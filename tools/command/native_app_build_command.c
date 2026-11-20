@@ -460,9 +460,16 @@ static void zab_recipe_describe(struct zab *z, const char *stage)
 
 /* The commit reply carries the verified receipt's identity, and the tasks
  * preview offer candidate under the exact keys the tasks offer command
- * reads (preview_root, preview_receipt, preview_program, artifact_sha3). */
+ * reads (preview_root, preview_receipt, preview_program, artifact_sha3).
+ * The make-form observation contract (the build evidence app.receive-copy
+ * retains) is carried with honest recipe-form values: the committed build
+ * environment is the receipt's toolchain capsule when it files one, else
+ * its input lock root; the build record is the filed install receipt; the
+ * artifact digest is the image identity; nothing was cached and the build
+ * ran in the lifecycle's confined verifier. */
 static void zab_recipe_commit_reply(struct zab *z,
-    const struct package_resident_artifact *a)
+    const struct package_resident_artifact *a,
+    const struct vcs_package_build_receipt *receipt)
 {
     struct json_value *d = &z->reply->data;
     zab_recipe_describe(z, "commit");
@@ -470,6 +477,12 @@ static void zab_recipe_commit_reply(struct zab *z,
     (void)json_push_kv_str(d, "program", a->output);
     (void)json_push_kv_str(d, "artifact_sha3", a->accepted.image_sha3_hex);
     (void)json_push_kv_str(d, "program_path", a->locator);
+    zcl_package_copy_push_root(d, "env_root", receipt->has_toolchain_capsule
+        ? receipt->toolchain_capsule_root : receipt->lock_root);
+    zcl_package_copy_push_root(d, "record_id", a->receipt_id);
+    (void)json_push_kv_str(d, "image_sha3", a->accepted.image_sha3_hex);
+    (void)json_push_kv_bool(d, "cache_hit", false);
+    (void)json_push_kv_str(d, "confinement", "recipe");
     zcl_package_copy_push_root(d, "preview_root", a->package_root);
     zcl_package_copy_push_root(d, "preview_receipt", a->receipt_id);
     (void)json_push_kv_str(d, "preview_program", a->output);
@@ -556,7 +569,15 @@ static void zab_recipe_build(struct zab *z)
                  r.message);
         return;
     }
-    zab_recipe_commit_reply(z, &artifact);
+    struct vcs_package_build_receipt receipt;
+    r = package_lifecycle_receipt_read(z->datadir, installed.receipt_id,
+                                       &receipt);
+    if (!r.ok) {
+        zab_fail(z, "RECIPE_ARTIFACT_REFUSED", true,
+                 "the filed install receipt could not be read", r.message);
+        return;
+    }
+    zab_recipe_commit_reply(z, &artifact, &receipt);
 }
 
 static void zab_plan_id(struct zab *z)

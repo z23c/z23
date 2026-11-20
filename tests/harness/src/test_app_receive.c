@@ -2257,6 +2257,87 @@ static int rz_build_case(bool makefile, bool programs)
     zcl_command_reply_free(&reply); json_free(&input); return failures;
 }
 
+/* The share open's success shape so far as this lane's surface carries it:
+ * the launch stage opened the kept recipe install to a preview (nothing
+ * spawned, so no pid and nothing settled), the exact installed identity is
+ * bound to the build, and the build evidence retains the recipe contract
+ * (recipe_build, the bin/ program and the preview candidate). The
+ * preview_* keys and the app invoke next action surface in the reply once
+ * the receive-copy leaf carries them (owned by the tasks-ooda lane). */
+static bool rz_open_observed(const struct json_value *observation,
+                             const struct receive_fixture *f)
+{
+    const struct json_value *data = json_get(observation, "data");
+    const char *digest = json_get_str(json_get(data, "image_sha3"));
+    const char *stage = json_get_str(json_get(data, "stage"));
+    const char *root = json_get_str(json_get(data, "package_root"));
+    return data && stage && !strcmp(stage, "commit") && root &&
+        !strcmp(root, f->package) && digest && strlen(digest) == 64 &&
+        json_get_bool(json_get(data, "executed")) &&
+        !json_get_bool(json_get(data, "settled_alive"));
+}
+/* The build evidence carries the recipe contract: the routing, the bin/
+ * program and the tasks preview candidate bound to the received release. */
+static bool rz_open_build_offer(const struct json_value *build,
+                                const struct receive_fixture *f)
+{
+    const char *program = json_get_str(json_get(build, "recipe_program"));
+    const char *offer = json_get_str(json_get(build, "preview_program"));
+    const char *root = json_get_str(json_get(build, "preview_root"));
+    return build && json_get_bool(json_get(build, "recipe_build")) &&
+        program && offer && root && f->package[0] &&
+        !strcmp(program, "bin/tinyprog") && !strcmp(offer, "bin/tinyprog") &&
+        strlen(root) == 64 && !strcmp(root, f->package);
+}
+static bool rz_open_offer(const struct zcl_command_reply *reply,
+                          const struct receive_fixture *f)
+{
+    const struct json_value *open = json_get(&reply->data, "open_observation");
+    const struct json_value *build = json_get(&reply->data, "build");
+    const struct json_value *pid = json_get(&reply->data, "pid");
+    const char *digest = json_get_str(json_get(&reply->data, "image_sha3"));
+    const char *opened = json_get_str(json_get(json_get(open, "data"),
+                                               "image_sha3"));
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        json_get_bool(json_get(&reply->data, "executed")) &&
+        json_get_bool(json_get(&reply->data, "build_matches_open")) &&
+        (!pid || (pid->type == JSON_INT && json_get_int(pid) == 0)) &&
+        rz_open_observed(open, f) && rz_open_build_offer(build, f) &&
+        digest && opened && !strcmp(digest, opened);
+}
+
+/* `z23 app open FILE.z23share` of a recipe-form release: the receive/open
+ * launch stage completes to the kept install's preview, never a
+ * spawn-and-wait window wait. */
+static int rz_open_case(void)
+{
+    int failures = 0;
+    struct receive_fixture f = {0};
+    struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive_open.v1");
+    TEST("app.receive-copy opens a recipe-form share to the preview offer") {
+        char plan[65] = {0};
+        ASSERT(rt_setup_form(&f, false, true));
+        ASSERT(rt_input(&input, &f));
+        struct zcl_command_request request = {.input = &input};
+        zcl_native_handle_app_receive_copy(&request, &reply);
+        const char *id = json_get_str(json_get(&reply.data, "plan_id"));
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && id && strlen(id) == 64);
+        memcpy(plan, id, 64);
+        ASSERT(json_push_kv_str(&input, "plan_id", plan) &&
+            json_push_kv_bool(&input, "confirm", true));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.app_receive_open.v1");
+        zcl_native_handle_app_receive_copy(&request, &reply);
+        if (!rz_open_offer(&reply, &f))
+            fprintf(stderr, "RECIPE_OPEN status=%d code=%s msg=%s\n",
+                reply.status, reply.error.code, reply.error.message);
+        ASSERT(rz_open_offer(&reply, &f));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input); return failures;
+}
+
 int test_app_receive(void)
 {
     int failures = rt_wrap_cases();
@@ -2293,6 +2374,7 @@ int test_app_receive(void)
 #endif
     failures += rz_build_case(false, true);
     failures += rz_build_case(false, false);
+    failures += rz_open_case();
     /* Native harness owns fixture retirement; preserve failed state for diagnosis. */
     return failures;
 }

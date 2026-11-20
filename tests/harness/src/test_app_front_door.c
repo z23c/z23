@@ -35,6 +35,7 @@
 #include "command/native_app_launch.h"
 #include "command/native_app_front_door.h"
 #include "command/native_command.h"
+#include "command/native_zcode_package_bundle.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -45,6 +46,7 @@
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_release.h"
+#include "vcs/vcs.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "core/uint256.h"
@@ -1452,6 +1454,123 @@ static int afd_list_quiet(const struct afd_world *w)
     return failures;
 }
 
+/* ── the recipe form: a headless program share opens to a preview offer ── */
+
+/* One headless program package: the main() prints and exits, so a
+ * spawn-and-wait open can never see it as a usable window. */
+static const char k_prog_meta[] =
+    "{\n  \"schema\": 1,\n  \"name\": \"stub/tinyprog\",\n"
+    "  \"semver\": \"0.1.0\",  \"language\": \"c23\",\n"
+    "  \"license\": \"Apache-2.0\",  \"include_dir\": \"include\",\n"
+    "  \"source_dir\": \"src\",  \"dependencies\": [],\n"
+    "  \"programs\": [\"app/main.c\"]\n}\n";
+static const char k_prog_library[] = "int tinyprog_value(void) { return 7; }\n";
+static const char k_prog_main[] =
+    "#include <stdio.h>\nint main(void) { puts(\"tinyprog ready\"); "
+    "return 0; }\n";
+
+static bool afd_recipe_source(const struct afd_world *w, char *src,
+                              size_t cap)
+{
+    static const char *const dirs[] = {"include", "src", "app"};
+    char dir[AFD_PATH], saved[AFD_PATH];
+    (void)snprintf(src, cap, "%s/prog-src", w->root);
+    /* afd_license reads the checkout's LICENSE by a relative path; earlier
+     * cases may have left the process in another directory. */
+    bool ok = getcwd(saved, sizeof(saved)) != NULL &&
+              chdir(w->saved_cwd) == 0 && mkdir(src, 0700) == 0 &&
+              afd_license(src) && chdir(saved) == 0;
+    if (!ok && chdir(saved) != 0)
+        printf("  [recipe source: could not return to %s]\n", saved);
+    for (size_t i = 0; ok && i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+        int n = snprintf(dir, sizeof(dir), "%s/%s", src, dirs[i]);
+        ok = n > 0 && (size_t)n < sizeof(dir) && mkdir(dir, 0700) == 0;
+    }
+    return ok && afd_put(src, "include/boost.h", "#define BOOST 1\n") &&
+           afd_put(src, "zcode-package.json", k_prog_meta) &&
+           afd_put(src, "src/main.c", k_prog_library) &&
+           afd_put(src, "app/main.c", k_prog_main);
+}
+
+static bool afd_recipe_share(const struct afd_world *w, const char *src,
+                             char *path, size_t cap)
+{
+    char key[AFD_PATH + 16], publisher[PLUGIN_HEX_PUBLIC_KEY + 1];
+    char detail[256] = {0};
+    struct plugin_dist_published why;
+    struct vcs_package_prepare_options o = {
+        .dir = src, .publisher_sequence = 1, .reward_address = "",
+        .chain_id = "zclassic-main",
+    };
+    struct vcs_package_prepared p;
+    struct zcl_command_reply r;
+    struct zcl_package_bundle_wires wires;
+    uint8_t tree[32];
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    vcs_package_prepared_init(&p);
+    (void)snprintf(key, sizeof(key), "%s/prog.key", w->root);
+    (void)snprintf(path, cap, "%s/tinyprog-1.z23share", w->root);
+    bool ok = plugin_keygen(key, publisher) == PLUGIN_OK &&
+              plugin_dist_release_key_sign(key, NULL, o.publisher_pubkey,
+                                           NULL, &why) == PLUGIN_DIST_OK &&
+              vcs_package_prepare(&o, &p, detail, sizeof(detail)) ==
+                  VCS_PACKAGE_PREPARE_OK &&
+              plugin_dist_release_key_sign(key, p.signing_digest,
+                                           o.publisher_pubkey,
+                                           p.release.signature,
+                                           &why) == PLUGIN_DIST_OK &&
+              vcs_package_release_serialize(&p.release, &wire, &wire_len) ==
+                  VCS_PACKAGE_RELEASE_OK &&
+              vcs_tree_capture_path(src, tree) == VCS_OK;
+    zcl_command_reply_init(&r, "zcl.test.app_front_door.v1");
+    memset(&wires, 0, sizeof(wires));
+    wires.release = wire;
+    wires.release_len = wire_len;
+    wires.manifest = p.manifest_wire;
+    wires.manifest_len = p.manifest_wire_len;
+    wires.recipe = p.recipe_wire;
+    wires.recipe_len = p.recipe_wire_len;
+    if (ok)
+        ok = zcl_package_bundle_write(path, src, tree, &wires, &r) &&
+             r.status == ZCL_COMMAND_STATUS_PASSED;
+    if (!ok)
+        printf("  [prog share: %s %s]\n", r.error.code, r.error.message);
+    zcl_command_reply_free(&r);
+    free(wire);
+    vcs_package_prepared_free(&p);
+    return ok;
+}
+
+static int afd_recipe_open(const struct afd_world *w)
+{
+    int failures = 0;
+    TEST("app front door: open of a recipe-form share completes to its "
+         "preview without a spawn") {
+        char src[AFD_PATH], share[AFD_PATH], home[AFD_PATH], datadir[AFD_PATH];
+        struct asf_door run;
+        ASSERT(afd_recipe_source(w, src, sizeof(src)));
+        ASSERT(afd_recipe_share(w, src, share, sizeof(share)));
+        (void)snprintf(home, sizeof(home), "%s/prog-home", w->root);
+        (void)snprintf(datadir, sizeof(datadir), "%s/prog-data", w->root);
+        ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
+        /* The checkout as the working directory, like the tasks carry: the
+         * recipe install resolves the package verifier beside build/bin. */
+        asf_door_run(home, w->saved_cwd, datadir, "open", share,
+                     ZCL_CLI_CONFIRM_YES, &run);
+        if (run.rc != 0)
+            printf("  [recipe open rc=%d text=%s]\n", run.rc, run.text);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(strstr(run.text, "copy: tinyprog-1") != NULL);
+        /* Nothing was spawned: the reported pid is 0, never a live child.
+         * (The door prints "opened tinyprog-1 pid 0"; the receive-copy
+         * leaf copies the inner pid verbatim.) */
+        ASSERT(asf_door_pid(run.text) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_front_door(void);
 int test_app_front_door(void)
 {
@@ -1485,6 +1604,7 @@ int test_app_front_door(void)
         failures += afd_b_refusals(&w);
         failures += afd_b_plan_shows_root(&w);
         failures += afd_b_receives(&w);
+        failures += afd_recipe_open(&w);
     }
     if (!failures)
         failures += afd_key_note_after_confirm(&w);

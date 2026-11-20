@@ -16,7 +16,15 @@
  * ~/.local/state/z23/apps. The reply carries the pid once the app is still
  * running after the settle time; an early exit is APP_EXITED with the log
  * tail. The app runs unconfined, as the owner's own build of their own
- * copy, which is why only an adopted or owner-trusted copy opens. */
+ * copy, which is why only an adopted or owner-trusted copy opens.
+ *
+ * Recipe form: a copy without a root Makefile whose package is the kept
+ * lifecycle install opens to the tasks preview offer instead of a window
+ * (the ntd_offer_render contract's candidate keys plus the exact app
+ * invoke next action). Nothing is spawned, so no exit can be observed;
+ * the open confirm accepts the same recipe plan identity app.build's
+ * recipe form binds. A make-form copy keeps every byte of the path
+ * above. */
 
 #include "command/native_command.h"
 
@@ -31,6 +39,9 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/resident_launch.h"
+#include "services/package_lifecycle.h"
+#include "services/package_resident.h"
+#include "sha3/sha3.h"
 #include "util/path_util.h"
 
 #include <stdio.h>
@@ -67,6 +78,8 @@ struct zrc {
     char image_hex[65];
     char image_path[APP_COPY_BUILD_PATH];
     uint8_t plan_id[32];
+    bool recipe;
+    struct package_resident_artifact installed;
 };
 
 static void zrc_fail(struct zrc *z, const char *code, const char *message,
@@ -144,6 +157,86 @@ static bool zrc_record(struct zrc *z)
                  "build first", z->name);
     return false;
 }
+/* ── the recipe form: the kept install opens to a preview offer ──────── */
+
+#if !defined(_WIN32)
+/* The build-form rule app.build routes by: a root Makefile is the make
+ * fragment path, and this open stays byte-identical there. */
+static bool zrc_recipe_form(const struct zrc *z)
+{
+    char path[APP_COPY_BUILD_PATH];
+    struct stat st;
+    return zcl_path_join(path, sizeof(path), z->copy_dir, "Makefile") &&
+        !(lstat(path, &st) == 0 && S_ISREG(st.st_mode));
+}
+
+/* The same recipe plan app.build's recipe form binds for this copy, so the
+ * open confirm accepts exactly the identity the build installed. */
+static void zrc_recipe_plan_id(struct zrc *z)
+{
+    static const char domain[] = "zcl.app_build.recipe_plan.v1";
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, z->copy.fork_version, 32);
+    sha3_256_write(&sha, z->copy.selected_version, 32);
+    sha3_256_write(&sha, z->package_root, 32);
+    sha3_256_write(&sha, z->installed.recipe_root, 32);
+    sha3_256_write(&sha, z->dependency_root, 32);
+    sha3_256_finalize(&sha, z->plan_id);
+}
+
+/* The kept install of this exact package: the filed, revalidated receipt,
+ * one bin/ program, and the artifact verified against that receipt. Any
+ * weaker state refuses; a copy that was never lifecycle-installed reports
+ * 0 and falls through to the make-form record path's own refusal.
+ * Returns 1 when the recipe identity is ready, 0 for the make path. */
+static int zrc_recipe_kept(struct zrc *z)
+{
+    struct package_lifecycle_step step;
+    struct package_lifecycle_programs programs;
+    bool installed = false;
+    struct zcl_result r = package_lifecycle_installed_inspect(z->datadir,
+        z->package_root, &step, &installed);
+    if (!r.ok) {
+        zrc_fail(z, "RECIPE_OPEN_REFUSED", "the kept install could not be "
+                 "inspected", r.message);
+        return -1;
+    }
+    if (!installed) return 0;
+    if (!step.has_receipt) {
+        zrc_fail(z, "RECIPE_OPEN_REFUSED", "the kept install has no build "
+                 "receipt", z->copy_dir);
+        return -1;
+    }
+    r = package_lifecycle_installed_programs(z->datadir, z->package_root,
+                                             &programs);
+    if (!r.ok || programs.count == 0 ||
+        strncmp(programs.output[0], "bin/", 4) != 0) {
+        zrc_fail(z, "RECIPE_OPEN_REFUSED", "the kept install names no bin/ "
+                 "program", r.ok ? z->copy_dir : r.message);
+        return -1;
+    }
+    r = package_resident_artifact_read(z->datadir, z->package_root,
+        step.receipt_id, programs.output[0], &z->installed);
+    if (!r.ok) {
+        zrc_fail(z, "RECIPE_OPEN_REFUSED", "the installed program did not "
+                 "verify against its receipt", r.message);
+        return -1;
+    }
+    memcpy(z->image_hex, z->installed.accepted.image_sha3_hex,
+           sizeof(z->image_hex));
+    z->recipe = true;
+    zrc_recipe_plan_id(z);
+    return 1;
+}
+#else
+static int zrc_recipe_kept(struct zrc *z)
+{
+    (void)z;
+    return 0;
+}
+#endif
 
 static bool zrc_derive(struct zrc *z)
 {
@@ -158,8 +251,15 @@ static bool zrc_derive(struct zrc *z)
         !app_copy_build_roots(z->datadir, z->copy_dir, &z->copy,
                               z->package_root, z->dependency_root, z->reply) ||
         !app_copy_build_store(z->datadir, z->copy.fork_version, &z->store,
-                              z->reply) ||
-        !zrc_record(z))
+                              z->reply))
+        return false;
+#if !defined(_WIN32)
+    if (zrc_recipe_form(z)) {
+        int recipe = zrc_recipe_kept(z);
+        if (recipe != 0) return recipe > 0;
+    }
+#endif
+    if (!zrc_record(z))
         return false;
     if (!app_image_build_id(&z->rec, record_id).ok) {
         zrc_fail(z, "RECORD_INVALID", "the build record has no id", z->name);
@@ -182,6 +282,62 @@ static void zrc_describe(struct zrc *z, const char *stage)
     (void)json_push_kv_str(d, "image_sha3", z->image_hex);
     zcl_package_copy_push_root(d, "package_root", z->package_root);
     zcl_package_copy_push_root(d, "head_version", z->copy.head_version);
+    if (z->recipe) {
+        (void)json_push_kv_bool(d, "recipe_build", true);
+        (void)json_push_kv_str(d, "recipe_program", z->installed.output);
+        zcl_package_copy_push_root(d, "recipe_root", z->installed.recipe_root);
+    }
+}
+
+/* The tasks preview offer contract (native_task_document_command.c's
+ * ntd_offer_render candidate keys): the exact installed identity a tasks
+ * offer or an app invoke reads back. */
+static bool zrc_offer_render(struct zrc *z, struct json_value *d)
+{
+    return zcl_package_copy_push_root(d, "preview_root", z->package_root) &&
+        zcl_package_copy_push_root(d, "preview_receipt",
+                                   z->installed.receipt_id) &&
+        json_push_kv_str(d, "preview_program", z->installed.output) &&
+        json_push_kv_str(d, "artifact_sha3",
+                         z->installed.accepted.image_sha3_hex);
+}
+
+/* The one interactive path for these exact bytes: app invoke package on
+ * the receipt identity, as a pasteable command. */
+static bool zrc_invoke_next(struct zrc *z, char *out, size_t cap)
+{
+    char root[65], receipt[65];
+    zcl_hex_encode(z->package_root, 32, root);
+    zcl_hex_encode(z->installed.receipt_id, 32, receipt);
+    return zcl_app_hint(out, cap, z->datadir,
+        "invoke package --package_root=%s --receipt_id=%s "
+        "--artifact_sha3=%s --program=%s --input_text=list "
+        "--accept_execution=true",
+        root, receipt, z->installed.accepted.image_sha3_hex,
+        z->installed.output);
+}
+
+/* The recipe form's open: success is the preview offer, never a live
+ * process. Nothing is spawned, so no exit can be observed here. The
+ * empty process observation is the truth: no pid, no settled state. */
+static void zrc_recipe_open(struct zrc *z)
+{
+    struct json_value *d = &z->reply->data;
+    char next[2 * APP_COPY_BUILD_PATH + 192];
+    zrc_describe(z, "commit");
+    bool ok = zrc_invoke_next(z, next, sizeof(next)) &&
+        zrc_offer_render(z, d) &&
+        json_push_kv_str(d, "next", next) &&
+        json_push_kv_str(d, "status", "preview") &&
+        json_push_kv_int(d, "pid", 0) &&
+        json_push_kv_str(d, "start_token", "") &&
+        json_push_kv_str(d, "mapped_proof", "") &&
+        json_push_kv_bool(d, "settled_alive", false) &&
+        json_push_kv_bool(d, "executed", true);
+    if (!ok)
+        zcl_command_reply_fail(z->reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_FAILED, "OBSERVATION_UNAVAILABLE", "open",
+            false, true, "the preview offer could not be retained", z->name);
 }
 
 /* ── confirm ─────────────────────────────────────────────────────────── */
@@ -365,7 +521,8 @@ void zcl_native_handle_app_run_copy(const struct zcl_command_request *request,
         } else if (zcl_package_copy_plan_matches(request->input, z->plan_id,
                                                  reply, ZRC_COMMAND) &&
                    zrc_accepted(z)) {
-            zrc_open(z);
+            if (z->recipe) zrc_recipe_open(z);
+            else zrc_open(z);
         }
     }
     if (z->copy_open)
