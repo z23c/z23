@@ -90,9 +90,11 @@ void task_update_panel_model(const struct task_list *list, struct zcl_present_mo
     const struct task_update *update = list->update;
     (void)snprintf(model->title, sizeof(model->title), "%s",
         list->permission ? "Allow this program to run?" : "Try / Keep / Go back");
-    const char *summary = list->permission
-        ? "Runs separately with copies of tasks and undo. No live data access. Going back checks current data before switching."
-        : update->message;
+    const char *summary = update->message;
+    if (list->permission == 1)
+        summary = "The preview runs separately on copies of your tasks and Undo history.";
+    if (list->permission == 2)
+        summary = "Before switching, the earlier program runs on copies of your tasks and Undo history.";
     (void)snprintf(model->summary, sizeof(model->summary), "%s", summary);
     tup_rows(list, model);
     const char *const confirm[] = { "Allow preview", "Cancel", "Tasks", "Cancel" };
