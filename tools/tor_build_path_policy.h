@@ -54,7 +54,16 @@ static int tor_build_path_policy_check(int status)
  * requiring either language's quoting rather than evaluating a path as code. */
 static int tor_build_path_root_safe(const char *root)
 {
-    if (!root || root[0] != '/' || strlen(root) >= 4096) return 0;
+    if (!root || strlen(root) >= 4096) return 0;
+    if (root[0] != '/') {
+#ifdef _WIN32
+        int drive = (root[0] >= 'A' && root[0] <= 'Z') ||
+                    (root[0] >= 'a' && root[0] <= 'z');
+        if (!drive || root[1] != ':' || root[2] != '/') return 0;
+#else
+        return 0;
+#endif
+    }
     for (const unsigned char *p = (const unsigned char *)root; *p; p++) {
         int alpha = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z');
         int digit = *p >= '0' && *p <= '9';

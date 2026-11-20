@@ -1374,6 +1374,10 @@ static int run_selftest(void)
 
     char base[PATH_BUF_MAX];
     snprintf(base, sizeof base, "%s/z23-tor-provenance-selftest.%ld", tmpdir, (long)getpid());
+#ifdef _WIN32
+    for (char *p = base; *p; ++p)
+        if (*p == '\\') *p = '/';
+#endif
     selftest_rmdir_tree(base); /* clean any stale run with the same pid, best effort */
     if (selftest_prepare(base)) {
         selftest_rmdir_tree(base);
