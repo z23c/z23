@@ -13,6 +13,7 @@
  * Include with ZCL_TEST_SEMANTIC_LEAF(name) defined. */
 
 ZCL_TEST_SEMANTIC_LEAF(stage_repair_coin_backfill)
+ZCL_TEST_SEMANTIC_LEAF(source_identity_authority)
 ZCL_TEST_SEMANTIC_LEAF(app_event_sync)
 ZCL_TEST_SEMANTIC_LEAF(file_controller)
 ZCL_TEST_SEMANTIC_LEAF(cold_join_sovereign)

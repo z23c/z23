@@ -563,6 +563,35 @@ static bool ic_leaf_exact_witness(void)
            p.closure_groups_len == 0 && !p.closure_universal;
 }
 
+/* The wrapper is a mechanically audited leaf; the hooked helper and the
+ * production batch source must still route to its original test group. */
+static bool ic_source_identity_leaf_witness(void)
+{
+    const char *wrapper[] = { "tests/harness/src/test_source_identity_authority.c" };
+    const char *helper[] = { "tests/harness/src/source_identity_authority_fixture.c" };
+    const char *production[] = { "tools/dev/source_identity_batch.c" };
+    struct zcl_devloop_plan p;
+    if (!zcl_devloop_plan_files(wrapper, 1, &p) ||
+        !zcl_devloop_plan_add_closure(".", wrapper, 1, &p) ||
+        p.path_groups_len != 1 ||
+        strcmp(p.path_groups[0], "test_source_identity_authority") != 0 ||
+        p.closure_groups_len != 0 || p.closure_universal) {
+        fprintf(stderr, "source identity wrapper leaf plan is not exact\n");
+        return false;
+    }
+    if (!zcl_devloop_plan_files(helper, 1, &p) ||
+        !ic_group_in(p.path_groups, p.path_groups_len, "source_identity_authority")) {
+        fprintf(stderr, "source identity helper does not route to its test\n");
+        return false;
+    }
+    if (!zcl_devloop_plan_files(production, 1, &p) ||
+        !ic_group_in(p.path_groups, p.path_groups_len, "source_identity_authority")) {
+        fprintf(stderr, "source identity production source does not route to its test\n");
+        return false;
+    }
+    return true;
+}
+
 /* Reaching a semantic leaf contributes its own group AND still folds the
  * rule groups the reached file matches (the production selection must never
  * shrink because a test became a leaf). */
@@ -2218,6 +2247,7 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
                                 "test_activerecord_query_builder"));
             ASSERT(ic_leaf_floor_witness());
             ASSERT(ic_leaf_exact_witness());
+            ASSERT(ic_source_identity_leaf_witness());
             ASSERT(ic_leaf_fold_keeps_rule_groups());
             ASSERT(ic_prod_keeps_groups_witness());
             ASSERT(ic_supervisor_keeps_boot_groups());
