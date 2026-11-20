@@ -13235,7 +13235,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_reflex_projection_lanes, 5),
     DP_CASE(test_drive_focused_partial, 5),
     DP_CASE(test_hotfork_descriptor_boundary, 5),
-    DP_CASE(test_template_generator_concurrency, 3),
+    DP_CASE(test_template_generator_concurrency, 1),
     DP_CASE(test_generator_stamp_gate, 3),
     DP_CASE(test_watch_session_stop_leaves_nothing, 3),
     DP_CASE(test_watch_session_orphaned_worker_stopped, 0),
