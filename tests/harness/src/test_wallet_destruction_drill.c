@@ -65,6 +65,7 @@
 #include "sim/simnet_sapling.h"
 
 #include "controllers/wallet_controller.h"
+#include "../../../contexts/wallet/services/src/wallet_recovery_coverage.h"
 #include "controllers/wallet_helpers.h"
 
 #include "models/database.h"
@@ -120,6 +121,7 @@
 #include "rpc/server.h"
 
 #include <sqlite3.h>
+#include <time.h>
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -1868,6 +1870,8 @@ static int act4_check_phrase_absent_from_plan(
     return failures;
 }
 
+static struct key_id mixed_fixture_key_id;
+
 /* ACT 4 helper: the recovered wallet must hold the published address. */
 static int act4_check_recovered_wallet(struct wallet *new_w,
                                        struct wallet_sqlite *new_ws,
@@ -1883,6 +1887,9 @@ static int act4_check_recovered_wallet(struct wallet *new_w,
         /* Exactly what boot does on the next start of this datadir. */
         DR_CHECK("act4: boot adopts the seed as the HD master",
                  wallet_hd_adopt_seed(new_w, restored_seed));
+        bool mixed_key_recovered = keystore_have_key(&new_w->keystore, &mixed_fixture_key_id);
+        printf("    synthetic independent key in phrase-restored wallet: %s\n", mixed_key_recovered ? "yes" : "no");
+        DR_CHECK("mixed: independent key absent from restored wallet", !mixed_key_recovered);
 
         /* ── THE ASSERTION THAT MATTERS ───────────────────────────
          *
@@ -1984,10 +1991,101 @@ static int act4_check_status_readonly(const char *newdir)
     return failures;
 }
 
+static enum wrc_coverage coverage_fixture(struct wallet_sqlite *ws, const uint8_t seed[32])
+{
+    struct wallet *old = zcl_malloc(sizeof(*old), "coverage.test");
+    if (!old) return WRC_COVERAGE_UNKNOWN;
+    wallet_init(old);
+    enum wrc_coverage result = wrc_recovery_coverage(ws, old, seed);
+    wallet_free(old);
+    free(old);
+    return result;
+}
+
+static int coverage_shielded_fixture(void)
+{
+    int failures = 0;
+    char dir[256], path[320];
+    dr_mkdir(dir, sizeof(dir), "coverage-shielded");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db ndb = {0};
+    if (!node_db_open(&ndb, path)) return 1;
+    struct wallet_sqlite ws;
+    if (!wallet_sqlite_open(&ws, ndb.db)) { node_db_close(&ndb); return 1; }
+    struct wallet *w = zcl_malloc(sizeof(*w), "coverage.shielded");
+    if (!w) { wallet_sqlite_close(&ws); node_db_close(&ndb); return 1; }
+    wallet_init(w);
+    const uint8_t seed[32] = { 1 }, other_seed[32] = { 2 };
+    DR_CHECK("coverage: shielded seed", sapling_keystore_set_seed(&w->sapling_keys, seed));
+    DR_CHECK("coverage: empty seed wallet flush", wallet_sqlite_flush_r(&ws, w).ok);
+    DR_CHECK("coverage: empty seed wallet complete", coverage_fixture(&ws, seed) == WRC_COVERAGE_COMPLETE);
+    DR_CHECK("coverage: mismatched snapshot seed unknown", coverage_fixture(&ws, other_seed) == WRC_COVERAGE_UNKNOWN);
+    uint8_t div[11], pk_d[32];
+    DR_CHECK("coverage: shielded child", sapling_keystore_new_address(&w->sapling_keys, div, pk_d));
+    DR_CHECK("coverage: shielded wallet flush", wallet_sqlite_flush_r(&ws, w).ok);
+    DR_CHECK("coverage: shielded-only wallet complete", coverage_fixture(&ws, seed) == WRC_COVERAGE_COMPLETE);
+    sqlite3 *ro_db = NULL;
+    struct node_db ro_ndb;
+    char ro_path[1200];
+    enum zcl_node_db_ro_status ro = zcl_native_node_db_open_readonly(dir, &ro_db, &ro_ndb, ro_path, sizeof(ro_path));
+    DR_CHECK("coverage: readonly database open", ro == ZCL_NODE_DB_RO_OK);
+    if (ro == ZCL_NODE_DB_RO_OK) {
+        struct wallet_sqlite ro_ws;
+        struct zcl_result opened = wallet_sqlite_open_r(&ro_ws, ro_db);
+        DR_CHECK("coverage: readonly wallet open", opened.ok);
+        if (opened.ok) {
+            DR_CHECK("coverage: readonly snapshot complete", coverage_fixture(&ro_ws, seed) == WRC_COVERAGE_COMPLETE);
+            DR_CHECK("coverage: readonly snapshot released", sqlite3_get_autocommit(ro_db));
+            wallet_sqlite_close(&ro_ws);
+        }
+        zcl_native_node_db_close_readonly(&ro_db, &ro_ndb);
+    }
+    DR_CHECK("coverage: corrupt shielded identity", sqlite3_exec(ndb.db, "UPDATE wallet_sapling_keys SET pk_d=zeroblob(32)", NULL, NULL, NULL) == SQLITE_OK);
+    DR_CHECK("coverage: corrupt shielded identity unknown", coverage_fixture(&ws, seed) == WRC_COVERAGE_UNKNOWN);
+    DR_CHECK("coverage: repair shielded fixture", wallet_sqlite_flush_r(&ws, w).ok);
+    struct ext_key master;
+    DR_CHECK("coverage: derive transparent master", hd_master_from_seed(&master, seed, sizeof(seed)));
+    for (uint32_t index = 119; index <= 120; index++) {
+        struct privkey priv;
+        struct pubkey pub;
+        privkey_init(&priv);
+        bool derived = bip44_derive_keypair(&master, &priv, &pub, 0, BIP44_EXTERNAL, index);
+        DR_CHECK("coverage: derive noncontiguous child", derived);
+        DR_CHECK("coverage: store noncontiguous child", derived && keystore_add_key(&w->keystore, &priv));
+        memory_cleanse(&priv, sizeof(priv));
+        DR_CHECK("coverage: persist noncontiguous child", wallet_sqlite_flush_r(&ws, w).ok);
+        enum wrc_coverage expected = index == 119 ? WRC_COVERAGE_COMPLETE : WRC_COVERAGE_INCOMPLETE;
+        DR_CHECK("coverage: child matches offline rebuild bound", coverage_fixture(&ws, seed) == expected);
+    }
+    memory_cleanse(&master, sizeof(master));
+    DR_CHECK("coverage: clear synthetic transparent rows", sqlite3_exec(ndb.db, "DELETE FROM wallet_keys", NULL, NULL, NULL) == SQLITE_OK);
+    wallet_free(w);
+    wallet_init(w);
+    DR_CHECK("coverage: reset shielded seed", sapling_keystore_set_seed(&w->sapling_keys, seed));
+    DR_CHECK("coverage: reset shielded child", sapling_keystore_new_address(&w->sapling_keys, div, pk_d));
+    DR_CHECK("coverage: reset shielded fixture", wallet_sqlite_flush_r(&ws, w).ok);
+    DR_CHECK("coverage: before shielded import complete", coverage_fixture(&ws, seed) == WRC_COVERAGE_COMPLETE);
+    struct zip32_xsk other;
+    zip32_xsk_master(&other, other_seed, sizeof(other_seed));
+    DR_CHECK("coverage: import independent shielded key", sapling_keystore_import_xsk(&w->sapling_keys, &other));
+    memory_cleanse(&other, sizeof(other));
+    DR_CHECK("coverage: imported shielded key flush", wallet_sqlite_flush_r(&ws, w).ok);
+    DR_CHECK("coverage: imported shielded key incomplete", coverage_fixture(&ws, seed) == WRC_COVERAGE_INCOMPLETE);
+    wallet_free(w);
+    free(w);
+    wallet_sqlite_close(&ws);
+    node_db_close(&ndb);
+    dr_destroy_tree(dir, 2);
+    return failures;
+}
+
+
 static int act4_recovery_phrase(void)
 {
     int failures = 0;
     printf("\n-- ACT 4: destroy the machine, recover from TWELVE WORDS --\n");
+    failures += coverage_shielded_fixture();
+    printf("    coverage sizeof wallet: %zu bytes\n", sizeof(struct wallet));
 
     char livedir[256], newdir[256];
     dr_mkdir(livedir, sizeof(livedir), "act4live");
@@ -2021,6 +2119,35 @@ static int act4_recovery_phrase(void)
              wallet_top_up_key_pool(live_w, DEFAULT_KEYPOOL_SIZE));
     DR_CHECK("act4: flush the wallet",
              wallet_sqlite_flush_r(&live_ws, live_w).ok);
+
+    for (int mixed = 0; mixed < 2; mixed++) {
+        if (mixed) {
+            struct privkey independent;
+            privkey_make_new(&independent, true);
+            struct pubkey independent_pub;
+            privkey_get_pubkey(&independent, &independent_pub);
+            mixed_fixture_key_id = pubkey_get_id(&independent_pub);
+            DR_CHECK("mixed: key is not already in phrase wallet", !keystore_have_key(&live_w->keystore, &mixed_fixture_key_id));
+            DR_CHECK("mixed: add independent key", keystore_add_key(&live_w->keystore, &independent));
+            DR_CHECK("mixed: persist independent key", wallet_sqlite_flush_r(&live_ws, live_w).ok);
+        }
+        uint8_t coverage_seed[32];
+        DR_CHECK("coverage: seed readable", wallet_sqlite_read_sapling_seed(&live_ws, coverage_seed));
+        struct timespec coverage_begin, coverage_end;
+        clock_gettime(CLOCK_MONOTONIC, &coverage_begin);
+        enum wrc_coverage coverage = coverage_fixture(&live_ws, coverage_seed);
+        clock_gettime(CLOCK_MONOTONIC, &coverage_end);
+        printf("    coverage elapsed ms: %.2f\n", (coverage_end.tv_sec - coverage_begin.tv_sec) * 1000.0 + (coverage_end.tv_nsec - coverage_begin.tv_nsec) / 1000000.0);
+        memory_cleanse(coverage_seed, sizeof(coverage_seed));
+        printf("    synthetic %s coverage=%d\n", mixed ? "mixed" : "control", (int)coverage);
+        DR_CHECK("coverage: correct for fixture", coverage == (mixed ? WRC_COVERAGE_INCOMPLETE : WRC_COVERAGE_COMPLETE));
+    }
+    DR_CHECK("coverage: corrupt transparent pubkey", sqlite3_exec(live_ndb.db, "UPDATE wallet_keys SET pubkey=zeroblob(length(pubkey)) WHERE rowid=(SELECT min(rowid) FROM wallet_keys)", NULL, NULL, NULL) == SQLITE_OK);
+    uint8_t corrupt_seed[32];
+    DR_CHECK("coverage: reload seed for corrupt row", wallet_sqlite_read_sapling_seed(&live_ws, corrupt_seed));
+    DR_CHECK("coverage: corrupt transparent identity unknown", coverage_fixture(&live_ws, corrupt_seed) == WRC_COVERAGE_UNKNOWN);
+    memory_cleanse(corrupt_seed, sizeof(corrupt_seed));
+    DR_CHECK("coverage: repair transparent fixture", wallet_sqlite_flush_r(&live_ws, live_w).ok);
 
     /* The address a user would actually be handed and would actually
      * publish. THIS is the string that has to come back. */
