@@ -174,6 +174,7 @@ static bool sia_fixture_files(const char *root)
     static const char *const paths[] = {
         "tools/dev/source-identity-selftest.sh", "tools/dev/source-identity-batch-selftest.sh",
         "tools/dev/source-identity.sh", "tools/dev/source-identity-batch-bootstrap.sh",
+        "tools/scripts/source_identity_lib.sh",
         "tools/dev/source_identity_batch.c", "contexts/commons/packages/zsha256/src/zsha256.c",
         "contexts/commons/packages/zsha256/include/zsha256/zsha256.h",
         "platform/modules/base/src/safe_alloc.c", "platform/modules/base/include/base/safe_alloc.h",
