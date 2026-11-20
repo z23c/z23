@@ -354,10 +354,17 @@ ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 # Its standalone compile must not recurse into the readiness check it serves.
 ZCL_TOR_PROVENANCE_GOALS := build/bin/z23-tor-provenance \
 	tools/tor-provenance z23-tor-provenance
+# The auditor builds with HOST_CC even for a cross VENDOR_TARGET. Only its
+# compile goals are standalone; audit and vendor-ready consume vendor inputs.
+DEP_AUDIT_BIN = $(BIN_DIR)/dep_audit
+ZCL_DEP_AUDIT_BUILD_GOALS := dep-audit
+ifeq ($(DEP_AUDIT_BIN),build/bin/dep_audit)
+ZCL_DEP_AUDIT_BUILD_GOALS += build/bin/dep_audit
+endif
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	$(ZCL_ANDROID_ACCEPTANCE_GOALS) \
 	$(ZCL_WINDOWS_STANDALONE_GOALS) \
-	$(ZCL_TOR_PROVENANCE_GOALS) \
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
 	windows-acceptance-compile windows-acceptance \
@@ -507,7 +514,7 @@ ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 # Keep configured values (including deferred variable references) conservative:
 # the packer links zlib. Mixed node goals still require normal bootstrap.
 ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -914,11 +921,6 @@ ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
 # Gate E1 file-size policy checker (rule near check-file-size-ceiling below).
 # Declared here because the test binaries take it as an order-only prereq.
 FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
-# Vendor dependency audit (tools/dep_audit.c). Declared here because
-# vendor-ready and audit name it as a prerequisite. It is a host tool: the
-# audit runs on the build machine even under a cross VENDOR_TARGET, so it is
-# compiled with HOST_CC rather than the target CC.
-DEP_AUDIT_BIN = $(BIN_DIR)/dep_audit
 # Test-group list and registry report (tools/dev/test_group_list*.c). Declared
 # here because Make runs it at parse time (ONLY= validation, t-list) and the
 # test binaries take it as an order-only prerequisite. Host tool.
@@ -1864,7 +1866,7 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-p
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe \
-	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 

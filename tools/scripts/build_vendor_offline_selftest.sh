@@ -244,7 +244,7 @@ fi
 # build state is needed to observe whether Make attempts vendor bootstrap.
 probe_mk="$SANDBOX/bootstrap.mk"
 {
-    printf '%s\n' 'VENDOR_LIBS := vendor/lib/missing.a'
+    printf '%s\n' 'VENDOR_LIBS := vendor/lib/missing.a' 'BIN_DIR := build/bin'
     awk '/^ZCL_TOR_PROVENANCE_GOALS :=/ { copying=1 }
          copying { print }
          /^ZCL_HOTSWAP_LOOP_ONLY :=/ { copying=0 }' "$ROOT/Makefile"
@@ -258,7 +258,7 @@ probe_mk="$SANDBOX/bootstrap.mk"
     cat <<'MAKE'
 .DEFAULT_GOAL := z23
 .PHONY: z23 windows-headless-run windows-headless-run-selftest
-z23 print-node-c23-srcs help doctor doctor-build timings agent-dev-status \
+z23 audit dep-audit build/bin/dep_audit print-node-c23-srcs help doctor doctor-build timings agent-dev-status \
 print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags \
 windows-headless-run windows-headless-run-selftest build/bin/z23-headless-run.exe $(ZCL_TOR_PROVENANCE_GOALS):
 	@printf 'lean=%s\n' '$(ZCL_HOTSWAP_LOOP_ONLY)'
@@ -305,7 +305,7 @@ probe_bootstrap()
 
 for goal in windows-headless-run windows-headless-run-selftest \
         build/bin/z23-headless-run.exe build/bin/z23-tor-provenance \
-        tools/tor-provenance z23-tor-provenance; do
+        tools/tor-provenance z23-tor-provenance dep-audit build/bin/dep_audit; do
     probe_bootstrap skip "$goal"
     probe_bootstrap require "$goal" z23
 done
@@ -315,6 +315,10 @@ for goal in print-node-c23-srcs help doctor doctor-build timings agent-dev-statu
     probe_bootstrap require "$goal" z23
 done
 probe_bootstrap skip windows-headless-run windows-headless-run-selftest
+probe_bootstrap skip windows-headless-run-selftest dep-audit
+probe_bootstrap require BIN_DIR=custom-bin build/bin/dep_audit
+probe_bootstrap require audit
+probe_bootstrap require dep-audit audit
 probe_bootstrap require z23
 probe_bootstrap require
 
