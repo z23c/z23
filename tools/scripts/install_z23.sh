@@ -1097,6 +1097,7 @@ install_payload_macos_generation() {
             || die "macOS generation path is not a directory: $MACOS_GENERATION"
         macos_generation_matches "$stage" "$MACOS_GENERATION" \
             || die "macOS generation $MACOS_GENERATION_ID does not match its verified manifest"
+        verify_tasks_share "$stage" "$MACOS_GENERATION"
     else
         MACOS_INCOMING="$(mktemp -d "$generations/.incoming.XXXXXX")" \
             || die "could not stage macOS release generation"
@@ -1110,6 +1111,7 @@ install_payload_macos_generation() {
         # whether the directory name still equals what SHA256SUMS records.
         install -m 444 "$stage/SHA256SUMS" "$MACOS_INCOMING/SHA256SUMS"
         if has_app_source "$stage"; then install_app_members "$stage" "$MACOS_INCOMING"; fi
+        verify_tasks_share "$stage" "$MACOS_INCOMING"
         if [ -n "$(manifest_digest_of "$stage" z23-app-macos)" ]; then
             "$MACOS_INCOMING/z23-app-macos" --assemble "$MACOS_INCOMING" \
                 || die "could not assemble the verified macOS app bundle"
@@ -1154,7 +1156,7 @@ install_payload_macos_generation() {
             || die "cannot link the current macOS $app app"
         atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/$app" \
             || die "cannot link the current macOS $app source"
-        if [ -n "$(manifest_digest_of "$stage" tasks.z23share)" ]; then [ ! -e "$prefix/share/z23/apps/tasks" ] || [ -L "$prefix/share/z23/apps/tasks" ] || die "Tasks source selector is not installer-managed"; atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/tasks" || die "cannot link macOS Tasks source"; verify_tasks_share "$stage" "$MACOS_GENERATION"; fi
+        if [ -n "$(manifest_digest_of "$stage" tasks.z23share)" ]; then [ ! -e "$prefix/share/z23/apps/tasks" ] || [ -L "$prefix/share/z23/apps/tasks" ] || die "Tasks source selector is not installer-managed"; atomic_relative_link ../../../lib/z23/current "$prefix/share/z23/apps/tasks" || die "cannot link macOS Tasks source"; fi
     fi
     install_docs "$prefix"
 }
