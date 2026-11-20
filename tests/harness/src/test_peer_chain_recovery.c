@@ -10,6 +10,8 @@
 
 #include "test/test_core.h"
 #include "test/host_tool_capture.h"
+#include "models/database.h"
+#include "services/wallet_backup_service.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -355,6 +357,142 @@ static bool recovery_write_sentinel(const char *path)
     bool ok = file && fwrite("keep", 1, 4, file) == 4;
     if (file && fclose(file) != 0) ok = false;
     return ok;
+}
+
+/* Compare every typed cell and row in the wallet backup table set. */
+static bool recovery_wallet_cells_equal(sqlite3_stmt *a, sqlite3_stmt *b, int column)
+{
+    int type = sqlite3_column_type(a, column);
+    if (type != sqlite3_column_type(b, column)) return false;
+    if (type == SQLITE_NULL) return true;
+    if (type == SQLITE_INTEGER)
+        return sqlite3_column_int64(a, column) == sqlite3_column_int64(b, column);
+    if (type == SQLITE_FLOAT)
+        return sqlite3_column_double(a, column) == sqlite3_column_double(b, column);
+    const void *x = sqlite3_column_blob(a, column);
+    const void *y = sqlite3_column_blob(b, column);
+    int n = sqlite3_column_bytes(a, column);
+    return n == sqlite3_column_bytes(b, column) && (n == 0 || (x && y && memcmp(x, y, (size_t)n) == 0));
+}
+
+static bool recovery_wallet_table_equal(sqlite3 *source, sqlite3 *dest, const char *table)
+{
+    sqlite3_stmt *a = NULL, *b = NULL;
+    char *sql = sqlite3_mprintf("SELECT * FROM \"%w\"", table);
+    bool ok = sql && sqlite3_prepare_v2(source, sql, -1, &a, NULL) == SQLITE_OK &&
+              sqlite3_prepare_v2(dest, sql, -1, &b, NULL) == SQLITE_OK;
+    sqlite3_free(sql);
+    int rows = 0;
+    if (ok) ok = sqlite3_column_count(a) == sqlite3_column_count(b);
+    while (ok) {
+        int x = sqlite3_step(a), y = sqlite3_step(b);
+        if (x != y || (x != SQLITE_ROW && x != SQLITE_DONE)) { ok = false; break; }
+        if (x == SQLITE_DONE) break;
+        rows++;
+        for (int i = 0; ok && i < sqlite3_column_count(a); i++)
+            ok = recovery_wallet_cells_equal(a, b, i);
+    }
+    if (sqlite3_finalize(a) != SQLITE_OK) ok = false;
+    if (sqlite3_finalize(b) != SQLITE_OK) ok = false;
+    return ok && rows == 1;
+}
+
+static bool recovery_wallet_equal(sqlite3 *source, const char *path)
+{
+    sqlite3 *dest = NULL;
+    bool ok = sqlite3_open_v2(path, &dest, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    size_t count = 0;
+    const char *const *tables = wallet_backup_tables(&count);
+    if (count != 9) ok = false;
+    for (size_t i = 0; ok && i < count; i++)
+        ok = recovery_wallet_table_equal(source, dest, tables[i]);
+    if (dest && sqlite3_close(dest) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_wallet_integrity(const char *path)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+              sqlite3_prepare_v2(db, "PRAGMA integrity_check", -1, &s, NULL) == SQLITE_OK &&
+              sqlite3_step(s) == SQLITE_ROW && sqlite3_column_text(s, 0) &&
+              strcmp((const char *)sqlite3_column_text(s, 0), "ok") == 0 && sqlite3_step(s) == SQLITE_DONE;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    s = NULL;
+    if (ok) ok = sqlite3_prepare_v2(db, "PRAGMA foreign_key_check", -1, &s, NULL) == SQLITE_OK &&
+                 sqlite3_column_count(s) == 4 && sqlite3_step(s) == SQLITE_DONE;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_wallet_peer_empty(const char *path)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+              sqlite3_prepare_v2(db, "SELECT count(*) FROM peer_chain_observations", -1, &s, NULL) == SQLITE_OK &&
+              sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int64(s, 0) == 0 && sqlite3_step(s) == SQLITE_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool recovery_wallet_seed_fixture(sqlite3 *db)
+{
+    return recovery_exec(db,
+        "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed,created_at) VALUES(zeroblob(20),x'010002',x'030004',1,11);"
+        "INSERT INTO wallet_keypool(pubkey_hash,generation) VALUES(zeroblob(20),7);"
+        "INSERT INTO wallet_key_encryption(id,wrapped_dek) VALUES(1,x'050006');"
+        "INSERT INTO wallet_seed(id,seed,next_child) VALUES(1,x'070008090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324',42);"
+        "INSERT INTO wallet_scripts(script_hash,redeem_script) VALUES(x'09000a',x'0b000c');"
+        "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,child_index,address) VALUES(x'0d000e',x'0f0010',x'110012',x'130014',x'150016',3,'synthetic');"
+        "INSERT INTO wallet_transactions(txid,raw_tx,time_received,from_me) VALUES(x'170018',x'19001a',19,1);"
+        "INSERT INTO wallet_utxos(txid,vout,value,address_hash,script,height) VALUES(x'170018',0,23,x'1b001c',x'1d001e',5);"
+        "INSERT INTO wallet_sapling_notes(txid,output_index,value,rcm,memo,ivk,diversifier,pk_d,cm,nullifier,witness_data,witness_height) VALUES(x'1f0020',0,29,x'210022',x'230024',x'0d000e',x'130014',x'150016',x'250026',x'270028',x'29002a',5);");
+}
+
+static int test_peer_chain_recovery_wallet_wal(void)
+{
+    int failures = 0;
+    char dir[4096], source[4608], destination[4608], wal[4700], out[4096] = {0};
+    struct node_db ndb = {0};
+    sqlite3 *published = NULL;
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "wallet-wal");
+    TEST("peer_chain_recovery: published WAL snapshot preserves all typed wallet rows") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(wal, sizeof(wal), "%s-wal", source) > 0);
+        ASSERT(node_db_open(&ndb, source));
+        ASSERT(recovery_wallet_seed_fixture(ndb.db));
+        ASSERT(recovery_exec(ndb.db, "PRAGMA wal_checkpoint(TRUNCATE);"));
+        node_db_close(&ndb);
+        ASSERT(recovery_zero_observation_root(source));
+        ASSERT(recovery_quick_check(source, false));
+        ASSERT(sqlite3_open(source, &ndb.db) == SQLITE_OK);
+        ASSERT(recovery_exec(ndb.db, "PRAGMA wal_autocheckpoint=0;"));
+        ASSERT(recovery_exec(ndb.db, "UPDATE wallet_seed SET next_child=43 WHERE id=1; UPDATE wallet_sapling_notes SET witness_data=x'2b002c',witness_height=6"));
+        struct stat wal_stat;
+        ASSERT(stat(wal, &wal_stat) == 0 && wal_stat.st_size > 0);
+        ASSERT(recovery_run(source, destination, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "pre-recovery quick_check: ok") == NULL);
+        ASSERT(strstr(out, "pre-recovery quick_check:") != NULL);
+        ASSERT(recovery_wallet_integrity(destination));
+        ASSERT(recovery_wallet_peer_empty(destination));
+        ASSERT(recovery_wallet_equal(ndb.db, destination));
+        ASSERT(sqlite3_open(destination, &published) == SQLITE_OK);
+        ASSERT(recovery_exec(published, "UPDATE wallet_seed SET seed=x'070009' WHERE id=1"));
+        ASSERT(sqlite3_close(published) == SQLITE_OK);
+        published = NULL;
+        ASSERT(!recovery_wallet_equal(ndb.db, destination));
+        PASS();
+    } _test_next:;
+    if (published) sqlite3_close(published);
+    if (ndb.open) node_db_close(&ndb);
+    else if (ndb.db) sqlite3_close(ndb.db);
+    (void)test_rm_rf_recursive(dir);
+    return failures;
 }
 
 static int test_peer_chain_recovery_clean_wal(void)
@@ -789,6 +927,7 @@ int test_peer_chain_recovery(void)
     failures += test_peer_chain_recovery_live_writes();
 #endif
     failures += test_peer_chain_recovery_clean_wal();
+    failures += test_peer_chain_recovery_wallet_wal();
     failures += test_peer_chain_recovery_foreign_keys();
     failures += test_peer_chain_recovery_corrupt_observation();
     failures += test_peer_chain_recovery_zero_root();
