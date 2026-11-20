@@ -191,7 +191,37 @@ static bool recovery_close(sqlite3 **db, const char *label)
     return true;
 }
 
+struct recovery_progress {
+    int best_copied;
+    int64_t last;
+    bool clock_bad, stalled;
+};
+
 /* Bound an unchanged high-water mark; healthy large copies keep advancing. */
+static void recovery_progress_note(struct recovery_progress *progress,
+                                   sqlite3_backup *backup, int rc)
+{
+    int64_t now = platform_time_monotonic_ms();
+    if (now <= 0 || now < progress->last) {
+        progress->clock_bad = true;
+        return;
+    }
+    if (rc == SQLITE_OK) {
+        int copied = sqlite3_backup_pagecount(backup) - sqlite3_backup_remaining(backup);
+        if (copied > progress->best_copied) {
+            progress->best_copied = copied;
+            progress->last = now;
+        }
+    }
+    if (rc != SQLITE_DONE && now - progress->last >= RECOVERY_STALL_MS)
+        progress->stalled = true;
+}
+
+static bool recovery_backup_retryable(int rc)
+{
+    return rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED;
+}
+
 static bool recovery_backup(sqlite3 *source, sqlite3 *copy)
 {
     sqlite3_backup *backup = sqlite3_backup_init(copy, "main", source, "main");
@@ -199,23 +229,19 @@ static bool recovery_backup(sqlite3 *source, sqlite3 *copy)
         fprintf(stderr, "peer_chain_recovery: backup init failed: %s\n", sqlite3_errmsg(copy));
         return false;
     }
-    int rc = SQLITE_OK, retries = 0, best_copied = -1;
-    int64_t last_progress = platform_time_monotonic_ms();
-    bool clock_bad = last_progress <= 0, stalled = false;
-    while (!clock_bad && !stalled && (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED)) {
+    int rc = SQLITE_OK, retries = 0;
+    struct recovery_progress progress = { .best_copied = -1,
+        .last = platform_time_monotonic_ms() };
+    progress.clock_bad = progress.last <= 0;
+    while (!progress.clock_bad && !progress.stalled &&
+           recovery_backup_retryable(rc)) {
         if (rc != SQLITE_OK && ++retries > 50) break;
         if (rc != SQLITE_OK) sqlite3_sleep(10);
         rc = sqlite3_backup_step(backup, 128);
-        int64_t now = platform_time_monotonic_ms();
-        if (now <= 0 || now < last_progress) { clock_bad = true; break; }
-        if (rc == SQLITE_OK) {
-            int copied = sqlite3_backup_pagecount(backup) - sqlite3_backup_remaining(backup);
-            if (copied > best_copied) { best_copied = copied; last_progress = now; }
-        }
-        if (rc != SQLITE_DONE && now - last_progress >= RECOVERY_STALL_MS) stalled = true;
+        recovery_progress_note(&progress, backup, rc);
     }
-    if (clock_bad || stalled) {
-        fprintf(stderr, "peer_chain_recovery: %s\n", clock_bad ?
+    if (progress.clock_bad || progress.stalled) {
+        fprintf(stderr, "peer_chain_recovery: %s\n", progress.clock_bad ?
                 "monotonic clock unavailable or reversed" :
                 "backup stalled without progress for 30 seconds");
         rc = SQLITE_ABORT;

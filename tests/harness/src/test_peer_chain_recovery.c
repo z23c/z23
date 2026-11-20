@@ -660,6 +660,17 @@ static int test_peer_chain_recovery_directory_sync_after_publish(void)
 }
 
 #if defined(__linux__)
+static bool recovery_prepare_live_writes(const char *source, bool wal)
+{
+    if (!recovery_fixture(source)) return false;
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(source, &db) == SQLITE_OK;
+    if (ok && wal) ok = recovery_exec(db, "PRAGMA journal_mode=WAL");
+    if (ok) ok = recovery_exec(db, "INSERT INTO unrelated VALUES(2, hex(zeroblob(600000)))");
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
 static int test_peer_chain_recovery_live_writes(void)
 {
     int failures = 0;
@@ -671,12 +682,7 @@ static int test_peer_chain_recovery_live_writes(void)
         snprintf(source, sizeof(source), "%s/source%d.db", dir, i);
         snprintf(dest, sizeof(dest), "%s/dest%d.db", dir, i);
         snprintf(tmp, sizeof(tmp), "%s.peer_chain_recovery.tmp", dest);
-        bool ok = recovery_fixture(source);
-        sqlite3 *db = NULL;
-        ok = ok && sqlite3_open(source, &db) == SQLITE_OK;
-        if (ok && i == 0) ok = recovery_exec(db, "PRAGMA journal_mode=WAL");
-        if (ok) ok = recovery_exec(db, "INSERT INTO unrelated VALUES(2, hex(zeroblob(600000)))");
-        if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+        bool ok = recovery_prepare_live_writes(source, i == 0);
         const char *argv[] = { "build/fixtures/peer_chain_recovery_snapshot", modes[i], source, dest, NULL };
         int rc = ok ? test_host_tool_capture(argv, out, sizeof(out), 15000) : -1;
         if (i == 0) {
