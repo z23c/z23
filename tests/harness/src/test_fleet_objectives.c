@@ -495,6 +495,39 @@ static void fox_frow(char *out, size_t cap, const char *state, const char *ts,
                    state, ts, tip, dim, detail);
 }
 
+static void fox_frow_log(char *out, size_t cap, const char *ts, const char *tip,
+                         const char *detail, const char *log_path)
+{
+    (void)snprintf(out + strlen(out), cap - strlen(out),
+                   "{\"state\":\"failed\",\"ts\":\"%s\",\"tip\":\"%s\","
+                   "\"dimension\":\"lint\",\"log_path\":\"%s\","
+                   "\"detail\":\"%s\"}\n",
+                   ts, tip, log_path, detail);
+}
+
+static bool fox_capability_log(const char *path, size_t prefix, bool embedded_nul,
+                               const char *source, const char *capability)
+{
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+        return false;
+    char filler[4096];
+    memset(filler, 'x', sizeof(filler));
+    bool ok = true;
+    while (prefix > 0) {
+        size_t n = prefix < sizeof(filler) ? prefix : sizeof(filler);
+        ok = fwrite(filler, 1, n, fp) == n && ok;
+        prefix -= n;
+    }
+    if (embedded_nul)
+        ok = fputc(0, fp) != EOF && fputs("tail\n", fp) != EOF && ok;
+    ok = fprintf(fp,
+                 "check_capability_closure: VIOLATION — undeclared reach: "
+                 "%s uses %s\n",
+                 source, capability) >= 0 && ok;
+    return fclose(fp) == 0 && ok;
+}
+
 #define FOX_TF "test test_build_fabric: FAIL at tests/x.c:382 (a) [child_proof_failed_exit_1]"
 
 static int fox_case_repeats(void)
@@ -548,6 +581,103 @@ static int fox_case_repeats(void)
         v = zcl_objectives_measure(&o, "land_failure_repeats");
         ASSERT_EQ(v.value, 3);
         ASSERT_STR_EQ(v.note, "unmapped-code-change failed in 3 rows");
+        PASS();
+    }
+    TEST("objectives: capability failures repeat by source reach, not gate") {
+        static const struct {
+            const char *source;
+            const char *capability;
+        } rows[] = {
+            {"engine/composition/src/boot.c", "CAP_CLOCK"},
+            {"engine/composition/src/boot.c", "CAP_CLOCK"},
+            {"engine/composition/src/boot_net_budgets.c", "CAP_FS_WRITE"},
+            {"engine/composition/src/boot_net_budgets.c", "CAP_FS_WRITE"},
+            {"tools/dev/land_preflight.c", "CAP_FS_READ"},
+        };
+        text[0] = '\0';
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+            char log[1024], violation[1024], tip[8], ts[32];
+            (void)snprintf(log, sizeof(log), "%s/capability-%zu.log", root, i);
+            (void)snprintf(violation, sizeof(violation),
+                           "check_capability_closure: VIOLATION — undeclared reach: "
+                           "%s uses %s\n  with no module row\n",
+                           rows[i].source, rows[i].capability);
+            ASSERT(fox_write(log, violation));
+            (void)snprintf(tip, sizeof(tip), "c%zu", i);
+            (void)snprintf(ts, sizeof(ts), "2026-10-22T1%zu:00:00Z", i);
+            fox_frow_log(text, sizeof(text), ts, tip,
+                         "FAIL check-capability-closure [detail truncated]", log);
+        }
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 2);
+        ASSERT_STR_EQ(v.note,
+                      "capability:engine/composition/src/boot.c:CAP_CLOCK "
+                      "failed in 2 rows");
+        PASS();
+    }
+    TEST("objectives: capability evidence beyond the 1 MiB bound is ignored") {
+        char log[1024];
+        (void)snprintf(log, sizeof(log), "%s/capability-bound.log", root);
+        ASSERT(fox_capability_log(log, 1024 * 1024 - 1, false,
+                                  "engine/composition/src/boot.c", "CAP_CLOCK"));
+        text[0] = '\0';
+        fox_frow_log(text, sizeof(text), "2026-10-22T10:00:00Z", "bound",
+                     "FAIL check-capability-closure [detail truncated]", log);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 1);
+        ASSERT_STR_EQ(v.note, "check-capability-closure failed in 1 row");
+        PASS();
+    }
+    TEST("objectives: capability evidence with an embedded NUL is ignored") {
+        char log[1024];
+        (void)snprintf(log, sizeof(log), "%s/capability-nul.log", root);
+        ASSERT(fox_capability_log(log, 0, true, "engine/composition/src/boot.c",
+                                  "CAP_CLOCK"));
+        text[0] = '\0';
+        fox_frow_log(text, sizeof(text), "2026-10-22T10:00:00Z", "nul",
+                     "FAIL check-capability-closure [detail truncated]", log);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 1);
+        ASSERT_STR_EQ(v.note, "check-capability-closure failed in 1 row");
+        PASS();
+    }
+    TEST("objectives: absent or unrecognized capability evidence falls back") {
+        char log[1024];
+        text[0] = '\0';
+        fox_frow_log(text, sizeof(text), "2026-10-22T10:00:00Z", "missing",
+                     "FAIL check-capability-closure [detail truncated]",
+                     "/nonexistent/fox/capability.log");
+        (void)snprintf(log, sizeof(log), "%s/capability-other.log", root);
+        ASSERT(fox_write(log, "check-capability-closure: unrelated failure\n"));
+        fox_frow_log(text, sizeof(text), "2026-10-22T10:10:00Z", "other",
+                     "FAIL check-capability-closure [detail truncated]", log);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 2);
+        ASSERT_STR_EQ(v.note, "check-capability-closure failed in 2 rows");
+        PASS();
+    }
+    TEST("objectives: an oversized capability key falls back without truncation") {
+        char log[1024], source[301];
+        memset(source, 's', sizeof(source) - 1);
+        source[sizeof(source) - 1] = '\0';
+        (void)snprintf(log, sizeof(log), "%s/capability-long.log", root);
+        ASSERT(fox_capability_log(log, 0, false, source, "CAP_CLOCK"));
+        text[0] = '\0';
+        fox_frow_log(text, sizeof(text), "2026-10-22T10:00:00Z", "long",
+                     "FAIL check-capability-closure [detail truncated]", log);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 1);
+        ASSERT_STR_EQ(v.note, "check-capability-closure failed in 1 row");
         PASS();
     }
     TEST("objectives: failures older than 24 h before the newest outcome "

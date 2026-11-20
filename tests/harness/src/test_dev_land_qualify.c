@@ -1021,7 +1021,7 @@ static int dlx_fast_isolated_case(void)
     char land[4096] = {0};
     TEST("land: qualify lint goal is lint-land, not full lint") {
         struct dlx_rig rig;
-        char jobs[2048] = {0};
+        char jobs[32768] = {0};
         char wt[4096];
         char timing_env[4096 + 32];
         const char *argv[8];

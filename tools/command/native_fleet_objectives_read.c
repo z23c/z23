@@ -1005,8 +1005,9 @@ static struct zcl_objective_value obj_land_success_rate_7d(
  * re-proves alone, so one failure is deduped by (key, tip): the same tip
  * failing the same way on a later attempt counts once. */
 #define OBJ_REPEAT_WINDOW_S ((int64_t)24 * 3600)
-#define OBJ_KEY_MAX 64u
+#define OBJ_KEY_MAX 256u
 #define OBJ_TIP_MAX 48u
+#define OBJ_CAPABILITY_LOG_MAX (1024u * 1024u)
 
 struct obj_failure {
     char key[OBJ_KEY_MAX];
@@ -1063,6 +1064,73 @@ static void obj_repeat_lint_key(const char *detail, char *out, size_t cap)
         obj_repeat_put(out, cap, at, len);
 }
 
+/* Capability outcomes truncate detail before the actionable violation. Read
+ * the first source reach from the retained land log so unrelated omissions
+ * do not look like one recurring gate failure. Missing or unfamiliar evidence
+ * retains the gate-key fallback. */
+static bool obj_repeat_capability_line(char *line, char *out, size_t cap,
+                                       bool *found)
+{
+    *found = false;
+    const char *violation = strstr(line, "VIOLATION");
+    const char *reach = violation ? strstr(violation, "undeclared reach: ")
+                                  : NULL;
+    if (!reach)
+        return false;
+    const char *source = reach + strlen("undeclared reach: ");
+    const char *uses = strstr(source, " uses ");
+    if (!uses)
+        return false;
+    const char *capability = uses + strlen(" uses ");
+    size_t source_len = (size_t)(uses - source);
+    size_t capability_len = 0;
+    while (obj_key_char(capability[capability_len]))
+        capability_len++;
+    if (source_len == 0 || capability_len == 0)
+        return false;
+    int n = snprintf(out, cap, "capability:%.*s:%.*s", (int)source_len, source,
+                     (int)capability_len, capability);
+    *found = n > 0 && (size_t)n < cap;
+    return true;
+}
+
+static bool obj_repeat_capability_key(const struct json_value *row, char *out,
+                                      size_t cap)
+{
+    const char *detail = json_get_str(json_get(row, "detail"));
+    const char *path = json_get_str(json_get(row, "log_path"));
+    if (!strstr(detail, "check-capability-closure") || !path[0])
+        return false;
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return false;
+    char *log = zcl_malloc(OBJ_CAPABILITY_LOG_MAX + 1u,
+                           "fleet_objectives_capability_log");
+    if (!log) {
+        (void)fclose(fp);
+        return false;
+    }
+    size_t len = fread(log, 1, OBJ_CAPABILITY_LOG_MAX, fp);
+    bool valid = !ferror(fp) && !memchr(log, 0, len);
+    (void)fclose(fp);
+    if (!valid) {
+        free(log);
+        return false;
+    }
+    log[len] = '\0';
+    bool found = false;
+    for (char *line = log; line && *line;) {
+        char *next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
+        if (obj_repeat_capability_line(line, out, cap, &found))
+            break;
+        line = next;
+    }
+    free(log);
+    return found;
+}
+
 /* Any other dimension keys as itself, cut at its first ':' (some carry a
  * path suffix); a row with no dimension keys as "failed". */
 static void obj_repeat_key(const struct json_value *row, char *out, size_t cap)
@@ -1075,6 +1143,8 @@ static void obj_repeat_key(const struct json_value *row, char *out, size_t cap)
         return;
     }
     if (strcmp(dim, "lint") == 0) {
+        if (obj_repeat_capability_key(row, out, cap))
+            return;
         obj_repeat_lint_key(detail, out, cap);
         return;
     }
