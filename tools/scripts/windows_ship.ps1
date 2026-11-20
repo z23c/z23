@@ -67,7 +67,7 @@ if (-not (Test-Path -LiteralPath $srcExe)) {
 }
 
 $shipRoot = if ($OutDir) { $OutDir } else { Join-Path $CheckoutRoot "build\ship\$AppName" }
-$null = New-Item -ItemType Directory -Path $shipRoot -Force
+$shipRoot = (New-Item -ItemType Directory -Path $shipRoot -Force).FullName
 $dstExe = Join-Path $shipRoot "$AppName.exe"
 Copy-Item -LiteralPath $srcExe -Destination $dstExe -Force
 
@@ -115,7 +115,9 @@ $manifest | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
 $sumLine = "$exeHash *$AppName.exe"
 $sumsPath = Join-Path $shipRoot 'SHA256SUMS'
-$sumLine | Set-Content -LiteralPath $sumsPath -Encoding UTF8
+# sha256sum expects the digest at byte zero. Windows PowerShell 5.1 adds a
+# UTF-8 BOM with Set-Content, while WriteAllText defaults to BOM-free UTF-8.
+[System.IO.File]::WriteAllText($sumsPath, "$sumLine`n")
 
 Write-Note "shipped $AppName to $shipRoot"
 Write-Note "exe sha256: $exeHash"
