@@ -9,6 +9,8 @@
 #endif
 #include "test/test_core.h"
 #include "services/block_index_loader.h"
+#include "../../../engine/services/src/block_index_flat_internal.h"
+#include "crypto/sha3.h"
 #include "services/block_index_flat_anchor.h"
 #include "services/island_anchor.h"
 #include "services/block_index_cache_envelope.h"
@@ -2783,6 +2785,35 @@ static bool bil_mine_anchor_header(struct block_index *anchor,
     return mined;
 }
 
+static bool bil_reorder_flat_rows(const char *dir)
+{
+    char path[512];
+    if (snprintf(path, sizeof(path), "%s/block_index.bin", dir) >= (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "rb+");
+    if (!f) return false;
+    struct ssio_sidecar_header hdr;
+    unsigned char body[4096];
+    bool ok = fread(&hdr, sizeof(hdr), 1, f) == 1 &&
+        memcmp(hdr.magic, BII_EMBEDDED_MAGIC, 4) == 0 &&
+        hdr.body_size <= sizeof(body) &&
+        hdr.body_size >= 8 + 3 * sizeof(struct block_index_flat) &&
+        fread(body, 1, (size_t)hdr.body_size, f) == hdr.body_size;
+    if (ok) {
+        struct block_index_flat first, last;
+        memcpy(&first, body + 8, sizeof(first));
+        memcpy(&last, body + 8 + 2 * sizeof(last), sizeof(last));
+        memcpy(body + 8, &last, sizeof(last));
+        memcpy(body + 8 + 2 * sizeof(first), &first, sizeof(first));
+        sha3_256(body, (size_t)hdr.body_size, hdr.body_sha3);
+        ok = fseek(f, 0, SEEK_SET) == 0 &&
+            fwrite(&hdr, sizeof(hdr), 1, f) == 1 &&
+            fwrite(body, 1, (size_t)hdr.body_size, f) == hdr.body_size;
+    }
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
 static bool bil_private_anchor_refusal(const char *dir)
 {
     struct main_state state;
@@ -2800,6 +2831,27 @@ static bool bil_private_anchor_refusal(const char *dir)
     main_state_free(&state);
     block_index_history_arena_release(&arena);
     return ok;
+}
+
+static int bil_unordered_forward_case(const char *dir, const struct uint256 *tip,
+                                      const struct arith_uint256 *ordered_work)
+{
+    int failures = 0;
+    bool reordered = bil_reorder_flat_rows(dir);
+    BIL_CHECK("bil: valid fixture rows reordered", reordered);
+    struct main_state unordered;
+    main_state_init(&unordered);
+    struct zcl_result unordered_load = load_block_index_flat(dir, &unordered);
+    struct uint256 h0 = make_test_hash(0), h1 = make_test_hash(1);
+    struct block_index *u0 = block_map_find(&unordered.map_block_index, &h0);
+    struct block_index *u1 = block_map_find(&unordered.map_block_index, &h1);
+    struct block_index *u2 = block_map_find(&unordered.map_block_index, tip);
+    BIL_CHECK("bil: unordered load restores parent links and work",
+              reordered && unordered_load.ok && u0 && u1 && u2 &&
+              u0->pprev == NULL && u1->pprev == u0 && u2->pprev == u1 &&
+              arith_uint256_compare(&u2->nChainWork, ordered_work) == 0);
+    main_state_free(&unordered);
+    return failures;
 }
 
 static int bil_forward_allocation_case(void)
@@ -2835,7 +2887,12 @@ static int bil_forward_allocation_case(void)
         main_state_free(&src);
         struct main_state anchor_dst;
         main_state_init(&anchor_dst);
+        zcl_alloc_fault_fail_next("flat forward pass");
         struct zcl_result anchor_load = load_block_index_flat(tmpdir, &anchor_dst);
+        bool sorted_skipped_alloc = zcl_alloc_fault_armed_label() != NULL;
+        zcl_alloc_fault_clear();
+        BIL_CHECK("bil: ordered load requires no forward array",
+                  anchor_load.ok && sorted_skipped_alloc);
         struct block_index *loaded_anchor = block_map_find(
             &anchor_dst.map_block_index, &bound);
         size_t loaded_solution_len = 0;
@@ -2845,7 +2902,10 @@ static int bil_forward_allocation_case(void)
                   anchor_load.ok && loaded_anchor &&
                   loaded_solution_len == sizeof(solution) && loaded_solution &&
                   memcmp(loaded_solution, solution, sizeof(solution)) == 0);
+        struct arith_uint256 ordered_work = {0};
+        if (loaded_anchor) ordered_work = loaded_anchor->nChainWork;
         main_state_free(&anchor_dst);
+        failures += bil_unordered_forward_case(tmpdir, &bound, &ordered_work);
         BIL_CHECK("bil: private forward refusal releases anchored extension and arena",
                   bil_private_anchor_refusal(tmpdir));
         main_state_init(&dst);

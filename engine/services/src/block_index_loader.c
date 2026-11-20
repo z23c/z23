@@ -686,18 +686,22 @@ static void bil_flat_link_rows(
 
 }
 
-static struct zcl_result bil_flat_forward_rows(
-    struct main_state *ms, struct block_index *arena, uint32_t count,
-    void **release)
+static bool bil_flat_rows_ordered(struct block_index *arena, uint32_t count)
 {
-    struct block_index **sorted =
-        zcl_malloc((size_t)count * sizeof(*sorted), "flat forward pass");
-    if (!sorted) {
-        bil_flat_rollback(&ms->map_block_index, arena, count);
-        return ZCL_ERR(-12, "block_index_flat: forward-pass allocation failed "
-                       "for %u entries", count);
+    struct block_index *previous = NULL;
+    for (uint32_t i = 0; i < count; i++) {
+        struct block_index *cur = &arena[i];
+        if (!cur->phashBlock)
+            continue;
+        if (previous && previous->nHeight > cur->nHeight)
+            return false;
+        previous = cur;
     }
-    *release = sorted;
+    return true;
+}
+
+static struct zcl_result bil_flat_forward_rows(
+    struct main_state *ms, struct block_index *arena, uint32_t count)
 {
     /* Recompute every pointer-graph-derived field through the canonical
      * forward pass (nChainWork, nChainTx, skip links, cached branch id,
@@ -717,29 +721,32 @@ static struct zcl_result bil_flat_forward_rows(
      * so chain_advance_coordinator saw local==best_header and the reducer drive
      * converged with unfolded on-disk bodies — a live wedge. Re-deriving from
      * the pointer graph is the canonical, wedge-proof path. */
-    if (sorted) {
-        size_t n = 0;
+    /* Check every admitted row before applying the canonical forward pass.
+     * Unordered inputs retain the existing sorted fallback. */
+    if (bil_flat_rows_ordered(arena, count)) {
         for (uint32_t i = 0; i < count; i++) {
-            if (arena[i].phashBlock)
-                sorted[n++] = &arena[i];
+            struct block_index *cur = &arena[i];
+            if (cur->phashBlock)
+                block_index_forward_pass(&cur, 1);
         }
-        /* Genuine flat files are height-sorted by the writer and the arena
-         * above preserves file order, so the collected array is already
-         * the forward-pass order and qsort would be an identity
-         * permutation at O(n log n) cost (~3M pointers on a full index).
-         * block_index_sort_forward_pass_input skips it exactly then and
-         * qsorts exactly otherwise. Skipping is behaviour-identical:
-         * block_index_forward_pass derives every field from the
-         * already-linked pprev (strictly lower height, so always
-         * processed first in ANY height-sorted order), and equal-height
-         * rows share no ancestry — their relative order cannot change any
-         * output. A foreign/legacy unsorted file still takes the qsort,
-         * bit for bit as before. */
-        block_index_sort_forward_pass_input(sorted, n);
-        block_index_forward_pass(sorted, n);
+        return ZCL_OK;
     }
+    struct block_index **sorted =
+        zcl_malloc((size_t)count * sizeof(*sorted), "flat forward pass");
+    if (!sorted) {
+        bil_flat_rollback(&ms->map_block_index, arena, count);
+        return ZCL_ERR(-12, "block_index_flat: forward-pass allocation failed "
+                       "for %u entries", count);
+    }
+    size_t n = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (arena[i].phashBlock)
+            sorted[n++] = &arena[i];
+    }
+    block_index_sort_forward_pass_input(sorted, n);
+    block_index_forward_pass(sorted, n);
+    free(sorted);
     return ZCL_OK;
-}
 }
 
 static bool bil_flat_allocation_sizes_valid(size_t count)
@@ -1101,7 +1108,6 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
      * O_CREAT|O_TRUNC hands every boot a freshly zeroed file whose
      * ftruncate extension faults in zero-filled, exactly like the calloc
      * fallback's demand-zero anonymous pages. */
-    void *release = NULL; /* heap scratch (the sorted array) freed at finish */
     int64_t t_parse_ms = 0, t_fwd_ms = 0;
     struct bil_flat_release rel = {.mapping = &mapping,
                                    .entries = input.entries};
@@ -1120,9 +1126,8 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     }
     t_parse_ms = platform_time_monotonic_ms() - t0_ms;
     t_fwd_ms = platform_time_monotonic_ms();
-    result = bil_flat_forward_rows(ms, arena, count, &release);
+    result = bil_flat_forward_rows(ms, arena, count);
 finish:
-    free(release);
     bil_record_private_failure(result.ok, publish_identity);
     bil_arena_release(arena, arena_mapped, arena_bytes, arena_path,
                       !result.ok);
