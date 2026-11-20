@@ -48,12 +48,13 @@ char *zcl_native_ops_health_body(const struct json_value *args,
         LOG_NULL("ops.native", "healthcheck RPC returned null");
     }
     struct json_value root;
-    bool parsed = status_parse_json(&root, raw);
-    if (parsed && status_json_is_rpc_error(&root)) {
+    bool parsed = status_parse_rpc_json(&root, raw, JSON_OBJ);
+    /* With an object result, refusal means a complete RPC error; parse
+     * failures reset root to null, including trailing garbage. */
+    if (!parsed && root.type == JSON_OBJ) {
         json_free(&root);
         return raw;
     }
-    parsed = parsed && root.type == JSON_OBJ;
     const struct json_value *status = parsed ? json_get(&root, "status") : NULL;
     const struct json_value *healthy = parsed ? json_get(&root, "healthy") : NULL;
     const struct json_value *serving = parsed ? json_get(&root, "serving") : NULL;

@@ -2455,6 +2455,20 @@ static int test_ops_health_body_fails_closed(void)
         ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
         ASSERT(strstr(out, "incompatible success body") != NULL);
 
+        g_bridge_rpc_error_fixture =
+            "{\"error\":{\"code\":-32097,\"message\":\"truncated\"}";
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strstr(out, "incompatible success body") != NULL);
+
+        g_bridge_rpc_error_fixture =
+            "{\"error\":{\"code\":-32097,\"message\":\"extra\"}} trailing";
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strstr(out, "incompatible success body") != NULL);
+
         node_rpc_client_set_test_hook(bridge_rpc_null_mock);
         code = ZCL_COMMAND_EXIT_INTERNAL;
         ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
