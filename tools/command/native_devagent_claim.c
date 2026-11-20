@@ -1323,6 +1323,54 @@ static size_t dvc_line_conflicts(const char *line, const char *wt,
     return n;
 }
 
+static const char *dvc_evidence_present(const char *text)
+{
+    return text && text[0] ? text : "UNKNOWN";
+}
+
+static void dvc_evidence_field(const char *text, char *out, size_t cap)
+{
+    text = dvc_evidence_present(text);
+    size_t n = strlen(text);
+    if (n >= cap)
+        n = cap - 1;
+    while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80)
+        n--;
+    memcpy(out, text, n);
+    out[n] = '\0';
+}
+
+static const char *dvc_evidence_value(const struct json_value *row,
+                                      const char *key)
+{
+    const struct json_value *value = json_get(row, key);
+    return value && value->type == JSON_STR ? json_get_str(value) : NULL;
+}
+
+static void dvc_overlap_evidence(const struct json_value *conflicts,
+                                 char out[256])
+{
+    const struct json_value *first = json_at(conflicts, 0);
+    if (!first) {
+        (void)snprintf(out, 256, "conflict metadata unavailable; refusal preserved");
+        return;
+    }
+    const char *file_value = dvc_evidence_present(dvc_evidence_value(first, "file"));
+    const char *worktree_value = dvc_evidence_present(dvc_evidence_value(first, "worktree"));
+    const char *story_value = dvc_evidence_present(dvc_evidence_value(first, "story"));
+    int written = snprintf(out, 256,
+                           "file=%s worktree=%s story=%s; all conflicts in reply data",
+                           file_value, worktree_value, story_value);
+    if (written >= 0 && written < 256)
+        return;
+    char file[49], worktree[81], story[41];
+    dvc_evidence_field(file_value, file, sizeof(file));
+    dvc_evidence_field(worktree_value, worktree, sizeof(worktree));
+    dvc_evidence_field(story_value, story, sizeof(story));
+    (void)snprintf(out, 256, "file=%s worktree=%s story=%s; all conflicts in reply data",
+                   file, worktree, story);
+}
+
 /* Refuse when any requested file is live in another worktree's line. */
 static bool dvc_check_overlap(const struct dvc_facts *facts,
                               const struct dvc_ledger *lg,
@@ -1349,11 +1397,12 @@ static bool dvc_check_overlap(const struct dvc_facts *facts,
         nconf += dvc_line_conflicts(lg->lines[i], wt, norm, &conflicts);
     }
     if (nconf > 0) {
+        char evidence[256];
+        dvc_overlap_evidence(&conflicts, evidence);
         (void)json_push_kv(&reply->data, "conflicts", &conflicts);
         (void)json_push_kv_str(&reply->data, "ledger", facts->ledger);
         dvc_fail(reply, "CLAIM_OVERLAP", "claim",
-                 "files already claimed by another worktree",
-                 "see conflicts in the reply data");
+                 "files already claimed by another worktree", evidence);
         (void)snprintf(reply->error.next_action,
                        sizeof(reply->error.next_action),
                        "Coordinate with the named claim owner through dev.agent.mail; "

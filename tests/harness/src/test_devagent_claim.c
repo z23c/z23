@@ -589,6 +589,62 @@ _test_next:;
     return failures;
 }
 
+static int dvx_missing_story_evidence_test(void)
+{
+    int failures = 0;
+    TEST("claim: a missing conflict story is UNKNOWN in CLI evidence") {
+        char repo[512];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "missing-story");
+        ASSERT(dvx_fixture(repo));
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl",
+                         "{\"worktree\":\"" DVX_FOREIGN
+                         "\",\"files\":[\"engine/a.c\"]}\n"));
+        const char *files[] = {"engine/a.c", NULL};
+        struct dvx_call c;
+        dvx_claim(&c, repo, "metadata-probe", files, false);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+        ASSERT(strstr(c.reply.error.evidence, "story=UNKNOWN") != NULL);
+        dvx_end(&c);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dvx_long_owner_evidence_test(void)
+{
+    int failures = 0;
+    TEST("claim: available evidence room preserves the complete owner") {
+        char repo[512], owner[121], row[256];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "long-owner");
+        ASSERT(dvx_fixture(repo));
+        size_t prefix = strlen(DVX_FOREIGN);
+        memcpy(owner, DVX_FOREIGN, prefix);
+        memset(owner + prefix, 'w', sizeof(owner) - prefix - 1);
+        owner[sizeof(owner) - 1] = '\0';
+        (void)snprintf(row, sizeof(row),
+                       "{\"worktree\":\"%s\",\"story\":\"hex-codec\","
+                       "\"files\":[\"engine/a.c\"]}\n", owner);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        const char *files[] = {"engine/a.c", NULL};
+        struct dvx_call c;
+        dvx_claim(&c, repo, "metadata-probe", files, false);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+        ASSERT(strstr(c.reply.error.evidence, owner) != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "engine/a.c") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "hex-codec") != NULL);
+        ASSERT(zutf8_validate(c.reply.error.evidence));
+        dvx_end(&c);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 struct dvx_interleaved_claim {
     const char *other;
     bool entered;
@@ -806,6 +862,40 @@ _test_next:;
     return failures;
 }
 
+static int dvx_utf8_evidence_test(const char *one, const char *two)
+{
+    int failures = 0;
+    TEST("claim: conflict evidence truncates only at UTF-8 boundaries") {
+        char story[42], file[201], truncated[40], expected[64];
+        memset(story, 'a', 39);
+        memcpy(story + 39, "\xc3\xa9", 3);
+        memset(file, 'f', sizeof(file) - 1);
+        file[sizeof(file) - 1] = '\0';
+        const char *files[] = {file, NULL};
+        struct dvx_call c;
+        dvx_claim(&c, one, story, files, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        dvx_end(&c);
+        dvx_claim(&c, two, "boundary-contender", files, false);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "CLAIM_OVERLAP");
+        ASSERT(zutf8_validate(c.reply.error.evidence));
+        memset(truncated, 'a', 39);
+        truncated[39] = '\0';
+        (void)snprintf(expected, sizeof(expected), "story=%s;", truncated);
+        ASSERT(strstr(c.reply.error.evidence, expected) != NULL);
+        ASSERT(strstr(c.reply.error.evidence, story) == NULL);
+        const struct json_value *conflicts = dvx_arr(&c, "conflicts");
+        ASSERT(conflicts && conflicts->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&conflicts->children[0], "story")),
+                      story);
+        dvx_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dvx_escaped_path_tests(const char *one, const char *two)
 {
     int failures = 0;
@@ -875,6 +965,7 @@ static int dvx_escaped_path_tests(const char *one, const char *two)
         PASS();
     }
 
+    failures += dvx_utf8_evidence_test(one, two);
 _test_next:;
     return failures;
 }
@@ -931,7 +1022,9 @@ int test_devagent_claim(void)
 {
     int failures = dvx_lease_tests() + dvx_expiry_scope_tests() +
                    dvx_owner_authority_tests() + dvx_owner_roundtrip_tests() +
-                   dvx_orphan_retirement_tests() + dvx_metadata_tests() + dvx_unreadable_tests() +
+                   dvx_orphan_retirement_tests() + dvx_metadata_tests() +
+                   dvx_missing_story_evidence_test() + dvx_long_owner_evidence_test() +
+                   dvx_unreadable_tests() +
                    dvx_write_failure_tests() + dvx_interleaved_tests() +
                    dvx_release_input_tests();
     char one[512], two[600];
@@ -1018,6 +1111,9 @@ int test_devagent_claim(void)
         ASSERT(wt && wt->type == JSON_STR && json_get_str(wt)[0] != '\0');
         ASSERT(story && story->type == JSON_STR);
         ASSERT_STR_EQ(json_get_str(story), "hex-codec");
+        ASSERT(strstr(c.reply.error.evidence, "engine/a.c") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, json_get_str(wt)) != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "hex-codec") != NULL);
         const char *claimed_at = json_get_str(
             json_get(&conflicts->children[0], "claimed_at"));
         ASSERT(claimed_at != NULL);
