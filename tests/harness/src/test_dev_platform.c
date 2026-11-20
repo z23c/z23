@@ -11443,7 +11443,7 @@ static int test_cold_epoch_integrity_gate(void)
                    "}\n"
                    "trap cleanup EXIT HUP INT TERM\n"
                    "ZCL_BUILD_EPOCH_CACHE_DIR=\"$scratch/cache\" \\\n"
-                   "  tools/dev/build-epoch-integrity-cached.sh \\\n"
+                   "  make --no-print-directory check-build-epoch-integrity \\\n"
                    "  >\"$scratch/out.log\" 2>&1 || { cat \"$scratch/out.log\"; exit 1; }\n"
                    "grep -Eq '^PASS check-build-epoch-selftest[[:space:]]' \"$scratch/out.log\" &&\n"
                    "grep -Eq '^PASS check-make-depfile-scope-selftest[[:space:]]' "
