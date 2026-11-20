@@ -1869,6 +1869,9 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-p
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
+# Full lint links the dev verifier. Give lint-only builds their existing
+# provenance preparation before the link, without authorizing vendor repair.
+ZCL_TOR_LINT_LINK := $(if $(strip $(ZCL_TOR_LINK_REQUESTED)),,$(filter lint,$(MAKECMDGOALS)))
 
 TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk
 # Same restart mechanism as VENDOR_BOOTSTRAP_MK: remaking an included makefile
@@ -1882,7 +1885,7 @@ TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk
 # tools/dev/c23_portable_release.c establishes the archives itself
 # through that toolchain before it ever calls make.
 ifeq ($(ZCL_TOR),full)
-ifneq ($(strip $(ZCL_TOR_LINK_REQUESTED)),)
+ifneq ($(strip $(ZCL_TOR_LINK_REQUESTED) $(ZCL_TOR_LINT_LINK)),)
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -2498,7 +2501,11 @@ tor-provenance-ready:
 # pre-restart parse memoized a source-identity capture that predates these
 # archives, and without the drop the post-restart parse would cache-hit that
 # cold record instead of re-deriving identity from the bytes now linked.
-$(TOR_BOOTSTRAP_MK): tor-ready
+$(TOR_BOOTSTRAP_MK): $(if $(ZCL_TOR_LINT_LINK),tor-provenance-ready,tor-ready)
+ifneq ($(ZCL_TOR_LINT_LINK),)
+	@ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' tools/scripts/tor_archives_ready.sh check || \
+	  { $(MAKE) --no-print-directory -o tor-provenance-ready check-tor-provenance; exit 1; }
+endif
 	@set -eu; \
 	mkdir -p "$(dir $@)"; \
 	ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh session-cache-drop; \

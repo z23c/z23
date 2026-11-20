@@ -1867,10 +1867,12 @@ static int t_tor_ready_before_link(void)
 {
     static const char script[] =
         "set -eu; cd \"$2\"\n"
-        "mkdir -p build/identity tools/scripts\n"
-        "printf '#!/bin/sh\\necho probe >> events\\ntest -f ready-marker\\n' > tools/scripts/tor_archives_ready.sh; chmod +x tools/scripts/tor_archives_ready.sh\n"
-        "printf '%s\\n' 'ZCL_TOR ?= full' 'ZCL_TOR_LINK_REQUESTED := link' 'TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk' 'TOR_MISSING_ARCHIVES :=' > Makefile\n"
-        "sed -n '/^ifeq ($(ZCL_TOR),full)/,/^# The stub/{ /^# The stub/d; p; }' \"$1/Makefile\" >> Makefile\n"
+        "mkdir -p build/identity tools/scripts tools/dev\n"
+        "printf '#!/bin/sh\\necho \"$1\" >> events\\ntest -f ready-marker\\n' > tools/scripts/tor_archives_ready.sh; chmod +x tools/scripts/tor_archives_ready.sh\n"
+        "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/source-identity.sh; chmod +x tools/dev/source-identity.sh\n"
+        "printf '%s\\n' 'ZCL_TOR ?= full' > Makefile\n"
+        "sed -n '/^ZCL_TOR_SKIP_GOALS :=/,/^# The stub/{ /^# The stub/d; p; }' \"$1/Makefile\" >> Makefile\n"
+        "sed -n '/^$(TOR_BOOTSTRAP_MK):/,/^$/p' \"$1/Makefile\" >> Makefile\n"
         "sed -n '/^tor-ready: /p' \"$1/Makefile\" >> Makefile\n"
         "cat >> Makefile <<'MAKE'\n"
         "$(shell echo parse >> parse-events)\n"
@@ -1878,8 +1880,10 @@ static int t_tor_ready_before_link(void)
         ".PHONY: vendor-ready\n"
         "vendor-ready:\n\t@echo vendor >> events; : > vendor-marker\n"
         "tor-ready:\n\t@test -f vendor-marker; echo ready >> events; case \"$(STATE)\" in legacy) echo rebuilt >> events ;; stale|missing|valid) : ;; *) exit 1 ;; esac; : > ready-marker\n"
-        "$(TOR_BOOTSTRAP_MK): tor-ready\n\t@echo '# ready' > $@\n"
-        "link:\n\t@echo link:$(MAKE_RESTARTS) >> events\n"
+        ".PHONY: tor-provenance-ready check-tor-provenance lint\n"
+        "tor-provenance-ready:\n\t@echo prepare >> events; test \"$(STATE)\" = refuse || touch ready-marker\n"
+        "check-tor-provenance: tor-provenance-ready\n\t@echo diagnostic >> events; exit 1\n"
+        "link lint:\n\t@echo $@:$(MAKE_RESTARTS) >> events\n"
         "MAKE\n"
         "printf '# old stamp\\n' > build/identity/tor-inputs-ready.mk\n"
         "touch -t 200001010000 build/identity/tor-inputs-ready.mk\n"
@@ -1904,6 +1908,16 @@ static int t_tor_ready_before_link(void)
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "tor_ready", "bootstrap");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (!bad) {
+        static const char lint[] =
+            "set -eu; cd \"$2\"; : > events\n"
+            "make --no-print-directory -j2 lint > run.log 2>&1\n"
+            "printf 'probe\\nprepare\\ncheck\\nlint:1\\n' > expected; cmp expected events\n"
+            ": > events; rm ready-marker\n"
+            "if make --no-print-directory -j2 STATE=refuse lint > run.log 2>&1; then exit 1; fi\n"
+            "printf 'probe\\nprepare\\ncheck\\ndiagnostic\\n' > expected; cmp expected events\n";
+        bad = build_needs_fixture_run(repo_root(), fixture, lint);
+    }
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
 }
