@@ -9,6 +9,7 @@
 #include "test/test_core.h"
 #include "services/db_maintenance.h"
 #include "event/event.h"
+#include "json/json.h"
 #include "models/database.h"
 
 #include <stdatomic.h>
@@ -125,6 +126,39 @@ static void dbm_fixture_destroy(struct dbm_fixture *f)
 
 /* A vacuum gate that always returns false. */
 static bool dbm_gate_always_false(void) { return false; }
+
+static int dbm_last_failure_after_success(void)
+{
+    int failures = 0;
+    struct dbm_fixture f;
+    if (!dbm_fixture_init(&f, "last_failure")) return 1;
+    struct db_maintenance_status before, failed, after;
+    db_maintenance_status_snapshot(&before);
+    DBM_CHECK("dbm: read-only fixture refuses analyze",
+              sqlite3_exec(f.raw, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK &&
+              !db_maintenance_run_now(&f.ndb, "analyze").ok);
+    db_maintenance_status_snapshot(&failed);
+    DBM_CHECK("dbm: failed analyze records its operation and reason",
+              failed.total_failures == before.total_failures + 1 &&
+              strncmp(failed.last_error, "op=analyze ", 11) == 0 && failed.last_error[11]);
+    DBM_CHECK("dbm: writable fixture completes analyze",
+              sqlite3_exec(f.raw, "PRAGMA query_only=OFF", NULL, NULL, NULL) == SQLITE_OK &&
+              db_maintenance_run_now(&f.ndb, "analyze").ok);
+    db_maintenance_status_snapshot(&after);
+    DBM_CHECK("dbm: success advances runs and retains the last failure",
+              after.total_runs == failed.total_runs + 1 &&
+              after.total_failures == failed.total_failures &&
+              strcmp(after.last_error, failed.last_error) == 0);
+    struct json_value doc;
+    json_init(&doc);
+    bool dumped = db_maintenance_dump_state_json(&doc, NULL);
+    const char *reason = json_get_str(json_get(json_get(&doc, "_health"), "reason"));
+    DBM_CHECK("dbm: health rollup still names the recorded failure",
+              dumped && reason && failed.last_error[0] && strstr(reason, failed.last_error));
+    json_free(&doc);
+    dbm_fixture_destroy(&f);
+    return failures;
+}
 
 int test_db_maintenance(void)
 {
@@ -363,5 +397,6 @@ int test_db_maintenance(void)
     event_clear_observers(EV_DB_MAINTENANCE_START);
     event_clear_observers(EV_DB_MAINTENANCE_DONE);
     event_clear_observers(EV_DB_MAINTENANCE_FAILED);
+    failures += dbm_last_failure_after_success();
     return failures + ZCL_TEST_SETUP_FAILURES();
 }

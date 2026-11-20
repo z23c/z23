@@ -693,7 +693,7 @@ static struct zcl_result dbm_run_now(struct node_db *db, const char *op,
 
     dbm_note_run_locked(op, platform_time_wall_unix(), elapsed_ms, removed);
     g_dbm.total_runs++;
-    g_dbm.last_error[0] = '\0';
+    /* The lifetime failure count and its most recent cause stay paired. */
 
     event_emitf(EV_DB_MAINTENANCE_DONE, 0,
                 "op=%s elapsed_ms=%" PRId64 " removed=%" PRId64,
