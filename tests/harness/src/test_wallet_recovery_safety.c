@@ -1381,6 +1381,138 @@ static bool wrs_mk_node_db(struct wrs_node_db *fx, const char *tag,
     return roots && (!bound || boot_shutdown_marker_write_clean(fx->dir));
 }
 
+/* Inject only a wallet-facts read failure on each new fixture connection. */
+static int g_wrs_facts_fault;
+static int g_wrs_facts_fired;
+static bool g_wrs_interrupt_armed;
+
+static int wrs_facts_interrupt(void *ctx)
+{
+    (void)ctx;
+    if (!g_wrs_interrupt_armed) return 0;
+    g_wrs_interrupt_armed = false;
+    g_wrs_facts_fired++;
+    return 1;
+}
+
+static int wrs_facts_trace(unsigned type, void *ctx, void *stmt, void *detail)
+{
+    (void)type; (void)ctx; (void)detail;
+    const char *sql = sqlite3_sql(stmt);
+    g_wrs_interrupt_armed = sql &&
+        ((g_wrs_facts_fault == 1 && strstr(sql, "FROM wallet_keys") &&
+          (strstr(sql, "COUNT(") || strstr(sql, "count("))) ||
+         (g_wrs_facts_fault == 2 && strstr(sql, "FROM wallet_seed")));
+    return 0;
+}
+
+void wallet_recovery_facts_hook_for_test(void (*hook)(sqlite3 *));
+
+static void wrs_facts_open(sqlite3 *db)
+{
+    sqlite3_progress_handler(db, 1, wrs_facts_interrupt, db);
+    (void)sqlite3_trace_v2(db, SQLITE_TRACE_STMT, wrs_facts_trace, db);
+}
+
+static bool wrs_facts_values(sqlite3_stmt *st, int fault)
+{
+    for (int i = 0; i < 6; i++)
+        if (sqlite3_column_type(st, i) != SQLITE_INTEGER) return false;
+    return sqlite3_column_int(st, 0) == (fault == 1) &&
+        sqlite3_column_int(st, 1) == (fault == 2) &&
+        sqlite3_column_int(st, 2) == 0 && sqlite3_column_int(st, 3) == 0 &&
+        sqlite3_column_int(st, 4) == (fault == 1) &&
+        sqlite3_column_int(st, 5) == (fault == 2);
+}
+
+/* Reopen read-only and prove the exact synthetic row and all other indicators. */
+static bool wrs_facts_intact(const char *path, int fault)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    const char *sql = "SELECT (SELECT count(*) FROM wallet_keys),"
+        "(SELECT count(*) FROM wallet_seed),"
+        "(SELECT count(*) FROM wallet_sapling_keys),"
+        "(SELECT count(*) FROM wallet_sapling_notes),"
+        "(SELECT count(*) FROM wallet_keys WHERE "
+        "pubkey_hash=x'751e76e8199196d454941c45d1b3a323f1433bd6' AND "
+        "pubkey=x'0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798' AND "
+        "privkey=x'0000000000000000000000000000000000000000000000000000000000000001' AND compressed=1),"
+        "(SELECT count(*) FROM wallet_seed WHERE id=1 AND seed=zeroblob(32))";
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && st &&
+              sqlite3_step(st) == SQLITE_ROW;
+    if (ok) ok = wrs_facts_values(st, fault) && sqlite3_step(st) == SQLITE_DONE;
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static int wrs_unreadable_wallet_facts_case(int fault)
+{
+    int failures = 0;
+    {
+        struct wrs_node_db fx;
+        bool made = wrs_mk_node_db(&fx, fault == 1 ? "key_read_fault" :
+                                   "seed_read_fault", NULL, false);
+        WRS_CHECK("single-indicator target created", made);
+        if (!made) return failures;
+        sqlite3 *db = NULL;
+        bool seeded = sqlite3_open(fx.db_path, &db) == SQLITE_OK;
+        const char *insert = fault == 1
+            ? "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed) "
+              "VALUES(x'751e76e8199196d454941c45d1b3a323f1433bd6',"
+              "x'0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',"
+              "x'0000000000000000000000000000000000000000000000000000000000000001',1)"
+            : "INSERT INTO wallet_seed(id,seed) VALUES(1,zeroblob(32))";
+        seeded = seeded && sqlite3_exec(db, insert, NULL, NULL, NULL) == SQLITE_OK;
+        if (db && sqlite3_close(db) != SQLITE_OK) seeded = false;
+        WRS_CHECK("fixture contains only its named indicator",
+                  seeded && wrs_facts_intact(fx.db_path, fault));
+        int64_t size_before = 0;
+        uint64_t before = wrs_file_hash(fx.db_path, &size_before);
+        struct wallet_recovery_request req = {
+            .phrase = WRS_PHRASE_B, .datadir = fx.dir, .dry_run = true,
+        };
+        struct wallet_recovery_report rep;
+        g_wrs_facts_fault = fault; g_wrs_facts_fired = 0;
+        wallet_recovery_facts_hook_for_test(wrs_facts_open);
+        struct zcl_result r = wallet_recovery_run(&req, &rep);
+        wallet_recovery_facts_hook_for_test(NULL);
+        g_wrs_facts_fault = 0; g_wrs_interrupt_armed = false;
+        bool refused = g_wrs_facts_fired == 1 && !r.ok && r.code == -63;
+        printf("    fault=%d fired=%d ok=%d code=%d\n", fault, g_wrs_facts_fired, r.ok, r.code);
+        WRS_CHECK("unreadable single indicator refuses the plan", refused);
+        req.dry_run = false; g_wrs_facts_fault = fault; g_wrs_facts_fired = 0;
+        wallet_recovery_facts_hook_for_test(wrs_facts_open);
+        r = wallet_recovery_run(&req, &rep);
+        wallet_recovery_facts_hook_for_test(NULL);
+        g_wrs_facts_fault = 0; g_wrs_interrupt_armed = false;
+        WRS_CHECK("unreadable single indicator refuses before commit",
+                  g_wrs_facts_fired == 1 && !r.ok && r.code == -63);
+        int64_t size_after = 0;
+        uint64_t after = wrs_file_hash(fx.db_path, &size_after);
+        WRS_CHECK("facts failure preserves raw wallet database",
+                  before && before == after && size_before == size_after);
+        WRS_CHECK("read-only reopen preserves exact wallet facts",
+                  wrs_facts_intact(fx.db_path, fault));
+        r = wrs_restore(fx.dir, WRS_PHRASE_B, &rep);
+        WRS_CHECK("immediate retry opens target and reports existing wallet",
+                  !r.ok && r.code == -62);
+        test_rm_rf(fx.dir);
+    }
+    return failures;
+}
+
+static int t_unreadable_wallet_facts_refuse(void)
+{
+    return wrs_unreadable_wallet_facts_case(1) +
+           wrs_unreadable_wallet_facts_case(2);
+}
+
 /* Overwrite the noted root pages in place with bytes no b-tree page starts
  * with. Size and header stay put, so a shutdown binding still matches. */
 static bool wrs_damage_roots(const struct wrs_node_db *fx)
@@ -1756,6 +1888,7 @@ int test_wallet_recovery_safety(void)
     failures += t_reply_reports_encrypted_at_rest_once();
 
     wrs_set_at_rest(NULL, "1");
+    failures += t_unreadable_wallet_facts_refuse();
     failures += t_verified_clean_binding_skips_every_full_check();
     failures += t_unbound_node_db_is_checked_exactly_once();
     failures += t_damaged_sqlite_node_db_is_refused_not_reset();

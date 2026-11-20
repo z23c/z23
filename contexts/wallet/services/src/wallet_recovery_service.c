@@ -533,13 +533,35 @@ struct zcl_result wallet_recovery_status(const char *datadir,
 
 /* ── target inspection and creation extras ───────────────────────── */
 
-/* Everything besides the transparent keys and the seed that makes a target
- * a wallet: Sapling spending keys and received notes. */
-static void wrc_count_shielded_rows(struct node_db *ndb,
-                                    struct wallet_recovery_report *out)
+/* A failed count is unknown, not an empty wallet. */
+static struct zcl_result wrc_read_wallet_counts(sqlite3 *db,
+                                         struct wallet_recovery_report *out)
 {
-    out->sapling_keys_before = db_sapling_key_count(ndb);
-    out->notes_before = db_sapling_note_count_all(ndb);
+    if (!db || !out)
+        return ZCL_ERR(-63, "cannot inspect wallet counts");
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT (SELECT count(*) FROM wallet_keys), "
+        "(SELECT count(*) FROM wallet_sapling_keys), "
+        "(SELECT count(*) FROM wallet_sapling_notes)";
+    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK || !s) {
+        sqlite3_finalize(s);
+        return ZCL_ERR(-63, "cannot prepare wallet counts");
+    }
+    bool ok = ar_step_checked(s, "wallet recovery: count", NULL) == ZCL_STEP_ROW;
+    int64_t counts[3] = {0};
+    for (int i = 0; ok && i < 3; i++) {
+        ok = sqlite3_column_type(s, i) == SQLITE_INTEGER;
+        if (ok) counts[i] = sqlite3_column_int64(s, i);
+        if (counts[i] < 0) ok = false;
+    }
+    if (ok) ok = ar_step_checked(s, "wallet recovery: count completion", NULL) == ZCL_STEP_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK || !ok)
+        return ZCL_ERR(-63, "cannot read wallet counts");
+    out->keys_before = counts[0];
+    out->keys_after = counts[0];
+    out->sapling_keys_before = counts[1];
+    out->notes_before = counts[2];
+    return ZCL_OK;
 }
 
 /* Register the caller's passphrase (or the creation-policy environment one)
@@ -1142,29 +1164,39 @@ struct zcl_result wrc_open_existing_target_ro(
     return ZCL_OK;
 }
 
+#ifdef ZCL_TESTING
+static void (*wrc_facts_test_hook)(sqlite3 *);
+void wallet_recovery_facts_hook_for_test(void (*hook)(sqlite3 *));
+void wallet_recovery_facts_hook_for_test(void (*hook)(sqlite3 *))
+{
+    wrc_facts_test_hook = hook;
+}
+#endif
+
 /* Read the existing wallet's key and seed facts through the open handle. */
 struct zcl_result wrc_read_existing_wallet_facts(
     struct wallet_recovery_report *out, struct wrc_run *st)
 {
     struct zcl_result wr = wallet_sqlite_open_r(&st->ws, st->ndb.db);
-    if (!wr.ok) {
-        zcl_native_node_db_close_readonly(&st->ro_db, &st->ndb);
-        wallet_restore_datadir_release(&st->wlock);
+    if (!wr.ok)
         return ZCL_ERR(-63, "cannot open the wallet tables in %s: %s",
                        out->target_db, wr.message);
-    }
     st->have_ws = true;
+#ifdef ZCL_TESTING
+    if (wrc_facts_test_hook) wrc_facts_test_hook(st->ndb.db);
+#endif
 
-    out->keys_before = db_wallet_key_count(&st->ndb);
-    out->keys_after = out->keys_before;
+    struct zcl_result counts = wrc_read_wallet_counts(st->ndb.db, out);
+    if (!counts.ok) return counts;
     /* The ROW question, not the readability one. A LOCKED seed is a
      * seed: recovering over it would put a second seed on a wallet
      * whose first one is merely shut, and the owner would have no way
      * to tell which keys came from which. */
     out->seed_state_before = wallet_sqlite_sapling_seed_state(&st->ws, NULL);
+    if (out->seed_state_before == WALLET_SEED_UNREADABLE)
+        return ZCL_ERR(-63, "cannot read the existing wallet seed");
     out->seed_present_before =
         wallet_seed_state_row_present(out->seed_state_before);
-    wrc_count_shielded_rows(&st->ndb, out);
     return ZCL_OK;
 }
 
@@ -1319,8 +1351,10 @@ struct zcl_result wrc_inspect_and_open_target(
 
     if (st->have_db) {
         struct zcl_result fr = wrc_read_existing_wallet_facts(out, st);
-        if (!fr.ok)
+        if (!fr.ok) {
+            wrc_run_release(st);
             return fr;
+        }
     }
 
     if (st->have_db) {
