@@ -14808,7 +14808,7 @@ $(DEP_AUDIT_BIN): $(DEP_AUDIT_SRCS) $(SPAWN_BINARY_HEADERS) platform/modules/pla
 	$(or $(HOST_CC),cc) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(if $(filter Darwin,$(ZCL_BUILD_OS)),-D_DARWIN_C_SOURCE,) \
 	    $(DEP_AUDIT_INCLUDES) \
-	    -o $@ $(DEP_AUDIT_SRCS) -lpthread
+	    -o $@ $(DEP_AUDIT_SRCS) $(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread)
 
 # mutation-campaign measures whether a test group would NOTICE if the code it
 # covers were wrong: it enumerates one-token defects in a source file,
