@@ -1444,6 +1444,18 @@ static bool padded_build_chain(struct main_state *ms, const char *dir,
         struct block b;
         build_test_block(&b, 80000u + (uint32_t)i);
         b.header.hashPrevBlock = prev;
+        if (i == 1) {
+            unsigned char script[2048];
+            memset(script, 0x51, sizeof(script));
+            script_set(&b.vtx[0].vout[0].script_pub_key, script, sizeof(script));
+        }
+        struct byte_stream encoded;
+        stream_init(&encoded, 4096);
+        bool size_ok = block_serialize(&b, &encoded);
+        size_t cap = 4 + 32 + 32 + 32 + 4 + 4 + 32 + 9 + MAX_SOLUTION_SIZE;
+        size_ok = size_ok && (i == 1 ? encoded.size > cap : encoded.size <= cap);
+        stream_free(&encoded);
+        if (!size_ok) { block_free(&b); return false; }
         block_get_hash(&b, &hashes[i]);
         struct disk_block_pos pos;
         bool ok = padded_write_block(dir, &b, &pos);

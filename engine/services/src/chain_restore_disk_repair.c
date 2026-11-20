@@ -613,7 +613,7 @@ static bool chain_restore_index_block_file(
                 (*blocks)++;
             }
             long next_pos = data_pos + (long)block_size;
-            if (fseek(f, next_pos, SEEK_SET) != 0)
+            if (nread < block_size && fseek(f, next_pos, SEEK_SET) != 0)
                 break;
         }
     return true;
