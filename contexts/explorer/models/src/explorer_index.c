@@ -388,21 +388,19 @@ int64_t db_view_integrity_contiguous_height(struct node_db *ndb)
         return -1;
     }
     int64_t expected = 0;
-    bool gap = false;
     int rc;
     while ((rc = db_view_integrity_step(s)) == ZCL_STEP_ROW) {
         if (sqlite3_column_type(s, 0) != SQLITE_INTEGER) {
             AR_FINALIZE(s);
             return -1;
         }
-        if (AR_COL_INT(s, 0) != expected) {
-            gap = true;
+        if (AR_COL_INT(s, 0) != expected)
             break;
-        }
         expected++;
     }
     AR_FINALIZE(s);
-    if (rc != ZCL_STEP_DONE && !(rc == ZCL_STEP_ROW && gap)) return -1;
+    /* A retained ROW can only be the gap that ended the loop. */
+    if (rc != ZCL_STEP_DONE && rc != ZCL_STEP_ROW) return -1;
     return expected - 1;
 }
 
