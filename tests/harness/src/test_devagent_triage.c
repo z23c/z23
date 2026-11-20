@@ -151,10 +151,29 @@ static bool dvx_commit(const char *dir, const char *message)
     return dvx_git(dir, add) && dvx_git(dir, commit);
 }
 
+/* One commit whose patch main already carries under another hash: main moves
+ * on, then the same change is cherry-picked onto it. Patch-equivalent, but
+ * not hash-equal, so `rev-list base..branch` still counts it. */
+static bool dvx_landed(const char *dir)
+{
+    const char *co_landed[] = {"checkout", "-q", "-b", "landed", NULL};
+    const char *co_main[] = {"checkout", "-q", "main", NULL};
+    const char *pick[] = {"-c", "user.name=Z23 Test",
+                          "-c", "user.email=z23-test@example.invalid",
+                          "-c", "commit.gpgsign=false",
+                          "cherry-pick", "landed", NULL};
+    return dvx_git(dir, co_landed) &&
+           dvx_write(dir, "landed.c", "int l(void){return 2;}\n") &&
+           dvx_commit(dir, "landed work") && dvx_git(dir, co_main) &&
+           dvx_write(dir, "moved.c", "int m(void){return 3;}\n") &&
+           dvx_commit(dir, "main moves on") && dvx_git(dir, pick);
+}
+
 /* One repository holding exactly the three shapes the bins exist for:
  *   merged   — branched off main and never moved (nothing ahead)
  *   ahead    — one clean new file, so it merges into main untouched
- *   conflict — edits the same line main then edited differently */
+ *   conflict — edits the same line main then edited differently
+ *   landed   — its patch is already on main under another hash (see dvx_landed) */
 static bool dvx_fixture(const char *dir)
 {
     const char *init[] = {"-c", "init.defaultBranch=main", "init", "-q", NULL};
@@ -172,7 +191,33 @@ static bool dvx_fixture(const char *dir)
            dvx_write(dir, "a.c", "int a(void){return 111;}\n") &&
            dvx_commit(dir, "conflict side") && dvx_git(dir, co_main) &&
            dvx_write(dir, "a.c", "int a(void){return 222;}\n") &&
-           dvx_commit(dir, "main side");
+           dvx_commit(dir, "main side") && dvx_landed(dir);
+}
+
+/* The row object for one branch, or NULL when the branch is absent. */
+static const struct json_value *dvx_row_of(const struct dvx_call *c,
+                                           const char *branch)
+{
+    const struct json_value *branches = dvx_arr(c, "branches");
+    if (!branches)
+        return NULL;
+    for (size_t i = 0; i < branches->num_children; i++) {
+        const struct json_value *name =
+            json_get(&branches->children[i], "branch");
+        if (name && name->type == JSON_STR && json_get_str(name) &&
+            strcmp(json_get_str(name), branch) == 0)
+            return &branches->children[i];
+    }
+    return NULL;
+}
+
+/* One integer field of one branch's row, or -1 when either is absent. */
+static long long dvx_row_int(const struct dvx_call *c, const char *branch,
+                             const char *key)
+{
+    const struct json_value *row = dvx_row_of(c, branch);
+    const struct json_value *v = row ? json_get(row, key) : NULL;
+    return v && v->type == JSON_INT ? json_get_int(v) : -1;
 }
 
 /* Each row carries the numbers its bin was decided from, and the branch that
@@ -188,12 +233,14 @@ static int dvx_check_rows(const struct json_value *branches)
             json_get(row, "last_commit_age_days");
         const struct json_value *clean = json_get(row, "merge_clean");
         const struct json_value *head = json_get(row, "head");
+        const struct json_value *unlanded = json_get(row, "unlanded");
         ASSERT(ahead && ahead->type == JSON_INT);
         ASSERT(behind && behind->type == JSON_INT);
         ASSERT(age && age->type == JSON_INT && json_get_int(age) >= 0);
         ASSERT(clean && clean->type == JSON_BOOL);
         ASSERT(head && head->type == JSON_STR &&
                strlen(json_get_str(head)) >= 4);
+        ASSERT(unlanded && unlanded->type == JSON_INT);
     }
     /* And the one branch that cannot merge says so. */
     for (size_t i = 0; i < branches->num_children; i++) {
@@ -258,15 +305,33 @@ int test_devagent_triage(void)
         ASSERT(dvx_ok(&c));
         const struct json_value *branches = dvx_arr(&c, "branches");
         ASSERT(branches != NULL);
-        ASSERT_EQ((long long)branches->num_children, 3);
+        ASSERT_EQ((long long)branches->num_children, 4);
         ASSERT_STR_EQ(dvx_bin_of(&c, "main"), "");
         ASSERT_EQ(dvx_sub_int(&c, "counts", "land"), 1);
         ASSERT_EQ(dvx_sub_int(&c, "counts", "rebase"), 1);
-        ASSERT_EQ(dvx_sub_int(&c, "counts", "delete"), 1);
+        ASSERT_EQ(dvx_sub_int(&c, "counts", "delete"), 2);
         const struct json_value *truncated =
             json_get(&c.reply.data, "truncated");
         ASSERT(truncated && truncated->type == JSON_BOOL);
         ASSERT(!json_get_bool(truncated));
+        dvx_end(&c);
+        PASS();
+    }
+
+    TEST("triage: a commit already on main under another hash is delete") {
+        struct dvx_call c;
+        dvx_begin(&c);
+        (void)json_push_kv_str(&c.input, "cwd", root);
+        (void)json_push_kv_str(&c.input, "base", "main");
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        /* One commit, patch-equivalent to main but not hash-equal to it. */
+        ASSERT_EQ(dvx_row_int(&c, "landed", "ahead"), 1);
+        ASSERT_EQ(dvx_row_int(&c, "landed", "unlanded"), 0);
+        ASSERT_STR_EQ(dvx_bin_of(&c, "landed"), "delete");
+        /* Genuinely new work is still counted as unlanded. */
+        ASSERT_EQ(dvx_row_int(&c, "ahead", "unlanded"), 1);
+        ASSERT_STR_EQ(dvx_bin_of(&c, "ahead"), "land");
         dvx_end(&c);
         PASS();
     }

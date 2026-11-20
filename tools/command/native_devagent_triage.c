@@ -23,6 +23,11 @@
  *   branch                the short name
  *   head                  short SHA, as `git rev-parse --short` prints it
  *   ahead                 commits in base..branch
+ *   unlanded              commits in base..branch with no patch-equivalent
+ *                         commit in base: the lines of `git cherry <base>
+ *                         <branch>` that begin with '+'. -1 (unknown) when
+ *                         that output filled its buffer and cannot be read
+ *                         in full.
  *   behind                commits in branch..base
  *   last_commit_age_days  whole days between the branch head's commit time
  *                         and now
@@ -31,10 +36,13 @@
  *   bin                   see RULE
  *
  * RULE, in this order:
- *   "delete"  when ahead == 0, OR when last_commit_age_days > max_age_days
- *             AND behind > 500;
+ *   "delete"  when ahead == 0, OR unlanded == 0 (every commit already has a
+ *             patch-equivalent commit on base), OR when last_commit_age_days >
+ *             max_age_days AND behind > 500;
  *   else "land"   when merge_clean;
  *   else "rebase".
+ * An unknown unlanded (-1) never matches "unlanded == 0", so that branch is
+ * binned by the rest of RULE alone.
  *
  * OUTPUT (zcl.agent_triage.v1) on ok=true
  *   leaf       "dev.agent.triage"
@@ -201,17 +209,34 @@ static void dvg_read_int_option(const struct json_value *input,
         *out = json_get_int(v);
 }
 
-/* Run the five per-branch probes in order — head SHA, ahead, behind, commit
- * time, merge-tree — filling head/ahead/behind/age_days/merge_clean. Returns
- * the first non-zero git exit status, with `line` naming that argv, or 0
- * when every probe ran; a non-zero merge-tree is the merge_clean=false
- * answer, never a failure. The caller logs and owns the failure path. */
+/* Count the `git cherry` lines that begin with '+': commits with no
+ * patch-equivalent commit on base. zcl_spawn_capture cuts output at cap - 1
+ * bytes without saying so, so a buffer filled to that limit may hide lines;
+ * that answer is unknown (-1), never a count. */
+static long long dvg_count_unlanded(const char *text, size_t cap)
+{
+    long long n = 0;
+    if (strlen(text) + 1 >= cap)
+        return -1;
+    for (const char *p = text; *p; p++) {
+        if (*p == '+' && (p == text || p[-1] == '\n'))
+            n++;
+    }
+    return n;
+}
+
+/* Run the six per-branch probes in order — head SHA, ahead, unlanded, behind,
+ * commit time, merge-tree — filling head/ahead/unlanded/behind/age_days/
+ * merge_clean. Returns the first non-zero git exit status, with `line` naming
+ * that argv, or 0 when every probe ran; a non-zero merge-tree is the
+ * merge_clean=false answer, never a failure. The caller logs and owns the
+ * failure path. */
 static int dvg_measure_branch(const char *cwd, const char *base,
                               const char *branch, time_t now, char *head,
                               size_t headcap, char *out, size_t outcap,
                               char *line, size_t linecap, long long *ahead,
-                              long long *behind, long long *age_days,
-                              bool *merge_clean)
+                              long long *unlanded, long long *behind,
+                              long long *age_days, bool *merge_clean)
 {
     char range_ahead[300], range_behind[300];
     int rc;
@@ -233,6 +258,14 @@ static int dvg_measure_branch(const char *cwd, const char *base,
             return rc;
         dvg_strip(out);
         *ahead = dvg_parse_ll(out);
+    }
+
+    {
+        const char *argv_cherry[] = {"cherry", base, branch, NULL};
+        rc = dvg_git(cwd, argv_cherry, out, outcap, line, linecap);
+        if (rc != 0)
+            return rc;
+        *unlanded = dvg_count_unlanded(out, outcap);
     }
 
     (void)snprintf(range_behind, sizeof(range_behind), "%s..%s", branch,
@@ -272,13 +305,15 @@ static int dvg_measure_branch(const char *cwd, const char *base,
 
 /* Apply RULE, in this order, bump the matching reported-branch counter and
  * return the bin name. */
-static const char *dvg_bin_branch(long long ahead, long long max_age_days,
-                                  long long age_days, long long behind,
-                                  bool merge_clean, long long *land,
-                                  long long *rebase, long long *del)
+static const char *dvg_bin_branch(long long ahead, long long unlanded,
+                                  long long max_age_days, long long age_days,
+                                  long long behind, bool merge_clean,
+                                  long long *land, long long *rebase,
+                                  long long *del)
 {
     const char *bin;
-    if (ahead == 0 || (age_days > max_age_days && behind > 500))
+    if (ahead == 0 || unlanded == 0 ||
+        (age_days > max_age_days && behind > 500))
         bin = "delete";
     else if (merge_clean)
         bin = "land";
@@ -346,13 +381,13 @@ void zcl_native_handle_dev_agent_triage(
     for (size_t i = 0; i < names.count && (long long)i < limit; i++) {
         const char *branch = names.names[i];
         char head[128];
-        long long ahead = 0, behind = 0, age_days = 0;
+        long long ahead = 0, unlanded = 0, behind = 0, age_days = 0;
         bool merge_clean;
         const char *bin;
 
         rc = dvg_measure_branch(cwd, base, branch, now, head, sizeof(head),
                                 out, sizeof(out), line, sizeof(line), &ahead,
-                                &behind, &age_days, &merge_clean);
+                                &unlanded, &behind, &age_days, &merge_clean);
         if (rc != 0) {
             dvg_git_failed(reply, line, rc);
             json_free(&row);
@@ -360,7 +395,7 @@ void zcl_native_handle_dev_agent_triage(
             return;
         }
 
-        bin = dvg_bin_branch(ahead, max_age_days, age_days, behind,
+        bin = dvg_bin_branch(ahead, unlanded, max_age_days, age_days, behind,
                              merge_clean, &land, &rebase, &del);
 
         json_set_object(&row);
@@ -368,6 +403,7 @@ void zcl_native_handle_dev_agent_triage(
         (void)json_push_kv_str(&row, "head", head);
         (void)json_push_kv_int(&row, "ahead", ahead);
         (void)json_push_kv_int(&row, "behind", behind);
+        (void)json_push_kv_int(&row, "unlanded", unlanded);
         (void)json_push_kv_int(&row, "last_commit_age_days", age_days);
         (void)json_push_kv_bool(&row, "merge_clean", merge_clean);
         (void)json_push_kv_str(&row, "bin", bin);

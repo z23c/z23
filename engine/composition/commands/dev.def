@@ -2042,7 +2042,8 @@ ZCL_COMMAND_READY_READ(
     "One bin per local branch except main, decided from Git alone: commits "
     "ahead and behind the base, the age of the last commit, and whether "
     "merge-tree can merge it into the base without conflict. A branch with "
-    "nothing ahead, or an old branch far behind, is delete; a cleanly "
+    "nothing ahead, or with every commit already on base under another hash, "
+    "or an old branch far behind, is delete; a cleanly "
     "merging branch is land; everything else is rebase. It merges nothing, "
     "deletes nothing, and writes no ref.", 65536,
     "agent,triage,branches,merge,stale,land",
