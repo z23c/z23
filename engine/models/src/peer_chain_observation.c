@@ -126,11 +126,12 @@ bool db_peer_chain_observation_prune(struct node_db *ndb, int keep_rows)
     qb_select(&keep, QB_T_peer_chain_observations);
     qb_select_column(&keep, QB_C_peer_chain_observations_id);
     qb_order_by(&keep, QB_C_peer_chain_observations_id, QB_DESC);
-    qb_limit(&keep, keep_rows);
+    qb_limit(&keep, 1);
+    qb_offset(&keep, keep_rows);
 
     struct qb q;
     qb_delete(&q, QB_T_peer_chain_observations);
-    qb_where_in_select(&q, QB_C_peer_chain_observations_id, true, &keep);
+    qb_where_scalar_select(&q, QB_C_peer_chain_observations_id, QB_LE, &keep);
     sqlite3_stmt *s = NULL;
     if (!QB_PREPARE(ndb, &q, s))
         return false; // raw-return-ok:query-builder-logs-prepare-failure

@@ -118,6 +118,32 @@ static int test_observation_model(void)
     return failures;
 }
 
+static int test_prune_sparse_boundaries(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    NM_CHECK(node_db_open(&db, ":memory:"));
+    if (!db.open) return failures + 1;
+    const char *insert = "INSERT INTO peer_chain_observations "
+        "(id,peer_id,addr,user_agent,observed_at) VALUES "
+        "(-20,1,'a','x',1),(0,2,'a','x',1),"
+        "(13,3,'a','x',1),(9223372036854775807,4,'a','x',1)";
+    NM_CHECK(sqlite3_exec(db.db, insert, NULL, NULL, NULL) == SQLITE_OK);
+    NM_CHECK(db_peer_chain_observation_prune(&db, 10));
+    NM_CHECK(db_peer_chain_observation_count(&db) == 4);
+    NM_CHECK(db_peer_chain_observation_prune(&db, 2));
+    struct db_peer_chain_observation out[4];
+    int count = db_peer_chain_observation_recent(&db, out, 4);
+    NM_CHECK(count == 2 && out[0].peer_id == 4 && out[1].peer_id == 3);
+    NM_CHECK(db_peer_chain_observation_prune(&db, 0));
+    NM_CHECK(db_peer_chain_observation_count(&db) == 0);
+    NM_CHECK(sqlite3_exec(db.db, insert, NULL, NULL, NULL) == SQLITE_OK);
+    NM_CHECK(db_peer_chain_observation_prune(&db, -1));
+    NM_CHECK(db_peer_chain_observation_count(&db) == 0);
+    node_db_close(&db);
+    return failures;
+}
+
 static bool fixture_is_wal(sqlite3 *db)
 {
     sqlite3_stmt *s = NULL;
@@ -127,6 +153,12 @@ static bool fixture_is_wal(sqlite3 *db)
                strcmp((const char *)sqlite3_column_text(s, 0), "wal") == 0;
     sqlite3_finalize(s);
     return wal;
+}
+
+static int fixture_progress(void *ctx)
+{
+    (*(int *)ctx)++;
+    return 0;
 }
 
 static int test_prune_diagnostic(void)
@@ -146,7 +178,13 @@ static int test_prune_diagnostic(void)
         "(peer_id,addr,user_agent,observed_at) SELECT x,'peer','/test/',1 FROM n", NULL, NULL, NULL);
     NM_CHECK(rc == SQLITE_OK);
     NM_CHECK(db_peer_chain_observation_count(&db) == 10005);
-    NM_CHECK(db_peer_chain_observation_prune(&db, 10000));
+    int progress = 0;
+    sqlite3_progress_handler(db.db, 1000, fixture_progress, &progress);
+    bool pruned = db_peer_chain_observation_prune(&db, 10000);
+    sqlite3_progress_handler(db.db, 0, NULL, NULL);
+    printf("prune VM progress callbacks=%d (1000 steps each)\n", progress);
+    NM_CHECK(pruned);
+    NM_CHECK(progress < 60);
     NM_CHECK(db_peer_chain_observation_count(&db) == 10000);
     NM_CHECK(sqlite3_exec(db.db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK);
     FILE *log = tmpfile();
@@ -477,6 +515,7 @@ int test_network_monitor(void)
     printf("\n=== network_monitor tests ===\n");
     int failures = 0;
     failures += test_observation_model();
+    failures += test_prune_sparse_boundaries();
     failures += test_prune_diagnostic();
     failures += test_consensus_view();
     failures += test_tip_regression_condition();

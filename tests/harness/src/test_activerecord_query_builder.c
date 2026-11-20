@@ -379,6 +379,31 @@ int test_activerecord_query_builder(void)
         PASS();
     }
 
+    TEST("qb: scalar subquery uses closed operator and preserves binds") {
+        struct qb sub, q;
+        qb_select(&sub, QB_T_parity_samples);
+        qb_select_column(&sub, QB_C_parity_samples_id);
+        qb_order_by(&sub, QB_C_parity_samples_id, QB_DESC);
+        qb_limit(&sub, 1);
+        qb_offset(&sub, 50);
+        qb_delete(&q, QB_T_parity_samples);
+        qb_where_int(&q, QB_C_parity_samples_ts, QB_LT, 99);
+        qb_where_scalar_select(&q, QB_C_parity_samples_id, QB_LE, &sub);
+        ASSERT_STR_EQ(qb_sql(&q), "DELETE FROM parity_samples WHERE ts<? AND id<= "
+            "(SELECT id FROM parity_samples ORDER BY id DESC LIMIT ? OFFSET ?)");
+        ASSERT_EQ(qb_bind_count(&q), 3);
+        ASSERT(q.binds[0].kind == QB_BIND_INT && q.binds[0].i == 99);
+        ASSERT(q.binds[1].kind == QB_BIND_INT && q.binds[1].i == 1);
+        ASSERT(q.binds[2].kind == QB_BIND_INT && q.binds[2].i == 50);
+        qb_delete(&q, QB_T_parity_samples);
+        qb_where_scalar_select(&q, QB_C_parity_samples_id, (enum qb_op)999, &sub);
+        ASSERT(!qb_ok(&q));
+        qb_delete(&q, QB_T_parity_samples);
+        qb_where_scalar_select(&q, QB_C_parity_samples_id, QB_LE, NULL);
+        ASSERT(!qb_ok(&q));
+        PASS();
+    }
+
     /* ── 2. Value smuggling ─────────────────────────────────────────── */
 
     TEST("qb ATTACK: an injection payload never reaches SQL text (WHERE)") {

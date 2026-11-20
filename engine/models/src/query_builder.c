@@ -871,25 +871,23 @@ void qb_where_in_text(struct qb *q, enum qb_column c,
     qb_puts(q, ")");
 }
 
-void qb_where_in_select(struct qb *q, enum qb_column c, bool negated,
-                        struct qb *sub)
+static bool qb_select_ready(struct qb *q, struct qb *sub)
 {
     if (!sub) {
-        qb_fail(q, "IN (subselect) needs a built subquery");
-        return;
+        qb_fail(q, "subquery needs a built subquery");
+        return false;
     }
-    /* Settle the subquery first: a still-open projection has no FROM yet.
-     * A subquery that failed for any reason poisons the parent — there is
-     * no partial splice. */
     (void)qb_sql(sub);
     if (sub->failed || sub->verb != QB_VERB_SELECT || sub->len == 0) {
-        qb_fail(q, "IN (subselect): subquery is not a completed SELECT (%s)",
+        qb_fail(q, "expected a completed SELECT subquery (%s)",
                 sub->failed ? sub->error : "not settled");
-        return;
+        return false;
     }
-    if (!qb_where_lead(q) || !qb_ident(q, c))
-        return;
-    qb_puts(q, negated ? " NOT IN (" : " IN (");
+    return true;
+}
+
+static void qb_splice_select(struct qb *q, struct qb *sub)
+{
     qb_puts(q, sub->sql);
     qb_puts(q, ")");
     for (int i = 0; i < sub->nbinds; i++) {
@@ -899,6 +897,23 @@ void qb_where_in_select(struct qb *q, enum qb_column c, bool negated,
         }
         q->binds[q->nbinds++] = sub->binds[i];
     }
+}
+
+void qb_where_in_select(struct qb *q, enum qb_column c, bool negated,
+                        struct qb *sub)
+{
+    if (!qb_select_ready(q, sub) || !qb_where_lead(q) || !qb_ident(q, c))
+        return;
+    qb_puts(q, negated ? " NOT IN (" : " IN (");
+    qb_splice_select(q, sub);
+}
+
+void qb_where_scalar_select(struct qb *q, enum qb_column c, enum qb_op op,
+                            struct qb *sub)
+{
+    if (!qb_select_ready(q, sub) || !qb_where_col_op(q, c, op)) return;
+    qb_puts(q, " (");
+    qb_splice_select(q, sub);
 }
 
 void qb_group_begin(struct qb *q, enum qb_conj conj)

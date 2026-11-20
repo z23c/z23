@@ -276,6 +276,9 @@ void qb_where_in_text(struct qb *q, enum qb_column c,
  * subject to exactly the same no-concatenation rule as its parent. */
 void qb_where_in_select(struct qb *q, enum qb_column c, bool negated,
                         struct qb *sub);
+/* c op (SELECT ...); SQLite treats no result as NULL. */
+void qb_where_scalar_select(struct qb *q, enum qb_column c, enum qb_op op,
+                            struct qb *sub);
 
 /* One level of OR/AND grouping: qb_group_begin(q, QB_OR); ...; qb_group_end(q)
  * emits "(a OR b OR c)" as one AND-term of the enclosing WHERE. */
