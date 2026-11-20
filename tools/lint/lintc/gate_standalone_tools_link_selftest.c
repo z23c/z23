@@ -9,6 +9,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <stdio.h>
+#include "base/safe_alloc.h"
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -391,16 +392,17 @@ static int stl_st_nested(void)
 static void stl_st_key_with_fake(const char *dir, const char *tool, const char *oldpath,
                                  char *key, size_t cap)
 {
-    char bin[STL_PATH], f[STL_PATH], np[STL_PATH * 2];
+    char bin[STL_PATH], f[STL_PATH];
     key[0] = '\0';
     if (ovf(snprintf(bin, sizeof bin, "%s/fake-%s", dir, tool), sizeof bin) ||
         ovf(snprintf(f, sizeof f, "%s/%s", bin, tool), sizeof f) ||
-        ovf(snprintf(np, sizeof np, "%s:%s", bin, oldpath), sizeof np) ||
         csr_write(f, "#!/bin/sh\necho fake-tool-version\n") != 0 || chmod(f, 0755) != 0)
         return;
-    setenv("PATH", np, 1);
+    if (stl_prepend_tool_path(bin) != 0)
+        return;
     stl_x11_key_in(dir, key, cap);
-    setenv("PATH", oldpath, 1);
+    if (setenv("PATH", oldpath, 1) != 0)
+        key[0] = '\0';
 }
 
 static int stl_st_stamp_bytes(const char *path, const char *key, const char *bytes,
@@ -443,18 +445,22 @@ static int stl_st_stamp_contents(const char *dir)
 static int stl_st_stamp(const char *dir)
 {
     char k0[128], k1[128], k2[128], k3[128], sh[STL_PATH], local[STL_PATH], xdg[STL_PATH];
-    char oldpath[STL_PATH * 2] = "", oldxdg[STL_PATH] = "";
+    char oldxdg[STL_PATH] = "";
     const char *p = getenv("PATH"), *x = getenv("XDG_CACHE_HOME");
     int had_xdg = x != NULL, bad = 0;
-    if (!p || ovf(snprintf(oldpath, sizeof oldpath, "%s", p), sizeof oldpath) ||
+    if (!p ||
         (x && ovf(snprintf(oldxdg, sizeof oldxdg, "%s", x), sizeof oldxdg)) ||
         ovf(snprintf(xdg, sizeof xdg, "%s/xdg", dir), sizeof xdg) ||
         ovf(snprintf(local, sizeof local, "%s/absent.stamp", dir), sizeof local))
         return stl_st_expect("stamp env", 1, 0);
+    char *oldpath = zcl_strdup(p, "standalone tools selftest PATH");
+    if (!oldpath)
+        return stl_st_expect("save PATH", 1, 0);
     stl_x11_key_in(dir, k0, sizeof k0);
     stl_x11_key_in(dir, k3, sizeof k3);
     stl_st_key_with_fake(dir, "make", oldpath, k1, sizeof k1);
     stl_st_key_with_fake(dir, "bash", oldpath, k2, sizeof k2);
+    free(oldpath);
     bad |= stl_st_expect("stamp key available", strlen(k0) == 64, 1);
     bad |= stl_st_expect("stamp key stable", strcmp(k0, k3) == 0, 1);
     bad |= stl_st_expect("stamp key follows make", strlen(k1) == 64 && strcmp(k0, k1) != 0, 1);

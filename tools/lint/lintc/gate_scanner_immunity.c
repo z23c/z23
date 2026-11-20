@@ -25,15 +25,10 @@
 #include <unistd.h>
 #include "lintc.h"
 
-enum { SI_PATH = 1024, SI_TEXT = 4096, SI_OUT = 16384, SI_MSG = 640,
-       SI_ENVN = 256, SI_ENVL = 2048 };
+enum { SI_PATH = 1024, SI_TEXT = 4096, SI_OUT = 16384, SI_MSG = 640 };
 
 static const char k_si_gate_bin[] = "build/bin/z23-lint";
 static const char k_si_tag[] = "selftest_scanner_immunity";
-
-extern char **environ;
-
-struct si_env { const char *name; const char *val; };
 
 static char si_scan_root[SI_PATH];
 static char si_out[SI_OUT];
@@ -76,64 +71,6 @@ static const char k_si_stray_text[] =
     " * untracked, not from its content. */\n"
     "static void scanner_immunity_stray_probe(void) {}\n";
 
-static int si_env_is(const char *entry, const char *name)
-{
-    size_t n = strlen(name);
-    return strncmp(entry, name, n) == 0 && entry[n] == '=';
-}
-
-static int si_env_put(char *dst, const char *name, const char *val)
-{
-    return ovf(snprintf(dst, SI_ENVL, "%s=%s", name, val), (size_t)SI_ENVL)
-               ? -1
-               : 0;
-}
-
-/* Builds a full envp (static storage, no heap) from environ with the mod
- * entries applied: val != NULL sets/replaces, val == NULL unsets. Returns
- * the entry count, or -1 on overflow. nmod must be <= 16. */
-static int si_env_build(char (*buf)[SI_ENVL], char **ptr, int max,
-                        const struct si_env *mod, int nmod)
-{
-    unsigned char used[2] = { 0, 0 };
-    int n = 0;
-    for (char **e = environ; *e; e++) {
-        int hit = -1;
-        for (int j = 0; j < nmod; j++)
-            if (si_env_is(*e, mod[j].name)) {
-                hit = j;
-                break;
-            }
-        if (hit >= 0) {
-            if (!mod[hit].val)
-                continue;
-            used[hit / 8] |= (unsigned char)(1u << (hit % 8));
-            if (si_env_put(buf[n], mod[hit].name, mod[hit].val))
-                return -1;
-        } else {
-            size_t l = strlen(*e);
-            if (l >= (size_t)SI_ENVL)
-                return -1;
-            memcpy(buf[n], *e, l + 1);
-        }
-        ptr[n] = buf[n];
-        n++;
-        if (n >= max)
-            return -1;
-    }
-    for (int j = 0; j < nmod; j++) {
-        if (!mod[j].val || (used[j / 8] & (unsigned char)(1u << (j % 8))))
-            continue;
-        if (si_env_put(buf[n], mod[j].name, mod[j].val))
-            return -1;
-        ptr[n] = buf[n];
-        n++;
-        if (n >= max)
-            return -1;
-    }
-    ptr[n] = NULL;
-    return n;
-}
 
 /* waitpid retried on EINTR only; any other failure is an error, never a
  * clean status. */
@@ -151,15 +88,9 @@ static int si_wait(pid_t pid, int *st)
  * and stderr of the child into out. *code receives the child's exit status
  * (128 if killed by a signal). Returns 0 ran, 2 internal error. */
 static int si_spawn(const char *path, char *const argv[],
-                    const struct si_env *mod, int nmod, char *out, size_t cap,
+                    const char *prod, const char *scanvar, char *out, size_t cap,
                     int *code)
 {
-    static char env_buf[SI_ENVN][SI_ENVL];
-    static char *env_ptr[SI_ENVN + 1];
-    if (si_env_build(env_buf, env_ptr, SI_ENVN, mod, nmod) < 0) {
-        fprintf(stderr, "%s: env array exceeds %d\n", k_si_tag, SI_ENVN);
-        return 2;
-    }
     FILE *tf = tmpfile();
     if (!tf)
         return die("z23-lint: tmpfile failed\n", "");
@@ -171,7 +102,11 @@ static int si_spawn(const char *path, char *const argv[],
     if (pid == 0) {
         if (dup2(fileno(tf), 1) < 0 || dup2(fileno(tf), 2) < 0)
             _exit(126);
-        execve(path, argv, env_ptr);
+        int rc = prod ? setenv("ZCL_LINT_PRODUCTION_SCAN", prod, 1)
+                      : unsetenv("ZCL_LINT_PRODUCTION_SCAN");
+        if (rc != 0 || setenv(scanvar, si_scan_root, 1) != 0)
+            _exit(126);
+        execv(path, argv);
         _exit(127);
     }
     int st = 0;
@@ -187,6 +122,8 @@ static int si_spawn(const char *path, char *const argv[],
     out[r] = '\0';
     fclose(tf);
     *code = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+    if (*code >= 126)
+        return die("z23-lint: scanner child setup or execution failed: %s\n", path);
     return 0;
 }
 
@@ -195,13 +132,8 @@ static int si_spawn(const char *path, char *const argv[],
 static int si_run_scan(const char *prod, const char *scanvar, const char *gate,
                        int *grc)
 {
-    struct si_env mod[2];
-    mod[0].name = "ZCL_LINT_PRODUCTION_SCAN";
-    mod[0].val = prod;
-    mod[1].name = scanvar;
-    mod[1].val = si_scan_root;
     char *argv[3] = { (char *)"z23-lint", (char *)gate, NULL };
-    return si_spawn(k_si_gate_bin, argv, mod, 2, si_out, SI_OUT, grc);
+    return si_spawn(k_si_gate_bin, argv, prod, scanvar, si_out, SI_OUT, grc);
 }
 
 static int si_run_prod(const char *gate, int *grc)

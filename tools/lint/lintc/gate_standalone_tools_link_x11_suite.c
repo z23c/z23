@@ -72,23 +72,22 @@ static void x11_child_mf(struct stl_x11_ctx *c, const struct stl_x11_run *r)
     }
 }
 
-static int x11_prepend_path(const struct stl_x11_ctx *c)
+int stl_prepend_tool_path(const char *directory)
 {
-    static const char suffix[] = "/bin:";
     const char *inherited = getenv("PATH");
     if (!inherited)
         inherited = "";
-    size_t directory_len = strlen(c->tmp);
+    size_t directory_len = strlen(directory);
     size_t inherited_len = strlen(inherited);
-    if (inherited_len > SIZE_MAX - directory_len - sizeof(suffix))
+    if (inherited_len > SIZE_MAX - directory_len - 2)
         return -1;
-    size_t size = directory_len + sizeof(suffix) + inherited_len;
+    size_t size = directory_len + 2 + inherited_len;
     char *path = zcl_malloc(size, "X11 fixture child PATH");
     if (!path)
         return -1;
-    memcpy(path, c->tmp, directory_len);
-    memcpy(path + directory_len, suffix, sizeof(suffix) - 1);
-    memcpy(path + directory_len + sizeof(suffix) - 1, inherited, inherited_len + 1);
+    memcpy(path, directory, directory_len);
+    path[directory_len] = ':';
+    memcpy(path + directory_len + 1, inherited, inherited_len + 1);
     int rc = setenv("PATH", path, 1);
     free(path);
     return rc;
@@ -114,8 +113,12 @@ static void x11_child(struct stl_x11_ctx *c, const struct stl_x11_run *r)
         unsetenv("DISPLAY");
     if (r->inherited_path && setenv("PATH", r->inherited_path, 1) != 0)
         _exit(127);
-    if (r->fake_path && x11_prepend_path(c) != 0)
-        _exit(127);
+    if (r->fake_path) {
+        char bin[sizeof(c->tmp) + sizeof("/bin")];
+        if (ovf(snprintf(bin, sizeof bin, "%s/bin", c->tmp), sizeof bin) ||
+            stl_prepend_tool_path(bin) != 0)
+            _exit(127);
+    }
     if (ovf(snprintf(fl, sizeof fl, "%s/lib", c->tmp), sizeof fl))
         _exit(127);
     setenv("REAL_CC", c->realcc, 1);

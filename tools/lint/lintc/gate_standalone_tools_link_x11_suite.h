@@ -34,5 +34,6 @@ static const char k_stl_x11_nested[] = "Z23_X11_SELFTEST_NESTED";
 int stl_x11_fixture(struct stl_x11_ctx *c);
 int stl_x11_make_from(struct stl_x11_ctx *c, enum stl_x11_mk kind);
 int stl_x11_selftest_run(void);
+int stl_prepend_tool_path(const char *directory);
 
 #endif

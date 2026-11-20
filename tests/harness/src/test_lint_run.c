@@ -945,9 +945,50 @@ static int test_lrun_build_jobs(void)
     return failures;
 }
 
+static int lrun_long_path_selftest(const char *gate)
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        const char *path = getenv("PATH");
+        if (!path) _exit(125);
+        static const char entry[] = ":/__z23_missing_tool_dir__";
+        size_t original = strlen(path), padding = 96 * (sizeof(entry) - 1);
+        if (original > SIZE_MAX - padding - 1) _exit(125);
+        char *long_path = malloc(original + padding + 1);
+        if (!long_path) _exit(125);
+        memcpy(long_path, path, original);
+        for (size_t i = 0; i < padding; i += sizeof(entry) - 1)
+            memcpy(long_path + original + i, entry, sizeof(entry) - 1);
+        long_path[original + padding] = '\0';
+        if (setenv("PATH", long_path, 1)) _exit(125);
+        free(long_path);
+        const char *lint = "build/bin/z23-lint";
+        execl(lint, lint, gate, "--selftest", (char *)NULL);
+        _exit(127);
+    }
+    int status;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    return waited == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int test_lrun_inherited_path(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: scanner and fake-tool stamps accept a long inherited PATH") {
+        int scanner = lrun_long_path_selftest("check-scanner-immunity");
+        int stamp = lrun_long_path_selftest("check-standalone-tools-link");
+        ASSERT_EQ(scanner, 0);
+        ASSERT_EQ(stamp, 0);
+    } TEST_END
+    return failures;
+}
+
 int test_lint_run(void)
 {
     int failures = 0;
+    failures += test_lrun_inherited_path();
     failures += test_lrun_fast_names();
     failures += test_lrun_build_jobs();
     failures += test_lrun_seal();
