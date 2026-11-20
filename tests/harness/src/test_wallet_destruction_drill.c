@@ -65,6 +65,8 @@
 #include "sim/simnet_sapling.h"
 
 #include "controllers/wallet_controller.h"
+#include "controllers/wallet_native_handlers.h"
+#include "config/command_catalog.h"
 #include "../../../contexts/wallet/services/src/wallet_recovery_coverage.h"
 #include "controllers/wallet_helpers.h"
 
@@ -2093,8 +2095,38 @@ static int coverage_shielded_fixture(void)
 }
 
 
+static int coverage_public_status(const char *dir, bool mixed)
+{
+    int failures = 0;
+    struct json_value input = {0};
+    json_set_object(&input);
+    DR_CHECK("public coverage: set datadir", json_push_kv_str(&input, "datadir", dir));
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+    zcl_native_handle_wallet_recovery_status(&request, &reply);
+    const struct json_value *recoverable = json_get(&reply.data, "recoverable_from_phrase");
+    const struct json_value *count = json_get(&reply.data, "keys_before");
+    const char *coverage = json_get_str(json_get(&reply.data, "phrase_coverage"));
+    DR_CHECK("public coverage: key count", count && count->type == JSON_INT &&
+             json_get_int(count) == (mixed ? 101 : 100));
+    DR_CHECK("public coverage: recovery boolean", recoverable && recoverable->type == JSON_BOOL &&
+             json_get_bool(recoverable) == !mixed);
+    DR_CHECK("public coverage: coverage state", coverage &&
+             !strcmp(coverage, mixed ? "incomplete" : "complete"));
+    if (mixed) {
+        const char *guidance = json_get_str(json_get(&reply.data, "what_to_do"));
+        DR_CHECK("public coverage: mixed wallet needs a file backup", guidance &&
+                 strstr(guidance, "backup") && strstr(guidance, "file"));
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
+
 static int coverage_transparent_fixture(struct wallet_sqlite *ws, struct wallet *w,
-                                        struct node_db *ndb)
+                                        struct node_db *ndb, const char *dir)
 {
     int failures = 0;
     for (int mixed = 0; mixed < 2; mixed++) {
@@ -2118,6 +2150,7 @@ static int coverage_transparent_fixture(struct wallet_sqlite *ws, struct wallet 
         memory_cleanse(coverage_seed, sizeof(coverage_seed));
         printf("    synthetic %s coverage=%d\n", mixed ? "mixed" : "control", (int)coverage);
         DR_CHECK("coverage: correct for fixture", coverage == (mixed ? WRC_COVERAGE_INCOMPLETE : WRC_COVERAGE_COMPLETE));
+        failures += coverage_public_status(dir, mixed);
     }
     DR_CHECK("coverage: corrupt transparent pubkey", sqlite3_exec(ndb->db, "UPDATE wallet_keys SET pubkey=zeroblob(length(pubkey)) WHERE rowid=(SELECT min(rowid) FROM wallet_keys)", NULL, NULL, NULL) == SQLITE_OK);
     uint8_t corrupt_seed[32];
@@ -2169,7 +2202,7 @@ static int act4_recovery_phrase(void)
     DR_CHECK("act4: flush the wallet",
              wallet_sqlite_flush_r(&live_ws, live_w).ok);
 
-    failures += coverage_transparent_fixture(&live_ws, live_w, &live_ndb);
+    failures += coverage_transparent_fixture(&live_ws, live_w, &live_ndb, livedir);
 
     /* The address a user would actually be handed and would actually
      * publish. THIS is the string that has to come back. */
