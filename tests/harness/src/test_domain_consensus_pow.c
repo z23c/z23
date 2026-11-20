@@ -154,6 +154,40 @@ static int check_pow_value_points(const struct consensus_params *params)
     return failures;
 }
 
+/* Independent general 256-bit calculation, including malformed compact inputs. */
+static int check_block_proof_general_reference(void)
+{
+    static const uint32_t mantissas[] = {
+        0, 1, 2, 3, 4, 255, 256, 257, 65535, 65536, 65537,
+        0x7ffffe, 0x7fffff, 0x800000, 0x800001, 0xffffff
+    };
+    int failures = 0;
+    bool all_match = true;
+    for (uint32_t e = 0; e <= 255; e++) {
+        for (size_t i = 0; i < sizeof(mantissas) / sizeof(mantissas[0]); i++) {
+            uint32_t bits = (e << 24) | mantissas[i];
+            bool negative = false, overflow = false;
+            struct arith_uint256 target, expected, actual, one, denom, inv;
+            arith_uint256_set_compact(&target, bits, &negative, &overflow);
+            arith_uint256_set_zero(&expected);
+            if (!negative && !overflow && !arith_uint256_is_zero(&target)) {
+                arith_uint256_set_u64(&one, 1);
+                arith_uint256_add(&denom, &target, &one);
+                arith_uint256_complement(&inv, &target);
+                arith_uint256_div(&expected, &inv, &denom);
+                arith_uint256_add(&expected, &expected, &one);
+            }
+            struct zcl_result r = domain_consensus_block_proof(bits, &actual);
+            if (!r.ok || arith_uint256_compare(&actual, &expected) != 0) {
+                printf("\n  MISMATCH general reference bits=0x%08x\n", bits);
+                all_match = false;
+            }
+        }
+    }
+    DCP_CHECK("block_proof matches general 256-bit reference", all_match);
+    return failures;
+}
+
 /* Regression seal for block_proof over sampled nBits values. */
 static int check_block_proof_matches_legacy(void)
 {
@@ -311,6 +345,7 @@ int test_domain_consensus_pow(void)
     /* --- regression seal: domain function must match the legacy
      * wrapper for every sampled input. If anyone "improves" either
      * side, the test shouts. --- */
+    failures += check_block_proof_general_reference();
     failures += check_block_proof_matches_legacy();
     failures += check_increase_difficulty_by_matches_legacy(params);
     failures += check_calculate_next_work_matches_legacy(params);

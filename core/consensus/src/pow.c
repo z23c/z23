@@ -20,6 +20,19 @@ struct zcl_result domain_consensus_block_proof(
         return ZCL_ERR(DOMAIN_CONSENSUS_POW_ERR_NULL_OUT,
                        "block_proof: null out_work for n_bits=0x%08x", n_bits);
 
+    uint32_t exponent = n_bits >> 24;
+    uint32_t mantissa = n_bits & 0x00ffffffU;
+    if (exponent >= 28 && exponent <= 32 &&
+        mantissa > 0 && mantissa <= 0x007fffffU) {
+        /* With target = m * 2^s, floor(2^256/(target+1))
+         * equals floor((2^(256-s)-1)/m): the removed fraction
+         * cannot bridge the next integer, even when m divides 2^(256-s). */
+        unsigned shift = 256 - 8 * (exponent - 3);
+        arith_uint256_set_u64(out_work,
+                ((UINT64_C(1) << shift) - 1) / mantissa);
+        return ZCL_OK;
+    }
+
     bool fNegative = false;
     bool fOverflow = false;
     struct arith_uint256 bnTarget;

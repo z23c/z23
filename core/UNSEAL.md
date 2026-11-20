@@ -1302,3 +1302,7 @@ later lane flips it HARD.
 - 2026-11-20T05:00:25Z — REASON: Owner-authorized reconsiderblock storage-error retry: retain local operator holds until cleared header records are durable. Preserve zclassicd successful reconsideration and all consensus predicates.
   old ROOT: 6a3f7b0ced7e032b5a94d100f5e97300f646bf1eee6880742d906c368455870b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-20T17:46:28Z — REASON: Owner-authorized compact block-work arithmetic optimization preserving consensus parity
+  old ROOT: d0076f25fceedce40b8e8d6bca878d872c0c030b2ec338efefff3dda8d1fd97b
+  by: owner unseal ritual (make core-unseal)
