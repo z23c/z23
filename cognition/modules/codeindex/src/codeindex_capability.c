@@ -1177,6 +1177,7 @@ static bool cap_fill_candidate(struct codeindex *ci, const struct cap_scan *s,
     c->symbol_count = a->name_hits;
     c->score = cap_score(s, a);
     c->terms_matched = cap_terms_matched(s, a);
+    c->file_stem_terms = cap_popcount(cap_groups(&s->ss, a->stem_mask));
     c->coherent_terms_matched = cap_coherent_terms(s, a);
 
     struct ci_file f;
@@ -1215,8 +1216,8 @@ static bool cap_fill_pool(struct codeindex *ci, struct cap_scan *s,
 }
 
 /* Ranking order after usage is known: terms answered, then whether the path or
- * purpose covers the whole question, then how load-bearing the file is, then
- * the cheap score, then path for determinism. Returns <0 when `p` goes first. */
+ * purpose covers the whole question, a filename covering at least two terms,
+ * how load-bearing the file is, the cheap score, then path for determinism. */
 static int cap_order(const struct ci_capability *p,
                      const struct ci_capability *k)
 {
@@ -1224,6 +1225,9 @@ static int cap_order(const struct ci_capability *p,
         return p->terms_matched > k->terms_matched ? -1 : 1;
     bool ps = p->score >= CI_W_WHOLE_COVER, ks = k->score >= CI_W_WHOLE_COVER;
     if (ps != ks) return ps ? -1 : 1;
+    int pst = p->file_stem_terms >= 2 ? p->file_stem_terms : 0;
+    int kst = k->file_stem_terms >= 2 ? k->file_stem_terms : 0;
+    if (pst != kst) return pst > kst ? -1 : 1;
     if (p->used_by_files != k->used_by_files)
         return p->used_by_files > k->used_by_files ? -1 : 1;
     if (p->score != k->score) return p->score > k->score ? -1 : 1;

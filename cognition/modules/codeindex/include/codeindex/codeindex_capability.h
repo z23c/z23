@@ -104,6 +104,8 @@ struct ci_capability {
     int  score;
     /* How many of the query's stems this candidate matched anywhere. */
     int  terms_matched;
+    /* Query base-term groups matched by the basename, including aliases. */
+    int  file_stem_terms;
     /* Most stems jointly supported by one symbol plus file context. */
     int  coherent_terms_matched;
     /* Distinct callers of coherent symbol witnesses. */

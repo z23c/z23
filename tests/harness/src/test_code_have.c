@@ -408,6 +408,17 @@ static int ch_check_real_tree(struct ci_capability *caps,
         CH_CHECK("the verdict on a live capability is ALREADY EXISTS",
                  n > 0 && codeindex_capability_verdict(caps, n, q) ==
                      CI_CAPABILITY_ALREADY_EXISTS);
+        struct ci_capability pack[5];
+        struct ci_capability_query pack_q;
+        int pack_n = codeindex_capabilities(
+            ci, "how is a plugin packed into an archive", pack, 5, &pack_q);
+        bool pack_found = false;
+        for (int i = 0; i < pack_n; i++)
+            if (strcmp(pack[i].header,
+                       "contexts/commons/modules/plugin/src/plugin_pack.c") == 0)
+                pack_found = true;
+        CH_CHECK("a multi-term filename reaches its implementation",
+                 pack_found);
         codeindex_close(ci);
     }
     return failures;
@@ -624,7 +635,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 30 /* of all cases: 21/63 (33%) on 2026-11-04, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 31 /* of all cases: 22/63 (34%) on 2026-11-20, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {
