@@ -9,6 +9,7 @@ unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 
 SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity.sh"
+. "$(dirname "$SCRIPT")/../scripts/source_identity_lib.sh"
 REAL_GIT="$(command -v git)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-source-identity-selftest.XXXXXX")"
 trap 'if [ -n "${BATCH_PID:-}" ]; then wait "$BATCH_PID" 2>/dev/null || true; fi; rm -rf "$SANDBOX"' EXIT HUP INT TERM
@@ -18,6 +19,28 @@ fail()
     printf 'source-identity-selftest: FAIL: %s\n' "$*" >&2
     exit 1
 }
+
+capture_id()
+{
+    local id
+    id="$("$SCRIPT" capture)" || return 1
+    zcl_is_sha256 "$id" || return 1
+    printf '%s\n' "$id"
+}
+
+capture_compare()
+{
+    local expected="$1" relation="$2" actual
+    zcl_is_sha256 "$expected" || return 1
+    actual="$(capture_id)" || return 1
+    test "$actual" "$relation" "$expected"
+}
+
+for bad_capture in /bin/false /bin/true /bin/echo; do
+    if (SCRIPT="$bad_capture"; capture_compare 0000000000000000000000000000000000000000000000000000000000000000 '!='); then
+        fail "failed or malformed capture from $bad_capture was accepted as different"
+    fi
+done
 
 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/source-identity-batch-selftest.sh" & BATCH_PID=$!
 
@@ -78,20 +101,20 @@ fi
 git add .
 git commit -qm base
 
-submodule_before="$($SCRIPT capture)" || fail 'submodule baseline failed'
+submodule_before="$(capture_id)" || fail 'submodule baseline failed'
 git -C vendor/sub commit --allow-empty -qm history-only
 git add vendor/sub
 git commit -qm gitlink-history-only
-submodule_after="$($SCRIPT capture)" || fail 'submodule history capture failed'
+submodule_after="$(capture_id)" || fail 'submodule history capture failed'
 [ "$submodule_before" = "$submodule_after" ] ||
     fail 'identity inherited the parent/submodule Git object id'
 
 printf 'submodule edit\n' >> vendor/sub/sub.c
-submodule_changed="$($SCRIPT capture)" || fail 'submodule edit capture failed'
+submodule_changed="$(capture_id)" || fail 'submodule edit capture failed'
 [ "$submodule_changed" != "$submodule_after" ] ||
     fail 'current submodule bytes did not supersede source identity'
 printf 'submodule input\n' > vendor/sub/sub.c
-[ "$($SCRIPT capture)" = "$submodule_after" ] ||
+capture_compare "$submodule_after" = ||
     fail 'restoring submodule bytes did not restore source identity'
 
 mv vendor/sub vendor/sub-initialized
@@ -102,57 +125,57 @@ if "$SCRIPT" capture > /dev/null 2>&1; then
 fi
 rm -rf vendor/sub
 mv vendor/sub-initialized vendor/sub
-[ "$($SCRIPT capture)" = "$submodule_after" ] ||
+capture_compare "$submodule_after" = ||
     fail 'restoring initialized gitlink did not restore source identity'
 
 printf 'archive changed\n' > vendor/lib/fixture.a
-[ "$($SCRIPT capture)" != "$submodule_after" ] ||
+capture_compare "$submodule_after" != ||
     fail 'ignored linked archive bytes did not supersede source identity'
 printf 'archive input\n' > vendor/lib/fixture.a
+capture_compare "$submodule_after" = ||
+    fail 'restoring linked archive bytes did not restore source identity'
 
 printf 'generated header changed\n' > vendor/include/openssl/fixture.h
-[ "$($SCRIPT capture)" != "$submodule_after" ] ||
+capture_compare "$submodule_after" != ||
     fail 'ignored generated header bytes did not supersede source identity'
 printf 'generated header input\n' > vendor/include/openssl/fixture.h
-[ "$($SCRIPT capture)" = "$submodule_after" ] ||
+capture_compare "$submodule_after" = ||
     fail 'restoring generated header bytes did not restore source identity'
-[ "$($SCRIPT capture)" = "$submodule_after" ] ||
-    fail 'restoring linked archive bytes did not restore source identity'
 
 printf 'int ignored_source(void) { return 1; }\n' \
     > engine/controllers/src/ignored-fixture.c
 git check-ignore -q engine/controllers/src/ignored-fixture.c ||
     fail 'ignored source fixture is not actually ignored'
-ignored_source_a="$($SCRIPT capture)" ||
+ignored_source_a="$(capture_id)" ||
     fail 'ignored wildcard source capture failed'
 [ "$ignored_source_a" != "$submodule_after" ] ||
     fail 'ignored wildcard-selected C source was omitted'
 printf 'int ignored_source(void) { return 2; }\n' \
     > engine/controllers/src/ignored-fixture.c
-ignored_source_b="$($SCRIPT capture)" ||
+ignored_source_b="$(capture_id)" ||
     fail 'mutated ignored wildcard source capture failed'
 [ "$ignored_source_b" != "$ignored_source_a" ] ||
     fail 'ignored wildcard-selected C source mutation was omitted'
 rm engine/controllers/src/ignored-fixture.c
-[ "$($SCRIPT capture)" = "$submodule_after" ] ||
+capture_compare "$submodule_after" = ||
     fail 'removing ignored wildcard source did not restore identity'
 
 printf '#define IGNORED_FIXTURE 1\n' \
     > engine/controllers/include/controllers/ignored-fixture.h
 git check-ignore -q engine/controllers/include/controllers/ignored-fixture.h ||
     fail 'ignored header fixture is not actually ignored'
-ignored_header_a="$($SCRIPT capture)" ||
+ignored_header_a="$(capture_id)" ||
     fail 'ignored include-root header capture failed'
 [ "$ignored_header_a" != "$submodule_after" ] ||
     fail 'ignored include-root header was omitted'
 printf '#define IGNORED_FIXTURE 2\n' \
     > engine/controllers/include/controllers/ignored-fixture.h
-ignored_header_b="$($SCRIPT capture)" ||
+ignored_header_b="$(capture_id)" ||
     fail 'mutated ignored include-root header capture failed'
 [ "$ignored_header_b" != "$ignored_header_a" ] ||
     fail 'ignored include-root header mutation was omitted'
 rm engine/controllers/include/controllers/ignored-fixture.h
-[ "$($SCRIPT capture)" = "$submodule_after" ] ||
+capture_compare "$submodule_after" = ||
     fail 'removing ignored include-root header did not restore identity'
 
 rm vendor/lib/fixture.a
@@ -165,7 +188,7 @@ else
     # MSYS2's default winsymlink mode materializes a regular compatibility
     # file when Windows symlink creation is unavailable. It has no symlink
     # metadata to reject, but its bytes must still participate in identity.
-    [ "$($SCRIPT capture)" != "$submodule_after" ] ||
+    capture_compare "$submodule_after" != ||
         fail 'materialized Windows symlink compatibility file was omitted'
 fi
 rm vendor/lib/fixture.a
@@ -173,9 +196,9 @@ printf 'archive input\n' > vendor/lib/fixture.a
 
 # A history-only Git commit changes the repository's SHA-1 HEAD but not source
 # bytes. The sovereign v2 identity must therefore remain exactly unchanged.
-tree_before_history="$($SCRIPT capture)" || fail 'clean-tree capture failed'
+tree_before_history="$(capture_id)" || fail 'clean-tree capture failed'
 git commit --allow-empty -qm history-only
-tree_after_history="$($SCRIPT capture)" || fail 'post-history capture failed'
+tree_after_history="$(capture_id)" || fail 'post-history capture failed'
 [ "$tree_before_history" = "$tree_after_history" ] ||
     fail 'identity inherited a Git commit/object id instead of source bytes'
 [ -z "$($SCRIPT paths)" ] || fail 'history-only commit appeared as source dirt'
@@ -203,32 +226,31 @@ fi
 chmod +x fixture-160.c
 git add fixture-1.c fixture-2.c
 
-fast="$("$SCRIPT" capture)" || fail 'batched capture failed'
+fast="$(capture_id)" || fail 'batched capture failed'
 dirty_record="$("$SCRIPT" capture-record)" || fail 'dirty record capture failed'
 read -r dirty_id dirty_bit dirty_mutation <<< "$dirty_record"
 [ "$dirty_id" = "$fast" ] && [ "$dirty_bit" = 1 ] &&
     [[ "$dirty_mutation" =~ ^[0-9a-f]{64}$ ]] ||
     fail 'dirty record did not include non-committed source state'
-portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 "$SCRIPT" capture)" ||
+portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 capture_id)" ||
     fail 'portable capture failed'
 [ "$fast" = "$portable" ] ||
     fail "batched identity differs from canonical portable identity fast=$fast portable=$portable"
-[[ "$fast" =~ ^[0-9a-f]{64}$ ]] || fail 'capture was not lowercase SHA-256'
 
 if [ "$HAVE_NATIVE_SYMLINK" = 1 ]; then
     # A trailing newline is a legal symlink-target byte. It must supersede the
     # otherwise-identical target, and both collectors must agree exactly.
     ln -sfn $'fixture-2.c\n' source-link
-    newline_fast="$("$SCRIPT" capture)" ||
+    newline_fast="$(capture_id)" ||
         fail 'batched trailing-newline symlink capture failed'
-    newline_portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 "$SCRIPT" capture)" ||
+    newline_portable="$(ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 capture_id)" ||
         fail 'portable trailing-newline symlink capture failed'
     [ "$newline_fast" = "$newline_portable" ] ||
         fail 'fast/portable identities differ for trailing-newline symlink target'
     [ "$newline_fast" != "$fast" ] ||
         fail 'trailing-newline symlink target did not supersede source identity'
     ln -sfn fixture-2.c source-link
-    restored="$("$SCRIPT" capture)" || fail 'restored symlink capture failed'
+    restored="$(capture_id)" || fail 'restored symlink capture failed'
     [ "$restored" = "$fast" ] ||
         fail 'restoring exact symlink target did not restore source identity'
 fi
@@ -239,7 +261,7 @@ aba_record="$($SCRIPT capture-record)" || fail 'ABA baseline capture failed'
 read -r aba_id aba_clean aba_mutation <<< "$aba_record"
 printf 'transient compiler input\n' > fixture-170.c
 printf 'int fixture_170(void) { return 170; }\n' > fixture-170.c
-[ "$($SCRIPT capture)" = "$aba_id" ] ||
+capture_compare "$aba_id" = ||
     fail 'ABA restore did not recover the portable content identity'
 if "$SCRIPT" verify-record "$aba_id" "$aba_clean" "$aba_mutation" \
         > /dev/null 2>&1; then
@@ -424,17 +446,20 @@ rm -rf _module-origin/verify-mutation-race-bin \
 # The metadata token operates on the enumerated set, so independently refresh
 # that set before accepting a record. Inject a new untracked file during the
 # first SHA-256 pass and prove a single capture-record cannot omit it.
-real_sha256sum="$(command -v sha256sum)"
 mkdir inventory-race-bin
 printf '%s\n' '#!/usr/bin/env bash' \
-    'if [ "$#" -eq 0 ]; then' \
+    'if [ "$#" -eq 0 ] && [ ! -e "$RACE_FLAG" ]; then' \
     '  input="$(mktemp)" || exit 98' \
     '  trap '\''rm -f "$input"'\'' EXIT HUP INT TERM' \
     '  cat > "$input" || exit 98' \
     '  if grep -aFq zcl.dev_source_identity.v2 "$input" &&' \
-    '     [ ! -e "$INVENTORY_RACE_FLAG" ]; then' \
-    '    : > "$INVENTORY_RACE_FLAG"' \
-    '    printf "late inventory input\\n" > "$INVENTORY_RACE_SOURCE"' \
+    '     [ ! -e "$RACE_FLAG" ]; then' \
+    '    : > "$RACE_FLAG"' \
+    '    case "$RACE_ACTION" in' \
+    '      add) printf "late inventory input\\n" > "$RACE_SOURCE" ;;' \
+    '      remove) rm -f "$RACE_SOURCE" ;;' \
+    '      *) exit 97 ;;' \
+    '    esac' \
     '  fi' \
     '  "$REAL_SHA256SUM" < "$input"' \
     '  exit $?' \
@@ -448,6 +473,14 @@ chmod +x inventory-race-bin/sha256sum
 # point is that nothing arms it.
 race_state="$(mktemp -d "${TMPDIR:-/tmp}/zcl-source-identity-race.XXXXXX")"
 race_flag="$race_state/fired"
+run_capture_race()
+{
+    local action="$1" source="$2"
+    shift 2
+    PATH="$PWD/inventory-race-bin:$PATH" REAL_SHA256SUM="$real_sha256sum" \
+        RACE_FLAG="$race_flag" RACE_ACTION="$action" RACE_SOURCE="$source" \
+        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 env "$@" "$SCRIPT" capture-record
+}
 
 # A single attempt hashed a path set that no longer describes the tree, so it
 # must refuse rather than publish a record with the new source missing. The
@@ -456,13 +489,8 @@ race_flag="$race_state/fired"
 # human reading the gate log can act on it instead of re-running blind.
 rm -f late-inventory-source.c
 rm -f "$race_flag"
-if PATH="$PWD/inventory-race-bin:$PATH" \
-        REAL_SHA256SUM="$real_sha256sum" \
-        INVENTORY_RACE_FLAG="$race_flag" \
-        INVENTORY_RACE_SOURCE="$PWD/late-inventory-source.c" \
-        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
-        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
-        "$SCRIPT" capture-record > /dev/null 2> "$race_state/added.err"; then
+if run_capture_race add "$PWD/late-inventory-source.c" \
+        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 > /dev/null 2> "$race_state/added.err"; then
     fail 'new source created during capture escaped the inventory guard'
 fi
 grep -aFq 'source-identity:   added late-inventory-source.c' \
@@ -476,12 +504,7 @@ grep -aFq 'source-identity:   added late-inventory-source.c' \
 # wearing a zero exit status.
 rm -f late-inventory-source.c
 rm -f "$race_flag"
-race_record="$(PATH="$PWD/inventory-race-bin:$PATH" \
-        REAL_SHA256SUM="$real_sha256sum" \
-        INVENTORY_RACE_FLAG="$race_flag" \
-        INVENTORY_RACE_SOURCE="$PWD/late-inventory-source.c" \
-        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
-        "$SCRIPT" capture-record 2>/dev/null)" ||
+race_record="$(run_capture_race add "$PWD/late-inventory-source.c" 2>/dev/null)" ||
     fail 'capture-record never converged on a settled tree'
 [ -f late-inventory-source.c ] ||
     fail 'inventory race fixture never planted its late source'
@@ -499,31 +522,9 @@ rm -f late-inventory-source.c
 # generic one-line message.
 mkdir -p engine/controllers/src
 printf 'vanishing build input\n' > engine/controllers/src/late-remove-source.c
-mkdir vanish-race-bin
-printf '%s\n' '#!/usr/bin/env bash' \
-    'if [ "$#" -eq 0 ]; then' \
-    '  input="$(mktemp)" || exit 98' \
-    '  trap '\''rm -f "$input"'\'' EXIT HUP INT TERM' \
-    '  cat > "$input" || exit 98' \
-    '  if grep -aFq zcl.dev_source_identity.v2 "$input" &&' \
-    '     [ ! -e "$VANISH_RACE_FLAG" ]; then' \
-    '    : > "$VANISH_RACE_FLAG"' \
-    '    rm -f "$VANISH_RACE_SOURCE"' \
-    '  fi' \
-    '  "$REAL_SHA256SUM" < "$input"' \
-    '  exit $?' \
-    'fi' \
-    'exec "$REAL_SHA256SUM" "$@"' > vanish-race-bin/sha256sum
-chmod +x vanish-race-bin/sha256sum
-vanish_flag="$race_state/vanish-fired"
-rm -f "$vanish_flag"
-if PATH="$PWD/vanish-race-bin:$PATH" \
-        REAL_SHA256SUM="$real_sha256sum" \
-        VANISH_RACE_FLAG="$vanish_flag" \
-        VANISH_RACE_SOURCE="$PWD/engine/controllers/src/late-remove-source.c" \
-        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
-        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
-        "$SCRIPT" capture-record > /dev/null 2> "$race_state/removed.err"; then
+rm -f "$race_flag"
+if run_capture_race remove "$PWD/engine/controllers/src/late-remove-source.c" \
+        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 > /dev/null 2> "$race_state/removed.err"; then
     fail 'a build input removed during capture escaped the inventory guard'
 fi
 [ -e engine/controllers/src/late-remove-source.c ] &&
@@ -532,7 +533,6 @@ grep -aFq \
         'source-identity:   removed engine/controllers/src/late-remove-source.c' \
         "$race_state/removed.err" ||
     fail 'inventory-changed refusal did not name the removed path'
-rm -rf vanish-race-bin
 
 # The one path class that must NOT arm that guard: an ephemeral lint fixture.
 # Make's own source globs refuse to compile a "/_" path, so a fixture planted
@@ -544,13 +544,8 @@ ephemeral_baseline="$("$SCRIPT" capture-record)" ||
     fail 'ephemeral fixture baseline capture failed'
 ephemeral_fixture="engine/controllers/src/_late_fixture_tmp.c"
 rm -f "$race_flag"
-ephemeral_record="$(PATH="$PWD/inventory-race-bin:$PATH" \
-        REAL_SHA256SUM="$real_sha256sum" \
-        INVENTORY_RACE_FLAG="$race_flag" \
-        INVENTORY_RACE_SOURCE="$PWD/$ephemeral_fixture" \
-        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
-        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
-        "$SCRIPT" capture-record 2>"$race_state/ephemeral.err")" || {
+ephemeral_record="$(run_capture_race add "$PWD/$ephemeral_fixture" \
+        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 2>"$race_state/ephemeral.err")" || {
     cat "$race_state/ephemeral.err" >&2
     fail 'an ephemeral lint fixture stopped a source identity capture'
 }
