@@ -896,6 +896,17 @@ static int seed_race_trace(unsigned kind, void *ctx, void *stmt, void *unused)
     return 0;
 }
 
+static void seed_race_cleanup(sqlite3 *db, sqlite3 *other, sqlite3_stmt *s,
+                              struct wallet_sqlite *ws, const char *dir)
+{
+    if (db) sqlite3_trace_v2(db, 0, NULL, NULL);
+    if (s) sqlite3_finalize(s);
+    if (ws->open) wallet_sqlite_close(ws);
+    if (other) sqlite3_close(other);
+    if (db) sqlite3_close(db);
+    if (dir[0]) test_rm_rf_recursive(dir);
+}
+
 static int test_seed_counter_race(bool create)
 {
     int failures = 0;
@@ -938,12 +949,7 @@ static int test_seed_counter_race(bool create)
         ASSERT(memcmp(saved, expected, sizeof(expected)) == 0);
         PASS();
     } _test_next:;
-    if (db) sqlite3_trace_v2(db, 0, NULL, NULL);
-    if (s) sqlite3_finalize(s);
-    if (ws.open) wallet_sqlite_close(&ws);
-    if (other) sqlite3_close(other);
-    if (db) sqlite3_close(db);
-    if (dir[0]) test_rm_rf_recursive(dir);
+    seed_race_cleanup(db, other, s, &ws, dir);
     return failures;
 }
 

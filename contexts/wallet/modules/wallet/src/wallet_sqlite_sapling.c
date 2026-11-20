@@ -129,6 +129,24 @@ static int wsql_bind_seed_expected(sqlite3_stmt *stmt, int index, int type,
     return SQLITE_MISMATCH;
 }
 
+static int wsql_seed_conditional_write(sqlite3_stmt *stmt, const uint8_t *seed,
+                                       size_t seed_len, int observed_type,
+                                       const uint8_t *observed, size_t observed_len,
+                                       bool *matched)
+{
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    int rc = sqlite3_bind_blob(stmt, 1, seed, (int)seed_len, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK)
+        rc = wsql_bind_seed_expected(stmt, 2, observed_type, observed, observed_len);
+    if (rc == SQLITE_OK) rc = AR_STEP_WRITE(stmt);
+    *matched = rc == SQLITE_ROW;
+    if (*matched) rc = AR_STEP_WRITE(stmt);
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+    return rc;
+}
+
 bool wallet_sqlite_write_sapling_seed(struct wallet_sqlite *ws,
                                       const uint8_t seed[32])
 {
@@ -155,20 +173,12 @@ bool wallet_sqlite_write_sapling_seed(struct wallet_sqlite *ws,
         memory_cleanse(observed, sizeof(observed));
         LOG_FAIL("wallet_sqlite", "write_sapling_seed: refused, wallet locked");
     }
-    sqlite3_stmt *stmt = ws->stmt_seed_write;
-    sqlite3_reset(stmt);
-    sqlite3_clear_bindings(stmt);
-    int rc = sqlite3_bind_blob(stmt, 1, encrypted ? enc : seed,
-                               encrypted ? (int)enc_len : 32, SQLITE_TRANSIENT);
-    if (rc == SQLITE_OK)
-        rc = wsql_bind_seed_expected(stmt, 2, observed_type, observed, observed_len);
-    if (rc == SQLITE_OK) rc = AR_STEP_WRITE(stmt);
-    bool matched = rc == SQLITE_ROW;
-    if (matched) rc = AR_STEP_WRITE(stmt);
-    sqlite3_reset(stmt);
-    sqlite3_clear_bindings(stmt);
+    bool matched = false;
+    int rc = wsql_seed_conditional_write(ws->stmt_seed_write,
+        encrypted ? enc : seed, encrypted ? enc_len : 32, observed_type,
+        observed, observed_len, &matched);
     memory_cleanse(observed, sizeof(observed));
-    if (enc) { memory_cleanse(enc, enc_len); free(enc); }
+    wsql_wipe_free(enc, enc_len);
     if (rc != SQLITE_DONE)
         LOG_FAIL("wallet_sqlite", "write_sapling_seed: write failed rc=%d", rc);
     if (!matched)
