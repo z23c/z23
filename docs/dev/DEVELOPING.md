@@ -2070,7 +2070,10 @@ or qualify a native planner's dry-run as an activation proof.
 A host with no worktree on the queue host (a Mac or Windows machine) never
 pushes to `origin/main`; it sends a bundle of its unlanded commits and the
 queue host queues them like any other lane. The tip must carry a good
-signature on the queue host, or the reply is `TIP_UNSIGNED`.
+signature from a signer the queue host trusts. An unsigned tip returns
+`TIP_UNSIGNED`. If Git verifies the signature but reports unknown trust
+(`%G?` is `U`), the reply is `TIP_SIGNER_UNTRUSTED`. The queue operator can
+inspect the exact commit with `git verify-commit <tip>` on that host.
 
 ```
 z23-dev dev land send --host=<queue-host> --lane=NAME [--note=TEXT] \

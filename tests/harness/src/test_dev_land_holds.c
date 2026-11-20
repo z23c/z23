@@ -721,16 +721,38 @@ _test_next:;
 int dlx_case_unsigned_tip(void)
 {
     int failures = 0;
-    TEST("land: submit refuses an unsigned tip and an unknown one") {
+    TEST("land: submit distinguishes unsigned, untrusted and unknown tips") {
         struct dlx_rig rig;
         struct dlx_call c;
+        const char *sign[] = { "commit", "--amend", "-S", "--no-edit", "--no-verify", NULL };
+        const char *head[] = { "rev-parse", "HEAD", NULL };
+        const char *signers[] = { "config", "--local", "--get", "gpg.ssh.allowedSignersFile", NULL };
+        const char *signature[] = { "log", "-1", "--format=%G?", NULL };
+        char allowed[1024], status[128];
         dlx_isolate("refuse");
         ASSERT(dlx_rig_make(&rig, "refuse_rig"));
         /* The fixture commits are --no-gpg-sign, so this IS the unsigned
          * case, and the bypass is not set. */
+        ASSERT_EQ(dlx_git_out(rig.clone, signature, status, sizeof(status)), 0);
+        ASSERT_STR_EQ(status, "N");
         dlx_submit(&c, &rig, rig.tip);
         ASSERT(dlx_run(&c));
         ASSERT(!dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "TIP_UNSIGNED");
+        dlx_end(&c);
+        /* Remove the fixture key from its private allowed-signers file.
+         * Git still verifies the signature but reports unknown trust. */
+        ASSERT(dlx_sign_arm(rig.clone, "untrusted_tip"));
+        ASSERT_EQ(dlx_git(rig.clone, sign), 0);
+        ASSERT_EQ(dlx_git_out(rig.clone, head, rig.tip, sizeof(rig.tip)), 0);
+        ASSERT_EQ(dlx_git_out(rig.clone, signers, allowed, sizeof(allowed)), 0);
+        ASSERT(dlx_write(allowed, ""));
+        ASSERT_EQ(dlx_git_out(rig.clone, signature, status, sizeof(status)), 0);
+        ASSERT_STR_EQ(status, "U");
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(!dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "TIP_SIGNER_UNTRUSTED");
         dlx_end(&c);
         /* A commit id nobody can resolve. */
         setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
@@ -744,7 +766,7 @@ int dlx_case_unsigned_tip(void)
         ASSERT(dlx_run(&c));
         ASSERT(!dlx_ok(&c));
         dlx_end(&c);
-        /* Nothing was stored by any of the three. */
+        /* None of the refused submissions entered the queue. */
         dlx_begin(&c, "status");
         (void)json_push_kv_bool(&c.input, "json", true);
         ASSERT(dlx_run(&c));

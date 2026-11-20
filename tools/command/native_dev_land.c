@@ -3926,22 +3926,22 @@ static bool dl_submit_require_signed_tip(const char *allow_unsigned,
                                          const char *sig,
                                          struct zcl_command_reply *reply)
 {
-    if (sig[0] != 'G') {
-        /* The test-only bypass. It is admitted ONLY alongside the proof
-         * stub, which no production caller sets: a signing key is not always
-         * available to a test process, but a real submission that skipped
-         * both the signature and the proof would be a landing with no
-         * evidence at all. */
-        if (!(allow_unsigned && strcmp(allow_unsigned, "1") == 0 &&
-              dl_stub() != NULL)) {
-            dl_fail(reply, "TIP_UNSIGNED", "submit",
-                    "main takes signed commits only; sign the tip and "
-                    "resubmit",
-                    sig[0] ? sig : "git log -1 --format=%G? said nothing");
-            return false;
-        }
+    if (sig[0] == 'G')
+        return true;
+    /* Isolated tests may lack a signing key. Both test controls are required. */
+    if (allow_unsigned && strcmp(allow_unsigned, "1") == 0 && dl_stub() != NULL)
+        return true;
+    if (sig[0] == 'U') {
+        dl_fail(reply, "TIP_SIGNER_UNTRUSTED", "submit",
+                "Git verified the signature but could not establish signer trust "
+                "on the queue host. Ask the queue operator to verify the signer.",
+                sig);
+    } else {
+        dl_fail(reply, "TIP_UNSIGNED", "submit",
+                "main takes signed commits only; sign the tip and resubmit",
+                sig[0] ? sig : "git log -1 --format=%G? said nothing");
     }
-    return true;
+    return false;
 }
 
 
@@ -16052,6 +16052,7 @@ static const struct dl_next_entry k_dl_next[] = {
     {"TIP_UNKNOWN", "git rev-parse HEAD in your worktree, then z23 dev land submit --tip=<sha>"},
     {"TIP_UNRELATED", "git fetch origin main and rebase the tip onto origin/main, then z23 dev land submit --tip=<new sha>"},
     {"TIP_UNSIGNED", "git commit --amend -S --no-edit, then z23 dev land submit --tip=<new sha>"},
+    {"TIP_SIGNER_UNTRUSTED", "ask the queue operator to verify the signer on the queue host with git verify-commit <tip>, then retry once signer trust is established"},
     {"NO_CHECKOUT", "run from inside a Z23 checkout or pass --worktree=<path>, then z23 dev land @A"},
     {"DEV_BUILD_REQUIRED", "devbuild --wait make -j28 dev-bin, then rerun with build/bin/z23-dev dev land @A"},
     {"ATTESTATION_UNKNOWN", "devbuild --wait make -j28 dev-bin, then rerun with build/bin/z23-dev dev land @A"},
