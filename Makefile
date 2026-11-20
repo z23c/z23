@@ -278,6 +278,8 @@ endif
 # paths qualify; an unknown path, mixed node goal, or default build does not.
 ZCL_WINDOWS_ACCEPTANCE_DIR := build/tests/windows
 ZCL_WINDOWS_ACCEPTANCE_SQLITE := $(ZCL_WINDOWS_ACCEPTANCE_DIR)/lib/libsqlite3.a
+BUILD_DIR = build
+BIN_DIR = $(BUILD_DIR)/bin
 include platform/modules/platform/tests/windows_acceptance.mk
 include platform/modules/platform/tests/android_acceptance.mk
 ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs windows-acceptance-fixtures \
@@ -378,6 +380,9 @@ ZCL_GENERATED_HEADER_GOALS := contexts/wallet/views/include/views/wallet_templat
 	build/identity/gen-stamps/install_script.stamp \
 	build/identity/gen-stamps/native_tunnel_export_binding.stamp
 ZCL_GENERATED_HEADER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS))),,1),)
+# This direct-source helper neither consumes node artifacts nor stamps source
+# identity. Classify only a single exact goal; mixed/default builds stay full.
+override ZCL_TIMINGS_HELPER_ONLY := $(if $(filter 1,$(words $(MAKECMDGOALS))),$(if $(filter z23-timings,$(MAKECMDGOALS)),1,$(if $(and $(filter build/bin/z23-timings,$(MAKECMDGOALS)),$(filter 1,$(words $(BIN_DIR))),$(filter build/bin,$(BIN_DIR))),1,)))
 # Only profile selection ignores generated-header companions; identity and
 # artifact gates still inspect the original MAKECMDGOALS.
 ZCL_PROFILE_GOALS := $(if $(strip $(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS))),$(filter-out $(ZCL_GENERATED_HEADER_GOALS),$(MAKECMDGOALS)),$(MAKECMDGOALS))
@@ -397,7 +402,7 @@ ZCL_GAME_INPUT_QUERY_ONLY := $(if $(filter print-game-closure,$(MAKECMDGOALS)),$
 # set only gates the depfile-graph import skip.
 ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) check-capability-inventory-generated docs-proof-tools hotswap-module-so \
 	t-hotswap hotswap-test-so $(ZCL_GENERATED_HEADER_GOALS)
-ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),)
+ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),))
 
 # worktree-prime supplies generated vendor/lib/*.a and vendor/include by copy
 # instead of the vendor-bootstrap rule's from-pinned-source rebuild (measured
@@ -496,7 +501,7 @@ ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 # Keep configured values (including deferred variable references) conservative:
 # the packer links zlib. Mixed node goals still require normal bootstrap.
 ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),)
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -533,7 +538,9 @@ ifeq ($(strip $(MAKE_RESTARTS)),)
 ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
 ifeq ($(ZCL_GENERATED_HEADER_ONLY),)
+ifeq ($(ZCL_TIMINGS_HELPER_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
+endif
 endif
 endif
 endif
@@ -588,14 +595,12 @@ endif
 # derives a new token, so cross-invocation supersession detection (a real
 # source edit between two separate builds) is untouched; see the session
 # cache in tools/dev/source-identity.sh.
-BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY)$(ZCL_GENERATED_HEADER_ONLY),1,)
+BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY)$(ZCL_GENERATED_HEADER_ONLY)$(ZCL_TIMINGS_HELPER_ONLY),1,)
 BUILD_INVOCATION_PID := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell printf '%s' $$PPID)))
 BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell tools/dev/process-start-token.sh '$(BUILD_INVOCATION_PID)' 2>/dev/null)))
 BUILD_INVOCATION_ID := $(if $(BUILD_EPOCH_CLEAN_ONLY),clean,$(strip $(shell printf '%s\0%s' '$(BUILD_INVOCATION_PID)' '$(BUILD_INVOCATION_START)' | sha256sum | awk '{print $$1}')))
 ZCL_SOURCE_IDENTITY_SESSION := $(BUILD_INVOCATION_PID):$(BUILD_INVOCATION_START)
 
-BUILD_DIR = build
-BIN_DIR = $(BUILD_DIR)/bin
 ZCL_ENGINE_UNIT_GOALS := engine-unit $(BIN_DIR)/z23-engine-unit $(BIN_DIR)/zclassic23-engine-unit
 
 # Deriving one compile epoch fingerprints the compiler, sysroot, flags, and
@@ -734,6 +739,9 @@ else ifeq ($(ZCL_INVENTORY_LINT_ONLY),1)
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else ifeq ($(ZCL_GENERATED_HEADER_ONLY),1)
 # Header-only recipes never stamp or publish a node artifact.
+BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
+else ifeq ($(ZCL_TIMINGS_HELPER_ONLY),1)
+# The standalone timings helper does not consume this record.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else
 BUILD_SOURCE_RECORD := $(shell ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh capture-record 2>/dev/null || echo unknown 0 unknown)
@@ -1850,7 +1858,7 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-p
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe \
-	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS)
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 

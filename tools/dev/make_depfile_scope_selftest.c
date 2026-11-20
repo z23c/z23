@@ -573,17 +573,20 @@ static size_t release_probe_args(const struct engine_probe_case *c, const char *
     return n;
 }
 
-static size_t engine_probe_start(const struct engine_probe_case *c, const char *log)
+static size_t engine_probe_start(const struct engine_probe_case *c, const char *log,
+                                 bool natural_epoch, bool derived_bin,
+                                 const char *extra_arg)
 {
     const char *argv[48] = {"make", "-f", text("%s/engine.mk", work),
         "--no-print-directory", "-n", "-o", "/dev/null", "-o",
         "contexts/explorer/views/include/views/site_css.h", "VIEW_BOOTSTRAP_MK=/dev/null",
         "VIEW_GEN_HEADERS=", "VIEW_GEN_HEADERS_EARLY=", "VENDOR_LIBS=", "NODE_VENDOR_LIBS=",
-        "ZCL_TOR=stub", "ZCL_USE_CCACHE=0", "BUILD_EPOCH_CLEAN_ONLY=0",
-        "BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000",
-        "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000",
-        "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000"};
-    size_t n = 20;
+        "ZCL_TOR=stub", "ZCL_USE_CCACHE=0"};
+    size_t n = 16;
+    if (!natural_epoch) argv[n++] = "BUILD_EPOCH_CLEAN_ONLY=0";
+    argv[n++] = "BUILD_COMPILER_ID=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = "BUILD_SYSTEM_ID=0000000000000000000000000000000000000000000000000000000000000000";
+    argv[n++] = "zcl_compile_epoch=0000000000000000000000000000000000000000000000000000000000000000";
     /* An included Makefile is remade even with -n. Keep vendor repair inert. */
     argv[n++] = "-o";
     argv[n++] = "build/identity/vendor-inputs-ready.mk";
@@ -598,7 +601,7 @@ static size_t engine_probe_start(const struct engine_probe_case *c, const char *
     }
     if (c->custom) {
         argv[n++] = text("BUILD_DIR=%s/custom-build", work);
-        if (strcmp(c->name, "custom-derived") != 0)
+        if (!derived_bin)
             argv[n++] = text("BIN_DIR=%s/custom-bin", work);
     } else if (!c->defaults) {
         argv[n++] = text("BUILD_DIR=%s/engine-build", work);
@@ -621,15 +624,18 @@ static size_t engine_probe_start(const struct engine_probe_case *c, const char *
                     "platform/modules/util/src/spawn_binary_internal.h";
     }
     n = release_probe_args(c, argv, n);
+    if (extra_arg) argv[n++] = extra_arg;
     if (c->first) argv[n++] = c->first;
     if (c->second) argv[n++] = c->second;
     argv[n] = NULL;
     return probe_start(argv, log, false);
 }
 
-static bool engine_probe_output(const struct engine_probe_case *c, const char *data, int rc)
+static bool engine_probe_output(const struct engine_probe_case *c, const char *data,
+                                int rc, bool expect_capture)
 {
-    if (c->capture) return rc == 2 && strstr(data, "ENGINE_CAPTURE_SENTINEL") != NULL;
+    if (expect_capture)
+        return rc == 2 && strstr(data, "ENGINE_CAPTURE_SENTINEL") != NULL;
     if (rc != 0 || !strstr(data, text("ZCL_EPOCH_PROBE=[%s]", c->epoch)) ||
         !strstr(data, text("ZCL_DEPFILES_PROBE=[%s]", c->dep))) return false;
     for (size_t j = 0; j < 5; ++j) {
@@ -637,6 +643,43 @@ static bool engine_probe_output(const struct engine_probe_case *c, const char *d
         if (present != ((c->mask & (1u << j)) != 0)) return false;
     }
     return true;
+}
+
+static void timings_scope_probes(void)
+{
+    const struct { struct engine_probe_case probe; bool capture, derived, bad_cc; const char *extra; } cases[] = {
+        {{"timings-alias", "z23-timings", NULL, false, false, true, 0, "", ""}, false, false, false, NULL},
+        {{"timings-binary", "build/bin/z23-timings", NULL, false, true, true, 0, "", ""}, false, false, false, NULL},
+        {{"timings-custom-alias", "z23-timings", NULL, true, false, true, 0, "", ""}, false, false, false, NULL},
+        {{"timings-custom", text("%s/custom-bin/z23-timings", work), NULL, true, false, true, 0, "", ""}, true, false, false, NULL},
+        {{"timings-derived", text("%s/custom-build/bin/z23-timings", work), NULL, true, false, true, 0, "", ""}, true, true, false, NULL},
+        {{"timings-node", "z23-timings", "z23", false, false, true, 0, "", ""}, true, false, false, NULL},
+        {{"timings-unknown", "z23-timings", "zcl-depfile-unknown", false, false, true, 0, "", ""}, true, false, false, NULL},
+        {{"timings-spoof", "z23-timings", "zcl-depfile-unknown", false, false, true, 0, "", ""}, true, false, false, "ZCL_TIMINGS_HELPER_ONLY=1"},
+        {{"timings-toolchain", "z23-timings", NULL, false, false, true, 0, "", ""}, false, false, true, "CC=false"},
+        {{"timings-first-build", "first-build-timing", NULL, false, false, true, 0, "", ""}, true, false, false, NULL},
+        {{"timings-pr-check", "pr-check", NULL, false, false, true, 0, "", ""}, true, false, false, NULL},
+    };
+    enum { count = sizeof(cases) / sizeof(cases[0]) };
+    size_t children[count]; const char *logs[count];
+    for (size_t i = 0; i < count; ++i) {
+        logs[i] = text("%s/%s.out", work, cases[i].probe.name);
+        children[i] = engine_probe_start(&cases[i].probe, logs[i], true, cases[i].derived, cases[i].extra);
+    }
+    for (size_t i = 0; i < count; ++i) {
+        int rc = probe_wait(children[i]); char *data = output(logs[i]);
+        bool ok = cases[i].bad_cc ? rc == 2 && strstr(data, "C23 toolchain check failed") :
+            engine_probe_output(&cases[i].probe, data, rc, cases[i].capture);
+        if (!strcmp(cases[i].probe.name, "timings-alias"))
+            ok = ok && strstr(data, "-std=c23") && strstr(data, "-DZCL_TIMINGS_STANDALONE") &&
+                strstr(data, "tools/dev/timings.c") && strstr(data, " -lm");
+        if (!ok) {
+            fprintf(stderr, "timings scope case=%s rc=%d\n%s\n", cases[i].probe.name, rc, data);
+            free(data); fail("timings scope probe failed");
+        }
+        free(data);
+    }
+    probe_count = 0;
 }
 
 static bool vendor_audit_output(const char *data)
@@ -706,12 +749,13 @@ static void engine_scope_probes(void)
     const char *logs[count];
     for (size_t i = 0; i < count; ++i) {
         logs[i] = text("%s/engine-%s.out", work, cases[i].name);
-        children[i] = engine_probe_start(&cases[i], logs[i]);
+        children[i] = engine_probe_start(&cases[i], logs[i], false,
+                                         strcmp(cases[i].name, "custom-derived") == 0, NULL);
     }
     for (size_t i = 0; i < count; ++i) {
         int rc = probe_wait(children[i]);
         char *data = output(logs[i]);
-        if (!engine_probe_output(&cases[i], data, rc)) {
+        if (!engine_probe_output(&cases[i], data, rc, cases[i].capture)) {
             fprintf(stderr, "engine scope case=%s rc=%d\n%s\n", cases[i].name, rc, data);
             free(data); fail("engine scope probe failed");
         }
@@ -762,11 +806,11 @@ static void registry_scope_probes(void)
     size_t children[count]; const char *logs[count];
     for (size_t i = 0; i < count; ++i) {
         logs[i] = text("%s/%s.out", work, cases[i].name);
-        children[i] = engine_probe_start(&cases[i], logs[i]);
+        children[i] = engine_probe_start(&cases[i], logs[i], false, false, NULL);
     }
     for (size_t i = 0; i < count; ++i) {
         int rc = probe_wait(children[i]); char *data = output(logs[i]);
-        bool ok = engine_probe_output(&cases[i], data, rc);
+        bool ok = engine_probe_output(&cases[i], data, rc, cases[i].capture);
         if (!strcmp(cases[i].name, "registry-source")) ok = ok && registry_compile_output(data);
         if (!ok) { fprintf(stderr, "registry scope case=%s rc=%d\n%s\n", cases[i].name, rc, data); free(data); fail("registry scope probe failed"); }
         free(data);
@@ -786,6 +830,8 @@ int main(int argc, char **argv)
     profile_probes();
     text_rewind(persistent);
     engine_scope_probes();
+    text_rewind(persistent);
+    timings_scope_probes();
     text_rewind(persistent);
     registry_scope_probes();
     text_rewind(persistent);
