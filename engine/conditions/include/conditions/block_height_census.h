@@ -15,8 +15,9 @@ typedef bool (*block_height_pred_fn)(const struct block_index *p, void *ctx);
 /* First block in `ms->map_block_index` (bucket order) at `height` for which
  * `pred` is true, or NULL.
  *
- * Equivalent to scanning the whole block map, which costs one reader-lock
- * round trip and one cache miss per bucket (about 3 million at the tip).
+ * Equivalent to scanning the whole block map. Census fills and overflow
+ * scans copy at most 128 physical bucket slots per reader-lock lease, then
+ * inspect occupied rows outside the lock.
  * The set of blocks at one height is gathered by a single scan and reused
  * until the map gains an entry, the active tip moves, the best header
  * changes, or 30 seconds pass. Each call re-reads `nHeight` and passes the
@@ -36,6 +37,8 @@ unsigned long block_height_census_test_scans(void);
 /* Replace the seconds clock the 30 s expiry reads; reset restores it. */
 void block_height_census_test_set_clock(int64_t (*fn)(void));
 void block_height_census_test_reset(void);
+/* -1 disables, -2 always refuses, nonnegative refuses once after N batches. */
+void block_height_census_test_fail_batch_after(int count);
 #endif
 
 #endif /* ZCL_CONDITIONS_BLOCK_HEIGHT_CENSUS_H */

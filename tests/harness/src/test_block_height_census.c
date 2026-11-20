@@ -15,6 +15,7 @@
 #include "validation/main_state.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define BHC_CHECK(name, expr) do {                       \
@@ -137,6 +138,11 @@ static int bhc_case_rebuilds_on_change(void)
     (void)block_height_find(&ms, 1, pred_failed, NULL);
     BHC_CHECK("a changed best header rebuilds the census",
               block_height_census_test_scans() == scans + 1);
+    scans = block_height_census_test_scans();
+    bool grew = block_map_reserve(&ms.map_block_index, 4096);
+    BHC_CHECK("a reallocated bucket array rebuilds the census",
+              grew && block_height_find(&ms, 1, pred_failed, NULL) == late &&
+              block_height_census_test_scans() == scans + 1);
     main_state_free(&ms);
     return failures;
 }
@@ -225,6 +231,80 @@ static int bhc_case_expiry_rescans(void)
     return failures;
 }
 
+static bool bhc_pred_map_unlocked(const struct block_index *p, void *ctx)
+{
+    struct block_map *map = ctx;
+    int rc = pthread_rwlock_trywrlock(&map->rwlock);
+    if (rc == 0) pthread_rwlock_unlock(&map->rwlock);
+    return rc == 0 && (p->nStatus & BLOCK_FAILED_MASK);
+}
+
+static int bhc_case_batch_lock_refusal(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    for (int i = 0; i < 512; i++)
+        (void)bhc_insert(&ms, i + 1, i + 1, NULL, BLOCK_VALID_TREE);
+    struct block_index *target = bhc_insert(&ms, 9000, 9000, NULL,
+                                            BLOCK_FAILED_VALID);
+    block_height_census_test_fail_batch_after(1);
+    struct block_index *first = block_height_find(&ms, 9000, bhc_pred_map_unlocked,
+                                                   &ms.map_block_index);
+    unsigned long scans = block_height_census_test_scans();
+    struct block_index *second = block_height_find(&ms, 9000, bhc_pred_map_unlocked,
+                                                    &ms.map_block_index);
+    BHC_CHECK("partial batch refusal falls back without caching partial results",
+              target && first == target && second == target &&
+              block_height_census_test_scans() == scans + 1);
+    block_height_census_test_reset();
+    block_height_census_test_fail_batch_after(-2);
+    struct block_index *refused = block_height_find(&ms, 9000, pred_any, NULL);
+    scans = block_height_census_test_scans();
+    block_height_census_test_fail_batch_after(-1);
+    struct block_index *recovered = block_height_find(&ms, 9000, pred_any, NULL);
+    BHC_CHECK("persistent batch lock refusal is not cached as absence",
+              refused == NULL && recovered == target &&
+              block_height_census_test_scans() == scans + 1);
+    block_height_census_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
+static int bhc_case_sparse_batches(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    ms.map_block_index.capacity = 512;
+    ms.map_block_index.buckets = calloc(512, sizeof(*ms.map_block_index.buckets));
+    struct block_index rows[34] = {0};
+    if (!ms.map_block_index.buckets) {
+        BHC_CHECK("sparse batch fixture allocated", false);
+        main_state_free(&ms);
+        return failures;
+    }
+    for (size_t i = 0; i < 34; i++) {
+        rows[i].nHeight = 90;
+        rows[i].nStatus = i == 33 ? BLOCK_FAILED_VALID : 0;
+        size_t slot = i < 17 ? i * 7 : 256 + (i - 17) * 7;
+        ms.map_block_index.buckets[slot].index = &rows[i];
+    }
+    ms.map_block_index.size = 34;
+    BHC_CHECK("sparse batches preserve order and overflow fallback",
+              block_height_find(&ms, 90, pred_failed, NULL) == &rows[33] &&
+              block_height_find(&ms, 90, pred_any, NULL) == &rows[0]);
+    unsigned long scans = block_height_census_test_scans();
+    BHC_CHECK("sparse overflow marker remains cached",
+              block_height_find(&ms, 90, pred_failed, NULL) == &rows[33] &&
+              block_height_census_test_scans() == scans);
+    block_height_census_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_block_height_census(void)
 {
     printf("\n=== block_height_census tests ===\n");
@@ -234,5 +314,7 @@ int test_block_height_census(void)
     failures += bhc_case_overflow_falls_back_to_scan();
     failures += bhc_case_moved_block_not_returned();
     failures += bhc_case_expiry_rescans();
+    failures += bhc_case_batch_lock_refusal();
+    failures += bhc_case_sparse_batches();
     return failures;
 }

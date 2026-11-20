@@ -12,10 +12,12 @@
 #include "validation/main_state.h"
 
 #include <pthread.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #define CENSUS_CAP 32
+#define CENSUS_BUCKET_BATCH 128
 /* A census older than this is rebuilt even when nothing visible changed.
  * `nHeight` is written after map insertion and rewritten by header relinks
  * and height repair (in sealed core/ and in many engine files), so there is
@@ -48,6 +50,7 @@ static unsigned long g_scans;
 
 #ifdef ZCL_TESTING
 static int64_t (*g_test_clock)(void);
+static _Thread_local int g_test_fail_batch_after = -1;
 #endif
 
 static int64_t mono_secs(void)
@@ -99,6 +102,52 @@ static bool census_current(const struct census *c, struct main_state *ms,
            mono_secs() - c->born < CENSUS_MAX_AGE_SECS;
 }
 
+struct census_walk {
+    size_t next, count;
+    bool done;
+    struct block_index *items[CENSUS_BUCKET_BATCH];
+};
+
+/* Bound each lock lease by physical slots, including holes. Row fields and
+ * predicates are read only after unlocking; the bucket array itself is never
+ * retained across leases. Returns -1 on lock refusal, 0 at end, 1 for a batch. */
+static int census_walk_batch(struct census_walk *walk, const struct block_map *map)
+{
+    for (;;) {
+        if (walk->done) return 0;
+        int rc;
+#ifdef ZCL_TESTING
+        if (g_test_fail_batch_after == -2) rc = EAGAIN;
+        else if (g_test_fail_batch_after == 0) { g_test_fail_batch_after = -1; rc = EAGAIN; }
+        else {
+            if (g_test_fail_batch_after > 0) g_test_fail_batch_after--;
+            rc = pthread_rwlock_rdlock((pthread_rwlock_t *)&map->rwlock);
+        }
+#else
+        rc = pthread_rwlock_rdlock((pthread_rwlock_t *)&map->rwlock);
+#endif
+        if (rc != 0) {
+            LOG_RETURN(-1, "condition", "height census: block map batch lock failed: rc=%d", rc);
+        }
+        size_t remaining = walk->next < map->capacity ? map->capacity - walk->next : 0;
+        size_t slots = remaining < CENSUS_BUCKET_BATCH ? remaining : CENSUS_BUCKET_BATCH;
+        size_t count = 0;
+        for (size_t i = 0; i < slots; i++) {
+            struct block_index *p = map->buckets[walk->next + i].index;
+            walk->items[count] = p;
+            count += p != NULL;
+        }
+        walk->next += slots;
+        walk->done = walk->next >= map->capacity;
+        rc = pthread_rwlock_unlock((pthread_rwlock_t *)&map->rwlock);
+        if (rc != 0) {
+            LOG_RETURN(-1, "condition", "height census: block map batch unlock failed: rc=%d", rc);
+        }
+        walk->count = count;
+        if (count) return 1;
+    }
+}
+
 /* Gather every block at `height`. A height holding more blocks than the census
  * stores is recorded as an overflow marker, valid until the map size changes,
  * so the caller scans once per call instead of twice. The map size is
@@ -127,16 +176,25 @@ static void census_fill(struct census *c, struct main_state *ms, int height,
     c->overflow = false;
     g_scans++;
 
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(c->map, &iter, NULL, &p)) {
-        if (!p || p->nHeight != height)
-            continue;
-        if (c->n == CENSUS_CAP) {
-            c->overflow = true;
-            break;
+    struct census_walk walk = {0};
+    int step;
+    while ((step = census_walk_batch(&walk, c->map)) > 0) {
+        for (size_t i = 0; i < walk.count; i++) {
+            struct block_index *p = walk.items[i];
+            if (p->nHeight != height)
+                continue;
+            if (c->n == CENSUS_CAP) {
+                c->overflow = true;
+                break;
+            }
+            c->items[c->n++] = p;
         }
-        c->items[c->n++] = p;
+        if (c->overflow) break;
+    }
+    if (step < 0) {
+        c->n = 0;
+        c->overflow = true;
+        return;
     }
     c->valid = true;
 }
@@ -144,11 +202,13 @@ static void census_fill(struct census *c, struct main_state *ms, int height,
 static struct block_index *scan_find(struct main_state *ms, int height,
                                      block_height_pred_fn pred, void *ctx)
 {
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (p && p->nHeight == height && pred(p, ctx))
-            return p;
+    struct census_walk walk = {0};
+    while (census_walk_batch(&walk, &ms->map_block_index) > 0) {
+        for (size_t i = 0; i < walk.count; i++) {
+            struct block_index *p = walk.items[i];
+            if (p->nHeight == height && pred(p, ctx))
+                return p;
+        }
     }
     return NULL;
 }
@@ -181,6 +241,11 @@ struct block_index *block_height_find(struct main_state *ms, int height,
 }
 
 #ifdef ZCL_TESTING
+void block_height_census_test_fail_batch_after(int count)
+{
+    g_test_fail_batch_after = count;
+}
+
 unsigned long block_height_census_test_scans(void)
 {
     pthread_mutex_lock(&g_mu);
@@ -200,6 +265,7 @@ void block_height_census_test_reset(void)
 {
     pthread_mutex_lock(&g_mu);
     g_test_clock = NULL;
+    g_test_fail_batch_after = -1;
     for (int i = 0; i < CENSUS_SLOTS; i++)
         g_census[i].valid = false;
     g_scans = 0;
