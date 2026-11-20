@@ -52,28 +52,28 @@ void wcs_sha_str(const char *d, size_t n, char out[WCS_SHA])
     sha_final(&s, out);
 }
 
-/* -1 real error; 0 ok. A path that is not a regular file hashes as
- * "absent" with *enoent set when it vanished, mirroring the shell
- * original's [ -f ] test and its narrowly scoped TOCTOU tolerance. */
+/* -1 real error; 0 ok. A vanished path is the only tolerated omission. */
 static int sha_file_ex(const char *path, char out[WCS_SHA], int *enoent)
 {
     static char buf[65536];
     struct stat st;
     *enoent = 0;
     strcpy(out, "absent");
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+    if (stat(path, &st) != 0) {
         *enoent = (errno == ENOENT);
-        return 0;
+        return *enoent ? 0 : -1;
     }
+    if (!S_ISREG(st.st_mode)) { errno = EINVAL; return -1; }
     FILE *f = fopen(path, "rb");
-    if (!f) { *enoent = (errno == ENOENT); return 0; }
+    if (!f) { *enoent = (errno == ENOENT); return *enoent ? 0 : -1; }
     struct wcs_sha s;
     sha_init(&s);
     size_t n;
     while ((n = fread(buf, 1, sizeof buf, f)) > 0)
         sha_update(&s, (const uint8_t *)buf, n);
-    if (ferror(f)) { fclose(f); return -1; }
-    fclose(f);
+    int failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    if (failed) return -1;
     sha_final(&s, out);
     return 0;
 }
@@ -107,15 +107,13 @@ static const char *const dg_pruned[] = { ".git", "build", "test-tmp",
     ".claude", ".cache", "vendor/tor", NULL };
 
 
-/* Manual recursion, not nftw: nftw stops on FTW_SKIP_SUBTREE unless glibc's
- * FTW_ACTIONRETVAL is set, which is not portable. Unreadable directories are
- * skipped, as nftw reports them; depth is bounded and fails closed. */
+/* Manual recursion keeps pruning portable; only vanished entries are skipped. */
 static int dg_scan(const char *dir, int depth);
 
 static int dg_entry(const char *p, int depth)
 {
     struct stat st;
-    if (lstat(p, &st) != 0) return 0;
+    if (lstat(p, &st) != 0) return errno == ENOENT ? 0 : -1;
     if (S_ISDIR(st.st_mode)) {
         const char *rel = p[0] == '.' && p[1] == '/' ? p + 2 : p;
         return wcs_name_in(rel, dg_pruned) ? 0 : dg_scan(p, depth + 1);
@@ -140,10 +138,13 @@ static int dg_scan(const char *dir, int depth)
 {
     if (depth > 64) return -1;
     DIR *d = opendir(dir);
-    if (!d) return 0;
+    if (!d) return errno == ENOENT ? 0 : -1;
     struct dirent *de;
     int rc = 0;
-    while (rc == 0 && (de = readdir(d)) != NULL) {
+    while (rc == 0) {
+        errno = 0;
+        de = readdir(d);
+        if (!de) { if (errno != 0) rc = -1; break; }
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
         char p[WCS_PATH];
         if (ovf(snprintf(p, sizeof p, "%s/%s", dir, de->d_name), sizeof p))
@@ -151,7 +152,7 @@ static int dg_scan(const char *dir, int depth)
         else
             rc = dg_entry(p, depth);
     }
-    closedir(d);
+    if (closedir(d) != 0) rc = -1;
     return rc;
 }
 
@@ -201,32 +202,40 @@ static int dg_incl_add(char incl[DG_INCL][256], int *nincl, const char *name,
     return 0;
 }
 
+static int dg_scan_includes_file(FILE *f, const char *path,
+                                 char incl[DG_INCL][256], int *nincl)
+{
+    static char line[WCS_SRCLINE];
+    int rc = 0;
+    while (rc == 0 && fgets(line, sizeof line, f)) {
+        size_t raw = strlen(line);
+        if (raw && line[raw - 1] != '\n' && !feof(f)) {
+            fprintf(stderr, "%s: source line exceeds %d bytes in %s\n",
+                    k_wcs_gate, WCS_SRCLINE, path);
+            rc = -1;
+            break;
+        }
+        for (const char *h = strchr(line, '#'); h && rc == 0;
+             h = strchr(h + 1, '#')) {
+            const char *name = NULL;
+            size_t len = 0;
+            if (dg_incl_name(h, &name, &len))
+                rc = dg_incl_add(incl, nincl, name, len);
+        }
+    }
+    if (ferror(f)) rc = -1;
+    return rc;
+}
+
 /* Collects basenames named by an include "...c" anywhere in the tree. */
 static int dg_incl_scan(char incl[DG_INCL][256], int *nincl)
 {
-    static char line[WCS_SRCLINE];
     for (int i = 0; i < dg_n; i++) {
         if (!dg_ext_ok(dg_paths[i])) continue;
         FILE *f = fopen(dg_paths[i], "r");
-        if (!f) continue;
-        int rc = 0;
-        while (rc == 0 && fgets(line, sizeof line, f)) {
-            size_t raw = strlen(line);
-            if (raw && line[raw - 1] != '\n' && !feof(f)) {
-                fprintf(stderr, "%s: source line exceeds %d bytes in %s\n",
-                        k_wcs_gate, WCS_SRCLINE, dg_paths[i]);
-                rc = -1;
-                break;
-            }
-            for (const char *h = strchr(line, '#'); h && rc == 0;
-                 h = strchr(h + 1, '#')) {
-                const char *name = NULL;
-                size_t len = 0;
-                if (dg_incl_name(h, &name, &len))
-                    rc = dg_incl_add(incl, nincl, name, len);
-            }
-        }
-        fclose(f);
+        if (!f) { if (errno == ENOENT) continue; return -1; }
+        int rc = dg_scan_includes_file(f, dg_paths[i], incl, nincl);
+        if (fclose(f) != 0) rc = -1;
         if (rc != 0) return -1;
     }
     return 0;

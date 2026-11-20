@@ -555,6 +555,72 @@ static int cache_policy_proofs(const char *base, const char *root,
     return bad;
 }
 
+static int cache_io_fallback(const char *base, const char *root,
+                             const char *stub, const char *flags,
+                             const char *srclist, const char *runs)
+{
+    char sha[WCS_SHA], dir[SFP], miss[SFP], out[SFP];
+    if (sjoin(dir, sizeof dir, base, "/io-cache") ||
+        sjoin(miss, sizeof miss, base, "/io-misses") ||
+        sjoin(out, sizeof out, base, "/io-out") || csr_mkdirs(out)) return 2;
+    if (wcs_include_digest(root, sha) == 0) return 1;
+    if (wcs_cache_setup("tu-cache-io", stub, stub, flags, base, root, dir) ||
+        wcs_cache_on() || wcs_cache_plan(srclist, miss, out, 1) ||
+        count_lines(miss) != 16) return 1;
+    int before = count_lines(runs);
+    if (run_misses(miss, out, stub, flags) || count_lines(runs) != before + 16)
+        return 1;
+    return 0;
+}
+
+static int cache_io_invalid_path(const char *base)
+{
+    char file[SFP], invalid[SFP], sha[WCS_SHA];
+    if (sjoin(file, sizeof file, base, "/not-a-directory") ||
+        sjoin(invalid, sizeof invalid, file, "/child")) return 2;
+    if (csr_write(file, "fixture\n") != 0) return 2;
+    int rc = wcs_sha_file(invalid, sha);
+    (void)unlink(file);
+    if (rc == 0) return sf_fail("invalid parent was accepted as an absent cache input");
+    if (wcs_sha_file(file, sha) != 0 || strcmp(sha, "absent") != 0)
+        return sf_fail("vanished input was not tolerated");
+    return 0;
+}
+
+static int cache_io_refusal(const char *base, const char *root,
+                            const char *stub, const char *flags,
+                            const char *srclist, const char *runs)
+{
+    char denied[SFP], subdir[SFP];
+    if (sjoin(denied, sizeof denied, root, "/src/shared.h") ||
+        sjoin(subdir, sizeof subdir, root, "/src/nested")) return 2;
+    int rc = cache_io_invalid_path(base);
+    if (rc) return rc;
+    if (chmod(denied, 0000) != 0) return 2;
+    if (access(denied, R_OK) == 0) {
+        (void)chmod(denied, 0600);
+        return 0; /* Privileged users cannot exercise mode-bit refusal. */
+    }
+    rc = cache_io_fallback(base, root, stub, flags, srclist, runs);
+    if (chmod(denied, 0600) != 0) return 2;
+    if (rc == 0 && chmod(subdir, 0000) == 0) {
+        if (access(subdir, R_OK | X_OK) != 0)
+            rc = cache_io_fallback(base, root, stub, flags, srclist, runs);
+        if (chmod(subdir, 0700) != 0) return 2;
+    } else if (rc == 0) return 2;
+    if (rc != 0) return sf_fail("unreadable include did not disable the cache");
+    printf("  OK: --self-test — unreadable file and directory disable cache; all 16 units compile\n");
+    return 0;
+}
+
+static int cache_io_and_synthetic(const char *base, const char *root,
+                                  const char *srclist, const char *stub,
+                                  const char *flags, const char *runs)
+{
+    int rc = cache_io_refusal(base, root, stub, flags, srclist, runs);
+    return rc ? rc : cache_proofs_synthetic(base, root, srclist, stub, flags, runs);
+}
+
 static int cache_selftest(const char *cc, const char *flags_nul,
                           const char *scratch, const char *real_src)
 {
@@ -588,7 +654,7 @@ static int cache_selftest(const char *cc, const char *flags_nul,
     fprintf(ff, "-c%c", '\0');
     fclose(ff);
     setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "1", 1);
-    int rc = cache_proofs_synthetic(base, root, srclist, stub, flags, runs);
+    int rc = cache_io_and_synthetic(base, root, srclist, stub, flags, runs);
     if (rc == 0)
         rc = cache_policy_proofs(base, root, srclist, stub, flags, runs);
     if (rc == 0)
