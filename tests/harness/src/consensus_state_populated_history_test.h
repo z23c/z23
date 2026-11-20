@@ -125,11 +125,12 @@ static bool csi_populated_history_rows(const char *history, sqlite3 *db,
 
 static bool csi_populated_history_open_archive(const struct csi_real_paths *p,
     const struct wallet_cutover_binding *binding, struct wallet_history_capability *cap,
-    struct main_state *archive, sqlite3 *db, const uint8_t originals[2][32])
+    struct main_state *archive, sqlite3 *db, const uint8_t originals[2][32],
+    struct block_index_history_arena *arena)
 {
     return archive && csi_populated_history_cap(cap, p, binding) &&
         block_index_history_archive_open(archive, wallet_history_capability_path(cap), 3500000,
-                                         binding->target_height, binding->target_hash, NULL).ok &&
+                                         binding->target_height, binding->target_hash, NULL, arena).ok &&
         csi_populated_history_rows(wallet_history_capability_path(cap), db, archive, originals);
 }
 static bool csi_populated_history_count(sqlite3 *db, sqlite3_stmt **count)
@@ -154,9 +155,11 @@ static bool csi_populated_history_proof(const struct csi_real_paths *p,
     if (count && sqlite3_finalize(count) != SQLITE_OK) ok = false;
     struct wallet_history_capability cap; wallet_history_capability_init(&cap);
     struct main_state *archive = calloc(1, sizeof(*archive));
+    struct block_index_history_arena arena = {0};
     if (archive) main_state_init(archive);
-    ok = ok && csi_populated_history_open_archive(p, binding, &cap, archive, db, originals);
+    ok = ok && csi_populated_history_open_archive(p, binding, &cap, archive, db, originals, &arena);
     if (archive) { main_state_free(archive); free(archive); }
+    block_index_history_arena_release(&arena);
     wallet_history_capability_release(&cap);
     if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
     return ok;

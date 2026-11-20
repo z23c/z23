@@ -1539,13 +1539,17 @@ static int fsi_case_terminal_script_wiring(void)
     archive.pindex_best_header = &rows[FSI_W];
     struct icb_terminal_context terminal = {0};
     terminal.archive = &archive;
+    /* The fixture rows stand in for an owned private arena; selection must
+     * promote its ownership before linking a public window to them. */
+    terminal.archive_arena.rows = rows;
+    terminal.archive_arena.count = FSI_W + 1;
     memcpy(terminal.window, n.is.w, sizeof(terminal.window));
     struct consensus_state_bundle_manifest manifest = {0};
     manifest.height = 64882;
     struct zcl_result r = ready ? icb_terminal_select_window_test(&terminal, &n.ms, &manifest) : ZCL_ERR(-1, "fixture");
     FSI_CHECK("terminal selection restores exact old-tip script validity before binding",
         ready && r.ok && (old->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS &&
-        terminal.prepared && n.ms.pindex_best_header != old);
+        terminal.prepared && terminal.archive_arena.promoted && n.ms.pindex_best_header != old);
     icb_terminal_unlink_window(&terminal);
     main_state_free(&archive);
     fsi_node_close(&n);
@@ -1906,7 +1910,7 @@ static bool fsi_real_stage(const struct fsi_node *n, const char *bundle)
 
 static bool fsi_real_window(struct main_state *archive, const char *archive_dir,
                             struct block_header *window, struct island_anchor *anchor,
-                            char *why, size_t why_size)
+                            char *why, size_t why_size, struct block_index_history_arena *arena)
 {
     const struct rom_state_rung *rung = NULL;
     for (size_t i = 0; i < get_rom_state_rung_count(); ++i) {
@@ -1914,7 +1918,7 @@ static bool fsi_real_window(struct main_state *archive, const char *archive_dir,
         if (r && r->cp.height == 3309900) rung = r;
     }
     bool read = rung && block_index_history_archive_open(archive, archive_dir, 3500000,
-        3309900, rung->cp.block_hash, window).ok;
+        3309900, rung->cp.block_hash, window, arena).ok;
     flysync_island_test_set_frozen_verifier(NULL);
     flysync_island_test_set_rung(NULL);
     return read && flysync_island_verify_window(window, ISLAND_ANCHOR_WINDOW,
@@ -1957,7 +1961,8 @@ static int fsi_real_recovery_child(void)
     main_state_init(&archive);
     struct block_header w[ISLAND_ANCHOR_WINDOW];
     struct island_anchor anchor;
-    bool valid = fsi_real_window(&archive, archive_dir, w, &anchor, why, sizeof(why));
+    struct block_index_history_arena arena = {0};
+    bool valid = fsi_real_window(&archive, archive_dir, w, &anchor, why, sizeof(why), &arena);
     bool lease = staged && boot_datadir_lock_acquire(n.dir);
     bool ready = lease && fsi_recovery_genesis(progress_store_db());
     flysync_island_set_requested(true);
@@ -1974,6 +1979,7 @@ static int fsi_real_recovery_child(void)
     reducer_startup_gate_test_reset();
     checkpoint_header_fetch_test_reset();
     main_state_free(&archive);
+    block_index_history_arena_release(&arena);
     fsi_node_close(&n);
     return failures;
 }

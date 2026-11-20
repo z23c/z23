@@ -36,6 +36,7 @@ struct history_export {
     unsigned file_count;
     uint64_t total;
     struct main_state *index;
+    struct block_index_history_arena arena;
     uintptr_t source_root;
     bool source_open;
     char source_path[128], parent_path[128], stage_path[128];
@@ -162,15 +163,17 @@ static bool history_validate_archive(const struct wallet_history_export_request 
     if (!verified) return false;
     main_state_init(verified);
 #ifdef ZCL_TESTING
+    struct block_index_history_arena arena = {0};
     struct zcl_result opened = test_genesis ?
         block_index_history_archive_test_open(verified, path, request->max_rows,
-            request->endpoint_height, request->endpoint_hash, test_genesis, NULL) :
+            request->endpoint_height, request->endpoint_hash, test_genesis, NULL, &arena) :
         block_index_history_archive_open(verified, path, request->max_rows,
-            request->endpoint_height, request->endpoint_hash, NULL);
+            request->endpoint_height, request->endpoint_hash, NULL, &arena);
 #else
     (void)test_genesis;
+    struct block_index_history_arena arena = {0};
     struct zcl_result opened = block_index_history_archive_open(verified, path,
-        request->max_rows, request->endpoint_height, request->endpoint_hash, NULL);
+        request->max_rows, request->endpoint_height, request->endpoint_hash, NULL, &arena);
 #endif
     bool ok = opened.ok;
     for (int64_t h = 0; ok && h <= request->endpoint_height; h++) {
@@ -184,12 +187,14 @@ static bool history_validate_archive(const struct wallet_history_export_request 
         ok = checked.ok;
     }
     main_state_free(verified);
+    block_index_history_arena_release(&arena);
     free(verified);
     return ok;
 }
 static bool history_validate(struct history_export *e)
 {
     main_state_free(e->index);
+    block_index_history_arena_release(&e->arena);
     free(e->index);
     e->index = NULL;
 #ifdef ZCL_TESTING
@@ -201,6 +206,7 @@ static bool history_validate(struct history_export *e)
 static void history_close(struct history_export *e)
 {
     if (e->index) { main_state_free(e->index); free(e->index); }
+    block_index_history_arena_release(&e->arena);
     if (e->source_open) platform_private_directory_close(e->source_root);
     for (unsigned i = 0; i < HISTORY_FILE_LIMIT; i++) platform_positioned_file_close(&e->files[i]);
     platform_directory_transaction_close(&e->blocks);
@@ -258,7 +264,7 @@ static bool history_copy_index(struct history_export *e)
     e->index = zcl_calloc(1, sizeof(*e->index), "history export index state");
     if (!e->index) return false;
     main_state_init(e->index);
-    return block_index_history_index_load(e->stage_path, e->index, e->request->max_rows).ok;
+    return block_index_history_index_load(e->stage_path, e->index, e->request->max_rows, &e->arena).ok;
 }
 static bool history_request_valid(const struct wallet_history_export_request *r,
                                   const struct wallet_history_export_result *out)

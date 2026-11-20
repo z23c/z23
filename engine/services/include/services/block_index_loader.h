@@ -175,11 +175,25 @@ size_t block_index_flat_age_arena_pages(struct main_state *ms,
 size_t block_index_flat_paced_reage(struct main_state *ms, int tip_height,
                                     int64_t now_ms, size_t window_bytes);
 
+/* Private rows are owned until all users of the state have detached and the
+ * state is freed. An escaped public ancestry must be promoted before linking;
+ * promoted rows and their extensions then live for the process lifetime. */
+struct block_index_history_arena {
+    struct block_index *rows;
+    size_t count;
+    bool promoted;
+};
+void block_index_history_arena_release(struct block_index_history_arena *arena);
+void block_index_history_arena_promote(struct block_index_history_arena *arena);
+#ifdef ZCL_TESTING
+void block_index_history_test_release_counts(size_t *arenas, size_t *extensions);
+#endif
+
 /* Load a bounded flat index into an empty private state without publishing a
  * global flat identity. This admits no header, chain or endpoint authority.
  * Discard the private state after any failure. */
 struct zcl_result block_index_history_index_load(const char *datadir, struct main_state *state,
-                                                  size_t max_entries);
+    size_t max_entries, struct block_index_history_arena *arena);
 
 /* Caller owns an empty standalone state and keeps archive bytes immutable for
  * this call and subsequent replay. Endpoint must already be admitted by the
@@ -190,12 +204,14 @@ struct zcl_result block_index_history_index_load(const char *datadir, struct mai
 struct block_header;
 struct zcl_result block_index_history_archive_open(struct main_state *state,
     const char *archive_dir, size_t max_entries, int32_t endpoint_height,
-    const uint8_t endpoint_hash[32], struct block_header *top_window);
+    const uint8_t endpoint_hash[32], struct block_header *top_window,
+    struct block_index_history_arena *arena);
 #ifdef ZCL_TESTING
 struct uint256;
 struct zcl_result block_index_history_archive_test_open(struct main_state *state,
     const char *archive_dir, size_t max_entries, int32_t endpoint_height,
-    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window);
+    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window,
+    struct block_index_history_arena *arena);
 #endif
 
 

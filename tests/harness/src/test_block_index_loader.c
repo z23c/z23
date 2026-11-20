@@ -2781,6 +2781,25 @@ static bool bil_mine_anchor_header(struct block_index *anchor,
     return mined;
 }
 
+static bool bil_private_anchor_refusal(const char *dir)
+{
+    struct main_state state;
+    main_state_init(&state);
+    struct block_index_history_arena arena = {0};
+    size_t before = 0, after = 0, ext_before = 0, ext_after = 0;
+    block_index_history_test_release_counts(&before, &ext_before);
+    zcl_alloc_fault_fail_next("flat forward pass");
+    struct zcl_result failure = block_index_history_index_load(dir, &state, 3, &arena);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    block_index_history_test_release_counts(&after, &ext_after);
+    bool ok = !failure.ok && fired && state.map_block_index.size == 0 &&
+        !arena.rows && after == before + 1 && ext_after > ext_before;
+    main_state_free(&state);
+    block_index_history_arena_release(&arena);
+    return ok;
+}
+
 static int bil_forward_allocation_case(void)
 {
     int failures = 0;
@@ -2825,6 +2844,8 @@ static int bil_forward_allocation_case(void)
                   loaded_solution_len == sizeof(solution) && loaded_solution &&
                   memcmp(loaded_solution, solution, sizeof(solution)) == 0);
         main_state_free(&anchor_dst);
+        BIL_CHECK("bil: private forward refusal releases anchored extension and arena",
+                  bil_private_anchor_refusal(tmpdir));
         main_state_init(&dst);
         struct block_index resident;
         block_index_init(&resident);
@@ -3398,18 +3419,20 @@ static int bil_flat_private_identity_case(const char *dir)
     struct block_index_flat_identity before = {0}, after = {0};
     bool identity_before = block_index_flat_verified_identity(dir, &before);
     struct main_state isolated; main_state_init(&isolated);
-    bool zero = !block_index_history_index_load(dir, &isolated, 0).ok;
-    bool bounded = !block_index_history_index_load(dir, &isolated, 1).ok &&
+    struct block_index_history_arena arena = {0};
+    bool zero = !block_index_history_index_load(dir, &isolated, 0, &arena).ok;
+    bool bounded = !block_index_history_index_load(dir, &isolated, 1, &arena).ok &&
         isolated.map_block_index.size == 0;
     bool after_refusal = block_index_flat_verified_identity(dir, &after) &&
         !memcmp(&before, &after, sizeof(before));
-    bool private_ok = block_index_history_index_load(dir, &isolated, 2).ok;
-    bool nonempty = !block_index_history_index_load(dir, &isolated, 2).ok;
+    bool private_ok = block_index_history_index_load(dir, &isolated, 2, &arena).ok;
+    bool nonempty = !block_index_history_index_load(dir, &isolated, 2, &arena).ok;
     bool after_success = block_index_flat_verified_identity(dir, &after) &&
         !memcmp(&before, &after, sizeof(before));
     BIL_CHECK("bil: private history index bounds and identity isolation",
               identity_before && zero && bounded && after_refusal && private_ok && nonempty && after_success);
     main_state_free(&isolated);
+    block_index_history_arena_release(&arena);
     return failures;
 }
 
@@ -3562,6 +3585,27 @@ static bool bil_history_view_matches(const struct main_state *archive,
         block_index_hdrext_peek(selected) != NULL && bil_history_window_matches(window, hashes);
 }
 
+static bool bil_history_arena_absent(const char *dir)
+{
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof(path), "%s/.block_index.arena", dir);
+    return n > 0 && (size_t)n < sizeof(path) && access(path, F_OK) != 0 && errno == ENOENT;
+}
+
+static bool bil_history_release_checked(struct main_state *archive,
+    struct block_index_history_arena *arena, bool require_extensions)
+{
+    size_t before = 0, after = 0, ext_before = 0, ext_after = 0;
+    block_index_history_test_release_counts(&before, &ext_before);
+    main_state_free(archive);
+    block_index_history_arena_release(arena);
+    block_index_history_test_release_counts(&after, &ext_after);
+    bool ok = !arena->rows && !arena->count && !arena->promoted &&
+        (!require_extensions || (after == before + 1 && ext_after > ext_before));
+    block_index_history_arena_release(arena);
+    return ok && !arena->rows && !arena->count && !arena->promoted;
+}
+
 static int bil_history_archive_case(int mode)
 {
     int failures = 0;
@@ -3583,19 +3627,46 @@ static int bil_history_archive_case(int mode)
     bool pinned = save_block_index_flat_identity(sentinel, &original, &identity).ok &&
         block_index_flat_verified_identity(sentinel, &before);
     struct block_header window[ISLAND_ANCHOR_WINDOW];
+    struct block_index_history_arena arena = {0};
     struct zcl_result r = block_index_history_archive_test_open(&archive, dir,
-        mode == 4 ? 28 : 29, 27, hashes[27].data, &hashes[0], window);
+        mode == 4 ? 28 : 29, 27, hashes[27].data, &hashes[0], window, &arena);
     bool retained = pinned && block_index_flat_verified_identity(sentinel, &after) &&
         !memcmp(&before, &after, sizeof(before));
     bool view_ok = mode == 0 ? r.ok && bil_history_view_matches(&archive, hashes, window) :
         !r.ok && active_chain_cached_height(&archive.chain_active) < 0 && !archive.pindex_best_header;
+    BIL_CHECK("history archive does not create an arena file in immutable input",
+              bil_history_arena_absent(dir));
     BIL_CHECK("history archive verifies selected ancestry and preserves identity", made && pinned && retained && view_ok);
-    main_state_free(&archive); main_state_free(&original);
+    BIL_CHECK("history owner releases rows and extensions and closes idempotently",
+              bil_history_release_checked(&archive, &arena, mode == 0));
+    main_state_free(&original);
     (void)test_rm_rf_recursive(dir); (void)test_rm_rf_recursive(sentinel);
     return failures;
 }
 
 #if defined(__linux__) && !defined(_WIN32)
+static bool bil_history_legacy_write(const char *path, struct stat *before)
+{
+    static const char content[] = "existing legacy arena";
+    FILE *f = fopen(path, "wb");
+    bool ok = f && fwrite(content, 1, sizeof(content), f) == sizeof(content);
+    if (f && fclose(f) != 0) ok = false;
+    return ok && stat(path, before) == 0;
+}
+
+static bool bil_history_legacy_unchanged(const char *path, const struct stat *before)
+{
+    static const char content[] = "existing legacy arena";
+    char readback[sizeof(content)] = {0};
+    FILE *f = fopen(path, "rb");
+    bool ok = f && fread(readback, 1, sizeof(readback), f) == sizeof(readback);
+    if (f && fclose(f) != 0) ok = false;
+    struct stat after;
+    return ok && stat(path, &after) == 0 && before->st_ino == after.st_ino &&
+        before->st_size == after.st_size && before->st_mtime == after.st_mtime &&
+        !memcmp(readback, content, sizeof(content));
+}
+
 static int bil_history_retained_handle_case(void)
 {
     int failures = 0;
@@ -3606,19 +3677,28 @@ static int bil_history_retained_handle_case(void)
     }
     struct uint256 hashes[29] = {0};
     bool made = bil_history_make(dir, hashes, 0);
+    char legacy[PATH_MAX + 32];
+    int legacy_n = snprintf(legacy, sizeof(legacy), "%s/.block_index.arena", dir);
+    struct stat legacy_before;
+    bool legacy_ok = legacy_n > 0 && (size_t)legacy_n < sizeof(legacy) &&
+        bil_history_legacy_write(legacy, &legacy_before);
     uintptr_t handle = 0;
     bool opened = made && platform_private_directory_open_validated_traverse(dir, &handle);
     char path[64];
     int n = opened ? snprintf(path, sizeof(path), "/proc/self/fd/%d", (int)handle) : -1;
     struct main_state archive; main_state_init(&archive);
     struct block_header window[ISLAND_ANCHOR_WINDOW];
+    struct block_index_history_arena arena = {0};
     bool valid_path = n >= 0 && (size_t)n < sizeof(path);
     struct zcl_result r = valid_path ? block_index_history_archive_test_open(
-        &archive, path, 29, 27, hashes[27].data, &hashes[0], window) :
+        &archive, path, 29, 27, hashes[27].data, &hashes[0], window, &arena) :
         ZCL_ERR(-1, "history retained directory unavailable");
     BIL_CHECK("history archive traverses retained private directory handle",
         opened && valid_path && r.ok && bil_history_view_matches(&archive, hashes, window));
+    BIL_CHECK("history archive preserves an existing legacy arena file",
+              legacy_ok && bil_history_legacy_unchanged(legacy, &legacy_before));
     main_state_free(&archive);
+    block_index_history_arena_release(&arena);
     if (opened) platform_private_directory_close(handle);
     (void)test_rm_rf_recursive(dir);
     return failures;
@@ -3637,9 +3717,12 @@ static int bil_history_cancel_case(void)
     bool made = bil_history_make(dir, hashes, 0);
     struct main_state archive; main_state_init(&archive);
     struct block_header window[ISLAND_ANCHOR_WINDOW];
+    struct block_index_history_arena arena = {0};
+    size_t freed_before = 0, freed_after = 0, ext_before = 0, ext_after = 0;
+    block_index_history_test_release_counts(&freed_before, &ext_before);
     block_index_history_test_cancel_height(13);
     struct zcl_result r = block_index_history_archive_test_open(&archive, dir, 29, 27,
-        hashes[27].data, &hashes[0], window);
+        hashes[27].data, &hashes[0], window, &arena);
     block_index_history_test_cancel_height(-1);
     struct block_header zero[ISLAND_ANCHOR_WINDOW] = {0};
     BIL_CHECK("history cancellation clears partial window", !memcmp(window, zero, sizeof(window)));
@@ -3647,21 +3730,30 @@ static int bil_history_cancel_case(void)
         made && !r.ok && strstr(r.message, "cancelled") &&
         active_chain_cached_height(&archive.chain_active) < 0 && !archive.pindex_best_header);
     main_state_free(&archive);
+    block_index_history_arena_release(&arena);
+    block_index_history_test_release_counts(&freed_after, &ext_after);
+    BIL_CHECK("history cancellation frees its owned rows and header extensions",
+              freed_after == freed_before + 1 && ext_after > ext_before && !arena.rows);
+    freed_before = freed_after;
     main_state_init(&archive);
     block_index_history_test_cancel_row(10);
     r = block_index_history_archive_test_open(&archive, dir, 29, 27,
-        hashes[27].data, &hashes[0], window);
+        hashes[27].data, &hashes[0], window, &arena);
     block_index_history_test_cancel_row(-1);
     BIL_CHECK("partial archive insert rolls back before arena release",
         !r.ok && strstr(r.message, "cancelled") && archive.map_block_index.size == 0 &&
         active_chain_cached_height(&archive.chain_active) < 0);
     main_state_free(&archive);
+    block_index_history_arena_release(&arena);
+    block_index_history_test_release_counts(&freed_after, NULL);
+    BIL_CHECK("partial insertion frees its anonymous arena", freed_after == freed_before + 1 && !arena.rows);
     main_state_init(&archive);
     r = block_index_history_archive_test_open(&archive, dir, 29, 27,
-        hashes[27].data, &hashes[0], window);
+        hashes[27].data, &hashes[0], window, &arena);
     BIL_CHECK("history succeeds after cancelled attempt cleanup",
         r.ok && bil_history_view_matches(&archive, hashes, window));
     main_state_free(&archive);
+    block_index_history_arena_release(&arena);
     (void)test_rm_rf_recursive(dir);
     return failures;
 }
@@ -3728,21 +3820,24 @@ static int bil_history_probe_child(void)
     const char *hasharg = input.hash;
     struct uint256 hash; uint256_set_hex(&hash, hasharg);
     struct main_state state; main_state_init(&state);
+    struct block_index_history_arena arena = {0};
     struct block_header window[ISLAND_ANCHOR_WINDOW];
     struct timespec start, end; struct rusage usage;
     long before = bil_am_rss_kib();
     if (before < 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0) { main_state_free(&state); return 1; }
     struct zcl_result r = block_index_history_archive_open(&state, dir, (size_t)maxrows,
-                                                           (int32_t)height, hash.data, window);
+                                                           (int32_t)height, hash.data, window, &arena);
     struct uint256 top = {0}; if (r.ok) block_header_get_hash(&window[0], &top);
     bool ok = r.ok && uint256_eq(&top, &hash) && state.pindex_best_header &&
         state.pindex_best_header->phashBlock && uint256_eq(state.pindex_best_header->phashBlock, &hash);
     if (!ok || clock_gettime(CLOCK_MONOTONIC, &end) != 0 || getrusage(RUSAGE_SELF, &usage) != 0) {
-        fprintf(stderr, "history probe refused: %s\n", r.message); main_state_free(&state); return 1;
+        fprintf(stderr, "history probe refused: %s\n", r.message); main_state_free(&state);
+        block_index_history_arena_release(&arena); return 1;
     }
     long rss = bil_am_rss_kib();
     size_t rows = state.map_block_index.size;
     main_state_free(&state);
+    block_index_history_arena_release(&arena);
     long after = bil_am_rss_kib();
     if (rss < 0 || after < 0) return 1;
     int64_t elapsed = (int64_t)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000;

@@ -419,6 +419,16 @@ static struct zcl_result bil_flat_payload_read(
     return ZCL_OK;
 }
 
+#ifdef ZCL_TESTING
+static _Atomic size_t g_history_arenas_released;
+static _Atomic size_t g_history_extensions_released;
+void block_index_history_test_release_counts(size_t *arenas, size_t *extensions)
+{
+    if (arenas) *arenas = atomic_load(&g_history_arenas_released);
+    if (extensions) *extensions = atomic_load(&g_history_extensions_released);
+}
+#endif
+
 /* No pprev or forward-pass work has run on refusal. Remove only this
  * attempt's arena pointers before releasing the arena and its header
  * extensions; resident entries retain their bytes and probe chains. Integer
@@ -436,8 +446,13 @@ static void bil_flat_rollback(struct block_map *bm,
             bm->size--;
         }
     }
-    for (uint32_t i = 0; i < count; i++)
+    for (uint32_t i = 0; i < count; i++) {
+#ifdef ZCL_TESTING
+        if (block_index_hdrext_peek(&arena[i]))
+            atomic_fetch_add(&g_history_extensions_released, 1);
+#endif
         block_index_hdrext_free(&arena[i]);
+    }
 }
 
 static uint32_t bil_selected_genesis_bits(const struct chain_params *cp)
@@ -994,8 +1009,39 @@ static void bil_arena_release(struct block_index *arena, bool mapped,
 #endif
 }
 
+static struct zcl_result bil_flat_check_count(uint32_t count, size_t max_entries)
+{
+    if ((size_t)count > max_entries)
+        return ZCL_ERR(-12, "block_index_flat: %u entries exceed budget %zu", count, max_entries);
+    if (!bil_flat_allocation_sizes_valid(count))
+        return ZCL_ERR(-10, "block_index_flat: allocation size overflow (%u entries)", count);
+    return ZCL_OK;
+}
+
+static struct block_index *bil_load_arena(const char *datadir, uint32_t count,
+    bool canonical, bool *mapped, char *path, size_t path_cap)
+{
+    if (canonical) return bil_arena_alloc(datadir, count, mapped, path, path_cap);
+    return zcl_calloc(count, sizeof(struct block_index), "private history arena");
+}
+
+static void bil_private_arena_take(struct block_index_history_arena *owner,
+                                   struct block_index *arena, size_t count)
+{
+    if (owner) { owner->rows = arena; owner->count = count; }
+}
+
+static void bil_record_private_failure(bool succeeded, bool canonical)
+{
+#ifdef ZCL_TESTING
+    if (!succeeded && !canonical) atomic_fetch_add(&g_history_arenas_released, 1);
+#else
+    (void)succeeded; (void)canonical;
+#endif
+}
+
 static struct zcl_result bil_flat_load(const char *datadir, struct main_state *ms,
-                                       size_t max_entries, bool publish_identity)
+    size_t max_entries, bool publish_identity, struct block_index_history_arena *owner)
 {
     /* A failed or legacy load cannot inherit a verified snapshot identity. */
     if (publish_identity) {
@@ -1020,14 +1066,10 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
         return result;
     }
     uint32_t count = input.count;
-    if ((size_t)count > max_entries) {
+    result = bil_flat_check_count(count, max_entries);
+    if (!result.ok) {
         flat_read_mapping_close(&mapping, fd);
-        return ZCL_ERR(-12, "block_index_flat: %u entries exceed budget %zu", count, max_entries);
-    }
-    if (!bil_flat_allocation_sizes_valid(count)) {
-        flat_read_mapping_close(&mapping, fd);
-        return ZCL_ERR(-10, "block_index_flat: allocation size overflow (%u entries)",
-                       count);
+        return result;
     }
     int64_t t0 = (int64_t)platform_time_wall_time_t();
     int64_t t0_ms = platform_time_monotonic_ms();
@@ -1038,12 +1080,11 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     /* File-backed arena (see bil_arena_file_map and bil_arena_alloc); the
      * zcl_calloc fallback keeps every platform or path without a usable
      * mapping loading identically. */
-    char arena_path[1024];
+    char arena_path[1024] = {0};
     size_t arena_bytes = (size_t)count * sizeof(struct block_index);
-    bool arena_mapped;
-    struct block_index *arena = bil_arena_alloc(datadir, count, &arena_mapped,
-                                                arena_path,
-                                                sizeof(arena_path));
+    bool arena_mapped = false;
+    struct block_index *arena = bil_load_arena(datadir, count, publish_identity,
+                                               &arena_mapped, arena_path, sizeof(arena_path));
     if (!arena) {
         flat_read_mapping_close(&mapping, fd);
         return ZCL_ERR(-10, "block_index_flat: arena allocation failed for %u "
@@ -1075,11 +1116,13 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     result = bil_flat_forward_rows(ms, arena, count, &release);
 finish:
     free(release);
+    bil_record_private_failure(result.ok, publish_identity);
     bil_arena_release(arena, arena_mapped, arena_bytes, arena_path,
                       !result.ok);
     flat_read_mapping_close(&mapping, fd);
     if (!result.ok)
         return result;
+    bil_private_arena_take(owner, arena, count);
     bil_flat_arena_register(ms, arena, arena_bytes, publish_identity,
                             arena_mapped);
     t_fwd_ms = platform_time_monotonic_ms() - t_fwd_ms;
@@ -1104,22 +1147,48 @@ finish:
 struct zcl_result load_block_index_flat_bounded(const char *datadir, struct main_state *ms,
                                                 size_t max_entries)
 {
-    return bil_flat_load(datadir, ms, max_entries, true);
+    return bil_flat_load(datadir, ms, max_entries, true, NULL);
 }
 
 static struct zcl_result load_block_index_flat_archive(const char *datadir, struct main_state *ms,
-                                                size_t max_entries)
+    size_t max_entries, struct block_index_history_arena *arena)
 {
-    return bil_flat_load(datadir, ms, max_entries, false);
+    if (!arena || arena->rows || arena->count || arena->promoted)
+        return ZCL_ERR(-1, "history index: arena owner is unavailable");
+    return bil_flat_load(datadir, ms, max_entries, false, arena);
 }
 
 struct zcl_result block_index_history_index_load(const char *datadir, struct main_state *ms,
-                                                  size_t max_entries)
+    size_t max_entries, struct block_index_history_arena *arena)
 {
     if (!datadir || !datadir[0] || !ms || !max_entries || ms->map_block_index.size ||
         ms->pindex_best_header || active_chain_cached_height(&ms->chain_active) >= 0)
         return ZCL_ERR(-1, "history index: invalid input or nonempty state");
-    return load_block_index_flat_archive(datadir, ms, max_entries);
+    return load_block_index_flat_archive(datadir, ms, max_entries, arena);
+}
+
+void block_index_history_arena_promote(struct block_index_history_arena *arena)
+{
+    if (arena && arena->rows) arena->promoted = true;
+}
+
+void block_index_history_arena_release(struct block_index_history_arena *arena)
+{
+    if (!arena) return;
+    if (!arena->promoted) {
+        for (size_t i = 0; i < arena->count; i++) {
+#ifdef ZCL_TESTING
+            if (block_index_hdrext_peek(&arena->rows[i]))
+                atomic_fetch_add(&g_history_extensions_released, 1);
+#endif
+            block_index_hdrext_free(&arena->rows[i]);
+        }
+#ifdef ZCL_TESTING
+        if (arena->rows) atomic_fetch_add(&g_history_arenas_released, 1);
+#endif
+        free(arena->rows);
+    }
+    memset(arena, 0, sizeof(*arena));
 }
 
 struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms)
@@ -1335,12 +1404,13 @@ static bool bha_input_valid(const struct main_state *state, const char *dir, siz
 
 static struct zcl_result bha_open(struct main_state *state,
     const char *archive_dir, size_t max_entries, int32_t endpoint_height,
-    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window)
+    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window,
+    struct block_index_history_arena *arena)
 {
     if (top_window) memset(top_window, 0, ISLAND_ANCHOR_WINDOW * sizeof(*top_window));
     if (!bha_input_valid(state, archive_dir, max_entries, endpoint_height, endpoint_hash, genesis, top_window))
         return ZCL_ERR(-1, "history archive: invalid input or nonempty state");
-    struct zcl_result loaded = load_block_index_flat_archive(archive_dir, state, max_entries);
+    struct zcl_result loaded = load_block_index_flat_archive(archive_dir, state, max_entries, arena);
     if (!loaded.ok) return loaded;
     if (bha_cancelled(endpoint_height)) return ZCL_ERR(-5, "history archive: cancelled");
     char path[4096];
@@ -1369,7 +1439,8 @@ static struct zcl_result bha_open(struct main_state *state,
 
 struct zcl_result block_index_history_archive_open(struct main_state *state,
     const char *archive_dir, size_t max_entries, int32_t endpoint_height,
-    const uint8_t endpoint_hash[32], struct block_header *top_window)
+    const uint8_t endpoint_hash[32], struct block_header *top_window,
+    struct block_index_history_arena *arena)
 {
     const struct chain_params *params = chain_params_get();
     if (!params) {
@@ -1377,13 +1448,14 @@ struct zcl_result block_index_history_archive_open(struct main_state *state,
         return ZCL_ERR(-1, "history archive: network unavailable");
     }
     return bha_open(state, archive_dir, max_entries, endpoint_height, endpoint_hash,
-                    &params->consensus.hashGenesisBlock, top_window);
+                    &params->consensus.hashGenesisBlock, top_window, arena);
 }
 #ifdef ZCL_TESTING
 struct zcl_result block_index_history_archive_test_open(struct main_state *state,
     const char *archive_dir, size_t max_entries, int32_t endpoint_height,
-    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window)
+    const uint8_t endpoint_hash[32], const struct uint256 *genesis, struct block_header *top_window,
+    struct block_index_history_arena *arena)
 {
-    return bha_open(state, archive_dir, max_entries, endpoint_height, endpoint_hash, genesis, top_window);
+    return bha_open(state, archive_dir, max_entries, endpoint_height, endpoint_hash, genesis, top_window, arena);
 }
 #endif

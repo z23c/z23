@@ -4,6 +4,7 @@
 #define ZCL_CONSENSUS_STATE_INSTALL_TERMINAL_INTERNAL_H
 #include "primitives/block.h"
 #include "services/island_anchor.h"
+#include "services/block_index_loader.h"
 #include "util/result.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -57,6 +58,7 @@ void bound_history_preflight_close(struct bound_history_preflight **p);
 struct icb_terminal_context {
     struct bound_history_preflight *preflight_owner;
     struct main_state *archive;
+    struct block_index_history_arena archive_arena;
     struct block_index *bridge_window[ISLAND_ANCHOR_WINDOW];
     uintptr_t history_handle;
     bool history_open;

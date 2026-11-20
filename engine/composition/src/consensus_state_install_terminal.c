@@ -86,6 +86,10 @@ bool icb_terminal_link_window(struct icb_terminal_context *terminal,
                                      rows, &parent) ||
         !icb_terminal_parent_has_frontier(parent, old_tip)) return false;
     memcpy(terminal->bridge_window, rows, sizeof(rows));
+    /* Public nodes may retain these ancestors even after the bridge is
+     * detached. Their backing rows and extensions therefore live as long as
+     * the process, including when a later install step refuses. */
+    block_index_history_arena_promote(&terminal->archive_arena);
     rows[ISLAND_ANCHOR_WINDOW - 1]->pprev = parent;
     for (int i = ISLAND_ANCHOR_WINDOW - 1; i >= 0; --i) {
         rows[i]->pskip = NULL;
@@ -137,7 +141,7 @@ static struct zcl_result icb_terminal_open_history(struct icb_terminal_context *
     ++bound_history_archive_opens;
 #endif
     return block_index_history_archive_open(terminal->archive, path, 3500000,
-        manifest->height, manifest->block_hash, terminal->window);
+        manifest->height, manifest->block_hash, terminal->window, &terminal->archive_arena);
 }
 
 struct bound_history_preflight {
@@ -222,6 +226,7 @@ static void bound_history_preflight_close_impl(struct bound_history_preflight **
     icb_terminal_unlink_window(&p->terminal);
     if (p->reader) bmr_close(p->reader);
     if (p->terminal.archive) { main_state_free(p->terminal.archive); free(p->terminal.archive); }
+    block_index_history_arena_release(&p->terminal.archive_arena);
     free(p); *object = NULL;
 }
 
@@ -556,6 +561,7 @@ static void icb_terminal_close_local(struct icb_terminal_context *local, struct 
     if (borrowed) return;
     icb_terminal_unlink_window(local);
     if (local->archive) { main_state_free(local->archive); free(local->archive); }
+    block_index_history_arena_release(&local->archive_arena);
     if (local->history_open) platform_private_directory_close(local->history_handle);
 }
 static struct zcl_result icb_terminal_guarded(
@@ -697,6 +703,7 @@ struct zcl_result consensus_state_install_from_bundle_terminal_old_retry(
     icb_terminal_unlink_window(&terminal);
     if (terminal.archive) {
         main_state_free(terminal.archive);
+        block_index_history_arena_release(&terminal.archive_arena);
         free(terminal.archive);
     }
     if (terminal.history_open) platform_private_directory_close(terminal.history_handle);

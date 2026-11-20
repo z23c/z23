@@ -427,6 +427,7 @@ struct boot_pending_history {
     bool observation_valid;
     struct wallet_history_capability capability;
     struct main_state *state;
+    struct block_index_history_arena arena;
     uintptr_t directory;
     bool directory_open;
     char path[4096];
@@ -434,10 +435,8 @@ struct boot_pending_history {
 
 static void boot_pending_history_close(struct boot_pending_history *history)
 {
-    if (history->state) {
-        main_state_free(history->state);
-        free(history->state);
-    }
+    if (history->state) { main_state_free(history->state); free(history->state); }
+    block_index_history_arena_release(&history->arena);
     if (history->directory_open) platform_private_directory_close(history->directory);
     wallet_history_capability_release(&history->capability);
 }
@@ -601,7 +600,7 @@ enum boot_pending_replay_result boot_test_bound_history_status(const struct app_
 
 #ifdef ZCL_TESTING
 typedef struct zcl_result (*boot_test_history_open_fn)(struct main_state *, const char *,
-    size_t, int32_t, const uint8_t[32], struct block_header *);
+    size_t, int32_t, const uint8_t[32], struct block_header *, struct block_index_history_arena *);
 static boot_test_history_open_fn g_boot_test_history_open;
 void boot_test_pending_history_set_open(boot_test_history_open_fn fn)
 {
@@ -610,15 +609,15 @@ void boot_test_pending_history_set_open(boot_test_history_open_fn fn)
 #endif
 
 static struct zcl_result boot_pending_history_load(struct main_state *state, const char *path,
-    const struct wallet_witness_endpoint *endpoint)
+    const struct wallet_witness_endpoint *endpoint, struct block_index_history_arena *arena)
 {
 #ifdef ZCL_TESTING
     if (g_boot_test_history_open)
         return g_boot_test_history_open(state, path, BOOT_WALLET_HISTORY_MAX_ROWS,
-                                       endpoint->height, endpoint->hash.data, NULL);
+                                       endpoint->height, endpoint->hash.data, NULL, arena);
 #endif
     return block_index_history_archive_open(state, path, BOOT_WALLET_HISTORY_MAX_ROWS,
-                                             endpoint->height, endpoint->hash.data, NULL);
+                                             endpoint->height, endpoint->hash.data, NULL, arena);
 }
 
 static bool boot_pending_history_open(struct boot_pending_history *history,
@@ -639,7 +638,7 @@ static bool boot_pending_history_open(struct boot_pending_history *history,
     history->state = zcl_calloc(1, sizeof(*history->state), "wallet history archive state");
     if (!history->state) return false;
     main_state_init(history->state);
-    struct zcl_result loaded = boot_pending_history_load(history->state, history->path, endpoint);
+    struct zcl_result loaded = boot_pending_history_load(history->state, history->path, endpoint, &history->arena);
     if (!loaded.ok) LOG_WARN("wallet", "wallet history archive refused: %s", loaded.message);
     return loaded.ok;
 }

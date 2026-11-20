@@ -23,13 +23,13 @@
 static struct uint256 bil_startup_genesis;
 static struct zcl_result bil_startup_archive_open(struct main_state *state,
     const char *path, size_t cap, int32_t height, const uint8_t hash[32],
-    struct block_header *window)
+    struct block_header *window, struct block_index_history_arena *arena)
 {
     return block_index_history_archive_test_open(state, path, cap, height, hash,
-                                                  &bil_startup_genesis, window);
+                                                  &bil_startup_genesis, window, arena);
 }
 void boot_test_pending_history_set_open(struct zcl_result (*fn)(struct main_state *,
-    const char *, size_t, int32_t, const uint8_t[32], struct block_header *));
+    const char *, size_t, int32_t, const uint8_t[32], struct block_header *, struct block_index_history_arena *));
 bool boot_test_pending_replay_prepare(struct boot_cutover_env *, struct app_context *,
     struct boot_cutover_replay *, struct wallet_rpc_context *, void **);
 void boot_test_pending_replay_close(void *);
