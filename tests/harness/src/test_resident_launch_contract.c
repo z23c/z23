@@ -1316,7 +1316,8 @@ static int rlc_app_keep_open(void)
     return ok ? 0 : 1;
 }
 
-static int rlc_app_keep_open_selected(const struct rlc_app_keep_facts *facts)
+static void rlc_app_keep_open_selected_call(const struct rlc_app_keep_facts *facts,
+                                             struct zcl_command_reply *reply)
 {
     struct json_value input;
     json_init(&input);
@@ -1331,18 +1332,112 @@ static int rlc_app_keep_open_selected(const struct rlc_app_keep_facts *facts)
         json_push_kv_str(&input, "record_id", facts->binding->receipt_hex) &&
         json_push_kv_bool(&input, "accept_execution", true);
     struct zcl_command_request request = {.input = &input};
+    app_launch_test_set_desktop(0);
+    if (ok) zcl_native_handle_app_open_selected(&request, reply);
+    app_launch_test_set_desktop(-1);
+    json_free(&input);
+}
+
+static int rlc_app_keep_open_selected(const struct rlc_app_keep_facts *facts)
+{
     struct zcl_command_reply reply;
     zcl_command_reply_init(&reply, "zcl.app_open.v1");
-    app_launch_test_set_desktop(0);
-    if (ok) zcl_native_handle_app_open_selected(&request, &reply);
-    app_launch_test_set_desktop(-1);
+    rlc_app_keep_open_selected_call(facts, &reply);
     const char *result = json_get_str(json_get(&reply.data, "result"));
-    ok = reply.status == ZCL_COMMAND_STATUS_PASSED && result &&
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && result &&
         strstr(result, "Keep receipt") != NULL;
     if (!ok) fprintf(stderr, "app keep selected open: %s %s\n", reply.error.code, reply.error.message);
     zcl_command_reply_free(&reply);
-    json_free(&input);
     return ok ? 0 : 1;
+}
+
+static bool rlc_app_keep_update_preserved(const struct rlc_app_keep_facts *facts,
+    const struct package_resident_record *before, const struct task_document *before_document)
+{
+    struct package_resident_store store = {0};
+    struct task_document after_document = {0};
+    struct package_resident_record after = {0};
+    bool ok = package_resident_store_open_app(&store, facts->valid, "local/tasks").ok &&
+        package_resident_record_read(&store, &after).ok &&
+        task_document_read(&store, &after_document).ok &&
+        before->generation == after.generation &&
+        package_resident_identity_equal(&before->current, &after.current) &&
+        rlc_task_equal(before_document, &after_document);
+    (void)package_resident_store_close(&store);
+    return ok;
+}
+
+static int rlc_app_keep_open_update_refused(const struct rlc_app_keep_facts *facts,
+                                             const struct rlc_binding *kept)
+{
+    int failures = 0;
+    struct package_resident_store store = {0};
+    struct task_document before_document = {0};
+    struct package_resident_record before = {0};
+    bool prepared = package_resident_store_open_app(&store, facts->valid, "local/tasks").ok &&
+        task_document_apply(&store, 0, TASK_DOCUMENT_ADD, 0, "Preserve selected-open task", &before_document).ok &&
+        task_document_apply(&store, before_document.state.revision, TASK_DOCUMENT_EDIT,
+            before_document.state.tasks[0].id, "Edited before selected open", &before_document).ok &&
+        before_document.can_undo && package_resident_record_read(&store, &before).ok &&
+        !strcmp(before.current.artifact_sha3, kept->sha3);
+    (void)package_resident_store_close(&store);
+    RLC_CHECK("selected open: durable task, undo and working generation prepared", prepared);
+    if (!prepared) return failures;
+
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    rlc_app_keep_open_selected_call(facts, &reply);
+    bool refused = reply.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(reply.error.code, "DESKTOP_REQUIRED") && !reply.error.mutated;
+    RLC_CHECK("selected open: different Tasks image requires preview and preserves Keep tasks and Undo",
+              refused && rlc_app_keep_update_preserved(facts, &before, &before_document));
+    if (!refused)
+        fprintf(stderr, "selected update unexpectedly opened: %s %s\n", reply.error.code, reply.error.message);
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+
+static void rlc_call_serving(struct rlc_call *c,
+    const struct zcl_command_spec *spec, const char *datadir, const char *app,
+    const char *action, const char *root_hex, const char *receipt_hex,
+    const char *sha3_hex, const char *program, const char *input_text);
+
+static int rlc_app_keep_establish(const struct rlc_app_keep_facts *facts)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), RLC_LEAF, NULL);
+    struct rlc_call accept, activate, invoke;
+    rlc_call_serving(&accept, spec, facts->valid, "local/tasks", "accept",
+        facts->binding->root_hex, facts->binding->receipt_hex, facts->binding->sha3,
+        RLC_ZTASKS_PROGRAM, "list");
+    bool ran_accept = rlc_invoke(&accept);
+    rlc_call_serving(&activate, spec, facts->valid, "local/tasks", "activate",
+        NULL, NULL, NULL, NULL, "list");
+    bool ran_activate = rlc_invoke(&activate);
+    rlc_call_serving(&invoke, spec, facts->valid, "local/tasks", "invoke",
+        NULL, NULL, NULL, NULL, "list");
+    bool ran_invoke = rlc_invoke(&invoke);
+    const char *served = rlc_str(&activate, "serving_sha3");
+    const char *result = rlc_str(&invoke, "result");
+    bool ok = ran_accept && rlc_ok(&accept) &&
+        ran_activate && rlc_ok(&activate) && served &&
+        !strcmp(served, facts->binding->sha3) &&
+        ran_invoke && rlc_ok(&invoke) && result && strstr(result, "Keep receipt");
+    if (!ok)
+        fprintf(stderr, "app keep establish: accept=%d activate=%d invoke=%d served=%s expected=%s result=%s\n",
+            rlc_ok(&accept), rlc_ok(&activate), rlc_ok(&invoke),
+            served ? served : "", facts->binding->sha3, result ? result : "");
+    rlc_end(&accept);
+    rlc_end(&activate);
+    rlc_end(&invoke);
+    return ok ? 0 : 1;
+}
+
+static int rlc_app_keep_established_open(const struct rlc_app_keep_facts *facts)
+{
+    if (rlc_app_keep_customize(facts) != 0) return 1;
+    if (rlc_app_keep_establish(facts) != 0) return 1;
+    if (rlc_app_keep_open() != 0) return 1;
+    return rlc_app_keep_open_selected(facts);
 }
 
 static int rlc_app_keep_commit(const struct rlc_app_keep_facts *facts)
@@ -1372,9 +1467,7 @@ static int rlc_app_keep_commit(const struct rlc_app_keep_facts *facts)
     zcl_command_reply_free(&reply);
     json_free(&input);
     if (!ok) return 1;
-    if (rlc_app_keep_customize(facts) != 0) return 1;
-    if (rlc_app_keep_open() != 0) return 1;
-    return rlc_app_keep_open_selected(facts);
+    return rlc_app_keep_established_open(facts);
 }
 
 static int rlc_app_keep_adopt(const char *valid, const struct rlc_binding *binding,
@@ -1435,7 +1528,21 @@ static int rlc_app_keep_receipt(const char *base, const struct rlc_binding *bind
         .valid = valid, .destination = destination, .version = version,
         .env = env, .deps = deps, .binding = &fresh,
     };
-    return rlc_app_keep_commit(&facts) || rlc_app_keep_tamper(&facts);
+    if (rlc_app_keep_commit(&facts) != 0) return 1;
+
+    struct rlc_binding next;
+    if (!rlc_install_ztasks_variant_reward(valid, zcode, "0.100.0", 100,
+        "Preview before Keep", RLC_PREVIEW_OK, "", &next)) return 1;
+    char next_destination[4400], next_version[65];
+    if (rlc_app_keep_adopt(valid, &next, next_destination, next_version) != 0) return 1;
+    if (!package_lifecycle_receipt_read(valid, next.receipt, &receipt).ok) return 1;
+    char next_env[65];
+    zcl_hex_encode(receipt.toolchain_capsule_root, 32, next_env);
+    struct rlc_app_keep_facts update = {
+        .valid = valid, .destination = next_destination, .version = next_version,
+        .env = next_env, .deps = deps, .binding = &next,
+    };
+    return rlc_app_keep_open_update_refused(&update, &fresh) || rlc_app_keep_tamper(&facts);
 }
 
 static int rlc_task_journey(const char *base, const struct rlc_binding *n,

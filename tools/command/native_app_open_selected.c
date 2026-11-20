@@ -478,17 +478,24 @@ static bool as_tasks_action(struct as_open *a, const char *action)
         a->reply->data = out.data;
         json_init(&out.data);
     }
-    if (ok && (!strcmp(action, "accept") || !strcmp(action, "activate")))
-        a->reply->error.mutated = true;
     a->reply->error.mutated |= out.error.mutated;
     zcl_command_reply_free(&out);
     json_free(&in);
     return ok;
 }
 
-static bool as_tasks_activate(struct as_open *a)
+static bool as_tasks_kept_matches(struct as_open *a,
+                                   const struct zcl_command_reply *status)
 {
-    return as_tasks_action(a, "accept") && as_tasks_action(a, "activate");
+    char package[65], receipt[65], image[65];
+    zcl_hex_encode(a->package, 32, package);
+    zcl_hex_encode(a->record_id, 32, receipt);
+    zcl_hex_encode(a->image_sha, 32, image);
+    return json_get_bool(json_get(&status->data, "has_kept_program")) &&
+        !strcmp(package, json_get_str(json_get(&status->data, "kept_root"))) &&
+        !strcmp(receipt, json_get_str(json_get(&status->data, "kept_receipt"))) &&
+        !strcmp(image, json_get_str(json_get(&status->data, "kept_artifact_sha3"))) &&
+        !strcmp("bin/ztasks", json_get_str(json_get(&status->data, "kept_program")));
 }
 
 static bool as_tasks_open(struct as_open *a)
@@ -507,23 +514,23 @@ static bool as_tasks_open(struct as_open *a)
         json_free(&in);
         return false;
     }
-    char package[65], receipt[65], image[65];
-    zcl_hex_encode(a->package, 32, package);
-    zcl_hex_encode(a->record_id, 32, receipt);
-    zcl_hex_encode(a->image_sha, 32, image);
-    bool matches = json_get_bool(json_get(&status.data, "has_kept_program")) &&
-        !strcmp(package, json_get_str(json_get(&status.data, "kept_root"))) &&
-        !strcmp(receipt, json_get_str(json_get(&status.data, "kept_receipt"))) &&
-        !strcmp(image, json_get_str(json_get(&status.data, "kept_artifact_sha3"))) &&
-        !strcmp("bin/ztasks", json_get_str(json_get(&status.data, "kept_program")));
+    bool matches = as_tasks_kept_matches(a, &status);
     zcl_command_reply_free(&status);
     json_free(&in);
-    if (!matches && !as_tasks_activate(a)) return false;
-    if (!a->env_cfg.desktop) return as_tasks_action(a, "invoke");
+    if (!a->env_cfg.desktop) {
+        if (!matches)
+            return as_fail(a, "DESKTOP_REQUIRED",
+                "a different Tasks image needs the desktop Try/Keep preview; working version retained",
+                a->entry.id);
+        return as_tasks_action(a, "invoke");
+    }
     json_init(&in);
     json_set_object(&in);
     ok = json_push_kv_str(&in, "action", "open") &&
-        json_push_kv_str(&in, "datadir", a->datadir);
+        json_push_kv_str(&in, "datadir", a->datadir) &&
+        (matches || (zcl_package_copy_push_root(&in, "preview_root", a->package) &&
+        zcl_package_copy_push_root(&in, "preview_receipt", a->record_id) &&
+        json_push_kv_str(&in, "preview_program", "bin/ztasks")));
     struct zcl_command_reply opened;
     zcl_command_reply_init(&opened, "zcl.task_document.v1");
     if (ok) ok = zcl_app_inner_call("app.tasks", &in, &opened, NULL);
