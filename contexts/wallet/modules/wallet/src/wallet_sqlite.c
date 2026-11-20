@@ -324,9 +324,11 @@ struct zcl_result wallet_sqlite_open_r(struct wallet_sqlite *ws, sqlite3 *db)
 
     const struct wsql_prep_spec preps[] = {
         { &ws->stmt_key_write,
-          "INSERT OR REPLACE INTO wallet_keys"
+          "INSERT INTO wallet_keys"
           " (pubkey_hash, pubkey, privkey, compressed)"
-          " VALUES(?,?,?,?)",
+          " VALUES(?,?,?,?) ON CONFLICT(pubkey_hash) DO UPDATE SET"
+          " pubkey=excluded.pubkey,privkey=excluded.privkey,"
+          " compressed=excluded.compressed",
           "wallet_keys", "key_write" },
         { &ws->stmt_key_read,
           "SELECT pubkey_hash, pubkey, privkey, compressed, rowid"

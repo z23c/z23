@@ -1285,6 +1285,105 @@ done:
 
 /* ── Entry point ─────────────────────────────────────────────── */
 
+static bool wse_keypool_fixture(sqlite3 *db, const struct key_id *kid)
+{
+    if (sqlite3_exec(db, "PRAGMA foreign_keys=ON; DROP TABLE wallet_keypool;"
+        "CREATE TABLE wallet_keypool(pubkey_hash BLOB PRIMARY KEY,"
+        "generation INTEGER NOT NULL UNIQUE, FOREIGN KEY(pubkey_hash)"
+        " REFERENCES wallet_keys(pubkey_hash) ON DELETE CASCADE);"
+        "UPDATE wallet_keys SET created_at=12345", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    int enabled = 0;
+    if (sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FKEY, -1, &enabled) != SQLITE_OK || enabled != 1)
+        return false;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db, "INSERT INTO wallet_keypool VALUES(?1,42)",
+                                -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_blob(st, 1, kid->id.data, 20, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_DONE;
+    if (st && sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool wse_keypool_row(sqlite3 *db, const struct key_id *kid,
+                            sqlite3_int64 *rowid, bool encrypted)
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "SELECT k.rowid,k.created_at,p.generation,k.privkey FROM wallet_keys k "
+        "JOIN wallet_keypool p ON p.pubkey_hash=k.pubkey_hash WHERE k.pubkey_hash=?1",
+        -1, &st, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_blob(st, 1, kid->id.data, 20, SQLITE_STATIC) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(st) == SQLITE_ROW;
+    if (ok) {
+        const void *blob = sqlite3_column_blob(st, 3);
+        int n = sqlite3_column_bytes(st, 3);
+        bool is_envelope = blob && wallet_sqlite_key_is_envelope(blob, (size_t)n);
+        ok = sqlite3_column_int64(st, 1) == 12345 &&
+             sqlite3_column_int64(st, 2) == 42 && is_envelope == encrypted;
+        *rowid = sqlite3_column_int64(st, 0);
+    }
+    if (st && sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static int test_plaintext_migration_preserves_keypool(void)
+{
+    int failures = 0;
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "wallet_sqlite_enc", "migration_pool");
+    snprintf(path, sizeof(path), "%s/wallet.db", dir);
+    sqlite3 *db = NULL;
+    struct wallet_sqlite ws = {0};
+    struct wallet *before = NULL, *after = NULL;
+    TEST("wallet_sqlite_enc: plaintext migration preserves keypool identity") {
+        wallet_lock_reset_for_test(); set_passphrase(NULL);
+        ASSERT(sqlite3_open(path, &db) == SQLITE_OK);
+        ASSERT(sqlite3_exec(db, k_schema, NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+        struct privkey key, got;
+        struct pubkey pk;
+        make_test_key(&key, &pk, 0x63);
+        struct key_id kid = pubkey_get_id(&pk);
+        ASSERT(wallet_sqlite_write_key_r(&ws, &pk, &key).ok);
+        ASSERT(wse_keypool_fixture(db, &kid));
+        sqlite3_int64 first = 0, second = 0;
+        ASSERT(wse_keypool_row(db, &kid, &first, false));
+        before = alloc_wallet(); ASSERT(before);
+        ASSERT(wallet_sqlite_read_keys_r(&ws, before).ok);
+        set_passphrase("migration-pool-pass");
+        ASSERT(wallet_sqlite_migrate_transparent_keys_r(&ws, before).ok);
+        wallet_sqlite_close(&ws);
+        ASSERT(sqlite3_close(db) == SQLITE_OK); db = NULL;
+        ASSERT(sqlite3_open(path, &db) == SQLITE_OK);
+        ASSERT(sqlite3_exec(db, "PRAGMA foreign_keys=ON", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wallet_sqlite_open_r(&ws, db).ok);
+        ASSERT(wse_keypool_row(db, &kid, &second, true));
+        ASSERT_EQ(first, second);
+        privkey_init(&got);
+        ASSERT(wallet_sqlite_read_single_key(&ws, &pk, &got).ok);
+        ASSERT(memcmp(got.vch, key.vch, 32) == 0);
+        after = alloc_wallet(); ASSERT(after);
+        ASSERT(wallet_sqlite_read_keys_r(&ws, after).ok);
+        ASSERT(wallet_sqlite_read_keypool_r(&ws, after).ok);
+        ASSERT_EQ(after->key_pool_size, 1);
+        ASSERT_EQ(after->key_pool[0].generation, 42);
+        ASSERT(wallet_sqlite_delete_key_r(&ws, &pk).ok);
+        sqlite3_stmt *st = NULL;
+        ASSERT(sqlite3_prepare_v2(db, "SELECT count(*) FROM wallet_keypool", -1, &st, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0);
+        sqlite3_finalize(st);
+        PASS();
+    } _test_next:;
+    if (ws.open) wallet_sqlite_close(&ws);
+    if (db) sqlite3_close(db);
+    if (before) free_wallet(before);
+    if (after) free_wallet(after);
+    set_passphrase(NULL); wallet_lock_reset_for_test();
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_wallet_sqlite_enc(void);
 
 int test_wallet_sqlite_enc(void)
@@ -1309,6 +1408,7 @@ int test_wallet_sqlite_enc(void)
     failures += test_scrub_upgrades_plaintext_rows();
     failures += test_scrub_noop_without_passphrase();
     failures += test_legacy_wks1_migrates_and_restarts();
+    failures += test_plaintext_migration_preserves_keypool();
     failures += test_wkd1_batch_and_row_swap_authentication();
     failures += test_wkd1_failure_clears_reported_length();
 
