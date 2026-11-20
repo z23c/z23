@@ -2501,8 +2501,10 @@ tor-provenance-ready:
 # pre-restart parse memoized a source-identity capture that predates these
 # archives, and without the drop the post-restart parse would cache-hit that
 # cold record instead of re-deriving identity from the bytes now linked.
-$(TOR_BOOTSTRAP_MK): $(if $(ZCL_TOR_LINT_LINK),tor-provenance-ready,tor-ready)
-ifneq ($(ZCL_TOR_LINT_LINK),)
+ifeq ($(ZCL_TOR_LINT_LINK),)
+$(TOR_BOOTSTRAP_MK): tor-ready
+else
+$(TOR_BOOTSTRAP_MK): tor-provenance-ready
 	@ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' tools/scripts/tor_archives_ready.sh check || \
 	  { $(MAKE) --no-print-directory -o tor-provenance-ready check-tor-provenance; exit 1; }
 endif

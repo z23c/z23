@@ -1872,7 +1872,7 @@ static int t_tor_ready_before_link(void)
         "printf '#!/bin/sh\\nexit 0\\n' > tools/dev/source-identity.sh; chmod +x tools/dev/source-identity.sh\n"
         "printf '%s\\n' 'ZCL_TOR ?= full' > Makefile\n"
         "sed -n '/^ZCL_TOR_SKIP_GOALS :=/,/^# The stub/{ /^# The stub/d; p; }' \"$1/Makefile\" >> Makefile\n"
-        "sed -n '/^$(TOR_BOOTSTRAP_MK):/,/^$/p' \"$1/Makefile\" >> Makefile\n"
+        "sed -n '/^ifeq ($(ZCL_TOR_LINT_LINK),)/,/^$/p' \"$1/Makefile\" >> Makefile\n"
         "sed -n '/^tor-ready: /p' \"$1/Makefile\" >> Makefile\n"
         "cat >> Makefile <<'MAKE'\n"
         "$(shell echo parse >> parse-events)\n"
