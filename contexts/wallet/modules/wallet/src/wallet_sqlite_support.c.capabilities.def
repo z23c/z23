@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for wallet SQLite statement support. */
+ZCL_MODULE_CAPABILITY("contexts/wallet/modules/wallet/src/wallet_sqlite_support.c", CAP_FS_READ|CAP_FS_WRITE, "prepares and reads the wallet key-count statement")
