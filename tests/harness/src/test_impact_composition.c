@@ -12994,7 +12994,14 @@ static int test_ic_local_selection_build_needs(void)
                                                   NULL, needs, 19, &n));
             bool swarm = strcmp(verifier_groups[i], "test_zcode_swarm_net") == 0 ||
                 strcmp(verifier_groups[i], "test_zcode_swarm_net_shard_01") == 0;
-            ASSERT(n == verifier_needs + (swarm ? pure_needs : 0));
+#if defined(__linux__)
+            bool registry_launcher = strcmp(verifier_groups[i], "test_zcode_package_registry") == 0;
+#else
+            bool registry_launcher = false;
+#endif
+            ASSERT(n == verifier_needs + (swarm ? pure_needs : 0) + registry_launcher);
+            ASSERT(ic_needs_have(needs, n, "process-group-exec",
+                                 "build/bin/process-group-exec") == registry_launcher);
             ASSERT(ic_needs_have(needs, n, "dev-package-verifier-ensure",
                                  "build/bin/z23-package-verify-dev") ==
                    (verifier_needs != 0));

@@ -2,6 +2,7 @@
  * Purpose: rederive the self-hosted package DAG and its root projection. */
 
 #include "test/test_core.h"
+#include "registry_builder_pair.h"
 
 #include "base/hex.h"
 #include "config/c23_commons_build_profile.h"
@@ -158,30 +159,6 @@ static bool registry_write_bytes(const char *path, const uint8_t *bytes,
     if (fclose(file) != 0)
         ok = false;
     return ok;
-}
-
-static bool registry_build_one(const char *datadir, const char *root_hex,
-                               int64_t now_unix)
-{
-    struct package_lifecycle_plan_report plan;
-    struct zcl_result planned =
-        package_lifecycle_plan(datadir, root_hex, now_unix, &plan);
-    if (!planned.ok || !plan.ready) {
-        printf("  zcode_package_registry: plan %s failed rule=%s detail=%s "
-               "message=%s\n", root_hex, plan.rule, plan.detail,
-               planned.message);
-        return false;
-    }
-    struct package_lifecycle_commit_report commit;
-    struct zcl_result committed = package_lifecycle_commit(
-        datadir, plan.plan_id, now_unix + 1, &commit);
-    if (!committed.ok || !commit.installed) {
-        printf("  zcode_package_registry: commit %s failed rule=%s detail=%s "
-               "message=%s\n", root_hex, commit.rule, commit.detail,
-               committed.message);
-        return false;
-    }
-    return true;
 }
 
 static const struct registry_expected *registry_named(const char *name)
@@ -672,8 +649,11 @@ static bool registry_build_and_read_receipts(
     int64_t now, struct vcs_package_build_receipt *a,
     struct vcs_package_build_receipt *b)
 {
-    return registry_build_one(builder_a, content_root, now) &&
-           registry_build_one(builder_b, content_root, now) &&
+    bool built = registry_builder_pair_available()
+        ? registry_builder_pair_run(builder_a, builder_b, content_root, now)
+        : registry_builder_build_one(builder_a, content_root, now) &&
+          registry_builder_build_one(builder_b, content_root, now);
+    return built &&
            registry_read_receipt(builder_a, content_root, a) &&
            registry_read_receipt(builder_b, content_root, b);
 }
@@ -701,6 +681,30 @@ static bool registry_consumer_checks(bool ok, const char *builder)
            registry_stranger_build(builder);
 }
 
+static bool registry_pair_fixture_ready(const char *a, const char *b)
+{
+    return !registry_builder_pair_available() || registry_builder_pair_cleanup_test(a, b);
+}
+
+static bool registry_fixture_prepare(struct vcs_package_store *a,
+                                     struct vcs_package_store *b, size_t i)
+{
+    struct vcs_package_prepared prepared;
+    if (!registry_prepare(&registry_packages[i], &prepared)) {
+        printf("  zcode_package_registry: prepare %s failed\n", registry_packages[i].name);
+        return false;
+    }
+    bool published_a, published_b;
+    bool ok = registry_publish_pair(a, b, &prepared, registry_packages[i].dir,
+                                    &published_a, &published_b);
+    if (!ok)
+        printf("  zcode_package_registry: publish %s failed builder_a=%s builder_b=%s\n",
+               registry_packages[i].name, published_a ? "ok" : "failed",
+               published_b ? "ok" : "failed");
+    vcs_package_prepared_free(&prepared);
+    return ok;
+}
+
 static bool registry_independent_reproduction(size_t *reproduced_out)
 {
     *reproduced_out = 0;
@@ -709,6 +713,11 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
                      "builder_a");
     test_make_tmpdir(builder_b, sizeof(builder_b), "zcode_registry",
                      "builder_b");
+    if (!registry_pair_fixture_ready(builder_a, builder_b)) {
+        test_rm_rf(builder_a);
+        test_rm_rf(builder_b);
+        return false;
+    }
     struct vcs_package_store *store_a = NULL, *store_b = NULL;
     bool ok = registry_open_builder_stores(builder_a, builder_b, &store_a,
                                            &store_b);
@@ -719,24 +728,7 @@ static bool registry_independent_reproduction(size_t *reproduced_out)
     for (size_t i = 0;
          ok && i < sizeof(registry_packages) / sizeof(registry_packages[0]);
          i++) {
-        struct vcs_package_prepared prepared;
-        ok = registry_prepare(&registry_packages[i], &prepared);
-        if (ok) {
-            bool published_a, published_b;
-            ok = registry_publish_pair(store_a, store_b, &prepared,
-                                       registry_packages[i].dir,
-                                       &published_a, &published_b);
-            if (!ok)
-                printf("  zcode_package_registry: publish %s failed "
-                       "builder_a=%s builder_b=%s\n",
-                       registry_packages[i].name,
-                       published_a ? "ok" : "failed",
-                       published_b ? "ok" : "failed");
-            vcs_package_prepared_free(&prepared);
-        } else {
-            printf("  zcode_package_registry: prepare %s failed\n",
-                   registry_packages[i].name);
-        }
+        ok = registry_fixture_prepare(store_a, store_b, i);
     }
     registry_close_builder_stores(store_a, store_b);
 

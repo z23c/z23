@@ -43,6 +43,7 @@
 #define _DEFAULT_SOURCE 1
 #endif
 
+#include "registry_builder_pair.h"
 #include "platform/time_compat.h"
 #include "platform/directory_compat.h"
 #include "platform/logical_cpu.h"
@@ -4533,6 +4534,8 @@ int main(int argc, char **argv)
         }
         break;
     }
+    registry_builder_exit_if_requested(argc, argv);
+    registry_builder_pair_enable();
     extern void onion_stop_child_exit_if_requested(int, char **);
     onion_stop_child_exit_if_requested(argc, argv);
     extern void dlx_selfupgrade_child_exit_if_requested(int, char **);

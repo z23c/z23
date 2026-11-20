@@ -238,6 +238,10 @@ ZCL_TEST_GROUP_BUILD_NEED("test_make_lint_gates",
                               "dev-package-verifier-ensure")
 ZCL_PACKAGE_VERIFIER_NEED("test_zcode_verify")
 ZCL_PACKAGE_VERIFIER_NEED("test_zcode_package_registry")
+#if defined(__linux__)
+ZCL_TEST_GROUP_BUILD_NEED("test_zcode_package_registry",
+                          "build/bin/process-group-exec", "process-group-exec")
+#endif
 ZCL_PACKAGE_VERIFIER_NEED("test_zcode_package_dev")
 ZCL_PACKAGE_VERIFIER_NEED("test_zcode_package_dev_shard_01")
 ZCL_PACKAGE_VERIFIER_NEED("test_zcode_package_dev_shard_02")
