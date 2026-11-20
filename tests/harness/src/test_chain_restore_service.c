@@ -13,6 +13,7 @@
 #include "services/chain_restore_boot_snapshot.h"
 #include "services/chain_restore_executor.h"
 #include "services/chain_restore_integrity.h"
+#include "services/chain_restore_disk_repair.h"
 #include "services/chain_restore_planner.h"
 #include "services/chain_restore_repair.h"
 #include "validation/main_state.h"
@@ -2258,6 +2259,46 @@ static int test_chain_restore_walks_abort_on_shutdown(void) {
 
 /* ── Registration ──────────────────────────────────────────────── */
 
+
+static int test_block_file_rebuild_across_files(void)
+{
+    int failures = 0;
+    TEST("block-file rebuild reads consecutive headers and switches files") {
+        enum { first_count = 32 };
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "restore_stream", "two_files");
+        struct main_state ms;
+        main_state_init(&ms);
+        struct block_index *parent = ods_build_disk_chain(&ms, dir, first_count);
+        struct block_index *expected[first_count + 1];
+        for (int h = first_count - 1; h >= 0; --h) {
+            ASSERT(parent != NULL);
+            expected[h] = parent;
+            parent = parent->pprev;
+        }
+        struct disk_block_pos pos = { .nFile = 1 };
+        struct uint256 hash;
+        ASSERT(write_chain_block_fixture(dir, &pos, expected[first_count - 1]->phashBlock,
+                                         0x1e14f420u, 1700000032u, &hash));
+        struct block_index *tip = chainstate_insert_block_index(
+            (struct chainstate *)&ms, &hash);
+        ASSERT(tip != NULL);
+        expected[first_count] = tip;
+        tip->nHeight = first_count;
+        ASSERT(active_chain_move_window_tip(&ms.chain_active, tip));
+        ASSERT(chain_restore_rebuild_active_chain_from_block_files(&ms, tip, dir)
+               == first_count + 1);
+        for (int h = 0; h <= first_count; ++h) {
+            ASSERT(active_chain_at(&ms.chain_active, h) == expected[h]);
+            ASSERT(expected[h]->nFile == (h == first_count ? 1 : 0));
+        }
+        ASSERT(tip->nDataPos == pos.nPos);
+        main_state_free(&ms);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 int test_chain_restore_service(void) {
     int failures = 0;
     /* Plan tests */
@@ -2304,6 +2345,7 @@ int test_chain_restore_service(void) {
     failures += test_finalize_verified_scopes_trust_flag();
     failures += test_finalize_quarantine_preserves_served_floor();
     failures += test_finalize_never_waits_for_progress_under_main();
+    failures += test_block_file_rebuild_across_files();
     failures += test_rebuild_active_chain_is_o_chain_not_delta();
     failures += test_unclean_restart_recovery_is_o_delta();
     failures += test_chain_restore_walks_abort_on_shutdown();

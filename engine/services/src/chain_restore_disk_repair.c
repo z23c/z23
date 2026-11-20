@@ -67,6 +67,36 @@ static bool chain_restore_decode_index_header(
     return true;
 }
 
+static void chain_restore_close_block_file(FILE *file)
+{
+    if (file)
+        fclose(file);
+}
+
+/* A walk retains its read-only stream until the block file changes. Block
+ * files are expected to remain the same files for the duration of the walk. */
+static bool chain_restore_read_header_bytes(
+    const char *datadir, int file, unsigned int pos, FILE **cached,
+    int *cached_file, unsigned char *buf, size_t cap, size_t *nread)
+{
+    if (!datadir || !datadir[0] || file < 0 || pos == 0)
+        return false;
+    if (!*cached || *cached_file != file) {
+        chain_restore_close_block_file(*cached);
+        char path[576];
+        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
+                 datadir, file);
+        *cached = fopen(path, "rb");
+        if (!*cached)
+            return false;
+        *cached_file = file;
+    }
+    if (fseek(*cached, (long)pos, SEEK_SET) != 0)
+        return false;
+    *nread = fread(buf, 1, cap, *cached); // disk-io-lock: boot-local repair
+    return *nread >= 4 + 32 + 32 + 32 + 4 + 4 + 32 + 1;
+}
+
 static bool chain_restore_read_header_at_index(
     const struct block_index *bi,
     const char *datadir,
@@ -82,26 +112,10 @@ static bool chain_restore_read_header_at_index(
         *hash_matches_out = false;
     if (!(bi->nStatus & BLOCK_HAVE_DATA) || bi->nFile < 0 || bi->nDataPos == 0)
         return false;
-
-    if (!*cached || *cached_file != bi->nFile) {
-        if (*cached) {
-            fclose(*cached);
-            *cached = NULL;
-        }
-        char path[576];
-        snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat",
-                 datadir, bi->nFile);
-        *cached = fopen(path, "rb");
-        if (!*cached)
-            return false;
-        *cached_file = bi->nFile;
-    }
-
     unsigned char buf[4 + 32 + 32 + 32 + 4 + 4 + 32 + 9 + MAX_SOLUTION_SIZE];
-    if (fseek(*cached, (long)bi->nDataPos, SEEK_SET) != 0)
-        return false;
-    size_t nread = fread(buf, 1, sizeof(buf), *cached); // disk-io-lock: boot-local repair
-    if (nread < 4 + 32 + 32 + 32 + 4 + 4 + 32 + 1)
+    size_t nread;
+    if (!chain_restore_read_header_bytes(datadir, bi->nFile, bi->nDataPos,
+                                         cached, cached_file, buf, sizeof(buf), &nread))
         return false;
 
     return chain_restore_decode_index_header(bi, buf, nread, hdr,
@@ -281,8 +295,7 @@ int chain_restore_rebuild_active_chain_from_disk(
             break;
     }
 
-    if (cached)
-        fclose(cached);
+    chain_restore_close_block_file(cached);
 
     if (populated != tip->nHeight + 1 && thread_registry_shutdown_requested())
         printf("[chain-restore] disk ancestry rebuild aborted on shutdown: "
@@ -500,28 +513,22 @@ static bool chain_restore_read_header_at_pos(
     const char *datadir,
     int file,
     unsigned int pos,
+    FILE **cached,
+    int *cached_file,
     struct block_header *hdr)
 {
     if (!datadir || !datadir[0] || file < 0 || pos == 0 || !hdr)
         return false;
-    char path[576];
-    snprintf(path, sizeof(path), "%s/blocks/blk%05d.dat", datadir, file);
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return false;
     unsigned char buf[4 + 32 + 32 + 32 + 4 + 4 + 32 + 9 + MAX_SOLUTION_SIZE];
-    bool ok = false;
-    if (fseek(f, (long)pos, SEEK_SET) == 0) {
-        size_t nread = fread(buf, 1, sizeof(buf), f); // disk-io-lock: boot-local repair
-        if (nread >= 4 + 32 + 32 + 32 + 4 + 4 + 32 + 1) {
-            struct byte_stream s;
-            stream_init_from_data(&s, buf, nread);
-            block_header_init(hdr);
-            ok = block_header_deserialize(hdr, &s);
-            stream_free(&s);
-        }
-    }
-    fclose(f);
+    size_t nread;
+    if (!chain_restore_read_header_bytes(datadir, file, pos, cached, cached_file,
+                                         buf, sizeof(buf), &nread))
+        return false;
+    struct byte_stream s;
+    stream_init_from_data(&s, buf, nread);
+    block_header_init(hdr);
+    bool ok = block_header_deserialize(hdr, &s);
+    stream_free(&s);
     return ok;
 }
 
@@ -548,6 +555,8 @@ int chain_restore_rebuild_active_chain_from_block_files(
     struct block_index *child = NULL;
     int populated = 0;
     int repaired = 0;
+    FILE *cached = NULL;
+    int cached_file = -1;
 
     /* Same O(chain) witness as _from_disk (and its FULL block-file scan above,
      * chain_restore_scan_block_files, is itself O(all blocks on disk)): this
@@ -557,8 +566,7 @@ int chain_restore_rebuild_active_chain_from_block_files(
      * not cold seeds only. */
     atomic_uint_least64_t *scan_ctr =
         boot_scan_counter("chain_restore.disk_rebuild_rows");
-    /* Same per-height shutdown poll as _from_disk: one atomic load is noise
-     * next to the per-height open/pread/close. */
+    /* Same per-height shutdown poll as _from_disk. */
     for (int h = tip->nHeight;
          h >= 0 && !thread_registry_shutdown_requested(); h--) {
         boot_scan_bump(scan_ctr);
@@ -568,7 +576,7 @@ int chain_restore_rebuild_active_chain_from_block_files(
             break;
         struct block_header hdr;
         if (!chain_restore_read_header_at_pos(datadir, pos->file, pos->pos,
-                                              &hdr))
+                                              &cached, &cached_file, &hdr))
             break;
         struct uint256 disk_hash;
         block_header_get_hash(&hdr, &disk_hash);
@@ -604,6 +612,7 @@ int chain_restore_rebuild_active_chain_from_block_files(
 
     if (child)
         child->pprev = NULL;
+    chain_restore_close_block_file(cached);
     chain_restore_disk_pos_map_free(&pos_map);
     printf("[chain-restore] block-file ancestry rebuilt active chain: "
            "tip_h=%d populated=%d repaired=%d\n",
