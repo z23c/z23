@@ -465,12 +465,30 @@ static int wrc_import_save_failure(bool watch_only)
             ASSERT(wrc_reply_has(&result, "1 utxos rows skipped"));
         }
         json_free(&result);
+        ASSERT(sqlite3_exec(fx.ndb.db, "DROP TRIGGER refuse_one",
+                            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(watch_only ? wrc_import_address(&fx, &result) :
+                            wrc_import(&fx, &result));
+        ASSERT(wrc_wallet_rows(&fx) == 2);
+        int64_t value;
+        int height;
+        bool coinbase;
+        ASSERT(wrc_wallet_row(&fx, 1, &value, &height, &coinbase));
+        ASSERT(value == WRC_COIN_AMOUNT && height == 7 && !coinbase);
+        ASSERT(wrc_wallet_row(&fx, 2, &value, &height, &coinbase));
+        ASSERT(value == WRC_COIN_AMOUNT && height == 7 && !coinbase);
+        if (watch_only) {
+            ASSERT(json_get_int(json_get(&result, "utxos")) == 2);
+            ASSERT(json_get_real(json_get(&result, "balance")) ==
+                   (double)(2 * WRC_COIN_AMOUNT) / 1e8);
+            ASSERT(json_get(&result, "utxos_save_failed") == NULL);
+        }
+        json_free(&result);
         wrc_close(&fx);
         PASS();
     } _test_next:;
     return failures;
 }
-
 
 static int wrc_importaddress_skips_disagreeing_rows(void)
 {
