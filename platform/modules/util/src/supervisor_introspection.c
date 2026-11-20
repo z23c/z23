@@ -252,6 +252,8 @@ static bool supervisor_root_fields(struct json_value *out)
                       supervisor_tick_runner_last_hb_age_us());
     ok &= json_push_kv_int (out, "tick_runner_stall_fires",
                       (int64_t)atomic_load(&g_runner_contract.stall_fires));
+    ok &= json_push_kv_str(out, "tick_runner_last_stall_callback",
+                      supervisor_tick_runner_last_stall_callback_name());
     ok &= json_push_kv_bool(out, "stall_delivery_running",
                       atomic_load(&g_stall_runner_running));
     int64_t stall_hb = atomic_load(&g_stall_runner_last_us);

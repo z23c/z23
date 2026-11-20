@@ -550,6 +550,7 @@ int64_t  supervisor_tick_runner_last_hb_age_us(void);
 uint32_t supervisor_tick_runner_stall_fires(void);
 bool     supervisor_tick_runner_running(void);
 const char *supervisor_active_callback_name(void);
+const char *supervisor_tick_runner_last_stall_callback_name(void);
 
 /* The tick runner's OS thread id (0 before it starts). The heartbeat age above
  * says only how long the runner has been inside one child's on_tick; it cannot

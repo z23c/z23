@@ -1633,6 +1633,13 @@ static int check_stop_pending_callback(void)
     return failures;
 }
 
+static void wedge_runner_from_child(struct liveness_contract *self)
+{
+    (void)self;
+    supervisor_tick_runner_backdate_hb_for_testing(5000000);
+    supervisor_tick_runner_monitor_for_testing();
+}
+
 static int check_wedged_tick_runner_blocker(void)
 {
     int failures = 0;
@@ -1643,13 +1650,16 @@ static int check_wedged_tick_runner_blocker(void)
     supervisor_reset_for_testing();
     blocker_reset_for_testing();
     {
+        static struct liveness_contract child;
         supervisor_tick_runner_setup_for_testing(/*deadline_secs=*/1);
-        supervisor_tick_runner_backdate_hb_for_testing(5000000);  /* 5 s ago */
+        liveness_contract_init(&child, "stall.runner_identity");
+        child.on_tick = wedge_runner_from_child;
+        supervisor_child_id id = supervisor_register(&child);
         uint32_t fires0 = supervisor_tick_runner_stall_fires();
-
-        supervisor_tick_runner_monitor_for_testing();
-        SUP_CHECK("wedged runner fires stall exactly once",
-            supervisor_tick_runner_stall_fires() - fires0 == 1);
+        atomic_store(&child.tick_pending, true);
+        supervisor_run_due_ticks_for_testing();
+        SUP_CHECK("wedged runner fixture registers and fires exactly once",
+            id >= 0 && supervisor_tick_runner_stall_fires() - fires0 == 1);
         SUP_CHECK("wedged runner names supervisor.tick_runner_wedged blocker",
             blocker_exists("supervisor.tick_runner_wedged"));
 
@@ -1663,6 +1673,14 @@ static int check_wedged_tick_runner_blocker(void)
         supervisor_tick_runner_monitor_for_testing();
         SUP_CHECK("runner heartbeat resumes -> blocker cleared",
             !blocker_exists("supervisor.tick_runner_wedged"));
+        struct json_value v;
+        json_init(&v);
+        bool dump_ok = supervisor_dump_state_json(&v, "summary");
+        const char *last = json_get_str(
+            json_get(&v, "tick_runner_last_stall_callback"));
+        SUP_CHECK("runner stall callback identity survives recovery",
+            dump_ok && last && strcmp(last, "stall.runner_identity") == 0);
+        json_free(&v);
 
         blocker_reset_for_testing();
     }

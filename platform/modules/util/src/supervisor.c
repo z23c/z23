@@ -284,6 +284,7 @@ static _Atomic uint64_t g_runner_wake_seq = 0;
  * teardown.  Publish a stable name snapshot instead of retaining that pointer
  * in diagnostics.  g_lock also makes concurrent JSON reads race-free. */
 static char g_runner_active_name[SUPERVISOR_NAME_MAX];
+static char g_runner_last_stall_name[SUPERVISOR_NAME_MAX];
 
 /* The policy an operator should be TOLD, which is not always the one a child
  * declared. Three children (chain.coord_escalation, net.outbound_floor, and
@@ -962,6 +963,11 @@ static void supervisor_monitor_runner(int64_t now)
         int expected = SUPERVISOR_STALL_NONE;
         if (atomic_compare_exchange_strong(&g_runner_contract.stall_reason,
                 &expected, SUPERVISOR_STALL_TIME_DEADLINE)) {
+            pthread_mutex_lock(&g_lock);
+            snprintf(g_runner_last_stall_name,
+                     sizeof(g_runner_last_stall_name), "%s",
+                     g_runner_active_name[0] ? g_runner_active_name : "unknown");
+            pthread_mutex_unlock(&g_lock);
             atomic_fetch_add(&g_runner_contract.stall_fires, 1u);
             runner_blocker_schedule(RUNNER_BLOCKER_SET);
         }
@@ -1403,6 +1409,7 @@ void supervisor_reset_for_testing(void)
     memset(g_domains, 0, sizeof(g_domains));
     g_domain_count = 0;
     g_stall_runner_active_name[0] = '\0';
+    g_runner_last_stall_name[0] = '\0';
     g_stale_cancel_hook = NULL;
     g_stale_cancel_hook_ctx = NULL;
     g_rearm_cancel_hook = NULL;
@@ -1466,6 +1473,16 @@ const char *supervisor_active_callback_name(void)
     pthread_mutex_lock(&g_lock);
     snprintf(name, sizeof(name), "%s",
              g_runner_active_name[0] ? g_runner_active_name : "none");
+    pthread_mutex_unlock(&g_lock);
+    return name;
+}
+
+const char *supervisor_tick_runner_last_stall_callback_name(void)
+{
+    static _Thread_local char name[SUPERVISOR_NAME_MAX];
+    pthread_mutex_lock(&g_lock);
+    snprintf(name, sizeof(name), "%s",
+             g_runner_last_stall_name[0] ? g_runner_last_stall_name : "none");
     pthread_mutex_unlock(&g_lock);
     return name;
 }
