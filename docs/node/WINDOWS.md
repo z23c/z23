@@ -179,6 +179,19 @@ The Makefile's `TOR_FULL` selection uses these archives on both lanes.
      mingw-w64-ucrt-x86_64-libsystre
    ```
 
+When invoking GCC directly from PowerShell, put the UCRT64 toolchain on
+the current process's `PATH` so its compiler subprocesses can load their
+DLLs. A missing `libmpc-3.dll`, `libgmp-10.dll`, or `libisl-23.dll`
+at `cc1.exe` startup can indicate this directory is missing. Substitute
+your MSYS2 installation path if it differs. This check runs the C23 front end
+and leaves no build output.
+
+```powershell
+$ucrtBin = 'C:\msys64\ucrt64\bin'
+$env:Path = "$ucrtBin;$env:Path"
+'static_assert(sizeof(int) >= 2);' | & "$ucrtBin\gcc.exe" -std=c23 -x c -fsyntax-only -
+```
+
 Keep the checkout on the Windows filesystem rather than inside the
 MSYS2 tree, and enter it from UCRT64 through its drive mount (a path
 under `C:` appears as `/c`). Do not add the MSYS2 `usr\bin` directory

@@ -270,6 +270,11 @@ static int run_bounded(uint64_t timeout_ms, wchar_t *const argv[])
     launch_suspended(&launch, argv, line, previous_thread_mode);
     report_launch_failure(&launch, argv[0]);
     int result = wait_for_launch(&launch, timeout_ms);
+    if ((DWORD)result == STATUS_DLL_NOT_FOUND)
+        fwprintf(stderr,
+                 L"z23_bounded_run: %ls returned STATUS_DLL_NOT_FOUND (0x%08lX). "
+                 L"Check the application's runtime DLLs and the PATH inherited by the process.\n",
+                 argv[0], (unsigned long)(DWORD)result);
 
     if (launch.started) {
         CloseHandle(launch.process.hThread);
