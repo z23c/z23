@@ -337,14 +337,22 @@ int64_t db_view_integrity_max_height(struct node_db *ndb)
 
 #ifdef ZCL_TESTING
 static bool g_view_integrity_step_fail;
+static int g_view_integrity_fail_after = -1;
 static int db_view_integrity_step(sqlite3_stmt *s)
 {
-    return g_view_integrity_step_fail ? SQLITE_BUSY :
-           ar_step_checked(s, "view_integrity prefix probe", NULL);
+    if (g_view_integrity_step_fail || g_view_integrity_fail_after == 0)
+        return SQLITE_BUSY;
+    if (g_view_integrity_fail_after > 0)
+        g_view_integrity_fail_after--;
+    return ar_step_checked(s, "view_integrity prefix probe", NULL);
 }
 void db_view_integrity_test_step_fail(bool enabled)
 {
     g_view_integrity_step_fail = enabled;
+}
+void db_view_integrity_test_step_fail_after(int rows)
+{
+    g_view_integrity_fail_after = rows;
 }
 #else
 #define db_view_integrity_step(s) ar_step_checked(s, "view_integrity prefix probe", NULL)
@@ -371,26 +379,31 @@ int64_t db_view_integrity_contiguous_height(struct node_db *ndb)
     if (count <= 0 || min != 0 || max < 0 || max == INT64_MAX) return -1;
     if (count == max + 1) return max;
 
-    int64_t lo = 0, hi = max;
-    while (lo < hi) {
-        int64_t mid = lo + (hi - lo + 1) / 2;
-        AR_PREPARE_RET(ndb, s,
-            "SELECT COUNT(*) FROM view_integrity WHERE height<=?", -1);
-        if (AR_BIND_INT(s, 1, mid) != SQLITE_OK) {
-            AR_FINALIZE(s);
-            return -1;
-        }
-        enum zcl_step rc = db_view_integrity_step(s);
-        if (rc != ZCL_STEP_ROW) {
-            AR_FINALIZE(s);
-            return -1;
-        }
-        bool complete = AR_COL_INT(s, 0) == mid + 1;
+    /* The summary and walk are separate statements. Limit the walk to the
+     * observed max; callers requiring one snapshot must hold a read transaction. */
+    AR_PREPARE_RET(ndb, s,
+        "SELECT height FROM view_integrity WHERE height<=? ORDER BY height", -1);
+    if (AR_BIND_INT(s, 1, max) != SQLITE_OK) {
         AR_FINALIZE(s);
-        if (complete) lo = mid;
-        else hi = mid - 1;
+        return -1;
     }
-    return lo;
+    int64_t expected = 0;
+    bool gap = false;
+    int rc;
+    while ((rc = db_view_integrity_step(s)) == ZCL_STEP_ROW) {
+        if (sqlite3_column_type(s, 0) != SQLITE_INTEGER) {
+            AR_FINALIZE(s);
+            return -1;
+        }
+        if (AR_COL_INT(s, 0) != expected) {
+            gap = true;
+            break;
+        }
+        expected++;
+    }
+    AR_FINALIZE(s);
+    if (rc != ZCL_STEP_DONE && !(rc == ZCL_STEP_ROW && gap)) return -1;
+    return expected - 1;
 }
 
 /* ── Owner-derivation helper ───────────────────────────────────────── */

@@ -777,6 +777,10 @@ static int cc_integrity_summary_cases(struct node_db *ndb)
     CC_CHECK("integrity summary: bounded SQLite row steps",
              installed && removed && trace.summaries == 1 &&
              trace.fullscan_steps == 0 && trace.vm_steps < 512);
+    CC_CHECK("integrity summary: late gap fixture",
+             cc_exec(ndb->db, "DELETE FROM view_integrity WHERE height=8190"));
+    CC_CHECK("integrity summary: late gap exact prefix",
+             db_view_integrity_contiguous_height(ndb) == 8189);
     return failures;
 }
 
@@ -816,6 +820,23 @@ static int cc_sparse_integrity_cases(struct node_db *ndb)
     printf("sparse integrity: forced step failure cursor=%lld\n",
            (long long)cursor);
     CC_CHECK("sparse integrity: forced step error fails closed", cursor == -1);
+    db_view_integrity_test_step_fail_after(2);
+    cursor = db_view_integrity_contiguous_height(ndb);
+    db_view_integrity_test_step_fail_after(-1);
+    CC_CHECK("sparse integrity: error after positive prefix fails closed",
+             cursor == -1);
+    CC_CHECK("sparse integrity: early gap fixture",
+             cc_exec(ndb->db, "DELETE FROM view_integrity;"
+                     "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+                     "(0,zeroblob(32)),(2,zeroblob(32))"));
+    CC_CHECK("sparse integrity: early gap exact prefix",
+             db_view_integrity_contiguous_height(ndb) == 0);
+    CC_CHECK("sparse integrity: near max fixture",
+             cc_exec(ndb->db, "DELETE FROM view_integrity;"
+                     "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+                     "(0,zeroblob(32)),(9223372036854775806,zeroblob(32))"));
+    CC_CHECK("sparse integrity: near max exact prefix",
+             db_view_integrity_contiguous_height(ndb) == 0);
     return failures;
 }
 

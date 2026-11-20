@@ -116,10 +116,13 @@ int64_t db_view_integrity_max_height(struct node_db *ndb);
 
 /* Highest height H for which every receipt from 0 through H is present, or
  * -1 when no such prefix exists or the read fails. Uses a COUNT/MIN/MAX fast
- * path for a complete table, then bounded indexed searches for the first gap. */
+ * path for a complete table, then an ordered walk bounded by that summary max.
+ * The summary and walk are separate statements unless the caller holds a read
+ * transaction; concurrent changes can therefore be observed between them. */
 int64_t db_view_integrity_contiguous_height(struct node_db *ndb);
 #ifdef ZCL_TESTING
 void db_view_integrity_test_step_fail(bool enabled);
+void db_view_integrity_test_step_fail_after(int rows);
 #endif
 
 /* Read the 20-byte address hash recorded for a spent prevout (used to
