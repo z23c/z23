@@ -1370,7 +1370,8 @@ static void rs_rawtx_verbose_cases(struct rs_rawtx_fx *fx)
 enum rs_header_case {
     HEADER_DEFAULT, HEADER_VERBOSE, HEADER_DISK, HEADER_NUMERIC,
     HEADER_PORT, HEADER_BAD_PORT_DISK, HEADER_ABOVE_TIP,
-    HEADER_BAD_PORT_NO_DISK, HEADER_NULL, HEADER_CASE_COUNT
+    HEADER_BAD_PORT_NO_DISK, HEADER_OVERSIZE_PORT_DISK,
+    HEADER_OVERSIZE_PORT_NO_DISK, HEADER_NULL, HEADER_CASE_COUNT
 };
 
 static bool rs_rawtx_header_result(enum rs_header_case i, bool called,
@@ -1380,7 +1381,8 @@ static bool rs_rawtx_header_result(enum rs_header_case i, bool called,
     if (i == HEADER_DEFAULT || i == HEADER_VERBOSE)
         return called && result->type == JSON_OBJ;
     if (i == HEADER_NUMERIC || i == HEADER_ABOVE_TIP ||
-        i == HEADER_BAD_PORT_NO_DISK || i == HEADER_NULL) return !called;
+        i == HEADER_BAD_PORT_NO_DISK || i == HEADER_OVERSIZE_PORT_NO_DISK ||
+        i == HEADER_NULL) return !called;
     return called && result->type == JSON_STR &&
            strcmp(json_get_str(result), expected) == 0;
 }
@@ -1398,8 +1400,12 @@ static bool rs_rawtx_header_case(struct rs_rawtx_fx *fx, enum rs_header_case i,
         else json_set_bool(&arg, i == HEADER_VERBOSE);
         (void)json_push_back(&params, &arg);
     }
-    rs_raw_header = i == HEADER_PORT ? &fx->body.header : NULL;
-    node_db_runtime_port_set(i == HEADER_PORT ? &rs_raw_header_port :
+    bool oversize = i == HEADER_OVERSIZE_PORT_DISK ||
+                    i == HEADER_OVERSIZE_PORT_NO_DISK;
+    fx->body.header.nSolutionSize = oversize ? MAX_SOLUTION_SIZE + 1
+                                             : MAX_SOLUTION_SIZE;
+    rs_raw_header = i == HEADER_PORT || oversize ? &fx->body.header : NULL;
+    node_db_runtime_port_set(i == HEADER_PORT || oversize ? &rs_raw_header_port :
         (i == HEADER_BAD_PORT_DISK || i == HEADER_BAD_PORT_NO_DISK)
             ? &rpc_safety_header_port : NULL);
     json_init(&result);
@@ -1407,7 +1413,8 @@ static bool rs_rawtx_header_case(struct rs_rawtx_fx *fx, enum rs_header_case i,
     bool ok = rs_rawtx_header_result(i, called, &result, expected);
     static const char *const names[] = {
         "default", "verbose", "disk", "numeric", "verified port",
-        "mismatched port with disk", "above tip", "mismatched port without disk", "null"
+        "mismatched port with disk", "above tip", "mismatched port without disk",
+        "oversized port with disk", "oversized port without disk", "null"
     };
     if (!ok) printf("header case %s failed (called=%d type=%d) ", names[i], called, result.type);
     json_free(&result); json_free(&arg); json_free(&params);
@@ -1424,15 +1431,18 @@ static void rs_rawtx_header_cases(struct rs_rawtx_fx *fx)
     reducer_frontier_provable_tip_set(0);
     struct block_index *bi = block_map_find(&fx->ms.map_block_index, &fx->body_hash);
     unsigned saved_status = bi ? bi->nStatus : 0;
+    size_t saved_solution_size = fx->body.header.nSolutionSize;
     for (enum rs_header_case i = HEADER_DEFAULT; i < HEADER_CASE_COUNT; i++) {
         if (bi) {
             bi->nHeight = i == HEADER_ABOVE_TIP ? 1 : 0;
             bi->nStatus = saved_status;
-            if (i == HEADER_PORT || i == HEADER_BAD_PORT_NO_DISK)
+            if (i == HEADER_PORT || i == HEADER_BAD_PORT_NO_DISK ||
+                i == HEADER_OVERSIZE_PORT_NO_DISK)
                 bi->nStatus &= ~BLOCK_HAVE_DATA;
         }
         fx->ok = rs_rawtx_header_case(fx, i, expected) && fx->ok;
     }
+    fx->body.header.nSolutionSize = saved_solution_size;
     if (bi) bi->nStatus = saved_status;
     node_db_runtime_port_set(NULL);
     rs_raw_header = NULL;
