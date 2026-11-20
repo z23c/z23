@@ -1566,6 +1566,10 @@ static int afd_recipe_open(const struct afd_world *w)
          * (The door prints "opened tinyprog-1 pid 0"; the receive-copy
          * leaf copies the inner pid verbatim.) */
         ASSERT(asf_door_pid(run.text) == 0);
+        ASSERT(strstr(run.text, "next:") != NULL);
+        ASSERT(strstr(run.text, "app invoke package") != NULL);
+        ASSERT(strstr(run.text, "bin/tinyprog") != NULL);
+        ASSERT(strstr(run.text, "--accept_execution=true") != NULL);
         PASS();
     } _test_next:;
     return failures;

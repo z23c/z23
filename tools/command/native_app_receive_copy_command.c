@@ -239,6 +239,25 @@ static void zrv_open_binding(struct zrv *z, const struct zcl_command_reply *buil
         !strcmp(version, head) && !strcmp(package, opened_package));
 }
 
+static bool zrv_open_offer(struct zrv *z, const struct zcl_command_reply *inner)
+{
+    static const char *const keys[] = {
+        "next", "preview_root", "preview_receipt", "preview_program",
+        "artifact_sha3"
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const struct json_value *value = json_get(&inner->data, keys[i]);
+        if (!value) continue;
+        if (value->type != JSON_STR ||
+            !json_push_kv(&z->reply->data, keys[i], value)) {
+            zcl_package_copy_fail(z->reply, "OBSERVATION_UNAVAILABLE", true,
+                "The open succeeded but its preview action could not be retained; inspect the copy before retrying.", z->dest);
+            return false;
+        }
+    }
+    return true;
+}
+
 static void zrv_open_result(struct zrv *z, struct zcl_command_reply *inner, bool ok)
 {
     const struct json_value *pid = json_get(&inner->data, "pid");
@@ -251,6 +270,7 @@ static void zrv_open_result(struct zrv *z, struct zcl_command_reply *inner, bool
             "The open result did not retain a valid execution observation; inspect the copy before retrying.", z->dest);
         return;
     }
+    if (!zrv_open_offer(z, inner)) return;
     if (!zrv_observe(z, "open_observation", "app.run.copy", inner, zrv_open_fields,
                      sizeof(zrv_open_fields) / sizeof(zrv_open_fields[0]))) return;
     zrv_describe(z, "commit");

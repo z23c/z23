@@ -2257,13 +2257,10 @@ static int rz_build_case(bool makefile, bool programs)
     zcl_command_reply_free(&reply); json_free(&input); return failures;
 }
 
-/* The share open's success shape so far as this lane's surface carries it:
- * the launch stage opened the kept recipe install to a preview (nothing
- * spawned, so no pid and nothing settled), the exact installed identity is
- * bound to the build, and the build evidence retains the recipe contract
- * (recipe_build, the bin/ program and the preview candidate). The
- * preview_* keys and the app invoke next action surface in the reply once
- * the receive-copy leaf carries them (owned by the tasks-ooda lane). */
+/* The share open opens the kept recipe install to a preview (nothing
+ * spawned, so no pid and nothing settled), binds the exact installed
+ * identity to the build, and retains both the recipe build evidence and
+ * the outer preview offer with its app invoke next action. */
 static bool rz_open_observed(const struct json_value *observation,
                              const struct receive_fixture *f)
 {
@@ -2289,6 +2286,22 @@ static bool rz_open_build_offer(const struct json_value *build,
         !strcmp(program, "bin/tinyprog") && !strcmp(offer, "bin/tinyprog") &&
         strlen(root) == 64 && !strcmp(root, f->package);
 }
+static bool rz_open_preview_offer(const struct zcl_command_reply *reply,
+                                  const struct receive_fixture *f,
+                                  const char *digest)
+{
+    const char *root = json_get_str(json_get(&reply->data, "preview_root"));
+    const char *receipt = json_get_str(json_get(&reply->data, "preview_receipt"));
+    const char *program = json_get_str(json_get(&reply->data, "preview_program"));
+    const char *artifact = json_get_str(json_get(&reply->data, "artifact_sha3"));
+    const char *next = json_get_str(json_get(&reply->data, "next"));
+    return root && !strcmp(root, f->package) && receipt && strlen(receipt) == 64 &&
+        program && !strcmp(program, "bin/tinyprog") &&
+        artifact && !strcmp(artifact, digest) && next &&
+        strstr(next, "app invoke package") && strstr(next, f->package) &&
+        strstr(next, "--accept_execution=true");
+}
+
 static bool rz_open_offer(const struct zcl_command_reply *reply,
                           const struct receive_fixture *f)
 {
@@ -2303,7 +2316,8 @@ static bool rz_open_offer(const struct zcl_command_reply *reply,
         json_get_bool(json_get(&reply->data, "build_matches_open")) &&
         (!pid || (pid->type == JSON_INT && json_get_int(pid) == 0)) &&
         rz_open_observed(open, f) && rz_open_build_offer(build, f) &&
-        digest && opened && !strcmp(digest, opened);
+        digest && opened && !strcmp(digest, opened) &&
+        rz_open_preview_offer(reply, f, digest);
 }
 
 /* `z23 app open FILE.z23share` of a recipe-form release: the receive/open
