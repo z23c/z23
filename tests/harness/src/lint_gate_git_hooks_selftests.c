@@ -982,6 +982,58 @@ static int hooks_boot_case(const struct hooks_fx *fx, const char *dir,
            || hooks_boot_has(dir, "tor-ran");
 }
 
+/* Exercise the actual pin expression against isolated stale and current stamps. */
+static int hooks_pin_makefile(const char *dir)
+{
+    char source[PATH_MAX], path[PATH_MAX], *text = NULL;
+    if (repo_path(source, sizeof source, "Makefile") ||
+        dip_join(path, sizeof path, dir, "pin.mk") ||
+        read_entire_file(source, &text) || !text) {
+        free(text);
+        return 1;
+    }
+    const char *start = strstr(text, "\nSQLITE_VENDOR_PIN =");
+    const char *end = start ? strstr(start, "\nVENDOR_REPAIR_GOALS") : NULL;
+    FILE *file = fopen(path, "wb");
+    bool ok = file && end &&
+        fputs("ZCL_VENDOR_LIB := vendor/lib\nVENDOR_LIBS := vendor/lib/libsqlite3.a\n", file) >= 0 &&
+        fwrite(start, 1, (size_t)(end - start), file) == (size_t)(end - start) &&
+        fputs("\nshow:\n\t@echo x$(strip $(VENDOR_MISSING_INPUTS))\n", file) >= 0;
+    if (file && fclose(file) != 0) ok = false;
+    free(text);
+    return !ok;
+}
+
+static int hooks_pin_run(const struct hooks_fx *fx, const char *dir,
+                         const char *path, const char *stamp, const char *expected)
+{
+    char out[HOOKS_OUT_CAP];
+    const char *argv[] = {"make", "-s", "-C", dir, "-f", "pin.mk", "show", NULL};
+    return write_file(path, stamp) ||
+           hooks_spawn(argv, fx->genv.vp, out, sizeof out) ||
+           strcmp(out, expected) != 0;
+}
+
+
+static int hooks_pin_checks(const struct hooks_fx *fx, const char *dir)
+{
+    char path[PATH_MAX];
+    const char *const dirs[] = {"vendor", "vendor/lib", "vendor/lib/.provenance"};
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++)
+        if (dip_join(path, sizeof path, dir, dirs[i]) || mkdir(path, 0755)) return 1;
+    if (hooks_pin_makefile(dir) ||
+        dip_join(path, sizeof path, dir, "tools/scripts/build_vendor.sh") ||
+        write_file(path, "SQLITE_SHA=\"abc123\"\n") ||
+        dip_join(path, sizeof path, dir, "vendor/lib/libsqlite3.a") ||
+        write_file(path, "archive") ||
+        dip_join(path, sizeof path, dir, "vendor/lib/.provenance/libsqlite3.a.stamp"))
+        return 1;
+    return hooks_pin_run(fx, dir, path, "source_sha256=old\n",
+                         "xvendor/lib/libsqlite3.a\n") ||
+           hooks_pin_run(fx, dir, path, "source_sha256=abc123\n", "x\n");
+}
+
+
 static int hooks_boot_checks(struct hooks_fx *fx)
 {
     static const struct hooks_goal_case cases[] = {
@@ -1019,6 +1071,7 @@ static int hooks_boot_checks(struct hooks_fx *fx)
     bad |= hooks_vendor_case(fx, dir, "MAKE_RESTARTS=1", NULL, 1);
     bad |= hooks_vendor_case(fx, dir, "FAIL_VENDOR=1", "FAIL_VENDOR=1", 0);
     bad |= hooks_vendor_case(fx, dir, "FAIL_AUDIT=1", "FAIL_AUDIT=1", 0);
+    bad |= hooks_pin_checks(fx, dir);
     return bad;
 }
 

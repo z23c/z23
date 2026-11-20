@@ -434,21 +434,5 @@ children="$(ps --ppid $$ -o comm=,args=)"
 [[ "$children" != *"tools/scripts/build_vendor.sh"* ]] ||
     fail 'serial vendor worker remained active after failure'
 
-# Exercise the actual Makefile pin check with a private archive/stamp pair.
-mkdir -p "$SANDBOX/vendor/lib/.provenance"
-: > "$SANDBOX/vendor/lib/libsqlite3.a"
-{
-    printf "%s\n" "ZCL_VENDOR_LIB := vendor/lib" "VENDOR_LIBS := vendor/lib/libsqlite3.a"
-    sed -n "/^# An old SQLite pin/,/^VENDOR_REPAIR_GOALS/{ /^VENDOR_REPAIR_GOALS/!p; }" "$ROOT/Makefile"
-    printf "show:\n\t%s\n" '@echo x$(strip $(VENDOR_MISSING_INPUTS))'
-} > "$SANDBOX/sqlite-pin.mk"
-printf "%s\n" "source_sha256=old" > "$SANDBOX/vendor/lib/.provenance/libsqlite3.a.stamp"
-[[ "$(cd "$SANDBOX" && make -s -f sqlite-pin.mk show)" == "xvendor/lib/libsqlite3.a" ]] ||
-    fail "stale SQLite stamp did not trigger vendor bootstrap"
-pin="$(sed -n 's/^SQLITE_SHA="\([0-9a-f]*\)"/\1/p' "$ROOT/tools/scripts/build_vendor.sh")"
-printf "source_sha256=%s\n" "$pin" > "$SANDBOX/vendor/lib/.provenance/libsqlite3.a.stamp"
-[[ "$(cd "$SANDBOX" && make -s -f sqlite-pin.mk show)" == "x" ]] ||
-    fail "current SQLite stamp unnecessarily triggered vendor bootstrap"
-
 printf '%s\n' \
     'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'
