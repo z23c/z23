@@ -14,6 +14,10 @@ struct bfat_verifier_snapshot {
     uint8_t bytes[32];
 };
 
+#if defined(__linux__)
+struct zcl_result bfat_verifier_check_seals(int observed);
+#endif
+
 struct zcl_result bfat_verifier_snapshot_open(
     const char *path, struct bfat_verifier_snapshot *out);
 void bfat_verifier_snapshot_close(struct bfat_verifier_snapshot *snapshot);

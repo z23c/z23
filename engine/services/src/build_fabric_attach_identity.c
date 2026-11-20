@@ -82,6 +82,17 @@ static bool bfat_root_owned_path(const char *path)
 #endif
 
 #if defined(__linux__)
+static const int bfat_verifier_required_seals =
+    F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+
+struct zcl_result bfat_verifier_check_seals(int observed)
+{
+    if (observed < 0 ||
+        (observed & bfat_verifier_required_seals) != bfat_verifier_required_seals)
+        return ZCL_ERR(-1, "verifier snapshot seal readback failed");
+    return ZCL_OK;
+}
+
 static bool bfat_copy_to_memfd(const struct platform_positioned_file *source,
                                 uint64_t size, int fd)
 {
@@ -137,24 +148,28 @@ static struct zcl_result bfat_verifier_snapshot_open_linux(
         !platform_positioned_file_snapshot(&source, &stamp) ||
         stamp.size == 0 || stamp.size > UINT64_C(256) * 1024u * 1024u) {
         platform_positioned_file_close(&source);
-        return ZCL_ERR(-1, "verifier snapshot source unavailable");
+        return ZCL_ERR(-1, "verifier snapshot source open or metadata failed");
     }
     int fd = memfd_create("z23-build-verifier",
                           MFD_ALLOW_SEALING | MFD_CLOEXEC);
     if (fd < 0) {
         platform_positioned_file_close(&source);
-        return ZCL_ERR(-1, "verifier snapshot memfd unavailable");
+        return ZCL_ERR(-1, "verifier snapshot memfd create failed");
     }
-    bool ok = bfat_copy_to_memfd(&source, stamp.size, fd);
+    bool copied = bfat_copy_to_memfd(&source, stamp.size, fd);
     platform_positioned_file_close(&source);
-    const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
-    if (!ok || fcntl(fd, F_ADD_SEALS, seals) != 0 ||
-        (fcntl(fd, F_GET_SEALS) & seals) != seals ||
-        !bfat_hash_sealed_memfd(fd, stamp.size, out->bytes))
-        ok = false;
-    if (!ok) {
+    const char *failure = NULL;
+    if (!copied)
+        failure = "verifier snapshot copy failed";
+    else if (fcntl(fd, F_ADD_SEALS, bfat_verifier_required_seals) != 0)
+        failure = "verifier snapshot seal add failed";
+    else if (!bfat_verifier_check_seals(fcntl(fd, F_GET_SEALS)).ok)
+        failure = "verifier snapshot seal readback failed";
+    else if (!bfat_hash_sealed_memfd(fd, stamp.size, out->bytes))
+        failure = "verifier snapshot hash failed";
+    if (failure) {
         close(fd);
-        return ZCL_ERR(-1, "verifier snapshot copy or seal failed");
+        return ZCL_ERR(-1, "%s", failure);
     }
     out->fd = fd;
     return ZCL_OK;
@@ -372,8 +387,9 @@ struct zcl_result bfat_runtime_roots(
 #endif
     ZCL_CHECK(bfw_worker_path(workspace, path, sizeof(path)));
     struct bfat_verifier_snapshot snapshot = { .fd = -1 };
-    if (!bfat_verifier_snapshot_open(path, &snapshot).ok)
-        return ZCL_ERR(-1, "executor-runtime-closure-missing: verifier snapshot");
+    struct zcl_result opened = bfat_verifier_snapshot_open(path, &snapshot);
+    if (!opened.ok)
+        return ZCL_ERR(-1, "executor-runtime-closure-missing: %s", opened.message);
     struct zcl_result result = bfat_runtime_roots_snapshot(
         workspace, desc, &snapshot, runtime_root, verifier_root);
     bfat_verifier_snapshot_close(&snapshot);

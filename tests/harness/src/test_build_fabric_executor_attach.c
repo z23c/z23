@@ -93,6 +93,25 @@ static bool att_copy_executable(const char *from, const char *to)
     return ok && chmod(to, 0700) == 0;
 }
 
+static int test_bf_attach_seal_status(void)
+{
+    int failures = 0;
+    TEST("build_fabric_attach: seal query requires success and every required bit") {
+        const int required = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+        ASSERT(!bfat_verifier_check_seals(-1).ok);
+        ASSERT(!bfat_verifier_check_seals(required & ~F_SEAL_WRITE).ok);
+        ASSERT(bfat_verifier_check_seals(required).ok);
+        ASSERT(bfat_verifier_check_seals(required | 0x40000000).ok);
+        struct bfat_verifier_snapshot unavailable = { .fd = 123 };
+        struct zcl_result missing = bfat_verifier_snapshot_open("/dev/null", &unavailable);
+        ASSERT(!missing.ok);
+        ASSERT_STR_EQ(missing.message, "verifier snapshot source open or metadata failed");
+        ASSERT_EQ(unavailable.fd, -1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_attach_sealed_verifier_aba(void)
 {
     int failures = 0;
@@ -1845,6 +1864,7 @@ int test_build_fabric_attach(void)
 {
     int failures = 0;
 #if defined(__linux__)
+    failures += test_bf_attach_seal_status();
     failures += test_bf_attach_sealed_verifier_aba();
 #endif
 #if !defined(_WIN32)
