@@ -1602,6 +1602,12 @@ static void csir_wallet_read_exit_check(void)
         _exit(4);
 }
 
+static int csir_interrupt_once(void *ctx)
+{
+    int *calls = ctx;
+    return (*calls)++ == 0;
+}
+
 static void csir_wallet_read_failure_child(const char *datadir, int mode)
 {
     struct node_db *node; struct wallet_sqlite *ws;
@@ -1614,10 +1620,13 @@ static void csir_wallet_read_failure_child(const char *datadir, int mode)
     wallet_init(wallet);
     const char *sql = mode == 0 ? "DROP TABLE wallet_transactions" :
         "INSERT INTO node_state(key,value) VALUES('wallet_scan_height',X'00')";
-    if (mode != 2 && sqlite3_exec(node->db, sql, NULL, NULL, NULL) != SQLITE_OK)
+    if (mode < 2 && sqlite3_exec(node->db, sql, NULL, NULL, NULL) != SQLITE_OK)
         _exit(2);
     boot_error_reset_for_testing();
-    csir_expected_wallet_read_code = mode == 0 ? "WALLET_TX_LOAD_FAILED" : "WALLET_SCAN_LOAD_FAILED";
+    csir_expected_wallet_read_code = mode == 0 ? "WALLET_TX_LOAD_FAILED" :
+        mode == 3 ? "WALLET_KEY_LOAD_FAILED" : "WALLET_SCAN_LOAD_FAILED";
+    int interrupted = 0;
+    if (mode == 3) sqlite3_progress_handler(node->db, 1, csir_interrupt_once, &interrupted);
     if (mode != 2 && atexit(csir_wallet_read_exit_check) != 0) _exit(2);
     boot_wallet_read_persisted_test(datadir);
     _exit(mode == 2 ? 0 : 3);
@@ -1627,8 +1636,9 @@ static int case_wallet_read_failure_stops_startup(void)
 {
     int failures = 0;
     const char *cases[] = {"wallet transaction read error stops startup",
-        "corrupt wallet scan metadata stops startup", "absent wallet scan metadata permits startup"};
-    for (int mode = 0; mode < 3; ++mode) {
+        "corrupt wallet scan metadata stops startup", "absent wallet scan metadata permits startup",
+        "interrupted wallet key read stops startup"};
+    for (int mode = 0; mode < 4; ++mode) {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "csir_wallet_read", "case");
         fflush(NULL);

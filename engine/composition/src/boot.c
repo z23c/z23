@@ -1296,6 +1296,10 @@ static void boot_wallet_read_persisted_state(struct app_context *ctx,
                 "wallet_sqlite_read_keys failed: code=%d %s (%s:%d)\n",
                 _r.code, _r.message,
                 _r.source_file ? _r.source_file : "?", _r.source_line);
+            boot_error_report(BOOT_ERROR_FATAL, "WALLET_KEY_LOAD_FAILED", "wallet_load",
+                              "Wallet keys could not be loaded; startup stopped.",
+                              NULL, 0, "read_keys=false");
+            exit(1);
         }
     }
     boot_wallet_read_keypool_or_exit(&g_wallet_sqlite, &g_wallet);
