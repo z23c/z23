@@ -2427,6 +2427,28 @@ static int test_ops_health_body_fails_closed(void)
         ASSERT(strstr(out, "\"serving\":false") != NULL);
 
         g_bridge_rpc_error_fixture =
+            "{\"error\":{\"code\":-32097,\"message\":\"cannot read RPC auth cookie\"}}";
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_TRANSIENT);
+        ASSERT(strstr(out, "NODE_UNAVAILABLE") != NULL);
+        ASSERT(strstr(out, "cannot read RPC auth cookie") != NULL);
+
+        g_bridge_rpc_error_fixture =
+            "{\"error\":{\"code\":-32603,\"message\":\"health service failed\"}}";
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strstr(out, "health service failed") != NULL);
+
+        g_bridge_rpc_error_fixture =
+            "{\"code\":-32603,\"message\":\"bare health error\"}";
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strstr(out, "bare health error") != NULL);
+
+        g_bridge_rpc_error_fixture =
             "{\"status\":\"blocked\",\"healthy\":false}";
         code = ZCL_COMMAND_EXIT_INTERNAL;
         ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
