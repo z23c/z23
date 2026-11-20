@@ -12,6 +12,8 @@
 #include "platform/os_proc.h"
 #include "util/rss_trim.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,6 +100,88 @@ static int rt_policy_cases(void)
              !rss_trim_tick(&p, &ops));
     RT_CHECK("no trim before next interval is not reported as a trim",
              !rss_trim_tick(&p, &ops));
+    rss_trim_policy_init(&p, 100);
+    RT_CHECK("time zero is a valid first trim", rss_trim_heap_due(&p, 0, false));
+    RT_CHECK("time zero is not a second first trim", !rss_trim_heap_due(&p, 0, false));
+    RT_CHECK("interval boundary trims", rss_trim_heap_due(&p, 100, false));
+    RT_CHECK("clock rollback does not trim", !rss_trim_heap_due(&p, 0, false));
+    RT_CHECK("after rollback the original deadline remains", rss_trim_heap_due(&p, 200, false));
+    rss_trim_policy_init(&p, 100);
+    RT_CHECK("extreme initial time", rss_trim_heap_due(&p, INT64_MIN, false));
+    RT_CHECK("extreme elapsed time", rss_trim_heap_due(&p, INT64_MAX, false));
+    RT_CHECK("extreme rollback", !rss_trim_heap_due(&p, INT64_MIN, false));
+    rss_trim_policy_init(&p, 100);
+    ops.trim_heap = t_heap;
+    g_cache_calls = 0;
+    g_cache_result = RSS_TRIM_RELEASE_NONE;
+    rss_trim_tick(&p, &ops);
+    rss_trim_tick(&p, &ops);
+    RT_CHECK("nothing to release latches", g_cache_calls == 1);
+    return failures;
+}
+
+static pthread_mutex_t rt_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t rt_cv = PTHREAD_COND_INITIALIZER;
+static bool rt_entered, rt_continue;
+static _Atomic int rt_calls, rt_heaps;
+static _Atomic bool rt_sync;
+static bool rt_concurrent_sync(void *ctx) { (void)ctx; return atomic_load(&rt_sync); }
+static int64_t rt_concurrent_now(void) { return 1000000000; }
+static bool rt_concurrent_heap(void) { atomic_fetch_add(&rt_heaps, 1); return true; }
+static enum rss_trim_release rt_blocked_cache(void *ctx, int64_t *bytes)
+{
+    (void)ctx;
+    (void)bytes;
+    if (atomic_fetch_add(&rt_calls, 1) == 0) {
+        pthread_mutex_lock(&rt_mu);
+        rt_entered = true;
+        pthread_cond_broadcast(&rt_cv);
+        while (!rt_continue) pthread_cond_wait(&rt_cv, &rt_mu);
+        pthread_mutex_unlock(&rt_mu);
+    }
+    return RSS_TRIM_RELEASE_NONE;
+}
+struct rt_thread_args { struct rss_trim_policy *p; const struct rss_trim_ops *ops; };
+static void *rt_tick_thread(void *arg)
+{
+    struct rt_thread_args *a = arg;
+    rss_trim_tick(a->p, a->ops);
+    return NULL;
+}
+static int rt_concurrent_cases(void)
+{
+    int failures = 0;
+    struct rss_trim_policy p;
+    struct rss_trim_ops ops = {rt_concurrent_now, rt_concurrent_sync, rt_blocked_cache, rt_concurrent_heap, NULL, NULL};
+    struct rt_thread_args arg = {&p, &ops};
+    pthread_t thread;
+    rss_trim_policy_init(&p, RSS_TRIM_INTERVAL_US);
+    atomic_store(&rt_calls, 0);
+    atomic_store(&rt_heaps, 0);
+    atomic_store(&rt_sync, false);
+    rt_entered = false;
+    rt_continue = false;
+    if (pthread_create(&thread, NULL, rt_tick_thread, &arg) != 0) return 1;
+    pthread_mutex_lock(&rt_mu);
+    while (!rt_entered) pthread_cond_wait(&rt_cv, &rt_mu);
+    pthread_mutex_unlock(&rt_mu);
+    rss_trim_tick(&p, &ops);
+    int concurrent = atomic_load(&rt_calls);
+    int heaps_blocked = atomic_load(&rt_heaps);
+    atomic_store(&rt_sync, true);
+    rss_trim_tick(&p, &ops);
+    atomic_store(&rt_sync, false);
+    pthread_mutex_lock(&rt_mu);
+    rt_continue = true;
+    pthread_cond_broadcast(&rt_cv);
+    pthread_mutex_unlock(&rt_mu);
+    pthread_join(thread, NULL);
+    rss_trim_tick(&p, &ops);
+    int rearmed = atomic_load(&rt_calls);
+    printf("rss_trim: concurrent=%d rearmed=%d\n", concurrent, rearmed);
+    RT_CHECK("one release while first is in flight", concurrent == 1);
+    RT_CHECK("heap waits while cache release is in flight", heaps_blocked == 0);
+    RT_CHECK("sync during release re-arms the next steady tick", rearmed == concurrent + 1);
     return failures;
 }
 
@@ -147,7 +231,7 @@ static int rt_measure_cases(void)
 int test_rss_trim(void);
 int test_rss_trim(void)
 {
-    int failures = rt_policy_cases() + rt_measure_cases();
+    int failures = rt_policy_cases() + rt_concurrent_cases() + rt_measure_cases();
     printf(failures ? "=== rss_trim tests: %d FAILURE(S) ===\n\n"
                     : "=== rss_trim tests: ALL PASS (%d) ===\n\n", failures);
     return failures;

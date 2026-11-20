@@ -53,14 +53,15 @@ struct rss_trim_ops {
 
 struct rss_trim_policy {
     int64_t          interval_us;
-    _Atomic int64_t  last_trim_us;       /* valid iff have_trim */
-    _Atomic bool     have_trim;
-    _Atomic bool     cache_released;     /* latched until the next sync */
+    int64_t          last_trim_us;       /* valid iff have_trim */
+    bool             have_trim;
+    _Atomic bool     heap_gate;          /* nonblocking cadence claim */
+    _Atomic int      cache_state;        /* release claim and sync rearm */
 };
 
 void rss_trim_policy_init(struct rss_trim_policy *p, int64_t interval_us);
 
-/* Pure gates (exposed for tests). */
+/* Policy gates (exposed for tests). */
 bool rss_trim_cache_due(struct rss_trim_policy *p, bool in_sync);
 bool rss_trim_heap_due(struct rss_trim_policy *p, int64_t now_us,
                        bool in_sync);
