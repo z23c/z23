@@ -736,6 +736,13 @@ struct zcl_result sync_monitor_queue_best_header_body_checked(
                              expected_hash, queued_out);
 }
 
+static bool sync_monitor_is_next_child(const struct block_index *bi,
+                                       const struct block_index *tip, int next_h)
+{
+    return bi && bi->nHeight == next_h && bi->pprev == tip &&
+           bi->phashBlock && !(bi->nStatus & BLOCK_FAILED_MASK);
+}
+
 bool sync_monitor_active_next_child_exists(struct main_state *ms,
                                            struct block_index *tip,
                                            int next_h)
@@ -743,11 +750,15 @@ bool sync_monitor_active_next_child_exists(struct main_state *ms,
     if (!ms || !tip)
         return false;
 
+    struct block_index *best = ms->pindex_best_header;
+    if (sync_monitor_is_next_child(best, tip, next_h) &&
+        block_map_find(&ms->map_block_index, best->phashBlock) == best)
+        return true;
+
     size_t iter = 0;
     struct block_index *bi = NULL;
     while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-        if (bi && bi->nHeight == next_h && bi->pprev == tip &&
-            bi->phashBlock && !(bi->nStatus & BLOCK_FAILED_MASK))
+        if (sync_monitor_is_next_child(bi, tip, next_h))
             return true;
     }
     return false;

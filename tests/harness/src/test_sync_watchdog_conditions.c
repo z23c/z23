@@ -1332,11 +1332,67 @@ static int sync_watchdog_case_refill_cancellation(void)
     return failures;
 }
 
+static int sync_watchdog_case_mapped_next_child(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    struct uint256 tip_hash, other_hash, child_hash;
+    main_state_init(&ms);
+    struct block_index *tip = insert_watchdog_block(&ms, &tip_hash, 11, 10, NULL, 0);
+    struct block_index *other = insert_watchdog_block(&ms, &other_hash, 12, 10, NULL, 0);
+    struct block_index *child = insert_watchdog_block(&ms, &child_hash, 13, 11, tip, 0);
+    bool ok = tip && other && child;
+    if (ok) {
+        zcl_mutex_lock(&ms.cs_main);
+        ms.pindex_best_header = child;
+        ok = sync_monitor_active_next_child_exists(&ms, tip, 11);
+        SYNC_WATCHDOG_CHECK("mapped best next child", ok);
+
+        struct block_index unregistered = *child;
+        child->nStatus = BLOCK_FAILED_VALID;
+        unregistered.nStatus = 0;
+        ms.pindex_best_header = &unregistered;
+        ok = !sync_monitor_active_next_child_exists(&ms, tip, 11);
+        SYNC_WATCHDOG_CHECK("unmapped same hash cannot replace failed mapped child", ok);
+
+        ms.pindex_best_header = child;
+        ok = !sync_monitor_active_next_child_exists(&ms, tip, 11);
+        child->nStatus = 0;
+        child->nHeight = 12;
+        ok = ok && !sync_monitor_active_next_child_exists(&ms, tip, 11);
+        child->nHeight = 11;
+        child->pprev = other;
+        ok = ok && !sync_monitor_active_next_child_exists(&ms, tip, 11);
+        child->pprev = tip;
+        const struct uint256 *saved_hash = child->phashBlock;
+        child->phashBlock = NULL;
+        ok = ok && !sync_monitor_active_next_child_exists(&ms, tip, 11);
+        child->phashBlock = saved_hash;
+        SYNC_WATCHDOG_CHECK("failed, wrong height, wrong parent and null hash", ok);
+
+        unregistered.nStatus = BLOCK_FAILED_VALID;
+        ms.pindex_best_header = &unregistered;
+        ok = sync_monitor_active_next_child_exists(&ms, tip, 11);
+        ms.pindex_best_header = NULL;
+        ok = ok && sync_monitor_active_next_child_exists(&ms, tip, 11);
+        ok = ok && !sync_monitor_active_next_child_exists(NULL, tip, 11);
+        ok = ok && !sync_monitor_active_next_child_exists(&ms, NULL, 11);
+        SYNC_WATCHDOG_CHECK("fallback scan finds mapped child", ok);
+        ms.pindex_best_header = NULL;
+        zcl_mutex_unlock(&ms.cs_main);
+    } else {
+        SYNC_WATCHDOG_CHECK("mapped next-child fixture allocation", ok);
+    }
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_sync_watchdog_conditions(void)
 {
     printf("\n=== sync watchdog condition tests ===\n");
     int failures = 0;
 
+    failures += sync_watchdog_case_mapped_next_child();
     failures += sync_watchdog_case_hstar_backpressure();
     failures += sync_watchdog_case_monitor_dump();
     failures += sync_watchdog_case_reducer_progress();

@@ -104,6 +104,7 @@ int sync_monitor_local_header_refill(struct connman *cm,
 /* End only the matching missing-header episode after its condition witnesses
  * arrival, a peer retreat, or a superseding frontier. Does not report progress. */
 void sync_monitor_local_header_refill_witnessed(int missing_height);
+/* Caller holds ms->cs_main while reading the frontier and index entries. */
 bool sync_monitor_active_next_child_exists(struct main_state *ms,
                                            struct block_index *tip,
                                            int next_h);
