@@ -1411,21 +1411,42 @@ activate_macos_generation() {
     die "candidate macOS generation was rolled back"
 }
 
+macos_last_good_valid() {
+    local root="$1" target id dir name
+    [ -L "$root/last-good" ] || return 1
+    target="$(readlink "$root/last-good")"
+    id="${target#generations/}"
+    [ "$target" = "generations/$id" ] && attest_is_sha256 "$id" || return 1
+    dir="$root/generations/$id"
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    (validate_manifest_contract "$dir/SHA256SUMS") >/dev/null 2>&1 || return 1
+    [ "$(manifest_digest_of "$dir" z23)" = "$id" ] || return 1
+    for name in $(manifest_members "$dir"); do
+        case "$name" in docs.root|docs.bundle) continue ;; esac
+        [ -f "$dir/$name" ] && [ "$(sha256_file "$dir/$name")" = "$(manifest_digest_of "$dir" "$name")" ] || return 1
+    done
+    [ -L "$dir/zclassic23" ] && [ "$(readlink "$dir/zclassic23")" = z23 ] || return 1
+    if [ -n "$(manifest_digest_of "$dir" z23-app-macos)" ]; then
+        [ -x "$MACOS_GENERATION/z23-app-macos" ] && \
+            "$MACOS_GENERATION/z23-app-macos" --check-bundle "$dir" >/dev/null 2>&1 || return 1
+    fi
+}
+
 activate_macos_generation_without_service() {
-    local prefix="$1" root="$prefix/lib/z23" previous=""
+    local prefix="$1" root="$prefix/lib/z23" previous="" candidate="generations/$MACOS_GENERATION_ID"
     if [ -L "$root/current" ]; then
         previous="$(readlink "$root/current")"
     elif [ -e "$root/current" ]; then
         die "macOS current generation is not a symbolic link"
     fi
-    if [ -n "$previous" ]; then
+    if [ -n "$previous" ] && [ "$previous" != "$candidate" ]; then
         atomic_relative_link "$previous" "$root/last-good" \
             || die "could not preserve the last-good macOS generation"
     fi
-    macos_switch_current "$prefix" "generations/$MACOS_GENERATION_ID" \
+    macos_switch_current "$prefix" "$candidate" \
         || die "could not select the installed macOS generation"
-    if [ -z "$previous" ]; then
-        atomic_relative_link "generations/$MACOS_GENERATION_ID" \
+    if [ -z "$previous" ] || { [ "$previous" = "$candidate" ] && ! macos_last_good_valid "$root"; }; then
+        atomic_relative_link "$candidate" \
             "$root/last-good" \
             || die "could not record the first last-good macOS generation"
     fi
@@ -1909,6 +1930,14 @@ EOF
     SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }tor_stamp_full"
 }
 
+selftest_remote_install() (
+    local prefix="$1"; shift
+    PATH="$SELFTEST_TMP/mockbin:$PATH" Z23_INSTALL_TEST_HTTP_ROOT="$SELFTEST_TMP/http" \
+        Z23_INSTALL_TEST_CURL_LOG="$SELFTEST_TMP/curl.log" Z23_SKIP_SYSTEMD=1 \
+        Z23_INSTALL_PREFIX="$prefix" Z23_UNIT_DIR="$SELFTEST_TMP/units" \
+        exec "$SCRIPT_DIR/install_z23.sh" "$@"
+)
+
 selftest_remote_authority() {
     local tmp="$SELFTEST_TMP" rc curl_version
 
@@ -1916,12 +1945,7 @@ selftest_remote_authority() {
     # Missing expectation refuses before even fetching SHA256SUMS.
     : >"$tmp/curl.log"
     rc=0
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-missing" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/remote-missing" \
         --source=https://mirror.invalid/good \
         >/dev/null 2>"$tmp/remote-missing.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: remote source without manifest digest must exit 1"
@@ -1936,13 +1960,8 @@ selftest_remote_authority() {
     for curl_version in 8.3.0 unreadable; do
         : >"$tmp/curl.log"
         rc=0
-        PATH="$tmp/mockbin:$PATH" \
         Z23_INSTALL_TEST_CURL_VERSION="$curl_version" \
-        Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-        Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-        Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/curl-$curl_version" \
-        Z23_UNIT_DIR="$tmp/units" \
-            "$SCRIPT_DIR/install_z23.sh" \
+            selftest_remote_install "$tmp/curl-$curl_version" \
             --source=https://mirror.invalid/good \
             --manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             >/dev/null 2>"$tmp/curl-$curl_version.err" || rc=$?
@@ -1959,12 +1978,7 @@ selftest_remote_pins() {
     # fetch any payload or install anything.
     : >"$tmp/curl.log"
     rc=0
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-wrong" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/remote-wrong" \
         --source=https://mirror.invalid/good \
         --manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         >/dev/null 2>"$tmp/remote-wrong.err" || rc=$?
@@ -1980,12 +1994,7 @@ selftest_remote_pins() {
     SELFTEST_MANIFEST_SHA="$(sha256sum "$tmp/http/good/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
     rc=0
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-replaced" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/remote-replaced" \
         --source=https://mirror.invalid/replaced \
         --manifest-sha256="$SELFTEST_MANIFEST_SHA" \
         >/dev/null 2>"$tmp/remote-replaced.err" || rc=$?
@@ -2003,13 +2012,8 @@ selftest_remote_success() {
     # Positive remote path: the selected manifest downloads and installs the
     # same verified files regardless of which mirror served them.
     : >"$tmp/curl.log"
-    out="$(PATH="$tmp/mockbin:$PATH" \
-        Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-        Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-        Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-good" \
-        Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
-        --source=https://mirror.invalid/good \
+    out="$(selftest_remote_install "$tmp/remote-good" \
+                --source=https://mirror.invalid/good \
         --manifest-sha256="$SELFTEST_MANIFEST_SHA" 2>"$tmp/remote-good.err")" \
         || die "selftest: correctly pinned remote release failed"
     [ "$out" = "$NEXT_COMMAND" ] \
@@ -2034,12 +2038,7 @@ selftest_remote_success() {
     split_sha="$(sha256sum "$tmp/http/split-names/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
     rc=0
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-split" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/remote-split" \
         --source=https://mirror.invalid/split-names \
         --manifest-sha256="$split_sha" \
         >/dev/null 2>"$tmp/remote-split.err" || rc=$?
@@ -2063,12 +2062,7 @@ selftest_remote_bounds() {
     oversized_manifest_sha256="$(sha256sum "$tmp/http/oversized/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
     rc=0
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-oversized" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/remote-oversized" \
         --source=https://mirror.invalid/oversized \
         --manifest-sha256="$oversized_manifest_sha256" \
         >/dev/null 2>"$tmp/remote-oversized.err" || rc=$?
@@ -2083,12 +2077,7 @@ selftest_remote_bounds() {
         "$tmp/http/oversized-payload/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
     rc=0
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-oversized-payload" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/remote-oversized-payload" \
         --source=https://mirror.invalid/oversized-payload \
         --manifest-sha256="$oversized_payload_manifest_sha256" \
         >/dev/null 2>"$tmp/remote-oversized-payload.err" || rc=$?
@@ -2109,12 +2098,7 @@ selftest_remote_manifest_and_signal() {
         invalid_sha="$(sha256sum "$tmp/http/$invalid_kind/SHA256SUMS" | awk '{print $1}')"
         : >"$tmp/curl.log"
         rc=0
-        PATH="$tmp/mockbin:$PATH" \
-        Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-        Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-        Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/remote-$invalid_kind" \
-        Z23_UNIT_DIR="$tmp/units" \
-            "$SCRIPT_DIR/install_z23.sh" \
+        selftest_remote_install "$tmp/remote-$invalid_kind" \
             --source="https://mirror.invalid/$invalid_kind" \
             --manifest-sha256="$invalid_sha" \
             >/dev/null 2>"$tmp/remote-$invalid_kind.err" || rc=$?
@@ -2449,6 +2433,13 @@ selftest_macos_helper_bytes() {
     done
 }
 
+selftest_macos_install() (
+    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin Z23_SKIP_SYSTEMD=0 \
+        Z23_INSTALL_PREFIX="$prefix" Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac_log" Z23_INSTALL_TEST_LAUNCHD_STATE="$mac_state" \
+        exec "$SCRIPT_DIR/install_z23.sh" --source="$mac/$1"
+)
+
 selftest_macos_transaction() {
     local tmp="$SELFTEST_TMP" mac="$SELFTEST_TMP/macos"
     local prefix="$mac/prefix & native" launchd="$mac/LaunchAgents"
@@ -2511,6 +2502,63 @@ EOF
     v1_manifest_file_sha="$(sha256_file "$mac/v1/SHA256SUMS")"
     [ "$v1_id" != "$v1_manifest_file_sha" ] \
         || die "selftest: fixture's z23 digest collided with its manifest-file digest"
+    # No-service retries preserve a verified prior generation and repair a
+    # missing or invalid fallback, including an interrupted first selection.
+    local retry_prefix="$mac/no-service" retry_root="$mac/no-service/lib/z23" bad
+    for version in v1 v2 v2; do
+        Z23_INSTALL_TEST_PLATFORM=Darwin Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$retry_prefix" \
+            "$SCRIPT_DIR/install_z23.sh" --source="$mac/$version" >/dev/null 2>"$mac/no-service.err" \
+            || die "selftest: no-service $version install failed"
+    done
+    [ "$(readlink "$retry_root/current")" = "generations/$v2_id" ] && \
+        [ "$(readlink "$retry_root/last-good")" = "generations/$v1_id" ] \
+        || die "selftest: no-service retry lost the previous generation"
+    chmod u+w "$retry_root/generations/$v1_id"
+    rm "$retry_root/generations/$v1_id/zclassic23"
+    ln -s "$mac/v1/z23" "$retry_root/generations/$v1_id/zclassic23"
+    Z23_INSTALL_TEST_PLATFORM=Darwin Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$retry_prefix" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" >/dev/null 2>"$mac/no-service.err" \
+        || die "selftest: no-service alias repair failed"
+    [ "$(readlink "$retry_root/last-good")" = "generations/$v2_id" ] \
+        || die "selftest: invalid fallback alias was retained"
+    rm "$retry_root/generations/$v1_id/zclassic23"
+    ln -s z23 "$retry_root/generations/$v1_id/zclassic23"
+    chmod 555 "$retry_root/generations/$v1_id"
+    local bundle_root="$mac/fallback-bundle" bundle_dir="$mac/fallback-bundle/generations/$v1_id"
+    mkdir -p "$bundle_dir" "$mac/trusted-helper"
+    cp -R "$retry_root/generations/$v1_id/." "$bundle_dir/"
+    chmod u+w "$bundle_dir"
+    for name in $APP_SOURCE_MEMBERS; do cp "$SELFTEST_TMP/app-release/$name" "$bundle_dir/$name"; done
+    printf 'inert launcher\n' >"$bundle_dir/z23-app-macos"
+    printf 'inert plist\n' >"$bundle_dir/Z23Apps-Info.plist"
+    chmod u+w "$bundle_dir/SHA256SUMS"
+    (cd "$bundle_dir" && sha256sum $RELEASE_MEMBERS $APP_SOURCE_MEMBERS $APP_MACOS_MEMBERS >SHA256SUMS)
+    ln -s "generations/$v1_id" "$bundle_root/last-good"
+    cat >"$mac/trusted-helper/z23-app-macos" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --check-bundle ] && [ -f "$2/bundle-valid" ]
+EOF
+    chmod 755 "$mac/trusted-helper/z23-app-macos"
+    touch "$bundle_dir/bundle-valid"
+    (MACOS_GENERATION="$mac/trusted-helper"; macos_last_good_valid "$bundle_root") \
+        || die "selftest: valid fallback bundle refused"
+    rm "$bundle_dir/bundle-valid"
+    if (MACOS_GENERATION="$mac/trusted-helper"; macos_last_good_valid "$bundle_root"); then
+        die "selftest: damaged fallback bundle accepted"
+    fi
+    for bad in missing dangling malformed invalid; do
+        rm -f -- "$retry_root/last-good"
+        case "$bad" in
+            dangling) ln -s "generations/$(printf '%064d' 0)" "$retry_root/last-good" ;;
+            malformed) ln -s ../outside "$retry_root/last-good" ;;
+            invalid) mkdir -p "$retry_root/generations/$(printf '%064d' 0)"; ln -s "generations/$(printf '%064d' 0)" "$retry_root/last-good" ;;
+        esac
+        Z23_INSTALL_TEST_PLATFORM=Darwin Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$retry_prefix" \
+            "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" >/dev/null 2>"$mac/no-service.err" \
+            || die "selftest: no-service $bad fallback repair failed"
+        [ "$(readlink "$retry_root/last-good")" = "generations/$v2_id" ] \
+            || die "selftest: no-service $bad fallback was not repaired"
+    done
     if command -v shasum >/dev/null 2>&1; then
         ln -s "$(command -v shasum)" "$mac/hashbin/shasum"
         ln -s "$(command -v awk)" "$mac/hashbin/awk"
@@ -2596,14 +2644,10 @@ fi
 printf 'p4242\nftxt\nD0x1\ni%s\nn%s/%s/z23\n' "$inode" "$root" "$target"
 EOF
     chmod 755 "$mock/plutil" "$mock/launchctl" "$mock/lsof"
+    local mac_log="$mac/launchctl.log" mac_state="$mac/launchd.state"
     : >"$mac/launchctl.log"
 
-    out="$(PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v1" \
+    out="$(selftest_macos_install v1 \
         2>"$mac/v1.err")" || die "selftest: first macOS generation failed"
     [ "$out" = "$NEXT_COMMAND" ] \
         || die "selftest: macOS install did not print one next command"
@@ -2686,13 +2730,8 @@ EOF
     # Readiness can succeed while launchd is still running other bytes. The
     # exact txt-vnode digest must catch that and restore v1 automatically.
     rc=0
-    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_WRONG_IMAGE=1 \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+    Z23_INSTALL_TEST_WRONG_IMAGE=1 \
+        selftest_macos_install v2 \
         >/dev/null 2>"$mac/wrong-image.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: wrong running Mac image must refuse"
     grep -q 'was rolled back' "$mac/wrong-image.err" \
@@ -2703,13 +2742,8 @@ EOF
     # lsof's txt pathname can be reused for new bytes while the old vnode
     # remains mapped. A pathname digest of v2 would pass this case falsely.
     rc=0
-    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_REPLACED_IMAGE=1 \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+    Z23_INSTALL_TEST_REPLACED_IMAGE=1 \
+        selftest_macos_install v2 \
         >/dev/null 2>"$mac/replaced-image.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: replaced mapped Mac image must refuse"
     grep -q 'was rolled back' "$mac/replaced-image.err" \
@@ -2736,13 +2770,8 @@ EOF
 
     # A typed bootwait failure is the other rollback edge.
     rc=0
-    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_READY_FAIL=1 \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+    Z23_INSTALL_TEST_READY_FAIL=1 \
+        selftest_macos_install v2 \
         >/dev/null 2>"$mac/not-ready.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: unready Mac generation must refuse"
     grep -q 'was rolled back' "$mac/not-ready.err" \
@@ -2755,25 +2784,15 @@ EOF
     # while activation is pending. The installer's existing trap must restore
     # both the old node selection and working helpers, without a sleep race.
     rc=0
-    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_SIGNAL_PARENT=1 \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+    Z23_INSTALL_TEST_SIGNAL_PARENT=1 \
+        selftest_macos_install v2 \
         >/dev/null 2>"$mac/signal-rollback.err" || rc=$?
     [ "$rc" -eq 143 ] || die "selftest: pending activation TERM must exit 143"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
         || die "selftest: pending activation TERM did not restore v1"
     selftest_macos_helper_bytes "$prefix" "$mac/v1"
 
-    out="$(PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/launchd.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+    out="$(selftest_macos_install v2 \
         2>"$mac/v2.err")" || die "selftest: ready macOS upgrade failed"
     [ "$out" = "$NEXT_COMMAND" ] \
         || die "selftest: macOS upgrade did not print one next command"
@@ -2794,16 +2813,12 @@ EOF
     prefix="$mac/headless-prefix"
     launchd="$mac/headless-agents"
     datadir="$mac/headless-data"
+    mac_log="$mac/headless-launchctl.log"; mac_state="$mac/headless.state"
     run_headless_install() {
-        PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-            Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-            Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-            Z23_INSTALL_TEST_HEADLESS=1 \
+        Z23_INSTALL_TEST_HEADLESS=1 \
             Z23_INSTALL_TEST_READY_FAIL="$1" \
             Z23_INSTALL_TEST_NO_DOMAIN="$2" \
-            Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/headless-launchctl.log" \
-            Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/headless.state" \
-            "$SCRIPT_DIR/install_z23.sh" --source="$mac/$3"
+            selftest_macos_install "$3"
     }
     run_headless_install 0 0 v1 >"$mac/headless.out" 2>"$mac/headless.err" \
         || die "selftest: Background macOS install failed"
@@ -2834,14 +2849,9 @@ EOF
 
     # A GUI login must not create a second node beside the Background one.
     : >"$mac/headless-launchctl.log"
-    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
+    Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
         Z23_INSTALL_TEST_NO_DOMAIN=0 \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/headless-launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/headless.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+        selftest_macos_install "v2" \
         >"$mac/gui-login.out" 2>"$mac/gui-login.err" \
         || die "selftest: upgrade after GUI login failed"
     [ -e "$mac/headless.state.user" ] && [ ! -e "$mac/headless.state.gui" ] \
@@ -2856,14 +2866,9 @@ EOF
     : >"$mac/headless.state.gui"
     : >"$mac/headless-launchctl.log"
     rc=0
-    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
-        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
-        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
-        Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
+    Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
         Z23_INSTALL_TEST_NO_DOMAIN=0 \
-        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/headless-launchctl.log" \
-        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/headless.state" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v1" \
+        selftest_macos_install "v1" \
         >"$mac/dual-domain.out" 2>"$mac/dual-domain.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: dual-domain services must refuse"
     grep -q 'refusing ambiguous activation' "$mac/dual-domain.err" \
@@ -3027,12 +3032,7 @@ selftest_current_release() {
     sort -r -k2 "$cur/SHA256SUMS" >"$tmp/http/good-new/SHA256SUMS"
     sha="$(sha256sum "$tmp/http/good-new/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
-    PATH="$tmp/mockbin:$PATH" \
-    Z23_INSTALL_TEST_HTTP_ROOT="$tmp/http" \
-    Z23_INSTALL_TEST_CURL_LOG="$tmp/curl.log" \
-    Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/cur-remote" \
-    Z23_UNIT_DIR="$tmp/units" \
-        "$SCRIPT_DIR/install_z23.sh" \
+    selftest_remote_install "$tmp/cur-remote" \
         --source=https://mirror.invalid/good-new --manifest-sha256="$sha" \
         >/dev/null 2>"$tmp/cur-remote.err" \
         || die "selftest: pinned current release failed to install remotely"
