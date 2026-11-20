@@ -784,6 +784,51 @@ static int cc_integrity_summary_cases(struct node_db *ndb)
     return failures;
 }
 
+static int cc_integrity_root_guard_cases(struct node_db *ndb)
+{
+    int failures = 0;
+    CC_CHECK("integrity root: negative and zero fixture",
+             cc_exec(ndb->db, "DELETE FROM view_integrity;"
+                     "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+                     "(-1,zeroblob(32)),(0,zeroblob(32))"));
+    CC_CHECK("integrity root: negative minimum refuses prefix",
+             db_view_integrity_contiguous_height(ndb) == -1);
+    CC_CHECK("integrity root: positive-only fixture",
+             cc_exec(ndb->db, "DELETE FROM view_integrity;"
+                     "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL "
+                     "SELECT x+1 FROM n WHERE x<8191) "
+                     "INSERT INTO view_integrity(height,sha3_hash) "
+                     "SELECT 3303111+x,zeroblob(32) FROM n"));
+
+    int ignored = 0, highwater = 0, guarded_hits = 0, old_hits = 0;
+    bool measured = sqlite3_db_status(ndb->db, SQLITE_DBSTATUS_CACHE_HIT,
+                                       &ignored, &highwater, 1) == SQLITE_OK;
+    int64_t cursor = db_view_integrity_contiguous_height(ndb);
+    measured = (sqlite3_db_status(ndb->db, SQLITE_DBSTATUS_CACHE_HIT,
+                                   &guarded_hits, &highwater, 1) == SQLITE_OK) && measured;
+    sqlite3_stmt *stmt = NULL;
+    bool old_ok = sqlite3_prepare_v2(ndb->db,
+        "SELECT (SELECT COUNT(*) FROM view_integrity),"
+        "COALESCE((SELECT MIN(height) FROM view_integrity),-1),"
+        "COALESCE((SELECT MAX(height) FROM view_integrity),-1)",
+        -1, &stmt, NULL) == SQLITE_OK;
+    if (old_ok) {
+        old_ok = sqlite3_step(stmt) == SQLITE_ROW &&
+                 sqlite3_column_int64(stmt, 0) == 8192 &&
+                 sqlite3_column_int64(stmt, 1) == 3303111 &&
+                 sqlite3_column_int64(stmt, 2) == 3311302;
+    }
+    sqlite3_finalize(stmt);
+    measured = (sqlite3_db_status(ndb->db, SQLITE_DBSTATUS_CACHE_HIT,
+                                   &old_hits, &highwater, 1) == SQLITE_OK) && measured;
+    printf("  integrity root: guarded_cache_hits=%d old_cache_hits=%d\n",
+           guarded_hits, old_hits);
+    CC_CHECK("integrity root: positive minimum refuses prefix", cursor == -1);
+    CC_CHECK("integrity root: avoids count and max page work",
+             measured && old_ok && guarded_hits + 4 < old_hits);
+    return failures;
+}
+
 static int cc_sparse_integrity_cases(struct node_db *ndb)
 {
     int failures = 0;
@@ -854,6 +899,7 @@ static int cc_ndb_rows_body(struct node_db *ndb)
     failures += cc_ndb_floor_variants();
     failures += cc_sparse_integrity_cases(ndb);
     failures += cc_integrity_summary_cases(ndb);
+    failures += cc_integrity_root_guard_cases(ndb);
 
     /* With the progress store closed the floor and every anchor row are
      * unavailable: a closed store never manufactures coverage. */

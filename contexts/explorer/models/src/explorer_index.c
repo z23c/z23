@@ -362,21 +362,20 @@ int64_t db_view_integrity_contiguous_height(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return -1;
     sqlite3_stmt *s = NULL;
-    /* One statement preserves the snapshot; separate aggregates let SQLite
-     * use its count operation and the primary-key endpoints. */
+    /* The WHERE guard preserves strict MIN=0 while allowing SQLite to skip
+     * count and max when genesis is absent, within one statement snapshot. */
     AR_PREPARE_RET(ndb, s,
         "SELECT (SELECT COUNT(*) FROM view_integrity),"
-        "COALESCE((SELECT MIN(height) FROM view_integrity),-1),"
-        "COALESCE((SELECT MAX(height) FROM view_integrity),-1)", -1);
-    int64_t count = -1, min = -1, max = -1;
+        "COALESCE((SELECT MAX(height) FROM view_integrity),-1) "
+        "WHERE (SELECT MIN(height) FROM view_integrity)=0", -1);
+    int64_t count = -1, max = -1;
     if (ar_step_checked(s, "view_integrity summary", NULL) == ZCL_STEP_ROW) {
         int col = 0;
         count = AR_COL_INT(s, col++);
-        min = AR_COL_INT(s, col++);
         max = AR_COL_INT(s, col++);
     }
     AR_FINALIZE(s);
-    if (count <= 0 || min != 0 || max < 0 || max == INT64_MAX) return -1;
+    if (count <= 0 || max < 0 || max == INT64_MAX) return -1;
     if (count == max + 1) return max;
 
     /* The summary and walk are separate statements. Limit the walk to the
