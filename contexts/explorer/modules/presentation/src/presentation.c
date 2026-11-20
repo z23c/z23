@@ -661,7 +661,10 @@ static void present_pages_finish(struct present_pages_run *run,
 {
     run->result->outcome = ZCL_PRESENT_WINDOW_ACTION;
     run->result->action_index = action;
-    RGFW_window_setShouldClose(run->window, RGFW_TRUE);
+    if (run->live)
+        present_pages_pump(run, true);
+    else
+        RGFW_window_setShouldClose(run->window, RGFW_TRUE);
 }
 
 static void present_pages_copy_image(struct present_pages_run *run)

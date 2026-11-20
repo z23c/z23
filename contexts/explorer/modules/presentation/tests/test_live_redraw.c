@@ -33,7 +33,7 @@ bool zcl_present_test_form_paste(struct zcl_present_window_form_field_v1 *);
 #if defined(__linux__)
 bool zcl_present_test_x11_libraries_retired(void);
 #endif
-struct fixture { unsigned calls; bool confirm; };
+struct fixture { unsigned calls; bool confirm; bool use_default_actions; };
 static void update(void *context, const struct zcl_present_window_event_v1 *event,
                    bool close_requested, bool *redraw, bool *allow_close)
 {
@@ -47,7 +47,8 @@ static void update(void *context, const struct zcl_present_window_event_v1 *even
 static bool input(void *context, const struct zcl_present_input_v1 *event,
                   uint32_t *focus, uint32_t *action)
 {
-    (void)context;
+    const struct fixture *f = context;
+    if (f->use_default_actions) return false;
     if (event->key != ZCL_PRESENT_INPUT_TEXT || event->character < '1' || event->character > '4') return false;
     *focus = event->character - '1';
     /* Scripted '3' changes only focus, like Tab in the native confirm view. */
@@ -55,7 +56,7 @@ static bool input(void *context, const struct zcl_present_input_v1 *event,
     return true;
 }
 static bool run(unsigned first, bool fail, bool expected_ok,
-                unsigned expected_calls, bool expected_confirm)
+                unsigned expected_calls, bool expected_confirm, bool use_default_actions)
 {
     static uint8_t pixels[16 * 16 * 3];
     struct zcl_present_window_v1 page = {
@@ -67,7 +68,7 @@ static bool run(unsigned first, bool fail, bool expected_ok,
         .struct_size = sizeof(pages), .abi_version = ZCL_PRESENT_ABI_V1,
         .pages = &page, .page_count = 1,
     };
-    struct fixture f = {0};
+    struct fixture f = {.use_default_actions = use_default_actions};
     const struct zcl_present_window_live_view_v1 live = {
         .owner = {.context = &f, .update = update}, .input = input,
     };
@@ -483,9 +484,10 @@ static bool clipboard_roundtrip_cases(void)
 
 static bool live_redraw_cases(void)
 {
-    return run(1, true, false, 1, false) && run(0, false, true, 1, false) &&
-        run(1, false, true, 2, true) && run(2, true, false, 1, false) &&
-        run(2, false, true, 2, true);
+    return run(1, true, false, 1, false, false) && run(0, false, true, 1, false, false) &&
+        run(1, false, true, 2, true, false) && run(2, true, false, 1, false, false) &&
+        run(2, false, true, 2, true, false) &&
+        run(1, false, true, 2, true, true);
 }
 int main(int argc, char **argv)
 {
