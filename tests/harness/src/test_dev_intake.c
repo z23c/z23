@@ -11,6 +11,7 @@
 #include "test/test_dev_batch_fixture.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "crypto/ed25519.h"
@@ -256,7 +257,8 @@ extern void zcl_dev_intake_hooks_for_test(dbf_handler list, dbf_handler post);
 
 static struct json_value g_di_pg[8];
 static int g_di_pn, g_di_calls, g_di_nposts;
-enum di_cur { DI_CUR_OK, DI_CUR_NO_HAS_MORE, DI_CUR_MISSING, DI_CUR_REPEAT, DI_CUR_RISING };
+enum di_cur { DI_CUR_OK, DI_CUR_NO_HAS_MORE, DI_CUR_MISSING, DI_CUR_REPEAT, DI_CUR_RISING,
+              DI_ROW_OOM, DI_QUERY_OOM };
 static enum di_cur g_di_cur;
 static bool g_di_list_fail;
 static char g_di_before[8][80], g_di_ptext[256];
@@ -298,6 +300,10 @@ static void di_stub_list(const struct zcl_command_request *rq,
     if (i + 1 >= g_di_pn || (g_di_cur == DI_CUR_MISSING && i == 1))
         return;
     di_stub_cursor(rp, i);
+    if (i == 0 && g_di_cur == DI_ROW_OOM)
+        zcl_alloc_fault_fail_next("json_copy_children");
+    if (i == 0 && g_di_cur == DI_QUERY_OOM)
+        zcl_alloc_fault_fail_next("json_set_str");
 }
 
 static void di_stub_post(const struct zcl_command_request *rq,
@@ -965,6 +971,10 @@ static int di_cursor_run(struct di *d, enum di_cur mode, const char *code)
     di_stub_on();
     di_call(d, &o, &reply, dump, sizeof(dump));
     ok = !strcmp(reply.error.code, code);
+    if (mode == DI_ROW_OOM || mode == DI_QUERY_OOM) {
+        ok = ok && !zcl_alloc_fault_armed_label() && g_di_calls == 1 && !g_di_nposts;
+        zcl_alloc_fault_clear();
+    }
     zcl_command_reply_free(&reply);
     di_stub_reset();
     return ok;
@@ -983,6 +993,12 @@ static int di_case_cursor(struct di *d)
 
     TEST("intake: a page without has_more is BOARD_PAGE_INVALID") {
         ASSERT(di_cursor_run(d, DI_CUR_NO_HAS_MORE, "BOARD_PAGE_INVALID"));
+        PASS();
+    }
+
+    TEST("intake: a failed row copy or continuation query refuses partial intake") {
+        ASSERT(di_cursor_run(d, DI_ROW_OOM, "BOARD_PAGE_INCOMPLETE"));
+        ASSERT(di_cursor_run(d, DI_QUERY_OOM, "BOARD_QUERY_INCOMPLETE"));
         PASS();
     }
 _test_next:;

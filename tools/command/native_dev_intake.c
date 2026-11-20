@@ -557,7 +557,7 @@ static int in_cmp(const void *a, const void *b)
 /* ── sub-leaf calls ────────────────────────────────────────────────────── */
 
 /* Run a sibling leaf in process; true on a passed reply. data (when not
- * NULL) receives a copy of reply.data; err (when not NULL) receives the
+ * NULL) takes ownership of reply.data; err (when not NULL) receives the
  * error of a reply that did not pass. */
 static bool in_sub_err(in_handler fn, const char *path, const char *schema,
                        const struct json_value *input, struct json_value *data,
@@ -572,8 +572,11 @@ static bool in_sub_err(in_handler fn, const char *path, const char *schema,
     zcl_command_reply_init(&rp, schema);
     fn(&rq, &rp);
     ok = rp.status == ZCL_COMMAND_STATUS_PASSED;
-    if (data)
-        json_copy(data, &rp.data);
+    if (data) {
+        json_free(data);
+        *data = rp.data;
+        json_init(&rp.data);
+    }
     if (!ok && err) {
         (void)snprintf(err->code, sizeof(err->code), "%s", rp.error.code);
         (void)snprintf(err->message, sizeof(err->message), "%s", rp.error.message);
@@ -624,8 +627,12 @@ static bool in_page_take(const struct json_value *page, int64_t *at, char id[65]
                    "so its completeness is unknown");
         return false;
     }
-    for (size_t i = 0; i < json_size(rows); i++)
-        (void)json_push_back(posts, json_at(rows, i));
+    for (size_t i = 0; i < json_size(rows); i++) {
+        if (!json_push_back(posts, json_at(rows, i))) {
+            in_err_set(err, "BOARD_PAGE_INCOMPLETE", "could not retain every board row");
+            return false;
+        }
+    }
     *more = json_get_bool(m);
     if (!*more)
         return true;
@@ -649,13 +656,17 @@ static bool in_page_read(in_handler list, const struct json_value *in, int64_t *
     bool ok;
     json_init(&q);
     json_set_object(&q);
-    (void)json_push_kv_str(&q, "room", room[0] ? room : "fleet");
-    (void)json_push_kv_int(&q, "limit", IN_PAGE_ROWS);
-    if (json_get(in, "since"))
-        (void)json_push_kv_int(&q, "since", json_get_int(json_get(in, "since")));
-    if (id[0]) {
-        (void)json_push_kv_int(&q, "before_created_at", *at);
-        (void)json_push_kv_str(&q, "before_id", id);
+    ok = json_push_kv_str(&q, "room", room[0] ? room : "fleet") &&
+         json_push_kv_int(&q, "limit", IN_PAGE_ROWS);
+    if (ok && json_get(in, "since"))
+        ok = json_push_kv_int(&q, "since", json_get_int(json_get(in, "since")));
+    if (ok && id[0])
+        ok = json_push_kv_int(&q, "before_created_at", *at) &&
+             json_push_kv_str(&q, "before_id", id);
+    if (!ok) {
+        in_err_set(err, "BOARD_QUERY_INCOMPLETE", "could not prepare the board page query");
+        json_free(&q);
+        return false;
     }
     json_init(&page);
     ok = in_sub_err(list, "fleet.board.list", "zcl.fleet_board_list.v1", &q,
@@ -666,32 +677,25 @@ static bool in_page_read(in_handler list, const struct json_value *in, int64_t *
     return ok;
 }
 
-/* The live board, every page up to IN_PAGES, into doc.posts. more is true
+/* The live board, every page up to IN_PAGES, into a posts array. more is true
  * when the board still had older posts at the cap. A failed page keeps its
  * error in err and fails the whole read: a partial board is not a board. */
 static bool in_load_board(const struct json_value *in, struct json_value *doc,
                           struct in_err *err, bool *more)
 {
     in_handler list = g_in_list_hook ? g_in_list_hook : zcl_native_handle_fleet_board_list;
-    struct json_value posts;
     char id[65] = "";
     int64_t at = 0;
     bool ok = true;
-    json_init(&posts);
-    json_set_array(&posts);
+    json_set_array(doc);
     *more = false;
     for (int page = 0; ok && page < IN_PAGES; page++) {
-        ok = in_page_read(list, in, &at, id, &posts, more, err);
+        ok = in_page_read(list, in, &at, id, doc, more, err);
         if (ok && !*more)
             break;
     }
     if (!ok && !err->code[0])
         in_err_set(err, "BOARD_LIST_FAILED", "fleet.board.list did not pass");
-    if (ok) {
-        json_set_object(doc);
-        ok = json_push_kv(doc, "posts", &posts);
-    }
-    json_free(&posts);
     return ok;
 }
 
