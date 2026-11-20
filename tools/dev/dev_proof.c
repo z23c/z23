@@ -5659,25 +5659,22 @@ static bool dp_donor_build_tree(const char *candidate_path, int64_t *touched)
            warm_generation_touched(candidate_path, touched);
 }
 
-/* Survey one generation directory against this proof's build identity, and
- * fill the pick policy's fields for it. Returns the entry's verdict:
- * NOT_CANDIDATE for a foreign tag or the caller's own generation (neither
- * is reported), a typed refusal for anything the pool holds that cannot
- * donate, and HEAD_MOVED / LIVE / ELIGIBLE with `slot` filled. An
- * `authoritative` survey also refuses, last, any donor built inside the
- * candidate trust domain. */
+static bool dp_donor_candidate_path(const char *parent, const char *in_use,
+                                    const char *name, char path[PATH_MAX])
+{
+    return warm_tag_name(name) &&
+           snprintf(path, PATH_MAX, "%s/%s", parent, name) < PATH_MAX &&
+           strcmp(path, in_use) != 0;
+}
+
+/* Survey an already identified generation against this proof's build
+ * identity. Typed refusals are recorded; HEAD_MOVED / LIVE / ELIGIBLE also
+ * fill `slot`. Authoritative surveys finally check the producer trust domain. */
 static enum dp_donor_verdict dp_donor_survey(
-    const char *parent, const char *root, const char *in_use,
-    const char *name,
+    const char *candidate_path, const char *root, const char *name,
     const struct zcl_dev_proof_build_identity_v1 *current,
     bool authoritative, struct zcl_dev_proof_warm_candidate *slot)
 {
-    char candidate_path[PATH_MAX];
-    if (!warm_tag_name(name) ||
-        snprintf(candidate_path, sizeof(candidate_path), "%s/%s",
-                 parent, name) >= (int)sizeof(candidate_path) ||
-        strcmp(candidate_path, in_use) == 0)
-        return DP_DONOR_NOT_CANDIDATE;
     char marker_local[65], marker_base[65];
     int64_t completed = 0, touched = 0;
     enum dp_donor_verdict verdict = dp_donor_marker_verdict(
@@ -5763,27 +5760,46 @@ static void dp_donor_rejection_note(const char *phases, const char *name,
  * cold reason when nothing is picked. */
 static bool dp_donor_collect(DIR *dir, const char *parent, const char *root,
                              const char *in_use, const char *phases,
-                             const struct zcl_dev_proof_build_identity_v1 *current,
+                             struct zcl_dev_proof_build_identity_v1 *current,
                              bool authoritative,
                              struct zcl_dev_proof_warm_candidate **candidates,
-                             size_t *count, enum dp_donor_verdict *furthest)
+                             size_t *count, enum dp_donor_verdict *furthest,
+                             char reason[32])
 {
     size_t capacity = 0;
-    for (struct dirent *entry = readdir(dir); entry;
-         entry = readdir(dir)) {
+    bool identity_ready = false;
+    for (;;) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            if (!errno) return true;
+            (void)snprintf(reason, 32, "%s", "pool_incomplete");
+            return false;
+        }
+        char path[PATH_MAX];
+        if (!dp_donor_candidate_path(parent, in_use, entry->d_name, path))
+            continue;
+        if (!identity_ready) {
+            if (!zcl_dev_proof_build_identity_v1_capture(root, current, NULL, 0)) {
+                (void)snprintf(reason, 32, "%s", "identity_unavailable");
+                return false;
+            }
+            identity_ready = true;
+        }
         struct zcl_dev_proof_warm_candidate surveyed;
         enum dp_donor_verdict verdict =
-            dp_donor_survey(parent, root, in_use, entry->d_name, current,
+            dp_donor_survey(path, root, entry->d_name, current,
                             authoritative, &surveyed);
-        if (verdict == DP_DONOR_NOT_CANDIDATE) continue;
         if (verdict > *furthest) *furthest = verdict;
         if (verdict != DP_DONOR_ELIGIBLE)
             dp_donor_rejection_note(phases, entry->d_name, verdict);
         if (!dp_donor_pickable(verdict)) continue;
-        if (!dp_donor_reserve(candidates, *count, &capacity)) return false;
+        if (!dp_donor_reserve(candidates, *count, &capacity)) {
+            (void)snprintf(reason, 32, "%s", "pool_incomplete");
+            return false;
+        }
         (*candidates)[(*count)++] = surveyed;
     }
-    return true;
 }
 
 /* Newest verifiable idle generation for this root, skipping the caller's
@@ -5795,27 +5811,25 @@ static bool warm_donor_scan(const char *parent, const char *root,
                             char reason[32])
 {
     (void)snprintf(reason, 32, "%s", "no_eligible_donor");
-    /* No verifiable identity for THIS proof means no safe comparison for
-     * any candidate: fail closed to cold rather than adopt objects this
-     * scan cannot prove match. */
-    struct zcl_dev_proof_build_identity_v1 current;
-    if (!zcl_dev_proof_build_identity_v1_capture(root, &current, NULL, 0)) {
-        (void)snprintf(reason, 32, "%s", "identity_unavailable");
-        return false;
-    }
+    if (!parent || !root || !in_use || !donor) return false;
     DIR *dir = opendir(parent);
-    if (!dir || !parent || !root || !in_use || !donor) {
-        if (dir) (void)closedir(dir);
+    if (!dir) {
+        (void)snprintf(reason, 32, "%s", "pool_unavailable");
         return false;
     }
+    struct zcl_dev_proof_build_identity_v1 current;
     struct zcl_dev_proof_warm_candidate *candidates = NULL;
     size_t count = 0;
     enum dp_donor_verdict furthest = DP_DONOR_NOT_CANDIDATE;
     bool collected = dp_donor_collect(dir, parent, root, in_use, phases,
                                       &current, authoritative, &candidates,
-                                      &count, &furthest);
-    (void)closedir(dir);
-    int best = collected ? warm_pick_donor(candidates, count) : -1;
+                                      &count, &furthest, reason);
+    if (closedir(dir) != 0) {
+        (void)snprintf(reason, 32, "%s", "pool_incomplete");
+        collected = false;
+    }
+    if (!collected) { free(candidates); return false; }
+    int best = warm_pick_donor(candidates, count);
     bool found = candidates && best >= 0 &&
                  dp_donor_confirm(&candidates[best], &current, donor);
     free(candidates);

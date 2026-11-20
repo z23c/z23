@@ -73,6 +73,7 @@
 #include "test/semantic_fuzz.h"
 #include "test/testcache.h"
 #include "vcs/vcs_object.h"
+#include "vcs/build_action.h"
 #include "test_group_catalog.h"
 #include "test_group_host_need.h"
 #include "util/clientversion.h"
@@ -17084,6 +17085,50 @@ static bool ic_warm_start(const struct ic_warm_tree *t, bool authoritative,
     return ok;
 }
 
+static int test_pw_empty_pool_skips_identity(void)
+{
+    int failures = 0;
+    TEST("proof warm start: empty and foreign-only pools skip identity") {
+        struct ic_warm_tree t = {0};
+        char donor[33] = {0}, reason[32] = {0}, foreign[PATH_MAX];
+        uint64_t files = 0, fresh_before = 0, hit_before = 0, fresh_after = 0, hit_after = 0;
+        test_make_tmpdir(t.root, sizeof(t.root), "proof_warm_e2e", "empty");
+        ASSERT(snprintf(t.pool, sizeof(t.pool), "%s/pool", t.root) < (int)sizeof(t.pool));
+        ASSERT(snprintf(t.gen, sizeof(t.gen), "%s/%s", t.pool,
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") < (int)sizeof(t.gen));
+        ASSERT(snprintf(foreign, sizeof(foreign), "%s/foreign", t.pool) < (int)sizeof(foreign));
+        ASSERT(mkdir(t.pool, 0700) == 0 && mkdir(t.gen, 0700) == 0);
+        ASSERT(mkdir(foreign, 0700) == 0);
+        /* No build plan under root: a real candidate must still refuse. */
+        (void)snprintf(t.repo, sizeof(t.repo), "%s", t.root);
+        vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh_before, &hit_before);
+        ASSERT(!ic_warm_start(&t, true, donor, reason, &files));
+        vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh_after, &hit_after);
+        printf("warm empty pool: toolchain fresh=%llu hits=%llu\n",
+               (unsigned long long)(fresh_after - fresh_before),
+               (unsigned long long)(hit_after - hit_before));
+        ASSERT(strcmp(reason, "no_eligible_donor") == 0);
+        ASSERT(fresh_after == fresh_before && hit_after == hit_before);
+        ASSERT(ic_write(t.root, "not-pool", "file\n"));
+        ASSERT(snprintf(foreign, sizeof(foreign), "%s/not-pool", t.root) < (int)sizeof(foreign));
+        ASSERT(!zcl_dev_proof_test_warm_start(t.repo, foreign, t.gen, t.c2,
+                                             NULL, true, donor, reason, &files));
+        ASSERT(strcmp(reason, "pool_unavailable") == 0);
+        vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh_before, &hit_before);
+        ASSERT(fresh_before == fresh_after && hit_before == hit_after);
+        ASSERT(snprintf(foreign, sizeof(foreign), "%s/%s", t.pool,
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") < (int)sizeof(foreign));
+        ASSERT(mkdir(foreign, 0700) == 0);
+        ASSERT(!ic_warm_start(&t, true, donor, reason, &files));
+        ASSERT(strcmp(reason, "identity_unavailable") == 0);
+        vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh_before, &hit_before);
+        ASSERT(fresh_before + hit_before == fresh_after + hit_after + 1);
+        ASSERT(test_rm_rf_recursive(t.root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pw_next_proof_seeds_from_the_finished_generation(void)
 {
     int failures = 0;
@@ -18122,6 +18167,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_fuzz_llvm_selection_table();
     failures += test_ic_sensor_bound_clang_reader();
 #if !defined(_WIN32)
+    failures += test_pw_empty_pool_skips_identity();
     failures += test_pw_next_proof_seeds_from_the_finished_generation();
     failures += test_pw_identity_mismatch_stays_cold_with_its_reason();
     failures += test_pw_live_donor_is_never_seeded_from();
