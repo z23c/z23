@@ -40,7 +40,9 @@
 
 #include "test/test_core.h"
 
+#include "chain/chainparams.h"
 #include "command/native_command.h"
+#include "services/wallet_recovery_service.h"
 #include "command/native_fleet.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
@@ -1765,6 +1767,205 @@ static bool rlw_fleet_fixture(void)
                            sizeof(rlw_fleet_line), &why);
 }
 
+static int g_rlw_status_db_opens;
+static int rlw_count_status_open(sqlite3 *db, char **err,
+                                 const sqlite3_api_routines *api)
+{
+    (void)db; (void)err; (void)api;
+    g_rlw_status_db_opens++;
+    return SQLITE_OK;
+}
+
+static int t_wallet_status_absent(void)
+{
+    int failures = 0;
+    char dir[256];
+    rlw_mkfixture(dir, sizeof(dir), "status-absent");
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    json_push_kv_str(&input, "datadir", dir);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+    zcl_native_handle_wallet_recovery_status(&request, &reply);
+    RLW_CHECK("status absent: no database has distinct blocked outcome",
+              reply.status == ZCL_COMMAND_STATUS_BLOCKED &&
+              strcmp(reply.error.code, "NO_NODE_DB") == 0);
+    zcl_command_reply_free(&reply); json_free(&input);
+    test_rm_rf(dir);
+    return failures;
+}
+
+static int t_wallet_status_bad_header(void)
+{
+    int failures = 0;
+    char dir[256], path[1200];
+    rlw_mkfixture(dir, sizeof(dir), "status-header-damaged");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool made = rlw_write_junk(path);
+    RLW_CHECK("status bad header: synthetic fixture", made);
+    if (made) {
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        json_push_kv_str(&input, "datadir", dir);
+        struct zcl_command_request request = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+        void (*hook)(void) = (void (*)(void))rlw_count_status_open;
+        g_rlw_status_db_opens = 0;
+        bool armed = sqlite3_auto_extension(hook) == SQLITE_OK;
+        if (armed) zcl_native_handle_wallet_recovery_status(&request, &reply);
+        sqlite3_cancel_auto_extension(hook);
+        RLW_CHECK("status bad header: one open attempt",
+                  armed && g_rlw_status_db_opens == 1);
+        RLW_CHECK("status bad header: unreadable without invented wallet facts",
+                  strcmp(reply.error.code, "NODE_DB_UNREADABLE") == 0 &&
+                  json_get(&reply.data, "keys_before") == NULL &&
+                  json_get(&reply.data, "keys_after") == NULL &&
+                  json_get(&reply.data, "wallet_already_present") == NULL);
+        zcl_command_reply_free(&reply); json_free(&input);
+    }
+    test_rm_rf(dir);
+    return failures;
+}
+
+/* Damage only the seed table in a closed, synthetic database. */
+static bool rlw_damage_seed_table(const char *path)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK) { if (db) sqlite3_close(db); return false; }
+    bool ok = sqlite3_exec(db,
+        "INSERT INTO wallet_seed(id,seed) VALUES(1,zeroblob(32));"
+        "PRAGMA wal_checkpoint(TRUNCATE)", NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_stmt *st = NULL;
+    ok = ok && sqlite3_prepare_v2(db,
+        "SELECT rootpage,(SELECT page_size FROM pragma_page_size) "
+        "FROM sqlite_master WHERE name='wallet_seed'",
+        -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW;
+    int root = ok ? sqlite3_column_int(st, 0) : 0;
+    int page_size = ok ? sqlite3_column_int(st, 1) : 0;
+    if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
+    if (!ok || root < 2 || page_size < 512) return false;
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    unsigned char broken[32];
+    memset(broken, 0xa5, sizeof(broken));
+    ok = fseek(f, (long)(root - 1) * page_size, SEEK_SET) == 0 &&
+         fwrite(broken, 1, sizeof(broken), f) == sizeof(broken);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int t_wallet_status_damaged_seed(void)
+{
+    int failures = 0;
+    char dir[256], path[1200];
+    rlw_mkfixture(dir, sizeof(dir), "status-seed-damaged");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool made = rlw_seed_node_db(dir, path) && rlw_damage_seed_table(path);
+    RLW_CHECK("status damaged seed: closed synthetic fixture", made);
+    if (made) {
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        json_push_kv_str(&input, "datadir", dir);
+        struct zcl_command_request request = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+        zcl_native_handle_wallet_recovery_status(&request, &reply);
+        const char *seed = json_get_str(json_get(&reply.data, "seed_state"));
+        const char *meaning = json_get_str(json_get(&reply.data, "meaning"));
+        printf("    damaged seed status=%d code=%s seed=%s meaning=%s\n",
+               (int)reply.status, reply.error.code, seed ? seed : "(none)",
+               meaning ? meaning : "(none)");
+        RLW_CHECK("status damaged seed: no definitive legacy diagnosis",
+                  reply.status == ZCL_COMMAND_STATUS_FAILED &&
+                  reply.exit_code == ZCL_COMMAND_EXIT_FAILED &&
+                  strcmp(reply.error.code, "WALLET_STATUS_UNAVAILABLE") == 0 &&
+                  !(meaning && strstr(meaning, "created before recovery phrases")) &&
+                  json_get(&reply.data, "keys_before") == NULL &&
+                  json_get(&reply.data, "keys_after") == NULL &&
+                  json_get(&reply.data, "recoverable_from_phrase") == NULL &&
+                  json_get(&reply.data, "wallet_already_present") == NULL);
+        zcl_command_reply_free(&reply); json_free(&input);
+    }
+    test_rm_rf(dir);
+    return failures;
+}
+
+struct rlw_status_fault { int mode, fired; bool armed; };
+
+static int rlw_status_progress(void *opaque)
+{
+    struct rlw_status_fault *f = opaque;
+    if (!f->armed) return 0;
+    f->armed = false;
+    f->fired++;
+    return 1;
+}
+
+static int rlw_status_trace(unsigned type, void *opaque, void *stmt, void *detail)
+{
+    (void)type; (void)detail;
+    struct rlw_status_fault *f = opaque;
+    const char *sql = sqlite3_sql(stmt);
+    f->armed = sql && ((f->mode == 1 && strstr(sql, "FROM wallet_seed")) ||
+        (f->mode == 2 && strstr(sql, "FROM wallet_keys") &&
+         (strstr(sql, "COUNT(") || strstr(sql, "count("))));
+    return 0;
+}
+
+static int t_wallet_status_unreadable_facts(void)
+{
+    int failures = 0;
+    char dir[256], path[1200];
+    rlw_mkfixture(dir, sizeof(dir), "status-unreadable");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db writable = {0};
+    bool made = node_db_open(&writable, path);
+    if (made) made = sqlite3_exec(writable.db,
+        "INSERT INTO wallet_seed(id,seed) VALUES(1,zeroblob(32));"
+        "INSERT INTO wallet_keys(pubkey_hash,pubkey,privkey,compressed) VALUES("
+        "x'751e76e8199196d454941c45d1b3a323f1433bd6',"
+        "x'0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',"
+        "x'0000000000000000000000000000000000000000000000000000000000000001',1)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    if (writable.open) node_db_close(&writable);
+    RLW_CHECK("status fault: synthetic seed and key fixture",
+              made && rlw_scalar(path, "SELECT count(*) FROM wallet_keys") == 1);
+    sqlite3 *db = NULL;
+    bool opened = made && sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK;
+    RLW_CHECK("status fault: open fixture read-only", opened);
+    if (opened) {
+        struct node_db ndb = {.db = db, .open = true};
+        chain_params_select(CHAIN_MAIN);
+        for (int mode = 1; mode <= 2; mode++) {
+            struct rlw_status_fault f = {.mode = mode};
+            sqlite3_progress_handler(db, 1, rlw_status_progress, &f);
+            sqlite3_trace_v2(db, SQLITE_TRACE_STMT, rlw_status_trace, &f);
+            struct wallet_recovery_report report = {0};
+            struct zcl_result r = wallet_recovery_status(dir, &ndb, &report);
+            sqlite3_progress_handler(db, 0, NULL, NULL);
+            sqlite3_trace_v2(db, 0, NULL, NULL);
+            printf("    status mode=%d fired=%d ok=%d seed_state=%d keys=%lld\n",
+                   mode, f.fired, r.ok, report.seed_state_before,
+                   (long long)report.keys_before);
+            RLW_CHECK("status fault: unreadable fact refuses a definitive answer",
+                      f.fired == 1 && !r.ok && r.code == -63 &&
+                      strstr(r.message, mode == 1 ? "wallet's seed" :
+                                                    "wallet key count") != NULL);
+        }
+        struct wallet_recovery_report healthy = {0};
+        struct zcl_result hr = wallet_recovery_status(dir, &ndb, &healthy);
+        RLW_CHECK("status fault: healthy read reports the key and seed",
+                  hr.ok && healthy.keys_before == 1 &&
+                  healthy.seed_state_before == WALLET_SEED_PLAINTEXT);
+        RLW_CHECK("status fault: read-only fixture closes", sqlite3_close(db) == SQLITE_OK);
+    } else if (db) sqlite3_close(db);
+    test_rm_rf(dir);
+    return failures;
+}
+
 int test_read_leaf_no_datadir_write(void)
 {
     printf("\n=== read leaf writes nothing to the datadir ===\n");
@@ -1792,6 +1993,10 @@ int test_read_leaf_no_datadir_write(void)
               refused && strcmp(code, "FLEET_ROOT_NOT_ANCHORED") == 0);
     test_rm_rf(probe);
 
+    failures += t_wallet_status_absent();
+    failures += t_wallet_status_bad_header();
+    failures += t_wallet_status_damaged_seed();
+    failures += t_wallet_status_unreadable_facts();
     failures += t_registry_coverage();
     failures += t_absent_node_db_is_not_created();
     failures += t_present_node_db_is_not_mutated();

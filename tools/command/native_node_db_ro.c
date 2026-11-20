@@ -648,20 +648,12 @@ enum zcl_node_db_ro_status zcl_native_kernel_store_open_readonly(
     return zcl_ro_open_existing(path, db_out);
 }
 
-bool zcl_native_node_db_require_readonly(
-    const char *datadir, struct zcl_command_reply *reply, const char *what,
-    sqlite3 **db_out, struct node_db *ndb_out)
+void zcl_native_node_db_report_readonly_failure(
+    enum zcl_node_db_ro_status st, const char *datadir, const char *path,
+    struct zcl_command_reply *reply, const char *what)
 {
-    if (!reply)
-        LOG_FAIL("cmd", "read-only node.db require called without a reply");
+    if (!reply) return;
     const char *noun = (what && what[0]) ? what : "the node database";
-
-    char path[1200];
-    enum zcl_node_db_ro_status st = zcl_native_node_db_open_readonly(
-        datadir, db_out, ndb_out, path, sizeof(path));
-    if (st == ZCL_NODE_DB_RO_OK)
-        return true;
-
     char message[512];
     switch (st) {
     case ZCL_NODE_DB_RO_NO_DATADIR:
@@ -670,7 +662,7 @@ bool zcl_native_node_db_require_readonly(
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
                                "normalize", false, false, message, "");
-        return false;
+        return;
     case ZCL_NODE_DB_RO_PATH_TOO_LONG:
         snprintf(message, sizeof(message),
                  "datadir path too long for %s", noun);
@@ -678,7 +670,7 @@ bool zcl_native_node_db_require_readonly(
                                ZCL_COMMAND_EXIT_INVALID,
                                "DATADIR_PATH_TOO_LONG", "normalize", false,
                                false, message, datadir ? datadir : "");
-        return false;
+        return;
     case ZCL_NODE_DB_RO_ABSENT:
         snprintf(message, sizeof(message),
                  "no node.db at that datadir, so %s cannot be read — check "
@@ -687,7 +679,7 @@ bool zcl_native_node_db_require_readonly(
                                ZCL_COMMAND_EXIT_BLOCKED,
                                "NODE_DB_UNAVAILABLE", "execute", true, false,
                                message, path);
-        return false;
+        return;
     case ZCL_NODE_DB_RO_UNRECOVERED_LOG:
         /* Readable in principle, and deliberately not read: consulting the
          * write-ahead log means creating the wal-index next to it, and a read
@@ -704,7 +696,7 @@ bool zcl_native_node_db_require_readonly(
                                ZCL_COMMAND_EXIT_BLOCKED,
                                "NODE_DB_UNRECOVERED_LOG", "execute", true,
                                false, message, path);
-        return false;
+        return;
     case ZCL_NODE_DB_RO_UNREADABLE:
     default:
         /* Distinct from ABSENT on purpose: the file IS there and we could
@@ -717,8 +709,23 @@ bool zcl_native_node_db_require_readonly(
                                ZCL_COMMAND_EXIT_BLOCKED,
                                "NODE_DB_UNREADABLE", "execute", true, false,
                                message, path);
-        return false;
+        return;
     }
+}
+
+bool zcl_native_node_db_require_readonly(
+    const char *datadir, struct zcl_command_reply *reply, const char *what,
+    sqlite3 **db_out, struct node_db *ndb_out)
+{
+    if (!reply)
+        LOG_FAIL("cmd", "read-only node.db require called without a reply");
+    char path[1200];
+    enum zcl_node_db_ro_status st = zcl_native_node_db_open_readonly(
+        datadir, db_out, ndb_out, path, sizeof(path));
+    if (st == ZCL_NODE_DB_RO_OK)
+        return true;
+    zcl_native_node_db_report_readonly_failure(st, datadir, path, reply, what);
+    return false;
 }
 
 void zcl_native_node_db_close_readonly(sqlite3 **db, struct node_db *ndb)

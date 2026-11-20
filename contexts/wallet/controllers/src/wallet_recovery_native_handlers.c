@@ -228,6 +228,14 @@ static void wrp_push_creation_state(struct zcl_command_reply *reply,
     }
 }
 
+/* A refused inspection knows the target, not its wallet contents. */
+static void wrp_push_status_target(struct zcl_command_reply *reply,
+                                   const struct wallet_recovery_report *rep)
+{
+    (void)json_push_kv_str(&reply->data, "datadir", rep->datadir);
+    (void)json_push_kv_str(&reply->data, "target_db", rep->target_db);
+}
+
 void zcl_native_handle_wallet_recovery_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -249,7 +257,7 @@ void zcl_native_handle_wallet_recovery_status(
     struct zcl_result pre = wallet_recovery_status_preflight(datadir, &rep);
     if (!pre.ok) {
         bool held = pre.code == -61;
-        wrp_push_report(reply, &rep);
+        wrp_push_status_target(reply, &rep);
         wnh_fail(reply,
                  held ? ZCL_COMMAND_EXIT_BLOCKED : ZCL_COMMAND_EXIT_FAILED,
                  held ? "DATADIR_LOCKED" : "BAD_DATADIR", pre.message,
@@ -271,7 +279,7 @@ void zcl_native_handle_wallet_recovery_status(
     int pid_fd = -1;
     struct zcl_result lock = wallet_restore_node_lock_acquire(datadir, &pid_fd);
     if (!lock.ok) {
-        wrp_push_report(reply, &rep);
+        wrp_push_status_target(reply, &rep);
         wnh_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "DATADIR_LOCKED",
                  lock.message, datadir);
         return;
@@ -305,13 +313,10 @@ void zcl_native_handle_wallet_recovery_status(
     }
     if (ro_st != ZCL_NODE_DB_RO_OK) {
         wallet_restore_node_lock_release(&pid_fd);
-        wrp_push_report(reply, &rep);
-        /* Fills the reply with NODE_DB_UNREADABLE / MISSING_DATADIR /
-         * DATADIR_PATH_TOO_LONG and returns false; never "ok": true. */
-        (void)zcl_native_node_db_require_readonly(
-            datadir, reply,
-            "whether this wallet can be rebuilt from its recovery phrase",
-            &db, &ndb);
+        wrp_push_status_target(reply, &rep);
+        zcl_native_node_db_report_readonly_failure(
+            ro_st, datadir, ndb_path, reply,
+            "whether this wallet can be rebuilt from its recovery phrase");
         return;
     }
 
@@ -321,8 +326,8 @@ void zcl_native_handle_wallet_recovery_status(
     zcl_native_node_db_close_readonly(&db, &ndb);
     wallet_restore_node_lock_release(&pid_fd);
     if (!r.ok) {
-        wrp_push_report(reply, &rep);
-        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "NO_WALLET", r.message,
+        wrp_push_status_target(reply, &rep);
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "WALLET_STATUS_UNAVAILABLE", r.message,
                  datadir);
         return;
     }

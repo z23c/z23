@@ -503,8 +503,14 @@ struct zcl_result wallet_recovery_status(const char *datadir,
     if (out->inspect_persisted_address)
         wrc_persisted_address(&ws, out);
 
-    out->keys_before = db_wallet_key_count(ndb);
-    out->keys_after = out->keys_before;
+    int64_t key_count = 0;
+    struct zcl_result count = wallet_sqlite_key_count_r(&ws, &key_count);
+    if (!count.ok) {
+        wallet_sqlite_close(&ws);
+        return ZCL_ERR(-63, "cannot read the wallet key count: %s", count.message);
+    }
+    out->keys_before = key_count;
+    out->keys_after = key_count;
 
     uint8_t seed[32];
     memset(seed, 0, sizeof(seed));
@@ -521,7 +527,9 @@ struct zcl_result wallet_recovery_status(const char *datadir,
                           out->seed_state_before == WALLET_SEED_UNLOCKED);
 
     struct zcl_result result = ZCL_OK;
-    if (seed_readable)
+    if (out->seed_state_before == WALLET_SEED_UNREADABLE)
+        result = ZCL_ERR(-63, "cannot read this wallet's seed");
+    else if (seed_readable)
         result = wrc_status_check_seed(&ws, seed, out);
     memory_cleanse(seed, sizeof(seed));
 

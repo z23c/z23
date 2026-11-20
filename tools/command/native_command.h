@@ -973,6 +973,11 @@ enum zcl_node_db_ro_status zcl_native_node_db_open_readonly(
     const char *datadir, struct sqlite3 **db_out, struct node_db *ndb_out,
     char *path_out, size_t path_size);
 
+/* Report a previously observed non-OK status without reopening the path. */
+void zcl_native_node_db_report_readonly_failure(
+    enum zcl_node_db_ro_status st, const char *datadir, const char *path,
+    struct zcl_command_reply *reply, const char *what);
+
 /* The same open, for a leaf where no database means no answer: on any
  * non-OK status the reply is filled with a distinct error code
  * (MISSING_DATADIR / DATADIR_PATH_TOO_LONG / NODE_DB_UNAVAILABLE /
