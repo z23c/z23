@@ -42,6 +42,8 @@ bool staged_sync_supervisor_init_stages_offline(struct main_state *ms);
 void staged_sync_supervisor_shutdown_stages(void);
 
 #ifdef ZCL_TESTING
+#include "util/rss_trim.h"
+
 /* Test-only reset for this module's file-static child IDs. Call after
  * supervisor_reset_for_testing() so no registry entry still points at the
  * contracts being cleared. */
@@ -88,6 +90,17 @@ int64_t staged_sync_supervisor_test_run_stage_tick(
  * cadence returns the normal batch untouched. */
 int staged_sync_supervisor_test_effective_batch(int normal_batch,
                                                  int per_step_fanout);
+
+/* Direct entry to the production catch-up -> steady release op
+ * (staged_rss_release_cache): the refold gate, the projection-page release
+ * and the block parse-ring clear exactly as staged_stage_tick fires them at
+ * the first at-tip tick. Exposed so a test can prove the fold-active
+ * deferral (RSS_TRIM_RELEASE_RETRY keeps the policy latch open) and the
+ * steady clear against the real singletons, without standing up an at-tip
+ * main_state (the per-TU is_initial_block_download latch makes that
+ * irreversible within one test process). */
+enum rss_trim_release staged_sync_supervisor_test_rss_release_cache(
+    int64_t *bytes);
 #endif
 
 #endif /* ZCL_STAGED_SYNC_SUPERVISOR_H */

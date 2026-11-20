@@ -39,8 +39,13 @@
 
 #include "test/test_helpers.h"
 
+#include "chain/chain.h"
+#include "core/amount.h"
+#include "core/uint256.h"
 #include "jobs/catchup_cadence.h"
+#include "jobs/mint_fold_ceiling.h"
 #include "jobs/node_pace.h"
+#include "jobs/refold_progress.h"
 #include "net/connman.h"
 #include "net/net.h"
 #include "net/protocol.h"
@@ -49,10 +54,14 @@
 #include "services/sync_monitor.h"
 #include "supervisors/net_supervisor.h"
 #include "supervisors/staged_sync_supervisor.h"
+#include "primitives/block.h"
+#include "primitives/transaction.h"
+#include "storage/block_parse_cache.h"
 #include "storage/progress_store.h"
 #include "storage/disk_block_io.h"
 #include "util/blocker.h"
 #include "util/reducer_drive_guard.h"
+#include "util/rss_trim.h"
 #include "util/safe_alloc.h"
 #include "util/supervisor.h"
 #include "util/thread_liveness.h"
@@ -63,7 +72,9 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #define SPT_CHECK(name, expr) do { \
     printf("supervisor_production_tree: %s... ", (name)); \
@@ -723,6 +734,114 @@ static int spt_case_catchup_cadence(struct main_state *staged_ms)
     return failures;
 }
 
+/* ── staged_rss_release_cache: parse-ring clear at the steady transition.
+ * The catch-up -> steady release must also drop the block parse ring's
+ * IBD-era bodies (a synced node never re-reads them; they are pure RSS),
+ * and a mid-fold trim must never strip the fold's parse window: while
+ * refold_cadence_active() holds, the release defers with
+ * RSS_TRIM_RELEASE_RETRY — the one answer that keeps the policy's
+ * once-per-transition latch open — and the first at-tip non-fold release
+ * clears. Driven through the production release op seam; the cache side
+ * is proven through the real public API: block_parse_cache_get() under an
+ * index WITHOUT BLOCK_HAVE_DATA can only be served by a resident entry,
+ * so it doubles as a pure hit/empty probe. */
+#define SPT_BPC_HEIGHT 7
+
+static bool spt_bpc_hit_probe(const struct block_index *no_data,
+                              const struct uint256 *hash, const char *dir)
+{
+    struct block out;
+    block_init(&out);
+    bool hit = block_parse_cache_get(SPT_BPC_HEIGHT, hash->data, no_data,
+                                     dir, &out);
+    block_free(&out);
+    return hit;
+}
+
+static int spt_case_rss_parse_cache_release(void)
+{
+    int failures = 0;
+    /* Fold gates inert (test_refold_cadence.c's rc_clear_gates shape). */
+    mint_fold_ceiling_set(MINT_FOLD_NO_CEILING);
+    refold_progress_test_set_cached(false);
+
+    /* One synthetic body on disk, then resident in the real parse ring. */
+    char dir[256];
+    snprintf(dir, sizeof(dir), "./test-tmp/%d_spt_bpc", (int)getpid());
+    mkdir("./test-tmp", 0755);
+    mkdir(dir, 0755);
+    char blocks[320];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    mkdir(blocks, 0755);
+
+    struct block b;
+    block_init(&b);
+    b.header.nVersion = 4;
+    b.header.nTime = 1790000000u;
+    b.header.nBits = 0x2000ffff;
+    b.num_vtx = 1;
+    b.vtx = calloc(1, sizeof(struct transaction)); // raw-alloc-ok:test-fixture
+    transaction_init(&b.vtx[0]);
+    transaction_alloc(&b.vtx[0], 1, 1);
+    b.vtx[0].vin[0].sequence = 0xffffffff;
+    b.vtx[0].vout[0].value = 10 * COIN;
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    unsigned char msg_start[4] = {0x24, 0xe9, 0x27, 0x64};
+    bool wrote = write_block_to_disk(&b, &pos, dir, msg_start);
+    struct uint256 hash;
+    block_get_hash(&b, &hash);
+    block_free(&b);
+
+    struct block_index bi;
+    block_index_init(&bi);
+    bi.nHeight = SPT_BPC_HEIGHT;
+    bi.phashBlock = &hash;
+    bi.nFile = pos.nFile;
+    bi.nDataPos = pos.nPos;
+    bi.nStatus |= BLOCK_HAVE_DATA;
+
+    struct block body;
+    block_init(&body);
+    bool filled = wrote &&
+                  block_parse_cache_get(SPT_BPC_HEIGHT, hash.data, &bi, dir,
+                                        &body);
+    block_free(&body);
+    SPT_CHECK("fixture: one body resident in the parse ring", filled);
+
+    struct block_index no_data = bi;
+    no_data.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
+    SPT_CHECK("probe: a no-data index is served from the ring (hit)",
+              spt_bpc_hit_probe(&no_data, &hash, dir));
+
+    /* 1. Mid-fold: the release defers, the fold's parse window survives. */
+    mint_fold_ceiling_set(3056758);
+    int64_t bytes = -1;
+    enum rss_trim_release r =
+        staged_sync_supervisor_test_rss_release_cache(&bytes);
+    SPT_CHECK("fold-active transition defers the release (RETRY)",
+              r == RSS_TRIM_RELEASE_RETRY);
+    SPT_CHECK("fold-active keeps the fold's parse window",
+              spt_bpc_hit_probe(&no_data, &hash, dir));
+
+    /* 2. First at-tip non-fold release clears the ring. */
+    mint_fold_ceiling_set(MINT_FOLD_NO_CEILING);
+    bytes = -1;
+    r = staged_sync_supervisor_test_rss_release_cache(&bytes);
+    SPT_CHECK("fold-inert release completes (DONE or NONE, never RETRY)",
+              r == RSS_TRIM_RELEASE_DONE || r == RSS_TRIM_RELEASE_NONE);
+    SPT_CHECK("steady transition empties the parse ring",
+              !spt_bpc_hit_probe(&no_data, &hash, dir));
+
+    /* Leave the process as we found it. */
+    refold_progress_test_set_cached(false);
+    block_parse_cache_clear();
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
+    TEST_DISCARD(system(cmd));
+    return failures;
+}
+
 /* Heartbeat-driven child checks: registration lands on the tree and the
  * heartbeat records a tick and a progress marker. */
 static int spt_case_thread_liveness_tree(struct thread_liveness_child *tlc,
@@ -987,6 +1106,7 @@ int test_supervisor_production_tree(void)
     failures += spt_case_drive_active(&staged_ms);
     failures += spt_case_paced(&staged_ms);
     failures += spt_case_catchup_cadence(&staged_ms);
+    failures += spt_case_rss_parse_cache_release();
 
     /* ── small-chain catch-up durability (journey run1 regression) ────── */
     failures += spt_case_small_chain_durability(&staged_ms);

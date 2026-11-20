@@ -46,6 +46,13 @@ bool boot_params_thread_failure_is_fatal(const struct app_context *ctx, const ch
  * so the kernel's first start_all starts it (env defaults precede peers). */
 bool boot_start_net_budgets_service(struct boot_svc_ctx *svc);
 
+/* Registers the parse_cache service on svc->service_kernel; full contract
+ * in config/boot_parse_cache.h. Call right after
+ * boot_start_net_budgets_service and BEFORE
+ * boot_start_mempool_limits_service: the same start_all starts it, and the
+ * ceiling env default must precede the cache's lazy first-use read. */
+bool boot_start_parse_cache_service(struct boot_svc_ctx *svc);
+
 /* True only for the real boot node database during pre-service cutover. */
 bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb);
 bool boot_wallet_cutover_recovery_context_matches(const struct node_db *ndb,

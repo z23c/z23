@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capabilities for the parse-cache budget boot adapter. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_parse_cache.c", CAP_PROCESS|CAP_FS_WRITE, "sets the RAM-class default parse-cache ceiling environment variable when the operator has not set it")

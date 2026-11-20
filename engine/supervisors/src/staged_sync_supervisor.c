@@ -31,6 +31,7 @@
 #include "util/supervisor.h"
 #include "storage/memory_profile.h"
 #include "storage/block_index_projection.h"
+#include "storage/block_parse_cache.h"
 #include "util/rss_trim.h"
 #include "jobs/node_pace.h"
 #include "jobs/refold_cadence.h"   /* accelerated drain batch + tick, mint/refold only */
@@ -289,11 +290,13 @@ static void staged_sync_apply_memory_profile(struct main_state *ms)
 
 /* Steady-node RSS discipline (util/rss_trim.h). Same is_initial_block_download()
  * signal as the gates above: the first at-tip tick after catch-up lowers the
- * block-index projection page cache to its steady size and releases its pages
- * (once per transition); an at-tip node also hands freed glibc arena pages back
- * at most once per 10 minutes. Runs at the top of the stage tick, before any
- * drain, so no cs_main, reducer lock or store lock is held (the supervisor
- * thread is not a signal handler). */
+ * block-index projection page cache to its steady size, releases its pages
+ * and clears the block parse ring's IBD-era bodies — a synced node never
+ * re-reads them, so they are pure resident memory (once per transition); an
+ * at-tip node also hands freed glibc arena pages back at most once per 10
+ * minutes. Runs at the top of the stage tick, before any drain, so no
+ * cs_main, reducer lock or store lock is held (the supervisor thread is not
+ * a signal handler). */
 static bool staged_rss_in_sync(void *ctx)
 {
     return is_initial_block_download((struct main_state *)ctx);
@@ -302,10 +305,29 @@ static bool staged_rss_in_sync(void *ctx)
 static enum rss_trim_release staged_rss_release_cache(void *ctx, int64_t *bytes)
 {
     (void)ctx;
+    /* A refold still in flight (or a -mint-anchor fold ceiling set) walks
+     * heights through the parse ring: a mid-fold trim would strip the
+     * fold's parse window and cost a disk re-parse of the in-flight batch.
+     * RETRY, never NONE, while the fold runs — rss_trim latches DONE/NONE
+     * for the rest of the steady period, so a NONE here would silently
+     * skip this release until the next catch-up; RETRY leaves the
+     * once-per-transition latch open and the release fires at the first
+     * at-tip non-fold tick. Cheap deferral: refold_cadence_active() is two
+     * atomic reads. */
+    if (refold_cadence_active())
+        return RSS_TRIM_RELEASE_RETRY;
     block_index_projection_t *p = block_index_projection_singleton();
+    int64_t n = 0;
+    if (p) {
+        n = block_index_projection_release_cache(p);
+        if (n < 0) return RSS_TRIM_RELEASE_RETRY;
+    }
+    /* Drop the catch-up parse ring with the same transition: pin-safe (a
+     * body a live stage still borrows defers via pending_evict and frees at
+     * release), and a later fold burst simply re-parses its batch off
+     * disk — bounded by the drain batch, not the ring's history. */
+    block_parse_cache_clear();
     if (!p) return RSS_TRIM_RELEASE_NONE;
-    int64_t n = block_index_projection_release_cache(p);
-    if (n < 0) return RSS_TRIM_RELEASE_RETRY;
     *bytes = n;
     return RSS_TRIM_RELEASE_DONE;
 }
@@ -844,5 +866,11 @@ int staged_sync_supervisor_test_effective_batch(int normal_batch,
                                                  int per_step_fanout)
 {
     return stage_effective_batch(normal_batch, per_step_fanout);
+}
+
+enum rss_trim_release staged_sync_supervisor_test_rss_release_cache(
+    int64_t *bytes)
+{
+    return staged_rss_release_cache(NULL, bytes);
 }
 #endif
