@@ -319,9 +319,9 @@ int chain_restore_rebuild_active_chain_from_disk(
 
 struct chain_restore_disk_pos_entry {
     struct uint256 hash;
-    int file;
+    /* Zero marks an empty slot; scanner file numbers are 0..9998. */
+    int file_plus_one;
     unsigned int pos;
-    bool occupied;
 };
 
 struct chain_restore_disk_pos_map {
@@ -376,16 +376,15 @@ static bool chain_restore_disk_pos_map_put(
     for (size_t i = 0; i < m->capacity; i++) {
         size_t slot = (idx + i) & (m->capacity - 1);
         struct chain_restore_disk_pos_entry *e = &m->entries[slot];
-        if (!e->occupied) {
+        if (!e->file_plus_one) {
             e->hash = *hash;
-            e->file = file;
+            e->file_plus_one = file + 1;
             e->pos = pos;
-            e->occupied = true;
             m->size++;
             return true;
         }
         if (uint256_eq(&e->hash, hash)) {
-            e->file = file;
+            e->file_plus_one = file + 1;
             e->pos = pos;
             return true;
         }
@@ -404,7 +403,7 @@ chain_restore_disk_pos_map_find(
     for (size_t i = 0; i < m->capacity; i++) {
         size_t slot = (idx + i) & (m->capacity - 1);
         const struct chain_restore_disk_pos_entry *e = &m->entries[slot];
-        if (!e->occupied)
+        if (!e->file_plus_one)
             return NULL;
         if (uint256_eq(&e->hash, hash))
             return e;
@@ -574,8 +573,9 @@ int chain_restore_rebuild_active_chain_from_block_files(
             chain_restore_disk_pos_map_find(&pos_map, &want);
         if (!pos)
             break;
+        int file = pos->file_plus_one - 1;
         struct block_header hdr;
-        if (!chain_restore_read_header_at_pos(datadir, pos->file, pos->pos,
+        if (!chain_restore_read_header_at_pos(datadir, file, pos->pos,
                                               &cached, &cached_file, &hdr))
             break;
         struct uint256 disk_hash;
@@ -588,7 +588,7 @@ int chain_restore_rebuild_active_chain_from_block_files(
             break;
 
         cur->nHeight = h;
-        cur->nFile = pos->file;
+        cur->nFile = file;
         cur->nDataPos = pos->pos;
         cur->nStatus |= BLOCK_HAVE_DATA;
         cur->nVersion = hdr.nVersion;

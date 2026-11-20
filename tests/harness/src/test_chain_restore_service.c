@@ -2293,6 +2293,18 @@ static int test_block_file_rebuild_across_files(void)
             ASSERT(expected[h]->nFile == (h == first_count ? 1 : 0));
         }
         ASSERT(tip->nDataPos == pos.nPos);
+
+        /* A duplicate header in a later file replaces its earlier position. */
+        struct disk_block_pos later = { .nFile = 2 };
+        struct uint256 duplicate;
+        ASSERT(write_chain_block_fixture(dir, &later, expected[first_count - 1]->phashBlock,
+                                         0x1e14f420u, 1700000032u, &duplicate));
+        ASSERT(uint256_eq(&duplicate, &hash));
+        ASSERT(chain_restore_rebuild_active_chain_from_block_files(&ms, tip, dir)
+               == first_count + 1);
+        ASSERT(tip->nFile == later.nFile);
+        ASSERT(tip->nDataPos == later.nPos);
+        ASSERT(active_chain_at(&ms.chain_active, 0) == expected[0]);
         main_state_free(&ms);
         test_rm_rf(dir);
         PASS();
