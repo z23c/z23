@@ -461,14 +461,6 @@ void boot_wallet_adopt_seed_if_it_governs(struct wallet *w)
         (void)wallet_hd_adopt_seed(w, w->sapling_keys.seed);
 }
 
-bool boot_wallet_seed_row_present(struct wallet_sqlite *ws)
-{
-    if (!ws || !ws->open)
-        return false;
-    return wallet_seed_state_row_present(
-        wallet_sqlite_sapling_seed_state(ws, NULL));
-}
-
 /* Row count of `table`: 0 when it does not exist (a datadir that never held a
  * wallet has none) and -1 for anything else that stops the count, because an
  * unreadable answer must never read as empty. */
@@ -509,7 +501,7 @@ int64_t boot_wallet_rows_at_risk(struct node_db *ndb, int64_t key_rows)
 bool boot_wallet_is_first_run(struct wallet_sqlite *ws, size_t transparent_keys)
 {
     return ws && ws->open && transparent_keys == 0 &&
-           !boot_wallet_seed_row_present(ws) &&
+           wallet_sqlite_sapling_seed_state(ws, NULL) == WALLET_SEED_ABSENT &&
            boot_wallet_table_rows(ws->db, "wallet_sapling_keys") == 0;
 }
 

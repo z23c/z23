@@ -1385,6 +1385,49 @@ static int guard_case(const char *dir, const char *name, bool first_run)
     return failures;
 }
 
+/* Interrupt one seed SELECT, then let later reads run normally. */
+static int wcr_interrupt_once(void *ctx)
+{
+    bool *fired = ctx;
+    if (*fired) return 0;
+    *fired = true;
+    return 1;
+}
+
+static int t_transient_seed_read(void)
+{
+    int failures = 0;
+    char dir[1024];
+    wcr_fixture(dir, sizeof(dir), "seed_read_interrupt");
+    bool seeded = wcr_sql(dir, "INSERT INTO wallet_seed(id,seed) VALUES(1,zeroblob(32))");
+    struct node_db ndb = {0};
+    struct wallet_sqlite ws = {0};
+    bool open = seeded && wcr_open(&ndb, dir) && wallet_sqlite_open_r(&ws, ndb.db).ok;
+    WCR_CHECK("seed read fixture opens", open);
+    if (!open) {
+        if (ndb.open) node_db_close(&ndb);
+        return failures;
+    }
+    bool fired = false;
+    sqlite3_progress_handler(ndb.db, 1, wcr_interrupt_once, &fired);
+    bool first = boot_wallet_is_first_run(&ws, 0);
+    sqlite3_progress_handler(ndb.db, 0, NULL, NULL);
+    WCR_CHECK("interrupted seed read cannot authorize first run or legacy import", fired && !first);
+    fired = false;
+    sqlite3_progress_handler(ndb.db, 1, wcr_interrupt_once, &fired);
+    bool mint = boot_wallet_may_mint(&ws, 0);
+    sqlite3_progress_handler(ndb.db, 0, NULL, NULL);
+    WCR_CHECK("interrupted seed read cannot authorize mint", fired && !mint);
+    uint8_t seed[32], expected[32] = {0};
+    enum wallet_seed_state state = wallet_sqlite_sapling_seed_state(&ws, seed);
+    WCR_CHECK("seed bytes survive the transient read failure",
+              state == WALLET_SEED_PLAINTEXT && memcmp(seed, expected, sizeof(seed)) == 0);
+    memory_cleanse(seed, sizeof(seed));
+    wallet_sqlite_close(&ws);
+    node_db_close(&ndb);
+    return failures;
+}
+
 static int t_boot_guards(void)
 {
     int failures = 0;
@@ -1423,6 +1466,7 @@ static int t_boot_guards(void)
     if (open)
         node_db_close(&ndb);
     failures += t_unreadable_rows();
+    failures += t_transient_seed_read();
     return failures;
 }
 
