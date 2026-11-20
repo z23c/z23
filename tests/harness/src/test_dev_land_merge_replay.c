@@ -535,6 +535,59 @@ static bool dlx_lint_cause_stays_in_frame(void)
     return fclose(f) == 0 && ok;
 }
 
+/* Trimmed verbatim frames from landed-failure logs (seq 3384, 3383, 3237):
+ * the selftests expected diagnostics precede the gates own verdict. */
+static bool dlx_lint_selftest_verdict_of(const char *gate, const char *body,
+                                         const char *verdict, const char *where)
+{
+    FILE *f = tmpfile();
+    if (!f) return false;
+    dlx_put_frame(f, gate);
+    (void)fputs(body, f);
+    char detail[250] = {0};
+    bool ok = dlx_lint_snapshot_of(f, detail, sizeof(detail)) &&
+        strstr(detail, verdict) && strstr(detail, where) &&
+        !strstr(detail, "Permission denied") && !strstr(detail, "cannot read");
+    return fclose(f) == 0 && ok;
+}
+
+static bool dlx_lint_selftest_verdict(void)
+{
+    static const char capclosure[] =
+        "z23-lint: cannot open /h/capclosure-selftest.X/t/fixture_src/raw_user.c: Permission denied\n"
+        "z23-lint: read failed: /h/capclosure-selftest.X/u: Is a directory\n"
+        "== check_capability_closure selftest ==\n"
+        "  selftest ok: A: undeclared strong-undefined reach to a classified symbol (rc=1)\n"
+        "  selftest ok: Y4: two applicable arms of equal specificity are FATAL, never graded\n"
+        "== selftest: PASS (31/31) ==\n"
+        "check_capability_closure: 1 foreign object(s) under /h/wt/build/dev-obj/epochs/400d2ec002a5aaa8392d9250552f8d8ad754ce9a074f5dcdb15cec92c395d6ee\n"
+        "  have no source in this tree (a failed candidate's leftovers);\n"
+        "  not graded. First 5:\n    tools/package_verify_wallet_gui.o\n"
+        "check_capability_closure: VIOLATION — undeclared reach: tools/dev/land_preflight.c uses CAP_FS_READ\n"
+        "  with no module_capabilities.def row at all (declares CAP_NONE).\n"
+        "check_capability_closure: FAIL — 2 violation(s)\n";
+    static const char baretmp[] =
+        "check-no-bare-tmp-fixture: UNPROVEN — cannot read /h/z23-lint-ntf-MPuVvf/case.c\n"
+        "examined-files: 1\nscan-floor: 0\nexamined-files: 0\nscan-floor: 0\n"
+        "check_no_bare_tmp_fixture selftest: OK\n"
+        "check-no-bare-tmp-fixture: NEW/GROWN — tests/harness/src/test_app_launch.c now has 3 bare-tmp fixture site(s) (baseline 0)\n"
+        "  tests/harness/src/test_app_launch.c:639\n";
+    static const char outparam[] =
+        "(expected diagnostics follow: two unreadable inputs)\n"
+        "z23-lint: cannot open /nonexistent-outparam-init-selftest/x.c: No such file or directory\n"
+        "z23-lint: read failed: .: Is a directory\n"
+        "check_outparam_init_before_return --selftest: PASS\n"
+        "check-outparam-init-before-return: 2 NEW out-parameter(s) whose\n"
+        "  initialization sits BELOW a failure return:\n"
+        "    ls_invoke(): struct zcl_command_reply *reply\n";
+    return dlx_lint_selftest_verdict_of("check-capability-closure", capclosure,
+               "VIOLATION", "land_preflight.c") &&
+        dlx_lint_selftest_verdict_of("check-no-bare-tmp-fixture", baretmp,
+               "NEW/GROWN", "test_app_launch.c") &&
+        dlx_lint_selftest_verdict_of("check-outparam-init-before-return", outparam,
+               "NEW out-parameter", "initialization sits BELOW");
+}
+
 static bool dlx_lint_late_failure(const char *log)
 {
     char detail[1024], dimension[64];
@@ -557,6 +610,7 @@ static int dlx_lint_failure_detail(void)
     TEST("land: lint detail keeps the cannot-execute cause after a long passing preamble") {
         ASSERT(dlx_lint_cause_survives());
         ASSERT(dlx_lint_cause_stays_in_frame());
+        ASSERT(dlx_lint_selftest_verdict());
         PASS();
     }
     TEST("land: lint failure detail retains the failed gate stderr body") {

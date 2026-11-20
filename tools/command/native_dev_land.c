@@ -6504,11 +6504,41 @@ static bool dl_lint_attributed_fail(const char *line, const char *gate)
     char c = line[n + 7];
     return c == '\0' || c == ':' || c == ' ' || c == '\r' || c == '\n';
 }
+/* A selftest runs before the real check and prints expected diagnostics;
+ * once it has finished, the gate's own verdict follows. */
+static bool dl_lint_selftest_done(const char *line)
+{
+    return strstr(line, "selftest ok") ||
+        (strstr(line, "selftest") && (strstr(line, ": PASS") || strstr(line, ": OK")));
+}
+static bool dl_lint_verdict_line(const char *line)
+{
+    return strstr(line, "VIOLATION") || strstr(line, "NEW/GROWN") ||
+        strstr(line, ": FAIL") || strstr(line, ": NEW") || strstr(line, " NEW ");
+}
 struct dl_lint_scan {
     struct dl_lint_excerpt prefix, diagnosis;
     struct dl_lint_cause cs;
     bool attributed;
+    struct dl_lint_excerpt post; /* after the last selftest, from the first verdict line */
+    bool marked, led;
 };
+/* Unattributed lines after the last selftest marker; the excerpt restarts at
+ * the first verdict-shaped line so the verdict leads the detail. */
+static void dl_lint_post_add(struct dl_lint_scan *s, const char *line, bool clipped)
+{
+    if (!clipped && dl_lint_selftest_done(line)) {
+        memset(&s->post, 0, sizeof(s->post));
+        s->marked = true; s->led = false;
+        return;
+    }
+    if (!s->marked) return;
+    if (!s->led && !clipped && dl_lint_verdict_line(line)) {
+        memset(&s->post, 0, sizeof(s->post));
+        s->led = true;
+    }
+    dl_lint_excerpt_add(&s->post, line, clipped);
+}
 /* One body line of the failed frame; false once the diagnosis is full. */
 static bool dl_lint_scan_line(struct dl_lint_scan *s, const char *line, bool clipped,
                               const char *gate)
@@ -6518,13 +6548,20 @@ static bool dl_lint_scan_line(struct dl_lint_scan *s, const char *line, bool cli
     else {
         dl_lint_excerpt_add(&s->prefix, line, clipped);
         dl_lint_cause_add(&s->cs, line);
+        dl_lint_post_add(s, line, clipped);
     }
     return !(s->attributed && s->diagnosis.clipped);
+}
+/* The attributed diagnosis, else what followed the last selftest, else the head. */
+static struct dl_lint_excerpt *dl_lint_chosen(struct dl_lint_scan *s)
+{
+    if (s->attributed) return &s->diagnosis;
+    return s->marked && s->post.used ? &s->post : &s->prefix;
 }
 static bool dl_lint_body_snapshot(FILE *f, char *detail, size_t cap, size_t remaining)
 {
     char line[4096], gate[256], next[256], merged[1000];
-    struct dl_lint_scan s = {{{0}, 0, false}, {{0}, 0, false}, {{0}, {{0}}, 0}, false};
+    struct dl_lint_scan s = {};
     bool line_clipped = false, found = false;
     while (dl_lint_line(f, line, sizeof(line), &line_clipped, &remaining)) {
         if (!found) {
@@ -6535,9 +6572,9 @@ static bool dl_lint_body_snapshot(FILE *f, char *detail, size_t cap, size_t rema
         if (line[strspn(line, " \t\r\n")] == '\0') continue;
         if (!dl_lint_scan_line(&s, line, line_clipped, gate)) break;
     }
-    struct dl_lint_excerpt *chosen = s.attributed ? &s.diagnosis : &s.prefix;
+    struct dl_lint_excerpt *chosen = dl_lint_chosen(&s);
     if (!chosen->used) return false;
-    if (!s.attributed && chosen->clipped) {
+    if (chosen == &s.prefix && chosen->clipped) {
         dl_lint_cause_body(&s.cs, chosen->text, merged, sizeof(merged));
         dl_lint_render(detail, cap, gate, merged, true);
         return true;
