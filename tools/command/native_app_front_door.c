@@ -380,6 +380,13 @@ static void fd_print_done(struct fd_run *r)
     fd_print_host_generation(r, "  ");
     if (fd_str(r, "preview"))
         (void)fprintf(r->out, "  %s\n", fd_str(r, "preview"));
+    const struct json_value *offered = json_get(&r->reply.data, "preview_offered");
+    if (offered && offered->type == JSON_BOOL && json_get_bool(offered)) {
+        char hint[FD_PATH + 512];
+        if (zcl_app_hint(hint, sizeof(hint), r->door->datadir, "open %s", "tasks"))
+            (void)fprintf(r->out, "  next: %s\n", hint);
+        (void)fprintf(r->out, "  In Tasks, choose More / Undo, then Updates. Try update asks permission before running.\n");
+    }
     const struct json_value *count = json_get(&r->reply.data, "matching_rebuild_keys");
     if (count && count->type == JSON_INT)
         (void)fprintf(r->out, "  matching signing keys: %lld (self-reported builds)\n", (long long)json_get_int(count));
