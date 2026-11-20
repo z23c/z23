@@ -196,7 +196,7 @@ static void wallet_import_options(const char *text, bool *do_rescan, bool *ignor
 #ifdef ZCL_TESTING
 static void (*wallet_import_published_hook)(void *);
 static void *wallet_import_published_hook_arg;
-[[maybe_unused]] static void wallet_import_set_published_hook(void (*hook)(void *), void *arg)
+void wallet_import_set_published_hook(void (*hook)(void *), void *arg)
 {
     wallet_import_published_hook = hook;
     wallet_import_published_hook_arg = arg;

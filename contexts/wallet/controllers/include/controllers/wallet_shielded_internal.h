@@ -193,6 +193,10 @@ bool wallet_shielded_import_refused(const struct wallet_rpc_context *ctx,
                                     const struct zip32_xsk *xsk,
                                     bool ignore_existing,
                                     struct json_value *result);
+#ifdef ZCL_TESTING
+void wallet_import_set_published_hook(void (*hook)(void *), void *arg);
+#endif
+
 bool rpc_z_importkey(const struct json_value *params, bool help,
                      struct json_value *result);
 bool rpc_z_exportviewingkey(const struct json_value *params, bool help,

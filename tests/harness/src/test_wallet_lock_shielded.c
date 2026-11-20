@@ -2194,17 +2194,6 @@ static int test_locked_flush_refuses_an_unsealed_key_without_a_row(void)
 }
 
 #ifdef ZCL_TESTING
-#define rpc_z_exportkey wls_fixture_z_exportkey
-#define rpc_z_importkey wls_fixture_z_importkey
-#define wallet_shielded_import_refused wls_fixture_import_refused
-#define rpc_z_exportviewingkey wls_fixture_z_exportviewingkey
-#define rpc_z_getmemo wls_fixture_z_getmemo
-#include "../../../contexts/wallet/controllers/src/wallet_shielded_keys.c"
-#undef rpc_z_getmemo
-#undef rpc_z_exportviewingkey
-#undef wallet_shielded_import_refused
-#undef rpc_z_importkey
-#undef rpc_z_exportkey
 static _Thread_local bool wls_import_pause;
 struct wls_import_barrier { pthread_mutex_t mu; pthread_cond_t cv; bool entered, release; };
 struct wls_import_task { struct wls_fixture *f; const char *key; bool ok; };
@@ -2215,7 +2204,7 @@ static bool wls_import_rpc(struct wls_fixture *f, const char *key, const char *r
     json_init(&params); json_set_array(&params); json_init(&value); json_init(&result);
     json_set_str(&value, key); json_push_back(&params, &value);
     json_set_str(&value, rescan); json_push_back(&params, &value);
-    bool ok = wls_fixture_z_importkey(&params, false, &result);
+    bool ok = rpc_z_importkey(&params, false, &result);
     (void)f;
     json_free(&result); json_free(&value); json_free(&params);
     return ok;

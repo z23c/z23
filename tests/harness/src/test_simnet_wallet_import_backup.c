@@ -144,6 +144,7 @@ static bool ib_fixture_finish_secret(struct json_value *result, char *secret,
 #define wallet_ctx ib_shielded_wallet_ctx
 #define rpc_z_exportkey ib_rpc_z_exportkey
 #define rpc_z_importkey ib_rpc_z_importkey
+#define wallet_import_set_published_hook ib_wallet_import_set_published_hook
 #define wallet_shielded_import_refused ib_wallet_shielded_import_refused
 #define rpc_z_exportviewingkey ib_rpc_z_exportviewingkey
 #define rpc_z_getmemo ib_rpc_z_getmemo
@@ -161,6 +162,7 @@ static bool ib_fixture_finish_secret(struct json_value *result, char *secret,
 #undef wallet_shielded_import_refused
 #undef rpc_z_getmemo
 #undef rpc_z_exportviewingkey
+#undef wallet_import_set_published_hook
 #undef rpc_z_importkey
 #undef rpc_z_exportkey
 #undef wallet_ctx
