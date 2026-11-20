@@ -202,6 +202,16 @@ struct zcl_result ssio_write_sidecar(const char *datadir,
 _Static_assert(sizeof(struct ssio_sidecar_header) == SSIO_EMBEDDED_HEADER_BYTES,
                "embedded header must reuse the 48-byte sidecar layout");
 
+static struct zcl_result ssio_embedded_fail(FILE *f, const char *tmp_path,
+    const struct ssio_spec *spec, const char *stage, int err)
+{
+    if (f) fclose(f);
+    unlink(tmp_path);
+    char cause[160];
+    ssio_cause(cause, sizeof(cause), err);
+    return ZCL_ERR(-9, "%s: %s failed: %s", spec->domain, stage, cause);
+}
+
 struct zcl_result ssio_write_embedded(
     const char *datadir, const struct ssio_spec *spec,
     bool (*emit_payload)(FILE *f, void *ctx,
@@ -248,20 +258,20 @@ struct zcl_result ssio_write_embedded(
     hdr.body_size = payload_size;
     memcpy(hdr.body_sha3, payload_sha3, 32);
 
+    errno = 0;
     if (fflush(f) != 0 || fseek(f, 0, SEEK_SET) != 0 ||
-        fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
-        fclose(f); unlink(tmp_path);
-        return ZCL_ERR(-9, "%s: header back-patch failed: %s",
-                       spec->domain, strerror(errno));
-    }
-    if (fflush(f) != 0) {
-        fclose(f); unlink(tmp_path);
-        return ZCL_ERR(-9, "%s: header flush failed: %s",
-                       spec->domain, strerror(errno));
-    }
+        fwrite(&hdr, sizeof(hdr), 1, f) != 1)
+        return ssio_embedded_fail(f, tmp_path, spec, "header back-patch", errno);
+    errno = 0;
+    if (fflush(f) != 0)
+        return ssio_embedded_fail(f, tmp_path, spec, "header flush", errno);
+    errno = 0;
     int fd = fileno(f);
-    if (fd >= 0) (void)platform_file_sync(fd);
-    fclose(f);
+    if (fd < 0 || platform_file_sync(fd) != 0)
+        return ssio_embedded_fail(f, tmp_path, spec, "file sync", errno);
+    errno = 0;
+    if (fclose(f) != 0)
+        return ssio_embedded_fail(NULL, tmp_path, spec, "file close", errno);
 
     /* ONE atomic rename publishes the body + its integrity header as an
      * indivisible unit — no second file, no inter-rename crash window. */
@@ -282,17 +292,14 @@ struct zcl_result ssio_write_embedded(
     ssio_sidecar_path(side_path, sizeof(side_path), datadir, spec);
     (void)unlink(side_path);
 
-    /* fsync the directory so the rename (the file's new identity) and the
-     * sidecar removal are durable across power loss. */
-#ifdef _WIN32
-    (void)platform_private_parent_flush(datadir);
-#else
-    int dfd = open(datadir, O_RDONLY | O_DIRECTORY);
-    if (dfd >= 0) {
-        (void)platform_file_sync(dfd);
-        close(dfd);
+    errno = 0;
+    if (!platform_private_parent_flush(datadir)) {
+        int saved = errno;
+        char cause[160];
+        ssio_cause(cause, sizeof(cause), saved);
+        return ZCL_ERR(-7, "%s: replacement visible; parent flush failed, "
+                       "durability unconfirmed: %s", spec->domain, cause);
     }
-#endif
     return ZCL_OK;
 }
 

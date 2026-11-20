@@ -119,8 +119,11 @@ enum ssio_read_verdict ssio_read_sidecar(const char *datadir,
  *      over exactly those payload bytes; it returns the byte count and
  *      finalized digest (false on any write error)
  *   4. fseek back to 0, stamp the real {magic, version, size, sha3}
- *   5. fflush + fsync(fd) + fsync(datadir) + ONE rename to <body_name>
- * On any error the .tmp is unlinked and a non-ok zcl_result returned.
+ *   5. fflush, sync and close the temporary file; rename it to <body_name>
+ *   6. remove the legacy sidecar, then flush the parent directory
+ * Before rename, an error removes the temporary file and preserves the old
+ * body. A parent flush error returns non-ok after the new body is visible;
+ * its durability is unconfirmed. Parent flush uses the host platform barrier.
  * `emit_payload` must NOT write the 48-byte header (this helper owns
  * it) — it writes only the payload, starting at file offset 48. */
 struct zcl_result ssio_write_embedded(

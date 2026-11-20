@@ -32,6 +32,62 @@
 #include <unistd.h>
 #endif
 
+#if !defined(_WIN32)
+#include "platform/file_sync.h"
+enum ss_fault { SS_NONE, SS_FIRST_FLUSH, SS_FLUSH, SS_SYNC, SS_CLOSE, SS_PARENT };
+static enum ss_fault ss_fault;
+static int ss_flush_count;
+static int ss_test_flush(FILE *f)
+{
+    if ((++ss_flush_count == 1 && ss_fault == SS_FIRST_FLUSH) ||
+        (ss_flush_count == 2 && ss_fault == SS_FLUSH)) { errno = EIO; return EOF; }
+    return fflush(f);
+}
+static int ss_test_sync(int fd)
+{
+    if (ss_fault == SS_SYNC) { errno = EIO; return -1; }
+    return platform_file_sync(fd);
+}
+static int ss_test_close(FILE *f)
+{
+    int rc = fclose(f);
+    if (ss_fault == SS_FIRST_FLUSH) errno = ENOSPC;
+    if (ss_fault == SS_CLOSE) { errno = EIO; return EOF; }
+    return rc;
+}
+static bool ss_test_parent(const char *path)
+{
+    if (ss_fault == SS_PARENT) { errno = EIO; return false; }
+    return platform_private_parent_flush(path);
+}
+#define ssio_hash_body ss_test_hash_body
+#define ssio_write_sidecar_raw ss_test_write_sidecar_raw
+#define ssio_write_sidecar ss_test_write_sidecar
+#define ssio_write_embedded ss_test_write_embedded
+#define ssio_verify_embedded ss_test_verify_embedded
+#define ssio_read_sidecar ss_test_read_sidecar
+#define ssio_quarantine ss_test_quarantine
+#define fflush ss_test_flush
+#define fclose ss_test_close
+#define platform_file_sync ss_test_sync
+#define platform_private_parent_flush ss_test_parent
+#ifndef SSIO_TEST_SOURCE
+#define SSIO_TEST_SOURCE "../../../engine/modules/storage/src/sha3_sidecar_io.c"
+#endif
+#include SSIO_TEST_SOURCE
+#undef platform_private_parent_flush
+#undef platform_file_sync
+#undef fclose
+#undef fflush
+#undef ssio_quarantine
+#undef ssio_read_sidecar
+#undef ssio_verify_embedded
+#undef ssio_write_embedded
+#undef ssio_write_sidecar
+#undef ssio_write_sidecar_raw
+#undef ssio_hash_body
+#endif
+
 #define SS_CHECK(name, expr) do {                                   \
     printf("sha3_sidecar_io: %s... ", (name));                      \
     if (expr) { printf("OK\n"); }                                   \
@@ -790,6 +846,55 @@ static int case_error_codes_and_io_errors(void)
     return failures;
 }
 
+static int case_embedded_barrier_failures(void)
+{
+    int failures = 0;
+    char dir[256], body[300], tmp[310];
+    test_make_tmpdir(dir, sizeof(dir), "ssio", "emb_barrier");
+    struct ssio_spec spec = emb_spec();
+    uint8_t payload[64];
+    emb_fill(payload, sizeof(payload));
+    struct emb_payload next = { payload, sizeof(payload), false };
+    snprintf(body, sizeof(body), "%s/emb.dat", dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", body);
+    SS_CHECK("barrier: seed body", emb_make(dir, &spec));
+    uint8_t before[1100], after[1100];
+    size_t before_len = 0, after_len = 0;
+    SS_CHECK("barrier: capture old body", read_all(body, before, sizeof(before), &before_len));
+    payload[0] ^= 0x55;
+    const enum ss_fault faults[] = { SS_FIRST_FLUSH, SS_FLUSH, SS_SYNC, SS_CLOSE, SS_PARENT };
+    const char *stages[] = { "header back-patch", "header flush", "file sync", "file close", "parent flush" };
+    for (size_t i = 0; i < sizeof(faults) / sizeof(faults[0]); i++) {
+        ss_fault = faults[i];
+        ss_flush_count = 0;
+        struct zcl_result r = ss_test_write_embedded(dir, &spec, emb_emit, &next);
+        ss_fault = SS_NONE;
+        SS_CHECK("barrier: failed stage reports cause", !r.ok &&
+                 strstr(r.message, stages[i]) && strstr(r.message, strerror(EIO)));
+        SS_CHECK("barrier: temporary file removed", platform_private_path_absent(tmp));
+        SS_CHECK("barrier: resulting body reads", read_all(body, after, sizeof(after), &after_len));
+        bool same = after_len == before_len && memcmp(before, after, after_len) == 0;
+        if (faults[i] == SS_PARENT) {
+            SS_CHECK("barrier: post-rename error reports visible replacement", !same &&
+                     strstr(r.message, "replacement visible") &&
+                     strstr(r.message, "durability unconfirmed"));
+            SS_CHECK("barrier: visible replacement verifies", ssio_verify_embedded(dir, &spec, NULL, NULL) == SSIO_READ_OK);
+            r = ssio_write_embedded(dir, &spec, emb_emit, &next);
+            SS_CHECK("barrier: retry succeeds and verifies", r.ok &&
+                     ssio_verify_embedded(dir, &spec, NULL, NULL) == SSIO_READ_OK);
+            SS_CHECK("barrier: retry saves exact payload",
+                     read_all(body, after, sizeof(after), &after_len) &&
+                     after_len == SSIO_EMBEDDED_HEADER_BYTES + sizeof(payload) &&
+                     memcmp(after + SSIO_EMBEDDED_HEADER_BYTES, payload, sizeof(payload)) == 0);
+        } else {
+            SS_CHECK("barrier: pre-rename failure preserves old bytes", same);
+            SS_CHECK("barrier: old body verifies", ssio_verify_embedded(dir, &spec, NULL, NULL) == SSIO_READ_OK);
+        }
+    }
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int case_embedded_write_failures(void)
 {
     int failures = 0;
@@ -974,6 +1079,7 @@ int test_sha3_sidecar_io(void)
     failures += case_unreadable_is_not_missing();
     failures += case_sidecar_read_refusals();
     failures += case_error_codes_and_io_errors();
+    failures += case_embedded_barrier_failures();
     failures += case_embedded_write_failures();
     failures += case_quarantine_renames_both();
 #endif
