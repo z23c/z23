@@ -2837,6 +2837,67 @@ static int t_quarantine_archive_collision(void)
     return failures;
 }
 
+static int t_v40_duplicate_purchase_orders(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    const char *preserved =
+        "SELECT count(*) FROM store_purchases WHERE "
+        "(id=1 AND operation_id='pending-a' AND amount_zatoshi=11 AND stage=1) OR "
+        "(id=2 AND operation_id='pending-b' AND amount_zatoshi=22 AND stage=2)";
+    const char *ledger = "SELECT count(*) FROM schema_migrations WHERE version='040'";
+    TEST("db_mig: conflicting purchase orders survive a refused v40 unique index") {
+        ASSERT(db_mig_open_raw_handle(&db, ":memory:"));
+        ASSERT(create_schema(&db));
+        /* Model a partially created v40 table before its unique index existed. */
+        ASSERT(node_db_exec(&db,
+            "CREATE TABLE IF NOT EXISTS store_purchases ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "order_id INTEGER NOT NULL,"
+            "product_id INTEGER NOT NULL,"
+            "product_name TEXT NOT NULL DEFAULT '',"
+            "token_id TEXT NOT NULL DEFAULT '',"
+            "payment_addr TEXT NOT NULL,"
+            "customer_addr TEXT NOT NULL DEFAULT '',"
+            "memo TEXT NOT NULL,"
+            "amount_zatoshi INTEGER NOT NULL,"
+            "content_hash BLOB "
+            "  CHECK(content_hash IS NULL OR length(content_hash)=32),"
+            "output_path TEXT NOT NULL DEFAULT '',"
+            "operation_id TEXT NOT NULL DEFAULT '',"
+            "stage INTEGER NOT NULL,"
+            "last_error TEXT NOT NULL DEFAULT '',"
+            "created_at INTEGER NOT NULL,"
+            "updated_at INTEGER NOT NULL)"));
+        ASSERT(node_db_exec(&db,
+            "INSERT INTO store_purchases(order_id,product_id,payment_addr,memo,"
+            "amount_zatoshi,operation_id,stage,created_at,updated_at) VALUES"
+            "(7,9,'fixture','a',11,'pending-a',1,10,10),"
+            "(7,9,'fixture','b',22,'pending-b',2,20,20)"));
+        int rc = node_db_migrate(&db, NULL);
+        printf("v40 duplicate order: rc=%d schema=%d ledger=%d records=%d\n",
+               rc, node_db_schema_version(&db), db_mig_count(db.db, ledger),
+               db_mig_count(db.db, preserved));
+        ASSERT_EQ(rc, -1);
+        ASSERT_EQ(node_db_schema_version(&db), 39);
+        ASSERT_EQ(db_mig_count(db.db, ledger), 0);
+        ASSERT_EQ(db_mig_count(db.db, preserved), 2);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM store_purchases WHERE order_id=7"), 2);
+        ASSERT(sqlite3_get_autocommit(db.db));
+        ASSERT(node_db_exec(&db, "UPDATE store_purchases SET order_id=8 WHERE id=2"));
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(db_mig_count(db.db, ledger), 1);
+        ASSERT_EQ(db_mig_count(db.db, preserved), 2);
+        ASSERT_EQ(db_mig_count(db.db,
+            "SELECT count(*) FROM pragma_index_list('store_purchases') "
+            "WHERE name='idx_store_purchases_order' AND \"unique\"=1"), 1);
+        PASS();
+    } _test_next:;
+    db_mig_close_raw_handle(&db);
+    return failures;
+}
+
 static int t_marker_failure_reopens_from_bootstrap(void)
 {
     int failures = 0;
@@ -2897,6 +2958,7 @@ int test_db_migration_idempotent(void)
     int failures = 0;
     mkdir_p("./test-tmp");
     failures += t_marker_failure_reopens_from_bootstrap();
+    failures += t_v40_duplicate_purchase_orders();
     failures += t_fresh_reaches_latest();
     failures += t_v85_missing_worker_table_refuses();
     failures += t_v87_wiki_index_refuses_without_stamp();
