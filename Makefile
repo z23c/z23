@@ -18324,11 +18324,11 @@ agent-verify:
 	    fi; \
 	    echo "agent-verify: selection $$kind groups=$$count reason=$$why detail=$$detail base=$$base$${rflag:+ names=$$only} select_secs=$$(($$(date +%s) - q0))" | tee -a build/scratch/agent-verify.rc; \
 	    if [ "$$kind" = exact ] && [ "$$count" = 0 ]; then echo "agent-verify: exact groups=0 selects no runtime tests; static gates still run" | tee -a build/scratch/agent-verify.rc; fi; \
-	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
+	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: tests run if capability closure passes" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
-	 fi; \
-	 if [ "$$kind" = universal ] && [ "$$rflag" = "" ]; then \
-	    closure_early=1; av_step check-capability-closure; \
+	    if [ "$$kind" = universal ] && [ -z "$$rflag" ]; then \
+	       closure_early=1; av_step check-capability-closure; \
+	    fi; \
 	 fi; \
 	 if [ -n "$$only" ] && { [ "$$closure_early" != 1 ] || [ -z "$$failed" ]; }; then \
 	    av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1 T_FAST_EXACT_ARGS=--cache; \

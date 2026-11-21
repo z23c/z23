@@ -1992,17 +1992,21 @@ static int t_agent_verify_universal_closure(void)
         "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
         "printf '#!/bin/sh\\ncase $1 in status) exit 0;; merge-base) echo base;; *) exit 1;; esac\\n' > bin/git; chmod +x bin/git\n"
         "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\ncase \"$*\" in *check-capability-closure*) [ \"${FAIL_CLOSURE:-0}\" = 0 ];; *) exit 0;; esac\\n' > submake; chmod +x submake\n"
-        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"{\\\"groups\\\":\\\"models,sqlite\\\",\\\"selector\\\":\\\"universal\\\",\\\"groups_selected\\\":2}\"\\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
+        "printf '#!/bin/sh\ncat <<END\n{\"groups\":\"models,sqlite\",\"selector\":\"universal\",\"groups_selected\":2}\nEND\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
         "PATH=\"$2/bin:$PATH\"; export PATH\n"
         "make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > pass.log 2>&1\n"
-        "[ \"$(grep -c check-capability-closure calls)\" = 1 ]; [ \"$(grep -c t-fast-exact calls)\" = 1 ]\n"
-        "c=$(grep -n check-capability-closure calls | cut -d: -f1); t=$(grep -n t-fast-exact calls | cut -d: -f1); [ \"$c\" -lt \"$t\" ]\n"
+        "[ \"$(grep -c -- '--no-print-directory check-capability-closure' calls)\" = 1 ]; [ \"$(grep -c t-fast-exact calls)\" = 1 ]\n"
+        "c=$(grep -n -- '--no-print-directory check-capability-closure' calls | cut -d: -f1); t=$(grep -n t-fast-exact calls | cut -d: -f1); [ \"$c\" -lt \"$t\" ]\n"
         "grep -q 't-fast-exact ONLY=models,sqlite ZCL_TEST_WERROR=1 T_FAST_EXACT_ARGS=--cache' calls\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
         ": > calls; if FAIL_CLOSURE=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > fail.log 2>&1; then exit 1; fi\n"
-        "[ \"$(grep -c check-capability-closure calls)\" = 1 ]; if grep -q t-fast-exact calls; then exit 1; fi\n"
+        "[ \"$(grep -c -- '--no-print-directory check-capability-closure' calls)\" = 1 ]; if grep -q t-fast-exact calls; then exit 1; fi\n"
         "for gate in proof-lint-prebuild lint-fast; do grep -q \"$gate\" calls; done\n"
-        "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (check-capability-closure)' ]\n";
+        "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (check-capability-closure)' ]\n"
+        ": > calls; kind=universal rflag= FAIL_CLOSURE=1 make --no-print-directory MAKE=./submake agent-verify ONLY=models > explicit.log 2>&1 && exit 1\n"
+        "[ \"$(grep -c -- '--no-print-directory check-capability-closure' calls)\" = 1 ]; [ \"$(grep -c t-fast-exact calls)\" = 1 ]\n"
+        "c=$(grep -n -- '--no-print-directory check-capability-closure' calls | cut -d: -f1); t=$(grep -n t-fast-exact calls | cut -d: -f1); [ \"$t\" -lt \"$c\" ]\n";
+
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "universal_closure");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);
