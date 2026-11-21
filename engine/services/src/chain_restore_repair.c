@@ -352,7 +352,7 @@ static int chain_restore_rebuild_pprev_walk(struct active_chain *c,
     return populated;
 }
 
-static void chain_restore_rebuild_skip_from_genesis(struct active_chain *c,
+void chain_restore_rebuild_skip_from_genesis(struct active_chain *c,
                                                     int tip_h)
 {
     for (int h = 1; h <= tip_h; h++) {

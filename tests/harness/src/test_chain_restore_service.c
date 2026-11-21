@@ -2299,6 +2299,13 @@ static int test_block_file_rebuild_across_files(void)
         ASSERT(tip != NULL);
         expected[first_count] = tip;
         tip->nHeight = first_count;
+        tip->pprev = expected[first_count - 1];
+        struct block_index *expected_skip[first_count + 1] = {0};
+        for (int h = 1; h <= first_count; ++h) {
+            block_index_build_skip(expected[h]);
+            expected_skip[h] = expected[h]->pskip;
+            ASSERT(expected_skip[h] != NULL);
+        }
         ASSERT(active_chain_move_window_tip(&ms.chain_active, tip));
         tip->nFile = 7;
         struct block_index *before_first = active_chain_at(&ms.chain_active, 0);
@@ -2315,6 +2322,8 @@ static int test_block_file_rebuild_across_files(void)
         for (int h = 0; h <= first_count; ++h) {
             ASSERT(active_chain_at(&ms.chain_active, h) == expected[h]);
             ASSERT(expected[h]->nFile == (h == first_count ? 1 : 0));
+            ASSERT(expected[h]->pskip == expected_skip[h]);
+            ASSERT(block_index_get_ancestor(expected[h], h / 2) == expected[h / 2]);
         }
         ASSERT(tip->nDataPos == pos.nPos);
 
