@@ -14,6 +14,7 @@ selector against the registered groups. Committed-candidate proof still uses
 
 Rules:
 - Run groups only through `make t-fast ONLY=<group>` (substring) or `make t-fast-exact ONLY=<group>`; never run `test_zcl` directly.
+- For an expected failure, `make t-fast-exact ONLY=<group> T_FAST_EXACT_ARGS=--diagnostic-once` runs once and produces no acceptance proof.
 - A test file that exists proves nothing; zero groups run is a failure.
 - Assertion macros jump to `_test_next`, a function-scoped C label. Do not duplicate that label when adding a test block; use a separate helper function or combine related assertions under one test. `TEST_END` also defines the label.
 - Never weaken an assertion, threshold or fail-closed refusal to pass.

@@ -734,6 +734,45 @@ static bool dlx_pc_order_case(const char *detail, bool fail_shell,
     return ok;
 }
 
+static bool dlx_pc_purpose_order_log(const struct dlx_rig *rig, const char *detail, bool fail)
+{
+    char path[1400], log[2048] = "";
+    size_t n = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig->clone);
+    bool ok = dlx_slurp(path, log, sizeof(log) - 1, &n);
+    log[n] = '\0';
+    const char *purpose = strstr(log, "check-file-purpose\n");
+    const char *windows = strstr(log, "check-windows-cross-syntax\n");
+    bool expect_purpose = strstr(detail, "check-file-purpose") != NULL;
+    bool expect_windows = strstr(detail, "check-windows-cross-syntax") != NULL && !fail;
+    ok = ok && (!!purpose == expect_purpose) && (!!windows == expect_windows) &&
+         (!purpose || !windows || purpose < windows);
+    if (!ok) printf("purpose precheck order: %s fail=%d ran=%s\n", detail, fail, log);
+    return ok;
+}
+
+static bool dlx_pc_purpose_order(const char *detail, bool fail)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char row[1024];
+    const char *known = "check-windows-cross-syntax\ncheck-file-purpose\n";
+    if (!dlx_pc_rig(&rig, "precheck_purpose_order", true, known)) return false;
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1, detail);
+    bool ok = dlx_pc_outcomes(row) &&
+        dlx_write_dep(rig.clone, "build/gen/guest_kernel_data.c", "x") &&
+        dlx_pc_file(&rig, "print-command", "printf '%s\\n' 'echo check-file-purpose >> build/precheck-ran; test ! -f build/purpose-fail'\n") &&
+        (!fail || dlx_pc_file(&rig, "purpose-fail", "x"));
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && ok;
+    if (fail) ok = ok && !dlx_ok(&c) && dlx_pc_purpose_refusal(&c) && dlx_queue_empty();
+    else ok = ok && dlx_ok(&c) && dlx_queue_has_one();
+    ok = dlx_pc_purpose_order_log(&rig, detail, fail) && ok;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_timing_entry(const struct json_value *row,
                                 const struct json_value *ran,
                                 const struct json_value *skipped)
@@ -1353,6 +1392,14 @@ int dlx_case_precheck(void)
     }
     TEST("land: the precheck gate set learns check-* names from failed lint rows") {
         ASSERT(dlx_pc_gate_set_learns());
+        PASS();
+    }
+    TEST("land: learned file-purpose runs before the Windows sweep") {
+        ASSERT(dlx_pc_purpose_order("check-windows-cross-syntax check-file-purpose", true));
+        ASSERT(dlx_pc_purpose_order("check-windows-cross-syntax check-file-purpose", false));
+        ASSERT(dlx_pc_purpose_order("check-file-purpose check-windows-cross-syntax", false));
+        ASSERT(dlx_pc_purpose_order("check-file-purpose", false));
+        ASSERT(dlx_pc_purpose_order("check-windows-cross-syntax", false));
         PASS();
     }
     TEST("land: a learned shell failure precedes standalone tool builds") {

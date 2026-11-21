@@ -1126,21 +1126,20 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
     return PC_GATE_RAN;
 }
 
-/* Prefer the source-only shell check to standalone tool compilation when
- * both were learned, without changing membership or the other gate order. */
-static void pc_prioritize_shell(struct zcl_land_precheck_gates *g)
+/* Move an already selected inexpensive gate ahead of the named slower gate. */
+static void pc_prioritize_gate(struct zcl_land_precheck_gates *g,
+                               const char *early, const char *later)
 {
-    size_t shell = g->count, standalone = g->count;
+    size_t early_index = g->count, later_index = g->count;
     for (size_t i = 0; i < g->count; i++) {
-        if (!strcmp(g->name[i], "check-shell-host-assumptions")) shell = i;
-        if (!strcmp(g->name[i], "check-standalone-tools-link")) standalone = i;
+        if (!strcmp(g->name[i], early)) early_index = i;
+        if (!strcmp(g->name[i], later)) later_index = i;
     }
-    if (shell == g->count || standalone >= shell) return;
+    if (early_index == g->count || later_index >= early_index) return;
     char name[ZCL_LAND_PRECHECK_GATE_MAX];
-    memcpy(name, g->name[shell], sizeof(name));
-    memmove(g->name[standalone + 1], g->name[standalone],
-            (shell - standalone) * sizeof(g->name[0]));
-    memcpy(g->name[standalone], name, sizeof(name));
+    memcpy(name, g->name[early_index], sizeof(name));
+    memmove(g->name[later_index + 1], g->name[later_index], (early_index - later_index) * sizeof(g->name[0]));
+    memcpy(g->name[later_index], name, sizeof(name));
 }
 
 static bool pc_gates_run(struct pc_run *r,
@@ -1260,7 +1259,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     r->deadline = pc_monotonic_ms() + budget_ms;
     if (ledger[0]) pc_history_learn(r, dir, g);
     else pc_history_unproven(r, "land state unavailable");
-    pc_prioritize_shell(g);
+    pc_prioritize_gate(g, "check-shell-host-assumptions", "check-standalone-tools-link");
+    pc_prioritize_gate(g, "check-file-purpose", "check-windows-cross-syntax");
     ok = pc_gates_run(r, g, reply);
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);
