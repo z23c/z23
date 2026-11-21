@@ -722,7 +722,7 @@ static int sm_marker_failure(enum sm_marker_fault fault)
 }
 
 /* The public runner inserts 001, then one ledger row per core version.
- * Refuse the target marker to retain that version's partially applied DDL. */
+ * Refuse the target marker so its transaction leaves the preceding schema. */
 static int sm_stop_core_marker(void *ctx, int op, const char *name,
                                const char *column, const char *db, const char *trigger)
 {
@@ -833,9 +833,10 @@ static int sm_core_failure(int ver, const char *index, const char *alter)
         return failures;
     }
     if (index)
-        SM_CHECK("core index fixture removes index", node_db_exec(&f.ndb, "DROP INDEX idx_blocks_height_all"));
+        SM_CHECK("v5 begins without the required index", sm_obj_count(&f.ndb, "index", "idx_blocks_height_all") == 0);
     if (alter)
-        SM_CHECK("v3 fixture removes one old column", node_db_exec(&f.ndb, "ALTER TABLE blocks DROP COLUMN sapling_tree_data"));
+        SM_CHECK("v3 begins without the tree data column", sm_scalar(&f.ndb,
+            "SELECT count(*) FROM pragma_table_info('blocks') WHERE name='sapling_tree_data'") == 0);
     struct sm_core_fault fault = {.index = index, .alter = alter};
     SM_CHECK("core fault installs", sqlite3_set_authorizer(f.ndb.db, sm_core_authorize, &fault) == SQLITE_OK);
     int result = node_db_migrate(&f.ndb, NULL);
@@ -846,6 +847,9 @@ static int sm_core_failure(int ver, const char *index, const char *alter)
     SM_CHECK("core failed row preserves floor", node_db_schema_compat_floor(&f.ndb) == ver - 1);
     SM_CHECK("core failed row leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
     SM_CHECK("core failed row leaves marker absent", sm_row_count(&f.ndb, ver) == 0);
+    if (ver == 3)
+        SM_CHECK("v3 refusal leaves its new tree column absent", sm_scalar(&f.ndb,
+            "SELECT count(*) FROM pragma_table_info('blocks') WHERE name='sapling_tree_data'") == 0);
     SM_CHECK("core failed row preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
     SM_CHECK("core clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0 &&
              node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
@@ -867,9 +871,11 @@ static int sm_core_partial_v3(void)
         if (f.ndb.open) sm_history_close(&f);
         return failures;
     }
-    SM_CHECK("partial v3 removes two columns", node_db_exec(&f.ndb,
-        "ALTER TABLE blocks DROP COLUMN sapling_tree_data;"
-        "ALTER TABLE wallet_sapling_notes DROP COLUMN witness_height"));
+    SM_CHECK("partial v3 already has one witness column", node_db_exec(&f.ndb,
+        "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_data BLOB"));
+    SM_CHECK("partial v3 lacks the other two columns", sm_scalar(&f.ndb,
+        "SELECT (SELECT count(*) FROM pragma_table_info('blocks') WHERE name='sapling_tree_data')"
+        "+(SELECT count(*) FROM pragma_table_info('wallet_sapling_notes') WHERE name='witness_height')") == 0);
     SM_CHECK("partially applied v3 retries", node_db_migrate(&f.ndb, NULL) > 0 &&
              node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
     SM_CHECK("v3 restores block column", sm_scalar(&f.ndb,

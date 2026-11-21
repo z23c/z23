@@ -401,19 +401,24 @@ static int db_migrate_precheck_newer_schema(struct node_db *ndb,
     return 0;
 }
 
+static bool db_migrate_finish_step(struct node_db *ndb, int32_t version, int32_t floor, bool applied)
+{
+    if (applied && node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+        node_db_state_set(ndb, "schema_compat_floor", &floor, sizeof(floor)) &&
+        node_db_commit(ndb)) return true;
+    if (!node_db_rollback(ndb))
+        LOG_ERROR("db", "migrate: rollback failed for schema version %d", (int)version);
+    LOG_ERROR("db", "migrate: failed to apply schema version %d with compatibility floor %d", (int)version, (int)floor);
+    return false;
+}
+
 bool db_migrate_persist_version_floor(struct node_db *ndb, int32_t version, int32_t floor)
 {
     if (!node_db_begin(ndb)) {
         LOG_ERROR("db", "migrate: cannot begin marker transaction for schema version %d", (int)version);
         return false;
     }
-    if (node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
-        node_db_state_set(ndb, "schema_compat_floor", &floor, sizeof(floor)) &&
-        node_db_commit(ndb)) return true;
-    if (!node_db_rollback(ndb))
-        LOG_ERROR("db", "migrate: marker rollback failed for schema version %d", (int)version);
-    LOG_ERROR("db", "migrate: failed to persist schema_version=%d schema_compat_floor=%d", (int)version, (int)floor);
-    return false;
+    return db_migrate_finish_step(ndb, version, floor, true);
 }
 
 static int node_db_migrate_feature_error(int feature_applied)
@@ -942,9 +947,11 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
      * block's own tail did. */
     for (int ver = 2; ver <= 13; ver++) {
         if (current_ver < ver) {
-            if (!db_migrate_apply_core_ddl(ndb, ver))
-                LOG_ERR("db", "migrate: v%d core DDL failed; version not advanced", ver);
-            DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, ver, floor);
+            if (!node_db_begin(ndb))
+                LOG_ERR("db", "migrate: cannot begin core schema v%d", ver);
+            bool applied_ddl = db_migrate_apply_core_ddl(ndb, ver);
+            if (!db_migrate_finish_step(ndb, ver, floor, applied_ddl))
+                LOG_ERR("db", "migrate: v%d core step failed; version not advanced", ver);
             current_ver = ver;
             applied++;
         }
