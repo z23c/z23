@@ -371,35 +371,35 @@ static int entry_path(const char *src, const char *sha, char *out, size_t cap)
     return 0;
 }
 
-static void replay_entry(const char *ent, const char *log, const char *rc,
-                         int erc, int haslog)
+static int replay_log(const char *ent, const char *log)
 {
-    FILE *o = fopen(rc, "w");
-    if (o) { fprintf(o, "%d\n", erc); fclose(o); }
-    o = fopen(log, "w");
-    if (!o) return;
-    if (haslog) {
-        FILE *i = fopen(ent, "rb");
-        static char buf[4096];
-        int first = 1;
-        size_t n;
-        if (i) {
-            while ((n = fread(buf, 1, sizeof buf, i)) > 0) {
-                if (first) {
-                    char *nl = memchr(buf, '\n', n);
-                    if (nl) {
-                        size_t off = (size_t)(nl - buf) + 1;
-                        fwrite(buf + off, 1, n - off, o);
-                        first = 0;
-                    }
-                } else {
-                    fwrite(buf, 1, n, o);
-                }
-            }
-            fclose(i);
-        }
-    }
-    fclose(o);
+    FILE *in = fopen(ent, "rb");
+    if (!in) return 1;
+    FILE *out = fopen(log, "wb");
+    if (!out) { fclose(in); return 1; }
+    char header[64], buf[4096];
+    int failed = fgets(header, sizeof header, in) == NULL || !strchr(header, '\n');
+    size_t n;
+    while (!failed && (n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) failed = 1;
+    if (ferror(in)) failed = 1;
+    if (fclose(in) != 0) failed = 1;
+    if (fclose(out) != 0) failed = 1;
+    return failed;
+}
+
+static int replay_entry(const char *ent, const char *log, const char *rc,
+                        int erc, int haslog)
+{
+    FILE *out = fopen(rc, "w");
+    if (!out) return 1;
+    int failed = fprintf(out, "%d\n", erc) < 0;
+    if (fclose(out) != 0) failed = 1;
+    if (failed) return 1;
+    if (haslog) return replay_log(ent, log);
+    out = fopen(log, "w");
+    if (!out) return 1;
+    return fclose(out) != 0;
 }
 
 static int entry_valid(const char *ent, int *erc, int *haslog)
@@ -408,7 +408,7 @@ static int entry_valid(const char *ent, int *erc, int *haslog)
     if (!f) return 0;
     char line[64];
     int ok = fgets(line, sizeof line, f) != NULL;
-    fclose(f);
+    if (fclose(f) != 0) ok = 0;
     if (!ok) return 0;
     char *sp = strchr(line, ' ');
     if (!sp) return 0;
@@ -493,8 +493,11 @@ static int plan_row(const char *row, const char *sha, const char *out_dir,
     }
     if (flat) flat_name(row, name, sizeof name);
     else if (wcs_copy(name, sizeof name, row)) return 2;
-    wcs_paths_for(name, out_dir, log, sizeof log, rc, sizeof rc);
-    replay_entry(ent, log, rc, erc, haslog);
+    if (wcs_paths_for(name, out_dir, log, sizeof log, rc, sizeof rc) != 0 ||
+        replay_entry(ent, log, rc, erc, haslog) != 0) {
+        fprintf(stderr, "%s: cannot replay cache entry for %s\n", k_wcs_gate, row);
+        return 2;
+    }
     return 0;
 }
 

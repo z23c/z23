@@ -648,6 +648,33 @@ static int cache_preserved_replay(const char *srclist, const char *miss,
 }
 
 
+static int cache_replay_refusal(const char *srclist, const char *miss,
+                                const char *out, const char *log,
+                                const char *replay, const char *expected,
+                                const char *rc, bool fail_rc)
+{
+    const char *blocked = fail_rc ? rc : replay;
+    if (remove(rc) != 0 || remove(replay) != 0 || mkdir(blocked, 0700) != 0)
+        return 2;
+    int result = wcs_cache_plan(srclist, miss, out, 1);
+    if (rmdir(blocked) != 0) return 2;
+    if (result == 0) return sf_fail("unwritable replay counted as a cache hit");
+    return cache_preserved_replay(srclist, miss, out, log, replay, expected, rc);
+}
+
+
+static int cache_replay_failures(const char *srclist, const char *miss,
+                                 const char *out, const char *log,
+                                 const char *replay, const char *expected,
+                                 const char *rc)
+{
+    int result = cache_preserved_replay(srclist, miss, out, log, replay, expected, rc);
+    if (result == 0) result = cache_replay_refusal(srclist, miss, out, log, replay, expected, rc, true);
+    if (result == 0) result = cache_replay_refusal(srclist, miss, out, log, replay, expected, rc, false);
+    return result;
+}
+
+
 static int cache_failed_log_test(const char *base, const char *root,
                                  const char *stub, const char *flags,
                                  const char *srclist)
@@ -670,7 +697,7 @@ static int cache_failed_log_test(const char *base, const char *root,
         return sf_fail("non-regular empty log was accepted");
     if (cache_store_limited(src, log) != 0)
         return sf_fail("failed entry write was published");
-    return cache_preserved_replay(srclist, miss, out, log, replay, expected, rc);
+    return cache_replay_failures(srclist, miss, out, log, replay, expected, rc);
 }
 
 static int cache_io_and_synthetic(const char *base, const char *root,
