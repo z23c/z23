@@ -1102,8 +1102,10 @@ static bool cap_scan_run(struct codeindex *ci, struct cap_scan *s,
                          struct ci_capability_query *q)
 {
     ci_store_lock(ci->store);
-    bool ok = cap_scan_symbols(ci->store, s, q, ci->root) &&
-              cap_scan_files(ci->store, s, q);
+    /* Broad symbol matches must not fill the anchor table before a file with
+     * whole-query purpose evidence is admitted. */
+    bool ok = cap_scan_files(ci->store, s, q) &&
+              cap_scan_symbols(ci->store, s, q, ci->root);
     if (ok) cap_dir_credit(s);
     ci_store_unlock(ci->store);
     free(s->slot);

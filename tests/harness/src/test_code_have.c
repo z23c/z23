@@ -191,6 +191,15 @@ static int ch_find(const struct ci_capability *caps, int n, const char *header)
     return -1;
 }
 
+static bool ch_query_reaches(struct codeindex *ci, const char *query,
+                             const char *path)
+{
+    struct ci_capability caps[5];
+    struct ci_capability_query q;
+    int n = codeindex_capabilities(ci, query, caps, 5, &q);
+    return n > 0 && ch_find(caps, n, path) >= 0;
+}
+
 /* Run the morphology table: each query word must stem to the form that
  * reaches the code. */
 static int ch_check_query_stemming(void)
@@ -442,6 +451,15 @@ static int ch_check_real_tree(struct ci_capability *caps,
                 bech32_found = true;
         CH_CHECK("the address checksum query reaches its Bech32 codec",
                  bech32_found);
+        CH_CHECK("the changed-test query reaches its selector command",
+                 ch_query_reaches(ci, "what decides which tests run for my change",
+                                  "tools/command/native_dev_verify_change_command.c"));
+        CH_CHECK("the rebuild-selection query reaches its harness code",
+                 ch_query_reaches(ci, "which harness code picks the test groups that need rebuilding after a change",
+                                  "tests/harness/src/selection_build_needs.c"));
+        CH_CHECK("the cache-reason query reaches its explanation code",
+                 ch_query_reaches(ci, "where is the code that explains why a test cache entry was hit or missed",
+                                  "tests/harness/src/testcache_reason.c"));
         struct ci_capability android[5];
         struct ci_capability_query android_q;
         int android_n = codeindex_capabilities(
@@ -682,7 +700,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 38 /* of all cases: 26/63 (41%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 42 /* of all cases: 29/63 (46%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {

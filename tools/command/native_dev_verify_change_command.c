@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
+ * Purpose: Decide which tests run for each source change.
+ *
  * Native dev.verify-change adapter. Execution exists only in a dev build;
  * release binaries retain the discoverable command contract but cannot spawn
  * a compiler or test process. */

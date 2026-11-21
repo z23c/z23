@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Resolve the BUILD needs of the groups a test selector runs. */
+ * purpose: Harness code that picks the test groups needing rebuilds after a source change. */
 
 #include "test/selection_build_needs.h"
 

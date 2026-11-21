@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * purpose: Test cache code explaining why each entry was hit or missed. */
 /* Shared cache reason vocabulary. Keeping this leaf separate lets callers
  * check the labels without depending on the cache store and key machinery. */
 
