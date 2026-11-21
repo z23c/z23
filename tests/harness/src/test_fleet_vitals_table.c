@@ -436,6 +436,128 @@ static int vt_spare_rank(void)
     return failures;
 }
 
+/* fake-ssh replies for the no-recommendation cases: two over-committed hosts and
+ * one reachable host that reports no cpu count */
+static const char k_fake_ssh_hot[] =
+    "#!/bin/sh\n"
+    "while [ \"$1\" != \"--\" ]; do shift; done\n"
+    "shift\n"
+    "case \"$1\" in\n"
+    "  hot1) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"hot1\",\"cpus\":32,"
+    "\"load1_centi\":6800}}\n'; exit 0;;\n"
+    "  hot2) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"hot2\",\"cpus\":32,"
+    "\"load1_centi\":7500}}\n'; exit 0;;\n"
+    "  nocpu) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"nocpu\"}}\n'; exit 0;;\n"
+    "  idle) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"idle\",\"cpus\":32,"
+    "\"load1_centi\":300}}\n'; exit 0;;\n"
+    "esac\n"
+    "exit 3\n";
+
+static bool vt_call_remotes(const struct vt_fixture *f, const char *const *names, size_t n,
+                            struct vt_reply *r)
+{
+    struct json_value input = {0}, list = {0}, m;
+    vt_input(&input, &list);
+    for (size_t i = 0; i < n; ++i) {
+        m = vt_remote(names[i], f->route, "/opt/z23/bin/z23", names[i]);
+        vt_add(&list, &m);
+    }
+    (void)json_push_kv(&input, "machines", &list);
+    bool ok = vt_call("fleet.vitals.table", &input, r);
+    json_free(&input);
+    json_free(&list);
+    return ok;
+}
+
+static bool vt_best_is_null(const struct json_value *d)
+{
+    const struct json_value *best = json_get(d, "best");
+    return best && best->type == JSON_NULL;
+}
+
+static bool vt_hot_fixture(struct vt_fixture *f, const char *prefix)
+{
+    char ssh[700];
+    if (!vt_fixture_open(f, prefix))
+        return false;
+    snprintf(ssh, sizeof ssh, "%s/ssh", f->bin);
+    return vt_write(ssh, k_fake_ssh_hot, 0700);
+}
+
+static int vt_one_machine(void)
+{
+    int failures = 0;
+    struct vt_fixture f;
+    bool open = vt_hot_fixture(&f, "fleet_vitals_one");
+    TEST_CASE("fleet_vitals_table: one measured machine is never named best") {
+        ASSERT(open);
+        const char *names[] = {"idle", "nosuchhost"};
+        struct vt_reply r;
+        ASSERT(vt_call_remotes(&f, names, 2, &r));
+        ASSERT(vt_ok(&r));
+        const struct json_value *d = vt_data(&r);
+        ASSERT(vt_best_is_null(d));
+        ASSERT(strstr(vt_str(d, "advice"), "only idle was measured") != NULL);
+        ASSERT(strstr(vt_str(d, "advice"), "fleet vitals table --machines=") != NULL);
+        ASSERT(strstr(vt_str(d, "advice"), "most spare capacity") == NULL);
+        ASSERT(strstr(vt_str(d, "screen"), "most spare capacity") == NULL);
+        json_free(&r.root);
+    } TEST_END
+    vt_fixture_close(&f);
+    return failures;
+}
+
+static int vt_all_overloaded(void)
+{
+    int failures = 0;
+    struct vt_fixture f;
+    bool open = vt_hot_fixture(&f, "fleet_vitals_hot");
+    TEST_CASE("fleet_vitals_table: when every measured machine is over-committed none is recommended") {
+        ASSERT(open);
+        const char *names[] = {"hot1", "hot2", "nocpu"};
+        struct vt_reply r;
+        ASSERT(vt_call_remotes(&f, names, 3, &r));
+        ASSERT(vt_ok(&r));
+        const struct json_value *d = vt_data(&r), *rows = json_get(d, "rows");
+        ASSERT(vt_int(json_at(rows, 0), "spare_cores_centi") < 0);
+        ASSERT(vt_int(json_at(rows, 1), "spare_cores_centi") < 0);
+        ASSERT(vt_best_is_null(d));
+        ASSERT(strstr(vt_str(d, "advice"), "no measured machine has spare capacity") != NULL);
+        ASSERT(strstr(vt_str(d, "advice"), "most spare capacity") == NULL);
+        /* reachable but unmeasurable load is unranked: null, not 0 */
+        const struct json_value *rank = json_get(json_at(rows, 2), "spare_rank");
+        ASSERT(rank && rank->type == JSON_NULL);
+        ASSERT_EQ(vt_int(json_at(rows, 0), "spare_rank"), 1);
+        json_free(&r.root);
+    } TEST_END
+    vt_fixture_close(&f);
+    return failures;
+}
+
+static int vt_normal_comparison(void)
+{
+    int failures = 0;
+    struct vt_fixture f;
+    bool open = vt_hot_fixture(&f, "fleet_vitals_cmp");
+    TEST_CASE("fleet_vitals_table: a comparison with headroom names the machine with the most spare cores") {
+        ASSERT(open);
+        const char *names[] = {"hot1", "idle"};
+        struct vt_reply r;
+        ASSERT(vt_call_remotes(&f, names, 2, &r));
+        ASSERT(vt_ok(&r));
+        const struct json_value *d = vt_data(&r);
+        ASSERT_STR_EQ(vt_str(d, "best"), "idle");
+        ASSERT(strstr(vt_str(d, "advice"), "most spare capacity: idle") != NULL);
+        json_free(&r.root);
+    } TEST_END
+    vt_fixture_close(&f);
+    return failures;
+}
+
 static int vt_no_input(void)
 {
     int failures = 0;
@@ -454,7 +576,12 @@ static int vt_no_input(void)
         ASSERT_EQ(vt_int(row, "age_s"), 0);
         ASSERT(vt_int(row, "cpus") > 0);
         ASSERT(json_get(row, "jobs_running") != NULL && json_get(row, "jobs_queued") != NULL);
-        ASSERT(strstr(vt_str(d, "note"), "do not replicate") != NULL);
+        ASSERT(strstr(vt_str(d, "note"), "never reads recorded fleet vitals ledger rows") != NULL);
+        ASSERT(strstr(vt_str(d, "note"), "replicate") == NULL);
+        /* one machine, nothing compared: no recommendation */
+        ASSERT(vt_best_is_null(d));
+        ASSERT(strstr(vt_str(d, "advice"), "most spare capacity") == NULL);
+        ASSERT(strstr(vt_str(d, "advice"), "nothing was compared") != NULL);
         ASSERT(strstr(vt_str(d, "screen"), "build queue") != NULL);
         json_free(&r.root);
     } TEST_END
@@ -488,6 +615,9 @@ int test_fleet_vitals_table(void)
     failures += vt_no_route();
     failures += vt_leaf_missing();
     failures += vt_spare_rank();
+    failures += vt_one_machine();
+    failures += vt_all_overloaded();
+    failures += vt_normal_comparison();
     failures += vt_no_input();
     failures += vt_empty_list();
     if (failures == 0)

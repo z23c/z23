@@ -351,6 +351,9 @@ bool zcl_native_ops_host_queue_depth(int64_t *running, int64_t *queued)
         if (ok) {
             *running = (int64_t)json_size(run);
             *queued = (int64_t)json_size(wait);
+            const struct json_value *land = json_get(&status, "landing");
+            if (land && land->type == JSON_ARR)
+                *queued += (int64_t)json_size(land);
         }
     }
     json_free(&status);

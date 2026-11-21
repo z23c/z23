@@ -15,8 +15,9 @@
  *        the REMOTE z23) and host_alias [A-Za-z0-9._-]{1,64}};
  *        deadline_ms 1000..20000 (default 8000).
  * NO INPUT (no machines key): this box alone, measured now, with a note on
- *        what a remote row needs. Never a refusal. Fleet ledger vitals rows do
- *        not replicate between hosts, so no recorded remote row is shown.
+ *        what a remote row needs. Never a refusal. With fewer than two measured
+ *        machines nothing is compared, so best is null and no machine is recommended.
+ *        This command reads only numbers measured during the call, never ledger rows.
  * OUTPUT zcl.fleet_vitals_table.v1: rows[] (input order; each carries age_s 0,
  *        spare_cores_centi, load1_per_core_centi, jobs_running, jobs_queued and
  *        spare_rank), best, advice, age_note and screen (rank order). A machine that fails
@@ -732,7 +733,17 @@ static void vt_row(char *out, size_t cap, size_t *len, const size_t w[VT_COLS],
     vt_put(out, cap, len, "\xE2\x94\x82\n");
 }
 
-/* The line an agent acts on: the machine with the most spare cores. */
+/* The machine to recommend, or NULL. A recommendation needs a comparison (two
+ * or more measured machines) and real headroom (spare cores above zero). */
+static const struct vt_machine *vt_best(const struct vt_machine *m,
+                                        const size_t order[VT_MACHINES_MAX], size_t ranked)
+{
+    if (ranked < 2 || m[order[0]].spare_centi <= 0)
+        return NULL;
+    return &m[order[0]];
+}
+
+/* The line an agent acts on. It names a machine only when vt_best does. */
 static void vt_advice(const struct vt_machine *m, size_t count, const size_t order[VT_MACHINES_MAX],
                       size_t ranked, char *out, size_t cap)
 {
@@ -740,7 +751,20 @@ static void vt_advice(const struct vt_machine *m, size_t count, const size_t ord
         snprintf(out, cap, "no machine has a usable measurement, so none is recommended");
         return;
     }
-    const struct vt_machine *best = &m[order[0]];
+    if (ranked == 1) {
+        snprintf(out, cap,
+                 "only %s was measured, so nothing was compared and no machine is recommended; "
+                 "to compare, pass two or more machines: z23 fleet vitals table "
+                 "--machines=<json array of {label, route_file, slot, host_alias}>",
+                 m[order[0]].label);
+        return;
+    }
+    const struct vt_machine *best = vt_best(m, order, ranked);
+    if (!best) {
+        snprintf(out, cap, "no measured machine has spare capacity (%zu compared), so none is recommended",
+                 ranked);
+        return;
+    }
     char spare[32];
     vt_centi(spare, sizeof spare, best->spare_centi);
     snprintf(out, cap, "most spare capacity: %s (%s spare cores of %lld, measured now)%s",
@@ -821,7 +845,7 @@ static bool vt_push_load_cpu(struct json_value *row, const struct vt_machine *m)
         ok = json_push_kv(row, "spare_cores_centi", &null) &&
              json_push_kv(row, "load1_per_core_centi", &null);
     json_free(&null);
-    return ok && vt_push(row, "spare_rank", m->rank);
+    return ok && vt_push(row, "spare_rank", m->rank ? m->rank : -1);
 }
 
 static bool vt_push_mem_disk(struct json_value *row, const struct zcl_fleet_vitals_now *n)
@@ -854,16 +878,17 @@ static bool vt_row_json(const struct vt_machine *m, struct json_value *rows)
 static const char k_vt_implicit_note[] =
     "No machines were given, so only this box is shown. A remote machine needs one "
     "machines[] entry {label, route_file, slot, host_alias} (zcl.fleet_vitals_table_input.v1) "
-    "and is then measured live over its host tunnel. Fleet vitals ledger rows do not replicate "
-    "between hosts today, so there is no recorded remote row to show here; a number is only "
-    "ever shown when it was measured during this call.";
+    "and is then measured live over its host tunnel. This command reads only numbers measured "
+    "during this call and never reads recorded fleet vitals ledger rows; with fewer than two "
+    "measured machines nothing is compared and no machine is recommended.";
 
 static bool vt_summary_json(struct json_value *data, const struct vt_machine *m, bool implicit,
                             const size_t order[VT_MACHINES_MAX], size_t ranked, const char *advice)
 {
     struct json_value null = {0};
     json_set_null(&null);
-    bool ok = ranked ? json_push_kv_str(data, "best", m[order[0]].label)
+    const struct vt_machine *best = vt_best(m, order, ranked);
+    bool ok = best ? json_push_kv_str(data, "best", best->label)
                      : json_push_kv(data, "best", &null);
     json_free(&null);
     return ok && json_push_kv_str(data, "advice", advice) &&
