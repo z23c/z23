@@ -243,7 +243,7 @@ static bool sm_seed_cursor_post(struct node_db *db, struct fleet_board_post *pos
            db_fleet_board_post_ingest(db, post, 600000, NULL) == FLEET_BOARD_OK;
 }
 
-static bool sm_v84_denied_stamp(struct node_db *db)
+static bool sm_v84_denied_stamp(struct node_db *db, struct fleet_board_post *expected)
 {
     int floor = node_db_schema_compat_floor(db);
     if (!node_db_exec(db, "CREATE TEMP TRIGGER refuse_board_stamp BEFORE INSERT "
@@ -254,10 +254,13 @@ static bool sm_v84_denied_stamp(struct node_db *db)
     int version = node_db_schema_version(db);
     int zero = sm_scalar(db, "SELECT count(*) FROM fleet_board_posts WHERE arrival=0");
     int indexes = sm_obj_count(db, "index", "idx_fleet_board_arrival");
+    struct db_fleet_board_post row;
+    bool preserved = db_fleet_board_post_find(db, expected->id, &row) &&
+                     row.arrival == 0 && sm_visit_cursor_post(&row, expected);
     printf("v84 refused stamp: rc=%d schema=%d zero=%d indexes=%d\n", rc, version, zero, indexes);
     return node_db_exec(db, "DROP TRIGGER refuse_board_stamp") &&
            rc == -1 && version == 83 && node_db_schema_compat_floor(db) == floor &&
-           zero == 1 && indexes == 0 && sm_row_count(db, 84) == 0 && sqlite3_get_autocommit(db->db);
+           preserved && zero == 1 && indexes == 0 && sm_row_count(db, 84) == 0 && sqlite3_get_autocommit(db->db);
 }
 
 static bool sm_v84_cursor_replay(int64_t prior, bool refuse_ledger)
@@ -274,7 +277,7 @@ static bool sm_v84_cursor_replay(int64_t prior, bool refuse_ledger)
     if (ok) ok = node_db_exec(&f.ndb, prior == 0
         ? "UPDATE fleet_board_posts SET arrival=0"
         : "UPDATE fleet_board_posts SET arrival=73");
-    if (ok && refuse_ledger) ok = sm_v84_denied_stamp(&f.ndb);
+    if (ok && refuse_ledger) ok = sm_v84_denied_stamp(&f.ndb, &post);
     int result = ok ? node_db_migrate(&f.ndb, NULL) : -1;
     int64_t cursor = 0;
     int visited = db_fleet_board_fleet_after(&f.ndb, 600001, 0, 4,
