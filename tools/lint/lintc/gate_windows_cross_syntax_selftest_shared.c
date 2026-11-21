@@ -472,13 +472,66 @@ static int sh_retention_case(struct sh_env *e, const char *stub, const char *fla
     return sh_generation_count(root) == 1 ? 0 : sh_fail("the one-generation limit was exceeded");
 }
 
+static int sh_active_child(const struct sh_env *e, const char *stub, const char *flags,
+                           int ready, int resume)
+{
+    int h, m, s;
+    char miss[SH_P], out[SH_P], token = 'x';
+    if (sh_run(e, 0, stub, stub, flags, &h, &m, &s) != 0 ||
+        shp_(miss, sizeof miss, "%s/active-miss", e->work[0]) ||
+        shp_(out, sizeof out, "%s/out", e->work[0]) || write(ready, &token, 1) != 1 ||
+        read(resume, &token, 1) != 1) return 2;
+    if (wcs_cache_plan(e->list[0], miss, out, 1) != 0) return 2;
+    struct stat st;
+    return stat(miss, &st) == 0 && st.st_size == 0 ? 0 : 1;
+}
+
+static int sh_active_peer(struct sh_env *e, const char *stub, const char *flags)
+{
+    char path[SH_P];
+    if (chdir(e->tree[0]) != 0 ||
+        wcs_cache_setup("tu-cache-shared-selftest", stub, stub, flags,
+                        e->work[1], ".", NULL) != 0 || !wcs_cache_on()) return 2;
+    if (shp_(path, sizeof path, "%s/src/shared.h", e->tree[1]) ||
+        csr_write(path, "#define SHARED_ST 99\n") != 0) return 2;
+    if (chdir(e->tree[1]) != 0 ||
+        wcs_cache_setup("tu-cache-shared-selftest", stub, stub, flags,
+                        e->work[1], ".", NULL) != 0 || wcs_cache_on()) return 2;
+    return 0;
+}
+
+
+static int sh_active_retention(struct sh_env *e, const char *stub, const char *flags)
+{
+    int ready[2], resume[2], status;
+    char token;
+    if (pipe(ready) || pipe(resume)) return 2;
+    pid_t pid = fork();
+    if (pid < 0) return 2;
+    if (pid == 0) {
+        close(ready[0]); close(resume[1]);
+        _exit(sh_active_child(e, stub, flags, ready[1], resume[0]));
+    }
+    close(ready[1]); close(resume[0]);
+    int ready_seen = read(ready[0], &token, 1) == 1;
+    int ok = ready_seen;
+    if (ok && sh_active_peer(e, stub, flags) != 0) ok = 0;
+    if (ready_seen && write(resume[1], "x", 1) != 1) ok = 0;
+    close(ready[0]); close(resume[1]);
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) ok = 0;
+    if (!ok) return sh_fail("active generation was pruned during a peer sweep");
+    return 0;
+}
+
+
 static int sh_retention(struct sh_env *e, const char *stub, const char *flags)
 {
     const char *value = getenv("ZCL_LINT_TU_CACHE_GENERATIONS");
     char *saved = value ? strdup(value) : NULL;
     if (value && !saved) return 2;
     int rc = setenv("ZCL_LINT_TU_CACHE_GENERATIONS", "1", 1) == 0 ?
-        sh_retention_case(e, stub, flags) : 2;
+        sh_active_retention(e, stub, flags) : 2;
+    if (rc == 0) rc = sh_retention_case(e, stub, flags);
     int restored = saved ? setenv("ZCL_LINT_TU_CACHE_GENERATIONS", saved, 1) :
         unsetenv("ZCL_LINT_TU_CACHE_GENERATIONS");
     free(saved);

@@ -80,6 +80,7 @@ int wcs_cache_setup(const char *gate, const char *script_path,
                     const char *cc, const char *flags_nul,
                     const char *scratch, const char *root,
                     const char *cachedir);
+void wcs_cache_release(void);
 int wcs_cache_on(void);
 const char *wcs_cache_off_reason(void);
 int wcs_cache_plan(const char *src_list, const char *miss_list,

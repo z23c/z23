@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <utime.h>
@@ -74,6 +75,7 @@ int wcs_mkdirs_p(const char *path)
 static int c_on;
 static char c_reason[256];
 static char c_dir[WCS_PATH];
+static int c_generation_lock = -1;
 static char c_stats[WCS_PATH];
 static unsigned c_tmp_seq;
 
@@ -242,6 +244,53 @@ static int generations_to_keep(void)
     return keep;
 }
 
+/* The stable gate lock is outside pruned generations. Active sweeps share it;
+ * only an idle gate can take it exclusively and prune. */
+void wcs_cache_release(void)
+{
+    if (c_generation_lock >= 0) close(c_generation_lock);
+    c_generation_lock = -1;
+    c_on = 0;
+}
+
+static int cache_generation_lock(const char *root, bool *exclusive)
+{
+    char path[WCS_PATH];
+    struct stat st;
+    if (wcs_mkdirs_p(root) != 0 ||
+        ovf(snprintf(path, sizeof path, "%s/.generation.lock", root), sizeof path)) return -1;
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return -1; }
+    int rc;
+    do { rc = flock(fd, LOCK_EX | LOCK_NB); } while (rc != 0 && errno == EINTR);
+    *exclusive = rc == 0;
+    if (!*exclusive && errno != EWOULDBLOCK && errno != EAGAIN) { close(fd); return -1; }
+    return fd;
+}
+
+
+static int cache_generation_acquire(const char *root, const char *dir,
+                                    const char *salt)
+{
+    bool exclusive = false;
+    int fd = cache_generation_lock(root, &exclusive), rc;
+    struct stat st;
+    if (fd < 0) return -1;
+    if (exclusive && wcs_mkdirs_p(dir) != 0) { close(fd); return -1; }
+    if (exclusive && prune_generations(root, salt, generations_to_keep()) != 0) {
+        close(fd);
+        return -2;
+    }
+    do { rc = flock(fd, LOCK_SH); } while (rc != 0 && errno == EINTR);
+    /* A busy gate never creates another generation. A downgrade may also
+     * lose the just-created directory to a peer before shared lock acquisition. */
+    if (rc != 0 || stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) { close(fd); return -1; }
+    c_generation_lock = fd;
+    return 0;
+}
+
+
 static int cache_env_off(const char *cachedir)
 {
     if ((!cachedir || !env_eq("ZCL_TU_CACHE_SELFTEST_FORCE", "1")) &&
@@ -293,7 +342,7 @@ int wcs_cache_setup(const char *gate, const char *script_path,
     char ccid[WCS_LINE], dg[WCS_SHA], libsha[WCS_SHA], gsha[WCS_SHA];
     char fsha[WCS_SHA], salt[WCS_SHA], input[WCS_LINE * 2], ccbin[WCS_SHA];
     char gate_root[WCS_PATH], dir[WCS_PATH];
-    c_on = 0;
+    wcs_cache_release();
     c_dir[0] = c_stats[0] = '\0';
     if (cache_env_off(cachedir)) return 0;
     if (cc_version_line(cc, scratch, ccid, sizeof ccid) != 0) {
@@ -321,25 +370,22 @@ int wcs_cache_setup(const char *gate, const char *script_path,
         return 0;
     if (ovf(snprintf(dir, sizeof dir, "%s/%s", gate_root, salt), sizeof dir))
         return 0;
-    if (wcs_mkdirs_p(dir) != 0) {
-        c_off_fmt("cannot create '%s'", dir);
-        return 0;
+    int lock_result = cache_generation_acquire(gate_root, dir, salt);
+    if (lock_result != 0) {
+        c_off("cache generation unavailable or in use");
+        return lock_result == -2 ? 2 : 0;
     }
     utime(dir, NULL);
-    if (prune_generations(gate_root, salt, generations_to_keep()) != 0) {
-        c_off("cache generations could not be pruned");
-        return 2;
-    }
     if (ovf(snprintf(c_stats, sizeof c_stats, "%s/tu-cache.events", scratch),
-            sizeof c_stats))
-        return 0;
+            sizeof c_stats)) { wcs_cache_release(); return 0; }
     FILE *f = fopen(c_stats, "w");
     if (!f) {
         c_off_fmt("cannot write '%s'", c_stats);
+        wcs_cache_release();
         return 0;
     }
     fclose(f);
-    if (wcs_copy(c_dir, sizeof c_dir, dir)) return 0;
+    if (wcs_copy(c_dir, sizeof c_dir, dir)) { wcs_cache_release(); return 0; }
     c_on = 1;
     return 0;
 }

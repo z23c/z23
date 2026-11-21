@@ -544,7 +544,7 @@ int wcs_lists_selftest(void)
     return ok ? 0 : 1;
 }
 
-int wcs_sweep(void)
+static int wcs_sweep_inner(void)
 {
     char srclist[WCS_PATH], flagsnul[WCS_PATH], misslist[WCS_PATH];
     if (ovf(snprintf(srclist, sizeof srclist, "%s/srcs.txt", g_wcs_work),
@@ -585,3 +585,10 @@ int wcs_sweep(void)
     return verdict(L, brows, bn, stale, ns);
 }
 
+
+int wcs_sweep(void)
+{
+    int rc = wcs_sweep_inner();
+    wcs_cache_release();
+    return rc;
+}
