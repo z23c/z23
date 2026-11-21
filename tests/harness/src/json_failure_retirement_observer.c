@@ -128,9 +128,24 @@ static bool jr_fault_failure_retires(const char *raw, const char *label,
     return ok && fault_fired;
 }
 
+static bool jr_long_plain_string(void)
+{
+    static const char raw[] =
+        "\"synthetic-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"";
+    struct json_value v;
+    zcl_alloc_fault_fail_nth("json_string", 2);
+    bool ok = jr_json_read(&v, raw, sizeof(raw) - 1) && v.type == JSON_STR &&
+        strlen(jr_json_get_str(&v)) == sizeof(raw) - 3 &&
+        memcmp(jr_json_get_str(&v), raw + 1, sizeof(raw) - 3) == 0 &&
+        zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
+    jr_json_free(&v);
+    return ok;
+}
+
 int json_failure_retirement_case(void)
 {
-    bool ok = true;
+    bool ok = jr_long_plain_string();
     ok = ok && jr_failure_retires("\"synthetic-secret\\q\"", 1, 1);
     ok = ok && jr_failure_retires("{\"synthetic-private\"}", 1, 1);
     ok = ok && jr_failure_retires(
@@ -138,7 +153,7 @@ int json_failure_retirement_case(void)
     ok = ok && jr_failure_retires(
         "{\"private\":\"synthetic-secret\",", 2, 1);
     ok = ok && jr_fault_failure_retires(
-        "\"synthetic-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        "\"synthetic-secret-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n\"",
         "json_string", 2, 1, 1);
     ok = ok && jr_fault_failure_retires(
         "{\"private\":\"synthetic-secret\"}", "json_children", 1, 2, 1);

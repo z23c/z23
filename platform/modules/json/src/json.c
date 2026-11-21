@@ -608,17 +608,29 @@ static bool str_escape(char **s, size_t *cap, size_t *len,
     return str_put(s, cap, len, c);
 }
 
+/* Copy the ordinary prefix once. The escape decoder can grow the buffer. */
+static const char *str_plain_end(const char *p, const char *end)
+{
+    while (p < end && (unsigned char)*p >= 0x20 && *p != '"' && *p != '\\')
+        p++;
+    return p;
+}
+
 /* out == NULL walks the same grammar without allocating (json_valid). */
 static bool parse_string(char **out, const char **pp, const char *end)
 {
     const char *p = *pp;
     if (p >= end || *p != '"') return false;
     p++;
-    size_t cap = 64, len = 0;
+    const char *start = p;
+    p = str_plain_end(p, end);
+    size_t len = (size_t)(p - start);
+    size_t cap = len < 64 ? 64 : len + 1;
     char *s = NULL;
     if (out) {
         s = json_heap_alloc(cap, "json_string");
         if (!s) return false;
+        memcpy(s, start, len);
     }
     while (p < end && *p != '"') {
         unsigned char c = (unsigned char)*p++;
