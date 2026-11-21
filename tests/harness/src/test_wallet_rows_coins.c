@@ -26,6 +26,7 @@
 #include "models/utxo.h"
 #include "models/wallet_tx.h"
 #include "rpc/server.h"
+#include "rpc/httpserver.h"
 #include "script/standard.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
@@ -1271,10 +1272,210 @@ static int wrc_rebuild_without_coins_view(void)
     return failures;
 }
 
+static int wrc_deny_wallet_read(void *ctx, int operation, const char *a,
+                                const char *b, const char *db, const char *trigger)
+{
+    (void)ctx; (void)b; (void)db; (void)trigger;
+    return operation == SQLITE_READ && a && strcmp(a, "wallet_utxos") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+
+static bool wrc_reserved_output(const struct transaction *tx, uint32_t n, void *ctx)
+{
+    (void)tx; (void)ctx;
+    return n == 2;
+}
+
+static bool wrc_listunspent_policy(struct wrc_fx *fx, struct wallet_tx *tx)
+{
+    struct key_id watch = {0};
+    watch.id.data[0] = 0xb9;
+    bool ok = keystore_add_watch_only_id(&fx->w->keystore, &watch);
+    tx->tx.num_vout = 4;
+    script_for_p2pkh(&tx->tx.vout[1].script_pub_key, &watch);
+    wallet_set_coin_reservation_probe(wrc_reserved_output, NULL);
+    wallet_mark_outpoint_spent(fx->w, &tx->tx.hash, 3);
+    struct json_value result = {0};
+    ok = ok && wrc_listunspent(fx, &result) && json_size(&result) == 2;
+    const struct json_value *first = json_at(&result, 0);
+    const struct json_value *second = json_at(&result, 1);
+    const struct json_value *a = first ? json_get(first, "spendable") : NULL;
+    const struct json_value *b = second ? json_get(second, "spendable") : NULL;
+    ok = ok && a && b && a->type == JSON_BOOL && b->type == JSON_BOOL &&
+         json_get_bool(a) && !json_get_bool(b);
+    json_free(&result);
+    wallet_set_coin_reservation_probe(NULL, NULL);
+    wallet_unmark_outpoint_spent(fx->w, &tx->tx.hash, 3);
+    tx->tx.num_vout = 4096;
+    return ok;
+}
+
+
+static bool wrc_listunspent_seed(struct wrc_fx *fx, unsigned count)
+{
+    for (unsigned i = 0; i < count; i++) {
+        struct db_wallet_utxo u = {0};
+        wrc_txid((uint16_t)i, u.txid);
+        u.value = 2000;
+        u.script = fx->own_script.data;
+        u.script_len = fx->own_script.size;
+        if (!db_wallet_utxo_save(&fx->ndb, &u)) return false;
+    }
+    return true;
+}
+
+static bool wrc_count_utxo(struct db_wallet_utxo *u, void *ctx)
+{
+    (void)u;
+    (*(size_t *)ctx)++;
+    return true;
+}
+
+struct wrc_progress { size_t calls, limit; };
+
+static int wrc_interrupt_after(void *ctx)
+{
+    struct wrc_progress *p = ctx;
+    p->calls++;
+    return p->limit && p->calls > p->limit;
+}
+
+static bool wrc_listunspent_interrupt(struct wrc_fx *fx)
+{
+    struct wrc_progress p = {0};
+    sqlite3_progress_handler(fx->ndb.db, 1, wrc_interrupt_after, &p);
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT txid,vout,value,address_hash,script,height,is_coinbase"
+        " FROM wallet_utxos WHERE spent_txid IS NULL ORDER BY value DESC";
+    bool prepared = sqlite3_prepare_v2(fx->ndb.db, sql, -1, &s, NULL) == SQLITE_OK;
+    bool row = prepared && sqlite3_step(s) == SQLITE_ROW;
+    size_t first_row = p.calls;
+    if (s) (void)sqlite3_finalize(s);
+    p.calls = 0; p.limit = first_row + 1;
+    size_t visited = 0;
+    enum db_wallet_utxo_iter_result status = db_wallet_utxo_each_unspent(
+        &fx->ndb, 128 * 1024 * 1024, wrc_count_utxo, &visited);
+    sqlite3_progress_handler(fx->ndb.db, 0, NULL, NULL);
+    return row && status == DB_WALLET_UTXO_ITER_READ_ERROR && visited == 0;
+}
+
+
+static bool wrc_listunspent_db_faults(struct wrc_fx *fx)
+{
+    struct json_value result = {0};
+    bool denied = sqlite3_set_authorizer(fx->ndb.db, wrc_deny_wallet_read, NULL) == SQLITE_OK;
+    bool refused = denied && !wrc_listunspent(fx, &result);
+    json_free(&result);
+    bool reset = sqlite3_set_authorizer(fx->ndb.db, NULL, NULL) == SQLITE_OK;
+    bool began = sqlite3_exec(fx->ndb.db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    bool tx_refused = began && !wrc_listunspent(fx, &result);
+    json_free(&result);
+    bool rollback = began && sqlite3_exec(fx->ndb.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    size_t visited = 0;
+    enum db_wallet_utxo_iter_result limited = db_wallet_utxo_each_unspent(
+        &fx->ndb, 1, wrc_count_utxo, &visited);
+    bool interrupted = wrc_listunspent_interrupt(fx);
+    bool damaged = sqlite3_exec(fx->ndb.db,
+        "UPDATE wallet_utxos SET txid=x'01' WHERE value=1000", NULL, NULL, NULL) == SQLITE_OK;
+    bool bad_refused = damaged && !wrc_listunspent(fx, &result);
+    json_free(&result);
+    return refused && reset && tx_refused && rollback && bad_refused && interrupted &&
+           limited == DB_WALLET_UTXO_ITER_RESOURCE && visited == 0;
+}
+
+static bool wrc_listunspent_db_complete(struct wrc_fx *fx)
+{
+    if (!wrc_listunspent_seed(fx, 4096)) return false;
+    struct json_value result = {0};
+    bool ok = wrc_listunspent_min(fx, &result, 0) && json_size(&result) == 4096;
+    json_free(&result);
+    struct db_wallet_utxo last = {0};
+    wrc_txid(4096, last.txid); last.value = 1000; last.height = 6;
+    last.script = fx->own_script.data; last.script_len = fx->own_script.size;
+    ok = ok && db_wallet_utxo_save(&fx->ndb, &last) &&
+         wrc_listunspent_min(fx, &result, 0) && json_size(&result) == 4097;
+    size_t bytes = json_write(&result, NULL, 0);
+    char *wire = NULL; size_t wire_bytes = 0;
+    bool serialized = rpc_http_test_serialize_response(&result, &wire, &wire_bytes);
+    free(wire);
+    ok = ok && serialized && wire_bytes == bytes;
+    json_free(&result);
+    ok = ok && wrc_listunspent(fx, &result) && json_size(&result) == 1;
+    json_free(&result);
+    printf("LIST_DB bytes=%zu ok=%d\n", bytes, ok);
+    return wrc_listunspent_db_faults(fx) && ok;
+}
+
+static bool wrc_listunspent_memory_make(struct wallet_tx *a, struct wallet_tx *b,
+                                         struct wrc_fx *fx)
+{
+    transaction_init(&a->tx); transaction_init(&b->tx);
+    if (!transaction_alloc(&a->tx, 0, 4096)) return false;
+    a->used = true; a->confirms = 5; a->tx.hash.data[0] = 1;
+    fx->w->num_wallet_tx = 1;
+    if (!transaction_alloc(&b->tx, 0, 1)) return false;
+    b->used = true; b->confirms = 1; b->tx.hash.data[0] = 2;
+    fx->w->num_wallet_tx = 2;
+    for (size_t i = 0; i < 4096; i++) {
+        a->tx.vout[i].value = 2000;
+        a->tx.vout[i].script_pub_key = fx->own_script;
+    }
+    b->tx.vout[0].value = 1000;
+    b->tx.vout[0].script_pub_key = fx->own_script;
+    return true;
+}
+
+static bool wrc_listunspent_memory_filtered(struct wrc_fx *fx)
+{
+    struct json_value params = {0}, arg = {0}, result = {0};
+    json_set_array(&params); json_set_int(&arg, 1);
+    bool ok = json_push_back(&params, &arg) && json_push_back(&params, &arg) &&
+              rpc_table_execute(&fx->tbl, "listunspent", &params, &result) &&
+              json_size(&result) == 1;
+    json_free(&params); json_free(&arg); json_free(&result);
+    return ok;
+}
+
+static bool wrc_listunspent_memory_complete(struct wrc_fx *fx)
+{
+    wallet_rpc_context_set_node_db(NULL);
+    struct wallet_tx *a = &fx->w->map_wallet[0], *b = &fx->w->map_wallet[1];
+    if (!wrc_listunspent_memory_make(a, b, fx)) return false;
+    struct json_value result = {0};
+    b->used = false; fx->w->num_wallet_tx = 1;
+    bool ok = wrc_listunspent_min(fx, &result, 0) && json_size(&result) == 4096;
+    json_free(&result);
+    b->used = true; fx->w->num_wallet_tx = 2;
+    ok = ok && wrc_listunspent_min(fx, &result, 0) && json_size(&result) == 4097;
+    json_free(&result);
+    ok = ok && wrc_listunspent_memory_filtered(fx);
+    b->used = false; fx->w->num_wallet_tx = 1;
+    bool policy = wrc_listunspent_policy(fx, a);
+    b->used = true; fx->w->num_wallet_tx = 2;
+    return ok && policy;
+}
+
+static int wrc_listunspent_complete(void)
+{
+    struct wrc_fx fx;
+    if (!wrc_open(&fx, false)) return 1;
+    size_t count = 0;
+    bool empty = db_wallet_utxo_each_unspent(&fx.ndb, 0, wrc_count_utxo, &count) ==
+                 DB_WALLET_UTXO_ITER_OK && count == 0;
+    bool key = wallet_import_key(fx.w, &fx.key);
+    bool db = empty && key && wrc_listunspent_db_complete(&fx);
+    bool memory = key && wrc_listunspent_memory_complete(&fx);
+    wrc_close(&fx);
+    printf("wallet_rows_coins: listunspent complete database=%d memory=%d\n", db, memory);
+    return !db || !memory;
+}
+
 int wrc_run_tests(void);
 int wrc_run_tests(void)
 {
     int failures = 0;
+    failures += wrc_listunspent_complete();
     failures += wrc_import_agreeing_row_kept();
     failures += wrc_import_disagreeing_rows_skipped();
     failures += wrc_import_height_comes_from_coin();

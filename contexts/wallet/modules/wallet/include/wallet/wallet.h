@@ -302,6 +302,12 @@ void wallet_available_coins(const struct wallet *w,
                              size_t *num_coins, size_t max_coins,
                              bool only_confirmed, bool include_zero_value);
 
+/* Visit available coins in wallet order while holding the wallet mutex.
+ * Return false to abort; borrowed coin pointers expire when the visit returns. */
+typedef bool (*wallet_coin_visit_fn)(const struct coin_entry *coin, void *ctx);
+bool wallet_available_coins_each(const struct wallet *w, bool only_confirmed,
+                                 wallet_coin_visit_fn visit, void *ctx);
+
 /* Sum all coins matching wallet_available_coins(w, ..., false, false),
  * without an output count limit. Returns false on overflow. */
 bool wallet_available_coins_balance(const struct wallet *w, int64_t *balance_out);

@@ -92,6 +92,31 @@ static bool wallet_coin_output_spendable(const struct wallet *w,
     return can_spend;
 }
 
+bool wallet_available_coins_each(const struct wallet *w, bool only_confirmed,
+                                 wallet_coin_visit_fn visit, void *ctx)
+{
+    if (!w || !visit) return false;
+    bool ok = true;
+    zcl_mutex_lock((zcl_mutex_t *)&w->cs);
+    for (size_t i = 0; i < MAX_WALLET_TX && ok; i++) {
+        const struct wallet_tx *wtx = &w->map_wallet[i];
+        if (!wallet_tx_has_listable_coins(wtx, only_confirmed)) continue;
+        for (size_t j = 0; j < wtx->tx.num_vout && ok; j++) {
+            const struct tx_out *out = &wtx->tx.vout[j];
+            if (!wallet_coin_output_available(w, wtx, j, false, false)) continue;
+            bool spendable = wallet_coin_output_spendable(w, out);
+            struct coin_entry coin = {
+                .wtx = wtx, .i = (unsigned int)j, .depth = wtx->confirms,
+                .spendable = spendable, .solvable = spendable,
+            };
+            ok = visit(&coin, ctx);
+        }
+    }
+    zcl_mutex_unlock((zcl_mutex_t *)&w->cs);
+    return ok;
+}
+
+
 void wallet_available_coins_ex(const struct wallet *w,
                                struct coin_entry *coins_out,
                                size_t *num_coins, size_t max_coins,

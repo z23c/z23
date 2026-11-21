@@ -15,6 +15,7 @@
 #include "controllers/wallet_row_coins.h"
 #include "controllers/yardsale_wallet_controller.h"
 #include "wallet/wallet_lock.h"
+#include "rpc/httpserver.h"
 void rpc_wallet_set_state(struct wallet *w, struct main_state *ms,
                           const char *datadir, struct wallet_sqlite *wdb,
                           struct tx_mempool *mempool,
@@ -330,29 +331,16 @@ static bool rpc_walletencrypt(const struct json_value *params, bool help,
     return true;
 }
 
-static void listunspent_push_script_destination(struct json_value *entry,
+static bool listunspent_push_script_destination(struct json_value *entry,
                                                 const struct script *sc)
 {
     struct tx_destination dest;
     if (script_extract_destination(sc, &dest)) {
         char addr[128];
         if (wallet_encode_destination(&dest, addr, sizeof(addr)))
-            json_push_kv_str(entry, "address", addr);
+            return json_push_kv_str(entry, "address", addr);
     }
-}
-
-static void listunspent_push_db_script_address(struct json_value *entry,
-                                               struct db_wallet_utxo *u)
-{
-    /* Decode address from script */
-    if (u->script && u->script_len > 0 &&
-        u->script_len <= MAX_SCRIPT_SIZE) {
-        struct script sc;
-        script_init(&sc);
-        memcpy(sc.data, u->script, u->script_len);
-        sc.size = u->script_len;
-        listunspent_push_script_destination(entry, &sc);
-    }
+    return true;
 }
 
 /* A wallet row that carries a height keeps it. A row at height 0 is normal
@@ -392,91 +380,79 @@ static bool listunspent_db_utxo_eligible(struct db_wallet_utxo *u, int confs,
     return true;
 }
 
-static void listunspent_push_db_utxos(struct wallet_rpc_context *ctx,
-                                      struct json_value *result, int tip,
-                                      int min_conf, int max_conf)
+enum { LISTUNSPENT_SCRATCH_BYTES = 128 * 1024 * 1024 };
+
+struct listunspent_state {
+    struct wallet_rpc_context *ctx;
+    struct json_value *result;
+    size_t bytes;
+    int tip, min_conf, max_conf, disagreeing;
+    bool too_large;
+};
+
+static bool listunspent_emit(struct listunspent_state *s,
+                             const struct uint256 *hash, uint32_t index,
+                             const struct script *script, int64_t value,
+                             int confirmations, bool spendable, bool solvable)
 {
-    struct db_wallet_utxo utxos[4096];
-    int n = db_wallet_utxo_list_unspent(ctx->node_db, utxos, 4096);
-    int disagreeing = 0;
-    for (int i = 0; i < n; i++) {
-        int h = 0;
-        if (!listunspent_db_utxo_height(ctx, &utxos[i], &h)) {
-            disagreeing++;
-            db_wallet_utxo_free(&utxos[i]);
-            continue;
+    struct json_value entry = {0};
+    json_set_object(&entry);
+    char txid[65], amount[32];
+    uint256_get_hex(hash, txid);
+    format_amount(value, amount, sizeof(amount));
+    bool ok = json_push_kv_str(&entry, "txid", txid) &&
+              json_push_kv_int(&entry, "vout", (int64_t)index) &&
+              (!script || listunspent_push_script_destination(&entry, script)) &&
+              json_push_kv_real(&entry, "amount", strtod(amount, NULL)) &&
+              json_push_kv_int(&entry, "confirmations", confirmations) &&
+              json_push_kv_bool(&entry, "spendable", spendable) &&
+              json_push_kv_bool(&entry, "solvable", solvable);
+    if (ok) {
+        size_t bytes = json_write(&entry, NULL, 0);
+        if (bytes >= RPC_HTTP_MAX_RESP_BYTES - s->bytes) {
+            s->too_large = true;
+            ok = false;
+        } else {
+            s->bytes += bytes + 1;
+            ok = json_push_back(s->result, &entry);
         }
-        int confs = (h > 0) ? tip - h + 1 : 0;
-        if (!listunspent_db_utxo_eligible(&utxos[i], confs, min_conf,
-                                          max_conf)) {
-            db_wallet_utxo_free(&utxos[i]);
-            continue;
-        }
-
-        struct json_value entry = {0};
-        json_init(&entry);
-        json_set_object(&entry);
-
-        struct uint256 txid_u;
-        memcpy(txid_u.data, utxos[i].txid, 32);
-        char txid_hex[65];
-        uint256_get_hex(&txid_u, txid_hex);
-        json_push_kv_str(&entry, "txid", txid_hex);
-        json_push_kv_int(&entry, "vout", (int64_t)utxos[i].vout);
-
-        listunspent_push_db_script_address(&entry, &utxos[i]);
-
-        char amt_buf[32];
-        format_amount(utxos[i].value, amt_buf, sizeof(amt_buf));
-        json_push_kv_real(&entry, "amount", strtod(amt_buf, NULL));
-        json_push_kv_int(&entry, "confirmations", (int64_t)confs);
-        json_push_kv_bool(&entry, "spendable", true);
-        json_push_kv_bool(&entry, "solvable", true);
-
-        json_push_back(result, &entry);
-        json_free(&entry);
-        db_wallet_utxo_free(&utxos[i]);
     }
-    if (disagreeing > 0)
-        LOG_WARN("wallet", "listunspent: %d height-0 wallet_utxos rows left "
-                 "out: the coin carries a different amount or script than "
-                 "the row", disagreeing);
+    json_free(&entry);
+    return ok;
 }
 
-static void listunspent_push_wallet_coins(struct wallet_rpc_context *ctx,
-                                          struct json_value *result,
-                                          int min_conf, int max_conf)
+static bool listunspent_db_visit(struct db_wallet_utxo *u, void *context)
 {
-    struct coin_entry coins[4096];
-    size_t num_coins = 0;
-    wallet_available_coins(ctx->wallet, coins, &num_coins, 4096,
-                           min_conf > 0, false);
-    for (size_t i = 0; i < num_coins; i++) {
-        if (coins[i].depth < min_conf || coins[i].depth > max_conf)
-            continue;
-
-        struct json_value entry = {0};
-        json_init(&entry);
-        json_set_object(&entry);
-
-        char txid[65];
-        uint256_get_hex(&coins[i].wtx->tx.hash, txid);
-        json_push_kv_str(&entry, "txid", txid);
-        json_push_kv_int(&entry, "vout", (int64_t)coins[i].i);
-
-        const struct tx_out *out = &coins[i].wtx->tx.vout[coins[i].i];
-        listunspent_push_script_destination(&entry, &out->script_pub_key);
-
-        char amt_buf[32];
-        format_amount(out->value, amt_buf, sizeof(amt_buf));
-        json_push_kv_real(&entry, "amount", strtod(amt_buf, NULL));
-        json_push_kv_int(&entry, "confirmations", (int64_t)coins[i].depth);
-        json_push_kv_bool(&entry, "spendable", coins[i].spendable);
-        json_push_kv_bool(&entry, "solvable", coins[i].solvable);
-
-        json_push_back(result, &entry);
-        json_free(&entry);
+    struct listunspent_state *s = context;
+    int height = 0;
+    if (!listunspent_db_utxo_height(s->ctx, u, &height)) {
+        s->disagreeing++;
+        return true;
     }
+    int confs = height > 0 ? s->tip - height + 1 : 0;
+    if (!listunspent_db_utxo_eligible(u, confs, s->min_conf, s->max_conf))
+        return true;
+    struct uint256 hash;
+    memcpy(hash.data, u->txid, sizeof(hash.data));
+    struct script script, *script_ptr = NULL;
+    if (u->script && u->script_len > 0 && u->script_len <= MAX_SCRIPT_SIZE) {
+        script_init(&script);
+        memcpy(script.data, u->script, u->script_len);
+        script.size = u->script_len;
+        script_ptr = &script;
+    }
+    return listunspent_emit(s, &hash, u->vout, script_ptr, u->value,
+                            confs, true, true);
+}
+
+static bool listunspent_wallet_visit(const struct coin_entry *coin, void *context)
+{
+    struct listunspent_state *s = context;
+    if (coin->depth < s->min_conf || coin->depth > s->max_conf) return true;
+    const struct tx_out *out = &coin->wtx->tx.vout[coin->i];
+    return listunspent_emit(s, &coin->wtx->tx.hash, coin->i,
+                            &out->script_pub_key, out->value, coin->depth,
+                            coin->spendable, coin->solvable);
 }
 
 static bool rpc_listunspent(const struct json_value *params, bool help,
@@ -507,15 +483,29 @@ static bool rpc_listunspent(const struct json_value *params, bool help,
 
     json_set_array(result);
 
-    /* SQLite model layer — authoritative UTXO source */
+    struct listunspent_state state = {
+        .ctx = ctx, .result = result, .bytes = 2, .tip = tip,
+        .min_conf = min_conf, .max_conf = max_conf,
+    };
+    enum db_wallet_utxo_iter_result iter = DB_WALLET_UTXO_ITER_OK;
+    bool ok;
     if (wallet_ctx_db_ready(ctx)) {
-        listunspent_push_db_utxos(ctx, result, tip, min_conf, max_conf);
-        return true;
+        iter = db_wallet_utxo_each_unspent(ctx->node_db, LISTUNSPENT_SCRATCH_BYTES,
+                                            listunspent_db_visit, &state);
+        ok = iter == DB_WALLET_UTXO_ITER_OK;
+    } else {
+        ok = wallet_available_coins_each(ctx->wallet, min_conf > 0,
+                                          listunspent_wallet_visit, &state);
     }
-
-    /* Fallback: in-memory wallet */
-    listunspent_push_wallet_coins(ctx, result, min_conf, max_conf);
-
+    if (state.disagreeing > 0)
+        LOG_WARN("wallet", "listunspent: %d height-0 rows disagree with coin",
+                 state.disagreeing);
+    if (!ok) {
+        json_set_str(result, state.too_large ? "Listunspent response exceeds RPC limit"
+            : iter == DB_WALLET_UTXO_ITER_RESOURCE ? "Listunspent snapshot exceeds available resources"
+            : "Listunspent could not read or serialize outputs");
+        return false;
+    }
     return true;
 }
 

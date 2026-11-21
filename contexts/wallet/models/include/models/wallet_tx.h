@@ -202,6 +202,21 @@ bool db_wallet_projection_summary(struct node_db *ndb,
 int db_wallet_utxo_list_unspent(struct node_db *ndb,
                                 struct db_wallet_utxo *out, size_t max);
 
+enum db_wallet_utxo_iter_result {
+    DB_WALLET_UTXO_ITER_OK,
+    DB_WALLET_UTXO_ITER_READ_ERROR,
+    DB_WALLET_UTXO_ITER_RESOURCE,
+    DB_WALLET_UTXO_ITER_VISITOR_ERROR,
+};
+/* Copy one ordered SELECT under the connection mutex, then invoke visitors
+ * after unlocking. scratch_limit bounds owned row structs and script bytes;
+ * snapshot allocation or limit failure returns RESOURCE before any visitor;
+ * SQLite errors, including finalization failure, return READ_ERROR. Row fields
+ * may be changed locally; the script is borrowed for the callback. */
+enum db_wallet_utxo_iter_result db_wallet_utxo_each_unspent(
+    struct node_db *ndb, size_t scratch_limit,
+    bool (*visit)(struct db_wallet_utxo *, void *), void *ctx);
+
 /* List all wallet UTXOs (spent + unspent). Returns count. */
 int db_wallet_utxo_list_all(struct node_db *ndb,
                             struct db_wallet_utxo *out, size_t max);

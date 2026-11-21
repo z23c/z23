@@ -11,6 +11,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define RPC_HTTP_MAX_RESP_BYTES ((size_t)128 * 1024 * 1024)
+
 bool rpc_http_start(const struct rpc_table *table, uint16_t port,
                      const char *rpc_user, const char *rpc_password,
                      const char *datadir);

@@ -46,7 +46,6 @@ static bool rpc_http_method_returns_key_material(const char *method)
  * allocation an authenticated client can drive. A response that would
  * exceed this returns a proper RPC error envelope instead of a partial
  * or out-of-band send. */
-#define RPC_HTTP_MAX_RESP_BYTES ((size_t)128 * 1024 * 1024)
 
 bool rpc_http_test_build_response_envelope(bool rpc_ok,
                                            const char *method,
