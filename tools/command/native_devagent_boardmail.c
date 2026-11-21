@@ -46,13 +46,15 @@
  * is a well-formed row, and either the row's `to` is this receiver (then
  * "in <ref> P" is recorded) or its ref is one this box exported to P. It is
  * appended to <state>/mail/inbox.P.jsonl as the original row plus
- * "board_post":"<id>","board_signer":"<host hex>", unless a line beginning
- * with the identical original row is already in the file (the same post
+ * "board_post":"<id>","board_signer":"<host hex>", unless a complete valid
+ * line already carries that original row and carrier fields (the same post
  * re-gossiped, or a twin post of the same row). The match is on the whole
  * row, never on the post id alone: a line that merely NAMES a post id must
- * not stop the genuine row from arriving. The cursor is saved only after a
- * whole page was handled, so a crash replays the page and the dedupe keeps
- * one line. Correctness never depends on the cursor.
+ * not stop the genuine row from arriving. Dedupe and append hold the inbox
+ * lock, and the row and parent are flushed before the cursor is saved. The
+ * cursor is saved only after a whole page was handled, so a crash or failed
+ * append replays the page and the dedupe keeps one line. Correctness never
+ * depends on the cursor.
  *
  * ADMISSION (zcl_devagent_boardmail_admit). A row carrying a board field is
  * admitted only when ALL hold, in this order:
@@ -98,6 +100,8 @@
 #include "controllers/rpc_client.h"
 #include "fleet_enrol.h"
 #include "json/json.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -528,23 +532,37 @@ static void bm_state_load(const char *recvdir, struct bm_state *st)
         st->import_after = 0;
 }
 
-/* Installed by rename, so a crash leaves the old cursors, never half. */
-static void bm_state_save(const char *recvdir, const struct bm_state *st)
+/* Publish flushed cursor bytes and their parent-directory barrier together. */
+static bool bm_state_save(const char *recvdir, const struct bm_state *st)
 {
-    char path[BM_PATH_CAP], tmp[BM_PATH_CAP + 8], text[256];
-    FILE *f;
+    char path[BM_PATH_CAP], resolved[BM_PATH_CAP], parent[BM_PATH_CAP];
+    char leaf[96], text[256];
+    struct platform_private_staging staging;
+    uint64_t nonce = 0;
+    bool ok = false;
     int n = snprintf(text, sizeof(text),
                      "export_offset=%lld\nimport_epoch=%s\nimport_after=%lld\n",
                      st->export_offset, st->import_epoch, st->import_after);
     bm_state_path(recvdir, path, sizeof(path));
-    (void)snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    f = fopen(tmp, "wb");
-    if (n <= 0 || (size_t)n >= sizeof(text) || !f ||
-        fwrite(text, 1, (size_t)n, f) != (size_t)n || fclose(f) != 0 ||
-        rename(tmp, path) != 0) {
-        LOG_WARN(BM_LOG, "cannot record the board mail cursors in %s", path);
-        (void)remove(tmp);
+    platform_private_staging_init(&staging);
+    if (n > 0 && (size_t)n < sizeof(text) &&
+        rng_fill((uint8_t *)&nonce, sizeof(nonce)) &&
+        platform_private_destination_resolve(path, resolved, sizeof(resolved),
+                                             parent, sizeof(parent))) {
+        (void)snprintf(leaf, sizeof(leaf), ".boardmail-state-%016llx.tmp",
+                       (unsigned long long)nonce);
+        if (platform_private_staging_create(&staging, parent, leaf)) {
+            ok = platform_private_file_write_at(&staging.file, text,
+                                                (size_t)n, 0) &&
+                 platform_private_staging_replace(&staging, BM_STATE_FILE);
+        }
     }
+    if (!ok) {
+        (void)platform_private_staging_retire(&staging);
+        LOG_WARN(BM_LOG, "cannot record the board mail cursors in %s", path);
+    }
+    platform_private_staging_close(&staging);
+    return ok;
 }
 
 /* ── the node's fleet_board RPC ────────────────────────────────────────── */
@@ -923,57 +941,182 @@ static void bm_export_walk(const struct zcl_boardmail_ctx *c,
 
 /* ── import ────────────────────────────────────────────────────────────── */
 
-/* Is this post (by id) or this exact original row already in the file? */
-static bool bm_inbox_has(const char *path, const char *text)
+#ifdef ZCL_TESTING
+static int (*g_bm_test_io)(const char *, int);
+void zcl_devagent_boardmail_test_io(int (*hook)(const char *, int))
 {
-    char *line = zcl_malloc(BM_LINE_CAP, "boardmail.inbox_line");
-    size_t tlen = strlen(text);
-    bool found = false;
-    FILE *f;
-    if (!line) {
-        LOG_WARN(BM_LOG, "cannot allocate the inbox dedupe buffer");
-        return true; /* never append what cannot be checked */
-    }
-    f = fopen(path, "rb");
-    while (f && !found && fgets(line, BM_LINE_CAP, f)) {
-        found = tlen > 1 && strncmp(line, text, tlen - 1) == 0 &&
-                (line[tlen - 1] == ',' || line[tlen - 1] == '}');
-    }
-    if (f)
-        (void)fclose(f);
-    free(line);
-    return found;
+    g_bm_test_io = hook;
+}
+#endif
+
+/* Test phases: 0 = partial append, 1 = file sync, 2 = parent sync. */
+static int bm_io_fault(const char *path, int phase)
+{
+    (void)path;
+    (void)phase;
+#ifdef ZCL_TESTING
+    if (g_bm_test_io)
+        return g_bm_test_io(path, phase);
+#endif
+    return 0;
 }
 
-/* The original row with the two carrier fields appended: the row's text
- * ends in its closing brace, which the fields go in front of. */
-static bool bm_inbox_append(const char *path, const char *text,
-                            const char *id, const char *host)
+static bool bm_inbox_match(char *line, size_t len, const char *text)
 {
-    size_t tlen = strlen(text), cap = tlen + 200u, n;
-    char *line;
-    int fd, w;
-    bool ok;
-    if (tlen < 2 || text[tlen - 1] != '}')
+    struct json_value v;
+    size_t tlen = strlen(text);
+    bool match;
+    if (tlen < 2 || len < tlen ||
+        (line[tlen - 1] != ',' && line[tlen - 1] != '}') ||
+        memcmp(line, text, tlen - 1) != 0)
         return false;
-    line = zcl_malloc(cap, "boardmail.inbox_append");
-    if (!line) {
-        LOG_WARN(BM_LOG, "cannot allocate one inbox line");
+    line[len] = '\0';
+    json_init(&v);
+    match = json_read(&v, line, len) && v.type == JSON_OBJ &&
+            bm_hex64(bm_str(&v, "board_post")) &&
+            bm_hex64(bm_str(&v, "board_signer"));
+    json_free(&v);
+    return match;
+}
+
+struct bm_inbox_scan {
+    char line[BM_LINE_CAP + 1];
+    size_t used;
+    const char *text;
+    bool skip, found, complete;
+};
+
+static void bm_inbox_scan_byte(struct bm_inbox_scan *s, char ch)
+{
+    if (ch != '\n') {
+        s->complete = false;
+        if (s->skip)
+            return;
+        if (s->used < BM_LINE_CAP)
+            s->line[s->used++] = ch;
+        else {
+            s->used = 0;
+            s->skip = true;
+        }
+        return;
+    }
+    s->complete = true;
+    if (!s->skip && !s->found && bm_inbox_match(s->line, s->used, s->text))
+        s->found = true;
+    s->used = 0;
+    s->skip = false;
+}
+
+static bool bm_inbox_scan_locked(struct platform_private_file *file,
+                                 uint64_t size, const char *text,
+                                 bool *found, bool *complete)
+{
+    struct bm_inbox_scan s = {.text = text, .complete = true};
+    char buf[4096];
+    uint64_t off = 0;
+    if (size > 0) {
+        char last;
+        if (!platform_private_file_read_at(file, &last, 1, size - 1))
+            return false;
+        if (last != '\n') {
+            *found = false;
+            *complete = false;
+            return true;
+        }
+    }
+    while (off < size && !s.found) {
+        size_t n = size - off > sizeof(buf) ? sizeof(buf) : (size_t)(size - off);
+        if (!platform_private_file_read_at(file, buf, n, off))
+            return false;
+        for (size_t i = 0; i < n && !s.found; i++)
+            bm_inbox_scan_byte(&s, buf[i]);
+        off += n;
+    }
+    *found = s.found;
+    *complete = s.complete;
+    return true;
+}
+
+static bool bm_inbox_write(struct platform_private_file *file, const char *line,
+                           size_t n, uint64_t off, const char *path)
+{
+    (void)path;
+#ifdef ZCL_TESTING
+    if (bm_io_fault(path, 0) != 0) {
+        size_t partial = n / 2;
+        if (partial > 0)
+            (void)platform_private_file_write_at(file, line, partial, off);
         return false;
     }
+#endif
+    return platform_private_file_write_at(file, line, n, off);
+}
+
+static bool bm_inbox_flush(struct platform_private_file *file,
+                           const char *parent, const char *path)
+{
+    return bm_io_fault(path, 1) == 0 && platform_private_file_flush(file) &&
+           bm_io_fault(path, 2) == 0 && platform_private_parent_flush(parent);
+}
+
+enum bm_inbox_result {
+    BM_INBOX_ERROR,
+    BM_INBOX_PRESENT,
+    BM_INBOX_APPENDED
+};
+
+static enum bm_inbox_result bm_inbox_commit(struct platform_private_file *file,
+                                            const char *parent, const char *path,
+                                            const char *line, size_t n,
+                                            uint64_t size, bool found)
+{
+    if (found)
+        return bm_inbox_flush(file, parent, path) ? BM_INBOX_PRESENT
+                                                  : BM_INBOX_ERROR;
+    if (!bm_inbox_write(file, line, n, size, path)) {
+        if (!platform_private_file_truncate(file, size) ||
+            !platform_private_file_flush(file))
+            LOG_WARN(BM_LOG, "cannot roll back a partial append to %s", path);
+        return BM_INBOX_ERROR;
+    }
+    return bm_inbox_flush(file, parent, path) ? BM_INBOX_APPENDED
+                                              : BM_INBOX_ERROR;
+}
+
+/* Lock dedupe and append together; only a complete, valid carried row dedupes. */
+static enum bm_inbox_result bm_inbox_store(const char *path, const char *text,
+                                           const char *id, const char *host)
+{
+    size_t tlen = strlen(text), cap = tlen + 200u, n = 0;
+    char resolved[BM_PATH_CAP], parent[BM_PATH_CAP];
+    struct platform_private_file file;
+    enum bm_inbox_result result = BM_INBOX_ERROR;
+    uint64_t size = 0;
+    bool found = false, complete = false;
+    char *line;
+    int w;
+    if (tlen < 2 || text[tlen - 1] != '}')
+        return BM_INBOX_ERROR;
+    line = zcl_malloc(cap, "boardmail.inbox_append");
+    if (!line)
+        return BM_INBOX_ERROR;
     w = snprintf(line, cap, "%.*s,\"board_post\":\"%s\",\"board_signer\":"
                  "\"%s\"}\n", (int)(tlen - 1), text, id, host);
-    n = w > 0 ? (size_t)w : 0u;
-    fd = n > 0 && n < cap
-             ? open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600)
-             : -1;
-    ok = fd >= 0 && write(fd, line, n) == (ssize_t)n;
-    if (fd >= 0)
-        (void)close(fd);
-    if (!ok)
-        LOG_WARN(BM_LOG, "cannot append a carried row to %s", path);
+    platform_private_file_init(&file);
+    if (w > 0 && (size_t)w < cap &&
+        platform_private_destination_resolve(path, resolved, sizeof(resolved),
+                                             parent, sizeof(parent)) &&
+        platform_private_file_open_locked_create(resolved, &file) &&
+        platform_private_file_size(&file, &size) &&
+        bm_inbox_scan_locked(&file, size, text, &found, &complete) && complete) {
+        n = (size_t)w;
+        result = bm_inbox_commit(&file, parent, path, line, n, size, found);
+    }
+    platform_private_file_close(&file);
+    if (result == BM_INBOX_ERROR)
+        LOG_WARN(BM_LOG, "cannot durably append a carried row to %s", path);
     free(line);
-    return ok;
+    return result;
 }
 
 /* Is this post a carried mail row this box should keep, and from whom? */
@@ -990,7 +1133,7 @@ static const struct bm_peer *bm_import_peer(const struct zcl_boardmail_ctx *c,
     return (p && strcmp(p->name, c->receiver) != 0) ? p : NULL;
 }
 
-static void bm_import_post(const struct zcl_boardmail_ctx *c,
+static bool bm_import_post(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
                            const struct json_value *post,
                            struct rcv_beat_stats *st)
@@ -1000,13 +1143,14 @@ static void bm_import_post(const struct zcl_boardmail_ctx *c,
     char path[BM_PATH_CAP];
     struct json_value v;
     struct bm_row r;
+    enum bm_inbox_result stored = BM_INBOX_PRESENT;
     bool mine;
     if (!p || !bm_hex64(id))
-        return;
+        return true;
     json_init(&v);
     if (!json_read(&v, text, strlen(text)) || !bm_row_from(&v, &r)) {
         json_free(&v);
-        return;
+        return true;
     }
     mine = strcmp(r.to, c->receiver) == 0;
     if (mine || bm_refs_has(refs, 'o', r.ref, p->name)) {
@@ -1014,11 +1158,12 @@ static void bm_import_post(const struct zcl_boardmail_ctx *c,
                        p->name);
         if (mine)
             bm_refs_add(refs, 'i', r.ref, p->name);
-        if (!bm_inbox_has(path, text) &&
-            bm_inbox_append(path, text, id, bm_str(post, "host")))
+        stored = bm_inbox_store(path, text, id, bm_str(post, "host"));
+        if (stored == BM_INBOX_APPENDED)
             st->board_in++;
     }
     json_free(&v);
+    return stored != BM_INBOX_ERROR;
 }
 
 /* Adopt the answering node process's epoch. True when the cursor was in
@@ -1040,7 +1185,7 @@ static bool bm_import_epoch_moved(struct bm_state *s, const char *epoch)
 static bool bm_import_page(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
                            struct bm_state *s, bool *more,
-                           struct rcv_beat_stats *st)
+                           bool *storage_failed, struct rcv_beat_stats *st)
 {
     struct json_value in, out;
     const struct json_value *posts;
@@ -1063,8 +1208,13 @@ static bool bm_import_page(const struct zcl_boardmail_ctx *c,
     }
     posts = ok ? json_get(&out, "posts") : NULL;
     n = (posts && posts->type == JSON_ARR) ? json_size(posts) : 0u;
-    for (i = 0; i < n; i++)
-        bm_import_post(c, ro, refs, json_at(posts, i), st);
+    for (i = 0; i < n; i++) {
+        if (!bm_import_post(c, ro, refs, json_at(posts, i), st)) {
+            *storage_failed = true;
+            json_free(&out);
+            return false;
+        }
+    }
     if (ok) {
         s->import_after = bm_int(&out, "scanned", s->import_after);
         *more = n >= (size_t)BM_PAGE_LIMIT;
@@ -1103,23 +1253,29 @@ static struct bm_beat *bm_beat_open(const struct zcl_boardmail_ctx *c)
     return b;
 }
 
-void zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
+bool zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
                                    struct rcv_beat_stats *st)
 {
     struct bm_beat *b = bm_beat_open(c);
     unsigned pages = 0;
-    bool more = true;
+    bool more = true, storage_failed = false;
     if (!b)
-        return;
+        return true;
     while (more && pages++ < BM_IMPORT_PAGES) {
         more = false;
-        if (!bm_import_page(c, &b->ro, &b->refs, &b->s, &more, st)) {
+        if (!bm_import_page(c, &b->ro, &b->refs, &b->s, &more,
+                            &storage_failed, st)) {
             st->board_deferred++;
             break;
         }
-        bm_state_save(c->recvdir, &b->s);
+        if (!bm_state_save(c->recvdir, &b->s)) {
+            storage_failed = true;
+            st->board_deferred++;
+            break;
+        }
     }
     free(b);
+    return !storage_failed;
 }
 
 void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
@@ -1133,8 +1289,8 @@ void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
     bm_state_load(c->recvdir, &b->s);
     before = b->s.export_offset;
     bm_export_walk(c, &b->ro, &b->refs, &b->s, st);
-    if (b->s.export_offset != before)
-        bm_state_save(c->recvdir, &b->s);
+    if (b->s.export_offset != before && !bm_state_save(c->recvdir, &b->s))
+        st->board_deferred++;
     free(b);
 }
 

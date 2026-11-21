@@ -2609,9 +2609,10 @@ static void rcv_beat(struct rcv_ctx *c)
     c->deferred = false;
     if (c->dry && !zcl_path_is_dir(c->p.maildir))
         return;
-    zcl_devagent_boardmail_import(&board, c->st);
+    bool import_durable = zcl_devagent_boardmail_import(&board, c->st);
     (void)snprintf(since, sizeof(since), "%s", c->dry ? "" : c->intake.pos);
-    rcv_intake_drain(c, since, c->dry ? RCV_SURVEY_PAGES : RCV_PAGES_PER_BEAT);
+    if (import_durable)
+        rcv_intake_drain(c, since, c->dry ? RCV_SURVEY_PAGES : RCV_PAGES_PER_BEAT);
     zcl_devagent_boardmail_export(&board, c->st);
 }
 

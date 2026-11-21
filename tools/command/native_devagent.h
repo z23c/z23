@@ -552,8 +552,10 @@ struct zcl_boardmail_ctx {
 
 /* Before intake: page this node's fleet posts and append each carried row
  * addressed here (or answering a row this box sent) to inbox.<box>.jsonl
- * with "board_post" and "board_signer". */
-void zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
+ * with "board_post" and "board_signer". False means a row or cursor is not
+ * durable, so intake must wait for a replay; an unavailable board RPC is not
+ * a local storage failure and does not block previously delivered mail. */
+bool zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
                                    struct rcv_beat_stats *st);
 
 /* After the answers: post outbox rows bound for another enrolled box, and

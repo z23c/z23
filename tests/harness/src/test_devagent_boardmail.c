@@ -34,6 +34,7 @@
 #include "fleet_enrol.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/private_file.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 
@@ -50,6 +51,7 @@
 #endif
 
 int test_devagent_boardmail(void);
+void zcl_devagent_boardmail_test_io(int (*hook)(const char *, int));
 
 #if !defined(_WIN32)
 
@@ -94,6 +96,17 @@ struct bmx_node {
 
 static struct bmx_node g_bmx_node[2];
 static int g_bmx_active;
+static int g_bmx_io_phase = -1;
+
+static int bmx_io_fault(const char *path, int phase)
+{
+    if (phase == g_bmx_io_phase && strstr(path, "inbox.node-a.jsonl")) {
+        g_bmx_io_phase = -1;
+        return -1;
+    }
+    return 0;
+}
+
 /* The three signing keys: A's node, B's node, and a third enrolled box C
  * that nobody granted anything to. */
 static char g_bmx_host[4][65];
@@ -562,6 +575,14 @@ static bool bmx_write(int box, const char *rel, const char *text,
     return fclose(f) == 0 && ok;
 }
 
+static long long bmx_size(int box, const char *rel)
+{
+    char path[1600];
+    struct stat st;
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/%s", g_bmx_state[box], rel);
+    return stat(path, &st) == 0 ? (long long)st.st_size : -1;
+}
+
 static void bmx_forget(int box, const char *rel)
 {
     char path[1600];
@@ -680,11 +701,14 @@ static bool bmx_setup(const char *tag)
         bmx_hex(pub, 32, g_bmx_host[k]);
     }
     node_rpc_client_set_test_hook(bmx_rpc);
+    zcl_devagent_boardmail_test_io(bmx_io_fault);
     return bmx_checkout(g_bmx_ws) && bmx_roster(BMX_A) && bmx_roster(BMX_B);
 }
 
 static void bmx_teardown(void)
 {
+    g_bmx_io_phase = -1;
+    zcl_devagent_boardmail_test_io(NULL);
     node_rpc_client_set_test_hook(NULL);
     if (g_bmx_had_xdg)
         setenv("XDG_STATE_HOME", g_bmx_saved_xdg, 1);
@@ -1468,6 +1492,141 @@ _test_next:;
     return failures;
 }
 
+static int bmx_t_append_retry(void)
+{
+    int failures = 0;
+    TEST("boardmail: partial append and sync failures hold intake and replay "
+         "exactly once without losing another writer's bytes") {
+        for (int phase = 0; phase < 3; phase++) {
+            struct rcv_beat_stats st;
+            char ref[64], tag[64];
+            (void)snprintf(ref, sizeof(ref), "job-durable-%d", phase);
+            (void)snprintf(tag, sizeof(tag), "append-retry-%d", phase);
+            ASSERT(bmx_setup(tag));
+            ASSERT(bmx_sent(ref));
+            bmx_carry(BMX_A, BMX_B);
+            ASSERT(bmx_write(BMX_B, "mail/inbox.node-a.jsonl",
+                             "other-writer\n", "wb"));
+            g_bmx_io_phase = phase;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT(st.board_deferred >= 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl",
+                                "other-writer", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref, NULL),
+                      phase == 0 ? 0 : 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
+                                "import_after=1", NULL), 0);
+            ASSERT_EQ(bmx_queued(ref), 0);
+            g_bmx_io_phase = -1;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.admitted, 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref,
+                                "\"board_signer\""), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl",
+                                "other-writer", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
+                                "import_after=1", NULL), 1);
+            ASSERT_EQ(bmx_queued(ref), 1);
+            bmx_forget(BMX_B, "receive/boardmail.state");
+            bmx_forget(BMX_B, "receive/intake.state");
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", ref,
+                                "\"board_signer\""), 1);
+            ASSERT_EQ(bmx_queued(ref), 1);
+            bmx_teardown();
+        }
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
+static int bmx_t_partial_row(void)
+{
+    int failures = 0;
+    TEST("boardmail: a partial JSON row defers, then its completed carrier "
+         "row dedupes and admits once") {
+        struct rcv_beat_stats st;
+        char row[4096], stored[8192], partial[8192];
+        size_t cut = 100;
+        ASSERT(bmx_setup("partial-row"));
+        ASSERT(bmx_sent("job-partial"));
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT(bmx_outbox_row("job-partial", row, sizeof(row)));
+        (void)snprintf(stored, sizeof(stored),
+                       "%.*s,\"board_post\":\"%s\",\"board_signer\":\"%s\"}\n",
+                       (int)(strlen(row) - 1), row, g_bmx_node[BMX_B].p[0].id,
+                       g_bmx_host[BMX_A]);
+        (void)snprintf(partial, cut + 1, "%s", stored);
+        ASSERT(bmx_write(BMX_B, "mail/inbox.node-a.jsonl", partial, "wb"));
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT(st.board_deferred >= 1);
+        ASSERT_EQ(bmx_size(BMX_B, "mail/inbox.node-a.jsonl"), (long long)cut);
+        ASSERT_EQ(bmx_queued("job-partial"), 0);
+        ASSERT(bmx_write(BMX_B, "mail/inbox.node-a.jsonl", stored + cut, "ab"));
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(bmx_size(BMX_B, "mail/inbox.node-a.jsonl"),
+                  (long long)strlen(stored));
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-partial",
+                            "\"board_signer\""), 1);
+        ASSERT_EQ(bmx_queued("job-partial"), 1);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
+static int bmx_t_locked_append(void)
+{
+    int failures = 0;
+    TEST("boardmail: a concurrent inbox lock defers the cursor, then another "
+         "writer's completed row is preserved and deduped") {
+        struct rcv_beat_stats st;
+        struct platform_private_file lock;
+        char row[4096], path[1600];
+        ASSERT(bmx_setup("locked-append"));
+        ASSERT(bmx_sent("job-locked"));
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT(bmx_outbox_row("job-locked", row, sizeof(row)));
+        ASSERT(bmx_write(BMX_B, "mail/inbox.node-a.jsonl", "", "wb"));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/mail/inbox.node-a.jsonl",
+                       g_bmx_state[BMX_B]);
+        platform_private_file_init(&lock);
+        ASSERT(platform_private_file_open_locked_create(path, &lock));
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT(st.board_deferred >= 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
+                            "import_after=1", NULL), 0);
+        ASSERT(bmx_inbox_forge("node-a", row, g_bmx_node[BMX_B].p[0].id,
+                               g_bmx_host[BMX_A]));
+        platform_private_file_close(&lock);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-locked",
+                            "\"board_signer\""), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
+                            "import_after=1", NULL), 1);
+        ASSERT_EQ(bmx_queued("job-locked"), 1);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_devagent_boardmail(void)
@@ -1486,6 +1645,9 @@ int test_devagent_boardmail(void)
     failures += bmx_t_delivery();
     failures += bmx_t_directory();
     failures += bmx_t_directory_crowded();
+    failures += bmx_t_append_retry();
+    failures += bmx_t_partial_row();
+    failures += bmx_t_locked_append();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");
