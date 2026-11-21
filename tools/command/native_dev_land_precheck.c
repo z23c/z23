@@ -424,7 +424,6 @@ struct pc_run {
     char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
     bool gate_output_available;
-    bool model_sql_required;
     struct json_value windows_capture;
     bool windows_capture_seen, windows_capture_ok;
     char land[4096];
@@ -1107,11 +1106,6 @@ static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
 }
 
 /* One gate: skipped (unknown or unproven), refused, or ran clean. */
-static bool pc_model_sql_unproven(const struct pc_run *r, const char *gate, int rc)
-{
-    return r->model_sql_required && strcmp(gate, PC_MODEL_SQL_GATE) == 0 && rc == PC_EXIT_UNPROVEN;
-}
-
 static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                                       const char *list,
                                       struct zcl_command_reply *reply)
@@ -1138,10 +1132,6 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
                 "canonical file-purpose command could not be resolved safely",
                 r->out);
-        return PC_GATE_REFUSED;
-    }
-    if (pc_model_sql_unproven(r, gate, rc)) {
-        pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE", "model SQL check could not decide", r->out);
         return PC_GATE_REFUSED;
     }
     if (!script && rc == PC_EXIT_UNPROVEN) {
@@ -1190,10 +1180,6 @@ static bool pc_gates_run(struct pc_run *r,
         return false;
     }
     (void)snprintf(list, sizeof(list), "%s", r->out);
-    if (r->model_sql_required && !pc_known(list, PC_MODEL_SQL_GATE)) {
-        pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE", "model SQL check is not available in the lane binary", r->bin);
-        return false;
-    }
     for (size_t i = 0; i < g->count; i++) {
         if (pc_gate_one(r, g->name[i], list, reply) == PC_GATE_REFUSED)
             return false;
@@ -1299,19 +1285,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     }
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
                                pc_now(), g);
-    r->model_sql_required = pc_model_sql_needed(wt);
-    if (r->model_sql_required) {
-        size_t before = g->count;
+    if (pc_model_sql_needed(wt))
         pc_gate_add(g, PC_MODEL_SQL_GATE, strlen(PC_MODEL_SQL_GATE));
-        bool present = false;
-        for (size_t i = 0; i < g->count; i++)
-            if (strcmp(g->name[i], PC_MODEL_SQL_GATE) == 0) present = true;
-        if (!present && before == g->count) {
-            pc_fail(reply, leaf, "PRECHECK_UNAVAILABLE", "model SQL gate exceeds precheck capacity", wt);
-            free(g); json_free(&r->windows_capture); free(r);
-            return false;
-        }
-    }
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
     int64_t budget_ms = pc_budget_ms();
 #if defined(ZCL_TESTING)
@@ -1325,6 +1300,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     else pc_history_unproven(r, "land state unavailable");
     pc_prioritize_gate(g, "check-shell-host-assumptions", "check-standalone-tools-link");
     pc_prioritize_gate(g, "check-file-purpose", "check-windows-cross-syntax");
+    pc_prioritize_gate(g, PC_MODEL_SQL_GATE, "check-windows-cross-syntax");
+    pc_prioritize_gate(g, PC_MODEL_SQL_GATE, "check-capability-closure");
     pc_prioritize_gate(g, "check-capability-inventory-generated", "check-kpi-floor");
     ok = pc_gates_run(r, g, reply);
     if (ok) {
