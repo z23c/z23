@@ -10160,6 +10160,7 @@ PEER_CHAIN_RECOVERY_BIN = $(BIN_DIR)/peer_chain_recovery$(ZCL_HOST_EXEEXT)
 .PHONY: peer_chain_recovery
 peer_chain_recovery: $(PEER_CHAIN_RECOVERY_BIN)
 $(PEER_CHAIN_RECOVERY_BIN): tools/peer_chain_recovery.c \
+    platform/modules/platform/include/platform/file_sync.h \
     tools/peer_chain_recovery_standalone.c tools/multicall.h \
     platform/modules/platform/include/platform/windows_path.h \
     platform/modules/util/include/util/ar_step_readonly.h \
@@ -10183,6 +10184,7 @@ $(PEER_CHAIN_RECOVERY_UNLINK_FAULT): tests/harness/fixtures/peer_chain_recovery_
 	    -D_GNU_SOURCE -fPIC -shared -o $@ $< -ldl
 
 $(BUILD_DIR)/fixtures/peer_chain_recovery_snapshot: tests/harness/fixtures/peer_chain_recovery_snapshot.c tools/peer_chain_recovery.c \
+    platform/modules/platform/include/platform/file_sync.h \
     platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
     platform/modules/platform/src/clock.c vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
