@@ -5256,7 +5256,7 @@ static bool dl_status_collect_outcomes(const char *opath,
     for (size_t k = 0; k < *nlast; k++) {
         if (!dl_push_outcome_row(outcomes, &last[k]) ||
             !dlmr_push_row_hint(&outcomes->children[outcomes->num_children - 1],
-                                sus, *nsus, last[k].seq))
+                                sus, *nsus, last[k].seq, last[k].tip))
             return false;
     }
     return true;

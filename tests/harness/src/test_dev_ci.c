@@ -494,6 +494,78 @@ _test_next:;
     return failures;
 }
 
+/* A failed outcome row naming a test group, for the main-red advisory. */
+static void dcx_red_row(char *out, size_t cap, long long seq, const char *wt,
+                        const char *group)
+{
+    int n = snprintf(out, cap,
+        "{\"seq\":%lld,\"ts\":\"2026-09-19T00:00:00Z\",\"tip\":\"%040llx\","
+        "\"worktree\":\"/w/%s\",\"note\":\"\",\"state\":\"failed\","
+        "\"phase\":\"\",\"attempt\":1,\"started\":0,\"base\":\"\","
+        "\"local\":\"\",\"tip_pushed\":\"\",\"dimension\":\"test\","
+        "\"log_path\":\"\",\"detail\":\"test %s: FAIL at tests/x.c:1 (c)\"}\n",
+        seq, (unsigned long long)seq, wt, group);
+    if (n < 0 || (size_t)n >= cap)
+        dcx_fail("red row does not fit");
+}
+
+static void dcx_seed_red(long long first, size_t rows, const char *group)
+{
+    char dir[DCX_BUF], path[DCX_BUF], row[DCX_BUF], text[DCX_BUF * 10];
+    text[0] = 0;
+    for (size_t i = 0; i < rows; i++) {
+        char wt[16];
+        (void)snprintf(wt, sizeof(wt), "w%zu", i);
+        dcx_red_row(row, sizeof(row), first + (long long)i, wt, group);
+        if (strlen(text) + strlen(row) >= sizeof(text))
+            dcx_fail("red rows do not fit");
+        (void)strcat(text, row);
+    }
+    dcx_dir(g_dcx_root, "land", dir, sizeof(dir));
+    dcx_join(path, sizeof(path), dir, "outcomes.jsonl");
+    dcx_write(path, text);
+}
+
+static int dcx_t_main_red_line(void)
+{
+    int failures = 0;
+
+    TEST("ci: status prints the main-red line, and nothing for a line too long to carry") {
+        struct dcx_call c;
+        char longname[80];
+        dcx_isolate("main_red_line");
+        dcx_seed_land();
+        dcx_seed_red(10, 2, "test_short");
+        dcx_seed_units(30, true);
+        dcx_begin(&c, "{}");
+        ASSERT(dcx_run(&c));
+        ASSERT(dcx_ok(&c));
+        ASSERT(strstr(dcx_screen(&c),
+                      "  main may be red for test_short: rows 10, 11 failed it") != NULL);
+        dcx_end(&c);
+        dcx_restore();
+        /* Eight huge seqs and a 71-character group overflow 256 bytes: the
+         * hint is empty, and an empty hint prints no bare line. */
+        memset(longname, 'g', 71);
+        longname[71] = 0;
+        dcx_isolate("main_red_overflow");
+        dcx_seed_land();
+        dcx_seed_red(9000000000000000001LL, 9, longname);
+        dcx_seed_units(30, true);
+        dcx_begin(&c, "{}");
+        ASSERT(dcx_run(&c));
+        ASSERT(dcx_ok(&c));
+        ASSERT(strstr(dcx_screen(&c), "main may be red") == NULL);
+        ASSERT(strstr(dcx_screen(&c), "\n  \n") == NULL);
+        dcx_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dcx_restore();
+    return failures;
+}
+
 static int dcx_t_queue(void)
 {
     int failures = 0;
@@ -1086,6 +1158,7 @@ int test_dev_ci(void)
     int failures = 0;
     failures += dcx_t_registered();
     failures += dcx_t_status();
+    failures += dcx_t_main_red_line();
     failures += dcx_t_queue();
     failures += dcx_t_jobs();
     failures += dcx_t_last_pass();

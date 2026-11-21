@@ -1107,9 +1107,12 @@ static void dci_status_land(const struct dci_state *st,
                 dci_int(flight, "seq", -1), dci_str(flight, "tip"),
                 dci_str(flight, "phase"), dci_int(flight, "attempt", -1),
                 dci_int(flight, "elapsed_s", -1));
-    for (size_t i = 0, n = dci_count(dci_arr(land, "main_red")); i < n; i++)
-        dci_say(scr, "  %s\n",
-                dci_str(&dci_arr(land, "main_red")->children[i], "hint"));
+    for (size_t i = 0, n = dci_count(dci_arr(land, "main_red")); i < n; i++) {
+        const char *hint =
+            dci_str(&dci_arr(land, "main_red")->children[i], "hint");
+        if (hint[0]) /* an overflowing line is empty: print nothing */
+            dci_say(scr, "  %s\n", hint);
+    }
     last = dci_newest(outcomes, dci_land_passed);
     dci_say_land_outcome(scr, "  last landed", last, true, "");
     last = dci_newest(outcomes, dci_land_failed);
