@@ -34,6 +34,8 @@
 #include <time.h>
 #include <unistd.h>
 
+bool testcache_test_exec_call(const char *b);
+
 /* Each runner process owns its fixture tree. Two independent proof/test
  * processes can now exercise this group concurrently without deleting each
  * other's source, depfiles, signer state, or CAS objects. */
@@ -2185,6 +2187,30 @@ static bool tc_acme_and_agent_policy(void)
            tc_external_exec_denied();
 }
 
+static int tc_exec_detector_cases(void)
+{
+    int failures = 0;
+    static const char *const yes[] = {
+        "execve(", "execvp(", "execv(", "execlp(", "execl(",
+        "fexecve(", "posix_spawnp(", "posix_spawn(", "popen(", "system(",
+        "x;system(", "\"system(\";execve(", "'s';popen(",
+        "\"escaped \\\" system( still literal\";fexecve("
+    };
+    static const char *const no[] = {
+        "", "execve", "execv", "posix_spawn", "syste",
+        "mysystem(", "_execve(", "9popen(", "Xfexecve(",
+        "\"system(\"", "'popen('", "\"escaped \\\" execve( still literal\"",
+        "\"unclosed execv(", "'unclosed system("
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(yes) / sizeof(yes[0]); i++)
+        if (!testcache_test_exec_call(yes[i])) ok = false;
+    for (size_t i = 0; i < sizeof(no) / sizeof(no[0]); i++)
+        if (testcache_test_exec_call(no[i])) ok = false;
+    TC_CHECK("exec detector respects all tokens, boundaries and literals", ok);
+    return failures;
+}
+
 /* ── The exec rail: probe-time refusal for out-of-closure execs ──────────
  *
  * The fixture half proves the scanner itself: a planted popen() of a
@@ -2196,6 +2222,7 @@ static bool tc_acme_and_agent_policy(void)
 static int tc_exec_rail_fixture(void)
 {
     int failures = 0;
+    failures += tc_exec_detector_cases();
     TC_CHECK("entry-signal fixture writes",
              write_fixture_full(TC_TOP_EXEC, TC_LEAF_A, TC_OTHER_A, TC_H_A,
                                 TC_DEF_A));

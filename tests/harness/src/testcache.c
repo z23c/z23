@@ -898,34 +898,40 @@ static bool trc_self_reexec(const char *b)
     return false;
 }
 
-/* A call-site token in code, not one spelled inside a string literal.
- * The rail's own token table lives in string literals; those are not calls. */
-static bool trc_code_has_token(const char *b, const char *tok)
+/* Scan code once, skipping quoted literals and checking only token initials. */
+static bool trc_has_exec_call(const char *b)
 {
     size_t n = strlen(b);
-    size_t tl = strlen(tok);
     size_t i = 0;
+    bool initials[256] = {false};
+    for (size_t j = 0; j < sizeof(TRC_EXEC_TOKENS) /
+                             sizeof(TRC_EXEC_TOKENS[0]); j++)
+        initials[(unsigned char)TRC_EXEC_TOKENS[j][0]] = true;
     while (i < n) {
         if (b[i] == '"' || b[i] == '\'') {
             trc_skip_literal(b, n, &i);
             continue;
         }
-        if (i + tl <= n && memcmp(b + i, tok, tl) == 0 &&
-            trc_left_boundary(b, b + i))
-            return true;
+        if (initials[(unsigned char)b[i]] &&
+            trc_left_boundary(b, b + i)) {
+            for (size_t j = 0; j < sizeof(TRC_EXEC_TOKENS) /
+                                     sizeof(TRC_EXEC_TOKENS[0]); j++) {
+                const char *tok = TRC_EXEC_TOKENS[j];
+                size_t tl = strlen(tok);
+                if (tl <= n - i && memcmp(b + i, tok, tl) == 0)
+                    return true;
+            }
+        }
         i++;
     }
     return false;
 }
 
-/* True when any exec-family call site is present. */
-static bool trc_has_exec_call(const char *b)
+/* Test-binary-only fixture access to the detector on comment-stripped input. */
+bool testcache_test_exec_call(const char *b);
+bool testcache_test_exec_call(const char *b)
 {
-    for (size_t i = 0; i < sizeof(TRC_EXEC_TOKENS) / sizeof(TRC_EXEC_TOKENS[0]);
-         i++)
-        if (trc_code_has_token(b, TRC_EXEC_TOKENS[i]))
-            return true;
-    return false;
+    return trc_has_exec_call(b);
 }
 
 /* The .sh word ending inside the literal starting at q (just after a
