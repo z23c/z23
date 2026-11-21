@@ -18234,6 +18234,7 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # universal. A path that routes to no group is named on the selection line
 # (detail=unrouted=N first=<path>); with no routed group the test step is
 # skipped. The stack gate still runs the proof's full set.
+# File-size and complexity checks stop the run before building or selecting.
 # The check-capability-closure step is the land proof's closure gate; it
 # prepares and grades the dev epoch after the focused test has reported.
 # The lint-fast check-kpi-floor gate reads tools/lint/kpi_floor.txt and the
@@ -18281,11 +18282,13 @@ agent-verify:
 	    s0=$$(date +%s); $(MAKE) --no-print-directory "$$step" "$$@" >"$$log" 2>&1; rc=$$?; s1=$$(date +%s); \
 	    { echo "agent-verify: $$step rc=$$rc secs=$$((s1 - s0))"; \
 	      if [ "$$step" = t-fast-exact ]; then grep 'SUITE VERDICT' "$$log" | tail -1; fi; \
-	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
+	      if [ $$rc -ne 0 ]; then grep -E '^FAIL|OVER THE HARD LIMIT:|FAIL at|error:|not a valid|unknown exact group|\*\*\*' "$$log" | head -5 | cut -c1-200; fi; \
 	      if [ $$rc -ne 0 ]; then $(MAKE) --no-print-directory agent-verify-evidence LOG="$$log"; fi; \
 	    } | tee -a build/scratch/agent-verify.rc; \
 	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
 	 }; \
+	 av_step check-file-size-ceiling; \
+	 if [ -n "$$failed" ]; then av_total; echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; exit 1; fi; \
 	 av_step check-cyclomatic-complexity; \
 	 if [ -n "$$failed" ]; then av_total; echo "agent-verify: FAILED ($$(echo $$failed))" | tee -a build/scratch/agent-verify.rc; exit 1; fi; \
 	 if [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; then \

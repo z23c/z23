@@ -1984,6 +1984,26 @@ static int t_shell_host_assumptions_recipe(void)
     return bad;
 }
 
+static int t_agent_verify_size_preflight(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p bin\n"
+        "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
+        "printf '#!/bin/sh\\nexit 0\\n' > bin/git; chmod +x bin/git\n"
+        "printf '#!/bin/sh\\necho \"$*\" >> calls\\ncase \"$*\" in *check-file-size-ceiling*) echo \"  OVER THE HARD LIMIT: src/control.c\"; exit 1;; *) exit 0;; esac\\n' > submake; chmod +x submake\n"
+        "PATH=\"$2/bin:$PATH\"; export PATH\n"
+        "if make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > size.log 2>&1; then exit 1; fi\n"
+        "[ \"$(wc -l < calls)\" = 2 ]; grep -q check-file-size-ceiling calls; grep -q agent-verify-evidence calls\n"
+        "grep -q 'OVER THE HARD LIMIT: src/control.c' size.log\n"
+        "grep -Eq '^agent-verify: check-file-size-ceiling rc=[1-9][0-9]* secs=[0-9]+$' build/scratch/agent-verify.rc\n"
+        "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (check-file-size-ceiling)' ]\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "size_preflight");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_agent_verify_preflight(void)
 {
     static const char script[] =
@@ -1997,12 +2017,12 @@ static int t_agent_verify_preflight(void)
         "[ ! -e calls ]\n"
         "for choice in @changed @route; do if DIRTY=1 make --no-print-directory MAKE=./submake agent-verify ONLY=$choice > dirty.log 2>&1; then exit 1; fi; [ ! -e calls ]; done\n"
         "if FAIL_COMPLEXITY=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > fail.log 2>&1; then exit 1; fi\n"
-        "[ \"$(wc -l < calls)\" = 2 ]; grep -q check-cyclomatic-complexity calls; grep -q agent-verify-evidence calls\n"
+        "[ \"$(wc -l < calls)\" = 3 ]; grep -q check-cyclomatic-complexity calls; grep -q agent-verify-evidence calls\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (check-cyclomatic-complexity)' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
         "grep -Eq '^agent-verify: check-cyclomatic-complexity rc=[0-9]+ secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > pass.log 2>&1\n"
-        "[ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]; sed -n 1p calls | grep -q check-cyclomatic-complexity\n"
+        "[ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]; sed -n 1p calls | grep -q check-file-size-ceiling; sed -n 2p calls | grep -q check-cyclomatic-complexity\n"
         "grep -q 'dev-bin ZCL_TEST_WERROR=1' calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
@@ -2016,7 +2036,7 @@ static int t_agent_verify_preflight(void)
         "ln1() { grep -n -m1 -- \"$1\" calls | cut -d: -f1; }\n"
         "p0=$(ln1 check-cyclomatic-complexity); p1=$(ln1 t-fast-exact); p2=$(ln1 check-capability-closure); p3=$(ln1 proof-lint-prebuild); p4=$(ln1 lint-fast)\n"
         "[ \"$p0\" -lt \"$p1\" ]; [ \"$p1\" -lt \"$p2\" ]; [ \"$p2\" -lt \"$p3\" ]; [ \"$p3\" -lt \"$p4\" ]\n"
-        "for gate in check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild lint-fast; do grep -Eq \"^agent-verify: $gate rc=0 secs=[0-9]+$\" build/scratch/agent-verify.rc; done\n"
+        "for gate in check-file-size-ceiling check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild lint-fast; do grep -Eq \"^agent-verify: $gate rc=0 secs=[0-9]+$\" build/scratch/agent-verify.rc; done\n"
         "grep -Eq '^agent-verify: dev-bin rc=0 secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         "grep -Eq '^agent-verify: selection exact groups=1 .* select_secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         "grep -q -- '--base=base' selector-calls\n"
@@ -2234,7 +2254,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_worktree_prime_historical_evidence() + t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() + t_wcs_supplied_srcs() +
+    return t_worktree_prime_historical_evidence() + t_agent_verify_size_preflight() + t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() + t_wcs_supplied_srcs() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
