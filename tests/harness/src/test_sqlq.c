@@ -115,16 +115,17 @@ static int test_sqlq_blob_chunks(void)
     int failures = 0;
     static char out[25000], expected[25000];
     const char *sql = "SELECT zeroblob(4095),zeroblob(4096),"
-                      "zeroblob(4097),x\x27\x27,NULL";
+                      "CAST(zeroblob(4095)||x'01ab'||zeroblob(1) AS BLOB),x'',NULL";
     TEST("sqlq: blob chunks preserve boundaries, empty BLOB and NULL") {
         size_t off = 0;
-        const size_t sizes[] = {4095, 4096, 4097};
+        const size_t sizes[] = {4095, 4096, 4095};
         for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
             memset(expected + off, '0', sizes[i] * 2);
             off += sizes[i] * 2;
-            expected[off++] = '\t';
+            if (i < 2) expected[off++] = '\t';
         }
-        memcpy(expected + off, "\tNULL" SQLQ_EOL, sizeof("\tNULL" SQLQ_EOL));
+        memcpy(expected + off, "01ab00\t\tNULL" SQLQ_EOL,
+               sizeof("01ab00\t\tNULL" SQLQ_EOL));
         ASSERT(sqlq_run(":memory:", sql, out, sizeof out) == 0);
         ASSERT(strcmp(out, expected) == 0);
 #if !defined(_WIN32)

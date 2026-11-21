@@ -96,10 +96,11 @@ static bool sqlq_print_blob(sqlite3_stmt *st, int column)
         return false;
     }
     int len = sqlite3_column_bytes(st, column);
-    char encoded[8193];
+    enum { SQLQ_BLOB_CHUNK = 4096 };
+    char encoded[SQLQ_BLOB_CHUNK * 2 + 1];
     for (size_t offset = 0; offset < (size_t)len;) {
         size_t chunk = (size_t)len - offset;
-        if (chunk > 4096) chunk = 4096;
+        if (chunk > SQLQ_BLOB_CHUNK) chunk = SQLQ_BLOB_CHUNK;
         zcl_hex_encode(bytes + offset, chunk, encoded);
         if (fwrite(encoded, 2, chunk, stdout) != chunk) return false;
         offset += chunk;
