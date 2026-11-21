@@ -288,23 +288,46 @@ static void report_reset(struct zcl_chainlog_report *rep)
     memset(rep, 0, sizeof *rep);
 }
 
-static enum zcl_chainlog_status chainlog_header_read(struct zcl_chainlog *log,
+
+static enum zcl_chainlog_status chainlog_open_io(const char *path, bool read_only,
+    const char *stage, const char *action)
+{
+    LOG_ERROR("chainlog", "%s: mode=%s %s failed; %s", path, read_only ? "readonly" : "writable", stage, action);
+    return ZCL_CHAINLOG_IO;
+}
+
+static enum zcl_chainlog_status chainlog_header_read(struct zcl_chainlog *log, const char *path,
     uint64_t *size, uint8_t hdr[HDR])
 {
     if (!platform_private_file_size(&log->file, size))
-        return ZCL_CHAINLOG_IO;
+        return chainlog_open_io(path, log->read_only, "size", "preserve file, check access, then reopen");
     if (*size == 0 && !log->read_only) {
         header_build(hdr, log->stream);
-        if (!platform_private_file_write_at(&log->file, hdr, HDR, 0) ||
-            !platform_private_file_flush(&log->file))
-            return ZCL_CHAINLOG_IO;
+        if (!platform_private_file_write_at(&log->file, hdr, HDR, 0))
+            return chainlog_open_io(path, false, "header write", "preserve file, check storage, then reopen");
+        if (!platform_private_file_flush(&log->file))
+            return chainlog_open_io(path, false, "header flush", "preserve file, check storage, then reopen");
         *size = HDR;
     } else if (*size < HDR) {
         return ZCL_CHAINLOG_FORMAT;
     } else if (!platform_private_file_read_at(&log->file, hdr, HDR, 0)) {
-        return ZCL_CHAINLOG_IO;
+        return chainlog_open_io(path, log->read_only, "header read", "preserve file, check access, then reopen");
     }
     return header_check(hdr, log->stream);
+}
+
+static enum zcl_chainlog_status chainlog_recover(struct zcl_chainlog *log,
+    const char *path, uint64_t keep, const struct zcl_chainlog_report *report)
+{
+    if (!platform_private_file_truncate(&log->file, keep))
+        return chainlog_open_io(path, false, "recovery truncate", "preserve file, check storage, then reopen");
+    if (!platform_private_file_flush(&log->file))
+        return chainlog_open_io(path, false, "recovery flush", "preserve file, check storage, then reopen");
+    LOG_WARN("chainlog", "%s: discarded %llu uncommitted byte(s) after "
+                         "%llu record(s)", path,
+             (unsigned long long)report->torn_bytes,
+             (unsigned long long)report->records);
+    return ZCL_CHAINLOG_OK;
 }
 
 static struct zcl_chainlog *chainlog_open(const char *path,
@@ -320,13 +343,13 @@ static struct zcl_chainlog *chainlog_open(const char *path,
 
     struct zcl_chainlog *log = zcl_calloc(1, sizeof *log, "chainlog");
     if (!log) {
-        report->status = ZCL_CHAINLOG_IO;
+        report->status = chainlog_open_io(path, read_only, "chainlog allocation", "free memory, then retry");
         return NULL;
     }
     log->scratch = zcl_malloc(ZCL_CHAINLOG_PAYLOAD_MAX, "chainlog_scratch");
     if (!log->scratch) {
         free(log);
-        report->status = ZCL_CHAINLOG_IO;
+        report->status = chainlog_open_io(path, read_only, "scratch allocation", "free memory, then retry");
         return NULL;
     }
     platform_private_file_init(&log->file);
@@ -335,13 +358,14 @@ static struct zcl_chainlog *chainlog_open(const char *path,
 
     if (!(read_only ? platform_private_file_open_observation(path, &log->file)
                     : platform_private_file_open_locked_create_wait(path, &log->file))) {
-        report->status = ZCL_CHAINLOG_IO;
+        report->status = chainlog_open_io(path, read_only,
+            read_only ? "open observation" : "open writer", "check path/access or writer, then retry");
         goto fail;
     }
 
     uint64_t size = 0;
     uint8_t hdr[HDR];
-    enum zcl_chainlog_status st = chainlog_header_read(log, &size, hdr);
+    enum zcl_chainlog_status st = chainlog_header_read(log, path, &size, hdr);
     if (st != ZCL_CHAINLOG_OK) {
         report->status = st;
         goto fail;
@@ -359,15 +383,11 @@ static struct zcl_chainlog *chainlog_open(const char *path,
      * sentinel ever committed. */
     if (report->torn_bytes && !read_only) {
         uint64_t keep = size - report->torn_bytes;
-        if (!platform_private_file_truncate(&log->file, keep) ||
-            !platform_private_file_flush(&log->file)) {
-            report->status = ZCL_CHAINLOG_IO;
+        st = chainlog_recover(log, path, keep, report);
+        if (st != ZCL_CHAINLOG_OK) {
+            report->status = st;
             goto fail;
         }
-        LOG_WARN("chainlog", "%s: discarded %llu uncommitted byte(s) after "
-                             "%llu record(s)", path,
-                 (unsigned long long)report->torn_bytes,
-                 (unsigned long long)report->records);
         size = keep;
     }
 

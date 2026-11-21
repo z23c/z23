@@ -42,12 +42,12 @@
 #include "base/log_macros.h"
 #include "platform/private_file.h"
 #if !defined(_WIN32)
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
 
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +55,17 @@
 /* Compile the real module with local I/O interception, without global hooks. */
 static unsigned cl_fault_at, cl_io_calls;
 static bool cl_injection_ok;
+static unsigned cl_open_fault;
+static bool cl_fault_size(struct platform_private_file *f, uint64_t *n)
+{
+    if (cl_open_fault == 1) { cl_open_fault = 0; return false; }
+    return platform_private_file_size(f, n);
+}
+static bool cl_fault_truncate(struct platform_private_file *f, uint64_t n)
+{
+    if (cl_open_fault == 3) { cl_open_fault = 0; return false; }
+    return platform_private_file_truncate(f, n);
+}
 static char cl_diagnostic[512];
 static void cl_capture_log(enum zcl_log_level level, const char *fmt, ...)
     ZCL_PRINTF_LIKE(2, 3);
@@ -94,6 +105,7 @@ static enum { CL_READ_NORMAL, CL_READ_FAIL, CL_READ_OVERSIZE, CL_READ_SHORTEN } 
 static bool cl_fault_read(struct platform_private_file *f, void *p, size_t n,
                           uint64_t at)
 {
+    if (cl_open_fault == 2) { cl_open_fault = 0; return false; }
     if (cl_read_fault == CL_READ_FAIL && n == ZCL_CHAINLOG_PREFIX_BYTES)
         return false;
     if (!platform_private_file_read_at(f, p, n, at))
@@ -104,12 +116,16 @@ static bool cl_fault_read(struct platform_private_file *f, void *p, size_t n,
         ((uint8_t *)p)[15] = 7;
     return true;
 }
+#define platform_private_file_size cl_fault_size
+#define platform_private_file_truncate cl_fault_truncate
 #define platform_private_file_read_at cl_fault_read
 #define platform_private_file_write_at cl_fault_write
 #define platform_private_file_flush cl_fault_flush
 #define zcl_log_emit_at cl_capture_log
 #include "../../../engine/modules/chainlog/src/chainlog.c"
 #undef zcl_log_emit_at
+#undef platform_private_file_size
+#undef platform_private_file_truncate
 #undef platform_private_file_read_at
 #undef platform_private_file_write_at
 #undef platform_private_file_flush
@@ -127,6 +143,11 @@ static const uint8_t k_stream_a[32] = {
     0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7,
     0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
 };
+static bool open_diagnostic(const char *path, bool readonly, const char *stage, const char *action)
+{
+    return strstr(cl_diagnostic, path) && strstr(cl_diagnostic, readonly ? "mode=readonly" : "mode=writable") &&
+        strstr(cl_diagnostic, stage) && strstr(cl_diagnostic, "failed;") && strstr(cl_diagnostic, action);
+}
 static const uint8_t k_stream_b[32] = {
     0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
     0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
@@ -757,6 +778,17 @@ static int case_surface(void)
     return failures;
 }
 
+static bool busy_observation_diagnostic(const char *path)
+{
+    struct zcl_chainlog_report report;
+    cl_diagnostic[0] = '\0';
+    struct zcl_chainlog *log = zcl_chainlog_open_readonly(path, k_stream_a, &report);
+    bool refused = !log && report.status == ZCL_CHAINLOG_IO &&
+        open_diagnostic(path, true, "open observation", "check path/access or writer, then retry");
+    zcl_chainlog_close(log);
+    return refused;
+}
+
 static int case_observation_lock(void)
 {
     int failures = 0;
@@ -788,18 +820,14 @@ static int case_observation_lock(void)
     pid_t child = fork();
     if (child == 0) {
         alarm(2);
-        struct zcl_chainlog *observed = zcl_chainlog_open_readonly(path, k_stream_a, &report);
-        zcl_chainlog_close(observed);
-        _exit(!observed && report.status == ZCL_CHAINLOG_IO ? 0 : 1);
+        _exit(busy_observation_diagnostic(path) ? 0 : 1);
     }
     int status = 0;
     CL_CHECK("observer refuses before writer releases",
         child > 0 && waitpid(child, &status, 0) == child &&
         WIFEXITED(status) && WEXITSTATUS(status) == 0);
 #else
-    struct zcl_chainlog *busy = zcl_chainlog_open_readonly(path, k_stream_a, &report);
-    CL_CHECK("observer refuses held writer", !busy && report.status == ZCL_CHAINLOG_IO);
-    zcl_chainlog_close(busy);
+    CL_CHECK("observer refuses held writer with diagnostic", busy_observation_diagnostic(path));
 #endif
     uint64_t size = 0;
     CL_CHECK("writer fixture size", platform_private_file_size(&held, &size));
@@ -1026,10 +1054,118 @@ static int case_failed_append(void)
     return failures;
 }
 
+static bool open_fixture(const char *path, unsigned fixture)
+{
+    uint8_t bytes[256] = {0};
+    long size = 0;
+    if (fixture == 0 || fixture == 4) return true;
+    if (fixture == 2) return file_spill(path, bytes, 0);
+    if (!build_log(path, k_stream_a, 1, NULL)) return false;
+    if (fixture != 3) return true;
+    if (!append_snapshot(path, bytes, &size) || size > (long)sizeof bytes - 4) return false;
+    memcpy(bytes + size, "torn", 4);
+    return file_spill(path, bytes, (size_t)size + 4);
+}
+struct open_diagnostic_row {
+    const char *stage, *allocation, *action;
+    unsigned fault, io;
+    bool readonly;
+    unsigned fixture;
+};
+
+static int check_recovery_bytes(const char *path, const uint8_t before[256],
+                                long size, bool truncate_failed)
+{
+    int failures = 0;
+    uint8_t after[256];
+    long after_size = 0;
+    bool read = append_snapshot(path, after, &after_size);
+    CL_CHECK("recovery failure keeps expected bytes", read && size >= 4 &&
+        after_size == (truncate_failed ? size : size - 4) &&
+        memcmp(before, after, (size_t)after_size) == 0);
+    if (!truncate_failed) {
+        struct zcl_chainlog_report report;
+        struct zcl_chainlog *log = zcl_chainlog_open_readonly(path, k_stream_a, &report);
+        char body[128]; size_t got = 0; uint32_t kind = 0;
+        bool valid = log && report.records == 1 && report.torn_bytes == 0 &&
+            zcl_chainlog_read(log, 1, &kind, body, sizeof body, &got) == ZCL_CHAINLOG_OK &&
+            kind == 1 && got == strlen(k_body[0]) && memcmp(body, k_body[0], got) == 0;
+        CL_CHECK("recovery flush refusal preserves readable committed record", valid);
+        zcl_chainlog_close(log);
+    }
+    return failures;
+}
+
+static int check_open_refusal(const char *path, const struct open_diagnostic_row *row)
+{
+    int failures = 0;
+    struct zcl_chainlog_report rep;
+    uint8_t before[256]; long before_size = 0;
+    bool saved = row->fixture != 3 || append_snapshot(path, before, &before_size);
+    CL_CHECK("recovery fixture snapshot", saved);
+    memset(&rep, 0xA5, sizeof rep);
+    cl_diagnostic[0] = '\0';
+    cl_open_fault = row->fault;
+    cl_fault_at = row->io;
+    cl_io_calls = 0;
+    cl_injection_ok = true;
+    if (row->allocation) zcl_alloc_fault_fail_next(row->allocation);
+    struct zcl_chainlog *log = row->readonly
+        ? zcl_chainlog_open_readonly(path, k_stream_a, &rep)
+        : zcl_chainlog_open(path, k_stream_a, &rep);
+    CL_CHECK("open refusal status", !log && rep.status == ZCL_CHAINLOG_IO);
+    CL_CHECK(row->stage, open_diagnostic(path, row->readonly, row->stage, row->action));
+    CL_CHECK("open fault reached", cl_open_fault == 0 && cl_injection_ok &&
+        cl_io_calls == row->io && zcl_alloc_fault_armed_label() == NULL);
+    CL_CHECK("open refusal report", rep.records == (row->fixture == 3) &&
+        rep.torn_bytes == 4u * (row->fixture == 3));
+    CL_CHECK("open refusal has no bad sequence", rep.first_bad_seq == 0);
+    cl_open_fault = cl_fault_at = 0;
+    zcl_alloc_fault_clear();
+    zcl_chainlog_close(log);
+    if (row->fixture == 3 && saved)
+        failures += check_recovery_bytes(path, before, before_size, row->fault == 3);
+    if (row->fixture == 0)
+        CL_CHECK("absent observation stays absent", file_size(path) < 0);
+    return failures;
+}
+
+static int case_open_diagnostics(void)
+{
+    int failures = 0;
+    const struct open_diagnostic_row rows[] = {
+        {"chainlog allocation", "chainlog", "free memory, then retry", 0, 0, false, 1},
+        {"scratch allocation", "chainlog_scratch", "free memory, then retry", 0, 0, true, 1},
+        {"open observation", NULL, "check path/access or writer, then retry", 0, 0, true, 0},
+        {"open writer", NULL, "check path/access or writer, then retry", 0, 0, false, 4},
+        {"size", NULL, "preserve file, check access, then reopen", 1, 0, false, 1},
+        {"header read", NULL, "preserve file, check access, then reopen", 2, 0, true, 1},
+        {"header write", NULL, "preserve file, check storage, then reopen", 0, 1, false, 2},
+        {"header flush", NULL, "preserve file, check storage, then reopen", 0, 2, false, 2},
+        {"recovery truncate", NULL, "preserve file, check storage, then reopen", 3, 0, false, 3},
+        {"recovery flush", NULL, "preserve file, check storage, then reopen", 0, 1, false, 3},
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+        char dir[256], path[320];
+        test_make_tmpdir(dir, sizeof dir, "chainlog", "open_diagnostics");
+        (void)snprintf(path, sizeof path, rows[i].fixture == 4 ? "%s" : "%s/missing", dir);
+        bool ready = open_fixture(path, rows[i].fixture);
+        CL_CHECK("open diagnostic fixture", ready);
+        if (ready) failures += check_open_refusal(path, &rows[i]);
+        if (rows[i].fixture == 4) {
+            struct stat info;
+            CL_CHECK("writer refusal preserves directory", stat(path, &info) == 0 && S_ISDIR(info.st_mode));
+        }
+        test_cleanup_tmpdir(dir);
+    }
+    return failures;
+}
+
 int test_chainlog(void)
 {
     int failures = 0;
     failures += case_dense_sequence();
+    failures += case_open_diagnostics();
     failures += case_failed_append();
     failures += case_observation_lock();
     char readonly_dir[256];
