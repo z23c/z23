@@ -102,9 +102,12 @@ and its boot caller exits with status 1 rather than continuing sync.
 Two typed commands read and use this, both `AUTH_OWNER`:
 
 - `core wallet recovery status` — answers `recoverable_from_phrase` by
-  **attempting the derivation**, not by reading a stored flag. A wallet that
-  predates recovery phrases, or one created by SKIP, answers `false` and is
-  directed to file backup instead. Takes a `datadir` that defaults to the live
+  **checking the persisted wallet material against a rebuild**, not by reading
+  a stored flag. `phrase_coverage` is `complete`, `incomplete` or `unknown`;
+  `recoverable_from_phrase` is true only for complete coverage. With no stored
+  seed, coverage is unknown and status cannot evaluate an external phrase.
+  Keep a wallet file backup and its passphrase when coverage is incomplete or
+  unknown. Takes a `datadir` that defaults to the live
   one and opens it **read-only** (`zcl_native_node_db_open_readonly()`).
 - `core wallet recovery restore` — plan/commit rebuild from the words alone.
   `datadir` is **required with no default**, deliberately not the running

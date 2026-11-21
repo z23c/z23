@@ -5,6 +5,7 @@
 
 #include "services/wallet_recovery_service.h"
 #include "wallet_recovery_internal.h"
+#include "wallet_recovery_coverage.h"
 #include "services/wallet_create_service.h"
 #include "core/random.h"
 
@@ -449,26 +450,47 @@ static struct zcl_result wrc_status_check_seed(
         return ZCL_ERR(-63, "out of memory loading the wallet");
     }
     wallet_init(w);
-    /* A read failure here would leave an empty keystore, and an empty
-     * keystore makes wallet_hd_adopt_seed say yes unconditionally —
-     * i.e. it would report a legacy wallet as phrase-recoverable. Fail
-     * the question instead of answering it wrong. */
-    struct zcl_result kr = wallet_sqlite_read_keys_r(ws, w);
-    if (!kr.ok) {
-        wallet_free(w);
-        free(w);
-        return ZCL_ERR(-63, "cannot read this wallet's keys, so whether "
-                       "a phrase would bring them back is unknown: %s",
-                       kr.message);
-    }
-    out->seed_installed = wallet_hd_adopt_seed(w, seed);
+    enum wrc_coverage coverage = wrc_recovery_coverage(ws, w, seed);
+    out->phrase_coverage = coverage == WRC_COVERAGE_COMPLETE
+        ? WALLET_PHRASE_COVERAGE_COMPLETE
+        : coverage == WRC_COVERAGE_INCOMPLETE
+          ? WALLET_PHRASE_COVERAGE_INCOMPLETE : WALLET_PHRASE_COVERAGE_UNKNOWN;
+    out->seed_installed = coverage == WRC_COVERAGE_COMPLETE;
     if (out->seed_installed)
         (void)wallet_seed_address_at(seed, 0, BIP44_EXTERNAL, 0,
                                      out->first_address,
                                      sizeof(out->first_address));
     wallet_free(w);
     free(w);
-    return ZCL_OK;
+    return coverage == WRC_COVERAGE_UNKNOWN
+        ? ZCL_ERR(-63, "cannot verify recovery phrase coverage") : ZCL_OK;
+}
+
+static struct zcl_result wrc_status_seed(
+    struct wallet_sqlite *ws, struct wallet_recovery_report *out)
+{
+    uint8_t seed[32];
+    memset(seed, 0, sizeof(seed));
+    /* Three different facts, three different answers. "No seed row" and "a
+     * seed row I cannot decrypt" used to be the same false here, and that
+     * told the owner of an encrypted, phrase-backed wallet that their
+     * wallet predates recovery phrases and their money could only come back
+     * from a file. It can come back from their words; they have to unlock
+     * it first. The caller renders LOCKED as its own answer. */
+    out->seed_state_before = wallet_sqlite_sapling_seed_state(ws, seed);
+    out->seed_present_before =
+        wallet_seed_state_row_present(out->seed_state_before);
+    bool seed_readable = (out->seed_state_before == WALLET_SEED_PLAINTEXT ||
+                          out->seed_state_before == WALLET_SEED_UNLOCKED);
+
+    struct zcl_result result = ZCL_OK;
+    if (out->seed_state_before == WALLET_SEED_UNREADABLE)
+        result = ZCL_ERR(-63, "cannot read this wallet's seed");
+    else if (seed_readable)
+        result = wrc_status_check_seed(ws, seed, out);
+    memory_cleanse(seed, sizeof(seed));
+
+    return result;
 }
 
 struct zcl_result wallet_recovery_status(const char *datadir,
@@ -512,26 +534,7 @@ struct zcl_result wallet_recovery_status(const char *datadir,
     out->keys_before = key_count;
     out->keys_after = key_count;
 
-    uint8_t seed[32];
-    memset(seed, 0, sizeof(seed));
-    /* Three different facts, three different answers. "No seed row" and "a
-     * seed row I cannot decrypt" used to be the same false here, and that
-     * told the owner of an encrypted, phrase-backed wallet that their
-     * wallet predates recovery phrases and their money could only come back
-     * from a file. It can come back from their words; they have to unlock
-     * it first. The caller renders LOCKED as its own answer. */
-    out->seed_state_before = wallet_sqlite_sapling_seed_state(&ws, seed);
-    out->seed_present_before =
-        wallet_seed_state_row_present(out->seed_state_before);
-    bool seed_readable = (out->seed_state_before == WALLET_SEED_PLAINTEXT ||
-                          out->seed_state_before == WALLET_SEED_UNLOCKED);
-
-    struct zcl_result result = ZCL_OK;
-    if (out->seed_state_before == WALLET_SEED_UNREADABLE)
-        result = ZCL_ERR(-63, "cannot read this wallet's seed");
-    else if (seed_readable)
-        result = wrc_status_check_seed(&ws, seed, out);
-    memory_cleanse(seed, sizeof(seed));
+    struct zcl_result result = wrc_status_seed(&ws, out);
 
     /* The wallet_sqlite statement set is ours; the node_db handle under it
      * is the caller's and stays open. */

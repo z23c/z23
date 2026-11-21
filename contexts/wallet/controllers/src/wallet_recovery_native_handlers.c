@@ -236,6 +236,96 @@ static void wrp_push_status_target(struct zcl_command_reply *reply,
     (void)json_push_kv_str(&reply->data, "target_db", rep->target_db);
 }
 
+static void wrp_status_render(struct zcl_command_reply *reply,
+                              const struct wallet_recovery_report *rep,
+                              const char *cutover)
+{
+    wrp_push_report(reply, rep);
+    (void)json_push_kv_str(&reply->data, "wallet_cutover_state", cutover);
+    (void)json_push_kv_bool(&reply->data, "recoverable_from_phrase",
+                            rep->seed_installed);
+    (void)json_push_kv_str(&reply->data, "phrase_coverage",
+        rep->phrase_coverage == WALLET_PHRASE_COVERAGE_COMPLETE ? "complete" :
+        rep->phrase_coverage == WALLET_PHRASE_COVERAGE_INCOMPLETE ? "incomplete" : "unknown");
+    (void)json_push_kv_str(&reply->data, "seed_state",
+                           wrp_seed_state_name(rep->seed_state_before));
+
+    /* LOCKED is answered on its own, BEFORE the recoverable/not fork.
+     * An encrypted wallet that does have a phrase-backed seed used to fall
+     * through to the "created before recovery phrases" branch below and be
+     * told its money could only come back from a file — the error path and
+     * the empty result returning the same value, the defect family this
+     * tree keeps paying for. "Locked, unlock and ask again" and "there is
+     * no phrase for this wallet" are opposite answers and now read that
+     * way. */
+    if (rep->seed_state_before == WALLET_SEED_LOCKED) {
+        wrp_push_locked_address(reply, rep, cutover);
+
+        (void)json_push_kv_str(&reply->data, "meaning",
+            "this wallet IS seed-backed — the seed is right there in "
+            "node.db — but it is encrypted and could not be decrypted "
+            "here, so whether your twelve words rebuild it cannot be "
+            "checked yet. This is not the same as having no recovery "
+            "phrase");
+        (void)json_push_kv_str(&reply->data, "what_to_do",
+            "unlock the wallet and ask again: set ZCL_WALLET_PASSPHRASE to "
+            "the passphrase you encrypted it with and re-run this command. "
+            "Do not treat this as 'no phrase' and do not recover over this "
+            "datadir");
+        wnh_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "WALLET_LOCKED",
+                 "the wallet seed at this datadir is encrypted and could "
+                 "not be decrypted, so this command cannot say whether your "
+                 "recovery phrase rebuilds it — unlock it and ask again",
+                 rep->datadir);
+        return;
+    }
+    if (rep->seed_state_before == WALLET_SEED_MALFORMED) {
+        (void)json_push_kv_str(&reply->data, "meaning",
+            "there is a seed row in this wallet, but it is not a usable "
+            "seed. That is damage, not the absence of a recovery phrase");
+        (void)json_push_kv_str(&reply->data, "what_to_do",
+            "do not recover over this datadir. Take a copy of it first, "
+            "then rebuild into a NEW empty datadir — from your twelve words "
+            "('core wallet recovery restore') or from a wallet backup file");
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "WALLET_SEED_UNUSABLE",
+                 "the wallet seed stored at this datadir is not a usable "
+                 "seed", rep->datadir);
+        return;
+    }
+
+    if (rep->seed_installed) {
+        (void)json_push_kv_str(&reply->data, "meaning",
+            "an empty-datadir rebuild from this seed reproduced all checked "
+            "wallet keys. If you have the words for this seed, they can "
+            "reproduce those keys");
+        (void)json_push_kv_str(&reply->data, "phrase_shown_again",
+            "never — the node stores only the key material the words derive, "
+            "and the words cannot be worked back out of it. If you did not "
+            "write them down, take a file backup now (core wallet backup "
+            "now) and treat that file as the only copy");
+    } else if (rep->seed_state_before == WALLET_SEED_ABSENT) {
+        (void)json_push_kv_str(&reply->data, "meaning",
+            "no recovery seed was found in this wallet. No recovery was "
+            "verified using a seed stored here; a separate external phrase "
+            "cannot be evaluated by this status");
+        (void)json_push_kv_str(&reply->data, "what_to_do",
+            "back it up as a file: 'core wallet backup now', and keep that "
+            "file somewhere the machine's disk failing cannot take with it. "
+            "To move to a phrase-backed wallet, recover a NEW empty datadir "
+            "from a new phrase and send your coins there");
+    } else {
+        (void)json_push_kv_str(&reply->data, "meaning",
+            rep->phrase_coverage == WALLET_PHRASE_COVERAGE_INCOMPLETE
+            ? "an empty-datadir rebuild from this seed did not reproduce "
+            "every stored key or entry"
+            : "whether the recovery phrase covers all wallet material is unknown");
+        (void)json_push_kv_str(&reply->data, "what_to_do",
+            "keep a wallet file backup and its passphrase; inspect your wallet "
+            "before relying on its recovery phrase alone");
+    }
+    reply->error.mutated = false;
+}
+
 void zcl_native_handle_wallet_recovery_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -327,83 +417,15 @@ void zcl_native_handle_wallet_recovery_status(
     wallet_restore_node_lock_release(&pid_fd);
     if (!r.ok) {
         wrp_push_status_target(reply, &rep);
+        if (rep.seed_state_before == WALLET_SEED_PLAINTEXT ||
+            rep.seed_state_before == WALLET_SEED_UNLOCKED)
+            (void)json_push_kv_str(&reply->data, "phrase_coverage", "unknown");
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "WALLET_STATUS_UNAVAILABLE", r.message,
                  datadir);
         return;
     }
 
-    wrp_push_report(reply, &rep);
-    (void)json_push_kv_str(&reply->data, "wallet_cutover_state", cutover);
-    (void)json_push_kv_bool(&reply->data, "recoverable_from_phrase",
-                            rep.seed_installed);
-    (void)json_push_kv_str(&reply->data, "seed_state",
-                           wrp_seed_state_name(rep.seed_state_before));
-
-    /* LOCKED is answered on its own, BEFORE the recoverable/not fork.
-     * An encrypted wallet that does have a phrase-backed seed used to fall
-     * through to the "created before recovery phrases" branch below and be
-     * told its money could only come back from a file — the error path and
-     * the empty result returning the same value, the defect family this
-     * tree keeps paying for. "Locked, unlock and ask again" and "there is
-     * no phrase for this wallet" are opposite answers and now read that
-     * way. */
-    if (rep.seed_state_before == WALLET_SEED_LOCKED) {
-        wrp_push_locked_address(reply, &rep, cutover);
-
-        (void)json_push_kv_str(&reply->data, "meaning",
-            "this wallet IS seed-backed — the seed is right there in "
-            "node.db — but it is encrypted and could not be decrypted "
-            "here, so whether your twelve words rebuild it cannot be "
-            "checked yet. This is not the same as having no recovery "
-            "phrase");
-        (void)json_push_kv_str(&reply->data, "what_to_do",
-            "unlock the wallet and ask again: set ZCL_WALLET_PASSPHRASE to "
-            "the passphrase you encrypted it with and re-run this command. "
-            "Do not treat this as 'no phrase' and do not recover over this "
-            "datadir");
-        wnh_fail(reply, ZCL_COMMAND_EXIT_BLOCKED, "WALLET_LOCKED",
-                 "the wallet seed at this datadir is encrypted and could "
-                 "not be decrypted, so this command cannot say whether your "
-                 "recovery phrase rebuilds it — unlock it and ask again",
-                 datadir);
-        return;
-    }
-    if (rep.seed_state_before == WALLET_SEED_MALFORMED) {
-        (void)json_push_kv_str(&reply->data, "meaning",
-            "there is a seed row in this wallet, but it is not a usable "
-            "seed. That is damage, not the absence of a recovery phrase");
-        (void)json_push_kv_str(&reply->data, "what_to_do",
-            "do not recover over this datadir. Take a copy of it first, "
-            "then rebuild into a NEW empty datadir — from your twelve words "
-            "('core wallet recovery restore') or from a wallet backup file");
-        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "WALLET_SEED_UNUSABLE",
-                 "the wallet seed stored at this datadir is not a usable "
-                 "seed", datadir);
-        return;
-    }
-
-    if (rep.seed_installed) {
-        (void)json_push_kv_str(&reply->data, "meaning",
-            "this wallet's keys all descend from its recovery phrase, so the "
-            "twelve words you wrote down when it was created bring it back "
-            "on any machine");
-        (void)json_push_kv_str(&reply->data, "phrase_shown_again",
-            "never — the node stores only the key material the words derive, "
-            "and the words cannot be worked back out of it. If you did not "
-            "write them down, take a file backup now (core wallet backup "
-            "now) and treat that file as the only copy");
-    } else {
-        (void)json_push_kv_str(&reply->data, "meaning",
-            "this wallet was created before recovery phrases. Its keys are "
-            "independently random, so no phrase can rebuild them and there "
-            "is no phrase to show you");
-        (void)json_push_kv_str(&reply->data, "what_to_do",
-            "back it up as a file: 'core wallet backup now', and keep that "
-            "file somewhere the machine's disk failing cannot take with it. "
-            "To move to a phrase-backed wallet, recover a NEW empty datadir "
-            "from a new phrase and send your coins there");
-    }
-    reply->error.mutated = false;
+    wrp_status_render(reply, &rep, cutover);
 }
 
 /* Restore has no default: it installs spending keys and must preserve the

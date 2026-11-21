@@ -85,6 +85,12 @@ enum wallet_recovery_history_skip {
     WALLET_RECOVERY_HISTORY_SHIELDED_ONLY /* no transparent key to look up */
 };
 
+enum wallet_phrase_coverage {
+    WALLET_PHRASE_COVERAGE_UNKNOWN,
+    WALLET_PHRASE_COVERAGE_COMPLETE,
+    WALLET_PHRASE_COVERAGE_INCOMPLETE,
+};
+
 struct wallet_recovery_report {
     char    datadir[1024];
     char    target_db[1024];
@@ -101,7 +107,8 @@ struct wallet_recovery_report {
      * true for LOCKED and MALFORMED too — those must block a write exactly
      * as a readable seed does. */
     enum wallet_seed_state seed_state_before;
-    bool    seed_installed;       /* the phrase's seed is now on disk */
+    bool    seed_installed;       /* restore: seed installed; status: complete coverage */
+    enum wallet_phrase_coverage phrase_coverage; /* status: verified coverage */
     bool    creation_replayed;    /* successful no-write creation receipt verification */
     bool    creation_write_attempted; /* writable-open attempted; mutation possible */
     /* PUBLIC addresses the phrase reproduces — safe to print, and the one

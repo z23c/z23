@@ -2125,6 +2125,27 @@ static int coverage_public_status(const char *dir, bool mixed)
 }
 
 
+static int coverage_public_unavailable(const char *dir)
+{
+    int failures = 0;
+    struct json_value input = {0};
+    json_set_object(&input);
+    DR_CHECK("public unknown: set datadir", json_push_kv_str(&input, "datadir", dir));
+    struct zcl_command_request request = { .input = &input };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+    zcl_native_handle_wallet_recovery_status(&request, &reply);
+    const char *coverage = json_get_str(json_get(&reply.data, "phrase_coverage"));
+    DR_CHECK("public unknown: failed without definitive recovery answer",
+             reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             !strcmp(reply.error.code, "WALLET_STATUS_UNAVAILABLE") && coverage &&
+             !strcmp(coverage, "unknown") &&
+             json_get(&reply.data, "recoverable_from_phrase") == NULL);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return failures;
+}
+
 static int coverage_transparent_fixture(struct wallet_sqlite *ws, struct wallet *w,
                                         struct node_db *ndb, const char *dir)
 {
@@ -2156,6 +2177,7 @@ static int coverage_transparent_fixture(struct wallet_sqlite *ws, struct wallet 
     uint8_t corrupt_seed[32];
     DR_CHECK("coverage: reload seed for corrupt row", wallet_sqlite_read_sapling_seed(ws, corrupt_seed));
     DR_CHECK("coverage: corrupt transparent identity unknown", coverage_fixture(ws, corrupt_seed) == WRC_COVERAGE_UNKNOWN);
+    failures += coverage_public_unavailable(dir);
     memory_cleanse(corrupt_seed, sizeof(corrupt_seed));
     DR_CHECK("coverage: repair transparent fixture", wallet_sqlite_flush_r(ws, w).ok);
     return failures;

@@ -1796,6 +1796,36 @@ static int t_wallet_status_absent(void)
     return failures;
 }
 
+static int t_wallet_status_no_seed(void)
+{
+    int failures = 0;
+    char dir[256], path[1200];
+    rlw_mkfixture(dir, sizeof(dir), "status-no-seed");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool made = rlw_seed_node_db(dir, path);
+    RLW_CHECK("status no seed: synthetic database", made);
+    if (made) {
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        json_push_kv_str(&input, "datadir", dir);
+        struct zcl_command_request request = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.wallet_recovery_status.v1");
+        zcl_native_handle_wallet_recovery_status(&request, &reply);
+        const struct json_value *recoverable = json_get(&reply.data, "recoverable_from_phrase");
+        const char *coverage = json_get_str(json_get(&reply.data, "phrase_coverage"));
+        const char *meaning = json_get_str(json_get(&reply.data, "meaning"));
+        RLW_CHECK("status no seed: external phrase is not evaluated",
+                  reply.status == ZCL_COMMAND_STATUS_PASSED && recoverable &&
+                  recoverable->type == JSON_BOOL && !json_get_bool(recoverable) &&
+                  coverage && strcmp(coverage, "unknown") == 0 && meaning &&
+                  strstr(meaning, "external phrase") != NULL);
+        zcl_command_reply_free(&reply); json_free(&input);
+    }
+    test_rm_rf(dir);
+    return failures;
+}
+
 static int t_wallet_status_bad_header(void)
 {
     int failures = 0;
@@ -1994,6 +2024,7 @@ int test_read_leaf_no_datadir_write(void)
     test_rm_rf(probe);
 
     failures += t_wallet_status_absent();
+    failures += t_wallet_status_no_seed();
     failures += t_wallet_status_bad_header();
     failures += t_wallet_status_damaged_seed();
     failures += t_wallet_status_unreadable_facts();
