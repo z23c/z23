@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool wallet_snapshot_access_allowed(struct node_db *ndb, bool owned)
+bool wallet_snapshot_access_allowed(struct node_db *ndb, bool owned)
 {
     if (owned) return true;
     struct node_db_tx_owner owner;

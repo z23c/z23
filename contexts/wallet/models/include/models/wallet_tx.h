@@ -42,6 +42,9 @@ struct db_wallet_tx_raw_view {
     int block_height;
 };
 
+/* Caller holds the SQLite connection mutex and passes its autocommit state. */
+bool wallet_snapshot_access_allowed(struct node_db *ndb, bool autocommit);
+
 /* Callbacks and validation */
 struct ar_callbacks *db_wallet_tx_callbacks(void);
 bool db_wallet_tx_validate(const struct db_wallet_tx *t, struct ar_errors *errors);

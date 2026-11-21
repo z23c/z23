@@ -742,6 +742,10 @@ struct zcl_result vault_read_snapshot(struct node_db *ndb,
     sqlite3_mutex *mutex = sqlite3_db_mutex(ndb->db);
     sqlite3_mutex_enter(mutex);
     bool initial_autocommit = sqlite3_get_autocommit(ndb->db) != 0;
+    if (!wallet_snapshot_access_allowed(ndb, initial_autocommit)) {
+        sqlite3_mutex_leave(mutex);
+        return ZCL_ERR(-2, "vault snapshot cannot join the active transaction");
+    }
     if (sqlite3_exec(ndb->db, "SAVEPOINT vault_snapshot", NULL, NULL, NULL) != SQLITE_OK) {
         sqlite3_mutex_leave(mutex);
         return ZCL_ERR(-2, "vault snapshot transaction unavailable");

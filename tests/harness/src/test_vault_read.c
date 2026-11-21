@@ -564,6 +564,63 @@ static int vr_check_balance_read_failure(struct node_db *ndb, const char *table,
     return failures;
 }
 
+struct vr_foreign_read {
+    struct node_db *db;
+    struct vault_snapshot snap;
+    struct zcl_result result;
+};
+
+static void *vr_read_on_foreign_thread(void *arg)
+{
+    struct vr_foreign_read *read = arg;
+    memset(&read->snap, 0xff, sizeof(read->snap));
+    read->result = vault_read_snapshot(read->db, &read->snap);
+    return NULL;
+}
+
+static int vr_check_transaction_ownership(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    struct vault_snapshot snap, zero = {0};
+    struct zcl_result result;
+    if (!node_db_open(&db, ":memory:")) return 1;
+
+    bool began = sqlite3_exec(db.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+    VR_CHECK("untracked write transaction begins", began);
+    if (began) {
+        memset(&snap, 0xff, sizeof(snap));
+        result = vault_read_snapshot(&db, &snap);
+        VR_CHECK("untracked write transaction refuses with zero output",
+                 !result.ok && result.code == -2 && memcmp(&snap, &zero, sizeof(snap)) == 0 &&
+                 !sqlite3_get_autocommit(db.db));
+        VR_CHECK("untracked caller retains transaction",
+                 sqlite3_exec(db.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    }
+
+    began = node_db_begin_immediate(&db);
+    VR_CHECK("tracked owner transaction begins", began);
+    if (began) {
+        result = vault_read_snapshot(&db, &snap);
+        VR_CHECK("tracked owner can read and retains transaction",
+                 result.ok && !sqlite3_get_autocommit(db.db));
+        struct vr_foreign_read read = {.db = &db};
+        pthread_t thread;
+        int created = pthread_create(&thread, NULL, vr_read_on_foreign_thread, &read);
+        VR_CHECK("foreign reader starts", created == 0);
+        if (created == 0) {
+            int joined = pthread_join(thread, NULL);
+            VR_CHECK("foreign reader refuses with zero output", joined == 0 &&
+                     !read.result.ok && read.result.code == -2 &&
+                     memcmp(&read.snap, &zero, sizeof(zero)) == 0 &&
+                     !sqlite3_get_autocommit(db.db));
+        }
+        VR_CHECK("tracked caller retains transaction", node_db_rollback(&db));
+    }
+    node_db_close(&db);
+    return failures;
+}
+
 static int vr_check_empty_balance(void)
 {
     int failures = 0;
@@ -629,6 +686,7 @@ int test_vault_read(void)
     failures += vr_check_balance_read_failure(&ndb, "wallet_utxos", "transparent_zcl");
     failures += vr_check_balance_read_failure(&ndb, "wallet_sapling_notes", "shielded_zcl");
     failures += vr_check_empty_balance();
+    failures += vr_check_transaction_ownership();
     node_db_close(&ndb);
     test_rm_rf(dir);
 
