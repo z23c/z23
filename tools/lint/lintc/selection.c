@@ -198,10 +198,8 @@ static void make_child(const char *root, int out_fd)
     _exit(127);
 }
 
-static int read_lines_c(int fd, struct strv *out)
+static int read_lines_stream(FILE *f, struct strv *out)
 {
-    FILE *f = fdopen(fd, "r");
-    if (!f) { close(fd); return 2; }
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
@@ -212,10 +210,37 @@ static int read_lines_c(int fd, struct strv *out)
         if (n > 2 && strcmp(line + n - 2, ".c") == 0)
             rc = strv_add(out, line, (size_t)n);
     }
+    if (ferror(f)) rc = 2;
     free(line);
-    fclose(f);
     return rc;
 }
+
+static int read_lines_file(FILE *f, struct strv *out)
+{
+    int rc = read_lines_stream(f, out);
+    if (fclose(f) != 0) rc = 2;
+    if (rc != 0) strv_free(out);
+    return rc;
+}
+
+static int read_lines_c(int fd, struct strv *out)
+{
+    FILE *f = fdopen(fd, "r");
+    if (!f) { close(fd); return 2; }
+    return read_lines_file(f, out);
+}
+
+#if defined(__GLIBC__)
+int lint_selection_stream_test(FILE *f);
+int lint_selection_stream_test(FILE *f)
+{
+    struct strv out = {};
+    int rc = read_lines_file(f, &out);
+    if ((rc == 0 && out.n != 1) || (rc != 0 && out.n != 0)) rc = 3;
+    strv_free(&out);
+    return rc;
+}
+#endif
 
 static int units_node_c23_file(const char *path, struct strv *out, FILE *err)
 {

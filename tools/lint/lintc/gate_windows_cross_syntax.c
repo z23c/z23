@@ -552,10 +552,8 @@ static void show_make_failure(const char *errp)
     fclose(f);
 }
 
-static int read_src_raw(const char *raw)
+static int read_src_stream(FILE *in)
 {
-    FILE *in = fopen(raw, "r");
-    if (!in) return 2;
     static char line[WCS_PATH];
     while (g_wcs_nsrc < WCS_TUS && fgets(line, sizeof line, in)) {
         size_t l = strlen(line);
@@ -564,7 +562,7 @@ static int read_src_raw(const char *raw)
         memcpy(g_wcs_src[g_wcs_nsrc], line, l + 1);
         g_wcs_nsrc++;
     }
-    fclose(in);
+    if (ferror(in)) return 2;
     if (g_wcs_nsrc >= WCS_TUS) {
         fprintf(stderr, "%s: translation units exceed %d\n", k_wcs_gate,
                 WCS_TUS);
@@ -572,6 +570,48 @@ static int read_src_raw(const char *raw)
     }
     return 0;
 }
+
+static int read_src_file(FILE *in)
+{
+    int start = g_wcs_nsrc;
+    int rc = read_src_stream(in);
+    if (fclose(in) != 0) rc = 2;
+    if (rc != 0) g_wcs_nsrc = start;
+    return rc;
+}
+
+static int read_src_raw(const char *raw)
+{
+    FILE *in = fopen(raw, "r");
+    return in ? read_src_file(in) : 2;
+}
+
+#if defined(__GLIBC__)
+int wcs_stream_test(FILE *in);
+int wcs_stream_test(FILE *in)
+{
+    int start = g_wcs_nsrc;
+    int rc = read_src_file(in);
+    if ((rc == 0 && g_wcs_nsrc != start + 1) ||
+        (rc != 0 && g_wcs_nsrc != start)) rc = 3;
+    g_wcs_nsrc = start;
+    return rc;
+}
+
+int wcs_stream_limit_test(FILE *in);
+int wcs_stream_limit_test(FILE *in)
+{
+    int saved = g_wcs_nsrc;
+    char last[WCS_PATH];
+    memcpy(last, g_wcs_src[WCS_TUS - 1], sizeof last);
+    g_wcs_nsrc = WCS_TUS - 1;
+    int rc = read_src_file(in);
+    bool refused = rc != 0 && g_wcs_nsrc == WCS_TUS - 1;
+    memcpy(g_wcs_src[WCS_TUS - 1], last, sizeof last);
+    g_wcs_nsrc = saved;
+    return refused ? 0 : 1;
+}
+#endif
 
 static int dedupe_srcs(void)
 {

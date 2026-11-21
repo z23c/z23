@@ -10,10 +10,14 @@
  *      tu_cache_selftest in tools/lint/tu_result_cache.sh (deleted), over
  *      16 synthetic TUs plus one real TU with the gate's real compiler.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -811,9 +815,58 @@ static int wcs_log_shape_test(const char *base)
     return bad;
 }
 
+#if defined(__GLIBC__)
+int lint_selection_stream_test(FILE *f);
+int wcs_stream_test(FILE *f);
+int wcs_stream_limit_test(FILE *f);
+
+struct wcs_error_cookie { int reads; bool fail; };
+static ssize_t wcs_error_read(void *opaque, char *buf, size_t size)
+{
+    struct wcs_error_cookie *c = opaque;
+    static const char row[] = "engine/entry/main.c\n";
+    if (c->reads++ == 0) {
+        if (size < sizeof(row) - 1) return -1;
+        memcpy(buf, row, sizeof(row) - 1);
+        return (ssize_t)(sizeof(row) - 1);
+    }
+    if (!c->fail) return 0;
+    errno = EIO;
+    return -1;
+}
+
+static int wcs_stream_error_test(void)
+{
+    int (*readers[])(FILE *) = { lint_selection_stream_test, wcs_stream_test };
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(readers) / sizeof(readers[0]); i++) {
+        for (int fail = 0; fail <= 1; fail++) {
+            struct wcs_error_cookie cookie = { .fail = fail != 0 };
+            cookie_io_functions_t io = { .read = wcs_error_read };
+            FILE *f = fopencookie(&cookie, "r", io);
+            if (!f) return 1;
+            int rc = readers[i](f);
+            bool valid = cookie.reads >= 2 && (fail ? rc != 0 : rc == 0);
+            if (!valid || rc == 3) {
+                fprintf(stderr, "source stream selftest: reader=%zu fail=%d refused=%d\n",
+                        i, fail, rc != 0);
+                bad = 1;
+            }
+        }
+    }
+    struct wcs_error_cookie cookie = {};
+    cookie_io_functions_t io = { .read = wcs_error_read };
+    FILE *f = fopencookie(&cookie, "r", io);
+    if (!f || wcs_stream_limit_test(f) != 0) bad = 1;
+    return bad;
+}
+#else
+static int wcs_stream_error_test(void) { return 0; }
+#endif
+
 static int wcs_log_setup_test(const char *base)
 {
-    return wcs_lists_selftest() || wcs_log_shape_test(base) ||
+    return wcs_stream_error_test() || wcs_lists_selftest() || wcs_log_shape_test(base) ||
            wcs_mkdir_selftest(base);
 }
 
