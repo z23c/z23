@@ -24,6 +24,7 @@ struct test_verdict_doc {
     size_t groups_total;
     size_t groups_ran;
     size_t groups_cached;
+    size_t self_skips;              /* groups printing an in-test SKIP marker */
     size_t groups_failed;           /* the full failed count, may exceed names */
     const char *const *failed_names; /* first failed groups; at most 64 used */
     size_t failed_names_count;
@@ -85,8 +86,8 @@ static inline int test_verdict_json_format(char *buf, size_t cap,
     ok = ok && test_verdict_append_str(buf, cap, &off, d->mode);
     ok = ok && test_verdict_append(buf, cap, &off,
         ",\"groups_total\":%zu,\"groups_ran\":%zu,\"groups_cached\":%zu,"
-        "\"groups_failed\":%zu,\"failed_groups\":[",
-        d->groups_total, d->groups_ran, d->groups_cached, d->groups_failed);
+        "\"self_skips\":%zu,\"groups_failed\":%zu,\"failed_groups\":[",
+        d->groups_total, d->groups_ran, d->groups_cached, d->self_skips, d->groups_failed);
     size_t shown = d->failed_names_count < TEST_VERDICT_MAX_FAILED_NAMES
         ? d->failed_names_count : TEST_VERDICT_MAX_FAILED_NAMES;
     ok = ok && test_verdict_append_names(buf, cap, &off, d, shown);

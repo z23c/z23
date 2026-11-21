@@ -2754,7 +2754,7 @@ static struct test_verdict_doc verdict_doc_base(void)
 {
     struct test_verdict_doc doc = {
         .mode = "cold", .groups_total = 3, .groups_ran = 3,
-        .groups_cached = 0, .groups_failed = 0,
+        .groups_cached = 0, .self_skips = 0, .groups_failed = 0,
         .failed_names = NULL, .failed_names_count = 0,
         .toolkey = "abc123", .devbuild_lane = NULL, .ended_unix = 1234,
     };
@@ -2772,7 +2772,7 @@ static int test_verdict_json_zero_failures(void)
         ASSERT_STR_EQ(out,
             "{\"schema\":\"zcl.test_verdict.v1\",\"mode\":\"cold\","
             "\"groups_total\":3,\"groups_ran\":3,\"groups_cached\":0,"
-            "\"groups_failed\":0,\"failed_groups\":[],"
+            "\"self_skips\":0,\"groups_failed\":0,\"failed_groups\":[],"
             "\"failed_groups_truncated\":false,\"toolkey\":\"abc123\","
             "\"devbuild_lane\":null,\"ended_unix\":1234}\n");
         PASS();
@@ -2788,6 +2788,7 @@ static int test_verdict_json_two_failures(void)
         const char *names[] = { "alpha", "beta" };
         struct test_verdict_doc two = doc;
         two.groups_failed = 2;
+        two.self_skips = 1;
         two.failed_names = names;
         two.failed_names_count = 2;
         two.devbuild_lane = "z23-lane-a";
@@ -2796,7 +2797,7 @@ static int test_verdict_json_two_failures(void)
         ASSERT_STR_EQ(out,
             "{\"schema\":\"zcl.test_verdict.v1\",\"mode\":\"cold\","
             "\"groups_total\":3,\"groups_ran\":3,\"groups_cached\":0,"
-            "\"groups_failed\":2,\"failed_groups\":[\"alpha\",\"beta\"],"
+            "\"self_skips\":1,\"groups_failed\":2,\"failed_groups\":[\"alpha\",\"beta\"],"
             "\"failed_groups_truncated\":false,\"toolkey\":\"abc123\","
             "\"devbuild_lane\":\"z23-lane-a\",\"ended_unix\":1234}\n");
         PASS();
@@ -2847,7 +2848,7 @@ static int test_verdict_json_quoted_name(void)
         ASSERT_STR_EQ(out,
             "{\"schema\":\"zcl.test_verdict.v1\",\"mode\":\"cold\","
             "\"groups_total\":3,\"groups_ran\":2,\"groups_cached\":0,"
-            "\"groups_failed\":1,\"failed_groups\":[\"a\\\"b\\\\c\"],"
+            "\"self_skips\":0,\"groups_failed\":1,\"failed_groups\":[\"a\\\"b\\\\c\"],"
             "\"failed_groups_truncated\":false,\"toolkey\":\"abc123\","
             "\"devbuild_lane\":null,\"ended_unix\":1234}\n");
         char tiny[16];
