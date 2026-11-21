@@ -882,6 +882,38 @@ enum fleet_board_result boot_fleet_board_append_app_offer_nowait(
 enum fleet_board_result boot_fleet_board_publish(
     struct fleet_board_post *post, int64_t now)
 {
+    return boot_fleet_board_publish_to(post, now, NULL, NULL);
+}
+
+/* After a stored publish: announce a public post, offer a new fleet post to
+ * the push queue with the caller's hint, and account for a hint that had
+ * nothing to ride. Returns what was done with the hint. */
+static enum fleet_board_push_hint fleet_board_after_store(
+    const struct fleet_board_post *post, bool stored, const char *push_to)
+{
+    uint8_t own[32];
+    bool have_own = boot_fleet_board_public_identity(own);
+    if (post->scope != FLEET_BOARD_SCOPE_FLEET) {
+        boot_fleet_board_announce(post->id);
+        return push_to ? boot_fleet_board_fleet_push_enqueue_to(
+                             post, have_own ? own : NULL, push_to)
+                       : FLEET_BOARD_PUSH_HINT_NONE;
+    }
+    if (stored && (have_own || push_to))
+        return boot_fleet_board_fleet_push_enqueue_to(
+            post, have_own ? own : NULL, push_to);
+    return push_to ? boot_fleet_board_fleet_push_hint_unused(push_to)
+                   : FLEET_BOARD_PUSH_HINT_NONE;
+}
+
+enum fleet_board_result boot_fleet_board_publish_to(
+    struct fleet_board_post *post, int64_t now, const char *push_to,
+    enum fleet_board_push_hint *hint_out)
+{
+    enum fleet_board_push_hint unused;
+    if (!hint_out)
+        hint_out = &unused;
+    *hint_out = FLEET_BOARD_PUSH_HINT_NONE;
     if (!post)
         return FLEET_BOARD_ERR_ARGS;
     struct node_db *ndb = fleet_board_db();
@@ -902,7 +934,12 @@ enum fleet_board_result boot_fleet_board_publish(
             return r;
     }
 
-    if (typed) return fleet_board_review_publish(ndb, post, now);
+    if (typed) {
+        r = fleet_board_review_publish(ndb, post, now);
+        if (r == FLEET_BOARD_OK && push_to)
+            *hint_out = boot_fleet_board_fleet_push_hint_unused(push_to);
+        return r;
+    }
     bool stored = false;
     r = db_fleet_board_post_ingest_wait(ndb, post, now,
                                         FLEET_BOARD_PUBLISH_WAIT_MS, &stored);
@@ -915,11 +952,7 @@ enum fleet_board_result boot_fleet_board_publish(
      * post is durable here and readable locally, but its id is never flooded
      * on the public inventory path; a new one is offered to the push queue,
      * which the board lane drains (config/boot_fleet_board.h, PUSH). */
-    uint8_t own[32];
-    if (post->scope != FLEET_BOARD_SCOPE_FLEET)
-        boot_fleet_board_announce(post->id);
-    else if (stored && boot_fleet_board_public_identity(own))
-        boot_fleet_board_fleet_push_enqueue(post, own);
+    *hint_out = fleet_board_after_store(post, stored, push_to);
     return FLEET_BOARD_OK;
 }
 

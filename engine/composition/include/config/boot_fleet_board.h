@@ -138,6 +138,8 @@ bool boot_fleet_board_inventory_cursor_commit_for_testing(
  * be stored is never announced. */
 enum fleet_board_result boot_fleet_board_publish(
     struct fleet_board_post *post, int64_t now);
+/* boot_fleet_board_publish_to, below, adds the local caller's delivery
+ * hint for the push. */
 
 /* Internal app-host renewal: persist the canonical signed wire before the
  * guarded append. The caller provides its exclusive zero-busy-timeout runtime
@@ -189,19 +191,31 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * dials out can still be pulled from.
  *
  * PUSH only speeds one post up; it is never the only way a post arrives.
- * After this box durably stores a fleet post it signed itself, and only
- * when that post answers (`ref`) a post this box holds whose author is
- * another box, the lane tick offers it to that one box, once, in a stream
- * whose whole payload rides the OPEN (FLEET_BOARD_FLEET_MSG_PUSH). The
- * author of the answered post is the only addressee the node can verify on
- * its own: nothing else in a signed post names a recipient (a mail row's
- * `to` is text the node does not read), so a post with no such `ref` is not
- * pushed and waits for the pull. The addressee is pushed to only when its
- * board key is the online key of exactly one paired peer and that peer
- * passes the very test a pull from it would have to pass to be served this
- * post (the status capability, a current delegation, the read role, the
- * roster) at the moment the push opens, while its send queue is under
- * budget (net_send_over_budget) and no other push to it is open. Nothing is
+ * After this box durably stores a new fleet post it signed itself, the lane
+ * tick offers it to ONE box, once, in a stream whose whole payload rides the
+ * OPEN (FLEET_BOARD_FLEET_MSG_PUSH). Which box: the board key the local
+ * caller named in the post RPC's `push_to` delivery hint when it gave a
+ * usable one, else the author of the post this one answers (`ref`) when
+ * this box holds that post and another box wrote it; a post with neither is
+ * not pushed and waits for the pull. Nothing in a signed post names a
+ * recipient (a mail row's `to` is text the node does not read), so agent
+ * mail is pushed only by the hint its exporter passes. The hint is never
+ * signed, stored, put in a frame or echoed to a peer; it decides only whom
+ * the node TRIES, and a hint that is malformed, names this box, or rides a
+ * post that is not a new FLEET post of this box's own is refused by name
+ * (enum fleet_board_push_hint) and the post is treated as if it carried
+ * none. When a hint and a `ref` name different boxes the hint is used and
+ * the ref is not: one post, one addressee, never two. The addressee is
+ * pushed to only when its board key is the online key of exactly one paired
+ * peer and that peer passes the very test a pull from it would have to pass
+ * to be served this post (the status capability, a current delegation, the
+ * read role, the roster) at the moment the push opens, while its send queue
+ * is under budget (net_send_over_budget) and no other push to it is open,
+ * and only while the post is one a pull would still serve (unexpired, or a
+ * wiki page). So no hint can make a post reach a box a pull would not
+ * serve, or more than one box: a local process able to call the post RPC
+ * can already publish the post to every eligible box by pull, and gains
+ * only the choice of which one of those is tried first. Nothing is
  * relayed: a box pushes only posts its own key signed. The receiver copies
  * the payload into a bounded push inbox, separate from the pull inbox, on
  * the frame path, and checks nothing else there; its lane tick re-proves the
@@ -210,10 +224,22 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * store anything about it (so a push can never learn whether this box holds
  * a post another box wrote), stores each through the same checks a pulled
  * post meets without waiting on another board writer, and closes the stream
- * with a receipt (FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT). Received pushes are
- * committed one a tick, oldest first. Both halves judge a peer on its newest
- * pairing row that grants the status capability now. A push touches no
- * cursor, sweep or answer check. A push that is refused, lost, or
+ * with a receipt (FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT). A record refused or
+ * deferred for a node-wide reason (a full store, a failed append, the
+ * node-wide wiki replacement cap) carries no result code in the receipt,
+ * so a pusher learns only its own post's fate; a deferral because another
+ * board writer held the lock at that instant still names ERR_BUSY, a fact
+ * no older than the commit time beside it. Received pushes are committed one
+ * a tick, oldest first. Fairness holds among pushes that got an inbox slot:
+ * FLEET_BOARD_PUSH_INBOX_MAX distinct paired peers that refill their slots
+ * at once can keep the inbox full, and every other push is then refused
+ * push_inbox_full and left to the pull. A new pushed record costs two
+ * signature checks (its decode, then the one store ingest every post takes),
+ * so a commit costs at most 2 * FLEET_BOARD_PUSH_POSTS_MAX. Both halves
+ * judge a peer on any pairing row for its Noise key that grants the status
+ * capability now and passes the whole test, newest first, so a newer row
+ * under another master does not hide the row that proves it. A push touches
+ * no cursor, sweep or answer check. A push that is refused, lost, or
  * never answered is not sent again: the next pull carries the post, and a
  * post both paths deliver is one row by id. An older node answers the new
  * type stream_malformed, and that session is not pushed to again.
@@ -384,7 +410,22 @@ enum fleet_board_push_skip {
     FLEET_BOARD_PUSH_SKIP_TOO_LARGE,     /* the post cannot ride one OPEN */
     FLEET_BOARD_PUSH_SKIP_OPEN_FAILED,   /* the stream primitive refused the open */
     FLEET_BOARD_PUSH_SKIP_NO_RECEIPT,    /* closed by this box after the wait */
+    FLEET_BOARD_PUSH_SKIP_EXPIRED,       /* expired while it waited: no pull serves it */
     FLEET_BOARD_PUSH_SKIPS
+};
+
+/* What the node did with the `push_to` delivery hint of one post RPC. Every
+ * value but NONE and QUEUED is a refusal: the hint is dropped and the post
+ * is pushed (or not) exactly as if it had carried none. */
+enum fleet_board_push_hint {
+    FLEET_BOARD_PUSH_HINT_NONE = 0,  /* no hint was given */
+    FLEET_BOARD_PUSH_HINT_QUEUED,    /* queued for the one box it names */
+    FLEET_BOARD_PUSH_HINT_MALFORMED, /* not 64 lowercase hex */
+    FLEET_BOARD_PUSH_HINT_NOT_FLEET, /* the post is not FLEET scope */
+    FLEET_BOARD_PUSH_HINT_NOT_OWN,   /* the post is not signed by this box */
+    FLEET_BOARD_PUSH_HINT_NOT_STORED, /* the publish stored no new plain post */
+    FLEET_BOARD_PUSH_HINT_SELF,      /* it names this box's own board key */
+    FLEET_BOARD_PUSH_HINTS
 };
 
 /* Which check a push judgment of a paired peer failed: the addressee's on
@@ -425,7 +466,9 @@ bool boot_fleet_board_fleet_register_service(void);
  * answered by push code (refusals at open included) and push_in_records
  * the records it judged by verdict; push_in_dropped pushes that ended
  * before their commit; push_data_refused DATA on a push stream, which
- * closes it. */
+ * closes it. push_hint: the post RPC's `push_to` hints by what was done
+ * with each. The read-only `fleet_board op=status` reply carries all of
+ * these under "carriage". */
 struct boot_fleet_board_fleet_counts {
     uint64_t delegation_refused;
     uint64_t role_refused;
@@ -446,6 +489,7 @@ struct boot_fleet_board_fleet_counts {
     uint64_t push_data_refused;
     uint64_t push_refused_out[FLEET_BOARD_PUSH_REFUSALS];
     uint64_t push_refused_in[FLEET_BOARD_PUSH_REFUSALS];
+    uint64_t push_hint[FLEET_BOARD_PUSH_HINTS];
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
 
@@ -456,6 +500,29 @@ void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
  * pull. */
 void boot_fleet_board_fleet_push_enqueue(const struct fleet_board_post *post,
                                          const uint8_t own_key[32]);
+/* The same, with the local caller's `push_to` delivery hint (NULL: none):
+ * text naming the board key of the one box to try. A usable hint queues the
+ * post for that box whether or not it has a `ref`, and its box is used in
+ * place of the ref's. The hint is copied into the queue entry only; the
+ * post is untouched. Returns what was done with the hint, counted. */
+enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
+    const struct fleet_board_post *post, const uint8_t own_key[32],
+    const char *push_to);
+/* A hint whose publish stored nothing new (the same post again, or a typed
+ * wiki review): counted and refused; MALFORMED when it is not even a key. */
+enum fleet_board_push_hint boot_fleet_board_fleet_push_hint_unused(
+    const char *push_to);
+/* The token each hint verdict renders as in the post and status replies. */
+const char *boot_fleet_board_push_hint_name(enum fleet_board_push_hint h);
+/* boot_fleet_board_publish with the local caller's optional `push_to`
+ * delivery hint (NULL: none), handed to the push queue only when this call
+ * newly stored a FLEET post. The hint is never signed, stored or announced,
+ * and changes nothing about whether or how the post is published.
+ * `hint_out` (may be NULL) receives what was done with it:
+ * FLEET_BOARD_PUSH_HINT_NONE when there was none or the publish failed. */
+enum fleet_board_result boot_fleet_board_publish_to(
+    struct fleet_board_post *post, int64_t now, const char *push_to,
+    enum fleet_board_push_hint *hint_out);
 
 #ifdef ZCL_TESTING
 struct vcs_zcode_dht_delegation;
@@ -515,6 +582,11 @@ uint64_t boot_fleet_board_fleet_test_states_freed(void);
  * `tag`; age_push moves every push stream's open time `seconds` back, so the
  * next pump tick sees its wait run out. */
 void boot_fleet_board_fleet_test_bind_second_peer(
+    const struct vcs_zcode_dht_delegation *peer_delegation);
+/* A third delegation the stand-in answers for (NULL clears it; bind_authority
+ * clears it too), so a hint and a `ref` can name two different addressees
+ * while the pusher still resolves. */
+void boot_fleet_board_fleet_test_bind_third_peer(
     const struct vcs_zcode_dht_delegation *peer_delegation);
 size_t boot_fleet_board_fleet_test_push_send(struct boot_svc_ctx *svc,
                                              struct node_db *store);

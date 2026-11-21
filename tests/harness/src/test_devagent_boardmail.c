@@ -83,6 +83,10 @@ struct bmx_post {
     char agent[80];
     char receipt[64];
     long long created, ttl, arrival;
+    /* The post call's `push_to` delivery hint, as the exporter sent it ("-"
+     * when it sent none). Recorded beside the post, never part of its id:
+     * the hint is not signed. */
+    char push_to[80];
 };
 
 struct bmx_node {
@@ -249,6 +253,9 @@ static void bmx_op_post(const struct json_value *in, struct json_value *out,
     (void)snprintf(p.receipt, sizeof(p.receipt), "%s",
                    json_get_str(json_get(in, "receipt")));
     bmx_post_id(&p, p.id);
+    const struct json_value *hint = json_get(in, "push_to");
+    (void)snprintf(p.push_to, sizeof(p.push_to), "%s",
+                   hint ? json_get_str(hint) : "-");
     stored = bmx_store(g_bmx_active, &p);
     if (!stored) {
         bmx_refuse(out, "BOARD_REFUSED");
@@ -1457,6 +1464,60 @@ _test_next:;
     return failures;
 }
 
+/* Posts on `node` signed by `host` whose post call carried `push_to`. */
+static long long bmx_hinted(int node, int host, const char *push_to)
+{
+    long long hits = 0;
+    for (size_t i = 0; i < g_bmx_node[node].n; i++) {
+        const struct bmx_post *p = &g_bmx_node[node].p[i];
+        hits += strcmp(p->host, g_bmx_host[host]) == 0 &&
+                strcmp(p->push_to, push_to) == 0;
+    }
+    return hits;
+}
+
+static int bmx_t_push_hint(void)
+{
+    int failures = 0;
+    TEST("boardmail: a box-addressed row and every answer to an imported "
+         "directive name their box's board key as the push hint; alias and "
+         "broadcast rows are still not exported") {
+        struct rcv_beat_stats st;
+        ASSERT(bmx_setup("push-hint"));
+        /* A's directive to node-b: hinted to node-b's board key. */
+        ASSERT(bmx_sent("job-h"));
+        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
+        ASSERT_EQ(bmx_hinted(BMX_A, BMX_A, g_bmx_host[BMX_B]), 1);
+        /* B's accept, and the worker's result posted to everyone, answer
+         * the directive A sent: both hinted back to node-a. */
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT(bmx_mail("node-b", "*", "result", "job-h",
+                        "worker=node-b\nstate=done\nverdict=pass\n"));
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(bmx_signed_by(BMX_B, BMX_B), 2);
+        ASSERT_EQ(bmx_hinted(BMX_B, BMX_B, g_bmx_host[BMX_A]), 2);
+        /* Alias and broadcast rows that answer nothing stay local. */
+        bmx_use(BMX_A);
+        ASSERT(bmx_mail("chatgpt", "*", "note", "bcast-1", "to everyone\n"));
+        ASSERT(bmx_mail("chatgpt", "someagent", "note", "alias-1",
+                        "to an agent alias\n"));
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 0);
+        ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
+        /* No carried post went without its hint. */
+        ASSERT_EQ(bmx_hinted(BMX_A, BMX_A, "-"), 0);
+        ASSERT_EQ(bmx_hinted(BMX_B, BMX_B, "-"), 0);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
 static int bmx_t_oversize(void)
 {
     int failures = 0;
@@ -1643,6 +1704,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_deferred();
     failures += bmx_t_oversize();
     failures += bmx_t_delivery();
+    failures += bmx_t_push_hint();
     failures += bmx_t_directory();
     failures += bmx_t_directory_crowded();
     failures += bmx_t_append_retry();

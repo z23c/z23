@@ -68,6 +68,9 @@ void board_push_lane_tick(struct boot_svc_ctx *svc, struct node_db *store,
                           int64_t now);
 /* Fill the push fields of the lane's counters. */
 void board_push_counts(struct boot_fleet_board_fleet_counts *out);
+/* The token a skip reason and a push code are logged and reported as. */
+const char *board_push_skip_name(unsigned why);
+const char *board_push_code_name(unsigned code);
 /* Drop the queue, the inbox and the per-session memory. */
 void board_push_forget(void);
 

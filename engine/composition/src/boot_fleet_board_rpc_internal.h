@@ -17,4 +17,7 @@ bool fb_render_list(struct json_value *result,
                     const struct db_fleet_board_post *rows, int n);
 void fb_op_list(struct node_db *ndb, const struct json_value *in,
                 struct json_value *result, int64_t now);
+/* Add the fleet carriage lane's counters to a status reply as one bounded
+ * "carriage" object (boot_fleet_board_carriage_rpc.c). */
+bool fb_render_carriage(struct json_value *result);
 #endif

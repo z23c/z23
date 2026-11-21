@@ -34,13 +34,16 @@ static _Atomic uint64_t g_delegation_refused;
 static _Atomic uint64_t g_role_refused;
 
 #ifdef ZCL_TESTING
-/* See boot_fleet_board_fleet_test_bind_authority / _bind_second_peer. */
+/* See boot_fleet_board_fleet_test_bind_authority / _bind_second_peer /
+ * _bind_third_peer. */
 static zcl_mutex_t g_test_lock;
 static zcl_once_t g_test_once = ZCL_ONCE_INIT;
 static bool g_test_authority;
 static struct vcs_zcode_dht_delegation g_test_delegation;
 static struct vcs_zcode_dht_delegation g_test_second;
 static bool g_test_second_set;
+static struct vcs_zcode_dht_delegation g_test_third;
+static bool g_test_third_set;
 static uint8_t g_test_genesis[32];
 static int64_t g_test_now;
 
@@ -72,6 +75,10 @@ bool board_peer_delegation(const struct db_mesh_pairing *row,
                     memcmp(row->peer_noise_pubkey,
                            g_test_second.noise_static_pubkey, 32) == 0
                 ? &g_test_second
+            : g_test_third_set &&
+                    memcmp(row->peer_noise_pubkey,
+                           g_test_third.noise_static_pubkey, 32) == 0
+                ? &g_test_third
                 : NULL;
         if (d)
             *out = *d;
@@ -155,27 +162,48 @@ bool board_pairing_for_peer(struct node_db *ndb,
     return found;
 }
 
-bool board_pairing_allowing(struct node_db *ndb,
-                            const uint8_t peer_noise_static[32],
-                            uint64_t capability, int64_t now,
-                            struct db_mesh_pairing *out)
+/* Add `key` to the first `n` of `keys` unless it is there or they are full. */
+static size_t board_key_add(uint8_t (*keys)[32], size_t n, size_t cap,
+                            const uint8_t key[32])
 {
+    for (size_t i = 0; i < n; i++)
+        if (memcmp(keys[i], key, 32) == 0)
+            return n;
+    if (n == cap)
+        return n;
+    memcpy(keys[n], key, 32);
+    return n + 1;
+}
+
+size_t board_push_pusher_keys(struct node_db *ndb,
+                              const uint8_t peer_noise_static[32], int64_t now,
+                              uint8_t (*keys)[32], size_t cap,
+                              enum fleet_board_push_refusal *why)
+{
+    *why = FLEET_BOARD_PUSH_REFUSAL_PAIRING;
     struct db_mesh_pairing *rows = zcl_calloc(
         FLEET_BOARD_FLEET_PEERS_MAX, sizeof *rows, "fleet_board_push_pairing");
     if (!rows)
-        return false;
+        return 0;
     int count = db_mesh_pairing_list(ndb, rows, FLEET_BOARD_FLEET_PEERS_MAX);
-    bool found = false;
-    /* The list runs oldest first: the last row that allows is the newest. */
-    for (int i = 0; i < count; i++) {
+    size_t n = 0;
+    bool judged = false;
+    /* The list runs oldest first: walk it from the end, newest first. */
+    for (int i = count - 1; i >= 0 && n < cap; i--) {
         if (memcmp(rows[i].peer_noise_pubkey, peer_noise_static, 32) != 0 ||
-            !mesh_pairing_allows(&rows[i], capability, now))
+            !mesh_pairing_allows(&rows[i], MESH_PAIRING_CAP_STATUS_READ, now))
             continue;
-        *out = rows[i];
-        found = true;
+        uint8_t online[32];
+        enum fleet_board_push_refusal r =
+            board_push_judge_peer(&rows[i], false, now, online);
+        if (r == FLEET_BOARD_PUSH_REFUSALS)
+            n = board_key_add(keys, n, cap, online);
+        else if (!judged)
+            *why = r; /* the newest allowing row's failure names the refusal */
+        judged = true;
     }
     free(rows);
-    return found;
+    return n;
 }
 
 enum fleet_board_push_refusal board_push_judge_peer(
@@ -285,6 +313,19 @@ void boot_fleet_board_fleet_test_bind_authority(
     }
     memset(&g_test_second, 0, sizeof g_test_second);
     g_test_second_set = false;
+    memset(&g_test_third, 0, sizeof g_test_third);
+    g_test_third_set = false;
+    zcl_mutex_unlock(&g_test_lock);
+}
+
+void boot_fleet_board_fleet_test_bind_third_peer(
+    const struct vcs_zcode_dht_delegation *peer_delegation)
+{
+    board_test_lock();
+    g_test_third_set = peer_delegation != NULL;
+    memset(&g_test_third, 0, sizeof g_test_third);
+    if (peer_delegation)
+        g_test_third = *peer_delegation;
     zcl_mutex_unlock(&g_test_lock);
 }
 

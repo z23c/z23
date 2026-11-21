@@ -7897,7 +7897,7 @@ static int test_fleet_board_state_tag(unsigned c)
 #define FBP_PUSHER 7
 #define FBP_ADDRESSEE 9
 #define FBP_STRANGER 8
-#define FBP_CASES 30u
+#define FBP_CASES 41u
 
 /* A failed step names its line and fails the case. */
 #define FBP_REQUIRE(cond)                                                      \
@@ -8902,6 +8902,708 @@ static bool fbp_case_commit_never_waits(struct fbp *p)
     return true;
 }
 
+/* ── the delivery hint, and the re-review fixes ───────────────────────── */
+
+/* A mail row as the boardmail exporter carries it: the board post's text,
+ * naming its recipient only inside the JSON. */
+#define FBH_MAIL_ROW                                                           \
+    "{\"seq\":1,\"ts\":\"2026-11-22T00:00:00Z\",\"from\":\"chatgpt\","         \
+    "\"to\":\"node-b\",\"kind\":\"directive\",\"body\":\"run the gate\","      \
+    "\"ref\":\"job-1\"}"
+
+/* A mail-shaped FLEET note by `who` with no ref (what the exporter posts),
+ * stored in `db`. */
+static bool fbh_mail_post(struct node_db *db, uint8_t who, const char *text,
+                          uint32_t ttl, struct fleet_board_post *out)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    fb_test_compose(out, FLEET_BOARD_KIND_NOTE, "chatgpt", text, 2001, ttl);
+    fb_test_scope(out, FLEET_BOARD_SCOPE_FLEET, "");
+    (void)snprintf(out->receipt, sizeof out->receipt, "%s", "z23.mail.v1");
+    return fleet_board_post_sign(out, seed, pk) == FLEET_BOARD_OK &&
+           db_fleet_board_post_ingest(db, out, 2100, NULL) == FLEET_BOARD_OK;
+}
+
+static size_t fbh_count(const uint8_t *hay, size_t n, const uint8_t *needle,
+                        size_t m)
+{
+    size_t hits = 0;
+    for (size_t i = 0; m && i + m <= n; i++)
+        hits += memcmp(hay + i, needle, m) == 0;
+    return hits;
+}
+
+/* How often `key` appears in `bytes`, raw or as lowercase hex. */
+static size_t fbh_key_hits(const uint8_t *bytes, size_t n, const uint8_t key[32])
+{
+    char hex[65];
+    zcl_hex_encode(key, 32, hex);
+    return fbh_count(bytes, n, key, 32) +
+           fbh_count(bytes, n, (const uint8_t *)hex, 64);
+}
+
+/* Every frame queued on `from`, searched for `key` and then carried through
+ * the production decoder on `to`. Returns the frames the decoder took. */
+static size_t fbh_carry(struct p2p_node *from, struct send_segment *q,
+                        struct noise_transport *t, struct msg_processor *mp,
+                        struct p2p_node *to, const uint8_t key[32],
+                        size_t *hits)
+{
+    static uint8_t frame[MESH_LOOP_WIRE_MAX];
+    size_t n = 0;
+    bool more = true;
+    while (more) {
+        more = false;
+        size_t len = mesh_loop_take(from, q, t, frame, sizeof frame, &more);
+        if (len == 0)
+            continue;
+        *hits += fbh_key_hits(frame, len, key);
+        n += mesh_stream_frame(mp, to, frame, len, NULL) ? 1u : 0u;
+    }
+    return n;
+}
+
+/* The stored row of `id` in `db`, as its signed wire, holds no trace of
+ * `key`. */
+static bool fbh_stored_clean(struct node_db *db, const uint8_t id[32],
+                             const uint8_t key[32])
+{
+    static struct db_fleet_board_post row;
+    size_t len = 0;
+    return db_fleet_board_post_lookup_checked(db, id, &row) ==
+               FLEET_BOARD_LOOKUP_FOUND &&
+           fleet_board_post_encode(&row.post, g_fbp_wire, sizeof g_fbp_wire,
+                                   &len) == FLEET_BOARD_OK &&
+           fbh_key_hits(g_fbp_wire, len, key) == 0;
+}
+
+/* Case 30. */
+static bool fbp_case_hint_delivers(struct fbp *p)
+{
+    struct fleet_board_post mail;
+    char to[65];
+    const uint8_t *key = p->addressee.online_pubkey;
+    size_t hits = 0;
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
+    zcl_hex_encode(key, 32, to);
+    int64_t asked = boot_fleet_board_fleet_test_last_after();
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 1);
+    /* Tick one, the pushing box: one OPEN, carried and searched. */
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 1);
+    FBP_REQUIRE(fbh_carry(p->w.asker, p->w.ask_q, p->w.f.res_term, &p->w.mp,
+                          p->w.answerer, key, &hits) == 1);
+    /* Tick two, the hinted box: stored, and the receipt goes back. */
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_commit(&p->w.a) == 1);
+    FBP_REQUIRE(fbh_carry(p->w.answerer, p->w.answer_q, p->w.f.term_peer.ini,
+                          &p->w.mp, p->w.asker, key, &hits) == 1);
+    FBP_REQUIRE(hits == 0);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, mail.id));
+    FBP_REQUIRE(boot_fleet_board_fleet_test_live_tagged(true, BOARD_STATE_PULL) == 0);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_last_after() == asked);
+    FBP_REQUIRE(fbh_stored_clean(&p->w.a, mail.id, key));
+    FBP_REQUIRE(fbh_stored_clean(&p->w.b, mail.id, key));
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_hint[FLEET_BOARD_PUSH_HINT_QUEUED] ==
+                p->before.push_hint[FLEET_BOARD_PUSH_HINT_QUEUED] + 1);
+    FBP_REQUIRE(fbp_counted_one_stored(p));
+    /* The same row then offered by pull is one row: the pull adds the
+     * question and the reply, and finds the note already held. */
+    FBP_REQUIRE(fbp_pull_into_addressee(p) == 2);
+    struct fleet_board_status st;
+    FBP_REQUIRE(db_fleet_board_status(&p->w.a, FBW_NOW, &st) && st.posts == 3);
+    return true;
+}
+
+/* The pushing box's own board as a node runs it: the publish path on its
+ * store, its identity in the fixture's datadir, and the fleet_board RPC. */
+struct fbh_node {
+    struct boot_svc_ctx svc;
+    struct rpc_table table;
+    char warm[256];
+    bool was_warming;
+    bool wired;
+    uint8_t pk[32];
+};
+
+static struct fbh_node g_fbh;
+
+/* A delegation for `pk` on `noise` under the master `master_fill` names,
+ * valid for an hour either side of `now` on the real clock: the post RPC
+ * stamps created_at from it. */
+static bool fbh_delegation(const struct mesh_term_fixture *f,
+                           const uint8_t pk[32], const uint8_t noise[32],
+                           uint8_t master_fill, int64_t now,
+                           struct vcs_zcode_dht_delegation *out)
+{
+    uint8_t beacon[32], master_seed[32];
+    memset(beacon, 0x22, sizeof beacon);
+    memset(master_seed, master_fill, sizeof master_seed);
+    return vcs_zcode_dht_delegation_sign(
+               out, f->genesis, pk, noise, ZCL_FINALITY_DEPTH, beacon,
+               (uint64_t)(now - 3600), (uint64_t)(now + 3600), 7,
+               master_seed) == VCS_ZCODE_DHT_DELEGATION_OK;
+}
+
+static bool fbh_wire(struct fbp *p, struct fbh_node *h)
+{
+    memset(h, 0, sizeof *h);
+    h->svc.node_db = &p->w.b;
+    h->svc.datadir = p->w.dir;
+    boot_fleet_board_shutdown();
+    boot_fleet_board_wire(&h->svc);
+    h->wired = true;
+    rpc_table_init(&h->table);
+    boot_fleet_board_register_rpc(&h->table);
+    h->was_warming = rpc_is_in_warmup(h->warm, sizeof h->warm);
+    set_rpc_warmup_finished();
+    uint8_t seed[32];
+    char why[256];
+    struct vcs_zcode_dht_delegation pusher, addressee;
+    why[0] = '\0';
+    bool ok = boot_fleet_board_identity(seed, h->pk, why, sizeof why);
+    memset(seed, 0, sizeof seed);
+    if (!ok)
+        printf("FAIL: the pushing box's board identity: %s\n", why);
+    FBP_REQUIRE(ok);
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    FBP_REQUIRE(fbh_delegation(&p->w.f, h->pk, p->w.f.term_peer.noise_pub,
+                               0x61, now, &pusher));
+    FBP_REQUIRE(fbh_delegation(&p->w.f, p->addressee.online_pubkey,
+                               p->w.f.resp_noise_pub, 0x88, now, &addressee));
+    boot_fleet_board_fleet_test_bind_authority(&pusher, p->w.f.genesis, now);
+    boot_fleet_board_fleet_test_bind_second_peer(&addressee);
+    return true;
+}
+
+static void fbh_unwire(struct fbh_node *h)
+{
+    if (!h->wired)
+        return;
+    if (h->was_warming)
+        set_rpc_warmup_started(h->warm);
+    boot_fleet_board_shutdown();
+    h->wired = false;
+}
+
+/* One fleet_board RPC with `input` (consumed). */
+static bool fbh_rpc(struct fbh_node *h, struct json_value *input,
+                    struct json_value *result)
+{
+    struct json_value params;
+    json_init(&params);
+    json_set_array(&params);
+    bool ok = json_push_back(&params, input) &&
+              rpc_table_execute(&h->table, "fleet_board", &params, result);
+    json_free(&params);
+    json_free(input);
+    return ok;
+}
+
+/* op=post of a mail-shaped note, as the exporter sends it. `push_to` NULL
+ * sends none; `number` sends the hint as a JSON number instead. A non-zero
+ * `created_at` is passed back, as a re-export does. */
+static bool fbh_post(struct fbh_node *h, const char *scope, const char *text,
+                     const char *push_to, bool number, int64_t created_at,
+                     struct json_value *result)
+{
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "op", "post") &&
+              json_push_kv_str(&in, "kind", "note") &&
+              json_push_kv_str(&in, "scope", scope) &&
+              json_push_kv_str(&in, "text", text) &&
+              json_push_kv_str(&in, "agent", "chatgpt") &&
+              json_push_kv_str(&in, "receipt", "z23.mail.v1") &&
+              json_push_kv_int(&in, "ttl", 604800);
+    if (ok && created_at > 0)
+        ok = json_push_kv_int(&in, "created_at", created_at);
+    if (ok && push_to)
+        ok = json_push_kv_str(&in, "push_to", push_to);
+    if (ok && number)
+        ok = json_push_kv_int(&in, "push_to", 7);
+    if (!ok) {
+        json_free(&in);
+        return false;
+    }
+    return fbh_rpc(h, &in, result) && json_get_bool(json_get(result, "ok"));
+}
+
+/* The posted id, and what the node said it did with the hint. */
+static bool fbh_posted(const struct json_value *r, const char *hint,
+                       uint8_t id[32])
+{
+    const char *said = json_get_str(json_get(r, "push_hint"));
+    return fleet_board_id_from_hex(json_get_str(json_get(r, "id")), id) &&
+           (hint ? said && strcmp(said, hint) == 0 : said == NULL);
+}
+
+/* The status reply's carriage counters this group reads. */
+struct fbh_status {
+    int64_t opened, hint[FLEET_BOARD_PUSH_HINTS], in_stored, receipt_stored,
+        skipped_unresolved;
+};
+
+static int64_t fbh_at(const struct json_value *o, const char *a, const char *b,
+                      const char *c)
+{
+    const struct json_value *v = json_get(json_get(o, a), b);
+    if (c)
+        v = json_get(v, c);
+    return v && v->type == JSON_INT ? json_get_int(v) : -1;
+}
+
+static bool fbh_status(struct fbh_node *h, struct fbh_status *s)
+{
+    struct json_value in, r;
+    json_init(&in);
+    json_init(&r);
+    json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "op", "status") && fbh_rpc(h, &in, &r) &&
+              json_get_bool(json_get(&r, "ok"));
+    const struct json_value *c = json_get(&r, "carriage");
+    memset(s, 0, sizeof *s);
+    if (ok && c) {
+        s->opened = fbh_at(c, "push_out", "opened", NULL);
+        for (unsigned i = FLEET_BOARD_PUSH_HINT_QUEUED;
+             i < FLEET_BOARD_PUSH_HINTS; i++)
+            s->hint[i] = fbh_at(c, "push_out", "hint",
+                                boot_fleet_board_push_hint_name(
+                                    (enum fleet_board_push_hint)i));
+        s->in_stored = fbh_at(c, "push_in", "records", "stored");
+        s->receipt_stored = fbh_at(c, "push_out", "receipt_records", "stored");
+        s->skipped_unresolved = fbh_at(c, "push_out", "skipped", "unresolved");
+    }
+    /* Additive: the fields that were there before are still there. */
+    ok = ok && c && json_get(&r, "posts") && json_get(&r, "chain_intact") &&
+         s->opened >= 0 && s->in_stored >= 0 && s->receipt_stored >= 0 &&
+         s->skipped_unresolved >= 0 &&
+         fbh_at(c, "pull", "stored", NULL) >= 0 &&
+         fbh_at(c, "push_in", "refused", "delegation") >= 0;
+    json_free(&r);
+    return ok;
+}
+
+static bool fbh_case_hint_rpc(struct fbp *p, struct fbh_node *h)
+{
+    char to[65];
+    const uint8_t *key = p->addressee.online_pubkey;
+    uint8_t id[32];
+    size_t hits = 0;
+    struct fbh_status s0, s1;
+    struct json_value r;
+    json_init(&r);
+    zcl_hex_encode(key, 32, to);
+    FBP_REQUIRE(fbh_status(h, &s0));
+    bool posted = fbh_post(h, "fleet", FBH_MAIL_ROW, to, false, 0, &r) &&
+                  fbh_posted(&r, "queued", id);
+    json_free(&r);
+    FBP_REQUIRE(posted);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 1);
+    FBP_REQUIRE(fbh_carry(p->w.asker, p->w.ask_q, p->w.f.res_term, &p->w.mp,
+                          p->w.answerer, key, &hits) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_commit(&p->w.a) == 1);
+    FBP_REQUIRE(fbh_carry(p->w.answerer, p->w.answer_q, p->w.f.term_peer.ini,
+                          &p->w.mp, p->w.asker, key, &hits) == 1);
+    FBP_REQUIRE(hits == 0);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, id));
+    FBP_REQUIRE(boot_fleet_board_fleet_test_live_tagged(true, BOARD_STATE_PULL) == 0);
+    FBP_REQUIRE(fbh_stored_clean(&p->w.a, id, key));
+    FBP_REQUIRE(fbh_stored_clean(&p->w.b, id, key));
+    /* fleet board status shows the counters moving. */
+    FBP_REQUIRE(fbh_status(h, &s1));
+    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_QUEUED] ==
+                s0.hint[FLEET_BOARD_PUSH_HINT_QUEUED] + 1);
+    FBP_REQUIRE(s1.opened == s0.opened + 1);
+    FBP_REQUIRE(s1.in_stored == s0.in_stored + 1);
+    FBP_REQUIRE(s1.receipt_stored == s0.receipt_stored + 1);
+    /* The same row by pull is one row (the fixture's own posts are long
+     * expired on this clock, so the pull finds only the note, held). */
+    FBP_REQUIRE(fbp_pull_into_addressee(p) == 0);
+    struct fleet_board_status st;
+    FBP_REQUIRE(db_fleet_board_status(&p->w.a,
+                                      (int64_t)platform_time_wall_time_t(),
+                                      &st) &&
+                st.posts == 1);
+    return true;
+}
+
+/* Case 31. */
+static bool fbp_case_hint_rpc(struct fbp *p)
+{
+    bool ok = fbh_wire(p, &g_fbh) && fbh_case_hint_rpc(p, &g_fbh);
+    fbh_unwire(&g_fbh);
+    return ok;
+}
+
+static bool fbh_case_rpc_refusals(struct fbp *p, struct fbh_node *h)
+{
+    char to[65], upper[65], self[65];
+    uint8_t id_bad[32], id_num[32], id_self[32], id_public[32], id_again[32];
+    struct fbh_status s0, s1;
+    struct json_value r;
+    json_init(&r);
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    for (size_t i = 0; i < 65; i++)
+        upper[i] = (char)(to[i] >= 'a' && to[i] <= 'f' ? to[i] - 32 : to[i]);
+    zcl_hex_encode(h->pk, 32, self);
+    FBP_REQUIRE(fbh_status(h, &s0));
+    /* A hint on a PUBLIC post: refused by name; the post is published. */
+    bool ok = fbh_post(h, "public", "a public note", to, false, 0, &r) &&
+              fbh_posted(&r, "not_fleet", id_public);
+    json_free(&r);
+    FBP_REQUIRE(ok);
+    /* Malformed, as text and as a number: refused, the post still stored. */
+    ok = fbh_post(h, "fleet", "{\"seq\":2,\"to\":\"node-b\"}", upper, false, 0,
+                  &r) &&
+         fbh_posted(&r, "malformed", id_bad);
+    json_free(&r);
+    FBP_REQUIRE(ok);
+    ok = fbh_post(h, "fleet", "{\"seq\":3,\"to\":\"node-b\"}", NULL, true, 0,
+                  &r) &&
+         fbh_posted(&r, "malformed", id_num);
+    json_free(&r);
+    FBP_REQUIRE(ok);
+    /* This box itself. */
+    ok = fbh_post(h, "fleet", "{\"seq\":4,\"to\":\"node-b\"}", self, false, 0,
+                  &r) &&
+         fbh_posted(&r, "self", id_self);
+    int64_t created = json_get_int(json_get(&r, "created_at"));
+    json_free(&r);
+    FBP_REQUIRE(ok);
+    /* The same post again stores nothing new, so its hint has nothing to
+     * ride. */
+    ok = fbh_post(h, "fleet", "{\"seq\":4,\"to\":\"node-b\"}", to, false,
+                  created, &r) &&
+         fbh_posted(&r, "not_stored", id_again);
+    json_free(&r);
+    FBP_REQUIRE(ok && memcmp(id_again, id_self, 32) == 0);
+    /* None of them was queued, and no reply ever named a key. */
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 0);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.b, id_bad) &&
+                db_fleet_board_have(&p->w.b, id_num) &&
+                db_fleet_board_have(&p->w.b, id_public));
+    FBP_REQUIRE(fbh_status(h, &s1));
+    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] ==
+                s0.hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] + 1);
+    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_MALFORMED] ==
+                s0.hint[FLEET_BOARD_PUSH_HINT_MALFORMED] + 2);
+    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_SELF] ==
+                s0.hint[FLEET_BOARD_PUSH_HINT_SELF] + 1);
+    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_NOT_STORED] ==
+                s0.hint[FLEET_BOARD_PUSH_HINT_NOT_STORED] + 1);
+    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_QUEUED] ==
+                s0.hint[FLEET_BOARD_PUSH_HINT_QUEUED]);
+    /* The fleet posts still reach the eligible peer by pull. */
+    FBP_REQUIRE(fbp_pull_into_addressee(p) == 3);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, id_bad) &&
+                db_fleet_board_have(&p->w.a, id_num) &&
+                db_fleet_board_have(&p->w.a, id_self));
+    return true;
+}
+
+/* Case 32. */
+static bool fbp_case_hint_rpc_refusals(struct fbp *p)
+{
+    bool ok = fbh_wire(p, &g_fbh) && fbh_case_rpc_refusals(p, &g_fbh);
+    fbh_unwire(&g_fbh);
+    return ok;
+}
+
+/* Case 33. A hint names a box a pull would not serve: nothing is opened,
+ * the reason is counted, and the pull still delivers. */
+static bool fbp_case_hint_ineligible(struct fbp *p)
+{
+    struct fleet_board_post mail;
+    char to[65], stranger_hex[65];
+    uint8_t seed[32], stranger[32];
+    fb_test_identity(FBP_STRANGER, seed, stranger);
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    zcl_hex_encode(stranger, 32, stranger_hex);
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
+    /* No read role. */
+    g_fbw_deny_read = true;
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    size_t opened = boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b);
+    g_fbw_deny_read = false;
+    FBP_REQUIRE(opened == 0);
+    /* No pairing names the key. */
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       stranger_hex) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 0);
+    /* No live session. */
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    atomic_store(&p->w.asker->disconnect, true);
+    opened = boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b);
+    atomic_store(&p->w.asker->disconnect, false);
+    FBP_REQUIRE(opened == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_INELIGIBLE] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_INELIGIBLE] + 1);
+    FBP_REQUIRE(c.push_refused_out[FLEET_BOARD_PUSH_REFUSAL_ROLE] ==
+                p->before.push_refused_out[FLEET_BOARD_PUSH_REFUSAL_ROLE] + 1);
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_UNRESOLVED] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_UNRESOLVED] + 1);
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED] + 1);
+    FBP_REQUIRE(c.push_opened == p->before.push_opened);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_inbox_used() == 0);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, mail.id));
+    FBP_REQUIRE(fbp_pull_into_addressee(p) == 3);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, mail.id));
+    return true;
+}
+
+/* Case 34. A hint that is malformed, names this box, rides a PUBLIC post
+ * or a post another box signed is refused by name and never queued. */
+static bool fbp_case_hint_refused_by_name(struct fbp *p)
+{
+    static const char *const malformed[] = {
+        "",
+        "zz",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+        "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+    };
+    struct fleet_board_post mail, public_note, foreign;
+    char to[65], self[65];
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    zcl_hex_encode(p->pk_pusher, 32, self);
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
+    FBP_REQUIRE(fbw_post(&p->w.b, FBP_PUSHER, FLEET_BOARD_SCOPE_PUBLIC,
+                         "a public note", 2000, 3600, 2100, &public_note));
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_ADDRESSEE, "{\"seq\":5}", 3600,
+                              &foreign));
+    for (size_t i = 0; i < sizeof malformed / sizeof malformed[0]; i++)
+        FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(
+                        &mail, p->pk_pusher, malformed[i]) ==
+                    FLEET_BOARD_PUSH_HINT_MALFORMED);
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       self) ==
+                FLEET_BOARD_PUSH_HINT_SELF);
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&public_note,
+                                                       p->pk_pusher, to) ==
+                FLEET_BOARD_PUSH_HINT_NOT_FLEET);
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&foreign, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_NOT_OWN);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_hint[FLEET_BOARD_PUSH_HINT_MALFORMED] ==
+                p->before.push_hint[FLEET_BOARD_PUSH_HINT_MALFORMED] + 5);
+    FBP_REQUIRE(c.push_hint[FLEET_BOARD_PUSH_HINT_SELF] ==
+                p->before.push_hint[FLEET_BOARD_PUSH_HINT_SELF] + 1);
+    FBP_REQUIRE(c.push_hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] ==
+                p->before.push_hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] + 1);
+    FBP_REQUIRE(c.push_hint[FLEET_BOARD_PUSH_HINT_NOT_OWN] ==
+                p->before.push_hint[FLEET_BOARD_PUSH_HINT_NOT_OWN] + 1);
+    FBP_REQUIRE(c.push_hint[FLEET_BOARD_PUSH_HINT_QUEUED] ==
+                p->before.push_hint[FLEET_BOARD_PUSH_HINT_QUEUED]);
+    FBP_REQUIRE(c.push_queued == p->before.push_queued);
+    return true;
+}
+
+/* Case 35. A hint and a ref that name different paired boxes: exactly one
+ * push, to the hinted box. */
+static bool fbp_case_hint_beats_ref(struct fbp *p)
+{
+    uint8_t noise[32];
+    struct vcs_zcode_dht_delegation third;
+    struct fleet_board_post from_third, to_both, control;
+    char to[65];
+    size_t hits = 0;
+    FBP_REQUIRE(fbp_fake_peer(&p->w, 0xD1, noise));
+    FBP_REQUIRE(fbp_delegation(&p->w.f, FBP_STRANGER, noise, 0xD1, &third));
+    boot_fleet_board_fleet_test_bind_third_peer(&third);
+    FBP_REQUIRE(fbw_post(&p->w.b, FBP_STRANGER, FLEET_BOARD_SCOPE_FLEET,
+                         "a question from the third box", 2000, 3600, 2100,
+                         &from_third));
+    FBP_REQUIRE(fbp_reply_post(&p->w.b, FBP_PUSHER, from_third.id,
+                               "answers the third box, hinted elsewhere",
+                               &to_both));
+    FBP_REQUIRE(fbp_reply_post(&p->w.b, FBP_PUSHER, from_third.id,
+                               "answers the third box, no hint", &control));
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    /* Without a hint the ref decides, and the addressee gets nothing. */
+    boot_fleet_board_fleet_push_enqueue(&control, p->pk_pusher);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 0);
+    /* With one, the hinted box gets the post, once, and nobody else. */
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&to_both, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_live_tagged(true, BOARD_STATE_PUSH_OUT) == 1);
+    FBP_REQUIRE(fbh_carry(p->w.asker, p->w.ask_q, p->w.f.res_term, &p->w.mp,
+                          p->w.answerer, p->addressee.online_pubkey,
+                          &hits) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_commit(&p->w.a) == 1);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, to_both.id));
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, control.id));
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_opened == p->before.push_opened + 1);
+    return true;
+}
+
+/* A newer live row for `noise` under the master `fill` names: it sorts after
+ * the fixture's row, and no delegation the lane resolves matches it. */
+static bool fbh_newer_row(struct fbw *w, const uint8_t noise[32], uint8_t fill)
+{
+    struct db_mesh_pairing row;
+    memset(&row, 0, sizeof row);
+    memcpy(row.network_genesis, w->f.genesis, 32);
+    memset(row.peer_master_pubkey, fill, 32);
+    memcpy(row.peer_noise_pubkey, noise, 32);
+    row.capability_mask = MESH_PAIRING_CAP_STATUS_READ;
+    row.delegation_sequence = 7;
+    row.paired_at = FBW_PAIRED_AT + 5;
+    row.expires_at = FBW_PAIRING_EXPIRES;
+    return mesh_pairing_id_derive(row.network_genesis, row.peer_master_pubkey,
+                                  row.peer_noise_pubkey, row.pairing_id) &&
+           db_mesh_pairing_insert(&w->f.ndb, &row);
+}
+
+/* Case 36 (re-review nit 1, receiving half). */
+static bool fbp_case_pusher_two_masters(struct fbp *p)
+{
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.term_peer.noise_pub, 0xE1));
+    FBP_REQUIRE(fbp_push_once(p));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    return fbp_counted_one_stored(p);
+}
+
+/* Case 37 (re-review nit 1, sending half). */
+static bool fbp_case_addressee_two_masters(struct fbp *p)
+{
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE2));
+    FBP_REQUIRE(fbp_push_once(p));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    return fbp_counted_one_stored(p);
+}
+
+static bool fbh_case_node_wide(struct fbp *p)
+{
+    struct fleet_board_post filler;
+    struct board_push_receipt rc;
+    FBP_REQUIRE(fbw_post(&p->w.a, FBP_STRANGER, FLEET_BOARD_SCOPE_FLEET,
+                         "fills the receiving store", 2000, 3600, 2100,
+                         &filler));
+    db_fleet_board_test_set_store_limits(1, 1024 * 1024);
+    FBP_REQUIRE(fbp_probe(p, 1, fbp_payload(&p->reply, 1), &rc));
+    FBP_REQUIRE(rc.code == FLEET_BOARD_PUSH_CODE_COMMITTED && rc.n == 1);
+    FBP_REQUIRE(rc.rec[0].verdict == FLEET_BOARD_PUSH_RECORD_DEFERRED);
+    FBP_REQUIRE(rc.rec[0].result == FLEET_BOARD_OK);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
+/* Case 38 (re-review nit 2). A full store is this box's state, not the
+ * pusher's post's: the record is deferred with no result code. */
+static bool fbp_case_node_wide_result(struct fbp *p)
+{
+    bool ok = fbh_case_node_wide(p);
+    db_fleet_board_test_set_store_limits(0, 0);
+    return ok;
+}
+
+/* Case 39 (re-review nit 5). */
+static bool fbp_case_expired_not_pushed(struct fbp *p)
+{
+    uint8_t seed[32], pk[32];
+    struct fleet_board_post brief;
+    fb_test_identity(FBP_PUSHER, seed, pk);
+    fb_test_compose(&brief, FLEET_BOARD_KIND_NOTE, "carrier",
+                    "an answer that expires while it waits", 2001, 300);
+    fb_test_scope(&brief, FLEET_BOARD_SCOPE_FLEET, "");
+    memcpy(brief.ref, p->question.id, 32);
+    FBP_REQUIRE(fleet_board_post_sign(&brief, seed, pk) == FLEET_BOARD_OK);
+    FBP_REQUIRE(db_fleet_board_post_ingest(&p->w.b, &brief, 2100, NULL) ==
+                FLEET_BOARD_OK);
+    /* Expired at the lane's clock (2001 + 300 < FBW_NOW): no pull serves it. */
+    boot_fleet_board_fleet_push_enqueue(&brief, p->pk_pusher);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_EXPIRED] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_EXPIRED] + 1);
+    FBP_REQUIRE(c.push_opened == p->before.push_opened);
+    return true;
+}
+
+/* Lines of the captured stderr holding `needle`. */
+static size_t fbh_lines_with(const char *path, const char *needle)
+{
+    char line[2048];
+    size_t n = 0;
+    FILE *f = fopen(path, "rb");
+    while (f && fgets(line, sizeof line, f))
+        n += strstr(line, needle) != NULL;
+    if (f)
+        (void)fclose(f);
+    return n;
+}
+
+/* One push opened, then answered with a receipt naming another post. */
+static bool fbh_wrong_receipt(struct fbp *p)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX], receipt[FLEET_BOARD_PUSH_RECEIPT_MAX];
+    uint8_t kind = 0;
+    uint64_t sid = 0;
+    bool more = false;
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 1);
+    size_t len = mesh_loop_take(p->w.asker, p->w.ask_q, p->w.f.res_term, frame,
+                                sizeof frame, &more);
+    FBP_REQUIRE(len > 0 && mesh_stream_test_read_header(frame, len, &kind, &sid));
+    struct board_push_receipt rc;
+    memset(&rc, 0, sizeof rc);
+    rc.code = FLEET_BOARD_PUSH_CODE_COMMITTED;
+    rc.n = 1;
+    memset(rc.rec[0].id, 0xEE, 32);
+    size_t rlen = board_push_receipt_encode(&rc, receipt);
+    size_t n = mesh_stream_test_close_frame(sid, MESH_STREAM_CLOSED_BY_SERVICE,
+                                            receipt, rlen, frame, sizeof frame);
+    FBP_REQUIRE(n > 0 && mesh_stream_frame(&p->w.mp, p->w.asker, frame, n, NULL));
+    FBP_REQUIRE(boot_fleet_board_fleet_test_live_tagged(true, BOARD_STATE_PUSH_OUT) == 0);
+    return true;
+}
+
+/* Case 40 (re-review nit 4). Receipts naming other posts are counted every
+ * time and logged at most once a window. */
+static bool fbp_case_receipt_log_limited(struct fbp *p)
+{
+    char path[512];
+    (void)snprintf(path, sizeof path, "%s/stderr.log", p->w.dir);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    FBP_REQUIRE(fd >= 0);
+    (void)fflush(stderr);
+    int saved = dup(2);
+    bool redirected = saved >= 0 && dup2(fd, 2) >= 0;
+    bool ok = redirected;
+    for (unsigned i = 0; ok && i < 3; i++)
+        ok = fbh_wrong_receipt(p);
+    (void)fflush(stderr);
+    if (saved >= 0) {
+        (void)dup2(saved, 2);
+        (void)close(saved);
+    }
+    (void)close(fd);
+    FBP_REQUIRE(ok);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_closed[MESH_STREAM_REFUSED_MALFORMED] ==
+                p->before.push_closed[MESH_STREAM_REFUSED_MALFORMED] + 3);
+    FBP_REQUIRE(fbh_lines_with(path, "names other posts than were pushed") <= 1);
+    return true;
+}
+
 typedef bool (*fbp_case_fn)(struct fbp *p);
 
 static const struct {
@@ -8972,6 +9674,34 @@ static const struct {
     { "fleet board push: a commit never waits on another board writer; the "
       "record is answered deferred and the pull carries it",
       fbp_case_commit_never_waits },
+    { "fleet board push hint: a mail-shaped note with a valid hint is stored "
+      "on that box within two lane ticks with no pull opened, the hint is in "
+      "no stored post or frame, and the later pull is one row",
+      fbp_case_hint_delivers },
+    { "fleet board push hint: the post RPC's push_to queues the note, the "
+      "push stores it, and fleet board status shows the counters moving",
+      fbp_case_hint_rpc },
+    { "fleet board push hint: the post RPC refuses a hint on a public post, "
+      "a malformed hint, this box and an already stored post by name, and "
+      "the posts still reach the peer by pull", fbp_case_hint_rpc_refusals },
+    { "fleet board push hint: a hint naming a box without the read role, an "
+      "unpaired box or a disconnected box opens nothing, is counted by "
+      "reason, and the pull still delivers", fbp_case_hint_ineligible },
+    { "fleet board push hint: a malformed hint, this box, a public post and "
+      "another box's post are refused by name and never queued",
+      fbp_case_hint_refused_by_name },
+    { "fleet board push hint: when a hint and a ref name different boxes, "
+      "exactly one push goes, to the hinted box", fbp_case_hint_beats_ref },
+    { "fleet board push: a newer live pairing row under another master does "
+      "not void an honest pusher's push", fbp_case_pusher_two_masters },
+    { "fleet board push: a newer live pairing row under another master does "
+      "not stop the push to the addressee", fbp_case_addressee_two_masters },
+    { "fleet board push: a record deferred because this box's store is full "
+      "carries no result code", fbp_case_node_wide_result },
+    { "fleet board push: an own post that expired while it waited is not "
+      "pushed, and that is counted", fbp_case_expired_not_pushed },
+    { "fleet board push: receipts naming other posts are counted each time "
+      "and logged at most once a window", fbp_case_receipt_log_limited },
 };
 
 /* Each case gets a fresh paired fixture. */

@@ -10,7 +10,11 @@
  *
  * One method, one `op` field, because the whole surface is small and a reader
  * comparing the CLI against the node should be able to see both halves at
- * once. Every op is bounded; no op takes a path, a command, or a key. */
+ * once. Every op is bounded; no op takes a path, a command, or a secret
+ * key. The post op's optional `push_to` names a peer's PUBLIC board key as
+ * a delivery hint for the push (config/boot_fleet_board.h, PUSH): it is
+ * never signed, stored or echoed, and decides only which one eligible peer
+ * is tried first. */
 
 #include "config/boot_fleet_board.h"
 #include "boot_fleet_board_wiki_scope_internal.h"
@@ -300,6 +304,18 @@ static bool fb_compose(const struct json_value *in, struct json_value *result,
     return true;
 }
 
+/* The post op's optional `push_to` delivery hint, as the caller sent it:
+ * NULL when absent or null. A value that is there but is not a string is
+ * handed on as "" so the node refuses it as malformed rather than dropping
+ * it unseen. Shape and every other check belong to the push queue. */
+static const char *fb_push_to(const struct json_value *in)
+{
+    const struct json_value *v = json_get(in, "push_to");
+    if (!v || v->type == JSON_NULL)
+        return NULL;
+    return v->type == JSON_STR && json_get_str(v) ? json_get_str(v) : "";
+}
+
 static void fb_op_post(struct node_db *ndb, const struct json_value *in,
                        struct json_value *result, int64_t now)
 {
@@ -307,7 +323,9 @@ static void fb_op_post(struct node_db *ndb, const struct json_value *in,
     if (!fb_compose(in, result, now, &post) ||
         boot_fleet_wiki_scope_reject(ndb, &post, result))
         return;
-    enum fleet_board_result r = boot_fleet_board_publish(&post, now);
+    enum fleet_board_push_hint hint = FLEET_BOARD_PUSH_HINT_NONE;
+    enum fleet_board_result r =
+        boot_fleet_board_publish_to(&post, now, fb_push_to(in), &hint);
     if (r != FLEET_BOARD_OK) {
         fb_refuse_write(result, r);
         return;
@@ -319,6 +337,10 @@ static void fb_op_post(struct node_db *ndb, const struct json_value *in,
     json_push_kv_str(result, "id", hex);
     json_push_kv_str(result, "kind", fleet_board_kind_name(post.kind));
     json_push_kv_int(result, "created_at", (int64_t)post.created_at);
+    /* What became of the hint, by name; the key itself is never echoed. */
+    if (hint != FLEET_BOARD_PUSH_HINT_NONE)
+        json_push_kv_str(result, "push_hint",
+                         boot_fleet_board_push_hint_name(hint));
 }
 
 static bool fb_wiki_write_ids(const char *parent, const char *binding,
@@ -577,6 +599,10 @@ static void fb_op_status(struct node_db *ndb, struct json_value *result,
     } else {
         json_push_kv_str(result, "host_unavailable", "identity_not_loaded");
     }
+    /* The fleet carriage lane's counters, pull and push, since start. */
+    if (!fb_render_carriage(result))
+        json_push_kv_str(result, "carriage_unavailable",
+                         "the carriage counters could not be rendered");
 }
 
 /* The body is hex so byte offsets may split UTF-8 without losing bytes.

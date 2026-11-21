@@ -33,7 +33,15 @@
  * receipt "z23.mail.v1", ttl BM_TTL_S, and created_at = the row's own ts,
  * so a re-export after a crash signs the same bytes and is the same post id
  * (the store keeps one). A row whose ts is already older than the ttl is
- * never posted: it would be delivered late. A row too large for a board
+ * never posted: it would be delivered late. The post call also names the
+ * box the row is carried for, by the board key its roster line says that
+ * box signs with, as the optional `push_to` delivery hint: the node then
+ * pushes the stored post to that one box at once when a pull from it would
+ * be served the post, and the pull still carries it otherwise. The hint is
+ * not signed and changes neither the post id nor who may read the post; an
+ * answer to an imported directive carries the hint of the box the directive
+ * came from, so its accept, refusals and result return by push too. A row
+ * too large for a board
  * note (BM_TEXT_MAX) is skipped with a log line; fleet.steer.send refuses
  * those before they are written. The cursor advances past a row only when
  * its post was stored or refused for a reason that cannot clear, so a node
@@ -617,8 +625,12 @@ static bool bm_refusal_final(const char *code)
     return false;
 }
 
+/* `push_to`, when not NULL, is the board key (64 lowercase hex) of the one
+ * box the row is carried for: a delivery hint the node uses only to choose
+ * which eligible peer it pushes the stored post to. It is not part of the
+ * signed post, so it changes neither the post id nor who may read it. */
 static enum bm_post bm_post_row(const char *line, const struct bm_row *r,
-                                long long now)
+                                long long now, const char *push_to)
 {
     struct json_value in, out;
     long long created = bm_ts_unix(r->ts);
@@ -646,6 +658,8 @@ static enum bm_post bm_post_row(const char *line, const struct bm_row *r,
     (void)json_push_kv_str(&in, "receipt", BM_RECEIPT);
     (void)json_push_kv_int(&in, "created_at", created);
     (void)json_push_kv_int(&in, "ttl", BM_TTL_S);
+    if (push_to)
+        (void)json_push_kv_str(&in, "push_to", push_to);
     rc = bm_call(&in, &out);
     verdict = rc == BM_RPC_OK ? BM_POST_DONE
               : rc == BM_RPC_REFUSED && bm_refusal_final(bm_str(&out, "code"))
@@ -854,6 +868,21 @@ void zcl_devagent_boardmail_observe(const char *to, const char *ref,
     free(v);
 }
 
+/* The board key of roster box `peer` as the push hint, in `hex`: the key its
+ * node signs board posts with, which is the key the node's push matches a
+ * paired peer by (its delegation's online key). NULL when the box is no
+ * longer on the verified roster: the row is still exported, and the pull
+ * carries it. */
+static const char *bm_push_to(const struct bm_roster *ro, const char *peer,
+                              char hex[BM_HEX + 1])
+{
+    const struct bm_peer *p = bm_by_name(ro, peer);
+    if (!p)
+        return NULL;
+    zcl_hex_encode(p->signer, sizeof(p->signer), hex);
+    return hex;
+}
+
 /* One complete outbox line. False when the cursor must stay before it. */
 static bool bm_export_line(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
@@ -862,6 +891,7 @@ static bool bm_export_line(const struct zcl_boardmail_ctx *c,
     struct json_value v;
     struct bm_row r;
     const char *peer;
+    char push_to[BM_HEX + 1];
     bool record = false, advance = true;
     json_init(&v);
     if (!json_read(&v, line, strlen(line)) || !bm_row_from(&v, &r) ||
@@ -869,7 +899,8 @@ static bool bm_export_line(const struct zcl_boardmail_ctx *c,
         json_free(&v);
         return true;
     }
-    switch (bm_post_row(line, &r, (long long)platform_time_wall_time_t())) {
+    switch (bm_post_row(line, &r, (long long)platform_time_wall_time_t(),
+                        bm_push_to(ro, peer, push_to))) {
     case BM_POST_DONE:
         st->board_out++;
         if (record)
