@@ -1281,13 +1281,16 @@ static void coins_flush_write_best_and_commitment(
 /* Prepare and step the post-commit stats query.  Returns -1 when the
  * prepare failed (nothing to finalize), 0 when no row came back, 1 when
  * a row was read.  The caller owns *out_stmt and finalizes it after its
- * success log, as the original code did. */
+ * success log, as the original code did.
+ * Independent scalar aggregates use the height index and native count while
+ * keeping both observations in one statement snapshot. */
 static int coins_flush_read_post_stats(sqlite3 *db, sqlite3_stmt **out_stmt,
                                       int64_t *max_h, int64_t *count)
 {
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(db,
-            "SELECT IFNULL(MAX(height), -1), COUNT(*) FROM utxos",
+            "SELECT COALESCE((SELECT MAX(height) FROM utxos), -1), "
+            "(SELECT COUNT(*) FROM utxos)",
             -1, &s, NULL) != SQLITE_OK)
         return -1;
     *out_stmt = s;
