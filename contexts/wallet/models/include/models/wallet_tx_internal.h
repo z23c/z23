@@ -31,6 +31,10 @@ bool wallet_tx_query_total_and_count(struct node_db *ndb,
                                      int64_t *total_out,
                                      int *count_out);
 
+/* Shared UTXO row decoder; caller owns the returned script. */
+void db_wallet_utxo_read_row(sqlite3_stmt *s, int col,
+                             struct db_wallet_utxo *out);
+
 /* SaplingNote row deserializer (defined in sapling_note.c).
  * Used by sapling list functions and by WalletTx has_many :sapling_notes
  * in wallet_tx.c. */
