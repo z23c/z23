@@ -2713,6 +2713,10 @@ static int sapling_crypto_jub_add_niels_matches_jub_add(void)
         struct jub_niels nq[JUB_NIELS_BATCH_MAX + 1];
         bool ok = pedersen_segment_generator(0, &g0) &&
                   pedersen_segment_generator(1, &g1);
+        if (!ok) {
+            printf("FAIL (generator setup)\n");
+            return 1;
+        }
         /* q[i] = (i+1) * g1 in extended form with z != 1; acc walks g0. */
         q[0] = g1;
         for (int i = 1; i < JUB_NIELS_BATCH_MAX; i++)

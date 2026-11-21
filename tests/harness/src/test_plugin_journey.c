@@ -104,6 +104,7 @@ static bool pj_write(const char *path, const uint8_t *bytes, size_t len)
     return fclose(f) == 0 && ok;
 }
 
+#if defined(__linux__)
 static bool pj_slurp(const char *path, char *out, size_t cap)
 {
     FILE *f = fopen(path, "rb");
@@ -114,6 +115,7 @@ static bool pj_slurp(const char *path, char *out, size_t cap)
     out[n] = '\0';
     return true;
 }
+#endif
 
 static bool pj_call(void (*handler)(const struct zcl_command_request *,
                                     struct zcl_command_reply *),
@@ -160,6 +162,7 @@ static bool pj_mkdirs(struct pj_fixture *f)
            setenv("HOME", f->home, 1) == 0;
 }
 
+#if defined(__linux__)
 /* The signed sha3_512 of the executable member, read from a manifest. */
 static bool pj_manifest_sha(const char *path, char out[129])
 {
@@ -181,6 +184,7 @@ static bool pj_manifest_sha(const char *path, char out[129])
     json_free(&v);
     return ok;
 }
+#endif
 
 static bool pj_keygen_to(const char *path, char pub_hex[65])
 {

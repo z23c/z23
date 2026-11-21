@@ -750,7 +750,7 @@ static int test_peer_chain_recovery_unlink_after_publish(void)
 #else
     TEST("peer_chain_recovery: post-publication unlink failure preserves success and destination") {
         printf("not applicable (Linux LD_PRELOAD fault; Windows publication has no unlink step)\n");
-    } _test_next:;
+    }
 #endif
     return failures;
 }
@@ -791,7 +791,7 @@ static int test_peer_chain_recovery_temporary_sync_failure(void)
 #else
     TEST("peer_chain_recovery: temporary sync failure prevents publication") {
         printf("not applicable (Linux LD_PRELOAD sync fault)\n");
-    } _test_next:;
+    }
 #endif
     return failures;
 }
@@ -840,7 +840,7 @@ static int test_peer_chain_recovery_directory_sync_after_publish(bool unsupporte
 #else
     TEST(label) {
         printf("not applicable (Linux LD_PRELOAD directory fault)\n");
-    } _test_next:;
+    }
 #endif
     return failures;
 }
