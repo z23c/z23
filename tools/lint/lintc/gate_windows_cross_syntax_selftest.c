@@ -691,6 +691,27 @@ static int cache_header_only_test(const char *src, const char *srclist,
 }
 
 
+static int cache_status_bounds_test(const char *src, const char *srclist,
+                                    const char *miss, const char *out,
+                                    const char *log, const char *expected,
+                                    const char *replay, const char *rc)
+{
+    static const char *const bad[] = {"256 0\n", "999999999999999999999999999999999999 0\n"};
+    char sha[WCS_SHA], entry[WCS_PATH];
+    if (wcs_sha_file(src, sha) != 0 ||
+        wcs_cache_entry_path(src, sha, entry, sizeof entry) != 0) return 2;
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        if (csr_write(entry, bad[i]) != 0 ||
+            wcs_cache_plan(srclist, miss, out, 1) != 0 || count_lines(miss) != 16)
+            return sf_fail("out-of-range cached status was accepted");
+    }
+    if (csr_write(expected, "255\n") || wcs_cache_store(src, 255, log)) return 2;
+    int result = cache_preserved_replay(srclist, miss, out, log, replay, expected, rc);
+    if (csr_write(expected, "7\n") || wcs_cache_store(src, 7, log)) return 2;
+    return result;
+}
+
+
 static int cache_final_tests(const char *src, const char *srclist,
                              const char *miss, const char *out,
                              const char *log, const char *expected,
@@ -698,7 +719,9 @@ static int cache_final_tests(const char *src, const char *srclist,
 {
     int result = cache_replay_failures(srclist, miss, out, log, replay, expected, rc);
     if (result != 0) return result;
-    return cache_header_only_test(src, srclist, miss, out, log, expected, replay, rc);
+    result = cache_header_only_test(src, srclist, miss, out, log, expected, replay, rc);
+    if (result != 0) return result;
+    return cache_status_bounds_test(src, srclist, miss, out, log, expected, replay, rc);
 }
 
 

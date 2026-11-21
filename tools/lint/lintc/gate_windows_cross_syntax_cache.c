@@ -411,7 +411,11 @@ static bool entry_header(FILE *in, int *erc, int *haslog)
     if (!line[0]) return false;
     for (const char *c = line; *c; c++)
         if (*c < '0' || *c > '9') return false;
-    *erc = atoi(line);
+    errno = 0;
+    char *end = NULL;
+    unsigned long status = strtoul(line, &end, 10);
+    if (errno == ERANGE || !end || *end || status > 255) return false;
+    *erc = (int)status;
     if (!(hl[0] == '0' || hl[0] == '1') || hl[1] != '\n' || hl[2] != '\0') return false;
     *haslog = hl[0] - '0';
     return true;
@@ -525,7 +529,7 @@ static int plan_mkdir_for(const char *path)
     if (!sl) return 0;
     if (ovf(snprintf(d, sizeof d, "%.*s", (int)(sl - path), path), sizeof d))
         return 2;
-    wcs_cache_entry_path(d, "x", ent, sizeof ent);
+    if (wcs_cache_entry_path(d, "x", ent, sizeof ent) != 0) return 2;
     char *pe = strrchr(ent, '/');
     if (pe) {
         *pe = '\0';
