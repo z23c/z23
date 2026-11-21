@@ -145,7 +145,7 @@ platform/adapters/outbound/persistence/src/hodl_history_sqlite.c 4
 platform/adapters/outbound/persistence/src/node_health_store_sqlite.c 2
 platform/adapters/outbound/persistence/src/snapshot_store_sqlite.c 3
 platform/adapters/outbound/persistence/src/wallet_backup_store_sqlite.c 4
-platform/adapters/outbound/persistence/src/wallet_restore_store_sqlite.c 7
+platform/adapters/outbound/persistence/src/wallet_restore_store_sqlite.c 2
 platform/adapters/outbound/persistence/src/wallet_view_sqlite.c 13
 tools/command/native_dev_index_identity.c 1
 tools/command/native_dev_index_ingest.c 2

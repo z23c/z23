@@ -73,66 +73,84 @@ static void wrs_report_init(struct wallet_restore_table_report *r,
     r->rows_after = -1;
 }
 
-/* "SELECT count(*) FROM <schema>.<table>"; -1 when the statement cannot run
- * (which, for an attached schema, means the table is absent). */
+/* Return -1 for an absent table or any failed count. */
 static int64_t wrs_count(sqlite3 *db, const char *schema, const char *table)
 {
-    if (!db || !wrs_ident_ok(schema) || !wrs_ident_ok(table))
-        return -1;
+    if (!db || !wrs_ident_ok(schema) || !wrs_ident_ok(table)) return -1;
     char sql[192];
     snprintf(sql, sizeof(sql), "SELECT count(*) FROM %s.%s", schema, table);
     sqlite3_stmt *st = NULL;
-    int64_t n = -1;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && st) {
-        if (AR_STEP_ROW_READONLY(st) == SQLITE_ROW)
-            n = sqlite3_column_int64(st, 0);
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK || !st) {
         sqlite3_finalize(st);
+        return -1;
     }
+    int64_t n = -1;
+    if (ar_step_checked(st, "restore row count", NULL) == ZCL_STEP_ROW &&
+        sqlite3_column_type(st, 0) == SQLITE_INTEGER) {
+        n = sqlite3_column_int64(st, 0);
+        if (n < 0 || ar_step_checked(st, "restore row count", NULL) != ZCL_STEP_DONE)
+            n = -1;
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK) n = -1;
     return n;
 }
 
-static bool wrs_table_exists(sqlite3 *db, const char *schema, const char *table)
+enum wrs_presence { WRS_ERROR = -1, WRS_ABSENT = 0, WRS_PRESENT = 1 };
+
+static enum wrs_presence wrs_table_exists(sqlite3 *db, const char *schema,
+                                          const char *table)
 {
-    if (!db || !wrs_ident_ok(schema) || !wrs_ident_ok(table))
-        return false;
+    if (!db || !wrs_ident_ok(schema) || !wrs_ident_ok(table)) return WRS_ERROR;
     char sql[192];
     snprintf(sql, sizeof(sql),
-             "SELECT 1 FROM %s.sqlite_master WHERE type='table' AND name=?",
-             schema);
+             "SELECT 1 FROM %s.sqlite_master WHERE type='table' AND name=?", schema);
     sqlite3_stmt *st = NULL;
-    bool found = false;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && st) {
-        sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC);
-        found = AR_STEP_ROW_READONLY(st) == SQLITE_ROW;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK || !st) {
         sqlite3_finalize(st);
+        return WRS_ERROR;
     }
-    return found;
+    enum wrs_presence result = WRS_ERROR;
+    if (sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC) == SQLITE_OK) {
+        enum zcl_step step = ar_step_checked(st, "restore table presence", NULL);
+        if (step == ZCL_STEP_DONE) result = WRS_ABSENT;
+        else if (step == ZCL_STEP_ROW) {
+            result = ar_step_checked(st, "restore table presence", NULL) == ZCL_STEP_DONE
+                     ? WRS_PRESENT : WRS_ERROR;
+        }
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK) result = WRS_ERROR;
+    return result;
 }
 
-/* Read the manifest row for `table` out of an attached backup schema.
- * Returns false when the file carries no manifest or no row for it. */
-static bool wrs_manifest_row(sqlite3 *db, const char *schema,
-                             const char *table, bool *out_present,
-                             int64_t *out_rows)
+/* Absence is distinct from an unreadable manifest or row. */
+static enum wrs_presence wrs_manifest_row(sqlite3 *db, const char *schema,
+                                           const char *table, bool *out_present,
+                                           int64_t *out_rows)
 {
-    if (!wrs_table_exists(db, schema, WALLET_BACKUP_MANIFEST_TABLE))
-        return false;
+    enum wrs_presence exists = wrs_table_exists(db, schema, WALLET_BACKUP_MANIFEST_TABLE);
+    if (exists != WRS_PRESENT) return exists;
     char sql[256];
-    snprintf(sql, sizeof(sql),
-             "SELECT present_in_source,row_count FROM %s."
+    snprintf(sql, sizeof(sql), "SELECT present_in_source,row_count FROM %s."
              WALLET_BACKUP_MANIFEST_TABLE " WHERE table_name=?", schema);
     sqlite3_stmt *st = NULL;
-    bool got = false;
-    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && st) {
-        sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC);
-        if (AR_STEP_ROW_READONLY(st) == SQLITE_ROW) {
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK || !st) {
+        sqlite3_finalize(st);
+        return WRS_ERROR;
+    }
+    enum wrs_presence result = WRS_ERROR;
+    if (sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC) == SQLITE_OK) {
+        enum zcl_step step = ar_step_checked(st, "restore manifest", NULL);
+        if (step == ZCL_STEP_DONE) result = WRS_ABSENT;
+        else if (step == ZCL_STEP_ROW && sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
+                 sqlite3_column_type(st, 1) == SQLITE_INTEGER) {
             *out_present = sqlite3_column_int(st, 0) != 0;
             *out_rows = sqlite3_column_int64(st, 1);
-            got = true;
+            result = ar_step_checked(st, "restore manifest", NULL) == ZCL_STEP_DONE
+                     ? WRS_PRESENT : WRS_ERROR;
         }
-        sqlite3_finalize(st);
     }
-    return got;
+    if (sqlite3_finalize(st) != SQLITE_OK) result = WRS_ERROR;
+    return result;
 }
 
 /* Column names of <schema>.<table> in declaration order. Returns the count
@@ -151,7 +169,9 @@ static int wrs_columns(sqlite3 *db, const char *schema, const char *table,
         return -1;
     }
     int n = 0;
-    while (AR_STEP_ROW_READONLY(st) == SQLITE_ROW && n < max) {
+    enum zcl_step step;
+    while ((step = ar_step_checked(st, "restore columns", NULL)) == ZCL_STEP_ROW) {
+        if (n >= max) { n = -1; break; }
         const unsigned char *nm = sqlite3_column_text(st, 1);
         if (!nm)
             continue;
@@ -162,7 +182,8 @@ static int wrs_columns(sqlite3 *db, const char *schema, const char *table,
             pk_flags[n] = sqlite3_column_int(st, 5);
         n++;
     }
-    sqlite3_finalize(st);
+    if (step != ZCL_STEP_DONE) n = -1;
+    if (sqlite3_finalize(st) != SQLITE_OK) n = -1;
     return n;
 }
 
@@ -203,6 +224,28 @@ static bool wrs_catalog_readable(sqlite3 *db)
 
 /* ── inspect ────────────────────────────────────────────────── */
 
+static bool wrs_inspect_table(sqlite3 *db, const char *t,
+                              struct wallet_restore_table_report *report)
+{
+    if (!wrs_ident_ok(t)) return true;
+    enum wrs_presence exists = wrs_table_exists(db, "main", t);
+    if (exists == WRS_ERROR) return false;
+    report->in_backup = exists == WRS_PRESENT;
+    if (report->in_backup) {
+        report->rows_in_backup = wrs_count(db, "main", t);
+        if (report->rows_in_backup < 0) return false;
+    }
+    bool present = false;
+    int64_t rows = -1;
+    enum wrs_presence manifest = wrs_manifest_row(db, "main", t, &present, &rows);
+    if (manifest == WRS_ERROR) return false;
+    if (manifest == WRS_PRESENT) {
+        report->manifest_present_in_source = present;
+        report->manifest_row_count = rows;
+    }
+    return true;
+}
+
 static enum wallet_restore_store_status wrs_inspect_backup(
     void *self,
     const char *backup_path,
@@ -236,17 +279,10 @@ static enum wallet_restore_store_status wrs_inspect_backup(
     }
 
     for (size_t i = 0; i < n_tables; i++) {
-        const char *t = tables[i];
-        if (!wrs_ident_ok(t))
-            continue;
-        reports[i].in_backup = wrs_table_exists(db, "main", t);
-        if (reports[i].in_backup)
-            reports[i].rows_in_backup = wrs_count(db, "main", t);
-        bool mpresent = false;
-        int64_t mrows = -1;
-        if (wrs_manifest_row(db, "main", t, &mpresent, &mrows)) {
-            reports[i].manifest_present_in_source = mpresent;
-            reports[i].manifest_row_count = mrows;
+        if (!wrs_inspect_table(db, tables[i], &reports[i])) {
+            wrs_err(err, err_cap, "cannot inspect backup table %s: %s", tables[i], sqlite3_errmsg(db));
+            sqlite3_close(db);
+            return WR_STORE_OPEN_BACKUP_FAILED;
         }
     }
     sqlite3_close(db);
@@ -359,10 +395,13 @@ static int64_t wrs_count_collisions(sqlite3 *db, const char *table,
     sqlite3_stmt *st = NULL;
     int64_t n = -1;
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && st) {
-        if (AR_STEP_ROW_READONLY(st) == SQLITE_ROW)
+        if (ar_step_checked(st, "restore collision count", NULL) == ZCL_STEP_ROW &&
+            sqlite3_column_type(st, 0) == SQLITE_INTEGER) {
             n = sqlite3_column_int64(st, 0);
-        sqlite3_finalize(st);
-    }
+            if (n < 0 || ar_step_checked(st, "restore collision count", NULL) != ZCL_STEP_DONE) n = -1;
+        }
+        if (sqlite3_finalize(st) != SQLITE_OK) n = -1;
+    } else if (st) sqlite3_finalize(st);
     return n;
 }
 
@@ -370,11 +409,14 @@ static int64_t wrs_count_collisions(sqlite3 *db, const char *table,
  * wrapped DEK. INSERT OR IGNORE on id=1 would otherwise keep the target
  * wrapper while importing ciphertext encrypted under the backup's different
  * DEK, producing durable but permanently unreadable keys. */
-static bool wrs_key_encryption_compatible(sqlite3 *db)
+enum wrs_compat { WRS_COMPATIBLE, WRS_CONFLICT, WRS_COMPAT_ERROR };
+
+static enum wrs_compat wrs_key_encryption_compatible(sqlite3 *db)
 {
-    if (!wrs_table_exists(db, "main", "wallet_key_encryption") ||
-        !wrs_table_exists(db, "bak", "wallet_key_encryption"))
-        return true;
+    enum wrs_presence main = wrs_table_exists(db, "main", "wallet_key_encryption");
+    enum wrs_presence bak = wrs_table_exists(db, "bak", "wallet_key_encryption");
+    if (main == WRS_ERROR || bak == WRS_ERROR) return WRS_COMPAT_ERROR;
+    if (main == WRS_ABSENT || bak == WRS_ABSENT) return WRS_COMPATIBLE;
     sqlite3_stmt *stmt = NULL;
     const char *sql =
         "SELECT m.wrapped_dek=b.wrapped_dek "
@@ -382,14 +424,19 @@ static bool wrs_key_encryption_compatible(sqlite3 *db)
         "CROSS JOIN bak.wallet_key_encryption b "
         "WHERE m.id=1 AND b.id=1";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
-        if (stmt) sqlite3_finalize(stmt);
-        return false;
+        sqlite3_finalize(stmt);
+        return WRS_COMPAT_ERROR;
     }
-    int rc = AR_STEP_ROW_READONLY(stmt);
-    bool compatible = rc == SQLITE_DONE ||
-        (rc == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1);
-    sqlite3_finalize(stmt);
-    return compatible;
+    enum zcl_step step = ar_step_checked(stmt, "restore encryption identity", NULL);
+    enum wrs_compat result = WRS_COMPAT_ERROR;
+    if (step == ZCL_STEP_DONE) result = WRS_COMPATIBLE;
+    else if (step == ZCL_STEP_ROW && sqlite3_column_type(stmt, 0) == SQLITE_INTEGER) {
+        result = sqlite3_column_int(stmt, 0) == 1 ? WRS_COMPATIBLE : WRS_CONFLICT;
+        if (ar_step_checked(stmt, "restore encryption identity", NULL) != ZCL_STEP_DONE)
+            result = WRS_COMPAT_ERROR;
+    }
+    if (sqlite3_finalize(stmt) != SQLITE_OK) result = WRS_COMPAT_ERROR;
+    return result;
 }
 
 /* Copies the backup rows the target lacks and records the row accounting. */
@@ -410,6 +457,10 @@ static enum wallet_restore_store_status wrs_insert_missing_rows(
     }
 
     r->rows_collided = wrs_count_collisions(db, t, pk, n_pk);
+    if (n_pk > 0 && r->rows_collided < 0) {
+        wrs_err(err, err_cap, "cannot count existing rows in %s: %s", t, sqlite3_errmsg(db));
+        return WR_STORE_MERGE_FAILED;
+    }
 
     char sql[4096];
     snprintf(sql, sizeof(sql),
@@ -425,6 +476,10 @@ static enum wallet_restore_store_status wrs_insert_missing_rows(
     sqlite3_free(emsg);
 
     r->rows_after = wrs_count(db, "main", t);
+    if (r->rows_after < 0) {
+        wrs_err(err, err_cap, "cannot count merged rows in %s: %s", t, sqlite3_errmsg(db));
+        return WR_STORE_MERGE_FAILED;
+    }
     r->rows_inserted = (r->rows_after >= 0 && r->rows_before >= 0)
                        ? r->rows_after - r->rows_before : -1;
     if (r->rows_inserted >= 0 && r->rows_in_backup >= 0) {
@@ -443,15 +498,26 @@ static enum wallet_restore_store_status wrs_merge_table(
 {
     bool mpresent = false;
     int64_t mrows = -1;
-    if (wrs_manifest_row(db, "bak", t, &mpresent, &mrows)) {
+    enum wrs_presence manifest = wrs_manifest_row(db, "bak", t, &mpresent, &mrows);
+    enum wrs_presence source = wrs_table_exists(db, "bak", t);
+    enum wrs_presence target = wrs_table_exists(db, "main", t);
+    if (manifest == WRS_ERROR || source == WRS_ERROR || target == WRS_ERROR) {
+        wrs_err(err, err_cap, "cannot inspect restore table %s: %s", t, sqlite3_errmsg(db));
+        return WR_STORE_MERGE_FAILED;
+    }
+    if (manifest == WRS_PRESENT) {
         r->manifest_present_in_source = mpresent;
         r->manifest_row_count = mrows;
     }
-
-    r->rows_before = wrs_count(db, "main", t);
-    r->in_backup = wrs_table_exists(db, "bak", t);
+    if (target == WRS_PRESENT) {
+        r->rows_before = wrs_count(db, "main", t);
+        if (r->rows_before < 0) {
+            wrs_err(err, err_cap, "cannot count target table %s: %s", t, sqlite3_errmsg(db));
+            return WR_STORE_MERGE_FAILED;
+        }
+    }
+    r->in_backup = source == WRS_PRESENT;
     if (!r->in_backup) {
-        /* Nothing to merge. Reported, not skipped in silence. */
         r->rows_inserted = 0;
         r->rows_collided = 0;
         r->rows_rejected = 0;
@@ -459,16 +525,10 @@ static enum wallet_restore_store_status wrs_merge_table(
         return WR_STORE_OK;
     }
     r->rows_in_backup = wrs_count(db, "bak", t);
-    if (r->rows_before < 0) {
-        /* The TARGET lacks the table — the caller was supposed to open
-         * it through the schema path. Refuse loudly rather than create
-         * a constraint-free table behind the operator's back. */
-        wrs_err(err, err_cap,
-                "target has no %s table (open the datadir through "
-                "the node schema first)", t);
+    if (r->rows_in_backup < 0 || target != WRS_PRESENT) {
+        wrs_err(err, err_cap, "cannot count source or find target table %s: %s", t, sqlite3_errmsg(db));
         return WR_STORE_MERGE_FAILED;
     }
-
     return wrs_insert_missing_rows(db, t, r, err, err_cap);
 }
 
@@ -488,16 +548,19 @@ static enum wallet_restore_store_status wrs_open_merge(
                 sqlite3_errmsg(db));
         return WR_STORE_ATTACH_FAILED;
     }
-    if (!wrs_key_encryption_compatible(db)) {
-        wrs_err(err, err_cap,
-                "backup wallet-key encryption identity conflicts with "
-                "the target; restore into a fresh datadir");
-        (void)sqlite3_exec(db, "DETACH DATABASE bak", NULL, NULL, NULL);
-        return WR_STORE_MERGE_FAILED;
-    }
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
         wrs_err(err, err_cap, "cannot begin restore transaction: %s",
                 sqlite3_errmsg(db));
+        (void)sqlite3_exec(db, "DETACH DATABASE bak", NULL, NULL, NULL);
+        return WR_STORE_MERGE_FAILED;
+    }
+    enum wrs_compat compatible = wrs_key_encryption_compatible(db);
+    if (compatible != WRS_COMPATIBLE) {
+        if (compatible == WRS_COMPAT_ERROR)
+            wrs_err(err, err_cap, "cannot read wallet-key encryption identity: %s", sqlite3_errmsg(db));
+        else
+            wrs_err(err, err_cap, "backup wallet-key encryption identity conflicts with the target; restore into a fresh datadir");
+        (void)sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         (void)sqlite3_exec(db, "DETACH DATABASE bak", NULL, NULL, NULL);
         return WR_STORE_MERGE_FAILED;
     }

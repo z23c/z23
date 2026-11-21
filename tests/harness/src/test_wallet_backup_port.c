@@ -35,6 +35,7 @@
 #include "platform/private_directory.h"
 
 #include "adapters/outbound/persistence/wallet_backup_store_sqlite.h"
+#include "adapters/outbound/persistence/wallet_restore_store_sqlite.h"
 #include "ports/wallet_backup_store_port.h"
 #include "services/wallet_backup_service.h"
 #include "models/database.h"
@@ -221,10 +222,145 @@ static int wbp_service_backup(struct node_db *ndb, int seeded)
     return failures;
 }
 
+struct wbp_restore_fault { sqlite3 *db; const char *table; int hits; };
+
+static int wbp_restore_deny_read(void *ctx, int action, const char *table,
+                                 const char *column, const char *database,
+                                 const char *trigger)
+{
+    (void)column; (void)trigger;
+    struct wbp_restore_fault *fault = ctx;
+    if (action == SQLITE_READ && table && database && !strcmp(database, "bak") &&
+        !strcmp(table, fault->table) && !sqlite3_get_autocommit(fault->db)) {
+        fault->hits++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool wbp_restore_preserved(const char *path)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    sqlite3_stmt *st = NULL;
+    const char *sql = "SELECT (SELECT count(*) FROM wallet_keys WHERE id=1 AND v=100),"
+        "(SELECT count(*) FROM wallet_keys WHERE id=2),"
+        "(SELECT count(*) FROM wallet_scripts WHERE id=1 AND v=100),"
+        "(SELECT count(*) FROM wallet_scripts WHERE id=2),"
+        "(SELECT count(*) FROM wallet_key_encryption WHERE id=1 AND wrapped_dek=x'01')";
+    bool ok = sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && st &&
+        sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1 &&
+        sqlite3_column_int(st, 1) == 0 && sqlite3_column_int(st, 2) == 1 &&
+        sqlite3_column_int(st, 3) == 0 && sqlite3_column_int(st, 4) == 1;
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return ok;
+}
+
+static int wbp_restore_denials(struct wallet_restore_store_port *port, sqlite3 *target,
+                               const char *target_path, const char *backup_path)
+{
+    int failures = 0;
+    const char *tables[] = { "wallet_keys", "wallet_scripts" };
+    struct wallet_restore_table_report reports[2];
+    enum wallet_restore_store_status status;
+    char err[256];
+    const char *denied[] = { "sqlite_master", "wallet_key_encryption", "wallet_scripts" };
+    for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); i++) {
+        WBP_CHECK("reset target before each denial", sqlite3_exec(target, "DELETE FROM wallet_keys WHERE id=2;DELETE FROM wallet_scripts WHERE id=2", NULL, NULL, NULL) == SQLITE_OK);
+        struct wbp_restore_fault fault = { target, denied[i], 0 };
+        WBP_CHECK("install restore read denial", sqlite3_set_authorizer(target, wbp_restore_deny_read, &fault) == SQLITE_OK);
+        status = port->merge_into_target(port->self, backup_path, tables, 2, false, reports, err, sizeof(err));
+        WBP_CHECK("restore denied read refuses", fault.hits > 0 && status == WR_STORE_MERGE_FAILED);
+        if (i == 2) WBP_CHECK("restore failed after earlier insert", reports[0].rows_inserted == 1);
+        WBP_CHECK("restore denied read ends transaction", sqlite3_get_autocommit(target));
+        WBP_CHECK("restore denied read rolls back on reopen", wbp_restore_preserved(target_path));
+        WBP_CHECK("remove restore read denial", sqlite3_set_authorizer(target, NULL, NULL) == SQLITE_OK);
+    }
+    return failures;
+}
+
+
+static int wbp_restore_setup(sqlite3 *target, sqlite3 *backup)
+{
+    int failures = 0;
+    const char *schema = "CREATE TABLE wallet_keys(id INTEGER PRIMARY KEY,v INTEGER);"
+        "CREATE TABLE wallet_scripts(id INTEGER PRIMARY KEY,v INTEGER);";
+    const char *target_schema = "CREATE TABLE wallet_keys(id INTEGER PRIMARY KEY,v INTEGER,extra INTEGER DEFAULT 7);"
+        "CREATE TABLE wallet_scripts(id INTEGER PRIMARY KEY,v INTEGER);";
+    WBP_CHECK("restore target fixture", sqlite3_exec(target, target_schema, NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(target, "CREATE TABLE wallet_key_encryption(id INTEGER PRIMARY KEY,wrapped_dek BLOB);"
+                     "INSERT INTO wallet_key_encryption VALUES(1,x'01');"
+                     "INSERT INTO wallet_keys(id,v) VALUES(1,100);INSERT INTO wallet_scripts VALUES(1,100)",
+                     NULL, NULL, NULL) == SQLITE_OK);
+    WBP_CHECK("restore legacy source fixture", sqlite3_exec(backup, schema, NULL, NULL, NULL) == SQLITE_OK &&
+        sqlite3_exec(backup, "INSERT INTO wallet_keys VALUES(2,200);INSERT INTO wallet_scripts VALUES(2,200)",
+                     NULL, NULL, NULL) == SQLITE_OK);
+    return failures;
+}
+
+
+static int wbp_restore_faults(void)
+{
+    int failures = 0;
+    char target_path[256], backup_path[256];
+    snprintf(target_path, sizeof(target_path), WBP_DIR "/wrs_%d_target.db", (int)getpid());
+    snprintf(backup_path, sizeof(backup_path), WBP_DIR "/wrs_%d_backup.db", (int)getpid());
+    wbp_rm(target_path); wbp_rm(backup_path);
+    sqlite3 *target = NULL, *backup = NULL;
+    if (sqlite3_open(target_path, &target) != SQLITE_OK ||
+        sqlite3_open(backup_path, &backup) != SQLITE_OK) {
+        if (target) sqlite3_close(target);
+        if (backup) sqlite3_close(backup);
+        return 1;
+    }
+    failures += wbp_restore_setup(target, backup);
+    sqlite3_close(backup);
+    struct wallet_restore_store_sqlite_ctx ctx;
+    struct wallet_restore_store_port port = {0};
+    WBP_CHECK("restore adapter bind", wallet_restore_store_sqlite_bind(&ctx, target, &port));
+    const char *tables[] = { "wallet_keys", "wallet_scripts" };
+    struct wallet_restore_table_report reports[2];
+    char err[256];
+    enum wallet_restore_store_status status = port.merge_into_target(port.self, backup_path,
+        tables, 2, false, reports, err, sizeof(err));
+    WBP_CHECK("restore truly absent wrapper remains compatible", status == WR_STORE_OK &&
+              reports[0].rows_inserted == 1 && reports[1].rows_inserted == 1);
+    WBP_CHECK("reset restore target fixture", sqlite3_exec(target,
+        "DELETE FROM wallet_keys WHERE id=2;DELETE FROM wallet_scripts WHERE id=2", NULL, NULL, NULL) == SQLITE_OK);
+    WBP_CHECK("open source wrapper fixture", sqlite3_open(backup_path, &backup) == SQLITE_OK);
+    if (!backup) { sqlite3_close(target); return failures + 1; }
+    WBP_CHECK("create conflicting wrapper", sqlite3_exec(backup,
+        "CREATE TABLE wallet_key_encryption(id INTEGER PRIMARY KEY,wrapped_dek BLOB);"
+        "INSERT INTO wallet_key_encryption VALUES(1,x'02')", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_close(backup); backup = NULL;
+    status = port.merge_into_target(port.self, backup_path, tables, 2, false, reports, err, sizeof(err));
+    WBP_CHECK("restore conflicting wrapper refuses", status == WR_STORE_MERGE_FAILED && wbp_restore_preserved(target_path));
+    WBP_CHECK("open matching wrapper fixture", sqlite3_open(backup_path, &backup) == SQLITE_OK);
+    if (!backup) { sqlite3_close(target); return failures + 1; }
+    WBP_CHECK("match wrapper", sqlite3_exec(backup,
+        "UPDATE wallet_key_encryption SET wrapped_dek=x'01'", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_close(backup);
+    failures += wbp_restore_denials(&port, target, target_path, backup_path);
+    status = port.merge_into_target(port.self, backup_path, tables, 2, false, reports, err, sizeof(err));
+    WBP_CHECK("restore matching wrapper merges", status == WR_STORE_OK && reports[0].rows_inserted == 1 && reports[1].rows_inserted == 1);
+    sqlite3_stmt *st = NULL;
+    bool shared_columns = sqlite3_prepare_v2(target, "SELECT extra FROM wallet_keys WHERE id=2", -1, &st, NULL) == SQLITE_OK && st && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 7;
+    WBP_CHECK("restore preserves older backup shared-column merge", shared_columns);
+    sqlite3_finalize(st);
+    sqlite3_close(target);
+    wbp_rm(target_path); wbp_rm(backup_path);
+    return failures;
+}
+
 int test_wallet_backup_port(void)
 {
     int failures = 0;
     mkdir(WBP_DIR, 0755);
+    failures += wbp_restore_faults();
 
     char src_db_path[256];
     char dst_path[256];
