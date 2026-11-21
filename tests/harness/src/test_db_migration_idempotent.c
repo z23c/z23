@@ -2373,6 +2373,8 @@ enum db_mig_mutation {
     DB_MIG_MUT_LEDGER_ABOVE,    /* ledger row above the schema marker */
     DB_MIG_MUT_FLOOR_BADLEN,    /* floor stored as a 2-byte blob */
     DB_MIG_MUT_SCHEMA_BADLEN,   /* schema marker stored as an 8-byte blob */
+    DB_MIG_MUT_SCHEMA_SHORT,
+    DB_MIG_MUT_SCHEMA_TEXT,
 };
 
 static bool db_mig_set_blob(sqlite3 *db, const char *key, const void *buf,
@@ -2411,6 +2413,11 @@ static bool db_mig_apply_mutation(const char *dbpath, enum db_mig_mutation mut,
         unsigned char eight[8] = { 0 };
         memcpy(eight, &version, sizeof(version));
         ok = db_mig_set_blob(raw, "schema_version", eight, sizeof(eight));
+    } else if (ok && mut == DB_MIG_MUT_SCHEMA_SHORT) {
+        ok = db_mig_set_blob(raw, "schema_version", &version, 3);
+    } else if (ok && mut == DB_MIG_MUT_SCHEMA_TEXT) {
+        ok = sqlite3_exec(raw, "UPDATE node_state SET value=CAST(value AS TEXT) "
+                         "WHERE key='schema_version'", NULL, NULL, NULL) == SQLITE_OK;
     }
     sqlite3_close(raw);
     return ok;
@@ -2482,7 +2489,13 @@ static int t_runtime_reopen_follows_compat_floor(void)
          NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
         {"rt_ahead1_schema_badlen", 1, 0, 0, DB_MIG_MUT_SCHEMA_BADLEN,
          NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
-        {"rt_exact_max", 0, 0, 0, DB_MIG_MUT_NONE, -1, true},
+        {"rt_exact_max", 0, 0, 0, DB_MIG_MUT_NONE, NODE_DB_SCHEMA_PREFLIGHT_SUPPORTED, true},
+        {"rt_exact_schema_badlen", 0, 0, 0, DB_MIG_MUT_SCHEMA_BADLEN,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
+        {"rt_exact_schema_short", 0, 0, 0, DB_MIG_MUT_SCHEMA_SHORT,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
+        {"rt_exact_schema_text", 0, 0, 0, DB_MIG_MUT_SCHEMA_TEXT,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
         {"rt_behind1", -1, 0, 0, DB_MIG_MUT_NONE, -1, false},
     };
     TEST("db_mig: runtime reopen follows the compat floor contract") {

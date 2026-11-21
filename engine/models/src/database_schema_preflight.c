@@ -267,7 +267,7 @@ static bool parse_migration_version(const unsigned char *text, int bytes,
  * schema_version) as the conservative default: no downgrade is assumed
  * safe for a database this binary never classified itself. */
 static bool read_compat_floor(sqlite3 *db, int32_t marker, int32_t *floor_out,
-                              const char **detail_out)
+                               const char **detail_out)
 {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
@@ -409,8 +409,8 @@ static bool schema_marker_read_blob(sqlite3_stmt *stmt, int32_t *version)
  * *detail_out describing the failure otherwise. *version_out is set only
  * for an unsupported marker value, which the caller reports verbatim; every
  * other failure leaves it at the caller's initial 0. */
-static int read_schema_marker(sqlite3 *db, int32_t *version_out,
-                              const char **detail_out)
+int node_db_read_schema_marker(sqlite3 *db, int32_t *version_out,
+                               const char **detail_out)
 {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
@@ -474,7 +474,7 @@ static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
 
     int32_t version = 0;
     const char *marker_detail = NULL;
-    if (read_schema_marker(db, &version, &marker_detail) != SQLITE_OK)
+    if (node_db_read_schema_marker(db, &version, &marker_detail) != SQLITE_OK)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
                                 marker_detail);
 

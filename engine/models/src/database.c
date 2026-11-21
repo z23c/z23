@@ -1121,10 +1121,13 @@ static _Atomic bool g_reopen_refusal_banner_logged;
 static bool node_db_runtime_reopen_schema_ok(struct node_db *ndb,
                                              const char *reason)
 {
-    int schema = node_db_schema_version(ndb);
-    if (schema == NODE_DB_MAX_SCHEMA)
+    int32_t schema = 0;
+    const char *detail = NULL;
+    bool valid = node_db_read_schema_marker(ndb->db, &schema, &detail) ==
+                 SQLITE_OK;
+    if (valid && schema == NODE_DB_MAX_SCHEMA)
         return true;
-    if (schema > NODE_DB_MAX_SCHEMA) {
+    if (valid && schema > NODE_DB_MAX_SCHEMA) {
         struct node_db_schema_preflight pf =
             node_db_schema_preflight_existing(ndb->path);
         if (pf.state == NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE) {
