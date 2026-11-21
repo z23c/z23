@@ -128,25 +128,31 @@ bool agent_impact_path_is_direct_development_contract(const char *path)
     return false;
 }
 
+struct agent_impact_rule {
+    const char *patterns;
+    const char *groups;
+};
+
+static const struct agent_impact_rule agent_impact_rules[] = {
+#define AGENT_IMPACT_RULE(patterns, groups) {patterns, groups},
+#include "controllers/agent_impact_rules.def"
+#undef AGENT_IMPACT_RULE
+};
+
 bool agent_impact_apply_shared_rules(const char *path,
                                      struct agent_impact_acc *acc)
 {
     bool matched = false;
-
-#define AGENT_IMPACT_RULE(patterns, groups) \
-    do { \
-        if (agent_impact_match_any_pattern(path, (patterns), false)) { \
-            if (!acc) \
-                return true; \
-            agent_impact_add_group_list((acc), (groups)); \
-            if (acc) \
-                acc->shared_rule_hits++; \
-            matched = true; \
-        } \
-    } while (0);
-#include "controllers/agent_impact_rules.def"
-#undef AGENT_IMPACT_RULE
-
+    for (size_t i = 0; i < agent_impact_rule_count(); i++) {
+        const struct agent_impact_rule *rule = &agent_impact_rules[i];
+        if (agent_impact_match_any_pattern(path, rule->patterns, false)) {
+            if (!acc)
+                return true;
+            agent_impact_add_group_list(acc, rule->groups);
+            acc->shared_rule_hits++;
+            matched = true;
+        }
+    }
     return matched;
 }
 
@@ -155,25 +161,14 @@ void agent_impact_collect_literal_groups(const char *path,
 {
     if (!acc)
         return;
-#define AGENT_IMPACT_RULE(patterns, groups) \
-    do { \
-        if (agent_impact_match_any_pattern(path, (patterns), true)) \
-            agent_impact_add_group_list(acc, (groups)); \
-    } while (0);
-#include "controllers/agent_impact_rules.def"
-#undef AGENT_IMPACT_RULE
+    for (size_t i = 0; i < agent_impact_rule_count(); i++) {
+        const struct agent_impact_rule *rule = &agent_impact_rules[i];
+        if (agent_impact_match_any_pattern(path, rule->patterns, true))
+            agent_impact_add_group_list(acc, rule->groups);
+    }
 }
 
 size_t agent_impact_rule_count(void)
 {
-    size_t count = 0;
-#define AGENT_IMPACT_RULE(patterns, groups) \
-    do { \
-        (void)(patterns); \
-        (void)(groups); \
-        count++; \
-    } while (0);
-#include "controllers/agent_impact_rules.def"
-#undef AGENT_IMPACT_RULE
-    return count;
+    return sizeof(agent_impact_rules) / sizeof(agent_impact_rules[0]);
 }
