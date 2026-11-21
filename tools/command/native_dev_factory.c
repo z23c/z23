@@ -25,9 +25,9 @@
  * from retained suite observations bound to its unique scheduler unit.
  * These observations can be incomplete and do not establish what caused the
  * job's final exit. Legacy or ambiguous identities remain unnamed.
- * cold_t_fast_* counts t-fast runs with cpu_s above 600 (cold builds), their
- * run_s total and how many ran without a -j token; warm_t_fast_n counts the
- * rest. */
+ * cold_t_fast_* counts t-fast and agent-verify runs with cpu_s above 600
+ * (cold builds), their run_s total and how many ran without a -j token;
+ * warm_t_fast_n counts the rest. */
 
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
@@ -71,7 +71,7 @@
 #define FAC_VERDICT_MAX (1u << 16)
 #define FAC_NAME 64u
 #define FAC_MAX_NAMES 64u
-#define FAC_COLD_CPU_S 600.0 /* a t-fast run above this cpu_s is a cold build */
+#define FAC_COLD_CPU_S 600.0 /* a test run above this cpu_s is a cold build */
 
 enum fac_class {
     FAC_LAND, FAC_T_FAST, FAC_LINT, FAC_PREPARE, FAC_BUILD, FAC_OTHER,
@@ -312,11 +312,25 @@ static void fac_inc(int64_t *v)
         (*v)++;
 }
 
+static bool fac_has_token(const char *cmd, const char *target)
+{
+    size_t n = strlen(target);
+    while (*cmd) {
+        while (*cmd == ' ' || *cmd == '\t') cmd++;
+        const char *end = cmd;
+        while (*end && *end != ' ' && *end != '\t') end++;
+        if ((size_t)(end - cmd) == n && memcmp(cmd, target, n) == 0)
+            return true;
+        cmd = end;
+    }
+    return false;
+}
+
 static int fac_classify(const char *cmd)
 {
     if (strstr(cmd, "dev land") || strstr(cmd, "dev proof"))
         return FAC_LAND;
-    if (strstr(cmd, "t-fast"))
+    if (strstr(cmd, "t-fast") || fac_has_token(cmd, "agent-verify"))
         return FAC_T_FAST;
     if (strstr(cmd, "lint"))
         return FAC_LINT;
@@ -888,9 +902,9 @@ static void fac_first_section(const struct fac_jobs *j, struct json_value *out)
     free(r);
 }
 
-/* Cold t-fast builds: a t-fast or t-fast-exact run whose cpu_s exceeds
- * FAC_COLD_CPU_S. Reports the count, their total run time, how many ran
- * without -j, and the warm t-fast runs at or below the threshold. */
+/* Cold test verification: a t-fast, t-fast-exact or agent-verify run whose
+ * cpu_s exceeds FAC_COLD_CPU_S. Reports the count, their total run time, how
+ * many ran without -j, and the warm runs at or below the threshold. */
 static void fac_cold_section(const struct fac_jobs *j, struct json_value *out)
 {
     int64_t cold = 0, serial = 0, warm = 0;

@@ -807,14 +807,15 @@ int test_dev_factory(void)
         PASS();
     }
 
-    TEST("factory: cold t-fast runs by cpu threshold, serial ones counted") {
+    TEST("factory: cold test verification by cpu threshold, serial counted") {
         char cwd[700], jobs_k[700], all[4096], row[1024];
         size_t n = 0;
         FILE *fp;
         (void)snprintf(cwd, sizeof(cwd), "%s/wt_k", base);
         (void)snprintf(jobs_k, sizeof(jobs_k), "%s/jobs_k.jsonl", base);
         /* cold + -j (800 s), cold + serial (500 s), warm at the threshold
-         * (100 s), warm serial (40 s), and a non-t-fast build (ignored). */
+         * (100 s), warm serial (40 s), cold agent-verify (200 s), and two
+         * non-test commands containing agent-verify text (ignored). */
 #define DFX_K(...)                                                         \
     do {                                                                   \
         dfx_job_line(row, sizeof(row), __VA_ARGS__);                       \
@@ -828,8 +829,12 @@ int test_dev_factory(void)
               "make -j28 t-fast ONLY=c", cwd);
         DFX_K("z23", now - 600, now - 599, now - 559, 1, 40, 30, 0, "tK4",
               "make t-fast-exact ONLY=d", cwd);
-        DFX_K("z23", now - 500, now - 490, now - 10, 10, 900, 900, 0, "tK5",
-              "make -j28 z23", cwd);
+        DFX_K("z23", now - 550, now - 540, now - 340, 10, 200, 700, 0, "tK5",
+              "make -j28 agent-verify ONLY=e", cwd);
+        DFX_K("z23", now - 500, now - 490, now - 10, 10, 900, 900, 0, "tK6",
+              "make -j28 agent-verify-evidence LOG=/tmp/v", cwd);
+        DFX_K("z23", now - 450, now - 440, now - 10, 10, 900, 900, 0, "tK7",
+              "make -j28 z23 LOG=/tmp/agent-verify.log", cwd);
 #undef DFX_K
         fp = fopen(jobs_k, "w");
         ASSERT(fp != NULL);
@@ -838,8 +843,10 @@ int test_dev_factory(void)
         (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_k, 1);
         dfx_run(&c, 48);
         ASSERT(dfx_ok(&c));
-        ASSERT_EQ((int)dfx_num(&c, "jobs.cold_t_fast_n"), 2);
-        ASSERT(dfx_near(&c, "jobs.cold_t_fast_run_s", 1300));
+        ASSERT_EQ((int)dfx_num(&c, "jobs.classes.build.n"), 2);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.classes.t_fast.n"), 5);
+        ASSERT_EQ((int)dfx_num(&c, "jobs.cold_t_fast_n"), 3);
+        ASSERT(dfx_near(&c, "jobs.cold_t_fast_run_s", 1500));
         ASSERT_EQ((int)dfx_num(&c, "jobs.cold_t_fast_without_j"), 1);
         ASSERT_EQ((int)dfx_num(&c, "jobs.warm_t_fast_n"), 2);
         ASSERT(dfx_near(&c, "jobs.cold_t_fast_cpu_threshold_s", 600));
