@@ -21,6 +21,10 @@ static void sha3_wipe(void *ptr, size_t len)
 }
 
 /* One Keccak-f round, theta/rho/pi/chi/iota fully unrolled over locals, a -> e. */
+/* Keep the two rounds together so intermediate lanes can stay in registers. */
+#if __has_c_attribute(gnu::always_inline)
+[[gnu::always_inline]]
+#endif
 static inline void keccak_round(const uint64_t a[restrict 25], uint64_t e[restrict 25], uint64_t rc)
 {
     uint64_t c0 = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
