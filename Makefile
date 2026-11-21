@@ -3401,6 +3401,7 @@ skycombat-agent-client:
 	@echo "skycombat_agent_client_requires_linux" >&2; exit 2
 endif
 
+ZCL_RETRIEVAL_HISTORICAL_COMMITS := fff77e30c30157113c7dced2f0179c92980f6481 25fe3e353288d2f52e7f5fc07b7b722b27e71f1a
 .PHONY: worktree-prime worktree-prime-selftest
 # Formalizes the "copy generated vendor inputs before a fresh worktree can
 # compile and link" tribal knowledge (docs/work/README.md, the zclassic23-dev
@@ -3462,6 +3463,25 @@ worktree-prime: $(BIN_DIR)/copy-vendor-include
 	  exit 1; \
 	fi; \
 	if [ "$$(cd "$$src" && pwd -P)" = "$$(pwd -P)" ]; then \
+	  if git rev-parse --git-dir >/dev/null 2>&1; then \
+	    for commit in $(ZCL_RETRIEVAL_HISTORICAL_COMMITS); do \
+	      case "$$commit" in *[!0-9a-f]*|'') \
+	        echo "worktree-prime: invalid historical retrieval commit $$commit" >&2; exit 1 ;; \
+	      esac; \
+	      if [ "$${#commit}" -ne 40 ]; then \
+	        echo "worktree-prime: invalid historical retrieval commit $$commit" >&2; exit 1; \
+	      fi; \
+	      if git cat-file -e "$$commit^{commit}" 2>/dev/null; then continue; fi; \
+	      echo "worktree-prime: fetching historical retrieval evidence $$commit"; \
+	      if ! git -c uploadpack.allowAnySHA1InWant=true fetch --quiet --no-tags \
+	          --no-write-fetch-head --no-recurse-submodules origin "$$commit"; then \
+	        echo "worktree-prime: could not fetch historical retrieval evidence $$commit from origin" >&2; exit 1; \
+	      fi; \
+	      if ! git cat-file -e "$$commit^{commit}" 2>/dev/null; then \
+	        echo "worktree-prime: historical retrieval evidence $$commit is still unavailable" >&2; exit 1; \
+	      fi; \
+	    done; \
+	  fi; \
 	  echo "worktree-prime: this checkout ($$src) IS the source — nothing to do"; \
 	  exit 0; \
 	fi; \

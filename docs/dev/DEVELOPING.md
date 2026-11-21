@@ -56,8 +56,14 @@ patch against the current baseline.
 ### Historical retrieval evidence in a fresh clone
 
 The retrieval lint gate checks pinned commits from before the source baseline.
-If it reports `benchmark lineage is unavailable` or `driver commit is unavailable`,
-fetch those exact evidence objects without fetching their old submodules:
+Standalone `make worktree-prime` imports either missing pinned commit from
+`origin`, then verifies the exact object before running proof setup. Once the
+objects are present, priming is offline. If either object cannot be fetched,
+priming fails immediately and names the commit.
+
+When bypassing standalone priming, or when its origin lacks the objects, use
+this manual recovery if a check reports `benchmark lineage is unavailable` or
+`driver commit is unavailable`; it fetches without fetching old submodules:
 
 ```sh
 git fetch --no-recurse-submodules origin fff77e30c30157113c7dced2f0179c92980f6481
@@ -70,6 +76,7 @@ directly. These fetches supply evidence without changing the checked-out source.
 Do not merge the historical commits. If either object is unavailable, retain the
 failure for the reviewer; the check still requires the exact evidence.
 
+<!-- claim: symbol-present ZCL_RETRIEVAL_HISTORICAL_COMMITS Makefile # standalone priming imports pinned historical evidence -->
 <!-- claim: symbol-present lineage_commit tools/dev/retrieval-gold-corpus-check.sh # pinned historical corpus lineage -->
 <!-- claim: symbol-present driver tools/dev/retrieval-gold-identifier-graph-receipt-check.sh # pinned historical benchmark driver -->
 

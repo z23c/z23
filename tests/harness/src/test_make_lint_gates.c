@@ -2149,13 +2149,57 @@ static int t_agent_verify_empty_exact(void)
     return bad;
 }
 
+static int t_worktree_prime_historical_evidence(void)
+{
+    static const char script[] =
+        "set -eu; root=$1; work=$2; cd \"$work\"\n"
+        "export HOME=\"$work/home\" GIT_CONFIG_NOSYSTEM=1 GIT_ALLOW_PROTOCOL=file\n"
+        "mkdir -p \"$HOME\"\n"
+        "git config --global user.name Fixture; git config --global user.email fixture@example.invalid\n"
+        "git config --global protocol.file.allow always\n"
+        "git init -q donor; cd donor; mkdir -p vendor/lib; : > vendor/lib/stub.a\n"
+        "git add vendor/lib/stub.a; git commit -qm baseline; tree=$(git rev-parse 'HEAD^{tree}')\n"
+        "first=$(git commit-tree \"$tree\" -m lineage); second=$(git commit-tree \"$tree\" -p \"$first\" -m driver)\n"
+        "cd \"$work\"; git clone -q --no-local --no-hardlinks --no-checkout \"file://$work/donor\" clone\n"
+        "git -C clone checkout -q HEAD; cd clone\n"
+        "for commit in \"$first\" \"$second\"; do\n"
+        "  if git cat-file -e \"$commit^{commit}\" 2>/dev/null; then echo 'unreachable evidence cloned' >&2; exit 1; fi\n"
+        "done\n"
+        "mkdir -p build/bin; : > build/bin/copy-vendor-include; chmod +x build/bin/copy-vendor-include\n"
+        "sed -n '/^ZCL_RETRIEVAL_HISTORICAL_COMMITS /p; /^worktree-prime: /,/^worktree-prime-selftest: /{ /^worktree-prime-selftest: /d; p; }' \"$root/Makefile\" > prime.mk\n"
+        "head_before=$(git rev-parse HEAD); tree_before=$(git rev-parse 'HEAD^{tree}')\n"
+        "refs_before=$(git for-each-ref --format='%(refname) %(objectname)' | sort); status_before=$(git status --porcelain)\n"
+        "make --no-print-directory -f prime.mk worktree-prime BIN_DIR=build/bin ZCL_RETRIEVAL_HISTORICAL_COMMITS=\"$first $second\" > \"$work/prime.log\" 2>&1\n"
+        "git cat-file -e \"$first^{commit}\"; git cat-file -e \"$second^{commit}\"\n"
+        "git merge-base --is-ancestor \"$first\" \"$second\"\n"
+        "[ \"$head_before\" = \"$(git rev-parse HEAD)\" ]; [ \"$tree_before\" = \"$(git rev-parse 'HEAD^{tree}')\" ]\n"
+        "[ \"$refs_before\" = \"$(git for-each-ref --format='%(refname) %(objectname)' | sort)\" ]\n"
+        "[ \"$status_before\" = \"$(git status --porcelain)\" ]\n"
+        "cd \"$work\"; mv donor donor.offline; cd clone\n"
+        "make --no-print-directory -f prime.mk worktree-prime BIN_DIR=build/bin ZCL_RETRIEVAL_HISTORICAL_COMMITS=\"$first $second\" > \"$work/offline.log\" 2>&1\n"
+        "cd \"$work\"; mv donor.offline donor; cd clone\n"
+        "missing=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "if make --no-print-directory -f prime.mk worktree-prime BIN_DIR=build/bin ZCL_RETRIEVAL_HISTORICAL_COMMITS=\"$missing\" > \"$work/missing.log\" 2>&1; then exit 1; fi\n"
+        "grep -F \"$missing\" \"$work/missing.log\" >/dev/null\n"
+        "defaults=$(sed -n 's/^ZCL_RETRIEVAL_HISTORICAL_COMMITS := //p' \"$root/Makefile\")\n"
+        "lineage=$(sed -n 's/^readonly lineage_commit=//p' \"$root/tools/dev/retrieval-gold-corpus-check.sh\")\n"
+        "driver=$(sed -n 's/^readonly driver=//p' \"$root/tools/dev/retrieval-gold-identifier-graph-receipt-check.sh\")\n"
+        "[ \"$defaults\" = \"$lineage $driver\" ]\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "worktree_prime", "retrieval_evidence");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "worktree-prime evidence fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates_realroot(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_worktree_prime_historical_evidence() + t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
