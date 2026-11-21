@@ -191,26 +191,18 @@ static void report_app_init_failed(const struct app_context *ctx)
         return;
     }
 
-    char bootstatus[1100];
-    char rerun[1100];
-    (void)snprintf(bootstatus, sizeof(bootstatus),
-                   "z23 core node bootstatus -datadir=%s", datadir);
-    (void)snprintf(rerun, sizeof(rerun),
-                   "z23 -datadir=%s -loglevel=debug", datadir);
     const struct boot_error_next next[] = {
-        { bootstatus,
-          "read the on-disk boot beacon (<datadir>/boot_status.json). It needs "
-          "no running node and records the last stage this boot durably "
-          "reached" },
-        { rerun,
-          "re-run the same boot with debug logging; the step that refused "
-          "prints its reason to stderr above this line" },
+        { "z23 core node bootstatus -datadir=YOUR_DATADIR",
+          "supply the datadir from the evidence as one quoted argument to "
+          "read the last recorded boot stage offline. For a debug retry, "
+          "add -loglevel=debug to the original invocation to preserve its "
+          "network, lane and profile" },
     };
     boot_error_report(BOOT_ERROR_FATAL, "BOOT_INIT_FAILED", "app_init",
                       "node initialisation did not complete and no boot step "
                       "recorded a typed reason — treat the last stderr lines "
                       "above as the failure site",
-                      next, 2, "stage_reached=%s datadir=%s lane=%s profile=%s",
+                      next, 1, "stage_reached=%s datadir=%s lane=%s profile=%s",
                       stage, datadir,
                       ctx ? app_operator_lane_name(ctx->operator_lane) : "?",
                       ctx ? app_runtime_profile_name(ctx->runtime_profile)

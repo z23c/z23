@@ -972,7 +972,7 @@ static bool cas_capture_bind_refusal(const char *root, uint16_t port,
     char home[PATH_MAX+8], datadir[PATH_MAX+8], home_env[PATH_MAX+16];
     char datadir_flag[PATH_MAX+24], port_flag[32], connect_flag[64];
     snprintf(home, sizeof(home), "%s/home", root);
-    snprintf(datadir, sizeof(datadir), "%s/dd", root);
+    snprintf(datadir, sizeof(datadir), "%s/db dir", root);
     if (mkdir(home, 0700) != 0 || mkdir(datadir, 0700) != 0) return false;
     snprintf(home_env, sizeof(home_env), "HOME=%s", home);
     snprintf(datadir_flag, sizeof(datadir_flag), "-datadir=%s", datadir);
@@ -1014,6 +1014,10 @@ static bool cas_bind_refusal_observed(const char *out,
         !observed->timed_out && !observed->overflow &&
         cas_contains(out, "P2P explicit bind failed:") &&
         cas_contains(out, "(no fallback)") && cas_contains(out, "BOOT_INIT_FAILED") &&
+        cas_contains(out, "z23 core node bootstatus -datadir=YOUR_DATADIR\n") &&
+        cas_contains(out, "/db dir lane=test") &&
+        cas_contains(out, "add -loglevel=debug to the original invocation") &&
+        !cas_contains(out, "next[2]:  z23 -datadir=") &&
         cas_contains(out, "stage_reached=network_ready") &&
         !cas_contains(out, "stage_reached=ready");
 }
