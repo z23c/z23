@@ -1874,9 +1874,10 @@ static int test_dev_land_speculative_next_pair(void)
         /* The read-only decision is exactly what it was and no longer takes
          * the speculative pair's keys: those belong to dev land speculate. */
         {
-            char why[256];
+            char why[256], elsewhere[1400];
+            (void)snprintf(elsewhere, sizeof(elsewhere), "%s/x.bundle", g_dlx_state);
             dlx_begin(&c, "decision");
-            (void)json_push_kv_str(&c.input, "bundle_out", "/tmp/x.bundle");
+            (void)json_push_kv_str(&c.input, "bundle_out", elsewhere);
             ASSERT(c.request.spec != NULL && !zcl_command_registry_input_validate(c.request.spec, &c.input, why, sizeof(why)));
             dlx_end(&c);
         }

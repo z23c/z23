@@ -866,7 +866,7 @@ static bool dl_train_restack(const struct dl_dirs *d, const struct dl_row *head,
     if (!dl_train_checkout(d, t->tip))
         return false;
     for (size_t i = 0; i < kept; i++)
-        if (dl_train_add(d, head, t, &keep[i]) < 0)
+        if (dl_train_add(d, head, t, &keep[i], dl_rebase) < 0)
             break;
     return true;
 }

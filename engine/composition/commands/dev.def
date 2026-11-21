@@ -2335,7 +2335,7 @@ ZCL_COMMAND_BRANCH("dev.land", "dev",
 
 ZCL_COMMAND_READY_COMMAND(
     "dev.land.submit", "dev.land", "",
-    "Queue a signed tip for landing and return at once",
+    "Queue a signed tip and return at once",
     "Queues a signed tip (default: worktree HEAD) before publishing to origin. "
     "Refuses unsigned or unrelated tips. "
     "A repeated tip from the same worktree attaches before qualify and does "
@@ -2370,7 +2370,7 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.drive", "dev.land", "",
-    "Drive a queued row through proof and publication",
+    "Drive a queued row to publication",
     "A bounded foreground integrator session: rebase, lint, exact proof "
     "request, proof execution and receipt-gated push, with the step lock "
     "released while the proof runs. With seq it repeats up to 6 rounds, "
@@ -2400,7 +2400,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_READY_READ(
     "dev.land.status", "dev.land", "",
-    "Read the landing queue and the exact proof handoff",
+    "Read the queue and the exact proof handoff",
     "Reads the queue rows, the in-flight proof pair and the publication hold "
     "from the private landing state at call time; nothing is fetched or "
     "mutated. The default reply is compact: the newest three outcome rows "
@@ -2439,7 +2439,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.speculate", "dev.land", "",
-    "Predict the pair the queue proves after the in-flight row lands",
+    "Predict next pair",
     "Takes the decision's coherent snapshot, releases its locks, then builds "
     "data.speculative_pair: the pair the queue will prove next, predicted "
     "while a row is in flight, as {local, base, tree, rows[]} with the "
@@ -2498,7 +2498,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.attach", "dev.land", "",
-    "Seal the signed Git intent for an exact proven pair",
+    "Seal the signed intent for a proven pair",
     "Seals the signed publication intent of one proven row. Optional base and "
     "head pins refuse a changed pair.", 65536,
     "land,attach,intent,proof",
@@ -2517,7 +2517,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.attach_publish", "dev.land", "",
-    "Seal the intent and run its publication beat under one lock",
+    "Seal the intent and publish under one lock",
     "Seals the intent of an exact pair and performs its current-base "
     "publication beat under one lock. wait_ms bounds an explicit wait for "
     "the proof.", 65536,
@@ -2594,7 +2594,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.fence_replace", "dev.land", "",
-    "Bind an explicit paired successor to a fenced row",
+    "Bind a successor to a fenced row",
     "Replaces a fenced pair with an explicit successor named by seq, base, "
     "head, tip and worktree; the worktree must live under the land directory.", 65536,
     "land,fence,successor",
@@ -2613,7 +2613,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_READ(
     "dev.land.attest_only", "dev.land", "",
-    "Report the bounded self observation of this binary",
+    "Report this binary's self observation",
     "Reports the bounded self image and source observation, the exact "
     "unsealed seq410 pair, the time and two fixture booleans; the service "
     "origin stays UNKNOWN. It returns before any mutation.", 16384,
@@ -2632,7 +2632,7 @@ ZCL_COMMAND_DEV_READ(
  * (tools/command/native_dev_land_window.c). */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.window", "dev.land", "",
-    "Read or announce the two-lander LAND-WINDOW proving windows",
+    "Read or announce LAND-WINDOW proving windows",
     "open reads LAND-WINDOW announcements from retained agent mail. It lists "
     "up to 64 open windows from other hosts matching the optional base. A higher "
     "sequence from the same sender supersedes a window for the same host, "
@@ -2690,7 +2690,7 @@ ZCL_COMMAND_DEV_READ(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.intake", "dev.land", "",
-    "Take in READY board posts: verify, scope, merge-check, verdict",
+    "Take in READY posts: verify, scope, merge-check",
     "For each READY post (one id, or a room since a time, or a saved "
     "posts_file) it checks the post signature, that the author key is in the "
     "allow file, fetches the offered bundle (a sha256 token; bundle_dir/"
@@ -2724,7 +2724,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * Submit from another machine (tools/command/native_dev_land_remote.c). */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.receive", "dev.land", "",
-    "Queue a bundle sent from another machine (queue host)",
+    "Queue a bundle sent from another machine",
     "Verifies the git bundle in the checkout that owns the queue, fetches "
     "its single head into refs/heads/remote/<lane>, readies the detached "
     "worktree <state root>/land-remote/<lane> and queues that tip through "
@@ -2761,7 +2761,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.send", "dev.land", "",
-    "Send this checkout's unlanded commits to the queue host",
+    "Send unlanded commits to the queue host",
     "Refuses dirty tracked files (SEND_DIRTY_TREE), fetches origin main, and "
     "requires HEAD ahead (SEND_NOTHING_AHEAD). Bundles HEAD ^origin/main, "
     "scps to <host>:<inbox>/<lane>-<sha12>.bundle, then runs <remote_cmd> dev "
@@ -2802,7 +2802,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.check_offer", "dev.land", "",
-    "Check a sent bundle against its offer manifest, read-only",
+    "Check a sent bundle against its offer, read-only",
     "Reads <bundle_out>.offer.json and checks the bundle, queueing and "
     "touching nothing: OFFER_BAD_MANIFEST (schema, commit, base or sha), "
     "OFFER_SHA_MISMATCH, OFFER_BAD_BUNDLE (git bundle verify in repo, "
@@ -2827,7 +2827,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.attest_offer", "dev.land", "",
-    "Check an offered bundle and sign a receipt for it",
+    "Check an offered bundle and sign a receipt",
     "Runs exactly check_offer's checks (same inputs and OFFER_* refusals) "
     "and only on a pass writes receipt_out (absolute), signed with this "
     "box's dev proof key: commit, base, bundle_sha256, checks, verdict ok, "
@@ -2875,7 +2875,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.reverify_offer", "dev.land", "",
-    "Rebuild an offered commit and re-run dev cx check on it",
+    "Rebuild an offered commit and re-run cx check",
     "Runs check_offer's checks (same inputs, OFFER_* refusals), fetches the "
     "bundle head into a temporary ref and cherry-picks it without committing "
     "onto a scratch worktree at the offered base. The unit is the one "
@@ -2920,7 +2920,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.qualify_offer", "dev.land", "",
-    "Count the distinct labs that re-verified an offered commit",
+    "Count labs that re-verified an offered commit",
     "Each of receipts (comma list of absolute paths) passes "
     "verify_offer_receipt's checks against offer, same codes, its path as "
     "evidence. It counts only with cx_check (check=verify: agent_verify; "

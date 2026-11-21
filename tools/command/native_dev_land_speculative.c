@@ -69,7 +69,6 @@
 #if !defined(_WIN32)
 #include <dirent.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -227,7 +226,7 @@ static bool dl_spec_stale(const struct dl_spec *s, const char *parent,
            snprintf(path, cap, "%s/%s", parent, name) < (int)cap &&
            strcmp(path, s->dir) != 0 && lstat(path, &st) == 0 &&
            S_ISDIR(st.st_mode) && st.st_uid == geteuid() &&
-           time(NULL) - st.st_mtime >= DL_SPEC_STALE_SECS;
+           platform_time_wall_unix() - (int64_t)st.st_mtime >= DL_SPEC_STALE_SECS;
 }
 
 /* The stale scratch's worktree, then its directory; false when git will not
