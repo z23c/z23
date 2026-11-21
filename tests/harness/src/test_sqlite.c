@@ -4767,7 +4767,7 @@ static bool v47_refusal_case(enum v47_fault mode)
            mode, fault.denied, rc, node_db_schema_version(&ndb),
            node_db_schema_compat_floor(&ndb),
            v47_scalar(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='047'"));
-    ok = ok && fault.denied > 0 && rc < 0 && node_db_schema_version(&ndb) == 46 &&
+    ok = ok && fault.denied > 0 && rc == -1 && node_db_schema_version(&ndb) == 46 &&
          node_db_schema_compat_floor(&ndb) == floor &&
          v47_scalar(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='047'") == 0 &&
          v47_scalar(ndb.db, "SELECT count(*) FROM v47_sentinel WHERE value='keep'") == 1 &&

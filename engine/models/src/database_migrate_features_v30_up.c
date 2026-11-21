@@ -658,8 +658,10 @@ static bool db_migrate_v47_vault_intents(struct node_db *ndb, int floor)
          node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
     if (ok) ok = node_db_commit(ndb);
     if (!ok) {
-        (void)node_db_rollback(ndb);
-        LOG_ERROR("db", "migrate: v47 wallet schema failed; version not advanced");
+        if (!node_db_rollback(ndb))
+            LOG_ERROR("db", "migrate: v47 wallet schema and rollback failed");
+        else
+            LOG_ERROR("db", "migrate: v47 wallet schema failed; rolled back");
     }
     return ok;
 }
