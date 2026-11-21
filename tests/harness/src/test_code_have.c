@@ -419,6 +419,17 @@ static int ch_check_real_tree(struct ci_capability *caps,
                 pack_found = true;
         CH_CHECK("a multi-term filename reaches its implementation",
                  pack_found);
+        struct ci_capability base58[5];
+        struct ci_capability_query base58_q;
+        int base58_n = codeindex_capabilities(
+            ci, "Base58 address encoding", base58, 5, &base58_q);
+        bool base58_found = false;
+        for (int i = 0; i < base58_n; i++)
+            if (strcmp(base58[i].header,
+                       "platform/domain/encoding/src/base58.c") == 0)
+                base58_found = true;
+        CH_CHECK("Base58 address encoding reaches its codec",
+                 base58_found);
         codeindex_close(ci);
     }
     return failures;
@@ -635,7 +646,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 31 /* of all cases: 22/63 (34%) on 2026-11-20, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 33 /* of all cases: 23/63 (36%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {

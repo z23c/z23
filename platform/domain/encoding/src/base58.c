@@ -2,9 +2,10 @@
  * Copyright (c) 2014 The Bitcoin Core developers
  * Copyright 2026 Rhett Creighton
  *
- * Pure Base58 / Base58Check codec. See platform/domain/encoding/base58.h for
- * the contract; this file is intentionally allocation-free and
- * dependency-light (only core/hash.h for the SHA256d checksum).
+ * Pure Base58 / Base58Check address codec.
+ * See platform/domain/encoding/include/domain/encoding/base58.h for the contract;
+ * this file is intentionally allocation-free and dependency-light (only
+ * core/hash.h for the SHA256d checksum).
  */
 
 #include "domain/encoding/base58.h"
