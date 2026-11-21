@@ -242,11 +242,10 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * a post another box wrote), stores each through the same checks a pulled
  * post meets without waiting on another board writer, and closes the stream
  * with a receipt (FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT). A record refused or
- * deferred for a node-wide reason (a full store, a failed append, the
- * node-wide wiki replacement cap) carries no result code in the receipt,
- * so a pusher learns only its own post's fate; a deferral because another
- * board writer held the lock at that instant still names ERR_BUSY, a fact
- * no older than the commit time beside it. Received pushes are committed one
+ * deferred for a node-wide reason (another board writer holding the lock, a
+ * full store, a failed append, the node-wide wiki replacement cap) carries
+ * no result code in the receipt, so a pusher learns only its own post's
+ * fate. Received pushes are committed one
  * a tick, oldest first. Fairness holds among pushes that got an inbox slot:
  * FLEET_BOARD_PUSH_INBOX_MAX distinct paired peers that refill their slots
  * at once can keep the inbox full, and every other push is then refused
@@ -488,8 +487,9 @@ bool boot_fleet_board_fleet_register_service(void);
  * the records it judged by verdict; push_in_dropped pushes that ended
  * before their commit; push_data_refused DATA on a push stream, which
  * closes it. push_hint: the post RPC's `push_to` hints by what was done
- * with each. The read-only `fleet_board op=status` reply carries all of
- * these under "carriage". */
+ * with each; a hinted post that never reaches the queue is counted there
+ * only, never also under push_skipped. The read-only `fleet_board op=status`
+ * reply carries all of these under "carriage". */
 struct boot_fleet_board_fleet_counts {
     uint64_t delegation_refused;
     uint64_t role_refused;

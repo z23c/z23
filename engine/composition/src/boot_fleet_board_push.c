@@ -344,12 +344,22 @@ static void push_queue_put(const struct push_queued *q)
         push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
 }
 
-/* A post that is not this box's own FLEET post: counted, and a usable hint
- * on it refused by which of the two it is not. */
+/* A post that carried a hint and is not offered to the queue is counted
+ * once, under its hint verdict; only an unhinted one moves a skip counter
+ * at enqueue. */
+static void push_skip_unhinted(enum fleet_board_push_hint hint,
+                               enum fleet_board_push_skip why)
+{
+    if (hint == FLEET_BOARD_PUSH_HINT_NONE)
+        push_skip(why, 1);
+}
+
+/* A post that is not this box's own FLEET post, and a usable hint on it
+ * refused by which of the two it is not. */
 static enum fleet_board_push_hint push_not_own(
     const struct fleet_board_post *post, enum fleet_board_push_hint hint)
 {
-    push_skip(FLEET_BOARD_PUSH_SKIP_NOT_OWN, 1);
+    push_skip_unhinted(hint, FLEET_BOARD_PUSH_SKIP_NOT_OWN);
     if (hint == FLEET_BOARD_PUSH_HINT_QUEUED)
         hint = post && post->scope != FLEET_BOARD_SCOPE_FLEET
                    ? FLEET_BOARD_PUSH_HINT_NOT_FLEET
@@ -368,11 +378,12 @@ enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
         return push_not_own(post, hint);
     if (hint == FLEET_BOARD_PUSH_HINT_QUEUED && memcmp(to, own_key, 32) == 0)
         hint = FLEET_BOARD_PUSH_HINT_SELF;
-    /* A refused hint is as if there were none: the ref decides, or nothing. */
+    /* A refused hint is as if there were none: the ref decides, or nothing;
+     * with nothing, the post is counted once, under its hint verdict. */
     bool use_to = hint == FLEET_BOARD_PUSH_HINT_QUEUED;
     if (!use_to &&
         (push_id_zero(post->ref) || memcmp(post->ref, post->id, 32) == 0)) {
-        push_skip(FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE, 1);
+        push_skip_unhinted(hint, FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE);
         return push_hint_count(hint);
     }
     struct push_queued q;
@@ -1073,8 +1084,9 @@ static uint8_t push_screen(struct node_db *store,
  * writer: on the shared tick-runner thread a held board write lock is
  * FLEET_BOARD_ERR_BUSY, which the receipt answers deferred and the pull
  * retries. A refusal that describes this box rather than the pusher's post
- * (a full store, a failed append, a wiki quota that may be the node-wide
- * replacement cap) goes back with its verdict and no result code. */
+ * (another board writer holding the lock, a full store, a failed append, a
+ * wiki quota that may be the node-wide replacement cap) goes back with its
+ * verdict and no result code. */
 static uint8_t push_ingest(struct node_db *store,
                            const struct fleet_board_post *post, int64_t now,
                            uint8_t *result)
@@ -1087,7 +1099,8 @@ static uint8_t push_ingest(struct node_db *store,
     }
     if (r == FLEET_BOARD_OK && stored && boot_fleet_roster_is_row(post))
         boot_fleet_roster_invalidate();
-    bool node_wide = r == FLEET_BOARD_ERR_CAPACITY ||
+    bool node_wide = r == FLEET_BOARD_ERR_BUSY ||
+                     r == FLEET_BOARD_ERR_CAPACITY ||
                      r == FLEET_BOARD_ERR_STORAGE ||
                      r == FLEET_BOARD_ERR_WIKI_QUOTA;
     *result = node_wide ? (uint8_t)FLEET_BOARD_OK : (uint8_t)r;
