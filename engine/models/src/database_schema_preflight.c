@@ -267,7 +267,7 @@ static bool parse_migration_version(const unsigned char *text, int bytes,
  * schema_version) as the conservative default: no downgrade is assumed
  * safe for a database this binary never classified itself. */
 static bool read_compat_floor(sqlite3 *db, int32_t marker, int32_t *floor_out,
-                               const char **detail_out)
+                              const char **detail_out)
 {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(db,
