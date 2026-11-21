@@ -681,16 +681,18 @@ static void projection_open_log_plan(enum projection_integrity_plan plan,
     }
 }
 
-static void projection_open_log_quick_check_done(
-    enum projection_integrity_plan plan, const char *display_path,
-    int64_t started_ms)
+static enum sqlite_integrity_result projection_scan_on_open(
+    enum projection_integrity_plan plan, sqlite3 *db,
+    const char *display_path, int64_t started_ms)
 {
-    if (plan == PROJECTION_INTEGRITY_SCAN_NOW) {
+    projection_open_log_plan(plan, display_path);
+    if (plan != PROJECTION_INTEGRITY_SCAN_NOW) return SQLITE_INTEGRITY_CLEAN;
+    enum sqlite_integrity_result result = sqlite_integrity_quick_check(db, "projection_store");
+    if (result != SQLITE_INTEGRITY_INCOMPLETE)
         fprintf(stderr,  // obs-ok:projection-store-lifecycle
                 "[projection_store] quick_check done path=%s elapsed_ms=%lld\n",
-                display_path,
-                (long long)(platform_time_monotonic_ms() - started_ms));
-    }
+                display_path, (long long)(platform_time_monotonic_ms() - started_ms));
+    return result;
 }
 
 #ifndef _WIN32
@@ -877,7 +879,7 @@ bool projection_store_open(const char *datadir)
      * and their state rows) are fully rebuildable, but a corrupt file
      * left in place would otherwise surface as a mid-fold SQLITE_CORRUPT deep
      * inside a projection job — a JOB_FATAL with no named blocker. On a
-     * non-"ok" quick_check, quarantine the file aside and reopen a FRESH one;
+     * confirmed integrity failure, quarantine the file aside and reopen a fresh one;
      * whichever projection job runs next re-creates its schema (CREATE TABLE
      * IF NOT EXISTS) and re-derives its rows from the kernel, same as a
      * brand-new node. AUTO-TERMINATING + idempotent: a fresh, just-created
@@ -891,9 +893,7 @@ bool projection_store_open(const char *datadir)
      * storage/projection_store.h and config/boot_fast_restart.h). The scan
      * is never skipped or shortened; only its thread changes. */
     int64_t quick_check_started = platform_time_monotonic_ms();
-    projection_open_log_plan(plan, display_path);
-    enum sqlite_integrity_result integrity = plan == PROJECTION_INTEGRITY_SCAN_NOW
-        ? sqlite_integrity_quick_check(db, "projection_store") : SQLITE_INTEGRITY_CLEAN;
+    enum sqlite_integrity_result integrity = projection_scan_on_open(plan, db, display_path, quick_check_started);
     if (integrity == SQLITE_INTEGRITY_CORRUPT) {
 #ifdef _WIN32
         fprintf(stderr,  // obs-ok:projection-store-open-failure
@@ -912,9 +912,6 @@ bool projection_store_open(const char *datadir)
         }
 #endif
     }
-    if (integrity != SQLITE_INTEGRITY_INCOMPLETE)
-        projection_open_log_quick_check_done(plan, display_path, quick_check_started);
-
     if (integrity == SQLITE_INTEGRITY_INCOMPLETE || !apply_pragmas(db)) {
         sqlite3_close(db);
 #ifdef _WIN32

@@ -1710,11 +1710,20 @@ static int ps_authorize_connection(sqlite3 *db, char **error,
     return sqlite3_set_authorizer(db, ps_deny_quickcheck, NULL);
 }
 
+static bool ps_integrity_witness_present(sqlite3 *db)
+{
+    sqlite3_stmt *stmt = NULL;
+    bool found = sqlite3_prepare_v2(db, "SELECT v FROM integrity_witness", -1, &stmt, NULL) == SQLITE_OK &&
+                 sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 37;
+    sqlite3_finalize(stmt);
+    return found;
+}
+
 static int ps_test_incomplete_check(bool projection)
 {
     int failures = 0;
     char dir[256], path[512], receipt[544];
-    struct stat before = {0}, after;
+    struct stat before = {0}, after = {0};
     bool (*open_store)(const char *) = projection ? projection_store_open : progress_store_open;
     void (*close_store)(void) = projection ? projection_store_close : progress_store_close;
     sqlite3 *(*store_db)(void) = projection ? projection_store_db : progress_store_db;
@@ -1734,16 +1743,12 @@ static int ps_test_incomplete_check(bool projection)
     if (opened) close_store();
     if (armed) (void)sqlite3_cancel_auto_extension((void (*)(void))ps_authorize_connection);
     PS_CHECK("incomplete check refuses open", !opened && atomic_load(&ps_denied_scans) == 1u);
-    PS_CHECK("incomplete check preserves original file", seeded && stat(path, &after) == 0 &&
-             after.st_dev == before.st_dev && after.st_ino == before.st_ino);
+    PS_CHECK("original path accessible after denied scan", stat(path, &after) == 0);
+    PS_CHECK("incomplete check preserves original file", before.st_dev == after.st_dev && before.st_ino == after.st_ino);
     PS_CHECK("incomplete check creates no quarantine archive",
              (projection ? ps_count_corrupt_projection(dir) : ps_count_corrupt(dir)) == 0);
-    sqlite3_stmt *stmt = NULL;
-    bool readable = open_store(dir) && sqlite3_prepare_v2(store_db(),
-        "SELECT v FROM integrity_witness", -1, &stmt, NULL) == SQLITE_OK &&
-        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 37;
+    bool readable = open_store(dir) && ps_integrity_witness_present(store_db());
     PS_CHECK("original data accessible after scan authority returns", readable);
-    sqlite3_finalize(stmt);
     close_store();
     test_cleanup_tmpdir(dir);
     return failures;
