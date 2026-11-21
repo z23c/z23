@@ -770,15 +770,18 @@ static void hgt_warning_child(const struct hgt_warning_fixture *f, bool pressure
 static int hgt_warning_run(const struct hgt_warning_fixture *f, bool pressure,
                            bool fail_sort, int pad, char *out, size_t size)
 {
+    if (!out || size < 2) return -1;
+    out[0] = 0;
     pid_t child = fork();
     if (child < 0) return -1;
     if (child == 0) hgt_warning_child(f, pressure, fail_sort, pad);
     int status;
     if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
     FILE *file = fopen(f->output, "rb");
-    if (!file || size < 2) return -1;
+    if (!file) return -1;
     size_t n = fread(out, 1, size - 1, file);
-    bool ok = !ferror(file) && feof(file) && fclose(file) == 0;
+    bool ok = !ferror(file) && feof(file);
+    if (fclose(file) != 0) ok = false;
     out[n] = '\0';
     return ok ? WEXITSTATUS(status) : -1;
 }
@@ -800,17 +803,18 @@ static bool hgt_warning_test(const char *tmp)
     if (!hgt_warning_setup(&f, tmp)) return false;
     bool bounded = false;
     for (int pad = 0; pad < 2 && !bounded; pad++) {
-        if (hgt_warning_run(&f, false, false, pad, out, sizeof out) != 0) { fprintf(stderr, "warning run failed: %s\n", out); return false; }
+        if (hgt_warning_run(&f, false, false, pad, out, sizeof out) != 0) { fprintf(stderr, "warning run failed: %.300s\n", out); return false; }
         char *body = strstr(out, "would post: ");
-        if (!body) { fprintf(stderr, "warning missing body: %s\n", out); return false; }
+        if (!body) { fprintf(stderr, "warning missing body: %.300s\n", out); return false; }
         body += strlen("would post: ");
         char *end = strchr(body, '\n');
         if (!end || (size_t)(end - body) != 4000) { fprintf(stderr, "warning length=%zu\n", end ? (size_t)(end-body) : 0); return false; }
         bounded = strstr(body, "é") && hgt_warning_utf8(body, 4000);
     }
     if (!bounded) { fprintf(stderr, "warning utf8 boundary failed\n"); return false; }
-    if (hgt_warning_run(&f, false, true, 0, out, sizeof out) == 0) { fprintf(stderr, "warning sort failure suppressed\n"); return false; }
-    if (hgt_warning_run(&f, true, false, 0, out, sizeof out) != 0) { fprintf(stderr, "pressure run failed: %s\n", out); return false; }
+    int sort_rc = hgt_warning_run(&f, false, true, 0, out, sizeof out);
+    if (sort_rc != 37) { fprintf(stderr, "warning sort failure rc=%d\n", sort_rc); return false; }
+    if (hgt_warning_run(&f, true, false, 0, out, sizeof out) != 0) { fprintf(stderr, "pressure run failed: %.300s\n", out); return false; }
     const char *p = out;
     for (int i = 1; i <= 10; i++) {
         char expected[32];
