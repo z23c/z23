@@ -14,7 +14,12 @@
  *        route_file (absolute path of a client.json), slot (absolute path of
  *        the REMOTE z23) and host_alias [A-Za-z0-9._-]{1,64}};
  *        deadline_ms 1000..20000 (default 8000).
- * OUTPUT zcl.fleet_vitals_table.v1: rows[] and screen. A machine that fails
+ * NO INPUT (no machines key): this box alone, measured now, with a note on
+ *        what a remote row needs. Never a refusal. Fleet ledger vitals rows do
+ *        not replicate between hosts, so no recorded remote row is shown.
+ * OUTPUT zcl.fleet_vitals_table.v1: rows[] (input order; each carries age_s 0,
+ *        spare_cores_centi, load1_per_core_centi, jobs_running, jobs_queued and
+ *        spare_rank), best, advice, age_note and screen (rank order). A machine that fails
  *        is {label, reachable:false, error}; it never fails the call. Error
  *        codes: DEADLINE, SPAWN_FAILED, REMOTE_EXIT, BAD_REPLY,
  *        SSH_UNRESOLVED, SELF_UNRESOLVED.
@@ -28,13 +33,16 @@
   "path": "fleet.vitals.table",
   "parent": "fleet.vitals",
   "handler": "zcl_native_handle_fleet_vitals_table",
-  "summary": "One table of every named machine's load, memory and disk",
+  "summary": "Which machine has spare CPU: load, queue, memory and disk per machine",
   "semantics": [
     "Measures this box and, for each named remote machine, runs the fixed ",
     "read leaf fleet vitals read over the host tunnel with one pinned ssh ",
     "argv, concurrently, each under its own deadline. At most 16 machines. ",
     "A machine that cannot be reached shows as unreachable with an error ",
-    "code and never fails the call. It writes nothing."
+    "code and never fails the call. With no input it shows this box alone. ",
+    "Each row carries spare cores, build queue depth and age, and the screen ",
+    "ranks machines by spare cores; every number is measured during the ",
+    "call. It writes nothing."
   ],
   "input_schema": "zcl.fleet_vitals_table_input.v1",
   "output_schema": "zcl.fleet_vitals_table.v1",
@@ -66,6 +74,7 @@
 
 #if !defined(_WIN32)
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #define VT_MACHINES_MAX 16u
@@ -87,6 +96,9 @@ struct vt_machine {
     char error[24];
     int64_t rtt_ms;
     struct zcl_fleet_vitals_now now;
+    bool implicit;      /* the no-input default row */
+    int64_t spare_centi; /* (cpus - load1) * 100; INT64_MIN when unknown */
+    int rank;           /* 1 = most spare capacity; 0 = not ranked */
     /* remote plumbing */
     const char *ssh;
     const char *self;
@@ -301,6 +313,38 @@ static const char *vt_shape_refusal(const struct json_value *list, const struct 
     return NULL;
 }
 
+/* Lowercase letters and digits pass, a dot or hyphen after the first byte
+ * becomes a hyphen, anything else is dropped; at most 16 bytes. */
+static size_t vt_label_from_host(const char *host, char label[17])
+{
+    size_t n = 0;
+    for (const char *c = host; *c && n < 16; ++c) {
+        char ch = (*c >= 'A' && *c <= 'Z') ? (char)(*c - 'A' + 'a') : *c;
+        bool alnum = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+        if (alnum)
+            label[n++] = ch;
+        else if (n > 0 && (ch == '-' || ch == '.'))
+            label[n++] = '-';
+    }
+    label[n] = 0;
+    return n;
+}
+
+/* The no-input row: this box, labelled from its host name, measured now. */
+static void vt_default_machine(struct vt_machine *m)
+{
+    char host[65] = "";
+    memset(m, 0, sizeof *m);
+#if !defined(_WIN32)
+    if (gethostname(host, sizeof host - 1) != 0)
+        host[0] = 0;
+#endif
+    if (vt_label_from_host(host, m->label) == 0)
+        snprintf(m->label, sizeof m->label, "this-box");
+    m->local = true;
+    m->implicit = true;
+}
+
 /* Fills `m`/`count` or the refusal; nothing is spawned here. */
 static bool vt_input(const struct zcl_command_request *request,
                      struct vt_machine m[VT_MACHINES_MAX], size_t *count,
@@ -310,6 +354,16 @@ static bool vt_input(const struct zcl_command_request *request,
     const struct json_value *list = input ? json_get(input, "machines") : NULL;
     struct json_value parsed = {0};
     const char *why = NULL;
+    if (!list) { /* no machines key at all: this box alone, never a refusal */
+        if (!vt_deadline(input, deadline)) {
+            vt_refuse(reply, "TABLE_DEADLINE_REFUSED",
+                      "deadline_ms is 1000 to 20000; refused before any spawn", "deadline_ms");
+            return false;
+        }
+        vt_default_machine(&m[0]);
+        *count = 1;
+        return true;
+    }
     if (list && list->type == JSON_STR) { /* the CLI may carry it as JSON text */
         const char *text = json_get_str(list);
         if (!text || !json_read(&parsed, text, strlen(text)))
@@ -361,7 +415,8 @@ static bool vt_parse_reply(const char *text, struct zcl_fleet_vitals_now *now)
             {"mem_total_mib", &now->mem_total_mib}, {"mem_avail_mib", &now->mem_avail_mib},
             {"mem_used_mib", &now->mem_used_mib}, {"disk_total_mib", &now->disk_total_mib},
             {"disk_used_mib", &now->disk_used_mib}, {"disk_free_mib", &now->disk_free_mib},
-            {"uptime_s", &now->uptime_s},
+            {"uptime_s", &now->uptime_s}, {"jobs_running", &now->jobs_running},
+            {"jobs_queued", &now->jobs_queued},
         };
         for (size_t i = 0; ok && i < sizeof map / sizeof map[0]; ++i) {
             *map[i].dst = vt_field(data, map[i].key);
@@ -446,6 +501,7 @@ static bool vt_arm(struct vt_machine *m, const char *ssh, const char *self,
     }
     if (m->local) {
         zcl_fleet_vitals_measure(&m->now);
+        zcl_fleet_vitals_measure_queue(&m->now);
         m->reachable = true;
         return false;
     }
@@ -497,10 +553,59 @@ static void vt_measure_all(struct vt_machine *m, size_t count, int deadline)
     }
 }
 
+/* ---- spare capacity ---------------------------------------------------- */
+
+#define VT_COLS 9
+
+/* (cpus - load1) in centi-cores; negative means the box is over-committed. */
+static void vt_spare(struct vt_machine *m)
+{
+    const struct zcl_fleet_vitals_now *n = &m->now;
+    m->spare_centi = INT64_MIN;
+    if (m->reachable && n->cpus > 0 && n->load1_centi >= 0)
+        m->spare_centi = n->cpus * 100 - n->load1_centi;
+}
+
+/* true when a should be ahead of b: more spare cores, then a shorter queue. */
+static bool vt_ahead(const struct vt_machine *a, const struct vt_machine *b)
+{
+    if (a->spare_centi != b->spare_centi)
+        return a->spare_centi > b->spare_centi;
+    int64_t qa = a->now.jobs_queued < 0 ? 0 : a->now.jobs_queued;
+    int64_t qb = b->now.jobs_queued < 0 ? 0 : b->now.jobs_queued;
+    return qa < qb;
+}
+
+/* Fills m[i].rank (1 = most spare) and order[] (rank order, then every
+ * unranked machine in input order); returns the ranked count. */
+static size_t vt_rank(struct vt_machine *m, size_t count, size_t order[VT_MACHINES_MAX])
+{
+    size_t ranked = 0;
+    for (size_t i = 0; i < count; ++i) {
+        vt_spare(&m[i]);
+        m[i].rank = 0;
+        if (m[i].spare_centi != INT64_MIN) {
+            size_t at = ranked++;
+            while (at > 0 && vt_ahead(&m[i], &m[order[at - 1]])) {
+                order[at] = order[at - 1];
+                --at;
+            }
+            order[at] = i;
+        }
+    }
+    for (size_t r = 0; r < ranked; ++r)
+        m[order[r]].rank = (int)r + 1;
+    size_t next = ranked;
+    for (size_t i = 0; i < count; ++i)
+        if (!m[i].rank)
+            order[next++] = i;
+    return ranked;
+}
+
 /* ---- screen ------------------------------------------------------------ */
 
 struct vt_cells {
-    char cell[VT_MACHINES_MAX][6][160];
+    char cell[VT_MACHINES_MAX][VT_COLS][160];
 };
 
 static size_t vt_width(const char *s)
@@ -512,7 +617,7 @@ static size_t vt_width(const char *s)
     return n;
 }
 
-static void vt_bar(char *out, size_t cap, int64_t used, int64_t total, int64_t pct_of)
+static void vt_bar(char *out, size_t cap, int64_t used, int64_t total)
 {
     int filled = total > 0 ? (int)((used * VT_BAR_CELLS + total / 2) / total) : 0;
     size_t len = 0;
@@ -520,7 +625,6 @@ static void vt_bar(char *out, size_t cap, int64_t used, int64_t total, int64_t p
     out[0] = '\0';
     for (int i = 0; i < VT_BAR_CELLS && len + 4 < cap; ++i)
         len += (size_t)snprintf(out + len, cap - len, "%s", i < filled ? "\xE2\x96\x88" : "\xE2\x96\x91");
-    (void)pct_of;
 }
 
 static void vt_gib(char *out, size_t cap, int64_t mib)
@@ -529,50 +633,69 @@ static void vt_gib(char *out, size_t cap, int64_t mib)
     snprintf(out, cap, "%lld.%lld", (long long)(tenths / 10), (long long)(tenths % 10));
 }
 
-static void vt_fill_cells(const struct vt_machine *m, char c[6][160])
+/* A centi value as "12.34" or "-1.50". */
+static void vt_centi(char *out, size_t cap, int64_t centi)
+{
+    const char *sign = centi < 0 ? "-" : "";
+    uint64_t a = centi < 0 ? (uint64_t)0 - (uint64_t)centi : (uint64_t)centi;
+    snprintf(out, cap, "%s%llu.%02llu", sign, (unsigned long long)(a / 100),
+             (unsigned long long)(a % 100));
+}
+
+static void vt_fill_unreached(const struct vt_machine *m, char c[VT_COLS][160])
+{
+    for (size_t k = 1; k < VT_COLS; ++k)
+        snprintf(c[k], 160, "-");
+    if (m->no_route) {
+        snprintf(c[5], 160, "\xC2\xB7\xC2\xB7 no tunnel route \xC2\xB7\xC2\xB7");
+        snprintf(c[6], 160, "\xC2\xB7\xC2\xB7 no tunnel route \xC2\xB7\xC2\xB7");
+    } else {
+        snprintf(c[5], 160, "unreachable: %s", m->error);
+    }
+}
+
+static void vt_fill_mem_disk(const struct zcl_fleet_vitals_now *n, char c[VT_COLS][160])
+{
+    char bar[96], a[24], b[24];
+    snprintf(c[5], 160, "-");
+    snprintf(c[6], 160, "-");
+    if (n->mem_total_mib > 0 && n->mem_used_mib >= 0) {
+        vt_bar(bar, sizeof bar, n->mem_used_mib, n->mem_total_mib);
+        vt_gib(a, sizeof a, n->mem_used_mib);
+        vt_gib(b, sizeof b, n->mem_total_mib);
+        snprintf(c[5], 160, "%s %s/%sG", bar, a, b);
+    }
+    if (n->disk_total_mib > 0 && n->disk_used_mib >= 0) {
+        vt_bar(bar, sizeof bar, n->disk_used_mib, n->disk_total_mib);
+        vt_gib(a, sizeof a, n->disk_used_mib);
+        vt_gib(b, sizeof b, n->disk_total_mib);
+        snprintf(c[6], 160, "%s %s/%sG %lld%%", bar, a, b,
+                 (long long)((n->disk_used_mib * 100 + n->disk_total_mib / 2) / n->disk_total_mib));
+    }
+}
+
+static void vt_fill_cells(const struct vt_machine *m, char c[VT_COLS][160])
 {
     snprintf(c[0], 160, "%s", m->label);
-    if (m->no_route) {
-        snprintf(c[1], 160, "-");
-        snprintf(c[2], 160, "-");
-        snprintf(c[3], 160, "\xC2\xB7\xC2\xB7 no tunnel route \xC2\xB7\xC2\xB7");
-        snprintf(c[4], 160, "\xC2\xB7\xC2\xB7 no tunnel route \xC2\xB7\xC2\xB7");
-        snprintf(c[5], 160, "-");
-        return;
-    }
-    if (!m->reachable) {
-        snprintf(c[1], 160, "-");
-        snprintf(c[2], 160, "-");
-        snprintf(c[3], 160, "unreachable: %s", m->error);
-        snprintf(c[4], 160, "-");
-        snprintf(c[5], 160, "-");
+    if (m->no_route || !m->reachable) {
+        vt_fill_unreached(m, c);
         return;
     }
     const struct zcl_fleet_vitals_now *n = &m->now;
-    char bar[96], a[24], b[24];
-    if (n->cpus >= 0) snprintf(c[1], 160, "%lld", (long long)n->cpus); else snprintf(c[1], 160, "-");
+    for (size_t k = 1; k < 5; ++k)
+        snprintf(c[k], 160, "-");
+    if (n->cpus >= 0)
+        snprintf(c[1], 160, "%lld", (long long)n->cpus);
     if (n->load1_centi >= 0)
-        snprintf(c[2], 160, "%lld.%02lld", (long long)(n->load1_centi / 100), (long long)(n->load1_centi % 100));
-    else
-        snprintf(c[2], 160, "-");
-    if (n->mem_total_mib > 0 && n->mem_used_mib >= 0) {
-        vt_bar(bar, sizeof bar, n->mem_used_mib, n->mem_total_mib, 0);
-        vt_gib(a, sizeof a, n->mem_used_mib);
-        vt_gib(b, sizeof b, n->mem_total_mib);
-        snprintf(c[3], 160, "%s %s/%sG", bar, a, b);
-    } else {
-        snprintf(c[3], 160, "-");
-    }
-    if (n->disk_total_mib > 0 && n->disk_used_mib >= 0) {
-        vt_bar(bar, sizeof bar, n->disk_used_mib, n->disk_total_mib, 0);
-        vt_gib(a, sizeof a, n->disk_used_mib);
-        vt_gib(b, sizeof b, n->disk_total_mib);
-        snprintf(c[4], 160, "%s %s/%sG %lld%%", bar, a, b,
-                 (long long)((n->disk_used_mib * 100 + n->disk_total_mib / 2) / n->disk_total_mib));
-    } else {
-        snprintf(c[4], 160, "-");
-    }
-    snprintf(c[5], 160, "%lld", (long long)m->rtt_ms);
+        vt_centi(c[2], 160, n->load1_centi);
+    if (m->spare_centi != INT64_MIN)
+        vt_centi(c[3], 160, m->spare_centi);
+    if (n->jobs_running >= 0 && n->jobs_queued >= 0)
+        snprintf(c[4], 160, "%lld run %lld wait", (long long)n->jobs_running,
+                 (long long)n->jobs_queued);
+    vt_fill_mem_disk(n, c);
+    snprintf(c[7], 160, "0s live");
+    snprintf(c[8], 160, "%lld", (long long)m->rtt_ms);
 }
 
 static void vt_put(char *out, size_t cap, size_t *len, const char *s)
@@ -584,21 +707,22 @@ static void vt_put(char *out, size_t cap, size_t *len, const char *s)
     }
 }
 
-static void vt_rule(char *out, size_t cap, size_t *len, const size_t w[6],
+static void vt_rule(char *out, size_t cap, size_t *len, const size_t w[VT_COLS],
                     const char *l, const char *mid, const char *r)
 {
     vt_put(out, cap, len, l);
-    for (size_t c = 0; c < 6; ++c) {
+    for (size_t c = 0; c < VT_COLS; ++c) {
         for (size_t i = 0; i < w[c] + 2; ++i)
             vt_put(out, cap, len, "\xE2\x94\x80");
-        vt_put(out, cap, len, c == 5 ? r : mid);
+        vt_put(out, cap, len, c == VT_COLS - 1 ? r : mid);
     }
     vt_put(out, cap, len, "\n");
 }
 
-static void vt_row(char *out, size_t cap, size_t *len, const size_t w[6], char c[6][160])
+static void vt_row(char *out, size_t cap, size_t *len, const size_t w[VT_COLS],
+                   char c[VT_COLS][160])
 {
-    for (size_t k = 0; k < 6; ++k) {
+    for (size_t k = 0; k < VT_COLS; ++k) {
         vt_put(out, cap, len, "\xE2\x94\x82 ");
         vt_put(out, cap, len, c[k]);
         for (size_t i = vt_width(c[k]); i < w[k]; ++i)
@@ -608,25 +732,43 @@ static void vt_row(char *out, size_t cap, size_t *len, const size_t w[6], char c
     vt_put(out, cap, len, "\xE2\x94\x82\n");
 }
 
-static void vt_screen(const struct vt_machine *m, size_t count, char *out, size_t cap)
+/* The line an agent acts on: the machine with the most spare cores. */
+static void vt_advice(const struct vt_machine *m, size_t count, const size_t order[VT_MACHINES_MAX],
+                      size_t ranked, char *out, size_t cap)
 {
-    static const char *const heads[6] = {"machine", "cpus", "load1", "memory used/total G",
-                                         "disk used/total G pct", "rtt ms"};
+    if (ranked == 0) {
+        snprintf(out, cap, "no machine has a usable measurement, so none is recommended");
+        return;
+    }
+    const struct vt_machine *best = &m[order[0]];
+    char spare[32];
+    vt_centi(spare, sizeof spare, best->spare_centi);
+    snprintf(out, cap, "most spare capacity: %s (%s spare cores of %lld, measured now)%s",
+             best->label, spare, (long long)best->now.cpus,
+             count > ranked ? "; machines without a measurement are listed last, not ranked" : "");
+}
+
+static void vt_screen(const struct vt_machine *m, size_t count, const size_t order[VT_MACHINES_MAX],
+                      const char *advice, char *out, size_t cap)
+{
+    static const char *const heads[VT_COLS] = {
+        "machine", "cpus", "load1", "spare cores", "build queue",
+        "memory used/total G", "disk used/total G pct", "age", "rtt ms"};
     struct vt_cells *cells = zcl_calloc(1, sizeof *cells, "vitals table cells");
-    size_t len = 0, w[6];
+    size_t len = 0, w[VT_COLS];
     out[0] = '\0';
     if (!cells)
         return;
-    for (size_t c = 0; c < 6; ++c)
+    for (size_t c = 0; c < VT_COLS; ++c)
         w[c] = vt_width(heads[c]);
     for (size_t i = 0; i < count; ++i) {
-        vt_fill_cells(&m[i], cells->cell[i]);
-        for (size_t c = 0; c < 6; ++c)
+        vt_fill_cells(&m[order[i]], cells->cell[i]);
+        for (size_t c = 0; c < VT_COLS; ++c)
             if (vt_width(cells->cell[i][c]) > w[c])
                 w[c] = vt_width(cells->cell[i][c]);
     }
-    char head[6][160];
-    for (size_t c = 0; c < 6; ++c)
+    char head[VT_COLS][160];
+    for (size_t c = 0; c < VT_COLS; ++c)
         snprintf(head[c], 160, "%s", heads[c]);
     vt_rule(out, cap, &len, w, "\xE2\x94\x8C", "\xE2\x94\xAC", "\xE2\x94\x90");
     vt_row(out, cap, &len, w, head);
@@ -640,6 +782,10 @@ static void vt_screen(const struct vt_machine *m, size_t count, char *out, size_
         up += m[i].reachable ? 1u : 0u;
     snprintf(total, sizeof total, "%zu/%zu machines reachable\n", up, count);
     vt_put(out, cap, &len, total);
+    vt_put(out, cap, &len,
+           "every number above was measured during this call (age 0s); none is recorded or cached\n");
+    vt_put(out, cap, &len, advice);
+    vt_put(out, cap, &len, "\n");
     free(cells);
 }
 
@@ -659,10 +805,23 @@ static bool vt_push(struct json_value *obj, const char *key, int64_t value)
 static bool vt_push_load_cpu(struct json_value *row, const struct vt_machine *m)
 {
     const struct zcl_fleet_vitals_now *n = &m->now;
-    return json_push_kv_str(row, "host", n->host) && vt_push(row, "rtt_ms", m->rtt_ms) &&
-           vt_push(row, "cpus", n->cpus) && vt_push(row, "load1_centi", n->load1_centi) &&
-           vt_push(row, "load5_centi", n->load5_centi) &&
-           vt_push(row, "load15_centi", n->load15_centi);
+    bool ok = json_push_kv_str(row, "host", n->host) && vt_push(row, "rtt_ms", m->rtt_ms) &&
+              vt_push(row, "cpus", n->cpus) && vt_push(row, "load1_centi", n->load1_centi) &&
+              vt_push(row, "load5_centi", n->load5_centi) &&
+              vt_push(row, "load15_centi", n->load15_centi) &&
+              vt_push(row, "jobs_running", n->jobs_running) &&
+              vt_push(row, "jobs_queued", n->jobs_queued);
+    /* spare may be negative (over-committed), so it is not clamped to null */
+    struct json_value null = {0};
+    json_set_null(&null);
+    if (ok && m->spare_centi != INT64_MIN)
+        ok = json_push_kv_int(row, "spare_cores_centi", m->spare_centi) &&
+             json_push_kv_int(row, "load1_per_core_centi", n->load1_centi / n->cpus);
+    else if (ok)
+        ok = json_push_kv(row, "spare_cores_centi", &null) &&
+             json_push_kv(row, "load1_per_core_centi", &null);
+    json_free(&null);
+    return ok && vt_push(row, "spare_rank", m->rank);
 }
 
 static bool vt_push_mem_disk(struct json_value *row, const struct zcl_fleet_vitals_now *n)
@@ -685,10 +844,32 @@ static bool vt_row_json(const struct vt_machine *m, struct json_value *rows)
     if (ok && !m->reachable)
         ok = json_push_kv_str(&row, "error", m->error);
     else if (ok)
-        ok = vt_push_load_cpu(&row, m) && vt_push_mem_disk(&row, &m->now);
+        ok = json_push_kv_int(&row, "age_s", 0) && vt_push_load_cpu(&row, m) &&
+             vt_push_mem_disk(&row, &m->now);
     ok = ok && json_push_back(rows, &row);
     json_free(&row);
     return ok;
+}
+
+static const char k_vt_implicit_note[] =
+    "No machines were given, so only this box is shown. A remote machine needs one "
+    "machines[] entry {label, route_file, slot, host_alias} (zcl.fleet_vitals_table_input.v1) "
+    "and is then measured live over its host tunnel. Fleet vitals ledger rows do not replicate "
+    "between hosts today, so there is no recorded remote row to show here; a number is only "
+    "ever shown when it was measured during this call.";
+
+static bool vt_summary_json(struct json_value *data, const struct vt_machine *m, bool implicit,
+                            const size_t order[VT_MACHINES_MAX], size_t ranked, const char *advice)
+{
+    struct json_value null = {0};
+    json_set_null(&null);
+    bool ok = ranked ? json_push_kv_str(data, "best", m[order[0]].label)
+                     : json_push_kv(data, "best", &null);
+    json_free(&null);
+    return ok && json_push_kv_str(data, "advice", advice) &&
+           json_push_kv_str(data, "age_note",
+                            "every number was measured during this call (age_s 0); none is recorded or cached") &&
+           (!implicit || json_push_kv_str(data, "note", k_vt_implicit_note));
 }
 
 void zcl_native_handle_fleet_vitals_table(
@@ -706,14 +887,19 @@ void zcl_native_handle_fleet_vitals_table(
         vt_refuse(reply, "TABLE_ALLOC", "the table could not be built", "alloc");
     } else if (vt_input(request, m, &count, &deadline, reply)) {
         vt_measure_all(m, count, deadline);
+        size_t order[VT_MACHINES_MAX];
+        size_t ranked = vt_rank(m, count, order);
+        char advice[256];
+        vt_advice(m, count, order, ranked, advice, sizeof advice);
         struct json_value rows = {0};
         json_set_array(&rows);
         bool ok = true;
         for (size_t i = 0; ok && i < count; ++i)
             ok = vt_row_json(&m[i], &rows);
-        vt_screen(m, count, screen, 16384);
+        vt_screen(m, count, order, advice, screen, 16384);
         ok = ok && json_push_kv_str(&reply->data, "schema", "zcl.fleet_vitals_table.v1") &&
              json_push_kv(&reply->data, "rows", &rows) &&
+             vt_summary_json(&reply->data, m, m[0].implicit, order, ranked, advice) &&
              json_push_kv_str(&reply->data, "screen", screen);
         json_free(&rows);
         if (ok) {

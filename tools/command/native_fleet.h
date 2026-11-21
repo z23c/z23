@@ -300,8 +300,12 @@ struct zcl_fleet_vitals_now {
     int64_t mem_total_mib, mem_avail_mib, mem_used_mib;
     int64_t disk_total_mib, disk_used_mib, disk_free_mib;
     int64_t uptime_s;
+    int64_t jobs_running, jobs_queued; /* build queue; -1 when not observed */
 };
 void zcl_fleet_vitals_measure(struct zcl_fleet_vitals_now *out);
+/* Fills jobs_running and jobs_queued from the host build queue (ops host
+ * jobs); both stay -1 when the queue cannot be observed. */
+void zcl_fleet_vitals_measure_queue(struct zcl_fleet_vitals_now *out);
 
 /* z23-toolgen:begin handlers - generated, do not edit */
 /* fleet.nodes.table (tools/command/native_fleet_nodes_table.c) */

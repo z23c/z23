@@ -329,3 +329,31 @@ void zcl_native_handle_ops_host_jobs(const struct zcl_command_request *request,
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 #endif
 }
+
+bool zcl_native_ops_host_queue_depth(int64_t *running, int64_t *queued)
+{
+    if (!running || !queued)
+        return false;
+#ifndef __linux__
+    return false;
+#else
+    struct ba_config cfg;
+    struct json_value status;
+    bool ok;
+    ohb_defaults(&cfg);
+    json_init(&status);
+    json_set_object(&status);
+    ok = ohb_locations(&cfg) && ba_status(cfg.state_dir, &status);
+    if (ok) {
+        const struct json_value *run = json_get(&status, "running");
+        const struct json_value *wait = json_get(&status, "queued");
+        ok = run && run->type == JSON_ARR && wait && wait->type == JSON_ARR;
+        if (ok) {
+            *running = (int64_t)json_size(run);
+            *queued = (int64_t)json_size(wait);
+        }
+    }
+    json_free(&status);
+    return ok;
+#endif
+}

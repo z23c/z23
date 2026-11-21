@@ -95,6 +95,7 @@ void zcl_fleet_vitals_measure(struct zcl_fleet_vitals_now *out)
     out->mem_used_mib = p[3] ? v[3] : -1;
     out->mem_avail_mib = p[3] && p[4] ? v[4] - v[3] : -1;
     out->uptime_s = os_proc_system_uptime_seconds();
+    out->jobs_running = out->jobs_queued = -1;
     out->disk_total_mib = out->disk_used_mib = out->disk_free_mib = -1;
     uint64_t avail = 0, total = 0;
     if (platform_disk_space(home, &avail, &total) && total >= avail) {
@@ -109,6 +110,16 @@ void zcl_fleet_vitals_measure(struct zcl_fleet_vitals_now *out)
 #endif
 }
 
+void zcl_fleet_vitals_measure_queue(struct zcl_fleet_vitals_now *out)
+{
+    int64_t running = 0, queued = 0;
+    out->jobs_running = out->jobs_queued = -1;
+    if (zcl_native_ops_host_queue_depth(&running, &queued)) {
+        out->jobs_running = running;
+        out->jobs_queued = queued;
+    }
+}
+
 static bool vitals_push(struct json_value *obj, const char *key, int64_t value)
 {
     if (value >= 0)
@@ -118,6 +129,13 @@ static bool vitals_push(struct json_value *obj, const char *key, int64_t value)
     bool ok = json_push_kv(obj, key, &null);
     json_free(&null);
     return ok;
+}
+
+static bool vitals_queue_json(struct json_value *data, const struct zcl_fleet_vitals_now *now)
+{
+    return vitals_push(data, "uptime_s", now->uptime_s) &&
+           vitals_push(data, "jobs_running", now->jobs_running) &&
+           vitals_push(data, "jobs_queued", now->jobs_queued);
 }
 
 void zcl_native_handle_fleet_vitals_read(
@@ -130,6 +148,7 @@ void zcl_native_handle_fleet_vitals_read(
     zcl_command_reply_init(reply, "zcl.fleet_vitals_read.v1");
     struct zcl_fleet_vitals_now now;
     zcl_fleet_vitals_measure(&now);
+    zcl_fleet_vitals_measure_queue(&now);
     bool ok = json_push_kv_str(&reply->data, "schema", "zcl.fleet_vitals_read.v1") &&
               json_push_kv_str(&reply->data, "host", now.host) &&
               vitals_push(&reply->data, "cpus", now.cpus) &&
@@ -142,7 +161,7 @@ void zcl_native_handle_fleet_vitals_read(
               vitals_push(&reply->data, "disk_total_mib", now.disk_total_mib) &&
               vitals_push(&reply->data, "disk_used_mib", now.disk_used_mib) &&
               vitals_push(&reply->data, "disk_free_mib", now.disk_free_mib) &&
-              vitals_push(&reply->data, "uptime_s", now.uptime_s);
+              vitals_queue_json(&reply->data, &now);
     if (!ok) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "VITALS_READ_ALLOC",

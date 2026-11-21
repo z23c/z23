@@ -359,6 +359,126 @@ static int vt_leaf_missing(void)
     return failures;
 }
 
+/* fake-ssh replies that differ only in load, queue and a missing queue field */
+static const char k_fake_ssh_rank[] =
+    "#!/bin/sh\n"
+    "while [ \"$1\" != \"--\" ]; do shift; done\n"
+    "shift\n"
+    "case \"$1\" in\n"
+    "  idle) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"idle\",\"cpus\":32,"
+    "\"load1_centi\":300,\"mem_total_mib\":8192,\"mem_used_mib\":4096,"
+    "\"disk_total_mib\":102400,\"disk_used_mib\":51200,\"jobs_running\":1,"
+    "\"jobs_queued\":0}}\n'; exit 0;;\n"
+    "  busy) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"busy\",\"cpus\":32,"
+    "\"load1_centi\":7500,\"mem_total_mib\":8192,\"mem_used_mib\":4096,"
+    "\"disk_total_mib\":102400,\"disk_used_mib\":51200,\"jobs_running\":4,"
+    "\"jobs_queued\":6}}\n'; exit 0;;\n"
+    "  oldq) printf '{\"schema\":\"zcl.result.v1\",\"ok\":true,\"data\":"
+    "{\"schema\":\"zcl.fleet_vitals_read.v1\",\"host\":\"oldq\",\"cpus\":24,"
+    "\"load1_centi\":1200}}\n'; exit 0;;\n"
+    "esac\n"
+    "exit 3\n";
+
+static int vt_spare_rank(void)
+{
+    int failures = 0;
+    struct vt_fixture f;
+    bool open = vt_fixture_open(&f, "fleet_vitals_rank");
+    char ssh[700];
+    snprintf(ssh, sizeof ssh, "%s/ssh", f.bin);
+    TEST_CASE("fleet_vitals_table: machines rank by spare cores, unreachable last, every row age 0") {
+        ASSERT(open && vt_write(ssh, k_fake_ssh_rank, 0700));
+        struct json_value input = {0}, list = {0}, m;
+        vt_input(&input, &list);
+        const char *names[] = {"busy", "idle", "oldq", "gone"};
+        for (size_t i = 0; i < 4; ++i) {
+            m = vt_remote(names[i], f.route, "/opt/z23/bin/z23", i == 3 ? "nosuch" : names[i]);
+            vt_add(&list, &m);
+        }
+        (void)json_push_kv(&input, "machines", &list);
+        struct vt_reply r;
+        ASSERT(vt_call("fleet.vitals.table", &input, &r));
+        json_free(&input);
+        json_free(&list);
+        ASSERT(vt_ok(&r));
+        const struct json_value *d = vt_data(&r), *rows = json_get(d, "rows");
+        ASSERT(rows && json_size(rows) == 4);
+        /* rows keep input order; spare_rank carries the ordering */
+        const struct json_value *busy = json_at(rows, 0), *idle = json_at(rows, 1),
+                                *oldq = json_at(rows, 2), *gone = json_at(rows, 3);
+        ASSERT_EQ(vt_int(idle, "spare_cores_centi"), 2900);
+        ASSERT_EQ(vt_int(oldq, "spare_cores_centi"), 2400 - 1200);
+        ASSERT_EQ(vt_int(busy, "spare_cores_centi"), 3200 - 7500); /* over-committed: negative */
+        ASSERT_EQ(vt_int(idle, "spare_rank"), 1);
+        ASSERT_EQ(vt_int(oldq, "spare_rank"), 2);
+        ASSERT_EQ(vt_int(busy, "spare_rank"), 3);
+        ASSERT_EQ(vt_int(idle, "load1_per_core_centi"), 9);
+        ASSERT_EQ(vt_int(idle, "age_s"), 0);
+        ASSERT_EQ(vt_int(busy, "jobs_queued"), 6);
+        ASSERT(json_get(oldq, "jobs_queued") && json_get(oldq, "jobs_queued")->type == JSON_NULL);
+        ASSERT(!json_get_bool(json_get(gone, "reachable")));
+        ASSERT(json_get(gone, "spare_rank") == NULL);
+        ASSERT_STR_EQ(vt_str(d, "best"), "idle");
+        ASSERT(strstr(vt_str(d, "advice"), "idle") != NULL);
+        ASSERT(strstr(vt_str(d, "age_note"), "measured during this call") != NULL);
+        /* the screen lists machines in rank order, the unreachable one last */
+        const char *screen = vt_str(d, "screen");
+        const char *p_idle = strstr(screen, "idle"), *p_old = strstr(screen, "oldq"),
+                   *p_busy = strstr(screen, "busy"), *p_gone = strstr(screen, "gone");
+        ASSERT(p_idle && p_old && p_busy && p_gone);
+        ASSERT(p_idle < p_old && p_old < p_busy && p_busy < p_gone);
+        ASSERT(strstr(screen, "4 run 6 wait") != NULL);
+        json_free(&r.root);
+    } TEST_END
+    vt_fixture_close(&f);
+    return failures;
+}
+
+static int vt_no_input(void)
+{
+    int failures = 0;
+    TEST_CASE("fleet_vitals_table: no machines key shows this box alone with queue, age and a remote note") {
+        struct json_value input = {0};
+        json_set_object(&input);
+        struct vt_reply r;
+        ASSERT(vt_call("fleet.vitals.table", &input, &r));
+        json_free(&input);
+        ASSERT(vt_ok(&r));
+        const struct json_value *d = vt_data(&r), *rows = json_get(d, "rows");
+        ASSERT(rows && json_size(rows) == 1);
+        const struct json_value *row = json_at(rows, 0);
+        ASSERT_STR_EQ(vt_str(row, "source"), "local");
+        ASSERT(json_get_bool(json_get(row, "reachable")));
+        ASSERT_EQ(vt_int(row, "age_s"), 0);
+        ASSERT(vt_int(row, "cpus") > 0);
+        ASSERT(json_get(row, "jobs_running") != NULL && json_get(row, "jobs_queued") != NULL);
+        ASSERT(strstr(vt_str(d, "note"), "do not replicate") != NULL);
+        ASSERT(strstr(vt_str(d, "screen"), "build queue") != NULL);
+        json_free(&r.root);
+    } TEST_END
+    return failures;
+}
+
+static int vt_empty_list(void)
+{
+    int failures = 0;
+    TEST_CASE("fleet_vitals_table: an explicit empty machines list is still refused") {
+        struct json_value input = {0}, list = {0};
+        vt_input(&input, &list);
+        (void)json_push_kv(&input, "machines", &list);
+        struct vt_reply r;
+        ASSERT(vt_call("fleet.vitals.table", &input, &r));
+        json_free(&input);
+        json_free(&list);
+        ASSERT(!vt_ok(&r));
+        ASSERT_STR_EQ(vt_error(&r), "TABLE_INPUT_REFUSED");
+        json_free(&r.root);
+    } TEST_END
+    return failures;
+}
+
 int test_fleet_vitals_table(void);
 int test_fleet_vitals_table(void)
 {
@@ -367,6 +487,9 @@ int test_fleet_vitals_table(void)
     failures += vt_refusals();
     failures += vt_no_route();
     failures += vt_leaf_missing();
+    failures += vt_spare_rank();
+    failures += vt_no_input();
+    failures += vt_empty_list();
     if (failures == 0)
         printf("test_fleet_vitals_table: all passed\n");
     else

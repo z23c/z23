@@ -1188,12 +1188,15 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "fleet.vitals.table", "fleet.vitals", "",
-    "One table of every named machine's load, memory and disk",
+    "Which machine has spare CPU: load, queue, memory and disk per machine",
     "Measures this box and, for each named remote machine, runs the fixed "
     "read leaf fleet vitals read over the host tunnel with one pinned ssh "
     "argv, concurrently, each under its own deadline. At most 16 machines. "
     "A machine that cannot be reached shows as unreachable with an error "
-    "code and never fails the call. It writes nothing.",
+    "code and never fails the call. With no input it shows this box alone. "
+    "Each row carries spare cores, build queue depth and age, and the "
+    "screen ranks machines by spare cores; every number is measured during "
+    "the call. It writes nothing.",
     32768,
     "fleet,vitals,table,load,memory,disk,machines",
     "zcl.fleet_vitals_table_input.v1", "zcl.fleet_vitals_table.v1",

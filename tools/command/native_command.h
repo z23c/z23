@@ -1041,6 +1041,9 @@ bool zcl_native_ops_host_build_try_run(const char *const *words, size_t count,
                                        size_t consumed, int *rc);
 
 /* ops.host.jobs — running and queued build jobs, read from /proc/locks. */
+/* Counts of running and queued build jobs on this host, for fleet vitals.
+ * False when the queue cannot be observed (non-Linux, unreadable state). */
+bool zcl_native_ops_host_queue_depth(int64_t *running, int64_t *queued);
 
 /* ops.host.legacy.status / .seed — legacy zclassicd oracle and bootstrap
  * datadirs: identity, lock, RPC height, ports, and the two-phase seed. */
