@@ -299,9 +299,11 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * tick, and share one cursor table. It holds both, or least-recently-used
  * eviction would drop the very cursor each pull is about to use. */
 #define FLEET_BOARD_FLEET_CURSOR_SLOTS (2u * FLEET_BOARD_FLEET_PEERS_MAX)
-/* The lane tick. A tick with no push work reads two counters and returns;
- * the pull, the answer drain and everything else the lane did once a second
- * still run once a second. */
+/* The lane tick. A tick with no push work takes the board lane's own lock
+ * twice, reads the clock and two counters, and returns; the pull, the answer drain and
+ * everything else the lane did once a second still run once a second. The
+ * supervisor already ticks every 100 ms for the stream pump, so this adds no
+ * wakeup of its own. */
 #define FLEET_BOARD_FLEET_TICK_US 100000
 
 /* PUSH (see above). The OPEN payload: type, version, record count n, then n
