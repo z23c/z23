@@ -958,6 +958,7 @@ static void fuzz_board_push_receipt(const uint8_t *w, size_t n)
     }
     require(g.v.n <= FLEET_BOARD_PUSH_POSTS_MAX &&
             g.v.code < FLEET_BOARD_PUSH_CODES &&
+            (g.v.code != FLEET_BOARD_PUSH_CODE_COMMITTED || g.v.n != 0) &&
             n == FLEET_BOARD_PUSH_RECEIPT_HEAD +
                      (size_t)g.v.n * FLEET_BOARD_PUSH_RECEIPT_RECORD);
     for (unsigned i = 0; i < g.v.n; i++)
@@ -965,6 +966,10 @@ static void fuzz_board_push_receipt(const uint8_t *w, size_t n)
     uint8_t out[FLEET_BOARD_PUSH_RECEIPT_MAX];
     require(board_push_receipt_encode(&g.v, out) == n &&
             memcmp(out, w, n) == 0);
+    /* A local producer cannot acknowledge a commit without any post IDs. */
+    g.v.code = FLEET_BOARD_PUSH_CODE_COMMITTED;
+    g.v.n = 0;
+    require(board_push_receipt_encode(&g.v, out) == 0);
 }
 
 /* ── agent_broker_proto ──────────────────────────────────────────────── */

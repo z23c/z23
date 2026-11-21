@@ -192,10 +192,17 @@ bool board_push_valid(const uint8_t *buf, size_t len, unsigned *n_out)
     return true;
 }
 
+/* A committed push covers a nonempty batch. Refusals may have no rows. */
+static bool board_push_receipt_count_valid(uint8_t code, uint8_t count)
+{
+    return code < FLEET_BOARD_PUSH_CODES && count <= FLEET_BOARD_PUSH_POSTS_MAX &&
+           (code != FLEET_BOARD_PUSH_CODE_COMMITTED || count != 0);
+}
+
 size_t board_push_receipt_encode(const struct board_push_receipt *r,
                                  uint8_t out[FLEET_BOARD_PUSH_RECEIPT_MAX])
 {
-    if (!r || r->n > FLEET_BOARD_PUSH_POSTS_MAX)
+    if (!r || !board_push_receipt_count_valid(r->code, r->n))
         return 0;
     out[0] = (uint8_t)FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT;
     out[1] = (uint8_t)FLEET_BOARD_FLEET_VERSION;
@@ -218,7 +225,7 @@ bool board_push_receipt_decode(const uint8_t *in, size_t len,
     if (!in || !out || len < FLEET_BOARD_PUSH_RECEIPT_HEAD ||
         in[0] != (uint8_t)FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT ||
         in[1] != (uint8_t)FLEET_BOARD_FLEET_VERSION ||
-        in[2] >= FLEET_BOARD_PUSH_CODES || in[3] > FLEET_BOARD_PUSH_POSTS_MAX ||
+        !board_push_receipt_count_valid(in[2], in[3]) ||
         len != FLEET_BOARD_PUSH_RECEIPT_HEAD +
                    (size_t)in[3] * FLEET_BOARD_PUSH_RECEIPT_RECORD)
         return false;

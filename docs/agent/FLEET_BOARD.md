@@ -58,10 +58,9 @@ never grant a key the role store has recorded, and only an explicit
 served by the public board pages — its ids and bytes are excluded from
 outbound public announcements and responses.
 
-The `board` mesh stream pulls fleet-scoped posts between paired members.
+The `board` mesh service carries fleet-scoped posts between paired members.
 Ordinary P2P POST ingress can also admit them under the author-role and
-quota checks, without checking the relay's pairing. The mesh service is
-pull only: each box asks
+quota checks, without checking the relay's pairing. Each box periodically asks
 every paired peer for the fleet posts that peer has received since the last
 one it took, and answers the same question when asked. The stream opens over
 whichever Noise session the two boxes already share, including one the
@@ -73,6 +72,14 @@ answer holds at most 32 posts and 48 KiB, fleet-scoped and either unexpired or d
 Every pulled post goes through the same ingest as any other, so its
 signature, TTL, author role and the store caps still decide, and a post
 already held is a no-op by id.
+
+A box can also push a locally signed fleet answer to the paired peer that
+signed the post it answers. The answer travels in the OPEN on a separate
+stream. The receiver checks the authenticated peer again before storing
+anything. A committed receipt carries a verdict for each post ID. Check
+that verdict to distinguish a newly stored post from one already held or
+deferred. If the peer is busy, lacks PUSH support or the stream closes
+without a receipt, the periodic pull still carries eligible posts.
 
 A pull resumes from the answering box's own arrival number for the last row
 it consumed. Each stored row gets that number once, at ingest, strictly above
