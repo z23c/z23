@@ -221,11 +221,16 @@ static int sm_row_count(struct node_db *ndb, int version)
     return sm_scalar(ndb, sql);
 }
 
+static bool sm_post_identity_matches(const struct fleet_board_post *actual,
+                                     const struct fleet_board_post *expected)
+{
+    return memcmp(actual->id, expected->id, sizeof(expected->id)) == 0 &&
+           memcmp(actual->signature, expected->signature, sizeof(expected->signature)) == 0;
+}
+
 static bool sm_visit_cursor_post(const struct db_fleet_board_post *row, void *ctx)
 {
-    const struct fleet_board_post *expected = ctx;
-    return memcmp(row->post.id, expected->id, sizeof(expected->id)) == 0 &&
-           memcmp(row->post.signature, expected->signature, sizeof(expected->signature)) == 0;
+    return sm_post_identity_matches(&row->post, ctx);
 }
 
 static bool sm_seed_cursor_post(struct node_db *db, struct fleet_board_post *post)
@@ -305,7 +310,7 @@ static bool sm_v84_ambiguous_preserved(struct sm_fixture *f,
 {
     struct db_fleet_board_post row;
     if (sm_scalar(&f->ndb, "SELECT count(*) FROM fleet_board_posts") != (mixed ? 2 : 1) ||
-        !db_fleet_board_post_find(&f->ndb, post->id, &row) || !sm_visit_cursor_post(&row, post))
+        !db_fleet_board_post_find(&f->ndb, post->id, &row) || !sm_post_identity_matches(&row.post, post))
         return false;
     if (mixed) return row.arrival == 73 &&
         sm_scalar(&f->ndb, "SELECT count(*) FROM fleet_board_posts WHERE arrival=0") == 1;
