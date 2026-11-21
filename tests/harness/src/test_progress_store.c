@@ -11,6 +11,7 @@
  *   - dump_state_json reports open status, path, and stage_cursor row count */
 
 #include "test/test_core.h"
+#include "event/event.h"
 #include "platform/positioned_file.h"
 #include "crypto/sha3.h"
 #include "base/hex.h"
@@ -1691,12 +1692,14 @@ static int ps_test_existing_other_directory(int dirfd)
 #endif
 
 static atomic_uint ps_denied_scans;
+static atomic_bool ps_allow_first_scan;
 
 static int ps_deny_quickcheck(void *arg, int action, const char *name,
                               const char *value, const char *db, const char *source)
 {
     (void)arg; (void)value; (void)db; (void)source;
     if (action == SQLITE_PRAGMA && name && sqlite3_stricmp(name, "quick_check") == 0) {
+        if (atomic_exchange(&ps_allow_first_scan, false)) return SQLITE_OK;
         atomic_fetch_add(&ps_denied_scans, 1u);
         return SQLITE_DENY;
     }
@@ -1709,6 +1712,35 @@ static int ps_authorize_connection(sqlite3 *db, char **error,
     (void)error; (void)api;
     return sqlite3_set_authorizer(db, ps_deny_quickcheck, NULL);
 }
+
+#ifndef _WIN32
+static int ps_test_fresh_projection_check_denied(void)
+{
+    int failures = 0;
+    char dir[256], path[512], events[1024];
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", "fresh_denied");
+    snprintf(path, sizeof(path), "%s/progress.kv", dir);
+    PS_CHECK("seed corrupt projection", ps_seed_projection_without_receipt(dir, path) &&
+             ps_corrupt_projection_page(path));
+    event_log_init();
+    atomic_store(&ps_allow_first_scan, true);
+    atomic_store(&ps_denied_scans, 0u);
+    bool armed = sqlite3_auto_extension((void (*)(void))ps_authorize_connection) == SQLITE_OK;
+    PS_CHECK("install fresh scan authorizer", armed);
+    bool opened = projection_store_open(dir);
+    if (opened) projection_store_close();
+    if (armed) (void)sqlite3_cancel_auto_extension((void (*)(void))ps_authorize_connection);
+    atomic_store(&ps_allow_first_scan, false);
+    PS_CHECK("confirmed corrupt original archived", ps_count_corrupt_projection(dir) > 0);
+    PS_CHECK("fresh check denied exactly once", !opened && atomic_load(&ps_denied_scans) == 1u);
+    size_t n = event_dump_json_filtered(events, sizeof(events), 1, event_type_name(EV_RECOVERY_ACTION));
+    PS_CHECK("latest recovery event identifies incomplete fresh scan",
+             n > 0 && n < sizeof(events) &&
+             strstr(events, "action=projection_store_check_incomplete reason=quick_check_incomplete") != NULL);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+#endif
 
 static bool ps_integrity_witness_present(sqlite3 *db)
 {
@@ -1905,6 +1937,9 @@ int test_progress_store(void)
 
     failures += ps_test_incomplete_check(false);
     failures += ps_test_incomplete_check(true);
+#ifndef _WIN32
+    failures += ps_test_fresh_projection_check_denied();
+#endif
     failures += ps_test_existing_only();
     printf("progress_store: %d failures\n", failures);
 

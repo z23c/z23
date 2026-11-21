@@ -727,18 +727,17 @@ static bool projection_open_requarantine(const char *path, sqlite3 **dbp,
                     "reason=disk_fault path=%s", path);
         return false;
     }
-    if (sqlite_integrity_quick_check(db, "projection_store") != SQLITE_INTEGRITY_CLEAN) {
-        /* A freshly-created, empty DB that fails quick_check cannot be
-         * derived-state corruption — the underlying storage is broken.
-         * Do NOT quarantine again (that would loop); fail terminally. */
+    enum sqlite_integrity_result result = sqlite_integrity_quick_check(db, "projection_store");
+    if (result != SQLITE_INTEGRITY_CLEAN) {
+        bool corrupt = result == SQLITE_INTEGRITY_CORRUPT;
         fprintf(stderr,  // obs-ok:projection-store-open-failure
-                "[projection_store] FRESH %s still fails quick_check — "
-                "terminal disk/fs fault, refusing to loop\n", path);
+                "[projection_store] fresh %s quick_check %s; refusing to reopen again\n",
+                path, corrupt ? "found corruption" : "could not complete");
         sqlite3_close(db);
         (void)close(opened_dir_fd);
-        event_emitf(EV_RECOVERY_ACTION, 0,
-                    "action=projection_store_fresh_corrupt "
-                    "reason=disk_fault path=%s", path);
+        event_emitf(EV_RECOVERY_ACTION, 0, "action=%s reason=%s path=%s",
+                    corrupt ? "projection_store_fresh_corrupt" : "projection_store_check_incomplete",
+                    corrupt ? "disk_fault" : "quick_check_incomplete", path);
         return false;
     }
     fprintf(stderr,  // obs-ok:projection-store-lifecycle
