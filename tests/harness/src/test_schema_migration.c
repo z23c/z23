@@ -646,16 +646,60 @@ static int sm_v6_authorize(void *ctx, int op, const char *first,
     return SQLITE_OK;
 }
 
+static void sm_history_close(struct sm_fixture *f)
+{
+    if (f->ndb.db) sqlite3_close(f->ndb.db);
+    f->ndb.db = NULL;
+    f->ndb.open = false;
+}
+
+static bool sm_history_open(struct sm_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    if (sqlite3_open_v2(":memory:", &f->ndb.db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
+        sm_history_close(f);
+        return false;
+    }
+    f->ndb.open = true;
+    return create_schema(&f->ndb);
+}
+
+/* The public runner inserts 001, then one ledger row per core version.
+ * Refuse the target marker to retain that version's partially applied DDL. */
+static int sm_stop_core_marker(void *ctx, int op, const char *name,
+                               const char *column, const char *db, const char *trigger)
+{
+    (void)column; (void)db; (void)trigger;
+    int *remaining = ctx;
+    if (op == SQLITE_INSERT && name && strcmp(name, "schema_migrations") == 0 &&
+        --*remaining == 0) return SQLITE_DENY;
+    return SQLITE_OK;
+}
+
+static bool sm_history_before(struct sm_fixture *f, int version)
+{
+    char future_rows[96];
+    snprintf(future_rows, sizeof(future_rows),
+             "SELECT count(*) FROM schema_migrations WHERE CAST(version AS INTEGER) >= %d", version);
+    int remaining = version;
+    int32_t floor = version - 1;
+    if (!sm_history_open(f) ||
+        sqlite3_set_authorizer(f->ndb.db, sm_stop_core_marker, &remaining) != SQLITE_OK)
+        return false;
+    int rc = node_db_migrate(&f->ndb, NULL);
+    return sqlite3_set_authorizer(f->ndb.db, NULL, NULL) == SQLITE_OK &&
+        rc < 0 && remaining == 0 && node_db_schema_version(&f->ndb) == floor &&
+        sm_row_count(&f->ndb, floor) == 1 && sm_scalar(&f->ndb, future_rows) == 0 &&
+        node_db_state_set(&f->ndb, "schema_compat_floor", &floor, sizeof(floor));
+}
+
 static bool sm_v6_prepare(struct sm_fixture *f)
 {
-    int32_t version = 5;
-    return sm_fixture_init(f) &&
+    return sm_history_before(f, 6) &&
         node_db_exec(&f->ndb, "DROP INDEX IF EXISTS idx_snote_address;"
-            "DELETE FROM schema_migrations WHERE version='006';"
             "CREATE TABLE v6_fixture_sentinel(value INTEGER NOT NULL);"
-            "INSERT INTO v6_fixture_sentinel VALUES(37)") &&
-        node_db_state_set(&f->ndb, "schema_version", &version, sizeof(version)) &&
-        node_db_state_set(&f->ndb, "schema_compat_floor", &version, sizeof(version));
+            "INSERT INTO v6_fixture_sentinel VALUES(37)");
 }
 
 static int sm_v6_failure(enum sm_v6_fault_kind kind)
@@ -664,7 +708,7 @@ static int sm_v6_failure(enum sm_v6_fault_kind kind)
     struct sm_fixture f = {0};
     if (!sm_v6_prepare(&f)) {
         SM_CHECK("v6 fixture prepares", false);
-        if (f.ndb.open) sm_fixture_destroy(&f);
+        if (f.ndb.open) sm_history_close(&f);
         return failures;
     }
     if (kind == SM_V6_ALTER)
@@ -682,12 +726,13 @@ static int sm_v6_failure(enum sm_v6_fault_kind kind)
     SM_CHECK("v6 failure leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
     SM_CHECK("v6 failure leaves marker absent", sm_row_count(&f.ndb, 6) == 0);
     SM_CHECK("v6 failure preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
-    SM_CHECK("v6 clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0);
+    SM_CHECK("v6 clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0 &&
+             node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
     SM_CHECK("v6 retry records marker", sm_row_count(&f.ndb, 6) == 1);
     SM_CHECK("v6 retry creates required index", sm_scalar(&f.ndb,
         "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_snote_address'") == 1);
     SM_CHECK("v6 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
-    sm_fixture_destroy(&f);
+    sm_history_close(&f);
     return failures;
 }
 
@@ -716,17 +761,9 @@ static int sm_core_authorize(void *ctx, int op, const char *first,
 
 static bool sm_core_prepare(struct sm_fixture *f, int ver)
 {
-    int32_t before = ver - 1;
-    char sql[160];
-    snprintf(sql, sizeof(sql), "DELETE FROM schema_migrations WHERE CAST(version AS INTEGER) >= %d", ver);
-    if (!sm_fixture_init(f) ||
-        !node_db_exec(&f->ndb, "CREATE TABLE core_fixture_sentinel(value INTEGER NOT NULL);"
-                              "INSERT INTO core_fixture_sentinel VALUES(37)") ||
-        !node_db_exec(&f->ndb, sql) ||
-        !node_db_state_set(&f->ndb, "schema_version", &before, sizeof(before)) ||
-        !node_db_state_set(&f->ndb, "schema_compat_floor", &before, sizeof(before))) return false;
-    snprintf(sql, sizeof(sql), "SELECT count(*) FROM schema_migrations WHERE CAST(version AS INTEGER) >= %d", ver);
-    return sm_scalar(&f->ndb, sql) == 0 && sm_row_count(&f->ndb, ver - 1) == 1 &&
+    return sm_history_before(f, ver) &&
+        node_db_exec(&f->ndb, "CREATE TABLE core_fixture_sentinel(value INTEGER NOT NULL);"
+                              "INSERT INTO core_fixture_sentinel VALUES(37)") &&
         (ver <= 6 || sm_row_count(&f->ndb, 6) == 1);
 }
 
@@ -736,7 +773,7 @@ static int sm_core_failure(int ver, const char *index, const char *alter)
     struct sm_fixture f = {0};
     if (!sm_core_prepare(&f, ver)) {
         SM_CHECK("core migration fixture prepares", false);
-        if (f.ndb.open) sm_fixture_destroy(&f);
+        if (f.ndb.open) sm_history_close(&f);
         return failures;
     }
     if (index)
@@ -754,13 +791,14 @@ static int sm_core_failure(int ver, const char *index, const char *alter)
     SM_CHECK("core failed row leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
     SM_CHECK("core failed row leaves marker absent", sm_row_count(&f.ndb, ver) == 0);
     SM_CHECK("core failed row preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
-    SM_CHECK("core clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0);
+    SM_CHECK("core clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0 &&
+             node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
     SM_CHECK("core retry records marker", sm_row_count(&f.ndb, ver) == 1);
     SM_CHECK("core retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
     if (index)
         SM_CHECK("core retry creates required index", sm_scalar(&f.ndb,
             "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_height_all'") == 1);
-    sm_fixture_destroy(&f);
+    sm_history_close(&f);
     return failures;
 }
 
@@ -770,19 +808,20 @@ static int sm_core_partial_v3(void)
     struct sm_fixture f = {0};
     if (!sm_core_prepare(&f, 3)) {
         SM_CHECK("partial v3 fixture prepares", false);
-        if (f.ndb.open) sm_fixture_destroy(&f);
+        if (f.ndb.open) sm_history_close(&f);
         return failures;
     }
     SM_CHECK("partial v3 removes two columns", node_db_exec(&f.ndb,
         "ALTER TABLE blocks DROP COLUMN sapling_tree_data;"
         "ALTER TABLE wallet_sapling_notes DROP COLUMN witness_height"));
-    SM_CHECK("partially applied v3 retries", node_db_migrate(&f.ndb, NULL) > 0);
+    SM_CHECK("partially applied v3 retries", node_db_migrate(&f.ndb, NULL) > 0 &&
+             node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
     SM_CHECK("v3 restores block column", sm_scalar(&f.ndb,
         "SELECT count(*) FROM pragma_table_info('blocks') WHERE name='sapling_tree_data'") == 1);
     SM_CHECK("v3 preserves and restores witness columns", sm_scalar(&f.ndb,
         "SELECT count(*) FROM pragma_table_info('wallet_sapling_notes') WHERE name IN ('witness_data','witness_height')") == 2);
     SM_CHECK("partial v3 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
-    sm_fixture_destroy(&f);
+    sm_history_close(&f);
     return failures;
 }
 
@@ -840,12 +879,7 @@ static int sm_v27_bootstrap_authorize(void *ctx, int op, const char *first,
 
 static bool sm_v27_prepare(struct sm_fixture *f)
 {
-    memset(f, 0, sizeof(*f));
-    if (sqlite3_open_v2(":memory:", &f->ndb.db,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK)
-        return false;
-    f->ndb.open = true;
-    if (!create_schema(&f->ndb) || !node_db_exec(&f->ndb,
+    if (!sm_history_open(f) || !node_db_exec(&f->ndb,
         "CREATE TABLE core_fixture_sentinel(value INTEGER NOT NULL);"
         "INSERT INTO core_fixture_sentinel VALUES(37)")) return false;
     struct sm_v27_bootstrap guard = {0};
@@ -855,13 +889,6 @@ static bool sm_v27_prepare(struct sm_fixture *f)
     return removed && guard.stopped && rc < 0 && node_db_schema_version(&f->ndb) == 26 &&
         sm_row_count(&f->ndb, 26) == 1 && sm_row_count(&f->ndb, 27) == 0 &&
         sm_scalar(&f->ndb, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='peer_chain_observations'") == 0;
-}
-
-static void sm_v27_close(struct sm_fixture *f)
-{
-    if (f->ndb.db) sqlite3_close(f->ndb.db);
-    f->ndb.db = NULL;
-    f->ndb.open = false;
 }
 
 static int sm_v27_clean(void)
@@ -875,7 +902,7 @@ static int sm_v27_clean(void)
         printf("v27 clean run result=%d schema=%d\n", result, node_db_schema_version(&f.ndb));
         SM_CHECK("v27 clean historical migration reaches latest", result > 0 && node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
     }
-    if (f.ndb.db) sm_v27_close(&f);
+    if (f.ndb.db) sm_history_close(&f);
     return failures;
 }
 
@@ -885,7 +912,7 @@ static int sm_v27_failure(enum sm_v27_fault_kind kind)
     struct sm_fixture f = {0};
     if (!sm_v27_prepare(&f)) {
         SM_CHECK("v27 historical fixture prepares", false);
-        if (f.ndb.db) sm_v27_close(&f);
+        if (f.ndb.db) sm_history_close(&f);
         return failures;
     }
     int floor_before = node_db_schema_compat_floor(&f.ndb);
@@ -908,7 +935,7 @@ static int sm_v27_failure(enum sm_v27_fault_kind kind)
     SM_CHECK("v27 retry creates observation index", sm_scalar(&f.ndb,
         "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_peer_chain_obs_observed_at'") == 1);
     SM_CHECK("v27 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
-    sm_v27_close(&f);
+    sm_history_close(&f);
     return failures;
 }
 
