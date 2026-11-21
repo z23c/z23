@@ -2539,10 +2539,10 @@ $(BIN_DIR)/repro-network-policy-selftest: \
 	    tools/dev/dev_script_dir.c \
 	    platform/modules/platform/src/os_proc.c && mv -f "$@.tmp" "$@"
 
-check-vendor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(BIN_DIR)/z23-lint
+check-vendor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(BIN_DIR)/z23-lint $(REPRO_NETWORK_POLICY_SELFTEST_BIN)
 	@tools/scripts/test_vendor_provenance.sh
 	@tools/scripts/build_vendor_offline_selftest.sh
-	@./build/bin/repro-network-policy-selftest
+	@"$(REPRO_NETWORK_POLICY_SELFTEST_BIN)"
 	@sha256sum --check vendor/rgfw/SHA256SUMS
 	@sha256sum --check vendor/qrcodegen/SHA256SUMS
 	@sha256sum --check vendor/typography/SHA256SUMS
