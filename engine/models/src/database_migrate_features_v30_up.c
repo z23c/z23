@@ -311,8 +311,9 @@ static void db_migrate_v38_zid_domains(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('038')");
 }
 
-static void db_migrate_v39_onion_directory(struct node_db *ndb)
+static bool db_migrate_v39_onion_directory(struct node_db *ndb)
 {
+    bool ok = true;
     /* v39: the ON-CHAIN NODE DIRECTORY (onion_directory) — a rebuildable
      * projection of confirmed `ZDIR` OP_RETURNs (zdir/zdir.h), folded by
      * contexts/naming/models/src/explorer_index_zdir.c during the same
@@ -331,7 +332,7 @@ static void db_migrate_v39_onion_directory(struct node_db *ndb)
      * exclude a peer. Never consulted by consensus; safe to drop and
      * refold. hostname is CHECKed to the exact Tor v3 length here and to
      * the full alphabet rule in db_onion_directory_validate. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS onion_directory ("
         "hostname TEXT PRIMARY KEY CHECK(length(hostname)=62),"
         "txid BLOB NOT NULL CHECK(length(txid)=32),"
@@ -344,12 +345,13 @@ static void db_migrate_v39_onion_directory(struct node_db *ndb)
 
     /* Peer discovery reads active rows newest-registration-first; the
      * status filter and the height ordering are the whole query. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_onion_directory_status_height "
         "ON onion_directory(status, height DESC)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('039')");
+    return ok;
 }
 
 static void db_migrate_v40_store_purchases(struct node_db *ndb)
@@ -721,7 +723,6 @@ static void (*const k_db_migrate_v30_steps[])(struct node_db *) = {
     [36 - 30] = db_migrate_v36_agent_sessions,
     [37 - 30] = db_migrate_v37_zid_identities,
     [38 - 30] = db_migrate_v38_zid_domains,
-    [39 - 30] = db_migrate_v39_onion_directory,
     [40 - 30] = db_migrate_v40_store_purchases,
     [41 - 30] = db_migrate_v41_build_fabric,
     [42 - 30] = db_migrate_v42_build_leases,
@@ -731,6 +732,25 @@ static void (*const k_db_migrate_v30_steps[])(struct node_db *) = {
     [46 - 30] = db_migrate_v46_zslp_validity,
     [48 - 30] = db_migrate_v48_zswap_ads,
 };
+
+struct db_migrate_checked_step {
+    int version;
+    const char *name;
+    bool (*apply)(struct node_db *);
+};
+
+static const struct db_migrate_checked_step k_checked_steps[] = {
+    {35, "wallet labels", db_migrate_v35_wallet_labels},
+    {39, "onion directory", db_migrate_v39_onion_directory},
+    {47, "wallet schema", db_migrate_v47_vault_intents},
+};
+
+static const struct db_migrate_checked_step *db_migrate_checked_step(int version)
+{
+    for (size_t i = 0; i < sizeof(k_checked_steps) / sizeof(k_checked_steps[0]); ++i)
+        if (k_checked_steps[i].version == version) return &k_checked_steps[i];
+    return NULL;
+}
 
 /* Next schema version in the v30-v48 range, or 0 when that range is already
  * applied. A database still below v30 takes 30; each later step is one
@@ -753,13 +773,9 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
     int next = db_migrate_v30_next_version(current_ver);
 
     while (next != 0) {
-        if (next == 35) {
-            if (!db_migrate_checked_feature(ndb, 35, floor_ver, "wallet labels",
-                                            db_migrate_v35_wallet_labels))
-                return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-        } else if (next == 47) {
-            if (!db_migrate_checked_feature(ndb, 47, floor_ver, "wallet schema",
-                                            db_migrate_v47_vault_intents))
+        const struct db_migrate_checked_step *checked = db_migrate_checked_step(next);
+        if (checked) {
+            if (!db_migrate_checked_feature(ndb, next, floor_ver, checked->name, checked->apply))
                 return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         } else {
             k_db_migrate_v30_steps[next - 30](ndb);
