@@ -205,17 +205,34 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * post that is not a new FLEET post of this box's own is refused by name
  * (enum fleet_board_push_hint) and the post is treated as if it carried
  * none. When a hint and a `ref` name different boxes the hint is used and
- * the ref is not: one post, one addressee, never two. The addressee is
- * pushed to only when its board key is the online key of exactly one paired
- * peer and that peer passes the very test a pull from it would have to pass
- * to be served this post (the status capability, a current delegation, the
- * read role, the roster) at the moment the push opens, while its send queue
+ * the ref is not: one post, one addressee, never two. The hint is honoured
+ * only on the call that newly stores the post: a row stored by an earlier
+ * call and posted again (an exporter that re-exports after a crash, or
+ * after a restart lost the in-memory queue) is refused not_stored and is
+ * carried by the pull only. Hinted and ref-derived entries share the one
+ * FLEET_BOARD_PUSH_QUEUE_MAX-entry queue, and a full queue drops its oldest
+ * entry, so heavy agent mail can evict earlier entries; the pull carries
+ * every one of them. The addressee is pushed to only when its board key is
+ * the online key of exactly one paired peer and, at the moment the push opens, the answering half's own
+ * disclosure decision for a pull from that peer's Noise key serves it: the
+ * same function a pull is judged by (board_accept_authorized, asked with
+ * nothing recorded), on the same pairing row (the one
+ * board_pairing_for_peer picks), with the same checks (a current
+ * delegation on that session, the read role, the roster), and that row's
+ * delegation proves the addressee's board key; then while its send queue
  * is under budget (net_send_over_budget) and no other push to it is open,
  * and only while the post is one a pull would still serve (unexpired, or a
- * wiki page). So no hint can make a post reach a box a pull would not
- * serve, or more than one box: a local process able to call the post RPC
- * can already publish the post to every eligible box by pull, and gains
- * only the choice of which one of those is tried first. Nothing is
+ * wiki page). Where the pull would refuse, the post is skipped ineligible
+ * and the pull remains its only carrier. So a push never reaches a peer a
+ * pull from that peer would not be served, and no hint can make a post
+ * reach more than one box: a local process able to call the post RPC can
+ * already publish the post to every eligible box by pull, and gains only
+ * the choice of which one of those is tried first. Known limitation: the
+ * pull judges a peer on the OLDEST pairing row for its Noise key, live or
+ * not, so a re-paired peer whose oldest row is no longer the live one (an
+ * expired row, or one under another master) is served neither pull nor
+ * push; fixing the pull's row selection is a follow-up on the pull path,
+ * and the push follows it by construction. Nothing is
  * relayed: a box pushes only posts its own key signed. The receiver copies
  * the payload into a bounded push inbox, separate from the pull inbox, on
  * the frame path, and checks nothing else there; its lane tick re-proves the
@@ -235,10 +252,14 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * at once can keep the inbox full, and every other push is then refused
  * push_inbox_full and left to the pull. A new pushed record costs two
  * signature checks (its decode, then the one store ingest every post takes),
- * so a commit costs at most 2 * FLEET_BOARD_PUSH_POSTS_MAX. Both halves
- * judge a peer on any pairing row for its Noise key that grants the status
- * capability now and passes the whole test, newest first, so a newer row
- * under another master does not hide the row that proves it. A push touches
+ * so a commit costs at most 2 * FLEET_BOARD_PUSH_POSTS_MAX. The receiving
+ * half accepts a pusher on any pairing row for its Noise key that grants the
+ * status capability now, whose delegation is current on that session and
+ * whose key the roster admits: the checks this box's asking half makes on
+ * any row before it pulls from that peer, so a push is accepted only from a
+ * peer this box would pull from, and only records signed by a key those
+ * rows prove (the read role is not asked: the pusher is disclosed nothing).
+ * A push touches
  * no cursor, sweep or answer check. A push that is refused, lost, or
  * never answered is not sent again: the next pull carries the post, and a
  * post both paths deliver is one row by id. An older node answers the new
@@ -400,7 +421,7 @@ enum fleet_board_push_skip {
     FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE,  /* no `ref`, or it names no other box's post */
     FLEET_BOARD_PUSH_SKIP_QUEUE_FULL,    /* dropped as the oldest of a full queue */
     FLEET_BOARD_PUSH_SKIP_GONE,          /* no longer in this box's store */
-    FLEET_BOARD_PUSH_SKIP_UNRESOLVED,    /* the addressee is no paired peer */
+    FLEET_BOARD_PUSH_SKIP_UNRESOLVED,    /* no paired peer, or not the pull row's key */
     FLEET_BOARD_PUSH_SKIP_AMBIGUOUS,     /* ... or more than one */
     FLEET_BOARD_PUSH_SKIP_INELIGIBLE,    /* a pull from it would not be served */
     FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED, /* no live session to it */

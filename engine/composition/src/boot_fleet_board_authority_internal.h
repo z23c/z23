@@ -43,25 +43,30 @@ bool board_peer_may_read(const uint8_t signer[32]);
 /* The fleet roster admits this board key here. */
 bool board_roster_admits(const uint8_t online_pubkey[32]);
 /* Everything the answering half proves before it reads a post for a peer:
- * a pairing row, a current delegation, the read role and the roster. */
+ * the pairing row board_pairing_for_peer picks, a current delegation, the
+ * read role and the roster. Refusals are counted and logged. */
 bool board_accept_authorized(const uint8_t peer_noise_static[32]);
-/* The push's questions, which count and log nothing (the push names its own
- * refusals). judge_peer: on one pairing row, the status capability, a
- * delegation that resolves and is current, the read role when `want_read`
- * (the addressee's disclosure test; the pusher is not asked it), and the
- * roster. Returns FLEET_BOARD_PUSH_REFUSALS when every check passes, with
- * the peer's board key in `online_out` (may be NULL), else the check that
- * failed. Rows are insert-only, so an expired row can sit before a live one
- * and a Noise key can hold live rows under two masters; both push halves
- * therefore judge every row that grants the status capability now, newest
- * first, and take the rows that pass. pusher_keys: the receiving half's
- * question, the board keys of every such row for `peer_noise_static` that
- * passes (read role not asked), distinct, at most `cap`; when none,
- * `why` names the check the newest allowing row failed, PAIRING when no row
- * allows. */
+/* The push's sending half: the very decision board_accept_authorized makes
+ * for a pull from this Noise static (same function, same row, same clock),
+ * with nothing counted or logged. Returns FLEET_BOARD_PUSH_REFUSALS when a
+ * pull would be served, with the board key that row's delegation proves in
+ * `online_out` (may be NULL), else the check that refused. */
+enum fleet_board_push_refusal board_push_disclosure(
+    const uint8_t peer_noise_static[32], uint8_t online_out[32]);
+/* The push's receiving half, which counts and logs nothing (the push names
+ * its own refusals). judge_peer: on one pairing row, the status capability,
+ * a delegation that resolves and is current on that row's Noise static, and
+ * the roster: the checks the asking half (board_peer_due in
+ * boot_fleet_board_fleet.c) makes on any row before this box pulls from that
+ * peer. The read role is not asked: it governs what this box discloses, and
+ * a pusher is disclosed nothing. Returns FLEET_BOARD_PUSH_REFUSALS when every
+ * check passes, with the peer's board key in `online_out` (may be NULL),
+ * else the check that failed. pusher_keys: the board keys of every row for
+ * `peer_noise_static` that grants the status capability now and passes,
+ * newest first, distinct, at most `cap`; when none, `why` names the check
+ * the newest allowing row failed, PAIRING when no row allows. */
 enum fleet_board_push_refusal board_push_judge_peer(
-    const struct db_mesh_pairing *row, bool want_read, int64_t now,
-    uint8_t online_out[32]);
+    const struct db_mesh_pairing *row, int64_t now, uint8_t online_out[32]);
 size_t board_push_pusher_keys(struct node_db *ndb,
                               const uint8_t peer_noise_static[32], int64_t now,
                               uint8_t (*keys)[32], size_t cap,

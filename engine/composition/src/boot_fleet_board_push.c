@@ -495,9 +495,9 @@ static struct push_peer *push_peer_lead(struct push_round *r,
 
 /* Every pairing row that grants the status capability now and whose
  * delegation resolves, newest first (the list runs oldest first, so it is
- * walked from the end). Every such row is kept, not only a Noise key's
- * newest: a newer row under another master must not hide the row that
- * proves the peer, which is the row the receiving half accepts too. */
+ * walked from the end). The table only finds which Noise key a board key
+ * belongs to (push_match); it decides nothing: whether that peer is pushed
+ * to is the pull's own decision, asked in push_peer_judge. */
 static void push_round_peers(struct push_round *r)
 {
     struct node_db *pairings = app_runtime_node_db();
@@ -621,32 +621,26 @@ static int push_match(struct push_round *r, const uint8_t to[32],
     return PUSH_OK;
 }
 
-/* The answering side's own disclosure test for the peer `lead` leads, asked
- * on each of its rows whose board key is `to`, newest first, until one
- * passes; when none does, the newest one's failure is counted as a push
- * judgment. Then the link: connected, under its send budget, not an older
- * node this session, and no push to it already open. */
+/* The answering half's own disclosure decision for the Noise key `lead`
+ * leads (board_push_disclosure: the function, row and clock a pull from that
+ * peer on that session is judged by, nothing recorded as a pull). Where the
+ * pull would refuse, the post is not pushed and the refusal is counted as a
+ * push judgment; where the pull's row proves another board key than `to`,
+ * `to` does not resolve to this peer. Then the link: connected, under its
+ * send budget, not an older node this session, and no push to it already
+ * open. */
 static int push_peer_judge(const struct push_round *r,
                            const struct push_peer *lead, const uint8_t to[32])
 {
     const uint8_t *noise = lead->row.peer_noise_pubkey;
-    enum fleet_board_push_refusal refusal = FLEET_BOARD_PUSH_REFUSAL_PAIRING;
-    bool judged = false, passed = false;
-    for (size_t i = 0; i < r->n_peers && !passed; i++) {
-        const struct push_peer *e = &r->peers[i];
-        if (e->lead != lead || memcmp(e->online, to, 32) != 0)
-            continue;
-        enum fleet_board_push_refusal why =
-            board_push_judge_peer(&e->row, true, r->now, NULL);
-        passed = why == FLEET_BOARD_PUSH_REFUSALS;
-        if (!passed && !judged)
-            refusal = why;
-        judged = true;
-    }
-    if (!passed) {
+    uint8_t served[32];
+    enum fleet_board_push_refusal refusal = board_push_disclosure(noise, served);
+    if (refusal != FLEET_BOARD_PUSH_REFUSALS) {
         push_refused(true, refusal);
         return FLEET_BOARD_PUSH_SKIP_INELIGIBLE;
     }
+    if (memcmp(served, to, 32) != 0)
+        return FLEET_BOARD_PUSH_SKIP_UNRESOLVED;
     struct noise_transport_snapshot snap;
     memset(&snap, 0, sizeof snap);
     struct p2p_node *node =
@@ -1001,12 +995,17 @@ struct push_authors {
     size_t n;
 };
 
-/* The pusher's standing now, as a pull from it would be judged, and the
- * board keys it proves: every pairing row for its Noise key that grants the
- * status capability now, newest first, whose delegation resolves and is
- * current and whose key the roster admits. The read role is not asked: it
- * governs what this box discloses, and a push discloses nothing. A failure
- * is counted as a push judgment, never as a pull. */
+/* The pusher's standing now and the board keys it proves
+ * (board_push_pusher_keys): every pairing row for its Noise key that grants
+ * the status capability now, newest first, whose delegation resolves and is
+ * current on that Noise static and whose key the roster admits. Those are
+ * the checks this box's asking half (board_peer_due) makes on any row before
+ * it pulls from that peer and stores what it answers, so a pusher is
+ * accepted only where this box would pull from it, and a pushed record must
+ * also be signed by a key those rows prove, which a pulled page is not
+ * asked. The read role is not asked: it governs what this box discloses,
+ * and a push discloses nothing. A failure is counted as a push judgment,
+ * never as a pull. */
 static bool push_pusher_standing(const uint8_t peer_static[32],
                                  struct push_authors *authors)
 {

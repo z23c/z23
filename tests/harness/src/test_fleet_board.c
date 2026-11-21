@@ -56,6 +56,7 @@
 #include "../../../engine/composition/src/boot_fleet_board_roster_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_frame_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_push_internal.h"
+#include "../../../engine/composition/src/boot_fleet_board_authority_internal.h"
 #include "validation/main_constants.h"
 #include "base/serialize_le.h"
 #include "vcs/zcode_dht_delegation.h"
@@ -7897,7 +7898,7 @@ static int test_fleet_board_state_tag(unsigned c)
 #define FBP_PUSHER 7
 #define FBP_ADDRESSEE 9
 #define FBP_STRANGER 8
-#define FBP_CASES 41u
+#define FBP_CASES 43u
 
 /* A failed step names its line and fails the case. */
 #define FBP_REQUIRE(cond)                                                      \
@@ -8773,18 +8774,42 @@ static bool fbp_first_row(struct fbw *w, const uint8_t noise[32],
     return false;
 }
 
-/* Case 24. */
+/* A push to the addressee was not opened because the pull's own decision
+ * refused it for its delegation `judged` times, and nothing reached it. */
+static bool fbp_pull_refusal_held(struct fbp *p, uint64_t judged,
+                                  uint64_t posts)
+{
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_opened == p->before.push_opened);
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_INELIGIBLE] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_INELIGIBLE] +
+                    posts);
+    FBP_REQUIRE(c.push_refused_out[FLEET_BOARD_PUSH_REFUSAL_DELEGATION] ==
+                p->before.push_refused_out[FLEET_BOARD_PUSH_REFUSAL_DELEGATION] +
+                    judged);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_inbox_used() == 0);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
+/* Case 24. The addressee's oldest pairing row has expired and a live one
+ * follows it. The pull judges a peer on its oldest row, so a pull from the
+ * addressee is refused; the push asks the pull's own decision and opens
+ * nothing. (A known limitation of the pull's row choice, which the push
+ * follows: config/boot_fleet_board.h, PUSH.) */
 static bool fbp_case_addressee_old_row(struct fbp *p)
 {
     struct db_mesh_pairing first;
+    FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
     FBP_REQUIRE(fbp_expired_row_first(&p->w, p->w.f.resp_noise_pub,
                                       p->addr_peer.pairing.pairing_id));
     FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
                 !mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
                                      FBW_NOW));
-    FBP_REQUIRE(fbp_push_once(p));
-    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
-    return true;
+    FBP_REQUIRE(!board_accept_authorized(p->w.f.resp_noise_pub));
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 0);
+    return fbp_pull_refusal_held(p, 1, 1);
 }
 
 /* Case 25. */
@@ -9604,6 +9629,92 @@ static bool fbp_case_receipt_log_limited(struct fbp *p)
     return true;
 }
 
+/* An older LIVE pairing row for `noise` under another master: the list
+ * returns it before the row `live_id` names (the same paired_at, a pairing
+ * id that sorts first), and no delegation the lane resolves matches it. */
+static bool fbh_older_row(struct fbw *w, const uint8_t noise[32],
+                          const char *live_id)
+{
+    for (unsigned fill = 1; fill < 256; fill++) {
+        struct db_mesh_pairing row;
+        memset(&row, 0, sizeof row);
+        memcpy(row.network_genesis, w->f.genesis, 32);
+        memset(row.peer_master_pubkey, (int)fill, 32);
+        memcpy(row.peer_noise_pubkey, noise, 32);
+        row.capability_mask = MESH_PAIRING_CAP_STATUS_READ;
+        row.delegation_sequence = 7;
+        row.paired_at = FBW_PAIRED_AT;
+        row.expires_at = FBW_PAIRING_EXPIRES;
+        if (!mesh_pairing_id_derive(row.network_genesis, row.peer_master_pubkey,
+                                    row.peer_noise_pubkey, row.pairing_id))
+            return false;
+        if (strcmp(row.pairing_id, live_id) < 0)
+            return db_mesh_pairing_insert(&w->f.ndb, &row);
+    }
+    return false;
+}
+
+/* Case 41 (security re-review). An older live row under another master for
+ * the addressee's Noise key: the pull, judging that row, refuses the
+ * addressee (session_mismatch), so neither a hinted post nor a ref-derived
+ * one opens a push and nothing is stored; a third, newer row under yet
+ * another master changes nothing. */
+static bool fbp_case_pull_row_refuses(struct fbp *p)
+{
+    struct fleet_board_post mail;
+    struct db_mesh_pairing first;
+    char to[65];
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
+    FBP_REQUIRE(fbh_older_row(&p->w, p->w.f.resp_noise_pub,
+                              p->addr_peer.pairing.pairing_id));
+    FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
+                mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
+                                    FBW_NOW) &&
+                strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0);
+    FBP_REQUIRE(!board_accept_authorized(p->w.f.resp_noise_pub));
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
+    /* By hint. */
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    FBP_REQUIRE(fbp_send(p) == 0);
+    /* By ref. */
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 0);
+    /* Three rows: a newer one under a third master. */
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE4));
+    FBP_REQUIRE(!board_accept_authorized(p->w.f.resp_noise_pub));
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 0);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, mail.id));
+    return fbp_pull_refusal_held(p, 3, 3);
+}
+
+/* Case 42, the mirror. The addressee's oldest row is the live one and a
+ * newer live row under another master follows it: the pull serves the
+ * addressee, and a hinted post and a ref-derived one both reach it in one
+ * push. */
+static bool fbp_case_pull_row_serves(struct fbp *p)
+{
+    struct fleet_board_post mail;
+    char to[65];
+    size_t frames = 0;
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE5));
+    FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 1);
+    FBP_REQUIRE(fbp_commit(p, &frames) == 2 && frames == 1);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, mail.id));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
 typedef bool (*fbp_case_fn)(struct fbp *p);
 
 static const struct {
@@ -9662,7 +9773,8 @@ static const struct {
     { "fleet board push: the lane's own tick drains once a second, pulls "
       "once an interval, and pushes on its 100 ms ticks", fbp_case_real_tick },
     { "fleet board push: an expired pairing row older than the addressee's "
-      "live one does not stop the push", fbp_case_addressee_old_row },
+      "live one makes the pull refuse it, and the push follows the pull",
+      fbp_case_addressee_old_row },
     { "fleet board push: an expired pairing row older than the pusher's live "
       "one does not void its push", fbp_case_pusher_old_row },
     { "fleet board push: an addressee two paired peers claim is pushed "
@@ -9702,6 +9814,13 @@ static const struct {
       "pushed, and that is counted", fbp_case_expired_not_pushed },
     { "fleet board push: receipts naming other posts are counted each time "
       "and logged at most once a window", fbp_case_receipt_log_limited },
+    { "fleet board push: an older live pairing row under another master "
+      "makes the pull refuse the addressee, and then neither a hinted nor a "
+      "ref-derived post opens a push, with two rows or three",
+      fbp_case_pull_row_refuses },
+    { "fleet board push: where the addressee's oldest pairing row is the "
+      "live one the pull serves it, and a hinted and a ref-derived post "
+      "both reach it in one push", fbp_case_pull_row_serves },
 };
 
 /* Each case gets a fresh paired fixture. */

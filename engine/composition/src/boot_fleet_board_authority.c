@@ -5,8 +5,11 @@
  * (boot_fleet_board_fleet.c), the asking half and the push
  * (boot_fleet_board_push.c). Moved out of boot_fleet_board_fleet.c so the
  * stream lane keeps to its size limit. The pull's refusals are counted and
- * named here, never the peer; the push asks the same checks through
- * board_push_judge_peer, which counts and logs nothing, and names its own
+ * named here, never the peer. The push's sending half asks the answering
+ * half's own disclosure decision (board_disclosure, through
+ * board_push_disclosure) with recording off, so it computes exactly what a
+ * pull from that peer would and counts and logs nothing as a pull; the
+ * receiving half asks board_push_pusher_keys. The push names its own
  * refusals.
  */
 
@@ -123,6 +126,26 @@ static enum mesh_pairing_reason board_delegation_reason(
         now);
 }
 
+/* The delegation question; with `record` a refusal is counted and named as
+ * the pull's, never the peer. */
+static bool board_delegation_check(struct node_db *ndb,
+                                   const struct db_mesh_pairing *row,
+                                   const struct vcs_zcode_dht_delegation *peer,
+                                   const uint8_t session_noise_static[32],
+                                   int64_t now, bool record)
+{
+    enum mesh_pairing_reason reason =
+        board_delegation_reason(ndb, row, peer, session_noise_static, now);
+    if (reason == MESH_PAIRING_OK)
+        return true;
+    if (!record)
+        return false;
+    atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
+    LOG_WARN("fleet.board", "fleet pull refused: delegation %s",
+             mesh_pairing_reason_token(reason));
+    return false;
+}
+
 /* The pull's question. A refusal is counted and named, never the peer. */
 bool board_delegation_current(struct node_db *ndb,
                               const struct db_mesh_pairing *row,
@@ -130,14 +153,8 @@ bool board_delegation_current(struct node_db *ndb,
                               const uint8_t session_noise_static[32],
                               int64_t now)
 {
-    enum mesh_pairing_reason reason =
-        board_delegation_reason(ndb, row, peer, session_noise_static, now);
-    if (reason == MESH_PAIRING_OK)
-        return true;
-    atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
-    LOG_WARN("fleet.board", "fleet pull refused: delegation %s",
-             mesh_pairing_reason_token(reason));
-    return false;
+    return board_delegation_check(ndb, row, peer, session_noise_static, now,
+                                  true);
 }
 
 /* The pairing row for one Noise static: bounded, and fail-closed on an
@@ -195,7 +212,7 @@ size_t board_push_pusher_keys(struct node_db *ndb,
             continue;
         uint8_t online[32];
         enum fleet_board_push_refusal r =
-            board_push_judge_peer(&rows[i], false, now, online);
+            board_push_judge_peer(&rows[i], now, online);
         if (r == FLEET_BOARD_PUSH_REFUSALS)
             n = board_key_add(keys, n, cap, online);
         else if (!judged)
@@ -207,8 +224,7 @@ size_t board_push_pusher_keys(struct node_db *ndb,
 }
 
 enum fleet_board_push_refusal board_push_judge_peer(
-    const struct db_mesh_pairing *row, bool want_read, int64_t now,
-    uint8_t online_out[32])
+    const struct db_mesh_pairing *row, int64_t now, uint8_t online_out[32])
 {
     struct node_db *ndb = app_runtime_node_db();
     if (!row || !ndb || !app_runtime_node_db_handle_open(ndb) ||
@@ -219,11 +235,6 @@ enum fleet_board_push_refusal board_push_judge_peer(
         board_delegation_reason(ndb, row, &peer, row->peer_noise_pubkey,
                                 now) != MESH_PAIRING_OK)
         return FLEET_BOARD_PUSH_REFUSAL_DELEGATION;
-    char why[ZCL_FLEET_ROLE_WHY_MAX];
-    if (want_read &&
-        !zcl_fleet_role_allows(peer.online_pubkey, FLEET_BOARD_FLEET_READ_LEAF,
-                               NULL, why, sizeof why))
-        return FLEET_BOARD_PUSH_REFUSAL_ROLE;
     struct node_db *store = board_db();
     if (!store || !boot_fleet_roster_admits_peer(store, peer.online_pubkey, now))
         return FLEET_BOARD_PUSH_REFUSAL_ROSTER;
@@ -232,17 +243,45 @@ enum fleet_board_push_refusal board_push_judge_peer(
     return FLEET_BOARD_PUSH_REFUSALS;
 }
 
-/* A paired, current peer still reads fleet-private posts only when the
- * key it signs with holds a role granting the board's read leaf here. */
-bool board_peer_may_read(const uint8_t signer[32])
+/* The read-role question; with `record` a refusal is counted and named as
+ * the pull's. */
+static bool board_read_check(const uint8_t signer[32], bool record)
 {
     char why[ZCL_FLEET_ROLE_WHY_MAX];
     if (zcl_fleet_role_allows(signer, FLEET_BOARD_FLEET_READ_LEAF, NULL, why,
                               sizeof why))
         return true;
+    if (!record)
+        return false;
     atomic_fetch_add_explicit(&g_role_refused, 1, memory_order_relaxed);
     LOG_WARN("fleet.board", "fleet pull refused: %s", why);
     return false;
+}
+
+/* A paired, current peer still reads fleet-private posts only when the
+ * key it signs with holds a role granting the board's read leaf here. */
+bool board_peer_may_read(const uint8_t signer[32])
+{
+    return board_read_check(signer, true);
+}
+
+/* The roster question; with `record` a refusal is logged as the pull's,
+ * rate limited. */
+static bool board_roster_check(const uint8_t online_pubkey[32], bool record)
+{
+    struct node_db *store = board_db();
+    if (!store)
+        return false;
+    int64_t now = board_now();
+    bool ok = boot_fleet_roster_admits_peer(store, online_pubkey, now);
+    uint64_t skipped = 0;
+    if (!ok && record &&
+        boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_PEER_REFUSED, now,
+                                  &skipped))
+        LOG_WARN("fleet.board", "fleet pull refused: not on the fleet roster "
+                 "(%llu more since the last line)",
+                 (unsigned long long)skipped);
+    return ok;
 }
 
 /* ZRC 0012 step 2: is this peer's board key on the fleet roster? The roster
@@ -251,41 +290,58 @@ bool board_peer_may_read(const uint8_t signer[32])
  * admits members only; an unverifiable one admits nobody. */
 bool board_roster_admits(const uint8_t online_pubkey[32])
 {
-    struct node_db *store = board_db();
-    if (!store)
-        return false;
-    int64_t now = board_now();
-    bool ok = boot_fleet_roster_admits_peer(store, online_pubkey, now);
-    uint64_t skipped = 0;
-    if (!ok && boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_PEER_REFUSED,
-                                         now, &skipped))
-        LOG_WARN("fleet.board", "fleet pull refused: not on the fleet roster "
-                 "(%llu more since the last line)",
-                 (unsigned long long)skipped);
-    return ok;
+    return board_roster_check(online_pubkey, true);
 }
 
 /* Everything the answering half proves about a peer that is already
  * through the primitive's Noise and capability gates, before any post is
- * read. */
-bool board_accept_authorized(const uint8_t peer_noise_static[32])
+ * read: the row board_pairing_for_peer picks, its delegation current on
+ * this session, the read role and the roster. The one decision for the pull
+ * (`record`: refusals counted and logged as the pull's) and for the push's
+ * sending half (`record` clear: the same computation, nothing recorded).
+ * Returns FLEET_BOARD_PUSH_REFUSALS when served, with the board key the
+ * row's delegation proves in `online_out` (may be NULL). */
+static enum fleet_board_push_refusal board_disclosure(
+    const uint8_t peer_noise_static[32], bool record, uint8_t online_out[32])
 {
     struct node_db *ndb = app_runtime_node_db();
     if (!ndb || !app_runtime_node_db_handle_open(ndb))
-        return false;
+        return FLEET_BOARD_PUSH_REFUSAL_PAIRING;
     struct db_mesh_pairing row;
     struct vcs_zcode_dht_delegation peer;
-    if (!board_pairing_for_peer(ndb, peer_noise_static, &row) ||
-        !board_peer_delegation(&row, &peer)) {
-        atomic_fetch_add_explicit(&g_delegation_refused, 1,
-                                  memory_order_relaxed);
-        LOG_WARN("fleet.board", "fleet pull refused: delegation_unresolved");
-        return false;
+    bool paired = board_pairing_for_peer(ndb, peer_noise_static, &row);
+    if (!paired || !board_peer_delegation(&row, &peer)) {
+        if (record) {
+            atomic_fetch_add_explicit(&g_delegation_refused, 1,
+                                      memory_order_relaxed);
+            LOG_WARN("fleet.board",
+                     "fleet pull refused: delegation_unresolved");
+        }
+        return paired ? FLEET_BOARD_PUSH_REFUSAL_DELEGATION
+                      : FLEET_BOARD_PUSH_REFUSAL_PAIRING;
     }
-    return board_delegation_current(ndb, &row, &peer, peer_noise_static,
-                                    board_now()) &&
-           board_peer_may_read(peer.online_pubkey) &&
-           board_roster_admits(peer.online_pubkey);
+    if (!board_delegation_check(ndb, &row, &peer, peer_noise_static,
+                                board_now(), record))
+        return FLEET_BOARD_PUSH_REFUSAL_DELEGATION;
+    if (!board_read_check(peer.online_pubkey, record))
+        return FLEET_BOARD_PUSH_REFUSAL_ROLE;
+    if (!board_roster_check(peer.online_pubkey, record))
+        return FLEET_BOARD_PUSH_REFUSAL_ROSTER;
+    if (online_out)
+        memcpy(online_out, peer.online_pubkey, 32);
+    return FLEET_BOARD_PUSH_REFUSALS;
+}
+
+bool board_accept_authorized(const uint8_t peer_noise_static[32])
+{
+    return board_disclosure(peer_noise_static, true, NULL) ==
+           FLEET_BOARD_PUSH_REFUSALS;
+}
+
+enum fleet_board_push_refusal board_push_disclosure(
+    const uint8_t peer_noise_static[32], uint8_t online_out[32])
+{
+    return board_disclosure(peer_noise_static, false, online_out);
 }
 
 void board_authority_counts(struct boot_fleet_board_fleet_counts *out)
