@@ -2452,6 +2452,64 @@ static bool tgs_priority_git(const char *root, const char *args, char *out, size
     return true;
 }
 
+static bool tgs_priority_timed_attempt(const char *root, const char *local,
+                                       const char *base, int when)
+{
+    char attempt[PATH_MAX], request[PATH_MAX + 32], body[320];
+    if (!zcl_dev_proof_test_failure_attempt_prepare(root, local, base, attempt, sizeof(attempt)) ||
+        snprintf(request, sizeof(request), "%s/request", attempt) >= (int)sizeof(request) ||
+        snprintf(body, sizeof(body), "zcl.dev_proof_request.v1\n%s\n%s\n%d\n1\n", local, base, when) >= (int)sizeof(body) ||
+        !tgs_write_file(request, body)) return false;
+    return zcl_dev_proof_test_failure_attempt_settle(root, local, base, attempt,
+        "child_proof_failed_exit_1\ntest test_hex_codec: FAIL at changed.c:1");
+}
+
+static int test_priority_recent_history(void)
+{
+    int failures = 0;
+    TEST("failure priority: newest relevant request gets the bounded diff budget") {
+        char root[PATH_MAX], canonical[PATH_MAX], path[PATH_MAX + 128], scratch[PATH_MAX + 64];
+        char base[128], old[128], recent[128], priority[256];
+        static char out[1024 * 1024];
+        test_make_tmpdir(root, sizeof(root), "tgs_priority", "recent");
+        ASSERT(realpath(root, canonical));
+        ASSERT(tgs_priority_git(canonical, "init -q", out, sizeof(out)));
+        snprintf(path, sizeof(path), "%s/other.c", canonical);
+        ASSERT(tgs_write_file(path, "old\n"));
+        ASSERT(tgs_priority_git(canonical, "add other.c", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "-c user.name=fixture -c user.email=fixture@invalid commit -qm base --no-gpg-sign", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "rev-parse HEAD", base, sizeof(base)));
+        ASSERT(tgs_write_file(path, "new\n"));
+        ASSERT(tgs_priority_git(canonical, "add other.c", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "-c user.name=fixture -c user.email=fixture@invalid commit -qm old --no-gpg-sign", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "rev-parse HEAD", old, sizeof(old)));
+        snprintf(path, sizeof(path), "%s/changed.c", canonical);
+        ASSERT(tgs_write_file(path, "new\n"));
+        ASSERT(tgs_priority_git(canonical, "add changed.c", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "-c user.name=fixture -c user.email=fixture@invalid commit -qm recent --no-gpg-sign", out, sizeof(out)));
+        ASSERT(tgs_priority_git(canonical, "rev-parse HEAD", recent, sizeof(recent)));
+        for (int i = 0; strcmp(recent, old) <= 0 && i < 128; i++) {
+            char content[64];
+            snprintf(content, sizeof(content), "new %d\n", i);
+            ASSERT(tgs_write_file(path, content));
+            ASSERT(tgs_priority_git(canonical, "add changed.c", out, sizeof(out)));
+            ASSERT(tgs_priority_git(canonical, "-c user.name=fixture -c user.email=fixture\ commit --amend -qm recent --no-gpg-sign", out, sizeof(out)));
+            ASSERT(tgs_priority_git(canonical, "rev-parse HEAD", recent, sizeof(recent)));
+        }
+        ASSERT(strcmp(recent, old) > 0);
+        for (int i = 0; i < 17; i++) ASSERT(tgs_priority_timed_attempt(canonical, old, base, 10));
+        ASSERT(tgs_priority_timed_attempt(canonical, recent, old, 20));
+        snprintf(scratch, sizeof(scratch), "%s/priority-diff", canonical);
+        const char *changed[] = {"changed.c"};
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority)));
+        ASSERT_STR_EQ(priority, "test_hex_codec");
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_priority_bound_history_dispatch(void)
 {
     int failures = 0;
@@ -4500,6 +4558,7 @@ int test_test_group_selector(void)
     failures += test_dispatch_order_pure();
     failures += test_failure_priority_history();
 #if !defined(_WIN32)
+    failures += test_priority_recent_history();
     failures += test_priority_bound_history_dispatch();
 #endif
     failures += test_dispatch_weights_read();

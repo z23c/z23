@@ -13156,6 +13156,8 @@ struct dp_priority_scan {
     const char **selected;
     size_t selected_count, diffs, seen, ignored, limited, hints;
     bool *matched;
+    struct zcl_dev_proof_history_failure candidates[DP_PRIORITY_DIFF_LIMIT];
+    size_t candidates_count;
 };
 
 static bool dp_priority_read_diff(struct dp_priority_scan *s,
@@ -13188,6 +13190,16 @@ static bool dp_priority_read_diff(struct dp_priority_scan *s,
     return match != ZCL_FAILURE_PRIORITY_INVALID;
 }
 
+/* Request start is a scheduling hint, not a failure timestamp. The native
+ * reader requires a valid bound request time; ties use the attempt name. */
+static bool dp_priority_newer(const struct zcl_dev_proof_history_failure *a,
+                              const struct zcl_dev_proof_history_failure *b)
+{
+    int64_t at = a->request_started_unix, bt = b->request_started_unix;
+    if (at != bt) return at > bt;
+    return strcmp(a->attempt, b->attempt) < 0;
+}
+
 static bool dp_priority_visit(const struct zcl_dev_proof_history_failure *failure, void *ctx)
 {
     struct dp_priority_scan *s = ctx;
@@ -13197,9 +13209,25 @@ static bool dp_priority_visit(const struct zcl_dev_proof_history_failure *failur
         failure, s->selected, s->selected_count, group, sizeof(group));
     if (m == ZCL_FAILURE_PRIORITY_INVALID) { s->ignored++; return true; }
     if (m != ZCL_FAILURE_PRIORITY_MATCH) return true;
-    if (s->diffs >= DP_PRIORITY_DIFF_LIMIT) { s->limited++; return true; }
-    if (!dp_priority_read_diff(s, failure, group)) s->ignored++;
+    size_t i = 0;
+    while (i < s->candidates_count && !dp_priority_newer(failure, &s->candidates[i])) i++;
+    if (s->candidates_count == DP_PRIORITY_DIFF_LIMIT) s->limited++;
+    else s->candidates_count++;
+    if (i >= DP_PRIORITY_DIFF_LIMIT) return true;
+    for (size_t j = s->candidates_count - 1; j > i; j--)
+        s->candidates[j] = s->candidates[j - 1];
+    s->candidates[i] = *failure;
     return true;
+}
+
+static void dp_priority_read_candidates(struct dp_priority_scan *s)
+{
+    for (size_t i = 0; i < s->candidates_count; i++) {
+        char group[ZCL_TEST_GROUP_FULL_MAX];
+        if (zcl_dev_proof_failure_priority_group(&s->candidates[i], s->selected,
+                s->selected_count, group, sizeof(group)) != ZCL_FAILURE_PRIORITY_MATCH ||
+            !dp_priority_read_diff(s, &s->candidates[i], group)) s->ignored++;
+    }
 }
 
 static bool dp_priority_selected(struct dp_priority_scan *s, char *groups)
@@ -13259,7 +13287,10 @@ static bool dp_failure_priority(const char *root, const char *scratch,
               strcmp(root, canonical) == 0 && dp_priority_selected(&s, copy) &&
               zcl_dev_proof_history_advisory(root, dp_priority_visit, &s,
                                               &invalid_archives) == ZCL_PROOF_HISTORY_COMPLETE;
-    if (ok) ok = dp_priority_render(&s, out, cap);
+    if (ok) {
+        dp_priority_read_candidates(&s);
+        ok = dp_priority_render(&s, out, cap);
+    }
     if (!ok) out[0] = '\0';
     dp_priority_report(&s, ok, invalid_archives, report, report_cap);
     free(matched); free(selected); free(copy);
