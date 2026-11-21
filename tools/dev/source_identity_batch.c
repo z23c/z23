@@ -353,7 +353,9 @@ static void cache_remember(const char *path, const struct stat *st,
     if (row.path == nullptr)
         return;
     g_rows[g_row_count++] = row;
-    if (g_row_count > 1)
+    /* The source inventory arrives in byte order. An append preserves the
+     * lookup order unless it precedes the previous last row. */
+    if (g_row_count > 1 && row_cmp(&g_rows[g_row_count - 2], &row) > 0)
         qsort(g_rows, g_row_count, sizeof(*g_rows), row_cmp);
     g_rows_sorted = 1;
     g_cache_dirty = 1;

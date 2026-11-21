@@ -239,6 +239,39 @@ static int sia_stat_modes(void)
 }
 
 
+static int sia_digest_cache_order(void)
+{
+    int failures = 0;
+    struct digest_row *saved_rows = g_rows;
+    size_t saved_count = g_row_count, saved_cap = g_row_cap;
+    int saved_sorted = g_rows_sorted, saved_dirty = g_cache_dirty;
+    g_rows = NULL;
+    g_row_count = g_row_cap = 0;
+    g_rows_sorted = g_cache_dirty = 0;
+    TEST("digest cache keeps mixed append sorted and replaces a duplicate") {
+        struct stat snapshot = {0};
+        uint8_t first[32] = {1}, replacement[32] = {2};
+        cache_remember("a.c", &snapshot, first);
+        cache_remember("c.c", &snapshot, first);
+        cache_remember("b.c", &snapshot, first);
+        cache_remember("b.c", &snapshot, replacement);
+        ASSERT_EQ(g_row_count, 3);
+        ASSERT(cache_find("a.c") != NULL);
+        struct digest_row *middle = cache_find("b.c");
+        ASSERT(middle != NULL);
+        ASSERT(memcmp(middle->digest, replacement, sizeof(replacement)) == 0);
+        ASSERT(cache_find("c.c") != NULL);
+        PASS();
+    } _test_next:;
+    for (size_t i = 0; i < g_row_count; i++) free(g_rows[i].path);
+    free(g_rows);
+    g_rows = saved_rows;
+    g_row_count = saved_count; g_row_cap = saved_cap;
+    g_rows_sorted = saved_sorted; g_cache_dirty = saved_dirty;
+    return failures;
+}
+
+
 static int sia_digest_cache_concurrent(void)
 {
     int failures = 0;
@@ -344,6 +377,7 @@ int sia_source_identity_fixture_before(void);
 int sia_source_identity_fixture_before(void)
 {
     int failures = 0;
+    failures += sia_digest_cache_order();
     failures += sia_digest_cache_concurrent();
     failures += sia_stat_modes();
     return failures;
