@@ -12,6 +12,7 @@
 #include "json/json.h"
 #include "platform/atomic_link.h"
 #include "platform/barrier.h"
+#include "platform/os_proc.h"
 #include "plugin/plugin_attest.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_run.h"
@@ -35,6 +36,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #if defined(__linux__)
+#include <poll.h>
 #include <sys/sysmacros.h> /* major()/minor() of a /proc/locks device */
 #endif
 #if !defined(_WIN32)
@@ -2335,6 +2337,176 @@ static bool pst_wait_for_exit(pid_t pid, int *status)
     return false;
 }
 
+static void pst_slow_waiter(const char *plugdir, uint64_t parent)
+{
+    if (!os_proc_bind_parent_death(SIGKILL, parent)) _exit(126);
+    struct plugin_lock lk;
+    plugin_lock_test_timing(2000, 0);
+    _exit((int)plugin_lock_acquire(plugdir, &lk));
+}
+
+#if defined(__linux__)
+static bool pst_pipe_ready(int fd, short events, int timeout_ms)
+{
+    struct pollfd p = { .fd = fd, .events = events };
+    return poll(&p, 1, timeout_ms) == 1 && (p.revents & events) != 0;
+}
+
+static bool pst_bind_supervisor(uint64_t parent)
+{
+    return os_proc_bind_parent_death(SIGKILL, parent);
+}
+
+/* The waitable leader reserves its process-group id until group cleanup. */
+static void pst_kill_session_and_reap(pid_t leader)
+{
+    siginfo_t info;
+    int rc;
+    (void)kill(leader, SIGKILL);
+    do {
+        rc = waitid(P_PID, (id_t)leader, &info, WEXITED | WNOWAIT);
+    } while (rc != 0 && errno == EINTR);
+    if (rc == 0) (void)kill(-leader, SIGKILL);
+    while (waitpid(leader, NULL, 0) < 0 && errno == EINTR) {}
+}
+
+static void pst_waiter_parent(int control[2], int live[2],
+                              const char *plugdir, const char *gatepath,
+                              uint64_t supervisor_parent)
+{
+    if (!pst_bind_supervisor(supervisor_parent) || setsid() < 0) _exit(1);
+    close(control[0]);
+    close(live[0]);
+    uint64_t owner = (uint64_t)getpid();
+    pid_t child = fork();
+    if (child == 0) {
+        close(control[1]);
+        pst_slow_waiter(plugdir, owner);
+    }
+    close(live[1]);
+    if (child <= 0 || write(control[1], &child, sizeof(child)) != (ssize_t)sizeof(child)) _exit(1);
+    int status = 0;
+    bool ready = pst_wait_for_announcement(gatepath) && kill(child, SIGSTOP) == 0 &&
+                 waitpid(child, &status, WUNTRACED) == child && WIFSTOPPED(status);
+    char marker = ready ? 'Y' : 'N';
+    (void)write(control[1], &marker, 1);
+    if (!ready) _exit(1);
+    for (;;) pause();
+}
+
+static bool pst_waiter_stopped(int fd)
+{
+    pid_t waiter = -1;
+    char marker = 0;
+    return pst_pipe_ready(fd, POLLIN, 3000) &&
+           read(fd, &waiter, sizeof(waiter)) == (ssize_t)sizeof(waiter) && waiter > 0 &&
+           pst_pipe_ready(fd, POLLIN, 3000) && read(fd, &marker, 1) == 1 && marker == 'Y';
+}
+
+/* A private process group permits bounded cleanup on every setup path. The
+ * pipe remains open only in the waiter, so EOF proves its death. */
+static bool pst_stopped_waiter_parent_death(const char *plugdir,
+                                            const char *gatepath)
+{
+    int control[2] = {-1, -1}, live[2] = {-1, -1};
+    pid_t parent = -1;
+    bool stopped = false, died = false;
+    if (pipe(control) != 0 || pipe(live) != 0) goto done;
+    fflush(NULL);
+    uint64_t supervisor_parent = (uint64_t)getpid();
+    parent = fork();
+    if (parent < 0) goto done;
+    if (parent == 0) pst_waiter_parent(control, live, plugdir, gatepath, supervisor_parent);
+    close(control[1]); control[1] = -1;
+    close(live[1]); live[1] = -1;
+    if (pst_waiter_stopped(control[0])) {
+        stopped = true;
+        (void)kill(parent, SIGKILL);
+        died = pst_pipe_ready(live[0], POLLHUP, 3000);
+    }
+done:
+    if (parent > 0) pst_kill_session_and_reap(parent);
+    for (size_t i = 0; i < 2; i++) {
+        if (control[i] >= 0) close(control[i]);
+        if (live[i] >= 0) close(live[i]);
+    }
+    return stopped && died;
+}
+
+static void pst_supervisor_outer(int live[2], uint64_t test_parent)
+{
+    close(live[0]);
+    if (!pst_bind_supervisor(test_parent) || setsid() < 0) _exit(1);
+    uint64_t owner = (uint64_t)getpid();
+    pid_t supervisor = fork();
+    if (supervisor == 0) {
+        if (!pst_bind_supervisor(owner)) _exit(1);
+        if (write(live[1], "Y", 1) != 1) _exit(1);
+        for (;;) pause();
+    }
+    close(live[1]);
+    if (supervisor < 0) _exit(1);
+    for (;;) pause();
+}
+
+/* An outer observer kills the disposable test parent, then observes the
+ * supervisor's pipe close. The private session is cleaned before reaping its
+ * leader, preventing reuse of its numeric process-group id. */
+static bool pst_supervisor_parent_death(void)
+{
+    int live[2] = {-1, -1};
+    pid_t outer = -1;
+    bool ready = false, died = false;
+    if (pipe(live) != 0) goto done;
+    uint64_t test_parent = (uint64_t)getpid();
+    outer = fork();
+    if (outer < 0) goto done;
+    if (outer == 0) pst_supervisor_outer(live, test_parent);
+    close(live[1]); live[1] = -1;
+    char marker = 0;
+    ready = pst_pipe_ready(live[0], POLLIN, 3000) &&
+            read(live[0], &marker, 1) == 1 && marker == 'Y';
+    if (ready) {
+        (void)kill(outer, SIGKILL);
+        died = pst_pipe_ready(live[0], POLLHUP, 3000);
+    }
+done:
+    if (outer > 0) pst_kill_session_and_reap(outer);
+    for (size_t i = 0; i < 2; i++)
+        if (live[i] >= 0) close(live[i]);
+    return ready && died;
+}
+
+static int pst_case_supervisor_parent_death(void)
+{
+    int failures = 0;
+    TEST_CASE("a plugin fixture supervisor dies with its test parent") {
+        ASSERT(pst_supervisor_parent_death());
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_stopped_waiter_parent_death(void)
+{
+    int failures = 0;
+    TEST_CASE("a stopped plugin waiter dies with its abruptly killed parent") {
+        struct pst_fx fx;
+        char plugdir[PATH_MAX], lockpath[PATH_MAX], gatepath[PATH_MAX];
+        ASSERT(pst_fx_open(&fx, true) && pst_install(&fx, "hello", "version a", &(struct pst_opts){0}) == PLUGIN_OK);
+        ASSERT(pst_plug_path(&fx, NULL, plugdir, sizeof(plugdir)));
+        ASSERT(pst_plug_path(&fx, ".lock", lockpath, sizeof(lockpath)));
+        ASSERT(pst_plug_path(&fx, ".lock.q", gatepath, sizeof(gatepath)));
+        int held = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        ASSERT(held >= 0 && flock(held, LOCK_EX | LOCK_NB) == 0);
+        bool died = pst_stopped_waiter_parent_death(plugdir, gatepath);
+        close(held);
+        pst_fx_close(&fx);
+        ASSERT(died);
+    } TEST_END
+    return failures;
+}
+#endif
+
 static int pst_case_lock_slow_poll(void)
 {
     int failures = 0;
@@ -2348,13 +2520,10 @@ static int pst_case_lock_slow_poll(void)
         int held = open(lockpath, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
         ASSERT(held >= 0 && flock(held, LOCK_EX | LOCK_NB) == 0);
         fflush(NULL);
+        uint64_t parent = (uint64_t)getpid();
         pid_t pid = fork();
         ASSERT(pid >= 0);
-        if (pid == 0) {
-            struct plugin_lock lk;
-            plugin_lock_test_timing(2000, 0);
-            _exit((int)plugin_lock_acquire(plugdir, &lk));
-        }
+        if (pid == 0) pst_slow_waiter(plugdir, parent);
         bool announced = pst_wait_for_announcement(gatepath);
         int stopped = kill(pid, SIGSTOP);
         int status = 0;
@@ -2740,6 +2909,10 @@ int test_plugin_store(void)
     failures += pst_case_lock_fairness();
     failures += pst_case_lock_clock_jump();
     failures += pst_case_lock_slow_poll();
+#if defined(__linux__)
+    failures += pst_case_stopped_waiter_parent_death();
+    failures += pst_case_supervisor_parent_death();
+#endif
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();
     failures += pst_case_threaded_install();
