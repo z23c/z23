@@ -18241,7 +18241,7 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # skipped. The stack gate still runs the proof's full set.
 # File-size and complexity checks stop the run before building or selecting.
 # The check-capability-closure step is the land proof's closure gate; it
-# prepares and grades the dev epoch after the focused test has reported.
+# prepares and grades the dev epoch before universal tests, or after focused tests.
 # The lint-fast check-kpi-floor gate reads tools/lint/kpi_floor.txt and the
 # inputs its metrics measure: build/gen/CAPABILITY_INVENTORY.jsonl (built by
 # the runner's inventory prerequisite), engine/composition/commands/catalog.def,
@@ -18279,7 +18279,7 @@ agent-verify:
 	       exit 2; \
 	    fi; \
 	 fi; \
-	 av_t0=$$(date +%s); failed=""; \
+	 av_t0=$$(date +%s); failed=""; closure_early=0; \
 	 av_total() { echo "agent-verify: total secs=$$(($$(date +%s) - av_t0))" | tee -a build/scratch/agent-verify.rc; }; \
 	 av_step() { \
 	    step="$$1"; shift; \
@@ -18327,8 +18327,13 @@ agent-verify:
 	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
 	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \
-	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1 T_FAST_EXACT_ARGS=--cache; fi; \
-	 av_step check-capability-closure; \
+	 if [ "$$kind" = universal ] && [ "$$rflag" = "" ]; then \
+	    closure_early=1; av_step check-capability-closure; \
+	 fi; \
+	 if [ -n "$$only" ] && { [ "$$closure_early" != 1 ] || [ -z "$$failed" ]; }; then \
+	    av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1 T_FAST_EXACT_ARGS=--cache; \
+	 fi; \
+	 if [ "$$closure_early" != 1 ]; then av_step check-capability-closure; fi; \
 	 av_step proof-lint-prebuild; \
 	 av_step lint-fast; \
 	 if [ -z "$$failed" ]; then \
