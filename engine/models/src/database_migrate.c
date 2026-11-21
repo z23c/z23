@@ -435,14 +435,15 @@ static const struct db_migrate_core_ddl k_db_migrate_core_ddl[] = {
      NULL, NULL},
 
     /* Add Sapling commitment tree tracking columns */
-    {3, DB_MIGRATE_CORE_DDL_EXEC,
-     "ALTER TABLE blocks ADD COLUMN sapling_tree_data BLOB", NULL, NULL},
-    {3, DB_MIGRATE_CORE_DDL_EXEC,
+    {3, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
+     "ALTER TABLE blocks ADD COLUMN sapling_tree_data BLOB",
+     "v3: blocks.sapling_tree_data", "duplicate column name: sapling_tree_data"},
+    {3, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
      "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_data BLOB",
-     NULL, NULL},
-    {3, DB_MIGRATE_CORE_DDL_EXEC,
+     "v3: wallet_sapling_notes.witness_data", "duplicate column name: witness_data"},
+    {3, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
      "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_height INTEGER DEFAULT 0",
-     NULL, NULL},
+     "v3: wallet_sapling_notes.witness_height", "duplicate column name: witness_height"},
     {3, DB_MIGRATE_CORE_DDL_EXEC,
      "INSERT OR IGNORE INTO schema_migrations(version) VALUES('003')",
      NULL, NULL},
@@ -860,7 +861,7 @@ static bool db_migrate_apply_core_ddl(struct node_db *ndb, int version)
             ok = db_exec_checked(ndb->db, r->sql, r->label) == SQLITE_OK;
         else
             ok = node_db_exec(ndb, r->sql);
-        if (version == 6 && !ok) return false;
+        if (!ok) return false;
     }
     return true;
 }

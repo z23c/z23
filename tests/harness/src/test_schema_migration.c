@@ -690,6 +690,107 @@ static int sm_v6_failure(enum sm_v6_fault_kind kind)
     return failures;
 }
 
+struct sm_core_fault { const char *index; const char *alter; int inserts; int denied; };
+
+static int sm_core_authorize(void *ctx, int op, const char *first,
+                             const char *second, const char *db, const char *trigger)
+{
+    struct sm_core_fault *fault = ctx;
+    (void)db; (void)trigger;
+    if (fault->index && op == SQLITE_CREATE_INDEX && first && strcmp(first, fault->index) == 0) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    if (fault->alter && op == SQLITE_ALTER_TABLE && second && strcmp(second, fault->alter) == 0) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    if (!fault->index && !fault->alter && op == SQLITE_INSERT && first &&
+        strcmp(first, "schema_migrations") == 0 && ++fault->inserts == 2) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool sm_core_prepare(struct sm_fixture *f, int ver)
+{
+    int32_t before = ver - 1;
+    char sql[100];
+    snprintf(sql, sizeof(sql), "DELETE FROM schema_migrations WHERE version='%03d'", ver);
+    return sm_v6_prepare(f) && node_db_exec(&f->ndb,
+        "CREATE INDEX IF NOT EXISTS idx_snote_address ON wallet_sapling_notes(address) WHERE spent_txid IS NULL") &&
+        node_db_exec(&f->ndb, sql) &&
+        node_db_state_set(&f->ndb, "schema_version", &before, sizeof(before)) &&
+        node_db_state_set(&f->ndb, "schema_compat_floor", &before, sizeof(before));
+}
+
+static int sm_core_failure(int ver, const char *index, const char *alter)
+{
+    int failures = 0;
+    struct sm_fixture f = {0};
+    if (!sm_core_prepare(&f, ver)) {
+        SM_CHECK("core migration fixture prepares", false);
+        if (f.ndb.open) sm_fixture_destroy(&f);
+        return failures;
+    }
+    if (index)
+        SM_CHECK("core index fixture removes index", node_db_exec(&f.ndb, "DROP INDEX idx_blocks_height_all"));
+    if (alter)
+        SM_CHECK("v3 fixture removes one old column", node_db_exec(&f.ndb, "ALTER TABLE blocks DROP COLUMN sapling_tree_data"));
+    struct sm_core_fault fault = {.index = index, .alter = alter};
+    SM_CHECK("core fault installs", sqlite3_set_authorizer(f.ndb.db, sm_core_authorize, &fault) == SQLITE_OK);
+    int result = node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("core fault removes", sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    SM_CHECK("core target denial occurred", fault.denied == 1);
+    SM_CHECK("core failed row refuses migration", result < 0);
+    SM_CHECK("core failed row preserves version", node_db_schema_version(&f.ndb) == ver - 1);
+    SM_CHECK("core failed row preserves floor", node_db_schema_compat_floor(&f.ndb) == ver - 1);
+    SM_CHECK("core failed row leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
+    SM_CHECK("core failed row leaves marker absent", sm_row_count(&f.ndb, ver) == 0);
+    SM_CHECK("core failed row preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    SM_CHECK("core clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0);
+    SM_CHECK("core retry records marker", sm_row_count(&f.ndb, ver) == 1);
+    SM_CHECK("core retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    if (index)
+        SM_CHECK("core retry creates required index", sm_scalar(&f.ndb,
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_height_all'") == 1);
+    sm_fixture_destroy(&f);
+    return failures;
+}
+
+static int sm_core_partial_v3(void)
+{
+    int failures = 0;
+    struct sm_fixture f = {0};
+    if (!sm_core_prepare(&f, 3)) {
+        SM_CHECK("partial v3 fixture prepares", false);
+        if (f.ndb.open) sm_fixture_destroy(&f);
+        return failures;
+    }
+    SM_CHECK("partial v3 removes two columns", node_db_exec(&f.ndb,
+        "ALTER TABLE blocks DROP COLUMN sapling_tree_data;"
+        "ALTER TABLE wallet_sapling_notes DROP COLUMN witness_height"));
+    SM_CHECK("partially applied v3 retries", node_db_migrate(&f.ndb, NULL) > 0);
+    SM_CHECK("v3 restores block column", sm_scalar(&f.ndb,
+        "SELECT count(*) FROM pragma_table_info('blocks') WHERE name='sapling_tree_data'") == 1);
+    SM_CHECK("v3 preserves and restores witness columns", sm_scalar(&f.ndb,
+        "SELECT count(*) FROM pragma_table_info('wallet_sapling_notes') WHERE name IN ('witness_data','witness_height')") == 2);
+    SM_CHECK("partial v3 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    sm_fixture_destroy(&f);
+    return failures;
+}
+
+static int sm_core_migration_failures(void)
+{
+    int failures = sm_core_partial_v3();
+    for (int ver = 2; ver <= 13; ver++)
+        failures += sm_core_failure(ver, NULL, NULL);
+    failures += sm_core_failure(3, NULL, "blocks");
+    failures += sm_core_failure(5, "idx_blocks_height_all", NULL);
+    return failures;
+}
+
 static int sm_migrate_version_read(void)
 {
     int failures = 0;
@@ -1233,6 +1334,7 @@ int test_schema_migration(void)
     failures += sm_v6_failure(SM_V6_INDEX);
     failures += sm_v6_failure(SM_V6_MARKER);
     failures += sm_v6_failure(SM_V6_ALTER);
+    failures += sm_core_migration_failures();
 
     return failures;
 }
