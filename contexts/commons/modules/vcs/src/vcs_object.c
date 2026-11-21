@@ -276,8 +276,8 @@ static bool object_stage_publish(
 {
     bool ok = (len == 0 ||
                platform_private_file_write_at(staged, content, len, 0)) &&
-              platform_private_file_truncate(staged, len) &&
-              platform_private_file_flush(staged);
+              platform_private_file_truncate(staged, len);
+    /* Both publication primitives flush the staged file before renaming it. */
     if (ok && replace)
         ok = platform_private_file_replace(staged, tmp, final);
     bool already_exists = false;

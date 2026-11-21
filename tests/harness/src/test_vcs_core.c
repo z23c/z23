@@ -30,6 +30,7 @@
 #include "test/public_shape_fixture.h"
 
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_commit.h"
 #include "vcs/vcs_index.h"
@@ -2924,6 +2925,26 @@ static int t_object_parent_barriers(const char *repo)
 }
 #endif
 
+static int t_object_repair_flushes(const char *repo, const uint8_t *data,
+                                 size_t len, const uint8_t address[32])
+{
+    int failures = 0;
+    bool replaced = false;
+    uint8_t hash[32];
+    unsigned long flushes = platform_private_flush_events();
+    VC_CHECK("replace corrupt object",
+             vcs_object_put_repair(repo, data, len, VCS_TAG_BLOB, hash, &replaced) && replaced);
+    VC_CHECK("replacement flushes staged file and three directories",
+             platform_private_flush_events() - flushes == 4);
+    uint8_t *got = NULL;
+    size_t glen = 0;
+    VC_CHECK("replacement reads back under original address",
+             vcs_object_get(repo, address, VCS_TAG_BLOB, &got, &glen) == 0 &&
+             glen == len && got && memcmp(got, data, len) == 0);
+    free(got);
+    return failures;
+}
+
 /* ── test 2/3: object store dedup + verify-on-read ──────────────── */
 static int t_object_store(const char *repo)
 {
@@ -2932,7 +2953,10 @@ static int t_object_store(const char *repo)
 
     const uint8_t data[] = "the quick brown fox";
     uint8_t h1[32], h2[32];
+    unsigned long flushes = platform_private_flush_events();
     VC_CHECK("put1", vcs_object_put(repo, data, sizeof(data), VCS_TAG_BLOB, h1));
+    VC_CHECK("fresh put flushes staged file and three directories",
+             platform_private_flush_events() - flushes == 4);
     int before = vc_count_objects(repo);
     VC_CHECK("put2 (dup)", vcs_object_put(repo, data, sizeof(data), VCS_TAG_BLOB, h2));
     int after = vc_count_objects(repo);
@@ -2984,6 +3008,8 @@ static int t_object_store(const char *repo)
     VC_CHECK("verify-on-read catches corruption",
              vcs_object_get(repo, h1, VCS_TAG_BLOB, &g3, &g3len) != 0);
     free(g3);
+
+    failures += t_object_repair_flushes(repo, data, sizeof(data), h1);
     return failures;
 }
 
