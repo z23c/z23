@@ -324,6 +324,11 @@ static bool dlx_qualify_refused(const struct dlx_call *c, const char *code)
 
 static bool dlx_qualify_make_field(FILE *f, const char *text, int delimiter)
 {
+    if (!text) {
+        int c;
+        while ((c = fgetc(f)) != EOF && c != delimiter && c != '\n') {}
+        return c == delimiter;
+    }
     for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
         if (fgetc(f) != *p)
             return false;
@@ -992,24 +997,25 @@ static void dlx_route_over_cap(const char *path, struct agent_impact_acc *acc)
         dlx_add_catalog(acc, 0, 200);
 }
 
-/* The make goal the shipped qualify path recorded. "lint-land" is not "lint". */
-static const char *dlx_seen_lint_goal(const char *jobs)
+static bool dlx_long_trace(const struct dlx_rig *rig, bool wrong_goal)
 {
-    if (strstr(jobs, "\nlint-land|") != NULL ||
-        strncmp(jobs, "lint-land|", 10) == 0)
-        return "lint-land";
-    if (strstr(jobs, "\nlint|") != NULL || strncmp(jobs, "lint|", 5) == 0)
-        return "lint";
-    return "";
-}
-
-static bool dlx_jobs_slurp(const struct dlx_rig *rig, char *buf, size_t cap)
-{
+    static const char *const goals[] = { "docs-capability-inventory", "dev-bin",
+        "install-hooks", "lint-ready", "check-cyclomatic-complexity",
+        "lint-land", "t-fast-exact" };
     char path[1400];
     if (snprintf(path, sizeof(path), "%s/qualify-jobs.txt", rig->clone) >=
-        (int)sizeof(path))
-        return false;
-    return dlx_slurp(path, buf, cap - 1, NULL);
+        (int)sizeof(path)) return false;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    for (size_t i = 0; i < 7; i++) {
+        fprintf(f, "%s||", wrong_goal && i == 5 ? "lint" : goals[i]);
+        if (i == 6) fputs("test_leaf_smoke", f);
+        else for (size_t j = 0; j < 10020; j++) fputc('x', f);
+        fputc('\n', f);
+    }
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    return ok;
 }
 
 /* Drives the shipped qualify path and the shipped proof lint argv. */
@@ -1021,7 +1027,6 @@ static int dlx_fast_isolated_case(void)
     char land[4096] = {0};
     TEST("land: qualify lint goal is lint-land, not full lint") {
         struct dlx_rig rig;
-        char jobs[32768] = {0};
         char wt[4096];
         char timing_env[4096 + 32];
         const char *argv[8];
@@ -1048,12 +1053,14 @@ static int dlx_fast_isolated_case(void)
         called = true;
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_ok(&c));
-        ASSERT(dlx_jobs_slurp(&rig, jobs, sizeof(jobs)));
-        ASSERT_STR_EQ(dlx_seen_lint_goal(jobs), "lint-land");
+        ASSERT(dlx_qualify_make_trace(&rig, NULL, NULL, NULL));
+        ASSERT(dlx_long_trace(&rig, false));
+        ASSERT(dlx_qualify_make_trace(&rig, NULL, NULL, NULL));
+        ASSERT(dlx_long_trace(&rig, true));
+        ASSERT(!dlx_qualify_make_trace(&rig, NULL, NULL, NULL));
         ASSERT(test_rm_rf_recursive(land) == 0);
         land[0] = 0;
-        printf("qualify lint goal %s; proof lint target %s\n",
-               dlx_seen_lint_goal(jobs), targets);
+        printf("qualify lint goal lint-land; proof lint target %s\n", targets);
         PASS();
     }
 _test_next:;
