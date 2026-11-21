@@ -151,11 +151,12 @@ static bool ci_strset_grow(struct ci_strset *set)
     return true;
 }
 
-/* Add `s`. *added=true iff it was newly inserted (false on a dup). Returns
- * false only on a hard error (alloc). */
-static bool ci_strset_add(struct ci_strset *set, const char *s, bool *added)
+/* On insertion, return the set-owned key through inserted. Its address stays
+ * valid across rehashes until the set is freed. Duplicates leave it NULL. */
+static bool ci_strset_add(struct ci_strset *set, const char *s,
+                          const char **inserted)
 {
-    if (added) *added = false;
+    if (inserted) *inserted = NULL;
     if (!s || !s[0])
         return true;  /* ignore empties (unattributed enclosing) — not an error */
     if (set->len * 10 >= set->cap * 7 && !ci_strset_grow(set))
@@ -171,7 +172,7 @@ static bool ci_strset_add(struct ci_strset *set, const char *s, bool *added)
         LOG_FAIL("codeindex", "ci_strset key dup");
     set->slots[j] = dup;
     set->len++;
-    if (added) *added = true;
+    if (inserted) *inserted = dup;
     return true;
 }
 
@@ -187,7 +188,7 @@ static bool ci_strset_has(const struct ci_strset *set, const char *s)
 
 /* ── a growable name list (traversal frontier + impacted-file accumulator) ── */
 struct ci_strlist {
-    char  **items;   /* owns each string */
+    const char **items;  /* borrowed for the traversal */
     size_t  cap;
     size_t  len;
 };
@@ -196,16 +197,13 @@ static bool ci_strlist_push(struct ci_strlist *l, const char *s)
 {
     if (l->len == l->cap) {
         size_t ncap = l->cap ? l->cap * 2 : 64;
-        char **ni = zcl_realloc(l->items, ncap * sizeof(*ni), "ci_strlist");
+        const char **ni = zcl_realloc(l->items, ncap * sizeof(*ni), "ci_strlist");
         if (!ni)
             LOG_FAIL("codeindex", "ci_strlist grow");
         l->items = ni;
         l->cap = ncap;
     }
-    char *dup = zcl_strdup(s, "ci_strlist_item");
-    if (!dup)
-        LOG_FAIL("codeindex", "ci_strlist item dup");
-    l->items[l->len++] = dup;
+    l->items[l->len++] = s;
     return true;
 }
 
@@ -213,8 +211,6 @@ static void ci_strlist_free(struct ci_strlist *l)
 {
     if (!l || !l->items)
         return;
-    for (size_t i = 0; i < l->len; i++)
-        free(l->items[i]);
     free(l->items);
     l->items = NULL;
     l->cap = l->len = 0;
@@ -287,7 +283,7 @@ static bool ci_closure_add_file(struct ci_closure_ctx *c, const char *path,
 {
     if (!path || !path[0])
         return true;
-    bool added = false;
+    const char *added = NULL;
     if (!ci_strset_add(&c->seen_files, path, &added))
         return false;
     if (!added)
@@ -298,7 +294,7 @@ static bool ci_closure_add_file(struct ci_closure_ctx *c, const char *path,
                          CI_IMPACT_CLOSURE_MAX_FILES, c->files.len, path, NULL);
         return true;
     }
-    return ci_strlist_push(&c->files, path);
+    return ci_strlist_push(&c->files, added);
 }
 
 /* ── linkage identity ──────────────────────────────────────────────────
@@ -343,10 +339,10 @@ static bool ci_closure_queue(struct ci_closure_ctx *c, const char *key,
                          CI_CLOSURE_MAX_SYMS, c->seen_syms.len, NULL, key);
         return true;
     }
-    bool added = false;
+    const char *added = NULL;
     if (!ci_strset_add(&c->seen_syms, key, &added))
         return false;
-    return !added || ci_strlist_push(frontier, key);
+    return !added || ci_strlist_push(frontier, added);
 }
 
 static bool ci_closure_queue_symbol(struct ci_closure_ctx *c,
@@ -412,7 +408,7 @@ static bool ci_closure_queue_caller(struct ci_closure_ctx *c,
     int n = snprintf(site, sizeof(site), "%s@%s", caller, file);
     if (n < 0 || (size_t)n >= sizeof(site))
         LOG_FAIL("codeindex", "closure site overflow for %s", caller);
-    bool added = false;
+    const char *added = NULL;
     if (!ci_strset_add(&c->seen_sites, site, &added))
         return false;
     if (!added)
@@ -1074,8 +1070,7 @@ static bool ci_fwd_record_file(struct ci_closure_ctx *c, struct codeindex *ci,
         if (!ci_closure_add_file(c, c->incbuf[i], hit_cap))
             return false;
     }
-    bool added = false;
-    return ni == CI_CLOSURE_QUERY_BATCH || ci_strset_add(&c->expanded_defs, path, &added);
+    return ni == CI_CLOSURE_QUERY_BATCH || ci_strset_add(&c->expanded_defs, path, NULL);
 }
 
 /* Record EVERY definition row of `sym`, any kind, so a name defined in several
@@ -1134,7 +1129,7 @@ static bool ci_fwd_expand_level(struct ci_closure_ctx *c, struct codeindex *ci,
                 *truncated = true;
                 continue;
             }
-            bool new_sym = false;
+            const char *new_sym = NULL;
             if (!ci_strset_add(&c->seen_syms, callee, &new_sym))
                 return false;
             if (!new_sym)
@@ -1143,7 +1138,7 @@ static bool ci_fwd_expand_level(struct ci_closure_ctx *c, struct codeindex *ci,
              * never drop it. */
             if (!ci_fwd_record_symbol_file(c, ci, callee, truncated))
                 return false;
-            if (!ci_strlist_push(next, callee))
+            if (!ci_strlist_push(next, new_sym))
                 return false;
         }
     }
@@ -1174,8 +1169,7 @@ static bool ci_forward_walk(struct ci_closure_ctx *c, struct codeindex *ci,
                             const char *root_symbol, struct ci_strlist *frontier,
                             struct ci_strlist *next, bool *truncated)
 {
-    bool added = false;
-    if (!ci_strset_add(&c->seen_syms, root_symbol, &added))
+    if (!ci_strset_add(&c->seen_syms, root_symbol, NULL))
         return false;
     if (!ci_fwd_record_symbol_file(c, ci, root_symbol, truncated))
         return false;

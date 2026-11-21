@@ -838,6 +838,74 @@ static bool sc_exact_put(struct ci_store *s, const char *name, char kind,
     return ci_store_put_symbol(s, &sym);
 }
 
+/* Two distinct files per branch make both retained middle frontiers necessary.
+ * 725 branches cross the 70%-full threshold of the initial 1024-slot sets. */
+enum { SC_REHASH_BRANCHES = 725, SC_REHASH_FILES = 2 * SC_REHASH_BRANCHES + 2 };
+
+static bool sc_rehash_fixture(struct ci_store *s)
+{
+    if (!sc_exact_put(s, "rehash_root", 'T', "rehash/00-root.c", "") ||
+        !sc_exact_put(s, "rehash_sink", 'T', "rehash/99-sink.c", ""))
+        return false;
+    for (int i = 0; i < SC_REHASH_BRANCHES; i++) {
+        char first[32], second[32], first_path[64], second_path[64];
+        snprintf(first, sizeof(first), "rehash_first_%04d", i);
+        snprintf(second, sizeof(second), "rehash_second_%04d", i);
+        snprintf(first_path, sizeof(first_path), "rehash/10-%04d.c", i);
+        snprintf(second_path, sizeof(second_path), "rehash/20-%04d.c", i);
+        if (!sc_exact_put(s, first, 'T', first_path, "") ||
+            !sc_exact_put(s, second, 'T', second_path, "") ||
+            !ci_store_put_ref(s, first, "rehash/00-root.c", i + 1, "rehash_root") ||
+            !ci_store_put_ref(s, second, first_path, 1, first) ||
+            !ci_store_put_ref(s, "rehash_sink", second_path, 1, second))
+            return false;
+    }
+    return true;
+}
+
+static bool sc_rehash_exact_files(char (*out)[256], int n)
+{
+    if (n != SC_REHASH_FILES || strcmp(out[0], "rehash/00-root.c") ||
+        strcmp(out[SC_REHASH_FILES - 1], "rehash/99-sink.c"))
+        return false;
+    for (int i = 0; i < SC_REHASH_BRANCHES; i++) {
+        char expected[64];
+        snprintf(expected, sizeof(expected), "rehash/10-%04d.c", i);
+        if (strcmp(out[i + 1], expected)) return false;
+        snprintf(expected, sizeof(expected), "rehash/20-%04d.c", i);
+        if (strcmp(out[i + 1 + SC_REHASH_BRANCHES], expected)) return false;
+    }
+    return true;
+}
+
+static int test_sc_rehash_closures(void)
+{
+    int failures = 0;
+    struct ci_store *store = NULL;
+    char (*out)[256] = NULL;
+    TEST("codeindex_static_callers: both closures retain keys across rehash") {
+        store = ci_store_open_path(":memory:");
+        ASSERT(store != NULL);
+        ASSERT(sc_rehash_fixture(store));
+        out = calloc(SC_REHASH_FILES, sizeof(*out));
+        ASSERT(out != NULL);
+        struct codeindex ci = {.store = store};
+        bool truncated = true, root_found = false;
+        int n = codeindex_forward_closure(&ci, "rehash_root", out,
+                                          SC_REHASH_FILES, &truncated, &root_found);
+        ASSERT(root_found && !truncated && sc_rehash_exact_files(out, n));
+        const char changed[1][256] = {"rehash/99-sink.c"};
+        truncated = true;
+        n = codeindex_impact_closure(&ci, changed, 1, 0, out,
+                                     SC_REHASH_FILES, &truncated);
+        ASSERT(!truncated && sc_rehash_exact_files(out, n));
+        PASS();
+    } _test_next:;
+    free(out);
+    if (store) ci_store_close(store);
+    return failures;
+}
+
 static bool sc_exact_order(const struct ci_symbol *rows)
 {
     return rows[0].kind == 'T' && !strcmp(rows[0].def_path, "a.c") &&
@@ -919,6 +987,7 @@ static int test_sc_exact_checked(void)
 int test_codeindex_static_callers(void)
 {
     int failures = test_sc_cause_labels() + test_sc_cause_value();
+    failures += test_sc_rehash_closures();
     failures += test_sc_caller_edge_query();
     failures += test_sc_forward_dedup();
     failures += test_sc_exact_checked();
