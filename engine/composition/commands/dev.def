@@ -2577,9 +2577,11 @@ ZCL_COMMAND_DEV_COMMAND(
     "dev.land.window", "dev.land", "",
     "Read or announce the two-lander LAND-WINDOW proving windows",
     "open reads LAND-WINDOW announcements from retained agent mail. It lists "
-    "up to 64 open windows from other hosts matching the optional base. A later "
-    "announcement for the same pair supersedes the earlier one. A later LANDED "
-    "or RELEASED from the same sender closes the named candidate. grace_s "
+    "up to 64 open windows from other hosts matching the optional base. A higher "
+    "sequence from the same sender supersedes a window for the same host, "
+    "candidate and base. LANDED or RELEASED closes the named candidate when "
+    "the sender matches, the sequence is higher and the timestamp is at or "
+    "after the announcement. grace_s "
     "includes overruns with negative seconds_left. dropped counts additional "
     "open windows omitted from the reply. max_seconds_left covers all matching "
     "open windows and is zero when none have time remaining. skipped counts "
