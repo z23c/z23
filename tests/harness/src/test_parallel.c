@@ -165,7 +165,8 @@ static bool tmpfs_create_root(void)
 {
     struct statfs fs;
     if (statfs("/dev/shm", &fs) != 0 ||
-        (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC) return false;
+        (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC ||
+        !test_tmpfs_space_available(&fs)) return false;
     if (mkdir("/dev/shm/z23-scratch", 0700) != 0 && errno != EEXIST) return false;
     if (!test_tmpfs_parent_safe("/dev/shm/z23-scratch")) return false;
     char cwd[PATH_MAX];

@@ -4095,6 +4095,45 @@ static int tgs_durable_verdict(void)
     return failures;
 }
 
+/* Exercise a full finite mount without filling shared tmpfs. */
+static int test_tmpfs_exhaustion(void)
+{
+    int failures = 0;
+    TEST("runner: full tmpfs falls back without overriding an explicit root") {
+        struct statfs fs = {0};
+        fs.f_blocks = 100;
+        ASSERT(!test_tmpfs_space_available(&fs));
+        fs.f_bavail = 1;
+        ASSERT(test_tmpfs_space_available(&fs));
+        fs.f_blocks = 0;
+        fs.f_bavail = 0;
+        ASSERT(test_tmpfs_space_available(&fs)); /* unbounded report */
+        char root[PATH_MAX], custom[PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "missing");
+        int n = snprintf(custom, sizeof(custom), "%s/absent", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(custom));
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            if (setenv("ZCL_TEST_TMPROOT", custom, 1) ||
+                unsetenv("ZCL_TEST_TMPFS_ACTIVE")) _exit(1);
+            test_tmpfs_guard();
+            if (!getenv("ZCL_TEST_TMPROOT") ||
+                strcmp(getenv("ZCL_TEST_TMPROOT"), custom)) _exit(2);
+            if (setenv("ZCL_TEST_TMPFS_ACTIVE", custom, 1)) _exit(3);
+            test_tmpfs_guard();
+            _exit(getenv("ZCL_TEST_TMPROOT") ||
+                  getenv("ZCL_TEST_TMPFS_ACTIVE") ? 4 : 0);
+        }
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A nested runner that inherits a live outer tmpfs root (the runner exports
  * it to every group) must put its attempt state inside it and leave the root
  * alone: only the runner that created a root may remove it. */
@@ -4505,6 +4544,7 @@ int test_test_group_selector(void)
 #if defined(__linux__)
     failures += tgs_durable_verdict();
     failures += test_tmpfs_fallback();
+    failures += test_tmpfs_exhaustion();
     failures += test_tmpfs_inherited_root();
     failures += test_tmpfs_failure_retained();
     failures += test_tmpfs_early_exit_removed();

@@ -53,6 +53,21 @@ static inline bool test_tmpfs_parent_safe(const char *path)
 #endif
 
 #if defined(__linux__)
+#include <sys/vfs.h>
+
+/* Zero available blocks is definitive only when a filesystem reports a
+ * finite block count. Do not interpret an unbounded inode count as full. */
+static inline bool test_tmpfs_space_available(const struct statfs *fs)
+{
+    return fs->f_blocks == 0 || fs->f_bavail != 0;
+}
+
+static inline bool test_tmpfs_path_has_space(const char *path)
+{
+    struct statfs fs;
+    return statfs(path, &fs) == 0 && test_tmpfs_space_available(&fs);
+}
+
 static inline bool test_tmpfs_size_at(const char *path, uint64_t *bytes, bool is_child);
 
 static inline bool test_tmpfs_size_child(const char *path, const char *name,
@@ -110,7 +125,8 @@ static inline void test_tmpfs_guard(void)
             limit = (uint64_t)mb * 1024 * 1024;
     }
     uint64_t bytes = 0;
-    if (!test_tmpfs_size_at(root, &bytes, false) || bytes >= limit) {
+    if (!test_tmpfs_path_has_space(root) ||
+        !test_tmpfs_size_at(root, &bytes, false) || bytes >= limit) {
         fprintf(stderr, "test_parallel: tmpfs limit reached or usage unavailable; using test-tmp for new fixtures\n");
         (void)unsetenv("ZCL_TEST_TMPROOT");
         (void)unsetenv("ZCL_TEST_TMPFS_ACTIVE");

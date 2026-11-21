@@ -4029,7 +4029,7 @@ static void zd_improve_tmpdir(char *out, size_t cap, const char *prefix,
     struct statfs fs;
     if (!getenv("ZCL_TEST_IMPROVE_DISK") && statfs("/dev/shm", &fs) == 0 &&
         (unsigned long)fs.f_type == (unsigned long)TMPFS_MAGIC &&
-        !(fs.f_flags & MS_NOEXEC)) {
+        test_tmpfs_space_available(&fs) && !(fs.f_flags & MS_NOEXEC)) {
         int n = snprintf(out, cap, "/dev/shm/z23zd%d_%s_XXXXXX", (int)getpid(), tag);
         if (n > 0 && (size_t)n < cap && mkdtemp(out)) {
             if (strcmp(tag, "improve") == 0) printf("[improve fixture: tmpfs] ");
