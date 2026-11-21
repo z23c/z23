@@ -4,6 +4,7 @@
 #include "services/blog_publication_service.h"
 
 #include "base/bytes.h"
+#include "base/serialize_le.h"
 #include "chain/chainparams.h"
 #include "keys/key_io.h"
 #include "models/app_event.h"
@@ -35,31 +36,6 @@ enum blog_publication_error {
     BLOG_ERR_VALIDATION = -9,
     BLOG_ERR_TX = -10,
 };
-
-static void write_u16_le(uint8_t out[2], uint16_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-}
-
-static void write_u32_le(uint8_t out[4], uint32_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-    out[2] = (uint8_t)(value >> 16);
-    out[3] = (uint8_t)(value >> 24);
-}
-
-static uint16_t read_u16_le(const uint8_t in[2])
-{
-    return (uint16_t)in[0] | ((uint16_t)in[1] << 8);
-}
-
-static uint32_t read_u32_le(const uint8_t in[4])
-{
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8) |
-           ((uint32_t)in[2] << 16) | ((uint32_t)in[3] << 24);
-}
 
 static bool payload_field_size(const char *value, size_t max, size_t *len_out)
 {
@@ -104,11 +80,11 @@ static bool blog_payload_build(const struct blog_publish_request *request,
     out[off++] = (uint8_t)slug_len;
     memcpy(out + off, request->slug, slug_len);
     off += slug_len;
-    write_u16_le(out + off, (uint16_t)title_len);
+    zcl_write_u16_le(out + off, (uint16_t)title_len);
     off += 2;
     memcpy(out + off, request->title, title_len);
     off += title_len;
-    write_u32_le(out + off, (uint32_t)body_len);
+    zcl_write_u32_le(out + off, (uint32_t)body_len);
     off += 4;
     memcpy(out + off, request->body, body_len);
     off += body_len;
@@ -150,12 +126,12 @@ static bool blog_payload_parse(const uint8_t *payload, size_t payload_len,
     if (!take_payload_field(&p, end, slug_len, out->slug,
                             sizeof(out->slug)) || (size_t)(end - p) < 2)
         return false;
-    size_t title_len = read_u16_le(p);
+    size_t title_len = zcl_read_u16_le(p);
     p += 2;
     if (!take_payload_field(&p, end, title_len, out->title,
                             sizeof(out->title)) || (size_t)(end - p) < 4)
         return false;
-    size_t body_len = read_u32_le(p);
+    size_t body_len = zcl_read_u32_le(p);
     p += 4;
     if (!take_payload_field(&p, end, body_len, out->body,
                             sizeof(out->body)))

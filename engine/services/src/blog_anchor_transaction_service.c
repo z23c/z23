@@ -26,17 +26,6 @@ enum blog_anchor_error {
     BLOG_ERR_TX = -10,
 };
 
-static void write_u16_le(uint8_t out[2], uint16_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-}
-
-static uint16_t read_u16_le(const uint8_t in[2])
-{
-    return (uint16_t)in[0] | ((uint16_t)in[1] << 8);
-}
-
 #define BLOG_ANCHOR_PLAN_TTL 600LL
 #define BLOG_ANCHOR_PAYLOAD_MAX 256u
 
@@ -124,7 +113,7 @@ static bool blog_anchor_payload_encode(
     out[off++] = (uint8_t)name_len;
     memcpy(out + off, payload->blog_name, name_len); off += name_len;
     memcpy(out + off, payload->event_id, 32); off += 32;
-    write_u16_le(out + off, (uint16_t)payload->script_len); off += 2;
+    zcl_write_u16_le(out + off, (uint16_t)payload->script_len); off += 2;
     memcpy(out + off, payload->script, payload->script_len);
     off += payload->script_len;
     memcpy(out + off, payload->txid, 32); off += 32;
@@ -146,7 +135,7 @@ static bool blog_anchor_payload_body_decode(
     memcpy(payload->blog_name, raw + off, name_len); off += name_len;
     payload->blog_name[name_len] = 0;
     memcpy(payload->event_id, raw + off, 32); off += 32;
-    payload->script_len = read_u16_le(raw + off); off += 2;
+    payload->script_len = zcl_read_u16_le(raw + off); off += 2;
     if (payload->script_len == 0 ||
         payload->script_len > BLOG_ANCHOR_SCRIPT_MAX ||
         off + payload->script_len + 32 + 8 != raw_len)
