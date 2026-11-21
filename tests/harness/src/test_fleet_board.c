@@ -7732,6 +7732,152 @@ static int test_fleet_board_delayed_authority(unsigned change)
     return failures;
 }
 
+/* A tag no board state carries: what a future or corrupt state looks like. */
+#define FBT_UNKNOWN_TAG 0x7F
+
+/* The reason the next frame `from` sent carries, when it is a CLOSE; 0xFF
+ * when nothing was sent and 0xFE when the frame is not a CLOSE. */
+static uint8_t fbt_close_reason(struct p2p_node *from,
+                                struct send_segment *sentinel,
+                                struct noise_transport *peer)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX];
+    uint8_t kind = 0;
+    bool more = false;
+    size_t len = mesh_loop_take(from, sentinel, peer, frame, sizeof(frame),
+                                &more);
+    if (len == 0)
+        return 0xFFu;
+    if (!mesh_stream_test_read_header(frame, len, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_CLOSE ||
+        len <= MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u)
+        return 0xFEu;
+    return frame[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u];
+}
+
+/* The asking node opens a real pull, the answering node sends its whole
+ * answer and its close, and only then is the asking stream's state swapped
+ * for one tagged `tag`; the answer then arrives on it. */
+static bool fbt_answer_onto(struct fbw *w, int tag)
+{
+    if (!boot_fleet_board_fleet_test_pull(w->f.resp_noise_pub, w->box_a) ||
+        mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp,
+                       w->answerer) != 1)
+        return false;
+    boot_fleet_board_fleet_test_serve(); /* the answer */
+    boot_fleet_board_fleet_test_serve(); /* nothing left: close */
+    return boot_fleet_board_fleet_test_retag(true, tag) == 1 &&
+           mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini,
+                          &w->mp, w->asker) == 2;
+}
+
+/* Case `c`'s wrong-state event, on a real serve stream the asking node's OPEN
+ * made (cases 0, 1, 3, 4) or on a real pull (2, 5): 0 DATA from the asker,
+ * 1 a service CLOSE from the asker, 3 a pull state and 4 an unknown tag on
+ * the serve stream's tick, 2 a serve state and 5 an unknown tag under the
+ * arriving answer. `*freed` is the freed count once the event is over,
+ * less the states still hanging on streams. */
+static bool fbt_provoke(struct fbw *w, unsigned c, uint64_t *freed)
+{
+    uint8_t pull[FLEET_BOARD_FLEET_PULL_BYTES] = {0};
+    pull[0] = FLEET_BOARD_FLEET_MSG_PULL;
+    pull[1] = FLEET_BOARD_FLEET_VERSION;
+    uint8_t frame[MESH_LOOP_WIRE_MAX], junk[16];
+    memset(junk, 0x5A, sizeof(junk));
+    *freed = boot_fleet_board_fleet_test_states_freed();
+    if (c == 2 || c == 5) {
+        *freed += 1; /* the pull state the swap gives back */
+        return fbt_answer_onto(w, c == 2 ? 2 /* SERVE */ : FBT_UNKNOWN_TAG);
+    }
+    size_t len = mesh_stream_test_open_frame(
+        1, 4096, FLEET_BOARD_FLEET_SERVICE_NAME, pull, sizeof(pull), frame,
+        sizeof(frame));
+    if (!fbw_deliver(w, frame, len) ||
+        mesh_stream_test_live_count(FLEET_BOARD_FLEET_SERVICE_NAME) != 1)
+        return false;
+    if (c == 3 || c == 4) {
+        *freed += 1; /* the serve state the swap gives back */
+        if (boot_fleet_board_fleet_test_retag(
+                false, c == 3 ? 1 /* PULL */ : FBT_UNKNOWN_TAG) != 1)
+            return false;
+        boot_fleet_board_fleet_test_serve();
+        return true;
+    }
+    len = c == 0 ? mesh_stream_test_data_frame(1, junk, sizeof(junk), frame,
+                                               sizeof(frame))
+                 : mesh_stream_test_close_frame(
+                       1, MESH_STREAM_CLOSED_BY_SERVICE, junk, sizeof(junk),
+                       frame, sizeof(frame));
+    return fbw_deliver(w, frame, len);
+}
+
+/* Every board stream state carries its type tag first, and each callback
+ * reads a state only as the struct its own tag names: never by which side
+ * opened the stream. A state on the wrong side, or with a tag no code here
+ * knows, ends the stream by name as malformed, reaches no inbox, and is
+ * freed exactly once. Each case gets a fresh paired fixture. */
+static int test_fleet_board_state_tag(unsigned c)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-state-tag" };
+    const char *names[] = {
+        "fleet board state tag: DATA from the asker on a serve stream is "
+        "refused by name and nothing reaches the inbox",
+        "fleet board state tag: a service CLOSE on a serve stream copies "
+        "nothing into the inbox",
+        "fleet board state tag: an answer arriving on a pull stream that "
+        "holds a serve state is refused by name and nothing is stored",
+        "fleet board state tag: a serve stream holding a pull state is "
+        "refused by name on the tick and sends nothing",
+        "fleet board state tag: an unknown tag on the answering side is "
+        "refused on the tick and freed once",
+        "fleet board state tag: an unknown tag on the asking side is "
+        "refused, copied nowhere, and freed once" };
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+    TEST(names[c]) {
+        ASSERT(opened);
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "tagged state",
+                        2000, 3600, 2100, &post));
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind(&w.a);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        uint64_t freed = 0;
+        ASSERT(fbt_provoke(&w, c, &freed));
+        /* The peer ended case 1's stream itself, so nothing is sent back;
+         * every other case is refused by name, by the side holding it. */
+        bool asking_side = c == 2 || c == 5;
+        unsigned reason =
+            asking_side ? fbt_close_reason(w.asker, w.ask_q, w.f.res_term)
+                        : fbt_close_reason(w.answerer, w.answer_q,
+                                           w.f.term_peer.ini);
+        ASSERT_EQ(reason,
+                  c == 1 ? 0xFFu : (unsigned)MESH_STREAM_REFUSED_MALFORMED);
+        ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        /* Every state still hanging on a stream is freed once, here: the
+         * serve stream's, and the asking stream's when there is one. */
+        uint64_t held = (c == 2 || c == 5) ? 2u : 1u;
+        mesh_stream_test_reset();
+        ASSERT_EQ(boot_fleet_board_fleet_test_states_freed(), freed + held);
+        mesh_stream_test_reset();
+        ASSERT_EQ(boot_fleet_board_fleet_test_states_freed(), freed + held);
+        PASS();
+    }
+    _test_next:
+    fbw_close(&w);
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 static int test_fleet_board_fleet_carriage(void)
 {
     int failures = 0;
@@ -13464,6 +13610,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_fleet_carriage();
     for (unsigned change = 0; change < 4; change++)
         failures += test_fleet_board_delayed_authority(change);
+    for (unsigned c = 0; c < 6; c++)
+        failures += test_fleet_board_state_tag(c);
     failures += test_fleet_board_fleet_cursor_resumes();
     failures += test_fleet_board_fleet_cursor_heals_lost_rows();
     failures += test_fleet_board_fleet_cursor_table_full();

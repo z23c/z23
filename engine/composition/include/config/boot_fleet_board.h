@@ -307,8 +307,9 @@ struct vcs_zcode_dht_delegation;
  * share one process) and forgets every per-peer cursor; pull opens the
  * asking half toward a resolved peer with the cursor held for that peer's
  * box id; pull_paired runs the real pull lane over the pairing rows; serve
- * runs the answering tick once; drain_into commits the inbox into the
- * ASKING box's store and returns how many posts it newly stored.
+ * runs on_tick once over every live stream, as the pump does; drain_into
+ * commits the inbox into the ASKING box's store and returns how many posts
+ * it newly stored.
  * bind_authority stands in for the DHT delegation lookup, the genesis and
  * the clock, exactly as boot_fleet_ledger_test_bind_authority does; the
  * pairing authority itself still runs. Pass NULL to unbind. */
@@ -339,6 +340,12 @@ size_t boot_fleet_board_fleet_test_pull_roster_lane(struct boot_svc_ctx *svc,
                                                     int64_t now);
 void boot_fleet_board_fleet_test_roster_identity(int side, const uint8_t *seed,
                                                  const uint8_t *pub);
+/* The state-tag guard. retag swaps the state of every live "board" stream on
+ * one side for a fresh one carrying `tag` (any value, known or not), freeing
+ * the old one, and returns how many it swapped; states_freed counts every
+ * state the lane has freed, whatever its tag. */
+size_t boot_fleet_board_fleet_test_retag(bool local_initiator, int tag);
+uint64_t boot_fleet_board_fleet_test_states_freed(void);
 #endif
 
 /* The refusal phrase for `r` and, where one exists, the limit hit and the
