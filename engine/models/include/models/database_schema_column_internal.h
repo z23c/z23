@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* purpose: recognize exact native SQLite column declarations for migration replay. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: recognize exact native SQLite column declarations for migration replay. */
 #ifndef ZCL_DATABASE_SCHEMA_COLUMN_INTERNAL_H
 #define ZCL_DATABASE_SCHEMA_COLUMN_INTERNAL_H
 
