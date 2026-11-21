@@ -783,7 +783,7 @@ static bool dlx_pc_unproven_after_info(void)
         "if [ \"$1\" = check-capability-closure ]; then\n"
         "  echo 'check_capability_closure: 1 foreign object(s)'\n"
         "  echo '  not graded; first object follows'\n"
-        "  echo '    tools/package_verify_wallet_gui.o'\n"
+        "  echo '    tools/UNPROVEN_probe.o'\n"
         "  echo 'check_capability_closure: UNPROVEN - 5 module_capabilities.def'\n"
         "  exit 2\n"
         "fi\nexit 0\n";

@@ -628,11 +628,20 @@ static int pc_ship_run(struct pc_run *r)
  * first line for gates that do not label their unproven reason. */
 static const char *pc_unproven_line(const char *out)
 {
-    const char *mark = strstr(out, "UNPROVEN");
-    if (!mark) return out;
-    while (mark > out && !strchr("\r\n", mark[-1])) mark--;
-    return mark;
+    const char *line = out;
+    while (*line) {
+        const char *end = line + strcspn(line, "\r\n");
+        for (const char *mark = line; end - mark >= 8; mark++) {
+            if ((mark == line || (mark - line >= 2 && mark[-2] == ':' && mark[-1] == ' ')) &&
+                memcmp(mark, "UNPROVEN", 8) == 0 &&
+                (mark + 8 == end || strchr(" \t:", mark[8]))) return line;
+        }
+        line = end;
+        while (*line == '\r' || *line == '\n') line++;
+    }
+    return out;
 }
+
 
 /* Appends "gate: reason line" for an unproven gate to r->unproven and
  * counts the gate as skipped. Both writes are bounded; a full buffer drops
