@@ -67,25 +67,9 @@
  * to `ver` itself, before this call, for a BREAKING step (a rename, drop, or
  * a change to what an existing column/row means). Used by every versioned
  * migration block in database_migrate.c and database_migrate_features*.c. */
+bool db_migrate_persist_version_floor(struct node_db *ndb, int32_t version, int32_t floor);
 #define DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, ver, floor_ver) do { \
-    int32_t _v = (int32_t)(ver); \
-    int32_t _f = (int32_t)(floor_ver); \
-    bool _txn_owned = node_db_begin((ndb)); \
-    bool _ok = node_db_state_set((ndb), "schema_version", &_v, sizeof(_v)) && \
-               node_db_state_set((ndb), "schema_compat_floor", &_f, \
-                                 sizeof(_f)); \
-    if (_txn_owned) { \
-        if (_ok) \
-            _ok = node_db_commit((ndb)); \
-        else \
-            (void)node_db_rollback((ndb)); \
-    } \
-    if (!_ok) { \
-        LOG_ERR("db", "migrate: failed to persist " \
-                "schema_version=%d schema_compat_floor=%d atomically; " \
-                "aborting migration to prevent loop on next boot", \
-                (int)_v, (int)_f); \
-    } \
+    if (!db_migrate_persist_version_floor((ndb), (ver), (floor_ver))) return -1; \
 } while (0)
 
 /* Log the Campaign-C3 newer-schema refusal banner: schema_version exceeds

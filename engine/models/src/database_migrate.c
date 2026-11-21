@@ -401,6 +401,21 @@ static int db_migrate_precheck_newer_schema(struct node_db *ndb,
     return 0;
 }
 
+bool db_migrate_persist_version_floor(struct node_db *ndb, int32_t version, int32_t floor)
+{
+    if (!node_db_begin(ndb)) {
+        LOG_ERROR("db", "migrate: cannot begin marker transaction for schema version %d", (int)version);
+        return false;
+    }
+    if (node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+        node_db_state_set(ndb, "schema_compat_floor", &floor, sizeof(floor)) &&
+        node_db_commit(ndb)) return true;
+    if (!node_db_rollback(ndb))
+        LOG_ERROR("db", "migrate: marker rollback failed for schema version %d", (int)version);
+    LOG_ERROR("db", "migrate: failed to persist schema_version=%d schema_compat_floor=%d", (int)version, (int)floor);
+    return false;
+}
+
 static int node_db_migrate_feature_error(int feature_applied)
 {
     return feature_applied == DB_MIGRATE_BACKUP_FAILED_PROPAGATE
@@ -882,6 +897,8 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
     }
     int precheck = db_migrate_precheck_newer_schema(ndb, current_ver);
     if (precheck != DB_MIGRATE_PRECHECK_PROCEED) return precheck;
+    if (!sqlite3_get_autocommit(ndb->db))
+        LOG_ERR("db", "migrate: caller transaction active before schema bootstrap");
 
     /* Ensure schema_migrations table exists.  If this fails,
      * node_db_schema_version() will return 0 and every migration will

@@ -665,6 +665,62 @@ static bool sm_history_open(struct sm_fixture *f)
     return create_schema(&f->ndb);
 }
 
+enum sm_marker_fault { SM_MARKER_NESTED, SM_MARKER_BEGIN, SM_MARKER_SECOND, SM_MARKER_COMMIT };
+
+static int sm_marker_authorize(void *ctx, int op, const char *name, const char *b,
+                               const char *c, const char *d)
+{
+    (void)b; (void)c; (void)d;
+    if (op != SQLITE_TRANSACTION || !name) return SQLITE_OK;
+    enum sm_marker_fault fault = *(const enum sm_marker_fault *)ctx;
+    if (fault == SM_MARKER_BEGIN && strcmp(name, "BEGIN") == 0) return SQLITE_DENY;
+    if (fault == SM_MARKER_COMMIT && strcmp(name, "COMMIT") == 0) return SQLITE_DENY;
+    return SQLITE_OK;
+}
+
+static int sm_marker_failure(enum sm_marker_fault fault)
+{
+    int failures = 0;
+    struct sm_fixture f = {0};
+    if (!sm_history_open(&f)) {
+        SM_CHECK("marker fixture opens", false);
+        sm_history_close(&f);
+        return failures;
+    }
+    SM_CHECK("marker fixture seeds sentinel", node_db_exec(&f.ndb,
+        "CREATE TABLE marker_sentinel(n INTEGER); INSERT INTO marker_sentinel VALUES(1)"));
+    if (fault == SM_MARKER_NESTED) {
+        SM_CHECK("outer transaction owns a pending row", node_db_begin(&f.ndb) &&
+                 node_db_exec(&f.ndb, "INSERT INTO marker_sentinel VALUES(2)"));
+    }
+    if (fault == SM_MARKER_SECOND)
+        SM_CHECK("second marker trigger installs", node_db_exec(&f.ndb,
+            "CREATE TEMP TRIGGER marker_floor BEFORE INSERT ON node_state "
+            "WHEN NEW.key='schema_compat_floor' BEGIN SELECT RAISE(ABORT,'fixture'); END"));
+    SM_CHECK("marker fault installs", sqlite3_set_authorizer(f.ndb.db, sm_marker_authorize, &fault) == SQLITE_OK);
+    int rc = node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("marker fault removes", sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    printf("marker migration fault=%d rc=%d version=%d autocommit=%d\n",
+           fault, rc, node_db_schema_version(&f.ndb), sqlite3_get_autocommit(f.ndb.db));
+    SM_CHECK("marker failure returns schema error", rc == -1);
+    SM_CHECK("marker version remains at bootstrap", node_db_schema_version(&f.ndb) == 1);
+    SM_CHECK("marker failure preserves absent floor", sm_scalar(&f.ndb,
+        "SELECT count(*) FROM node_state WHERE key='schema_compat_floor'") == 0);
+    if (fault == SM_MARKER_NESTED) {
+        SM_CHECK("migration leaves caller transaction open", !sqlite3_get_autocommit(f.ndb.db));
+        SM_CHECK("nested refusal precedes ledger bootstrap", sm_obj_count(&f.ndb, "table", "schema_migrations") == 0);
+        SM_CHECK("outer owner commits its own row", node_db_commit(&f.ndb));
+        SM_CHECK("outer work survives refusal", sm_rows_in(&f.ndb, "marker_sentinel") == 2);
+    }
+    SM_CHECK("failed owned transaction is closed", sqlite3_get_autocommit(f.ndb.db) != 0);
+    if (fault == SM_MARKER_SECOND)
+        SM_CHECK("second marker trigger removes", node_db_exec(&f.ndb, "DROP TRIGGER marker_floor"));
+    SM_CHECK("clean public retry reaches latest", node_db_migrate(&f.ndb, NULL) > 0 &&
+             node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
+    sm_history_close(&f);
+    return failures;
+}
+
 /* The public runner inserts 001, then one ledger row per core version.
  * Refuse the target marker to retain that version's partially applied DDL. */
 static int sm_stop_core_marker(void *ctx, int op, const char *name,
@@ -1479,6 +1535,8 @@ int test_schema_migration(void)
     /* ── 13. Mutation-gap pins (ordering, failure states, rerun) ── */
     failures += sm_mutation_gap_tests();
     failures += sm_migrate_version_read();
+    for (int fault = SM_MARKER_NESTED; fault <= SM_MARKER_COMMIT; fault++)
+        failures += sm_marker_failure((enum sm_marker_fault)fault);
     failures += sm_v6_failure(SM_V6_INDEX);
     failures += sm_v6_failure(SM_V6_MARKER);
     failures += sm_v6_failure(SM_V6_ALTER);
