@@ -571,7 +571,7 @@ static int cache_copy_log(FILE *out, const char *log)
 }
 
 
-static int cache_store(const char *src, int rc, const char *log)
+int wcs_cache_store(const char *src, int rc, const char *log)
 {
     char sha[WCS_SHA], ent[WCS_PATH], tmp[WCS_PATH];
     wcs_sha_file(src, sha);
@@ -580,7 +580,7 @@ static int cache_store(const char *src, int rc, const char *log)
     char *sl = strrchr(ent, '/');
     if (sl) { *sl = '\0'; wcs_mkdirs_p(ent); *sl = '/'; }
     struct stat st;
-    if (stat(log, &st) != 0) return 1;
+    if (stat(log, &st) != 0 || !S_ISREG(st.st_mode)) return 1;
     int haslog = st.st_size > 0;
     if (ovf(snprintf(tmp, sizeof tmp, "%s/.tmp.%d.%u", c_dir, (int)getpid(),
                      ++c_tmp_seq), sizeof tmp))
@@ -595,11 +595,6 @@ static int cache_store(const char *src, int rc, const char *log)
     return 0;
 }
 
-int wcs_cache_store_io_selftest(const char *src, const char *log)
-{
-    return cache_store(src, 1, log);
-}
-
 int wcs_cache_compile(const char *log, const char *rcf, const char *cc,
                       char *const cargv[], const char *src)
 {
@@ -607,7 +602,7 @@ int wcs_cache_compile(const char *log, const char *rcf, const char *cc,
     (void)cc;
     FILE *f = fopen(rcf, "w");
     if (f) { fprintf(f, "%d\n", rc); fclose(f); }
-    if (c_on && cache_store(src, rc, log) == 0) cache_event("s");
+    if (c_on && wcs_cache_store(src, rc, log) == 0) cache_event("s");
     return 0;
 }
 

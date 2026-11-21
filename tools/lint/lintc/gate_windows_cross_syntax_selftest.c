@@ -18,6 +18,9 @@
 #endif
 #include <ctype.h>
 #include <errno.h>
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -617,23 +620,57 @@ static int cache_io_refusal(const char *base, const char *root,
     return 0;
 }
 
+/* File-size limit produces a real buffered write/close error in a child. */
+static int cache_store_limited(const char *src, const char *log)
+{
+    pid_t pid = fork();
+    if (pid < 0) return 2;
+    if (pid == 0) {
+        struct rlimit limit = {4, 4};
+        if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR || setrlimit(RLIMIT_FSIZE, &limit) != 0)
+            _exit(2);
+        _exit(wcs_cache_store(src, 3, log) != 0 ? 0 : 1);
+    }
+    int status;
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) return 2;
+    return WEXITSTATUS(status);
+}
+
+static int cache_preserved_replay(const char *srclist, const char *miss,
+                                  const char *out, const char *log,
+                                  const char *replay, const char *expected,
+                                  const char *rc)
+{
+    if (wcs_cache_plan(srclist, miss, out, 1) != 0 || count_lines(miss) != 15 ||
+        !files_equal(log, replay) || !files_equal(expected, rc))
+        return sf_fail("failed replacement changed the cached diagnostic or status");
+    return 0;
+}
+
+
 static int cache_failed_log_test(const char *base, const char *root,
                                  const char *stub, const char *flags,
                                  const char *srclist)
 {
     char cd[SFP], src[SFP], log[SFP], miss[SFP], out[SFP];
+    char replay[SFP], rc[SFP], expected[SFP];
     if (sjoin(cd, sizeof cd, base, "/failed-cache") ||
         sjoin(src, sizeof src, root, "/src/u7.c") ||
-        sjoin(log, sizeof log, root, "/src") ||
+        sjoin(log, sizeof log, base, "/valid-log") ||
         sjoin(miss, sizeof miss, base, "/failed-miss.txt") ||
-        sjoin(out, sizeof out, base, "/failed-out")) return 2;
+        sjoin(out, sizeof out, base, "/failed-out") ||
+        sjoin(expected, sizeof expected, base, "/expected-rc") ||
+        flat_paths(out, src, replay, sizeof replay, rc, sizeof rc)) return 2;
+    if (csr_mkdirs(out) || csr_write(log, "original diagnostic\n") ||
+        csr_write(expected, "7\n")) return 2;
     wcs_cache_setup("tu-cache-selftest", stub, stub, flags, base, root, cd);
-    if (!wcs_cache_on()) return sf_fail("failed-log test cache unavailable");
-    if (wcs_cache_store_io_selftest(src, log) == 0)
-        return sf_fail("unreadable log was published as a cache entry");
-    if (wcs_cache_plan(srclist, miss, out, 1) != 0 || count_lines(miss) != 16)
-        return sf_fail("failed log produced a reusable cache hit");
-    return 0;
+    if (!wcs_cache_on() || wcs_cache_store(src, 7, log) != 0)
+        return sf_fail("cannot seed a valid cache entry");
+    if (wcs_cache_store(src, 0, "/dev/null") == 0)
+        return sf_fail("non-regular empty log was accepted");
+    if (cache_store_limited(src, log) != 0)
+        return sf_fail("failed entry write was published");
+    return cache_preserved_replay(srclist, miss, out, log, replay, expected, rc);
 }
 
 static int cache_io_and_synthetic(const char *base, const char *root,
