@@ -44,3 +44,11 @@ EAGAIN, error, full-buffer and call-budget checks. The strict focused group
 passed 1/1 with no skips or retries in 9.699 seconds of test-body time. This
 fixture defect is established independently; it is not an identified cause of
 the earlier load-flaky result.
+
+On 2026-11-21, candidate `254e31bc` selected 1,605 cold groups for
+`agent-verify ONLY=@changed`. The test step took 1,092 seconds and reported
+17 self-skips; capability closure then failed. A recipe fixture now checks
+that universal selections run capability closure once before test dispatch,
+that a closure failure suppresses that dispatch while preserving the remaining
+static checks, and that a passing closure retains the selected tests. This
+observation does not measure end-to-end savings.
