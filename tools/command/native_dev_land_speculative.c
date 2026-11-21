@@ -215,47 +215,63 @@ static bool dl_spec_width(struct dl_spec *s)
     return false;
 }
 
+#if !defined(_WIN32)
+/* One entry of the temp directory: a scratch of this leaf, owned by this
+ * user, older than any live call, and not the current call's. */
+static bool dl_spec_stale(const struct dl_spec *s, const char *parent,
+                          const char *name, char *path, size_t cap)
+{
+    struct stat st;
+    return strncmp(name, DL_SPEC_SCRATCH_PREFIX,
+                   strlen(DL_SPEC_SCRATCH_PREFIX)) == 0 &&
+           snprintf(path, cap, "%s/%s", parent, name) < (int)cap &&
+           strcmp(path, s->dir) != 0 && lstat(path, &st) == 0 &&
+           S_ISDIR(st.st_mode) && st.st_uid == geteuid() &&
+           time(NULL) - st.st_mtime >= DL_SPEC_STALE_SECS;
+}
+
+/* The stale scratch's worktree, then its directory; false when git will not
+ * remove the worktree, which is then left. */
+static bool dl_spec_discard(const struct dl_spec *s, const char *path)
+{
+    char wt[PLATFORM_TEMP_PATH_MAX + 292];
+    struct stat st;
+    if (snprintf(wt, sizeof(wt), "%s/wt", path) >= (int)sizeof(wt))
+        return false;
+    if (lstat(wt, &st) == 0) {
+        /* Twice forced: a worktree add killed half-way holds an
+         * "initializing" lock that a single force does not break. */
+        const char *rm[] = { "worktree", "remove", "--force", "--force", wt,
+                             NULL };
+        if (dl_git(s->landing->wt, rm, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
+            return false;
+    }
+    (void)platform_private_directory_remove_empty(path);
+    return true;
+}
+#endif
+
 /* Remove the scratch worktrees and directories a crashed call left: only
  * names this leaf makes, owned by this user, older than any live call, at
  * most DL_SPEC_SWEEP_MAX per call. A checkout git will not remove is left. */
 static void dl_spec_sweep(const struct dl_spec *s)
 {
 #if !defined(_WIN32)
-    char parent[PLATFORM_TEMP_PATH_MAX], path[PLATFORM_TEMP_PATH_MAX + 288],
-        wt[PLATFORM_TEMP_PATH_MAX + 292];
+    char parent[PLATFORM_TEMP_PATH_MAX], path[PLATFORM_TEMP_PATH_MAX + 288];
     const char *slash = strrchr(s->dir, '/');
     size_t plen = slash ? (size_t)(slash - s->dir) : 0, swept = 0;
     DIR *dir;
     struct dirent *e;
-    time_t now = time(NULL);
     if (!plen || plen >= sizeof(parent))
         return;
     memcpy(parent, s->dir, plen);
     parent[plen] = '\0';
     dir = opendir(parent);
     dl_deadline_set(platform_time_monotonic_ms() + DL_SPEC_CLEANUP_MS);
-    while (dir && swept < DL_SPEC_SWEEP_MAX && (e = readdir(dir)) != NULL) {
-        struct stat st;
-        if (strncmp(e->d_name, DL_SPEC_SCRATCH_PREFIX,
-                    strlen(DL_SPEC_SCRATCH_PREFIX)) != 0 ||
-            snprintf(path, sizeof(path), "%s/%s", parent, e->d_name) >=
-                (int)sizeof(path) ||
-            strcmp(path, s->dir) == 0 || lstat(path, &st) != 0 ||
-            !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
-            now - st.st_mtime < DL_SPEC_STALE_SECS ||
-            snprintf(wt, sizeof(wt), "%s/wt", path) >= (int)sizeof(wt))
-            continue;
-        if (lstat(wt, &st) == 0) {
-            /* Twice forced: a worktree add killed half-way holds an
-             * "initializing" lock that a single force does not break. */
-            const char *rm[] = { "worktree", "remove", "--force", "--force",
-                                 wt, NULL };
-            if (dl_git(s->landing->wt, rm, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
-                continue;
-        }
-        (void)platform_private_directory_remove_empty(path);
-        swept++;
-    }
+    while (dir && swept < DL_SPEC_SWEEP_MAX && (e = readdir(dir)) != NULL)
+        if (dl_spec_stale(s, parent, e->d_name, path, sizeof(path)) &&
+            dl_spec_discard(s, path))
+            swept++;
     if (dir)
         (void)closedir(dir);
     dl_deadline_set(0);
