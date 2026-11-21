@@ -31,6 +31,10 @@ struct platform_file_metadata {
 enum platform_file_metadata_result platform_file_metadata_read(
     const char *utf8_path, struct platform_file_metadata *out);
 
+/* Describe the object held by an existing descriptor, without reopening it. */
+enum platform_file_metadata_result platform_file_metadata_read_fd(
+    int fd, struct platform_file_metadata *out);
+
 /* What kind of object a pathname names, without following a final
  * symlink/reparse point. */
 enum platform_file_shape {

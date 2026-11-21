@@ -19,6 +19,16 @@
 #include <unistd.h>
 #endif
 
+int platform_file_stream_fd(FILE *stream)
+{
+    if (!stream) return -1;
+#ifdef _WIN32
+    return _fileno(stream);
+#else
+    return fileno(stream);
+#endif
+}
+
 FILE *platform_file_stream_open_read(const char *path)
 {
     if (!path || !path[0])

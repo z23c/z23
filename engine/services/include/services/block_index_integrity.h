@@ -199,6 +199,14 @@ int bii_verify_embedded(const char *datadir,
                         struct ssio_sidecar_header *out,
                         uint64_t *out_payload_off);
 
+/* Verify the loader's open stream and memoize only a matching stable path.
+ * The caller owns the stream, initially at offset zero; this call advances it.
+ * The caller must prevent concurrent in-place writes during verification and
+ * parsing; this binds the open object, not an immutable byte snapshot. */
+int bii_verify_embedded_stream(const char *datadir, FILE *stream,
+                           struct ssio_sidecar_header *out,
+                           uint64_t *out_payload_off);
+
 /* The embedded verification above memoises what it proved: header digest,
  * payload size and the file identity (device, inode, size, mtime in
  * nanoseconds). bii_verify() accepts that memo for the same process and

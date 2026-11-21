@@ -303,19 +303,12 @@ struct zcl_result ssio_write_embedded(
     return ZCL_OK;
 }
 
-enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
+enum ssio_read_verdict ssio_verify_embedded_stream(FILE *f,
                                             const struct ssio_spec *spec,
                                             struct ssio_sidecar_header *out,
                                             uint64_t *out_payload_off)
 {
-    char body_path[1024];
-    ssio_body_path(body_path, sizeof(body_path), datadir, spec);
-
-    FILE *f = fopen(body_path, "rb");
-    if (!f) {
-        if (errno == ENOENT) return SSIO_READ_MISSING;
-        return SSIO_READ_UNREADABLE;
-    }
+    if (!f) return SSIO_READ_UNREADABLE;
 
     /* Magic check FIRST and on the first 4 bytes ONLY: a legacy body
      * (whose first bytes are the "ZCLI" payload magic, not spec->magic,
@@ -324,11 +317,9 @@ enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
      * short-read STALE that would masquerade as embedded corruption. */
     uint8_t lead4[4];
     if (fread(lead4, 1, 4, f) != 4) {
-        fclose(f);
         return SSIO_READ_BAD_MAGIC;  /* too short to be embedded → legacy */
     }
     if (memcmp(lead4, spec->magic, 4) != 0) {
-        fclose(f);
         return SSIO_READ_BAD_MAGIC;
     }
 
@@ -336,11 +327,9 @@ enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
     struct ssio_sidecar_header hdr;
     if (fseek(f, 0, SEEK_SET) != 0 ||
         fread(&hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
-        fclose(f);
         return SSIO_READ_STALE;  /* embedded magic but header truncated */
     }
     if (hdr.version != spec->version) {
-        fclose(f);
         return SSIO_READ_UNSUPPORTED;
     }
 
@@ -352,7 +341,7 @@ enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
 
     enum { BUF_SIZE = 1u << 20 };  /* 1 MiB */
     uint8_t *buf = zcl_malloc(BUF_SIZE, spec->malloc_label);
-    if (!buf) { fclose(f); return SSIO_READ_UNREADABLE; }
+    if (!buf) return SSIO_READ_UNREADABLE;
 
     uint64_t hashed = 0;
     size_t n;
@@ -362,7 +351,6 @@ enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
     }
     bool io_err = ferror(f) != 0;
     free(buf);
-    fclose(f);
     if (io_err) return SSIO_READ_UNREADABLE;
 
     if (hashed != hdr.body_size)
@@ -376,6 +364,21 @@ enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
     if (out) *out = hdr;
     if (out_payload_off) *out_payload_off = SSIO_EMBEDDED_HEADER_BYTES;
     return SSIO_READ_OK;
+}
+
+enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
+                                            const struct ssio_spec *spec,
+                                            struct ssio_sidecar_header *out,
+                                            uint64_t *out_payload_off)
+{
+    char body_path[1024];
+    ssio_body_path(body_path, sizeof(body_path), datadir, spec);
+    FILE *f = fopen(body_path, "rb");
+    if (!f) return errno == ENOENT ? SSIO_READ_MISSING : SSIO_READ_UNREADABLE;
+    enum ssio_read_verdict result = ssio_verify_embedded_stream(f, spec, out,
+                                                               out_payload_off);
+    fclose(f);
+    return result;
 }
 
 /* ── Sidecar reader ─────────────────────────────────────────── */

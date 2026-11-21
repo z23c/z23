@@ -146,6 +146,11 @@ enum ssio_read_verdict ssio_verify_embedded(const char *datadir,
                                             struct ssio_sidecar_header *out,
                                             uint64_t *out_payload_off);
 
+/* Verify the already-open object from byte zero; caller retains the stream. */
+enum ssio_read_verdict ssio_verify_embedded_stream(
+    FILE *f, const struct ssio_spec *spec, struct ssio_sidecar_header *out,
+    uint64_t *out_payload_off);
+
 /* Rename both the body and sidecar aside as <name>.corrupt.<ts> and
  * emit spec->corrupt_event with "verdict=<verdict_name> ts=<ts>".
  * Missing files are silently ignored. `verdict_name` is the

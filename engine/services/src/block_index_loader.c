@@ -18,6 +18,7 @@
 
 #include "platform/time_compat.h"
 #include "platform/read_mapping.h"
+#include "platform/file_stream.h"
 #include "services/block_index_loader.h"
 #include "services/island_anchor.h"
 #include "storage/blocks_mmap_reader.h"
@@ -75,11 +76,10 @@ static _Atomic int64_t g_flat_row_quarantined = 0;
 static struct log_throttle g_flat_row_quarantine_log = LOG_THROTTLE_INIT;
 
 static void flat_read_mapping_close(struct platform_read_mapping *mapping,
-                                    int fd)
+                                    FILE *stream)
 {
     platform_read_mapping_close(mapping);
-    if (fd >= 0)
-        close(fd);
+    if (stream) fclose(stream);
 }
 int64_t block_index_flat_row_quarantined(void)
 {
@@ -335,22 +335,25 @@ static void bil_flat_fill_pindex(struct block_index *pindex,
     memcpy(pindex->hashFinalSaplingRoot.data, row->sapling_root, 32);
 }
 
-/* The front door owns mapping/fd cleanup, including every parse refusal. */
+/* The front door owns mapping/stream cleanup, including every parse refusal. */
 static struct zcl_result bil_flat_mapping_open(
-    const char *datadir, int *fd_out, struct platform_read_mapping *mapping,
+    const char *datadir, FILE **stream_out, struct platform_read_mapping *mapping,
     size_t *file_size_out)
 {
-    *fd_out = -1;
+    *stream_out = NULL;
     *file_size_out = 0;
     platform_read_mapping_init(mapping);
     char path[1024];
-    snprintf(path, sizeof(path), "%s/block_index.bin", datadir);
-    *fd_out = open(path, O_RDONLY);
-    if (*fd_out < 0)
+    int n = snprintf(path, sizeof(path), "%s/block_index.bin", datadir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return ZCL_ERR(-1, "block_index_flat: datadir path too long");
+    *stream_out = platform_file_stream_open_read(path);
+    if (!*stream_out)
         return ZCL_ERR(-1, "block_index_flat: cannot open %s: %s",
                        path, strerror(errno));
+    int fd = platform_file_stream_fd(*stream_out);
     struct stat st;
-    if (fstat(*fd_out, &st) != 0)
+    if (fd < 0 || fstat(fd, &st) != 0)
         return ZCL_ERR(-2, "block_index_flat: fstat failed: %s",
                        strerror(errno));
     if (st.st_size < 0 || (uintmax_t)st.st_size > SIZE_MAX)
@@ -360,7 +363,7 @@ static struct zcl_result bil_flat_mapping_open(
     if (*file_size_out < 8)
         return ZCL_ERR(-3, "block_index_flat: file too small (%zu bytes)",
                        *file_size_out);
-    if (!platform_read_mapping_open(mapping, *fd_out, *file_size_out))
+    if (!platform_read_mapping_open(mapping, fd, *file_size_out))
         return ZCL_ERR(-4, "block_index_flat: mapping failed (%zu bytes)",
                        *file_size_out);
     platform_read_mapping_advise_sequential(mapping);
@@ -376,7 +379,7 @@ struct bil_flat_input {
 };
 
 static struct zcl_result bil_flat_payload_read(
-    const char *datadir, const uint8_t *data, size_t file_size,
+    const char *datadir, FILE *stream, const uint8_t *data, size_t file_size,
     struct bil_flat_input *out)
 {
     *out = (struct bil_flat_input){0};
@@ -384,7 +387,7 @@ static struct zcl_result bil_flat_payload_read(
     uint64_t payload_off = 0;
     if (memcmp(data, BII_EMBEDDED_MAGIC, 4) == 0) {
         struct ssio_sidecar_header ehdr;
-        int ev = bii_verify_embedded(datadir, &ehdr, &payload_off);
+        int ev = bii_verify_embedded_stream(datadir, stream, &ehdr, &payload_off);
         if (ev != 0)
             return ZCL_ERR(-5, "block_index_flat: embedded integrity check "
                            "FAILED (verdict=%d) — refusing the body", ev);
@@ -1064,31 +1067,31 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
         g_bil_flat_arena_base = NULL;
         g_bil_flat_arena_bytes = 0;
     }
-    int fd;
+    FILE *stream;
     size_t file_size;
     struct platform_read_mapping mapping;
-    struct zcl_result result = bil_flat_mapping_open(datadir, &fd, &mapping,
+    struct zcl_result result = bil_flat_mapping_open(datadir, &stream, &mapping,
                                                      &file_size);
     if (!result.ok) {
-        flat_read_mapping_close(&mapping, fd);
+        flat_read_mapping_close(&mapping, stream);
         return result;
     }
     struct bil_flat_input input;
-    result = bil_flat_payload_read(datadir, mapping.data, file_size, &input);
+    result = bil_flat_payload_read(datadir, stream, mapping.data, file_size, &input);
     if (!result.ok) {
-        flat_read_mapping_close(&mapping, fd);
+        flat_read_mapping_close(&mapping, stream);
         return result;
     }
     uint32_t count = input.count;
     result = bil_flat_check_count(count, max_entries);
     if (!result.ok) {
-        flat_read_mapping_close(&mapping, fd);
+        flat_read_mapping_close(&mapping, stream);
         return result;
     }
     int64_t t0 = (int64_t)platform_time_wall_time_t();
     int64_t t0_ms = platform_time_monotonic_ms();
     if (!block_map_reserve(&ms->map_block_index, count)) {
-        flat_read_mapping_close(&mapping, fd);
+        flat_read_mapping_close(&mapping, stream);
         return ZCL_ERR(-10, "block_index_flat: map reserve failed (%u entries)", count);
     }
     /* File-backed arena (see bil_arena_file_map and bil_arena_alloc); the
@@ -1100,7 +1103,7 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     struct block_index *arena = bil_load_arena(datadir, count, publish_identity,
                                                &arena_mapped, arena_path, sizeof(arena_path));
     if (!arena) {
-        flat_read_mapping_close(&mapping, fd);
+        flat_read_mapping_close(&mapping, stream);
         return ZCL_ERR(-10, "block_index_flat: arena allocation failed for %u "
                        "entries (%zu bytes)", count, arena_bytes);
     }
@@ -1131,7 +1134,7 @@ finish:
     bil_record_private_failure(result.ok, publish_identity);
     bil_arena_release(arena, arena_mapped, arena_bytes, arena_path,
                       !result.ok);
-    flat_read_mapping_close(&mapping, fd);
+    flat_read_mapping_close(&mapping, stream);
     if (!result.ok)
         return result;
     bil_private_arena_take(owner, arena, count);

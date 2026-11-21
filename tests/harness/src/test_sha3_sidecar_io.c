@@ -65,6 +65,7 @@ static bool ss_test_parent(const char *path)
 #define ssio_write_sidecar ss_test_write_sidecar
 #define ssio_write_embedded ss_test_write_embedded
 #define ssio_verify_embedded ss_test_verify_embedded
+#define ssio_verify_embedded_stream ss_test_verify_embedded_stream
 #define ssio_read_sidecar ss_test_read_sidecar
 #define ssio_quarantine ss_test_quarantine
 #define fflush ss_test_flush
@@ -82,6 +83,7 @@ static bool ss_test_parent(const char *path)
 #undef ssio_quarantine
 #undef ssio_read_sidecar
 #undef ssio_verify_embedded
+#undef ssio_verify_embedded_stream
 #undef ssio_write_embedded
 #undef ssio_write_sidecar
 #undef ssio_write_sidecar_raw

@@ -10,4 +10,7 @@
  * stream and closes it with fclose(). */
 FILE *platform_file_stream_open_read(const char *path);
 
+/* Borrow the descriptor from a stream; the caller must not close it. */
+int platform_file_stream_fd(FILE *stream);
+
 #endif

@@ -27,6 +27,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include "storage/sha3_sidecar_io.h"
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -975,10 +976,10 @@ static int t_bcs_repair_heights_wrapper(void)
 
 static bool bii_memo_emit(FILE *f, void *ctx, uint64_t *size, uint8_t sha3[32])
 {
-    (void)ctx;
+    uint8_t seed = ctx ? *(const uint8_t *)ctx : 7u;
     uint8_t payload[4096];
     for (size_t i = 0; i < sizeof(payload); i++)
-        payload[i] = (uint8_t)(i * 31u + 7u);
+        payload[i] = (uint8_t)(i * 31u + seed);
     struct sha3_256_ctx h;
     sha3_256_init(&h);
     sha3_256_write(&h, payload, sizeof(payload));
@@ -1007,6 +1008,94 @@ static bool bii_memo_flip_payload_byte(const char *dir)
     ok = ok && fseek(f, 100, SEEK_SET) == 0 && fwrite(&b, 1, 1, f) == 1;
     fclose(f);
     return ok;
+}
+
+static int t_verified_stream_identity(void)
+{
+    int failures = 0;
+    char a[256], b[256], path[1024];
+    if (!bii_make_tmpdir(a, sizeof(a))) return 1;
+    if (!bii_make_tmpdir(b, sizeof(b))) {
+        bii_tear_down(a);
+        return 1;
+    }
+    uint8_t seed = 23;
+    bool written = bii_write_embedded(a, bii_memo_emit, NULL).ok &&
+                   bii_write_embedded(b, bii_memo_emit, &seed).ok;
+    struct ssio_sidecar_header a_header = {0}, b_header = {0}, actual = {0};
+    bool paths_ok = written && bii_verify_embedded(a, &a_header, NULL) == 0 &&
+                    bii_verify_embedded(b, &b_header, NULL) == 0;
+    snprintf(path, sizeof(path), "%s/block_index.bin", a);
+    FILE *stream = fopen(path, "rb");
+    bool stream_ok = stream && bii_verify_embedded_stream(b, stream, &actual, NULL) == 0;
+    BII_RUN("memo: stream selects A and never memoizes unrelated B",
+            paths_ok && stream_ok &&
+            memcmp(&a_header, &b_header, sizeof(a_header)) != 0 &&
+            memcmp(&actual, &a_header, sizeof(actual)) == 0 &&
+            !bii_verified_body_current(b, NULL).ok);
+    if (stream) fclose(stream);
+    bii_verified_body_forget();
+    bii_tear_down(a);
+    bii_tear_down(b);
+    return failures;
+}
+
+static int t_verified_stream_refusals(void)
+{
+    int failures = 0;
+    char b[256];
+    if (!bii_make_tmpdir(b, sizeof(b))) return 1;
+    BII_RUN("memo: refusal fixture written",
+            bii_write_embedded(b, bii_memo_emit, NULL).ok);
+    BII_RUN("memo: invalid stream refuses and clears memo",
+            bii_verify_embedded(b, NULL, NULL) == 0 &&
+            bii_verified_body_current(b, NULL).ok &&
+            bii_verify_embedded_stream(b, NULL, NULL, NULL) == SSIO_READ_UNREADABLE &&
+            !bii_verified_body_current(b, NULL).ok);
+    char long_path[1100];
+    memset(long_path, 'x', sizeof(long_path) - 1);
+    long_path[sizeof(long_path) - 1] = '\0';
+    bool memo_ready = bii_verify_embedded(b, NULL, NULL) == 0 &&
+                      bii_verified_body_current(b, NULL).ok;
+    uint64_t count = bii_full_hash_count();
+    BII_RUN("memo: overlong path refuses and clears memo",
+            memo_ready && bii_verify_embedded(long_path, NULL, NULL) ==
+                SSIO_READ_UNREADABLE && bii_full_hash_count() == count + 1 &&
+            !bii_verified_body_current(b, NULL).ok);
+    bii_verified_body_forget();
+    bii_tear_down(b);
+    return failures;
+}
+
+static int t_verified_stream_matching_path(void)
+{
+    int failures = 0;
+    char dir[256];
+    if (!bii_make_tmpdir(dir, sizeof(dir))) return 1;
+    bii_verified_body_forget();
+    BII_RUN("memo: matching fixture written",
+            bii_write_embedded(dir, bii_memo_emit, NULL).ok);
+    {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+        FILE *stream = fopen(path, "rb");
+        struct ssio_sidecar_header path_header, fd_header;
+        uint64_t path_offset = 0, fd_offset = 0;
+        bool path_ok = bii_verify_embedded(dir, &path_header, &path_offset) == 0;
+        uint64_t count = bii_full_hash_count();
+        bool fd_ok = stream && bii_verify_embedded_stream(
+            dir, stream, &fd_header, &fd_offset) == 0;
+        BII_RUN("memo: open-file verifier matches path and publishes memo",
+                path_ok && fd_ok && fd_offset == path_offset &&
+                memcmp(&fd_header, &path_header, sizeof(fd_header)) == 0 &&
+                bii_full_hash_count() == count + 1 &&
+                bii_verified_body_current(dir, NULL).ok &&
+                bii_full_hash_count() == count + 1);
+        if (stream) fclose(stream);
+    }
+    bii_verified_body_forget();
+    bii_tear_down(dir);
+    return failures;
 }
 
 static int t_verified_memo(void)
@@ -2504,6 +2593,9 @@ int test_block_index_integrity(void)
     failures += t_verdict_names();
     failures += t_recovery_status();
     failures += t_dump_state_json();
+    failures += t_verified_stream_identity();
+    failures += t_verified_stream_refusals();
+    failures += t_verified_stream_matching_path();
     failures += t_verified_memo();
     failures += t_height_repair();
     failures += t_height_repair_empty();

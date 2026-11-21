@@ -4,6 +4,9 @@
  * block_index.bin. Split from block_index_integrity.c so the sidecar
  * verifier and structural repair paths stay separately readable. */
 
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "services/block_index_integrity.h"
 #include "storage/sha3_sidecar_io.h"
 
@@ -12,6 +15,7 @@
 #include "event/event.h"
 #include "ports/block_index_sidecar_port.h"
 #include "platform/file_metadata.h"
+#include "platform/file_stream.h"
 #include "util/result.h"
 
 #include <errno.h>
@@ -188,24 +192,50 @@ int bii_verify_embedded(const char *datadir,
                         uint64_t *out_payload_off)
 {
     char body_path[1024];
-    struct platform_file_metadata before, after;
+    int n = snprintf(body_path, sizeof(body_path), "%s/%s", datadir,
+                     bii_embedded_spec.body_name);
+    if (n < 0 || (size_t)n >= sizeof(body_path)) {
+        bii_verified_body_forget();
+        g_full_hashes++;
+        return SSIO_READ_UNREADABLE;
+    }
+    FILE *stream = fopen(body_path, "rb");
+    if (!stream) {
+        int result = errno == ENOENT ? SSIO_READ_MISSING : SSIO_READ_UNREADABLE;
+        bii_verified_body_forget();
+        g_full_hashes++;
+        return result;
+    }
+    int result = bii_verify_embedded_stream(datadir, stream, out, out_payload_off);
+    fclose(stream);
+    return result;
+}
+
+int bii_verify_embedded_stream(const char *datadir, FILE *stream,
+                           struct ssio_sidecar_header *out,
+                           uint64_t *out_payload_off)
+{
+    char path[1024];
+    struct platform_file_metadata before, after, named;
     struct ssio_sidecar_header hdr;
-    snprintf(body_path, sizeof(body_path), "%s/%s", datadir,
-             bii_embedded_spec.body_name);
-    bool have_before = platform_file_metadata_read(body_path, &before) ==
-                       PLATFORM_FILE_METADATA_OK;
+    int n = snprintf(path, sizeof(path), "%s/%s", datadir,
+                     bii_embedded_spec.body_name);
+    int fd = platform_file_stream_fd(stream);
+    bool observed = n >= 0 && (size_t)n < sizeof(path) && fd >= 0 &&
+        platform_file_metadata_read_fd(fd, &before) == PLATFORM_FILE_METADATA_OK;
     bii_verified_body_forget();
-    enum ssio_read_verdict v = bii_hash_embedded(datadir, &hdr,
-                                                 out_payload_off);
+    g_full_hashes++;
+    if (fd < 0) return SSIO_READ_UNREADABLE;
+    enum ssio_read_verdict v = ssio_verify_embedded_stream(
+        stream, &bii_embedded_spec, &hdr, out_payload_off);
     if (v == SSIO_READ_OK) {
-        if (out)
-            *out = hdr;
-        /* Remember only when the file is provably the same one before and
-         * after the hash: a write during the hash must not be memoised. */
-        if (have_before &&
-            platform_file_metadata_read(body_path, &after) ==
-                PLATFORM_FILE_METADATA_OK && bii_same_file(&before, &after))
-            bii_remember_verified(datadir, &hdr, &after);
+        bool same = observed &&
+            platform_file_metadata_read_fd(fd, &after) == PLATFORM_FILE_METADATA_OK &&
+            bii_same_file(&before, &after) &&
+            platform_file_metadata_read(path, &named) == PLATFORM_FILE_METADATA_OK &&
+            bii_same_file(&after, &named);
+        if (out) *out = hdr;
+        if (same) bii_remember_verified(datadir, &hdr, &after);
     }
     return (int)v;
 }

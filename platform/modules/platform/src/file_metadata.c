@@ -18,6 +18,40 @@
 #endif
 #include <windows.h>
 #include <wchar.h>
+#include <io.h>
+
+static enum platform_file_metadata_result metadata_from_handle(
+    HANDLE file, struct platform_file_metadata *out)
+{
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    if (!out || !GetFileInformationByHandle(file, &info))
+        return PLATFORM_FILE_METADATA_REFUSED;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return PLATFORM_FILE_METADATA_REPARSE;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return PLATFORM_FILE_METADATA_NOT_REGULAR;
+    out->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    out->links = (uint64_t)info.nNumberOfLinks;
+    uint64_t ticks = ((uint64_t)info.ftLastWriteTime.dwHighDateTime << 32) |
+                     info.ftLastWriteTime.dwLowDateTime;
+    const uint64_t epoch = UINT64_C(116444736000000000);
+    out->modified_seconds = ticks >= epoch
+        ? (int64_t)((ticks - epoch) / UINT64_C(10000000)) : 0;
+    out->modified_nanoseconds = ticks >= epoch
+        ? (uint32_t)(((ticks - epoch) % UINT64_C(10000000)) * 100) : 0;
+    out->device = (uint64_t)info.dwVolumeSerialNumber;
+    out->inode = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    return PLATFORM_FILE_METADATA_OK;
+}
+
+enum platform_file_metadata_result platform_file_metadata_read_fd(
+    int fd, struct platform_file_metadata *out)
+{
+    if (fd < 0) return PLATFORM_FILE_METADATA_REFUSED;
+    intptr_t handle = _get_osfhandle(fd);
+    return handle == -1 ? PLATFORM_FILE_METADATA_REFUSED
+                        : metadata_from_handle((HANDLE)handle, out);
+}
 
 enum platform_file_metadata_result platform_file_metadata_read(
     const char *path, struct platform_file_metadata *out)
@@ -37,27 +71,9 @@ enum platform_file_metadata_result platform_file_metadata_read(
             ? PLATFORM_FILE_METADATA_MISSING
             : PLATFORM_FILE_METADATA_REFUSED;
     }
-    BY_HANDLE_FILE_INFORMATION info = {0};
-    bool inspected = GetFileInformationByHandle(file, &info) != 0;
+    enum platform_file_metadata_result result = metadata_from_handle(file, out);
     CloseHandle(file);
-    if (!inspected) return PLATFORM_FILE_METADATA_REFUSED;
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-        return PLATFORM_FILE_METADATA_REPARSE;
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
-        return PLATFORM_FILE_METADATA_NOT_REGULAR;
-    out->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
-    out->links = (uint64_t)info.nNumberOfLinks;
-    uint64_t ticks = ((uint64_t)info.ftLastWriteTime.dwHighDateTime << 32) |
-                     info.ftLastWriteTime.dwLowDateTime;
-    const uint64_t unix_epoch_ticks = UINT64_C(116444736000000000);
-    out->modified_seconds = ticks >= unix_epoch_ticks
-        ? (int64_t)((ticks - unix_epoch_ticks) / UINT64_C(10000000)) : 0;
-    out->modified_nanoseconds = ticks >= unix_epoch_ticks
-        ? (uint32_t)(((ticks - unix_epoch_ticks) % UINT64_C(10000000)) * 100)
-        : 0;
-    out->device = (uint64_t)info.dwVolumeSerialNumber;
-    out->inode = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
-    return PLATFORM_FILE_METADATA_OK;
+    return result;
 }
 
 enum platform_file_shape platform_file_shape_read(const char *path)
@@ -100,6 +116,34 @@ enum platform_file_shape platform_file_shape_read(const char *path)
 #include <errno.h>
 #include <sys/stat.h>
 
+static enum platform_file_metadata_result metadata_from_stat(
+    const struct stat *st, struct platform_file_metadata *out)
+{
+    if (!out) return PLATFORM_FILE_METADATA_REFUSED;
+    if (S_ISLNK(st->st_mode)) return PLATFORM_FILE_METADATA_REPARSE;
+    if (!S_ISREG(st->st_mode)) return PLATFORM_FILE_METADATA_NOT_REGULAR;
+    if (st->st_size < 0) return PLATFORM_FILE_METADATA_REFUSED;
+    out->size = (uint64_t)st->st_size;
+    out->links = (uint64_t)st->st_nlink;
+    out->modified_seconds = (int64_t)st->st_mtime;
+#if defined(__APPLE__)
+    out->modified_nanoseconds = (uint32_t)st->st_mtimespec.tv_nsec;
+#else
+    out->modified_nanoseconds = (uint32_t)st->st_mtim.tv_nsec;
+#endif
+    out->device = (uint64_t)st->st_dev;
+    out->inode = (uint64_t)st->st_ino;
+    return PLATFORM_FILE_METADATA_OK;
+}
+
+enum platform_file_metadata_result platform_file_metadata_read_fd(
+    int fd, struct platform_file_metadata *out)
+{
+    struct stat st;
+    return fstat(fd, &st) == 0 ? metadata_from_stat(&st, out)
+                              : PLATFORM_FILE_METADATA_REFUSED;
+}
+
 enum platform_file_metadata_result platform_file_metadata_read(
     const char *path, struct platform_file_metadata *out)
 {
@@ -110,23 +154,7 @@ enum platform_file_metadata_result platform_file_metadata_read(
         return errno == ENOENT || errno == ENOTDIR
             ? PLATFORM_FILE_METADATA_MISSING
             : PLATFORM_FILE_METADATA_REFUSED;
-    if (S_ISLNK(st.st_mode))
-        return PLATFORM_FILE_METADATA_REPARSE;
-    if (!S_ISREG(st.st_mode))
-        return PLATFORM_FILE_METADATA_NOT_REGULAR;
-    if (st.st_size < 0)
-        return PLATFORM_FILE_METADATA_REFUSED;
-    out->size = (uint64_t)st.st_size;
-    out->links = (uint64_t)st.st_nlink;
-    out->modified_seconds = (int64_t)st.st_mtime;
-#if defined(__APPLE__)
-    out->modified_nanoseconds = (uint32_t)st.st_mtimespec.tv_nsec;
-#else
-    out->modified_nanoseconds = (uint32_t)st.st_mtim.tv_nsec;
-#endif
-    out->device = (uint64_t)st.st_dev;
-    out->inode = (uint64_t)st.st_ino;
-    return PLATFORM_FILE_METADATA_OK;
+    return metadata_from_stat(&st, out);
 }
 
 enum platform_file_shape platform_file_shape_read(const char *path)
