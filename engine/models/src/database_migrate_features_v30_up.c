@@ -16,12 +16,13 @@
 #include "models/database.h"
 #include "models/database_internal.h"
 
-static void db_migrate_v30_zanc_anchors(struct node_db *ndb)
+static bool db_migrate_v30_zanc_anchors(struct node_db *ndb)
 {
+    bool ok = true;
     /* v30: ZCL Anchors (ZANC) — software/package digest anchoring. One
      * rebuildable projection row per confirmed ZANC OP_RETURN, keyed by
      * txid. Not consulted by consensus; rebuilt from block history. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zanc_anchors ("
         "txid BLOB PRIMARY KEY CHECK(length(txid)=32),"
         "height INTEGER NOT NULL,"
@@ -29,23 +30,25 @@ static void db_migrate_v30_zanc_anchors(struct node_db *ndb)
         "digest BLOB NOT NULL CHECK(length(digest)=32),"
         "label TEXT NOT NULL DEFAULT '') WITHOUT ROWID");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zanc_digest "
         "ON zanc_anchors(hash_type, digest, height)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('030')");
+    return ok;
 }
 
-static void db_migrate_v31_op_return_index(struct node_db *ndb)
+static bool db_migrate_v31_op_return_index(struct node_db *ndb)
 {
+    bool ok = true;
     /* v31: OP_RETURN catalog (op_return_index) — one rebuildable
      * projection row per OP_RETURN OUTPUT (not per tx; a tx with
      * several OP_RETURN outputs gets several rows), covering ZNAM,
      * ZSLP, ZANC, and unrecognized lokad tags alike. See
      * models/op_return_index.h. Not consulted by consensus; rebuilt
      * from block history (op_return_index_truncate). */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS op_return_index ("
         "txid BLOB NOT NULL CHECK(length(txid)=32),"
         "vout_n INTEGER NOT NULL,"
@@ -56,20 +59,22 @@ static void db_migrate_v31_op_return_index(struct node_db *ndb)
         "payload_sha3 BLOB NOT NULL CHECK(length(payload_sha3)=32),"
         "PRIMARY KEY (txid, vout_n)) WITHOUT ROWID");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_op_return_index_height "
         "ON op_return_index(height)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_op_return_index_tag "
         "ON op_return_index(tag_text, height)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('031')");
+    return ok;
 }
 
-static void db_migrate_v32_zslp_ledger(struct node_db *ndb)
+static bool db_migrate_v32_zslp_ledger(struct node_db *ndb)
 {
+    bool ok = true;
     /* v32: ZSLP per-(token, outpoint) ledger (zslp_ledger) — the
      * debit-correct token-balance projection that finally makes token
      * balances fully chain-derived (the credit-only zslp_balances is
@@ -80,7 +85,7 @@ static void db_migrate_v32_zslp_ledger(struct node_db *ndb)
      * models/zslp_ledger.h. Not consulted by consensus; rebuilt from the
      * zslp_transfers / tx_outputs / tx_inputs projections
      * (zslp_ledger_truncate). token_id is internal (node) byte order. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zslp_ledger ("
         "token_id BLOB NOT NULL CHECK(length(token_id)=32),"
         "txid BLOB NOT NULL CHECK(length(txid)=32),"
@@ -94,28 +99,30 @@ static void db_migrate_v32_zslp_ledger(struct node_db *ndb)
         "PRIMARY KEY (token_id, txid, vout)) WITHOUT ROWID");
 
     /* Reconciliation surface: SUM(amount) over a holder's unspent rows. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zslp_ledger_addr "
         "ON zslp_ledger(token_id, address) WHERE spent_by_txid IS NULL");
 
     /* Spend-marking lookup by consumed outpoint (across tokens). */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zslp_ledger_outpoint "
         "ON zslp_ledger(txid, vout)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('032')");
+    return ok;
 }
 
-static void db_migrate_v33_parity_samples(struct node_db *ndb)
+static bool db_migrate_v33_parity_samples(struct node_db *ndb)
 {
+    bool ok = true;
     /* v33: parity_samples — bounded, retained history of the mirror's
      * per-tick consensus-parity comparison against the co-located
      * zclassicd oracle (models/parity_sample.h). One row per
      * legacy_mirror_sync comparison outcome. Purely observational —
      * never consulted by consensus. Bounded retention: the mirror
      * prunes to the newest N rows. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS parity_samples ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "ts INTEGER NOT NULL,"
@@ -125,31 +132,34 @@ static void db_migrate_v33_parity_samples(struct node_db *ndb)
         "hash_equal INTEGER NOT NULL DEFAULT 0 CHECK(hash_equal IN (0,1)),"
         "oracle_reachable INTEGER NOT NULL DEFAULT 0 "
         "  CHECK(oracle_reachable IN (0,1)))");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_parity_samples_ts "
         "ON parity_samples(ts DESC)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('033')");
+    return ok;
 }
 
-static void db_migrate_v34_block_index_envelope(struct node_db *ndb)
+static bool db_migrate_v34_block_index_envelope(struct node_db *ndb)
 {
+    bool ok = true;
     /* v34: block_index_cache integrity envelope — one row (envelope_id=1)
      * carrying an XOR-combined SHA3-256 over every block_index_cache row
      * + its row_count, verified at load. See
      * services/block_index_cache_envelope.h and docs/work/FORWARD_PLAN.md
      * item 7.3. Appended here (not next to block_index_cache's v4 DDL in
      * database_migrate.c) because this is the next free schema slot. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS block_index_cache_envelope ("
         "envelope_id INTEGER PRIMARY KEY CHECK(envelope_id=1),"
         "row_count INTEGER NOT NULL,"
         "content_sha3 BLOB NOT NULL CHECK(length(content_sha3)=32),"
         "written_at INTEGER NOT NULL)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('034')");
+    return ok;
 }
 
 static bool db_migrate_checked_feature(struct node_db *ndb, int version,
@@ -195,14 +205,15 @@ static bool db_migrate_v35_wallet_labels(struct node_db *ndb)
     return ok;
 }
 
-static void db_migrate_v36_agent_sessions(struct node_db *ndb)
+static bool db_migrate_v36_agent_sessions(struct node_db *ndb)
 {
+    bool ok = true;
     /* v36: agent_sessions — scoped agent spend-authority grants. One row
      * per minted session: a revocable, expiring cap set (per-tx limit,
      * rolling-window limit, recipient allowlist) bound to a principal.
      * See docs/work/agent-spend-policy-design.md. App-layer policy only —
      * never consulted by consensus. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS agent_sessions ("
         "session_id TEXT PRIMARY KEY,"
         "account TEXT NOT NULL REFERENCES principals(address),"
@@ -222,16 +233,18 @@ static void db_migrate_v36_agent_sessions(struct node_db *ndb)
         "expires_at INTEGER NOT NULL,"
         "revoked INTEGER NOT NULL DEFAULT 0)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_agent_sessions_account "
         "ON agent_sessions(account)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('036')");
+    return ok;
 }
 
-static void db_migrate_v37_zid_identities(struct node_db *ndb)
+static bool db_migrate_v37_zid_identities(struct node_db *ndb)
 {
+    bool ok = true;
     /* v37: zid_identities — the sovereign-identity projection. One
      * rebuildable row per master ed25519 key that has been anchored
      * on-chain, answering "is this 32-byte key anchored, by whom, at
@@ -241,7 +254,7 @@ static void db_migrate_v37_zid_identities(struct node_db *ndb)
      * 'active' | 'rotated' | 'revoked'; successor_pubkey is present
      * exactly when status='rotated'. See models/zid_identity.h. Not
      * consulted by consensus; rebuilt from block history. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zid_identities ("
         "master_pubkey BLOB NOT NULL CHECK(length(master_pubkey)=32) "
         "  PRIMARY KEY,"
@@ -257,21 +270,23 @@ static void db_migrate_v37_zid_identities(struct node_db *ndb)
 
     /* Name resolution (db_zid_identity_find_by_name) — every
      * list/filter path a command exposes must have an index. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zid_identities_name "
         "ON zid_identities(name)");
 
     /* Height-ordered listing / range filters. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zid_identities_height "
         "ON zid_identities(anchor_height)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('037')");
+    return ok;
 }
 
-static void db_migrate_v38_zid_domains(struct node_db *ndb)
+static bool db_migrate_v38_zid_domains(struct node_db *ndb)
 {
+    bool ok = true;
     /* v38: zid ANCHOR DOMAINS (zid_domains + zid_domain_leaves) — the
      * durable record of WHAT a domain batch committed. The leaf set is
      * stored in canonical sorted order alongside the root it folds to,
@@ -283,7 +298,7 @@ static void db_migrate_v38_zid_domains(struct node_db *ndb)
      * anchor path, never rebuilt from block history, and never
      * consulted by consensus. anchored_txid/anchored_height stay NULL
      * until the domain root is committed on-chain. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zid_domains ("
         "domain_name TEXT PRIMARY KEY,"
         "owner_pubkey BLOB CHECK(length(owner_pubkey)=32),"
@@ -294,7 +309,7 @@ static void db_migrate_v38_zid_domains(struct node_db *ndb)
         "anchored_height INTEGER,"
         "updated_at INTEGER NOT NULL)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zid_domain_leaves ("
         "domain_name TEXT NOT NULL,"
         "leaf_index INTEGER NOT NULL,"
@@ -303,12 +318,13 @@ static void db_migrate_v38_zid_domains(struct node_db *ndb)
         "PRIMARY KEY (domain_name, leaf_index)) WITHOUT ROWID");
 
     /* "prove this digest" is a lookup, not a scan of the leaf set. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zid_domain_leaves_digest "
         "ON zid_domain_leaves(record_digest)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('038')");
+    return ok;
 }
 
 static bool db_migrate_v39_onion_directory(struct node_db *ndb)
@@ -354,8 +370,9 @@ static bool db_migrate_v39_onion_directory(struct node_db *ndb)
     return ok;
 }
 
-static void db_migrate_v40_store_purchases(struct node_db *ndb)
+static bool db_migrate_v40_store_purchases(struct node_db *ndb)
 {
+    bool ok = true;
     /* v40: store_purchases — the BUYER's side of a store transaction
      * (models/store_purchase.h). `orders` is the merchant's row; this is
      * the row the buyer needs to finish a purchase it already paid for.
@@ -372,7 +389,7 @@ static void db_migrate_v40_store_purchases(struct node_db *ndb)
      * checked before any byte is written to output_path.
      *
      * App-layer projection: never read by consensus, safe to drop. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS store_purchases ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "order_id INTEGER NOT NULL,"
@@ -392,26 +409,28 @@ static void db_migrate_v40_store_purchases(struct node_db *ndb)
         "created_at INTEGER NOT NULL,"
         "updated_at INTEGER NOT NULL)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_store_purchases_order "
         "ON store_purchases(order_id)");
 
     /* The resume path asks exactly one question — what is unfinished —
      * so it is an index lookup, not a scan of every purchase ever made. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_store_purchases_stage "
         "ON store_purchases(stage, id)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('040')");
+    return ok;
 }
 
-static void db_migrate_v41_build_fabric(struct node_db *ndb)
+static bool db_migrate_v41_build_fabric(struct node_db *ndb)
 {
+    bool ok = true;
     /* v41: ZBuild Fabric coordinator ledger. Build jobs own ordered
      * actions; approved workers may sign receipts binding an action to an
      * output. This is local operator/development state, never consensus. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS build_jobs ("
         "job_id TEXT PRIMARY KEY CHECK(length(job_id)=64),"
         "source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),"
@@ -426,11 +445,11 @@ static void db_migrate_v41_build_fabric(struct node_db *ndb)
         "  CHECK(cancel_requested IN (0,1)),"
         "created_at INTEGER NOT NULL CHECK(created_at>=0),"
         "updated_at INTEGER NOT NULL CHECK(updated_at>=0)) WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_jobs_state_created "
         "ON build_jobs(state,created_at DESC)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS build_actions ("
         "action_id TEXT PRIMARY KEY CHECK(length(action_id)=64),"
         "job_id TEXT NOT NULL REFERENCES build_jobs(job_id) ON DELETE CASCADE,"
@@ -457,14 +476,14 @@ static void db_migrate_v41_build_fabric(struct node_db *ndb)
         "created_at INTEGER NOT NULL CHECK(created_at>=0),"
         "updated_at INTEGER NOT NULL CHECK(updated_at>=0),"
         "UNIQUE(job_id,sequence)) WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_actions_job_sequence "
         "ON build_actions(job_id,sequence)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_actions_state_updated "
         "ON build_actions(state,updated_at)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS build_workers ("
         "worker_id TEXT PRIMARY KEY CHECK(length(worker_id)=64),"
         "signer_pubkey TEXT NOT NULL UNIQUE CHECK(length(signer_pubkey)=64),"
@@ -475,11 +494,11 @@ static void db_migrate_v41_build_fabric(struct node_db *ndb)
         "expires_at INTEGER NOT NULL DEFAULT 0 CHECK(expires_at>=0),"
         "last_seen_at INTEGER NOT NULL DEFAULT 0 CHECK(last_seen_at>=0)) "
         "WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_workers_approval "
         "ON build_workers(approved,revoked,expires_at)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS build_receipts ("
         "receipt_id TEXT PRIMARY KEY CHECK(length(receipt_id)=64),"
         "action_id TEXT NOT NULL REFERENCES build_actions(action_id) "
@@ -492,15 +511,16 @@ static void db_migrate_v41_build_fabric(struct node_db *ndb)
         "confinement TEXT NOT NULL CHECK(length(confinement) BETWEEN 1 AND 255),"
         "exit_status INTEGER NOT NULL CHECK(exit_status BETWEEN 0 AND 255),"
         "created_at INTEGER NOT NULL CHECK(created_at>=0)) WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_receipts_job_created "
         "ON build_receipts(job_id,created_at)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_receipts_action "
         "ON build_receipts(action_id)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('041')");
+    return ok;
 }
 
 static void db_migrate_v42_build_leases(struct node_db *ndb)
@@ -585,12 +605,13 @@ static void db_migrate_v44_receipt_trust(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('044')");
 }
 
-static void db_migrate_v45_lane_receipts(struct node_db *ndb)
+static bool db_migrate_v45_lane_receipts(struct node_db *ndb)
 {
+    bool ok = true;
     /* v45: rebuildable lookup projection for signed lane_receipt.v1 CAS
      * objects. Rows are append-only roots; canonical receipt bytes and
      * signatures remain the authority in the existing workspace CAS. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zcode_lane_receipts ("
         "receipt_id TEXT PRIMARY KEY CHECK(length(receipt_id)=64),"
         "source_root_sha3 TEXT NOT NULL CHECK(length(source_root_sha3)=64),"
@@ -603,11 +624,12 @@ static void db_migrate_v45_lane_receipts(struct node_db *ndb)
         "lane INTEGER NOT NULL CHECK(lane BETWEEN 1 AND 3),"
         "created_at INTEGER NOT NULL CHECK(created_at>0),"
         "UNIQUE(source_root_sha3,lane))");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zcode_lane_source "
         "ON zcode_lane_receipts(source_root_sha3,lane,created_at)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('045')");
+    return ok;
 }
 
 static void db_migrate_v46_zslp_validity(struct node_db *ndb)
@@ -678,8 +700,9 @@ static bool db_migrate_v47_vault_intents(struct node_db *ndb)
     return ok;
 }
 
-static void db_migrate_v48_zswap_ads(struct node_db *ndb)
+static bool db_migrate_v48_zswap_ads(struct node_db *ndb)
 {
+    bool ok = true;
     /* v48: zswap YARDSALE ads (zswap_ads) — the rebuildable projection
      * of verified signed "for sale by owner" ZSLP-token/ZCL gossip ads
      * (zswap_quote.v1, contexts/market/modules/zswap). One row per quote_root (the dedup
@@ -688,7 +711,7 @@ static void db_migrate_v48_zswap_ads(struct node_db *ndb)
      * first/last_seen + seen_count are local gossip bookkeeping. A
      * yardsale cache — remembered signs, never a market or a matching
      * engine; never consulted by consensus; safe to drop. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zswap_ads ("
         "quote_root BLOB NOT NULL PRIMARY KEY "
         "  CHECK(length(quote_root)=32),"
@@ -705,52 +728,42 @@ static void db_migrate_v48_zswap_ads(struct node_db *ndb)
         " WITHOUT ROWID");
 
     /* The browse query filters one token's still-valid ads. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zswap_ads_token_expiry "
         "ON zswap_ads(token_id, expires_unix)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('048')");
+    return ok;
 }
 
-/* Indexed by schema version minus 30. Slots 0..18 are versions 30..48. */
-static void (*const k_db_migrate_v30_steps[])(struct node_db *) = {
-    [30 - 30] = db_migrate_v30_zanc_anchors,
-    [31 - 30] = db_migrate_v31_op_return_index,
-    [32 - 30] = db_migrate_v32_zslp_ledger,
-    [33 - 30] = db_migrate_v33_parity_samples,
-    [34 - 30] = db_migrate_v34_block_index_envelope,
-    [36 - 30] = db_migrate_v36_agent_sessions,
-    [37 - 30] = db_migrate_v37_zid_identities,
-    [38 - 30] = db_migrate_v38_zid_domains,
-    [40 - 30] = db_migrate_v40_store_purchases,
-    [41 - 30] = db_migrate_v41_build_fabric,
-    [42 - 30] = db_migrate_v42_build_leases,
-    [43 - 30] = db_migrate_v43_zcode_roots,
-    [44 - 30] = db_migrate_v44_receipt_trust,
-    [45 - 30] = db_migrate_v45_lane_receipts,
-    [46 - 30] = db_migrate_v46_zslp_validity,
-    [48 - 30] = db_migrate_v48_zswap_ads,
-};
-
-struct db_migrate_checked_step {
-    int version;
+/* Indexed by schema version minus 30. Legacy ALTER steps retain their behavior. */
+struct db_migrate_v30_step {
     const char *name;
-    bool (*apply)(struct node_db *);
+    bool (*checked)(struct node_db *);
+    void (*legacy)(struct node_db *);
 };
-
-static const struct db_migrate_checked_step k_checked_steps[] = {
-    {35, "wallet labels", db_migrate_v35_wallet_labels},
-    {39, "onion directory", db_migrate_v39_onion_directory},
-    {47, "wallet schema", db_migrate_v47_vault_intents},
+static const struct db_migrate_v30_step k_db_migrate_v30_steps[] = {
+    [30 - 30] = {"zanc anchors", db_migrate_v30_zanc_anchors, NULL},
+    [31 - 30] = {"op return index", db_migrate_v31_op_return_index, NULL},
+    [32 - 30] = {"zslp ledger", db_migrate_v32_zslp_ledger, NULL},
+    [33 - 30] = {"parity samples", db_migrate_v33_parity_samples, NULL},
+    [34 - 30] = {"block index envelope", db_migrate_v34_block_index_envelope, NULL},
+    [35 - 30] = {"wallet labels", db_migrate_v35_wallet_labels, NULL},
+    [36 - 30] = {"agent sessions", db_migrate_v36_agent_sessions, NULL},
+    [37 - 30] = {"zid identities", db_migrate_v37_zid_identities, NULL},
+    [38 - 30] = {"zid domains", db_migrate_v38_zid_domains, NULL},
+    [39 - 30] = {"onion directory", db_migrate_v39_onion_directory, NULL},
+    [40 - 30] = {"store purchases", db_migrate_v40_store_purchases, NULL},
+    [41 - 30] = {"build fabric", db_migrate_v41_build_fabric, NULL},
+    [42 - 30] = {NULL, NULL, db_migrate_v42_build_leases},
+    [43 - 30] = {NULL, NULL, db_migrate_v43_zcode_roots},
+    [44 - 30] = {NULL, NULL, db_migrate_v44_receipt_trust},
+    [45 - 30] = {"lane receipts", db_migrate_v45_lane_receipts, NULL},
+    [46 - 30] = {NULL, NULL, db_migrate_v46_zslp_validity},
+    [47 - 30] = {"wallet schema", db_migrate_v47_vault_intents, NULL},
+    [48 - 30] = {"zswap ads", db_migrate_v48_zswap_ads, NULL},
 };
-
-static const struct db_migrate_checked_step *db_migrate_checked_step(int version)
-{
-    for (size_t i = 0; i < sizeof(k_checked_steps) / sizeof(k_checked_steps[0]); ++i)
-        if (k_checked_steps[i].version == version) return &k_checked_steps[i];
-    return NULL;
-}
 
 /* Next schema version in the v30-v48 range, or 0 when that range is already
  * applied. A database still below v30 takes 30; each later step is one
@@ -773,12 +786,12 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
     int next = db_migrate_v30_next_version(current_ver);
 
     while (next != 0) {
-        const struct db_migrate_checked_step *checked = db_migrate_checked_step(next);
-        if (checked) {
-            if (!db_migrate_checked_feature(ndb, next, floor_ver, checked->name, checked->apply))
+        const struct db_migrate_v30_step *step = &k_db_migrate_v30_steps[next - 30];
+        if (step->checked) {
+            if (!db_migrate_checked_feature(ndb, next, floor_ver, step->name, step->checked))
                 return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         } else {
-            k_db_migrate_v30_steps[next - 30](ndb);
+            step->legacy(ndb);
             DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, next, floor_ver);
         }
         current_ver = next;
