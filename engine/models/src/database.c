@@ -650,32 +650,54 @@ void node_db_set_quick_check_skip_probe(node_db_quick_check_skip_probe_fn fn)
     g_quick_check_skip_probe = fn;
 }
 
-bool node_db_quick_check_ok(sqlite3 *db, const char *path)
+enum db_quickcheck_outcome {
+    DB_QUICKCHECK_CLEAN,
+    DB_QUICKCHECK_CORRUPT,
+    DB_QUICKCHECK_INCOMPLETE,
+};
+
+static enum db_quickcheck_outcome db_quickcheck_error(int rc)
+{
+    int primary = rc & 0xff;
+    return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB
+        ? DB_QUICKCHECK_CORRUPT : DB_QUICKCHECK_INCOMPLETE;
+}
+
+static enum db_quickcheck_outcome db_quickcheck_row(sqlite3_stmt *stmt)
+{
+    if (sqlite3_column_type(stmt, 0) != SQLITE_TEXT)
+        return DB_QUICKCHECK_INCOMPLETE;
+    const unsigned char *text = sqlite3_column_text(stmt, 0);
+    if (!text) return DB_QUICKCHECK_INCOMPLETE;
+    int bytes = sqlite3_column_bytes(stmt, 0);
+    if (bytes <= 0) return DB_QUICKCHECK_INCOMPLETE;
+    if (bytes == 2 && memcmp(text, "ok", 2) == 0) return DB_QUICKCHECK_CLEAN;
+    LOG_WARN("db", "db: quick_check found corruption: %s", text);
+    return DB_QUICKCHECK_CORRUPT;
+}
+
+static enum db_quickcheck_outcome db_quickcheck_run(sqlite3 *db, const char *path)
 {
     sqlite3_stmt *stmt = NULL;
-    bool ok = false;
     struct db_long_op_progress progress;
     db_long_op_start(db, &progress, "quick_check", path);
-
     int rc = sqlite3_prepare_v2(db, "PRAGMA quick_check(1)", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        db_long_op_finish(db, &progress, false, rc);
-        LOG_FAIL("db", "db: quick_check prepare failed: %s",
-                sqlite3_errmsg(db));
+    enum db_quickcheck_outcome result = db_quickcheck_error(rc);
+    if (rc == SQLITE_OK && stmt) {
+        rc = sqlite3_step(stmt);  // raw-sql-ok:read-only-introspection
+        result = rc == SQLITE_ROW ? db_quickcheck_row(stmt) : db_quickcheck_error(rc);
     }
-    rc = sqlite3_step(stmt);  // raw-sql-ok:read-only-introspection
-    if (rc == SQLITE_ROW) {
-        const unsigned char *txt = sqlite3_column_text(stmt, 0);
-        ok = txt && strcmp((const char *)txt, "ok") == 0;
-        if (!ok && txt) {
-            LOG_WARN("db", "db: quick_check failed: %s", txt);
-        }
-    } else {
-        LOG_WARN("db", "db: quick_check step failed: %s", sqlite3_errmsg(db));
-    }
-    sqlite3_finalize(stmt);
-    db_long_op_finish(db, &progress, ok, rc);
-    return ok;
+    int final_rc = stmt ? sqlite3_finalize(stmt) : SQLITE_OK;
+    if (final_rc != SQLITE_OK) { rc = final_rc; result = db_quickcheck_error(final_rc); }
+    if (result == DB_QUICKCHECK_INCOMPLETE)
+        LOG_WARN("db", "db: quick_check incomplete (rc=%d): %s", rc, sqlite3_errmsg(db));
+    db_long_op_finish(db, &progress, result == DB_QUICKCHECK_CLEAN, rc);
+    return result;
+}
+
+bool node_db_quick_check_ok(sqlite3 *db, const char *path)
+{
+    return db_quickcheck_run(db, path) == DB_QUICKCHECK_CLEAN;
 }
 
 static void db_quarantine_one(const char *path, const char *suffix)
@@ -948,21 +970,36 @@ static bool db_open_raw_initial(struct node_db *ndb, const char *path,
     return raw_opened;
 }
 
-/* Boot quick_check: false only when it ran and found the store malformed. */
-static bool db_boot_quick_check_clean(struct node_db *ndb, const char *path)
+/* Distinguish an integrity finding from a check that could not complete. */
+static enum db_quickcheck_outcome db_boot_quick_check(struct node_db *ndb, const char *path)
 {
     /* Skip-probe: true = verified-clean skip or unclean/unverified
      * deferral (probe logs which). False = run blocking PRAGMA. */
     bool skip_quick_check = g_quick_check_skip_probe && path &&
                             g_quick_check_skip_probe(path);
     if (skip_quick_check)
-        return true;
+        return DB_QUICKCHECK_CLEAN;
     int64_t t_qc = db_now_ms();
-    bool qc_ok = node_db_quick_check_ok(ndb->db, path);
+    enum db_quickcheck_outcome qc = db_quickcheck_run(ndb->db, path);
     printf("[boot]   %-28s %lldms\n", "sqlite.quick_check",
            (long long)(db_now_ms() - t_qc));
-    return qc_ok;
+    return qc;
 }
+
+/* Rebuild only when the completed integrity check establishes corruption. */
+static bool db_boot_quick_check_repair(struct node_db *ndb, const char *path,
+                                       const char **schema_attempt)
+{
+    enum db_quickcheck_outcome qc = db_boot_quick_check(ndb, path);
+    if (qc == DB_QUICKCHECK_INCOMPLETE) return false;
+    if (qc == DB_QUICKCHECK_CORRUPT) {
+        LOG_INFO("db", "db: %s is malformed; rebuilding fresh SQLite state", path);
+        if (!db_quarantine_and_reopen(ndb, path, true)) return false;
+        *schema_attempt = "recovery";
+    }
+    return true;
+}
+
 
 /* Both staging deletes of the boot crash recovery; true when both succeed or
  * when this is a runtime reopen, which skips them. */
@@ -1023,13 +1060,8 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
     if (!db_open_raw_initial(ndb, path, boot_ceremony))
         return node_db_open_abort(ndb);
     const char *schema_attempt = "initial";
-    if (boot_ceremony && !db_boot_quick_check_clean(ndb, path)) {
-        LOG_INFO("db", "db: %s is malformed; rebuilding fresh SQLite state",
-                 path);
-        if (!db_quarantine_and_reopen(ndb, path, boot_ceremony))
-            return node_db_open_abort(ndb);
-        schema_attempt = "recovery";
-    }
+    if (boot_ceremony && !db_boot_quick_check_repair(ndb, path, &schema_attempt))
+        return node_db_open_abort(ndb);
 
     if (!db_build_schema_with_repair(ndb, path, boot_ceremony, schema_attempt))
         return node_db_open_abort(ndb);

@@ -2095,16 +2095,79 @@ static bool db_mig_has_quarantined_family(const char *dir)
     return found;
 }
 
-static int t_malformed_store_heals_when_quick_check_deferred(void)
+static int db_mig_quickcheck_denied;
+
+static int db_mig_deny_quickcheck(void *ctx, int action, const char *name,
+                                  const char *arg, const char *db, const char *trigger)
+{
+    (void)ctx; (void)arg; (void)db; (void)trigger;
+    if (action == SQLITE_PRAGMA && name && strcmp(name, "quick_check") == 0) {
+        db_mig_quickcheck_denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int db_mig_quickcheck_authorizer(sqlite3 *db, char **error,
+                                        const sqlite3_api_routines *api)
+{
+    (void)error; (void)api;
+    return sqlite3_set_authorizer(db, db_mig_deny_quickcheck, NULL);
+}
+
+static int t_quickcheck_auth_refusal_preserves_store(void)
+{
+    int failures = 0;
+    char dir[256], path[320];
+    struct node_db db = {0};
+    bool armed = false, opened = false;
+    struct stat before, after;
+    db_mig_path(dir, sizeof(dir), "quickcheck-denied");
+    mkdir_p(dir);
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    TEST("db_mig: SQLITE_AUTH on quick_check refuses without replacing original") {
+        ASSERT(node_db_open(&db, path));
+        ASSERT(node_db_exec(&db, "CREATE TABLE qc_sentinel(v INTEGER NOT NULL)"));
+        ASSERT(node_db_exec(&db, "INSERT INTO qc_sentinel VALUES(37)"));
+        node_db_close(&db);
+        ASSERT(stat(path, &before) == 0);
+        db_mig_quickcheck_denied = 0;
+        armed = sqlite3_auto_extension((void (*)(void))db_mig_quickcheck_authorizer) == SQLITE_OK;
+        ASSERT(armed);
+        opened = node_db_open(&db, path);
+        if (opened) node_db_close(&db);
+        ASSERT(sqlite3_cancel_auto_extension((void (*)(void))db_mig_quickcheck_authorizer) != 0);
+        armed = false;
+        ASSERT(db_mig_quickcheck_denied > 0);
+        ASSERT(!opened);
+        ASSERT(!db_mig_has_quarantined_family(dir));
+        ASSERT(stat(path, &after) == 0);
+        ASSERT(before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+        ASSERT(node_db_open(&db, path));
+        int64_t value = 0;
+        ASSERT(db_mig_query_int(db.db, "SELECT v FROM qc_sentinel", &value));
+        ASSERT_EQ(value, 37);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    if (armed) (void)sqlite3_cancel_auto_extension((void (*)(void))db_mig_quickcheck_authorizer);
+    if (db.open) node_db_close(&db);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+
+static int t_malformed_store_heals(bool deferred)
 {
     int failures = 0;
     char dir[256];
     char dbpath[512];
-    db_mig_path(dir, sizeof(dir), "malformed_deferred_qc");
+    db_mig_path(dir, sizeof(dir), deferred ? "malformed_deferred_qc" : "malformed_checked_qc");
     mkdir_p(dir);
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
 
-    TEST("db_mig: malformed store heals when quick_check is deferred") {
+    TEST(deferred ? "db_mig: malformed store heals when quick_check is deferred" :
+                    "db_mig: quick_check corruption still triggers quarantine") {
         int64_t page_size = 0;
         int64_t rootpage = 0;
         {
@@ -2132,7 +2195,7 @@ static int t_malformed_store_heals_when_quick_check_deferred(void)
         ASSERT(db_mig_scribble_page(dbpath, rootpage, page_size));
         ASSERT(!db_mig_has_quarantined_family(dir));
 
-        node_db_set_quick_check_skip_probe(db_mig_skip_quick_check_always);
+        node_db_set_quick_check_skip_probe(deferred ? db_mig_skip_quick_check_always : NULL);
         struct node_db healed;
         bool opened = node_db_open(&healed, dbpath);
         node_db_set_quick_check_skip_probe(NULL);
@@ -2668,7 +2731,9 @@ int test_db_migration_idempotent(void)
     failures += t_floor_above_latest_refuses_with_typed_error();
     failures += t_backup_flag_writes_file_before_breaking_step();
     failures += t_backup_flag_refuses_on_insufficient_space();
-    failures += t_malformed_store_heals_when_quick_check_deferred();
+    failures += t_quickcheck_auth_refusal_preserves_store();
+    failures += t_malformed_store_heals(true);
+    failures += t_malformed_store_heals(false);
     failures += t_malformed_store_repair_is_boot_only();
     return failures;
 }
