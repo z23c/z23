@@ -24,6 +24,8 @@
 #include "dev_proof_observation_admission.h"
 #include "vcs/vcs_object.h"
 
+#include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -538,6 +540,120 @@ static bool tc_batch_seed(char names[TC_QN][64])
     return stored;
 }
 
+static bool tc_cache_size(sqlite3 *db, int *out)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA cache_size", -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW;
+    if (ok) *out = sqlite3_column_int(stmt, 0);
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static int tc_deny_cache_set(void *ctx, int action, const char *a,
+                             const char *b, const char *db, const char *source)
+{
+    (void)db;
+    (void)source;
+    if (action == SQLITE_PRAGMA && a && b && strcmp(a, "cache_size") == 0) {
+        (*(int *)ctx)++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+enum tc_pager_case { TC_PAGER_LIVE, TC_PAGER_SNAPSHOT, TC_PAGER_DENIED };
+
+struct tc_large_batch {
+    struct testcache *tc;
+    sqlite3 *db;
+    const char **names;
+    struct testcache_probe *out;
+    const struct testcache_probe *hit;
+    const struct testcache_probe *refused;
+};
+
+static bool tc_large_rows_equal(const struct tc_large_batch *f, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!tc_probe_equal(&f->out[i], i == 0 ? f->hit : f->refused))
+            return false;
+    return true;
+}
+
+static bool tc_large_run(struct tc_large_batch *f, size_t count,
+                         int expected_cache, bool compare_rows)
+{
+    int current = 0;
+    if (!testcache_probe_groups(f->tc, f->names, NULL, count, f->out) ||
+        !tc_cache_size(f->db, &current) || current != expected_cache)
+        return false;
+    return !compare_rows || tc_large_rows_equal(f, count);
+}
+
+static bool tc_large_execute(struct tc_large_batch *f, enum tc_pager_case mode)
+{
+    const size_t count = 1024;
+    int denied = 0;
+    bool ok = sqlite3_exec(f->db, "PRAGMA cache_size=-2000", NULL, NULL, NULL)
+              == SQLITE_OK;
+    if (ok && mode == TC_PAGER_LIVE)
+        ok = tc_large_run(f, count - 1, -2000, true);
+    if (ok && mode == TC_PAGER_DENIED)
+        ok = sqlite3_set_authorizer(f->db, tc_deny_cache_set, &denied)
+             == SQLITE_OK;
+    if (ok)
+        ok = tc_large_run(f, count,
+                          mode == TC_PAGER_LIVE ? -8192 : -2000,
+                          mode != TC_PAGER_SNAPSHOT);
+    if (ok && mode == TC_PAGER_DENIED) ok = denied > 0;
+    if (mode == TC_PAGER_DENIED)
+        (void)sqlite3_set_authorizer(f->db, NULL, NULL);
+    return ok;
+}
+
+static bool tc_large_batch_case(enum tc_pager_case mode, const char *hit_name,
+                                const char *refused_name,
+                                const struct testcache_probe *hit,
+                                const struct testcache_probe *refused)
+{
+    const size_t count = 1024;
+    const char *changed[] = {"core/modules/net/src/tc_other.c"};
+    struct tc_large_batch f = {.hit = hit, .refused = refused};
+    f.names = calloc(count, sizeof(*f.names));
+    f.out = calloc(count, sizeof(*f.out));
+    f.tc = mode == TC_PAGER_SNAPSHOT
+        ? testcache_open_snapshot(TC_FIX, changed, 1) : testcache_open(TC_FIX);
+    struct codeindex *ci = testcache_test_codeindex(f.tc);
+    f.db = ci && ci->store ? ci_store_db(ci->store) : NULL;
+    bool ok = f.names && f.out && f.db;
+    if (ok) {
+        for (size_t i = 0; i < count; i++)
+            f.names[i] = refused_name;
+        f.names[0] = hit_name;
+        ok = tc_large_execute(&f, mode);
+    }
+    if (f.tc) testcache_close(f.tc);
+    free(f.out);
+    free(f.names);
+    return ok;
+}
+
+static int tc_large_batch_parity(const char *hit_name, const char *refused_name,
+                                 const struct testcache_probe *hit,
+                                 const struct testcache_probe *refused)
+{
+    int failures = 0;
+    TC_CHECK("large live batch tunes pager and matches solo probes",
+             tc_large_batch_case(TC_PAGER_LIVE, hit_name, refused_name, hit, refused));
+    TC_CHECK("large snapshot batch keeps its pager profile",
+             tc_large_batch_case(TC_PAGER_SNAPSHOT, hit_name, refused_name, hit, refused));
+    TC_CHECK("denied pager tuning preserves profile and solo probes",
+             tc_large_batch_case(TC_PAGER_DENIED, hit_name, refused_name, hit, refused));
+    return failures;
+}
+
 /* Acceptance 2: one handle serving N groups returns exactly what N fresh
  * handles return — key, code, hit, cacheable — including a denylisted and
  * an unresolved slot that must not perturb their neighbours. */
@@ -589,6 +705,8 @@ static int tc_batch_parity(void)
     TC_CHECK("unresolved slot stays uncacheable inside the batch",
              !batched[TC_QN + 1].cacheable &&
              batched[TC_QN + 1].code == TESTCACHE_R_ENTRY_UNRESOLVED);
+    failures += tc_large_batch_parity(ptrs[0], ptrs[TC_QN],
+                                      &solo[0], &solo[TC_QN]);
     return failures;
 }
 

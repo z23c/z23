@@ -56,6 +56,10 @@
 /* Opaque handle: open once per run in the parent, before any fork. */
 struct testcache;
 
+/* Test fixture access to the owned index; valid only while tc is open. */
+struct codeindex;
+struct codeindex *testcache_test_codeindex(struct testcache *tc);
+
 /* Open the cache for the source tree rooted at repo_root (NULL selects
  * ZCL_DEV_SOURCE_ROOT, else "."). Opens/rebuilds the code index and ensures the
  * .zvcs object store exists. Returns NULL on hard failure — the caller then

@@ -181,6 +181,20 @@ void codeindex_close(struct codeindex *ci)
     free(ci);
 }
 
+bool codeindex_enable_bulk_reads(struct codeindex *ci)
+{
+    sqlite3 *db = ci ? ci_store_db(ci->store) : NULL;
+    if (!db)
+        LOG_FAIL("codeindex", "bulk read cache requires a database");
+    ci_store_lock(ci->store);
+    int rc = sqlite3_exec(db, "PRAGMA cache_size=-8192", NULL, NULL, NULL);
+    ci_store_unlock(ci->store);
+    if (rc != SQLITE_OK)
+        LOG_FAIL("codeindex", "bulk read cache pragma failed: %s",
+                 sqlite3_errstr(rc));
+    return true;
+}
+
 bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32])
 {
     if (!ci || !ci->store || !out)

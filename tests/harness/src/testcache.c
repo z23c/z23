@@ -1611,6 +1611,11 @@ void testcache_close(struct testcache *tc)
     free(tc);
 }
 
+struct codeindex *testcache_test_codeindex(struct testcache *tc)
+{
+    return tc ? tc->ci : NULL;
+}
+
 const char *testcache_store_root(const struct testcache *tc)
 {
     return tc ? tc->store_root : NULL;
@@ -2864,6 +2869,12 @@ bool testcache_probe_groups(struct testcache *tc,
         }
         return false;
     }
+    /* The measured 1024-group workload benefits from a larger pager. This
+     * private live connection keeps the advisory setting until close; small
+     * batches and snapshot connections do not request a change. */
+    if (n_groups >= 1024 && !tc->snapshot_mode)
+        (void)codeindex_enable_bulk_reads(tc->ci);
+
     /* Sequentially, on the shared scratch + memo: each slot runs the exact
      * same internal probe a solo call would, so keys are byte-identical by
      * construction and one slot's truncation/non-resolution never reaches

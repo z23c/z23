@@ -201,6 +201,10 @@ bool codeindex_last_stale_refusal(struct codeindex_stale_refusal *out);
 long long codeindex_generation_age_s(const char *root, long long now_unix);
 void codeindex_close(struct codeindex *ci);
 
+/* Advisory 8 MiB page cache for repeated reads on this handle only. The
+ * setting lasts until close; failure leaves normal query semantics intact. */
+bool codeindex_enable_bulk_reads(struct codeindex *ci);
+
 /* Exact content root of the source generation this verified handle reads.
  * codeindex_open() has already matched the store's stat-bound freshness root
  * to the checkout, so this is a safe generation key for in-process derived
