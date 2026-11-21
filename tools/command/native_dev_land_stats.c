@@ -27,7 +27,8 @@
  *   percentiles use the nearest rank.
  * The ledger is read from its tail, at most LS_BYTES_MAX bytes; when the file
  * is larger, source.capped is true and source.window_covered says whether
- * the oldest row read still predates the window start. */
+ * the oldest row read still predates the window start and the row cap did
+ * not stop the scan. The selected time window includes both endpoints. */
 
 #include "command/native_command.h"
 #include "command/native_fleet_objectives.h"
@@ -73,7 +74,7 @@ struct ls_fail {
 };
 
 struct ls_stats {
-    int64_t window_start;
+    int64_t window_start, window_end;
     int64_t rows[LS_NSTATES];
     int64_t busy_s;
     int64_t read_rows, skipped, oversized;
@@ -195,7 +196,7 @@ static void ls_row(struct ls_stats *s, const struct json_value *row)
     }
     if (s->oldest_end == 0 || end < s->oldest_end)
         s->oldest_end = end;
-    if (end < s->window_start)
+    if (end < s->window_start || end > s->window_end)
         return;
     if (start > 0 && end >= start)
         dur = end - start;
@@ -429,7 +430,8 @@ static void ls_fails(const struct ls_stats *s, struct json_value *out)
 
 static bool ls_covered(const struct ls_stats *s, const struct ls_src *src)
 {
-    return !src->capped || (s->oldest_end > 0 && s->oldest_end < s->window_start);
+    return !src->rows_capped &&
+           (!src->capped || (s->oldest_end > 0 && s->oldest_end < s->window_start));
 }
 
 static void ls_source(const struct ls_stats *s, const struct ls_src *src,
@@ -616,6 +618,7 @@ void zcl_native_handle_dev_land_stats(const struct zcl_command_request *request,
         return;
     }
     s->window_start = now - hours * 3600;
+    s->window_end = now;
     if (!ls_read(path, s, &src))
         ls_refuse(reply, ZCL_COMMAND_EXIT_FAILED, "LEDGER_UNREADABLE", "read",
                   "the land outcomes ledger cannot be read", path);

@@ -251,6 +251,61 @@ _test_next:;
     return failures;
 }
 
+static int dls_boundaries_case(const char *dir)
+{
+    int failures = 0;
+    struct dls_call c;
+    char path[600];
+    TEST("land.stats: window includes both endpoints and excludes future rows") {
+        (void)snprintf(path, sizeof(path), "%s/bounds.jsonl", dir);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        const long long times[] = {DLS_NOW - 3601, DLS_NOW - 3600,
+                                   DLS_NOW, DLS_NOW + 1};
+        for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); i++)
+            ASSERT(fprintf(f, "{\"state\":\"landed\",\"terminal_recorded_at\":%lld}\n",
+                           times[i]) > 0);
+        ASSERT(fclose(f) == 0);
+        dls_run(&c, path, 1);
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(dls_int(dls_sub(&c, "totals"), "landed"), 2);
+        dls_end(&c);
+        ASSERT(remove(path) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dls_rows_cap_case(const char *dir)
+{
+    int failures = 0;
+    struct dls_call c;
+    char path[600];
+    TEST("land.stats: stopping at the row cap does not claim full coverage") {
+        (void)snprintf(path, sizeof(path), "%s/rows-cap.jsonl", dir);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        for (unsigned i = 0; i < 200000; i++)
+            ASSERT(fputs("{\"state\":\"landed\",\"terminal_recorded_at\":1}\n", f) >= 0);
+        ASSERT(fprintf(f, "{\"state\":\"landed\",\"terminal_recorded_at\":%lld}\n",
+                       DLS_NOW) > 0);
+        ASSERT(fclose(f) == 0);
+        dls_run(&c, path, 1);
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *src = dls_sub(&c, "source");
+        ASSERT(dls_flag(src, "rows_capped"));
+        ASSERT(!dls_flag(src, "capped"));
+        ASSERT(!dls_flag(src, "window_covered"));
+        ASSERT(strstr(json_get_str(dls_sub(&c, "screen")), "only partly covered") != NULL);
+        dls_end(&c);
+        ASSERT(remove(path) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dls_cap_case(const char *dir, const char *fixture)
 {
     int failures = 0;
@@ -303,6 +358,8 @@ int test_land_stats(void)
     failures += dls_totals_case(ledger);
     failures += dls_window_case(ledger);
     failures += dls_read_error_case(dir);
+    failures += dls_boundaries_case(dir);
+    failures += dls_rows_cap_case(dir);
     failures += dls_cap_case(dir, ledger);
     if (failures == 0)
         printf("test_land_stats: all passed\n");
