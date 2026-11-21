@@ -413,14 +413,10 @@ build/bin/z23 core consensus integrity
    (`build/bin/z23 invalidateblock "BLOCK_HASH"` /
    `build/bin/z23 reconsiderblock "BLOCK_HASH"`) to drop a stale fork.
    Replace `BLOCK_HASH` with the block's actual hash.
-4. Nuclear option (last resort): stop node, delete state, resync:
-   ```bash
-   systemctl --user stop z23-node
-   rm -f ~/.zclassic-c23/node.db ~/.zclassic-c23/node.db-{wal,shm}
-   rm -f ~/.zclassic-c23/block_index.bin{,.sha3}
-   systemctl --user start z23-node
-   # Node will rebuild from block files or snapshot sync (cold bootstrap is now --importblockindex then a normal boot).
-   ```
+4. If a resync is necessary, use a separate, empty datadir and verify the
+   resulting chain tip against an independent node. Preserve the original
+   datadir and its SQLite sidecars. Block files and chain snapshots cannot
+   restore wallet spending keys.
 
 **Prevention:** Run background validation (`-nobgvalidation` NOT set). Monitor
 the `zcl_block_height` derivative: alert if zero for >10 minutes while peers
@@ -951,8 +947,8 @@ journalctl --user -u z23-node --since "5 min ago" --no-pager
 |-------|-----|
 | `database is locked` | Another instance is running. `pgrep z23`. Kill stale process. |
 | `block index corrupt` | `EV_BLOCK_INDEX_CORRUPT`. Delete and rebuild: `rm ~/.zclassic-c23/block_index.bin{,.sha3}; systemctl --user restart z23-node` |
-| `node.db corrupt` | Delete `node.db*`, restart — will rebuild from block files or snapshot. |
-| `schema version mismatch` | Node was downgraded. Use the matching binary version or delete+resync. |
+| `node.db corrupt` | Preserve the database and its WAL and SHM files. If diagnostics identify damage confined to peer observation history, follow the copy-first procedure above. For other damage, use an isolated recovery copy and verify wallet data before authorizing replacement. |
+| `schema version mismatch` | Check the recorded schema version and use a compatible binary. Preserve the datadir while investigating the mismatch. |
 | `permission denied` | `chmod 700 ~/.zclassic-c23; chown -R $USER ~/.zclassic-c23` |
 | `address already in use` | Port conflict. `ss -tlnp | grep 8033`. Change with `-port=` or stop conflicting service. |
 
