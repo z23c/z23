@@ -118,6 +118,35 @@ static int test_observation_model(void)
     return failures;
 }
 
+static int test_failed_retention_bounds_history(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    NM_CHECK(node_db_open(&db, ":memory:"));
+    if (!db.open) return failures + 1;
+    struct db_peer_chain_observation obs = mk_obs(1, 100, 'a');
+    bool pending = true;
+    network_monitor_persist_sample(&db, &obs, 1, 1, &pending);
+    NM_CHECK(!pending && db_peer_chain_observation_count(&db) == 1);
+    NM_CHECK(sqlite3_exec(db.db, "CREATE TEMP TRIGGER deny_prune BEFORE DELETE ON "
+        "peer_chain_observations BEGIN SELECT RAISE(ABORT,'fixture'); END",
+        NULL, NULL, NULL) == SQLITE_OK);
+    obs.peer_id = 2;
+    network_monitor_persist_sample(&db, &obs, 1, 1, &pending);
+    NM_CHECK(pending && db_peer_chain_observation_count(&db) == 2);
+    for (int i = 0; i < 3; i++)
+        network_monitor_persist_sample(&db, &obs, 1, 1, &pending);
+    NM_CHECK(pending && db_peer_chain_observation_count(&db) == 2);
+    NM_CHECK(sqlite3_exec(db.db, "DROP TRIGGER deny_prune", NULL, NULL, NULL) == SQLITE_OK);
+    obs.peer_id = 3;
+    network_monitor_persist_sample(&db, &obs, 1, 1, &pending);
+    struct db_peer_chain_observation latest[2];
+    NM_CHECK(!pending && db_peer_chain_observation_recent(&db, latest, 2) == 1 &&
+             latest[0].peer_id == 3);
+    node_db_close(&db);
+    return failures;
+}
+
 static int test_prune_sparse_boundaries(void)
 {
     int failures = 0;
@@ -515,6 +544,7 @@ int test_network_monitor(void)
     printf("\n=== network_monitor tests ===\n");
     int failures = 0;
     failures += test_observation_model();
+    failures += test_failed_retention_bounds_history();
     failures += test_prune_sparse_boundaries();
     failures += test_prune_diagnostic();
     failures += test_consensus_view();

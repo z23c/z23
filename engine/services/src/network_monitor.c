@@ -442,8 +442,28 @@ static int nm_arrival_window(struct nm_arrival_sample *win, int max,
     return count;
 }
 
+void network_monitor_persist_sample(struct node_db *db,
+                                    struct db_peer_chain_observation *obs,
+                                    int n, int retain_rows, bool *prune_pending)
+{
+    if (!db || !db->open || !obs || !prune_pending || n <= 0)
+        return;
+    if (*prune_pending && !db_peer_chain_observation_prune(db, retain_rows)) {
+        LOG_WARN("network_monitor", "retention prune failed; history sample deferred");
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        if (!db_peer_chain_observation_save(db, &obs[i]))
+            LOG_WARN("network_monitor", "observation save failed peer=%lld",
+                     (long long)obs[i].peer_id);
+    }
+    *prune_pending = !db_peer_chain_observation_prune(db, retain_rows);
+    if (*prune_pending)
+        LOG_WARN("network_monitor", "retention prune failed");
+}
+
 /* One full sample: snapshot peers, persist (best-effort), fold the view. */
-static void nm_sample_once(void)
+static void nm_sample_once(bool *prune_pending)
 {
     static struct db_peer_chain_observation obs[NM_MAX_PEERS]; /* thread-owned */
     static nm_group_key_t groups[NM_MAX_PEERS];                /* thread-owned */
@@ -452,19 +472,7 @@ static void nm_sample_once(void)
     int n = nm_snapshot_peers(obs, groups, NM_MAX_PEERS, now);
     int64_t our_h = nm_our_height();
 
-    /* Persist history (best-effort — a busy DB never blocks detection, which
-     * runs off the folded RAM view below). */
-    struct node_db *db = g_nm.db;
-    if (db && db->open) {
-        for (int i = 0; i < n; i++) {
-            if (!db_peer_chain_observation_save(db, &obs[i]))
-                LOG_WARN("network_monitor",
-                         "observation save failed peer=%lld",
-                         (long long)obs[i].peer_id);
-        }
-        if (n > 0 && !db_peer_chain_observation_prune(db, g_nm.retain_rows))
-            LOG_WARN("network_monitor", "retention prune failed");
-    }
+    network_monitor_persist_sample(g_nm.db, obs, n, g_nm.retain_rows, prune_pending);
 
     struct network_consensus_view v;
     network_monitor_compute_view(obs, n, our_h, now, &v);
@@ -553,6 +561,7 @@ static void nm_on_stall(struct liveness_contract *c)
 static void *nm_thread_fn(void *arg)
 {
     (void)arg;
+    bool prune_pending = true; /* Check retained history on the first nonempty sample. */
     int64_t next_sample_at = 0; /* sample immediately on first wake */
     while (!atomic_load(&g_nm.stop_requested)) {
         atomic_fetch_add(&g_nm.loop_ticks, 1);
@@ -560,7 +569,7 @@ static void *nm_thread_fn(void *arg)
 
         int64_t now = platform_time_wall_unix();
         if (now >= next_sample_at) {
-            nm_sample_once();
+            nm_sample_once(&prune_pending);
             next_sample_at = now + g_nm.sample_interval_secs;
         }
         /* 200ms increments so stop() stays responsive between samples. */

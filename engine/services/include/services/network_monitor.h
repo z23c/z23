@@ -65,6 +65,12 @@ struct network_consensus_view {
     int fork_count_b;
 };
 
+/* Retry failed retention before storing another sample. The sampler sets
+ * prune_pending on startup and retains it across nonempty samples. */
+void network_monitor_persist_sample(struct node_db *db,
+                                    struct db_peer_chain_observation *obs,
+                                    int n, int retain_rows, bool *prune_pending);
+
 /* ── Pure fold (unit-testable with synthetic observations) ──────────────
  * Compute the consensus view from an array of per-peer observations (one per
  * peer — the latest sample). our_height is our active-chain height (-1 if
