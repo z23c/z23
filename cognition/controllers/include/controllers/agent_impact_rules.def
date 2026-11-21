@@ -1033,6 +1033,13 @@ AGENT_IMPACT_RULE("tools/mind/*|cognition/modules/codeindex/*|tools/command/nati
 
 /* Code navigator command surface: the `code` branch backed by cognition/modules/codeindex. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_capsule.c|tools/command/native_code_render.c|tools/command/native_code_structure.c|tools/command/native_code_context_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_brief.c|tools/command/native_code_brief.h|tools/command/native_code_relations_command.c|tests/harness/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
+/* The MCP server tests assert the exact `code.guide` brief that `z23_code`
+ * returns over the wire (test_mcp_serve.c MS_GUIDE_ARGS: its next commands,
+ * lesson state and node-unavailable wording). The brief is composed by these
+ * three units and the rule above routes them only to the in-process code
+ * groups, so a change to the brief wording reached main with a red
+ * mcp_serve (land rows 3279 and 3284 failed on it until the test was fixed). */
+AGENT_IMPACT_RULE("tools/command/native_code_brief.c|tools/command/native_code_brief.h|tools/command/native_code_guide_command.c", "mcp_serve")
 
 /* code.packet: the one-call work packet. It composes the code.* readers and
  * the capsule/structure/receive seams it calls, so an edit to any of them

@@ -1346,6 +1346,31 @@ static int test_registration_gate_impact(void)
     return failures;
 }
 
+/* test_mcp_serve asserts the code.guide brief over the wire; the brief is
+ * composed by these units, so each must select the MCP group. Land rows 3279
+ * and 3284 failed in test_mcp_serve because the commit that reworded the
+ * brief changed only these files and the proof never selected the group. */
+static int test_code_brief_selects_mcp_serve(void)
+{
+    static const char *const brief_units[] = {
+        "tools/command/native_code_brief.c",
+        "tools/command/native_code_brief.h",
+        "tools/command/native_code_guide_command.c",
+    };
+    int failures = 0;
+    TEST("code.guide brief sources select the MCP serve proof") {
+        for (size_t i = 0; i < sizeof(brief_units) / sizeof(brief_units[0]); i++) {
+            struct agent_impact_acc acc = {0};
+            ASSERT(agent_impact_apply_shared_rules(brief_units[i], &acc));
+            ASSERT(impact_has_group(&acc, "mcp_serve"));
+            ASSERT(impact_has_group(&acc, "code_impact"));
+            ASSERT(!acc.groups_lost);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_devagent_routes(void)
 {
     int failures = 0;
@@ -2631,6 +2656,7 @@ int test_code_impact(void)
     failures += test_code_rule_prefix_parity();
     failures += test_code_devagent_routes();
     failures += test_registration_gate_impact();
+    failures += test_code_brief_selects_mcp_serve();
     failures += test_code_route_completeness();
     failures += test_code_route_consumer_bounds();
     failures += test_code_impact_unsafe_narrow();
