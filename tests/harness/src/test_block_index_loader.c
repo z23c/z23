@@ -2854,6 +2854,34 @@ static int bil_unordered_forward_case(const char *dir, const struct uint256 *tip
     return failures;
 }
 
+/* The reordered three-row file is [height 2, height 1, height 0].
+ * A resident duplicate removes the middle arena slot, but the two admitted
+ * rows still invert across that gap and must take the sorted fallback. */
+static int bil_duplicate_gap_forward_case(const char *dir)
+{
+    int failures = 0;
+    struct main_state dst;
+    main_state_init(&dst);
+    struct block_index resident;
+    block_index_init(&resident);
+    resident.hashBlock = make_test_hash(1);
+    resident.phashBlock = &resident.hashBlock;
+    resident.nHeight = 1;
+    resident.nBits = 0x1f07ffff;
+    resident.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    bool inserted = block_map_insert(&dst.map_block_index, &resident.hashBlock, &resident);
+    zcl_alloc_fault_fail_next("flat forward pass");
+    struct zcl_result result = load_block_index_flat(dir, &dst);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    BIL_CHECK("bil: unordered admitted rows across duplicate use sorted fallback",
+              inserted && !result.ok && result.code == -12 && fired &&
+              dst.map_block_index.size == 1 &&
+              block_map_find(&dst.map_block_index, &resident.hashBlock) == &resident);
+    main_state_free(&dst);
+    return failures;
+}
+
 static int bil_forward_allocation_case(void)
 {
     int failures = 0;
@@ -2906,6 +2934,7 @@ static int bil_forward_allocation_case(void)
         if (loaded_anchor) ordered_work = loaded_anchor->nChainWork;
         main_state_free(&anchor_dst);
         failures += bil_unordered_forward_case(tmpdir, &bound, &ordered_work);
+        failures += bil_duplicate_gap_forward_case(tmpdir);
         BIL_CHECK("bil: private forward refusal releases anchored extension and arena",
                   bil_private_anchor_refusal(tmpdir));
         main_state_init(&dst);

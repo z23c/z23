@@ -641,10 +641,13 @@ static struct zcl_result bil_flat_insert_rows(
     return ZCL_OK;
 }
 
-static void bil_flat_link_rows(
+/* Return whether admitted heights are ordered for the forward pass. */
+static bool bil_flat_link_rows(
     struct block_map *bm, struct bil_flat_release *rel,
     uint32_t count, struct block_index *arena)
 {
+    int32_t previous_height = INT32_MIN;
+    bool ordered = true;
     const struct block_index_flat *entries = rel->entries;
     /* Link pprev HASH-ONLY: resolve each entry's parent by its stored
      * prev_hash, never by a height guess. The insert loop above has already
@@ -667,6 +670,10 @@ static void bil_flat_link_rows(
             bil_flat_release_rows(rel, i);
         }
         struct block_index *pindex = &arena[i];
+        if (pindex->phashBlock) {
+            if (pindex->nHeight < previous_height) ordered = false;
+            previous_height = pindex->nHeight;
+        }
         /* The preceding arena row is usable only if it was admitted; a
          * duplicate can leave its slot empty while the map owns the parent. */
         if (i && arena[i - 1].phashBlock &&
@@ -686,25 +693,11 @@ static void bil_flat_link_rows(
             /* else: parent not loaded — leave pprev NULL (see above). */
         }
     }
-
-}
-
-static bool bil_flat_rows_ordered(struct block_index *arena, uint32_t count)
-{
-    struct block_index *previous = NULL;
-    for (uint32_t i = 0; i < count; i++) {
-        struct block_index *cur = &arena[i];
-        if (!cur->phashBlock)
-            continue;
-        if (previous && previous->nHeight > cur->nHeight)
-            return false;
-        previous = cur;
-    }
-    return true;
+    return ordered;
 }
 
 static struct zcl_result bil_flat_forward_rows(
-    struct main_state *ms, struct block_index *arena, uint32_t count)
+    struct main_state *ms, struct block_index *arena, uint32_t count, bool ordered)
 {
     /* Recompute every pointer-graph-derived field through the canonical
      * forward pass (nChainWork, nChainTx, skip links, cached branch id,
@@ -724,9 +717,9 @@ static struct zcl_result bil_flat_forward_rows(
      * so chain_advance_coordinator saw local==best_header and the reducer drive
      * converged with unfolded on-disk bodies — a live wedge. Re-deriving from
      * the pointer graph is the canonical, wedge-proof path. */
-    /* Check every admitted row before applying the canonical forward pass.
+    /* The link walk checked every admitted height before any derived state changed.
      * Unordered inputs retain the existing sorted fallback. */
-    if (bil_flat_rows_ordered(arena, count)) {
+    if (ordered) {
         for (uint32_t i = 0; i < count; i++) {
             struct block_index *cur = &arena[i];
             if (cur->phashBlock)
@@ -1119,7 +1112,7 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
         goto finish;
     }
     rel.released = 0;
-    bil_flat_link_rows(&ms->map_block_index, &rel, count, arena);
+    bool ordered = bil_flat_link_rows(&ms->map_block_index, &rel, count, arena);
     /* Old files end at expected; old readers ignore the new trailer. */
     if (file_size > input.expected) {
         struct zcl_result ar = block_index_flat_anchor_apply(
@@ -1129,7 +1122,7 @@ static struct zcl_result bil_flat_load(const char *datadir, struct main_state *m
     }
     t_parse_ms = platform_time_monotonic_ms() - t0_ms;
     t_fwd_ms = platform_time_monotonic_ms();
-    result = bil_flat_forward_rows(ms, arena, count);
+    result = bil_flat_forward_rows(ms, arena, count, ordered);
 finish:
     bil_record_private_failure(result.ok, publish_identity);
     bil_arena_release(arena, arena_mapped, arena_bytes, arena_path,
