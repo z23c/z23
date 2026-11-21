@@ -86,6 +86,7 @@ int wcs_cache_plan(const char *src_list, const char *miss_list,
                    const char *out_dir, int flat);
 int wcs_cache_compile(const char *log, const char *rcf, const char *cc,
                       char *const cargv[], const char *src);
+int wcs_cache_store_io_selftest(const char *src, const char *log);
 int wcs_cache_counts(int *h, int *m, int *s);
 void wcs_cache_summary(void);
 

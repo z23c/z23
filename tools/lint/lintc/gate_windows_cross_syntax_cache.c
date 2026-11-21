@@ -555,6 +555,22 @@ static void cache_event(const char *e)
     if (f) { fprintf(f, "%s\n", e); fclose(f); }
 }
 
+static int cache_copy_log(FILE *out, const char *log)
+{
+    FILE *in = fopen(log, "rb");
+    if (!in) return 1;
+    char buf[4096];
+    size_t n;
+    int failed = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { failed = 1; break; }
+    }
+    if (ferror(in)) failed = 1;
+    if (fclose(in) != 0) failed = 1;
+    return failed;
+}
+
+
 static int cache_store(const char *src, int rc, const char *log)
 {
     char sha[WCS_SHA], ent[WCS_PATH], tmp[WCS_PATH];
@@ -564,25 +580,24 @@ static int cache_store(const char *src, int rc, const char *log)
     char *sl = strrchr(ent, '/');
     if (sl) { *sl = '\0'; wcs_mkdirs_p(ent); *sl = '/'; }
     struct stat st;
-    int haslog = stat(log, &st) == 0 && st.st_size > 0;
+    if (stat(log, &st) != 0) return 1;
+    int haslog = st.st_size > 0;
     if (ovf(snprintf(tmp, sizeof tmp, "%s/.tmp.%d.%u", c_dir, (int)getpid(),
                      ++c_tmp_seq), sizeof tmp))
         return 1;
     FILE *o = fopen(tmp, "wb");
     if (!o) return 1;
-    fprintf(o, "%d %d\n", rc, haslog);
-    if (haslog) {
-        FILE *i = fopen(log, "rb");
-        static char buf[4096];
-        size_t n;
-        if (i) {
-            while ((n = fread(buf, 1, sizeof buf, i)) > 0) fwrite(buf, 1, n, o);
-            fclose(i);
-        }
-    }
-    fclose(o);
+    int failed = fprintf(o, "%d %d\n", rc, haslog) < 0;
+    if (haslog && !failed) failed = cache_copy_log(o, log);
+    if (fclose(o) != 0) failed = 1;
+    if (failed) { remove(tmp); return 1; }
     if (rename(tmp, ent) != 0) { remove(tmp); return 1; }
     return 0;
+}
+
+int wcs_cache_store_io_selftest(const char *src, const char *log)
+{
+    return cache_store(src, 1, log);
 }
 
 int wcs_cache_compile(const char *log, const char *rcf, const char *cc,

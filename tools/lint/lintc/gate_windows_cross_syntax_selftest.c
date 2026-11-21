@@ -617,13 +617,34 @@ static int cache_io_refusal(const char *base, const char *root,
     return 0;
 }
 
+static int cache_failed_log_test(const char *base, const char *root,
+                                 const char *stub, const char *flags,
+                                 const char *srclist)
+{
+    char cd[SFP], src[SFP], log[SFP], miss[SFP], out[SFP];
+    if (sjoin(cd, sizeof cd, base, "/failed-cache") ||
+        sjoin(src, sizeof src, root, "/src/u7.c") ||
+        sjoin(log, sizeof log, root, "/src") ||
+        sjoin(miss, sizeof miss, base, "/failed-miss.txt") ||
+        sjoin(out, sizeof out, base, "/failed-out")) return 2;
+    wcs_cache_setup("tu-cache-selftest", stub, stub, flags, base, root, cd);
+    if (!wcs_cache_on()) return sf_fail("failed-log test cache unavailable");
+    if (wcs_cache_store_io_selftest(src, log) == 0)
+        return sf_fail("unreadable log was published as a cache entry");
+    if (wcs_cache_plan(srclist, miss, out, 1) != 0 || count_lines(miss) != 16)
+        return sf_fail("failed log produced a reusable cache hit");
+    return 0;
+}
+
 static int cache_io_and_synthetic(const char *base, const char *root,
                                   const char *srclist, const char *stub,
                                   const char *flags, const char *runs)
 {
-    int rc = cache_io_refusal(base, root, stub, flags, srclist, runs);
+    int rc = cache_failed_log_test(base, root, stub, flags, srclist);
+    if (rc == 0) rc = cache_io_refusal(base, root, stub, flags, srclist, runs);
     return rc ? rc : cache_proofs_synthetic(base, root, srclist, stub, flags, runs);
 }
+
 
 static int cache_selftest(const char *cc, const char *flags_nul,
                           const char *scratch, const char *real_src)
