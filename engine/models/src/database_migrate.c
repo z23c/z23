@@ -556,8 +556,7 @@ static const struct db_migrate_core_ddl k_db_migrate_core_ddl[] = {
 
     /* v6: Add address column to wallet_sapling_notes for per-order
      * payment matching.  Tolerate "duplicate column name" on
-     * re-apply; any other error (disk full, corruption) is now
-     * logged instead of silently swallowed. */
+     * re-apply; any other error refuses this migration step. */
     {6, DB_MIGRATE_CORE_DDL_EXEC_TOLERANT,
      "ALTER TABLE wallet_sapling_notes ADD COLUMN address TEXT",
      "v6: add wallet_sapling_notes.address",
@@ -846,7 +845,7 @@ static const struct db_migrate_core_ddl k_db_migrate_core_ddl[] = {
 
 /* Apply every k_db_migrate_core_ddl row of one version, in table order —
  * the statements the matching versioned block ran, nothing else. */
-static void db_migrate_apply_core_ddl(struct node_db *ndb, int version)
+static bool db_migrate_apply_core_ddl(struct node_db *ndb, int version)
 {
     for (size_t i = 0;
          i < sizeof k_db_migrate_core_ddl / sizeof k_db_migrate_core_ddl[0];
@@ -854,13 +853,16 @@ static void db_migrate_apply_core_ddl(struct node_db *ndb, int version)
         const struct db_migrate_core_ddl *r = &k_db_migrate_core_ddl[i];
         if (r->version != version)
             continue;
+        bool ok;
         if (r->kind == DB_MIGRATE_CORE_DDL_EXEC_TOLERANT)
-            db_exec_tolerant(ndb->db, r->sql, r->label, r->tolerated);
+            ok = db_exec_tolerant(ndb->db, r->sql, r->label, r->tolerated) == SQLITE_OK;
         else if (r->kind == DB_MIGRATE_CORE_DDL_EXEC_CHECKED)
-            db_exec_checked(ndb->db, r->sql, r->label);
+            ok = db_exec_checked(ndb->db, r->sql, r->label) == SQLITE_OK;
         else
-            node_db_exec(ndb, r->sql);
+            ok = node_db_exec(ndb, r->sql);
+        if (version == 6 && !ok) return false;
     }
+    return true;
 }
 
 int node_db_migrate(struct node_db *ndb, const char *datadir)
@@ -922,7 +924,8 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
      * block's own tail did. */
     for (int ver = 2; ver <= 13; ver++) {
         if (current_ver < ver) {
-            db_migrate_apply_core_ddl(ndb, ver);
+            if (!db_migrate_apply_core_ddl(ndb, ver))
+                LOG_ERR("db", "migrate: v%d core DDL failed; version not advanced", ver);
             DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, ver, floor);
             current_ver = ver;
             applied++;

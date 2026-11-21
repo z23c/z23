@@ -619,6 +619,77 @@ static int sm_deny_state_read(void *ctx, int action, const char *a,
     return SQLITE_OK;
 }
 
+enum sm_v6_fault_kind { SM_V6_INDEX, SM_V6_MARKER, SM_V6_ALTER };
+struct sm_v6_fault { enum sm_v6_fault_kind kind; int inserts; int denied; };
+
+static int sm_v6_authorize(void *ctx, int op, const char *first,
+                           const char *second, const char *db, const char *trigger)
+{
+    struct sm_v6_fault *fault = ctx;
+    (void)db; (void)trigger;
+    if (!first) return SQLITE_OK;
+    if (fault->kind == SM_V6_ALTER && op == SQLITE_ALTER_TABLE && second &&
+        strcmp(second, "wallet_sapling_notes") == 0) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    if (fault->kind == SM_V6_INDEX && op == SQLITE_CREATE_INDEX && strcmp(first, "idx_snote_address") == 0) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    if (fault->kind == SM_V6_MARKER && op == SQLITE_INSERT && strcmp(first, "schema_migrations") == 0 &&
+        ++fault->inserts == 2) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool sm_v6_prepare(struct sm_fixture *f)
+{
+    int32_t version = 5;
+    return sm_fixture_init(f) &&
+        node_db_exec(&f->ndb, "DROP INDEX IF EXISTS idx_snote_address;"
+            "DELETE FROM schema_migrations WHERE version='006';"
+            "CREATE TABLE v6_fixture_sentinel(value INTEGER NOT NULL);"
+            "INSERT INTO v6_fixture_sentinel VALUES(37)") &&
+        node_db_state_set(&f->ndb, "schema_version", &version, sizeof(version)) &&
+        node_db_state_set(&f->ndb, "schema_compat_floor", &version, sizeof(version));
+}
+
+static int sm_v6_failure(enum sm_v6_fault_kind kind)
+{
+    int failures = 0;
+    struct sm_fixture f = {0};
+    if (!sm_v6_prepare(&f)) {
+        SM_CHECK("v6 fixture prepares", false);
+        if (f.ndb.open) sm_fixture_destroy(&f);
+        return failures;
+    }
+    if (kind == SM_V6_ALTER)
+        SM_CHECK("v6 old note schema removes address",
+                 node_db_exec(&f.ndb, "DROP INDEX IF EXISTS idx_snote_view_address;"
+                 "ALTER TABLE wallet_sapling_notes DROP COLUMN address"));
+    struct sm_v6_fault fault = {.kind = kind};
+    SM_CHECK("v6 authorizer installs", sqlite3_set_authorizer(f.ndb.db, sm_v6_authorize, &fault) == SQLITE_OK);
+    int result = node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("v6 authorizer removes", sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    SM_CHECK("v6 target denial occurred", fault.denied == 1);
+    SM_CHECK("v6 failed statement refuses migration", result < 0);
+    SM_CHECK("v6 failure leaves schema version at 5", node_db_schema_version(&f.ndb) == 5);
+    SM_CHECK("v6 failure leaves compatibility floor at 5", node_db_schema_compat_floor(&f.ndb) == 5);
+    SM_CHECK("v6 failure leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
+    SM_CHECK("v6 failure leaves marker absent", sm_row_count(&f.ndb, 6) == 0);
+    SM_CHECK("v6 failure preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    SM_CHECK("v6 clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0);
+    SM_CHECK("v6 retry records marker", sm_row_count(&f.ndb, 6) == 1);
+    SM_CHECK("v6 retry creates required index", sm_scalar(&f.ndb,
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_snote_address'") == 1);
+    SM_CHECK("v6 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    sm_fixture_destroy(&f);
+    return failures;
+}
+
 static int sm_migrate_version_read(void)
 {
     int failures = 0;
@@ -1159,6 +1230,9 @@ int test_schema_migration(void)
     /* ── 13. Mutation-gap pins (ordering, failure states, rerun) ── */
     failures += sm_mutation_gap_tests();
     failures += sm_migrate_version_read();
+    failures += sm_v6_failure(SM_V6_INDEX);
+    failures += sm_v6_failure(SM_V6_MARKER);
+    failures += sm_v6_failure(SM_V6_ALTER);
 
     return failures;
 }
