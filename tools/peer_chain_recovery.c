@@ -630,11 +630,11 @@ static bool recovery_sync_parent(const char *destination)
     int sync_error = errno;
     int closed = close(fd);
     int close_error = errno;
-    bool ok = (synced == 0 || sync_error == EINVAL) && closed == 0;
+    bool ok = synced == 0 && closed == 0;
     if (!ok)
         fprintf(stderr, "peer_chain_recovery: parent directory sync failed for %s: %s\n",
                 destination,
-                strerror(synced != 0 && sync_error != EINVAL ? sync_error : close_error));
+                strerror(synced != 0 ? sync_error : close_error));
     return ok;
 }
 #endif

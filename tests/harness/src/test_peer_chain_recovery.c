@@ -755,14 +755,17 @@ static int test_peer_chain_recovery_unlink_after_publish(void)
     return failures;
 }
 
-static int test_peer_chain_recovery_directory_sync_after_publish(void)
+static int test_peer_chain_recovery_directory_sync_after_publish(bool unsupported)
 {
     int failures = 0;
+    const char *label = unsupported
+        ? "peer_chain_recovery: unsupported directory sync withholds success"
+        : "peer_chain_recovery: parent sync failure retains destination without success";
 #if defined(__linux__)
     char dir[4096], canonical_dir[4096], source[4608], destination[4608];
     char temporary[4608], out[4096] = {0};
     test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "directory-sync");
-    TEST("peer_chain_recovery: parent sync failure retains destination without success") {
+    TEST(label) {
         ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
         ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
         ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp",
@@ -773,6 +776,7 @@ static int test_peer_chain_recovery_directory_sync_after_publish(void)
         ASSERT(before.data != NULL);
         ASSERT(setenv("LD_PRELOAD", "build/fixtures/peer_chain_recovery_unlink_fault.so", 1) == 0);
         ASSERT(setenv("ZCL_TEST_PEER_RECOVERY_FSYNC_DIR", canonical_dir, 1) == 0);
+        if (unsupported) ASSERT(setenv("ZCL_TEST_PEER_RECOVERY_FSYNC_EINVAL", "1", 1) == 0);
         const char *argv[] = {RECOVERY_BIN, source, destination, NULL};
         struct zcl_spawn_evidence evidence;
         ASSERT(zcl_spawn_capture_evidence(argv, out, sizeof(out), 15000, &evidence) == 1);
@@ -790,9 +794,10 @@ static int test_peer_chain_recovery_directory_sync_after_publish(void)
     } _test_next:;
     (void)unsetenv("LD_PRELOAD");
     (void)unsetenv("ZCL_TEST_PEER_RECOVERY_FSYNC_DIR");
+    (void)unsetenv("ZCL_TEST_PEER_RECOVERY_FSYNC_EINVAL");
     (void)test_rm_rf_recursive(dir);
 #else
-    TEST("peer_chain_recovery: parent sync failure retains destination without success") {
+    TEST(label) {
         printf("not applicable (Linux LD_PRELOAD directory fault)\n");
     } _test_next:;
 #endif
@@ -938,6 +943,7 @@ int test_peer_chain_recovery(void)
     failures += test_peer_chain_recovery_refusals();
     failures += test_peer_chain_recovery_destination_sidecars();
     failures += test_peer_chain_recovery_unlink_after_publish();
-    failures += test_peer_chain_recovery_directory_sync_after_publish();
+    failures += test_peer_chain_recovery_directory_sync_after_publish(false);
+    failures += test_peer_chain_recovery_directory_sync_after_publish(true);
     return failures;
 }

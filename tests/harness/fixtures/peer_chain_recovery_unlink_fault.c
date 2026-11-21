@@ -64,7 +64,7 @@ int fsync(int fd)
             ? readlink(descriptor, path, sizeof path) : -1;
         if (resolved == (ssize_t)strlen(fault) &&
             memcmp(path, fault, (size_t)resolved) == 0) {
-            errno = EIO;
+            errno = getenv("ZCL_TEST_PEER_RECOVERY_FSYNC_EINVAL") ? EINVAL : EIO;
             return -1;
         }
     }
