@@ -24,6 +24,7 @@
 #include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 #include <sqlite3.h>
 #include "command/native_command.h"
+#include "command/native_code_packet_priv.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
 
@@ -723,8 +724,27 @@ static int test_code_packet_markdown_fields(void)
             ASSERT(hit >= at);
             at = hit + 1;
         }
-        ASSERT(strstr(md, "t-fast-exact ONLY=") != NULL);
-        ASSERT(strstr(md, "make lint") != NULL);
+        ASSERT(strstr(md, "agent-verify ONLY=@changed") != NULL);
+        ASSERT(strstr(md, "t-fast-exact ONLY=") == NULL);
+        ASSERT(strstr(md, "devbuild --wait make lint\n") == NULL);
+        ASSERT_EQ(json_size(json_get(&reply.data, "gates")), 1u);
+        struct pk_facts facts = {0};
+        char gates[PK_GATES][PK_GATE_LEN];
+        facts.nroute = 1;
+        facts.ngroup = 1;
+        (void)snprintf(facts.route[0].file, sizeof(facts.route[0].file),
+                       "%s", "tools/command/native_command.c");
+        (void)snprintf(facts.group[0].id, sizeof(facts.group[0].id),
+                       "%s", "test_command_registry_catalog");
+        ASSERT_EQ(pk_gate_lines(&facts, gates), 2u);
+        ASSERT_STR_EQ(gates[0],
+            "DEVBUILD_NO_OFFLOAD=1 timeout 2400 devbuild --wait make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
+        ASSERT_STR_EQ(gates[1],
+            "timeout 2400 devbuild --wait make lint-preflight");
+        facts.ngroup = 0;
+        ASSERT_EQ(pk_gate_lines(&facts, gates), 1u);
+        ASSERT_STR_EQ(gates[0],
+            "timeout 2400 devbuild --wait make lint-fast-preflight");
         zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
@@ -1016,7 +1036,9 @@ static int test_code_packet_tail_failure(void)
         ASSERT(zcl_packet_test_tail(&out));
         const struct json_value *gates = json_get(&out, "gates");
         ASSERT(gates != NULL && gates->type == JSON_ARR);
-        ASSERT_EQ(gates->num_children, 3);
+        ASSERT_EQ(gates->num_children, 1);
+        ASSERT_STR_EQ(json_get_str(json_at(gates, 0)),
+            "timeout 2400 devbuild --wait make lint-fast");
         json_free(&out);
         ASSERT_EQ(json_test_live_blocks(), before);
         PASS();

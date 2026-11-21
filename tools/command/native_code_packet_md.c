@@ -48,25 +48,29 @@ const char *pk_size_class(int max_dependents)
 size_t pk_gate_lines(const struct pk_facts *f, char (*out)[PK_GATE_LEN])
 {
     size_t n = 0;
-    if (f->ngroup > 0) {
-        int len = snprintf(out[n], PK_GATE_LEN,
-                           "timeout 2400 devbuild --wait make t-fast-exact "
-                           "ONLY=");
-        for (int i = 0; i < f->ngroup && len > 0 && len < PK_GATE_LEN - 100;
-             i++)
-            len += snprintf(out[n] + len, PK_GATE_LEN - (size_t)len, "%s%s",
-                            i ? "," : "", f->group[i].id);
-        n++;
+    bool preflight = false;
+    for (int i = 0; i < f->nroute; i++) {
+        const char *path = f->route[i].file;
+        size_t len = strlen(path);
+        if (strncmp(path, "tools/command/", 14) == 0 ||
+            strncmp(path, "engine/", 7) == 0 ||
+            (len > 4 && strcmp(path + len - 4, ".def") == 0)) {
+            preflight = true;
+            break;
+        }
     }
-    (void)snprintf(out[n++], PK_GATE_LEN,
-                   "timeout 2400 devbuild --wait make z23-dev && timeout 600 "
-                   "devbuild --wait make check-capability-closure");
-    (void)snprintf(out[n++], PK_GATE_LEN,
-                   "timeout 2400 devbuild --wait make docs-capability-"
-                   "inventory fix-doc-counts");
-    (void)snprintf(out[n++], PK_GATE_LEN,
-                   "env -u GIT_EDITOR -u GIT_OPTIONAL_LOCKS timeout 2400 "
-                   "devbuild --wait make lint");
+    if (f->ngroup > 0)
+        (void)snprintf(out[n++], PK_GATE_LEN,
+                       "DEVBUILD_NO_OFFLOAD=1 timeout 2400 devbuild --wait make "
+                       "-j\"$(getconf _NPROCESSORS_ONLN)\" "
+                       "agent-verify ONLY=@changed");
+    if (preflight)
+        (void)snprintf(out[n++], PK_GATE_LEN,
+                       "timeout 2400 devbuild --wait make %s",
+                       f->ngroup > 0 ? "lint-preflight" : "lint-fast-preflight");
+    else if (f->ngroup == 0)
+        (void)snprintf(out[n++], PK_GATE_LEN,
+                       "timeout 2400 devbuild --wait make lint-fast");
     return n;
 }
 
@@ -137,14 +141,13 @@ static void pk_md_acceptance(struct pk_sb *sb, const struct pk_facts *f)
     pk_sb_add(sb,
         "  Red then green: a new or changed test must fail with the fix "
         "reverted and pass with it; say how you showed it.\n"
-        "  Lint-fast: run `make lint-fast` while iterating; the full lint is "
-        "the last gate.\n"
+        "  Lint-fast: run `make lint-fast` while iterating; native landing "
+        "runs full lint on the committed candidate.\n"
         "  Performance: state a measured number for any hot path you touch; "
         "never assert wall-clock time in a test.\n"
         "  Presentation: operator-facing text is plain, aligned and free of "
         "host names, addresses and absolute paths.\n"
-        "  Gates (devbuild --wait, output to build/scratch/, read with tail):"
-        "\n");
+        "  Final gates (commit first for @changed; use devbuild --wait):\n");
     char gates[PK_GATES][PK_GATE_LEN];
     size_t ng = pk_gate_lines(f, gates);
     for (size_t i = 0; i < ng; i++)
