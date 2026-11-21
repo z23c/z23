@@ -2655,6 +2655,8 @@ Z23_FLAG("ZCL_TEST_ONLY", "env_test", "-", "-",
           "first use tests/harness/src/test.c:auto; documented at docs/quality/CHAOS_HARNESS.md:518: ZCL_TEST_ONLY=chaos_harness build/bin/test_zcl")
 Z23_FLAG("ZCL_TEST_PEER_RECOVERY_FSYNC_DIR", "env_test", "-", "-",
           "exact parent directory whose post-publication fsync is refused by the isolated Linux durability fixture; first use tests/harness/fixtures/peer_chain_recovery_unlink_fault.c:auto")
+Z23_FLAG("ZCL_TEST_PEER_RECOVERY_FSYNC_EINVAL", "env_test", "-", "-",
+          "simulate unsupported directory sync instead of an I/O error in the isolated Linux recovery fixture; first use tests/harness/fixtures/peer_chain_recovery_unlink_fault.c:auto")
 Z23_FLAG("ZCL_TEST_PEER_RECOVERY_UNLINK", "env_test", "-", "-",
           "exact temporary path whose unlink is refused by the isolated Linux publication-cleanup fixture; first use tests/harness/fixtures/peer_chain_recovery_unlink_fault.c:auto")
 Z23_FLAG("ZCL_TEST_PERF_ASSERTS", "env_test", "-", "-",
