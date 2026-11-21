@@ -10147,10 +10147,10 @@ SQLQ_BIN = $(BIN_DIR)/sqlq$(ZCL_HOST_EXEEXT)
 .PHONY: sqlq
 sqlq: $(SQLQ_BIN)
 $(SQLQ_BIN): tools/sqlq.c tools/sqlq_standalone.c tools/multicall.h \
-    vendor/include/sqlite3.h vendor/lib/libsqlite3.a
+    platform/modules/base/include/base/hex.h vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include -Iplatform/modules/base/include \
 	    -o $@ tools/sqlq.c tools/sqlq_standalone.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 

@@ -18,6 +18,7 @@
  */
 
 #include "multicall.h"
+#include "base/hex.h"
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -87,6 +88,25 @@ static bool sqlq_print_text(sqlite3_stmt *st, int column)
     return fwrite(text, 1, (size_t)length, stdout) == (size_t)length;
 }
 
+static bool sqlq_print_blob(sqlite3_stmt *st, int column)
+{
+    const unsigned char *bytes = sqlite3_column_blob(st, column);
+    if (!bytes && sqlite3_errcode(sqlite3_db_handle(st)) == SQLITE_NOMEM) {
+        fprintf(stderr, "sqlq: column %d blob conversion failed\n", column);
+        return false;
+    }
+    int len = sqlite3_column_bytes(st, column);
+    char encoded[8193];
+    for (size_t offset = 0; offset < (size_t)len;) {
+        size_t chunk = (size_t)len - offset;
+        if (chunk > 4096) chunk = 4096;
+        zcl_hex_encode(bytes + offset, chunk, encoded);
+        if (fwrite(encoded, 2, chunk, stdout) != chunk) return false;
+        offset += chunk;
+    }
+    return true;
+}
+
 static bool sqlq_allowed_prefix(const char *sql)
 {
     return strncasecmp(sql, "SELECT", 6) == 0 ||
@@ -130,12 +150,13 @@ int sqlq_main(int argc, char **argv)
             case SQLITE_NULL:
                 fputs("NULL", stdout);
                 break;
-            case SQLITE_BLOB: {
-                const unsigned char *b = sqlite3_column_blob(st, i);
-                int len = sqlite3_column_bytes(st, i);
-                for (int j = 0; j < len; j++) printf("%02x", b[j]);
+            case SQLITE_BLOB:
+                if (!sqlq_print_blob(st, i)) {
+                    sqlite3_finalize(st);
+                    sqlite3_close(db);
+                    return finish_stdout(1);
+                }
                 break;
-            }
             default:
                 if (!sqlq_print_text(st, i)) {
                     sqlite3_finalize(st);
