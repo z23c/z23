@@ -6054,6 +6054,7 @@ static int tag_rebuild_open_failure(struct tag_world *w)
         asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT(run.rc != 0); ASSERT(strstr(run.text, "APP_EXITED:") != NULL);
         ASSERT(strstr(run.text, "Do not receive it again.") == NULL);
+        ASSERT(strstr(run.text, " app build ") == NULL);
         ASSERT(strstr(run.text, "rebuild_report: published") != NULL);
         ASSERT(strstr(run.text, "destination: ") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
@@ -6154,6 +6155,20 @@ static bool tag_build_failure_next(const char *datadir, const char *command,
     asf_close(&leaf); return ok;
 }
 
+static bool tag_human_build_hint(const char *text, const char *datadir)
+{
+    const char *start = strstr(text, "\ncopy: ");
+    if (!start) return false;
+    start += strlen("\ncopy: ");
+    const char *end = strchr(start, '\n');
+    if (!end || end == start || (size_t)(end - start) >= TAG_PATH) return false;
+    char copy[TAG_PATH], hint[2 * TAG_PATH + 64], line[2 * TAG_PATH + 72];
+    memcpy(copy, start, (size_t)(end - start)); copy[end - start] = '\0';
+    if (!zcl_app_hint(hint, sizeof(hint), datadir, "build %s", copy)) return false;
+    int n = snprintf(line, sizeof(line), "next: %s\n", hint);
+    return n > 0 && (size_t)n < sizeof(line) && strstr(text, line) != NULL;
+}
+
 static int tag_rehost_build_failure(struct tag_world *w)
 {
     int failures = 0;
@@ -6166,13 +6181,14 @@ static int tag_rehost_build_failure(struct tag_world *w)
         ASSERT_EQ(run.rc, 0);
         ASSERT(zcl_app_offer_parse(g_tag.text, strlen(g_tag.text), &w->offer));
         (void)snprintf(w->name, sizeof(w->name), "%s", w->offer.name);
-        ASSERT(snprintf(home, sizeof(home), "%s/build-fail-home", w->root) > 0);
+        ASSERT(snprintf(home, sizeof(home), "%s/build fail 'home", w->root) > 0);
         ASSERT(snprintf(datadir, sizeof(datadir), "%s/datadir", home) > 0);
         ASSERT(mkdir(home, 0700) == 0 && mkdir(datadir, 0700) == 0);
         ASSERT(tag_board_variant(w, NULL, NULL, false));
         asf_door_run(home, home, datadir, "get", w->name, ZCL_CLI_CONFIRM_ASK, &run);
         ASSERT(run.rc != 0); ASSERT(strstr(run.text, "BUILD_FAILED:") != NULL);
         ASSERT(strstr(run.text, "Do not receive it again.") != NULL);
+        ASSERT(tag_human_build_hint(run.text, datadir));
         ASSERT(strstr(run.text, "destination: ") != NULL);
         ASSERT(strstr(run.text, "hosting_status: recurring hosting enabled") != NULL);
         ASSERT(strstr(run.text, "earlier step already changed") != NULL);
@@ -6190,6 +6206,12 @@ static int tag_rehost_build_failure(struct tag_world *w)
         printf("  [build recovery next: get=%d receive=%d]\n", get_next, receive_next);
         ASSERT(get_committed); ASSERT(receive_committed);
         ASSERT(get_next); ASSERT(receive_next);
+        char human_data[TAG_PATH];
+        ASSERT(snprintf(human_data, sizeof(human_data), "%s/receive human 'data", w->root) > 0 &&
+               mkdir(human_data, 0700) == 0);
+        asf_door_run(home, home, human_data, "open", file, ZCL_CLI_CONFIRM_YES, &run);
+        ASSERT(run.rc != 0); ASSERT(strstr(run.text, "BUILD_FAILED:") != NULL);
+        ASSERT(tag_human_build_hint(run.text, human_data));
         PASS();
     } _test_next:;
     return failures;

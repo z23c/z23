@@ -251,6 +251,23 @@ static void fd_partial_data(struct fd_run *r)
     fd_print_host_generation(r, "");
 }
 
+static void fd_build_recovery_hint(struct fd_run *r)
+{
+    for (size_t i = 0; i < r->reply.next_count; ++i) {
+        const struct zcl_command_next *next = &r->reply.next[i];
+        if (strcmp(next->command, "app.build") != 0) continue;
+        struct json_value input; json_init(&input);
+        bool parsed = json_read(&input, next->input_json, strlen(next->input_json)) && input.type == JSON_OBJ;
+        const char *copy = parsed ? json_get_str(json_get(&input, "copy")) : NULL;
+        const char *datadir = parsed ? json_get_str(json_get(&input, "datadir")) : NULL;
+        char hint[2 * FD_PATH + 64];
+        if (copy && copy[0] && datadir && datadir[0] &&
+            zcl_app_hint(hint, sizeof(hint), datadir, "build %s", copy))
+            (void)fprintf(r->out, "next: %s\n", hint);
+        json_free(&input);
+    }
+}
+
 static int fd_refused(struct fd_run *r)
 {
     const struct zcl_command_error *e = &r->reply.error;
@@ -260,6 +277,7 @@ static int fd_refused(struct fd_run *r)
                   e->evidence[0] ? ")" : "");
     if (e->next_action[0])
         (void)fprintf(r->out, "next: %s\n", e->next_action);
+    fd_build_recovery_hint(r);
     const char *offer_hint = fd_str(r, "next_offer");
     if (offer_hint) (void)fprintf(r->out, "next: %s\n", offer_hint);
     const char *first = fd_str(r, "choice_a"), *second = fd_str(r, "choice_b");
