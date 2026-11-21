@@ -461,7 +461,7 @@ static int wrc_accounting_overflow(struct wrc_f *f, struct wallet_tx *wtx)
     return failures;
 }
 
-static int wrc_accounting_boundary(struct wrc_f *f)
+static int wrc_accounting_boundary(struct wrc_f *f, struct wallet *original)
 {
     int failures = 0;
     struct wallet *w = zcl_calloc(1, sizeof(*w), "accounting.fixture");
@@ -493,7 +493,7 @@ static int wrc_accounting_boundary(struct wrc_f *f)
         failures += wrc_accounting_policy(f, w, wtx);
         failures += wrc_accounting_overflow(f, wtx);
     }
-    rpc_wallet_set_state(f->owner, f->ms, f->datadir, f->ws, f->mempool, NULL);
+    rpc_wallet_set_state(original, f->ms, f->datadir, f->ws, f->mempool, NULL);
     wallet_free(w);
     free(w);
     return failures;
@@ -3301,7 +3301,7 @@ int test_wallet_rescan_coverage(void)
             .idx = idx, .ws = &ws, .tbl = &wtbl, .mempool = &mempool,
         };
         failures += wrc_boot_catch_up_fail_closed(&f);
-        failures += wrc_accounting_boundary(&f);
+        failures += wrc_accounting_boundary(&f, w1);
     }
     rpc_wallet_set_state(w1, &ms, datadir, &ws, &mempool, NULL);
     failures += wrc_k_cleared_marker_persists(w1, &ws, &wtbl, idx, last);
