@@ -1283,7 +1283,7 @@ top_consumers() {
         case "$d" in "$GC_HOME"/.zclassic*) continue ;; esac
         [ "$(now_epoch)" -lt "$deadline" ] || break
         bounded_du_children "$d"
-    done | sort -rn | head -5 | while IFS=$'\t' read -r b p; do
+    done | sort -rn | sed -n "1,5p" | while IFS=$'\t' read -r b p; do
         rel="${p#"$GC_HOME"/}"
         printf '%s %s; ' "$(printf '%s' "$rel" | tr '/' '>')" "$(human "$b")"
     done
@@ -1303,7 +1303,7 @@ warn_low_disk() {
         fi
     fi
     body="host-gc: $(human "$free") free after the sweep, below the ${LOW_DISK_GB}G floor. top: $(top_consumers)"
-    body="$(printf '%s' "$body" | head -c 4000)"
+    body="$(LC_ALL=C; printf "%s" "${body:0:4000}")"
     if ! bin="$(dev_mail_bin)"; then
         say "lowdisk: no z23-dev to post with — $body"
         log_line "lowdisk-mail-failed" "$GC_HOME" "$free" "no z23-dev"
@@ -2092,7 +2092,7 @@ report_pressure() {
         find "$GC_HOME" -mindepth 1 -maxdepth 1 -type d \
             ! -name '.zclassic*' 2>/dev/null \
             | while IFS= read -r d; do printf '%s\t%s\n' "$(dir_bytes "$d")" "$d"; done \
-            | sort -rn | head -10 \
+            | sort -rn | sed -n "1,10p" \
             | while IFS=$'\t' read -r b d; do say "  $(human "$b")  $d"; done
         log_line "pressure-critical" "$GC_HOME" 0 "free_pct=$pct floor=${PRESSURE_CRITICAL_FREE_PCT}%"
     fi
