@@ -691,7 +691,7 @@ static int case_handlers(struct al_fx *f)
         ASSERT(strstr(msg, "skycombat") != NULL);
     PASS(); }
 #if !defined(_WIN32)
-    TEST("app.open of tasks points to its native open command") {
+    TEST("app.open of tasks points to its native list command") {
         struct json_value tasks_in;
         struct zcl_command_request tasks_req = {.input = &tasks_in,
                                                 .view = "normal",
@@ -705,7 +705,7 @@ static int case_handlers(struct al_fx *f)
         ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
         ASSERT_EQ(reply.next_count, 2u);
         ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
-        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
         ASSERT_STR_EQ(reply.next[1].command, "app.list");
         zcl_command_reply_free(&reply);
     PASS(); }
@@ -725,10 +725,30 @@ static int case_handlers(struct al_fx *f)
             ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
             ASSERT_EQ(reply.next_count, 2u);
             ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
-            ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+            ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
             ASSERT_STR_EQ(reply.next[1].command, "app.list");
             zcl_command_reply_free(&reply);
         }
+    PASS(); }
+    TEST("headless app.open tasks keeps the private default with an implicit node profile") {
+        struct json_value in;
+        struct zcl_command_request req = {.input = &in, .view = "normal"};
+        char old_dir[512];
+        snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        ASSERT(!zcl_native_command_datadir_is_explicit());
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "name", "tasks"));
+        zcl_native_bridge_bind_rpc(f->root, old_port);
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&req, &reply);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
+        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
+        zcl_command_reply_free(&reply);
+        json_free(&in);
     PASS(); }
     TEST("app.open of tasks preserves an explicit data directory") {
         struct json_value in;
@@ -746,7 +766,7 @@ static int case_handlers(struct al_fx *f)
         ASSERT_EQ(reply.next_count, 2u);
         /* the datadir travels embedded in one JSON string: each quote in the
          * path is escaped once more on the way through */
-        snprintf(expect, sizeof(expect), "{\"action\":\"open\",\"datadir\":\"");
+        snprintf(expect, sizeof(expect), "{\"action\":\"list\",\"datadir\":\"");
         size_t n = strlen(expect);
         for (const char *p = datadir; *p != '\0'; ++p) {
             if (*p == '"') expect[n++] = '\\';
@@ -814,37 +834,222 @@ static int case_handlers(struct al_fx *f)
         json_free(&in);
     PASS(); }
 #endif
-    TEST("app.list says what can be opened and offers open and copy of the "
-         "first launchable app") {
-        struct json_value empty;
-        struct zcl_command_request list_request = {.input = &empty,
-                                                   .view = "normal"};
-        json_init(&empty);
-        json_set_object(&empty);
-        list_request.invoked_name = "app.list";
-        zcl_command_reply_init(&reply, "zcl.app_list.v1");
-        zcl_native_handle_app_list_launchable(&list_request, &reply);
-        const struct json_value *launchable = json_get(&reply.data,
-                                                       "launchable");
-        ASSERT(launchable && launchable->num_children >= 1);
-        /* the built-in catalog's first entry, not read back from the reply */
-        ASSERT_STR_EQ(json_get_str(json_get(&launchable->children[0], "id")),
-                      "skycombat");
-        const char *summary = json_get_str(json_get(&reply.data, "summary"));
-        ASSERT(summary && strstr(summary, "launchable") != NULL &&
-               strstr(summary, "z23 app open") != NULL);
-        ASSERT_EQ(reply.next_count, 2u);
-        ASSERT_STR_EQ(reply.next[0].command, "app.open");
-        ASSERT(strstr(reply.next[0].input_json, "\"skycombat\"") != NULL);
-        ASSERT_STR_EQ(reply.next[1].command, "app.adopt");
-        ASSERT_STR_EQ(reply.next[1].input_json, "{\"name\":\"skycombat\"}");
-        json_free(&empty);
-    PASS(); }
 _test_next:;
+    app_launch_test_set_bin_dir(NULL);
     app_launch_test_set_desktop(-1);
     zcl_command_reply_free(&reply);
     json_free(&input);
     al_env_restore(saved, nsaved);
+    return failures;
+}
+
+static int case_list_guide(struct al_fx *f)
+{
+    int failures = 0;
+    struct al_saved_env saved[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL},
+                                   {"XDG_STATE_HOME", NULL}};
+    size_t nsaved = sizeof(saved) / sizeof(saved[0]);
+    struct zcl_command_reply reply = {0};
+    char root[PATH_MAX] = {0}, home[PATH_MAX], bin[PATH_MAX];
+    al_env_save(saved, nsaved);
+    TEST("app.list guides installed desktop apps or headless Tasks") {
+        ASSERT(al_path(root, sizeof(root), f->root, "list-XXXXXX"));
+        ASSERT(mkdtemp(root));
+        ASSERT(al_path(home, sizeof(home), root, "home"));
+        ASSERT(mkdir(home, 0700) == 0);
+        ASSERT(al_path(bin, sizeof(bin), root, "bin"));
+        ASSERT(mkdir(bin, 0700) == 0);
+        ASSERT(setenv("HOME", home, 1) == 0);
+        ASSERT(unsetenv("XDG_CONFIG_HOME") == 0);
+        ASSERT(unsetenv("XDG_STATE_HOME") == 0);
+        struct json_value empty;
+        struct zcl_command_request list_request = {.input = &empty,
+                                                   .view = "normal",
+                                                   .invoked_name = "app.list"};
+        char tasks[PATH_MAX], game[PATH_MAX];
+        json_init(&empty);
+        json_set_object(&empty);
+        ASSERT(al_path(tasks, sizeof(tasks), bin, "z23"));
+        ASSERT(al_path(game, sizeof(game), bin, "z23-skycombat"));
+        app_launch_test_set_bin_dir(bin);
+        app_launch_test_set_desktop(1);
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        ASSERT(reply.next_count >= 1);
+        ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+        ASSERT(strstr(reply.next[0].input_json, "\"list\"") != NULL);
+        const char *hint = json_get_str(json_get(&reply.data, "next"));
+        ASSERT(hint);
+        ASSERT(strstr(hint, "tasks list") != NULL);
+        zcl_command_reply_free(&reply);
+
+        /* A runnable operator row has no implied source-copy support. */
+        char cfgdir[PATH_MAX], cfg[PATH_MAX], row[8192];
+        ASSERT(al_path(cfgdir, sizeof(cfgdir), home, "z23"));
+        ASSERT(mkdir(cfgdir, 0700) == 0 || errno == EEXIST);
+        ASSERT(al_path(cfg, sizeof(cfg), cfgdir, "apps.tsv"));
+        int row_len = al_row(row, sizeof(row), "operatorapp", "-",
+                             f->bin_ready, "-", "ready", f->raised);
+        ASSERT(row_len > 0 && (size_t)row_len < sizeof(row));
+        ASSERT(al_write_file(cfg, row, 0600));
+        ASSERT(setenv("XDG_CONFIG_HOME", home, 1) == 0);
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        ASSERT_EQ(reply.next_count, 1u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.open");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"name\":\"operatorapp\"}");
+        zcl_command_reply_free(&reply);
+        ASSERT(unsetenv("XDG_CONFIG_HOME") == 0);
+        ASSERT(unlink(cfg) == 0);
+
+        ASSERT(al_copy_exe(f->bin_ready, tasks, 0700));
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        ASSERT(reply.next_count >= 1);
+        ASSERT_STR_EQ(reply.next[0].command, "app.open");
+        ASSERT(strstr(reply.next[0].input_json, "\"tasks\"") != NULL);
+        hint = json_get_str(json_get(&reply.data, "next"));
+        ASSERT(hint);
+        ASSERT(strstr(hint, "open tasks") != NULL);
+        zcl_command_reply_free(&reply);
+
+        /* Structured open and copy retain the selected profile. */
+        char saved_dir[512], expected_open[640], expected_copy[640];
+        snprintf(saved_dir, sizeof(saved_dir), "%s", zcl_native_command_datadir());
+        int saved_port = zcl_native_command_rpc_port();
+        zcl_native_bridge_bind_rpc(f->root, saved_port);
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        zcl_native_bridge_bind_rpc(saved_dir, saved_port);
+        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT(snprintf(expected_open, sizeof(expected_open),
+                        "{\"name\":\"tasks\",\"datadir\":\"%s\"}", f->root) > 0);
+        ASSERT(snprintf(expected_copy, sizeof(expected_copy),
+                        "{\"app\":\"tasks\",\"datadir\":\"%s\"}", f->root) > 0);
+        ASSERT_STR_EQ(reply.next[0].input_json, expected_open);
+        ASSERT_STR_EQ(reply.next[1].input_json, expected_copy);
+        zcl_command_reply_free(&reply);
+
+        char unsafe[512];
+        int un = snprintf(unsafe, sizeof(unsafe), "%s/user's-profile", f->root);
+        ASSERT(un > 0 && (size_t)un < sizeof(unsafe));
+        zcl_native_bridge_bind_rpc(unsafe, saved_port);
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        zcl_native_bridge_bind_rpc(saved_dir, saved_port);
+        ASSERT_EQ(reply.next_count, 0u);
+        hint = json_get_str(json_get(&reply.data, "next"));
+        ASSERT(hint);
+        ASSERT(strstr(hint, "open tasks") != NULL);
+        ASSERT(strstr(hint, "user\\'s-profile") != NULL);
+        zcl_command_reply_free(&reply);
+
+        ASSERT(al_copy_exe(f->bin_ready, game, 0700));
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        ASSERT(reply.next_count >= 2);
+        ASSERT_STR_EQ(reply.next[0].command, "app.open");
+        ASSERT(strstr(reply.next[0].input_json, "\"skycombat\"") != NULL);
+        ASSERT_STR_EQ(reply.next[1].command, "app.adopt");
+        ASSERT_STR_EQ(reply.next[1].input_json, "{\"name\":\"skycombat\"}");
+        hint = json_get_str(json_get(&reply.data, "next"));
+        ASSERT(hint);
+        ASSERT(strstr(hint, "open skycombat") != NULL);
+        zcl_command_reply_free(&reply);
+
+        app_launch_test_set_desktop(0);
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        ASSERT(reply.next_count >= 1);
+        ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+        hint = json_get_str(json_get(&reply.data, "next"));
+        ASSERT(hint);
+        ASSERT(strstr(hint, "tasks list") != NULL);
+        zcl_command_reply_free(&reply);
+        /* An implicit node profile must not replace the private Tasks default. */
+        char old_dir[512], quoted[512];
+        snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+        int old_port = zcl_native_command_rpc_port();
+        int qn = snprintf(quoted, sizeof(quoted), "%s/user's-profile", f->root);
+        ASSERT(qn > 0 && (size_t)qn < sizeof(quoted));
+        zcl_native_bridge_bind_rpc(quoted, old_port);
+        zcl_command_reply_init(&reply, "zcl.app_list.v1");
+        zcl_native_handle_app_list_launchable(&list_request, &reply);
+        zcl_native_bridge_bind_rpc(old_dir, old_port);
+        ASSERT_EQ(reply.next_count, 1u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
+        hint = json_get_str(json_get(&reply.data, "next"));
+        ASSERT(hint);
+        ASSERT(strstr(hint, "tasks list") != NULL);
+        ASSERT(strstr(hint, "-datadir=") == NULL);
+        zcl_command_reply_free(&reply);
+
+        (void)unlink(tasks);
+        (void)unlink(game);
+        app_launch_test_set_bin_dir(NULL);
+        json_free(&empty);
+    PASS(); }
+
+_test_next:;
+    app_launch_test_set_bin_dir(NULL);
+    app_launch_test_set_desktop(-1);
+    zcl_command_reply_free(&reply);
+    al_env_restore(saved, nsaved);
+    if (test_rm_rf_recursive(root) != 0) failures++;
+    return failures;
+}
+
+/* A child owns native bootstrap globals and captures the actual CLI envelope. */
+static bool al_list_profile_cli(struct al_fx *f, bool explicit_profile,
+                                char *out, size_t cap)
+{
+    int fd[2];
+    if (pipe(fd) != 0) return false;
+    pid_t child = fork();
+    if (child < 0) { close(fd[0]); close(fd[1]); return false; }
+    if (child == 0) {
+        close(fd[0]);
+        if (dup2(fd[1], STDOUT_FILENO) < 0) _exit(125);
+        close(fd[1]);
+        app_launch_test_set_bin_dir(f->env.bin_dir);
+        app_launch_test_set_desktop(0);
+        const char *args[] = {"list"};
+        int rc = zcl_native_command_main("app", args, 1, f->root, 0,
+                                         CHAIN_MAIN, explicit_profile);
+        fflush(stdout);
+        _exit(rc);
+    }
+    close(fd[1]);
+    size_t used = 0;
+    ssize_t n;
+    while (used + 1 < cap && (n = read(fd[0], out + used, cap - used - 1)) > 0)
+        used += (size_t)n;
+    close(fd[0]);
+    out[used] = '\0';
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+}
+
+static int case_list_profiles(struct al_fx *f)
+{
+    int failures = 0;
+    static char out[32768];
+    TEST("app.list CLI implicit node profile keeps private Tasks default") {
+        ASSERT(al_list_profile_cli(f, false, out, sizeof(out)));
+        ASSERT(strstr(out, "\"command\":\"app.tasks\"") != NULL);
+        ASSERT(strstr(out, "\"input\":{\"action\":\"list\"}") != NULL);
+        ASSERT(strstr(out, "\"next\":\"z23 app tasks list\"") != NULL);
+        PASS();
+    } TEST("app.list CLI explicit profile remains in Tasks next actions") {
+        ASSERT(al_list_profile_cli(f, true, out, sizeof(out)));
+        ASSERT(strstr(out, "\"command\":\"app.tasks\"") != NULL);
+        ASSERT(strstr(out, "\"action\":\"list\",\"datadir\":") != NULL);
+        ASSERT(strstr(out, f->root) != NULL);
+        ASSERT(strstr(out, "-datadir=") != NULL);
+        PASS();
+    } _test_next:;
     return failures;
 }
 
@@ -926,7 +1131,7 @@ static int case_open_desktop(struct al_fx *f)
         ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
         ASSERT_EQ(reply.next_count, 2u);
         ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
-        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"open\"}");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
         ASSERT_STR_EQ(reply.next[1].command, "app.list");
         zcl_command_reply_free(&reply);
     PASS(); }
@@ -3985,6 +4190,8 @@ _test_next:
     failures += case_stale_record(&f);
     failures += case_process_env(&f);
     failures += case_handlers(&f);
+    failures += case_list_guide(&f);
+    failures += case_list_profiles(&f);
 #if !defined(_WIN32)
     failures += case_open_desktop(&f);
 #endif

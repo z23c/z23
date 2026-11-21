@@ -20,6 +20,7 @@
 #include "command/native_dev_land_remote_shared.h"
 #include "json/json.h"
 #include "platform/process_lock.h"
+#include "platform/path_compat.h"
 #include "util/log_macros.h"
 
 #define APP_LIST_HINT_MAX (4u * APP_LAUNCH_PATH_MAX + 128u)
@@ -376,29 +377,44 @@ static void app_render(const struct app_open_result *r,
     app_push_opt_str(d, "log_tail", r->log_tail);
 }
 
+/* The terminal renderer quotes next-action JSON with shell single quotes. */
+static void app_profile_next(const char *command, const char *key,
+                             const char *value, const char *reason,
+                             const char *dir, struct zcl_command_reply *reply)
+{
+    if (dir && dir[0] && (!platform_path_is_absolute(dir) || strchr(dir, '\''))) return;
+    struct json_value next_args;
+    char wire[APP_LIST_HINT_MAX];
+    json_init(&next_args);
+    json_set_object(&next_args);
+    bool ok = json_push_kv_str(&next_args, key, value) &&
+              (!dir || !dir[0] || json_push_kv_str(&next_args, "datadir", dir));
+    size_t n = ok ? json_write(&next_args, wire, sizeof(wire)) : 0;
+    if (n && n < sizeof(wire))
+        (void)zcl_command_reply_add_next(reply, command, wire, reason);
+    json_free(&next_args);
+}
+
+static void app_tasks_list_next(const char *dir, struct zcl_command_reply *reply)
+{
+    app_profile_next("app.tasks", "action", "list",
+                     "list your tasks without a desktop", dir, reply);
+}
+
 #if !defined(_WIN32)
 static void app_tasks_next(const char *name, const struct json_value *input,
                            struct zcl_command_reply *reply)
 {
-    if ((strcmp(name, "tasks") != 0 && strcmp(name, "task") != 0 &&
-         strcmp(name, "ztasks") != 0) ||
-        zcl_native_command_datadir_is_explicit()) return;
+    if (strcmp(name, "tasks") && strcmp(name, "task") && strcmp(name, "ztasks")) return;
     const struct json_value *value = json_get(input, "datadir");
     const char *dir = value ? json_get_str(value) : NULL;
-    /* The terminal renderer quotes the whole JSON with shell single quotes. */
-    if (value && (!dir || dir[0] != '/' || strchr(dir, '\'')))
-        return;
-    struct json_value next;
-    char wire[384];
-    json_init(&next);
-    json_set_object(&next);
-    bool ok = json_push_kv_str(&next, "action", "open") &&
-              (!dir || json_push_kv_str(&next, "datadir", dir));
-    size_t n = ok ? json_write(&next, wire, sizeof(wire)) : 0;
-    if (n && n < sizeof(wire))
-        (void)zcl_command_reply_add_next(reply, "app.tasks", wire,
-                                         "open the native app");
-    json_free(&next);
+    if (value && !dir) return;
+    if (zcl_native_command_datadir_is_explicit()) {
+        const char *global = zcl_native_command_datadir();
+        if (!global || !global[0] || (dir && strcmp(dir, global))) return;
+        dir = global;
+    }
+    app_tasks_list_next(dir, reply);
 }
 #endif
 
@@ -602,37 +618,73 @@ static bool app_list_kept(const struct app_launch_env *env, struct json_value *l
     return true;
 }
 
-/* Offer the installed-source owner flow for the built-in game. Other catalog
- * entries retain their existing copy route. Neither hint authorizes a write. */
-static void app_list_guide(const struct app_launch_registry *reg,
+/* The headless Tasks action needs no installed desktop app. */
+static void app_list_tasks_guide(struct zcl_command_reply *reply)
+{
+    const char *datadir = zcl_native_command_datadir_is_explicit() ?
+        zcl_native_command_datadir() : NULL;
+    char text[APP_LIST_HINT_MAX];
+    app_tasks_list_next(datadir, reply);
+#if defined(_WIN32)
+    /* zcl_app_hint is POSIX-shell text; Windows callers use next JSON. */
+    if (datadir && datadir[0]) return;
+#endif
+    if ((!datadir || !datadir[0] || platform_path_is_absolute(datadir)) &&
+        zcl_app_hint(text, sizeof(text), datadir, "tasks list"))
+        (void)json_push_kv_str(&reply->data, "next", text);
+}
+
+static const struct app_launch_entry *app_list_first_installed(
+    const struct app_launch_env *env, const struct app_launch_registry *reg)
+{
+#if !defined(_WIN32)
+    if (env->desktop) {
+        for (unsigned i = 0; i < reg->count; i++)
+            if (reg->entries[i].installed && app_launch_entry_is_windowed(&reg->entries[i]))
+                return &reg->entries[i];
+    }
+#else
+    (void)env;
+    (void)reg;
+#endif
+    return NULL;
+}
+
+
+static void app_list_copy_guide(const struct app_launch_entry *entry,
+                                struct zcl_command_reply *reply)
+{
+    if (!entry->builtin) return;
+    bool installed_source = !strcmp(entry->id, "skycombat");
+    app_profile_next(installed_source ? "app.adopt" : "app.copy",
+                     installed_source ? "name" : "app", entry->id,
+                     installed_source ? "review Make my copy, then preview and Keep" :
+                                        "make your own copy of it",
+                     zcl_native_command_datadir(), reply);
+}
+
+/* List only an installed windowed app as an open action. Kept-source
+ * navigation is added separately after this guide. */
+static void app_list_guide(const struct app_launch_env *env,
+                           const struct app_launch_registry *reg,
                            struct zcl_command_reply *reply)
 {
-    char input[128];
     (void)json_push_kv_str(&reply->data, "summary",
-                           "To change a kept version, use app.customize with its exact kept: ID from launchable, not the builtin name. "
-                           "The read validates source and returns its revision; listing is not source admission. "
-                           "launchable apps open with z23 app open NAME; "
-                           "z23 app adopt --name=skycombat offers a personal copy "
-                           "from its installed source");
-    if (reg->count == 0)
+        "Open an installed app in a desktop session, or use app.tasks to list tasks in a terminal. "
+        "To inspect a saved copy, use app.customize with its exact kept: ID to get its revision.");
+    const struct app_launch_entry *entry = app_list_first_installed(env, reg);
+    if (!entry) {
+        app_list_tasks_guide(reply);
         return;
+    }
     char text[APP_LIST_HINT_MAX];
     if (zcl_app_hint(text, sizeof(text), zcl_native_command_datadir(),
-                     "open %s", reg->entries[0].id))
+                     "open %s", entry->id))
         (void)json_push_kv_str(&reply->data, "next", text);
-    if (snprintf(input, sizeof(input), "{\"name\":\"%s\"}",
-                 reg->entries[0].id) < (int)sizeof(input))
-        (void)zcl_command_reply_add_next(reply, "app.open", input,
-                                         "open this launchable app");
-    bool installed_source = reg->entries[0].builtin &&
-        !strcmp(reg->entries[0].id, "skycombat");
-    if (snprintf(input, sizeof(input), "{\"%s\":\"%s\"}",
-                 installed_source ? "name" : "app",
-                 reg->entries[0].id) < (int)sizeof(input))
-        (void)zcl_command_reply_add_next(reply,
-            installed_source ? "app.adopt" : "app.copy", input,
-            installed_source ? "review Make my copy, then preview and Keep" :
-                               "make your own copy of it");
+    app_profile_next("app.open", "name", entry->id,
+                     "open this installed app in a desktop session",
+                     zcl_native_command_datadir(), reply);
+    app_list_copy_guide(entry, reply);
 }
 
 static void app_list_launchable_body(
@@ -665,7 +717,7 @@ static void app_list_launchable_body(
             "KEPT_LIST_REFUSED", "list", false, false,
             "kept selections are unreadable, corrupt, or exceed the bounded list", w->env.state_dir);
     }
-    app_list_guide(&w->reg, reply);
+    app_list_guide(&w->env, &w->reg, reply);
     if (reply->status == ZCL_COMMAND_STATUS_PASSED && !app_list_kept_next(&list, reply))
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
             "KEPT_LIST_REFUSED", "list", false, false,
