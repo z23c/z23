@@ -282,7 +282,7 @@ static int cache_generation_acquire(const char *root, const char *dir,
         close(fd);
         return -2;
     }
-    do { rc = flock(fd, LOCK_SH); } while (rc != 0 && errno == EINTR);
+    do { rc = flock(fd, LOCK_SH | LOCK_NB); } while (rc != 0 && errno == EINTR);
     /* A busy gate never creates another generation. A downgrade may also
      * lose the just-created directory to a peer before shared lock acquisition. */
     if (rc != 0 || stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) { close(fd); return -1; }

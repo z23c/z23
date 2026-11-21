@@ -15,6 +15,9 @@
 #include <dirent.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/file.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -505,9 +508,10 @@ static int sh_active_retention(struct sh_env *e, const char *stub, const char *f
 {
     int ready[2], resume[2], status;
     char token;
-    if (pipe(ready) || pipe(resume)) return 2;
+    if (pipe(ready) != 0) return 2;
+    if (pipe(resume) != 0) { close(ready[0]); close(ready[1]); return 2; }
     pid_t pid = fork();
-    if (pid < 0) return 2;
+    if (pid < 0) { close(ready[0]); close(ready[1]); close(resume[0]); close(resume[1]); return 2; }
     if (pid == 0) {
         close(ready[0]); close(resume[1]);
         _exit(sh_active_child(e, stub, flags, ready[1], resume[0]));
@@ -524,6 +528,81 @@ static int sh_active_retention(struct sh_env *e, const char *stub, const char *f
 }
 
 
+static bool sh_exclusive_misses(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    int n = 0, ch;
+    while ((ch = fgetc(f)) != EOF) if (ch == '\n') n++;
+    int failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    return !failed && n == SH_UNITS;
+}
+
+
+static int sh_exclusive_peer(const struct sh_env *e, const char *stub, const char *flags)
+{
+    char miss[SH_P], out[SH_P], log[SH_P], rc[SH_P];
+    if (chdir(e->tree[0]) != 0 ||
+        wcs_cache_setup("tu-cache-shared-selftest", stub, stub, flags,
+                        e->work[0], ".", NULL) != 0 || wcs_cache_on()) return 2;
+    shp(miss, sizeof miss, "%s/exclusive-miss", e->work[0]);
+    shp(out, sizeof out, "%s/out", e->work[0]);
+    shp(log, sizeof log, "%s/exclusive.log", e->work[0]);
+    shp(rc, sizeof rc, "%s/exclusive.rc", e->work[0]);
+    if (wcs_cache_plan(e->list[0], miss, out, 1) != 0) return 2;
+    if (!sh_exclusive_misses(miss)) return 2;
+    char *const args[] = {(char *)stub, (char *)"-c", (char *)"src/s0.c", NULL};
+    if (wcs_cache_compile(log, rc, stub, args, "src/s0.c") != 0) return 2;
+    FILE *f = fopen(rc, "r");
+    if (!f) return 2;
+    int status = -1, ok = fscanf(f, "%d", &status) == 1 && status == 0;
+    if (fclose(f) != 0) ok = 0;
+    return ok ? 0 : 2;
+}
+
+static int sh_exclusive_wait(pid_t pid, int read_fd, int lock_fd)
+{
+    struct pollfd pfd = {.fd = read_fd, .events = POLLIN};
+    int polled = poll(&pfd, 1, 10000);
+    char result = 2;
+    bool ok = polled == 1 && read(read_fd, &result, 1) == 1 && result == 0;
+    if (!ok) (void)kill(pid, SIGKILL);
+    close(read_fd);
+    int status;
+    pid_t got;
+    do { got = waitpid(pid, &status, 0); } while (got < 0 && errno == EINTR);
+    close(lock_fd);
+    if (!ok || got != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return sh_fail("exclusive cache lock stalled or prevented uncached compile");
+    return 0;
+}
+
+
+static int sh_exclusive_case(const struct sh_env *e, const char *stub, const char *flags)
+{
+    char lock[SH_P];
+    shp(lock, sizeof lock, "%s/.cache/z23/lint-tu/tu-cache-shared-selftest/.generation.lock", e->home);
+    wcs_cache_release();
+    int fd = open(lock, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return 2;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); return 2; }
+    int done[2];
+    if (pipe(done) != 0) { close(fd); return 2; }
+    pid_t pid = fork();
+    if (pid < 0) { close(done[0]); close(done[1]); close(fd); return 2; }
+    if (pid == 0) {
+        close(done[0]); close(fd);
+        char result = (char)sh_exclusive_peer(e, stub, flags);
+        int sent = write(done[1], &result, 1) == 1;
+        close(done[1]);
+        _exit(sent ? 0 : 2);
+    }
+    close(done[1]);
+    return sh_exclusive_wait(pid, done[0], fd);
+}
+
+
 static int sh_retention(struct sh_env *e, const char *stub, const char *flags)
 {
     const char *value = getenv("ZCL_LINT_TU_CACHE_GENERATIONS");
@@ -532,6 +611,7 @@ static int sh_retention(struct sh_env *e, const char *stub, const char *flags)
     int rc = setenv("ZCL_LINT_TU_CACHE_GENERATIONS", "1", 1) == 0 ?
         sh_active_retention(e, stub, flags) : 2;
     if (rc == 0) rc = sh_retention_case(e, stub, flags);
+    if (rc == 0) rc = sh_exclusive_case(e, stub, flags);
     int restored = saved ? setenv("ZCL_LINT_TU_CACHE_GENERATIONS", saved, 1) :
         unsetenv("ZCL_LINT_TU_CACHE_GENERATIONS");
     free(saved);
