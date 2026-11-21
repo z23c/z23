@@ -113,6 +113,7 @@ is classified `exclusive` and queues behind shared z23 jobs. Its admission line,
 `devbuild: z23 class normal lane N`, can follow a `devbuild: note:` line.
 
 Inspect before editing: `pwd`, `git status --short --branch`,
+set -e; /base=$(git merge-base HEAD origin/main)/i git rev-parse HEAD
 `git fetch origin main`, `git rev-parse HEAD origin/main`. On a fresh clone,
 `make setup` (under `devbuild --wait`) arms dependencies and hooks. Descend the
 command catalog through `discover help <path>`, search with
@@ -151,6 +152,24 @@ the less loaded build host and tests the committed tree only, so commit first;
 tracked edits are refused. `r2gate` runs the gate on the second host. Its own
 queue check can hand the job back to `zgate`, which sets `R2GATE_FORCE=1` to
 skip that check.
+
+For `ONLY=@changed`, bind the sender base explicitly: the receiver
+`origin/main` may be older even when it has the committed candidate. From the
+clean candidate worktree, fetch and calculate its merge-base, then pass it to
+the admitted direct route:
+
+```sh
+set -e; /base=$(git merge-base HEAD origin/main)/i git rev-parse HEAD
+git fetch origin main
+base=$(git merge-base HEAD origin/main)
+git merge-base --is-ancestor "$base" HEAD
+R2GATE_FORCE=1 "$HOME/.local/lib/z23/tools/r2gate" "$PWD" \
+  agent-verify 'ONLY=@changed' "AGENT_VERIFY_BASE=$base"
+```
+
+Check the archived `source-identity.txt` for the candidate commit and the
+`agent-verify: selection` line in `job.log` for the intended base and group
+count. A successful remote run with a different base is not that selection.
 
 `devbuild` keeps the gate local for a dirty tree, a subdirectory, `ZCL_` or
 `Z23_` environment variables, other targets, flags or variables, a nested
@@ -574,6 +593,7 @@ Then identify the checkout and preserve existing work:
 ```bash
 pwd
 git status --short --branch
+set -e; /base=$(git merge-base HEAD origin/main)/i git rev-parse HEAD
 git fetch origin main
 git rev-parse HEAD origin/main
 ```
