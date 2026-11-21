@@ -1497,6 +1497,18 @@ static int test_ic_capacity_provenance(void)
         zcl_devloop_capacity_set_node(&plan, NULL);
         zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
         ASSERT(strstr(selection.detail, "capacity_input=batch capacity_node=unknown") != NULL);
+        zcl_devloop_capacity_reset_closure(&plan);
+        zcl_devloop_capacity_note(&plan, "include", "group-cap",
+                                 "engine/composition/commands/core.def");
+        zcl_devloop_capacity_set_node(&plan,
+                                      "tests/harness/src/test_wallet_destruction_drill.c");
+        zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
+        ASSERT_STR_EQ(selection.detail,
+            "capacity_origin=include capacity_cause=group-cap "
+            "capacity_input=engine/composition/commands/core.def "
+            "capacity_node=known:tests/harness/src/test_wallet_destruction_drill.c");
+        zcl_devloop_capacity_reset_closure(&plan);
+        zcl_devloop_capacity_note(&plan, "semantic", "caller_query_saturated", "batch");
         char encoded_overflow[60];
         memset(encoded_overflow, '%', sizeof(encoded_overflow) - 1);
         encoded_overflow[sizeof(encoded_overflow) - 1] = '\0';
@@ -1518,8 +1530,8 @@ static int test_ic_capacity_provenance(void)
         long_input[200] = '\0';
         zcl_devloop_capacity_note(&plan, "include", "file-cap", long_input);
         zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
-        ASSERT_STR_EQ(selection.detail,
-                      "capacity_origin=include capacity_cause=file-cap capacity_input=unknown capacity_node=unknown");
+        ASSERT(strstr(selection.detail, long_input) != NULL);
+        ASSERT(strstr(selection.detail, "capacity_node=unknown") != NULL);
         zcl_devloop_capacity_reset_closure(&plan);
         zcl_devloop_capacity_note(&plan, "path", "group-cap", "file.c");
         plan.path_universal = true;

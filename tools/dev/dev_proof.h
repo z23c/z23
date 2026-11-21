@@ -449,7 +449,7 @@ struct zcl_dev_proof_range_selection {
     bool route_only;
     uint32_t unrouted;
     const char *reason;
-    char detail[160];
+    char detail[512];
     char gated[PROOF_HOST_GATED_MAX];
     /* Monotonic microseconds; -1 means unavailable or not applicable. */
     int64_t changed_set_us, path_plan_us, closure_us, groups_us;
