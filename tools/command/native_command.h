@@ -550,6 +550,9 @@ struct zcl_native_local_publication {
 void zcl_native_zcode_local_publication_commit(
     const struct zcl_native_local_publication *publication,
     struct zcl_command_reply *reply);
+void zcl_native_zcode_local_publication_commit_classified(
+    const struct zcl_native_local_publication *publication,
+    struct zcl_command_reply *reply, bool *stale_publisher_sequence);
 /* zcode.workspace.source.bundle file I/O (native_zcode_source_bundle_command.c),
  * shared with the .z23share leaves: a stable read of one non-empty regular
  * file of at most 64 MiB (caller frees; NULL on refusal), and an exclusive

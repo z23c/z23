@@ -518,6 +518,24 @@ bool zcl_test_app_receive_progress(const struct zcl_command_request *request,
     return ar_progress_commit(request, NULL, reply, presenter, context, hooks);
 }
 #endif
+static void ar_stale_notice(struct zcl_command_reply *reply,
+    app_confirm_presenter presenter, void *context)
+{
+    const struct json_value *stale = json_get(&reply->data, "stale_publisher_sequence");
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED || !stale || stale->type != JSON_BOOL || !json_get_bool(stale)) return;
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-receive-stale");
+    if (!view) return;
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "receive-stale");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "A newer release is already known");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary),
+        "%s", reply->error.message);
+    view->model.action_count = 1;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    char why[256];
+    if (app_confirm_prepare(view, why, sizeof(why))) (void)app_confirm_show(view, presenter, context, why, sizeof(why));
+    app_confirm_free(view); free(view);
+}
 static void ar_commit_preview(const struct zcl_command_request *request,
     struct receive_work *w, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, const char *worker_path,
@@ -528,6 +546,7 @@ static void ar_commit_preview(const struct zcl_command_request *request,
         , NULL
 #endif
     );
+    ar_stale_notice(reply, presenter, context);
     const char *stage = zcl_package_copy_str(&reply->data, "stage");
     if (offer && w->preview && reply->status == ZCL_COMMAND_STATUS_PASSED &&
         reply->exit_code == 0 && stage && !strcmp(stage, "commit"))

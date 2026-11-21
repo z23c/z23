@@ -377,6 +377,7 @@ static bool zpb_trusted(struct zpb_receive *s)
 static bool zpb_store(struct zpb_receive *s, const struct zpb_keep *k)
 {
     struct zcl_command_reply sub;
+    bool stale = false;
     const struct json_value *day = json_get(s->input, "day");
     const struct zcl_native_local_publication publication = {
         .datadir = k->datadir, .source_directory = s->share.src,
@@ -394,14 +395,15 @@ static bool zpb_store(struct zpb_receive *s, const struct zpb_keep *k)
         .owner_local = true,
     };
     zcl_command_reply_init(&sub, "zcl.zcode_package_publish_commit.v1");
-    zcl_native_zcode_local_publication_commit(&publication, &sub);
+    zcl_native_zcode_local_publication_commit_classified(&publication, &sub, &stale);
     bool ok = sub.status == ZCL_COMMAND_STATUS_PASSED;
-    if (!ok)
-        zcl_package_copy_fail(s->reply, "RECEIVE_STORE_REFUSED",
-                              sub.error.mutated,
-                              "the local package store refused the verified "
-                              "release", sub.error.evidence[0]
-                                  ? sub.error.evidence : sub.error.message);
+    if (!ok) {
+        zcl_package_copy_fail(s->reply, "RECEIVE_STORE_REFUSED", sub.error.mutated,
+            stale ? "This profile already knows a newer release from this publisher. Ask the sender for an updated share." :
+                "the local package store refused the verified release",
+            sub.error.evidence[0] ? sub.error.evidence : sub.error.message);
+        if (stale) (void)json_push_kv_bool(&s->reply->data, "stale_publisher_sequence", true);
+    }
     zcl_command_reply_free(&sub);
     return ok;
 }

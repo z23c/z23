@@ -1362,10 +1362,11 @@ static bool zc_local_wires_valid(const struct zcl_native_local_publication *p)
         p->recipe_wire_len <= VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES;
 }
 
-void zcl_native_zcode_local_publication_commit(
+void zcl_native_zcode_local_publication_commit_classified(
     const struct zcl_native_local_publication *p,
-    struct zcl_command_reply *reply)
+    struct zcl_command_reply *reply, bool *stale_publisher_sequence)
 {
+    if (stale_publisher_sequence) *stale_publisher_sequence = false;
     if (!reply)
         return;
     if (!p || !p->datadir || !p->datadir[0] ||
@@ -1401,7 +1402,17 @@ void zcl_native_zcode_local_publication_commit(
         zc_commit_cleanup(&c);
         return;
     }
+    if (stale_publisher_sequence && c.report.failure_count &&
+        c.report.failures[0].rule == VCS_PACKAGE_PUBLISH_RULE_ACCEPT &&
+        c.report.accept == VCS_PACKAGE_ACCEPT_STALE)
+        *stale_publisher_sequence = true;
     zc_commit_local(&c);
+}
+
+void zcl_native_zcode_local_publication_commit(
+    const struct zcl_native_local_publication *p, struct zcl_command_reply *reply)
+{
+    zcl_native_zcode_local_publication_commit_classified(p, reply, NULL);
 }
 
 void zcl_native_handle_zcode_package_publish_commit(

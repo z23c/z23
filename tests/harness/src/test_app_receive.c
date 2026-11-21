@@ -2434,9 +2434,77 @@ static int rz_open_case(void)
     zcl_command_reply_free(&reply); json_free(&input); return failures;
 }
 
+struct rt_sequence_view { bool consent, notice; };
+static bool rt_sequence_present(void *context, const struct zcl_present_model_v1 *m,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct rt_sequence_view *view = context;
+    if (!strcmp(m->request_id, "receive-copy")) return rt_progress_present(m, pages, live);
+    if (!strcmp(m->request_id, "receive-stale")) {
+        view->notice = strstr(m->summary, "newer release") && strstr(m->summary, "updated share");
+        bool close = false, redraw = false;
+        return rt_action(live, 0, &close, &redraw) && close;
+    }
+    uint32_t count = 0; struct rt_presenter p = {.decision = RT_CONFIRM};
+    if (!zcl_present_model_page_count_v1(m, &count, why, cap) || count < 2 ||
+        !rt_page_through(&p, live, count)) return false;
+    view->consent = true;
+    return rt_finish(&p, live);
+}
+static bool rt_sequence_attempt(struct receive_fixture *f, const char *file,
+    const char *destination, struct rt_sequence_view *view, struct zcl_command_reply *reply)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "file", file) &&
+        json_push_kv_str(&input, "datadir", f->datadir) &&
+        json_push_kv_str(&input, "destination", destination) && json_push_kv_int(&input, "day", 20400);
+    struct zcl_command_request request = {.input = &input};
+    if (ok) zcl_test_app_receive_run(&request, reply, rt_sequence_present, view);
+    json_free(&input); return ok;
+}
+static bool rt_sequence_trust(const char *copy_path, const char *datadir,
+    struct zcl_package_receive_trust *trust)
+{
+    struct zcl_package_copy copy;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.receive.v1");
+    bool opened = zcl_package_copy_open_selected_as(copy_path, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test", NULL);
+    bool ok = opened && zcl_package_receive_trust_read(datadir, copy.fork_version, copy.parent_release, trust);
+    if (opened) zcl_package_copy_close(&copy);
+    zcl_command_reply_free(&reply); return ok;
+}
+static int rt_stale_sequence_case(void)
+{
+    int failures = 0; struct receive_fixture f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST("older signed release is refused with an actionable native notice") {
+        ASSERT(rt_setup(&f));
+        char newer[900]; ASSERT(snprintf(newer, sizeof(newer), "%s/newer-copy", f.world.root) > 0);
+        struct rt_sequence_view first = {0}, stale = {0};
+        ASSERT(rt_sequence_attempt(&f, f.alternate, newer, &first, &reply));
+        ASSERT(first.consent && !first.notice && reply.status == ZCL_COMMAND_STATUS_PASSED && reply.error.mutated);
+        struct zcl_package_receive_trust before = {0}, after = {0};
+        ASSERT(rt_sequence_trust(newer, f.datadir, &before));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+        ASSERT(rt_sequence_attempt(&f, f.file, f.destination, &stale, &reply));
+        ASSERT(stale.consent && stale.notice && rt_failed_with(&reply, "RECEIVE_STORE_REFUSED") && !reply.error.mutated);
+        ASSERT(strstr(reply.error.evidence, "stale-publisher-sequence"));
+        struct stat st; ASSERT(lstat(f.destination, &st) != 0 && errno == ENOENT);
+        ASSERT(lstat(newer, &st) == 0 && S_ISDIR(st.st_mode));
+        ASSERT(rt_sequence_trust(newer, f.datadir, &after) && !memcmp(&before, &after, sizeof(before)));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+        struct rt_sequence_view missing = {0};
+        ASSERT(rt_sequence_attempt(&f, f.backup, f.destination, &missing, &reply));
+        ASSERT(!missing.notice && !missing.consent && reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); return failures;
+}
+
 int test_app_receive(void)
 {
     int failures = rt_wrap_cases();
+    failures += rt_stale_sequence_case();
     struct receive_fixture f;
     TEST("app.receive requires all-page native confirmation and rechecks the exact signed file") {
         ASSERT(rt_setup(&f));
