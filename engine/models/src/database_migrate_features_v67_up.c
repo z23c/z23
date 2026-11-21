@@ -258,14 +258,14 @@ static int db_migrate_step_83(struct node_db *ndb, int *current_ver,
 static bool db_migrate_v84_arrivals(struct node_db *ndb, int *state)
 {
     static const char sql[] =
-        "SELECT CASE WHEN EXISTS(SELECT 1 FROM fleet_board_posts "
+        "SELECT CASE WHEN EXISTS(SELECT 1 FROM main.fleet_board_posts "
         "WHERE typeof(arrival)<>'integer' OR arrival<0) THEN -1 "
-        "WHEN EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival=0) "
-        "AND EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival>0) THEN -1 "
-        "WHEN EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival=0) "
-        "AND (EXISTS(SELECT 1 FROM fleet_board_posts WHERE typeof(seq)<>'integer' OR seq<=0) "
-        "OR EXISTS(SELECT seq FROM fleet_board_posts GROUP BY seq HAVING count(*)>1)) THEN -1 "
-        "WHEN EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival=0) THEN 1 ELSE 0 END";
+        "WHEN EXISTS(SELECT 1 FROM main.fleet_board_posts WHERE arrival=0) "
+        "AND EXISTS(SELECT 1 FROM main.fleet_board_posts WHERE arrival>0) THEN -1 "
+        "WHEN EXISTS(SELECT 1 FROM main.fleet_board_posts WHERE arrival=0) "
+        "AND (EXISTS(SELECT 1 FROM main.fleet_board_posts WHERE typeof(seq)<>'integer' OR seq<=0) "
+        "OR EXISTS(SELECT seq FROM main.fleet_board_posts GROUP BY seq HAVING count(*)>1)) THEN -1 "
+        "WHEN EXISTS(SELECT 1 FROM main.fleet_board_posts WHERE arrival=0) THEN 1 ELSE 0 END";
     return db_migrate_inspect_scalar(ndb, sql, state);
 }
 
@@ -285,15 +285,29 @@ static bool db_migrate_v84_index(struct node_db *ndb, int *state)
     return db_migrate_inspect_scalar(ndb, sql, state);
 }
 
+/* Recheck after UPDATE: a trigger may suppress a row without an SQL error. */
+static bool db_migrate_v84_backfill(struct node_db *ndb)
+{
+    int state = 0;
+    if (!db_migrate_v84_arrivals(ndb, &state) || state < 0) return false;
+    if (state == 0) return true;
+    int triggers = 0;
+    if (!db_migrate_inspect_scalar(ndb,
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='fleet_board_posts' COLLATE NOCASE "
+            "UNION ALL SELECT 1 FROM sqlite_temp_schema WHERE type='trigger' AND tbl_name='fleet_board_posts' COLLATE NOCASE)",
+            &triggers) || triggers != 0) return false;
+    if (!node_db_exec(ndb, "UPDATE main.fleet_board_posts SET arrival=seq")) return false;
+    return db_migrate_v84_arrivals(ndb, &state) && state == 0;
+}
+
 static bool db_migrate_v84_apply(struct node_db *ndb, int floor)
 {
-    int column = 0, arrivals = 0, index = 0;
+    int column = 0, index = 0;
     bool ok = db_migrate_board_arrival_column(ndb, &column) && column >= 0;
     if (ok && column == 0) ok = node_db_exec(ndb,
         "ALTER TABLE main.fleet_board_posts ADD COLUMN arrival INTEGER NOT NULL DEFAULT 0 CHECK(arrival>=0)");
-    if (ok) ok = db_migrate_v84_arrivals(ndb, &arrivals) && arrivals >= 0;
     if (ok) ok = db_migrate_v84_index(ndb, &index) && index >= 0;
-    if (ok && arrivals == 1) ok = node_db_exec(ndb, "UPDATE main.fleet_board_posts SET arrival=seq");
+    if (ok) ok = db_migrate_v84_backfill(ndb);
     if (ok && index == 0) ok = node_db_exec(ndb,
         "CREATE UNIQUE INDEX main.idx_fleet_board_arrival ON fleet_board_posts(arrival)");
     if (ok) ok = node_db_exec(ndb, "INSERT OR IGNORE INTO schema_migrations(version) VALUES('084')");
@@ -1307,13 +1321,15 @@ static int db_migrate_step_80(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
-static int db_migrate_steps_80_83(struct node_db *ndb, int *version, int *floor, int *applied)
+static int db_migrate_steps_80_84(struct node_db *ndb, int *version, int *floor, int *applied)
 {
     if (db_migrate_step_80(ndb, version, floor, applied) < 0) return -1;
     (void)db_migrate_step_81(ndb, version, floor, applied);
     if (db_migrate_step_82(ndb, version, applied, *floor) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_step_83(ndb, version, floor, applied) < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    if (db_migrate_step_84(ndb, version, floor, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     return 0;
 }
@@ -1368,10 +1384,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
             return r;
         }
     }
-    int steps_80_83 = db_migrate_steps_80_83(ndb, &current_ver, &floor_ver, &applied);
-    if (steps_80_83 < 0) return steps_80_83;
-    if (db_migrate_step_84(ndb, &current_ver, &floor_ver, &applied) < 0)
-        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    int steps_80_84 = db_migrate_steps_80_84(ndb, &current_ver, &floor_ver, &applied);
+    if (steps_80_84 < 0) return steps_80_84;
     return db_migrate_finish_87(ndb, &current_ver, &floor_ver, &applied,
                                 version, floor);
 }

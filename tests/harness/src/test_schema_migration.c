@@ -263,6 +263,13 @@ static bool sm_v84_denied_stamp(struct node_db *db, struct fleet_board_post *exp
            preserved && zero == 1 && indexes == 0 && sm_row_count(db, 84) == 0 && sqlite3_get_autocommit(db->db);
 }
 
+static bool sm_v84_assigned_guard(struct node_db *db, int64_t prior)
+{
+    return prior != 73 || node_db_exec(db,
+        "CREATE TEMP TRIGGER preserve_assigned BEFORE UPDATE OF arrival ON main.fleet_board_posts "
+        "BEGIN SELECT RAISE(IGNORE); END");
+}
+
 static bool sm_v84_cursor_replay(int64_t prior, bool refuse_ledger)
 {
     struct sm_fixture f;
@@ -277,6 +284,7 @@ static bool sm_v84_cursor_replay(int64_t prior, bool refuse_ledger)
     if (ok) ok = node_db_exec(&f.ndb, prior == 0
         ? "UPDATE fleet_board_posts SET arrival=0"
         : "UPDATE fleet_board_posts SET arrival=73");
+    if (ok) ok = sm_v84_assigned_guard(&f.ndb, prior);
     if (ok && refuse_ledger) ok = sm_v84_denied_stamp(&f.ndb, &post);
     int result = ok ? node_db_migrate(&f.ndb, NULL) : -1;
     int64_t cursor = 0;
@@ -286,6 +294,83 @@ static bool sm_v84_cursor_replay(int64_t prior, bool refuse_ledger)
            (long long)prior, result, node_db_schema_version(&f.ndb), visited, (long long)cursor);
     ok = ok && result > 0 && node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST &&
          visited == 1 && cursor == (prior == 0 ? 1 : prior);
+    zcl_fleet_role_checker_install(NULL);
+    sm_fixture_destroy(&f);
+    return ok;
+}
+
+static bool sm_v84_ambiguous_preserved(struct sm_fixture *f,
+                                        const struct fleet_board_post *post,
+                                        bool mixed)
+{
+    struct db_fleet_board_post row;
+    if (sm_scalar(&f->ndb, "SELECT count(*) FROM fleet_board_posts") != (mixed ? 2 : 1) ||
+        !db_fleet_board_post_find(&f->ndb, post->id, &row) || !sm_visit_cursor_post(&row, post))
+        return false;
+    if (mixed) return row.arrival == 73 &&
+        sm_scalar(&f->ndb, "SELECT count(*) FROM fleet_board_posts WHERE arrival=0") == 1;
+    return row.arrival == 0 && sm_scalar(&f->ndb,
+        "SELECT count(*) FROM sqlite_master WHERE name='idx_fleet_board_arrival' AND tbl_name='other_board_index'") == 1;
+}
+
+static bool sm_v84_refuses_ambiguous(bool mixed)
+{
+    struct sm_fixture f;
+    struct fleet_board_post post = {0};
+    if (!sm_fixture_init(&f)) return false;
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    int32_t version = 83;
+    bool ok = sm_seed_cursor_post(&f.ndb, &post) &&
+        node_db_exec(&f.ndb, "DROP INDEX idx_fleet_board_arrival;"
+                             "DELETE FROM schema_migrations WHERE version>='084'") &&
+        node_db_state_set(&f.ndb, "schema_version", &version, sizeof(version));
+    if (ok && mixed) ok = node_db_exec(&f.ndb,
+        "INSERT INTO fleet_board_posts(id,seq,kind,created_at,ttl,expires_at,ref,host_pubkey,agent,slug,title,supersedes,receipt,text,body_bytes,signature,chain_prev,chain_hash,received_at,scope,room,arrival) "
+        "SELECT randomblob(32),seq+1,kind,created_at,ttl,expires_at,ref,host_pubkey,agent,slug,title,supersedes,receipt,text,body_bytes,signature,chain_prev,chain_hash,received_at,scope,room,0 FROM fleet_board_posts;"
+        "UPDATE fleet_board_posts SET arrival=73 WHERE seq=1");
+    if (ok && !mixed) ok = node_db_exec(&f.ndb,
+        "UPDATE fleet_board_posts SET arrival=0; CREATE TABLE other_board_index(x);"
+        "CREATE INDEX idx_fleet_board_arrival ON other_board_index(x)");
+    int rc = ok ? node_db_migrate(&f.ndb, NULL) : 0;
+    ok = ok && rc == -1 && node_db_schema_version(&f.ndb) == 83 &&
+        sm_row_count(&f.ndb, 84) == 0 && sqlite3_get_autocommit(f.ndb.db) &&
+        sm_v84_ambiguous_preserved(&f, &post, mixed);
+    zcl_fleet_role_checker_install(NULL);
+    sm_fixture_destroy(&f);
+    return ok;
+}
+
+static bool sm_v84_ignored_preserved(struct sm_fixture *f,
+                                     struct fleet_board_post *post, int floor)
+{
+    struct db_fleet_board_post row;
+    return node_db_schema_version(&f->ndb) == 83 &&
+        node_db_schema_compat_floor(&f->ndb) == floor && sm_row_count(&f->ndb, 84) == 0 &&
+        sm_obj_count(&f->ndb, "index", "idx_fleet_board_arrival") == 0 &&
+        sm_scalar(&f->ndb, "SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name='ignore_arrival'") == 1 &&
+        sqlite3_get_autocommit(f->ndb.db) &&
+        db_fleet_board_post_find(&f->ndb, post->id, &row) && row.arrival == 0 &&
+        sm_visit_cursor_post(&row, post);
+}
+
+static bool sm_v84_refuses_triggered_update(bool deleting)
+{
+    struct sm_fixture f;
+    struct fleet_board_post post = {0};
+    if (!sm_fixture_init(&f)) return false;
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    int32_t version = 83;
+    bool ok = sm_seed_cursor_post(&f.ndb, &post) &&
+        node_db_exec(&f.ndb, "DROP INDEX idx_fleet_board_arrival;"
+                             "DELETE FROM schema_migrations WHERE version>='084';"
+                             "UPDATE fleet_board_posts SET arrival=0") &&
+        node_db_state_set(&f.ndb, "schema_version", &version, sizeof(version));
+    int floor = node_db_schema_compat_floor(&f.ndb);
+    if (ok) ok = node_db_exec(&f.ndb, deleting
+        ? "CREATE TEMP TRIGGER ignore_arrival AFTER UPDATE OF arrival ON main.fleet_board_posts BEGIN DELETE FROM fleet_board_posts WHERE id=NEW.id; END"
+        : "CREATE TEMP TRIGGER ignore_arrival BEFORE UPDATE OF arrival ON main.fleet_board_posts BEGIN SELECT RAISE(IGNORE); END");
+    int rc = ok ? node_db_migrate(&f.ndb, NULL) : 0;
+    ok = ok && rc == -1 && sm_v84_ignored_preserved(&f, &post, floor);
     zcl_fleet_role_checker_install(NULL);
     sm_fixture_destroy(&f);
     return ok;
@@ -1616,6 +1701,10 @@ int test_schema_migration(void)
     SM_CHECK("v84 replays an unfinished cursor backfill", sm_v84_cursor_replay(0, false));
     SM_CHECK("v84 preserves an assigned fleet cursor", sm_v84_cursor_replay(73, false));
     SM_CHECK("v84 refuses a ledger failure and retries", sm_v84_cursor_replay(0, true));
+    SM_CHECK("v84 refuses mixed cursor states", sm_v84_refuses_ambiguous(true));
+    SM_CHECK("v84 preserves a foreign index", sm_v84_refuses_ambiguous(false));
+    SM_CHECK("v84 refuses an ignored backfill", sm_v84_refuses_triggered_update(false));
+    SM_CHECK("v84 refuses a deleting trigger", sm_v84_refuses_triggered_update(true));
     failures += sm_migrate_version_read();
     for (int fault = SM_MARKER_NESTED; fault <= SM_MARKER_COMMIT; fault++)
         failures += sm_marker_failure((enum sm_marker_fault)fault);
