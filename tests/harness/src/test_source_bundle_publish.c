@@ -313,19 +313,105 @@ static void sbp_run_fetch(const char *root_hex, const char *out_path,
 /* Drive the checkout leaf — materializing what arrived. */
 static void sbp_run_checkout(const char *bundle, const char *root_hex,
                              const char *cas, const char *destination,
-                             struct zcl_command_reply *reply)
+                             bool direct, struct zcl_command_reply *reply)
 {
     struct json_value input;
     json_init(&input);
     json_set_object(&input);
     (void)json_push_kv_str(&input, "bundle", bundle);
     (void)json_push_kv_str(&input, "source_root", root_hex);
-    (void)json_push_kv_str(&input, "workspace", cas);
+    if (!direct) (void)json_push_kv_str(&input, "workspace", cas);
     (void)json_push_kv_str(&input, "destination", destination);
-    struct zcl_command_request request = { .input = &input };
+    const struct zcl_command_spec *spec = direct ? zcl_command_registry_find(
+        zcl_command_catalog(), "zcode.workspace.source.bundle.materialize", NULL) : NULL;
+    struct zcl_command_request request = { .input = &input, .spec = spec };
     zcl_command_reply_init(reply, "zcl.zcode_source_bundle_checkout.v1");
-    zcl_native_handle_zcode_source_bundle_checkout(&request, reply);
+    if (direct && spec && spec->handler) spec->handler(&request, reply);
+    else if (!direct) zcl_native_handle_zcode_source_bundle_checkout(&request, reply);
+    else zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+        ZCL_COMMAND_EXIT_FAILED, "MISSING_HANDLER", "test", false, false, "missing direct leaf", "");
     json_free(&input);
+}
+
+#if !defined(_WIN32)
+static bool sbp_direct_contents(const char *source, const char *destination)
+{
+    char path[PATH_MAX], original[PATH_MAX];
+    struct stat a, b;
+    int x = snprintf(original, sizeof(original), "%s/main.c", source);
+    int y = snprintf(path, sizeof(path), "%s/main.c", destination);
+    return x > 0 && (size_t)x < sizeof(original) && y > 0 && (size_t)y < sizeof(path) &&
+        stat(original, &a) == 0 && stat(path, &b) == 0 &&
+        (a.st_mode & 0777) == (b.st_mode & 0777) && (b.st_mode & 0100) &&
+        sbp_same_file(source, destination, "main.c") && sbp_same_file(source, destination, "unit.h") &&
+        sbp_same_file(source, destination, "NOTES");
+}
+
+static bool sbp_direct_refused(const char *bundle, const char *root,
+                               const char *cas, const char *dest, const char *code)
+{
+    struct zcl_command_reply reply;
+    sbp_run_checkout(bundle, root, cas, dest, true, &reply);
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !strcmp(reply.error.code, code);
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static bool sbp_direct_unsafe(const char *bundle, const char *root,
+                              const char *cas, const char *bad)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/unsafe", bad);
+    if (n <= 0 || (size_t)n >= sizeof(path) || mkdir(path, 0700) != 0 || chmod(bad, 0777) != 0) return false;
+    bool ok = sbp_direct_refused(bundle, root, cas, path, "DISPOSABLE_PATH_UNSUPPORTED");
+    if (chmod(bad, 0700) != 0 || rmdir(path) != 0) ok = false;
+    if (chmod(bad, 0755) != 0) return false;
+    ok = sbp_direct_refused(bundle, root, cas, bad, "BAD_SOURCE_BUNDLE_CHECKOUT_INPUT") && ok;
+    return chmod(bad, 0700) == 0 && ok;
+}
+
+static bool sbp_direct_invalid(const char *bundle, const char *root,
+                               const char *cas, const char *bad, const char *destination)
+{
+    char path[PATH_MAX];
+    if (!sbp_direct_refused(bundle, "0000000000000000000000000000000000000000000000000000000000000000",
+                            cas, bad, "SOURCE_BUNDLE_IMPORT_REFUSED")) return false;
+    int n = snprintf(path, sizeof(path), "%s/link", bad);
+    if (n <= 0 || (size_t)n >= sizeof(path) || symlink(destination, path) != 0) return false;
+    bool ok = sbp_direct_refused(bundle, root, cas, path, "BAD_SOURCE_BUNDLE_CHECKOUT_INPUT");
+    if (unlink(path) != 0) ok = false;
+    n = snprintf(path, sizeof(path), "%s/main.c", bad);
+    return ok && n > 0 && (size_t)n < sizeof(path) && access(path, F_OK) != 0 && errno == ENOENT;
+}
+#endif
+
+static bool sbp_direct_case(const char *bundle, const char *root, const char *source)
+{
+#if defined(_WIN32)
+    (void)source;
+    struct zcl_command_reply reply;
+    sbp_run_checkout(bundle, root, "", "", true, &reply);
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED &&
+              strcmp(reply.error.code, "DISPOSABLE_PATH_UNSUPPORTED") == 0;
+    zcl_command_reply_free(&reply);
+    return ok;
+#else
+    char cas[PATH_MAX], destination[PATH_MAX], bad[PATH_MAX], path[PATH_MAX];
+    if (!test_mkdtemp(cas, sizeof(cas), "zcl_sbp_direct_cas") ||
+        !test_mkdtemp(destination, sizeof(destination), "zcl_sbp_direct_out") ||
+        !test_mkdtemp(bad, sizeof(bad), "zcl_sbp_direct_bad")) return false;
+    struct zcl_command_reply reply;
+    sbp_run_checkout(bundle, root, cas, destination, true, &reply);
+    bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED;
+    zcl_command_reply_free(&reply);
+    ok = ok && sbp_direct_contents(source, destination);
+    int n = snprintf(path, sizeof(path), "%s/.zvcs", cas);
+    ok = ok && n > 0 && (size_t)n < sizeof(path) && access(path, F_OK) != 0 && errno == ENOENT;
+    ok = ok && sbp_direct_unsafe(bundle, root, cas, bad);
+    ok = ok && sbp_direct_invalid(bundle, root, cas, bad, destination);
+    sbp_rm_tree(destination, 6); sbp_rm_tree(bad, 6); sbp_rm_tree(cas, 6);
+    return ok;
+#endif
 }
 
 /* The string value of one reply key, or NULL. */
@@ -365,6 +451,9 @@ static int test_publish_then_fetch_elsewhere(void)
         char *ddir = test_mkdtemp(droot, sizeof droot, "zcl_sbpub_dest");
         ASSERT(adir && wdir && bdir && cdir && ddir);
         ASSERT(sbp_make_tree(wdir, 'A'));
+        char executable[PATH_MAX];
+        ASSERT(snprintf(executable, sizeof(executable), "%s/main.c", wdir) > 0);
+        ASSERT(chmod(executable, 0755) == 0);
 
         /* NODE A: its own datadir, its own port, serving. */
         uint16_t port = sbp_serve(adir);
@@ -405,7 +494,7 @@ static int test_publish_then_fetch_elsewhere(void)
         zcl_command_reply_free(&reply);
         ASSERT(access(out_path, F_OK) == 0);
 
-        sbp_run_checkout(out_path, root_hex, cdir, ddir, &reply);
+        sbp_run_checkout(out_path, root_hex, cdir, ddir, false, &reply);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
         zcl_command_reply_free(&reply);
 
@@ -419,6 +508,7 @@ static int test_publish_then_fetch_elsewhere(void)
         ASSERT(sbp_same_file(wdir, ddir, "main.c"));
         ASSERT(sbp_same_file(wdir, ddir, "unit.h"));
         ASSERT(sbp_same_file(wdir, ddir, "NOTES"));
+        ASSERT(sbp_direct_case(out_path, root_hex, wdir));
 
         fs_server_stop();
         sbp_rm_tree(ddir, 6);

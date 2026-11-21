@@ -35,6 +35,7 @@ struct wi_release {
 };
 static bool wi_copy(const char *src, const char *dst, mode_t mode);
 static bool wi_mkpath(const char *base, const char *rel);
+static int wi_run_installer(const struct wi_release *f);
 
 static bool wi_write(const char *path, const void *bytes, size_t size, mode_t mode)
 {
@@ -104,6 +105,54 @@ static bool wi_fixture_runtime(struct wi_release *f, bool replacement)
     }
     n = snprintf(path, sizeof(path), "%s/AGENT_CARD.md", f->release);
     return n > 0 && (size_t)n < sizeof(path) && wi_write(path, "# Agent\n", 8, 0600);
+}
+
+/* Observe the selected route, including an older binary's unknown leaf and a
+ * new binary that refuses materialization before any installation. */
+static bool wi_route_runtime(struct wi_release *f, int behavior)
+{
+    char exe[PATH_MAX], path[PATH_MAX], text[PATH_MAX * 3];
+    if (!realpath(WI_EXE, exe) || strchr(exe, '\'') || strchr(f->base, '\'')) return false;
+    int n = snprintf(text, sizeof(text),
+        "#!/bin/sh\nif [ \"$1\" = -version ]; then echo 'tor: full'; exit 0; fi\n"
+        "if [ \"$1 $2 $3 $4 $5\" = 'zcode workspace source bundle materialize' ]; then "
+        "echo materialize >>'%s/route'; if [ %d = 1 ]; then echo '{\"error\":{\"code\":\"UNKNOWN_COMMAND\",\"evidence\":\"zcode.workspace.source.bundle.materialize\"}}'; exit 2; fi; "
+        "if [ %d = 2 ]; then echo '{\"error\":{\"code\":\"SOURCE_BUNDLE_IMPORT_REFUSED\"}}'; exit 2; fi; "
+        "if [ %d = 3 ]; then echo '{\"error\":{\"code\":\"DISPOSABLE_PATH_UNSUPPORTED\"}}'; exit 2; fi; fi\n"
+        "if [ \"$1 $2 $3 $4 $5\" = 'zcode workspace source bundle checkout' ]; then echo checkout >>'%s/route'; fi\n"
+        "exec '%s' \"$@\"\n", f->base, behavior, behavior, behavior, f->base, exe);
+    if (n <= 0 || (size_t)n >= sizeof(text)) return false;
+    const char *names[] = {"z23", "zclassic23"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        n = snprintf(path, sizeof(path), "%s/%s", f->release, names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path) || !wi_write(path, text, strlen(text), 0700))
+            return false;
+    }
+    return true;
+}
+
+static bool wi_route_is(const struct wi_release *f, const char *expected)
+{
+    char path[PATH_MAX], text[64];
+    int n = snprintf(path, sizeof(path), "%s/route", f->base);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "rb"); if (!file) return false;
+    size_t used = fread(text, 1, sizeof(text) - 1, file);
+    bool ok = !ferror(file);
+    if (fclose(file) != 0) ok = false;
+    text[used] = '\0';
+    return ok && !strcmp(text, expected) && unlink(path) == 0;
+}
+
+static bool wi_route_controls(struct wi_release *f)
+{
+    if (!wi_route_runtime(f, 1) || !wi_fixture_manifest(f, 2) ||
+        wi_run_installer(f) != 0 || !wi_route_is(f, "materialize\ncheckout\n")) return false;
+    if (!wi_route_runtime(f, 3) || !wi_fixture_manifest(f, 2) ||
+        wi_run_installer(f) != 0 || !wi_route_is(f, "materialize\ncheckout\n")) return false;
+    if (!wi_route_runtime(f, 2) || !wi_fixture_manifest(f, 2) ||
+        wi_run_installer(f) == 0 || !wi_route_is(f, "materialize\n")) return false;
+    return wi_route_runtime(f, 0) && wi_fixture_manifest(f, 2);
 }
 
 static bool wi_fixture_paths(struct wi_release *f)
@@ -335,8 +384,11 @@ static int wi_standalone_release(void)
         ASSERT(wi_fixture_create(&f));
         ASSERT(setenv(keys[0], f.prefix, 1) == 0 && setenv(keys[1], "1", 1) == 0 &&
             unsetenv(keys[2]) == 0 && wi_isolated_env(&f));
+        ASSERT(wi_route_runtime(&f, 0) && wi_fixture_manifest(&f, 2));
         int rc = wi_run_installer(&f); ASSERT_EQ(rc, 0);
+        ASSERT(wi_route_is(&f, "materialize\n"));
         ASSERT(wi_preserved_docs(&f));
+        ASSERT(wi_route_controls(&f));
         char installed[PATH_MAX], original[65];
         ASSERT(snprintf(installed, sizeof(installed), "%s/bin/z23", f.prefix) > 0);
         ASSERT(wi_sha256(installed, original));

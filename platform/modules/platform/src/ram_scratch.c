@@ -19,6 +19,7 @@
 #define _GNU_SOURCE
 #endif
 #include "platform/ram_scratch.h"
+#include "platform/private_directory.h"
 
 #include "platform/disk_space.h"
 #include "platform/os_proc.h"
@@ -231,26 +232,6 @@ static int lease_lock_open(const char *path, bool private)
     return fd;
 }
 
-#if defined(__linux__)
-static bool ram_scratch_ancestors_safe(const char *root)
-{
-    char path[4096], canonical[4096];
-    if (!realpath(root, canonical) || strcmp(root, canonical) != 0 ||
-        snprintf(path, sizeof(path), "%s", root) >= (int)sizeof(path)) return false;
-    for (;;) {
-        char *slash = strrchr(path, '/');
-        if (!slash) return false;
-        if (slash == path) path[1] = '\0'; else *slash = '\0';
-        struct stat st;
-        if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) ||
-            (st.st_uid != 0 && st.st_uid != geteuid())) return false;
-        if ((st.st_mode & 0022) &&
-            (!(st.st_mode & S_ISVTX) || st.st_uid != 0)) return false;
-        if (strcmp(path, "/") == 0) return true;
-    }
-}
-#endif
-
 static bool ram_scratch_private_root(const char *root)
 {
 #if defined(__linux__)
@@ -258,7 +239,7 @@ static bool ram_scratch_private_root(const char *root)
     struct statfs fs;
     struct statvfs vfs;
     if (lstat(root, &st) != 0 || statfs(root, &fs) != 0 ||
-        statvfs(root, &vfs) != 0 || !ram_scratch_ancestors_safe(root)) return false;
+        statvfs(root, &vfs) != 0 || !platform_private_directory_ancestors_safe(root)) return false;
     struct platform_ram_scratch_root_facts facts = {
         .directory = S_ISDIR(st.st_mode), .owner = st.st_uid == geteuid(),
         .owner_private = (st.st_mode & 0077) == 0,

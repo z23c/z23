@@ -14,12 +14,19 @@
 #include "private_acl_internal.h"
 
 #include <errno.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+static bool private_directory_ancestors_safe_platform(const char *path)
+{
+    (void)path;
+    return false;
+}
 
 static bool private_directory_wide(const char *path, wchar_t out[32768])
 {
@@ -214,8 +221,34 @@ void platform_private_directory_close(uintptr_t native_handle)
 #else
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static bool private_directory_canonical(const char *root, char path[4096])
+{
+    char canonical[4096];
+    if (!root || !realpath(root, canonical) || strcmp(root, canonical) != 0) return false;
+    int n = snprintf(path, 4096, "%s", root);
+    return n >= 0 && n < 4096;
+}
+
+static bool private_directory_ancestors_safe_platform(const char *root)
+{
+    char path[4096];
+    if (!private_directory_canonical(root, path)) return false;
+    for (;;) {
+        char *slash = strrchr(path, '/');
+        if (!slash) return false;
+        if (slash == path) path[1] = '\0'; else *slash = '\0';
+        struct stat st;
+        if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) ||
+            (st.st_uid != 0 && st.st_uid != geteuid())) return false;
+        if ((st.st_mode & 0022) &&
+            (!(st.st_mode & S_ISVTX) || st.st_uid != 0)) return false;
+        if (!strcmp(path, "/")) return true;
+    }
+}
 
 bool platform_private_directory_ensure(const char *path)
 {
@@ -304,6 +337,11 @@ void platform_private_directory_close(uintptr_t native_handle)
     if ((int)native_handle >= 0) close((int)native_handle);
 }
 #endif
+
+bool platform_private_directory_ancestors_safe(const char *path)
+{
+    return private_directory_ancestors_safe_platform(path);
+}
 
 bool platform_private_directory_open_validated_traverse(
     const char *path, uintptr_t *native_handle)

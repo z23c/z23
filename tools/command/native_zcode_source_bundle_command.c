@@ -12,6 +12,7 @@
 #include "platform/directory_transaction.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
+#include "platform/private_directory.h"
 #include "util/safe_alloc.h"
 #include "util/write_all.h"
 #include "net/rom_fetch.h"
@@ -400,6 +401,38 @@ static void zsb_checkout_refuse(struct zcl_command_reply *reply,
                 : vcs_source_bundle_result_string(result));
 }
 
+static bool zsb_direct_inputs(const struct json_value *input, const char *bundle,
+                              const char *destination, uint8_t root[32],
+                              char canonical[ZSB_PATH_MAX])
+{
+    uintptr_t held;
+    if (!bundle || !destination || !zsb_root(input, root) ||
+        !zcl_native_zcode_workspace_is_explicit_scratch(destination) ||
+        !platform_directory_canonical_real(destination, canonical, ZSB_PATH_MAX) ||
+        strcmp(destination, canonical) || !zsb_empty_dir(canonical) ||
+        !platform_private_directory_open_validated(canonical, &held)) return false;
+    platform_private_directory_close(held);
+    return true;
+}
+
+static enum vcs_source_bundle_result zsb_checkout_direct(
+    const char *bundle, const uint8_t root[32], const char *destination,
+    struct vcs_source_bundle_metrics *metrics)
+{
+#if defined(_WIN32)
+    (void)bundle; (void)root; (void)destination; (void)metrics;
+    return VCS_SOURCE_BUNDLE_ERR_OUTPUT;
+#else
+    size_t wire_len = 0;
+    uint8_t *wire = zcl_native_source_bundle_read(bundle, &wire_len);
+    enum vcs_source_bundle_result result = wire ?
+        vcs_source_bundle_materialize_disposable(wire, wire_len, root, destination, metrics) :
+        VCS_SOURCE_BUNDLE_ERR_WIRE;
+    free(wire);
+    return result;
+#endif
+}
+
 void zcl_native_handle_zcode_source_bundle_checkout(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -428,6 +461,39 @@ void zcl_native_handle_zcode_source_bundle_checkout(
     zsb_render(&reply->data, root, &metrics);
     (void)json_push_kv_bool(&reply->data, "checked_out", true);
     (void)json_push_kv_str(&reply->data, "destination", destination_real);
+}
+
+void zcl_native_handle_zcode_source_bundle_materialize(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+#if defined(_WIN32)
+    zsb_fail(reply, "DISPOSABLE_PATH_UNSUPPORTED", "validate",
+             "disposable output is unavailable on Windows");
+    return;
+#endif
+    const char *bundle = zsb_str(request->input, "bundle");
+    const char *destination = zsb_str(request->input, "destination");
+    char canonical[ZSB_PATH_MAX]; uint8_t root[32];
+    if (!zsb_direct_inputs(request->input, bundle, destination, root, canonical)) {
+        zsb_fail(reply, "BAD_SOURCE_BUNDLE_CHECKOUT_INPUT", "validate",
+                 "bundle, source_root and an empty canonical private scratch destination are required");
+        return;
+    }
+    if (!platform_private_directory_ancestors_safe(canonical)) {
+        zsb_fail(reply, "DISPOSABLE_PATH_UNSUPPORTED", "validate",
+                 "disposable output requires trusted stable ancestors");
+        return;
+    }
+    struct vcs_source_bundle_metrics metrics;
+    enum vcs_source_bundle_result result = zsb_checkout_direct(bundle, root, canonical, &metrics);
+    if (result != VCS_SOURCE_BUNDLE_OK) {
+        zsb_checkout_refuse(reply, result);
+        return;
+    }
+    zsb_render(&reply->data, root, &metrics);
+    (void)json_push_kv_bool(&reply->data, "checked_out", true);
+    (void)json_push_kv_str(&reply->data, "destination", canonical);
 }
 
 /* ── Fetch: the same bundle, arriving over the wire ──────────────────

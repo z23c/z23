@@ -208,6 +208,27 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_source_bundle_checkout)
 
 ZCL_COMMAND_READY_COMMAND(
+    "zcode.workspace.source.bundle.materialize", "zcode.workspace.source.bundle", "",
+    "Reconstruct verified disposable source",
+    "Authenticates the complete bundle before writing to an empty private scratch "
+    "destination under trusted stable ancestors. No CAS or durability is provided; "
+    "the caller owns the destination exclusively and removes partial output on failure.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,source,bundle,disposable,reconstruct",
+    "zcl.zcode_source_bundle_materialize.input.v1",
+    "zcl.zcode_source_bundle_checkout.v1",
+    "bundle,source_root,destination",
+    "bundle,source_root,destination",
+    "z23 zcode workspace source bundle materialize --input='{\"bundle\":\"/tmp/source.zvsb\",\"source_root\":\"<64hex>\",\"destination\":\"/tmp/source-scratch\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_source_bundle_materialize)
+
+ZCL_COMMAND_READY_COMMAND(
     "zcode.workspace.source.bundle.fetch", "zcode.workspace.source.bundle", "",
     "Fetch a source bundle from peers by its content root",
     "Asks each peer in a comma-separated host:port list which source bundles "

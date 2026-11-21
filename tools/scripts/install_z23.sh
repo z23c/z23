@@ -275,25 +275,32 @@ cleanup_install_stage() {
 
 # Verify and reconstruct before changing installed payloads or the docs link.
 prepare_bundled_docs() {
-    local stage="$1" scratch root result timeout_cmd=""
+    local stage="$1" scratch root result rc timeout_cmd=""
+    local -a runner=("$stage/z23")
+    local -a args
     [ -n "$(manifest_digest_of "$stage" docs.bundle)" ] || return 0
     [ "$(wc -c <"$stage/docs.root" | tr -d ' ')" -eq 65 ] && \
         LC_ALL=C grep -Ex '[0-9a-f]{64}' "$stage/docs.root" >/dev/null || die "invalid verified docs root"
     IFS= read -r root <"$stage/docs.root" || die "cannot read verified docs root"
     scratch="$(mktemp -d "$stage/docs-scratch.XXXXXX")" || die "cannot stage verified docs"
-    mkdir "$scratch/cas" "$scratch/docs" || die "cannot prepare docs checkout"
+    scratch="$(cd "$scratch" && pwd -P)" || die "cannot resolve docs scratch"
+    mkdir -m 700 "$scratch/docs" || die "cannot prepare docs checkout"
     if command -v timeout >/dev/null 2>&1; then timeout_cmd=timeout
     elif command -v gtimeout >/dev/null 2>&1; then timeout_cmd=gtimeout
     fi
-    if [ -n "$timeout_cmd" ]; then
-        result="$("$timeout_cmd" 120 "$stage/z23" zcode workspace source bundle checkout \
-            "--bundle=$stage/docs.bundle" "--source_root=$root" "--workspace=$scratch/cas" \
-            "--destination=$scratch/docs" --field=checked_out </dev/null)" || die "verified docs checkout failed"
-    else
-        result="$("$stage/z23" zcode workspace source bundle checkout \
-            "--bundle=$stage/docs.bundle" "--source_root=$root" "--workspace=$scratch/cas" \
-            "--destination=$scratch/docs" --field=checked_out </dev/null)" || die "verified docs checkout failed"
-    fi
+    [ -z "$timeout_cmd" ] || runner=("$timeout_cmd" 120 "$stage/z23")
+    args=("--bundle=$stage/docs.bundle" "--source_root=$root" "--destination=$scratch/docs")
+    rc=0
+    result="$("${runner[@]}" zcode workspace source bundle materialize \
+        "${args[@]}" --json </dev/null)" || rc=$?
+    case "$rc:$result" in
+        0:*'"ok":true'*'"checked_out":true'*) result=checked_out=true ;;
+        2:*'"code":"UNKNOWN_COMMAND"'*'"evidence":"zcode.workspace.source.bundle.materialize"'*|2:*'"code":"DISPOSABLE_PATH_UNSUPPORTED"'*)
+            mkdir -m 700 "$scratch/cas" || die "cannot prepare docs checkout"
+            result="$("${runner[@]}" zcode workspace source bundle checkout "${args[@]}" \
+                "--workspace=$scratch/cas" --field=checked_out </dev/null)" || die "verified docs checkout failed" ;;
+        *) die "verified docs materialization failed" ;;
+    esac
     [ "$result" = 'checked_out=true' ] && [ -f "$scratch/docs/README.md" ] || die "verified docs checkout incomplete"
     [ -z "$(find "$scratch/docs" -type f ! -name '*.md' -print -quit)" ] || die "verified docs contain non-Markdown files"
     INSTALL_DOCS_SOURCE="$scratch/docs"
@@ -315,15 +322,11 @@ payload_max_bytes() {
             printf '%s\n' "$REMOTE_VERIFIER_MAX_BYTES" ;;
         z23-acme|zclassic23-acme) printf '%s\n' "$REMOTE_ACME_MAX_BYTES" ;;
         AGENT_CARD.md) printf '%s\n' "$REMOTE_CARD_MAX_BYTES" ;;
-        docs.root) printf '%s\n' 65 ;;
-        docs.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
-        z23-skycombat|z23-tasks|source.bundle|tasks.z23share) printf '%s\n' "$((64 * 1024 * 1024))" ;;
-        tasks-source.root) printf '%s\n' 65 ;;
+        docs.root|tasks-source.root) printf '%s\n' 65 ;;
+        docs.bundle|z23-skycombat|z23-tasks|source.bundle|tasks.z23share|app-toolchain.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
         z23-app-macos) printf '%s\n' "$((4 * 1024 * 1024))" ;;
         Z23Apps-Info.plist) printf '%s\n' 65536 ;;
-        installed-source.json) printf '%s\n' 4096 ;;
-        app-toolchain.json) printf '%s\n' 4096 ;;
-        app-toolchain.bundle) printf '%s\n' "$((64 * 1024 * 1024))" ;;
+        installed-source.json|app-toolchain.json) printf '%s\n' 4096 ;;
         manifest.wire) printf '%s\n' "$((1024 * 1024))" ;;
         recipe.wire) printf '%s\n' "$((256 * 1024))" ;;
         app-build.wire) printf '%s\n' 240 ;;
@@ -344,14 +347,10 @@ manifest_members() {
 manifest_alias_source() {
     local dir="$1" name="$2" source_name
     case "$name" in
-        zclassic23) source_name=z23 ;;
-        zclassic23-package-verify) source_name=z23-package-verify ;;
-        zclassic23-acme) source_name=z23-acme ;;
+        zclassic23|zclassic23-package-verify|zclassic23-acme) source_name="z23${name#zclassic23}" ;;
         *) return 0 ;;
     esac
-    if [ -n "$(manifest_digest_of "$dir" "$source_name")" ]; then
-        printf '%s\n' "$source_name"
-    fi
+    [ -z "$(manifest_digest_of "$dir" "$source_name")" ] || printf '%s\n' "$source_name"
 }
 
 RELEASE_NAMES_CURRENT=$'AGENT_CARD.md\nz23\nz23-acme\nz23-package-verify\nzclassic23\nzclassic23-acme\nzclassic23-package-verify'
@@ -796,18 +795,12 @@ has_app_source() {
 app_payload_members() {
     if [ -n "$(manifest_digest_of "$1" z23-tasks)" ]; then printf '%s\n' "z23-tasks ${APP_SOURCE_MEMBERS#z23-skycombat }"; else printf '%s\n' "$APP_SOURCE_MEMBERS"; fi
     if [ -n "$(manifest_digest_of "$1" tasks.z23share)" ]; then printf '%s\n' "$APP_TASKS_MEMBERS"; fi
-    if [ -n "$(manifest_digest_of "$1" z23-app-macos)" ]; then
-        printf '%s\n' "$APP_MACOS_MEMBERS"
-    fi
-    if [ -n "$(manifest_digest_of "$1" org.zclassic.ZClassic23.desktop)" ]; then
-        printf '%s\n' "$APP_DESKTOP_MEMBERS"
-    fi
-    if [ -n "$(manifest_digest_of "$1" app-toolchain.json)" ]; then
-        printf '%s\n' "$APP_TOOLCHAIN_MEMBERS"
-    fi
-    if [ -n "$(manifest_digest_of "$1" docs.bundle)" ]; then
-        printf '%s\n' docs.bundle docs.root
-    fi
+    local entry name members
+    for entry in "z23-app-macos:$APP_MACOS_MEMBERS" "org.zclassic.ZClassic23.desktop:$APP_DESKTOP_MEMBERS" \
+                 "app-toolchain.json:$APP_TOOLCHAIN_MEMBERS" "docs.bundle:"$'docs.bundle\ndocs.root'; do
+        name=${entry%%:*}; members=${entry#*:}
+        [ -z "$(manifest_digest_of "$1" "$name")" ] || printf '%s\n' "$members"
+    done
 }
 
 # The release manifest remains the authority. No JSON projection parsing in

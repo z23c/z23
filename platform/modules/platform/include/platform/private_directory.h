@@ -18,6 +18,10 @@ bool platform_private_directory_publish_no_clobber(
     const char *staging_utf8, const char *destination_utf8);
 bool platform_private_directory_remove_empty(const char *utf8_path);
 
+/* A canonical directory path whose ancestors are owned by root or the
+ * current user and cannot be replaced by another user. Windows refuses. */
+bool platform_private_directory_ancestors_safe(const char *path);
+
 /* Open, validate, and return the exact owner-private no-link directory object.
  * The caller retains this capability until platform_private_directory_close. */
 bool platform_private_directory_open_validated(const char *utf8_path,
