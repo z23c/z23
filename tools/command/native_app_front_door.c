@@ -603,8 +603,9 @@ static bool fd_words(const char *const *words, size_t count, size_t consumed,
 
 /* The launcher owns catalog alias resolution and all unreadable-selection
  * refusals. Only an absent selection permits the CLI copy fallback. */
-static bool fd_open_native_priority(const char *name)
+static bool fd_open_native_priority(const char *name, bool *catalog)
 {
+    *catalog = false;
     if (app_selection_route_reserved(name)) return true;
     struct app_launch_env env; char why[256];
     if (!app_launch_env_from_process(&env, why, sizeof(why))) return true;
@@ -613,6 +614,7 @@ static bool fd_open_native_priority(const char *name)
     if (registry.config_error[0]) return true;
     const struct app_launch_entry *entry = app_launch_registry_find(&registry, name);
     if (!entry) return false;
+    *catalog = true;
     struct app_selection selection;
     return app_selection_load(env.state_dir, entry->id, &selection) != APP_SELECTION_ABSENT;
 }
@@ -655,14 +657,38 @@ static int fd_catalog(const char *datadir)
 }
 
 static bool fd_open_routes(const struct zcl_command_spec *spec, const char *verb,
-                           const char *target, const char *datadir)
+                           const char *target, const char *datadir, bool *protected)
 {
     bool copy_open = strcmp(spec->path, "app.run.copy") == 0;
-    if (!copy_open && strcmp(spec->path, "app.open") == 0 &&
-        fd_open_native_priority(target)) return false;
+    *protected = false;
+    if (!copy_open && strcmp(spec->path, "app.open") == 0) {
+        bool catalog = false;
+        bool priority = fd_open_native_priority(target, &catalog);
+        *protected = priority || catalog;
+        if (priority) return false;
+    }
     if (strcmp(verb, "open") == 0 && !copy_open && datadir &&
         !zcl_str_has_suffix(target, ZCL_PACKAGE_BUNDLE_SUFFIX) &&
         !fd_is_copy(datadir, target)) return false;
+    return true;
+}
+
+/* ZIP is an archive, not a signed share. Only the human CLI gets guidance;
+ * catalog names and existing app copies keep their normal routing priority. */
+static bool fd_zip_suffix(const char *verb, const char *target)
+{
+    size_t len = strlen(target);
+    if (strcmp(verb, "open") || len < 4 || target[len - 4] != '.') return false;
+    return (target[len - 3] == 'z' || target[len - 3] == 'Z') &&
+        (target[len - 2] == 'i' || target[len - 2] == 'I') &&
+        (target[len - 1] == 'p' || target[len - 1] == 'P');
+}
+static bool fd_zip_guidance(const char *verb, const char *target, bool protected)
+{
+    if (protected || !fd_zip_suffix(verb, target)) return false;
+    struct stat st;
+    if (stat(target, &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    (void)fprintf(stdout, "Extract the ZIP, then open the .z23share file inside if present with z23 app open.\n");
     return true;
 }
 
@@ -684,7 +710,11 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
         return false;
     const char *dd = datadir && datadir[0] ? datadir
                                            : zcl_native_command_datadir();
-    if (!fd_open_routes(spec, verb, target, dd)) return false;
+    bool protected = false;
+    if (!fd_open_routes(spec, verb, target, dd, &protected)) {
+        if (fd_zip_guidance(verb, target, protected)) { *rc = (int)ZCL_COMMAND_EXIT_INVALID; return true; }
+        return false;
+    }
     const struct zcl_app_front_door door = {
         .verb = verb, .target = target, .datadir = dd,
         .root = root, .publisher = publisher,

@@ -1752,6 +1752,86 @@ static int afd_repeat_share(struct afd_world *w)
     free(before); free(after); return failures;
 }
 
+static bool afd_zip_dispatch(const char *datadir, const char *target, bool yes,
+    char *out, size_t cap, bool *handled, int *rc)
+{
+    const struct zcl_command_spec *spec = afd_spec("app.open");
+    const char *words[] = {target, "--yes"};
+    if (!spec) return false;
+    FILE *capture = tmpfile();
+    if (!capture) return false;
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0 || dup2(fileno(capture), STDOUT_FILENO) < 0) {
+        if (saved >= 0) close(saved);
+        fclose(capture); return false;
+    }
+    *rc = -1;
+    *handled = zcl_app_front_door_try(spec, words, yes ? 2 : 1, 0, datadir, rc);
+    fflush(stdout);
+    bool ok = dup2(saved, STDOUT_FILENO) >= 0;
+    close(saved); rewind(capture);
+    size_t n = fread(out, 1, cap - 1, capture); out[n] = 0;
+    if (fclose(capture) != 0) ok = false;
+    return ok;
+}
+static bool afd_zip_valid(const struct afd_world *w, const char *zip)
+{
+    char output[1024]; bool handled = false; int rc = 0;
+    char *home = afd_snapshot(w->a_home), *data = afd_snapshot(w->a_datadir);
+    bool ok = home && data && afd_zip_dispatch(w->a_datadir, zip, true, output, sizeof(output), &handled, &rc) &&
+        handled && rc != 0 && strstr(output, "Extract") && strstr(output, ".z23share") &&
+        !strstr(output, "verified") && afd_same(home, w->a_home) && afd_same(data, w->a_datadir);
+    free(home); free(data); return ok;
+}
+static bool afd_zip_other_routes(const struct afd_world *w, const char *near)
+{
+    char output[1024]; bool handled = false; int rc = 0;
+    bool ok = afd_zip_dispatch(w->a_datadir, near, false, output, sizeof(output), &handled, &rc) && !handled;
+    bool dispatched = afd_zip_dispatch(w->a_datadir, "missing.zip", false, output, sizeof(output), &handled, &rc);
+    ok = ok && dispatched && !handled;
+    dispatched = afd_zip_dispatch(w->a_datadir, "collision.zip", false, output, sizeof(output), &handled, &rc);
+    return ok && dispatched && handled && !strstr(output, "Extract the ZIP");
+}
+static bool afd_zip_cleanup(const char *zip, const char *near, const char *copy)
+{
+    bool ok = true;
+    if (rmdir(copy) != 0) ok = false;
+    if (unlink(zip) != 0) ok = false;
+    if (unlink(near) != 0) ok = false;
+    if (unlink("Other Tasks.zip") != 0) ok = false;
+    if (unlink("collision.zip") != 0) ok = false;
+    return ok;
+}
+static bool afd_zip_checks(const struct afd_world *w)
+{
+    char zip[AFD_PATH], near[AFD_PATH], copy[AFD_PATH];
+    if (snprintf(zip, sizeof(zip), "%s/My Tasks.ZIP", w->a_home) >= (int)sizeof(zip) ||
+        snprintf(near, sizeof(near), "%s/My Tasks.zip.bak", w->a_home) >= (int)sizeof(near) ||
+        snprintf(copy, sizeof(copy), "%s/copies/collision.zip", w->a_datadir) >= (int)sizeof(copy)) return false;
+    if (!afd_put(w->a_home, "My Tasks.ZIP", "not an archive") ||
+        !afd_put(w->a_home, "Other Tasks.zip", "not an archive") ||
+        !afd_put(w->a_home, "My Tasks.zip.bak", "near miss") ||
+        !afd_put(w->a_home, "collision.zip", "not an archive") || mkdir(copy, 0700)) return false;
+    bool ok = afd_zip_valid(w, zip) && afd_zip_valid(w, "Other Tasks.zip") && afd_zip_other_routes(w, near);
+    bool cleaned = afd_zip_cleanup(zip, near, copy);
+    return ok && cleaned;
+}
+static int afd_zip_case(const struct afd_world *w)
+{
+    int failures = 0; char cwd[AFD_PATH], *home = NULL;
+    bool captured = afd_route_env_capture("HOME", &home) && getcwd(cwd, sizeof(cwd));
+    if (!captured) { free(home); return 1; }
+    TEST("app open guides ZIP extraction without changing a profile or displacing copy routing") {
+        ASSERT(setenv("HOME", w->a_home, 1) == 0 && chdir(w->a_home) == 0);
+        ASSERT(afd_zip_checks(w));
+        PASS();
+    } _test_next:;
+    if (chdir(cwd) != 0) ++failures;
+    if (!afd_route_env_restore("HOME", home)) ++failures;
+    free(home); return failures;
+}
+
 int test_app_front_door(void);
 int test_app_front_door(void)
 {
@@ -1798,6 +1878,7 @@ int test_app_front_door(void)
     if (!failures) {
         failures += afd_receive_missing(&w);
         failures += afd_list_quiet(&w);
+        failures += afd_zip_case(&w);
         failures += afd_repeat_share(&w);
     }
     printf("app front door journey: A %d commands, %d hex pastes; B %d "
