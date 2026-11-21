@@ -1,4 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* purpose: Compare stored wallet keys with the keys recovered into an empty wallet. */
 #include "wallet_recovery_coverage.h"
 #include "wallet_recovery_internal.h"
 #include "wallet/wallet.h"

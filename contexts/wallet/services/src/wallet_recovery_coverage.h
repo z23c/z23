@@ -1,4 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* purpose: Declare the wallet recovery coverage verdict and comparison interface. */
 #ifndef Z23_WALLET_RECOVERY_COVERAGE_H
 #define Z23_WALLET_RECOVERY_COVERAGE_H
 #include <stdint.h>
