@@ -940,8 +940,6 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
 
     *version = current_ver;
     *floor = floor_ver;
-    /* Unconditional, branch-free forward — see DB_MIGRATE_BACKUP_FAILED_
-     * PROPAGATE's comment in database_internal.h for why this stays safe
-     * even when v67_up's own backup guard refused. */
-    return applied + node_db_migrate_features_v67_up(ndb, version, floor);
+    return db_migrate_accumulate(applied,
+        node_db_migrate_features_v67_up(ndb, version, floor));
 }

@@ -109,24 +109,15 @@ void node_db_log_unknown_schema_refusal(const char *detail);
  * migration stopped instead of only that it did. */
 #define NODE_DB_MIGRATE_ERR_BACKUP_FAILED (-3)
 
-/* Internal-only propagation sentinel between the versioned-migration hop
- * functions (node_db_migrate_features() -> ..._v30_up() -> ..._v49_up() ->
- * ..._v67_up()), NOT the public error code a caller of node_db_migrate()
- * sees. Each hop's own tail line forwards its downstream call's result with
- * a plain, branch-free `applied + <downstream call>` (matching every other
- * migration hop here and keeping each hop function's own pinned cyclomatic
- * complexity unchanged) — so the one function that actually detects a
- * refusal must return a magnitude so far below any
- * possible sum of `applied` counts (each hop applies at most a few dozen
- * versioned steps) that no amount of unconditional addition on the way up
- * can bring it back to a non-negative value. node_db_migrate() itself is
- * the ONLY place that reads the range and translates backup refusal to
- * NODE_DB_MIGRATE_ERR_BACKUP_FAILED or schema failure to generic -1. */
+/* Migration groups return an applied count or a negative refusal. Preserve
+ * the refusal through each caller until node_db_migrate maps its public code. */
 #define DB_MIGRATE_BACKUP_FAILED_PROPAGATE (-1000000)
-/* Distinct from the backup refusal after each feature helper adds its own
- * applied count on return. A failed additive DDL step is a schema error. */
 #define DB_MIGRATE_SCHEMA_FAILED_PROPAGATE (-2000000)
-#define DB_MIGRATE_SCHEMA_FAILED_BOUND (-1500000)
+
+static inline int db_migrate_accumulate(int applied, int downstream)
+{
+    return downstream < 0 ? downstream : applied + downstream;
+}
 
 /* Opt-in pre-migration safety net for -db-backup-before-migrate
  * (ZCL_DB_BACKUP_BEFORE_MIGRATE; see engine/composition/src/args.c). When the

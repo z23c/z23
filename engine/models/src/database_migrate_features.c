@@ -833,14 +833,9 @@ int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
         applied++;
     }
 
-    /* Unconditional, branch-free forward — see DB_MIGRATE_BACKUP_FAILED_
-     * PROPAGATE's comment in database_internal.h for why this stays safe
-     * even when a downstream hop's own backup guard refused (current_ver/
-     * floor_ver, threaded by pointer all the way down, are already left
-     * exactly where that step's own guard set them). */
-    applied += node_db_migrate_features_v30_up(ndb, &current_ver, &floor_ver);
+    int downstream = node_db_migrate_features_v30_up(ndb, &current_ver, &floor_ver);
 
     *version = current_ver;
     *floor = floor_ver;
-    return applied;
+    return db_migrate_accumulate(applied, downstream);
 }

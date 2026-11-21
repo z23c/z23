@@ -403,8 +403,8 @@ static int db_migrate_precheck_newer_schema(struct node_db *ndb,
 
 static int node_db_migrate_feature_error(int feature_applied)
 {
-    return feature_applied < DB_MIGRATE_SCHEMA_FAILED_BOUND
-        ? -1 : NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+    return feature_applied == DB_MIGRATE_BACKUP_FAILED_PROPAGATE
+        ? NODE_DB_MIGRATE_ERR_BACKUP_FAILED : -1;
 }
 
 /* How one row of k_db_migrate_core_ddl is applied: a plain node_db_exec, a
@@ -939,12 +939,6 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
      * database_migrate_features.c — same versioned-block pattern, same
      * schema_migrations + schema_version stamping. */
     int feature_applied = node_db_migrate_features(ndb, &current_ver, &floor);
-    /* A negative return here is a migration refusal, already
-     * combined by unconditional addition through every migration hop below
-     * this one (see that macro's comment in database_internal.h) — this is
-     * the ONE place that reads the sign and translates it to the public
-     * error code; current_ver/floor were already left exactly where the
-     * refusing step's own guard set them. */
     if (feature_applied < 0)
         return node_db_migrate_feature_error(feature_applied);
     applied += feature_applied;

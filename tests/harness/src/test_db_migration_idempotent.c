@@ -814,6 +814,49 @@ static int t_v85_missing_worker_table_refuses(void)
     return failures;
 }
 
+static int db_mig_deny_shop_index(void *hits, int action, const char *name,
+                                  const char *column, const char *db, const char *trigger)
+{
+    (void)column; (void)db; (void)trigger;
+    if (action == SQLITE_CREATE_INDEX && name && strcmp(name, "idx_shop_fulfills_want") == 0) {
+        (*(int *)hits)++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int t_migration_hop_refusal(void)
+{
+    int failures = 0;
+    int hits = 0;
+    struct node_db db = {0};
+    TEST("db_mig: upstream applied counts preserve downstream schema errors") {
+        ASSERT(db_mig_open_raw_handle(&db, ":memory:"));
+        ASSERT(create_schema(&db));
+        ASSERT_EQ(sqlite3_set_authorizer(db.db, db_mig_deny_shop_index, &hits), SQLITE_OK);
+        int after_progress = node_db_migrate(&db, NULL);
+        int floor = node_db_schema_compat_floor(&db);
+        int on_retry = node_db_migrate(&db, NULL);
+        ASSERT_EQ(hits, 2);
+        ASSERT_EQ(node_db_schema_version(&db), 66);
+        ASSERT_EQ(node_db_schema_compat_floor(&db), floor);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='066'"), 1);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='067'"), 0);
+        printf("db_mig: v67 refusal after progress=%d on retry=%d\n", after_progress, on_retry);
+        ASSERT_EQ(after_progress, -1);
+        ASSERT_EQ(on_retry, -1);
+        ASSERT_EQ(sqlite3_set_authorizer(db.db, NULL, NULL), SQLITE_OK);
+        ASSERT(node_db_migrate(&db, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='067'"), 1);
+        ASSERT_EQ(node_db_migrate(&db, NULL), 0);
+        PASS();
+    } _test_next:;
+    if (db.db) (void)sqlite3_set_authorizer(db.db, NULL, NULL);
+    db_mig_close_raw_handle(&db);
+    return failures;
+}
+
 static int db_mig_deny_wiki_index(void *unused, int action,
     const char *first, const char *second, const char *database, const char *trigger)
 {
@@ -2810,6 +2853,7 @@ int test_db_migration_idempotent(void)
     failures += t_v29_schema_match_table();
     failures += t_v82_board_kind_ceiling_row_copy_is_lossless();
     failures += t_v84_board_arrival_survives_remigration();
+    failures += t_migration_hop_refusal();
     failures += t_additive_migration_keeps_floor();
     failures += t_breaking_migration_raises_floor();
     failures += t_older_binary_within_floor_opens_read_compatible();
