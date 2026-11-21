@@ -303,6 +303,54 @@ static int wbp_restore_setup(sqlite3 *target, sqlite3 *backup)
 }
 
 
+static int wbp_restore_manifest_flags(struct wallet_restore_store_port *port,
+                                      const char *target_path,
+                                      const char *backup_path)
+{
+    int failures = 0;
+    sqlite3 *backup = NULL;
+    if (sqlite3_open(backup_path, &backup) != SQLITE_OK || !backup) {
+        if (backup) sqlite3_close(backup);
+        return 1;
+    }
+    WBP_CHECK("create manifest fixture", sqlite3_exec(backup,
+        "CREATE TABLE wallet_backup_manifest(table_name TEXT PRIMARY KEY,"
+        "present_in_source INTEGER NOT NULL,row_count INTEGER NOT NULL);"
+        "INSERT INTO wallet_backup_manifest VALUES('wallet_keys',0,-1)",
+        NULL, NULL, NULL) == SQLITE_OK);
+    const char *tables[] = { "wallet_keys" };
+    struct wallet_restore_table_report report;
+    char err[256];
+    const int64_t invalid[] = { INT64_C(4294967296), INT64_C(4294967297), -1, 2 };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        char sql[128];
+        snprintf(sql, sizeof(sql), "UPDATE wallet_backup_manifest SET present_in_source=%lld",
+                 (long long)invalid[i]);
+        WBP_CHECK("set invalid manifest flag", sqlite3_exec(backup, sql, NULL, NULL, NULL) == SQLITE_OK);
+        enum wallet_restore_store_status inspected = port->inspect_backup(port->self, backup_path,
+            tables, 1, &report, err, sizeof(err));
+        WBP_CHECK("invalid manifest flag refuses inspection", inspected == WR_STORE_OPEN_BACKUP_FAILED);
+        enum wallet_restore_store_status merged = port->merge_into_target(port->self, backup_path,
+            tables, 1, false, &report, err, sizeof(err));
+        WBP_CHECK("invalid manifest flag refuses restore", merged == WR_STORE_MERGE_FAILED &&
+                  wbp_restore_preserved(target_path));
+    }
+    WBP_CHECK("set absent manifest row", sqlite3_exec(backup,
+        "UPDATE wallet_backup_manifest SET present_in_source=0,row_count=-1", NULL, NULL, NULL) == SQLITE_OK);
+    enum wallet_restore_store_status inspected = port->inspect_backup(port->self, backup_path,
+        tables, 1, &report, err, sizeof(err));
+    WBP_CHECK("absent manifest row keeps negative count", inspected == WR_STORE_OK &&
+              !report.manifest_present_in_source && report.manifest_row_count == -1);
+    WBP_CHECK("set manifest mismatch", sqlite3_exec(backup,
+        "UPDATE wallet_backup_manifest SET present_in_source=1,row_count=999", NULL, NULL, NULL) == SQLITE_OK);
+    inspected = port->inspect_backup(port->self, backup_path, tables, 1, &report, err, sizeof(err));
+    WBP_CHECK("manifest mismatch remains visible", inspected == WR_STORE_OK &&
+              report.manifest_present_in_source && report.manifest_row_count == 999 && report.rows_in_backup == 1);
+    WBP_CHECK("remove manifest fixture", sqlite3_exec(backup, "DROP TABLE wallet_backup_manifest", NULL, NULL, NULL) == SQLITE_OK);
+    sqlite3_close(backup);
+    return failures;
+}
+
 static int wbp_restore_faults(void)
 {
     int failures = 0;
@@ -344,6 +392,7 @@ static int wbp_restore_faults(void)
     WBP_CHECK("match wrapper", sqlite3_exec(backup,
         "UPDATE wallet_key_encryption SET wrapped_dek=x'01'", NULL, NULL, NULL) == SQLITE_OK);
     sqlite3_close(backup);
+    failures += wbp_restore_manifest_flags(&port, target_path, backup_path);
     failures += wbp_restore_denials(&port, target, target_path, backup_path);
     status = port.merge_into_target(port.self, backup_path, tables, 2, false, reports, err, sizeof(err));
     WBP_CHECK("restore matching wrapper merges", status == WR_STORE_OK && reports[0].rows_inserted == 1 && reports[1].rows_inserted == 1);

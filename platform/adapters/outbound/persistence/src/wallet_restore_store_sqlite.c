@@ -143,10 +143,14 @@ static enum wrs_presence wrs_manifest_row(sqlite3 *db, const char *schema,
         if (step == ZCL_STEP_DONE) result = WRS_ABSENT;
         else if (step == ZCL_STEP_ROW && sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
                  sqlite3_column_type(st, 1) == SQLITE_INTEGER) {
-            *out_present = sqlite3_column_int(st, 0) != 0;
-            *out_rows = sqlite3_column_int64(st, 1);
-            result = ar_step_checked(st, "restore manifest", NULL) == ZCL_STEP_DONE
-                     ? WRS_PRESENT : WRS_ERROR;
+            int64_t flag = sqlite3_column_int64(st, 0);
+            int64_t rows = sqlite3_column_int64(st, 1);
+            if ((flag == 0 || flag == 1) &&
+                ar_step_checked(st, "restore manifest", NULL) == ZCL_STEP_DONE) {
+                *out_present = flag == 1;
+                *out_rows = rows;
+                result = WRS_PRESENT;
+            }
         }
     }
     if (sqlite3_finalize(st) != SQLITE_OK) result = WRS_ERROR;
