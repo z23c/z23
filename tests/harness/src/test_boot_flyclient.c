@@ -294,6 +294,7 @@ static int mmb_reconcile_guard_checks(const char *dir)
     return failures;
 }
 
+#if defined(__linux__)
 static bool mmb_prepare_marks(struct node_db *db)
 {
     static const char *const names[] = {"svc.mmb.prepare.open", "svc.mmb.prepare.reconcile",
@@ -328,6 +329,8 @@ static int mmb_prepare_timing_checks(struct boot_svc_ctx *svc, const char *dir,
     if (timing_ready) node_db_close(&timing_db);
     return failures;
 }
+
+#endif
 
 static int mmb_boot_prepare_warm_checks(const char *dir)
 {
