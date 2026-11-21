@@ -1303,6 +1303,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     pc_prioritize_gate(g, PC_MODEL_SQL_GATE, "check-windows-cross-syntax");
     pc_prioritize_gate(g, PC_MODEL_SQL_GATE, "check-capability-closure");
     pc_prioritize_gate(g, "check-capability-inventory-generated", "check-kpi-floor");
+    pc_prioritize_gate(g, "check-no-new-bash", "check-windows-cross-syntax");
+    pc_prioritize_gate(g, "check-no-new-bash", "check-zcc-cache");
     ok = pc_gates_run(r, g, reply);
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);

@@ -773,6 +773,47 @@ static bool dlx_pc_purpose_order(const char *detail, bool fail)
     return ok;
 }
 
+static bool dlx_pc_bash_order_log(const struct dlx_rig *rig, const char *detail, bool fail)
+{
+    char path[1400], log[2048] = "";
+    size_t n = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig->clone);
+    bool ok = dlx_slurp(path, log, sizeof(log) - 1, &n);
+    log[n] = '\0';
+    const char *bash = strstr(log, "check-no-new-bash\n");
+    const char *slow[] = {"check-windows-cross-syntax", "check-zcc-cache"};
+    ok = ok && (!!bash == (strstr(detail, "check-no-new-bash") != NULL));
+    for (size_t i = 0; i < sizeof(slow) / sizeof(slow[0]); i++) {
+        const char *p = strstr(log, slow[i]);
+        bool selected = strstr(detail, slow[i]) != NULL;
+        ok = ok && (!!p == (selected && !fail)) && (!p || !bash || bash < p);
+    }
+    if (!ok) printf("bash precheck order: %s fail=%d ran=%s\n", detail, fail, log);
+    return ok;
+}
+
+static bool dlx_pc_bash_order(const char *detail, bool fail)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char row[1024];
+    const char *known = "check-windows-cross-syntax\ncheck-zcc-cache\n"
+        "check-no-new-bash\n";
+    if (!dlx_pc_rig(&rig, "precheck_bash_order", true, known)) return false;
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1, detail);
+    bool ok = dlx_pc_outcomes(row) &&
+        dlx_write_dep(rig.clone, "build/gen/guest_kernel_data.c", "x") &&
+        (!fail || dlx_pc_file(&rig, "precheck-fail", "check-no-new-bash"));
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && ok;
+    if (fail) ok = ok && !dlx_ok(&c) && !strcmp(dlx_str(&c, "gate"), "check-no-new-bash") && dlx_queue_empty();
+    else ok = ok && dlx_ok(&c) && dlx_queue_has_one();
+    ok = dlx_pc_bash_order_log(&rig, detail, fail) && ok;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_unproven_after_info(void)
 {
     struct dlx_rig rig;
@@ -1475,6 +1516,14 @@ int dlx_case_precheck(void)
         ASSERT(dlx_pc_purpose_order("check-file-purpose check-windows-cross-syntax", false));
         ASSERT(dlx_pc_purpose_order("check-file-purpose", false));
         ASSERT(dlx_pc_purpose_order("check-windows-cross-syntax", false));
+        PASS();
+    }
+    TEST("land: selected shell budget precedes expensive gates") {
+        ASSERT(dlx_pc_bash_order("check-windows-cross-syntax check-zcc-cache check-no-new-bash", true));
+        ASSERT(dlx_pc_bash_order("check-windows-cross-syntax check-zcc-cache check-no-new-bash", false));
+        ASSERT(dlx_pc_bash_order("check-zcc-cache check-no-new-bash", false));
+        ASSERT(dlx_pc_bash_order("check-no-new-bash", false));
+        ASSERT(dlx_pc_bash_order("check-windows-cross-syntax", false));
         PASS();
     }
     TEST("land: selected inventory refresh precedes the KPI floor") {
