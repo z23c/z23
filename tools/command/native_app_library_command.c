@@ -52,7 +52,7 @@ struct library {
     char recovered_root[APP_SELECTION_PATH_MAX];
     size_t count, index;
     size_t data_cap;
-    unsigned page;
+    unsigned page, recovered_from;
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     char source_version[65];
     char shared_path[ZCL_PRESENT_COPY_TEXT_MAX + 1];
@@ -155,9 +155,10 @@ static void al_model(struct library *w)
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-%zu", w->index);
     (void)snprintf(m->title, sizeof(m->title), "My Apps");
     if (!w->count) {
-        (void)snprintf(m->summary, sizeof(m->summary), "No apps yet. Create a copy or discover an app to get started.");
+        (void)snprintf(m->summary, sizeof(m->summary), "Create an app copy, browse received copies, or discover an app.");
         app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
-        app_library_choice(m, "home", "More options", "Received copies, discovery, hosting.");
+        app_library_choice(m, "home", "More options", "Discovery and hosting.");
+        app_library_choice(m, "recover-copies", "Received copies", "Review copies received in this profile.");
         return;
     }
     const struct library_row *r = &w->rows[w->index];
@@ -210,9 +211,10 @@ static void al_recovered_model(struct library *w)
     zcl_present_model_init_v1(m, ZCL_PRESENT_MODEL_CHOICE);
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-recovered-copies");
     (void)snprintf(m->title, sizeof(m->title), "Received copies");
+    const char *back = w->recovered_from == 8 ? "Return to Discover apps." : "Return to My Apps.";
     if (!w->recovered_count) {
         (void)snprintf(m->summary, sizeof(m->summary), "No profile copies were found.");
-        app_library_choice(m, "recover-back", "Back", "Return to Discover apps."); return;
+        app_library_choice(m, "recover-back", "Back", back); return;
     }
     const struct al_recovered_row *row = &w->recovered[w->recovered_index];
     char label[73]; size_t i = 0;
@@ -227,7 +229,7 @@ static void al_recovered_model(struct library *w)
         row->available ? "Review this trusted received copy." : "Other, saved, or unavailable copy.");
     if (w->recovered_index) app_library_choice(m, "recover-previous", "Previous", "Browse back.");
     if (w->recovered_index + 1 < w->recovered_count) app_library_choice(m, "recover-next", "Next", "Browse forward.");
-    app_library_choice(m, "recover-back", "Back", "Return to Discover apps.");
+    app_library_choice(m, "recover-back", "Back", back);
 }
 
 struct al_help_view {
@@ -1781,9 +1783,9 @@ static bool al_recovered_action(struct library *w, const char *id, const char *d
 {
     if (!strcmp(id, "recover-copies")) {
         if (!al_recovered_scan(w, datadir, reply)) return false;
-        w->page = 10; return true;
+        w->recovered_from = w->page; w->page = 10; return true;
     }
-    if (!strcmp(id, "recover-back")) { w->page = 8; return true; }
+    if (!strcmp(id, "recover-back")) { w->page = w->recovered_from; return true; }
     if (!strcmp(id, "recover-previous")) { if (w->recovered_index) --w->recovered_index; return true; }
     if (!strcmp(id, "recover-next")) { if (w->recovered_index + 1 < w->recovered_count) ++w->recovered_index; return true; }
     if (!strcmp(id, "recover-select")) return al_recovered_start(w, datadir, reply);

@@ -55,6 +55,10 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <sys/proc_info.h>
+#endif
 
 #define AL_FIXTURE "build/bin/z23-app-launch-fixture"
 #define AL_MARKER "FIXTURE: Device initialized successfully"
@@ -795,7 +799,9 @@ static int case_handlers(struct al_fx *f)
         test_fmt_tmpdir(datadir, sizeof(datadir), "zcl_app_open", "user's profile");
         ASSERT(json_push_kv_str(&in, "datadir", datadir));
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        app_launch_test_set_desktop(0);
         zcl_native_handle_app_open(&req, &reply);
+        app_launch_test_set_desktop(-1);
         ASSERT_EQ(reply.next_count, 1u);
         ASSERT_STR_EQ(reply.next[0].command, "app.list");
         zcl_command_reply_free(&reply);
@@ -1886,8 +1892,8 @@ static bool al_deep_quoted_home(const char *home, char *top, size_t topcap,
 {
     if (!al_path(top, topcap, home, "evidence-bound") || mkdir(top, 0700)) return false;
     if (snprintf(deep, deepcap, "%s", top) >= (int)deepcap) return false;
-    char part[161]; memset(part, '"', sizeof(part) - 1); part[sizeof(part) - 1] = 0;
-    for (unsigned i = 0; i < 7; ++i) {
+    char part[126]; memset(part, '"', sizeof(part) - 1); part[sizeof(part) - 1] = 0;
+    for (unsigned i = 0; i < 6; ++i) {
         size_t n = strlen(deep);
         if (snprintf(deep + n, deepcap - n, "/%s", part) >= (int)(deepcap - n) || mkdir(deep, 0700)) return false;
     }
@@ -3256,7 +3262,41 @@ static void al_library_all_rows_actions(struct al_library_script *s)
     for (unsigned i = 31; i < 47; ++i) s->actions[i] = (i & 1u) ? 1u : 2u;
     s->actions[47] = 3;
 }
-static int case_library_bounds(void)
+struct al_received_nav { unsigned step; bool via_discover, valid; };
+struct al_nav_step { const char *page, *action; };
+static bool al_received_nav_model(const struct zcl_present_model_v1 *m, unsigned step, unsigned last, bool discover)
+{
+    if (step == 0)
+        return m->action_count == 3 && !strcmp(m->actions[0].id, "create") &&
+            !strcmp(m->actions[1].id, "home") && !strcmp(m->actions[2].id, "recover-copies");
+    if (step == last - 1)
+        return strstr(m->summary, "No profile copies") && m->item_count == 1 &&
+            strstr(m->items[0].value, discover ? "Discover apps" : "My Apps");
+    return true;
+}
+static bool al_received_nav_present(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    static const struct al_nav_step direct[] = {
+        {"library-0", "recover-copies"}, {"library-recovered-copies", "recover-back"}, {"library-0", NULL}};
+    static const struct al_nav_step discover[] = {
+        {"library-0", "home"}, {"library-home", "discover"}, {"library-discover-options", "recover-copies"},
+        {"library-recovered-copies", "recover-back"}, {"library-discover-options", NULL}};
+    (void)copy;
+    struct al_received_nav *nav = context;
+    const struct al_nav_step *steps = nav->via_discover ? discover : direct;
+    unsigned count = nav->via_discover ? 5u : 3u, step = nav->step++;
+    if (step >= count) return false;
+    nav->valid = nav->valid && zcl_present_model_validate_v1(model, why, cap) &&
+        !strcmp(model->request_id, steps[step].page) &&
+        al_received_nav_model(model, step, count - 1, nav->via_discover);
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    if (!steps[step].action) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    int index = al_default_action(model, steps[step].action);
+    if (index < 0) return false;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = (uint32_t)index; return true;
+}
+static int case_library_empty(void)
 {
     int failures = 0;
     static struct al_fx f;
@@ -3266,9 +3306,29 @@ static int case_library_bounds(void)
         ASSERT(al_write_file(f.env.config_path, "", 0600));
         struct al_library_script s = {.actions = {1}, .count = 1, .valid = true};
         zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
-        ASSERT(s.valid && s.calls == 1 && s.home_calls == 1 && !s.errors && strstr(s.last_summary, "No apps yet"));
+        ASSERT(s.valid && s.calls == 1 && s.home_calls == 1 && !s.errors && strstr(s.last_summary, "browse received copies"));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
     PASS(); }
+    TEST("Received copies returns to its originating screen without changing the profile") {
+        for (unsigned route = 0; route < 2; ++route) {
+            struct al_received_nav nav = {.via_discover = route != 0, .valid = true};
+            zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+            zcl_test_app_library_setup(&f.env, NULL, f.root, &reply, al_received_nav_present, &nav);
+            ASSERT(nav.valid && nav.step == (route ? 5u : 3u));
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        }
+        PASS();
+    }
+_test_next:;
+    zcl_command_reply_free(&reply);
+    return failures;
+}
+static int case_library_bounds(void)
+{
+    int failures = 0;
+    static struct al_fx f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    if (!al_setup(&f) || !al_write_file(f.env.config_path, "", 0600)) { zcl_command_reply_free(&reply); return 1; }
     TEST("My Apps reaches all32 rows including duplicate friendly saved labels") {
         ASSERT(al_library_fill(&f));
         struct al_library_script s = {.count = 48, .valid = true};
@@ -3758,29 +3818,46 @@ static bool al_keep_notice(void *context, const struct zcl_present_model_v1 *mod
     return false;
 }
 
+#if defined(__APPLE__)
+static bool al_keep_owned_image(pid_t pid, const char *resolved)
+{
+    char exe[APP_LAUNCH_PATH_MAX]; uint64_t start = 0;
+    struct proc_bsdinfo info;
+    return pid > 1 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info) &&
+        info.pbi_uid == getuid() && app_proc_identity(pid, exe, &start) && !strcmp(exe, resolved);
+}
+static bool al_keep_stop_image(const char *resolved)
+{
+    int count = proc_listallpids(NULL, 0);
+    if (count <= 0 || count > 65536) return false;
+    size_t capacity = (size_t)count + 64u;
+    pid_t *pids = calloc(capacity, sizeof(*pids));
+    if (!pids) return false;
+    count = proc_listallpids(pids, (int)(capacity * sizeof(*pids)));
+    bool stopped = false;
+    if (count > 0 && (size_t)count < capacity) {
+        for (int i = 0; i < count && !stopped; ++i) {
+            if (al_keep_owned_image(pids[i], resolved)) stopped = asf_alive_then_stop(pids[i]);
+        }
+    }
+    free(pids);
+    return stopped;
+}
+#else
+static bool al_keep_stop_image(const char *resolved)
+{
+    long pid = app_proc_scan(resolved);
+    return pid > 1 && asf_alive_then_stop(pid);
+}
+#endif
 /* Stop the app the draft preview opened, identified by its kept image. */
 static bool al_keep_stop_app(const struct json_value *kept, const char *datadir)
 {
     const char *image = zcl_package_copy_str(kept, "image_sha3");
     char path[PATH_MAX], resolved[PATH_MAX];
-    if (!image || strlen(image) != 64 ||
-        snprintf(path, sizeof(path), "%s/app_build/images/%s", datadir, image) >= (int)sizeof(path) ||
-        !realpath(path, resolved))
-        return false;
-    DIR *d = opendir("/proc");
-    bool stopped = false;
-    struct dirent *e;
-    while (d && !stopped && (e = readdir(d))) {
-        char link[128], exe[PATH_MAX];
-        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-        int n = snprintf(link, sizeof(link), "/proc/%.60s/exe", e->d_name);
-        ssize_t len = n > 0 && n < (int)sizeof(link) ? readlink(link, exe, sizeof(exe) - 1) : -1;
-        if (len <= 0) continue;
-        exe[len] = 0;
-        if (!strcmp(exe, resolved)) stopped = asf_alive_then_stop(strtol(e->d_name, NULL, 10));
-    }
-    if (d) (void)closedir(d);
-    return stopped;
+    return image && strlen(image) == 64 &&
+        snprintf(path, sizeof(path), "%s/app_build/images/%s", datadir, image) < (int)sizeof(path) &&
+        realpath(path, resolved) && al_keep_stop_image(resolved);
 }
 
 /* The kept receipt names exactly the selection now on disk. */
@@ -3929,6 +4006,7 @@ _test_next:
     failures += case_library_profile_input();
     failures += case_library_builtin_help();
     failures += case_library_saved_default();
+    failures += case_library_empty();
     failures += case_library_bounds();
     failures += case_library_keep_receipt();
     al_kill_all();
