@@ -40,12 +40,33 @@
  * at most 96 bytes; the ref is probe.<12 hex nonce>.<index>. A directive is
  * never produced, and the echo role ignores any row whose kind is not note,
  * whose body lacks the prefix or exceeds the cap, and rows whose ts is older
- * than an hour. Box-addressed only: `to` is never "*" and never this box.
- * The signed fleet board admits 60 posts per 10 minutes per key. This leaf
- * refuses to spend more than 40 of them: PROBE_RATE_OVER_BUDGET when the
- * count and interval would put more than 40 posts in any 10-minute window,
- * PROBE_QUOTA_RECENT when this box already posted probe or echo rows in the
- * last 10 minutes that, with this run, pass 40.
+ * than an hour. `to` must be one well-formed name that is neither "*" nor
+ * this run's `from`. That is all that is checked: neither name is compared
+ * with the roster (no read-only roster source is used), so an alias or an
+ * unknown name passes and the run simply reports missing echoes. A probe
+ * never fans out to "*".
+ * The signed fleet board admits 60 posts per 10 minutes per key, and that
+ * quota is per host key: it is shared with every other mail the host posts
+ * (other names on the host, a concurrent send and echo, the receiver's own
+ * exports). This leaf refuses to spend more than 40 of them:
+ * PROBE_RATE_OVER_BUDGET when the count and interval would put more than 40
+ * posts in any 10-minute window, PROBE_QUOTA_RECENT when this name already
+ * posted probe or echo rows in the last 10 minutes that, with this run, pass
+ * 40. The budget does NOT account for the quota other mail spends, so a
+ * probe run can still push real mail over the board quota (delayed, not
+ * lost).
+ *
+ * WHICH STREAM A ROW CAME FROM. Every pull row names its `stream`:
+ * outbox.jsonl (this box's own posts) or inbox.<box>.jsonl (mail that
+ * arrived from outside). Delivery means arrival in an inbox, so: the echo
+ * role answers a probe row only when it was read from an inbox stream
+ * (counted as skipped_not_inbox otherwise), and the send role counts an echo
+ * only when it was read from inbox.<to>.jsonl, the stream of the addressed
+ * peer, and its `from` is that peer. Any other echo is an INVALID sample
+ * (echo_not_from_peer_inbox, echo_from_not_peer), excluded from percentiles
+ * and counted (echo_wrong_stream, echo_from_not_peer); a later echo from the
+ * right source replaces it. Running both roles on one box therefore yields
+ * no valid sample.
  *
  * REPORT. Every sample (ref, t1..t4, state, reason, legs), counts sent,
  * echoed, valid, missing, invalid, and p50, p90, p99 and max of one_way_ms.
@@ -56,11 +77,16 @@
  * max is "missing" if any sample has none). Fewer than 10 sent probes, or
  * fewer than 10 valid samples, refuse every percentile by name
  * (status "refused") and still list the samples. `transport` is taken from
- * the rows' own evidence: "board" only when every echoed row carried a
- * board_post on this side and the echo reports the probe row carried one on
- * the peer; "other" when no leg did; "mixed" otherwise; "none" with no echo.
- * A result therefore cannot claim the board path for a row that arrived by
- * another carrier. The delivery the first probe post reported (exported or
+ * the rows' own evidence, per leg of each VALID sample. A leg is "board"
+ * only when its row came from an inbox stream and carries a 64-lowercase-hex
+ * board_post AND board_signer; "other" when it came from an inbox stream
+ * with no board fields; "unattributed" for anything else (a partial or
+ * malformed board field, or a non-inbox stream). The result is the one label
+ * every leg shares, "mixed" when legs differ or the same echo arrived by two
+ * carriers (that sample's echo_leg is "mixed"), "none" with no valid sample.
+ * "board" means "carries well-formed board fields on an inbox stream"; it is
+ * NOT verified against the node, because no existing read-only call confirms
+ * a post without touching the held mail files. The delivery the first probe post reported (exported or
  * local) is recorded as first_post_delivery but is not a gate: the mail_carry
  * baseline is measurable with the same leaf.
  *
@@ -105,6 +131,8 @@
 #define PM_TOKEN_CAP 4096u
 #define PM_PAGES_MAX 512u
 #define PM_PENDING_MAX 256u
+#define PM_LEG_MAX 16u
+#define PM_HEX_LEN 64u
 
 /* The mail leaves, held as pointers: this leaf builds every request itself
  * and forwards no caller key. */
@@ -178,6 +206,52 @@ static const char *pm_str(const struct json_value *row, const char *key)
     if (!field || field->type != JSON_STR)
         return "";
     return json_get_str(field) ? json_get_str(field) : "";
+}
+
+/* 64 lowercase hex characters: the shape the board carry writes. */
+static bool pm_hex64(const char *s)
+{
+    size_t n = 0;
+    for (; s[n]; n++)
+        if (!((s[n] >= '0' && s[n] <= '9') || (s[n] >= 'a' && s[n] <= 'f')))
+            return false;
+    return n == PM_HEX_LEN;
+}
+
+/* Mail that arrived from outside: a row read from inbox.<box>.jsonl. This
+ * box's own outbox.jsonl is never delivery. */
+static bool pm_stream_inbox(const struct json_value *row)
+{
+    const char *s = pm_str(row, "stream");
+    size_t n = strlen(s);
+    return pm_starts(s, "inbox.") && n > 12 &&
+           strcmp(s + n - 6, ".jsonl") == 0 && !strchr(s, '/');
+}
+
+/* The inbox stream of one named peer box. */
+static bool pm_stream_of(const struct json_value *row, const char *peer)
+{
+    char want[PM_NAME_MAX + 16];
+    int w = snprintf(want, sizeof(want), "inbox.%s.jsonl", peer);
+    return w > 0 && (size_t)w < sizeof(want) &&
+           strcmp(pm_str(row, "stream"), want) == 0;
+}
+
+/* What a row's own evidence supports about its carrier. */
+static const char *pm_leg_label(const struct json_value *row)
+{
+    const char *post = pm_str(row, "board_post");
+    const char *signer = pm_str(row, "board_signer");
+    if (!pm_stream_inbox(row))
+        return "unattributed";
+    if (!post[0] && !signer[0])
+        return "other";
+    return pm_hex64(post) && pm_hex64(signer) ? "board" : "unattributed";
+}
+
+static bool pm_leg_known(const char *leg)
+{
+    return strcmp(leg, "board") == 0 || strcmp(leg, "other") == 0;
 }
 
 /* The name charset dev.agent.mail accepts for a sender or recipient. */
@@ -499,7 +573,8 @@ static bool pm_parse_names(const struct json_value *input, struct pm_input *in,
     if (!to || to->type != JSON_STR || !pm_name_ok(json_get_str(to)) ||
         strcmp(json_get_str(to), "*") == 0) {
         pm_refuse(reply, "PROBE_TO_NOT_A_BOX",
-                  "to is one peer box name, never * and never an alias",
+                  "to is one well-formed peer name and never *; only its "
+                  "spelling is checked, not the roster",
                   "input.to");
         return false;
     }
@@ -566,7 +641,7 @@ static bool pm_parse(const struct zcl_command_request *request,
 struct pm_pending {
     char ref[PM_REF_MAX];
     char from[PM_NAME_MAX];
-    char leg[8];
+    char leg[PM_LEG_MAX];
     int64_t t1, t2;
     bool watch, answered;
 };
@@ -646,11 +721,12 @@ enum pm_state { PM_MISSING = 0, PM_VALID, PM_INVALID };
 struct pm_sample {
     char ref[PM_REF_MAX];
     char echo_from[PM_NAME_MAX];
-    char probe_leg[8], echo_leg[8], basis[8];
+    char probe_leg[PM_LEG_MAX], echo_leg[PM_LEG_MAX], basis[8];
     int64_t t1, t2, t3, t4, network_ms;
     const char *reason;
     int state;
     bool seen;
+    bool bad_source, wrong_stream, wrong_from;
 };
 
 struct pm_send {
@@ -659,7 +735,7 @@ struct pm_send {
     char nonce[PM_NONCE_HEX + 1];
     char cursor[PM_TOKEN_CAP];
     char inner[64];
-    unsigned posted, seen, duplicates, name_mismatch;
+    unsigned posted, seen, settled, duplicates, name_mismatch, wrong_stream;
     char delivery[24];
     struct pm_sample s[PM_COUNT_MAX];
 };
@@ -692,10 +768,20 @@ static void pm_take_echo(struct pm_sample *s, const struct json_value *row,
     s->t4 = t4;
     (void)snprintf(s->echo_from, sizeof(s->echo_from), "%s",
                    pm_str(row, "from"));
-    if (strcmp(s->echo_from, to) != 0)
-        st->name_mismatch++;
-    (void)snprintf(s->echo_leg, sizeof(s->echo_leg), "%s",
-                   pm_str(row, "board_post")[0] ? "board" : "other");
+    (void)snprintf(s->echo_leg, sizeof(s->echo_leg), "%s", pm_leg_label(row));
+    if (!pm_stream_of(row, to)) {
+        s->bad_source = s->wrong_stream = true;
+        s->state = PM_INVALID;
+        s->reason = "echo_not_from_peer_inbox";
+        return;
+    }
+    if (strcmp(s->echo_from, to) != 0) {
+        s->bad_source = s->wrong_from = true;
+        s->state = PM_INVALID;
+        s->reason = "echo_from_not_peer";
+        return;
+    }
+    st->settled++;
     if (strlen(body) > PM_ECHO_BODY_MAX ||
         !pm_field_ll(body, "t1=", &t1) || !pm_field_ll(body, "t2=", &t2) ||
         !pm_field_ll(body, "t3=", &t3) ||
@@ -705,6 +791,8 @@ static void pm_take_echo(struct pm_sample *s, const struct json_value *row,
         s->reason = "echo_body_malformed";
         return;
     }
+    if (!pm_leg_known(s->probe_leg))
+        (void)snprintf(s->probe_leg, sizeof(s->probe_leg), "unattributed");
     s->t2 = t2;
     s->t3 = t3;
     if (t1 != s->t1) {
@@ -713,11 +801,31 @@ static void pm_take_echo(struct pm_sample *s, const struct json_value *row,
     }
 }
 
+/* Is this row from the addressed peer's own inbox stream? */
+static bool pm_echo_source_ok(const struct pm_send *st,
+                              const struct json_value *row)
+{
+    return pm_stream_of(row, st->in.to) &&
+           strcmp(pm_str(row, "from"), st->in.to) == 0;
+}
+
+/* A second row for an echo already taken. If it is from the right source
+ * and a different carrier than the first, the sample's carrier is "mixed". */
+static void pm_echo_again(struct pm_send *st, struct pm_sample *s,
+                          const struct json_value *row)
+{
+    st->duplicates++;
+    if (pm_echo_source_ok(st, row) &&
+        strcmp(pm_leg_label(row), s->echo_leg) != 0)
+        (void)snprintf(s->echo_leg, sizeof(s->echo_leg), "mixed");
+}
+
 /* One row from the wait page: an echo of one of this run's probes? */
 static bool pm_send_row(const struct json_value *row, int64_t t4, void *ctx)
 {
     struct pm_send *st = ctx;
     const char *ref = pm_str(row, "ref");
+    struct pm_sample *s;
     int idx;
     if (strcmp(pm_str(row, "kind"), PM_KIND) != 0 ||
         !pm_starts(pm_str(row, "body"), PM_ECHO_PREFIX))
@@ -725,11 +833,19 @@ static bool pm_send_row(const struct json_value *row, int64_t t4, void *ctx)
     idx = pm_ref_index(st, ref);
     if (idx < 0)
         return false;
-    if (st->s[idx].seen) {
-        st->duplicates++;
+    s = &st->s[idx];
+    if (s->seen && (!s->bad_source || !pm_echo_source_ok(st, row))) {
+        pm_echo_again(st, s, row);
         return false;
     }
-    pm_take_echo(&st->s[idx], row, t4, st->in.to, st);
+    if (s->seen) {
+        /* An echo from the wrong source gives way to one from the right. */
+        struct pm_sample fresh = {.t1 = s->t1};
+        (void)snprintf(fresh.ref, sizeof(fresh.ref), "%s", s->ref);
+        *s = fresh;
+        st->seen--;
+    }
+    pm_take_echo(s, row, t4, st->in.to, st);
     return true;
 }
 
@@ -745,7 +861,7 @@ static const char *pm_collect(struct pm_send *st, int64_t until_ms,
         struct zcl_command_reply r;
         int64_t left = until_ms - platform_time_monotonic_ms();
         bool ok;
-        if (stop_when_seen && st->seen >= st->posted)
+        if (stop_when_seen && st->settled >= st->posted)
             return NULL;
         /* One wait always runs, so a row already readable is read now even
          * when the deadline has just passed. */
@@ -967,21 +1083,29 @@ static bool pm_percentiles_json(struct json_value *data, const int64_t *sorted,
     return ok;
 }
 
-/* "board" only when every echoed row shows the board on both legs. */
+/* The one label every leg of every valid sample shares, else "mixed";
+ * "none" with no valid sample. "board" is well-formed fields on an inbox
+ * stream, not a check against the node. */
 static const char *pm_transport(const struct pm_send *st)
 {
-    unsigned board = 0, legs = 0;
+    static const char *const labels[] = {"board", "other", "unattributed"};
+    unsigned count[3] = {0, 0, 0}, legs = 0;
     for (unsigned i = 0; i < st->posted; i++) {
         const struct pm_sample *s = &st->s[i];
-        if (!s->seen)
+        const char *const leg[2] = {s->echo_leg, s->probe_leg};
+        if (s->state != PM_VALID)
             continue;
         legs += 2;
-        board += (strcmp(s->echo_leg, "board") == 0) +
-                 (strcmp(s->probe_leg, "board") == 0);
+        for (size_t l = 0; l < 2; l++)
+            for (size_t k = 0; k < 3; k++)
+                count[k] += strcmp(leg[l], labels[k]) == 0;
     }
     if (legs == 0)
         return "none";
-    return board == legs ? "board" : board == 0 ? "other" : "mixed";
+    for (size_t k = 0; k < 3; k++)
+        if (count[k] == legs)
+            return labels[k];
+    return "mixed";
 }
 
 static bool pm_counts_json(struct json_value *data, const struct pm_send *st,
@@ -995,42 +1119,72 @@ static bool pm_counts_json(struct json_value *data, const struct pm_send *st,
            json_push_kv_int(data, "missing", st->posted - st->seen) &&
            json_push_kv_int(data, "duplicate_echoes", st->duplicates) &&
            json_push_kv_int(data, "echo_from_not_peer", st->name_mismatch) &&
+           json_push_kv_int(data, "echo_wrong_stream", st->wrong_stream) &&
            json_push_kv_int(data, "one_way_over_1000ms", over_1s) &&
            json_push_kv_int(data, "min_samples", PM_MIN_SAMPLES);
+}
+
+/* The fixed explanatory strings of the report. */
+static bool pm_report_notes(struct json_value *data)
+{
+    return json_push_kv_str(data, "method",
+                            "one_way = ((t4 - t1) - (t3 - t2)) / 2; t1 and t4 "
+                            "on the sender clock, t2 and t3 on the peer "
+                            "clock") &&
+           json_push_kv_str(data, "percentile_rule",
+                            "nearest-rank over the sent probes; missing and "
+                            "invalid sort last; a rank past the valid "
+                            "samples is missing; refused below the minimum") &&
+           json_push_kv_str(data, "transport_note",
+                            "board means an inbox-stream row carrying a "
+                            "64-hex board_post and board_signer; it is not "
+                            "verified against the node. other is an inbox "
+                            "row with no board fields; unattributed is "
+                            "anything else; mixed is differing legs or one "
+                            "echo by two carriers");
+}
+
+/* Judge every sample; the valid network times, sorted, and the counts. */
+static unsigned pm_judge_all(struct pm_send *st, int64_t *sorted,
+                             unsigned *over_1s)
+{
+    unsigned nvalid = 0;
+    st->wrong_stream = st->name_mismatch = 0;
+    for (unsigned i = 0; i < st->posted; i++) {
+        const struct pm_sample *s = &st->s[i];
+        pm_judge(&st->s[i]);
+        st->wrong_stream += s->wrong_stream;
+        st->name_mismatch += s->wrong_from;
+        if (s->state == PM_VALID) {
+            sorted[nvalid++] = s->network_ms;
+            *over_1s += s->network_ms > 2000;
+        }
+    }
+    qsort(sorted, nvalid, sizeof(sorted[0]), pm_cmp_ll);
+    return nvalid;
 }
 
 static bool pm_send_report(struct pm_send *st, struct zcl_command_reply *reply)
 {
     struct json_value arr;
     int64_t sorted[PM_COUNT_MAX];
-    unsigned nvalid = 0, over_1s = 0;
-    bool ok;
+    unsigned nvalid, over_1s = 0;
+    bool ok, samples_ok = true;
     json_init(&arr);
     json_set_array(&arr);
-    for (unsigned i = 0; i < st->posted; i++) {
-        pm_judge(&st->s[i]);
-        if (st->s[i].state == PM_VALID) {
-            sorted[nvalid++] = st->s[i].network_ms;
-            over_1s += st->s[i].network_ms > 2000;
-        }
-    }
-    qsort(sorted, nvalid, sizeof(sorted[0]), pm_cmp_ll);
+    nvalid = pm_judge_all(st, sorted, &over_1s);
+    /* A sample that cannot be encoded fails the report; it is never left
+     * out while the counts still include it. */
     for (unsigned i = 0; i < st->posted; i++)
-        (void)pm_sample_json(&st->s[i], i, &arr);
-    ok = json_push_kv_str(&reply->data, "leaf", "dev.agent.mail.probe") &&
+        samples_ok = pm_sample_json(&st->s[i], i, &arr) && samples_ok;
+    ok = samples_ok && json_push_kv_str(&reply->data, "leaf", "dev.agent.mail.probe") &&
          json_push_kv_str(&reply->data, "role", "send") &&
          json_push_kv_str(&reply->data, "from", st->in.from) &&
          json_push_kv_str(&reply->data, "peer", st->in.to) &&
          json_push_kv_str(&reply->data, "nonce", st->nonce) &&
          json_push_kv_str(&reply->data, "transport", pm_transport(st)) &&
          json_push_kv_str(&reply->data, "first_post_delivery", st->delivery) &&
-         json_push_kv_str(&reply->data, "method",
-                          "one_way = ((t4 - t1) - (t3 - t2)) / 2; t1 and t4 "
-                          "on the sender clock, t2 and t3 on the peer clock") &&
-         json_push_kv_str(&reply->data, "percentile_rule",
-                          "nearest-rank over the sent probes; missing and "
-                          "invalid sort last; a rank past the valid samples "
-                          "is missing; refused below the minimum") &&
+         pm_report_notes(&reply->data) &&
          pm_counts_json(&reply->data, st, nvalid, over_1s) &&
          pm_percentiles_json(&reply->data, sorted, nvalid, st->posted) &&
          json_push_kv(&reply->data, "samples", &arr);
@@ -1103,7 +1257,8 @@ struct pm_echo {
     struct pm_pending pend[PM_PENDING_MAX];
     size_t npend;
     bool basis_watch;
-    unsigned skipped_oversize, skipped_stale, skipped_other, table_full;
+    unsigned skipped_oversize, skipped_stale, skipped_other;
+    unsigned skipped_not_inbox, table_full;
     unsigned posted;
     char cursor[PM_TOKEN_CAP];
     char inner[64];
@@ -1123,6 +1278,10 @@ static bool pm_probe_row_ok(struct pm_echo *e, const struct json_value *row)
 {
     const char *body = pm_str(row, "body");
     const char *from = pm_str(row, "from");
+    if (!pm_stream_inbox(row)) {
+        e->skipped_not_inbox++;
+        return false;
+    }
     if (strcmp(pm_str(row, "kind"), PM_KIND) != 0 ||
         strcmp(pm_str(row, "to"), e->in.from) != 0 ||
         !pm_starts(body, PM_PROBE_PREFIX) || !pm_ref_ok(pm_str(row, "ref")) ||
@@ -1163,7 +1322,7 @@ static bool pm_echo_row(const struct json_value *row, int64_t t2, void *ctx)
     (void)snprintf(p->ref, sizeof(p->ref), "%s", pm_str(row, "ref"));
     (void)snprintf(p->from, sizeof(p->from), "%s", pm_str(row, "from"));
     (void)snprintf(p->leg, sizeof(p->leg), "%s",
-                   pm_str(row, "board_post")[0] ? "board" : "other");
+                   pm_leg_label(row));
     p->t1 = t1;
     p->t2 = t2;
     p->watch = e->basis_watch;
@@ -1266,6 +1425,8 @@ static bool pm_echo_report(struct pm_echo *e, struct zcl_command_reply *reply)
                                e->skipped_stale) &&
               json_push_kv_int(&reply->data, "skipped_other",
                                e->skipped_other) &&
+              json_push_kv_int(&reply->data, "skipped_not_inbox",
+                               e->skipped_not_inbox) &&
               json_push_kv_int(&reply->data, "table_full", e->table_full) &&
               json_push_kv_str(&reply->data, "next_since", e->cursor) &&
               json_push_kv(&reply->data, "echoes", &e->out);

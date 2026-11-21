@@ -57,6 +57,11 @@ struct pmt_world {
     int64_t offset[2];
     int side;
     bool with_board;
+    int board_shape;        /* 0 well-formed, 1 short post, 2 upper-case post,
+                             * 3 no signer */
+    const char *alias_from; /* rewrite the echo row's from to this name */
+    bool dup_plain;         /* also carry the echo again without board fields */
+    bool back_to_outbox;    /* land the echo row in the sender's own outbox */
     bool use_since;
     int drop_index;
     int delivered;
@@ -157,14 +162,34 @@ static void pmt_world(const char *tag, int64_t offset_b, bool with_board,
 
 static void pmt_stamp_line(char *line, size_t cap, const char *raw, size_t n)
 {
-    static const char tail[] =
-        ",\"board_post\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
-        "\"board_signer\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}\n";
+    static const char lower[] =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char upper[] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    static const char signer[] =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char tail[256];
+    const char *post = g_w.board_shape == 1   ? "abc"
+                       : g_w.board_shape == 2 ? upper
+                                              : lower;
+    int w = snprintf(tail, sizeof(tail), ",\"board_post\":\"%s\"", post);
+    if (g_w.board_shape != 3)
+        w += snprintf(tail + w, sizeof(tail) - (size_t)w,
+                      ",\"board_signer\":\"%s\"", signer);
+    w += snprintf(tail + w, sizeof(tail) - (size_t)w, "}\n");
     /* raw ends with "}\n": drop both, add the board evidence. */
-    if (n < 2 || n + sizeof(tail) >= cap)
+    if (n < 2 || n + (size_t)w + 1 >= cap)
         abort();
     memcpy(line, raw, n - 2);
-    memcpy(line + n - 2, tail, sizeof(tail));
+    memcpy(line + n - 2, tail, (size_t)w + 1);
+}
+
+/* A courier that names the wrong sender on the echo row. */
+static void pmt_alias(char *raw)
+{
+    char *at = g_w.alias_from ? strstr(raw, "\"from\":\"node-b\"") : NULL;
+    if (at)
+        memcpy(at + 8, g_w.alias_from, strlen("node-b"));
 }
 
 /* Copy complete outbox lines addressed to `to` into `dest`'s inbox stream. */
@@ -194,9 +219,12 @@ static void pmt_carry(int from_side, int to_side, const char *to,
         *consumed = pos;
         if (!strstr(raw, needle) || (drop >= 0 && strstr(raw, dropat)))
             continue;
+        pmt_alias(raw);
         if (g_w.with_board) {
             pmt_stamp_line(line, sizeof(line), raw, n);
             (void)fputs(line, out);
+            if (g_w.dup_plain)
+                (void)fputs(raw, out);
         } else {
             (void)fputs(raw, out);
         }
@@ -258,8 +286,22 @@ static void pmt_pump(void *ctx)
         pmt_keep_cursor(&c);
     pmt_end(&c);
     g_w.true_ms += 20; /* B -> A */
-    pmt_carry(PMT_SIDE_B, PMT_SIDE_A, "node-a", "inbox.node-b.jsonl",
+    pmt_carry(PMT_SIDE_B, PMT_SIDE_A, "node-a",
+              g_w.back_to_outbox ? "outbox.jsonl" : "inbox.node-b.jsonl",
               &g_w.carried_b, g_w.drop_index);
+}
+
+/* One box playing both roles: the "echo" runs on the sending root, under the
+ * peer's name, and answers the sender's own outbox rows. Nothing is carried. */
+static void pmt_pump_loopback(void *ctx)
+{
+    struct pmt_call c;
+    (void)ctx;
+    g_w.true_ms += 10;
+    pmt_probe(&c, "echo", NULL, "node-b", 5, -1, 1, g_w.since);
+    pmt_keep_cursor(&c);
+    pmt_end(&c);
+    g_w.true_ms += 20;
 }
 
 /* The echo run that must exist before the sender starts. */
@@ -749,6 +791,90 @@ int test_agent_mail_latency_probe(void)
         pmt_scan_rows(PMT_SIDE_B, "node-b", &scan);
         ASSERT_EQ(scan.rows, 1);
         ASSERT_EQ(scan.bad, 0);
+        PASS();
+    }
+
+    TEST("probe: a same-box loopback delivers nothing and measures nothing") {
+        pmt_world("loop", 0, false, true, -1);
+        pmt_probe(&b, "echo", NULL, "node-b", 5, -1, 1, NULL);
+        pmt_keep_cursor(&b);
+        pmt_end(&b);
+        zcl_devagent_mailprobe_test_set_pump(pmt_pump_loopback, &g_w);
+        pmt_probe(&a, "send", "node-b", "node-a", 10, 0, 300, NULL);
+        zcl_devagent_mailprobe_test_set_pump(NULL, NULL);
+        ASSERT(pmt_ok(&a));
+        ASSERT_EQ(pmt_int(&a, "sent"), (int64_t)10);
+        ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)0);
+        ASSERT_STR_EQ(pmt_pct_overall(&a), "refused");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p50"), "");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p99"), "");
+        pmt_end(&a);
+        PASS();
+    }
+
+    TEST("probe: an echo read from the sender's own outbox is invalid") {
+        pmt_world("outbox", 0, true, true, -1);
+        g_w.back_to_outbox = true;
+        pmt_prime_echo();
+        pmt_send(&a, 10, 0, 300);
+        ASSERT(pmt_ok(&a));
+        ASSERT_EQ(pmt_int(&a, "echoed"), (int64_t)10);
+        ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)0);
+        ASSERT_EQ(pmt_int(&a, "invalid"), (int64_t)10);
+        ASSERT_EQ(pmt_int(&a, "echo_wrong_stream"), (int64_t)10);
+        ASSERT_STR_EQ(pmt_sample_str(&a, 0, "state"), "invalid");
+        ASSERT_STR_EQ(pmt_sample_str(&a, 0, "reason"),
+                      "echo_not_from_peer_inbox");
+        ASSERT_STR_EQ(pmt_pct_overall(&a), "refused");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p50"), "");
+        pmt_end(&a);
+        PASS();
+    }
+
+    TEST("probe: an echo from a box other than the peer is invalid") {
+        pmt_world("alias", 0, true, true, -1);
+        g_w.alias_from = "node-c";
+        pmt_prime_echo();
+        pmt_send(&a, 10, 0, 300);
+        ASSERT(pmt_ok(&a));
+        ASSERT_EQ(pmt_int(&a, "echoed"), (int64_t)10);
+        ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)0);
+        ASSERT_EQ(pmt_int(&a, "echo_from_not_peer"), (int64_t)10);
+        ASSERT_STR_EQ(pmt_sample_str(&a, 0, "state"), "invalid");
+        ASSERT_STR_EQ(pmt_sample_str(&a, 0, "reason"), "echo_from_not_peer");
+        ASSERT_STR_EQ(pmt_pct_overall(&a), "refused");
+        pmt_end(&a);
+        PASS();
+    }
+
+    TEST("probe: malformed board fields do not earn the board label") {
+        for (int shape = 1; shape <= 3; shape++) {
+            pmt_world("shape", 0, true, true, -1);
+            g_w.board_shape = shape;
+            pmt_prime_echo();
+            pmt_send(&a, 10, 0, 2000);
+            ASSERT(pmt_ok(&a));
+            ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)10);
+            ASSERT_STR_EQ(pmt_str(&a, "transport"), "unattributed");
+            ASSERT_STR_EQ(pmt_sample_str(&a, 0, "echo_leg"), "unattributed");
+            ASSERT_STR_EQ(pmt_sample_str(&a, 0, "probe_leg"), "unattributed");
+            ASSERT(strstr(pmt_str(&a, "transport_note"),
+                          "not verified against the node") != NULL);
+            pmt_end(&a);
+        }
+        PASS();
+    }
+
+    TEST("probe: the same echo by two carriers marks the sample mixed") {
+        pmt_world("mixed", 0, true, true, -1);
+        g_w.dup_plain = true;
+        pmt_prime_echo();
+        pmt_send(&a, 10, 0, 2000);
+        ASSERT(pmt_ok(&a));
+        ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)10);
+        ASSERT_STR_EQ(pmt_sample_str(&a, 0, "echo_leg"), "mixed");
+        ASSERT_STR_EQ(pmt_str(&a, "transport"), "mixed");
+        pmt_end(&a);
         PASS();
     }
 

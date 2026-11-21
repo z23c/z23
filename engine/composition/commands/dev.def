@@ -3224,16 +3224,17 @@ ZCL_COMMAND_DEV_COMMAND(
     "cancels clock offset, counts sent, echoed, valid, missing and invalid, "
     "nearest-rank p50, p90, p99 and max over the sent probes where a "
     "missing or invalid sample sorts last and a rank past the valid samples "
-    "is missing, and transport read from the rows' own board_post evidence. "
+    "is missing, and transport read from the rows' own board fields. "
     "Fewer than 10 sent or valid samples refuse every percentile by name. "
     "Start the echo run before the send run. kind, body and ref are fixed "
     "(PROBE_FIELD_FIXED): a probe is always a note. Refuses more than 40 "
     "posts in a 10-minute window, counting this box's recent probe and echo "
-    "rows, because the board admits 60 per key.", 32768,
+    "rows, because the board admits 60 per key, shared with other mail. Only "
+    "inbox-stream rows count; board means well-formed board fields.", 32768,
     "agent,mail,probe,latency,echo,fleet,measure",
     "zcl.agent_mail_probe_input.v1", "zcl.agent_mail_probe.v1",
     "action,to,from,probes,interval_ms,timeout_ms,since", "action",
-    "z23 dev agent mail probe send --to=box-b --probes=20 --interval_ms=20000",
+    "z23-dev dev agent mail probe send --to=box-b --probes=20 --interval_ms=20000",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
