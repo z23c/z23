@@ -546,6 +546,33 @@ static void bp_park_fixture_end(const char *dir)
     test_rm_rf(dir);
 }
 
+static int bp_node_db_guidance(const char *captured, const char *display_dir)
+{
+    int failures = 0;
+    BP_CHECK("node_db_unopened: gives the offline bootstatus template",
+             strstr(captured, "z23 core node bootstatus -datadir=YOUR_DATADIR") != NULL);
+    BP_CHECK("node_db_unopened: preserves the database family",
+             strstr(captured, "node.db-wal") != NULL &&
+             strstr(captured, "node.db-shm") != NULL);
+    BP_CHECK("node_db_unopened: requires a verified private recovery copy",
+             strstr(captured, "verified private recovery copy") != NULL);
+    BP_CHECK("node_db_unopened: copy requires a quiescent database",
+             strstr(captured, "database is quiescent") != NULL);
+    BP_CHECK("node_db_unopened: runbook link is scoped to key storage",
+             strstr(captured, "key-storage section of docs/node/WALLET_PERSISTENCE_RECOVERY.md") != NULL);
+    BP_CHECK("node_db_unopened: chain cannot recover wallet keys",
+             strstr(captured, "chain cannot recover wallet keys") != NULL);
+    BP_CHECK("node_db_unopened: does not assume a rebuild was attempted",
+             strstr(captured, "bounded rebuild did not recover") == NULL);
+    BP_CHECK("node_db_unopened: no move or restart command",
+             strstr(captured, "mv ") == NULL &&
+             strstr(captured, "systemctl --user restart") == NULL);
+    BP_CHECK("node_db_unopened: datadir is evidence, not shell input",
+             strstr(captured, display_dir) != NULL &&
+             strstr(captured, "bootstatus -datadir=/tmp/z23") == NULL);
+    return failures;
+}
+
 /* ── node.db unopenable REFUSES; it must never park ───────────────
  *
  * Parking sends no READY= under Type=notify and the step stays open, so the
@@ -563,7 +590,8 @@ static int bp_node_db_gate_refuses(void)
 
     bp_park_fixture_begin(dir, sizeof(dir), false);
     boot_step_enter("db.open_migrate");
-    bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
+    const char *display_dir = "/tmp/z23 path;$(echo not-a-command)";
+    bool captured_ok = bp_capture_gate(display_dir, captured, sizeof(captured),
                                        &gate_rc);
     bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
     BP_CHECK("serving+node_db_unopened: gate returns (does not park)",
@@ -578,9 +606,7 @@ static int bp_node_db_gate_refuses(void)
              strstr(captured,
                     "step=db.open_migrate state=failed verdict=failure")
                  != NULL);
-    BP_CHECK("serving+node_db_unopened: names one operator command",
-             captured_ok && strstr(captured, "systemctl --user restart")
-                 != NULL);
+    if (captured_ok) failures += bp_node_db_guidance(captured, display_dir);
     BP_CHECK("serving+node_db_unopened: latches FATAL (exit 1 path)",
              boot_error_reported());
     BP_CHECK("serving+node_db_unopened: boot_status names the blocker",

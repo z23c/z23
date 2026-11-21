@@ -15,10 +15,8 @@
  * then exit non-zero naming the one command the operator runs. systemd reports
  * failed and Restart= owns the retry.
  *
- * THE REPAIR RUNS FIRST. A malformed node.db does not reach this gate:
- * models/database.c quarantines the SQLite family and rebuilds fresh (see
- * db_build_schema there). Reaching this gate means the store could not be
- * opened even after that repair. */
+ * Confirmed corruption may trigger the SQLite family quarantine before this
+ * gate. Reaching it means the store could not be opened. */
 
 #include "config/boot_internal.h"
 
@@ -32,8 +30,6 @@
 bool boot_node_db_open_failed_gate(const char *datadir)
 {
     const char *dd = datadir ? datadir : "(unset)";
-    char inspect[1100];
-    char retry[1100];
     char evidence[1200];
 
     fprintf(stderr, "Warning: SQLite database unavailable\n");
@@ -58,30 +54,23 @@ bool boot_node_db_open_failed_gate(const char *datadir)
      * says verdict=failure, and it must not be sequenced behind anything. */
     (void)boot_step_fail("node_db_unopened");
 
-    (void)snprintf(inspect, sizeof(inspect),
-                   "ls -l %s/node.db %s/node.db-wal %s/node.db.corrupt-*",
-                   dd, dd, dd);
-    (void)snprintf(retry, sizeof(retry),
-                   "mv %s/node.db %s/node.db.unopenable-$(date -u +%%Y%%m%%dT%%H%%M%%SZ) "
-                   "&& systemctl --user restart z23-node", dd, dd);
     (void)snprintf(evidence, sizeof(evidence),
                    "datadir=%s store=node.db stage=db.open_migrate", dd);
 
     const struct boot_error_next next[] = {
-        { inspect,
-          "look at the store first: a permission/ownership change, a full or "
-          "read-only filesystem, and an already-quarantined "
-          "node.db.corrupt-<UTC> each point at a different cause" },
-        { retry,
-          "move the unopenable store aside (nothing is deleted) and restart. "
-          "The node rebuilds node.db from the chain it already has on disk" },
+        { "z23 core node bootstatus -datadir=YOUR_DATADIR",
+          "replace YOUR_DATADIR with the datadir from the evidence as one "
+          "quoted argument; this reads boot status without RPC. Preserve "
+          "node.db, node.db-wal, and node.db-shm together; make a "
+          "verified private recovery copy while the database is quiescent, before "
+          "any repair. The chain cannot recover wallet keys. See the key-storage "
+          "section of docs/node/WALLET_PERSISTENCE_RECOVERY.md" },
     };
     return boot_refuse_at_permanent_gate(
         "node_db_unopened",
-        "node.db could not be opened and the bounded rebuild did not recover "
-        "it. The node is NOT running: booting on would mean no persistence "
+        "node.db could not be opened. The node is NOT running: booting on would mean no persistence "
         "for wallet keys, chain state, or the progress cursor",
-        next, 2, evidence);
+        next, 1, evidence);
 }
 
 /* The node.db open step reports progress while it runs.
