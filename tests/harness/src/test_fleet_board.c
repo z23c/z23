@@ -7898,7 +7898,7 @@ static int test_fleet_board_state_tag(unsigned c)
 #define FBP_PUSHER 7
 #define FBP_ADDRESSEE 9
 #define FBP_STRANGER 8
-#define FBP_CASES 43u
+#define FBP_CASES 48u
 
 /* A failed step names its line and fails the case. */
 #define FBP_REQUIRE(cond)                                                      \
@@ -8792,11 +8792,12 @@ static bool fbp_pull_refusal_held(struct fbp *p, uint64_t judged,
     return true;
 }
 
+static bool fbh_pull_push_agree(struct fbp *p, bool served, unsigned seq);
+
 /* Case 24. The addressee's oldest pairing row has expired and a live one
- * follows it. The pull judges a peer on its oldest row, so a pull from the
- * addressee is refused; the push asks the pull's own decision and opens
- * nothing. (A known limitation of the pull's row choice, which the push
- * follows: config/boot_fleet_board.h, PUSH.) */
+ * follows it. The pull judges every row that is live now, so a pull from
+ * the addressee is served on the live row, and a hinted push reaches it.
+ * (This case pinned the refusal while the pull judged only the oldest row.) */
 static bool fbp_case_addressee_old_row(struct fbp *p)
 {
     struct db_mesh_pairing first;
@@ -8806,10 +8807,7 @@ static bool fbp_case_addressee_old_row(struct fbp *p)
     FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
                 !mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
                                      FBW_NOW));
-    FBP_REQUIRE(!board_accept_authorized(p->w.f.resp_noise_pub));
-    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
-    FBP_REQUIRE(fbp_send(p) == 0);
-    return fbp_pull_refusal_held(p, 1, 1);
+    return fbh_pull_push_agree(p, true, 24);
 }
 
 /* Case 25. */
@@ -9735,15 +9733,17 @@ static bool fbh_older_row(struct fbw *w, const uint8_t noise[32],
 }
 
 /* Case 41 (security re-review). An older live row under another master for
- * the addressee's Noise key: the pull, judging that row, refuses the
- * addressee (session_mismatch), so neither a hinted post nor a ref-derived
- * one opens a push and nothing is stored; a third, newer row under yet
- * another master changes nothing. */
+ * the addressee's Noise key, whose delegation does not match the session:
+ * the pull is served on the addressee's own row and never on that one, so a
+ * hinted post and a ref-derived one both reach it in one push; a third,
+ * newer row under yet another master changes nothing. (This case pinned the
+ * refusal while the pull judged only the oldest row.) */
 static bool fbp_case_pull_row_refuses(struct fbp *p)
 {
     struct fleet_board_post mail;
     struct db_mesh_pairing first;
     char to[65];
+    size_t frames = 0;
     zcl_hex_encode(p->addressee.online_pubkey, 32, to);
     FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
     FBP_REQUIRE(fbh_older_row(&p->w, p->w.f.resp_noise_pub,
@@ -9752,23 +9752,20 @@ static bool fbp_case_pull_row_refuses(struct fbp *p)
                 mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
                                     FBW_NOW) &&
                 strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0);
-    FBP_REQUIRE(!board_accept_authorized(p->w.f.resp_noise_pub));
+    FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
     FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
-    /* By hint. */
+    /* By hint, and by ref. */
     FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
                                                        to) ==
                 FLEET_BOARD_PUSH_HINT_QUEUED);
-    FBP_REQUIRE(fbp_send(p) == 0);
-    /* By ref. */
     boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
-    FBP_REQUIRE(fbp_send(p) == 0);
+    FBP_REQUIRE(fbp_send(p) == 1);
+    FBP_REQUIRE(fbp_commit(p, &frames) == 2 && frames == 1);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, mail.id));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
     /* Three rows: a newer one under a third master. */
     FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE4));
-    FBP_REQUIRE(!board_accept_authorized(p->w.f.resp_noise_pub));
-    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
-    FBP_REQUIRE(fbp_send(p) == 0);
-    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, mail.id));
-    return fbp_pull_refusal_held(p, 3, 3);
+    return fbh_pull_push_agree(p, true, 41);
 }
 
 /* Case 42, the mirror. The addressee's oldest row is the live one and a
@@ -9792,6 +9789,128 @@ static bool fbp_case_pull_row_serves(struct fbp *p)
     FBP_REQUIRE(fbp_commit(p, &frames) == 2 && frames == 1);
     FBP_REQUIRE(db_fleet_board_have(&p->w.a, mail.id));
     FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
+/* ── which pairing rows the disclosure decision judges ─────────────────── */
+
+/* The pull's decision and the push's agree on the addressee, whatever its
+ * pairing rows: both serve it (`served`) or both refuse it; a served push
+ * proves the addressee's board key; the push's judgment counts nothing as a
+ * pull, and a refused pull counts one refusal, however many rows it judged;
+ * a hinted mail post (numbered `seq`) reaches the addressee by push exactly
+ * when the pull serves it. */
+static bool fbh_pull_push_agree(struct fbp *p, bool served, unsigned seq)
+{
+    const uint8_t *noise = p->w.f.resp_noise_pub;
+    struct fleet_board_post mail;
+    uint8_t key[32];
+    char to[65], text[192];
+    size_t frames = 0;
+    struct boot_fleet_board_fleet_counts c0 = fbp_now_counts();
+    bool push = board_push_disclosure(noise, key) == FLEET_BOARD_PUSH_REFUSALS;
+    struct boot_fleet_board_fleet_counts c1 = fbp_now_counts();
+    FBP_REQUIRE(c1.delegation_refused == c0.delegation_refused &&
+                c1.role_refused == c0.role_refused);
+    bool pull = board_accept_authorized(noise);
+    struct boot_fleet_board_fleet_counts c2 = fbp_now_counts();
+    FBP_REQUIRE(pull == served && push == served);
+    FBP_REQUIRE(!served || memcmp(key, p->addressee.online_pubkey, 32) == 0);
+    FBP_REQUIRE(c2.delegation_refused + c2.role_refused ==
+                c1.delegation_refused + c1.role_refused + (served ? 0u : 1u));
+    (void)snprintf(text, sizeof text,
+                   "{\"seq\":%u,\"from\":\"chatgpt\",\"to\":\"node-b\","
+                   "\"kind\":\"directive\",\"body\":\"run the gate\"}",
+                   seq);
+    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
+    FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, text, 3600, &mail));
+    FBP_REQUIRE(boot_fleet_board_fleet_push_enqueue_to(&mail, p->pk_pusher,
+                                                       to) ==
+                FLEET_BOARD_PUSH_HINT_QUEUED);
+    FBP_REQUIRE(fbp_send(p) == (served ? 1u : 0u));
+    FBP_REQUIRE(!served || (fbp_commit(p, &frames) == 1 && frames == 1));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, mail.id) == served);
+    return true;
+}
+
+/* Revoke the addressee's row under the master `fill` names (fbh_newer_row),
+ * or, with fill 0, the addressee's own pairing. */
+static bool fbh_revoke(struct fbp *p, uint8_t fill)
+{
+    struct db_mesh_pairing row;
+    memset(&row, 0, sizeof row);
+    memset(row.peer_master_pubkey, fill, 32);
+    if (fill == 0)
+        (void)snprintf(row.pairing_id, sizeof row.pairing_id, "%s",
+                       p->addr_peer.pairing.pairing_id);
+    else if (!mesh_pairing_id_derive(p->w.f.genesis, row.peer_master_pubkey,
+                                     p->w.f.resp_noise_pub, row.pairing_id))
+        return false;
+    return db_mesh_pairing_revoke(&p->w.f.ndb, row.pairing_id, FBW_NOW);
+}
+
+/* Case 43. The addressee's only pairing is revoked: neither pull nor push. */
+static bool fbp_case_only_row_revoked(struct fbp *p)
+{
+    FBP_REQUIRE(fbh_revoke(p, 0));
+    return fbh_pull_push_agree(p, false, 43);
+}
+
+/* Case 44. The addressee's pairing is revoked and a later live pairing of
+ * the same Noise key under another master does not match the session: that
+ * row never carries the revoked pairing's authority. */
+static bool fbp_case_revoked_then_other_master(struct fbp *p)
+{
+    FBP_REQUIRE(fbh_revoke(p, 0));
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE6));
+    FBP_REQUIRE(fbh_pull_push_agree(p, false, 44));
+    return fbp_pull_refusal_held(p, 1, 1);
+}
+
+/* Case 45. An older pairing of the addressee's Noise key under another
+ * master is revoked; the addressee's own, distinct pairing is live. */
+static bool fbp_case_revoked_older_pairing(struct fbp *p)
+{
+    struct db_mesh_pairing first;
+    FBP_REQUIRE(fbh_older_row(&p->w, p->w.f.resp_noise_pub,
+                              p->addr_peer.pairing.pairing_id));
+    FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
+                strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0);
+    FBP_REQUIRE(db_mesh_pairing_revoke(&p->w.f.ndb, first.pairing_id, FBW_NOW));
+    return fbh_pull_push_agree(p, true, 45);
+}
+
+/* Case 46. FLEET_BOARD_DISCLOSURE_ROWS_MAX newer live rows under other
+ * masters put the addressee's own row beyond the rows judged, so it is not
+ * considered and the decision refuses; once one of them is revoked (a dead
+ * row is never judged and takes no place) the addressee's row is judged
+ * again and serves. */
+static bool fbp_case_rows_past_cap(struct fbp *p)
+{
+    for (unsigned i = 0; i < FLEET_BOARD_DISCLOSURE_ROWS_MAX; i++)
+        FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub,
+                                  (uint8_t)(0xD0u + i)));
+    FBP_REQUIRE(fbh_pull_push_agree(p, false, 46));
+    FBP_REQUIRE(fbh_revoke(p, 0xD1));
+    return fbh_pull_push_agree(p, true, 146);
+}
+
+/* Case 47. When no row serves, the newest row judged names the refusal:
+ * with the read role denied, the addressee's own row fails the role and two
+ * newer rows under other masters fail their delegation; one refusal is
+ * counted, the newest row's (delegation), never the role's. */
+static bool fbp_case_refusal_row(struct fbp *p)
+{
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE7));
+    FBP_REQUIRE(fbh_newer_row(&p->w, p->w.f.resp_noise_pub, 0xE8));
+    struct boot_fleet_board_fleet_counts c0 = fbp_now_counts();
+    g_fbw_deny_read = true;
+    bool agree = fbh_pull_push_agree(p, false, 47);
+    g_fbw_deny_read = false;
+    FBP_REQUIRE(agree);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.delegation_refused == c0.delegation_refused + 1);
+    FBP_REQUIRE(c.role_refused == c0.role_refused);
     return true;
 }
 
@@ -9853,8 +9972,8 @@ static const struct {
     { "fleet board push: the lane's own tick drains once a second, pulls "
       "once an interval, and pushes on its 100 ms ticks", fbp_case_real_tick },
     { "fleet board push: an expired pairing row older than the addressee's "
-      "live one makes the pull refuse it, and the push follows the pull",
-      fbp_case_addressee_old_row },
+      "live one does not stop the pull serving it, and a hinted push follows "
+      "the pull", fbp_case_addressee_old_row },
     { "fleet board push: an expired pairing row older than the pusher's live "
       "one does not void its push", fbp_case_pusher_old_row },
     { "fleet board push: an addressee two paired peers claim is pushed "
@@ -9895,12 +10014,26 @@ static const struct {
     { "fleet board push: receipts naming other posts are counted each time "
       "and logged at most once a window", fbp_case_receipt_log_limited },
     { "fleet board push: an older live pairing row under another master "
-      "makes the pull refuse the addressee, and then neither a hinted nor a "
-      "ref-derived post opens a push, with two rows or three",
+      "does not stop the pull serving the addressee on its own row, and a "
+      "hinted and a ref-derived post reach it, with two rows or three",
       fbp_case_pull_row_refuses },
     { "fleet board push: where the addressee's oldest pairing row is the "
       "live one the pull serves it, and a hinted and a ref-derived post "
       "both reach it in one push", fbp_case_pull_row_serves },
+    { "fleet board disclosure: a peer whose only pairing is revoked is "
+      "served neither pull nor push, and one refusal is counted",
+      fbp_case_only_row_revoked },
+    { "fleet board disclosure: a revoked pairing is not carried by a later "
+      "live pairing of the same Noise key whose delegation does not match",
+      fbp_case_revoked_then_other_master },
+    { "fleet board disclosure: a revoked older pairing does not stop a "
+      "distinct live pairing serving pull and push",
+      fbp_case_revoked_older_pairing },
+    { "fleet board disclosure: an authorising row beyond the newest live "
+      "rows judged is not considered, and counts once refused",
+      fbp_case_rows_past_cap },
+    { "fleet board disclosure: when no row serves, the newest row judged "
+      "names the one refusal counted", fbp_case_refusal_row },
 };
 
 /* Each case gets a fresh paired fixture. */

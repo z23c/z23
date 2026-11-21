@@ -216,10 +216,9 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * the online key of exactly one paired peer and, at the moment the push opens, the answering half's own
  * disclosure decision for a pull from that peer's Noise key serves it: the
  * same function a pull is judged by (board_accept_authorized, asked with
- * nothing recorded), on the same pairing row (the one
- * board_pairing_for_peer picks), with the same checks (a current
- * delegation on that session, the read role, the roster), and that row's
- * delegation proves the addressee's board key; then while its send queue
+ * nothing recorded), on the same pairing rows, with the same checks (a
+ * current delegation on that session, the read role, the roster), and the
+ * newest row that serves proves the addressee's board key; then while its send queue
  * is under budget (net_send_over_budget) and no other push to it is open,
  * and only while the post is one a pull would still serve (unexpired, or a
  * wiki page). Where the pull would refuse, the post is skipped ineligible
@@ -227,12 +226,23 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * pull from that peer would not be served, and no hint can make a post
  * reach more than one box: a local process able to call the post RPC can
  * already publish the post to every eligible box by pull, and gains only
- * the choice of which one of those is tried first. Known limitation: the
- * pull judges a peer on the OLDEST pairing row for its Noise key, live or
- * not, so a re-paired peer whose oldest row is no longer the live one (an
- * expired row, or one under another master) is served neither pull nor
- * push; fixing the pull's row selection is a follow-up on the pull path,
- * and the push follows it by construction. Nothing is
+ * the choice of which one of those is tried first. Which pairing rows that
+ * decision judges: a pairing is one row, keyed by its pairing id, the hash
+ * of network genesis, peer master key and peer Noise key; rows are
+ * insert-only and a revocation is sticky, so a revoked pairing id is never
+ * live again, and one Noise key holds several rows only under different
+ * masters (or networks). The decision takes the newest
+ * FLEET_BOARD_DISCLOSURE_ROWS_MAX rows for the peer's Noise key that grant
+ * the status capability now (mesh_pairing_allows: not revoked, unexpired)
+ * and serves the peer when any one of them passes every check on its own:
+ * that row's master's delegation resolves and is current and bound to this
+ * session under that row, then the read role and the roster. A revoked or
+ * expired row is never judged, so no other row carries its authority; an
+ * allowing row past those newest is not judged (fail closed), and neither
+ * is a row past the first FLEET_BOARD_FLEET_PEERS_MAX of the pairing list,
+ * which runs oldest first. When none serves, the newest judged row's
+ * refusal is counted and logged once ("no live pairing" when no row
+ * allows). Nothing is
  * relayed: a box pushes only posts its own key signed. The receiver copies
  * the payload into a bounded push inbox, separate from the pull inbox, on
  * the frame path, and checks nothing else there; its lane tick re-proves the
@@ -264,8 +274,9 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * post both paths deliver is one row by id. An older node answers the new
  * type stream_malformed, and that session is not pushed to again.
  *
- * Who is answered: a peer whose pairing row grants the status capability,
- * whose delegation is still current, and whose online key holds a role
+ * Who is answered: a peer with a pairing row (of those judged, above) that
+ * grants the status capability, whose delegation under that row is still
+ * current, and whose online key holds a role
  * granting FLEET_BOARD_FLEET_READ_LEAF here — and, once a fleet roster is in
  * force (config/boot_fleet_roster.h, ZRC 0012 step 2), that is a member of it;
  * the asking half pulls only from such a peer, and ingest takes a fleet post

@@ -27,10 +27,10 @@ bool board_network_genesis(uint8_t out[32]);
 /* The paired peer's delegation, as the lane resolves it. */
 bool board_peer_delegation(const struct db_mesh_pairing *row,
                            struct vcs_zcode_dht_delegation *out);
-/* The pairing row for one Noise static, from a bounded read. */
-bool board_pairing_for_peer(struct node_db *ndb,
-                            const uint8_t peer_noise_static[32],
-                            struct db_mesh_pairing *out);
+/* The disclosure decision judges at most this many pairing rows for one
+ * Noise static: the newest that grant the status capability now (the push's
+ * receiving half proves at most as many board keys, PUSH_PUSHER_KEYS_MAX). */
+#define FLEET_BOARD_DISCLOSURE_ROWS_MAX 4u
 /* The peer's delegation is still current on chain; refusals are counted. */
 bool board_delegation_current(struct node_db *ndb,
                               const struct db_mesh_pairing *row,
@@ -43,14 +43,17 @@ bool board_peer_may_read(const uint8_t signer[32]);
 /* The fleet roster admits this board key here. */
 bool board_roster_admits(const uint8_t online_pubkey[32]);
 /* Everything the answering half proves before it reads a post for a peer:
- * the pairing row board_pairing_for_peer picks, a current delegation, the
- * read role and the roster. Refusals are counted and logged. */
+ * one of the newest pairing rows for its Noise static that grant the status
+ * capability now (at most FLEET_BOARD_DISCLOSURE_ROWS_MAX) passes on its own
+ * a current delegation bound to this session, the read role and the roster.
+ * A refused decision is counted and logged once. */
 bool board_accept_authorized(const uint8_t peer_noise_static[32]);
 /* The push's sending half: the very decision board_accept_authorized makes
- * for a pull from this Noise static (same function, same row, same clock),
+ * for a pull from this Noise static (same function, same rows, same clock),
  * with nothing counted or logged. Returns FLEET_BOARD_PUSH_REFUSALS when a
- * pull would be served, with the board key that row's delegation proves in
- * `online_out` (may be NULL), else the check that refused. */
+ * pull would be served, with the board key the newest serving row's
+ * delegation proves in `online_out` (may be NULL), else the check the newest
+ * row refused on (PAIRING when no row grants the capability now). */
 enum fleet_board_push_refusal board_push_disclosure(
     const uint8_t peer_noise_static[32], uint8_t online_out[32]);
 /* The push's receiving half, which counts and logs nothing (the push names

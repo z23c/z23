@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Who the "board" stream lane serves, pulls from and pushes to:
- * the pairing row, the peer's delegation and whether it is current, the read
+ * the pairing rows, the peer's delegation and whether it is current, the read
  * role and the fleet roster, each asked the same way by the answering half
  * (boot_fleet_board_fleet.c), the asking half and the push
  * (boot_fleet_board_push.c). Moved out of boot_fleet_board_fleet.c so the
@@ -157,26 +157,27 @@ bool board_delegation_current(struct node_db *ndb,
                                   true);
 }
 
-/* The pairing row for one Noise static: bounded, and fail-closed on an
- * unreadable list. */
-bool board_pairing_for_peer(struct node_db *ndb,
-                            const uint8_t peer_noise_static[32],
-                            struct db_mesh_pairing *out)
+/* The pairing rows that may authorise a disclosure to one Noise static now:
+ * those granting the status capability at `now` (not revoked, unexpired),
+ * newest first (the list runs oldest first), at most
+ * FLEET_BOARD_DISCLOSURE_ROWS_MAX. Bounded, and fail-closed on an unreadable
+ * list. */
+static size_t board_disclosure_rows(
+    struct node_db *ndb, const uint8_t peer_noise_static[32], int64_t now,
+    struct db_mesh_pairing out[FLEET_BOARD_DISCLOSURE_ROWS_MAX])
 {
     struct db_mesh_pairing *rows = zcl_calloc(
         FLEET_BOARD_FLEET_PEERS_MAX, sizeof *rows, "fleet_board_pairing");
     if (!rows)
-        return false;
+        return 0;
     int count = db_mesh_pairing_list(ndb, rows, FLEET_BOARD_FLEET_PEERS_MAX);
-    bool found = false;
-    for (int i = 0; i < count && !found; i++) {
-        if (memcmp(rows[i].peer_noise_pubkey, peer_noise_static, 32) != 0)
-            continue;
-        *out = rows[i];
-        found = true;
-    }
+    size_t n = 0;
+    for (int i = count - 1; i >= 0 && n < FLEET_BOARD_DISCLOSURE_ROWS_MAX; i--)
+        if (memcmp(rows[i].peer_noise_pubkey, peer_noise_static, 32) == 0 &&
+            mesh_pairing_allows(&rows[i], MESH_PAIRING_CAP_STATUS_READ, now))
+            out[n++] = rows[i];
     free(rows);
-    return found;
+    return n;
 }
 
 /* Add `key` to the first `n` of `keys` unless it is there or they are full. */
@@ -293,35 +294,32 @@ bool board_roster_admits(const uint8_t online_pubkey[32])
     return board_roster_check(online_pubkey, true);
 }
 
-/* Everything the answering half proves about a peer that is already
- * through the primitive's Noise and capability gates, before any post is
- * read: the row board_pairing_for_peer picks, its delegation current on
- * this session, the read role and the roster. The one decision for the pull
- * (`record`: refusals counted and logged as the pull's) and for the push's
- * sending half (`record` clear: the same computation, nothing recorded).
- * Returns FLEET_BOARD_PUSH_REFUSALS when served, with the board key the
- * row's delegation proves in `online_out` (may be NULL). */
-static enum fleet_board_push_refusal board_disclosure(
-    const uint8_t peer_noise_static[32], bool record, uint8_t online_out[32])
+/* A pull refusal that names no row's check; with `record` it is counted
+ * and logged as the pull's. */
+static void board_pull_refused(bool record, const char *why)
 {
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb))
-        return FLEET_BOARD_PUSH_REFUSAL_PAIRING;
-    struct db_mesh_pairing row;
+    if (!record)
+        return;
+    atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
+    LOG_WARN("fleet.board", "fleet pull refused: %s", why);
+}
+
+/* One pairing row's whole chain: the delegation of its master resolves, is
+ * current and bound to this session's Noise key under this row, the read
+ * role, the roster. FLEET_BOARD_PUSH_REFUSALS when it passes, with the
+ * board key the delegation proves in `online_out` (may be NULL). */
+static enum fleet_board_push_refusal board_disclosure_row(
+    struct node_db *ndb, const struct db_mesh_pairing *row,
+    const uint8_t peer_noise_static[32], int64_t now, bool record,
+    uint8_t online_out[32])
+{
     struct vcs_zcode_dht_delegation peer;
-    bool paired = board_pairing_for_peer(ndb, peer_noise_static, &row);
-    if (!paired || !board_peer_delegation(&row, &peer)) {
-        if (record) {
-            atomic_fetch_add_explicit(&g_delegation_refused, 1,
-                                      memory_order_relaxed);
-            LOG_WARN("fleet.board",
-                     "fleet pull refused: delegation_unresolved");
-        }
-        return paired ? FLEET_BOARD_PUSH_REFUSAL_DELEGATION
-                      : FLEET_BOARD_PUSH_REFUSAL_PAIRING;
+    if (!board_peer_delegation(row, &peer)) {
+        board_pull_refused(record, "delegation_unresolved");
+        return FLEET_BOARD_PUSH_REFUSAL_DELEGATION;
     }
-    if (!board_delegation_check(ndb, &row, &peer, peer_noise_static,
-                                board_now(), record))
+    if (!board_delegation_check(ndb, row, &peer, peer_noise_static, now,
+                                record))
         return FLEET_BOARD_PUSH_REFUSAL_DELEGATION;
     if (!board_read_check(peer.online_pubkey, record))
         return FLEET_BOARD_PUSH_REFUSAL_ROLE;
@@ -330,6 +328,46 @@ static enum fleet_board_push_refusal board_disclosure(
     if (online_out)
         memcpy(online_out, peer.online_pubkey, 32);
     return FLEET_BOARD_PUSH_REFUSALS;
+}
+
+/* Everything the answering half proves about a peer that is already
+ * through the primitive's Noise and capability gates, before any post is
+ * read. The one decision for the pull (`record`: refusals counted and
+ * logged as the pull's) and for the push's sending half (`record` clear:
+ * the same computation, nothing recorded). The rows judged are
+ * board_disclosure_rows; the peer is served when any one of them passes
+ * board_disclosure_row, newest first, and the first that passes supplies
+ * `online_out` (may be NULL). When none passes, the newest row's refusal is
+ * the answer, recorded once: rows are judged with nothing recorded, and with
+ * `record` the newest is judged again recording (only when it is not the
+ * only row, which is judged recording at once). No allowing row: PAIRING. */
+static enum fleet_board_push_refusal board_disclosure(
+    const uint8_t peer_noise_static[32], bool record, uint8_t online_out[32])
+{
+    struct node_db *ndb = app_runtime_node_db();
+    if (!ndb || !app_runtime_node_db_handle_open(ndb))
+        return FLEET_BOARD_PUSH_REFUSAL_PAIRING;
+    int64_t now = board_now();
+    struct db_mesh_pairing rows[FLEET_BOARD_DISCLOSURE_ROWS_MAX];
+    size_t n = board_disclosure_rows(ndb, peer_noise_static, now, rows);
+    if (n == 0) {
+        board_pull_refused(record, "no live pairing");
+        return FLEET_BOARD_PUSH_REFUSAL_PAIRING;
+    }
+    enum fleet_board_push_refusal newest = FLEET_BOARD_PUSH_REFUSAL_PAIRING;
+    for (size_t i = 0; i < n; i++) {
+        enum fleet_board_push_refusal r = board_disclosure_row(
+            ndb, &rows[i], peer_noise_static, now, record && n == 1,
+            online_out);
+        if (r == FLEET_BOARD_PUSH_REFUSALS)
+            return r;
+        if (i == 0)
+            newest = r;
+    }
+    if (record && n > 1)
+        newest = board_disclosure_row(ndb, &rows[0], peer_noise_static, now,
+                                      true, online_out);
+    return newest;
 }
 
 bool board_accept_authorized(const uint8_t peer_noise_static[32])
