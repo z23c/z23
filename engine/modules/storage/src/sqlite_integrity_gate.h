@@ -23,10 +23,14 @@
 #include <sqlite3.h>
 #include <stdbool.h>
 
-/* PRAGMA quick_check(1) on `db`, logging under "[log_tag] ...". Returns true
- * only when quick_check reports exactly "ok". A prepare/step failure (the
- * connection itself is wedged on a corrupt file) counts as NOT ok. */
-bool sqlite_integrity_quick_check_ok(sqlite3 *db, const char *log_tag);
+enum sqlite_integrity_result {
+    SQLITE_INTEGRITY_INCOMPLETE,
+    SQLITE_INTEGRITY_CLEAN,
+    SQLITE_INTEGRITY_CORRUPT
+};
+
+enum sqlite_integrity_result sqlite_integrity_quick_check(sqlite3 *db,
+                                                         const char *log_tag);
 
 /* Move `path` (+ its -wal / -shm siblings, if present) aside with one shared
  * timestamped + pid + process-local-sequence suffix so repeated quarantines

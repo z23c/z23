@@ -725,7 +725,7 @@ static bool projection_open_requarantine(const char *path, sqlite3 **dbp,
                     "reason=disk_fault path=%s", path);
         return false;
     }
-    if (!sqlite_integrity_quick_check_ok(db, "projection_store")) {
+    if (sqlite_integrity_quick_check(db, "projection_store") != SQLITE_INTEGRITY_CLEAN) {
         /* A freshly-created, empty DB that fails quick_check cannot be
          * derived-state corruption — the underlying storage is broken.
          * Do NOT quarantine again (that would loop); fail terminally. */
@@ -892,8 +892,9 @@ bool projection_store_open(const char *datadir)
      * is never skipped or shortened; only its thread changes. */
     int64_t quick_check_started = platform_time_monotonic_ms();
     projection_open_log_plan(plan, display_path);
-    if (plan == PROJECTION_INTEGRITY_SCAN_NOW &&
-        !sqlite_integrity_quick_check_ok(db, "projection_store")) {
+    enum sqlite_integrity_result integrity = plan == PROJECTION_INTEGRITY_SCAN_NOW
+        ? sqlite_integrity_quick_check(db, "projection_store") : SQLITE_INTEGRITY_CLEAN;
+    if (integrity == SQLITE_INTEGRITY_CORRUPT) {
 #ifdef _WIN32
         fprintf(stderr,  // obs-ok:projection-store-open-failure
                 "[projection_store] %s failed integrity quick_check; native "
@@ -911,10 +912,10 @@ bool projection_store_open(const char *datadir)
         }
 #endif
     }
-    projection_open_log_quick_check_done(plan, display_path,
-                                         quick_check_started);
+    if (integrity != SQLITE_INTEGRITY_INCOMPLETE)
+        projection_open_log_quick_check_done(plan, display_path, quick_check_started);
 
-    if (!apply_pragmas(db)) {
+    if (integrity == SQLITE_INTEGRITY_INCOMPLETE || !apply_pragmas(db)) {
         sqlite3_close(db);
 #ifdef _WIN32
         (void)sqlite_vfs_dir_unregister(opened_vfs_name);

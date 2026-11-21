@@ -278,10 +278,8 @@ static bool apply_pragmas(sqlite3 *db)
  * coins_kv UTXO table; if SQLite reports a malformed file, a mid-fold
  * SQLITE_CORRUPT turns into a permanent JOB_FATAL that pins H* forever with no
  * named blocker. Detecting it here lets the open path quarantine + re-derive
- * instead. Returns true only when PRAGMA quick_check reports exactly "ok". A
- * prepare/step failure (the connection itself is wedged on a corrupt file) is
- * treated as NOT ok so the caller quarantines. */
-static bool progress_store_quick_check_ok(sqlite3 *db)
+ * instead. An incomplete scan leaves the original family in place. */
+static enum sqlite_integrity_result progress_store_quick_check(sqlite3 *db)
 {
     /* The scan below walks every b-tree page of a multi-hundred-MB file.  On a
      * fresh connection SQLite defaults to a 2 MiB cache and no mmap, so the
@@ -297,12 +295,12 @@ static bool progress_store_quick_check_ok(sqlite3 *db)
     snprintf(mp, sizeof(mp), "PRAGMA mmap_size=%lld", (long long)mmap_bytes);
     (void)sqlite3_exec(db, cp, NULL, NULL, NULL);
     (void)sqlite3_exec(db, mp, NULL, NULL, NULL);
-    return sqlite_integrity_quick_check_ok(db, "progress_store");
+    return sqlite_integrity_quick_check(db, "progress_store");
 }
 
 bool progress_store_quick_check_for_test(sqlite3 *db)
 {
-    return progress_store_quick_check_ok(db);
+    return progress_store_quick_check(db) == SQLITE_INTEGRITY_CLEAN;
 }
 
 /* Move the corrupt consensus.db (+ -wal/-shm) aside so the reopen creates a
@@ -340,14 +338,6 @@ static bool progress_store_quick_check_skipped(const char *path)
         return false;
     return probe(path);
 #endif
-}
-
-/* True when the existing consensus.db must be quarantined: the verified-clean
- * skip did not apply and the integrity quick_check failed. */
-static bool progress_store_quick_check_rejects(sqlite3 *db,
-                                               bool skip_existing_check)
-{
-    return !skip_existing_check && !progress_store_quick_check_ok(db);
 }
 
 static bool progress_store_open_prepare(const char *datadir, char *display_path, char *path, uintptr_t *out_handle)
@@ -582,7 +572,7 @@ static bool progress_store_open_impl(const char *datadir)
     /* Integrity gate. consensus.db is the authority store for the stage cursors
      * and the coins_kv UTXO table; a corrupt file otherwise surfaces as a
      * mid-fold SQLITE_CORRUPT → JOB_FATAL that pins H* permanently with no
-     * named blocker. On a non-"ok" quick_check, quarantine the file and reopen
+     * named blocker. On confirmed corruption, quarantine the file and reopen
      * a FRESH one — boot re-seeds coins_kv from consensus_snapshot.db / the
      * anchor and re-folds the stages from there (the kernel is derived chain
      * state, not an independently trusted source). AUTO-TERMINATING +
@@ -590,7 +580,9 @@ static bool progress_store_open_impl(const char *datadir)
      * fresh, just-created store that ALSO fails quick_check is a disk/fs fault,
      * not corrupt derived state — log a terminal blocker and fail the open
      * instead of quarantine-looping. */
-    if (progress_store_quick_check_rejects(db, skip_existing_check)) {
+    enum sqlite_integrity_result integrity = skip_existing_check
+        ? SQLITE_INTEGRITY_CLEAN : progress_store_quick_check(db);
+    if (integrity != SQLITE_INTEGRITY_CLEAN) {
 #ifdef _WIN32
         /* Quarantine is intentionally still contained: its current helper
          * renames a pathname family after close, outside the retained HANDLE
@@ -607,6 +599,12 @@ static bool progress_store_open_impl(const char *datadir)
         pthread_mutex_unlock(&g_lock);
         return false;
 #else
+        if (integrity == SQLITE_INTEGRITY_INCOMPLETE) {
+            sqlite3_close(db);
+            progress_directory_close(opened_dir_handle);
+            pthread_mutex_unlock(&g_lock);
+            return false;
+        }
         fprintf(stderr,  // obs-ok:progress-store-open-failure
                 "[progress_store] %s failed integrity quick_check; "
                 "quarantining + re-deriving from snapshot/anchor\n", path);
@@ -630,7 +628,7 @@ static bool progress_store_open_impl(const char *datadir)
             pthread_mutex_unlock(&g_lock);
             return false;
         }
-        if (!progress_store_quick_check_ok(db)) {
+        if (progress_store_quick_check(db) != SQLITE_INTEGRITY_CLEAN) {
             /* A freshly-created, empty DB that fails quick_check cannot be
              * derived-state corruption — the underlying storage is broken.
              * Do NOT quarantine again (that would loop); fail terminally with
@@ -695,7 +693,7 @@ bool progress_store_open(const char *datadir)
 static bool progress_existing_valid(sqlite3 *db)
 {
     bool candidate = false;
-    if (!progress_store_quick_check_ok(db) ||
+    if (progress_store_quick_check(db) != SQLITE_INTEGRITY_CLEAN ||
         !progress_store_candidate_state(db, &candidate) || candidate)
         return false;
     unsigned char v[4];

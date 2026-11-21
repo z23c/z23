@@ -25,31 +25,50 @@ static int64_t wall_now_s(void)
     return (int64_t)ts.tv_sec;
 }
 
-bool sqlite_integrity_quick_check_ok(sqlite3 *db, const char *log_tag)
+static enum sqlite_integrity_result integrity_error(int rc)
+{
+    int primary = rc & 0xff;
+    return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB
+        ? SQLITE_INTEGRITY_CORRUPT : SQLITE_INTEGRITY_INCOMPLETE;
+}
+
+static enum sqlite_integrity_result integrity_row(sqlite3_stmt *stmt, const char *log_tag)
+{
+    if (sqlite3_column_type(stmt, 0) != SQLITE_TEXT)
+        return SQLITE_INTEGRITY_INCOMPLETE;
+    const unsigned char *text = sqlite3_column_text(stmt, 0);
+    int bytes = sqlite3_column_bytes(stmt, 0);
+    if (!text || bytes <= 0)
+        return SQLITE_INTEGRITY_INCOMPLETE;
+    if (bytes == 2 && memcmp(text, "ok", 2) == 0)
+        return SQLITE_INTEGRITY_CLEAN;
+    fprintf(stderr,  // obs-ok:sqlite-integrity-gate
+            "[%s] quick_check found corruption: %s\n", log_tag, text);
+    return SQLITE_INTEGRITY_CORRUPT;
+}
+
+enum sqlite_integrity_result sqlite_integrity_quick_check(sqlite3 *db,
+                                                         const char *log_tag)
 {
     sqlite3_stmt *stmt = NULL;
-    bool ok = false;
     int rc = sqlite3_prepare_v2(db, "PRAGMA quick_check(1)", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        fprintf(stderr,  // obs-ok:sqlite-integrity-gate
-                "[%s] quick_check prepare failed: %s\n",
-                log_tag, sqlite3_errmsg(db));
-        return false;
+    if (rc == SQLITE_OK && stmt)
+        rc = sqlite3_step(stmt);  // raw-sql-ok:kernel-primitive
+    enum sqlite_integrity_result result = rc == SQLITE_ROW
+        ? integrity_row(stmt, log_tag) : integrity_error(rc);
+    if (result == SQLITE_INTEGRITY_CLEAN) {
+        rc = sqlite3_step(stmt);  // raw-sql-ok:kernel-primitive
+        if (rc != SQLITE_DONE) result = integrity_error(rc);
     }
-    rc = sqlite3_step(stmt);  // raw-sql-ok:kernel-primitive
-    if (rc == SQLITE_ROW) {
-        const unsigned char *txt = sqlite3_column_text(stmt, 0);
-        ok = txt && strcmp((const char *)txt, "ok") == 0;
-        if (!ok && txt)
-            fprintf(stderr,  // obs-ok:sqlite-integrity-gate
-                    "[%s] quick_check failed: %s\n", log_tag, txt);
-    } else {
-        fprintf(stderr,  // obs-ok:sqlite-integrity-gate
-                "[%s] quick_check step failed: %s\n",
-                log_tag, sqlite3_errmsg(db));
+    int final_rc = sqlite3_finalize(stmt);
+    if (final_rc != SQLITE_OK) {
+        rc = final_rc;
+        result = integrity_error(rc);
     }
-    sqlite3_finalize(stmt);
-    return ok;
+    if (result == SQLITE_INTEGRITY_INCOMPLETE || (result == SQLITE_INTEGRITY_CORRUPT && rc != SQLITE_ROW))
+        fprintf(stderr,  // obs-ok:sqlite-integrity-gate
+                "[%s] quick_check rc=%d: %s\n", log_tag, rc, sqlite3_errmsg(db));
+    return result;
 }
 
 /* Rename one <path>-family file out of the way with a timestamped, pid+seq-

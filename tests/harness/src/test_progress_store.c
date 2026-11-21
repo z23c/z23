@@ -1690,6 +1690,65 @@ static int ps_test_existing_other_directory(int dirfd)
 }
 #endif
 
+static atomic_uint ps_denied_scans;
+
+static int ps_deny_quickcheck(void *arg, int action, const char *name,
+                              const char *value, const char *db, const char *source)
+{
+    (void)arg; (void)value; (void)db; (void)source;
+    if (action == SQLITE_PRAGMA && name && sqlite3_stricmp(name, "quick_check") == 0) {
+        atomic_fetch_add(&ps_denied_scans, 1u);
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int ps_authorize_connection(sqlite3 *db, char **error,
+                                   const sqlite3_api_routines *api)
+{
+    (void)error; (void)api;
+    return sqlite3_set_authorizer(db, ps_deny_quickcheck, NULL);
+}
+
+static int ps_test_incomplete_check(bool projection)
+{
+    int failures = 0;
+    char dir[256], path[512], receipt[544];
+    struct stat before = {0}, after;
+    bool (*open_store)(const char *) = projection ? projection_store_open : progress_store_open;
+    void (*close_store)(void) = projection ? projection_store_close : progress_store_close;
+    sqlite3 *(*store_db)(void) = projection ? projection_store_db : progress_store_db;
+    test_make_tmpdir(dir, sizeof(dir), "progress_store", projection ? "projection_denied" : "consensus_denied");
+    snprintf(path, sizeof(path), "%s/%s", dir, projection ? "progress.kv" : "consensus.db");
+    snprintf(receipt, sizeof(receipt), "%s.clean", path);
+    bool seeded = open_store(dir) && sqlite3_exec(store_db(),
+        "CREATE TABLE integrity_witness(v INTEGER); INSERT INTO integrity_witness VALUES(37)",
+        NULL, NULL, NULL) == SQLITE_OK;
+    close_store();
+    PS_CHECK("valid store seeded before denied scan", seeded && stat(path, &before) == 0);
+    if (projection) PS_CHECK("require projection scan", unlink(receipt) == 0);
+    atomic_store(&ps_denied_scans, 0u);
+    bool armed = sqlite3_auto_extension((void (*)(void))ps_authorize_connection) == SQLITE_OK;
+    PS_CHECK("authorizer installed", armed);
+    bool opened = open_store(dir);
+    if (opened) close_store();
+    if (armed) (void)sqlite3_cancel_auto_extension((void (*)(void))ps_authorize_connection);
+    PS_CHECK("incomplete check refuses open", !opened && atomic_load(&ps_denied_scans) == 1u);
+    PS_CHECK("incomplete check preserves original file", seeded && stat(path, &after) == 0 &&
+             after.st_dev == before.st_dev && after.st_ino == before.st_ino);
+    PS_CHECK("incomplete check creates no quarantine archive",
+             (projection ? ps_count_corrupt_projection(dir) : ps_count_corrupt(dir)) == 0);
+    sqlite3_stmt *stmt = NULL;
+    bool readable = open_store(dir) && sqlite3_prepare_v2(store_db(),
+        "SELECT v FROM integrity_witness", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 37;
+    PS_CHECK("original data accessible after scan authority returns", readable);
+    sqlite3_finalize(stmt);
+    close_store();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int ps_test_existing_only(void)
 {
     int failures = 0;
@@ -1839,6 +1898,8 @@ int test_progress_store(void)
     failures += ps_test_projection_scan_quarantine();
     failures += ps_test_projection_receipt_reader_blocked();
 
+    failures += ps_test_incomplete_check(false);
+    failures += ps_test_incomplete_check(true);
     failures += ps_test_existing_only();
     printf("progress_store: %d failures\n", failures);
 
