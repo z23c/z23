@@ -432,9 +432,8 @@ for mode in parallel serial; do
         fail "offline $mode driver succeeded or left a worker active"
     grep -q 'offline cache miss or checksum failure: openssl' "$log" ||
         fail "$mode driver did not report the OpenSSL cache miss"
-    if grep -q 'libevent 2.1.12' "$log"; then
+    ! grep -q 'libevent 2.1.12' "$log" ||
         fail "$mode libevent started after its OpenSSL dependency failed"
-    fi
 done
 
 printf '%s\n' \
