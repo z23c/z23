@@ -278,21 +278,34 @@ static struct binding_probe binding_probe_start(size_t i)
     put(object, 1893456000, "");
     put(exporter, 1893456000, "");
     put(header, 0, "");
-    put(text("%s/binding.d", base), 0, "%s: %s\n", make_path(object), make_path(header));
+    char *generated = text("%s/generated.h", base);
+    put(generated, 1577836800, "");
+    if (i != 5)
+        put(text("%s/cleanse.d", parent), 0, "%s: platform/modules/base/src/cleanse.c %s%s\n",
+            make_path(object), make_path(header), i == 4 ? text(" %s", make_path(generated)) : "");
     char *makefile = text("%s/probe.mk", base);
-    put(makefile, 0, "include %s/Makefile\ninclude %s/binding.d\n", make_path(root), make_path(base));
+    put(makefile, 0, "include %s/Makefile\n", make_path(root));
     const char *argv[48] = {"make", "-f", makefile, "--no-print-directory", "-n",
             "-o", "Makefile", "-o", "tools/native_tunnel_sources.def",
             "-o", "contexts/wallet/views/include/views/wallet_templates_gen.h",
             "-o", "contexts/explorer/views/include/views/site_css.h",
             "-o", "contexts/commons/views/include/views/install_script_gen.h",
             "ZCL_STANDALONE_CLEAN=1", text("BUILD_SOURCE_RECORD=%s", source_record),
-            "ZCL_EPOCH_PROFILES=", "ZCL_DEPFILE_PROFILES=", text("BUILD_DIR=%s/build", base),
+            "ZCL_EPOCH_PROFILES=", "ZCL_DEPFILE_PROFILES=build-only", text("BUILD_DIR=%s/build", base),
             text("BIN_DIR=%s", bin), text("OBJ_DIR=%s", objects), "BUILD_ONLY_LEASE=",
             "BUILD_FAST_EPOCH_OBJECT_PREREQ=", "BUILD_FAST_EPOCH_OBJECT_COMMAND=echo ZCL_BINDING_OBJECT_REBUILD",
             object, exporter, NULL};
     size_t n = 27;
-    if (i) {argv[n++] = "-W"; argv[n++] = i == 1 ? "tools/dev/native_tunnel_export_binding.h" : header;}
+    argv[n++] = text("ALL_OBJS=%s", object);
+    argv[n++] = text("VIEW_GEN_HEADERS=contexts/wallet/views/include/views/wallet_templates_gen.h "
+                     "contexts/explorer/views/include/views/site_css.h "
+                     "contexts/commons/views/include/views/install_script_gen.h "
+                     "tools/dev/native_tunnel_export_binding.h %s", generated);
+    if (i) {
+        argv[n++] = "-W";
+        argv[n++] = i == 1 ? "tools/dev/native_tunnel_export_binding.h" :
+                    i == 2 ? header : generated;
+    }
     argv[n] = NULL;
     char *log = text("%s/probe.out", base);
     return (struct binding_probe){probe_start(argv, log, false), log, exporter};
@@ -300,20 +313,22 @@ static struct binding_probe binding_probe_start(size_t i)
 
 static void binding_probes(void)
 {
-    struct binding_probe probes[3];
-    for (size_t i = 0; i < 3; ++i) probes[i] = binding_probe_start(i);
-    for (size_t i = 0; i < 3; ++i) {
+    struct binding_probe probes[6];
+    for (size_t i = 0; i < 6; ++i) probes[i] = binding_probe_start(i);
+    for (size_t i = 0; i < 6; ++i) {
         int rc = probe_wait(probes[i].child);
         char *data = output(probes[i].log);
         bool rebuild = strstr(data, "ZCL_BINDING_OBJECT_REBUILD") != NULL;
         bool link = strstr(data, text("-o %s", probes[i].exporter)) != NULL;
-        if (rc != 0 || (i == 0 && (rebuild || link)) || (i == 1 && (rebuild || !link)) || (i == 2 && !rebuild)) {
+        bool expected_rebuild = i == 2 || i == 4 || i == 5;
+        bool expected_link = i == 1;
+        if (rc != 0 || rebuild != expected_rebuild || (i < 2 && link != expected_link)) {
             fprintf(stderr, "%s\n", data);
             fail(text("binding probe %zu failed (status=%d object=%d exporter=%d)", i, rc, rebuild, link));
         }
         free(data);
     }
-    probe_count = 0; /* All three isolated cases were reaped. */
+    probe_count = 0; /* All isolated cases were reaped. */
 }
 
 static void profile_values(char *data, char **epoch, char **depfiles)

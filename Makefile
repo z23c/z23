@@ -4209,13 +4209,10 @@ $(BIN_DIR)/inspect_html: tools/inspect_html.c platform/modules/base/src/safe_all
 # checkout that touches an input (or, for the tunnel binding, the Makefile),
 # EVERY make invocation re-ran the generator, rewrote the bootstrap marker,
 # restarted the parse and paid a second full source capture. The header rules
-# now take their stamp as an ORDER-ONLY prerequisite: the stamp (a file under
-# build/, outside the source inventory) is newer than the inputs exactly when
-# they were last regenerated, so a content-identical regeneration is paid once
-# and the stamp, not the header's mtime, records it. A changed input still
-# reruns the generator (stamp older than input), the header's mtime moves only
-# when its bytes change (so dependents rebuild exactly as before), and a
-# missing header drops the stamp and regenerates it.
+# use the stamp to run the generator once per input change. The header
+# takes the stamp as a normal prerequisite so Make rechecks the header
+# mtime after generation, before classifying consumers in this invocation.
+# Only a missing header needs recovery in the header recipe.
 GEN_STAMP_DIR = build/identity/gen-stamps
 TMPL_STAMP = $(GEN_STAMP_DIR)/wallet_templates.stamp
 SITE_CSS_STAMP = $(GEN_STAMP_DIR)/site_css.stamp
@@ -4236,13 +4233,13 @@ $(INSTALL_SH_STAMP): $(INSTALL_SH_SRC) tools/gen_templates.c | $(TMPL_TOOL)
 	@$(TMPL_TOOL) --single-text $(INSTALL_SH_SRC) $(INSTALL_SH_GEN) INSTALL_FROM_SOURCE_SH ZCL_VIEWS_INSTALL_SCRIPT_GEN_H
 	@touch $@
 
-$(TMPL_GEN): | $(TMPL_STAMP)
+$(TMPL_GEN): $(TMPL_STAMP)
 	@[ -e $@ ] || { rm -f $(TMPL_STAMP); $(MAKE) --no-print-directory $(TMPL_STAMP); }
 
-$(SITE_CSS_GEN): | $(SITE_CSS_STAMP)
+$(SITE_CSS_GEN): $(SITE_CSS_STAMP)
 	@[ -e $@ ] || { rm -f $(SITE_CSS_STAMP); $(MAKE) --no-print-directory $(SITE_CSS_STAMP); }
 
-$(INSTALL_SH_GEN): | $(INSTALL_SH_STAMP)
+$(INSTALL_SH_GEN): $(INSTALL_SH_STAMP)
 	@[ -e $@ ] || { rm -f $(INSTALL_SH_STAMP); $(MAKE) --no-print-directory $(INSTALL_SH_STAMP); }
 
 # Included near the top of this file. Updating it after its generated-header
@@ -4391,6 +4388,12 @@ gen-stamps-selftest:
 	  lmk; [ -e "$$w/$$h" ] || fail "deleted $$h was not regenerated"; after="$$(snap)"; \
 	  expect "deleted $$h" "$$mask" "$$g"; \
 	done; \
+	p "same-invocation CSS consumer"; \
+	printf '%s: %s\n\t@cp $$< $$@\n' "$$d/css-copy" "$(SITE_CSS_GEN)" >"$$d/consumer.mk"; \
+	consumer() { (cd "$$w" && $(MAKE) --no-print-directory -s -f Makefile -f "$$d/consumer.mk" "$$d/css-copy"); }; \
+	consumer || fail "initial CSS consumer"; \
+	printf '\n.gen-stamps-proof { display: block; }\n' >>"$$w/$(SITE_CSS_SRC)"; \
+	consumer && grep -Fq .gen-stamps-proof "$$d/css-copy" || fail "CSS consumer stale after generation"; \
 	echo "gen-stamps-selftest: PASS"
 
 # Focused parses must not pay for the commit stamp: BUILD_COMMIT is lazy, so a
@@ -10336,7 +10339,12 @@ $(RETRIEVAL_PAIR_BIN): $(RETRIEVAL_PAIR_CANDIDATE) FORCE
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_PROFILE)" \
 	  "$(DEV_EPOCH_COMPILE_FLAGS)" "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
-$(RETRIEVAL_PAIR_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
+# Compiler depfiles name the source as a prerequisite of the object. During
+# implicit-rule search, secondary expansion sees those explicit prerequisites.
+# Without that source edge, retain the conservative generated-header set.
+.SECONDEXPANSION:
+ZCL_UNTRACKED_VIEW_HEADERS = $(if $(filter $*.c,$^),,$(OBJECT_GEN_HEADERS))
+$(RETRIEVAL_PAIR_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(OBJECT_GEN_HEADERS) $(DEV_LEASE)
 	@mkdir -p $(dir $@)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -12649,7 +12657,7 @@ ci-sync-smoke: zclassic23
 
 BUILD_ONLY_OBJECT_CFLAGS = $(BUILD_ONLY_CFLAGS)
 $(OBJ_DIR)/platform/modules/util/src/clientversion.o: BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
-$(OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(BUILD_ONLY_LEASE)
+$(OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(BUILD_ONLY_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_ONLY_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(BUILD_ONLY_SESSION)" -- \
@@ -12675,7 +12683,7 @@ $(NODE_C23_OBJ_DIR)/core/modules/net/src/https_server_install.o: NODE_C23_OBJECT
 endif
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
-$(NODE_C23_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(NODE_C23_LEASE)
+$(NODE_C23_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(NODE_C23_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(NODE_C23_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(NODE_C23_SESSION)" -- \
@@ -12697,7 +12705,7 @@ DEV_COMPILE_CFLAGS = $(DEV_RESTART_CFLAGS)
 $(foreach d,$(DEV_HOT_SRC_DIRS),$(DEV_OBJ_DIR)/$(d)/%.o $(CLANG_FACTS_OUT_DIR)/$(d)/%.zsm $(CLANG_FACTS_OUT_DIR)/$(d)/%.argv): DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
 
 $(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
+$(DEV_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(OBJECT_GEN_HEADERS) $(DEV_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_SESSION)" -- \
@@ -12771,7 +12779,7 @@ $(TEST_FAST_OBJ_DIR)/tests/harness/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
 $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_FAST_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(TEST_FAST_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_FAST_LEASE)
+$(TEST_FAST_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(TEST_FAST_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_FAST_SESSION)" -- \
@@ -12794,7 +12802,7 @@ $(TEST_REL_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_REL_OBJECT_CFLAGS 
   $(ARENA_VIEW_INCLUDES)
 $(TEST_REL_OBJ_DIR)/tests/harness/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_REL_PROFILE),TEST_REL_EPOCH_COMPILE_FLAGS)
-$(TEST_REL_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_REL_LEASE)
+$(TEST_REL_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(TEST_REL_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_REL_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_REL_SESSION)" -- \
@@ -12821,7 +12829,7 @@ $(TEST_ASAN_OBJ_DIR)/tests/harness/src/testcache.o: TEST_ASAN_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_ASAN_PROFILE),TEST_ASAN_EPOCH_COMPILE_FLAGS)
 $(TEST_ASAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_ASAN_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(TEST_ASAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_ASAN_LEASE)
+$(TEST_ASAN_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(TEST_ASAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_ASAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_ASAN_SESSION)" -- \
@@ -12836,7 +12844,7 @@ DEV_ASAN_OBJECT_CFLAGS = $(DEV_ASAN_CFLAGS)
 DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(DEV_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): DEV_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
 $(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_ASAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(DEV_ASAN_LEASE)
+$(DEV_ASAN_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(DEV_ASAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_ASAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_ASAN_SESSION)" -- \
@@ -12860,7 +12868,7 @@ $(TEST_TSAN_OBJ_DIR)/tests/harness/src/testcache.o: TEST_TSAN_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_TSAN_PROFILE),TEST_TSAN_EPOCH_COMPILE_FLAGS)
 $(TEST_TSAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_TSAN_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(TEST_TSAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_TSAN_LEASE)
+$(TEST_TSAN_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(TEST_TSAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(TEST_TSAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(TEST_TSAN_SESSION)" -- \
@@ -12873,7 +12881,7 @@ $(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY
 # hot-path split — sanitizer fidelity over optimizer-sensitivity coverage).
 DEV_TSAN_OBJECT_CFLAGS = $(DEV_TSAN_CFLAGS)
 $(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_TSAN_OBJ_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(DEV_TSAN_LEASE)
+$(DEV_TSAN_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(DEV_TSAN_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_TSAN_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_TSAN_SESSION)" -- \
@@ -14299,7 +14307,7 @@ COV_OBJECT_CFLAGS = $(COV_CFLAGS) -Wno-deprecated-declarations
 $(COV_BUILD_DIR)/platform/modules/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(COV_BUILD_DIR)/tests/harness/src/test_arena_view.o: COV_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
-$(COV_BUILD_DIR)/%.o: %.c $(OBJECT_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(COV_LEASE)
+$(COV_BUILD_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(OBJECT_GEN_HEADERS) $(COV_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) coverage "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(COV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(COV_SESSION)" -- \
@@ -18614,7 +18622,7 @@ lint lint-fast lint-fast-preflight: check-native-tunnel-export-binding
 # whole Makefile, so every Makefile edit or fresh checkout left the unchanged
 # header permanently older than its input and restarted every later parse.
 TUNNEL_EXPORT_BINDING_STAMP = $(GEN_STAMP_DIR)/native_tunnel_export_binding.stamp
-$(TUNNEL_EXPORT_BINDING): | $(TUNNEL_EXPORT_BINDING_STAMP)
+$(TUNNEL_EXPORT_BINDING): $(TUNNEL_EXPORT_BINDING_STAMP)
 	@[ -e $@ ] || { rm -f $(TUNNEL_EXPORT_BINDING_STAMP); $(MAKE) --no-print-directory $(TUNNEL_EXPORT_BINDING_STAMP); }
 $(TUNNEL_EXPORT_BINDING_STAMP): tools/native_tunnel_sources.def Makefile
 	@mkdir -p $(dir $@)
