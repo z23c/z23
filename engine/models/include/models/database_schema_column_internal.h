@@ -13,6 +13,18 @@ static inline bool dbsc_space(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
 }
 
+static inline bool dbsc_keyword(const char **at, const char *word)
+{
+    const char *p = *at;
+    size_t n = strlen(word);
+    if (strncmp(p, word, n) != 0 || !dbsc_space(p[n])) return false;
+    p += n;
+    while (dbsc_space(*p)) ++p;
+    *at = p;
+    return true;
+}
+
+
 static inline bool dbsc_ident(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -96,7 +108,6 @@ static inline bool dbsc_request_valid(const char *schema, const char *name,
                                       const char *declaration)
 {
     if (!schema || !name || !*name || !declaration || !*declaration) return false;
-    if (strncmp(schema, "CREATE TABLE ", 13) != 0) return false;
     for (const char *n = name; *n; ++n) if (!dbsc_ident(*n)) return false;
     size_t len = strlen(name);
     return strncmp(declaration, name, len) == 0 && dbsc_space(declaration[len]);
@@ -104,7 +115,8 @@ static inline bool dbsc_request_valid(const char *schema, const char *name,
 
 static inline const char *dbsc_first_field(const char *schema)
 {
-    const char *p = schema + 13;
+    const char *p = schema;
+    if (!dbsc_keyword(&p, "CREATE") || !dbsc_keyword(&p, "TABLE")) return NULL;
     if (!dbsc_ident(*p)) return NULL;
     while (dbsc_ident(*p)) ++p;
     while (dbsc_space(*p)) ++p;

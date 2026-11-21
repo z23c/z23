@@ -286,6 +286,7 @@ ZCL_MODULE_CAPABILITY("engine/models/src/database_lifetime.c", CAP_FS_READ|CAP_F
 ZCL_MODULE_CAPABILITY("engine/models/src/database_long_op.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate.c", CAP_FS_READ|CAP_CLOCK|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate_features.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate_features_v30_up.c", CAP_FS_READ | CAP_FS_WRITE, "Checked SQLite schema migrations read and write the node database")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate_features_v67_up.c", CAP_FS_READ | CAP_FS_WRITE, "Atomic schema migrations write the node database")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_modes.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_progress.c", CAP_NONE, "registers callbacks on a SQLite connection through the harmless progress-handler call; no file, clock or process access")

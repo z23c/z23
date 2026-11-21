@@ -1385,6 +1385,10 @@ static int tsb_schema_column_exact(void)
     static const char expected[] = "role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))";
     static const struct { const char *schema; bool match; } cases[] = {
         {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", true},
+        {"CREATE\tTABLE t(role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", true},
+        {"CREATEX TABLE t(role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", false},
+        {"CREATE TABLEX t(role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", false},
+        {"CREATE VIEW t(role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", false},
         {"CREATE TABLE t(id TEXT DEFAULT 'role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))', role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))) WITHOUT ROWID", true},
         {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)) OR 1)", false},
         {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,3)))", false},
