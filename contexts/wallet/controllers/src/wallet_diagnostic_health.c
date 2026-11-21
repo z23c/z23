@@ -74,7 +74,7 @@ static void accounting_sum_inputs(const struct wallet *w,
                                   const struct wallet_tx *wtx,
                                   const struct transaction *tx,
                                   int64_t *total_in, int *missing_inputs,
-                                  struct outpoint *first_missing)
+                                  struct outpoint *first_missing, bool *valid)
 {
     if (!wtx->from_me) return;
     for (size_t j = 0; j < tx->num_vin; j++) {
@@ -84,7 +84,9 @@ static void accounting_sum_inputs(const struct wallet *w,
             if (*missing_inputs == 0) *first_missing = *input;
             (*missing_inputs)++;
         } else {
-            *total_in += prev->tx.vout[input->n].value;
+            int64_t value = prev->tx.vout[input->n].value;
+            if (value < 0 || *total_in > INT64_MAX - value) *valid = false;
+            else *total_in += value;
         }
     }
 }
@@ -118,17 +120,29 @@ static void accounting_shielded_flows(const struct transaction *tx,
 /* Fee = total_transparent_in + from_shielded - value_out
  * Note: transaction_get_value_out() already includes shielded sends
  * (vpub_old, negative value_balance), so no separate to_shielded subtraction */
-static int64_t accounting_tx_fee(const struct wallet_tx *wtx,
-                                 const struct transaction *tx,
-                                 int64_t total_in, int64_t from_shielded)
+static bool accounting_tx_fee(const struct wallet_tx *wtx,
+                              const struct transaction *tx,
+                              int64_t total_in, int64_t from_shielded,
+                              int64_t *fee_out)
 {
-    int64_t tx_fee = 0;
-    if (wtx->from_me && (total_in > 0 || from_shielded > 0)) {
-        int64_t value_out = (int64_t)transaction_get_value_out(tx);
-        tx_fee = total_in + from_shielded - value_out;
-        if (tx_fee < 0) tx_fee = 0;
-    }
-    return tx_fee;
+    *fee_out = 0;
+    if (!wtx->from_me) return true;
+    int64_t value_out = transaction_get_value_out(tx);
+    if (value_out < 0 || total_in < 0 || from_shielded < 0 ||
+        total_in > INT64_MAX - from_shielded) return false;
+    int64_t available = total_in + from_shielded;
+    if (available < value_out) return false;
+    *fee_out = available - value_out;
+    return true;
+}
+
+static void accounting_add_fee(int64_t fee, bool known, int64_t *total,
+                               int64_t *unknown, bool *sum_valid)
+{
+    if (!known) { (*unknown)++; return; }
+    if (!*sum_valid) return;
+    if (fee > INT64_MAX - *total) *sum_valid = false;
+    else *total += fee;
 }
 
 static void accounting_emit_flow_amounts(struct json_value *entry,
@@ -136,14 +150,17 @@ static void accounting_emit_flow_amounts(struct json_value *entry,
                                          int64_t internal, int64_t tx_fee,
                                          int64_t to_shielded,
                                          int64_t from_shielded,
-                                         int64_t total_in, bool fee_known)
+                                         int64_t total_in, bool fee_known,
+                                         bool input_known, bool input_valid)
 {
     char s[32];
-    if (!fee_known) {
-        accounting_push_null(entry, "fee");
+    if (!fee_known) accounting_push_null(entry, "fee");
+    if (!input_known) {
         accounting_push_null(entry, "total_in");
-        format_amount(total_in, s, sizeof(s));
-        json_push_kv_real(entry, "known_input_subtotal", strtod(s, NULL));
+        if (input_valid) {
+            format_amount(total_in, s, sizeof(s));
+            json_push_kv_real(entry, "known_input_subtotal", strtod(s, NULL));
+        } else accounting_push_null(entry, "known_input_subtotal");
     }
     if (ext_in > 0) {
         format_amount(ext_in, s, sizeof(s));
@@ -169,7 +186,7 @@ static void accounting_emit_flow_amounts(struct json_value *entry,
         format_amount(from_shielded, s, sizeof(s));
         json_push_kv_real(entry, "from_shielded", strtod(s, NULL));
     }
-    if (fee_known && total_in > 0) {
+    if (input_known && total_in > 0) {
         format_amount(total_in, s, sizeof(s));
         json_push_kv_real(entry, "total_in", strtod(s, NULL));
     }
@@ -266,6 +283,8 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     int64_t total_to_shielded = 0;   /* transparent → shielded pool */
     int64_t total_from_shielded = 0; /* shielded pool → transparent */
     int64_t missing_total = 0;
+    int64_t unknown_fees = 0;
+    bool fee_sum_valid = true;
     zcl_mutex_lock(&ctx->wallet->cs);
     bool pending = ctx->wallet->scan_retry.pending;
     bool map_at_capacity = ctx->wallet->num_wallet_tx >= MAX_WALLET_TX;
@@ -294,16 +313,18 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         int64_t total_in = 0;
         int missing_inputs = 0;
         struct outpoint first_missing = {0};
+        bool input_valid = true;
         accounting_sum_inputs(ctx->wallet, wtx, tx, &total_in,
-                              &missing_inputs, &first_missing);
+                              &missing_inputs, &first_missing, &input_valid);
         missing_total += missing_inputs;
 
         int64_t to_shielded = 0;
         int64_t from_shielded = 0;
         accounting_shielded_flows(tx, &to_shielded, &from_shielded);
 
-        int64_t tx_fee = missing_inputs ? 0 :
-            accounting_tx_fee(wtx, tx, total_in, from_shielded);
+        int64_t tx_fee = 0;
+        bool fee_known = !missing_inputs && input_valid &&
+            accounting_tx_fee(wtx, tx, total_in, from_shielded, &tx_fee);
 
         /* Classify flows:
          * For from_me txs:
@@ -330,7 +351,8 @@ bool rpc_getwalletaccounting(const struct json_value *params,
 
         total_external_in += ext_in;
         total_external_out += ext_out;
-        total_fees += tx_fee;
+        accounting_add_fee(tx_fee, fee_known, &total_fees, &unknown_fees,
+                           &fee_sum_valid);
         total_internal += internal;
         total_to_shielded += to_shielded;
         total_from_shielded += from_shielded;
@@ -344,7 +366,7 @@ bool rpc_getwalletaccounting(const struct json_value *params,
 
         accounting_emit_flow_amounts(&entry, ext_in, ext_out, internal,
                                      tx_fee, to_shielded, from_shielded,
-                                     total_in, missing_inputs == 0);
+                                     total_in, fee_known, missing_inputs == 0 && input_valid, input_valid);
         accounting_note_missing_input(&entry, missing_inputs, &first_missing);
 
         /* Output details */
@@ -362,9 +384,11 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     format_amount(total_external_out, s, sizeof(s));
     json_push_kv_real(result, "external_out", strtod(s, NULL));
 
-    format_amount(total_fees, s, sizeof(s));
-    json_push_kv_real(result, "known_fee_subtotal", strtod(s, NULL));
-    if (missing_total) accounting_push_null(result, "total_fees");
+    if (fee_sum_valid) {
+        format_amount(total_fees, s, sizeof(s));
+        json_push_kv_real(result, "known_fee_subtotal", strtod(s, NULL));
+    } else accounting_push_null(result, "known_fee_subtotal");
+    if (unknown_fees || !fee_sum_valid) accounting_push_null(result, "total_fees");
     else json_push_kv_real(result, "total_fees", strtod(s, NULL));
 
     format_amount(total_to_shielded, s, sizeof(s));
@@ -384,6 +408,7 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     json_push_kv_str(result, "history_coverage",
                      pending || missing_total ? "incomplete" : "unverified");
     json_push_kv_int(result, "unresolved_inputs", missing_total);
+    json_push_kv_int(result, "unresolved_fees", unknown_fees);
     accounting_push_null(result, "spent_externally");
     accounting_push_null(result, "discrepancy");
     accounting_push_null(result, "balanced");

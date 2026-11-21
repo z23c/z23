@@ -628,6 +628,28 @@ static int wrc_accounting_known_fee(struct wrc_f *f, struct wallet *w,
     return failures;
 }
 
+static int wrc_accounting_bad_fee(struct wrc_f *f, const char *label)
+{
+    int failures = 0;
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+    char encoded[8192];
+    if (json_write(&result, encoded, sizeof(encoded)) < sizeof(encoded))
+        printf("ACCOUNTING_BAD_FEE %s %s\n", label, encoded);
+    const struct json_value *child = wrc_history_send(&result);
+    const struct json_value *total_in = json_get(child, "total_in");
+    const struct json_value *known = json_get(&result, "known_fee_subtotal");
+    WRC_CHECK("invalid fee is unknown but known input remains visible", ok && child &&
+              wrc_int(&result, "unresolved_inputs") == 0 &&
+              wrc_int(&result, "unresolved_fees") == 1 &&
+              wrc_history_null(&result, "total_fees") && wrc_history_null(child, "fee") &&
+              total_in && total_in->type == JSON_REAL && json_get_real(total_in) == 10.0 &&
+              known && known->type == JSON_REAL && json_get_real(known) == 0.0);
+    json_free(&params); json_free(&result);
+    return failures;
+}
+
 static int wrc_accounting_history(struct wrc_f *f, struct wallet *original)
 {
     int failures = 0;
@@ -664,6 +686,13 @@ static int wrc_accounting_history(struct wrc_f *f, struct wallet *original)
         wallet_mark_outpoint_spent(w, &parent->tx.hash, 0);
         rpc_wallet_set_state(w, f->ms, f->datadir, f->ws, f->mempool, NULL);
         failures += wrc_accounting_history_read(f, "complete", false);
+        send->tx.vout[0].value = INT64_C(600000000);
+        send->tx.vout[1].value = INT64_C(500000000);
+        failures += wrc_accounting_bad_fee(f, "negative_fee");
+        send->tx.vout[0].value = -1;
+        send->tx.vout[1].value = INT64_C(400000000);
+        failures += wrc_accounting_bad_fee(f, "invalid_value_out");
+        send->tx.vout[0].value = INT64_C(500000000);
         parent->used = false;
         w->num_wallet_tx = 1;
         wallet_unmark_outpoint_spent(w, &parent->tx.hash, 0);
