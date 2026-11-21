@@ -210,11 +210,19 @@ struct zpb_receive {
     char release_hex[65];
 };
 
-static bool zpb_refuse(struct zpb_receive *s, const char *why)
+/* A ZIP-like prefix is only guidance after share verification refuses. */
+static bool zpb_zip_prefix(const struct zpb_file *file)
+{
+    static const uint8_t local[] = {'P', 'K', 3, 4};
+    static const uint8_t empty[] = {'P', 'K', 5, 6};
+    return file->len >= sizeof(local) &&
+        (!memcmp(file->bytes, local, sizeof(local)) || !memcmp(file->bytes, empty, sizeof(empty)));
+}
+static bool zpb_refuse(struct zpb_receive *s, const char *why, bool zip)
 {
     zcl_package_copy_fail(s->reply, "BUNDLE_REFUSED", false,
-                          "the share file does not verify; nothing was kept. "
-                          "Ask the sender for the file again", why);
+        zip ? "This file may be a ZIP archive. Extract it, then open the .z23share file inside if present." :
+              "the share file does not verify; nothing was kept. Ask the sender for the file again", why);
     return false;
 }
 
@@ -227,7 +235,7 @@ static bool zpb_load(struct zpb_receive *s)
         zcl_package_copy_fail(s->reply, "BUNDLE_UNREADABLE", false, "file must name a readable share file of at most 64 MiB", s->path ? s->path : k_zpb_verify);
         return false;
     }
-    if (!vcs_package_share_load(&s->share, s->file.bytes, s->file.len, &reason)) return zpb_refuse(s, reason);
+    if (!vcs_package_share_load(&s->share, s->file.bytes, s->file.len, &reason)) return zpb_refuse(s, reason, zpb_zip_prefix(&s->file));
     zcl_hex_encode(s->share.release.publisher_pubkey, VCS_PACKAGE_RELEASE_PUBKEY_BYTES, s->fingerprint);
     zcl_hex_encode(s->share.release.package_root, 32, s->package_hex);
     zcl_hex_encode(s->share.release_id, 32, s->release_hex);
@@ -236,7 +244,7 @@ static bool zpb_load(struct zpb_receive *s)
 static bool zpb_check_source(struct zpb_receive *s)
 {
     const char *reason = NULL;
-    return vcs_package_share_check_source(&s->share, &reason) || zpb_refuse(s, reason);
+    return vcs_package_share_check_source(&s->share, &reason) || zpb_refuse(s, reason, false);
 }
 static void zpb_free(struct zpb_receive *s)
 {

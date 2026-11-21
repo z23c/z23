@@ -691,6 +691,63 @@ static bool zpb_flipped_copy(const char *from, const char *to, long offset)
     return ok;
 }
 
+static bool zpb_write_fixture(const char *path, const uint8_t *bytes, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(bytes, 1, len, f) == len;
+    return fclose(f) == 0 && ok;
+}
+static bool zpb_zip_refusal(const char *path, const struct zpb_world *w, bool zip)
+{
+    static const char *const commands[] = {"zcode.package.bundle.verify", "zcode.package.bundle.receive"};
+    char destination[800];
+    int n = snprintf(destination, sizeof(destination), "%s/zip-no-copy", w->root);
+    if (n <= 0 || (size_t)n >= sizeof(destination)) return false;
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        struct zpb_leaf l; zpb_open(&l);
+        bool ok = json_push_kv_str(&l.in, "file", path);
+        if (i) ok = ok && json_push_kv_str(&l.in, "datadir", w->bob_datadir) &&
+            json_push_kv_str(&l.in, "destination", destination);
+        ok = ok && zpb_exec(commands[i], &l) && zpb_refusal(&l, "BUNDLE_REFUSED") &&
+            !l.out.error.mutated && (strstr(l.out.error.message, "may be a ZIP archive") != NULL) == zip;
+        if (zip) ok = ok && strstr(l.out.error.message, "if present");
+        zpb_close(&l);
+        if (!ok) return false;
+    }
+    return true;
+}
+static int zpb_zip_guidance(const struct zpb_world *w)
+{
+    int failures = 0; uint8_t *share = NULL;
+    TEST("bundle refusal guides ZIP extraction without trusting an extension or short prefix") {
+        static const uint8_t local[] = {'P', 'K', 3, 4};
+        static const uint8_t empty[] = {'P', 'K', 5, 6};
+        char path[800];
+        ASSERT(snprintf(path, sizeof(path), "%s/fixture.z23share", w->root) > 0);
+        ASSERT(zpb_write_fixture(path, local, sizeof(local)) && zpb_zip_refusal(path, w, true));
+        ASSERT(zpb_write_fixture(path, empty, sizeof(empty)) && zpb_zip_refusal(path, w, true));
+        ASSERT(zpb_write_fixture(path, local, 3) && zpb_zip_refusal(path, w, false));
+        ASSERT(remove(path) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/verified-share.zip", w->root) > 0);
+        size_t len = 0; share = zcl_native_source_bundle_read(w->share_file, &len);
+        ASSERT(share && zpb_write_fixture(path, share, len));
+        struct zpb_leaf l; zpb_open(&l);
+        ASSERT(json_push_kv_str(&l.in, "file", path) && zpb_pass("zcode.package.bundle.verify", &l));
+        ASSERT(!l.out.error.mutated && !strcmp(zpb_get(&l, "package_root"), w->shared_package));
+        zpb_close(&l);
+        zpb_open(&l);
+        char destination[800];
+        ASSERT(snprintf(destination, sizeof(destination), "%s/zip-valid-copy", w->root) > 0);
+        ASSERT(json_push_kv_str(&l.in, "file", path) && json_push_kv_str(&l.in, "datadir", w->bob_datadir) &&
+            json_push_kv_str(&l.in, "destination", destination) && zpb_pass("zcode.package.bundle.receive", &l));
+        ASSERT(!l.out.error.mutated && !strcmp(zpb_get(&l, "package_root"), w->shared_package));
+        zpb_close(&l); ASSERT(remove(path) == 0);
+        PASS();
+    } _test_next:;
+    free(share); return failures;
+}
+
 static int zpb_flipped_refused(const struct zpb_world *w)
 {
     int failures = 0;
@@ -881,6 +938,7 @@ int test_zcode_package_bundle(void)
     }
     if (!failures) {
         failures += zpb_bob_receives(&w);
+        failures += zpb_zip_guidance(&w);
         failures += zpb_flipped_refused(&w);
         failures += zpb_selected_bundle(&w);
     }
