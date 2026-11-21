@@ -516,11 +516,13 @@ bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
 bool db_block_scan_height_range_probe(struct node_db *ndb, int lo, int hi,
                                       db_block_range_cb cb, void *ctx)
 {
+    /* Built-in min(rowid) binds the bare columns to the first row at each
+     * height, preserving the full scan tie-break without a per-height sort. */
     return scan_height_range(ndb,
-        "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx"
+        "SELECT height,hash,status,file_num,data_pos,undo_pos,num_tx,min(rowid)"
         " FROM blocks INDEXED BY idx_blocks_height_state"
         " WHERE height BETWEEN ? AND ?"
-        " AND status>=3 ORDER BY height, rowid",
+        " AND status>=3 GROUP BY height ORDER BY height",
         true, lo, hi, cb, ctx);
 }
 

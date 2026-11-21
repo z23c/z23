@@ -596,7 +596,7 @@ struct ndt_probe_seen {
     bool full;
     int height[8];
     int status[8], file[8], data[8], undo[8], ntx[8];
-    uint8_t hash0[8];
+    uint8_t hash[8][32];
     size_t solution_len[8];
 };
 
@@ -612,7 +612,7 @@ static bool ndt_probe_cb(int height, const struct db_block *row, void *ctx)
     p->data[i] = row->data_pos;
     p->undo[i] = row->undo_pos;
     p->ntx[i] = row->num_tx;
-    p->hash0[i] = row->hash[0] ^ row->hash[31];
+    memcpy(p->hash[i], row->hash, 32);
     p->solution_len[i] = row->solution_len;
     return true;
 }
@@ -631,7 +631,7 @@ static bool ndt_probe_compare(const struct ndt_probe_seen *full,
                full->data[i] == probe->data[i] &&
                full->undo[i] == probe->undo[i] &&
                full->ntx[i] == probe->ntx[i] &&
-               full->hash0[i] == probe->hash0[i];
+               memcmp(full->hash[i], probe->hash[i], 32) == 0;
         *narrow = *narrow && full->solution_len[i] > 0 &&
                   probe->solution_len[i] == 0;
     }
@@ -662,17 +662,60 @@ static bool ndt_probe_uses_covering_index(struct node_db *ndb, const char *sql)
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(ndb->db, explain, -1, &stmt, NULL) != SQLITE_OK)
         return false;
-    bool covering = false;
+    bool covering = false, sorted = false;
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         const unsigned char *detail = sqlite3_column_text(stmt, 3);
         if (detail && strstr((const char *)detail,
                 "USING COVERING INDEX idx_blocks_height_state"))
             covering = true;
+        if (detail && strstr((const char *)detail, "USE TEMP B-TREE"))
+            sorted = true;
     }
     sqlite3_finalize(stmt);
-    return covering && rc == SQLITE_DONE;
+    return covering && !sorted && rc == SQLITE_DONE;
 }
+
+static bool ndt_probe_stop(int height, const struct db_block *row, void *ctx)
+{
+    (void)height;
+    (void)row;
+    (*(int *)ctx)++;
+    return false;
+}
+
+static int ndt_probe_ties(struct node_db *ndb, const struct ndt_probe_seen *first)
+{
+    int failures = 0;
+    bool ok = node_db_exec(ndb, "DROP INDEX idx_blocks_height") &&
+        node_db_exec(ndb,
+            "INSERT INTO blocks(hash,height,prev_hash,version,merkle_root,"
+            "time,bits,nonce,solution,chain_work,status,file_num,data_pos,undo_pos,num_tx) "
+            "SELECT zeroblob(32),height,prev_hash,version,merkle_root,time,bits,"
+            "nonce,solution,chain_work,status,NULL,NULL,NULL,num_tx "
+            "FROM blocks WHERE height=10 LIMIT 1");
+    NDT_CHECK("probe: duplicate height inserted", ok);
+    struct ndt_probe_seen seen = {0};
+    bool scanned = ok && db_block_scan_height_range_probe(ndb, 10, 10,
+                                                          ndt_probe_cb, &seen);
+    NDT_CHECK("probe: first rowid retains complete hash and values",
+              scanned && seen.n == 1 && memcmp(seen.hash[0], first->hash[0], 32) == 0 &&
+              seen.file[0] == 0 && seen.data[0] == 0 && seen.undo[0] == 0 &&
+              seen.file[0] == first->file[0] && seen.data[0] == first->data[0] &&
+              seen.undo[0] == first->undo[0] && seen.status[0] == first->status[0] &&
+              seen.ntx[0] == first->ntx[0]);
+    int stopped = 0;
+    NDT_CHECK("probe: callback stop propagates", !db_block_scan_height_range_probe(
+              ndb, 10, 14, ndt_probe_stop, &stopped) && stopped == 1);
+    NDT_CHECK("probe: drop index for error", node_db_exec(ndb,
+              "DROP INDEX idx_blocks_height_state"));
+    seen = (struct ndt_probe_seen){0};
+    NDT_CHECK("probe: missing index fails without callbacks",
+              !db_block_scan_height_range_probe(ndb, 10, 14, ndt_probe_cb, &seen) &&
+              seen.n == 0);
+    return failures;
+}
+
 
 static int ndt_probe_scan_cases(const char *dir)
 {
@@ -684,6 +727,7 @@ static int ndt_probe_scan_cases(const char *dir)
     bool ready = node_db_open(&ndb, path);
     for (int h = 10; ready && h <= 14; h++)
         ready = ndt_write_block_row(&ndb, h, 3 | BLOCK_HAVE_DATA, 2000 + h);
+    ready = ready && node_db_exec(&ndb, "UPDATE blocks SET file_num=NULL,data_pos=NULL,undo_pos=NULL WHERE height=10");
     NDT_CHECK("probe: fixture db built", ready);
     struct ndt_probe_seen full, probe;
     memset(&full, 0, sizeof(full));
@@ -697,7 +741,7 @@ static int ndt_probe_scan_cases(const char *dir)
     bool traced = sqlite3_trace_v2(ndb.db, 0, NULL, NULL) == SQLITE_OK;
     NDT_CHECK("probe: both scans ok, five rows each",
               a && b && traced && full.n == 5 && probe.n == 5);
-    NDT_CHECK("probe: narrow scan uses the covering state index",
+    NDT_CHECK("probe: covering state index without temporary sort",
               ndt_probe_uses_covering_index(&ndb, seen.value));
     bool narrow = false;
     bool same = ndt_probe_compare(&full, &probe, &narrow);
@@ -708,6 +752,7 @@ static int ndt_probe_scan_cases(const char *dir)
     NDT_CHECK("probe: bad range refused",
               !db_block_scan_height_range_probe(&ndb, 5, 4, ndt_probe_cb,
                                                 &stop));
+    if (ready) failures += ndt_probe_ties(&ndb, &probe);
     node_db_close(&ndb);
     return failures;
 }
