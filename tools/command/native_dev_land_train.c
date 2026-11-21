@@ -82,7 +82,6 @@
 #include <unistd.h>
 #endif
 
-#define DL_TRAIN_MAX 8
 #define DL_TRAIN_LINT_RETRY_MS (15 * 60 * 1000)
 struct dl_train_group {
     size_t n;
@@ -133,15 +132,7 @@ bool dl_train_group_valid(const struct dl_row *r)
     return false;
 }
 
-struct dl_train {
-    size_t n;
-    char tip[80];
-    struct dl_row m[DL_TRAIN_MAX - 1];
-    char commit[DL_TRAIN_MAX - 1][80]; /* each member's commit in the stack */
-    char red[1024];                    /* the last red stacked lint's detail */
-};
-
-static size_t dl_train_width(void)
+size_t dl_train_width(void)
 {
     const char *s = getenv("ZCL_LAND_TRAIN_WIDTH");
     if (!s || s[0] < '2' || s[0] > '0' + DL_TRAIN_MAX || s[1])
@@ -150,7 +141,7 @@ static size_t dl_train_width(void)
 }
 
 /* A row that may head a train or ride in one. */
-static bool dl_train_fresh(const struct dl_row *r)
+bool dl_train_fresh(const struct dl_row *r)
 {
     return (r->train_group[0] || (r->attempt == 1 && !r->train_solo)) && !r->predecessor_seq &&
            !r->fence_peer && !r->publication_hold;
@@ -167,7 +158,7 @@ bool dl_train_formed(const struct dl_row *row)
     return row->proof_intent[0] && row->train_commit[0];
 }
 
-static bool dl_train_joinable(const struct dl_row *r, const struct dl_row *head)
+bool dl_train_joinable(const struct dl_row *r, const struct dl_row *head)
 {
     return r->seq != head->seq && strcmp(r->train_group, head->train_group) == 0 && strcmp(r->state, "queued") == 0 &&
            dl_train_fresh(r) && !r->proof_intent[0] &&
@@ -237,13 +228,18 @@ bool dl_train_refuse_bound(const struct dl_dirs *d, const struct dl_row *rows,
 
 /* Clear a train binding the row's head no longer holds before the row's
  * own rebase: nothing downstream may read a pair this row did not prepare. */
-int dl_train_rebase(const struct dl_dirs *d, struct dl_row *row,
-                    const char *observed_main, char *why, size_t why_cap)
+void dl_train_reset_pair(struct dl_row *row)
 {
     row->tree[0] = '\0';
     row->proof_intent[0] = '\0';
     row->train_commit[0] = '\0';
     dl_publication_clear(row);
+}
+
+int dl_train_rebase(const struct dl_dirs *d, struct dl_row *row,
+                    const char *observed_main, char *why, size_t why_cap)
+{
+    dl_train_reset_pair(row);
     return dl_rebase(d, row, observed_main, why, why_cap);
 }
 
@@ -558,7 +554,7 @@ bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
 
 /* ── stacking ──────────────────────────────────────────────────────────── */
 
-static bool dl_train_checkout(const struct dl_dirs *d, const char *commit)
+bool dl_train_checkout(const struct dl_dirs *d, const char *commit)
 {
     const char *args[] = { "checkout", "--quiet", "--force", "--detach",
                            commit, NULL };
@@ -569,12 +565,13 @@ static bool dl_train_checkout(const struct dl_dirs *d, const char *commit)
 /* Rebase one queued row onto the stacked tip: 1 stacked, 0 skipped (it
  * stays queued, untouched), -1 stop stacking. */
 static int dl_train_add(const struct dl_dirs *d, const struct dl_row *head,
-                        struct dl_train *t, const struct dl_row *next)
+                        struct dl_train *t, const struct dl_row *next,
+                        dl_rebase_fn rebase)
 {
     char why[512], line[800];
     struct dl_row m = *next, range = *head;
     (void)snprintf(m.log_path, sizeof(m.log_path), "%s", head->log_path);
-    int rc = dl_rebase(d, &m, t->tip, why, sizeof(why));
+    int rc = rebase(d, &m, t->tip, why, sizeof(why));
     if (rc > 0) {
         (void)snprintf(range.base, sizeof(range.base), "%s", t->tip);
         (void)snprintf(range.local, sizeof(range.local), "%s", m.local);
@@ -638,13 +635,43 @@ static bool dl_train_group_intact(const struct dl_row *head,
     }
     return g.seq[0] == head->seq;
 }
+/* Stack up to width-1 joinable rows from `rows` onto the head, each rebased on
+ * the previous by `rebase`. Returns true when any rebase ran, i.e. the
+ * worktree no longer holds the head. The queue is the caller's: the driver
+ * passes rows it read under queue.lock, the advisory speculative prediction
+ * passes a snapshot with the in-flight pair already removed. */
+bool dl_train_stack_rows(const struct dl_dirs *d,
+                         const struct dl_row *head, struct dl_train *t,
+                         const struct dl_row *rows, size_t n,
+                         size_t width, dl_rebase_fn rebase)
+{
+    struct dl_train_group group;
+    bool loaded = true, touched = false;
+    (void)snprintf(t->tip, sizeof(t->tip), "%s", head->local);
+    if (head->train_group[0]) {
+        loaded = dl_train_group_parse(head->train_group, &group) &&
+                 dl_train_group_intact(head, rows, n);
+        if (loaded) width = group.n;
+    }
+    const struct dl_row *after = head, *next;
+    while (loaded && t->n + 1 < width &&
+           (next = dl_train_next(rows, n, head, after)) != NULL) {
+        after = next;
+        touched = true;
+        if (dl_train_add(d, head, t, next, rebase) < 0)
+            break;
+    }
+    if (loaded && head->train_group[0] && t->n + 1 != width) t->n = 0;
+    return touched;
+}
+
 /* Stack up to width-1 joinable rows onto the prepared head. Returns true
  * when any rebase ran, i.e. the worktree no longer holds the head. */
 static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
                            struct dl_train *t)
 {
     struct dl_row *rows = NULL;
-    size_t n = 0, width = dl_train_width();
+    size_t n = 0;
     char qpath[4096 + 32];
     bool touched = false;
     (void)snprintf(t->tip, sizeof(t->tip), "%s", head->local);
@@ -656,21 +683,9 @@ static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
         return false;
     bool loaded = dl_load_rows(qpath, &rows, &n, NULL, 0);
     dl_unlock(lock);
-    struct dl_train_group group;
-    if (loaded && head->train_group[0]) {
-        loaded = dl_train_group_parse(head->train_group, &group) &&
-                 dl_train_group_intact(head, rows, n);
-        if (loaded) width = group.n;
-    }
-    const struct dl_row *after = head, *next;
-    while (loaded && t->n + 1 < width &&
-           (next = dl_train_next(rows, n, head, after)) != NULL) {
-        after = next;
-        touched = true;
-        if (dl_train_add(d, head, t, next) < 0)
-            break;
-    }
-    if (loaded && head->train_group[0] && t->n + 1 != width) t->n = 0;
+    if (loaded)
+        touched = dl_train_stack_rows(d, head, t, rows, n, dl_train_width(),
+                                      dl_rebase);
     free(rows);
     return touched;
 }

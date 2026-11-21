@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "command/native_command.h"
 
@@ -211,6 +212,19 @@ void zcl_native_dev_land_submit_local(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply);
 int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
               const char *observed_main, char *why, size_t why_cap);
+/* dl_rebase without the landing worktree's submodule seed: the same rebase
+ * and the same (local, base), for a scratch worktree that proves nothing. */
+int dl_rebase_pair(const struct dl_dirs *d, struct dl_row *row,
+                   const char *observed_main, char *why, size_t why_cap);
+/* The row dl_step_pick_row's queue order starts next: the in-flight row, else
+ * the first queued row by priority then seq. False when there is none. */
+bool dl_step_pick_row(const struct dl_row *rows, size_t nrows,
+                      struct dl_row *pick, bool *inflight);
+/* A wall-clock deadline (monotonic ms, 0 none) for every dl_git spawn of the
+ * calling thread, and a budget cut to it (0 once it has passed). Only the
+ * advisory speculative prediction sets one. */
+void dl_deadline_set(int64_t at_ms);
+int dl_budget_ms(int limit_ms);
 bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row);
 void dl_publication_clear(struct dl_row *r);
 bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row);
@@ -304,5 +318,55 @@ int dl_train_rebase(const struct dl_dirs *d, struct dl_row *row,
 /* Add the queued rows riding in the in-flight row's pair to its status. */
 void dl_train_status(struct json_value *inflight, const struct dl_row *rows,
                      size_t n);
+/* The train's stacking, shared with the advisory speculative prediction
+ * (native_dev_land_speculative.c). A train is the head's prepared tip plus up
+ * to DL_TRAIN_MAX - 1 stacked members, each rebased on the previous. */
+#define DL_TRAIN_MAX 8
+struct dl_train {
+    size_t n;
+    char tip[80];
+    struct dl_row m[DL_TRAIN_MAX - 1];
+    char commit[DL_TRAIN_MAX - 1][80]; /* each member's commit in the stack */
+    char red[1024];                    /* the last red stacked lint's detail */
+};
+/* A rebase of a row's tip onto a commit: dl_rebase for the driver,
+ * dl_rebase_pair for the advisory speculative prediction. */
+typedef int (*dl_rebase_fn)(const struct dl_dirs *, struct dl_row *,
+                            const char *, char *, size_t);
+/* ZCL_LAND_TRAIN_WIDTH as the driver reads it: 2..8, else 0 (no train). */
+size_t dl_train_width(void);
+/* A row that may head a train or ride in one. */
+bool dl_train_fresh(const struct dl_row *r);
+/* A queued, unheld first-attempt row of the head's group with no pair yet. */
+bool dl_train_joinable(const struct dl_row *r, const struct dl_row *head);
+/* Forget the pair a row carried, before its own rebase. */
+void dl_train_reset_pair(struct dl_row *row);
+/* Check `commit` out, detached, in d->wt. */
+bool dl_train_checkout(const struct dl_dirs *d, const char *commit);
+/* Stack up to width-1 joinable rows of `rows` onto the head, each rebased on
+ * the previous by `rebase`; true when any rebase ran. */
+bool dl_train_stack_rows(const struct dl_dirs *d, const struct dl_row *head,
+                         struct dl_train *t, const struct dl_row *rows,
+                         size_t n, size_t width, dl_rebase_fn rebase);
+
+/* The advisory speculative pair of `dev land decision`
+ * (native_dev_land_speculative.c):
+ * the pair the queue will prove NEXT, predicted while the in-flight row is
+ * still proving. `width` is the train width to assume (0: the process
+ * environment's, as the driver reads it), `budget_ms` bounds the whole
+ * prediction, `bundle_out` (absolute path or NULL) also writes the pair's git
+ * bundle and offer. */
+#define DL_SPEC_BUDGET_MS (2 * 60 * 1000)
+struct dl_spec_args {
+    size_t width;
+    int64_t budget_ms;
+    const char *bundle_out;
+};
+/* `rows` is a queue snapshot the caller read under the decision's shared
+ * locks and has released; the prediction takes no lock and writes no queue,
+ * ledger or ref. `out` is an initialized JSON object this fills. */
+void dl_train_speculate(const struct dl_dirs *d, const struct dl_row *rows,
+                        size_t n, const struct dl_spec_args *args,
+                        struct json_value *out);
 
 #endif

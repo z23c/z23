@@ -2426,9 +2426,18 @@ ZCL_COMMAND_READY_READ(
     "Observe the next landing dispatch",
     "Reads one coherent local queue, fence and outcome snapshot using the "
     "same dispatch classifier as step. The result is advisory, covers only "
-    "the next dispatch, and does not authorize publication.", 65536,
+    "the next dispatch, and does not authorize publication. With "
+    "speculative=true (or bundle_out) it adds data.speculative_pair: the "
+    "pair the queue will prove next, predicted while a row is in flight, "
+    "as {local, base, tree, rows[]} with the in-flight (local, base) it came "
+    "from, or a reason when none exists. It holds only if the in-flight row "
+    "lands, builds in a scratch worktree, writes no queue, ledger or ref and "
+    "takes no lock after the snapshot; bundle_out=<absolute path> alone "
+    "writes the pair's git bundle and offer, refusing existing paths. "
+    "train_width and budget_ms tune the prediction.", 65536,
     "land,decision,queue,dispatch",
-    "zcl.land_decision_input.v1", "zcl.land.v1", "seq", "",
+    "zcl.land_decision_input.v1", "zcl.land.v1",
+    "seq,speculative,bundle_out,train_width,budget_ms", "",
     "z23-dev dev land decision",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,

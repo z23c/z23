@@ -153,6 +153,7 @@
 #include "command/native_dev_land_attestation.h"
 #include "command/native_dev_land_window.h"
 #include "command/native_dev_land_internal.h"
+#include "command/native_dev_land_remote_shared.h"
 #include "command/native_dev_land_cancel.h"
 #include "command/native_dev_land_precheck.h"
 #include "command/native_dev_land_selfupgrade.h"
@@ -1788,6 +1789,29 @@ void dl_unlock(int fd)
 
 /* ── git, and only git ─────────────────────────────────────────────────── */
 
+/* An optional wall-clock deadline for the calling thread (monotonic ms; 0 is
+ * none, the only state the landing driver ever runs in). The advisory
+ * speculative-pair prediction sets one so every git spawn it makes, however
+ * deep inside the rebase code it shares with the driver, is held to one
+ * budget. */
+static _Thread_local int64_t g_dl_deadline_ms;
+
+void dl_deadline_set(int64_t at_ms)
+{
+    g_dl_deadline_ms = at_ms;
+}
+
+/* `limit_ms` cut to what is left of the deadline; 0 when it has passed. */
+int dl_budget_ms(int limit_ms)
+{
+    if (!g_dl_deadline_ms)
+        return limit_ms;
+    int64_t left = g_dl_deadline_ms - platform_time_monotonic_ms();
+    if (left <= 0)
+        return 0;
+    return left < limit_ms ? (int)left : limit_ms;
+}
+
 /* Run one git command in `dir` and capture its stdout. No shell is ever
  * involved: argv goes straight to execvp through util/spawn.h. Returns the
  * child's exit status, or -1 when the launch itself failed. */
@@ -1799,6 +1823,9 @@ int dl_git(const char *dir, const char *const *args, char *out,
     if (out && cap)
         out[0] = '\0';
     if (!dir || !args)
+        return -1;
+    timeout_ms = dl_budget_ms(timeout_ms);
+    if (g_dl_deadline_ms && timeout_ms <= 0)
         return -1;
     argv[n++] = "git";
     argv[n++] = "-C";
@@ -6301,8 +6328,8 @@ static int dl_rebase_refused(const struct dl_dirs *d, const char *paths,
  * the core seal files alone, which dl_reseal_rebase() settles for a row
  * that ran the unseal ritual itself (native_dev_land_reseal.c); any other
  * path still conflicts as before, and a declined reseal says why. */
-int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
-                     const char *observed_main, char *why, size_t why_cap)
+int dl_rebase_pair(const struct dl_dirs *d, struct dl_row *row,
+                   const char *observed_main, char *why, size_t why_cap)
 {
     char buf[DL_GIT_CAP];
     bool integrated = false;
@@ -6341,6 +6368,19 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         (void)snprintf(why, why_cap, "the rebased head cannot be named");
         return -1;
     }
+    return 1;
+}
+
+/* dl_rebase_pair() plus the landing worktree's submodule seed. The pair
+ * (local, base) is complete without the seed, so the advisory speculative
+ * prediction stops at dl_rebase_pair() and never touches vendor/tor. */
+int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
+              const char *observed_main, char *why, size_t why_cap)
+{
+    char buf[DL_GIT_CAP];
+    int rc = dl_rebase_pair(d, row, observed_main, why, why_cap);
+    if (rc != 1)
+        return rc;
     /* WHY. git worktree add leaves vendor/tor as an empty gitlink. Proof
      * generation then points the submodule url at that empty directory and
      * fails. Seed it from the submitting checkout, which already has the
@@ -11763,7 +11803,7 @@ static enum dl_dispatch_kind dl_dispatch_classify(const struct dl_dispatch_input
     return 1;
 }
 
-[[maybe_unused]] static bool dl_step_pick_row(const struct dl_row *rows,
+bool dl_step_pick_row(const struct dl_row *rows,
                                              size_t nrows,
                                              struct dl_row *pick,
                                              bool *inflight)
@@ -12831,6 +12871,161 @@ static bool dl_decision_row_identity(struct zcl_command_reply *reply,
         json_push_kv_str(&reply->data, "local", pick->local);
 }
 
+#if !defined(_WIN32)
+/* The optional speculative pair: asked for by `speculative` or implied by
+ * `bundle_out`, never by default, because it builds a scratch worktree and
+ * the self-upgrade comparison runs this leaf under a 22 s budget. */
+struct dl_decision_spec {
+    bool want;
+    struct dl_spec_args args;
+    struct dl_row *rows;
+    size_t nrows;
+};
+
+static bool dl_decision_int_in(const struct zcl_command_request *req,
+                               const char *key, long long lo, long long hi,
+                               long long *out, bool *given)
+{
+    const struct json_value *v = json_get(req->input, key);
+    *given = v != NULL;
+    if (!v)
+        return true;
+    if (v->type != JSON_INT || json_get_int(v) < lo || json_get_int(v) > hi)
+        return false;
+    *out = json_get_int(v);
+    return true;
+}
+
+/* bundle_out is refused before any work if it cannot be written: the same
+ * refusals, with the same codes, as `dev land send --bundle_out`. */
+static bool dl_decision_bundle_in(const struct zcl_command_request *req,
+                                  struct dl_decision_spec *spec,
+                                  struct zcl_command_reply *reply)
+{
+    struct zcl_command_reply *chk;
+    bool ok;
+    spec->args.bundle_out = dl_str(req, "bundle_out");
+    if (!spec->args.bundle_out)
+        return true;
+    chk = zcl_calloc(1, sizeof(*chk), "dev.land.decision.bundle_out");
+    if (!chk) {
+        dl_fail(reply, "DECISION_UNAVAILABLE", "decision", "out of memory",
+                "input.bundle_out");
+        return false;
+    }
+    zcl_command_reply_init(chk, "zcl.land.v1");
+    ok = zcl_dlr_bundle_out_free(spec->args.bundle_out, chk);
+    if (!ok)
+        dl_fail(reply, chk->error.code, "decision", chk->error.message,
+                chk->error.evidence);
+    zcl_command_reply_free(chk);
+    free(chk);
+    spec->want = true;
+    return ok;
+}
+
+static bool dl_decision_spec_in(const struct zcl_command_request *req,
+                                struct dl_decision_spec *spec,
+                                struct zcl_command_reply *reply)
+{
+    const struct json_value *flag = json_get(req->input, "speculative");
+    long long width = 0, budget = 0;
+    bool given_width, given_budget;
+    spec->want = flag && ((flag->type == JSON_BOOL && json_get_bool(flag)) ||
+                          (flag->type == JSON_STR && json_get_str(flag) &&
+                           strcmp(json_get_str(flag), "true") == 0));
+    if (!dl_decision_int_in(req, "train_width", 2, 8, &width, &given_width) ||
+        !dl_decision_int_in(req, "budget_ms", 1000, 600000, &budget,
+                            &given_budget)) {
+        dl_fail(reply, "BAD_INPUT", "decision",
+                "train_width must be 2..8 and budget_ms 1000..600000",
+                "input.train_width or input.budget_ms");
+        return false;
+    }
+    spec->args.width = (size_t)width;
+    spec->args.budget_ms = budget;
+    return dl_decision_bundle_in(req, spec, reply);
+}
+
+static bool dl_decision_rows(const struct dl_dirs *d,
+                             struct dl_decision_spec *spec)
+{
+    char path[4192];
+    return snprintf(path, sizeof(path), "%s/queue.jsonl", d->land) <
+               (int)sizeof(path) &&
+           dl_load_rows(path, &spec->rows, &spec->nrows, NULL, 0);
+}
+
+/* After the locks are released: the pair, or why there is none. */
+static void dl_decision_speculate(const struct dl_dirs *d,
+                                  enum dl_dispatch_kind kind,
+                                  const struct dl_decision_spec *spec,
+                                  struct zcl_command_reply *reply)
+{
+    struct json_value out;
+    json_init(&out);
+    json_set_object(&out);
+    if (kind == DL_DISPATCH_RESUME) {
+        dl_train_speculate(d, spec->rows, spec->nrows, &spec->args, &out);
+    } else {
+        bool idle = kind == DL_DISPATCH_EMPTY || kind == DL_DISPATCH_PREPARE;
+        (void)json_push_kv_str(&out, "schema", "zcl.land.speculative_pair.v1");
+        (void)json_push_kv_str(&out, "status", "none");
+        (void)json_push_kv_str(&out, "reason", idle ? "nothing_in_flight"
+                                                    : "dispatch_not_resume");
+        (void)json_push_kv_str(&out, "detail", idle
+            ? "no row is in flight, so no landing is about to move main"
+            : "the next dispatch is not a resume of the in-flight row");
+    }
+    (void)json_push_kv(&reply->data, "speculative_pair", &out);
+    json_free(&out);
+}
+
+/* The decision's inputs, refused before any lock is taken. A request with no
+ * input object is the snapshot's to report unavailable, as it always was. */
+static bool dl_decision_input(const struct zcl_command_request *req,
+                              struct dl_decision_spec *spec,
+                              struct zcl_command_reply *reply)
+{
+    long long requested = 0;
+    if (!req || !req->input)
+        return true;
+    if (json_get(req->input, "seq") && !dl_seq_in(req, &requested)) {
+        dl_fail(reply, "BAD_INPUT", "decision", "seq must be a positive integer", "input.seq");
+        return false;
+    }
+    return dl_decision_spec_in(req, spec, reply);
+}
+
+/* One coherent snapshot under the shared locks, which are released before it
+ * returns, with the queue rows copied under them when a pair was asked for. */
+static bool dl_decision_observe(const struct zcl_command_request *req,
+                                struct dl_dirs *d,
+                                struct dl_decision_spec *spec,
+                                struct zcl_command_reply *reply,
+                                enum dl_dispatch_kind *kind)
+{
+    struct dl_row pick = {0};
+    bool have = false, ok = false;
+    int step = -1, queue = -1;
+    if (!req || !req->input || !dl_dirs_resolve(d, false) ||
+        (step = dl_snapshot_lock(d->land, "step.lock")) < 0 ||
+        (queue = dl_snapshot_lock(d->land, "queue.lock")) < 0) goto out;
+    *kind = dl_decision_snapshot(d, req, &pick, &have);
+#if defined(ZCL_TESTING)
+    if (!dl_test_pick_barrier()) goto out;
+#endif
+    const char *name = dl_dispatch_name(*kind);
+    ok = name && dl_snapshot_lock_same(step, d->land, "step.lock") &&
+         dl_snapshot_lock_same(queue, d->land, "queue.lock") &&
+         dl_decision_encode(reply, name, &pick, have) &&
+         (!spec->want || dl_decision_rows(d, spec));
+out:
+    dl_unlock(queue); dl_unlock(step);
+    return ok;
+}
+#endif
+
 static void dl_decision(const struct zcl_command_request *req,
                         struct zcl_command_reply *reply)
 {
@@ -12839,36 +13034,25 @@ static void dl_decision(const struct zcl_command_request *req,
     dl_fail(reply, "DECISION_UNAVAILABLE", "decision", "snapshot requires POSIX locks", "step.lock");
 #else
     struct dl_dirs d;
-    struct dl_row pick = {0};
-    bool have = false;
-    int step = -1, queue = -1;
-    long long requested = 0;
-    if (req && req->input && json_get(req->input, "seq") &&
-        !dl_seq_in(req, &requested)) {
-        dl_fail(reply, "BAD_INPUT", "decision", "seq must be a positive integer", "input.seq");
+    struct dl_decision_spec spec = {0};
+    enum dl_dispatch_kind kind = DL_DISPATCH_OUTCOME_ERROR;
+    if (!dl_decision_input(req, &spec, reply))
         return;
+    if (dl_decision_observe(req, &d, &spec, reply, &kind)) {
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = 0;
+        /* The snapshot is complete and the locks are gone: the driver's beats
+         * are not held up by the prediction, which reads only the rows copied
+         * under them. */
+        if (spec.want)
+            dl_decision_speculate(&d, kind, &spec, reply);
+    } else {
+        json_free(&reply->data);
+        json_set_object(&reply->data);
+        dl_fail(reply, "DECISION_UNAVAILABLE", "decision",
+                "cannot obtain a coherent landing snapshot", "state, lock, fence or outcome unavailable");
     }
-    if (!req || !req->input || !dl_dirs_resolve(&d, false) ||
-        (step = dl_snapshot_lock(d.land, "step.lock")) < 0 ||
-        (queue = dl_snapshot_lock(d.land, "queue.lock")) < 0) goto unavailable;
-    enum dl_dispatch_kind kind = dl_decision_snapshot(&d, req, &pick, &have);
-#if defined(ZCL_TESTING)
-    if (!dl_test_pick_barrier()) goto unavailable;
-#endif
-    const char *name = dl_dispatch_name(kind);
-    if (!name || !dl_snapshot_lock_same(step, d.land, "step.lock") ||
-        !dl_snapshot_lock_same(queue, d.land, "queue.lock")) goto unavailable;
-    if (!dl_decision_encode(reply, name, &pick, have)) goto unavailable;
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = 0;
-    dl_unlock(queue); dl_unlock(step);
-    return;
-unavailable:
-    dl_unlock(queue); dl_unlock(step);
-    json_free(&reply->data);
-    json_set_object(&reply->data);
-    dl_fail(reply, "DECISION_UNAVAILABLE", "decision",
-            "cannot obtain a coherent landing snapshot", "state, lock, fence or outcome unavailable");
+    free(spec.rows);
 #endif
 }
 

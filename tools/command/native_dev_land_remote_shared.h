@@ -45,6 +45,15 @@ bool zcl_dlr_file_sha256(const char *path,
                          char hex[SHA256_OUTPUT_SIZE * 2 + 1]);
 /* One JSON object plus a newline, created exclusively at path. */
 bool zcl_dlr_json_write_new(const struct json_value *doc, const char *path);
+/* --bundle_out's refusals before any work (SEND_BAD_ARGUMENT, SEND_BUNDLE_EXISTS,
+ * SEND_OFFER_EXISTS); nothing is written. A refusal is in reply. */
+bool zcl_dlr_bundle_out_free(const char *out, struct zcl_command_reply *reply);
+/* --bundle_out for one exact pair (dev land decision): the bundle of
+ * base..commit from the object store of `root`, whose HEAD must be `commit`,
+ * and its offer, both created exclusively. data.bundle, bundle_sha256, offer. */
+bool zcl_dlr_bundle_pair(const char *root, const char *commit, const char *base,
+                         const char *out, const char *lane,
+                         struct zcl_command_reply *reply);
 
 #define DLR_QUAL_RECEIPTS_MAX 32
 /* reverify_offer / qualify_offer --check: cx (the split check, the default),

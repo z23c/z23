@@ -1351,7 +1351,7 @@ static bool cr_dev_control_descriptor(const struct zcl_command_spec *spec, const
     if (!strcmp(spec->path, "dev.land.submit") && !strcmp(key, "precheck_budget_ms")) {
         out->type = JSON_INT; out->minimum = 180000; out->maximum = 720000; return true;
     }
-    return false;
+    return command_registry_land_decision_descriptor(spec, key, out);
 }
 
 /* Leaf-scoped descriptor specials that predate the general tables below. */

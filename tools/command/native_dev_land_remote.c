@@ -533,6 +533,10 @@ struct dlr_send {
     long ahead;
     char note_buf[DLR_NOTE_MAX + 1];
     char lane_buf[256];
+    /* The bundle's one prerequisite and the offer's base, when it is not
+     * origin/main with the commit's parent (zcl_dlr_bundle_pair); NULL for
+     * every send. */
+    const char *range_base;
 };
 
 static void dlr_send_fail(struct zcl_command_reply *reply, const char *code,
@@ -884,9 +888,10 @@ static void dlr_send_unpin(const struct dlr_send *s)
 static bool dlr_send_make(struct dlr_send *s, const char *path,
                           struct zcl_command_reply *reply)
 {
-    char sink[1024];
-    const char *tip, *mk[] = {"bundle", "create", path, NULL, "^origin/main",
-                              NULL};
+    char sink[1024], excluded[96];
+    const char *tip, *mk[] = {"bundle", "create", path, NULL, excluded, NULL};
+    (void)snprintf(excluded, sizeof(excluded), "^%s",
+                   s->range_base ? s->range_base : "origin/main");
     if (s->commit && !dlr_send_pin(s, reply))
         return false;
     tip = s->commit ? s->tmpref : "HEAD";
@@ -950,12 +955,18 @@ static bool dlr_send_offer(struct dlr_send *s, struct zcl_command_reply *reply)
     struct json_value doc;
     bool ok = false;
     /* The base is the bundle's prerequisite, the parent of the one included
-     * commit, not the origin/main tip, which may have moved past it. */
-    if (snprintf(spec, sizeof(spec), "%.40s^", s->sha) >= (int)sizeof(spec))
-        return false;
-    if (!dlr_send_git(s, rp, s->base, sizeof(s->base), "SEND_GIT_FAILED",
-                      reply))
-        return false;
+     * commit, not the origin/main tip, which may have moved past it. An exact
+     * pair names its prerequisite itself: its commits may be several. */
+    if (s->range_base) {
+        (void)snprintf(s->base, sizeof(s->base), "%s", s->range_base);
+    } else {
+        if (snprintf(spec, sizeof(spec), "%.40s^", s->sha) >=
+            (int)sizeof(spec))
+            return false;
+        if (!dlr_send_git(s, rp, s->base, sizeof(s->base), "SEND_GIT_FAILED",
+                          reply))
+            return false;
+    }
     json_init(&doc);
     json_set_object(&doc);
     ok = json_push_kv_str(&doc, "schema", "zcl.dev_land_offer.v1") &&
@@ -1032,6 +1043,87 @@ static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
     (void)json_push_kv_str(&reply->data, "offer", s->offer);
     (void)json_push_kv_str(&reply->data, "ready", ready);
     dlr_send_next_action(s, reply);
+}
+
+/* The refusals --bundle_out gives before any work: not an absolute path in the
+ * closed character set (SEND_BAD_ARGUMENT), or bundle_out or its .offer.json
+ * already there (SEND_BUNDLE_EXISTS, SEND_OFFER_EXISTS). Nothing is written. */
+bool zcl_dlr_bundle_out_free(const char *out, struct zcl_command_reply *reply)
+{
+    struct dlr_send *s = zcl_calloc(1, sizeof(*s), "dev_land_remote.out");
+    bool ok = false;
+    if (!s) {
+        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                      "cannot allocate the bundle check", "memory");
+        return false;
+    }
+    s->out = out;
+    if (!out || !out[0] || !dlr_out_ok(out) || out[0] != '/')
+        dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                      "bundle_out must be an absolute path of "
+                      "[A-Za-z0-9 ._,:/+=-]", "input.bundle_out");
+    else
+        ok = dlr_send_out_free(s, reply);
+    free(s);
+    return ok;
+}
+
+/* A full 40-hex commit id and nothing after it. */
+static bool dlr_hex40_ok(const char *s)
+{
+    size_t n = 0;
+    return s && zcl_dlr_sha_ok(s, &n) && n == 40 && !s[n];
+}
+
+/* The exact pair's names, into s: a checkout, two commit ids, a lane. */
+static bool dlr_pair_args(struct dlr_send *s, const char *root,
+                          const char *commit, const char *base,
+                          const char *lane)
+{
+    return root && lane && zcl_dlr_lane_ok(lane) && dlr_hex40_ok(commit) &&
+           dlr_hex40_ok(base) &&
+           snprintf(s->root, sizeof(s->root), "%s", root) <
+               (int)sizeof(s->root) &&
+           snprintf(s->sha, sizeof(s->sha), "%s", commit) <
+               (int)sizeof(s->sha);
+}
+
+/* The --bundle_out handoff for one exact pair: the bundle of base..commit made
+ * from the object store of the checkout `root` (whose HEAD is `commit`, a
+ * detached scratch worktree, so no ref is written) and the offer beside it,
+ * created exclusively like a send's. The bundle's one prerequisite is `base`.
+ * data.bundle, bundle_sha256, offer and commit on success; a refusal as in
+ * a send. */
+bool zcl_dlr_bundle_pair(const char *root, const char *commit, const char *base,
+                         const char *out, const char *lane,
+                         struct zcl_command_reply *reply)
+{
+    struct dlr_send *s = zcl_calloc(1, sizeof(*s), "dev_land_remote.pair");
+    bool ok = false;
+    if (!s) {
+        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                      "cannot allocate the bundle", "memory");
+        return false;
+    }
+    if (!dlr_pair_args(s, root, commit, base, lane)) {
+        dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                      "an exact pair needs a checkout, 40-hex commit and base "
+                      "and a lane name", "bundle pair");
+    } else if (!out || out[0] != '/' || !dlr_out_ok(out)) {
+        dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                      "bundle_out must be an absolute path of "
+                      "[A-Za-z0-9 ._,:/+=-]", "input.bundle_out");
+    } else {
+        s->range_base = base;
+        s->lane = lane;
+        s->out = out;
+        if (dlr_send_out_free(s, reply)) {
+            dlr_send_out(s, reply);
+            ok = reply->error.code[0] == '\0';
+        }
+    }
+    free(s);
+    return ok;
 }
 
 static bool dlr_send_copy(struct dlr_send *s, struct zcl_command_reply *reply)

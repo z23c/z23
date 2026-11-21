@@ -58,6 +58,16 @@
 #define DL_SEAL_LOG "core/UNSEAL.md"
 #define DL_SEAL_STOPS 8
 #define DL_SEAL_TOOL_MS (5 * 60 * 1000)
+
+/* A seal tool child's budget: DL_SEAL_TOOL_MS, cut to the calling thread's
+ * deadline when the advisory speculative prediction set one (dl_git applies
+ * the same cut). An exhausted deadline is 1 ms, never 0: a child must still
+ * be killed, not left unbounded. */
+static int dl_seal_make_ms(void)
+{
+    int ms = dl_budget_ms(DL_SEAL_TOOL_MS);
+    return ms > 0 ? ms : 1;
+}
 #define DL_SEAL_BLOB_MAX (16u * 1024u * 1024u)
 #define DL_SEAL_LIST_CAP (1024u * 1024u)
 
@@ -342,7 +352,7 @@ static int dl_gate_check(const char *wt, struct dl_seal_gate *gate)
     if (!out)
         return dl_gate_set(gate, DL_SEAL_ERR, "out of memory");
     int rc = zcl_spawn_capture_merged_observed(argv, out, DL_LOG_CAP,
-                                               DL_SEAL_TOOL_MS, &timed_out);
+                                               dl_seal_make_ms(), &timed_out);
     bool verdict = strstr(out, "core_seal:") != NULL;
     free(out);
     if (rc == 0 && !timed_out)
@@ -440,7 +450,7 @@ static bool dl_reseal_make(const char *wt, const struct dl_row *row)
     if (!out)
         return false;
     int rc = zcl_spawn_capture_merged_observed(argv, out, DL_LOG_CAP,
-                                               DL_SEAL_TOOL_MS, &timed_out);
+                                               dl_seal_make_ms(), &timed_out);
     dl_log(row, out);
     free(out);
     return rc == 0 && !timed_out;

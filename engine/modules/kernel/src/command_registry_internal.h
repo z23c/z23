@@ -28,6 +28,10 @@ bool command_registry_devagent_input_extra_bool_key(const char *key);
 bool command_registry_devagent_input_seq_ok(const struct json_value *value);
 bool command_registry_devagent_integer_descriptor(
     const char *key, struct zcl_command_input_descriptor *out);
+/* dev.land.decision's speculative, train_width and budget_ms keys. */
+bool command_registry_land_decision_descriptor(
+    const struct zcl_command_spec *spec, const char *key,
+    struct zcl_command_input_descriptor *out);
 bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
                                             const struct json_value *value,
                                             bool *type_ok);
