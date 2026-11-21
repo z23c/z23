@@ -69,11 +69,25 @@ struct app_host_test_world {
     struct node_db db;
 };
 
-static bool app_host_test_open(struct app_host_test_world *w)
+static bool app_host_test_inputs(struct app_host_test_world *w,
+                                 const struct app_host_test_world *source)
+{
+    if (!source)
+        return test_app_host_fixture_create(w->root, sizeof(w->root), w->share,
+                                            sizeof(w->share), &w->offer);
+    /* Only the signed public input is shared. Each store and DB lives in a fresh root. */
+    memcpy(w->share, source->share, sizeof(w->share));
+    w->offer = source->offer;
+    if (test_mkdtemp(w->root, sizeof(w->root), "host_observer")) return true;
+    w->root[0] = '\0';
+    return false;
+}
+
+static bool app_host_test_open(struct app_host_test_world *w,
+                               const struct app_host_test_world *source)
 {
     memset(w, 0, sizeof(*w));
-    if (!test_app_host_fixture_create(w->root, sizeof(w->root), w->share,
-                                      sizeof(w->share), &w->offer)) return false;
+    if (!app_host_test_inputs(w, source)) return false;
     int n = snprintf(w->store_path, sizeof(w->store_path), "%s/host-store", w->root);
     int d = snprintf(w->db_path, sizeof(w->db_path), "%s/host.db", w->root);
     if (n < 0 || (size_t)n >= sizeof(w->store_path) || d < 0 || (size_t)d >= sizeof(w->db_path)) return false;
@@ -486,14 +500,14 @@ static bool app_host_local_rpc_roundtrip(struct app_host_test_world *w,
     ok = ok && app_host_local_rpc_success(&out, s);
     json_free(&in); json_free(&out); json_free(&plan); return ok;
 }
-static int app_host_local_rpc_cases(void)
+static int app_host_local_rpc_cases(const struct app_host_test_world *source)
 {
     int failures = 0; struct app_host_test_world w = {0}; struct app_host_test_hooks_state s = {0};
     struct boot_app_host_test_hooks hooks = {.context = &s, .identity_probe = app_host_test_probe,
         .identity_create = app_host_test_create, .datadir = app_host_test_datadir};
     uint8_t release[32];
     TEST("local hosting RPC binds confirmed plan to exact node and identity state") {
-        ASSERT(app_host_test_open(&w)); ASSERT(app_host_test_release_id(w.share, release));
+        ASSERT(app_host_test_open(&w, source)); ASSERT(app_host_test_release_id(w.share, release));
         s.datadir = w.store_path; s.local_absent = true; s.host[0] = 9; boot_app_host_set_test_hooks(&hooks);
         ASSERT(app_host_local_rpc_roundtrip(&w, &s, release)); PASS();
     } _test_next:;
@@ -501,7 +515,7 @@ static int app_host_local_rpc_cases(void)
     if (w.root[0] && !app_host_test_close(&w)) ++failures;
     return failures;
 }
-static int app_host_local_cases(void)
+static int app_host_local_cases(const struct app_host_test_world *source)
 {
     int failures = 0; struct app_host_test_world w = {0}; struct app_host_test_hooks_state s = {0};
     struct boot_app_host_test_hooks hooks = {.context = &s, .identity_probe = app_host_test_probe,
@@ -510,7 +524,7 @@ static int app_host_local_cases(void)
     uint8_t release[32], host[32], root[32]; int64_t generation = 0; bool attempted = false;
     struct boot_app_host_local_state absent, present, enabled, disabled; struct db_app_host_intent row;
     TEST("local original hosting binds identity, signed release, possession and consent generation") {
-        ASSERT(app_host_test_open(&w)); ASSERT(app_host_test_release_id(w.share, release));
+        ASSERT(app_host_test_open(&w, source)); ASSERT(app_host_test_release_id(w.share, release));
         ASSERT(zcl_hex_decode_lower(w.offer.carrier, root, 32));
         s.datadir = w.store_path; s.store = w.store; memcpy(s.carrier, root, 32);
         s.local_absent = true; s.host[0] = 9;
@@ -1008,7 +1022,7 @@ int model_app_host_coordinator_tests(void)
         ASSERT_EQ(pthread_mutex_init(&s.mutex, NULL), 0);
         ASSERT_EQ(pthread_cond_init(&s.condition, NULL), 0); sync_ready = true;
         zcl_fleet_role_checker_install_permissive_for_testing();
-        ASSERT(app_host_test_open(&w));
+        ASSERT(app_host_test_open(&w, NULL));
         ASSERT(app_host_test_local_rpc_refuses_unconfirmed(&w));
         s.seed[0] = 11; ed25519_keypair(s.host, sk, s.seed); memcpy(s.seed, sk, 32);
         s.datadir = w.store_path; s.store = w.store;
@@ -1132,8 +1146,11 @@ _test_next:
     if (stop_live) (void)pthread_join(stop_id, NULL);
     if (sync_ready) { pthread_cond_destroy(&s.condition); pthread_mutex_destroy(&s.mutex); }
     boot_app_host_set_test_hooks(NULL); zcl_fleet_role_checker_install(NULL);
+    const struct app_host_test_world *source = failures ? NULL : &w;
+    failures += app_host_local_cases(source);
+    failures += app_host_local_rpc_cases(source);
     if (!app_host_test_close(&w)) { printf("FAIL: app host fixture cleanup\n"); ++failures; }
-    return failures + host_cli_response_tests() + app_host_local_cases() + app_host_local_rpc_cases() + host_local_cli_cases() + host_ready_frame_tests();
+    return failures + host_cli_response_tests() + host_local_cli_cases() + host_ready_frame_tests();
 }
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Inert snippet for test_app_host.c; uses actual registered CLI handlers.
