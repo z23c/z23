@@ -78,7 +78,6 @@ extern size_t block_index_flat_age_arena_pages(struct main_state *, size_t)
 extern size_t block_index_flat_paced_reage(struct main_state *, int,
                                            int64_t, size_t)
     __attribute__((weak));
-#endif
 
 /* The paced wrapper flags an absent implementation with (size_t)-1, like
  * the aging wrapper: the reage fixture's checks must FAIL when the entry
@@ -86,14 +85,9 @@ extern size_t block_index_flat_paced_reage(struct main_state *, int,
 static size_t bil_test_paced_reage(struct main_state *ms, int height,
                                    int64_t now_ms, size_t window)
 {
-#if defined(__linux__)
     if (!block_index_flat_paced_reage)
         return (size_t)-1;
     return block_index_flat_paced_reage(ms, height, now_ms, window);
-#else
-    (void)ms; (void)height; (void)now_ms; (void)window;
-    return (size_t)-1;
-#endif
 }
 
 /* The aging wrapper flags an absent implementation with (size_t)-1
@@ -101,15 +95,11 @@ static size_t bil_test_paced_reage(struct main_state *ms, int height,
  * is missing, not silently pass as no-ops. */
 static size_t bil_test_age_arena_pages(struct main_state *ms, size_t window)
 {
-#if defined(__linux__)
     if (!block_index_flat_age_arena_pages)
         return (size_t)-1;
     return block_index_flat_age_arena_pages(ms, window);
-#else
-    (void)ms; (void)window;
-    return (size_t)-1;
-#endif
 }
+#endif
 
 /* Build a minimal block_index chain of `n` blocks in main_state. */
 static void build_synthetic_chain(struct main_state *ms, int n)

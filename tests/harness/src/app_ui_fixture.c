@@ -116,4 +116,7 @@ bool app_ui_drive(const char *driver, const char *title, const char *action,
     bool stopped = app_ui_stop(&child);
     return ok && stopped;
 }
+#else
+/* The test build also compiles this file on hosts without the Linux fixture. */
+typedef int app_ui_fixture_inactive_unit;
 #endif
