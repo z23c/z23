@@ -424,7 +424,7 @@ static void db_migrate_v26_principals(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('026')");
 }
 
-static void db_migrate_v27_peer_observations(struct node_db *ndb)
+static bool db_migrate_v27_peer_observations(struct node_db *ndb)
 {
     /* v27: network-monitor per-peer chain-intelligence history. One row
      * per sampled peer per monitor tick (best height, learnable tip hash,
@@ -432,7 +432,7 @@ static void db_migrate_v27_peer_observations(struct node_db *ndb)
      * never read by consensus/chain selection. Bounded retention: the
      * network monitor prunes to the newest N rows. Idempotent on a pre-v27
      * db. */
-    node_db_exec(ndb,
+    return node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS peer_chain_observations ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "peer_id INTEGER NOT NULL,"
@@ -445,11 +445,10 @@ static void db_migrate_v27_peer_observations(struct node_db *ndb)
         "inbound INTEGER NOT NULL DEFAULT 0,"
         "first_seen INTEGER NOT NULL DEFAULT 0,"
         "last_seen INTEGER NOT NULL DEFAULT 0,"
-        "observed_at INTEGER NOT NULL)");
+        "observed_at INTEGER NOT NULL)") &&
     node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_peer_chain_obs_observed_at "
-        "ON peer_chain_observations(observed_at DESC)");
-
+        "ON peer_chain_observations(observed_at DESC)") &&
     node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('027')");
 }
@@ -512,8 +511,8 @@ static void db_migrate_v28_blog_posts(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('028')");
 }
 
-/* Versions whose migration is pure DDL with no failure path of its own:
- * only the version/floor persist can fail, and that stays in the caller. */
+/* Version 27 uses its checked step below; other DDL-only entries retain
+ * their existing behavior. Version/floor persistence stays in the caller. */
 struct db_migrate_ddl_step {
     int version;
     void (*run)(struct node_db *ndb);
@@ -528,7 +527,7 @@ static const struct db_migrate_ddl_step k_ddl_only_steps[] = {
     {19, db_migrate_v19_hodl_history},
     {20, db_migrate_v20_store_blobs},
     {26, db_migrate_v26_principals},
-    {27, db_migrate_v27_peer_observations},
+    {27, NULL},
     {28, db_migrate_v28_blog_posts},
 };
 enum { DDL_STEPS_THROUGH_V20 = 7, DDL_STEPS_TOTAL = 10 };
@@ -813,7 +812,14 @@ int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
 
     for (size_t i = DDL_STEPS_THROUGH_V20; i < DDL_STEPS_TOTAL; i++) {
         if (current_ver < k_ddl_only_steps[i].version) {
-            k_ddl_only_steps[i].run(ndb);
+            if (k_ddl_only_steps[i].version == 27) {
+                if (!db_migrate_v27_peer_observations(ndb)) {
+                    LOG_ERROR("db", "migrate: v27 peer observations failed; version not advanced");
+                    return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+                }
+            } else {
+                k_ddl_only_steps[i].run(ndb);
+            }
             DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, k_ddl_only_steps[i].version,
                                              floor_ver);
             current_ver = k_ddl_only_steps[i].version;

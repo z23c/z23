@@ -9,6 +9,7 @@
 #include "test/test_core.h"
 #include "models/schema_migration.h"
 #include "models/database.h"
+#include "models/database_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -795,6 +796,122 @@ static int sm_core_migration_failures(void)
     return failures;
 }
 
+enum sm_v27_fault_kind { SM_V27_TABLE, SM_V27_INDEX, SM_V27_MARKER };
+struct sm_v27_fault { enum sm_v27_fault_kind kind; int inserts; int denied; };
+
+static int sm_v27_authorize(void *ctx, int op, const char *first,
+                            const char *second, const char *db, const char *trigger)
+{
+    struct sm_v27_fault *fault = ctx;
+    (void)second; (void)db; (void)trigger;
+    if (!first) return SQLITE_OK;
+    if ((fault->kind == SM_V27_TABLE && op == SQLITE_CREATE_TABLE &&
+         strcmp(first, "peer_chain_observations") == 0) ||
+        (fault->kind == SM_V27_INDEX && op == SQLITE_CREATE_INDEX &&
+         strcmp(first, "idx_peer_chain_obs_observed_at") == 0)) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    if (fault->kind == SM_V27_MARKER && op == SQLITE_INSERT &&
+        strcmp(first, "schema_migrations") == 0 && ++fault->inserts == 2) {
+        fault->denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+struct sm_v27_bootstrap { bool stopped; };
+
+static int sm_v27_bootstrap_authorize(void *ctx, int op, const char *first,
+                                      const char *second, const char *db, const char *trigger)
+{
+    struct sm_v27_bootstrap *guard = ctx;
+    (void)second; (void)db; (void)trigger;
+    if (!first) return SQLITE_OK;
+    if (op == SQLITE_CREATE_TABLE && strcmp(first, "peer_chain_observations") == 0) {
+        guard->stopped = true;
+        return SQLITE_DENY;
+    }
+    if (guard->stopped && op == SQLITE_INSERT &&
+        (!strcmp(first, "schema_migrations") || !strcmp(first, "node_state")))
+        return SQLITE_DENY;
+    return SQLITE_OK;
+}
+
+static bool sm_v27_prepare(struct sm_fixture *f)
+{
+    memset(f, 0, sizeof(*f));
+    if (sqlite3_open_v2(":memory:", &f->ndb.db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK)
+        return false;
+    f->ndb.open = true;
+    if (!create_schema(&f->ndb) || !node_db_exec(&f->ndb,
+        "CREATE TABLE core_fixture_sentinel(value INTEGER NOT NULL);"
+        "INSERT INTO core_fixture_sentinel VALUES(37)")) return false;
+    struct sm_v27_bootstrap guard = {0};
+    if (sqlite3_set_authorizer(f->ndb.db, sm_v27_bootstrap_authorize, &guard) != SQLITE_OK) return false;
+    int rc = node_db_migrate(&f->ndb, NULL);
+    bool removed = sqlite3_set_authorizer(f->ndb.db, NULL, NULL) == SQLITE_OK;
+    return removed && guard.stopped && rc < 0 && node_db_schema_version(&f->ndb) == 26 &&
+        sm_row_count(&f->ndb, 26) == 1 && sm_row_count(&f->ndb, 27) == 0 &&
+        sm_scalar(&f->ndb, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='peer_chain_observations'") == 0;
+}
+
+static void sm_v27_close(struct sm_fixture *f)
+{
+    if (f->ndb.db) sqlite3_close(f->ndb.db);
+    f->ndb.db = NULL;
+    f->ndb.open = false;
+}
+
+static int sm_v27_clean(void)
+{
+    int failures = 0;
+    struct sm_fixture f = {0};
+    bool prepared = sm_v27_prepare(&f);
+    SM_CHECK("v27 clean historical fixture prepares", prepared);
+    if (prepared) {
+        int result = node_db_migrate(&f.ndb, NULL);
+        printf("v27 clean run result=%d schema=%d\n", result, node_db_schema_version(&f.ndb));
+        SM_CHECK("v27 clean historical migration reaches latest", result > 0 && node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
+    }
+    if (f.ndb.db) sm_v27_close(&f);
+    return failures;
+}
+
+static int sm_v27_failure(enum sm_v27_fault_kind kind)
+{
+    int failures = 0;
+    struct sm_fixture f = {0};
+    if (!sm_v27_prepare(&f)) {
+        SM_CHECK("v27 historical fixture prepares", false);
+        if (f.ndb.db) sm_v27_close(&f);
+        return failures;
+    }
+    int floor_before = node_db_schema_compat_floor(&f.ndb);
+    struct sm_v27_fault fault = {.kind = kind};
+    SM_CHECK("v27 fault installs", sqlite3_set_authorizer(f.ndb.db, sm_v27_authorize, &fault) == SQLITE_OK);
+    int result = node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("v27 fault removes", sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    SM_CHECK("v27 target denial occurred", fault.denied == 1);
+    SM_CHECK("v27 failed row returns schema error", result == -1);
+    SM_CHECK("v27 failure preserves version and floor", node_db_schema_version(&f.ndb) == 26 &&
+             node_db_schema_compat_floor(&f.ndb) == floor_before);
+    SM_CHECK("v27 failure leaves marker absent", sm_row_count(&f.ndb, 27) == 0);
+    SM_CHECK("v27 failure leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
+    SM_CHECK("v27 failure preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
+    int retry = node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("v27 clean retry reaches latest", retry > 0 && node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
+    SM_CHECK("v27 retry records marker", sm_row_count(&f.ndb, 27) == 1);
+    SM_CHECK("v27 retry creates observation table", sm_scalar(&f.ndb,
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='peer_chain_observations'") == 1);
+    SM_CHECK("v27 retry creates observation index", sm_scalar(&f.ndb,
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_peer_chain_obs_observed_at'") == 1);
+    SM_CHECK("v27 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
+    sm_v27_close(&f);
+    return failures;
+}
+
 static int sm_migrate_version_read(void)
 {
     int failures = 0;
@@ -1339,6 +1456,10 @@ int test_schema_migration(void)
     failures += sm_v6_failure(SM_V6_MARKER);
     failures += sm_v6_failure(SM_V6_ALTER);
     failures += sm_core_migration_failures();
+    failures += sm_v27_clean();
+    failures += sm_v27_failure(SM_V27_TABLE);
+    failures += sm_v27_failure(SM_V27_INDEX);
+    failures += sm_v27_failure(SM_V27_MARKER);
 
     return failures;
 }
