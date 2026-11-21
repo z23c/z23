@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "cccb67fba886c5ca1ba1522708f2228fe320bb2fef970ba7ebbb2cfd53229c9c"
+    "e3b86c5ea4d0b73c1f0f89a6f6fa8833610fc37e5d44abc6bcf32c3a642bd544"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "d8833ddc31b31ae03e1954c77230991b4caacb84c82c16b25cde045ffd1699ce") \
+        "3e4d12d307a4d46b53b1d71676a7553bdb14792f00a5a0fa65524858518cdc3c") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "f2ed2cd6b1e118a99e10fdb475c82ca210600e833e18e74fe2fb4d40f400dfc8") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \
@@ -73,7 +73,7 @@
     ZCL_HOTSWAP_SECTION_ROW("core/math/src", \
         "489136c5ceec46980deb06e9a9437c79b691a13606b3fcab9d6130508dad43a8") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules", \
-        "f59c503d514d490bd38a401df5262e437e4dc5420ca97831995a30229dd9993a") \
+        "3263485230c82aebcc72965142a57fbf781100d36df86d2cbed932d67ff668bb") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom", \
         "20fc50fc216a21b99b3704761fd36818bad04788f7fc18fc2f774277ab273515") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom/include", \
@@ -107,7 +107,7 @@
     ZCL_HOTSWAP_SECTION_ROW("core/modules/core/src", \
         "549a6085d3be922026f17bfe86e1192b090ee8b18c8cccd272c941c9007750ab") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto", \
-        "b64222f0f3dc5b007f7c2d9e955a323e0b3b5cd5957f3dffd4063d84e63813fc") \
+        "06e68f9d2db95ba49b8f917ac242e76f3280e2ee3b282b92b7c6468fbea61bc3") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto/include", \
         "bc80b33f7dcaad7d880309cac1e33cfc922909ca8a43d21948c8db58e7a3d5e1") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto/include/crypto", \

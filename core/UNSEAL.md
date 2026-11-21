@@ -1306,3 +1306,7 @@ later lane flips it HARD.
 - 2026-11-20T17:46:28Z — REASON: Owner-authorized compact block-work arithmetic optimization preserving consensus parity
   old ROOT: d0076f25fceedce40b8e8d6bca878d872c0c030b2ec338efefff3dda8d1fd97b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-21T00:57:25Z — REASON: Refresh the sealed crypto-sha3 package dependency root after an owner-authorized statement-equivalent scalar Keccak optimization; no consensus predicate or algorithm change
+  old ROOT: 80d8737652330a28241ffea55d2ab3cc297a2ee332d6660aec00d25fbb9ffac0
+  by: owner unseal ritual (make core-unseal)
