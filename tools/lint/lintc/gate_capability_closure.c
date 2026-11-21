@@ -265,7 +265,7 @@ static int ccg_when(struct ccg_scan *s)
 }
 
 /* Keeps an object whose translation unit exists here (or is generated under
- * build/); a leftover of a failed candidate is foreign and never graded. */
+ * build/); objects without a matching source are foreign and never graded. */
 static int ccg_grade_object(struct ccg_scan *s, const char *rel)
 {
     char src[CCD_PATH], abs[CCD_PATH];
@@ -285,7 +285,7 @@ static void ccg_foreign_report(const struct ccg_scan *s)
     if (s->foreign.n == 0)
         return;
     ccg_say(s, "check_capability_closure: %zu foreign object(s) under %s\n"
-               "  have no source in this tree (a failed candidate's leftovers);\n"
+               "  have no matching source in this tree;\n"
                "  not graded. First %d:\n", s->foreign.n, s->epoch, CCG_FOREIGN_SHOWN);
     for (size_t i = 0; i < s->foreign.n && i < CCG_FOREIGN_SHOWN; i++)
         ccg_say(s, "    %s\n", s->foreign.ent[i].key);
@@ -503,10 +503,10 @@ static int ccg_coverage_floor(struct ccg_scan *s)
         ccg_say(s, "    %s\n", s->unobs.s[i]);
     if (s->c.unobserved > CCG_UNOBS_SHOWN)
         ccg_say(s, "    ... and %d more\n", s->c.unobserved - CCG_UNOBS_SHOWN);
-    ccg_say(s, "  Build a COMPLETE epoch and re-run:\n"
+    ccg_say(s, "  Prepare the required epoch objects and re-run:\n"
                "    build/bin/checkout-lock foreground build/.checkout.lock -- \\\n"
                "      %s\n", s->cfg->os == CCD_WINDOWS ? "make -j16 z23-dev"
-                                                      : "make -j16 build/bin/z23-dev build/bin/z23-package-verify-dev");
+                                                      : "make check-capability-closure");
     return 2;
 }
 

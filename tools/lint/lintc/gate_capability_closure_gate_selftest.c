@@ -276,8 +276,9 @@ static int cgs_case_f(const struct ccs_fx *fx)
 {
     struct ccg_cfg cfg;
     char row[CCD_PATH];
-    const char *const need[] = { "UNPROVEN", "phantom_tool.c", NULL };
     cgs_cfg(&cfg);
+    const char *const need[] = { "UNPROVEN", "phantom_tool.c",
+        cfg.os == CCD_WINDOWS ? "make -j16 z23-dev" : "make check-capability-closure", NULL };
     if (cgs_base(fx, "f", cgs_row(row, sizeof row, "fixture_src/phantom_tool.c", "CAP_NETWORK")) != 0
         || ccs_put(fx, "f/fixture_src/phantom_tool.c", "int phantom_export(int x) { return x + 1; }\n") != 0)
         return ccs_say(0, "F: fixture");
@@ -544,17 +545,23 @@ static int cgs_case_v(const struct ccs_fx *fx)
     return cgs_check(fx, "v", &cfg, -1, need, "V: all trap forms after embedded NULs are found at the original line numbers");
 }
 
-/* R. the leftover object of a failed candidate has no source in this tree: it is
- * foreign, counted and not graded. Case A is the other half. */
+/* R. An object without a matching source is counted and not graded. */
 static int cgs_case_r(const struct ccs_fx *fx)
 {
     struct ccg_cfg cfg;
-    const char *const need[] = { "foreign-objects=1", NULL };
     cgs_cfg(&cfg);
     if (cgs_base(fx, "r", "") != 0 || ccs_put(fx, ".foreign_verify_attest.c", k_use) != 0
         || cgs_cc(fx, ".foreign_verify_attest.c", "r/build/dev-obj/epochs/fx0/tools/dev/verify_attest.o", NULL) != 0)
         return ccs_say(0, "R: fixture");
-    return cgs_check(fx, "r", &cfg, 0, need, "R: an object whose source is absent is foreign, counted, and not graded");
+    struct cgs_res result;
+    cgs_run(fx, "r", &cfg, &result);
+    bool ok = result.rc == 0 && result.text &&
+        strstr(result.text, "foreign-objects=1") &&
+        strstr(result.text, "have no matching source in this tree") &&
+        !strstr(result.text, "failed candidate");
+    if (!ok) cgs_show(result.text);
+    free(result.text);
+    return ccs_say(ok, "R: an unpaired object is reported without claiming provenance");
 }
 
 /* A generated object may have no retained source, but an error resolving
