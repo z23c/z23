@@ -87,55 +87,6 @@ static void sm_fixture_destroy(struct sm_fixture *f)
     node_db_close(&f->ndb);
 }
 
-static bool sm_visit_cursor_post(const struct db_fleet_board_post *row, void *ctx)
-{
-    const struct fleet_board_post *expected = ctx;
-    return memcmp(row->post.id, expected->id, sizeof(expected->id)) == 0 &&
-           memcmp(row->post.signature, expected->signature, sizeof(expected->signature)) == 0;
-}
-
-static bool sm_seed_cursor_post(struct node_db *db, struct fleet_board_post *post)
-{
-    uint8_t seed[32] = {84}, secret[32], pub[32];
-    ed25519_keypair(pub, secret, seed);
-    post->kind = FLEET_BOARD_KIND_NOTE;
-    post->scope = FLEET_BOARD_SCOPE_FLEET;
-    post->created_at = 600000;
-    post->ttl = 3600;
-    snprintf(post->agent, sizeof(post->agent), "cursor");
-    snprintf(post->text, sizeof(post->text), "pending");
-    post->text_len = (uint32_t)strlen(post->text);
-    return fleet_board_post_sign(post, secret, pub) == FLEET_BOARD_OK &&
-           db_fleet_board_post_ingest(db, post, 600000, NULL) == FLEET_BOARD_OK;
-}
-
-static bool sm_v84_cursor_replay(int64_t prior)
-{
-    struct sm_fixture f;
-    struct fleet_board_post post = {0};
-    if (!sm_fixture_init(&f)) return false;
-    zcl_fleet_role_checker_install_permissive_for_testing();
-    int32_t version = 83;
-    bool ok = sm_seed_cursor_post(&f.ndb, &post) &&
-        node_db_exec(&f.ndb, "DROP INDEX idx_fleet_board_arrival;"
-                             "DELETE FROM schema_migrations WHERE version>='084'") &&
-        node_db_state_set(&f.ndb, "schema_version", &version, sizeof(version));
-    if (ok) ok = node_db_exec(&f.ndb, prior == 0
-        ? "UPDATE fleet_board_posts SET arrival=0"
-        : "UPDATE fleet_board_posts SET arrival=73");
-    int result = ok ? node_db_migrate(&f.ndb, NULL) : -1;
-    int64_t cursor = 0;
-    int visited = db_fleet_board_fleet_after(&f.ndb, 600001, 0, 4,
-                                             sm_visit_cursor_post, &post, &cursor);
-    printf("v84 replay prior=%lld rc=%d version=%d visited=%d cursor=%lld\n",
-           (long long)prior, result, node_db_schema_version(&f.ndb), visited, (long long)cursor);
-    ok = ok && result > 0 && node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST &&
-         visited == 1 && cursor == (prior == 0 ? 1 : prior);
-    zcl_fleet_role_checker_install(NULL);
-    sm_fixture_destroy(&f);
-    return ok;
-}
-
 /* ── Mutation-gap helpers ──────────────────────────────────── */
 
 /* Execution log: which fake migration bodies ran, in order. */
@@ -268,6 +219,73 @@ static int sm_row_count(struct node_db *ndb, int version)
              "SELECT COUNT(*) FROM schema_migrations WHERE version='%03d'",
              version);
     return sm_scalar(ndb, sql);
+}
+
+static bool sm_visit_cursor_post(const struct db_fleet_board_post *row, void *ctx)
+{
+    const struct fleet_board_post *expected = ctx;
+    return memcmp(row->post.id, expected->id, sizeof(expected->id)) == 0 &&
+           memcmp(row->post.signature, expected->signature, sizeof(expected->signature)) == 0;
+}
+
+static bool sm_seed_cursor_post(struct node_db *db, struct fleet_board_post *post)
+{
+    uint8_t seed[32] = {84}, secret[32], pub[32];
+    ed25519_keypair(pub, secret, seed);
+    post->kind = FLEET_BOARD_KIND_NOTE;
+    post->scope = FLEET_BOARD_SCOPE_FLEET;
+    post->created_at = 600000;
+    post->ttl = 3600;
+    snprintf(post->agent, sizeof(post->agent), "cursor");
+    snprintf(post->text, sizeof(post->text), "pending");
+    post->text_len = (uint32_t)strlen(post->text);
+    return fleet_board_post_sign(post, secret, pub) == FLEET_BOARD_OK &&
+           db_fleet_board_post_ingest(db, post, 600000, NULL) == FLEET_BOARD_OK;
+}
+
+static bool sm_v84_denied_stamp(struct node_db *db)
+{
+    int floor = node_db_schema_compat_floor(db);
+    if (!node_db_exec(db, "CREATE TEMP TRIGGER refuse_board_stamp BEFORE INSERT "
+                          "ON schema_migrations WHEN NEW.version='084' "
+                          "BEGIN SELECT RAISE(ABORT,'fixture'); END"))
+        return false;
+    int rc = node_db_migrate(db, NULL);
+    int version = node_db_schema_version(db);
+    int zero = sm_scalar(db, "SELECT count(*) FROM fleet_board_posts WHERE arrival=0");
+    int indexes = sm_obj_count(db, "index", "idx_fleet_board_arrival");
+    printf("v84 refused stamp: rc=%d schema=%d zero=%d indexes=%d\n", rc, version, zero, indexes);
+    return node_db_exec(db, "DROP TRIGGER refuse_board_stamp") &&
+           rc == -1 && version == 83 && node_db_schema_compat_floor(db) == floor &&
+           zero == 1 && indexes == 0 && sm_row_count(db, 84) == 0 && sqlite3_get_autocommit(db->db);
+}
+
+static bool sm_v84_cursor_replay(int64_t prior, bool refuse_ledger)
+{
+    struct sm_fixture f;
+    struct fleet_board_post post = {0};
+    if (!sm_fixture_init(&f)) return false;
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    int32_t version = 83;
+    bool ok = sm_seed_cursor_post(&f.ndb, &post) &&
+        node_db_exec(&f.ndb, "DROP INDEX idx_fleet_board_arrival;"
+                             "DELETE FROM schema_migrations WHERE version>='084'") &&
+        node_db_state_set(&f.ndb, "schema_version", &version, sizeof(version));
+    if (ok) ok = node_db_exec(&f.ndb, prior == 0
+        ? "UPDATE fleet_board_posts SET arrival=0"
+        : "UPDATE fleet_board_posts SET arrival=73");
+    if (ok && refuse_ledger) ok = sm_v84_denied_stamp(&f.ndb);
+    int result = ok ? node_db_migrate(&f.ndb, NULL) : -1;
+    int64_t cursor = 0;
+    int visited = db_fleet_board_fleet_after(&f.ndb, 600001, 0, 4,
+                                             sm_visit_cursor_post, &post, &cursor);
+    printf("v84 replay prior=%lld rc=%d version=%d visited=%d cursor=%lld\n",
+           (long long)prior, result, node_db_schema_version(&f.ndb), visited, (long long)cursor);
+    ok = ok && result > 0 && node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST &&
+         visited == 1 && cursor == (prior == 0 ? 1 : prior);
+    zcl_fleet_role_checker_install(NULL);
+    sm_fixture_destroy(&f);
+    return ok;
 }
 
 static int sm_rows_in(struct node_db *ndb, const char *table)
@@ -1592,8 +1610,9 @@ int test_schema_migration(void)
 
     /* ── 13. Mutation-gap pins (ordering, failure states, rerun) ── */
     failures += sm_mutation_gap_tests();
-    SM_CHECK("v84 replays an unfinished cursor backfill", sm_v84_cursor_replay(0));
-    SM_CHECK("v84 preserves an assigned fleet cursor", sm_v84_cursor_replay(73));
+    SM_CHECK("v84 replays an unfinished cursor backfill", sm_v84_cursor_replay(0, false));
+    SM_CHECK("v84 preserves an assigned fleet cursor", sm_v84_cursor_replay(73, false));
+    SM_CHECK("v84 refuses a ledger failure and retries", sm_v84_cursor_replay(0, true));
     failures += sm_migrate_version_read();
     for (int fault = SM_MARKER_NESTED; fault <= SM_MARKER_COMMIT; fault++)
         failures += sm_marker_failure((enum sm_marker_fault)fault);
