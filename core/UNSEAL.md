@@ -1310,3 +1310,7 @@ later lane flips it HARD.
 - 2026-11-21T00:57:25Z — REASON: Refresh the sealed crypto-sha3 package dependency root after an owner-authorized statement-equivalent scalar Keccak optimization; no consensus predicate or algorithm change
   old ROOT: 80d8737652330a28241ffea55d2ab3cc297a2ee332d6660aec00d25fbb9ffac0
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-21T04:32:47Z — REASON: Owner-authorized ACME certificate validity conversion anchored to Unix epoch; no consensus predicate change
+  old ROOT: 14b4031eadd0e340dc09b6886d4b9df0023a66126d7f91b1df48b5b98e73b766
+  by: owner unseal ritual (make core-unseal)

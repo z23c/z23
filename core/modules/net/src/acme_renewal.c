@@ -20,7 +20,6 @@
 #include <time.h>
 
 #include "base/log_macros.h"
-#include "platform/time_compat.h"
 
 bool acme_renewal_due(int64_t not_after, int64_t now)
 {
@@ -58,27 +57,21 @@ const char *acme_renewal_action_name(enum acme_renewal_action action)
     return "unknown";
 }
 
-/* ASN1_TIME to Unix seconds, via OpenSSL's own difference-from-now so the
- * calendar arithmetic (leap years, the two-digit UTCTime pivot) stays in one
- * audited implementation rather than being re-derived here. */
+/* Use OpenSSL calendar arithmetic relative to the fixed Unix epoch. */
 static bool asn1_time_to_unix(const ASN1_TIME *t, int64_t *out)
 {
     if (!t || !out)
         return false;
-    /* Through platform.clock rather than the raw C library call, so the
-     * tree keeps one clock boundary. This must stay a WALL reading:
-     * ASN1_TIME_diff() with a NULL `from` measures from OpenSSL's own
-     * reading of the real wall clock, and the two are added together below.
-     * A zero comes back only when the port could not read the clock at all,
-     * which is not a time anything can be anchored to. */
-    const time_t reference = platform_time_wall_time_t();
-    if (reference <= 0)
+    ASN1_TIME *epoch = ASN1_TIME_set(NULL, (time_t)0);
+    if (!epoch)
         return false;
     int days = 0;
     int seconds = 0;
-    if (ASN1_TIME_diff(&days, &seconds, NULL, t) != 1)
+    const bool ok = ASN1_TIME_diff(&days, &seconds, epoch, t) == 1;
+    ASN1_TIME_free(epoch);
+    if (!ok)
         return false;
-    *out = (int64_t)reference + (int64_t)days * 86400 + (int64_t)seconds;
+    *out = (int64_t)days * 86400 + (int64_t)seconds;
     return true;
 }
 

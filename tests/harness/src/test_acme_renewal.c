@@ -9,6 +9,7 @@
  */
 
 #include "test/test_core.h"
+#include "platform/clock.h"
 
 #include "net/acme_challenge.h"
 #include "net/acme_b64url.h"
@@ -104,6 +105,34 @@ static int check_renewal_action_names(void)
     return failures;
 }
 
+static int64_t acme_fixed_wall(void *unused)
+{
+    (void)unused;
+    return INT64_C(1000);
+}
+
+static int check_fixed_certificate_dates(X509 *cert, EVP_PKEY *key, const char *path)
+{
+    int failures = 0;
+    bool fixed = ASN1_TIME_set_string(X509_getm_notBefore(cert), "19691231235959Z") == 1 &&
+                 ASN1_TIME_set_string(X509_getm_notAfter(cert), "20500101000000Z") == 1 &&
+                 X509_sign(cert, key, EVP_sha256()) > 0;
+    FILE *out = fixed ? fopen(path, "wb") : NULL;
+    fixed = out && PEM_write_X509(out, cert) == 1;
+    if (out && fclose(out) != 0)
+        fixed = false;
+
+    const clock_iface_t *previous = clock_default();
+    static const clock_iface_t fake = { .now_monotonic_ns = acme_fixed_wall, .now_wall_ms = acme_fixed_wall };
+    clock_set_default(&fake);
+    int64_t nb = 0, na = 0;
+    bool read_ok = fixed && acme_certificate_validity(path, &nb, &na);
+    clock_set_default(previous);
+    AR_CHECK("fixed certificate dates ignore the injected wall clock",
+             read_ok && nb == -1 && na == INT64_C(2524608000));
+    return failures;
+}
+
 static int check_challenge_certificate_legs(const char *real, const char *missing)
 {
     int failures = 0;
@@ -157,6 +186,8 @@ static int check_challenge_certificate_legs(const char *real, const char *missin
                  acme_renewal_check(real, nb - 1) == ACME_RENEWAL_NOT_YET_VALID);
         AR_CHECK("an absent certificate has nothing to wait for either",
                  acme_renewal_seconds_until_due(missing, issued) == 0);
+
+        failures += check_fixed_certificate_dates(cert, key, real);
     } else {
         failures += 9;
     }
