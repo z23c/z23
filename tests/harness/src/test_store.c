@@ -1085,6 +1085,51 @@ static int test_store_null_path(void)
     return failures;
 }
 
+static bool store_payment_denied;
+static int store_payment_fallback_reads;
+
+static int store_payment_authorizer(void *ctx, int op, const char *table,
+                                    const char *column, const char *db, const char *trigger)
+{
+    (void)ctx; (void)db; (void)trigger;
+    if (op != SQLITE_READ || !table || !column || strcmp(table, "wallet_sapling_notes") != 0)
+        return SQLITE_OK;
+    if (store_payment_denied && strcmp(column, "value") == 0) store_payment_fallback_reads++;
+    if (strcmp(column, "address") != 0) return SQLITE_OK;
+    store_payment_denied = true;
+    return SQLITE_DENY;
+}
+
+static int store_payment_extension(sqlite3 *db, char **error, const sqlite3_api_routines *api)
+{
+    (void)error; (void)api;
+    return sqlite3_set_authorizer(db, store_payment_authorizer, NULL);
+}
+
+static int test_store_payment_read_failure(void)
+{
+    int failures = 0;
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "store", "payment_read_failure");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    struct node_db db = {0};
+    bool setup = node_db_open(&db, path);
+    if (setup) node_db_close(&db);
+    int64_t empty = setup ? zslp_payment_check_received(dir, "synthetic", 1) : -2;
+    store_payment_denied = false;
+    store_payment_fallback_reads = 0;
+    bool armed = setup && sqlite3_auto_extension((void (*)(void))store_payment_extension) == SQLITE_OK;
+    int64_t denied = armed ? zslp_payment_check_received(dir, "synthetic", 1) : -2;
+    if (armed) sqlite3_cancel_auto_extension((void (*)(void))store_payment_extension);
+    int64_t recovered = setup ? zslp_payment_check_received(dir, "synthetic", 1) : -2;
+    printf("store: payment read failure stays unavailable... ");
+    if (setup && armed && empty == 0 && denied == -1 && store_payment_denied &&
+        store_payment_fallback_reads == 0 && recovered == 0) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    TEST_DISCARD(test_rm_rf_recursive(dir));
+    return failures;
+}
+
 static int test_store_zslp_null_params(void)
 {
     int failures = 0;
@@ -1100,7 +1145,11 @@ static int test_store_zslp_null_params(void)
         ok = ok && (!zslp_send(NULL, "X", "X", 1));
         char addr[128];
         ok = ok && (!zslp_generate_payment_address(NULL, addr, sizeof(addr)));
-        ok = ok && (zslp_check_payment(NULL, "X", 0) == 0);
+        ok = ok && (zslp_check_payment(NULL, "X", 0) == -1);
+        ok = ok && (zslp_payment_check_received(NULL, "X", 1) == -1);
+        char missing[320];
+        snprintf(missing, sizeof(missing), "%s/missing-payment-db", test_datadir);
+        ok = ok && (zslp_payment_check_received(missing, "X", 1) == -1);
         if (ok) printf("OK (all NULL cases safe)\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -2002,6 +2051,7 @@ int test_store(void)
     failures += test_store_token_gated_access();
     failures += test_store_null_path();
     failures += test_store_zslp_null_params();
+    failures += test_store_payment_read_failure();
     failures += test_store_processor_multi_token();
     failures += test_store_validation_a();
     failures += test_store_validation_b();

@@ -780,6 +780,179 @@ static int rs_case_reindex_replay(void)
     return failures;
 }
 
+struct rs_ledger_deny { const char *table; int seen; };
+
+static int rs_ledger_authorizer(void *arg, int op, const char *a,
+                                const char *b, const char *db, const char *view)
+{
+    (void)b; (void)db; (void)view;
+    struct rs_ledger_deny *deny = arg;
+    if (op == SQLITE_READ && a && strcmp(a, deny->table) == 0) {
+        deny->seen++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool rs_ledger_call(struct rpc_table *tbl, bool expected)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool handled = rpc_table_execute(tbl, "walletledger", &params, &result);
+    bool ok = handled == expected;
+    if (expected)
+        ok = ok && json_get(&result, "entries") && json_get(&result, "accounting");
+    else
+        ok = ok && !json_get(&result, "entries") && !json_get(&result, "accounting");
+    json_free(&params); json_free(&result);
+    return ok;
+}
+
+static bool rs_ledger_order(struct rpc_table *tbl)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(tbl, "walletledger", &params, &result);
+    const struct json_value *holdings = json_get(&result, "current_holdings");
+    const struct json_value *t = json_get(holdings, "transparent");
+    const struct json_value *z = json_get(holdings, "shielded");
+    const char *ta = json_get_str(json_get(json_at(t, 0), "amount"));
+    const char *za = json_get_str(json_get(json_at(z, 0), "amount"));
+    ok = ok && json_size(t) == 2 && json_size(z) == 2 && ta && za &&
+         strcmp(ta, "0.00000002") == 0 && strcmp(za, "0.00000004") == 0;
+    json_free(&params); json_free(&result);
+    return ok;
+}
+
+static bool rs_ledger_transparent_count(struct rpc_table *tbl, size_t count)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool handled = rpc_table_execute(tbl, "walletledger", &params, &result);
+    const struct json_value *holdings = json_get(&result, "current_holdings");
+    const struct json_value *transparent = json_get(holdings, "transparent");
+    bool ok = handled && transparent && json_size(transparent) == count;
+    json_free(&params); json_free(&result);
+    return ok;
+}
+
+static bool rs_ledger_seed(struct node_db *ndb)
+{
+    return sqlite3_exec(ndb->db,
+        "INSERT INTO wallet_utxos(txid,vout,value,address_hash,script,height)"
+        " VALUES(randomblob(32),0,1,zeroblob(20),zeroblob(1),1),"
+        "(randomblob(32),0,2,zeroblob(20),zeroblob(1),2);"
+        "INSERT INTO wallet_sapling_notes(txid,output_index,value,rcm,ivk,"
+        "diversifier,pk_d,cm,nullifier,block_height) VALUES"
+        "(randomblob(32),0,3,zeroblob(32),zeroblob(32),zeroblob(11),"
+        "zeroblob(32),zeroblob(32),randomblob(32),1),"
+        "(randomblob(32),0,4,zeroblob(32),zeroblob(32),zeroblob(11),"
+        "zeroblob(32),zeroblob(32),randomblob(32),2);", NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool rs_ledger_denials(struct node_db *ndb, struct rpc_table *tbl)
+{
+    bool ok = true;
+    const char *tables[] = {"wallet_utxos", "wallet_sapling_notes", "wallet_transactions"};
+    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]) && ok; i++) {
+        struct rs_ledger_deny deny = {tables[i], 0};
+        bool installed = sqlite3_set_authorizer(ndb->db, rs_ledger_authorizer, &deny) == SQLITE_OK;
+        bool refused = installed && rs_ledger_call(tbl, false);
+        (void)sqlite3_set_authorizer(ndb->db, NULL, NULL);
+        bool retried = installed && rs_ledger_call(tbl, true);
+        ok = installed && deny.seen > 0 && refused && retried;
+        if (!ok) printf("(%s seen=%d refused=%d retry=%d) ", tables[i], deny.seen, refused, retried);
+    }
+    return ok;
+}
+
+static bool rs_ledger_spent(struct node_db *ndb, struct rpc_table *tbl)
+{
+    bool ok = true;
+    if (ok) {
+        bool malformed = sqlite3_exec(ndb->db,
+            "UPDATE wallet_utxos SET spent_txid=zeroblob(1) WHERE value=1",
+            NULL, NULL, NULL) == SQLITE_OK;
+        bool refused = malformed && rs_ledger_call(tbl, false);
+        bool valid = sqlite3_exec(ndb->db,
+            "UPDATE wallet_utxos SET spent_txid=zeroblob(32) WHERE value=1",
+            NULL, NULL, NULL) == SQLITE_OK && rs_ledger_transparent_count(tbl, 1);
+        bool cleared = sqlite3_exec(ndb->db,
+            "UPDATE wallet_utxos SET spent_txid=NULL WHERE value=1",
+            NULL, NULL, NULL) == SQLITE_OK;
+        ok = malformed && refused && valid && cleared && rs_ledger_order(tbl);
+    }
+    return ok;
+}
+
+static bool rs_ledger_height(struct node_db *ndb, struct rpc_table *tbl)
+{
+    bool ok = true;
+    if (ok) {
+        bool malformed = sqlite3_exec(ndb->db,
+            "INSERT INTO wallet_transactions(txid,raw_tx,block_height,time_received,from_me,fee)"
+            " VALUES(zeroblob(32),zeroblob(1),char(98,97,100),1,0,0)",
+            NULL, NULL, NULL) == SQLITE_OK;
+        bool refused = malformed && rs_ledger_call(tbl, false);
+        bool fixed = sqlite3_exec(ndb->db,
+            "UPDATE wallet_transactions SET block_height=NULL", NULL, NULL, NULL) == SQLITE_OK;
+        bool accepted = fixed && rs_ledger_call(tbl, true);
+        bool cleared = sqlite3_exec(ndb->db, "DELETE FROM wallet_transactions",
+                                    NULL, NULL, NULL) == SQLITE_OK;
+        ok = malformed && refused && fixed && accepted && cleared;
+    }
+    return ok;
+}
+
+static bool rs_ledger_fee(struct node_db *ndb, struct rpc_table *tbl)
+{
+    bool ok = true;
+    if (ok) {
+        bool inserted = sqlite3_exec(ndb->db,
+            "INSERT INTO wallet_transactions(txid,raw_tx,time_received,from_me,fee)"
+            " VALUES(zeroblob(32),zeroblob(1),1,1,-9223372036854775808)",
+            NULL, NULL, NULL) == SQLITE_OK;
+        bool refused = inserted && rs_ledger_call(tbl, false);
+        bool cleared = sqlite3_exec(ndb->db, "DELETE FROM wallet_transactions",
+                                    NULL, NULL, NULL) == SQLITE_OK;
+        ok = inserted && refused && cleared && rs_ledger_order(tbl);
+    }
+    return ok;
+}
+
+static int rs_case_ledger_read_failure(void)
+{
+    printf("rpc_safety: walletledger refuses unreadable tables and retries... ");
+    ensure_rpc_warmup_finished_once();
+    struct wallet *wallet = calloc(1, sizeof(*wallet));
+    if (!wallet) { printf("FAIL (allocation)\n"); return 1; }
+    wallet_init(wallet);
+    struct node_db ndb = {0};
+    bool ok = node_db_open(&ndb, ":memory:");
+    struct rpc_table tbl; rpc_table_init(&tbl);
+    register_wallet_diagnostic_rpc_commands(&tbl);
+    wallet_rpc_context_set_base(wallet, NULL, NULL, NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(&ndb);
+    if (ok) ok = rs_ledger_call(&tbl, true);
+    if (ok) ok = rs_ledger_denials(&ndb, &tbl);
+    if (ok) ok = rs_ledger_seed(&ndb) && rs_ledger_order(&tbl);
+    if (ok) {
+        struct db_sapling_note notes[2] = {0};
+        ok = db_sapling_note_list_all_checked(&ndb, notes, 1) == -1 &&
+             db_sapling_note_list_all_checked(&ndb, notes, 2) == 2;
+    }
+    if (ok) ok = rs_ledger_spent(&ndb, &tbl);
+    if (ok) ok = rs_ledger_height(&ndb, &tbl);
+    if (ok) ok = rs_ledger_fee(&ndb, &tbl);
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    if (ndb.db) node_db_close(&ndb);
+    wallet_free(wallet); free(wallet);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok ? 0 : 1;
+}
+
+
 static int rs_case_walletbackup_status(void)
 {
     int failures = 0;
@@ -2361,6 +2534,7 @@ int test_rpc_safety(void)
 
     failures += rs_case_reindex_replay();
     failures += rs_case_walletbackup_status();
+    failures += rs_case_ledger_read_failure();
     failures += rs_case_getrawmempool_live();
 
     failures += rs_case_rawtx_locator();

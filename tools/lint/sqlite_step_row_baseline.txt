@@ -39,9 +39,9 @@ contexts/market/models/src/zswap_ad.c 2
 contexts/naming/models/src/znam.c 3
 contexts/wallet/models/src/vault_intent.c 3
 contexts/wallet/models/src/wallet_key.c 4
-contexts/wallet/models/src/wallet_tx.c 9
-contexts/wallet/models/src/wallet_tx_reads.c 3
-contexts/wallet/models/src/wallet_tx_reorg.c 2
+contexts/wallet/models/src/wallet_tx.c 8
+contexts/wallet/models/src/wallet_tx_reads.c 1
+contexts/wallet/models/src/wallet_tx_reorg.c 1
 contexts/wallet/modules/wallet/src/wallet_sqlite.c 5
 contexts/wallet/modules/wallet/src/wallet_sqlite_keypool.c 2
 contexts/wallet/modules/wallet/src/wallet_sqlite_sapling.c 1

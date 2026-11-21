@@ -20,51 +20,61 @@
 
 #include <string.h>
 
-/* Shared read-only aggregate primitive for wallet model siblings. */
-bool wallet_tx_query_total_and_count(struct node_db *ndb,
-                                     const char *sql,
-                                     const void *bind_blob,
-                                     size_t bind_blob_len,
-                                     int64_t *total_out,
-                                     int *count_out)
+static bool wallet_tx_read_balance(sqlite3_stmt *stmt, int64_t *total, int *count)
 {
-    sqlite3_stmt *s = NULL;
-    int64_t total = 0;
-    int count = 0;
-
-    if (!ndb || !ndb->open || !sql)
-        return false;
-    sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL);
-    if (!s)
-        LOG_FAIL("wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
-    if (bind_blob && bind_blob_len > 0)
-        AR_BIND_BLOB(s, 1, bind_blob, (int)bind_blob_len);
-    if (AR_STEP_ROW(s)) {
-        total = AR_COL_INT(s, 0);
-        count = (int)AR_COL_INT(s, 1);
+    if (ar_step_checked(stmt, "wallet balance", NULL) != ZCL_STEP_ROW ||
+        sqlite3_column_type(stmt, 0) != SQLITE_INTEGER) return false;
+    *total = sqlite3_column_int64(stmt, 0);
+    if (count) {
+        int64_t n = sqlite3_column_int64(stmt, 1);
+        if (sqlite3_column_type(stmt, 1) != SQLITE_INTEGER || n < 0 || n > INT_MAX) return false;
+        *count = (int)n;
     }
-    AR_FINALIZE(s);
-    if (total_out)
-        *total_out = total;
-    if (count_out)
-        *count_out = count;
-    return true;
+    return *total >= 0 && ar_step_checked(stmt, "wallet balance end", NULL) == ZCL_STEP_DONE;
+}
+
+/* Owns stmt and publishes only a complete nonnegative aggregate. */
+bool wallet_tx_finish_balance(sqlite3_stmt *stmt, bool bound, int64_t *total_out, int *count_out)
+{
+    int64_t total = -1;
+    int count = -1;
+    bool ok = stmt && bound && wallet_tx_read_balance(stmt, &total, count_out ? &count : NULL);
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    if (total_out) *total_out = ok ? total : -1;
+    if (count_out) *count_out = ok ? count : -1;
+    return ok;
+}
+
+bool wallet_tx_query_total_and_count(struct node_db *ndb, const char *sql,
+                                     const void *bind_blob, size_t bind_blob_len,
+                                     int64_t *total_out, int *count_out)
+{
+    if (total_out) *total_out = -1;
+    if (count_out) *count_out = -1;
+    if (!ndb || !ndb->open || !ndb->db || !sql || bind_blob_len > INT_MAX ||
+        (bind_blob_len > 0 && !bind_blob)) return false;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) == SQLITE_OK;
+    if (ok && bind_blob && bind_blob_len > 0)
+        ok = sqlite3_bind_blob(s, 1, bind_blob, (int)bind_blob_len, SQLITE_STATIC) == SQLITE_OK;
+    return wallet_tx_finish_balance(s, ok, total_out, count_out);
 }
 
 static int db_wallet_query_max_height(struct node_db *ndb, const char *sql)
 {
+    if (!ndb || !ndb->open || !ndb->db || !sql) return -1;
     sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) == SQLITE_OK;
     int height = 0;
-
-    if (!ndb || !ndb->open || !sql)
-        return 0;
-    sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL);
-    if (!s)
-        LOG_RETURN(0, "wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
-    if (AR_STEP_ROW(s) && sqlite3_column_type(s, 0) != SQLITE_NULL)
-        height = (int)AR_COL_INT(s, 0);
-    AR_FINALIZE(s);
-    return height;
+    if (ok) ok = ar_step_checked(s, "wallet tip", NULL) == ZCL_STEP_ROW;
+    if (ok && sqlite3_column_type(s, 0) != SQLITE_NULL) {
+        int64_t h = sqlite3_column_int64(s, 0);
+        ok = sqlite3_column_type(s, 0) == SQLITE_INTEGER && h >= 0 && h <= INT_MAX;
+        if (ok) height = (int)h;
+    }
+    if (ok) ok = ar_step_checked(s, "wallet tip end", NULL) == ZCL_STEP_DONE;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    return ok ? height : -1;
 }
 
 int64_t db_wallet_tx_total_fees(struct node_db *ndb, int *fee_paying_count)
@@ -114,24 +124,28 @@ int db_wallet_chain_tip_height(struct node_db *ndb)
 int db_wallet_effective_tip_height(struct node_db *ndb)
 {
     int chain_tip = db_wallet_chain_tip_height(ndb);
+    if (chain_tip < 0) return -1;
     int utxo_tip = db_wallet_query_max_height(ndb,
         "SELECT MAX(height) FROM wallet_utxos WHERE spent_txid IS NULL");
+    if (utxo_tip < 0) return -1;
     return utxo_tip > chain_tip ? utxo_tip : chain_tip;
 }
 
 bool db_wallet_projection_summary(struct node_db *ndb,
                                   struct db_wallet_projection_summary *out)
 {
-    if (!ndb || !ndb->open || !out)
-        return false;
+    if (!out) return false;
     memset(out, 0, sizeof(*out));
-    out->chain_tip_height = db_wallet_chain_tip_height(ndb);
-    out->effective_tip_height = db_wallet_effective_tip_height(ndb);
-    out->transparent_balance = db_wallet_utxo_balance_with_count(ndb,
-        &out->utxo_count);
-    out->shielded_balance = db_sapling_note_balance_with_count(ndb,
-        &out->note_count);
-    out->speed_balance = out->transparent_balance;
+    if (!ndb || !ndb->open) return false;
+    struct db_wallet_projection_summary value = {0};
+    value.chain_tip_height = db_wallet_chain_tip_height(ndb);
+    value.effective_tip_height = db_wallet_effective_tip_height(ndb);
+    value.transparent_balance = db_wallet_utxo_balance_with_count(ndb, &value.utxo_count);
+    value.shielded_balance = db_sapling_note_balance_with_count(ndb, &value.note_count);
+    if (value.chain_tip_height < 0 || value.effective_tip_height < 0 ||
+        value.transparent_balance < 0 || value.shielded_balance < 0) return false;
+    value.speed_balance = value.transparent_balance;
+    *out = value;
     return true;
 }
 struct wallet_utxo_snapshot_row {

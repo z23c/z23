@@ -65,6 +65,7 @@ bool zslp_generate_payment_address(const char *datadir,
 
 /* Check if a z-address has received a payment of at least min_amount.
  * Returns the amount received, or 0 if no payment. */
+/* Nonnegative received amount, including zero; -1 means unavailable. */
 int64_t zslp_check_payment(const char *datadir,
                             const char *z_addr,
                             int64_t min_amount);

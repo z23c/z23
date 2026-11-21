@@ -148,6 +148,10 @@ size_t serve_history(uint8_t *r, size_t max, int page,
     }
 
     int tip = wv_effective_tip(db);
+    if (tip < 0) {
+        sqlite3_close(db);
+        return wv_render_unavailable(r, max, "History — Z23", "/wallet/history");
+    }
     int per_page = 50;
 
     size_t off = wv_emit_header(r, max, "History — Z23", "/wallet/history");
@@ -268,6 +272,10 @@ size_t serve_tx_detail(uint8_t *r, size_t max, const char *txid_hex) {
     }
 
     int tip = wv_effective_tip(db);
+    if (tip < 0) {
+        sqlite3_close(db);
+        return wv_render_unavailable(r, max, "History — Z23", "/wallet/history");
+    }
     size_t off = wv_emit_header(r, max, "Transaction — Z23", "/wallet/history");
 
     /* Sanitize txid: only hex chars, max 64 */

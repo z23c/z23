@@ -330,6 +330,11 @@ int check_wallet_view_backup_warning_template_has_address(void)
     return failures;
 }
 
+static bool wv_pulse_is_unavailable(void)
+{
+    return wv_has("HTTP/1.1 503") && wv_has("\"error\":") && !wv_has("\"balance\":");
+}
+
 int check_wallet_view_dashboard_with_no_db_renders_gracefully(void)
 {
     int failures = 0;
@@ -363,10 +368,10 @@ int check_wallet_view_dashboard_with_no_db_renders_gracefully(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("EMPTY: pulse returns 0 balance when no DB... ");
+    printf("EMPTY: pulse reports unavailable when no DB... ");
     {
         wv_get("/api/wallet/pulse");
-        bool ok = wv_has("\"balance\":0");
+        bool ok = wv_pulse_is_unavailable();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
@@ -420,9 +425,8 @@ int check_wallet_view_send_form_still_renders_with_no_db(void)
     printf("EDGE: shield amount=0 shows input form, not confirm... ");
     {
         wv_get("/wallet/shield?amount=0");
-        bool has_form = wv_has("shield-amt") || wv_has("Nothing to shield");
-        bool bad = wv_has("Confirm</button>") && (!wv_has("shield-amt") || wv_has("Nothing to shield"));
-        if (has_form && !bad) printf("OK\n");
+        bool unavailable = wv_has("Wallet data unavailable") && !wv_has("Confirm</button>");
+        if (unavailable) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
 
@@ -786,3 +790,108 @@ int check_wallet_view_dashboard_renders_in_50ms(void)
     return failures;
 }
 
+static const char *wv_denied_table;
+static int wv_denials;
+
+static int wv_deny_wallet_read(void *ctx, int action, const char *first,
+                               const char *second, const char *db, const char *trigger)
+{
+    (void)ctx; (void)second; (void)db; (void)trigger;
+    if (action == SQLITE_READ && first && wv_denied_table &&
+        !strcmp(first, wv_denied_table)) {
+        wv_denials++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int wv_install_deny(sqlite3 *db, char **error, const sqlite3_api_routines *api)
+{
+    (void)error; (void)api;
+    return sqlite3_set_authorizer(db, wv_deny_wallet_read, NULL);
+}
+
+static bool wv_check_denied_views(const char *table, bool tip)
+{
+    wv_denied_table = table;
+    wv_denials = 0;
+    if (sqlite3_auto_extension((void (*)(void))wv_install_deny) != SQLITE_OK) {
+        wv_denied_table = NULL;
+        return false;
+    }
+    wv_get("/wallet"); bool dashboard = wv_has("Wallet data unavailable");
+    wv_get("/wallet/coins"); bool coins = wv_has("Wallet data unavailable");
+    wv_get("/api/wallet/pulse"); bool pulse = wv_has("\"error\":") && !wv_has("\"balance\":");
+    wv_get(tip ? "/wallet/history" : "/wallet/send");
+    bool detail = tip ? wv_has("Wallet data unavailable") : wv_has("Unavailable");
+    wv_get(tip ? "/wallet/node" : "/wallet");
+    bool node = !tip || wv_has("Unavailable");
+    int denied = wv_denials;
+    int removed = sqlite3_cancel_auto_extension((void (*)(void))wv_install_deny);
+    wv_denied_table = NULL;
+    return denied > 0 && removed != 0 && dashboard && coins && pulse && detail && node;
+}
+
+static bool wv_check_out_of_range(void)
+{
+    sqlite3 *db = wv_open_db_rw();
+    if (!db) return false;
+    bool changed = sqlite3_exec(db, "UPDATE wallet_sapling_notes SET value=9223372036854775807", NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_close(db);
+    bool dashboard = false, send = false, coins = false, pulse = false;
+    if (changed) {
+        wv_get("/wallet"); dashboard = wv_has("Wallet data unavailable");
+        wv_get("/wallet/send"); send = wv_has("Unavailable");
+        wv_get("/wallet/coins"); coins = wv_has("Wallet data unavailable");
+        wv_get("/api/wallet/pulse"); pulse = wv_has("\"error\":") && !wv_has("\"balance\":");
+    }
+    db = wv_open_db_rw();
+    if (!db) return false;
+    char sql[128];
+    snprintf(sql, sizeof(sql), "UPDATE wallet_sapling_notes SET value=%lld", (long long)WV_FIX_ZBAL_SAT);
+    bool restored = sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_close(db);
+    return changed && restored && dashboard && send && coins && pulse;
+}
+
+static bool wv_check_utxo_read_failure(void)
+{
+    wv_get("/api/wallet/pulse");
+    bool healthy = wv_has("\"balance\":") && !wv_has("\"error\":");
+    wv_denied_table = "wallet_utxos";
+    wv_denials = 0;
+    int installed = sqlite3_auto_extension((void (*)(void))wv_install_deny);
+    wv_get("/wallet"); bool dashboard = wv_has("Wallet data unavailable");
+    wv_get("/wallet/send"); bool send = wv_has("Unavailable") && !wv_has("0.00000000 ZCL available");
+    wv_get("/wallet/shield"); bool shield = wv_has("Wallet data unavailable");
+    wv_get("/wallet/coins"); bool coins = wv_has("Wallet data unavailable");
+    wv_get("/api/wallet/pulse"); bool pulse = wv_has("\"error\":") && !wv_has("\"balance\":");
+    int denials = wv_denials;
+    int removed = sqlite3_cancel_auto_extension((void (*)(void))wv_install_deny);
+    wv_denied_table = NULL;
+    wv_get("/api/wallet/pulse"); bool retry = wv_has("\"balance\":") && !wv_has("\"error\":");
+    if (installed != SQLITE_OK || !removed || !healthy || !denials || !dashboard || !send || !shield || !coins || !pulse || !retry) {
+        printf("FAIL wallet read errors: installed=%d denials=%d healthy=%d dashboard=%d send=%d shield=%d coins=%d pulse=%d retry=%d\n",
+               installed, denials, healthy, dashboard, send, shield, coins, pulse, retry);
+        return false;
+    }
+    return true;
+}
+
+int check_wallet_view_unreadable_balances(void)
+{
+    wv_get("/wallet");
+    bool script = wv_has("catch(unavailable)") && wv_has("isFinite(d[k])") && wv_has("wallet-privacy-card");
+    bool utxo = wv_check_utxo_read_failure();
+    bool shielded = wv_check_denied_views("wallet_sapling_notes", false);
+    bool tip = wv_check_denied_views("blocks", true);
+    bool range = wv_check_out_of_range();
+    int count = 0;
+    bool nulls = wv_query_ground_truth_balance(NULL, &count) == -1 && count == -1 &&
+        wv_query_speed_balance(NULL) == -1 && wv_effective_tip(NULL) == -1;
+    if (!script || !utxo || !shielded || !tip || !range || !nulls) {
+        printf("FAIL wallet views: script=%d utxo=%d shielded=%d tip=%d range=%d nulls=%d\n", script, utxo, shielded, tip, range, nulls);
+        return 1;
+    }
+    return 0;
+}

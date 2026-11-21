@@ -12,6 +12,7 @@
 #include "util/log_macros.h"
 #include "util/ar_step_readonly.h"
 #include "models/wallet_tx.h"
+#include "core/amount.h"
 #include "models/ar_after_commit.h"
 #include "models/wallet_tx_internal.h"
 #include "models/wallet_key.h"
@@ -451,8 +452,8 @@ int64_t db_sapling_note_balance(struct node_db *ndb)
 
 int64_t db_sapling_note_encumbered_balance(struct node_db *ndb)
 {
-    int64_t total = 0;
-    int count = 0;
+    int64_t total = -1;
+    int count = -1;
 
     (void)wallet_tx_query_total_and_count(ndb,
         "SELECT COALESCE(SUM(n.value),0), COUNT(*) "
@@ -467,8 +468,8 @@ int64_t db_sapling_note_encumbered_balance(struct node_db *ndb)
 
 int64_t db_sapling_note_balance_with_count(struct node_db *ndb, int *note_count)
 {
-    int64_t total = 0;
-    int count = 0;
+    int64_t total = -1;
+    int count = -1;
 
     (void)wallet_tx_query_total_and_count(ndb,
         "SELECT COALESCE(SUM(n.value),0), COUNT(*) "
@@ -480,88 +481,74 @@ int64_t db_sapling_note_balance_with_count(struct node_db *ndb, int *note_count)
     return total;
 }
 
-int64_t db_sapling_note_balance_for_ivk(struct node_db *ndb,
-                                        const uint8_t ivk[32])
+static int64_t sapling_balance_query(struct node_db *ndb, const char *sql,
+                                     const void *first, int first_len, bool text,
+                                     const void *second, int second_len,
+                                     bool has_number, int64_t number)
 {
-    if (!ndb->open) return 0;
+    if (!ndb || !ndb->open || !ndb->db) return -1;
     sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes"
-        " WHERE ivk=? AND spent_txid IS NULL",
-        AR_BIND_BLOB(s, 1, ivk, 32));
+    bool ok = sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) == SQLITE_OK;
+    int pos = 1;
+    if (ok && first) {
+        int rc = text ? sqlite3_bind_text(s, pos++, first, -1, SQLITE_STATIC)
+                      : sqlite3_bind_blob(s, pos++, first, first_len, SQLITE_STATIC);
+        ok = rc == SQLITE_OK;
+    }
+    if (ok && second) ok = sqlite3_bind_blob(s, pos++, second, second_len, SQLITE_STATIC) == SQLITE_OK;
+    if (ok && has_number) ok = sqlite3_bind_int64(s, pos, number) == SQLITE_OK;
+    int64_t total = -1;
+    (void)wallet_tx_finish_balance(s, ok, &total, NULL);
+    return total;
 }
 
-int64_t db_sapling_note_balance_for_ivk_minconf(struct node_db *ndb,
-                                                const uint8_t ivk[32],
+int64_t db_sapling_note_balance_for_ivk(struct node_db *ndb, const uint8_t ivk[32])
+{
+    if (!ivk) return 0;
+    return sapling_balance_query(ndb,
+        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes WHERE ivk=? AND spent_txid IS NULL",
+        ivk, 32, false, NULL, 0, false, 0);
+}
+
+int64_t db_sapling_note_balance_for_ivk_minconf(struct node_db *ndb, const uint8_t ivk[32],
                                                 int tip_height, int minconf)
 {
-    if (!ndb || !ndb->open) return 0;
-    /* minconf<=0 → no confirmation requirement (count everything unspent). */
-    if (minconf <= 0)
-        return db_sapling_note_balance_for_ivk(ndb, ivk);
-
-    /* A note at block_height h has (tip - h + 1) confirmations; require that to
-     * be >= minconf, i.e. block_height <= tip - minconf + 1. Unconfirmed notes
-     * (NULL block_height) never satisfy minconf>=1 and are excluded. */
-    int max_height = tip_height - minconf + 1;
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes"
-        " WHERE ivk=? AND spent_txid IS NULL"
-        "   AND block_height IS NOT NULL AND block_height >= 1"
-        "   AND block_height <= ?",
-        AR_BIND_BLOB(s, 1, ivk, 32);
-        AR_BIND_INT(s, 2, max_height));
+    if (!ivk) return 0;
+    if (minconf <= 0) return db_sapling_note_balance_for_ivk(ndb, ivk);
+    int64_t max_height = (int64_t)tip_height - minconf + 1;
+    return sapling_balance_query(ndb,
+        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes WHERE ivk=? AND spent_txid IS NULL "
+        "AND block_height IS NOT NULL AND block_height >= 1 AND block_height <= ?",
+        ivk, 32, false, NULL, 0, true, max_height);
 }
 
 int64_t db_sapling_note_balance_for_diversifier_minconf(
     struct node_db *ndb, const uint8_t ivk[32], const uint8_t diversifier[11],
     int tip_height, int minconf)
 {
-    if (!ndb || !ndb->open || !ivk || !diversifier) return 0;
-    sqlite3_stmt *s = NULL;
-    if (minconf <= 0) {
-        AR_QUERY_INT64_BOUND(ndb, s,
-            "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes"
-            " WHERE ivk=? AND diversifier=? AND spent_txid IS NULL",
-            AR_BIND_BLOB(s, 1, ivk, 32);
-            AR_BIND_BLOB(s, 2, diversifier, 11));
-    }
-    int max_height = tip_height - minconf + 1;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes"
-        " WHERE ivk=? AND diversifier=? AND spent_txid IS NULL"
-        "   AND block_height IS NOT NULL AND block_height >= 1"
-        "   AND block_height <= ?",
-        AR_BIND_BLOB(s, 1, ivk, 32);
-        AR_BIND_BLOB(s, 2, diversifier, 11);
-        AR_BIND_INT(s, 3, max_height));
+    if (!ivk || !diversifier) return 0;
+    const char *sql = minconf <= 0
+        ? "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes WHERE ivk=? AND diversifier=? AND spent_txid IS NULL"
+        : "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes WHERE ivk=? AND diversifier=? AND spent_txid IS NULL "
+          "AND block_height IS NOT NULL AND block_height >= 1 AND block_height <= ?";
+    int64_t max_height = (int64_t)tip_height - minconf + 1;
+    return sapling_balance_query(ndb, sql, ivk, 32, false, diversifier, 11, minconf > 0, max_height);
 }
 
-int64_t db_sapling_note_balance_for_address(struct node_db *ndb,
-                                            const char *address)
+int64_t db_sapling_note_balance_for_address(struct node_db *ndb, const char *address)
 {
-    sqlite3_stmt *s = NULL;
-
-    if (!ndb || !ndb->open || !address || address[0] == '\0')
-        return 0;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes "
-        "WHERE spent_txid IS NULL AND address=?",
-        AR_BIND_TEXT(s, 1, address));
+    if (!address || !address[0]) return 0;
+    return sapling_balance_query(ndb,
+        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes WHERE spent_txid IS NULL AND address=?",
+        address, 0, true, NULL, 0, false, 0);
 }
 
-int64_t db_sapling_note_balance_for_exact_value(struct node_db *ndb,
-                                                int64_t value)
+int64_t db_sapling_note_balance_for_exact_value(struct node_db *ndb, int64_t value)
 {
-    sqlite3_stmt *s = NULL;
-
-    if (!ndb || !ndb->open || value <= 0)
-        return 0;
-    AR_QUERY_INT64_BOUND(ndb, s,
-        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes "
-        "WHERE spent_txid IS NULL AND value=?",
-        AR_BIND_INT(s, 1, value));
+    if (value <= 0) return 0;
+    return sapling_balance_query(ndb,
+        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes WHERE spent_txid IS NULL AND value=?",
+        NULL, 0, false, NULL, 0, true, value);
 }
 
 int db_sapling_note_list_unspent(struct node_db *ndb,
@@ -710,6 +697,69 @@ int db_sapling_note_list_unspent_for_ivk(struct node_db *ndb,
         AR_BIND_BLOB(s, 1, ivk, 32),
         db_sapling_note_read_row(s, 0, &out[count]));
 }
+
+static bool sapling_diagnostic_blob(sqlite3_stmt *s, int col, int size)
+{
+    return sqlite3_column_type(s, col) == SQLITE_BLOB &&
+           sqlite3_column_bytes(s, col) == size && sqlite3_column_blob(s, col);
+}
+
+static bool sapling_diagnostic_height(sqlite3_stmt *s)
+{
+    int type = sqlite3_column_type(s, 10);
+    return type == SQLITE_NULL || (type == SQLITE_INTEGER &&
+        sqlite3_column_int64(s, 10) >= INT_MIN && sqlite3_column_int64(s, 10) <= INT_MAX);
+}
+
+static bool sapling_diagnostic_row(sqlite3_stmt *s)
+{
+    int spent = sqlite3_column_type(s, 12);
+    int memo = sqlite3_column_type(s, 4);
+    return sapling_diagnostic_blob(s, 0, 32) &&
+           sqlite3_column_type(s, 1) == SQLITE_INTEGER &&
+           sqlite3_column_int64(s, 1) >= 0 &&
+           sqlite3_column_int64(s, 1) <= UINT32_MAX &&
+           sqlite3_column_type(s, 2) == SQLITE_INTEGER &&
+           MoneyRange(sqlite3_column_int64(s, 2)) &&
+           sapling_diagnostic_blob(s, 6, 11) &&
+           sapling_diagnostic_blob(s, 7, 32) &&
+           sapling_diagnostic_height(s) &&
+           (memo == SQLITE_NULL || (memo == SQLITE_BLOB && sqlite3_column_bytes(s, 4) <= 512)) &&
+           (spent == SQLITE_NULL || sapling_diagnostic_blob(s, 12, 32));
+}
+
+int db_sapling_note_list_all_checked(struct node_db *ndb,
+                                     struct db_sapling_note *out, size_t max)
+{
+    bool valid = wallet_checked_output_valid(out, max, sizeof(*out));
+    if (valid) memset(out, 0, max * sizeof(*out));
+    if (!ndb || !ndb->open || !ndb->db || !valid)
+        return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+        "SELECT txid,output_index,value,rcm,memo,ivk,diversifier,pk_d,"
+        "cm,nullifier,block_height,source,spent_txid"
+        " FROM wallet_sapling_notes ORDER BY block_height DESC", -1, &s, NULL) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return -1;
+    }
+    size_t count = 0;
+    int rc;
+    while ((rc = ar_step_checked(s, "wallet diagnostic notes", NULL)) == ZCL_STEP_ROW) {
+        if (count == max || !sapling_diagnostic_row(s)) { rc = ZCL_STEP_ERROR; break; }
+        db_sapling_note_read_row(s, 0, &out[count]);
+        wallet_tx_read_spent_txid(s, 12, &out[count]);
+        count++;
+        if (sqlite3_errcode(ndb->db) == SQLITE_NOMEM) { rc = ZCL_STEP_ERROR; break; }
+    }
+    int final_rc = sqlite3_finalize(s);
+    if (rc != ZCL_STEP_DONE || final_rc != SQLITE_OK) {
+        memset(out, 0, count * sizeof(*out));
+        return -1;
+    }
+    return (int)count;
+}
+
 
 int db_sapling_note_list_all(struct node_db *ndb,
                               struct db_sapling_note *out, size_t max)

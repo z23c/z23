@@ -332,6 +332,22 @@ size_t wv_emit_header(uint8_t *buf, size_t max, const char *title,
     return off;
 }
 
+size_t wv_render_unavailable(uint8_t *buf, size_t max, const char *title,
+                             const char *active)
+{
+    size_t off = wv_emit_header(buf, max, title, active);
+    struct template_var vars[] = {
+        { "heading", "Wallet data unavailable" },
+        { "message", "Wallet data could not be read. Please try again." },
+        { "back_url", "/wallet" }, { "back_label", "Back to Wallet" },
+        { "retry_url", "/wallet" },
+    };
+    off += template_render(TMPL_VALIDATION_ERROR, vars, 5,
+                           (char *)buf + off, max - off);
+    wv_emit_footer(buf, max, &off);
+    return off;
+}
+
 void wv_emit_footer(uint8_t *buf, size_t max, size_t *off) {
     APPEND(*off, buf, max, "</main>");
     APPEND(*off, buf, max,
@@ -344,8 +360,17 @@ void wv_emit_footer(uint8_t *buf, size_t max, size_t *off) {
         "<script>"
         "(function(){"
         "var u='zcl://node/api/wallet/pulse';"
+        "function unavailable(){"
+        "var h=document.getElementById('sb-h');"
+        "var p=document.getElementById('sb-p');"
+        "var m=document.getElementById('sb-m');"
+        "if(h)h.textContent='Block --';if(p)p.textContent='Peers --';"
+        "if(m)m.textContent='Transactions --';"
+        "if(window._dashUnavailable)window._dashUnavailable();}"
         "function up(){"
         "fetch(u).then(function(r){return r.json()}).then(function(d){"
+        "var nums=['height','balance','shielded','speed_balance','t_utxos','z_notes','peers','mempool'];"
+        "if(!d||d.error||typeof d.sync!=='string'||nums.some(function(k){return typeof d[k]!=='number'||!isFinite(d[k])||d[k]<0;})){unavailable();return;}"
         "var h=document.getElementById('sb-h');"
         "var p=document.getElementById('sb-p');"
         "var m=document.getElementById('sb-m');"
@@ -353,7 +378,7 @@ void wv_emit_footer(uint8_t *buf, size_t max, size_t *off) {
         "if(p)p.textContent=d.peers+' peers';"
         "if(m)m.textContent=d.mempool+' tx';"
         "if(window._dashUpdate)window._dashUpdate(d);"
-        "}).catch(function(){});}"
+        "}).catch(unavailable);}"
         "up();setInterval(up,5000);"
         "})();"
         "</script>"

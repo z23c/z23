@@ -411,14 +411,19 @@ int64_t zslp_payment_check_received(const char *datadir,
     int64_t received = 0;
 
     if (!datadir || !z_addr)
-        return 0;
+        return -1;
 
     memset(&ndb, 0, sizeof(ndb));
-    snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
+    int n = snprintf(db_path, sizeof(db_path), "%s/node.db", datadir);
+    if (n < 0 || (size_t)n >= sizeof(db_path)) return -1;
     if (!node_db_open_runtime(&ndb, db_path, "zslp.payment_check"))
-        return 0;
+        return -1;
 
     received = db_sapling_note_balance_for_address(&ndb, z_addr);
+    if (received < 0) {
+        node_db_close(&ndb);
+        return -1;
+    }
 
     if (received < min_amount && min_amount > 0) {
         received = db_sapling_note_balance_for_exact_value(&ndb, min_amount);

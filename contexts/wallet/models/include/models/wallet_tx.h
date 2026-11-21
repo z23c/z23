@@ -63,6 +63,7 @@ int db_wallet_tx_count(struct node_db *ndb);
 /* Number of wallet transactions whose durable projection names a confirmed
  * block hash. Used to detect when the in-memory wallet publication trails
  * confirmed history even though its coarse scan height reached the tip. */
+/* Returns -1 on read failure; a valid empty count is zero. */
 int db_wallet_tx_confirmed_count(struct node_db *ndb);
 void db_wallet_tx_free(struct db_wallet_tx *t);
 
@@ -178,6 +179,8 @@ bool db_wallet_utxo_mark_spent(struct node_db *ndb,
 bool db_wallet_utxo_find(struct node_db *ndb,
                          const uint8_t txid[32], uint32_t vout,
                          struct db_wallet_utxo *out);
+/* Balance readers return -1 and set optional counts to -1 on read failure;
+ * a valid empty balance and count are zero. Height readers return -1 on failure. */
 int64_t db_wallet_utxo_balance(struct node_db *ndb);
 int64_t db_wallet_utxo_balance_with_count(struct node_db *ndb, int *utxo_count);
 /* Value held by inputs reserved by wallet transactions that are currently
@@ -412,6 +415,8 @@ enum db_sapling_note_reservation_state db_sapling_note_reservation_probe(
 bool db_sapling_note_mark_spent_bool_compat(struct node_db *ndb,
                                 const uint8_t nullifier[32],
                                 const uint8_t spent_by[32]);
+/* Balance readers return -1 on read failure; valid empty results are zero.
+ * A missing key, address, or nonpositive exact value selects no notes. */
 int64_t db_sapling_note_balance(struct node_db *ndb);
 int64_t db_sapling_note_encumbered_balance(struct node_db *ndb);
 int64_t db_sapling_note_balance_for_ivk(struct node_db *ndb,
@@ -475,6 +480,9 @@ int db_sapling_note_list_unspent_for_ivk(struct node_db *ndb,
                                           struct db_sapling_note *out, size_t max);
 
 /* List all notes (spent + unspent). Returns count. */
+/* With 0 < max <= INT_MAX and representable byte size, out is cleared before
+ * reading, including on failure. Invalid capacities leave it untouched. */
+int db_sapling_note_list_all_checked(struct node_db *ndb, struct db_sapling_note *out, size_t max);
 int db_sapling_note_list_all(struct node_db *ndb,
                               struct db_sapling_note *out, size_t max);
 
@@ -560,5 +568,12 @@ struct ar_callbacks *db_wallet_utxo_callbacks(void);
 /* Test-only: re-arm the wallet_tx + wallet_utxo before/after_save hooks (see .c). */
 void wallet_tx_reset_hooks_for_testing(void);
 struct ar_callbacks *db_sapling_note_callbacks(void);
+
+/* Complete lists; return -1 on read failure or insufficient capacity.
+ * With 0 < max <= INT_MAX and representable byte size, out is cleared before
+ * reading, including on failure. Invalid capacities leave it untouched. Free successful rows with the
+ * corresponding row-free function before reusing the buffer. */
+int db_wallet_tx_list_checked(struct node_db *ndb, struct db_wallet_tx *out, size_t max);
+int db_wallet_utxo_list_all_checked(struct node_db *ndb, struct db_wallet_utxo *out, size_t max);
 
 #endif

@@ -122,7 +122,7 @@ static void sort_ledger_events_by_height(struct ledger_event *events,
 }
 
 /* For this tx, find: T credits, T debits, Z credits, Z debits */
-static void sum_ledger_event_flows(const struct db_wallet_utxo *all_utxos,
+static bool sum_ledger_event_flows(const struct db_wallet_utxo *all_utxos,
                                    int nutxos,
                                    const struct db_sapling_note *all_notes,
                                    int nnotes, const struct ledger_event *ev,
@@ -131,28 +131,29 @@ static void sum_ledger_event_flows(const struct db_wallet_utxo *all_utxos,
     /* T credits: UTXOs created by this tx */
     for (int u = 0; u < nutxos; u++) {
         if (memcmp(all_utxos[u].txid, ev->txid, 32) == 0)
-            fl->t_credit += all_utxos[u].value;
+            if (ckd_add(&fl->t_credit, fl->t_credit, all_utxos[u].value)) return false;
     }
 
     /* T debits: UTXOs spent by this tx */
     for (int u = 0; u < nutxos; u++) {
         if (all_utxos[u].is_spent &&
             memcmp(all_utxos[u].spent_txid, ev->txid, 32) == 0)
-            fl->t_debit += all_utxos[u].value;
+            if (ckd_add(&fl->t_debit, fl->t_debit, all_utxos[u].value)) return false;
     }
 
     /* Z credits: notes created by this tx (received into wallet) */
     for (int n = 0; n < nnotes; n++) {
         if (memcmp(all_notes[n].txid, ev->txid, 32) == 0)
-            fl->z_credit += all_notes[n].value;
+            if (ckd_add(&fl->z_credit, fl->z_credit, all_notes[n].value)) return false;
     }
 
     /* Z debits: notes spent by this tx */
     for (int n = 0; n < nnotes; n++) {
         if (all_notes[n].is_spent &&
             memcmp(all_notes[n].spent_txid, ev->txid, 32) == 0)
-            fl->z_debit += all_notes[n].value;
+            if (ckd_add(&fl->z_debit, fl->z_debit, all_notes[n].value)) return false;
     }
+    return true;
 }
 
 /* Classify the transaction type */
@@ -199,43 +200,48 @@ static const char *ledger_event_type(int64_t t_debit, int64_t t_credit,
 }
 
 /* Count funds credited from outside the wallet */
-static void add_external_deposit_totals(struct ledger_totals *tot, bool from_me,
+static bool add_external_deposit_totals(struct ledger_totals *tot, bool from_me,
                                         int64_t t_credit, int64_t z_credit)
 {
     if (!from_me && t_credit > 0)
-        tot->total_t_received += t_credit;  /* external deposits */
+        if (ckd_add(&tot->total_t_received, tot->total_t_received, t_credit)) return false;  /* external deposits */
     if (!from_me && z_credit > 0)
-        tot->total_z_received += z_credit;  /* external z-deposits */
+        if (ckd_add(&tot->total_z_received, tot->total_z_received, z_credit)) return false;  /* external z-deposits */
+    return true;
 }
 
 /* Count funds leaving the wallet in transactions we sent */
-static void add_sender_outflow_totals(struct ledger_totals *tot, bool from_me,
+static bool add_sender_outflow_totals(struct ledger_totals *tot, bool from_me,
                                       int64_t t_debit, int64_t t_credit,
                                       int64_t z_debit, int64_t z_credit,
                                       int64_t fee)
 {
     if (from_me) {
         /* For our sends: external_out = debit - credit - shielded */
-        int64_t t_external = t_debit - t_credit - fee;
-        if (z_credit > 0) t_external -= z_credit; /* value went to z-pool */
-        if (t_external > 0) tot->total_t_sent += t_external;
+        int64_t t_external;
+        if (ckd_sub(&t_external, t_debit, t_credit) ||
+            ckd_sub(&t_external, t_external, fee)) return false;
+        if (z_credit > 0 && ckd_sub(&t_external, t_external, z_credit)) return false; /* value went to z-pool */
+        if (t_external > 0 && ckd_add(&tot->total_t_sent, tot->total_t_sent, t_external)) return false;
         /* z outflow: z_debit - z_credit (change) */
-        int64_t z_external = z_debit - z_credit;
+        int64_t z_external;
+        if (ckd_sub(&z_external, z_debit, z_credit)) return false;
         if (t_credit > 0 && z_debit > 0) z_external -= 0; /* unshield */
-        if (z_external > 0) tot->total_z_sent += z_external;
+        if (z_external > 0 && ckd_add(&tot->total_z_sent, tot->total_z_sent, z_external)) return false;
     }
+    return true;
 }
 
 /* Count funds moved between the transparent and shielded pools */
-static void add_pool_transfer_totals(struct ledger_totals *tot, bool from_me,
+static bool add_pool_transfer_totals(struct ledger_totals *tot, bool from_me,
                                      int64_t t_debit, int64_t t_credit,
                                      int64_t z_debit, int64_t z_credit)
 {
-    if (t_debit > 0 && z_credit > 0) tot->total_shielded += z_credit;
-    if (z_debit > 0 && t_credit > 0 && !from_me)
-        tot->total_unshielded += t_credit;
-    else if (z_debit > 0 && t_credit > 0 && from_me && t_debit == 0)
-        tot->total_unshielded += t_credit;
+    if (t_debit > 0 && z_credit > 0 &&
+        ckd_add(&tot->total_shielded, tot->total_shielded, z_credit)) return false;
+    if (z_debit > 0 && t_credit > 0 && (!from_me || t_debit == 0) &&
+        ckd_add(&tot->total_unshielded, tot->total_unshielded, t_credit)) return false;
+    return true;
 }
 
 /* Build entry */
@@ -290,7 +296,7 @@ static void append_ledger_entry(struct json_value *entries,
 }
 
 /* Per-address breakdown of unspent transparent funds */
-static void build_transparent_holdings(struct wallet_rpc_context *ctx,
+static void build_transparent_holdings(const struct db_wallet_utxo *unspent, int nu,
                                        struct json_value *holdings,
                                        const unsigned char *pk_pfx,
                                        size_t pk_pfx_len,
@@ -301,10 +307,10 @@ static void build_transparent_holdings(struct wallet_rpc_context *ctx,
     struct json_value t_holdings = {0};
     json_set_array(&t_holdings);
 
-    struct db_wallet_utxo unspent[1024];
-    int nu = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 1024);
-
+    *unspent_count = 0;
     for (int i = 0; i < nu; i++) {
+        if (unspent[i].is_spent) continue;
+        (*unspent_count)++;
         struct json_value h = {0};
         json_set_object(&h);
 
@@ -340,16 +346,14 @@ static void build_transparent_holdings(struct wallet_rpc_context *ctx,
 
         json_push_back(&t_holdings, &h);
         json_free(&h);
-        db_wallet_utxo_free(&unspent[i]);
     }
 
     json_push_kv(holdings, "transparent", &t_holdings);
     json_free(&t_holdings);
-    *unspent_count = nu;
 }
 
 /* Shielded holdings */
-static void build_shielded_holdings(struct wallet_rpc_context *ctx,
+static void build_shielded_holdings(const struct db_sapling_note *unspent_notes, int nn,
                                     struct json_value *holdings,
                                     int64_t *verified_z,
                                     int *unspent_note_count)
@@ -357,10 +361,10 @@ static void build_shielded_holdings(struct wallet_rpc_context *ctx,
     struct json_value z_holdings = {0};
     json_set_array(&z_holdings);
 
-    struct db_sapling_note unspent_notes[256];
-    int nn = db_sapling_note_list_unspent(ctx->node_db, unspent_notes, 256);
-
+    *unspent_note_count = 0;
     for (int i = 0; i < nn; i++) {
+        if (unspent_notes[i].is_spent) continue;
+        (*unspent_note_count)++;
         struct json_value h = {0};
         json_set_object(&h);
 
@@ -400,12 +404,10 @@ static void build_shielded_holdings(struct wallet_rpc_context *ctx,
 
         json_push_back(&z_holdings, &h);
         json_free(&h);
-        db_sapling_note_free(&unspent_notes[i]);
     }
 
     json_push_kv(holdings, "shielded", &z_holdings);
     json_free(&z_holdings);
-    *unspent_note_count = nn;
 }
 
 /* Accounting summary */
@@ -458,6 +460,87 @@ static void append_accounting_summary(struct json_value *result,
 
     json_push_kv(result, "accounting", &acct);
     json_free(&acct);
+}
+
+static int ledger_utxo_value_desc(const void *a, const void *b)
+{
+    const struct db_wallet_utxo *x = a, *y = b;
+    return (x->value < y->value) - (x->value > y->value);
+}
+
+static int ledger_note_value_desc(const void *a, const void *b)
+{
+    const struct db_sapling_note *x = a, *y = b;
+    return (x->value < y->value) - (x->value > y->value);
+}
+
+static bool ledger_update_totals(struct ledger_totals *tot, const struct ledger_flows *fl,
+                                 bool from_me, int64_t fee)
+{
+        int64_t t_net, z_net, combined;
+        if (ckd_sub(&t_net, fl->t_credit, fl->t_debit) ||
+            ckd_sub(&z_net, fl->z_credit, fl->z_debit) ||
+            ckd_add(&tot->t_balance, tot->t_balance, t_net) ||
+            ckd_add(&tot->z_balance, tot->z_balance, z_net) ||
+            ckd_add(&combined, tot->t_balance, tot->z_balance) ||
+            tot->t_balance == INT64_MIN || tot->z_balance == INT64_MIN ||
+            combined == INT64_MIN) return false;
+
+        /* Track accounting totals (net flows, not gross) */
+        if (!add_external_deposit_totals(tot, from_me, fl->t_credit, fl->z_credit) ||
+            !add_sender_outflow_totals(tot, from_me, fl->t_debit,
+                                       fl->t_credit, fl->z_debit, fl->z_credit, fee) ||
+            !add_pool_transfer_totals(tot, from_me, fl->t_debit,
+                                      fl->t_credit, fl->z_debit, fl->z_credit) ||
+            ckd_add(&tot->total_fees, tot->total_fees, fee)) return false;
+    return true;
+}
+
+static bool ledger_summary_safe(const struct db_wallet_utxo *all_utxos, int nutxos,
+                                const struct db_sapling_note *all_notes, int nnotes,
+                                const struct ledger_totals *tot)
+{
+    int64_t checked_t = 0, checked_z = 0, checked_total, expected, delta;
+    for (int i = 0; i < nutxos; i++)
+        if (!all_utxos[i].is_spent && ckd_add(&checked_t, checked_t, all_utxos[i].value))
+            return false;
+    for (int i = 0; i < nnotes; i++)
+        if (!all_notes[i].is_spent && ckd_add(&checked_z, checked_z, all_notes[i].value))
+            return false;
+    if (ckd_add(&checked_total, checked_t, checked_z) ||
+        ckd_add(&expected, tot->total_t_received, tot->total_z_received) ||
+        ckd_sub(&expected, expected, tot->total_t_sent) ||
+        ckd_sub(&expected, expected, tot->total_z_sent) ||
+        ckd_sub(&expected, expected, tot->total_fees) ||
+        ckd_sub(&delta, expected, checked_total) || delta == INT64_MIN)
+        return false;
+    return true;
+}
+
+static bool ledger_render_events(const struct db_wallet_utxo *all_utxos, int nutxos,
+                                 const struct db_sapling_note *all_notes, int nnotes,
+                                 const struct ledger_event *events, int nevents,
+                                 struct ledger_totals *tot, struct json_value *entries)
+{
+    for (int e = 0; e < nevents; e++) {
+        struct ledger_flows fl = {0};
+        if (!sum_ledger_event_flows(all_utxos, nutxos, all_notes, nnotes,
+                                    &events[e], &fl)) LOG_FAIL("wallet_diag", "wallet ledger event flow overflow");
+
+        /* Fee */
+        int64_t fee = events[e].from_me ? events[e].fee : 0;
+        if (fee == INT64_MIN) return false;
+        if (fee < 0) fee = -fee;
+
+        const char *type = ledger_event_type(fl.t_debit, fl.t_credit,
+                                             fl.z_debit, fl.z_credit,
+                                             events[e].from_me);
+
+        if (!ledger_update_totals(tot, &fl, events[e].from_me, fee))
+            LOG_FAIL("wallet_diag", "wallet ledger totals overflow");
+        append_ledger_entry(entries, &events[e], &fl, fee, type, tot);
+    }
+    return true;
 }
 
 /* Cleanup */
@@ -518,17 +601,26 @@ bool rpc_walletledger(const struct json_value *params, bool help,
 
     /* Load all data from SQLite */
     struct db_wallet_utxo *all_utxos = zcl_calloc(4096, sizeof(*all_utxos), "diag_utxos");
-    int nutxos = all_utxos ? db_wallet_utxo_list_all(ctx->node_db, all_utxos, 4096) : 0;
+    int nutxos = all_utxos ? db_wallet_utxo_list_all_checked(ctx->node_db, all_utxos, 4096) : -1;
 
     struct db_sapling_note *all_notes = zcl_calloc(1024, sizeof(*all_notes), "diag_notes");
-    int nnotes = all_notes ? db_sapling_note_list_all(ctx->node_db, all_notes, 1024) : 0;
+    int nnotes = all_notes ? db_sapling_note_list_all_checked(ctx->node_db, all_notes, 1024) : -1;
 
     struct db_wallet_tx *all_txs = zcl_calloc(2000, sizeof(*all_txs), "diag_txs");
-    int ntxs = all_txs ? db_wallet_tx_list(ctx->node_db, all_txs, 2000, 0) : 0;
+    int ntxs = all_txs ? db_wallet_tx_list_checked(ctx->node_db, all_txs, 2000) : -1;
 
     /* Build a height-sorted list of unique txids */
     struct ledger_event *events = zcl_calloc(4096, sizeof(*events), "diag_events");
     int nevents = 0;
+
+    if (nutxos < 0 || nnotes < 0 || ntxs < 0 || !events) {
+        free_ledger_batches(all_utxos, nutxos, all_notes, nnotes, all_txs, ntxs, events);
+        json_set_str(result, "Wallet data unavailable");
+        return false;
+    }
+
+    qsort(all_utxos, (size_t)nutxos, sizeof(*all_utxos), ledger_utxo_value_desc);
+    qsort(all_notes, (size_t)nnotes, sizeof(*all_notes), ledger_note_value_desc);
 
     collect_ledger_events(all_txs, ntxs, min_h, max_h, events, &nevents);
     sort_ledger_events_by_height(events, nevents);
@@ -540,36 +632,11 @@ bool rpc_walletledger(const struct json_value *params, bool help,
 
     struct ledger_totals tot = {0};
 
-    for (int e = 0; e < nevents; e++) {
-        struct ledger_flows fl = {0};
-        sum_ledger_event_flows(all_utxos, nutxos, all_notes, nnotes,
-                               &events[e], &fl);
+    if (!ledger_render_events(all_utxos, nutxos, all_notes, nnotes, events, nevents,
+                              &tot, &entries)) goto arithmetic_error;
 
-        /* Fee */
-        int64_t fee = events[e].from_me ? events[e].fee : 0;
-        if (fee < 0) fee = -fee;
-
-        const char *type = ledger_event_type(fl.t_debit, fl.t_credit,
-                                             fl.z_debit, fl.z_credit,
-                                             events[e].from_me);
-
-        /* Update running balances */
-        int64_t t_net = fl.t_credit - fl.t_debit;
-        int64_t z_net = fl.z_credit - fl.z_debit;
-        tot.t_balance += t_net;
-        tot.z_balance += z_net;
-
-        /* Track accounting totals (net flows, not gross) */
-        add_external_deposit_totals(&tot, events[e].from_me,
-                                    fl.t_credit, fl.z_credit);
-        add_sender_outflow_totals(&tot, events[e].from_me, fl.t_debit,
-                                  fl.t_credit, fl.z_debit, fl.z_credit, fee);
-        add_pool_transfer_totals(&tot, events[e].from_me, fl.t_debit,
-                                 fl.t_credit, fl.z_debit, fl.z_credit);
-        tot.total_fees += fee;
-
-        append_ledger_entry(&entries, &events[e], &fl, fee, type, &tot);
-    }
+    if (!ledger_summary_safe(all_utxos, nutxos, all_notes, nnotes, &tot))
+        goto arithmetic_error;
 
     json_push_kv(result, "entries", &entries);
     json_free(&entries);
@@ -580,9 +647,9 @@ bool rpc_walletledger(const struct json_value *params, bool help,
 
     int64_t verified_t = 0, verified_z = 0;
     int nu = 0, nn = 0;
-    build_transparent_holdings(ctx, &holdings, pk_pfx, pk_pfx_len,
+    build_transparent_holdings(all_utxos, nutxos, &holdings, pk_pfx, pk_pfx_len,
                                sc_pfx, sc_pfx_len, &verified_t, &nu);
-    build_shielded_holdings(ctx, &holdings, &verified_z, &nn);
+    build_shielded_holdings(all_notes, nnotes, &holdings, &verified_z, &nn);
 
     json_push_kv(result, "current_holdings", &holdings);
     json_free(&holdings);
@@ -594,4 +661,10 @@ bool rpc_walletledger(const struct json_value *params, bool help,
                         all_txs, ntxs, events);
 
     return true;
+
+arithmetic_error:
+    json_free(&entries);
+    free_ledger_batches(all_utxos, nutxos, all_notes, nnotes, all_txs, ntxs, events);
+    json_set_str(result, "Wallet ledger arithmetic unavailable");
+    return false;
 }

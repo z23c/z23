@@ -94,10 +94,8 @@ int check_wallet_view_get_wallet_history_returns_history_or_loading(void)
         size_t n = wv_get("/api/wallet/pulse");
         bool ok = (n > 0);
         ok = ok && wv_has("Content-Type: application/json");
-        ok = ok && wv_has("\"height\":");
-        ok = ok && wv_has("\"balance\":");
-        ok = ok && wv_has("\"peers\":");
-        ok = ok && wv_has("\"sync\":");
+        ok = ok && wv_has("HTTP/1.1 503") && wv_has("\"error\":");
+        ok = ok && !wv_has("\"balance\":");
         if (ok) printf("OK\n");
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }

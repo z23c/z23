@@ -1606,9 +1606,86 @@ static int test_account_tie_order(void)
     return failures;
 }
 
+struct wdr_balance_fault {
+    const char *table;
+    unsigned denied;
+};
+
+static int wdr_deny_balance_read(void *opaque, int op, const char *table,
+                                 const char *column, const char *db, const char *source)
+{
+    (void)column; (void)db; (void)source;
+    struct wdr_balance_fault *fault = opaque;
+    if (op == SQLITE_READ && table && strcmp(table, fault->table) == 0) {
+        ++fault->denied;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool wdr_balance_unavailable_info(const struct json_value *result)
+{
+    const struct json_value *value = json_get(result, "balance");
+    const struct json_value *available = json_get(result, "balance_available");
+    return value && value->type == JSON_NULL && available &&
+           available->type == JSON_BOOL && !json_get_bool(available);
+}
+
+static bool wdr_balance_matches(const struct json_value *result, const char *method,
+                                const char *amount)
+{
+    const struct json_value *value = strcmp(method, "getbalance") == 0
+        ? result : json_get(result, "total");
+    return value && value->type == JSON_STR && strcmp(json_get_str(value), amount) == 0;
+}
+
+static bool wdr_balance_rpc(struct wdr *f, const char *method, const char *deny,
+                            const char *amount)
+{
+    struct json_value params = {0}, result = {0};
+    struct wdr_balance_fault fault = {.table = deny};
+    json_set_array(&params);
+    bool ok = sqlite3_set_authorizer(f->ndb.db, deny ? wdr_deny_balance_read : NULL,
+                                     &fault) == SQLITE_OK;
+    bool answered = ok && rpc_table_execute(f->tbl, method, &params, &result);
+    ok = sqlite3_set_authorizer(f->ndb.db, NULL, NULL) == SQLITE_OK && ok;
+    if (!deny) {
+        ok = ok && answered && wdr_balance_matches(&result, method, amount);
+    } else if (strcmp(method, "getwalletinfo") == 0) {
+        ok = ok && answered && wdr_balance_unavailable_info(&result);
+    } else {
+        ok = ok && !answered && result.type == JSON_STR &&
+             strstr(json_get_str(&result), "balance unavailable") != NULL;
+    }
+    json_free(&result);
+    json_free(&params);
+    return ok && (!deny || fault.denied > 0);
+}
+
+static int wdr_balance_refusal(void)
+{
+    struct wdr f = {0};
+    int failures = 0;
+    TEST("wallet balance RPC distinguishes an unreadable projection from an empty wallet") {
+        ASSERT(wdr_restore(&f));
+        ASSERT(wallet_readiness_initialize(f.w, WALLET_READINESS_READY, false, 0));
+        char zero[32];
+        format_amount(0, zero, sizeof(zero));
+        ASSERT(wdr_balance_rpc(&f, "getbalance", NULL, zero));
+        ASSERT(wdr_balance_rpc(&f, "z_gettotalbalance", NULL, zero));
+        ASSERT(wdr_balance_rpc(&f, "getbalance", "wallet_utxos", NULL));
+        ASSERT(wdr_balance_rpc(&f, "getwalletinfo", "wallet_utxos", NULL));
+        ASSERT(wdr_balance_rpc(&f, "z_gettotalbalance", "wallet_sapling_notes", NULL));
+        ASSERT(wdr_balance_rpc(&f, "z_gettotalbalance", NULL, zero));
+        PASS();
+    } _test_next:;
+    wdr_teardown(&f);
+    return failures;
+}
+
 int test_wallet_diversified_receive(void)
 {
-    int failures = 0;
+    int failures = wdr_balance_refusal();
     failures += test_receive_find_and_restore();
     failures += test_latest_after_new_and_restart();
     failures += test_current_counter_edges();

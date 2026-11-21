@@ -4,6 +4,7 @@
  * validated wallet transaction save lifecycle. */
 
 #include "models/wallet_tx.h"
+#include "models/wallet_tx_internal.h"
 #include "util/log_macros.h"
 
 #include <stdlib.h>
@@ -38,27 +39,23 @@ bool db_wallet_tx_mark_unconfirmed(struct node_db *ndb,
 
 int db_wallet_tx_confirmed_count(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open)
-        return 0;
-    AR_QUERY_COUNT_SQL(ndb,
-        "SELECT COUNT(*) FROM wallet_transactions "
+    int count = -1;
+    (void)wallet_tx_query_total_and_count(ndb,
+        "SELECT 0, COUNT(*) FROM wallet_transactions "
         "WHERE block_hash IS NOT NULL AND length(block_hash)=32 "
-        "AND block_hash!=zeroblob(32)");
+        "AND block_hash!=zeroblob(32)", NULL, 0, NULL, &count);
+    return count;
 }
 
 int64_t db_wallet_utxo_encumbered_balance(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open)
-        return 0;
-    sqlite3_stmt *s = NULL;
-    AR_PREPARE_RET(ndb, s,
-        "SELECT COALESCE(SUM(u.value),0) FROM wallet_utxos u "
+    int64_t total = -1;
+    (void)wallet_tx_query_total_and_count(ndb,
+        "SELECT COALESCE(SUM(u.value),0), COUNT(*) FROM wallet_utxos u "
         "JOIN wallet_transactions w ON w.txid=u.spent_txid "
         "WHERE u.spent_txid IS NOT NULL AND (w.block_hash IS NULL "
-        "OR length(w.block_hash)!=32 OR w.block_hash=zeroblob(32))", -1);
-    int64_t total = 0;
-    if (AR_STEP_ROW(s)) total = AR_COL_INT(s, 0);
-    AR_FINALIZE(s);
+        "OR length(w.block_hash)!=32 OR w.block_hash=zeroblob(32))",
+        NULL, 0, &total, NULL);
     return total;
 }
 

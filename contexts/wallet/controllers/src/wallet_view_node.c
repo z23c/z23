@@ -36,6 +36,7 @@ static const char *node_sync_class(const char *sync_raw, bool synced) {
 }
 
 static void format_node_height(char *height_s, size_t size, int tip) {
+    if (tip < 0) { snprintf(height_s, size, "Unavailable"); return; }
     if (format_with_commas(height_s, size, tip) == 0)
         snprintf(height_s, size, "%d", tip);
 }
@@ -101,7 +102,7 @@ static void render_node_peer_table(sqlite3 *db, char *peer_table,
 size_t serve_node(uint8_t *r, size_t max) {
     sqlite3 *db = wv_open_db();
 
-    int tip = 0, peers = 0, mempool = 0, utxo_count = 0;
+    int tip = -1, peers = 0, mempool = 0, utxo_count = 0;
     int64_t supply = 0;
     fetch_node_stats(db, &tip, &peers, &mempool, &utxo_count, &supply);
 

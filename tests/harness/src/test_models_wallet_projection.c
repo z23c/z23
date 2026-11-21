@@ -713,9 +713,144 @@ static bool wallet_cutover_utxo_fixture(void)
     return fixture_rm_ok(dir) && ok;
 }
 
+static int wallet_balance_deny_read(void *ctx, int action, const char *name,
+                                    const char *b, const char *c, const char *d)
+{
+    (void)b; (void)c; (void)d;
+    return action == SQLITE_READ && name && strcmp(name, (const char *)ctx) == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int wallet_balance_interrupt(void *ctx)
+{
+    (void)ctx;
+    return 1;
+}
+
+static bool wallet_balance_seed(struct node_db *ndb)
+{
+    struct db_wallet_utxo u = {0};
+    struct db_sapling_note note = {0};
+    u.txid[0] = 1; u.address_hash[0] = 2; u.value = 5000;
+    u.script = (uint8_t *)"\x51"; u.script_len = 1; u.height = 1;
+    note.txid[0] = 3; note.rcm[0] = 4; note.ivk[0] = 5;
+    note.diversifier[0] = 6; note.pk_d[0] = 7; note.cm[0] = 8;
+    note.nullifier[0] = 9; note.value = 7000; note.block_height = 1;
+    snprintf(note.address, sizeof(note.address), "%s", "zs-fixture");
+    return db_wallet_utxo_save(ndb, &u) && db_sapling_note_save(ndb, &note);
+}
+
+static bool wallet_balance_prepare_fail(struct node_db *ndb, const char *table)
+{
+    int count = 99;
+    if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, (void *)table) != SQLITE_OK) return false;
+    int64_t value = strcmp(table, "wallet_utxos") == 0
+        ? db_wallet_utxo_balance_with_count(ndb, &count)
+        : db_sapling_note_balance_with_count(ndb, &count);
+    bool ok = value == -1 && count == -1;
+    return sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK && ok;
+}
+
+static bool wallet_balance_step_fail(struct node_db *ndb)
+{
+    int count = 99;
+    sqlite3_progress_handler(ndb->db, 1, wallet_balance_interrupt, NULL);
+    int64_t value = db_sapling_note_balance_with_count(ndb, &count);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    return value == -1 && count == -1;
+}
+
+static bool wallet_balance_summary_fail(struct node_db *ndb)
+{
+    struct db_wallet_projection_summary out;
+    memset(&out, 0x5a, sizeof(out));
+    if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, "wallet_sapling_notes") != SQLITE_OK) return false;
+    bool result = db_wallet_projection_summary(ndb, &out);
+    bool removed = sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK;
+    return removed && !result && out.transparent_balance == 0 && out.shielded_balance == 0 &&
+           out.utxo_count == 0 && out.note_count == 0;
+}
+
+static bool wallet_balance_tip_fail(struct node_db *ndb)
+{
+    int count = 99;
+    if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, "blocks") != SQLITE_OK) return false;
+    int64_t value = db_wallet_utxo_spendable_balance(ndb, &count);
+    bool removed = sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK;
+    return removed && value == -1 && count == -1;
+}
+
+static bool wallet_balance_other_failures(struct node_db *ndb)
+{
+    uint8_t ivk[32] = {5}, diversifier[11] = {6};
+    if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, "wallet_sapling_notes") != SQLITE_OK) return false;
+    bool ok = db_sapling_note_encumbered_balance(ndb) == -1 &&
+        db_sapling_note_balance_for_ivk(ndb, ivk) == -1 &&
+        db_sapling_note_balance_for_ivk_minconf(ndb, ivk, 20, 1) == -1 &&
+        db_sapling_note_balance_for_diversifier_minconf(ndb, ivk, diversifier, 20, 1) == -1 &&
+        db_sapling_note_balance_for_address(ndb, "zs-fixture") == -1 &&
+        db_sapling_note_balance_for_exact_value(ndb, 7000) == -1;
+    if (sqlite3_set_authorizer(ndb->db, NULL, NULL) != SQLITE_OK) ok = false;
+    if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, "wallet_utxos") != SQLITE_OK) return false;
+    ok = (db_wallet_utxo_encumbered_balance(ndb) == -1) && ok;
+    if (sqlite3_set_authorizer(ndb->db, NULL, NULL) != SQLITE_OK) ok = false;
+    if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, "wallet_transactions") != SQLITE_OK) return false;
+    ok = (db_wallet_tx_confirmed_count(ndb) == -1) && ok;
+    if (sqlite3_set_authorizer(ndb->db, NULL, NULL) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+
+static bool wallet_balance_other_success(struct node_db *ndb)
+{
+    uint8_t ivk[32] = {5}, diversifier[11] = {6};
+    return db_wallet_utxo_encumbered_balance(ndb) == 0 &&
+        db_sapling_note_encumbered_balance(ndb) == 0 &&
+        db_wallet_tx_confirmed_count(ndb) == 0 &&
+        db_sapling_note_balance_for_ivk(ndb, ivk) == 7000 &&
+        db_sapling_note_balance_for_ivk_minconf(ndb, ivk, 20, 1) == 7000 &&
+        db_sapling_note_balance_for_diversifier_minconf(ndb, ivk, diversifier, 20, 1) == 7000 &&
+        db_sapling_note_balance_for_address(ndb, "zs-fixture") == 7000 &&
+        db_sapling_note_balance_for_exact_value(ndb, 7000) == 7000 &&
+        db_sapling_note_balance_for_ivk(ndb, NULL) == 0 &&
+        db_sapling_note_balance_for_address(ndb, "") == 0 &&
+        db_sapling_note_balance_for_exact_value(ndb, 0) == 0;
+}
+
+
+static bool wallet_balance_success_values(struct node_db *db)
+{
+    int tc = -1, zc = -1;
+    bool ok = db_wallet_utxo_balance_with_count(db, &tc) == 0 && tc == 0 &&
+              db_sapling_note_balance_with_count(db, &zc) == 0 && zc == 0;
+    ok = ok && wallet_balance_seed(db);
+    ok = ok && db_wallet_utxo_balance_with_count(db, &tc) == 5000 && tc == 1 &&
+         db_sapling_note_balance_with_count(db, &zc) == 7000 && zc == 1;
+    return ok && wallet_balance_other_success(db);
+}
+
+
+static bool wallet_balance_failure_case(void)
+{
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return false;
+    bool ok = wallet_balance_success_values(&db);
+    bool t = wallet_balance_prepare_fail(&db, "wallet_utxos");
+    bool z = wallet_balance_prepare_fail(&db, "wallet_sapling_notes");
+    bool step = wallet_balance_step_fail(&db);
+    bool summary = wallet_balance_summary_fail(&db);
+    bool tip = wallet_balance_tip_fail(&db);
+    bool other = wallet_balance_other_failures(&db);
+    printf("wallet aggregate evidence prepare_t=%d prepare_z=%d step=%d second=%d tip=%d\n", t, z, step, summary, tip);
+    node_db_close(&db);
+    return ok && t && z && step && summary && tip && other;
+}
+
+
 int test_model_wallet_projection(void)
 {
     int failures = 0;
+    if (!wallet_balance_failure_case()) failures++;
     printf("Cutover UTXO merge preserves reservations and defers events... ");
     if (wallet_cutover_utxo_fixture()) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     printf("Wallet transaction presence distinguishes missing and I/O failure... ");

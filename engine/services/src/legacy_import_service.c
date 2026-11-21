@@ -528,6 +528,11 @@ static void legacy_import_announce_complete(const struct timespec *ts_start,
     /* Report final results. */
     int64_t t_bal = db_wallet_utxo_balance(ndb);
     int64_t z_bal = db_sapling_note_balance(ndb);
+    if (t_bal < 0 || z_bal < 0 || t_bal > INT64_MAX - z_bal) {
+        printf("legacy_import: complete; wallet balance unavailable\n");
+        fflush(stdout);
+        return;
+    }
     int64_t total = t_bal + z_bal;
 
     struct timespec ts_end;

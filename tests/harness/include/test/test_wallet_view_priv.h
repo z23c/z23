@@ -85,6 +85,8 @@ int check_wallet_view_history_txs_show_non_zero_amounts(void);
 int check_wallet_view_shield_review_page_renders_correctly(void);
 int check_wallet_view_send_review_to_zs1_shows_t_z_privacy_warning(void);
 
+int check_wallet_view_unreadable_balances(void);
+
 /* test_wallet_view_resilience.c — contacts datalist, receive QR/copy
  * text, unresolved-var checks, badges/backup warning, no-DB graceful
  * degradation, oversized POST safety, titles/command-center/template

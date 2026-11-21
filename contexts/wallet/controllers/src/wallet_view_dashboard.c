@@ -6,6 +6,7 @@
 #include "platform/time_compat.h"
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"
+#include "models/wallet_tx.h"
 #include "views/wallet_view_dashboard_view.h"
 #include "sync/sync_state.h"
 #include "util/log_macros.h"
@@ -237,6 +238,7 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
 
     int tip = wv_effective_tip(db);
     sqlite3_close(db);
+    if (tip < 0) return wv_render_unavailable(r, max, "Z23 Wallet", "/wallet");
 
     /* Sync wallet from zclassicd before displaying balance.
      * This ensures the dashboard never shows stale data.
@@ -256,6 +258,10 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
     /* Shielded: verified notes minus spent nullifiers */
     int z_notes = 0;
     int64_t shielded = wv_query_shielded_balance(db, &z_notes);
+    if (!wv_balance_pair_valid(transparent, shielded) || t_utxos < 0 || z_notes < 0) {
+        sqlite3_close(db);
+        return wv_render_unavailable(r, max, "Z23 Wallet", "/wallet");
+    }
 
     apply_pending_shield_to_display(&transparent, &shielded);
 
@@ -282,6 +288,8 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
 
     char privacy_buf[512] = "";
     render_privacy_card(privacy_buf, sizeof(privacy_buf), transparent);
+    char privacy_section[576];
+    snprintf(privacy_section, sizeof(privacy_section), "<div id='wallet-privacy-card'>%s</div>", privacy_buf);
 
     char token_buf[2048] = "";
     render_token_cards(db, token_buf, sizeof(token_buf));
@@ -313,7 +321,7 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
         { "pct",            pct_str },
         { "breakdown",      breakdown },
         { "details_link",   details_link },
-        { "privacy_card",   privacy_buf },
+        { "privacy_card",   privacy_section },
         { "token_cards",    token_buf },
         { "recent_txs",     tx_buf },
         { "backup_warning", backup_buf },
@@ -328,7 +336,13 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
         "function fmt(z){var v=z/1e8;if(z===0)return'0.00';"
         "if(z%%1000000===0)return v.toFixed(2);"
         "if(z%%10000===0)return v.toFixed(4);return v.toFixed(8);}"
+        "window._dashUnavailable=function(){"
+        "var b=document.getElementById('bal');if(b)b.textContent='Unavailable';"
+        "var bd=document.getElementById('breakdown');if(bd)bd.textContent='Wallet data unavailable';"
+        "var pc=document.getElementById('wallet-privacy-card');if(pc)pc.style.display='none';"
+        "var pm=document.getElementById('privacy-meter');if(pm)pm.style.display='none';};"
         "window._dashUpdate=function(d){"
+        "var pm0=document.getElementById('privacy-meter');if(pm0)pm0.style.display='';"
         "var b=document.getElementById('bal');"
         "if(b){var n=fmt(d.balance+d.shielded)+' ZCL';"
         "if(b.textContent!==n){b.textContent=n;}}"
@@ -378,78 +392,59 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
     return off;
 }
 
-static struct {
-    int height;
-    int64_t balance, shielded, speed_bal;
-    int t_utxos, z_notes;
-} pulse_cache;
+static size_t wv_pulse_unavailable(uint8_t *r, size_t max)
+{
+    int n = snprintf((char *)r, max,
+        "HTTP/1.1 503 Service Unavailable\r\n"
+        "Content-Type: application/json\r\n"
+        "Cache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        "{\"error\":\"Wallet data unavailable\"}");
+    return n >= 0 && (size_t)n < max ? (size_t)n : 0;
+}
+
+static bool wv_pulse_read(sqlite3 *db, struct wv_pulse *p)
+{
+    struct db_wallet_projection_summary summary;
+    if (!wv_query_projection_summary(db, &summary) ||
+        !wv_balance_pair_valid(summary.transparent_balance, summary.shielded_balance) ||
+        !MoneyRange(summary.speed_balance) || summary.effective_tip_height < 0 ||
+        summary.utxo_count < 0 || summary.note_count < 0) return false;
+    p->height = summary.effective_tip_height;
+    p->balance = summary.transparent_balance;
+    p->shielded = summary.shielded_balance;
+    p->speed_balance = summary.speed_balance;
+    p->t_utxos = summary.utxo_count;
+    p->z_notes = summary.note_count;
+    p->peers = wv_query_int(db, "SELECT count(*) FROM peers");
+    p->mempool = wv_query_int(db, "SELECT count(*) FROM mempool_entries");
+    return true;
+}
 
 size_t serve_pulse(uint8_t *r, size_t max) {
     sqlite3 *db = wv_open_db();
-    int height = 0, peers = 0, mempool = 0;
-    int64_t balance = 0, shielded = 0, speed_bal = 0;
-    int t_utxos = 0, z_notes = 0;
-
-    /* Check if a pending shield operation completed */
+    if (!db) return wv_pulse_unavailable(r, max);
     if (g_shield_opid[0]) {
         int ss = wv_shield_check_status();
-        if (ss == 2 || ss == -1)
-            g_balance_dirty = 1; /* shield done — force recompute */
+        if (ss == 2 || ss == -1) g_balance_dirty = 1;
     }
-
-    if (db) {
-        height = wv_effective_tip(db);
-        peers = wv_query_int(db,  "SELECT count(*) FROM peers");
-        mempool = wv_query_int(db, "SELECT count(*) FROM mempool_entries");
-
-        if (g_balance_dirty) {
-            /* Wallet changed — sync from zclassicd then recompute */
-            sqlite3_close(db);
-            wv_sync_wallet_from_zclassicd();
-            db = wv_open_db();
-            if (!db) return 0;
-        }
-
-        if (height != pulse_cache.height || pulse_cache.height == 0 ||
-            g_balance_dirty) {
-            g_balance_dirty = 0;
-            /* Recompute balances */
-            balance = wv_query_ground_truth_balance(db, &t_utxos);
-            shielded = wv_query_shielded_balance(db, &z_notes);
-            speed_bal = wv_query_speed_balance(db);
-
-            pulse_cache.height = height;
-            pulse_cache.balance = balance;
-            pulse_cache.shielded = shielded;
-            pulse_cache.speed_bal = speed_bal;
-            pulse_cache.t_utxos = t_utxos;
-            pulse_cache.z_notes = z_notes;
-        } else {
-            /* Same height — serve cached balances, only refresh peers/mempool */
-            balance = pulse_cache.balance;
-            shielded = pulse_cache.shielded;
-            speed_bal = pulse_cache.speed_bal;
-            t_utxos = pulse_cache.t_utxos;
-            z_notes = pulse_cache.z_notes;
-        }
+    if (g_balance_dirty) {
         sqlite3_close(db);
+        wv_sync_wallet_from_zclassicd();
+        db = wv_open_db();
+        if (!db) return wv_pulse_unavailable(r, max);
     }
-
-    /* Adjust pulse balances for pending shield operation */
+    struct wv_pulse p = {0};
+    bool ok = wv_pulse_read(db, &p);
+    sqlite3_close(db);
+    if (!ok) return wv_pulse_unavailable(r, max);
+    g_balance_dirty = 0;
     if (g_shield_pending_amount > 0 && g_shield_pending_since > 0) {
         int64_t pending = g_shield_pending_amount;
-        if (pending > balance) pending = balance;
-        balance -= pending;
-        shielded += pending;
+        if (pending > p.balance) pending = p.balance;
+        p.balance -= pending;
+        p.shielded += pending;
     }
-
     const char *sync = sync_state_name(sync_get_state());
-
-    struct wv_pulse p = {
-        .height = height, .balance = balance, .shielded = shielded,
-        .speed_balance = speed_bal, .t_utxos = t_utxos, .z_notes = z_notes,
-        .peers = peers, .mempool = mempool
-    };
     snprintf(p.sync, sizeof(p.sync), "%s", sync ? sync : "idle");
     return wv_render_pulse(r, max, &p);
 }

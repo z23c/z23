@@ -64,6 +64,7 @@ struct zcl_result zslp_service_store_token(sqlite3 *db, const char *token_id,
 
 struct zcl_result zslp_payment_generate_address(struct wallet *wallet,
                                                 char *z_addr_out, size_t max);
+/* Nonnegative received amount; -1 means payment state is unavailable. */
 int64_t zslp_payment_check_received(const char *datadir,
                                     const char *z_addr,
                                     int64_t min_amount);

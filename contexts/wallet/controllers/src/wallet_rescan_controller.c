@@ -76,6 +76,7 @@ static bool rpc_replaywalletfromchain(const struct json_value *params,
     }
 
     int64_t old_balance = db_wallet_utxo_balance(ctx->node_db);
+    if (old_balance < 0) return wallet_balance_unavailable(result);
 
     wallet_rebuild_spent_set(ctx->wallet);
 
@@ -91,14 +92,9 @@ static bool rpc_replaywalletfromchain(const struct json_value *params,
             &cov, "Wallet replay failed; previous projection retained"))
         return false;
 
-    int64_t new_balance = db_wallet_utxo_balance(ctx->node_db);
     int utxo_count = 0;
-    {
-        struct db_wallet_utxo tmp[4096];
-        utxo_count = db_wallet_utxo_list_unspent(ctx->node_db, tmp, 4096);
-        for (int i = 0; i < utxo_count; i++)
-            db_wallet_utxo_free(&tmp[i]);
-    }
+    int64_t new_balance = db_wallet_utxo_balance_with_count(ctx->node_db, &utxo_count);
+    if (new_balance < 0) return wallet_balance_unavailable(result);
 
     wallet_view_replay_summary(result, utxo_count,
         found > 0 ? found : 0, new_balance, old_balance);
@@ -330,14 +326,9 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
             "rescanwallet", "Chainstate lookup"))
         return false;
 
-    int64_t balance_before = db_wallet_utxo_balance(ctx->node_db);
     int utxos_before = 0;
-    {
-        struct db_wallet_utxo tmp[4096];
-        utxos_before = db_wallet_utxo_list_unspent(ctx->node_db, tmp, 4096);
-        for (int i = 0; i < utxos_before; i++)
-            db_wallet_utxo_free(&tmp[i]);
-    }
+    int64_t balance_before = db_wallet_utxo_balance_with_count(ctx->node_db, &utxos_before);
+    if (balance_before < 0) return wallet_balance_unavailable(result);
 
     /* Full rescan from block 0. wallet_scan_blocks owns the sole atomic
      * replacement; retain the old projection if scanning or storage fails. */
@@ -360,6 +351,9 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
             "Wallet rescan failed; previous projection retained"))
         return false;
 
+    int64_t balance_after = db_wallet_utxo_balance(ctx->node_db);
+    if (balance_after < 0) return wallet_balance_unavailable(result);
+
     /* Now sync the in-memory wallet from the fresh SQLite data */
     struct db_wallet_utxo unspent[4096];
     int count = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 4096);
@@ -380,9 +374,8 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
             wallet_unmark_outpoint_spent(ctx->wallet, &tid, unspent[i].vout);
             synced++;
         }
+        db_wallet_utxo_free(&unspent[i]);
     }
-
-    int64_t balance_after = db_wallet_utxo_balance(ctx->node_db);
 
     json_set_object(result);
     json_push_kv_int(result, "blocks_scanned", (int64_t)(chain_tip + 1));
@@ -397,9 +390,6 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
     json_push_kv_str(result, "balance_before", amt);
     format_amount(balance_after, amt, sizeof(amt));
     json_push_kv_str(result, "balance_after", amt);
-
-    for (int i = 0; i < count; i++)
-        db_wallet_utxo_free(&unspent[i]);
 
     return true;
 }

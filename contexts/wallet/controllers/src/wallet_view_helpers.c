@@ -465,7 +465,7 @@ int wv_effective_tip(sqlite3 *db) {
     struct node_db ndb;
 
     if (!db)
-        return 0;
+        return -1;
     memset(&ndb, 0, sizeof(ndb));
     ndb.db = db;
     ndb.open = true;
@@ -628,8 +628,10 @@ void wv_format_relative_time(int64_t timestamp, char *out, size_t out_max) {
 int64_t wv_query_ground_truth_balance(sqlite3 *db, int *utxo_count) {
     struct node_db ndb;
 
-    if (!db)
-        return 0;
+    if (!db) {
+        if (utxo_count) *utxo_count = -1;
+        return -1;
+    }
     memset(&ndb, 0, sizeof(ndb));
     ndb.db = db;
     ndb.open = true;
@@ -639,27 +641,31 @@ int64_t wv_query_ground_truth_balance(sqlite3 *db, int *utxo_count) {
 int64_t wv_query_shielded_balance(sqlite3 *db, int *note_count) {
     struct node_db ndb;
 
-    if (!db)
-        return 0;
+    if (!db) {
+        if (note_count) *note_count = -1;
+        return -1;
+    }
     memset(&ndb, 0, sizeof(ndb));
     ndb.db = db;
     ndb.open = true;
     return db_sapling_note_balance_with_count(&ndb, note_count);
 }
 
-int64_t wv_query_speed_balance(sqlite3 *db) {
-    struct node_db ndb;
-    struct db_wallet_projection_summary summary;
-
-    if (!db)
-        return 0;
-    memset(&ndb, 0, sizeof(ndb));
-    memset(&summary, 0, sizeof(summary));
+bool wv_query_projection_summary(sqlite3 *db, struct db_wallet_projection_summary *out) {
+    if (!db || !out) return false;
+    struct node_db ndb = {0};
     ndb.db = db;
     ndb.open = true;
-    if (!db_wallet_projection_summary(&ndb, &summary))
-        return 0;
-    return summary.speed_balance;
+    return db_wallet_projection_summary(&ndb, out);
+}
+
+bool wv_balance_pair_valid(int64_t a, int64_t b) {
+    return MoneyRange(a) && MoneyRange(b) && MoneyRange(a + b);
+}
+
+int64_t wv_query_speed_balance(sqlite3 *db) {
+    struct db_wallet_projection_summary summary;
+    return wv_query_projection_summary(db, &summary) ? summary.speed_balance : -1;
 }
 
 /* ── Shield status check ───────────────────────────────────── */

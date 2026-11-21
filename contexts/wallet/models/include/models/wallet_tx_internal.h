@@ -2,22 +2,30 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php.
  *
- * Internal helper contract shared between the wallet_tx ActiveRecord
- * model files (wallet_tx.c and sapling_note.c). NOT part of the public
+ * Internal helper contract shared by the wallet transaction, key and
+ * Sapling note ActiveRecord model files. NOT part of the public
  * model API — controllers/services must include models/wallet_tx.h.
  *
  * This header keeps shared wallet row readers and aggregate helpers visible
- * only to the wallet transaction / Sapling note model siblings that own those
- * tables. */
+ * only to the wallet model siblings that own those tables. */
 
 #ifndef ZCL_DB_MODEL_WALLET_TX_INTERNAL_H
 #define ZCL_DB_MODEL_WALLET_TX_INTERNAL_H
 
 #include "models/wallet_tx.h"
+#include <limits.h>
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+static inline bool wallet_checked_output_valid(const void *out, size_t max, size_t size)
+{
+    return out && max && max <= INT_MAX && max <= SIZE_MAX / size;
+}
+
+/* Finalizes the statement and sets amounts and optional count to -1 on failure. */
+bool wallet_tx_finish_balance(sqlite3_stmt *stmt, bool bound, int64_t *total_out, int *count_out);
 
 /* Shared sum+count aggregate query (defined in wallet_tx_reads.c).
  * Used by db_wallet_utxo_balance_with_count and

@@ -244,22 +244,21 @@ static bool wallet_sapling_address_balance(struct wallet_rpc_context *ctx,
      * populated, so trusting it here under-reported the balance and ignored
      * minconf. Always derive the per-address balance from the DB with a
      * minconf-aware query. */
+    if (!wallet_ctx_db_ready(ctx)) return wallet_balance_unavailable(result);
     int64_t balance = 0;
-    if (ctx->node_db) {
-        const struct sapling_key_entry *ske =
-            sapling_keystore_find_by_owned_address(&ctx->wallet->sapling_keys, z_d, z_pkd);
-        if (ske) {
-            int tip = ctx->wallet->best_block_height;
-            if (tip == 0 && ctx->main_state)
-                tip = active_chain_height(&ctx->main_state->chain_active);
-            if (tip == 0 && wallet_ctx_db_ready(ctx)) {
-                int db_h = db_block_max_height_any_status(ctx->node_db);
-                if (db_h >= 0)
-                    tip = db_h;
-            }
-            balance = db_sapling_note_balance_for_diversifier_minconf(
-                ctx->node_db, ske->ivk, z_d, tip, minconf);
+    const struct sapling_key_entry *ske =
+        sapling_keystore_find_by_owned_address(&ctx->wallet->sapling_keys, z_d, z_pkd);
+    if (ske) {
+        int tip = ctx->wallet->best_block_height;
+        if (tip == 0 && ctx->main_state)
+            tip = active_chain_height(&ctx->main_state->chain_active);
+        if (minconf > 0 && tip == 0) {
+            tip = db_wallet_chain_tip_height(ctx->node_db);
+            if (tip < 0) return wallet_balance_unavailable(result);
         }
+        balance = db_sapling_note_balance_for_diversifier_minconf(
+            ctx->node_db, ske->ivk, z_d, tip, minconf);
+        if (balance < 0) return wallet_balance_unavailable(result);
     }
     char buf[32];
     format_amount(balance, buf, sizeof(buf));
@@ -438,18 +437,20 @@ bool rpc_z_gettotalbalance(const struct json_value *params, bool help,
         ctx, &freshness);
 
     /* Shielded balance: always from SQLite (authoritative source) */
-    int64_t z_balance = 0;
-    int64_t encumbered = 0;
-    if (ctx->node_db) {
-        z_balance = db_sapling_note_balance(ctx->node_db);
-        encumbered = db_wallet_utxo_encumbered_balance(ctx->node_db) +
-                     db_sapling_note_encumbered_balance(ctx->node_db);
-    }
+    if (t_balance < 0 || !wallet_ctx_db_ready(ctx)) return wallet_balance_unavailable(result);
+    int64_t z_balance = db_sapling_note_balance(ctx->node_db);
+    int64_t t_locked = db_wallet_utxo_encumbered_balance(ctx->node_db);
+    int64_t z_locked = db_sapling_note_encumbered_balance(ctx->node_db);
+    if (z_balance < 0 || t_locked < 0 || z_locked < 0 || t_locked > INT64_MAX - z_locked)
+        return wallet_balance_unavailable(result);
+    int64_t encumbered = t_locked + z_locked;
 
     /* A reorg can resurrect an outgoing transaction into the mempool. Its
      * inputs remain ours but are deliberately unavailable for a second spend.
      * Report them as encumbered ownership so total money never vanishes while
      * keeping both spendable balances conservative. */
+    if (t_balance > INT64_MAX - z_balance || t_balance + z_balance > INT64_MAX - encumbered)
+        return wallet_balance_unavailable(result);
     int64_t total = t_balance + z_balance + encumbered;
 
     char t_str[32], z_str[32], enc_str[32], tot_str[32];

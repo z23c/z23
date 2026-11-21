@@ -1280,6 +1280,99 @@ static int wrc_deny_wallet_read(void *ctx, int operation, const char *a,
         ? SQLITE_DENY : SQLITE_OK;
 }
 
+static int wrc_deny_diagnostic_read(void *ctx, int operation, const char *a,
+                                    const char *b, const char *db, const char *trigger)
+{
+    (void)b; (void)db; (void)trigger;
+    return operation == SQLITE_READ && a && strcmp(a, ctx) == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool wrc_diagnostic_rpc(struct wrc_fx *fx, const char *method)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(&fx->tbl, method, &params, &result);
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static bool wrc_diagnostic_denial(struct wrc_fx *fx, const char *method,
+                                  const char *table)
+{
+    bool installed = sqlite3_set_authorizer(fx->ndb.db,
+        wrc_deny_diagnostic_read, (void *)table) == SQLITE_OK;
+    bool refused = installed && !wrc_diagnostic_rpc(fx, method);
+    bool reset = sqlite3_set_authorizer(fx->ndb.db, NULL, NULL) == SQLITE_OK;
+    return refused && reset && wrc_diagnostic_rpc(fx, method);
+}
+
+static bool wrc_diagnostic_empty(struct wrc_fx *fx, const char *method,
+                                 const char *array, const char *count)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(&fx->tbl, method, &params, &result);
+    const struct json_value *items = json_get(&result, array);
+    const struct json_value *summary = json_get(&result, "summary");
+    const struct json_value *value = summary ? json_get(summary, count) : NULL;
+    ok = ok && items && items->type == JSON_ARR && json_size(items) == 0 &&
+         value && json_get_int(value) == 0;
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static int wrc_diagnostic_complete(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: diagnostic reads fail closed and recover") {
+        ASSERT(wrc_open(&fx, false));
+        ASSERT(wrc_diagnostic_empty(&fx, "listwalletkeys", "transparent_keys",
+                                    "transparent_key_count"));
+        ASSERT(wrc_diagnostic_empty(&fx, "getbalanceflow", "flows", "transaction_count"));
+        ASSERT(wrc_diagnostic_denial(&fx, "listwalletkeys", "wallet_keys"));
+        ASSERT(wrc_add_wallet_key(&fx));
+        ASSERT(wrc_diagnostic_denial(&fx, "listwalletkeys", "wallet_utxos"));
+        ASSERT(wrc_diagnostic_denial(&fx, "getbalanceflow", "wallet_utxos"));
+        ASSERT(wrc_diagnostic_denial(&fx, "getbalanceflow", "wallet_transactions"));
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int wrc_diagnostic_cap(void)
+{
+    int failures = 0;
+    struct wrc_fx fx;
+    TEST("wallet_rows_coins: key diagnostics refuse a truncated list") {
+        ASSERT(wrc_open(&fx, false));
+        ASSERT(wrc_add_wallet_key(&fx));
+        bool seeded = true;
+        for (int i = 0; i < 257 && seeded; i++) {
+            struct db_wallet_utxo row = {0};
+            wrc_txid((uint16_t)i, row.txid);
+            memcpy(row.address_hash, fx.addr_hash, sizeof(row.address_hash));
+            row.value = 1;
+            row.script = fx.own_script.data;
+            row.script_len = fx.own_script.size;
+            seeded = db_wallet_utxo_save(&fx.ndb, &row);
+        }
+        ASSERT(seeded);
+        ASSERT(!wrc_diagnostic_rpc(&fx, "listwalletkeys"));
+        uint8_t txid[32];
+        wrc_txid(256, txid);
+        ASSERT(db_wallet_utxo_delete(&fx.ndb, txid, 0));
+        ASSERT(wrc_diagnostic_rpc(&fx, "listwalletkeys"));
+        wrc_close(&fx);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 
 static bool wrc_reserved_output(const struct transaction *tx, uint32_t n, void *ctx)
 {
@@ -1475,6 +1568,8 @@ int wrc_run_tests(void);
 int wrc_run_tests(void)
 {
     int failures = 0;
+    failures += wrc_diagnostic_complete();
+    failures += wrc_diagnostic_cap();
     failures += wrc_listunspent_complete();
     failures += wrc_import_agreeing_row_kept();
     failures += wrc_import_disagreeing_rows_skipped();

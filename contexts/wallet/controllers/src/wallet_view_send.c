@@ -18,8 +18,8 @@
 size_t serve_send(uint8_t *r, size_t max) {
     sqlite3 *db = wv_open_db();
 
-    int64_t balance = 0;
-    int64_t shielded_bal = 0;
+    int64_t balance = -1;
+    int64_t shielded_bal = -1;
     /* Contacts for autocomplete (max 20) */
     struct db_contact contacts[20];
     int n_contacts = 0;
@@ -39,8 +39,12 @@ size_t serve_send(uint8_t *r, size_t max) {
     size_t off = wv_emit_header(r, max, "Send — Z23", "/wallet/send");
 
     char bal_fmt[32];
-    int64_t spendable_total = balance + shielded_bal;
-    zcl_format_zcl(bal_fmt, sizeof(bal_fmt), spendable_total);
+    bool balance_known = wv_balance_pair_valid(balance, shielded_bal);
+    int64_t spendable_total = balance_known ? balance + shielded_bal : -1;
+    if (balance_known)
+        zcl_format_zcl(bal_fmt, sizeof(bal_fmt), spendable_total);
+    else
+        snprintf(bal_fmt, sizeof(bal_fmt), "Unavailable");
 
     /* Shielded note (raw HTML, empty if no shielded balance) */
     char shielded_note[256] = "";
@@ -120,6 +124,7 @@ size_t serve_send(uint8_t *r, size_t max) {
         "function updateRemaining(){"
         "var a=parseFloat(document.getElementById('amt').value)||0;"
         "var r=document.getElementById('remaining');"
+        "if(BAL<0){r.textContent='Wallet data unavailable';return;}"
         "if(a>0&&a<=BAL){r.textContent='Remaining: '+(BAL-a-%.8f).toFixed(8)+' ZCL';"
         "r.style.color='#666';}"
         "else if(a>BAL){r.textContent='Insufficient funds';"
@@ -130,6 +135,7 @@ size_t serve_send(uint8_t *r, size_t max) {
         "var m=document.getElementById('amt').value.trim();"
         "document.getElementById('addr-err').textContent='';"
         "document.getElementById('amt-err').textContent='';"
+        "if(BAL<0){document.getElementById('amt-err').textContent='Wallet data unavailable';return false;}"
         "var minLen=a&&a.startsWith('zs1')?70:26;"
         "if(!a||a.length<minLen){"
         "document.getElementById('addr-err').textContent="
@@ -221,7 +227,7 @@ static bool query_total_spendable_balance(int64_t *out) {
     int64_t t_balance = wv_query_ground_truth_balance(db, NULL);
     int64_t z_balance = wv_query_shielded_balance(db, NULL);
     sqlite3_close(db);
-    if (!MoneyRange(t_balance) || !MoneyRange(z_balance)) {
+    if (!wv_balance_pair_valid(t_balance, z_balance)) {
         LOG_WARN("wallet_view", "review balance projection out of money range");
         return false;
     }
@@ -527,6 +533,10 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
             return off;
         }
     }
+
+    int64_t available = 0;
+    if (!query_total_spendable_balance(&available))
+        return wv_render_unavailable(r, max, "Sending — Z23", "/wallet/send");
 
     /* Execute send */
     bool is_shielded = (strncmp(address, "zs1", 3) == 0);

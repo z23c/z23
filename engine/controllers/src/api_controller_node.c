@@ -781,6 +781,8 @@ size_t api_serve_wallet(uint8_t *response, size_t response_max)
      * EXCLUDES immature coinbase (matches listunspent + the coin selector). */
     int64_t transparent = db_wallet_utxo_spendable_balance(ndb, NULL);
     int64_t shielded = db_sapling_note_balance(ndb);
+    if (transparent < 0 || shielded < 0)
+        return api_json_error(response, response_max, JSON_500_HEADERS, "Wallet balance unavailable");
 
     /* Address — encode the first wallet key's pubkey hash */
     char address[128] = "";

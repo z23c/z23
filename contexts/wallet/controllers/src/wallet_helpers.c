@@ -27,6 +27,12 @@
 
 struct wallet_rpc_context g_wallet_ctx = {0};
 
+bool wallet_balance_unavailable(struct json_value *result)
+{
+    json_set_str(result, "Wallet balance unavailable: database read failed");
+    return false;
+}
+
 static void wallet_snapshot_scan_state(struct wallet *wallet,
                                        int *wallet_height,
                                        size_t *wallet_txs,
@@ -94,8 +100,8 @@ int64_t wallet_transparent_spendable_balance_diagnose(
 {
     if (freshness)
         memset(freshness, 0, sizeof(*freshness));
-    if (!ctx || !ctx->wallet)
-        return 0;
+    if (!ctx || !ctx->wallet || (ctx->node_db && !wallet_ctx_db_ready(ctx)))
+        return -1;
 
     int wallet_height = 0;
     size_t wallet_txs = 0;
@@ -111,6 +117,9 @@ int64_t wallet_transparent_spendable_balance_diagnose(
     int64_t durable_balance = wallet_ctx_db_ready(ctx)
         ? db_wallet_utxo_spendable_balance(ctx->node_db, NULL)
         : memory_balance;
+
+    if (db_confirmed_txs < 0 || durable_balance < 0)
+        return -1;
 
     /* best_block_height is a scan cursor, not proof that every wallet effect
      * at that height has reached RAM.  In particular, a restarted sender can

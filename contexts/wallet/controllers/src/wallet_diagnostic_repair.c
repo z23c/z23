@@ -101,6 +101,21 @@ bool rpc_scanblockfiles(const struct json_value *params, bool help,
 
     return true;
 }
+static bool wallet_repair_balances(struct wallet_rpc_context *ctx, struct json_value *result)
+{
+    int64_t t = db_wallet_utxo_balance(ctx->node_db);
+    int64_t z = db_sapling_note_balance(ctx->node_db);
+    if (t < 0 || z < 0 || t > INT64_MAX - z) return wallet_balance_unavailable(result);
+    char amount[32];
+    format_amount(t, amount, sizeof(amount));
+    json_push_kv_str(result, "wallet_t_balance", amount);
+    format_amount(z, amount, sizeof(amount));
+    json_push_kv_str(result, "wallet_z_balance", amount);
+    format_amount(t + z, amount, sizeof(amount));
+    json_push_kv_str(result, "total_balance", amount);
+    return true;
+}
+
 bool rpc_reindexdb(const struct json_value *params, bool help,
                           struct json_value *result)
 {
@@ -170,20 +185,7 @@ bool rpc_reindexdb(const struct json_value *params, bool help,
     json_push_kv_int(result, "blocks_scanned", chain_tip + 1);
     json_push_kv_int(result, "wallet_transactions", found);
 
-    int64_t t_bal = db_wallet_utxo_balance(ctx->node_db);
-    char bal_str[32];
-    format_amount(t_bal, bal_str, sizeof(bal_str));
-    json_push_kv_str(result, "wallet_t_balance", bal_str);
-
-    int64_t z_bal = db_sapling_note_balance(ctx->node_db);
-    char zbal_str[32];
-    format_amount(z_bal, zbal_str, sizeof(zbal_str));
-    json_push_kv_str(result, "wallet_z_balance", zbal_str);
-
-    int64_t total = t_bal + z_bal;
-    char tot_str[32];
-    format_amount(total, tot_str, sizeof(tot_str));
-    json_push_kv_str(result, "total_balance", tot_str);
+    if (!wallet_repair_balances(ctx, result)) return false;
 
     struct db_wallet_utxo utxos[256];
     int utxo_count = db_wallet_utxo_list_unspent(ctx->node_db, utxos, 256);
@@ -245,20 +247,7 @@ bool rpc_importlegacy(const struct json_value *params, bool help,
     json_set_object(result);
     json_push_kv_int(result, "wallet_transactions", found);
 
-    int64_t t_bal = db_wallet_utxo_balance(ctx->node_db);
-    char bal_str[32];
-    format_amount(t_bal, bal_str, sizeof(bal_str));
-    json_push_kv_str(result, "wallet_t_balance", bal_str);
-
-    int64_t z_bal = db_sapling_note_balance(ctx->node_db);
-    char zbal_str[32];
-    format_amount(z_bal, zbal_str, sizeof(zbal_str));
-    json_push_kv_str(result, "wallet_z_balance", zbal_str);
-
-    int64_t total = t_bal + z_bal;
-    char tot_str[32];
-    format_amount(total, tot_str, sizeof(tot_str));
-    json_push_kv_str(result, "total_balance", tot_str);
+    if (!wallet_repair_balances(ctx, result)) return false;
 
     struct db_wallet_utxo utxos[256];
     int utxo_count = db_wallet_utxo_list_unspent(ctx->node_db, utxos, 256);
@@ -495,6 +484,7 @@ bool rpc_reconcilewalletutxos(const struct json_value *params,
     }
 
     int64_t balance_before = db_wallet_utxo_balance(ctx->node_db);
+    if (balance_before < 0) return wallet_balance_unavailable(result);
 
     struct db_wallet_utxo unspent[4096];
     int count = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 4096);
@@ -517,6 +507,10 @@ bool rpc_reconcilewalletutxos(const struct json_value *params,
 
     int64_t balance_after = fix ? db_wallet_utxo_balance(ctx->node_db)
                                 : balance_before;
+    if (balance_after < 0) {
+        json_free(&details);
+        return wallet_balance_unavailable(result);
+    }
 
     if (fix) {
         node_db_state_set_int(ctx->node_db, "last_reconcile_height",
@@ -637,6 +631,7 @@ bool rpc_purgephantomutxos(const struct json_value *params,
     }
 
     int64_t balance_before = db_wallet_utxo_balance(ctx->node_db);
+    if (balance_before < 0) return wallet_balance_unavailable(result);
 
     struct db_wallet_utxo unspent[4096];
     int count = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 4096);
@@ -659,6 +654,11 @@ bool rpc_purgephantomutxos(const struct json_value *params,
         return false;
     }
 
+    int64_t balance_after = dryrun ? balance_before : db_wallet_utxo_balance(ctx->node_db);
+    if (balance_after < 0) {
+        wallet_diag_rollback_best_effort(ctx->node_db, "purge-orphans balance read");
+        return wallet_balance_unavailable(result);
+    }
     if (!dryrun) {
         if (!wallet_diag_commit_checked(ctx->node_db,
                                         "purge-orphans commit")) {
@@ -669,9 +669,6 @@ bool rpc_purgephantomutxos(const struct json_value *params,
     } else {
         wallet_diag_rollback_best_effort(ctx->node_db, "purge-orphans dry-run rollback");
     }
-
-    int64_t balance_after = dryrun ? balance_before
-                                   : db_wallet_utxo_balance(ctx->node_db);
 
     wallet_view_purge_summary(result, utxos_deleted, txs_deleted,
         amount_purged, balance_before, balance_after);

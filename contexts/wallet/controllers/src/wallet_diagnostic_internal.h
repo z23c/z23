@@ -19,6 +19,14 @@
 
 #include <stdbool.h>
 
+#if __has_include(<stdckdint.h>)
+#include <stdckdint.h>
+#else
+/* Older supported cross compilers provide equivalent checked builtins. */
+#define ckd_add(result, a, b) __builtin_add_overflow((a), (b), (result))
+#define ckd_sub(result, a, b) __builtin_sub_overflow((a), (b), (result))
+#endif
+
 /* Shared helpers (definitions live in wallet_diagnostic_controller.c).
  * wallet_ctx_db_ready is shared across all wallet controllers and is
  * declared in controllers/wallet_helpers.h. */

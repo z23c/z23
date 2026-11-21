@@ -258,7 +258,7 @@ int64_t zslp_check_payment(const char *datadir,
                             int64_t min_amount)
 {
     if (!zslp_controller_datadir(datadir))
-        return 0;
+        return -1;
     return zslp_payment_check_received(zslp_controller_datadir(datadir),
                                        z_addr, min_amount);
 }

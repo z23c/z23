@@ -78,6 +78,7 @@ static bool rpc_getbalance(const struct json_value *params, bool help,
      * that exact state. Read the same locked source the coin selector uses so
      * confirmation, history, and balance become visible together. */
     int64_t balance = wallet_transparent_spendable_balance(ctx);
+    if (balance < 0) return wallet_balance_unavailable(result);
     char buf[32];
     format_amount(balance, buf, sizeof(buf));
     json_set_str(result, buf);
@@ -123,8 +124,9 @@ static bool rpc_getwalletinfo(const struct json_value *params, bool help,
     /* Use the finalized in-memory wallet, not its asynchronous wallet_utxos
      * projection, so the summary cannot report a stale balance immediately
      * after saying a transaction is confirmed. */
-    if (readiness == WALLET_READINESS_READY) {
-        int64_t balance = wallet_transparent_spendable_balance(ctx);
+    int64_t balance = readiness == WALLET_READINESS_READY
+        ? wallet_transparent_spendable_balance(ctx) : -1;
+    if (balance >= 0) {
         format_amount(balance, bal, sizeof(bal));
         format_amount(wallet_get_unconfirmed_balance(ctx->wallet), ubal, sizeof(ubal));
         format_amount(wallet_get_immature_balance(ctx->wallet), ibal, sizeof(ibal));
@@ -139,7 +141,7 @@ static bool rpc_getwalletinfo(const struct json_value *params, bool help,
         json_push_kv(result, "immature_balance", &absent);
         json_free(&absent);
     }
-    json_push_kv_bool(result, "balance_available", readiness == WALLET_READINESS_READY);
+    json_push_kv_bool(result, "balance_available", balance >= 0);
     json_push_kv_str(result, "wallet_readiness", readiness == WALLET_READINESS_READY ? "ready" :
                      readiness == WALLET_READINESS_PENDING ? "pending" : "unknown");
     format_amount(ctx->wallet->default_fee, fee, sizeof(fee));

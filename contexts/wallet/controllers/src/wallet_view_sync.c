@@ -239,6 +239,7 @@ static bool wv_sync_utxo_rows_append(struct wv_sync_rows *rows,
 static bool wv_sync_parse_utxo_rows(struct node_db *ndb, const char *lu,
                                     struct wv_sync_rows *rows) {
     int chain_tip = db_wallet_chain_tip_height(ndb);
+    if (chain_tip < 0) return false;
     const char *p = lu;
     const char *txid_s;
     size_t txid_l;
@@ -321,6 +322,7 @@ static bool wv_sync_sapling_notes_append(struct wv_sync_rows *rows,
 static bool wv_sync_parse_note_rows(struct node_db *ndb, const char *zlu,
                                     struct wv_sync_rows *rows) {
     int chain_tip = db_wallet_chain_tip_height(ndb);
+    if (chain_tip < 0) return false;
     const char *p = zlu;
     const char *txid_s;
     size_t txid_l;
@@ -344,6 +346,7 @@ static void wv_sync_refresh_tx_heights(struct node_db *ndb) {
                                                  sizeof(txids) / sizeof(txids[0]));
     int updated = 0;
     int chain_tip = db_wallet_chain_tip_height(ndb);
+    if (chain_tip < 0) return;
     for (int i = 0; i < tx_count; i++) {
         char txid_hex[65];
         for (int j = 0; j < 32; j++)

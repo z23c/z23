@@ -34,7 +34,7 @@ size_t serve_shield(uint8_t *r, size_t max, const char *query) {
     if (amount <= 0) {
         /* No amount specified — show amount input form (or nothing-to-shield) */
         size_t off = wv_emit_header(r, max, "Shield — Z23", "/wallet/shield");
-        int64_t avail = 0;
+        int64_t avail = -1;
         {
             sqlite3 *sdb = wv_open_db();
             if (sdb) {
@@ -42,6 +42,8 @@ size_t serve_shield(uint8_t *r, size_t max, const char *query) {
                 sqlite3_close(sdb);
             }
         }
+        if (!MoneyRange(avail))
+            return wv_render_unavailable(r, max, "Shield — Z23", "/wallet/shield");
         double max_val = (double)avail / (double)ZATOSHI_PER_ZCL - FEE_ZCL;
         if (max_val < 0) max_val = 0;
 
@@ -230,6 +232,11 @@ static void render_shield_balance_card(char *bal_card, size_t bal_card_size) {
     if (sdb) {
         int64_t new_t = wv_query_ground_truth_balance(sdb, NULL);
         int64_t new_z = wv_query_shielded_balance(sdb, NULL);
+        if (!wv_balance_pair_valid(new_t, new_z)) {
+            snprintf(bal_card, bal_card_size, "<div>Wallet data unavailable</div>");
+            sqlite3_close(sdb);
+            return;
+        }
         char ts[32], zs[32], gs[32];
         snprintf(ts, sizeof(ts), "%.8f", (double)new_t / 1e8);
         snprintf(zs, sizeof(zs), "%.8f", (double)new_z / 1e8);
@@ -240,6 +247,8 @@ static void render_shield_balance_card(char *bal_card, size_t bal_card_size) {
         template_render(TMPL_SHIELD_BALANCE_CARD, bv, 3,
             bal_card, bal_card_size);
         sqlite3_close(sdb);
+    } else {
+        snprintf(bal_card, bal_card_size, "<div>Wallet data unavailable</div>");
     }
 }
 
@@ -278,6 +287,12 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
             return off;
         }
     }
+
+    sqlite3 *balance_db = wv_open_db();
+    int64_t available = wv_query_ground_truth_balance(balance_db, NULL);
+    if (balance_db) sqlite3_close(balance_db);
+    if (!MoneyRange(available))
+        return wv_render_unavailable(r, max, "Shield — Z23", "/wallet/shield");
 
     /* Look up a z-address from the wallet to use as destination */
     char z_dest[256] = "";

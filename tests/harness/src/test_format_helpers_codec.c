@@ -89,6 +89,25 @@ int test_format_helpers_codec(void)
         PASS();
     }
 
+    TEST("zcl amount formatters handle full signed range") {
+        char buf[64];
+        zcl_format_zcl(buf, sizeof(buf), INT64_MIN);
+        ASSERT_STR_EQ(buf, "-92233720368.54775808");
+        zcl_format_zcl(buf, sizeof(buf), INT64_MAX);
+        ASSERT_STR_EQ(buf, "92233720368.54775807");
+        zcl_format_zcl(buf, sizeof(buf), -1);
+        ASSERT_STR_EQ(buf, "-0.00000001");
+        zcl_format_zcl(buf, sizeof(buf), 0);
+        ASSERT_STR_EQ(buf, "0.00000000");
+        zcl_format_zcl_trimmed(buf, sizeof(buf), INT64_MIN, 2);
+        ASSERT_STR_EQ(buf, "-92233720368.54775808");
+        zcl_format_zcl_short(buf, sizeof(buf), INT64_MAX);
+        ASSERT_STR_EQ(buf, "92233720368.54775807");
+        zcl_format_zcl_short(buf, sizeof(buf), 0);
+        ASSERT_STR_EQ(buf, "0.0000");
+        PASS();
+    }
+
     /* ───────────────────────── zcl_format_zcl_trimmed ───────────────────────── */
 
     TEST("zcl_format_zcl_trimmed: min_decimals=0 on an all-zero fraction "

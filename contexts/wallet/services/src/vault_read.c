@@ -271,6 +271,11 @@ static void collect_transparent(struct node_db *ndb,
     total     = db_wallet_utxo_balance_with_count(ndb, &utxo_count);
     spendable = db_wallet_utxo_spendable_balance(ndb, NULL);
 
+    if (total < 0 || spendable < 0 || utxo_count < 0) {
+        row_undetermined(row, "wallet UTXO balance unavailable");
+        return;
+    }
+
     row->spendable  = spendable;
     row->immature   = total > spendable ? total - spendable : 0;
     row->item_count = utxo_count;
@@ -293,6 +298,10 @@ static void collect_shielded(struct node_db *ndb,
     (void)ids;
     (void)snap;
     row->spendable  = db_sapling_note_balance_with_count(ndb, &note_count);
+    if (row->spendable < 0 || note_count < 0) {
+        row_undetermined(row, "shielded note balance unavailable");
+        return;
+    }
     row->item_count = note_count;
     row_determined(row, VAULT_EVIDENCE_EXACT_NOTE_SUM,
                    "db_sapling_note_balance_with_count");
@@ -671,8 +680,12 @@ static struct zcl_result vault_read_snapshot_collect(struct node_db *ndb,
         return ZCL_ERR(-3, "vault_read_snapshot: identity set allocation "
                            "of %zu bytes failed", sizeof(*ids));
 
-    out->identities.transparent_keys = db_wallet_key_each(
+    out->identities.transparent_keys = db_wallet_key_each_checked(
         ndb, ident_add_transparent, ids);
+    if (out->identities.transparent_keys < 0) {
+        free(ids);
+        return ZCL_ERR(-4, "vault snapshot wallet keys unavailable");
+    }
     ident_load_watch_only(ndb, ids);
     out->identities.watch_only = ids->n_watch;
     ident_load_sapling(ndb, ids);
@@ -691,6 +704,10 @@ static struct zcl_result vault_read_snapshot_collect(struct node_db *ndb,
         c->fn(ndb, ids, out, row);
     }
     free(ids);
+
+    if (!out->rows[VAULT_CLASS_TRANSPARENT].determined ||
+        !out->rows[VAULT_CLASS_SHIELDED].determined)
+        return ZCL_ERR(-4, "vault snapshot wallet balance unavailable");
 
     /* A collector that returned without writing its row would otherwise
      * emit a silent, all-zero line. Refuse the whole snapshot instead. */

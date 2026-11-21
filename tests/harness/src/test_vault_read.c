@@ -541,6 +541,44 @@ static int vr_check_cutover_snapshot(struct node_db *ndb)
     return failures;
 }
 
+static int vr_deny_balance_read(void *ctx, int op, const char *name,
+                                const char *column, const char *db, const char *trigger)
+{
+    (void)column; (void)db; (void)trigger;
+    return op == SQLITE_READ && name && strcmp(name, (const char *)ctx) == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int vr_check_balance_read_failure(struct node_db *ndb, const char *table,
+                                         const char *class_name)
+{
+    int failures = 0;
+    struct vault_snapshot snap;
+    VR_CHECK("balance read denial installed", sqlite3_set_authorizer(ndb->db, vr_deny_balance_read, (void *)table) == SQLITE_OK);
+    struct zcl_result result = vault_read_snapshot(ndb, &snap);
+    VR_CHECK("balance read denial removed", sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK);
+    VR_CHECK("unreadable balance refuses aggregate", !result.ok && snap.zcl_total == 0);
+    result = vault_read_snapshot(ndb, &snap);
+    const struct vault_row *row = result.ok ? vr_row(&snap, class_name) : NULL;
+    VR_CHECK("balance resumes after read recovers", result.ok && row && row->determined);
+    return failures;
+}
+
+static int vr_check_empty_balance(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    struct vault_snapshot snap;
+    struct zcl_result result = vault_read_snapshot(&db, &snap);
+    const struct vault_row *t = result.ok ? vr_row(&snap, "transparent_zcl") : NULL;
+    const struct vault_row *z = result.ok ? vr_row(&snap, "shielded_zcl") : NULL;
+    VR_CHECK("empty wallet balances remain known zero", result.ok && t && z &&
+             t->determined && z->determined && t->spendable == 0 && z->spendable == 0);
+    node_db_close(&db);
+    return failures;
+}
+
 int test_vault_read(void)
 {
     int failures = 0;
@@ -587,6 +625,10 @@ int test_vault_read(void)
 
     failures += vr_check_cutover_snapshot(&ndb);
     failures += vr_check_release_failure(&ndb);
+    failures += vr_check_balance_read_failure(&ndb, "wallet_keys", "transparent_zcl");
+    failures += vr_check_balance_read_failure(&ndb, "wallet_utxos", "transparent_zcl");
+    failures += vr_check_balance_read_failure(&ndb, "wallet_sapling_notes", "shielded_zcl");
+    failures += vr_check_empty_balance();
     node_db_close(&ndb);
     test_rm_rf(dir);
 

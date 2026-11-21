@@ -17,6 +17,7 @@
 #include "domain/encoding/base58.h"
 #include "domain/encoding/bech32.h"
 #include "chain/chainparams.h"
+#include "core/amount.h"
 #include "rpc/zclassicd_port.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,9 @@ int64_t wv_query_int64(sqlite3 *db, const char *sql);
 int64_t wv_query_ground_truth_balance(sqlite3 *db, int *utxo_count);
 int64_t wv_query_shielded_balance(sqlite3 *db, int *note_count);
 int64_t wv_query_speed_balance(sqlite3 *db);
+struct db_wallet_projection_summary;
+bool wv_query_projection_summary(sqlite3 *db, struct db_wallet_projection_summary *out);
+bool wv_balance_pair_valid(int64_t a, int64_t b);
 int wv_effective_tip(sqlite3 *db);
 
 /* ── RPC helpers ──────────────────────────────────────────── */
@@ -84,6 +88,8 @@ int wv_recent_contacts(struct db_contact *out, size_t max);
 size_t wv_emit_header(uint8_t *buf, size_t max, const char *title,
                       const char *active_tab);
 void wv_emit_footer(uint8_t *buf, size_t max, size_t *off);
+size_t wv_render_unavailable(uint8_t *buf, size_t max, const char *title,
+                             const char *active);
 size_t wv_emit_qr_svg(uint8_t *buf, size_t max, size_t off,
                        const char *data, int module_size);
 size_t wv_emit_nav(uint8_t *buf, size_t max, const char *active);

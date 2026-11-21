@@ -135,4 +135,13 @@ struct db_sapling_note;
 int db_sapling_key_notes(struct node_db *ndb, const uint8_t ivk[32],
                          struct db_sapling_note *out, size_t max);
 
+/* Public metadata only: privkey is zeroed. Returns the complete count or -1.
+ * Callback results are provisional until success. */
+int db_wallet_key_each_checked(struct node_db *ndb, wallet_key_cb cb, void *ctx);
+/* Returns -1 on read failure or insufficient capacity. A non-NULL out with
+ * 0 < max <= INT_MAX and representable byte size is cleared before reading;
+ * invalid capacities leave it untouched. */
+int db_wallet_key_utxos_checked(struct node_db *ndb, const uint8_t pubkey_hash[20],
+                                struct db_wallet_utxo *out, size_t max);
+
 #endif

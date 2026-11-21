@@ -7,6 +7,17 @@
 
 /* ── Coins (/wallet/coins) — Full UTXO audit view ──────────── */
 
+static bool wv_coins_in_range(const struct wallet_view_coin *coins, int n)
+{
+    int64_t total = 0;
+    if (n < 0) return false;
+    for (int i = 0; i < n; i++) {
+        if (!wv_balance_pair_valid(total, coins[i].value)) return false;
+        total += coins[i].value;
+    }
+    return true;
+}
+
 size_t serve_coins(uint8_t *r, size_t max) {
     sqlite3 *db = wv_open_db();
     if (!db) {
@@ -18,6 +29,13 @@ size_t serve_coins(uint8_t *r, size_t max) {
     }
 
     int tip = wv_effective_tip(db);
+    int z_notes = 0;
+    int64_t z_total = wv_query_shielded_balance(db, &z_notes);
+    int64_t speed_bal = wv_query_speed_balance(db);
+    if (tip < 0 || !MoneyRange(z_total) || z_notes < 0 || !MoneyRange(speed_bal)) {
+        sqlite3_close(db);
+        return wv_render_unavailable(r, max, "Coins — Z23", "/wallet/coins");
+    }
     size_t off = wv_emit_header(r, max, "Coins — Z23", "/wallet/coins");
 
     /* Pre-render UTXO rows into buffer (fetch via port, render via view) */
@@ -28,14 +46,15 @@ size_t serve_coins(uint8_t *r, size_t max) {
         struct wallet_view_coin coins[256];
         int n_coins = wv_list_unspent_coins(db, coins,
             sizeof(coins) / sizeof(coins[0]));
+        if (!wv_coins_in_range(coins, n_coins)) {
+            sqlite3_close(db);
+            return wv_render_unavailable(r, max, "Coins — Z23", "/wallet/coins");
+        }
         wv_render_coin_rows(utxo_rows, sizeof(utxo_rows), coins, n_coins,
             tip, &t_total, &t_count);
     }
 
     /* Shielded notes */
-    int z_notes = 0;
-    int64_t z_total = wv_query_shielded_balance(db, &z_notes);
-
     /* Pre-render notes section */
     char notes_section[8192];
     size_t ns = 0;
@@ -99,13 +118,16 @@ size_t serve_coins(uint8_t *r, size_t max) {
     char t_total_s[32], z_total_s[32], grand_s[32];
     char t_count_s[16], speed_bal_s[32], speed_utxos_s[16];
     char chain_supply_s[32], chain_utxos_s[16];
+    if (!wv_balance_pair_valid(t_total, z_total)) {
+        sqlite3_close(db);
+        return wv_render_unavailable(r, max, "Coins — Z23", "/wallet/coins");
+    }
     int64_t grand = t_total + z_total;
     snprintf(t_total_s, sizeof(t_total_s), "%.8f", (double)t_total / 1e8);
     snprintf(z_total_s, sizeof(z_total_s), "%.8f", (double)z_total / 1e8);
     snprintf(grand_s, sizeof(grand_s), "%.8f", (double)grand / 1e8);
     snprintf(t_count_s, sizeof(t_count_s), "%d", t_count);
 
-    int64_t speed_bal = wv_query_speed_balance(db);
     int speed_utxo_count = wv_query_int(db,
         "SELECT count(*) FROM wallet_utxos WHERE spent_txid IS NULL");
     snprintf(speed_bal_s, sizeof(speed_bal_s), "%.8f",

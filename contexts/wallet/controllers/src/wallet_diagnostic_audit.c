@@ -142,21 +142,10 @@ static void walletaudit_accumulate_address(
     }
 }
 
-static void walletaudit_shielded_totals(struct wallet_rpc_context *ctx,
-    int64_t *z_balance, int *z_unspent)
-{
-    if (wallet_ctx_db_ready(ctx)) {
-        *z_balance = db_sapling_note_balance(ctx->node_db);
-        struct db_sapling_note db_notes[256];
-        *z_unspent = db_sapling_note_list_unspent(ctx->node_db,
-                                                  db_notes, 256);
-    }
-}
-
 static void walletaudit_fill_summary(struct wallet_rpc_context *ctx,
     int64_t verified_balance, int verified_count,
     int64_t phantom_balance, int phantom_count,
-    int64_t z_balance, int z_unspent, struct json_value *result)
+    int64_t z_balance, int z_unspent, int64_t sqlite_balance, struct json_value *result)
 {
     char s[32];
     struct json_value summary = {0};
@@ -187,11 +176,8 @@ static void walletaudit_fill_summary(struct wallet_rpc_context *ctx,
     format_amount(wallet_reports, s, sizeof(s));
     json_push_kv_str(&summary, "getbalance_reports", s);
 
-    if (wallet_ctx_db_ready(ctx)) {
-        int64_t sqlite_balance = db_wallet_utxo_balance(ctx->node_db);
-        format_amount(sqlite_balance, s, sizeof(s));
-        json_push_kv_str(&summary, "sqlite_verified_balance", s);
-    }
+    format_amount(sqlite_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "sqlite_verified_balance", s);
 
     json_push_kv(&result[0], "summary", &summary);
     json_free(&summary);
@@ -244,6 +230,11 @@ bool rpc_walletaudit(const struct json_value *params, bool help,
     if (!rpc_require_chainstate_lookup_ready(ctx->main_state, result,
             "walletaudit", "Chainstate lookup"))
         return false;
+
+    int z_unspent = 0;
+    int64_t sqlite_balance = db_wallet_utxo_balance(ctx->node_db);
+    int64_t z_balance = db_sapling_note_balance_with_count(ctx->node_db, &z_unspent);
+    if (sqlite_balance < 0 || z_balance < 0) return wallet_balance_unavailable(result);
 
     const struct chain_params *cp = chain_params_get();
     size_t pk_pfx_len, sc_pfx_len;
@@ -324,14 +315,9 @@ bool rpc_walletaudit(const struct json_value *params, bool help,
                                        out->value, available);
     }
 
-    /* Phase 2: Shielded notes (always from SQLite) */
-    int64_t z_balance = 0;
-    int z_unspent = 0;
-    walletaudit_shielded_totals(ctx, &z_balance, &z_unspent);
-
     /* Phase 3: Build summary */
     walletaudit_fill_summary(ctx, verified_balance, verified_count,
-        phantom_balance, phantom_count, z_balance, z_unspent, result);
+        phantom_balance, phantom_count, z_balance, z_unspent, sqlite_balance, result);
 
     /* Per-address breakdown */
     walletaudit_push_addr_breakdown(addr_bal, num_addrs, result);

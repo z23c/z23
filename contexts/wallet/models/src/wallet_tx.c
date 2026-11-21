@@ -19,6 +19,7 @@
  *   belongs_to :sapling_key */
 
 #include "platform/time_compat.h"
+#include "core/amount.h"
 #include "util/log_macros.h"
 #include "util/ar_step_readonly.h"
 #include "encoding/utilstrencodings.h"
@@ -990,8 +991,8 @@ int64_t db_wallet_utxo_balance(struct node_db *ndb)
 
 int64_t db_wallet_utxo_balance_with_count(struct node_db *ndb, int *utxo_count)
 {
-    int64_t total = 0;
-    int count = 0;
+    int64_t total = -1;
+    int count = -1;
 
     (void)wallet_tx_query_total_and_count(ndb,
         "SELECT COALESCE(SUM(value),0), COUNT(*) "
@@ -1004,36 +1005,18 @@ int64_t db_wallet_utxo_balance_with_count(struct node_db *ndb, int *utxo_count)
 
 int64_t db_wallet_utxo_spendable_balance(struct node_db *ndb, int *utxo_count)
 {
-    sqlite3_stmt *s = NULL;
-    int64_t total = 0;
-    int count = 0;
-
-    if (utxo_count)
-        *utxo_count = 0;
-    if (!ndb || !ndb->open)
-        return 0;
-
-    /* Coinbase outputs are spendable only once buried COINBASE_MATURITY=100
-     * blocks deep. Exclude immature coinbase from the spendable total so the
-     * reported balance matches what the coin-selector can actually spend (see
-     * db_wallet_utxo_select_coins) and what rpc_listunspent shows. */
+    if (utxo_count) *utxo_count = -1;
+    if (!ndb || !ndb->open || !ndb->db) return -1;
     int tip = db_wallet_chain_tip_height(ndb);
-
-    sqlite3_prepare_v2(ndb->db,
+    if (tip < 0) return -1;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_prepare_v2(ndb->db,
         "SELECT COALESCE(SUM(value),0), COUNT(*) FROM wallet_utxos"
-        " WHERE spent_txid IS NULL"
-        "   AND (is_coinbase=0 OR height <= ?)",
-        -1, &s, NULL);
-    if (!s)
-        LOG_RETURN(0, "wallet_tx", "prepare failed: %s", sqlite3_errmsg(ndb->db));
-    AR_BIND_INT(s, 1, tip - 100);
-    if (AR_STEP_ROW(s)) {
-        total = AR_COL_INT(s, 0);
-        count = (int)AR_COL_INT(s, 1);
-    }
-    AR_FINALIZE(s);
-    if (utxo_count)
-        *utxo_count = count;
+        " WHERE spent_txid IS NULL AND (is_coinbase=0 OR height <= ?)",
+        -1, &s, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_bind_int64(s, 1, (int64_t)tip - 100) == SQLITE_OK;
+    int64_t total = -1;
+    (void)wallet_tx_finish_balance(s, ok, &total, utxo_count);
     return total;
 }
 
@@ -1399,3 +1382,118 @@ bool db_wallet_utxo_key(struct node_db *ndb, const struct db_wallet_utxo *u,
 }
 
 /* SaplingNote belongs_to :sapling_key — lives in sapling_note.c */
+
+static bool wallet_diagnostic_txid_valid(sqlite3_stmt *s)
+{
+    return sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+        sqlite3_column_bytes(s, 0) == 32 && sqlite3_column_blob(s, 0);
+}
+
+static bool wallet_diagnostic_utxo_valid(sqlite3_stmt *s)
+{
+    int spent = sqlite3_column_type(s, 7);
+    return wallet_diagnostic_txid_valid(s) &&
+        sqlite3_column_type(s, 2) == SQLITE_INTEGER && MoneyRange(sqlite3_column_int64(s, 2)) &&
+        (spent == SQLITE_NULL || (spent == SQLITE_BLOB &&
+         sqlite3_column_bytes(s, 7) == 32 && sqlite3_column_blob(s, 7)));
+}
+
+static bool wallet_diagnostic_fee_valid(sqlite3_stmt *s)
+{
+    int type = sqlite3_column_type(s, 6);
+    if (type == SQLITE_NULL) return sqlite3_column_int64(s, 5) == 0;
+    if (type != SQLITE_INTEGER) return false;
+    int64_t fee = sqlite3_column_int64(s, 6);
+    if (fee == INT64_MIN) return false;
+    return MoneyRange(fee < 0 ? -fee : fee);
+}
+
+static bool wallet_diagnostic_tx_valid(sqlite3_stmt *s)
+{
+    int height = sqlite3_column_type(s, 3);
+    return wallet_diagnostic_txid_valid(s) &&
+        (height == SQLITE_NULL || (height == SQLITE_INTEGER &&
+         sqlite3_column_int64(s, 3) >= INT_MIN && sqlite3_column_int64(s, 3) <= INT_MAX)) &&
+        sqlite3_column_type(s, 4) == SQLITE_INTEGER &&
+        sqlite3_column_type(s, 5) == SQLITE_INTEGER &&
+        wallet_diagnostic_fee_valid(s);
+}
+
+static bool wallet_diagnostic_db_valid(const struct node_db *ndb)
+{
+    return ndb && ndb->open && ndb->db;
+}
+
+int db_wallet_tx_list_checked(struct node_db *ndb, struct db_wallet_tx *out,
+                              size_t max)
+{
+    bool valid = wallet_checked_output_valid(out, max, sizeof(*out));
+    if (valid) memset(out, 0, max * sizeof(*out));
+    if (!valid || !wallet_diagnostic_db_valid(ndb)) return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT txid,raw_tx,block_hash,block_height,time_received,from_me,fee"
+            " FROM wallet_transactions ORDER BY time_received DESC, txid DESC",
+            -1, &s, NULL) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return -1;
+    }
+    size_t count = 0;
+    int rc;
+    while ((rc = ar_step_checked(s, "wallet diagnostic read", NULL)) == ZCL_STEP_ROW) {
+        if (count == max) { rc = ZCL_STEP_ERROR; break; }
+        if (!wallet_diagnostic_tx_valid(s)) { rc = ZCL_STEP_ERROR; break; }
+        int raw_len = sqlite3_column_bytes(s, 1);
+        db_wallet_tx_read_row(s, 0, &out[count]);
+        count++;
+        if ((raw_len > 0 && !out[count - 1].raw_tx) ||
+            sqlite3_errcode(ndb->db) == SQLITE_NOMEM) {
+            rc = ZCL_STEP_ERROR;
+            break;
+        }
+    }
+    int final_rc = sqlite3_finalize(s);
+    if (rc != ZCL_STEP_DONE || final_rc != SQLITE_OK) {
+        for (size_t i = 0; i < count; i++) db_wallet_tx_free(&out[i]);
+        memset(out, 0, count * sizeof(*out));
+        return -1;
+    }
+    return (int)count;
+}
+
+int db_wallet_utxo_list_all_checked(struct node_db *ndb,
+                                    struct db_wallet_utxo *out, size_t max)
+{
+    bool valid = wallet_checked_output_valid(out, max, sizeof(*out));
+    if (valid) memset(out, 0, max * sizeof(*out));
+    if (!valid || !wallet_diagnostic_db_valid(ndb)) return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT txid,vout,value,address_hash,script,height,is_coinbase,"
+            "spent_txid,spent_vin FROM wallet_utxos ORDER BY height ASC",
+            -1, &s, NULL) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return -1;
+    }
+    size_t count = 0;
+    int rc;
+    while ((rc = ar_step_checked(s, "wallet diagnostic read", NULL)) == ZCL_STEP_ROW) {
+        if (count == max) { rc = ZCL_STEP_ERROR; break; }
+        if (!wallet_diagnostic_utxo_valid(s)) { rc = ZCL_STEP_ERROR; break; }
+        db_wallet_utxo_read_row(s, 0, &out[count]);
+        read_utxo_spent(s, 7, &out[count]);
+        count++;
+        if ((out[count - 1].script_len && !out[count - 1].script) ||
+            sqlite3_errcode(ndb->db) == SQLITE_NOMEM) {
+            rc = ZCL_STEP_ERROR;
+            break;
+        }
+    }
+    int final_rc = sqlite3_finalize(s);
+    if (rc != ZCL_STEP_DONE || final_rc != SQLITE_OK) {
+        for (size_t i = 0; i < count; i++) db_wallet_utxo_free(&out[i]);
+        memset(out, 0, count * sizeof(*out));
+        return -1;
+    }
+    return (int)count;
+}

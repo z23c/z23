@@ -217,8 +217,12 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
                  "importchainstate: failed to read imported UTXO total");
     }
     json_push_kv_int(result, "total_value_zatoshi", total_value);
-    json_push_kv_int(result, "wallet_balance_zatoshi",
-                     db_wallet_utxo_balance(ctx->node_db));
+    int64_t wallet_balance = db_wallet_utxo_balance(ctx->node_db);
+    if (wallet_balance < 0) {
+        json_set_str(result, "Chainstate imported, but wallet balance is unavailable");
+        LOG_FAIL("blockchain", "importchainstate: wallet balance unavailable after import");
+    }
+    json_push_kv_int(result, "wallet_balance_zatoshi", wallet_balance);
 
     printf("importchainstate: done — %d UTXOs imported\n", count);
     fflush(stdout);

@@ -17,6 +17,7 @@
 #include "keys/key_io.h"
 #include "sapling/fast_scan.h"
 #include <stdatomic.h>
+#include "core/amount.h"
 #include "script/standard.h"
 #include "support/cleanse.h"
 #include "core/utiltime.h"
@@ -66,40 +67,49 @@ struct key_balance_ctx {
     struct coins_view_cache *coins_tip;
     int64_t total_balance;
     int total_keys;
+    bool failed;
 };
+
+static bool key_utxo_available(struct key_balance_ctx *kc,
+                               const struct db_wallet_utxo *utxo)
+{
+    if (utxo->is_spent) return false;
+    if (!kc->coins_tip) return true;
+    struct uint256 tid;
+    memcpy(tid.data, utxo->txid, 32);
+    struct coins cc;
+    coins_init(&cc);
+    bool found = coins_view_cache_get_coins(kc->coins_tip, &tid, &cc);
+    bool available = found && coins_is_available(&cc, utxo->vout);
+    coins_free(&cc);
+    return available;
+}
 
 static void key_balance_cb(const struct db_wallet_key *key, void *ctx)
 {
     struct key_balance_ctx *kc = ctx;
+    if (kc->failed) return;
 
     /* Get UTXOs for this key */
     struct db_wallet_utxo utxos[256];
-    int n = db_wallet_key_utxos(kc->ndb, key->pubkey_hash, utxos, 256);
+    int n = db_wallet_key_utxos_checked(kc->ndb, key->pubkey_hash, utxos, 256);
+    if (n < 0) { kc->failed = true; return; }
 
     /* Sum verified balance */
     int64_t balance = 0;
     int unspent = 0;
     for (int i = 0; i < n; i++) {
-        if (!utxos[i].is_spent) {
-            if (kc->coins_tip) {
-                struct uint256 tid;
-                memcpy(tid.data, utxos[i].txid, 32);
-                struct coins cc;
-                coins_init(&cc);
-                bool found = coins_view_cache_get_coins(kc->coins_tip,
-                    &tid, &cc);
-                bool avail = found &&
-                    coins_is_available(&cc, utxos[i].vout);
-                coins_free(&cc);
-                if (avail) {
-                    balance += utxos[i].value;
-                    unspent++;
-                }
-            } else {
-                balance += utxos[i].value;
-                unspent++;
-            }
+        if (key_utxo_available(kc, &utxos[i])) {
+            if (!MoneyRange(utxos[i].value) ||
+                ckd_add(&balance, balance, utxos[i].value))
+                kc->failed = true;
+            unspent++;
         }
+    }
+    for (int i = 0; i < n; i++) db_wallet_utxo_free(&utxos[i]);
+    if (kc->failed || ckd_add(&kc->total_balance, kc->total_balance, balance)) {
+        kc->failed = true;
+        return;
     }
 
     /* Encode address */
@@ -112,10 +122,9 @@ static void key_balance_cb(const struct db_wallet_key *key, void *ctx)
 
     struct json_value entry = {0};
     wallet_view_key_entry(&entry, key, addr, unspent, balance);
-    json_push_back(kc->arr, &entry);
+    if (!json_push_back(kc->arr, &entry)) kc->failed = true;
     json_free(&entry);
 
-    kc->total_balance += balance;
     kc->total_keys++;
 }
 
@@ -167,7 +176,11 @@ bool rpc_listwalletkeys(const struct json_value *params, bool help,
         .total_balance = 0,
         .total_keys = 0,
     };
-    db_wallet_key_each(ctx->node_db, key_balance_cb, &kctx);
+    if (db_wallet_key_each_checked(ctx->node_db, key_balance_cb, &kctx) < 0 ||
+        kctx.failed) {
+        json_free(&keys_arr);
+        return wallet_balance_unavailable(result);
+    }
 
     json_push_kv(result, "transparent_keys", &keys_arr);
     json_free(&keys_arr);
@@ -181,9 +194,11 @@ bool rpc_listwalletkeys(const struct json_value *params, bool help,
         if (!ctx->wallet->sapling_keys.keys[i].used) continue;
         const struct sapling_key_entry *sk = &ctx->wallet->sapling_keys.keys[i];
 
-        int64_t z_bal = 0;
-        if (wallet_ctx_db_ready(ctx))
-            z_bal = db_sapling_note_balance_for_ivk(ctx->node_db, sk->ivk);
+        int64_t z_bal = db_sapling_note_balance_for_ivk(ctx->node_db, sk->ivk);
+        if (!MoneyRange(z_bal)) {
+            json_free(&z_keys);
+            return wallet_balance_unavailable(result);
+        }
 
         struct json_value zentry = {0};
         json_set_object(&zentry);
@@ -197,7 +212,11 @@ bool rpc_listwalletkeys(const struct json_value *params, bool help,
         char amt[32];
         format_amount(z_bal, amt, sizeof(amt));
         json_push_kv_real(&zentry, "balance", strtod(amt, NULL));
-        z_total += z_bal;
+        if (ckd_add(&z_total, z_total, z_bal)) {
+            json_free(&zentry);
+            json_free(&z_keys);
+            return wallet_balance_unavailable(result);
+        }
 
         json_push_back(&z_keys, &zentry);
         json_free(&zentry);
@@ -215,7 +234,12 @@ bool rpc_listwalletkeys(const struct json_value *params, bool help,
     json_push_kv_real(&summary, "transparent_balance", strtod(amt, NULL));
     format_amount(z_total, amt, sizeof(amt));
     json_push_kv_real(&summary, "shielded_balance", strtod(amt, NULL));
-    format_amount(kctx.total_balance + z_total, amt, sizeof(amt));
+    int64_t total;
+    if (ckd_add(&total, kctx.total_balance, z_total)) {
+        json_free(&summary);
+        return wallet_balance_unavailable(result);
+    }
+    format_amount(total, amt, sizeof(amt));
     json_push_kv_real(&summary, "total_balance", strtod(amt, NULL));
     json_push_kv(result, "summary", &summary);
     json_free(&summary);
@@ -452,19 +476,22 @@ struct balanceflow_ctx {
     int flow_count;
 };
 
-static int64_t balanceflow_tx_credit(struct wallet_rpc_context *ctx,
-                                     struct transaction *tx)
+static bool balanceflow_tx_credit(struct wallet_rpc_context *ctx,
+                                  struct transaction *tx, int64_t *out)
 {
     int64_t credit = 0;
     for (size_t j = 0; j < tx->num_vout; j++) {
-        if (wallet_is_mine(ctx->wallet, &tx->vout[j]))
-            credit += tx->vout[j].value;
+        if (wallet_is_mine(ctx->wallet, &tx->vout[j]) &&
+            (!MoneyRange(tx->vout[j].value) ||
+             ckd_add(&credit, credit, tx->vout[j].value)))
+            return false;
     }
-    return credit;
+    *out = credit;
+    return true;
 }
 
-static int64_t balanceflow_tx_debit(struct db_wallet_utxo *utxos,
-                                    int nutxos, struct transaction *tx)
+static bool balanceflow_tx_debit(struct db_wallet_utxo *utxos,
+                                 int nutxos, struct transaction *tx, int64_t *out)
 {
     int64_t debit = 0;
     for (size_t j = 0; j < tx->num_vin; j++) {
@@ -472,12 +499,15 @@ static int64_t balanceflow_tx_debit(struct db_wallet_utxo *utxos,
             if (memcmp(utxos[k].txid,
                        tx->vin[j].prevout.hash.data, 32) == 0 &&
                 utxos[k].vout == tx->vin[j].prevout.n) {
-                debit += utxos[k].value;
+                if (!MoneyRange(utxos[k].value) ||
+                    ckd_add(&debit, debit, utxos[k].value))
+                    return false;
                 break;
             }
         }
     }
-    return debit;
+    *out = debit;
+    return true;
 }
 
 static const char *balanceflow_tx_category(bool from_me, int64_t credit,
@@ -491,50 +521,74 @@ static const char *balanceflow_tx_category(bool from_me, int64_t credit,
         return "internal";
 }
 
-static int64_t balanceflow_chainstate_balance(struct wallet_rpc_context *ctx)
+static bool balanceflow_chainstate_balance(struct wallet_rpc_context *ctx,
+    const struct db_wallet_utxo *utxos, int count, int64_t *out)
 {
     int64_t chain_balance = 0;
-    struct db_wallet_utxo unspent[1024];
-    int nu = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 1024);
-    for (int i = 0; i < nu; i++) {
+    for (int i = 0; i < count; i++) {
+        if (utxos[i].is_spent) continue;
         struct uint256 tid;
-        memcpy(tid.data, unspent[i].txid, 32);
+        memcpy(tid.data, utxos[i].txid, 32);
         struct coins cc;
         coins_init(&cc);
         bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &cc);
-        if (found && coins_is_available(&cc, unspent[i].vout))
-            chain_balance += unspent[i].value;
+        bool available = found && coins_is_available(&cc, utxos[i].vout);
         coins_free(&cc);
+        if (available && (!MoneyRange(utxos[i].value) ||
+            ckd_add(&chain_balance, chain_balance, utxos[i].value))) return false;
     }
-    return chain_balance;
+    *out = chain_balance;
+    return true;
 }
 
-static void balanceflow_append_tx_flow(struct balanceflow_ctx *fc,
+static bool balanceflow_update_totals(struct balanceflow_ctx *fc, bool from_me,
+                                      int64_t credit, int64_t debit, int64_t fee,
+                                      int64_t *net)
+{
+    int64_t sent = 0;
+    if (ckd_sub(net, credit, debit) ||
+        ckd_add(&fc->running_balance, fc->running_balance, *net) ||
+        (credit > 0 && !from_me &&
+         ckd_add(&fc->total_received, fc->total_received, credit)) ||
+        (debit > 0 && (ckd_sub(&sent, debit, credit) ||
+         ckd_add(&fc->total_sent, fc->total_sent, sent))) ||
+        ckd_add(&fc->total_fees, fc->total_fees, fee))
+        return false;
+    return true;
+}
+
+static bool balanceflow_append_tx_flow(struct balanceflow_ctx *fc,
                                        struct json_value *flows,
                                        struct db_wallet_tx *row)
 {
     if (row->block_height < fc->min_height ||
         row->block_height > fc->max_height) {
         db_wallet_tx_free(row);
-        return;
+        return true;
     }
 
     struct transaction tx;
     if (!wallet_db_tx_deserialize(row, &tx)) {
         db_wallet_tx_free(row);
-        return;
+        return false;
     }
 
     /* Calculate credit: outputs that are mine */
-    int64_t credit = balanceflow_tx_credit(fc->wctx, &tx);
+    int64_t credit = 0;
 
     /* Calculate debit: inputs from wallet UTXOs */
     int64_t debit = 0;
-    if (row->from_me)
-        debit = balanceflow_tx_debit(fc->utxos, fc->nutxos, &tx);
+    bool ok = balanceflow_tx_credit(fc->wctx, &tx, &credit);
+    if (row->from_me && ok)
+        ok = balanceflow_tx_debit(fc->utxos, fc->nutxos, &tx, &debit);
 
     int64_t fee = row->from_me ? row->fee : 0;
-    int64_t net = credit - debit;
+    int64_t net = 0;
+    if (!ok || !balanceflow_update_totals(fc, row->from_me, credit, debit, fee, &net)) {
+        transaction_free(&tx);
+        db_wallet_tx_free(row);
+        return false;
+    }
 
     char txid_hex[65];
     uint256_get_hex(&tx.hash, txid_hex);
@@ -542,28 +596,29 @@ static void balanceflow_append_tx_flow(struct balanceflow_ctx *fc,
     const char *category = balanceflow_tx_category(row->from_me,
                                                    credit, debit);
 
-    fc->running_balance += net;
-    if (credit > 0 && !row->from_me)
-        fc->total_received += credit;
-    if (debit > 0)
-        fc->total_sent += (debit - credit);
-    fc->total_fees += fee;
-
     struct json_value entry = {0};
     wallet_view_flow_entry(&entry, txid_hex, category,
                            net, fee,
                            row->block_height, fc->running_balance);
-    json_push_back(flows, &entry);
+    ok = json_push_back(flows, &entry);
     json_free(&entry);
     fc->flow_count++;
 
     transaction_free(&tx);
     db_wallet_tx_free(row);
+    return ok;
+}
+
+static void balanceflow_free_utxos(struct db_wallet_utxo *utxos, int count)
+{
+    for (int i = 0; i < count; i++) db_wallet_utxo_free(&utxos[i]);
+    free(utxos);
 }
 
 static void balanceflow_push_summary(struct json_value *result,
                                      struct wallet_rpc_context *ctx,
-                                     const struct balanceflow_ctx *fc)
+                                     const struct balanceflow_ctx *fc,
+                                     int64_t chain_balance)
 {
     struct json_value summary = {0};
     json_set_object(&summary);
@@ -581,7 +636,6 @@ static void balanceflow_push_summary(struct json_value *result,
 
     /* Cross-verify with chainstate */
     if (ctx->coins_tip) {
-        int64_t chain_balance = balanceflow_chainstate_balance(ctx);
         format_amount(chain_balance, amt, sizeof(amt));
         json_push_kv_real(&summary, "chainstate_verified_balance",
                           strtod(amt, NULL));
@@ -616,31 +670,35 @@ bool rpc_getbalanceflow(const struct json_value *params, bool help,
             "Chainstate lookup"))
         return false;
 
-    const struct chain_params *cp = chain_params_get();
-    size_t pk_pfx_len, sc_pfx_len;
-    const unsigned char *pk_pfx = chain_params_base58_prefix(
-        cp, B58_PUBKEY_ADDRESS, &pk_pfx_len);
-    const unsigned char *sc_pfx = chain_params_base58_prefix(
-        cp, B58_SCRIPT_ADDRESS, &sc_pfx_len);
-    (void)pk_pfx; (void)pk_pfx_len;
-    (void)sc_pfx; (void)sc_pfx_len;
-
     /* Get all wallet UTXOs (spent + unspent) sorted by height */
     struct db_wallet_utxo *all_utxos = zcl_calloc(4096, sizeof(struct db_wallet_utxo), "wallet_utxos");
     if (!all_utxos) {
         json_set_str(result, "Out of memory");
         return false;
     }
-    int nutxos = db_wallet_utxo_list_all(ctx->node_db, all_utxos, 4096);
+    int nutxos = db_wallet_utxo_list_all_checked(ctx->node_db, all_utxos, 4096);
+    if (nutxos < 0) {
+        free(all_utxos);
+        return wallet_balance_unavailable(result);
+    }
 
     /* Get all wallet txs sorted by time */
     struct db_wallet_tx *txs = zcl_calloc(2000, sizeof(struct db_wallet_tx), "wallet_txs");
     if (!txs) {
-        free(all_utxos);
+        balanceflow_free_utxos(all_utxos, nutxos);
         json_set_str(result, "Out of memory");
         return false;
     }
-    int ntxs = db_wallet_tx_list(ctx->node_db, txs, 2000, 0);
+    int ntxs = db_wallet_tx_list_checked(ctx->node_db, txs, 2000);
+    if (ntxs < 0) {
+        balanceflow_free_utxos(all_utxos, nutxos);
+        free(txs);
+        return wallet_balance_unavailable(result);
+    }
+
+    int64_t chain_balance = 0;
+    bool ok = !ctx->coins_tip || balanceflow_chainstate_balance(
+        ctx, all_utxos, nutxos, &chain_balance);
 
     json_set_object(result);
 
@@ -662,16 +720,17 @@ bool rpc_getbalanceflow(const struct json_value *params, bool help,
 
     /* Process each transaction */
     for (int i = ntxs - 1; i >= 0; i--) {
-        balanceflow_append_tx_flow(&fc, &flows, &txs[i]);
+        if (ok) ok = balanceflow_append_tx_flow(&fc, &flows, &txs[i]);
+        else db_wallet_tx_free(&txs[i]);
     }
 
-    json_push_kv(result, "flows", &flows);
+    if (ok) ok = json_push_kv(result, "flows", &flows);
     json_free(&flows);
 
     /* Summary */
-    balanceflow_push_summary(result, ctx, &fc);
+    if (ok) balanceflow_push_summary(result, ctx, &fc, chain_balance);
 
-    free(all_utxos);
+    balanceflow_free_utxos(all_utxos, nutxos);
     free(txs);
-    return true;
+    return ok ? true : wallet_balance_unavailable(result);
 }

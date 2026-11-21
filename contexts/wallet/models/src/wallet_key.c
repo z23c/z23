@@ -16,9 +16,12 @@
  * validates :address, string_present: true */
 
 #include "base/serialize_le.h"
+#include "core/amount.h"
 #include "util/log_macros.h"
+#include "util/ar_step_readonly.h"
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"
+#include "models/wallet_tx_internal.h"
 #include "support/cleanse.h"
 #include "util/result.h"
 #include <string.h>
@@ -604,4 +607,95 @@ int db_sapling_key_notes(struct node_db *ndb, const uint8_t ivk[32],
     }
     AR_FINALIZE(s);
     return count;
+}
+
+static bool wallet_key_public_row(sqlite3_stmt *s, struct db_wallet_key *key)
+{
+    if (sqlite3_column_type(s, 0) != SQLITE_BLOB ||
+        sqlite3_column_bytes(s, 0) != 20 || !sqlite3_column_blob(s, 0))
+        return false;
+    memset(key, 0, sizeof(*key));
+    memcpy(key->pubkey_hash, sqlite3_column_blob(s, 0), 20);
+    int pk_len = sqlite3_column_bytes(s, 1);
+    const void *pk = sqlite3_column_blob(s, 1);
+    if (pk_len < 0 || pk_len > 33 || (pk_len > 0 && !pk)) return false;
+    if (pk_len > 0) memcpy(key->pubkey, pk, (size_t)pk_len);
+    key->pubkey_len = (size_t)pk_len;
+    key->compressed = sqlite3_column_int(s, 2) != 0;
+    key->created_at = sqlite3_column_int64(s, 3);
+    return true;
+}
+
+int db_wallet_key_each_checked(struct node_db *ndb, wallet_key_cb cb, void *ctx)
+{
+    if (!ndb || !ndb->open || !ndb->db || !cb) return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT pubkey_hash,pubkey,compressed,created_at"
+            " FROM wallet_keys", -1, &s, NULL) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return -1;
+    }
+    int count = 0;
+    int rc;
+    while ((rc = ar_step_checked(s, "wallet diagnostic read", NULL)) == ZCL_STEP_ROW) {
+        if (count == INT_MAX) { rc = ZCL_STEP_ERROR; break; }
+        struct db_wallet_key k;
+        if (!wallet_key_public_row(s, &k)) {
+            rc = ZCL_STEP_ERROR;
+            break;
+        }
+        cb(&k, ctx);
+        count++;
+    }
+    int final_rc = sqlite3_finalize(s);
+    return rc == ZCL_STEP_DONE && final_rc == SQLITE_OK ? count : -1;
+}
+
+static bool wallet_key_utxo_row_valid(sqlite3_stmt *s)
+{
+    return sqlite3_column_type(s, 0) == SQLITE_BLOB &&
+        sqlite3_column_bytes(s, 0) == 32 && sqlite3_column_blob(s, 0) &&
+        sqlite3_column_type(s, 2) == SQLITE_INTEGER && MoneyRange(sqlite3_column_int64(s, 2));
+}
+
+int db_wallet_key_utxos_checked(struct node_db *ndb,
+    const uint8_t pubkey_hash[20], struct db_wallet_utxo *out, size_t max)
+{
+    bool valid = wallet_checked_output_valid(out, max, sizeof(*out));
+    if (valid) memset(out, 0, max * sizeof(*out));
+    if (!ndb || !ndb->open || !ndb->db || !pubkey_hash || !valid) return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT txid,vout,value,height,is_coinbase"
+            " FROM wallet_utxos WHERE address_hash=?"
+            " AND spent_txid IS NULL ORDER BY value DESC", -1, &s, NULL) != SQLITE_OK ||
+        sqlite3_bind_blob(s, 1, pubkey_hash, 20, SQLITE_TRANSIENT) != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return -1;
+    }
+    size_t count = 0;
+    int rc;
+    while ((rc = ar_step_checked(s, "wallet diagnostic read", NULL)) == ZCL_STEP_ROW) {
+        if (count == max) { rc = ZCL_STEP_ERROR; break; }
+        if (!wallet_key_utxo_row_valid(s)) {
+            rc = ZCL_STEP_ERROR;
+            break;
+        }
+        struct db_wallet_utxo *u = &out[count++];
+        memset(u, 0, sizeof(*u));
+        AR_READ_BLOB(s, 0, u->txid, 32);
+        u->vout = (uint32_t)AR_COL_INT(s, 1);
+        u->value = AR_COL_INT(s, 2);
+        memcpy(u->address_hash, pubkey_hash, 20);
+        u->script_len = 0;
+        u->height = (int)AR_COL_INT(s, 3);
+        u->is_coinbase = AR_COL_INT(s, 4) != 0;
+    }
+    int final_rc = sqlite3_finalize(s);
+    if (rc != ZCL_STEP_DONE || final_rc != SQLITE_OK) {
+        memset(out, 0, count * sizeof(*out));
+        return -1;
+    }
+    return (int)count;
 }

@@ -21,14 +21,11 @@ void zcl_format_time(char *buf, size_t max, int64_t timestamp)
 
 void zcl_format_zcl(char *buf, size_t max, int64_t zatoshi)
 {
-    int64_t whole, frac;
+    int64_t whole = zatoshi / ZATOSHI_PER_ZCL;
+    int64_t frac = zatoshi % ZATOSHI_PER_ZCL;
     if (zatoshi < 0) {
-        whole = (-zatoshi) / ZATOSHI_PER_ZCL;
-        frac = (-zatoshi) % ZATOSHI_PER_ZCL;
-        snprintf(buf, max, "-%" PRId64 ".%08" PRId64, whole, frac);
+        snprintf(buf, max, "-%" PRId64 ".%08" PRId64, -whole, -frac);
     } else {
-        whole = zatoshi / ZATOSHI_PER_ZCL;
-        frac = zatoshi % ZATOSHI_PER_ZCL;
         snprintf(buf, max, "%" PRId64 ".%08" PRId64, whole, frac);
     }
 }

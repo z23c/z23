@@ -23,6 +23,7 @@
 #include "wallet/sapling_keys.h"   /* MAX_SAPLING_KEYS (break-park regression) */
 #include "keys/key.h"
 #include "models/database.h"       /* node_db (scrub reader assertions) */
+#include "models/wallet_tx.h"
 #include "models/wallet_key.h"     /* db_wallet_key_each / count */
 #include "support/cleanse.h"
 #include "util/result.h"
@@ -1383,6 +1384,205 @@ static int test_plaintext_migration_preserves_keypool(void)
     return failures;
 }
 
+static void diagnostic_key_count(const struct db_wallet_key *key, void *ctx)
+{
+    for (size_t i = 0; i < sizeof(key->privkey); i++) {
+        if (key->privkey[i] != 0) { *(int *)ctx = -100; return; }
+    }
+    (*(int *)ctx)++;
+}
+
+struct diagnostic_interrupt_context {
+    sqlite3 *db;
+    int seen;
+};
+
+static void diagnostic_interrupt_key(const struct db_wallet_key *key, void *ctx)
+{
+    (void)key;
+    struct diagnostic_interrupt_context *state = ctx;
+    state->seen++;
+    sqlite3_interrupt(state->db);
+}
+
+
+static int diagnostic_deny_read(void *ctx, int action, const char *a,
+                                const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)a; (void)b; (void)c; (void)d;
+    return action == SQLITE_READ ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int diagnostic_interrupt(void *ctx)
+{
+    (void)ctx;
+    return 1;
+}
+
+static bool diagnostic_all_bytes(const void *buffer, size_t length, unsigned char value)
+{
+    const unsigned char *bytes = buffer;
+    for (size_t i = 0; i < length; i++)
+        if (bytes[i] != value) return false;
+    return true;
+}
+
+static bool diagnostic_invalid_outputs_untouched(void)
+{
+    struct db_wallet_utxo u;
+    struct db_wallet_tx t;
+    struct db_sapling_note n;
+    uint8_t hash[20] = {0};
+    memset(&u, 0xa5, sizeof(u));
+    if (db_wallet_key_utxos_checked(NULL, hash, &u, SIZE_MAX) != -1 ||
+        !diagnostic_all_bytes(&u, sizeof(u), 0xa5)) return false;
+    if (db_wallet_utxo_list_all_checked(NULL, &u, SIZE_MAX) != -1 ||
+        !diagnostic_all_bytes(&u, sizeof(u), 0xa5)) return false;
+    memset(&t, 0xa5, sizeof(t));
+    if (db_wallet_tx_list_checked(NULL, &t, SIZE_MAX) != -1 ||
+        !diagnostic_all_bytes(&t, sizeof(t), 0xa5)) return false;
+    memset(&n, 0xa5, sizeof(n));
+    return db_sapling_note_list_all_checked(NULL, &n, SIZE_MAX) == -1 &&
+           diagnostic_all_bytes(&n, sizeof(n), 0xa5);
+}
+
+static bool diagnostic_outputs_initialized(void)
+{
+    struct db_wallet_utxo u;
+    struct db_wallet_tx t;
+    struct db_sapling_note n;
+    uint8_t hash[20] = {0};
+    memset(&u, 0xa5, sizeof(u));
+    if (db_wallet_key_utxos_checked(NULL, hash, &u, 1) != -1 ||
+        !diagnostic_all_bytes(&u, sizeof(u), 0)) return false;
+    memset(&u, 0xa5, sizeof(u));
+    if (db_wallet_utxo_list_all_checked(NULL, &u, 1) != -1 ||
+        !diagnostic_all_bytes(&u, sizeof(u), 0)) return false;
+    memset(&t, 0xa5, sizeof(t));
+    if (db_wallet_tx_list_checked(NULL, &t, 1) != -1 ||
+        !diagnostic_all_bytes(&t, sizeof(t), 0)) return false;
+    memset(&n, 0xa5, sizeof(n));
+    if (db_sapling_note_list_all_checked(NULL, &n, 1) != -1 ||
+        !diagnostic_all_bytes(&n, sizeof(n), 0)) return false;
+    return diagnostic_invalid_outputs_untouched();
+}
+
+static int test_diagnostic_checked_readers(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    struct db_wallet_utxo utxos[2] = {0};
+    struct db_wallet_tx txs[2] = {0};
+    TEST("checked diagnostic readers reject failed and truncated evidence") {
+        ASSERT(diagnostic_outputs_initialized());
+        db = open_mem_db();
+        ASSERT(db != NULL);
+        ASSERT(sqlite3_exec(db, "CREATE TABLE wallet_utxos(txid BLOB,vout INT,value INT,"
+            "address_hash BLOB,script BLOB,height INT,is_coinbase INT,spent_txid BLOB,spent_vin INT)",
+            NULL, NULL, NULL) == SQLITE_OK);
+        struct node_db ndb = {.db = db, .open = true};
+        uint8_t hash[20] = {0};
+        int seen = 0;
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_key_count, &seen) == 0);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == 0);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == 0);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == 0);
+        ASSERT(sqlite3_exec(db,
+            "INSERT INTO wallet_keys VALUES(zeroblob(20),zeroblob(33),randomblob(32),1,1);"
+            "INSERT INTO wallet_utxos VALUES(zeroblob(32),0,4,zeroblob(20),x'01',1,0,NULL,NULL);"
+            "INSERT INTO wallet_utxos VALUES(zeroblob(32),1,5,zeroblob(20),x'02',1,0,NULL,NULL);"
+            "INSERT INTO wallet_transactions VALUES(zeroblob(32),x'01',NULL,NULL,1,0,0);"
+            "INSERT INTO wallet_transactions VALUES(randomblob(32),x'02',NULL,NULL,2,0,0);",
+            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_key_count, &seen) == 1 && seen == 1);
+        ASSERT(sqlite3_exec(db, "INSERT INTO wallet_keys VALUES(zeroblob(1),zeroblob(33),zeroblob(32),1,1)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_key_count, &seen) == -1);
+        ASSERT(sqlite3_exec(db, "DELETE FROM wallet_keys WHERE length(pubkey_hash) != 20", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_exec(db, "INSERT INTO wallet_keys VALUES(randomblob(20),zeroblob(33),zeroblob(32),1,1)", NULL, NULL, NULL) == SQLITE_OK);
+        struct diagnostic_interrupt_context interrupted = {.db = db};
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_interrupt_key, &interrupted) == -1);
+        ASSERT(interrupted.seen == 1);
+        seen = 0;
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_key_count, &seen) == 2 && seen == 2);
+        ASSERT(sqlite3_exec(db, "DELETE FROM wallet_keys WHERE pubkey_hash != zeroblob(20)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 1) == -1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 1) == -1);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 1) == -1);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == 2);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == 2);
+        for (size_t i = 0; i < 2; i++) db_wallet_utxo_free(&utxos[i]);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == 2);
+        for (size_t i = 0; i < 2; i++) db_wallet_tx_free(&txs[i]);
+        ASSERT(sqlite3_exec(db, "DELETE FROM wallet_utxos; DELETE FROM wallet_transactions;"
+            "INSERT INTO wallet_utxos VALUES(zeroblob(1),0,4,zeroblob(20),NULL,1,0,NULL,NULL);"
+            "INSERT INTO wallet_transactions VALUES(zeroblob(1),NULL,NULL,NULL,1,0,0);",
+            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == -1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == -1);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == -1);
+        ASSERT(sqlite3_exec(db, "DELETE FROM wallet_utxos; DELETE FROM wallet_transactions",
+            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == 0);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == 0);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == 0);
+        ASSERT(sqlite3_exec(db,
+            "INSERT INTO wallet_utxos VALUES(zeroblob(32),0,4,zeroblob(20),NULL,1,0,NULL,NULL);"
+            "INSERT INTO wallet_transactions VALUES(zeroblob(32),NULL,NULL,NULL,1,1,0);"
+            "UPDATE wallet_utxos SET value=CAST(zeroblob(1) AS TEXT);",
+            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == -1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == -1);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_utxos SET value=-1", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == -1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == -1);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_utxos SET value=4;"
+            "UPDATE wallet_transactions SET fee=CAST(zeroblob(1) AS TEXT)",
+            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == -1);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_transactions SET fee=0,"
+            "time_received=CAST(zeroblob(1) AS TEXT)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == -1);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_transactions SET time_received=1", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_transactions SET fee=(-9223372036854775807 - 1)", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == -1);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_transactions SET from_me=0,fee=NULL", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == 1);
+        db_wallet_tx_free(&txs[0]);
+        ASSERT(sqlite3_exec(db, "UPDATE wallet_transactions SET from_me=1,fee=-7", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == 1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == 1);
+        db_wallet_utxo_free(&utxos[0]);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == 1);
+        db_wallet_tx_free(&txs[0]);
+        ASSERT(sqlite3_set_authorizer(db, diagnostic_deny_read, NULL) == SQLITE_OK);
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_key_count, &seen) == -1);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == -1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == -1);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == -1);
+        ASSERT(sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK);
+        sqlite3_progress_handler(db, 1, diagnostic_interrupt, NULL);
+        ASSERT(db_wallet_key_each_checked(&ndb, diagnostic_key_count, &seen) == -1);
+        ASSERT(db_wallet_key_utxos_checked(&ndb, hash, utxos, 2) == -1);
+        ASSERT(db_wallet_utxo_list_all_checked(&ndb, utxos, 2) == -1);
+        ASSERT(db_wallet_tx_list_checked(&ndb, txs, 2) == -1);
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        ASSERT(sqlite3_close(db) == SQLITE_OK);
+        db = NULL;
+        PASS();
+    } _test_next:;
+    for (size_t i = 0; i < 2; i++) {
+        db_wallet_utxo_free(&utxos[i]);
+        db_wallet_tx_free(&txs[i]);
+    }
+    if (db) {
+        sqlite3_progress_handler(db, 0, NULL, NULL);
+        sqlite3_set_authorizer(db, NULL, NULL);
+        sqlite3_close(db);
+    }
+    return failures;
+}
+
+
 int test_wallet_sqlite_enc(void);
 
 int test_wallet_sqlite_enc(void)
@@ -1392,6 +1592,7 @@ int test_wallet_sqlite_enc(void)
     /* Start from a clean lock state; tests opt in through explicit unlock. */
     wallet_lock_reset_for_test();
 
+    failures += test_diagnostic_checked_readers();
     failures += test_shielded_empty_proof();
     failures += test_notes_empty_proof();
     failures += test_plaintext_roundtrip();

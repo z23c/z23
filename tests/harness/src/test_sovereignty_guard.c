@@ -32,6 +32,7 @@
 #include "controllers/zslp_controller.h"
 #include "core/uint256.h"
 #include "jobs/reducer_frontier.h"
+#include "models/database.h"
 #include "json/json.h"
 #include "rpc/server.h"
 #include "storage/coins_kv.h"
@@ -569,6 +570,23 @@ int test_sovereignty_guard(void)
                  sg_page_substrings_match((const char *)page, n,
                                           "Spend Refused", false,
                                           "release_assisted", false));
+        SG_CHECK("sovereign: unavailable balance stops the send",
+                 sg_page_substrings_match((const char *)page, n,
+                                          "Wallet data unavailable", true,
+                                          "Send Failed", false));
+
+        char wallet_path[320];
+        snprintf(wallet_path, sizeof(wallet_path), "%s/node.db", dir);
+        struct node_db wallet_db = {0};
+        bool opened = node_db_open(&wallet_db, wallet_path);
+        SG_CHECK("sovereign: isolated wallet projection opens", opened);
+        if (opened) node_db_close(&wallet_db);
+        const char *previous_dir = g_wv_datadir;
+        g_wv_datadir = dir;
+        n = serve_send_confirm(page, sizeof(page),
+                               (const uint8_t *)body, strlen(body));
+        g_wv_datadir = previous_dir;
+        sg_terminate_page(page, sizeof(page), n);
         SG_CHECK("sovereign: web-UI send form degrades to node-absent",
                  sg_page_has_any((const char *)page, n,
                                  "Node Offline", "Send Failed",

@@ -454,11 +454,13 @@ bool rpc_db_info(const struct json_value *params, bool help,
     json_push_kv_int(result, "max_block_height", max_h);
 
     int64_t wallet_bal = db_wallet_utxo_balance(ctx->node_db);
+    if (wallet_bal < 0) return wallet_balance_unavailable(result);
     char bal_str[32];
     format_amount(wallet_bal, bal_str, sizeof(bal_str));
     json_push_kv_str(result, "wallet_t_balance", bal_str);
 
     int64_t sapling_bal = db_sapling_note_balance(ctx->node_db);
+    if (sapling_bal < 0) return wallet_balance_unavailable(result);
     char zbal_str[32];
     format_amount(sapling_bal, zbal_str, sizeof(zbal_str));
     json_push_kv_str(result, "wallet_z_balance", zbal_str);

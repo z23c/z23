@@ -93,10 +93,12 @@ static inline struct coins_view_cache *wallet_rpc_coins_tip(void)
  * need not pull in the full struct node_db definition. */
 bool wallet_ctx_db_ready(const struct wallet_rpc_context *ctx);
 
+bool wallet_balance_unavailable(struct json_value *result);
+
 /* Transparent spendable balance from the freshest complete wallet view. The
  * finalized in-memory view leads async SQLite projection at the live tip;
  * boot/recovery fixtures with no complete memory view retain the durable DB
- * fallback. */
+ * fallback. A failed durable read returns -1. */
 int64_t wallet_transparent_spendable_balance(
     const struct wallet_rpc_context *ctx);
 

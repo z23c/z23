@@ -573,10 +573,7 @@ int test_wallet_view(void)
     failures += check_wallet_view_receive_has_qr_code_svg();
     failures += check_wallet_view_receive_public_pane_hidden_by_default();
     failures += check_wallet_view_coins_page_renders_no_active_nav_tab();
-    failures += check_wallet_view_shield_shows_fee_and_total_cost();
-    failures += check_wallet_view_shield_with_negative_amount_shows_form_or_not();
     failures += check_wallet_view_tx_detail_with_short_txid_shows_error_or_load();
-    failures += check_wallet_view_pulse_returns_valid_json_structure();
     failures += check_wallet_view_design_system_colors_are_consistent();
     failures += check_wallet_view_path_traversal_in_tx_detail_is_sanitized();
     failures += check_wallet_view_zero_size_response_buffer_doesn_t_crash();
@@ -598,6 +595,9 @@ int test_wallet_view(void)
     wallet_view_init(fixture_datadir);
     printf("\n=== FIXTURE WALLET RENDER TESTS (deterministic seeded data) ===\n\n");
 
+    failures += check_wallet_view_pulse_returns_valid_json_structure();
+    failures += check_wallet_view_shield_with_negative_amount_shows_form_or_not();
+    failures += check_wallet_view_shield_shows_fee_and_total_cost();
     failures += check_wallet_view_dashboard_shows_real_balance_not_loading();
     failures += check_wallet_view_dashboard_recent_txs_link_to_wallet_tx_or_syn();
     failures += check_wallet_view_pulse_has_peers_0();
@@ -621,6 +621,7 @@ int test_wallet_view(void)
     failures += check_wallet_view_no_unresolved_vars_in_coins();
     failures += check_wallet_view_history_cards_use_template_secured_badge();
     failures += check_wallet_view_backup_warning_template_has_address();
+    failures += check_wallet_view_unreadable_balances();
 
     /* ═══════════════════════════════════════════════════════════
      * 15. EMPTY STATE TESTS — no DB, simulate fresh install
