@@ -61,6 +61,8 @@
 #define LW_HOST_MAX 64u
 #define LW_FROM_MAX 128u
 #define LW_MAX_WINDOWS 128u
+/* 64 maximal rows leave room for the envelope in the 16 KiB open reply. */
+#define LW_OPEN_ROWS 64u
 #define LW_LINE_CAP 16384
 #define LW_BODY_CAP 4200u
 
@@ -97,6 +99,7 @@ struct lw_scan {
     int64_t grace;
     int64_t skipped;
     int64_t max_left;
+    int64_t dropped;
     struct json_value *open;
     struct zcl_land_window_hit *hit;
     struct zcl_command_reply *reply;
@@ -431,20 +434,20 @@ static bool lw_scan_mail(struct lw_scan *sc, bool matching)
     return ok;
 }
 
-static void lw_push_window(struct json_value *arr, const struct lw_window *w,
+static bool lw_push_window(struct json_value *arr, const struct lw_window *w,
                            int64_t left)
 {
     struct json_value item;
     json_init(&item);
     json_set_object(&item);
-    (void)json_push_kv_str(&item, "host", w->host);
-    (void)json_push_kv_str(&item, "candidate", w->cand);
-    (void)json_push_kv_str(&item, "base", w->base);
-    (void)json_push_kv_int(&item, "expected_done_epoch", w->done_epoch);
-    (void)json_push_kv_int(&item, "seconds_left", left);
-    (void)json_push_kv_int(&item, "seq", w->seq);
-    (void)json_push_back(arr, &item);
+    bool ok = json_push_kv_str(&item, "host", w->host) &&
+              json_push_kv_str(&item, "candidate", w->cand) &&
+              json_push_kv_str(&item, "base", w->base) &&
+              json_push_kv_int(&item, "expected_done_epoch", w->done_epoch) &&
+              json_push_kv_int(&item, "seconds_left", left) &&
+              json_push_kv_int(&item, "seq", w->seq) && json_push_back(arr, &item);
     json_free(&item);
+    return ok;
 }
 
 static void lw_hit_take(struct zcl_land_window_hit *hit,
@@ -464,7 +467,12 @@ static bool lw_resolve_page(struct lw_scan *sc)
         if (sc->hit)
             lw_hit_take(sc->hit, w, left, sc->grace);
         else {
-            lw_push_window(sc->open, w, left);
+            if (json_size(sc->open) >= LW_OPEN_ROWS)
+                sc->dropped++;
+            else if (!lw_push_window(sc->open, w, left)) {
+                lw_invalid(sc->reply, "cannot append the open window", "oom");
+                return false;
+            }
             if (left > sc->max_left)
                 sc->max_left = left;
         }
@@ -572,14 +580,18 @@ static void lw_open(const struct zcl_command_request *request,
     json_set_array(&arr);
     sc->open = &arr;
     if (lw_query(sc, host, base10, now, grace, reply)) {
-        (void)json_push_kv_str(&reply->data, "leaf", "dev.land.window");
-        (void)json_push_kv_str(&reply->data, "action", "open");
-        (void)json_push_kv(&reply->data, "open_windows", &arr);
-        (void)json_push_kv_int(&reply->data, "max_seconds_left", sc->max_left);
-        (void)json_push_kv_int(&reply->data, "skipped", sc->skipped);
-        (void)json_push_kv_int(&reply->data, "dropped", 0);
-        reply->status = ZCL_COMMAND_STATUS_PASSED;
-        reply->exit_code = 0;
+        bool ok = json_push_kv_str(&reply->data, "leaf", "dev.land.window") &&
+                  json_push_kv_str(&reply->data, "action", "open") &&
+                  json_push_kv(&reply->data, "open_windows", &arr) &&
+                  json_push_kv_int(&reply->data, "max_seconds_left", sc->max_left) &&
+                  json_push_kv_int(&reply->data, "skipped", sc->skipped) &&
+                  json_push_kv_int(&reply->data, "dropped", sc->dropped);
+        if (ok) {
+            reply->status = ZCL_COMMAND_STATUS_PASSED;
+            reply->exit_code = 0;
+        } else {
+            lw_invalid(reply, "cannot build the open window reply", "oom");
+        }
     }
     json_free(&arr);
     free(sc);

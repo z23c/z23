@@ -425,6 +425,23 @@ static int dlw_long_history(void)
         ASSERT(closed);
         ASSERT(zcl_land_window_foreign("hosta", DLW_B, DLW_T1000, 0, &hit));
         ASSERT(!hit.open && hit.stale == 130);
+        char active[130][256];
+        for (size_t i = 0; i < 130; i++) {
+            (void)snprintf(active[i], sizeof(active[i]),
+                           "{\"seq\":%zu,\"ts\":\"2026-10-09T09:50:00Z\","
+                           "\"from\":\"current\",\"body\":\"LAND-WINDOW peer, candidate %010zx"
+                           " on base " DLW_B ", proving now, expected done %s.\"}",
+                           i + 1, i + 1, i == 129 ? "11:00Z" : "10:30Z");
+            rows[i] = active[i];
+        }
+        dlw_rows(rows, 130);
+        dlw_open(&c, "hosta", DLW_T1000);
+        bool bounded = dlw_ok(&c) && dlw_windows(&c) == 64 &&
+                       dlw_int(&c, "dropped") == 66 && dlw_int(&c, "max_seconds_left") == 3600;
+        dlw_end(&c);
+        ASSERT(bounded);
+        ASSERT(zcl_land_window_foreign("hosta", DLW_B, DLW_T1000, 0, &hit));
+        ASSERT(hit.open_count == 130 && hit.seconds_left == 3600);
         PASS();
     }
 _test_next:;
