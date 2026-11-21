@@ -37,6 +37,7 @@
 #endif
 
 #include "test/test_core.h"
+#include "models/database_schema_column_internal.h"
 
 #include "chain/chainparams.h"
 #include "config/runtime.h"
@@ -1379,9 +1380,35 @@ static bool tsb_purchase_unique_guard(void)
 }
 
 
+static int tsb_schema_column_exact(void)
+{
+    static const char expected[] = "role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))";
+    static const struct { const char *schema; bool match; } cases[] = {
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", true},
+        {"CREATE TABLE t(id TEXT DEFAULT 'role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))', role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))) WITHOUT ROWID", true},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)) OR 1)", false},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,3)))", false},
+        {"CREATE TABLE t(id INTEGER, role_extra INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", false},
+        {"CREATE TABLE t(id TEXT DEFAULT 'role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))')", false},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)), role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", false},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)) /* comment */)", false},
+        {"CREATE TABLE t(id TEXT DEFAULT 'unterminated, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)))", false},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))", false},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2))); DROP TABLE x", false},
+        {"CREATE TABLE t(id INTEGER, role INTEGER NOT NULL DEFAULT 1 CHECK(role IN (1,2)),)", false},
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+        ok = ok && db_schema_column_exact(cases[i].schema, "role", expected) == cases[i].match;
+    ok = ok && !db_schema_column_exact("CREATE TABLE t(role_extra INTEGER)", "role", "role INTEGER");
+    return tsb_report("native schema column matches complete declaration", ok);
+}
+
+
 int test_store_buyer(void)
 {
     int failures = 0;
+    failures += tsb_schema_column_exact();
     char datadir[512];
     char out_path[640];
     char part_path[704];

@@ -5126,6 +5126,217 @@ static int ordinary_refusal_tests(void)
     return failures;
 }
 
+struct legacy_case { int version; int ordinal; const char *table; const char *column; const char *type; const char *value; };
+static const struct legacy_case legacy_cases[] = {
+    {42,1,"build_actions","lease_id","TEXT","''"},
+    {43,9,"build_actions","task_root_sha3","TEXT","''"},
+    {44,14,"build_receipts","trust_state","TEXT","'LOCAL_ACCEPTED'"},
+    {46,15,"zslp_ledger","role","INTEGER","1"},
+};
+enum legacy_fault_mode { LEGACY_PREPARE, LEGACY_ALTER, LEGACY_LEDGER };
+struct legacy_fault { int ordinal, seen, denied; bool reached; enum legacy_fault_mode mode; };
+static bool legacy_prepare_denied(int op, const char *name)
+{
+    if (op == SQLITE_ALTER_TABLE || op == SQLITE_CREATE_INDEX || op == SQLITE_CREATE_TABLE) return true;
+    return op == SQLITE_INSERT && name &&
+           (!strcmp(name, "schema_migrations") || !strcmp(name, "node_state"));
+}
+
+static int legacy_authorize(void *ctx, int op, const char *a, const char *b, const char *c, const char *d)
+{
+    struct legacy_fault *f = ctx;
+    (void)b; (void)c; (void)d;
+    if (op == SQLITE_ALTER_TABLE && !f->reached && ++f->seen >= f->ordinal) f->reached = true;
+    if (!f->reached) return SQLITE_OK;
+    bool deny = f->mode == LEGACY_PREPARE && legacy_prepare_denied(op, a);
+    deny = deny || (f->mode == LEGACY_ALTER && op == SQLITE_ALTER_TABLE);
+    deny = deny || (f->mode == LEGACY_LEDGER && op == SQLITE_INSERT && a && !strcmp(a, "schema_migrations"));
+    if (!deny) return SQLITE_OK;
+    f->denied++;
+    return SQLITE_DENY;
+}
+
+static bool legacy_seed_row(struct node_db *ndb)
+{
+    return node_db_exec(ndb,
+        "INSERT INTO build_jobs(job_id,source_sha256,source_cas_sha3,toolchain_sha3,profile,state,created_at,updated_at) "
+        "VALUES(printf('%064d',1),printf('%064d',2),printf('%064d',3),printf('%064d',4),'fixture','PLANNED',17,17)");
+}
+
+static bool legacy_rows_preserved(sqlite3 *db)
+{
+    return v47_scalar(db, "SELECT count(*) FROM ordinary_sentinel WHERE v='keep'") == 1 &&
+           v47_scalar(db, "SELECT count(*) FROM build_jobs WHERE job_id=printf('%064d',1) AND profile='fixture' AND created_at=17") == 1;
+}
+
+
+static int legacy_column_count(sqlite3 *db, const struct legacy_case *item)
+{
+    char sql[256];
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM pragma_table_info('%s') WHERE name='%s'",
+             item->table, item->column);
+    return v47_scalar(db, sql);
+}
+
+
+static bool legacy_prepare(struct node_db *ndb, const struct legacy_case *item)
+{
+    struct ordinary_case seed = {41, "build_jobs"};
+    if (!ordinary_prepare(ndb, &seed)) return false;
+    struct legacy_fault f = {.ordinal=item->ordinal,.mode=LEGACY_PREPARE};
+    if (sqlite3_set_authorizer(ndb->db, legacy_authorize, &f) != SQLITE_OK) return false;
+    int rc = node_db_migrate(ndb, NULL);
+    if (sqlite3_set_authorizer(ndb->db, NULL, NULL) != SQLITE_OK) return false;
+    struct ordinary_case marker = {item->version, ""};
+    return rc == -1 && f.denied > 0 && node_db_schema_version(ndb) == item->version-1 &&
+           ordinary_ledger_count(ndb->db, &marker) == 0 && legacy_column_count(ndb->db, item) == 0 &&
+           legacy_seed_row(ndb);
+}
+static bool legacy_refusal_checked(struct node_db *ndb, const struct legacy_case *item,
+                                   const struct legacy_fault *fault, int floor, int rc)
+{
+    struct ordinary_case marker = {item->version, ""};
+    return fault->denied > 0 && rc == -1 && node_db_schema_version(ndb) == item->version - 1 &&
+        ordinary_ledger_count(ndb->db, &marker) == 0 && node_db_schema_compat_floor(ndb) == floor &&
+        sqlite3_get_autocommit(ndb->db) && legacy_column_count(ndb->db, item) == 0 &&
+        legacy_rows_preserved(ndb->db);
+}
+
+static bool legacy_retry_checked(struct node_db *ndb, const struct legacy_case *item)
+{
+    struct ordinary_case marker = {item->version, ""};
+    return node_db_migrate(ndb, NULL) > 0 && node_db_schema_version(ndb) == NODE_DB_SCHEMA_LATEST &&
+        ordinary_ledger_count(ndb->db, &marker) == 1 && legacy_column_count(ndb->db, item) == 1 &&
+        legacy_rows_preserved(ndb->db);
+}
+
+
+static bool legacy_fault_case(const struct legacy_case *item, enum legacy_fault_mode mode)
+{
+    struct node_db ndb = {0};
+    bool ok = legacy_prepare(&ndb, item);
+    if (!ok) { if (ndb.db) sqlite3_close(ndb.db); return false; }
+    int floor = node_db_schema_compat_floor(&ndb);
+    struct legacy_fault f = {.ordinal=1,.mode=mode};
+    ok = sqlite3_set_authorizer(ndb.db, legacy_authorize, &f) == SQLITE_OK;
+    int rc = ok ? node_db_migrate(&ndb, NULL) : 0;
+    if (sqlite3_set_authorizer(ndb.db, NULL, NULL) != SQLITE_OK) ok = false;
+    struct ordinary_case marker = {item->version, ""};
+    int ledger = ordinary_ledger_count(ndb.db, &marker);
+    printf("legacy version=%d mode=%d denied=%d rc=%d schema=%d floor=%d ledger=%d\n",
+           item->version, mode, f.denied, rc, node_db_schema_version(&ndb), node_db_schema_compat_floor(&ndb), ledger);
+    ok = ok && legacy_refusal_checked(&ndb, item, &f, floor, rc);
+    if (ok) ok = legacy_retry_checked(&ndb, item);
+    sqlite3_close(ndb.db);
+    return ok;
+}
+static const char *legacy_check(const struct legacy_case *item)
+{
+    switch (item->version) {
+    case 42: return "CHECK(length(lease_id) IN (0,64))";
+    case 43: return "CHECK(length(task_root_sha3) IN (0,64))";
+    case 44: return "CHECK(trust_state IN ('LOCAL_ACCEPTED','REMOTE_OBSERVED','LOCAL_REPRODUCED','QUORUM_MATCHED','REJECTED'))";
+    case 46: return "CHECK(role IN (1,2))";
+    default: return "";
+    }
+}
+
+static bool legacy_add_partial(struct node_db *ndb, const struct legacy_case *item, int bad)
+{
+    char sql[512];
+    const char *type = bad == 1 ? "BLOB" : item->type;
+    const char *nullable = bad == 2 ? "" : "NOT NULL";
+    const char *value = bad == 3 ? "NULL" : item->value;
+    const char *check = legacy_check(item);
+    char *decoy = NULL;
+    if (bad == 4) check = "";
+    if (bad == 5) check = "CHECK(1)";
+    if (bad == 6) {
+        decoy = sqlite3_mprintf("CHECK(1) /* %s */", check);
+        check = decoy;
+    }
+    if (bad == 7) {
+        decoy = sqlite3_mprintf("CHECK(1 OR %Q IS NULL)", check);
+        check = decoy;
+    }
+    bool ok = check != NULL;
+    if (ok) {
+        snprintf(sql, sizeof(sql), "ALTER TABLE %s ADD COLUMN %s %s %s DEFAULT %s %s",
+                 item->table, item->column, type, nullable, value, check);
+        ok = node_db_exec(ndb, sql);
+    }
+    sqlite3_free(decoy);
+    return ok;
+}
+
+static bool legacy_partial_result(struct node_db *ndb, const struct legacy_case *item,
+                                  int bad, int floor, int rc)
+{
+    struct ordinary_case marker = {item->version, ""};
+    bool ok;
+    if (bad) {
+        ok = rc == -1 && node_db_schema_version(ndb) == item->version - 1 &&
+             ordinary_ledger_count(ndb->db, &marker) == 0 && node_db_schema_compat_floor(ndb) == floor &&
+             sqlite3_get_autocommit(ndb->db);
+    } else {
+        ok = rc > 0 && node_db_schema_version(ndb) == NODE_DB_SCHEMA_LATEST &&
+             ordinary_ledger_count(ndb->db, &marker) == 1;
+    }
+    return ok && legacy_column_count(ndb->db, item) == 1 && legacy_rows_preserved(ndb->db);
+}
+
+static bool legacy_decoy_preserved(sqlite3 *db, const struct legacy_case *item, int bad)
+{
+    if (bad != 6 && bad != 7) return true;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1", -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(stmt, 1, item->table, -1, SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_step(stmt) == SQLITE_ROW;
+    char *needle = bad == 7 ? sqlite3_mprintf("%q", legacy_check(item)) : NULL;
+    if (ok) {
+        const char *schema = (const char *)sqlite3_column_text(stmt, 0);
+        const char *expected = bad == 6 ? legacy_check(item) : needle;
+        ok = schema && expected && strstr(schema, expected) &&
+             (bad != 6 || strstr(schema, "/*"));
+    }
+    sqlite3_free(needle);
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+
+static bool legacy_partial_case(const struct legacy_case *item, int bad)
+{
+    struct node_db ndb = {0};
+    bool ok = legacy_prepare(&ndb, item);
+    if (!ok) {
+        if (ndb.db) sqlite3_close(ndb.db);
+        return false;
+    }
+    ok = legacy_add_partial(&ndb, item, bad);
+    ok = ok && legacy_decoy_preserved(ndb.db, item, bad);
+    int floor = node_db_schema_compat_floor(&ndb);
+    int rc = ok ? node_db_migrate(&ndb, NULL) : 0;
+    struct ordinary_case marker = {item->version, ""};
+    printf("legacy partial version=%d bad=%d rc=%d schema=%d ledger=%d\n",
+           item->version, bad, rc, node_db_schema_version(&ndb), ordinary_ledger_count(ndb.db, &marker));
+    ok = ok && legacy_partial_result(&ndb, item, bad, floor, rc);
+    sqlite3_close(ndb.db);
+    return ok;
+}
+
+static int legacy_refusal_tests(void)
+{
+    int failures = 0;
+    for (size_t i=0; i<sizeof(legacy_cases)/sizeof(legacy_cases[0]); ++i)
+        for (int mode=LEGACY_ALTER; mode<=LEGACY_LEDGER; ++mode)
+            if (!legacy_fault_case(&legacy_cases[i], (enum legacy_fault_mode)mode)) failures++;
+    for (size_t i = 0; i < sizeof(legacy_cases) / sizeof(legacy_cases[0]); ++i)
+        for (int bad = 0; bad <= 7; ++bad)
+            if (!legacy_partial_case(&legacy_cases[i], bad)) failures++;
+    return failures;
+}
+
 static int normal_mode_deny(void *ctx, int action, const char *a, const char *b,
                             const char *c, const char *d)
 {
@@ -5149,7 +5360,7 @@ static bool normal_mode_refusal_case(int action)
 
 
 int test_sqlite(void) {
-    int failures = v47_refusal_tests() + v35_refusal_tests() + v39_refusal_tests() + ordinary_refusal_tests();
+    int failures = v47_refusal_tests() + v35_refusal_tests() + v39_refusal_tests() + ordinary_refusal_tests() + legacy_refusal_tests();
     if (!normal_mode_refusal_case(SQLITE_PRAGMA) || !normal_mode_refusal_case(SQLITE_CREATE_INDEX)) failures++;
 
 #if defined(_WIN32)

@@ -15,6 +15,10 @@
 
 #include "models/database.h"
 #include "models/database_internal.h"
+#include "models/database_schema_column_internal.h"
+#include "util/ar_step_readonly.h"
+
+#include <string.h>
 
 static bool db_migrate_v30_zanc_anchors(struct node_db *ndb)
 {
@@ -520,86 +524,145 @@ static bool db_migrate_v41_build_fabric(struct node_db *ndb)
     return ok;
 }
 
-static void db_migrate_v42_build_leases(struct node_db *ndb)
+static bool db_migrate_column_declaration(struct node_db *ndb, const char *table,
+                                          const char *column, const char *alter_sql)
 {
+    const char *declaration = strstr(alter_sql, " ADD COLUMN ");
+    if (!declaration) return false;
+    declaration += sizeof(" ADD COLUMN ") - 1;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?1 COLLATE NOCASE",
+            -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC) == SQLITE_OK &&
+              ar_step_checked(stmt, "migrate inspect declaration", NULL) == ZCL_STEP_ROW;
+    if (ok) {
+        const char *schema = (const char *)sqlite3_column_text(stmt, 0);
+        ok = schema && db_schema_column_exact(schema, column, declaration);
+    }
+    if (ok) ok = ar_step_checked(stmt, "migrate inspect declaration end", NULL) == ZCL_STEP_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+/* Inspect an existing partial column before accepting it; absence alone may
+ * be repaired with the original ALTER. SQL errors are never absence. */
+static bool db_migrate_ensure_column(struct node_db *ndb, const char *table,
+                                     const char *column, const char *type,
+                                     const char *default_value, const char *sql)
+{
+    static const char query[] =
+        "SELECT type, \"notnull\", dflt_value FROM pragma_table_info(?1,'main') "
+        "WHERE name=?2 COLLATE NOCASE";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ndb->db, query, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_bind_text(stmt, 2, column, -1, SQLITE_STATIC) == SQLITE_OK;
+    bool present = false, compatible = false;
+    if (ok) {
+        int rc = ar_step_checked(stmt, "migrate inspect column", NULL);
+        if (rc == ZCL_STEP_ROW) {
+            present = true;
+            const char *actual_type = (const char *)sqlite3_column_text(stmt, 0);
+            const char *actual_default = (const char *)sqlite3_column_text(stmt, 2);
+            compatible = actual_type && actual_default &&
+                sqlite3_stricmp(actual_type, type) == 0 && sqlite3_column_int(stmt, 1) == 1 &&
+                strcmp(actual_default, default_value) == 0;
+            rc = ar_step_checked(stmt, "migrate inspect column end", NULL);
+        }
+        ok = rc == ZCL_STEP_DONE;
+    }
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    if (!ok || (present && !compatible)) return false;
+    return present ? db_migrate_column_declaration(ndb, table, column, sql) : node_db_exec(ndb, sql);
+}
+
+static bool db_migrate_v42_build_leases(struct node_db *ndb)
+{
+    bool ok = true;
     /* v42: durable ZBuild leases. Claims are compare-and-swap writes;
      * their expiry and heartbeat make worker death recoverable after a
      * process or host restart without allowing two owners to publish. */
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "lease_id", "TEXT", "''",
         "ALTER TABLE build_actions ADD COLUMN lease_id TEXT NOT NULL "
         "DEFAULT '' CHECK(length(lease_id) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "lease_expires_at", "INTEGER", "0",
         "ALTER TABLE build_actions ADD COLUMN lease_expires_at INTEGER "
         "NOT NULL DEFAULT 0 CHECK(lease_expires_at>=0)");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "lease_heartbeat_at", "INTEGER", "0",
         "ALTER TABLE build_actions ADD COLUMN lease_heartbeat_at INTEGER "
         "NOT NULL DEFAULT 0 CHECK(lease_heartbeat_at>=0)");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "attempt_count", "INTEGER", "0",
         "ALTER TABLE build_actions ADD COLUMN attempt_count INTEGER "
         "NOT NULL DEFAULT 0 CHECK(attempt_count>=0)");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "claimed_at", "INTEGER", "0",
         "ALTER TABLE build_actions ADD COLUMN claimed_at INTEGER "
         "NOT NULL DEFAULT 0 CHECK(claimed_at>=0)");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "started_at", "INTEGER", "0",
         "ALTER TABLE build_actions ADD COLUMN started_at INTEGER "
         "NOT NULL DEFAULT 0 CHECK(started_at>=0)");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "finished_at", "INTEGER", "0",
         "ALTER TABLE build_actions ADD COLUMN finished_at INTEGER "
         "NOT NULL DEFAULT 0 CHECK(finished_at>=0)");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_receipts", "lease_id", "TEXT", "''",
         "ALTER TABLE build_receipts ADD COLUMN lease_id TEXT NOT NULL "
         "DEFAULT '' CHECK(length(lease_id) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_actions_lease_recovery "
         "ON build_actions(state,lease_expires_at,updated_at)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('042')");
+    return ok;
 }
 
-static void db_migrate_v43_zcode_roots(struct node_db *ndb)
+static bool db_migrate_v43_zcode_roots(struct node_db *ndb)
 {
+    bool ok = true;
     /* v43: canonical ZCODE task/candidate context and the work-receipt
      * projection. Empty roots retain project-neutral legacy actions;
      * ZCODE actions require all semantic roots in model validation. */
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "task_root_sha3", "TEXT", "''",
         "ALTER TABLE build_actions ADD COLUMN task_root_sha3 TEXT NOT NULL "
         "DEFAULT '' CHECK(length(task_root_sha3) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "candidate_root_sha3", "TEXT", "''",
         "ALTER TABLE build_actions ADD COLUMN candidate_root_sha3 TEXT NOT NULL "
         "DEFAULT '' CHECK(length(candidate_root_sha3) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "proof_policy_root_sha3", "TEXT", "''",
         "ALTER TABLE build_actions ADD COLUMN proof_policy_root_sha3 TEXT NOT NULL "
         "DEFAULT '' CHECK(length(proof_policy_root_sha3) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_actions", "context_root_sha3", "TEXT", "''",
         "ALTER TABLE build_actions ADD COLUMN context_root_sha3 TEXT NOT NULL "
         "DEFAULT '' CHECK(length(context_root_sha3) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_receipts", "work_receipt_sha3", "TEXT", "''",
         "ALTER TABLE build_receipts ADD COLUMN work_receipt_sha3 TEXT NOT NULL "
         "DEFAULT '' CHECK(length(work_receipt_sha3) IN (0,64))");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_actions_zcode_task "
         "ON build_actions(task_root_sha3,candidate_root_sha3,state)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('043')");
+    return ok;
 }
 
-static void db_migrate_v44_receipt_trust(struct node_db *ndb)
+static bool db_migrate_v44_receipt_trust(struct node_db *ndb)
 {
+    bool ok = true;
     /* v44: one receipt ledger, explicit trust semantics. Existing rows
      * were admitted only through the approved local receipt path. Remote
      * canonical receipts enter as observations and cannot inherit that
      * authority merely by occupying the same indexed relationship. */
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "build_receipts", "trust_state", "TEXT", "'LOCAL_ACCEPTED'",
         "ALTER TABLE build_receipts ADD COLUMN trust_state TEXT NOT NULL "
         "DEFAULT 'LOCAL_ACCEPTED' CHECK(trust_state IN "
         "('LOCAL_ACCEPTED','REMOTE_OBSERVED','LOCAL_REPRODUCED',"
         "'QUORUM_MATCHED','REJECTED'))");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_build_receipts_action_trust "
         "ON build_receipts(action_id,trust_state,created_at)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('044')");
+    return ok;
 }
 
 static bool db_migrate_v45_lane_receipts(struct node_db *ndb)
@@ -629,15 +692,16 @@ static bool db_migrate_v45_lane_receipts(struct node_db *ndb)
     return ok;
 }
 
-static void db_migrate_v46_zslp_validity(struct node_db *ndb)
+static bool db_migrate_v46_zslp_validity(struct node_db *ndb)
 {
+    bool ok = true;
     /* v46: strict recursive ZSLP validity. The outpoint ledger records
      * token outputs and mint batons, but only after the tri-state
      * validator admits their ancestry and quantities. */
-    node_db_exec(ndb,
+    ok = ok && db_migrate_ensure_column(ndb, "zslp_ledger", "role", "INTEGER", "1",
         "ALTER TABLE zslp_ledger ADD COLUMN role INTEGER NOT NULL "
         "DEFAULT 1 CHECK(role IN (1,2))");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS zslp_validity ("
         "txid BLOB PRIMARY KEY CHECK(length(txid)=32),"
         "token_id BLOB CHECK(token_id IS NULL OR length(token_id)=32),"
@@ -650,14 +714,15 @@ static void db_migrate_v46_zslp_validity(struct node_db *ndb)
         "burned_units INTEGER NOT NULL DEFAULT 0 CHECK(burned_units>=0),"
         "minted_units INTEGER NOT NULL DEFAULT 0 CHECK(minted_units>=0),"
         "baton_vout INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zslp_validity_token_height "
         "ON zslp_validity(token_id,block_height,status)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_zslp_ledger_valid_role "
         "ON zslp_ledger(token_id,role,spent_by_txid)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('046')");
+    return ok;
 }
 
 static bool db_migrate_v47_vault_intents(struct node_db *ndb)
@@ -734,32 +799,31 @@ static bool db_migrate_v48_zswap_ads(struct node_db *ndb)
     return ok;
 }
 
-/* Indexed by schema version minus 30. Legacy ALTER steps retain their behavior. */
+/* Indexed by schema version minus 30. */
 struct db_migrate_v30_step {
     const char *name;
     bool (*checked)(struct node_db *);
-    void (*legacy)(struct node_db *);
 };
 static const struct db_migrate_v30_step k_db_migrate_v30_steps[] = {
-    [30 - 30] = {"zanc anchors", db_migrate_v30_zanc_anchors, NULL},
-    [31 - 30] = {"op return index", db_migrate_v31_op_return_index, NULL},
-    [32 - 30] = {"zslp ledger", db_migrate_v32_zslp_ledger, NULL},
-    [33 - 30] = {"parity samples", db_migrate_v33_parity_samples, NULL},
-    [34 - 30] = {"block index envelope", db_migrate_v34_block_index_envelope, NULL},
-    [35 - 30] = {"wallet labels", db_migrate_v35_wallet_labels, NULL},
-    [36 - 30] = {"agent sessions", db_migrate_v36_agent_sessions, NULL},
-    [37 - 30] = {"zid identities", db_migrate_v37_zid_identities, NULL},
-    [38 - 30] = {"zid domains", db_migrate_v38_zid_domains, NULL},
-    [39 - 30] = {"onion directory", db_migrate_v39_onion_directory, NULL},
-    [40 - 30] = {"store purchases", db_migrate_v40_store_purchases, NULL},
-    [41 - 30] = {"build fabric", db_migrate_v41_build_fabric, NULL},
-    [42 - 30] = {NULL, NULL, db_migrate_v42_build_leases},
-    [43 - 30] = {NULL, NULL, db_migrate_v43_zcode_roots},
-    [44 - 30] = {NULL, NULL, db_migrate_v44_receipt_trust},
-    [45 - 30] = {"lane receipts", db_migrate_v45_lane_receipts, NULL},
-    [46 - 30] = {NULL, NULL, db_migrate_v46_zslp_validity},
-    [47 - 30] = {"wallet schema", db_migrate_v47_vault_intents, NULL},
-    [48 - 30] = {"zswap ads", db_migrate_v48_zswap_ads, NULL},
+    [30 - 30] = {"zanc anchors", db_migrate_v30_zanc_anchors},
+    [31 - 30] = {"op return index", db_migrate_v31_op_return_index},
+    [32 - 30] = {"zslp ledger", db_migrate_v32_zslp_ledger},
+    [33 - 30] = {"parity samples", db_migrate_v33_parity_samples},
+    [34 - 30] = {"block index envelope", db_migrate_v34_block_index_envelope},
+    [35 - 30] = {"wallet labels", db_migrate_v35_wallet_labels},
+    [36 - 30] = {"agent sessions", db_migrate_v36_agent_sessions},
+    [37 - 30] = {"zid identities", db_migrate_v37_zid_identities},
+    [38 - 30] = {"zid domains", db_migrate_v38_zid_domains},
+    [39 - 30] = {"onion directory", db_migrate_v39_onion_directory},
+    [40 - 30] = {"store purchases", db_migrate_v40_store_purchases},
+    [41 - 30] = {"build fabric", db_migrate_v41_build_fabric},
+    [42 - 30] = {"schema v42", db_migrate_v42_build_leases},
+    [43 - 30] = {"schema v43", db_migrate_v43_zcode_roots},
+    [44 - 30] = {"schema v44", db_migrate_v44_receipt_trust},
+    [45 - 30] = {"lane receipts", db_migrate_v45_lane_receipts},
+    [46 - 30] = {"schema v46", db_migrate_v46_zslp_validity},
+    [47 - 30] = {"wallet schema", db_migrate_v47_vault_intents},
+    [48 - 30] = {"zswap ads", db_migrate_v48_zswap_ads},
 };
 
 /* Next schema version in the v30-v48 range, or 0 when that range is already
@@ -784,13 +848,8 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
 
     while (next != 0) {
         const struct db_migrate_v30_step *step = &k_db_migrate_v30_steps[next - 30];
-        if (step->checked) {
-            if (!db_migrate_checked_feature(ndb, next, floor_ver, step->name, step->checked))
-                return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-        } else {
-            step->legacy(ndb);
-            DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, next, floor_ver);
-        }
+        if (!db_migrate_checked_feature(ndb, next, floor_ver, step->name, step->checked))
+            return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         current_ver = next;
         applied++;
         next = db_migrate_v30_next_version(current_ver);
