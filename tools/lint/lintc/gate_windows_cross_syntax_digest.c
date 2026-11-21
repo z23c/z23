@@ -111,9 +111,8 @@ static const char *const dg_pruned[] = { ".git", "build", "test-tmp",
 
 /* A target outside the scanned tree, or under a pruned subtree, may include
  * dependencies the digest cannot see. Disable caching for that traversal. */
-static bool dg_symlink_in_scope(const char *path)
+static bool dg_symlink_in_scope(const char *path, char target[PATH_MAX])
 {
-    char target[PATH_MAX];
     if (!realpath(path, target)) return false;
     size_t n = strlen(dg_root);
     if (strncmp(target, dg_root, n) != 0 ||
@@ -141,7 +140,8 @@ static int dg_entry(const char *p, int depth)
     if (wcs_name_in(rel, dg_pruned)) return 0;
     if (lstat(p, &st) != 0) return errno == ENOENT ? 0 : -1;
     if (S_ISLNK(st.st_mode)) {
-        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || !dg_symlink_in_scope(p)) return -1;
+        char target[PATH_MAX];
+        if (!dg_symlink_in_scope(p, target) || stat(target, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
     } else if (S_ISDIR(st.st_mode)) {
         return dg_scan(p, depth + 1);
     }
@@ -255,12 +255,31 @@ static int dg_scan_includes_file(FILE *f, const char *path,
 }
 
 /* Collects basenames named by an include "...c" anywhere in the tree. */
+/* A stable source snapshot is required across collection, hashing and compile.
+ * Resolve links again before each read, validate scope, then open that target. */
+static int dg_read_path(const char *path, char target[PATH_MAX], bool *link)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return -1;
+    *link = S_ISLNK(st.st_mode);
+    if (*link) {
+        if (!dg_symlink_in_scope(path, target) || stat(target, &st) != 0 || !S_ISREG(st.st_mode))
+            return -1;
+    } else if (!S_ISREG(st.st_mode) ||
+               snprintf(target, PATH_MAX, "%s", path) >= PATH_MAX) return -1;
+    return 0;
+}
+
+
 static int dg_incl_scan(char incl[DG_INCL][256], int *nincl)
 {
     for (int i = 0; i < dg_n; i++) {
         if (!dg_ext_ok(dg_paths[i])) continue;
-        FILE *f = fopen(dg_paths[i], "r");
-        if (!f) { if (errno == ENOENT) continue; return -1; }
+        char target[PATH_MAX];
+        bool link;
+        if (dg_read_path(dg_paths[i], target, &link) != 0) return -1;
+        FILE *f = fopen(target, "r");
+        if (!f) return -1;
         int rc = dg_scan_includes_file(f, dg_paths[i], incl, nincl);
         if (fclose(f) != 0) rc = -1;
         if (rc != 0) return -1;
@@ -313,17 +332,30 @@ static int dg_digest_ordered(const int *ord, int nord, char out[WCS_SHA])
     for (int i = 0; i < nord; i++) {
         int en = 0;
         const char *p = dg_paths[ord[i]];
-        if (sha_file_ex(p, sha, &en) != 0) {
+        char target[PATH_MAX];
+        bool link;
+        if (dg_read_path(p, target, &link) != 0) return -1;
+        if (sha_file_ex(target, sha, &en) != 0) {
             fprintf(stderr, "tu_cache_include_digest: sha256 reported an "
                     "error the vanished-path race does not explain:\n"
                     "  %s: %s\n", p, strerror(errno));
             return -1;
         }
-        if (en) continue;
+        if (en) return -1;
         sha_update(&s, (const uint8_t *)p, strlen(p));
         sha_update(&s, (const uint8_t *)"\t", 1);
         sha_update(&s, (const uint8_t *)sha, 64);
         sha_update(&s, (const uint8_t *)"\n", 1);
+        if (link) {
+            size_t n = strlen(dg_root);
+            const char *rel = target + n + (n > 1);
+            if (dg_bad_path(rel)) return -1;
+            sha_update(&s, (const uint8_t *)"link\t", 5);
+            sha_update(&s, (const uint8_t *)p, strlen(p));
+            sha_update(&s, (const uint8_t *)"\t", 1);
+            sha_update(&s, (const uint8_t *)rel, strlen(rel));
+            sha_update(&s, (const uint8_t *)"\n", 1);
+        }
     }
     sha_final(&s, out);
     return 0;

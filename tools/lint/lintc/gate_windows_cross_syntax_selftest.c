@@ -386,6 +386,20 @@ static int cache_symlink_directory(const char *base, const char *root,
 }
 
 
+static int cache_symlink_same_bytes(const char *base, const char *root,
+                                    const char *srclist, const char *stub,
+                                    const char *flags, const char *one,
+                                    const char *two, const char *link)
+{
+    if (csr_write(one, "#pragma once\n#define CHOICE 2\n") ||
+        csr_write(two, "#pragma once\n#define CHOICE 2\n")) return 2;
+    if (sweep_expect(base, stub, root, flags, srclist, 0, 16, 16) != 0) return 1;
+    if (unlink(link) != 0 || symlink("one.h", link) != 0) return 2;
+    if (sweep_expect(base, stub, root, flags, srclist, 0, 16, 16) != 0) return 1;
+    return sweep_expect(base, stub, root, flags, srclist, 16, 0, 0);
+}
+
+
 static int cache_symlink_test(const char *base, const char *root,
                               const char *srclist, const char *stub,
                               const char *flags)
@@ -402,6 +416,7 @@ static int cache_symlink_test(const char *base, const char *root,
     if (unlink(link) != 0 || symlink("two.h", link) != 0) return 2;
     if (sweep_expect(base, stub, root, flags, srclist, 0, 16, 16) != 0) return 1;
     if (sweep_expect(base, stub, root, flags, srclist, 16, 0, 0) != 0) return 1;
+    if (cache_symlink_same_bytes(base, root, srclist, stub, flags, one, two, link) != 0) return 1;
     return cache_symlink_directory(base, root, srclist, stub, flags);
 }
 
