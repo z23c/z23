@@ -972,6 +972,12 @@ int test_peer_chain_recovery(void)
     }
 #endif
 #if defined(__linux__)
+    const char *root_args[] = {"build/fixtures/peer_chain_recovery_snapshot", "roots", NULL};
+    char root_result[256] = {0};
+    if (test_host_tool_capture(root_args, root_result, sizeof(root_result), 15000) != 0) {
+        fprintf(stderr, "peer_chain_recovery: root ownership fixture failed: %s\n", root_result);
+        failures++;
+    }
     failures += test_peer_chain_recovery_live_writes();
 #endif
     failures += test_peer_chain_recovery_clean_wal();

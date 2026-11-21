@@ -27,8 +27,30 @@ static int test_backup_step(sqlite3_backup *backup, int pages)
 #undef peer_chain_recovery_main
 #undef sqlite3_backup_step
 #undef platform_time_monotonic_ms
+static int test_root_pairs(void)
+{
+    static const struct {
+        int table, index, owners;
+        bool valid;
+    } cases[] = {
+        {2, 3, 2, true}, {3, 2, 2, true}, {2, 2, 2, false},
+        {1, 3, 2, false}, {3, 1, 2, false}, {2, 3, 3, false},
+        {2, 3, 1, false},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        if (recovery_root_pair_ok(cases[i].table, cases[i].index,
+                                  cases[i].owners) != cases[i].valid) {
+            fprintf(stderr, "unexpected recovery verdict for roots %d,%d with %d owners\n",
+                    cases[i].table, cases[i].index, cases[i].owners);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "roots") == 0) return test_root_pairs();
     if (argc != 4) return 2;
     mode = strcmp(argv[1], "stall") == 0 ? 2 : 1;
     if (sqlite3_open(argv[2], &writer) != SQLITE_OK) return 3;

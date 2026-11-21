@@ -360,6 +360,13 @@ static bool recovery_schema_read(sqlite3 *db, const char *type, const char *name
     return ok;
 }
 
+static bool recovery_root_pair_ok(sqlite3_int64 table, sqlite3_int64 index,
+                                  sqlite3_int64 owners)
+{
+    /* Page one belongs to sqlite_schema. Each observation root has one owner. */
+    return table > 1 && index > 1 && table != index && owners == 2;
+}
+
 static bool recovery_roots_distinct(sqlite3 *db, const struct recovery_schema *table,
                                     const struct recovery_schema *index)
 {
@@ -371,7 +378,8 @@ static bool recovery_roots_distinct(sqlite3 *db, const struct recovery_schema *t
     if (ok) ok = sqlite3_bind_int64(st, 2, index->rootpage) == SQLITE_OK;
     if (ok) ok = ar_step_checked(st, "peer chain recovery read", NULL) ==
                  ZCL_STEP_ROW &&
-                 sqlite3_column_int64(st, 0) == 2;
+                 recovery_root_pair_ok(table->rootpage, index->rootpage,
+                                       sqlite3_column_int64(st, 0));
     if (sqlite3_finalize(st) != SQLITE_OK) ok = false;
     if (!ok)
         fputs("peer_chain_recovery: observation roots are shared or unsafe; refusing reset\n",
