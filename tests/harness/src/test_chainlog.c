@@ -89,11 +89,26 @@ static bool cl_fault_flush(struct platform_private_file *f)
 #define zcl_chainlog_head cl_local_head
 #define zcl_chainlog_verify cl_local_verify
 #include "chainlog/chainlog.h"
+/* Refuse a prefix read or substitute an oversized length in memory only. */
+static unsigned cl_read_fault;
+static bool cl_fault_read(struct platform_private_file *f, void *p, size_t n,
+                          uint64_t at)
+{
+    if (cl_read_fault == 1 && n == ZCL_CHAINLOG_PREFIX_BYTES)
+        return false;
+    if (!platform_private_file_read_at(f, p, n, at))
+        return false;
+    if (cl_read_fault == 2 && n == ZCL_CHAINLOG_PREFIX_BYTES)
+        memset((uint8_t *)p + 12, 0xff, 4);
+    return true;
+}
+#define platform_private_file_read_at cl_fault_read
 #define platform_private_file_write_at cl_fault_write
 #define platform_private_file_flush cl_fault_flush
 #define zcl_log_emit_at cl_capture_log
 #include "../../../engine/modules/chainlog/src/chainlog.c"
 #undef zcl_log_emit_at
+#undef platform_private_file_read_at
 #undef platform_private_file_write_at
 #undef platform_private_file_flush
 
@@ -608,6 +623,53 @@ static int case_bit_sweep(void)
 
 /* ── 6. the surface refuses nonsense ───────────────────────────────── */
 
+static int check_read_arguments(struct zcl_chainlog *log)
+{
+    int failures = 0;
+    size_t got = 777;
+    char small[4];
+    CL_CHECK("record zero does not exist",
+             zcl_chainlog_read(log, 0, NULL, small, sizeof small, &got) ==
+                 ZCL_CHAINLOG_ARGUMENT && got == 0);
+    got = 777;
+    CL_CHECK("a record past the end is NOT_FOUND",
+             zcl_chainlog_read(log, 99, NULL, small, sizeof small, &got) ==
+                 ZCL_CHAINLOG_NOT_FOUND && got == 0);
+    got = 777;
+    CL_CHECK("a NULL log refuses with zero length",
+             zcl_chainlog_read(NULL, 2, NULL, small, sizeof small, &got) ==
+                 ZCL_CHAINLOG_ARGUMENT && got == 0);
+    CL_CHECK("a NULL length refuses",
+             zcl_chainlog_read(log, 2, NULL, small, sizeof small, NULL) ==
+                 ZCL_CHAINLOG_ARGUMENT);
+    return failures;
+}
+
+static int check_read_prefix_refusals(struct zcl_chainlog *log)
+{
+    int failures = 0;
+    size_t got = 777;
+    char small[4];
+    cl_read_fault = 1;
+    CL_CHECK("a failed prefix read reports zero length",
+             zcl_chainlog_read(log, 2, NULL, small, sizeof small, &got) ==
+                 ZCL_CHAINLOG_IO && got == 0);
+    cl_read_fault = 2;
+    got = 777;
+    CL_CHECK("a refused prefix length reports zero length",
+             zcl_chainlog_read(log, 2, NULL, small, sizeof small, &got) ==
+                 ZCL_CHAINLOG_FORMAT && got == 0);
+    cl_read_fault = 0;
+    char full[8] = {0};
+    got = 777;
+    CL_CHECK("a valid read retains its true size and bytes",
+             zcl_chainlog_read(log, 2, NULL, full, sizeof full, &got) ==
+                 ZCL_CHAINLOG_OK);
+    CL_CHECK("a valid read reports eight bytes", got == 8);
+    CL_CHECK("a valid read copies the record", memcmp(full, "abcdefgh", sizeof full) == 0);
+    return failures;
+}
+
 static int case_surface(void)
 {
     int failures = 0;
@@ -667,12 +729,9 @@ static int case_surface(void)
              zcl_chainlog_read(log, 2, NULL, small, sizeof small, &got) ==
                  ZCL_CHAINLOG_TRUNCATED);
     CL_CHECK("and it says how much room the record needs", got == 8);
-    CL_CHECK("record zero does not exist",
-             zcl_chainlog_read(log, 0, NULL, small, sizeof small, &got) ==
-                 ZCL_CHAINLOG_ARGUMENT);
-    CL_CHECK("a record past the end is NOT_FOUND",
-             zcl_chainlog_read(log, 99, NULL, small, sizeof small, &got) ==
-                 ZCL_CHAINLOG_NOT_FOUND);
+    failures += check_read_arguments(log);
+    failures += check_read_prefix_refusals(log);
+    got = 777;
     CL_CHECK("an empty record reads back as empty",
              zcl_chainlog_read(log, 1, NULL, small, sizeof small, &got) ==
                      ZCL_CHAINLOG_OK &&

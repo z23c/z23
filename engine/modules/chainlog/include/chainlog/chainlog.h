@@ -162,9 +162,11 @@ enum zcl_chainlog_status zcl_chainlog_append(struct zcl_chainlog *log,
                                              uint64_t *out_seq,
                                              uint8_t out_chain[32]);
 
-/* Read record `seq` back. `*len` always receives the record's true size, so
- * a ZCL_CHAINLOG_TRUNCATED tells the caller exactly how big a buffer to
- * bring. The frame's chain is re-verified on the way out. */
+/* Read record `seq` back. `len` is required. A supplied `*len` receives zero
+ * until a valid size prefix is read, then receives the record's true size,
+ * including on later refusals. A ZCL_CHAINLOG_TRUNCATED tells the caller
+ * exactly how big a buffer to bring. The frame's chain is re-verified on
+ * the way out. */
 enum zcl_chainlog_status zcl_chainlog_read(struct zcl_chainlog *log,
                                            uint64_t seq, uint32_t *kind,
                                            void *buf, size_t cap, size_t *len);

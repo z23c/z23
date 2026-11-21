@@ -526,7 +526,10 @@ enum zcl_chainlog_status zcl_chainlog_read(struct zcl_chainlog *log,
                                            uint64_t seq, uint32_t *kind,
                                            void *buf, size_t cap, size_t *len)
 {
-    if (!log || seq == 0 || !len)
+    if (!len)
+        return ZCL_CHAINLOG_ARGUMENT;
+    *len = 0;
+    if (!log || seq == 0)
         return ZCL_CHAINLOG_ARGUMENT;
     if (seq > log->count)
         return ZCL_CHAINLOG_NOT_FOUND;
