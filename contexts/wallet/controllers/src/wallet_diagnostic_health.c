@@ -261,8 +261,12 @@ bool rpc_getwalletaccounting(const struct json_value *params,
 
     ENSURE_WALLET(result);
 
+    /* Keep the balance, transaction pointers and scan facts in one wallet view.
+     * The coin balance helper takes this recursive mutex again. */
+    zcl_mutex_lock(&ctx->wallet->cs);
     int64_t utxo_balance = 0;
     if (!wallet_available_coins_balance(ctx->wallet, &utxo_balance)) {
+        zcl_mutex_unlock(&ctx->wallet->cs);
         json_set_str(result, "Available wallet coin balance overflow");
         return false;
     }
@@ -285,10 +289,9 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     int64_t missing_total = 0;
     int64_t unknown_fees = 0;
     bool fee_sum_valid = true;
-    zcl_mutex_lock(&ctx->wallet->cs);
     bool pending = ctx->wallet->scan_retry.pending;
-    bool map_at_capacity = ctx->wallet->num_wallet_tx >= MAX_WALLET_TX;
-    zcl_mutex_unlock(&ctx->wallet->cs);
+    size_t tx_count = ctx->wallet->num_wallet_tx;
+    bool map_at_capacity = tx_count >= MAX_WALLET_TX;
 
     struct json_value tx_list = {0};
     json_init(&tx_list);
@@ -377,6 +380,8 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         json_free(&entry);
     }
 
+    zcl_mutex_unlock(&ctx->wallet->cs);
+
     char s[32];
     format_amount(total_external_in, s, sizeof(s));
     json_push_kv_real(result, "external_in", strtod(s, NULL));
@@ -414,7 +419,7 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     accounting_push_null(result, "balanced");
 
     json_push_kv_int(result, "tx_count",
-                     (int64_t)ctx->wallet->num_wallet_tx);
+                     (int64_t)tx_count);
     json_push_kv(&result[0], "transactions", &tx_list);
     json_free(&tx_list);
 

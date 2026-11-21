@@ -766,6 +766,18 @@ static int wrc_accounting_shielded_funded(struct wrc_f *f, struct wallet *origin
             printf("ACCOUNTING_SHIELDED_FUNDED %s\n", encoded);
         WRC_CHECK("shielded-funded RPC reports 10 in, 5 out, 4 unspent, 1 fee",
                   ok && wrc_shielded_accounting_amounts(&result));
+        json_free(&result);
+        zcl_mutex_lock(&w->cs);
+        send->tx.vout[1].value = INT64_C(300000000);
+        zcl_mutex_unlock(&w->cs);
+        ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+        const struct json_value *balance = json_get(&result, "utxo_balance");
+        const struct json_value *fee = json_get(&result, "total_fees");
+        const struct json_value *count = json_get(&result, "tx_count");
+        WRC_CHECK("accounting RPC reflects a subsequent wallet update consistently",
+                  ok && balance && fee && count &&
+                  json_get_real(balance) == 3.0 && json_get_real(fee) == 2.0 &&
+                  json_get_int(count) == 1);
         json_free(&params); json_free(&result);
     }
     rpc_wallet_set_state(original, f->ms, f->datadir, f->ws, f->mempool, NULL);
