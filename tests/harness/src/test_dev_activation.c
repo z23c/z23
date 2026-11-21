@@ -1891,6 +1891,17 @@ static bool persist_command_available(int fd, const char *name,
 static void persist_command_handle(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply);
 
+/* The adapter is included with fixture-local names so it cannot supply or
+ * mask the production command symbol. A missing rollback feature remains a
+ * nullable reference for the fail-then-pass test. */
+#if defined(__APPLE__)
+__attribute__((weak_import))
+#elif !defined(_WIN32)
+__attribute__((weak))
+#endif
+void persist_command_rollback(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply);
+
 #ifndef ZCL_DEV_BUILD
 #define ZCL_DEV_BUILD
 #define PERSIST_TEST_DEV_BUILD
@@ -1901,7 +1912,9 @@ static void persist_command_handle(const struct zcl_command_request *request,
 #define authority_receipt_header_seal_and_write persist_command_seal
 #define authority_receipt_header_authority_available persist_command_available
 #define zcl_native_handle_dev_generation_activate persist_command_handle
+#define zcl_native_handle_dev_generation_rollback persist_command_rollback
 #include "../../../tools/command/native_dev_activation_command.c"
+#undef zcl_native_handle_dev_generation_rollback
 #undef zcl_native_handle_dev_generation_activate
 #undef authority_receipt_header_authority_available
 #undef authority_receipt_header_seal_and_write
@@ -1911,14 +1924,6 @@ static void persist_command_handle(const struct zcl_command_request *request,
 #ifdef PERSIST_TEST_DEV_BUILD
 #undef ZCL_DEV_BUILD
 #undef PERSIST_TEST_DEV_BUILD
-#endif
-
-#if !defined(_WIN32)
-/* The rollback entry point is defined by the included adapter above when the
- * feature is present. Declared weak so a fail-then-pass run that builds the
- * suite WITHOUT the feature asserts its absence instead of failing to link. */
-__attribute__((weak)) void zcl_native_handle_dev_generation_rollback(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply);
 #endif
 
 static int test_persistence_command(int branch)
@@ -2109,7 +2114,7 @@ static int test_rollback_command(void)
      * feature links the weak symbol as NULL and must FAIL here, not crash. */
     void (*volatile rollback_entry)(const struct zcl_command_request *,
                                     struct zcl_command_reply *) =
-        zcl_native_handle_dev_generation_rollback;
+        persist_command_rollback;
     struct sandbox sb;
     sandbox_enter(&sb, "persist_rollback");
     struct platform_clock_source clock = {
