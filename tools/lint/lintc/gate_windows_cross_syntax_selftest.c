@@ -820,7 +820,7 @@ int lint_selection_stream_test(FILE *f);
 int wcs_stream_test(FILE *f);
 int wcs_stream_limit_test(FILE *f);
 
-struct wcs_error_cookie { int reads; bool fail; };
+struct wcs_error_cookie { int reads; int fail; };
 static ssize_t wcs_error_read(void *opaque, char *buf, size_t size)
 {
     struct wcs_error_cookie *c = opaque;
@@ -830,7 +830,15 @@ static ssize_t wcs_error_read(void *opaque, char *buf, size_t size)
         memcpy(buf, row, sizeof(row) - 1);
         return (ssize_t)(sizeof(row) - 1);
     }
-    if (!c->fail) return 0;
+    if (c->fail != 1) return 0;
+    errno = EIO;
+    return -1;
+}
+
+static int wcs_error_close(void *opaque)
+{
+    struct wcs_error_cookie *c = opaque;
+    if (c->fail != 2) return 0;
     errno = EIO;
     return -1;
 }
@@ -840,9 +848,9 @@ static int wcs_stream_error_test(void)
     int (*readers[])(FILE *) = { lint_selection_stream_test, wcs_stream_test };
     int bad = 0;
     for (size_t i = 0; i < sizeof(readers) / sizeof(readers[0]); i++) {
-        for (int fail = 0; fail <= 1; fail++) {
-            struct wcs_error_cookie cookie = { .fail = fail != 0 };
-            cookie_io_functions_t io = { .read = wcs_error_read };
+        for (int fail = 0; fail <= 2; fail++) {
+            struct wcs_error_cookie cookie = { .fail = fail };
+            cookie_io_functions_t io = { .read = wcs_error_read, .close = wcs_error_close };
             FILE *f = fopencookie(&cookie, "r", io);
             if (!f) return 1;
             int rc = readers[i](f);
@@ -855,7 +863,7 @@ static int wcs_stream_error_test(void)
         }
     }
     struct wcs_error_cookie cookie = {};
-    cookie_io_functions_t io = { .read = wcs_error_read };
+    cookie_io_functions_t io = { .read = wcs_error_read, .close = wcs_error_close };
     FILE *f = fopencookie(&cookie, "r", io);
     if (!f || wcs_stream_limit_test(f) != 0) bad = 1;
     return bad;

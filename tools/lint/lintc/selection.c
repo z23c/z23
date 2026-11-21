@@ -210,7 +210,7 @@ static int read_lines_stream(FILE *f, struct strv *out)
         if (n > 2 && strcmp(line + n - 2, ".c") == 0)
             rc = strv_add(out, line, (size_t)n);
     }
-    if (ferror(f)) rc = 2;
+    if (ferror(f) || !feof(f)) rc = 2;
     free(line);
     return rc;
 }
