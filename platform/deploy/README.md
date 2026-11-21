@@ -39,6 +39,9 @@ you are new; this page is about operating a host, not about building.
   C5 and C7 only; C1, C2 and C4 are not scheduled (see the unit header for why).
 - **Agents.** `zcl-agent-worker@.service` and `zcl-agent-receive@.service`, the
   instanced pair. The instance name is the box's own agent identity.
+  The receiver runs no node but carries mail over the signed board through the
+  box's own node: set `Z23_NODE_FLAGS=-rpcport=<PORT>` in a drop-in when that
+  node is not on the dev-lane default (see the unit header).
 - **Installers.** `setup.sh`, `provision-z23-build-host.sh`,
   `install-host-watchdog.sh`, `migrate-role-names.sh`, and the bundle and
   cutover scripts. Subdirectories `fleet-gateway/`, `devfleet/`, `examples/`,

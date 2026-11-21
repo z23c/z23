@@ -31,6 +31,18 @@ Description=Z23 resident mail receiver for agent identity %i (admits directives,
 # runs NO node: no datadir, no P2P or RPC port, no wallet, no listener. It
 # therefore cannot touch the operator's live node or any lane's datadir.
 #
+# IT MUST STILL REACH ONE. Mail crosses hosts over the signed fleet board, and
+# the board carry calls this box's own node's fleet_board RPC as a client.
+# Z23_NODE_FLAGS below names that node. Left empty, z23-dev uses its dev-lane
+# default (datadir ~/.zclassic-c23-dev, RPC port 18252, on purpose: a dev
+# binary does not touch the canonical node unasked). A box whose public node
+# runs elsewhere, as the release lane does on 18232, then has no node to
+# answer, and mail never leaves the box. Recognise it by the journal line
+# "board post for ref=... deferred: no node answered" repeating, and by
+# `z23-dev dev agent receive status --receiver=<id>` showing board_in and
+# board_out at 0 while the node is up. Fix it with the drop-in under the
+# Z23_NODE_FLAGS paragraph.
+#
 # WHAT ADMISSION PROVES, PLAINLY. A grant of the owner's naming a sender
 # label. Nothing in the tree signs or verifies an agent-mail row today: an
 # inbox.<peer>.jsonl file's provenance is its filename plus whatever
@@ -161,6 +173,20 @@ OOMScoreAdjust=500
 #   Environment=Z23_RECEIVE_WORKSPACE_FLAG=--workspace=%h/.z23/lanes/yourlane
 Environment=Z23_RECEIVE_WORKSPACE_FLAG=
 
+# THE NODE THIS RECEIVER REACHES FOR BOARD CARRY. Same shape and same reason as
+# the workspace flag above: the variable holds whole flags, so empty means ZERO
+# arguments (unquoted single-dollar $VAR in ExecStart; braced ${VAR} would pass
+# an empty argument). It ships EMPTY, so the dev binary default selection is
+# used. The flags are global client flags and sit BEFORE the command path.
+# -rpcport alone is enough: the matching datadir is auto-discovered, and
+# -datadir=DIR may be added to pin one. Check the target first with
+# `z23-dev -rpcport=<PORT> fleet board status` (ok:true), then:
+#   systemctl --user edit zcl-agent-receive@box-a
+#   [Service]
+#   Environment=Z23_NODE_FLAGS=-rpcport=<PORT>
+#   systemctl --user restart zcl-agent-receive@box-a
+Environment=Z23_NODE_FLAGS=
+
 # THE BINARY IS THE INSTALLED ONE, NEVER A CHECKOUT'S BUILD OUTPUT. The
 # receiver and the dev.agent.worker resident are ONE candidate: if they
 # resolve their executable through different paths, or through a path whose
@@ -188,7 +214,7 @@ Environment=Z23_RECEIVE_WORKSPACE_FLAG=
 # above still refuses a binary that exits in a tight loop. Every decision
 # is re-derived from files on the next drive, so a restart between beats
 # neither loses a ref nor executes one twice.
-ExecStart=%h/.local/bin/z23-dev dev agent receive run --receiver=%i $Z23_RECEIVE_WORKSPACE_FLAG --deadline_s=86400 --wait_ms=1000
+ExecStart=%h/.local/bin/z23-dev $Z23_NODE_FLAGS dev agent receive run --receiver=%i $Z23_RECEIVE_WORKSPACE_FLAG --deadline_s=86400 --wait_ms=1000
 
 # The resident handles SIGTERM cooperatively: it stops taking new work at the
 # next check, the watcher wait returns within its stop-sample slice, and the
