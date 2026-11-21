@@ -268,6 +268,36 @@ static int rcptsig_selftest_cleanup_case(const char *fix, int sig)
     return bad;
 }
 
+/* The sink starts empty and nobody drains it. Once its write end loses
+ * POLLOUT the wrapper has forwarded enough data to encounter backpressure. */
+static bool rcptsig_wait_backpressure(int fd, int timeout_ms)
+{
+    struct timespec start, now;
+    struct pollfd sink = {.fd = fd, .events = POLLOUT};
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
+        return false;
+
+    for (;;) {
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return false;
+        int64_t elapsed = (int64_t)(now.tv_sec - start.tv_sec) * 1000 +
+                          (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed >= timeout_ms)
+            return false;
+
+        int ready = poll(&sink, 1, 0);
+        if (ready == 0)
+            return true;
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready < 0 || sink.revents != POLLOUT)
+            return false;
+        int remaining = timeout_ms - (int)elapsed;
+        if (poll(nullptr, 0, remaining < 10 ? remaining : 10) < 0 && errno != EINTR)
+            return false;
+    }
+}
+
 /* The wrapper's stdout is a pipe nobody reads and the gate has filled it:
  * a signal must still stop the wrapper within the kill grace period. */
 static int rcptsig_stalled_stdout_case(const char *fix)
@@ -281,8 +311,8 @@ static int rcptsig_stalled_stdout_case(const char *fix)
     if (pipe(sink) != 0)
         return 1;
     if (rcptsig_spawn(fix, args, nullptr, sink[1], &p) == 0 && rcptsig_wait_ready(&p) == 0) {
-        sleep(2);
-        bad = rcptsig_signal_verdict(&p, SIGTERM, 1);
+        bool stalled = rcptsig_wait_backpressure(sink[1], RCPTSIG_READY_MS);
+        bad = rcptsig_signal_verdict(&p, SIGTERM, 1) || !stalled;
     }
     rcptsig_kill_leftover(&p);
     close(sink[0]);
