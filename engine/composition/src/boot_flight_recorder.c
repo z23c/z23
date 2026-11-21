@@ -87,13 +87,20 @@ void boot_flight_recorder_reset_buffer_for_testing(void)
 
 static bool bfr_ensure_schema(struct node_db *ndb)
 {
-    return node_db_exec(ndb,
+    if (!node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS boot_stage_timings ("
         " boot_epoch INTEGER NOT NULL,"
         " stage      TEXT    NOT NULL,"
         " ms         INTEGER NOT NULL,"
         " ts         INTEGER NOT NULL,"
-        " PRIMARY KEY (boot_epoch, stage))");
+        " PRIMARY KEY (boot_epoch, stage))"))
+        return false;
+    /* Optional covering index speeds both count and ordered median reads. */
+    if (!node_db_exec(ndb,
+            "CREATE INDEX IF NOT EXISTS idx_boot_stage_ms "
+            "ON boot_stage_timings(stage, ms)"))
+        LOG_WARN("boot_flight", "median index unavailable; using table scan");
+    return true;
 }
 
 /* Approximate median ms for `stage` across every durably retained boot

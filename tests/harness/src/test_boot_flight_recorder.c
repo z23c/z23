@@ -569,6 +569,67 @@ static int bfr_test_boot_topmark_recording(struct node_db *ndb)
     return failures;
 }
 
+static int bfr_deny_index(void *ctx, int action, const char *a, const char *b,
+                          const char *db, const char *trigger)
+{
+    (void)ctx; (void)a; (void)b; (void)db; (void)trigger;
+    return action == SQLITE_CREATE_INDEX ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int bfr_test_index_refusal(struct node_db *ndb)
+{
+    int failures = 0;
+    BFR_CHECK("drop optional index for refusal", sqlite3_exec(ndb->db,
+        "DROP INDEX IF EXISTS idx_boot_stage_ms", NULL, NULL, NULL) == SQLITE_OK);
+    BFR_CHECK("install index refusal", sqlite3_set_authorizer(ndb->db,
+        bfr_deny_index, NULL) == SQLITE_OK);
+    boot_flight_recorder_mark("index_refused", 17);
+    boot_flight_recorder_finish(ndb);
+    BFR_CHECK("remove index refusal", sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK);
+    BFR_CHECK("index refusal does not block persistence", bfr_distinct_epoch_count(ndb->db) == 1);
+    failures += bfr_clear_stage_timing_history(ndb, "clear index refusal history");
+    return failures;
+}
+
+
+static int bfr_test_existing_history_index(struct node_db *ndb)
+{
+    int failures = 0;
+    failures += bfr_clear_stage_timing_history(ndb, "clear for existing history");
+    BFR_CHECK("remove old optional index", sqlite3_exec(ndb->db,
+        "DROP INDEX IF EXISTS idx_boot_stage_ms", NULL, NULL, NULL) == SQLITE_OK);
+    BFR_CHECK("existing rows seeded",
+        bfr_insert_history_row(ndb->db, 101, "indexed", 10) &&
+        bfr_insert_history_row(ndb->db, 102, "indexed", 20) &&
+        bfr_insert_history_row(ndb->db, 103, "indexed", 20) &&
+        bfr_insert_history_row(ndb->db, 104, "indexed", 50));
+    boot_flight_recorder_mark("indexed", 30);
+    boot_flight_recorder_finish(ndb);
+    sqlite3_stmt *s = NULL;
+    int rc = sqlite3_prepare_v2(ndb->db,
+        "EXPLAIN QUERY PLAN SELECT ms FROM boot_stage_timings "
+        "WHERE stage=? ORDER BY ms LIMIT 1 OFFSET ?", -1, &s, NULL);
+    bool indexed = false;
+    while (rc == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW) {
+        const char *detail = (const char *)sqlite3_column_text(s, 3);
+        if (detail && strstr(detail, "COVERING INDEX idx_boot_stage_ms")) indexed = true;
+    }
+    sqlite3_finalize(s);
+    BFR_CHECK("existing table gains covering median index", indexed);
+    struct json_value v = {0};
+    json_set_object(&v);
+    bool ok = boot_flight_recorder_dump_state_json(&v, NULL);
+    const struct json_value *stages = json_get(&v, "stages");
+    const struct json_value *row = stages && json_size(stages) ? json_at(stages, 0) : NULL;
+    const struct json_value *med = row ? json_get(row, "median_ms") : NULL;
+    BFR_CHECK("dump reads tied median from existing history",
+              ok && med && json_get_int(med) == 20);
+    json_free(&v);
+    failures += bfr_clear_stage_timing_history(ndb, "clear indexed history");
+    return failures;
+}
+
+
 int test_boot_flight_recorder(void);
 int test_boot_flight_recorder(void)
 {
@@ -620,6 +681,9 @@ int test_boot_flight_recorder(void)
     failures += bfr_test_boot_clock_monotonic(&ndb);
     failures += bfr_test_boot_submark_recording(&ndb);
     failures += bfr_test_boot_topmark_recording(&ndb);
+
+    failures += bfr_test_existing_history_index(&ndb);
+    failures += bfr_test_index_refusal(&ndb);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
