@@ -1,7 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Purpose: the `code have` leaf — answer "does this checkout ALREADY DO X?"
- * in one call, before an agent writes the thing a second time.
+ * Purpose: See whether a feature already exists before an agent writes it again.
  *
  * This is a separate translation unit from native_code_command.c on purpose:
  * that file is already near the 1500-line ceiling, and this leaf answers a

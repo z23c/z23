@@ -460,6 +460,18 @@ static int ch_check_real_tree(struct ci_capability *caps,
         CH_CHECK("the cache-reason query reaches its explanation code",
                  ch_query_reaches(ci, "where is the code that explains why a test cache entry was hit or missed",
                                   "tests/harness/src/testcache_reason.c"));
+        CH_CHECK("the existing-feature query reaches the code-have command",
+                 ch_query_reaches(ci, "how do I see whether a feature already exists before I write it again",
+                                  "tools/command/native_code_have_command.c"));
+        CH_CHECK("the index-word query reaches its text search",
+                 ch_query_reaches(ci, "how does the text search over the code index match words",
+                                  "tools/command/native_dev_index_search.c"));
+        CH_CHECK("the tangled-function query reaches its complexity check",
+                 ch_query_reaches(ci, "which check tells me my function has grown too tangled to maintain",
+                                  "tools/command/native_dev_cx_check.c"));
+        CH_CHECK("the accepted-work query reaches its shared fixture",
+                 ch_query_reaches(ci, "shared fixture setup for accepted work acceptance tests",
+                                  "tests/harness/src/accepted_work_fixture.c"));
         struct ci_capability android[5];
         struct ci_capability_query android_q;
         int android_n = codeindex_capabilities(
@@ -700,7 +712,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 42 /* of all cases: 29/63 (46%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 49 /* of all cases: 33/63 (52%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {

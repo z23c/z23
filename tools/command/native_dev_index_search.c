@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
+ * Purpose: Text search over the code index matching words with FTS5.
+ *
  * dev.index search — FTS5 MATCH over rows_fts joined back to rows. See
  * native_dev_index_search.h. Every direct sqlite3_step call here carries the
  * `// raw-sql-ok:index-store` marker for the same reason as

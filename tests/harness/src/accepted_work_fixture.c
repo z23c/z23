@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Shared fixture setup for accepted work acceptance tests. */
 
 #include "test/accepted_work_fixture.h"
 

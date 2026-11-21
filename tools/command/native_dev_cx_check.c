@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: dev.cx.check. Verifies one complexity-split unit in a worktree and,
- *          when it passes, applies the baseline tighten there (rows only
+ * purpose: Check whether a function has grown too tangled to maintain with dev.cx.check.
+ *          When it passes, applies the baseline tighten there (rows only
  *          deleted). Each failure carries one named code: CX_SCOPE,
  *          CX_PRESERVED, CX_COMPILE, CX_BASELINE_ADDED, CX_STILL_OVER,
  *          CX_GATE. The metric is the lane's own build/bin/z23-lint
