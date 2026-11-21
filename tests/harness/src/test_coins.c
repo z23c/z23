@@ -1437,74 +1437,100 @@ static int coins_stats_trace_cb(unsigned type, void *ctx, void *statement, void 
     return 0;
 }
 
-static int coins_case_sqlite_post_flush_stats(void)
+static bool coins_stats_flush(struct coins_view_sqlite *view,
+                              struct coins_map *map, const struct uint256 *tip,
+                              struct coins_stats_trace *trace,
+                              int64_t height, int64_t count, bool no_scan)
 {
-    int failures = 0;
-    sqlite3 *db = NULL;
-    if (sqlite3_open(":memory:", &db) != SQLITE_OK || !db) {
-        if (db) sqlite3_close(db);
-        printf("coins post-flush stats: fixture open... FAIL\n");
-        return 1;
-    }
+    memset(trace, 0, sizeof(*trace));
+    return coins_view_sqlite_batch_write(view, map, tip, NULL) &&
+        trace->rows == 1 && trace->profiles == 1 &&
+        trace->max_height == height && trace->count == count &&
+        (!no_scan || trace->fullscan == 0);
+}
+
+
+static bool coins_stats_fixture_schema(sqlite3 *db)
+{
     const char *schema =
         "CREATE TABLE utxos(txid BLOB NOT NULL, vout INTEGER NOT NULL, "
         "value INTEGER, script BLOB, script_type INTEGER, address_hash BLOB, "
         "height INTEGER, is_coinbase INTEGER, PRIMARY KEY(txid,vout));"
         "CREATE INDEX idx_utxo_height ON utxos(height);"
         "CREATE TABLE node_state(key TEXT PRIMARY KEY,value BLOB);";
-    bool ok = sqlite3_exec(db, schema, NULL, NULL, NULL) == SQLITE_OK;
-    struct coins_view_sqlite view;
-    bool opened = ok && coins_view_sqlite_open(&view, db);
-    ok = opened && sqlite3_exec(db,
+    return sqlite3_exec(db, schema, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool coins_stats_fixture_seed(sqlite3 *db, struct coins_map *dirty)
+{
+    if (sqlite3_exec(db,
         "WITH RECURSIVE seq(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM seq "
         "WHERE i<16) INSERT INTO utxos(txid,vout,value,script,height) "
         "SELECT CAST(substr(hex(zeroblob(32))||i,-32) AS BLOB),0,1,zeroblob(1),i FROM seq",
-        NULL, NULL, NULL) == SQLITE_OK;
-    struct coins_map dirty, empty;
-    coins_map_init(&dirty);
-    coins_map_init(&empty);
-    struct uint256 txid, tip;
+        NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    struct uint256 txid;
     memset(txid.data, 0xa5, sizeof(txid.data));
-    memset(tip.data, 0xb7, sizeof(tip.data));
-    struct coins_cache_entry *entry = coins_map_insert(&dirty, &txid);
-    ok = ok && entry && coins_alloc(&entry->coins, 1);
-    if (entry && entry->coins.vout) {
-        entry->coins.vout[0].value = 50000000;
-        entry->coins.height = 7;
-        entry->flags = COINS_CACHE_DIRTY;
-    }
+    struct coins_cache_entry *entry = coins_map_insert(dirty, &txid);
+    if (!entry || !coins_alloc(&entry->coins, 1))
+        return false;
+    entry->coins.vout[0].value = 50000000;
+    entry->coins.height = 7;
+    entry->flags = COINS_CACHE_DIRTY;
+    return true;
+}
+
+static int coins_stats_scenarios(sqlite3 *db, struct coins_view_sqlite *view,
+                                 struct coins_map *dirty, struct coins_map *empty)
+{
     struct coins_stats_trace trace = {0};
-    bool tracing = opened && sqlite3_trace_v2(view.db, SQLITE_TRACE_ROW | SQLITE_TRACE_PROFILE,
-                                               coins_stats_trace_cb, &trace) == SQLITE_OK;
-    bool flushed = ok && tracing && coins_view_sqlite_batch_write(&view, &dirty, &tip, NULL);
-    bool indexed = flushed && trace.rows == 1 && trace.profiles == 1 &&
-        trace.max_height == 16 && trace.count == 17 && trace.fullscan == 0;
+    if (sqlite3_trace_v2(view->db, SQLITE_TRACE_ROW | SQLITE_TRACE_PROFILE,
+                         coins_stats_trace_cb, &trace) != SQLITE_OK) {
+        printf("coins post-flush stats: trace setup... FAIL\n");
+        return 1;
+    }
+    struct uint256 tip;
+    memset(tip.data, 0xb7, sizeof(tip.data));
+    int failures = 0;
+    bool indexed = coins_stats_flush(view, dirty, &tip, &trace, 16, 17, true);
     printf("coins post-flush stats: indexed exact result without row scan... %s\n",
            indexed ? "OK" : "FAIL");
     if (!indexed) failures++;
-    memset(&trace, 0, sizeof(trace));
-    bool dropped = opened && sqlite3_exec(db, "DROP INDEX idx_utxo_height", NULL, NULL, NULL) == SQLITE_OK;
-    flushed = dropped && tracing && coins_view_sqlite_batch_write(&view, &empty, NULL, NULL);
-    bool unindexed = flushed && trace.rows == 1 && trace.profiles == 1 &&
-        trace.max_height == 16 && trace.count == 17;
+    bool unindexed = sqlite3_exec(db, "DROP INDEX idx_utxo_height", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_stats_flush(view, empty, NULL, &trace, 16, 17, false);
     printf("coins post-flush stats: missing index preserves exact result... %s\n",
            unindexed ? "OK" : "FAIL");
     if (!unindexed) failures++;
-    memset(&trace, 0, sizeof(trace));
-    bool cleared = opened && sqlite3_exec(db, "DELETE FROM utxos", NULL, NULL, NULL) == SQLITE_OK;
-    flushed = cleared && tracing && coins_view_sqlite_batch_write(&view, &empty, NULL, NULL);
-    bool empty_ok = flushed && trace.rows == 1 && trace.profiles == 1 &&
-        trace.max_height == -1 && trace.count == 0;
+    bool empty_ok = sqlite3_exec(db, "DELETE FROM utxos", NULL, NULL, NULL) == SQLITE_OK &&
+        coins_stats_flush(view, empty, NULL, &trace, -1, 0, false);
     printf("coins post-flush stats: empty result... %s\n", empty_ok ? "OK" : "FAIL");
     if (!empty_ok) failures++;
-    if (tracing) (void)sqlite3_trace_v2(view.db, 0, NULL, NULL);
+    (void)sqlite3_trace_v2(view->db, 0, NULL, NULL);
+    return failures;
+}
+
+static int coins_case_sqlite_post_flush_stats(void)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK || !db) {
+        if (db) sqlite3_close(db);
+        printf("coins post-flush stats: fixture open... FAIL\n");
+        return 1;
+    }
+    struct coins_view_sqlite view;
+    bool opened = coins_stats_fixture_schema(db) && coins_view_sqlite_open(&view, db);
+    struct coins_map dirty, empty;
+    coins_map_init(&dirty);
+    coins_map_init(&empty);
+    bool seeded = opened && coins_stats_fixture_seed(db, &dirty);
+    int failures = seeded ? coins_stats_scenarios(db, &view, &dirty, &empty) : 1;
+    if (!seeded) printf("coins post-flush stats: fixture setup... FAIL\n");
     coins_map_free(&dirty);
     coins_map_free(&empty);
     if (opened) coins_view_sqlite_close(&view);
     sqlite3_close(db);
     return failures;
 }
-
 
 int test_coins(void)
 {
