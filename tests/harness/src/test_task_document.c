@@ -84,6 +84,92 @@ static bool td_reload_check(struct zcl_command_reply *stale, const char *directo
     if (ok) ok = td_reload_content(&reply);
     zcl_command_reply_free(&reply); json_free(&input); return ok;
 }
+static bool td_public_call(const struct json_value *input, struct json_value *out)
+{
+    json_set_null(out);
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(registry, "app.tasks", NULL);
+    if (!spec) return false;
+    struct zcl_command_context context = {.registry = registry, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    char wire[8192]; enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+    size_t n = zcl_command_registry_execute_json(registry, spec, &context, input, false,
+        spec->path, "normal", 0, 0, NULL, wire, sizeof(wire), &code);
+    return n && n < sizeof(wire) && json_read(out, wire, n);
+}
+static bool td_json_text(const struct json_value *object, const char *key, const char *expected)
+{
+    const char *actual = json_get_str(json_get(object, key));
+    return actual && !strcmp(actual, expected);
+}
+static bool td_public_stale(struct json_value *input, const char *directory)
+{
+    struct json_value result = {0}, replay = {0};
+    bool ok = td_public_call(input, &result);
+    const struct json_value *error = json_get(&result, "error");
+    const char *code = json_get_str(json_get(error, "code"));
+    const struct json_value *next = json_at(json_get(&result, "next"), 0);
+    const char *command = json_get_str(json_get(next, "command"));
+    const struct json_value *next_input = json_get(next, "input");
+    ok = ok && code && !strcmp(code, "TASK_SAVE_FAILED") && command && !strcmp(command, "app.tasks") &&
+        next_input && td_json_text(next_input, "datadir", directory) &&
+        td_json_text(next_input, "app", "local/reload") && td_json_text(next_input, "action", "list");
+    if (ok) ok = td_public_call(next_input, &replay);
+    if (ok) {
+        const struct json_value *data = json_get(&replay, "data");
+        const char *title = json_get_str(json_get(json_at(json_get(data, "tasks"), 0), "title"));
+        ok = json_get_bool(json_get(&replay, "ok")) && json_get_int(json_get(data, "revision")) == 1 &&
+            json_get_bool(json_get(data, "can_undo")) && title && !strcmp(title, "Winner");
+    }
+    json_free(&replay); json_free(&result); return ok;
+}
+#if defined(ZCL_TESTING)
+static bool td_forged_next(struct zcl_command_reply *reply, const char *directory,
+                           const char *app, const char *action)
+{
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "app", app) && json_push_kv_str(&input, "datadir", directory) &&
+        json_push_kv_str(&input, "action", action);
+    char old[sizeof(reply->next[0].input_json)];
+    (void)snprintf(old, sizeof(old), "%s", reply->next[0].input_json);
+    size_t n = ok ? json_write(&input, reply->next[0].input_json, sizeof(reply->next[0].input_json)) : 0;
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(registry, "app.tasks", NULL);
+    char wire[8192];
+    size_t len = n && spec ? zcl_command_registry_test_reply_wire(registry, spec, reply, wire, sizeof(wire)) : 0;
+    ok = n && spec && len == 0;
+    (void)snprintf(reply->next[0].input_json, sizeof(reply->next[0].input_json), "%s", old);
+    json_free(&input); return ok;
+}
+static bool td_forged_reply(struct zcl_command_reply *reply)
+{
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(registry, "app.tasks", NULL);
+    char wire[8192], code[sizeof(reply->error.code)];
+    (void)snprintf(code, sizeof(code), "%s", reply->error.code);
+    reply->error.mutated = true;
+    bool ok = spec && !zcl_command_registry_test_reply_wire(registry, spec, reply, wire, sizeof(wire));
+    reply->error.mutated = false;
+    (void)snprintf(reply->error.code, sizeof(reply->error.code), "%s", "OTHER_FAILURE");
+    ok = ok && !zcl_command_registry_test_reply_wire(registry, spec, reply, wire, sizeof(wire));
+    (void)snprintf(reply->error.code, sizeof(reply->error.code), "%s", code);
+    return ok;
+}
+static bool td_forged_checks(struct zcl_command_reply *reply, const char *directory)
+{
+    char alternate[4096];
+    int n = snprintf(alternate, sizeof(alternate), "%s/other", directory);
+    return n > 0 && (size_t)n < sizeof(alternate) && td_forged_reply(reply) &&
+        td_forged_next(reply, directory, "local/other", "list") &&
+        td_forged_next(reply, directory, "local/reload", "delete") &&
+        td_forged_next(reply, alternate, "local/reload", "list");
+}
+#else
+static bool td_forged_checks(struct zcl_command_reply *reply, const char *directory)
+{
+    (void)reply; (void)directory; return true;
+}
+#endif
 static bool td_reload_request(const char *directory, int64_t expected, bool stale)
 {
     struct json_value input = {0}; json_set_object(&input);
@@ -92,8 +178,9 @@ static bool td_reload_request(const char *directory, int64_t expected, bool stal
         json_push_kv_int(&input, "expected_revision", expected);
     struct zcl_command_reply reply = {0};
     if (ok) ok = td_call(&input, &reply);
-    if (ok) ok = stale ? td_reload_check(&reply, directory) :
-        reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && reply.next_count == 0;
+    if (ok && stale) ok = td_reload_check(&reply, directory) && td_public_stale(&input, directory) &&
+        td_forged_checks(&reply, directory);
+    else if (ok) ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && reply.next_count == 0;
     zcl_command_reply_free(&reply); json_free(&input); return ok;
 }
 static bool td_unrelated_request(const char *directory)

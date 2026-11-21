@@ -280,12 +280,46 @@ static bool android_job_next_valid(const struct zcl_command_spec *spec,
     return id[0] && strcmp(id, json_get_str(requested)) == 0;
 }
 
+static bool tasks_reload_reply_valid(const struct zcl_command_spec *spec,
+    const struct zcl_command_reply *reply)
+{
+    return spec->input_schema && spec->output_schema &&
+        !strcmp(spec->input_schema, "zcl.task_document.input.v1") &&
+        !strcmp(spec->output_schema, "zcl.task_document.v1") &&
+        reply->status == ZCL_COMMAND_STATUS_FAILED && !reply->error.mutated &&
+        !strcmp(reply->error.code, "TASK_SAVE_FAILED") && !strcmp(reply->error.phase, "save");
+}
+
+/* A stale task save may reload only the exact document in its failure facts. */
+static bool tasks_reload_next_valid(const struct zcl_command_spec *spec,
+    const struct json_value *input, const struct zcl_command_reply *reply)
+{
+    if (!tasks_reload_reply_valid(spec, reply) || input->num_children != 3) return false;
+    const struct json_value *action = json_get(input, "action");
+    const struct json_value *facts = json_get(&reply->data, "failure_facts");
+    const struct json_value *kind = json_get(facts, "kind");
+    return action && action->type == JSON_STR && !strcmp(json_get_str(action), "list") &&
+        facts && facts->type == JSON_OBJ && facts->num_children == 3 &&
+        kind && kind->type == JSON_STR && !strcmp(json_get_str(kind), "task-stale-reload") &&
+        source_next_text(input, "app", facts, "app") &&
+        source_next_text(input, "datadir", facts, "datadir");
+}
+
+static bool ordinary_self_link_valid(const struct zcl_command_spec *spec,
+    const struct json_value *input, const struct json_value *data)
+{
+    return json_get(input, "cursor") || json_get(input, "item_offset") ||
+        json_get(input, "after") || source_next_valid(spec, input, data) ||
+        supervisor_next_valid(spec, input, data) || android_job_next_valid(spec, input, data);
+}
+
 static bool push_next_item_valid(const struct zcl_command_next *next,
                                  const struct zcl_command_registry *registry,
                                  const struct zcl_command_spec *current_spec,
-                                 const struct json_value *data,
+                                 const struct zcl_command_reply *reply,
                                  struct json_value *input)
 {
+    const struct json_value *data = &reply->data;
     if (!json_read(input, next->input_json, strlen(next->input_json)) ||
         input->type != JSON_OBJ)
         return false;
@@ -294,15 +328,13 @@ static bool push_next_item_valid(const struct zcl_command_next *next,
     char why[160] = {0};
     if (!next_spec || command_registry_is_branch(next_spec))
         return false;
-    /* Generic self-links retain their established paging-key requirement.
-     * Selected-source navigation has a schema-specific, reply-bound check;
-     * neither check claims to compare against the original request input. */
-    if (current_spec && strcmp(next_spec->path, current_spec->path) == 0 &&
-        !json_get(input, "cursor") && !json_get(input, "item_offset") &&
-        !json_get(input, "after") && !source_next_valid(current_spec, input, data) &&
-        !supervisor_next_valid(current_spec, input, data) &&
-        !android_job_next_valid(current_spec, input, data))
-        return false;
+    if (current_spec && !strcmp(current_spec->path, "app.tasks") &&
+        !strcmp(next_spec->path, current_spec->path))
+        return tasks_reload_next_valid(current_spec, input, reply) &&
+            zcl_command_registry_input_validate(next_spec, input, why, sizeof(why));
+    /* Generic self-links retain their established paging and source checks. */
+    if (current_spec && !strcmp(next_spec->path, current_spec->path) &&
+        !ordinary_self_link_valid(current_spec, input, data)) return false;
     return zcl_command_registry_input_validate(next_spec, input, why,
                                                sizeof(why));
 }
@@ -311,14 +343,14 @@ static bool push_next_item(struct json_value *array,
                            const struct zcl_command_next *next,
                            const struct zcl_command_registry *registry,
                            const struct zcl_command_spec *current_spec,
-                           const struct json_value *data,
+                           const struct zcl_command_reply *reply,
                            enum command_serialize_failure *failure)
 {
     struct json_value item, input;
     json_init(&item);
     json_init(&input);
     json_set_object(&item);
-    if (!push_next_item_valid(next, registry, current_spec, data, &input)) {
+    if (!push_next_item_valid(next, registry, current_spec, reply, &input)) {
         if (failure) *failure = COMMAND_SERIALIZE_NEXT;
         json_free(&input);
         json_free(&item);
@@ -344,7 +376,7 @@ bool command_registry_push_next_array(
     json_set_array(&array);
     bool ok = true;
     for (size_t i = 0; ok && i < reply->next_count; i++)
-        ok = push_next_item(&array, &reply->next[i], registry, current_spec, &reply->data, failure);
+        ok = push_next_item(&array, &reply->next[i], registry, current_spec, reply, failure);
     ok = ok && json_push_kv(root, "next", &array);
     json_free(&array);
     return ok;

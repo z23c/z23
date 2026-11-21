@@ -228,8 +228,15 @@ static void ntd_stale_recovery(struct zcl_command_reply *reply,
     bool ok = json_push_kv_str(&next, "action", "list") &&
         json_push_kv_str(&next, "app", app) && json_push_kv_str(&next, "datadir", directory);
     char wire[sizeof(reply->next[0].input_json)]; size_t n = ok ? json_write(&next, wire, sizeof(wire)) : 0;
-    bool added = n && n < sizeof(wire) && zcl_command_reply_add_next(reply, "app.tasks", wire,
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    bool safe = n && n < 384 && n < sizeof(wire) && !strchr(wire, '\'');
+    bool bound = safe && json_push_kv_str(&facts, "kind", "task-stale-reload") &&
+        json_push_kv_str(&facts, "app", app) &&
+        json_push_kv_str(&facts, "datadir", directory) &&
+        json_push_kv(&reply->data, "failure_facts", &facts);
+    bool added = bound && zcl_command_reply_add_next(reply, "app.tasks", wire,
         "Reload the current tasks in this same document before saving.");
+    json_free(&facts);
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", added ?
         "Reload the current tasks using the next command before saving." :
         "Reload with app.tasks action list using the same app and datadir.");
