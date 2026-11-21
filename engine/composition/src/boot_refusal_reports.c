@@ -46,23 +46,23 @@ void boot_report_datadir_create_failed(const char *datadir, int error_errno)
     parent_dir_of(dd, parent, sizeof(parent));
 
     /* ENOENT can indicate a missing parent; verify it before retrying. */
-    const struct boot_error_next missing_parent[] = {
-        { "inspect the parent directory", "if a parent is missing, create the directory and its parents" },
-        { "check parent permissions", "confirm the parent exists and is writable by the user running "
-              "the node" },
+#if defined(_WIN32)
+    const char *identity_command = "whoami";
+#else
+    const char *identity_command = "id -un";
+#endif
+    const struct boot_error_next next[] = {
+        { identity_command, error_errno == ENOENT
+            ? "check the user; if a parent is missing, create the directory and its parents"
+            : "check the user and inspect the requested path, its type, owner and mode" },
     };
-    const struct boot_error_next not_permitted[] = {
-        { "inspect the requested path", "inspect the requested path and its type, owner and mode" },
-        { "id -un", "print the user this process runs as" },
-    };
-    bool parent_missing = error_errno == ENOENT;
     char identity[192];
     if (!platform_current_identity(identity, sizeof(identity)))
         (void)snprintf(identity, sizeof(identity), "unavailable");
     boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_CREATE_FAILED",
                       "datadir_select",
                       "the data directory could not be created or validated as private",
-                      parent_missing ? missing_parent : not_permitted, 2,
+                      next, 1,
                       "datadir=%s parent=%s identity=%s directory_errno=%s",
                       dd, parent, identity,
                       error_errno > 0 ? strerror(error_errno) : "unavailable");
