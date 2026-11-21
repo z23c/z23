@@ -2389,8 +2389,7 @@ static void pst_waiter_parent(int control[2], int live[2],
     bool ready = pst_wait_for_announcement(gatepath) && kill(child, SIGSTOP) == 0 &&
                  waitpid(child, &status, WUNTRACED) == child && WIFSTOPPED(status);
     char marker = ready ? 'Y' : 'N';
-    (void)write(control[1], &marker, 1);
-    if (!ready) _exit(1);
+    if (write(control[1], &marker, 1) != 1 || !ready) _exit(1);
     for (;;) pause();
 }
 
