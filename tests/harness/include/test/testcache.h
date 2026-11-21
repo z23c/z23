@@ -65,6 +65,9 @@ struct codeindex *testcache_test_codeindex(struct testcache *tc);
  * .zvcs object store exists. Returns NULL on hard failure — the caller then
  * runs every group (fail-safe: no cache, never a wrong skip). */
 struct testcache *testcache_open(const char *repo_root);
+/* Full freshness and rebuild checks without enrolling a later-open memo. */
+struct testcache *testcache_open_one_shot(const char *repo_root);
+
 /* Resident save-cycle variant: open only the already-verified index snapshot
  * and bind the exact changed source set. A group's old forward closure may be
  * reused only when it excludes every changed source; any affected group runs

@@ -26,6 +26,7 @@
 
 #include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 #include <sqlite3.h>
+#include "codeindex/codeindex_build.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -525,6 +526,53 @@ static uint64_t tc_now_ms(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u +
            (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* A one-shot open must perform its own freshness walk without enrolling or
+ * sealing a memo, even when this process already opened the same index. */
+static bool tc_one_shot_read(struct testcache_probe *out)
+{
+    uint64_t walks = codeindex_test_freshness_walks();
+    uint64_t enrollments = codeindex_test_watch_enrollments();
+    uint64_t seals = codeindex_test_freshness_seals();
+    struct testcache *tc = testcache_open_one_shot(TC_FIX);
+    if (!tc) return false;
+    struct codeindex *ci = testcache_test_codeindex(tc);
+    bool ok = ci && ci->one_shot &&
+              codeindex_test_freshness_walks() > walks &&
+              codeindex_test_watch_enrollments() == enrollments &&
+              codeindex_test_freshness_seals() == seals;
+    testcache_probe_group(tc, "test_demo_entry", out);
+    ok = ok && out->key_valid && out->cacheable;
+    testcache_close(tc);
+    return ok;
+}
+
+static bool tc_regular_read(struct testcache_probe *out)
+{
+    struct testcache *tc = testcache_open(TC_FIX);
+    if (!tc) return false;
+    testcache_probe_group(tc, "test_demo_entry", out);
+    testcache_close(tc);
+    return out->key_valid && out->cacheable;
+}
+
+static int tc_one_shot_freshness(void)
+{
+    int failures = 0;
+    struct testcache_probe original = {0}, same = {0}, changed = {0}, check = {0};
+    bool ok = write_fixture(TC_LEAF_A, TC_OTHER_A, TC_H_A);
+    ok = ok && tc_regular_read(&original);
+    ok = ok && tc_one_shot_read(&same);
+    TC_CHECK("one-shot walks without a seal and matches the live key",
+             ok && tc_probe_equal(&original, &same));
+    ok = write_fixture(TC_LEAF_B, TC_OTHER_A, TC_H_A);
+    ok = ok && tc_one_shot_read(&changed);
+    ok = ok && tc_regular_read(&check);
+    TC_CHECK("one-shot sees changed source and refreshed depfiles",
+             ok && tc_probe_equal(&changed, &check) &&
+             memcmp(original.key, changed.key, sizeof(original.key)) != 0);
+    return failures;
 }
 
 /* Store one PASS per batch entry so parity covers HIT as well as MISS. */
@@ -4250,6 +4298,7 @@ int test_testcache(void)
     failures += tc_batch_vanished();
     failures += tc_batch_restart_crosstree();
     failures += tc_batch_perf();
+    failures += tc_one_shot_freshness();
     failures += tc_observation_roundtrip();
     failures += tc_action_inputs_phase();
     failures += tc_load_flaky_excerpt();

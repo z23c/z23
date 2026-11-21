@@ -1503,9 +1503,11 @@ static void trc_open_load_depfiles(struct testcache *tc)
     }
 }
 
+enum trc_open_mode { TRC_OPEN_NORMAL, TRC_OPEN_ONE_SHOT, TRC_OPEN_SNAPSHOT };
+
 static struct testcache *testcache_open_mode(
     const char *repo_root, const char *const *changed_sources,
-    size_t changed_source_count, bool snapshot_mode)
+    size_t changed_source_count, enum trc_open_mode mode)
 {
     const char *root = trc_open_select_root(repo_root);
 
@@ -1548,7 +1550,7 @@ static struct testcache *testcache_open_mode(
     }
 
     trc_env_digest(tc->envkey);
-    tc->snapshot_mode = snapshot_mode;
+    tc->snapshot_mode = mode == TRC_OPEN_SNAPSHOT;
     for (size_t i = 0; i < changed_source_count; i++) {
         const char *path = changed_sources[i];
         if (trc_open_changed_path_invalid(path, sizeof(tc->changed[0]))) {
@@ -1560,8 +1562,9 @@ static struct testcache *testcache_open_mode(
     }
     trc_open_load_depfiles(tc);
 
-    tc->ci = snapshot_mode ? codeindex_open_existing(tc->root)
-                           : codeindex_open(tc->root);
+    tc->ci = mode == TRC_OPEN_SNAPSHOT ? codeindex_open_existing(tc->root) :
+             mode == TRC_OPEN_ONE_SHOT ? codeindex_open_one_shot(tc->root) :
+                        codeindex_open(tc->root);
     if (!tc->ci) {
         trc_sigmemo_free(&tc->sigmemo);
         trc_memo_free(&tc->memo);
@@ -1574,7 +1577,12 @@ static struct testcache *testcache_open_mode(
 
 struct testcache *testcache_open(const char *repo_root)
 {
-    return testcache_open_mode(repo_root, NULL, 0, false);
+    return testcache_open_mode(repo_root, NULL, 0, TRC_OPEN_NORMAL);
+}
+
+struct testcache *testcache_open_one_shot(const char *repo_root)
+{
+    return testcache_open_mode(repo_root, NULL, 0, TRC_OPEN_ONE_SHOT);
 }
 
 struct testcache *testcache_open_snapshot(
@@ -1584,7 +1592,7 @@ struct testcache *testcache_open_snapshot(
     if (!changed_sources || changed_source_count == 0)
         return NULL;
     return testcache_open_mode(repo_root, changed_sources,
-                               changed_source_count, true);
+                               changed_source_count, TRC_OPEN_SNAPSHOT);
 }
 
 size_t testcache_depfile_count(const struct testcache *tc)

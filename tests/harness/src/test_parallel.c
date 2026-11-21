@@ -693,7 +693,7 @@ static bool acquire_open_probe(struct testcache **tc,
     bool served;
     *tc = snapshot
         ? testcache_open_snapshot(NULL, changed_sources, n_changed)
-        : testcache_open(NULL);
+        : testcache_open_one_shot(NULL);
     if (!*tc) return false;
     n_fill = probe_slots_fill(results, a->names, a->contracts, a->back,
                               activate_proof_contracts);
