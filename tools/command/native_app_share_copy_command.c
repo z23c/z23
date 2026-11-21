@@ -40,6 +40,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/file_metadata.h"
 #include "util/authority_receipt.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
@@ -115,34 +116,55 @@ static bool zsh_state(struct zsh *z)
     return ok;
 }
 
-static bool zsh_output(struct zsh *z)
+static bool zsh_output_shape(struct zsh *z, bool *available)
+{
+    enum platform_file_shape shape = platform_file_shape_read(z->output);
+    *available = shape == PLATFORM_FILE_SHAPE_MISSING;
+    if (shape != PLATFORM_FILE_SHAPE_UNREADABLE) return true;
+    zcl_package_copy_fail(z->reply, "OUTPUT_UNAVAILABLE", false,
+                          "Cannot inspect the share destination.", z->output);
+    return false;
+}
+static bool zsh_implicit_output(struct zsh *z)
 {
     char cwd[APP_COPY_BUILD_PATH], leaf[96];
-    const char *given = zcl_package_copy_str(z->input, "output");
     const char *base = strrchr(z->dir, '/');
-    struct stat st;
-    int leaf_len = snprintf(leaf, sizeof(leaf), "%s%s", base ? base + 1 : z->dir,
-                            ZCL_PACKAGE_BUNDLE_SUFFIX);
-    int given_len = given ? snprintf(z->output, sizeof(z->output), "%s", given) : 0;
-    bool ok = given ? given_len > 0 && (size_t)given_len < sizeof(z->output)
-                    : getcwd(cwd, sizeof(cwd)) &&
-                          leaf_len > 0 && (size_t)leaf_len < sizeof(leaf) &&
-                          zcl_path_join(z->output, sizeof(z->output), cwd,
-                                        leaf);
-    if (!ok || z->output[0] != '/') {
-        const char *evidence = given && strlen(given) < sizeof(z->reply->error.evidence)
-            ? given : "output path unavailable or too long";
-        zcl_package_copy_fail(z->reply, "BAD_OUTPUT", false, "output must "
-                              "be an absolute bounded path", evidence);
-        return false;
+    base = base ? base + 1 : z->dir;
+    if (!getcwd(cwd, sizeof(cwd)) || cwd[0] != '/') return false;
+    for (unsigned i = 1; i <= 1000; ++i) {
+        int n = i == 1 ? snprintf(leaf, sizeof(leaf), "%s%s", base, ZCL_PACKAGE_BUNDLE_SUFFIX) :
+            snprintf(leaf, sizeof(leaf), "%s-%u%s", base, i, ZCL_PACKAGE_BUNDLE_SUFFIX);
+        if (n <= 0 || (size_t)n >= sizeof(leaf) || !zcl_path_join(z->output, sizeof(z->output), cwd, leaf)) return false;
+        bool available;
+        if (!zsh_output_shape(z, &available)) return false;
+        if (available) return true;
     }
-    if (stat(z->output, &st) == 0) {
-        zcl_package_copy_fail(z->reply, "OUTPUT_EXISTS", false, "a share "
-                              "file is never overwritten; move it or name "
-                              "another output", z->output);
-        return false;
+    zcl_package_copy_fail(z->reply, "OUTPUT_UNAVAILABLE", false,
+                          "No free share filename is available.", "app.share-copy");
+    return false;
+}
+static bool zsh_output(struct zsh *z)
+{
+    const char *given = zcl_package_copy_str(z->input, "output");
+    if (!given) {
+        if (zsh_implicit_output(z)) return true;
+        if (z->reply->status != ZCL_COMMAND_STATUS_PASSED) return false;
+    } else {
+        int n = snprintf(z->output, sizeof(z->output), "%s", given);
+        if (n > 0 && (size_t)n < sizeof(z->output) && z->output[0] == '/') {
+            bool available;
+            if (!zsh_output_shape(z, &available)) return false;
+            if (available) return true;
+            zcl_package_copy_fail(z->reply, "OUTPUT_EXISTS", false,
+                "a share file is never overwritten; move it or name another output", z->output);
+            return false;
+        }
     }
-    return true;
+    const char *evidence = given && strlen(given) < sizeof(z->reply->error.evidence)
+        ? given : "output path unavailable or too long";
+    zcl_package_copy_fail(z->reply, "BAD_OUTPUT", false,
+                          "output must be an absolute bounded path", evidence);
+    return false;
 }
 
 /* The key bundle.sign uses; its public half when the file exists. Reading
