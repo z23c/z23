@@ -2024,6 +2024,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
 #endif
     {"test_dev_land_watcher_admission()",
      test_dev_land_watcher_admission, 0u},
+    {"test_dev_land_main_red_advisory()",
+     test_dev_land_main_red_advisory, 0u},
     {"test_dev_land_long_proof_root()",
      test_dev_land_long_proof_root, 0u},
     {"test_dev_land_malformed_queue_refusal()",
@@ -2372,6 +2374,7 @@ static const char *const g_dlx_original_calls[] = {
     "test_dev_land_two_candidates_same_base()",
 #endif
     "test_dev_land_watcher_admission()",
+    "test_dev_land_main_red_advisory()",
     "test_dev_land_long_proof_root()",
     "test_dev_land_malformed_queue_refusal()",
     "test_dev_land_chain_codec()",

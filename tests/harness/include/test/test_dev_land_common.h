@@ -410,6 +410,7 @@ int test_dev_land_exact_tree(void);
 int test_dev_land_source_binding(void);
 int test_dev_land_watcher_admission(void);
 int test_dev_land_long_proof_root(void);
+int test_dev_land_main_red_advisory(void);
 int test_dev_land_chain_codec(void);
 bool dlx_chain_row(char *out, size_t cap, long long seq,
     const char *repo, const char *local, const char *base, const char *state,

@@ -144,6 +144,7 @@
 
 #include "command/native_command.h"
 #include "command/native_submit_claim_guard.h"
+#include "command/native_dev_land_main_red.h"
 #include "command/native_dev_land_prepare.h"
 #include "command/native_dev_land_qualify.h"
 #include "command/native_dev_land_read.h"
@@ -4972,12 +4973,14 @@ static bool dl_status_push_result(struct zcl_command_reply *reply,
                                   const struct json_value *inflight,
                                   const struct json_value *outcomes,
                                   bool have_inflight, bool want_json,
-                                  const char *screen)
+                                  const struct dlmr_suspect *main_red,
+                                  size_t n_red, const char *screen)
 {
     return json_push_kv_str(&reply->data, "leaf", DL_LEAF) &&
            json_push_kv(&reply->data, "queued", queued) &&
            (!have_inflight || json_push_kv(&reply->data, "in_flight", inflight)) &&
            json_push_kv(&reply->data, "outcomes", outcomes) &&
+           dlmr_push_status(&reply->data, main_red, n_red) &&
            (want_json || json_push_kv_str(&reply->data, "screen", screen));
 }
 
@@ -5167,11 +5170,14 @@ static bool dl_push_outcome_row(struct json_value *arr,
 struct dl_outcome_tail {
     struct dl_row *last;
     size_t *count;
+    struct dlmr_window *window;
 };
 
 static bool dl_collect_outcome_tail(const struct dl_row *row, void *context)
 {
     struct dl_outcome_tail *tail = context;
+    dlmr_note(tail->window, row->seq, row->state, row->dimension,
+              row->worktree, row->tip, row->detail);
     if (*tail->count == 10) {
         for (size_t k = 1; k < *tail->count; k++)
             tail->last[k - 1] = tail->last[k];
@@ -5181,11 +5187,11 @@ static bool dl_collect_outcome_tail(const struct dl_row *row, void *context)
     return true;
 }
 
-static enum dl_history_result dl_outcomes_tail(const char *path, struct dl_row last[10],
+static enum dl_history_result dl_outcomes_tail(const char *path, struct dl_row last[10], struct dlmr_window *window,
                              size_t *count, char *why, size_t why_cap)
 {
     *count = 0;
-    struct dl_outcome_tail tail = {last, count};
+    struct dl_outcome_tail tail = {last, count, window};
     return dl_history_read_result(path, dl_collect_outcome_tail, &tail, why, why_cap);
 }
 
@@ -5236,14 +5242,21 @@ static bool dl_status_collect_outcomes(const char *opath,
                                        struct dl_row last[10], size_t *nlast,
                                        char *read_why, size_t why_cap,
                                        enum dl_history_result *history_result,
-                                       struct json_value *outcomes)
+                                       struct json_value *outcomes,
+                                       struct dlmr_suspect sus[DLMR_SUSPECTS_MAX],
+                                       size_t *nsus)
 {
-    /* The last ten outcomes, oldest first. */
-    *history_result = dl_outcomes_tail(opath, last, nlast, read_why, why_cap);
+    struct dlmr_window window = {0};
+    /* The last ten outcomes, oldest first; the window behind the main-red
+     * advisory is folded from the same single pass. */
+    *history_result = dl_outcomes_tail(opath, last, &window, nlast, read_why, why_cap);
     if (*history_result != DL_HISTORY_OK)
         return false;
+    *nsus = dlmr_suspects(&window, sus, DLMR_SUSPECTS_MAX);
     for (size_t k = 0; k < *nlast; k++) {
-        if (!dl_push_outcome_row(outcomes, &last[k]))
+        if (!dl_push_outcome_row(outcomes, &last[k]) ||
+            !dlmr_push_row_hint(&outcomes->children[outcomes->num_children - 1],
+                                sus, *nsus, last[k].seq))
             return false;
     }
     return true;
@@ -5363,6 +5376,8 @@ static void dl_status(const struct zcl_command_request *req,
     struct dl_dirs d;
     struct dl_row *rows = NULL;
     struct dl_row last[10];
+    struct dlmr_suspect main_red[DLMR_SUSPECTS_MAX];
+    size_t n_red = 0;
     size_t nrows = 0, nlast = 0;
     char qpath[4096 + 32], opath[4096 + 32], screen[16384];
     char read_why[128] = {0};
@@ -5400,7 +5415,8 @@ static void dl_status(const struct zcl_command_request *req,
         goto fail;
     dl_train_status(&inflight, rows, nrows);
     if (!dl_status_collect_outcomes(opath, last, &nlast, read_why,
-                                    sizeof(read_why), &history_result, &outcomes))
+                                    sizeof(read_why), &history_result, &outcomes,
+                                    main_red, &n_red))
         goto fail;
     if (!want_json) {
         if (!dl_status_screen_header(&queued, have_inflight, screen,
@@ -5410,6 +5426,7 @@ static void dl_status(const struct zcl_command_request *req,
                                        sizeof(screen), &used) ||
             !dl_status_screen_queued(rows, nrows, screen, sizeof(screen),
                                      &used) ||
+            !dlmr_screen(main_red, n_red, screen, sizeof(screen), &used) ||
             !dl_status_screen_outcomes(last, nlast, screen, sizeof(screen),
                                        &used))
             goto render_done;
@@ -5418,7 +5435,7 @@ render_done:
     if (!dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
                                 &used, want_json) ||
         !dl_status_push_result(reply, &queued, &inflight, &outcomes,
-                               have_inflight, want_json, screen))
+                               have_inflight, want_json, main_red, n_red, screen))
         goto fail;
     free(rows);
     json_free(&queued);
