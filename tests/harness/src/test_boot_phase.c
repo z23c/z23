@@ -573,7 +573,8 @@ static int bp_node_db_guidance(const char *captured, const char *display_dir)
     return failures;
 }
 
-bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 *));
+bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 *),
+                            bool *closed);
 
 static int g_bp_migration_denials;
 static int g_bp_migration_authorizer_rc;
@@ -604,12 +605,17 @@ static int bp_node_db_second_migration_refuses(void)
     boot_stage_reset_for_testing();
     g_bp_migration_denials = 0;
     g_bp_migration_authorizer_rc = -1;
+    bool closed = false;
     bool ok = boot_test_open_node_db(&g_bp_park_ctx,
-                                     bp_inject_migration_read_failure);
+                                     bp_inject_migration_read_failure, &closed);
     BP_CHECK("second migration fixture injects read failure after open",
              g_bp_migration_authorizer_rc == SQLITE_OK &&
              g_bp_migration_denials > 0);
     BP_CHECK("second migration failure refuses boot", !ok);
+    BP_CHECK("second migration failure closes the database", closed);
+    BP_CHECK("second migration failure reports its typed reason",
+             boot_error_reported() &&
+             strcmp(boot_error_first_code(), "NODE_DB_MIGRATION_FAILED") == 0);
     BP_CHECK("second migration failure does not advance DB stage",
              boot_stage_current() == BOOT_STAGE_INIT);
     bp_park_fixture_end(dir);

@@ -1205,8 +1205,12 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
             exit(1);
         }
         if (migrate_rc < 0) {
-            fprintf(stderr, "ERROR: node.db migration failed (rc=%d); refusing boot\n",
-                    migrate_rc);
+            node_db_close(&g_node_db);
+            boot_error_report(BOOT_ERROR_FATAL, "NODE_DB_MIGRATION_FAILED",
+                              "db.open_migrate",
+                              "node.db migration failed; boot stopped. "
+                              "Inspect the preceding database error before retrying.",
+                              NULL, 0, "rc=%d", migrate_rc);
             event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                         "node_db_migration_failed rc=%d", migrate_rc);
             (void)boot_step_fail("node_db_migration_failed");
@@ -1242,11 +1246,13 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
 }
 
 #ifdef ZCL_TESTING
-bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 *))
+bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 *),
+                            bool *closed)
 {
     boot_test_after_node_db_open = after_open;
     bool ok = boot_seq_open_node_db(ctx);
     boot_test_after_node_db_open = NULL;
+    *closed = !g_node_db.open;
     if (g_node_db.open)
         node_db_close(&g_node_db);
     return ok;
