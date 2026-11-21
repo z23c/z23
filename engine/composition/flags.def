@@ -1129,6 +1129,8 @@ Z23_FLAG("ZCL_HOST_GC_CCACHE_BIN", "env_build", "ccache", "-",
           "fixture seam for the ccache binary the sweep drives; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_CCACHE_CAP_GB", "env_build", "20", "-",
           "cap the ccache sweep trims the compiler cache to; first use tools/scripts/host_gc.sh:auto")
+Z23_FLAG("ZCL_HOST_GC_DEVSCRATCH_DIR", "env_build", "$GC_HOME/.cache/development-scratch/z23", "-",
+          "per-project development-scratch root (devbuild and lanes) the scratch sweep also walks, same rules as the state scratch root; empty disables; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_HOME", "env_build", "$HOME", "-",
           "fixture seam for the home directory every sweep path is rooted at; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_INSTALL_LIB", "env_build", "$HOME/.local/lib/z23/tools", "-",

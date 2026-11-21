@@ -7,16 +7,9 @@
 # --apply is passed. `--status` prints one screen of host hygiene facts and
 # exits without touching anything.
 #
-# WHY THIS EXISTS. The box grew to 281 GB of ~/github with no cap on any
-# cache and no watcher on free space. The single largest consumer was a
-# directory nothing on the host knew how to reclaim: `.z23p`, the proof
-# generation pool created by tools/dev/dev_proof.c (see CATEGORY z23p below).
-# The pre-existing timers each guard one narrow thing — worktree_gc.sh
-# classifies named worktrees, test-tmp-clean sweeps scratch, logrotate
-# rotates logs. Nobody capped ccache, nobody capped the zcc cache, nobody
-# reaped a detached proof generation, and nobody noticed the disk filling.
-# This script is the missing whole-host sweep; it does NOT reimplement the
-# parts that already work, it calls them.
+# WHY THIS EXISTS. No cache had a cap and nothing watched free space; the largest
+# leak, the .z23p proof pool (tools/dev/dev_proof.c), had no reclaimer. This is the
+# whole-host sweep; it calls the parts that already work rather than redoing them.
 #
 # WHAT IT WILL NEVER TOUCH (hard protect list, enforced in is_protected()
 # and re-checked immediately before every destructive action):
@@ -35,37 +28,12 @@
 # The protect list is a PREFIX test on a resolved absolute path, so a
 # symlink or a `..` cannot walk into a protected tree and out again.
 #
-# QUARANTINE, NOT DELETE. Anything that is not a pure cache or build output
-# is MOVED to $STATE/quarantine/<date>/ rather than unlinked, and swept 14
-# days later. Caches and build outputs are exempt because they are, by
-# definition, reproducible by rerunning the build — quarantining 49 GB of
-# ccache would defeat the purpose of capping it.
+# QUARANTINE, NOT DELETE. Anything that is not a reproducible cache or build
+# output is MOVED to $STATE/quarantine/<date>/ and swept 14 days later.
+# EVERY ACTION LOGS ONE LINE to $STATE/host_gc.log, bytes included, so totals
+# can be re-derived from the log.
 #
-# EVERY ACTION LOGS ONE LINE to $STATE/host_gc.log with the bytes it
-# reclaimed, so "what did the janitor do last night" is one `tail` away and
-# the byte totals in any report can be re-derived from the log rather than
-# trusted.
-#
-# CATEGORIES (-a..-i map to the sweep order below):
-#   ccache   cap ccache to 20 GB and collect
-#   zcc      trim the zcc compile cache to 15 GB with its own evictor
-#   z23p     reap dead dev-proof generations (the 158 GB leak) on the disk
-#            pool AND on its tmpfs twin, which grew to 34 GB of RAM in one
-#            unattended day while nothing here was looking at it
-#   tmp      registered worktrees under /tmp
-#   tmplitter unregistered /tmp test fixtures (no worktree behind them)
-#   journal  vacuum the user journal to 512 MB
-#   binbak   quarantine ~/bin/*.bak-* older than 60 days
-#   testtmp  stale test scratch in idle worktrees
-#   orphan   kill parentless processes whose checkout was deleted
-#   deadexec WARN on user units whose ExecStart is missing or inside build/
-#   worktree merged+clean named worktrees, via worktree_gc.sh --apply
-#   units    landed units/lanes/trains, by PATCH equivalence (git cherry),
-#            not ancestry — catches cherry-picked lanes worktree_gc.sh can't
-#   scratch  scratch dirs whose owning worktree is gone; .gc_keep pins one
-#   pressure not a sweep: reports free-space % and halves every age floor
-#            above it when low, prints top dirs under $GC_HOME when critical
-#
+# CATEGORIES: the table in docs/dev/HOST_GC.md lists every category and its rules.
 # FIXTURE MODE. Every host-global path and external binary is indirected
 # through a ZCL_HOST_GC_* variable so tools/lint/check_host_gc.sh can run
 # the whole sweep against a throwaway HOME and prove each category fires and
@@ -128,6 +96,7 @@ TRAINS_DIR="${ZCL_HOST_GC_TRAINS_DIR:-$GC_HOME/.z23/trains}"
 # scratch: dated/named scratch dirs with no worktree behind them any more.
 SCRATCH_MIN_AGE_D="${ZCL_HOST_GC_SCRATCH_MIN_AGE_D:-7}"
 SCRATCH_DIR="${ZCL_HOST_GC_SCRATCH_DIR:-$GC_HOME/.local/state/zclassic23/scratch}"
+DEVSCRATCH_DIR="${ZCL_HOST_GC_DEVSCRATCH_DIR-$GC_HOME/.cache/development-scratch/z23}"
 # pressure: below this free-space percentage, every age floor above is
 # halved for this run (reported in the summary); below 5% the ten largest
 # directories under $GC_HOME are also printed as a report line.
@@ -1588,20 +1557,15 @@ sweep_trains_landed() {
 }
 
 # ============================================================= CATEGORY scratch
-# Dated/named directories under $SCRATCH_DIR with no worktree left behind
-# them (their lane, unit, or train is long gone) and nothing live inside.
-# Names in $SCRATCH_DIR/.gc_keep (one per line, exact basename match) are
-# never touched — the standing way to pin a scratch dir open-endedly without
-# editing this script.
+# Dirs under a scratch root with no worktree left and nothing live inside.
+# Roots: $SCRATCH_DIR, and $DEVSCRATCH_DIR (devbuild/lane per-project scratch,
+# ~/.cache/development-scratch/z23; empty disables). development-builds has its
+# own 1-day policy and job locks and is never walked. <root>/.gc_keep (one
+# basename per line) pins a dir. In use = process cwd/fd inside, a linked git
+# worktree, or any entry written within the age floor. land-inbox is never swept.
+SCRATCH_NEVER_NAMES=" quarantine land-inbox "
 scratch_is_kept_by_name() {
-    local name="$1" keepfile="$SCRATCH_DIR/.gc_keep" line
-    [ -f "$keepfile" ] || return 1
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        case "$line" in \#*) continue ;; esac
-        [ "$line" = "$name" ] && return 0
-    done < "$keepfile"
-    return 1
+    [ -f "$1/.gc_keep" ] && grep -qxF -- "$2" "$1/.gc_keep"
 }
 
 scratch_has_live_worktree() {
@@ -1612,20 +1576,26 @@ scratch_has_live_worktree() {
     return 1
 }
 
-sweep_scratch() {
-    want scratch || return 0
-    hdr "scratch (older than ${SCRATCH_MIN_AGE_D}d, no owning worktree)"
-    [ -d "$SCRATCH_DIR" ] || { say "scratch: no $SCRATCH_DIR — skipped"; return 0; }
-    ensure_cwd_set
-    local min_age=$(( SCRATCH_MIN_AGE_D * 86400 ))
-    [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
-    local total=0 removed=0 kept=0 d name bytes
-    for d in "$SCRATCH_DIR"/*; do
+# A linked worktree whose gitdir still exists, or any entry within three
+# levels modified inside the age floor (-quit keeps it cheap on big trees).
+scratch_is_live_tree() {
+    local g mins=$(( $2 / 60 ))
+    g="$(awk '/^gitdir:/{print substr($0,9)}' "$1/.git" 2>/dev/null)"
+    [ -n "$g" ] && [ -e "$g" ] && return 0
+    [ "$mins" -ge 1 ] || mins=1
+    [ -n "$(find "$1" -maxdepth 3 -mmin "-$mins" -print -quit 2>/dev/null)" ]
+}
+
+sweep_scratch_root() {
+    local root="$1" min_age="$2" total=0 removed=0 kept=0 d name bytes
+    [ -n "$root" ] || return 0
+    [ -d "$root" ] || { say "scratch: no $root — skipped"; return 0; }
+    for d in "$root"/*; do
         [ -d "$d" ] || continue
         name="$(basename -- "$d")"
-        [ "$name" = "quarantine" ] && continue
+        case "$SCRATCH_NEVER_NAMES" in *" $name "*) continue ;; esac
         total=$(( total + 1 ))
-        if scratch_is_kept_by_name "$name"; then
+        if scratch_is_kept_by_name "$root" "$name"; then
             kept=$(( kept + 1 )); say "scratch: KEEP (.gc_keep): $d"; continue
         fi
         if [ "$(age_secs "$d")" -lt "$min_age" ]; then
@@ -1637,12 +1607,25 @@ sweep_scratch() {
         if scratch_has_live_worktree "$name"; then
             kept=$(( kept + 1 )); say "scratch: KEEP (worktree still exists): $d"; continue
         fi
+        if scratch_is_live_tree "$d" "$min_age"; then
+            kept=$(( kept + 1 )); say "scratch: KEEP (worktree or written within the age floor): $d"; continue
+        fi
         bytes="$(quarantine_path "$d" scratch)" || { kept=$(( kept + 1 )); continue; }
-        removed=$(( removed + 1 )); total=$(( total ));
+        removed=$(( removed + 1 ))
         add_result scratch "$bytes" 1
         say "scratch: quarantine $name ($(human "$bytes"))"
     done
-    say "scratch: $total dir(s) under $SCRATCH_DIR — $removed reapable, $kept kept"
+    say "scratch: $total dir(s) under $root — $removed reapable, $kept kept"
+}
+
+sweep_scratch() {
+    want scratch || return 0
+    hdr "scratch (older than ${SCRATCH_MIN_AGE_D}d, no owning worktree)"
+    ensure_cwd_set
+    local min_age=$(( SCRATCH_MIN_AGE_D * 86400 ))
+    [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
+    sweep_scratch_root "$SCRATCH_DIR" "$min_age"
+    sweep_scratch_root "$DEVSCRATCH_DIR" "$min_age"
 }
 
 # ============================================================ CATEGORY journal

@@ -41,6 +41,7 @@ UNITS_FX="$HOME_FX/.z23/units"
 LANES_FX="$HOME_FX/.z23/lanes"
 TRAINS_FX="$HOME_FX/.z23/trains"
 SCRATCH_FX="$HOME_FX/.local/state/zclassic23/scratch"
+DEVSCRATCH_FX="$HOME_FX/.cache/development-scratch/z23"
 ZCCDIR_FX="$HOME_FX/.cache/zcc"
 Z23P_FX="$HOME_FX/github/.z23p"
 # The tmpfs twin of the proof pool, and the node binary the z23p sweep
@@ -70,7 +71,7 @@ chmod +x "$WORKTREE_STUB"
 : > "$WORKTREE_CALLS"
 
 mkdir -p -- "$TMP_FX" "$PROC_FX" "$STATE_FX" "$UNITS_FX" "$LANES_FX" \
-    "$TRAINS_FX" "$SCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX"
+    "$TRAINS_FX" "$SCRATCH_FX" "$DEVSCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX"
 
 # FREE SPACE IS INJECTED, NEVER READ LIVE. host_gc.sh measures free space
 # with `df -P` on its home; this stub answers for the fixture instead, so a
@@ -161,6 +162,7 @@ run_hostgc() {
         ZCL_HOST_GC_LANES_DIR="$LANES_FX" \
         ZCL_HOST_GC_TRAINS_DIR="$TRAINS_FX" \
         ZCL_HOST_GC_SCRATCH_DIR="$SCRATCH_FX" \
+        ZCL_HOST_GC_DEVSCRATCH_DIR="$DEVSCRATCH_FX" \
         ZCL_HOST_GC_ZCC_DIR="$ZCCDIR_FX" \
         ZCL_HOST_GC_Z23P="$Z23P_FX" \
         ZCL_HOST_GC_RAM_ROOT="$RAM_FX" \
@@ -500,6 +502,25 @@ done
 [ "$found" = 1 ] || fail "scratch apply did not move the orphaned dir into quarantine"
 [ -d "$SCRATCH_FX/pinned-lane" ] || fail "scratch apply removed a .gc_keep-pinned dir"
 [ -d "$SCRATCH_FX/still-here" ] || fail "scratch apply removed a dir with a live worktree"
+
+# development-scratch root: same rules as the state root; land-inbox never swept.
+for n in idle-exp pinned-exp occupied-exp land-inbox; do
+    mkdir -p -- "$DEVSCRATCH_FX/$n/sub"; touch_old "$DEVSCRATCH_FX/$n/sub"; touch_old "$DEVSCRATCH_FX/$n"
+done
+mkdir -p -- "$DEVSCRATCH_FX/young-exp" "$PROC_FX/4243"
+printf "pinned-exp\n" > "$DEVSCRATCH_FX/.gc_keep"
+ln -s "$DEVSCRATCH_FX/occupied-exp/sub" "$PROC_FX/4243/cwd"
+out="$(run_hostgc scratch dry-run ZCL_HOST_GC_SCRATCH_MIN_AGE_D=7)"
+assert_contains "$out" "quarantine idle-exp" "devscratch dry-run reports an old idle dir reapable"
+assert_contains "$out" "KEEP (.gc_keep): $DEVSCRATCH_FX/pinned-exp" "devscratch dry-run keeps a pinned dir"
+assert_contains "$out" "KEEP (live process inside): $DEVSCRATCH_FX/occupied-exp" "devscratch dry-run keeps a dir with a live process cwd inside"
+assert_not_contains "$out" "young-exp" "devscratch dry-run says nothing of a young dir"
+assert_not_contains "$out" "land-inbox" "devscratch dry-run never walks land-inbox"
+assert_contains "$out" "1 reapable" "devscratch dry-run counts exactly the idle dir"
+out="$(run_hostgc scratch apply ZCL_HOST_GC_SCRATCH_MIN_AGE_D=7)"
+[ -d "$DEVSCRATCH_FX/idle-exp" ] && fail "devscratch apply left the idle dir in place" || pass "devscratch apply quarantined the idle dir"
+for n in pinned-exp occupied-exp young-exp land-inbox; do [ -d "$DEVSCRATCH_FX/$n" ] || fail "devscratch apply removed $n"; done
+rm -f -- "$PROC_FX/4243/cwd"
 
 # ---------------------------------------------------------- z23p (donors)
 # The newest complete generation per build identity is the next proof's
