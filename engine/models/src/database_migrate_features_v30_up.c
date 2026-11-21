@@ -152,9 +152,27 @@ static void db_migrate_v34_block_index_envelope(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('034')");
 }
 
-static bool db_migrate_v35_wallet_labels(struct node_db *ndb, int floor)
+static bool db_migrate_checked_feature(struct node_db *ndb, int version,
+                                       int floor, const char *name,
+                                       bool (*apply)(struct node_db *))
 {
     if (!node_db_begin(ndb)) return false;
+    int32_t v = (int32_t)version, f = (int32_t)floor;
+    bool ok = apply(ndb) &&
+              node_db_state_set(ndb, "schema_version", &v, sizeof(v)) &&
+              node_db_state_set(ndb, "schema_compat_floor", &f, sizeof(f));
+    if (ok) ok = node_db_commit(ndb);
+    if (!ok) {
+        if (!node_db_rollback(ndb))
+            LOG_ERROR("db", "migrate: v%d %s and rollback failed", version, name);
+        else
+            LOG_ERROR("db", "migrate: v%d %s failed; rolled back", version, name);
+    }
+    return ok;
+}
+
+static bool db_migrate_v35_wallet_labels(struct node_db *ndb)
+{
     bool ok = true;
     /* v35: wallet_labels — the address book. One row per labeled
      * address, keyed by address so a re-label overwrites in place;
@@ -174,16 +192,6 @@ static bool db_migrate_v35_wallet_labels(struct node_db *ndb, int floor)
 
     ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('035')");
-    int32_t version = 35, compat_floor = (int32_t)floor;
-    ok = ok && node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
-         node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
-    if (ok) ok = node_db_commit(ndb);
-    if (!ok) {
-        if (!node_db_rollback(ndb))
-            LOG_ERROR("db", "migrate: v35 wallet labels and rollback failed");
-        else
-            LOG_ERROR("db", "migrate: v35 wallet labels failed; rolled back");
-    }
     return ok;
 }
 
@@ -631,9 +639,8 @@ static void db_migrate_v46_zslp_validity(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('046')");
 }
 
-static bool db_migrate_v47_vault_intents(struct node_db *ndb, int floor)
+static bool db_migrate_v47_vault_intents(struct node_db *ndb)
 {
-    if (!node_db_begin(ndb)) return false;
     bool ok = true;
     /* v47: a passphrase-wrapped metadata DEK plus encrypted intent rows.
      * Sensitive bodies are application data, never consensus state. */
@@ -666,16 +673,6 @@ static bool db_migrate_v47_vault_intents(struct node_db *ndb, int floor)
         "raw_tx BLOB NOT NULL) WITHOUT ROWID");
     ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('047')");
-    int32_t version = 47, compat_floor = (int32_t)floor;
-    ok = ok && node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
-         node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
-    if (ok) ok = node_db_commit(ndb);
-    if (!ok) {
-        if (!node_db_rollback(ndb))
-            LOG_ERROR("db", "migrate: v47 wallet schema and rollback failed");
-        else
-            LOG_ERROR("db", "migrate: v47 wallet schema failed; rolled back");
-    }
     return ok;
 }
 
@@ -757,10 +754,12 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
 
     while (next != 0) {
         if (next == 35) {
-            if (!db_migrate_v35_wallet_labels(ndb, floor_ver))
+            if (!db_migrate_checked_feature(ndb, 35, floor_ver, "wallet labels",
+                                            db_migrate_v35_wallet_labels))
                 return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         } else if (next == 47) {
-            if (!db_migrate_v47_vault_intents(ndb, floor_ver))
+            if (!db_migrate_checked_feature(ndb, 47, floor_ver, "wallet schema",
+                                            db_migrate_v47_vault_intents))
                 return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         } else {
             k_db_migrate_v30_steps[next - 30](ndb);
