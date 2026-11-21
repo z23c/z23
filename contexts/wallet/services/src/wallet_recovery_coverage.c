@@ -94,12 +94,12 @@ static bool coverage_xfvk_equal(const struct zip32_xfvk *a,
         memcmp(a->dk, b->dk, sizeof(a->dk)) == 0;
 }
 
-static bool coverage_contains_keys(const struct coverage_public *pub,
+static enum wrc_coverage coverage_compare_keys(const struct coverage_public *pub,
                                    const struct wallet *rebuilt)
 {
     for (size_t i = 0; i < pub->transparent_count; i++)
         if (!keystore_have_key(&rebuilt->keystore, &pub->transparent[i]))
-            return false;
+            return WRC_COVERAGE_INCOMPLETE;
     for (size_t i = 0; i < pub->shielded_count; i++) {
         bool found = false;
         for (size_t j = 0; j < MAX_SAPLING_KEYS; j++) {
@@ -109,9 +109,9 @@ static bool coverage_contains_keys(const struct coverage_public *pub,
                 break;
             }
         }
-        if (!found) return false;
+        if (!found) return WRC_COVERAGE_INCOMPLETE;
     }
-    return true;
+    return WRC_COVERAGE_COMPLETE;
 }
 
 static bool coverage_load_wallet(struct wallet_sqlite *ws, struct wallet *old,
@@ -177,8 +177,8 @@ enum wrc_coverage wrc_recovery_coverage(struct wallet_sqlite *ws, struct wallet 
             !sapling_keystore_set_seed(&old->sapling_keys, seed) ||
             !wrc_rebuild_keys(old, NULL, false, &report).ok)
             result = WRC_COVERAGE_UNKNOWN;
-        else if (!coverage_contains_keys(pub, old))
-            result = WRC_COVERAGE_INCOMPLETE;
+        else
+            result = coverage_compare_keys(pub, old);
     }
     free(pub);
     return result;
