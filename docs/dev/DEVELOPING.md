@@ -1057,8 +1057,11 @@ It prints one
 selection line with `select_secs=<s>`), so the log says where the minutes went,
 then `agent-verify: total secs=<total>` and the verdict line, `agent-verify: OK` or
 `agent-verify: FAILED (...)` (the verdict lines carry no timing, so the land rail reads them unchanged), and writes the same lines to
-`build/scratch/agent-verify.rc`. Run it through devbuild as one job, with
-`devbuild --wait --class normal make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`. Full
+`build/scratch/agent-verify.rc`. For `ONLY=@changed` on an offloaded gate,
+use the [sender-pinned recipe](#where-a-gate-runs). For a local run, use
+`DEVBUILD_NO_OFFLOAD=1 devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`.
+Select the normal resource class using the host's supported syntax. For named
+groups, use `ONLY=<group,group>` through the admitted route. Full
 `make lint` and the wide group list remain the landing step's job.
 The selector bootstrap and exact test step both use `ZCL_TEST_WERROR=1`.
 This aligns their strict test-compile policy.
