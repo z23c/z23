@@ -367,7 +367,7 @@ static int case_refusals(struct al_fx *f)
         ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "not_installed");
         ASSERT_STR_EQ(f->res.id, "skycombat");
         ASSERT(strstr(f->res.message, "z23-skycombat"));
-        ASSERT_STR_EQ(f->res.hint, "build it with make game");
+        ASSERT_STR_EQ(f->res.hint, "from a source checkout, build it with make game");
     PASS(); }
     /* Without a desktop, Tasks is served by its native command rather than
      * this windowed-open path; the catalog hint still names both apps. */
@@ -1002,7 +1002,7 @@ _test_next:;
 
 /* A child owns native bootstrap globals and captures the actual CLI envelope. */
 static bool al_list_profile_cli(struct al_fx *f, bool explicit_profile,
-                                char *out, size_t cap)
+                                bool missing, char *out, size_t cap)
 {
     int fd[2];
     if (pipe(fd) != 0) return false;
@@ -1013,9 +1013,11 @@ static bool al_list_profile_cli(struct al_fx *f, bool explicit_profile,
         if (dup2(fd[1], STDOUT_FILENO) < 0) _exit(125);
         close(fd[1]);
         app_launch_test_set_bin_dir(f->env.bin_dir);
-        app_launch_test_set_desktop(0);
-        const char *args[] = {"list"};
-        int rc = zcl_native_command_main("app", args, 1, f->root, 0,
+        app_launch_test_set_desktop(missing ? 1 : 0);
+        const char *list[] = {"list"};
+        const char *open[] = {"open", "skycombat"};
+        int rc = zcl_native_command_main("app", missing ? open : list,
+                                         missing ? 2 : 1, f->root, 0,
                                          CHAIN_MAIN, explicit_profile);
         fflush(stdout);
         _exit(rc);
@@ -1029,7 +1031,7 @@ static bool al_list_profile_cli(struct al_fx *f, bool explicit_profile,
     out[used] = '\0';
     int status = 0;
     return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
-           WEXITSTATUS(status) == 0;
+           WEXITSTATUS(status) == (missing ? ZCL_COMMAND_EXIT_BLOCKED : 0);
 }
 
 static int case_list_profiles(struct al_fx *f)
@@ -1037,17 +1039,50 @@ static int case_list_profiles(struct al_fx *f)
     int failures = 0;
     static char out[32768];
     TEST("app.list CLI implicit node profile keeps private Tasks default") {
-        ASSERT(al_list_profile_cli(f, false, out, sizeof(out)));
+        ASSERT(al_list_profile_cli(f, false, false, out, sizeof(out)));
         ASSERT(strstr(out, "\"command\":\"app.tasks\"") != NULL);
         ASSERT(strstr(out, "\"input\":{\"action\":\"list\"}") != NULL);
         ASSERT(strstr(out, "\"next\":\"z23 app tasks list\"") != NULL);
         PASS();
     } TEST("app.list CLI explicit profile remains in Tasks next actions") {
-        ASSERT(al_list_profile_cli(f, true, out, sizeof(out)));
+        ASSERT(al_list_profile_cli(f, true, false, out, sizeof(out)));
         ASSERT(strstr(out, "\"command\":\"app.tasks\"") != NULL);
         ASSERT(strstr(out, "\"action\":\"list\",\"datadir\":") != NULL);
         ASSERT(strstr(out, f->root) != NULL);
         ASSERT(strstr(out, "-datadir=") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int case_missing_profiles(struct al_fx *f)
+{
+    int failures = 0;
+    static char out[32768];
+    TEST("missing app CLI offers a working list for the implicit profile") {
+        ASSERT(al_list_profile_cli(f, false, true, out, sizeof(out)));
+        ASSERT(strstr(out, "\"code\":\"NOT_INSTALLED\"") != NULL);
+        ASSERT(strstr(out, "\"command\":\"app.list\"") != NULL);
+        ASSERT(strstr(out, "source checkout") != NULL);
+        ASSERT(al_list_profile_cli(f, false, false, out, sizeof(out)));
+        ASSERT(strstr(out, "\"command\":\"app.tasks\"") != NULL);
+        PASS();
+    } TEST("missing app CLI keeps the explicit profile in the list command") {
+        struct json_value parsed;
+        json_init(&parsed);
+        ASSERT(al_list_profile_cli(f, true, true, out, sizeof(out)));
+        ASSERT(json_read(&parsed, out, strlen(out)));
+        const struct json_value *error = json_get(&parsed, "error");
+        ASSERT_STR_EQ(json_get_str(json_get(error, "code")), "NOT_INSTALLED");
+        ASSERT(strstr(out, "\"command\":\"app.list\"") == NULL);
+        const char *next = json_get_str(json_get(error, "next_action"));
+        const char *evidence = json_get_str(json_get(error, "evidence"));
+        ASSERT(evidence && strstr(evidence, "source checkout"));
+        ASSERT(next && strstr(next, "-datadir="));
+        ASSERT(strstr(next, f->root) && strstr(next, "app list"));
+        json_free(&parsed);
+        ASSERT(al_list_profile_cli(f, true, false, out, sizeof(out)));
+        ASSERT(strstr(out, f->root) != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -1116,7 +1151,46 @@ static int case_open_desktop(struct al_fx *f)
         ASSERT_STR_EQ(reply.error.code, "NOT_INSTALLED");
         ASSERT(strstr(json_get_str(json_get(&reply.data, "message")),
                       "ghostapp is not installed"));
+        ASSERT_EQ(reply.next_count, 1u);
+        ASSERT_STR_EQ(reply.next[0].command, "app.list");
+        ASSERT_STR_EQ(reply.next[0].input_json, "{}");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "hint")),
+                      "install it at the path apps.tsv names");
+        zcl_command_reply_free(&reply);
+    PASS(); }
+    TEST("missing operator app keeps an input profile in its terminal command") {
+        char profile[PATH_MAX];
+        int nprofile = snprintf(profile, sizeof(profile), "%s/user's profile", f->root);
+        ASSERT(nprofile > 0 && (size_t)nprofile < sizeof(profile));
+        ASSERT(json_push_kv_str(&input, "datadir", profile));
+        app_launch_test_set_desktop(1);
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        app_launch_test_set_desktop(-1);
+        ASSERT_STR_EQ(reply.error.code, "NOT_INSTALLED");
         ASSERT_EQ(reply.next_count, 0u);
+        const char *next = reply.error.next_action;
+        ASSERT(next && strstr(next, f->root) && strstr(next, "app list"));
+        ASSERT(strstr(next, "user\\'s\\ profile") != NULL);
+        ASSERT_STR_EQ(reply.error.evidence, "install it at the path apps.tsv names");
+        zcl_command_reply_free(&reply);
+    PASS(); }
+    TEST("an oversized profile never emits a truncated shell command") {
+        char profile[400];
+        profile[0] = '/';
+        memset(profile + 1, 'a', sizeof(profile) - 2);
+        profile[sizeof(profile) - 1] = '\0';
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "name", "ghostapp"));
+        ASSERT(json_push_kv_str(&input, "datadir", profile));
+        app_launch_test_set_desktop(1);
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_open(&request, &reply);
+        app_launch_test_set_desktop(-1);
+        ASSERT_STR_EQ(reply.error.code, "NOT_INSTALLED");
+        ASSERT_EQ(reply.next_count, 0u);
+        ASSERT_EQ(reply.error.next_action[0], '\0');
+        ASSERT_STR_EQ(reply.error.evidence, "install it at the path apps.tsv names");
         zcl_command_reply_free(&reply);
     PASS(); }
     /* Block D: headless Tasks refuses UNKNOWN_APP with native actions;
@@ -4192,6 +4266,7 @@ _test_next:
     failures += case_handlers(&f);
     failures += case_list_guide(&f);
     failures += case_list_profiles(&f);
+    failures += case_missing_profiles(&f);
 #if !defined(_WIN32)
     failures += case_open_desktop(&f);
 #endif

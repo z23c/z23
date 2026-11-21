@@ -147,7 +147,7 @@ static bool app_open_admit(const struct app_launch_env *env,
         snprintf(text, sizeof(text), "%s is not installed: %.200s does not "
                  "exist", (*entry)->id, (*entry)->executable);
         snprintf(hint, sizeof(hint), "%s%s",
-                 (*entry)->builtin ? "build it with " : "",
+                 (*entry)->builtin ? "from a source checkout, build it with " : "",
                  (*entry)->build_hint);
         app_fail(out, APP_STAGE_NOT_INSTALLED, text, hint);
         return false;
@@ -444,6 +444,24 @@ static void app_reply_fail(const struct app_open_result *r, const char *name,
     }
 }
 
+static void app_missing_next(const char *datadir, struct zcl_command_reply *reply)
+{
+    if (!datadir || !datadir[0]) {
+        (void)zcl_command_reply_add_next(reply, "app.list", "{}",
+                                         "see apps available on this device");
+        return;
+    }
+#if !defined(_WIN32)
+    char command[APP_LIST_HINT_MAX];
+    if (platform_path_is_absolute(datadir) &&
+        zcl_app_hint(command, sizeof(command), datadir, "list")) {
+        size_t n = strlen(command);
+        if (n < sizeof(reply->error.next_action))
+            memcpy(reply->error.next_action, command, n + 1);
+    }
+#endif
+}
+
 struct app_open_work {
     struct app_launch_env env;
     struct app_launch_registry reg;
@@ -494,6 +512,7 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
     }
     const char *datadir = zcl_native_command_datadir_is_explicit() ?
         zcl_native_command_datadir() : json_get_str(json_get(request->input, "datadir"));
+    const char *selected_datadir = datadir;
     if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
     if (datadir) {
         int n = snprintf(w->env.datadir, sizeof(w->env.datadir), "%s", datadir);
@@ -505,6 +524,8 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
     app_render(&w->result, reply);
     if (w->result.status == APP_OPEN_FAILED)
         app_reply_fail(&w->result, name, request->input, reply);
+    if (w->result.stage == APP_STAGE_NOT_INSTALLED)
+        app_missing_next(selected_datadir, reply);
     free(w);
 }
 
