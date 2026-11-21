@@ -49,6 +49,7 @@ Z23P_FX="$HOME_FX/github/.z23p"
 # their production defaults this selftest would point a real `z23 ops host
 # gc --apply` at the real /dev/shm/z23p of whatever box it runs on.
 RAM_FX="$WORK/shm/z23p"
+RAMSCR_FX="$WORK/shm/z23-scratch"
 Z23_STUB="$WORK/z23-stub"
 Z23_STUB_CALLS="$WORK/z23-stub-calls.log"
 WORKTREE_STUB="$WORK/worktree-gc-stub"
@@ -71,7 +72,8 @@ chmod +x "$WORKTREE_STUB"
 : > "$WORKTREE_CALLS"
 
 mkdir -p -- "$TMP_FX" "$PROC_FX" "$STATE_FX" "$UNITS_FX" "$LANES_FX" \
-    "$TRAINS_FX" "$SCRATCH_FX" "$DEVSCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX"
+    "$TRAINS_FX" "$SCRATCH_FX" "$DEVSCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX" "$RAMSCR_FX"
+printf 'tmpfs %s tmpfs rw 0 0\n' "$WORK/shm" > "$PROC_FX/mounts"
 
 # FREE SPACE IS INJECTED, NEVER READ LIVE. host_gc.sh measures free space
 # with `df -P` on its home; this stub answers for the fixture instead, so a
@@ -84,6 +86,7 @@ mkdir -p -- "$DF_STUB_DIR"
 cat > "$DF_STUB_DIR/df" <<'STUBEOF'
 #!/usr/bin/env bash
 avail="${HGT_DF_AVAIL_KB:-1000000000}"
+[ "${3:-}" = "${HGT_DF_RAM_ROOT:-/nonexistent}" ] && avail="$HGT_DF_RAM_AVAIL_KB"
 total=2000000000
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
 printf 'fixture %s %s %s 50%% /\n' "$total" "$(( total - avail ))" "$avail"
@@ -166,6 +169,7 @@ run_hostgc() {
         ZCL_HOST_GC_ZCC_DIR="$ZCCDIR_FX" \
         ZCL_HOST_GC_Z23P="$Z23P_FX" \
         ZCL_HOST_GC_RAM_ROOT="$RAM_FX" \
+        ZCL_HOST_GC_RAM_SCRATCH_DIR="$RAMSCR_FX" \
         ZCL_HOST_GC_Z23_BIN="${ZCL_HOST_GC_Z23_BIN:-$Z23_STUB}" \
         ZCL_HOST_GC_WORKTREE_GC="$WORKTREE_STUB" \
         HGT_WORKTREE_CALLS="$WORKTREE_CALLS" \
@@ -195,6 +199,8 @@ assert_not_contains() {
         *) pass "$label" ;;
     esac
 }
+# assert_gone PATH FAIL_LABEL PASS_LABEL
+assert_gone() { if [ -e "$1" ]; then fail "$2"; else pass "$3"; fi; }
 
 [ -x "$HOSTGC" ] || { echo "host_gc_selftest: $HOSTGC is not executable" >&2; exit 2; }
 
@@ -215,8 +221,7 @@ assert_not_contains "$log" "claude-keepme" "tmplitter dry-run never logs an exem
 assert_contains "$out" "1 reapable" "tmplitter dry-run summary counts the reapable entry"
 
 out="$(run_hostgc tmplitter apply)"
-[ -e "$TMP_FX/orphan-fixture" ] && fail "tmplitter apply left the unregistered entry behind" \
-    || pass "tmplitter apply removed the unregistered entry"
+assert_gone "$TMP_FX/orphan-fixture" "tmplitter apply left the unregistered entry behind" "tmplitter apply removed the unregistered entry"
 [ -e "$TMP_FX/claude-keepme" ] || fail "tmplitter apply removed an exempt entry"
 
 # -------------------------------------------------------------------- z23p
@@ -238,8 +243,7 @@ assert_contains "$out" "KEEP (creating process still alive)" \
     "z23p dry-run reports the alive-creator generation as kept"
 
 out="$(run_hostgc z23p apply)"
-[ -e "$Z23P_FX/gen-dead" ] && fail "z23p apply left a dead-creator generation behind" \
-    || pass "z23p apply removed the dead-creator generation"
+assert_gone "$Z23P_FX/gen-dead" "z23p apply left a dead-creator generation behind" "z23p apply removed the dead-creator generation"
 [ -e "$Z23P_FX/gen-alive" ] || fail "z23p apply removed a live-creator generation"
 
 # ------------------------------------------------------------- z23p (tmpfs)
@@ -274,8 +278,7 @@ printf '999999999\n' > "$RAM_FX/gen-ram-dead/creator.pid"
 out="$(ZCL_HOST_GC_Z23_BIN="$WORK/no-such-z23" PATH="/usr/bin:/bin" \
     run_hostgc z23p apply)"
 assert_contains "$out" "no z23 binary" "z23p says why it fell back to its own classifier"
-[ -e "$RAM_FX/gen-ram-dead" ] && fail "the fallback classifier left a dead tmpfs generation behind" \
-    || pass "the fallback classifier reaps a dead tmpfs generation"
+assert_gone "$RAM_FX/gen-ram-dead" "the fallback classifier left a dead tmpfs generation behind" "the fallback classifier reaps a dead tmpfs generation"
 
 # --------------------------------------------------------------------- zcc
 out="$(ZCL_HOST_GC_ZCC_BIN="$WORK/no-such-zcc" PATH="/usr/bin:/bin" \
@@ -352,6 +355,13 @@ exit $?
 TIMEOUTEOF
 chmod +x "$TIMEOUT_STUB_DIR/timeout"
 
+# assert_one_walk LABEL: the evictor ran exactly once and du (PATH-shadowed) never did.
+assert_one_walk() {
+    local calls; calls="$(wc -c < "$ZCC_STUB_COUNT" | tr -d '[:space:]')"
+    [ "$calls" = 1 ] || fail "$1 invoked the evictor $calls time(s), expected exactly 1"
+    if [ -s "$DU_CALL_LOG" ]; then fail "$1 called du, which the one-walk invariant forbids: $(cat -- "$DU_CALL_LOG")"
+    else pass "$1 never calls du — held/freed come from the evictor's report alone"; fi
+}
 ZCC_STUB_COUNT="$WORK/zcc-stub-count"
 : > "$ZCC_STUB_COUNT"
 out="$(ZCL_HOST_GC_ZCC_BIN="$ZCC_STUB_OK" ZCC_STUB_COUNT_FILE="$ZCC_STUB_COUNT" \
@@ -360,13 +370,7 @@ log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
 assert_contains "$out" "reclaimed 7" \
     "zcc apply reports the freed amount straight from the evictor's report line"
 assert_contains "$log" "zcc-trim" "zcc apply logs a zcc-trim row"
-calls="$(wc -c < "$ZCC_STUB_COUNT" | tr -d '[:space:]')"
-[ "$calls" = 1 ] || fail "zcc apply invoked the evictor $calls time(s), expected exactly 1"
-if [ -s "$DU_CALL_LOG" ]; then
-    fail "zcc apply called du, which the one-walk invariant forbids: $(cat -- "$DU_CALL_LOG")"
-else
-    pass "zcc apply never calls du — held/freed come from the evictor's report alone"
-fi
+assert_one_walk "zcc apply"
 
 # A cache FREEZE (free space under the freeze floor — the state a proof
 # generation on a full tmpfs is always in) must not buy the second walk
@@ -380,13 +384,7 @@ out="$(ZCL_HOST_GC_ZCC_BIN="$ZCC_STUB_OK" ZCC_STUB_COUNT_FILE="$ZCC_STUB_COUNT" 
 assert_contains "$out" "FREEZE active" "zcc apply under a cache freeze says so"
 assert_contains "$out" "reclaimed 7" \
     "zcc apply under a cache freeze still reports the evictor's freed amount"
-calls="$(wc -c < "$ZCC_STUB_COUNT" | tr -d '[:space:]')"
-[ "$calls" = 1 ] || fail "zcc apply under a freeze invoked the evictor $calls time(s), expected exactly 1"
-if [ -s "$DU_CALL_LOG" ]; then
-    fail "zcc apply under a cache freeze called du, which the one-walk invariant forbids: $(cat -- "$DU_CALL_LOG")"
-else
-    pass "zcc apply under a cache freeze never calls du — the freeze is recorded from the evictor's held figure"
-fi
+assert_one_walk "zcc apply under a cache freeze"
 
 # A stub that prints garbage must fail loudly (zcc-trim-failed), never a
 # silent 0-freed success row.
@@ -473,8 +471,7 @@ assert_contains "$out" "landed-unit" "units dry-run names the patch-equivalent w
 assert_contains "$out" "KEEP (unlanded commits" "units dry-run keeps the unlanded worktree"
 
 out="$(run_hostgc units apply)"
-[ -d "$UNITS_FX/landed-unit" ] && fail "units apply left the landed worktree behind" \
-    || pass "units apply removed the landed worktree"
+assert_gone "$UNITS_FX/landed-unit" "units apply left the landed worktree behind" "units apply removed the landed worktree"
 [ -d "$UNITS_FX/unlanded-unit" ] || fail "units apply removed the unlanded worktree"
 
 # ------------------------------------------------------------------ scratch
@@ -493,8 +490,7 @@ assert_contains "$out" "KEEP (.gc_keep)" "scratch dry-run honors .gc_keep"
 assert_contains "$out" "KEEP (worktree still exists)" "scratch dry-run keeps a dir with a live worktree"
 
 out="$(run_hostgc scratch apply)"
-[ -d "$SCRATCH_FX/orphaned-lane" ] && fail "scratch apply left the orphaned dir in place" \
-    || pass "scratch apply quarantined the orphaned dir (moved, not deleted)"
+assert_gone "$SCRATCH_FX/orphaned-lane" "scratch apply left the orphaned dir in place" "scratch apply quarantined the orphaned dir (moved, not deleted)"
 found=0
 for d in "$STATE_FX"/quarantine/*/scratch/orphaned-lane; do
     [ -d "$d" ] && found=1
@@ -522,6 +518,44 @@ out="$(run_hostgc scratch apply ZCL_HOST_GC_SCRATCH_MIN_AGE_D=7)"
 for n in pinned-exp occupied-exp young-exp land-inbox; do [ -d "$DEVSCRATCH_FX/$n" ] || fail "devscratch apply removed $n"; done
 rm -f -- "$PROC_FX/4243/cwd"
 
+# ---------------------------------------------------------------- ramscratch
+# The runner's tmpfs scratch root: RAM, so entries are deleted in place (never
+# quarantined). The fixture sits under the fake tmpfs mount in $PROC_FX/mounts.
+mkdir -p -- "$WORK/outside" "$PROC_FX/4244"; : > "$WORK/outside/f"; chmod 0400 "$WORK/outside/f"
+for n in old.idle000 ro.entry00 live.entry0 young.entry; do mkdir -p -- "$RAMSCR_FX/$n/sub"; : > "$RAMSCR_FX/$n/sub/f"; done
+ln -s "$WORK/outside" "$RAMSCR_FX/old.idle000/out"; touch -h -t 200001010000 "$RAMSCR_FX/old.idle000/out"  # a link leaving the entry is never followed
+for n in old.idle000 ro.entry00 live.entry0; do
+    touch_old "$RAMSCR_FX/$n/sub/f"; touch_old "$RAMSCR_FX/$n/sub"; touch_old "$RAMSCR_FX/$n"
+done
+chmod 0400 "$RAMSCR_FX/ro.entry00/sub/f"; chmod 0500 "$RAMSCR_FX/ro.entry00/sub"
+ln -s "$RAMSCR_FX/live.entry0/sub" "$PROC_FX/4244/cwd"
+out="$(run_hostgc ramscratch dry-run)"
+assert_contains "$out" "would remove $RAMSCR_FX/old.idle000" "ramscratch dry-run reports an old idle entry reapable"
+assert_contains "$out" "would remove $RAMSCR_FX/ro.entry00" "ramscratch dry-run reports an entry with a read-only subtree reapable"
+assert_contains "$out" "KEEP (live process inside): $RAMSCR_FX/live.entry0" "ramscratch keeps an entry with a live process cwd inside"
+assert_contains "$out" "4 dir(s) under $RAMSCR_FX — 2 reapable, 2 kept" "ramscratch dry-run reports two reapable and keeps the live and the young entry"
+[ -d "$RAMSCR_FX/old.idle000" ] || fail "ramscratch dry-run removed an entry"
+out="$(run_hostgc ramscratch apply)"
+assert_gone "$RAMSCR_FX/old.idle000" "ramscratch apply left an old idle entry" "ramscratch apply removed an old idle entry"
+assert_gone "$RAMSCR_FX/ro.entry00" "ramscratch apply left a read-only subtree behind" "ramscratch apply fully removed an entry with a read-only subtree"
+[ -e "$WORK/outside/f" ] && [ ! -w "$WORK/outside/f" ] || fail "ramscratch followed a symlink out of an entry"
+for n in live.entry0 young.entry; do [ -d "$RAMSCR_FX/$n" ] || fail "ramscratch apply removed $n"; done
+[ -z "$(find "$STATE_FX/quarantine" -name ramscratch 2>/dev/null)" ] || fail "ramscratch moved RAM into quarantine"
+# The age floor is halved when the tmpfs itself is nearly full, never for a full home disk.
+mkdir -p -- "$RAMSCR_FX/mid.entry00"; touch_old "$RAMSCR_FX/mid.entry00"
+ram_dry() { run_hostgc ramscratch dry-run ZCL_HOST_GC_RAM_SCRATCH_MIN_AGE_H=400000 HGT_DF_RAM_ROOT="$RAMSCR_FX" "$@"; }
+assert_contains "$(ram_dry HGT_DF_RAM_AVAIL_KB=1000000000)" "3 dir(s) under $RAMSCR_FX — 0 reapable, 3 kept" "ramscratch keeps entries younger than the floor"
+assert_not_contains "$(ram_dry HGT_DF_RAM_AVAIL_KB=1000000000 HGT_DF_AVAIL_KB=1000)" "would remove" "ramscratch ignores a nearly full home disk"
+assert_contains "$(ram_dry HGT_DF_RAM_AVAIL_KB=1000)" "would remove $RAMSCR_FX/mid.entry00" "ramscratch halves the floor when the tmpfs is nearly full"
+# Refused and disabled roots change nothing.
+ln -s "$RAMSCR_FX" "$WORK/shm/link"; mkdir -p -- "$HOME_FX/not-tmpfs/x"; touch_old "$HOME_FX/not-tmpfs/x"
+for r in "$WORK/shm/link" "shm/z23-scratch" "$HOME_FX/not-tmpfs"; do
+    assert_contains "$(run_hostgc ramscratch apply ZCL_HOST_GC_RAM_SCRATCH_DIR="$r")" "ramscratch: REFUSED" "ramscratch refuses root $r"
+done
+assert_contains "$(run_hostgc ramscratch apply ZCL_HOST_GC_RAM_SCRATCH_DIR=)" "ramscratch: disabled" "an empty ramscratch root disables the sweep"
+[ -d "$RAMSCR_FX/mid.entry00" ] && [ -d "$HOME_FX/not-tmpfs/x" ] || fail "ramscratch removed something under a refused or disabled root"
+rm -rf -- "$PROC_FX/4244"
+
 # ---------------------------------------------------------- z23p (donors)
 # The newest complete generation per build identity is the next proof's
 # warm donor and is kept; every other generation is reaped as before. The
@@ -548,10 +582,8 @@ out="$(run_hostgc z23p apply)"
     || fail "z23p reaped the newest complete generation of its build identity"
 [ -d "$Z23P_FX/gen-donor-b" ] && pass "z23p keeps the newest donor of a second identity" \
     || fail "z23p reaped the newest complete generation of a second identity"
-[ -d "$Z23P_FX/gen-donor-a-old" ] && fail "z23p kept a superseded donor of the same identity" \
-    || pass "z23p reaps a superseded generation of the same identity"
-[ -d "$Z23P_FX/gen-donor-c" ] && fail "z23p kept a third donor past the two-donor bound" \
-    || pass "z23p bounds the donor keep to two generations"
+assert_gone "$Z23P_FX/gen-donor-a-old" "z23p kept a superseded donor of the same identity" "z23p reaps a superseded generation of the same identity"
+assert_gone "$Z23P_FX/gen-donor-c" "z23p kept a third donor past the two-donor bound" "z23p bounds the donor keep to two generations"
 
 # A pool other than the default one (a lane's own proof pool, or the
 # landing worktree's) is discovered from git's worktree list and swept by
@@ -563,8 +595,7 @@ touch_old "$OTHER_POOL/gen-lane-dead"
 out="$(run_hostgc z23p dry-run)"
 assert_contains "$out" "$OTHER_POOL" "z23p discovers a proof pool outside the default location"
 out="$(run_hostgc z23p apply)"
-[ -e "$OTHER_POOL/gen-lane-dead" ] && fail "z23p left a dead generation in a discovered pool" \
-    || pass "z23p reaps a dead generation in a discovered pool"
+assert_gone "$OTHER_POOL/gen-lane-dead" "z23p left a dead generation in a discovered pool" "z23p reaps a dead generation in a discovered pool"
 
 # ------------------------------------------------------------------ wtbuild
 # build/ output inside idle registered worktrees: the 230 GB that filled
@@ -625,36 +656,29 @@ assert_contains "$out" "$POOL_GEN/test-tmp/wt-nest/build/obj" "wtbuild names a w
 
 out="$(run_hostgc wtbuild apply)"
 log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
-[ -e "$WT_FX/wt-idle/build/obj" ] && fail "wtbuild apply left idle build output behind" \
-    || pass "wtbuild apply removes idle build output"
-[ -e "$WT_FX/wt-idle/build/bin" ] && fail "wtbuild apply left an idle build/bin no unit runs from" \
-    || pass "wtbuild apply removes a build/bin no unit runs from"
+assert_gone "$WT_FX/wt-idle/build/obj" "wtbuild apply left idle build output behind" "wtbuild apply removes idle build output"
+assert_gone "$WT_FX/wt-idle/build/bin" "wtbuild apply left an idle build/bin no unit runs from" "wtbuild apply removes a build/bin no unit runs from"
 for sub in scratch handoff devverify clang-facts lane-stopwatch proof-receipts acceptance-run evidence; do
     [ -f "$WT_FX/wt-idle/build/$sub/f" ] || fail "wtbuild apply removed evidence-bearing build/$sub"
 done
 pass "wtbuild apply keeps every evidence-bearing build/ child"
 [ -f "$WT_FX/wt-idle/build/.session.lock" ] || fail "wtbuild apply removed hidden build state"
-[ -e "$WT_FX/wt-idle/test-tmp/case1" ] && fail "wtbuild apply left idle test scratch behind" \
-    || pass "wtbuild apply removes idle test scratch"
-[ -e "$WT_FX/wt-emptied/build/obj" ] && fail "wtbuild read a freshly emptied build/ directory as recent work" \
-    || pass "wtbuild ignores directory mtimes when judging recent work"
+assert_gone "$WT_FX/wt-idle/test-tmp/case1" "wtbuild apply left idle test scratch behind" "wtbuild apply removes idle test scratch"
+assert_gone "$WT_FX/wt-emptied/build/obj" "wtbuild read a freshly emptied build/ directory as recent work" "wtbuild ignores directory mtimes when judging recent work"
 [ -f "$WT_FX/wt-live/build/obj/a.o" ] || fail "wtbuild apply removed output from a worktree in use"
 [ -f "$WT_FX/wt-recent/build/obj/a.o" ] || fail "wtbuild apply removed output built recently"
 [ -f "$WT_FX/wt-mid/build/obj/a.o" ] || fail "wtbuild apply ignored the 12h idle floor with disk to spare"
 [ -f "$WT_FX/wt-unit/build/bin/tool" ] || fail "wtbuild apply removed a build/bin a systemd unit runs from"
-[ -e "$WT_FX/wt-unit/build/obj" ] && fail "wtbuild apply kept the rest of a unit-bearing build/" \
-    || pass "wtbuild apply keeps only the unit's build/bin"
+assert_gone "$WT_FX/wt-unit/build/obj" "wtbuild apply kept the rest of a unit-bearing build/" "wtbuild apply keeps only the unit's build/bin"
 assert_contains "$log" "$(printf 'wtbuild-remove\t%s' "$WT_FX/wt-idle/build/obj")" \
     "wtbuild apply logs each removal with its path"
 [ -d "$REPO_FX" ] || fail "wtbuild touched the main checkout"
 [ -f "$POOL_GEN/build/obj/a.o" ] || fail "wtbuild reached into a proof generation that z23p owns"
-[ -e "$POOL_GEN/test-tmp/wt-nest/build/obj" ] && fail "wtbuild skipped a worktree nested inside a proof generation" \
-    || pass "wtbuild sweeps a nested worktree and leaves the proof generation to z23p"
+assert_gone "$POOL_GEN/test-tmp/wt-nest/build/obj" "wtbuild skipped a worktree nested inside a proof generation" "wtbuild sweeps a nested worktree and leaves the proof generation to z23p"
 
 # Below the low-disk floor the idle window drops to two hours.
 out="$(HGT_DF_AVAIL_KB=1048576 run_hostgc wtbuild apply)"
-[ -e "$WT_FX/wt-mid/build/obj" ] && fail "wtbuild under low disk kept output idle for 5h" \
-    || pass "wtbuild under low disk reclaims output idle for more than 2h"
+assert_gone "$WT_FX/wt-mid/build/obj" "wtbuild under low disk kept output idle for 5h" "wtbuild under low disk reclaims output idle for more than 2h"
 [ -f "$WT_FX/wt-recent/build/obj/a.o" ] || fail "wtbuild under low disk removed output built just now"
 # The live occupant of wt-live stays for the landed section below.
 
@@ -682,8 +706,7 @@ grep -Eq '^  repotmp +[1-9][0-9]* item\(s\)' <<<"$out" \
     || fail "repotmp missing from the summary table (cat_totals category list)"
 
 out="$(run_hostgc repotmp apply)"
-[ -e "$REPO_FX/test-tmp/stale-rig" ] && fail "repotmp apply left stale main-checkout scratch behind" \
-    || pass "repotmp apply removed the stale entry"
+assert_gone "$REPO_FX/test-tmp/stale-rig" "repotmp apply left stale main-checkout scratch behind" "repotmp apply removed the stale entry"
 [ -e "$REPO_FX/test-tmp/fresh-rig" ] || fail "repotmp apply removed a fresh entry"
 [ -f "$REPO_FX/base.txt" ] || fail "repotmp removed tracked main-checkout content"
 
@@ -774,8 +797,7 @@ assert_contains "$out" "KEEP (dirty" "landed dry-run keeps a dirty worktree"
 [ -d "$WT_FX/lane-landed" ] || fail "landed dry-run removed a worktree"
 
 out="$(HGT_EXTRA_ARGS=--reap-landed-worktrees run_hostgc landed apply)"
-[ -e "$WT_FX/lane-landed" ] && fail "landed apply left a fully landed idle worktree" \
-    || pass "landed apply removes a fully landed idle worktree"
+assert_gone "$WT_FX/lane-landed" "landed apply left a fully landed idle worktree" "landed apply removes a fully landed idle worktree"
 [ -d "$WT_FX/lane-unlanded" ] || fail "landed apply removed a worktree with unlanded commits"
 [ -f "$WT_FX/lane-dirty/wip.txt" ] || fail "landed apply removed a dirty worktree"
 [ -d "$WT_FX/wt-live" ] || fail "landed apply removed a worktree a live process sits in"

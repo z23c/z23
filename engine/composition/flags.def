@@ -1157,6 +1157,10 @@ Z23_FLAG("ZCL_HOST_GC_QUARANTINE_TTL_D", "env_build", "14", "-",
           "days a quarantined path survives before permanent deletion; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_RAM_ROOT", "env_build", "/dev/shm/z23p", "-",
           "fixture seam for the tmpfs twin of the dev-proof generation pool the z23p sweep now also reaps; first use tools/scripts/host_gc.sh:auto")
+Z23_FLAG("ZCL_HOST_GC_RAM_SCRATCH_DIR", "env_build", "/dev/shm/z23-scratch", "-",
+          "tmpfs scratch root the test runner fills, swept by the ramscratch category and deleted in place; must be an absolute non-symlink path on a tmpfs or ramfs mount; empty disables; first use tools/scripts/host_gc.sh:auto")
+Z23_FLAG("ZCL_HOST_GC_RAM_SCRATCH_MIN_AGE_H", "env_build", "6", "-",
+          "hours an entry of the ramscratch root must sit idle before it is reaped, halved when the tmpfs itself is under the pressure floor; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_REPO", "env_build", "$GC_HOME/github/zclassic23", "-",
           "fixture seam for the root checkout the units/scratch sweeps consult; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_REPOTMP_MIN_AGE_D", "env_build", "2", "-",

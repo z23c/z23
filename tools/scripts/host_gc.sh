@@ -33,11 +33,8 @@
 # EVERY ACTION LOGS ONE LINE to $STATE/host_gc.log, bytes included, so totals
 # can be re-derived from the log.
 #
-# CATEGORIES: the table in docs/dev/HOST_GC.md lists every category and its rules.
-# FIXTURE MODE. Every host-global path and external binary is indirected
-# through a ZCL_HOST_GC_* variable so tools/lint/check_host_gc.sh can run
-# the whole sweep against a throwaway HOME and prove each category fires and
-# each protected path survives. Production runs set none of them.
+# CATEGORIES and FIXTURE MODE (every path and binary behind a ZCL_HOST_GC_*
+# seam): docs/dev/HOST_GC.md lists each category's rules and the fixture seams.
 
 set -euo pipefail
 
@@ -97,6 +94,10 @@ TRAINS_DIR="${ZCL_HOST_GC_TRAINS_DIR:-$GC_HOME/.z23/trains}"
 SCRATCH_MIN_AGE_D="${ZCL_HOST_GC_SCRATCH_MIN_AGE_D:-7}"
 SCRATCH_DIR="${ZCL_HOST_GC_SCRATCH_DIR:-$GC_HOME/.local/state/zclassic23/scratch}"
 DEVSCRATCH_DIR="${ZCL_HOST_GC_DEVSCRATCH_DIR-$GC_HOME/.cache/development-scratch/z23}"
+# ramscratch: the test runner's tmpfs scratch root; empty disables. RAM turns over
+# faster than disk and 6 h outlasts any run plus its triage, so the floor is hours.
+RAM_SCRATCH_DIR="${ZCL_HOST_GC_RAM_SCRATCH_DIR-/dev/shm/z23-scratch}"
+RAM_SCRATCH_MIN_AGE_H="${ZCL_HOST_GC_RAM_SCRATCH_MIN_AGE_H:-6}"
 # pressure: below this free-space percentage, every age floor above is
 # halved for this run (reported in the summary); below 5% the ten largest
 # directories under $GC_HOME are also printed as a report line.
@@ -151,8 +152,8 @@ nothing is removed, moved, or killed.
   --status       print one screen of host hygiene facts and exit
   --only CAT     run a single category. CAT is one of:
                  ccache zcc z23p tmp tmplitter journal binbak testtmp repotmp
-                 orphan deadexec worktree units scratch wtbuild landtmp
-                 landed lowdisk
+                 orphan deadexec worktree units scratch ramscratch wtbuild
+                 landtmp landed lowdisk
   --wt-build-idle-h=N      hours an idle worktree's build/ output is kept (12)
   --reap-landed-worktrees  also remove clean, fully landed, idle worktrees
 
@@ -313,7 +314,7 @@ add_result() {
 # feature either.
 cat_totals() {
     printf '%s' "$CAT_RESULTS" | awk '
-        BEGIN { n = split("ccache zcc z23p tmp tmplitter journal binbak testtmp repotmp orphan deadexec worktree units scratch wtbuild landtmp landed quarantine", o, " ") }
+        BEGIN { n = split("ccache zcc z23p tmp tmplitter journal binbak testtmp repotmp orphan deadexec worktree units scratch ramscratch wtbuild landtmp landed quarantine", o, " ") }
         { b[$1] += $2; c[$1] += $3 }
         END { for (i = 1; i <= n; i++) printf "%s %d %d\n", o[i], c[o[i]] + 0, b[o[i]] + 0 }'
 }
@@ -733,10 +734,8 @@ z23p_sweep_ram() {
         z23p_sweep_pool "$Z23P_RAM"
         return 0
     fi
-    floor="$Z23P_MIN_AGE_H"
-    if [ "$LOW_DISK" = 1 ]; then floor=0; fi
-    apply_arg=false
-    if [ "$APPLY" = 1 ]; then apply_arg=true; fi
+    floor="$Z23P_MIN_AGE_H"; [ "$LOW_DISK" = 1 ] && floor=0
+    apply_arg=false; [ "$APPLY" = 1 ] && apply_arg=true
     out="$(env HOME="$GC_HOME" ZCL_RAM_SCRATCH_ROOT="$(dirname -- "$Z23P_RAM")" \
         "$bin" ops host gc "--apply=$apply_arg" "--floor_hours=$floor" 2>&1)" || true
     bytes="$(z23p_native_bytes "$out")"
@@ -1071,26 +1070,12 @@ land_queue_busy() {
         return 0
     fi
     if [ -e "$LAND_DIR/step.lock" ]; then
-        if ! command -v flock >/dev/null 2>&1; then
-            printf 'no flock binary to prove step.lock is free'
-            return 0
-        fi
-        if ! flock -n -x "$LAND_DIR/step.lock" true 2>/dev/null; then
-            printf 'step.lock is held by a land step or proof'
-            return 0
-        fi
+        command -v flock >/dev/null 2>&1 || { printf 'no flock binary to prove step.lock is free'; return 0; }
+        flock -n -x "$LAND_DIR/step.lock" true 2>/dev/null || { printf 'step.lock is held by a land step or proof'; return 0; }
     fi
     ensure_cwd_set
-    if cwd_occupied "$LAND_DIR/wt"; then
-        printf 'a live process is inside the landing worktree'
-        return 0
-    fi
+    cwd_occupied "$LAND_DIR/wt" && { printf 'a live process is inside the landing worktree'; return 0; }
     return 1
-}
-
-landtmp_reap_children() {
-    local tt="$1"
-    reap_children landtmp landtmp-remove "$tt" "land queue idle"
 }
 
 sweep_landtmp() {
@@ -1113,11 +1098,11 @@ sweep_landtmp() {
             log_line "landtmp-skip" "$tt" 0 "step.lock raced"
             return 0
         fi
-        landtmp_reap_children "$tt"
+        reap_children landtmp landtmp-remove "$tt" "land queue idle"
         exec 8>&-
         return 0
     fi
-    landtmp_reap_children "$tt"
+    reap_children landtmp landtmp-remove "$tt" "land queue idle"
 }
 
 # ========================================================== CATEGORY landed
@@ -1210,11 +1195,7 @@ landed_remove() {
         rm -rf -- "$wt" 2>/dev/null || true
         git -C "$GC_REPO" worktree prune >/dev/null 2>&1 || true
     fi
-    if [ -e "$wt" ]; then
-        log_line "landed-remove-failed" "$wt" 0 "head=$sha"
-        say "landed: could not remove $wt (left in place)"
-        return 0
-    fi
+    [ ! -e "$wt" ] || { log_line "landed-remove-failed" "$wt" 0 "head=$sha"; say "landed: could not remove $wt (left in place)"; return 0; }
     log_line "landed-remove" "$wt" "$bytes" "head=$sha branch=$branch"
     add_result landed "$bytes" 1
     say "landed: removed $wt ($(human "$bytes")) — recorded at $sha"
@@ -1297,22 +1278,12 @@ warn_low_disk() {
     hdr "low-disk warning"
     if [ -e "$stamp" ]; then
         age="$(age_secs "$stamp")"
-        if [ "$age" -lt $(( LOWDISK_MAIL_EVERY_H * 3600 )) ]; then
-            say "lowdisk: rate limited — last warning $(( age / 60 ))m ago (one per ${LOWDISK_MAIL_EVERY_H}h)"
-            return 0
-        fi
+        [ "$age" -ge $(( LOWDISK_MAIL_EVERY_H * 3600 )) ] || { say "lowdisk: rate limited — last warning $(( age / 60 ))m ago (one per ${LOWDISK_MAIL_EVERY_H}h)"; return 0; }
     fi
     body="host-gc: $(human "$free") free after the sweep, below the ${LOW_DISK_GB}G floor. top: $(top_consumers)"
     body="$(LC_ALL=C; printf "%s" "${body:0:4000}")"
-    if ! bin="$(dev_mail_bin)"; then
-        say "lowdisk: no z23-dev to post with — $body"
-        log_line "lowdisk-mail-failed" "$GC_HOME" "$free" "no z23-dev"
-        return 0
-    fi
-    if [ "$APPLY" != 1 ]; then
-        say "lowdisk: would post: $body"
-        return 0
-    fi
+    bin="$(dev_mail_bin)" || { say "lowdisk: no z23-dev to post with — $body"; log_line "lowdisk-mail-failed" "$GC_HOME" "$free" "no z23-dev"; return 0; }
+    [ "$APPLY" = 1 ] || { say "lowdisk: would post: $body"; return 0; }
     if "$bin" dev agent mail --action=post --to=oauth --kind=problem --ref=host-gc \
         "--body=$body" >/dev/null 2>&1; then
         ensure_state
@@ -1414,20 +1385,7 @@ sweep_tmplitter() {
             say "tmplitter: KEEP (open by a live process): $entry"
             continue
         fi
-        refuse_if_protected "$entry" || continue
-        bytes="$(dir_bytes "$entry")"
-        if [ "$APPLY" = 1 ]; then
-            chmod -R u+w "$entry" 2>/dev/null || true
-            if rm -rf -- "$entry" 2>/dev/null; then
-                removed=$(( removed + 1 )); add_result tmplitter "$bytes" 1
-                log_line "tmplitter-remove" "$entry" "$bytes" "unregistered fixture"
-            else
-                log_line "tmplitter-remove-failed" "$entry" 0 "rm refused"
-            fi
-        else
-            removed=$(( removed + 1 )); add_result tmplitter "$bytes" 1
-            log_line "tmplitter-remove" "$entry" "$bytes" "unregistered fixture"
-        fi
+        reap_tree tmplitter tmplitter-remove "$entry" "unregistered fixture" && removed=$(( removed + 1 ))
     done
     say "tmplitter: $total unregistered entr(y/ies) — $removed reapable, $kept kept"
 }
@@ -1484,19 +1442,17 @@ reap_landed_worktree() {
     bytes="$(dir_bytes "$wt")"
     if [ "$APPLY" = 1 ]; then
         refuse_if_protected "$wt" || return 0
-        if git -C "$GC_REPO" worktree remove --force -- "$wt" 2>/dev/null; then
-            add_result "$cat" "$bytes" 1
-            log_line "$cat-remove" "$wt" "$bytes" "$reason"
-            say "$cat: removed $wt ($(human "$bytes"))"
-        else
+        if ! git -C "$GC_REPO" worktree remove --force -- "$wt" 2>/dev/null; then
             log_line "$cat-remove-failed" "$wt" 0 "git refused"
             say "$cat: git refused to remove $wt (left in place)"
+            return 0
         fi
+        say "$cat: removed $wt ($(human "$bytes"))"
     else
-        add_result "$cat" "$bytes" 1
-        log_line "$cat-remove" "$wt" "$bytes" "$reason"
         say "$cat: would remove $wt ($(human "$bytes")) — $reason"
     fi
+    add_result "$cat" "$bytes" 1
+    log_line "$cat-remove" "$wt" "$bytes" "$reason"
 }
 
 sweep_units() {
@@ -1587,35 +1543,40 @@ scratch_is_live_tree() {
 }
 
 sweep_scratch_root() {
-    local root="$1" min_age="$2" total=0 removed=0 kept=0 d name bytes
+    local root="$1" min_age="$2" cat="${3:-scratch}" total=0 removed=0 kept=0 d name bytes
     [ -n "$root" ] || return 0
-    [ -d "$root" ] || { say "scratch: no $root — skipped"; return 0; }
+    [ -d "$root" ] || { say "$cat: no $root — skipped"; return 0; }
     for d in "$root"/*; do
         [ -d "$d" ] || continue
+        [ "$cat" = ramscratch ] && [ -L "$d" ] && continue
         name="$(basename -- "$d")"
         case "$SCRATCH_NEVER_NAMES" in *" $name "*) continue ;; esac
         total=$(( total + 1 ))
         if scratch_is_kept_by_name "$root" "$name"; then
-            kept=$(( kept + 1 )); say "scratch: KEEP (.gc_keep): $d"; continue
+            kept=$(( kept + 1 )); say "$cat: KEEP (.gc_keep): $d"; continue
         fi
         if [ "$(age_secs "$d")" -lt "$min_age" ]; then
             kept=$(( kept + 1 )); continue
         fi
         if cwd_occupied "$d"; then
-            kept=$(( kept + 1 )); say "scratch: KEEP (live process inside): $d"; continue
+            kept=$(( kept + 1 )); say "$cat: KEEP (live process inside): $d"; continue
         fi
         if scratch_has_live_worktree "$name"; then
-            kept=$(( kept + 1 )); say "scratch: KEEP (worktree still exists): $d"; continue
+            kept=$(( kept + 1 )); say "$cat: KEEP (worktree still exists): $d"; continue
         fi
         if scratch_is_live_tree "$d" "$min_age"; then
-            kept=$(( kept + 1 )); say "scratch: KEEP (worktree or written within the age floor): $d"; continue
+            kept=$(( kept + 1 )); say "$cat: KEEP (worktree or written within the age floor): $d"; continue
         fi
-        bytes="$(quarantine_path "$d" scratch)" || { kept=$(( kept + 1 )); continue; }
+        if [ "$cat" = ramscratch ]; then  # RAM: delete in place, no quarantine
+            reap_tree "$cat" ramscratch-remove "$d" "tmpfs idle>${min_age}s" || { kept=$(( kept + 1 )); continue; }
+        else
+            bytes="$(quarantine_path "$d" scratch)" || { kept=$(( kept + 1 )); continue; }
+            add_result scratch "$bytes" 1
+            say "scratch: quarantine $name ($(human "$bytes"))"
+        fi
         removed=$(( removed + 1 ))
-        add_result scratch "$bytes" 1
-        say "scratch: quarantine $name ($(human "$bytes"))"
     done
-    say "scratch: $total dir(s) under $root — $removed reapable, $kept kept"
+    say "$cat: $total dir(s) under $root — $removed reapable, $kept kept"
 }
 
 sweep_scratch() {
@@ -1626,6 +1587,38 @@ sweep_scratch() {
     [ "$LOW_DISK" = 1 ] && min_age=$(( min_age / 2 ))
     sweep_scratch_root "$SCRATCH_DIR" "$min_age"
     sweep_scratch_root "$DEVSCRATCH_DIR" "$min_age"
+}
+
+# ramscratch: the test runner's tmpfs root (/dev/shm/z23-scratch/<hash>.<rand>).
+# The runner removes an entry only on a green exit; a failed run keeps it on
+# purpose and a killed run never gets to, and nothing bounds the directory, so
+# it filled the 47 GB tmpfs (every tmpfs-using test then failed ENOSPC). Same
+# rules as scratch, but the root must be a canonical absolute path on a
+# tmpfs/ramfs mount, free space is the tmpfs's own, and removal is in place.
+ram_scratch_root_ok() {
+    local fs
+    case "$1" in /*) ;; *) say "ramscratch: REFUSED relative root $1"; return 1 ;; esac
+    [ -d "$1" ] || { say "ramscratch: no $1 — skipped"; return 1; }
+    if [ -L "$1" ] || [ "$(realpath -- "$1" 2>/dev/null)" != "${1%/}" ]; then
+        say "ramscratch: REFUSED $1 (symlink, or a path through one)"; return 1
+    fi
+    fs="$(awk -v p="$1" '{ m = $2; if ((p == m || index(p, m == "/" ? m : m "/") == 1) && length(m) >= n) { n = length(m); t = $3 } } END { print t }' "$PROC_ROOT/mounts" 2>/dev/null)"
+    case "$fs" in tmpfs|ramfs) return 0 ;; esac
+    say "ramscratch: REFUSED $1 (not on a tmpfs or ramfs mount: ${fs:-unknown})"; return 1
+}
+
+sweep_ramscratch() {
+    want ramscratch || return 0
+    hdr "ramscratch (RAM; older than ${RAM_SCRATCH_MIN_AGE_H}h, deleted in place)"
+    local root="$RAM_SCRATCH_DIR" min_age=$(( RAM_SCRATCH_MIN_AGE_H * 3600 )) pct
+    [ -n "$root" ] || { say "ramscratch: disabled (empty root)"; return 0; }
+    ram_scratch_root_ok "$root" || return 0
+    ensure_cwd_set
+    pct="$(free_pct "$root")"
+    if [ -n "$pct" ] && [ "$pct" -lt "$PRESSURE_MIN_FREE_PCT" ]; then
+        min_age=$(( min_age / 2 )); say "ramscratch: tmpfs ${pct}% free, age floor halved"
+    fi
+    sweep_scratch_root "$root" "$min_age" ramscratch
 }
 
 # ============================================================ CATEGORY journal
@@ -1697,7 +1690,6 @@ sweep_binbak() {
     local min_age=$(( BINBAK_MIN_AGE_D * 86400 ))
     local n=0 bytes total=0 f
     while IFS= read -r f; do
-        [ -n "$f" ] || continue
         [ -e "$f" ] || continue
         [ "$(age_secs "$f")" -ge "$min_age" ] || continue
         is_protected "$f" && continue
@@ -1724,21 +1716,13 @@ sweep_testtmp() {
         # An actively building lane is off limits regardless of what is inside.
         [ "$(age_secs "$root")" -ge 3600 ] || continue
         while IFS= read -r d; do
-            [ -n "$d" ] || continue
             [ -d "$d" ] || continue
             [ "$(age_secs "$d")" -ge "$min_age" ] || continue
             is_protected "$d" && continue
-            bytes="$(dir_bytes "$d")"
-            if [ "$APPLY" = 1 ]; then
-                refuse_if_protected "$d" || continue
-                chmod -R u+w "$d" 2>/dev/null || true
-                rm -rf -- "$d" 2>/dev/null || { log_line "testtmp-failed" "$d" 0 "rm refused"; continue; }
-            fi
-            log_line "testtmp-remove" "$d" "$bytes" "stale scratch"
-            n=$(( n + 1 )); total=$(( total + bytes ))
+            reap_tree testtmp testtmp-remove "$d" "stale scratch" || continue
+            n=$(( n + 1 )); total=$(( total + REAP_BYTES ))
         done < <(find "$root" -maxdepth 3 \( -name 'test-tmp' -o -name '.zcl_test_render' \) -type d 2>/dev/null)
     done
-    add_result testtmp "$total" "$n"
     say "testtmp: $n stale scratch dirs, $(human "$total")"
 }
 
@@ -2075,7 +2059,7 @@ print_status() {
 # critical percentage — name the ten largest directories under $GC_HOME so
 # the next agent does not have to go hunting for what is actually full.
 free_pct() {
-    df -P -- "$GC_HOME" 2>/dev/null | awk 'NR==2{u=$3+$4; if (u>0) printf "%d", $4*100/u; else print 0}'
+    df -P -- "${1:-$GC_HOME}" 2>/dev/null | awk 'NR==2{u=$3+$4; if (u>0) printf "%d", $4*100/u; else print 0}'
 }
 
 report_pressure() {
@@ -2161,6 +2145,7 @@ sweep_worktree
 sweep_units
 sweep_trains_landed
 sweep_scratch
+sweep_ramscratch
 sweep_wtbuild
 sweep_landtmp
 sweep_landed
