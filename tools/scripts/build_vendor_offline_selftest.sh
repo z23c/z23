@@ -7,14 +7,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-vendor-offline-selftest.XXXXXX")"
 lock_pid=
+wait_lock_selftest()
+{
+    [ -n "$lock_pid" ] || return 0
+    local status=0
+    wait "$lock_pid" || status=$?
+    lock_pid=
+    cat "$lock_log"
+    return "$status"
+}
+
 cleanup()
 {
     status=$?
     trap - EXIT HUP INT TERM
-    if [ -n "$lock_pid" ]; then
-        wait "$lock_pid" || :
-        cat "$lock_log"
-    fi
+    wait_lock_selftest || :
     rm -rf "$SANDBOX"
     exit "$status"
 }
@@ -32,16 +39,6 @@ fail()
     wait_lock_selftest || :
     printf 'build_vendor_offline_selftest: FAIL: %s\n' "$*" >&2
     exit 1
-}
-
-wait_lock_selftest()
-{
-    [ -n "$lock_pid" ] || return 0
-    local status=0
-    wait "$lock_pid" || status=$?
-    lock_pid=
-    cat "$lock_log"
-    return "$status"
 }
 
 lock_log="$SANDBOX/vendor-lock-selftest.log"
@@ -189,9 +186,7 @@ if command -v c++ >/dev/null 2>&1; then
         printf '%s\n' '    fi'
         printf '%s\n' '    previous="$argument"'
         printf '%s\n' 'done'
-        printf 'exec'
-        printf ' %q' "${fixture_host_argv[@]}"
-        printf ' "$@"\n'
+        printf 'exec %q "$@"\n' "$SANDBOX/tools/native-cc"
     } > "$SANDBOX/tools/c-only-cc"
     chmod +x "$SANDBOX/tools/c-only-cc"
     if output="$(cd "$SANDBOX" && HOSTCC=tools/c-only-cc \
@@ -202,9 +197,7 @@ if command -v c++ >/dev/null 2>&1; then
         fail 'a C driver without a C++ front end could not identify the lock helper compiler'
 fi
 
-if ! wait_lock_selftest; then
-    fail 'vendor lock selftest failed'
-fi
+wait_lock_selftest || fail 'vendor lock selftest failed'
 
 # Bad bootstrap identities must refuse before touching an existing helper.
 cp -R "$SANDBOX/build/bin/vendor-lock" "$SANDBOX/helper-cache-before"
@@ -293,26 +286,21 @@ probe_bootstrap()
         cat "$fixture/output" >&2
         fail "bootstrap selection probe failed: $*"
     fi
-    if [ "$expected" = skip ] || [ "$expected" = query ]; then
-        if [ "$expected" = skip ]; then
-            grep -q '^lean=1$' "$fixture/output" ||
-                fail "bootstrap helper entered authoritative node parse: $*"
-        elif grep -q '^lean=1$' "$fixture/output"; then
-            fail "source query skipped the full node source declarations: $*"
-        fi
-        [ ! -e "$fixture/vendor-contact" ] ||
-            fail "nonlink goals invoked vendor bootstrap: $*"
-        [ ! -e "$fixture/tor-contact" ] ||
-            fail "nonlink goals invoked Tor bootstrap: $*"
-    else
-        if grep -q '^lean=1$' "$fixture/output"; then
-            fail "node goals entered lean helper parse: $*"
-        fi
-        [ -s "$fixture/vendor-contact" ] ||
-            fail "node goals skipped vendor bootstrap: $*"
-        [ -s "$fixture/tor-contact" ] ||
-            fail "node goals skipped Tor bootstrap: $*"
+    if [ "$expected" = skip ]; then
+        grep -q '^lean=1$' "$fixture/output" ||
+            fail "bootstrap helper entered authoritative node parse: $*"
+    elif grep -q '^lean=1$' "$fixture/output"; then
+        fail "$expected goal entered lean helper parse: $*"
     fi
+    for service in vendor tor; do
+        if [ "$expected" = require ]; then
+            [ -s "$fixture/$service-contact" ] ||
+                fail "node goals skipped $service bootstrap: $*"
+        else
+            [ ! -e "$fixture/$service-contact" ] ||
+                fail "nonlink goals invoked $service bootstrap: $*"
+        fi
+    done
 }
 
 for goal in windows-headless-run windows-headless-run-selftest \
@@ -346,26 +334,22 @@ printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$SANDBOX/bin/llvm-ar"
 chmod +x "$SANDBOX/bin/llvm-ar"
 
 identity_calls="$(awk '{ n++ } END { print n + 0 }' "$VENDOR_LOCK_KEY_TRACE")"
-for archive in libsecp256k1.a libsecp256k1-darwin.a; do
+for archive in libsecp256k1.a libsecp256k1-darwin.a libsecp256k1-android.a; do
+    if [ "$archive" = libsecp256k1-android.a ]; then
+        [[ "$(awk '{ n++ } END { print n + 0 }' "$VENDOR_LOCK_KEY_TRACE")" == "$identity_calls" ]] ||
+            fail 'out-of-target provenance refusal derived a lock compiler identity'
+        expected='vendor provenance verification failed'
+    else
+        expected='archive is not required for this target'
+    fi
     if output="$(cd "$SANDBOX" && VENDOR_TARGET=aarch64-linux-android24 \
         PATH="$SANDBOX/bin:$PATH" ANDROID_NDK_ROOT="$SANDBOX/fake-ndk" VENDOR_CC="$SANDBOX/bin/fake-android-cc" \
         VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 tools/scripts/build_vendor.sh \
         --check-provenance "$archive" 2>&1)"; then
-        fail 'cross provenance accepted an archive outside REQUIRED'
+        fail "cross provenance unexpectedly accepted $archive"
     fi
-    [[ "$output" == *'archive is not required for this target'* ]] ||
-        fail 'cross archive refusal did not reach REQUIRED check'
+    [[ "$output" == *"$expected"* ]] || fail "provenance refusal for $archive did not report $expected"
 done
-[[ "$(awk '{ n++ } END { print n + 0 }' "$VENDOR_LOCK_KEY_TRACE")" == "$identity_calls" ]] ||
-    fail 'out-of-target provenance refusal derived a lock compiler identity'
-if output="$(cd "$SANDBOX" && VENDOR_TARGET=aarch64-linux-android24 \
-    PATH="$SANDBOX/bin:$PATH" ANDROID_NDK_ROOT="$SANDBOX/fake-ndk" VENDOR_CC="$SANDBOX/bin/fake-android-cc" \
-    VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 tools/scripts/build_vendor.sh \
-    --check-provenance libsecp256k1-android.a 2>&1)"; then
-    fail 'unstamped target archive unexpectedly passed provenance'
-fi
-[[ "$output" == *'vendor provenance verification failed'* ]] ||
-    fail 'target archive did not reach provenance verification'
 
 # A populated archive cache restores in offline mode without a downloader, and
 # the restored archive still passes the stamp check. The first run builds libz
@@ -437,22 +421,17 @@ run_failed_vendor_group() (
 # independent workers must be reaped before the driver reports failure.
 rm -rf "$SANDBOX/vendor/.cache" "$VENDOR_ARCHIVE_CACHE"
 mkdir -p "$SANDBOX/vendor/.cache" "$VENDOR_ARCHIVE_CACHE"
-if ! run_failed_vendor_group 3 "$SANDBOX/parallel-failure.log"; then
-    fail 'offline parallel driver succeeded or left a worker active'
-fi
-grep -q 'offline cache miss or checksum failure: openssl' "$SANDBOX/parallel-failure.log" ||
-    fail 'parallel driver did not report the OpenSSL cache miss'
-if grep -q 'libevent 2.1.12' "$SANDBOX/parallel-failure.log"; then
-    fail 'libevent started after its OpenSSL dependency failed'
-fi
-if ! run_failed_vendor_group 1 "$SANDBOX/serial-failure.log"; then
-    fail 'offline serial driver succeeded or left a worker active'
-fi
-grep -q 'offline cache miss or checksum failure: openssl' "$SANDBOX/serial-failure.log" ||
-    fail 'serial driver did not report the OpenSSL cache miss'
-if grep -q 'libevent 2.1.12' "$SANDBOX/serial-failure.log"; then
-    fail 'serial libevent started after its OpenSSL dependency failed'
-fi
+for mode in parallel serial; do
+    if [ "$mode" = parallel ]; then workers=3; else workers=1; fi
+    log="$SANDBOX/$mode-failure.log"
+    run_failed_vendor_group "$workers" "$log" ||
+        fail "offline $mode driver succeeded or left a worker active"
+    grep -q 'offline cache miss or checksum failure: openssl' "$log" ||
+        fail "$mode driver did not report the OpenSSL cache miss"
+    if grep -q 'libevent 2.1.12' "$log"; then
+        fail "$mode libevent started after its OpenSSL dependency failed"
+    fi
+done
 
 printf '%s\n' \
     'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'
