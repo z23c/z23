@@ -957,6 +957,40 @@ static bool cin_fault_old_rows(sqlite3 *db)
 }
 
 #if !defined(_WIN32)
+static int cin_deny_temp_table(void *ctx, int action, const char *a,
+                               const char *b, const char *db, const char *source)
+{
+    (void)ctx; (void)a; (void)b; (void)db; (void)source;
+    return action == SQLITE_CREATE_TEMP_TABLE ? SQLITE_DENY : SQLITE_OK;
+}
+
+static bool cin_reconcile_diagnostic(const char *root, struct ci_store *store,
+                                     const uint8_t expected[32], bool deny,
+                                     const char *marker)
+{
+    sqlite3 *db = ci_store_db(store);
+    FILE *capture = tmpfile();
+    int saved = capture ? dup(STDERR_FILENO) : -1;
+    if (saved < 0) { if (capture) fclose(capture); return false; }
+    fflush(stderr);
+    if (dup2(fileno(capture), STDERR_FILENO) < 0) {
+        close(saved); fclose(capture); return false;
+    }
+    bool installed = !deny || sqlite3_set_authorizer(db, cin_deny_temp_table, NULL) == SQLITE_OK;
+    bool refused = installed && !ci_reconcile_includes(root, store, expected);
+    bool reset = !deny || sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK;
+    fflush(stderr);
+    bool restored = dup2(saved, STDERR_FILENO) >= 0;
+    close(saved);
+    rewind(capture);
+    char text[4096];
+    size_t n = fread(text, 1, sizeof text - 1, capture);
+    bool read_ok = !ferror(capture);
+    text[n] = '\0';
+    bool closed = fclose(capture) == 0;
+    return refused && reset && restored && read_ok && closed && strstr(text, marker);
+}
+
 static bool cin_fault_call(const char *root, struct ci_store *store,
                            const struct ci_merkle_leaf *leaf,
                            const uint8_t dep_stat[32], const uint8_t digest[32],
@@ -1034,9 +1068,21 @@ static bool cin_incremental_control(const char *root)
     struct ci_store *store = NULL;
     bool ready = cin_fault_seed(root, &store);
     if (!store) return false;
-    uint8_t dep_stat[32];
+    uint8_t dep_stat[32] = {0};
     bool seeded = ready && cin_fault_old_rows(ci_store_db(store)) &&
                   ci_deps_stat_root_sha3(root, dep_stat);
+#if !defined(_WIN32)
+    uint8_t changed_stat[32];
+    memcpy(changed_stat, dep_stat, sizeof changed_stat);
+    changed_stat[0] ^= 1;
+    bool drift = seeded && cin_reconcile_diagnostic(root, store, changed_stat, false,
+        "includes_reconcile stage=depfile_metadata_mismatch");
+    bool denied = seeded && cin_reconcile_diagnostic(root, store, dep_stat, true,
+        "includes_reconcile stage=sql_setup sqlite=23");
+    printf("codeindex_incremental: reconcile diagnostic metadata=%d sqlite_auth=%d\n",
+           drift, denied);
+    seeded = seeded && drift && denied;
+#endif
     struct ci_merkle_leaf leaf = {0};
     (void)snprintf(leaf.path, sizeof leaf.path, "lib/net/src/fault.c");
     uint8_t digest[32] = {0};

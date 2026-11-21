@@ -261,17 +261,32 @@ static bool reconcile_include_rows(const char *root, struct ci_store *staged,
               sqlite3_prepare_v2(db,
                   "INSERT OR IGNORE INTO include_expected(source,dep_path)"
                   " VALUES(?1,?2)", -1, &insert, NULL) == SQLITE_OK;
+    if (!ok) LOG_ERROR("codeindex", "includes_reconcile stage=sql_setup sqlite=%d",
+                       sqlite3_errcode(db));
     struct include_expected_edges expected = {.insert = insert, .ok = ok};
-    if (ok)
-        ok = ci_deps_scan_roots(root, include_expected_edge, &expected, parsed_root, parsed_stat) &&
-             expected.ok;
+    if (ok) {
+        bool scanned = ci_deps_scan_roots(root, include_expected_edge, &expected, parsed_root, parsed_stat);
+        if (!scanned) LOG_ERROR("codeindex", "includes_reconcile stage=depfile_scan");
+        else if (!expected.ok) LOG_ERROR("codeindex", "includes_reconcile stage=sql_insert sqlite=%d",
+                                         sqlite3_errcode(db));
+        ok = scanned && expected.ok;
+    }
     if (insert) sqlite3_finalize(insert);
-    if (ok)
+    if (ok) {
         ok = sqlite3_exec(db, rewrite_sql, NULL, NULL, NULL) == SQLITE_OK;
-    if (ok) ok = include_rows_match(db, compare_sql);
+        if (!ok) LOG_ERROR("codeindex", "includes_reconcile stage=sql_rewrite sqlite=%d",
+                           sqlite3_errcode(db));
+    }
+    if (ok) {
+        ok = include_rows_match(db, compare_sql);
+        if (!ok) LOG_ERROR("codeindex", "includes_reconcile stage=compare");
+    }
     if (sqlite3_exec(db, "DROP TABLE IF EXISTS temp.include_expected", NULL,
-                     NULL, NULL) != SQLITE_OK)
+                     NULL, NULL) != SQLITE_OK) {
+        LOG_ERROR("codeindex", "includes_reconcile stage=sql_cleanup sqlite=%d",
+                  sqlite3_errcode(db));
         ok = false;
+    }
     return ok;
 }
 
@@ -290,10 +305,14 @@ bool ci_reconcile_includes(const char *root, struct ci_store *staged,
                            const uint8_t expected_stat[32])
 {
     uint8_t dep_root[32], dep_stat[32];
-    return reconcile_include_rows(root, staged, dep_root, dep_stat) &&
-           memcmp(dep_stat, expected_stat, 32) == 0 &&
-           ci_store_meta_set(staged, "dep_root_sha3", dep_root, 32) &&
-           include_stamp_edge_root(staged);
+    if (!reconcile_include_rows(root, staged, dep_root, dep_stat)) return false;
+    if (memcmp(dep_stat, expected_stat, 32) != 0)
+        LOG_FAIL("codeindex", "includes_reconcile stage=depfile_metadata_mismatch");
+    if (!ci_store_meta_set(staged, "dep_root_sha3", dep_root, 32))
+        LOG_FAIL("codeindex", "includes_reconcile stage=depfile_root_stamp");
+    if (!include_stamp_edge_root(staged))
+        LOG_FAIL("codeindex", "includes_reconcile stage=include_root_stamp");
+    return true;
 }
 
 
