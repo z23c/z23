@@ -149,9 +149,9 @@ bool node_db_backup_before_breaking_migration(struct node_db *ndb,
  * Process-local; mirrors disk_monitor_set_free_bytes_for_test(). */
 void node_db_backup_set_free_bytes_override_for_test(int64_t bytes);
 
-/* Read exactly one four-byte BLOB schema marker from an open handle. */
-int node_db_read_schema_marker(sqlite3 *db, int32_t *version_out,
-                               const char **detail_out);
+/* Read the runtime marker and current-version ledger in one snapshot. */
+bool node_db_read_runtime_schema(sqlite3 *db, int32_t *version,
+                                 const char **detail);
 
 /* Existing-file schema preflight. This runs before database.c opens a
  * write-capable handle or applies journal_mode=WAL. FRESH includes a missing

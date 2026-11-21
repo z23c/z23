@@ -409,7 +409,7 @@ static bool schema_marker_read_blob(sqlite3_stmt *stmt, int32_t *version)
  * *detail_out describing the failure otherwise. *version_out is set only
  * for an unsupported marker value, which the caller reports verbatim; every
  * other failure leaves it at the caller's initial 0. */
-int node_db_read_schema_marker(sqlite3 *db, int32_t *version_out,
+static int node_db_read_schema_marker(sqlite3 *db, int32_t *version_out,
                                const char **detail_out)
 {
     sqlite3_stmt *stmt = NULL;
@@ -452,6 +452,25 @@ int node_db_read_schema_marker(sqlite3 *db, int32_t *version_out,
     }
     *version_out = version;
     return SQLITE_OK;
+}
+
+/* A fresh runtime handle has no transaction. Keep the marker and its
+ * current-version ledger check in one SQLite read snapshot. */
+bool node_db_read_runtime_schema(sqlite3 *db, int32_t *version,
+                                 const char **detail)
+{
+    if (sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) {
+        *detail = "SCHEMA_VERSION_UNKNOWN: cannot start schema read snapshot";
+        return false;
+    }
+    bool ok = node_db_read_schema_marker(db, version, detail) == SQLITE_OK;
+    if (ok && *version == NODE_DB_MAX_SCHEMA)
+        ok = migration_ledger_consistent(db, *version, detail);
+    if (sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) {
+        *detail = "SCHEMA_VERSION_UNKNOWN: cannot close schema read snapshot";
+        return false;
+    }
+    return ok;
 }
 
 static struct node_db_schema_preflight inspect_schema(sqlite3 *db)

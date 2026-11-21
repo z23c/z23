@@ -1123,8 +1123,7 @@ static bool node_db_runtime_reopen_schema_ok(struct node_db *ndb,
 {
     int32_t schema = 0;
     const char *detail = NULL;
-    bool valid = node_db_read_schema_marker(ndb->db, &schema, &detail) ==
-                 SQLITE_OK;
+    bool valid = node_db_read_runtime_schema(ndb->db, &schema, &detail);
     if (valid && schema == NODE_DB_MAX_SCHEMA)
         return true;
     if (valid && schema > NODE_DB_MAX_SCHEMA) {
@@ -1145,7 +1144,8 @@ static bool node_db_runtime_reopen_schema_ok(struct node_db *ndb,
         }
     }
     LOG_WARN("db", "lightweight runtime reopen refused schema=%d "
-             "expected=%d reason=%s", schema, NODE_DB_MAX_SCHEMA, reason);
+             "expected=%d reason=%s detail=%s", schema, NODE_DB_MAX_SCHEMA,
+             reason, detail ? detail : "none");
     return false;
 }
 

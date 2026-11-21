@@ -2490,6 +2490,8 @@ static int t_runtime_reopen_follows_compat_floor(void)
         {"rt_ahead1_schema_badlen", 1, 0, 0, DB_MIG_MUT_SCHEMA_BADLEN,
          NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
         {"rt_exact_max", 0, 0, 0, DB_MIG_MUT_NONE, NODE_DB_SCHEMA_PREFLIGHT_SUPPORTED, true},
+        {"rt_exact_ledger_above", 0, 0, 0, DB_MIG_MUT_LEDGER_ABOVE,
+         NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
         {"rt_exact_schema_badlen", 0, 0, 0, DB_MIG_MUT_SCHEMA_BADLEN,
          NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, false},
         {"rt_exact_schema_short", 0, 0, 0, DB_MIG_MUT_SCHEMA_SHORT,
