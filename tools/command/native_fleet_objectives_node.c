@@ -18,6 +18,7 @@
 #include "controllers/native_handler_body.h"
 #include "controllers/status_native_handlers.h"
 #include "json/json.h"
+#include "util/boot_phase.h"
 #include "util/boot_status.h"
 
 #include <stdio.h>
@@ -241,6 +242,24 @@ struct zcl_objective_value zcl_objectives_node_tip_lag_blocks(
     return v;
 }
 
+/* The last entry runs through beacon capture and is not a completed
+ * transition interval. Earlier entries name the transition they reach. */
+static void obj_node_boot_interval(struct zcl_objective_value *v,
+                                   const struct boot_status_snapshot *snap)
+{
+    int32_t best = -1;
+    for (int32_t i = 0; i + 1 < snap->stages_len; i++)
+        if (snap->stages[i].ms > 0 &&
+            (best < 0 || snap->stages[i].ms > snap->stages[best].ms))
+            best = i;
+    if (best < 0) return;
+    size_t used = strlen(v->note);
+    (void)snprintf(v->note + used, sizeof(v->note) - used,
+                   "; slowest completed interval to %s: %lld ms",
+                   boot_stage_name((enum boot_stage)snap->stages[best].stage),
+                   (long long)snap->stages[best].ms);
+}
+
 struct zcl_objective_value zcl_objectives_node_warm_restart_s(
     const struct zcl_objectives_options *options)
 {
@@ -282,5 +301,6 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
         (void)snprintf(v.note, sizeof(v.note),
                        "latest boot: started_unix=%s updated_unix=%s; source identity unavailable",
                        started, updated);
+    obj_node_boot_interval(&v, &snap);
     return v;
 }

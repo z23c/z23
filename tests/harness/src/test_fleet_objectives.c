@@ -1204,6 +1204,29 @@ static bool fox_boot_source_attribution(const char *path, const char *datadir)
            strstr(v.note, "source_id_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
 }
 
+static bool fox_boot_interval_command(const char *datadir, const char *path)
+{
+    static const char beacon[] =
+        "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\","
+        "\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,"
+        "\"started_unix\":1000,\"updated_unix\":1138,\"elapsed_s\":138,"
+        "\"source_id_sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\","
+        "\"stages\":[{\"stage\":0,\"ms\":2},{\"stage\":3,\"ms\":67588},{\"stage\":9,\"ms\":70000}]}";
+    if (!fox_write(path, beacon) || setenv("ZCL_LAND_OBJECTIVES_DATADIR", datadir, 1) != 0)
+        return false;
+    struct fox_call c;
+    fox_begin(&c);
+    bool ok = fox_run(&c);
+    const struct json_value *row = fox_row(&c, "node_warm_restart_s");
+    const char *note = fox_row_str(row, "note");
+    ok = ok && row && strstr(note, "slowest completed interval to db_open: 67588 ms") &&
+         strstr(note, "started_unix=1000") && strstr(note, "updated_unix=1138") &&
+         strstr(note, "source_id_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    fox_end(&c);
+    (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOX_NO_DATADIR, 1);
+    return ok;
+}
+
 static int fox_case_next(void)
 {
     int failures = 0;
@@ -2384,9 +2407,11 @@ int test_fleet_objectives(void)
         ASSERT(strstr(v.note, "started_unix=1000") != NULL);
         ASSERT(strstr(v.note, "updated_unix=1137") != NULL);
         ASSERT(strstr(v.note, "source identity unavailable") != NULL);
+        ASSERT(strstr(v.note, "slowest completed interval") == NULL);
         char path[1200];
         (void)snprintf(path, sizeof(path), "%s/boot_status.json", dd);
         ASSERT(fox_boot_source_attribution(path, dd));
+        ASSERT(fox_boot_interval_command(dd, path));
         ASSERT(fox_write(path, "{\"schema\":\"zcl.boot_status.v1\",\"phase\":\"serving\",\"stage\":\"ready\",\"stage_ordinal\":9,\"height\":100,\"rpc_bound\":true,\"serving\":true,\"started_unix\":0,\"updated_unix\":0,\"elapsed_s\":0}"));
         v = fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
         ASSERT(v.measured);
