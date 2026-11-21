@@ -364,31 +364,29 @@ int wcs_paths_for(const char *src, const char *out_dir, char *log,
     return 0;
 }
 
-static int entry_path(const char *src, const char *sha, char *out, size_t cap)
+int wcs_cache_entry_path(const char *src, const char *sha, char *out, size_t cap)
 {
     if (ovf(snprintf(out, cap, "%s/%s.%s", c_dir, src, sha), cap))
         return 2;
     return 0;
 }
 
-static int replay_log(const char *ent, const char *log)
+static int replay_log(FILE *in, const char *log)
 {
-    FILE *in = fopen(ent, "rb");
-    if (!in) return 1;
     FILE *out = fopen(log, "wb");
-    if (!out) { fclose(in); return 1; }
-    char header[64], buf[4096];
-    int failed = fgets(header, sizeof header, in) == NULL || !strchr(header, '\n');
+    if (!out) return 1;
+    char buf[4096];
     size_t n;
-    while (!failed && (n = fread(buf, 1, sizeof buf, in)) > 0)
-        if (fwrite(buf, 1, n, out) != n) failed = 1;
+    int failed = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { failed = 1; break; }
+    }
     if (ferror(in)) failed = 1;
-    if (fclose(in) != 0) failed = 1;
     if (fclose(out) != 0) failed = 1;
     return failed;
 }
 
-static int replay_entry(const char *ent, const char *log, const char *rc,
+static int replay_entry(FILE *in, const char *log, const char *rc,
                         int erc, int haslog)
 {
     FILE *out = fopen(rc, "w");
@@ -396,31 +394,44 @@ static int replay_entry(const char *ent, const char *log, const char *rc,
     int failed = fprintf(out, "%d\n", erc) < 0;
     if (fclose(out) != 0) failed = 1;
     if (failed) return 1;
-    if (haslog) return replay_log(ent, log);
+    if (haslog) return replay_log(in, log);
     out = fopen(log, "w");
     if (!out) return 1;
     return fclose(out) != 0;
 }
 
-static int entry_valid(const char *ent, int *erc, int *haslog)
+static bool entry_header(FILE *in, int *erc, int *haslog)
 {
-    FILE *f = fopen(ent, "rb");
-    if (!f) return 0;
     char line[64];
-    int ok = fgets(line, sizeof line, f) != NULL;
-    if (fclose(f) != 0) ok = 0;
-    if (!ok) return 0;
+    if (!fgets(line, sizeof line, in)) return false;
     char *sp = strchr(line, ' ');
-    if (!sp) return 0;
+    if (!sp) return false;
     *sp = '\0';
     const char *hl = sp + 1;
-    if (!line[0]) return 0;
+    if (!line[0]) return false;
     for (const char *c = line; *c; c++)
-        if (*c < '0' || *c > '9') return 0;
+        if (*c < '0' || *c > '9') return false;
     *erc = atoi(line);
-    if (!(hl[0] == '0' || hl[0] == '1') || hl[1] != '\n') return 0;
+    if (!(hl[0] == '0' || hl[0] == '1') || hl[1] != '\n' || hl[2] != '\0') return false;
     *haslog = hl[0] - '0';
-    return 1;
+    return true;
+}
+
+/* 0 is a validated open stream, 1 a malformed or absent entry, 2 an I/O error. */
+static int entry_open(const char *ent, FILE **stream, int *erc, int *haslog)
+{
+    FILE *in = fopen(ent, "rb");
+    if (!in) return errno == ENOENT ? 1 : 2;
+    bool valid = entry_header(in, erc, haslog);
+    int ch = valid ? fgetc(in) : EOF;
+    int error = ferror(in);
+    if (valid && !error) {
+        valid = *haslog ? ch != EOF : ch == EOF;
+        if (valid && ch != EOF && ungetc(ch, in) == EOF) error = 1;
+    }
+    if (valid && !error) { *stream = in; return 0; }
+    if (fclose(in) != 0) error = 1;
+    return error ? 2 : 1;
 }
 
 static int read_list_file(const char *path, char rows[][WCS_PATH], int max)
@@ -480,9 +491,12 @@ static int plan_row(const char *row, const char *sha, const char *out_dir,
                     int flat, char miss[][WCS_PATH], int *nmiss)
 {
     char ent[WCS_PATH], log[WCS_PATH], rc[WCS_PATH], name[WCS_PATH];
-    entry_path(row, sha, ent, sizeof ent);
+    if (wcs_cache_entry_path(row, sha, ent, sizeof ent) != 0) return 2;
     int erc = 0, haslog = 0;
-    if (!entry_valid(ent, &erc, &haslog)) {
+    FILE *in = NULL;
+    int opened = entry_open(ent, &in, &erc, &haslog);
+    if (opened == 2) return 2;
+    if (opened == 1) {
         if (*nmiss >= WCS_TUS || wcs_copy(miss[*nmiss], WCS_PATH, row)) {
             fprintf(stderr, "%s: miss list exceeds %d rows\n", k_wcs_gate,
                     WCS_TUS);
@@ -492,9 +506,11 @@ static int plan_row(const char *row, const char *sha, const char *out_dir,
         return 1;
     }
     if (flat) flat_name(row, name, sizeof name);
-    else if (wcs_copy(name, sizeof name, row)) return 2;
-    if (wcs_paths_for(name, out_dir, log, sizeof log, rc, sizeof rc) != 0 ||
-        replay_entry(ent, log, rc, erc, haslog) != 0) {
+    else if (wcs_copy(name, sizeof name, row)) { fclose(in); return 2; }
+    int failed = wcs_paths_for(name, out_dir, log, sizeof log, rc, sizeof rc) != 0;
+    if (!failed) failed = replay_entry(in, log, rc, erc, haslog);
+    if (fclose(in) != 0) failed = 1;
+    if (failed) {
         fprintf(stderr, "%s: cannot replay cache entry for %s\n", k_wcs_gate, row);
         return 2;
     }
@@ -509,7 +525,7 @@ static int plan_mkdir_for(const char *path)
     if (!sl) return 0;
     if (ovf(snprintf(d, sizeof d, "%.*s", (int)(sl - path), path), sizeof d))
         return 2;
-    entry_path(d, "x", ent, sizeof ent);
+    wcs_cache_entry_path(d, "x", ent, sizeof ent);
     char *pe = strrchr(ent, '/');
     if (pe) {
         *pe = '\0';
@@ -579,7 +595,7 @@ int wcs_cache_store(const char *src, int rc, const char *log)
     char sha[WCS_SHA], ent[WCS_PATH], tmp[WCS_PATH];
     wcs_sha_file(src, sha);
     if (strlen(sha) != 64) return 1;
-    if (entry_path(src, sha, ent, sizeof ent) != 0) return 1;
+    if (wcs_cache_entry_path(src, sha, ent, sizeof ent) != 0) return 1;
     char *sl = strrchr(ent, '/');
     if (sl) { *sl = '\0'; wcs_mkdirs_p(ent); *sl = '/'; }
     struct stat st;
