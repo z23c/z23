@@ -773,12 +773,24 @@ static bool dlx_pc_purpose_order(const char *detail, bool fail)
     return ok;
 }
 
+static bool dlx_pc_inventory_order_log(const struct dlx_rig *rig, bool selected)
+{
+    char path[1400], log[2048] = "";
+    size_t n = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig->clone);
+    if (!dlx_slurp(path, log, sizeof(log) - 1, &n)) return false;
+    log[n] = 0;
+    const char *inv = strstr(log, "check-capability-inventory-generated\n");
+    const char *kpi = strstr(log, "check-kpi-floor\n");
+    return kpi && (!!inv == selected) && (!inv || inv < kpi);
+}
+
+
 static bool dlx_pc_inventory_before_kpi(bool selected)
 {
     struct dlx_rig rig;
     struct dlx_call c;
-    char row[1024], path[1400], log[2048] = "";
-    size_t n = 0;
+    char row[1024];
     const char *inventory = "check-capability-inventory-generated";
     const char *script = "#!/bin/sh\n"
         "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
@@ -796,12 +808,7 @@ static bool dlx_pc_inventory_before_kpi(bool selected)
     ok = dlx_run(&c) && ok;
     ok = ok && (selected ? (!dlx_ok(&c) && !strcmp(dlx_str(&c, "gate"), "check-kpi-floor") && dlx_queue_empty())
                          : (dlx_ok(&c) && dlx_queue_has_one()));
-    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig.clone);
-    ok = dlx_slurp(path, log, sizeof(log) - 1, &n) && ok;
-    log[n] = 0;
-    const char *inv = strstr(log, "check-capability-inventory-generated\n");
-    const char *kpi = strstr(log, "check-kpi-floor\n");
-    ok = ok && kpi && (!!inv == selected) && (!inv || inv < kpi);
+    ok = dlx_pc_inventory_order_log(&rig, selected) && ok;
     dlx_end(&c);
     dlx_restore();
     return ok;
