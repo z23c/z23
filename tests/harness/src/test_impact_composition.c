@@ -8670,10 +8670,17 @@ static int test_ic_proof_select_range_matches_proof_selector(void)
         ASSERT(strcmp(sel.reason, "changed-input-structure") == 0);
         ASSERT(sel.count == proof_count);
         ASSERT(strcmp(lane, proof) == 0);
+        ASSERT(strcmp(sel.gated, gated) == 0);
         ASSERT(sel.files == 1);
         /* The detail names the row that widened it and how it changed. */
         ASSERT(strstr(sel.detail, "kind=A") != NULL);
         ASSERT(strstr(sel.detail, "path=optional.h") != NULL);
+        char tiny[1];
+        struct zcl_dev_proof_range_selection short_sel = {
+            .groups = tiny, .groups_size = sizeof(tiny)};
+        ASSERT(!zcl_dev_proof_select_range(IC_CHANGED_REPO, two, add_h,
+                                           &short_sel, why, sizeof(why)));
+        ASSERT(strcmp(why, "test_selection_invalid_or_truncated") == 0);
 
         /* Content-only range in a tree with no code index: the plan cannot
          * close, so the selection is the universal set, never a narrow one. */

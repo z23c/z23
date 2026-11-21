@@ -9412,17 +9412,23 @@ static void dp_select_close(const char *root,
                             struct zcl_devloop_plan *plan,
                             struct zcl_dev_proof_range_selection *out)
 {
+    /* Structural changes already require the full catalog; no closure is needed. */
+    if (set->structural_path) {
+        (void)dp_changed_set_widen(set, plan);
+        out->reason = "changed-input-structure";
+        dp_select_structure_detail(out, set);
+        return;
+    }
     const char *refusal = "";
     bool admitted = dp_changed_set_close(root, set, plan, &refusal);
     if (!admitted && zcl_devloop_plan_files(set->files, set->count, plan))
         admitted = dp_changed_set_close(root, set, plan, &refusal);
-    bool widened = dp_changed_set_widen(set, plan);
+    (void)dp_changed_set_widen(set, plan);
     if (admitted) {
-        out->reason = dp_selection_reason(plan, widened, set->split_count > 0,
+        out->reason = dp_selection_reason(plan, false, set->split_count > 0,
                                          set->fresh_count > 0,
                                          set->deleted_count > 0);
         dp_select_capacity_detail(out, plan);
-        if (widened) dp_select_structure_detail(out, set);
         return;
     }
     (void)zcl_devloop_plan_refusal_text(plan, out->detail,
@@ -9431,8 +9437,7 @@ static void dp_select_close(const char *root,
         (void)snprintf(out->detail, sizeof(out->detail), "%s", refusal);
     plan->closure_universal = true;
     plan->docs_only = false;
-    out->reason = widened ? "changed-input-structure" : "plan-not-closed";
-    if (widened) dp_select_structure_detail(out, set);
+    out->reason = "plan-not-closed";
 }
 
 /* Route screen: the plan's path-floor groups (the shared-rule route of every
