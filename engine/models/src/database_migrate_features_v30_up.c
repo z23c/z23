@@ -115,14 +115,13 @@ static bool db_migrate_v32_zslp_ledger(struct node_db *ndb)
 
 static bool db_migrate_v33_parity_samples(struct node_db *ndb)
 {
-    bool ok = true;
     /* v33: parity_samples — bounded, retained history of the mirror's
      * per-tick consensus-parity comparison against the co-located
      * zclassicd oracle (models/parity_sample.h). One row per
      * legacy_mirror_sync comparison outcome. Purely observational —
      * never consulted by consensus. Bounded retention: the mirror
      * prunes to the newest N rows. */
-    ok = ok && node_db_exec(ndb,
+    return node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS parity_samples ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "ts INTEGER NOT NULL,"
@@ -131,14 +130,13 @@ static bool db_migrate_v33_parity_samples(struct node_db *ndb)
         "heights_equal_at INTEGER NOT NULL DEFAULT -1,"
         "hash_equal INTEGER NOT NULL DEFAULT 0 CHECK(hash_equal IN (0,1)),"
         "oracle_reachable INTEGER NOT NULL DEFAULT 0 "
-        "  CHECK(oracle_reachable IN (0,1)))");
-    ok = ok && node_db_exec(ndb,
+        "  CHECK(oracle_reachable IN (0,1)))") &&
+        node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_parity_samples_ts "
         "ON parity_samples(ts DESC)");
 
     ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('033')");
-    return ok;
 }
 
 static bool db_migrate_v34_block_index_envelope(struct node_db *ndb)
