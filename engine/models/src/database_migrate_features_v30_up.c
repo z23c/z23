@@ -152,26 +152,39 @@ static void db_migrate_v34_block_index_envelope(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('034')");
 }
 
-static void db_migrate_v35_wallet_labels(struct node_db *ndb)
+static bool db_migrate_v35_wallet_labels(struct node_db *ndb, int floor)
 {
+    if (!node_db_begin(ndb)) return false;
+    bool ok = true;
     /* v35: wallet_labels — the address book. One row per labeled
      * address, keyed by address so a re-label overwrites in place;
      * backs setlabel / getaddressesbylabel / listlabels and
      * core.wallet.address.label(.by-label). A plain annotation
      * overlay: never part of the wallet keystore, never consulted by
      * consensus. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS wallet_labels ("
         "address TEXT PRIMARY KEY,"
         "label TEXT NOT NULL DEFAULT '',"
         "updated_at INTEGER NOT NULL DEFAULT 0)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_wallet_labels_label "
         "ON wallet_labels(label)");
 
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('035')");
+    int32_t version = 35, compat_floor = (int32_t)floor;
+    ok = ok && node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+         node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
+    if (ok) ok = node_db_commit(ndb);
+    if (!ok) {
+        if (!node_db_rollback(ndb))
+            LOG_ERROR("db", "migrate: v35 wallet labels and rollback failed");
+        else
+            LOG_ERROR("db", "migrate: v35 wallet labels failed; rolled back");
+    }
+    return ok;
 }
 
 static void db_migrate_v36_agent_sessions(struct node_db *ndb)
@@ -708,7 +721,6 @@ static void (*const k_db_migrate_v30_steps[])(struct node_db *) = {
     [32 - 30] = db_migrate_v32_zslp_ledger,
     [33 - 30] = db_migrate_v33_parity_samples,
     [34 - 30] = db_migrate_v34_block_index_envelope,
-    [35 - 30] = db_migrate_v35_wallet_labels,
     [36 - 30] = db_migrate_v36_agent_sessions,
     [37 - 30] = db_migrate_v37_zid_identities,
     [38 - 30] = db_migrate_v38_zid_domains,
@@ -744,7 +756,10 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
     int next = db_migrate_v30_next_version(current_ver);
 
     while (next != 0) {
-        if (next == 47) {
+        if (next == 35) {
+            if (!db_migrate_v35_wallet_labels(ndb, floor_ver))
+                return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+        } else if (next == 47) {
             if (!db_migrate_v47_vault_intents(ndb, floor_ver))
                 return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         } else {

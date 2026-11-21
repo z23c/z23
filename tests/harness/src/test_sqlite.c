@@ -4816,6 +4816,104 @@ static int v47_refusal_tests(void)
     return !create || !ledger;
 }
 
+enum v35_fault { V35_PREPARE, V35_INDEX, V35_LEDGER };
+struct v35_fault_state { enum v35_fault mode; bool reached; int denied; };
+
+static int v35_authorize(void *ctx, int action, const char *name,
+                         const char *b, const char *c, const char *d)
+{
+    struct v35_fault_state *f = ctx;
+    (void)b; (void)c; (void)d;
+    if (action == SQLITE_CREATE_INDEX && name &&
+        strcmp(name, "idx_wallet_labels_label") == 0) {
+        f->reached = true;
+        if (f->mode != V35_LEDGER) { f->denied++; return SQLITE_DENY; }
+    }
+    if (f->reached && action == SQLITE_INSERT && name &&
+        ((f->mode == V35_PREPARE && strcmp(name, "node_state") == 0) ||
+         (f->mode == V35_LEDGER && strcmp(name, "schema_migrations") == 0))) {
+        f->denied++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool v35_prepare(struct node_db *ndb)
+{
+    memset(ndb, 0, sizeof(*ndb));
+    if (sqlite3_open(":memory:", &ndb->db) != SQLITE_OK) return false;
+    ndb->open = true;
+    if (!create_schema(ndb) || !node_db_exec(ndb,
+        "CREATE TABLE v35_sentinel(value TEXT);INSERT INTO v35_sentinel VALUES('keep')"))
+        return false;
+    struct v35_fault_state prep = {.mode = V35_PREPARE};
+    if (sqlite3_set_authorizer(ndb->db, v35_authorize, &prep) != SQLITE_OK) return false;
+    int rc = node_db_migrate(ndb, NULL);
+    if (sqlite3_set_authorizer(ndb->db, NULL, NULL) != SQLITE_OK) return false;
+    return rc < 0 && prep.denied > 0 && node_db_schema_version(ndb) == 34 &&
+        node_db_exec(ndb, "DROP TABLE IF EXISTS wallet_labels;"
+                     "DELETE FROM schema_migrations WHERE version='035';"
+                     "CREATE TABLE wallet_labels(address TEXT PRIMARY KEY,"
+                     "label TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT 0);"
+                     "INSERT INTO wallet_labels VALUES('fixture-address','kept-label',17)");
+}
+
+static bool v35_rows_preserved(sqlite3 *db)
+{
+    return v47_scalar(db, "SELECT count(*) FROM v35_sentinel WHERE value='keep'") == 1 &&
+        v47_scalar(db, "SELECT count(*) FROM wallet_labels WHERE address='fixture-address' "
+                       "AND label='kept-label' AND updated_at=17") == 1;
+}
+
+static bool v35_refusal_checked(struct node_db *ndb, int floor, int denied, int rc)
+{
+    return denied > 0 && rc == -1 && node_db_schema_version(ndb) == 34 &&
+        node_db_schema_compat_floor(ndb) == floor &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM schema_migrations WHERE version='035'") == 0 &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM sqlite_master WHERE name='idx_wallet_labels_label'") == 0 &&
+        sqlite3_get_autocommit(ndb->db) && v35_rows_preserved(ndb->db);
+}
+
+static bool v35_retry_checked(struct node_db *ndb)
+{
+    return node_db_migrate(ndb, NULL) > 0 &&
+        node_db_schema_version(ndb) == NODE_DB_SCHEMA_LATEST &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM schema_migrations WHERE version='035'") == 1 &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM sqlite_master WHERE name='idx_wallet_labels_label'") == 1 &&
+        v35_rows_preserved(ndb->db);
+}
+
+static bool v35_refusal_case(enum v35_fault mode)
+{
+    struct node_db ndb = {0};
+    bool ok = v35_prepare(&ndb);
+    if (!ok) { if (ndb.db) sqlite3_close(ndb.db); return false; }
+    int floor = node_db_schema_compat_floor(&ndb);
+    struct v35_fault_state fault = {.mode = mode};
+    ok = sqlite3_set_authorizer(ndb.db, v35_authorize, &fault) == SQLITE_OK;
+    int rc = ok ? node_db_migrate(&ndb, NULL) : 0;
+    if (sqlite3_set_authorizer(ndb.db, NULL, NULL) != SQLITE_OK) ok = false;
+    printf("v35 evidence mode=%d denied=%d rc=%d schema=%d floor=%d ledger35=%d\n",
+           mode, fault.denied, rc, node_db_schema_version(&ndb),
+           node_db_schema_compat_floor(&ndb),
+           v47_scalar(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='035'"));
+    ok = ok && v35_refusal_checked(&ndb, floor, fault.denied, rc);
+    if (ok) ok = v35_retry_checked(&ndb);
+    sqlite3_close(ndb.db);
+    return ok;
+}
+
+static int v35_refusal_tests(void)
+{
+    printf("v35 index refusal preserves labels and retries... ");
+    bool index = v35_refusal_case(V35_INDEX);
+    printf("%s\n", index ? "OK" : "FAIL");
+    printf("v35 ledger refusal preserves labels and retries... ");
+    bool ledger = v35_refusal_case(V35_LEDGER);
+    printf("%s\n", ledger ? "OK" : "FAIL");
+    return !index || !ledger;
+}
+
 static int normal_mode_deny(void *ctx, int action, const char *a, const char *b,
                             const char *c, const char *d)
 {
@@ -4839,7 +4937,7 @@ static bool normal_mode_refusal_case(int action)
 
 
 int test_sqlite(void) {
-    int failures = v47_refusal_tests();
+    int failures = v47_refusal_tests() + v35_refusal_tests();
     if (!normal_mode_refusal_case(SQLITE_PRAGMA) || !normal_mode_refusal_case(SQLITE_CREATE_INDEX)) failures++;
 
 #if defined(_WIN32)
