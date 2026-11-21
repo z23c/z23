@@ -94,12 +94,11 @@ int node_db_sync_tip_witness_needs_rescan(void)
  * height h, or h when none must. A note that needs a block below the reducer's
  * oldest frontier cannot be replayed and must not hold the others back: it is
  * counted as needing a rescan. */
-static int tip_witness_replay_start(struct node_db *ndb, int h)
+static int tip_witness_replay_start(struct node_db *ndb, int h,
+                                    const struct db_sapling_note *notes, int nw)
 {
     int first = tip_witness_first_replayable();
     int unreplayable = 0;
-    struct db_sapling_note *notes = NULL;
-    int nw = db_sapling_note_list_unspent_alloc(ndb, &notes);
     int start = h;
     for (int i = 0; i < nw; i++) {
         uint8_t *blob = NULL;
@@ -117,12 +116,11 @@ static int tip_witness_replay_start(struct node_db *ndb, int h)
         else if (need >= 0 && need < start)
             start = need;
     }
-    free(notes);
     int before = atomic_exchange(&g_tip_witness_needs_rescan, unreplayable);
     if (unreplayable > 0 && before != unreplayable)
         LOG_WARN("sync", "tip witnesses: %d wallet note(s) need a rescan "
                  "(history below h=%d is not held)", unreplayable, first);
-    return nw < 0 ? h : start;
+    return start;
 }
 
 static bool tip_witness_apply_block(struct node_db *ndb, struct wallet *wallet,
@@ -255,10 +253,9 @@ enum tip_witness_prep { TIP_PREP_FAILED, TIP_PREP_PARTIAL, TIP_PREP_READY };
 static enum tip_witness_prep tip_witness_prepare(
     struct node_db *ndb, struct wallet *wallet,
     const struct block_index *pindex, const struct sync_block_reader *rd,
-    struct incremental_merkle_tree *tree)
+    int start, struct incremental_merkle_tree *tree)
 {
     int h = pindex->nHeight;
-    int start = tip_witness_replay_start(ndb, h);
     int count = h - start < TIP_WITNESS_REPLAY_MAX ? h - start
                                                    : TIP_WITNESS_REPLAY_MAX;
     bool replayed = count > 0 &&
@@ -279,14 +276,23 @@ bool node_db_sync_advance_tip_witnesses_with(
     if (!ndb || !ndb->open || !blk || !pindex || !pindex->pprev || !rd)
         LOG_FAIL("sync", "tip witnesses: invalid args");
     int h = pindex->nHeight;
-    if (db_sapling_note_count_unspent(ndb) <= 0) {
+    int64_t t0 = GetTimeMicros();
+    struct db_sapling_note *notes = NULL;
+    int nw = db_sapling_note_list_unspent_alloc(ndb, &notes);
+    if (nw < 0) {
+        free(notes);
+        LOG_FAIL("sync", "tip witnesses: cannot read unspent notes");
+    }
+    if (nw == 0) {
+        free(notes);
         atomic_store(&g_tip_witness_needs_rescan, 0);
         return true; // raw-return-ok:no wallet notes, nothing to maintain
     }
-    int64_t t0 = GetTimeMicros();
+    int start = tip_witness_replay_start(ndb, h, notes, nw);
+    free(notes);
     struct incremental_merkle_tree tree;
     enum tip_witness_prep prep =
-        tip_witness_prepare(ndb, wallet, pindex, rd, &tree);
+        tip_witness_prepare(ndb, wallet, pindex, rd, start, &tree);
     if (prep == TIP_PREP_PARTIAL)
         return true; // raw-return-ok:partial replay; the next call continues
     if (prep == TIP_PREP_FAILED)

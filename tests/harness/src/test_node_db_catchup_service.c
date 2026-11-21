@@ -3043,6 +3043,30 @@ static int nt_check_missed_blocks(void)
     return failures;
 }
 
+static int nt_deny_note_read(void *ctx, int op, const char *table,
+                             const char *column, const char *db, const char *source)
+{
+    (void)ctx; (void)column; (void)db; (void)source;
+    return op == SQLITE_READ && table && strcmp(table, "wallet_sapling_notes") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int nt_check_note_read_failure(struct nt_run *r)
+{
+    int failures = 0;
+    NDC_CHECK("note read denial is installed",
+              sqlite3_set_authorizer(r->ndb->db, nt_deny_note_read, NULL) == SQLITE_OK);
+    bool denied_ok = nt_tip(r, NT_A7);
+    NDC_CHECK("unreadable notes fail", !denied_ok);
+    NDC_CHECK("unreadable notes preserve the rescan count",
+              node_db_sync_tip_witness_needs_rescan() == 1);
+    NDC_CHECK("note read denial is removed",
+              sqlite3_set_authorizer(r->ndb->db, NULL, NULL) == SQLITE_OK);
+    NDC_CHECK("readable notes recover and retain the rescan count",
+              nt_tip(r, NT_A7) && node_db_sync_tip_witness_needs_rescan() == 1);
+    return failures;
+}
+
 /* A note below the reducer's oldest frontier cannot be replayed. It must not
  * hold the other notes back: they reach the tip, and it is reported. */
 static int nt_check_note_below_history(void)
@@ -3056,12 +3080,14 @@ static int nt_check_note_below_history(void)
     NDC_CHECK("the newer note reaches 7", up && nt_current(&r, NT_NOTE, NT_A7));
     NDC_CHECK("the old note is reported as needing a rescan",
               up && node_db_sync_tip_witness_needs_rescan() == 1);
-    NDC_CHECK("the last note spent clears the rescan count",
+    if (up) failures += nt_check_note_read_failure(&r);
+    NDC_CHECK("the last note is spent",
               up && sqlite3_exec(ndb.db, "UPDATE wallet_sapling_notes SET "
-                                   "spent_txid=x'01'", NULL, NULL, NULL) ==
-                         SQLITE_OK &&
-              nt_tip(&r, NT_A7) &&
-              node_db_sync_tip_witness_needs_rescan() == 0);
+                                   "spent_txid=x'01'", NULL, NULL, NULL) == SQLITE_OK);
+    NDC_CHECK("reducer history is closed",
+              progress_store_close_checked() == PROGRESS_STORE_CLOSE_OK);
+    NDC_CHECK("empty notes clear the rescan count without history",
+              up && nt_tip(&r, NT_A7) && node_db_sync_tip_witness_needs_rescan() == 0);
     nt_close(&r, dir);
     return failures;
 }
