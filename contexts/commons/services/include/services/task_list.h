@@ -12,7 +12,7 @@ struct task_list {
     bool updates;
     uint32_t selected, first, focus;
     uint64_t selected_id;
-    bool menu, repaint, closing, open_editor, new_task;
+    bool menu, repaint, closing, open_editor, new_task, update_ack_error;
     char notice[128];
 };
 void task_list_init(struct task_list *list, struct task_editor *editor);

@@ -750,6 +750,79 @@ static int tl_failure_test(struct task_list *list, const char *directory)
     return failures;
 }
 
+#if defined(ZCL_TESTING)
+bool zcl_test_task_update_completed(struct task_update *update);
+
+static bool tl_wait_update_failure(struct task_list *list)
+{
+    int64_t end = platform_time_monotonic_us() + INT64_C(30000000);
+    while (!zcl_test_task_update_completed(list->update) && platform_time_monotonic_us() < end)
+        platform_sleep_ms(1);
+    return zcl_test_task_update_completed(list->update) && !task_list_poll(list).ok;
+}
+
+static int tl_update_notice_model_test(struct task_list *list)
+{
+    int failures = 0;
+    struct zcl_present_model_v1 model;
+    TE_CHECK("local notice takes precedence", task_list_model(list, &model).ok &&
+        strstr(model.summary, "Existing local action error") != NULL);
+    list->notice[0] = '\0';
+    TE_CHECK("hidden update failure is visible", task_list_model(list, &model).ok &&
+        strstr(model.summary, list->update->message) != NULL);
+    list->editor->status = TASK_EDITOR_UNSAVED;
+    TE_CHECK("draft status takes precedence over update failure", task_list_model(list, &model).ok &&
+        !strncmp(model.summary, "Unsaved changes", 15));
+    list->editor->status = TASK_EDITOR_SAVED;
+    list->update->phase = TASK_UPDATE_KEPT;
+    list->update_ack_error = true;
+    (void)snprintf(list->update->message, sizeof(list->update->message), "Program kept; notice could not be cleared.");
+    TE_CHECK("kept acknowledgment failure remains visible", task_list_model(list, &model).ok &&
+        strstr(model.summary, list->update->message) != NULL);
+    list->update->phase = TASK_UPDATE_RUNNING;
+    (void)snprintf(list->update->message, sizeof(list->update->message), "Preparing retry");
+    TE_CHECK("retry does not retain prior failure", task_list_poll(list).ok && !list->update_ack_error &&
+        task_list_model(list, &model).ok && strstr(model.summary, "notice could not be cleared") == NULL && !list->notice[0]);
+    list->update->phase = TASK_UPDATE_KEPT;
+    (void)snprintf(list->update->message, sizeof(list->update->message), "Current program is ready.");
+    TE_CHECK("successful Keep preserves Saved summary", task_list_model(list, &model).ok &&
+        !strncmp(model.summary, "Saved", 5));
+    list->update->phase = TASK_UPDATE_CANCELLED;
+    TE_CHECK("cancelled update preserves Saved summary", task_list_model(list, &model).ok &&
+        !strncmp(model.summary, "Saved", 5));
+    return failures;
+}
+
+static int tl_update_notice_test(const char *directory)
+{
+    int failures = 0;
+    struct task_editor editor = {0};
+    struct task_update update = {0};
+    struct task_list list;
+    TE_CHECK("open update notice fixture", task_editor_open(&editor, directory, "local/notice").ok &&
+        task_update_open(&update, directory, "local/notice", "/dev/null", NULL).ok);
+    task_list_init(&list, &editor);
+    list.update = &update;
+    struct zcl_present_model_v1 model;
+    TE_CHECK("synchronous update refusal is visible without polling", !task_update_try(&update, false, false).ok &&
+        update.phase == TASK_UPDATE_FAILED && !list.update_ack_error &&
+        task_list_model(&list, &model).ok && strstr(model.summary, update.message) != NULL);
+    list.updates = true;
+    (void)snprintf(list.notice, sizeof(list.notice), "Existing local action error");
+    TE_CHECK("start refused update in panel", task_update_try(&update, true, false).ok);
+    TE_CHECK("panel owns its failure without overwriting local notice", tl_wait_update_failure(&list) &&
+        update.phase == TASK_UPDATE_FAILED && update.message[0] &&
+        !strcmp(list.notice, "Existing local action error"));
+    list.updates = false;
+    TE_CHECK("start refused update outside panel", task_update_try(&update, true, false).ok);
+    TE_CHECK("hidden failure preserves local notice", tl_wait_update_failure(&list) &&
+        update.phase == TASK_UPDATE_FAILED && !strcmp(list.notice, "Existing local action error"));
+    failures += tl_update_notice_model_test(&list);
+    TE_CHECK("release update fixture", task_update_finish(&update).ok);
+    return failures;
+}
+#endif
+
 static int tl_adopt_snapshot_test(struct task_list *list, const struct task_document *newer,
     uint64_t selected_id)
 {
@@ -840,6 +913,9 @@ static int tl_acceptance(const char *directory)
         reopened.saved.state.count == editor.saved.state.count &&
         memcmp(reopened.saved.state.tasks, editor.saved.state.tasks, sizeof(editor.saved.state.tasks)) == 0);
     failures += tl_failure_test(&list, directory);
+#if defined(ZCL_TESTING)
+    failures += tl_update_notice_test(directory);
+#endif
     failures += tl_newer_snapshot_test(directory);
     TE_CHECK("list releases its save worker", task_editor_finish(&editor).ok && !editor.pending);
     return failures;

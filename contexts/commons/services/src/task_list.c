@@ -109,6 +109,16 @@ static void tl_adopt_update(struct task_list *list)
     }
 }
 
+static void tl_update_result(struct task_list *list, struct zcl_result result, bool updated)
+{
+    bool previous = list->update_ack_error;
+    if (!result.ok) list->update_ack_error = list->update->phase == TASK_UPDATE_KEPT;
+    else if (updated || list->update->pending || list->update->phase == TASK_UPDATE_RUNNING ||
+             list->update->phase == TASK_UPDATE_KEEPING || list->update->phase == TASK_UPDATE_CANCELLED)
+        list->update_ack_error = false;
+    if (previous != list->update_ack_error) list->repaint = true;
+}
+
 struct zcl_result task_list_poll(struct task_list *list)
 {
     if (!list || !list->editor) return ZCL_ERR(-1, "task-list: durable editor required");
@@ -123,11 +133,15 @@ struct zcl_result task_list_poll(struct task_list *list)
         bool updated = false;
         result = task_update_poll(list->update, &updated);
         list->repaint |= updated;
-        if (!result.ok) return tl_failure(list, result);
+        tl_update_result(list, result, updated);
+        if (!result.ok) { list->repaint = true; return result; }
         if (list->update->active_valid && !list->update->pending) {
             tl_adopt_update(list);
             if (list->update->active_document.state.revision < list->editor->saved.state.revision) {
-                return task_update_refresh(list->update);
+                result = task_update_refresh(list->update);
+                tl_update_result(list, result, false);
+                if (!result.ok) list->repaint = true;
+                return result;
             }
         }
     }
@@ -255,6 +269,14 @@ static void tl_model_actions(const struct task_list *list, struct zcl_present_mo
         (void)snprintf(model->actions[3].label, sizeof(model->actions[3].label), "Updates");
 }
 
+static bool tl_update_ack_error_visible(const struct task_list *list)
+{
+    return !list->updates && list->update && list->update->message[0] &&
+        list->editor->status == TASK_EDITOR_SAVED &&
+        (list->update->phase == TASK_UPDATE_FAILED ||
+         (list->update->phase == TASK_UPDATE_KEPT && list->update_ack_error));
+}
+
 struct zcl_result task_list_model(const struct task_list *list, struct zcl_present_model_v1 *model)
 {
     if (!list || !list->editor || !model) return ZCL_ERR(-1, "task-list: visual owner and output required");
@@ -268,6 +290,8 @@ struct zcl_result task_list_model(const struct task_list *list, struct zcl_prese
         char status[sizeof(model->summary)];
         (void)snprintf(status, sizeof(status), "%s", model->summary);
         (void)snprintf(model->summary, sizeof(model->summary), "%.128s: %.127s", status, list->notice);
+    } else if (tl_update_ack_error_visible(list)) {
+        (void)snprintf(model->summary, sizeof(model->summary), "%.255s", list->update->message);
     } else if (!count && list->editor->status == TASK_EDITOR_SAVED)
         (void)snprintf(model->summary, sizeof(model->summary), "Saved. No tasks yet - choose New task.");
     tl_model_rows(list, model);
