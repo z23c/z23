@@ -2248,13 +2248,18 @@ NODE_C23_OBJ_DIR = $(NODE_C23_OBJ_ROOT)/epochs/$(NODE_C23_COMPILE_EPOCH)
 # input order. patsubst preserves it.
 NODE_C23_SRCS = $(NODE_ENTRY_SRCS) $(ALL_SRCS)
 
-# The windows-cross-syntax lint gate grades exactly the TUs the release
-# node binary compiles, not a _WIN32-token grep guess. One .PHONY print
-# target per line keeps the list script-consumable without a second
-# source of truth.
-.PHONY: print-node-c23-srcs
+# The windows-cross-syntax lint gate grades exactly the Windows release TUs.
+# Share one explicit Windows print query per driver invocation; a standalone
+# gate without this supplied file retains its own direct query.
+WCS_NODE_C23_SRCS_FILE = $(abspath $(BUILD_DIR)/gen/node-c23-srcs.txt)
+.PHONY: print-node-c23-srcs node-c23-srcs-file
 print-node-c23-srcs:
 	@printf '%s\n' $(NODE_C23_SRCS)
+node-c23-srcs-file:
+	@mkdir -p "$(dir $(WCS_NODE_C23_SRCS_FILE))"
+	@$(if $(ZCL_MAKE_NO_EXEC),:,set -e; tmp=$$(mktemp "$(WCS_NODE_C23_SRCS_FILE).XXXXXX"); trap 'rm -f "$$tmp"' EXIT HUP INT TERM; $(MAKE) -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs > "$$tmp"; test -s "$$tmp"; mv -f "$$tmp" "$(WCS_NODE_C23_SRCS_FILE)")
+check-windows-cross-syntax lint lint-fast lint-changed lint-land lint-preflight lint-fast-preflight: node-c23-srcs-file
+check-windows-cross-syntax lint lint-fast lint-changed lint-land lint-preflight lint-fast-preflight: export ZCL_WCS_NODE_C23_SRCS_FILE := $(WCS_NODE_C23_SRCS_FILE)
 NODE_C23_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(NODE_C23_SRCS))
 NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.$(BUILD_INVOCATION_ID).rsp
 # The external package verifier shares the node's exact C23 compile profile

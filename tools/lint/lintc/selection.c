@@ -201,8 +201,7 @@ static void make_child(const char *root, int out_fd)
 static int read_lines_c(int fd, struct strv *out)
 {
     FILE *f = fdopen(fd, "r");
-    if (!f)
-        return 2;
+    if (!f) { close(fd); return 2; }
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
@@ -218,10 +217,30 @@ static int read_lines_c(int fd, struct strv *out)
     return rc;
 }
 
-/* The exact TU list the cross-syntax gate compiles: the Makefile's own
- * windows NODE_C23_SRCS, filtered to .c paths the same way the gate does. */
+static int units_node_c23_file(const char *path, struct strv *out, FILE *err)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(err, "select: cannot open supplied NODE_C23_SRCS file "
+                "%s: %s\n", path, strerror(errno));
+        return 2;
+    }
+    int rc = read_lines_c(fd, out);
+    if (rc != 0 || out->n == 0) {
+        fprintf(err, "select: supplied NODE_C23_SRCS file %s is "
+                "unreadable or empty\n", path);
+        return 2;
+    }
+    return 0;
+}
+
+/* The exact TU list the cross-syntax gate compiles: the supplied Windows
+ * NODE_C23_SRCS file or child-Make query, filtered to .c paths identically. */
 static int units_node_c23(const char *root, struct strv *out, FILE *err)
 {
+    const char *supplied = getenv("ZCL_WCS_NODE_C23_SRCS_FILE");
+    if (supplied && *supplied)
+        return units_node_c23_file(supplied, out, err);
     int p[2];
     if (pipe(p) != 0)
         return 2;

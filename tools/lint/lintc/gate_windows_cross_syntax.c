@@ -1,16 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: gate check-windows-cross-syntax — syntax-only mingw sweep of
- * every translation unit the release node binary compiles (NODE_C23_SRCS
- * via `make print-node-c23-srcs`). Ported from
- * tools/lint/check_windows_cross_syntax.sh (deleted). Selftest:
- * gate_windows_cross_syntax_selftest.c. Per-TU result cache:
- * gate_windows_cross_syntax_cache.c.
- *
- * SKIP contract: mingw absent prints SKIP and exits 0 (SKIP is not a
- * pass) unless ZCL_REQUIRE_MINGW=1, which is a hard exit 2. Fail closed
- * everywhere else: missing baseline, hollow scan, or compiler
- * infrastructure failure is never a clean verdict.
+ * purpose: check-windows-cross-syntax sweeps NODE_C23_SRCS from the supplied
+ * file or direct Make fallback. Selftest/cache live in their sibling files.
+ * Mingw absence is SKIP (0) unless ZCL_REQUIRE_MINGW=1 (exit 2); every other
+ * infrastructure failure, including an unreadable supplied list, fails closed.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -86,8 +79,7 @@ int wcs_run_status(char *const argv[])
     return wcs_run_capture("/dev/null", "/dev/null", argv);
 }
 
-/* 1 when name is executable on PATH, 0 when it is absent, -1 when a PATH
- * entry is too long to probe: an error, never a quiet absence. */
+/* PATH probe: 1 present, 0 absent, -1 overlong entry (never quiet absence). */
 int wcs_have_cmd(const char *name)
 {
     if (strchr(name, '/')) return access(name, X_OK) == 0;
@@ -612,11 +604,19 @@ int wcs_finish_src_list(const char *srclist)
 static int get_src_list(void)
 {
     char raw[WCS_PATH], errp[WCS_PATH], srclist[WCS_PATH];
+    const char *supplied = getenv("ZCL_WCS_NODE_C23_SRCS_FILE");
+    if (ovf(snprintf(srclist, sizeof srclist, "%s/srcs.txt", g_wcs_work),
+            sizeof srclist))
+        return 2;
+    if (supplied && *supplied) {
+        if (read_src_raw(supplied) == 0) return wcs_finish_src_list(srclist);
+        fprintf(stderr, "%s: FATAL — cannot read supplied NODE_C23_SRCS "
+                "file '%s'\n", k_wcs_gate, supplied);
+        return 2;
+    }
     if (ovf(snprintf(raw, sizeof raw, "%s/srcs.raw", g_wcs_work), sizeof raw) ||
         ovf(snprintf(errp, sizeof errp, "%s/print-node-c23-srcs.err",
-                     g_wcs_work), sizeof errp) ||
-        ovf(snprintf(srclist, sizeof srclist, "%s/srcs.txt", g_wcs_work),
-            sizeof srclist))
+                     g_wcs_work), sizeof errp))
         return 2;
     char *mk[5] = { (char *)"make", (char *)"-s",
                     (char *)"ZCL_TARGET=windows-x86_64",
@@ -701,8 +701,8 @@ static int wcs_setup_sources(void)
 {
     if (get_src_list() != 0) return 2;
     int r = gate_require_scanned(g_wcs_nsrc, 150, k_wcs_gate,
-        "'make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs' printed no "
-        "translation units — NODE_C23_SRCS moved or the target broke");
+        "the source list named no translation units — NODE_C23_SRCS moved, "
+        "the supplied file is empty, or the Make target broke");
     if (r) return r;
     return 0;
 }

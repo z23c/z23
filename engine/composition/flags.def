@@ -2794,6 +2794,8 @@ Z23_FLAG("ZCL_WAL_MAX_BYTES", "env_runtime", "-", "-",
           "first use engine/services/src/db_maintenance.c:auto; documented at docs/RUNBOOK.md:155: Prevention:** Set ZCL_WAL_MAX_BYTES=104857600 (100MB cap, auto-checkpoint). Monitor zcl...")
 Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:auto")
+Z23_FLAG("ZCL_WCS_NODE_C23_SRCS_FILE", "env_build", "-", "-",
+          "Absolute Make-generated Windows NODE_C23_SRCS path; unset uses the direct child-Make fallback.")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
           "undocumented; first use tools/lint/lintc/gate_windows_acceptance_steps.c:auto")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_ROOT", "env_build", "-", "-",

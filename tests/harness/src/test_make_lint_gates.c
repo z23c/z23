@@ -1758,7 +1758,7 @@ static int t_lint_fast_tor_graph(void)
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
-        "fixture_make_raw() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null REPRO_NETWORK_POLICY_SELFTEST_BIN=/dev/null BUILD_EPOCH_INTEGRITY_LINT_BIN=/dev/null CHECKOUT_LOCK_SELFTEST_LINT_BIN=/dev/null \"$@\"; }\n"
+        "fixture_make_raw() { make --no-print-directory -o /dev/null -o ./stub-lint -f Makefile -f overlay.mk VENDOR_LIBS= ZCL_TOR=stub ZCL_LINT_FAST_PRECHECK=1 ZCL_LINT_SERIAL=0 ZCL_USE_CCACHE=0 MAKE_RESTARTS=1 LIB_MODULES=platform LIB_TREE_MODULES=platform ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= TEST_GROUP_LIST_BIN=/bin/echo TEST_GROUP_LIST_SRCS=/dev/null TEST_GROUP_LIST_HDRS=/dev/null TEST_GROUP_LIST_BUILD=: 'BUILD_SOURCE_RECORD=0000000000000000000000000000000000000000000000000000000000000000 1 0000000000000000000000000000000000000000000000000000000000000000' EQUIHASH_FACT_TOOL=/dev/null LINTC_TOOL=./stub-lint FILE_SIZE_POLICY_BIN=/dev/null TOOLGEN_BIN=/dev/null TOR_PROVENANCE_BIN=/dev/null HOTSWAP_ACTION_PLAN=/dev/null CAPABILITY_INVENTORY_TOOL=/dev/null ZCODE_PACKAGE_REGISTRY_CHECK_BIN=/dev/null REPRO_NETWORK_POLICY_SELFTEST_BIN=/dev/null BUILD_EPOCH_INTEGRITY_LINT_BIN=/dev/null CHECKOUT_LOCK_SELFTEST_LINT_BIN=/dev/null \"$@\"; }\n"
         "fixture_make() { fixture_make_raw -o tor-provenance-ready \"$@\"; }\n"
         "if ! fixture_make fixture-print-gates > expected 2>parse.log; then cat parse.log >&2; exit 1; fi\n"
         "if ! fixture_make lint-fast > run.log 2>&1; then cat run.log >&2; exit 1; fi\n"
@@ -1826,9 +1826,9 @@ static int t_lint_fast_tor_graph(void)
         "if [ \"$rc\" -gt 1 ] || grep -F 'mixed fast-test and dev/node build goals cannot share one Make' pair.log >/dev/null; then echo \"direct build pair refused rc=$rc\" >&2; exit 1; fi\n"
         "grep '^dev-bin:' pair.log >/dev/null; grep '^z23:' pair.log >/dev/null\n";
     static const char union_checks[] =
-        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$1\" >> \"$HOME/calls\"\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/$1-args\"\\nprintf \"%%s\\\\n\" \"${ZCL_CAP_CLOSURE_SOURCE_RECORD:-}\" > \"$HOME/$1-record\"\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"$1\" >> \"$HOME/calls\"\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/$1-args\"\\nprintf \"%%s\\\\n\" \"${ZCL_CAP_CLOSURE_SOURCE_RECORD:-}\" > \"$HOME/$1-record\"\\nprintf \"%%s\\\\n\" \"${ZCL_WCS_NODE_C23_SRCS_FILE:-}\" > \"$HOME/$1-srcs\"\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
         "chmod +x stub-lint\n"
-        "printf '%s\\n' '.PHONY: fixture-a fixture-b fixture-c' 'fixture-a fixture-b fixture-c:' '\t@printf \"%s\\\\n\" \"$@\" >> \"$(HOME)/serial-calls\"; test \"$(FAIL_GATE)\" != 1' >> overlay.mk\n"
+        "printf '%s\\n' '.PHONY: fixture-a fixture-b fixture-c' 'fixture-a fixture-b fixture-c:' '\t@test -n \"$(ZCL_WCS_NODE_C23_SRCS_FILE)\"; printf \"%s\\\\n\" \"$@\" >> \"$(HOME)/serial-calls\"; test \"$(FAIL_GATE)\" != 1' >> overlay.mk\n"
         "union_make() { fixture_make_raw -o lint-preflight-epoch-verify -o check-native-tunnel-export-binding Z23_DEV_BIN=/dev/null DEV_PACKAGE_VERIFY_BIN=/dev/null CAPABILITY_STANDALONE_OBJS= 'LINT_FAST_GATES=fixture-a fixture-b' 'LINT_PREFLIGHT_GATES=fixture-b fixture-c' 'LINT_FAST_PRECHECK_NATIVE=fixture-a fixture-b fixture-c' \"$@\"; }\n"
         "rm -f \"$HOME/calls\" \"$HOME/tor\"; union_make lint-fast-preflight > union.log 2>&1 || { cat union.log >&2; exit 1; }\n"
         "[ ! -e \"$HOME/tor\" ]\n"
@@ -1836,6 +1836,8 @@ static int t_lint_fast_tor_graph(void)
         "printf 'fixture-a\\nfixture-b\\nfixture-c\\n' > expected-union; tail -n +6 \"$HOME/run-args\" > actual-union; cmp expected-union actual-union\n"
         "grep -Fx -- '--skip=fixture-a,fixture-b,fixture-c' \"$HOME/precheck-args\" >/dev/null\n"
         "grep -F '0000000000000000' \"$HOME/run-record\" >/dev/null\n"
+        "[ \"$(cat \"$HOME/run-srcs\")\" = \"$2/build/gen/node-c23-srcs.txt\" ]\n"
+        "fixture_make ZCL_TARGET=windows-x86_64 print-node-c23-srcs > expected-node-srcs; cmp expected-node-srcs build/gen/node-c23-srcs.txt\n"
         "rm -f \"$HOME/calls\"; if FAIL_STAGE=run union_make lint-fast-preflight > union-fail.log 2>&1; then exit 1; fi\n"
         "[ \"$(grep -c '^precheck$' \"$HOME/calls\" || :)\" = 0 ]\n"
         "rm -f \"$HOME/calls\"; if FAIL_STAGE=precheck union_make lint-fast-preflight > union-precheck-fail.log 2>&1; then exit 1; fi\n"
@@ -2193,13 +2195,46 @@ static int t_worktree_prime_historical_evidence(void)
     return bad;
 }
 
+static int t_wcs_supplied_srcs(void)
+{
+    static const char script[] =
+        "set -eu; root=$1; work=$2\n"
+        "mkdir -p \"$work/bin\"\n"
+        "make -s -C \"$root\" VENDOR_LIBS= ZCL_TOR=stub ZCL_TARGET=windows-x86_64 print-node-c23-srcs > \"$work/srcs\"\n"
+        "make -s -C \"$root\" VENDOR_LIBS= ZCL_TOR=stub node-c23-srcs-file\n"
+        "cmp \"$root/build/gen/node-c23-srcs.txt\" \"$work/srcs\"\n"
+        "printf '#!/bin/sh\\nprintf called >> \"$MARKER\"\\nexit 97\\n' > \"$work/bin/make\"; chmod +x \"$work/bin/make\"\n"
+        "MARKER=\"$work/make-called\"; export MARKER\n"
+        "PATH=\"$work/bin:/usr/bin:/bin\"; export PATH\n"
+        "ZCL_MINGW_CC=\"$work/no-mingw\"; export ZCL_MINGW_CC\n"
+        "ZCL_WCS_NODE_C23_SRCS_FILE=\"$work/srcs\"; export ZCL_WCS_NODE_C23_SRCS_FILE\n"
+        "\"$root/build/bin/z23-lint\" check-windows-cross-syntax --self-test > \"$work/gate.log\" 2>&1 || { cat \"$work/gate.log\"; exit 1; }\n"
+        "printf 'engine/entry/main.c\\n' > \"$work/one-src\"\n"
+        "ZCL_WCS_NODE_C23_SRCS_FILE=\"$work/one-src\" \"$root/build/bin/z23-lint\" select --dry --base=HEAD --root=\"$root\" --objects=\"$root\" --gate=check-windows-cross-syntax --summary --no-landlock > \"$work/select.json\"\n"
+        "grep -F '\"units\":1' \"$work/select.json\" >/dev/null\n"
+        "[ ! -e \"$MARKER\" ]\n"
+        "if ZCL_WCS_NODE_C23_SRCS_FILE=\"$work/missing\" \"$root/build/bin/z23-lint\" select --dry --base=HEAD --root=\"$root\" --objects=\"$root\" --gate=check-windows-cross-syntax --summary --no-landlock > \"$work/missing-select.log\" 2>&1; then exit 1; fi\n"
+        "grep -F \"$work/missing\" \"$work/missing-select.log\" >/dev/null\n"
+        "if ZCL_WCS_NODE_C23_SRCS_FILE=\"$work/missing\" \"$root/build/bin/z23-lint\" check-windows-cross-syntax --self-test > \"$work/missing-gate.log\" 2>&1; then exit 1; fi\n"
+        "grep -F \"$work/missing\" \"$work/missing-gate.log\" >/dev/null\n"
+        ": > \"$work/empty\"\n"
+        "if ZCL_WCS_NODE_C23_SRCS_FILE=\"$work/empty\" \"$root/build/bin/z23-lint\" select --dry --base=HEAD --root=\"$root\" --objects=\"$root\" --gate=check-windows-cross-syntax --summary --no-landlock > \"$work/empty.log\" 2>&1; then exit 1; fi\n"
+        "[ ! -e \"$MARKER\" ]\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "wcs_supplied", "srcs");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "WCS supplied-source fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 int test_make_lint_gates_realroot(void)
 {
     char real_root[PATH_MAX];
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_worktree_prime_historical_evidence() + t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() +
+    return t_worktree_prime_historical_evidence() + t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() + t_wcs_supplied_srcs() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 
