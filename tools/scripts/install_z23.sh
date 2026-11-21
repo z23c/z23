@@ -241,11 +241,11 @@ INSTALL_STAGE=""
 INSTALL_STAGE_PARENT=""
 INSTALL_DOCS_SOURCE=""
 
-cleanup_install_stage() {
+cleanup_macos_incoming() {
     if [ -n "${MACOS_INCOMING:-}" ]; then
         case "$MACOS_INCOMING" in
             "${MACOS_GENERATIONS:-/invalid}"/.incoming.??????)
-                chmod u+w "$MACOS_INCOMING" 2>/dev/null || true
+                find -P "$MACOS_INCOMING" -xdev -type d -exec chmod u+w {} +
                 find "$MACOS_INCOMING" -xdev -depth -delete
                 ;;
             *)
@@ -255,6 +255,10 @@ cleanup_install_stage() {
         esac
         MACOS_INCOMING=""
     fi
+}
+
+cleanup_install_stage() {
+    cleanup_macos_incoming
     [ -n "$INSTALL_STAGE" ] || return 0
     case "$INSTALL_STAGE" in
         "$INSTALL_STAGE_PARENT"/zcl-install-z23.??????) ;;
@@ -1016,6 +1020,22 @@ macos_generation_matches() {
         && [ "$(readlink "$generation/zclassic23")" = z23 ]
 }
 
+macos_commit_generation() {
+    local stage="$1" candidate="$2" generations="$3"
+    # The basename is the generation ID; never replace a winner.
+    mv -n -- "$candidate" "$generations/" || [ -d "$candidate" ] \
+        || die "could not commit macOS release generation"
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+        [ -d "$MACOS_GENERATION" ] && [ ! -L "$MACOS_GENERATION" ] && \
+            macos_generation_matches "$stage" "$MACOS_GENERATION" \
+            || die "macOS generation $MACOS_GENERATION_ID does not match its verified manifest"
+        verify_tasks_share "$stage" "$MACOS_GENERATION"
+    else
+        chmod 555 "$MACOS_GENERATION"
+    fi
+    cleanup_macos_incoming
+}
+
 # Place one helper under both names: the z23-<helper> primary as a real file
 # and zclassic23-<helper> as a relative symlink to it (the node's own
 # z23 / zclassic23 shape). A current release supplies z23-<helper>; a release
@@ -1074,7 +1094,7 @@ MACOS_ACTIVE_PREFIX=""
 MACOS_ACTIVATION_PENDING=0
 
 install_payload_macos_generation() {
-    local stage="$1" prefix="$2" root generations name helper
+    local stage="$1" prefix="$2" root generations name helper candidate
     [ -z "$(manifest_digest_of "$stage" app-toolchain.json)" ] \
         || die "the bundled app compiler is supported only by the Linux release"
     root="$prefix/lib/z23"
@@ -1092,8 +1112,8 @@ install_payload_macos_generation() {
     MACOS_GENERATION="$generations/$MACOS_GENERATION_ID"
     install_directories "$generations" "$prefix/bin" "$prefix/share/z23"
 
-    if [ -e "$MACOS_GENERATION" ]; then
-        [ -d "$MACOS_GENERATION" ] \
+    if [ -e "$MACOS_GENERATION" ] || [ -L "$MACOS_GENERATION" ]; then
+        [ -d "$MACOS_GENERATION" ] && [ ! -L "$MACOS_GENERATION" ] \
             || die "macOS generation path is not a directory: $MACOS_GENERATION"
         macos_generation_matches "$stage" "$MACOS_GENERATION" \
             || die "macOS generation $MACOS_GENERATION_ID does not match its verified manifest"
@@ -1101,31 +1121,28 @@ install_payload_macos_generation() {
     else
         MACOS_INCOMING="$(mktemp -d "$generations/.incoming.XXXXXX")" \
             || die "could not stage macOS release generation"
-        install -m 555 "$stage/z23" "$MACOS_INCOMING/z23"
-        install_helper "$stage" "$MACOS_INCOMING" package-verify 555
-        install_helper "$stage" "$MACOS_INCOMING" acme 555
-        install -m 444 "$stage/AGENT_CARD.md" "$MACOS_INCOMING/AGENT_CARD.md"
+        candidate="$MACOS_INCOMING/$MACOS_GENERATION_ID"
+        mkdir -m 700 "$candidate" || die "could not create macOS generation candidate"
+        install -m 555 "$stage/z23" "$candidate/z23"
+        install_helper "$stage" "$candidate" package-verify 555
+        install_helper "$stage" "$candidate" acme 555
+        install -m 444 "$stage/AGENT_CARD.md" "$candidate/AGENT_CARD.md"
         # Retained beside the binary it names the generation after, so a
         # later provenance check (generation_provenance) or fleet audit reads
         # the installed tree alone -- no re-fetch, no rebuild -- to answer
         # whether the directory name still equals what SHA256SUMS records.
-        install -m 444 "$stage/SHA256SUMS" "$MACOS_INCOMING/SHA256SUMS"
-        if has_app_source "$stage"; then install_app_members "$stage" "$MACOS_INCOMING"; fi
-        verify_tasks_share "$stage" "$MACOS_INCOMING"
+        install -m 444 "$stage/SHA256SUMS" "$candidate/SHA256SUMS"
+        if has_app_source "$stage"; then install_app_members "$stage" "$candidate"; fi
+        verify_tasks_share "$stage" "$candidate"
         if [ -n "$(manifest_digest_of "$stage" z23-app-macos)" ]; then
-            "$MACOS_INCOMING/z23-app-macos" --assemble "$MACOS_INCOMING" \
+            "$candidate/z23-app-macos" --assemble "$candidate" \
                 || die "could not assemble the verified macOS app bundle"
-            "$MACOS_INCOMING/z23-app-macos" --check-bundle "$MACOS_INCOMING" \
+            "$candidate/z23-app-macos" --check-bundle "$candidate" \
                 || die "macOS app bundle differs from the verified release"
         fi
-        ln -s z23 "$MACOS_INCOMING/zclassic23" \
+        ln -s z23 "$candidate/zclassic23" \
             || die "could not create the macOS generation node alias"
-        # APFS refuses to rename the generation after its owner-write bit is
-        # removed. Commit its final name first, then make the directory inert.
-        mv -- "$MACOS_INCOMING" "$MACOS_GENERATION" \
-            || die "could not commit macOS release generation"
-        MACOS_INCOMING=""
-        chmod 555 "$MACOS_GENERATION"
+        macos_commit_generation "$stage" "$candidate" "$generations"
     fi
 
     # These stable public names never contain release bytes. Each resolves
@@ -1842,16 +1859,18 @@ EOF
         "$tmp/unreadable-stamp.err" \
         tor_stamp_unreadable "a release whose -version is unreadable"
 
+    # All four foreign releases contain identical bytes; only their sidecars differ.
+    for variant in missing full wrong-hash bound; do
+        local dir="$tmp/sidecar-$variant"
+        mkdir -p "$dir"
+        printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' >"$dir/z23"
+        chmod 755 "$dir/z23"
+        ln -f -- "$dir/z23" "$dir/zclassic23"
+        cp -f -- "$tmp/good/zclassic23-package-verify" "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" "$dir/"
+        (cd "$dir" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
+    done
+
     # Foreign payload: not executable on this host, and no sidecar.
-    mkdir -p "$tmp/sidecar-missing"
-    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
-        >"$tmp/sidecar-missing/z23"
-    chmod 755 "$tmp/sidecar-missing/z23"
-    ln -f -- "$tmp/sidecar-missing/z23" "$tmp/sidecar-missing/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
-        "$tmp/sidecar-missing/"
-    (cd "$tmp/sidecar-missing" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
     selftest_expect_stamp_refuse \
         "$tmp/sidecar-missing" "$tmp/sidecar-missing-dest" \
         "$tmp/sidecar-missing.err" \
@@ -1862,16 +1881,7 @@ EOF
     # payload's bytes (no binary_sha256 line at all): refused. A bare
     # `tor: full` sidecar next to any foreign-arch payload used to be enough
     # to install — that is precisely the forgery this binding closes.
-    mkdir -p "$tmp/sidecar-full"
-    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
-        >"$tmp/sidecar-full/z23"
-    chmod 755 "$tmp/sidecar-full/z23"
-    ln -f -- "$tmp/sidecar-full/z23" "$tmp/sidecar-full/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
-        "$tmp/sidecar-full/"
     printf 'tor: full\n' >"$tmp/sidecar-full/z23.tor-stamp"
-    (cd "$tmp/sidecar-full" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
     selftest_expect_stamp_refuse \
         "$tmp/sidecar-full" "$tmp/sidecar-full-dest" "$tmp/sidecar-full.err" \
         tor_stamp_unbound "a non-executable release whose sidecar has no binary_sha256"
@@ -1880,32 +1890,14 @@ EOF
     # this payload's actual (checksummed) bytes: also refused, and for the
     # same reason -- the binding is what is being checked, not merely its
     # presence.
-    mkdir -p "$tmp/sidecar-wrong-hash"
-    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
-        >"$tmp/sidecar-wrong-hash/z23"
-    chmod 755 "$tmp/sidecar-wrong-hash/z23"
-    ln -f -- "$tmp/sidecar-wrong-hash/z23" "$tmp/sidecar-wrong-hash/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
-        "$tmp/sidecar-wrong-hash/"
     printf 'tor: full\nbinary_sha256: %s\n' \
         "$(printf 'a%.0s' {1..64})" >"$tmp/sidecar-wrong-hash/z23.tor-stamp"
-    (cd "$tmp/sidecar-wrong-hash" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
     selftest_expect_stamp_refuse \
         "$tmp/sidecar-wrong-hash" "$tmp/sidecar-wrong-hash-dest" "$tmp/sidecar-wrong-hash.err" \
         tor_stamp_unbound "a non-executable release whose sidecar binary_sha256 does not match"
 
     # Same foreign payload, sidecar correctly bound to this exact z23's
     # checksummed bytes: that is what "enough to install" now requires.
-    mkdir -p "$tmp/sidecar-bound"
-    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
-        >"$tmp/sidecar-bound/z23"
-    chmod 755 "$tmp/sidecar-bound/z23"
-    ln -f -- "$tmp/sidecar-bound/z23" "$tmp/sidecar-bound/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
-        "$tmp/sidecar-bound/"
-    (cd "$tmp/sidecar-bound" && sha256sum $RELEASE_MEMBERS_LEGACY >SHA256SUMS)
     printf 'tor: full\nbinary_sha256: %s\n' \
         "$(manifest_digest_of "$tmp/sidecar-bound" z23)" \
         >"$tmp/sidecar-bound/z23.tor-stamp"
@@ -2443,7 +2435,7 @@ selftest_macos_install() (
 selftest_macos_transaction() {
     local tmp="$SELFTEST_TMP" mac="$SELFTEST_TMP/macos"
     local prefix="$mac/prefix & native" launchd="$mac/LaunchAgents"
-    local datadir="$mac/data & chain" mock="$mac/mockbin" rc out
+    local datadir="$mac/data & chain" mock="$mac/mockbin" rc out name
     local v1_id v2_id current_target last_good_target
     local v1_manifest_file_sha
     mkdir -p "$mac/v1" "$mac/v2" "$mock" "$launchd" "$datadir"
@@ -2560,10 +2552,9 @@ EOF
             || die "selftest: no-service $bad fallback was not repaired"
     done
     if command -v shasum >/dev/null 2>&1; then
-        ln -s "$(command -v shasum)" "$mac/hashbin/shasum"
-        ln -s "$(command -v awk)" "$mac/hashbin/awk"
-        ln -s "$(command -v dirname)" "$mac/hashbin/dirname"
-        ln -s "$(command -v basename)" "$mac/hashbin/basename"
+        for name in shasum awk dirname basename; do
+            ln -s "$(command -v "$name")" "$mac/hashbin/$name"
+        done
         [ "$(PATH="$mac/hashbin" sha256_file "$mac/v1/SHA256SUMS")" = "$v1_manifest_file_sha" ] \
             || die "selftest: stock macOS shasum digest path drifted"
         PATH="$mac/hashbin" sha256_check_manifest "$mac/v1/SHA256SUMS" >/dev/null \
@@ -3124,6 +3115,14 @@ selftest_app_source() {
         cmp -s "$app/$name" "$tmp/app-mac-fresh/lib/z23/generations/$node_id/$name" \
             || die "selftest: macOS app generation differs: $name"
     done
+    local MACOS_GENERATIONS="$tmp/app-mac-fresh/lib/z23/generations" MACOS_GENERATION_ID="$node_id"
+    local MACOS_GENERATION="$MACOS_GENERATIONS/$node_id" MACOS_INCOMING incoming
+    MACOS_INCOMING="$(mktemp -d "$MACOS_GENERATIONS/.incoming.XXXXXX")"; incoming="$MACOS_INCOMING"
+    mkdir -p "$incoming/$node_id/read-only"; : >"$incoming/$node_id/read-only/file"
+    chmod 555 "$incoming/$node_id/read-only"
+    macos_commit_generation "$app" "$incoming/$node_id" "$MACOS_GENERATIONS"
+    [ ! -e "$incoming" ] && macos_generation_matches "$app" "$MACOS_GENERATION" \
+        || die "selftest: overlapping winner reuse or cleanup failed"
 }
 
 selftest_macos_app_manifest() {
