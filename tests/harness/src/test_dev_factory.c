@@ -355,6 +355,76 @@ static void dfx_unenv(void)
     (void)unsetenv("ZCL_DEV_FACTORY_PROC");
 }
 
+static int dfx_case_failed_group_recency(const char *base, const char *jobs,
+                                         const char *land, const char *att,
+                                         const char *proc, long now)
+{
+    int failures = 0;
+    struct dfx_call c;
+    TEST("factory: failed group recency uses the newest valid timestamp") {
+        char wt[700], root[700], dir[800], path[900], jobs_recency[700];
+        char text[4096], newest[32], older[32];
+        const char *units[] = {"devbuild-100-1.scope", "devbuild-100-2.scope",
+                               "devbuild-100-3.scope", "devbuild-100-4.scope"};
+        const char *suites[] = {"dddddddddddddddddddddddddddddddd",
+                                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                                "ffffffffffffffffffffffffffffffff",
+                                "00000000000000000000000000000000"};
+        const char *groups[] = {"[\"shared\"]", "[\"shared\",\"other\"]",
+                                "[\"shared\",\"missing\"]",
+                                "[\"shared\",\"overflow\"]"};
+        (void)snprintf(wt, sizeof(wt), "%s/wt_recency", base);
+        (void)snprintf(root, sizeof(root), "%s/recency-verdicts", base);
+        (void)snprintf(jobs_recency, sizeof(jobs_recency), "%s/jobs_recency.jsonl",
+                       base);
+        (void)snprintf(newest, sizeof(newest), "%ld", now);
+        (void)snprintf(older, sizeof(older), "%ld", now - 20);
+        const char *ended[] = {newest, older, NULL, "1e100"};
+        FILE *fp = fopen(jobs_recency, "w");
+        ASSERT(fp != NULL);
+        for (int i = 0; i < 4; i++) {
+            (void)snprintf(dir, sizeof(dir), "%s/%s", root, units[i]);
+            dfx_mkdirs(dir);
+            (void)snprintf(path, sizeof(path), "%s/%s.json", dir, suites[i]);
+            (void)snprintf(text, sizeof(text),
+                "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"%s\",\"suite\":\"%s\",\"groups_total\":2,\"groups_ran\":%d,\"groups_cached\":0,\"groups_failed\":%d,\"failed_groups_truncated\":false,\"failed_groups\":%s}\n",
+                units[i], suites[i], i == 0 ? 1 : 2, i == 0 ? 1 : 2,
+                groups[i]);
+            dfx_write(path, text);
+            ASSERT(chmod(path, 0600) == 0);
+            int n = snprintf(text, sizeof(text),
+                "{\"project\":\"z23\",\"cwd\":\"%s\",\"queued\":%ld,\"rc\":2,\"cmd\":\"make t-fast\",\"unit\":\"%s\",\"verdict_root\":\"%s\"%s%s}\n",
+                wt, now - 40 + i, units[i], root,
+                ended[i] ? ",\"ended\":" : "", ended[i] ? ended[i] : "");
+            ASSERT(n > 0 && (size_t)n < sizeof(text));
+            ASSERT(fputs(text, fp) >= 0);
+        }
+        ASSERT(fclose(fp) == 0);
+        (void)setenv("ZCL_DEV_FACTORY_VERDICTS", root, 1);
+        (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_recency, 1);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        const struct json_value *rows = dfx_at(&c, "jobs.failed_groups");
+        const char *names[] = {"shared", "missing", "other", "overflow"};
+        const int64_t counts[] = {4, 1, 1, 1};
+        const int64_t ends[] = {now, 0, now - 20, 0};
+        ASSERT_EQ((int)json_size(rows), 4);
+        for (size_t i = 0; i < 4; i++) {
+            const struct json_value *row = json_at(rows, i);
+            ASSERT_STR_EQ(json_get_str(json_get(row, "group")), names[i]);
+            ASSERT_EQ(json_get_int(json_get(row, "n")), counts[i]);
+            ASSERT(json_get(row, "last_ended_unix") != NULL);
+            ASSERT_EQ(json_get_int(json_get(row, "last_ended_unix")), ends[i]);
+        }
+        dfx_end(&c);
+        (void)unsetenv("ZCL_DEV_FACTORY_VERDICTS");
+        dfx_env(jobs, land, att, proc);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_factory(void);
 int test_dev_factory(void)
 {
@@ -562,6 +632,10 @@ int test_dev_factory(void)
         dfx_run(&c, 48); ASSERT(dfx_ok(&c));
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 1);
         ASSERT_EQ((int)json_size(dfx_at(&c, "jobs.failed_groups")), 1);
+        const struct json_value *failed_group =
+            json_at(dfx_at(&c, "jobs.failed_groups"), 0);
+        ASSERT_EQ(json_get_int(json_get(failed_group, "last_ended_unix")),
+                  (int64_t)now);
         dfx_end(&c);
         (void)setenv("ZCL_DEV_FACTORY_VERDICTS", wt, 1);
         dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
@@ -606,6 +680,8 @@ int test_dev_factory(void)
         ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);
         (void)unsetenv("ZCL_DEV_FACTORY_VERDICTS"); dfx_env(jobs, land, att, proc); PASS();
     }
+
+    failures += dfx_case_failed_group_recency(base, jobs, land, att, proc, now);
 
     TEST("factory: legacy jobs remain unnamed despite a nearby verdict") {
         char cwd_a[700], cwd_b[700], dir[800], path[900], jobs_c[700], vtext[256];

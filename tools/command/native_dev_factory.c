@@ -921,6 +921,7 @@ static void fac_cold_section(const struct fac_jobs *j, struct json_value *out)
 struct fac_name {
     char key[FAC_NAME];
     int64_t n;
+    int64_t last_ended;
 };
 
 struct fac_verdict {
@@ -930,11 +931,22 @@ struct fac_verdict {
     struct fac_name names[FAC_MAX_NAMES];
 };
 
-static void fac_verdict_note(struct fac_verdict *v, const char *name)
+static int64_t fac_verdict_time(double ended)
 {
+    if (!(ended >= 0.0 && ended <= 9007199254740991.0))
+        return 0;
+    return (int64_t)ended;
+}
+
+static void fac_verdict_note(struct fac_verdict *v, const char *name,
+                             double ended)
+{
+    int64_t ended_unix = fac_verdict_time(ended);
     for (size_t i = 0; i < v->nn; i++) {
         if (strcmp(v->names[i].key, name) == 0) {
             fac_inc(&v->names[i].n);
+            if (ended_unix > v->names[i].last_ended)
+                v->names[i].last_ended = ended_unix;
             return;
         }
     }
@@ -945,6 +957,7 @@ static void fac_verdict_note(struct fac_verdict *v, const char *name)
     (void)snprintf(v->names[v->nn].key, sizeof(v->names[v->nn].key), "%s",
                    name);
     v->names[v->nn].n = 1;
+    v->names[v->nn].last_ended = ended_unix;
     v->nn++;
 }
 
@@ -1007,7 +1020,7 @@ static bool fac_verdict_names(const struct json_value *doc,
         const struct json_value *s = json_at(arr, i);
         const char *name = s && s->type == JSON_STR ? json_get_str(s) : NULL;
         if (name && name[0]) {
-            fac_verdict_note(v, name);
+            fac_verdict_note(v, name, 0);
             any = true;
         }
     }
@@ -1121,7 +1134,8 @@ static void fac_verdict_job(struct fac_jobs *jobs, const struct fac_job *jb, str
     struct fac_unit_slot *slot = fac_unit_slot(jobs, jb->unit);
     struct fac_verdict *found = zcl_calloc(1, sizeof(*found), "dev_factory_unit_verdict");
     if (slot && slot->count == 1 && found && fac_unit_verdicts(jb, jobs->verdict_root, found)) {
-        for (size_t i = 0; i < found->nn; ++i) fac_verdict_note(v, found->names[i].key);
+        for (size_t i = 0; i < found->nn; ++i)
+            fac_verdict_note(v, found->names[i].key, jb->ended);
         if (found->overflow) fac_inc(&v->overflow);
         named = true;
     }
@@ -1181,6 +1195,8 @@ static void fac_failed_section(struct fac_jobs *j, struct json_value *out)
         fac_new_obj(&row);
         (void)json_push_kv_str(&row, "group", v->names[i].key);
         (void)json_push_kv_int(&row, "n", v->names[i].n);
+        (void)json_push_kv_int(&row, "last_ended_unix",
+                               v->names[i].last_ended);
         (void)json_push_back(&names, &row);
         json_free(&row);
     }
