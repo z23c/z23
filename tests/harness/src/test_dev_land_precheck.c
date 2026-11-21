@@ -891,18 +891,20 @@ static bool dlx_pc_unknown_gate_skipped(void)
     return ok;
 }
 
-static bool dlx_pc_missing_lint_refused(void)
+static bool dlx_pc_missing_lint_refused(bool bad_list)
 {
     struct dlx_rig rig;
     struct dlx_call c;
     bool ok;
-    if (!dlx_pc_rig(&rig, "precheck_nolint", false, ""))
+    if (!dlx_pc_rig(&rig, "precheck_nolint", bad_list, ""))
+        return false;
+    if (bad_list && !dlx_pc_file(&rig, "bin/z23-lint", "#!/bin/sh\nexit 1\n"))
         return false;
     dlx_pc_submit(&c, &rig, NULL, NULL);
     ok = dlx_run(&c) && !dlx_ok(&c) &&
          strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE") == 0 &&
          strstr(c.reply.error.message,
-                "make build/bin/z23-lint docs-capability-inventory") != NULL;
+                "make check-capability-inventory-generated") != NULL;
     dlx_end(&c);
     ok = ok && dlx_queue_empty();
     dlx_restore();
@@ -1461,7 +1463,8 @@ int dlx_case_precheck(void)
         PASS();
     }
     TEST("land: precheck without a lane z23-lint refuses with the prime hint") {
-        ASSERT(dlx_pc_missing_lint_refused());
+        ASSERT(dlx_pc_missing_lint_refused(false));
+        ASSERT(dlx_pc_missing_lint_refused(true));
         PASS();
     }
     TEST("land: precheck refuses a tip that is not the worktree HEAD") {

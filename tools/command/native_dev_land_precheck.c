@@ -1153,7 +1153,7 @@ static bool pc_gates_run(struct pc_run *r,
         pc_failure_facts(r, "--list", reply, rc < 0);
         pc_fail(reply, r->leaf, rc < 0 ? "PRECHECK_TIMEOUT" : "PRECHECK_UNAVAILABLE",
                 "the lane's z23-lint --list did not answer; run `make "
-                "build/bin/z23-lint docs-capability-inventory` in the lane, "
+                "check-capability-inventory-generated` in the lane, "
                 "or resubmit with --precheck=skip",
                 r->bin);
         return false;
@@ -1232,7 +1232,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     ) {
         pc_fail(reply, leaf, "PRECHECK_UNAVAILABLE",
                 "the lane has no build/bin/z23-lint to run the precheck "
-                "gates; run `make build/bin/z23-lint docs-capability-inventory` "
+                "gates; run `make check-capability-inventory-generated` "
                 "in the lane and resubmit (--precheck=skip is for emergencies "
                 "only)",
                 wt);
