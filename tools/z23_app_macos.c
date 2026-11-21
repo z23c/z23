@@ -43,14 +43,28 @@ static id text(const char *s)
     return ((id (*)(id, SEL, const char *))objc_msgSend)(
         (id)objc_getClass("NSString"), sel_registerName("stringWithUTF8String:"), s);
 }
-static void alert(const char *detail)
+static id alert_box(const char *detail)
 {
     id box = send_id((id)objc_getClass("NSAlert"), "alloc");
     box = send_id(box, "init");
     send_object(box, "setMessageText:", text("Z23 could not open the app"));
     send_object(box, "setInformativeText:", text(detail));
+    return box;
+}
+static void alert(const char *detail)
+{
+    id box = alert_box(detail);
     (void)((long (*)(id, SEL))objc_msgSend)(box, sel_registerName("runModal"));
     send_void(box, "release");
+}
+static bool document_alert(void)
+{
+    id box = alert_box("The shared app did not finish opening. In My Apps, choose Received copies, or More options, then Discover apps, then Review received copies. If missing, ask the sender for a fresh file.");
+    (void)((id (*)(id, SEL, id))objc_msgSend)(box, sel_registerName("addButtonWithTitle:"), text("Close"));
+    (void)((id (*)(id, SEL, id))objc_msgSend)(box, sel_registerName("addButtonWithTitle:"), text("Open My Apps"));
+    long choice = ((long (*)(id, SEL))objc_msgSend)(box, sel_registerName("runModal"));
+    send_void(box, "release");
+    return choice == 1001; /* NSAlertSecondButtonReturn */
 }
 static bool path_parent(char *path)
 {
@@ -129,9 +143,11 @@ static void reap_children(id self, SEL selector, id timer)
         bool failed = done < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
         bool document = children[i].document;
         children[i] = children[--child_count];
-        if (failed)
-            alert(document ? "The shared app did not finish opening. In My Apps, choose More options, then Discover apps, then Review received copies. If the copy is missing, ask the sender for a fresh file."
-                           : "The Z23 app window did not finish successfully.");
+        if (failed && document) {
+            if (document_alert()) (void)spawn_app(NULL);
+        } else if (failed) {
+            alert("The Z23 app window did not finish successfully.");
+        }
     }
     reaping = false;
     if (!child_count) {
