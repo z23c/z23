@@ -31,6 +31,7 @@
 #include "platform/os_proc.h"
 
 #include <fcntl.h>
+#include <locale.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -698,6 +699,127 @@ static bool hgt_script_isolated(const char *tmp)
     bool ok = hgt_script_redirected(&f);
     bool intact = hgt_script_intact(&f);
     return ok && intact;
+}
+
+/* Exercise the real warning paths with private metrics and no mail delivery. */
+struct hgt_warning_fixture {
+    char root[HGT_PATH], home[HGT_PATH], bin[HGT_PATH], bulk[HGT_PATH];
+    char output[HGT_PATH], path[HGT_PATH * 2], z23[HGT_PATH];
+};
+
+static bool hgt_warning_program(const char *dir, const char *name, const char *body)
+{
+    char path[HGT_PATH];
+    int n = snprintf(path, sizeof path, "%s/%s", dir, name);
+    return n > 0 && (size_t)n < sizeof path && hgt_write(path, body) && chmod(path, 0700) == 0;
+}
+
+static bool hgt_warning_paths(struct hgt_warning_fixture *f, const char *tmp)
+{
+    if (snprintf(f->root, sizeof f->root, "%s/warning", tmp) >= (int)sizeof f->root ||
+        snprintf(f->home, sizeof f->home, "%s/home", f->root) >= (int)sizeof f->home ||
+        snprintf(f->bin, sizeof f->bin, "%s/bin", f->root) >= (int)sizeof f->bin ||
+        snprintf(f->bulk, sizeof f->bulk, "%s/bulk", f->home) >= (int)sizeof f->bulk ||
+        snprintf(f->output, sizeof f->output, "%s/output", f->root) >= (int)sizeof f->output ||
+        snprintf(f->z23, sizeof f->z23, "%s/z23", f->bin) >= (int)sizeof f->z23 ||
+        snprintf(f->path, sizeof f->path, "%s:%s", f->bin, getenv("PATH") ? getenv("PATH") : "") >= (int)sizeof f->path)
+        return false;
+    return true;
+}
+
+static bool hgt_warning_setup(struct hgt_warning_fixture *f, const char *tmp)
+{
+    if (!hgt_warning_paths(f, tmp)) return false;
+    if (mkdir(f->root, 0700) || mkdir(f->home, 0700) || mkdir(f->bin, 0700) || mkdir(f->bulk, 0700)) return false;
+    static const char df[] = "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 2000000000 1998951424 1048576 99%% /\\n'\n";
+    static const char du[] = "#!/bin/bash\nlast=\"${!#}\"\nif [ \"${HGT_PRESSURE_SORT:-0}\" = 1 ]; then exec /usr/bin/du \"$@\"; fi\ncase \"$last\" in */bulk) "
+        "awk -v top=\"$last\" -v pad=\"${HGT_PAD:-0}\" 'BEGIN { s=\"\"; for (j=0;j<1950;j++) s=s \"é\"; "
+        "for (i=1;i<=50000;i++) printf \"%d\\t%s/%s%s-%05d\\n\", 2000000000-i, top, (pad?\"x\":\"\"), (i<=5?s:\"row\"), i }' ;; "
+        "*) exec /usr/bin/du \"$@\" ;; esac\n";
+    static const char sort[] = "#!/bin/sh\n[ \"${HGT_FAIL_SORT:-0}\" = 1 ] && exit 37\n"
+        "if [ \"${HGT_PRESSURE_SORT:-0}\" = 1 ]; then "
+        "{ cat; awk 'BEGIN { for(i=1;i<=50000;i++) printf \"%d\\tpressure-row-%05d\\n\", 2000000000-i, i }'; } | /usr/bin/sort \"$@\"; exit $?; fi\n"
+        "exec /usr/bin/sort \"$@\"\n";
+    return hgt_warning_program(f->bin, "df", df) && hgt_warning_program(f->bin, "du", du) &&
+        hgt_warning_program(f->bin, "sort", sort) && hgt_warning_program(f->bin, "z23", "#!/bin/sh\nexit 0\n") &&
+        hgt_warning_program(f->bin, "z23-dev", "#!/bin/sh\nexit 0\n");
+}
+
+static void hgt_warning_child(const struct hgt_warning_fixture *f, bool pressure,
+                              bool fail_sort, int pad)
+{
+    int fd = open(f->output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0) _exit(120);
+    close(fd);
+    const char *names[] = {"PATH", "LC_ALL", "ZCL_HOST_GC_HOME", "ZCL_HOST_GC_TMP",
+        "ZCL_HOST_GC_PROC", "ZCL_HOST_GC_STATE", "ZCL_HOST_GC_REPO", "ZCL_HOST_GC_Z23_BIN",
+        "ZCL_HOST_GC_WORKTREE_GC", "HGT_PAD", "HGT_FAIL_SORT", "HGT_PRESSURE_SORT",
+        "ZCL_HOST_GC_PRESSURE_MIN_FREE_PCT", "ZCL_HOST_GC_PRESSURE_CRITICAL_FREE_PCT"};
+    const char *values[] = {f->path, "C.UTF-8", f->home, f->root, f->root, f->root,
+        f->root, f->z23, f->z23, pad ? "1" : "0", fail_sort ? "1" : "0",
+        pressure ? "1" : "0", pressure ? "101" : "0", pressure ? "101" : "0"};
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (setenv(names[i], values[i], 1)) _exit(121);
+    if (!setlocale(LC_CTYPE, "")) {
+        if (setenv("LC_ALL", "en_US.UTF-8", 1) || !setlocale(LC_CTYPE, "")) _exit(123);
+    }
+    execl("tools/scripts/host_gc.sh", "host_gc.sh", "--only", pressure ? "worktree" : "lowdisk", "--dry-run", (char *)NULL);
+    _exit(122);
+}
+
+static int hgt_warning_run(const struct hgt_warning_fixture *f, bool pressure,
+                           bool fail_sort, int pad, char *out, size_t size)
+{
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) hgt_warning_child(f, pressure, fail_sort, pad);
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)) return -1;
+    FILE *file = fopen(f->output, "rb");
+    if (!file || size < 2) return -1;
+    size_t n = fread(out, 1, size - 1, file);
+    bool ok = !ferror(file) && feof(file) && fclose(file) == 0;
+    out[n] = '\0';
+    return ok ? WEXITSTATUS(status) : -1;
+}
+
+static bool hgt_warning_utf8(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) continue;
+        if (c != 0xc3 || ++i >= n || (unsigned char)s[i] != 0xa9) return false;
+    }
+    return true;
+}
+
+static bool hgt_warning_test(const char *tmp)
+{
+    struct hgt_warning_fixture f = {0};
+    char out[65536];
+    if (!hgt_warning_setup(&f, tmp)) return false;
+    bool bounded = false;
+    for (int pad = 0; pad < 2 && !bounded; pad++) {
+        if (hgt_warning_run(&f, false, false, pad, out, sizeof out) != 0) { fprintf(stderr, "warning run failed: %s\n", out); return false; }
+        char *body = strstr(out, "would post: ");
+        if (!body) { fprintf(stderr, "warning missing body: %s\n", out); return false; }
+        body += strlen("would post: ");
+        char *end = strchr(body, '\n');
+        if (!end || (size_t)(end - body) != 4000) { fprintf(stderr, "warning length=%zu\n", end ? (size_t)(end-body) : 0); return false; }
+        bounded = strstr(body, "é") && hgt_warning_utf8(body, 4000);
+    }
+    if (!bounded) { fprintf(stderr, "warning utf8 boundary failed\n"); return false; }
+    if (hgt_warning_run(&f, false, true, 0, out, sizeof out) == 0) { fprintf(stderr, "warning sort failure suppressed\n"); return false; }
+    if (hgt_warning_run(&f, true, false, 0, out, sizeof out) != 0) { fprintf(stderr, "pressure run failed: %s\n", out); return false; }
+    const char *p = out;
+    for (int i = 1; i <= 10; i++) {
+        char expected[32];
+        snprintf(expected, sizeof expected, "pressure-row-%05d", i);
+        p = strstr(p, expected);
+        if (!p) { fprintf(stderr, "pressure row missing: %s\n", expected); return false; }
+        p += strlen(expected);
+    }
+    return strstr(p, "pressure-row-00011") == NULL;
 }
 
 static void hgt_chomp(char *s)
@@ -1601,6 +1723,10 @@ int test_host_gc(void)
     failures += hgt_archive_tests(tmp);
     failures += hgt_disposable_tests(tmp);
     failures += hgt_route_tests();
+    if (!hgt_warning_test(tmp)) {
+        fprintf(stderr, "host gc: warning fixture failed\n");
+        ++failures;
+    }
     if (!hgt_script_isolated(tmp)) {
         fprintf(stderr, "host gc: selftest escaped isolated Git environment\n");
         ++failures;
