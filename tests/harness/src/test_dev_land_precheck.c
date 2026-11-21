@@ -773,6 +773,40 @@ static bool dlx_pc_purpose_order(const char *detail, bool fail)
     return ok;
 }
 
+static bool dlx_pc_inventory_before_kpi(bool selected)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char row[1024], path[1400], log[2048] = "";
+    size_t n = 0;
+    const char *inventory = "check-capability-inventory-generated";
+    const char *script = "#!/bin/sh\n"
+        "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "echo \"$1\" >> build/precheck-ran\n"
+        "if [ \"$1\" = check-capability-inventory-generated ]; then echo fail > build/inventory; fi\n"
+        "if [ \"$1\" = check-kpi-floor ]; then test \"$(cat build/inventory)\" = pass; exit $?; fi\n"
+        "exit 0\n";
+    if (!dlx_pc_rig(&rig, "precheck_inventory_order", true,
+                    "check-kpi-floor\ncheck-capability-inventory-generated\n")) return false;
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1,
+               selected ? inventory : "check-unrelated");
+    bool ok = dlx_pc_outcomes(row) && dlx_pc_file(&rig, "inventory", "pass\n") &&
+        dlx_pc_file(&rig, "bin/z23-lint", script);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && ok;
+    ok = ok && (selected ? (!dlx_ok(&c) && !strcmp(dlx_str(&c, "gate"), "check-kpi-floor") && dlx_queue_empty())
+                         : (dlx_ok(&c) && dlx_queue_has_one()));
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig.clone);
+    ok = dlx_slurp(path, log, sizeof(log) - 1, &n) && ok;
+    log[n] = 0;
+    const char *inv = strstr(log, "check-capability-inventory-generated\n");
+    const char *kpi = strstr(log, "check-kpi-floor\n");
+    ok = ok && kpi && (!!inv == selected) && (!inv || inv < kpi);
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
 static bool dlx_pc_timing_entry(const struct json_value *row,
                                 const struct json_value *ran,
                                 const struct json_value *skipped)
@@ -1400,6 +1434,11 @@ int dlx_case_precheck(void)
         ASSERT(dlx_pc_purpose_order("check-file-purpose check-windows-cross-syntax", false));
         ASSERT(dlx_pc_purpose_order("check-file-purpose", false));
         ASSERT(dlx_pc_purpose_order("check-windows-cross-syntax", false));
+        PASS();
+    }
+    TEST("land: selected inventory refresh precedes the KPI floor") {
+        ASSERT(dlx_pc_inventory_before_kpi(true));
+        ASSERT(dlx_pc_inventory_before_kpi(false));
         PASS();
     }
     TEST("land: a learned shell failure precedes standalone tool builds") {

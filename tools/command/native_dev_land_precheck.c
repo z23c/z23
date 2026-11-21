@@ -1261,6 +1261,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     else pc_history_unproven(r, "land state unavailable");
     pc_prioritize_gate(g, "check-shell-host-assumptions", "check-standalone-tools-link");
     pc_prioritize_gate(g, "check-file-purpose", "check-windows-cross-syntax");
+    pc_prioritize_gate(g, "check-capability-inventory-generated", "check-kpi-floor");
     ok = pc_gates_run(r, g, reply);
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);
