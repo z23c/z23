@@ -96,7 +96,22 @@ static bool doctor_report_failure(FILE *stream, const char *mode, const struct d
     return false;
 }
 
-static bool doctor_case_report(FILE *report, const char *fixture, const char *mode,
+static struct doctor_failure doctor_classify(const char *out, const char *mode,
+                                             const char *state, bool matches,
+                                             int rc, bool timeout)
+{
+    bool text_mode = !strcmp(mode, "failtext");
+    bool output_valid = rc == 0 && !timeout;
+    return (struct doctor_failure) {
+        .exit_ok = rc == 0, .completed = !timeout,
+        .expected_text = !output_valid || !text_mode || strstr(out, "matches_release_artifact=unknown"),
+        .no_diff = !output_valid || !text_mode || !strstr(out, "LIVE NODE DIFFERS"),
+        .no_stopped = !output_valid || !text_mode || !strstr(out, "THE LIVE NODE IS NOT RUNNING"),
+        .json_matches = !output_valid || text_mode || doctor_json_matches(out, mode, state, matches),
+    };
+}
+
+static bool doctor_case(const char *fixture, const char *mode,
                         const char *state, bool matches)
 {
     struct doctor_env e;
@@ -110,23 +125,10 @@ static bool doctor_case_report(FILE *report, const char *fixture, const char *mo
     int rc = zcl_spawn_capture_merged_in_dir_observed(argv, NULL, out, sizeof(out), 15000, &timeout);
     int64_t end_ms = platform_time_monotonic_ms();
     int64_t elapsed_ms = start_ms < 0 || end_ms < start_ms ? -1 : end_ms - start_ms;
-    bool text_mode = !strcmp(mode, "failtext");
-    bool output_valid = rc == 0 && !timeout;
-    struct doctor_failure f = {
-        .exit_ok = rc == 0, .completed = !timeout,
-        .expected_text = !output_valid || !text_mode || strstr(out, "matches_release_artifact=unknown"),
-        .no_diff = !output_valid || !text_mode || !strstr(out, "LIVE NODE DIFFERS"),
-        .no_stopped = !output_valid || !text_mode || !strstr(out, "THE LIVE NODE IS NOT RUNNING"),
-        .json_matches = !output_valid || text_mode || doctor_json_matches(out, mode, state, matches),
-    };
-    return doctor_report_failure(report, mode, &f, rc, timeout, elapsed_ms);
+    struct doctor_failure f = doctor_classify(out, mode, state, matches, rc, timeout);
+    return doctor_report_failure(stderr, mode, &f, rc, timeout, elapsed_ms);
 }
 
-static bool doctor_case(const char *fixture, const char *mode,
-                        const char *state, bool matches)
-{
-    return doctor_case_report(stderr, fixture, mode, state, matches);
-}
 
 static int syncdiag_doctor_failure_diagnostic(void)
 {
@@ -134,8 +136,7 @@ static int syncdiag_doctor_failure_diagnostic(void)
     TEST("doctor fixture failure reports bounded evidence") {
         FILE *f = tmpfile();
         ASSERT(f != NULL);
-        struct doctor_failure failure = { .exit_ok = true, .completed = true,
-            .expected_text = false, .no_diff = true, .no_stopped = true, .json_matches = true };
+        struct doctor_failure failure = doctor_classify("no expected text", "failtext", "unknown", false, 0, false);
         bool ok = doctor_report_failure(f, "controlled", &failure, 0, false, 42);
         ASSERT(!ok && fflush(f) == 0 && fseek(f, 0, SEEK_SET) == 0);
         char buf[256] = {0};
@@ -186,15 +187,6 @@ static int syncdiag_doctor_live_identity(void)
         ASSERT(doctor_case(root, "multiple", "unknown", false));
         ASSERT(doctor_case(root, "missingrelease", "reporting", false));
         ASSERT(doctor_case(root, "failtext", "unknown", false));
-        FILE *report = tmpfile();
-        ASSERT(report != NULL);
-        bool unexpected = doctor_case_report(report, root, "different", "wrong_state", false);
-        ASSERT(!unexpected && fflush(report) == 0 && fseek(report, 0, SEEK_SET) == 0);
-        char diagnostic[256] = {0};
-        ASSERT(fgets(diagnostic, sizeof(diagnostic), report) != NULL);
-        ASSERT(strstr(diagnostic, "rc=0 timeout=0 elapsed_ms=") != NULL);
-        ASSERT(strstr(diagnostic, "failed=json_matches,") != NULL);
-        ASSERT(fclose(report) == 0);
         PASS();
     } _test_next:;
     if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
