@@ -5015,14 +5015,15 @@ static int v39_refusal_tests(void)
 
 struct ordinary_case { int version; const char *table; };
 static const struct ordinary_case ordinary_cases[] = {
-    {30,"zanc_anchors"},{31,"op_return_index"},{32,"zslp_ledger"},
-    {33,"parity_samples"},{34,"block_index_cache_envelope"},
-    {36,"agent_sessions"},{37,"zid_identities"},{38,"zid_domains"},
-    {40,"store_purchases"},{41,"build_jobs"},{45,"zcode_lane_receipts"},
-    {48,"zswap_ads"},
+    {30, "zanc_anchors"}, {31, "op_return_index"}, {32, "zslp_ledger"},
+    {33, "parity_samples"}, {34, "block_index_cache_envelope"},
+    {36, "agent_sessions"}, {37, "zid_identities"}, {38, "zid_domains"},
+    {40, "store_purchases"}, {41, "build_jobs"}, {45, "zcode_lane_receipts"},
+    {48, "zswap_ads"},
 };
 enum ordinary_mode { ORD_PREPARE, ORD_CREATE, ORD_LEDGER };
 struct ordinary_fault { const char *table; enum ordinary_mode mode; bool reached; int denied; };
+
 static int ordinary_authorize(void *ctx, int op, const char *a, const char *b,
                               const char *c, const char *d)
 {
@@ -5030,15 +5031,34 @@ static int ordinary_authorize(void *ctx, int op, const char *a, const char *b,
     (void)b; (void)c; (void)d;
     if (op == SQLITE_CREATE_TABLE && a && strcmp(a, f->table) == 0) {
         f->reached = true;
-        if (f->mode != ORD_LEDGER) { f->denied++; return SQLITE_DENY; }
+        if (f->mode != ORD_LEDGER) {
+            f->denied++;
+            return SQLITE_DENY;
+        }
     }
     if (f->reached && op == SQLITE_INSERT && a &&
         ((f->mode == ORD_PREPARE && strcmp(a, "node_state") == 0) ||
          (f->mode == ORD_LEDGER && strcmp(a, "schema_migrations") == 0))) {
-        f->denied++; return SQLITE_DENY;
+        f->denied++;
+        return SQLITE_DENY;
     }
     return SQLITE_OK;
 }
+
+static int ordinary_table_count(sqlite3 *db, const struct ordinary_case *item)
+{
+    char sql[256];
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='%s'", item->table);
+    return v47_scalar(db, sql);
+}
+
+static int ordinary_ledger_count(sqlite3 *db, const struct ordinary_case *item)
+{
+    char sql[128];
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM schema_migrations WHERE version='%03d'", item->version);
+    return v47_scalar(db, sql);
+}
+
 static bool ordinary_prepare(struct node_db *ndb, const struct ordinary_case *item)
 {
     memset(ndb, 0, sizeof(*ndb));
@@ -5053,40 +5073,56 @@ static bool ordinary_prepare(struct node_db *ndb, const struct ordinary_case *it
     char sql[128];
     snprintf(sql, sizeof(sql), "DELETE FROM schema_migrations WHERE CAST(version AS INTEGER)=%d", item->version);
     return rc == -1 && f.denied > 0 && node_db_schema_version(ndb) == item->version - 1 &&
-           node_db_exec(ndb, sql);
-
+           node_db_exec(ndb, sql) && ordinary_ledger_count(ndb->db, item) == 0 &&
+           ordinary_table_count(ndb->db, item) == 0;
 }
+
+static bool ordinary_refusal_ok(struct node_db *ndb, const struct ordinary_case *item,
+                                int floor, int denied, int rc)
+{
+    return denied > 0 && rc == -1 && node_db_schema_version(ndb) == item->version - 1 &&
+        ordinary_ledger_count(ndb->db, item) == 0 && ordinary_table_count(ndb->db, item) == 0 &&
+        node_db_schema_compat_floor(ndb) == floor && sqlite3_get_autocommit(ndb->db) &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM ordinary_sentinel WHERE v='keep'") == 1;
+}
+
+static bool ordinary_retry_ok(struct node_db *ndb, const struct ordinary_case *item)
+{
+    return node_db_migrate(ndb, NULL) > 0 && node_db_schema_version(ndb) == NODE_DB_SCHEMA_LATEST &&
+        ordinary_ledger_count(ndb->db, item) == 1 && ordinary_table_count(ndb->db, item) == 1 &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM ordinary_sentinel WHERE v='keep'") == 1;
+}
+
 static bool ordinary_case_run(const struct ordinary_case *item, enum ordinary_mode mode)
 {
     struct node_db ndb = {0};
     bool ok = ordinary_prepare(&ndb, item);
-    if (!ok) { if (ndb.db) sqlite3_close(ndb.db); return false; }
+    if (!ok) {
+        if (ndb.db) sqlite3_close(ndb.db);
+        return false;
+    }
     int floor = node_db_schema_compat_floor(&ndb);
     struct ordinary_fault f = {item->table, mode, false, 0};
     ok = sqlite3_set_authorizer(ndb.db, ordinary_authorize, &f) == SQLITE_OK;
     int rc = ok ? node_db_migrate(&ndb, NULL) : 0;
     if (sqlite3_set_authorizer(ndb.db, NULL, NULL) != SQLITE_OK) ok = false;
-    char sql[128];
-    snprintf(sql, sizeof(sql), "SELECT count(*) FROM schema_migrations WHERE version='%03d'", item->version);
-    int ledger = v47_scalar(ndb.db, sql), ver = node_db_schema_version(&ndb);
-    char table_sql[256];
-    snprintf(table_sql, sizeof(table_sql), "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='%s'", item->table);
-    printf("ordinary version=%d mode=%d denied=%d rc=%d schema=%d ledger=%d\n", item->version, mode, f.denied, rc, ver, ledger);
-    ok = ok && f.denied > 0 && rc == -1 && ver == item->version - 1 && ledger == 0 &&
-         v47_scalar(ndb.db, table_sql) == 0 &&
-         node_db_schema_compat_floor(&ndb) == floor && sqlite3_get_autocommit(ndb.db) &&
-         v47_scalar(ndb.db, "SELECT count(*) FROM ordinary_sentinel WHERE v='keep'") == 1;
-    if (ok) ok = node_db_migrate(&ndb, NULL) > 0 && node_db_schema_version(&ndb) == NODE_DB_SCHEMA_LATEST &&
-        v47_scalar(ndb.db, sql) == 1 && v47_scalar(ndb.db, table_sql) == 1 && v47_scalar(ndb.db, "SELECT count(*) FROM ordinary_sentinel WHERE v='keep'") == 1;
+    printf("ordinary version=%d mode=%d denied=%d rc=%d schema=%d ledger=%d table=%d\n",
+           item->version, mode, f.denied, rc, node_db_schema_version(&ndb),
+           ordinary_ledger_count(ndb.db, item), ordinary_table_count(ndb.db, item));
+    ok = ok && ordinary_refusal_ok(&ndb, item, floor, f.denied, rc);
+    if (ok) ok = ordinary_retry_ok(&ndb, item);
     sqlite3_close(ndb.db);
     return ok;
 }
+
 static int ordinary_refusal_tests(void)
 {
     int failures = 0;
-    for (size_t i=0; i<sizeof(ordinary_cases)/sizeof(ordinary_cases[0]); ++i)
-        for (int mode=ORD_CREATE; mode<=ORD_LEDGER; ++mode)
+    for (size_t i = 0; i < sizeof(ordinary_cases) / sizeof(ordinary_cases[0]); ++i) {
+        for (int mode = ORD_CREATE; mode <= ORD_LEDGER; ++mode) {
             if (!ordinary_case_run(&ordinary_cases[i], (enum ordinary_mode)mode)) failures++;
+        }
+    }
     return failures;
 }
 
