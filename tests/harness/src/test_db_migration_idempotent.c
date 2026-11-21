@@ -2837,6 +2837,64 @@ static int t_quarantine_archive_collision(void)
     return failures;
 }
 
+static int db_mig_deny_marker_begin(void *ctx, int op, const char *name,
+                                    const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)b; (void)c; (void)d;
+    return op == SQLITE_TRANSACTION && name && strcmp(name, "BEGIN") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int t_marker_failure_reopens_from_bootstrap(void)
+{
+    int failures = 0;
+    for (int fault = 0; fault < 2; ++fault) {
+        char dir[256], path[512];
+        db_mig_path(dir, sizeof(dir), fault ? "marker_restart_fault" : "marker_restart_control");
+        mkdir_p(dir);
+        snprintf(path, sizeof(path), "%s/node.db", dir);
+        struct node_db db;
+        bool raw_open = false, normal_open = false;
+        int rc = 0, version = 0, ledger = 0, sentinel = 0;
+        TEST("db_mig: marker refusal permits clean bootstrap reopen") {
+            ASSERT(db_mig_open_raw_handle(&db, path));
+            raw_open = true;
+            ASSERT(create_schema(&db));
+            ASSERT(node_db_exec(&db, "CREATE TABLE marker_sentinel(n INTEGER); INSERT INTO marker_sentinel VALUES(42)"));
+            if (fault) {
+                ASSERT(sqlite3_set_authorizer(db.db, db_mig_deny_marker_begin, NULL) == SQLITE_OK);
+                rc = node_db_migrate(&db, NULL);
+                ASSERT(sqlite3_set_authorizer(db.db, NULL, NULL) == SQLITE_OK);
+                version = node_db_schema_version(&db);
+                ledger = db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='002'");
+                ASSERT(sqlite3_get_autocommit(db.db) != 0);
+            }
+            db_mig_close_raw_handle(&db);
+            raw_open = false;
+            normal_open = node_db_open(&db, path);
+            if (normal_open) {
+                sentinel = db_mig_count(db.db, "SELECT count(*) FROM marker_sentinel WHERE n=42");
+                version = fault ? version : node_db_schema_version(&db);
+                ASSERT(node_db_schema_version(&db) == NODE_DB_SCHEMA_LATEST);
+            }
+            printf("marker restart fault=%d rc=%d before_version=%d ledger002=%d open=%d sentinel=%d\n",
+                   fault, rc, version, ledger, normal_open, sentinel);
+            if (fault) {
+                ASSERT(rc == -1);
+                ASSERT(version == 1);
+                ASSERT(ledger == 0);
+            }
+            ASSERT(normal_open);
+            ASSERT(sentinel == 1);
+            PASS();
+        } _test_next:;
+        if (raw_open) db_mig_close_raw_handle(&db);
+        if (normal_open) node_db_close(&db);
+        test_cleanup_tmpdir(dir);
+    }
+    return failures;
+}
+
 int test_db_migration_idempotent(void);
 
 int test_db_migration_idempotent(void)
@@ -2844,6 +2902,7 @@ int test_db_migration_idempotent(void)
     printf("\n=== db_migration_idempotent tests ===\n");
     int failures = 0;
     mkdir_p("./test-tmp");
+    failures += t_marker_failure_reopens_from_bootstrap();
     failures += t_fresh_reaches_latest();
     failures += t_v85_missing_worker_table_refuses();
     failures += t_v87_wiki_index_refuses_without_stamp();
