@@ -1782,9 +1782,45 @@ _test_next:;
     return failures;
 }
 
+static int dlx_status_encoding_failure_case(void)
+{
+    int failures = 0;
+    struct dlx_scope_case t = {0};
+    struct dlx_call c;
+    bool opened = false;
+    TEST("land: status attachment allocation failure refuses a partial snapshot") {
+        ASSERT(dlx_scope_prepare(&t, "status_encode_failure", NULL));
+        dlx_begin(&c, "status"); opened = true;
+        zcl_native_handle_dev_land_status(&c.request, &c.reply);
+        ASSERT(dlx_ok(&c));
+        const struct json_value *queued = json_get(&c.reply.data, "queued");
+        const struct json_value *outcomes = json_get(&c.reply.data, "outcomes");
+        ASSERT(queued && queued->type == JSON_ARR && queued->num_children > 0);
+        ASSERT(outcomes && outcomes->type == JSON_ARR);
+        dlx_end(&c); opened = false;
+
+        dlx_begin(&c, "status"); opened = true;
+        /* Fail the top-level queued attachment after its rows were built. */
+        zcl_alloc_fault_fail_nth("json_push_kv_key", 32);
+        zcl_native_handle_dev_land_status(&c.request, &c.reply);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
+        ASSERT(!json_get(&c.reply.data, "queued") && !json_get(&c.reply.data, "outcomes"));
+        ASSERT(!json_get(&c.reply.data, "steer") && !json_get(&c.reply.data, "incident"));
+        PASS();
+    }
+_test_next:;
+    zcl_alloc_fault_clear();
+    if (opened) dlx_end(&c);
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_drive_seq_scope(void)
 {
-    return dlx_decision_selfupgrade_case() +
+    return dlx_status_encoding_failure_case() + dlx_decision_selfupgrade_case() +
            dlx_decision_row_hash_case() + dlx_decision_empty_hash_case() +
            dlx_decision_encoding_failure_case() +
            dlx_decision_queue_case() + dlx_decision_terminal_case() +

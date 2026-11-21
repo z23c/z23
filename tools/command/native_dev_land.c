@@ -4930,30 +4930,31 @@ static void dl_steer_append_screen(char *screen, size_t cap, size_t *used,
         *used += (size_t)w;
 }
 
-static void dl_steer_push(struct zcl_command_reply *reply,
+static bool dl_steer_push(struct zcl_command_reply *reply,
                           const struct dl_steer_view *s)
 {
     struct json_value obj;
     if (!reply || !s)
-        return;
+        return false;
     json_init(&obj);
     json_set_object(&obj);
-    (void)json_push_kv_str(&obj, "candidate", s->candidate);
-    (void)json_push_kv_int(&obj, "seq", s->seq);
-    (void)json_push_kv_str(&obj, "phase", s->phase);
-    (void)json_push_kv_str(&obj, "owner", s->owner);
-    (void)json_push_kv_str(&obj, "lease", s->lease);
-    (void)json_push_kv_str(&obj, "proof_state", s->proof_state);
-    (void)json_push_kv_str(&obj, "receiver_driver", s->receiver_driver);
-    (void)json_push_kv_str(&obj, "first_missing_transition", s->missing);
-    (void)json_push_kv_str(&obj, "wake_command", s->wake);
-    (void)json_push_kv_str(&obj, "remote_state", s->remote_state);
-    (void)json_push_kv(&reply->data, "steer", &obj);
-    (void)json_push_kv_str(&reply->data, "incident", s->incident);
+    bool ok = json_push_kv_str(&obj, "candidate", s->candidate) &&
+         json_push_kv_int(&obj, "seq", s->seq) &&
+         json_push_kv_str(&obj, "phase", s->phase) &&
+         json_push_kv_str(&obj, "owner", s->owner) &&
+         json_push_kv_str(&obj, "lease", s->lease) &&
+         json_push_kv_str(&obj, "proof_state", s->proof_state) &&
+         json_push_kv_str(&obj, "receiver_driver", s->receiver_driver) &&
+         json_push_kv_str(&obj, "first_missing_transition", s->missing) &&
+         json_push_kv_str(&obj, "wake_command", s->wake) &&
+         json_push_kv_str(&obj, "remote_state", s->remote_state) &&
+         json_push_kv(&reply->data, "steer", &obj) &&
+         json_push_kv_str(&reply->data, "incident", s->incident);
     json_free(&obj);
+    return ok;
 }
 
-static void dl_status_attach_steer(struct zcl_command_reply *reply,
+static bool dl_status_attach_steer(struct zcl_command_reply *reply,
                                    const struct dl_dirs *d,
                                    const struct dl_row *rows, size_t nrows,
                                    int64_t now, char *screen, size_t screen_cap,
@@ -4963,7 +4964,21 @@ static void dl_status_attach_steer(struct zcl_command_reply *reply,
     dl_steer_compose(d, rows, nrows, now, &sv);
     if (!want_json)
         dl_steer_append_screen(screen, screen_cap, used, &sv);
-    dl_steer_push(reply, &sv);
+    return dl_steer_push(reply, &sv);
+}
+
+static bool dl_status_push_result(struct zcl_command_reply *reply,
+                                  const struct json_value *queued,
+                                  const struct json_value *inflight,
+                                  const struct json_value *outcomes,
+                                  bool have_inflight, bool want_json,
+                                  const char *screen)
+{
+    return json_push_kv_str(&reply->data, "leaf", DL_LEAF) &&
+           json_push_kv(&reply->data, "queued", queued) &&
+           (!have_inflight || json_push_kv(&reply->data, "in_flight", inflight)) &&
+           json_push_kv(&reply->data, "outcomes", outcomes) &&
+           (want_json || json_push_kv_str(&reply->data, "screen", screen));
 }
 
 /* ── status ────────────────────────────────────────────────────────────── */
@@ -5400,19 +5415,15 @@ static void dl_status(const struct zcl_command_request *req,
             goto render_done;
     }
 render_done:
-    dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
-                           &used, want_json);
+    if (!dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
+                                &used, want_json) ||
+        !dl_status_push_result(reply, &queued, &inflight, &outcomes,
+                               have_inflight, want_json, screen))
+        goto fail;
     free(rows);
-    (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
-    (void)json_push_kv(&reply->data, "queued", &queued);
-    if (have_inflight)
-        (void)json_push_kv(&reply->data, "in_flight", &inflight);
-    (void)json_push_kv(&reply->data, "outcomes", &outcomes);
     json_free(&queued);
     json_free(&inflight);
     json_free(&outcomes);
-    if (!want_json)
-        (void)json_push_kv_str(&reply->data, "screen", screen);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
     return;
@@ -5421,6 +5432,9 @@ fail:
     json_free(&inflight);
     json_free(&outcomes);
     free(rows);
+    json_free(&reply->data);
+    json_init(&reply->data);
+    json_set_object(&reply->data);
     dl_status_read_failure(reply, history_result, read_why, qpath);
 }
 
