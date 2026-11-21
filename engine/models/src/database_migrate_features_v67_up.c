@@ -254,51 +254,71 @@ static int db_migrate_step_83(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
-/* True once fleet_board_posts already carries the v84 `arrival` column.
- * Same re-migration guard as fleet_board_posts_v81_scope_present(). */
-static bool fleet_board_posts_v84_arrival_present(struct node_db *ndb)
+/* Classify existing cursor values before repairing an interrupted backfill. */
+static bool db_migrate_v84_arrivals(struct node_db *ndb, int *state)
 {
-    const char *type = NULL;
-    return ndb && ndb->open &&
-           sqlite3_table_column_metadata(
-               ndb->db, NULL, "fleet_board_posts",
-               "arrival", &type, NULL, NULL, NULL, NULL) == SQLITE_OK;
+    static const char sql[] =
+        "SELECT CASE WHEN EXISTS(SELECT 1 FROM fleet_board_posts "
+        "WHERE typeof(arrival)<>'integer' OR arrival<0) THEN -1 "
+        "WHEN EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival=0) "
+        "AND EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival>0) THEN -1 "
+        "WHEN EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival=0) "
+        "AND (EXISTS(SELECT 1 FROM fleet_board_posts WHERE typeof(seq)<>'integer' OR seq<=0) "
+        "OR EXISTS(SELECT seq FROM fleet_board_posts GROUP BY seq HAVING count(*)>1)) THEN -1 "
+        "WHEN EXISTS(SELECT 1 FROM fleet_board_posts WHERE arrival=0) THEN 1 ELSE 0 END";
+    return db_migrate_inspect_scalar(ndb, sql, state);
 }
 
-/* v84: every board row gets a local arrival number that only ever grows.
- * `seq` cannot serve as a cursor another box holds, because a reclaim
- * renumbers it, and `received_at` has one-second resolution, so two rows
- * landing in the same second have no order a pulling peer can resume
- * from. The paired fleet pull pages on `arrival` instead. Existing rows
- * take their current seq, which is already unique and in arrival order;
- * the ingest path assigns every later row a number above the largest one
- * stored. The UNIQUE index is both the integrity check and the index the
- * page walks. */
+/* 0 absent, 1 expected unique arrival index, -1 incompatible. */
+static bool db_migrate_v84_index(struct node_db *ndb, int *state)
+{
+    static const char sql[] =
+        "WITH owner AS (SELECT 1 FROM main.sqlite_schema WHERE type='index' "
+        "AND name='idx_fleet_board_arrival' COLLATE NOCASE AND tbl_name='fleet_board_posts'), "
+        "valid AS (SELECT 1 FROM pragma_index_list('fleet_board_posts','main') "
+        "WHERE name='idx_fleet_board_arrival' COLLATE NOCASE AND \"unique\"=1 AND partial=0 AND origin='c'), "
+        "keys AS (SELECT * FROM pragma_index_xinfo('idx_fleet_board_arrival','main') WHERE key=1) "
+        "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='idx_fleet_board_arrival' COLLATE NOCASE) THEN 0 "
+        "WHEN EXISTS(SELECT 1 FROM owner) AND EXISTS(SELECT 1 FROM valid) AND (SELECT count(*) FROM keys)=1 "
+        "AND EXISTS(SELECT 1 FROM keys WHERE seqno=0 AND name='arrival' COLLATE NOCASE AND desc=0 AND coll='BINARY') "
+        "THEN 1 ELSE -1 END";
+    return db_migrate_inspect_scalar(ndb, sql, state);
+}
+
+static bool db_migrate_v84_apply(struct node_db *ndb, int floor)
+{
+    int column = 0, arrivals = 0, index = 0;
+    bool ok = db_migrate_board_arrival_column(ndb, &column) && column >= 0;
+    if (ok && column == 0) ok = node_db_exec(ndb,
+        "ALTER TABLE main.fleet_board_posts ADD COLUMN arrival INTEGER NOT NULL DEFAULT 0 CHECK(arrival>=0)");
+    if (ok) ok = db_migrate_v84_arrivals(ndb, &arrivals) && arrivals >= 0;
+    if (ok) ok = db_migrate_v84_index(ndb, &index) && index >= 0;
+    if (ok && arrivals == 1) ok = node_db_exec(ndb, "UPDATE main.fleet_board_posts SET arrival=seq");
+    if (ok && index == 0) ok = node_db_exec(ndb,
+        "CREATE UNIQUE INDEX main.idx_fleet_board_arrival ON fleet_board_posts(arrival)");
+    if (ok) ok = node_db_exec(ndb, "INSERT OR IGNORE INTO schema_migrations(version) VALUES('084')");
+    int32_t version = 84, compat_floor = floor;
+    if (ok) ok = node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+                 node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
+    return ok;
+}
+
 static int db_migrate_step_84(struct node_db *ndb, int *current_ver,
                               int *floor_ver, int *applied)
 {
     if (*current_ver >= 84) return 0;
-    if (!fleet_board_posts_v84_arrival_present(ndb)) {
-        if (!node_db_exec(ndb,
-                "ALTER TABLE fleet_board_posts ADD COLUMN arrival INTEGER "
-                "NOT NULL DEFAULT 0 CHECK(arrival>=0)"))
-            LOG_ERR("db", "migrate v84: board arrival column failed");
-        if (!node_db_exec(ndb, "UPDATE fleet_board_posts SET arrival=seq"))
-            LOG_ERR("db", "migrate v84: board arrival backfill failed");
+    if (!node_db_begin(ndb)) LOG_ERR("db", "migrate v84: cannot begin");
+    bool ok = db_migrate_v84_apply(ndb, *floor_ver);
+    if (ok) ok = node_db_commit(ndb);
+    if (!ok) {
+        if (!node_db_rollback(ndb)) LOG_ERROR("db", "migrate v84: rollback failed");
+        LOG_ERR("db", "migrate v84: cursor repair or stamp failed");
     }
-    if (!node_db_exec(ndb,
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_board_arrival "
-            "ON fleet_board_posts(arrival)"))
-        LOG_ERR("db", "migrate v84: board arrival index failed");
-    if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) "
-            "VALUES('084')"))
-        LOG_ERR("db", "migrate v84: migration stamp failed");
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 84, *floor_ver);
     *current_ver = 84;
     (*applied)++;
     return 0;
 }
+
 
 /* v85 adds only a pointer to the latest issuer checkpoint. Immutable proof
  * objects stay in CAS. The guard permits retry after an interrupted ALTER;
@@ -1350,7 +1370,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
     }
     int steps_80_83 = db_migrate_steps_80_83(ndb, &current_ver, &floor_ver, &applied);
     if (steps_80_83 < 0) return steps_80_83;
-    (void)db_migrate_step_84(ndb, &current_ver, &floor_ver, &applied);
+    if (db_migrate_step_84(ndb, &current_ver, &floor_ver, &applied) < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     return db_migrate_finish_87(ndb, &current_ver, &floor_ver, &applied,
                                 version, floor);
 }
