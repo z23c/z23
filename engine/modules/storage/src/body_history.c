@@ -334,18 +334,17 @@ size_t body_history_census_probe_window(int64_t lo, int64_t hi,
     if (!probe || lo < 0 || lo > hi)
         return 0;
 
-    int64_t span = hi - lo + 1;
-    if (span > (int64_t)cap)
-        span = (int64_t)cap;
+    uint64_t width = (uint64_t)(hi - lo) + 1;
+    size_t span = width < cap ? (size_t)width : cap;
 
-    for (int64_t i = 0; i < span; i++) {
-        enum body_history_probe r = probe(lo + i, &hashes[i], ctx);
+    for (size_t i = 0; i < span; i++) {
+        enum body_history_probe r = probe(lo + (int64_t)i, &hashes[i], ctx);
         if (r == BODY_HISTORY_PROBE_HAVE || r == BODY_HISTORY_PROBE_MISSING)
             classes[i] = (uint8_t)r;
         /* Anything else — including a probe that returns a value outside
          * the enum — stays INDETERMINATE. */
     }
-    return (size_t)span;
+    return span;
 }
 
 /* Outcome of folding a pass of probe classifications into the coverage

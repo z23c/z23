@@ -330,6 +330,27 @@ static int test_bh_restored_coverage_is_a_claim_not_a_look(void)
     return failures;
 }
 
+static int test_bh_probe_full_height_range(void)
+{
+    int failures = 0;
+    TEST("probe caps the full nonnegative height range at the output capacity") {
+        uint8_t indexed[] = {1, 1};
+        uint8_t have[] = {1, 0};
+        struct bh_fake_chain chain = {
+            .height_count = 2, .indexed = indexed, .have_data = have
+        };
+        uint8_t classes[2];
+        struct uint256 hashes[2];
+        size_t n = body_history_census_probe_window(0, INT64_MAX, bh_fake_probe,
+            &chain, classes, hashes, 2);
+        ASSERT(n == 2 && chain.probe_calls == 2);
+        ASSERT(classes[0] == BODY_HISTORY_PROBE_HAVE);
+        ASSERT(classes[1] == BODY_HISTORY_PROBE_MISSING);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A probe that cannot run at all must be indistinguishable in outcome from
  * the unreadable case and never leave a slot looking answered. */
 static int test_bh_null_probe_leaves_everything_unmeasured(void)
@@ -1729,6 +1750,7 @@ int test_body_history(void)
     failures += test_bh_block_acceptance_refuses_unproven_history();
     failures += test_bh_unreadable_index_is_not_no_hole();
     failures += test_bh_restored_coverage_is_a_claim_not_a_look();
+    failures += test_bh_probe_full_height_range();
     failures += test_bh_null_probe_leaves_everything_unmeasured();
     failures += test_bh_partial_read_does_not_certify();
     failures += test_bh_evaluate_failure_paths_are_unknown();
