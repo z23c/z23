@@ -1056,7 +1056,14 @@ static bool dl_prechecked_parse(const char *line, struct dl_row *r)
     return true;
 }
 
-static bool dl_optional_row_strings(const char *line, struct dl_row *r)
+static bool dl_required_row_strings(const struct json_value *doc, struct dl_row *r)
+{
+    return dl_doc_string(doc, "tip", r->tip, sizeof(r->tip)).state == DL_STRING_FOUND &&
+        dl_sha_ok(r->tip) &&
+        dl_doc_string(doc, "state", r->state, sizeof(r->state)).state == DL_STRING_FOUND;
+}
+
+static bool dl_row_strings(const char *line, struct dl_row *r)
 {
     const struct { const char *key; char *out; size_t cap; } fields[] = {
         { "ts", r->ts, sizeof(r->ts) },
@@ -1087,7 +1094,7 @@ static bool dl_optional_row_strings(const char *line, struct dl_row *r)
     };
     struct json_value doc;
     json_init(&doc);
-    bool ok = json_read(&doc, line, strlen(line));
+    bool ok = json_read(&doc, line, strlen(line)) && dl_required_row_strings(&doc, r);
     for (size_t i = 0; ok && i < sizeof(fields) / sizeof(fields[0]); i++) {
         struct dl_string_result value = dl_doc_string(&doc, fields[i].key,
             fields[i].out, fields[i].cap);
@@ -1117,13 +1124,6 @@ static bool dl_parse_dispatch_fields(const char *line, struct dl_row *r)
         (strcmp(r->state, "fenced") != 0 || r->fence_peer > 0);
 }
 
-static bool dl_required_row_strings(const char *line, struct dl_row *r)
-{
-    return dl_line_string(line, "tip", r->tip, sizeof(r->tip)).state == DL_STRING_FOUND &&
-        dl_sha_ok(r->tip) &&
-        dl_line_string(line, "state", r->state, sizeof(r->state)).state == DL_STRING_FOUND;
-}
-
 static bool dl_parse_row(const char *line, struct dl_row *r)
 {
     long long priority = 0;
@@ -1139,9 +1139,7 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
         return false;
     if (!dl_priority_parse(r, priority, has_priority))
         return false;
-    if (!dl_required_row_strings(line, r))
-        return false;
-    if (!dl_optional_row_strings(line, r)) return false;
+    if (!dl_row_strings(line, r)) return false;
     if (!dl_worktree_shape_ok(r->worktree))
         return false;
     if (!dl_line_int(line, "attempt", &r->attempt) || r->attempt < 1)
