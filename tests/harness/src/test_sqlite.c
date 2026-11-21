@@ -4745,6 +4745,42 @@ static bool v47_prepare(struct node_db *ndb)
                      "DELETE FROM schema_migrations WHERE version='047'");
 }
 
+static bool v47_seed_existing(struct node_db *ndb, enum v47_fault mode)
+{
+    if (mode != V47_LEDGER) return true;
+    return node_db_exec(ndb,
+        "CREATE TABLE wallet_metadata_key(id INTEGER PRIMARY KEY CHECK(id=1),"
+        "wrapped_dek BLOB NOT NULL);"
+        "INSERT INTO wallet_metadata_key VALUES(1,x'1234')");
+}
+
+static bool v47_existing_row_preserved(sqlite3 *db, enum v47_fault mode)
+{
+    return mode != V47_LEDGER ||
+        v47_scalar(db, "SELECT count(*) FROM wallet_metadata_key WHERE hex(wrapped_dek)='1234'") == 1;
+}
+
+static bool v47_refusal_checked(struct node_db *ndb, enum v47_fault mode,
+                                int floor, int denied, int rc)
+{
+    return denied > 0 && rc == -1 && node_db_schema_version(ndb) == 46 &&
+        node_db_schema_compat_floor(ndb) == floor &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM schema_migrations WHERE version='047'") == 0 &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM v47_sentinel WHERE value='keep'") == 1 &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM sqlite_master WHERE name IN "
+                   "('vault_intents','vault_intent_raw','idx_vault_intents_state_time')") == 0 &&
+        sqlite3_get_autocommit(ndb->db) && v47_existing_row_preserved(ndb->db, mode);
+}
+
+static bool v47_retry_checked(struct node_db *ndb, enum v47_fault mode)
+{
+    return node_db_migrate(ndb, NULL) > 0 &&
+        node_db_schema_version(ndb) == NODE_DB_SCHEMA_LATEST &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM schema_migrations WHERE version='047'") == 1 &&
+        v47_scalar(ndb->db, "SELECT count(*) FROM v47_sentinel WHERE value='keep'") == 1 &&
+        v47_existing_row_preserved(ndb->db, mode);
+}
+
 static bool v47_refusal_case(enum v47_fault mode)
 {
     struct node_db ndb = {0};
@@ -4753,11 +4789,7 @@ static bool v47_refusal_case(enum v47_fault mode)
         if (ndb.db) sqlite3_close(ndb.db);
         return false;
     }
-    if (mode == V47_LEDGER)
-        ok = node_db_exec(&ndb,
-            "CREATE TABLE wallet_metadata_key(id INTEGER PRIMARY KEY CHECK(id=1),"
-            "wrapped_dek BLOB NOT NULL);"
-            "INSERT INTO wallet_metadata_key VALUES(1,x'1234')");
+    ok = v47_seed_existing(&ndb, mode);
     int floor = ok ? node_db_schema_compat_floor(&ndb) : -1;
     struct v47_fault_state fault = {.mode = mode};
     if (ok) ok = sqlite3_set_authorizer(ndb.db, v47_authorize, &fault) == SQLITE_OK;
@@ -4767,23 +4799,21 @@ static bool v47_refusal_case(enum v47_fault mode)
            mode, fault.denied, rc, node_db_schema_version(&ndb),
            node_db_schema_compat_floor(&ndb),
            v47_scalar(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='047'"));
-    ok = ok && fault.denied > 0 && rc == -1 && node_db_schema_version(&ndb) == 46 &&
-         node_db_schema_compat_floor(&ndb) == floor &&
-         v47_scalar(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='047'") == 0 &&
-         v47_scalar(ndb.db, "SELECT count(*) FROM v47_sentinel WHERE value='keep'") == 1 &&
-         v47_scalar(ndb.db, "SELECT count(*) FROM sqlite_master WHERE name IN "
-                    "('vault_intents','vault_intent_raw','idx_vault_intents_state_time')") == 0 &&
-         sqlite3_get_autocommit(ndb.db);
-    if (ok && mode == V47_LEDGER)
-        ok = v47_scalar(ndb.db, "SELECT count(*) FROM wallet_metadata_key WHERE hex(wrapped_dek)='1234'") == 1;
-    if (ok) ok = node_db_migrate(&ndb, NULL) > 0 &&
-                 node_db_schema_version(&ndb) == NODE_DB_SCHEMA_LATEST &&
-                 v47_scalar(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='047'") == 1 &&
-                 v47_scalar(ndb.db, "SELECT count(*) FROM v47_sentinel WHERE value='keep'") == 1;
-    if (ok && mode == V47_LEDGER)
-        ok = v47_scalar(ndb.db, "SELECT count(*) FROM wallet_metadata_key WHERE hex(wrapped_dek)='1234'") == 1;
+    ok = ok && v47_refusal_checked(&ndb, mode, floor, fault.denied, rc);
+    if (ok) ok = v47_retry_checked(&ndb, mode);
     if (ndb.db) sqlite3_close(ndb.db);
     return ok;
+}
+
+static int v47_refusal_tests(void)
+{
+    printf("v47 create refusal preserves history and retries... ");
+    bool create = v47_refusal_case(V47_CREATE);
+    printf("%s\n", create ? "OK" : "FAIL");
+    printf("v47 ledger refusal preserves existing rows and retries... ");
+    bool ledger = v47_refusal_case(V47_LEDGER);
+    printf("%s\n", ledger ? "OK" : "FAIL");
+    return !create || !ledger;
 }
 
 static int normal_mode_deny(void *ctx, int action, const char *a, const char *b,
@@ -4809,14 +4839,7 @@ static bool normal_mode_refusal_case(int action)
 
 
 int test_sqlite(void) {
-    printf("v47 create refusal preserves history and retries... ");
-    bool v47_create = v47_refusal_case(V47_CREATE);
-    printf("%s\n", v47_create ? "OK" : "FAIL");
-    printf("v47 ledger refusal preserves existing rows and retries... ");
-    bool v47_ledger = v47_refusal_case(V47_LEDGER);
-    printf("%s\n", v47_ledger ? "OK" : "FAIL");
-    int failures = 0;
-    if (!v47_create || !v47_ledger) failures++;
+    int failures = v47_refusal_tests();
     if (!normal_mode_refusal_case(SQLITE_PRAGMA) || !normal_mode_refusal_case(SQLITE_CREATE_INDEX)) failures++;
 
 #if defined(_WIN32)
