@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * Ledger transaction review parser for the device screen shown before signing. */
 #include "zcl_tx_review.h"
 
 #include <stdbool.h>

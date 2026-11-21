@@ -56,7 +56,7 @@
 {"q":"where is the code that explains why a test cache entry was hit or missed","answers":["tests/harness/src/testcache_reason.c"]}
 {"q":"shared fixture setup for accepted work acceptance tests","answers":["tests/harness/src/accepted_work_fixture.c"]}
 {"q":"Android app entry point for the Z23 node","answers":["apps/z23android/android_main.c"]}
-{"q":"device review screen that shows a ledger transaction before signing","answers":["apps/zcl-ledger/device-blue-review/src/zcl_tx_review.c"]}
+{"q":"device review screen that shows a ledger transaction before signing","answers":["apps/zcl-ledger/src/zcl_tx_review.c"]}
 {"q":"separate account verifier that may vouch for reusing compiled objects","answers":["docs/work/separate-verifier.md"]}
 {"q":"bounded spending authority for an AI agent over digital assets per transaction and per window","answers":["docs/work/agent-spend-policy-design.md"]}
 {"q":"node that keeps running with zero maintenance and never stalls waiting on a human","answers":["docs/work/sticky-node-plan.md"]}

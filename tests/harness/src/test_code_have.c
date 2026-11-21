@@ -442,6 +442,18 @@ static int ch_check_real_tree(struct ci_capability *caps,
                 android_found = true;
         CH_CHECK("the Android entry-point query reaches its app",
                  android_found);
+        struct ci_capability ledger[5];
+        struct ci_capability_query ledger_q;
+        int ledger_n = codeindex_capabilities(
+            ci, "device review screen that shows a ledger transaction before signing",
+            ledger, 5, &ledger_q);
+        bool ledger_found = false;
+        for (int i = 0; i < ledger_n; i++)
+            if (strcmp(ledger[i].header,
+                       "apps/zcl-ledger/src/zcl_tx_review.c") == 0)
+                ledger_found = true;
+        CH_CHECK("the Ledger device review query reaches its transaction parser",
+                 ledger_found);
         codeindex_close(ci);
     }
     return failures;
@@ -658,7 +670,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 34 /* of all cases: 24/63 (38%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 36 /* of all cases: 25/63 (39%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {
