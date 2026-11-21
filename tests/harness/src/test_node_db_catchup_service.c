@@ -427,7 +427,7 @@ static int ndc_torn_walk_repaired_pass(struct ndc_torn_walk *w)
 
     if (w->opened) node_db_close(&w->ndb);
     active_chain_free(&w->ac);
-    test_cleanup_tmpdir(w->dir2);
+    NDC_CHECK("torn walk fixture is removed", test_rm_rf_recursive(w->dir2) == 0);
     return failures;
 }
 
@@ -2086,8 +2086,9 @@ static int ndc_check_yield_after_turbo_defers_restore(struct ndc_fix_ctx *fx)
     return failures;
 }
 
-static void ndc_release_five_block_fixture(struct ndc_fix_ctx *fx)
+static int ndc_release_five_block_fixture(struct ndc_fix_ctx *fx)
 {
+    int failures = 0;
     node_db_catchup_lock_guard_test_reset();
     node_db_catchup_test_reset_reopen();
     blocker_reset_for_testing();
@@ -2096,13 +2097,14 @@ static void ndc_release_five_block_fixture(struct ndc_fix_ctx *fx)
     if (fx->openC) node_db_close(&fx->ndbC);
     if (fx->openR) node_db_close(&fx->ndbR);
     active_chain_free(&fx->ac);
-    test_cleanup_tmpdir(fx->dirF);
+    NDC_CHECK("five-block fixture is removed", test_rm_rf_recursive(fx->dirF) == 0);
     test_cleanup_tmpdir(fx->dirA);
     test_cleanup_tmpdir(fx->dirB);
     test_cleanup_tmpdir(fx->dirC);
     test_cleanup_tmpdir(fx->dirD);
     test_cleanup_tmpdir(fx->dirR);
     test_cleanup_tmpdir(fx->dirS);
+    return failures;
 }
 
 static int ndc_fork_row_count(struct node_db *ndb, const uint8_t hash[32],
@@ -2582,7 +2584,7 @@ static int ndc_check_sapling_empty_tree_needs_activation(void)
         if (built)
             failures += ndc_sap_run(&f, &c);
         active_chain_free(&f.ac);
-        test_cleanup_tmpdir(f.dir);
+        NDC_CHECK("sapling variant fixture is removed", test_rm_rf_recursive(f.dir) == 0);
     }
     return failures;
 }
@@ -2612,7 +2614,7 @@ static int ndc_check_sapling_tree_not_extended_by_old_heights(void)
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
             failures += ndc_sap_run(&f, &cases[i]);
     active_chain_free(&f.ac);
-    test_cleanup_tmpdir(f.dir);
+    NDC_CHECK("sapling block fixture is removed", test_rm_rf_recursive(f.dir) == 0);
     failures += ndc_check_sapling_empty_tree_needs_activation();
     chain_params_select(CHAIN_MAIN);
     return failures;
@@ -2789,7 +2791,7 @@ static int ndc_check_start_at_seed(void)
         failures += ndc_seed_wallet_cases(&f);
     }
     active_chain_free(&f.ac);
-    test_cleanup_tmpdir(f.dir);
+    NDC_CHECK("sapling block fixture is removed", test_rm_rf_recursive(f.dir) == 0);
     chain_params_select(CHAIN_MAIN);
     return failures;
 }
@@ -7282,9 +7284,9 @@ int test_node_db_catchup_service(void)
     failures += ndc_append_sixth_block(&fx);
     failures += ndc_check_parked_then_half_open(&fx);
     failures += ndc_check_resumed_matches_continuous(&fx);
-    ndc_release_five_block_fixture(&fx);
+    failures += ndc_release_five_block_fixture(&fx);
 
-    test_cleanup_tmpdir(dir);
+    NDC_CHECK("block mapping fixture is removed", test_rm_rf_recursive(dir) == 0);
     printf("node_db_catchup_service: %d failures\n", failures);
     return failures;
 }
