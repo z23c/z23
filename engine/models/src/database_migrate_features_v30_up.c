@@ -618,15 +618,17 @@ static void db_migrate_v46_zslp_validity(struct node_db *ndb)
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('046')");
 }
 
-static void db_migrate_v47_vault_intents(struct node_db *ndb)
+static bool db_migrate_v47_vault_intents(struct node_db *ndb, int floor)
 {
+    if (!node_db_begin(ndb)) return false;
+    bool ok = true;
     /* v47: a passphrase-wrapped metadata DEK plus encrypted intent rows.
      * Sensitive bodies are application data, never consensus state. */
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS wallet_metadata_key ("
         "id INTEGER PRIMARY KEY CHECK(id=1),"
         "wrapped_dek BLOB NOT NULL)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS vault_intents ("
         "plan_id BLOB PRIMARY KEY CHECK(length(plan_id)=32),"
         "digest BLOB NOT NULL CHECK(length(digest)=32),"
@@ -642,15 +644,24 @@ static void db_migrate_v47_vault_intents(struct node_db *ndb)
         "confirm_hash BLOB CHECK(confirm_hash IS NULL OR length(confirm_hash)=32),"
         "error_code TEXT NOT NULL DEFAULT '',"
         "updated_at INTEGER NOT NULL) WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_vault_intents_state_time "
         "ON vault_intents(state,created_at DESC)");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "CREATE TABLE IF NOT EXISTS vault_intent_raw ("
         "plan_id BLOB PRIMARY KEY CHECK(length(plan_id)=32),"
         "raw_tx BLOB NOT NULL) WITHOUT ROWID");
-    node_db_exec(ndb,
+    ok = ok && node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('047')");
+    int32_t version = 47, compat_floor = (int32_t)floor;
+    ok = ok && node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+         node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
+    if (ok) ok = node_db_commit(ndb);
+    if (!ok) {
+        (void)node_db_rollback(ndb);
+        LOG_ERROR("db", "migrate: v47 wallet schema failed; version not advanced");
+    }
+    return ok;
 }
 
 static void db_migrate_v48_zswap_ads(struct node_db *ndb)
@@ -707,7 +718,6 @@ static void (*const k_db_migrate_v30_steps[])(struct node_db *) = {
     [44 - 30] = db_migrate_v44_receipt_trust,
     [45 - 30] = db_migrate_v45_lane_receipts,
     [46 - 30] = db_migrate_v46_zslp_validity,
-    [47 - 30] = db_migrate_v47_vault_intents,
     [48 - 30] = db_migrate_v48_zswap_ads,
 };
 
@@ -732,8 +742,13 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
     int next = db_migrate_v30_next_version(current_ver);
 
     while (next != 0) {
-        k_db_migrate_v30_steps[next - 30](ndb);
-        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, next, floor_ver);
+        if (next == 47) {
+            if (!db_migrate_v47_vault_intents(ndb, floor_ver))
+                return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+        } else {
+            k_db_migrate_v30_steps[next - 30](ndb);
+            DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, next, floor_ver);
+        }
         current_ver = next;
         applied++;
         next = db_migrate_v30_next_version(current_ver);
