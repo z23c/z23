@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/wallet_recovery_coverage.c", CAP_FS_READ|CAP_FS_WRITE, "reads wallet rows in a read-only SQLite transaction")
