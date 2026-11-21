@@ -71,7 +71,7 @@ static int boot_refusal_identity_probe(void)
 #if !defined(_WIN32)
 static int datadir_advice_probe(const char *report, int error)
 {
-    if (!strstr(report, "next[0]:  id -un\n") || strstr(report, "next[1]:"))
+    if (!strstr(report, "next[1]:  id -un\n") || strstr(report, "next[2]:"))
         return 5;
     if (error == ENOENT)
         return strstr(report, "if a parent is missing") ? 0 : 3;
