@@ -13605,7 +13605,39 @@ struct dp_shadow_audit {
     uint32_t divergences;
     uint32_t cold_ran;
     uint32_t cold_failed;
+    bool seed_cold_eligible;
 };
+
+static bool dp_shadow_cold_passed(const struct dp_shadow_audit *a, bool accepted)
+{
+    return accepted && a->cold_failed == 0 && a->cold_ran == a->probe.groups;
+}
+
+/* Only one complete, canonical zero retry count authorizes PASS seeding. */
+static bool dp_shadow_seed_cold_ok(const char *line)
+{
+    static const char prefix[] = "SUITE VERDICT mode=cold ";
+    static const char key[] = "load_flaky";
+    bool seen = false;
+    if (strncmp(line, prefix, sizeof(prefix) - 1) != 0)
+        return false;
+    for (const char *p = line + sizeof(prefix) - 1; *p;) {
+        while (*p == ' ') p++;
+        const char *end = strchr(p, ' ');
+        if (!end) end = p + strlen(p);
+        size_t n = (size_t)(end - p);
+        if (n >= 5 && !memcmp(p, "mode=", 5)) return false;
+        if (n >= sizeof(key) - 1 && !memcmp(p, key, sizeof(key) - 1) &&
+            (n == sizeof(key) - 1 || p[sizeof(key) - 1] == '=')) {
+            if (seen || n != sizeof("load_flaky=0") - 1 ||
+                memcmp(p, "load_flaky=0", n))
+                return false;
+            seen = true;
+        }
+        p = end;
+    }
+    return seen;
+}
 
 /* The SUITE VERDICT line of a cold test log, exactly one and whole. */
 static bool dp_shadow_cold_verdict(const char *cold, size_t len,
@@ -13613,20 +13645,30 @@ static bool dp_shadow_cold_verdict(const char *cold, size_t len,
 {
     const char *p = cold;
     uint32_t seen = 0;
+    bool unusable = false;
     char line[4096] = {0};
     while (p < cold + len) {
         const char *eol = memchr(p, '\n', (size_t)(cold + len - p));
         size_t n = eol ? (size_t)(eol - p) : (size_t)(cold + len - p);
-        if (n > 14 && memcmp(p, "SUITE VERDICT ", 14) == 0 &&
-            n < sizeof(line) && eol) {
-            memcpy(line, p, n);
-            line[n] = '\0';
-            seen++;
+        if (n >= 14 && memcmp(p, "SUITE VERDICT ", 14) == 0) {
+            if (n >= sizeof(line) || !eol) {
+                unusable = true;
+            } else {
+                if (memchr(p, 0, n)) unusable = true;
+                if (n > 14) {
+                    memcpy(line, p, n);
+                    line[n] = '\0';
+                    seen++;
+                }
+            }
         }
         p += n + (eol ? 1 : 0);
     }
-    return seen == 1 && parse_uint_field(line, "groups_ran=", &out->cold_ran) &&
-           parse_uint_field(line, "groups_failed=", &out->cold_failed);
+    if (seen != 1 || !parse_uint_field(line, "groups_ran=", &out->cold_ran) ||
+        !parse_uint_field(line, "groups_failed=", &out->cold_failed))
+        return false;
+    out->seed_cold_eligible = !unusable && dp_shadow_seed_cold_ok(line);
+    return true;
 }
 
 /* Is `name` an entry of the runner's "Failed groups:" report? The report is
@@ -13716,6 +13758,7 @@ bool zcl_dev_proof_test_shadow_audit(const char *probe, size_t plen,
         out->hits = a.hits;
         out->divergences = a.divergences;
         out->cold_ran = a.cold_ran;
+        out->seed_cold_eligible = dp_shadow_cold_passed(&a, true) && a.seed_cold_eligible;
     }
     return ok;
 }
@@ -13728,28 +13771,49 @@ static bool dp_shadow_tail_read(const char *path, char **bytes, size_t *len)
 {
     FILE *f = fopen(path, "rb");
     long size;
-    size_t want, got;
-    char *buf;
     if (!f) return false;
     if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0) {
         fclose(f);
         return false;
     }
-    want = (size_t)size > DP_SHADOW_TAIL_MAX ? DP_SHADOW_TAIL_MAX
-                                              : (size_t)size;
-    buf = zcl_malloc(want + 1, "proof_shadow_tail");
-    if (!buf || fseek(f, size - (long)want, SEEK_SET) != 0) {
+    size_t want = (size_t)size > DP_SHADOW_TAIL_MAX ? DP_SHADOW_TAIL_MAX : (size_t)size;
+    bool clipped = (size_t)size > want;
+    size_t read_len = want + (clipped ? 1 : 0);
+    char *buf = zcl_malloc(read_len + 1, "proof_shadow_tail");
+    if (!buf || fseek(f, size - (long)read_len, SEEK_SET) != 0) {
         free(buf);
         fclose(f);
         return false;
     }
-    got = fread(buf, 1, want, f);
-    fclose(f);
-    buf[got] = '\0';
+    size_t got = fread(buf, 1, read_len, f);
+    bool ok = got == read_len && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok) {
+        free(buf);
+        return false;
+    }
+    size_t drop = 0;
+    if (clipped) {
+        drop = 1;
+        if (buf[0] != '\n') {
+            char *eol = memchr(buf + 1, '\n', want);
+            drop = eol ? (size_t)(eol - buf) + 1 : read_len;
+        }
+    }
+    size_t kept = read_len - drop;
+    memmove(buf, buf + drop, kept);
+    buf[kept] = '\0';
     *bytes = buf;
-    *len = got;
+    *len = kept;
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_shadow_tail_read(const char *path, char **bytes, size_t *len)
+{
+    return dp_shadow_tail_read(path, bytes, len);
+}
+#endif
 
 /* The shadow store root: absolute, bounded, and only when asked for. */
 static const char *dp_shadow_store(void)
@@ -13943,8 +14007,13 @@ static void dp_worker_shadow_audit(struct dp_worker *w, bool accepted)
                    a.cold_ran == a.probe.groups);
     (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_audit",
                                    note);
-    if (accepted && a.cold_failed == 0 && a.cold_ran == a.probe.groups)
-        dp_worker_shadow_seed(w, store);
+    if (dp_shadow_cold_passed(&a, accepted)) {
+        if (a.seed_cold_eligible)
+            dp_worker_shadow_seed(w, store);
+        else
+            (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_seed",
+                                           "skipped: cold_retry_or_unknown");
+    }
 }
 
 /* The routed-group preflight: probe the candidate's whole required set

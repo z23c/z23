@@ -804,11 +804,13 @@ struct zcl_dev_proof_shadow_audit {
     uint32_t hits;
     uint32_t divergences;
     uint32_t cold_ran;
+    bool seed_cold_eligible;
 };
 bool zcl_dev_proof_test_shadow_audit(const char *probe, size_t plen,
                                      const char *cold, size_t clen,
                                      const char *phases,
                                      struct zcl_dev_proof_shadow_audit *out);
+bool zcl_dev_proof_test_shadow_tail_read(const char *path, char **bytes, size_t *len);
 /* Seam for the preflight's empty-store skip: the exact decision the proof
  * worker makes before spawning the probe. True means the store provably
  * holds no verdict, the spawn is skipped, and phases_path received

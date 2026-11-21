@@ -248,6 +248,90 @@ _test_next:;
     return failures;
 }
 
+static int tcs_seed_eligibility_checks(void)
+{
+    int failures = 0;
+    static const char probe[] = "PROBE test_a MISS ok -\n"
+        "PROBE-SUMMARY groups=1 would_reuse=0 must_run=1 uncacheable=0\n";
+    static const struct { const char *name, *verdict; bool seed; } cases[] = {
+        {"clean", "mode=cold groups_ran=1 groups_failed=0 load_flaky=0", true},
+        {"retried", "mode=cold groups_ran=1 groups_failed=0 load_flaky=1", false},
+        {"missing", "mode=cold groups_ran=1 groups_failed=0", false},
+        {"suffix", "mode=cold groups_ran=1 groups_failed=0 load_flaky=0x", false},
+        {"leading-zero", "mode=cold groups_ran=1 groups_failed=0 load_flaky=00", false},
+        {"overflow", "mode=cold groups_ran=1 groups_failed=0 load_flaky=4294967296", false},
+        {"near-name", "mode=cold groups_ran=1 groups_failed=0 xload_flaky=0", false},
+        {"bare-duplicate", "mode=cold groups_ran=1 groups_failed=0 load_flaky load_flaky=0", false},
+        {"signed", "mode=cold groups_ran=1 groups_failed=0 load_flaky=+0", false},
+        {"duplicate", "mode=cold groups_ran=1 groups_failed=0 load_flaky=0 load_flaky=1", false},
+        {"duplicate-zero", "mode=cold groups_ran=1 groups_failed=0 load_flaky=0 load_flaky=0", false},
+        {"bad-mode", "mode=warm groups_ran=1 groups_failed=0 load_flaky=0", false},
+        {"duplicate-mode", "mode=cold mode=warm groups_ran=1 groups_failed=0 load_flaky=0", false},
+        {"failed", "mode=cold groups_ran=1 groups_failed=1 load_flaky=0", false},
+        {"short-count", "mode=cold groups_ran=0 groups_failed=0 load_flaky=0", false},
+    };
+    TEST("testcache shadow: seed refuses retry or uncertain cold evidence") {
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char cold[512];
+            struct zcl_dev_proof_shadow_audit a = {0};
+            int n = snprintf(cold, sizeof(cold), "SUITE VERDICT %s\n", cases[i].verdict);
+            ASSERT(n > 0 && (size_t)n < sizeof(cold));
+            bool ok = zcl_dev_proof_test_shadow_audit(probe, strlen(probe), cold,
+                                                      (size_t)n, NULL, &a);
+            if (!ok || a.seed_cold_eligible != cases[i].seed)
+                printf("shadow seed case=%s audit=%d seed=%d\n", cases[i].name,
+                       ok, a.seed_cold_eligible);
+            ASSERT(ok && a.seed_cold_eligible == cases[i].seed);
+        }
+        static const char duplicate[] =
+            "SUITE VERDICT mode=cold groups_ran=1 groups_failed=0 load_flaky=0\n"
+            "SUITE VERDICT mode=cold groups_ran=1 groups_failed=0 load_flaky=0\n";
+        struct zcl_dev_proof_shadow_audit a = {0};
+        ASSERT(!zcl_dev_proof_test_shadow_audit(probe, strlen(probe), duplicate,
+                                                sizeof(duplicate) - 1, NULL, &a));
+        static const char truncated[] =
+            "SUITE VERDICT mode=cold groups_ran=1 groups_failed=0 load_flaky=0";
+        ASSERT(!zcl_dev_proof_test_shadow_audit(probe, strlen(probe), truncated,
+                                                sizeof(truncated) - 1, NULL, &a));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int tcs_tail_boundary_checks(void)
+{
+    int failures = 0;
+    static const char verdict[] = "SUITE VERDICT mode=cold groups_ran=1 groups_failed=0 load_flaky=0\n";
+    TEST("testcache shadow: clipped tail preserves only complete first lines") {
+        char path[512];
+        ASSERT(snprintf(path, sizeof(path), "%s/tail.log", tcs_fix()) < (int)sizeof(path));
+        for (int aligned = 0; aligned < 2; aligned++) {
+            FILE *f = fopen(path, "wb");
+            ASSERT(f != NULL);
+            bool ok = fputc(aligned ? '\n' : 'x', f) != EOF &&
+                      fwrite(verdict, 1, sizeof(verdict) - 1, f) == sizeof(verdict) - 1;
+            for (size_t i = sizeof(verdict) - 1; ok && i < 1024u * 1024u; i++)
+                ok = fputc('x', f) != EOF;
+            if (fclose(f) != 0) ok = false;
+            ASSERT(ok);
+            char *tail = NULL;
+            size_t n = 0;
+            ASSERT(zcl_dev_proof_test_shadow_tail_read(path, &tail, &n));
+            bool correct = aligned ? n == 1024u * 1024u &&
+                                      !memcmp(tail, verdict, sizeof(verdict) - 1)
+                                   : n == 1024u * 1024u - (sizeof(verdict) - 1) &&
+                                      !strstr(tail, "SUITE VERDICT ");
+            free(tail);
+            ASSERT(correct);
+        }
+        (void)unlink(path);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int tcs_audit_checks(void)
 {
     int failures = 0;
@@ -365,6 +449,8 @@ int test_testcache_shadow(void)
     printf("\n=== testcache shadow lane tests ===\n");
     failures += tcs_store_checks();
     failures += tcs_audit_checks();
+    failures += tcs_seed_eligibility_checks();
+    failures += tcs_tail_boundary_checks();
     failures += tcs_lane_contract_checks();
     failures += tcs_runner_flag_checks();
     if (!tcs_reset_store())
