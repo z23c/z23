@@ -20,6 +20,7 @@
 
 #include "test/test_core.h"
 #include "test/testcache.h"
+#include "base/safe_alloc.h"
 #include "dev_proof_observation_admission.h"
 #include "vcs/vcs_object.h"
 
@@ -3150,21 +3151,64 @@ static int tc_phase_a2_verdict_store(uint8_t keyA[32], bool have_keyA)
     return failures;
 }
 
-static int tc_seed_ineligible(struct testcache *tc, struct testcache_probe *probe,
+static int tc_seed_ineligible(struct testcache *tc, const struct testcache_probe *probe,
                                const struct testcache_probe *readback)
 {
     int failures = 0;
+    struct testcache_probe candidate = *probe;
     struct testcache_seed_counts counts = {0};
     testcache_seed_probe(tc, NULL, false, &counts);
-    testcache_seed_probe(tc, probe, true, &counts);
+    testcache_seed_probe(tc, &candidate, true, &counts);
     testcache_seed_probe(tc, readback, false, &counts);
-    probe->key_valid = false;
-    testcache_seed_probe(tc, probe, false, &counts);
-    probe->key_valid = true;
-    probe->cacheable = false;
-    testcache_seed_probe(tc, probe, false, &counts);
+    candidate.key_valid = false;
+    testcache_seed_probe(tc, &candidate, false, &counts);
+    candidate.key_valid = true;
+    candidate.cacheable = false;
+    testcache_seed_probe(tc, &candidate, false, &counts);
     TC_CHECK("empty or ineligible seeds are 0/0/0",
              counts.stored == 0 && counts.attempted == 0 && counts.failed == 0);
+    return failures;
+}
+
+/* Exercise duplicate keys, disjoint shards, skip/miss rules and refusal.
+ * The second pass injects pool allocation failure and must use serial writes. */
+static int tc_seed_batch(struct testcache *tc, const struct testcache_probe *source,
+                         bool refuse_pool)
+{
+    int failures = 0;
+    struct testcache_probe probes[8];
+    for (size_t i = 0; i < 8; i++) {
+        probes[i] = *source;
+        probes[i].key[0] = (uint8_t)(source->key[0] + (refuse_pool ? 16 : 1) + i);
+    }
+    memcpy(probes[1].key, probes[0].key, sizeof(probes[0].key));
+    probes[4].hit = true;
+    probes[5].hit = true;
+    probes[6].key_valid = false;
+    probes[7].cacheable = false;
+    char shard[256];
+    snprintf(shard, sizeof(shard), ".zvcs/objects/%02x", probes[3].key[0]);
+    if (!mk_write(TC_STORE, shard, "blocked")) return 1;
+    struct testcache_seed_counts counts = {0};
+    if (refuse_pool) zcl_alloc_fault_fail_next("workpool_items");
+    testcache_seed_probes(tc, probes, 8, 4, &counts);
+    bool fault_consumed = !refuse_pool || zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    TC_CHECK("batch accounts duplicates and a refused store",
+             fault_consumed && counts.attempted == 4 && counts.stored == 3 && counts.failed == 1);
+    for (size_t i = 0; i < 3; i += 2) {
+        uint8_t *bytes = NULL;
+        size_t len = 0;
+        bool ok = vcs_object_load_raw(TC_STORE, probes[i].key, &bytes, &len) == 0 &&
+                  len == 56 && memcmp(bytes + 16, probes[i].key, 32) == 0;
+        free(bytes);
+        TC_CHECK("batch seed reads back its full key", ok);
+    }
+    uint8_t *missing = NULL;
+    size_t missing_len = 0;
+    bool absent = vcs_object_load_raw(TC_STORE, probes[4].key, &missing, &missing_len) != 0;
+    free(missing);
+    TC_CHECK("skipped batch entry is absent", absent);
     return failures;
 }
 
@@ -3210,6 +3254,8 @@ static int tc_seed_counts(void)
     TC_CHECK("successful seed reads back the same key",
              readback.hit && memcmp(readback.key, probe.key, 32) == 0);
     failures += tc_seed_ineligible(tc, &probe, &readback);
+    failures += tc_seed_batch(tc, &probe, false);
+    failures += tc_seed_batch(tc, &probe, true);
 cleanup:
     testcache_close(tc);
     unsetenv("ZCL_TESTCACHE_STORE_ROOT");

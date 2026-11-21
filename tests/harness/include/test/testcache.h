@@ -283,6 +283,11 @@ void testcache_seed_probe(struct testcache *tc,
                           const struct testcache_probe *probe, bool skipped,
                           struct testcache_seed_counts *counts);
 
+/* Batch seed after probing; joins all writers before returning. */
+void testcache_seed_probes(struct testcache *tc, const struct testcache_probe *probes,
+                           size_t n, int jobs,
+                           struct testcache_seed_counts *counts);
+
 /* Store a PASS verdict exactly like testcache_store_pass, but flagged
  * load-flaky: the group FAILed or was WEDGED once under a contended pool
  * before passing alone (see test_parallel.c's rerun_load_flaky_groups). A

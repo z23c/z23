@@ -25,6 +25,7 @@
 #include "platform/time_compat.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include "util/workpool.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -2918,18 +2919,76 @@ void testcache_store_pass_flaky(struct testcache *tc, const uint8_t key[32])
     (void)trc_store_pass_ex(tc, key, true);
 }
 
+static bool trc_seed_probe_eligible(const struct testcache_probe *probe, bool skipped)
+{
+    return probe && !skipped && probe->cacheable && probe->key_valid && !probe->hit;
+}
+
 void testcache_seed_probe(struct testcache *tc,
                           const struct testcache_probe *probe, bool skipped,
                           struct testcache_seed_counts *counts)
 {
-    if (!tc || !probe || !counts || skipped || !probe->cacheable ||
-        !probe->key_valid || probe->hit)
+    if (!tc || !counts || !trc_seed_probe_eligible(probe, skipped))
         return;
     counts->attempted++;
     if (testcache_store_pass(tc, probe->key))
         counts->stored++;
     else
         counts->failed++;
+}
+
+/* Equal full keys share their first byte, so one worker stores them in order. */
+struct trc_seed_worker {
+    struct testcache *tc;
+    const struct testcache_probe *probes;
+    size_t count;
+    unsigned partition, partitions;
+    struct testcache_seed_counts counts;
+};
+
+static bool trc_seed_worker_run(void *item)
+{
+    struct trc_seed_worker *w = item;
+    for (size_t i = 0; i < w->count; i++)
+        if (w->probes[i].key[0] % w->partitions == w->partition)
+            testcache_seed_probe(w->tc, &w->probes[i], false, &w->counts);
+    return true; /* Store refusals are counted; no partition may short-circuit. */
+}
+
+void testcache_seed_probes(struct testcache *tc, const struct testcache_probe *probes,
+                           size_t n, int jobs,
+                           struct testcache_seed_counts *counts)
+{
+    if (!tc || !probes || !counts) return;
+    size_t eligible = 0;
+    for (size_t i = 0; i < n; i++)
+        if (trc_seed_probe_eligible(&probes[i], false))
+            eligible++;
+    unsigned workers = jobs > 0 ? (unsigned)jobs : 1;
+    if (workers > 4) workers = 4;
+    if (workers > eligible) workers = (unsigned)eligible;
+    struct workpool pool;
+    if (eligible < 4 || workers < 2 ||
+        !workpool_init(&pool, (int)workers, workers, trc_seed_worker_run)) {
+        for (size_t i = 0; i < n; i++)
+            testcache_seed_probe(tc, &probes[i], false, counts);
+        return;
+    }
+    struct trc_seed_worker tasks[4] = {0};
+    void *items[4];
+    for (unsigned i = 0; i < workers; i++) {
+        tasks[i] = (struct trc_seed_worker){
+            .tc = tc, .probes = probes, .count = n,
+            .partition = i, .partitions = workers};
+        items[i] = &tasks[i];
+    }
+    (void)workpool_run(&pool, items, workers);
+    workpool_destroy(&pool);
+    for (unsigned i = 0; i < workers; i++) {
+        counts->stored += tasks[i].counts.stored;
+        counts->attempted += tasks[i].counts.attempted;
+        counts->failed += tasks[i].counts.failed;
+    }
 }
 
 void testcache_dump_group(struct testcache *tc, const char *group_name)

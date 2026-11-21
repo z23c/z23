@@ -873,13 +873,20 @@ static void print_probe_only(const struct group_result *results,
  * lane) passes this only after a proof ended accepted, so every selected
  * group did pass cold on exactly the bytes these keys name. */
 static void seed_probe_passes(const struct group_result *results,
-                              const struct testcache_probe *probes,
-                              struct testcache *tc)
+                              struct testcache_probe *probes,
+                              struct testcache *tc, int jobs)
 {
     struct testcache_seed_counts counts = {0};
-    if (tc && probes)
+    if (tc && probes) {
+        size_t n = 0;
+        /* The probe report is complete; compact this disposable array in order. */
         for (size_t i = 0; i < g_num_groups; i++)
-            testcache_seed_probe(tc, &probes[i], results[i].skipped, &counts);
+            if (!results[i].skipped) {
+                if (n != i) probes[n] = probes[i];
+                n++;
+            }
+        testcache_seed_probes(tc, probes, n, jobs, &counts);
+    }
     printf("SEED-SUMMARY stored=%zu attempted=%zu failed=%zu\n",
            counts.stored, counts.attempted, counts.failed);
 }
@@ -4220,7 +4227,7 @@ static int run_cache_probe(struct run_ctx *c)
     if (c->o.cli_probe_only) {
         print_probe_only(c->results, c->probes, c->tc);
         if (c->o.cli_seed_pass)
-            seed_probe_passes(c->results, c->probes, c->tc);
+            seed_probe_passes(c->results, c->probes, c->tc, c->o.jobs);
         testcache_close(c->tc);
         free(c->probes);
         free(c->results);
