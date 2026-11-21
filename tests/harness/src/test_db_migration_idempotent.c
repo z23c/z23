@@ -2837,14 +2837,6 @@ static int t_quarantine_archive_collision(void)
     return failures;
 }
 
-static int db_mig_deny_marker_begin(void *ctx, int op, const char *name,
-                                    const char *b, const char *c, const char *d)
-{
-    (void)ctx; (void)b; (void)c; (void)d;
-    return op == SQLITE_TRANSACTION && name && strcmp(name, "BEGIN") == 0
-        ? SQLITE_DENY : SQLITE_OK;
-}
-
 static int t_marker_failure_reopens_from_bootstrap(void)
 {
     int failures = 0;
@@ -2862,9 +2854,11 @@ static int t_marker_failure_reopens_from_bootstrap(void)
             ASSERT(create_schema(&db));
             ASSERT(node_db_exec(&db, "CREATE TABLE marker_sentinel(n INTEGER); INSERT INTO marker_sentinel VALUES(42)"));
             if (fault) {
-                ASSERT(sqlite3_set_authorizer(db.db, db_mig_deny_marker_begin, NULL) == SQLITE_OK);
+                ASSERT(node_db_exec(&db,
+                    "CREATE TEMP TRIGGER refuse_floor BEFORE INSERT ON node_state "
+                    "WHEN NEW.key='schema_compat_floor' BEGIN SELECT RAISE(ABORT,'fixture'); END"));
                 rc = node_db_migrate(&db, NULL);
-                ASSERT(sqlite3_set_authorizer(db.db, NULL, NULL) == SQLITE_OK);
+                ASSERT(node_db_exec(&db, "DROP TRIGGER refuse_floor"));
                 version = node_db_schema_version(&db);
                 ledger = db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='002'");
                 ASSERT(sqlite3_get_autocommit(db.db) != 0);
