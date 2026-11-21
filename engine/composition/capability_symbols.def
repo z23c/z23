@@ -657,8 +657,7 @@ ZCL_CAPABILITY_SYMBOL("secp256k1_nonce_function_rfc6979", CAP_RANDOM,
 ZCL_CAPABILITY_SYMBOL("alarm", CAP_CLOCK,
     "Schedules a signal against an elapsed interval.")
 ZCL_CAPABILITY_SYMBOL("ASN1_TIME_diff", CAP_CLOCK,
-    "Reads the current time when its from argument is null, which is "
-    "how it is normally called.")
+    "Reads the current time when either time argument is null.")
 ZCL_CAPABILITY_SYMBOL("clock_gettime", CAP_CLOCK, "")
 ZCL_CAPABILITY_SYMBOL("getrusage", CAP_CLOCK,
     "Reports consumed CPU time, which is a measured interval.")
@@ -901,6 +900,10 @@ ZCL_CAPABILITY_SYMBOL("ASN1_OCTET_STRING_free", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("ASN1_OCTET_STRING_new", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("ASN1_OCTET_STRING_set", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("ASN1_STRING_set", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("ASN1_TIME_free", CAP_HARMLESS,
+    "Frees an in-memory ASN.1 time value.")
+ZCL_CAPABILITY_SYMBOL("ASN1_TIME_set", CAP_HARMLESS,
+    "Sets an ASN.1 time value from a caller-supplied time_t, allocating if needed.")
 ZCL_CAPABILITY_SYMBOL("backtrace", CAP_HARMLESS,
     "Reads this process own stack. The _fd variant emits bytes and is "
     "CAP_FS_WRITE.")
