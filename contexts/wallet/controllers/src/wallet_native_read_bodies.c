@@ -62,10 +62,11 @@ char *zcl_native_listunspent_body(const struct json_value *args,
      * confirmation window the answer was computed under — the projection
      * idiom the shielded read bodies below already use. */
     struct json_value utxos;
+    json_init(&utxos);
     if (!json_read(&utxos, raw, strlen(raw))) {
         json_free(&utxos);
         free(raw);
-        err->status = ZCL_NATIVE_BODY_INTERNAL;
+        err->status = ZCL_NATIVE_BODY_PROTOCOL;
         snprintf(err->message, sizeof(err->message),
                  "RPC %s returned an unparseable body", "listunspent");
         LOG_NULL("native.wallet", "RPC %s returned an unparseable body",
@@ -76,29 +77,37 @@ char *zcl_native_listunspent_body(const struct json_value *args,
     /* An RPC-level error body is forwarded verbatim: the bridge already
      * turns {"error":...} into a typed TOOL_ERROR, and re-wrapping it would
      * hide the node's own message. */
-    if (utxos.type == JSON_OBJ && json_get(&utxos, "error")) {
+    const struct json_value *rpc_error = utxos.type == JSON_OBJ ? json_get(&utxos, "error") : NULL;
+    if (rpc_error && rpc_error->type != JSON_NULL) {
         char *passthru = wnh_body_render(&utxos, "listunspent",
                                          WNH_LIST_BODY, err);
         json_free(&utxos);
         return passthru;
     }
 
+    if (utxos.type != JSON_ARR) {
+        json_free(&utxos);
+        err->status = ZCL_NATIVE_BODY_PROTOCOL;
+        snprintf(err->message, sizeof(err->message),
+                 "RPC listunspent did not return a UTXO array");
+        LOG_NULL("native.wallet", "RPC listunspent did not return a UTXO array");
+    }
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
-    if (utxos.type != JSON_ARR) {
-        /* A wallet with no UTXOs still answers with an empty list, never a
-         * missing key — an empty holding is an answer, not an absence. */
-        json_free(&utxos);
-        json_init(&utxos);
-        json_set_array(&utxos);
-    }
-    (void)json_push_kv_str(&doc, "schema", "zcl.wallet_utxos.v1");
-    (void)json_push_kv(&doc, "utxos", &utxos);
-    (void)json_push_kv_int(&doc, "count", (int64_t)utxos.num_children);
-    (void)json_push_kv_int(&doc, "minconf", minconf);
-    (void)json_push_kv_int(&doc, "maxconf", maxconf);
+    bool built = json_push_kv_str(&doc, "schema", "zcl.wallet_utxos.v1") &&
+                 json_push_kv(&doc, "utxos", &utxos) &&
+                 json_push_kv_int(&doc, "count", (int64_t)utxos.num_children) &&
+                 json_push_kv_int(&doc, "minconf", minconf) &&
+                 json_push_kv_int(&doc, "maxconf", maxconf);
     json_free(&utxos);
+    if (!built) {
+        json_free(&doc);
+        err->status = ZCL_NATIVE_BODY_INTERNAL;
+        snprintf(err->message, sizeof(err->message),
+                 "RPC listunspent envelope could not be built");
+        LOG_NULL("native.wallet", "RPC listunspent envelope could not be built");
+    }
 
     char *out = wnh_body_render(&doc, "listunspent", WNH_LIST_BODY, err);
     json_free(&doc);
@@ -117,7 +126,7 @@ static char *wnh_tx_fail(struct zcl_native_body_err *err,
 
 /* listtransactions answers a BARE ARRAY and the bridge drops non-object
  * bodies (BAD_TOOL_BODY), so the array rides inside the declared
- * zcl.wallet_tx_list.v1 envelope in RPC order. Unlike listunspent, anything
+ * zcl.wallet_tx_list.v1 envelope in RPC order. Anything
  * that is not an array (or an RPC error object, forwarded verbatim so the
  * bridge types it TOOL_ERROR) is a PROTOCOL failure, never an empty list.
  * Size is bounded twice: the render buffer here and the registry's

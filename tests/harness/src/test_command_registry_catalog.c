@@ -2914,11 +2914,14 @@ static int test_status_journey_safe_money_frontdoor(void)
 
 /* core.wallet.utxo.list wraps the bare listunspent array in the declared
  * zcl.wallet_utxos.v1 envelope; asserted on the rendered reply bytes. */
+static const char *g_utxo_fixture;
+
 static char *listunspent_mock_rpc(const char *method,
                                   const char *params_json)
 {
     (void)params_json;
-    if (strcmp(method, "listunspent") == 0)
+    if (strcmp(method, "listunspent") == 0) {
+        if (g_utxo_fixture) return strdup(g_utxo_fixture);
         return strdup(
             "[{\"txid\":\"aabbccddeeff00112233445566778899aabbccddeeff0011"
             "2233445566778899\",\"vout\":0,"
@@ -2929,6 +2932,7 @@ static char *listunspent_mock_rpc(const char *method,
             "8899aabbccddeeff\",\"vout\":1,"
             "\"amount\":0.25,\"confirmations\":3,"
             "\"spendable\":true,\"solvable\":true}]");
+    }
     return strdup("null");
 }
 
@@ -2977,6 +2981,57 @@ static int test_wallet_utxo_list_envelope(void)
         PASS();
     } _test_next:;
     node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+static bool utxo_reply(const char *fixture, char *out, size_t cap,
+                       enum zcl_command_exit *code)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *s = find_spec(reg, "core.wallet.utxo.list");
+    g_utxo_fixture = fixture;
+    node_rpc_client_set_test_hook(listunspent_mock_rpc);
+    bool ok = s && exec_leaf(reg, s, out, cap, code);
+    node_rpc_client_set_test_hook(NULL);
+    g_utxo_fixture = NULL;
+    return ok;
+}
+
+static int test_wallet_utxo_list_errors(void)
+{
+    int failures = 0;
+    char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+    TEST("wallet utxo list distinguishes empty results from invalid RPC replies") {
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(utxo_reply("[]", out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "\"utxos\":[]") != NULL);
+        const char *bad[] = {"null", "42", "{}", "{\"error\":null}", "["};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(utxo_reply(bad[i], out, sizeof(out), &code));
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        }
+        ASSERT(utxo_reply("{\"error\":{\"code\":-13,\"message\":\"wallet locked\"}}",
+                          out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(strstr(out, "wallet locked") != NULL);
+        ASSERT(strstr(out, "TOOL_ERROR") != NULL);
+        g_utxo_fixture = "[]";
+        node_rpc_client_set_test_hook(listunspent_mock_rpc);
+        zcl_alloc_fault_fail_nth("json_push_kv_key", 1u);
+        struct zcl_native_body_err err = {0};
+        char *body = zcl_native_listunspent_body(NULL, &err);
+        zcl_alloc_fault_clear();
+        node_rpc_client_set_test_hook(NULL);
+        g_utxo_fixture = NULL;
+        bool refused = body == NULL && err.status == ZCL_NATIVE_BODY_INTERNAL;
+        free(body);
+        ASSERT(refused);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    node_rpc_client_set_test_hook(NULL);
+    g_utxo_fixture = NULL;
     return failures;
 }
 
@@ -8059,6 +8114,7 @@ int test_command_registry_catalog(void)
     failures += test_status_brief_flat_lean_envelope();
     failures += test_status_journey_safe_money_frontdoor();
     failures += test_wallet_utxo_list_envelope();
+    failures += test_wallet_utxo_list_errors();
     failures += test_wallet_tx_list_envelope();
     failures += test_wallet_tx_list_fails_closed();
     failures += test_wallet_tx_list_budget_and_alloc();
