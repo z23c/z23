@@ -173,10 +173,10 @@ static bool send_key(Display *display, Window root, Window window,
     KeyCode keycode = XKeysymToKeycode(display, key);
     if (keycode == 0)
         return false;
-    if (XTestFakeKeyEvent(display, keycode, True, 0) &&
-        XTestFakeKeyEvent(display, keycode, False, 0)) {
+    if (XTestFakeKeyEvent(display, keycode, True, 0)) {
+        bool released = XTestFakeKeyEvent(display, keycode, False, 0) != 0;
         (void)XSync(display, False);
-        return true;
+        return released;
     }
     XEvent event;
     memset(&event, 0, sizeof(event));
@@ -399,6 +399,42 @@ static bool wait_for_replacement(Display *display, Window root, const char *titl
     return false;
 }
 
+/* Focus can race mapping or destruction after discovery. Handle only the
+ * exact SetInputFocus request; all other X errors retain the prior handler. */
+static struct {
+    Display *display;
+    Window window;
+    unsigned long serial;
+    XErrorHandler previous;
+    bool unavailable;
+} focus_request;
+static int focus_error(Display *display, XErrorEvent *error)
+{
+    bool match = error->error_code == BadMatch &&
+        (error->resourceid == None || error->resourceid == focus_request.window);
+    bool gone = error->error_code == BadWindow && error->resourceid == focus_request.window;
+    if (display == focus_request.display && error->serial == focus_request.serial &&
+        error->request_code == 42 && (match || gone)) {
+        focus_request.unavailable = true; return 0;
+    }
+    if (focus_request.previous) return focus_request.previous(display, error);
+    fprintf(stderr, "native_ui_driver: unexpected X error %u request %u serial %lu\n",
+        error->error_code, error->request_code, error->serial);
+    exit(1);
+}
+static bool focus_window(Display *display, Window window)
+{
+    (void)XSync(display, False);
+    focus_request.display = display; focus_request.window = window;
+    focus_request.serial = NextRequest(display); focus_request.unavailable = false;
+    focus_request.previous = XSetErrorHandler(focus_error);
+    XSetInputFocus(display, window, RevertToParent, CurrentTime);
+    (void)XSync(display, False);
+    (void)XSetErrorHandler(focus_request.previous);
+    focus_request.display = NULL;
+    return !focus_request.unavailable;
+}
+
 static void wait_for_matching_windows(Display *display, Window root,
                                       const struct ui_driver_options *options,
                                       unsigned int attempts, Window *window,
@@ -412,8 +448,12 @@ static void wait_for_matching_windows(Display *display, Window root,
         if (!options->expect_count_set && *window != None) {
             if (options->expect_pixels_change)
                 *before = capture_window(display, *window);
-            if (!options->expect_pixels_change || *before)
-                break;
+            bool keyboard = options->key && strncmp(options->key, "click=", 6) != 0 &&
+                ui_driver_key_symbol(options->key) != NoSymbol;
+            if ((!options->expect_pixels_change || *before) &&
+                (!keyboard || focus_window(display, *window))) break;
+            if (*before) { XDestroyImage(*before); *before = NULL; }
+            *window = None;
         }
         if (i < attempts)
             sleep_20ms();
@@ -430,7 +470,6 @@ static bool send_window_event(Display *display, Window root, Window window,
         return false;
     if (key_sym == NoSymbol)
         return send_close(display, window);
-    XSetInputFocus(display, window, RevertToParent, CurrentTime);
     return send_key(display, root, window, key_sym);
 }
 

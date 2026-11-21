@@ -15,13 +15,13 @@
 
 enum nur_mode { NUR_DELAYED, NUR_UNMAPPED, NUR_UNCHANGED, NUR_UNEXPECTED, NUR_RACE,
     NUR_NAME_RACE, NUR_TREE_RACE, NUR_NAME_UNEXPECTED, NUR_KEYS, NUR_REPLACED, NUR_NOT_REPLACED,
-    NUR_DESTROY_ATTR, NUR_DESTROY_IMAGE, NUR_BAD_ATTR, NUR_CLICK };
+    NUR_DESTROY_ATTR, NUR_DESTROY_IMAGE, NUR_BAD_ATTR, NUR_CLICK, NUR_FOCUS_DELAYED, NUR_FOCUS_NEVER, NUR_FOCUS_UNEXPECTED, NUR_CLOSE_UNMAPPED };
 static struct {
     enum nur_mode mode;
     Display *owner;
     Window window, victim;
     GC gc;
-    unsigned int sleeps, presses, releases, images, button_presses, button_releases;
+    unsigned int sleeps, presses, releases, images, button_presses, button_releases, closes;
     KeySym pressed[4], released[4];
     int click_x, click_y;
     bool injected, first_null, count_ok;
@@ -31,7 +31,7 @@ static struct {
  * only the driver's first real polling wait permits the owner to map. */
 static int nur_sleep(const struct timespec *duration, struct timespec *remaining)
 {
-    if (nur.mode == NUR_DELAYED && nur.sleeps == 0) {
+    if ((nur.mode == NUR_DELAYED || nur.mode == NUR_FOCUS_DELAYED) && nur.sleeps == 0) {
         XMapWindow(nur.owner, nur.window);
         (void)XSync(nur.owner, False);
     }
@@ -51,6 +51,12 @@ static void nur_button_event(const XEvent *event)
     if (event->type == ButtonRelease) ++nur.button_releases;
 }
 
+static bool nur_close_event(const XEvent *event)
+{
+    return event->type == ClientMessage && event->xclient.format == 32 &&
+        event->xclient.message_type == XInternAtom(nur.owner, "WM_PROTOCOLS", False) &&
+        (Atom)event->xclient.data.l[0] == XInternAtom(nur.owner, "WM_DELETE_WINDOW", False);
+}
 static void nur_events(void)
 {
     (void)XSync(nur.owner, False);
@@ -58,7 +64,7 @@ static void nur_events(void)
         XEvent event; XNextEvent(nur.owner, &event);
         if (event.xany.window != nur.window) continue;
         if (event.type == KeyPress) {
-            if (nur.mode == NUR_KEYS && nur.presses < 4)
+            if (nur.presses < 4)
                 nur.pressed[nur.presses] = XLookupKeysym(&event.xkey, 0);
             ++nur.presses;
             if (nur.mode == NUR_DELAYED || nur.mode == NUR_RACE ||
@@ -68,10 +74,11 @@ static void nur_events(void)
             }
         }
         if (event.type == KeyRelease) {
-            if (nur.mode == NUR_KEYS && nur.releases < 4)
+            if (nur.releases < 4)
                 nur.released[nur.releases] = XLookupKeysym(&event.xkey, 0);
             ++nur.releases;
         }
+        if (nur_close_event(&event)) ++nur.closes;
         if (event.type == ButtonPress || event.type == ButtonRelease)
             nur_button_event(&event);
     }
@@ -189,6 +196,8 @@ static bool nur_expected_error(const XErrorEvent *error)
     if (nur.mode == NUR_UNEXPECTED)
         return nur.images == 1 && nur.presses == 0 && nur.releases == 0 &&
             error->error_code == BadDrawable && error->request_code == 73;
+    if (nur.mode == NUR_FOCUS_UNEXPECTED)
+        return error->error_code == BadWindow && error->request_code == 42 && error->resourceid == 0x7fffffffu;
     if (error->error_code != BadWindow || error->resourceid != None) return false;
     if (nur.mode == NUR_NAME_UNEXPECTED) return error->request_code == 20;
     if (nur.mode == NUR_BAD_ATTR) return error->request_code == 3;
@@ -204,6 +213,11 @@ static int nur_error(Display *display, XErrorEvent *error)
     _Exit(expected ? 77 : 78);
 }
 
+static int nur_focus(Display *display, Window window, int revert, Time time)
+{
+    if (nur.mode == NUR_FOCUS_UNEXPECTED) { nur.injected = true; window = 0x7fffffffu; }
+    return XSetInputFocus(display, window, revert, time);
+}
 /* No replacement capture, image comparison, result predicate or event sender.
  * Each wrapper above calls Xlib; they only schedule mapping, paint as owner,
  * count delivered events and provoke one real error. No production test hook. */
@@ -215,9 +229,11 @@ static int nur_error(Display *display, XErrorEvent *error)
 #define XGetWindowAttributes nur_attributes
 #define XFetchName nur_fetch_name
 #define XQueryTree nur_query_tree
+#define XSetInputFocus nur_focus
 #define main native_ui_driver_main
 #include "../../tools/native_ui_driver.c"
 #undef main
+#undef XSetInputFocus
 #undef XQueryTree
 #undef XFetchName
 #undef XGetWindowAttributes
@@ -249,7 +265,8 @@ static bool nur_open(char title[96])
     XStoreName(nur.owner, nur.window, title);
     XSelectInput(nur.owner, nur.window, KeyPressMask | KeyReleaseMask |
         ButtonPressMask | ButtonReleaseMask);
-    if (nur.mode == NUR_UNCHANGED || nur.mode == NUR_UNEXPECTED || nur.mode >= NUR_RACE)
+    if (nur.mode != NUR_FOCUS_DELAYED && nur.mode != NUR_FOCUS_NEVER && nur.mode != NUR_CLOSE_UNMAPPED &&
+        (nur.mode == NUR_UNCHANGED || nur.mode == NUR_UNEXPECTED || nur.mode >= NUR_RACE))
         XMapWindow(nur.owner, nur.window);
     (void)XSync(nur.owner, False);
     return true;
@@ -282,8 +299,17 @@ static bool nur_basic_result(int result)
     if (nur.mode == NUR_CLICK) return nur_click_result(result);
     return false; /* Unexpected error must terminate through nur_error. */
 }
+static bool nur_focus_result(int result)
+{
+    bool mapped = nur.mode == NUR_FOCUS_DELAYED;
+    return result == (mapped ? 0 : 1) && nur.sleeps >= 1 &&
+        nur.presses == (mapped ? 1u : 0u) && nur.releases == (mapped ? 1u : 0u) &&
+        (!mapped || (nur.pressed[0] == XK_Return && nur.released[0] == XK_Return));
+}
 static bool nur_result(int result)
 {
+    if (nur.mode == NUR_CLOSE_UNMAPPED) return result == 0 && nur.closes == 1 && nur.presses == 0 && nur.releases == 0;
+    if (nur.mode == NUR_FOCUS_DELAYED || nur.mode == NUR_FOCUS_NEVER) return nur_focus_result(result);
     if (nur.mode == NUR_REPLACED || nur.mode == NUR_NOT_REPLACED)
         return result == (nur.mode == NUR_REPLACED ? 0 : 1) && nur.presses == 1 && nur.releases == 1;
     if (nur.mode == NUR_KEYS) return result == 0;
@@ -292,6 +318,10 @@ static bool nur_result(int result)
 }
 static bool nur_mode_parse(const char *name)
 {
+    if (!strcmp(name, "close-unmapped")) { nur.mode = NUR_CLOSE_UNMAPPED; return true; }
+    if (!strcmp(name, "focus-unexpected")) { nur.mode = NUR_FOCUS_UNEXPECTED; return true; }
+    if (!strcmp(name, "focus-delayed")) { nur.mode = NUR_FOCUS_DELAYED; return true; }
+    if (!strcmp(name, "focus-never")) { nur.mode = NUR_FOCUS_NEVER; return true; }
     if (strcmp(name, "click") == 0) { nur.mode = NUR_CLICK; return true; }
     static const char *const modes[] = {"delayed", "unmapped", "unchanged", "unexpected", "race",
         "name-race", "tree-race", "name-unexpected", "keys", "replaced", "not-replaced", "click"};
@@ -316,6 +346,10 @@ static int nur_run_driver(char *option)
     char *args[] = {"native_ui_driver", option, "--key=tab", "--expect-pixels-change", "--timeout-ms=200", NULL};
     char *replace_args[] = {"native_ui_driver", option, "--key=1", "--expect-window-replaced", "--timeout-ms=200", NULL};
     char *click_args[] = {"native_ui_driver", option, "--key=click=12,14", "--expect-pixels-change", "--timeout-ms=200", NULL};
+    char *focus_args[] = {"native_ui_driver", option, "--key=enter", "--timeout-ms=200", NULL};
+    char *close_args[] = {"native_ui_driver", option, "--key=escape", "--timeout-ms=200", NULL};
+    if (nur.mode == NUR_CLOSE_UNMAPPED) return native_ui_driver_main(4, close_args);
+    if (nur.mode >= NUR_FOCUS_DELAYED) return native_ui_driver_main(4, focus_args);
     if (nur.mode == NUR_KEYS) return nur_keys(option) ? 0 : 1;
     if (nur.mode == NUR_CLICK) return native_ui_driver_main(5, click_args);
     return (nur.mode == NUR_REPLACED || nur.mode == NUR_NOT_REPLACED) ?
