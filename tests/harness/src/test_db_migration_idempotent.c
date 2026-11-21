@@ -1823,6 +1823,7 @@ static int t_v29_schema_match_table(void)
 static int t_v29_incompatible_schema_fails_without_stamp(void)
 {
     int failures = 0;
+    struct node_db ndb = {0};
     char dir[256];
     db_mig_path(dir, sizeof(dir), "v29_incompatible");
     mkdir_p(dir);
@@ -1836,19 +1837,36 @@ static int t_v29_incompatible_schema_fails_without_stamp(void)
                                   "kind INTEGER", "kind TEXT"));
         ASSERT(db_mig_v29_seed(dbpath, "DROP TABLE app_events;", table_sql));
 
-        int opened = 0;
-        int stamp = -1;
-        ASSERT(db_mig_v29_outcome(dbpath, &opened, &stamp));
-        ASSERT_EQ(stamp, 0);
-
-        sqlite3 *raw = NULL;
-        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
-        ASSERT(db_mig_count(raw,
+        ASSERT(db_mig_open_raw_handle(&ndb, dbpath));
+        ASSERT(node_db_exec(&ndb, "CREATE TABLE v29_fixture_sentinel(value INTEGER);"
+                                  "INSERT INTO v29_fixture_sentinel VALUES(37)"));
+        int floor_before = node_db_schema_compat_floor(&ndb);
+        int result = node_db_migrate(&ndb, NULL);
+        int version_after = node_db_schema_version(&ndb);
+        int floor_after = node_db_schema_compat_floor(&ndb);
+        int autocommit = sqlite3_get_autocommit(ndb.db);
+        int marker = db_mig_count(ndb.db,
+            "SELECT count(*) FROM schema_migrations WHERE version='029'");
+        int original = db_mig_count(ndb.db,
             "SELECT count(*) FROM sqlite_master WHERE type='table' "
-            "AND name='app_events' AND sql LIKE '%kind TEXT%'") == 1);
-        sqlite3_close(raw);
+            "AND name='app_events' AND sql LIKE '%kind TEXT%'");
+        int sentinel = db_mig_count(ndb.db, "SELECT count(*) FROM v29_fixture_sentinel WHERE value=37");
+        ASSERT_EQ(result, -1);
+        ASSERT_EQ(version_after, 28);
+        ASSERT_EQ(floor_after, floor_before);
+        ASSERT(autocommit != 0);
+        ASSERT_EQ(marker, 0);
+        ASSERT_EQ(original, 1);
+        ASSERT_EQ(sentinel, 1);
+        ASSERT(node_db_exec(&ndb, "DROP TABLE app_events"));
+        ASSERT(node_db_migrate(&ndb, NULL) > 0);
+        ASSERT_EQ(node_db_schema_version(&ndb), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(db_mig_count(ndb.db, "SELECT count(*) FROM schema_migrations WHERE version='029'"), 1);
+        ASSERT_EQ(db_mig_count(ndb.db, "SELECT count(*) FROM v29_fixture_sentinel WHERE value=37"), 1);
+        db_mig_close_raw_handle(&ndb);
         PASS();
     } _test_next:;
+    if (ndb.db) db_mig_close_raw_handle(&ndb);
     test_cleanup_tmpdir(dir);
     return failures;
 }

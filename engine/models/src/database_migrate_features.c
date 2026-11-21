@@ -150,13 +150,7 @@ static bool migration_app_events_schema_valid(struct node_db *ndb)
  * v29 is ADDITIVE (a new shared table + indexes): floor_ver carries over
  * unchanged, but is still persisted in the same transaction as
  * schema_version so a reader never observes one bumped without the other.
- * Split out of node_db_migrate_features() to keep that already-pinned
- * function's own cyclomatic complexity from growing; always returns having
- * either committed (with schema_version=29) or logged and rolled back —
- * the caller advances current_ver unconditionally either way, same as
- * every other migration block here. Returns 0 always (int, not void, only
- * because LOG_ERR below expands to an int-returning `return -1;` on its
- * own failure path; the caller does not read this value). */
+ * Returns success after committing or failure after rolling back. */
 static int db_migrate_v29_app_events(struct node_db *ndb, int floor_ver)
 {
     if (!node_db_begin(ndb))
@@ -828,7 +822,8 @@ int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
     }
 
     if (current_ver < 29) {
-        (void)db_migrate_v29_app_events(ndb, floor_ver);
+        if (db_migrate_v29_app_events(ndb, floor_ver) < 0)
+            return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
         current_ver = 29;
         applied++;
     }
