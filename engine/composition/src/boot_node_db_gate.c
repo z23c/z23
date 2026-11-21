@@ -19,6 +19,7 @@
  * gate. Reaching it means the store could not be opened. */
 
 #include "config/boot_internal.h"
+#include "models/database.h"
 
 #include "event/event.h"
 #include "util/blocker.h"
@@ -26,6 +27,7 @@
 #include "util/log_macros.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 bool boot_node_db_open_failed_gate(const char *datadir)
 {
@@ -71,6 +73,27 @@ bool boot_node_db_open_failed_gate(const char *datadir)
         "node.db could not be opened. The node is NOT running: booting on would mean no persistence "
         "for wallet keys, chain state, or the progress cursor",
         next, 1, evidence);
+}
+
+bool boot_node_db_migration_accept(struct node_db *ndb, int rc)
+{
+    if (rc == -2) {
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "node_db_schema_downgrade_refused rc=%d", rc);
+        exit(1);
+    }
+    if (rc >= 0)
+        return true;
+    node_db_close(ndb);
+    boot_error_report(BOOT_ERROR_FATAL, "NODE_DB_MIGRATION_FAILED",
+                      "db.open_migrate",
+                      "node.db migration failed; boot stopped. "
+                      "Inspect the preceding database error before retrying.",
+                      NULL, 0, "rc=%d", rc);
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                "node_db_migration_failed rc=%d", rc);
+    (void)boot_step_fail("node_db_migration_failed");
+    return false;
 }
 
 /* The node.db open step reports progress while it runs.

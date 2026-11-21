@@ -1195,27 +1195,7 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
             boot_test_after_node_db_open(g_node_db.db);
 #endif
         int migrate_rc = node_db_migrate(&g_node_db, ctx->datadir);
-        if (migrate_rc == -2) {
-            /* Schema downgrade refused — node_db_migrate has already
-             * printed the operator-actionable explanation to stderr.
-             * Bail before any wallet / chain logic runs so we don't
-             * write through a schema we don't understand. */
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "node_db_schema_downgrade_refused rc=%d", migrate_rc);
-            exit(1);
-        }
-        if (migrate_rc < 0) {
-            node_db_close(&g_node_db);
-            boot_error_report(BOOT_ERROR_FATAL, "NODE_DB_MIGRATION_FAILED",
-                              "db.open_migrate",
-                              "node.db migration failed; boot stopped. "
-                              "Inspect the preceding database error before retrying.",
-                              NULL, 0, "rc=%d", migrate_rc);
-            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-                        "node_db_migration_failed rc=%d", migrate_rc);
-            (void)boot_step_fail("node_db_migration_failed");
-            return false;
-        }
+        if (!boot_node_db_migration_accept(&g_node_db, migrate_rc)) return false;
         process_block_set_node_db(&g_node_db);
         if (!db_service_is_started(&g_db_service)) {
             if (!boot_step_start_db_service()) {
@@ -1231,13 +1211,9 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
             event_emitf(EV_BOOT_DB_OPEN, 0, "schema=%d tip=%d",
                         node_db_schema_version(&g_node_db), db_tip);
         }
-        /* Schema version -> next clean-shutdown marker (advisory). */
         boot_shutdown_marker_set_schema_version(
             node_db_schema_version(&g_node_db));
     } else {
-        /* #7: every other boot-storage gate names a typed blocker and parks
-         * alive-degraded on open failure; this one used to log a warning and
-         * CONTINUE booting RAM-only. See boot_node_db_gate.c. */
         return boot_node_db_open_failed_gate(ctx->datadir);
     }
     boot_step_done();
@@ -1253,8 +1229,7 @@ bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 
     bool ok = boot_seq_open_node_db(ctx);
     boot_test_after_node_db_open = NULL;
     *closed = !g_node_db.open;
-    if (g_node_db.open)
-        node_db_close(&g_node_db);
+    if (g_node_db.open) node_db_close(&g_node_db);
     return ok;
 }
 #endif
