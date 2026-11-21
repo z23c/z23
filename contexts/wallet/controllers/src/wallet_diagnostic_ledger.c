@@ -543,6 +543,24 @@ static bool ledger_render_events(const struct db_wallet_utxo *all_utxos, int nut
     return true;
 }
 
+struct ledger_read_batch {
+    struct db_wallet_utxo *utxos;
+    struct db_sapling_note *notes;
+    struct db_wallet_tx *txs;
+    int nutxos, nnotes, ntxs;
+};
+
+static bool ledger_read_batch(struct node_db *ndb, void *arg)
+{
+    struct ledger_read_batch *b = arg;
+    b->nutxos = db_wallet_utxo_list_all_checked(ndb, b->utxos, 4096);
+    if (b->nutxos < 0) return false;
+    b->nnotes = db_sapling_note_list_all_checked(ndb, b->notes, 1024);
+    if (b->nnotes < 0) return false;
+    b->ntxs = db_wallet_tx_list_checked(ndb, b->txs, 2000);
+    return b->ntxs >= 0;
+}
+
 /* Cleanup */
 static void free_ledger_batches(struct db_wallet_utxo *all_utxos, int nutxos,
                                 struct db_sapling_note *all_notes, int nnotes,
@@ -601,19 +619,20 @@ bool rpc_walletledger(const struct json_value *params, bool help,
 
     /* Load all data from SQLite */
     struct db_wallet_utxo *all_utxos = zcl_calloc(4096, sizeof(*all_utxos), "diag_utxos");
-    int nutxos = all_utxos ? db_wallet_utxo_list_all_checked(ctx->node_db, all_utxos, 4096) : -1;
 
     struct db_sapling_note *all_notes = zcl_calloc(1024, sizeof(*all_notes), "diag_notes");
-    int nnotes = all_notes ? db_sapling_note_list_all_checked(ctx->node_db, all_notes, 1024) : -1;
 
     struct db_wallet_tx *all_txs = zcl_calloc(2000, sizeof(*all_txs), "diag_txs");
-    int ntxs = all_txs ? db_wallet_tx_list_checked(ctx->node_db, all_txs, 2000) : -1;
+    struct ledger_read_batch batch = {.utxos = all_utxos, .notes = all_notes, .txs = all_txs};
+    bool read_ok = all_utxos && all_notes && all_txs &&
+                   wallet_db_read_snapshot(ctx->node_db, ledger_read_batch, &batch);
+    int nutxos = batch.nutxos, nnotes = batch.nnotes, ntxs = batch.ntxs;
 
     /* Build a height-sorted list of unique txids */
     struct ledger_event *events = zcl_calloc(4096, sizeof(*events), "diag_events");
     int nevents = 0;
 
-    if (nutxos < 0 || nnotes < 0 || ntxs < 0 || !events) {
+    if (!read_ok || !events) {
         free_ledger_batches(all_utxos, nutxos, all_notes, nnotes, all_txs, ntxs, events);
         json_set_str(result, "Wallet data unavailable");
         return false;

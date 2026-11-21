@@ -40,6 +40,7 @@
 #include "validation/txmempool.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_lock.h"
+#include <pthread.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -918,6 +919,214 @@ static bool rs_ledger_fee(struct node_db *ndb, struct rpc_table *tbl)
         ok = inserted && refused && cleared && rs_ledger_order(tbl);
     }
     return ok;
+}
+
+struct rs_ledger_writer { sqlite3 *db; int called; int rc; };
+
+static int rs_ledger_trace(unsigned event, void *arg, void *stmt, void *unused)
+{
+    (void)unused;
+    struct rs_ledger_writer *w = arg;
+    const char *sql = event == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
+    if (!w->called && sql && strstr(sql, "FROM wallet_sapling_notes ORDER BY")) {
+        w->called++;
+        w->rc = sqlite3_exec(w->db,
+            "BEGIN; INSERT INTO wallet_utxos(txid,vout,value,address_hash,script,height)"
+            " VALUES(zeroblob(32),0,7,zeroblob(20),zeroblob(1),1);"
+            "INSERT INTO wallet_transactions(txid,raw_tx,block_height,time_received,from_me,fee)"
+            " VALUES(zeroblob(32),zeroblob(1),1,1,0,0); COMMIT;", NULL, NULL, NULL);
+    }
+    return 0;
+}
+
+static bool rs_ledger_snapshot_call(struct rpc_table *tbl, size_t expected)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool handled = rpc_table_execute(tbl, "walletledger", &params, &result);
+    const struct json_value *entries = json_get(&result, "entries");
+    const struct json_value *holdings = json_get(&result, "current_holdings");
+    const struct json_value *transparent = json_get(holdings, "transparent");
+    bool ok = handled && entries && transparent && json_size(entries) == expected &&
+              json_size(transparent) == expected;
+    if (!ok) printf("(handled=%d entries=%zu holdings=%zu expected=%zu) ",
+                    handled, json_size(entries), json_size(transparent), expected);
+    json_free(&params); json_free(&result);
+    return ok;
+}
+
+struct rs_snapshot_fixture {
+    char dir[256];
+    bool made;
+    struct node_db ndb;
+    sqlite3 *writer;
+    struct wallet *wallet;
+    struct rpc_table tbl;
+};
+
+static bool rs_snapshot_setup(struct rs_snapshot_fixture *fx)
+{
+    char path[320];
+    fx->made = test_mkdtemp(fx->dir, sizeof(fx->dir), "ledger_snapshot") != NULL;
+    fx->wallet = calloc(1, sizeof(*fx->wallet));
+    if (fx->wallet) wallet_init(fx->wallet);
+    if (!fx->made || !fx->wallet || snprintf(path, sizeof(path), "%s/node.db", fx->dir) <= 0)
+        return false;
+    if (!node_db_open(&fx->ndb, path)) return false;
+    if (sqlite3_exec(fx->ndb.db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    if (sqlite3_open_v2(path, &fx->writer, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK)
+        return false;
+    rpc_table_init(&fx->tbl);
+    register_wallet_diagnostic_rpc_commands(&fx->tbl);
+    wallet_rpc_context_set_base(fx->wallet, NULL, NULL, NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(&fx->ndb);
+    return true;
+}
+
+static bool rs_snapshot_interleave(struct rs_snapshot_fixture *fx)
+{
+    struct rs_ledger_writer w = {fx->writer, 0, SQLITE_ERROR};
+    if (!rs_ledger_snapshot_call(&fx->tbl, 0)) return false;
+    if (sqlite3_trace_v2(fx->ndb.db, SQLITE_TRACE_STMT, rs_ledger_trace, &w) != SQLITE_OK)
+        return false;
+    bool first = rs_ledger_snapshot_call(&fx->tbl, 0);
+    (void)sqlite3_trace_v2(fx->ndb.db, 0, NULL, NULL);
+    bool second = rs_ledger_snapshot_call(&fx->tbl, 1);
+    bool ok = first && second && w.called == 1 && w.rc == SQLITE_OK;
+    if (!ok) printf("(writer called=%d rc=%d first=%d second=%d) ", w.called, w.rc, first, second);
+    return ok;
+}
+
+static bool rs_snapshot_caller_transaction(struct rs_snapshot_fixture *fx)
+{
+    sqlite3 *db = fx->ndb.db;
+    if (!node_db_begin_immediate(&fx->ndb)) return false;
+    if (sqlite3_exec(db, "UPDATE wallet_utxos SET value=8", NULL, NULL, NULL) != SQLITE_OK) {
+        (void)node_db_rollback(&fx->ndb);
+        return false;
+    }
+    bool ok = rs_ledger_snapshot_call(&fx->tbl, 1) && !sqlite3_get_autocommit(db);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT value FROM wallet_utxos", -1, &s, NULL) != SQLITE_OK)
+        ok = false;
+    else if (sqlite3_step(s) != SQLITE_ROW || sqlite3_column_int64(s, 0) != 8)
+        ok = false;
+    if (sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (!node_db_rollback(&fx->ndb)) ok = false;
+    return ok && sqlite3_get_autocommit(db) && rs_ledger_snapshot_call(&fx->tbl, 1);
+}
+
+struct rs_snapshot_thread {
+    struct node_db *ndb;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    bool ready, release, began, changed, rolled_back;
+};
+
+static void *rs_snapshot_writer_thread(void *arg)
+{
+    struct rs_snapshot_thread *w = arg;
+    w->began = node_db_begin_immediate(w->ndb);
+    w->changed = w->began && sqlite3_exec(w->ndb->db,
+        "UPDATE wallet_utxos SET value=9", NULL, NULL, NULL) == SQLITE_OK;
+    pthread_mutex_lock(&w->mutex);
+    w->ready = true;
+    pthread_cond_signal(&w->cond);
+    while (!w->release) pthread_cond_wait(&w->cond, &w->mutex);
+    pthread_mutex_unlock(&w->mutex);
+    w->rolled_back = w->began && node_db_rollback(w->ndb);
+    return NULL;
+}
+
+static bool rs_snapshot_foreign_writer(struct rs_snapshot_fixture *fx)
+{
+    struct rs_snapshot_thread w = {.ndb = &fx->ndb};
+    if (pthread_mutex_init(&w.mutex, NULL) != 0) return false;
+    if (pthread_cond_init(&w.cond, NULL) != 0) { pthread_mutex_destroy(&w.mutex); return false; }
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, rs_snapshot_writer_thread, &w) != 0) {
+        pthread_cond_destroy(&w.cond); pthread_mutex_destroy(&w.mutex); return false;
+    }
+    pthread_mutex_lock(&w.mutex);
+    while (!w.ready) pthread_cond_wait(&w.cond, &w.mutex);
+    pthread_mutex_unlock(&w.mutex);
+    bool refused = w.changed && rs_ledger_call(&fx->tbl, false);
+    pthread_mutex_lock(&w.mutex);
+    w.release = true;
+    pthread_cond_signal(&w.cond);
+    pthread_mutex_unlock(&w.mutex);
+    bool joined = pthread_join(thread, NULL) == 0;
+    pthread_cond_destroy(&w.cond); pthread_mutex_destroy(&w.mutex);
+    return refused && joined && w.rolled_back && sqlite3_get_autocommit(fx->ndb.db) &&
+           rs_ledger_snapshot_call(&fx->tbl, 1);
+}
+
+static bool rs_snapshot_untracked_transactions(struct rs_snapshot_fixture *fx)
+{
+    sqlite3 *db = fx->ndb.db;
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE; UPDATE wallet_utxos SET value=10", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    bool refused = rs_ledger_call(&fx->tbl, false);
+    bool rolled = sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    if (!refused || !rolled) return false;
+    if (sqlite3_exec(db, "BEGIN; SELECT value FROM wallet_utxos", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    bool accepted = rs_ledger_snapshot_call(&fx->tbl, 1) && !sqlite3_get_autocommit(db);
+    rolled = sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK;
+    return accepted && rolled && rs_ledger_snapshot_call(&fx->tbl, 1);
+}
+
+static int rs_snapshot_deny_release(void *arg, int op, const char *a,
+                                    const char *b, const char *db, const char *view)
+{
+    (void)db; (void)view;
+    int *denied = arg;
+    if (!*denied && op == SQLITE_SAVEPOINT && a && b &&
+        strcmp(a, "RELEASE") == 0 && strcmp(b, "wallet_read_snapshot") == 0) {
+        *denied = 1;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool rs_snapshot_release_failure(struct rs_snapshot_fixture *fx)
+{
+    int denied = 0;
+    if (sqlite3_set_authorizer(fx->ndb.db, rs_snapshot_deny_release, &denied) != SQLITE_OK)
+        return false;
+    bool refused = rs_ledger_call(&fx->tbl, false);
+    (void)sqlite3_set_authorizer(fx->ndb.db, NULL, NULL);
+    return denied && refused && sqlite3_get_autocommit(fx->ndb.db) &&
+           rs_ledger_snapshot_call(&fx->tbl, 1);
+}
+
+static bool rs_snapshot_cleanup(struct rs_snapshot_fixture *fx)
+{
+    bool ok = true;
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    if (fx->writer && sqlite3_close(fx->writer) != SQLITE_OK) ok = false;
+    if (fx->ndb.db) node_db_close(&fx->ndb);
+    if (fx->wallet) { wallet_free(fx->wallet); free(fx->wallet); }
+    if (fx->made && test_rm_rf_recursive(fx->dir) != 0) ok = false;
+    return ok;
+}
+
+static int rs_case_ledger_snapshot(void)
+{
+    printf("rpc_safety: walletledger holds one snapshot across wallet reads... ");
+    ensure_rpc_warmup_finished_once();
+    struct rs_snapshot_fixture fx = {0};
+    bool ok = rs_snapshot_setup(&fx);
+    if (ok) ok = rs_snapshot_interleave(&fx);
+    if (ok) ok = rs_snapshot_caller_transaction(&fx);
+    if (ok) ok = rs_snapshot_foreign_writer(&fx);
+    if (ok) ok = rs_snapshot_untracked_transactions(&fx);
+    if (ok) ok = rs_snapshot_release_failure(&fx);
+    if (!rs_snapshot_cleanup(&fx)) ok = false;
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok ? 0 : 1;
 }
 
 static int rs_case_ledger_read_failure(void)
@@ -2535,6 +2744,7 @@ int test_rpc_safety(void)
     failures += rs_case_reindex_replay();
     failures += rs_case_walletbackup_status();
     failures += rs_case_ledger_read_failure();
+    failures += rs_case_ledger_snapshot();
     failures += rs_case_getrawmempool_live();
 
     failures += rs_case_rawtx_locator();

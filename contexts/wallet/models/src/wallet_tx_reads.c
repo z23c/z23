@@ -121,9 +121,8 @@ int db_wallet_chain_tip_height(struct node_db *ndb)
     return db_wallet_query_max_height(ndb, "SELECT MAX(height) FROM blocks");
 }
 
-int db_wallet_effective_tip_height(struct node_db *ndb)
+static int wallet_effective_tip_from_chain(struct node_db *ndb, int chain_tip)
 {
-    int chain_tip = db_wallet_chain_tip_height(ndb);
     if (chain_tip < 0) return -1;
     int utxo_tip = db_wallet_query_max_height(ndb,
         "SELECT MAX(height) FROM wallet_utxos WHERE spent_txid IS NULL");
@@ -131,20 +130,31 @@ int db_wallet_effective_tip_height(struct node_db *ndb)
     return utxo_tip > chain_tip ? utxo_tip : chain_tip;
 }
 
+int db_wallet_effective_tip_height(struct node_db *ndb)
+{
+    return wallet_effective_tip_from_chain(ndb, db_wallet_chain_tip_height(ndb));
+}
+
+static bool wallet_projection_summary_collect(struct node_db *ndb, void *ctx)
+{
+    struct db_wallet_projection_summary *value = ctx;
+    value->chain_tip_height = db_wallet_chain_tip_height(ndb);
+    value->effective_tip_height = wallet_effective_tip_from_chain(ndb, value->chain_tip_height);
+    value->transparent_balance = db_wallet_utxo_balance_with_count(ndb, &value->utxo_count);
+    value->shielded_balance = db_sapling_note_balance_with_count(ndb, &value->note_count);
+    if (value->chain_tip_height < 0 || value->effective_tip_height < 0 ||
+        value->transparent_balance < 0 || value->shielded_balance < 0) return false;
+    value->speed_balance = value->transparent_balance;
+    return true;
+}
+
 bool db_wallet_projection_summary(struct node_db *ndb,
                                   struct db_wallet_projection_summary *out)
 {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
-    if (!ndb || !ndb->open) return false;
     struct db_wallet_projection_summary value = {0};
-    value.chain_tip_height = db_wallet_chain_tip_height(ndb);
-    value.effective_tip_height = db_wallet_effective_tip_height(ndb);
-    value.transparent_balance = db_wallet_utxo_balance_with_count(ndb, &value.utxo_count);
-    value.shielded_balance = db_sapling_note_balance_with_count(ndb, &value.note_count);
-    if (value.chain_tip_height < 0 || value.effective_tip_height < 0 ||
-        value.transparent_balance < 0 || value.shielded_balance < 0) return false;
-    value.speed_balance = value.transparent_balance;
+    if (!wallet_db_read_snapshot(ndb, wallet_projection_summary_collect, &value)) return false;
     *out = value;
     return true;
 }

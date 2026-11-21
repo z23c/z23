@@ -569,6 +569,12 @@ struct ar_callbacks *db_wallet_utxo_callbacks(void);
 void wallet_tx_reset_hooks_for_testing(void);
 struct ar_callbacks *db_sapling_note_callbacks(void);
 
+/* Run read-only collection under one connection snapshot. Outputs are
+ * provisional until true. The owning thread retains its transaction; foreign
+ * owned transactions and untracked writes are refused. */
+bool wallet_db_read_snapshot(struct node_db *ndb,
+                             bool (*collect)(struct node_db *, void *), void *ctx);
+
 /* Complete lists; return -1 on read failure or insufficient capacity.
  * With 0 < max <= INT_MAX and representable byte size, out is cleared before
  * reading, including on failure. Invalid capacities leave it untouched. Free successful rows with the

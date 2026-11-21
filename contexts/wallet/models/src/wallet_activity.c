@@ -5,6 +5,7 @@
  * returns the rows it managed to read before an error. */
 
 #include "models/wallet_activity.h"
+#include "models/wallet_tx.h"
 #include "models/query_builder.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
@@ -14,6 +15,45 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static bool wallet_snapshot_access_allowed(struct node_db *ndb, bool owned)
+{
+    if (owned) return true;
+    struct node_db_tx_owner owner;
+    if (node_db_tx_owner_get(ndb, &owner))
+        return pthread_equal(owner.thread, pthread_self()) != 0;
+    return sqlite3_txn_state(ndb->db, NULL) != SQLITE_TXN_WRITE;
+}
+
+bool wallet_db_read_snapshot(struct node_db *ndb,
+                             bool (*collect)(struct node_db *, void *), void *ctx)
+{
+    if (!ndb || !ndb->open || !ndb->db || !collect) return false;
+    sqlite3 *db = ndb->db;
+    sqlite3_mutex *mutex = sqlite3_db_mutex(db);
+    sqlite3_mutex_enter(mutex);
+    bool owned = sqlite3_get_autocommit(db) != 0;
+    if (!wallet_snapshot_access_allowed(ndb, owned)) {
+        LOG_WARN("wallet", "wallet read snapshot cannot join the active transaction");
+        sqlite3_mutex_leave(mutex);
+        return false;
+    }
+    if (owned && sqlite3_exec(db, "SAVEPOINT wallet_read_snapshot", NULL, NULL, NULL) != SQLITE_OK) {
+        LOG_WARN("wallet", "wallet read snapshot could not start");
+        sqlite3_mutex_leave(mutex);
+        return false;
+    }
+    bool ok = collect(ndb, ctx);
+    if (owned && sqlite3_exec(db, "RELEASE wallet_read_snapshot", NULL, NULL, NULL) != SQLITE_OK) {
+        int rollback = sqlite3_exec(db, "ROLLBACK TO wallet_read_snapshot", NULL, NULL, NULL);
+        int release = sqlite3_exec(db, "RELEASE wallet_read_snapshot", NULL, NULL, NULL);
+        if (release != SQLITE_OK) release = sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        LOG_WARN("wallet", "wallet read snapshot release failed (cleanup %d/%d)", rollback, release);
+        ok = false;
+    }
+    sqlite3_mutex_leave(mutex);
+    return ok;
+}
 
 #define WA_NCOLS(a) (sizeof(a) / sizeof((a)[0]))
 

@@ -73,6 +73,85 @@ static bool wallet_projection_summary_check(struct node_db *ndb, bool ok)
     return ok;
 }
 
+struct projection_snapshot_injection {
+    sqlite3 *writer;
+    int attempts;
+    int rc;
+};
+
+static int projection_snapshot_trace(unsigned type, void *ctx, void *stmt, void *detail)
+{
+    (void)detail;
+    struct projection_snapshot_injection *inj = ctx;
+    const char *sql = type == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
+    if (!sql || inj->attempts || !strstr(sql, "FROM wallet_sapling_notes n")) return 0;
+    inj->attempts++;
+    inj->rc = sqlite3_exec(inj->writer,
+        "BEGIN IMMEDIATE; UPDATE wallet_utxos SET value=0;"
+        "UPDATE wallet_sapling_notes SET value=5; COMMIT;", NULL, NULL, NULL);
+    return 0;
+}
+
+static bool projection_snapshot_seed(struct node_db *ndb)
+{
+    return sqlite3_exec(ndb->db,
+        "PRAGMA journal_mode=WAL;"
+        "INSERT INTO wallet_utxos(txid,vout,value,address_hash,script,height)"
+        " VALUES(zeroblob(32),0,5,zeroblob(20),zeroblob(1),1);"
+        "INSERT INTO wallet_sapling_notes(txid,output_index,value,rcm,ivk,diversifier,pk_d,cm,nullifier)"
+        " VALUES(zeroblob(32),0,0,zeroblob(32),zeroblob(32),zeroblob(11),zeroblob(32),zeroblob(32),zeroblob(32));",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool projection_snapshot_after(struct node_db *ndb)
+{
+    struct db_wallet_projection_summary after = {0};
+    bool ok = db_wallet_projection_summary(ndb, &after) &&
+        after.transparent_balance == 0 && after.shielded_balance == 5;
+    if (ok) ok = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok) ok = db_wallet_projection_summary(ndb, &after) &&
+        after.transparent_balance == 0 && after.shielded_balance == 5 &&
+        !sqlite3_get_autocommit(ndb->db);
+    if (!sqlite3_get_autocommit(ndb->db))
+        ok = (sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK) && ok;
+    return ok;
+}
+
+static bool projection_snapshot_observed(const struct projection_snapshot_injection *inj,
+                                         const struct db_wallet_projection_summary *summary)
+{
+    return inj->attempts == 1 && inj->rc == SQLITE_OK &&
+        summary->transparent_balance == 5 && summary->shielded_balance == 0;
+}
+
+static bool wallet_projection_snapshot_case(void)
+{
+    char dir[256], path[320];
+    struct node_db ndb = {0};
+    sqlite3 *writer = NULL;
+    struct projection_snapshot_injection inj = {0};
+    struct db_wallet_projection_summary summary = {0};
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "snapshot");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool ok = node_db_open(&ndb, path);
+    if (ok) ok = projection_snapshot_seed(&ndb);
+    if (ok) ok = sqlite3_open_v2(path, &writer, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK;
+    inj.writer = writer;
+    if (ok) ok = sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, projection_snapshot_trace, &inj) == SQLITE_OK;
+    if (ok) ok = db_wallet_projection_summary(&ndb, &summary);
+    if (ndb.db) sqlite3_trace_v2(ndb.db, 0, NULL, NULL);
+    printf("(T=%lld Z=%lld commits=%d rc=%d) ",
+        (long long)summary.transparent_balance, (long long)summary.shielded_balance,
+        inj.attempts, inj.rc);
+    ok = ok && projection_snapshot_observed(&inj, &summary) &&
+        sqlite3_get_autocommit(ndb.db);
+    if (ok) ok = projection_snapshot_after(&ndb);
+    if (writer) ok = (sqlite3_close(writer) == SQLITE_OK) && ok;
+    if (ndb.open) node_db_close(&ndb);
+    ok = fixture_rm_ok(dir) && ok;
+    return ok;
+}
+
 static bool wallet_projection_summary_case(void)
 {
     char dbdir[256];
@@ -767,7 +846,7 @@ static bool wallet_balance_summary_fail(struct node_db *ndb)
     if (sqlite3_set_authorizer(ndb->db, wallet_balance_deny_read, "wallet_sapling_notes") != SQLITE_OK) return false;
     bool result = db_wallet_projection_summary(ndb, &out);
     bool removed = sqlite3_set_authorizer(ndb->db, NULL, NULL) == SQLITE_OK;
-    return removed && !result && out.transparent_balance == 0 && out.shielded_balance == 0 &&
+    return removed && !result && sqlite3_get_autocommit(ndb->db) && out.transparent_balance == 0 && out.shielded_balance == 0 &&
            out.utxo_count == 0 && out.note_count == 0;
 }
 
@@ -861,6 +940,10 @@ int test_model_wallet_projection(void)
     else { printf("FAIL\n"); failures++; }
     printf("Unspent list reports complete rows and errors... ");
     if (wallet_projection_unspent_list_case()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    printf("Wallet projection summary stays on one read snapshot... ");
+    if (wallet_projection_snapshot_case()) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
     printf("Wallet projection model summarizes balances and tips... ");

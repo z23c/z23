@@ -236,32 +236,27 @@ size_t serve_dashboard(uint8_t *r, size_t max) {
         return render_loading_page(r, max);
     }
 
-    int tip = wv_effective_tip(db);
-    sqlite3_close(db);
-    if (tip < 0) return wv_render_unavailable(r, max, "Z23 Wallet", "/wallet");
-
-    /* Sync wallet from zclassicd before displaying balance.
-     * This ensures the dashboard never shows stale data.
-     * Only sync when explicitly enabled (live mode, not tests). */
-    if (g_sync_enabled)
+    /* Keep the pre-sync readiness check; after sync, use a fresh snapshot. */
+    if (g_sync_enabled) {
+        int pre_sync_tip = wv_effective_tip(db);
+        sqlite3_close(db);
+        if (pre_sync_tip < 0)
+            return wv_render_unavailable(r, max, "Z23 Wallet", "/wallet");
         wv_sync_wallet_from_zclassicd();
-
-    db = wv_open_db();
-    if (!db) {
-        return render_loading_page(r, max);
+        db = wv_open_db();
+        if (!db) return render_loading_page(r, max);
     }
 
-    /* Ground-truth transparent balance (P2PKH + P2SH change addresses) */
-    int t_utxos = 0;
-    int64_t transparent = wv_query_ground_truth_balance(db, &t_utxos);
-
-    /* Shielded: verified notes minus spent nullifiers */
-    int z_notes = 0;
-    int64_t shielded = wv_query_shielded_balance(db, &z_notes);
-    if (!wv_balance_pair_valid(transparent, shielded) || t_utxos < 0 || z_notes < 0) {
+    struct db_wallet_projection_summary summary;
+    if (!wv_query_projection_summary(db, &summary) ||
+        !wv_balance_pair_valid(summary.transparent_balance, summary.shielded_balance) ||
+        summary.utxo_count < 0 || summary.note_count < 0) {
         sqlite3_close(db);
         return wv_render_unavailable(r, max, "Z23 Wallet", "/wallet");
     }
+    int tip = summary.effective_tip_height;
+    int64_t transparent = summary.transparent_balance;
+    int64_t shielded = summary.shielded_balance;
 
     apply_pending_shield_to_display(&transparent, &shielded);
 
