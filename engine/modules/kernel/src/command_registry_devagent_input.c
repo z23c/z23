@@ -360,30 +360,36 @@ static bool devagent_worker_ints(const char *path, const char *key,
     return false;
 }
 
-/* dev.agent.receive's bounded beat cadence. Same reason as the worker arm
- * above: `--max_beats=1` and `--wait_ms=200` type as integers, so the
- * default string branch would make the leaf uninvokable from a shell while
- * raw JSON worked. Scoped to this exact leaf because `wait_ms` and
- * `max_beats` mean nothing anywhere else today. The handler owns the
- * defaults; the transport only admits the integer shape in range. */
+/* dev.agent.receive's bounded beat cadence and dev.agent.mail.probe's count
+ * and pacing. Same reason as the worker arm above: `--max_beats=1`,
+ * `--wait_ms=200` and `--probes=20` type as integers, so the default string
+ * branch would make the leaf uninvokable from a shell while raw JSON worked.
+ * Scoped to the exact leaf because these names mean nothing anywhere else
+ * today. The handler owns the defaults and, for the probe, refuses an
+ * out-of-range count or interval by name; the transport only admits the
+ * integer shape in a wider range. */
 static bool devagent_receive_ints(const char *path, const char *key,
                                   const struct json_value *value,
                                   bool *type_ok)
 {
     static const struct {
+        const char *path;
         const char *key;
         long long lo;
         long long hi;
     } bounds[] = {
-        { "deadline_s", 1, 86400 },
-        { "wait_ms", 50, 60000 },
-        { "max_beats", 0, 1000000 },
+        { "dev.agent.receive", "deadline_s", 1, 86400 },
+        { "dev.agent.receive", "wait_ms", 50, 60000 },
+        { "dev.agent.receive", "max_beats", 0, 1000000 },
+        { "dev.agent.mail.probe", "probes", 0, 1000 },
+        { "dev.agent.mail.probe", "interval_ms", 0, 86400000 },
     };
     size_t i;
-    if (!path || strcmp(path, "dev.agent.receive") != 0)
+    if (!path)
         return false;
     for (i = 0; i < sizeof(bounds) / sizeof(bounds[0]); i++) {
-        if (strcmp(key, bounds[i].key) != 0)
+        if (strcmp(path, bounds[i].path) != 0 ||
+            strcmp(key, bounds[i].key) != 0)
             continue;
         *type_ok = value->type == JSON_INT &&
                    json_get_int(value) >= bounds[i].lo &&

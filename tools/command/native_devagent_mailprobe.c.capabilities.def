@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_devagent_mailprobe.c", CAP_FS_WRITE, "posts and reads agent mail only through the dev.agent.mail and dev.agent.mail.wait handlers in process, so the only file it can cause to be written is the owner-private mail outbox through the mail post action; it opens no file, socket or process itself, and the only direct write is the allocation-failure diagnostic to stderr from base/safe_alloc.h")
