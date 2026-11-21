@@ -24,8 +24,10 @@
 #include <unistd.h>
 
 #define Z23_APP_CHILD_MAX 32u
-static pid_t children[Z23_APP_CHILD_MAX];
+struct app_child { pid_t pid; bool document; };
+static struct app_child children[Z23_APP_CHILD_MAX];
 static size_t child_count;
+static bool reaping;
 static char runtime_path[PATH_MAX];
 static char profile_arg[PATH_MAX];
 extern char **environ;
@@ -88,7 +90,7 @@ static bool spawn_app(const char *file)
     pid_t pid;
     int error = posix_spawn(&pid, runtime_path, NULL, NULL, file ? receive : library, environ);
     if (error) { alert(strerror(error)); return false; }
-    children[child_count++] = pid;
+    children[child_count++] = (struct app_child){ .pid = pid, .document = file != NULL };
     return true;
 }
 static const char *file_path(id path)
@@ -118,14 +120,20 @@ static BOOL open_untitled(id self, SEL selector, id app)
 static void reap_children(id self, SEL selector, id timer)
 {
     (void)self; (void)selector; (void)timer;
+    if (reaping) return;
+    reaping = true;
     for (size_t i = 0; i < child_count;) {
         int status;
-        pid_t done = waitpid(children[i], &status, WNOHANG);
+        pid_t done = waitpid(children[i].pid, &status, WNOHANG);
         if (done == 0 || (done < 0 && errno == EINTR)) { ++i; continue; }
-        if (done < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
-            alert("The Z23 app window did not finish successfully.");
+        bool failed = done < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+        bool document = children[i].document;
         children[i] = children[--child_count];
+        if (failed)
+            alert(document ? "The shared app did not finish opening. In My Apps, choose More options, then Discover apps, then Review received copies. If the copy is missing, ask the sender for a fresh file."
+                           : "The Z23 app window did not finish successfully.");
     }
+    reaping = false;
     if (!child_count) {
         id app = send_id((id)objc_getClass("NSApplication"), "sharedApplication");
         send_object(app, "terminate:", nil);
