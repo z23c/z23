@@ -70,6 +70,7 @@
 #include "models/database.h"
 
 #include "wallet/wallet.h"
+#include "wallet/keystore.h"
 #include "wallet/sapling_keys.h"
 #include "util/safe_alloc.h"
 #include "util/ar_step_readonly.h"
@@ -366,6 +367,137 @@ struct wrc_f {
     char net_blocks[384];
     char hidden[400];
 };
+
+static bool wrc_accounting_balance(struct wrc_f *f, int64_t expected)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+    const struct json_value *balance = json_get(&result, "utxo_balance");
+    if (balance && balance->type == JSON_REAL)
+        printf(" (utxo_balance=%.8f)", json_get_real(balance));
+    ok = ok && balance && balance->type == JSON_REAL && json_get_real(balance) == (double)expected;
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static bool wrc_accounting_reserved(const struct transaction *tx, uint32_t vout, void *ctx)
+{
+    (void)tx; (void)ctx;
+    return vout == 2;
+}
+
+static int wrc_accounting_maturity(struct wrc_f *f, struct wallet *w,
+                                   const struct wallet_tx *source)
+{
+    int failures = 0;
+    struct wallet_tx *cb = &w->map_wallet[1];
+    cb->used = true;
+    cb->confirms = 0;
+    w->num_wallet_tx++;
+    transaction_init(&cb->tx);
+    bool allocated = transaction_alloc(&cb->tx, 1, 1);
+    WRC_CHECK("accounting: create coinbase", allocated);
+    if (allocated) {
+        cb->tx.hash.data[0] = 0x71;
+        cb->tx.vout[0].value = INT64_C(700000000);
+        cb->tx.vout[0].script_pub_key = source->tx.vout[4].script_pub_key;
+        WRC_CHECK("accounting RPC excludes immature coinbase", wrc_accounting_balance(f, 5));
+        cb->confirms = 100000;
+        WRC_CHECK("accounting RPC includes mature coinbase", wrc_accounting_balance(f, 12));
+    }
+    return failures;
+}
+
+static int wrc_accounting_policy(struct wrc_f *f, struct wallet *w,
+                                 struct wallet_tx *wtx)
+{
+    int failures = 0;
+    wtx->tx.num_vout = 6;
+    wtx->tx.vout[0].value = 0;
+    struct key_id watch = {0};
+    watch.id.data[0] = 0xb9;
+    WRC_CHECK("accounting: add watch-only key", keystore_add_watch_only_id(&w->keystore, &watch));
+    script_for_p2pkh(&wtx->tx.vout[1].script_pub_key, &watch);
+    wallet_set_coin_reservation_probe(wrc_accounting_reserved, NULL);
+    wallet_mark_outpoint_spent(w, &wtx->tx.hash, 3);
+    struct script redeem;
+    script_init(&redeem);
+    WRC_CHECK("accounting: build redeem script", script_push_op(&redeem, OP_TRUE));
+    WRC_CHECK("accounting: add redeem script", keystore_add_cscript(&w->keystore, &redeem));
+    struct script_id sid;
+    script_id_from_script(&sid, &redeem);
+    script_for_p2sh(&wtx->tx.vout[5].script_pub_key, &sid);
+    wtx->tx.vout[5].value = INT64_C(300000000);
+    struct coin_entry coins[6];
+    size_t n = 0;
+    wallet_available_coins(w, coins, &n, 6, false, false);
+    WRC_CHECK("accounting: selection excludes reserved, spent and zero but includes watch-only",
+              n == 3 && coins[0].i == 1 && !coins[0].spendable && coins[1].i == 4 && coins[2].i == 5 && !coins[2].spendable);
+    WRC_CHECK("accounting RPC includes nonspendable owned script", wrc_accounting_balance(f, 5));
+    wtx->confirms = 3;
+    WRC_CHECK("accounting RPC includes confirmed outputs", wrc_accounting_balance(f, 5));
+    failures += wrc_accounting_maturity(f, w, wtx);
+    wallet_set_coin_reservation_probe(NULL, NULL);
+    wallet_unmark_outpoint_spent(w, &wtx->tx.hash, 3);
+    wtx->tx.num_vout = 4097;
+    return failures;
+}
+
+static int wrc_accounting_overflow(struct wrc_f *f, struct wallet_tx *wtx)
+{
+    int failures = 0;
+    wtx->tx.num_vout = 2;
+    wtx->tx.vout[0].value = INT64_MAX;
+    wtx->tx.vout[1].value = 1;
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+    WRC_CHECK("accounting RPC refuses overflowing available balance", !ok);
+    json_free(&params);
+    json_free(&result);
+    wtx->tx.num_vout = 4097;
+    return failures;
+}
+
+static int wrc_accounting_boundary(struct wrc_f *f)
+{
+    int failures = 0;
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "accounting.fixture");
+    if (!w) return 1;
+    wallet_init(w);
+    struct pubkey pk;
+    bool created = wallet_generate_new_key(w, &pk);
+    WRC_CHECK("accounting fixture generates a key", created);
+    struct wallet_tx *wtx = &w->map_wallet[0];
+    wtx->used = true;
+    wtx->confirms = 0;
+    w->num_wallet_tx = 1;
+    transaction_init(&wtx->tx);
+    bool allocated = created && transaction_alloc(&wtx->tx, 0, 4097);
+    WRC_CHECK("accounting fixture allocates 4097 outputs", allocated);
+    if (allocated) {
+        struct key_id kid = pubkey_get_id(&pk);
+        for (size_t i = 0; i < 4097; i++) {
+            wtx->tx.vout[i].value = i == 4096 ? INT64_C(200000000) : INT64_C(100000000);
+            script_for_p2pkh(&wtx->tx.vout[i].script_pub_key, &kid);
+        }
+        rpc_wallet_set_state(w, f->ms, f->datadir, f->ws, f->mempool, NULL);
+        wtx->tx.num_vout = 4095;
+        WRC_CHECK("accounting RPC includes 4095 outputs", wrc_accounting_balance(f, 4095));
+        wtx->tx.num_vout = 4096;
+        WRC_CHECK("accounting RPC includes 4096 outputs", wrc_accounting_balance(f, 4096));
+        wtx->tx.num_vout = 4097;
+        WRC_CHECK("accounting RPC includes distinct 4097th output", wrc_accounting_balance(f, 4098));
+        failures += wrc_accounting_policy(f, w, wtx);
+        failures += wrc_accounting_overflow(f, wtx);
+    }
+    rpc_wallet_set_state(f->owner, f->ms, f->datadir, f->ws, f->mempool, NULL);
+    wallet_free(w);
+    free(w);
+    return failures;
+}
 
 /* A wallet as the next boot builds it: key, flushed txs, then scan state. */
 static struct wallet *wrc_reboot_wallet(struct wrc_f *f)
@@ -3169,6 +3301,7 @@ int test_wallet_rescan_coverage(void)
             .idx = idx, .ws = &ws, .tbl = &wtbl, .mempool = &mempool,
         };
         failures += wrc_boot_catch_up_fail_closed(&f);
+        failures += wrc_accounting_boundary(&f);
     }
     rpc_wallet_set_state(w1, &ms, datadir, &ws, &mempool, NULL);
     failures += wrc_k_cleared_marker_persists(w1, &ws, &wtbl, idx, last);

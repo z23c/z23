@@ -130,6 +130,32 @@ void wallet_available_coins(const struct wallet *w,
                               only_confirmed, include_zero_value, false);
 }
 
+bool wallet_available_coins_balance(const struct wallet *w, int64_t *balance_out)
+{
+    if (!w || !balance_out) return false;
+    *balance_out = 0;
+    int64_t sum = 0;
+    bool ok = true;
+    zcl_mutex_lock((zcl_mutex_t *)&w->cs);
+    for (size_t i = 0; i < MAX_WALLET_TX && ok; i++) {
+        const struct wallet_tx *wtx = &w->map_wallet[i];
+        if (!wallet_tx_has_listable_coins(wtx, false)) continue;
+        for (size_t j = 0; j < wtx->tx.num_vout; j++) {
+            if (!wallet_coin_output_available(w, wtx, j, false, false)) continue;
+            int64_t value = wtx->tx.vout[j].value;
+            if ((value > 0 && sum > INT64_MAX - value) ||
+                (value < 0 && sum < INT64_MIN - value)) {
+                ok = false;
+                break;
+            }
+            sum += value;
+        }
+    }
+    zcl_mutex_unlock((zcl_mutex_t *)&w->cs);
+    if (ok) *balance_out = sum;
+    return ok;
+}
+
 int64_t wallet_default_fee(const struct wallet *w)
 {
     if (!w)

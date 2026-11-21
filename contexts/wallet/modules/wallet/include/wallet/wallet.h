@@ -302,6 +302,10 @@ void wallet_available_coins(const struct wallet *w,
                              size_t *num_coins, size_t max_coins,
                              bool only_confirmed, bool include_zero_value);
 
+/* Sum all coins matching wallet_available_coins(w, ..., false, false),
+ * without an output count limit. Returns false on overflow. */
+bool wallet_available_coins_balance(const struct wallet *w, int64_t *balance_out);
+
 /* Extended inventory for asset-aware builders. The ordinary wrapper above
  * always excludes ZSLP token and mint-baton outputs so a plain ZCL send cannot
  * silently burn them. Only a token builder should pass include_slp_reserved. */

@@ -228,17 +228,6 @@ static void accounting_output_details(const struct wallet *w,
     json_free(&details);
 }
 
-static int64_t accounting_utxo_balance(const struct wallet *w)
-{
-    int64_t utxo_balance = 0;
-    struct coin_entry coins[4096];
-    size_t nc = 0;
-    wallet_available_coins(w, coins, &nc, 4096, false, false);
-    for (size_t i = 0; i < nc; i++)
-        utxo_balance += coins[i].wtx->tx.vout[coins[i].i].value;
-    return utxo_balance;
-}
-
 bool rpc_getwalletaccounting(const struct json_value *params,
                                     bool help, struct json_value *result)
 {
@@ -251,6 +240,12 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         "Invariant: external_in = utxo_balance + external_out + fees");
 
     ENSURE_WALLET(result);
+
+    int64_t utxo_balance = 0;
+    if (!wallet_available_coins_balance(ctx->wallet, &utxo_balance)) {
+        json_set_str(result, "Available wallet coin balance overflow");
+        return false;
+    }
 
     const struct chain_params *cp = chain_params_get();
     size_t pk_pfx_len, sc_pfx_len;
@@ -349,9 +344,6 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         json_push_back(&tx_list, &entry);
         json_free(&entry);
     }
-
-    /* Compute actual UTXO balance */
-    int64_t utxo_balance = accounting_utxo_balance(ctx->wallet);
 
     char s[32];
     format_amount(total_external_in, s, sizeof(s));
