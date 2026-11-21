@@ -210,9 +210,9 @@ enum db_wallet_utxo_iter_result {
 };
 /* Copy one ordered SELECT under the connection mutex, then invoke visitors
  * after unlocking. scratch_limit bounds owned row structs and script bytes;
- * snapshot allocation or limit failure returns RESOURCE before any visitor;
- * SQLite errors, including finalization failure, return READ_ERROR. Row fields
- * may be changed locally; the script is borrowed for the callback. */
+ * Read and scratch-resource failures are reported before any visitor runs.
+ * A visitor failure stops traversal. Row fields may be changed locally; the
+ * script is borrowed for the callback. */
 enum db_wallet_utxo_iter_result db_wallet_utxo_each_unspent(
     struct node_db *ndb, size_t scratch_limit,
     bool (*visit)(struct db_wallet_utxo *, void *), void *ctx);
