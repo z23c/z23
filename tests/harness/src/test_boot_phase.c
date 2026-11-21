@@ -573,6 +573,49 @@ static int bp_node_db_guidance(const char *captured, const char *display_dir)
     return failures;
 }
 
+bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 *));
+
+static int g_bp_migration_denials;
+static int g_bp_migration_authorizer_rc;
+
+static int bp_deny_migration_read(void *unused, int action, const char *table,
+                                  const char *column, const char *db,
+                                  const char *trigger)
+{
+    (void)unused; (void)column; (void)db; (void)trigger;
+    if (action == SQLITE_READ && table && strcmp(table, "node_state") == 0) {
+        g_bp_migration_denials++;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static void bp_inject_migration_read_failure(sqlite3 *db)
+{
+    g_bp_migration_authorizer_rc = sqlite3_set_authorizer(
+        db, bp_deny_migration_read, NULL);
+}
+
+static int bp_node_db_second_migration_refuses(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    bp_park_fixture_begin(dir, sizeof(dir), false);
+    boot_stage_reset_for_testing();
+    g_bp_migration_denials = 0;
+    g_bp_migration_authorizer_rc = -1;
+    bool ok = boot_test_open_node_db(&g_bp_park_ctx,
+                                     bp_inject_migration_read_failure);
+    BP_CHECK("second migration fixture injects read failure after open",
+             g_bp_migration_authorizer_rc == SQLITE_OK &&
+             g_bp_migration_denials > 0);
+    BP_CHECK("second migration failure refuses boot", !ok);
+    BP_CHECK("second migration failure does not advance DB stage",
+             boot_stage_current() == BOOT_STAGE_INIT);
+    bp_park_fixture_end(dir);
+    return failures;
+}
+
 /* ── node.db unopenable REFUSES; it must never park ───────────────
  *
  * Parking sends no READY= under Type=notify and the step stays open, so the
@@ -2437,6 +2480,7 @@ int test_boot_phase(void)
     }
 
     failures += bp_node_db_gate_refuses();
+    failures += bp_node_db_second_migration_refuses();
     failures += bp_legacy_snapshot_keeps_source_lock();
     failures += bp_test_legacy_header_pull_predicates();
     failures += bp_test_blocks_table_hydrate_predicates();

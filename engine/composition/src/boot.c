@@ -1179,6 +1179,10 @@ static bool boot_seq_prologue(struct app_context *ctx, struct boot_seq *s)
     return true;
 }
 
+#ifdef ZCL_TESTING
+static void (*boot_test_after_node_db_open)(sqlite3 *);
+#endif
+
 /* Open and migrate node.db, then start the DB service. */
 static bool boot_seq_open_node_db(struct app_context *ctx)
 {
@@ -1186,6 +1190,10 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
     int64_t t_phase = boot_clock_ms();
     boot_node_db_open_step_begin();  /* see boot_node_db_gate.c */
     if (node_db_sync_init(&g_node_db, ctx->datadir)) {
+#ifdef ZCL_TESTING
+        if (boot_test_after_node_db_open)
+            boot_test_after_node_db_open(g_node_db.db);
+#endif
         int migrate_rc = node_db_migrate(&g_node_db, ctx->datadir);
         if (migrate_rc == -2) {
             /* Schema downgrade refused — node_db_migrate has already
@@ -1195,6 +1203,14 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
             event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                         "node_db_schema_downgrade_refused rc=%d", migrate_rc);
             exit(1);
+        }
+        if (migrate_rc < 0) {
+            fprintf(stderr, "ERROR: node.db migration failed (rc=%d); refusing boot\n",
+                    migrate_rc);
+            event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                        "node_db_migration_failed rc=%d", migrate_rc);
+            (void)boot_step_fail("node_db_migration_failed");
+            return false;
         }
         process_block_set_node_db(&g_node_db);
         if (!db_service_is_started(&g_db_service)) {
@@ -1224,6 +1240,18 @@ static bool boot_seq_open_node_db(struct app_context *ctx)
     boot_topmark("sqlite_open_migrate", t_phase);
     return true;
 }
+
+#ifdef ZCL_TESTING
+bool boot_test_open_node_db(struct app_context *ctx, void (*after_open)(sqlite3 *))
+{
+    boot_test_after_node_db_open = after_open;
+    bool ok = boot_seq_open_node_db(ctx);
+    boot_test_after_node_db_open = NULL;
+    if (g_node_db.open)
+        node_db_close(&g_node_db);
+    return ok;
+}
+#endif
 
 /* Open the wallet persistence layer and refuse (STATE D) if user keys are
  * on disk but the layer will not open. */
