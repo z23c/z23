@@ -113,6 +113,7 @@ static int cps_write_script(const char *dir)
         "} >> \"$dir/log\"\n"
         "case \"$base\" in\n"
         "  sha256sum)\n"
+        "    while IFS= read -r line || [ -n \"${line-}\" ]; do :; done\n"
         "    if [ \"${1-}\" = -c ]; then\n"
         "      if [ -f \"$dir/sha.fail\" ]; then exit 1; fi\n"
         "      exit 0\n"
