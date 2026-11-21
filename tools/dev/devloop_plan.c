@@ -1285,7 +1285,10 @@ static bool plan_closure_include_walk(struct zcl_devloop_plan *plan,
         for (int d = 0; d < nd; d++) {
             if (!plan_fold_reached_file(plan, impacted[d],
                                         ZCL_DEVLOOP_DIM_INCLUDE)) {
+                bool first_capacity = !plan->capacity_origin;
                 zcl_devloop_capacity_note(plan, "include", "group-cap", files[i]);
+                if (first_capacity)
+                    zcl_devloop_capacity_set_node(plan, impacted[d]);
                 plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
                 break;
             }

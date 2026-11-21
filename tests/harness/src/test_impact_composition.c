@@ -16868,6 +16868,22 @@ static int test_ic_include_capacity_runs_everything(void)
                                 "\"") != NULL);
         }
 
+        /* A single dependent makes the group-cap trigger unambiguous. */
+        ASSERT(unlink(IC_FIX_INCCAP "/build/obj/tor_integration.d") == 0);
+        zcl_devloop_test_plan_group_cap = 1;
+        bool group_built = ic_include_plan(0, &plan);
+        zcl_devloop_test_plan_group_cap = 0;
+        ASSERT(group_built);
+        ASSERT(plan.closure_universal);
+        ASSERT_STR_EQ(plan.capacity_origin, "include");
+        ASSERT_STR_EQ(plan.capacity_cause, "group-cap");
+        ASSERT_STR_EQ(plan.capacity_input, IC_INCCAP_DEF);
+        ASSERT_STR_EQ(plan.capacity_node, "core/modules/net/src/download.c");
+        ASSERT(ic_capacity_json_is(&plan, "include", "group-cap", IC_INCCAP_DEF,
+                                   "core/modules/net/src/download.c"));
+        ASSERT(zcl_devloop_plan_proof_admissible(&plan, &why));
+        ASSERT(ic_write_include_fanout(IC_FIX_INCCAP, false));
+
         /* (a) two dependents, room for one: capacity. The dimension answers
          * with the universal closure and the plan is admissible proof. */
         ASSERT(ic_include_plan(1, &plan));
