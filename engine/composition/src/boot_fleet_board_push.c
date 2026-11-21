@@ -324,6 +324,39 @@ void boot_fleet_board_fleet_push_enqueue(const struct fleet_board_post *post,
     (void)boot_fleet_board_fleet_push_enqueue_to(post, own_key, NULL);
 }
 
+/* Append one entry under the push lock; a full queue gives up its oldest. */
+static void push_queue_put(const struct push_queued *q)
+{
+    bool dropped = false;
+    push_lock();
+    if (g_queue_len == FLEET_BOARD_PUSH_QUEUE_MAX) {
+        g_queue_head = (g_queue_head + 1) % FLEET_BOARD_PUSH_QUEUE_MAX;
+        g_queue_len--;
+        dropped = true;
+    }
+    g_queue[(g_queue_head + g_queue_len) % FLEET_BOARD_PUSH_QUEUE_MAX] = *q;
+    g_queue_len++;
+    atomic_store_explicit(&g_queue_count, g_queue_len, memory_order_relaxed);
+    push_unlock();
+    push_bump(&g_send_gen, 1);
+    push_bump(&g_queued, 1);
+    if (dropped)
+        push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
+}
+
+/* A post that is not this box's own FLEET post: counted, and a usable hint
+ * on it refused by which of the two it is not. */
+static enum fleet_board_push_hint push_not_own(
+    const struct fleet_board_post *post, enum fleet_board_push_hint hint)
+{
+    push_skip(FLEET_BOARD_PUSH_SKIP_NOT_OWN, 1);
+    if (hint == FLEET_BOARD_PUSH_HINT_QUEUED)
+        hint = post && post->scope != FLEET_BOARD_SCOPE_FLEET
+                   ? FLEET_BOARD_PUSH_HINT_NOT_FLEET
+                   : FLEET_BOARD_PUSH_HINT_NOT_OWN;
+    return push_hint_count(hint);
+}
+
 enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
     const struct fleet_board_post *post, const uint8_t own_key[32],
     const char *push_to)
@@ -331,14 +364,8 @@ enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
     uint8_t to[32];
     enum fleet_board_push_hint hint = push_hint_parse(push_to, to);
     if (!post || !own_key || post->scope != FLEET_BOARD_SCOPE_FLEET ||
-        memcmp(post->host_pubkey, own_key, 32) != 0) {
-        push_skip(FLEET_BOARD_PUSH_SKIP_NOT_OWN, 1);
-        if (hint == FLEET_BOARD_PUSH_HINT_QUEUED)
-            hint = post && post->scope != FLEET_BOARD_SCOPE_FLEET
-                       ? FLEET_BOARD_PUSH_HINT_NOT_FLEET
-                       : FLEET_BOARD_PUSH_HINT_NOT_OWN;
-        return push_hint_count(hint);
-    }
+        memcmp(post->host_pubkey, own_key, 32) != 0)
+        return push_not_own(post, hint);
     if (hint == FLEET_BOARD_PUSH_HINT_QUEUED && memcmp(to, own_key, 32) == 0)
         hint = FLEET_BOARD_PUSH_HINT_SELF;
     /* A refused hint is as if there were none: the ref decides, or nothing. */
@@ -357,21 +384,7 @@ enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
     if (use_to)
         memcpy(q.to, to, 32);
     q.queued = board_now();
-    bool dropped = false;
-    push_lock();
-    if (g_queue_len == FLEET_BOARD_PUSH_QUEUE_MAX) {
-        g_queue_head = (g_queue_head + 1) % FLEET_BOARD_PUSH_QUEUE_MAX;
-        g_queue_len--;
-        dropped = true;
-    }
-    g_queue[(g_queue_head + g_queue_len) % FLEET_BOARD_PUSH_QUEUE_MAX] = q;
-    g_queue_len++;
-    atomic_store_explicit(&g_queue_count, g_queue_len, memory_order_relaxed);
-    push_unlock();
-    push_bump(&g_send_gen, 1);
-    push_bump(&g_queued, 1);
-    if (dropped)
-        push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
+    push_queue_put(&q);
     return push_hint_count(hint);
 }
 
