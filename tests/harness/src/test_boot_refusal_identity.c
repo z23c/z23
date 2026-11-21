@@ -12,10 +12,16 @@
 #include "config/boot_mempool_limits.h"
 #include "config/boot_refusal_reports.h"
 #include "platform/current_identity.h"
+#include "util/util.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 static int current_identity_boundary_probe(void)
 {
@@ -61,6 +67,65 @@ static int boot_refusal_identity_probe(void)
         return 2;
     return 0;
 }
+
+#if !defined(_WIN32)
+static int datadir_advice_probe(const char *report, int error)
+{
+    if (error == ENOENT)
+        return strstr(report, "if a parent is missing") ? 0 : 3;
+    return strstr(report, "inspect the requested path") ? 0 : 4;
+}
+
+/* Exercise the same SetDataDir/errno/report sequence used by boot. */
+static int datadir_refusal_probe(const char *path)
+{
+    boot_error_reset_for_testing();
+    errno = 0;
+    bool accepted = SetDataDir(path);
+    int error = errno;
+    if (accepted) return 1;
+    boot_report_datadir_create_failed(path, error);
+    char report[4096], evidence[256];
+    snprintf(evidence, sizeof(evidence), "directory_errno=%s", error > 0 ? strerror(error) : "unavailable");
+    if (!boot_error_last_render(report, sizeof(report)) ||
+        !strstr(report, "BOOT_DATADIR_CREATE_FAILED") ||
+        !strstr(report, "datadir_select") || !strstr(report, path) ||
+        !strstr(report, "identity=") || !strstr(report, evidence) ||
+        !strstr(report, "created or validated as private") ||
+        strstr(report, "does not exist")) return 2;
+    return datadir_advice_probe(report, error);
+}
+
+static int datadir_existing_file_and_missing_parent_probe(void)
+{
+    char dir[256], file[512], missing[512];
+    test_make_tmpdir(dir, sizeof(dir), "boot_refusal", "datadir");
+    snprintf(file, sizeof(file), "%s/existing-file", dir);
+    snprintf(missing, sizeof(missing), "%s/missing/target", dir);
+    FILE *f = fopen(file, "wb");
+    if (!f) { test_cleanup_tmpdir(dir); return 1; }
+    if (fclose(f) != 0) { test_rm_rf_recursive(dir); return 2; }
+    int a = datadir_refusal_probe(file);
+    int b = datadir_refusal_probe(missing);
+    boot_error_reset_for_testing();
+    boot_report_datadir_create_failed(file, 0);
+    char report[4096];
+    bool zero_error = boot_error_last_render(report, sizeof(report)) &&
+        strstr(report, "directory_errno=unavailable") &&
+        !strstr(report, "directory_errno=Success");
+    (void)test_rm_rf_recursive(dir);
+    return a ? 10 + a : b ? 20 + b : zero_error ? 0 : 30;
+}
+
+static int datadir_isolated_probe(void)
+{
+    pid_t child = fork();
+    if (child == 0) _exit(datadir_existing_file_and_missing_parent_probe());
+    int status = 0;
+    return child > 0 && waitpid(child, &status, 0) == child &&
+        WIFEXITED(status) ? WEXITSTATUS(status) : 99;
+}
+#endif
 
 static bool mempool_limits_probe_start_ok(void *ctx)
 {
@@ -188,6 +253,14 @@ int test_boot_refusal_identity(void)
         printf("FAIL (step %d)\n", rc);
         failures++;
     }
+
+#if !defined(_WIN32)
+    rc = datadir_isolated_probe();
+    printf("boot_refusal_identity: existing file and missing parent report accurately... ");
+    if (rc == 0) printf("OK\n");
+    else { printf("FAIL (step %d)\n", rc); failures++; }
+
+#endif
 
     rc = boot_signal_handler_install_refusal_probe();
     printf("boot_refusal_identity: signal_handler_install failure is "

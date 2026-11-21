@@ -39,43 +39,33 @@ static void rescue_copy_command(const char *datadir, char *out, size_t cap)
     (void)snprintf(out, cap, "cp -a %s %s.rescue-copy", datadir, datadir);
 }
 
-void boot_report_datadir_create_failed(const char *datadir, int mkdir_errno)
+void boot_report_datadir_create_failed(const char *datadir, int error_errno)
 {
     const char *dd = datadir && datadir[0] ? datadir : "(unset)";
     char parent[1024];
     parent_dir_of(dd, parent, sizeof(parent));
 
-    char mk[1100], ls[1100];
-    (void)snprintf(mk, sizeof(mk), "mkdir -p %s", dd);
-    (void)snprintf(ls, sizeof(ls), "ls -ld %s", parent);
-
-    /* Only offer `mkdir -p` when a missing parent is what actually failed.
-     * On EACCES/EROFS the same mkdir would fail identically, so suggesting it
-     * would spend the reader's next move proving what this line already
-     * measured. */
+    /* ENOENT can indicate a missing parent; verify it before retrying. */
     const struct boot_error_next missing_parent[] = {
-        { mk, "create the directory INCLUDING its parents; the node's own "
-              "create is single-level and fails when a parent is missing" },
-        { ls, "confirm the parent exists and is writable by the user running "
+        { "inspect the parent directory", "if a parent is missing, create the directory and its parents" },
+        { "check parent permissions", "confirm the parent exists and is writable by the user running "
               "the node" },
     };
     const struct boot_error_next not_permitted[] = {
-        { ls, "compare the parent's owner and mode against the user running "
-              "the node; the create was refused, not merely missing a "
-              "parent" },
+        { "inspect the requested path", "inspect the requested path and its type, owner and mode" },
         { "id -un", "print the user this process runs as" },
     };
-    bool parent_missing = mkdir_errno == ENOENT;
+    bool parent_missing = error_errno == ENOENT;
     char identity[192];
     if (!platform_current_identity(identity, sizeof(identity)))
         (void)snprintf(identity, sizeof(identity), "unavailable");
     boot_error_report(BOOT_ERROR_FATAL, "BOOT_DATADIR_CREATE_FAILED",
                       "datadir_select",
-                      "the data directory does not exist and could not be "
-                      "created",
+                      "the data directory could not be created or validated as private",
                       parent_missing ? missing_parent : not_permitted, 2,
-                      "datadir=%s parent=%s identity=%s mkdir_errno=%s",
-                      dd, parent, identity, strerror(mkdir_errno));
+                      "datadir=%s parent=%s identity=%s directory_errno=%s",
+                      dd, parent, identity,
+                      error_errno > 0 ? strerror(error_errno) : "unavailable");
 }
 
 void boot_report_signal_handler_install_failed(void)

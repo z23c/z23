@@ -26,10 +26,9 @@ extern "C" {
 
 struct zcl_result;
 
-/* BOOT_DATADIR_CREATE_FAILED — the datadir did not exist and the node's
- * single-level mkdir also failed. `mkdir_errno` is errno as captured at the
- * failing call. */
-void boot_report_datadir_create_failed(const char *datadir, int mkdir_errno);
+/* BOOT_DATADIR_CREATE_FAILED — the data directory could not be created or
+ * validated as private. `error_errno` is captured from the failing call. */
+void boot_report_datadir_create_failed(const char *datadir, int error_errno);
 
 /* BOOT_SIGNAL_HANDLER_INSTALL_FAILED — signal_handler_install returned
  * non-zero. Boot refuses rather than run without a crash handler. */
