@@ -2601,6 +2601,33 @@ ZCL_COMMAND_DEV_COMMAND(
     "landing windows are a development-lane coordination surface",
     "z23 dev land window")
 
+/* ── dev.land.stats ────────────────────────────────────────────────────────
+ * Measured landing-throughput reading of the outcomes ledger
+ * (tools/command/native_dev_land_stats.c). */
+ZCL_COMMAND_DEV_READ(
+    "dev.loop.land_stats", "dev.loop", "dev.land.stats",
+    "Read the land queue's measured throughput",
+    "Reads the tail of the land outcomes ledger (at most 32 MiB, said in "
+    "source when capped) for the last hours (default 168, 1..720) and "
+    "reports per UTC day how busy the single proof slot was (summed "
+    "terminal_recorded_at minus started over 86400 s), the rows landed, "
+    "failed, conflict and cancelled, the failure rate as failed over landed "
+    "plus failed against the under-5% target, the failures by phase and "
+    "dimension with the slot minutes each burned, and the median and p90 "
+    "duration of landed rows (nearest rank), with a short screen. "
+    "outcomes overrides the ledger path and now the clock, for fixtures. "
+    "It reads only and writes nothing.", 32768,
+    "land,stats,throughput,slot,failure,percentile,measure",
+    "zcl.land_stats_input.v1", "zcl.land_stats.v1", "hours,now,outcomes", "",
+    "z23-dev dev land stats --hours=168", ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_stats,
+    "landing statistics read dev-lane state and need the dev binary",
+    "z23-dev dev land stats")
+
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.intake", "dev.land", "",
     "Take in READY board posts: verify, scope, merge-check, verdict",

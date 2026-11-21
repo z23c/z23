@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the dev.land.stats leaf. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_stats.c", CAP_FS_READ|CAP_FS_WRITE, "reads the tail of the land outcomes ledger (read-only fopen, which the closure classifier counts as FS_WRITE); writes no file; spawns nothing")

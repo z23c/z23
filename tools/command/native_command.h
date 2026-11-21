@@ -1459,6 +1459,10 @@ void zcl_dev_orient_banner(char *out, size_t cap);
  * (tools/command/native_dev_factory.c). */
 /* dev.land.window — two-lander LAND-WINDOW protocol
  * (tools/command/native_dev_land_window.c). */
+/* dev.land.stats — measured landing throughput from the outcomes ledger
+ * (tools/command/native_dev_land_stats.c). */
+void zcl_native_handle_dev_land_stats(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply);
 /* dev.land.receive / dev.land.send — submit from another machine
  * (tools/command/native_dev_land_remote.c). The first two are the narrow
  * entries it borrows from tools/command/native_dev_land.c. */

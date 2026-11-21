@@ -1293,6 +1293,9 @@ static bool cr_telegram_descriptor(const struct zcl_command_spec *spec, const ch
 
 static bool cr_objectives_path_key(const char *path, const char *key)
 {
+    static const char *const stats_keys[] = { "outcomes" };
+    if (!strcmp(path, "dev.loop.land_stats"))
+        return command_registry_key_in_set(key, stats_keys, 1);
     static const char *const keys[] = { "outcomes", "attempts_dir", "repo", "lintc_dir", "baseline", "brief" };
     return !strcmp(path, "fleet.objectives") && command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0]));
 }
