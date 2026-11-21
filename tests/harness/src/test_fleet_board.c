@@ -2875,6 +2875,38 @@ static bool fb_rpc_fleet_page(struct fb_rpc_fixture *f, int64_t after,
     return ok;
 }
 
+static bool fb_page_faults(struct fb_rpc_fixture *f)
+{
+    static const char *const labels[] = {"json_set_str", "json_push_kv_key",
+        "json_children", "json_keys", "json_copy_children", "json_copy_keys",
+        "json_copy_key", "json_copy_str"};
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        bool any = false;
+        for (unsigned nth = 1; nth <= 128; nth++) {
+            struct json_value input, params, result;
+            json_init(&input); json_init(&params); json_init(&result);
+            json_set_object(&input); json_set_array(&params);
+            bool setup = json_push_kv_str(&input, "op", "fleet_page") &&
+                         json_push_kv_int(&input, "after", 0) &&
+                         json_push_back(&params, &input);
+            if (!setup) { json_free(&input); json_free(&params); return false; }
+            zcl_alloc_fault_fail_nth(labels[i], nth);
+            bool called = rpc_table_execute(&f->table, "fleet_board", &params, &result);
+            bool hit = zcl_alloc_fault_armed_label() == NULL;
+            zcl_alloc_fault_clear();
+            bool safe = !hit || !called ||
+                (!json_get_bool(json_get(&result, "ok")) &&
+                 !json_get(&result, "scanned") && !json_get(&result, "posts"));
+            json_free(&result); json_free(&params); json_free(&input);
+            if (!safe) return false;
+            if (!hit) break;
+            any = true;
+        }
+        if (!any) return false;
+    }
+    return true;
+}
+
 static int test_fleet_board_rpc_fleet_page(void)
 {
     int failures = 0;
@@ -2905,6 +2937,7 @@ static int test_fleet_board_rpc_fleet_page(void)
                            &out));
         ASSERT(json_get_bool(json_get(&out, "ok")));
         json_free(&out);
+        ASSERT(fb_page_faults(&f));
 
         json_init(&page);
         ASSERT(fb_rpc_fleet_page(&f, 0, &page));

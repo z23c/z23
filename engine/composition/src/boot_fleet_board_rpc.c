@@ -472,16 +472,22 @@ static bool fb_page_epoch_hex(char out[33])
     return true;
 }
 
+struct fb_page_render {
+    struct json_value *posts;
+    bool failed;
+};
+
 static bool fb_page_visit(const struct db_fleet_board_post *row, void *ctx)
 {
-    struct json_value *arr = ctx;
+    struct fb_page_render *page = ctx;
     struct json_value item;
     json_init(&item);
     json_set_object(&item);
-    fb_render_post(&item, row);
-    (void)json_push_kv_int(&item, "arrival", row->arrival);
-    bool pushed = json_push_back(arr, &item);
+    bool pushed = fb_render_post_fields(&item, row, true) &&
+                  json_push_kv_int(&item, "arrival", row->arrival) &&
+                  json_push_back(page->posts, &item);
     json_free(&item);
+    page->failed = !pushed;
     return pushed;
 }
 
@@ -506,21 +512,24 @@ static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
     json_init(&arr);
     json_set_array(&arr);
     int64_t scanned = after;
+    struct fb_page_render page = { .posts = &arr };
     int n = db_fleet_board_fleet_after(ndb, now, after, (unsigned)limit,
-                                       fb_page_visit, &arr, &scanned);
-    if (n < 0) {
+                                       fb_page_visit, &page, &scanned);
+    if (n < 0 || page.failed) {
         json_free(&arr);
         fb_error(result, "PAGE_UNAVAILABLE",
-                 "the fleet page could not be read from the board store");
+                 "the fleet page could not be read or rendered");
         return;
     }
     json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    (void)json_push_kv(result, "posts", &arr);
+    bool ok = json_push_kv_bool(result, "ok", true) &&
+              json_push_kv(result, "posts", &arr) &&
+              json_push_kv_int(result, "returned", n) &&
+              json_push_kv_int(result, "scanned", scanned) &&
+              json_push_kv_str(result, "epoch", epoch);
     json_free(&arr);
-    json_push_kv_int(result, "returned", n);
-    json_push_kv_int(result, "scanned", scanned);
-    json_push_kv_str(result, "epoch", epoch);
+    if (!ok)
+        fb_error(result, "PAGE_UNAVAILABLE", "the fleet page could not be rendered");
 }
 
 static void fb_op_status(struct node_db *ndb, struct json_value *result,
