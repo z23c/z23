@@ -215,6 +215,60 @@ static int vb_check_unreadable_identity_tables(void)
     return failures;
 }
 
+/* The first row is valid; the second fails during sqlite3_step, after prepare. */
+static bool vb_one_row_then_error(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    int first = sqlite3_step(stmt);
+    int second = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return first == SQLITE_ROW && second == SQLITE_ERROR;
+}
+
+static int vb_check_identity_step_failures(void)
+{
+    struct vrx_fix f;
+    struct vault_snapshot snap;
+    int failures = 0;
+    if (!vrx_open(&f, "vault_identity_step")) {
+        vrx_close(&f);
+        return 1;
+    }
+    VRX_REQUIRE("watch-only fault view created", vrx_exec(&f.ndb,
+        "CREATE TEMP VIEW wallet_watch_only AS "
+        "SELECT 'watch-address' AS address, zeroblob(20) AS address_hash "
+        "UNION ALL SELECT abs(-9223372036854775808), zeroblob(20)"));
+    VRX_REQUIRE("watch-only view fails after one row", vb_one_row_then_error(f.ndb.db,
+        "SELECT address,address_hash FROM wallet_watch_only"));
+    VRX_REQUIRE("watch-only fault snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("watch-only step failure makes names undetermined",
+        snap.identities.watch_only == 1 && snap.identities.truncated &&
+        !snap.rows[VAULT_CLASS_NAME].determined);
+    VRX_REQUIRE("watch-only fault view removed", vrx_exec(&f.ndb,
+        "DROP VIEW temp.wallet_watch_only"));
+    VRX_REQUIRE("watch-only recovery snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("watch-only recovery restores complete names",
+        !snap.identities.truncated && snap.rows[VAULT_CLASS_NAME].determined);
+
+    VRX_REQUIRE("sapling fault view created", vrx_exec(&f.ndb,
+        "CREATE TEMP VIEW wallet_sapling_keys AS "
+        "SELECT zeroblob(11) AS diversifier, zeroblob(32) AS pk_d "
+        "UNION ALL SELECT zeroblob(11), abs(-9223372036854775808)"));
+    VRX_REQUIRE("sapling view fails after one row", vb_one_row_then_error(f.ndb.db,
+        "SELECT diversifier,pk_d FROM wallet_sapling_keys"));
+    VRX_REQUIRE("sapling fault snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("sapling step failure makes market undetermined",
+        snap.identities.sapling_keys == 1 && snap.identities.truncated &&
+        !snap.rows[VAULT_CLASS_MARKET].determined);
+    VRX_REQUIRE("sapling fault view removed", vrx_exec(&f.ndb,
+        "DROP VIEW temp.wallet_sapling_keys"));
+    VRX_REQUIRE("sapling recovery snapshot builds", vault_read_snapshot(&f.ndb, &snap).ok);
+    VRX_CHECK("sapling recovery restores complete identity set", !snap.identities.truncated);
+    vrx_close(&f);
+    return failures;
+}
+
 /* ── per-class saturation ─────────────────────────────────────────── */
 
 static bool vb_seed_swaps(struct node_db *ndb, unsigned first, unsigned count)
@@ -732,6 +786,7 @@ int vault_read_bounds_tests(void)
     failures += vb_check_dump_state_without_db();
     failures += vb_check_wire_names();
     failures += vb_check_unreadable_identity_tables();
+    failures += vb_check_identity_step_failures();
     failures += vb_check_key_cap();
     failures += vb_check_watch_cap();
     failures += vb_check_sapling_cap();
