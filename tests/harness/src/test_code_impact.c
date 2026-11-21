@@ -1371,6 +1371,28 @@ static int test_code_brief_selects_mcp_serve(void)
     return failures;
 }
 
+/* The lander writes an objectives snapshot checked against the catalog tables
+ * (test_dev_land_merge_replay), so those tables select the dev_land proof. */
+static int test_objectives_catalog_selects_dev_land(void)
+{
+    static const char *const catalog_units[] = {
+        "engine/composition/objectives.def",
+        "engine/composition/objective_work.def",
+        "tools/command/native_fleet_objectives_read.c",
+    };
+    int failures = 0;
+    TEST("objectives catalog sources select the dev_land proof") {
+        for (size_t i = 0; i < sizeof(catalog_units) / sizeof(catalog_units[0]); i++) {
+            struct agent_impact_acc acc = {0};
+            ASSERT(agent_impact_apply_shared_rules(catalog_units[i], &acc));
+            ASSERT(impact_has_group(&acc, "dev_land"));
+            ASSERT(!acc.groups_lost);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_devagent_routes(void)
 {
     int failures = 0;
@@ -2657,6 +2679,7 @@ int test_code_impact(void)
     failures += test_code_devagent_routes();
     failures += test_registration_gate_impact();
     failures += test_code_brief_selects_mcp_serve();
+    failures += test_objectives_catalog_selects_dev_land();
     failures += test_code_route_completeness();
     failures += test_code_route_consumer_bounds();
     failures += test_code_impact_unsafe_narrow();
