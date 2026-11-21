@@ -1571,6 +1571,60 @@ static bool afd_recipe_share(const struct afd_world *w, const char *src,
     return ok;
 }
 
+static bool afd_recipe_local_release_needed(const char *datadir, const char *copy)
+{
+    struct afd_leaf l; afd_open_leaf(&l);
+    bool ok = json_push_kv_str(&l.in, "copy", copy) && json_push_kv_str(&l.in, "datadir", datadir) &&
+        afd_exec("app.build", &l) && afd_refused(&l, "RECIPE_RELEASE_REQUIRED") && !l.out.error.mutated &&
+        l.out.next_count == 1 && !strcmp(l.out.next[0].command, "app.share-copy") &&
+        strstr(l.out.next[0].input_json, datadir) && strstr(l.out.next[0].input_json, copy) &&
+        strstr(l.out.error.next_action, "signing identity");
+    afd_close_leaf(&l); return ok;
+}
+static bool afd_recipe_incomplete_inventory(const char *datadir, const char *copy)
+{
+    char path[AFD_PATH];
+    int n = snprintf(path, sizeof(path), "%s/zcode/releases/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "wx");
+    if (!file) return false;
+    bool ok = fputs("invalid release", file) >= 0;
+    if (fclose(file) != 0) ok = false;
+    struct afd_leaf l; afd_open_leaf(&l);
+    ok = ok && json_push_kv_str(&l.in, "copy", copy) && json_push_kv_str(&l.in, "datadir", datadir) &&
+        afd_exec("app.build", &l) && l.out.status == ZCL_COMMAND_STATUS_PASSED && !l.out.error.mutated;
+    afd_close_leaf(&l);
+    if (unlink(path) != 0) ok = false;
+    return ok;
+}
+static bool afd_recipe_refusal(const struct afd_world *w, const char *home,
+    const char *datadir, const char *copy)
+{
+    struct asf_door refused;
+    char *before_home = afd_snapshot(home), *before_data = afd_snapshot(datadir);
+    bool ok = before_home && before_data && afd_recipe_local_release_needed(datadir, copy);
+    asf_door_run(home, w->saved_cwd, datadir, "build", "tinyprog-1", ZCL_CLI_CONFIRM_PLAN_ONLY, &refused);
+    ok = ok && refused.rc && strstr(refused.text, "RECIPE_RELEASE_REQUIRED") &&
+        strstr(refused.text, "app share") && strstr(refused.text, datadir) &&
+        strstr(refused.text, "tinyprog-1") && !strstr(refused.text, "--yes") &&
+        afd_same(before_home, home) && afd_same(before_data, datadir);
+    free(before_home); free(before_data); return ok;
+}
+static bool afd_recipe_edited(const struct afd_world *w, const char *home, const char *datadir)
+{
+    char copy[AFD_PATH];
+    int n = snprintf(copy, sizeof(copy), "%s/copies/tinyprog-1", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(copy) ||
+        !afd_put(copy, "src/main.c", "int tinyprog_value(void) { return 8; }\n")) return false;
+    struct asf_door save, share, build;
+    asf_door_run(home, w->saved_cwd, datadir, "save", "tinyprog-1", ZCL_CLI_CONFIRM_YES, &save);
+    if (save.rc || !afd_recipe_incomplete_inventory(datadir, copy) ||
+        !afd_recipe_refusal(w, home, datadir, copy)) return false;
+    asf_door_run(home, home, datadir, "share", "tinyprog-1", ZCL_CLI_CONFIRM_YES, &share);
+    if (share.rc) return false;
+    asf_door_run(home, w->saved_cwd, datadir, "build", "tinyprog-1", ZCL_CLI_CONFIRM_PLAN_ONLY, &build);
+    return build.rc == 0 && strstr(build.text, "package_root:");
+}
 static int afd_recipe_open(const struct afd_world *w)
 {
     int failures = 0;
@@ -1599,6 +1653,7 @@ static int afd_recipe_open(const struct afd_world *w)
         ASSERT(strstr(run.text, "app invoke package") != NULL);
         ASSERT(strstr(run.text, "bin/tinyprog") != NULL);
         ASSERT(strstr(run.text, "--accept_execution=true") != NULL);
+        ASSERT(afd_recipe_edited(w, home, datadir));
         PASS();
     } _test_next:;
     return failures;

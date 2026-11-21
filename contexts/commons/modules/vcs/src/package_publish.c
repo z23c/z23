@@ -473,6 +473,41 @@ static bool publish_read_release_wire(DIR *d, const char *dir,
 #endif
 }
 
+static bool publish_load_release(DIR *d, const char *dir, const char *name,
+                                 uint8_t *wire, struct vcs_package_release *out)
+{
+    size_t len = 0;
+    if (!publish_read_release_wire(d, dir, name, wire, &len)) {
+        LOG_ERROR(PUBLISH_LOG, "skipping unreadable or linked release %s", name);
+        return false;
+    }
+    if (vcs_package_release_parse(wire, len, out) != VCS_PACKAGE_RELEASE_OK) {
+        LOG_ERROR(PUBLISH_LOG, "skipping unparseable release %s", name);
+        return false;
+    }
+    return true;
+}
+
+static bool publish_scan_releases(DIR *d, const char *dir, uint8_t *wire,
+                                  struct vcs_package_release *out, size_t out_cap,
+                                  size_t *count_out, size_t *skipped_out)
+{
+    for (;;) {
+        errno = 0;
+        struct dirent *de = readdir(d);
+        if (!de) return errno == 0;
+        if (!zcl_is_lower_hex(de->d_name, 64)) continue;
+        if (*count_out >= out_cap) {
+            (*skipped_out)++;
+            continue;
+        }
+        if (publish_load_release(d, dir, de->d_name, wire, &out[*count_out]))
+            (*count_out)++;
+        else
+            (*skipped_out)++;
+    }
+}
+
 bool vcs_package_publish_load_releases(const char *zcode_dir,
                                        struct vcs_package_release *out,
                                        size_t out_cap, size_t *count_out,
@@ -496,33 +531,11 @@ bool vcs_package_publish_load_releases(const char *zcode_dir,
         closedir(d);
         LOG_RETURN(false, PUBLISH_LOG, "release wire buffer");
     }
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        if (!zcl_is_lower_hex(de->d_name, 64))
-            continue;
-        if (*count_out >= out_cap) {
-            (*skipped_out)++;
-            continue;
-        }
-        size_t len = 0;
-        if (!publish_read_release_wire(d, dir, de->d_name, wire, &len)) {
-            LOG_ERROR(PUBLISH_LOG, "skipping unreadable or linked release %s",
-                      de->d_name);
-            (*skipped_out)++;
-            continue;
-        }
-        if (vcs_package_release_parse(wire, len,
-                                      &out[*count_out]) !=
-                VCS_PACKAGE_RELEASE_OK) {
-            LOG_ERROR(PUBLISH_LOG, "skipping unparseable release %s",
-                      de->d_name);
-            (*skipped_out)++;
-            continue;
-        }
-        (*count_out)++;
-    }
+    bool complete = publish_scan_releases(d, dir, wire, out, out_cap,
+                                          count_out, skipped_out);
     free(wire);
-    closedir(d);
+    if (closedir(d) != 0) complete = false;
+    if (!complete) { *count_out = 0; *skipped_out = 0; return false; }
     qsort(out, *count_out, sizeof(*out), publish_release_cmp);
     return true;
 }

@@ -74,6 +74,7 @@
 #include "util/path_util.h"
 #include "vcs/package_deps.h"
 #include "vcs/package_prepare.h"
+#include "vcs/package_publish.h"
 #include "vcs/package_release.h"
 #include "vcs/package_store.h"
 
@@ -113,7 +114,7 @@ struct zab {
     /* Recipe build form: the copy has no root Makefile and its release
      * carries a zcode recipe with programs (installed as bin/<short name>). */
     bool recipe_build;
-    uint8_t recipe_root[32];
+    uint8_t recipe_root[32], recipe_parent_root[32];
     char program[VCS_PACKAGE_PATH_MAX];
 };
 
@@ -298,6 +299,7 @@ static bool zab_release_recipe(struct zab *z, struct vcs_package_recipe *recipe,
                                       &release, release_id) !=
         ZCL_PACKAGE_COPY_FOUND)
         return false;
+    memcpy(z->recipe_parent_root, release.package_root, 32);
     const char *slash = strchr(release.name, '/');
     const char *leaf = slash ? slash + 1 : release.name;
     if (!leaf[0] || strlen(leaf) >= cap)
@@ -613,6 +615,46 @@ static bool zab_environment(struct zab *z)
     return true;
 }
 
+static void zab_share_recovery(struct zab *z)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    char wire[512];
+    const char *copy = zcl_package_copy_str(z->input, "copy");
+    bool ok = copy && json_push_kv_str(&input, "copy", copy) &&
+        json_push_kv_str(&input, "datadir", z->datadir);
+    size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
+    if (n && n < sizeof(wire))
+        (void)zcl_command_reply_add_next(z->reply, "app.share-copy", wire,
+            "Optionally create a local signed release and share file, then plan the build again.");
+    json_free(&input);
+}
+/* An incomplete inventory cannot prove the saved root has no release. */
+static bool zab_release_definitely_absent(struct zab *z)
+{
+    char dir[ZAB_PATH]; size_t count = 0, skipped = 0;
+    if (!zcl_path_join(dir, sizeof(dir), z->datadir, "zcode")) return false;
+    struct vcs_package_release *rows = zcl_calloc(VCS_PACKAGE_PUBLISH_MAX_RELEASES,
+        sizeof(*rows), "app.build.release_inventory");
+    if (!rows) return false;
+    bool absent = vcs_package_publish_load_releases(dir, rows, VCS_PACKAGE_PUBLISH_MAX_RELEASES,
+        &count, &skipped) && skipped == 0;
+    for (size_t i = 0; absent && i < count; ++i) {
+        if (!memcmp(rows[i].package_root, z->package_root, 32)) absent = false;
+    }
+    free(rows); return absent;
+}
+static bool zab_recipe_release_ready(struct zab *z)
+{
+    if (z->version || !memcmp(z->recipe_parent_root, z->package_root, 32)) return true;
+    if (!zab_release_definitely_absent(z)) return true;
+    zab_fail(z, "RECIPE_RELEASE_REQUIRED", false,
+        "No verified local release was found for this saved version. You can share it, then plan the build again.", ZAB_COMMAND);
+    (void)snprintf(z->reply->error.next_action, sizeof(z->reply->error.next_action),
+        "Sharing creates a signing identity if needed, writes a share file, and may save under a personal publisher.");
+    zab_share_recovery(z);
+    return false;
+}
+
 /* Every check and root a plan and its confirm both derive. The recipe form
  * derives the copy's roots plus its release-recipe binding and skips every
  * make-only stage; the make form is unchanged. */
@@ -624,6 +666,7 @@ static bool zab_derive(struct zab *z)
         !zab_package(z) || !zab_dependencies_match(z) || !zab_store_paths(z))
         return false;
     if (z->recipe_build) {
+        if (!zab_recipe_release_ready(z)) return false;
         zab_recipe_plan_id(z);
         return true;
     }

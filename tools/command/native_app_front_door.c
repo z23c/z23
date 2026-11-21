@@ -278,6 +278,11 @@ static int fd_refused(struct fd_run *r)
     if (e->next_action[0])
         (void)fprintf(r->out, "next: %s\n", e->next_action);
     fd_build_recovery_hint(r);
+    if (!strcmp(e->code, "RECIPE_RELEASE_REQUIRED")) {
+        char hint[2 * FD_PATH + 64];
+        if (zcl_app_hint(hint, sizeof(hint), r->datadir, "share %s", r->target))
+            (void)fprintf(r->out, "next: %s\n", hint);
+    }
     const char *offer_hint = fd_str(r, "next_offer");
     if (offer_hint) (void)fprintf(r->out, "next: %s\n", offer_hint);
     const char *first = fd_str(r, "choice_a"), *second = fd_str(r, "choice_b");
