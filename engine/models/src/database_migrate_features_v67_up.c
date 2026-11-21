@@ -35,14 +35,14 @@ static bool fleet_board_posts_v81_scope_present(struct node_db *ndb)
 
 /* Inspect the complete key shape before replacing a pre-v83 index. A name
  * owned by another table or an unexpected index is never dropped. */
-static bool store_purchases_v83_scalar(struct node_db *ndb, const char *sql, int *value)
+static bool db_migrate_inspect_scalar(struct node_db *ndb, const char *sql, int *value)
 {
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(ndb->db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-    bool ok = ar_step_checked(stmt, "migrate v83 inspect", NULL) == ZCL_STEP_ROW &&
+    bool ok = ar_step_checked(stmt, "migration inspect", NULL) == ZCL_STEP_ROW &&
               sqlite3_column_type(stmt, 0) == SQLITE_INTEGER;
     if (ok) *value = sqlite3_column_int(stmt, 0);
-    if (ok) ok = ar_step_checked(stmt, "migrate v83 inspect end", NULL) == ZCL_STEP_DONE;
+    if (ok) ok = ar_step_checked(stmt, "migration inspect end", NULL) == ZCL_STEP_DONE;
     if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
     return ok;
 }
@@ -62,7 +62,7 @@ static bool store_purchases_v83_index(struct node_db *ndb, int *shape)
         "WHEN EXISTS(SELECT 1 FROM owner) AND EXISTS(SELECT 1 FROM valid) AND (SELECT count(*) FROM keys)=2 "
         "AND EXISTS(SELECT 1 FROM keys WHERE seqno=0 AND name='seller_onion' AND desc=0 AND coll='BINARY') "
         "AND EXISTS(SELECT 1 FROM keys WHERE seqno=1 AND name='order_id' AND desc=0 AND coll='BINARY') THEN 2 ELSE -1 END";
-    return store_purchases_v83_scalar(ndb, sql, shape);
+    return db_migrate_inspect_scalar(ndb, sql, shape);
 }
 
 static bool store_purchases_v83_column(struct node_db *ndb, int *column)
@@ -73,7 +73,16 @@ static bool store_purchases_v83_column(struct node_db *ndb, int *column)
         "WHEN EXISTS(SELECT 1 FROM pragma_table_info('store_purchases','main') "
         "WHERE name='seller_onion' AND upper(trim(type))='TEXT' AND \"notnull\"=1 "
         "AND dflt_value=char(39)||char(39)) THEN 1 ELSE -1 END";
-    return store_purchases_v83_scalar(ndb, sql, column);
+    return db_migrate_inspect_scalar(ndb, sql, column);
+}
+
+/* SQLite identifiers are case-insensitive; preserve a compatible existing cursor. */
+static bool db_migrate_board_arrival_column(struct node_db *ndb, int *column)
+{
+    return db_migrate_inspect_scalar(ndb,
+        "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM pragma_table_xinfo('fleet_board_posts','main') WHERE name='arrival' COLLATE NOCASE) THEN 0 "
+        "WHEN EXISTS(SELECT 1 FROM pragma_table_xinfo('fleet_board_posts','main') WHERE name='arrival' COLLATE NOCASE "
+        "AND upper(trim(type))='INTEGER' AND \"notnull\"=1 AND dflt_value='0' AND hidden=0) THEN 1 ELSE -1 END", column);
 }
 
 /* v82 step 1: rebuild `fleet_board_posts` with `kind` widened to admit 1..64,
@@ -86,6 +95,9 @@ static bool store_purchases_v83_column(struct node_db *ndb, int *column)
  * row, then swaps it in under the old name. */
 static int db_migrate_v82_rebuild_table(struct node_db *ndb)
 {
+    int arrival = 0;
+    if (!db_migrate_board_arrival_column(ndb, &arrival) || arrival < 0)
+        LOG_ERR("db", "migrate v82: incompatible arrival column");
     if (!node_db_exec(ndb,
             "CREATE TABLE fleet_board_posts_v82("
             "id BLOB PRIMARY KEY CHECK(length(id)=32),"
@@ -110,15 +122,18 @@ static int db_migrate_v82_rebuild_table(struct node_db *ndb)
             "scope INTEGER NOT NULL DEFAULT 0 CHECK(scope BETWEEN 0 AND 2),"
             "room TEXT NOT NULL DEFAULT '' CHECK(length(room)<=32))"))
         LOG_ERR("db", "migrate v82: agents-kind table rebuild failed");
-    if (!node_db_exec(ndb,
-            /* Named columns, not SELECT *: a database re-migrated from a
-             * version stamped back below 82 already carries the v84
-             * `arrival` column, which this v81-shaped copy leaves behind
-             * and the v84 step then re-adds. */
-            "INSERT INTO fleet_board_posts_v82 SELECT id,seq,kind,"
-            "created_at,ttl,expires_at,ref,host_pubkey,agent,slug,title,"
-            "supersedes,receipt,text,body_bytes,signature,chain_prev,"
-            "chain_hash,received_at,scope,room FROM fleet_board_posts"))
+    if (arrival == 1 && !node_db_exec(ndb,
+            "ALTER TABLE fleet_board_posts_v82 ADD COLUMN arrival INTEGER "
+            "NOT NULL DEFAULT 0 CHECK(arrival>=0)"))
+        LOG_ERR("db", "migrate v82: board arrival preservation failed");
+#define BOARD_V82_COLUMNS "id,seq,kind,created_at,ttl,expires_at,ref,host_pubkey," \
+    "agent,slug,title,supersedes,receipt,text,body_bytes,signature," \
+    "chain_prev,chain_hash,received_at,scope,room"
+    const char *copy = arrival == 1
+        ? "INSERT INTO fleet_board_posts_v82 SELECT " BOARD_V82_COLUMNS ",arrival FROM fleet_board_posts"
+        : "INSERT INTO fleet_board_posts_v82 SELECT " BOARD_V82_COLUMNS " FROM fleet_board_posts";
+#undef BOARD_V82_COLUMNS
+    if (!node_db_exec(ndb, copy))
         LOG_ERR("db", "migrate v82: agents-kind row copy failed");
     if (!node_db_exec(ndb, "DROP TABLE fleet_board_posts"))
         LOG_ERR("db", "migrate v82: old board table drop failed");
@@ -134,23 +149,23 @@ static int db_migrate_v82_agents_kind(struct node_db *ndb)
 {
     if (db_migrate_v82_rebuild_table(ndb) < 0) return -1;
     if (!node_db_exec(ndb,
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_board_seq "
+            "CREATE UNIQUE INDEX idx_fleet_board_seq "
             "ON fleet_board_posts(seq)"))
         LOG_ERR("db", "migrate v82: board seq index failed");
     if (!node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_fleet_board_created "
+            "CREATE INDEX idx_fleet_board_created "
             "ON fleet_board_posts(created_at DESC,id)"))
         LOG_ERR("db", "migrate v82: board created index failed");
     if (!node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_fleet_board_ref "
+            "CREATE INDEX idx_fleet_board_ref "
             "ON fleet_board_posts(ref,kind)"))
         LOG_ERR("db", "migrate v82: board ref index failed");
     if (!node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_fleet_board_slug "
+            "CREATE INDEX idx_fleet_board_slug "
             "ON fleet_board_posts(slug,created_at DESC,id)"))
         LOG_ERR("db", "migrate v82: board slug index failed");
     if (!node_db_exec(ndb,
-            "CREATE INDEX IF NOT EXISTS idx_fleet_board_room "
+            "CREATE INDEX idx_fleet_board_room "
             "ON fleet_board_posts(room,created_at DESC,id)"))
         LOG_ERR("db", "migrate v82: board room index failed");
     if (!node_db_exec(ndb,
@@ -159,18 +174,21 @@ static int db_migrate_v82_agents_kind(struct node_db *ndb)
     return 0;
 }
 
-/* Wraps its own `current_ver < 82` check and failure handling so the
- * caller's pinned complexity never has to carry this version gate, or a
- * check of its result, as branches of its own. A failed step logs loudly
- * (LOG_ERR above) and simply leaves `current_ver`/`applied` where they
- * were — the next boot retries v82 from scratch, same as any other
- * mid-migration crash. */
+/* The table swap, indexes and version markers commit together. */
 static int db_migrate_step_82(struct node_db *ndb, int *current_ver,
                               int *applied, int floor_ver)
 {
     if (*current_ver >= 82) return 0;
-    if (db_migrate_v82_agents_kind(ndb) < 0) return -1;
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 82, floor_ver);
+    if (!node_db_begin(ndb)) LOG_ERR("db", "migrate v82: cannot begin");
+    bool ok = db_migrate_v82_agents_kind(ndb) == 0;
+    int32_t version = 82, compat_floor = floor_ver;
+    if (ok) ok = node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+                 node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
+    if (ok) ok = node_db_commit(ndb);
+    if (!ok) {
+        if (!node_db_rollback(ndb)) LOG_ERROR("db", "migrate v82: rollback failed");
+        LOG_ERR("db", "migrate v82: board rebuild or stamp failed");
+    }
     *current_ver = 82;
     (*applied)++;
     return 0;
@@ -202,7 +220,7 @@ static bool store_purchases_v83_repair_index(struct node_db *ndb)
 static bool store_purchases_v83_apply(struct node_db *ndb, int floor)
 {
     int column = 0, order_column = 0;
-    bool ok = store_purchases_v83_scalar(ndb,
+    bool ok = db_migrate_inspect_scalar(ndb,
         "SELECT count(*) FROM pragma_table_xinfo('store_purchases','main') WHERE name='order_id' "
         "AND upper(trim(type))='INTEGER' AND \"notnull\"=1 AND hidden=0", &order_column) && order_column == 1;
     if (ok) ok = store_purchases_v83_column(ndb, &column) && column >= 0;
@@ -210,7 +228,7 @@ static bool store_purchases_v83_apply(struct node_db *ndb, int floor)
         "ALTER TABLE main.store_purchases ADD COLUMN seller_onion TEXT "
         "NOT NULL DEFAULT '' CHECK(length(seller_onion)<=62)");
     int nulls = 0;
-    if (ok) ok = store_purchases_v83_scalar(ndb,
+    if (ok) ok = db_migrate_inspect_scalar(ndb,
         "SELECT EXISTS(SELECT 1 FROM main.store_purchases WHERE seller_onion IS NULL OR order_id IS NULL)", &nulls) && nulls == 0;
     if (ok) ok = store_purchases_v83_repair_index(ndb);
     if (ok) ok = node_db_exec(ndb, "INSERT OR IGNORE INTO schema_migrations(version) VALUES('083')");
@@ -1273,8 +1291,8 @@ static int db_migrate_steps_80_83(struct node_db *ndb, int *version, int *floor,
 {
     if (db_migrate_step_80(ndb, version, floor, applied) < 0) return -1;
     (void)db_migrate_step_81(ndb, version, floor, applied);
-    /* Preserve the existing v81/v82 return handling. */
-    (void)db_migrate_step_82(ndb, version, applied, *floor);
+    if (db_migrate_step_82(ndb, version, applied, *floor) < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     if (db_migrate_step_83(ndb, version, floor, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     return 0;

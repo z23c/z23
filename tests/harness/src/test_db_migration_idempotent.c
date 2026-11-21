@@ -1871,6 +1871,140 @@ static int t_v29_incompatible_schema_fails_without_stamp(void)
     return failures;
 }
 
+struct db_mig_v82_fault { bool dropped; bool denied; };
+
+static int db_mig_deny_v82_rename(void *ctx, int action, const char *first,
+                                  const char *second, const char *db, const char *trigger)
+{
+    struct db_mig_v82_fault *fault = ctx;
+    (void)db; (void)trigger;
+    if (action == SQLITE_DROP_TABLE && first && !strcmp(first, "fleet_board_posts"))
+        fault->dropped = true;
+    if (action == SQLITE_ALTER_TABLE && second &&
+        !strcmp(second, "fleet_board_posts_v82") && fault->dropped && !fault->denied) {
+        fault->denied = true;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static bool db_mig_v82_rows_intact(sqlite3 *db)
+{
+    if (db_mig_count(db, "SELECT count(*) FROM fleet_board_posts") != 7)
+        return false;
+    for (int kind = 1; kind <= 7; kind++)
+        if (!db_mig_board_row_matches(db, kind)) return false;
+    return true;
+}
+
+static int t_v82_interrupted_rebuild(void)
+{
+    int failures = 0;
+    char dir[256], path[512];
+    struct node_db db = {0};
+    bool opened = false;
+    struct db_mig_v82_fault fault = {0};
+    db_mig_path(dir, sizeof(dir), "v82_interrupted"); mkdir_p(dir);
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    TEST("db_mig: v82 interruption preserves v81 rows and retry") {
+        ASSERT(db_mig_seed_v81_board_db(path));
+        ASSERT(db_mig_open_raw_handle(&db, path)); opened = true;
+        ASSERT(db_mig_v82_rows_intact(db.db));
+        ASSERT(db_mig_exec_raw(db.db, "CREATE INDEX idx_fleet_board_created ON fleet_board_posts(created_at DESC,id); CREATE INDEX idx_fleet_board_ref ON fleet_board_posts(ref,kind); CREATE INDEX idx_fleet_board_slug ON fleet_board_posts(slug,created_at DESC,id); CREATE INDEX idx_fleet_board_room ON fleet_board_posts(room,created_at DESC,id)"));
+        ASSERT(sqlite3_set_authorizer(db.db, db_mig_deny_v82_rename, &fault) == SQLITE_OK);
+        int rc = node_db_migrate(&db, NULL);
+        ASSERT(sqlite3_set_authorizer(db.db, NULL, NULL) == SQLITE_OK);
+        printf("v82 witness: rc=%d version=%d canonical=%d staging=%d rows=%d seq_index=%d\n", rc, node_db_schema_version(&db), db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fleet_board_posts'"), db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fleet_board_posts_v82'"), db_mig_count(db.db, "SELECT count(*) FROM fleet_board_posts"), db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_fleet_board_seq'"));
+        ASSERT(fault.dropped && fault.denied);
+        ASSERT_EQ(rc, -1);
+        ASSERT_EQ(node_db_schema_version(&db), 81);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM schema_migrations WHERE version='082'"), 0);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='fleet_board_posts_v82'"), 0);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_fleet_board_seq'"), 1);
+        ASSERT(db_mig_v82_rows_intact(db.db));
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_fleet_board_seq','idx_fleet_board_created','idx_fleet_board_ref','idx_fleet_board_slug','idx_fleet_board_room')"), 5);
+        ASSERT(sqlite3_get_autocommit(db.db));
+        ASSERT(db_mig_exec_raw(db.db, "CREATE TABLE fleet_board_posts_v82(sentinel INTEGER); INSERT INTO fleet_board_posts_v82 VALUES(42)"));
+        ASSERT_EQ(node_db_migrate(&db, NULL), -1);
+        ASSERT_EQ(node_db_schema_version(&db), 81);
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM fleet_board_posts_v82 WHERE sentinel=42"), 1);
+        ASSERT(db_mig_v82_rows_intact(db.db));
+        ASSERT(db_mig_exec_raw(db.db, "DROP TABLE fleet_board_posts_v82"));
+        ASSERT(db_mig_exec_raw(db.db, "DROP INDEX idx_fleet_board_created; CREATE TABLE foreign_board_index(x); CREATE INDEX idx_fleet_board_created ON foreign_board_index(x)"));
+        ASSERT_EQ(node_db_migrate(&db, NULL), -1);
+        ASSERT_EQ(node_db_schema_version(&db), 81);
+        ASSERT(db_mig_v82_rows_intact(db.db));
+        ASSERT_EQ(db_mig_count(db.db, "SELECT count(*) FROM sqlite_master WHERE name='idx_fleet_board_created' AND tbl_name='foreign_board_index'"), 1);
+        ASSERT(db_mig_exec_raw(db.db, "DROP INDEX idx_fleet_board_created; DROP TABLE foreign_board_index; CREATE INDEX idx_fleet_board_created ON fleet_board_posts(created_at DESC,id)"));
+        db_mig_close_raw_handle(&db); opened = false;
+        ASSERT(node_db_open(&db, path)); opened = true;
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+        ASSERT(db_mig_v82_rows_intact(db.db));
+        node_db_close(&db); opened = false;
+        PASS();
+    } _test_next:;
+    if (opened) { (void)sqlite3_set_authorizer(db.db, NULL, NULL); db_mig_close_raw_handle(&db); }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+
+static bool db_mig_board_post(struct fleet_board_post *post, const char *text,
+                              int64_t now);
+
+static int t_v82_signed_post_survives(void)
+{
+    int failures = 0;
+    char dir[256], path[512];
+    struct node_db db = {0};
+    struct fleet_board_post post;
+    struct db_fleet_board_post row;
+    struct db_mig_v82_fault fault = {0};
+    bool opened = false, stored = false;
+    db_mig_path(dir, sizeof(dir), "v82_signed"); mkdir_p(dir);
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    TEST("db_mig: v82 rollback and retry preserve a verified signed post") {
+        ASSERT(node_db_open(&db, path)); opened = true;
+        ASSERT(db_mig_board_post(&post, "v82 synthetic signed post", 600000));
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &post, 600000, &stored), FLEET_BOARD_OK);
+        ASSERT(stored);
+        ASSERT(node_db_exec(&db, "UPDATE fleet_board_posts SET arrival=73"));
+        ASSERT(db_fleet_board_post_find(&db, post.id, &row));
+        ASSERT(row.seq != 73);
+        int64_t prior_arrival = row.arrival;
+        ASSERT(prior_arrival > 0);
+        node_db_close(&db); opened = false;
+        ASSERT(db_mig_open_raw_handle(&db, path)); opened = true;
+        ASSERT(db_mig_stamp_schema(db.db, 81));
+        ASSERT(db_mig_stamp_floor(db.db, 79));
+        ASSERT(db_mig_exec_raw(db.db, "DELETE FROM schema_migrations WHERE CAST(version AS INTEGER)>=82"));
+        ASSERT(db_mig_exec_raw(db.db, "ALTER TABLE fleet_board_posts RENAME COLUMN arrival TO ARRIVAL"));
+        ASSERT(sqlite3_set_authorizer(db.db, db_mig_deny_v82_rename, &fault) == SQLITE_OK);
+        int rc = node_db_migrate(&db, NULL);
+        ASSERT(sqlite3_set_authorizer(db.db, NULL, NULL) == SQLITE_OK);
+        ASSERT(fault.denied);
+        ASSERT_EQ(rc, -1);
+        ASSERT(db_fleet_board_post_find(&db, post.id, &row));
+        ASSERT_EQ(row.arrival, prior_arrival);
+        ASSERT(memcmp(row.post.signature, post.signature, sizeof(post.signature)) == 0);
+        ASSERT_EQ(fleet_board_post_verify(&row.post), FLEET_BOARD_OK);
+        db_mig_close_raw_handle(&db); opened = false;
+        ASSERT(node_db_open(&db, path)); opened = true;
+        ASSERT(db_fleet_board_post_find(&db, post.id, &row));
+        ASSERT_EQ(row.arrival, prior_arrival);
+        ASSERT(memcmp(row.post.signature, post.signature, sizeof(post.signature)) == 0);
+        ASSERT_EQ(fleet_board_post_verify(&row.post), FLEET_BOARD_OK);
+        node_db_close(&db); opened = false;
+        PASS();
+    } _test_next:;
+    if (opened) { (void)sqlite3_set_authorizer(db.db, NULL, NULL); db_mig_close_raw_handle(&db); }
+    zcl_fleet_role_checker_install(NULL);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+
 static int t_v82_board_kind_ceiling_row_copy_is_lossless(void)
 {
     int failures = 0;
@@ -2984,6 +3118,8 @@ int test_db_migration_idempotent(void)
     failures += t_supported_current_schema_reopens_normally();
     failures += t_v29_incompatible_schema_fails_without_stamp();
     failures += t_v29_schema_match_table();
+    failures += t_v82_interrupted_rebuild();
+    failures += t_v82_signed_post_survives();
     failures += t_v82_board_kind_ceiling_row_copy_is_lossless();
     failures += t_v84_board_arrival_survives_remigration();
     failures += t_migration_hop_refusal();
