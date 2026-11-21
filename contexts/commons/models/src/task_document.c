@@ -170,8 +170,10 @@ struct zcl_result task_document_apply(struct package_resident_store *store,
     ZCL_CHECK(td_sql(store, "BEGIN IMMEDIATE"));
     struct task_document row;
     struct zcl_result result = task_document_read(store, &row);
-    if (result.ok && (row.state.revision != expected_revision || expected_revision >= INT64_MAX))
+    if (result.ok && expected_revision >= INT64_MAX)
         result = ZCL_ERR(-1, "task-save: stale or exhausted revision; reload before saving");
+    if (result.ok && row.state.revision != expected_revision)
+        result = ZCL_ERR(TASK_DOCUMENT_STALE, "task-save: stale or exhausted revision; reload before saving");
     if (result.ok) result = td_change(store, &row, action, task_id, title);
     if (result.ok) result = td_sql(store, "COMMIT");
     if (!result.ok && !sqlite3_get_autocommit(store->db)) {

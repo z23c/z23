@@ -30,17 +30,21 @@
     if (!ok) ++failures; \
 } while (0)
 
+static bool td_call(struct json_value *input, struct zcl_command_reply *reply)
+{
+    zcl_command_reply_init(reply, "zcl.task_document.v1");
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
+    if (!spec) return false;
+    struct zcl_command_request request = {.spec = spec, .input = input};
+    char why[256];
+    if (!zcl_command_registry_input_validate(spec, input, why, sizeof(why))) return false;
+    spec->handler(&request, reply); return true;
+}
 static bool td_default_call(const char *body, bool success, int64_t revision, const char *title)
 {
     struct json_value input = {0};
-    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
-    struct zcl_command_request request = { .spec = spec, .input = &input };
-    struct zcl_command_reply reply;
-    zcl_command_reply_init(&reply, "zcl.task_document.v1");
-    char error[256];
-    bool ok = spec && json_read(&input, body, strlen(body)) &&
-        zcl_command_registry_input_validate(spec, &input, error, sizeof(error));
-    if (ok) spec->handler(&request, &reply);
+    struct zcl_command_reply reply = {0};
+    bool ok = json_read(&input, body, strlen(body)) && td_call(&input, &reply);
     ok = ok && ((reply.exit_code == 0) == success);
     if (ok && success) {
         const struct json_value *tasks = json_get(&reply.data, "tasks");
@@ -53,6 +57,101 @@ static bool td_default_call(const char *body, bool success, int64_t revision, co
     zcl_command_reply_free(&reply);
     json_free(&input);
     return ok;
+}
+
+static bool td_reload_content(const struct zcl_command_reply *reply)
+{
+    const struct json_value *tasks = json_get(&reply->data, "tasks");
+    const char *title = json_get_str(json_get(json_at(tasks, 0), "title"));
+    return reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        json_get_int(json_get(&reply->data, "revision")) == 1 &&
+        json_get_bool(json_get(&reply->data, "can_undo")) && title && !strcmp(title, "Winner");
+}
+static bool td_reload_check(struct zcl_command_reply *stale, const char *directory)
+{
+    if (stale->status == ZCL_COMMAND_STATUS_PASSED || stale->error.mutated ||
+        strcmp(stale->error.code, "TASK_SAVE_FAILED") || stale->next_count != 1 ||
+        strcmp(stale->next[0].command, "app.tasks")) return false;
+    struct json_value input = {0};
+    bool ok = json_read(&input, stale->next[0].input_json, strlen(stale->next[0].input_json));
+    const char *app = json_get_str(json_get(&input, "app"));
+    const char *dir = json_get_str(json_get(&input, "datadir"));
+    const char *action = json_get_str(json_get(&input, "action"));
+    ok = ok && app && !strcmp(app, "local/reload") && dir && !strcmp(dir, directory) &&
+        action && !strcmp(action, "list");
+    struct zcl_command_reply reply = {0};
+    if (ok) ok = td_call(&input, &reply);
+    if (ok) ok = td_reload_content(&reply);
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool td_reload_request(const char *directory, int64_t expected, bool stale)
+{
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", directory) && json_push_kv_str(&input, "app", "local/reload") &&
+        json_push_kv_str(&input, "action", "add") && json_push_kv_str(&input, "title", "Loser") &&
+        json_push_kv_int(&input, "expected_revision", expected);
+    struct zcl_command_reply reply = {0};
+    if (ok) ok = td_call(&input, &reply);
+    if (ok) ok = stale ? td_reload_check(&reply, directory) :
+        reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && reply.next_count == 0;
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool td_unrelated_request(const char *directory)
+{
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", directory) && json_push_kv_str(&input, "app", "local/reload") &&
+        json_push_kv_str(&input, "action", "delete") && json_push_kv_int(&input, "task_id", 999) &&
+        json_push_kv_int(&input, "expected_revision", 1);
+    struct zcl_command_reply reply = {0};
+    if (ok) ok = td_call(&input, &reply);
+    ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && reply.next_count == 0;
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static bool td_remove_reload_fixture(const char *path)
+{
+    char db[4096], zcode[4096];
+    int a = snprintf(db, sizeof(db), "%s/zcode/resident.db", path);
+    int b = snprintf(zcode, sizeof(zcode), "%s/zcode", path);
+    return a > 0 && (size_t)a < sizeof(db) && b > 0 && (size_t)b < sizeof(zcode) &&
+        unlink(db) == 0 && rmdir(zcode) == 0 && rmdir(path) == 0;
+}
+static bool td_long_stale(const char *directory)
+{
+    char path[4096], part[181], app[202];
+    memset(part, '\"', sizeof(part) - 1); part[sizeof(part) - 1] = 0;
+    memset(app, 'a', sizeof(app) - 1); app[100] = '/'; app[sizeof(app) - 1] = 0;
+    int n = snprintf(path, sizeof(path), "%s/%s", directory, part);
+    if (n < 0 || (size_t)n >= sizeof(path) || mkdir(path, 0700)) return false;
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "datadir", path) && json_push_kv_str(&input, "app", app) &&
+        json_push_kv_str(&input, "action", "add") && json_push_kv_str(&input, "title", "One") &&
+        json_push_kv_int(&input, "expected_revision", 1);
+    struct zcl_command_reply reply = {0};
+    if (ok) ok = td_call(&input, &reply);
+    ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated && reply.next_count == 0 &&
+        strstr(reply.error.next_action, "same app and datadir");
+    zcl_command_reply_free(&reply); json_free(&input);
+    bool removed = td_remove_reload_fixture(path);
+    return ok && removed;
+}
+static int td_stale_reload(const char *directory)
+{
+    int failures = 0; char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/reload \"profile\\name", directory);
+    if (n < 0 || (size_t)n >= sizeof(path) || mkdir(path, 0700)) return 1;
+    struct json_value input = {0}; json_set_object(&input);
+    bool seeded = json_push_kv_str(&input, "datadir", path) && json_push_kv_str(&input, "app", "local/reload") &&
+        json_push_kv_str(&input, "action", "add") && json_push_kv_str(&input, "title", "Winner") &&
+        json_push_kv_int(&input, "expected_revision", 0);
+    struct zcl_command_reply reply = {0};
+    if (seeded) seeded = td_call(&input, &reply) && reply.status == ZCL_COMMAND_STATUS_PASSED;
+    zcl_command_reply_free(&reply); json_free(&input);
+    TD_CHECK("stale next reloads same escaped directory and namespace without losing Undo", seeded && td_reload_request(path, 0, true));
+    TD_CHECK("exhausted revision has no stale recovery action", td_reload_request(path, INT64_MAX, false));
+    TD_CHECK("unrelated failure has no stale recovery action", td_unrelated_request(path));
+    TD_CHECK("oversized reload action is never truncated", td_long_stale(directory));
+    TD_CHECK("reload fixture removed", td_remove_reload_fixture(path));
+    return failures;
 }
 
 static int td_default_storage(const char *directory)
@@ -982,6 +1081,7 @@ int test_task_document(void)
     struct zcl_result opened = package_resident_store_open_app(&store, directory, "local/tasks");
     if (!opened.ok) { fprintf(stderr, "task_document: open: %s\n", opened.message); return 1; }
     failures += td_default_storage(directory);
+    failures += td_stale_reload(directory);
     failures += td_actions(&store, &row);
     failures += td_restart(&store, directory, &row);
     failures += td_failures(&store, &row);

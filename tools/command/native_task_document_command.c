@@ -219,6 +219,23 @@ static bool ntd_offer_render(struct json_value *data, const struct task_update_o
         json_push_kv_str(data, "next_action", "In Tasks, choose More / Undo, then Updates. Try update asks permission before running.");
 }
 
+static void ntd_stale_recovery(struct zcl_command_reply *reply,
+    const struct json_value *input, const char *directory)
+{
+    const char *app = ntd_string(input, "app");
+    if (!app) app = "local/tasks";
+    struct json_value next; json_init(&next); json_set_object(&next);
+    bool ok = json_push_kv_str(&next, "action", "list") &&
+        json_push_kv_str(&next, "app", app) && json_push_kv_str(&next, "datadir", directory);
+    char wire[sizeof(reply->next[0].input_json)]; size_t n = ok ? json_write(&next, wire, sizeof(wire)) : 0;
+    bool added = n && n < sizeof(wire) && zcl_command_reply_add_next(reply, "app.tasks", wire,
+        "Reload the current tasks in this same document before saving.");
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", added ?
+        "Reload the current tasks using the next command before saving." :
+        "Reload with app.tasks action list using the same app and datadir.");
+    json_free(&next);
+}
+
 void zcl_native_handle_task_document(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
@@ -245,5 +262,7 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
         LOG_ERROR("app.tasks", "%s", result.message);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "TASK_SAVE_FAILED", "save", false, false, result.message, "app.tasks");
+        if (!offering && result.code == TASK_DOCUMENT_STALE)
+            ntd_stale_recovery(reply, request->input, directory);
     }
 }

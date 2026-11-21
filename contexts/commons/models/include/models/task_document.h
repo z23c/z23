@@ -16,6 +16,8 @@ struct task_document_checkpoint {
     char app[256];
     struct task_document document;
 };
+/* Distinguishes a revision conflict from exhaustion and other failures. */
+enum { TASK_DOCUMENT_STALE = -31001 };
 enum task_document_action {
     TASK_DOCUMENT_ADD, TASK_DOCUMENT_EDIT, TASK_DOCUMENT_COMPLETE,
     TASK_DOCUMENT_REOPEN, TASK_DOCUMENT_DELETE, TASK_DOCUMENT_UNDO
