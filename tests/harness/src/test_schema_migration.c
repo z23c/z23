@@ -591,6 +591,70 @@ static int sm_gap_run_begin_refused(void)
     return failures;
 }
 
+struct sm_version_read_guard {
+    int reads_denied;
+    int writes;
+    bool deny_read;
+    bool deny_write;
+};
+
+static int sm_deny_state_read(void *ctx, int action, const char *a,
+                              const char *b, const char *c, const char *d)
+{
+    struct sm_version_read_guard *guard = ctx;
+    (void)b; (void)c; (void)d;
+    if (guard->deny_read && action == SQLITE_READ && a &&
+        strcmp(a, "node_state") == 0) {
+        guard->reads_denied++;
+        return SQLITE_DENY;
+    }
+    if (action == SQLITE_INSERT || action == SQLITE_UPDATE ||
+        action == SQLITE_DELETE || action == SQLITE_CREATE_TABLE ||
+        action == SQLITE_ALTER_TABLE || action == SQLITE_CREATE_INDEX ||
+        action == SQLITE_CREATE_TRIGGER || action == SQLITE_DROP_TABLE) {
+        guard->writes++;
+        if (guard->deny_write)
+            return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int sm_migrate_version_read(void)
+{
+    int failures = 0;
+    struct sm_fixture f;
+    if (!sm_fixture_init(&f)) {
+        SM_CHECK("migration read fixture opens", false);
+        return failures;
+    }
+    SM_CHECK("fresh node db opens at latest schema",
+             node_db_schema_version(&f.ndb) == NODE_DB_SCHEMA_LATEST);
+    struct sm_version_read_guard guard = {.deny_read = true};
+    SM_CHECK("migration fixture installs authorizer",
+             sqlite3_set_authorizer(f.ndb.db, sm_deny_state_read, &guard) == SQLITE_OK);
+    int result = node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("migration fixture removes authorizer",
+             sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    printf("migration denied read: reads=%d write_authorizations=%d result=%d\n",
+           guard.reads_denied, guard.writes, result);
+    SM_CHECK("migration fails when schema version cannot be read", result < 0);
+    SM_CHECK("migration attempted the denied read", guard.reads_denied > 0);
+    SM_CHECK("migration attempts no writes after read failure", guard.writes == 0);
+    SM_CHECK("migration removes version for absent-key fixture",
+             node_db_state_delete(&f.ndb, "schema_version"));
+    guard = (struct sm_version_read_guard){.deny_write = true};
+    SM_CHECK("migration fixture installs authorizer",
+             sqlite3_set_authorizer(f.ndb.db, sm_deny_state_read, &guard) == SQLITE_OK);
+    (void)node_db_migrate(&f.ndb, NULL);
+    SM_CHECK("migration fixture removes authorizer",
+             sqlite3_set_authorizer(f.ndb.db, NULL, NULL) == SQLITE_OK);
+    printf("migration absent version: write_authorizations=%d\n", guard.writes);
+    SM_CHECK("migration reaches bootstrap for absent version key",
+             guard.writes > 0);
+    sm_fixture_destroy(&f);
+    return failures;
+}
+
 static int sm_deny_create_table(void *u, int act, const char *a,
                                 const char *b, const char *c, const char *d)
 {
@@ -1094,6 +1158,7 @@ int test_schema_migration(void)
 
     /* ── 13. Mutation-gap pins (ordering, failure states, rerun) ── */
     failures += sm_mutation_gap_tests();
+    failures += sm_migrate_version_read();
 
     return failures;
 }

@@ -871,7 +871,12 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
     /* Checked FIRST, before the schema_migrations bootstrap below: a
      * read-compatible open must never attempt any schema write, not even
      * an idempotent one. See db_migrate_precheck_newer_schema() above. */
-    int current_ver = node_db_schema_version(ndb);
+    int32_t current_ver = 0;
+    bool version_present = false;
+    if (!node_db_state_read(ndb, "schema_version", &current_ver,
+                            sizeof(current_ver), NULL, &version_present)) {
+        LOG_ERR("db", "migrate: schema version read failed; aborting before writes");
+    }
     int precheck = db_migrate_precheck_newer_schema(ndb, current_ver);
     if (precheck != DB_MIGRATE_PRECHECK_PROCEED) return precheck;
 
