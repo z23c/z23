@@ -6,6 +6,9 @@
 #include "models/database_lifetime.h"
 
 #include "platform/path_compat.h"
+#if !defined(_WIN32)
+#include "platform/rename_compat.h"
+#endif
 #include "platform/time_compat.h"
 
 #include <errno.h>
@@ -727,10 +730,12 @@ uint64_t db_lifetime_unauthorized_count(void)
     return atomic_load(&g_unauthorized);
 }
 
+enum lifetime_fs_operation { LIFETIME_UNLINK, LIFETIME_RENAME, LIFETIME_RENAME_NOREPLACE };
+
 static int lifetime_explicit_fs(const char *event, const char *from,
                                 const char *to, const char *owner,
                                 enum db_lifetime_authority authority,
-                                uint64_t generation, bool rename_op)
+                                uint64_t generation, enum lifetime_fs_operation operation)
 {
     struct db_lifetime_scope scope;
     db_lifetime_scope_enter(&scope, owner, authority, generation);
@@ -749,7 +754,15 @@ static int lifetime_explicit_fs(const char *event, const char *from,
         errno = EPERM;
         rc = -1;
     } else {
-        rc = rename_op ? rename(from, to) : unlink(from);
+        if (operation == LIFETIME_RENAME_NOREPLACE) {
+#if defined(_WIN32)
+            rc = rename(from, to);
+#else
+            rc = platform_renameat_noreplace(AT_FDCWD, from, AT_FDCWD, to);
+#endif
+        } else {
+            rc = operation == LIFETIME_RENAME ? rename(from, to) : unlink(from);
+        }
     }
     lifetime_log(event, from, 0,
                  current_generation ? current_generation : generation,
@@ -763,7 +776,15 @@ int db_lifetime_rename(const char *from, const char *to, const char *owner,
                        uint64_t generation)
 {
     return lifetime_explicit_fs("rename", from, to, owner, authority,
-                                generation, true);
+                                generation, LIFETIME_RENAME);
+}
+
+int db_lifetime_rename_noreplace(const char *from, const char *to, const char *owner,
+                                 enum db_lifetime_authority authority,
+                                 uint64_t generation)
+{
+    return lifetime_explicit_fs("rename_noreplace", from, to, owner, authority,
+                                generation, LIFETIME_RENAME_NOREPLACE);
 }
 
 int db_lifetime_unlink(const char *path, const char *owner,
@@ -771,5 +792,5 @@ int db_lifetime_unlink(const char *path, const char *owner,
                        uint64_t generation)
 {
     return lifetime_explicit_fs("unlink", path, NULL, owner, authority,
-                                generation, false);
+                                generation, LIFETIME_UNLINK);
 }

@@ -43,6 +43,9 @@ uint64_t db_lifetime_unauthorized_count(void);
 int db_lifetime_rename(const char *from, const char *to, const char *owner,
                        enum db_lifetime_authority authority,
                        uint64_t generation);
+int db_lifetime_rename_noreplace(const char *from, const char *to, const char *owner,
+                                 enum db_lifetime_authority authority,
+                                 uint64_t generation);
 int db_lifetime_unlink(const char *path, const char *owner,
                        enum db_lifetime_authority authority,
                        uint64_t generation);

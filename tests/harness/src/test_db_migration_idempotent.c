@@ -8,6 +8,7 @@
 
 #include "test/test_core.h"
 #include "models/database.h"
+#include "platform/clock.h"
 #include "models/database_internal.h"
 #include "models/fleet_board_post.h"
 #include "session/fleet_board_proto.h"
@@ -2690,6 +2691,76 @@ static int t_backup_flag_refuses_on_insufficient_space(void)
     return failures;
 }
 
+static int64_t db_mig_fixed_wall(void *self)
+{
+    (void)self;
+    return INT64_C(1700000000000);
+}
+
+static int t_quarantine_archive_collision(void)
+{
+    int failures = 0;
+    char dir[256], dbpath[512], archive[640], wal_archive[640], shm_archive[640];
+    const clock_iface_t *previous_clock = clock_default();
+    clock_iface_t fixed_clock = *previous_clock;
+    fixed_clock.now_wall_ms = db_mig_fixed_wall;
+    db_mig_path(dir, sizeof(dir), "family_collision");
+    mkdir_p(dir);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+    snprintf(archive, sizeof(archive), "%s.corrupt-20231114T221320Z", dbpath);
+    snprintf(wal_archive, sizeof(wal_archive), "%s-wal.corrupt-20231114T221320Z", dbpath);
+    snprintf(shm_archive, sizeof(shm_archive), "%s-shm.corrupt-20231114T221320Z", dbpath);
+    TEST("db_mig: quarantine collision preserves the store and archive on retry") {
+        int64_t page_size = 0, rootpage = 0;
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        ASSERT(node_db_exec(&seed, "DROP INDEX IF EXISTS idx_tx_block"));
+        ASSERT(db_mig_query_int(seed.db, "PRAGMA page_size", &page_size));
+        ASSERT(db_mig_query_int(seed.db,
+            "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='transactions'", &rootpage));
+        node_db_close(&seed);
+        ASSERT(db_mig_scribble_page(dbpath, rootpage, page_size));
+        struct stat before, after1, after2, archive_before, archive_after;
+        ASSERT(stat(dbpath, &before) == 0);
+        FILE *reserved = fopen(archive, "wb");
+        ASSERT(reserved != NULL);
+        ASSERT(fwrite("SENTINEL37", 1, 10, reserved) == 10);
+        ASSERT(fclose(reserved) == 0);
+        ASSERT(stat(archive, &archive_before) == 0);
+        clock_set_default(&fixed_clock);
+        node_db_set_quick_check_skip_probe(db_mig_skip_quick_check_always);
+        struct node_db first, second;
+        bool open1 = node_db_open(&first, dbpath);
+        if (open1) node_db_close(&first);
+        int stat1 = stat(dbpath, &after1);
+        bool open2 = node_db_open(&second, dbpath);
+        if (open2) node_db_close(&second);
+        int stat2 = stat(dbpath, &after2);
+        node_db_set_quick_check_skip_probe(NULL);
+        clock_set_default(previous_clock);
+        ASSERT(stat(archive, &archive_after) == 0);
+        char sentinel[10];
+        reserved = fopen(archive, "rb");
+        ASSERT(reserved != NULL);
+        ASSERT(fread(sentinel, 1, sizeof(sentinel), reserved) == sizeof(sentinel));
+        ASSERT(fgetc(reserved) == EOF);
+        ASSERT(fclose(reserved) == 0);
+        ASSERT(!open1 && !open2);
+        ASSERT(stat1 == 0 && stat2 == 0);
+        ASSERT(before.st_ino == after1.st_ino && before.st_ino == after2.st_ino);
+        ASSERT(archive_before.st_ino == archive_after.st_ino);
+        struct stat unused;
+        ASSERT(stat(wal_archive, &unused) != 0 && errno == ENOENT);
+        ASSERT(stat(shm_archive, &unused) != 0 && errno == ENOENT);
+        ASSERT(memcmp(sentinel, "SENTINEL37", sizeof(sentinel)) == 0);
+        PASS();
+    } _test_next:;
+    node_db_set_quick_check_skip_probe(NULL);
+    clock_set_default(previous_clock);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_db_migration_idempotent(void);
 
 int test_db_migration_idempotent(void)
@@ -2734,6 +2805,7 @@ int test_db_migration_idempotent(void)
     failures += t_quickcheck_auth_refusal_preserves_store();
     failures += t_malformed_store_heals(true);
     failures += t_malformed_store_heals(false);
+    failures += t_quarantine_archive_collision();
     failures += t_malformed_store_repair_is_boot_only();
     return failures;
 }

@@ -700,20 +700,26 @@ bool node_db_quick_check_ok(sqlite3 *db, const char *path)
     return db_quickcheck_run(db, path) == DB_QUICKCHECK_CLEAN;
 }
 
-static void db_quarantine_one(const char *path, const char *suffix)
+static bool db_quarantine_one(const char *path, const char *suffix, bool no_replace)
 {
     char dst[1400];
-    if (access(path, F_OK) != 0) return;
-    snprintf(dst, sizeof(dst), "%s.%s", path, suffix);
-    if (db_lifetime_rename(path, dst, "node_db.quarantine",
-                           DB_LIFETIME_BACKING_OWNER, 0) == 0) {
+    if (access(path, F_OK) != 0) return false;
+    int n = snprintf(dst, sizeof(dst), "%s.%s", path, suffix);
+    if (n < 0 || (size_t)n >= sizeof(dst)) return false;
+    int rc = no_replace
+        ? db_lifetime_rename_noreplace(path, dst, "node_db.quarantine",
+                                       DB_LIFETIME_BACKING_OWNER, 0)
+        : db_lifetime_rename(path, dst, "node_db.quarantine",
+                             DB_LIFETIME_BACKING_OWNER, 0);
+    if (rc == 0) {
         LOG_INFO("db", "db: quarantined %s -> %s", path, dst);
-    } else {
-        LOG_WARN("db", "db: failed to quarantine %s: %s", path, strerror(errno));
+        return true;
     }
+    LOG_WARN("db", "db: failed to quarantine %s: %s", path, strerror(errno));
+    return false;
 }
 
-static void db_quarantine_files(const char *path)
+static bool db_quarantine_files(const char *path)
 {
     char wal[1200];
     char shm[1200];
@@ -727,9 +733,10 @@ static void db_quarantine_files(const char *path)
     snprintf(wal, sizeof(wal), "%s-wal", path);
     snprintf(shm, sizeof(shm), "%s-shm", path);
 
-    db_quarantine_one(path, suffix);
-    db_quarantine_one(wal, suffix);
-    db_quarantine_one(shm, suffix);
+    if (!db_quarantine_one(path, suffix, true)) return false;
+    (void)db_quarantine_one(wal, suffix, false);
+    (void)db_quarantine_one(shm, suffix, false);
+    return true;
 }
 
 static bool db_open_raw(sqlite3 **db_out, const char *path,
@@ -839,8 +846,8 @@ static bool db_error_is_corruption(sqlite3 *db)
 }
 
 /* Close the damaged handle, rename the family aside, and open a fresh
- * store at the same path. False only when the pathname lease cannot be
- * rebound or the fresh open itself fails. */
+ * store at the same path. False when the main file cannot be moved without replacing an existing
+ * archive, the pathname lease cannot be rebound, or the fresh open fails. */
 static bool db_quarantine_and_reopen(struct node_db *ndb, const char *path,
                                      bool boot_ceremony)
 {
@@ -849,7 +856,7 @@ static bool db_quarantine_and_reopen(struct node_db *ndb, const char *path,
         sqlite3_close(ndb->db);
         ndb->db = NULL;
     }
-    db_quarantine_files(path);
+    if (!db_quarantine_files(path)) return false;
     if (!node_db_owner_lease_rebind(ndb)) {
         LOG_FAIL("db", "db: quarantine could not rebind the pathname lease "
                  "for %s; the fresh store was not reopened", path);
