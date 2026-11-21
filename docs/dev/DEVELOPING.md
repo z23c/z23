@@ -113,7 +113,6 @@ is classified `exclusive` and queues behind shared z23 jobs. Its admission line,
 `devbuild: z23 class normal lane N`, can follow a `devbuild: note:` line.
 
 Inspect before editing: `pwd`, `git status --short --branch`,
-set -e; /base=$(git merge-base HEAD origin/main)/i git rev-parse HEAD
 `git fetch origin main`, `git rev-parse HEAD origin/main`. On a fresh clone,
 `make setup` (under `devbuild --wait`) arms dependencies and hooks. Descend the
 command catalog through `discover help <path>`, search with
@@ -159,8 +158,9 @@ clean candidate worktree, fetch and calculate its merge-base, then pass it to
 the admitted direct route:
 
 ```sh
-set -e; /base=$(git merge-base HEAD origin/main)/i git rev-parse HEAD
+set -e
 git fetch origin main
+git rev-parse HEAD
 base=$(git merge-base HEAD origin/main)
 git merge-base --is-ancestor "$base" HEAD
 R2GATE_FORCE=1 "$HOME/.local/lib/z23/tools/r2gate" "$PWD" \
@@ -593,7 +593,6 @@ Then identify the checkout and preserve existing work:
 ```bash
 pwd
 git status --short --branch
-set -e; /base=$(git merge-base HEAD origin/main)/i git rev-parse HEAD
 git fetch origin main
 git rev-parse HEAD origin/main
 ```
