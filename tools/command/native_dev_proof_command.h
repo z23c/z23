@@ -7,6 +7,7 @@
 struct zcl_command_reply;
 struct zcl_command_request;
 struct zcl_dev_proof_status;
+struct zcl_dev_proof_range_selection;
 
 void zcl_dev_proof_step_conclude(struct zcl_command_reply *reply, int result,
                                  const struct zcl_dev_proof_status *status);
@@ -33,4 +34,8 @@ void zcl_dev_proof_status_conclude(struct zcl_command_reply *reply,
  * registry drops an over-budget reply to a bare envelope, so the handler
  * refuses by name instead and `agent-verify` never sees a half answer. */
 bool zcl_dev_proof_select_reply_fits(size_t groups_len, size_t budget_bytes);
+#if defined(ZCL_TESTING)
+void zcl_dev_proof_select_test_timings(struct zcl_command_reply *reply,
+                                       const struct zcl_dev_proof_range_selection *selection);
+#endif
 #endif

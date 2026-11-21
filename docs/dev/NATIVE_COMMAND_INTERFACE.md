@@ -57,6 +57,10 @@ dev authority is the explicit native plan/commit leaf; watcher scripts, deploy
 scripts, broad test commands, and service commands do not gain publication
 authority from an environment switch.
 
+`dev proof select` reports `timing_us` for changed-set capture, path planning,
+closure and group selection. A null phase was not run or its monotonic clock
+was unavailable; timings do not change the selected groups.
+
 ## 2. Architectural law
 
 > Core owns truth. Apps consume capabilities.

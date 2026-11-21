@@ -451,6 +451,8 @@ struct zcl_dev_proof_range_selection {
     const char *reason;
     char detail[160];
     char gated[PROOF_HOST_GATED_MAX];
+    /* Monotonic microseconds; -1 means unavailable or not applicable. */
+    int64_t changed_set_us, path_plan_us, closure_us, groups_us;
 };
 size_t zcl_dev_proof_select_groups_capacity(void);
 /* The selector a proof of an un-narrowable plan runs for `root`: every

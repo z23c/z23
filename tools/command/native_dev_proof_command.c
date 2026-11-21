@@ -1121,6 +1121,40 @@ bool zcl_dev_proof_select_reply_fits(size_t groups_len, size_t budget_bytes)
     return false;
 }
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* Durations are observational; a failed clock or an unrun phase is null. */
+static void proof_select_duration(struct json_value *timings, const char *name, int64_t us)
+{
+    struct json_value value;
+    json_init(&value);
+    if (us < 0) json_set_null(&value); else json_set_int(&value, us);
+    (void)json_push_kv(timings, name, &value);
+    json_free(&value);
+}
+
+static void proof_select_timings(struct zcl_command_reply *reply,
+                                 const struct zcl_dev_proof_range_selection *s)
+{
+    struct json_value timings;
+    json_init(&timings);
+    json_set_object(&timings);
+    proof_select_duration(&timings, "changed_set", s->changed_set_us);
+    proof_select_duration(&timings, "path_plan", s->path_plan_us);
+    proof_select_duration(&timings, "closure", s->closure_us);
+    proof_select_duration(&timings, "groups", s->groups_us);
+    (void)json_push_kv(&reply->data, "timing_us", &timings);
+    json_free(&timings);
+}
+#endif
+
+#if defined(ZCL_TESTING)
+void zcl_dev_proof_select_test_timings(struct zcl_command_reply *reply,
+                                       const struct zcl_dev_proof_range_selection *s)
+{
+    proof_select_timings(reply, s);
+}
+#endif
+
 /* dev.proof.select: the test groups the land proof would select for
  * base..local, from the proof worker's own planner and selector. A lane
  * verify runs exactly this set, so it cannot miss a group the proof runs. */
@@ -1194,6 +1228,7 @@ static void proof_select(
     (void)json_push_kv_str(&reply->data, "host_gated",
                            selection.gated[0] ? selection.gated : "-");
     (void)json_push_kv_str(&reply->data, "groups", selection.groups);
+    proof_select_timings(reply, &selection);
     free(selection.groups);
 #endif
 }

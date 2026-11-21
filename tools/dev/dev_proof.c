@@ -9472,6 +9472,13 @@ static bool dp_select_route_only(const struct zcl_dev_proof_changed_set *set,
     return true;
 }
 
+/* Diagnostic only: clock failure or rollback is reported as unavailable. */
+static int64_t dp_select_elapsed(int64_t start)
+{
+    int64_t end = platform_time_monotonic_us();
+    return start > 0 && end >= start ? end - start : -1;
+}
+
 /* Narrow or close the plan (route screen or proof closure) and select. */
 static bool dp_select_plan(const char *root,
                            const struct zcl_dev_proof_changed_set *set,
@@ -9483,13 +9490,17 @@ static bool dp_select_plan(const char *root,
         if (!dp_select_route_only(set, plan, out, why, why_len))
             return false;
     } else {
+        int64_t started = platform_time_monotonic_us();
         dp_select_close(root, set, plan, out);
+        out->closure_us = dp_select_elapsed(started);
     }
     out->universal = plan->closure_universal;
     out->files = set->count;
-    if (build_test_selector(plan, root, out->groups, out->groups_size,
-                            &out->count, out->gated, sizeof(out->gated)))
-        return true;
+    int64_t started = platform_time_monotonic_us();
+    bool selected = build_test_selector(plan, root, out->groups, out->groups_size,
+                                        &out->count, out->gated, sizeof(out->gated));
+    out->groups_us = dp_select_elapsed(started);
+    if (selected) return true;
     proof_why(why, why_len, "test_selection_invalid_or_truncated");
     return false;
 }
@@ -9519,6 +9530,7 @@ bool zcl_dev_proof_select_range(const char *root_in, const char *base,
     out->reason = "impact-plan";
     out->gated[0] = '\0';
     out->detail[0] = '\0';
+    out->changed_set_us = out->path_plan_us = out->closure_us = out->groups_us = -1;
     struct zcl_dev_proof_changed_set set = {0};
     struct zcl_devloop_plan *plan = zcl_calloc(1, sizeof(*plan),
                                                "proof select plan");
@@ -9526,12 +9538,16 @@ bool zcl_dev_proof_select_range(const char *root_in, const char *base,
         proof_why(why, why_len, "proof_select_allocation_failed");
         return false;
     }
+    int64_t started = platform_time_monotonic_us();
     bool ok = zcl_dev_proof_changed_set_capture(root, base, local, scratch,
                                                 NULL, &set, why, why_len);
+    out->changed_set_us = dp_select_elapsed(started);
+    started = platform_time_monotonic_us();
     if (ok && !zcl_devloop_plan_files(set.files, set.count, plan)) {
         proof_why(why, why_len, "impact_plan_invalid");
         ok = false;
     }
+    out->path_plan_us = dp_select_elapsed(started);
     if (ok)
         ok = dp_select_plan(root, &set, plan, out, why, why_len);
     zcl_dev_proof_changed_set_release(&set);

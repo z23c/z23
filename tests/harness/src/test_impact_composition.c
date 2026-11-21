@@ -8543,6 +8543,79 @@ static int test_ic_changed_set_deleted_script_closure(void)
  * range selects the proof's universal set under the proof's own reason, and a
  * range whose plan this tree cannot close never narrows -- it selects the same
  * universal set and says why. */
+static int test_ic_proof_select_timing_wire(void)
+{
+    int failures = 0;
+    TEST("proof select: native timing object preserves numbers and unavailable phases") {
+        struct zcl_dev_proof_range_selection s = {
+            .changed_set_us = 0, .path_plan_us = 12, .closure_us = -1, .groups_us = 34};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_select.v1");
+        zcl_dev_proof_select_test_timings(&reply, &s);
+        const struct json_value *timing = json_get(&reply.data, "timing_us");
+        const struct json_value *capture = json_get(timing, "changed_set");
+        const struct json_value *plan = json_get(timing, "path_plan");
+        const struct json_value *closure = json_get(timing, "closure");
+        const struct json_value *groups = json_get(timing, "groups");
+        ASSERT(timing && timing->type == JSON_OBJ && json_size(timing) == 4);
+        ASSERT(capture && capture->type == JSON_INT && json_get_int(capture) == 0);
+        ASSERT(plan && plan->type == JSON_INT && json_get_int(plan) == 12);
+        ASSERT(closure && closure->type == JSON_NULL);
+        ASSERT(groups && groups->type == JSON_INT && json_get_int(groups) == 34);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_select_timing_budget(void)
+{
+    int failures = 0;
+    static char groups[63801], detail[101], gated[101], wire[65537];
+    TEST("proof select: near-cap native reply retains the timing object") {
+        memset(groups, 'g', sizeof(groups) - 1);
+        memset(detail, 'd', sizeof(detail) - 1);
+        memset(gated, 'h', sizeof(gated) - 1);
+        const struct zcl_command_registry *registry = zcl_command_catalog();
+        const struct zcl_command_spec *spec = zcl_command_registry_find(registry, "dev.proof.select", NULL);
+        ASSERT(spec != NULL && spec->budget_bytes == 65536);
+        ASSERT(zcl_dev_proof_select_reply_fits(strlen(groups) + strlen(detail) + strlen(gated), 65536));
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_select.v1");
+        ASSERT(json_push_kv_str(&reply.data, "base", "0123456789012345678901234567890123456789"));
+        ASSERT(json_push_kv_str(&reply.data, "local_commit", "0123456789012345678901234567890123456789"));
+        ASSERT(json_push_kv_int(&reply.data, "files", 1));
+        ASSERT(json_push_kv_str(&reply.data, "selector", "exact"));
+        ASSERT(json_push_kv_str(&reply.data, "reason", "impact-plan"));
+        ASSERT(json_push_kv_str(&reply.data, "detail", detail));
+        ASSERT(json_push_kv_int(&reply.data, "groups_selected", 1));
+        ASSERT(json_push_kv_str(&reply.data, "host_gated", gated));
+        ASSERT(json_push_kv_str(&reply.data, "groups", groups));
+        struct zcl_dev_proof_range_selection s = {
+            .changed_set_us = INT64_MAX, .path_plan_us = INT64_MAX,
+            .closure_us = INT64_MAX, .groups_us = INT64_MAX};
+        zcl_dev_proof_select_test_timings(&reply, &s);
+        struct zcl_command_budget_fixture fixture = {.budget_bytes = 65536};
+        size_t n = zcl_command_registry_test_reply_wire_fixture(registry, spec, &reply, &fixture,
+                                                                 wire, sizeof(wire));
+        ASSERT(n > 0 && n <= 65536);
+        struct json_value doc;
+        json_init(&doc);
+        ASSERT(json_read(&doc, wire, n));
+        const struct json_value *data = json_get(&doc, "data");
+        ASSERT(json_get_str(json_get(data, "groups")) &&
+               strcmp(json_get_str(json_get(data, "groups")), groups) == 0);
+        const struct json_value *timings = json_get(data, "timing_us");
+        ASSERT(timings && json_size(timings) == 4);
+        ASSERT(json_get_int(json_get(timings, "closure")) == INT64_MAX);
+        printf("proof_select near-cap wire bytes=%zu selector bytes=64000\n", n);
+        json_free(&doc);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_select_range_matches_proof_selector(void)
 {
     int failures = 0;
@@ -8588,6 +8661,8 @@ static int test_ic_proof_select_range_matches_proof_selector(void)
         if (!selected_ok)
             printf("invariant=proof_select refused why=%s\n", why);
         ASSERT(selected_ok);
+        ASSERT(sel.changed_set_us >= 0 && sel.path_plan_us >= 0 &&
+               sel.closure_us >= 0 && sel.groups_us >= 0);
         printf("invariant=proof_select case=structural universal=%d "
                "selected=%u proof=%u reason=%s\n", sel.universal ? 1 : 0,
                (unsigned)sel.count, (unsigned)proof_count, sel.reason);
@@ -8683,6 +8758,8 @@ static int test_ic_proof_select_route_only(void)
             IC_CHANGED_REPO, tip, mod, &sel, why, sizeof(why));
         if (!route_ok) printf("invariant=proof_select route refused why=%s\n", why);
         ASSERT(route_ok);
+        ASSERT(sel.changed_set_us >= 0 && sel.path_plan_us >= 0 &&
+               sel.closure_us == -1 && sel.groups_us >= 0);
         const char *files[] = {"engine/composition/goals.def"};
         struct zcl_devloop_plan *plan = calloc(1, sizeof(*plan));
         ASSERT(plan && zcl_devloop_plan_files(files, 1, plan));
@@ -18229,6 +18306,8 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_changed_set_split_sibling_closure();
     failures += test_ic_changed_set_fresh_source_closure();
     failures += test_ic_changed_set_deleted_script_closure();
+    failures += test_ic_proof_select_timing_wire();
+    failures += test_ic_proof_select_timing_budget();
     failures += test_ic_proof_select_range_matches_proof_selector();
     failures += test_ic_proof_select_route_only();
     failures += test_ic_deleted_input_closes_current_graph();
