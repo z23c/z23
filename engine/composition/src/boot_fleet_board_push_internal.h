@@ -58,9 +58,12 @@ void board_push_stream_close(struct mesh_stream *st, enum board_state_tag tag,
                              const uint8_t *payload, size_t len);
 /* Free one PUSH_OUT or PUSH_IN state by its own rule. */
 void board_push_state_free(void *state);
-/* One lane tick of push work: commit at most one received push into
- * `store`, then open the pushes the queue holds. Two counter reads and no
- * lock when there is nothing to do. */
+/* One lane tick of push work at lane time `now` (Unix seconds): commit at
+ * most one received push into `store`, the oldest, then open the pushes the
+ * queue holds. Two counter reads and no lock when there is nothing to do;
+ * one more counter read and one push lock pair when posts wait and nothing
+ * changed since the last sending round, which then runs at most once a
+ * second. */
 void board_push_lane_tick(struct boot_svc_ctx *svc, struct node_db *store,
                           int64_t now);
 /* Fill the push fields of the lane's counters. */

@@ -44,6 +44,22 @@ bool board_roster_admits(const uint8_t online_pubkey[32]);
 /* Everything the answering half proves before it reads a post for a peer:
  * a pairing row, a current delegation, the read role and the roster. */
 bool board_accept_authorized(const uint8_t peer_noise_static[32]);
+/* The push's questions, which count and log nothing (the push names its own
+ * refusals). pairing_allowing: the NEWEST row for one Noise static that
+ * grants `capability` at `now`; rows are insert-only, so an expired row can
+ * sit before the live one, and both push halves judge a peer on the row that
+ * allows it. judge_peer: on that row, the status capability, a delegation
+ * that resolves and is current, the read role when `want_read` (the
+ * addressee's disclosure test; the pusher is not asked it), and the roster.
+ * Returns FLEET_BOARD_PUSH_REFUSALS when every check passes, with the peer's
+ * board key in `online_out` (may be NULL), else the check that failed. */
+bool board_pairing_allowing(struct node_db *ndb,
+                            const uint8_t peer_noise_static[32],
+                            uint64_t capability, int64_t now,
+                            struct db_mesh_pairing *out);
+enum fleet_board_push_refusal board_push_judge_peer(
+    const struct db_mesh_pairing *row, bool want_read, int64_t now,
+    uint8_t online_out[32]);
 /* Fill delegation_refused and role_refused. */
 void board_authority_counts(struct boot_fleet_board_fleet_counts *out);
 

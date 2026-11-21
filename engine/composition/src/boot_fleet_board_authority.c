@@ -3,9 +3,11 @@
  * the pairing row, the peer's delegation and whether it is current, the read
  * role and the fleet roster, each asked the same way by the answering half
  * (boot_fleet_board_fleet.c), the asking half and the push
- * (boot_fleet_board_push.c). Moved out of boot_fleet_board_fleet.c unchanged
- * so the stream lane keeps to its size limit; refusals are counted and named
- * here, never the peer.
+ * (boot_fleet_board_push.c). Moved out of boot_fleet_board_fleet.c so the
+ * stream lane keeps to its size limit. The pull's refusals are counted and
+ * named here, never the peer; the push asks the same checks through
+ * board_push_judge_peer, which counts and logs nothing, and names its own
+ * refusals.
  */
 
 #include "boot_fleet_board_authority_internal.h"
@@ -100,20 +102,29 @@ int64_t board_now(void)
 }
 
 /* The pairing row's own window cannot say whether the peer's master
- * identity is still ACTIVE on chain, so that is asked separately. A
- * refusal is counted and named, never the peer. */
+ * identity is still ACTIVE on chain, so that is asked separately. */
+static enum mesh_pairing_reason board_delegation_reason(
+    struct node_db *ndb, const struct db_mesh_pairing *row,
+    const struct vcs_zcode_dht_delegation *peer,
+    const uint8_t session_noise_static[32], int64_t now)
+{
+    uint8_t network_genesis[32];
+    if (!board_network_genesis(network_genesis))
+        return MESH_PAIRING_BAD_ARGUMENT;
+    return mesh_pairing_service_authorize_status(
+        ndb, network_genesis, row->pairing_id, peer, session_noise_static,
+        now);
+}
+
+/* The pull's question. A refusal is counted and named, never the peer. */
 bool board_delegation_current(struct node_db *ndb,
                               const struct db_mesh_pairing *row,
                               const struct vcs_zcode_dht_delegation *peer,
                               const uint8_t session_noise_static[32],
                               int64_t now)
 {
-    uint8_t network_genesis[32];
-    enum mesh_pairing_reason reason = MESH_PAIRING_BAD_ARGUMENT;
-    if (board_network_genesis(network_genesis))
-        reason = mesh_pairing_service_authorize_status(
-            ndb, network_genesis, row->pairing_id, peer,
-            session_noise_static, now);
+    enum mesh_pairing_reason reason =
+        board_delegation_reason(ndb, row, peer, session_noise_static, now);
     if (reason == MESH_PAIRING_OK)
         return true;
     atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
@@ -142,6 +153,55 @@ bool board_pairing_for_peer(struct node_db *ndb,
     }
     free(rows);
     return found;
+}
+
+bool board_pairing_allowing(struct node_db *ndb,
+                            const uint8_t peer_noise_static[32],
+                            uint64_t capability, int64_t now,
+                            struct db_mesh_pairing *out)
+{
+    struct db_mesh_pairing *rows = zcl_calloc(
+        FLEET_BOARD_FLEET_PEERS_MAX, sizeof *rows, "fleet_board_push_pairing");
+    if (!rows)
+        return false;
+    int count = db_mesh_pairing_list(ndb, rows, FLEET_BOARD_FLEET_PEERS_MAX);
+    bool found = false;
+    /* The list runs oldest first: the last row that allows is the newest. */
+    for (int i = 0; i < count; i++) {
+        if (memcmp(rows[i].peer_noise_pubkey, peer_noise_static, 32) != 0 ||
+            !mesh_pairing_allows(&rows[i], capability, now))
+            continue;
+        *out = rows[i];
+        found = true;
+    }
+    free(rows);
+    return found;
+}
+
+enum fleet_board_push_refusal board_push_judge_peer(
+    const struct db_mesh_pairing *row, bool want_read, int64_t now,
+    uint8_t online_out[32])
+{
+    struct node_db *ndb = app_runtime_node_db();
+    if (!row || !ndb || !app_runtime_node_db_handle_open(ndb) ||
+        !mesh_pairing_allows(row, MESH_PAIRING_CAP_STATUS_READ, now))
+        return FLEET_BOARD_PUSH_REFUSAL_PAIRING;
+    struct vcs_zcode_dht_delegation peer;
+    if (!board_peer_delegation(row, &peer) ||
+        board_delegation_reason(ndb, row, &peer, row->peer_noise_pubkey,
+                                now) != MESH_PAIRING_OK)
+        return FLEET_BOARD_PUSH_REFUSAL_DELEGATION;
+    char why[ZCL_FLEET_ROLE_WHY_MAX];
+    if (want_read &&
+        !zcl_fleet_role_allows(peer.online_pubkey, FLEET_BOARD_FLEET_READ_LEAF,
+                               NULL, why, sizeof why))
+        return FLEET_BOARD_PUSH_REFUSAL_ROLE;
+    struct node_db *store = board_db();
+    if (!store || !boot_fleet_roster_admits_peer(store, peer.online_pubkey, now))
+        return FLEET_BOARD_PUSH_REFUSAL_ROSTER;
+    if (online_out)
+        memcpy(online_out, peer.online_pubkey, 32);
+    return FLEET_BOARD_PUSH_REFUSALS;
 }
 
 /* A paired, current peer still reads fleet-private posts only when the

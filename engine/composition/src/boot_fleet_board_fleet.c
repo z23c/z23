@@ -122,6 +122,8 @@ static struct node_db *g_test_db;
 static char g_test_cursor_dir[512];
 static int64_t g_test_last_after;
 static _Atomic uint64_t g_test_states_freed;
+static _Atomic uint64_t g_test_second_runs;
+static _Atomic uint64_t g_test_pull_runs;
 #endif
 
 static void board_lock_init(void)
@@ -1080,23 +1082,20 @@ static void board_publish_roster_due(struct node_db *ndb, int64_t now)
         (void)boot_fleet_roster_publish(ndb, now);
 }
 
-/* Every FLEET_BOARD_FLEET_TICK_US: the push work when there is any, then,
- * once a second, everything this lane did before the push. */
-static void board_tick(struct liveness_contract *contract)
+/* Every FLEET_BOARD_FLEET_TICK_US, with `svc` the wired context and `now` the
+ * wall clock: the push work when there is any, then, once a second,
+ * everything this lane did before the push. */
+static void board_tick_at(struct boot_svc_ctx *svc, int64_t now)
 {
-    (void)contract;
     board_lock();
-    struct boot_svc_ctx *svc = g_svc;
-    bool wired = svc != NULL;
     int64_t last = g_last_pull;
     int64_t second = g_last_second;
     board_unlock();
     struct node_db *ndb = board_db();
-    if (!wired || !ndb) {
+    if (!svc || !ndb) {
         supervisor_progress_idle(g_child);
         return;
     }
-    int64_t now = (int64_t)platform_time_wall_time_t();
     board_push_lane_tick(svc, ndb, now);
     if (now == second) {
         supervisor_progress_idle(g_child);
@@ -1105,6 +1104,9 @@ static void board_tick(struct liveness_contract *contract)
     board_lock();
     g_last_second = now;
     board_unlock();
+#ifdef ZCL_TESTING
+    atomic_fetch_add_explicit(&g_test_second_runs, 1, memory_order_relaxed);
+#endif
     (void)board_drain_inbox(ndb, now);
     if (now <= 0 ||
         (last != 0 && now - last < FLEET_BOARD_FLEET_PULL_INTERVAL_S)) {
@@ -1114,11 +1116,23 @@ static void board_tick(struct liveness_contract *contract)
     board_lock();
     g_last_pull = now;
     board_unlock();
+#ifdef ZCL_TESTING
+    atomic_fetch_add_explicit(&g_test_pull_runs, 1, memory_order_relaxed);
+#endif
     struct vcs_package_store *host_store = vcs_package_store_global();
     if (host_store) (void)boot_app_host_tick(ndb, host_store, now);
     board_publish_roster_due(ndb, now);
     board_pull_paired_peers(now);
     (void)board_pull_roster_peers(svc, ndb, now);
+}
+
+static void board_tick(struct liveness_contract *contract)
+{
+    (void)contract;
+    board_lock();
+    struct boot_svc_ctx *svc = g_svc;
+    board_unlock();
+    board_tick_at(svc, (int64_t)platform_time_wall_time_t());
 }
 
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out)
@@ -1333,5 +1347,19 @@ void boot_fleet_board_fleet_test_restart_cursors(void)
 int64_t boot_fleet_board_fleet_test_last_after(void)
 {
     return g_test_last_after;
+}
+
+void boot_fleet_board_fleet_test_tick(struct boot_svc_ctx *svc, int64_t now)
+{
+    board_tick_at(svc, now);
+}
+
+void boot_fleet_board_fleet_test_tick_runs(uint64_t *seconds, uint64_t *pulls)
+{
+    if (seconds)
+        *seconds =
+            atomic_load_explicit(&g_test_second_runs, memory_order_relaxed);
+    if (pulls)
+        *pulls = atomic_load_explicit(&g_test_pull_runs, memory_order_relaxed);
 }
 #endif

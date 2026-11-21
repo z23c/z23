@@ -205,10 +205,15 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * relayed: a box pushes only posts its own key signed. The receiver copies
  * the payload into a bounded push inbox, separate from the pull inbox, on
  * the frame path, and checks nothing else there; its lane tick re-proves the
- * pusher, requires every pushed post to be signed by the pusher's own board
- * key, stores each through the same checks a pulled post meets, and closes
- * the stream with a receipt (FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT). A push
- * touches no cursor, sweep or answer check. A push that is refused, lost, or
+ * pusher, decodes every pushed record and requires its id to be its bytes,
+ * FLEET scope and the pusher's own board key as author before it asks the
+ * store anything about it (so a push can never learn whether this box holds
+ * a post another box wrote), stores each through the same checks a pulled
+ * post meets without waiting on another board writer, and closes the stream
+ * with a receipt (FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT). Received pushes are
+ * committed one a tick, oldest first. Both halves judge a peer on its newest
+ * pairing row that grants the status capability now. A push touches no
+ * cursor, sweep or answer check. A push that is refused, lost, or
  * never answered is not sent again: the next pull carries the post, and a
  * post both paths deliver is one row by id. An older node answers the new
  * type stream_malformed, and that session is not pushed to again.
@@ -300,10 +305,13 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * eviction would drop the very cursor each pull is about to use. */
 #define FLEET_BOARD_FLEET_CURSOR_SLOTS (2u * FLEET_BOARD_FLEET_PEERS_MAX)
 /* The lane tick. A tick with no push work takes the board lane's own lock
- * twice, reads the clock and two counters, and returns; the pull, the answer drain and
- * everything else the lane did once a second still run once a second. The
- * supervisor already ticks every 100 ms for the stream pump, so this adds no
- * wakeup of its own. */
+ * twice, reads the clock and two counters, and returns; the pull, the answer
+ * drain and everything else the lane did once a second still run once a
+ * second. While posts wait in the push queue and nothing changed (no post
+ * queued and no push ended since the last round) a tick adds one counter
+ * read and one push lock pair: the sending round, with its pairing walk,
+ * runs at most once a second otherwise. The supervisor already ticks every
+ * 100 ms for the stream pump, so this adds no wakeup of its own. */
 #define FLEET_BOARD_FLEET_TICK_US 100000
 
 /* PUSH (see above). The OPEN payload: type, version, record count n, then n
@@ -326,7 +334,9 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 /* Post ids waiting for the lane tick; a full queue gives up its oldest. */
 #define FLEET_BOARD_PUSH_QUEUE_MAX 32u
 /* Received pushes waiting for the lane tick, preallocated, at most one per
- * pushing peer; the tick commits one push a tick. */
+ * pushing peer; the tick commits one push a tick, in arrival order, so a
+ * peer that refills its slot at once waits behind every push that arrived
+ * before its refill. */
 #define FLEET_BOARD_PUSH_INBOX_MAX 8u
 /* A sender closes its own push this long after opening it when no receipt
  * came; a receiver closes an uncommitted push at the same mark. A post kept
@@ -377,15 +387,29 @@ enum fleet_board_push_skip {
     FLEET_BOARD_PUSH_SKIPS
 };
 
+/* Which check a push judgment of a paired peer failed: the addressee's on
+ * the sending half, the pusher's at its commit on the receiving half. */
+enum fleet_board_push_refusal {
+    FLEET_BOARD_PUSH_REFUSAL_PAIRING = 0, /* no row grants the status capability now */
+    FLEET_BOARD_PUSH_REFUSAL_DELEGATION,  /* unresolved, or not current on chain */
+    FLEET_BOARD_PUSH_REFUSAL_ROLE,        /* addressee only: no read leaf grant */
+    FLEET_BOARD_PUSH_REFUSAL_ROSTER,      /* the fleet roster does not admit its key */
+    FLEET_BOARD_PUSH_REFUSALS
+};
+
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc);
 void boot_fleet_board_fleet_shutdown(void);
 /* Registered once; serves both halves of every board stream. */
 bool boot_fleet_board_fleet_register_service(void);
 
 /* Counted since this process started. delegation_refused: a paired peer
- * whose delegation is no longer current, on either half. role_refused: a
- * paired peer whose online key holds no FLEET_BOARD_FLEET_READ_LEAF grant,
- * refused before the store was read. inbox_full: an answer that arrived
+ * whose delegation is no longer current, on either half of the pull.
+ * role_refused: a paired peer whose online key holds no
+ * FLEET_BOARD_FLEET_READ_LEAF grant, refused a pull before the store was
+ * read. Neither counts a push judgment: push_refused_out counts, by the
+ * check that failed, the addressees the sending half did not push to, and
+ * push_refused_in the pushers whose standing failed at the commit (each such
+ * push is also answered push_revoked). inbox_full: an answer that arrived
  * with no free commit slot (asked for again next pull). stored: fleet posts
  * a pull added to this box's store. deferred: pulled posts refused for a
  * reason that can clear, each offered again by a later sweep.
@@ -420,6 +444,8 @@ struct boot_fleet_board_fleet_counts {
     uint64_t push_in_records[FLEET_BOARD_PUSH_VERDICTS];
     uint64_t push_in_dropped;
     uint64_t push_data_refused;
+    uint64_t push_refused_out[FLEET_BOARD_PUSH_REFUSALS];
+    uint64_t push_refused_in[FLEET_BOARD_PUSH_REFUSALS];
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
 
@@ -499,6 +525,18 @@ size_t boot_fleet_board_fleet_test_push_queued(void);
 size_t boot_fleet_board_fleet_test_push_inbox_used(void);
 size_t boot_fleet_board_fleet_test_live_tagged(bool local_initiator, int tag);
 void boot_fleet_board_fleet_test_age_push(int64_t seconds);
+/* push_send_at is push_send at lane time `now` (Unix seconds);
+ * push_peer_walks counts the pairing walks the sending half has made. tick
+ * runs the lane's own supervisor tick body with `svc` as the wired context
+ * and `now` as the wall clock; tick_runs reads how many times its
+ * once-a-second work (the answer drain) and its pull-interval work (the
+ * pulls) have run. */
+size_t boot_fleet_board_fleet_test_push_send_at(struct boot_svc_ctx *svc,
+                                                struct node_db *store,
+                                                int64_t now);
+uint64_t boot_fleet_board_fleet_test_push_peer_walks(void);
+void boot_fleet_board_fleet_test_tick(struct boot_svc_ctx *svc, int64_t now);
+void boot_fleet_board_fleet_test_tick_runs(uint64_t *seconds, uint64_t *pulls);
 #endif
 
 /* The refusal phrase for `r` and, where one exists, the limit hit and the

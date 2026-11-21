@@ -7897,7 +7897,7 @@ static int test_fleet_board_state_tag(unsigned c)
 #define FBP_PUSHER 7
 #define FBP_ADDRESSEE 9
 #define FBP_STRANGER 8
-#define FBP_CASES 19u
+#define FBP_CASES 30u
 
 /* A failed step names its line and fails the case. */
 #define FBP_REQUIRE(cond)                                                      \
@@ -8159,7 +8159,11 @@ static bool fbp_case_no_read_role(struct fbp *p)
     struct boot_fleet_board_fleet_counts c = fbp_now_counts();
     FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_INELIGIBLE] ==
                 p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_INELIGIBLE] + 1);
-    FBP_REQUIRE(c.role_refused == p->before.role_refused + 1);
+    /* Counted as a push judgment, by the check that failed; the pull's own
+     * refusal counter does not move. */
+    FBP_REQUIRE(c.push_refused_out[FLEET_BOARD_PUSH_REFUSAL_ROLE] ==
+                p->before.push_refused_out[FLEET_BOARD_PUSH_REFUSAL_ROLE] + 1);
+    FBP_REQUIRE(c.role_refused == p->before.role_refused);
     FBP_REQUIRE(boot_fleet_board_fleet_test_push_inbox_used() == 0);
     FBP_REQUIRE(!db_fleet_board_have(&p->w.a, p->reply.id));
     return true;
@@ -8206,6 +8210,9 @@ static bool fbp_case_pusher_revoked(struct fbp *p)
                 p->before.push_in[FLEET_BOARD_PUSH_CODE_REVOKED] + 1);
     FBP_REQUIRE(c.push_receipt[FLEET_BOARD_PUSH_CODE_REVOKED] ==
                 p->before.push_receipt[FLEET_BOARD_PUSH_CODE_REVOKED] + 1);
+    FBP_REQUIRE(c.push_refused_in[FLEET_BOARD_PUSH_REFUSAL_PAIRING] ==
+                p->before.push_refused_in[FLEET_BOARD_PUSH_REFUSAL_PAIRING] + 1);
+    FBP_REQUIRE(c.delegation_refused == p->before.delegation_refused);
     return true;
 }
 
@@ -8527,6 +8534,374 @@ static bool fbp_case_sender_wait(struct fbp *p)
     return true;
 }
 
+static uint8_t g_fbp_wire[FLEET_BOARD_BODY_MAX + 128u];
+
+/* A FLEET note by `who`, signed and stored nowhere. */
+static bool fbp_signed(uint8_t who, const char *text,
+                       struct fleet_board_post *out)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    fb_test_compose(out, FLEET_BOARD_KIND_NOTE, "carrier", text, 2002, 3600);
+    fb_test_scope(out, FLEET_BOARD_SCOPE_FLEET, "");
+    return fleet_board_post_sign(out, seed, pk) == FLEET_BOARD_OK;
+}
+
+/* One push payload in g_fbp_payload of a single record that names `id` and
+ * carries `wire` as its bytes, whatever they are. */
+static size_t fbp_raw_record(const uint8_t id[32], const uint8_t *wire,
+                             size_t wire_len)
+{
+    board_push_begin(g_fbp_payload);
+    size_t len = FLEET_BOARD_PUSH_HEAD;
+    memcpy(g_fbp_payload + len, id, 32);
+    zcl_write_u32_be(g_fbp_payload + len + 32, (uint32_t)wire_len);
+    memcpy(g_fbp_payload + len + FLEET_BOARD_PUSH_RECORD_HEAD, wire, wire_len);
+    g_fbp_payload[2] = 1;
+    return len + FLEET_BOARD_PUSH_RECORD_HEAD + wire_len;
+}
+
+/* The receipt the addressee answers one raw push with on stream `sid`. */
+static bool fbp_probe(struct fbp *p, uint64_t sid, size_t len,
+                      struct board_push_receipt *rc)
+{
+    FBP_REQUIRE(len > 0 && fbp_raw_open(&p->w, sid, g_fbp_payload, len));
+    (void)boot_fleet_board_fleet_test_push_commit(&p->w.a);
+    FBP_REQUIRE(fbp_close(&p->w, rc) == MESH_STREAM_CLOSED_BY_SERVICE);
+    return true;
+}
+
+/* Two receipts a pusher cannot tell apart: the push code, the record count,
+ * and each record's verdict and result. */
+static bool fbp_same_answer(const struct board_push_receipt *x,
+                            const struct board_push_receipt *y)
+{
+    if (x->code != y->code || x->n != y->n)
+        return false;
+    for (unsigned i = 0; i < x->n; i++)
+        if (x->rec[i].verdict != y->rec[i].verdict ||
+            x->rec[i].result != y->rec[i].result)
+            return false;
+    return true;
+}
+
+/* Case 19. A paired pusher names a post a third box wrote that the
+ * addressee holds, and one it does not hold, first with bytes that are no
+ * post and then with each post's own bytes: the answers must not differ. */
+static bool fbp_case_no_membership_oracle(struct fbp *p)
+{
+    struct fleet_board_post held, absent;
+    FBP_REQUIRE(fbw_post(&p->w.a, FBP_STRANGER, FLEET_BOARD_SCOPE_FLEET,
+                         "a third box's private note", 2000, 3600, 2100,
+                         &held));
+    FBP_REQUIRE(fbp_signed(FBP_STRANGER, "a note the addressee never saw",
+                           &absent));
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, absent.id));
+    static const uint8_t junk[] = "not a board post at all";
+    struct board_push_receipt r_held, r_absent;
+    FBP_REQUIRE(fbp_probe(p, 1, fbp_raw_record(held.id, junk, sizeof junk),
+                          &r_held));
+    FBP_REQUIRE(fbp_probe(p, 3, fbp_raw_record(absent.id, junk, sizeof junk),
+                          &r_absent));
+    FBP_REQUIRE(fbp_same_answer(&r_held, &r_absent));
+    size_t wl = 0;
+    FBP_REQUIRE(fleet_board_post_encode(&held, g_fbp_wire, sizeof g_fbp_wire,
+                                        &wl) == FLEET_BOARD_OK);
+    FBP_REQUIRE(fbp_probe(p, 5, fbp_raw_record(held.id, g_fbp_wire, wl),
+                          &r_held));
+    FBP_REQUIRE(fleet_board_post_encode(&absent, g_fbp_wire,
+                                        sizeof g_fbp_wire,
+                                        &wl) == FLEET_BOARD_OK);
+    FBP_REQUIRE(fbp_probe(p, 7, fbp_raw_record(absent.id, g_fbp_wire, wl),
+                          &r_absent));
+    FBP_REQUIRE(fbp_same_answer(&r_held, &r_absent));
+    FBP_REQUIRE(r_held.code == FLEET_BOARD_PUSH_CODE_AUTHOR && r_held.n == 0);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, absent.id));
+    return true;
+}
+
+/* Case 20. */
+static bool fbp_case_mixed_push_void(struct fbp *p)
+{
+    struct fleet_board_post posts[2];
+    FBP_REQUIRE(fbw_post(&p->w.a, FBP_STRANGER, FLEET_BOARD_SCOPE_FLEET,
+                         "held here, written by a third box", 2000, 3600,
+                         2100, &posts[0]));
+    posts[1] = p->reply;
+    struct board_push_receipt rc;
+    FBP_REQUIRE(fbp_probe(p, 1, fbp_payload(posts, 2), &rc));
+    FBP_REQUIRE(rc.code == FLEET_BOARD_PUSH_CODE_AUTHOR && rc.n == 0);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
+/* A push OPEN on stream `sid` from the paired session with Noise static
+ * `noise`, carrying g_fbp_payload. */
+static bool fbp_open_as(struct fbp *p, const uint8_t noise[32], uint64_t sid,
+                        size_t len)
+{
+    size_t n = mesh_stream_test_open_frame(
+        sid, FLEET_BOARD_PUSH_WINDOW, FLEET_BOARD_FLEET_SERVICE_NAME,
+        g_fbp_payload, len, g_fbp_frame, sizeof g_fbp_frame);
+    return n > 0 && mesh_stream_test_frame_as(&p->w.mp, p->w.answerer, noise,
+                                              g_fbp_frame, n);
+}
+
+/* Case 21. A paired peer whose standing fails at every commit refills its
+ * inbox slot the moment it is answered; it filled first, so it is served
+ * first, and the honest push behind it is stored on the second tick. */
+static bool fbp_case_fair_commit(struct fbp *p)
+{
+    uint8_t flooder[32];
+    FBP_REQUIRE(fbp_fake_peer(&p->w, 0xC0, flooder));
+    size_t len = fbp_payload(&p->reply, 1);
+    FBP_REQUIRE(len > 0 && fbp_open_as(p, flooder, 1, len));
+    FBP_REQUIRE(fbp_raw_open(&p->w, 1, g_fbp_payload, len)); /* the honest one */
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_inbox_used() == 2);
+    for (unsigned tick = 0; tick < 2; tick++) {
+        (void)boot_fleet_board_fleet_test_push_commit(&p->w.a);
+        if (boot_fleet_board_fleet_test_push_inbox_used() < 2)
+            FBP_REQUIRE(fbp_open_as(p, flooder, 3 + 2u * tick, len));
+    }
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_in[FLEET_BOARD_PUSH_CODE_REVOKED] ==
+                p->before.push_in[FLEET_BOARD_PUSH_CODE_REVOKED] + 1);
+    return true;
+}
+
+/* Case 22. While a post waits behind an open push and nothing changes, the
+ * lane ticks do no pairing walk; the round runs again when the push ends. */
+static bool fbp_case_held_ticks_cheap(struct fbp *p)
+{
+    struct fleet_board_post second;
+    FBP_REQUIRE(fbp_reply_post(&p->w.b, FBP_PUSHER, p->question.id,
+                               "a second answer", &second));
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 1);
+    boot_fleet_board_fleet_push_enqueue(&second, p->pk_pusher);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b) == 0);
+    uint64_t walks = boot_fleet_board_fleet_test_push_peer_walks();
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 1); /* held */
+    for (unsigned t = 0; t < 3; t++)
+        FBP_REQUIRE(boot_fleet_board_fleet_test_push_send(&p->w.svc,
+                                                          &p->w.b) == 0);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_peer_walks() == walks);
+    /* The once-a-second round: the post is still held for an open push. */
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send_at(&p->w.svc, &p->w.b,
+                                                         FBW_NOW + 1) == 0);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_peer_walks() == walks);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 1);
+    /* The receipt ends the first push, and the next tick sends the second. */
+    size_t frames = 0;
+    FBP_REQUIRE(fbp_commit(p, &frames) == 1 && frames == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_send_at(&p->w.svc, &p->w.b,
+                                                         FBW_NOW + 1) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 0);
+    return true;
+}
+
+/* Case 23. The lane's own tick, on a clock the test sets. */
+static bool fbp_case_real_tick(struct fbp *p)
+{
+    boot_fleet_board_fleet_test_bind(&p->w.b); /* the pushing box's lane */
+    uint64_t s0 = 0, l0 = 0, s = 0, l = 0;
+    boot_fleet_board_fleet_test_tick_runs(&s0, &l0);
+    boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW);
+    boot_fleet_board_fleet_test_tick_runs(&s, &l);
+    FBP_REQUIRE(s == s0 + 1 && l == l0 + 1);
+    for (unsigned t = 0; t < 9; t++) /* the rest of that second */
+        boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW);
+    boot_fleet_board_fleet_test_tick_runs(&s, &l);
+    FBP_REQUIRE(s == s0 + 1 && l == l0 + 1);
+    /* Push work runs on a 100 ms tick inside the second. */
+    uint64_t opened = fbp_now_counts().push_opened;
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW);
+    FBP_REQUIRE(fbp_now_counts().push_opened == opened + 1);
+    boot_fleet_board_fleet_test_tick_runs(&s, &l);
+    FBP_REQUIRE(s == s0 + 1 && l == l0 + 1);
+    /* The next second drains once; the pull waits out its interval. */
+    boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW + 1);
+    boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW + 1);
+    boot_fleet_board_fleet_test_tick_runs(&s, &l);
+    FBP_REQUIRE(s == s0 + 2 && l == l0 + 1);
+    boot_fleet_board_fleet_test_tick(&p->w.svc,
+                                     FBW_NOW + FLEET_BOARD_FLEET_PULL_INTERVAL_S);
+    boot_fleet_board_fleet_test_tick_runs(&s, &l);
+    FBP_REQUIRE(s == s0 + 3 && l == l0 + 2);
+    return true;
+}
+
+/* An expired pairing row for `noise` that the pairing list returns before
+ * the live one (rows are insert-only; the list orders by paired_at, then by
+ * pairing id, so the master is chosen to sort first). */
+static bool fbp_expired_row_first(struct fbw *w, const uint8_t noise[32],
+                                  const char *live_id)
+{
+    struct db_mesh_pairing row;
+    memset(&row, 0, sizeof row);
+    memcpy(row.network_genesis, w->f.genesis, 32);
+    memcpy(row.peer_noise_pubkey, noise, 32);
+    row.capability_mask = MESH_PAIRING_CAP_STATUS_READ;
+    row.delegation_sequence = 1;
+    row.paired_at = FBW_PAIRED_AT;
+    row.expires_at = FBW_PAIRED_AT + 1;
+    for (unsigned fill = 1; fill < 256; fill++) {
+        memset(row.peer_master_pubkey, (int)fill, 32);
+        if (!mesh_pairing_id_derive(row.network_genesis,
+                                    row.peer_master_pubkey,
+                                    row.peer_noise_pubkey, row.pairing_id))
+            return false;
+        if (strcmp(row.pairing_id, live_id) < 0)
+            return db_mesh_pairing_insert(&w->f.ndb, &row);
+    }
+    return false;
+}
+
+/* The first row the pairing list holds for `noise`. */
+static bool fbp_first_row(struct fbw *w, const uint8_t noise[32],
+                          struct db_mesh_pairing *out)
+{
+    static struct db_mesh_pairing rows[8];
+    int n = db_mesh_pairing_list(&w->f.ndb, rows, 8);
+    for (int i = 0; i < n; i++)
+        if (memcmp(rows[i].peer_noise_pubkey, noise, 32) == 0) {
+            *out = rows[i];
+            return true;
+        }
+    return false;
+}
+
+/* Case 24. */
+static bool fbp_case_addressee_old_row(struct fbp *p)
+{
+    struct db_mesh_pairing first;
+    FBP_REQUIRE(fbp_expired_row_first(&p->w, p->w.f.resp_noise_pub,
+                                      p->addr_peer.pairing.pairing_id));
+    FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
+                !mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
+                                     FBW_NOW));
+    FBP_REQUIRE(fbp_push_once(p));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
+/* Case 25. */
+static bool fbp_case_pusher_old_row(struct fbp *p)
+{
+    struct db_mesh_pairing first;
+    FBP_REQUIRE(fbp_expired_row_first(&p->w, p->w.f.term_peer.noise_pub,
+                                      p->w.f.term_peer.pairing.pairing_id));
+    FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.term_peer.noise_pub, &first) &&
+                !mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
+                                     FBW_NOW));
+    FBP_REQUIRE(fbp_push_once(p));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    return true;
+}
+
+/* Case 26. Two paired peers whose delegations name the addressee's key. */
+static bool fbp_case_ambiguous(struct fbp *p)
+{
+    uint8_t noise[32];
+    struct vcs_zcode_dht_delegation twin;
+    FBP_REQUIRE(fbp_fake_peer(&p->w, 0xD0, noise));
+    FBP_REQUIRE(fbp_delegation(&p->w.f, FBP_ADDRESSEE, noise, 0x88, &twin));
+    boot_fleet_board_fleet_test_bind_authority(&p->addressee, p->w.f.genesis,
+                                               FBW_NOW);
+    boot_fleet_board_fleet_test_bind_second_peer(&twin);
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_AMBIGUOUS] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_AMBIGUOUS] + 1);
+    FBP_REQUIRE(c.push_opened == p->before.push_opened);
+    return true;
+}
+
+/* Case 27. A wiki page as long as a page may be cannot ride one OPEN. */
+static bool fbp_case_too_large(struct fbp *p)
+{
+    static struct fleet_board_post page;
+    static char text[FLEET_BOARD_WIKI_TEXT_MAX + 1];
+    uint8_t seed[32], pk[32];
+    memset(text, 'w', FLEET_BOARD_WIKI_TEXT_MAX);
+    text[FLEET_BOARD_WIKI_TEXT_MAX] = '\0';
+    fb_test_identity(FBP_PUSHER, seed, pk);
+    fb_test_compose(&page, FLEET_BOARD_KIND_WIKI, "carrier", text, 2001, 3600);
+    fb_test_scope(&page, FLEET_BOARD_SCOPE_FLEET, "");
+    (void)snprintf(page.slug, sizeof page.slug, "%s", "long-answer");
+    (void)snprintf(page.title, sizeof page.title, "%s", "Long answer");
+    memcpy(page.ref, p->question.id, 32);
+    FBP_REQUIRE(fleet_board_post_sign(&page, seed, pk) == FLEET_BOARD_OK);
+    FBP_REQUIRE(db_fleet_board_post_ingest(&p->w.b, &page, 2100, NULL) ==
+                FLEET_BOARD_OK);
+    boot_fleet_board_fleet_push_enqueue(&page, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_TOO_LARGE] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_TOO_LARGE] + 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 0);
+    return true;
+}
+
+/* Case 28. */
+static bool fbp_case_not_connected(struct fbp *p)
+{
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    atomic_store(&p->w.asker->disconnect, true);
+    size_t opened = boot_fleet_board_fleet_test_push_send(&p->w.svc, &p->w.b);
+    atomic_store(&p->w.asker->disconnect, false);
+    FBP_REQUIRE(opened == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED] + 1);
+    return true;
+}
+
+struct fbp_commit_thread {
+    struct node_db *store;
+    atomic_bool done;
+};
+
+static void *fbp_commit_main(void *arg)
+{
+    struct fbp_commit_thread *t = arg;
+    (void)boot_fleet_board_fleet_test_push_commit(t->store);
+    atomic_store(&t->done, true);
+    return NULL;
+}
+
+/* Case 29. Another board writer holds the write lock: the commit does not
+ * wait for it, answers the record deferred, and the pull carries it. */
+static bool fbp_case_commit_never_waits(struct fbp *p)
+{
+    size_t len = fbp_payload(&p->reply, 1);
+    FBP_REQUIRE(len > 0 && fbp_raw_open(&p->w, 1, g_fbp_payload, len));
+    struct fbp_commit_thread t = { .store = &p->w.a };
+    atomic_init(&t.done, false);
+    pthread_t thread;
+    fleet_board_write_lock();
+    int spawned = pthread_create(&thread, NULL, fbp_commit_main, &t);
+    for (unsigned ms = 0; spawned == 0 && ms < 2000 && !atomic_load(&t.done);
+         ms += 5)
+        platform_sleep_ms(5);
+    bool done_while_held = atomic_load(&t.done);
+    fleet_board_write_unlock();
+    int joined = spawned == 0 ? pthread_join(thread, NULL) : -1;
+    FBP_REQUIRE(spawned == 0 && joined == 0);
+    FBP_REQUIRE(done_while_held);
+    struct board_push_receipt rc;
+    FBP_REQUIRE(fbp_close(&p->w, &rc) == MESH_STREAM_CLOSED_BY_SERVICE);
+    FBP_REQUIRE(rc.code == FLEET_BOARD_PUSH_CODE_COMMITTED && rc.n == 1 &&
+                rc.rec[0].verdict == FLEET_BOARD_PUSH_RECORD_DEFERRED &&
+                rc.rec[0].result == FLEET_BOARD_ERR_BUSY);
+    FBP_REQUIRE(!db_fleet_board_have(&p->w.a, p->reply.id));
+    FBP_REQUIRE(fbp_pull_into_addressee(p) == 2);
+    return true;
+}
+
 typedef bool (*fbp_case_fn)(struct fbp *p);
 
 static const struct {
@@ -8573,6 +8948,30 @@ static const struct {
       "unavailable when its wait runs out", fbp_case_receiver_wait },
     { "fleet board push: the sender ends its own push when no receipt comes",
       fbp_case_sender_wait },
+    { "fleet board push: a pusher cannot learn whether this box holds a post "
+      "another box wrote", fbp_case_no_membership_oracle },
+    { "fleet board push: a push carrying another box's held post stores "
+      "nothing, the pusher's own post included", fbp_case_mixed_push_void },
+    { "fleet board push: a peer that refills its inbox slot at once does not "
+      "starve another; the honest push is stored within two ticks",
+      fbp_case_fair_commit },
+    { "fleet board push: ticks while a post waits behind an open push walk "
+      "no pairing rows", fbp_case_held_ticks_cheap },
+    { "fleet board push: the lane's own tick drains once a second, pulls "
+      "once an interval, and pushes on its 100 ms ticks", fbp_case_real_tick },
+    { "fleet board push: an expired pairing row older than the addressee's "
+      "live one does not stop the push", fbp_case_addressee_old_row },
+    { "fleet board push: an expired pairing row older than the pusher's live "
+      "one does not void its push", fbp_case_pusher_old_row },
+    { "fleet board push: an addressee two paired peers claim is pushed "
+      "nothing, and that is counted", fbp_case_ambiguous },
+    { "fleet board push: a post too large for one OPEN is left to the pull, "
+      "and that is counted", fbp_case_too_large },
+    { "fleet board push: an addressee with no live session is pushed nothing, "
+      "and that is counted", fbp_case_not_connected },
+    { "fleet board push: a commit never waits on another board writer; the "
+      "record is answered deferred and the pull carries it",
+      fbp_case_commit_never_waits },
 };
 
 /* Each case gets a fresh paired fixture. */

@@ -105,6 +105,8 @@ enum push_log_kind {
     PUSH_LOG_SKIP = 0,
     PUSH_LOG_IN,
     PUSH_LOG_RECEIPT,
+    PUSH_LOG_JUDGE_OUT, /* an addressee judged ineligible */
+    PUSH_LOG_JUDGE_IN,  /* a pusher whose standing failed at the commit */
     PUSH_LOG_KINDS
 };
 
@@ -122,6 +124,11 @@ static uint32_t g_slot_seq;
 static _Atomic size_t g_inbox_filled; /* FILLED slots, for the idle tick */
 static struct push_session g_unsupported[PUSH_SESSIONS_MAX];
 static size_t g_unsupported_next;
+/* Bumped when a post is queued and when a push this box sent ends: what can
+ * make a sending round do something the last one could not. */
+static _Atomic uint64_t g_send_gen;
+static uint64_t g_round_gen;    /* g_send_gen when the last round ran */
+static int64_t g_round_second; /* the lane second it ran in */
 static struct {
     int64_t last;
     uint64_t skipped;
@@ -137,9 +144,12 @@ static _Atomic uint64_t g_in[FLEET_BOARD_PUSH_CODES];
 static _Atomic uint64_t g_in_records[FLEET_BOARD_PUSH_VERDICTS];
 static _Atomic uint64_t g_in_dropped;
 static _Atomic uint64_t g_data_refused;
+static _Atomic uint64_t g_refused_out[FLEET_BOARD_PUSH_REFUSALS];
+static _Atomic uint64_t g_refused_in[FLEET_BOARD_PUSH_REFUSALS];
 
 #ifdef ZCL_TESTING
 static bool g_test_pre_push;
+static _Atomic uint64_t g_test_peer_walks;
 #endif
 
 static const char *const k_skip_names[FLEET_BOARD_PUSH_SKIPS] = {
@@ -152,6 +162,13 @@ static const char *const k_skip_names[FLEET_BOARD_PUSH_SKIPS] = {
 static const char *const k_code_names[FLEET_BOARD_PUSH_CODES] = {
     "committed",   "push_malformed", "push_author_mismatch", "push_inbox_full",
     "push_busy",   "push_revoked",   "push_unavailable",
+};
+
+static const char *const k_refusal_names[FLEET_BOARD_PUSH_REFUSALS] = {
+    "no pairing row grants the status capability",
+    "delegation unresolved or not current",
+    "no read role",
+    "not on the fleet roster",
 };
 
 static void push_lock_init(void)
@@ -200,12 +217,35 @@ static void push_skip(enum fleet_board_push_skip why, uint64_t n)
 {
     push_bump(&g_skipped[why], n);
     uint64_t skipped = 0;
+    /* An ineligible addressee is logged, with the check it failed, by
+     * push_peer_judge. */
     if (why > FLEET_BOARD_PUSH_SKIP_QUEUE_FULL &&
+        why != FLEET_BOARD_PUSH_SKIP_INELIGIBLE &&
         push_log_due(PUSH_LOG_SKIP, &skipped))
         LOG_INFO("fleet.board", "fleet push skipped: %s, %llu post(s); the "
                  "pull carries them (%llu more lines since the last)",
                  k_skip_names[why], (unsigned long long)n,
                  (unsigned long long)skipped);
+}
+
+/* A push judgment that refused a peer: counted by the check that failed, in
+ * the push's own counters, and logged at most once a window. */
+static void push_refused(bool sending, enum fleet_board_push_refusal why)
+{
+    push_bump(sending ? &g_refused_out[why] : &g_refused_in[why], 1);
+    uint64_t skipped = 0;
+    if (!push_log_due(sending ? PUSH_LOG_JUDGE_OUT : PUSH_LOG_JUDGE_IN,
+                      &skipped))
+        return;
+    if (sending)
+        LOG_INFO("fleet.board", "fleet push skipped: the addressee failed a "
+                 "push check (%s); the pull carries the post (%llu more "
+                 "lines since the last)", k_refusal_names[why],
+                 (unsigned long long)skipped);
+    else
+        LOG_WARN("fleet.board", "fleet push refused at commit: the pusher "
+                 "failed a push check (%s) (%llu more lines since the last)",
+                 k_refusal_names[why], (unsigned long long)skipped);
 }
 
 static int64_t push_now_ms(void)
@@ -250,6 +290,7 @@ void boot_fleet_board_fleet_push_enqueue(const struct fleet_board_post *post,
     g_queue_len++;
     atomic_store_explicit(&g_queue_count, g_queue_len, memory_order_relaxed);
     push_unlock();
+    push_bump(&g_send_gen, 1);
     push_bump(&g_queued, 1);
     if (dropped)
         push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
@@ -331,10 +372,14 @@ struct push_peer {
     uint8_t *frame; /* FLEET_BOARD_PUSH_MAX bytes once it holds a record */
 };
 
+/* A round allocates its peer table and post buffers, and walks the pairing
+ * rows, only when an entry needs resolving: a round whose every entry waits
+ * for a push still open does neither. */
 struct push_round {
     struct boot_svc_ctx *svc;
     struct node_db *store;
     int64_t now;
+    bool ready;  /* the peer table and the buffers below are built */
     struct push_peer *peers;
     size_t n_peers;
     struct push_queued held[FLEET_BOARD_PUSH_QUEUE_MAX];
@@ -353,7 +398,9 @@ static bool push_peer_known(const struct push_round *r,
 }
 
 /* Every paired peer whose row grants the status capability now and whose
- * delegation resolves, once per Noise static. */
+ * delegation resolves, once per Noise static, on its NEWEST such row (the
+ * list runs oldest first, so it is walked from the end): the same row the
+ * receiving half judges a pusher on. */
 static void push_round_peers(struct push_round *r)
 {
     struct node_db *pairings = app_runtime_node_db();
@@ -363,10 +410,13 @@ static void push_round_peers(struct push_round *r)
         FLEET_BOARD_FLEET_PEERS_MAX, sizeof *rows, "fleet_board_push_pairings");
     if (!rows)
         return;
+#ifdef ZCL_TESTING
+    push_bump(&g_test_peer_walks, 1);
+#endif
     int count = db_mesh_pairing_list(pairings, rows,
                                      FLEET_BOARD_FLEET_PEERS_MAX);
-    for (int i = 0; i < count && r->n_peers < FLEET_BOARD_FLEET_PEERS_MAX;
-         i++) {
+    for (int i = count - 1; i >= 0 && r->n_peers < FLEET_BOARD_FLEET_PEERS_MAX;
+         i--) {
         struct vcs_zcode_dht_delegation peer;
         if (!mesh_pairing_allows(&rows[i], MESH_PAIRING_CAP_STATUS_READ,
                                  r->now) ||
@@ -379,6 +429,26 @@ static void push_round_peers(struct push_round *r)
         p->ready = PUSH_UNASKED;
     }
     free(rows);
+}
+
+/* Build what resolving an entry needs, once a round. False when memory ran
+ * out. */
+static bool push_round_ready(struct push_round *r)
+{
+    if (r->ready)
+        return true;
+    if (!r->peers)
+        r->peers = zcl_calloc(FLEET_BOARD_FLEET_PEERS_MAX, sizeof *r->peers,
+                              "fleet_board_push_peers");
+    if (!r->row)
+        r->row = zcl_calloc(1, sizeof *r->row, "fleet_board_push_row");
+    if (!r->ref_row)
+        r->ref_row = zcl_calloc(1, sizeof *r->ref_row, "fleet_board_push_ref");
+    if (!r->peers || !r->row || !r->ref_row)
+        return false;
+    push_round_peers(r);
+    r->ready = true;
+    return true;
 }
 
 struct push_live_probe {
@@ -434,15 +504,20 @@ static int push_resolve(struct push_round *r, const struct push_queued *q,
     return matches == 1 ? PUSH_OK : FLEET_BOARD_PUSH_SKIP_AMBIGUOUS;
 }
 
-/* The answering side's own disclosure test for this peer, then the link:
+/* The answering side's own disclosure test for this peer, asked on the row
+ * that allows it now and counted as a push judgment, then the link:
  * connected, under its send budget, not an older node this session, and no
  * push to it already open. */
 static int push_peer_judge(const struct push_round *r,
                            const struct push_peer *p)
 {
     const uint8_t *noise = p->row.peer_noise_pubkey;
-    if (!board_accept_authorized(noise))
+    enum fleet_board_push_refusal refusal =
+        board_push_judge_peer(&p->row, true, r->now, NULL);
+    if (refusal != FLEET_BOARD_PUSH_REFUSALS) {
+        push_refused(true, refusal);
         return FLEET_BOARD_PUSH_SKIP_INELIGIBLE;
+    }
     struct noise_transport_snapshot snap;
     memset(&snap, 0, sizeof snap);
     struct p2p_node *node =
@@ -506,6 +581,10 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
         push_hold(r, q, NULL);
         return;
     }
+    if (!push_round_ready(r)) {
+        push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, 1);
+        return;
+    }
     struct push_peer *p = NULL;
     int step = push_resolve(r, q, &p);
     if (step == PUSH_OK) {
@@ -561,32 +640,43 @@ static void push_round_free(struct push_round *r)
     free(r);
 }
 
+/* Whether a sending round may do anything the last one could not: a post
+ * was queued or a push this box sent ended since it ran, or the lane second
+ * moved on (a held post's wait, a pairing or a session can change with
+ * time). At most once a second otherwise, and O(1) when not due. */
+static bool push_round_due(int64_t now)
+{
+    uint64_t gen = atomic_load_explicit(&g_send_gen, memory_order_relaxed);
+    push_lock();
+    bool due = gen != g_round_gen || now != g_round_second;
+    if (due) {
+        g_round_gen = gen;
+        g_round_second = now;
+    }
+    push_unlock();
+    return due;
+}
+
 /* Drain the queue once: resolve, judge, batch, open. Returns the pushes
  * opened. */
 static size_t push_send_round(struct boot_svc_ctx *svc, struct node_db *store,
                               int64_t now)
 {
+    if (!push_round_due(now))
+        return 0;
     struct push_queued taken[FLEET_BOARD_PUSH_QUEUE_MAX];
     size_t n = push_take_queue(taken);
     if (n == 0)
         return 0;
     struct push_round *r = zcl_calloc(1, sizeof *r, "fleet_board_push_round");
-    if (r) {
-        r->peers = zcl_calloc(FLEET_BOARD_FLEET_PEERS_MAX, sizeof *r->peers,
-                              "fleet_board_push_peers");
-        r->row = zcl_calloc(1, sizeof *r->row, "fleet_board_push_row");
-        r->ref_row = zcl_calloc(1, sizeof *r->ref_row, "fleet_board_push_ref");
-    }
-    if (!r || !r->peers || !r->row || !r->ref_row || !store) {
-        if (r)
-            push_round_free(r);
+    if (!r || !store) {
+        free(r);
         push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, n);
         return 0;
     }
     r->svc = svc;
     r->store = store;
     r->now = now;
-    push_round_peers(r);
     for (size_t i = 0; i < n; i++)
         push_offer(r, &taken[i]);
     uint64_t before = atomic_load_explicit(&g_opened, memory_order_relaxed);
@@ -731,25 +821,33 @@ struct push_commit {
     size_t len;
 };
 
+/* Take the push that arrived first. Fills are numbered in arrival order, so
+ * a peer that refills its slot the moment it is answered waits behind every
+ * push that arrived before the refill: no pushing peer is served twice while
+ * another waits, and a waiting push is committed within
+ * FLEET_BOARD_PUSH_INBOX_MAX ticks. The numbers wrap; at most
+ * FLEET_BOARD_PUSH_INBOX_MAX are live, so a signed difference orders them. */
 static bool push_take_filled(struct push_commit *c)
 {
-    bool found = false;
+    struct push_slot *oldest = NULL;
     push_lock();
-    for (uint32_t i = 0; i < FLEET_BOARD_PUSH_INBOX_MAX && !found; i++) {
+    for (uint32_t i = 0; i < FLEET_BOARD_PUSH_INBOX_MAX; i++) {
         struct push_slot *s = &g_inbox[i];
-        if (s->state != PUSH_SLOT_FILLED)
-            continue;
-        s->state = PUSH_SLOT_COMMITTING;
+        if (s->state == PUSH_SLOT_FILLED &&
+            (!oldest || (int32_t)(s->seq - oldest->seq) < 0))
+            oldest = s;
+    }
+    if (oldest) {
+        oldest->state = PUSH_SLOT_COMMITTING;
         atomic_fetch_sub_explicit(&g_inbox_filled, 1, memory_order_relaxed);
-        c->slot = i;
-        c->seq = s->seq;
-        memcpy(c->peer_static, s->peer_static, 32);
-        c->bytes = s->bytes;
-        c->len = s->len;
-        found = true;
+        c->slot = (uint32_t)(oldest - g_inbox);
+        c->seq = oldest->seq;
+        memcpy(c->peer_static, oldest->peer_static, 32);
+        c->bytes = oldest->bytes;
+        c->len = oldest->len;
     }
     push_unlock();
-    return found;
+    return oldest != NULL;
 }
 
 static void push_release_slot(uint32_t slot, uint32_t seq)
@@ -763,32 +861,35 @@ static void push_release_slot(uint32_t slot, uint32_t seq)
 }
 
 /* The pusher's standing now, as a pull from it would be judged plus its
- * board key: a pairing row granting the status capability, a delegation that
- * resolves and is current, and the roster. The read role is not asked: it
- * governs what this box discloses, and a push discloses nothing. */
+ * board key, on its newest pairing row that grants the status capability: a
+ * delegation that resolves and is current, and the roster. The read role is
+ * not asked: it governs what this box discloses, and a push discloses
+ * nothing. A failure is counted as a push judgment, never as a pull. */
 static bool push_pusher_standing(const uint8_t peer_static[32],
                                  uint8_t author_out[32])
 {
     struct node_db *pairings = app_runtime_node_db();
-    if (!pairings || !app_runtime_node_db_handle_open(pairings))
-        return false;
     int64_t now = board_now();
     struct db_mesh_pairing row;
-    struct vcs_zcode_dht_delegation peer;
-    if (!board_pairing_for_peer(pairings, peer_static, &row) ||
-        !mesh_pairing_allows(&row, MESH_PAIRING_CAP_STATUS_READ, now) ||
-        !board_peer_delegation(&row, &peer) ||
-        !board_delegation_current(pairings, &row, &peer, peer_static, now) ||
-        !board_roster_admits(peer.online_pubkey))
-        return false;
-    memcpy(author_out, peer.online_pubkey, 32);
-    return true;
+    enum fleet_board_push_refusal refusal = FLEET_BOARD_PUSH_REFUSAL_PAIRING;
+    if (pairings && app_runtime_node_db_handle_open(pairings) &&
+        board_pairing_allowing(pairings, peer_static,
+                               MESH_PAIRING_CAP_STATUS_READ, now, &row))
+        refusal = board_push_judge_peer(&row, false, now, author_out);
+    if (refusal == FLEET_BOARD_PUSH_REFUSALS)
+        return true;
+    push_refused(false, refusal);
+    return false;
 }
 
-/* One record before anything is stored: held already (no signature check),
- * or decoded and then the record the pusher named, FLEET scope, and signed
- * by the pusher's own board key. A failed decode is the record's own
- * refusal; a wrong id, scope or author voids the whole push. */
+/* One record before anything is stored. It is decoded (its id re-derived
+ * from the bytes and its signature checked), and it must be the record the
+ * pusher named, FLEET scope, and signed by the pusher's own board key, before
+ * the store is asked anything about it: a record that fails is answered the
+ * same whether or not this box holds that id, so a push cannot learn what
+ * this box holds that another box wrote. Only the pusher's own post may be
+ * answered held. A failed decode is the record's own refusal; a wrong id,
+ * scope or author voids the whole push. */
 static uint8_t push_screen(struct node_db *store,
                            const struct board_push_record *rec,
                            const uint8_t author[32],
@@ -797,10 +898,6 @@ static uint8_t push_screen(struct node_db *store,
 {
     *decoded = false;
     *result = FLEET_BOARD_OK;
-    if (db_fleet_board_have(store, rec->id)) {
-        *verdict = FLEET_BOARD_PUSH_RECORD_HELD;
-        return FLEET_BOARD_PUSH_CODE_COMMITTED;
-    }
     enum fleet_board_result r =
         fleet_board_post_decode(rec->wire, rec->wire_len, post);
     if (r != FLEET_BOARD_OK) {
@@ -813,21 +910,30 @@ static uint8_t push_screen(struct node_db *store,
         return FLEET_BOARD_PUSH_CODE_MALFORMED;
     if (memcmp(post->host_pubkey, author, 32) != 0)
         return FLEET_BOARD_PUSH_CODE_AUTHOR;
+    if (db_fleet_board_have(store, rec->id)) {
+        *verdict = FLEET_BOARD_PUSH_RECORD_HELD;
+        return FLEET_BOARD_PUSH_CODE_COMMITTED;
+    }
     *decoded = true;
     return FLEET_BOARD_PUSH_CODE_COMMITTED;
 }
 
 /* The ingest a pulled post goes through, without the cursor's pinned-arrival
  * rule: the roster screen, then the one store write every post takes
- * (signature, TTL, author role, quotas). */
+ * (signature, TTL, author role, quotas). It never waits for another board
+ * writer: on the shared tick-runner thread a held board write lock is
+ * FLEET_BOARD_ERR_BUSY, which the receipt answers deferred and the pull
+ * retries. */
 static uint8_t push_ingest(struct node_db *store,
                            const struct fleet_board_post *post, int64_t now,
                            uint8_t *result)
 {
     bool stored = false;
     enum fleet_board_result r = boot_fleet_roster_screen_post(store, post, now);
-    if (r == FLEET_BOARD_OK)
-        r = db_fleet_board_post_ingest(store, post, now, &stored);
+    if (r == FLEET_BOARD_OK) {
+        db_fleet_board_post_prepare_nowait();
+        r = db_fleet_board_post_ingest_nowait(store, post, now, &stored);
+    }
     if (r == FLEET_BOARD_OK && stored && boot_fleet_roster_is_row(post))
         boot_fleet_roster_invalidate();
     *result = (uint8_t)r;
@@ -922,7 +1028,10 @@ static size_t push_commit_one(struct node_db *store)
     push_release_slot(c.slot, c.seq);
     push_bump(&g_in[rc.code], 1);
     uint64_t skipped = 0;
+    /* push_revoked was logged, with the check that failed, by
+     * push_pusher_standing. */
     if (rc.code != FLEET_BOARD_PUSH_CODE_COMMITTED &&
+        rc.code != FLEET_BOARD_PUSH_CODE_REVOKED &&
         push_log_due(PUSH_LOG_IN, &skipped))
         LOG_WARN("fleet.board", "fleet push refused: %s (%llu more lines "
                  "since the last)", k_code_names[rc.code],
@@ -1053,6 +1162,7 @@ void board_push_stream_close(struct mesh_stream *st, enum board_state_tag tag,
 {
     if (tag == BOARD_STATE_PUSH_OUT) {
         push_out_closed(st, reason, payload, len);
+        push_bump(&g_send_gen, 1); /* a post held for this peer may go now */
         return;
     }
     const struct board_push_in_state *s = st->service_state;
@@ -1067,6 +1177,8 @@ void board_push_state_free(void *state)
         const struct board_push_in_state *s = state;
         if (push_slot_drop(s->slot, s->seq) == PUSH_DROP_DONE)
             push_bump(&g_in_dropped, 1);
+    } else if (tag && *tag == BOARD_STATE_PUSH_OUT) {
+        push_bump(&g_send_gen, 1); /* however the push ended */
     }
     free(state);
 }
@@ -1094,6 +1206,8 @@ void board_push_counts(struct boot_fleet_board_fleet_counts *out)
         atomic_load_explicit(&g_in_dropped, memory_order_relaxed);
     out->push_data_refused =
         atomic_load_explicit(&g_data_refused, memory_order_relaxed);
+    push_copy(out->push_refused_out, g_refused_out, FLEET_BOARD_PUSH_REFUSALS);
+    push_copy(out->push_refused_in, g_refused_in, FLEET_BOARD_PUSH_REFUSALS);
 }
 
 void board_push_forget(void)
@@ -1107,6 +1221,8 @@ void board_push_forget(void)
     }
     memset(g_unsupported, 0, sizeof g_unsupported);
     g_unsupported_next = 0;
+    g_round_gen = atomic_load_explicit(&g_send_gen, memory_order_relaxed);
+    g_round_second = 0;
     atomic_store_explicit(&g_queue_count, 0, memory_order_relaxed);
     atomic_store_explicit(&g_inbox_filled, 0, memory_order_relaxed);
     push_unlock();
@@ -1117,6 +1233,18 @@ size_t boot_fleet_board_fleet_test_push_send(struct boot_svc_ctx *svc,
                                              struct node_db *store)
 {
     return push_send_round(svc, store, board_now());
+}
+
+size_t boot_fleet_board_fleet_test_push_send_at(struct boot_svc_ctx *svc,
+                                                struct node_db *store,
+                                                int64_t now)
+{
+    return push_send_round(svc, store, now);
+}
+
+uint64_t boot_fleet_board_fleet_test_push_peer_walks(void)
+{
+    return atomic_load_explicit(&g_test_peer_walks, memory_order_relaxed);
 }
 
 size_t boot_fleet_board_fleet_test_push_commit(struct node_db *store)
