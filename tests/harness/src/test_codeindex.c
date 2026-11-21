@@ -467,6 +467,8 @@ static bool write_fixture_leaves(void)
                     "int hidden_fixture(void) { return 0; }\n") &&
            mk_write(FIX, "engine/composition/fixture_registry.def",
                     "FIXTURE_REGISTRY_ROW(value)\n") &&
+           mk_write(FIX, "apps/z23android/modules/demo/src/app.c",
+                    "int app_module_entry(void) { return 0; }\n") &&
            mk_write(FIX, "core/modules/net/src/saturation.c", SATURATION_C) &&
            mk_write(FIX, "tests/harness/include/test/build/generated_should_not_index.c",
                     "int generated_should_not_index(void) { return 0; }\n");
@@ -994,9 +996,9 @@ static int test_codeindex_platform_arm_context_map(void)
 
     struct ci_context_assignment assignment;
     size_t context_count = 0;
-    CI_CHECK("context taxonomy has exactly eleven target contexts",
+    CI_CHECK("context taxonomy has exactly twelve target contexts",
              codeindex_context_names(&context_count) != NULL &&
-             context_count == 11);
+             context_count == 12);
     CI_CHECK("messaging file has one physical context and model shape",
              codeindex_context_classify("contexts/messaging/models/src/zmsg.c", &assignment) &&
              assignment.production && !assignment.overlap && !assignment.orphan &&
@@ -1017,6 +1019,20 @@ static int test_codeindex_platform_arm_context_map(void)
                  memcmp(digest_a, digest_again, sizeof(digest_a)) == 0 &&
                  memcmp(digest_a, digest_b, sizeof(digest_a)) != 0);
     }
+    return failures;
+}
+
+static int test_codeindex_platform_arm_context_app(void)
+{
+    int failures = 0;
+    struct ci_context_assignment assignment;
+
+    CI_CHECK("independent app module has one app context and program shape",
+             codeindex_context_classify(
+                 "apps/z23android/modules/demo/src/app.c", &assignment) &&
+             assignment.production && !assignment.overlap &&
+             !assignment.orphan && strcmp(assignment.context, "apps") == 0 &&
+             strcmp(assignment.shape, "z23android") == 0);
     return failures;
 }
 
@@ -1057,6 +1073,7 @@ static bool test_codeindex_platform_arm_physical_root(const char *path)
            strncmp(path, "contexts/", 9) == 0 ||
            strncmp(path, "cognition/", 10) == 0 ||
            strncmp(path, "platform/", 9) == 0 ||
+           strncmp(path, "apps/", 5) == 0 ||
            strncmp(path, "tools/", 6) == 0;
 }
 
@@ -1537,6 +1554,9 @@ static int test_codeindex_platform_arm_fixture_roots(struct codeindex *ci)
     codeindex_file(ci, "engine/composition/fixture_registry.def", &cf, &found);
     CI_CHECK("registry node is indexed for impact without C symbols", found &&
              strcmp(cf.group, "engine/composition") == 0);
+    codeindex_file(ci, "apps/z23android/modules/demo/src/app.c", &cf, &found);
+    CI_CHECK("nested app module stays in the maintained apps root", found &&
+             strcmp(cf.group, "apps") == 0);
     return failures;
 }
 
@@ -1550,8 +1570,8 @@ static int test_codeindex_platform_arm_source_counts(struct codeindex *ci)
     struct ci_source_file_counts source_counts;
     CI_CHECK("C23 and registry-node counts are exact and separate",
              codeindex_source_file_counts(ci, &source_counts) &&
-             source_counts.c23_files == 21 &&
-             source_counts.governed_c23_files == 20 &&
+             source_counts.c23_files == 22 &&
+             source_counts.governed_c23_files == 21 &&
              source_counts.fixture_c23_files == 1 &&
              source_counts.registry_nodes == 1);
 
@@ -1643,6 +1663,8 @@ static int test_codeindex_platform_arm_card_and_counts(struct codeindex *ci)
         CI_CHECK("recursive count on a leaf group equals its direct count",
                  recur_self == direct);
         CI_CHECK("unknown group counts zero (not an error)", missing == 0);
+        CI_CHECK("apps root count includes nested app modules",
+                 codeindex_count_files_in_group(ci, "apps", true) == 1);
     }
     return failures;
 }
@@ -2542,6 +2564,7 @@ static int test_codeindex_platform_arm(void)
     int failures = 0;
 
     failures += test_codeindex_platform_arm_context_map();
+    failures += test_codeindex_platform_arm_context_app();
     failures += test_codeindex_platform_arm_context_owners();
 
  TEST_DISCARD(system("rm -rf " FIX));

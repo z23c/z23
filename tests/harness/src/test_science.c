@@ -1195,6 +1195,7 @@ static bool build_fixture(const char *dir)
 {
     char p[1024];
     if (!mkdir_p(dir, "lib/demo/src") || !mkdir_p(dir, "tools/demo") ||
+        !mkdir_p(dir, "apps/z23android") ||
         !mkdir_p(dir, "vendor/third_party") || !mkdir_p(dir, "docs"))
         return false;
 
@@ -1210,6 +1211,9 @@ static bool build_fixture(const char *dir)
         return false;
     (void)snprintf(p, sizeof p, "%s/tools/demo/notes.md", dir);
     if (!spill(p, "not C23 and must not be counted\n"))
+        return false;
+    (void)snprintf(p, sizeof p, "%s/apps/z23android/entry.c", dir);
+    if (!spill(p, "app\n"))
         return false;
     /* Vendored code is not this project's corpus. */
     (void)snprintf(p, sizeof p, "%s/vendor/third_party/huge.c", dir);
@@ -1227,10 +1231,10 @@ static int case_corpus_honesty_no_inventory(const char *dir, const char *inv)
     SC_CHECK("the walk succeeds with no inventory present",
              science_corpus_measure(dir, inv, &r));
     SC_CHECK("only C23 files under maintained roots are counted",
-             r.files_walked == 3);
+             r.files_walked == 4 && r.inventory_files_walked == 3);
     SC_CHECK("lines are counted, including a final line with no newline",
-             r.lines == 3 + 2 + 2);
-    SC_CHECK("vendored code is outside the corpus", r.bytes == 6 + 4 + 7);
+             r.lines == 3 + 2 + 2 + 1);
+    SC_CHECK("vendored code is outside the corpus", r.bytes == 6 + 4 + 7 + 4);
     SC_CHECK("the inventory is reported absent, not empty",
              !r.inventory_present &&
                  !r.scope_agrees);
@@ -1272,8 +1276,9 @@ static int case_corpus_honesty_fresh_inventory(const char *dir,
     SC_CHECK("duplicates and untested invariants are counted",
              r.duplicates == 2 && r.untested_invariants == 1 &&
                  r.capabilities == 1);
-    SC_CHECK("the two halves agree on the tree",
-             r.scope_agrees && r.inventory_files_scanned == 3);
+    SC_CHECK("the two halves agree on the inventory projection",
+             r.scope_agrees && r.files_walked == 4 &&
+                 r.inventory_files_walked == 3 && r.inventory_files_scanned == 3);
     SC_CHECK("the proven fraction is over PUBLIC SYMBOLS: 1 of 3",
              science_corpus_proven_symbols_milli(&r) == 333);
     SC_CHECK("the headline leads with what is NOT proven",
@@ -1307,7 +1312,7 @@ static int case_corpus_honesty_stale_inventory(const char *dir,
              science_corpus_measure(dir, inv, &r) && r.inventory_present);
     SC_CHECK("the scope check catches it",
              !r.scope_agrees && r.inventory_files_scanned == 9001 &&
-                 r.files_walked == 3);
+                 r.files_walked == 4 && r.inventory_files_walked == 3);
     SC_CHECK("and the headline announces the staleness rather than hiding it",
              science_corpus_headline(&r, head, sizeof head) > 0 &&
                  strstr(head, "STALE") != NULL &&

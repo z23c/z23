@@ -419,7 +419,8 @@ static int test_code_context_map(void)
         const struct json_value *taxonomy =
             json_get(&reply.data, "taxonomy");
         ASSERT(taxonomy && taxonomy->type == JSON_ARR &&
-               taxonomy->num_children == 11);
+               taxonomy->num_children == 12);
+        ASSERT(json_array_has_string(taxonomy, "apps"));
         ASSERT(json_array_has_string(taxonomy, "wallet"));
         ASSERT(json_array_has_string(taxonomy, "explorer"));
         ASSERT(json_array_has_string(taxonomy, "naming"));

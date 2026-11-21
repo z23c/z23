@@ -38,9 +38,11 @@ static const char *const k_roots[] = {
 static bool prune_dir(const char *name)
 {
 #define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
-#define SOURCE_INVENTORY_PRUNE_DIR(name_) \
+#define SOURCE_INVENTORY_PRUNE_DIR(name_)
+#define SOURCE_CORPUS_PRUNE_DIR(name_) \
     if (strcmp(name, name_) == 0) return true;
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_CORPUS_PRUNE_DIR
 #undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     return strncmp(name, "test-tmp", 8) == 0;
@@ -61,6 +63,19 @@ static bool corpus_has_segment(const char *path, const char *segment)
         bool right = p[n] == '\0' || p[n] == '/';
         if (left && right) return true;
     }
+    return false;
+}
+
+static bool inventory_pruned_path(const char *path)
+{
+#define SOURCE_PRUNE_DIR(name_) if (corpus_has_segment(path, name_)) return true;
+#define SOURCE_INVENTORY_PRUNE_DIR(name_) \
+    if (corpus_has_segment(path, name_)) return true;
+#define SOURCE_CORPUS_PRUNE_DIR(name_)
+#include "codeindex/source_prune_dirs.def"
+#undef SOURCE_CORPUS_PRUNE_DIR
+#undef SOURCE_INVENTORY_PRUNE_DIR
+#undef SOURCE_PRUNE_DIR
     return false;
 }
 
@@ -127,6 +142,8 @@ static bool measure_source(const char *root, const char *rel, const char *name,
     else
         out->non_test_lines += lines;
     out->files_walked++;
+    if (!inventory_pruned_path(path + strlen(root) + 1))
+        out->inventory_files_walked++;
     return true;
 }
 
@@ -295,7 +312,7 @@ bool science_corpus_measure(const char *root, const char *inventory_path,
 
     read_inventory(inventory_path, out);
     out->scope_agrees = out->inventory_present &&
-                        out->inventory_files_scanned == out->files_walked;
+                        out->inventory_files_scanned == out->inventory_files_walked;
     return true;
 }
 

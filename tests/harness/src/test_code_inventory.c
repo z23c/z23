@@ -94,6 +94,18 @@ static bool ci_test_room_fixture(void)
         "int segment_probe(void) { return demo_stub(5); }\n");
 }
 
+static bool ci_app_fixture(void)
+{
+    if (system("mkdir -p " CI_FIX "/apps/z23android/include/demo "
+               CI_FIX "/apps/z23android/src") != 0) return false;
+    return ci_write(CI_FIX "/apps/z23android/include/demo/demo.h",
+        "/* purpose: Standalone app API, not node capability evidence. */\n"
+        "int android_demo(void);\n") &&
+        ci_write(CI_FIX "/apps/z23android/src/demo.c",
+        "#include \"demo/demo.h\"\n"
+        "int android_demo(void) { return 0; }\n");
+}
+
 static bool ci_fixture(void)
 {
     if (system("rm -rf " CI_FIX " && mkdir -p "
@@ -1411,6 +1423,7 @@ int test_code_inventory(void)
 {
     ci_failures = 0;
     CI_ASSERT(ci_fixture());
+    CI_ASSERT(ci_app_fixture());
     CI_ASSERT(ci_test_room_fixture());
     struct ci_inventory_report *first = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(first != NULL);
@@ -1425,6 +1438,12 @@ int test_code_inventory(void)
     const struct ci_inventory_capability *other = ci_cap(
         first, "platform/modules/demo/include/demo/other.h");
     ci_capability_checks(demo, package, other);
+    char *inventory_text = ci_render(first);
+    CI_ASSERT(first->capability_count == 4);
+    CI_ASSERT(ci_cap(first, "apps/z23android/include/demo/demo.h") == NULL);
+    CI_ASSERT(inventory_text != NULL);
+    CI_ASSERT(inventory_text && strstr(inventory_text, "apps/z23android/") == NULL);
+    free(inventory_text);
 
     const struct ci_inventory_symbol *validate = ci_symbol(
         first, demo, "demo_validate");

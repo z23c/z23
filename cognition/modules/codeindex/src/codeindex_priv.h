@@ -57,8 +57,9 @@
  * sealed rows, so a ret6 store lacks the lines and the prose a reader now
  * expects and must be recomputed, not read as if they were zero or absent. */
 /* ret8 seals the unsigned, source-bound page-hint projection.
- * ret9 refuses scans that would silently omit symbols or references. */
-#define CI_SCHEMA_VERSION "ret9"
+ * ret9 refuses scans that would silently omit symbols or references.
+ * ret10 adds maintained apps to the physical source and context roots. */
+#define CI_SCHEMA_VERSION "ret10"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 

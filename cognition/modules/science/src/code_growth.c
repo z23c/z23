@@ -74,9 +74,11 @@ static bool growth_has_segment(const char *path, const char *segment)
 static bool growth_pruned(const char *path)
 {
 #define SOURCE_PRUNE_DIR(name_) if (growth_has_segment(path, name_)) return true;
-#define SOURCE_INVENTORY_PRUNE_DIR(name_) \
+#define SOURCE_INVENTORY_PRUNE_DIR(name_)
+#define SOURCE_CORPUS_PRUNE_DIR(name_) \
     if (growth_has_segment(path, name_)) return true;
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_CORPUS_PRUNE_DIR
 #undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     return growth_has_segment(path, "test-tmp");
@@ -143,12 +145,14 @@ static void growth_contract_digest(uint8_t out[32])
     sha3_256_write(&digest, (const unsigned char *)kind_, sizeof(kind_)); \
     sha3_256_write(&digest, (const unsigned char *)name_, sizeof(name_)); \
 } while (0);
-#define SOURCE_INVENTORY_PRUNE_DIR(name_) do { \
+#define SOURCE_INVENTORY_PRUNE_DIR(name_)
+#define SOURCE_CORPUS_PRUNE_DIR(name_) do { \
     static const char kind_[] = "inventory-prune"; \
     sha3_256_write(&digest, (const unsigned char *)kind_, sizeof(kind_)); \
     sha3_256_write(&digest, (const unsigned char *)name_, sizeof(name_)); \
 } while (0);
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_CORPUS_PRUNE_DIR
 #undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     sha3_256_finalize(&digest, out);

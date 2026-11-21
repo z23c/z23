@@ -61,7 +61,9 @@ static bool doc_name_pruned(const char *name)
 {
 #define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
 #define SOURCE_INVENTORY_PRUNE_DIR(name_)
+#define SOURCE_CORPUS_PRUNE_DIR(name_)
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_CORPUS_PRUNE_DIR
 #undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     return false;
@@ -117,9 +119,10 @@ static bool doc_collect_dir(const char *root, const char *reldir, bool recurse,
     return ok;
 }
 
-/* Sorted, repo-relative prose paths. The source roots plus apps/ are walked
- * recursively; the checkout root contributes only its own AGENTS.md and
- * README.md so sibling worktrees nested under it are never indexed. */
+/* Sorted, unique, repo-relative prose paths. The source roots plus apps/ are
+ * walked recursively; overlapping roots cannot duplicate a document. The
+ * checkout root contributes only its own AGENTS.md and README.md so sibling
+ * worktrees nested under it are never indexed. */
 static bool doc_enumerate(const char *root, struct doc_paths *out)
 {
     static const char *const roots[] = {
@@ -131,8 +134,18 @@ static bool doc_enumerate(const char *root, struct doc_paths *out)
     bool ok = doc_collect_dir(root, "", false, out);
     for (size_t i = 0; ok && i < sizeof(roots) / sizeof(roots[0]); i++)
         ok = doc_collect_dir(root, roots[i], true, out);
-    if (ok && out->n > 1)
+    if (ok && out->n > 1) {
         qsort(out->v, out->n, sizeof(out->v[0]), doc_path_cmp);
+        size_t write = 0;
+        for (size_t i = 0; i < out->n; i++) {
+            if (write > 0 && strcmp(out->v[write - 1], out->v[i]) == 0)
+                continue;
+            if (write != i)
+                memcpy(out->v[write], out->v[i], sizeof(out->v[0]));
+            write++;
+        }
+        out->n = write;
+    }
     return ok;
 }
 

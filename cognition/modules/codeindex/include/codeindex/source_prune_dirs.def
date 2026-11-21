@@ -13,3 +13,11 @@ SOURCE_PRUNE_DIR("vendor")
  * The public-capability projection excludes fixture APIs, but the source index
  * does not: coverage still binds their exact source bytes. */
 SOURCE_INVENTORY_PRUNE_DIR("fixtures")
+SOURCE_CORPUS_PRUNE_DIR("fixtures")
+/* Standalone programs are searchable source and maintained corpus, not node
+ * capability evidence. */
+
+SOURCE_INVENTORY_PRUNE_DIR("skycombat")
+SOURCE_INVENTORY_PRUNE_DIR("z23android")
+SOURCE_INVENTORY_PRUNE_DIR("z23kernel")
+SOURCE_INVENTORY_PRUNE_DIR("zcl-ledger")

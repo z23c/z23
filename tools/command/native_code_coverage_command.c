@@ -63,11 +63,12 @@ static bool coverage_is_maintained(const char *path)
 /* Capture the Git index, growing until the helper proves it did not truncate.
  * Newline-delimited output is intentional: tracked paths containing a newline
  * remain Git-quoted and therefore surface as an unindexed path instead of
- * silently changing the manifest boundary. */
+ * silently changing the manifest boundary. The tab separates entry metadata
+ * from the path; quoted special characters cannot forge that boundary. */
 static char *coverage_git_manifest(const char *root, size_t *capacity,
                                    char *why, size_t why_size)
 {
-    const char *const args[] = {"ls-files", NULL};
+    const char *const args[] = {"ls-files", "--stage", NULL};
     size_t cap = CODE_COVERAGE_CAPTURE_INITIAL;
     while (cap <= CODE_COVERAGE_CAPTURE_MAX) {
         char *output = zcl_malloc(cap, "code_coverage_git_manifest");
@@ -107,10 +108,39 @@ static void coverage_push_missing(struct json_value *missing,
     json_free(&item);
 }
 
-/* Scan the newline-delimited manifest once, counting tracked maintained
- * source files and collecting the ones the index does not list. Returns false
- * only when a per-path lookup fails, after copying that path into why; the
- * caller keeps ownership of the manifest, the index and the error reply. */
+static bool coverage_manifest_object(const char *begin, const char *end)
+{
+    if (end != begin + 40)
+        return false;
+    for (const char *p = begin; p < end; p++) {
+        if ((*p < '0' || *p > '9') && (*p < 'a' || *p > 'f'))
+            return false;
+    }
+    return true;
+}
+
+static char *coverage_manifest_path(char *row, bool *regular)
+{
+    char *tab = strchr(row, '\t');
+    char *mode_end = strchr(row, ' ');
+    if (!tab || !tab[1] || !mode_end || mode_end != row + 6)
+        return NULL;
+    char *stage = strchr(mode_end + 1, ' ');
+    if (!stage || !coverage_manifest_object(mode_end + 1, stage) ||
+        stage + 2 != tab || stage[1] < '0' || stage[1] > '3')
+        return NULL;
+    *regular = strncmp(row, "100644", 6) == 0 ||
+               strncmp(row, "100755", 6) == 0;
+    bool non_regular = strncmp(row, "120000", 6) == 0 ||
+                       strncmp(row, "160000", 6) == 0;
+    return *regular || non_regular ? tab + 1 : NULL;
+}
+
+/* Scan the newline-delimited manifest once, counting regular maintained
+ * source blobs and collecting the ones the index does not list. Symlinks and
+ * submodules deliberately stay outside the regular-file index. Returns false
+ * for a malformed/unknown entry or failed lookup, after copying the row or
+ * path into why; the caller owns the manifest, index and error reply. */
 static bool coverage_scan_manifest(struct codeindex *index, char *manifest,
                                    size_t manifest_capacity,
                                    struct json_value *missing,
@@ -124,20 +154,26 @@ static bool coverage_scan_manifest(struct codeindex *index, char *manifest,
         char *newline = memchr(cursor, '\n', (size_t)(end - cursor));
         char *next = newline ? newline + 1 : end;
         if (newline) *newline = '\0';
-        if (cursor[0] && coverage_is_maintained(cursor) &&
-            coverage_is_source(cursor)) {
+        bool regular = false;
+        char *path = coverage_manifest_path(cursor, &regular);
+        if (!path) {
+            (void)snprintf(why, why_size, "%s", cursor);
+            return false;
+        }
+        if (regular && coverage_is_maintained(path) &&
+            coverage_is_source(path)) {
             (*tracked_total)++;
             struct ci_file row;
             bool found = false;
-            if (!codeindex_file(index, cursor, &row, &found)) {
-                (void)snprintf(why, why_size, "%s", cursor);
+            if (!codeindex_file(index, path, &row, &found)) {
+                (void)snprintf(why, why_size, "%s", path);
                 return false;
             }
             if (found) {
                 (*indexed_tracked)++;
             } else {
                 if (*missing_total < CODE_COVERAGE_MISSING_CAP)
-                    coverage_push_missing(missing, cursor);
+                    coverage_push_missing(missing, path);
                 (*missing_total)++;
             }
         }

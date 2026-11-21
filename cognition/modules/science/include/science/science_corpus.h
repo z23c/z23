@@ -43,8 +43,10 @@
  * which was produced by a different walk at a different time. Dividing a
  * number from one walk by a number from the other is only meaningful if both
  * walks saw the same tree, so this module checks: `scope_agrees` is true only
- * when the file count it walked equals the file count the inventory recorded.
- * When they disagree the report SAYS SO and the caller must not present the
+ * when the inventory-projection file count it walked equals the file count the
+ * inventory recorded. Standalone apps remain in the corpus but are not node
+ * capabilities, so the two projections have separate totals. When the inventory
+ * counts disagree the report SAYS SO and the caller must not present the
  * proven fraction as current — the inventory is stale and the fix is
  * `make docs-capability-inventory`, not a smaller font on the caveat.
  *
@@ -73,6 +75,7 @@
 struct science_corpus_report {
     /* Measured by walking `root` now. */
     uint64_t files_walked;
+    uint64_t inventory_files_walked;
     uint64_t lines;
     uint64_t bytes;
     uint64_t non_test_lines;

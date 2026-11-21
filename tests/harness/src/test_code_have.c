@@ -430,6 +430,18 @@ static int ch_check_real_tree(struct ci_capability *caps,
                 base58_found = true;
         CH_CHECK("Base58 address encoding reaches its codec",
                  base58_found);
+        struct ci_capability android[5];
+        struct ci_capability_query android_q;
+        int android_n = codeindex_capabilities(
+            ci, "Android app entry point for the Z23 node", android, 5,
+            &android_q);
+        bool android_found = false;
+        for (int i = 0; i < android_n; i++)
+            if (strcmp(android[i].header,
+                       "apps/z23android/android_main.c") == 0)
+                android_found = true;
+        CH_CHECK("the Android entry-point query reaches its app",
+                 android_found);
         codeindex_close(ci);
     }
     return failures;
@@ -646,7 +658,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 33 /* of all cases: 23/63 (36%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 34 /* of all cases: 24/63 (38%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {

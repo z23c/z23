@@ -15,7 +15,7 @@ struct ci_module_context {
 
 static const char *const k_contexts[] = {
     "wallet", "explorer", "naming", "messaging", "market",
-    "commons", "clips", "cognition", "engine", "core", "platform",
+    "commons", "clips", "cognition", "engine", "core", "platform", "apps",
 };
 
 /* Module ownership is the smallest stable taxonomy for lib/: module names are
@@ -111,6 +111,7 @@ static const char *path_context(const char *path)
     if (starts(path, "core/")) return "core";
     if (starts(path, "engine/")) return "engine";
     if (starts(path, "cognition/")) return "cognition";
+    if (starts(path, "apps/")) return "apps";
     if (starts(path, "platform/") || starts(path, "tools/"))
         return "platform";
     return NULL;

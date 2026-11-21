@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * Z23 node Android app entry point. */
 #define _GNU_SOURCE
 #include "app.h"
 #include "base/cleanse.h"

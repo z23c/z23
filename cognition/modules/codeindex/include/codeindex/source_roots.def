@@ -6,6 +6,7 @@ SOURCE_ROOT("engine")
 SOURCE_ROOT("contexts")
 SOURCE_ROOT("cognition")
 SOURCE_ROOT("platform")
+SOURCE_ROOT("apps")
 SOURCE_ROOT("tools")
 SOURCE_ROOT("tests")
 /* Executable documentation examples are maintained C23 source too. The

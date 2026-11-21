@@ -306,17 +306,19 @@ static int cic_st_mk_fixture(struct cic_st *st)
     char *tmp = mkdtemp(st->tmpl);
     if (!tmp)
         return die("z23-lint: mkdir failed: %s\n", td);
-    char srcdir[4096], ac[4096];
+    char srcdir[4096], ac[4096], linkc[4096];
     if (ovf(snprintf(st->fixture, sizeof st->fixture, "%s/repo", tmp),
             sizeof st->fixture)
         || ovf(snprintf(srcdir, sizeof srcdir, "%s/src", st->fixture),
                sizeof srcdir)
         || ovf(snprintf(ac, sizeof ac, "%s/a.c", srcdir), sizeof ac)
+        || ovf(snprintf(linkc, sizeof linkc, "%s/link.c", srcdir), sizeof linkc)
         || ovf(snprintf(st->missp, sizeof st->missp, "%s/missing.c", srcdir),
                sizeof st->missp)
         || ovf(snprintf(st->basep, sizeof st->basep, "%s/baseline", tmp),
                sizeof st->basep)
         || csr_write(ac, "int coverage_fixture(void) { return 23; }\n")
+        || symlink("a.c", linkc) != 0
         || csr_write(st->basep, "0\n")) {
         (void)rap_rm_rf(tmp);
         return 2;
@@ -337,8 +339,9 @@ static int cic_st_git_init(struct cic_st *st)
     if (ovf(snprintf(gitcmd, sizeof gitcmd, "git -C '%s' init -q", fixture),
             sizeof gitcmd)
         || capture_cmd(gitcmd, dump, sizeof dump, &code) || code != 0
-        || ovf(snprintf(gitcmd, sizeof gitcmd, "git -C '%s' add src/a.c",
-                        fixture), sizeof gitcmd)
+        || ovf(snprintf(gitcmd, sizeof gitcmd,
+                        "git -C '%s' add src/a.c src/link.c", fixture),
+               sizeof gitcmd)
         || capture_cmd(gitcmd, dump, sizeof dump, &code) || code != 0) {
         (void)rap_rm_rf(tmp);
         return die("z23-lint: command failed (%s)\n", "git");
@@ -449,7 +452,7 @@ int check_codeindex_coverage_selftest(void)
     if (rc)
         return rc;
     (void)rap_rm_rf(st.tmpl);
-    if (fputs("check-codeindex-coverage: SELFTEST PASS — clean and restored manifests are GREEN; one tracked missing file is RED\n",
+    if (fputs("check-codeindex-coverage: SELFTEST PASS — clean and restored manifests are GREEN; tracked symlinks are excluded; one tracked missing regular file is RED\n",
               stdout) < 0)
         return die("z23-lint: write failed\n", "");
     return 0;

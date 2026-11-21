@@ -164,6 +164,10 @@ void ci_group_for_path(const char *relpath, char out[64])
     out[0] = '\0';
     if (!relpath || !relpath[0]) return;
 
+    if (starts_seg(relpath, "apps")) {
+        (void)snprintf(out, 64, "apps");
+        return;
+    }
     if (copy_modules_group(relpath, out)) return;
     if (starts_seg(relpath, "contexts")) {
         leading_components(relpath, 3, out);
@@ -209,6 +213,7 @@ static const char *ci_purpose_roots_a(const char *group)
     if (strcmp(group, "engine") == 0) return "node composition, execution, and the one-writer reducer";
     if (strcmp(group, "cognition") == 0) return "stories, ontology, predicates, focus, heuristics, evidence, and experience";
     if (strcmp(group, "platform") == 0) return "ports and operating-system or infrastructure adapters";
+    if (strcmp(group, "apps") == 0) return "independently built C23 application programs";
     if (strcmp(group, "tools") == 0) return "dev/ops tooling and native command surfaces";
     if (strcmp(group, "tests") == 0) return "the canonical test runner, groups, fixtures, and specifications";
     if (strcmp(group, "docs") == 0) return "executable C23 examples embedded in maintained documentation";
@@ -425,7 +430,7 @@ static bool emit_authority_rooms(struct ci_store *s, const char *authority,
 static bool emit_root_groups(struct ci_store *s)
 {
     static const char *const authorities[] = {
-        "core", "engine", "contexts", "cognition", "platform",
+        "core", "engine", "contexts", "cognition", "platform", "apps",
         "tools", "tests", "docs",
     };
     static const char *const external_roots[] = {

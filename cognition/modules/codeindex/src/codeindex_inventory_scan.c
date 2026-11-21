@@ -138,7 +138,9 @@ static bool inv_prune_dir(const char *name)
 #define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
 #define SOURCE_INVENTORY_PRUNE_DIR(name_) \
     if (strcmp(name, name_) == 0) return true;
+#define SOURCE_CORPUS_PRUNE_DIR(name_)
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_CORPUS_PRUNE_DIR
 #undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     return strncmp(name, "test-tmp", 8) == 0;
