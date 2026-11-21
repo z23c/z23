@@ -280,9 +280,10 @@ static bool ls_read(const char *path, struct ls_stats *s, struct ls_src *src)
         }
         ls_line(s, buf, len);
     }
+    bool ok = !src->absent && !ferror(fp);
     free(buf);
-    (void)fclose(fp);
-    return !src->absent;
+    if (fclose(fp) != 0) ok = false;
+    return ok;
 }
 
 static int ls_cmp_i64(const void *a, const void *b)

@@ -225,6 +225,32 @@ _test_next:;
     return failures;
 }
 
+static int dls_read_error_case(const char *dir)
+{
+    int failures = 0;
+    struct dls_call c;
+    char empty[600];
+    TEST("land.stats: a directory is refused and an empty file is valid") {
+        dls_run(&c, dir, 24);
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(c.reply.error.code, "LEDGER_UNREADABLE");
+        dls_end(&c);
+        (void)snprintf(empty, sizeof(empty), "%s/empty.jsonl", dir);
+        FILE *f = fopen(empty, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fclose(f) == 0);
+        dls_run(&c, empty, 24);
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(dls_int(dls_sub(&c, "source"), "bytes_total"), 0);
+        ASSERT_EQ(dls_int(dls_sub(&c, "totals"), "landed"), 0);
+        dls_end(&c);
+        ASSERT(remove(empty) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dls_cap_case(const char *dir, const char *fixture)
 {
     int failures = 0;
@@ -276,6 +302,7 @@ int test_land_stats(void)
     dls_fixture(ledger);
     failures += dls_totals_case(ledger);
     failures += dls_window_case(ledger);
+    failures += dls_read_error_case(dir);
     failures += dls_cap_case(dir, ledger);
     if (failures == 0)
         printf("test_land_stats: all passed\n");
