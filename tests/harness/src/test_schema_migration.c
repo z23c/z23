@@ -716,13 +716,17 @@ static int sm_core_authorize(void *ctx, int op, const char *first,
 static bool sm_core_prepare(struct sm_fixture *f, int ver)
 {
     int32_t before = ver - 1;
-    char sql[100];
-    snprintf(sql, sizeof(sql), "DELETE FROM schema_migrations WHERE version='%03d'", ver);
-    return sm_v6_prepare(f) && node_db_exec(&f->ndb,
-        "CREATE INDEX IF NOT EXISTS idx_snote_address ON wallet_sapling_notes(address) WHERE spent_txid IS NULL") &&
-        node_db_exec(&f->ndb, sql) &&
-        node_db_state_set(&f->ndb, "schema_version", &before, sizeof(before)) &&
-        node_db_state_set(&f->ndb, "schema_compat_floor", &before, sizeof(before));
+    char sql[160];
+    snprintf(sql, sizeof(sql), "DELETE FROM schema_migrations WHERE CAST(version AS INTEGER) >= %d", ver);
+    if (!sm_fixture_init(f) ||
+        !node_db_exec(&f->ndb, "CREATE TABLE core_fixture_sentinel(value INTEGER NOT NULL);"
+                              "INSERT INTO core_fixture_sentinel VALUES(37)") ||
+        !node_db_exec(&f->ndb, sql) ||
+        !node_db_state_set(&f->ndb, "schema_version", &before, sizeof(before)) ||
+        !node_db_state_set(&f->ndb, "schema_compat_floor", &before, sizeof(before))) return false;
+    snprintf(sql, sizeof(sql), "SELECT count(*) FROM schema_migrations WHERE CAST(version AS INTEGER) >= %d", ver);
+    return sm_scalar(&f->ndb, sql) == 0 && sm_row_count(&f->ndb, ver - 1) == 1 &&
+        (ver <= 6 || sm_row_count(&f->ndb, 6) == 1);
 }
 
 static int sm_core_failure(int ver, const char *index, const char *alter)
@@ -748,10 +752,10 @@ static int sm_core_failure(int ver, const char *index, const char *alter)
     SM_CHECK("core failed row preserves floor", node_db_schema_compat_floor(&f.ndb) == ver - 1);
     SM_CHECK("core failed row leaves autocommit enabled", sqlite3_get_autocommit(f.ndb.db) != 0);
     SM_CHECK("core failed row leaves marker absent", sm_row_count(&f.ndb, ver) == 0);
-    SM_CHECK("core failed row preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    SM_CHECK("core failed row preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
     SM_CHECK("core clean retry succeeds", node_db_migrate(&f.ndb, NULL) > 0);
     SM_CHECK("core retry records marker", sm_row_count(&f.ndb, ver) == 1);
-    SM_CHECK("core retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    SM_CHECK("core retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
     if (index)
         SM_CHECK("core retry creates required index", sm_scalar(&f.ndb,
             "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_blocks_height_all'") == 1);
@@ -776,7 +780,7 @@ static int sm_core_partial_v3(void)
         "SELECT count(*) FROM pragma_table_info('blocks') WHERE name='sapling_tree_data'") == 1);
     SM_CHECK("v3 preserves and restores witness columns", sm_scalar(&f.ndb,
         "SELECT count(*) FROM pragma_table_info('wallet_sapling_notes') WHERE name IN ('witness_data','witness_height')") == 2);
-    SM_CHECK("partial v3 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM v6_fixture_sentinel") == 37);
+    SM_CHECK("partial v3 retry preserves unrelated data", sm_scalar(&f.ndb, "SELECT value FROM core_fixture_sentinel") == 37);
     sm_fixture_destroy(&f);
     return failures;
 }
