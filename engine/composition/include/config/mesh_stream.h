@@ -284,6 +284,7 @@ bool mesh_stream_test_frame_as(struct msg_processor *mp, struct p2p_node *node,
  * supervised drain, so a test can put real frames on the wire. Pass NULL
  * to unbind. */
 void mesh_stream_test_bind(struct boot_svc_ctx *svc);
+void mesh_stream_test_pump_tick(void);
 #endif
 
 #endif /* ZCL_CONFIG_MESH_STREAM_H */

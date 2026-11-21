@@ -6,9 +6,10 @@
  * decoder opening it — only the socket is elided. Covers the open/data/
  * window/close round trip, the credit window stopping a sender until a
  * WINDOW arrives, close freeing the slot, the per-peer cap and the OPEN
- * cadence, and the named refusals for an unknown service, an unpaired peer
- * and a link that is not Noise. Every refusal is checked by name on the
- * wire, because a stream that fails open would hand a stranger a service.
+ * cadence, supervised session-loss handling, and the named refusals for an
+ * unknown service, an unpaired peer and a link that is not Noise. Every
+ * refusal is checked by name on the wire, because a stream that fails open
+ * would hand a stranger a service.
  */
 
 #include "test/test_core.h"
@@ -874,6 +875,46 @@ int test_mesh_stream(void)
         ASSERT_EQ(g_data_frames, (size_t)1);
         ASSERT_EQ(g_last_data_len, (size_t)5);
         ASSERT(memcmp(g_last_data, "re:up", 5) == 0);
+        PASS();
+    }
+
+    TEST("mesh stream: supervised pump ends both streams on session loss "
+         "without sending CLOSE frames") {
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
+        mesh_stream_test_reset();
+        stream_test_counters_reset();
+        uint64_t id = 0;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f.resp_noise_pub,
+                                   STREAM_TEST_WINDOW,
+                                   (const uint8_t *)"up", 2, NULL, &id),
+                  MESH_STREAM_OK);
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
+                  (size_t)1);
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f.term_peer.ini, &mp, a),
+                  (size_t)1);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)2);
+        a->disconnect = true;
+        b->disconnect = true;
+        mesh_stream_test_pump_tick();
+        a->disconnect = false;
+        b->disconnect = false;
+        ASSERT_EQ(g_closes, (size_t)2);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)0);
+        for (uint8_t initiator = 0; initiator < 2; initiator++) {
+            struct stream_test_visit v;
+            memset(&v, 0, sizeof(v));
+            v.id = id;
+            v.local_initiator = initiator != 0;
+            mesh_stream_visit(STREAM_TEST_ECHO, stream_test_read_visit, &v);
+            ASSERT(v.found);
+            ASSERT(v.ended);
+            ASSERT_EQ(v.end_reason, MESH_STREAM_ENDED_SESSION_LOST);
+        }
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
+                  (size_t)0);
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f.term_peer.ini, &mp, a),
+                  (size_t)0);
         PASS();
     }
 

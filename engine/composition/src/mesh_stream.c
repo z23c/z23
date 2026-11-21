@@ -1315,6 +1315,11 @@ void mesh_stream_test_bind(struct boot_svc_ctx *svc)
     zcl_mutex_unlock(&g_stream_lock);
 }
 
+void mesh_stream_test_pump_tick(void)
+{
+    stream_pump_tick(NULL);
+}
+
 bool mesh_stream_test_frame_as(struct msg_processor *mp, struct p2p_node *node,
                                const uint8_t peer_static[32],
                                const uint8_t *payload, size_t payload_len)
