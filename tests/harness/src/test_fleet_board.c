@@ -9208,6 +9208,31 @@ static bool fbh_status(struct fbh_node *h, struct fbh_status *s)
     return fbh_status_of(h, NULL, s);
 }
 
+static void fbh_carriage_read(const struct json_value *c,
+                              struct fbh_status *s)
+{
+    s->opened = fbh_at(c, "push_out", "opened", NULL);
+    for (unsigned i = FLEET_BOARD_PUSH_HINT_QUEUED; i < FLEET_BOARD_PUSH_HINTS;
+         i++)
+        s->hint[i] = fbh_at(c, "push_out", "hint",
+                            boot_fleet_board_push_hint_name(
+                                (enum fleet_board_push_hint)i));
+    s->in_stored = fbh_at(c, "push_in", "records", "stored");
+    s->receipt_stored = fbh_at(c, "push_out", "receipt_records", "stored");
+    s->skipped_unresolved = fbh_at(c, "push_out", "skipped", "unresolved");
+    s->skipped_not_own = fbh_at(c, "push_out", "skipped", "not_own");
+}
+
+/* Every counter read, and the older fields, are present. */
+static bool fbh_carriage_whole(const struct json_value *c,
+                               const struct fbh_status *s)
+{
+    return s->opened >= 0 && s->in_stored >= 0 && s->receipt_stored >= 0 &&
+           s->skipped_unresolved >= 0 && s->skipped_not_own >= 0 &&
+           fbh_at(c, "pull", "stored", NULL) >= 0 &&
+           fbh_at(c, "push_in", "refused", "delegation") >= 0;
+}
+
 /* The status reply's counters, and whether it names `key` (hex; NULL asks
  * nothing). */
 static bool fbh_status_of(struct fbh_node *h, const char *key,
@@ -9221,26 +9246,13 @@ static bool fbh_status_of(struct fbh_node *h, const char *key,
               json_get_bool(json_get(&r, "ok"));
     const struct json_value *c = json_get(&r, "carriage");
     memset(s, 0, sizeof *s);
-    if (ok && c) {
-        s->opened = fbh_at(c, "push_out", "opened", NULL);
-        for (unsigned i = FLEET_BOARD_PUSH_HINT_QUEUED;
-             i < FLEET_BOARD_PUSH_HINTS; i++)
-            s->hint[i] = fbh_at(c, "push_out", "hint",
-                                boot_fleet_board_push_hint_name(
-                                    (enum fleet_board_push_hint)i));
-        s->in_stored = fbh_at(c, "push_in", "records", "stored");
-        s->receipt_stored = fbh_at(c, "push_out", "receipt_records", "stored");
-        s->skipped_unresolved = fbh_at(c, "push_out", "skipped", "unresolved");
-        s->skipped_not_own = fbh_at(c, "push_out", "skipped", "not_own");
-    }
+    if (ok && c)
+        fbh_carriage_read(c, s);
     const char *const keys[1] = { key };
     s->named_key = ok && !fbh_names_no_key(&r, keys, 1);
     /* Additive: the fields that were there before are still there. */
     ok = ok && c && json_get(&r, "posts") && json_get(&r, "chain_intact") &&
-         s->opened >= 0 && s->in_stored >= 0 && s->receipt_stored >= 0 &&
-         s->skipped_unresolved >= 0 && s->skipped_not_own >= 0 &&
-         fbh_at(c, "pull", "stored", NULL) >= 0 &&
-         fbh_at(c, "push_in", "refused", "delegation") >= 0;
+         fbh_carriage_whole(c, s);
     json_free(&r);
     return ok;
 }
@@ -9298,59 +9310,92 @@ static bool fbp_case_hint_rpc(struct fbp *p)
     return ok;
 }
 
+/* One op=post whose reply names `hint` (NULL: no push_hint at all) and none
+ * of `keys`; `created` (may be NULL) receives its created_at. */
+static bool fbh_post_said(struct fbh_node *h, const char *scope,
+                          const char *text, const char *push_to, bool number,
+                          int64_t created_at, const char *hint,
+                          const char *const keys[3], uint8_t id[32],
+                          int64_t *created)
+{
+    struct json_value r;
+    json_init(&r);
+    bool ok = fbh_post(h, scope, text, push_to, number, created_at, &r) &&
+              fbh_posted(&r, hint, id) && fbh_names_no_key(&r, keys, 3);
+    if (created)
+        *created = json_get_int(json_get(&r, "created_at"));
+    json_free(&r);
+    return ok;
+}
+
+/* The addressee's key as lowercase hex in `to` and uppercase in `upper`. */
+static void fbh_hint_forms(const uint8_t key[32], char to[65], char upper[65])
+{
+    zcl_hex_encode(key, 32, to);
+    for (size_t i = 0; i < 65; i++)
+        upper[i] = (char)(to[i] >= 'a' && to[i] <= 'f' ? to[i] - 32 : to[i]);
+}
+
+/* Each refused hint is counted once, under its verdict: the PUBLIC post and
+ * the malformed and self hints on posts with no ref move no skip counter. */
+static bool fbh_refusals_counted(const struct fbh_status *s0,
+                                 const struct fbh_status *s1,
+                                 const struct boot_fleet_board_fleet_counts *c0)
+{
+    struct boot_fleet_board_fleet_counts c1 = fbp_now_counts();
+    FBP_REQUIRE(s1->skipped_not_own == s0->skipped_not_own);
+    FBP_REQUIRE(c1.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_OWN] ==
+                c0->push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_OWN]);
+    FBP_REQUIRE(c1.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE] ==
+                c0->push_skipped[FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE]);
+    FBP_REQUIRE(s1->hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] ==
+                s0->hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] + 1);
+    FBP_REQUIRE(s1->hint[FLEET_BOARD_PUSH_HINT_MALFORMED] ==
+                s0->hint[FLEET_BOARD_PUSH_HINT_MALFORMED] + 2);
+    FBP_REQUIRE(s1->hint[FLEET_BOARD_PUSH_HINT_SELF] ==
+                s0->hint[FLEET_BOARD_PUSH_HINT_SELF] + 1);
+    FBP_REQUIRE(s1->hint[FLEET_BOARD_PUSH_HINT_NOT_STORED] ==
+                s0->hint[FLEET_BOARD_PUSH_HINT_NOT_STORED] + 1);
+    FBP_REQUIRE(s1->hint[FLEET_BOARD_PUSH_HINT_QUEUED] ==
+                s0->hint[FLEET_BOARD_PUSH_HINT_QUEUED]);
+    return true;
+}
+
 static bool fbh_case_rpc_refusals(struct fbp *p, struct fbh_node *h)
 {
     char to[65], upper[65], self[65];
     uint8_t id_bad[32], id_num[32], id_self[32], id_public[32], id_again[32];
     uint8_t id_plain[32];
+    int64_t created = 0;
     struct fbh_status s0, s1;
-    struct json_value r;
-    json_init(&r);
-    zcl_hex_encode(p->addressee.online_pubkey, 32, to);
-    for (size_t i = 0; i < 65; i++)
-        upper[i] = (char)(to[i] >= 'a' && to[i] <= 'f' ? to[i] - 32 : to[i]);
+    fbh_hint_forms(p->addressee.online_pubkey, to, upper);
     zcl_hex_encode(h->pk, 32, self);
     const char *const keys[3] = { to, upper, self };
     FBP_REQUIRE(fbh_status(h, &s0));
     struct boot_fleet_board_fleet_counts c0 = fbp_now_counts();
-    /* A hint on a PUBLIC post: refused by name; the post is published. */
-    bool ok = fbh_post(h, "public", "a public note", to, false, 0, &r) &&
-              fbh_posted(&r, "not_fleet", id_public) &&
-              fbh_names_no_key(&r, keys, 3);
-    json_free(&r);
-    FBP_REQUIRE(ok);
+    /* A hint on a PUBLIC post: refused by name; the post is published. No
+     * reply below names a key. */
+    FBP_REQUIRE(fbh_post_said(h, "public", "a public note", to, false, 0,
+                              "not_fleet", keys, id_public, NULL));
     /* A post without a hint: its reply carries no push_hint at all. */
-    ok = fbh_post(h, "public", "a public note, unhinted", NULL, false, 0,
-                  &r) &&
-         fbh_posted(&r, NULL, id_plain) && fbh_names_no_key(&r, keys, 3);
-    json_free(&r);
-    FBP_REQUIRE(ok);
+    FBP_REQUIRE(fbh_post_said(h, "public", "a public note, unhinted", NULL,
+                              false, 0, NULL, keys, id_plain, NULL));
     /* Malformed, as text and as a number: refused, the post still stored. */
-    ok = fbh_post(h, "fleet", "{\"seq\":2,\"to\":\"node-b\"}", upper, false, 0,
-                  &r) &&
-         fbh_posted(&r, "malformed", id_bad) && fbh_names_no_key(&r, keys, 3);
-    json_free(&r);
-    FBP_REQUIRE(ok);
-    ok = fbh_post(h, "fleet", "{\"seq\":3,\"to\":\"node-b\"}", NULL, true, 0,
-                  &r) &&
-         fbh_posted(&r, "malformed", id_num) && fbh_names_no_key(&r, keys, 3);
-    json_free(&r);
-    FBP_REQUIRE(ok);
+    FBP_REQUIRE(fbh_post_said(h, "fleet", "{\"seq\":2,\"to\":\"node-b\"}",
+                              upper, false, 0, "malformed", keys, id_bad,
+                              NULL));
+    FBP_REQUIRE(fbh_post_said(h, "fleet", "{\"seq\":3,\"to\":\"node-b\"}",
+                              NULL, true, 0, "malformed", keys, id_num, NULL));
     /* This box itself. */
-    ok = fbh_post(h, "fleet", "{\"seq\":4,\"to\":\"node-b\"}", self, false, 0,
-                  &r) &&
-         fbh_posted(&r, "self", id_self) && fbh_names_no_key(&r, keys, 3);
-    int64_t created = json_get_int(json_get(&r, "created_at"));
-    json_free(&r);
-    FBP_REQUIRE(ok);
+    FBP_REQUIRE(fbh_post_said(h, "fleet", "{\"seq\":4,\"to\":\"node-b\"}",
+                              self, false, 0, "self", keys, id_self,
+                              &created));
     /* The same post again stores nothing new, so its hint has nothing to
      * ride. */
-    ok = fbh_post(h, "fleet", "{\"seq\":4,\"to\":\"node-b\"}", to, false,
-                  created, &r) &&
-         fbh_posted(&r, "not_stored", id_again) &&
-         fbh_names_no_key(&r, keys, 3);
-    json_free(&r);
-    FBP_REQUIRE(ok && memcmp(id_again, id_self, 32) == 0);
+    FBP_REQUIRE(fbh_post_said(h, "fleet", "{\"seq\":4,\"to\":\"node-b\"}", to,
+                              false, created, "not_stored", keys, id_again,
+                              NULL));
+    FBP_REQUIRE(memcmp(id_again, id_self, 32) == 0);
     /* None of them was queued, and no reply ever named a key. */
     FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 0);
     FBP_REQUIRE(db_fleet_board_have(&p->w.b, id_bad) &&
@@ -9358,25 +9403,7 @@ static bool fbh_case_rpc_refusals(struct fbp *p, struct fbh_node *h)
                 db_fleet_board_have(&p->w.b, id_public) &&
                 db_fleet_board_have(&p->w.b, id_plain));
     FBP_REQUIRE(fbh_status_of(h, to, &s1) && !s1.named_key);
-    /* Each refused hint is counted once, under its verdict: the PUBLIC post
-     * and the malformed and self hints on posts with no ref move no skip
-     * counter. */
-    FBP_REQUIRE(s1.skipped_not_own == s0.skipped_not_own);
-    struct boot_fleet_board_fleet_counts c1 = fbp_now_counts();
-    FBP_REQUIRE(c1.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_OWN] ==
-                c0.push_skipped[FLEET_BOARD_PUSH_SKIP_NOT_OWN]);
-    FBP_REQUIRE(c1.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE] ==
-                c0.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE]);
-    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] ==
-                s0.hint[FLEET_BOARD_PUSH_HINT_NOT_FLEET] + 1);
-    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_MALFORMED] ==
-                s0.hint[FLEET_BOARD_PUSH_HINT_MALFORMED] + 2);
-    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_SELF] ==
-                s0.hint[FLEET_BOARD_PUSH_HINT_SELF] + 1);
-    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_NOT_STORED] ==
-                s0.hint[FLEET_BOARD_PUSH_HINT_NOT_STORED] + 1);
-    FBP_REQUIRE(s1.hint[FLEET_BOARD_PUSH_HINT_QUEUED] ==
-                s0.hint[FLEET_BOARD_PUSH_HINT_QUEUED]);
+    FBP_REQUIRE(fbh_refusals_counted(&s0, &s1, &c0));
     /* The fleet posts still reach the eligible peer by pull. */
     FBP_REQUIRE(fbp_pull_into_addressee(p) == 3);
     FBP_REQUIRE(db_fleet_board_have(&p->w.a, id_bad) &&
