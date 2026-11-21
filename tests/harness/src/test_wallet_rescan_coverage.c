@@ -499,6 +499,194 @@ static int wrc_accounting_boundary(struct wrc_f *f, struct wallet *original)
     return failures;
 }
 
+static bool wrc_history_null(const struct json_value *object, const char *key)
+{
+    const struct json_value *value = json_get(object, key);
+    return value && value->type == JSON_NULL;
+}
+
+static const struct json_value *wrc_history_send(const struct json_value *result)
+{
+    const struct json_value *txs = json_get(result, "transactions");
+    if (!txs || txs->type != JSON_ARR) return NULL;
+    for (size_t i = 0; i < txs->num_children; i++)
+        if (wrc_bool(&txs->children[i], "from_me", false)) return &txs->children[i];
+    return NULL;
+}
+
+static int wrc_history_global_assert(const struct json_value *result, bool incomplete)
+{
+    int failures = 0;
+    WRC_CHECK("history scope is loaded transactions",
+              !strcmp(wrc_str(result, "accounting_scope"), "loaded_wallet_transactions"));
+    WRC_CHECK("history coverage does not claim completeness",
+              !strcmp(wrc_str(result, "history_coverage"), incomplete ? "incomplete" : "unverified"));
+    WRC_CHECK("global reconciliation verdicts are unknown",
+              wrc_history_null(result, "balanced") && wrc_history_null(result, "discrepancy") &&
+              wrc_history_null(result, "spent_externally"));
+    return failures;
+}
+
+static int wrc_history_missing_assert(const struct json_value *result, const char *label)
+{
+    int failures = 0;
+    const struct json_value *child = wrc_history_send(result);
+    WRC_CHECK("unresolved input makes fee and total input unknown", child &&
+              wrc_int(result, "unresolved_inputs") == 1 &&
+              wrc_history_null(result, "total_fees") &&
+              wrc_history_null(child, "fee") && wrc_history_null(child, "total_in") &&
+              wrc_int(child, "missing_inputs") == 1);
+    const char *hash = wrc_str(child, "missing_prevout");
+    const char *last = strcmp(label, "known_first_missing_second") == 0 ? "73" : "51";
+    WRC_CHECK("first unresolved prevout is recorded", strlen(hash) == 64 &&
+              strcmp(hash + 62, last) == 0 &&
+              wrc_int(child, "missing_prevout_vout") == (strcmp(label, "out_of_range") == 0 ? 1 : 0));
+    const struct json_value *known = json_get(child, "known_input_subtotal");
+    double expected = strcmp(label, "known_first_missing_second") == 0 ? 10.0 : 0.0;
+    WRC_CHECK("known input subtotal stays visible", known && known->type == JSON_REAL &&
+              json_get_real(known) == expected);
+    return failures;
+}
+
+static int wrc_history_complete_assert(const struct json_value *result)
+{
+    int failures = 0;
+    const struct json_value *in = json_get(result, "external_in");
+    const struct json_value *out = json_get(result, "external_out");
+    const struct json_value *bal = json_get(result, "utxo_balance");
+    const struct json_value *fee = json_get(result, "total_fees");
+    const struct json_value *known = json_get(result, "known_fee_subtotal");
+    WRC_CHECK("complete loaded flow is 10 in, 5 out, 4 unspent, 1 fee",
+              in && out && bal && fee && known && json_get_real(in) == 10.0 &&
+              json_get_real(out) == 5.0 && json_get_real(bal) == 4.0 &&
+              json_get_real(fee) == 1.0 && json_get_real(known) == 1.0);
+    return failures;
+}
+
+static int wrc_accounting_history_read(struct wrc_f *f, const char *label,
+                                       bool incomplete)
+{
+    int failures = 0;
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+    WRC_CHECK("history accounting RPC succeeds", ok);
+    char encoded[16384];
+    size_t size = json_write(&result, encoded, sizeof(encoded));
+    if (size < sizeof(encoded)) printf("ACCOUNTING_HISTORY %s %s\n", label, encoded);
+    else printf("ACCOUNTING_HISTORY %s output-too-large\n", label);
+    failures += wrc_history_global_assert(&result, incomplete);
+    bool missing = strcmp(label, "missing_parent") == 0 ||
+                   strcmp(label, "out_of_range") == 0 ||
+                   strcmp(label, "known_first_missing_second") == 0;
+    failures += missing ? wrc_history_missing_assert(&result, label)
+                        : wrc_history_complete_assert(&result);
+    json_free(&params);
+    json_free(&result);
+    return failures;
+}
+
+static int wrc_accounting_known_fee(struct wrc_f *f, struct wallet *w,
+                                    struct wallet_tx *first_parent,
+                                    const struct key_id *owned)
+{
+    int failures = 0;
+    struct wallet_tx *parent = &w->map_wallet[2], *send = &w->map_wallet[3];
+    parent->used = true; send->used = true;
+    transaction_init(&parent->tx); transaction_init(&send->tx);
+    bool allocated = transaction_alloc(&parent->tx, 0, 1) &&
+                     transaction_alloc(&send->tx, 1, 1);
+    WRC_CHECK("known-fee fixture allocates transactions", allocated);
+    if (!allocated) return failures + 1;
+    parent->confirms = 3; parent->tx.hash.data[0] = 0x61;
+    parent->tx.vout[0].value = INT64_C(300000000);
+    script_for_p2pkh(&parent->tx.vout[0].script_pub_key, owned);
+    send->from_me = true; send->confirms = 3; send->tx.hash.data[0] = 0x62;
+    send->tx.vin[0].prevout.hash = parent->tx.hash;
+    send->tx.vin[0].prevout.n = 0;
+    struct key_id other = {0}; other.id.data[0] = 0x79;
+    send->tx.vout[0].value = INT64_C(200000000);
+    script_for_p2pkh(&send->tx.vout[0].script_pub_key, &other);
+    wallet_mark_outpoint_spent(w, &parent->tx.hash, 0);
+    first_parent->used = false;
+    wallet_unmark_outpoint_spent(w, &first_parent->tx.hash, 0);
+    w->num_wallet_tx = 3;
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+    const struct json_value *known = json_get(&result, "known_fee_subtotal");
+    WRC_CHECK("known fee retained when another fee is unknown", ok &&
+              wrc_history_null(&result, "total_fees") && known &&
+              known->type == JSON_REAL && json_get_real(known) == 1.0);
+    json_free(&params); json_free(&result);
+    first_parent->used = true;
+    w->num_wallet_tx = 4;
+    return failures;
+}
+
+static int wrc_accounting_history(struct wrc_f *f, struct wallet *original)
+{
+    int failures = 0;
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "accounting.history");
+    if (!w) return 1;
+    wallet_init(w);
+    struct pubkey pk;
+    bool created = wallet_generate_new_key(w, &pk);
+    WRC_CHECK("history fixture generates a key", created);
+    struct wallet_tx *parent = &w->map_wallet[0], *send = &w->map_wallet[1];
+    transaction_init(&parent->tx);
+    transaction_init(&send->tx);
+    bool allocated = created && transaction_alloc(&parent->tx, 0, 1) &&
+                     transaction_alloc(&send->tx, 2, 2);
+    WRC_CHECK("history fixture allocates parent and send", allocated);
+    if (allocated) {
+        struct key_id ours = pubkey_get_id(&pk), other = {0};
+        other.id.data[0] = 0x78;
+        parent->used = true; parent->confirms = 3; parent->tx.hash.data[0] = 0x51;
+        parent->tx.vout[0].value = INT64_C(1000000000);
+        script_for_p2pkh(&parent->tx.vout[0].script_pub_key, &ours);
+        send->used = true; send->confirms = 3; send->from_me = true;
+        send->tx.hash.data[0] = 0x52;
+        send->tx.vin[0].prevout.hash = parent->tx.hash;
+        send->tx.vin[0].prevout.n = 0;
+        send->tx.vin[1].prevout.hash.data[0] = 0x73;
+        send->tx.vin[1].prevout.n = 0;
+        send->tx.num_vin = 1;
+        send->tx.vout[0].value = INT64_C(500000000);
+        script_for_p2pkh(&send->tx.vout[0].script_pub_key, &other);
+        send->tx.vout[1].value = INT64_C(400000000);
+        script_for_p2pkh(&send->tx.vout[1].script_pub_key, &ours);
+        w->num_wallet_tx = 2;
+        wallet_mark_outpoint_spent(w, &parent->tx.hash, 0);
+        rpc_wallet_set_state(w, f->ms, f->datadir, f->ws, f->mempool, NULL);
+        failures += wrc_accounting_history_read(f, "complete", false);
+        parent->used = false;
+        w->num_wallet_tx = 1;
+        wallet_unmark_outpoint_spent(w, &parent->tx.hash, 0);
+        failures += wrc_accounting_history_read(f, "missing_parent", true);
+        parent->used = true;
+        w->num_wallet_tx = 2;
+        send->tx.vin[0].prevout.n = 1;
+        failures += wrc_accounting_history_read(f, "out_of_range", true);
+        send->tx.vin[0].prevout.n = 0;
+        wallet_mark_outpoint_spent(w, &parent->tx.hash, 0);
+        send->tx.num_vin = 2;
+        failures += wrc_accounting_history_read(f, "known_first_missing_second", true);
+        send->tx.num_vin = 1;
+        w->scan_retry.pending = true;
+        failures += wrc_accounting_history_read(f, "scan_retry_pending", true);
+        w->scan_retry.pending = false;
+        w->num_wallet_tx = MAX_WALLET_TX;
+        failures += wrc_accounting_history_read(f, "wallet_map_limit", true);
+        w->num_wallet_tx = 2;
+        failures += wrc_accounting_known_fee(f, w, parent, &ours);
+    }
+    rpc_wallet_set_state(original, f->ms, f->datadir, f->ws, f->mempool, NULL);
+    wallet_free(w);
+    free(w);
+    return failures;
+}
+
 /* A wallet as the next boot builds it: key, flushed txs, then scan state. */
 static struct wallet *wrc_reboot_wallet(struct wrc_f *f)
 {
@@ -3302,6 +3490,7 @@ int test_wallet_rescan_coverage(void)
         };
         failures += wrc_boot_catch_up_fail_closed(&f);
         failures += wrc_accounting_boundary(&f, w1);
+        failures += wrc_accounting_history(&f, w1);
     }
     rpc_wallet_set_state(w1, &ms, datadir, &ws, &mempool, NULL);
     failures += wrc_k_cleared_marker_persists(w1, &ws, &wtbl, idx, last);

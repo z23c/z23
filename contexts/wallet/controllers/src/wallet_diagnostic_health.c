@@ -73,23 +73,28 @@ static void accounting_sum_outputs(const struct wallet *w,
 static void accounting_sum_inputs(const struct wallet *w,
                                   const struct wallet_tx *wtx,
                                   const struct transaction *tx,
-                                  int64_t *total_in, int *missing_inputs)
+                                  int64_t *total_in, int *missing_inputs,
+                                  struct outpoint *first_missing)
 {
-    if (wtx->from_me) {
-        for (size_t j = 0; j < tx->num_vin; j++) {
-            const struct wallet_tx *prev = wallet_get_tx(w,
-                &tx->vin[j].prevout.hash);
-            if (prev) {
-                uint32_t n = tx->vin[j].prevout.n;
-                if (n < prev->tx.num_vout) {
-                    int64_t v = prev->tx.vout[n].value;
-                    *total_in += v;
-                }
-            } else {
-                (*missing_inputs)++;
-            }
+    if (!wtx->from_me) return;
+    for (size_t j = 0; j < tx->num_vin; j++) {
+        const struct outpoint *input = &tx->vin[j].prevout;
+        const struct wallet_tx *prev = wallet_get_tx(w, &input->hash);
+        if (!prev || input->n >= prev->tx.num_vout) {
+            if (*missing_inputs == 0) *first_missing = *input;
+            (*missing_inputs)++;
+        } else {
+            *total_in += prev->tx.vout[input->n].value;
         }
     }
+}
+
+static void accounting_push_null(struct json_value *object, const char *name)
+{
+    struct json_value value = {0};
+    json_set_null(&value);
+    (void)json_push_kv(object, name, &value);
+    json_free(&value);
 }
 
 /* Track shielded value flows:
@@ -131,9 +136,15 @@ static void accounting_emit_flow_amounts(struct json_value *entry,
                                          int64_t internal, int64_t tx_fee,
                                          int64_t to_shielded,
                                          int64_t from_shielded,
-                                         int64_t total_in)
+                                         int64_t total_in, bool fee_known)
 {
     char s[32];
+    if (!fee_known) {
+        accounting_push_null(entry, "fee");
+        accounting_push_null(entry, "total_in");
+        format_amount(total_in, s, sizeof(s));
+        json_push_kv_real(entry, "known_input_subtotal", strtod(s, NULL));
+    }
     if (ext_in > 0) {
         format_amount(ext_in, s, sizeof(s));
         json_push_kv_real(entry, "external_in", strtod(s, NULL));
@@ -146,7 +157,7 @@ static void accounting_emit_flow_amounts(struct json_value *entry,
         format_amount(internal, s, sizeof(s));
         json_push_kv_real(entry, "internal", strtod(s, NULL));
     }
-    if (tx_fee > 0) {
+    if (fee_known && tx_fee > 0) {
         format_amount(tx_fee, s, sizeof(s));
         json_push_kv_real(entry, "fee", strtod(s, NULL));
     }
@@ -158,30 +169,22 @@ static void accounting_emit_flow_amounts(struct json_value *entry,
         format_amount(from_shielded, s, sizeof(s));
         json_push_kv_real(entry, "from_shielded", strtod(s, NULL));
     }
-    if (total_in > 0) {
+    if (fee_known && total_in > 0) {
         format_amount(total_in, s, sizeof(s));
         json_push_kv_real(entry, "total_in", strtod(s, NULL));
     }
 }
 
-static void accounting_note_missing_input(const struct wallet *w,
-                                          const struct transaction *tx,
-                                          struct json_value *entry,
-                                          int missing_inputs)
+static void accounting_note_missing_input(struct json_value *entry,
+                                          int missing_inputs,
+                                          const struct outpoint *first_missing)
 {
-    if (missing_inputs > 0) {
-        json_push_kv_int(entry, "missing_inputs", missing_inputs);
-        /* Show first missing input prevout for debugging */
-        for (size_t j = 0; j < tx->num_vin && j < 1; j++) {
-            const struct wallet_tx *prev = wallet_get_tx(w,
-                &tx->vin[j].prevout.hash);
-            if (!prev) {
-                char pi[65];
-                uint256_get_hex(&tx->vin[j].prevout.hash, pi);
-                json_push_kv_str(entry, "missing_prevout", pi);
-            }
-        }
-    }
+    if (missing_inputs <= 0) return;
+    json_push_kv_int(entry, "missing_inputs", missing_inputs);
+    char hash[65];
+    uint256_get_hex(&first_missing->hash, hash);
+    json_push_kv_str(entry, "missing_prevout", hash);
+    json_push_kv_int(entry, "missing_prevout_vout", first_missing->n);
 }
 
 static void accounting_output_details(const struct wallet *w,
@@ -235,9 +238,9 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     (void)params;
     RPC_HELP(help, result,
         "getwalletaccounting\n"
-        "Returns complete fund flow accounting.\n"
-        "Classifies all value as external_in, external_out, internal, or fees.\n"
-        "Invariant: external_in = utxo_balance + external_out + fees");
+        "Reports flows observed in loaded wallet transactions.\n"
+        "Incomplete inputs make fees unknown; history completeness is not established.\n"
+        "External spending, discrepancy and global balance verdict are unknown.");
 
     ENSURE_WALLET(result);
 
@@ -262,6 +265,11 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     int64_t total_internal = 0;      /* self-sends (change) */
     int64_t total_to_shielded = 0;   /* transparent → shielded pool */
     int64_t total_from_shielded = 0; /* shielded pool → transparent */
+    int64_t missing_total = 0;
+    zcl_mutex_lock(&ctx->wallet->cs);
+    bool pending = ctx->wallet->scan_retry.pending ||
+                   ctx->wallet->num_wallet_tx >= MAX_WALLET_TX;
+    zcl_mutex_unlock(&ctx->wallet->cs);
 
     struct json_value tx_list = {0};
     json_init(&tx_list);
@@ -285,14 +293,17 @@ bool rpc_getwalletaccounting(const struct json_value *params,
         /* Fee and input analysis (only for our sends) */
         int64_t total_in = 0;
         int missing_inputs = 0;
+        struct outpoint first_missing = {0};
         accounting_sum_inputs(ctx->wallet, wtx, tx, &total_in,
-                              &missing_inputs);
+                              &missing_inputs, &first_missing);
+        missing_total += missing_inputs;
 
         int64_t to_shielded = 0;
         int64_t from_shielded = 0;
         accounting_shielded_flows(tx, &to_shielded, &from_shielded);
 
-        int64_t tx_fee = accounting_tx_fee(wtx, tx, total_in, from_shielded);
+        int64_t tx_fee = missing_inputs ? 0 :
+            accounting_tx_fee(wtx, tx, total_in, from_shielded);
 
         /* Classify flows:
          * For from_me txs:
@@ -333,9 +344,8 @@ bool rpc_getwalletaccounting(const struct json_value *params,
 
         accounting_emit_flow_amounts(&entry, ext_in, ext_out, internal,
                                      tx_fee, to_shielded, from_shielded,
-                                     total_in);
-        accounting_note_missing_input(ctx->wallet, tx, &entry,
-                                      missing_inputs);
+                                     total_in, missing_inputs == 0);
+        accounting_note_missing_input(&entry, missing_inputs, &first_missing);
 
         /* Output details */
         accounting_output_details(ctx->wallet, wtx, tx, pk_pfx, pk_pfx_len,
@@ -353,7 +363,9 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     json_push_kv_real(result, "external_out", strtod(s, NULL));
 
     format_amount(total_fees, s, sizeof(s));
-    json_push_kv_real(result, "total_fees", strtod(s, NULL));
+    json_push_kv_real(result, "known_fee_subtotal", strtod(s, NULL));
+    if (missing_total) accounting_push_null(result, "total_fees");
+    else json_push_kv_real(result, "total_fees", strtod(s, NULL));
 
     format_amount(total_to_shielded, s, sizeof(s));
     json_push_kv_real(result, "to_shielded", strtod(s, NULL));
@@ -367,21 +379,13 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     format_amount(utxo_balance, s, sizeof(s));
     json_push_kv_real(result, "utxo_balance", strtod(s, NULL));
 
-    /* Spent externally = value that left the wallet through
-     * transactions not in our wallet history. Computed as residual:
-     * spent_externally = external_in + from_shielded
-     *                  - utxo_balance - external_out - fees - to_shielded */
-    int64_t spent_externally = (total_external_in + total_from_shielded)
-        - utxo_balance - total_external_out - total_fees - total_to_shielded;
-    if (spent_externally < 0) spent_externally = 0;
-
-    format_amount(spent_externally, s, sizeof(s));
-    json_push_kv_real(result, "spent_externally", strtod(s, NULL));
-
-    int64_t discrepancy = 0;  /* balanced by construction */
-    format_amount(discrepancy, s, sizeof(s));
-    json_push_kv_real(result, "discrepancy", strtod(s, NULL));
-    json_push_kv_bool(result, "balanced", discrepancy == 0);
+    json_push_kv_str(result, "accounting_scope", "loaded_wallet_transactions");
+    json_push_kv_str(result, "history_coverage",
+                     pending || missing_total ? "incomplete" : "unverified");
+    json_push_kv_int(result, "unresolved_inputs", missing_total);
+    accounting_push_null(result, "spent_externally");
+    accounting_push_null(result, "discrepancy");
+    accounting_push_null(result, "balanced");
 
     json_push_kv_int(result, "tx_count",
                      (int64_t)ctx->wallet->num_wallet_tx);
