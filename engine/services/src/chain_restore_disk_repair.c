@@ -682,6 +682,18 @@ static bool chain_restore_read_header_at_pos(
     return ok;
 }
 
+/* A descending walk can build skips only after reaching genesis. */
+static void chain_restore_finish_block_file_skips(struct active_chain *c,
+                                                   int tip_h, int populated)
+{
+    if (populated > 0 && populated - 1 == tip_h &&
+        !thread_registry_shutdown_requested()) {
+        zcl_mutex_lock(&c->write_lock);
+        chain_restore_rebuild_skip_from_genesis(c, tip_h);
+        zcl_mutex_unlock(&c->write_lock);
+    }
+}
+
 int chain_restore_rebuild_active_chain_from_block_files(
     struct main_state *ms,
     struct block_index *tip,
@@ -763,13 +775,7 @@ int chain_restore_rebuild_active_chain_from_block_files(
 
     if (child)
         child->pprev = NULL;
-    if (populated > 0 && populated - 1 == tip->nHeight &&
-        !thread_registry_shutdown_requested()) {
-        /* The descending walk cannot build skips until parents are linked. */
-        zcl_mutex_lock(&c->write_lock);
-        chain_restore_rebuild_skip_from_genesis(c, tip->nHeight);
-        zcl_mutex_unlock(&c->write_lock);
-    }
+    chain_restore_finish_block_file_skips(c, tip->nHeight, populated);
     chain_restore_close_block_file(cached);
     chain_restore_disk_pos_map_free(&pos_map);
     printf("[chain-restore] block-file ancestry rebuilt active chain: "
