@@ -10036,6 +10036,49 @@ static const struct {
       "names the one refusal counted", fbp_case_refusal_row },
 };
 
+static int test_push_receipt_accounting(void)
+{
+    int failures = 0;
+    const uint8_t ids[2][32] = {{1}, {2}};
+    struct board_push_receipt rc = { .code = FLEET_BOARD_PUSH_CODE_REVOKED, .n = 2 };
+    memcpy(rc.rec[0].id, ids[0], 32);
+    memcpy(rc.rec[1].id, ids[1], 32);
+    rc.rec[0].verdict = FLEET_BOARD_PUSH_RECORD_STORED;
+    rc.rec[1].verdict = FLEET_BOARD_PUSH_RECORD_HELD;
+    struct boot_fleet_board_fleet_counts before = fbp_now_counts(), after;
+    TEST("refused receipts count the code, not their record verdicts") {
+        board_push_receipt_seen(ids, 2, &rc);
+        after = fbp_now_counts();
+        ASSERT_EQ(after.push_receipt[FLEET_BOARD_PUSH_CODE_REVOKED],
+                  before.push_receipt[FLEET_BOARD_PUSH_CODE_REVOKED] + 1);
+        ASSERT_EQ(after.push_receipt_records[FLEET_BOARD_PUSH_RECORD_STORED],
+                  before.push_receipt_records[FLEET_BOARD_PUSH_RECORD_STORED]);
+        ASSERT_EQ(after.push_receipt_records[FLEET_BOARD_PUSH_RECORD_HELD],
+                  before.push_receipt_records[FLEET_BOARD_PUSH_RECORD_HELD]);
+        rc.code = FLEET_BOARD_PUSH_CODE_COMMITTED;
+        board_push_receipt_seen(ids, 2, &rc);
+        after = fbp_now_counts();
+        ASSERT_EQ(after.push_receipt[FLEET_BOARD_PUSH_CODE_COMMITTED],
+                  before.push_receipt[FLEET_BOARD_PUSH_CODE_COMMITTED] + 1);
+        ASSERT_EQ(after.push_receipt_records[FLEET_BOARD_PUSH_RECORD_STORED],
+                  before.push_receipt_records[FLEET_BOARD_PUSH_RECORD_STORED] + 1);
+        ASSERT_EQ(after.push_receipt_records[FLEET_BOARD_PUSH_RECORD_HELD],
+                  before.push_receipt_records[FLEET_BOARD_PUSH_RECORD_HELD] + 1);
+        rc.rec[1].id[31] ^= 1;
+        board_push_receipt_seen(ids, 2, &rc);
+        after = fbp_now_counts();
+        ASSERT_EQ(after.push_receipt[FLEET_BOARD_PUSH_CODE_COMMITTED],
+                  before.push_receipt[FLEET_BOARD_PUSH_CODE_COMMITTED] + 1);
+        ASSERT_EQ(after.push_receipt_records[FLEET_BOARD_PUSH_RECORD_HELD],
+                  before.push_receipt_records[FLEET_BOARD_PUSH_RECORD_HELD] + 1);
+        ASSERT_EQ(after.push_closed[MESH_STREAM_REFUSED_MALFORMED],
+                  before.push_closed[MESH_STREAM_REFUSED_MALFORMED] + 1);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
 /* Each case gets a fresh paired fixture. */
 static int test_fleet_board_push(unsigned c)
 {
@@ -15792,6 +15835,7 @@ int test_fleet_board(void)
         failures += test_fleet_board_delayed_authority(change);
     for (unsigned c = 0; c < 6; c++)
         failures += test_fleet_board_state_tag(c);
+    failures += test_push_receipt_accounting();
     for (unsigned c = 0; c < FBP_CASES; c++)
         failures += test_fleet_board_push(c);
     failures += test_fleet_board_fleet_cursor_resumes();

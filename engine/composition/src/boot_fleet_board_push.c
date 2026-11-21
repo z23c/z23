@@ -1255,12 +1255,12 @@ void board_push_stream_tick(struct mesh_stream *st, enum board_state_tag tag,
 
 /* A receipt the peer sent for this push: counted by code and, when it names
  * exactly the posts sent, by record. */
-static void push_receipt_seen(const struct board_push_out_state *s,
-                              const struct board_push_receipt *rc)
+void board_push_receipt_seen(const uint8_t ids[][32], uint8_t n,
+                             const struct board_push_receipt *rc)
 {
-    bool matches = rc->n == 0 || rc->n == s->n;
+    bool matches = rc->n == 0 || rc->n == n;
     for (unsigned i = 0; matches && i < rc->n; i++)
-        matches = memcmp(rc->rec[i].id, s->ids[i], 32) == 0;
+        matches = memcmp(rc->rec[i].id, ids[i], 32) == 0;
     uint64_t skipped = 0;
     if (!matches) {
         push_bump(&g_closed[MESH_STREAM_REFUSED_MALFORMED], 1);
@@ -1273,7 +1273,8 @@ static void push_receipt_seen(const struct board_push_out_state *s,
     push_bump(&g_receipt[rc->code], 1);
     bool clean = rc->code == FLEET_BOARD_PUSH_CODE_COMMITTED;
     for (unsigned i = 0; i < rc->n; i++) {
-        push_bump(&g_receipt_records[rc->rec[i].verdict], 1);
+        if (rc->code == FLEET_BOARD_PUSH_CODE_COMMITTED)
+            push_bump(&g_receipt_records[rc->rec[i].verdict], 1);
         clean = clean && rc->rec[i].verdict <= FLEET_BOARD_PUSH_RECORD_HELD;
     }
     if (!clean && push_log_due(PUSH_LOG_RECEIPT, &skipped))
@@ -1293,7 +1294,7 @@ static void push_out_closed(struct mesh_stream *st,
     s->self_closed = true;
     struct board_push_receipt rc;
     if (board_push_receipt_decode(payload, len, &rc)) {
-        push_receipt_seen(s, &rc);
+        board_push_receipt_seen(s->ids, s->n, &rc);
         return;
     }
     if (reason == MESH_STREAM_REFUSED_MALFORMED && len == 0) {

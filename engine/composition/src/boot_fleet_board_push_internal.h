@@ -66,6 +66,10 @@ void board_push_state_free(void *state);
  * second. */
 void board_push_lane_tick(struct boot_svc_ctx *svc, struct node_db *store,
                           int64_t now);
+struct board_push_receipt;
+/* Count a decoded receipt only for the post IDs actually sent. */
+void board_push_receipt_seen(const uint8_t ids[][32], uint8_t n,
+                             const struct board_push_receipt *receipt);
 /* Fill the push fields of the lane's counters. */
 void board_push_counts(struct boot_fleet_board_fleet_counts *out);
 /* The token a skip reason and a push code are logged and reported as. */
