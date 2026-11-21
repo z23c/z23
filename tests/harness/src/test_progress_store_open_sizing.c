@@ -38,11 +38,12 @@ extern void progress_store_folding_mmap_clamps(enum hw_profile_ram_class cls,
 
 /* Pin one class's selector output against the documented (floor, ceil)
  * literals. Pure: the input is the enum, so this holds on any host. */
-static void po_pin_clamps(int *failures, enum hw_profile_ram_class cls,
-                          const char *name, int64_t want_cache_floor,
-                          int64_t want_cache_ceil, int64_t want_mmap_floor,
-                          int64_t want_mmap_ceil)
+static int po_pin_clamps(enum hw_profile_ram_class cls,
+                         const char *name, int64_t want_cache_floor,
+                         int64_t want_cache_ceil, int64_t want_mmap_floor,
+                         int64_t want_mmap_ceil)
 {
+    int failures = 0;
     int64_t cache_floor, cache_ceil, mmap_floor, mmap_ceil;
     progress_store_folding_cache_clamps(cls, &cache_floor, &cache_ceil);
     progress_store_folding_mmap_clamps(cls, &mmap_floor, &mmap_ceil);
@@ -63,6 +64,7 @@ static void po_pin_clamps(int *failures, enum hw_profile_ram_class cls,
              "%s: mmap floor <= ceiling (ceiling<floor coercion cannot fire)",
              name);
     PO_CHECK(label, mmap_floor <= mmap_ceil);
+    return failures;
 }
 
 static int64_t po_pragma(sqlite3 *db, const char *sql)
@@ -110,13 +112,13 @@ int test_progress_store_open_sizing(void)
     /* Per-class folding ceilings: every class's documented pair pinned via
      * the pure selector, HIGH against the legacy canonical literals so a
      * class-table regression goes red even on a HIGH-RAM host. */
-    po_pin_clamps(&failures, HW_PROFILE_RAM_LOW, "LOW",
+    failures += po_pin_clamps(HW_PROFILE_RAM_LOW, "LOW",
                   16 * 1024, 64 * 1024,
                   64LL * 1024 * 1024, 128LL * 1024 * 1024);
-    po_pin_clamps(&failures, HW_PROFILE_RAM_MEDIUM, "MEDIUM",
+    failures += po_pin_clamps(HW_PROFILE_RAM_MEDIUM, "MEDIUM",
                   32 * 1024, 128 * 1024,
                   128LL * 1024 * 1024, 256LL * 1024 * 1024);
-    po_pin_clamps(&failures, HW_PROFILE_RAM_HIGH, "HIGH",
+    failures += po_pin_clamps(HW_PROFILE_RAM_HIGH, "HIGH",
                   64 * 1024, 256 * 1024,
                   256LL * 1024 * 1024, 512LL * 1024 * 1024);
 
