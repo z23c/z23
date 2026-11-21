@@ -24,7 +24,9 @@
  * failed_runs_named / failed_runs_unnamed, where a failed run is named only
  * from retained suite observations bound to its unique scheduler unit.
  * These observations can be incomplete and do not establish what caused the
- * job's final exit. Legacy or ambiguous identities remain unnamed.
+ * job's final exit. Legacy or ambiguous identities remain unnamed. Failed
+ * groups also record successful t-fast-exact jobs as later-pass evidence;
+ * diagnostic and substring-selected runs do not resolve a failure.
  * cold_t_fast_* counts t-fast and agent-verify runs with cpu_s above 600
  * (cold builds), their run_s total and how many ran without a -j token;
  * warm_t_fast_n counts the rest. */
@@ -41,6 +43,7 @@
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
@@ -312,18 +315,24 @@ static void fac_inc(int64_t *v)
         (*v)++;
 }
 
-static bool fac_has_token(const char *cmd, const char *target)
+static bool fac_span_has_token(const char *cmd, const char *limit,
+                               const char *target)
 {
     size_t n = strlen(target);
-    while (*cmd) {
-        while (*cmd == ' ' || *cmd == '\t') cmd++;
+    while (cmd < limit) {
+        while (cmd < limit && (*cmd == ' ' || *cmd == '\t')) cmd++;
         const char *end = cmd;
-        while (*end && *end != ' ' && *end != '\t') end++;
+        while (end < limit && *end != ' ' && *end != '\t') end++;
         if ((size_t)(end - cmd) == n && memcmp(cmd, target, n) == 0)
             return true;
         cmd = end;
     }
     return false;
+}
+
+static bool fac_has_token(const char *cmd, const char *target)
+{
+    return fac_span_has_token(cmd, cmd + strlen(cmd), target);
 }
 
 static int fac_classify(const char *cmd)
@@ -936,6 +945,7 @@ struct fac_name {
     char key[FAC_NAME];
     int64_t n;
     int64_t last_ended;
+    int64_t last_passed;
 };
 
 struct fac_verdict {
@@ -973,6 +983,90 @@ static void fac_verdict_note(struct fac_verdict *v, const char *name,
     v->names[v->nn].n = 1;
     v->names[v->nn].last_ended = ended_unix;
     v->nn++;
+}
+
+static bool fac_group_selector(const char *group, size_t n,
+                               char selector[FAC_NAME])
+{
+    if (n == 0 || n >= FAC_NAME)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (!isalnum((unsigned char)group[i]) && group[i] != '_')
+            return false;
+    (void)snprintf(selector, FAC_NAME, "%.*s", (int)n, group);
+    return true;
+}
+
+static bool fac_span_contains(const char *cmd, const char *limit,
+                              const char *needle)
+{
+    size_t n = strlen(needle);
+    for (; (size_t)(limit - cmd) >= n; cmd++)
+        if (memcmp(cmd, needle, n) == 0)
+            return true;
+    return false;
+}
+
+static bool fac_job_command(const struct fac_job *jb, const char **cmd,
+                            const char **limit)
+{
+    if (!jb->key)
+        return false;
+    const char *sep = strchr(jb->key, '\x1f');
+    if (!sep)
+        return false;
+    *cmd = sep + 1;
+    *limit = strchr(*cmd, '\x1f');
+    if (!*limit)
+        *limit = *cmd + strlen(*cmd);
+    return true;
+}
+
+static bool fac_exact_pass(const struct fac_job *jb, char selector[FAC_NAME])
+{
+    const char *cmd, *limit;
+    if (jb->rc != 0 || !fac_job_command(jb, &cmd, &limit))
+        return false;
+    if (fac_span_contains(cmd, limit, "--diagnostic-once") ||
+        !fac_span_has_token(cmd, limit, "t-fast-exact"))
+        return false;
+    while (cmd < limit) {
+        while (cmd < limit && (*cmd == ' ' || *cmd == '\t')) cmd++;
+        const char *token = cmd;
+        while (cmd < limit && *cmd != ' ' && *cmd != '\t') cmd++;
+        size_t n = (size_t)(cmd - token);
+        if (n > 5 && strncmp(token, "ONLY=", 5) == 0)
+            return fac_group_selector(token + 5, n - 5, selector);
+    }
+    return false;
+}
+
+static bool fac_selector_match(const char *selector, const char *name)
+{
+    static const char *const prefixes[] = {"", "test_", "spec_"};
+    char candidate[FAC_NAME];
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        int n = snprintf(candidate, sizeof(candidate), "%s%s", prefixes[i],
+                         selector);
+        if (n > 0 && (size_t)n < sizeof(candidate) &&
+            strcmp(candidate, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void fac_pass_note(struct fac_verdict *v, const char *selector,
+                          double ended)
+{
+    int64_t ended_unix = fac_verdict_time(ended);
+    size_t found = 0, matches = 0;
+    for (size_t i = 0; i < v->nn; i++)
+        if (fac_selector_match(selector, v->names[i].key)) {
+            found = i;
+            matches++;
+        }
+    if (matches == 1 && ended_unix > v->names[found].last_passed)
+        v->names[found].last_passed = ended_unix;
 }
 
 #if !defined(_WIN32)
@@ -1197,6 +1291,11 @@ static void fac_failed_section(struct fac_jobs *j, struct json_value *out)
         return;
     for (size_t i = 0; i < j->n; i++)
         fac_verdict_job(j, &j->v[i], v);
+    for (size_t i = 0; i < j->n; i++) {
+        char name[FAC_NAME];
+        if (fac_exact_pass(&j->v[i], name))
+            fac_pass_note(v, name, j->v[i].ended);
+    }
     (void)json_push_kv_int(out, "failed_runs_named", v->named);
     (void)json_push_kv_int(out, "failed_runs_unnamed", v->unnamed);
     fac_verdict_coverage(v, out);
@@ -1211,6 +1310,11 @@ static void fac_failed_section(struct fac_jobs *j, struct json_value *out)
         (void)json_push_kv_int(&row, "n", v->names[i].n);
         (void)json_push_kv_int(&row, "last_ended_unix",
                                v->names[i].last_ended);
+        (void)json_push_kv_int(&row, "last_passed_unix",
+                               v->names[i].last_passed);
+        (void)json_push_kv_bool(&row, "passed_after_failure",
+                                v->names[i].last_ended > 0 &&
+                                v->names[i].last_passed > v->names[i].last_ended);
         (void)json_push_back(&names, &row);
         json_free(&row);
     }

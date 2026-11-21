@@ -361,8 +361,9 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
 {
     int failures = 0;
     struct dfx_call c;
-    TEST("factory: failed group recency uses the newest valid timestamp") {
+    TEST("factory: failed group recency and exact pass evidence") {
         char wt[700], root[700], dir[800], path[900], jobs_recency[700];
+        char cwd_diag[700], cwd_target[700];
         char text[4096], newest[32], older[32];
         const char *units[] = {"devbuild-100-1.scope", "devbuild-100-2.scope",
                                "devbuild-100-3.scope", "devbuild-100-4.scope"};
@@ -370,15 +371,19 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
                                 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                                 "ffffffffffffffffffffffffffffffff",
                                 "00000000000000000000000000000000"};
-        const char *groups[] = {"[\"shared\"]", "[\"shared\",\"other\"]",
-                                "[\"shared\",\"missing\"]",
-                                "[\"shared\",\"overflow\"]"};
+        const char *groups[] = {"[\"test_shared\"]",
+                                "[\"test_shared\",\"test_other\",\"spec_wallet_dashboard\",\"test_test_fdt\"]",
+                                "[\"test_shared\",\"test_missing\"]",
+                                "[\"test_shared\",\"test_overflow\"]"};
+        const int verdict_counts[] = {1, 4, 2, 2};
         (void)snprintf(wt, sizeof(wt), "%s/wt_recency", base);
+        (void)snprintf(cwd_diag, sizeof(cwd_diag), "%s/cwd --diagnostic-once", wt);
+        (void)snprintf(cwd_target, sizeof(cwd_target), "%s/cwd t-fast-exact", wt);
         (void)snprintf(root, sizeof(root), "%s/recency-verdicts", base);
         (void)snprintf(jobs_recency, sizeof(jobs_recency), "%s/jobs_recency.jsonl",
                        base);
-        (void)snprintf(newest, sizeof(newest), "%ld", now);
-        (void)snprintf(older, sizeof(older), "%ld", now - 20);
+        (void)snprintf(newest, sizeof(newest), "%ld", now - 20);
+        (void)snprintf(older, sizeof(older), "%ld", now - 40);
         const char *ended[] = {newest, older, NULL, "1e100"};
         FILE *fp = fopen(jobs_recency, "w");
         ASSERT(fp != NULL);
@@ -387,8 +392,8 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
             dfx_mkdirs(dir);
             (void)snprintf(path, sizeof(path), "%s/%s.json", dir, suites[i]);
             (void)snprintf(text, sizeof(text),
-                "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"%s\",\"suite\":\"%s\",\"groups_total\":2,\"groups_ran\":%d,\"groups_cached\":0,\"groups_failed\":%d,\"failed_groups_truncated\":false,\"failed_groups\":%s}\n",
-                units[i], suites[i], i == 0 ? 1 : 2, i == 0 ? 1 : 2,
+                "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"%s\",\"suite\":\"%s\",\"groups_total\":4,\"groups_ran\":%d,\"groups_cached\":0,\"groups_failed\":%d,\"failed_groups_truncated\":false,\"failed_groups\":%s}\n",
+                units[i], suites[i], verdict_counts[i], verdict_counts[i],
                 groups[i]);
             dfx_write(path, text);
             ASSERT(chmod(path, 0600) == 0);
@@ -399,22 +404,56 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
             ASSERT(n > 0 && (size_t)n < sizeof(text));
             ASSERT(fputs(text, fp) >= 0);
         }
+        dfx_job_line(text, sizeof(text), "z23", now - 15, now - 14, now - 10,
+                     1, 4, 1, 0, "p1", "make t-fast-exact ONLY=shared",
+                     cwd_diag);
+        ASSERT(fputs(text, fp) >= 0);
+        dfx_job_line(text, sizeof(text), "z23", now - 55, now - 54, now - 50,
+                     1, 4, 1, 0, "p2", "make t-fast-exact ONLY=other", wt);
+        ASSERT(fputs(text, fp) >= 0);
+        dfx_job_line(text, sizeof(text), "z23", now - 15, now - 14, now - 10,
+                     1, 4, 1, 0, "p3", "make t-fast-exact ONLY=test_missing", wt);
+        ASSERT(fputs(text, fp) >= 0);
+        dfx_job_line(text, sizeof(text), "z23", now - 15, now - 14, now - 10,
+                     1, 4, 1, 0, "p4",
+                     "make t-fast-exact ONLY=overflow T_FAST_EXACT_ARGS=--diagnostic-once", wt);
+        ASSERT(fputs(text, fp) >= 0);
+        dfx_job_line(text, sizeof(text), "z23", now - 15, now - 14, now - 10,
+                     1, 4, 1, 0, "p5", "make t-fast ONLY=overflow",
+                     cwd_target);
+        ASSERT(fputs(text, fp) >= 0);
+        dfx_job_line(text, sizeof(text), "z23", now - 15, now - 14, now - 10,
+                     1, 4, 1, 0, "p6",
+                     "make t-fast-exact ONLY=spec_wallet_dashboard", wt);
+        ASSERT(fputs(text, fp) >= 0);
+        dfx_job_line(text, sizeof(text), "z23", now - 15, now - 14, now - 10,
+                     1, 4, 1, 0, "p7", "make t-fast-exact ONLY=test_fdt", wt);
+        ASSERT(fputs(text, fp) >= 0);
         ASSERT(fclose(fp) == 0);
         (void)setenv("ZCL_DEV_FACTORY_VERDICTS", root, 1);
         (void)setenv("ZCL_DEV_FACTORY_JOBS", jobs_recency, 1);
         dfx_run(&c, 48);
         ASSERT(dfx_ok(&c));
         const struct json_value *rows = dfx_at(&c, "jobs.failed_groups");
-        const char *names[] = {"shared", "missing", "other", "overflow"};
-        const int64_t counts[] = {4, 1, 1, 1};
-        const int64_t ends[] = {now, 0, now - 20, 0};
-        ASSERT_EQ((int)json_size(rows), 4);
-        for (size_t i = 0; i < 4; i++) {
+        const char *names[] = {"test_shared", "spec_wallet_dashboard",
+                               "test_missing", "test_other", "test_overflow",
+                               "test_test_fdt"};
+        const int64_t counts[] = {4, 1, 1, 1, 1, 1};
+        const int64_t ends[] = {now - 20, now - 40, 0, now - 40, 0, now - 40};
+        const int64_t passes[] = {now - 10, now - 10, now - 10, now - 50, 0,
+                                  now - 10};
+        const bool passed_after[] = {true, true, false, false, false, true};
+        ASSERT_EQ((int)json_size(rows), 6);
+        for (size_t i = 0; i < 6; i++) {
             const struct json_value *row = json_at(rows, i);
             ASSERT_STR_EQ(json_get_str(json_get(row, "group")), names[i]);
             ASSERT_EQ(json_get_int(json_get(row, "n")), counts[i]);
             ASSERT(json_get(row, "last_ended_unix") != NULL);
             ASSERT_EQ(json_get_int(json_get(row, "last_ended_unix")), ends[i]);
+            ASSERT_EQ(json_get_int(json_get(row, "last_passed_unix")), passes[i]);
+            ASSERT(json_get(row, "passed_after_failure") != NULL);
+            ASSERT(json_get_bool(json_get(row, "passed_after_failure")) ==
+                   passed_after[i]);
         }
         dfx_end(&c);
         (void)unsetenv("ZCL_DEV_FACTORY_VERDICTS");
