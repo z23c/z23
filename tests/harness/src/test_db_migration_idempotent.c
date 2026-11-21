@@ -1680,40 +1680,46 @@ static bool db_mig_v29_replace(char *out, size_t n, const char *src,
     return w >= 0 && (size_t)w < n;
 }
 
+static int db_mig_stop_at_v30(void *ctx, int action, const char *name,
+                              const char *column, const char *db, const char *trigger)
+{
+    (void)column; (void)db; (void)trigger;
+    bool *stopped = ctx;
+    if (action == SQLITE_CREATE_TABLE && name && strcmp(name, "zanc_anchors") == 0)
+        *stopped = true;
+    return *stopped && action != SQLITE_TRANSACTION ? SQLITE_DENY : SQLITE_OK;
+}
+
 static bool db_mig_v29_seed(const char *dbpath, const char *prologue,
                             const char *table_sql)
 {
-    struct node_db seed;
-    if (!node_db_open(&seed, dbpath))
+    struct node_db seed = {0};
+    if (!db_mig_open_raw_handle(&seed, dbpath))
         return false;
-    node_db_close(&seed);
-
-    sqlite3 *raw = NULL;
-    if (sqlite3_open(dbpath, &raw) != SQLITE_OK) {
-        sqlite3_close(raw);
-        return false;
-    }
-    bool ok = db_mig_exec_raw(raw,
-                  "DELETE FROM schema_migrations WHERE version='029'") &&
-              db_mig_exec_raw(raw, prologue) &&
-              (!table_sql || db_mig_exec_raw(raw, table_sql)) &&
-              db_mig_stamp_schema(raw, 28);
-    sqlite3_close(raw);
+    bool stopped = false;
+    sqlite3 *raw = seed.db;
+    bool ok = create_schema(&seed) &&
+              sqlite3_set_authorizer(raw, db_mig_stop_at_v30, &stopped) == SQLITE_OK &&
+              node_db_migrate(&seed, NULL) < 0 && stopped;
+    sqlite3_set_authorizer(raw, NULL, NULL);
+    ok = ok && node_db_schema_version(&seed) == 29 &&
+         db_mig_count(raw, "SELECT count(*) FROM schema_migrations WHERE version='029'") == 1 &&
+         db_mig_count(raw, "SELECT count(*) FROM schema_migrations WHERE version>='030'") == 0 &&
+         db_mig_exec_raw(raw, "DELETE FROM schema_migrations WHERE version='029'") &&
+         db_mig_exec_raw(raw, prologue) &&
+         (!table_sql || db_mig_exec_raw(raw, table_sql)) &&
+         db_mig_stamp_schema(raw, 28);
+    db_mig_close_raw_handle(&seed);
     return ok;
 }
 
 static bool db_mig_v29_outcome(const char *dbpath, int *opened, int *stamp)
 {
-    /* node_db_open() would refuse this seed before running any migration
-     * (open preflight: schema_version 28 contradicts the 030..087 rows in
-     * the migration ledger, SCHEMA_VERSION_UNKNOWN), so the v29 step would
-     * never execute and the stamp count would always be 0. Drive
-     * node_db_migrate() on a raw handle instead, as the other stamped-back
-     * cases in this file do; a negative return is the open refusal. */
     struct node_db ndb;
     if (!db_mig_open_raw_handle(&ndb, dbpath))
         return false;
-    *opened = node_db_migrate(&ndb, NULL) >= 0 ? 1 : 0;
+    *opened = node_db_migrate(&ndb, NULL) >= 0 &&
+              node_db_schema_version(&ndb) == NODE_DB_SCHEMA_LATEST;
     db_mig_close_raw_handle(&ndb);
 
     sqlite3 *raw = NULL;
@@ -1811,15 +1817,8 @@ static int t_v29_schema_match_table(void)
     return failures;
 }
 
-/* Incompatible app_events table, driven through the v29 migration on a raw
- * handle. Opening with node_db_open() would not reach the schema check: its
- * preflight refuses the seed first (schema_version 28 contradicts the 030..087
- * ledger rows, database_schema_preflight.c:346), so the stamp would be absent
- * whatever the schema. Here only the table's kind column type differs, so the
- * v29 index DDL still runs and migration_schema_object_matches() refuses the
- * table (database_migrate_features.c:69-160); the transaction then rolls back
- * before the '029' stamp is inserted. node_db_migrate() still returns the
- * applied count for this path, so the refusal is observed through the stamp. */
+/* A kind-column type mismatch must preserve the incompatible table and
+ * leave its v29 ledger entry absent. */
 static int t_v29_incompatible_schema_fails_without_stamp(void)
 {
     int failures = 0;
