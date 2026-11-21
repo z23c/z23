@@ -344,9 +344,7 @@ static void push_queue_put(const struct push_queued *q)
         push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
 }
 
-/* A post that carried a hint and is not offered to the queue is counted
- * once, under its hint verdict; only an unhinted one moves a skip counter
- * at enqueue. */
+/* A hinted post kept out of the queue is counted once, by its hint. */
 static void push_skip_unhinted(enum fleet_board_push_hint hint,
                                enum fleet_board_push_skip why)
 {
@@ -632,14 +630,10 @@ static int push_match(struct push_round *r, const uint8_t to[32],
     return PUSH_OK;
 }
 
-/* The answering half's own disclosure decision for the Noise key `lead`
- * leads (board_push_disclosure: the function, row and clock a pull from that
- * peer on that session is judged by, nothing recorded as a pull). Where the
- * pull would refuse, the post is not pushed and the refusal is counted as a
- * push judgment; where the pull's row proves another board key than `to`,
- * `to` does not resolve to this peer. Then the link: connected, under its
- * send budget, not an older node this session, and no push to it already
- * open. */
+/* The pull's own disclosure decision for `lead`'s Noise key
+ * (board_push_disclosure), counted as a push judgment when it refuses; its
+ * row must prove `to`. Then the link: connected, under its send budget, not
+ * an older node this session, and no push to it already open. */
 static int push_peer_judge(const struct push_round *r,
                            const struct push_peer *lead, const uint8_t to[32])
 {
@@ -1006,17 +1000,10 @@ struct push_authors {
     size_t n;
 };
 
-/* The pusher's standing now and the board keys it proves
- * (board_push_pusher_keys): every pairing row for its Noise key that grants
- * the status capability now, newest first, whose delegation resolves and is
- * current on that Noise static and whose key the roster admits. Those are
- * the checks this box's asking half (board_peer_due) makes on any row before
- * it pulls from that peer and stores what it answers, so a pusher is
- * accepted only where this box would pull from it, and a pushed record must
- * also be signed by a key those rows prove, which a pulled page is not
- * asked. The read role is not asked: it governs what this box discloses,
- * and a push discloses nothing. A failure is counted as a push judgment,
- * never as a pull. */
+/* The pusher's standing now and the board keys it proves: the checks this
+ * box's asking half makes on any row before it pulls from that peer
+ * (board_push_pusher_keys; config/boot_fleet_board.h, PUSH). A failure is
+ * counted as a push judgment, never as a pull. */
 static bool push_pusher_standing(const uint8_t peer_static[32],
                                  struct push_authors *authors)
 {
