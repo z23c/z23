@@ -569,7 +569,7 @@ static int bp_node_db_guidance(const char *captured, const char *display_dir)
              strstr(captured, "systemctl --user restart") == NULL);
     BP_CHECK("node_db_unopened: datadir is evidence, not shell input",
              strstr(captured, display_dir) != NULL &&
-             strstr(captured, "bootstatus -datadir=/tmp/z23") == NULL);
+             strstr(captured, "bootstatus -datadir=/fixture/z23") == NULL);
     return failures;
 }
 
@@ -590,7 +590,7 @@ static int bp_node_db_gate_refuses(void)
 
     bp_park_fixture_begin(dir, sizeof(dir), false);
     boot_step_enter("db.open_migrate");
-    const char *display_dir = "/tmp/z23 path;$(echo not-a-command)";
+    const char *display_dir = "/fixture/z23 path;$(echo not-a-command)";
     bool captured_ok = bp_capture_gate(display_dir, captured, sizeof(captured),
                                        &gate_rc);
     bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
