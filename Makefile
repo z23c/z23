@@ -17750,6 +17750,7 @@ LINT_GATES := \
 # (a nested make inside the gate itself is the 2026-09-06 unlink/write race
 # and destabilizes the sibling gates sharing the generation worktree).
 LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
+	$(BIN_DIR)/land-preflight \
 	$(BIN_DIR)/service-args \
 	$(BIN_DIR)/sovereign-source-identity-selftest \
 	$(BIN_DIR)/check_no_hardlink_seeding \
