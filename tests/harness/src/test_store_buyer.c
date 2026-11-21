@@ -1328,6 +1328,57 @@ static int tsb_unknown_ids_are_named(const char *datadir,
     return 0;
 }
 
+static bool tsb_purchase_unique_controls(struct node_db *db)
+{
+    struct db_store_purchase p = {0}, found;
+    p.order_id = 17;
+    p.product_id = 1;
+    p.amount_zatoshi = 1;
+    snprintf(p.payment_addr, sizeof(p.payment_addr), "address");
+    snprintf(p.memo, sizeof(p.memo), "memo");
+    snprintf(p.seller_onion, sizeof(p.seller_onion), "seller-a");
+    bool ok = db_store_purchase_save(db, &p) && p.id > 0;
+    int64_t first = p.id;
+    p.id = 0;
+    ok = ok && !db_store_purchase_save(db, &p) && p.id == 0;
+    snprintf(p.seller_onion, sizeof(p.seller_onion), "seller-b");
+    ok = ok && db_store_purchase_save(db, &p) && p.id > 0 && p.id != first;
+    ok = ok && db_store_purchase_find_by_order_seller(db, "seller-b", 17, &found)
+        && found.id == p.id;
+    return ok;
+}
+
+static bool tsb_purchase_unique_guard(void)
+{
+    char dir[512];
+    struct node_db db;
+    struct db_store_purchase p = {0}, found;
+    tsb_tmpdir(dir, sizeof(dir), "unique-guard");
+    if (!tsb_open(dir, &db))
+        return false;
+    bool ok = tsb_purchase_unique_controls(&db);
+    snprintf(p.payment_addr, sizeof(p.payment_addr), "address");
+    snprintf(p.memo, sizeof(p.memo), "memo");
+    snprintf(p.seller_onion, sizeof(p.seller_onion), "seller-b");
+    p.product_id = 1;
+    p.amount_zatoshi = 1;
+    ok = ok && sqlite3_exec(db.db, "DROP INDEX idx_store_purchases_order", NULL, NULL, NULL) == SQLITE_OK;
+    p.id = 0;
+    p.order_id = 18;
+    bool missing_ok = !db_store_purchase_save(&db, &p) && p.id == 0;
+    missing_ok = !db_store_purchase_find_by_order_seller(&db, "seller-b", 18, &found) && missing_ok;
+    bool inserted = sqlite3_exec(db.db,
+        "INSERT INTO store_purchases(order_id,product_id,payment_addr,memo,amount_zatoshi,stage,created_at,updated_at,seller_onion) VALUES(17,1,'address','memo',1,0,1,1,'seller-a')",
+        NULL, NULL, NULL) == SQLITE_OK;
+    memset(&found, 0x55, sizeof(found));
+    bool ambiguous_ok = !db_store_purchase_find_by_order_seller(&db, "seller-a", 17, &found)
+        && found.id == 0;
+    ok = ok && missing_ok && inserted && ambiguous_ok;
+    node_db_close(&db);
+    return fixture_rm_ok(dir) && ok;
+}
+
+
 int test_store_buyer(void)
 {
     int failures = 0;
@@ -1344,6 +1395,7 @@ int test_store_buyer(void)
     (void)snprintf(out_path, sizeof(out_path), "%s/bought.bin", datadir);
     (void)snprintf(part_path, sizeof(part_path), "%s.part", out_path);
 
+    failures += tsb_report("purchase uniqueness fails closed", tsb_purchase_unique_guard());
     failures += tsb_zaddr_prefix_follows_chain();
 
     if (!tsb_wire_merchant()) {

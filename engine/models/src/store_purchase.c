@@ -9,6 +9,7 @@
 #include "util/log_macros.h"
 #include "models/store_purchase.h"
 #include "models/model_text.h"
+#include "util/ar_step_readonly.h"
 #include <string.h>
 #include <time.h>
 
@@ -164,12 +165,22 @@ bool db_store_purchase_save(struct node_db *ndb, struct db_store_purchase *p)
             "customer_addr,memo,amount_zatoshi,content_hash,output_path,"
             "operation_id,stage,last_error,updated_at,seller_onion,"
             "created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(seller_onion,order_id) DO NOTHING RETURNING id");
         store_purchase_bind_common(s, p);
         AR_BIND_INT(s, 16, p->created_at);
-        AR_FINALIZE_STEP_DONE(s, ok);
+        int64_t id = 0;
+        if (ar_step_checked(s, "store purchase insert", NULL) == ZCL_STEP_ROW &&
+            sqlite3_column_type(s, 0) == SQLITE_INTEGER) {
+            id = sqlite3_column_int64(s, 0);
+            ok = id > 0 && ar_step_checked(s, "store purchase insert", NULL)
+                == ZCL_STEP_DONE;
+        }
+        if (sqlite3_finalize(s) != SQLITE_OK)
+            ok = false;
+        s = NULL;
         if (ok)
-            p->id = sqlite3_last_insert_rowid(ndb->db);
+            p->id = id;
     }
     if (!ok)
         LOG_WARN("model", "store_purchase save failed: %s",
@@ -255,8 +266,13 @@ bool db_store_purchase_find_by_order_seller(struct node_db *ndb,
         return false;
     }
     store_purchase_read_row(s, out);
-    AR_FINALIZE(s);
-    return true;
+    bool unique = ar_step_checked(s, "store purchase lookup", NULL)
+        == ZCL_STEP_DONE;
+    if (sqlite3_finalize(s) != SQLITE_OK)
+        unique = false;
+    if (!unique)
+        memset(out, 0, sizeof(*out));
+    return unique;
 }
 
 bool db_store_purchase_find_by_order(struct node_db *ndb, int64_t order_id,
