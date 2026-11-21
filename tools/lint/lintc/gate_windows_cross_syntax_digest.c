@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,6 +91,7 @@ int wcs_sha_file(const char *path, char out[WCS_SHA])
 enum { DG_MAX = 16384, DG_INCL = 512 };
 static char dg_paths[DG_MAX][WCS_PATH];
 static int dg_n;
+static char dg_root[PATH_MAX];
 
 static int dg_ext_ok(const char *p)
 {
@@ -107,16 +109,41 @@ static const char *const dg_pruned[] = { ".git", "build", "test-tmp",
     ".claude", ".cache", "vendor/tor", NULL };
 
 
+/* A target outside the scanned tree, or under a pruned subtree, may include
+ * dependencies the digest cannot see. Disable caching for that traversal. */
+static bool dg_symlink_in_scope(const char *path)
+{
+    char target[PATH_MAX];
+    if (!realpath(path, target)) return false;
+    size_t n = strlen(dg_root);
+    if (strncmp(target, dg_root, n) != 0 ||
+        (n > 1 && target[n] != '/')) return false;
+    const char *rel = target + n;
+    if (n == 1 && dg_root[0] == '/') rel = target + 1;
+    else rel++;
+    if (lint_path_is_excluded(rel)) return false;
+    for (size_t i = 0; dg_pruned[i]; i++) {
+        size_t len = strlen(dg_pruned[i]);
+        if (strncmp(rel, dg_pruned[i], len) == 0 &&
+            (rel[len] == '/' || rel[len] == '\0')) return false;
+    }
+    return true;
+}
+
+
 /* Manual recursion keeps pruning portable; only vanished entries are skipped. */
 static int dg_scan(const char *dir, int depth);
 
 static int dg_entry(const char *p, int depth)
 {
     struct stat st;
+    const char *rel = p[0] == '.' && p[1] == '/' ? p + 2 : p;
+    if (wcs_name_in(rel, dg_pruned)) return 0;
     if (lstat(p, &st) != 0) return errno == ENOENT ? 0 : -1;
-    if (S_ISDIR(st.st_mode)) {
-        const char *rel = p[0] == '.' && p[1] == '/' ? p + 2 : p;
-        return wcs_name_in(rel, dg_pruned) ? 0 : dg_scan(p, depth + 1);
+    if (S_ISLNK(st.st_mode)) {
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || !dg_symlink_in_scope(p)) return -1;
+    } else if (S_ISDIR(st.st_mode)) {
+        return dg_scan(p, depth + 1);
     }
     if (S_ISREG(st.st_mode) && dg_ext_ok(p)) {
         if (dg_n >= DG_MAX) {
@@ -302,14 +329,20 @@ static int dg_digest_ordered(const int *ord, int nord, char out[WCS_SHA])
     return 0;
 }
 
+static bool dg_collect(const char *root)
+{
+    dg_n = 0;
+    return realpath(root, dg_root) && dg_scan(root, 0) == 0 && dg_n > 0;
+}
+
+
 int wcs_include_digest(const char *root, char out[WCS_SHA])
 {
     static char incl[DG_INCL][256];
     static int ord[DG_MAX];
     static char keep[DG_MAX];
     int nincl = 0;
-    dg_n = 0;
-    if (dg_scan(root, 0) != 0 || dg_n == 0)
+    if (!dg_collect(root))
         return -1;
     for (int i = 0; i < dg_n; i++)
         if (dg_bad_path(dg_paths[i])) return -1;

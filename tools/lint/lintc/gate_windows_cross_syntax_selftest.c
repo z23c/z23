@@ -363,6 +363,49 @@ static int cps_edits(const char *base, const char *root, const char *srclist,
 }
 
 /* (1)-(6) over the synthetic tree; helper keeps the caller small. */
+static int cache_symlink_fallback(const char *base, const char *root,
+                                  const char *srclist, const char *stub,
+                                  const char *flags, const char *name,
+                                  const char *target)
+{
+    char link[SFP], miss[SFP];
+    if (sjoin(link, sizeof link, root, name) ||
+        sjoin(miss, sizeof miss, base, "/miss.txt") || symlink(target, link) != 0) return 2;
+    int result = sweep_once(base, stub, root, flags, srclist, 0);
+    bool safe = result == 0 && !wcs_cache_on() && count_lines(miss) == 16;
+    if (unlink(link) != 0 || !safe) return sf_fail("unsafe symlink did not fall back to uncached compilation");
+    return 0;
+}
+
+static int cache_symlink_directory(const char *base, const char *root,
+                                   const char *srclist, const char *stub,
+                                   const char *flags)
+{
+    int rc = cache_symlink_fallback(base, root, srclist, stub, flags, "/alias", ".");
+    return rc ? rc : cache_symlink_fallback(base, root, srclist, stub, flags, "/external.h", flags);
+}
+
+
+static int cache_symlink_test(const char *base, const char *root,
+                              const char *srclist, const char *stub,
+                              const char *flags)
+{
+    char one[SFP], two[SFP], link[SFP], src[SFP];
+    if (sjoin(one, sizeof one, root, "/src/one.h") ||
+        sjoin(two, sizeof two, root, "/src/two.h") ||
+        sjoin(link, sizeof link, root, "/src/choice.h") ||
+        sjoin(src, sizeof src, root, "/src/u0.c")) return 2;
+    if (csr_write(one, "#define CHOICE 1\n") || csr_write(two, "#define CHOICE 2\n") ||
+        csr_write(src, "#include \"choice.h\"\nint unit_0(void);\n") ||
+        symlink("one.h", link) != 0) return 2;
+    if (sweep_expect(base, stub, root, flags, srclist, 0, 16, 16) != 0) return 1;
+    if (unlink(link) != 0 || symlink("two.h", link) != 0) return 2;
+    if (sweep_expect(base, stub, root, flags, srclist, 0, 16, 16) != 0) return 1;
+    if (sweep_expect(base, stub, root, flags, srclist, 16, 0, 0) != 0) return 1;
+    return cache_symlink_directory(base, root, srclist, stub, flags);
+}
+
+
 static int cache_proofs_synthetic(const char *base, const char *root,
                                   const char *srclist, const char *stub,
                                   const char *flags, const char *runs)
@@ -373,6 +416,7 @@ static int cache_proofs_synthetic(const char *base, const char *root,
     rc = cps_warm(base, root, srclist, stub, flags, runs, &a);
     if (rc) return rc;
     rc = cps_edits(base, root, srclist, stub, flags);
+    if (rc == 0) rc = cache_symlink_test(base, root, srclist, stub, flags);
     return rc ? rc : wcs_selftest_shared_store(base, stub, flags);
 }
 
