@@ -238,18 +238,20 @@ static bool store_purchases_v83_apply(struct node_db *ndb, int floor)
     return ok;
 }
 
-static int db_migrate_step_83(struct node_db *ndb, int *current_ver,
-                              int *floor_ver, int *applied)
+/* The apply callback writes its markers inside this owned transaction. */
+static int db_migrate_owned_step(struct node_db *ndb, int *current_ver,
+                                 int floor_ver, int *applied, int target,
+                                 bool (*apply)(struct node_db *, int))
 {
-    if (*current_ver >= 83) return 0;
-    if (!node_db_begin(ndb)) LOG_ERR("db", "migrate v83: cannot begin");
-    bool ok = store_purchases_v83_apply(ndb, *floor_ver);
+    if (*current_ver >= target) return 0;
+    if (!node_db_begin(ndb)) LOG_ERR("db", "migrate v%d: cannot begin", target);
+    bool ok = apply(ndb, floor_ver);
     if (ok) ok = node_db_commit(ndb);
     if (!ok) {
-        if (!node_db_rollback(ndb)) LOG_ERROR("db", "migrate v83: rollback failed");
-        LOG_ERR("db", "migrate v83: purchase index or stamp failed");
+        if (!node_db_rollback(ndb)) LOG_ERROR("db", "migrate v%d: rollback failed", target);
+        LOG_ERR("db", "migrate v%d: schema step failed", target);
     }
-    *current_ver = 83;
+    *current_ver = target;
     (*applied)++;
     return 0;
 }
@@ -316,23 +318,6 @@ static bool db_migrate_v84_apply(struct node_db *ndb, int floor)
                  node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
     return ok;
 }
-
-static int db_migrate_step_84(struct node_db *ndb, int *current_ver,
-                              int *floor_ver, int *applied)
-{
-    if (*current_ver >= 84) return 0;
-    if (!node_db_begin(ndb)) LOG_ERR("db", "migrate v84: cannot begin");
-    bool ok = db_migrate_v84_apply(ndb, *floor_ver);
-    if (ok) ok = node_db_commit(ndb);
-    if (!ok) {
-        if (!node_db_rollback(ndb)) LOG_ERROR("db", "migrate v84: rollback failed");
-        LOG_ERR("db", "migrate v84: cursor repair or stamp failed");
-    }
-    *current_ver = 84;
-    (*applied)++;
-    return 0;
-}
-
 
 /* v85 adds only a pointer to the latest issuer checkpoint. Immutable proof
  * objects stay in CAS. The guard permits retry after an interrupted ALTER;
@@ -1327,9 +1312,9 @@ static int db_migrate_steps_80_84(struct node_db *ndb, int *version, int *floor,
     (void)db_migrate_step_81(ndb, version, floor, applied);
     if (db_migrate_step_82(ndb, version, applied, *floor) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_step_83(ndb, version, floor, applied) < 0)
+    if (db_migrate_owned_step(ndb, version, *floor, applied, 83, store_purchases_v83_apply) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
-    if (db_migrate_step_84(ndb, version, floor, applied) < 0)
+    if (db_migrate_owned_step(ndb, version, *floor, applied, 84, db_migrate_v84_apply) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     return 0;
 }
