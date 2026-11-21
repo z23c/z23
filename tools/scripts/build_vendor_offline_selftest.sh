@@ -403,36 +403,56 @@ if [ -f "$zlib_tarball" ]; then
     fi
 fi
 
+# Run each fixture in its own job-control process group so orphaned workers
+# remain observable after the driver exits, without inspecting other processes.
+run_failed_vendor_group() (
+    set -m || return 1
+    [[ $- == *m* ]] || return 1
+    cd "$SANDBOX" || return 1
+    local driver= status=0
+    trap 'if [ -n "$driver" ] && kill -0 -- "-$driver" 2>/dev/null; then
+        kill -KILL -- "-$driver" 2>/dev/null || :
+        for _ in {1..100}; do
+            kill -0 -- "-$driver" 2>/dev/null || break
+            sleep 0.01
+        done
+        if kill -0 -- "-$driver" 2>/dev/null; then
+            echo "fixture worker group did not terminate" >&2
+            exit 1
+        fi
+    fi' EXIT
+    VENDOR_FORCE=1 ZCL_VENDOR_OFFLINE=1 VENDOR_MAX_PARALLEL="$1" \
+        "$SANDBOX/tools/scripts/build_vendor.sh" libcrypto.a libevent.a libz.a \
+        >"$2" 2>&1 &
+    driver=$!
+    wait "$driver" || status=$?
+    if kill -0 -- "-$driver" 2>/dev/null; then
+        printf '%s\n' "vendor worker remained active after failure" >&2
+        return 1
+    fi
+    driver=
+    [ "$status" -ne 0 ]
+)
 # An OpenSSL failure must not release dependent libevent work, and all
 # independent workers must be reaped before the driver reports failure.
 rm -rf "$SANDBOX/vendor/.cache" "$VENDOR_ARCHIVE_CACHE"
 mkdir -p "$SANDBOX/vendor/.cache" "$VENDOR_ARCHIVE_CACHE"
-if (cd "$SANDBOX" && VENDOR_FORCE=1 ZCL_VENDOR_OFFLINE=1 VENDOR_MAX_PARALLEL=3 \
-    tools/scripts/build_vendor.sh libcrypto.a libevent.a libz.a \
-    >"$SANDBOX/parallel-failure.log" 2>&1); then
-    fail 'offline parallel misses unexpectedly built archives'
+if ! run_failed_vendor_group 3 "$SANDBOX/parallel-failure.log"; then
+    fail 'offline parallel driver succeeded or left a worker active'
 fi
 grep -q 'offline cache miss or checksum failure: openssl' "$SANDBOX/parallel-failure.log" ||
     fail 'parallel driver did not report the OpenSSL cache miss'
 if grep -q 'libevent 2.1.12' "$SANDBOX/parallel-failure.log"; then
     fail 'libevent started after its OpenSSL dependency failed'
 fi
-children="$(ps --ppid $$ -o comm=,args=)"
-[[ "$children" != *"tools/scripts/build_vendor.sh"* ]] ||
-    fail 'parallel vendor worker remained active after failure'
-if (cd "$SANDBOX" && VENDOR_FORCE=1 ZCL_VENDOR_OFFLINE=1 VENDOR_MAX_PARALLEL=1 \
-    tools/scripts/build_vendor.sh libcrypto.a libevent.a libz.a \
-    >"$SANDBOX/serial-failure.log" 2>&1); then
-    fail 'offline serial misses unexpectedly built archives'
+if ! run_failed_vendor_group 1 "$SANDBOX/serial-failure.log"; then
+    fail 'offline serial driver succeeded or left a worker active'
 fi
 grep -q 'offline cache miss or checksum failure: openssl' "$SANDBOX/serial-failure.log" ||
     fail 'serial driver did not report the OpenSSL cache miss'
 if grep -q 'libevent 2.1.12' "$SANDBOX/serial-failure.log"; then
     fail 'serial libevent started after its OpenSSL dependency failed'
 fi
-children="$(ps --ppid $$ -o comm=,args=)"
-[[ "$children" != *"tools/scripts/build_vendor.sh"* ]] ||
-    fail 'serial vendor worker remained active after failure'
 
 printf '%s\n' \
     'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'
