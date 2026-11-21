@@ -4,6 +4,7 @@
 
 #include "models/database.h"
 #include "models/database_internal.h"
+#include "util/ar_step_readonly.h"
 
 static bool mesh_capability_v79_present(struct node_db *ndb)
 {
@@ -32,17 +33,47 @@ static bool fleet_board_posts_v81_scope_present(struct node_db *ndb)
                "scope", &type, NULL, NULL, NULL, NULL) == SQLITE_OK;
 }
 
-/* True once store_purchases already carries the v83 `seller_onion` column.
- * Same re-migration guard as fleet_board_posts_v81_scope_present(): a
- * database that reached v83 and is later re-migrated from a schema_version
- * stamped back below 83 must not re-run the ADD COLUMN. */
-static bool store_purchases_v83_seller_onion_present(struct node_db *ndb)
+/* Inspect the complete key shape before replacing a pre-v83 index. A name
+ * owned by another table or an unexpected index is never dropped. */
+static bool store_purchases_v83_scalar(struct node_db *ndb, const char *sql, int *value)
 {
-    const char *type = NULL;
-    return ndb && ndb->open &&
-           sqlite3_table_column_metadata(
-               ndb->db, NULL, "store_purchases",
-               "seller_onion", &type, NULL, NULL, NULL, NULL) == SQLITE_OK;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool ok = ar_step_checked(stmt, "migrate v83 inspect", NULL) == ZCL_STEP_ROW &&
+              sqlite3_column_type(stmt, 0) == SQLITE_INTEGER;
+    if (ok) *value = sqlite3_column_int(stmt, 0);
+    if (ok) ok = ar_step_checked(stmt, "migrate v83 inspect end", NULL) == ZCL_STEP_DONE;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+/* 0 absent, 1 legacy order key, 2 seller/order key, -1 unexpected. */
+static bool store_purchases_v83_index(struct node_db *ndb, int *shape)
+{
+    static const char sql[] =
+        "WITH owner AS (SELECT 1 FROM main.sqlite_schema WHERE type='index' "
+        "AND name='idx_store_purchases_order' AND tbl_name='store_purchases'), "
+        "valid AS (SELECT 1 FROM pragma_index_list('store_purchases','main') "
+        "WHERE name='idx_store_purchases_order' AND \"unique\"=1 AND partial=0 AND origin='c'), "
+        "keys AS (SELECT * FROM pragma_index_xinfo('idx_store_purchases_order','main') WHERE key=1) "
+        "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='idx_store_purchases_order') THEN 0 "
+        "WHEN EXISTS(SELECT 1 FROM owner) AND EXISTS(SELECT 1 FROM valid) AND (SELECT count(*) FROM keys)=1 "
+        "AND EXISTS(SELECT 1 FROM keys WHERE seqno=0 AND name='order_id' AND desc=0 AND coll='BINARY') THEN 1 "
+        "WHEN EXISTS(SELECT 1 FROM owner) AND EXISTS(SELECT 1 FROM valid) AND (SELECT count(*) FROM keys)=2 "
+        "AND EXISTS(SELECT 1 FROM keys WHERE seqno=0 AND name='seller_onion' AND desc=0 AND coll='BINARY') "
+        "AND EXISTS(SELECT 1 FROM keys WHERE seqno=1 AND name='order_id' AND desc=0 AND coll='BINARY') THEN 2 ELSE -1 END";
+    return store_purchases_v83_scalar(ndb, sql, shape);
+}
+
+static bool store_purchases_v83_column(struct node_db *ndb, int *column)
+{
+    static const char sql[] =
+        "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM pragma_table_info('store_purchases','main') "
+        "WHERE name='seller_onion') THEN 0 "
+        "WHEN EXISTS(SELECT 1 FROM pragma_table_info('store_purchases','main') "
+        "WHERE name='seller_onion' AND upper(trim(type))='TEXT' AND \"notnull\"=1 "
+        "AND dflt_value=char(39)||char(39)) THEN 1 ELSE -1 END";
+    return store_purchases_v83_scalar(ndb, sql, column);
 }
 
 /* v82 step 1: rebuild `fleet_board_posts` with `kind` widened to admit 1..64,
@@ -152,38 +183,64 @@ static int db_migrate_step_82(struct node_db *ndb, int *current_ver,
  * two sellers hand out the same id — so the idempotence uniqueness moves
  * from order_id alone to (seller_onion, order_id); the constant default
  * backfills every existing row into the local seller's scope. ADD COLUMN
- * plus an index swap is enough: no CHECK widening, no table rebuild. A
- * database already carrying the column skips the swap entirely (see
- * store_purchases_v83_seller_onion_present() above).
+ * plus an index swap is enough: no CHECK widening, no table rebuild. The
+ * index shape is checked on retry even when the column already exists.
  *
  * Wraps its own `current_ver < 83` check, same reasoning as
  * db_migrate_step_82 above — and keeps the caller under its pinned
  * cyclomatic complexity. */
+static bool store_purchases_v83_repair_index(struct node_db *ndb)
+{
+    int shape = -1;
+    if (!store_purchases_v83_index(ndb, &shape) || shape < 0) return false;
+    if (shape == 2) return true;
+    if (shape == 1 && !node_db_exec(ndb, "DROP INDEX main.idx_store_purchases_order")) return false;
+    return node_db_exec(ndb,
+        "CREATE UNIQUE INDEX main.idx_store_purchases_order ON store_purchases(seller_onion,order_id)");
+}
+
+static bool store_purchases_v83_apply(struct node_db *ndb, int floor)
+{
+    int column = 0, order_column = 0;
+    bool ok = store_purchases_v83_scalar(ndb,
+        "SELECT count(*) FROM pragma_table_xinfo('store_purchases','main') WHERE name='order_id' "
+        "AND upper(trim(type))='INTEGER' AND \"notnull\"=1 AND hidden=0", &order_column) && order_column == 1;
+    if (ok) ok = store_purchases_v83_column(ndb, &column) && column >= 0;
+    if (ok && column == 0) ok = node_db_exec(ndb,
+        "ALTER TABLE main.store_purchases ADD COLUMN seller_onion TEXT "
+        "NOT NULL DEFAULT '' CHECK(length(seller_onion)<=62)");
+    int nulls = 0;
+    if (ok) ok = store_purchases_v83_scalar(ndb,
+        "SELECT count(*) FROM main.store_purchases WHERE seller_onion IS NULL OR order_id IS NULL", &nulls) && nulls == 0;
+    if (ok) ok = store_purchases_v83_repair_index(ndb);
+    if (ok) ok = node_db_exec(ndb, "INSERT OR IGNORE INTO schema_migrations(version) VALUES('083')");
+    int32_t version = 83, compat_floor = floor;
+    if (ok) ok = node_db_state_set(ndb, "schema_version", &version, sizeof(version)) &&
+                 node_db_state_set(ndb, "schema_compat_floor", &compat_floor, sizeof(compat_floor));
+    return ok;
+}
+
 static int db_migrate_step_83(struct node_db *ndb, int *current_ver,
                               int *floor_ver, int *applied)
 {
     if (*current_ver >= 83) return 0;
-    if (!store_purchases_v83_seller_onion_present(ndb)) {
-        if (!node_db_exec(ndb,
-                "ALTER TABLE store_purchases ADD COLUMN seller_onion TEXT "
-                "NOT NULL DEFAULT '' CHECK(length(seller_onion)<=62)"))
-            LOG_ERR("db", "migrate v83: store_purchases seller_onion failed");
-        if (!node_db_exec(ndb,
-                "DROP INDEX IF EXISTS idx_store_purchases_order"))
-            LOG_ERR("db", "migrate v83: store_purchases index drop failed");
-        if (!node_db_exec(ndb,
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_store_purchases_order "
-                "ON store_purchases(seller_onion,order_id)"))
-            LOG_ERR("db", "migrate v83: store_purchases index failed");
+    if (!node_db_begin(ndb)) LOG_ERR("db", "migrate v83: cannot begin");
+    bool ok = store_purchases_v83_apply(ndb, *floor_ver);
+    if (ok) ok = node_db_commit(ndb);
+    if (!ok) {
+        if (!node_db_rollback(ndb)) LOG_ERROR("db", "migrate v83: rollback failed");
+        LOG_ERR("db", "migrate v83: purchase index or stamp failed");
     }
-    if (!node_db_exec(ndb,
-            "INSERT OR IGNORE INTO schema_migrations(version) "
-            "VALUES('083')"))
-        LOG_ERR("db", "migrate v83: migration stamp failed");
-    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 83, *floor_ver);
     *current_ver = 83;
     (*applied)++;
     return 0;
+}
+
+/* Grouping preserves the existing v82 return handling. */
+static int db_migrate_steps_82_83(struct node_db *ndb, int *version, int *floor, int *applied)
+{
+    (void)db_migrate_step_82(ndb, version, applied, *floor);
+    return db_migrate_step_83(ndb, version, floor, applied);
 }
 
 /* True once fleet_board_posts already carries the v84 `arrival` column.
@@ -1219,6 +1276,15 @@ static int db_migrate_step_80(struct node_db *ndb, int *current_ver,
     return 0;
 }
 
+static int db_migrate_steps_80_83(struct node_db *ndb, int *version, int *floor, int *applied)
+{
+    if (db_migrate_step_80(ndb, version, floor, applied) < 0) return -1;
+    (void)db_migrate_step_81(ndb, version, floor, applied);
+    if (db_migrate_steps_82_83(ndb, version, floor, applied) < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    return 0;
+}
+
 int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
                                     int *floor)
 {
@@ -1269,11 +1335,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
             return r;
         }
     }
-    if (db_migrate_step_80(ndb, &current_ver, &floor_ver, &applied) < 0)
-        return -1;
-    (void)db_migrate_step_81(ndb, &current_ver, &floor_ver, &applied);
-    (void)db_migrate_step_82(ndb, &current_ver, &applied, floor_ver);
-    (void)db_migrate_step_83(ndb, &current_ver, &floor_ver, &applied);
+    int steps_80_83 = db_migrate_steps_80_83(ndb, &current_ver, &floor_ver, &applied);
+    if (steps_80_83 < 0) return steps_80_83;
     (void)db_migrate_step_84(ndb, &current_ver, &floor_ver, &applied);
     return db_migrate_finish_87(ndb, &current_ver, &floor_ver, &applied,
                                 version, floor);

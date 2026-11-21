@@ -1004,9 +1004,195 @@ static int purchase_test_onion_budget_check(struct purchase_test_run *run)
     return failures;
 }
 
+static int purchase_v83_count(struct node_db *db, const char *sql)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db->db, sql, -1, &stmt, NULL) != SQLITE_OK) return -1;
+    int count = sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : -1;
+    if (sqlite3_finalize(stmt) != SQLITE_OK) return -1;
+    return count;
+}
+
+static int purchase_v83_retry_case(bool old_index)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    bool setup = node_db_exec(&db,
+        "INSERT INTO store_purchases(order_id,product_id,payment_addr,memo,amount_zatoshi,stage,created_at,updated_at,seller_onion) "
+        "VALUES(17,3,'address','memo',5,1,1,1,'alpha');"
+        "DROP INDEX idx_store_purchases_order;");
+    if (old_index) setup = setup && node_db_exec(&db,
+        "CREATE UNIQUE INDEX idx_store_purchases_order ON store_purchases(order_id)");
+    int32_t version = 82;
+    setup = setup && node_db_state_set(&db, "schema_version", &version, sizeof(version));
+    PURCHASE_CHECK("v83 partial state prepared", setup);
+    if (setup) {
+        int rc = node_db_migrate(&db, NULL);
+        bool second = node_db_exec(&db,
+            "INSERT INTO store_purchases(order_id,product_id,payment_addr,memo,amount_zatoshi,stage,created_at,updated_at,seller_onion) "
+            "VALUES(17,4,'address','memo',6,1,1,1,'beta')");
+        bool duplicate = node_db_exec(&db,
+            "INSERT INTO store_purchases(order_id,product_id,payment_addr,memo,amount_zatoshi,stage,created_at,updated_at,seller_onion) "
+            "VALUES(17,5,'address','memo',7,1,1,1,'alpha')");
+        PURCHASE_CHECK("v83 retry completes", rc >= 0 && node_db_schema_version(&db) >= 83);
+        PURCHASE_CHECK("v83 accepts same order at a second seller", second);
+        PURCHASE_CHECK("v83 rejects same seller order", !duplicate);
+        PURCHASE_CHECK("v83 preserves both buyer records", purchase_v83_count(&db,
+            "SELECT count(*) FROM store_purchases WHERE order_id=17 AND ((seller_onion='alpha' AND product_id=3) OR (seller_onion='beta' AND product_id=4))") == 2);
+    }
+    node_db_close(&db);
+    return failures;
+}
+
+
+static int purchase_v83_deny_drop(void *ctx, int op, const char *name,
+                                  const char *b, const char *c, const char *d)
+{
+    (void)ctx; (void)b; (void)c; (void)d;
+    return op == SQLITE_DROP_INDEX && name && strcmp(name, "idx_store_purchases_order") == 0
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
+static int purchase_v83_refusal_case(bool foreign)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    bool setup = node_db_exec(&db, "DROP INDEX idx_store_purchases_order");
+    setup = setup && node_db_exec(&db, foreign
+        ? "CREATE TABLE v83_unrelated(id INTEGER); CREATE INDEX idx_store_purchases_order ON v83_unrelated(id)"
+        : "CREATE UNIQUE INDEX idx_store_purchases_order ON store_purchases(order_id)");
+    int32_t version = 82;
+    setup = setup && node_db_state_set(&db, "schema_version", &version, sizeof(version));
+    if (!foreign) setup = setup && sqlite3_set_authorizer(db.db, purchase_v83_deny_drop, NULL) == SQLITE_OK;
+    PURCHASE_CHECK("v83 refusal fixture prepared", setup);
+    if (setup) {
+        int rc = node_db_migrate(&db, NULL);
+        if (!foreign) (void)sqlite3_set_authorizer(db.db, NULL, NULL);
+        PURCHASE_CHECK("v83 unsafe or denied index refuses", rc == -1 && node_db_schema_version(&db) == 82);
+        PURCHASE_CHECK("v83 preserves original index", purchase_v83_count(&db, foreign
+            ? "SELECT count(*) FROM sqlite_schema WHERE name='idx_store_purchases_order' AND tbl_name='v83_unrelated'"
+            : "SELECT count(*) FROM pragma_index_info('idx_store_purchases_order') WHERE name='order_id'") == 1);
+        PURCHASE_CHECK("v83 failure releases transaction", sqlite3_get_autocommit(db.db) != 0);
+        if (!foreign) PURCHASE_CHECK("v83 retry after denial succeeds", node_db_migrate(&db, NULL) >= 0 && node_db_schema_version(&db) >= 83);
+    }
+    node_db_close(&db);
+    return failures;
+}
+
+
+static int purchase_v83_wrong_index_case(bool reversed)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    bool setup = node_db_exec(&db, "DROP INDEX idx_store_purchases_order") &&
+        node_db_exec(&db, reversed
+            ? "CREATE UNIQUE INDEX idx_store_purchases_order ON store_purchases(order_id,seller_onion)"
+            : "CREATE INDEX idx_store_purchases_order ON store_purchases(seller_onion,order_id)");
+    int32_t version = 82;
+    setup = setup && node_db_state_set(&db, "schema_version", &version, sizeof(version));
+    PURCHASE_CHECK("v83 wrong index fixture prepared", setup);
+    if (setup) {
+        int rc = node_db_migrate(&db, NULL);
+        PURCHASE_CHECK("v83 rejects wrong index shape", rc == -1 && node_db_schema_version(&db) == 82);
+        PURCHASE_CHECK("v83 retains wrong index for inspection", purchase_v83_count(&db,
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='idx_store_purchases_order'") == 1);
+    }
+    node_db_close(&db);
+    return failures;
+}
+
+
+static int purchase_v83_nullable_case(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    bool setup = node_db_exec(&db,
+        "DROP INDEX main.idx_store_purchases_order;"
+        "ALTER TABLE main.store_purchases DROP COLUMN seller_onion;"
+        "ALTER TABLE main.store_purchases ADD COLUMN seller_onion TEXT;"
+        "INSERT INTO store_purchases(order_id,product_id,payment_addr,memo,amount_zatoshi,stage,created_at,updated_at,seller_onion) "
+        "VALUES(17,3,'address','memo',5,1,1,1,NULL);"
+        "CREATE UNIQUE INDEX main.idx_store_purchases_order ON store_purchases(order_id)");
+    int32_t version = 82;
+    setup = setup && node_db_state_set(&db, "schema_version", &version, sizeof(version));
+    PURCHASE_CHECK("v83 nullable fixture prepared", setup);
+    if (setup) {
+        int rc = node_db_migrate(&db, NULL);
+        PURCHASE_CHECK("v83 refuses nullable seller", rc == -1 && node_db_schema_version(&db) == 82);
+        PURCHASE_CHECK("v83 preserves nullable buyer record", purchase_v83_count(&db,
+            "SELECT count(*) FROM main.store_purchases WHERE order_id=17 AND seller_onion IS NULL") == 1);
+        PURCHASE_CHECK("v83 preserves legacy index on nullable refusal", purchase_v83_count(&db,
+            "SELECT count(*) FROM pragma_index_info('idx_store_purchases_order','main') WHERE name='order_id'") == 1);
+    }
+    node_db_close(&db);
+    return failures;
+}
+
+static int purchase_v83_temp_index_case(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    bool setup = node_db_exec(&db,
+        "DROP INDEX main.idx_store_purchases_order;"
+        "CREATE UNIQUE INDEX main.idx_store_purchases_order ON store_purchases(order_id);"
+        "CREATE TEMP TABLE v83_temp(id INTEGER);"
+        "CREATE INDEX temp.idx_store_purchases_order ON v83_temp(id)");
+    int32_t version = 82;
+    setup = setup && node_db_state_set(&db, "schema_version", &version, sizeof(version));
+    PURCHASE_CHECK("v83 temporary-name fixture prepared", setup);
+    if (setup) {
+        PURCHASE_CHECK("v83 repairs main despite temporary name", node_db_migrate(&db, NULL) >= 0 && node_db_schema_version(&db) >= 83);
+        PURCHASE_CHECK("v83 preserves temporary index", purchase_v83_count(&db,
+            "SELECT count(*) FROM temp.sqlite_schema WHERE type='index' AND name='idx_store_purchases_order' AND tbl_name='v83_temp'") == 1);
+        PURCHASE_CHECK("v83 main index uses both keys", purchase_v83_count(&db,
+            "SELECT count(*) FROM pragma_index_info('idx_store_purchases_order','main') WHERE (seqno=0 AND name='seller_onion') OR (seqno=1 AND name='order_id')") == 2);
+    }
+    node_db_close(&db);
+    return failures;
+}
+
+
+static int purchase_v83_nullable_order_case(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    if (!node_db_open(&db, ":memory:")) return 1;
+    bool setup = node_db_exec(&db,
+        "DROP TABLE main.store_purchases;"
+        "CREATE TABLE main.store_purchases(id INTEGER PRIMARY KEY, order_id INTEGER, seller_onion TEXT NOT NULL DEFAULT '');"
+        "INSERT INTO main.store_purchases VALUES(1,NULL,'seller');"
+        "CREATE UNIQUE INDEX main.idx_store_purchases_order ON store_purchases(order_id)");
+    int32_t version = 82;
+    setup = setup && node_db_state_set(&db, "schema_version", &version, sizeof(version));
+    PURCHASE_CHECK("v83 nullable order fixture prepared", setup);
+    if (setup) {
+        int rc = node_db_migrate(&db, NULL);
+        PURCHASE_CHECK("v83 refuses nullable order", rc == -1 && node_db_schema_version(&db) == 82);
+        PURCHASE_CHECK("v83 preserves nullable order record", purchase_v83_count(&db,
+            "SELECT count(*) FROM main.store_purchases WHERE id=1 AND order_id IS NULL AND seller_onion='seller'") == 1);
+    }
+    node_db_close(&db);
+    return failures;
+}
+
+
 int file_market_purchase_tests(void)
 {
     int failures = 0;
+    failures += purchase_v83_retry_case(true);
+    failures += purchase_v83_retry_case(false);
+    failures += purchase_v83_refusal_case(false);
+    failures += purchase_v83_refusal_case(true);
+    failures += purchase_v83_wrong_index_case(true);
+    failures += purchase_v83_wrong_index_case(false);
+    failures += purchase_v83_nullable_case();
+    failures += purchase_v83_nullable_order_case();
+    failures += purchase_v83_temp_index_case();
     struct purchase_test_run run;
     bool ready = purchase_test_fixture_ready(&run);
     PURCHASE_CHECK("authenticated offer, identity, and encrypted fixture", ready);
