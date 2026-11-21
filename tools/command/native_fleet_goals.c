@@ -158,7 +158,8 @@ static bool gr_repo(const struct zcl_goals_options *o, char *out, size_t cap)
 /* Reason a git-backed row gives when no checkout resolves. */
 #define GR_NO_CHECKOUT                                                       \
     "no git checkout: the current directory is not inside one, no repo "     \
-    "input was given, and no source checkout is recorded or configured"
+    "input was given, and no source checkout is recorded or configured "     \
+    "(export ZCL_DEV_SOURCE_ROOT=<checkout> once per host, or run from inside it)"
 
 /* ── in-process leaf calls ────────────────────────────────────────────── */
 
