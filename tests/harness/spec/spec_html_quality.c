@@ -160,6 +160,8 @@ int spec_html_quality(void)
 
     FEATURE("Pulse API returns valid JSON") {
         STORY("pulse response is JSON, not HTML") {
+            struct spec_wallet_fixture pulse = {0};
+            if (!spec_wallet_fixture_open(&pulse)) return 1;
             GIVEN("pulse endpoint called")
                 GET("/api/wallet/pulse");
             THEN("response contains JSON structure")
@@ -171,6 +173,7 @@ int spec_html_quality(void)
             THEN("is NOT HTML")
                 EXPECT_NOT(has("<!DOCTYPE"));
                 EXPECT_NOT(has("<html"));
+            spec_wallet_fixture_close(&pulse);
             PASS();
         }
     }

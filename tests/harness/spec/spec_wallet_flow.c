@@ -44,12 +44,16 @@ int spec_wallet_flow(void)
         }
     }
 
+    struct spec_wallet_fixture shield = {0};
+    if (!spec_wallet_fixture_open(&shield)) return 1;
+
     FEATURE("Shield flow has clear 2-step progression") {
         STORY("step 1: amount selection") {
             GIVEN("shield page loads")
                 GET("/wallet/shield");
             THEN("amount input with Max button")
                 EXPECT(has("Max") || has("Nothing to shield") || is_loading() || is_loading());
+                EXPECT(has("Max"));
             PASS();
         }
 
@@ -62,6 +66,8 @@ int spec_wallet_flow(void)
             PASS();
         }
     }
+
+    spec_wallet_fixture_close(&shield);
 
     FEATURE("Every page has escape routes") {
         STORY("dashboard links to all sections") {
@@ -95,11 +101,14 @@ int spec_wallet_flow(void)
         }
 
         STORY("pulse keeps dashboard alive") {
+            struct spec_wallet_fixture pulse = {0};
+            if (!spec_wallet_fixture_open(&pulse)) return 1;
             GIVEN("pulse endpoint called")
                 GET("/api/wallet/pulse");
             THEN("JSON data returned")
                 EXPECT(has("height"));
                 EXPECT(has("balance"));
+            spec_wallet_fixture_close(&pulse);
             PASS();
         }
     }

@@ -10,7 +10,8 @@
 
 int spec_wallet_dashboard(void)
 {
-    wallet_view_init(NULL);
+    struct spec_wallet_fixture fixture;
+    if (!spec_wallet_fixture_open(&fixture)) return 1;
 
     FEATURE("User knows their financial position instantly") {
         STORY("balance is the dominant visual element") {
@@ -112,9 +113,12 @@ int spec_wallet_dashboard(void)
             GIVEN("dashboard loads without DB")
             WHEN("user sees loading state")
             THEN("message does not mention databases or errors")
+                wallet_view_init(NULL);
                 GET("/wallet");
-                /* Loading state should exist as a template */
                 EXPECT(is_200());
+                EXPECT(is_loading());
+                EXPECT_NOT(has("sqlite"));
+                wallet_view_init(fixture.dir);
             PASS();
         }
 
@@ -131,5 +135,7 @@ int spec_wallet_dashboard(void)
     }
 
     SPEC_SUMMARY();
-    return SPEC_FAILURES();
+    int failures = SPEC_FAILURES();
+    spec_wallet_fixture_close(&fixture);
+    return failures;
 }

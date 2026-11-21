@@ -13,7 +13,8 @@
 
 int spec_wallet_shield(void)
 {
-    wallet_view_init(NULL);
+    struct spec_wallet_fixture fixture;
+    if (!spec_wallet_fixture_open(&fixture)) return 1;
 
     FEATURE("User can always find the path to more privacy") {
         STORY("dashboard leads to shield page") {
@@ -84,5 +85,7 @@ int spec_wallet_shield(void)
     }
 
     SPEC_SUMMARY();
-    return SPEC_FAILURES();
+    int failures = SPEC_FAILURES();
+    spec_wallet_fixture_close(&fixture);
+    return failures;
 }

@@ -58,6 +58,7 @@ static void check_wallet_form_error_prevention(void)
                 GET("/wallet/shield");
             THEN("Max button fills amount automatically")
                 EXPECT(has("Max") || has("Nothing to shield") || is_loading() || is_loading());
+                EXPECT(has("Max"));
             PASS();
         }
     }
@@ -119,7 +120,10 @@ int spec_wallet_accessibility(void)
     wallet_view_init(NULL);
 
     check_wallet_visual_hierarchy();
+    struct spec_wallet_fixture shield = {0};
+    if (!spec_wallet_fixture_open(&shield)) return 1;
     check_wallet_form_error_prevention();
+    spec_wallet_fixture_close(&shield);
     check_wallet_copy_actions();
     check_wallet_color_meaning();
     check_wallet_touch_targets();

@@ -10,7 +10,8 @@
 
 int spec_wallet_pulse(void)
 {
-    wallet_view_init(NULL);
+    struct spec_wallet_fixture fixture;
+    if (!spec_wallet_fixture_open(&fixture)) return 1;
 
     FEATURE("User feels the network is alive without refreshing") {
         STORY("pulse endpoint returns real-time JSON") {
@@ -53,6 +54,21 @@ int spec_wallet_pulse(void)
         }
     }
 
+    FEATURE("Unavailable wallet data is explicit") {
+        STORY("pulse refuses an absent database") {
+            GIVEN("the wallet database is unavailable")
+                wallet_view_init(NULL);
+                GET("/api/wallet/pulse");
+            THEN("the pulse reports unavailability")
+                EXPECT(has("503 Service Unavailable"));
+                EXPECT(has("Wallet data unavailable"));
+                wallet_view_init(fixture.dir);
+            PASS();
+        }
+    }
+
     SPEC_SUMMARY();
-    return SPEC_FAILURES();
+    int failures = SPEC_FAILURES();
+    spec_wallet_fixture_close(&fixture);
+    return failures;
 }

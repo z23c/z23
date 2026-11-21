@@ -99,6 +99,7 @@ static void journey_user_shields_funds_for_privacy(void)
                 EXPECT(is_200());
             THEN("sees Max button or nothing-to-shield")
                 EXPECT(has("Max") || has("Nothing to shield") || is_loading());
+                EXPECT(has("Max"));
 
             GIVEN("user enters an amount to shield")
                 GET("/wallet/shield?amount=0.5");
@@ -232,7 +233,10 @@ int spec_user_journeys(void)
 
     journey_new_user_explores_wallet();
     journey_user_sends_zcl();
+    struct spec_wallet_fixture shield = {0};
+    if (!spec_wallet_fixture_open(&shield)) return 1;
     journey_user_shields_funds_for_privacy();
+    spec_wallet_fixture_close(&shield);
     journey_user_investigates_a_transaction();
     journey_user_audits_their_coins();
     journey_user_checks_privacy_status();

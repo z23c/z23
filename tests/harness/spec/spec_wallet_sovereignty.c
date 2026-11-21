@@ -14,7 +14,8 @@
 
 int spec_wallet_sovereignty(void)
 {
-    wallet_view_init(NULL);
+    struct spec_wallet_fixture fixture;
+    if (!spec_wallet_fixture_open(&fixture)) return 1;
 
     FEATURE("User feels like they ARE the network") {
         STORY("node page conveys power and authority") {
@@ -112,5 +113,7 @@ int spec_wallet_sovereignty(void)
     }
 
     SPEC_SUMMARY();
-    return SPEC_FAILURES();
+    int failures = SPEC_FAILURES();
+    spec_wallet_fixture_close(&fixture);
+    return failures;
 }

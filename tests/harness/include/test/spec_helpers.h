@@ -8,6 +8,8 @@
 
 #include "test/spec.h"
 #include "controllers/wallet_view_controller.h"
+#include "controllers/wallet_view_internal.h"
+#include "models/database.h"
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -52,6 +54,60 @@ out:
         test_rm_rf_recursive(dir);
     return rc;
 }
+
+struct spec_wallet_fixture {
+    char dir[256];
+    const char *previous_dir;
+    int balance_dirty;
+    time_t shield_pending_since;
+    char shield_opid[128];
+    int64_t shield_pending_amount;
+    bool sync_enabled;
+};
+
+/* A real, isolated schema with one synthetic spendable transparent output. */
+__attribute__((unused))
+static bool spec_wallet_fixture_open(struct spec_wallet_fixture *f)
+{
+    if (!f) return false;
+    memset(f, 0, sizeof(*f));
+    test_make_tmpdir(f->dir, sizeof(f->dir), "spec", "wallet");
+    char path[320];
+    int n = snprintf(path, sizeof(path), "%s/node.db", f->dir);
+    if (!f->dir[0] || n < 0 || (size_t)n >= sizeof(path)) return false;
+    struct node_db db = {0};
+    bool ok = node_db_open(&db, path);
+    if (ok) ok = node_db_exec(&db,
+        "CREATE TABLE mempool_entries(txid BLOB PRIMARY KEY, fee INTEGER, size INTEGER, time_added INTEGER)");
+    if (ok) ok = node_db_exec(&db,
+        "INSERT INTO wallet_utxos(txid,vout,value,address_hash,script,height,is_coinbase)"
+        " VALUES(zeroblob(32),0,100000000,zeroblob(20),zeroblob(1),1,0)");
+    if (db.open) node_db_close(&db);
+    if (!ok) { test_rm_rf_recursive(f->dir); return false; }
+    f->previous_dir = g_wv_datadir;
+    f->balance_dirty = g_balance_dirty;
+    f->shield_pending_since = g_shield_pending_since;
+    memcpy(f->shield_opid, g_shield_opid, sizeof(f->shield_opid));
+    f->shield_pending_amount = g_shield_pending_amount;
+    f->sync_enabled = g_sync_enabled;
+    g_sync_enabled = false;
+    wallet_view_init(f->dir);
+    return true;
+}
+
+__attribute__((unused))
+static void spec_wallet_fixture_close(struct spec_wallet_fixture *f)
+{
+    if (!f) return;
+    wallet_view_init(f->previous_dir);
+    g_balance_dirty = f->balance_dirty;
+    g_shield_pending_since = f->shield_pending_since;
+    memcpy(g_shield_opid, f->shield_opid, sizeof(g_shield_opid));
+    g_shield_pending_amount = f->shield_pending_amount;
+    g_sync_enabled = f->sync_enabled;
+    test_rm_rf_recursive(f->dir);
+}
+
 
 static uint8_t _resp[131072];
 
