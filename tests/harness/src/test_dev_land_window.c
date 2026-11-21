@@ -392,6 +392,45 @@ _test_next:;
 }
 #endif
 
+/* A complete history can fill both historical row limits before the
+ * current proof opens. Closers may be observed before their announcement. */
+static int dlw_long_history(void)
+{
+    int failures = 0;
+    TEST("land.window: live windows and late closes survive long history") {
+        const char *rows[645];
+        size_t n = 0;
+        for (int i = 0; i < 130; i++)
+            rows[n++] = WROW(1, "2026-10-08T09:50:00Z", "old", 0, "oldhost", "10:30Z");
+        for (int i = 0; i < 513; i++)
+            rows[n++] = CROW(2, "2026-10-08T10:00:00Z", "other", "RELEASED other");
+        size_t live = n;
+        rows[n++] = WROW(700, "2026-10-09T09:50:00Z", "current", 0, "peer", "10:30Z");
+        dlw_rows(rows, n);
+        struct dlw_call c;
+        dlw_open(&c, "local", DLW_T1000);
+        bool listed = dlw_ok(&c) && dlw_windows(&c) == 1 && dlw_int(&c, "dropped") == 0;
+        dlw_end(&c);
+        struct zcl_land_window_hit hit;
+        ASSERT(listed);
+        ASSERT(zcl_land_window_foreign("local", DLW_B, DLW_T1000, 0, &hit));
+        ASSERT(hit.open && hit.open_count == 1 && hit.stale == 130);
+        rows[n++] = rows[live];
+        rows[live] = CROW(701, "2026-10-09T09:58:00Z", "current",
+                          "LANDED peer, candidate " DLW_C " on base " DLW_B ".");
+        dlw_rows(rows, n);
+        dlw_open(&c, "local", DLW_T1000);
+        bool closed = dlw_ok(&c) && dlw_windows(&c) == 0;
+        dlw_end(&c);
+        ASSERT(closed);
+        ASSERT(zcl_land_window_foreign("local", DLW_B, DLW_T1000, 0, &hit));
+        ASSERT(!hit.open && hit.stale == 130);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dlw_foreign_cases(void)
 {
     int failures = 0;
@@ -807,6 +846,7 @@ _test_next:;
     failures += dlw_estimate_cases();
 #endif
     failures += dlw_foreign_cases();
+    failures += dlw_long_history();
     failures += dlw_lifecycle_cases();
     dlw_restore();
     if (failures == 0)

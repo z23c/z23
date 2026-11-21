@@ -61,9 +61,7 @@
 #define LW_HOST_MAX 64u
 #define LW_FROM_MAX 128u
 #define LW_MAX_WINDOWS 128u
-#define LW_MAX_CLOSERS 512u
 #define LW_LINE_CAP 16384
-#define LW_CLOSER_BODY 192u
 #define LW_BODY_CAP 4200u
 
 struct lw_window {
@@ -75,13 +73,7 @@ struct lw_window {
     long long seq;
     int64_t row_epoch;
     int64_t done_epoch;
-};
-
-struct lw_closer {
-    char from[LW_FROM_MAX + 1];
-    char ts[24];
-    char body[LW_CLOSER_BODY + 1];
-    long long seq;
+    bool dismissed;
 };
 
 /* The mail leaf's handler is held as a pointer (as dev.agent.mail.wait does):
@@ -98,11 +90,16 @@ struct lw_row {
 
 struct lw_scan {
     struct lw_window win[LW_MAX_WINDOWS];
-    struct lw_closer cls[LW_MAX_CLOSERS];
     size_t nwin;
-    size_t ncls;
+    const char *host;
+    const char *base;
+    int64_t now;
+    int64_t grace;
     int64_t skipped;
-    int64_t dropped;
+    int64_t max_left;
+    struct json_value *open;
+    struct zcl_land_window_hit *hit;
+    struct zcl_command_reply *reply;
 };
 
 static void lw_invalid(struct zcl_command_reply *reply, const char *msg,
@@ -253,8 +250,7 @@ static bool lw_ts_epoch(const char *ts, int64_t *epoch, int64_t *midnight)
 
 /* ── mail scan ──────────────────────────────────────────────────────────
  * The mail reader pages 16 KiB at a time (hundreds of pages for a real
- * history), so this leaf reads each jsonl stream under the mail dir once,
- * line by line, and parses only the rows that can matter. Fields are cut
+ * history), so this leaf scans the mail streams line by line, and parses only the rows that can matter. Fields are cut
  * with the same key-pattern reader the mail leaf uses for its own rows. */
 
 /* Copy the string value of "key":"..." out of a row line (\" and \\ are
@@ -293,43 +289,47 @@ static bool lw_field_int(const char *line, const char *key, long long *out)
     return end && end != p + strlen(pat) && *out >= 0;
 }
 
-static void lw_collect_window(struct lw_scan *sc, const struct lw_row *r)
+static bool lw_decode_window(const struct lw_row *r, struct lw_window *w)
 {
-    struct lw_window *w;
     int minutes;
     int64_t midnight;
-    if (sc->nwin >= LW_MAX_WINDOWS) {
-        sc->dropped++;
-        return;
-    }
-    w = &sc->win[sc->nwin];
-    memset(w, 0, sizeof(*w));
+    if (!lw_parse_body(r->body, w, &minutes) ||
+        !lw_ts_epoch(r->ts, &w->row_epoch, &midnight))
+        return false;
     (void)snprintf(w->from, sizeof(w->from), "%s", r->from);
     (void)snprintf(w->ts, sizeof(w->ts), "%s", r->ts);
     w->seq = r->seq;
-    if (!lw_parse_body(r->body, w, &minutes) ||
-        !lw_ts_epoch(w->ts, &w->row_epoch, &midnight)) {
-        sc->skipped++;
-        return;
-    }
     w->done_epoch = midnight + (int64_t)minutes * 60;
     if (w->done_epoch < w->row_epoch)
         w->done_epoch += 86400;
-    sc->nwin++;
+    return true;
 }
 
-static void lw_collect_closer(struct lw_scan *sc, const struct lw_row *r)
+static bool lw_resolve_page(struct lw_scan *sc);
+
+static bool lw_collect_window(struct lw_scan *sc, const struct lw_window *w)
 {
-    struct lw_closer *c;
-    if (sc->ncls >= LW_MAX_CLOSERS) {
-        sc->dropped++;
-        return;
+    if (strcmp(w->host, sc->host) == 0 ||
+        (sc->base[0] && strcmp(w->base, sc->base) != 0) ||
+        (sc->open && w->done_epoch <= sc->now - sc->grace))
+        return true;
+    sc->win[sc->nwin++] = *w;
+    return sc->nwin < LW_MAX_WINDOWS || lw_resolve_page(sc);
+}
+
+static void lw_match_row(struct lw_scan *sc, const struct lw_row *r,
+                         const struct lw_window *newer)
+{
+    for (size_t i = 0; i < sc->nwin; i++) {
+        struct lw_window *w = &sc->win[i];
+        if (w->dismissed || r->seq <= w->seq || strcmp(r->from, w->from))
+            continue;
+        if (newer)
+            w->dismissed = !strcmp(newer->host, w->host) &&
+                           !strcmp(newer->cand, w->cand) && !strcmp(newer->base, w->base);
+        else
+            w->dismissed = strcmp(r->ts, w->ts) >= 0 && strstr(r->body, w->cand) != NULL;
     }
-    c = &sc->cls[sc->ncls++];
-    (void)snprintf(c->from, sizeof(c->from), "%s", r->from);
-    (void)snprintf(c->ts, sizeof(c->ts), "%s", r->ts);
-    (void)snprintf(c->body, sizeof(c->body), "%s", r->body);
-    c->seq = r->seq;
 }
 
 static bool lw_line_relevant(const char *line)
@@ -339,46 +339,52 @@ static bool lw_line_relevant(const char *line)
            strstr(line, "\"body\":\"RELEASED");
 }
 
-static void lw_scan_line(struct lw_scan *sc, const char *line)
+static bool lw_scan_line(struct lw_scan *sc, const char *line, bool matching)
 {
     struct lw_row r;
-    long long seq = 0;
     if (line[0] == '\0' || line[0] == '\n')
-        return;
-    if (line[0] != '{') {
-        sc->skipped++;
-        return;
-    }
+        return true;
+    if (line[0] != '{')
+        goto skipped;
     if (!lw_line_relevant(line))
-        return;
-    if (!lw_field_int(line, "seq", &seq) ||
+        return true;
+    if (!lw_field_int(line, "seq", &r.seq) ||
         !lw_field_str(line, "ts", r.ts, sizeof(r.ts)) ||
         !lw_field_str(line, "from", r.from, sizeof(r.from)) ||
-        !lw_field_str(line, "body", r.body, sizeof(r.body))) {
-        sc->skipped++;
-        return;
+        !lw_field_str(line, "body", r.body, sizeof(r.body)))
+        goto skipped;
+    if (strncmp(r.body, "LAND-WINDOW ", 12) == 0) {
+        struct lw_window w = {0};
+        if (!lw_decode_window(&r, &w))
+            goto skipped;
+        if (!matching)
+            return lw_collect_window(sc, &w);
+        lw_match_row(sc, &r, &w);
+    } else if (matching) {
+        lw_match_row(sc, &r, NULL);
     }
-    r.seq = seq;
-    if (strncmp(r.body, "LAND-WINDOW ", 12) == 0)
-        lw_collect_window(sc, &r);
-    else
-        lw_collect_closer(sc, &r);
+    return true;
+skipped:
+    if (!matching)
+        sc->skipped++;
+    return true;
 }
 
-static void lw_scan_file(struct lw_scan *sc, const char *path)
+static bool lw_scan_file(struct lw_scan *sc, const char *path, bool matching)
 {
-    static char line[LW_LINE_CAP];
-    bool tail = false;
+    char line[LW_LINE_CAP];
+    bool tail = false, ok = true;
     FILE *f = fopen(path, "r");
     if (!f)
-        return;
-    while (fgets(line, sizeof(line), f)) {
+        return false;
+    while (ok && fgets(line, sizeof(line), f)) {
         bool full = strchr(line, '\n') != NULL;
         if (!tail)
-            lw_scan_line(sc, line);
+            ok = lw_scan_line(sc, line, matching);
         tail = !full;
     }
-    (void)fclose(f);
+    ok = ok && !ferror(f);
+    return fclose(f) == 0 && ok;
 }
 
 static bool lw_is_stream(const char *name)
@@ -387,7 +393,7 @@ static bool lw_is_stream(const char *name)
     return n > 6 && n < 128 && strcmp(name + n - 6, ".jsonl") == 0;
 }
 
-static bool lw_scan_mail(struct lw_scan *sc, struct zcl_command_reply *reply)
+static bool lw_scan_mail(struct lw_scan *sc, bool matching)
 {
     char state[4096], dir[4200], path[4400];
     struct dirent *ent;
@@ -399,56 +405,30 @@ static bool lw_scan_mail(struct lw_scan *sc, struct zcl_command_reply *reply)
     if (!d) {
         if (errno == ENOENT)
             return true;
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+        zcl_command_reply_fail(sc->reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_FAILED, "MAIL_READ_FAILED",
                                "scan", true, false,
                                "cannot read the mail dir", "mail");
         return false;
     }
-    while ((ent = readdir(d)) != NULL)
-        if (lw_is_stream(ent->d_name) &&
-            snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name) <
-                (int)sizeof(path))
-            lw_scan_file(sc, path);
-    (void)closedir(d);
-    return true;
-}
-
-/* ── open ─────────────────────────────────────────────────────────────── */
-
-static bool lw_closed(const struct lw_scan *sc, const struct lw_window *w)
-{
-    for (size_t i = 0; i < sc->ncls; i++) {
-        const struct lw_closer *c = &sc->cls[i];
-        if (strcmp(c->from, w->from) == 0 && c->seq > w->seq &&
-            strcmp(c->ts, w->ts) >= 0 && strstr(c->body, w->cand))
-            return true;
+    bool ok = true;
+    while (ok) {
+        errno = 0;
+        ent = readdir(d);
+        if (!ent) {
+            ok = errno == 0;
+            break;
+        }
+        if (lw_is_stream(ent->d_name))
+            ok = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name) <
+                 (int)sizeof(path) && lw_scan_file(sc, path, matching);
     }
-    return false;
-}
-
-/* A later window row from the same sender for the same pair supersedes this
- * one: it is the re-announcement with a fresh expected-done. */
-static bool lw_superseded(const struct lw_scan *sc, const struct lw_window *w)
-{
-    for (size_t i = 0; i < sc->nwin; i++) {
-        const struct lw_window *o = &sc->win[i];
-        if (o != w && o->seq > w->seq && strcmp(o->from, w->from) == 0 &&
-            strcmp(o->host, w->host) == 0 && strcmp(o->cand, w->cand) == 0 &&
-            strcmp(o->base, w->base) == 0)
-            return true;
-    }
-    return false;
-}
-
-/* Another host's window, on `base10` when given, neither closed nor
- * superseded. Expiry is the caller's. */
-static bool lw_counts(const struct lw_scan *sc, const struct lw_window *w,
-                      const char *host, const char *base10)
-{
-    return strcmp(w->host, host) != 0 &&
-           (!base10[0] || strcmp(w->base, base10) == 0) &&
-           !lw_closed(sc, w) && !lw_superseded(sc, w);
+    ok = closedir(d) == 0 && ok;
+    if (!ok && sc->reply->error.code[0] == '\0')
+        zcl_command_reply_fail(sc->reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "MAIL_READ_FAILED",
+                               "scan", true, false, "cannot scan the mail streams", "mail");
+    return ok;
 }
 
 static void lw_push_window(struct json_value *arr, const struct lw_window *w,
@@ -467,32 +447,41 @@ static void lw_push_window(struct json_value *arr, const struct lw_window *w,
     json_free(&item);
 }
 
-static void lw_report_open(const struct lw_scan *sc, const char *host,
-                           const char *base, int64_t now, int64_t grace,
-                           struct zcl_command_reply *reply)
+static void lw_hit_take(struct zcl_land_window_hit *hit,
+                        const struct lw_window *w, int64_t left, int64_t grace_s);
+
+/* Hold one page of relevant announcements. Match it against every stream
+ * so later closes and superseding windows count regardless of file order. */
+static bool lw_resolve_page(struct lw_scan *sc)
 {
-    struct json_value arr;
-    int64_t max_left = 0;
-    json_init(&arr);
-    json_set_array(&arr);
+    if (sc->nwin && !lw_scan_mail(sc, true))
+        return false;
     for (size_t i = 0; i < sc->nwin; i++) {
-        const struct lw_window *w = &sc->win[i];
-        int64_t left = w->done_epoch - now;
-        if (left <= -grace || !lw_counts(sc, w, host, base))
+        struct lw_window *w = &sc->win[i];
+        if (w->dismissed)
             continue;
-        lw_push_window(&arr, w, left);
-        if (left > max_left)
-            max_left = left;
+        int64_t left = w->done_epoch - sc->now;
+        if (sc->hit)
+            lw_hit_take(sc->hit, w, left, sc->grace);
+        else {
+            lw_push_window(sc->open, w, left);
+            if (left > sc->max_left)
+                sc->max_left = left;
+        }
     }
-    (void)json_push_kv_str(&reply->data, "leaf", "dev.land.window");
-    (void)json_push_kv_str(&reply->data, "action", "open");
-    (void)json_push_kv(&reply->data, "open_windows", &arr);
-    json_free(&arr);
-    (void)json_push_kv_int(&reply->data, "max_seconds_left", max_left);
-    (void)json_push_kv_int(&reply->data, "skipped", sc->skipped);
-    (void)json_push_kv_int(&reply->data, "dropped", sc->dropped);
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = 0;
+    sc->nwin = 0;
+    return true;
+}
+
+static bool lw_query(struct lw_scan *sc, const char *host, const char *base,
+                     int64_t now, int64_t grace, struct zcl_command_reply *reply)
+{
+    sc->host = host;
+    sc->base = base;
+    sc->now = now;
+    sc->grace = grace;
+    sc->reply = reply;
+    return lw_scan_mail(sc, false) && lw_resolve_page(sc);
 }
 
 static const char *lw_input_str(const struct zcl_command_request *req,
@@ -578,8 +567,21 @@ static void lw_open(const struct zcl_command_request *request,
         lw_invalid(reply, "cannot allocate the scan", "oom");
         return;
     }
-    if (lw_scan_mail(sc, reply))
-        lw_report_open(sc, host, base10, now, grace, reply);
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    sc->open = &arr;
+    if (lw_query(sc, host, base10, now, grace, reply)) {
+        (void)json_push_kv_str(&reply->data, "leaf", "dev.land.window");
+        (void)json_push_kv_str(&reply->data, "action", "open");
+        (void)json_push_kv(&reply->data, "open_windows", &arr);
+        (void)json_push_kv_int(&reply->data, "max_seconds_left", sc->max_left);
+        (void)json_push_kv_int(&reply->data, "skipped", sc->skipped);
+        (void)json_push_kv_int(&reply->data, "dropped", 0);
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = 0;
+    }
+    json_free(&arr);
     free(sc);
 }
 
@@ -1093,12 +1095,9 @@ bool zcl_land_window_foreign(const char *host, const char *base, int64_t now,
     if (!sc)
         return false;
     zcl_command_reply_init(&scratch, "zcl.land_window.v1");
-    ok = lw_scan_mail(sc, &scratch);
+    sc->hit = hit;
+    ok = lw_query(sc, host, base10, now, grace_s, &scratch);
     zcl_command_reply_free(&scratch);
-    for (size_t i = 0; ok && i < sc->nwin; i++)
-        if (lw_counts(sc, &sc->win[i], host, base10))
-            lw_hit_take(hit, &sc->win[i], sc->win[i].done_epoch - now,
-                        grace_s);
     hit->skipped = sc->skipped;
     free(sc);
     return ok;
