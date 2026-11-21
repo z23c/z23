@@ -899,9 +899,10 @@ Use this only for corruption localized to the observational peer-chain history.
 The standalone utility is **copy-first only**. It opens `SOURCE_DB` read-only,
 uses SQLite's online backup API to include committed live WAL state, and resets
 only `peer_chain_observations` and its preserved `observed_at` index in the copy.
-It prints the first pre-recovery `quick_check(1)` result, then requires a final
-`ok`, a clean foreign-key check, an empty recovered table, and unchanged table/index SQL before publishing.
-Any residual corruption publishes nothing.
+It reports the first pre-recovery `quick_check(1)` result. Before rebuilding, it
+requires distinct table and index root pages above page one, with exactly two owning
+catalog rows. Publication requires a final `quick_check(1)` result of `ok`, a clean
+foreign-key check, an empty observation table, and unchanged table and index SQL.
 
 For WAL sources, recovery pins a read snapshot only during the backup. Concurrent
 writers can continue, but WAL pages may remain retained until that snapshot is
@@ -925,6 +926,20 @@ remains unchanged. The utility does **not** replace a live database, stop or
 restart a node, clear recovery latches,
 or suppress quarantine. Review the recovered copy and use a separate explicitly
 authorized procedure for any later replacement decision.
+
+When the recovery record requires full SQLite integrity, run this read-only check
+on the isolated destination with sufficient I/O capacity.
+
+```bash
+make sqlq
+build/bin/sqlq "$DEST_DB" 'PRAGMA main.integrity_check'
+```
+
+Require exit status zero and a single output row equal to `ok`. To verify
+preservation of unrelated data, compare against evidence from the same source
+snapshot. A live writer may already have committed changes since the backup.
+<!-- claim: symbol-present recovery_root_pair_ok tools/peer_chain_recovery.c # observation root ownership check -->
+<!-- claim: symbol-present sqlq_main tools/sqlq.c # read-only integrity query -->
 <!-- claim: symbol-present peer_chain_recovery_main tools/peer_chain_recovery.c # copy-first recovery implementation -->
 <!-- claim: symbol-present peer_chain_recovery Makefile # standalone build target -->
 
