@@ -31,6 +31,7 @@
 #include "net/file_market.h"
 #include "script/htlc.h"
 #include "script/standard.h"
+#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "wallet/wallet_sqlite.h"
@@ -120,7 +121,7 @@ static void row_note(struct vault_row *row, const char *fmt, ...)
 
 /* Prepare an enumeration query. These SELECTs list identities and keys —
  * they never compute a balance, so nothing here duplicates a primitive.
- * Rows are stepped through AR_STEP_ROW as the AR contract requires. */
+ * Checked stepping distinguishes normal completion from an unreadable set. */
 static bool vault_prepare(struct node_db *ndb, sqlite3_stmt **s,
                           const char *sql)
 {
@@ -179,7 +180,8 @@ static void ident_load_watch_only(struct node_db *ndb, struct vault_ident *ids)
         ids->truncated = ids->t_truncated = true;   /* identity set is knowingly incomplete */
         return;
     }
-    while (AR_STEP_ROW(s)) {
+    enum zcl_step step;
+    while ((step = ar_step_checked(s, "vault watch-only identities", NULL)) == ZCL_STEP_ROW) {
         if (ids->n_t >= VAULT_MAX_T_IDENT) {
             ids->truncated = ids->t_truncated = true;
             break;
@@ -194,6 +196,8 @@ static void ident_load_watch_only(struct node_db *ndb, struct vault_ident *ids)
             ids->n_watch++;
         }
     }
+    if (step == ZCL_STEP_ERROR)
+        ids->truncated = ids->t_truncated = true;
     AR_FINALIZE(s);
 }
 
@@ -206,7 +210,8 @@ static void ident_load_sapling(struct node_db *ndb, struct vault_ident *ids)
         ids->truncated = ids->z_truncated = true;
         return;
     }
-    while (AR_STEP_ROW(s)) {
+    enum zcl_step step;
+    while ((step = ar_step_checked(s, "vault Sapling identities", NULL)) == ZCL_STEP_ROW) {
         if (ids->n_z >= VAULT_MAX_Z_IDENT) {
             ids->truncated = ids->z_truncated = true;
             break;
@@ -220,6 +225,8 @@ static void ident_load_sapling(struct node_db *ndb, struct vault_ident *ids)
         memcpy(ids->z_raw[ids->n_z] + 11, p, 32);
         ids->n_z++;
     }
+    if (step == ZCL_STEP_ERROR)
+        ids->truncated = ids->z_truncated = true;
     AR_FINALIZE(s);
 }
 
