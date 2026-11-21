@@ -537,9 +537,10 @@ static int wrc_history_missing_assert(const struct json_value *result, const cha
               wrc_history_null(child, "fee") && wrc_history_null(child, "total_in") &&
               wrc_int(child, "missing_inputs") == 1);
     const char *hash = wrc_str(child, "missing_prevout");
-    const char *last = strcmp(label, "known_first_missing_second") == 0 ? "73" : "51";
-    WRC_CHECK("first unresolved prevout is recorded", strlen(hash) == 64 &&
-              strcmp(hash + 62, last) == 0 &&
+    const char *expected_hash = strcmp(label, "known_first_missing_second") == 0
+        ? "0000000000000000000000000000000000000000000000000000000000000073"
+        : "0000000000000000000000000000000000000000000000000000000000000051";
+    WRC_CHECK("first unresolved prevout is recorded", strcmp(hash, expected_hash) == 0 &&
               wrc_int(child, "missing_prevout_vout") == (strcmp(label, "out_of_range") == 0 ? 1 : 0));
     const struct json_value *known = json_get(child, "known_input_subtotal");
     double expected = strcmp(label, "known_first_missing_second") == 0 ? 10.0 : 0.0;
@@ -576,6 +577,9 @@ static int wrc_accounting_history_read(struct wrc_f *f, const char *label,
     if (size < sizeof(encoded)) printf("ACCOUNTING_HISTORY %s %s\n", label, encoded);
     else printf("ACCOUNTING_HISTORY %s output-too-large\n", label);
     failures += wrc_history_global_assert(&result, incomplete);
+    WRC_CHECK("wallet map capacity is explicit",
+              wrc_bool(&result, "wallet_map_at_capacity", false) ==
+              (strcmp(label, "wallet_map_limit") == 0));
     bool missing = strcmp(label, "missing_parent") == 0 ||
                    strcmp(label, "out_of_range") == 0 ||
                    strcmp(label, "known_first_missing_second") == 0;
@@ -677,9 +681,63 @@ static int wrc_accounting_history(struct wrc_f *f, struct wallet *original)
         failures += wrc_accounting_history_read(f, "scan_retry_pending", true);
         w->scan_retry.pending = false;
         w->num_wallet_tx = MAX_WALLET_TX;
-        failures += wrc_accounting_history_read(f, "wallet_map_limit", true);
+        failures += wrc_accounting_history_read(f, "wallet_map_limit", false);
         w->num_wallet_tx = 2;
         failures += wrc_accounting_known_fee(f, w, parent, &ours);
+    }
+    rpc_wallet_set_state(original, f->ms, f->datadir, f->ws, f->mempool, NULL);
+    wallet_free(w);
+    free(w);
+    return failures;
+}
+
+static bool wrc_shielded_accounting_amounts(const struct json_value *result)
+{
+    const struct json_value *from = json_get(result, "from_shielded");
+    const struct json_value *out = json_get(result, "external_out");
+    const struct json_value *balance = json_get(result, "utxo_balance");
+    const struct json_value *fee = json_get(result, "total_fees");
+    const struct json_value *subtotal = json_get(result, "known_fee_subtotal");
+    const struct json_value *tx_fee = json_get(wrc_history_send(result), "fee");
+    return from && out && balance && fee && subtotal && tx_fee &&
+        json_get_real(from) == 10.0 && json_get_real(out) == 5.0 &&
+        json_get_real(balance) == 4.0 && json_get_real(fee) == 1.0 &&
+        json_get_real(subtotal) == 1.0 && json_get_real(tx_fee) == 1.0;
+}
+
+static int wrc_accounting_shielded_funded(struct wrc_f *f, struct wallet *original)
+{
+    int failures = 0;
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "accounting.shielded");
+    if (!w) return 1;
+    wallet_init(w);
+    struct pubkey pk;
+    bool created = wallet_generate_new_key(w, &pk);
+    struct wallet_tx *send = &w->map_wallet[0];
+    transaction_init(&send->tx);
+    bool allocated = created && transaction_alloc(&send->tx, 0, 2);
+    WRC_CHECK("shielded-funded fixture allocates", allocated);
+    if (allocated) {
+        send->used = true; send->from_me = true; send->confirms = 3;
+        send->tx.hash.data[0] = 0x92;
+        send->tx.value_balance = INT64_C(1000000000);
+        struct key_id ours = pubkey_get_id(&pk), other = {0};
+        other.id.data[0] = 0x93;
+        send->tx.vout[0].value = INT64_C(500000000);
+        script_for_p2pkh(&send->tx.vout[0].script_pub_key, &other);
+        send->tx.vout[1].value = INT64_C(400000000);
+        script_for_p2pkh(&send->tx.vout[1].script_pub_key, &ours);
+        w->num_wallet_tx = 1;
+        rpc_wallet_set_state(w, f->ms, f->datadir, f->ws, f->mempool, NULL);
+        struct json_value params = {0}, result = {0};
+        json_set_array(&params);
+        bool ok = rpc_table_execute(f->tbl, "getwalletaccounting", &params, &result);
+        char encoded[8192];
+        if (json_write(&result, encoded, sizeof(encoded)) < sizeof(encoded))
+            printf("ACCOUNTING_SHIELDED_FUNDED %s\n", encoded);
+        WRC_CHECK("shielded-funded RPC reports 10 in, 5 out, 4 unspent, 1 fee",
+                  ok && wrc_shielded_accounting_amounts(&result));
+        json_free(&params); json_free(&result);
     }
     rpc_wallet_set_state(original, f->ms, f->datadir, f->ws, f->mempool, NULL);
     wallet_free(w);
@@ -3491,6 +3549,7 @@ int test_wallet_rescan_coverage(void)
         failures += wrc_boot_catch_up_fail_closed(&f);
         failures += wrc_accounting_boundary(&f, w1);
         failures += wrc_accounting_history(&f, w1);
+        failures += wrc_accounting_shielded_funded(&f, w1);
     }
     rpc_wallet_set_state(w1, &ms, datadir, &ws, &mempool, NULL);
     failures += wrc_k_cleared_marker_persists(w1, &ws, &wtbl, idx, last);

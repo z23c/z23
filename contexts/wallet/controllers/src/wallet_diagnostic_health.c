@@ -123,7 +123,7 @@ static int64_t accounting_tx_fee(const struct wallet_tx *wtx,
                                  int64_t total_in, int64_t from_shielded)
 {
     int64_t tx_fee = 0;
-    if (wtx->from_me && total_in > 0) {
+    if (wtx->from_me && (total_in > 0 || from_shielded > 0)) {
         int64_t value_out = (int64_t)transaction_get_value_out(tx);
         tx_fee = total_in + from_shielded - value_out;
         if (tx_fee < 0) tx_fee = 0;
@@ -267,8 +267,8 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     int64_t total_from_shielded = 0; /* shielded pool → transparent */
     int64_t missing_total = 0;
     zcl_mutex_lock(&ctx->wallet->cs);
-    bool pending = ctx->wallet->scan_retry.pending ||
-                   ctx->wallet->num_wallet_tx >= MAX_WALLET_TX;
+    bool pending = ctx->wallet->scan_retry.pending;
+    bool map_at_capacity = ctx->wallet->num_wallet_tx >= MAX_WALLET_TX;
     zcl_mutex_unlock(&ctx->wallet->cs);
 
     struct json_value tx_list = {0};
@@ -380,6 +380,7 @@ bool rpc_getwalletaccounting(const struct json_value *params,
     json_push_kv_real(result, "utxo_balance", strtod(s, NULL));
 
     json_push_kv_str(result, "accounting_scope", "loaded_wallet_transactions");
+    json_push_kv_bool(result, "wallet_map_at_capacity", map_at_capacity);
     json_push_kv_str(result, "history_coverage",
                      pending || missing_total ? "incomplete" : "unverified");
     json_push_kv_int(result, "unresolved_inputs", missing_total);
