@@ -45,7 +45,7 @@ struct zcl_result snapsync_discard_staging_internal(struct node_db *ndb,
         return ZCL_ERR(-1, "discard_staging: ndb null or not open");
     bool ok = node_db_exec(ndb, "DELETE FROM " SNAPSYNC_STAGING_TABLE);
     ok &= node_db_exec(ndb,
-                       "DELETE FROM node_state WHERE key LIKE 'snapshot_staging_%'");
+                       "DELETE FROM node_state WHERE key GLOB 'snapshot_staging_*'");
     if (reason && *reason) {
         ok &= node_db_state_set(ndb, SNAPSYNC_STAGING_LAST_DISCARD_KEY,
                                 reason, strlen(reason));

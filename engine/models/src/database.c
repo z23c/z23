@@ -1019,7 +1019,7 @@ static bool db_boot_staging_cleanup(struct node_db *ndb, const char *path,
                "DELETE FROM snapshot_staging_utxos",
                "snapshot_staging_boot_cleanup", path) == SQLITE_OK &&
            db_exec_checked_progress(ndb->db,
-               "DELETE FROM node_state WHERE key LIKE 'snapshot_staging_%'",
+               "DELETE FROM node_state WHERE key GLOB 'snapshot_staging_*'",
                "snapshot_staging_state_boot_cleanup", path) == SQLITE_OK;
 }
 

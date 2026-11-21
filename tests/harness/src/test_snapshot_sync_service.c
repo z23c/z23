@@ -1064,6 +1064,9 @@ static int test_snapshot_sync_service_db_service_runtime(void)
         memset(&svc, 0, sizeof(svc));
         memset(&runtime, 0, sizeof(runtime));
         ASSERT(node_db_open(&ndb, ":memory:"));
+        int64_t marker = 0;
+        ASSERT(node_db_state_set_int(&ndb, "snapshot_staging_archive", 1));
+        ASSERT(node_db_state_set_int(&ndb, "snapshot_stagingXarchive", 2));
         db_service_init(&dbsvc);
         ASSERT(db_service_attach(&dbsvc, &ndb));
         ASSERT(db_service_start(&dbsvc));
@@ -1088,6 +1091,10 @@ static int test_snapshot_sync_service_db_service_runtime(void)
 
         app_runtime_set_current(NULL);
         db_service_stop(&dbsvc);
+        ASSERT(!node_db_state_get_int(&ndb, "snapshot_staging_archive", &marker));
+        ASSERT(node_db_state_get_int(&ndb, "snapshot_stagingXarchive", &marker));
+        ASSERT(marker == 2);
+
         node_db_close(&ndb);
         PASS();
     } _test_next:;
@@ -1402,6 +1409,8 @@ static int test_snapshot_sync_service_boot_discards_staging(void)
             " VALUES(X'4200000000000000000000000000000000000000000000000000000000000000',0,1,X'51',0,1,0)"));
         ASSERT(node_db_state_set(&ndb, "snapshot_staging_phase",
                                  "chunk_receive", strlen("chunk_receive")));
+        int64_t marker = 0;
+        ASSERT(node_db_state_set_int(&ndb, "snapshotXstaging_phase", 7));
         ASSERT(count_table_rows(ndb.db, "snapshot_staging_utxos") == 1);
         node_db_close(&ndb);
 
@@ -1409,6 +1418,8 @@ static int test_snapshot_sync_service_boot_discards_staging(void)
         ASSERT(count_table_rows(ndb.db, "snapshot_staging_utxos") == 0);
         ASSERT(!node_db_state_get(&ndb, "snapshot_staging_phase",
                                   phase, sizeof(phase), &phase_len));
+        ASSERT(node_db_state_get_int(&ndb, "snapshotXstaging_phase", &marker));
+        ASSERT(marker == 7);
         node_db_close(&ndb);
         unlink(dbpath);
         PASS();
