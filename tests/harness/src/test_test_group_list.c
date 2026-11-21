@@ -10,6 +10,7 @@
 #include "test/test_core.h"
 #include "test/test_home_isolation.h"
 #include "command/native_command.h"
+#include "controllers/agent_impact_rules.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "test_group_list.h"
@@ -332,6 +333,51 @@ static int test_leaf_registry_read_error(void)
     return failures;
 }
 
+static bool tglt_has_impact_group(const struct agent_impact_acc *acc, const char *group)
+{
+    for (size_t i = 0; i < acc->groups_len; i++)
+        if (strcmp(acc->groups[i], group) == 0) return true;
+    return false;
+}
+
+static int test_wallet_view_impact_specs(void)
+{
+    int failures = 0;
+    TEST("wallet view source impact selects its user-facing specifications") {
+        static const char *const paths[] = {
+            "contexts/wallet/controllers/src/wallet_view_dashboard.c",
+            "contexts/wallet/controllers/src/wallet_view_shield.c",
+            "contexts/wallet/models/src/wallet_label.c"
+        };
+        static const char *const specs[] = {
+            "spec_wallet_dashboard", "spec_wallet_shield", "spec_wallet_pulse",
+            "spec_wallet_sovereignty", "spec_wallet_flow", "spec_wallet_accessibility",
+            "spec_html_quality", "spec_user_journeys"
+        };
+        struct agent_impact_acc acc[3] = {0};
+        size_t found[3] = {0};
+        for (size_t i = 0; i < 3; i++) {
+            (void)agent_impact_apply_shared_rules(paths[i], &acc[i]);
+            for (size_t j = 0; j < sizeof(specs) / sizeof(specs[0]); j++)
+                if (tglt_has_impact_group(&acc[i], specs[j])) found[i]++;
+            printf("[path=%s groups=%zu specs=%zu] ", paths[i], acc[i].groups_len, found[i]);
+        }
+        ASSERT_EQ(found[0], 8);
+        ASSERT_EQ(found[1], 8);
+        ASSERT_EQ(found[2], 0);
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(!acc[i].groups_lost);
+            ASSERT(tglt_has_impact_group(&acc[i], "wallet_view"));
+            ASSERT(tglt_has_impact_group(&acc[i], "wallet"));
+            ASSERT(tglt_has_impact_group(&acc[i], "spec_wallet_send"));
+            ASSERT(tglt_has_impact_group(&acc[i], "spec_100_stories"));
+            ASSERT(tglt_has_impact_group(&acc[i], "make_lint_gates"));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_test_group_list(void)
 {
     int failures = 0;
@@ -341,5 +387,6 @@ int test_test_group_list(void)
     failures += test_leaf_end_to_end();
     failures += test_registry_read_error();
     failures += test_leaf_registry_read_error();
+    failures += test_wallet_view_impact_specs();
     return failures;
 }
