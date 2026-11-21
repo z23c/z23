@@ -166,6 +166,14 @@ int dl_reseal_rebase(const char *wt, struct dl_row *row,
 /* The queue's own commits are signed unless this is the unsigned fixture
  * (ZCL_LAND_ALLOW_UNSIGNED=1 under the proof stub). */
 bool dl_fixture_unsigned(void);
+/* The advisory speculative prediction builds unsigned: while it is set on the
+ * calling thread, dl_git passes `-c commit.gpgsign=false` and no hooks, and
+ * the code that names -S itself (dl_linear_commit, the resealer) names
+ * --no-gpg-sign instead. */
+void dl_unsigned_scratch_set(bool on);
+bool dl_commit_unsigned(void);
+/* What dl_conflict_why names when git showed no unmerged path. */
+#define DL_CONFLICT_NO_PATHS "rebase refused the tip"
 /* Append the optional seal_old_root/seal_new_root members to an encoded
  * row line of `size` bytes ending in "}\n"; returns the new size. */
 size_t dl_seal_append(const struct dl_row *r, char *out, size_t cap,
@@ -349,11 +357,12 @@ bool dl_train_stack_rows(const struct dl_dirs *d, const struct dl_row *head,
                          struct dl_train *t, const struct dl_row *rows,
                          size_t n, size_t width, dl_rebase_fn rebase);
 
-/* The advisory speculative pair of `dev land decision`
+/* The advisory speculative pair of `dev land speculate`
  * (native_dev_land_speculative.c):
  * the pair the queue will prove NEXT, predicted while the in-flight row is
- * still proving. `width` is the train width to assume (0: the process
- * environment's, as the driver reads it), `budget_ms` bounds the whole
+ * still proving. `width` is the train width to assume (1 solo, 2..8; 0 when
+ * the caller gave none: the process environment's ZCL_LAND_TRAIN_WIDTH, as
+ * the driver reads it, and with neither no pair is made up), `budget_ms` bounds the whole
  * prediction, `bundle_out` (absolute path or NULL) also writes the pair's git
  * bundle and offer. */
 #define DL_SPEC_BUDGET_MS (2 * 60 * 1000)

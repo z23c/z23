@@ -1795,10 +1795,25 @@ void dl_unlock(int fd)
  * deep inside the rebase code it shares with the driver, is held to one
  * budget. */
 static _Thread_local int64_t g_dl_deadline_ms;
+/* The same calling thread, when it runs the advisory prediction: its git
+ * children never sign and run no hook, whatever the landing repository's
+ * config says (dl_git passes the per-command config; dl_commit_unsigned()
+ * tells the code that names -S itself). The driver never sets it. */
+static _Thread_local bool g_dl_unsigned_scratch;
 
 void dl_deadline_set(int64_t at_ms)
 {
     g_dl_deadline_ms = at_ms;
+}
+
+void dl_unsigned_scratch_set(bool on)
+{
+    g_dl_unsigned_scratch = on;
+}
+
+bool dl_commit_unsigned(void)
+{
+    return g_dl_unsigned_scratch;
 }
 
 /* `limit_ms` cut to what is left of the deadline; 0 when it has passed. */
@@ -1818,7 +1833,7 @@ int dl_budget_ms(int limit_ms)
 int dl_git(const char *dir, const char *const *args, char *out,
                   size_t cap, int timeout_ms)
 {
-    const char *argv[24];
+    const char *argv[32];
     size_t n = 0;
     if (out && cap)
         out[0] = '\0';
@@ -1830,6 +1845,12 @@ int dl_git(const char *dir, const char *const *args, char *out,
     argv[n++] = "git";
     argv[n++] = "-C";
     argv[n++] = dir;
+    if (g_dl_unsigned_scratch) {
+        argv[n++] = "-c";
+        argv[n++] = "commit.gpgsign=false";
+        argv[n++] = "-c";
+        argv[n++] = "core.hooksPath=/dev/null";
+    }
     for (size_t i = 0; args[i]; i++) {
         if (n + 2 > sizeof(argv) / sizeof(argv[0]))
             return -1;
@@ -6011,7 +6032,7 @@ static void dl_conflict_why(const char *paths, char *why, size_t cap)
     }
     room = hint_len < cap ? cap - 1 - hint_len : 0;
     (void)snprintf(why, cap, "%.*s%s", (int)room,
-                   paths && paths[0] ? paths : "rebase refused the tip", hint);
+                   paths && paths[0] ? paths : DL_CONFLICT_NO_PATHS, hint);
     for (char *p = why; *p; p++) {
         if (*p == '\n')
             *p = ' ';
@@ -6046,7 +6067,10 @@ static bool dl_linear_commit(const struct dl_dirs *d, struct dl_row *row,
     size_t n = 0;
     args[n++] = "--no-replace-objects";
     args[n++] = "commit-tree";
-    if (!dl_fixture_unsigned()) args[n++] = "-S";
+    if (dl_commit_unsigned())
+        args[n++] = "--no-gpg-sign";
+    else if (!dl_fixture_unsigned())
+        args[n++] = "-S";
     args[n++] = tree;
     args[n++] = "-p"; args[n++] = base;
     args[n++] = "-m"; args[n++] = message;
@@ -12872,9 +12896,10 @@ static bool dl_decision_row_identity(struct zcl_command_reply *reply,
 }
 
 #if !defined(_WIN32)
-/* The optional speculative pair: asked for by `speculative` or implied by
- * `bundle_out`, never by default, because it builds a scratch worktree and
- * the self-upgrade comparison runs this leaf under a 22 s budget. */
+/* The speculative pair is the `dev land speculate` leaf's alone, never the
+ * read-only decision's: it writes git objects into the landing repository,
+ * registers a temporary worktree there and, with bundle_out, creates a file,
+ * and the self-upgrade comparison runs the decision under a 22 s budget. */
 struct dl_decision_spec {
     bool want;
     struct dl_spec_args args;
@@ -12916,7 +12941,7 @@ static bool dl_decision_bundle_in(const struct zcl_command_request *req,
     zcl_command_reply_init(chk, "zcl.land.v1");
     ok = zcl_dlr_bundle_out_free(spec->args.bundle_out, chk);
     if (!ok)
-        dl_fail(reply, chk->error.code, "decision", chk->error.message,
+        dl_fail(reply, chk->error.code, "speculate", chk->error.message,
                 chk->error.evidence);
     zcl_command_reply_free(chk);
     free(chk);
@@ -12928,17 +12953,17 @@ static bool dl_decision_spec_in(const struct zcl_command_request *req,
                                 struct dl_decision_spec *spec,
                                 struct zcl_command_reply *reply)
 {
-    const struct json_value *flag = json_get(req->input, "speculative");
     long long width = 0, budget = 0;
     bool given_width, given_budget;
-    spec->want = flag && ((flag->type == JSON_BOOL && json_get_bool(flag)) ||
-                          (flag->type == JSON_STR && json_get_str(flag) &&
-                           strcmp(json_get_str(flag), "true") == 0));
-    if (!dl_decision_int_in(req, "train_width", 2, 8, &width, &given_width) ||
+    spec->want = true;
+    /* 1 is a stated solo width; the driver's own width is the lander
+     * service's ZCL_LAND_TRAIN_WIDTH, which this process only sees if the
+     * caller exported it (dl_train_speculate names which it used). */
+    if (!dl_decision_int_in(req, "train_width", 1, 8, &width, &given_width) ||
         !dl_decision_int_in(req, "budget_ms", 1000, 600000, &budget,
                             &given_budget)) {
-        dl_fail(reply, "BAD_INPUT", "decision",
-                "train_width must be 2..8 and budget_ms 1000..600000",
+        dl_fail(reply, "BAD_INPUT", "speculate",
+                "train_width must be 1..8 and budget_ms 1000..600000",
                 "input.train_width or input.budget_ms");
         return false;
     }
@@ -12984,7 +13009,7 @@ static void dl_decision_speculate(const struct dl_dirs *d,
 /* The decision's inputs, refused before any lock is taken. A request with no
  * input object is the snapshot's to report unavailable, as it always was. */
 static bool dl_decision_input(const struct zcl_command_request *req,
-                              struct dl_decision_spec *spec,
+                              bool speculate, struct dl_decision_spec *spec,
                               struct zcl_command_reply *reply)
 {
     long long requested = 0;
@@ -12994,7 +13019,7 @@ static bool dl_decision_input(const struct zcl_command_request *req,
         dl_fail(reply, "BAD_INPUT", "decision", "seq must be a positive integer", "input.seq");
         return false;
     }
-    return dl_decision_spec_in(req, spec, reply);
+    return !speculate || dl_decision_spec_in(req, spec, reply);
 }
 
 /* One coherent snapshot under the shared locks, which are released before it
@@ -13026,17 +13051,20 @@ out:
 }
 #endif
 
-static void dl_decision(const struct zcl_command_request *req,
+/* `speculate` is the dev.land.speculate leaf: the same snapshot, then the
+ * advisory pair. The read-only decision leaf never asks for it. */
+static void dl_decision(const struct zcl_command_request *req, bool speculate,
                         struct zcl_command_reply *reply)
 {
 #if defined(_WIN32)
     (void)req;
+    (void)speculate;
     dl_fail(reply, "DECISION_UNAVAILABLE", "decision", "snapshot requires POSIX locks", "step.lock");
 #else
     struct dl_dirs d;
     struct dl_decision_spec spec = {0};
     enum dl_dispatch_kind kind = DL_DISPATCH_OUTCOME_ERROR;
-    if (!dl_decision_input(req, &spec, reply))
+    if (!dl_decision_input(req, speculate, &spec, reply))
         return;
     if (dl_decision_observe(req, &d, &spec, reply, &kind)) {
         reply->status = ZCL_COMMAND_STATUS_PASSED;
@@ -14466,7 +14494,7 @@ static bool dl_su_row_snapshot(const struct zcl_command_request *req,
     if (!json_push_kv_int(&input, "seq", seq)) { json_free(&input); return false; }
     scoped.input = &input;
     zcl_command_reply_init(&observed, "zcl.land.v1");
-    dl_decision(&scoped, &observed);
+    dl_decision(&scoped, false, &observed);
     const char *sha = json_get_str(json_get(&observed.data, "row_sha3"));
     bool ok = observed.status == ZCL_COMMAND_STATUS_PASSED && dl_hex_ok(sha, 64);
     if (ok) memcpy(row, sha, 65);
@@ -16536,7 +16564,23 @@ void zcl_native_handle_dev_land_decision(const struct zcl_command_request *reque
         dl_fail(reply, "BAD_INPUT", "decision", "decision is read-only", "input.action");
         return;
     }
-    dl_decision(request, reply);
+    dl_decision(request, false, reply);
+}
+
+/* The advisory speculative pair: the decision's snapshot, then the pair the
+ * queue will prove after the in-flight row lands. It writes git objects into
+ * the landing repository, registers a temporary worktree there and, with
+ * bundle_out, creates a file; it never writes queue state. */
+void zcl_native_handle_dev_land_speculate(const struct zcl_command_request *request,
+                                          struct zcl_command_reply *reply)
+{
+    const char *action = request && request->input ? dl_str(request, "action") : NULL;
+    if (!reply) return;
+    if (action && strcmp(action, "speculate") != 0) {
+        dl_fail(reply, "BAD_INPUT", "speculate", "speculate only predicts the next pair", "input.action");
+        return;
+    }
+    dl_decision(request, true, reply);
 }
 
 /* Narrow in-process entries for tools/command/native_dev_land_remote.c: the

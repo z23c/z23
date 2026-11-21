@@ -1008,21 +1008,77 @@ static void dlr_send_next_action(const struct dlr_send *s,
     (void)json_push_kv_str(&reply->data, "next_action", text);
 }
 
+/* An exact pair's bundle is made beside its destination under a name only
+ * this call holds, then linked into place: link(2) never replaces, so a file
+ * that appears at bundle_out after the up-front check is neither overwritten
+ * nor, on any failure here, removed. A send keeps the plain path below. */
+static bool dlr_pair_stage(struct dlr_send *s, struct zcl_command_reply *reply)
+{
+#if defined(_WIN32)
+    dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                  "an exact pair's bundle needs link(2)", s->out);
+    return false;
+#else
+    char part[DLR_PATH + 32];
+    bool ok = false;
+    FILE *f;
+    if (snprintf(part, sizeof(part), "%s.part-%ld", s->out,
+                 (long)getpid()) >= (int)sizeof(part)) {
+        dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                      "bundle_out is too long for its scratch sibling",
+                      "input.bundle_out");
+        return false;
+    }
+    f = fopen(part, "wx");
+    if (!f) {
+        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                      "cannot create a scratch file beside bundle_out", part);
+        return false;
+    }
+    (void)fclose(f);
+    if (!dlr_send_make(s, part, reply)) {
+        /* reply already names the failure */
+    } else if (!zcl_dlr_file_sha256(part, s->bsha)) {
+        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                      "cannot read back the bundle to hash it", part);
+    } else if (link(part, s->out) != 0) {
+        bool exists = errno == EEXIST;
+        dlr_send_fail(reply, exists ? "SEND_BUNDLE_EXISTS" : "SEND_BUNDLE_FAILED",
+                      "bundle",
+                      exists ? "bundle_out appeared while the pair was built; "
+                               "it is never overwritten"
+                             : "cannot place the bundle at bundle_out",
+                      s->out);
+    } else {
+        ok = true;
+    }
+    (void)remove(part);
+    return ok;
+#endif
+}
+
 /* --bundle_out: the handoff for a machine with no ssh to the queue host. */
 static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
 {
     char ready[256];
-    /* bundle_out did not exist (dlr_send_args), so any file at it now is
-     * this call's own partial output and is removed on failure. */
-    if (!dlr_send_make(s, s->out, reply)) {
-        (void)remove(s->out);
-        return;
-    }
-    if (!zcl_dlr_file_sha256(s->out, s->bsha)) {
-        (void)remove(s->out);
-        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
-                      "cannot read back the bundle to hash it", s->out);
-        return;
+    if (s->range_base) {
+        /* Not ours until linked: nothing at bundle_out is ever removed
+         * unless this call's own link put it there. */
+        if (!dlr_pair_stage(s, reply))
+            return;
+    } else {
+        /* bundle_out did not exist (dlr_send_args), so any file at it now is
+         * this call's own partial output and is removed on failure. */
+        if (!dlr_send_make(s, s->out, reply)) {
+            (void)remove(s->out);
+            return;
+        }
+        if (!zcl_dlr_file_sha256(s->out, s->bsha)) {
+            (void)remove(s->out);
+            dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                          "cannot read back the bundle to hash it", s->out);
+            return;
+        }
     }
     if (!dlr_send_offer(s, reply)) {
         (void)remove(s->out);

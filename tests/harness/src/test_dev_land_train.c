@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include <utime.h>
 
 #if !defined(_WIN32)
 
@@ -1657,6 +1658,8 @@ _test_next:;
  * identity a consumer keys on. */
 
 #define DLX_SP_DATE "2026-01-02T03:04:05+0000"
+/* width the tests give when they want a solo pair */
+#define DLX_SP_SOLO 1
 
 struct dlx_sp_pair {
     char status[16], reason[48], detail[512];
@@ -1670,23 +1673,24 @@ static bool dlx_sp_decide(struct dlx_call *c, int64_t width,
                           const char *bundle_out, int64_t budget_ms,
                           bool speculative)
 {
-    char why[256];
-    dlx_begin(c, "decision");
-    if (speculative)
-        (void)json_push_kv_bool(&c->input, "speculative", true);
+    char why[256] = "";
+    dlx_begin(c, speculative ? "speculate" : "decision");
     if (width)
         (void)json_push_kv_int(&c->input, "train_width", width);
     if (bundle_out)
         (void)json_push_kv_str(&c->input, "bundle_out", bundle_out);
     if (budget_ms)
         (void)json_push_kv_int(&c->input, "budget_ms", budget_ms);
-    if (!c->request.spec || !c->request.spec->handler ||
+    if (!c->request.spec ||
         !zcl_command_registry_input_validate(c->request.spec, &c->input, why,
                                              sizeof(why))) {
         printf("[decision input rejected: %s] ", why);
         return false;
     }
-    c->request.spec->handler(&c->request, &c->reply);
+    if (speculative)
+        zcl_native_handle_dev_land_speculate(&c->request, &c->reply);
+    else
+        c->request.spec->handler(&c->request, &c->reply);
     return true;
 }
 
@@ -1867,12 +1871,20 @@ static int test_dev_land_speculative_next_pair(void)
         ASSERT(dlx_sp_rig(&rig, "spec_next_rig", false, b, c3, d));
         ASSERT(dlx_tr_file_field("queue.jsonl", 1, "local", flight_local, sizeof(flight_local)));
         ASSERT(dlx_tr_file_field("queue.jsonl", 1, "base", flight_base, sizeof(flight_base)));
-        /* Without the flag the decision is exactly what it was. */
+        /* The read-only decision is exactly what it was and no longer takes
+         * the speculative pair's keys: those belong to dev land speculate. */
+        {
+            char why[256];
+            dlx_begin(&c, "decision");
+            (void)json_push_kv_str(&c.input, "bundle_out", "/tmp/x.bundle");
+            ASSERT(c.request.spec != NULL && !zcl_command_registry_input_validate(c.request.spec, &c.input, why, sizeof(why)));
+            dlx_end(&c);
+        }
         ASSERT(dlx_sp_decide(&c, 0, NULL, 0, false) && dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "speculative_pair") == NULL);
         dlx_end(&c);
         ASSERT(dlx_sp_state(&rig, before, sizeof(before)));
-        ASSERT(dlx_sp_decide(&c, 0, NULL, 0, true) && dlx_ok(&c));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, NULL, 0, true) && dlx_ok(&c));
         dlx_sp_read(&c, &p);
         dlx_end(&c);
         ASSERT(dlx_sp_state(&rig, after, sizeof(after)));
@@ -1897,6 +1909,9 @@ static int test_dev_land_speculative_next_pair(void)
         ASSERT(dlx_sp_tree_of(&rig, real, real_tree));
         ASSERT_STR_EQ(real_base, p.base);
         ASSERT_STR_EQ(real_tree, p.tree);
+        /* Commit ids equal only because this fixture is unsigned and the
+         * committer time pinned; in production the driver's commits are
+         * signed and carry their own time, so (base, tree) is the identity. */
         ASSERT_STR_EQ(real, p.local);
         ASSERT_STR_EQ(real, p.commit[0]);
         PASS();
@@ -1999,11 +2014,12 @@ static bool dlx_sp_phase(const char *from, const char *to)
 }
 
 /* One speculative decision that must pass with no pair for `reason`. */
-static bool dlx_sp_none(const char *reason, const char *detail_part)
+static bool dlx_sp_none_width(int64_t width, const char *reason,
+                              const char *detail_part)
 {
     struct dlx_call c;
     struct dlx_sp_pair p;
-    bool ran = dlx_sp_decide(&c, 0, NULL, 0, true), ok = ran && dlx_ok(&c);
+    bool ran = dlx_sp_decide(&c, width, NULL, 0, true), ok = ran && dlx_ok(&c);
     memset(&p, 0, sizeof(p));
     if (ok)
         dlx_sp_read(&c, &p);
@@ -2014,6 +2030,11 @@ static bool dlx_sp_none(const char *reason, const char *detail_part)
         printf("[want none/%s got %s/%s: %s] ", reason, ok ? "" : p.status,
                p.reason, p.detail);
     return ok;
+}
+
+static bool dlx_sp_none(const char *reason, const char *detail_part)
+{
+    return dlx_sp_none_width(DLX_SP_SOLO, reason, detail_part);
 }
 
 static int test_dev_land_speculative_no_pair(void)
@@ -2131,7 +2152,7 @@ static int test_dev_land_speculative_budget(void)
         ASSERT(dlx_sp_state(&rig, before, sizeof(before)));
         ASSERT(dlx_sp_slow_git(saved));
         int64_t started = platform_time_monotonic_us();
-        ASSERT(dlx_sp_decide(&c, 0, NULL, 1000, true) && dlx_ok(&c));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, NULL, 1000, true) && dlx_ok(&c));
         int64_t took_ms = (platform_time_monotonic_us() - started) / 1000;
         dlx_sp_read(&c, &p);
         dlx_end(&c);
@@ -2181,11 +2202,11 @@ static int test_dev_land_speculative_bundle(void)
         (void)snprintf(offer, sizeof(offer), "%s.offer.json", out);
         ASSERT(access(out, F_OK) != 0);
         /* No bundle_out, no file. */
-        ASSERT(dlx_sp_decide(&c, 0, NULL, 0, true) && dlx_ok(&c));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, NULL, 0, true) && dlx_ok(&c));
         dlx_end(&c);
         ASSERT(access(out, F_OK) != 0 && access(offer, F_OK) != 0);
         /* With it, the bundle's one head is the reported pair's local. */
-        ASSERT(dlx_sp_decide(&c, 0, out, 0, false) && dlx_ok(&c));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, out, 0, true) && dlx_ok(&c));
         dlx_sp_read(&c, &p);
         const struct json_value *bundle = json_get(json_get(&c.reply.data, "speculative_pair"), "bundle");
         ASSERT_STR_EQ(dlx_jstr(bundle, "bundle"), out);
@@ -2199,14 +2220,14 @@ static int test_dev_land_speculative_bundle(void)
         ASSERT(dlx_qp_file_has(offer, p.local) && dlx_qp_file_has(offer, p.base));
         ASSERT(dlx_slurp(out, first, sizeof(first), &first_len));
         /* An existing bundle_out or offer is refused before any work. */
-        ASSERT(dlx_sp_decide(&c, 0, out, 0, false));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, out, 0, true));
         ASSERT_STR_EQ(dlx_err_code(&c), "SEND_BUNDLE_EXISTS");
         ASSERT(json_get(&c.reply.data, "speculative_pair") == NULL);
         dlx_end(&c);
         ASSERT(dlx_slurp(out, second, sizeof(second), &second_len));
         ASSERT(first_len == second_len && memcmp(first, second, first_len) == 0);
         ASSERT(remove(out) == 0);
-        ASSERT(dlx_sp_decide(&c, 0, out, 0, false));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, out, 0, true));
         ASSERT_STR_EQ(dlx_err_code(&c), "SEND_OFFER_EXISTS");
         dlx_end(&c);
         ASSERT(access(out, F_OK) != 0);
@@ -2214,6 +2235,373 @@ static int test_dev_land_speculative_bundle(void)
         PASS();
     }
 _test_next:;
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* A `git` ahead of the real one that runs `action` (shell) first for any call
+ * whose arguments contain the word `match`, then the real git. */
+static bool dlx_sp_shim_git(char saved[4096], const char *match,
+                            const char *action)
+{
+    char dir[1200], path[1400], body[2400];
+    const char *old = getenv("PATH");
+    (void)snprintf(dir, sizeof(dir), "%s/shim-git", g_dlx_state);
+    if (!old || (mkdir(dir, 0700) != 0 && errno != EEXIST) ||
+        snprintf(path, sizeof(path), "%s/git", dir) >= (int)sizeof(path) ||
+        snprintf(body, sizeof(body),
+                 "#!/bin/sh\ncase \" $* \" in *' %s '*) %s;; esac\n"
+                 "PATH='%s'\nexec git \"$@\"\n", match, action, old) >=
+            (int)sizeof(body) ||
+        snprintf(saved, 4096, "%s", old) >= 4096 || !dlx_write(path, body) ||
+        chmod(path, 0700) != 0)
+        return false;
+    (void)snprintf(body, sizeof(body), "%s:%s", dir, old);
+    setenv("PATH", body, 1);
+    return true;
+}
+
+static void dlx_sp_shim_end(char saved[4096])
+{
+    if (saved[0])
+        setenv("PATH", saved, 1);
+    saved[0] = '\0';
+    unsetenv("DLX_SP_QUEUE");
+}
+
+/* The queue file's path, in DLX_SP_QUEUE for a shim to edit. */
+static void dlx_sp_queue_env(void)
+{
+    char land[1200], path[1400];
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    setenv("DLX_SP_QUEUE", path, 1);
+}
+
+/* A budget that runs out inside the head's rebase is the budget's verdict:
+ * the killed rebase also fails the conflict probe, which must not read as a
+ * conflict the row does not have. */
+static int test_dev_land_speculative_budget_in_rebase(void)
+{
+    int failures = 0;
+    char saved[4096] = "";
+    TEST("land: a budget that runs out inside the head's rebase is no conflict") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200];
+        dlx_isolate("spec_budget_rebase");
+        ASSERT(dlx_sp_tmpdir(tmp));
+        ASSERT(dlx_sp_rig(&rig, "spec_budget_rebase_rig", false, b, c3, d));
+        ASSERT(dlx_sp_shim_git(saved, "rebase", "exec sleep 30"));
+        int64_t started = platform_time_monotonic_us();
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, NULL, 4000, true) && dlx_ok(&c));
+        int64_t took_ms = (platform_time_monotonic_us() - started) / 1000;
+        dlx_sp_read(&c, &p);
+        dlx_end(&c);
+        dlx_sp_shim_end(saved);
+        if (strcmp(p.reason, "budget_exhausted") != 0)
+            printf("[want none/budget_exhausted got %s/%s: %s] ", p.status,
+                   p.reason, p.detail);
+        ASSERT_STR_EQ(p.status, "none");
+        ASSERT_STR_EQ(p.reason, "budget_exhausted");
+        ASSERT(took_ms < 15000);
+        ASSERT(dlx_sp_dir_empty(tmp));
+        PASS();
+    }
+_test_next:;
+    dlx_sp_shim_end(saved);
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* Terminal rows are dropped from queue.jsonl: a pair whose in-flight row, or
+ * whose next row, is gone when the build ends is stale. */
+static int test_dev_land_speculative_row_leaves(void)
+{
+    int failures = 0;
+    char saved[4096] = "";
+    TEST("land: a pair is dropped when the in-flight row or the next row leaves the queue") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200];
+        static const char *const drops[] = {
+            "grep -v '\"state\":\"inflight\"' \"$DLX_SP_QUEUE\" > \"$DLX_SP_QUEUE.new\"; mv \"$DLX_SP_QUEUE.new\" \"$DLX_SP_QUEUE\"",
+            "grep -v '\"state\":\"queued\"' \"$DLX_SP_QUEUE\" > \"$DLX_SP_QUEUE.new\"; mv \"$DLX_SP_QUEUE.new\" \"$DLX_SP_QUEUE\"",
+        };
+        for (size_t i = 0; i < sizeof(drops) / sizeof(drops[0]); i++) {
+            dlx_isolate(i ? "spec_leave_head" : "spec_leave_flight");
+            ASSERT(dlx_sp_tmpdir(tmp));
+            ASSERT(dlx_sp_rig(&rig, i ? "spec_leave_head_rig" : "spec_leave_flight_rig", false, b, c3, d));
+            dlx_sp_queue_env();
+            ASSERT(dlx_sp_shim_git(saved, "rebase", drops[i]));
+            ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, NULL, 0, true) && dlx_ok(&c));
+            dlx_sp_read(&c, &p);
+            dlx_end(&c);
+            dlx_sp_shim_end(saved);
+            if (strcmp(p.reason, "queue_moved") != 0)
+                printf("[want none/queue_moved got %s/%s] ", p.status, p.reason);
+            ASSERT_STR_EQ(p.status, "none");
+            ASSERT_STR_EQ(p.reason, "queue_moved");
+            ASSERT(p.local[0] == '\0');
+            ASSERT(dlx_sp_dir_empty(tmp));
+            dlx_sp_env_end();
+        }
+        PASS();
+    }
+_test_next:;
+    dlx_sp_shim_end(saved);
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* The width is the driver's, never a guess: refused when unknown, and named
+ * with where it came from when given. */
+static int test_dev_land_speculative_width(void)
+{
+    int failures = 0;
+    TEST("land: the prediction names its train width and refuses to guess one") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200];
+        dlx_isolate("spec_width");
+        ASSERT(dlx_sp_tmpdir(tmp));
+        ASSERT(dlx_sp_rig(&rig, "spec_width_rig", true, b, c3, d));
+        /* Neither input.train_width nor the environment: the driver's width
+         * is not visible to this process, so no pair is made up. */
+        unsetenv("ZCL_LAND_TRAIN_WIDTH");
+        ASSERT(dlx_sp_none_width(0, "width_unknown", "train_width"));
+        ASSERT(dlx_sp_dir_empty(tmp));
+        /* Given: echoed with its source. */
+        ASSERT(dlx_sp_decide(&c, 3, NULL, 0, true) && dlx_ok(&c));
+        dlx_sp_read(&c, &p);
+        const struct json_value *sp = json_get(&c.reply.data, "speculative_pair");
+        ASSERT_STR_EQ(dlx_jstr(sp, "train_width_source"), "input");
+        dlx_end(&c);
+        ASSERT_EQ(p.nrows, 3);
+        /* The environment, when the caller really has the lander's. */
+        setenv("ZCL_LAND_TRAIN_WIDTH", "2", 1);
+        ASSERT(dlx_sp_decide(&c, 0, NULL, 0, true) && dlx_ok(&c));
+        dlx_sp_read(&c, &p);
+        sp = json_get(&c.reply.data, "speculative_pair");
+        ASSERT_STR_EQ(dlx_jstr(sp, "train_width_source"), "environment");
+        dlx_end(&c);
+        ASSERT_EQ(p.nrows, 2);
+        PASS();
+    }
+_test_next:;
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* Rewrite `from` to `to` inside the queue row `seq` (a row line starts with
+ * {"seq":N,). */
+static bool dlx_sp_row_edit(long long seq, const char *from, const char *to)
+{
+    static char text[131072];
+    char land[1200], path[1400], anchor[48];
+    size_t len = 0;
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    (void)snprintf(anchor, sizeof(anchor), "\n{\"seq\":%lld,", seq);
+    if (!dlx_slurp(path, text, sizeof(text) - 64, &len))
+        return false;
+    text[len] = '\0';
+    char *row = strstr(text, anchor);
+    if (!row && strncmp(text, anchor + 1, strlen(anchor) - 1) == 0)
+        row = text;
+    char *at = row ? strstr(row + 1, from) : NULL, *eol = row ? strchr(row + 1, '\n') : NULL;
+    if (!at || (eol && at > eol))
+        return false;
+    memmove(at + strlen(to), at + strlen(from), strlen(at + strlen(from)) + 1);
+    memcpy(at, to, strlen(to));
+    return dlx_write(path, text);
+}
+
+/* A retry or a train_solo head is not held back: the driver proves it alone,
+ * a plain rebase onto local(N). */
+static int test_dev_land_speculative_solo_head(void)
+{
+    int failures = 0;
+    TEST("land: a train_solo or retried next row predicts a solo pair") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200];
+        static const char *const marks[][2] = {
+            { "\"train_solo\":0", "\"train_solo\":1" },
+            { "\"attempt\":1,", "\"attempt\":2," },
+        };
+        for (size_t i = 0; i < 2; i++) {
+            dlx_isolate(i ? "spec_solo_retry" : "spec_solo_train");
+            ASSERT(dlx_sp_tmpdir(tmp));
+            ASSERT(dlx_sp_rig(&rig, i ? "spec_solo_retry_rig" : "spec_solo_train_rig", true, b, c3, d));
+            ASSERT(dlx_sp_row_edit(2, marks[i][0], marks[i][1]));
+            ASSERT(dlx_sp_decide(&c, 3, NULL, 0, true) && dlx_ok(&c));
+            dlx_sp_read(&c, &p);
+            dlx_end(&c);
+            if (strcmp(p.status, "pair") != 0)
+                printf("[want pair got %s/%s: %s] ", p.status, p.reason, p.detail);
+            ASSERT_STR_EQ(p.status, "pair");
+            ASSERT_EQ(p.nrows, 1);
+            ASSERT_EQ(p.seq[0], 2);
+            ASSERT(dlx_sp_dir_empty(tmp));
+            dlx_sp_env_end();
+        }
+        PASS();
+    }
+_test_next:;
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* The advisory pair never signs with the landing repository's key: with
+ * signing configured and unable to succeed, the prediction still builds and
+ * its commits carry no signature. */
+static int test_dev_land_speculative_unsigned(void)
+{
+    int failures = 0;
+    struct dlx_rig rig = {0};
+    bool configured = false;
+    TEST("land: the speculative pair is built unsigned even when the repository signs") {
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200], commit[8192];
+        const char *on[] = { "config", "commit.gpgsign", "true", NULL };
+        const char *prog[] = { "config", "gpg.program", "/bin/false", NULL };
+        dlx_isolate("spec_unsigned");
+        ASSERT(dlx_sp_tmpdir(tmp));
+        ASSERT(dlx_sp_rig(&rig, "spec_unsigned_rig", true, b, c3, d));
+        ASSERT(dlx_git_out(rig.clone, on, commit, sizeof(commit)) == 0);
+        configured = true;
+        ASSERT(dlx_git_out(rig.clone, prog, commit, sizeof(commit)) == 0);
+        ASSERT(dlx_sp_decide(&c, 3, NULL, 0, true) && dlx_ok(&c));
+        dlx_sp_read(&c, &p);
+        {
+            const struct json_value *pr = json_get(json_get(&c.reply.data, "speculative_pair"), "pair");
+            const struct json_value *u = pr ? json_get(pr, "unsigned") : NULL;
+            ASSERT(u != NULL && json_get_bool(u));
+        }
+        dlx_end(&c);
+        if (strcmp(p.status, "pair") != 0)
+            printf("[want pair got %s/%s: %s] ", p.status, p.reason, p.detail);
+        ASSERT_STR_EQ(p.status, "pair");
+        ASSERT_EQ(p.nrows, 3);
+        for (int64_t i = 0; i < p.nrows; i++) {
+            const char *show[] = { "cat-file", "commit", p.commit[i], NULL };
+            ASSERT(dlx_git_out(rig.clone, show, commit, sizeof(commit)) == 0);
+            ASSERT(strstr(commit, "gpgsig") == NULL);
+        }
+        ASSERT(dlx_sp_dir_empty(tmp));
+        PASS();
+    }
+_test_next:;
+    if (configured) {
+        char out[256];
+        const char *a[] = { "config", "--unset", "commit.gpgsign", NULL };
+        const char *g[] = { "config", "--unset", "gpg.program", NULL };
+        (void)dlx_git_out(rig.clone, a, out, sizeof(out));
+        (void)dlx_git_out(rig.clone, g, out, sizeof(out));
+    }
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* A scratch worktree a crashed call left registered, with its checkout, is
+ * removed by the next call; a young one (another call's) is left alone. */
+static int test_dev_land_speculative_stale_scratch(void)
+{
+    int failures = 0;
+    TEST("land: the next speculative call clears a crashed call's scratch worktree") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200], old_dir[1400], old_wt[1500],
+            young_dir[1400], young_wt[1500], list[16384], out[512];
+        dlx_isolate("spec_stale");
+        ASSERT(dlx_sp_tmpdir(tmp));
+        ASSERT(dlx_sp_rig(&rig, "spec_stale_rig", false, b, c3, d));
+        (void)snprintf(old_dir, sizeof(old_dir), "%s/z23-land-spec-0000000000000dead", tmp);
+        (void)snprintf(old_wt, sizeof(old_wt), "%s/wt", old_dir);
+        (void)snprintf(young_dir, sizeof(young_dir), "%s/z23-land-spec-0000000000000beef", tmp);
+        (void)snprintf(young_wt, sizeof(young_wt), "%s/wt", young_dir);
+        ASSERT(mkdir(old_dir, 0700) == 0 && mkdir(young_dir, 0700) == 0);
+        const char *add_old[] = { "worktree", "add", "--quiet", "--detach", "--no-checkout", old_wt, "HEAD", NULL };
+        const char *add_young[] = { "worktree", "add", "--quiet", "--detach", "--no-checkout", young_wt, "HEAD", NULL };
+        ASSERT(dlx_git_out(rig.clone, add_old, out, sizeof(out)) == 0);
+        ASSERT(dlx_git_out(rig.clone, add_young, out, sizeof(out)) == 0);
+        struct utimbuf past = { time(NULL) - 3 * 3600, time(NULL) - 3 * 3600 };
+        ASSERT(utime(old_dir, &past) == 0);
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, NULL, 0, true) && dlx_ok(&c));
+        dlx_sp_read(&c, &p);
+        dlx_end(&c);
+        ASSERT_STR_EQ(p.status, "pair");
+        const char *wts[] = { "worktree", "list", "--porcelain", NULL };
+        ASSERT(dlx_git_out(rig.clone, wts, list, sizeof(list)) == 0);
+        if (access(old_dir, F_OK) == 0 || strstr(list, old_wt))
+            printf("[stale scratch left: dir=%d registered=%d] ", access(old_dir, F_OK) == 0, strstr(list, old_wt) != NULL);
+        ASSERT(access(old_dir, F_OK) != 0);
+        ASSERT(strstr(list, old_wt) == NULL);
+        ASSERT(access(young_wt, F_OK) == 0 && strstr(list, young_wt) != NULL);
+        PASS();
+    }
+_test_next:;
+    dlx_sp_env_end();
+    return failures;
+}
+
+/* bundle_out is created exclusively: a file that appears while the pair is
+ * built is neither overwritten nor removed, and a stalled bundle step stays
+ * inside the budget. */
+static int test_dev_land_speculative_bundle_exclusive(void)
+{
+    int failures = 0;
+    char saved[4096] = "";
+    TEST("land: bundle_out never replaces or removes a file it did not create") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct dlx_sp_pair p;
+        char b[64], c3[64], d[64], tmp[1200], out[1400], offer[1500], text[256],
+            action[1700];
+        size_t len = 0;
+        dlx_isolate("spec_bundle_race");
+        ASSERT(dlx_sp_tmpdir(tmp));
+        ASSERT(dlx_sp_rig(&rig, "spec_bundle_race_rig", false, b, c3, d));
+        (void)snprintf(out, sizeof(out), "%s/raced.bundle", g_dlx_state);
+        (void)snprintf(offer, sizeof(offer), "%s.offer.json", out);
+        /* The file appears after the up-front check, before git writes. */
+        (void)snprintf(action, sizeof(action), "echo precious > '%s'", out);
+        ASSERT(dlx_sp_shim_git(saved, "bundle", action));
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, out, 0, true) && dlx_ok(&c));
+        dlx_sp_read(&c, &p);
+        const struct json_value *bundle = json_get(json_get(&c.reply.data, "speculative_pair"), "bundle");
+        ASSERT(bundle && json_get(bundle, "error") != NULL);
+        dlx_end(&c);
+        dlx_sp_shim_end(saved);
+        ASSERT(dlx_slurp(out, text, sizeof(text) - 1, &len));
+        text[len] = '\0';
+        if (strcmp(text, "precious\n") != 0)
+            printf("[the raced file was changed: %s] ", text);
+        ASSERT_STR_EQ(text, "precious\n");
+        ASSERT(access(offer, F_OK) != 0);
+        ASSERT(dlx_sp_dir_empty(tmp));
+        /* A stalled bundle step is stopped by the budget. */
+        ASSERT(remove(out) == 0);
+        ASSERT(dlx_sp_shim_git(saved, "bundle", "exec sleep 30"));
+        int64_t started = platform_time_monotonic_us();
+        ASSERT(dlx_sp_decide(&c, DLX_SP_SOLO, out, 4000, true) && dlx_ok(&c));
+        int64_t took_ms = (platform_time_monotonic_us() - started) / 1000;
+        dlx_end(&c);
+        dlx_sp_shim_end(saved);
+        ASSERT(took_ms < 15000);
+        ASSERT(access(out, F_OK) != 0 && access(offer, F_OK) != 0);
+        ASSERT(dlx_sp_dir_empty(tmp));
+        PASS();
+    }
+_test_next:;
+    dlx_sp_shim_end(saved);
     dlx_sp_env_end();
     return failures;
 }
@@ -2260,6 +2648,13 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_speculative_no_pair();
     failures += test_dev_land_speculative_budget();
     failures += test_dev_land_speculative_bundle();
+    failures += test_dev_land_speculative_budget_in_rebase();
+    failures += test_dev_land_speculative_row_leaves();
+    failures += test_dev_land_speculative_width();
+    failures += test_dev_land_speculative_solo_head();
+    failures += test_dev_land_speculative_unsigned();
+    failures += test_dev_land_speculative_stale_scratch();
+    failures += test_dev_land_speculative_bundle_exclusive();
     return failures;
 }
 

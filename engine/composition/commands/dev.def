@@ -2426,18 +2426,9 @@ ZCL_COMMAND_READY_READ(
     "Observe the next landing dispatch",
     "Reads one coherent local queue, fence and outcome snapshot using the "
     "same dispatch classifier as step. The result is advisory, covers only "
-    "the next dispatch, and does not authorize publication. With "
-    "speculative=true (or bundle_out) it adds data.speculative_pair: the "
-    "pair the queue will prove next, predicted while a row is in flight, "
-    "as {local, base, tree, rows[]} with the in-flight (local, base) it came "
-    "from, or a reason when none exists. It holds only if the in-flight row "
-    "lands, builds in a scratch worktree, writes no queue, ledger or ref and "
-    "takes no lock after the snapshot; bundle_out=<absolute path> alone "
-    "writes the pair's git bundle and offer, refusing existing paths. "
-    "train_width and budget_ms tune the prediction.", 65536,
+    "the next dispatch, and does not authorize publication.", 65536,
     "land,decision,queue,dispatch",
-    "zcl.land_decision_input.v1", "zcl.land.v1",
-    "seq,speculative,bundle_out,train_width,budget_ms", "",
+    "zcl.land_decision_input.v1", "zcl.land.v1", "seq", "",
     "z23-dev dev land decision",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,
@@ -2445,6 +2436,45 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_DEV_STATE_READ,
     ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_land_decision)
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.speculate", "dev.land", "",
+    "Predict the pair the queue proves after the in-flight row lands",
+    "Takes the decision's coherent snapshot, releases its locks, then builds "
+    "data.speculative_pair: the pair the queue will prove next, predicted "
+    "while a row is in flight, as {local, base, tree, rows[]} with the "
+    "in-flight (local, base) it came from, or a reason when none exists "
+    "(nothing_in_flight, in_flight_pair_not_final, nothing_queued, "
+    "next_row_not_joinable, width_unknown, rebase_conflict, queue_moved, "
+    "scratch_unavailable, budget_exhausted). It holds only if the in-flight "
+    "row lands unchanged. Advisory: it writes no queue row, ledger, log or "
+    "ref and takes no lock after the snapshot, but it is not read-only: it "
+    "writes unreferenced git objects into the landing repository, registers "
+    "and removes a temporary worktree there under the OS temp directory, "
+    "clears a crashed call's scratch (prefix z23-land-spec-, older than 20 "
+    "minutes), and with bundle_out=<absolute path> creates the pair's git "
+    "bundle and offer exclusively (an existing path is refused, never "
+    "replaced). The commits are unsigned predictions made with signing and "
+    "hooks off; base and tree equal what the driver builds, commit ids do "
+    "not, so key on (base, tree). train_width (1 solo, 2..8) is the driver's "
+    "width: the lander service's ZCL_LAND_TRAIN_WIDTH is not visible to this "
+    "process, so pass it (or export it); the reply names the width assumed "
+    "and its source, and with neither there is no pair (width_unknown). "
+    "budget_ms bounds the whole prediction.", 65536,
+    "land,speculate,queue,prediction,bundle",
+    "zcl.land_speculate_input.v1", "zcl.land.v1",
+    "seq,bundle_out,train_width,budget_ms", "",
+    "z23-dev dev land speculate --train_width=8",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_speculate,
+    "a speculative pair writes git objects, a scratch worktree and an optional bundle",
+    "z23-dev dev land speculate")
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.step", "dev.land", "",

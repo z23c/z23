@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: the advisory speculative pair of `dev land decision`: the pair the
+ * purpose: the advisory speculative pair of `dev land speculate`: the pair the
  *          land queue will prove next, predicted while the in-flight row is
  *          still proving, with the driver's own rebase and train stacking in a
  *          scratch worktree. Reads a queue snapshot; writes nothing of the
@@ -19,22 +19,39 @@
  * dl_rebase_pair (the head's rebase, everything dl_rebase does but the
  * landing worktree's submodule seed) and dl_train_stack_rows (the stacking
  * dl_train_prepare_first runs), over the queue minus N and the rows bound to
- * N's pair. The base and the tree are exactly what the driver builds; the
- * commit id may differ, because a rebased commit carries the committer time
- * of the moment it is made. A consumer therefore keys on base and tree.
+ * N's pair. What it guarantees is the BASE and the TREE (and which rows ride):
+ * they are exactly what the driver builds. It does NOT guarantee commit ids.
+ * The speculative commits are unsigned predictions, made with signing and
+ * hooks off whatever the landing repository's config says (an advisory leaf
+ * never signs with the owner's key), while the driver's commits are signed
+ * when that repository signs; and a rebased commit carries the committer time
+ * of the moment it is made. So the driver's `local` differs from this one even
+ * when the tree is identical. A consumer keys on (base, tree), which is what
+ * the proof binds the content to, never on `local`.
  *
  * NOT PREDICTED. The stacked lint-land (which halves a red stack), the proof
  * dependencies, a row that conflicts only because main moves for another
  * reason, and N itself failing: the pair is a prediction that holds only if
  * N lands unchanged, and it names the in-flight (local, base) it came from.
  *
- * READ-ONLY. It reads a snapshot the caller took under the decision's shared
+ * WIDTH. The driver's train width is the lander service's
+ * ZCL_LAND_TRAIN_WIDTH, which is in that process's environment and in no
+ * state this one can read. The caller therefore passes train_width (1 is a
+ * stated solo proof) or exports the lander's value; the reply names the width
+ * assumed and its source (input or environment), and with neither no pair is
+ * made up (reason width_unknown).
+ *
+ * WRITES. It reads a snapshot the caller took under the decision's shared
  * locks and holds no lock itself, so the driver's beats are never delayed. It
  * writes no queue, ledger, log or ref and never touches the landing worktree:
  * the rebases run in a detached scratch worktree under a private temp
- * directory, removed again. The only durable output is --bundle_out, which
- * the caller asked for. Every git spawn is held to one deadline
- * (dl_deadline_set). */
+ * directory, removed again; the commits it makes are unreferenced objects in
+ * the landing repository. A scratch a crashed call left behind (name prefix
+ * z23-land-spec-, older than the longest budget, owned by this user) is
+ * removed at the start of the next call. The only durable output is
+ * --bundle_out, which the caller asked for and which is created exclusively.
+ * Every git spawn is held to one deadline (dl_deadline_set), and a deadline
+ * that passes anywhere is reported as budget_exhausted, never as a conflict. */
 
 #include "command/native_dev_land_internal.h"
 #include "command/native_dev_land_remote_shared.h"
@@ -49,8 +66,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+#endif
 
 #define DL_SPEC_CLEANUP_MS (30 * 1000)
+#define DL_SPEC_SCRATCH_PREFIX "z23-land-spec-"
+/* Longer than the longest budget (600 s) plus its cleanup, so a scratch this
+ * old belongs to no live call. */
+#define DL_SPEC_STALE_SECS (20 * 60)
+#define DL_SPEC_SWEEP_MAX 8
 
 struct dl_spec {
     const struct dl_dirs *landing;
@@ -61,6 +89,7 @@ struct dl_spec {
     struct dl_row flight, head;
     struct dl_train train;
     size_t width;
+    const char *width_source;
     char reason[40], detail[512];
     char local[80], base[80], tree[80];
     bool pair;
@@ -74,8 +103,8 @@ static void dl_spec_none(struct dl_spec *s, const char *reason,
 {
     if (s->reason[0])
         return;
-    if (dl_budget_ms(1) == 0 && (strcmp(reason, "scratch_unavailable") == 0 ||
-                                 strcmp(reason, "rebase_failed") == 0)) {
+    if (dl_budget_ms(1) == 0 && strcmp(reason, "queue_moved") != 0 &&
+        strcmp(reason, "width_unknown") != 0) {
         reason = "budget_exhausted";
         detail = "the time budget ran out before the pair was built";
     }
@@ -128,19 +157,16 @@ static struct dl_row *dl_spec_after_landing(const struct dl_spec *s,
     return after;
 }
 
-/* May the row head the next proof as a first attempt? The train's own test of
- * a row that may ride in a train, asked of a head that is itself no member. */
-static bool dl_spec_joinable(const struct dl_row *r)
+/* Can the driver start this row once N has landed? The train's own test of a
+ * row (dl_train_joinable) minus its first-attempt rule: a retry or a
+ * train_solo row is proved alone, a plain rebase onto local(N), and is as
+ * predictable as a fresh one. A held, fenced, successor or already bound row
+ * is not started that way. */
+static bool dl_spec_startable(const struct dl_row *r)
 {
-    struct dl_row *probe = zcl_calloc(1, sizeof(*probe), "dev.land.spec.probe");
-    bool ok = false;
-    if (probe) {
-        (void)snprintf(probe->train_group, sizeof(probe->train_group), "%s",
-                       r->train_group);
-        ok = dl_train_joinable(r, probe);
-    }
-    free(probe);
-    return ok;
+    return !r->publication_hold && !r->predecessor_seq && !r->fence_peer &&
+           !r->proof_intent[0] && !r->publication_signature[0] &&
+           !r->pushed[0] && !r->push_diagnostic_pending;
 }
 
 static bool dl_spec_head(struct dl_spec *s, const struct dl_row *after,
@@ -153,10 +179,10 @@ static bool dl_spec_head(struct dl_spec *s, const struct dl_row *after,
                      "no other row is queued behind the in-flight row");
         return false;
     }
-    if (dl_spec_joinable(&s->head))
+    if (dl_spec_startable(&s->head))
         return true;
     (void)snprintf(detail, sizeof(detail),
-                   "seq=%lld is next but cannot start as a first attempt: "
+                   "seq=%lld is next but cannot start from local(N) alone: "
                    "attempt=%lld train_solo=%lld hold=%d predecessor=%lld "
                    "fence_peer=%lld bound=%d",
                    s->head.seq, s->head.attempt, s->head.train_solo,
@@ -166,13 +192,95 @@ static bool dl_spec_head(struct dl_spec *s, const struct dl_row *after,
     return false;
 }
 
+/* The driver's width: what the caller states, else the environment the
+ * caller really has the lander's in. Never a default. */
+static bool dl_spec_width(struct dl_spec *s)
+{
+    if (s->args.width) {
+        s->width = s->args.width;
+        s->width_source = "input";
+        return true;
+    }
+    if (getenv("ZCL_LAND_TRAIN_WIDTH")) {
+        s->width = dl_train_width();
+        s->width_source = "environment";
+        return true;
+    }
+    s->width_source = "none";
+    dl_spec_none(s, "width_unknown",
+                 "pass input.train_width (1 for a solo proof, 2..8 for a "
+                 "train): the driver's width is the lander service's "
+                 "ZCL_LAND_TRAIN_WIDTH, which this process does not have, "
+                 "and no width is assumed");
+    return false;
+}
+
+/* Remove the scratch worktrees and directories a crashed call left: only
+ * names this leaf makes, owned by this user, older than any live call, at
+ * most DL_SPEC_SWEEP_MAX per call. A checkout git will not remove is left. */
+static void dl_spec_sweep(const struct dl_spec *s)
+{
+#if !defined(_WIN32)
+    char parent[PLATFORM_TEMP_PATH_MAX], path[PLATFORM_TEMP_PATH_MAX + 288],
+        wt[PLATFORM_TEMP_PATH_MAX + 292];
+    const char *slash = strrchr(s->dir, '/');
+    size_t plen = slash ? (size_t)(slash - s->dir) : 0, swept = 0;
+    DIR *dir;
+    struct dirent *e;
+    time_t now = time(NULL);
+    if (!plen || plen >= sizeof(parent))
+        return;
+    memcpy(parent, s->dir, plen);
+    parent[plen] = '\0';
+    dir = opendir(parent);
+    dl_deadline_set(platform_time_monotonic_ms() + DL_SPEC_CLEANUP_MS);
+    while (dir && swept < DL_SPEC_SWEEP_MAX && (e = readdir(dir)) != NULL) {
+        struct stat st;
+        if (strncmp(e->d_name, DL_SPEC_SCRATCH_PREFIX,
+                    strlen(DL_SPEC_SCRATCH_PREFIX)) != 0 ||
+            snprintf(path, sizeof(path), "%s/%s", parent, e->d_name) >=
+                (int)sizeof(path) ||
+            strcmp(path, s->dir) == 0 || lstat(path, &st) != 0 ||
+            !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+            now - st.st_mtime < DL_SPEC_STALE_SECS ||
+            snprintf(wt, sizeof(wt), "%s/wt", path) >= (int)sizeof(wt))
+            continue;
+        if (lstat(wt, &st) == 0) {
+            /* Twice forced: a worktree add killed half-way holds an
+             * "initializing" lock that a single force does not break. */
+            const char *rm[] = { "worktree", "remove", "--force", "--force",
+                                 wt, NULL };
+            if (dl_git(s->landing->wt, rm, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
+                continue;
+        }
+        (void)platform_private_directory_remove_empty(path);
+        swept++;
+    }
+    if (dir)
+        (void)closedir(dir);
+    dl_deadline_set(0);
+#else
+    (void)s;
+#endif
+}
+
+/* The private scratch directory, made first so a crashed call's leftovers are
+ * cleared at the start of every call. */
+static void dl_spec_scratch(struct dl_spec *s)
+{
+    if (!platform_temp_directory_create(DL_SPEC_SCRATCH_PREFIX, s->dir,
+                                        sizeof(s->dir)))
+        s->dir[0] = '\0';
+    else
+        dl_spec_sweep(s);
+}
+
 /* A detached, empty scratch worktree in the repository the landing worktree
  * belongs to: its own checkout, index and rebase state, no ref. */
 static bool dl_spec_open(struct dl_spec *s)
 {
     s->d = *s->landing;
-    if (!platform_temp_directory_create("z23-land-spec-", s->dir,
-                                        sizeof(s->dir)) ||
+    if (!s->dir[0] ||
         snprintf(s->d.wt, sizeof(s->d.wt), "%s/wt", s->dir) >=
             (int)sizeof(s->d.wt)) {
         dl_spec_none(s, "scratch_unavailable",
@@ -202,7 +310,10 @@ static void dl_spec_close(struct dl_spec *s)
     dl_deadline_set(0);
 }
 
-/* The head's rebase onto local(N): what dl_train_rebase does for its turn. */
+/* The head's rebase onto local(N): what dl_train_rebase does for its turn.
+ * A conflict is reported only when git showed unmerged paths and the budget
+ * is still alive: a rebase killed at the deadline also fails the probe that
+ * lists them, and a git failure with no unmerged path is no conflict. */
 static bool dl_spec_rebase(struct dl_spec *s)
 {
     char why[512] = "";
@@ -212,11 +323,16 @@ static bool dl_spec_rebase(struct dl_spec *s)
                             sizeof(why));
     if (rc == 1)
         return true;
-    dl_spec_none(s, rc == 0 ? "rebase_conflict" : "rebase_failed",
+    bool unmerged = rc == 0 && why[0] &&
+                    strncmp(why, DL_CONFLICT_NO_PATHS,
+                            strlen(DL_CONFLICT_NO_PATHS)) != 0;
+    dl_spec_none(s, unmerged ? "rebase_conflict" : "rebase_failed",
                  why[0] ? why : "the rebase did not complete");
     return false;
 }
 
+/* A queue row, by seq, in the state it was read in with its tip unchanged. A
+ * row that has left the file (terminal rows are dropped from it) is not. */
 static bool dl_spec_row_same(const struct dl_row *rows, size_t n,
                              const struct dl_row *want, const char *state)
 {
@@ -227,7 +343,9 @@ static bool dl_spec_row_same(const struct dl_row *rows, size_t n,
     return false;
 }
 
-/* The queue still holds the in-flight row and every row of the pair as read. */
+/* The queue still holds the in-flight row, in flight on the same attempt with
+ * the same (local, base), and every row of the pair as read. A row that is
+ * gone, or changed, is a queue that moved. */
 static bool dl_spec_current(const struct dl_spec *s)
 {
     struct dl_row *rows = NULL;
@@ -236,16 +354,17 @@ static bool dl_spec_current(const struct dl_spec *s)
     bool ok = snprintf(qpath, sizeof(qpath), "%s/queue.jsonl",
                        s->landing->land) < (int)sizeof(qpath) &&
               dl_load_rows(qpath, &rows, &n, NULL, 0);
+    bool flight = false;
     for (size_t i = 0; ok && i < n; i++) {
         if (rows[i].seq != s->flight.seq)
             continue;
-        ok = strcmp(rows[i].state, "inflight") == 0 &&
-             rows[i].attempt == s->flight.attempt &&
-             strcmp(rows[i].local, s->flight.local) == 0 &&
-             strcmp(rows[i].base, s->flight.base) == 0;
+        flight = strcmp(rows[i].state, "inflight") == 0 &&
+                 rows[i].attempt == s->flight.attempt &&
+                 strcmp(rows[i].local, s->flight.local) == 0 &&
+                 strcmp(rows[i].base, s->flight.base) == 0;
         break;
     }
-    ok = ok && dl_spec_row_same(rows, n, &s->head, "queued");
+    ok = ok && flight && dl_spec_row_same(rows, n, &s->head, "queued");
     for (size_t j = 0; ok && j < s->train.n; j++)
         ok = dl_spec_row_same(rows, n, &s->train.m[j], "queued");
     free(rows);
@@ -302,6 +421,29 @@ static void dl_spec_bundle(struct dl_spec *s)
     free(sub);
 }
 
+static void dl_spec_build(struct dl_spec *s, const struct dl_row *after,
+                          size_t count)
+{
+    if (s->width >= 2 && dl_train_fresh(&s->head))
+        (void)dl_train_stack_rows(&s->d, &s->head, &s->train, after, count,
+                                  s->width, dl_rebase_pair);
+    /* A stack cut short by the deadline would be a shorter train than the
+     * driver forms: not a pair. */
+    if (dl_budget_ms(1) == 0) {
+        dl_spec_none(s, "budget_exhausted", "");
+        return;
+    }
+    s->pair = dl_spec_pair(s);
+    if (s->pair && !dl_spec_current(s)) {
+        s->pair = false;
+        dl_spec_none(s, "queue_moved",
+                     "the in-flight row or a row of the pair changed or left "
+                     "the queue while the pair was built");
+    }
+    if (s->pair && s->args.bundle_out)
+        dl_spec_bundle(s);
+}
+
 static void dl_spec_run(struct dl_spec *s, const struct dl_row *rows, size_t n)
 {
     size_t count = 0;
@@ -313,21 +455,9 @@ static void dl_spec_run(struct dl_spec *s, const struct dl_row *rows, size_t n)
         dl_spec_none(s, "rebase_failed", "out of memory");
         return;
     }
-    if (dl_spec_head(s, after, count) && dl_spec_open(s) && dl_spec_rebase(s)) {
-        s->width = s->args.width ? s->args.width : dl_train_width();
-        if (s->width >= 2 && dl_train_fresh(&s->head))
-            (void)dl_train_stack_rows(&s->d, &s->head, &s->train, after,
-                                      count, s->width, dl_rebase_pair);
-        s->pair = dl_spec_pair(s);
-        if (s->pair && !dl_spec_current(s)) {
-            s->pair = false;
-            dl_spec_none(s, "queue_moved",
-                         "the in-flight row or a row of the pair changed "
-                         "while the pair was built");
-        }
-        if (s->pair && s->args.bundle_out)
-            dl_spec_bundle(s);
-    }
+    if (dl_spec_head(s, after, count) && dl_spec_width(s) &&
+        dl_spec_open(s) && dl_spec_rebase(s))
+        dl_spec_build(s, after, count);
     free(after);
 }
 
@@ -355,11 +485,14 @@ static void dl_spec_encode_pair(const struct dl_spec *s,
     (void)json_push_kv_str(&pair, "local", s->local);
     (void)json_push_kv_str(&pair, "base", s->base);
     (void)json_push_kv_str(&pair, "tree", s->tree);
-    (void)json_push_kv_str(&pair, "local_note",
-                           "a rebased commit carries the committer time of "
-                           "the moment it is made, so the driver's own local "
-                           "may differ from this one; base and tree are what "
-                           "the driver builds, key on them");
+    (void)json_push_kv_bool(&pair, "unsigned", true);
+    (void)json_push_kv_str(&pair, "identity",
+                           "base and tree are exactly what the driver builds; "
+                           "local and each commit are unsigned predictions "
+                           "made with signing off, and a rebased commit "
+                           "carries the time it is made, so the driver's own "
+                           "commit ids differ: key on base and tree, never "
+                           "on local");
     json_init(&rows);
     json_set_array(&rows);
     dl_spec_encode_row(&rows, &s->head, s->head.local);
@@ -396,6 +529,8 @@ static void dl_spec_encode(const struct dl_spec *s, struct json_value *out)
                            "below");
     (void)json_push_kv_str(out, "status", s->pair ? "pair" : "none");
     (void)json_push_kv_int(out, "train_width", (int64_t)s->width);
+    (void)json_push_kv_str(out, "train_width_source",
+                           s->width_source ? s->width_source : "none");
     if (s->flight_seen)
         dl_spec_encode_flight(s, out);
     if (s->pair)
@@ -422,14 +557,18 @@ void dl_train_speculate(const struct dl_dirs *d, const struct dl_row *rows,
     s->landing = d;
     s->args = *args;
     json_init(&s->bundle);
+    /* Unsigned and hookless for every git child of this call, then the
+     * budget: the sweep of a crashed call's scratch has its own. */
+    dl_unsigned_scratch_set(true);
+    dl_spec_scratch(s);
     dl_deadline_set(platform_time_monotonic_ms() +
                     (args->budget_ms > 0 ? args->budget_ms
                                          : DL_SPEC_BUDGET_MS));
     dl_spec_run(s, rows, n);
     dl_deadline_set(0);
     dl_spec_close(s);
+    dl_unsigned_scratch_set(false);
     dl_spec_encode(s, out);
     json_free(&s->bundle);
     free(s);
 }
-

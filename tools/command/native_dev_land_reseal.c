@@ -514,7 +514,9 @@ static int dl_reseal_pick(const char *wt, struct dl_row *row, char *why,
                           size_t cap)
 {
     const char *commit[] = { "commit", "--quiet", "--no-verify", "-C",
-                             "REBASE_HEAD", dl_fixture_unsigned() ? NULL : "-S",
+                             "REBASE_HEAD",
+                             dl_commit_unsigned() ? "--no-gpg-sign"
+                             : dl_fixture_unsigned() ? NULL : "-S",
                              NULL };
     const struct dl_seal_git g = { dl_seal_wt_run, (void *)wt };
     struct dl_blob tail;

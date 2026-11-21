@@ -87,24 +87,20 @@ bool command_registry_devagent_integer_descriptor(
     return true;
 }
 
-/* dev.land.decision's speculative-pair options: a flag and two bounded
+/* dev.land.speculate's options: two bounded
  * integers, the width a train would be formed at and the time budget. Every
  * other key of the leaf (seq, bundle_out) types as it always has. */
 bool command_registry_land_decision_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
 {
-    if (strcmp(spec->path, "dev.land.decision") != 0)
+    if (strcmp(spec->path, "dev.land.speculate") != 0)
         return false;
-    if (strcmp(key, "speculative") == 0) {
-        out->type = JSON_BOOL;
-        return true;
-    }
     bool width = strcmp(key, "train_width") == 0;
     if (!width && strcmp(key, "budget_ms") != 0)
         return false;
     out->type = JSON_INT;
-    out->minimum = width ? 2 : 1000;
+    out->minimum = width ? 1 : 1000;
     out->maximum = width ? 8 : 600000;
     return true;
 }
