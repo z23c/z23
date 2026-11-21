@@ -6,6 +6,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,13 +58,15 @@ int fsync(int fd)
         return -1;
     }
     const char *fault = getenv("ZCL_TEST_PEER_RECOVERY_FSYNC_DIR");
-    if (recovery_linked && fault) {
+    if (fault) {
         char descriptor[64], path[4096];
         int length = snprintf(descriptor, sizeof descriptor, "/proc/self/fd/%d", fd);
         ssize_t resolved = length > 0 && (size_t)length < sizeof descriptor
             ? readlink(descriptor, path, sizeof path) : -1;
+        int flags = fcntl(fd, F_GETFL);
         if (resolved == (ssize_t)strlen(fault) &&
-            memcmp(path, fault, (size_t)resolved) == 0) {
+            memcmp(path, fault, (size_t)resolved) == 0 &&
+            (recovery_linked || (flags >= 0 && (flags & O_ACCMODE) == O_RDONLY))) {
             errno = getenv("ZCL_TEST_PEER_RECOVERY_FSYNC_EINVAL") ? EINVAL : EIO;
             return -1;
         }

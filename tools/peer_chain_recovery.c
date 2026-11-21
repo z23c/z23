@@ -583,7 +583,7 @@ static bool recovery_sync_temporary(const char *temporary)
                 strerror(errno));
         return false;
     }
-    int synced = platform_file_sync(fd);
+    int synced = platform_authority_sync(fd);
     int sync_error = errno;
     int closed = close(fd);
     int close_error = errno;

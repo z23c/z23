@@ -755,6 +755,47 @@ static int test_peer_chain_recovery_unlink_after_publish(void)
     return failures;
 }
 
+static int test_peer_chain_recovery_temporary_sync_failure(void)
+{
+    int failures = 0;
+#if defined(__linux__)
+    char dir[4096], source[4608], destination[4608], temporary[4608];
+    char out[4096] = {0};
+    test_make_tmpdir(dir, sizeof(dir), "peer_chain_recovery", "temporary-sync");
+    TEST("peer_chain_recovery: temporary sync failure prevents publication") {
+        ASSERT(snprintf(source, sizeof(source), "%s/source.db", dir) > 0);
+        ASSERT(snprintf(destination, sizeof(destination), "%s/recovered.db", dir) > 0);
+        ASSERT(snprintf(temporary, sizeof(temporary), "%s.peer_chain_recovery.tmp", destination) > 0);
+        ASSERT(recovery_fixture(source));
+        struct recovery_bytes before = recovery_read(source);
+        ASSERT(before.data != NULL);
+        ASSERT(setenv("LD_PRELOAD", "build/fixtures/peer_chain_recovery_unlink_fault.so", 1) == 0);
+        ASSERT(setenv("ZCL_TEST_PEER_RECOVERY_FSYNC_DIR", temporary, 1) == 0);
+        const char *argv[] = {RECOVERY_BIN, source, destination, NULL};
+        struct zcl_spawn_evidence evidence;
+        ASSERT(zcl_spawn_capture_evidence(argv, out, sizeof(out), 15000, &evidence) == 1);
+        char error[ZCL_SPAWN_EVIDENCE_TAIL + 1];
+        ASSERT(evidence.stderr_complete && evidence.stderr_len < sizeof(error));
+        memcpy(error, evidence.stderr_tail, evidence.stderr_len);
+        error[evidence.stderr_len] = '\0';
+        ASSERT(strstr(error, "recovered file sync or close failed") != NULL);
+        ASSERT(recovery_same_bytes(source, &before));
+        ASSERT(recovery_absent(destination));
+        ASSERT(recovery_absent(temporary));
+        free(before.data);
+        PASS();
+    } _test_next:;
+    (void)unsetenv("LD_PRELOAD");
+    (void)unsetenv("ZCL_TEST_PEER_RECOVERY_FSYNC_DIR");
+    (void)test_rm_rf_recursive(dir);
+#else
+    TEST("peer_chain_recovery: temporary sync failure prevents publication") {
+        printf("not applicable (Linux LD_PRELOAD sync fault)\n");
+    } _test_next:;
+#endif
+    return failures;
+}
+
 static int test_peer_chain_recovery_directory_sync_after_publish(bool unsupported)
 {
     int failures = 0;
@@ -943,6 +984,7 @@ int test_peer_chain_recovery(void)
     failures += test_peer_chain_recovery_refusals();
     failures += test_peer_chain_recovery_destination_sidecars();
     failures += test_peer_chain_recovery_unlink_after_publish();
+    failures += test_peer_chain_recovery_temporary_sync_failure();
     failures += test_peer_chain_recovery_directory_sync_after_publish(false);
     failures += test_peer_chain_recovery_directory_sync_after_publish(true);
     return failures;
