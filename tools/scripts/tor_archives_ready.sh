@@ -56,6 +56,16 @@ tor_ambient_compiler() {
     zcl_tor_effective_cc "$ROOT/$TOR_TREE" "$TRIPLE"
 }
 
+# Source builds use the superproject index, including a staged Tor upgrade.
+# A Git-free source carrier supplies the committed vendor source manifest.
+tor_expected_pin() {
+    if [ -e "$SCRIPT_ROOT/.git" ]; then
+        git -C "$SCRIPT_ROOT" rev-parse --verify ':vendor/tor'
+    else
+        sed -n 's/^source_revision=//p' "$SCRIPT_ROOT/vendor/provenance/tor.manifest"
+    fi
+}
+
 have_all() {
     local a
     for a in "${ARCHIVES[@]}"; do
@@ -75,14 +85,15 @@ have_all() {
     else
         zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || return 1
     fi
-    local cc cid
+    local cc cid pin
+    pin="$(tor_expected_pin)" && [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || return 1
     cc="$(tor_ambient_compiler)"
     command -v "${cc%% *}" >/dev/null 2>&1 || return 1
     # Match build_tor_full.sh's probe directory too: Apple Clang's verbose
     # preprocessing output includes its compilation directory.
     cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$cc" 2>/dev/null)" || return 1
-    "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 || \
-        tor_alias_check "$cc"
+    "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --tor-commit "$pin" --compiler-id "$cid" >/dev/null 2>&1 || \
+        tor_alias_check "$cc" "$pin"
 }
 
 # The manifest records the compiler by the command string vendor/tor's own
@@ -104,7 +115,7 @@ tor_same_compiler_file() {
 }
 
 tor_alias_check() {
-    local primary_cc="$1" primary_path cand cand_path tried cid
+    local primary_cc="$1" pin="$2" primary_path cand cand_path tried cid
     primary_path="$(command -v "${primary_cc%% *}" 2>/dev/null)" || return 1
     primary_path="$(realpath -- "$primary_path" 2>/dev/null)" || return 1
     tried=" $primary_cc "
@@ -116,7 +127,7 @@ tor_alias_check() {
         cand_path="$(realpath -- "$cand_path" 2>/dev/null)" || continue
         tor_same_compiler_file "$cand_path" "$primary_path" || continue
         cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$cand" 2>/dev/null)" || continue
-        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 && return 0
+        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --tor-commit "$pin" --compiler-id "$cid" >/dev/null 2>&1 && return 0
     done
     return 1
 }
@@ -370,10 +381,7 @@ case "${1:-ready}" in
         done
         # Fixture and have_all derive the same compiler identity from the
         # missing-Makefile fallback; copied bytes retain producer provenance.
-        zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || {
-            echo "tor_archives_ready: selftest FAILED — could not build z23-tor-provenance" >&2
-            exit 1
-        }
+        selftest_pin="$(tor_expected_pin)"
         selftest_cc="$(zcl_tor_effective_cc "$fake_primary/$TOR_TREE" "$TRIPLE")"
         selftest_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$selftest_cc" 2>/dev/null)" || {
             echo "tor_archives_ready: selftest FAILED — could not derive a fixture compiler id" >&2
@@ -381,7 +389,7 @@ case "${1:-ready}" in
         }
         printf '/* #undef HAVE_BACKTRACE */\n' >"$fake_primary/$TOR_TREE/orconfig.h"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" write "$fake_primary/$TOR_TREE" \
-            "$(printf '%040x' 1)" "$selftest_cid" \
+            "$selftest_pin" "$selftest_cid" \
             "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {
             echo "tor_archives_ready: selftest FAILED — could not write fixture provenance manifest" >&2
             exit 1
@@ -407,6 +415,16 @@ PROBE_MAKE
             SCRIPT_ROOT="$probe_root"
             ROOT="$probe_root"
             zcl_tor_compiler_identity_for_cc() { printf '%s\n' "$selftest_cid"; }
+            mkdir -p "$probe_root/vendor/provenance"
+            printf 'source_revision=%s\n' "$selftest_pin" > "$probe_root/vendor/provenance/tor.manifest"
+            have_all probe || exit 1
+            # An index pin takes precedence over a matching carrier manifest.
+            unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+            git init -q "$probe_root" || exit 1
+            other_pin="$(printf '%040x' 2)"
+            git -C "$probe_root" update-index --add --cacheinfo "160000,$other_pin,vendor/tor" || exit 1
+            if have_all probe; then exit 1; fi
+            git -C "$probe_root" update-index --cacheinfo "160000,$selftest_pin,vendor/tor" || exit 1
             have_all probe || exit 1
             mv "$probe_root/build/bin/z23-tor-provenance" "$probe_root/helper.saved"
             if have_all probe; then exit 1; fi
@@ -423,8 +441,6 @@ PROBE_MAKE
             echo 'tor_archives_ready: selftest FAILED — non-building readiness probe' >&2
             exit 1
         }
-        # Consumer fallback (and Mac's subsequent donor probe) has no Makefile.
-        rm -f -- "$fake_primary/$TOR_TREE/Makefile"
         (
             ROOT="$fake_wt"
             cd "$fake_wt"
@@ -519,7 +535,7 @@ PROBE_MAKE
         sed '/^source_patch=/d; /^build_path_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
             "$fake_wt/$TOR_TREE/.provenance"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
-            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
+            "$fake_wt/$TOR_TREE" "$selftest_pin" "$selftest_cid" >/dev/null || {
             echo 'tor-ready: selftest FAILED intact pre-patch bundle refused' >&2
             exit 1
         }
@@ -530,7 +546,7 @@ PROBE_MAKE
         sed '/^fatal_handler_policy=/d; /^source_patch=/d; /^build_path_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
             "$fake_wt/$TOR_TREE/.provenance"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
-            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
+            "$fake_wt/$TOR_TREE" "$selftest_pin" "$selftest_cid" >/dev/null || {
             echo 'tor-ready: selftest FAILED intact legacy bundle refused' >&2
             exit 1
         }
@@ -540,14 +556,14 @@ PROBE_MAKE
         fi
         printf 'corrupt' >>"$fake_wt/$TOR_TREE/libtor.a"
         if "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
-            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null 2>&1; then
+            "$fake_wt/$TOR_TREE" "$selftest_pin" "$selftest_cid" >/dev/null 2>&1; then
             echo 'tor-ready: selftest FAILED corrupt legacy bundle was eligible' >&2
             exit 1
         fi
         cp -p "$fake_primary/$TOR_TREE/libtor.a" "$fake_wt/$TOR_TREE/libtor.a"
         printf 'fatal_handler_policy=wrong\n' >>"$fake_wt/$TOR_TREE/.provenance"
         if "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
-            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null 2>&1; then
+            "$fake_wt/$TOR_TREE" "$selftest_pin" "$selftest_cid" >/dev/null 2>&1; then
             echo 'tor-ready: selftest FAILED explicit wrong policy was eligible' >&2
             exit 1
         fi
@@ -596,42 +612,18 @@ PROBE_MAKE
             echo "tor_archives_ready: selftest FAILED — a distinct or missing compiler was accepted as an alias" >&2
             exit 1
         fi
-        # have_all() must accept a manifest recorded under one alias for the
-        # compiler (e.g. "gcc", what vendor/tor's real configure picked) when
-        # the ambient guess in THIS tree resolves to a different alias for
-        # the very same binary (e.g. "cc", what tor_ambient_compiler() falls
-        # back to with no vendor/tor/Makefile and CC unset -- exactly the
-        # state a freshly linked worktree is in; see tor_alias_check() and
-        # the header comment on tor_ambient_compiler()). Skip cleanly if this
-        # host's gcc and cc are not the same binary, since the fix does not
-        # apply there.
+        # A copied bundle can record gcc while its consumer discovers the same binary as cc.
         gcc_path="$(command -v gcc 2>/dev/null || true)"
         cc_path="$(command -v cc 2>/dev/null || true)"
         if [ -n "$gcc_path" ] && [ -n "$cc_path" ] && \
            tor_same_compiler_file "$gcc_path" "$cc_path"; then
             fake_wt3="$fixture/worktree3"
-            mkdir -p "$fake_wt3"
-            mkdir -p "$fake_wt3/$TOR_TREE"
-            printf 'CFLAGS = -g -O2\nfixture-object:\n\t$(CC) $(CFLAGS) -x c -c -o "$(OBJECT)" -\n' >"$fake_wt3/$TOR_TREE/Makefile"
-            "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" map-build-path "$fake_wt3/$TOR_TREE" "$fake_wt3" || exit 1
-            for a in "${ARCHIVES[@]}"; do
-                mkdir -p "$fake_wt3/${a%/*}"
-                printf 'void dynhost_stream_init(void) {}\n' |
-                    make -s -C "$fake_wt3/$TOR_TREE" fixture-object OBJECT="$fixture/patch.o" || exit 1
-                ar rcs "$fake_wt3/$a" "$fixture/patch.o" || exit 1
-            done
+            cp -R "$fake_primary" "$fake_wt3" || exit 1
             alias_cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" gcc 2>/dev/null)" || {
                 echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2
                 exit 1
             }
-            printf '/* #undef HAVE_BACKTRACE */\n' >"$fake_wt3/$TOR_TREE/orconfig.h"
-            "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" write "$fake_wt3/$TOR_TREE" \
-                "$(printf '%040x' 1)" "$alias_cid" \
-                "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {
-                echo "tor_archives_ready: selftest FAILED — could not write the alias fixture manifest" >&2
-                exit 1
-            }
-            rm -f -- "$fake_wt3/$TOR_TREE/Makefile"
+            "$known_good" rewrite-compiler-id "$fake_wt3/$TOR_TREE" "$alias_cid" >/dev/null || exit 1
             if ! (ROOT="$fake_wt3"; cd "$fake_wt3" && unset CC VENDOR_CC; have_all) >/dev/null 2>&1; then
                 echo "tor_archives_ready: selftest FAILED — have_all() rejected a manifest recorded under a same-binary compiler alias" >&2
                 exit 1
