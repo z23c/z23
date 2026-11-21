@@ -5,15 +5,12 @@
 `harness/src/` contains test implementations; filenames do not necessarily name registered groups. `harness/include/test/` holds shared helpers, and `fixtures/` holds local fixtures (`blocks`, `fleet_observations`, `riscv-tests`).
 
 For focused editing, use `make t-list` to discover registered groups and inspect
-the test's registration and shard table to find its owner. For example,
-`dlx_case_precheck` in `harness/src/test_dev_land_precheck.c` is assigned to
-owner `1u` in `g_dlx_shard_cases` in `harness/src/test_dev_land.c`, so run
-`make t-fast-exact ONLY=dev_land_shard_02`. The exact target validates the
-selector against the registered groups. Committed-candidate proof still uses
-`make agent-verify ONLY=@changed`.
+the test's registration and shard table to find its owner. In `g_dlx_shard_cases`
+in `harness/src/test_dev_land.c`, `dlx_case_precheck` has owner `1u`.
+Committed-candidate proof uses `make agent-verify ONLY=@changed`.
 
 Rules:
-- Run groups only through `make t-fast ONLY=<group>` (substring) or `make t-fast-exact ONLY=<group>`; never run `test_zcl` directly.
+- Use `make t-fast ONLY=<group>` (substring) or `make t-fast-exact ONLY=<group>` (exact). For `test_dev_land_precheck.c`, run `make t-fast-exact ONLY=dev_land_shard_02`. Never run `test_zcl` directly.
 - For an expected failure, `make t-fast-exact ONLY=<group> T_FAST_EXACT_ARGS=--diagnostic-once` runs once and produces no acceptance proof.
 - A test file that exists proves nothing; zero groups run is a failure.
 - Assertion macros jump to `_test_next`, a function-scoped C label. Do not duplicate that label when adding a test block; use a separate helper function or combine related assertions under one test. `TEST_END` also defines the label.
