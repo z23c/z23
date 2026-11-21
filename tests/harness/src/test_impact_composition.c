@@ -1530,8 +1530,11 @@ static int test_ic_capacity_provenance(void)
         long_input[200] = '\0';
         zcl_devloop_capacity_note(&plan, "include", "file-cap", long_input);
         zcl_dev_proof_test_select_capacity_detail(&selection, &plan);
-        ASSERT(strstr(selection.detail, long_input) != NULL);
-        ASSERT(strstr(selection.detail, "capacity_node=unknown") != NULL);
+        char expected_long_detail[512];
+        int expected_n = snprintf(expected_long_detail, sizeof(expected_long_detail),
+            "capacity_origin=include capacity_cause=file-cap capacity_input=%s capacity_node=unknown", long_input);
+        ASSERT(expected_n > 0 && (size_t)expected_n < sizeof(expected_long_detail));
+        ASSERT_STR_EQ(selection.detail, expected_long_detail);
         zcl_devloop_capacity_reset_closure(&plan);
         zcl_devloop_capacity_note(&plan, "path", "group-cap", "file.c");
         plan.path_universal = true;
