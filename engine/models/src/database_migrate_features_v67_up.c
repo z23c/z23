@@ -211,7 +211,7 @@ static bool store_purchases_v83_apply(struct node_db *ndb, int floor)
         "NOT NULL DEFAULT '' CHECK(length(seller_onion)<=62)");
     int nulls = 0;
     if (ok) ok = store_purchases_v83_scalar(ndb,
-        "SELECT count(*) FROM main.store_purchases WHERE seller_onion IS NULL OR order_id IS NULL", &nulls) && nulls == 0;
+        "SELECT EXISTS(SELECT 1 FROM main.store_purchases WHERE seller_onion IS NULL OR order_id IS NULL)", &nulls) && nulls == 0;
     if (ok) ok = store_purchases_v83_repair_index(ndb);
     if (ok) ok = node_db_exec(ndb, "INSERT OR IGNORE INTO schema_migrations(version) VALUES('083')");
     int32_t version = 83, compat_floor = floor;
@@ -234,13 +234,6 @@ static int db_migrate_step_83(struct node_db *ndb, int *current_ver,
     *current_ver = 83;
     (*applied)++;
     return 0;
-}
-
-/* Grouping preserves the existing v82 return handling. */
-static int db_migrate_steps_82_83(struct node_db *ndb, int *version, int *floor, int *applied)
-{
-    (void)db_migrate_step_82(ndb, version, applied, *floor);
-    return db_migrate_step_83(ndb, version, floor, applied);
 }
 
 /* True once fleet_board_posts already carries the v84 `arrival` column.
@@ -1280,7 +1273,9 @@ static int db_migrate_steps_80_83(struct node_db *ndb, int *version, int *floor,
 {
     if (db_migrate_step_80(ndb, version, floor, applied) < 0) return -1;
     (void)db_migrate_step_81(ndb, version, floor, applied);
-    if (db_migrate_steps_82_83(ndb, version, floor, applied) < 0)
+    /* Preserve the existing v81/v82 return handling. */
+    (void)db_migrate_step_82(ndb, version, applied, *floor);
+    if (db_migrate_step_83(ndb, version, floor, applied) < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     return 0;
 }
