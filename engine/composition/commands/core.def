@@ -224,12 +224,14 @@ ZCL_COMMAND_READY_READ(
     "Background proof-verification progress (blocks walked from "
     "genesis vs chain height), read live from the running node at "
     "call time; disabled entirely under -nobgvalidation. Read it "
-    "fail-closed: script_verif_skipped_no_undo counts non-coinbase "
-    "transactions whose scripts were NOT checked because the block's "
-    "undo (rev) data was absent, undo_missing_blocks counts the blocks "
-    "they sat in, and verification_incomplete is true whenever the walk "
-    "is short or either of those is nonzero, so a verified_height alone "
-    "never means the transparent scripts below it were verified.", 0,
+    "fail-closed: script_verif_skipped_no_undo is the cumulative walk "
+    "count of transactions whose scripts were not checked for missing undo; "
+    "it is restored from saved progress. undo_missing_blocks counts "
+    "missing-undo blocks observed by this process, independently of the "
+    "restored count. verification_incomplete is true when the walk is short "
+    "or either counter is nonzero. A verified_height alone does not prove "
+    "the scripts below it were checked. For current sampled re-verification "
+    "progress, use z23 ops state bg_validation.", 0,
     "validation,proofs,progress",
     "zcl.command.empty_input.v1", "zcl.validation_status.v1", "", "",
     "z23 core sync validation",
