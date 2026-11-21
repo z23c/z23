@@ -8,6 +8,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -278,6 +279,17 @@ static bool ci_publish_guarded_build_roots_and_projection(
 }
 #undef build
 
+/* Only a fresh in-memory store defers these lookup indexes during bulk
+ * insertion. The file-ordered index remains available to shard writers. */
+static bool ci_defer_ref_indexes(struct ci_store *store)
+{
+    if (sqlite3_exec(ci_store_db(store),
+            "DROP INDEX idx_refs_callee; DROP INDEX idx_refs_enclosing_ordered",
+            NULL, NULL, NULL) != SQLITE_OK)
+        LOG_FAIL("codeindex", "defer fresh reference indexes failed");
+    return true;
+}
+
 #line 231
 bool ci_build_store_memory(const char *root, int64_t build_start_ms,
                            struct ci_store **out_store,
@@ -301,9 +313,13 @@ bool ci_build_store_memory(const char *root, int64_t build_start_ms,
     ci_source_root_init(&build.source_root);
 
     bool tx_open = ci_store_begin(store);
-    bool ok = tx_open && ci_store_clear(store) && ci_group_emit_all(store) &&
+    bool ok = tx_open && ci_defer_ref_indexes(store) &&
+              ci_group_emit_all(store) &&
               build_files_and_docs(&build, root);
-    if (ok) idmap_sort(&build);
+    if (ok) {
+        idmap_sort(&build);
+        ok = ci_store_ensure_schema(ci_store_db(store));
+    }
 
     ok = ci_publish_guarded_build_roots_and_projection(
         ok, store, &build, root, source_stat_out, dep_stat_out);

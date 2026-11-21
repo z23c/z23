@@ -408,6 +408,37 @@ static bool cip_shard_ref_order(struct codeindex *index)
     return cip_shard_ref_sort(index, false);
 }
 
+/* Check both rebuilt indexes on the published cold generation, using the
+ * same predicates as caller/callee lookups. */
+static bool cip_ref_plan(sqlite3 *db, const char *sql, const char *index)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    bool found = false;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *detail = (const char *)sqlite3_column_text(stmt, 3);
+        if (detail && strstr(detail, index)) found = true;
+    }
+    bool closed = sqlite3_finalize(stmt) == SQLITE_OK;
+    return found && rc == SQLITE_DONE && closed;
+}
+
+static bool cip_cold_ref_indexes(struct codeindex *index)
+{
+    sqlite3 *db = ci_store_db(index->store);
+    struct ci_ref refs[8];
+    int n = codeindex_callers(index, "projection_leaf", refs, 8);
+    return n == 2 &&
+        strcmp(refs[0].enclosing, "projection_aux") == 0 &&
+        strcmp(refs[1].enclosing, "projection_main") == 0 &&
+        cip_ref_plan(db, "EXPLAIN QUERY PLAN SELECT * FROM refs WHERE callee_name=?",
+                     "idx_refs_callee") &&
+        cip_ref_plan(db, "EXPLAIN QUERY PLAN SELECT * FROM refs WHERE enclosing=? "
+                         "ORDER BY ref_file,ref_line", "idx_refs_enclosing_ordered");
+}
+
 static bool cip_legacy_ref_index(const char *root)
 {
     char path[PATH_MAX]; sqlite3 *db = NULL;
@@ -827,6 +858,8 @@ int test_codeindex_projection_integrity(void)
     CIP_CHECK("shard reference ordering needs no sort and preserves projection",
               rooted && cip_shard_ref_order(one) &&
               cip_generation_matches(one, source_root, projection_root));
+    CIP_CHECK("cold published reference indexes serve caller and callee lookups",
+              rooted && cip_cold_ref_indexes(one));
     codeindex_close(one);
     codeindex_close(two);
     failures += cip_check_index_migration(ready, workspace);
