@@ -773,6 +773,37 @@ static bool dlx_pc_purpose_order(const char *detail, bool fail)
     return ok;
 }
 
+static bool dlx_pc_unproven_after_info(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    const char *gate = "check-capability-closure";
+    const char *script = "#!/bin/sh\n"
+        "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "if [ \"$1\" = check-capability-closure ]; then\n"
+        "  echo 'check_capability_closure: 1 foreign object(s)'\n"
+        "  echo '  not graded; first object follows'\n"
+        "  echo '    tools/package_verify_wallet_gui.o'\n"
+        "  echo 'check_capability_closure: UNPROVEN - 5 module_capabilities.def'\n"
+        "  exit 2\n"
+        "fi\nexit 0\n";
+    char row[1024];
+    if (!dlx_pc_rig(&rig, "precheck_unproven_info", true,
+                    "check-capability-closure\n")) return false;
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1, gate);
+    bool ok = dlx_pc_outcomes(row) && dlx_pc_file(&rig, "bin/z23-lint", script);
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && dlx_ok(&c) && dlx_queue_has_one() && ok &&
+        dlx_pc_has(dlx_arr(&c, "precheck_skipped"), gate) &&
+        !dlx_pc_has(dlx_arr(&c, "precheck_ran"), gate) &&
+        strstr(dlx_str(&c, "precheck_unproven"),
+               "check_capability_closure: UNPROVEN - 5 module_capabilities.def") != NULL;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+
 static bool dlx_pc_inventory_order_log(const struct dlx_rig *rig, bool selected)
 {
     char path[1400], log[2048] = "";
@@ -1423,6 +1454,7 @@ int dlx_case_precheck(void)
     }
     TEST("land: precheck skips a gate that cannot decide (exit 2) and queues") {
         ASSERT(dlx_pc_unproven_gate_skipped());
+        ASSERT(dlx_pc_unproven_after_info());
         PASS();
     }
     TEST("land: submit queues a lane whose precheck gates are clean") {

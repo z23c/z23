@@ -624,16 +624,27 @@ static int pc_ship_run(struct pc_run *r)
     return 0;
 }
 
-/* Appends "gate: first output line" for an unproven gate to r->unproven and
+/* Prefer an explicit verdict after informational output; otherwise use the
+ * first line for gates that do not label their unproven reason. */
+static const char *pc_unproven_line(const char *out)
+{
+    const char *mark = strstr(out, "UNPROVEN");
+    if (!mark) return out;
+    while (mark > out && !strchr("\r\n", mark[-1])) mark--;
+    return mark;
+}
+
+/* Appends "gate: reason line" for an unproven gate to r->unproven and
  * counts the gate as skipped. Both writes are bounded; a full buffer drops
  * the reason but never the skip. */
 static void pc_note_unproven(struct pc_run *r, const char *gate)
 {
     char line[160];
-    size_t used = strlen(r->unproven), n = strcspn(r->out, "\r\n");
+    const char *reason = pc_unproven_line(r->out);
+    size_t used = strlen(r->unproven), n = strcspn(reason, "\r\n");
     if (n >= sizeof(line))
         n = sizeof(line) - 1;
-    memcpy(line, r->out, n);
+    memcpy(line, reason, n);
     line[n] = '\0';
     if (used > 0 && used + 2 < sizeof(r->unproven))
         (void)snprintf(r->unproven + used, sizeof(r->unproven) - used, "; ");
