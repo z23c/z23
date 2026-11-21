@@ -177,7 +177,9 @@ Environment=Z23_RECEIVE_WORKSPACE_FLAG=
 # the workspace flag above: the variable holds whole flags, so empty means ZERO
 # arguments (unquoted single-dollar $VAR in ExecStart; braced ${VAR} would pass
 # an empty argument). It ships EMPTY, so the dev binary default selection is
-# used. The flags are global client flags and sit BEFORE the command path.
+# used. The flags are global client flags; they sit LAST in ExecStart, after the
+# leaf arguments (the unit-resolve test needs the command path right after the
+# binary, and the client accepts -rpcport after the leaf, measured).
 # -rpcport alone is enough: the matching datadir is auto-discovered, and
 # -datadir=DIR may be added to pin one. Check the target first with
 # `z23-dev -rpcport=<PORT> fleet board status` (ok:true), then:
@@ -214,7 +216,7 @@ Environment=Z23_NODE_FLAGS=
 # above still refuses a binary that exits in a tight loop. Every decision
 # is re-derived from files on the next drive, so a restart between beats
 # neither loses a ref nor executes one twice.
-ExecStart=%h/.local/bin/z23-dev $Z23_NODE_FLAGS dev agent receive run --receiver=%i $Z23_RECEIVE_WORKSPACE_FLAG --deadline_s=86400 --wait_ms=1000
+ExecStart=%h/.local/bin/z23-dev dev agent receive run --receiver=%i $Z23_RECEIVE_WORKSPACE_FLAG --deadline_s=86400 --wait_ms=1000 $Z23_NODE_FLAGS
 
 # The resident handles SIGTERM cooperatively: it stops taking new work at the
 # next check, the watcher wait returns within its stop-sample slice, and the
