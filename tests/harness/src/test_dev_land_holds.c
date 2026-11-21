@@ -1767,6 +1767,53 @@ bool dlx_pc_gate_set_learns(void)
     return ok;
 }
 
+static bool dlx_pc_model_sql_setup(struct dlx_rig *rig, int mode)
+{
+    if (mode == 0) return true;
+    char dir[1400];
+    (void)snprintf(dir, sizeof(dir), "%s/engine/models/include/models", rig->clone);
+    if (!dlx_mkdir_p(dir) || !dlx_commit(rig->clone, "engine/models/include/models/new.h",
+            "static const char sql[] = \"SELECT * FROM t\";\n", rig->tip)) return false;
+    if (mode == 1) return dlx_pc_file(rig, "precheck-fail", "check-model-sql-literals");
+    char row[512];
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1, "check-model-sql-literals failed");
+    return dlx_pc_outcomes(row);
+}
+
+static bool dlx_pc_model_sql_once(struct dlx_call *c, const char *gate)
+{
+    const struct json_value *ran = dlx_arr(c, "precheck_ran");
+    size_t count = 0;
+    for (size_t i = 0; ran && i < ran->num_children; i++)
+        if (ran->children[i].type == JSON_STR && strcmp(json_get_str(&ran->children[i]), gate) == 0) count++;
+    return count == 1;
+}
+
+static bool dlx_pc_model_sql_route(int mode)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    const char *gate = "check-model-sql-literals";
+    const char *tags[] = {"model_clean", "model_red", "model_history"};
+    if (!dlx_pc_rig(&rig, tags[mode], true, "check-model-sql-literals\n")) return false;
+    bool ok = dlx_pc_model_sql_setup(&rig, mode);
+    dlx_pc_submit(&c, &rig, NULL, "model-route");
+    bool called = dlx_run(&c);
+    ok = ok && called && (mode == 1 ? !dlx_ok(&c) && strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0
+                                      : dlx_ok(&c));
+    ok = ok && dlx_pc_ran(&rig, gate) == (mode != 0);
+    if (mode == 2) ok = ok && dlx_pc_model_sql_once(&c, gate);
+    if (!ok) printf("model precheck fixture failed mode=%d error=%s\n", mode, dlx_err_code(&c));
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_model_sql_routes(void)
+{
+    return dlx_pc_model_sql_route(1) && dlx_pc_model_sql_route(0) && dlx_pc_model_sql_route(2);
+}
+
 bool dlx_pc_failing_gate_refused(void)
 {
     struct dlx_rig rig;
@@ -1793,7 +1840,7 @@ bool dlx_pc_failing_gate_refused(void)
          dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0 &&
          strcmp(head, rig.tip) == 0;
     dlx_restore();
-    return ok;
+    return ok && dlx_pc_model_sql_routes();
 }
 
 /* A gate exiting 2 cannot decide here: it is skipped and named, the gates

@@ -44,6 +44,7 @@
 #define PC_SHIP_GATE "check-ship-remote-transaction"
 #define PC_DEPFILE_GATE "check-make-depfile-scope-selftest"
 #define PC_DEPFILE_BIN "build/bin/depfile-scope-launch"
+#define PC_MODEL_SQL_GATE "check-model-sql-literals"
 
 static const char *const k_pc_core[] = {
     "check-file-size-ceiling", "check-cyclomatic-complexity",
@@ -423,6 +424,7 @@ struct pc_run {
     char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
     bool gate_output_available;
+    bool model_sql_required;
     struct json_value windows_capture;
     bool windows_capture_seen, windows_capture_ok;
     char land[4096];
@@ -1105,6 +1107,11 @@ static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
 }
 
 /* One gate: skipped (unknown or unproven), refused, or ran clean. */
+static bool pc_model_sql_unproven(const struct pc_run *r, const char *gate, int rc)
+{
+    return r->model_sql_required && strcmp(gate, PC_MODEL_SQL_GATE) == 0 && rc == PC_EXIT_UNPROVEN;
+}
+
 static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                                       const char *list,
                                       struct zcl_command_reply *reply)
@@ -1131,6 +1138,10 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE",
                 "canonical file-purpose command could not be resolved safely",
                 r->out);
+        return PC_GATE_REFUSED;
+    }
+    if (pc_model_sql_unproven(r, gate, rc)) {
+        pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE", "model SQL check could not decide", r->out);
         return PC_GATE_REFUSED;
     }
     if (!script && rc == PC_EXIT_UNPROVEN) {
@@ -1179,6 +1190,10 @@ static bool pc_gates_run(struct pc_run *r,
         return false;
     }
     (void)snprintf(list, sizeof(list), "%s", r->out);
+    if (r->model_sql_required && !pc_known(list, PC_MODEL_SQL_GATE)) {
+        pc_fail(reply, r->leaf, "PRECHECK_UNAVAILABLE", "model SQL check is not available in the lane binary", r->bin);
+        return false;
+    }
     for (size_t i = 0; i < g->count; i++) {
         if (pc_gate_one(r, g->name[i], list, reply) == PC_GATE_REFUSED)
             return false;
@@ -1231,6 +1246,22 @@ static bool pc_tip_is_head(const char *wt, const char *tip)
     return strcmp(head, tip) == 0;
 }
 
+/* The gate is whole-tree and shrink-only. Route it for changed model inputs;
+ * an unprovable diff runs it rather than suppressing a needed check. */
+static bool pc_model_sql_needed(const char *wt)
+{
+    const char *argv[] = {"git", "-C", wt, "diff", "--name-only", "-z",
+        "--no-renames", "origin/main...HEAD", "--",
+        ":(glob)**/models/**/*.c", ":(glob)**/models/**/*.h",
+        ":(glob)**/models/**/*.def", "tools/lint/model_sql_literal_baseline.txt",
+        "tools/lint/lintc/gate_model_sql_literals.c", NULL};
+    unsigned char output[1];
+    struct zcl_spawn_binary_observation observation = {0};
+    struct zcl_result result = zcl_spawn_capture_binary(argv, output, sizeof(output),
+                                                        30000, &observation);
+    return !result.ok || observation.output_len != 0;
+}
+
 static bool pc_run_gates(const char *leaf, const char *wt,
                          const char *land_dir, int64_t floor_ms, struct zcl_command_reply *reply)
 {
@@ -1268,6 +1299,19 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     }
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
                                pc_now(), g);
+    r->model_sql_required = pc_model_sql_needed(wt);
+    if (r->model_sql_required) {
+        size_t before = g->count;
+        pc_gate_add(g, PC_MODEL_SQL_GATE, strlen(PC_MODEL_SQL_GATE));
+        bool present = false;
+        for (size_t i = 0; i < g->count; i++)
+            if (strcmp(g->name[i], PC_MODEL_SQL_GATE) == 0) present = true;
+        if (!present && before == g->count) {
+            pc_fail(reply, leaf, "PRECHECK_UNAVAILABLE", "model SQL gate exceeds precheck capacity", wt);
+            free(g); json_free(&r->windows_capture); free(r);
+            return false;
+        }
+    }
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
     int64_t budget_ms = pc_budget_ms();
 #if defined(ZCL_TESTING)
