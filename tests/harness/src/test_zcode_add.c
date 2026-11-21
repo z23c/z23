@@ -319,9 +319,15 @@ static bool za_link_targets_path(const char *link, const char *target)
 {
     char actual[4400], expected[4400];
     ssize_t len = readlink(link, actual, sizeof(actual) - 1u);
-    if (len <= 0 || !test_abs_path(target, expected, sizeof(expected)))
-        return false;
+    if (len <= 0) return false;
     actual[len] = '\0';
+    if (actual[0] != '/') {
+        const char *root = strrchr(target, '/');
+        if (!root) return false;
+        int n = snprintf(expected, sizeof(expected), "../../installed/%s", root + 1);
+        return n > 0 && (size_t)n < sizeof(expected) && strcmp(actual, expected) == 0;
+    }
+    if (!test_abs_path(target, expected, sizeof(expected))) return false;
     return strcmp(actual, expected) == 0;
 }
 
@@ -1210,18 +1216,47 @@ static int t_atomic_write_temp_symlink(void)
     return failures;
 }
 
+static int za_moved_active_checks(struct pkgl_ctx *ctx, const char *base,
+                                  const char *moved, const uint8_t root[32], const uint8_t other[32])
+{
+    int failures = 0; char installed[400], active[400], target[4400], hex[65];
+    za_hex(root, 32, hex);
+    bool renamed = rename(base, moved) == 0;
+    (void)snprintf(ctx->zcode_dir, sizeof(ctx->zcode_dir), "%s/zcode", moved);
+    (void)snprintf(installed, sizeof(installed), "%s/installed/%s", ctx->zcode_dir, hex);
+    (void)snprintf(active, sizeof(active), "%s/active/alice/preview", ctx->zcode_dir);
+    uint8_t observed[32]; size_t count = 0; bool present = false;
+    struct zcl_result current = package_lifecycle_active(moved, "alice/preview", observed, &count, &present);
+    struct stat wanted, actual;
+    ZA_CHECK("moved profile resolves the same active root and generation",
+             renamed && stat(installed, &wanted) == 0 && stat(active, &actual) == 0 &&
+                 wanted.st_dev == actual.st_dev && wanted.st_ino == actual.st_ino &&
+                 current.ok && present && count == 1 && memcmp(observed, root, 32) == 0);
+    ZA_CHECK("a different generation root is refused",
+             !pkgl_active_pointer_matches(ctx, "alice/preview", other, true).ok);
+    bool absolute = test_abs_path(installed, target, sizeof(target)) && unlink(active) == 0 &&
+                    symlink(target, active) == 0;
+    ZA_CHECK("legacy absolute active pointer remains valid",
+             absolute && pkgl_active_pointer_matches(ctx, "alice/preview", root, true).ok);
+    bool malformed = unlink(active) == 0 && symlink("../preview", active) == 0;
+    ZA_CHECK("arbitrary relative active pointer is refused",
+             malformed && !pkgl_active_pointer_matches(ctx, "alice/preview", root, true).ok);
+    return failures;
+}
+
 static int t_relative_active_pointer(void)
 {
     int failures = 0;
-    char base[256], installed[400], active[400];
+    char base[256], moved[256], installed[400], active[400];
     (void)snprintf(base, sizeof(base), "test-tmp/za_relative_%ld",
                    (long)getpid());
     (void)za_rm_rf(base);
     bool private_base = za_mkdir_p(base);
     struct pkgl_ctx ctx = {0};
     (void)snprintf(ctx.zcode_dir, sizeof(ctx.zcode_dir), "%s/zcode", base);
-    uint8_t root[32], previous[32];
+    uint8_t root[32], previous[32], other[32];
     za_fake_root(root, 0x72);
+    za_fake_root(other, 0x73);
     char hex[65];
     za_hex(root, 32, hex);
     (void)snprintf(installed, sizeof(installed), "%s/installed/%s",
@@ -1233,12 +1268,20 @@ static int t_relative_active_pointer(void)
     struct zcl_result activated = pkgl_activate(
         &ctx, "alice/preview", root, 1000, previous, &had_previous);
     struct stat wanted, actual;
+    char link_target[100], expected_link[100];
+    ssize_t link_len = readlink(active, link_target, sizeof(link_target) - 1u);
+    if (link_len >= 0) link_target[link_len] = '\0';
+    (void)snprintf(expected_link, sizeof(expected_link), "../../installed/%s", hex);
     ZA_CHECK("relative datadir activation points at its installed directory",
              prepared && activated.ok && stat(installed, &wanted) == 0 &&
                  stat(active, &actual) == 0 &&
                  wanted.st_dev == actual.st_dev &&
-                 wanted.st_ino == actual.st_ino);
-    ZA_CHECK("relative activation fixture removed", za_rm_rf(base));
+                 wanted.st_ino == actual.st_ino && link_len > 0 &&
+                 strcmp(link_target, expected_link) == 0);
+    (void)snprintf(moved, sizeof(moved), "test-tmp/za_moved_%ld", (long)getpid());
+    (void)za_rm_rf(moved);
+    failures += za_moved_active_checks(&ctx, base, moved, root, other);
+    ZA_CHECK("relative activation fixture removed", za_rm_rf(base) && za_rm_rf(moved));
     return failures;
 }
 
@@ -3652,15 +3695,9 @@ static int za_e2e_rollback_bytes(struct za_e2e_fix *fx)
     struct package_lifecycle_rollback_report *rb = &fx->rb;
 
     char link[4400];
-    char resolved[4400];
     snprintf(link, sizeof(link), "%s/active/alice/ringbuffer", zcode);
-    ssize_t ln = readlink(link, resolved, sizeof(resolved) - 1u);
-    if (ln > 0)
-        resolved[ln] = '\0';
-    else
-        resolved[0] = '\0';
     ZA_CHECK("the active symlink points at A's install tree",
-             ln > 0 && za_link_targets_path(link, installed_dir));
+             za_link_targets_path(link, installed_dir));
 
     /* The claim is byte-exactness, so assert byte-exactness: hash what the
      * active pointer resolves to TODAY and compare against the fingerprint
@@ -3668,8 +3705,8 @@ static int za_e2e_rollback_bytes(struct za_e2e_fix *fx)
     char back_archive[4600];
     char back_header[4600];
     snprintf(back_archive, sizeof(back_archive), "%s/lib/libringbuffer.a",
-             resolved);
-    snprintf(back_header, sizeof(back_header), "%s/include/ring.h", resolved);
+             link);
+    snprintf(back_header, sizeof(back_header), "%s/include/ring.h", link);
     uint8_t back_archive_sha[32], back_header_sha[32];
     bool back_hashed = za_file_sha3(back_archive, back_archive_sha) &&
                        za_file_sha3(back_header, back_header_sha);

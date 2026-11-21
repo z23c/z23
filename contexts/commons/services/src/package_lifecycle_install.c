@@ -851,6 +851,13 @@ static struct zcl_result pkgl_active_target_matches(
                        "active installed root for %s is missing or not a "
                        "directory; inspect the install and reinstall the "
                        "exact verified root", name);
+    char relative[sizeof("../../installed/") + 64u];
+    (void)snprintf(relative, sizeof(relative), "../../installed/%s", hex);
+    if (strcmp(actual, relative) == 0) return ZCL_OK;
+    if (actual[0] != '/')
+        return ZCL_ERR(-1, "active pointer and generation log disagree for %s; "
+                           "inspect both and retry activation of the exact "
+                           "verified root", name);
     if (strcmp(actual, expected) != 0) {
         /* Older absolute links may contain a spelling of the same parent
          * through a symlink. Accept only if both paths resolve to the same
@@ -1010,14 +1017,10 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
                        "installed root %s is not a directory; quarantine "
                        "the invalid path and reinstall the exact root",
                        target);
-    /* A caller may use a relative datadir. Symlink contents are resolved
-     * relative to active/<publisher>/, not the caller's working directory. */
-    char absolute_target[PKGL_PATH_MAX];
-    if (!realpath(target, absolute_target))
-        return ZCL_ERR(-1,
-                       "cannot resolve installed root %s for activation: %s; "
-                       "inspect the install path and retry",
-                       target, strerror(errno));
+    /* Both directories move together with the profile. */
+    char hex[65], relative_target[sizeof("../../installed/") + 64u];
+    zcl_hex_encode(root, 32, hex);
+    (void)snprintf(relative_target, sizeof(relative_target), "../../installed/%s", hex);
 #endif
 
     char tmp[PKGL_PATH_MAX];
@@ -1029,7 +1032,7 @@ static struct zcl_result pkgl_swap_active(const struct pkgl_ctx *ctx,
     return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
 #else
     ZCL_CHECK(pkgl_clear_stale_active_link(tmp));
-    if (symlink(absolute_target, tmp) != 0)
+    if (symlink(relative_target, tmp) != 0)
         return ZCL_ERR(-1, "symlink %s: %s", tmp, strerror(errno));
 #endif
     if (rename(tmp, link) != 0) {
