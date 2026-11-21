@@ -31,6 +31,7 @@
 #include "wallet/wallet.h"
 #include "dev_failure_store.h"
 #include "kernel/command_registry.h"
+#include "command/native_app_launch.h"
 #include "command/native_command.h"
 #include "controllers/rpc_client.h"
 #include "controllers/status_native_handlers.h"
@@ -4969,21 +4970,30 @@ static int test_app_list_pasteable_next(void)
 {
     int failures = 0, rc = 0;
     char wire[16384];
-    TEST("app list carries a pasteable open command with -datadir") {
+    TEST("headless app list keeps private Tasks guidance and profile-specific catalog commands") {
         const char *list[] = {"list"};
         struct json_value reply;
         json_init(&reply);
-        ASSERT(uniform_cli_in("app", "/front-door-datadir", list, 1, wire,
-                              sizeof(wire), &rc));
+        app_launch_test_set_desktop(0);
+        bool ran = uniform_cli_in("app", "/front-door-datadir", list, 1, wire,
+                                  sizeof(wire), &rc);
+        app_launch_test_set_desktop(-1);
+        ASSERT(ran);
+        ASSERT_EQ(rc, 0);
         ASSERT(json_read(&reply, wire, strlen(wire)));
         const struct json_value *data = json_get(&reply, "data");
         const char *next = json_get_str(json_get(data, "next"));
         ASSERT(next != NULL);
-        ASSERT_STR_EQ(next, "z23 -datadir=/front-door-datadir app open "
-                            "skycombat");
+        ASSERT_STR_EQ(next, "z23 app tasks list");
+        const struct json_value *action = json_at(json_get(&reply, "next"), 0);
+        ASSERT_STR_EQ(json_get_str(json_get(action, "command")), "app.tasks");
+        const struct json_value *input = json_get(action, "input");
+        ASSERT_STR_EQ(json_get_str(json_get(input, "action")), "list");
+        ASSERT(json_get(input, "datadir") == NULL);
         const struct json_value *first =
             json_at(json_get(data, "launchable"), 0);
-        ASSERT_STR_EQ(json_get_str(json_get(first, "open")), next);
+        ASSERT_STR_EQ(json_get_str(json_get(first, "open")),
+                      "z23 -datadir=/front-door-datadir app open skycombat");
         json_free(&reply);
         PASS();
     } _test_next:;
