@@ -133,9 +133,8 @@ static bool db_migrate_v33_parity_samples(struct node_db *ndb)
         "  CHECK(oracle_reachable IN (0,1)))") &&
         node_db_exec(ndb,
         "CREATE INDEX IF NOT EXISTS idx_parity_samples_ts "
-        "ON parity_samples(ts DESC)");
-
-    ok = ok && node_db_exec(ndb,
+        "ON parity_samples(ts DESC)") &&
+        node_db_exec(ndb,
         "INSERT OR IGNORE INTO schema_migrations(version) VALUES('033')");
 }
 
