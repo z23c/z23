@@ -1635,8 +1635,8 @@ static int fgl_case_receipt_identity(const char *root)
             "{\"ts\":1800000001,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
             "{\"ts\":9223372036854775807,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
             "{\"ts\":-9223372036854775808,\"item\":\"C1\",\"verdict\":\"pass\"}\n",
-            "{\"ts\":1799996400,\"item\":\"C1\",\"verdict\":\"pass\"}\n"
-            "{\"ts\":1800000001,\"item\":\"C1\",\"verdict\":\"pass\"}\n"
+            ("{\"ts\":1799996400,\"item\":\"C1\",\"verdict\":\"pass\"}\n"
+             "{\"ts\":1800000001,\"item\":\"C1\",\"verdict\":\"pass\"}\n")
         };
         for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
             ASSERT(fgl_receipt_line(dir, "C1", rows[i]));
