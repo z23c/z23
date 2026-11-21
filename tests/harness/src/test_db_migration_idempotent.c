@@ -1698,7 +1698,8 @@ static bool db_mig_v29_seed(const char *dbpath, const char *prologue,
         return false;
     bool stopped = false;
     sqlite3 *raw = seed.db;
-    bool ok = create_schema(&seed) &&
+    bool ok = db_mig_exec_raw(raw, "PRAGMA journal_mode=WAL") &&
+              create_schema(&seed) &&
               sqlite3_set_authorizer(raw, db_mig_stop_at_v30, &stopped) == SQLITE_OK &&
               node_db_migrate(&seed, NULL) < 0 && stopped;
     sqlite3_set_authorizer(raw, NULL, NULL);
