@@ -28,6 +28,20 @@ int main(void)
                        "escaped wildcard");
     failures += expect(!platform_glob_match("*.c", "source.h", false),
                        "mismatch");
+    failures += expect(!platform_glob_match("tools/lib", "tools/lib.c", true),
+                       "literal pattern must consume the complete path");
+    failures += expect(platform_glob_match("tools/lib*", "tools/lib", true),
+                       "star after a literal prefix can match an empty suffix");
+    failures += expect(platform_glob_match("tools/[abc", "tools/[abc", true),
+                       "unclosed bracket after a literal prefix stays literal");
+    char limit[PLATFORM_GLOB_INPUT_MAX + 2];
+    memset(limit, 'x', sizeof(limit));
+    limit[PLATFORM_GLOB_INPUT_MAX + 1] = '\0';
+    failures += expect(!platform_glob_match(limit, limit, false),
+                       "identical overlong literals still fail closed");
+    limit[PLATFORM_GLOB_INPUT_MAX] = '\0';
+    failures += expect(platform_glob_match(limit, limit, true),
+                       "identical literals at the input limit match");
     if (failures == 0) puts("glob_match_acceptance: PASS");
     return failures != 0;
 }

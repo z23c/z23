@@ -80,18 +80,10 @@ static inline void platform_glob_transition(const char *pattern, size_t i,
     }
 }
 
-/* Supports '*', '?', bracket classes/ranges/negation, and backslash escapes.
- * When pathname is true, wildcards never consume '/'. Inputs above the fixed
- * repository-path bound fail closed. Dynamic programming avoids exponential
- * wildcard backtracking and keeps runtime O(pattern * text). */
-static inline bool platform_glob_match(const char *pattern, const char *text,
-                                       bool pathname)
+static inline bool platform_glob_match_suffix(const char *pattern, size_t pattern_len,
+                                              const char *text, size_t text_len,
+                                              bool pathname)
 {
-    if (!pattern || !text) return false;
-    size_t text_len = strnlen(text, PLATFORM_GLOB_INPUT_MAX + 1u);
-    size_t pattern_len = strnlen(pattern, PLATFORM_GLOB_INPUT_MAX + 1u);
-    if (text_len > PLATFORM_GLOB_INPUT_MAX ||
-        pattern_len > PLATFORM_GLOB_INPUT_MAX) return false;
     bool state[PLATFORM_GLOB_INPUT_MAX + 1u] = { false };
     bool next[PLATFORM_GLOB_INPUT_MAX + 1u];
     state[0] = true;
@@ -114,6 +106,26 @@ static inline bool platform_glob_match(const char *pattern, const char *text,
         memcpy(state, next, (text_len + 1u) * sizeof(state[0]));
     }
     return state[text_len];
+}
+
+/* Supports '*', '?', bracket classes/ranges/negation, and backslash escapes.
+ * When pathname is true, wildcards never consume '/'. Inputs above the fixed
+ * repository-path bound fail closed. Dynamic programming avoids exponential
+ * wildcard backtracking and keeps runtime O(pattern * text). */
+static inline bool platform_glob_match(const char *pattern, const char *text,
+                                       bool pathname)
+{
+    if (!pattern || !text) return false;
+    size_t text_len = strnlen(text, PLATFORM_GLOB_INPUT_MAX + 1u);
+    size_t pattern_len = strnlen(pattern, PLATFORM_GLOB_INPUT_MAX + 1u);
+    if (text_len > PLATFORM_GLOB_INPUT_MAX ||
+        pattern_len > PLATFORM_GLOB_INPUT_MAX) return false;
+    /* Bounded literal prefix is exact in both pathname modes. */
+    size_t prefix = strcspn(pattern, "*?[\\");
+    if (prefix > text_len || memcmp(pattern, text, prefix) != 0) return false;
+    if (prefix == pattern_len) return prefix == text_len;
+    return platform_glob_match_suffix(pattern + prefix, pattern_len - prefix,
+                                      text + prefix, text_len - prefix, pathname);
 }
 
 #endif
