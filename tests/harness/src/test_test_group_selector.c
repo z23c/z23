@@ -3234,8 +3234,18 @@ static bool tgs_retry_first_retained(const char *root, const char *out)
     return ok && strstr(text, "RETRY-EVIDENCE-FIRST") != NULL;
 }
 
+static bool tgs_pooled_provisional(const char *out, bool expected)
+{
+    const char *marker = strstr(out, "test_parallel: provisional pooled failure group=test_hex_codec outcome=exit code=1 elapsed=");
+    if (!expected) return marker == NULL;
+    const char *done = strstr(out, "test_parallel: general phase done");
+    const char *retry = strstr(out, "[rerun-alone]");
+    return marker && done && retry && marker < done && done < retry &&
+           !strstr(marker + 1, "test_parallel: provisional pooled failure ");
+}
+
 static int tgs_retry_assertions(const char *out, int rc, unsigned count,
-                                bool read_ok, bool rename_failure, bool retained)
+                                bool read_ok, bool rename_failure, bool retained, bool pooled_failure)
 {
     int failures = 0;
     TEST("runner: both retry captures remain observable") {
@@ -3247,6 +3257,11 @@ static int tgs_retry_assertions(const char *out, int rc, unsigned count,
         ASSERT(strstr(out, rename_failure ? "RETRY-FIRST-PRESERVE-FAILED"
                                          : "RETRY-FIRST-PRESERVED") != NULL);
         ASSERT(rename_failure || retained);
+        ASSERT(tgs_pooled_provisional(out, pooled_failure));
+        ASSERT(strstr(out, "SUITE VERDICT mode=cold") != NULL);
+        ASSERT(strstr(out, "groups_failed=0") != NULL);
+        ASSERT(strstr(out, pooled_failure ? "LOAD-FLAKY test_hex_codec first=FAIL alone=PASS"
+                                          : "LOAD-UNOBSERVED test_hex_codec first=UNOBSERVED alone=OBSERVED") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -3262,7 +3277,7 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
         test_make_tmpdir(root, sizeof(root), "tgs_retry", "evidence");
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
         int n = snprintf(command, sizeof(command),
-            "cd '%s' && '%s' --jobs=2 --verbose --no-cache "
+            "cd '%s' && '%s' --jobs=2 --no-cache "
             "%s --exact=test_hex_codec 2>&1", root, exe, mode);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         int rc = capture_command(command, out, sizeof(out));
@@ -3284,7 +3299,8 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
         ASSERT(proof_retry_fixture_check(attempt, rename_failure));
         ASSERT(test_rm_rf_recursive(attempt) == 0);
 #endif
-        failures += tgs_retry_assertions(out, rc, count, read_ok, rename_failure, retained);
+        failures += tgs_retry_assertions(out, rc, count, read_ok, rename_failure, retained,
+                                         strcmp(mode, "--retry-evidence-unobserved") != 0);
         PASS();
     } _test_next:;
     return failures;
@@ -3376,6 +3392,7 @@ static int test_runner_signal_diagnostic(void)
         ASSERT_EQ(rc, 3);
         ASSERT(strstr(out, "test_hex_codec (SIGNALED") != NULL);
         ASSERT(strstr(out, "CRASH-PROBE-PARENT group=test_hex_codec signaled=1 signal=6") != NULL);
+        ASSERT(strstr(out, "test_parallel: provisional pooled failure group=test_hex_codec outcome=signal code=6 elapsed=") != NULL);
         ASSERT(strstr(out, "[fatal-signal] sig=6") != NULL);
         ASSERT(strstr(out, "runner_signal_probe_frame") != NULL);
         ASSERT(strstr(out, "[fatal-signal] end") != NULL);

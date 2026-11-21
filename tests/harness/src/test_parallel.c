@@ -268,6 +268,7 @@ static const size_t g_num_groups =
 static unsigned g_expected_seconds[sizeof(g_groups) / sizeof(g_groups[0])];
 static size_t g_dispatch_order[sizeof(g_groups) / sizeof(g_groups[0])];
 static bool g_failure_priority[sizeof(g_groups) / sizeof(g_groups[0])];
+static bool g_pooled_failure_reported;
 
 static bool dispatch_priority_parse(const char *csv)
 {
@@ -2132,6 +2133,13 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
            sizeof(r->out_path));
     r->measured = 1;
     char elapsed_label[32];
+    if (!g_pooled_failure_reported && (r->signaled || r->exit_code != 0)) {
+        g_pooled_failure_reported = true;
+        printf("test_parallel: provisional pooled failure group=%s outcome=%s code=%d elapsed=%s\n",
+               g_groups[idx].name, r->signaled ? "signal" : "exit", r->exit_code,
+               runner_timing_label(&r->timing, elapsed_label));
+        fflush(stdout);
+    }
     if (pr->verbose)
         printf("[done    ] [%zu] %s (%s, %s)\n",
                idx, g_groups[idx].name,
@@ -4318,6 +4326,7 @@ static int run_execute(struct run_ctx *c)
     c->parent_pid = getpid();
     /* pre_skipped (‑‑only / params) plus cache HITS are already accounted done. */
     c->reaped = c->pre_skipped + c->cached_count;
+    g_pooled_failure_reported = false;
     dispatch_order_prepare(c->o.failure_priority);
     size_t exclusive_ran = run_exclusive_groups(c);
     /* stdout is unbuffered, so this line reaches a proof's log whole the
