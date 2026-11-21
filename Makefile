@@ -16720,6 +16720,8 @@ CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
 	$(CAPABILITY_INVENTORY_PLATFORM_SRCS)
 
 $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
+	cognition/modules/codeindex/include/codeindex/source_roots.def \
+	cognition/modules/codeindex/include/codeindex/source_prune_dirs.def \
 	cognition/modules/codeindex/include/codeindex/codeindex_inventory.h \
 	cognition/modules/codeindex/include/codeindex/codeindex_inventory_render.h \
 	cognition/modules/codeindex/src/codeindex_inventory_internal.h
