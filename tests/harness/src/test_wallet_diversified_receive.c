@@ -1683,9 +1683,81 @@ static int wdr_balance_refusal(void)
     return failures;
 }
 
+struct wdr_total_snapshot_fault {
+    sqlite3 *writer;
+    int attempts;
+    int rc;
+};
+
+static int wdr_total_snapshot_trace(unsigned type, void *ctx, void *stmt, void *detail)
+{
+    (void)detail;
+    struct wdr_total_snapshot_fault *fault = ctx;
+    const char *sql = type == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
+    if (!sql || fault->attempts || !strstr(sql, "JOIN wallet_transactions w ON w.txid=n.spent_txid"))
+        return 0;
+    fault->attempts++;
+    fault->rc = sqlite3_exec(fault->writer,
+        "BEGIN IMMEDIATE; UPDATE wallet_sapling_notes SET spent_txid=zeroblob(32); COMMIT;",
+        NULL, NULL, NULL);
+    return 0;
+}
+
+static bool wdr_total_snapshot_seed(struct wdr *f)
+{
+    return sqlite3_exec(f->ndb.db,
+        "PRAGMA journal_mode=WAL;"
+        "INSERT INTO wallet_transactions(txid,raw_tx,time_received,from_me,fee)"
+        " VALUES(zeroblob(32),zeroblob(1),1,1,0);"
+        "INSERT INTO wallet_sapling_notes(txid,output_index,value,rcm,ivk,diversifier,pk_d,cm,nullifier)"
+        " VALUES(zeroblob(32),0,500000000,zeroblob(32),zeroblob(32),zeroblob(11),zeroblob(32),zeroblob(32),zeroblob(32));",
+        NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool wdr_total_snapshot_call(struct wdr *f, const char *expected)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool answered = rpc_table_execute(f->tbl, "z_gettotalbalance", &params, &result);
+    const struct json_value *total = json_get(&result, "total");
+    const char *amount = total ? json_get_str(total) : NULL;
+    printf("(total=%s) ", amount ? amount : "unavailable");
+    bool ok = answered && amount && strcmp(amount, expected) == 0;
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static int wdr_total_snapshot_case(void)
+{
+    struct wdr f = {0};
+    sqlite3 *writer = NULL;
+    struct wdr_total_snapshot_fault fault = {0};
+    int failures = 0;
+    TEST("z_gettotalbalance reads note ownership from one snapshot") {
+        ASSERT(wdr_restore(&f));
+        ASSERT(wallet_readiness_initialize(f.w, WALLET_READINESS_READY, false, 0));
+        ASSERT(wdr_total_snapshot_seed(&f));
+        ASSERT(sqlite3_open_v2(f.ndb.path, &writer, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK);
+        fault.writer = writer;
+        ASSERT(sqlite3_trace_v2(f.ndb.db, SQLITE_TRACE_STMT, wdr_total_snapshot_trace, &fault) == SQLITE_OK);
+        ASSERT(wdr_total_snapshot_call(&f, "5.00000000"));
+        ASSERT(fault.attempts == 1 && fault.rc == SQLITE_OK);
+        ASSERT(sqlite3_trace_v2(f.ndb.db, 0, NULL, NULL) == SQLITE_OK);
+        ASSERT(wdr_total_snapshot_call(&f, "5.00000000"));
+        ASSERT(sqlite3_get_autocommit(f.ndb.db));
+        PASS();
+    } _test_next:;
+    if (f.ndb.db) sqlite3_trace_v2(f.ndb.db, 0, NULL, NULL);
+    if (writer) sqlite3_close(writer);
+    wdr_teardown(&f);
+    return failures;
+}
+
 int test_wallet_diversified_receive(void)
 {
     int failures = wdr_balance_refusal();
+    failures += wdr_total_snapshot_case();
     failures += test_receive_find_and_restore();
     failures += test_latest_after_new_and_restart();
     failures += test_current_counter_edges();

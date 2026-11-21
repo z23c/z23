@@ -404,6 +404,24 @@ bool rpc_z_listunspent(const struct json_value *params, bool help,
     return true;
 }
 
+struct wallet_owned_balances {
+    int64_t shielded;
+    int64_t encumbered;
+};
+
+static bool wallet_read_owned_balances(struct node_db *db, void *context)
+{
+    struct wallet_owned_balances *balances = context;
+    int64_t shielded = db_sapling_note_balance(db);
+    int64_t t_locked = db_wallet_utxo_encumbered_balance(db);
+    int64_t z_locked = db_sapling_note_encumbered_balance(db);
+    if (shielded < 0 || t_locked < 0 || z_locked < 0 || t_locked > INT64_MAX - z_locked)
+        return false;
+    balances->shielded = shielded;
+    balances->encumbered = t_locked + z_locked;
+    return true;
+}
+
 bool rpc_z_gettotalbalance(const struct json_value *params, bool help,
                                     struct json_value *result)
 {
@@ -438,12 +456,11 @@ bool rpc_z_gettotalbalance(const struct json_value *params, bool help,
 
     /* Shielded balance: always from SQLite (authoritative source) */
     if (t_balance < 0 || !wallet_ctx_db_ready(ctx)) return wallet_balance_unavailable(result);
-    int64_t z_balance = db_sapling_note_balance(ctx->node_db);
-    int64_t t_locked = db_wallet_utxo_encumbered_balance(ctx->node_db);
-    int64_t z_locked = db_sapling_note_encumbered_balance(ctx->node_db);
-    if (z_balance < 0 || t_locked < 0 || z_locked < 0 || t_locked > INT64_MAX - z_locked)
+    struct wallet_owned_balances balances;
+    if (!wallet_db_read_snapshot(ctx->node_db, wallet_read_owned_balances, &balances))
         return wallet_balance_unavailable(result);
-    int64_t encumbered = t_locked + z_locked;
+    int64_t z_balance = balances.shielded;
+    int64_t encumbered = balances.encumbered;
 
     /* A reorg can resurrect an outgoing transaction into the mempool. Its
      * inputs remain ours but are deliberately unavailable for a second spend.
