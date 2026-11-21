@@ -7,7 +7,8 @@
  * the arrival index and capped at FLEET_BOARD_FLEET_ANSWER_POSTS_MAX row
  * reads and signature checks, so a pull cannot hold the frame loop for
  * longer than that however large the store is. Every pulled post is
- * verified and stored on this lane's own tick with no lock held.
+ * verified and stored on this lane's own tick with no lock held. The push
+ * (boot_fleet_board_push.c) rides the same service and the same tick.
  */
 
 // one-result-type-ok:closed-security-verdict — the callbacks return the
@@ -23,8 +24,10 @@
 #include "config/boot_zcode_dht.h"
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
+#include "boot_fleet_board_authority_internal.h"
 #include "boot_fleet_board_cursor_internal.h"
 #include "boot_fleet_board_frame_internal.h"
+#include "boot_fleet_board_push_internal.h"
 #include "boot_fleet_board_roster_internal.h"
 #include "boot_mesh_status_internal.h"
 
@@ -60,19 +63,9 @@ struct board_ask {
     uint64_t generation;
 };
 
-/* What a stream's service_state is. Every state below starts with its tag,
- * and every callback dispatches on that tag, never on which side opened the
- * stream: the "board" and "board.roster" services share one callback set, so
- * a state is only ever read as the struct its own tag names. The push values
- * are reserved; no code here makes or accepts one yet, so they are refused
- * like any unknown tag. */
-enum board_state_tag {
-    BOARD_STATE_NONE = 0, /* never stored: a state no callback may read */
-    BOARD_STATE_PULL = 1,
-    BOARD_STATE_SERVE = 2,
-    BOARD_STATE_PUSH_OUT = 3,
-    BOARD_STATE_PUSH_IN = 4,
-};
+/* Every state below starts with its enum board_state_tag
+ * (boot_fleet_board_push_internal.h); the push states live in
+ * boot_fleet_board_push.c. */
 
 /* The asking half's per-stream state: what we asked, and what came back. */
 struct board_pull_state {
@@ -111,9 +104,8 @@ static bool g_cursors_loaded;
 static struct liveness_contract g_contract;
 static supervisor_child_id g_child = SUPERVISOR_INVALID_ID;
 static int64_t g_last_pull;
+static int64_t g_last_second; /* the once-a-second work last ran here */
 static int64_t g_last_roster_publish;
-static _Atomic uint64_t g_delegation_refused;
-static _Atomic uint64_t g_role_refused;
 static _Atomic uint64_t g_inbox_full;
 static _Atomic uint64_t g_stored;
 static _Atomic uint64_t g_deferred;
@@ -125,12 +117,8 @@ static uint8_t g_epoch[FLEET_BOARD_FLEET_EPOCH_BYTES];
 static bool g_epoch_ready;
 
 #ifdef ZCL_TESTING
-/* See boot_fleet_board_fleet_test_bind / _bind_authority. */
+/* See boot_fleet_board_fleet_test_bind. */
 static struct node_db *g_test_db;
-static bool g_test_authority;
-static struct vcs_zcode_dht_delegation g_test_delegation;
-static uint8_t g_test_genesis[32];
-static int64_t g_test_now;
 static char g_test_cursor_dir[512];
 static int64_t g_test_last_after;
 static _Atomic uint64_t g_test_states_freed;
@@ -153,7 +141,7 @@ static void board_unlock(void)
 }
 
 /* The board store this box serves from and commits into. */
-static struct node_db *board_db(void)
+struct node_db *board_db(void)
 {
     board_lock();
     struct node_db *ndb = g_svc ? g_svc->node_db : NULL;
@@ -182,145 +170,7 @@ static bool board_epoch(uint8_t out[FLEET_BOARD_FLEET_EPOCH_BYTES])
     return ready;
 }
 
-/* ── who may ask ─────────────────────────────────────────────────────── */
-
-/* The composition roots this decision reads, named so the test group can
- * stand in for the DHT lookup it cannot host (boot_fleet_ledger.c has the
- * same three, for the same reason). */
-static bool board_peer_delegation(const struct db_mesh_pairing *row,
-                                  struct vcs_zcode_dht_delegation *out)
-{
-#ifdef ZCL_TESTING
-    if (g_test_authority) {
-        if (memcmp(row->peer_noise_pubkey,
-                   g_test_delegation.noise_static_pubkey, 32) != 0)
-            return false;
-        *out = g_test_delegation;
-        return true;
-    }
-#endif
-    return boot_mesh_peer_delegation(row, out);
-}
-
-static bool board_network_genesis(uint8_t out[32])
-{
-#ifdef ZCL_TESTING
-    if (g_test_authority) {
-        memcpy(out, g_test_genesis, 32);
-        return true;
-    }
-#endif
-    return boot_zcode_dht_network_genesis(out);
-}
-
-static int64_t board_now(void)
-{
-#ifdef ZCL_TESTING
-    if (g_test_authority)
-        return g_test_now;
-#endif
-    return (int64_t)platform_time_wall_time_t();
-}
-
-/* The pairing row's own window cannot say whether the peer's master
- * identity is still ACTIVE on chain, so that is asked separately. A
- * refusal is counted and named, never the peer. */
-static bool board_delegation_current(
-    struct node_db *ndb, const struct db_mesh_pairing *row,
-    const struct vcs_zcode_dht_delegation *peer,
-    const uint8_t session_noise_static[32], int64_t now)
-{
-    uint8_t network_genesis[32];
-    enum mesh_pairing_reason reason = MESH_PAIRING_BAD_ARGUMENT;
-    if (board_network_genesis(network_genesis))
-        reason = mesh_pairing_service_authorize_status(
-            ndb, network_genesis, row->pairing_id, peer,
-            session_noise_static, now);
-    if (reason == MESH_PAIRING_OK)
-        return true;
-    atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
-    LOG_WARN("fleet.board", "fleet pull refused: delegation %s",
-             mesh_pairing_reason_token(reason));
-    return false;
-}
-
-/* The pairing row for one Noise static: bounded, and fail-closed on an
- * unreadable list. */
-static bool board_pairing_for_peer(struct node_db *ndb,
-                                   const uint8_t peer_noise_static[32],
-                                   struct db_mesh_pairing *out)
-{
-    struct db_mesh_pairing *rows = zcl_calloc(
-        FLEET_BOARD_FLEET_PEERS_MAX, sizeof *rows, "fleet_board_pairing");
-    if (!rows)
-        return false;
-    int count = db_mesh_pairing_list(ndb, rows, FLEET_BOARD_FLEET_PEERS_MAX);
-    bool found = false;
-    for (int i = 0; i < count && !found; i++) {
-        if (memcmp(rows[i].peer_noise_pubkey, peer_noise_static, 32) != 0)
-            continue;
-        *out = rows[i];
-        found = true;
-    }
-    free(rows);
-    return found;
-}
-
-/* A paired, current peer still reads fleet-private posts only when the
- * key it signs with holds a role granting the board's read leaf here. */
-static bool board_peer_may_read(const uint8_t signer[32])
-{
-    char why[ZCL_FLEET_ROLE_WHY_MAX];
-    if (zcl_fleet_role_allows(signer, FLEET_BOARD_FLEET_READ_LEAF, NULL, why,
-                              sizeof why))
-        return true;
-    atomic_fetch_add_explicit(&g_role_refused, 1, memory_order_relaxed);
-    LOG_WARN("fleet.board", "fleet pull refused: %s", why);
-    return false;
-}
-
-/* ZRC 0012 step 2: is this peer's board key on the fleet roster? The roster
- * is read from the board store this box serves from. Unarmed (no fleet root,
- * or no sealed row yet) admits, exactly as before this step; an armed roster
- * admits members only; an unverifiable one admits nobody. */
-static bool board_roster_admits(const uint8_t online_pubkey[32])
-{
-    struct node_db *store = board_db();
-    if (!store)
-        return false;
-    int64_t now = board_now();
-    bool ok = boot_fleet_roster_admits_peer(store, online_pubkey, now);
-    uint64_t skipped = 0;
-    if (!ok && boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_PEER_REFUSED,
-                                         now, &skipped))
-        LOG_WARN("fleet.board", "fleet pull refused: not on the fleet roster "
-                 "(%llu more since the last line)",
-                 (unsigned long long)skipped);
-    return ok;
-}
-
-/* Everything the answering half proves about a peer that is already
- * through the primitive's Noise and capability gates, before any post is
- * read. */
-static bool board_accept_authorized(const uint8_t peer_noise_static[32])
-{
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !app_runtime_node_db_handle_open(ndb))
-        return false;
-    struct db_mesh_pairing row;
-    struct vcs_zcode_dht_delegation peer;
-    if (!board_pairing_for_peer(ndb, peer_noise_static, &row) ||
-        !board_peer_delegation(&row, &peer)) {
-        atomic_fetch_add_explicit(&g_delegation_refused, 1,
-                                  memory_order_relaxed);
-        LOG_WARN("fleet.board", "fleet pull refused: delegation_unresolved");
-        return false;
-    }
-    return board_delegation_current(ndb, &row, &peer, peer_noise_static,
-                                    board_now()) &&
-           board_peer_may_read(peer.online_pubkey) &&
-           board_roster_admits(peer.online_pubkey);
-}
+/* Who may ask, be answered and be pushed to: boot_fleet_board_authority.c. */
 
 /* ── the answer ──────────────────────────────────────────────────────── */
 
@@ -342,20 +192,25 @@ static void board_answer_pin_head(struct board_answer *a, struct node_db *ndb,
 
 /* ── the service callbacks ───────────────────────────────────────────── */
 
-/* What this stream's state is, read from its own tag. A pull state lives
- * only on a stream this node opened and a serve state only on one the peer
- * opened; a tag on the wrong side, a reserved or unknown tag, or no state at
- * all is BOARD_STATE_NONE, which every callback refuses. */
+/* What this stream's state is, read from its own tag. A pull or push-out
+ * state lives only on a stream this node opened, a serve or push-in state
+ * only on one the peer opened; a tag on the wrong side, an unknown tag, or no
+ * state at all is BOARD_STATE_NONE, which every callback refuses. */
 static enum board_state_tag board_state_of(const struct mesh_stream *st)
 {
     const enum board_state_tag *tag = st->service_state;
     if (!tag)
         return BOARD_STATE_NONE;
-    if (*tag == BOARD_STATE_PULL && st->local_initiator)
-        return BOARD_STATE_PULL;
-    if (*tag == BOARD_STATE_SERVE && !st->local_initiator)
-        return BOARD_STATE_SERVE;
+    bool mine = *tag == BOARD_STATE_PULL || *tag == BOARD_STATE_PUSH_OUT;
+    bool theirs = *tag == BOARD_STATE_SERVE || *tag == BOARD_STATE_PUSH_IN;
+    if ((mine && st->local_initiator) || (theirs && !st->local_initiator))
+        return *tag;
     return BOARD_STATE_NONE;
+}
+
+static bool board_state_is_push(enum board_state_tag tag)
+{
+    return tag == BOARD_STATE_PUSH_OUT || tag == BOARD_STATE_PUSH_IN;
 }
 
 /* A callback met a state it may not read: the stream ends by name as
@@ -371,19 +226,24 @@ static void board_state_refuse(struct mesh_stream *st, const char *where)
 }
 
 /* Free one state by its own tag's rule. A pull and a serve state are each one
- * block; so is anything else this file ever hung on a stream, so an unknown
- * tag is freed the same way, once, and named. */
+ * block; a push state is freed by the push half, which also gives back the
+ * inbox slot a push-in state holds; anything else is one block, freed once
+ * and named. */
 static void board_state_free(void *state)
 {
     const enum board_state_tag *tag = state;
     if (!tag)
         return;
-    if (*tag != BOARD_STATE_PULL && *tag != BOARD_STATE_SERVE)
-        LOG_WARN("fleet.board", "board stream state with unknown tag %d freed",
-                 (int)*tag);
 #ifdef ZCL_TESTING
     atomic_fetch_add_explicit(&g_test_states_freed, 1, memory_order_relaxed);
 #endif
+    if (board_state_is_push(*tag)) {
+        board_push_state_free(state);
+        return;
+    }
+    if (*tag != BOARD_STATE_PULL && *tag != BOARD_STATE_SERVE)
+        LOG_WARN("fleet.board", "board stream state with unknown tag %d freed",
+                 (int)*tag);
     free(state);
 }
 
@@ -430,7 +290,8 @@ static enum mesh_stream_refusal board_serve_compose(struct mesh_stream *st,
 /* An inbound OPEN. The primitive has proven the Noise session and a
  * pairing row granting the capability; this lane proves the delegation is
  * current and the peer holds the read role, and only then reads the page
- * once, here. The tick rechecks authority before emitting the cached page. */
+ * once, here. The tick rechecks authority before emitting the cached page.
+ * A push goes to the push half instead. */
 static enum mesh_stream_refusal board_service_open(struct mesh_stream *st,
                                                    const uint8_t *payload,
                                                    size_t len, uint8_t *reply,
@@ -439,10 +300,13 @@ static enum mesh_stream_refusal board_service_open(struct mesh_stream *st,
                                                    void *ctx)
 {
     (void)ctx;
-    (void)reply;
-    (void)reply_cap;
     if (reply_len)
         *reply_len = 0;
+    /* A push: framing and one copy here, everything else on the tick. */
+    if (payload && len > 0 && payload[0] == FLEET_BOARD_FLEET_MSG_PUSH &&
+        board_push_dispatch_enabled())
+        return board_push_accept(st, payload, len, reply, reply_cap,
+                                 reply_len);
     int64_t after = 0;
     if (!board_pull_decode(payload, len, &after))
         return MESH_STREAM_REFUSED_MALFORMED;
@@ -517,12 +381,18 @@ static bool board_serve_authorized(const struct mesh_stream *st,
 
 /* The asking half receives the answer: bytes are copied and credit is
  * given back; nothing is verified and nothing is written here. DATA on any
- * other state (an asker sending on a serve stream) is off protocol. */
+ * other state (an asker sending on a serve stream, anything on a push) is
+ * off protocol. */
 static void board_service_data(struct mesh_stream *st, const uint8_t *payload,
                                size_t len, void *ctx)
 {
     (void)ctx;
-    if (board_state_of(st) != BOARD_STATE_PULL) {
+    enum board_state_tag tag = board_state_of(st);
+    if (board_state_is_push(tag)) {
+        board_push_data_refused(st, tag);
+        return;
+    }
+    if (tag != BOARD_STATE_PULL) {
         board_state_refuse(st, "data");
         return;
     }
@@ -544,11 +414,14 @@ static void board_service_data(struct mesh_stream *st, const uint8_t *payload,
  * the stream is done. A pull with nothing new costs one answer head. */
 static void board_service_tick(struct mesh_stream *st, int64_t now, void *ctx)
 {
-    (void)now;
     (void)ctx;
     enum board_state_tag tag = board_state_of(st);
     if (tag == BOARD_STATE_PULL)
         return; /* the asking half only waits for its answer */
+    if (board_state_is_push(tag)) {
+        board_push_stream_tick(st, tag, now);
+        return;
+    }
     if (tag != BOARD_STATE_SERVE) {
         board_state_refuse(st, "tick");
         return;
@@ -580,16 +453,20 @@ static struct board_inbox_slot *board_inbox_claim(void)
 
 /* The stream ended. A finished answer moves into the inbox by pointer; an
  * answer that did not finish has no standing and is asked for again. Only a
- * pull state ever reaches the inbox: a serve state keeps nothing, and a state
- * no callback may read is copied nowhere. */
+ * pull state ever reaches the inbox: a serve state keeps nothing, a push
+ * state goes to the push half (which reads the receipt, or gives back the
+ * push inbox slot), and a state no callback may read is copied nowhere. */
 static void board_service_close(struct mesh_stream *st,
                                 enum mesh_stream_refusal reason,
                                 const uint8_t *payload, size_t len, void *ctx)
 {
-    (void)payload;
-    (void)len;
     (void)ctx;
-    if (board_state_of(st) != BOARD_STATE_PULL)
+    enum board_state_tag tag = board_state_of(st);
+    if (board_state_is_push(tag)) {
+        board_push_stream_close(st, tag, reason, payload, len);
+        return;
+    }
+    if (tag != BOARD_STATE_PULL)
         return;
     struct board_pull_state *p = st->service_state;
     if (p->len == 0 ||
@@ -809,7 +686,7 @@ static bool board_answer_current(const struct board_cursor *c,
  * granted the author a role yet, its clock is behind the author's, the
  * author's quota or this store is full right now, or the store could not
  * write. Every one of these can clear, so the row is offered again. */
-static bool board_refusal_retryable(enum fleet_board_result r)
+bool board_refusal_retryable(enum fleet_board_result r)
 {
     switch (r) {
     case FLEET_BOARD_ERR_ROLE:
@@ -1203,6 +1080,8 @@ static void board_publish_roster_due(struct node_db *ndb, int64_t now)
         (void)boot_fleet_roster_publish(ndb, now);
 }
 
+/* Every FLEET_BOARD_FLEET_TICK_US: the push work when there is any, then,
+ * once a second, everything this lane did before the push. */
 static void board_tick(struct liveness_contract *contract)
 {
     (void)contract;
@@ -1210,6 +1089,7 @@ static void board_tick(struct liveness_contract *contract)
     struct boot_svc_ctx *svc = g_svc;
     bool wired = svc != NULL;
     int64_t last = g_last_pull;
+    int64_t second = g_last_second;
     board_unlock();
     struct node_db *ndb = board_db();
     if (!wired || !ndb) {
@@ -1217,6 +1097,14 @@ static void board_tick(struct liveness_contract *contract)
         return;
     }
     int64_t now = (int64_t)platform_time_wall_time_t();
+    board_push_lane_tick(svc, ndb, now);
+    if (now == second) {
+        supervisor_progress_idle(g_child);
+        return;
+    }
+    board_lock();
+    g_last_second = now;
+    board_unlock();
     (void)board_drain_inbox(ndb, now);
     if (now <= 0 ||
         (last != 0 && now - last < FLEET_BOARD_FLEET_PULL_INTERVAL_S)) {
@@ -1237,10 +1125,7 @@ void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out)
 {
     if (!out)
         return;
-    out->delegation_refused =
-        atomic_load_explicit(&g_delegation_refused, memory_order_relaxed);
-    out->role_refused =
-        atomic_load_explicit(&g_role_refused, memory_order_relaxed);
+    board_authority_counts(out);
     out->inbox_full =
         atomic_load_explicit(&g_inbox_full, memory_order_relaxed);
     out->stored = atomic_load_explicit(&g_stored, memory_order_relaxed);
@@ -1248,6 +1133,7 @@ void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out)
     out->answer_refused =
         atomic_load_explicit(&g_answer_refused, memory_order_relaxed);
     out->roster_refused = fleet_board_roster_refused_count();
+    board_push_counts(out);
 }
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */
@@ -1261,8 +1147,10 @@ static void board_forget_locked(void)
     memset(g_cursors, 0, sizeof g_cursors);
     g_cursors_loaded = false;
     g_last_pull = 0;
+    g_last_second = 0;
     g_last_roster_publish = 0;
     fleet_board_roster_forget();
+    board_push_forget();
 }
 
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc)
@@ -1295,7 +1183,8 @@ void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc)
         return;
     }
     supervisor_set_period(g_child, 1);
-    g_contract.period_us = 1000000;
+    g_contract.period_us = FLEET_BOARD_FLEET_TICK_US;
+    supervisor_request_min_tick_ms(FLEET_BOARD_FLEET_TICK_US / 1000);
     supervisor_set_deadline(g_child, 120);
     supervisor_set_progress_exempt(g_child,
                                    "paired peers may have nothing new to say");
@@ -1366,7 +1255,8 @@ struct board_retag {
 };
 
 /* Lane lock held. A pull or serve state for those tags (a serve state holding
- * bytes a wrong-side tick would send), a bare tag for any other, so a cast to
+ * bytes a wrong-side tick would send), a zeroed block as large for a push tag
+ * (its free rule reads past the tag), a bare tag for any other, so a cast to
  * the wrong struct reads past the block. */
 static bool board_retag_visitor(struct mesh_stream *st, void *ctx)
 {
@@ -1374,7 +1264,7 @@ static bool board_retag_visitor(struct mesh_stream *st, void *ctx)
     if (st->ended || st->local_initiator != r->local_initiator)
         return true;
     size_t size = r->tag == BOARD_STATE_PULL ? sizeof(struct board_pull_state)
-                  : r->tag == BOARD_STATE_SERVE
+                  : r->tag == BOARD_STATE_SERVE || board_state_is_push(r->tag)
                       ? sizeof(struct board_serve_state)
                       : sizeof(enum board_state_tag);
     enum board_state_tag *state = zcl_calloc(1, size, "fleet_board_test_state");
@@ -1412,23 +1302,6 @@ void boot_fleet_board_fleet_test_serve(void)
 size_t boot_fleet_board_fleet_test_drain_into(struct node_db *ndb)
 {
     return ndb && ndb->open ? board_drain_inbox(ndb, board_now()) : 0;
-}
-
-void boot_fleet_board_fleet_test_bind_authority(
-    const struct vcs_zcode_dht_delegation *peer_delegation,
-    const uint8_t network_genesis[32], int64_t now)
-{
-    board_lock();
-    g_test_authority = peer_delegation && network_genesis && now > 0;
-    memset(&g_test_delegation, 0, sizeof g_test_delegation);
-    memset(g_test_genesis, 0, sizeof g_test_genesis);
-    g_test_now = 0;
-    if (g_test_authority) {
-        g_test_delegation = *peer_delegation;
-        memcpy(g_test_genesis, network_genesis, 32);
-        g_test_now = now;
-    }
-    board_unlock();
 }
 
 /* The answering process as if it had restarted: the next answer carries a

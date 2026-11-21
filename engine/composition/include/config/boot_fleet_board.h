@@ -181,12 +181,37 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  *
  * A FLEET-scope post never rides the public INV/GET flood above. It moves
  * between PAIRED boxes only, over the existing mesh stream primitive, the
- * same way the fleet ledger's rows do: pull only. A box asks each paired
- * peer for the fleet posts that peer has received since the last one it
- * saw, and answers the same question when asked. Nothing is pushed and
- * nothing is volunteered. A stream opens over whichever session the two
- * boxes already share, including one the ANSWERING box dialled, so a box
- * behind NAT that dials out can still be pulled from.
+ * same way the fleet ledger's rows do. A box asks each paired peer for the
+ * fleet posts that peer has received since the last one it saw, and answers
+ * the same question when asked: the pull is the carrier, and the only one
+ * that retries. A stream opens over whichever session the two boxes already
+ * share, including one the ANSWERING box dialled, so a box behind NAT that
+ * dials out can still be pulled from.
+ *
+ * PUSH only speeds one post up; it is never the only way a post arrives.
+ * After this box durably stores a fleet post it signed itself, and only
+ * when that post answers (`ref`) a post this box holds whose author is
+ * another box, the lane tick offers it to that one box, once, in a stream
+ * whose whole payload rides the OPEN (FLEET_BOARD_FLEET_MSG_PUSH). The
+ * author of the answered post is the only addressee the node can verify on
+ * its own: nothing else in a signed post names a recipient (a mail row's
+ * `to` is text the node does not read), so a post with no such `ref` is not
+ * pushed and waits for the pull. The addressee is pushed to only when its
+ * board key is the online key of exactly one paired peer and that peer
+ * passes the very test a pull from it would have to pass to be served this
+ * post (the status capability, a current delegation, the read role, the
+ * roster) at the moment the push opens, while its send queue is under
+ * budget (net_send_over_budget) and no other push to it is open. Nothing is
+ * relayed: a box pushes only posts its own key signed. The receiver copies
+ * the payload into a bounded push inbox, separate from the pull inbox, on
+ * the frame path, and checks nothing else there; its lane tick re-proves the
+ * pusher, requires every pushed post to be signed by the pusher's own board
+ * key, stores each through the same checks a pulled post meets, and closes
+ * the stream with a receipt (FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT). A push
+ * touches no cursor, sweep or answer check. A push that is refused, lost, or
+ * never answered is not sent again: the next pull carries the post, and a
+ * post both paths deliver is one row by id. An older node answers the new
+ * type stream_malformed, and that session is not pushed to again.
  *
  * Who is answered: a peer whose pairing row grants the status capability,
  * whose delegation is still current, and whose online key holds a role
@@ -274,6 +299,81 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * tick, and share one cursor table. It holds both, or least-recently-used
  * eviction would drop the very cursor each pull is about to use. */
 #define FLEET_BOARD_FLEET_CURSOR_SLOTS (2u * FLEET_BOARD_FLEET_PEERS_MAX)
+/* The lane tick. A tick with no push work reads two counters and returns;
+ * the pull, the answer drain and everything else the lane did once a second
+ * still run once a second. */
+#define FLEET_BOARD_FLEET_TICK_US 100000
+
+/* PUSH (see above). The OPEN payload: type, version, record count n, then n
+ * records of a 32-byte id, a u32 length and the post wire, nothing after. */
+#define FLEET_BOARD_FLEET_MSG_PUSH 3u
+/* The CLOSE payload: type, version, push code, n, u64 commit time in Unix
+ * milliseconds, then n records of a 32-byte id, a verdict and a result. */
+#define FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT 4u
+#define FLEET_BOARD_PUSH_HEAD 3u
+#define FLEET_BOARD_PUSH_RECORD_HEAD 36u
+#define FLEET_BOARD_PUSH_POSTS_MAX 8u
+/* The whole OPEN payload, under MESH_STREAM_PAYLOAD_MAX. A post too large to
+ * ride in it is not pushed. */
+#define FLEET_BOARD_PUSH_MAX (size_t)(16u * 1024u)
+#define FLEET_BOARD_PUSH_RECEIPT_HEAD 12u
+#define FLEET_BOARD_PUSH_RECEIPT_RECORD 34u
+#define FLEET_BOARD_PUSH_RECEIPT_MAX                                           \
+    (FLEET_BOARD_PUSH_RECEIPT_HEAD +                                           \
+     FLEET_BOARD_PUSH_POSTS_MAX * FLEET_BOARD_PUSH_RECEIPT_RECORD)
+/* Post ids waiting for the lane tick; a full queue gives up its oldest. */
+#define FLEET_BOARD_PUSH_QUEUE_MAX 32u
+/* Received pushes waiting for the lane tick, preallocated, at most one per
+ * pushing peer; the tick commits one push a tick. */
+#define FLEET_BOARD_PUSH_INBOX_MAX 8u
+/* A sender closes its own push this long after opening it when no receipt
+ * came; a receiver closes an uncommitted push at the same mark. A post kept
+ * in the queue because its peer had a push open is dropped at the same
+ * mark. */
+#define FLEET_BOARD_PUSH_WAIT_S 10
+/* The credit a push stream opens with. The payload rides the OPEN, which
+ * spends no credit; one byte is the smallest window the primitive accepts. */
+#define FLEET_BOARD_PUSH_WINDOW 1u
+
+/* The push's own verdict, first on its receipt. */
+enum fleet_board_push_code {
+    FLEET_BOARD_PUSH_CODE_COMMITTED = 0, /* every record judged, see below */
+    FLEET_BOARD_PUSH_CODE_MALFORMED,     /* framing, id, or scope: voided whole */
+    FLEET_BOARD_PUSH_CODE_AUTHOR,        /* a record not signed by the pusher */
+    FLEET_BOARD_PUSH_CODE_INBOX_FULL,    /* no free push inbox slot */
+    FLEET_BOARD_PUSH_CODE_BUSY,          /* this peer already has one waiting */
+    FLEET_BOARD_PUSH_CODE_REVOKED,       /* the pusher lost standing before commit */
+    FLEET_BOARD_PUSH_CODE_UNAVAILABLE,   /* no store, no memory, or the wait ran out */
+    FLEET_BOARD_PUSH_CODES
+};
+
+/* One record's verdict on a committed push. */
+enum fleet_board_push_record_verdict {
+    FLEET_BOARD_PUSH_RECORD_STORED = 0,
+    FLEET_BOARD_PUSH_RECORD_HELD,     /* this box already held it */
+    FLEET_BOARD_PUSH_RECORD_DEFERRED, /* a refusal that can clear: pull retries */
+    FLEET_BOARD_PUSH_RECORD_REFUSED,
+    FLEET_BOARD_PUSH_VERDICTS
+};
+
+/* Why the sending half did not push a post it was offered. */
+enum fleet_board_push_skip {
+    FLEET_BOARD_PUSH_SKIP_NOT_OWN = 0,   /* not FLEET scope, or not signed here */
+    FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE,  /* no `ref`, or it names no other box's post */
+    FLEET_BOARD_PUSH_SKIP_QUEUE_FULL,    /* dropped as the oldest of a full queue */
+    FLEET_BOARD_PUSH_SKIP_GONE,          /* no longer in this box's store */
+    FLEET_BOARD_PUSH_SKIP_UNRESOLVED,    /* the addressee is no paired peer */
+    FLEET_BOARD_PUSH_SKIP_AMBIGUOUS,     /* ... or more than one */
+    FLEET_BOARD_PUSH_SKIP_INELIGIBLE,    /* a pull from it would not be served */
+    FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED, /* no live session to it */
+    FLEET_BOARD_PUSH_SKIP_OVER_BUDGET,   /* its send queue is over budget */
+    FLEET_BOARD_PUSH_SKIP_UNSUPPORTED,   /* it refused the type this session */
+    FLEET_BOARD_PUSH_SKIP_BUSY,          /* a push to it stayed open too long */
+    FLEET_BOARD_PUSH_SKIP_TOO_LARGE,     /* the post cannot ride one OPEN */
+    FLEET_BOARD_PUSH_SKIP_OPEN_FAILED,   /* the stream primitive refused the open */
+    FLEET_BOARD_PUSH_SKIP_NO_RECEIPT,    /* closed by this box after the wait */
+    FLEET_BOARD_PUSH_SKIPS
+};
 
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc);
 void boot_fleet_board_fleet_shutdown(void);
@@ -288,7 +388,18 @@ bool boot_fleet_board_fleet_register_service(void);
  * a pull added to this box's store. deferred: pulled posts refused for a
  * reason that can clear, each offered again by a later sweep.
  * answer_refused: answers dropped whole because they did not add up.
- * roster_refused: carriage with no pairing row refused, on either half. */
+ * roster_refused: carriage with no pairing row refused, on either half.
+ * The push, sending half: push_queued posts offered to the queue,
+ * push_opened push streams opened, push_skipped each reason a post was not
+ * pushed or a push ended without a receipt, push_closed push streams the
+ * peer ended without a receipt by the primitive's reason (an older peer's
+ * stream_malformed is counted under push_skipped UNSUPPORTED instead),
+ * push_receipt the receipts that came back by push code and push_receipt_records
+ * their records by verdict. Receiving half: push_in the pushes this box
+ * answered by push code (refusals at open included) and push_in_records
+ * the records it judged by verdict; push_in_dropped pushes that ended
+ * before their commit; push_data_refused DATA on a push stream, which
+ * closes it. */
 struct boot_fleet_board_fleet_counts {
     uint64_t delegation_refused;
     uint64_t role_refused;
@@ -297,8 +408,26 @@ struct boot_fleet_board_fleet_counts {
     uint64_t deferred;
     uint64_t answer_refused;
     uint64_t roster_refused;
+    uint64_t push_queued;
+    uint64_t push_opened;
+    uint64_t push_skipped[FLEET_BOARD_PUSH_SKIPS];
+    uint64_t push_closed[16]; /* by enum mesh_stream_refusal */
+    uint64_t push_receipt[FLEET_BOARD_PUSH_CODES];
+    uint64_t push_receipt_records[FLEET_BOARD_PUSH_VERDICTS];
+    uint64_t push_in[FLEET_BOARD_PUSH_CODES];
+    uint64_t push_in_records[FLEET_BOARD_PUSH_VERDICTS];
+    uint64_t push_in_dropped;
+    uint64_t push_data_refused;
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
+
+/* Offer one post this box just stored durably to the push queue: O(1) under
+ * the push lock, no store read, no stream call, safe from the RPC thread.
+ * Only a FLEET-scope post signed by `own_key` (this box's board key) whose
+ * `ref` names a post is queued; anything else is counted and left to the
+ * pull. */
+void boot_fleet_board_fleet_push_enqueue(const struct fleet_board_post *post,
+                                         const uint8_t own_key[32]);
 
 #ifdef ZCL_TESTING
 struct vcs_zcode_dht_delegation;
@@ -346,6 +475,28 @@ void boot_fleet_board_fleet_test_roster_identity(int side, const uint8_t *seed,
  * state the lane has freed, whatever its tag. */
 size_t boot_fleet_board_fleet_test_retag(bool local_initiator, int tag);
 uint64_t boot_fleet_board_fleet_test_states_freed(void);
+/* The push. bind_second_peer makes the delegation stand-in answer for a
+ * second Noise static as well (NULL clears it), so one process can hold the
+ * pusher's and the addressee's pairing at once. push_send runs the sending
+ * half of one lane tick with `store` as this box's store; push_commit runs
+ * the receiving half of one tick into `store` and returns the records it
+ * newly stored. pre_push_dispatch makes the "board" OPEN behave exactly as a
+ * node from before the push did. forget_inbox drops every received push, as
+ * a restart would. queued and inbox_used read the two bounded tables;
+ * live_tagged counts live "board" streams on one side whose state carries
+ * `tag`; age_push moves every push stream's open time `seconds` back, so the
+ * next pump tick sees its wait run out. */
+void boot_fleet_board_fleet_test_bind_second_peer(
+    const struct vcs_zcode_dht_delegation *peer_delegation);
+size_t boot_fleet_board_fleet_test_push_send(struct boot_svc_ctx *svc,
+                                             struct node_db *store);
+size_t boot_fleet_board_fleet_test_push_commit(struct node_db *store);
+void boot_fleet_board_fleet_test_pre_push_dispatch(bool on);
+void boot_fleet_board_fleet_test_push_forget_inbox(void);
+size_t boot_fleet_board_fleet_test_push_queued(void);
+size_t boot_fleet_board_fleet_test_push_inbox_used(void);
+size_t boot_fleet_board_fleet_test_live_tagged(bool local_initiator, int tag);
+void boot_fleet_board_fleet_test_age_push(int64_t seconds);
 #endif
 
 /* The refusal phrase for `r` and, where one exists, the limit hit and the

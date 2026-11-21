@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Exercise the peer-reachable mesh frame decoders (terminal, capability,
- * private object, stream, game, fleet board, agent broker) and the Noise
+ * private object, stream, game, fleet board and its push, agent broker) and the Noise
  * record-layer bounds under sanitizers. The first input byte picks the
  * decoder; the rest is its input. Every accepted frame must re-encode to the
  * bytes it came from, every refusal must leave its output as the header
@@ -22,6 +22,7 @@
 #include "session/mesh_private_object_frame.h"
 #include "session/mesh_terminal_proto.h"
 #include "util/sync.h"
+#include "../../engine/composition/src/boot_fleet_board_frame_internal.h"
 
 #include <signal.h>
 #include <stdbool.h>
@@ -903,6 +904,69 @@ static void fuzz_board_frame(const uint8_t *w, size_t n)
     free(ids);
 }
 
+/* ── board push (boot_fleet_board_frame.c) ───────────────────────────── */
+
+/* A push payload the codec accepts holds exactly the records it counts, each
+ * inside the payload, and re-frames to the bytes it came from; anything else
+ * is refused without a read past the payload. */
+static void fuzz_board_push(const uint8_t *w, size_t n)
+{
+    uint8_t *in = exact_alloc(n);
+    if (n)
+        memcpy(in, w, n);
+    unsigned count = 0;
+    size_t off = FLEET_BOARD_PUSH_HEAD;
+    struct board_push_record rec;
+    if (!board_push_valid(in, n, &count)) {
+        for (unsigned i = 0; i < FLEET_BOARD_PUSH_POSTS_MAX + 1u && n &&
+                             board_push_record_next(in, n, &off, &rec);
+             i++)
+            require(rec.wire >= in && rec.wire + rec.wire_len <= in + n);
+        free(in);
+        return;
+    }
+    require(count >= 1 && count <= FLEET_BOARD_PUSH_POSTS_MAX &&
+            n <= FLEET_BOARD_PUSH_MAX);
+    uint8_t *out = exact_alloc(n);
+    memcpy(out, in, FLEET_BOARD_PUSH_HEAD);
+    size_t at = FLEET_BOARD_PUSH_HEAD;
+    for (unsigned i = 0; i < count; i++) {
+        require(board_push_record_next(in, n, &off, &rec));
+        require(rec.wire_len >= 1 &&
+                at + FLEET_BOARD_PUSH_RECORD_HEAD + rec.wire_len <= n);
+        memcpy(out + at, rec.id, 32);
+        zcl_write_u32_be(out + at + 32, (uint32_t)rec.wire_len);
+        memcpy(out + at + FLEET_BOARD_PUSH_RECORD_HEAD, rec.wire, rec.wire_len);
+        at += FLEET_BOARD_PUSH_RECORD_HEAD + rec.wire_len;
+    }
+    require(off == n && at == n && memcmp(out, in, n) == 0);
+    free(out);
+    free(in);
+}
+
+/* A receipt decodes only at its exact length, leaves the output untouched on
+ * a refusal, and re-encodes to its own bytes. */
+static void fuzz_board_push_receipt(const uint8_t *w, size_t n)
+{
+    GUARDED(struct board_push_receipt) g;
+    GUARD_ARM(g);
+    bool ok = board_push_receipt_decode(w, n, &g.v);
+    GUARD_CHECK(g);
+    if (!ok) {
+        require_fill((const uint8_t *)&g.v, sizeof(g.v), OUT_FILL);
+        return;
+    }
+    require(g.v.n <= FLEET_BOARD_PUSH_POSTS_MAX &&
+            g.v.code < FLEET_BOARD_PUSH_CODES &&
+            n == FLEET_BOARD_PUSH_RECEIPT_HEAD +
+                     (size_t)g.v.n * FLEET_BOARD_PUSH_RECEIPT_RECORD);
+    for (unsigned i = 0; i < g.v.n; i++)
+        require(g.v.rec[i].verdict < FLEET_BOARD_PUSH_VERDICTS);
+    uint8_t out[FLEET_BOARD_PUSH_RECEIPT_MAX];
+    require(board_push_receipt_encode(&g.v, out) == n &&
+            memcmp(out, w, n) == 0);
+}
+
 /* ── agent_broker_proto ──────────────────────────────────────────────── */
 
 static void mvap_require_same_request(const struct mvap_request *a,
@@ -1379,6 +1443,8 @@ static const fuzz_arm_fn k_arms[] = {
     fuzz_pof,           fuzz_stream,       fuzz_game,
     fuzz_board_post,    fuzz_board_frame,  fuzz_mvap_request,
     fuzz_mvap_response, fuzz_mvap_prefix,  fuzz_noise,
+    /* Appended, so every seed's first byte (0..14) keeps its decoder. */
+    fuzz_board_push,    fuzz_board_push_receipt,
 };
 
 /* The first byte picks the decoder; the rest is its input. */

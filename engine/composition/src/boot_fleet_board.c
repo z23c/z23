@@ -913,9 +913,13 @@ enum fleet_board_result boot_fleet_board_publish(
     /* Announced only after it is durable: a post the fleet can ask for but
      * this node cannot serve is a promise nobody can keep. A fleet-scoped
      * post is durable here and readable locally, but its id is never flooded
-     * on the public inventory path. */
+     * on the public inventory path; a new one is offered to the push queue,
+     * which the board lane drains (config/boot_fleet_board.h, PUSH). */
+    uint8_t own[32];
     if (post->scope != FLEET_BOARD_SCOPE_FLEET)
         boot_fleet_board_announce(post->id);
+    else if (stored && boot_fleet_board_public_identity(own))
+        boot_fleet_board_fleet_push_enqueue(post, own);
     return FLEET_BOARD_OK;
 }
 
