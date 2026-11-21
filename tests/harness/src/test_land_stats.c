@@ -216,7 +216,7 @@ static int dls_window_case(const char *ledger)
         dls_run(&c, ledger, 721);
         ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_FAILED);
         dls_end(&c);
-        dls_run(&c, "test-tmp/dev_land_stats_absent/none.jsonl", 24);
+        dls_run(&c, "test-tmp/land_stats_absent/none.jsonl", 24);
         ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_FAILED);
         dls_end(&c);
         PASS();
@@ -266,20 +266,20 @@ _test_next:;
     return failures;
 }
 
-int test_dev_land_stats(void);
-int test_dev_land_stats(void)
+int test_land_stats(void);
+int test_land_stats(void)
 {
     int failures = 0;
     char dir[512], ledger[600];
-    test_make_tmpdir(dir, sizeof(dir), "dev_land_stats", "rig");
+    test_make_tmpdir(dir, sizeof(dir), "land_stats", "rig");
     (void)snprintf(ledger, sizeof(ledger), "%s/outcomes.jsonl", dir);
     dls_fixture(ledger);
     failures += dls_totals_case(ledger);
     failures += dls_window_case(ledger);
     failures += dls_cap_case(dir, ledger);
     if (failures == 0)
-        printf("test_dev_land_stats: all passed\n");
+        printf("test_land_stats: all passed\n");
     else
-        printf("test_dev_land_stats: %d FAILED\n", failures);
+        printf("test_land_stats: %d FAILED\n", failures);
     return failures;
 }

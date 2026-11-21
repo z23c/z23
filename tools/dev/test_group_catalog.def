@@ -1246,7 +1246,6 @@ ZCL_TEST_GROUP(dev_land_shard_03)
 ZCL_TEST_GROUP(dev_land_shard_04)
 ZCL_TEST_GROUP(dev_land_selfupgrade)
 ZCL_TEST_GROUP(dev_land_window)
-ZCL_TEST_GROUP(dev_land_stats)
 ZCL_TEST_GROUP(dev_land_remote)
 /* dev.ci: the one read-only screen over this host's CI and landing state.
  * The group exists for one property -- absent evidence never reads as a
@@ -1260,6 +1259,7 @@ ZCL_TEST_GROUP(dev_ship)
 /* Agent worktree construction: detached git worktree plus the proof's
  * vendored dependencies cloned onto independent inodes (never hardlinked). */
 ZCL_TEST_GROUP(dev_lane)
+ZCL_TEST_GROUP(land_stats)
 /* ops.host.gc: the host janitor over dev-proof worktree pools. The group
  * exists for one property — the sweep never deletes work. Three real git
  * worktree generations (one with a live process cwd'd inside, one locked,
