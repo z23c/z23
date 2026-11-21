@@ -465,12 +465,14 @@ static bool scan_height_range(struct node_db *ndb, const char *sql, bool narrow,
     AR_BIND_INT(s, 1, lo);
     AR_BIND_INT(s, 2, hi);
     bool ok = true;
-    int last_height = lo - 1;
+    int last_height = 0;
+    bool have_last = false;
     while (AR_STEP_ROW(s)) {
         int height = (int)AR_COL_INT(s, 0);
-        if (height == last_height)
+        if (have_last && height == last_height)
             continue;
         last_height = height;
+        have_last = true;
         struct db_block row;
         memset(&row, 0, sizeof(row));
         row.height = height;

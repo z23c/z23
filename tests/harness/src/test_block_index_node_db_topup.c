@@ -44,6 +44,7 @@
 #include "config/db_service.h"
 #include "config/runtime.h"
 
+#include <limits.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1000,6 +1001,36 @@ static int ndt_null_db_noop_checks(const char *dir, struct node_db *ndb,
 }
 
 static int ndt_clean_prefix_cases(const char *dir);
+static int ndt_boundary_cases(const char *dir)
+{
+    int failures = 0;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/node_boundary.db", dir);
+    struct node_db ndb = {0};
+    bool ready = node_db_open(&ndb, path) && ndt_range_row(&ndb, 1, false);
+    sqlite3_stmt *stmt = NULL;
+    if (ready)
+        ready = sqlite3_prepare_v2(ndb.db, "UPDATE blocks SET height=?1", -1,
+                                   &stmt, NULL) == SQLITE_OK &&
+                sqlite3_bind_int(stmt, 1, INT_MAX) == SQLITE_OK &&
+                sqlite3_step(stmt) == SQLITE_DONE;
+    if (stmt && sqlite3_finalize(stmt) != SQLITE_OK) ready = false;
+    NDT_CHECK("boundary: sparse maximum fixture built", ready);
+    if (ready) {
+        struct ndt_probe_seen full = {0}, probe = {0};
+        NDT_CHECK("boundary: full scan includes sole INT_MAX row",
+                  db_block_scan_height_range(&ndb, INT_MIN, INT_MAX,
+                                             ndt_probe_cb, &full) &&
+                  full.n == 1 && full.height[0] == INT_MAX);
+        NDT_CHECK("boundary: probe scan includes sole INT_MAX row",
+                  db_block_scan_height_range_probe(&ndb, INT_MIN, INT_MAX,
+                                                   ndt_probe_cb, &probe) &&
+                  probe.n == 1 && probe.height[0] == INT_MAX);
+    }
+    if (ndb.open) node_db_close(&ndb);
+    return failures;
+}
+
 static int ndt_holes_cases(const char *dir);
 static int ndt_tail_advance_cases(const char *dir, bool prefix_change);
 static int ndt_transaction_ownership(const char *dir);
@@ -1028,7 +1059,7 @@ int test_block_index_node_db_topup(void)
 
     if (fx.progress) sqlite3_close(fx.progress);
     node_db_close(&fx.ndb);
-    return failures + ndt_undo_topup_cases(dir) +
+    return failures + ndt_boundary_cases(dir) + ndt_undo_topup_cases(dir) +
            ndt_range_equivalence_cases(dir) +
            ndt_probe_scan_cases(dir) +
            ndt_clean_prefix_cases(dir) +
