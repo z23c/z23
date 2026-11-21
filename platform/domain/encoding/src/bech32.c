@@ -2,6 +2,8 @@
  * Copyright (c) 2017 Pieter Wuille
  * Copyright 2026 Rhett Creighton
  *
+ * Purpose: Bech32 address codec with checksum verification so typos are caught.
+ *
  * Pure BIP-173 Bech32 codec. See platform/domain/encoding/bech32.h for the
  * contract; this file has no I/O, RNG, clock, or persistence.
  */

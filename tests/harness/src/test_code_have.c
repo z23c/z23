@@ -430,6 +430,18 @@ static int ch_check_real_tree(struct ci_capability *caps,
                 base58_found = true;
         CH_CHECK("Base58 address encoding reaches its codec",
                  base58_found);
+        struct ci_capability bech32[5];
+        struct ci_capability_query bech32_q;
+        int bech32_n = codeindex_capabilities(
+            ci, "how addresses get a checksum so typos are caught", bech32, 5,
+            &bech32_q);
+        bool bech32_found = false;
+        for (int i = 0; i < bech32_n; i++)
+            if (strcmp(bech32[i].header,
+                       "platform/domain/encoding/src/bech32.c") == 0)
+                bech32_found = true;
+        CH_CHECK("the address checksum query reaches its Bech32 codec",
+                 bech32_found);
         struct ci_capability android[5];
         struct ci_capability_query android_q;
         int android_n = codeindex_capabilities(
@@ -670,7 +682,7 @@ static bool ch_paired_header_ownership(struct codeindex *ci)
  * never lower it to admit a regression. */
 #define HAVE_CASES_PATH   "tests/fixtures/code_have/cases.jsonl"
 #define HAVE_TOPK         5
-#define HAVE_MIN_HIT_PERCENT 36 /* of all cases: 25/63 (39%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
+#define HAVE_MIN_HIT_PERCENT 38 /* of all cases: 26/63 (41%) on 2026-11-21, kept 2 hits of slack for path renames; ratchet up as lanes land */
 
 static bool ch_path_answers(const char *path, const struct json_value *answers)
 {
