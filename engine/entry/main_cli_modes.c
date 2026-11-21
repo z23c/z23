@@ -34,6 +34,7 @@
 #include "util/spawn.h"
 #include <sqlite3.h>
 #include "json/json.h"
+#include "encoding/utilstrencodings.h"
 #include "views/wallet_gui.h"
 #include "models/database.h"
 #include "models/block.h"                 /* db_block_find_by_hash: tip-bind sapling_root */
@@ -1769,35 +1770,6 @@ static int cli_refuse_rpcport_autodiscovery(int port,
     return ZCL_COMMAND_EXIT_INVALID;
 }
 
-static const char b64[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void b64_encode(const char *in, size_t len, char *out)
-{
-    size_t i, j = 0;
-    for (i = 0; i + 2 < len; i += 3) {
-        uint8_t a = (uint8_t)in[i], b = (uint8_t)in[i+1], c = (uint8_t)in[i+2];
-        out[j++] = b64[a >> 2];
-        out[j++] = b64[((a & 3) << 4) | (b >> 4)];
-        out[j++] = b64[((b & 0xf) << 2) | (c >> 6)];
-        out[j++] = b64[c & 0x3f];
-    }
-    if (i < len) {
-        uint8_t a = (uint8_t)in[i];
-        out[j++] = b64[a >> 2];
-        if (i + 1 < len) {
-            uint8_t b2 = (uint8_t)in[i+1];
-            out[j++] = b64[((a & 3) << 4) | (b2 >> 4)];
-            out[j++] = b64[(b2 & 0xf) << 2];
-        } else {
-            out[j++] = b64[(a & 3) << 4];
-            out[j++] = '=';
-        }
-        out[j++] = '=';
-    }
-    out[j] = 0;
-}
-
 /* E4 error taxonomy: "nothing is listening at PORT" and "something is
  * listening but rejected our cookie" are distinct outcomes. Each gets its own
  * message AND its own process exit code (see the dispatch below
@@ -1978,8 +1950,17 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
     int timeout_sec = cli_rpc_timeout_sec();
     platform_socket_set_receive_timeout(sock, timeout_sec * 1000);
 
+    size_t cookie_len = strlen(cli_cookie);
     char auth[512];
-    b64_encode(cli_cookie, strlen(cli_cookie), auth);
+    if (EncodeBase64((const unsigned char *)cli_cookie, cookie_len,
+                     auth, sizeof(auth)) != ((cookie_len + 2) / 3) * 4) {
+        if (outcome) *outcome = CLI_RPC_OTHER_ERROR;
+        if (!quiet)
+            fprintf(stderr, "error=AUTH_ENCODING_FAILED detail=could not "
+                    "encode RPC credentials\n");
+        platform_socket_close(sock);
+        return NULL;
+    }
 
     char hdr[1024];
     int hlen = snprintf(hdr, sizeof(hdr),

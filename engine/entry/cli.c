@@ -6,6 +6,7 @@
 
 #include "rpc/client.h"
 #include "json/json.h"
+#include "encoding/utilstrencodings.h"
 #include "platform/socket_compat.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -75,36 +76,6 @@ static bool read_cookie(const char *datadir)
     return n > 0;
 }
 
-/* Base64 encode for HTTP Basic auth */
-static const char b64[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void base64_encode(const char *in, size_t len, char *out)
-{
-    size_t i, j = 0;
-    for (i = 0; i + 2 < len; i += 3) {
-        uint8_t a = (uint8_t)in[i], b = (uint8_t)in[i+1], c = (uint8_t)in[i+2];
-        out[j++] = b64[a >> 2];
-        out[j++] = b64[((a & 3) << 4) | (b >> 4)];
-        out[j++] = b64[((b & 0xf) << 2) | (c >> 6)];
-        out[j++] = b64[c & 0x3f];
-    }
-    if (i < len) {
-        uint8_t a = (uint8_t)in[i];
-        out[j++] = b64[a >> 2];
-        if (i + 1 < len) {
-            uint8_t b2 = (uint8_t)in[i+1];
-            out[j++] = b64[((a & 3) << 4) | (b2 >> 4)];
-            out[j++] = b64[(b2 & 0xf) << 2];
-        } else {
-            out[j++] = b64[(a & 3) << 4];
-            out[j++] = '=';
-        }
-        out[j++] = '=';
-    }
-    out[j] = 0;
-}
-
 /* True when the composed request length is exact and fits the buffer it
  * was composed into. snprintf truncates on overflow and reports the
  * would-have-written length; sending that length would read past the
@@ -112,6 +83,36 @@ static void base64_encode(const char *in, size_t len, char *out)
 static bool rpc_request_fits(size_t body_cap, int blen)
 {
     return blen >= 0 && (size_t)blen < body_cap;
+}
+
+static bool cli_send_http_request(platform_socket_t sock, const char *body,
+                                  size_t body_len)
+{
+    size_t cookie_len = strlen(g_cookie);
+    char auth_b64[512];
+    if (EncodeBase64((const unsigned char *)g_cookie, cookie_len,
+                     auth_b64, sizeof(auth_b64)) !=
+        ((cookie_len + 2) / 3) * 4) {
+        fprintf(stderr, "Cannot encode RPC credentials\n");
+        return false;
+    }
+
+    char header[1024];
+    int hlen = snprintf(header, sizeof(header),
+        "POST / HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Authorization: Basic %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n", g_host, auth_b64, body_len);
+    if (hlen < 0 || (size_t)hlen >= sizeof(header) ||
+        !platform_socket_send_all(sock, header, (size_t)hlen) ||
+        !platform_socket_send_all(sock, body, body_len)) {
+        fprintf(stderr, "Cannot send request to %s:%d\n", g_host, g_port);
+        return false;
+    }
+    return true;
 }
 
 /* json_write reports the required size even when the buffer truncates.
@@ -174,25 +175,7 @@ static char *rpc_call(const char *body, size_t body_cap, int composed_len)
     (void)platform_socket_set_receive_timeout(sock, CLI_RECV_SEC * 1000);
     (void)platform_socket_set_send_timeout(sock, CLI_RECV_SEC * 1000);
 
-    /* Build HTTP request */
-    char auth_b64[512];
-    base64_encode(g_cookie, strlen(g_cookie), auth_b64);
-
-    char header[1024];
-    int hlen = snprintf(header, sizeof(header),
-        "POST / HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "Authorization: Basic %s\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "\r\n", g_host, auth_b64, body_len);
-
-    /* Send header + body */
-    if (hlen < 0 || (size_t)hlen >= sizeof(header) ||
-        !platform_socket_send_all(sock, header, (size_t)hlen) ||
-        !platform_socket_send_all(sock, body, body_len)) {
-        fprintf(stderr, "Cannot send request to %s:%d\n", g_host, g_port);
+    if (!cli_send_http_request(sock, body, body_len)) {
         platform_socket_close(sock);
         return NULL;
     }

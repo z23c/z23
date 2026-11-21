@@ -578,6 +578,7 @@ ZCL_WINDOWS_ACCEPTANCE_native_optimal_SOURCES := \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/base/src/cleanse.c \
 	platform/modules/json/src/json.c \
+	platform/modules/encoding/src/utilstrencodings.c \
 	platform/modules/sha3/src/sha3.c \
 	core/modules/net/src/noise_transport.c \
 	core/modules/noise/src/noise_handshake.c \
@@ -735,6 +736,7 @@ ZCL_WINDOWS_ACCEPTANCE_rpc_client_transport_SOURCES := \
 	platform/modules/platform/tests/rpc_client_transport_windows_acceptance.c \
 	engine/controllers/src/rpc_client.c \
 	platform/modules/json/src/json.c \
+	platform/modules/encoding/src/utilstrencodings.c \
 	platform/modules/base/src/cleanse.c \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/platform/src/clock.c

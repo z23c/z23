@@ -28,5 +28,5 @@ code.shell_scripts 379
 code.size_debt 19
 determinism_debt 4
 docs.orphans 15
-duplicate_candidates 1843
+duplicate_candidates 1841
 untested_invariants 420

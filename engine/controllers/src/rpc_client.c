@@ -7,6 +7,7 @@
 #include "controllers/rpc_client.h"
 
 #include "json/json.h"
+#include "encoding/utilstrencodings.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -333,35 +334,6 @@ int node_rpc_test_client_port(void)
     return g_port;
 }
 #endif
-
-static const char b64[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static void base64_encode(const char *in, size_t len, char *out)
-{
-    size_t i, j = 0;
-    for (i = 0; i + 2 < len; i += 3) {
-        uint8_t a = (uint8_t)in[i], b = (uint8_t)in[i+1], c = (uint8_t)in[i+2];
-        out[j++] = b64[a >> 2];
-        out[j++] = b64[((a & 3) << 4) | (b >> 4)];
-        out[j++] = b64[((b & 0xf) << 2) | (c >> 6)];
-        out[j++] = b64[c & 0x3f];
-    }
-    if (i < len) {
-        uint8_t a = (uint8_t)in[i];
-        out[j++] = b64[a >> 2];
-        if (i + 1 < len) {
-            uint8_t b2 = (uint8_t)in[i+1];
-            out[j++] = b64[((a & 3) << 4) | (b2 >> 4)];
-            out[j++] = b64[(b2 & 0xf) << 2];
-        } else {
-            out[j++] = b64[(a & 3) << 4];
-            out[j++] = '=';
-        }
-        out[j++] = '=';
-    }
-    out[j] = 0;
-}
 
 static FILE *rpc_client_fopen(const char *path, const char *mode)
 {
@@ -857,9 +829,15 @@ static char *node_rpc_call_http_impl(const char *method,
         return rpc_connect_failure_body(crc);
     }
 
+    size_t cookie_len = strlen(cookie);
     char auth_b64[512];
-    base64_encode(cookie, strlen(cookie), auth_b64);
+    size_t auth_len = EncodeBase64((const unsigned char *)cookie, cookie_len,
+                                   auth_b64, sizeof(auth_b64));
     memset(cookie, 0, sizeof(cookie));
+    if (auth_len != ((cookie_len + 2) / 3) * 4) {
+        platform_socket_close(sock);
+        return rpc_transport_error("could not encode RPC cookie");
+    }
 
     char header[1024];
     int hlen = snprintf(header, sizeof(header),
