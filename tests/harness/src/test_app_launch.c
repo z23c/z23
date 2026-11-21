@@ -330,6 +330,9 @@ static int case_open_raise_reopen(struct al_fx *f)
         zcl_native_app_open_snapshot(&f->env, tasks, NULL, &reply);
         zcl_native_bridge_bind_rpc(old, old_port);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *pid = json_get(&reply.data, "pid");
+        ASSERT(pid && pid->type == JSON_INT && json_get_int(pid) > 1);
+        al_track((long)json_get_int(pid));
         char path[PATH_MAX], actual[1024], expected[1024];
         ASSERT(al_path(path, sizeof(path), f->env.datadir, "tasks-argv"));
         FILE *args = fopen(path, "re");
@@ -777,6 +780,9 @@ static int case_handlers(struct al_fx *f)
         app_launch_test_set_bin_dir(NULL);
         zcl_native_bridge_bind_rpc(old, old_port);
         ASSERT(open_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *pid = json_get(&open_reply.data, "pid");
+        ASSERT(pid && pid->type == JSON_INT && json_get_int(pid) > 1);
+        al_track((long)json_get_int(pid));
         ASSERT(al_path(path, sizeof(path), profile, "tasks-argv"));
         FILE *args = fopen(path, "re");
         ASSERT(args);
