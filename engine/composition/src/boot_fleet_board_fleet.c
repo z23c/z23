@@ -791,13 +791,20 @@ static bool board_record_is_head(const struct board_record *rec,
 static size_t board_offer_pass(struct node_db *ndb,
                                const struct board_inbox_slot *slot,
                                struct fleet_board_post *post, int64_t now,
-                               struct board_cursor *c, bool heads)
+                               struct board_cursor *c, bool heads,
+                               size_t *last_head_end)
 {
     size_t off = FLEET_BOARD_FLEET_ANSWER_HEAD;
     size_t stored = 0;
     struct board_record rec;
     while (board_record_next(slot->rows, slot->len, &off, &rec)) {
-        if (board_record_is_head(&rec, post) != heads)
+        /* Pass one classifies the entire immutable answer. Beyond its last
+         * head, pass two already knows every record is an ordinary row. */
+        bool head = (heads || off <= *last_head_end) &&
+                    board_record_is_head(&rec, post);
+        if (heads && head)
+            *last_head_end = off;
+        if (head != heads)
             continue;
         bool pinned = rec.arrival == FLEET_BOARD_ROSTER_PINNED_ARRIVAL;
         if ((slot->ask.sweep && rec.arrival > c->sweep_end) ||
@@ -819,8 +826,11 @@ static size_t board_offer_all(struct node_db *ndb,
                               struct fleet_board_post *post, int64_t now,
                               struct board_cursor *c)
 {
-    size_t stored = board_offer_pass(ndb, slot, post, now, c, true);
-    return stored + board_offer_pass(ndb, slot, post, now, c, false);
+    size_t last_head_end = 0;
+    size_t stored = board_offer_pass(ndb, slot, post, now, c, true,
+                                     &last_head_end);
+    return stored + board_offer_pass(ndb, slot, post, now, c, false,
+                                     &last_head_end);
 }
 
 /* Where the cursor stands once a whole answer has been offered. A forward
