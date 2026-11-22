@@ -300,11 +300,11 @@ void zcl_native_handle_zcode_package_bundle_verify(
         char next[1024];
         zpb_describe(s, "verify");
         (void)snprintf(next, sizeof(next),
-                       "check publisher %s with the sender, then the owner "
-                       "keeps it with: z23 zcode package bundle receive "
-                       "--input='{\"file\":\"%s\",\"destination\":\"<new "
-                       "folder>\"}'",
-                       s->fingerprint, s->path);
+                       "Check publisher %s and the package root with the sender. "
+                       "For an app, open the share file in Z23, review Receive, "
+                       "then preview and choose Keep. For other packages, use "
+                       "zcode.package.bundle.receive to plan and confirm an import.",
+                       s->fingerprint);
         (void)json_push_kv_str(&reply->data, "next", next);
     }
     zpb_free(s);

@@ -698,6 +698,24 @@ static bool zpb_write_fixture(const char *path, const uint8_t *bytes, size_t len
     bool ok = fwrite(bytes, 1, len, f) == len;
     return fclose(f) == 0 && ok;
 }
+static int zpb_verify_guidance(const struct zpb_world *w)
+{
+    int failures = 0; uint8_t *bytes = NULL; struct zpb_leaf l; zpb_open(&l);
+    char file[800]; size_t len = 0;
+    TEST("verified share guidance keeps filenames out of shell syntax and separates app Keep from package import") {
+        ASSERT(snprintf(file, sizeof(file), "%s/bob/Pilot's Bright Hangar.z23share", w->root) > 0);
+        bytes = zcl_native_source_bundle_read(w->share_file, &len);
+        ASSERT(bytes && zpb_write_fixture(file, bytes, len));
+        ASSERT(json_push_kv_str(&l.in, "file", file) && zpb_pass("zcode.package.bundle.verify", &l));
+        const char *next = zpb_get(&l, "next");
+        ASSERT(strstr(next, w->fingerprint) && !strstr(next, file));
+        ASSERT(strstr(next, "For an app") && strstr(next, "Receive") && strstr(next, "preview") && strstr(next, "Keep"));
+        ASSERT(strstr(next, "other packages") && strstr(next, "plan") && strstr(next, "confirm"));
+        ASSERT(!strstr(next, "--input=") && !l.out.error.mutated);
+        PASS();
+    } _test_next:;
+    free(bytes); zpb_close(&l); return failures;
+}
 static bool zpb_zip_refusal(const char *path, const struct zpb_world *w, bool zip)
 {
     static const char *const commands[] = {"zcode.package.bundle.verify", "zcode.package.bundle.receive"};
@@ -938,6 +956,7 @@ int test_zcode_package_bundle(void)
     }
     if (!failures) {
         failures += zpb_bob_receives(&w);
+        failures += zpb_verify_guidance(&w);
         failures += zpb_zip_guidance(&w);
         failures += zpb_flipped_refused(&w);
         failures += zpb_selected_bundle(&w);
