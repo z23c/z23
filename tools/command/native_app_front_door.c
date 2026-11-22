@@ -426,35 +426,44 @@ static void fd_key_note(struct fd_run *r)
                   "what you share, so back it up\n", fd_str(r, "key_path"));
 }
 
+static int fd_plan_only(struct fd_run *r)
+{
+    char hint[FD_PATH + 512];
+    /* Keep the identity consumed by a no-terminal plan in its retry. */
+    bool built;
+    if (!strcmp(r->verb->key, "file")) {
+        const char *plan = fd_str(r, "plan_id");
+        built = plan && strlen(plan) == 64 &&
+            zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                         "%s %s --plan-id=%s --yes", r->door->verb, r->door->target, plan);
+    } else if (r->door->root && r->door->publisher && r->door->offer_id)
+        built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                             "%s %s --root=%s --publisher=%s --offer=%s --yes",
+                             r->door->verb, r->door->target, r->door->root,
+                             r->door->publisher, r->door->offer_id);
+    else if (r->door->root && r->door->publisher)
+        built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                             "%s %s --root=%s --publisher=%s --yes",
+                             r->door->verb, r->door->target, r->door->root,
+                             r->door->publisher);
+    else
+        built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
+                             "%s %s --yes", r->door->verb, r->door->target);
+    if (!built) {
+        (void)fprintf(r->out, "nothing changed; cannot render a safe retry. Run this command in a terminal and review the plan again.\n");
+        return 0;
+    }
+    (void)fprintf(r->out, "nothing changed (no terminal to ask). next: %s\n", hint);
+    return 0;
+}
+
+
 /* Plan printed; now plan-only, a no, or the confirm. */
 static int fd_decide(struct fd_run *r)
 {
-    char q[1024], hint[FD_PATH + 512];
+    char q[1024];
     const char *changed = "nothing changed";
-    if (r->door->confirm.mode == ZCL_CLI_CONFIRM_PLAN_ONLY) {
-        /* Repeat the identity the door consumed, so the pasted next
-         * command lands on the same offer (an app.get without selectors
-         * can hit a different one, or AMBIGUOUS). One whole word per %s:
-         * app_hint_word escapes arguments, not the literal syntax. */
-        bool built;
-        if (r->door->root && r->door->publisher && r->door->offer_id)
-            built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
-                                 "%s %s --root=%s --publisher=%s --offer=%s --yes",
-                                 r->door->verb, r->door->target, r->door->root,
-                                 r->door->publisher, r->door->offer_id);
-        else if (r->door->root && r->door->publisher)
-            built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
-                                 "%s %s --root=%s --publisher=%s --yes",
-                                 r->door->verb, r->door->target, r->door->root,
-                                 r->door->publisher);
-        else
-            built = zcl_app_hint(hint, sizeof(hint), r->door->datadir,
-                                 "%s %s --yes", r->door->verb, r->door->target);
-        if (!built) hint[0] = '\0';
-        (void)fprintf(r->out, "%s (no terminal to ask). next: %s\n", changed,
-                      hint);
-        return 0;
-    }
+    if (r->door->confirm.mode == ZCL_CLI_CONFIRM_PLAN_ONLY) return fd_plan_only(r);
     fd_question(r, q, sizeof(q));
     if (!zcl_cli_confirm_ask(&r->door->confirm, q)) {
         (void)fprintf(r->out, "%s\n", changed);
@@ -503,12 +512,40 @@ static int fd_run_verb(struct fd_run *r)
         json_free(&r->in);
         return (int)ZCL_COMMAND_EXIT_INVALID;
     }
-    int rc = zcl_app_inner_call(r->verb->path, &r->in, &r->reply, NULL)
-                 ? (fd_print_plan(r), fd_decide(r))
-                 : fd_refused(r);
+    bool planned = zcl_app_inner_call(r->verb->path, &r->in, &r->reply, NULL);
+    const char *plan = planned ? fd_str(r, "plan_id") : NULL;
+    int rc;
+    if (!planned) rc = fd_refused(r);
+    else if (r->door->plan_id && (!plan || strcmp(plan, r->door->plan_id))) {
+        (void)fprintf(r->out, "z23 app %s: the reviewed file plan changed; review the file again.\n", r->door->verb);
+        rc = (int)ZCL_COMMAND_EXIT_INVALID;
+    } else { fd_print_plan(r); rc = fd_decide(r); }
     zcl_command_reply_free(&r->reply);
     json_free(&r->in);
     return rc;
+}
+
+static bool fd_plan_valid(struct fd_run *r)
+{
+    const char *plan = r->door->plan_id;
+    if (!plan) return true;
+    uint8_t decoded[32];
+    if (!strcmp(r->verb->key, "file") && strlen(plan) == 64 &&
+        zcl_hex_decode(plan, decoded, sizeof(decoded))) return true;
+    (void)fprintf(r->out, "z23 app %s: invalid file plan id; review the file again.\n", r->door->verb);
+    return false;
+}
+
+static bool fd_prepare_verb(struct fd_run *r)
+{
+    const struct zcl_app_front_door *door = r->door;
+    r->verb = fd_pick(door->verb, door->target, r->datadir);
+    if (!r->verb) {
+        (void)fprintf(r->out, "z23 app %s %s: not a copy under %s/copies, a .z23share file or a front-door verb\n",
+                      door->verb, door->target, r->datadir);
+        return false;
+    }
+    return fd_plan_valid(r);
 }
 
 int zcl_app_front_door_run(const struct zcl_app_front_door *door)
@@ -524,13 +561,7 @@ int zcl_app_front_door_run(const struct zcl_app_front_door *door)
                       door->verb);
         return (int)ZCL_COMMAND_EXIT_INVALID;
     }
-    r.verb = fd_pick(door->verb, door->target, r.datadir);
-    if (!r.verb) {
-        (void)fprintf(r.out, "z23 app %s %s: not a copy under %s/copies, a "
-                      ".z23share file or a front-door verb\n", door->verb,
-                      door->target, r.datadir);
-        return (int)ZCL_COMMAND_EXIT_INVALID;
-    }
+    if (!fd_prepare_verb(&r)) return (int)ZCL_COMMAND_EXIT_INVALID;
     /* A person at a terminal wants the result lines, not INFO logs: quiet
      * the floor for this one command unless -loglevel was given, then put
      * it back so no other caller in the process sees the change. */
@@ -573,22 +604,33 @@ static int fd_selector_word(const char *w, const char **root,
     return 1;
 }
 
-/* Exactly one target word and at most one --yes / -y. */
+static bool fd_plan_word(const char *verb, const char *word, const char **plan)
+{
+    if (strcmp(verb, "open") && strcmp(verb, "receive")) return false;
+    if (strncmp(word, "--plan-id", 9)) return false;
+    *plan = *plan || word[9] != '=' ? "" : word + 10;
+    return true;
+}
+
+/* One target, optional file plan pin, and at most one --yes / -y. */
 static bool fd_words(const char *const *words, size_t count, size_t consumed,
                      const char *verb, const char **target, bool *yes,
-                     const char **root, const char **publisher, const char **offer)
+                     const char **root, const char **publisher, const char **offer, const char **plan)
 {
     *target = NULL;
     *yes = false;
     *root = NULL;
     *publisher = NULL;
     *offer = NULL;
+    *plan = NULL;
     for (size_t i = consumed; i < count; i++) {
         const char *w = words[i];
         if (strcmp(w, "--yes") == 0 || strcmp(w, "-y") == 0) {
             if (*yes)
                 return false;
             *yes = true;
+        } else if (fd_plan_word(verb, w, plan)) {
+            continue;
         } else {
             int selector = strcmp(verb, "get") == 0
                                ? fd_selector_word(w, root, publisher, offer) : 0;
@@ -692,6 +734,15 @@ static bool fd_zip_guidance(const char *verb, const char *target, bool protected
     return true;
 }
 
+static bool fd_route_guidance(const char *plan, const char *verb, const char *target, bool protected)
+{
+    if (plan) {
+        (void)fprintf(stdout, "z23 app %s: the pinned file route is unavailable; review the file again.\n", verb);
+        return true;
+    }
+    return fd_zip_guidance(verb, target, protected);
+}
+
 bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
                             const char *const *words, size_t count,
                             size_t consumed, const char *datadir, int *rc)
@@ -703,22 +754,22 @@ bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
     }
     const char *verb = spec ? fd_verb_of(spec->path) : NULL;
     const char *target = NULL;
-    const char *root = NULL, *publisher = NULL, *offer = NULL;
+    const char *root = NULL, *publisher = NULL, *offer = NULL, *plan = NULL;
     bool yes = false;
     if (!verb || !rc || !fd_words(words, count, consumed, verb, &target, &yes,
-                                  &root, &publisher, &offer))
+                                  &root, &publisher, &offer, &plan))
         return false;
     const char *dd = datadir && datadir[0] ? datadir
                                            : zcl_native_command_datadir();
     bool protected = false;
     if (!fd_open_routes(spec, verb, target, dd, &protected)) {
-        if (fd_zip_guidance(verb, target, protected)) { *rc = (int)ZCL_COMMAND_EXIT_INVALID; return true; }
+        if (fd_route_guidance(plan, verb, target, protected)) { *rc = (int)ZCL_COMMAND_EXIT_INVALID; return true; }
         return false;
     }
     const struct zcl_app_front_door door = {
         .verb = verb, .target = target, .datadir = dd,
         .root = root, .publisher = publisher,
-        .offer_id = offer,
+        .offer_id = offer, .plan_id = plan,
         .confirm = zcl_cli_confirm_resolve(yes), .out = stdout,
     };
     *rc = zcl_app_front_door_run(&door);

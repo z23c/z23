@@ -800,7 +800,7 @@ static int afd_b_plan_shows_root(struct afd_world *w)
          "exact package root, and a hint that pastes") {
         struct asf_door run;
         struct afd_leaf v;
-        char want[AFD_PATH + 64], line[96];
+        char line[96];
         afd_open_leaf(&v);
         (void)json_push_kv_str(&v.in, "file", w->share);
         ASSERT(afd_exec("zcode.package.bundle.verify", &v));
@@ -825,12 +825,102 @@ static int afd_b_plan_shows_root(struct afd_world *w)
                             sizeof(line));
         ASSERT_STR_EQ(line, w->b_fp);
         ASSERT(afd_hint_of(run.text, w->hint, sizeof(w->hint)));
-        (void)snprintf(want, sizeof(want),
-                       "z23 -datadir=%s app open %s --yes", w->b_datadir,
-                       w->share);
-        ASSERT_STR_EQ(w->hint, want);
+        const char *pin = strstr(w->hint, "--plan-id=");
+        ASSERT(pin && strlen(pin) == strlen("--plan-id=") + 64u + strlen(" --yes"));
+        ASSERT(strstr(pin + strlen("--plan-id=") + 64u, " --yes") != NULL);
         PASS();
     } _test_next:;
+    return failures;
+}
+
+static bool afd_decline_pin(void *context, const char *question)
+{
+    unsigned *asked = context; (void)question; ++*asked; return false;
+}
+
+static int afd_b_plan_pin(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("B: a file retry pins the reviewed plan and refuses malformed or changed pins before consent") {
+        const char *start = strstr(w->hint, "--plan-id=");
+        char pin[80], wrong[80], malformed[] = "--plan-id=xyz";
+        char *before = afd_snapshot(w->b_datadir);
+        const struct zcl_command_spec *spec = afd_spec("app.open");
+        ASSERT(start && before && spec);
+        (void)snprintf(pin, sizeof(pin), "%.*s", 74, start);
+        (void)snprintf(wrong, sizeof(wrong), "%s", pin);
+        wrong[10] = wrong[10] == '0' ? '1' : '0';
+        const char *match[] = {w->share, pin};
+        const char *changed[] = {w->share, wrong, "--yes"};
+        const char *invalid[] = {w->share, malformed, "--yes"};
+        const char *missing_equals[] = {w->share, "--plan-id", "--yes"};
+        const char *duplicate[] = {w->share, pin, pin, "--yes"};
+        int rc = -1;
+        ASSERT(zcl_app_front_door_try(spec, match, 2, 0, w->b_datadir, &rc) && rc == 0);
+        ASSERT(zcl_app_front_door_try(spec, changed, 3, 0, w->b_datadir, &rc) && rc != 0);
+        ASSERT(zcl_app_front_door_try(spec, invalid, 3, 0, w->b_datadir, &rc) && rc != 0);
+        ASSERT(zcl_app_front_door_try(spec, missing_equals, 3, 0, w->b_datadir, &rc) && rc != 0);
+        ASSERT(zcl_app_front_door_try(spec, duplicate, 4, 0, w->b_datadir, &rc) && rc != 0);
+        unsigned asked = 0;
+        struct zcl_app_front_door door = {.verb = "open", .target = w->share, .datadir = w->b_datadir,
+            .plan_id = pin + 10, .confirm = {.mode = ZCL_CLI_CONFIRM_ASK, .ask = afd_decline_pin, .ctx = &asked}};
+        ASSERT(zcl_app_front_door_run(&door) == 1 && asked == 1);
+        door.plan_id = wrong + 10;
+        ASSERT(zcl_app_front_door_run(&door) != 0 && asked == 1);
+        ASSERT(afd_same(before, w->b_datadir));
+        free(before); PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+static int afd_b_spaced_plan(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("B: the pinned retry shell-quotes a chosen share filename containing a space") {
+        char path[AFD_PATH], hint[AFD_PATH + 200];
+        int n = snprintf(path, sizeof(path), "%s/shared copy.z23share", w->b_home);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        ASSERT(link(w->share, path) == 0);
+        struct asf_door run;
+        afd_door(w->b_home, w->b_datadir, "open", path, ZCL_CLI_CONFIRM_PLAN_ONLY, &run);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(afd_hint_of(run.text, hint, sizeof(hint)));
+        ASSERT(strstr(hint, "shared\\ copy.z23share") && strstr(hint, "--plan-id="));
+        ASSERT(unlink(path) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+static int afd_b_unrenderable_plan(struct afd_world *w)
+{
+    int failures = 0;
+    TEST("B: a file retry that cannot be quoted asks for an interactive review") {
+        char path[AFD_PATH];
+        int n = snprintf(path, sizeof(path), "%s/share\nname.z23share", w->b_home);
+        ASSERT(n > 0 && (size_t)n < sizeof(path));
+        ASSERT(link(w->share, path) == 0);
+        struct asf_door run;
+        afd_door(w->b_home, w->b_datadir, "open", path, ZCL_CLI_CONFIRM_PLAN_ONLY, &run);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(strstr(run.text, "cannot render a safe retry"));
+        ASSERT(strstr(run.text, "terminal") && strstr(run.text, "review the plan again"));
+        ASSERT(!strstr(run.text, "next:") && !strstr(run.text, "--yes"));
+        ASSERT(unlink(path) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
+static int afd_b_review_plans(struct afd_world *w)
+{
+    int failures = afd_b_plan_shows_root(w);
+    if (!failures) failures += afd_b_plan_pin(w);
+    if (!failures) failures += afd_b_spaced_plan(w);
+    if (!failures) failures += afd_b_unrenderable_plan(w);
     return failures;
 }
 
@@ -1902,7 +1992,7 @@ int test_app_front_door(void)
 #endif
     if (!failures) {
         failures += afd_b_refusals(&w);
-        failures += afd_b_plan_shows_root(&w);
+        failures += afd_b_review_plans(&w);
         failures += afd_b_receives(&w);
         failures += afd_recipe_open(&w);
     }

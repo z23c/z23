@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * The `z23 app` front door: one plain command per step of the app journey,
- * with no JSON, no plan ids and no pasted hex.
+ * with no JSON and no manually entered identities.
  *
  *   z23 app list                    catalog apps, installed manifests, and
  *                                   your copies (name and status)
@@ -20,7 +20,8 @@
  * runs the plan, asks one y/N (command/cli_confirm.h), and only then runs
  * the confirm with the plan's own plan_id and, for an open, the plan's own
  * image_sha3. With no terminal and no --yes it prints the plan and the
- * command that would go ahead, and changes nothing.
+ * command that would go ahead, and changes nothing. A file retry carries the
+ * reviewed plan id so it cannot silently accept a different plan.
  *
  * Authority stays with the leaves: copy, share and receive run owner leaves
  * (adopt, seed, bundle sign, bundle receive) as inner calls, which skip MCP
@@ -60,6 +61,7 @@ struct zcl_app_front_door {
     const char *root;    /* optional exact app.get identity */
     const char *publisher;
     const char *offer_id;
+    const char *plan_id;  /* optional prior file-receive plan */
     struct zcl_cli_confirm confirm;
     FILE *out;           /* human lines; NULL is stdout */
 };
@@ -71,9 +73,9 @@ struct zcl_app_front_door {
 int zcl_app_front_door_run(const struct zcl_app_front_door *door);
 
 /* The argv hook: true (with *rc set) when `words` after `consumed` are the
- * plain front-door form of one of the verbs above (exactly one target and
- * at most --yes, -y), which it then runs. False leaves the ordinary leaf
- * dispatch untouched, so --input, plan_id and confirm keep working. */
+ * plain front-door form of one of the verbs above (exactly one target, an
+ * optional file-receive --plan-id, and at most --yes or -y), which it
+ * then runs. False leaves the ordinary leaf dispatch untouched, so --input, plan_id and confirm keep working. */
 bool zcl_app_front_door_try(const struct zcl_command_spec *spec,
                             const char *const *words, size_t count,
                             size_t consumed, const char *datadir, int *rc);
