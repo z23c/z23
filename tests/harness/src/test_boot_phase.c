@@ -622,6 +622,51 @@ static int bp_node_db_second_migration_refuses(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static int g_bp_newer_stamps;
+
+static void bp_inject_newer_schema(sqlite3 *db)
+{
+    static const char *const keys[] = {"schema_version", "schema_compat_floor"};
+    int32_t version = NODE_DB_MAX_SCHEMA + 1;
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
+        sqlite3_stmt *st = NULL;
+        int rc = sqlite3_prepare_v2(db,
+            "UPDATE node_state SET value=? WHERE key=?", -1, &st, NULL);
+        if (rc == SQLITE_OK) rc = sqlite3_bind_blob(st, 1, &version, sizeof version, SQLITE_TRANSIENT);
+        if (rc == SQLITE_OK) rc = sqlite3_bind_text(st, 2, keys[i], -1, SQLITE_STATIC);
+        if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE && sqlite3_changes(db) == 1)
+            g_bp_newer_stamps++;
+        sqlite3_finalize(st);
+    }
+}
+
+static int bp_node_db_newer_schema_refuses(void)
+{
+    int failures = 0, status = 0;
+    char dir[PATH_MAX];
+    bp_park_fixture_begin(dir, sizeof dir, false);
+    pid_t pid = fork();
+    if (pid == 0) {
+        bool closed = false;
+        struct boot_status_snapshot snap;
+        char why[128];
+        g_bp_newer_stamps = 0;
+        bool ok = boot_test_open_node_db(&g_bp_park_ctx, bp_inject_newer_schema, &closed);
+        bool typed = boot_error_reported() &&
+            strcmp(boot_error_first_code(), "NODE_DB_SCHEMA_NEWER") == 0;
+        bool beacon = boot_status_read(dir, &snap, why, sizeof why) &&
+            strcmp(snap.blocker, "node_db_schema_newer") == 0 && !snap.serving;
+        _exit(g_bp_newer_stamps == 2 && !ok && closed && typed && beacon ? 0 : 9);
+    }
+    bool waited = pid > 0 && waitpid(pid, &status, 0) == pid;
+    BP_CHECK("newer schema after open refuses with typed beacon and closes db",
+             waited && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    bp_park_fixture_end(dir);
+    return failures;
+}
+#endif
+
 /* ── node.db unopenable REFUSES; it must never park ───────────────
  *
  * Parking sends no READY= under Type=notify and the step stays open, so the
@@ -2487,6 +2532,9 @@ int test_boot_phase(void)
 
     failures += bp_node_db_gate_refuses();
     failures += bp_node_db_second_migration_refuses();
+#if !defined(_WIN32)
+    failures += bp_node_db_newer_schema_refuses();
+#endif
     failures += bp_legacy_snapshot_keeps_source_lock();
     failures += bp_test_legacy_header_pull_predicates();
     failures += bp_test_blocks_table_hydrate_predicates();
