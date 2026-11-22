@@ -7,6 +7,7 @@
 struct json_value;
 struct node_db;
 struct db_fleet_board_post;
+struct boot_fleet_board_observation;
 void fb_error(struct json_value *result, const char *code, const char *message);
 const char *fb_str(const struct json_value *in, const char *key, const char *fallback);
 int64_t fb_int(const struct json_value *in, const char *key, int64_t fallback);
@@ -20,4 +21,6 @@ void fb_op_list(struct node_db *ndb, const struct json_value *in,
 /* Add the fleet carriage lane's counters to a status reply as one bounded
  * "carriage" object (boot_fleet_board_carriage_rpc.c). */
 bool fb_render_carriage(struct json_value *result);
+bool fb_status_observation(struct json_value *result, const char *key,
+                           const struct boot_fleet_board_observation *value);
 #endif

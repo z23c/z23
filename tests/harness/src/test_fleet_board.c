@@ -7898,7 +7898,7 @@ static int test_fleet_board_state_tag(unsigned c)
 #define FBP_PUSHER 7
 #define FBP_ADDRESSEE 9
 #define FBP_STRANGER 8
-#define FBP_CASES 48u
+#define FBP_CASES 49u
 
 /* A failed step names its line and fails the case. */
 #define FBP_REQUIRE(cond)                                                      \
@@ -8532,6 +8532,81 @@ static bool fbp_case_sender_wait(struct fbp *p)
     struct boot_fleet_board_fleet_counts c = fbp_now_counts();
     FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_RECEIPT] ==
                 p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_RECEIPT] + 1);
+    return true;
+}
+
+/* The receiver commits, but its CLOSE is lost before the pusher sees it. */
+static bool fbp_case_receipt_lost_after_commit(struct fbp *p)
+{
+    struct board_push_receipt rc;
+    struct fleet_board_status st;
+    boot_fleet_board_fleet_test_bind(&p->w.b);
+    boot_fleet_board_fleet_push_enqueue(&p->reply, p->pk_pusher);
+    FBP_REQUIRE(fbp_send(p) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_commit(&p->w.a) == 1);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    FBP_REQUIRE(db_fleet_board_status(&p->w.a, FBW_NOW, &st));
+    FBP_REQUIRE(st.posts == 1);
+    /* Take and inspect the wire receipt, but do not deliver it to the sender. */
+    FBP_REQUIRE(fbp_close(&p->w, &rc) == MESH_STREAM_CLOSED_BY_SERVICE);
+    FBP_REQUIRE(rc.code == FLEET_BOARD_PUSH_CODE_COMMITTED && rc.n == 1);
+    FBP_REQUIRE(rc.rec[0].verdict == FLEET_BOARD_PUSH_RECORD_STORED);
+    FBP_REQUIRE(memcmp(rc.rec[0].id, p->reply.id, 32) == 0);
+    FBP_REQUIRE(fbp_close(&p->w, &rc) == 0xFFu);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_live_tagged(true, BOARD_STATE_PUSH_OUT) == 1);
+    boot_fleet_board_fleet_test_age_push(FLEET_BOARD_PUSH_WAIT_S + 1);
+    mesh_stream_test_pump_tick();
+    FBP_REQUIRE(boot_fleet_board_fleet_test_live_tagged(true, BOARD_STATE_PUSH_OUT) == 0);
+    struct boot_fleet_board_fleet_counts c = fbp_now_counts();
+    FBP_REQUIRE(c.push_opened == p->before.push_opened + 1);
+    FBP_REQUIRE(c.push_in[FLEET_BOARD_PUSH_CODE_COMMITTED] ==
+                p->before.push_in[FLEET_BOARD_PUSH_CODE_COMMITTED] + 1);
+    FBP_REQUIRE(c.push_in_records[FLEET_BOARD_PUSH_RECORD_STORED] ==
+                p->before.push_in_records[FLEET_BOARD_PUSH_RECORD_STORED] + 1);
+    FBP_REQUIRE(c.push_receipt[FLEET_BOARD_PUSH_CODE_COMMITTED] ==
+                p->before.push_receipt[FLEET_BOARD_PUSH_CODE_COMMITTED]);
+    FBP_REQUIRE(c.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_RECEIPT] ==
+                p->before.push_skipped[FLEET_BOARD_PUSH_SKIP_NO_RECEIPT] + 1);
+    /* Inspect the actual DATA before delivering the same frame to the pull. */
+    mesh_loop_discard(p->w.asker, p->w.ask_q, p->w.f.res_term);
+    mesh_loop_discard(p->w.answerer, p->w.answer_q, p->w.f.term_peer.ini);
+    mesh_stream_test_reset();
+    FBP_REQUIRE(boot_fleet_board_fleet_test_pull(p->w.f.resp_noise_pub,
+                                                 p->w.box_a));
+    FBP_REQUIRE(mesh_loop_pump(p->w.asker, p->w.ask_q, p->w.f.res_term,
+                               &p->w.mp, p->w.answerer) == 1);
+    boot_fleet_board_fleet_test_serve();
+    boot_fleet_board_fleet_test_serve();
+    uint8_t frame[MESH_LOOP_WIRE_MAX], kind = 0;
+    bool more = false;
+    size_t len = mesh_loop_take(p->w.answerer, p->w.answer_q,
+                                p->w.f.term_peer.ini, frame, sizeof frame,
+                                &more);
+    const size_t data_off = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u + 2u;
+    FBP_REQUIRE(more && mesh_stream_test_read_header(frame, len, &kind, NULL));
+    FBP_REQUIRE(kind == MESH_STREAM_KIND_DATA && len >= data_off);
+    struct board_answer_head head;
+    const uint8_t *answer = frame + data_off;
+    size_t answer_len = len - data_off;
+    FBP_REQUIRE(board_answer_head_decode(answer, answer_len, &head));
+    FBP_REQUIRE(board_answer_valid(answer, answer_len, &head, 0, false));
+    size_t off = FLEET_BOARD_FLEET_ANSWER_HEAD;
+    struct board_record record;
+    FBP_REQUIRE(board_record_next(answer, answer_len, &off, &record));
+    FBP_REQUIRE(memcmp(record.id, p->question.id, 32) == 0);
+    FBP_REQUIRE(board_record_next(answer, answer_len, &off, &record));
+    FBP_REQUIRE(memcmp(record.id, p->reply.id, 32) == 0);
+    FBP_REQUIRE(off == answer_len);
+    FBP_REQUIRE(mesh_stream_frame(&p->w.mp, p->w.asker, frame, len, NULL));
+    FBP_REQUIRE(mesh_loop_pump(p->w.answerer, p->w.answer_q,
+                               p->w.f.term_peer.ini, &p->w.mp,
+                               p->w.asker) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_drain_into(&p->w.a) == 1);
+    FBP_REQUIRE(boot_fleet_board_fleet_test_last_after() == 0);
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->question.id));
+    FBP_REQUIRE(db_fleet_board_have(&p->w.a, p->reply.id));
+    FBP_REQUIRE(db_fleet_board_status(&p->w.a, FBW_NOW, &st));
+    FBP_REQUIRE(st.posts == 2);
     return true;
 }
 
@@ -10034,6 +10109,8 @@ static const struct {
       fbp_case_rows_past_cap },
     { "fleet board disclosure: when no row serves, the newest row judged "
       "names the one refusal counted", fbp_case_refusal_row },
+    { "fleet board push: a receipt lost after commit leaves one stored post "
+      "when the pull offers it again", fbp_case_receipt_lost_after_commit },
 };
 
 static int test_push_receipt_accounting(void)
@@ -10238,6 +10315,77 @@ static size_t fbw_pull_n(struct fbw *w, const uint8_t peer_box[32],
     return stored;
 }
 
+static bool fbw_status_call(const struct rpc_table *table, const char *peer,
+                            const char *post, struct json_value *result)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "op", "status");
+    if (peer) ok = ok && json_push_kv_str(&input, "peer", peer);
+    if (post) ok = ok && json_push_kv_str(&input, "post", post);
+    ok = ok && fb_test_rpc(table, &input, result);
+    json_free(&input);
+    return ok;
+}
+
+static bool fbw_status_match(const struct json_value *result)
+{
+    const struct json_value *attempt = json_get(result, "peer_attempt");
+    const struct json_value *ingest = json_get(result, "post_ingest");
+    const char *epoch = json_get_str(json_get(ingest, "epoch"));
+    const char *disposition = json_get_str(json_get(ingest, "disposition"));
+    char rendered[8192];
+    size_t len = json_write(result, rendered, sizeof rendered);
+    return json_get_bool(json_get(attempt, "observed")) &&
+           json_get_bool(json_get(ingest, "observed")) && epoch && disposition &&
+           strlen(epoch) == 32 &&
+           strcmp(disposition, "stored") == 0 && len > 0 && len < sizeof rendered &&
+           strstr(rendered, epoch) != NULL;
+}
+
+static bool fbw_status_checks(const struct rpc_table *table, const char *peer,
+                              char post[65])
+{
+    struct json_value result;
+    json_init(&result);
+    bool ok = fbw_status_call(table, NULL, NULL, &result) &&
+              json_get_bool(json_get(&result, "ok")) &&
+              !json_get(&result, "peer_attempt") && !json_get(&result, "post_ingest");
+    json_free(&result); json_init(&result);
+    ok = ok && fbw_status_call(table, peer, post, &result) && fbw_status_match(&result);
+    json_free(&result); json_init(&result);
+    post[0] = post[0] == '0' ? '1' : '0';
+    ok = ok && fbw_status_call(table, peer, post, &result) &&
+         json_get_bool(json_get(json_get(&result, "peer_attempt"), "observed")) &&
+         !json_get_bool(json_get(json_get(&result, "post_ingest"), "observed"));
+    json_free(&result); json_init(&result);
+    ok = ok && fbw_status_call(table, peer, NULL, &result) &&
+         !json_get_bool(json_get(&result, "ok"));
+    json_free(&result);
+    return ok;
+}
+
+/* Exercise status against observations from a real two-node pull. */
+static bool fbw_status_observations(struct fbw *w, const uint8_t post[32])
+{
+    struct db_service service = {.node_db = &w->b, .started = true};
+    struct app_runtime_context runtime = {.db_service = &service};
+    struct rpc_table table;
+    rpc_table_init(&table);
+    boot_fleet_board_register_rpc(&table);
+    char warmup[256], peer_hex[65], post_hex[65];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
+    set_rpc_warmup_finished();
+    app_runtime_set_current(&runtime);
+    fleet_board_id_to_hex(w->box_a, peer_hex);
+    fleet_board_id_to_hex(post, post_hex);
+    bool ok = fbw_status_checks(&table, peer_hex, post_hex);
+    app_runtime_set_current(&w->runtime);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    return ok;
+}
+
 #define FBW_BATCH 16
 
 /* The cursor must never pass over a row: same-second arrivals, a refusal
@@ -10270,6 +10418,18 @@ static int test_fleet_board_fleet_carriage_gap_free(void)
         ASSERT(fbw_post(&w.a, 20, FLEET_BOARD_SCOPE_FLEET, "first in 2300",
                         2300, 3600, 2300, &first[0]));
         ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
+        struct boot_fleet_board_observation attempt, ingest;
+        boot_fleet_board_observe_query(w.box_a, first[0].id, &attempt, &ingest);
+        ASSERT(attempt.found && ingest.found && ingest.stored && ingest.epoch_set);
+        ASSERT_EQ(ingest.result, FLEET_BOARD_OK);
+        ASSERT(fbw_status_observations(&w, first[0].id));
+        boot_fleet_board_observe_query(w.box_b, first[0].id, &attempt, &ingest);
+        ASSERT(!ingest.found);
+        uint8_t other_post[32];
+        memcpy(other_post, first[0].id, sizeof other_post);
+        other_post[0] ^= 1u;
+        boot_fleet_board_observe_query(w.box_a, other_post, &attempt, &ingest);
+        ASSERT(attempt.found && !ingest.found);
         /* More posts in that very second, some sorting below the id just
          * pulled and some above it. */
         size_t n = fbw_post_straddling(&w.a, 21, first[0].id, 2300, later,
@@ -12746,6 +12906,12 @@ static int test_fleet_board_roster_relay(void)
         boot_fleet_board_fleet_test_pull_paired(now);
         boot_fleet_roster_counts(&ra);
         ASSERT_EQ(ra.non_member, rb.non_member + 1);
+        struct boot_fleet_board_observation gate, observed_post;
+        boot_fleet_board_observe_query(w.f.term_peer.delegation.doc.master_pubkey,
+                                      after_member.id, &gate, &observed_post);
+        ASSERT(gate.found && gate.phase == FLEET_BOARD_OBS_GATE);
+        ASSERT_EQ(gate.result, FLEET_BOARD_GATE_ROSTER);
+        ASSERT(!gate.epoch_set && !observed_post.found);
 
         /* The peer joins the roster: served within the next pull. */
         ASSERT(fbr_member_row(&w.a, FBR_ROOT, "peerbox", FBR_PEER, now + 1));

@@ -142,6 +142,53 @@ static void board_unlock(void)
     zcl_mutex_unlock(&g_lock);
 }
 
+#define BOARD_OBSERVATIONS 64u
+struct board_observation_entry {
+    uint8_t peer[32], post[32];
+    bool ingest;
+    struct boot_fleet_board_observation value;
+};
+static struct board_observation_entry g_observations[BOARD_OBSERVATIONS];
+static uint64_t g_observation_sequence;
+
+static void board_observe(const uint8_t peer[32], const uint8_t *post,
+                          int64_t after, int64_t arrival, int result,
+                          enum boot_fleet_board_observation_phase phase,
+                          bool stored, bool retryable,
+                          const uint8_t *epoch)
+{
+    board_lock();
+    uint64_t seq = ++g_observation_sequence;
+    struct board_observation_entry *e = &g_observations[(seq - 1u) % BOARD_OBSERVATIONS];
+    memset(e, 0, sizeof *e);
+    memcpy(e->peer, peer, 32);
+    e->ingest = post != NULL;
+    if (post) memcpy(e->post, post, 32);
+    e->value = (struct boot_fleet_board_observation){
+        .found = true, .sequence = seq, .after = after, .arrival = arrival,
+        .result = result, .phase = phase, .stored = stored,
+        .retryable = retryable, .epoch_set = epoch != NULL};
+    if (epoch) memcpy(e->value.epoch, epoch, sizeof e->value.epoch);
+    board_unlock();
+}
+
+void boot_fleet_board_observe_query(const uint8_t peer[32], const uint8_t post[32],
+                                    struct boot_fleet_board_observation *attempt,
+                                    struct boot_fleet_board_observation *ingest)
+{
+    memset(attempt, 0, sizeof *attempt);
+    memset(ingest, 0, sizeof *ingest);
+    board_lock();
+    for (size_t i = 0; i < BOARD_OBSERVATIONS; i++) {
+        const struct board_observation_entry *e = &g_observations[i];
+        if (!e->value.found || memcmp(e->peer, peer, 32)) continue;
+        struct boot_fleet_board_observation *out = e->ingest ? ingest : attempt;
+        if (e->ingest && memcmp(e->post, post, 32)) continue;
+        if (e->value.sequence > out->sequence) *out = e->value;
+    }
+    board_unlock();
+}
+
 /* The board store this box serves from and commits into. */
 struct node_db *board_db(void)
 {
@@ -471,6 +518,9 @@ static void board_service_close(struct mesh_stream *st,
     if (tag != BOARD_STATE_PULL)
         return;
     struct board_pull_state *p = st->service_state;
+    if (!p->ask.roster)
+        board_observe(p->ask.peer_box_id, NULL, p->ask.after, 0, (int)reason,
+                      FLEET_BOARD_OBS_CLOSE, false, false, NULL);
     if (p->len == 0 ||
         (reason != MESH_STREAM_CLOSED_BY_SERVICE && reason != MESH_STREAM_OK))
         return;
@@ -746,11 +796,15 @@ static enum fleet_board_result board_record_ingest(
  * None names the post's text: that is the fleet's own. */
 static bool board_offer(struct node_db *ndb, const struct board_record *rec,
                         struct fleet_board_post *post, int64_t now,
-                        struct board_cursor *c)
+                        struct board_cursor *c, const struct board_ask *ask)
 {
     bool stored = false;
     enum fleet_board_result r = board_record_ingest(ndb, rec, post, now,
                                                     &stored);
+    if (!ask->roster)
+        board_observe(ask->peer_box_id, rec->id, ask->after, rec->arrival,
+                      (int)r, FLEET_BOARD_OBS_INGEST, stored,
+                      board_refusal_retryable(r), c->epoch_known ? c->epoch : NULL);
     if (board_refusal_retryable(r)) {
         /* A pinned record has no number to return to: it leads the next answer
          * while the asker is still behind it. */
@@ -811,7 +865,7 @@ static size_t board_offer_pass(struct node_db *ndb,
             (!pinned && db_fleet_board_have(ndb, rec.id)))
             continue;
         rec.roster_only = slot->roster_only;
-        if (board_offer(ndb, &rec, post, now, c))
+        if (board_offer(ndb, &rec, post, now, c, &slot->ask))
             stored++;
     }
     return stored;
@@ -941,10 +995,16 @@ static bool board_stream_open(const char *service,
                               struct board_pull_state *p)
 {
     uint64_t stream_id = 0;
+    if (!p->ask.roster)
+        board_observe(p->ask.peer_box_id, NULL, p->ask.after, 0, 0,
+                      FLEET_BOARD_OBS_OPEN_ATTEMPT, false, false, NULL);
     enum mesh_stream_refusal refusal = mesh_stream_open(
         service, peer_noise, 0, frame, frame_len, p, &stream_id);
     if (refusal == MESH_STREAM_OK)
         return true;
+    if (!p->ask.roster)
+        board_observe(p->ask.peer_box_id, NULL, p->ask.after, 0, (int)refusal,
+                      FLEET_BOARD_OBS_OPEN_FAILURE, false, false, NULL);
     if (refusal != MESH_STREAM_REFUSED_PEER_NOT_CONNECTED)
         LOG_WARN("fleet.board", "fleet pull not opened: %s",
                  mesh_stream_refusal_string(refusal));
@@ -1016,12 +1076,21 @@ static bool board_peer_due(struct node_db *ndb,
                            const struct db_mesh_pairing *row, int64_t now,
                            struct vcs_zcode_dht_delegation *peer)
 {
-    if (!mesh_pairing_allows(row, MESH_PAIRING_CAP_STATUS_READ, now) ||
-        !board_peer_delegation(row, peer) ||
-        !board_delegation_current(ndb, row, peer, row->peer_noise_pubkey,
-                                  now) ||
-        !board_roster_admits(peer->online_pubkey))
-        return false;
+    enum boot_fleet_board_gate_reason reason;
+    if (!mesh_pairing_allows(row, MESH_PAIRING_CAP_STATUS_READ, now))
+        reason = FLEET_BOARD_GATE_PAIRING;
+    else if (!board_peer_delegation(row, peer))
+        reason = FLEET_BOARD_GATE_DELEGATION_UNRESOLVED;
+    else if (!board_delegation_current(ndb, row, peer, row->peer_noise_pubkey, now))
+        reason = FLEET_BOARD_GATE_DELEGATION_REFUSED;
+    else if (!board_roster_admits(peer->online_pubkey))
+        reason = FLEET_BOARD_GATE_ROSTER;
+    else
+        goto eligible;
+    board_observe(row->peer_master_pubkey, NULL, 0, 0, (int)reason,
+                  FLEET_BOARD_OBS_GATE, false, false, NULL);
+    return false;
+eligible:
     struct board_live_probe probe;
     memset(&probe, 0, sizeof probe);
     memcpy(probe.peer_static, row->peer_noise_pubkey, 32);
@@ -1169,6 +1238,8 @@ static void board_forget_locked(void)
         free(g_inbox[i].rows);
     memset(g_inbox, 0, sizeof g_inbox);
     memset(g_cursors, 0, sizeof g_cursors);
+    memset(g_observations, 0, sizeof g_observations);
+    g_observation_sequence = 0;
     g_cursors_loaded = false;
     g_last_pull = 0;
     g_last_second = 0;

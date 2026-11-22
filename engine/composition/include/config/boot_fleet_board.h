@@ -347,6 +347,32 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 #define FLEET_BOARD_FLEET_MSG_PULL 1u
 #define FLEET_BOARD_FLEET_MSG_ANSWER 2u
 #define FLEET_BOARD_FLEET_EPOCH_BYTES 16u
+
+/* Bounded, volatile observations; sequence describes observation order only.
+ * The peer identifier is the paired peer's master public key. */
+enum boot_fleet_board_observation_phase {
+    FLEET_BOARD_OBS_OPEN_ATTEMPT, FLEET_BOARD_OBS_OPEN_FAILURE,
+    FLEET_BOARD_OBS_CLOSE, FLEET_BOARD_OBS_INGEST, FLEET_BOARD_OBS_GATE
+};
+enum boot_fleet_board_gate_reason {
+    FLEET_BOARD_GATE_PAIRING, FLEET_BOARD_GATE_DELEGATION_UNRESOLVED,
+    FLEET_BOARD_GATE_DELEGATION_REFUSED, FLEET_BOARD_GATE_ROSTER
+};
+struct boot_fleet_board_observation {
+    bool found;
+    uint64_t sequence;
+    int64_t after;
+    int64_t arrival;
+    int result;
+    enum boot_fleet_board_observation_phase phase;
+    bool stored;
+    bool retryable;
+    bool epoch_set;
+    uint8_t epoch[FLEET_BOARD_FLEET_EPOCH_BYTES];
+};
+void boot_fleet_board_observe_query(const uint8_t peer[32], const uint8_t post[32],
+                                    struct boot_fleet_board_observation *attempt,
+                                    struct boot_fleet_board_observation *ingest);
 /* type, version, u64 after_arrival */
 #define FLEET_BOARD_FLEET_PULL_BYTES 10u
 /* type, version, epoch, u64 arrival of the last row the page consumed */

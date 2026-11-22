@@ -554,9 +554,18 @@ static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
         fb_error(result, "PAGE_UNAVAILABLE", "the fleet page could not be rendered");
 }
 
-static void fb_op_status(struct node_db *ndb, struct json_value *result,
-                         int64_t now)
+static void fb_op_status(struct node_db *ndb, const struct json_value *in,
+                         struct json_value *result, int64_t now)
 {
+    const char *peer = fb_str(in, "peer", NULL);
+    const char *post = fb_str(in, "post", NULL);
+    uint8_t peer_id[32], post_id[32];
+    if ((json_get(in, "peer") || json_get(in, "post")) && (!peer || !post ||
+        !fleet_board_id_from_hex(peer, peer_id) ||
+        !fleet_board_id_from_hex(post, post_id))) {
+        fb_error(result, "INVALID_FILTER", "peer and post must both be 32-byte hex identifiers");
+        return;
+    }
     struct fleet_board_status status;
     if (!db_fleet_board_status(ndb, now, &status)) {
         fb_error(result, "STATUS_UNAVAILABLE", "the board store did not answer");
@@ -598,6 +607,13 @@ static void fb_op_status(struct node_db *ndb, struct json_value *result,
         json_push_kv_str(result, "host", hex);
     } else {
         json_push_kv_str(result, "host_unavailable", "identity_not_loaded");
+    }
+    if (peer) {
+        struct boot_fleet_board_observation attempt, ingest;
+        boot_fleet_board_observe_query(peer_id, post_id, &attempt, &ingest);
+        if (!fb_status_observation(result, "peer_attempt", &attempt) ||
+            !fb_status_observation(result, "post_ingest", &ingest))
+            json_push_kv_str(result, "observation_unavailable", "render_failed");
     }
     /* The fleet carriage lane's counters, pull and push, since start. */
     if (!fb_render_carriage(result))
@@ -1406,7 +1422,7 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
     else if (strcmp(op, "show") == 0)       fb_op_show(ndb, in, result);
     else if (strcmp(op, "fleet_page") == 0)
         fb_op_fleet_page(ndb, in, result, now);
-    else if (strcmp(op, "status") == 0)     fb_op_status(ndb, result, now);
+    else if (strcmp(op, "status") == 0)     fb_op_status(ndb, in, result, now);
     else if (!fb_dispatch_wiki(ndb, op, in, result))
         fb_error(result, "UNKNOWN_OP", "no such board operation");
     return true;

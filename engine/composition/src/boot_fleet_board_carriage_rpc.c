@@ -6,15 +6,17 @@
  * skipped by reason, what became of each delivery hint, and the pull's
  * refusals, without a test build. Bounded: a fixed set of keys per counter
  * group, and the primitive's close reasons only where one was counted.
- * Additive: nothing outside "carriage" changes.
+ * Exact peer and post queries also render the latest matching observations.
  */
 
 #include "boot_fleet_board_push_internal.h"
 #include "boot_fleet_board_rpc_internal.h"
 
+#include "base/hex.h"
 #include "config/boot_fleet_board.h"
 #include "config/mesh_stream.h"
 #include "json/json.h"
+#include "models/fleet_board_post.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -147,6 +149,81 @@ bool fb_render_carriage(struct json_value *result)
     json_set_object(&o);
     bool ok = carriage_pull(&o, &c) && carriage_push_out(&o, &c) &&
               carriage_push_in(&o, &c) && json_push_kv(result, "carriage", &o);
+    json_free(&o);
+    return ok;
+}
+
+static const char *fb_observation_phase(enum boot_fleet_board_observation_phase phase)
+{
+    static const char *const names[] = {
+        [FLEET_BOARD_OBS_OPEN_ATTEMPT] = "open_attempt",
+        [FLEET_BOARD_OBS_OPEN_FAILURE] = "open_failure",
+        [FLEET_BOARD_OBS_CLOSE] = "close",
+        [FLEET_BOARD_OBS_INGEST] = "ingest",
+        [FLEET_BOARD_OBS_GATE] = "gate_refusal",
+    };
+    return (unsigned)phase < sizeof names / sizeof names[0] ? names[phase] : "unknown";
+}
+
+static bool fb_observation_ingest(struct json_value *o,
+                                  const struct boot_fleet_board_observation *v)
+{
+    enum fleet_board_result r = (enum fleet_board_result)v->result;
+    const char *disposition = v->stored ? "stored" : v->retryable ? "deferred" :
+                              r == FLEET_BOARD_OK ? "held" : "refused";
+    return json_push_kv_int(o, "arrival", v->arrival) &&
+           json_push_kv_str(o, "disposition", disposition) &&
+           json_push_kv_str(o, "result", fleet_board_result_string(r));
+}
+
+static bool fb_observation_detail(struct json_value *o,
+                                  const struct boot_fleet_board_observation *v)
+{
+    static const char *const gate_reasons[] = {
+        [FLEET_BOARD_GATE_PAIRING] = "pairing",
+        [FLEET_BOARD_GATE_DELEGATION_UNRESOLVED] = "delegation_unresolved",
+        [FLEET_BOARD_GATE_DELEGATION_REFUSED] = "delegation_refused",
+        [FLEET_BOARD_GATE_ROSTER] = "roster",
+    };
+    if (v->phase == FLEET_BOARD_OBS_GATE) {
+        unsigned reason = (unsigned)v->result;
+        return json_push_kv_str(o, "reason", reason < sizeof gate_reasons / sizeof gate_reasons[0]
+                                ? gate_reasons[reason] : "unknown");
+    }
+    if (v->phase == FLEET_BOARD_OBS_INGEST)
+        return fb_observation_ingest(o, v);
+    if (v->phase == FLEET_BOARD_OBS_OPEN_ATTEMPT)
+        return true;
+    return json_push_kv_str(o, "reason", mesh_stream_refusal_string(
+                            (enum mesh_stream_refusal)v->result));
+}
+
+static bool fb_observation_fields(struct json_value *o,
+                                  const struct boot_fleet_board_observation *v)
+{
+    bool ok = json_push_kv_int(o, "sequence", (int64_t)v->sequence) &&
+              json_push_kv_str(o, "phase", fb_observation_phase(v->phase));
+    if (v->phase != FLEET_BOARD_OBS_GATE)
+        ok = ok && json_push_kv_int(o, "after", v->after);
+    ok = ok && fb_observation_detail(o, v);
+    if (v->epoch_set) {
+        char hex[33];
+        zcl_hex_encode(v->epoch, sizeof v->epoch, hex);
+        ok = ok && json_push_kv_str(o, "epoch", hex);
+    }
+    return ok;
+}
+
+/* The caller supplies both exact identifiers; no inventory is exposed. */
+bool fb_status_observation(struct json_value *result, const char *key,
+                           const struct boot_fleet_board_observation *v)
+{
+    struct json_value o;
+    json_init(&o);
+    json_set_object(&o);
+    bool ok = json_push_kv_bool(&o, "observed", v->found);
+    if (v->found) ok = ok && fb_observation_fields(&o, v);
+    ok = ok && json_push_kv(result, key, &o);
     json_free(&o);
     return ok;
 }
