@@ -453,6 +453,34 @@ static bool wtx_mail_has(const char *ref, const char *needle)
     return found;
 }
 
+#if !defined(_WIN32)
+static long long wtx_terminal_mail_count(const char *ref)
+{
+    struct wtx_call c;
+    long long count = -1;
+    wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&c.input, "action", "pull");
+    zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+    if (wtx_ok(&c)) {
+        const struct json_value *rows = json_get(&c.reply.data, "rows");
+        if (rows && rows->type == JSON_ARR) {
+            count = 0;
+            for (size_t i = 0; i < json_size(rows); i++) {
+                const struct json_value *row = json_at(rows, i);
+                const char *r = json_get_str(json_get(row, "ref"));
+                const char *body = json_get_str(json_get(row, "body"));
+                const char *kind = json_get_str(json_get(row, "kind"));
+                if (r && body && kind && strcmp(kind, "result") == 0 &&
+                    strcmp(r, ref) == 0 && strstr(body, "terminal="))
+                    count++;
+            }
+        }
+    }
+    wtx_end(&c);
+    return count;
+}
+#endif
+
 /* Copy the body of the result mail row under ref. False when no row
  * under that ref exists at all. */
 static bool wtx_mail_body(const char *ref, char *out, size_t cap)
@@ -519,7 +547,7 @@ static bool wtx_receipt_exists(const char *name, long long attempt)
     (void)snprintf(path, sizeof(path),
                    "%s/z23/dev/engine/%s/a%lld/receipt.json", g_wtx_state,
                    name, attempt);
-    return stat(path, &st) == 0;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
 /* True when receipt.json for name/attempt contains needle verbatim. The
@@ -584,6 +612,21 @@ static bool wtx_receipt_join(const char *name, long long attempt)
         ok = wtx_join_member(&receipt, &claim, keys[i]);
     const struct json_value *kind = json_get(&receipt, "kind");
     ok = ok && kind && kind->type == JSON_STR && strcmp(json_get_str(kind), "leaf") == 0;
+    json_free(&receipt);
+    json_free(&claim);
+    return ok;
+}
+
+static bool wtx_receipt_seq_matches_claim(const char *name, long long attempt)
+{
+    struct json_value receipt, claim;
+    json_init(&receipt);
+    json_init(&claim);
+    bool ok = wtx_run_json(name, attempt, "receipt.json", &receipt) &&
+              wtx_run_json(name, attempt, "claim.json", &claim) &&
+              wtx_join_member(&receipt, &claim, "seq");
+    const struct json_value *seq = json_get(&receipt, "seq");
+    ok = ok && seq && seq->type == JSON_INT && json_get_int(seq) > 0;
     json_free(&receipt);
     json_free(&claim);
     return ok;
@@ -883,10 +926,9 @@ static void wtx_fixture_usage(const struct wkr_job *job)
 static void wtx_fixture_receipt_block(const struct wkr_job *job)
 {
     if (g_fx_block_receipt) {
-        /* The receipt's temp name is taken by a directory: the worker's
-         * atomic receipt write cannot open it. */
+        /* A directory at the receipt destination prevents installation. */
         char path[4096 + 32];
-        if (snprintf(path, sizeof(path), "%s/receipt.json.tmp",
+        if (snprintf(path, sizeof(path), "%s/receipt.json",
                      job->rundir) < (int)sizeof(path))
             (void)mkdir(path, 0700);
     }
@@ -2687,6 +2729,147 @@ static void wtx_report(int failures)
         printf("test_devagent_worker: %d FAILED\n", failures);
 }
 
+#if !defined(_WIN32)
+static bool wtx_hold_pending(void) { return true; }
+static int wtx_result_mail_recovery(void)
+{
+    int failures = 0;
+    struct wkr_drive_opts o;
+    char dir[1200], outbox[1300];
+    const char *name = "wtx-mail-recovery";
+    wtx_isolate("mail-recovery");
+    wtx_queue_post(name);
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/mail", g_wtx_state);
+    wtx_mkdir_p(dir);
+    (void)snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", dir);
+    TEST("worker recovers terminal result after local outbox failure") {
+        ASSERT(mkdir(outbox, 0700) == 0);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-mail-first");
+        long long jobs = zcl_devagent_worker_drive(&o, wtx_fixture);
+        bool removed = rmdir(outbox) == 0;
+        ASSERT(removed);
+        ASSERT_EQ(jobs, 1);
+        ASSERT(wtx_receipt_has(name, 1, "\"verdict\":\"pass\""));
+        ASSERT(wtx_runout_has(name, 1, "result-mail-refused="));
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        for (int i = 0; i < 2; i++) {
+            wtx_opts(&o, "wtx", i ? "s-mail-third" : "s-mail-second");
+            zcl_devagent_worker_test_hold_pending = i ? NULL : wtx_hold_pending;
+            (void)zcl_devagent_worker_drive(&o, wtx_fixture);
+            zcl_devagent_worker_test_hold_pending = NULL;
+            if (!i) {
+                char pending[1400];
+                struct stat st;
+                (void)snprintf(pending, sizeof(pending), "%s/z23/dev/queue/worker-result.pending", g_wtx_state);
+                ASSERT(stat(pending, &st) == 0 && S_ISREG(st.st_mode));
+                ASSERT_EQ(wtx_terminal_mail_count(name), 1);
+            }
+            ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        }
+        long long executions = wtx_count_read();
+        long long results = wtx_terminal_mail_count(name);
+        if (executions != 1 || results != 1)
+            printf("mail recovery: executions=%lld terminal_results=%lld\n", executions, results);
+        ASSERT_EQ(executions, 1);
+        ASSERT_EQ(results, 1);
+        ASSERT(wtx_mail_has(name, "terminal=pass"));
+        ASSERT(wtx_mail_has(name, "gate=pass"));
+        PASS();
+    }
+_test_next:;
+    zcl_devagent_worker_test_hold_pending = NULL;
+    (void)rmdir(outbox);
+    wtx_restore();
+    return failures;
+}
+static int wtx_missing_result_receipt(void)
+{
+    int failures = 0;
+    struct wkr_drive_opts o;
+    char dir[1200], outbox[1300], receipt[1400];
+    const char *name = "wtx-mail-missing-receipt";
+    wtx_isolate("mail-missing-receipt");
+    wtx_queue_post(name);
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/mail", g_wtx_state);
+    wtx_mkdir_p(dir);
+    (void)snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", dir);
+    (void)snprintf(receipt, sizeof(receipt), "%s/z23/dev/engine/%s/a1/receipt.json", g_wtx_state, name);
+    TEST("worker never replays a pass after the matching receipt disappears") {
+        ASSERT(mkdir(outbox, 0700) == 0);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-missing-first");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT(rmdir(outbox) == 0);
+        ASSERT(wtx_receipt_exists(name, 1));
+        ASSERT(unlink(receipt) == 0);
+        wtx_opts(&o, "wtx", "s-missing-second");
+        (void)zcl_devagent_worker_drive(&o, wtx_fixture);
+        ASSERT_EQ(wtx_count_read(), 1);
+        ASSERT(!wtx_mail_has(name, "gate=pass"));
+        ASSERT(wtx_mail_has(name, "gate=no-receipt"));
+        ASSERT(wtx_runout_has(name, 1, "receipt-unwritable"));
+        PASS();
+    }
+_test_next:;
+    (void)rmdir(outbox);
+    wtx_restore();
+    return failures;
+}
+static int wtx_tampered_pending_body(void)
+{
+    int failures = 0;
+    struct wkr_drive_opts o;
+    char dir[1200], outbox[1300], pending[1400], text[32768];
+    const char *name = "wtx-mail-tampered";
+    wtx_isolate("mail-tampered");
+    wtx_queue_post(name);
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/mail", g_wtx_state);
+    wtx_mkdir_p(dir);
+    (void)snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", dir);
+    (void)snprintf(pending, sizeof(pending), "%s/z23/dev/queue/worker-result.pending", g_wtx_state);
+    TEST("worker refuses a changed pending body despite an intact receipt") {
+        ASSERT(mkdir(outbox, 0700) == 0);
+        g_fx_mode = 0;
+        (void)snprintf(g_fx_terminal, sizeof(g_fx_terminal), "%s", "pass");
+        g_fx_rc = 0;
+        g_fx_candidate = true;
+        wtx_opts(&o, "wtx", "s-tamper-first");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
+        ASSERT(rmdir(outbox) == 0);
+        ASSERT(wtx_receipt_exists(name, 1));
+        ASSERT(zcl_devagent_worker_read_file(pending, text, sizeof(text)));
+        char *gate = strstr(text, "gate=pass");
+        ASSERT(gate != NULL);
+        memcpy(gate, "gate=FAIL", 9);
+        FILE *f = fopen(pending, "wb");
+        ASSERT(f != NULL);
+        size_t n = strlen(text);
+        bool written = fwrite(text, 1, n, f) == n;
+        bool closed = fclose(f) == 0;
+        ASSERT(written && closed);
+        wtx_opts(&o, "wtx", "s-tamper-second");
+        (void)zcl_devagent_worker_drive(&o, wtx_fixture);
+        ASSERT_EQ(wtx_count_read(), 1);
+        ASSERT(!wtx_mail_has(name, "gate=pass"));
+        ASSERT(!wtx_mail_has(name, "gate=FAIL"));
+        struct stat st;
+        ASSERT(stat(pending, &st) == 0 && S_ISREG(st.st_mode));
+        PASS();
+    }
+_test_next:;
+    (void)rmdir(outbox);
+    wtx_restore();
+    return failures;
+}
+#endif
+
 int test_devagent_worker(void);
 int test_devagent_worker(void)
 {
@@ -2716,6 +2899,9 @@ int test_devagent_worker(void)
     }
 
     failures += wtx_usage_cases();
+    failures += wtx_result_mail_recovery();
+    failures += wtx_missing_result_receipt();
+    failures += wtx_tampered_pending_body();
 
     TEST("lifecycle: post claim fixture gate receipt reap completed")
     {
@@ -2834,6 +3020,7 @@ int test_devagent_worker(void)
         ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 1);
         ASSERT_EQ(wtx_count_read(), 1);
         ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        ASSERT(wtx_receipt_seq_matches_claim("wtx-orphan", 1));
         ASSERT(wtx_outcome("wtx-orphan", verdict, sizeof(verdict), &rc));
         ASSERT_STR_EQ(verdict, "PASS");
         ASSERT(zcl_devagent_closed_pass(verdict, rc));
@@ -3383,6 +3570,9 @@ int test_devagent_worker(void)
         ASSERT(!wtx_runout_has("wtx-noreceipt", 1, "rc=0\n"));
         ASSERT(!wtx_mail_has("wtx-noreceipt", "gate=pass"));
         ASSERT(wtx_mail_has("wtx-noreceipt", "terminal=receipt-unwritable"));
+        char blocked[4096];
+        (void)snprintf(blocked, sizeof(blocked), "%s/z23/dev/engine/wtx-noreceipt/a1/receipt.json", g_wtx_state);
+        ASSERT(rmdir(blocked) == 0);
         ASSERT(wtx_queue_verb("reap", NULL, NULL));
         ASSERT(wtx_outcome("wtx-noreceipt", verdict, sizeof(verdict), &rc));
         ASSERT_STR_EQ(verdict, "no-receipt");

@@ -21,6 +21,12 @@ void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
                                   const char *key_digest, bool require_existing,
                                   const char *disposition, bool probe);
 
+/* Internal keyed result post; no caller-controlled mail idempotency key. */
+void zcl_devagent_mail_worker_post(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply,
+                                   const char *name, long long attempt,
+                                   long long seq);
+
 bool zcl_devagent_mail_cursor_valid(const char *token);
 
 bool zcl_devagent_mail_cursor_covers(const char *token, const char *stream,
@@ -380,6 +386,7 @@ long long zcl_devagent_worker_gate(const struct wkr_job *job,
  * and cap is nonzero. */
 bool zcl_devagent_worker_read_file(const char *path, char *out, size_t cap);
 #ifdef ZCL_TESTING
+extern bool (*zcl_devagent_worker_test_hold_pending)(void);
 /* Isolated fixtures: feed an admitted brief path into the real task composer.
  * The returned refusal is static; refusal empties job->task. */
 const char *zcl_devagent_worker_test_compose_task(const char *brief,

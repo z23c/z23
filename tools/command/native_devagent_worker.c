@@ -87,6 +87,7 @@
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
@@ -96,10 +97,13 @@
 #include "platform/directory_watcher.h"
 #include "platform/positioned_file.h"
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
+#include "platform/rng.h"
 #include "platform/process_lock.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "platform/windows_path.h"
+#include "sha3/sha3.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
@@ -626,7 +630,8 @@ static bool wkr_row_mine(const struct json_value *r, const char **name,
     v = json_get(r, "name");
     *name = (v && v->type == JSON_STR) ? json_get_str(v) : "";
     *attempt = wkr_row_attempt(json_get(r, "attempt"));
-    return (*name)[0] != '\0' && *attempt >= 1;
+    return (*name)[0] != 0 && *attempt >= 1 &&
+           wkr_row_attempt(json_get(r, "seq")) >= 1;
 }
 
 static void wkr_adopt_fill(const struct json_value *r, const char *rundir,
@@ -639,6 +644,7 @@ static void wkr_adopt_fill(const struct json_value *r, const char *rundir,
     (void)snprintf(job->rundir, sizeof(job->rundir), "%s", rundir);
     (void)snprintf(job->name, sizeof(job->name), "%s", name);
     job->attempt = attempt;
+    job->seq = wkr_row_attempt(json_get(r, "seq"));
     (void)snprintf(job->kind, sizeof(job->kind), "%s",
                    (v && v->type == JSON_STR) ? json_get_str(v) : "leaf");
     (void)snprintf(job->model, sizeof(job->model), "%s", opts->model);
@@ -839,20 +845,18 @@ static void wkr_write_runout(const struct wkr_job *job, long long rc,
 /* The receipt reap judges. False when it could not be composed or
  * written: the caller then fails the run, because a pass that left no
  * receipt must never be reported as one. */
-static bool wkr_write_receipt(const struct wkr_drive_opts *opts,
+static bool wkr_format_receipt(const struct wkr_drive_opts *opts,
                               const struct wkr_job *job, const char *verdict,
-                              const struct wkr_result *res)
+                              const struct wkr_result *res, const char *mail_digest,
+                              char *text, size_t cap)
 {
-    char path[4096 + 32], text[8192];
+
     char e_cand[sizeof(res->candidate) * WKR_JSON_ESCAPE_WORST];
     char e_name[sizeof(job->name) * WKR_JSON_ESCAPE_WORST];
     char e_kind[sizeof(job->kind) * WKR_JSON_ESCAPE_WORST];
     struct wkr_prov_esc e;
     int w;
-    if (!opts || !job || !verdict || !res)
-        return false;
-    if (snprintf(path, sizeof(path), "%s/%s", job->rundir,
-                 WKR_RECEIPT_FILE) >= (int)sizeof(path))
+    if (!opts || !job || !verdict || !res || !text || !cap)
         return false;
     /* The receipt keeps the provenance bytes exactly as the executor gave
      * them; only the mail copy is bound by the name grammar. */
@@ -861,21 +865,36 @@ static bool wkr_write_receipt(const struct wkr_drive_opts *opts,
         !zcl_devagent_worker_json_escape(res->candidate, e_cand, sizeof(e_cand)) ||
         !zcl_devagent_worker_prov_escape(res, &e))
         return false;
-    w = snprintf(text, sizeof(text),
+    char binding[100] = {0};
+    if (mail_digest) {
+        if (strlen(mail_digest) != 64) return false;
+        (void)snprintf(binding, sizeof(binding), ",\"mail_envelope_sha3\":\"%s\"", mail_digest);
+    }
+    w = snprintf(text, cap,
                  "{\"name\":\"%s\",\"attempt\":%lld,\"seq\":%lld,"
                  "\"kind\":\"%s\",\"verdict\":\"%s\",\"worker\":\"%.48s\","
                  "\"session\":\"%.48s\",\"model\":\"%.128s\","
                  "\"candidate\":\"%s\",\"tokens\":%lld,\"wall_ms\":%lld,"
                  "\"provider\":\"%s\",\"turns\":%lld,\"command\":\"%s\","
-                 "\"source\":\"%s\",\"diff\":\"%s\",\"ts\":%lld}\n",
+                 "\"source\":\"%s\",\"diff\":\"%s\",\"ts\":%lld%s}\n",
                  e_name, job->attempt, job->seq, e_kind,
                  verdict, opts->worker, opts->session, job->model, e_cand,
                  res->tokens_used, res->wall_ms, e.provider, res->turns,
                  e.command, e.source, e.diff,
-                 (long long)platform_time_wall_unix());
-    if (w <= 0 || (size_t)w >= sizeof(text))
+                 (long long)platform_time_wall_unix(), binding);
+    return w > 0 && (size_t)w < cap;
+}
+
+static bool wkr_write_receipt(const struct wkr_drive_opts *opts,
+                              const struct wkr_job *job, const char *verdict,
+                              const struct wkr_result *res)
+{
+    char path[4096 + 32], text[8192];
+    if (!job || snprintf(path, sizeof(path), "%s/%s", job->rundir,
+                         WKR_RECEIPT_FILE) >= (int)sizeof(path) ||
+        !wkr_format_receipt(opts, job, verdict, res, NULL, text, sizeof(text)))
         return false;
-    return zcl_devagent_worker_write_atomic(path, text, (size_t)w);
+    return zcl_devagent_worker_write_atomic(path, text, strlen(text));
 }
 
 /* ── result mail: the row the originating client sees ────────────────────
@@ -983,7 +1002,8 @@ static void wkr_row_safe(struct wkr_mail_row *row,
  * carry. The code is COPIED: the reply it comes from does not outlive
  * this call. */
 static bool wkr_mail_post(const char *body, const char *ref,
-                          const char *worker, char *code, size_t cap)
+                          const char *worker, const struct wkr_job *key,
+                          char *code, size_t cap)
 {
     struct wkr_sub sub;
     char ebody[8192], eref[192], input[9216];
@@ -1008,7 +1028,11 @@ static bool wkr_mail_post(const char *body, const char *ref,
         wkr_sub_end(&sub);
         return false;
     }
-    zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
+    if (key)
+        zcl_devagent_mail_worker_post(&sub.request, &sub.reply, key->name,
+                                      key->attempt, key->seq);
+    else
+        zcl_native_handle_dev_agent_mail(&sub.request, &sub.reply);
     /* ran means the sibling handler was invoked, never that it accepted:
      * acceptance is the reply's own status, which wkr_sub_ok reads. */
     sub.ran = true;
@@ -1019,26 +1043,6 @@ static bool wkr_mail_post(const char *body, const char *ref,
                                                : "mail-refused");
     wkr_sub_end(&sub);
     return posted;
-}
-
-/* The row that always fits: the ref the client waits on, the verdict, the
- * rc, and the marker saying the rest was dropped to get it out. Bounding
- * every field to the shared name grammar makes the full row always fit, so
- * this is a fail-safe, not a routine path: it is what keeps a body that
- * somehow will not compose from cancelling the result. */
-static bool wkr_mail_reduced(const char *ref, const char *gate, long long rc,
-                             const char *postref, const char *worker,
-                             char *code, size_t cap)
-{
-    char body[512];
-    int w = snprintf(body, sizeof(body),
-                     "ref=%.64s\ngate=%.64s\nrc=%lld\nreduced=1\n", ref,
-                     gate, rc);
-    if (w <= 0 || (size_t)w >= sizeof(body)) {
-        (void)snprintf(code, cap, "%s", "reduced-compose-failed");
-        return false;
-    }
-    return wkr_mail_post(body, postref, worker, code, cap);
 }
 
 /* Record a lost result row where the operator and the next attempt's
@@ -1053,23 +1057,17 @@ static void wkr_mail_note_refusal(const struct wkr_job *job, long long rc,
     wkr_write_runout(job, rc, full);
 }
 
-static void wkr_mail_result(const struct wkr_drive_opts *opts,
-                            const struct wkr_job *job, const char *terminal,
-                            const char *candidate, const char *verdict,
-                            long long rc, long long tokens, long long wall_ms,
-                            const char *note, const struct wkr_result *res)
+/* Compose once so a retry publishes exactly the original safe body. */
+static bool wkr_mail_body(const struct wkr_drive_opts *opts,
+                          const struct wkr_job *job, const char *terminal,
+                          const char *candidate, const char *verdict,
+                          long long rc, long long tokens, long long wall_ms,
+                          const struct wkr_result *res, char *body, size_t cap)
 {
     struct wkr_mail_row row;
-    char body[2048], code[80];
-    bool posted;
-    int w;
-    if (!opts || !job || !terminal || !verdict)
-        return;
-    if (!candidate)
-        candidate = "";
-    (void)snprintf(code, sizeof(code), "%s", "mail-refused");
-    wkr_row_safe(&row, opts, job, terminal, candidate, verdict, res);
-    w = snprintf(body, sizeof(body),
+    if (!opts || !job || !terminal || !verdict || !body || !cap) return false;
+    wkr_row_safe(&row, opts, job, terminal, candidate ? candidate : "", verdict, res);
+    int w = snprintf(body, cap,
                  "ref=%.64s\nworker=%.64s\nsession=%.64s\nmodel=%.64s\n"
                  "attempt=%lld\nprovider=%.64s\nturns=%lld\ncommand=%.64s\n"
                  "source=%.64s\ndiff=%.64s\nterminal=%.64s\ncandidate=%.64s\n"
@@ -1078,14 +1076,308 @@ static void wkr_mail_result(const struct wkr_drive_opts *opts,
                  row.provider, row.turns, row.command, row.source, row.diff,
                  row.terminal, row.candidate, row.gate, rc, tokens, wall_ms,
                  row.elided ? WKR_MAIL_ELIDED_LINE : "");
-    if (w <= 0 || (size_t)w >= sizeof(body))
-        posted = wkr_mail_reduced(row.ref, row.gate, rc, job->name,
-                                  opts->worker, code, sizeof(code));
-    else
-        posted = wkr_mail_post(body, job->name, opts->worker, code,
-                               sizeof(code));
-    if (!posted)
+    if (w > 0 && (size_t)w < cap) return true;
+    w = snprintf(body, cap, "ref=%.64s\ngate=%.64s\nrc=%lld\nreduced=1\n",
+                 row.ref, row.gate, rc);
+    return w > 0 && (size_t)w < cap;
+}
+
+static void wkr_mail_result(const struct wkr_drive_opts *opts,
+                            const struct wkr_job *job, const char *terminal,
+                            const char *candidate, const char *verdict,
+                            long long rc, long long tokens, long long wall_ms,
+                            const char *note, const struct wkr_result *res)
+{
+    char body[2048], code[80] = "encode-failed";
+    if (!opts || !job || !terminal || !verdict) return;
+    if (!wkr_mail_body(opts, job, terminal, candidate, verdict, rc, tokens,
+                       wall_ms, res, body, sizeof(body)) ||
+        !wkr_mail_post(body, job->name, opts->worker, NULL, code, sizeof(code)))
         wkr_mail_note_refusal(job, rc, note, code);
+}
+
+#ifdef ZCL_TESTING
+bool (*zcl_devagent_worker_test_hold_pending)(void) = NULL;
+#endif
+
+#define WKR_PENDING_FILE "worker-result.pending"
+#define WKR_PENDING_CAP (32u * 1024u)
+
+struct wkr_pending {
+    struct wkr_job job;
+    char worker[49], body[2048], receipt_sha3[65], note[3400];
+    long long rc;
+};
+
+static void wkr_digest(const char *text, size_t size, char hex[65])
+{
+    struct sha3_256_ctx ctx;
+    unsigned char sum[32];
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)text, size);
+    sha3_256_finalize(&ctx, sum);
+    zcl_hex_encode(sum, sizeof(sum), hex);
+}
+
+/* Each field is length-prefixed, and the domain includes its NUL. */
+static void wkr_envelope_field(struct sha3_256_ctx *ctx, const char *value)
+{
+    char length[32];
+    size_t n = strlen(value);
+    int w = snprintf(length, sizeof(length), "%zu:", n);
+    if (w > 0 && (size_t)w < sizeof(length))
+        sha3_256_write(ctx, (const unsigned char *)length, (size_t)w);
+    sha3_256_write(ctx, (const unsigned char *)value, n);
+}
+
+static void wkr_envelope_digest(const struct wkr_pending *p, char hex[65])
+{
+    static const char domain[] = "z23.devagent.worker.result-envelope.v1";
+    struct sha3_256_ctx ctx;
+    unsigned char sum[32];
+    char attempt[32], seq[32];
+    (void)snprintf(attempt, sizeof(attempt), "%lld", p->job.attempt);
+    (void)snprintf(seq, sizeof(seq), "%lld", p->job.seq);
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)domain, sizeof(domain));
+    wkr_envelope_field(&ctx, p->worker);
+    wkr_envelope_field(&ctx, p->job.name);
+    wkr_envelope_field(&ctx, attempt);
+    wkr_envelope_field(&ctx, seq);
+    wkr_envelope_field(&ctx, p->body);
+    sha3_256_finalize(&ctx, sum);
+    zcl_hex_encode(sum, sizeof(sum), hex);
+}
+
+static bool wkr_receipt_envelope_matches(const char *receipt, const struct wkr_pending *p)
+{
+    struct json_value v;
+    char expected[65];
+    json_init(&v);
+    wkr_envelope_digest(p, expected);
+    bool ok = json_read(&v, receipt, strlen(receipt)) && v.type == JSON_OBJ;
+    size_t count = 0;
+    for (size_t i = 0; ok && i < v.num_children; i++)
+        if (v.keys[i] && strcmp(v.keys[i], "mail_envelope_sha3") == 0) count++;
+    const struct json_value *value = ok ? json_get(&v, "mail_envelope_sha3") : NULL;
+    ok = count == 1 && value && value->type == JSON_STR && json_get_str(value) &&
+         strcmp(json_get_str(value), expected) == 0;
+    json_free(&v);
+    return ok;
+}
+
+/* Publish a private file only after its bytes and containing directory sync. */
+static bool wkr_private_publish(const char *path, const char *leaf, const char *text, size_t size)
+{
+    char resolved[4096], parent[4096], tmp[96];
+    struct platform_private_staging staging;
+    uint64_t nonce;
+    bool ok = false;
+    platform_private_staging_init(&staging);
+    if (rng_fill((uint8_t *)&nonce, sizeof(nonce)) &&
+        platform_private_destination_resolve(path, resolved, sizeof(resolved),
+                                             parent, sizeof(parent))) {
+        (void)snprintf(tmp, sizeof(tmp), ".worker-%016llx.tmp", (unsigned long long)nonce);
+        if (leaf && platform_private_staging_create(&staging, parent, tmp))
+            ok = platform_private_file_write_at(&staging.file, text, size, 0) &&
+                 platform_private_staging_replace(&staging, leaf);
+    }
+    if (!ok) (void)platform_private_staging_retire(&staging);
+    platform_private_staging_close(&staging);
+    return ok;
+}
+
+static bool wkr_gated_runout(const struct wkr_job *job, long long rc, const char *note)
+{
+    char path[4096 + 32], text[4096];
+    int n = snprintf(text, sizeof(text), "rc=%lld\n%s\n", rc, note);
+    return n > 0 && (size_t)n < sizeof(text) &&
+           snprintf(path, sizeof(path), "%s/%s", job->rundir, WKR_RUNOUT_FILE) < (int)sizeof(path) &&
+           wkr_private_publish(path, WKR_RUNOUT_FILE, text, (size_t)n);
+}
+
+static bool wkr_gated_mail_refusal(const struct wkr_pending *p, const char *code)
+{
+    char note[3400];
+    (void)snprintf(note, sizeof(note), "%.3000s result-mail-refused=%.64s", p->note, code);
+    return wkr_gated_runout(&p->job, p->rc, note);
+}
+
+static bool wkr_private_read(const char *path, char *out, size_t cap)
+{
+    struct platform_private_file f;
+    uint64_t size = 0;
+    platform_private_file_init(&f);
+    bool ok = platform_private_file_open_observation(path, &f) &&
+              platform_private_file_validate_owner_private(&f) &&
+              platform_private_file_size(&f, &size) && size > 0 && size < cap &&
+              platform_private_file_read_at(&f, out, (size_t)size, 0);
+    platform_private_file_close(&f);
+    if (ok && memchr(out, 0, (size_t)size)) ok = false;
+    if (ok) out[size] = 0;
+    return ok;
+}
+
+static bool wkr_pending_path(char *out, size_t cap)
+{
+    char dir[4096];
+    return wkr_state_dir(dir, sizeof(dir), "queue") &&
+           snprintf(out, cap, "%s/%s", dir, WKR_PENDING_FILE) < (int)cap;
+}
+
+static bool wkr_pending_save(const struct wkr_pending *p)
+{
+    char path[4096 + 32], text[WKR_PENDING_CAP];
+    struct json_value v;
+    json_init(&v);
+    json_set_object(&v);
+    bool ok = json_push_kv_str(&v, "name", p->job.name) &&
+              json_push_kv_int(&v, "attempt", p->job.attempt) &&
+              json_push_kv_int(&v, "seq", p->job.seq) &&
+              json_push_kv_int(&v, "rc", p->rc) &&
+              json_push_kv_str(&v, "worker", p->worker) &&
+              json_push_kv_str(&v, "body", p->body) &&
+              json_push_kv_str(&v, "note", p->note) &&
+              json_push_kv_str(&v, "receipt_sha3", p->receipt_sha3);
+    size_t n = ok ? json_write(&v, text, sizeof(text)) : 0;
+    json_free(&v);
+    return n > 0 && n < sizeof(text) && wkr_pending_path(path, sizeof(path)) &&
+           wkr_private_publish(path, WKR_PENDING_FILE, text, n);
+}
+
+static bool wkr_pending_string(const struct json_value *v, const char *key,
+                               char *out, size_t cap)
+{
+    const struct json_value *x = json_get(v, key);
+    const char *str = x && x->type == JSON_STR ? json_get_str(x) : NULL;
+    if (!str || strlen(str) >= cap) return false;
+    (void)snprintf(out, cap, "%s", str);
+    return true;
+}
+
+static bool wkr_pending_int(const struct json_value *v, const char *key, long long *out)
+{
+    const struct json_value *x = json_get(v, key);
+    if (!x || x->type != JSON_INT) return false;
+    *out = (long long)json_get_int(x);
+    return true;
+}
+
+static bool wkr_pending_fields(const struct json_value *v, struct wkr_pending *p)
+{
+    return wkr_pending_string(v, "name", p->job.name, sizeof(p->job.name)) &&
+           wkr_pending_string(v, "worker", p->worker, sizeof(p->worker)) &&
+           wkr_pending_string(v, "body", p->body, sizeof(p->body)) &&
+           wkr_pending_string(v, "note", p->note, sizeof(p->note)) &&
+           wkr_pending_string(v, "receipt_sha3", p->receipt_sha3, sizeof(p->receipt_sha3)) &&
+           wkr_pending_int(v, "attempt", &p->job.attempt) &&
+           wkr_pending_int(v, "seq", &p->job.seq) && wkr_pending_int(v, "rc", &p->rc);
+}
+
+static bool wkr_pending_identity(struct wkr_pending *p)
+{
+    char engine[4096];
+    unsigned char digest[32];
+    return zcl_devagent_name_ok(p->job.name) && zcl_devagent_name_ok(p->worker) &&
+           p->job.attempt > 0 && p->job.seq > 0 && p->body[0] &&
+           strlen(p->receipt_sha3) == 64 &&
+           zcl_hex_decode_lower(p->receipt_sha3, digest, sizeof(digest)) &&
+           wkr_state_dir(engine, sizeof(engine), "engine") &&
+           snprintf(p->job.rundir, sizeof(p->job.rundir), "%s/%s/a%lld",
+                    engine, p->job.name, p->job.attempt) < (int)sizeof(p->job.rundir);
+}
+
+static bool wkr_pending_load(const char *path, struct wkr_pending *p)
+{
+    char text[WKR_PENDING_CAP];
+    struct json_value v;
+    memset(p, 0, sizeof(*p));
+    json_init(&v);
+    bool ok = wkr_private_read(path, text, sizeof(text)) &&
+              json_read(&v, text, strlen(text)) && v.type == JSON_OBJ &&
+              wkr_pending_fields(&v, p) && wkr_pending_identity(p);
+    json_free(&v);
+    return ok;
+}
+
+static bool wkr_pending_remove(const char *path)
+{
+    struct platform_private_file file;
+    struct platform_private_file_identity id;
+    char resolved[4096], parent[4096];
+    platform_private_file_init(&file);
+    bool ok = platform_private_destination_resolve(path, resolved, sizeof(resolved),
+                                                    parent, sizeof(parent)) &&
+              platform_private_file_open_locked(resolved, &file) &&
+              platform_private_file_validate_owner_private(&file) &&
+              platform_private_file_identity(&file, &id) &&
+              platform_private_file_retire_if_identity(&file, resolved, &id);
+    platform_private_file_close(&file);
+    return ok && platform_private_parent_flush(parent);
+}
+
+static int wkr_pending_missing(const char *path, struct wkr_pending *p)
+{
+    char body[512], code[80] = "encode-failed";
+    int n = snprintf(body, sizeof(body),
+                     "ref=%.64s\nterminal=receipt-unwritable\ngate=no-receipt\nrc=%d\n",
+                     p->job.name, WKR_RC_NO_RECEIPT);
+    wkr_write_runout(&p->job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
+    if (n <= 0 || (size_t)n >= sizeof(body) ||
+        !wkr_mail_post(body, p->job.name, p->worker, &p->job, code, sizeof(code))) {
+        wkr_mail_note_refusal(&p->job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE, code);
+        if (strncmp(code, "MAIL_REFUSED_", 13) != 0) return -1;
+    }
+    return wkr_pending_remove(path) ? 0 : -1;
+}
+
+static bool wkr_pending_receipt_matches(const char *receipt, const struct wkr_pending *p)
+{
+    char resolved[4096], parent[4096], text[8192], digest[65];
+    if (!platform_private_destination_resolve(receipt, resolved, sizeof(resolved),
+                                             parent, sizeof(parent)) ||
+        !platform_private_parent_flush(parent) ||
+        !wkr_private_read(resolved, text, sizeof(text))) return false;
+    wkr_digest(text, strlen(text), digest);
+    return strcmp(digest, p->receipt_sha3) == 0 && wkr_receipt_envelope_matches(text, p);
+}
+
+static bool wkr_pending_runout_matches(const struct wkr_pending *p)
+{
+    char path[4096 + 32], text[4096], prefix[48];
+    int n = snprintf(prefix, sizeof(prefix), "rc=%lld\n", p->rc);
+    return n > 0 && (size_t)n < sizeof(prefix) &&
+           snprintf(path, sizeof(path), "%s/%s", p->job.rundir, WKR_RUNOUT_FILE) < (int)sizeof(path) &&
+           wkr_private_read(path, text, sizeof(text)) && strncmp(text, prefix, (size_t)n) == 0;
+}
+
+static int wkr_pending_deliver(const char *path, struct wkr_pending *p)
+{
+    char code[80] = "encode-failed";
+    if (!wkr_mail_post(p->body, p->job.name, p->worker, &p->job, code, sizeof(code))) {
+        if (!wkr_gated_mail_refusal(p, code)) return -1;
+        if (strncmp(code, "MAIL_REFUSED_", 13) != 0) return -1;
+    }
+#ifdef ZCL_TESTING
+    if (zcl_devagent_worker_test_hold_pending && zcl_devagent_worker_test_hold_pending())
+        return -1;
+#endif
+    return wkr_pending_remove(path) ? 0 : -1;
+}
+
+/* 0 is settled or absent; -1 retains the pending intent and stops this drive. */
+static int wkr_pending_reconcile(void)
+{
+    char path[4096 + 32], receipt[4096 + 32];
+    struct wkr_pending p;
+    if (!wkr_pending_path(path, sizeof(path))) return -1;
+    if (platform_private_path_absent(path)) return 0;
+    if (!wkr_pending_load(path, &p) ||
+        snprintf(receipt, sizeof(receipt), "%s/%s", p.job.rundir,
+                 WKR_RECEIPT_FILE) >= (int)sizeof(receipt)) return -1;
+    if (platform_private_path_absent(receipt)) return wkr_pending_missing(path, &p);
+    if (!wkr_pending_receipt_matches(receipt, &p) || !wkr_pending_runout_matches(&p)) return -1;
+    return wkr_pending_deliver(path, &p);
 }
 
 /* ── run one job ─────────────────────────────────────────────────────────
@@ -1415,6 +1707,87 @@ static const char *wkr_prespend_guard(const struct wkr_job *job)
 static long long wkr_refuse_job(const struct wkr_drive_opts *opts,
                                 const struct wkr_job *job, const char *why);
 
+static bool wkr_gated_destination(const struct wkr_job *job)
+{
+    char engine[4096], expected[4096], receipt[4096 + 32];
+    return zcl_devagent_name_ok(job->name) && job->attempt > 0 && job->seq > 0 &&
+           wkr_state_dir(engine, sizeof(engine), "engine") &&
+           snprintf(expected, sizeof(expected), "%s/%s/a%lld", engine, job->name, job->attempt) < (int)sizeof(expected) &&
+           strcmp(expected, job->rundir) == 0 &&
+           snprintf(receipt, sizeof(receipt), "%s/%s", expected, WKR_RECEIPT_FILE) < (int)sizeof(receipt) &&
+           platform_private_path_absent(receipt);
+}
+
+static void wkr_gated_no_receipt(const struct wkr_drive_opts *opts,
+                                 const struct wkr_job *job, const struct wkr_result *res)
+{
+    wkr_write_runout(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
+    wkr_mail_result(opts, job, WKR_RECEIPT_UNWRITABLE, res->candidate, "no-receipt",
+                    WKR_RC_NO_RECEIPT, res->tokens_used, res->wall_ms, WKR_RECEIPT_UNWRITABLE, res);
+}
+
+static void wkr_gated_pending_failed(const struct wkr_drive_opts *opts,
+                                     const struct wkr_job *job, const struct wkr_result *res)
+{
+    char pending_path[4096 + 32], body[2048], code[80] = "encode-failed";
+    if (!wkr_pending_path(pending_path, sizeof(pending_path)) ||
+        !platform_private_path_absent(pending_path))
+        return; /* A rename may have succeeded; replay the installed intent. */
+    wkr_write_runout(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
+    if (!wkr_mail_body(opts, job, WKR_RECEIPT_UNWRITABLE, res->candidate,
+                       "no-receipt", WKR_RC_NO_RECEIPT, res->tokens_used,
+                       res->wall_ms, res, body, sizeof(body)) ||
+        !wkr_mail_post(body, job->name, opts->worker, job, code, sizeof(code)))
+        wkr_mail_note_refusal(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE, code);
+}
+
+static long long wkr_finish_gated(const struct wkr_drive_opts *opts,
+                                  const struct wkr_job *job, struct wkr_result *res)
+{
+    char verdict[32], gateline[256], note[3400];
+    long long rc;
+
+    rc = zcl_devagent_worker_gate(job, res, verdict, sizeof(verdict),
+                                  gateline, sizeof(gateline),
+                                  wkr_group_gate);
+    wkr_run_note(res, gateline, note, sizeof(note));
+    if (!wkr_gated_destination(job)) {
+        wkr_gated_no_receipt(opts, job, res);
+        return 1;
+    }
+    struct wkr_pending pending = {0};
+    char receipt[8192], path[4096 + 32];
+    pending.job = *job;
+    pending.rc = rc;
+    (void)snprintf(pending.worker, sizeof(pending.worker), "%s", opts->worker);
+    (void)snprintf(pending.note, sizeof(pending.note), "%s", note);
+    char envelope[65];
+    bool ready = zcl_devagent_name_ok(job->name) && job->attempt > 0 && job->seq > 0 &&
+        wkr_mail_body(opts, job, res->terminal, res->candidate, verdict, rc,
+                      res->tokens_used, res->wall_ms, res, pending.body, sizeof(pending.body));
+    if (ready) {
+        wkr_envelope_digest(&pending, envelope);
+        ready = wkr_format_receipt(opts, job, verdict, res, envelope, receipt, sizeof(receipt));
+    }
+    if (ready) wkr_digest(receipt, strlen(receipt), pending.receipt_sha3);
+    if (!ready || !wkr_gated_runout(job, rc, note)) {
+        wkr_gated_no_receipt(opts, job, res);
+        return 1;
+    }
+    if (!wkr_pending_save(&pending)) {
+        wkr_gated_pending_failed(opts, job, res);
+        return 1;
+    }
+    if (snprintf(path, sizeof(path), "%s/%s", job->rundir, WKR_RECEIPT_FILE) >= (int)sizeof(path) ||
+        !wkr_private_publish(path, WKR_RECEIPT_FILE, receipt, strlen(receipt))) {
+        /* A failed directory barrier can follow a successful rename. Keep the
+         * pending intent and let a later drive inspect the real receipt. */
+        return 1;
+    }
+    (void)wkr_pending_reconcile();
+    return 1;
+}
+
 static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
                                const struct wkr_job *job,
                                wkr_executor_fn exec)
@@ -1422,9 +1795,7 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
     struct wkr_spawn_out out;
     struct wkr_outcome oc;
     struct wkr_result res;
-    char verdict[32], gateline[256], note[3400];
     const char *guard;
-    long long rc;
     /* Authority and workspace BEFORE the submitted flip and the fork: a
      * refusal here spends nothing and submits nothing. */
     guard = wkr_prespend_guard(job);
@@ -1450,23 +1821,8 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
         return 1;
     }
     res.wall_ms = out.wall_ms;
-    rc = zcl_devagent_worker_gate(job, &res, verdict, sizeof(verdict),
-                                  gateline, sizeof(gateline),
-                                  wkr_group_gate);
-    wkr_run_note(&res, gateline, note, sizeof(note));
-    wkr_write_runout(job, rc, note);
-    if (!wkr_write_receipt(opts, job, verdict, &res)) {
-        /* No receipt means no verdict: the run fails, and the client is
-         * told so instead of reading a pass reap can never confirm. */
-        wkr_write_runout(job, WKR_RC_NO_RECEIPT, WKR_RECEIPT_UNWRITABLE);
-        wkr_mail_result(opts, job, WKR_RECEIPT_UNWRITABLE, res.candidate,
-                        "no-receipt", WKR_RC_NO_RECEIPT, res.tokens_used,
-                        res.wall_ms, WKR_RECEIPT_UNWRITABLE, &res);
-        return 1;
-    }
-    wkr_mail_result(opts, job, res.terminal, res.candidate, verdict, rc,
-                    res.tokens_used, res.wall_ms, note, &res);
-    return 1;
+    return wkr_finish_gated(opts, job, &res);
+
 }
 
 static long long wkr_run_job(const struct wkr_drive_opts *opts,
@@ -2152,6 +2508,7 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     wkr_mail_resnap(&idle);
     while (!g_wkr_term) {
         long long done;
+        if (wkr_pending_reconcile() < 0) break;
         if (wkr_drive_spent(opts, t0_s, jobs))
             break;
         wkr_reap();

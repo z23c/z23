@@ -2904,6 +2904,53 @@ void zcl_devagent_mail_steer_post(const struct zcl_command_request *request,
     dvm_post(request, reply, maildir, key_digest, require_existing, disposition, probe);
 }
 
+static bool dvm_worker_envelope(const struct zcl_command_request *request, const char *name)
+{
+    const char *action = dvm_str(request, "action"), *to = dvm_str(request, "to");
+    const char *kind = dvm_str(request, "kind"), *ref = dvm_str(request, "ref");
+    const char *from = dvm_str(request, "from");
+    return action && strcmp(action, "post") == 0 && to && strcmp(to, "*") == 0 &&
+           kind && strcmp(kind, "result") == 0 && ref && strcmp(ref, name) == 0 &&
+           from && zcl_devagent_name_ok(from) && !dvm_str(request, "sender_binding");
+}
+
+/* Keyed worker result posts are internal and cannot be requested on the
+ * public mail surface. The queue identity is the idempotency domain. */
+void zcl_devagent_mail_worker_post(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply,
+                                   const char *name, long long attempt,
+                                   long long seq)
+{
+    static const char domain[] = "z23.devagent.worker.result.v1";
+    struct sha3_256_ctx hash;
+    unsigned char sum[32];
+    char key[65], identity[192], maildir[4096];
+    int n;
+    if (!reply || !name || !zcl_devagent_name_ok(name) || attempt <= 0 || seq <= 0) {
+        if (reply) dvm_fail(reply, "BAD_INPUT", "invalid worker result identity", "queue identity");
+        return;
+    }
+    if (!dvm_worker_envelope(request, name)) {
+        dvm_fail(reply, "BAD_INPUT", "invalid worker result envelope", "result identity");
+        return;
+    }
+    n = snprintf(identity, sizeof(identity), "%s\n%lld\n%lld", name, attempt, seq);
+    if (n <= 0 || (size_t)n >= sizeof(identity)) {
+        dvm_fail(reply, "BAD_INPUT", "worker result identity exceeds its bound", "queue identity");
+        return;
+    }
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const unsigned char *)domain, sizeof(domain));
+    sha3_256_write(&hash, (const unsigned char *)identity, (size_t)n);
+    sha3_256_finalize(&hash, sum);
+    zcl_hex_encode(sum, sizeof(sum), key);
+    if (!dvm_mail_dir(maildir, sizeof(maildir), true)) {
+        dvm_fail(reply, "STATE_DIR_FAILED", "cannot resolve mail dir", "platform_state_root/mail");
+        return;
+    }
+    dvm_post(request, reply, maildir, key, false, NULL, false);
+}
+
 void zcl_native_handle_dev_agent_mail(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
