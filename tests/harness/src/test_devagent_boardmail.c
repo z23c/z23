@@ -102,6 +102,11 @@ struct bmx_node {
 
 static struct bmx_node g_bmx_node[2];
 static int g_bmx_active;
+static struct {
+    bool enabled;
+    char ack[65], result[65];
+    unsigned zero_pages, ack_seen, result_seen;
+} g_bmx_replay;
 static int g_bmx_io_phase = -1;
 
 static int bmx_io_fault(const char *path, int phase)
@@ -334,6 +339,8 @@ static void bmx_op_page(const struct json_value *in, struct json_value *out,
     long long after = json_get_int(json_get(in, "after"));
     long long limit = json_get_int(json_get(in, "limit"));
     long long scanned = after;
+    bool trace = g_bmx_replay.enabled && g_bmx_active == BMX_A && after == 0;
+    if (trace) g_bmx_replay.zero_pages++;
     struct json_value arr, item;
     json_init(&arr);
     json_set_array(&arr);
@@ -344,7 +351,11 @@ static void bmx_op_page(const struct json_value *in, struct json_value *out,
         json_init(&item);
         json_set_object(&item);
         bmx_render(&item, p);
-        (void)json_push_back(&arr, &item);
+        bool pushed = json_push_back(&arr, &item);
+        if (trace && pushed) {
+            if (strcmp(p->id, g_bmx_replay.ack) == 0) g_bmx_replay.ack_seen++;
+            if (strcmp(p->id, g_bmx_replay.result) == 0) g_bmx_replay.result_seen++;
+        }
         json_free(&item);
         scanned = p->arrival;
     }
@@ -776,6 +787,7 @@ static bool bmx_setup(const char *tag)
 
 static void bmx_teardown(void)
 {
+    g_bmx_replay.enabled = false;
     g_bmx_io_phase = -1;
     zcl_devagent_boardmail_test_io(NULL);
     node_rpc_client_set_test_hook(NULL);
@@ -869,6 +881,7 @@ static int bmx_t_round_trip(void)
     TEST("boardmail: A sends, B queues and answers, A reads the answers — "
          "over the signed board, no script") {
         struct rcv_beat_stats st;
+        char ack_post[96], result_post[96];
         ASSERT(bmx_setup("round-trip"));
         ASSERT(bmx_sent("job-1"));
         /* The directive is on A's board, signed by A's node key. */
@@ -889,6 +902,12 @@ static int bmx_t_round_trip(void)
                         "worker=node-b\nstate=done\nverdict=pass\n"));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
         ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 3);
+        (void)snprintf(ack_post, sizeof(ack_post), "\"board_post\":\"%s\"",
+                       g_bmx_node[BMX_B].p[1].id);
+        (void)snprintf(result_post, sizeof(result_post), "\"board_post\":\"%s\"",
+                       g_bmx_node[BMX_B].p[2].id);
+        ASSERT(strcmp(ack_post, result_post) != 0);
         bmx_carry(BMX_B, BMX_A);
         ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
         ASSERT_EQ(st.board_in, 2);
@@ -916,6 +935,34 @@ static int bmx_t_round_trip(void)
         ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
         ASSERT_EQ(bmx_signed_by(BMX_A, BMX_B), 2);
         ASSERT_EQ((long long)g_bmx_node[BMX_B].n, 3);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", ack_post,
+                            "state=accepted"), 1);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", result_post,
+                            "state=done"), 1);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "\"job-1\"",
+                            NULL), 2);
+        /* A loses its board cursor and reads both return posts again. */
+        bmx_carry(BMX_B, BMX_A);
+        memset(&g_bmx_replay, 0, sizeof(g_bmx_replay));
+        (void)snprintf(g_bmx_replay.ack, sizeof(g_bmx_replay.ack), "%s",
+                       g_bmx_node[BMX_B].p[1].id);
+        (void)snprintf(g_bmx_replay.result, sizeof(g_bmx_replay.result), "%s",
+                       g_bmx_node[BMX_B].p[2].id);
+        g_bmx_replay.enabled = true;
+        bmx_forget(BMX_A, "receive/boardmail.state");
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        g_bmx_replay.enabled = false;
+        ASSERT_EQ(g_bmx_replay.zero_pages, 1);
+        ASSERT_EQ(g_bmx_replay.ack_seen, 1);
+        ASSERT_EQ(g_bmx_replay.result_seen, 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.admitted, 0);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", ack_post,
+                            "state=accepted"), 1);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", result_post,
+                            "state=done"), 1);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "\"job-1\"",
+                            NULL), 2);
         bmx_teardown();
         PASS();
     }
