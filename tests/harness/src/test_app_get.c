@@ -371,7 +371,7 @@ struct tag_real_board {
     struct boot_svc_ctx svc;
     struct rpc_table table;
     char dir[TAG_PATH], warmup[256];
-    bool active, was_warming, transferred;
+    bool active, was_warming, transferred, list_offers;
 };
 static struct tag_real_board g_real_board;
 
@@ -601,6 +601,13 @@ static bool tag_show(const struct json_value *in, struct zcl_command_reply *out)
 {
     g_tag.shows++;
     (void)snprintf(g_tag.shown_id, sizeof(g_tag.shown_id), "%s", tag_in(in, "id"));
+    if (g_real_board.active && g_real_board.list_offers) {
+        struct json_value reply; json_init(&reply);
+        g_real_board.service.node_db = &g_real_board.destination;
+        bool ok = tag_real_board_rpc("show", in, &reply) && json_copy_checked(&out->data, &reply);
+        g_real_board.service.node_db = &g_real_board.source;
+        json_free(&reply); return ok;
+    }
     if (g_tag.show_mode == 1) return false;
     for (size_t i = 0; i < json_size(&g_tag.board); ++i) {
         const struct json_value *post = json_at(&g_tag.board, i);
@@ -659,7 +666,8 @@ static bool tag_list_page(const struct json_value *in, struct zcl_command_reply 
 static bool tag_list(const struct json_value *in, struct zcl_command_reply *out)
 {
     g_tag.lists++;
-    if (g_real_board.active && !strcmp(tag_in(in, "kind"), "result")) {
+    if (g_real_board.active && (!strcmp(tag_in(in, "kind"), "result") ||
+        (g_real_board.list_offers && !strcmp(tag_in(in, "kind"), "offer")))) {
         struct json_value reply; json_init(&reply);
         g_real_board.service.node_db = &g_real_board.destination;
         bool ok = tag_real_board_rpc("list", in, &reply) && json_copy_checked(&out->data, &reply);
@@ -3421,6 +3429,73 @@ static int tag_discover_cancel(struct tag_world *w)
         zcl_command_reply_free(&reply); PASS();
     } _test_next:;
     return failures;
+}
+
+/* Exercise the real board RPC and frame ingestion without opening a socket. */
+static bool tag_stored_offer_transfer(const uint8_t key[32], const uint8_t signer[32])
+{
+    uint8_t frame[FLEET_BOARD_FRAME_MAX]; size_t len = 0;
+    struct db_fleet_board_post row, received; struct fleet_board_post decoded;
+    bool stored = false;
+    return db_fleet_board_post_find(&g_real_board.source, key, &row) &&
+        row.post.kind == FLEET_BOARD_KIND_OFFER && row.post.scope == FLEET_BOARD_SCOPE_PUBLIC &&
+        !strcmp(row.post.room, "apps") && !strcmp(row.post.text, g_tag.text) &&
+        !memcmp(row.post.host_pubkey, signer, 32) && fleet_board_post_verify(&row.post) == FLEET_BOARD_OK &&
+        fleet_board_frame_encode_post(&row.post, frame, sizeof(frame), &len) == FLEET_BOARD_OK &&
+        fleet_board_frame_decode_post(frame, len, &decoded) == FLEET_BOARD_OK &&
+        db_fleet_board_post_ingest(&g_real_board.destination, &decoded,
+            (int64_t)platform_time_wall_unix(), &stored) == FLEET_BOARD_OK && stored &&
+        db_fleet_board_post_find(&g_real_board.destination, key, &received) &&
+        !memcmp(received.post.id, key, 32) && !memcmp(received.post.host_pubkey, signer, 32) &&
+        !strcmp(received.post.text, g_tag.text);
+}
+
+static bool tag_stored_offer(char id[65], char host[65])
+{
+    struct json_value in, out; json_init(&in); json_init(&out); json_set_object(&in);
+    uint8_t key[32], signer[32];
+    bool ok = tag_real_board_open() &&
+        json_push_kv_str(&in, "kind", "offer") && json_push_kv_str(&in, "room", "apps") &&
+        json_push_kv_str(&in, "scope", "public") && json_push_kv_str(&in, "text", g_tag.text) &&
+        tag_real_board_rpc("post", &in, &out);
+    const char *posted = json_get_str(json_get(&out, "id"));
+    ok = ok && posted && strlen(posted) == 64 && fleet_board_id_from_hex(posted, key) &&
+        boot_fleet_board_public_identity(signer) && tag_stored_offer_transfer(key, signer);
+    if (ok) { memcpy(id, posted, 65); zcl_hex_encode(signer, 32, host); }
+    json_free(&out); json_free(&in); return ok;
+}
+
+static int tag_stored_offer_catalog(struct tag_world *w)
+{
+    int failures = 0; char id[65] = {0}, host[65] = {0};
+    struct zcl_app_offer_row rows[4]; size_t count = 0;
+    struct zcl_command_reply why, reply; struct tag_discover d = {0};
+    const char *home = getenv("HOME"); char *saved_home = home ? strdup(home) : NULL;
+    if (home && !saved_home) return 1;
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("Discover reviews an offer stored and ingested by the real private board") {
+        ASSERT(tag_stored_offer(id, host));
+        g_real_board.list_offers = true;
+        int fetches = g_tag.fetches, offers = g_tag.offers, posts = g_tag.posts;
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u);
+        ASSERT_EQ(g_tag.fetches, fetches);
+        ASSERT(!strcmp(rows[0].post_id, id) && !strcmp(rows[0].host, host));
+        ASSERT(!strcmp(rows[0].offer.root, w->offer.root) &&
+               !strcmp(rows[0].offer.publisher, w->offer.publisher));
+        ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
+        ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL));
+        ASSERT_EQ(d.cards, 1); ASSERT_EQ(d.receive, 1);
+        ASSERT(!strcmp(g_tag.shown_id, id));
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_EQ(g_tag.fetches, fetches + 1); ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
+        ASSERT_EQ(tag_glob(w->j.b_datadir, "copies/*"), 0u);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); tag_real_board_close();
+    if (saved_home ? setenv("HOME", saved_home, 1) != 0 : unsetenv("HOME") != 0) failures++;
+    free(saved_home); return failures;
 }
 static int tag_library_discover(struct tag_world *w)
 {
@@ -6501,6 +6576,7 @@ static int tag_tor_deadline_cases(struct tag_world *w)
 static int tag_world_cases(struct tag_world *w)
 {
     int failures = 0;
+    failures += tag_stored_offer_catalog(w);
     failures += tag_catalog(w);
     failures += tag_dropped(w);
     failures += tag_identity_selection(w);
