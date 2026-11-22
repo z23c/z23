@@ -4,8 +4,10 @@
  * Given the paths an agent will edit and an optional topic, one bounded reply
  * names the nearest AGENTS.md owner of each path, the test groups the shared
  * impact rules route those paths to, the fleet-wiki lessons that match, and
- * the first commands to run. The only reads are AGENTS.md files under the
- * source root and local wiki searches under a one-second deadline; with no node the lessons are marked
+ * the first commands to run. Local reads also resolve HEAD and inspect the
+ * latest test-run artifact; that artifact has no source revision, so its
+ * failures are always labeled revision-unbound. AGENTS.md reads and wiki
+ * searches retain their existing bounds; with no node the lessons are marked
  * unavailable and the rest of the brief is unchanged. The serialized data
  * object never exceeds the caller's budget: sections are removed from the
  * lowest-priority end and every removal is reported in `cut`. */
@@ -16,16 +18,19 @@
 #include "command/native_code_brief.h"
 
 #include "base/safe_alloc.h"
+#include "codeindex/codeindex_focus.h"
 #include "command/native_code_priv.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
+#include "util/spawn.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define CB_TAG "native.code.brief"
 #define CB_MAX_PATHS 16
@@ -78,6 +83,10 @@ struct cb_brief {
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
     bool lessons_capped;
     bool lesson_lost; /* a lesson could not be copied: the query fails */
+    char revision[41];
+    bool revision_unavailable;
+    struct specialist_focus_evidence failure;
+    bool failure_present, failure_unavailable, cut_failure, cut_revision;
     int64_t deadline_ms;
     const char *root;
 };
@@ -799,6 +808,46 @@ static void cb_build_next(struct cb_brief *b)
     cb_push_next(b, "%s", "z23 ops host gc --apply=false");
 }
 
+/* ── checkout and previous-run evidence ───────────────────────────────── */
+
+static void cb_collect_revision(struct cb_brief *b)
+{
+    char marker[CB_HEAD_CAP];
+    struct stat st;
+    int n = snprintf(marker, sizeof(marker), "%s/.git", b->root);
+    if (n <= 0 || (size_t)n >= sizeof(marker) ||
+        stat(marker, &st) != 0) {
+        b->revision_unavailable = true;
+        return;
+    }
+    const char *argv[] = {"git", "rev-parse", "--verify", "HEAD", NULL};
+    char out[128];
+    if (zcl_spawn_capture_in_dir_observed(argv, b->root, out, sizeof(out),
+                                          250, NULL) != 0) {
+        b->revision_unavailable = true;
+        return;
+    }
+    out[strcspn(out, "\r\n")] = '\0';
+    size_t len = strlen(out);
+    bool hex = len == 40;
+    for (size_t i = 0; hex && i < len; i++)
+        hex = (out[i] >= '0' && out[i] <= '9') ||
+              (out[i] >= 'a' && out[i] <= 'f');
+    if (!hex) {
+        b->revision_unavailable = true;
+        return;
+    }
+    memcpy(b->revision, out, 41);
+}
+
+static void cb_collect_failure(struct cb_brief *b)
+{
+    b->failure_present = true;
+    specialist_focus_evidence_clear(&b->failure);
+    if (!specialist_focus_load_failed_groups(b->root, &b->failure))
+        b->failure_unavailable = true;
+}
+
 /* ── render ───────────────────────────────────────────────────────────── */
 
 #if defined(ZCL_TESTING)
@@ -902,17 +951,47 @@ bool zcl_code_brief_test_collect_lessons(const struct json_value *entries,
 }
 #endif
 
+static bool cb_push_failure(struct json_value *data, const struct cb_brief *b)
+{
+    if (!b->failure_present)
+        return true;
+    struct json_value obj, groups;
+    json_init(&obj);
+    json_set_object(&obj);
+    json_init(&groups);
+    json_set_array(&groups);
+    const char *status = b->failure_unavailable ? "unavailable"
+        : b->failure.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING
+            ? "no run recorded" : "recorded";
+    bool ok = json_push_kv_str(&obj, "status", status) &&
+        json_push_kv_str(&obj, "source", ".cache/test-timing/last-run.json");
+    if (ok && !b->failure_unavailable &&
+        b->failure.tests_run != SPECIALIST_FOCUS_ARTIFACT_MISSING)
+        ok = json_push_kv_str(&obj, "revision_binding", "unbound_last_run");
+    for (size_t i = 0; ok && !b->failure_unavailable && i < b->failure.failed_count; i++) {
+        const char *name = b->failure.failed[i];
+        if (cb_has(b->tests, b->ntests, ZCL_AGENT_IMPACT_GROUP_MAX, name))
+            ok = cb_array_string(&groups, name);
+    }
+    if (ok)
+        ok = json_push_kv(&obj, "failed_groups", &groups) &&
+             json_push_kv(data, "previous_failure", &obj);
+    json_free(&groups);
+    json_free(&obj);
+    return ok;
+}
+
 static bool cb_push_cut(struct json_value *data, const struct cb_brief *b)
 {
-    static const char *const names[] = {"lessons", "tests", "owner_rules",
-                                        "owners", "next"};
-    const bool flags[] = {b->cut_lessons, b->cut_tests, b->cut_rules,
-                          b->cut_owners, b->cut_next};
+    static const char *const names[] = {"lessons", "failure", "tests",
+                                        "owner_rules", "owners", "revision", "next"};
+    const bool flags[] = {b->cut_lessons, b->cut_failure, b->cut_tests,
+                          b->cut_rules, b->cut_owners, b->cut_revision, b->cut_next};
     struct json_value arr;
     bool any = false, ok = true;
     json_init(&arr);
     json_set_array(&arr);
-    for (size_t i = 0; ok && i < 5; i++) {
+    for (size_t i = 0; ok && i < sizeof(flags) / sizeof(flags[0]); i++) {
         if (!flags[i]) continue;
         any = true;
         ok = cb_array_string(&arr, names[i]);
@@ -956,17 +1035,39 @@ static bool cb_push_next_cmds(struct json_value *data, const struct cb_brief *b)
     return ok;
 }
 
+static bool cb_push_provenance(struct json_value *data, const struct cb_brief *b)
+{
+    return (!b->revision[0] || json_push_kv_str(data, "source_revision", b->revision)) &&
+           (!b->revision_unavailable || json_push_kv_bool(data, "source_revision_unavailable", true)) &&
+           cb_push_failure(data, b);
+}
+
+static bool cb_push_routing(struct json_value *data, const struct cb_brief *b)
+{
+    return ((b->cut_owners && b->nowners == 0) || cb_push_owners(data, b)) &&
+           ((b->cut_tests && b->ntests == 0) || cb_push_tests(data, b));
+}
+
+static bool cb_push_lesson_evidence(struct json_value *data, const struct cb_brief *b)
+{
+    bool omitted = b->cut_lessons && b->nlessons == 0;
+    return (omitted || cb_push_lessons(data, b)) &&
+           (omitted || !b->unavailable[0] ||
+            json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
+           (omitted || !b->lessons_capped ||
+            json_push_kv_bool(data, "lessons_capped", true));
+}
+
 static bool cb_build(const struct cb_brief *b, struct json_value *data)
 {
     json_free(data);
     json_init(data);
     json_set_object(data);
     return json_push_kv_str(data, "schema", "zcl.code_guide_brief.v1") &&
-           cb_push_owners(data, b) && cb_push_tests(data, b) &&
-           cb_push_lessons(data, b) &&
-           (!b->unavailable[0] || json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
-           (!b->lessons_capped || json_push_kv_bool(data, "lessons_capped", true)) &&
-           cb_push_next_cmds(data, b) && cb_push_cut(data, b);
+           cb_push_provenance(data, b) && cb_push_routing(data, b) &&
+           cb_push_lesson_evidence(data, b) &&
+           ((b->cut_next && b->nnext == 0) || cb_push_next_cmds(data, b)) &&
+           cb_push_cut(data, b);
 }
 
 /* Remove the lowest-priority content that is left; false when none is. */
@@ -974,6 +1075,11 @@ static bool cb_reduce(struct cb_brief *b)
 {
     if (b->nlessons) {
         json_free(&b->lessons[--b->nlessons].matched);
+        b->cut_lessons = true;
+    } else if (b->failure_present) {
+        b->failure_present = false;
+        b->cut_failure = true;
+    } else if (!b->cut_lessons) {
         b->cut_lessons = true;
     } else if (b->ntests) {
         b->ntests--;
@@ -984,6 +1090,9 @@ static bool cb_reduce(struct cb_brief *b)
     } else if (b->nowners) {
         b->nowners--;
         b->cut_owners = true;
+    } else if (b->revision[0]) {
+        b->revision[0] = '\0';
+        b->cut_revision = true;
     } else if (b->nnext) {
         b->nnext--;
         b->cut_next = true;
@@ -1046,8 +1155,10 @@ void zcl_code_brief_render(const struct zcl_command_request *request,
         cb_free(b);
         return;
     }
+    cb_collect_revision(b);
     cb_collect_owners(b, zcl_native_source_root(request));
     cb_collect_tests(b);
+    cb_collect_failure(b);
     cb_collect_lessons(request, b);
     cb_build_next(b);
     enum cb_fit_result result = cb_fit(b, &reply->data);

@@ -1044,6 +1044,9 @@ static int test_code_guide_brief(void)
     TEST("code.guide renders populated and empty brief data") {
         const char *doc = "{\"schema\":\"zcl.result.v1\",\"command\":\"code.guide\",\"ok\":true,\"data\":{"
             "\"schema\":\"zcl.code_guide_brief.v1\","
+            "\"source_revision\":\"0123456789abcdef0123456789abcdef01234567\","
+            "\"previous_failure\":{\"status\":\"recorded\",\"source\":\".cache/test-timing/last-run.json\","
+            "\"revision_binding\":\"unbound_last_run\",\"failed_groups\":[\"code_impact\"]},"
             "\"owners\":[{\"file\":\"tools/AGENTS.md\",\"rules\":[\"Use C23\"]}],"
             "\"tests\":[\"cli_render\"],\"lessons\":[{\"slug\":\"lesson-one\",\"rule\":\"Check first\"}],"
             "\"next\":[\"make lint-fast\"],\"tests_unmapped\":true,\"lessons_unavailable\":\"wiki unavailable\",\"lessons_capped\":true,\"truncated\":true,\"cut\":[\"owner_rules\"]}}";
@@ -1055,6 +1058,9 @@ static int test_code_guide_brief(void)
         ASSERT(strstr(out, "lesson-one") && strstr(out, "Check first") && strstr(out, "make lint-fast"));
         ASSERT(strstr(out, "capped") && strstr(out, "truncated") && strstr(out, "owner_rules"));
         ASSERT(strstr(out, "mapped") && strstr(out, "wiki unavailable"));
+        ASSERT(strstr(out, "0123456789abcdef0123456789abcdef01234567"));
+        ASSERT(strstr(out, "unbound_last_run") && strstr(out, "code_impact"));
+        ASSERT(strstr(out, ".cache/test-timing/last-run.json"));
         ASSERT(!strstr(out, "prove") && cr_max_line_width(out) <= 80);
         ASSERT(zcl_cli_render_doc(empty, strlen(empty), "code.guide", &e, out, sizeof(out)) > 0);
         ASSERT(!strstr(out, "capped") && !strstr(out, "truncated") && !strstr(out, "prove"));

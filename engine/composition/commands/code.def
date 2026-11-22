@@ -16,10 +16,13 @@ ZCL_COMMAND_READY_READ(
     "checkout state and never runs a compiler, test, or live-node command. "
     "With paths (at most 16), topic or budget (256..8192 bytes, default 2048; it "
     "bounds the data object, not the envelope) "
-    "it returns one bounded task brief: the nearest AGENTS.md rules per path, "
-    "the routed test groups, matching fleet-wiki lessons (marked unavailable "
+    "it returns one bounded task brief: exact HEAD when available, the nearest "
+    "AGENTS.md rules per path, routed test groups, matching fleet-wiki lessons, "
+    "and the first commands. previous_failure filters the latest test artifact "
+    "to routed failures and labels it unbound_last_run because the artifact has "
+    "no commit identity; tight budgets drop lessons before failure evidence. Lessons are unavailable "
     "when no node answers or one second passes; lessons_capped marks results "
-    "beyond five or trimmed text) and the first commands to run.", 12288,
+    "beyond five or trimmed text.", 12288,
     "code,guide,develop,proof,lint,t-fast,impact,agent",
     "zcl.code_guide.input.v1", "zcl.code_guide.v1", "paths,topic,budget",
     "paths",

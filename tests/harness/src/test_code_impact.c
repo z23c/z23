@@ -905,6 +905,44 @@ static int test_code_guide_next_commands(void)
     return failures;
 }
 
+static int test_code_guide_revision_and_failures(void)
+{
+    int failures = 0;
+    TEST("guide pins HEAD and reports only routed revision-unbound failures") {
+        char cwd[512];
+        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+        struct zcl_command_reply reply;
+        cg_guide_paths(cwd, "tools/command/native_code_brief.c", &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const char *revision = json_get_str(json_get(&reply.data, "source_revision"));
+        ASSERT(revision && strlen(revision) == 40);
+        ASSERT(json_get(&reply.data, "previous_failure") != NULL);
+        zcl_command_reply_free(&reply);
+
+        char root[512];
+        ASSERT(test_mkdtemp(root, sizeof root, "guide_revision_failure"));
+        ASSERT(ci_impact_mk_write(root, "AGENTS.md", "Rules:\n- Keep fixture evidence exact.\n"));
+        ASSERT(ci_impact_mk_write(root, ".cache/test-timing/last-run.json",
+            "{\"groups\":[{\"name\":\"code_impact\",\"rc\":1},"
+            "{\"name\":\"unrelated_group\",\"rc\":1}]}"));
+        cg_guide_paths(root, "tools/command/native_code_brief.c", &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_get_bool(json_get(&reply.data, "source_revision_unavailable")), true);
+        const struct json_value *failure = json_get(&reply.data, "previous_failure");
+        ASSERT(failure && failure->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "status")), "recorded");
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "revision_binding")), "unbound_last_run");
+        const struct json_value *groups = json_get(failure, "failed_groups");
+        ASSERT(groups && groups->type == JSON_ARR);
+        ASSERT_EQ(json_size(groups), 1u);
+        ASSERT_STR_EQ(json_get_str(json_at(groups, 0)), "code_impact");
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(test_rm_rf_recursive(root), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_long_cost(void)
 {
     int failures = 0;
@@ -2703,6 +2741,7 @@ int test_code_impact(void)
     failures += test_code_context_map_warm_follows_generation();
     failures += test_code_guide_source_changes();
     failures += test_code_guide_next_commands();
+    failures += test_code_guide_revision_and_failures();
     failures += test_code_guide_long_cost();
     failures += test_code_guide_render_fault();
     failures += test_code_guide_render_sweep();

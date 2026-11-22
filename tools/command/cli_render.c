@@ -1633,9 +1633,29 @@ static void code_guide_lessons(struct buf *b, const struct zcl_cli_render_env *e
     }
     if (lessons->num_children > count) emit_kv_wrap(b, e, 6, "more", "Additional lessons omitted from text.");
 }
+static void code_guide_provenance(struct buf *b, const struct zcl_cli_render_env *e,
+                                  const struct json_value *data)
+{
+    const char *revision = json_get_str(json_get(data, "source_revision"));
+    if (revision && revision[0]) emit_kv_wrap(b, e, 6, "source", revision);
+    if (json_get_bool(json_get(data, "source_revision_unavailable")))
+        emit_kv_wrap(b, e, 6, "source", "HEAD unavailable");
+    const struct json_value *failure = json_get(data, "previous_failure");
+    const char *failure_status = json_get_str(json_get(failure, "status"));
+    const char *failure_source = json_get_str(json_get(failure, "source"));
+    const char *failure_binding = json_get_str(json_get(failure, "revision_binding"));
+    if (failure_status && failure_status[0])
+        emit_kv_wrap(b, e, 6, "failure", failure_status);
+    if (failure_source && failure_source[0])
+        emit_kv_wrap(b, e, 6, "evidence", failure_source);
+    if (failure_binding && failure_binding[0])
+        emit_kv_wrap(b, e, 6, "binding", failure_binding);
+    code_guide_strings(b, e, json_get(failure, "failed_groups"), "failed_test");
+}
 static void render_code_guide_brief(struct buf *b, const struct zcl_cli_render_env *e,
                                     const struct json_value *data)
 {
+    code_guide_provenance(b, e, data);
     code_guide_owners(b, e, json_get(data, "owners"));
     code_guide_strings(b, e, json_get(data, "tests"), "test");
     code_guide_lessons(b, e, json_get(data, "lessons"));
