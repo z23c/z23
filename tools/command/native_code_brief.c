@@ -38,7 +38,7 @@
 #define CB_MAX_LESSONS 5
 #define CB_MAX_QUERIES 4
 #define CB_QUERY_CAP 129
-#define CB_MAX_NEXT 4
+#define CB_MAX_NEXT 5
 #define CB_NEXT_CAP (CB_PATH_CAP * 4 + sizeof("build/bin/z23 code cost --path=") + 2)
 #define CB_HEAD_CAP 4096
 #define CB_WIKI_DEADLINE_MS 1000
@@ -778,6 +778,19 @@ static void cb_build_next(struct cb_brief *b)
     }
     if (b->ntests == 1 && strcmp(b->tests[0], "make_lint_gates") == 0)
         cb_push_next(b, "%s", "build/bin/z23-lint run --list");
+#if defined(__linux__)
+    for (size_t i = 0; i < b->npaths; ++i) {
+        if (strcmp(b->paths[i], "tools/dev/build-epoch-session.sh") == 0 ||
+            strcmp(b->paths[i], "tools/dev/build-epoch-selftest.sh") == 0) {
+            char arg[CB_NEXT_CAP];
+            if (cb_cost_arg(b->root, arg))
+                cb_push_next(b, "z23 ops host gc --checkout=%s --epoch_keep=1", arg);
+            else
+                b->cut_next = true;
+            break;
+        }
+    }
+#endif
     cb_push_next(b, "%s", "z23 ops host gc --apply=false");
 }
 

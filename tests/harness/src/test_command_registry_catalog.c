@@ -689,6 +689,18 @@ static int test_code_guide_brief(void)
                       "z23 ops host gc --apply=false");
         ASSERT(json_write(&reply.data, NULL, 0) <= 2048);
         zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root, "{\"paths\":[\"tools/dev/build-epoch-session.sh\"]}",
+                         &reply, why, sizeof(why)));
+        next = json_get(&reply.data, "next");
+#if defined(__linux__)
+        char expected[PATH_MAX + 80];
+        snprintf(expected, sizeof(expected), "z23 ops host gc --checkout=%s --epoch_keep=1", root);
+        ASSERT(brief_array_has(next, expected));
+#else
+        ASSERT_EQ(json_size(next), 2u);
+#endif
+        ASSERT(brief_array_has(next, "z23 ops host gc --apply=false"));
+        zcl_command_reply_free(&reply);
         test_rm_rf_recursive(root);
         PASS();
     } _test_next:;
