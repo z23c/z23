@@ -5023,8 +5023,13 @@ ZCL_TEST_BUILD_NEEDS_RUN = needs="$$($(1) --list-build-needs $(2))" || exit 2; \
 # runner also needs the gateway and dev node: its fleet group exits with an
 # empty log when either is missing. Build these exact fixtures before tests;
 # a clean checkout must not depend on a leftover binary.
+# Every runner (strict, whole-suite, fast) gets the same private scratch root.
+# Without it a strict run puts fixtures under the checkout (a group-writable
+# home or work dir at umask 002) and zcode source bundle materialize refuses
+# the unsafe ancestors, so test_wiki_docs_install and test_source_bundle_publish
+# pass under t-fast and fail under test-parallel.
 LINKED_TEST_ENV := env -u ZCL_HOTSWAP_TEST_MODULE \
-	-u ZCL_HOTSWAP_TEST_AUTH
+	-u ZCL_HOTSWAP_TEST_AUTH ZCL_TEST_TMPFS="$(ZCL_TEST_TMPFS)"
 
 test-parallel-active:
 	@mkdir -p "$(BUILD_DIR)"
