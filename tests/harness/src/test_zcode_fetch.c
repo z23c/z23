@@ -668,15 +668,19 @@ static void zf_peers_offer_mode(char *body, int mode)
 {
     if (!body) return;
     if (mode == 6) {
-        char *field = strstr(body, "\"offer_expires_at\":0,");
+        char *field = strstr(body, "\"offer_expires_at\":0 ,");
         if (field) {
-            size_t n = strlen("\"offer_expires_at\":0,");
+            size_t n = strlen("\"offer_expires_at\":0 ,");
             memmove(field, field + n, strlen(field + n) + 1);
         }
     }
-    if (mode == 7) {
+    if (mode == 7 || mode == 8) {
         char *expiry = strstr(body, "\"offer_expires_at\":");
-        if (expiry) expiry[strlen("\"offer_expires_at\":")] = '5';
+        if (expiry) {
+            expiry += strlen("\"offer_expires_at\":");
+            if (mode == 7) *expiry = '5';
+            else memcpy(expiry, "\"\"", 2);
+        }
     }
 }
 static char *zf_peers_rpc_hook(const char *method, const char *params)
@@ -686,7 +690,7 @@ static char *zf_peers_rpc_hook(const char *method, const char *params)
     if (strcmp(method, "zcode_package_peers") || !params || !strstr(params, root) || zf_peers_mode == 1) return NULL;
     if (zf_peers_mode == 2) return zcl_strdup("{\"ok\":false,\"code\":\"PEERS_UNAVAILABLE\"}", "test.peers.error");
     if (zf_peers_mode == 3) return zcl_strdup("{", "test.peers.malformed");
-    char *body = zcl_strdup("{\"ok\":true,\"data\":{\"package_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"live\":true,\"peer_count\":1,\"peers_truncated\":false,\"peers\":[{\"peer\":42,\"session_key\":\"key\",\"tier\":\"guest\",\"inflight\":1,\"offer_expires_at\":0,\"allowance_exhausted\":false,\"offence_total\":0,\"transfer\":{\"verified_bytes_served\":5,\"verified_bytes_fetched\":7},\"verified_bytes_served\":5,\"verified_bytes_received\":7}],\"possession\":{\"observed\":true,\"tracked\":true,\"complete\":true,\"pinned\":true,\"public_serveable\":true,\"would_serve\":true,\"public_shape\":\"blob\",\"serve_rule\":\"blob\",\"present_bytes\":10,\"total_bytes\":10}}}", "test.zcode_fetch.peers");
+    char *body = zcl_strdup("{\"ok\":true,\"data\":{\"package_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"live\":true,\"peer_count\":1,\"peers_truncated\":false,\"peers\":[{\"peer\":42,\"session_key\":\"key\",\"tier\":\"guest\",\"inflight\":1,\"offer_expires_at\":0 ,\"allowance_exhausted\":false,\"offence_total\":0,\"transfer\":{\"verified_bytes_served\":5,\"verified_bytes_fetched\":7},\"verified_bytes_served\":5,\"verified_bytes_received\":7}],\"possession\":{\"observed\":true,\"tracked\":true,\"complete\":true,\"pinned\":true,\"public_serveable\":true,\"would_serve\":true,\"public_shape\":\"blob\",\"serve_rule\":\"blob\",\"present_bytes\":10,\"total_bytes\":10}}}", "test.zcode_fetch.peers");
     if (body && zf_peers_mode == 4) *strstr(body, root) = 'b';
     if (body && zf_peers_mode == 5) *strstr(body, "inflight") = 'x';
     zf_peers_offer_mode(body, zf_peers_mode);
@@ -697,7 +701,9 @@ static int zf_t_peers_remote_refusals(void)
 {
     int failures = 0;
     TEST("zcode package peers refuses unavailable or malformed resident observations") {
-        for (zf_peers_mode = 1; zf_peers_mode <= 5; ++zf_peers_mode) {
+        static const int modes[] = {1, 2, 3, 4, 5, 8};
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+            zf_peers_mode = modes[i];
             struct zf_cmd c;
             json_init(&c.input); json_set_object(&c.input);
             memset(&c.request, 0, sizeof(c.request)); c.request.input = &c.input;

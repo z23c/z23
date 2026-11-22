@@ -755,11 +755,17 @@ static bool zw_peers_row_valid(const struct json_value *p)
         zw_peers_field(p, "verified_bytes_served", JSON_INT) &&
         zw_peers_field(p, "verified_bytes_received", JSON_INT);
 }
+static bool zw_peers_optional_expiry_valid(const struct json_value *p)
+{
+    const struct json_value *expiry = json_get(p, "offer_expires_at");
+    return !expiry || expiry->type == JSON_INT;
+}
 static bool zw_peers_rows_valid(const struct json_value *rows)
 {
     if (!rows || rows->type != JSON_ARR || json_size(rows) > ZW_MAX_PEERS) return false;
     for (size_t i = 0; i < json_size(rows); ++i) {
-        if (!zw_peers_row_valid(json_at(rows, i))) return false;
+        const struct json_value *row = json_at(rows, i);
+        if (!zw_peers_row_valid(row) || !zw_peers_optional_expiry_valid(row)) return false;
     }
     return true;
 }
