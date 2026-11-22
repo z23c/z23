@@ -87,6 +87,7 @@ void zcl_native_handle_fleet_objectives_revision(
     struct zcl_objectives_options options;
     struct zcl_objectives_node_cache node_cache;
     struct zcl_objectives_window_cache window_cache;
+    struct zcl_objectives_landing_cache landing_cache;
     const struct zcl_objective_row *catalog;
     struct json_value rows;
     char text[ZCL_OBJECTIVES_TEXT_MAX];
@@ -101,6 +102,7 @@ void zcl_native_handle_fleet_objectives_revision(
     options.checkout_revision = revision;
     memset(&node_cache, 0, sizeof(node_cache));
     memset(&window_cache, 0, sizeof(window_cache));
+    memset(&landing_cache, 0, sizeof(landing_cache));
     options.outcomes = obj_input_str(request, "outcomes");
     options.attempts_dir = obj_input_str(request, "attempts_dir");
     options.repo = obj_input_str(request, "repo");
@@ -112,6 +114,7 @@ void zcl_native_handle_fleet_objectives_revision(
     options.datadir = getenv("ZCL_LAND_OBJECTIVES_DATADIR");
     options.node_cache = &node_cache;
     options.window_cache = &window_cache;
+    options.landing_cache = &landing_cache;
 
     n = zcl_objectives_catalog(&catalog);
 

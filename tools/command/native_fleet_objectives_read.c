@@ -403,6 +403,48 @@ static bool obj_newest_landed_train(
     return true;
 }
 
+/* Share the first complete train observation only within one request. */
+static bool obj_landing_observe(const struct zcl_objectives_options *options,
+    const char **use, char *path, size_t path_cap,
+    struct obj_outcomes_stats *stats, struct obj_train_stats *train,
+    struct zcl_objective_value *v)
+{
+    struct zcl_objectives_landing_cache *c = options ? options->landing_cache : NULL;
+    if (!c) {
+        if (!obj_newest_landed_train(options, use, path, path_cap, stats, v))
+            return false;
+        return obj_train_stats_for_note(*use, stats->last_landed_note, train);
+    }
+    if (!c->filled) {
+        c->ready = obj_newest_landed_train(options, use, path, path_cap, stats, v);
+        if (c->ready) {
+            c->train_ok = obj_train_stats_for_note(*use, stats->last_landed_note, train);
+            c->landed_at = stats->last_landed_at;
+            c->found = train->found;
+            c->earliest = train->earliest_epoch;
+            c->attempts = train->attempts.n;
+            obj_train_stats_free(train);
+        }
+        (void)snprintf(c->reason, sizeof c->reason, "%s", v->reason);
+        c->filled = true;
+    }
+    if (!c->ready) {
+        (void)snprintf(v->reason, sizeof v->reason, "%s", c->reason);
+        return false;
+    }
+    if (!obj_resolve_outcomes(options, path, path_cap, use)) {
+        obj_set_reason(v, "%s", "state root unavailable");
+        return false;
+    }
+    memset(stats, 0, sizeof *stats);
+    memset(train, 0, sizeof *train);
+    stats->last_landed_at = c->landed_at;
+    train->found = c->found;
+    train->earliest_epoch = c->earliest;
+    train->attempts.n = c->attempts;
+    return c->train_ok;
+}
+
 static struct zcl_objective_value obj_landing_latency_s(
     const struct zcl_objectives_options *options)
 {
@@ -412,11 +454,11 @@ static struct zcl_objective_value obj_landing_latency_s(
     char path[512];
     const char *use;
 
-    if (!obj_newest_landed_train(options, &use, path, sizeof(path), &stats,
-                                 &v))
-        return v;
-    if (!obj_train_stats_for_note(use, stats.last_landed_note, &train) ||
-        !train.found) {
+    memset(&train, 0, sizeof train);
+    bool observed = obj_landing_observe(options, &use, path, sizeof path,
+                                        &stats, &train, &v);
+    if (!observed && v.reason[0]) return v;
+    if (!observed || !train.found) {
         obj_set_reason(&v, "unavailable rows for the landed train in %s", use);
         obj_train_stats_free(&train);
         return v;
@@ -448,11 +490,11 @@ static struct zcl_objective_value obj_landing_attempts_per_train(
     char path[512];
     const char *use;
 
-    if (!obj_newest_landed_train(options, &use, path, sizeof(path), &stats,
-                                 &v))
-        return v;
-    if (!obj_train_stats_for_note(use, stats.last_landed_note, &train) ||
-        train.attempts.n == 0) {
+    memset(&train, 0, sizeof train);
+    bool observed = obj_landing_observe(options, &use, path, sizeof path,
+                                        &stats, &train, &v);
+    if (!observed && v.reason[0]) return v;
+    if (!observed || train.attempts.n == 0) {
         obj_set_reason(&v, "unavailable rows for the landed train in %s", use);
         obj_train_stats_free(&train);
         return v;

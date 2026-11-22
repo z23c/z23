@@ -335,6 +335,56 @@ _test_next:;
 #define FOX_MIDNIGHT 1792627200LL
 #define FOX_DAY 86400LL
 
+static int fox_case_landing_snapshot(void)
+{
+    int failures = 0;
+    char root[512], path[1024];
+    const char *cases[] = {
+        "{\"state\":\"landed\",\"note\":\"a\",\"ts\":\"2026-09-06T10:00:00Z\",\"attempt\":1,\"started\":4,\"landed_at\":1788692400}\n",
+        "{\"state\":\"landed\",\"note\":\"a\",\"ts\":\"2026-09-06T10:00:00Z\",\"attempt\":1,\"started\":4}\n",
+        "{\"state\":\"failed\",\"note\":\"a\"}\n{\"state\":\"landed\",\"note\":\"a\",\"ts\":\"2026-09-06T10:00:00Z\",\"attempt\":1,\"started\":4,\"landed_at\":1788692400}\n",
+        "{\"state\":\"landed\",\"note\":\"\",\"ts\":\"2026-09-06T10:00:00Z\"}\n",
+        "{broken}\n", ""
+    };
+    const char *ids[] = {"landing_latency_s", "landing_attempts_per_train"};
+    test_make_tmpdir(root, sizeof root, "fleet_objectives", "landing_snapshot");
+    (void)snprintf(path, sizeof path, "%s/outcomes", root);
+    TEST("objectives: paired landing snapshot preserves results and refreshes") {
+        struct zcl_objectives_options o = {0};
+        o.outcomes = path;
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            struct zcl_objective_value standalone[2];
+            struct zcl_objectives_landing_cache cache = {0};
+            ASSERT(fox_write(path, cases[i]));
+            o.landing_cache = NULL;
+            for (size_t j = 0; j < 2; j++)
+                standalone[j] = zcl_objectives_measure(&o, ids[j]);
+            o.landing_cache = &cache;
+            for (size_t j = 0; j < 2; j++) {
+                struct zcl_objective_value shared = zcl_objectives_measure(&o, ids[j]);
+                ASSERT(shared.measured == standalone[j].measured);
+                ASSERT(shared.value == standalone[j].value);
+                ASSERT(strcmp(shared.reason, standalone[j].reason) == 0);
+            }
+        }
+        struct zcl_objectives_landing_cache cache = {0};
+        ASSERT(fox_write(path, cases[0]));
+        o.landing_cache = &cache;
+        struct zcl_objective_value a = zcl_objectives_measure(&o, ids[0]);
+        ASSERT(a.measured && a.value == 3600);
+        ASSERT(fox_write(path, cases[5]));
+        struct zcl_objective_value b = zcl_objectives_measure(&o, ids[1]);
+        ASSERT(b.measured && b.value == 1);
+        o.landing_cache = NULL;
+        b = zcl_objectives_measure(&o, ids[1]);
+        ASSERT(!b.measured && strstr(b.reason, "no landed row"));
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int fox_case_window_snapshot(void)
 {
     int failures = 0;
@@ -1726,6 +1776,7 @@ int test_fleet_objectives(void)
     failures += fox_case_screen();
     failures += fox_case_next();
     failures += fox_case_node_cache();
+    failures += fox_case_landing_snapshot();
     failures += fox_case_window_snapshot();
     failures += fox_case_window_failures();
     failures += fox_case_attempt_allocations();
