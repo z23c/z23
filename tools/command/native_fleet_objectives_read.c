@@ -172,10 +172,24 @@ static void obj_row_group_key(const struct json_value *row, char *out,
                    obj_note_has_identity(text) ? text : "");
 }
 
+/* What makes one landed row a different landing from another. The queue's
+ * `seq` is unique per row; a row without it falls back to its submit time,
+ * proof attempt and start, and landing instant. A re-appended identical row
+ * is the same landing, so it never ends a train. */
+struct obj_landing_id {
+    bool has_seq;
+    int64_t seq;
+    int64_t ts;
+    int64_t attempt;
+    int64_t started;
+    int64_t landed_at;
+};
+
 struct obj_outcomes_stats {
     bool have_last_landed;
     int64_t last_landed_ts;
     int64_t last_landed_at; /* the row's landed_at, 0 when it has none */
+    struct obj_landing_id last_landed_id;
 
     char last_landed_note[OBJ_NOTE_MAX];
 };
@@ -188,6 +202,32 @@ static int64_t obj_row_landed_at(const struct json_value *row)
 {
     const struct json_value *v = json_get(row, "landed_at");
     return v && v->type == JSON_INT && json_get_int(v) > 0 ? json_get_int(v) : 0;
+}
+
+static struct obj_landing_id obj_row_landing_id(const struct json_value *row,
+                                                int64_t ts_unix)
+{
+    const struct json_value *seq = json_get(row, "seq");
+    struct obj_landing_id id = {
+        .has_seq = seq && seq->type == JSON_INT,
+        .ts = ts_unix,
+        .attempt = json_get_int(json_get(row, "attempt")),
+        .started = json_get_int(json_get(row, "started")),
+        .landed_at = obj_row_landed_at(row),
+    };
+    if (id.has_seq)
+        id.seq = json_get_int(seq);
+    return id;
+}
+
+static bool obj_landing_id_same(const struct obj_landing_id *a,
+                                const struct obj_landing_id *b)
+{
+    if (a->has_seq && b->has_seq)
+        return a->seq == b->seq;
+    return a->has_seq == b->has_seq && a->ts == b->ts &&
+           a->attempt == b->attempt && a->started == b->started &&
+           a->landed_at == b->landed_at;
 }
 
 static void obj_outcomes_row(const struct json_value *row,
@@ -204,6 +244,7 @@ static void obj_outcomes_row(const struct json_value *row,
     stats->have_last_landed = true;
     stats->last_landed_ts = ts_unix;
     stats->last_landed_at = obj_row_landed_at(row);
+    stats->last_landed_id = obj_row_landing_id(row, ts_unix);
     obj_row_group_key(row, stats->last_landed_note,
                       sizeof(stats->last_landed_note));
 }
@@ -300,6 +341,9 @@ struct obj_train_stats {
     bool invalid_start;
     int64_t earliest_epoch; /* the earliest row's `ts`: its submit time */
     struct obj_pair_set attempts; /* distinct (attempt, started) landed/failed */
+    /* The newest landed row. An EARLIER distinct landed row of the same note
+     * ended its own train: what came before it is not this train. */
+    const struct obj_landing_id *newest;
 };
 
 /* The row's submit time: `ts`, stamped once at enqueue. A row whose `ts`
@@ -320,27 +364,44 @@ static void obj_train_stats_row(const struct json_value *row,
     obj_row_group_key(row, key, sizeof(key));
     if (strcmp(key, note) != 0)
         return;
+    state = json_get_str(json_get(row, "state"));
+    if (strcmp(state, "landed") == 0 && out->newest) {
+        int64_t ts_unix = 0;
+        struct obj_landing_id id;
+        (void)obj_row_start_epoch(row, &ts_unix);
+        id = obj_row_landing_id(row, ts_unix);
+        if (!obj_landing_id_same(&id, out->newest)) {
+            /* A train ends at each landed row: restart after it. */
+            out->found = false;
+            out->invalid_start = false;
+            out->attempts.n = 0;
+            out->attempts.oom = false; /* moot: segment discarded */
+            return;
+        }
+    }
     if (!out->found && !out->invalid_start) {
         out->found = obj_row_start_epoch(row, &out->earliest_epoch);
         out->invalid_start = !out->found;
     }
-    state = json_get_str(json_get(row, "state"));
     if (strcmp(state, "landed") == 0 || strcmp(state, "failed") == 0)
         (void)obj_pair_add_new(&out->attempts,
                                json_get_int(json_get(row, "attempt")),
                                json_get_int(json_get(row, "started")));
 }
 
-/* Every row whose train identity is `note`, in file order: the earliest
+/* Rows whose train identity is `note`, in file order, since the previous
+ * landed row of that note (a landed row ends its train): the earliest
  * row's start (any state), and the count of distinct landed/failed
  * attempts. */
 static bool obj_train_stats_for_note(const char *path, const char *note,
+                                     const struct obj_landing_id *newest,
                                      struct obj_train_stats *out)
 {
     char line[OBJ_LINE_MAX];
     FILE *fp;
 
     memset(out, 0, sizeof(*out));
+    out->newest = newest;
     fp = fopen(path, "r");
     if (!fp)
         return false;
@@ -415,12 +476,14 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
     if (!c) {
         if (!obj_newest_landed_train(options, use, path, path_cap, stats, v))
             return false;
-        return obj_train_stats_for_note(*use, stats->last_landed_note, train);
+        return obj_train_stats_for_note(*use, stats->last_landed_note,
+                                      &stats->last_landed_id, train);
     }
     if (!c->filled) {
         c->ready = obj_newest_landed_train(options, use, path, path_cap, stats, v);
         if (c->ready) {
-            c->train_ok = obj_train_stats_for_note(*use, stats->last_landed_note, train);
+            c->train_ok = obj_train_stats_for_note(*use, stats->last_landed_note,
+                                      &stats->last_landed_id, train);
             c->landed_at = stats->last_landed_at;
             c->found = train->found;
             c->earliest = train->earliest_epoch;

@@ -282,8 +282,10 @@ attempt (the `phases.txt` in its logs directory has the `dimension_lint_and_test
 lint log, test from the test log (the two run concurrently inside one dimension),
 `proof_wall_s` from the final cumulative. `commits_landed_today` and the git gauges
 count `origin/main` from UTC midnight and never fetch. `landing_latency_s` is the
-landed row's `landed_at` minus the train's first submission `ts`; an outcome row
-written before `landed_at` existed stays unmeasured.
+landed row's `landed_at` minus the first submission `ts` after the same note's
+previous landed row (a landed row ends its train, so a lane that reuses one note
+is not one train; `landing_attempts_per_train` counts from the same point); an
+outcome row written before `landed_at` existed stays unmeasured.
 
 `land_failure_repeats` is the LEARN step: over the 24 h before the newest outcome's `ts`
 (not the wall clock) it keys each `failed` outcome by its test group (the `test <group>:`

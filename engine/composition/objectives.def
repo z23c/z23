@@ -40,16 +40,20 @@
  */
 
 Z23_OBJECTIVE("landing_latency_s", "lab", "outcomes.jsonl", "min", 1200, "s",
-             "per train, by its note: wall seconds from the newest landed "
-             "train's first submission (its earliest row ts) to the landed "
+             "per train, by its note; a landed row ends its train, so a "
+             "lane that lands many times under one note is not one train: "
+             "wall seconds from the first submission after the note's "
+             "previous landed row (its earliest row ts) to the newest landed "
              "row's landed_at; a train should land in the time one proof "
              "takes, not several")
 
 Z23_OBJECTIVE("landing_attempts_per_train", "lab", "outcomes.jsonl", "min", 1,
              "count",
-             "per train, by its note: the newest landed train's count of "
-             "distinct landed-or-failed attempts; a train that needs more "
-             "than one attempt is throwing finished proof work away")
+             "per train, by its note; a landed row ends its train: the "
+             "newest landed train's count of distinct landed-or-failed "
+             "attempts since the previous landed row of the same note; a "
+             "train that needs more than one attempt is throwing finished "
+             "proof work away")
 
 Z23_OBJECTIVE("proof_lint_wall_s", "lab", "lint.log", "min", 300, "s",
              "lint is the gate a lane pays before it may ask for a proof, "
