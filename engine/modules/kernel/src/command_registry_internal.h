@@ -61,6 +61,9 @@ bool command_registry_input_required_discovery(
 bool command_registry_copy_string(char *out, size_t out_size, const char *value);
 bool command_registry_path_valid(const char *path);
 bool command_registry_csv_token_equal(const char *csv, const char *value);
+bool command_registry_fold_equal(const char *a, size_t an, const char *b,
+                                 size_t bn);
+bool command_registry_csv_token_fold_equal(const char *csv, const char *value);
 bool command_registry_csv_valid_paths(const char *csv);
 bool command_registry_is_branch(const struct zcl_command_spec *spec);
 bool command_registry_enum_values_valid(const struct zcl_command_spec *spec);

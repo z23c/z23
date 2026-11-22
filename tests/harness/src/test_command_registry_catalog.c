@@ -8008,6 +8008,221 @@ static int test_success_data_budget(void)
     return failures;
 }
 
+/* '-' and '_' are one character inside a command word. An exact spelling
+ * wins; a folded hit resolves to the canonical spec and reports as an alias
+ * so callers print the canonical path. Dots and word breaks stay exact. */
+static int test_separator_fold_find(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("find folds - and _ inside a segment, exact spelling first") {
+        bool alias = true;
+        const struct zcl_command_spec *exact =
+            zcl_command_registry_find(reg, "dev.land.check_offer", &alias);
+        ASSERT(exact != NULL);
+        ASSERT(!alias);
+        const struct zcl_command_spec *folded =
+            zcl_command_registry_find(reg, "dev.land.check-offer", &alias);
+        ASSERT(folded == exact);
+        ASSERT(alias);
+        const struct zcl_command_spec *other =
+            zcl_command_registry_find(reg, "app.names.set_record", &alias);
+        ASSERT(other != NULL);
+        ASSERT_STR_EQ(other->path, "app.names.set-record");
+        ASSERT(alias);
+        ASSERT(zcl_command_registry_find(reg, "app.names.set-record",
+                                         &alias) == other);
+        ASSERT(!alias);
+        ASSERT(zcl_command_registry_find(reg, "dev.land.checkoffer", NULL) ==
+               NULL);
+        ASSERT(zcl_command_registry_find(reg, "dev-land.check_offer", NULL) ==
+               NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_resolve(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("resolve_words reaches a folded word and names the invoked spelling") {
+        const char *words[] = { "dev", "land", "check-offer" };
+        size_t consumed = 0;
+        bool alias = false;
+        char invoked[ZCL_COMMAND_MAX_PATH];
+        const struct zcl_command_spec *s = zcl_command_registry_resolve_words(
+            reg, words, 3, &consumed, &alias, invoked, sizeof(invoked));
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(s->path, "dev.land.check_offer");
+        ASSERT_EQ(consumed, (size_t)3);
+        ASSERT(alias);
+        ASSERT_STR_EQ(invoked, "dev.land.check-offer");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_input_key(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("a folded input key resolves to the declared spelling") {
+        const struct zcl_command_spec *s = find_spec(reg, "dev.train.keep");
+        ASSERT(s != NULL);
+        char key[64];
+        ASSERT(zcl_command_registry_input_key_canonical(s, "dry-run", key,
+                                                        sizeof(key)));
+        ASSERT_STR_EQ(key, "dry_run");
+        ASSERT(zcl_command_registry_input_key_canonical(s, "dry_run", key,
+                                                        sizeof(key)));
+        ASSERT_STR_EQ(key, "dry_run");
+        ASSERT(!zcl_command_registry_input_key_canonical(s, "dryrun", key,
+                                                         sizeof(key)));
+        ASSERT(!zcl_command_registry_input_key_canonical(s, "dry-run", key, 3));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_collision_refused(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[3];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    specs[1].traits = 0;
+    specs[1].path = "x.a-b";
+    specs[2] = specs[1];
+    specs[2].path = "x.a_b";
+    reg.count = 3;
+    TEST("validate refuses sibling paths that differ only by - vs _") {
+        ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
+        ASSERT(strstr(why, "differs only by - vs _") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_distinct_ok(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[3];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    specs[1].traits = 0;
+    specs[1].path = "x.a-b";
+    specs[2] = specs[1];
+    specs[2].path = "x.ab";
+    reg.count = 3;
+    TEST("validate accepts paths that differ in more than the separator") {
+        ASSERT(zcl_command_registry_validate(&reg, why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_keys_refused(void)
+{
+    int failures = 0;
+    struct zcl_command_spec specs[3];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    char why[128] = { 0 };
+    specs[1].traits = 0;
+    specs[1].path = "x.a-b";
+    specs[2] = specs[1];
+    reg.count = 3;
+    specs[2].path = "x.c";
+    specs[1].input_keys = "dry_run,x,dry-run";
+    TEST("validate refuses input keys that differ only by - vs _") {
+        ASSERT(!zcl_command_registry_validate(&reg, why, sizeof(why)));
+        ASSERT(strstr(why, "input keys of x.a-b differ only by") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* An alias takes part in the fold: two commands whose aliases (or an alias
+ * and a path) differ only by - vs _ would both match one input and the first
+ * row would win silently. A command may list its own name in a second
+ * spelling. Returns validate's verdict for two sibling leaves under x. */
+static bool fold_alias_registry_ok(const char *path1, const char *aliases1,
+                                   const char *path2, const char *aliases2,
+                                   char *why, size_t why_size)
+{
+    struct zcl_command_spec specs[3];
+    struct zcl_command_registry reg = test_unknown_trait_bit_registry(specs);
+    specs[1].traits = 0;
+    specs[1].path = path1;
+    specs[1].aliases = aliases1;
+    specs[2] = specs[1];
+    specs[2].path = path2;
+    specs[2].aliases = aliases2;
+    reg.count = 3;
+    return zcl_command_registry_validate(&reg, why, why_size);
+}
+
+static int test_separator_fold_aliases_refused(void)
+{
+    int failures = 0;
+    char why[160] = { 0 };
+    TEST("validate refuses aliases of two commands that differ only by - vs _") {
+        ASSERT(!fold_alias_registry_ok("x.a", "x.q-y_z", "x.c", "x.q_y-z", why,
+                                       sizeof(why)));
+        ASSERT(strstr(why, "alias x.q_y-z of x.c differs only by - vs _") !=
+               NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_alias_onto_path_refused(void)
+{
+    int failures = 0;
+    char why[160] = { 0 };
+    TEST("validate refuses an alias that folds onto another command's path") {
+        ASSERT(!fold_alias_registry_ok("x.a-b", "", "x.c", "x.a_b", why,
+                                       sizeof(why)));
+        ASSERT(strstr(why, "alias x.a_b of x.c differs only by - vs _") !=
+               NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_separator_fold_own_spellings_ok(void)
+{
+    int failures = 0;
+    char why[160] = { 0 };
+    TEST("validate accepts one command listing its own name in two spellings") {
+        ASSERT(fold_alias_registry_ok("x.a-b", "x.a_b,x.m-n,x.m_n", "x.c", "",
+                                      why, sizeof(why)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+/* The in-code exemption for rows that declare both spellings of one key
+ * (their handlers read both from unfolded JSON input) must stay in step with
+ * the rows: a row that drops a spelling no longer needs the exemption. */
+static int test_separator_fold_legacy_rows_still_need_it(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("the two exempt rows still declare both spellings of one key") {
+        const struct zcl_command_spec *invite =
+            find_spec(reg, "zses.invite.create");
+        const struct zcl_command_spec *select =
+            find_spec(reg, "dev.proof.select");
+        ASSERT(invite != NULL && select != NULL);
+        ASSERT(strstr(invite->input_keys, "capability_tag") != NULL);
+        ASSERT(strstr(invite->input_keys, "capability-tag") != NULL);
+        ASSERT(strstr(select->input_keys, "route_only") != NULL);
+        ASSERT(strstr(select->input_keys, "route-only") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_command_registry_catalog(void)
 {
     int failures = 0;
@@ -8040,6 +8255,16 @@ int test_command_registry_catalog(void)
     failures += test_alias_matching_path_refused();
     failures += test_duplicate_alias_refused();
     failures += test_duplicate_path_refused();
+    failures += test_separator_fold_find();
+    failures += test_separator_fold_resolve();
+    failures += test_separator_fold_input_key();
+    failures += test_separator_fold_collision_refused();
+    failures += test_separator_fold_distinct_ok();
+    failures += test_separator_fold_keys_refused();
+    failures += test_separator_fold_aliases_refused();
+    failures += test_separator_fold_alias_onto_path_refused();
+    failures += test_separator_fold_own_spellings_ok();
+    failures += test_separator_fold_legacy_rows_still_need_it();
     failures += test_distinct_alias_accepted();
     failures += test_parent_listed_after_child_accepted();
     failures += test_missing_branch_parent_refused();

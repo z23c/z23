@@ -4464,6 +4464,10 @@ static enum nc_main_flag_result nc_main_apply_flag(
         if (r != NC_FLAG_UNMATCHED)
             return r;
     }
+    char declared[128];
+    if (zcl_command_registry_input_key_canonical(st->spec, flag_key, declared,
+                                                 sizeof(declared)))
+        flag_key = declared; /* --dry-run for dry_run; exact spelling wins */
     if (nc_main_flag_wants_joined_value(st, flag_key, value, next_word)) {
         (void)snprintf(why, why_cap,
                        "--%s takes its value joined with '='; use --%s=value",

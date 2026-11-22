@@ -436,6 +436,12 @@ bool zcl_command_registry_validate(const struct zcl_command_registry *registry,
 const struct zcl_command_spec *zcl_command_registry_find(
     const struct zcl_command_registry *registry, const char *path_or_alias,
     bool *was_alias);
+/* Writes into `out` the declared input key of `spec` that `key` names: the
+ * exact spelling when declared, else the one declared key that differs only
+ * by '-' versus '_'. False when neither matches or `out` is too small. */
+bool zcl_command_registry_input_key_canonical(
+    const struct zcl_command_spec *spec, const char *key, char *out,
+    size_t out_size);
 const struct zcl_command_spec *zcl_command_registry_resolve_words(
     const struct zcl_command_registry *registry,
     const char *const *words, size_t word_count, size_t *consumed,

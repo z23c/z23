@@ -574,6 +574,21 @@ const struct zcl_command_spec *zcl_command_registry_find(
             return &registry->commands[i];
         }
     }
+    /* Exact and alias both missed: '-' and '_' are one character inside a
+     * segment. The hit reports as an alias so callers show the canonical
+     * path. */
+    size_t want = strlen(path_or_alias);
+    for (size_t i = 0; i < registry->count; i++) {
+        const struct zcl_command_spec *spec = &registry->commands[i];
+        if (command_registry_fold_equal(spec->path, strlen(spec->path),
+                                        path_or_alias, want) ||
+            command_registry_csv_token_fold_equal(spec->aliases,
+                                                  path_or_alias)) {
+            if (was_alias)
+                *was_alias = true;
+            return spec;
+        }
+    }
     return NULL;
 }
 

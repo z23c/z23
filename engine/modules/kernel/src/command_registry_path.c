@@ -64,6 +64,70 @@ bool command_registry_csv_token_equal(const char *csv, const char *value)
     return false;
 }
 
+/* '-' and '_' are one character for the fold; '.' and the rest are exact. */
+bool command_registry_fold_equal(const char *a, size_t an, const char *b,
+                                 size_t bn)
+{
+    if (an != bn)
+        return false;
+    for (size_t i = 0; i < an; i++) {
+        char x = a[i] == '_' ? '-' : a[i];
+        char y = b[i] == '_' ? '-' : b[i];
+        if (x != y)
+            return false;
+    }
+    return true;
+}
+
+/* First csv token that equals `value` under the fold, or NULL. *len is the
+ * token length. */
+static const char *csv_fold_token(const char *csv, const char *value,
+                                  size_t *len)
+{
+    if (!csv || !csv[0] || !value)
+        return NULL;
+    const char *at = csv;
+    while (*at) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (command_registry_fold_equal(at, n, value, strlen(value))) {
+            *len = n;
+            return at;
+        }
+        if (!end)
+            break;
+        at = end + 1;
+    }
+    return NULL;
+}
+
+bool command_registry_csv_token_fold_equal(const char *csv, const char *value)
+{
+    size_t len = 0;
+    return csv_fold_token(csv, value, &len) != NULL;
+}
+
+bool zcl_command_registry_input_key_canonical(
+    const struct zcl_command_spec *spec, const char *key, char *out,
+    size_t out_size)
+{
+    if (!spec || !key || !key[0] || !out || out_size == 0)
+        return false;
+    size_t len = 0;
+    const char *token = command_registry_csv_token_equal(spec->input_keys, key)
+                            ? key
+                            : csv_fold_token(spec->input_keys, key, &len);
+    if (!token)
+        return false;
+    if (token == key)
+        len = strlen(key);
+    if (len >= out_size)
+        return false;
+    memcpy(out, token, len);
+    out[len] = 0;
+    return true;
+}
+
 bool command_registry_csv_valid_paths(const char *csv)
 {
     if (!csv || !csv[0])

@@ -197,6 +197,14 @@ The root has nine choices: `status`, `core`, `app`, `dev`, `ops`,
 convenience aliases for `discover help` and `discover search`, but are not
 extra ontology branches. All other operations live under their owner.
 
+Inside one word, `-` and `_` are the same character: `dev land check-offer`
+resolves to `dev.land.check_offer`, and `--dry-run` names the key `dry_run`.
+The exact spelling wins; the reply names the canonical path. Dots and word
+breaks stay exact, and the registry refuses two paths or aliases, or two keys
+of one command, that differ only by that separator. Folding applies to command
+words and CLI flags only; keys inside `--input` JSON and MCP or RPC payloads
+stay exact.
+
 ## 5. Core tree
 
 ```text

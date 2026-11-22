@@ -1737,6 +1737,44 @@ static int test_format_flag_binds_leaf_input(void)
     return failures;
 }
 
+/* '-' and '_' are one character in a CLI flag name: --before-created-at names
+ * the declared key before_created_at, the exact spelling is unchanged, and
+ * both spellings in one call are the same key given twice. */
+static int test_flag_key_folds_dash_and_underscore(void)
+{
+    int failures = 0;
+    TEST_CASE("fleet board list: --before-created-at binds before_created_at; the pair is a duplicate") {
+        char wire[16384];
+        int rc = 0;
+        const char *dashed[] = {"board", "list", "--before-created-at=5",
+                                "--before-id=abababababababababababababababababababababababababababababababab"};
+        const char *exact[] = {"board", "list", "--before_created_at=5",
+                               "--before_id=abababababababababababababababababababababababababababababababab"};
+        const char *twice[] = {"board", "list", "--before-created-at=5",
+                               "--before_created_at=6", "--before-id=abababababababababababababababababababababababababababababababab"};
+        node_rpc_client_set_test_hook(format_capture_rpc);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", dashed, 4, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT(strstr(g_format_params, "\"before_created_at\"") != NULL);
+        ASSERT(strstr(g_format_params, "\"before_id\"") != NULL);
+        ASSERT(strstr(g_format_params, "before-") == NULL);
+        char folded_params[sizeof(g_format_params)];
+        snprintf(folded_params, sizeof(folded_params), "%s", g_format_params);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", exact, 4, wire, sizeof(wire), &rc));
+        ASSERT(strstr(wire, "BAD_FLAG") == NULL);
+        ASSERT_STR_EQ(g_format_params, folded_params);
+        g_format_params[0] = '\0';
+        ASSERT(uniform_cli("fleet", twice, 5, wire, sizeof(wire), &rc));
+        ASSERT(rc != 0);
+        ASSERT_EQ(g_format_params[0], '\0');
+        node_rpc_client_set_test_hook(NULL);
+    } TEST_END
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 static int test_double_dash_target_flags_bind_client(void)
 {
     int failures = 0;
@@ -5110,6 +5148,7 @@ int test_native_api_contract(void)
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();
     failures += test_format_flag_binds_leaf_input();
+    failures += test_flag_key_folds_dash_and_underscore();
     failures += test_double_dash_target_flags_bind_client();
     failures += test_library_profile_and_node_arguments();
     failures += test_space_separated_value_flag_is_refused_with_hint();

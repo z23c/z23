@@ -32,13 +32,14 @@ struct cr_name_slot {
 struct cr_name_table {
     struct cr_name_slot *slots;
     bool usable;
+    bool fold; /* hash and compare treat '-' and '_' as one */
 };
 
-static uint32_t cr_name_hash(const char *s, uint32_t n)
+static uint32_t cr_name_hash(const char *s, uint32_t n, bool fold)
 {
     uint32_t h = 2166136261u;
     for (uint32_t i = 0; i < n; i++) {
-        h ^= (unsigned char)s[i];
+        h ^= (unsigned char)(fold && s[i] == '_' ? '-' : s[i]);
         h *= 16777619u;
     }
     return h ? h : 1u;
@@ -55,7 +56,9 @@ static int cr_name_probe(const struct cr_name_table *t, const char *s,
             *slot_out = i;
             return 0;
         }
-        if (slot->hash == h && slot->len == n && memcmp(slot->s, s, n) == 0)
+        if (slot->hash == h && slot->len == n &&
+            (t->fold ? command_registry_fold_equal(slot->s, n, s, n)
+                     : memcmp(slot->s, s, n) == 0))
             return 1;
         i = (i + 1) & (CR_NAME_CAP - 1);
     }
@@ -65,7 +68,7 @@ static int cr_name_probe(const struct cr_name_table *t, const char *s,
 static bool cr_name_absent(struct cr_name_table *t, const char *s, uint32_t n)
 {
     uint32_t slot = 0;
-    int found = cr_name_probe(t, s, n, cr_name_hash(s, n), &slot);
+    int found = cr_name_probe(t, s, n, cr_name_hash(s, n, t->fold), &slot);
     if (found < 0)
         t->usable = false;
     return found == 0;
@@ -73,7 +76,7 @@ static bool cr_name_absent(struct cr_name_table *t, const char *s, uint32_t n)
 
 static bool cr_name_hold(struct cr_name_table *t, const char *s, uint32_t n)
 {
-    uint32_t h = cr_name_hash(s, n);
+    uint32_t h = cr_name_hash(s, n, t->fold);
     uint32_t slot = 0;
     int found = cr_name_probe(t, s, n, h, &slot);
     if (found < 0)
@@ -316,6 +319,101 @@ static bool cr_validate_collisions(const struct zcl_command_registry *registry,
     return true;
 }
 
+/* Lookup folds '-' and '_', so two spellings of one word would be
+ * ambiguous: no path or alias, and no two input keys of one command, may
+ * differ only by that separator from another. Exact repeats are refused
+ * earlier. Two shipped commands declare both spellings of one key because
+ * their handlers read keys from JSON input, which is not folded, so each
+ * spelling is a distinct accepted key there; lookup takes the exact spelling
+ * first, so neither is ambiguous. Shrink-only: add nothing. */
+static bool cr_fold_keys_legacy(const struct zcl_command_spec *spec)
+{
+    return strcmp(spec->path, "zses.invite.create") == 0 ||
+           strcmp(spec->path, "dev.proof.select") == 0;
+}
+
+static bool cr_validate_fold_keys(const struct zcl_command_spec *spec,
+                                  char *why, size_t why_size)
+{
+    if (cr_fold_keys_legacy(spec))
+        return true;
+    for (const char *a = spec->input_keys; a && *a;) {
+        const char *a_end = strchr(a, ',');
+        size_t an = a_end ? (size_t)(a_end - a) : strlen(a);
+        for (const char *b = a_end ? a_end + 1 : NULL; b && *b;) {
+            const char *b_end = strchr(b, ',');
+            size_t bn = b_end ? (size_t)(b_end - b) : strlen(b);
+            if (an == bn && memcmp(a, b, an) != 0 &&
+                command_registry_fold_equal(a, an, b, bn)) {
+                if (why)
+                    snprintf(why, why_size,
+                             "input keys of %s differ only by - vs _: %.*s",
+                             spec->path, (int)an, a);
+                return false;
+            }
+            b = b_end ? b_end + 1 : NULL;
+        }
+        a = a_end ? a_end + 1 : NULL;
+    }
+    return true;
+}
+
+/* True when alias `at` (length n) folds onto this spec's own path or an
+ * earlier alias of it: one command may list its own name in two spellings. */
+static bool cr_fold_own_repeat(const struct zcl_command_spec *spec,
+                               const char *at, size_t n)
+{
+    if (command_registry_fold_equal(spec->path, strlen(spec->path), at, n))
+        return true;
+    for (const char *p = spec->aliases; p && p < at;) {
+        const char *e = strchr(p, ',');
+        size_t pn = e ? (size_t)(e - p) : strlen(p);
+        if (command_registry_fold_equal(p, pn, at, n))
+            return true;
+        p = e ? e + 1 : at;
+    }
+    return false;
+}
+
+/* Aliases share the fold table with paths, so an alias that folds onto
+ * another command's path or alias would be won silently by the first row. */
+static bool cr_validate_fold_aliases(const struct zcl_command_spec *spec,
+                                     struct cr_name_table *names, char *why,
+                                     size_t why_size)
+{
+    for (const char *at = spec->aliases; at && *at;) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        if (n > 0 && !cr_fold_own_repeat(spec, at, n) && names->usable &&
+            !cr_name_hold(names, at, (uint32_t)n) && names->usable) {
+            if (why)
+                snprintf(why, why_size,
+                         "alias %.*s of %s differs only by - vs _ from "
+                         "another path or alias",
+                         (int)n, at, spec->path);
+            return false;
+        }
+        at = end ? end + 1 : NULL;
+    }
+    return true;
+}
+
+static bool cr_validate_fold(const struct zcl_command_spec *spec,
+                             struct cr_name_table *paths, char *why,
+                             size_t why_size)
+{
+    uint32_t n = (uint32_t)strlen(spec->path);
+    if (paths->usable && !cr_name_hold(paths, spec->path, n) && paths->usable) {
+        if (why)
+            snprintf(why, why_size,
+                     "path %s differs only by - vs _ from another path or alias",
+                     spec->path);
+        return false;
+    }
+    return cr_validate_fold_aliases(spec, paths, why, why_size) &&
+           cr_validate_fold_keys(spec, why, why_size);
+}
+
 static void cr_branch_hold(struct cr_name_table *branches,
                            const struct zcl_command_spec *spec)
 {
@@ -350,7 +448,8 @@ static int cr_branch_lookup(const struct cr_name_table *branches,
     if (!branches || !branches->usable || !branches->slots)
         return -1;
     n = (uint32_t)strlen(parent);
-    found = cr_name_probe(branches, parent, n, cr_name_hash(parent, n), &slot);
+    found = cr_name_probe(branches, parent, n,
+                          cr_name_hash(parent, n, false), &slot);
     return found < 0 ? -1 : found;
 }
 
@@ -388,6 +487,7 @@ static bool cr_validate_one(const struct zcl_command_registry *registry,
                             const struct zcl_command_spec *spec, size_t i,
                             char *why, size_t why_size,
                             struct cr_name_table *names,
+                            struct cr_name_table *folded,
                             const struct cr_name_table *branches)
 {
     if (!cr_validate_shape(spec, i, why, why_size))
@@ -402,6 +502,8 @@ static bool cr_validate_one(const struct zcl_command_registry *registry,
         return false;
     if (!cr_names_fast_clear(names, spec) &&
         !cr_validate_collisions(registry, spec, i, why, why_size))
+        return false;
+    if (!cr_validate_fold(spec, folded, why, why_size))
         return false;
     return cr_validate_parent_exists(registry, spec, why, why_size, branches);
 }
@@ -418,19 +520,24 @@ bool zcl_command_registry_validate(const struct zcl_command_registry *registry,
     }
     struct cr_name_table names = { 0 };
     struct cr_name_table branches = { 0 };
+    struct cr_name_table folded = { .fold = true };
     names.slots = zcl_calloc((size_t)CR_NAME_CAP, sizeof(names.slots[0]),
                              "cr_name_table");
     names.usable = names.slots != NULL;
+    folded.slots = zcl_calloc((size_t)CR_NAME_CAP, sizeof(folded.slots[0]),
+                              "cr_fold_table");
+    folded.usable = folded.slots != NULL;
     cr_branches_fill(&branches, registry);
     bool ok = true;
     for (size_t i = 0; i < registry->count; i++) {
         if (!cr_validate_one(registry, &registry->commands[i], i, why,
-                             why_size, &names, &branches)) {
+                             why_size, &names, &folded, &branches)) {
             ok = false;
             break;
         }
     }
     free(names.slots);
+    free(folded.slots);
     free(branches.slots);
     return ok;
 }
