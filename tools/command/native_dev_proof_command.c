@@ -208,6 +208,8 @@ static void proof_wait_failed(struct zcl_command_reply *reply,
         "the exact local commit and remote base proof failed",
         status->detail[0] ? status->detail : "child_proof_failed");
     proof_emit_producer_recovery(reply, status);
+    proof_emit_route(reply, status, "dev.proof.status",
+                     "inspect the exact proof evidence and log directory before retrying");
 }
 
 /* The exact status/exit-code contract for `dev.proof.wait`, given an

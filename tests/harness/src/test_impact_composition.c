@@ -3373,6 +3373,15 @@ static int test_ic_proof_wait_reports_settled_failure(void)
         ASSERT(log_dir && log_dir->type == JSON_STR &&
               json_get_str(log_dir)[0]);
         ASSERT(strcmp(json_get_str(log_dir), expected_log_dir) == 0);
+        ASSERT(reply.next_count == 1);
+        ASSERT_STR_EQ(reply.next[0].command, "dev.proof.status");
+        struct json_value next_input = {0};
+        ASSERT(json_read(&next_input, reply.next[0].input_json,
+                         strlen(reply.next[0].input_json)));
+        ASSERT_STR_EQ(json_get_str(json_get(&next_input, "root")), status.root);
+        ASSERT_STR_EQ(json_get_str(json_get(&next_input, "local_commit")), local);
+        ASSERT_STR_EQ(json_get_str(json_get(&next_input, "remote_base")), base);
+        json_free(&next_input);
         zcl_command_reply_free(&reply);
 
         /* Regression guard on the other side of the same contract: a
@@ -15706,7 +15715,9 @@ static int test_ic_foreground_selected_pair(void)
         zcl_dev_proof_step_conclude(&reply, 1, &status);
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_FAILED);
         ASSERT_STR_EQ(reply.error.code, "PROOF_FAILED");
-        ASSERT_STR_EQ(reply.next[0].command, "dev.proof.retry");
+        ASSERT_EQ(reply.next_count, 2);
+        ASSERT_STR_EQ(reply.next[0].command, "dev.proof.status");
+        ASSERT_STR_EQ(reply.next[1].command, "dev.proof.retry");
         ASSERT(ic_proof_reply_serializes(&reply));
         zcl_command_reply_free(&reply);
         ASSERT_EQ(zcl_dev_proof_step(f.root, local, base, &status), 1);
