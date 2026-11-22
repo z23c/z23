@@ -19,6 +19,8 @@
 #include "plugin/plugin_pack.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_release.h"
+#include "vcs/package_build.h"
+#include "models/package_resident.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -238,14 +240,76 @@ static int ad_model_cases(void)
     json_free(&plan); return failures;
 }
 
-enum ad_decision { AD_CANCEL, AD_ESCAPE, AD_ESCAPE_AFTER_CONFIRM, AD_CLOSE, AD_HEADLESS, AD_EARLY, AD_PAINT_FAIL, AD_CANCEL_AFTER_CONFIRM, AD_CLOSE_AFTER_CONFIRM, AD_STALE, AD_CONFIRM };
+enum ad_decision { AD_CANCEL, AD_ESCAPE, AD_ESCAPE_AFTER_CONFIRM, AD_CLOSE, AD_HEADLESS, AD_EARLY, AD_PAINT_FAIL, AD_CANCEL_AFTER_CONFIRM, AD_CLOSE_AFTER_CONFIRM, AD_STALE, AD_TASKS_STALE, AD_CONFIRM };
 struct ad_fake {
     enum ad_decision decision;
+    const char *tasks_datadir;
+    struct package_resident_identity tasks_identity;
     unsigned calls;
     bool observed, safe, all_pages, complete_details, continuation;
     char preview_text[2048];
     char destination[1024], parent[1024];
 };
+static bool ad_tasks_activate(const char *dir, const struct package_resident_identity *id)
+{
+    const char *nonce = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    struct package_resident_store store = {0};
+    struct package_resident_record row = {0};
+    bool ok = package_resident_store_open_app(&store, dir, "local/tasks").ok &&
+        package_resident_record_read(&store, &row).ok;
+    int64_t generation = row.generation;
+    if (ok) ok = package_resident_record_begin(&store, generation, &row).ok &&
+        package_resident_record_accept(&store, row.revision, generation, id, nonce, 1, &row).ok &&
+        package_resident_record_activate(&store, row.revision, generation, nonce, 1, &row).ok;
+    return package_resident_store_close(&store).ok && ok;
+}
+
+static bool ad_write_receipt(const struct abc_world *w, const uint8_t root[32],
+                             const uint8_t *wire, size_t len)
+{
+    char directory[ABC_PATH], path[ABC_PATH], hex[65]; zcl_hex_encode(root, 32, hex);
+    (void)snprintf(directory, sizeof(directory), "%s/zcode/receipts", w->alice_datadir);
+    (void)snprintf(path, sizeof(path), "%s/zcode/receipts/%s", w->alice_datadir, hex);
+    if (mkdir(directory, 0700) != 0 && errno != EEXIST) return false;
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = fwrite(wire, 1, len, file) == len;
+    if (fclose(file) != 0) ok = false;
+    return ok;
+}
+
+static bool ad_tasks_receipt(const struct abc_world *w, struct package_resident_identity *id, bool mismatch)
+{
+    uint8_t root[32] = {0}, rid[32], actual[32], output[32];
+    struct vcs_package_release release;
+    struct vcs_package_build_receipt *r = calloc(1, sizeof(*r));
+    if (!r) return false;
+    bool ok = zcl_hex_decode_lower(w->origin_release, rid, 32) &&
+        zcl_package_copy_find_release(w->alice_datadir, rid, &release, actual) == ZCL_PACKAGE_COPY_FOUND &&
+        !memcmp(rid, actual, 32);
+    vcs_package_build_receipt_init(r);
+    if (ok) { memcpy(r->package_root, release.package_root, 32); memcpy(r->recipe_root, release.recipe_root, 32); }
+    if (ok && mismatch) r->recipe_root[0] ^= 1;
+    memset(r->lock_root, 0x77, 32); memset(output, 0x42, 32);
+    (void)snprintf(r->compiler_id, sizeof(r->compiler_id), "gcc");
+    (void)snprintf(r->compiler_version, sizeof(r->compiler_version), "fixture");
+    (void)snprintf(r->flags, sizeof(r->flags), "-std=c23");
+    r->result_class = VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
+    r->isolation = VCS_PACKAGE_BUILD_ISOLATION_FULL; r->test_ran = true;
+    if (ok) ok = vcs_package_build_add_output(r, "bin/ztasks", output, 1) == VCS_PACKAGE_BUILD_OK &&
+        vcs_package_build_id(r, root) == VCS_PACKAGE_BUILD_OK;
+    uint8_t *wire = NULL; size_t len = 0;
+    if (ok) ok = vcs_package_build_serialize(r, &wire, &len) == VCS_PACKAGE_BUILD_OK;
+    char hex[65]; zcl_hex_encode(root, 32, hex);
+    if (ok) ok = ad_write_receipt(w, root, wire, len);
+    if (ok) {
+        zcl_hex_encode(release.package_root, 32, id->package_root);
+        memcpy(id->receipt_id, hex, sizeof(hex)); zcl_hex_encode(output, 32, id->artifact_sha3);
+        (void)snprintf(id->program, sizeof(id->program), "bin/ztasks"); id->configuration_generation = 1;
+    }
+    free(wire); free(r); return ok;
+}
+
 static bool ad_destination(const struct zcl_present_model_v1 *m, char *out, size_t cap)
 {
     bool collecting = false; size_t used = 0;
@@ -352,6 +416,14 @@ static bool ad_after_confirm(const struct ad_fake *f,
     }
     return f->decision != AD_PAINT_FAIL;
 }
+static bool ad_change_before_confirm(struct ad_fake *f)
+{
+    if (f->decision == AD_TASKS_STALE)
+        return ad_tasks_activate(f->tasks_datadir, &f->tasks_identity);
+    if (f->decision != AD_STALE) return true;
+    if (mkdir(f->parent, 0700) != 0 && errno != EEXIST) return false;
+    return mkdir(f->destination, 0700) == 0;
+}
 static bool ad_present_confirmation(struct ad_fake *f,
     const struct zcl_present_window_live_view_v1 *live, uint32_t pages)
 {
@@ -362,11 +434,7 @@ static bool ad_present_confirmation(struct ad_fake *f,
     f->safe = true;
     if (f->decision == AD_EARLY) return true;
     f->all_pages = ad_visit(live, pages);
-    if (!f->all_pages) return false;
-    if (f->decision == AD_STALE) {
-        if (mkdir(f->parent, 0700) != 0 && errno != EEXIST) return false;
-        if (mkdir(f->destination, 0700) != 0) return false;
-    }
+    if (!f->all_pages || !ad_change_before_confirm(f)) return false;
     if (!ad_action(live, 3, &close, &redraw) || !close) return false;
     return ad_after_confirm(f, live, &close, &redraw);
 }
@@ -419,6 +487,75 @@ static bool ad_reply_uncommitted(const struct zcl_command_reply *reply, bool rej
         (!rejected && reply->status == ZCL_COMMAND_STATUS_PASSED && status &&
          !strcmp(status, "canceled"));
 }
+static bool ad_pinned_call(const struct abc_world *w, const struct json_value *input,
+                           const struct package_resident_identity *id, enum ad_decision decision)
+{
+    struct zcl_command_request req = {.input = input};
+    struct ad_fake fake = {.decision = decision, .tasks_datadir = w->alice_datadir, .tasks_identity = *id};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.app_adopt.v1");
+    zcl_test_app_adopt_run(&req, &reply, ad_present, &fake);
+    bool ok = fake.calls == 1 && access(fake.destination, F_OK) != 0;
+    if (decision == AD_CANCEL) ok = ok && fake.observed && ad_reply_uncommitted(&reply, false);
+    else ok = ok && fake.all_pages && reply.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(reply.error.code, "TASKS_SOURCE_CHANGED") && !reply.error.mutated;
+    zcl_command_reply_free(&reply); return ok;
+}
+
+static bool ad_rejected_pin(const struct abc_world *w, bool complete)
+{
+    static const char wrong[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "release_root", w->origin_release) &&
+        json_push_kv_str(&input, "datadir", w->alice_datadir) &&
+        json_push_kv_int(&input, "kept_generation", 1);
+    if (complete) ok = ok && json_push_kv_str(&input, "kept_root", wrong) &&
+        json_push_kv_str(&input, "kept_receipt", wrong);
+    struct zcl_command_request req = {.input = &input};
+    struct ad_fake fake = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.app_adopt.v1");
+    if (ok) zcl_test_app_adopt_run(&req, &reply, ad_present, &fake);
+    if (ok) ok = fake.calls == 0 && !reply.error.mutated &&
+        !strcmp(reply.error.code, complete ? "TASKS_SOURCE_CHANGED" : "BAD_TASKS_PIN");
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+
+static bool ad_tasks_pinned(const struct abc_world *w)
+{
+    struct package_resident_identity id = {0};
+    if (!ad_tasks_receipt(w, &id, false) || !ad_tasks_activate(w->alice_datadir, &id)) return false;
+    if (!ad_rejected_pin(w, false) || !ad_rejected_pin(w, true)) return false;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "release_root", w->origin_release) &&
+        json_push_kv_str(&input, "datadir", w->alice_datadir) &&
+        json_push_kv_int(&input, "kept_generation", 1) &&
+        json_push_kv_str(&input, "kept_root", id.package_root) &&
+        json_push_kv_str(&input, "kept_receipt", id.receipt_id);
+    if (ok) ok = ad_pinned_call(w, &input, &id, AD_CANCEL);
+    if (ok) ok = ad_pinned_call(w, &input, &id, AD_TASKS_STALE);
+    char key[ABC_PATH]; (void)snprintf(key, sizeof(key), "%s/.z23/zcode_publisher.key", w->root);
+    if (ok) ok = access(key, F_OK) != 0;
+    json_free(&input); return ok;
+}
+
+static bool ad_recipe_mismatch(const struct abc_world *w)
+{
+    struct package_resident_identity id = {0};
+    if (!ad_tasks_receipt(w, &id, true) || !ad_tasks_activate(w->alice_datadir, &id)) return false;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "release_root", w->origin_release) &&
+        json_push_kv_str(&input, "datadir", w->alice_datadir) &&
+        json_push_kv_int(&input, "kept_generation", 3) &&
+        json_push_kv_str(&input, "kept_root", id.package_root) &&
+        json_push_kv_str(&input, "kept_receipt", id.receipt_id);
+    struct zcl_command_request req = {.input = &input};
+    struct ad_fake fake = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.app_adopt.v1");
+    if (ok) zcl_test_app_adopt_run(&req, &reply, ad_present, &fake);
+    if (ok) ok = fake.calls == 0 && !reply.error.mutated &&
+        !strcmp(reply.error.code, "TASKS_SOURCE_CHANGED");
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+
 static bool ad_no_commit(const struct abc_world *w, enum ad_decision decision)
 {
     struct ad_fake fake = {.decision = decision}; struct zcl_command_reply reply;
@@ -505,6 +642,8 @@ int test_app_adopt(void)
             ASSERT(ad_no_commit(&world, AD_PAINT_FAIL));
             ASSERT(ad_no_commit(&world, AD_CANCEL_AFTER_CONFIRM));
             ASSERT(ad_no_commit(&world, AD_CLOSE_AFTER_CONFIRM));
+            ASSERT(ad_tasks_pinned(&world));
+            ASSERT(ad_recipe_mismatch(&world));
             ASSERT(ad_stale(&world));
             ASSERT(ad_confirm(&world));
             PASS();

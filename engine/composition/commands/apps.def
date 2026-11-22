@@ -152,7 +152,11 @@ ZCL_COMMAND_READY_COMMAND(
     "identity, parent, changes and destination in a native confirmation "
     "window, and make a copy only after its local owner chooses Make my copy. "
     "The owner also authorizes a local publisher identity and a personal "
-    "metadata successor; the original fork remains. With name:skycombat instead "
+    "metadata successor; the original fork remains. "
+    "An optional complete kept Tasks generation, root and receipt pin requires "
+    "the exact current identity and matching signed release recipe at planning "
+    "and immediately before copying. "
+    "With name:skycombat instead "
     "of release_root, verify installed source and ask before creating a local "
     "key, release or copy. Both paths then offer Build and preview; Keep "
     "remains a separate choice. "
@@ -161,7 +165,7 @@ ZCL_COMMAND_READY_COMMAND(
     "building and running require the next native choice. A later failure "
     "retains the copy receipt with continuation:failed.",
     16384, "apps,adopt,make,my,copy,customize,release",
-    "zcl.app_adopt.input.v1", "zcl.app_adopt.v1", "release_root,datadir,name", "release_root",
+    "zcl.app_adopt.input.v1", "zcl.app_adopt.v1", "release_root,datadir,name,kept_generation,kept_root,kept_receipt", "release_root",
     "z23 app adopt --input=-",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,

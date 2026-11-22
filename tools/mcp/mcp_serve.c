@@ -166,8 +166,10 @@ static const struct mcp_tool mcp_tools[] = {
      "replace the local decision. Installed copies offer Build and Preview "
      "and a separate Keep; later failures retain the copy and continuation report.",
      "{\"type\":\"object\",\"properties\":{\"release_root\":{\"type\":\"string\","
-     "\"minLength\":64,\"maxLength\":64},\"name\":{\"type\":\"string\",\"enum\":[\"skycombat\"]},\"datadir\":{\"type\":\"string\"}},"
-     "\"oneOf\":[{\"required\":[\"release_root\"]},{\"required\":[\"name\"]}],\"additionalProperties\":false}",
+     "\"minLength\":64,\"maxLength\":64},\"name\":{\"type\":\"string\",\"enum\":[\"skycombat\"]},\"datadir\":{\"type\":\"string\"},\"kept_generation\":{\"type\":\"integer\",\"minimum\":1},\"kept_root\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"kept_receipt\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64}},"
+     "\"oneOf\":[{\"required\":[\"release_root\"],\"not\":{\"anyOf\":[{\"required\":[\"kept_generation\"]},{\"required\":[\"kept_root\"]},{\"required\":[\"kept_receipt\"]}]}},"
+     "{\"required\":[\"release_root\",\"kept_generation\",\"kept_root\",\"kept_receipt\"],\"not\":{\"required\":[\"name\"]}},"
+     "{\"required\":[\"name\"],\"not\":{\"anyOf\":[{\"required\":[\"kept_generation\"]},{\"required\":[\"kept_root\"]},{\"required\":[\"kept_receipt\"]}]}}],\"additionalProperties\":false}",
      false},
     {"apps_receive",
      "Request a native owner confirmation to receive one verified local share "
@@ -788,14 +790,37 @@ static bool app_tool_selected_args(const struct json_value *args,
 static bool app_adopt_argument_keys(const struct json_value *args, struct mcp_refusal *why)
 {
     if (!args || args->type != JSON_OBJ) return refuse(why, "BAD_ARGUMENT", "apps_adopt requires an object");
-    bool seen_root = false, seen_dir = false, seen_name = false;
+    static const char *const keys[] = {"release_root", "datadir", "name", "kept_generation", "kept_root", "kept_receipt"};
+    unsigned seen = 0;
     for (size_t i = 0; i < json_size(args); ++i) {
-        if (!strcmp(args->keys[i], "release_root") && !seen_root) seen_root = true;
-        else if (!strcmp(args->keys[i], "datadir") && !seen_dir) seen_dir = true;
-        else if (!strcmp(args->keys[i], "name") && !seen_name) seen_name = true;
-        else return refuse(why, "BAD_ARGUMENT", "apps_adopt accepts release_root OR name, and optional datadir");
+        size_t j = 0;
+        while (j < sizeof(keys) / sizeof(keys[0]) && strcmp(args->keys[i], keys[j])) ++j;
+        if (j == sizeof(keys) / sizeof(keys[0]) || (seen & (1u << j)))
+            return refuse(why, "BAD_ARGUMENT", "apps_adopt received an unknown or duplicate field");
+        seen |= 1u << j;
     }
-    return seen_root != seen_name || refuse(why, "BAD_ARGUMENT", "Choose exactly one release_root or installed name");
+    if (!!(seen & 1u) == !!(seen & 4u))
+        return refuse(why, "BAD_ARGUMENT", "Choose exactly one release_root or installed name");
+    unsigned pin = seen & 56u;
+    if (pin && (pin != 56u || !(seen & 1u)))
+        return refuse(why, "BAD_ARGUMENT", "A Tasks pin requires release_root and all three kept fields");
+    return true;
+}
+
+static bool app_adopt_pin_args(const struct json_value *args, struct json_value *input,
+                               struct mcp_refusal *why)
+{
+    const struct json_value *generation = json_get(args, "kept_generation");
+    if (!generation) return true;
+    const struct json_value *root = json_get(args, "kept_root");
+    const struct json_value *receipt = json_get(args, "kept_receipt");
+    if (generation->type != JSON_INT || json_get_int(generation) <= 0 ||
+        !root || root->type != JSON_STR || !receipt || receipt->type != JSON_STR)
+        return refuse(why, "BAD_ARGUMENT", "Tasks pin fields have invalid types");
+    return (json_push_kv(input, "kept_generation", generation) &&
+            json_push_kv(input, "kept_root", root) &&
+            json_push_kv(input, "kept_receipt", receipt)) ||
+        refuse(why, "OUT_OF_MEMORY", "cannot build the Tasks pin");
 }
 
 static bool app_adopt_run_args(const struct json_value *args,
@@ -810,8 +835,11 @@ static bool app_adopt_run_args(const struct json_value *args,
         return refuse(why, "BAD_ARGUMENT", "release_root or name and datadir must be strings");
     struct json_value input; json_init(&input); json_set_object(&input);
     bool ok = json_push_kv(&input, root ? "release_root" : "name", selected) &&
-              (!dir || json_push_kv(&input, "datadir", dir)) &&
-              json_push_kv_str(run, "path", "app.adopt") && json_push_kv(run, "input", &input);
+              (!dir || json_push_kv(&input, "datadir", dir));
+    if (!ok) refuse(why, "OUT_OF_MEMORY", "cannot build the adoption request");
+    if (ok) ok = app_adopt_pin_args(args, &input, why);
+    if (!ok) { json_free(&input); return false; }
+    ok = json_push_kv_str(run, "path", "app.adopt") && json_push_kv(run, "input", &input);
     json_free(&input);
     return ok || refuse(why, "OUT_OF_MEMORY", "cannot build the adoption request");
 }

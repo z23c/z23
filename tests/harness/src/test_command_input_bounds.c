@@ -2136,6 +2136,20 @@ static int t_objectives_path_descriptors(void)
     return failures;
 }
 
+static int t_adopt_tasks_generation(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.adopt", NULL);
+    struct zcl_command_input_descriptor d;
+    CIB_CHECK("Tasks adoption generation is a positive integer",
+        spec && zcl_command_registry_input_descriptor(spec, "kept_generation", &d) &&
+        d.type == JSON_INT && !d.required &&
+        cib_json_shape("app.adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kept_generation\":1}") &&
+        !cib_json_shape("app.adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kept_generation\":0}") &&
+        !cib_json_shape("app.adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kept_generation\":\"1\"}"));
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
@@ -2173,6 +2187,7 @@ int test_command_input_bounds(void)
     failures += t_out_key_is_per_leaf();
     failures += t_moved_max_lines_bounds();
     failures += t_moved_required_discovery();
+    failures += t_adopt_tasks_generation();
     failures += t_resident_execution_grant();
     failures += t_execution_consent_scopes();
     failures += t_local_acceptance_boolean();

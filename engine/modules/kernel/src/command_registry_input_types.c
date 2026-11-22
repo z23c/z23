@@ -749,6 +749,8 @@ static const struct cr_int_bound *cr_device_host_bound(const char *path,
 static const struct cr_int_bound *cr_app_customize_bound(const char *path,
                                                         const char *key)
 {
+    static const struct cr_int_bound generation = { "kept_generation", 1, INT64_MAX };
+    if (strcmp(path, "app.adopt") == 0 && !strcmp(key, "kept_generation")) return &generation;
     if (strcmp(path, "app.personalize") == 0 && !strcmp(key, "expected_revision")) {
         static const struct cr_int_bound revision = { "expected_revision", 1, INT64_MAX };
         return &revision;

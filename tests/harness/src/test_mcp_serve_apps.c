@@ -452,6 +452,10 @@ static int case_adopt_request(struct ma *m)
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
         ASSERT(ma_tool(m, 172, "apps_adopt", "{\"name\":\"skycombat\",\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"));
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 174, "apps_adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kept_generation\":1}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "BAD_ARGUMENT"));
+        ASSERT(ma_tool(m, 175, "apps_adopt", "{\"release_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kept_generation\":1,\"kept_root\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"kept_receipt\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}"));
+        ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "TASKS_STATE_UNAVAILABLE"));
         ASSERT(ma_tool(m, 173, "apps_adopt", "{\"name\":\"skycombat\"}"));
         ASSERT(ma_has(m, "\"isError\":true") && ma_has(m, "INSTALLED_SOURCE_UNAVAILABLE"));
         ASSERT(ma_tool(m, 18, "z23_run", "{\"path\":\"app.adopt\",\"input\":{}}"));

@@ -2,6 +2,8 @@
  * Show an owner the exact verified adoption plan before making a copy. */
 #include "command/native_command.h"
 #include "command/native_app_adopt.h"
+#include "command/native_app_customize_tasks.h"
+#include "services/package_lifecycle.h"
 #include "command/native_app_installed_copy.h"
 #include "command/native_app_receive_flow.h"
 #include "command/native_app_confirm.h"
@@ -29,6 +31,9 @@ struct ac_plan {
     char publisher[67], name[257], version[257];
     char key_path[AC_PATH], local_publisher[67];
     bool key_exists;
+    bool tasks_pin;
+    int64_t tasks_generation;
+    char tasks_root[AC_ROOT], tasks_receipt[AC_ROOT];
     bool has_parent, parent_known, changes_known, changes_truncated;
     char parent_release[AC_ROOT], parent_package[AC_ROOT], changes_unavailable[257];
     int64_t changes_total;
@@ -129,6 +134,78 @@ static bool ac_plan_fields(struct ac_plan *p, const struct json_value *data,
            strcmp(p->release, requested) == 0 && p->copy[0] == '/' && ac_parent(p, data);
 }
 
+/* All three fields pin one observed kept Tasks identity; absence preserves
+ * ordinary adoption. The copy is still separately approved by its owner. */
+static bool ac_tasks_pin(const struct json_value *input, struct ac_plan *p,
+                         struct zcl_command_reply *reply)
+{
+    const struct json_value *generation = json_get(input, "kept_generation");
+    const struct json_value *root = json_get(input, "kept_root");
+    const struct json_value *receipt = json_get(input, "kept_receipt");
+    if (!generation && !root && !receipt) return true;
+    const char *r = json_get_str(root), *id = json_get_str(receipt);
+    if (!generation || generation->type != JSON_INT || json_get_int(generation) <= 0 ||
+        !ac_root(r, 32) || !ac_root(id, 32)) {
+        ac_fail(reply, "BAD_TASKS_PIN", "Choose the exact kept Tasks generation, package and receipt.", AC_COMMAND);
+        return false;
+    }
+    p->tasks_pin = true; p->tasks_generation = json_get_int(generation);
+    memcpy(p->tasks_root, r, AC_ROOT); memcpy(p->tasks_receipt, id, AC_ROOT);
+    return true;
+}
+
+static bool ac_tasks_release(const struct ac_plan *p, struct zcl_command_reply *reply)
+{
+    uint8_t package[32], receipt_id[32], release_id[32], actual_id[32];
+    struct vcs_package_release release;
+    if (!zcl_hex_decode_lower(p->tasks_root, package, sizeof(package)) ||
+        !zcl_hex_decode_lower(p->tasks_receipt, receipt_id, sizeof(receipt_id)) ||
+        !zcl_hex_decode_lower(p->release, release_id, sizeof(release_id))) {
+        ac_fail(reply, "BAD_TASKS_PIN", "The Tasks identity cannot be decoded.", AC_COMMAND); return false;
+    }
+    if (zcl_package_copy_find_release(p->datadir, release_id, &release, actual_id) != ZCL_PACKAGE_COPY_FOUND) {
+        ac_fail(reply, "TASKS_RELEASE_UNAVAILABLE", "Cannot inspect the chosen release.", AC_COMMAND); return false;
+    }
+    struct vcs_package_build_receipt *receipt = zcl_calloc(1, sizeof(*receipt), "adopt-tasks-receipt");
+    if (!receipt) { ac_fail(reply, "OUT_OF_MEMORY", "Cannot inspect the kept Tasks receipt.", AC_COMMAND); return false; }
+    struct zcl_result read = package_lifecycle_receipt_read(p->datadir, receipt_id, receipt);
+    if (!read.ok) {
+        free(receipt); ac_fail(reply, "TASKS_RECEIPT_UNAVAILABLE", "Cannot inspect the kept Tasks receipt.", AC_COMMAND); return false;
+    }
+    bool ok = !memcmp(release_id, actual_id, 32) && !memcmp(release.package_root, package, 32) &&
+        vcs_package_build_installable(receipt) && !memcmp(receipt->package_root, package, 32) &&
+        !memcmp(receipt->recipe_root, release.recipe_root, 32);
+    free(receipt);
+    if (!ok) ac_fail(reply, "TASKS_SOURCE_CHANGED", "The kept Tasks release or receipt no longer matches. Choose it again.", AC_COMMAND);
+    return ok;
+}
+
+static bool ac_tasks_identity(const struct ac_plan *p, struct zcl_command_reply *reply)
+{
+    if (!p->tasks_pin) return true;
+    struct package_resident_record kept = {0};
+    if (!ac_tasks_kept_read(p->datadir, &kept)) {
+        ac_fail(reply, "TASKS_STATE_UNAVAILABLE", "Cannot inspect the kept Tasks identity.", AC_COMMAND);
+        return false;
+    }
+    bool ok = kept.generation == p->tasks_generation &&
+        !strcmp(kept.current.package_root, p->tasks_root) &&
+        !strcmp(kept.current.receipt_id, p->tasks_receipt);
+    if (!ok) ac_fail(reply, "TASKS_SOURCE_CHANGED", "The kept Tasks source changed. Choose it again.", AC_COMMAND);
+    return ok;
+}
+
+static bool ac_tasks_current(const struct ac_plan *p, struct zcl_command_reply *reply)
+{
+    if (!ac_tasks_identity(p, reply)) return false;
+    if (!p->tasks_pin) return true;
+    if (strcmp(p->package, p->tasks_root)) {
+        ac_fail(reply, "TASKS_SOURCE_CHANGED", "The chosen release has different source. Choose it again.", AC_COMMAND);
+        return false;
+    }
+    return ac_tasks_release(p, reply);
+}
+
 /* Use the same native adopt handler for both steps: the second invocation
  * must rederive and match the exact displayed plan before writing. */
 static bool ac_adopt(const struct zcl_command_request *request,
@@ -167,6 +244,7 @@ static bool ac_plan_read(const struct zcl_command_request *request,
         return false;
     }
     (void)snprintf(p->datadir, sizeof(p->datadir), "%s", dir);
+    if (!ac_tasks_identity(p, reply)) return false;
     (void)snprintf(p->release, sizeof(p->release), "%s", root);
     struct zcl_command_reply plan;
     zcl_command_reply_init(&plan, "zcl.zcode_package_adopt.v1");
@@ -177,7 +255,7 @@ static bool ac_plan_read(const struct zcl_command_request *request,
     else if (plan.status != ZCL_COMMAND_STATUS_PASSED) ac_forward_failure(reply, &plan);
     else if (!ok) ac_fail(reply, "ADOPT_PLAN_INVALID", "The release plan cannot be shown exactly.", AC_COMMAND);
     zcl_command_reply_free(&plan);
-    return ok && app_personalize_key_probe(reply, p->key_path, sizeof(p->key_path),
+    return ok && ac_tasks_current(p, reply) && app_personalize_key_probe(reply, p->key_path, sizeof(p->key_path),
                                            p->local_publisher, &p->key_exists);
 }
 
@@ -326,7 +404,7 @@ static void ac_personalize(const struct zcl_command_request *request,
 static void ac_commit(const struct zcl_command_request *request,
                       struct zcl_command_reply *reply, const struct ac_plan *p)
 {
-    if (!ac_key_matches(reply, p)) return;
+    if (!ac_tasks_current(p, reply) || !ac_key_matches(reply, p)) return;
     struct zcl_command_reply result;
     zcl_command_reply_init(&result, "zcl.zcode_package_adopt.v1");
     bool called = ac_adopt(request, p, true, &result);
@@ -359,7 +437,7 @@ static void ac_run(const struct zcl_command_request *request,
     if (!request || !reply) return;
     struct ac_work *w = zcl_calloc(1, sizeof(*w), "app-adopt");
     if (!w) { ac_fail(reply, "OUT_OF_MEMORY", "Cannot prepare the confirmation.", AC_COMMAND); return; }
-    if (!ac_plan_read(request, reply, &w->plan)) { free(w); return; }
+    if (!ac_tasks_pin(request->input, &w->plan, reply) || !ac_plan_read(request, reply, &w->plan)) { free(w); return; }
     char why[256] = {0};
     if (!ac_model(w, why, sizeof(why))) {
         ac_fail(reply, "CONFIRMATION_UNAVAILABLE", "Cannot display the exact copy plan.", why);
@@ -381,6 +459,11 @@ void zcl_native_handle_app_adopt(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
     if (request && json_get(request->input, "name")) {
+        if (json_get(request->input, "kept_generation") || json_get(request->input, "kept_root") ||
+            json_get(request->input, "kept_receipt")) {
+            ac_fail(reply, "BAD_TASKS_PIN", "A Tasks pin requires an exact release root.", AC_COMMAND);
+            return;
+        }
         app_installed_copy_run(request, reply, NULL, NULL);
         return;
     }
