@@ -1443,53 +1443,6 @@ size_t vcs_swarm_engine_peer_ids(struct vcs_swarm_engine *engine,
     return n;
 }
 
-size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
-                                    uint64_t peer)
-{
-    if (!engine || !engine->store || peer == 0)
-        return 0;
-    struct vcs_package_store_summary summaries[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
-    size_t n = vcs_package_store_list_announce_summaries(
-        engine->store, summaries, VCS_SWARM_MAX_LOCAL_ANNOUNCES);
-    pthread_mutex_lock(&engine->lock);
-    int slot = peer_slot(engine, peer);
-    if (slot < 0) {
-        pthread_mutex_unlock(&engine->lock);
-        return 0;
-    }
-    struct swarm_peer *p = &engine->peers[slot];
-    size_t queued = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (vcs_swarm_peer_was_announced(p, summaries[i].root))
-            continue;
-        /* Advertise only what this node would actually serve. Announcing a
-         * root we would then refuse is worse than not announcing it: it
-         * spends the peer's request budget on an answer that cannot come. */
-        if (!vcs_swarm_public_serveable(engine, summaries[i].root, NULL))
-            continue;
-        /* Never emit an over-budget or unremembered root: the receiver
-         * bans for it. A full session rotates a stale entry out instead. */
-        int keep = vcs_swarm_announce_plan(engine, p, summaries[i].root,
-                                           summaries, n);
-        if (keep < 0)
-            break;
-        struct vcs_package_swarm_message msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.type = VCS_PACKAGE_SWARM_ANNOUNCE;
-        memcpy(msg.body.announce.package_root, summaries[i].root, 32);
-        msg.body.announce.manifest_bytes = summaries[i].manifest_bytes;
-        msg.body.announce.file_count = summaries[i].file_count;
-        msg.body.announce.total_bytes = summaries[i].total_bytes;
-        msg.body.announce.total_chunks = summaries[i].total_chunks;
-        if (!vcs_swarm_queue_frame(engine, peer, &msg))
-            break;
-        vcs_swarm_announce_commit(p, keep, summaries[i].root);
-        queued++;
-    }
-    pthread_mutex_unlock(&engine->lock);
-    return queued;
-}
-
 bool vcs_swarm_engine_transfer_snapshot(
     struct vcs_swarm_engine *engine, uint64_t peer,
     struct vcs_swarm_transfer *out)

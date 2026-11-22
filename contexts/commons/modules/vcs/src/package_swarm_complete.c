@@ -132,6 +132,7 @@ static void announce_completed_root(struct vcs_swarm_engine *engine,
         if (!vcs_swarm_queue_frame(engine, peer->id, &msg))
             break;
         vcs_swarm_announce_commit(peer, keep, root);
+        peer->announced_tick[keep] = engine->ticked ? engine->last_tick : 0;
     }
 }
 

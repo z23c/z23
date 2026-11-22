@@ -68,6 +68,7 @@
 
 #include "test/public_shape_fixture.h"
 #include "test/accepted_work_fixture.h"
+#include "test/test_timing_budget.h"
 
 #include "base/hex.h"
 #include "chain/chainparams.h"
@@ -5193,10 +5194,94 @@ static int zwn_t_ordinary_c23_redundant(const struct chain_params *params)
         "lib", k_dirs, sizeof(k_dirs) / sizeof(k_dirs[0]), 1600u);
 }
 
-/* Late joiner discovery by announcement: A and B both hold the package, A
- * disappears, and only then C starts. C has no provider handle; the surviving
- * holder reaches it through B's ANNOUNCE, peers_for / advertised name B (and
- * never the vanished A), and a plain fetch completes from B. */
+static size_t zwn_announce_find(struct zwn_node *consumer,
+    const uint8_t root[32], struct zwn_link *provider_to_consumer,
+    struct zwn_link *consumer_to_provider,
+    const unsigned char msgstart[MESSAGE_START_SIZE], size_t round_limit,
+    size_t *rounds_out, int64_t *wall_us_out)
+{
+    struct vcs_swarm_peer_info holders[4];
+    size_t found = 0;
+    *rounds_out = 0;
+    int64_t zwn_discovery_started_us = platform_time_monotonic_us();
+    for (size_t round = 0; round < round_limit && found == 0; round++) {
+        if (!zwn_round(provider_to_consumer, consumer_to_provider, msgstart))
+            break;
+        (*rounds_out)++;
+        found = vcs_swarm_engine_peers_for(consumer->engine, root, holders, 4);
+        (void)vcs_swarm_engine_announce_to(
+            provider_to_consumer->owner->engine,
+            (uint64_t)provider_to_consumer->node->id);
+    }
+    int64_t zwn_discovery_ended_us = platform_time_monotonic_us();
+    *wall_us_out = zwn_discovery_ended_us >= zwn_discovery_started_us
+        ? zwn_discovery_ended_us - zwn_discovery_started_us : 0;
+    return found;
+}
+
+static bool zwn_announce_one_advertiser(struct vcs_swarm_engine *engine,
+                                        const uint8_t root[32])
+{
+    struct vcs_swarm_advertised advertised[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
+    size_t count = vcs_swarm_engine_advertised(
+        engine, advertised, VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    for (size_t i = 0; i < count; i++)
+        if (memcmp(advertised[i].root, root, 32) == 0)
+            return advertised[i].advertisers == 1;
+    return false;
+}
+
+static bool zwn_announce_repeat_empty(struct zwn_node *consumer,
+    struct zwn_node *provider, const uint8_t root[32])
+{
+    uint32_t before[ZWN_MAX_FILES];
+    memcpy(before, provider->chunk_data_replies, sizeof(before));
+    return vcs_swarm_engine_fetch(consumer->engine, root, ZWN_DAY,
+                                  ++consumer->now) ==
+               VCS_SWARM_FETCH_ALREADY_COMPLETE &&
+           memcmp(before, provider->chunk_data_replies, sizeof(before)) == 0;
+}
+
+static bool zwn_announce_transport_held(
+    struct zwn_node *node, const struct vcs_package_transport *transport)
+{
+    struct vcs_package_transport_import imported;
+    struct vcs_package_store_status status;
+    return vcs_package_store_pin(node->store, transport->transport_root,
+                                 true) == VCS_PACKAGE_STORE_OK &&
+           vcs_package_transport_import(node->store,
+                                        transport->transport_root, &imported) ==
+               VCS_PACKAGE_TRANSPORT_OK &&
+           memcmp(imported.package_root, transport->package_root, 32) == 0 &&
+           vcs_package_store_package_status(node->store,
+                                            transport->transport_root, &status) &&
+           status.complete && status.pinned &&
+           vcs_package_store_verify_possession(node->store,
+                                               transport->transport_root, false) &&
+           vcs_package_store_verify_possession(node->store,
+                                               transport->package_root, false);
+}
+
+static uint64_t zwn_announce_peak_rss_kib(void)
+{
+#if defined(_WIN32)
+    return 0;
+#else
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss <= 0)
+        return 0;
+#if defined(__APPLE__)
+    return (uint64_t)usage.ru_maxrss / 1024u;
+#else
+    return (uint64_t)usage.ru_maxrss;
+#endif
+#endif
+}
+
+/* A publishes; B discovers, retrieves and pins through ANNOUNCE alone. A then
+ * disappears before fresh C exists, and C repeats the same provider-free flow
+ * through B. The two discoveries and two repeat fetches are the measurement
+ * samples; this is an in-process wire fixture, not a physical network benchmark. */
 static int zwn_t_late_joiner_announce_discovery(
     const struct chain_params *params)
 {
@@ -5205,18 +5290,28 @@ static int zwn_t_late_joiner_announce_discovery(
     struct zwn_node a, b, c;
     struct zwn_link a_b, b_a;
     struct zwn_link b_c, c_b;
+    struct vcs_package_prepared prepared;
+    struct vcs_package_transport transport;
+    memset(&prepared, 0, sizeof(prepared));
+    vcs_package_transport_init(&transport);
     TEST("late joiner finds the surviving holder by announcement and "
          "fetches with no provider handle") {
-        struct zwn_pkg pkg;
-        ASSERT(zwn_make_package(&pkg, 4, 0x3c));
+        const char *source_dir = "contexts/commons/packages/zhex";
+        struct zwn_package_scenario scenario = {
+            .name = "zhex", .dht_namespace = "package.c23-commons",
+            .source_dir = source_dir, .publisher_sequence = 1,
+            .expected_package_root_hex = NULL,
+        };
+        ASSERT(zwn_prepare_package_transport(&scenario, source_dir, 1, NULL,
+                                             &prepared, &transport));
+        const uint8_t *root = transport.transport_root;
+        uint64_t zwn_case_cpu_started_us = test_process_cpu_us();
 
         const struct zwn_node_spec holders[] = {{&a, "lj-a"}, {&b, "lj-b"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, holders, 2));
-        ASSERT(zwn_store_package(a.store, &pkg));
-        ASSERT(zwn_store_package(b.store, &pkg));
-
-        /* A held the package redundantly with B, then vanishes before the
-         * late joiner exists. */
+        ASSERT(vcs_package_transport_store(a.store, &transport, source_dir) ==
+               VCS_PACKAGE_TRANSPORT_OK);
+        ASSERT(zwn_announce_transport_held(&a, &transport));
         const struct zwn_link_spec a_b_links[] = {
             {&a, &a_b, {12, 0, 0, 1}, "lj-b"},
             {&b, &b_a, {12, 0, 0, 2}, "lj-a"},
@@ -5224,10 +5319,35 @@ static int zwn_t_late_joiner_announce_discovery(
         ASSERT(zwn_fixture_links(&fixture, a_b_links, 2));
         ASSERT(zwn_meet_side(&a, &a_b));
         ASSERT(zwn_meet_side(&b, &b_a));
+        ASSERT(vcs_swarm_engine_announce_to(a.engine,
+                                            (uint64_t)a_b.node->id) == 0);
+
+        struct vcs_swarm_peer_info holders_seen[4];
+        struct vcs_swarm_advertised adv[4];
+        ASSERT(vcs_swarm_engine_peers_for(b.engine, root, holders_seen, 4) == 0);
+        ASSERT(vcs_swarm_engine_advertised(b.engine, adv, 4) == 0);
+        size_t mirror_rounds = 0, joiner_rounds = 0;
+        int64_t mirror_wall_us = 0, joiner_wall_us = 0;
+        ASSERT(zwn_announce_find(&b, root, &a_b, &b_a,
+                                 params->pchMessageStart, 90, &mirror_rounds,
+                                 &mirror_wall_us) == 1);
+        ASSERT(vcs_swarm_engine_peers_for(b.engine, root, holders_seen, 4) == 1);
+        ASSERT(holders_seen[0].peer == (uint64_t)b_a.node->id);
+        ASSERT(zwn_announce_one_advertiser(b.engine, root));
+        ASSERT(zwn_fetch_package_from_peers(&b, root, &a_b, &b_a, NULL, NULL,
+                                            params->pchMessageStart));
+        ASSERT(zwn_announce_transport_held(&b, &transport));
+        struct vcs_swarm_download_status mirror_status;
+        ASSERT(vcs_swarm_engine_download_status(b.engine, root, &mirror_status));
+        ASSERT(mirror_status.state == VCS_SWARM_DL_COMPLETE &&
+               mirror_status.requested_bytes == mirror_status.transferred_bytes &&
+               mirror_status.transferred_bytes == mirror_status.fetched_bytes &&
+               mirror_status.requested_objects == mirror_status.transferred_objects);
+        ASSERT(zwn_announce_repeat_empty(&b, &a, root));
+
         zwn_fixture_release_link(&fixture, &a_b);
         zwn_fixture_release_link(&fixture, &b_a);
         zwn_fixture_release_node(&fixture, &a);
-
         const struct zwn_node_spec joiner[] = {{&c, "lj-c"}};
         ASSERT(zwn_fixture_nodes(&fixture, params, joiner, 1));
         const struct zwn_link_spec b_c_links[] = {
@@ -5235,47 +5355,66 @@ static int zwn_t_late_joiner_announce_discovery(
             {&c, &c_b, {12, 0, 0, 4}, "lj-b"},
         };
         ASSERT(zwn_fixture_links(&fixture, b_c_links, 2));
+        zwn_tick(&b.mp, b_c.node, &b);
         ASSERT(zwn_meet_side(&b, &b_c));
         ASSERT(zwn_meet_side(&c, &c_b));
+        ASSERT(vcs_swarm_engine_announce_to(b.engine,
+                                            (uint64_t)b_c.node->id) == 0);
+        uint64_t announce_queued_tick = b.now;
+        zwn_tick(&b.mp, b_c.node, &b);
+        zwn_drain_quiet(&b_c);
+        ASSERT(vcs_swarm_engine_fetch(c.engine, root, ZWN_DAY, ++c.now) ==
+               VCS_SWARM_FETCH_OK);
 
-        /* Nothing announced has crossed the wire yet. */
-        struct vcs_swarm_peer_info holders_seen[4];
-        ASSERT(vcs_swarm_engine_peers_for(c.engine, pkg.root, holders_seen,
-                                          4) == 0);
-        struct vcs_swarm_advertised adv[4];
+        ASSERT(vcs_swarm_engine_peers_for(c.engine, root, holders_seen, 4) == 0);
         ASSERT(vcs_swarm_engine_advertised(c.engine, adv, 4) == 0);
-
-        size_t found = 0;
-        for (int r = 0; r < 20 && found == 0; r++) {
-            ASSERT(zwn_round(&b_c, &c_b, params->pchMessageStart));
-            found = vcs_swarm_engine_peers_for(c.engine, pkg.root,
-                                               holders_seen, 4);
-        }
-        /* Exactly one holder is discoverable: the survivor. */
-        ASSERT(found == 1);
+        ASSERT(zwn_announce_find(&c, root, &b_c, &c_b,
+                                 params->pchMessageStart, 90, &joiner_rounds,
+                                 &joiner_wall_us) == 1);
+        ASSERT(b.now >= announce_queued_tick &&
+               b.now - announce_queued_tick >= VCS_SWARM_ANNOUNCE_RETRY_TICKS);
+        ASSERT(vcs_swarm_engine_peers_for(c.engine, root, holders_seen, 4) == 1);
         ASSERT(holders_seen[0].peer == (uint64_t)c_b.node->id);
-        ASSERT(vcs_swarm_engine_advertised(c.engine, adv, 4) == 1);
-        ASSERT(memcmp(adv[0].root, pkg.root, 32) == 0);
-        ASSERT(adv[0].advertisers == 1);
-
-        /* No provider handle: the engine picks from the announcement. */
+        ASSERT(zwn_announce_one_advertiser(c.engine, root));
         uint32_t replies_before = b.chunk_data_replies[0];
-        ASSERT(vcs_swarm_engine_fetch(c.engine, pkg.root, ZWN_DAY,
-                                      ++c.now) == VCS_SWARM_FETCH_OK);
-        enum vcs_swarm_download_state state = VCS_SWARM_DL_INACTIVE;
-        bool terminal = false;
-        for (int r = 0; r < 600 && !terminal; r++) {
-            ASSERT(zwn_round(&b_c, &c_b, params->pchMessageStart));
-            terminal = zwn_download_done(&c, pkg.root, &state);
-        }
-        ASSERT(terminal);
-        ASSERT(state == VCS_SWARM_DL_COMPLETE);
+        ASSERT(zwn_fetch_package_from_peers(&c, root, &b_c, &c_b, NULL, NULL,
+                                            params->pchMessageStart));
         ASSERT(b.chunk_data_replies[0] > replies_before);
-        ASSERT(zwn_store_matches(c.store, &pkg));
+        ASSERT(zwn_announce_transport_held(&c, &transport));
+        struct vcs_swarm_download_status joiner_status;
+        ASSERT(vcs_swarm_engine_download_status(c.engine, root, &joiner_status));
+        ASSERT(joiner_status.state == VCS_SWARM_DL_COMPLETE &&
+               joiner_status.requested_bytes == joiner_status.transferred_bytes &&
+               joiner_status.transferred_bytes == joiner_status.fetched_bytes &&
+               joiner_status.requested_objects == joiner_status.transferred_objects);
+        ASSERT(zwn_announce_repeat_empty(&c, &b, root));
         ASSERT(c_b.node->misbehavior == 0);
-        zwn_free_package(&pkg);
+
+        uint64_t process_cpu_us = test_process_cpu_us() - zwn_case_cpu_started_us;
+        uint64_t transferred = mirror_status.transferred_bytes +
+            joiner_status.transferred_bytes;
+        printf("{\"schema\":\"zcl.swarm_announcement_discovery_fixture.v1\","
+               "\"status\":\"passed\",\"real_network\":false,"
+               "\"topology\":\"in_process_three_node_real_wire_no_sockets\","
+               "\"discovery_samples\":2,\"transfer_samples\":2,"
+               "\"lost_announce_samples\":1,\"repeat_samples\":2,"
+               "\"successful_user_outcomes\":2,"
+               "\"user_outcome_samples\":2,\"mirror_discovery_rounds\":%zu,"
+               "\"joiner_discovery_rounds\":%zu,\"mirror_discovery_wall_us\":%"
+               PRId64 ",\"joiner_discovery_wall_us\":%" PRId64
+               ",\"mirror_transferred_bytes\":%" PRIu64
+               ",\"joiner_transferred_bytes\":%" PRIu64
+               ",\"transferred_bytes_total\":%" PRIu64
+               ",\"repeated_payload_bytes\":0,\"repeated_chunk_replies\":0,"
+               "\"process_cpu_us\":%" PRIu64 ",\"process_peak_rss_kib\":%" PRIu64
+               ",\"memory_scope\":\"whole_test_process_high_water\"}\n",
+               mirror_rounds, joiner_rounds, mirror_wall_us, joiner_wall_us,
+               mirror_status.transferred_bytes, joiner_status.transferred_bytes,
+               transferred, process_cpu_us, zwn_announce_peak_rss_kib());
         PASS();
     } _test_next:
+    vcs_package_transport_free(&transport);
+    vcs_package_prepared_free(&prepared);
     zwn_fixture_cleanup(&fixture);
     return failures;
 }

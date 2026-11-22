@@ -115,6 +115,7 @@
 #define VCS_SWARM_PROVIDER_MAX 16u
 #define VCS_SWARM_BURST_WINDOW_TICKS 600u   /* request burst: 10 min @1s */
 #define VCS_SWARM_ANNOUNCE_WINDOW_TICKS 3600u /* announce rate: 1 h @1s */
+#define VCS_SWARM_ANNOUNCE_RETRY_TICKS 60u   /* lost-frame membership retry */
 #define VCS_SWARM_RECORD_WIRE_BYTES 59u
 
 struct vcs_package_store;
@@ -186,10 +187,15 @@ size_t vcs_swarm_engine_peer_ids(struct vcs_swarm_engine *engine,
 
 /* Queue ANNOUNCE frames to one peer for every complete tracked package
  * not already announced to this peer (bounded
- * VCS_SWARM_MAX_LOCAL_ANNOUNCES). Per-peer dedupe makes repeat calls
- * cheap: the transport glue calls this on every membership sync so
- * content completed or published AFTER the peer joined still propagates.
- * Returns the count queued. */
+ * VCS_SWARM_MAX_LOCAL_ANNOUNCES). Per-peer dedupe makes immediate repeat
+ * calls cheap. Membership syncs retry a previously queued root after
+ * VCS_SWARM_ANNOUNCE_RETRY_TICKS engine ticks so one lost queue/wire frame
+ * cannot hide retained content for the rest of the session. Retries reuse
+ * their root's slot and share the same conservative send-rate budget, since
+ * the receiver may have rejected the original at a full advertisement table.
+ * New content takes precedence: retries wait for a call with no new root.
+ * Content completed or published AFTER the peer joined still propagates on
+ * the next call. Returns the count queued. */
 size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
                                     uint64_t peer);
 

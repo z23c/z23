@@ -139,6 +139,9 @@ int vcs_swarm_announce_plan(struct vcs_swarm_engine *engine,
                    "is spent; the oldest send leaves the window later");
         return -1;
     }
+    for (size_t i = 0; i < peer->announced_count; i++)
+        if (memcmp(peer->announced[i], root, 32) == 0)
+            return (int)i;
     if (peer->announced_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
         return (int)peer->announced_count;
     for (size_t i = 0; i < peer->announced_count; i++) {
@@ -164,4 +167,98 @@ void vcs_swarm_announce_commit(struct swarm_peer *peer, int slot,
     peer->ann_ring_pos = (peer->ann_ring_pos + 1) % VCS_SWARM_MAX_LOCAL_ANNOUNCES;
     if (peer->ann_ring_count < VCS_SWARM_MAX_LOCAL_ANNOUNCES)
         peer->ann_ring_count++;
+}
+
+static int peer_announced_index(const struct swarm_peer *peer,
+                                const uint8_t root[32])
+{
+    for (size_t i = 0; i < peer->announced_count; i++)
+        if (memcmp(peer->announced[i], root, 32) == 0)
+            return (int)i;
+    return -1;
+}
+
+static struct swarm_peer *announce_peer(struct vcs_swarm_engine *engine,
+                                        uint64_t peer)
+{
+    for (size_t i = 0; i < VCS_SWARM_MAX_PEERS; i++)
+        if (engine->peers[i].used && engine->peers[i].id == peer)
+            return &engine->peers[i];
+    return NULL;
+}
+
+static bool announce_has_new(struct vcs_swarm_engine *engine,
+                             const struct swarm_peer *peer,
+                             const struct vcs_package_store_summary *summaries,
+                             size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (peer_announced_index(peer, summaries[i].root) < 0 &&
+            vcs_swarm_public_serveable(engine, summaries[i].root, NULL))
+            return true;
+    return false;
+}
+
+static bool announce_retry_due(const struct vcs_swarm_engine *engine,
+                               const struct swarm_peer *peer, int announced,
+                               bool retries, uint64_t announce_tick)
+{
+    uint64_t previous = peer->announced_tick[announced];
+    return retries && engine->ticked && announce_tick >= previous &&
+           announce_tick - previous >= VCS_SWARM_ANNOUNCE_RETRY_TICKS;
+}
+
+static bool announce_queue(struct vcs_swarm_engine *engine, uint64_t peer,
+                           const struct vcs_package_store_summary *summary)
+{
+    struct vcs_package_swarm_message msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = VCS_PACKAGE_SWARM_ANNOUNCE;
+    memcpy(msg.body.announce.package_root, summary->root, 32);
+    msg.body.announce.manifest_bytes = summary->manifest_bytes;
+    msg.body.announce.file_count = summary->file_count;
+    msg.body.announce.total_bytes = summary->total_bytes;
+    msg.body.announce.total_chunks = summary->total_chunks;
+    return vcs_swarm_queue_frame(engine, peer, &msg);
+}
+
+size_t vcs_swarm_engine_announce_to(struct vcs_swarm_engine *engine,
+                                    uint64_t peer)
+{
+    if (!engine || !engine->store || peer == 0)
+        return 0;
+    struct vcs_package_store_summary summaries[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
+    size_t n = vcs_package_store_list_announce_summaries(
+        engine->store, summaries, VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    pthread_mutex_lock(&engine->lock);
+    struct swarm_peer *p = announce_peer(engine, peer);
+    if (!p) {
+        pthread_mutex_unlock(&engine->lock);
+        return 0;
+    }
+    bool retries = !announce_has_new(engine, p, summaries, n);
+    size_t queued = 0;
+    uint64_t announce_tick = engine->ticked ? engine->last_tick : 0;
+    for (size_t i = 0; i < n; i++) {
+        int announced = peer_announced_index(p, summaries[i].root);
+        if (announced >= 0 &&
+            !announce_retry_due(engine, p, announced, retries, announce_tick))
+            continue;
+        /* Advertise only what this node would actually serve. Announcing a
+         * root we would then refuse is worse than not announcing it: it
+         * spends the peer's request budget on an answer that cannot come. */
+        if (!vcs_swarm_public_serveable(engine, summaries[i].root, NULL))
+            continue;
+        /* New sends and retries share the sender's conservative rate budget:
+         * the receiver may have rejected the original at a full ad table. */
+        int keep = vcs_swarm_announce_plan(engine, p, summaries[i].root,
+                                           summaries, n);
+        if (keep < 0 || !announce_queue(engine, peer, &summaries[i]))
+            break;
+        vcs_swarm_announce_commit(p, keep, summaries[i].root);
+        p->announced_tick[keep] = announce_tick;
+        queued++;
+    }
+    pthread_mutex_unlock(&engine->lock);
+    return queued;
 }

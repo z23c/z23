@@ -96,10 +96,10 @@ struct swarm_peer {
      * signed-evidence expiry for an offer injected by peer_offer(). */
     uint64_t ad_expires_at[VCS_SWARM_MAX_PEER_ADS];
     size_t ad_count;
-    /* Roots WE already announced TO this peer (dedupe: repeat announce_to
-     * calls queue only newly complete roots, so the transport glue can
-     * call it on every membership sync without flooding the peer). */
+    /* Roots WE already announced TO this peer. Immediate repeat calls dedupe;
+     * announced_tick permits a bounded retry after a lost queue/wire frame. */
     uint8_t announced[VCS_SWARM_MAX_LOCAL_ANNOUNCES][32];
+    uint64_t announced_tick[VCS_SWARM_MAX_LOCAL_ANNOUNCES];
     size_t announced_count;
     /* Sliding window over the receiver's hourly unique-root budget: monotonic
      * seconds of the last 64 new-root sends (ring; 512 bytes per peer, so
