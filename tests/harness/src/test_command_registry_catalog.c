@@ -721,7 +721,11 @@ static int test_code_guide_brief(void)
 #if defined(__linux__)
         ASSERT(brief_epoch_checkout(next, root));
 #else
-        ASSERT_EQ(json_size(next), 2u);
+        for (size_t i = 0; i < json_size(next); ++i) {
+            const char *command = json_get_str(json_at(next, i));
+            ASSERT(command && !strstr(command, "--epoch_keep="));
+            ASSERT(!strstr(command, "z23 ops host gc --checkout="));
+        }
 #endif
         ASSERT(brief_array_has(next, "z23 ops host gc --apply=false"));
         zcl_command_reply_free(&reply);
