@@ -1077,6 +1077,40 @@ static int tl_newer_snapshot_test(const char *directory)
     return failures;
 }
 
+static bool tl_empty_summary(struct task_list *list, const char *expected)
+{
+    struct zcl_present_model_v1 model; char why[256];
+    return task_list_model(list, &model).ok && zcl_present_model_validate_v1(&model, why, sizeof(why)) &&
+        !strcmp(model.summary, expected);
+}
+static int tl_empty_render_test(struct task_list *list)
+{
+    const char *fallback = "Saved. No tasks yet - choose New task.";
+    struct task_update update = {0}; int failures = 0;
+    list->update = &update; update.active_valid = true; update.active_document = list->editor->saved;
+    (void)snprintf(update.active, sizeof(update.active), "Your workshop is ready. Add your first task.\n");
+    TE_CHECK("kept empty render is displayed", tl_empty_summary(list, "Your workshop is ready. Add your first task."));
+    update.active_valid = false;
+    TE_CHECK("unverified render falls back", tl_empty_summary(list, fallback));
+    update.active_valid = true; ++update.active_document.state.last_write;
+    TE_CHECK("different saved state falls back", tl_empty_summary(list, fallback));
+    update.active_document = list->editor->saved; ++update.active_document.undo.revision;
+    TE_CHECK("different Undo snapshot falls back", tl_empty_summary(list, fallback));
+    update.active_document = list->editor->saved;
+    (void)snprintf(update.active, sizeof(update.active), "first\nsecond\n");
+    TE_CHECK("multiline render falls back", tl_empty_summary(list, fallback));
+    (void)snprintf(update.active, sizeof(update.active), "bad\033text\n");
+    TE_CHECK("control render falls back", tl_empty_summary(list, fallback));
+    memset(update.active, 'x', sizeof(update.active));
+    TE_CHECK("unterminated render falls back", tl_empty_summary(list, fallback));
+    (void)snprintf(update.active, sizeof(update.active), "valid\n");
+    (void)snprintf(list->notice, sizeof(list->notice), "notice");
+    struct zcl_present_model_v1 model;
+    TE_CHECK("notice retains priority", task_list_model(list, &model).ok && strstr(model.summary, "notice"));
+    list->notice[0] = 0; list->update = NULL;
+    return failures;
+}
+
 static int tl_acceptance(const char *directory)
 {
     int failures = 0;
@@ -1088,6 +1122,7 @@ static int tl_acceptance(const char *directory)
     char error[256];
     TE_CHECK("empty list validates with obvious New action", task_list_model(&list, &model).ok &&
         zcl_present_model_validate_v1(&model, error, sizeof(error)) && strcmp(model.actions[0].label, "New task") == 0);
+    failures += tl_empty_render_test(&list);
     TE_CHECK("create twelve durable tasks", tl_populate(&editor) && editor.saved.state.count == 12);
     task_list_refresh(&list);
     TE_CHECK("End scrolls selected row into viewport", tl_key_test(&list, ZCL_PRESENT_INPUT_END, false) && list.selected == 11 && list.first == 4);

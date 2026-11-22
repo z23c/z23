@@ -277,6 +277,32 @@ static bool tl_update_ack_error_visible(const struct task_list *list)
          (list->update->phase == TASK_UPDATE_KEPT && list->update_ack_error));
 }
 
+/* The confined render belongs only to the exact state and Undo it observed. */
+static bool tl_same_state(const struct ta_state *a, const struct ta_state *b)
+{
+    unsigned char left[TA_PAYLOAD], right[TA_PAYLOAD]; uint32_t ln = 0, rn = 0;
+    return ta_state_encode(a, left, &ln) && ta_state_encode(b, right, &rn) &&
+        ln == rn && !memcmp(left, right, ln);
+}
+static bool tl_empty_render(const struct task_list *list, struct zcl_present_model_v1 *model)
+{
+    const struct task_update *update = list->update;
+    const struct task_document *saved = &list->editor->saved;
+    if (!update || !update->active_valid || update->active_document.state.count ||
+        update->active_document.can_undo != saved->can_undo ||
+        !tl_same_state(&update->active_document.state, &saved->state) ||
+        !tl_same_state(&update->active_document.undo, &saved->undo)) return false;
+    const char *end = memchr(update->active, 0, sizeof(update->active));
+    if (!end) return false;
+    size_t n = (size_t)(end - update->active);
+    if (n && update->active[n - 1] == '\n') --n;
+    if (!n || n >= sizeof(model->summary)) return false;
+    for (size_t i = 0; i < n; ++i)
+        if ((unsigned char)update->active[i] < 32 || (unsigned char)update->active[i] > 126) return false;
+    memcpy(model->summary, update->active, n); model->summary[n] = 0;
+    return true;
+}
+
 struct zcl_result task_list_model(const struct task_list *list, struct zcl_present_model_v1 *model)
 {
     if (!list || !list->editor || !model) return ZCL_ERR(-1, "task-list: visual owner and output required");
@@ -292,7 +318,7 @@ struct zcl_result task_list_model(const struct task_list *list, struct zcl_prese
         (void)snprintf(model->summary, sizeof(model->summary), "%.128s: %.127s", status, list->notice);
     } else if (tl_update_ack_error_visible(list)) {
         (void)snprintf(model->summary, sizeof(model->summary), "%.255s", list->update->message);
-    } else if (!count && list->editor->status == TASK_EDITOR_SAVED)
+    } else if (!count && list->editor->status == TASK_EDITOR_SAVED && !tl_empty_render(list, model))
         (void)snprintf(model->summary, sizeof(model->summary), "Saved. No tasks yet - choose New task.");
     tl_model_rows(list, model);
     tl_model_actions(list, model);
