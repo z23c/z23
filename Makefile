@@ -289,13 +289,16 @@ ZCL_WINDOWS_STANDALONE_GOALS := print-node-c23-srcs windows-acceptance-fixtures 
 ZCL_WINDOWS_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_WINDOWS_STANDALONE_GOALS),$(MAKECMDGOALS))),,1),)
 ZCL_ANDROID_STANDALONE_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS),$(MAKECMDGOALS))),,1),)
 
+# These wrappers only validate and recurse; child makes establish their own inputs.
+override ZCL_AGENT_VERIFY_WRAPPER_ONLY := $(if $(filter 1,$(words $(MAKECMDGOALS))),$(if $(filter agent-verify agent-verify-evidence,$(MAKECMDGOALS)),1,))
+
 ZCL_USE_CCACHE ?= 1
 # The compile cache ships in-tree (tools/zcc.c). Prefer it over any installed
 # sccache/ccache so every developer gets the same fast rebuilds with nothing
 # to install, and fall back to a host cache only if the in-tree one cannot be
 # built here. This is a parse-time $(shell) because $(CC) is fixed before the
 # first recipe runs; see tools/dev/zcc_bootstrap.sh for why and what it costs.
-ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ] && [ "$(ZCL_ANDROID_STANDALONE_ONLY)" != "1" ]; then \
+ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_AGENT_VERIFY_WRAPPER_ONLY)" != "1" ] && [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ] && [ "$(ZCL_ANDROID_STANDALONE_ONLY)" != "1" ]; then \
                               $(CURDIR)/tools/dev/zcc_bootstrap.sh 2>/dev/null \
                               || command -v sccache 2>/dev/null \
                               || command -v ccache 2>/dev/null; fi)
@@ -407,7 +410,7 @@ ZCL_GAME_INPUT_QUERY_ONLY := $(if $(filter print-game-closure,$(MAKECMDGOALS)),$
 # BUILD_SOURCE_RECORD below), so they deliberately stay out of
 # ZCL_HOTSWAP_LOOP_GOALS above (that set fakes a zero identity). This wider
 # set only gates the depfile-graph import skip.
-ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) check-capability-inventory-generated docs-proof-tools hotswap-module-so \
+ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) $(if $(ZCL_AGENT_VERIFY_WRAPPER_ONLY),$(MAKECMDGOALS)) check-capability-inventory-generated docs-proof-tools hotswap-module-so \
 	t-hotswap hotswap-test-so $(ZCL_GENERATED_HEADER_GOALS)
 ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),))
 
@@ -442,9 +445,11 @@ ifneq ($(ZCL_HOTSWAP_LOOP_ONLY),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
 ifneq ($(ZCL_GAME_INPUT_QUERY_ONLY),1)
+ifneq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)
 ZCL_TOOLCHAIN_RC := $(shell CC="$(CC)" tools/dev/check-toolchain.sh >/dev/null; printf '%s' $$?)
 ifneq ($(ZCL_TOOLCHAIN_RC),0)
 $(error C23 toolchain check failed — this project requires gcc 14 or newer)
+endif
 endif
 endif
 endif
@@ -514,7 +519,7 @@ ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 # Keep configured values (including deferred variable references) conservative:
 # the packer links zlib. Mixed node goals still require normal bootstrap.
 ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(if $(ZCL_AGENT_VERIFY_WRAPPER_ONLY),$(MAKECMDGOALS)) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -551,7 +556,7 @@ ifeq ($(strip $(MAKE_RESTARTS)),)
 ifeq ($(ZCL_HOTSWAP_LOOP_ONLY),)
 ifeq ($(ZCL_INVENTORY_LINT_ONLY),)
 ifeq ($(ZCL_GENERATED_HEADER_ONLY),)
-ifeq ($(ZCL_TIMINGS_HELPER_ONLY),)
+ifeq ($(ZCL_TIMINGS_HELPER_ONLY)$(ZCL_AGENT_VERIFY_WRAPPER_ONLY),)
 -include $(VIEW_BOOTSTRAP_MK)
 endif
 endif
@@ -608,7 +613,7 @@ endif
 # derives a new token, so cross-invocation supersession detection (a real
 # source edit between two separate builds) is untouched; see the session
 # cache in tools/dev/source-identity.sh.
-BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY)$(ZCL_GENERATED_HEADER_ONLY)$(ZCL_TIMINGS_HELPER_ONLY),1,)
+BUILD_EPOCH_CLEAN_ONLY := $(if $(ZCL_STANDALONE_CLEAN)$(ZCL_HOTSWAP_LOOP_ONLY)$(ZCL_INVENTORY_LINT_ONLY)$(ZCL_GENERATED_HEADER_ONLY)$(ZCL_TIMINGS_HELPER_ONLY)$(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1,)
 BUILD_INVOCATION_PID := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell printf '%s' $$PPID)))
 BUILD_INVOCATION_START := $(if $(BUILD_EPOCH_CLEAN_ONLY),0,$(strip $(shell tools/dev/process-start-token.sh '$(BUILD_INVOCATION_PID)' 2>/dev/null)))
 BUILD_INVOCATION_ID := $(if $(BUILD_EPOCH_CLEAN_ONLY),clean,$(strip $(shell printf '%s\0%s' '$(BUILD_INVOCATION_PID)' '$(BUILD_INVOCATION_START)' | sha256sum | awk '{print $$1}')))
@@ -753,8 +758,8 @@ BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else ifeq ($(ZCL_GENERATED_HEADER_ONLY),1)
 # Header-only recipes never stamp or publish a node artifact.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
-else ifeq ($(ZCL_TIMINGS_HELPER_ONLY),1)
-# The standalone timings helper does not consume this record.
+else ifneq ($(filter 1,$(ZCL_TIMINGS_HELPER_ONLY) $(ZCL_AGENT_VERIFY_WRAPPER_ONLY)),)
+# These standalone helpers do not consume this record.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else
 BUILD_SOURCE_RECORD := $(shell ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh capture-record 2>/dev/null || echo unknown 0 unknown)
@@ -1694,7 +1699,9 @@ endif
 # cross target is selected, so the default parse pays no shell call.
 ZCL_C_STD := c23
 ifneq ($(ZCL_CROSS_TRIPLE),)
+ifneq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)
 ZCL_C_STD := $(shell printf 'int main(void){return 0;}' | $(CC) -std=c23 -fsyntax-only -x c - >/dev/null 2>&1 && printf c23 || printf c2x)
+endif
 endif
 CFLAGS = -std=$(ZCL_C_STD) -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wextra -Werror -pedantic \
 	$(REPRO_CFLAGS) \
@@ -1720,7 +1727,11 @@ CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAG
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
+ifeq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)
+ZCL_DEV_LINKER :=
+else
 ZCL_DEV_LINKER ?= $(eval ZCL_DEV_LINKER := $(shell tools/dev/dev-linker-select.sh))$(ZCL_DEV_LINKER)
+endif
 # Frozen restart bases are `-r` prelinks and always use the platform linker
 # (no -fuse-ld): mold writes the 1.3 GB .bss of the test graph as real zero
 # bytes (base 1551 MB vs 207 MB with gold and 215 MB with GNU ld, same inputs,
@@ -1866,7 +1877,7 @@ ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-p
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
 	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe \
-	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
+	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(if $(ZCL_AGENT_VERIFY_WRAPPER_ONLY),$(MAKECMDGOALS)) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
 # Full lint links the dev verifier. Give lint-only builds their existing

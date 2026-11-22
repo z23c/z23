@@ -843,8 +843,9 @@ static int hooks_quiet_held_ready(struct hooks_fx *fx)
 #define BOOT_GUEST "build/gen/guest_kernel_data.c"
 #define BOOT_TAIL \
     ".DEFAULT_GOAL := z23\n" \
-    ".PHONY: git-hook git-hook-selftest install-hooks z23 unknown-goal " \
+    ".PHONY: agent-verify agent-verify-evidence git-hook git-hook-selftest install-hooks z23 unknown-goal " \
     "rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures\n" \
+    "agent-verify agent-verify-evidence:\n\t@touch wrapper-ran\n" \
     "git-hook git-hook-selftest install-hooks:\n\t@touch hook-ran\n" \
     BOOT_GUEST ":\n\t@touch guest-ran\n" \
     "rvmachine-public-fixtures-testbin test-rvmachine-public-fixtures:\n\t@touch fixture-ran\n" \
@@ -860,7 +861,7 @@ struct hooks_goal_case {
 };
 
 static const char *const k_boot_marks[] = {
-    "hook-ran", "node-ran", "vendor-ran", "vendor-ready.mk", "tor-ran",
+    "wrapper-ran", "hook-ran", "node-ran", "vendor-ran", "vendor-ready.mk", "tor-ran",
     "tor-ready.mk", "guest-ran", "fixture-ran", "vendor-count", "audit-count"};
 
 static int hooks_boot_scripts(const char *dir)
@@ -882,6 +883,7 @@ static int hooks_boot_scripts(const char *dir)
 static int hooks_boot_fixture(const char *dir)
 {
     static const char *const marks[][2] = {
+        {"\noverride ZCL_AGENT_VERIFY_WRAPPER_ONLY :=", "\n\nZCL_USE_CCACHE"},
         {"\nZCL_WINDOWS_LAUNCHER_GOALS :=", "\n# Generated view headers"},
         {"\nZCL_TOR_SKIP_GOALS :=", "\n# The stub is reachable"},
         {"\n# Link/release/deploy front door:", "\n# Build the real embedded onion service"}};
@@ -899,7 +901,7 @@ static int hooks_boot_fixture(const char *dir)
     f = fopen(out_path, "wb");
     bad = f == NULL;
     if (f) bad |= fputs("VENDOR_REPAIR_REQUESTED := $(filter vendor-ready deploy install,$(MAKECMDGOALS))\nDEP_AUDIT_BIN := ./audit\n", f) < 0;
-    for (i = 0; f && i < 3; i++) {
+    for (i = 0; f && i < 4; i++) {
         const char *s = strstr(mk, marks[i][0]);
         const char *e = s ? strstr(s, marks[i][1]) : NULL;
         bad |= !e || fwrite(s, 1, (size_t)(e - s), f) != (size_t)(e - s);
@@ -1037,6 +1039,10 @@ static int hooks_pin_checks(const struct hooks_fx *fx, const char *dir)
 static int hooks_boot_checks(struct hooks_fx *fx)
 {
     static const struct hooks_goal_case cases[] = {
+        {{"agent-verify"}, 0, "wrapper-ran"},
+        {{"agent-verify-evidence"}, 0, "wrapper-ran"},
+        {{"agent-verify", "z23"}, 1, "node-ran"},
+        {{"agent-verify-evidence", "z23"}, 1, "node-ran"},
         {{"git-hook"}, 0, "hook-ran"},
         {{"git-hook-selftest"}, 0, "hook-ran"},
         {{"install-hooks"}, 0, "hook-ran"},
