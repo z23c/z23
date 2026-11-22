@@ -296,4 +296,5 @@ QB_SCHEMA_STATEMENT(resident_legacy_copy,
 QB_SCHEMA_STATEMENT(resident_legacy_drop, "DROP TABLE resident_serving_legacy")
 QB_SCHEMA_STATEMENT(resident_durable_begin,
     "PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; BEGIN IMMEDIATE")
+QB_SCHEMA_STATEMENT(resident_readonly_locking, "PRAGMA locking_mode=EXCLUSIVE")
 #endif

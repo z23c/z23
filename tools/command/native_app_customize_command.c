@@ -8,6 +8,7 @@
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "models/package_resident.h"
 #include "json/json.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_object.h"
@@ -140,15 +141,57 @@ static bool ac_catalog_entry(struct ac_read *a, struct app_launch_entry *selecte
     return true;
 }
 /* No version is kept yet: name the two commands that make one. */
+/* Existing resident acceptance is the only source of the kept identity. */
+static bool ac_tasks_kept(const char *directory, struct package_resident_record *kept)
+{
+    struct package_resident_store store = {0};
+    struct zcl_result opened = package_resident_store_open_app_readonly(&store, directory, "local/tasks");
+    if (!opened.ok) return false;
+    struct zcl_result read = package_resident_record_read(&store, kept);
+    struct zcl_result closed = package_resident_store_close(&store);
+    return read.ok && closed.ok && kept->generation > 0;
+}
+
+static bool ac_tasks_source_next(struct zcl_command_reply *reply, const char *directory,
+                                 const struct package_resident_record *kept)
+{
+    struct json_value args; json_init(&args); json_set_object(&args);
+    bool ok = json_push_kv_str(&args, "root", kept->current.package_root) &&
+        json_push_kv_str(&args, "datadir", directory);
+    char wire[sizeof(reply->next[0].input_json)];
+    size_t n = ok ? json_write(&args, wire, sizeof(wire)) : 0;
+    bool added = false;
+    if (n && n < 384 && n < sizeof(wire) && !strchr(wire, '\''))
+        added = zcl_command_reply_add_next(reply, "zcode.package.show", wire,
+            "Inspect metadata for the kept package when its release is available locally.");
+    json_free(&args);
+    return added;
+}
+
+static bool ac_tasks_identity_facts(struct json_value *facts,
+                                    const struct package_resident_record *kept)
+{
+    return json_push_kv_str(facts, "kept_root", kept->current.package_root) &&
+        json_push_kv_str(facts, "kept_receipt", kept->current.receipt_id) &&
+        json_push_kv_int(facts, "kept_generation", kept->generation) &&
+        json_push_kv_str(facts, "kept_program", kept->current.program);
+}
+
 static void ac_tasks_recovery(struct zcl_command_reply *reply)
 {
     const char *directory = zcl_native_command_datadir();
     if (!directory || !directory[0]) return;
+    struct package_resident_record kept = {0};
+    bool have_kept = ac_tasks_kept(directory, &kept);
     struct json_value facts; json_init(&facts); json_set_object(&facts);
-    if (json_push_kv_str(&facts, "kind", "tasks-source-profile") &&
-        json_push_kv_str(&facts, "data_directory", directory))
-        (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    bool facts_ok = json_push_kv_str(&facts, "kind", "tasks-source-profile") &&
+        json_push_kv_str(&facts, "data_directory", directory);
+    if (have_kept) facts_ok = facts_ok && ac_tasks_identity_facts(&facts, &kept);
+    if (facts_ok) (void)json_push_kv(&reply->data, "failure_facts", &facts);
     json_free(&facts);
+    if (have_kept && ac_tasks_source_next(reply, directory, &kept))
+        (void)snprintf(reply->error.message, sizeof(reply->error.message),
+            "A kept Tasks program exists. Inspect its package metadata using the first next action.");
     struct json_value next_args; json_init(&next_args); json_set_object(&next_args);
     bool ok = json_push_kv_str(&next_args, "action", "offer-status") &&
         json_push_kv_str(&next_args, "datadir", directory);

@@ -23,6 +23,7 @@
 #include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 #include "config/command_catalog.h"
+#include "models/package_resident.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "plugin/plugin_dist.h"
@@ -802,6 +803,99 @@ static bool act_tasks_source_hint(struct ac_fixture *f)
     return ok && found && unsafe;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+static bool act_tasks_kept_facts(struct abc_leaf *l, const struct package_resident_identity *id,
+                                 int64_t generation)
+{
+    const struct json_value *facts = json_get(&l->out.data, "failure_facts");
+    const char *root = json_get_str(json_get(facts, "kept_root"));
+    const char *receipt = json_get_str(json_get(facts, "kept_receipt"));
+    const char *program = json_get_str(json_get(facts, "kept_program"));
+    return root && receipt && program && !strcmp(root, id->package_root) &&
+        !strcmp(receipt, id->receipt_id) && !strcmp(program, id->program) &&
+        json_get_int(json_get(facts, "kept_generation")) == generation;
+}
+
+static bool act_tasks_kept_next(struct abc_leaf *l, const char *directory, const char *root)
+{
+    if (!l->out.next_count || strcmp(l->out.next[0].command, "zcode.package.show") ||
+        !strstr(l->out.error.message, "first next action")) return false;
+    for (size_t i = 0; i < l->out.next_count; ++i)
+        if (!strcmp(l->out.next[i].command, "zcode.package.show") &&
+            strstr(l->out.next[i].input_json, root) &&
+            strstr(l->out.next[i].input_json, directory)) return true;
+    return false;
+}
+
+static bool act_tasks_kept_wire(struct abc_leaf *l, const struct package_resident_identity *id)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.customize", NULL);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &l->out, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool parsed = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+    const char *root = json_get_str(json_get(facts, "kept_root"));
+    const char *receipt = json_get_str(json_get(facts, "kept_receipt"));
+    bool ok = parsed && root && receipt && !strcmp(root, id->package_root) && !strcmp(receipt, id->receipt_id);
+    json_free(&doc); return ok;
+}
+
+static bool act_tasks_kept_seed(const char *directory, struct package_resident_identity *id,
+                                struct package_resident_record *row)
+{
+    memset(id->package_root, 'a', 64); memset(id->receipt_id, 'b', 64);
+    memset(id->artifact_sha3, 'c', 64);
+    (void)snprintf(id->program, sizeof(id->program), "bin/ztasks"); id->configuration_generation = 1;
+    const char *nonce = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    struct package_resident_store store = {0};
+    bool ok = package_resident_store_open_app(&store, directory, "local/tasks").ok &&
+        package_resident_record_begin(&store, 0, row).ok &&
+        package_resident_record_accept(&store, row->revision, 0, id, nonce, 1, row).ok &&
+        package_resident_record_activate(&store, row->revision, 0, nonce, 1, row).ok;
+    return package_resident_store_close(&store).ok && ok;
+}
+
+static bool act_tasks_locked_fallback(const char *directory)
+{
+    struct package_resident_store writer = {0};
+    if (!package_resident_store_open_app(&writer, directory, "local/tasks").ok) return false;
+    bool ok = sqlite3_exec(writer.db, "BEGIN EXCLUSIVE", NULL, NULL, NULL) == SQLITE_OK;
+    int64_t before = platform_time_monotonic_us();
+    struct abc_leaf l; abc_open(&l);
+    ok = json_push_kv_str(&l.in, "name", "tasks") && act_result(&l, "SELECTION_REQUIRED") && ok;
+    int64_t elapsed = platform_time_monotonic_us() - before;
+    const struct json_value *facts = json_get(&l.out.data, "failure_facts");
+    ok = ok && elapsed >= 0 && elapsed < 1000000 && l.out.next_count > 0 &&
+        !strcmp(l.out.next[0].command, "app.tasks") && !json_get(facts, "kept_root");
+    abc_close(&l);
+    if (sqlite3_exec(writer.db, "ROLLBACK", NULL, NULL, NULL) != SQLITE_OK) ok = false;
+    return package_resident_store_close(&writer).ok && ok;
+}
+
+static bool act_tasks_kept_hint(void)
+{
+    char directory[PATH_MAX], package[PATH_MAX], db[PATH_MAX], old[4096];
+    if (!test_mkdtemp(directory, sizeof(directory), "tasks_kept_hint")) return false;
+    if (snprintf(package, sizeof(package), "%s/zcode", directory) >= (int)sizeof(package) ||
+        snprintf(db, sizeof(db), "%s/resident.db", package) >= (int)sizeof(db) || mkdir(package, 0700)) return false;
+    struct package_resident_identity id = {0};
+    struct package_resident_record row = {0};
+    bool ok = act_tasks_kept_seed(directory, &id, &row);
+    (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+    int port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(directory, port);
+    struct abc_leaf l; abc_open(&l);
+    ok = json_push_kv_str(&l.in, "name", "tasks") && act_result(&l, "SELECTION_REQUIRED") && ok;
+    ok = act_tasks_kept_facts(&l, &id, row.generation) && act_tasks_kept_wire(&l, &id) && ok;
+    bool found = act_tasks_kept_next(&l, directory, id.package_root);
+    abc_close(&l);
+    ok = act_tasks_locked_fallback(directory) && ok; zcl_native_bridge_bind_rpc(old, port);
+    bool removed = unlink(db) == 0 && rmdir(package) == 0 && rmdir(directory) == 0;
+    return ok && found && removed;
+}
+
+#endif
+
 static bool act_selection_refusal(struct ac_fixture *f)
 {
     char path[1600], saved[1620];
@@ -1509,6 +1603,9 @@ int test_app_customize(void)
         ASSERT(act_blob_refusal(&f));
         ASSERT(act_selection_refusal(&f));
         ASSERT(act_tasks_source_hint(&f));
+#if defined(__linux__) || defined(__APPLE__)
+        ASSERT(act_tasks_kept_hint());
+#endif
         ASSERT(act_no_grant(&f));
         ASSERT(act_reader_bounds(&f));
         ASSERT(act_alias_refusal(&f, false));

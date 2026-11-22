@@ -2,7 +2,9 @@
  * purpose: test deterministic crash and successor boundaries for serving acceptance. */
 #include "test/test_core.h"
 #include "models/package_resident.h"
+#include "crypto/sha256.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -484,6 +486,188 @@ static int pr_test_named_rollback_crash(struct pr_test_state *t)
     return failures;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+static int pr_test_readonly_absent(struct pr_test_state *t)
+{
+    int failures = 0;
+    char path[512];
+    (void)snprintf(path, sizeof(path), "%s/zcode/resident.db", t->directory);
+    struct package_resident_store reader = {0};
+    char missing[512]; (void)snprintf(missing, sizeof(missing), "%s/missing", t->directory);
+    PR_CHECK("readonly refuses absent profile",
+        !package_resident_store_open_app_readonly(&reader, missing, "local/tasks").ok);
+    PR_CHECK("readonly creates no profile", access(missing, F_OK) != 0 && errno == ENOENT);
+    PR_CHECK("readonly refuses absent database",
+        !package_resident_store_open_app_readonly(&reader, t->directory, "local/tasks").ok);
+    PR_CHECK("readonly absence creates no database", access(path, F_OK) != 0 && errno == ENOENT);
+    PR_CHECK("readonly absent cleanup", package_resident_store_close(&reader).ok);
+    sqlite3 *empty = NULL;
+    PR_CHECK("empty database fixture", sqlite3_open(path, &empty) == SQLITE_OK);
+    PR_CHECK("empty database initialized", sqlite3_exec(empty, "CREATE TABLE other(v)", NULL, NULL, NULL) == SQLITE_OK);
+    PR_CHECK("empty database fixture closes", sqlite3_close(empty) == SQLITE_OK);
+    PR_CHECK("readonly opens existing empty database",
+        package_resident_store_open_app_readonly(&reader, t->directory, "local/tasks").ok);
+    struct package_resident_record row = {0};
+    PR_CHECK("readonly refuses missing schema", !package_resident_record_read(&reader, &row).ok);
+    PR_CHECK("readonly closes empty database", package_resident_store_close(&reader).ok);
+    PR_CHECK("empty database fixture removed", unlink(path) == 0);
+    return failures;
+}
+
+static bool pr_hash(const char *path, unsigned char digest[32])
+{
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    struct sha256_ctx hash; sha256_init(&hash);
+    unsigned char buffer[4096]; size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), f)) != 0) sha256_write(&hash, buffer, n);
+    bool ok = !ferror(f); if (fclose(f) != 0) ok = false;
+    if (ok) sha256_finalize(&hash, digest);
+    return ok;
+}
+
+static int pr_test_readonly_refusals(void)
+{
+    int failures = 0; struct pr_test_state t;
+    if (!pr_test_setup(&t)) return 1;
+    char path[512], wal[520], package[512];
+    (void)snprintf(path, sizeof(path), "%s/zcode/resident.db", t.directory);
+    (void)snprintf(wal, sizeof(wal), "%s-wal", path);
+    (void)snprintf(package, sizeof(package), "%s/zcode", t.directory);
+    sqlite3 *db = NULL; struct package_resident_store reader = {0};
+    PR_CHECK("refusal fixture database", sqlite3_open(path, &db) == SQLITE_OK &&
+        sqlite3_exec(db, "CREATE TABLE sample(v)", NULL, NULL, NULL) == SQLITE_OK && sqlite3_close(db) == SQLITE_OK);
+    FILE *f = fopen(wal, "wb");
+    bool made = f && fwrite("stale", 1, 5, f) == 5; if (f && fclose(f) != 0) made = false;
+    unsigned char before[32], after[32];
+    PR_CHECK("stale WAL fixture", made && pr_hash(wal, before));
+    PR_CHECK("readonly refuses stale WAL", !package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok);
+    PR_CHECK("stale WAL bytes retained", pr_hash(wal, after) && !memcmp(before, after, 32) && unlink(wal) == 0);
+    PR_CHECK("unsafe database mode fixture", chmod(path, 0666) == 0);
+    PR_CHECK("readonly refuses unsafe database mode", !package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok);
+    PR_CHECK("unsafe fixture reset", chmod(path, 0600) == 0 && unlink(path) == 0);
+    PR_CHECK("nonregular FIFO fixture", mkfifo(path, 0600) == 0);
+    PR_CHECK("readonly refuses FIFO", !package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok);
+    PR_CHECK("FIFO fixture reset", unlink(path) == 0);
+    PR_CHECK("symlink fixture", symlink("/dev/null", path) == 0);
+    PR_CHECK("readonly refuses symlink", !package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok);
+    PR_CHECK("refusal fixture cleanup", unlink(path) == 0 && rmdir(package) == 0 && rmdir(t.directory) == 0);
+    return failures;
+}
+
+static bool pr_make_hot_journal(const char *path)
+{
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        sqlite3 *db = NULL;
+        if (sqlite3_open(path, &db) != SQLITE_OK || sqlite3_exec(db,
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA cache_size=3; "
+            "CREATE TABLE scratch_guard(v BLOB); INSERT INTO scratch_guard VALUES(zeroblob(16384)); "
+            "BEGIN IMMEDIATE; UPDATE scratch_guard SET v=randomblob(16384)", NULL, NULL, NULL) != SQLITE_OK ||
+            sqlite3_db_cacheflush(db) != SQLITE_OK) _exit(1);
+        _exit(0);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int pr_test_readonly_hot(void)
+{
+    int failures = 0; struct pr_test_state t;
+    if (!pr_test_setup(&t)) return 1;
+    char path[512], journal[520], package[512];
+    (void)snprintf(path, sizeof(path), "%s/zcode/resident.db", t.directory);
+    (void)snprintf(journal, sizeof(journal), "%s-journal", path);
+    (void)snprintf(package, sizeof(package), "%s/zcode", t.directory);
+    PR_CHECK("hot journal fixture", pr_make_hot_journal(path));
+    static const unsigned char magic[8] = {0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7};
+    unsigned char actual[8]; FILE *hot = fopen(journal, "rb");
+    bool hot_header = hot && fread(actual, 1, sizeof(actual), hot) == sizeof(actual) && !memcmp(actual, magic, sizeof(magic));
+    if (hot && fclose(hot) != 0) hot_header = false;
+    PR_CHECK("fixture journal is hot", hot_header);
+    unsigned char db_before[32], journal_before[32], db_after[32], journal_after[32];
+    PR_CHECK("hot journal hashes", pr_hash(path, db_before) && pr_hash(journal, journal_before));
+    struct package_resident_store reader = {0}; struct package_resident_record row = {0};
+    bool opened = package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok;
+    PR_CHECK("readonly refuses hot recovery", !opened || !package_resident_record_read(&reader, &row).ok);
+    PR_CHECK("hot readonly closes", package_resident_store_close(&reader).ok);
+    PR_CHECK("hot database and journal bytes unchanged", pr_hash(path, db_after) && pr_hash(journal, journal_after) &&
+        !memcmp(db_before, db_after, 32) && !memcmp(journal_before, journal_after, 32));
+    PR_CHECK("hot fixture cleanup", unlink(journal) == 0 && unlink(path) == 0 && rmdir(package) == 0 && rmdir(t.directory) == 0);
+    return failures;
+}
+
+static int pr_test_readonly_wal(void)
+{
+    int failures = 0; struct pr_test_state t;
+    if (!pr_test_setup(&t)) return 1;
+    char path[512], wal[520], shm[520];
+    (void)snprintf(path, sizeof(path), "%s/zcode/resident.db", t.directory);
+    (void)snprintf(wal, sizeof(wal), "%s-wal", path);
+    (void)snprintf(shm, sizeof(shm), "%s-shm", path);
+    sqlite3 *writer = NULL; struct package_resident_store reader = {0};
+    PR_CHECK("WAL fixture open", sqlite3_open(path, &writer) == SQLITE_OK);
+    PR_CHECK("WAL fixture writes", sqlite3_exec(writer, "PRAGMA journal_mode=WAL; CREATE TABLE sample(v); INSERT INTO sample VALUES(1)", NULL, NULL, NULL) == SQLITE_OK);
+    unsigned char before_wal[32], before_shm[32], after_wal[32], after_shm[32];
+    PR_CHECK("WAL fixture sidecars present", pr_hash(wal, before_wal) && pr_hash(shm, before_shm));
+    PR_CHECK("readonly refuses live WAL", !package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok);
+    PR_CHECK("WAL sidecars untouched", pr_hash(wal, after_wal) && pr_hash(shm, after_shm) &&
+        !memcmp(before_wal, after_wal, 32) && !memcmp(before_shm, after_shm, 32));
+    PR_CHECK("WAL writer closes", sqlite3_close(writer) == SQLITE_OK);
+    PR_CHECK("WAL sidecars absent after close", access(wal, F_OK) != 0 && errno == ENOENT && access(shm, F_OK) != 0 && errno == ENOENT);
+    PR_CHECK("readonly refuses WAL header", !package_resident_store_open_app_readonly(&reader, t.directory, "local/tasks").ok);
+    PR_CHECK("readonly creates no WAL sidecars", access(wal, F_OK) != 0 && errno == ENOENT && access(shm, F_OK) != 0 && errno == ENOENT);
+    PR_CHECK("WAL reader closes", package_resident_store_close(&reader).ok);
+    char package[512]; (void)snprintf(package, sizeof(package), "%s/zcode", t.directory);
+    PR_CHECK("WAL fixture cleanup", unlink(path) == 0 && rmdir(package) == 0 && rmdir(t.directory) == 0);
+    return failures;
+}
+
+static bool pr_reserved_lock(const char *directory, bool expected)
+{
+    char path[512];
+    if (snprintf(path, sizeof(path), "%s/zcode/resident.db", directory) >= (int)sizeof(path)) return false;
+    pid_t parent = getpid(), child = fork();
+    if (child < 0) return false;
+    if (!child) {
+        int fd = open(path, O_RDONLY | O_NOFOLLOW);
+        if (fd < 0) _exit(2);
+        struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET,
+            .l_start = 1073741825, .l_len = 1 };
+        int rc = fcntl(fd, F_GETLK, &lock);
+        bool matched = rc == 0 && (expected ? lock.l_type == F_WRLCK && lock.l_pid == parent : lock.l_type == F_UNLCK);
+        (void)close(fd); _exit(matched ? 0 : 1);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static int pr_test_readonly_existing(struct pr_test_state *t)
+{
+    int failures = 0;
+    struct package_resident_store reader = {0};
+    struct package_resident_record row = {0};
+    PR_CHECK("readonly writer active", sqlite3_exec(t->store.db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
+    PR_CHECK("writer makes uncommitted change", sqlite3_exec(t->store.db, "UPDATE resident_serving SET revision=revision+1", NULL, NULL, NULL) == SQLITE_OK);
+    PR_CHECK("other writer blocked before lookup", pr_reserved_lock(t->directory, true));
+    PR_CHECK("readonly opens existing", package_resident_store_open_app_readonly(&reader, t->directory, "local/tasks").ok);
+    PR_CHECK("readonly sees committed identity during writer",
+        package_resident_record_read(&reader, &row).ok && row.generation == t->row.generation && row.revision == t->row.revision &&
+        package_resident_identity_equal(&row.current, &t->row.current));
+    PR_CHECK("readonly rejects write", sqlite3_exec(reader.db, "DELETE FROM resident_serving", NULL, NULL, NULL) == SQLITE_READONLY);
+    PR_CHECK("readonly closes while writer active", package_resident_store_close(&reader).ok);
+    PR_CHECK("other writer remains blocked after reader close", pr_reserved_lock(t->directory, true));
+    PR_CHECK("readonly writer rollback", sqlite3_exec(t->store.db, "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK);
+    PR_CHECK("reserved lock released after rollback", pr_reserved_lock(t->directory, false));
+    PR_CHECK("readonly reopens after writer", package_resident_store_open_app_readonly(&reader, t->directory, "local/tasks").ok);
+    PR_CHECK("readonly model mutation refuses",
+        !package_resident_record_begin(&reader, row.generation, &row).ok && sqlite3_get_autocommit(reader.db));
+    PR_CHECK("readonly closes", package_resident_store_close(&reader).ok);
+    return failures;
+}
+
+#endif
+
 static int pr_test_named_all(struct pr_test_state *t)
 {
     int failures = pr_test_named_first(t);
@@ -530,7 +714,16 @@ int test_package_resident_record(void)
     int failures = pr_test_legacy_all(&test);
     failures += pr_test_cleanup(&test);
     if (!pr_test_setup(&test)) return failures + 1;
+#if defined(__linux__) || defined(__APPLE__)
+    failures += pr_test_readonly_absent(&test);
+#endif
     failures += pr_test_named_all(&test);
+#if defined(__linux__) || defined(__APPLE__)
+    failures += pr_test_readonly_existing(&test);
+    failures += pr_test_readonly_wal();
+    failures += pr_test_readonly_hot();
+    failures += pr_test_readonly_refusals();
+#endif
     failures += pr_test_cleanup(&test);
     if (!pr_test_setup(&test)) return failures + 1;
     failures += pr_test_migration(&test);

@@ -538,6 +538,67 @@ struct zcl_result package_resident_store_open_app(
     return ZCL_OK;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+/* Refuse present WAL sidecars before SQLite opens the main database. */
+static bool pr_readonly_rollback_file(const char *path)
+{
+    char sidecar[4648]; struct stat st;
+    const char *suffixes[] = { "-wal", "-shm" };
+    for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+        int n = snprintf(sidecar, sizeof(sidecar), "%s%s", path, suffixes[i]);
+        if (n < 0 || (size_t)n >= sizeof(sidecar) ||
+            lstat(sidecar, &st) == 0 || errno != ENOENT) return false;
+    }
+    return true;
+}
+
+static bool pr_readonly_rollback_header(sqlite3 *db)
+{
+    sqlite3_file *file = NULL;
+    unsigned char header[100];
+    return sqlite3_file_control(db, "main", SQLITE_FCNTL_FILE_POINTER, &file) == SQLITE_OK &&
+        file && file->pMethods && file->pMethods->xRead &&
+        file->pMethods->xRead(file, header, sizeof(header), 0) == SQLITE_OK &&
+        !memcmp(header, "SQLite format 3\0", 16) && header[18] == 1 && header[19] == 1;
+}
+
+/* Must run before the first pager read so WAL never enables shared memory. */
+static bool pr_readonly_locking_mode(sqlite3 *db)
+{
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(db, qb_schema_sql(QB_S_resident_readonly_locking), -1, &statement, NULL) != SQLITE_OK) return false;
+    int rc = AR_STEP_ROW_READONLY(statement);
+    const unsigned char *mode = rc == SQLITE_ROW ? sqlite3_column_text(statement, 0) : NULL;
+    bool ok = mode && !strcmp((const char *)mode, "exclusive");
+    if (sqlite3_finalize(statement) != SQLITE_OK) ok = false;
+    return ok;
+}
+#endif
+
+struct zcl_result package_resident_store_open_app_readonly(
+    struct package_resident_store *store, const char *datadir, const char *app)
+{
+    if (!store || store->db || !datadir || datadir[0] != '/' || !pr_app_valid(app))
+        return ZCL_ERR(-1, "resident-store: explicit directory and named app required");
+#if !defined(__linux__) && !defined(__APPLE__)
+    return ZCL_ERR(-1, "resident-store: safe live reader unavailable on this platform");
+#else
+    char path[4640];
+    ZCL_CHECK(pr_database_path(datadir, path));
+    if (!pr_readonly_rollback_file(path))
+        return ZCL_ERR(-1, "resident-store: rollback-only reader refused database or sidecars");
+    int flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW;
+    if (sqlite3_open_v2(path, &store->db, flags, "unix") != SQLITE_OK ||
+        !pr_readonly_locking_mode(store->db) || !pr_readonly_rollback_header(store->db)) {
+        struct zcl_result cleanup = package_resident_store_close(store);
+        if (!cleanup.ok) return cleanup;
+        return ZCL_ERR(-1, "resident-store: existing database open refused");
+    }
+    (void)snprintf(store->app, sizeof(store->app), "%s", app);
+    return ZCL_OK;
+#endif
+}
+
 static struct zcl_result pr_named_begin(struct package_resident_store *store,
     int64_t ticket, int64_t expected_generation, struct package_resident_record *out)
 {
