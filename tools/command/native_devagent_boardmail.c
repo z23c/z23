@@ -1017,25 +1017,32 @@ struct bm_inbox_scan {
     bool skip, found, complete;
 };
 
-static void bm_inbox_scan_byte(struct bm_inbox_scan *s, char ch)
+static void bm_inbox_scan_chunk(struct bm_inbox_scan *s, const char *buf, size_t n)
 {
-    if (ch != '\n') {
-        s->complete = false;
-        if (s->skip)
-            return;
-        if (s->used < BM_LINE_CAP)
-            s->line[s->used++] = ch;
-        else {
-            s->used = 0;
-            s->skip = true;
+    while (n && !s->found) {
+        const char *newline = memchr(buf, '\n', n);
+        size_t part = newline ? (size_t)(newline - buf) : n;
+        if (part) {
+            s->complete = false;
+            if (!s->skip) {
+                if (part > BM_LINE_CAP - s->used) {
+                    s->used = 0;
+                    s->skip = true;
+                } else {
+                    memcpy(s->line + s->used, buf, part);
+                    s->used += part;
+                }
+            }
         }
-        return;
+        if (!newline) return;
+        s->complete = true;
+        if (!s->skip && bm_inbox_match(s->line, s->used, s->text))
+            s->found = true;
+        s->used = 0;
+        s->skip = false;
+        buf = newline + 1;
+        n -= part + 1;
     }
-    s->complete = true;
-    if (!s->skip && !s->found && bm_inbox_match(s->line, s->used, s->text))
-        s->found = true;
-    s->used = 0;
-    s->skip = false;
 }
 
 static bool bm_inbox_scan_locked(struct platform_private_file *file,
@@ -1059,8 +1066,7 @@ static bool bm_inbox_scan_locked(struct platform_private_file *file,
         size_t n = size - off > sizeof(buf) ? sizeof(buf) : (size_t)(size - off);
         if (!platform_private_file_read_at(file, buf, n, off))
             return false;
-        for (size_t i = 0; i < n && !s.found; i++)
-            bm_inbox_scan_byte(&s, buf[i]);
+        bm_inbox_scan_chunk(&s, buf, n);
         off += n;
     }
     *found = s.found;
