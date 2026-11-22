@@ -409,6 +409,7 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
     struct obj_outcomes_stats *stats, struct obj_train_stats *train,
     struct zcl_objective_value *v)
 {
+    memset(train, 0, sizeof *train);
     struct zcl_objectives_landing_cache *c = options ? options->landing_cache : NULL;
     if (!c) {
         if (!obj_newest_landed_train(options, use, path, path_cap, stats, v))
@@ -437,7 +438,6 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
         return false;
     }
     memset(stats, 0, sizeof *stats);
-    memset(train, 0, sizeof *train);
     stats->last_landed_at = c->landed_at;
     train->found = c->found;
     train->earliest_epoch = c->earliest;
@@ -454,7 +454,6 @@ static struct zcl_objective_value obj_landing_latency_s(
     char path[512];
     const char *use;
 
-    memset(&train, 0, sizeof train);
     bool observed = obj_landing_observe(options, &use, path, sizeof path,
                                         &stats, &train, &v);
     if (!observed && v.reason[0]) return v;
@@ -490,7 +489,6 @@ static struct zcl_objective_value obj_landing_attempts_per_train(
     char path[512];
     const char *use;
 
-    memset(&train, 0, sizeof train);
     bool observed = obj_landing_observe(options, &use, path, sizeof path,
                                         &stats, &train, &v);
     if (!observed && v.reason[0]) return v;
