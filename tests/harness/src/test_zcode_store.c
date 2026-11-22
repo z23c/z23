@@ -39,6 +39,8 @@
 #include "test/test_core.h"
 
 #include "models/build_fabric.h"
+#include "platform/private_file.h"
+#include "platform/time_compat.h"
 #include "services/build_fabric_cache.h"
 #include "services/build_fabric_service.h"
 #include "vcs/build_action.h"
@@ -1577,6 +1579,23 @@ static int store_case_chain_legacy_empty_and_damaged(void)
 }
 #endif
 
+#if !defined(_WIN32)
+static int store_case_binding_flush(void)
+{
+    int failures = 0; char dir[512] = {0};
+    bool made = test_mkdtemp(dir, sizeof(dir), "store_binding_flush") != NULL;
+    unsigned long before = platform_private_flush_events();
+    int64_t start = platform_time_monotonic_us();
+    struct vcs_package_store *store = made ? vcs_package_store_open(dir, 1000000) : NULL;
+    int64_t elapsed = platform_time_monotonic_us() - start;
+    unsigned long count = platform_private_flush_events() - before;
+    printf("  chain binding fresh open: flushes=%lu elapsed_us=%lld\n", count, (long long)elapsed);
+    ZS_CHECK("fresh chain binding flushes its staged file exactly once", store && count == 1);
+    if (store) vcs_package_store_close(store);
+    if (made) test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
 int test_zcode_store(void)
 {
     printf("\n=== zcode_store: local content-addressed package store ===\n");
@@ -1606,6 +1625,7 @@ int test_zcode_store(void)
     failures += t_store_possession_scheduler();
     failures += t_store_releases();
 #if !defined(_WIN32)
+    failures += store_case_binding_flush();
     failures += store_case_cross_chain_writer();
     failures += store_case_chain_legacy();
     failures += store_case_chain_marker_refusal();

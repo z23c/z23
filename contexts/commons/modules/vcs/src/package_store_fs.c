@@ -135,7 +135,7 @@ static bool store_chain_publish(struct vcs_package_store *store, const char *pat
     struct platform_private_file file; platform_private_file_init(&file);
     bool created = platform_private_file_create(temp, &file), exists = false;
     bool ok = created && platform_private_file_write_at(&file, text, len, 0) &&
-        platform_private_file_truncate(&file, len) && platform_private_file_flush(&file) &&
+        platform_private_file_truncate(&file, len) &&
         platform_private_file_publish_no_clobber(&file, temp, path, &exists);
     if (created && (!ok || exists)) (void)platform_private_file_retire(&file, temp);
     platform_private_file_close(&file);
