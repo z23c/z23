@@ -974,15 +974,17 @@ static bool rcmd_main_case(const char *binary, const char *repo, const char *loc
                            const char *base, const char *code, const char *expected)
 {
     char input[512], out[16384];
+    char pin[96] = "";
+    if (base) (void)snprintf(pin, sizeof(pin), ",\"remote_base\":\"%s\"", base);
     int n = snprintf(input, sizeof(input),
-        "--input={\"operation\":\"check_main\",\"local_commit\":\"%s\",\"remote_base\":\"%s\"}",
-        local, base);
+        "--input={\"operation\":\"check_main\",\"local_commit\":\"%s\"%s}",
+        local, pin);
     if (n <= 0 || (size_t)n >= sizeof(input)) return false;
     int rc = rcmd_run(binary, repo, input, out, sizeof(out));
     struct json_value envelope = {0};
     bool ok = json_read(&envelope, out, strlen(out));
     const struct json_value *item = json_get(&envelope, code ? "error" : "data");
-    ok = ok && rcmd_main_reply(item, rc, local, base, code, expected);
+    ok = ok && rcmd_main_reply(item, rc, local, base ? base : expected, code, expected);
     json_free(&envelope);
     if (!ok) printf("check_main %s: rc=%d output=%s\n", code ? code : "CURRENT", rc, out);
     return ok;
@@ -1070,11 +1072,16 @@ static bool rcmd_main_freshness(struct rcmd_main_fixture *f, const char *binary)
     return rcmd_main_history(f->repo, f->root, f->base, f->tip) &&
         RPP_GIT(f->repo, NULL, 0, "push", "-q", "origin", "refs/heads/fixture:refs/heads/main") &&
         rcmd_main_case(binary, f->repo, f->tip, f->base, "REMOTE_MAIN_STALE", f->tip) &&
+        rcmd_main_case(binary, f->repo, f->tip, NULL, NULL, f->tip) &&
+        rcmd_main_case(binary, f->repo, f->tip, "2222222222222222222222222222222222222222",
+                       "REMOTE_MAIN_STALE", f->tip) &&
         rcmd_main_case(binary, f->repo, f->tip, f->tip, NULL, NULL) &&
         RPP_GIT(f->repo, f->next, sizeof(f->next), "commit-tree", f->tree, "-p", f->tip, "-m", "next") &&
         RPP_GIT(f->repo, NULL, 0, "update-ref", "refs/heads/fixture", f->next) &&
         RPP_GIT(f->repo, NULL, 0, "push", "-q", "origin", "refs/heads/fixture:refs/heads/main") &&
-        rcmd_main_case(binary, f->repo, f->next, f->tip, "REMOTE_MAIN_STALE", f->next);
+        rcmd_main_case(binary, f->repo, f->next, f->tip, "REMOTE_MAIN_STALE", f->next) &&
+        rcmd_main_case(binary, f->repo, f->next, NULL, NULL, f->next) &&
+        rcmd_main_case(binary, f->repo, f->tip, NULL, "REMOTE_MAIN_DIVERGED", f->next);
 }
 
 static bool rcmd_main_bad_objects(struct rcmd_main_fixture *f, const char *binary)
@@ -1090,6 +1097,82 @@ static bool rcmd_main_bad_objects(struct rcmd_main_fixture *f, const char *binar
         rcmd_main_extra(binary, f->repo, f->next);
 }
 
+/* HEAD, every ref and the worktree of a receiver, flattened for before/after comparison. */
+static bool rcmd_main_state(const char *repo, char out[1700])
+{
+    char head[80] = "", refs[1200] = "", status[300] = "";
+    if (!RPP_GIT(repo, head, sizeof(head), "rev-parse", "HEAD") ||
+        !RPP_GIT(repo, refs, sizeof(refs), "for-each-ref", "--format=%(refname) %(objectname)") ||
+        !RPP_GIT(repo, status, sizeof(status), "status", "--porcelain")) return false;
+    return snprintf(out, 1700, "%s|%s|%s", head, refs, status) < 1700;
+}
+
+static bool rcmd_main_corrupt_origin(const char *remote, const char *oid)
+{
+    char path[1400], dir[1400];
+    if (snprintf(dir, sizeof(dir), "%s/objects/%.2s", remote, oid) >= (int)sizeof(dir) ||
+        snprintf(path, sizeof(path), "%s/%s", dir, oid + 2) >= (int)sizeof(path)) return false;
+    (void)chmod(path, 0600);
+    FILE *file = fopen(path, "w");
+    if (!file) return false;
+    bool ok = fputs("not a git object\n", file) >= 0;
+    return fclose(file) == 0 && ok;
+}
+
+struct rcmd_main_stale {
+    char repo[1200], marker[1400], ahead[65], before[1700], after[1700];
+};
+
+static bool rcmd_main_unchanged(struct rcmd_main_stale *s)
+{
+    return rcmd_main_state(s->repo, s->after) && !strcmp(s->before, s->after) &&
+        access(s->marker, F_OK) != 0;
+}
+
+static bool rcmd_main_fetch_pass(struct rcmd_main_fixture *f, struct rcmd_main_stale *s,
+                                 const char *binary)
+{
+    char kind[16];
+    if (!rpp_path(s->repo, sizeof(s->repo), f->root, "stale") ||
+        !rpp_path(s->marker, sizeof(s->marker), s->repo, ".git/FETCH_HEAD") ||
+        !RPP_GIT(f->root, NULL, 0, "clone", "-q", f->remote, s->repo) ||
+        !RPP_GIT(f->repo, s->ahead, sizeof(s->ahead), "commit-tree", f->tree, "-p", f->next, "-m", "ahead") ||
+        !RPP_GIT(f->repo, NULL, 0, "update-ref", "refs/heads/fixture", s->ahead) ||
+        !RPP_GIT(f->repo, NULL, 0, "push", "-q", "origin", "refs/heads/fixture:refs/heads/main") ||
+        RPP_GIT(s->repo, NULL, 0, "cat-file", "-e", s->ahead) || !rcmd_main_state(s->repo, s->before))
+        return false;
+    bool ok = rcmd_main_case(binary, s->repo, s->ahead, NULL, NULL, s->ahead) &&
+        RPP_GIT(s->repo, kind, sizeof(kind), "cat-file", "-t", s->ahead) && !strcmp(kind, "commit") &&
+        rcmd_main_unchanged(s);
+    if (!ok) printf("check_main fetch changed the receiver or did not fetch\n");
+    return ok;
+}
+
+/* The tip commit stays readable, so origin still advertises it; one of its blobs is damaged. */
+static bool rcmd_main_fetch_broken(struct rcmd_main_fixture *f, struct rcmd_main_stale *s,
+                                   const char *binary)
+{
+    char blob[65], tree2[65], broken[65];
+    if (!rpp_text(f->repo, "unique", "unique\n") || !RPP_GIT(f->repo, NULL, 0, "add", "unique") ||
+        !RPP_GIT(f->repo, blob, sizeof(blob), "hash-object", "unique") ||
+        !RPP_GIT(f->repo, tree2, sizeof(tree2), "write-tree") ||
+        !RPP_GIT(f->repo, broken, sizeof(broken), "commit-tree", tree2, "-p", s->ahead, "-m", "broken") ||
+        !RPP_GIT(f->repo, NULL, 0, "update-ref", "refs/heads/fixture", broken) ||
+        !RPP_GIT(f->repo, NULL, 0, "push", "-q", "origin", "refs/heads/fixture:refs/heads/main") ||
+        !rcmd_main_corrupt_origin(f->remote, blob)) return false;
+    return rcmd_main_case(binary, s->repo, broken, NULL, "REMOTE_MAIN_FETCH_FAILED", broken) &&
+        rcmd_main_unchanged(s);
+}
+
+/* A receiver far behind origin: check_main fetches exactly origin's main into the object
+ * store and leaves branches, HEAD and the worktree alone; an origin that cannot serve the
+ * commit is refused by name. */
+static bool rcmd_main_fetch(struct rcmd_main_fixture *f, const char *binary)
+{
+    struct rcmd_main_stale s;
+    return rcmd_main_fetch_pass(f, &s, binary) && rcmd_main_fetch_broken(f, &s, binary);
+}
+
 static bool rcmd_main_unobservable(struct rcmd_main_fixture *f, const char *binary)
 {
     return RPP_GIT(f->repo, NULL, 0, "remote", "set-url", "origin", "/nonexistent-z23-main-fixture") &&
@@ -1103,7 +1186,8 @@ static bool rcmd_main_fixture(const char *binary)
 {
     struct rcmd_main_fixture f;
     bool ok = rcmd_main_setup(&f) && rcmd_main_freshness(&f, binary) &&
-        rcmd_main_bad_objects(&f, binary) && rcmd_main_unobservable(&f, binary);
+        rcmd_main_bad_objects(&f, binary) && rcmd_main_fetch(&f, binary) &&
+        rcmd_main_unobservable(&f, binary);
     if (ok) ok = test_rm_rf_recursive(f.root) == 0;
     else printf("check_main fixture retained: %s\n", f.root);
     return ok;

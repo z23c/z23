@@ -703,8 +703,10 @@ ZCL_COMMAND_DEV_COMMAND(
 ZCL_COMMAND_DEV_COMMAND(
     "dev.proof.remote", "dev.proof", "",
     "Check current main or manage one independently pinned remote proof",
-    "operation=check_main compares remote_base with advertised origin main and "
-    "checks local_commit ancestry without fetching; it is one observation, "
+    "operation=check_main compares optional remote_base with advertised origin main "
+    "(absent, origin main is the base, returned as observed_base), fetches "
+    "exactly that main into the object store when the receiver lacks it, and "
+    "checks local_commit ancestry; it is one observation, "
     "not continuing authority. "
     "The local owner supplies an exact source assignment and expected proof "
     "identity. The registered invocation checkout is the only destination. "

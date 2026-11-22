@@ -17,6 +17,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 static const char *remote_text(const struct json_value *input, const char *key)
 {
@@ -695,7 +698,8 @@ static void remote_execute_command(const struct zcl_command_request *request,
 #ifdef ZCL_DEV_BUILD
 #if !defined(_WIN32)
 /* A read-only, bounded Git observation with the qualified host environment. */
-static int remote_main_git_mode(const char *root, const char *const args[], char *out, size_t cap, bool owner_config)
+static int remote_main_git_run(const char *root, const char *const args[], char *out, size_t cap,
+                               bool owner_config, unsigned timeout_ms)
 {
     char source[4200];
     const char **env = remote_read_child_env(root, source);
@@ -719,13 +723,18 @@ static int remote_main_git_mode(const char *root, const char *const args[], char
     size_t n = 15;
     for (size_t i = 0; args[i] && n + 1u < sizeof(argv) / sizeof(argv[0]); i++) argv[n++] = args[i];
     argv[n] = NULL;
-    bool ok = zcl_devloop_process_run_env(root, argv, env, 30000, p) &&
+    bool ok = zcl_devloop_process_run_env(root, argv, env, timeout_ms, p) &&
         !p->timed_out && !p->cancelled && !p->term_signal && !p->output_truncated &&
         p->output_len < cap;
-    int rc = ok ? p->exit_code : -1;
+    int rc = ok ? p->exit_code : (p->timed_out ? -2 : -1);
     if (ok) { memcpy(out, p->output, p->output_len); out[p->output_len] = '\0'; }
     free(p); free(env);
     return rc;
+}
+
+static int remote_main_git_mode(const char *root, const char *const args[], char *out, size_t cap, bool owner_config)
+{
+    return remote_main_git_run(root, args, out, cap, owner_config, 30000);
 }
 
 static int remote_main_git(const char *root, const char *const args[], char *out, size_t cap)
@@ -751,12 +760,14 @@ static void remote_main_refuse(struct zcl_command_reply *reply, const char *code
 
 static bool remote_main_inputs(const struct json_value *input)
 {
-    if (!input || input->type != JSON_OBJ || json_size(input) != 3) return false;
+    if (!input || input->type != JSON_OBJ) return false;
+    size_t want = json_get(input, "remote_base") ? 3 : 2;
+    if (json_size(input) != want) return false;
     for (size_t i = 0; i < json_size(input); i++)
         if (strcmp(input->keys[i], "operation") && strcmp(input->keys[i], "local_commit") &&
             strcmp(input->keys[i], "remote_base")) return false;
     return remote_text(input, "operation") && remote_text(input, "local_commit") &&
-        remote_text(input, "remote_base");
+        (want == 2 || remote_text(input, "remote_base"));
 }
 
 static bool remote_main_url_char(unsigned char c)
@@ -809,6 +820,29 @@ static bool remote_main_observe(const char *root, char expected[65])
     return remote_oid(expected);
 }
 
+#define REMOTE_MAIN_FETCH_MS 180000u
+
+/* Fetch origin's main into the object store only: no ref, HEAD, FETCH_HEAD or worktree changes.
+ * A lock held by a concurrent fetch is retried once, then refused by name. */
+static const char *remote_main_fetch(const char *root)
+{
+    char origin[2048], output[4096];
+    if (!remote_main_origin(root, origin, sizeof(origin))) return "REMOTE_MAIN_UNOBSERVABLE";
+    const char *args[] = {"-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet",
+        "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--", origin,
+        "refs/heads/main", NULL};
+    bool busy = false;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int rc = remote_main_git_run(root, args, output, sizeof(output), false, REMOTE_MAIN_FETCH_MS);
+        if (rc == 0) return NULL;
+        if (rc == -2) return "REMOTE_MAIN_FETCH_TIMEOUT";
+        busy = rc > 0 && strstr(output, ".lock") != NULL;
+        if (!busy) return "REMOTE_MAIN_FETCH_FAILED";
+        if (attempt == 0) (void)sleep(1);
+    }
+    return "REMOTE_MAIN_FETCH_BUSY";
+}
+
 static const char *remote_main_commits(const char *root, const char *base, const char *local)
 {
     char output[2048];
@@ -817,10 +851,16 @@ static const char *remote_main_commits(const char *root, const char *base, const
         return "REMOTE_MAIN_UNOBSERVABLE";
     const char *has_candidate[] = {"cat-file", "-t", local, NULL};
     const char *has_base[] = {"cat-file", "-t", base, NULL};
+    int b = remote_main_git(root, has_base, output, sizeof(output));
+    if (b > 0) {
+        /* A stale receiver lacks origin's main: fetch exactly that, then look again. */
+        const char *fetched = remote_main_fetch(root);
+        if (fetched) return fetched;
+        b = remote_main_git(root, has_base, output, sizeof(output));
+    }
+    bool base_commit = b == 0 && !strcmp(output, "commit\n");
     int a = remote_main_git(root, has_candidate, output, sizeof(output));
     bool candidate_commit = a == 0 && !strcmp(output, "commit\n");
-    int b = remote_main_git(root, has_base, output, sizeof(output));
-    bool base_commit = b == 0 && !strcmp(output, "commit\n");
     if (a != 0 || b != 0)
         return a < 0 || b < 0 ? "REMOTE_MAIN_UNOBSERVABLE" : "REMOTE_MAIN_MISSING";
     if (!candidate_commit || !base_commit) return "REMOTE_MAIN_INVALID";
@@ -845,13 +885,16 @@ static void remote_check_main(const struct zcl_command_request *request,
 {
     const char *local = remote_text(request->input, "local_commit");
     const char *base = remote_text(request->input, "remote_base");
+    bool pinned = json_get(request->input, "remote_base") != NULL;
     char expected[65] = {0}, why[256] = {0};
-    if (!remote_main_inputs(request->input) || !remote_oid(local) || !remote_oid(base)) {
+    if (!remote_main_inputs(request->input) || !remote_oid(local) || (pinned && !remote_oid(base))) {
         remote_main_refuse(reply, "REMOTE_MAIN_INVALID", NULL, base); return;
     }
     if (!remote_read_redirects(why, sizeof(why)) || !remote_main_observe(root, expected)) {
         remote_main_refuse(reply, "REMOTE_MAIN_UNOBSERVABLE", NULL, base); return;
     }
+    /* No pin: origin's main is the base, so a stale receiver checkout never decides it. */
+    if (!pinned) base = expected;
     if (strcmp(expected, base)) { remote_main_refuse(reply, "REMOTE_MAIN_STALE", expected, base); return; }
     const char *failure = remote_main_commits(root, base, local);
     if (failure) { remote_main_refuse(reply, failure, expected, base); return; }
