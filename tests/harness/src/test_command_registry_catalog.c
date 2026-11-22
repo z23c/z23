@@ -38,6 +38,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <wordexp.h>
+#endif
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/file.h>
@@ -658,6 +661,26 @@ static bool brief_fixture(char *root, size_t root_size)
            brief_write(root, "tools/AGENTS.md", tools_guide);
 }
 
+#if defined(__linux__)
+static bool brief_epoch_checkout(const struct json_value *next, const char *root)
+{
+    for (size_t i = 0; i < json_size(next); ++i) {
+        const char *command = json_get_str(json_at(next, i));
+        if (!command || strncmp(command, "z23 ops host gc --checkout=", 27) != 0)
+            continue;
+        wordexp_t words = {0};
+        if (wordexp(command, &words, WRDE_NOCMD) != 0) return false;
+        bool matches = words.we_wordc == 6 &&
+            strncmp(words.we_wordv[4], "--checkout=", 11) == 0 &&
+            strcmp(words.we_wordv[4] + 11, root) == 0 &&
+            strcmp(words.we_wordv[5], "--epoch_keep=1") == 0;
+        wordfree(&words);
+        return matches;
+    }
+    return false;
+}
+#endif
+
 static int test_code_guide_brief(void)
 {
     int failures = 0;
@@ -693,14 +716,39 @@ static int test_code_guide_brief(void)
                          &reply, why, sizeof(why)));
         next = json_get(&reply.data, "next");
 #if defined(__linux__)
-        char expected[PATH_MAX + 80];
-        snprintf(expected, sizeof(expected), "z23 ops host gc --checkout=%s --epoch_keep=1", root);
-        ASSERT(brief_array_has(next, expected));
+        ASSERT(brief_epoch_checkout(next, root));
 #else
         ASSERT_EQ(json_size(next), 2u);
 #endif
         ASSERT(brief_array_has(next, "z23 ops host gc --apply=false"));
         zcl_command_reply_free(&reply);
+#if defined(__linux__)
+        ASSERT(brief_run(".", "{\"paths\":[\"tools/dev/build-epoch-session.sh\"]}",
+                         &reply, why, sizeof(why)));
+        char *canonical = realpath(".", NULL);
+        ASSERT(canonical != NULL);
+        bool matches = brief_epoch_checkout(json_get(&reply.data, "next"), canonical);
+        free(canonical);
+        ASSERT(matches);
+        zcl_command_reply_free(&reply);
+        char quoted[PATH_MAX + 20];
+        snprintf(quoted, sizeof(quoted), "%s friend's", root);
+        ASSERT_EQ(rename(root, quoted), 0);
+        ASSERT(brief_run(quoted, "{\"paths\":[\"tools/dev/build-epoch-session.sh\"]}",
+                         &reply, why, sizeof(why)));
+        canonical = realpath(quoted, NULL);
+        ASSERT(canonical != NULL);
+        matches = brief_epoch_checkout(json_get(&reply.data, "next"), canonical);
+        free(canonical);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(rename(quoted, root), 0);
+        ASSERT(matches);
+        snprintf(quoted, sizeof(quoted), "%s/missing", root);
+        ASSERT(brief_run(quoted, "{\"paths\":[\"tools/dev/build-epoch-session.sh\"]}",
+                         &reply, why, sizeof(why)));
+        ASSERT(!brief_epoch_checkout(json_get(&reply.data, "next"), quoted));
+        zcl_command_reply_free(&reply);
+#endif
         test_rm_rf_recursive(root);
         PASS();
     } _test_next:;

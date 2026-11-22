@@ -783,10 +783,12 @@ static void cb_build_next(struct cb_brief *b)
         if (strcmp(b->paths[i], "tools/dev/build-epoch-session.sh") == 0 ||
             strcmp(b->paths[i], "tools/dev/build-epoch-selftest.sh") == 0) {
             char arg[CB_NEXT_CAP];
-            if (cb_cost_arg(b->root, arg))
+            char *root = realpath(b->root, NULL);
+            if (root && cb_cost_arg(root, arg))
                 cb_push_next(b, "z23 ops host gc --checkout=%s --epoch_keep=1", arg);
             else
                 b->cut_next = true;
+            free(root);
             break;
         }
     }
