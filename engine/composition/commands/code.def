@@ -403,11 +403,13 @@ ZCL_COMMAND_READY_READ(
     "test groups with their catalog rows and host needs, the nearest existing "
     "test case, per-file blast radius, module_capabilities and remote-class "
     "authority rows, the exact gate command lines, the lint traps the touched "
-    "paths trigger, and the same packet rendered as markdown. Composed from "
+    "paths trigger, routed previous failures explicitly labeled "
+    "unbound_last_run, and the same packet rendered as markdown. Composed from "
     "the index-backed code.* readers; bound to the exact index generation "
     "(source_root_sha3, dep_root_sha3) and the checkout HEAD. Refuses a stale "
     "or absent index, an unsafe path, or an input past its bounds; never "
-    "rebuilds, writes, locks or spawns. symbols and files are JSON arrays "
+    "rebuilds, writes, locks or spawns. Output also depends on the mutable "
+    "last-run artifact, which has no commit identity. symbols and files are JSON arrays "
     "of strings supplied inside --input=JSON. max_lines is an integer from "
     "20 to 120 (default 60).", 65536,
     "code,packet,brief,scout,excerpt,tests,impact,gates",
@@ -419,7 +421,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE,
-    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_packet)
 
 ZCL_COMMAND_READY_READ(

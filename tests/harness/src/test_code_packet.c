@@ -888,7 +888,7 @@ static int test_code_packet_authority_and_pattern(void)
 static int test_code_packet_deterministic(void)
 {
     int failures = 0;
-    TEST("code_packet: two runs on one generation are byte-identical") {
+    TEST("code_packet: two runs with an unchanged generation and last-run artifact are byte-identical") {
         struct zcl_command_reply a, b;
         const char *syms[] = { "pk_small_add", "pk_long" };
         pkt_call("Same", syms, 2, NULL, 0, 0, &a);
@@ -1512,6 +1512,60 @@ static int test_code_packet_reverse_impact_failure(void)
     return failures;
 }
 
+static int test_code_packet_previous_failure(void)
+{
+    int failures = 0;
+    TEST("code_packet: previous failures are routed, deduplicated and revision-unbound") {
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        ASSERT(pkt_index_build());
+        const char *files[] = { "tools/command/native_code_capsule.c" };
+        struct zcl_command_reply reply;
+        pkt_call("Previous failure evidence", NULL, 0, files, 1, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *failure = json_get(&reply.data, "previous_failure");
+        ASSERT(failure && failure->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "status")), "no run recorded");
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "source")),
+                      ".cache/test-timing/last-run.json");
+        ASSERT(json_get(failure, "revision_binding") == NULL);
+        ASSERT_EQ(json_size(json_get(failure, "failed_groups")), 0u);
+        zcl_command_reply_free(&reply);
+
+        ASSERT(pkt_write(".cache/test-timing/last-run.json",
+            "{\"groups\":[{\"name\":\"code_capsule\",\"rc\":1},"
+            "{\"name\":\"test_code_capsule\",\"rc\":1},"
+            "{\"name\":\"unrelated_group\",\"rc\":1},"
+            "{\"name\":\"command_registry_catalog\",\"rc\":0}]}"));
+        pkt_call("Previous failure evidence", NULL, 0, files, 1, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        failure = json_get(&reply.data, "previous_failure");
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "status")), "recorded");
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "revision_binding")),
+                      "unbound_last_run");
+        const struct json_value *groups = json_get(failure, "failed_groups");
+        ASSERT_EQ(json_size(groups), 1u);
+        ASSERT_STR_EQ(json_get_str(json_at(groups, 0)), "test_code_capsule");
+        ASSERT(strstr(pkt_md(&reply),
+                      "PREVIOUS FAILURE (unbound_last_run): test_code_capsule") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "unrelated_group") == NULL);
+        zcl_command_reply_free(&reply);
+
+        ASSERT(pkt_write(".cache/test-timing/last-run.json", "{not json"));
+        pkt_call("Previous failure evidence", NULL, 0, files, 1, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        failure = json_get(&reply.data, "previous_failure");
+        ASSERT_STR_EQ(json_get_str(json_get(failure, "status")), "unavailable");
+        ASSERT(json_get(failure, "revision_binding") == NULL);
+        ASSERT_EQ(json_size(json_get(failure, "failed_groups")), 0u);
+        ASSERT(strstr(pkt_md(&reply), "PREVIOUS FAILURE: unavailable") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
 static int test_code_packet_index_recovery(void)
 {
     int failures = 0;
@@ -1645,6 +1699,7 @@ int test_code_packet(void)
     failures += test_code_packet_definition_evidence();
     failures += test_code_packet_impact_failure();
     failures += test_code_packet_reverse_impact_failure();
+    failures += test_code_packet_previous_failure();
     failures += test_code_packet_index_recovery();
     return failures;
 }

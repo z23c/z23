@@ -5,8 +5,10 @@
  * pass. For each symbol it returns the verbatim definition (head and tail
  * elided past max_lines); for every touched file the covering test groups
  * (the code.tests resolver), the blast radius (the code.impact closure), the
- * module_capabilities and remote-class rows, and the exact gate lines. The
- * same packet is rendered as markdown in PACKET_TEMPLATE field order.
+ * module_capabilities and remote-class rows, the exact gate lines, and routed
+ * failures from the latest test artifact. That artifact has no commit identity,
+ * so its evidence is always labeled revision-unbound. The same packet is
+ * rendered as markdown in PACKET_TEMPLATE field order.
  *
  * It opens the index READ-ONLY and refuses a stale or absent one, so it never
  * rebuilds, writes, locks or spawns; both generation roots come from that one
@@ -19,6 +21,7 @@
 
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
+#include "codeindex/codeindex_focus.h"
 #include "controllers/agent_impact_rules.h"
 #include "kernel/command_registry.h"
 #include "test_group_catalog.h"
@@ -67,6 +70,8 @@ struct pk_run {
     struct agent_impact_acc *route_accs;
     const char *routes[PK_TOUCH_MAX];
     bool route_risks[PK_TOUCH_MAX];
+    struct specialist_focus_evidence failure;
+    bool failure_unavailable;
     struct json_value excerpts, files, tests, pattern, impact, caps, auth,
         claims;
     struct pk_sb map, exc, pat, keep, authority, notes;
@@ -1053,6 +1058,46 @@ static void pk_do_pattern(struct pk_run *run, int index)
     pk_excerpt_free(&ex);
 }
 
+/* ── previous-run evidence ──────────────────────────────────────────────── */
+
+static bool pk_failed_group(const struct pk_run *run, const char *id)
+{
+    for (size_t i = 0; i < run->failure.failed_count; i++) {
+        char full[ZCL_TEST_GROUP_FULL_MAX];
+        if (zcl_test_group_resolve_exact(run->failure.failed[i], full) &&
+            strcmp(full, id) == 0)
+            return true;
+    }
+    return false;
+}
+
+static const char *pk_failure_status(const struct pk_run *run)
+{
+    if (run->failure_unavailable) return "unavailable";
+    return run->failure.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING
+        ? "no run recorded" : "recorded";
+}
+
+static void pk_failure_note(struct pk_run *run)
+{
+    const char *status = pk_failure_status(run);
+    if (strcmp(status, "recorded") != 0) {
+        pk_sb_add(&run->notes, "\nPREVIOUS FAILURE: %s", status);
+    } else {
+        int shown = 0;
+        pk_sb_add(&run->notes, "\nPREVIOUS FAILURE (unbound_last_run):");
+        for (int i = 0; i < run->f.ngroup; i++) {
+            if (!pk_failed_group(run, run->f.group[i].id)) continue;
+            pk_sb_add(&run->notes, "%s%s", shown++ == 0 ? " " : ", ",
+                      run->f.group[i].id);
+        }
+        if (!shown) pk_sb_add(&run->notes, " (none routed)");
+    }
+    pk_sb_add(&run->notes,
+              "\n  Previous run only; the artifact has no commit identity and "
+              "is not a verdict on BASE.\n");
+}
+
 /* ── assembly ───────────────────────────────────────────────────────────── */
 
 static void pk_run_reset(struct pk_run *run, int max_lines)
@@ -1153,6 +1198,7 @@ static void pk_assemble(struct pk_run *run, int max_lines)
     size_t nt = pk_trap_lines(run->traps, traps);
     for (size_t i = 0; i < nt; i++)
         pk_sb_add(&run->notes, "  - %s\n", traps[i]);
+    pk_failure_note(run);
 }
 
 static bool pk_tail_line(struct json_value *arr, const char *text)
@@ -1162,6 +1208,30 @@ static bool pk_tail_line(struct json_value *arr, const char *text)
     json_set_str(&value, text);
     bool ok = value.type == JSON_STR && json_push_back(arr, &value);
     json_free(&value);
+    return ok;
+}
+
+static bool pk_json_previous_failure(const struct pk_run *run,
+                                     struct json_value *out)
+{
+    struct json_value obj, groups;
+    json_init(&obj);
+    json_set_object(&obj);
+    json_init(&groups);
+    json_set_array(&groups);
+    const char *status = pk_failure_status(run);
+    bool ok = json_push_kv_str(&obj, "status", status) &&
+        json_push_kv_str(&obj, "source", ".cache/test-timing/last-run.json");
+    if (ok && strcmp(status, "recorded") == 0)
+        ok = json_push_kv_str(&obj, "revision_binding", "unbound_last_run");
+    for (int i = 0; ok && !run->failure_unavailable && i < run->f.ngroup; i++)
+        if (pk_failed_group(run, run->f.group[i].id))
+            ok = pk_tail_line(&groups, run->f.group[i].id);
+    if (ok)
+        ok = json_push_kv(&obj, "failed_groups", &groups) &&
+             json_push_kv(out, "previous_failure", &obj);
+    json_free(&groups);
+    json_free(&obj);
     return ok;
 }
 
@@ -1198,7 +1268,8 @@ static bool pk_tail_sections(const struct pk_run *run, struct json_value *out)
 static bool pk_json_tail(struct pk_run *run, struct json_value *out,
                          const struct pk_sb *doc)
 {
-    if (!pk_tail_header(run, out) || !pk_tail_sections(run, out)) return false;
+    if (!pk_tail_header(run, out) || !pk_json_previous_failure(run, out) ||
+        !pk_tail_sections(run, out)) return false;
     struct json_value gates, traps;
     json_init(&gates); json_set_array(&gates);
     json_init(&traps); json_set_array(&traps);
@@ -1409,6 +1480,9 @@ static bool pk_open(const struct zcl_command_request *request,
         return false;
     }
     (void)pk_git_head(&run->ctx, run->f.head, sizeof(run->f.head));
+    specialist_focus_evidence_clear(&run->failure);
+    run->failure_unavailable =
+        !specialist_focus_load_failed_groups(run->ctx.root, &run->failure);
     pk_slug(run->in.goal, run->f.name, sizeof(run->f.name));
     return true;
 }
