@@ -1227,6 +1227,7 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_mempool();
     *failures += test_accept_to_mempool();
     *failures += test_wallet_private_relay();
+    *failures += test_wallet_private_hold_db_proof();
     *failures += test_rpc();
     *failures += test_sqlite();
     *failures += test_activerecord();

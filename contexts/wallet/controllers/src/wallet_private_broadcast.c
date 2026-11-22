@@ -374,10 +374,14 @@ void wallet_private_broadcast_stop(void)
     (void)wallet_private_broadcast_stop_checked();
 }
 
-static bool wpb_memory_note_spent(const struct wallet *wallet, const uint8_t nf[32])
+/* The cache may refute a hold, never prove one: a cached copy of the note
+ * must be spent, but a note known only to the database (the cache is empty
+ * after a restart) is proven by the SAME_TX reservation probe, made in the
+ * caller's write transaction. Caller holds wallet->cs. */
+static bool wpb_memory_note_refutes(const struct wallet *wallet, const uint8_t nf[32])
 {
     for (size_t i = 0; i < wallet->num_sapling_notes; ++i)
-        if (wallet->sapling_notes[i].used && wallet->sapling_notes[i].spent &&
+        if (wallet->sapling_notes[i].used && !wallet->sapling_notes[i].spent &&
             memcmp(wallet->sapling_notes[i].nf, nf, 32) == 0) return true;
     return false;
 }
@@ -398,7 +402,7 @@ static enum wallet_hold_proof_result wpb_prove_shielded(struct node_db *ndb,
     }
     if (reserve) wallet_mark_sapling_nullifiers_spent(wallet, tx);
     for (size_t i = 0; i < tx->num_shielded_spend; ++i)
-        if (!wpb_memory_note_spent(wallet, tx->v_shielded_spend[i].nullifier.data))
+        if (wpb_memory_note_refutes(wallet, tx->v_shielded_spend[i].nullifier.data))
             return WALLET_HOLD_PROOF_CONFLICT;
     return WALLET_HOLD_PROOF_OK;
 }

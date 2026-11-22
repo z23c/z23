@@ -566,6 +566,7 @@ int test_keys(void);
 int test_mempool(void);
 int test_accept_to_mempool(void);
 int test_wallet_private_relay(void);
+int test_wallet_private_hold_db_proof(void);
 int test_rpc(void);
 int test_transaction(void);
 int test_net(void);
