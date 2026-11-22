@@ -474,6 +474,34 @@ out="$(run_hostgc units apply)"
 assert_gone "$UNITS_FX/landed-unit" "units apply left the landed worktree behind" "units apply removed the landed worktree"
 [ -d "$UNITS_FX/unlanded-unit" ] || fail "units apply removed the unlanded worktree"
 
+# -------------------------------------------------------------- lane roots
+# Needs a real z23 (the stub only logs calls); skipped when none is built.
+REAL_Z23="${HGT_REAL_Z23:-$SELF_DIR/../../build/bin/z23}"
+LROOT_FX="$HOME_FX/development/lanes/z23"
+if [ -x "$REAL_Z23" ]; then
+    mkdir -p -- "$LROOT_FX" "$WORK/proc-empty"   # empty procfs: a complete inventory off root
+    for n in clean dirty; do
+        git -C "$REPO_FX" worktree add -q -b "br-$n" "$LROOT_FX/lane-$n" main
+        touch_old "$LROOT_FX/lane-$n"; touch_old "$REPO_FX/.git/worktrees/lane-$n/index"
+    done
+    echo scribble > "$LROOT_FX/lane-dirty/untracked.txt"
+    lane_run() { run_hostgc units "$1" ZCL_HOST_GC_Z23_BIN="$REAL_Z23" ZCL_HOST_GC_PROC="$WORK/proc-empty" ZCL_HOST_GC_LANE_ROOTS="$LROOT_FX:$WORK/no-such-root"; }
+    out="$(lane_run dry-run)"
+    assert_contains "$out" "1 reapable (1 idle branch lanes" "lane roots dry run counts the idle clean branch lane"
+    assert_not_contains "$out" "no-such-root" "a missing lane root is skipped quietly"
+    [ -d "$LROOT_FX/lane-clean" ] || fail "lane roots dry run removed a lane"
+    out="$(run_hostgc units dry-run ZCL_HOST_GC_Z23_BIN="$WORK/no-such-z23" PATH=/usr/bin:/bin ZCL_HOST_GC_LANE_ROOTS="$LROOT_FX")"
+    assert_contains "$out" "SKIP lanes: no z23 binary" "a missing native verb is a named SKIP"
+    out="$(run_hostgc units dry-run ZCL_HOST_GC_Z23_BIN="$REAL_Z23" ZCL_HOST_GC_PROC="$WORK/proc-empty" ZCL_HOST_GC_LANE_ROOTS="$HOME_FX/github:$HOME_FX/.local/state:$HOME_FX")"
+    assert_contains "$out" "root skipped (protected or unsafe): $HOME_FX/github" "a root holding the main checkout is refused"
+    out="$(lane_run apply)"
+    assert_gone "$LROOT_FX/lane-clean" "lane roots apply left the idle clean lane" "lane roots apply removed the idle clean lane"
+    git -C "$REPO_FX" rev-parse -q --verify br-clean >/dev/null || fail "lane roots apply lost the removed lane's branch"
+    [ -d "$LROOT_FX/lane-dirty" ] || fail "lane roots apply removed a dirty lane"
+else
+    pass "lane roots: no real z23 at $REAL_Z23 — skipped"
+fi
+
 # ------------------------------------------------------------------ scratch
 mkdir -p -- "$SCRATCH_FX/orphaned-lane"
 touch_old "$SCRATCH_FX/orphaned-lane"

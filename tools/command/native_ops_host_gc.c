@@ -27,6 +27,7 @@
 #include "kernel/command_registry.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { OHG_MAX_FLOOR_HOURS = 24 * 365, OHG_MAX_AGE_DAYS = 3650 };
@@ -258,6 +259,19 @@ void zcl_native_handle_ops_host_gc(const struct zcl_command_request *request,
         return;
     }
     req.apply = json_get_bool_or(input, "apply", false);
+    /* Fixture seam shared with tools/scripts/host_gc.sh: a procfs fixture
+     * replaces the occupancy inventory root. Threat model: it is read from
+     * the process ENVIRONMENT only, never from request input, so no caller of
+     * the verb can swap in an empty /proc to hide a live lane; whoever
+     * controls the environment of the hourly timer (or of this process)
+     * already controls the user and can delete the lanes directly. Unset it
+     * is inert and the inventory is the real /proc. A fixture that cannot
+     * be opened leaves the inventory incomplete, which refuses every
+     * removal, so a typo fails closed. */
+    const char *proc_fixture = getenv("ZCL_HOST_GC_PROC");
+    if (proc_fixture && proc_fixture[0] == '/' &&
+        strlen(proc_fixture) < sizeof(req.proc_root))
+        memcpy(req.proc_root, proc_fixture, strlen(proc_fixture) + 1);
     floor_hours = json_get_int_or(input, "floor_hours",
                                   HOST_GC_DEFAULT_FLOOR_HOURS);
     if (floor_hours < 0 || floor_hours > OHG_MAX_FLOOR_HOURS) {

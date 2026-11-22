@@ -60,22 +60,12 @@ CCACHE_CAP_GB="${ZCL_HOST_GC_CCACHE_CAP_GB:-20}"
 ZCC_CAP_MB="${ZCL_HOST_GC_ZCC_CAP_MB:-15360}"      # 15 GB
 JOURNAL_CAP="${ZCL_HOST_GC_JOURNAL_CAP:-512M}"
 SYSTEM_JOURNAL_CAP="${ZCL_HOST_GC_SYSTEM_JOURNAL_CAP:-1G}"
-# Lowered from the original 24h: a live generation is minutes old and the
-# cwd/lock checks below already refuse anything still in use, so 24h of
-# accumulation before the first look was pure waste on a box that mints a
-# ~2 GB generation every few minutes.
+# A live generation is minutes old and the cwd/lock checks refuse anything in use.
 Z23P_MIN_AGE_H="${ZCL_HOST_GC_Z23P_MIN_AGE_H:-6}"
-# The tmpfs TWIN of that pool. dev_proof.c builds a generation in RAM when
-# RAM scratch is reserved and on disk otherwise, so a sweep that only walks
-# the disk pool watches half the leak: the RAM pool reached 34 GB in one
-# unattended day while this script reported the z23p category clean.
+# The tmpfs TWIN of that pool (RAM generations once reached 34 GB unseen).
 Z23P_RAM="${ZCL_HOST_GC_RAM_ROOT:-/dev/shm/z23p}"
-# The node binary. `z23 ops host gc` is preferred for the twin because it
-# finds the repository behind each generation from the generation itself,
-# so it reaches pools this script's single GC_REPO worktree listing cannot.
-# The timer runs from ~/.local/lib/z23/tools, so the installed binary is
-# that directory's sibling; anything else falls back to PATH, and a box
-# with neither falls back to this script's own classifier.
+# The node binary: the timer runs from ~/.local/lib/z23/tools, so the
+# installed z23 is that directory's sibling; else PATH; else the classifier.
 Z23_BIN="${ZCL_HOST_GC_Z23_BIN:-$SCRIPT_DIR/../z23}"
 TMP_MIN_AGE_D="${ZCL_HOST_GC_TMP_MIN_AGE_D:-2}"
 # tmplitter: unregistered /tmp entries (no worktree of any kind, not one of
@@ -89,6 +79,8 @@ TMPLITTER_MIN_AGE_D="${ZCL_HOST_GC_TMPLITTER_MIN_AGE_D:-2}"
 UNITS_MIN_AGE_H="${ZCL_HOST_GC_UNITS_MIN_AGE_H:-12}"
 UNITS_DIR="${ZCL_HOST_GC_UNITS_DIR:-$GC_HOME/.z23/units}"
 LANES_DIR="${ZCL_HOST_GC_LANES_DIR:-$GC_HOME/.z23/lanes}"
+LANE_ROOTS="${ZCL_HOST_GC_LANE_ROOTS:-$UNITS_DIR:$LANES_DIR:$GC_HOME/development/lanes/z23}"
+LANE_AGE_D="${ZCL_HOST_GC_LANE_AGE_D:-7}"
 TRAINS_DIR="${ZCL_HOST_GC_TRAINS_DIR:-$GC_HOME/.z23/trains}"
 # scratch: dated/named scratch dirs with no worktree behind them any more.
 SCRATCH_MIN_AGE_D="${ZCL_HOST_GC_SCRATCH_MIN_AGE_D:-7}"
@@ -110,26 +102,16 @@ TESTTMP_MIN_AGE_D="${ZCL_HOST_GC_TESTTMP_MIN_AGE_D:-1}"
 # fresh failure diagnostics survive a day of triage; nothing older is
 # anything but landfill.
 REPOTMP_MIN_AGE_D="${ZCL_HOST_GC_REPOTMP_MIN_AGE_D:-2}"
-# One run reaps at most this many stale entries, oldest arbitrary (readdir
-# order). The backlog on a host that never had the category is a one-time
-# hundred-thousand-entry population; du+rm on all of it in one run would
-# starve every later category for the hour — the measured dry-run cost of
-# the uncapped population was >10 min on the live host, while a bounded
-# 5000-entry batch costs ~19 s end to end including the full scan. 20000
-# keeps one hourly run at about a minute and drains the measured 204k-entry
-# backlog in roughly half a day of hourly runs; steady state is seconds.
+# One run reaps at most this many stale entries (oldest arbitrary): an
+# uncapped backlog of ~200k entries cost >10 min of du+rm and starved every
+# later category; 20000 keeps an hourly run near a minute.
 REPOTMP_BATCH_MAX="${ZCL_HOST_GC_REPOTMP_BATCH_MAX:-20000}"
 WORKTREE_IDLE_D="${ZCL_HOST_GC_WORKTREE_IDLE_D:-3}"
 ORPHAN_MIN_AGE_H="${ZCL_HOST_GC_ORPHAN_MIN_AGE_H:-24}"
 QUARANTINE_TTL_D="${ZCL_HOST_GC_QUARANTINE_TTL_D:-14}"
-# Two thresholds, not one, because the disk on this host actually reached
-# zero once and the node logged disk_full_pause CRITICAL. Below LOW_DISK_GB
-# the sweep runs and the per-category age floors are relaxed. Below
-# CACHE_FREEZE_GB the caches are additionally forbidden to GROW: the cap is
-# lowered to whatever they currently occupy, so a build in flight cannot
-# claim the space the sweep just recovered. A cache that re-fills the disk
-# faster than the janitor drains it is how free space reaches zero while an
-# hourly janitor is running and reporting success.
+# Two thresholds: below LOW_DISK_GB the sweep runs with relaxed age floors;
+# below CACHE_FREEZE_GB the caches are also capped at their current size so a
+# build in flight cannot claim the space the sweep just recovered.
 LOW_DISK_GB="${ZCL_HOST_GC_LOW_DISK_GB:-150}"
 CACHE_FREEZE_GB="${ZCL_HOST_GC_CACHE_FREEZE_GB:-100}"
 SYSTEMCTL_BIN="${ZCL_HOST_GC_SYSTEMCTL_BIN:-systemctl}"
@@ -472,29 +454,18 @@ sweep_ccache() {
 }
 
 # =============================================================== CATEGORY zcc
-# The zcc cache has a real evictor of its own (`zcc --zcc-trim MB`, the same
-# eviction the cache performs on itself). Using it rather than an atime sort
-# keeps ONE eviction policy: an external sweeper deleting entries the cache
-# still believes it owns is how a cache index goes stale.
+# The zcc cache has a real evictor (`zcc --zcc-trim MB`); using it keeps ONE
+# eviction policy, since an external sweeper deleting entries the cache still
+# believes it owns stales its index.
 #
-# ONE WALK PER RUN. `du -sb` over a multi-million-file cache is expensive on
-# a rotational box: measured on a fleet HDD host 2026-09-10, the hourly unit
-# ran 18:49-19:19 (30 min wall, 1.9s CPU, all I/O wait) with the `du -sb --
-# ~/.cache/zcc` call alone sitting 27 min in D state, holding
-# /proc/pressure/io avg10 at 60-67% for the whole hour and starving the live
-# node — even with Nice=19 + IOSchedulingClass=idle, which does not help a
-# seek-bound HDD. The evictor (`zcc --zcc-trim`) already walks the tree once
-# to do the eviction and prints what it found in its own report line
-# ("zcc: N MB held, N MB ceiling, N MB freed"); the APPLY path below reads
-# THAT line instead of measuring the directory again, so a normal apply run
-# costs exactly the evictor's one walk, never du before AND after it.
-# Dry-run still needs the current size before the evictor runs at all, so it
-# keeps exactly one measurement of its own — never a second on top of it.
-# A cache FREEZE on the apply path is recorded from the evictor's held
-# figure, never measured first: trimming to min(held, cap) frees exactly
-# what trimming to cap frees, so the freeze changes the log row, not the
-# eviction, and buying it with a walk of its own would put the second walk
-# back on every low-disk box.
+# ONE WALK PER RUN. `du -sb` over a multi-million-file cache once held a
+# rotational host in D state for 27 min of one hourly run (2026-09-10). The
+# evictor already walks the tree once and prints "zcc: N MB held, N MB
+# ceiling, N MB freed"; the APPLY path reads THAT line instead of measuring
+# again. Dry-run needs the size before the evictor runs, so it keeps one
+# measurement of its own. A cache FREEZE on apply is recorded from the held
+# figure, never measured first: trimming to min(held, cap) frees exactly what
+# trimming to cap frees.
 sweep_zcc() {
     want zcc || return 0
     hdr "zcc cache (cap $(( ZCC_CAP_MB / 1024 ))G)"
@@ -590,35 +561,23 @@ sweep_zcc() {
 }
 
 # ============================================================== CATEGORY z23p
-# THE LEAK. tools/dev/dev_proof.c:generation_prepare() creates one detached
-# worktree per (checkout, commit) pair under <parent-of-checkout>/.z23p, keyed
-# by a hash of both, and NEVER removes one. The push hook proves every commit
-# pair, so the pool grows by a ~2 GB worktree every few minutes and nothing
-# on the host had the authority to reclaim it: `git worktree prune` finds
-# nothing because every generation is still correctly registered.
-#
-# THE POOL COMES IN TWO HALVES. dev_proof.c builds a generation in RAM when
-# RAM scratch is reserved and on disk otherwise, so both are swept here: the
-# disk pool by the classifier below, the tmpfs twin by `z23 ops host gc`
-# when a binary is available (it finds the repository behind a generation
-# from the generation itself, so it sees twins this script's single GC_REPO
-# listing cannot) and by the same classifier when none is.
+# THE LEAK. tools/dev/dev_proof.c:generation_prepare() makes one detached
+# worktree per (checkout, commit) under <parent-of-checkout>/.z23p and NEVER
+# removes one; the push hook proves every commit, so the pool grows ~2 GB every
+# few minutes and `git worktree prune` finds nothing (all still registered).
+# Two halves: the disk pool by the classifier below, the tmpfs twin by
+# `z23 ops host gc` (it finds each generation's repository itself) or by the
+# same classifier when no binary is available.
 #
 # A generation is reapable when ALL of these hold:
 #   older than Z23P_MIN_AGE_H     (a proof in flight is minutes old)
 #   no process has it as cwd      (a proof in flight is chdir'd into it)
 #   not git-locked                (an explicit "leave this alone")
-#   detached HEAD and clean       (git's own verdict, not ours)
-# Anything failing the last test is REPORTED, never removed — a generation
-# holding uncommitted content is a bug worth a human's attention, not a
-# deletion candidate.
-# A generation directory left behind by dev_proof.c may carry a top-level
-# *.lock/*.pid file naming the pid that created it (state layout is an
-# internal detail of dev_proof.c and may not always be present — this is a
-# best-effort check, never the only reason a generation is kept). When one
-# exists and names a pid that is gone, the creator is PROVABLY dead and the
-# generation is reapable regardless of the age floor; when it names a pid
-# that is alive, the generation is kept regardless of age.
+#   detached HEAD and clean       (git's own verdict; a dirty one is REPORTED
+#                                  for a human, never removed)
+# A top-level *.lock/*.pid file (best effort, never the only reason to keep a
+# generation) naming a dead pid proves the creator dead: reapable regardless
+# of age; a live pid keeps it regardless of age.
 z23p_creator_status() {
     local wt="$1" f pid
     for f in "$wt"/*.lock "$wt"/*.pid; do
@@ -714,7 +673,7 @@ z23p_native_bin() {
 z23p_native_bytes() {
     local n=""
     n="$(printf '%s' "$1" \
-        | grep -o '"bytes_reclaimed"[[:space:]]*:[[:space:]]*[0-9][0-9]*' \
+        | grep -o "\"${2:-bytes_reclaimed}\"[[:space:]]*:[[:space:]]*[0-9][0-9]*" \
         | tail -1 | grep -o '[0-9][0-9]*$')" || true
     [ -n "$n" ] || n=0
     printf '%s' "$n"
@@ -848,13 +807,9 @@ z23p_generation_pool() {
 }
 
 # ========================================================= CATEGORY wtbuild
-# build/ output inside idle registered worktrees. On 2026-09-27 this host
-# reached 97% full with ~230 GB of obj/bin/toolchain trees spread over ~140
-# lane worktrees nobody had built in for days, while every category above
-# reported ~0 B reclaimable — none of them ever looked inside a lane's
-# build/. Build output is reproducible (each lane rebuilds on demand), so it
-# is DELETED, not quarantined, one log line per build/ child with its bytes.
-#
+# build/ output inside idle registered worktrees (230 GB over ~140 lanes on
+# 2026-09-27, every other category ~0 B). It is reproducible, so it is
+# DELETED, not quarantined, one log line per build/ child with its bytes.
 # A worktree is left entirely alone when a live process has its cwd, an
 # open file, or its executable inside it, or when anything under its build/
 # changed within the idle window (WT_BUILD_IDLE_H, default 12h; 2h below the
@@ -1455,6 +1410,38 @@ reap_landed_worktree() {
     log_line "$cat-remove" "$wt" "$bytes" "$reason"
 }
 
+# Idle clean lanes under LANE_ROOTS go to the native janitor (lock, occupancy,
+# unit-file, protected-path and archive-pin rules; a removed branch lane keeps
+# its branch). Missing roots are skipped quietly; a root that holds or sits
+# inside the main checkout or the state trees is dropped by name; a missing or
+# failing native verb is a named SKIP, never silence.
+sweep_lane_roots() {
+    local IFS=: bin out r o roots="" age="$LANE_AGE_D" key=bytes_reclaimable apply_arg=false
+    [ "$age" -ge 1 ] 2>/dev/null || age=7
+    [ "$LOW_DISK" = 1 ] && age=$(( (age + 1) / 2 ))
+    for r in $LANE_ROOTS; do
+        [ -d "$r" ] || continue
+        o="$r"; r="$(realpath -m -- "$r" 2>/dev/null || printf '%s' "$r")"
+        case "${r%/}/" in "$GC_REPO"/*|"$STATE"/*|"$GC_HOME/.local/state/z23"/*|"$GC_HOME"/) r="" ;; esac
+        case "$GC_REPO/:$STATE/:$GC_HOME/.local/state/z23/" in "${r%/}/"*|*":${r%/}/"*) r="" ;; esac
+        case "$r" in ""|*'"'*|*'\'*) say "lanes: root skipped (protected or unsafe): $o"; continue ;; esac
+        roots="$roots${roots:+,}\"$r\""
+    done
+    [ -n "$roots" ] || return 0
+    bin="$(z23p_native_bin)" || { say "SKIP lanes: no z23 binary with the native 'ops host gc' verb (Z23_BIN or PATH)"; return 0; }
+    [ "$APPLY" = 1 ] && { apply_arg=true; key=bytes_reclaimed; }
+    out="$(env HOME="$GC_HOME" "$bin" ops host gc \
+        "--input={\"roots\":[$roots],\"age_days\":$age,\"apply\":$apply_arg}" 2>&1)" || true
+    case "$out" in *'"totals"'*) ;; *) say "SKIP lanes: $bin ops host gc gave no report: $(printf '%s' "$out" | head -n 1)"; return 0 ;; esac
+    local bytes reap y n b u
+    bytes="$(z23p_native_bytes "$out" "$key")"; reap="$(z23p_native_bytes "$out" reapable)"
+    IFS=" " read -r y n b u <<< "$(printf '%s' "$out" | grep -o '"\(too_young\|need_review\|branch_kept\|in_use\)"[[:space:]]*:[[:space:]]*[0-9]*' \
+        | tr -d '" ' | awk -F: '{ s[$1] += $2 } END { print s["too_young"] + 0, s["need_review"] + 0, s["branch_kept"] + 0, s["in_use"] + 0 }')"
+    say "lanes: $reap reapable ($b idle branch lanes, branches kept), $y too young, $u in use, $n need review — $(human "$bytes") via $bin"
+    add_result units "$bytes" "$reap"
+    log_line "lanes-native" "$LANE_ROOTS" "$bytes" "age_days=$age apply=$apply_arg"
+}
+
 sweep_units() {
     want units || return 0
     hdr "landed units and lanes (patch-equivalent to main, older than ${UNITS_MIN_AGE_H}h)"
@@ -1468,6 +1455,7 @@ sweep_units() {
             reap_landed_worktree "$d" units "$min_age"
         done
     done
+    sweep_lane_roots
     if [ "$APPLY" = 1 ]; then
         git -C "$GC_REPO" worktree prune >/dev/null 2>&1 || true
     fi
@@ -1728,16 +1716,11 @@ sweep_testtmp() {
 
 # =========================================================== CATEGORY repotmp
 # The main checkout's own test-tmp (and its .zcl_test_render twin). Every
-# other scratch sweep skips it: z23_lane_worktrees excludes GC_REPO by
-# design, is_protected() shields the whole checkout tree, and sweep_testtmp
-# keys on the scratch dir's own mtime — which a single fresh child keeps
-# young forever, so the main checkout's test-tmp only grows (207,068
-# entries measured on 2026-09-29; `du` over it no longer finished inside
-# an 11-minute budget). This category reaps stale ENTRIES inside those two
-# dirs, age-keyed like tools/scripts/test_tmp_clean.sh; the checkout, the
-# scratch dirs themselves and every fresh entry stay put. The dirs are
-# gitignored scratch by the tree's own contract — durable evidence lives in
-# build/ artifact dirs and state ledgers, never here.
+# other scratch sweep skips it (is_protected() shields the checkout tree and
+# sweep_testtmp keys on the dir's own mtime, which one fresh child keeps
+# young forever), so it only grew: 207,068 entries on 2026-09-29. This
+# reaps stale ENTRIES inside those two gitignored dirs, age-keyed like
+# tools/scripts/test_tmp_clean.sh; the dirs and fresh entries stay put.
 sweep_repotmp() {
     want repotmp || return 0
     hdr "main-checkout test scratch (entries older than ${REPOTMP_MIN_AGE_D}d under $GC_REPO)"
@@ -1880,23 +1863,12 @@ sweep_worktree() {
 }
 
 # ========================================================= CATEGORY deadexec
-# Units whose ExecStart names a binary or script that is not on disk.
-#
-# WHY THIS IS A DISK-JANITOR'S JOB. It is the same accident seen from the
-# other end. A sweep (this one, a manual `rm -rf build/`, a lane teardown)
-# removes a checkout's build/ directory; any linger unit whose ExecStart
-# pointed into that build/ dies with 203/EXEC and STAYS dead, because
-# nothing on the host was watching for it. Two units on this host died
-# exactly this way and one of them was a probe, so its silence was read as a
-# real fault and paged for more than a day. A janitor that can create this
-# failure mode is obliged to detect it.
-#
-# REPORT ONLY, in every run including --apply. Disabling somebody's unit
-# automatically is not hygiene, it is an outage with extra steps. The output
-# is a WARN a human or an agent acts on.
-#
-# The policy this enforces by naming violations: no unit may point into a
-# checkout's build/ directory. Build trees are disposable by design;
+# Units whose ExecStart names a binary or script that is not on disk. A
+# sweep, a manual `rm -rf build/` or a lane teardown that removes a build/
+# leaves any linger unit pointing into it dead with 203/EXEC and silent, so a
+# janitor that can cause that must detect it. REPORT ONLY, in every run
+# including --apply: disabling a unit is an outage, not hygiene. The policy
+# named on violation: no unit points into a checkout's build/ directory;
 # installed binaries belong under the user's own lib tree.
 sweep_deadexec() {
     want deadexec || return 0

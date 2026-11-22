@@ -1141,6 +1141,10 @@ Z23_FLAG("ZCL_HOST_GC_JOURNALCTL_BIN", "env_build", "journalctl", "-",
           "fixture seam for the journalctl binary the journal sweep drives; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_JOURNAL_CAP", "env_build", "512M", "-",
           "cap the user journal is vacuumed to; first use tools/scripts/host_gc.sh:auto")
+Z23_FLAG("ZCL_HOST_GC_LANE_AGE_D", "env_build", "7", "-",
+          "idle days before the native janitor removes a clean lane worktree (halved under low disk, never 0); first use tools/scripts/host_gc.sh:auto")
+Z23_FLAG("ZCL_HOST_GC_LANE_ROOTS", "env_build", "$UNITS_DIR:$LANES_DIR:$GC_HOME/development/lanes/z23", "-",
+          "colon-separated lane roots the units sweep hands to z23 ops host gc; missing roots are skipped; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_LANES_DIR", "env_build", "$GC_HOME/.z23/lanes", "-",
           "root the units sweep walks for named-lane worktrees; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_GC_LOW_DISK_GB", "env_build", "150", "-",
