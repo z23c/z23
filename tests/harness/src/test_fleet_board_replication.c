@@ -468,6 +468,43 @@ static int test_rep_stage_text(void)
     return failures;
 }
 
+static int test_rep_clock_and_roster_guidance(void)
+{
+    int failures = 0;
+    struct boot_fleet_board_observation attempt, ingest;
+    struct fleet_board_post post;
+    struct json_value result;
+    char line[512];
+    json_init(&result); json_set_object(&result);
+    bool opened = rep_open(&g_rep, FBW_PAIRING_EXPIRES, FBW_NOW);
+    TEST("fleet board replication: future timestamp and roster-only defer name their real stage") {
+        ASSERT(opened);
+        int64_t future = FBW_NOW + FLEET_BOARD_FUTURE_SKEW_MAX + 1;
+        ASSERT(fbw_post(&g_rep.w.a, 7, FLEET_BOARD_SCOPE_FLEET, "future", future,
+                        3600, future, &post));
+        ASSERT_EQ(rep_pull(&g_rep), (size_t)0);
+        ASSERT(!db_fleet_board_have(&g_rep.w.b, post.id));
+        rep_observe(g_rep.w.box_a, post.id, &attempt, &ingest);
+        ASSERT(ingest.found && ingest.retryable && !ingest.stored);
+        ASSERT_EQ(ingest.result, (int)FLEET_BOARD_ERR_FUTURE);
+        ASSERT(fb_status_observation(&result, "post_ingest", &ingest));
+        const struct json_value *row = json_get(&result, "post_ingest");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "stage")), "clock");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "next_action")), "inspect_clock");
+        ASSERT(strstr(json_get_str(json_get(row, "operator_action")), "clock"));
+        ASSERT(strstr(boot_fleet_board_deferred_line(FLEET_BOARD_ERR_FUTURE, false,
+                                                     line, sizeof line), "stage=clock"));
+        ASSERT(strstr(line, "clock"));
+        ASSERT(strstr(boot_fleet_board_deferred_line(FLEET_BOARD_ERR_ROLE, true,
+                                                     line, sizeof line), "stage=roster"));
+        ASSERT(strstr(line, "z23 fleet doctor"));
+        PASS();
+    } _test_next:;
+    json_free(&result);
+    rep_close(&g_rep);
+    return failures;
+}
+
 static int test_rep_answer_role_refused(void)
 {
     int failures = 0;
@@ -725,6 +762,7 @@ int test_fleet_board_replication(void)
            test_rep_partition() + test_rep_cursor_missing_or_behind() +
            test_rep_cursor_ahead() + test_rep_expired() +
            test_rep_duplicate_delivery() + test_rep_stage_text() +
+           test_rep_clock_and_roster_guidance() +
            test_rep_answer_role_refused() + test_rep_ingest_role_refused() +
            test_rep_ingest_limit() + test_rep_decode_refused() +
            test_rep_gate_pairing() + test_rep_gate_delegation_expired() +

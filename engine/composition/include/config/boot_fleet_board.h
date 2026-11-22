@@ -689,7 +689,7 @@ const char *boot_fleet_board_write_message(enum fleet_board_result r, char *buf,
 enum boot_fleet_board_stage {
     BOARD_STAGE_PAIRING, BOARD_STAGE_DELEGATION, BOARD_STAGE_STREAM,
     BOARD_STAGE_ANSWER_ROLE, BOARD_STAGE_INGEST_ROLE,
-    BOARD_STAGE_INGEST_LIMIT, BOARD_STAGE_DECODE, BOARD_STAGE_ROSTER,
+    BOARD_STAGE_INGEST_LIMIT, BOARD_STAGE_DECODE, BOARD_STAGE_ROSTER, BOARD_STAGE_CLOCK,
     BOARD_STAGES
 };
 const char *boot_fleet_board_stage_name(enum boot_fleet_board_stage s);

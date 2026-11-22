@@ -73,6 +73,7 @@ const char *boot_fleet_board_stage_name(enum boot_fleet_board_stage s)
         [BOARD_STAGE_INGEST_LIMIT] = "ingest-limit",
         [BOARD_STAGE_DECODE] = "decode",
         [BOARD_STAGE_ROSTER] = "roster",
+        [BOARD_STAGE_CLOCK] = "clock",
     };
     return (unsigned)s < BOARD_STAGES ? names[s] : "unknown";
 }
@@ -88,6 +89,7 @@ const char *boot_fleet_board_stage_action(enum boot_fleet_board_stage s)
         [BOARD_STAGE_INGEST_LIMIT] = "inspect board counts with `z23 fleet board status` and the node storage logs",
         [BOARD_STAGE_DECODE] = "inspect build identities on both hosts with `z23 version`",
         [BOARD_STAGE_ROSTER] = "inspect membership and roster state with `z23 fleet doctor`",
+        [BOARD_STAGE_CLOCK] = "inspect sender and receiver clocks and the signed timestamp",
     };
     return (unsigned)s < BOARD_STAGES ? actions[s] : "";
 }
@@ -109,6 +111,7 @@ enum boot_fleet_board_stage boot_fleet_board_ingest_stage(
     case FLEET_BOARD_ERR_ROLE:
         return BOARD_STAGE_INGEST_ROLE;
     case FLEET_BOARD_ERR_FUTURE:
+        return BOARD_STAGE_CLOCK;
     case FLEET_BOARD_ERR_QUOTA:
     case FLEET_BOARD_ERR_WIKI_QUOTA:
     case FLEET_BOARD_ERR_WIKI_FULL:
@@ -199,7 +202,7 @@ const char *boot_fleet_board_deferred_line(enum fleet_board_result r,
 {
     if (roster_only && r == FLEET_BOARD_ERR_ROLE)
         return boot_fleet_board_stage_line(
-            BOARD_STAGE_INGEST_LIMIT, "this box takes only sealed rows until "
+            BOARD_STAGE_ROSTER, "this box takes only sealed rows until "
             "they arm its roster", buf, cap);
     return boot_fleet_board_ingest_line(r, buf, cap);
 }
