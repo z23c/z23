@@ -44,6 +44,9 @@ Z23_ROLE(observer, "read-only leaves")
 Z23_ROLE(landing,
         "the landing machine's key: post board results about trains, "
         "read the ledger")
+Z23_ROLE(scribe,
+        "replicate fleet wiki pages: post board rows of kind wiki only; "
+        "read the wiki; no other write")
 
 #undef Z23_ROLE
 
@@ -92,5 +95,17 @@ Z23_ROLE_GRANT(landing, "fleet.board.show", "*")
 Z23_ROLE_GRANT(landing, "fleet.board.status", "*")
 Z23_ROLE_GRANT(landing, "fleet.ledger.status", "*")
 Z23_ROLE_GRANT(landing, "fleet.usage", "*")
+
+/* scribe: wiki replication and nothing else. A wiki page travels as a board
+ * post of kind wiki, which no other role may carry, so an operator grants
+ * this deliberately; per-key wiki ceilings and windows still bound volume.
+ * It grants no board read: a peer that also PULLS needs observer or worker
+ * on its online key (fleet.board.list), a separate grant. */
+Z23_ROLE_GRANT(scribe, "fleet.board.post", "wiki")
+Z23_ROLE_GRANT(scribe, "fleet.wiki.read", "*")
+Z23_ROLE_GRANT(scribe, "fleet.wiki.list", "*")
+Z23_ROLE_GRANT(scribe, "fleet.wiki.find", "*")
+Z23_ROLE_GRANT(scribe, "fleet.wiki.history", "*")
+Z23_ROLE_GRANT(scribe, "fleet.roles.check", "*")
 
 #undef Z23_ROLE_GRANT

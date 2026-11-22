@@ -171,6 +171,25 @@ int test_fleet_roles(void)
         ASSERT(zcl_role_leaf_allowed(role, "fleet.ledger.status", NULL));
     }
 
+    TEST("fleet roles: scribe posts kind=wiki only and reads the wiki; "
+         "worker still cannot post wiki and scribe cannot post a note") {
+        uint8_t role = 0;
+        ASSERT(zcl_role_from_name("scribe", &role));
+        ASSERT_STR_EQ(zcl_role_name(role), "scribe");
+        ASSERT(zcl_role_leaf_allowed(role, "fleet.board.post", "wiki"));
+        ASSERT(!zcl_role_leaf_allowed(role, "fleet.board.post", "note"));
+        ASSERT(!zcl_role_leaf_allowed(role, "fleet.board.post", "result"));
+        ASSERT(!zcl_role_leaf_allowed(role, "fleet.ledger.replicate", NULL));
+        ASSERT(!zcl_role_leaf_allowed(role, "fleet.board.list", NULL));
+        ASSERT(!zcl_role_leaf_allowed(role, "fleet.wiki.write", NULL));
+        ASSERT(zcl_role_leaf_allowed(role, "fleet.wiki.read", NULL));
+        ASSERT(zcl_role_leaf_allowed(role, "fleet.wiki.history", NULL));
+        uint8_t worker = 0;
+        ASSERT(zcl_role_from_name("worker", &worker));
+        ASSERT(!zcl_role_leaf_allowed(worker, "fleet.board.post", "wiki"));
+        ASSERT(zcl_role_leaf_allowed(worker, "fleet.board.post", "note"));
+    }
+
     TEST("fleet roles: a fingerprint is stable and distinguishes keys") {
         uint8_t fp_a[ZCL_ROLE_FP_BYTES], fp_a_again[ZCL_ROLE_FP_BYTES];
         zcl_role_fingerprint(worker_pub, fp_a);
@@ -205,6 +224,9 @@ int test_fleet_roles(void)
             ASSERT(zcl_role_check(store, stranger_fp, true, leaves[i], NULL,
                                   NULL, 0));
         }
+        char why_wiki[ZCL_ROLE_LEAF_MAX];
+        ASSERT(!zcl_role_check(store, stranger_fp, false, "fleet.board.post",
+                               "wiki", why_wiki, sizeof why_wiki));
     }
 
     TEST("fleet roles: a grant takes effect immediately and its exact "
