@@ -184,11 +184,12 @@ static bool an_link_form(char out[ZCL_PRESENT_WINDOW_FORM_VALUE_MAX + 1],
  * return to the form with an explanation. This sketch depends on the bounded
  * explicit-paste implementation and must not connect until Submit. */
 
+#define AN_TIMEOUT_MS 120000u
 struct an_controller {
     const char *datadir;
     app_library_presenter cards;
     app_confirm_presenter notices;
-    void *context; bool error_presented;
+    void *context; bool error_presented, tor_deadline;
 #if defined(ZCL_TESTING)
     const struct app_network_test_hooks *hooks;
 #endif
@@ -344,9 +345,13 @@ static bool an_run_job(const char *datadir, const char *mode, const char *url,
     struct zcl_command_reply *reply)
 {
 #if defined(ZCL_TESTING)
-    if (controller->hooks && controller->hooks->job)
-        return controller->hooks->job(controller->context, mode, url, carrier, selected, result, reply);
+    if (controller->hooks && controller->hooks->job) {
+        bool ok = controller->hooks->job(controller->context, mode, url, carrier, selected, result, reply);
+        controller->tor_deadline = !ok && app_network_tor_deadline(result, AN_TIMEOUT_MS);
+        return ok;
+    }
 #endif
+    controller->tor_deadline = false;
     uint8_t random[18]; char why[256] = {0};
     struct an_scratch *scratch = an_job_scratch(datadir, random, reply); if (!scratch) return false;
     struct an_progress *p = zcl_calloc(1, sizeof(*p), "app-network.progress");
@@ -360,11 +365,13 @@ static bool an_run_job(const char *datadir, const char *mode, const char *url,
 #endif
     p->args = (struct app_network_job_args){.mode = mode, .url = url, .carrier_onion = carrier,
         .scratch = scratch->path, .selected = selected, .scratch_dev = (uint64_t)scratch->dev,
-        .scratch_ino = (uint64_t)scratch->ino, .bootstrap_port = port, .timeout_ms = 120000u,
+        .scratch_ino = (uint64_t)scratch->ino, .bootstrap_port = port, .timeout_ms = AN_TIMEOUT_MS,
         .network = zcl_native_command_network()};
     bool started = false, joined = false;
     bool shown = an_progress_run(p, controller->notices, controller->context, &started, &joined, why, sizeof(why));
-    return an_job_finish(p, scratch, started, joined, shown, result, reply);
+    bool ok = an_job_finish(p, scratch, started, joined, shown, result, reply);
+    controller->tor_deadline = !ok && app_network_tor_deadline(result, AN_TIMEOUT_MS);
+    return ok;
 }
 struct an_report { const struct zcl_app_offer_row *row; app_confirm_presenter presenter; void *context; };
 static void an_report_observed(void *context, const struct json_value *build,
@@ -469,6 +476,10 @@ static bool an_review_bytes(struct an_controller *c, const char *url,
 static bool an_notice(struct an_controller *c, const char *title, const char *summary,
     bool retry, bool *again)
 {
+    if (retry && c->tor_deadline) {
+        title = "Tor not ready";
+        summary = "Tor was not ready in time. Check connectivity and retry.";
+    }
     struct zcl_present_model_v1 model; struct zcl_present_window_event_v1 event = {0};
     zcl_present_model_init_v1(&model, ZCL_PRESENT_MODEL_STATUS_CARD);
     snprintf(model.request_id, sizeof(model.request_id), "app-network-notice");

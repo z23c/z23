@@ -25,6 +25,13 @@ struct app_network_job_result {
     int64_t capture_elapsed_ms;
     struct app_network_diagnostic diagnostic;
 };
+/* The worker reports TOR only when readiness was not observed at expiry. */
+static inline bool app_network_tor_deadline(const struct app_network_job_result *result, unsigned timeout_ms)
+{
+    return result->error == APP_NETWORK_TIMEOUT && result->protocol_valid && result->diagnostic_valid &&
+        result->diagnostic.phase == APP_NET_PHASE_TOR && result->diagnostic.attempts == 0 &&
+        result->diagnostic.elapsed_ms >= timeout_ms;
+}
 /* Synchronous; UI owner must call on a joined worker thread. Result bytes
  * are caller-owned. Parent retains scratch descriptor and cleans only after
  * child reaped; this function neither writes staged files nor removes trees. */

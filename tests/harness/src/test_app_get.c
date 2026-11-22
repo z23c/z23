@@ -27,6 +27,7 @@
 #endif
 #include "test/test_core.h"
 #include "test/app_seed_fixture.h"
+#include "presentation/canvas.h"
 
 #include "command/native_app_compose.h"
 #include "command/native_app_front_door.h"
@@ -3768,6 +3769,57 @@ static int tag_stage_case(struct tag_world *w, unsigned phase, bool direct, bool
     } _test_next:;
     return failures;
 }
+#define TAG_TOR_GUI_POST "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+struct tag_tor_gui { unsigned scenario, jobs, notices; bool pins; };
+static bool tag_tor_gui_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
+{
+    (void)context; (void)why; (void)cap;
+    int n = snprintf(out, 257, "http://%s/board/apps/v1/%s", TAG_ONION, TAG_TOR_GUI_POST);
+    *submitted = n > 0 && n < 257; return *submitted;
+}
+static bool tag_tor_gui_job(void *context, const char *mode, const char *url, const char *carrier,
+    const struct zcl_app_offer_row *selected, struct app_network_job_result *result,
+    struct zcl_command_reply *reply)
+{
+    struct tag_tor_gui *f = context; struct app_network_link link;
+    f->pins = f->pins && !strcmp(mode, "direct") && !carrier && !selected &&
+        app_network_link_parse(url, &link) && link.exact && !strcmp(link.post_id, TAG_TOR_GUI_POST);
+    ++f->jobs; result->error = f->scenario == 6 ? APP_NETWORK_UNAVAILABLE : APP_NETWORK_TIMEOUT;
+    result->protocol_valid = f->scenario != 1; result->diagnostic_valid = f->scenario != 2;
+    result->diagnostic.phase = f->scenario == 3 ? APP_NET_PHASE_NONE : APP_NET_PHASE_TOR;
+    result->diagnostic.attempts = f->scenario == 4 ? 1 : 0;
+    result->diagnostic.elapsed_ms = f->scenario == 5 ? 119999 : 120000;
+    return zcl_test_app_network_failure_reply(result, reply);
+}
+static bool tag_tor_gui_card(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_tor_gui *f = context; (void)copy;
+    if (!zcl_present_model_validate_v1(model, why, cap) || strcmp(model->request_id, "app-network-notice") ||
+        model->action_count != 2 || strcmp(model->actions[0].label, "Back") || strcmp(model->actions[1].label, "Retry")) return false;
+    bool deadline = f->scenario == 0;
+    if ((strcmp(model->title, "Tor not ready") == 0) != deadline ||
+        (strstr(model->summary, "Check connectivity") != NULL) != deadline ||
+        zcl_present_canvas_text_width(model->summary, strlen(model->summary), 15u) > 636u) return false;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = f->notices++ == 0 ? 1 : 0;
+    return true;
+}
+static int tag_tor_gui_case(struct tag_world *w, unsigned scenario)
+{
+    int failures = 0; struct zcl_command_reply reply; bool shown = false;
+    struct tag_tor_gui f = {.scenario = scenario, .pins = true};
+    TEST("shared app reports only a proven Tor bootstrap deadline") {
+        struct app_network_test_hooks hooks = {.form = tag_tor_gui_form, .job = tag_tor_gui_job};
+        int posts = g_tag.posts, offers = g_tag.offers, fetches = g_tag.fetches;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        ASSERT(!zcl_test_app_network_open_link(w->j.b_datadir, tag_tor_gui_card, NULL, &f, &reply, &shown, &hooks));
+        ASSERT_EQ(f.jobs, 2u); ASSERT_EQ(f.notices, 2u); ASSERT(f.pins && shown && !reply.error.mutated);
+        ASSERT_EQ(g_tag.posts, posts); ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.fetches, fetches);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    return failures;
+}
 struct tag_link_fixture { struct tag_discover discover; struct zcl_app_offer_row row; unsigned homes, jobs, errors, mode; bool action_error_title; };
 static bool tag_link_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
 {
@@ -6767,6 +6819,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_stage_bytes(w);
     failures += tag_stage_unsafe_parent(w);
     failures += tag_tor_deadline_cases(w);
+    for (unsigned i = 0; i < 7; ++i) failures += tag_tor_gui_case(w, i);
     failures += tag_discover_cancel(w);
     failures += tag_discover_fetch_close(w);
     failures += tag_fetch_native_profile(w);

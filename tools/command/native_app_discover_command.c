@@ -114,15 +114,6 @@ static bool adc_lines(struct zcl_command_reply *reply,
     return ok;
 }
 
-#if !defined(_WIN32)
-static bool adc_tor_deadline(const struct app_network_job_result *result, unsigned timeout_ms)
-{
-    return result->error == APP_NETWORK_TIMEOUT && result->protocol_valid && result->diagnostic_valid &&
-        result->diagnostic.phase == APP_NET_PHASE_TOR && result->diagnostic.attempts == 0 &&
-        result->diagnostic.elapsed_ms >= timeout_ms;
-}
-#endif
-
 /* One owned scratch round trip; the child is reaped before cleanup. The
  * sandboxed worker machinery is POSIX-only: on Windows the command fails
  * closed as unavailable rather than compiling a path it cannot honor —
@@ -184,7 +175,7 @@ static bool adc_job(const char *datadir, const char *mode, const char *url,
     }
     if (result->error != APP_NETWORK_OK || (ran && !result->protocol_valid)) {
         adc_fail_network(reply, result->error);
-        if (adc_tor_deadline(result, args.timeout_ms)) {
+        if (app_network_tor_deadline(result, args.timeout_ms)) {
             (void)snprintf(reply->error.message, sizeof(reply->error.message),
                 "Tor did not become ready before the connection timed out.");
             (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
