@@ -68,6 +68,9 @@ bool package_resident_identity_equal(const struct package_resident_identity *a,
 /* Named labels select local state; they confer no publisher authority. */
 struct zcl_result package_resident_store_open_app(
     struct package_resident_store *store, const char *datadir, const char *app);
+/* Initialize task and resident schemas in one durable transaction. */
+struct zcl_result package_resident_store_open_task_app(
+    struct package_resident_store *store, const char *datadir, const char *app);
 /* Open existing state without creating or migrating it. */
 struct zcl_result package_resident_store_open_app_readonly(
     struct package_resident_store *store, const char *datadir, const char *app);

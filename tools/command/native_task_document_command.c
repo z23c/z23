@@ -55,7 +55,7 @@ static struct zcl_result ntd_open(const struct json_value *input,
     if (!platform_private_directory_ensure(directory) ||
         !platform_private_directory_ensure(package_directory))
         return ZCL_ERR(-1, "tasks: private data directory could not be opened");
-    return package_resident_store_open_app(store, directory, app);
+    return package_resident_store_open_task_app(store, directory, app);
 }
 
 static struct zcl_result ntd_candidate(const struct json_value *input,

@@ -22,7 +22,7 @@
 DEFINE_MODEL_CALLBACKS(package_resident_record)
 
 #if !defined(_WIN32)
-static struct zcl_result pr_schema(struct package_resident_store *store);
+static struct zcl_result pr_schema(struct package_resident_store *store, bool tasks);
 #endif
 static void pr_pending_clear(struct package_resident_record *row);
 static bool pr_pending_valid(const struct package_resident_record *row);
@@ -230,12 +230,13 @@ static struct zcl_result pr_database_path(const char *datadir, char path[4640])
 }
 #endif
 
-struct zcl_result package_resident_store_open(
-    struct package_resident_store *store, const char *datadir)
+static struct zcl_result pr_open(
+    struct package_resident_store *store, const char *datadir, bool tasks)
 {
     if (!store || store->db || !datadir || datadir[0] != '/')
         return ZCL_ERR(-1, "resident-store: unused owner and explicit absolute datadir required");
 #if defined(_WIN32)
+    (void)tasks;
     return ZCL_ERR(-1, "resident-store: Windows execution remains unavailable");
 #else
     char path[4640];
@@ -253,7 +254,7 @@ struct zcl_result package_resident_store_open(
     /* EXTRA also synchronizes the directory when the rollback journal is
      * unlinked. SQLite's single transaction is the only commit authority;
      * neither an install symlink nor a process handle can override it. */
-    if (result.ok) result = pr_schema(store);
+    if (result.ok) result = pr_schema(store, tasks);
     if (!result.ok) {
         struct zcl_result cleanup = package_resident_store_close(store);
         if (!cleanup.ok) return cleanup;
@@ -261,6 +262,12 @@ struct zcl_result package_resident_store_open(
     if (result.ok) (void)snprintf(store->app, sizeof(store->app), "%s", "@legacy");
     return result;
 #endif
+}
+
+struct zcl_result package_resident_store_open(
+    struct package_resident_store *store, const char *datadir)
+{
+    return pr_open(store, datadir, false);
 }
 
 struct zcl_result package_resident_store_close(struct package_resident_store *store)
@@ -499,11 +506,12 @@ static struct zcl_result pr_schema_migrate(struct package_resident_store *store)
     return pr_sql(store, qb_schema_sql(QB_S_resident_legacy_drop));
 }
 
-static struct zcl_result pr_schema(struct package_resident_store *store)
+static struct zcl_result pr_schema(struct package_resident_store *store, bool tasks)
 {
     ZCL_CHECK(pr_sql(store, qb_schema_sql(QB_S_resident_durable_begin)));
     struct zcl_result result = pr_sql(store, qb_schema_sql(QB_S_resident_create));
     if (result.ok) result = pr_schema_migrate(store);
+    if (result.ok && tasks) result = pr_sql(store, qb_schema_sql(QB_S_task_documents_create));
     return pr_finish(store, result);
 }
 #endif
@@ -529,13 +537,25 @@ static bool pr_app_valid(const char *app)
     return slashes == 1;
 }
 
+static struct zcl_result pr_open_app(
+    struct package_resident_store *store, const char *datadir, const char *app, bool tasks)
+{
+    if (!pr_app_valid(app)) return ZCL_ERR(-1, "resident-app: bounded publisher/package label required");
+    ZCL_CHECK(pr_open(store, datadir, tasks));
+    (void)snprintf(store->app, sizeof(store->app), "%s", app);
+    return ZCL_OK;
+}
+
 struct zcl_result package_resident_store_open_app(
     struct package_resident_store *store, const char *datadir, const char *app)
 {
-    if (!pr_app_valid(app)) return ZCL_ERR(-1, "resident-app: bounded publisher/package label required");
-    ZCL_CHECK(package_resident_store_open(store, datadir));
-    (void)snprintf(store->app, sizeof(store->app), "%s", app);
-    return ZCL_OK;
+    return pr_open_app(store, datadir, app, false);
+}
+
+struct zcl_result package_resident_store_open_task_app(
+    struct package_resident_store *store, const char *datadir, const char *app)
+{
+    return pr_open_app(store, datadir, app, true);
 }
 
 #if defined(__linux__) || defined(__APPLE__)

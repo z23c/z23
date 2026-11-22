@@ -1146,6 +1146,42 @@ static int td_editor_acceptance(const char *directory)
     return failures;
 }
 
+static bool td_schema_seed(const char *path)
+{
+    sqlite3 *db = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK;
+    if (ok) ok = sqlite3_exec(db, "CREATE TABLE fixture_seed(v); CREATE INDEX task_documents ON fixture_seed(v)", NULL, NULL, NULL) == SQLITE_OK;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool td_schema_rolled_back(const char *path)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *s = NULL;
+    bool ok = sqlite3_open(path, &db) == SQLITE_OK;
+    if (ok) ok = sqlite3_prepare_v2(db, "SELECT count(*) FROM sqlite_master WHERE name = 'resident_serving'", -1, &s, NULL) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) == 0;
+    if (s && sqlite3_finalize(s) != SQLITE_OK) ok = false;
+    if (db && sqlite3_close(db) != SQLITE_OK) ok = false;
+    return ok;
+}
+
+static bool td_atomic_schema(const char *root)
+{
+    char dir[256], sub[320], path[384];
+    (void)snprintf(dir, sizeof(dir), "%s/atomic", root);
+    if (mkdir(dir, 0700) != 0) return false;
+    (void)snprintf(sub, sizeof(sub), "%s/zcode", dir);
+    (void)snprintf(path, sizeof(path), "%s/zcode/resident.db", dir);
+    bool ok = mkdir(sub, 0700) == 0 && td_schema_seed(path);
+    struct package_resident_store store = {0};
+    if (ok) ok = !package_resident_store_open_task_app(&store, dir, "local/tasks").ok && !store.db;
+    if (ok) ok = td_schema_rolled_back(path);
+    if (unlink(path) != 0 || rmdir(sub) != 0 || rmdir(dir) != 0) ok = false;
+    return ok;
+}
+
 #endif
 
 int test_task_document(void)
@@ -1163,10 +1199,16 @@ int test_task_document(void)
     if (!mkdtemp(directory)) { perror("task_document: mkdtemp"); return 1; }
     (void)snprintf(path, sizeof(path), "%s/zcode", directory);
     if (mkdir(path, 0700) != 0) { perror("task_document: mkdir"); return 1; }
+    TD_CHECK("task schema failure rolls back resident schema", td_atomic_schema(directory));
     struct package_resident_store store = {0};
     struct task_document row = {0};
-    struct zcl_result opened = package_resident_store_open_app(&store, directory, "local/tasks");
+    struct zcl_result opened = package_resident_store_open_task_app(&store, directory, "local/tasks");
     if (!opened.ok) { fprintf(stderr, "task_document: open: %s\n", opened.message); return 1; }
+    sqlite3_stmt *schema = NULL;
+    TD_CHECK("task schema present immediately after open",
+        sqlite3_prepare_v2(store.db, "SELECT app, payload, undo FROM task_documents",
+            -1, &schema, NULL) == SQLITE_OK);
+    TD_CHECK("task schema statement finalized", sqlite3_finalize(schema) == SQLITE_OK);
     failures += td_default_storage(directory);
     failures += td_stale_reload(directory);
     failures += td_actions(&store, &row);

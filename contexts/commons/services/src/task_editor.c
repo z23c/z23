@@ -38,7 +38,7 @@ static void *te_write(void *opaque)
 {
     struct task_editor_save *job = opaque;
     struct package_resident_store store = {0};
-    job->result = package_resident_store_open_app(&store, job->directory, job->app);
+    job->result = package_resident_store_open_task_app(&store, job->directory, job->app);
     if (job->result.ok)
         job->result = task_document_apply(&store, job->revision, job->action,
             job->id, job->title, &job->saved);
@@ -81,7 +81,7 @@ static void te_title(struct task_editor *editor)
 static struct zcl_result te_read(const char *directory, const char *app, struct task_document *saved)
 {
     struct package_resident_store store = {0};
-    struct zcl_result result = package_resident_store_open_app(&store, directory, app);
+    struct zcl_result result = package_resident_store_open_task_app(&store, directory, app);
     if (result.ok) result = task_document_read(&store, saved);
     struct zcl_result closed = package_resident_store_close(&store);
     if (result.ok && !closed.ok) result = closed;
