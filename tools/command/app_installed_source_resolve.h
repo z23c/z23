@@ -36,6 +36,7 @@ enum app_installed_source_status app_installed_source_select(const char *app,
     struct app_installed_source *out, char *why, size_t cap);
 
 enum app_installed_toolchain_status {
+    APP_INSTALLED_TOOLCHAIN_UNTRUSTED_PATH = -2,
     APP_INSTALLED_TOOLCHAIN_REFUSED = -1,
     APP_INSTALLED_TOOLCHAIN_UNSELECTED = 0,
     APP_INSTALLED_TOOLCHAIN_VERIFIED = 1

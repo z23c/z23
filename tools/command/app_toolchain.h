@@ -13,6 +13,7 @@
 #define APP_TOOLCHAIN_POLICY "zcl.app_toolchain.linux_sealed.v1"
 struct app_toolchain {
     bool selected;
+    bool untrusted_install_path;
     uint8_t tree[32], bundle_hash[32], env[32];
     char target[64];
     struct vcs_manifest manifest;

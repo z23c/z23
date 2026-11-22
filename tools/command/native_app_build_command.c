@@ -601,7 +601,10 @@ static bool zab_environment(struct zab *z)
     char kit_why[256] = "";
     if (!app_toolchain_resolve(&z->kit, kit_why, sizeof(kit_why)) ||
         (z->kit.selected && !app_toolchain_seal(&z->kit, kit_why, sizeof(kit_why)))) {
-        zab_fail(z, "ENV_UNAVAILABLE", false, "the selected compiler kit is unavailable", kit_why);
+        const char *message = z->kit.untrusted_install_path ?
+            "Z23 could not verify the owner or permissions of the build tools folder. Check your Z23 installation, then try again." :
+            "the selected compiler kit is unavailable";
+        zab_fail(z, "ENV_UNAVAILABLE", false, message, kit_why);
         return false;
     }
     struct zcl_result env = ZCL_OK;

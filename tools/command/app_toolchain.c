@@ -161,6 +161,11 @@ bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap)
     struct app_installed_toolchain retained = {0};
     enum app_installed_toolchain_status state = app_installed_toolchain_resolve(&retained, why, cap);
     if (state == APP_INSTALLED_TOOLCHAIN_UNSELECTED) return true;
+    if (state == APP_INSTALLED_TOOLCHAIN_UNTRUSTED_PATH) {
+        app_installed_toolchain_free(&retained);
+        kit->untrusted_install_path = true;
+        return false;
+    }
     bool ok = state == APP_INSTALLED_TOOLCHAIN_VERIFIED &&
         app_toolchain_verify(kit, retained.descriptor.bytes, retained.descriptor.length,
             retained.bundle.bytes, retained.bundle.length, why, cap);

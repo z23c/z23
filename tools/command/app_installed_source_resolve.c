@@ -62,14 +62,26 @@ static bool isr_trusted(const struct stat *st)
 {
     return (st->st_uid == 0 || st->st_uid == geteuid()) && !(st->st_mode & 022);
 }
-static bool isr_dir_ok(int fd)
+static bool isr_dir_ok(int fd, bool *untrusted)
 {
     struct stat st;
-    return fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && isr_trusted(&st);
+    if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
+    bool trusted = isr_trusted(&st);
+    if (!trusted && untrusted) *untrusted = true;
+    return trusted;
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_installed_untrusted_directory(int fd);
+bool zcl_test_installed_untrusted_directory(int fd)
+{
+    bool untrusted = false;
+    (void)isr_dir_ok(fd, &untrusted);
+    return untrusted;
+}
+#endif
 /* Walk from root, retaining each parent while opening its child. No realpath
  * inference, writable sticky exception, or owner/mode repair. */
-static int isr_directory(const char *path)
+static int isr_directory(const char *path, bool *untrusted)
 {
     if (path[0] != '/' || strlen(path) >= ISR_PATH) return -1;
     char copy[ISR_PATH];
@@ -77,14 +89,14 @@ static int isr_directory(const char *path)
     int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
     char *at = copy;
-    while (*at && isr_dir_ok(fd)) {
+    while (*at && isr_dir_ok(fd, untrusted)) {
         char *slash = strchr(at, '/');
         if (slash) *slash = 0;
         if (!*at || !strcmp(at, ".") || !strcmp(at, "..")) break;
         int next = openat(fd, at, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         close(fd); fd = next;
         if (fd < 0) return -1;
-        if (!slash) return isr_dir_ok(fd) ? fd : (close(fd), -1);
+        if (!slash) return isr_dir_ok(fd, untrusted) ? fd : (close(fd), -1);
         at = slash + 1;
     }
     close(fd);
@@ -127,7 +139,7 @@ bool app_installed_source_supported(const char *app)
     return false;
 }
 #if defined(__linux__)
-static bool isr_game_link(const char *prefix, const char *app)
+static bool isr_game_link(const char *prefix, const char *app, bool *untrusted)
 {
     char target[96], link[32], bin[ISR_PATH], actual[sizeof(target)];
     int n = snprintf(target, sizeof(target), "../share/z23/apps/%s/%s",
@@ -136,7 +148,7 @@ static bool isr_game_link(const char *prefix, const char *app)
     n = snprintf(link, sizeof(link), "z23-%s", app);
     if (n <= 0 || (size_t)n >= sizeof(link)) return false;
     if (!zcl_path_join(bin, sizeof(bin), prefix, "bin")) return false;
-    int fd = isr_directory(bin);
+    int fd = isr_directory(bin, untrusted);
     if (fd < 0) return false;
     ssize_t got = readlinkat(fd, link, actual, sizeof(actual));
     size_t want = strlen(target);
@@ -146,13 +158,14 @@ static bool isr_game_link(const char *prefix, const char *app)
     return ok;
 }
 #endif
-static bool isr_layout(struct isr_layout *l, const char *app)
+static bool isr_layout(struct isr_layout *l, const char *app, bool *untrusted)
 {
     memset(l, 0, sizeof(*l));
     if (!app_installed_source_supported(app)) return false;
     if (!isr_exe_path(l->exe, sizeof(l->exe))) return false;
     size_t n = strlen(l->exe);
 #if defined(__APPLE__)
+    (void)untrusted;
     l->mac = true;
     if (n < 70 || strcmp(l->exe + n - 4, "/z23")) return false;
     memcpy(l->dir, l->exe, n - 4);
@@ -167,9 +180,9 @@ static bool isr_layout(struct isr_layout *l, const char *app)
     if (n <= 8 || strcmp(l->exe + n - 8, "/bin/z23")) return false;
     char parent[ISR_PATH];
     memcpy(parent, l->exe, n - 8); parent[n-8] = 0;
-    if (!isr_game_link(parent, app)) return false;
+    if (!isr_game_link(parent, app, untrusted)) return false;
     if (!zcl_path_join(l->dir, sizeof(l->dir), parent, "share/z23/apps")) return false;
-    int fd = isr_directory(l->dir);
+    int fd = isr_directory(l->dir, untrusted);
     if (fd < 0) return false;
     ssize_t count = readlinkat(fd, isr_selector(app), l->generation, sizeof(l->generation));
     close(fd);
@@ -303,7 +316,7 @@ static bool isr_self(const struct isr_layout *l, const struct isr_manifest *m)
     char *slash = strrchr(parent, '/');
     if (!slash) return false;
     *slash = 0;
-    int dir = isr_directory(parent);
+    int dir = isr_directory(parent, NULL);
     if (dir < 0) return false;
     int named = openat(dir, "z23", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     close(dir);
@@ -383,7 +396,7 @@ static bool isr_binding_matches(int dir, const struct isr_layout *l,
                                 const char *mh, const char *app)
 {
     struct isr_layout again; struct isr_manifest final; char final_hash[65];
-    return isr_layout(&again, app) && !strcmp(l->exe, again.exe) &&
+    return isr_layout(&again, app, NULL) && !strcmp(l->exe, again.exe) &&
         !strcmp(l->dir, again.dir) &&
         isr_manifest(dir, l, &final, final_hash, app) && !strcmp(mh, final_hash);
 }
@@ -402,8 +415,8 @@ static bool isr_resolve(struct app_installed_source *out, char *why, size_t cap,
                         const char *app)
 {
     struct isr_layout l;
-    if (!isr_layout(&l, app)) return false;
-    int dir = isr_directory(l.dir);
+    if (!isr_layout(&l, app, NULL)) return false;
+    int dir = isr_directory(l.dir, NULL);
     if (dir < 0) return false;
     struct isr_manifest manifest; char mh[65], pin[65], image[ISR_PATH];
     bool ok = isr_manifest(dir, &l, &manifest, mh, app) && isr_self(&l, &manifest);
@@ -525,12 +538,14 @@ static enum app_installed_toolchain_status isr_toolchain(
     int candidate = isr_toolchain_candidate();
     if (candidate == 0) return APP_INSTALLED_TOOLCHAIN_UNSELECTED;
     struct isr_layout layout;
+    bool untrusted = false;
     const char *tool_app = NULL;
     for (size_t i = 0; !tool_app && i < ISR_APP_COUNT; ++i)
-        if (isr_layout(&layout, isr_apps[i])) tool_app = isr_apps[i];
-    if (candidate < 0 || !tool_app) return APP_INSTALLED_TOOLCHAIN_REFUSED;
-    int dir = isr_directory(layout.dir);
-    if (dir < 0) return APP_INSTALLED_TOOLCHAIN_REFUSED;
+        if (isr_layout(&layout, isr_apps[i], &untrusted)) tool_app = isr_apps[i];
+    if (candidate < 0 || !tool_app) return untrusted ? APP_INSTALLED_TOOLCHAIN_UNTRUSTED_PATH : APP_INSTALLED_TOOLCHAIN_REFUSED;
+    untrusted = false;
+    int dir = isr_directory(layout.dir, &untrusted);
+    if (dir < 0) return untrusted ? APP_INSTALLED_TOOLCHAIN_UNTRUSTED_PATH : APP_INSTALLED_TOOLCHAIN_REFUSED;
     bool selected = false;
     bool ok = isr_toolchain_kit(dir, &layout, out, tool_app, &selected);
     if (close(dir) != 0) ok = false;
@@ -560,6 +575,7 @@ enum app_installed_toolchain_status app_installed_toolchain_resolve(
     (void)app_installed_source_message(why, cap,
         status == APP_INSTALLED_TOOLCHAIN_VERIFIED ? "Retained kit bytes match the installer manifest; semantic verification required" :
         status == APP_INSTALLED_TOOLCHAIN_UNSELECTED ? "No installed compiler kit selected" :
+        status == APP_INSTALLED_TOOLCHAIN_UNTRUSTED_PATH ? "Installed compiler kit refused: untrusted directory owner or mode" :
         "Installed compiler kit refused: layout, owner/mode, manifest, running image or member mismatch");
     return status;
 }

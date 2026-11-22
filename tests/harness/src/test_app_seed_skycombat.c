@@ -1094,7 +1094,7 @@ static bool asi_confirm(struct ass_world *w, struct asi_run *r)
     }
     json_free(&reply); return ok;
 }
-static bool asi_kit_refusal_valid(const char *path, uint32_t code)
+static bool asi_kit_refusal_valid(const char *path, uint32_t code, bool untrusted)
 {
     struct json_value reply; json_init(&reply);
     bool ok = code != 0 && asi_json_file(path, &reply);
@@ -1103,27 +1103,32 @@ static bool asi_kit_refusal_valid(const char *path, uint32_t code)
     const struct json_value *mutated = json_get(error, "mutated");
     ok = ok && top_ok && top_ok->type == JSON_BOOL && !json_get_bool(top_ok) &&
         !strcmp(asi_string(error, "code"), "ENV_UNAVAILABLE") &&
-        !strcmp(asi_string(error, "evidence"),
+        !strcmp(asi_string(error, "evidence"), untrusted ?
+            "Installed compiler kit refused: untrusted directory owner or mode" :
             "Installed compiler kit refused: layout, owner/mode, manifest, running image or member mismatch") &&
+        !strcmp(asi_string(error, "message"), untrusted ?
+            "Z23 could not verify the owner or permissions of the build tools folder. Check your Z23 installation, then try again." :
+            "the selected compiler kit is unavailable") &&
         mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
     json_free(&reply); return ok;
 }
-static bool asi_kit_refusal_reply(struct ass_world *w, struct asi_run *r)
+static bool asi_kit_refusal_reply(struct ass_world *w, struct asi_run *r, bool untrusted)
 {
     char data[ASS_PATH+16], copy[ASS_PATH+16], version[80], path[ASS_PATH];
+    const char *log = untrusted ? "kit-path-refusal.json" : "kit-refusal.json";
     int a = snprintf(data, sizeof(data), "--datadir=%s", r->datadir);
     int b = snprintf(copy, sizeof(copy), "--copy=%s", r->copy);
     if (a <= 0 || (size_t)a >= sizeof(data) || b <= 0 || (size_t)b >= sizeof(copy) ||
-        !asi_path(path, sizeof(path), w->root, "kit-refusal.json")) return false;
+        !asi_path(path, sizeof(path), w->root, log)) return false;
     int v = snprintf(version, sizeof(version), "--version=%s", r->version);
     if (v <= 0 || (size_t)v >= sizeof(version)) return false;
     const char *argv[] = {r->installed, "app", "build", "--json", data, copy, version, NULL};
-    if (!asi_terminal_spawn(w, r, "kit-refusal.json", argv)) return false;
+    if (!asi_terminal_spawn(w, r, log, argv)) return false;
     uint32_t code = 0;
     enum platform_process_wait_result state = platform_process_wait(&r->cli, 120000, &code);
     if (state != PLATFORM_PROCESS_WAIT_EXITED) { (void)asi_stop(&r->cli); return false; }
     platform_process_close(&r->cli);
-    return asi_kit_refusal_valid(path, code);
+    return asi_kit_refusal_valid(path, code, untrusted);
 }
 static bool asi_kit_refusal(struct ass_world *w, struct asi_run *r)
 {
@@ -1132,8 +1137,11 @@ static bool asi_kit_refusal(struct ass_world *w, struct asi_run *r)
         snprintf(dir, sizeof(dir), "%s/share/z23/apps/%s", r->prefix, pin) >= (int)sizeof(dir) ||
         !asi_path(path, sizeof(path), dir, APP_TOOLCHAIN_DESCRIPTOR) || lstat(path, &st) ||
         !S_ISREG(st.st_mode) || chmod(path, st.st_mode | 022)) return false;
-    bool ok = asi_kit_refusal_reply(w, r);
+    bool ok = asi_kit_refusal_reply(w, r, false);
     bool restored = chmod(path, st.st_mode & 07777) == 0;
+    if (!ok || !restored || lstat(r->prefix, &st) || !S_ISDIR(st.st_mode) || chmod(r->prefix, st.st_mode | 022)) return false;
+    ok = asi_kit_refusal_reply(w, r, true);
+    restored = chmod(r->prefix, st.st_mode & 07777) == 0;
     return ok && restored;
 }
 
@@ -1592,6 +1600,15 @@ static bool isd_kit_bounds(struct isd_fixture *f)
     }
     return true;
 }
+bool zcl_test_installed_untrusted_directory(int fd);
+static bool isd_owner_check(int fd)
+{
+    struct stat st;
+    if (fstat(fd, &st) || zcl_test_installed_untrusted_directory(fd) || fchmod(fd, st.st_mode | 022)) return false;
+    bool refused = zcl_test_installed_untrusted_directory(fd);
+    bool restored = fchmod(fd, st.st_mode & 07777) == 0;
+    return refused && restored && !zcl_test_installed_untrusted_directory(-1);
+}
 static int isd_contract(struct ass_world *w)
 {
     int failures = 0; struct isd_fixture f = {.fd = -1};
@@ -1599,7 +1616,7 @@ static int isd_contract(struct ass_world *w)
         ASSERT(asi_path(f.directory, sizeof(f.directory), w->root, "desktop-contract"));
         ASSERT(mkdir(f.directory, 0700) == 0);
         f.fd = open(f.directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-        ASSERT(f.fd >= 0 && isd_payload(&f, 1));
+        ASSERT(f.fd >= 0 && isd_owner_check(f.fd) && isd_payload(&f, 1));
         ASSERT(isd_shapes(&f));
         ASSERT(isd_bad_rows(&f));
         ASSERT(isd_tamper(&f));
@@ -1662,7 +1679,7 @@ static bool asi_evidence(struct ass_world *w, const struct asi_run *r)
     static const char *const logs[] = {"installed-package.log", "installed-install.log",
 
         "installed-list.json", "installed-cancel.json", "installed-confirm.json", "installed-xvfb.log",
-        "installed-driver.log", "installed-cli.stderr", "kit-refusal.json"};
+        "installed-driver.log", "installed-cli.stderr", "kit-refusal.json", "kit-path-refusal.json"};
     if (!asi_evidence_copy(w, dir, logs, sizeof(logs)/sizeof(logs[0]))) return false;
     if (r->real_kit) {
         static const char *const build[] = {"kit-build-plan.json", "kit-build-commit.json"};
