@@ -44,6 +44,22 @@ static const struct json_value *fb_input(const struct json_value *params)
     return first && first->type == JSON_OBJ ? first : NULL;
 }
 
+static void fb_chain_failure(struct json_value *result,
+                             enum fleet_board_chain_check check)
+{
+    const char *reason = "read_failed";
+    const char *action = "inspect_node_storage_logs";
+    if (check == FLEET_BOARD_CHAIN_INVALID_ROW) {
+        reason = "invalid_row";
+        action = "inspect_local_board_record";
+    } else if (check == FLEET_BOARD_CHAIN_LINK_MISMATCH) {
+        reason = "link_mismatch";
+        action = "inspect_local_board_chain";
+    }
+    json_push_kv_str(result, "chain_check_error", reason);
+    json_push_kv_str(result, "chain_next_action", action);
+}
+
 static void fb_refuse(struct json_value *result, enum fleet_board_result r)
 {
     fb_error(result, r == FLEET_BOARD_ERR_BUSY ? "BOARD_BUSY" : "BOARD_REFUSED",
@@ -601,9 +617,11 @@ static void fb_op_status(struct node_db *ndb, const struct json_value *in,
         json_push_kv_str(result, "head_chain", hex);
     }
     int64_t checked = 0;
-    json_push_kv_bool(result, "chain_intact",
-                      db_fleet_board_chain_verify(ndb, &checked));
+    enum fleet_board_chain_check check = db_fleet_board_chain_check(ndb, &checked);
+    json_push_kv_bool(result, "chain_intact", check == FLEET_BOARD_CHAIN_OK);
     json_push_kv_int(result, "chain_checked", checked);
+    if (check != FLEET_BOARD_CHAIN_OK)
+        fb_chain_failure(result, check);
     /* Verified posts this node refused because their author holds no role
      * here. Invisible in the counts above, because they were never stored. */
     json_push_kv_int(result, "role_refused",

@@ -1436,53 +1436,56 @@ bool db_fleet_board_status(struct node_db *ndb, int64_t now,
     return board_head_chain(ndb, out->head_chain, &out->head_chain_set);
 }
 
-bool db_fleet_board_chain_verify(struct node_db *ndb, int64_t *checked_out)
+enum fleet_board_chain_check db_fleet_board_chain_check(
+    struct node_db *ndb, int64_t *checked_out)
 {
     if (checked_out)
         *checked_out = 0;
     if (!ndb || !ndb->open)
-        return false;
+        return FLEET_BOARD_CHAIN_READ_FAILED;
     struct qb q;
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
     qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_ASC);
     sqlite3_stmt *s = NULL;
     if (!QB_PREPARE(ndb, &q, s)) {
-        /* A chain the node cannot READ is reported as not intact, and the
-         * reason is logged: "the chain is broken" and "I could not look" are
-         * different findings and must not answer the same way silently. */
-        LOG_WARN("fleet.board",
-                 "chain verify could not read the ledger: %s", qb_error(&q));
-        return false;
+        LOG_WARN("fleet.board", "chain verify could not read the ledger: %s", qb_error(&q));
+        return FLEET_BOARD_CHAIN_READ_FAILED;
     }
 
-    uint8_t expect_prev[32];
-    memset(expect_prev, 0, sizeof(expect_prev));
-    bool ok = true;
+    uint8_t expect_prev[32] = {0};
+    enum fleet_board_chain_check result = FLEET_BOARD_CHAIN_OK;
+    enum zcl_step step;
     int64_t checked = 0;
-    while (ok && AR_STEP_ROW(s)) {
+    while ((step = ar_step_checked(s, "fleet.board chain verify", NULL)) == ZCL_STEP_ROW) {
         struct db_fleet_board_post row;
         uint8_t want[32];
         memset(&row, 0, sizeof(row));
         if (!fleet_board_row_read(s, &row)) {
-            ok = false;
-            break;
-        }
-        if (memcmp(row.chain_prev, expect_prev, 32) != 0) {
-            ok = false;
+            result = FLEET_BOARD_CHAIN_INVALID_ROW;
             break;
         }
         fleet_board_chain_step(row.chain_prev, row.post.id, want);
-        if (memcmp(want, row.chain_hash, 32) != 0) {
-            ok = false;
+        if (memcmp(row.chain_prev, expect_prev, 32) != 0 ||
+            memcmp(want, row.chain_hash, 32) != 0) {
+            result = FLEET_BOARD_CHAIN_LINK_MISMATCH;
             break;
         }
         memcpy(expect_prev, row.chain_hash, 32);
         checked++;
     }
-    sqlite3_finalize(s);
+    if (step == ZCL_STEP_ERROR)
+        result = FLEET_BOARD_CHAIN_READ_FAILED;
+    if (sqlite3_finalize(s) != SQLITE_OK && result == FLEET_BOARD_CHAIN_OK) {
+        LOG_WARN("fleet.board", "chain verify could not finish reading the ledger");
+        result = FLEET_BOARD_CHAIN_READ_FAILED;
+    }
     if (checked_out)
         *checked_out = checked;
-    return ok;
+    return result;
 }
 
+bool db_fleet_board_chain_verify(struct node_db *ndb, int64_t *checked_out)
+{
+    return db_fleet_board_chain_check(ndb, checked_out) == FLEET_BOARD_CHAIN_OK;
+}

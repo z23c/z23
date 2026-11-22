@@ -1909,6 +1909,91 @@ static bool fb_rpc_call(struct fb_rpc_fixture *f, struct json_value *input,
     return ok;
 }
 
+static bool fb_chain_status(struct fb_rpc_fixture *f, struct json_value *out)
+{
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "op", "status") &&
+              fb_rpc_call(f, &input, out);
+    json_free(&input);
+    return ok;
+}
+
+static bool fb_chain_refusal(const struct json_value *out, const char *reason,
+                             const char *next_action)
+{
+    const struct json_value *intact = json_get(out, "chain_intact");
+    const char *error = json_get_str(json_get(out, "chain_check_error"));
+    const char *action = json_get_str(json_get(out, "chain_next_action"));
+    return intact && intact->type == JSON_BOOL && !json_get_bool(intact) &&
+           json_get_int(json_get(out, "chain_checked")) == 1 && error &&
+           strcmp(error, reason) == 0 && action && strcmp(action, next_action) == 0;
+}
+
+static int test_fleet_board_chain_interrupted(void)
+{
+    int failures = 0;
+    struct fb_rpc_fixture fixture;
+    struct json_value out;
+    bool opened = false;
+    json_init(&out);
+    TEST("fleet board status distinguishes interrupted and mismatched chains") {
+        ASSERT(fb_rpc_fixture_open(&fixture, "chain-interrupted"));
+        opened = true;
+        uint8_t seed[32], pk[32];
+        fb_test_identity(1, seed, pk);
+        for (int i = 0; i < 2; i++) {
+            struct fleet_board_post post;
+            fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, "chain-test",
+                            "signed chain row", 100000 + (uint64_t)i, 3600);
+            ASSERT_EQ(fleet_board_post_sign(&post, seed, pk), FLEET_BOARD_OK);
+            ASSERT_EQ(db_fleet_board_post_ingest(&fixture.db, &post, 100001, NULL),
+                      FLEET_BOARD_OK);
+        }
+        ASSERT(fb_chain_status(&fixture, &out));
+        ASSERT(json_get_bool(json_get(&out, "chain_intact")));
+        ASSERT_EQ(json_get_int(json_get(&out, "chain_checked")), 2);
+        ASSERT(!json_get(&out, "chain_check_error"));
+        json_free(&out); json_init(&out);
+        /* Only the full verifier reads signatures. Its second row raises a
+         * step error while ordinary status aggregates can still complete. */
+        ASSERT(node_db_exec(&fixture.db,
+            "CREATE TEMP VIEW fleet_board_posts AS SELECT CASE WHEN p.seq="
+            "(SELECT MAX(seq) FROM main.fleet_board_posts) THEN abs(-9223372036854775808) "
+            "ELSE p.signature END AS signature,p.* FROM main.fleet_board_posts AS p"));
+        ASSERT(fb_chain_status(&fixture, &out));
+        ASSERT_EQ(json_get_int(json_get(&out, "chain_checked")), 1);
+        ASSERT(fb_chain_refusal(&out, "read_failed", "inspect_node_storage_logs"));
+        ASSERT(node_db_exec(&fixture.db, "DROP VIEW temp.fleet_board_posts"));
+        json_free(&out); json_init(&out);
+        ASSERT(fb_chain_status(&fixture, &out));
+        ASSERT(json_get_bool(json_get(&out, "chain_intact")));
+        ASSERT_EQ(json_get_int(json_get(&out, "chain_checked")), 2);
+        ASSERT(!json_get(&out, "chain_check_error"));
+        ASSERT(!json_get(&out, "chain_next_action"));
+        json_free(&out); json_init(&out);
+        ASSERT(node_db_exec(&fixture.db, "UPDATE fleet_board_posts SET chain_hash=zeroblob(32) "
+                                         "WHERE seq=(SELECT MAX(seq) FROM fleet_board_posts)"));
+        ASSERT(fb_chain_status(&fixture, &out));
+        ASSERT(fb_chain_refusal(&out, "link_mismatch", "inspect_local_board_chain"));
+        json_free(&out); json_init(&out);
+        /* The same row also has a broken chain hash: its bad signature must
+         * be identified first, not reported as an ordinary link mismatch. */
+        ASSERT(node_db_exec(&fixture.db, "UPDATE fleet_board_posts SET text='altered' "
+                                         "WHERE seq=(SELECT MAX(seq) FROM fleet_board_posts)"));
+        ASSERT(fb_chain_status(&fixture, &out));
+        ASSERT(fb_chain_refusal(&out, "invalid_row", "inspect_local_board_record"));
+        PASS();
+    }
+    _test_next:
+    if (opened) {
+        fb_rpc_fixture_close(&fixture);
+        test_rm_rf_recursive(fixture.dir);
+    }
+    json_free(&out);
+    return failures;
+}
+
 static bool fb_rpc_post(struct fb_rpc_fixture *f, const char *kind,
                         const char *text, const char *agent,
                         const char *scope, struct json_value *result)
@@ -16408,6 +16493,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_bounds();
     failures += test_fleet_board_frames();
     failures += test_fleet_board_store();
+    failures += test_fleet_board_chain_interrupted();
     failures += test_fleet_board_agents_kind();
     failures += test_fleet_board_kind_ceiling_refuses_unknown();
     failures += test_fleet_board_transaction_busy();

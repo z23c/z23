@@ -501,6 +501,14 @@ int db_fleet_board_room_list(struct node_db *ndb,
 
 /* Re-walk the stored chain in seq order and confirm every chain_hash is the
  * step its predecessor implies. Local integrity only. */
+enum fleet_board_chain_check {
+    FLEET_BOARD_CHAIN_OK,
+    FLEET_BOARD_CHAIN_READ_FAILED,
+    FLEET_BOARD_CHAIN_INVALID_ROW,
+    FLEET_BOARD_CHAIN_LINK_MISMATCH,
+};
+enum fleet_board_chain_check db_fleet_board_chain_check(
+    struct node_db *ndb, int64_t *checked_out);
 bool db_fleet_board_chain_verify(struct node_db *ndb, int64_t *checked_out);
 
 struct json_value;
