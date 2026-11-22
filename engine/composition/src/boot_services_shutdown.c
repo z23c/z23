@@ -655,6 +655,9 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
      * workers read active_chain_at + block bodies). Idempotent; belt and
      * braces, since proof_validate_stage_shutdown also stops it. */
     boot_pv_lookahead_stop();
+    /* Same for the script pre-verification pool (also stopped by
+     * script_validate_stage_shutdown). */
+    boot_sv_lookahead_stop();
     event_emitf(EV_NODE_SHUTDOWN, 0, "graceful");
     event_async_stop();
 

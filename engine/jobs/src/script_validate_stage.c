@@ -14,6 +14,8 @@
 #include "script_validate_log_store.h"
 #include "script_validate_stage_internal.h"
 #include "jobs/script_validate_verify.h"
+#include "jobs/sv_lookahead.h"
+#include "jobs/body_persist_stage.h"
 
 #include "chain/chain.h"
 #include "chain/chainparams.h"
@@ -609,8 +611,20 @@ static int sv_step_contextual_gate(struct stage_step_ctx *c, sqlite3 *db,
 /* Verify pass over the acquired body: the OFFLINE FAST-MINT pass-through when
  * skip_crypto is set, else the production pool-parallel sweep with its
  * reached-input tallies folded into the live atomics. */
+/* A cross-height lookahead verdict (jobs/sv_lookahead.h) for exactly this
+ * (height, hash, flags, branch id, resolver pair), or false: the caller then
+ * runs the inline sweep. Never true while the pool is off (the default). */
+static bool sv_lookahead_try(int height, const struct uint256 *hash,
+                             struct script_verify_summary *summary)
+{
+    uint32_t flags, branch_id;
+    script_verify_params_for_height(height, &flags, &branch_id);
+    return sv_lookahead_take(height, hash, flags, branch_id, g_prevout,
+                             g_prevout_user, summary);
+}
+
 static void sv_step_verify_block(const struct block *blk, int height,
-                                 bool skip_crypto,
+                                 const struct uint256 *hash, bool skip_crypto,
                                  struct script_verify_summary *summary)
 {
     if (skip_crypto) {
@@ -634,8 +648,9 @@ static void sv_step_verify_block(const struct block *blk, int height,
         /* Production path: fan the per-input ECDSA verify across the worker
          * pool, then fold the reached-input tallies the reduce computed into
          * the live atomics (verdict-identical to the serial sweep). */
-        script_verify_block(blk, height, g_prevout, g_prevout_user, NULL, NULL,
-                            true, summary);
+        if (!sv_lookahead_try(height, hash, summary))
+            script_verify_block(blk, height, g_prevout, g_prevout_user, NULL,
+                                NULL, true, summary);
         atomic_fetch_add(&g_inputs_verified_total, summary->inputs_verified);
         atomic_fetch_add(&g_inputs_failed_total, summary->inputs_failed);
     }
@@ -740,7 +755,7 @@ static job_result_t step_validate(struct stage_step_ctx *c)
 
     struct script_verify_summary summary;
     bool skip_crypto = mint_skip_crypto_get();
-    sv_step_verify_block(blk, next_h, skip_crypto, &summary);
+    sv_step_verify_block(blk, next_h, bi->phashBlock, skip_crypto, &summary);
     sv_release_stage_block(&handle, &owned, borrowed);
 
     /* Out of memory on this host: no verdict and no row, and not a missing
@@ -841,6 +856,7 @@ void script_validate_stage_shutdown(void)
 {
     /* Stop the shared verify worker pool before tearing down stage state so no
      * worker outlives the stage. Safe to call even if the pool never started. */
+    sv_lookahead_stop();
     script_verify_pool_shutdown();
     /* Finalize any residual per-batch statement caches (drain-end normally
      * clears them; this is the belt-and-suspenders teardown). */
@@ -881,6 +897,43 @@ void script_validate_stage_shutdown(void)
     atomic_store(&g_sv_unresolved_paged_height, (int64_t)-1);
     stage_db_fault_clear(&g_sv_db_fault);
     pthread_mutex_unlock(&g_lock);
+}
+
+/* The exclusive height bound the pool may verify: persisted bodies with their
+ * created outputs indexed, i.e. below the body_persist cursor. */
+static sv_lookahead_limit_fn g_lookahead_limit = body_persist_stage_cursor;
+
+#ifdef ZCL_TESTING
+void script_validate_lookahead_set_limit_for_test(sv_lookahead_limit_fn fn)
+{
+    g_lookahead_limit = fn ? fn : body_persist_stage_cursor;
+}
+#endif
+
+bool script_validate_lookahead_start(void)
+{
+    /* Snapshot the stage's (main_state, datadir, reader, resolver) tuple under
+     * the stage lock; sv_lookahead_take re-checks the resolver pair on every
+     * consume, so a later resolver swap is a miss. */
+    pthread_mutex_lock(&g_lock);
+    struct main_state *ms = g_ms;
+    char datadir[sizeof(g_datadir)];
+    snprintf(datadir, sizeof(datadir), "%s", g_datadir);
+    script_validate_reader_fn reader = g_reader;
+    void *reader_user = g_reader_user;
+    script_validate_prevout_fn prevout = g_prevout;
+    void *prevout_user = g_prevout_user;
+    pthread_mutex_unlock(&g_lock);
+    if (!ms || !prevout)
+        LOG_FAIL("script_validate",
+                 "[script_validate] lookahead start: stage not initialised");
+    return sv_lookahead_start(ms, datadir, reader, reader_user, prevout,
+                              prevout_user, g_lookahead_limit);
+}
+
+void script_validate_lookahead_stop(void)
+{
+    sv_lookahead_stop();
 }
 
 void script_validate_stage_set_reader(script_validate_reader_fn fn,

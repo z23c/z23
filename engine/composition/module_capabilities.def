@@ -240,6 +240,7 @@ ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/stage_repair_reducer_frontier_ref
 ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/stage_repair_rewind.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/stage_row_itag.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/jobs/src/sv_lookahead.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/tip_finalize_anchor.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/tip_finalize_evidence.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/tip_finalize_log_store.c", CAP_FS_READ|CAP_FS_WRITE, "")

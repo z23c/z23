@@ -1455,7 +1455,7 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     atomic_store(svc->running, true);
     boot_start_runtime_or_degrade(svc);
     boot_block_prefetch_start(ctx, svc->state); /* no-op sans -prefetch-blocks */
-    boot_pv_lookahead_start(ctx, svc->state);   /* no-op sans -pv-lookahead */
+    boot_lookahead_pools_start(ctx, svc->state); /* pv default on; sv needs -sv-lookahead */
     {
         struct block_index *tip = active_chain_tip(&svc->state->chain_active);
         int h = tip ? tip->nHeight : 0;

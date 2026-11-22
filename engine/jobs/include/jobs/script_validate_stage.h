@@ -63,6 +63,15 @@ uint64_t script_validate_stage_local_failure_total(void);
 uint64_t script_validate_stage_upstream_failed_total(void);
 uint64_t script_validate_stage_inputs_verified_total(void);
 
+/* Cross-height script pre-verification pool (jobs/sv_lookahead.h): start/stop.
+ * The only production caller is engine/composition/src/boot_sv_lookahead.c,
+ * under -sv-lookahead (default OFF). Start snapshots the stage's (main_state,
+ * datadir, reader, resolver) and fails if the stage is not initialised. A
+ * not-started pool makes every consume a miss: the stage verifies inline. Stop
+ * is idempotent; script_validate_stage_shutdown also stops the pool. */
+bool script_validate_lookahead_start(void);
+void script_validate_lookahead_stop(void);
+
 void script_validate_stage_set_reader(script_validate_reader_fn fn,
                                       void *user);
 void script_validate_stage_set_prevout_resolver(script_validate_prevout_fn fn,

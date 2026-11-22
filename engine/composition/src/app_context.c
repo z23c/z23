@@ -25,6 +25,9 @@ void app_context_defaults(struct app_context *ctx)
      * oracle) and fail-safe (a miss verifies inline), so it starts by default;
      * -pv-lookahead=0 restores the inline-only sweep. */
     ctx->pv_lookahead = true;
+    /* The script pre-verification pool lands dark: it is enabled only after a
+     * replay comparison against the inline sweep (-sv-lookahead). */
+    ctx->sv_lookahead = false;
     ctx->runtime_profile = ZCL_RUNTIME_FULL;
     ctx->operator_lane = ZCL_OPERATOR_LANE_UNKNOWN;
     ctx->par_workers = 0;   /* 0 => verify engine sizes to GetNumCores()-1 */

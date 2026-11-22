@@ -1063,6 +1063,9 @@ static int args_arm_perf_levers(const char *arg,
     else if (strcmp(arg, "-pv-lookahead") == 0 ||
              strcmp(arg, "-pv-lookahead=1") == 0) ctx->pv_lookahead = true;
     else if (strcmp(arg, "-pv-lookahead=0") == 0) ctx->pv_lookahead = false;
+    else if (strcmp(arg, "-sv-lookahead") == 0 ||
+             strcmp(arg, "-sv-lookahead=1") == 0) ctx->sv_lookahead = true;
+    else if (strcmp(arg, "-sv-lookahead=0") == 0) ctx->sv_lookahead = false;
     else return ARGS_ARM_NOMATCH;
     return ARGS_ARM_TAKEN;
 }

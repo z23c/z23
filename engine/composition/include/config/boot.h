@@ -489,6 +489,16 @@ struct app_context {
                                  * stream identical to the inline sweep
                                  * (test_pv_lookahead parity oracle). Opt out with
                                  * -pv-lookahead=0. */
+    bool sv_lookahead;         /* -sv-lookahead[=0] : start the bounded, supervised
+                                 * cross-height transparent-script pre-verification
+                                 * pool (engine/jobs/sv_lookahead.c), the
+                                 * script_validate counterpart of pv_lookahead.
+                                 * script_validate consumes a cached verdict keyed by
+                                 * (height, block hash, flags, branch id) instead of
+                                 * running the sweep on the drive thread. FAIL-SAFE:
+                                 * a miss, an unresolved prevout or a reorg verifies
+                                 * inline exactly as today. Default FALSE until a
+                                 * replay comparison against the inline sweep. */
 };
 
 void app_context_defaults(struct app_context *ctx);

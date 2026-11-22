@@ -475,6 +475,14 @@ static bool sv_parallel(const struct block *blk, int height, uint32_t flags,
     return true;
 }
 
+void script_verify_params_for_height(int height, uint32_t *flags,
+                                    uint32_t *branch_id)
+{
+    *flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
+    *branch_id = consensus_current_epoch_branch_id(
+        height, &chain_params_get()->consensus);
+}
+
 void script_verify_block(const struct block *blk, int height,
                          script_validate_prevout_fn resolver_default,
                          void *resolver_default_user,
@@ -494,9 +502,8 @@ void script_verify_block(const struct block *blk, int height,
         return;
     }
 
-    uint32_t flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
-    uint32_t branch_id = consensus_current_epoch_branch_id(
-        height, &chain_params_get()->consensus);
+    uint32_t flags, branch_id;
+    script_verify_params_for_height(height, &flags, &branch_id);
 
     struct script_validate_created_prevout_view view;
     script_validate_created_prevout_view_init(&view, height);

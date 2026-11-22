@@ -28,6 +28,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct script_verify_summary {
     int ok;
@@ -48,6 +49,13 @@ struct script_verify_summary {
 };
 
 void script_verify_summary_init(struct script_verify_summary *s);
+
+/* The (script flags, consensus branch id) script_verify_block verifies a block
+ * at `height` under. One definition, so a cached verdict (jobs/sv_lookahead.h)
+ * is keyed by exactly what the sweep used and is computed for the block's own
+ * height, never the drive cursor's. */
+void script_verify_params_for_height(int height, uint32_t *flags,
+                                    uint32_t *branch_id);
 
 /* Verify every input of `blk` at `height`. `resolver_default`/`user` and the
  * `override_*` pair carry the same resolver-selection contract the stage used

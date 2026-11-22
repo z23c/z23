@@ -411,6 +411,15 @@ void boot_pv_lookahead_start(const struct app_context *ctx,
                              struct main_state *ms);
 void boot_pv_lookahead_stop(void);
 
+/* Both cross-height pre-verification pools, one boot call
+ * (engine/composition/src/boot_sv_lookahead.c): the proof pool exactly as
+ * boot_pv_lookahead_start, then the script pool, which starts only under
+ * ctx->sv_lookahead (-sv-lookahead, default OFF). The stop is idempotent + safe
+ * without a prior start. */
+void boot_lookahead_pools_start(const struct app_context *ctx,
+                                struct main_state *ms);
+void boot_sv_lookahead_stop(void);
+
 /* ── boot_services.c accessors shared with boot_background_workers.c ──
  * The background-worker unit (engine/composition/src/boot_background_workers.c) was lifted
  * out of boot_services.c but its worker bodies still reach the boot context

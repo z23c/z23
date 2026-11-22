@@ -26,6 +26,17 @@
 #include "jobs/proof_validate_verify.h"
 #include "jobs/script_validate_stage.h"
 #include "jobs/script_validate_verify.h"
+#include "jobs/body_persist_stage.h"
+#include "jobs/created_outputs_index.h"
+#include "jobs/sv_lookahead.h"
+#include "chain/chain.h"
+#include "bloom/merkle.h"
+#include "storage/progress_store.h"
+#include "test/block_fixtures.h"
+#include "validation/chainstate.h"
+#include "validation/main_state.h"
+#include <sqlite3.h>
+#include <stdatomic.h>
 #include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "test/test_timing_budget.h"
@@ -583,6 +594,570 @@ static int vpd_case_precompute_out_of_memory(int height)
 
 /* ── the tests ────────────────────────────────────────────────────────────── */
 
+/* ── cross-height script lookahead (jobs/sv_lookahead.h) ──────────────────────
+ *
+ * Synthetic chain: block 0 is a lone coinbase; block h>=1 is {coinbase, a
+ * "funding" tx spending the output of block h-1's funding tx (block 0: its
+ * coinbase)}. So block H spends an output created in H-1 while the drive cursor
+ * is still at 0: the in-window spend chain. Scripts are OP_TRUE / OP_FALSE, so
+ * no keys are needed. bad_height's spend fails (EVAL_FALSE); unresolved_height's
+ * prevout is refused by the resolver. The injected resolver is a pure function
+ * of the outpoint hash, like the real created_outputs / coins_kv stores. */
+
+struct vpd_la_chain {
+    struct block_index *blocks;
+    struct uint256 *hashes;
+    struct block *bodies;
+    int n;
+    int bad_height;
+    int unresolved_height;
+    int signed_inputs;          /* >0: P2PKH + real ECDSA, this many inputs/tx */
+    struct privkey key;
+    struct pubkey pub;
+    struct script spk;
+    _Atomic uint64_t resolver_calls;
+};
+
+static struct transaction *vpd_la_funding(struct vpd_la_chain *c, int h)
+{
+    return &c->bodies[h].vtx[h == 0 ? 0 : 1];
+}
+
+/* Real ECDSA: sign every input of block h's funding tx over the P2PKH output it
+ * spends (block h-1's funding output). bad_height's input 0 gets a corrupt
+ * (still DER) signature. */
+static bool vpd_la_sign_inputs(struct vpd_la_chain *c, int h)
+{
+    struct transaction *tx = vpd_la_funding(c, h);
+    uint32_t branch = consensus_current_epoch_branch_id(
+        h, &chain_params_get()->consensus);
+    struct sighash_type ht = { .raw = SIGHASH_ALL };
+    for (size_t i = 0; i < tx->num_vin; i++) {
+        struct uint256 sh;
+        unsigned char sig[80], ss[1 + 73 + 1 + 65];
+        size_t siglen = sizeof(sig), n = 0;
+        if (!signature_hash(&c->spk, tx, (unsigned int)i, ht, 5000 + h - 1,
+                            branch, NULL, &sh) ||
+            !privkey_sign(&c->key, &sh, sig, &siglen) || siglen > 72)
+            return false;
+        if (h == c->bad_height && i == 0)
+            sig[siglen - 4] ^= 0xFF;
+        sig[siglen++] = SIGHASH_ALL;
+        size_t pklen = c->pub.size > 65 ? 65 : c->pub.size;
+        ss[n++] = (unsigned char)siglen;
+        memcpy(&ss[n], sig, siglen);
+        n += siglen;
+        ss[n++] = (unsigned char)pklen;
+        memcpy(&ss[n], c->pub.vch, pklen);
+        n += pklen;
+        script_set(&tx->vin[i].script_sig, ss, n);
+    }
+    return true;
+}
+
+static bool vpd_la_make_body(struct vpd_la_chain *c, int h)
+{
+    struct block *b = &c->bodies[h];
+    block_init(b);
+    b->num_vtx = h == 0 ? 1 : 2;
+    b->vtx = zcl_calloc(b->num_vtx, sizeof(struct transaction), "vpd_la_tx");
+    if (!b->vtx)
+        return false;
+    int none[64] = {0};
+    int nin = c->signed_inputs > 0 ? c->signed_inputs : 1;
+    if (!vpd_build_tx(&b->vtx[0], 1000 + h, true, none, 0, (uint32_t)h))
+        return false;
+    if (h > 0) {
+        if (!vpd_build_tx(&b->vtx[1], 2000 + h, false, none, nin, 0))
+            return false;
+        for (int i = 0; i < nin; i++) {
+            b->vtx[1].vin[i].prevout.hash = vpd_la_funding(c, h - 1)->hash;
+            b->vtx[1].vin[i].prevout.n = 0;
+        }
+    }
+    struct transaction *f = vpd_la_funding(c, h);
+    script_init(&f->vout[0].script_pub_key);
+    if (c->signed_inputs > 0)
+        f->vout[0].script_pub_key = c->spk;
+    else
+        script_push_op(&f->vout[0].script_pub_key,
+                       h + 1 == c->bad_height ? OP_FALSE : OP_TRUE);
+    f->vout[0].value = 5000 + h;
+    if (c->signed_inputs > 0 && h > 0 && !vpd_la_sign_inputs(c, h))
+        return false;
+    transaction_compute_hash(&b->vtx[b->num_vtx - 1]);
+    if (h > 0)
+        transaction_compute_hash(&b->vtx[0]);
+    b->header.nVersion = 4;
+    b->header.nTime = 1700003000u + (uint32_t)h;
+    b->header.nBits = 0x1f07ffff;
+    if (h > 0)
+        b->header.hashPrevBlock = c->hashes[h - 1];
+    struct uint256 txids[2] = { b->vtx[0].hash, b->vtx[b->num_vtx - 1].hash };
+    b->header.hashMerkleRoot = compute_merkle_root(txids, b->num_vtx);
+    block_header_get_hash(&b->header, &c->hashes[h]);
+    return true;
+}
+
+static void vpd_la_chain_free(struct vpd_la_chain *c)
+{
+    for (int i = 0; c->bodies && i < c->n; i++)
+        block_free(&c->bodies[i]);
+    free(c->blocks);
+    free(c->hashes);
+    free(c->bodies);
+    memset(c, 0, sizeof(*c));
+}
+
+static bool vpd_la_chain_build(struct vpd_la_chain *c, int n, int bad,
+                               int unresolved, int signed_inputs)
+{
+    memset(c, 0, sizeof(*c));
+    c->bad_height = bad;
+    c->unresolved_height = unresolved;
+    c->signed_inputs = signed_inputs;
+    if (signed_inputs > 0) {
+        privkey_make_new(&c->key, true);
+        privkey_get_pubkey(&c->key, &c->pub);
+        struct key_id kid = pubkey_get_id(&c->pub);
+        script_for_p2pkh(&c->spk, &kid);
+    }
+    c->blocks = zcl_calloc((size_t)n, sizeof(*c->blocks), "vpd_la_bi");
+    c->hashes = zcl_calloc((size_t)n, sizeof(*c->hashes), "vpd_la_hash");
+    c->bodies = zcl_calloc((size_t)n, sizeof(*c->bodies), "vpd_la_body");
+    if (!c->blocks || !c->hashes || !c->bodies)
+        return false;
+    c->n = n;
+    for (int i = 0; i < n; i++) {
+        if (!vpd_la_make_body(c, i))
+            return false;
+        block_index_init(&c->blocks[i]);
+        c->blocks[i].phashBlock = &c->hashes[i];
+        c->blocks[i].nHeight = i;
+        c->blocks[i].nStatus = BLOCK_HAVE_DATA;
+        if (i > 0)
+            c->blocks[i].pprev = &c->blocks[i - 1];
+    }
+    return true;
+}
+
+static bool vpd_la_reader(struct block *out, const struct block_index *bi,
+                          const char *datadir, void *user)
+{
+    (void)datadir;
+    const struct vpd_la_chain *c = user;
+    if (!out || !bi || !c || bi->nHeight < 0 || bi->nHeight >= c->n)
+        return false;
+    return test_block_copy(out, &c->bodies[bi->nHeight], "vpd_la_copy");
+}
+
+/* The output a block's input names, by outpoint hash; refused for the one
+ * unresolved block. Counts every call so a test can see a sweep NOT run. */
+static bool vpd_la_prevout(const struct outpoint *po, struct tx_out *out,
+                           void *user)
+{
+    struct vpd_la_chain *c = user;
+    atomic_fetch_add(&c->resolver_calls, 1);
+    for (int i = 0; po && out && i < c->n; i++) {
+        struct transaction *f = vpd_la_funding(c, i);
+        if (uint256_cmp(&f->hash, &po->hash) != 0 || po->n != 0)
+            continue;
+        if (i + 1 == c->unresolved_height)
+            return false;
+        tx_out_set_null(out);
+        out->value = f->vout[0].value;
+        out->script_pub_key = f->vout[0].script_pub_key;
+        return true;
+    }
+    return false;
+}
+
+static uint64_t vpd_la_limit_all;
+static uint64_t vpd_la_limit(void)
+{
+    return vpd_la_limit_all;
+}
+
+static bool vpd_la_wait_populated(uint64_t want, int timeout_ms)
+{
+    for (int i = 0; i < timeout_ms / 2 + 1; i++) {
+        if (sv_lookahead_populated() >= want)
+            return true;
+        platform_sleep_ms(2);
+    }
+    return sv_lookahead_populated() >= want;
+}
+
+/* Wrong hash, wrong flags, wrong branch id, another resolver pair: each is a
+ * MISS that leaves the slot for the exact key. */
+static bool vpd_la_probe_keying(const struct vpd_la_chain *c, int h)
+{
+    uint32_t flags, branch;
+    script_verify_params_for_height(h, &flags, &branch);
+    struct script_verify_summary s;
+    struct uint256 wrong = c->hashes[h];
+    wrong.data[0] ^= 0xff;
+    return !sv_lookahead_take(h, &wrong, flags, branch, vpd_la_prevout,
+                              (void *)c, &s) &&
+           !sv_lookahead_take(h, &c->hashes[h], flags ^ 1u, branch,
+                              vpd_la_prevout, (void *)c, &s) &&
+           !sv_lookahead_take(h, &c->hashes[h], flags, branch ^ 1u,
+                              vpd_la_prevout, (void *)c, &s) &&
+           !sv_lookahead_take(h, &c->hashes[h], flags, branch, vpd_prevout,
+                              NULL, &s) &&
+           !sv_lookahead_take(c->n + 7, &c->hashes[h], flags, branch,
+                              vpd_la_prevout, (void *)c, &s);
+}
+
+/* Consume every height: each hit must equal the inline reference byte for byte
+ * (reason string included); the unresolved height must miss. */
+static void vpd_la_take_all(struct vpd_la_chain *c,
+                            const struct script_verify_summary *ref, int unres,
+                            bool *same, bool *miss_ok)
+{
+    *same = true;
+    *miss_ok = true;
+    for (int h = 0; h < c->n; h++) {
+        uint32_t flags, branch;
+        script_verify_params_for_height(h, &flags, &branch);
+        struct script_verify_summary got;
+        bool hit = sv_lookahead_take(h, &c->hashes[h], flags, branch,
+                                     vpd_la_prevout, c, &got);
+        if (h == unres)
+            *miss_ok = !hit;
+        else
+            *same = *same && hit && sv_eq(&got, &ref[h]);
+    }
+}
+
+static int vpd_la_ref_checks(const struct script_verify_summary *ref, int bad,
+                             int unres)
+{
+    int failures = 0;
+    VPD_CHECK("lookahead ref: bad height is script_invalid, not internal",
+              !ref[bad].ok && !ref[bad].internal_error &&
+              ref[bad].first_failure_vin == 0 &&
+              ref[bad].first_failure_serror == SCRIPT_ERR_EVAL_FALSE);
+    VPD_CHECK("lookahead ref: refused prevout is internal_error",
+              !ref[unres].ok && ref[unres].internal_error);
+    return failures;
+}
+
+/* Every height's consumed verdict equals the inline serial sweep byte for byte
+ * (reason string included); the unresolved height is never cached. */
+static int vpd_la_module_diff(void)
+{
+    int failures = 0;
+    struct vpd_la_chain c;
+    struct main_state ms;
+    const int N = 24, BAD = 9, UNRES = 15;
+    main_state_init(&ms);
+    bool built = vpd_la_chain_build(&c, N, BAD, UNRES, 0);
+    VPD_CHECK("lookahead fixture built", built);
+    if (!built) {
+        vpd_la_chain_free(&c);
+        main_state_free(&ms);
+        return 1;
+    }
+    active_chain_move_window_tip(&ms.chain_active, &c.blocks[N - 1]);
+
+    struct script_verify_summary ref[24];
+    for (int h = 0; h < N; h++)
+        script_verify_block(&c.bodies[h], h, vpd_la_prevout, &c, NULL, NULL,
+                            false, &ref[h]);
+    failures += vpd_la_ref_checks(ref, BAD, UNRES);
+
+    vpd_la_limit_all = (uint64_t)N;
+    bool started = sv_lookahead_start(&ms, "", vpd_la_reader, &c,
+                                      vpd_la_prevout, &c, vpd_la_limit);
+    VPD_CHECK("lookahead pool started", started);
+    VPD_CHECK("lookahead warms every height but the unresolved one",
+              started && vpd_la_wait_populated((uint64_t)N - 1, 10000));
+    /* Let every height be swept, then the unresolved one must STAY uncached. */
+    for (int i = 0; i < 5000 && sv_lookahead_verified_total() < (uint64_t)N; i++)
+        platform_sleep_ms(2);
+    VPD_CHECK("lookahead populated excludes the unresolved height",
+              sv_lookahead_populated() == (uint64_t)N - 1 &&
+              sv_lookahead_skipped_total() >= 1);
+    VPD_CHECK("lookahead key probes (hash/flags/branch/resolver/height) miss",
+              vpd_la_probe_keying(&c, 4) && vpd_la_probe_keying(&c, BAD));
+
+    uint64_t calls_before = atomic_load(&c.resolver_calls);
+    bool same, miss_ok;
+    vpd_la_take_all(&c, ref, UNRES, &same, &miss_ok);
+    VPD_CHECK("lookahead hit == inline sweep, valid + bad-signature + chain",
+              same);
+    VPD_CHECK("lookahead refused-prevout height misses", miss_ok);
+    VPD_CHECK("lookahead take runs no sweep (resolver untouched)",
+              atomic_load(&c.resolver_calls) == calls_before);
+    VPD_CHECK("lookahead counters: hits=N-1, sweeps ran on workers",
+              sv_lookahead_hit_total() == (uint64_t)N - 1 &&
+              sv_lookahead_verified_total() >= (uint64_t)N);
+    sv_lookahead_stop();
+    struct script_verify_summary late;
+    VPD_CHECK("lookahead stopped pool never hits",
+              !sv_lookahead_take(3, &c.hashes[3], 0, 0, vpd_la_prevout, &c,
+                                 &late));
+    vpd_la_chain_free(&c);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* The flags/branch id a verdict is keyed by are the block's own height's: they
+ * differ across a network-upgrade activation, and a claim at one height can
+ * never satisfy a consume at another. */
+static int vpd_la_params_per_height(void)
+{
+    int failures = 0;
+    int act = chain_params_get()->consensus.vUpgrades[UPGRADE_SAPLING]
+                  .nActivationHeight;
+    uint32_t f1, b1, f2, b2;
+    script_verify_params_for_height(act - 1, &f1, &b1);
+    script_verify_params_for_height(act, &f2, &b2);
+    VPD_CHECK("lookahead params follow the claimed height",
+              b1 != b2 &&
+              b1 == consensus_current_epoch_branch_id(
+                        act - 1, &chain_params_get()->consensus) &&
+              b2 == consensus_current_epoch_branch_id(
+                        act, &chain_params_get()->consensus));
+    return failures;
+}
+
+/* ── through the real script_validate stage ───────────────────────────────── */
+
+struct vpd_la_fold {
+    bool setup_ok;
+    int drained;
+    uint64_t hits, misses, inputs_verified, inputs_failed, verified, invalid;
+    uint64_t resolver_calls_during_drain;
+    char rows[24][160];
+};
+
+static bool vpd_la_exec(sqlite3 *db, const char *sql)
+{
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    if (err)
+        sqlite3_free(err);
+    return rc == SQLITE_OK;
+}
+
+/* One ok=1 body_persist_log row per height plus the created_outputs rows
+ * body_persist would have written, so the production resolver reads a real
+ * index on the shared connection. */
+static bool vpd_la_seed_rows(sqlite3 *db, const struct vpd_la_chain *c)
+{
+    for (int h = 0; h < c->n; h++) {
+        char sql[200];
+        snprintf(sql, sizeof(sql),
+                 "INSERT OR REPLACE INTO body_persist_log "
+                 "(height, source, ok, persisted_at) "
+                 "VALUES (%d, 'verified', 1, 1)", h);
+        if (!vpd_la_exec(db, sql) ||
+            !created_outputs_index_put_block(db, &c->bodies[h], h))
+            return false;
+    }
+    return true;
+}
+
+/* script_validate_log rows, minus validated_at, as one comparable string per
+ * height. */
+static void vpd_la_capture_rows(sqlite3 *db, struct vpd_la_fold *out, int n)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+        "SELECT height, status, ok, tx_count, input_count, "
+        "hex(first_failure_txid), first_failure_vin, first_failure_serror, "
+        "hex(block_hash) FROM script_validate_log ORDER BY height",
+        -1, &st, NULL) != SQLITE_OK)
+        return;
+    while (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:test-fixture-readback
+        int h = sqlite3_column_int(st, 0);
+        if (h < 0 || h >= n)
+            continue;
+        snprintf(out->rows[h], sizeof(out->rows[h]), "%s|%d|%d|%d|%s|%d|%d|%s",
+                 (const char *)sqlite3_column_text(st, 1),
+                 sqlite3_column_int(st, 2), sqlite3_column_int(st, 3),
+                 sqlite3_column_int(st, 4),
+                 sqlite3_column_text(st, 5) ? (const char *)
+                     sqlite3_column_text(st, 5) : "",
+                 sqlite3_column_int(st, 6), sqlite3_column_int(st, 7),
+                 sqlite3_column_text(st, 8) ? (const char *)
+                     sqlite3_column_text(st, 8) : "");
+    }
+    sqlite3_finalize(st);
+}
+
+/* Fold the chain once through the real stage. `pool` starts the lookahead
+ * through script_validate_lookahead_start and waits for every height to warm
+ * first, so every consume must be a HIT. `prod_resolver` keeps the stage's
+ * production created_outputs resolver; otherwise the counting fake is used. */
+static void vpd_la_fold_run(struct vpd_la_fold *out, const char *tag,
+                            struct vpd_la_chain *c, bool pool,
+                            bool prod_resolver)
+{
+    memset(out, 0, sizeof(*out));
+    char dir[256];
+    struct main_state ms;
+    test_make_tmpdir(dir, sizeof(dir), "sv_lookahead", tag);
+    if (!progress_store_open(dir))
+        return;
+    main_state_init(&ms);
+    active_chain_move_window_tip(&ms.chain_active, &c->blocks[c->n - 1]);
+    sqlite3 *db = progress_store_db();
+    char sql[160];
+    snprintf(sql, sizeof(sql),
+             "INSERT OR REPLACE INTO stage_cursor(name, cursor, updated_at) "
+             "VALUES('body_persist', %d, 1)", c->n);
+    out->setup_ok = vpd_la_exec(db, sql) && body_persist_stage_init(&ms) &&
+                    vpd_la_seed_rows(db, c) && script_validate_stage_init(&ms);
+    if (out->setup_ok) {
+        script_validate_stage_set_reader(vpd_la_reader, c);
+        if (!prod_resolver)
+            script_validate_stage_set_prevout_resolver(vpd_la_prevout, c);
+        vpd_la_limit_all = (uint64_t)c->n;
+        script_validate_lookahead_set_limit_for_test(vpd_la_limit);
+        if (pool)
+            out->setup_ok = script_validate_lookahead_start() &&
+                            vpd_la_wait_populated((uint64_t)c->n, 10000);
+    }
+    uint64_t calls0 = atomic_load(&c->resolver_calls);
+    if (out->setup_ok) {
+        out->drained = script_validate_stage_drain(1000);
+        /* The totals are reset by a start; a pool-off fold reports zero. */
+        out->hits = pool ? sv_lookahead_hit_total() : 0;
+        out->misses = pool ? sv_lookahead_miss_total() : 0;
+        out->inputs_verified = script_validate_stage_inputs_verified_total();
+        out->verified = script_validate_stage_verified_total();
+        out->invalid = script_validate_stage_script_invalid_total();
+        out->resolver_calls_during_drain =
+            atomic_load(&c->resolver_calls) - calls0;
+        vpd_la_capture_rows(db, out, c->n);
+    }
+    script_validate_stage_shutdown();     /* stops the pool first */
+    script_validate_lookahead_set_limit_for_test(NULL);
+    body_persist_stage_shutdown();
+    main_state_free(&ms);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+}
+
+static bool vpd_la_rows_equal(const struct vpd_la_fold *a,
+                              const struct vpd_la_fold *b, int n)
+{
+    for (int h = 0; h < n; h++)
+        if (a->rows[h][0] == '\0' || strcmp(a->rows[h], b->rows[h]) != 0)
+            return false;
+    return true;
+}
+
+static int vpd_la_stage_diff(bool prod_resolver, const char *label)
+{
+    int failures = 0;
+    struct vpd_la_chain c;
+    const int N = 20, BAD = 9;
+    bool built = vpd_la_chain_build(&c, N, BAD, -1, 0);
+    struct vpd_la_fold off, on;
+    if (built) {
+        vpd_la_fold_run(&off, "off", &c, false, prod_resolver);
+        vpd_la_fold_run(&on, "on", &c, true, prod_resolver);
+    } else {
+        memset(&off, 0, sizeof(off));
+        memset(&on, 0, sizeof(on));
+    }
+    char name[96];
+    snprintf(name, sizeof(name), "stage %s: setup", label);
+    VPD_CHECK(name, built && off.setup_ok && on.setup_ok);
+    snprintf(name, sizeof(name), "stage %s: rows identical, lookahead on vs off",
+             label);
+    VPD_CHECK(name, vpd_la_rows_equal(&off, &on, N) &&
+              strstr(off.rows[BAD], "script_invalid|0|") != NULL);
+    snprintf(name, sizeof(name), "stage %s: stage counters identical", label);
+    VPD_CHECK(name, off.drained == on.drained && off.drained == N &&
+              off.inputs_verified == on.inputs_verified &&
+              off.verified == on.verified && off.invalid == on.invalid &&
+              off.invalid == 1);
+    snprintf(name, sizeof(name), "stage %s: every consume hit, none inline",
+             label);
+    VPD_CHECK(name, on.hits == (uint64_t)N && on.misses == 0 &&
+              off.hits == 0);
+    if (!prod_resolver) {
+        VPD_CHECK("stage fake: sweep ran inline with the pool off",
+                  off.resolver_calls_during_drain > 0);
+        VPD_CHECK("stage fake: sweep skipped on every hit (zero resolves)",
+                  on.resolver_calls_during_drain == 0);
+    }
+    vpd_la_chain_free(&c);
+    return failures;
+}
+
+/* Real-ECDSA differential + the drive-thread cost the lookahead removes: the
+ * inline sweep (production routing, pool fan) per block vs consuming a warm
+ * verdict. Informational timing, no threshold; a corrupt signature at BAD must
+ * yield the identical first failure. */
+static int vpd_la_bench(void)
+{
+    int failures = 0;
+    struct vpd_la_chain c;
+    struct main_state ms;
+    const int N = 24, M = 24, BAD = 17;
+    main_state_init(&ms);
+    bool built = vpd_la_chain_build(&c, N, BAD, -1, M);
+    VPD_CHECK("lookahead signed fixture built", built);
+    if (!built) {
+        vpd_la_chain_free(&c);
+        main_state_free(&ms);
+        return 1;
+    }
+    active_chain_move_window_tip(&ms.chain_active, &c.blocks[N - 1]);
+    struct script_verify_summary ref[24];
+    int64_t t0 = platform_time_monotonic_us();
+    for (int h = 0; h < N; h++)
+        script_verify_block(&c.bodies[h], h, vpd_la_prevout, &c, NULL, NULL,
+                            true, &ref[h]);
+    int64_t inline_us = platform_time_monotonic_us() - t0;
+
+    vpd_la_limit_all = (uint64_t)N;
+    int64_t t1 = platform_time_monotonic_us();
+    bool started = sv_lookahead_start(&ms, "", vpd_la_reader, &c,
+                                      vpd_la_prevout, &c, vpd_la_limit) &&
+                   vpd_la_wait_populated((uint64_t)N, 30000);
+    int64_t warm_us = platform_time_monotonic_us() - t1;
+    bool same = started;
+    int64_t t2 = platform_time_monotonic_us();
+    for (int h = 0; started && h < N; h++) {
+        uint32_t flags, branch;
+        struct script_verify_summary got;
+        script_verify_params_for_height(h, &flags, &branch);
+        same = same && sv_lookahead_take(h, &c.hashes[h], flags, branch,
+                                         vpd_la_prevout, &c, &got) &&
+               sv_eq(&got, &ref[h]);
+    }
+    int64_t hit_us = platform_time_monotonic_us() - t2;
+    sv_lookahead_stop();
+    VPD_CHECK("lookahead real-ECDSA hit == inline sweep, corrupt sig included",
+              same && !ref[BAD].ok && !ref[BAD].internal_error &&
+              ref[BAD].first_failure_vin == 0 && ref[1].inputs_verified == (size_t)M);
+    printf("parallel_determinism: lookahead drive-thread script cost, %d blocks x "
+           "%d ECDSA inputs: inline %lld us/block, consume warm verdict %lld "
+           "us/block; workers warmed all in %lld us\n", N - 1, M,
+           (long long)(inline_us / (N - 1)), (long long)(hit_us / N),
+           (long long)warm_us);
+    vpd_la_chain_free(&c);
+    main_state_free(&ms);
+    return failures;
+}
+
+static int vpd_la_cases(void)
+{
+    int failures = vpd_la_params_per_height();
+    failures += vpd_la_module_diff();
+    failures += vpd_la_bench();
+    failures += vpd_la_stage_diff(false, "counting resolver");
+    failures += vpd_la_stage_diff(true, "created_outputs resolver");
+    return failures;
+}
+
 int test_validate_parallel_determinism(void);
 int test_validate_parallel_determinism(void)
 {
@@ -873,6 +1448,7 @@ int test_validate_parallel_determinism(void)
     }
 
     failures += vpd_real_sapling_small_sets(H);
+    failures += vpd_la_cases();
 
     /* Join the lazily-started pools so no worker outlives the test. */
     script_verify_pool_shutdown();
