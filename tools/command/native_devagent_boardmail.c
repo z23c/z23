@@ -1090,10 +1090,12 @@ static bool bm_inbox_write(struct platform_private_file *file, const char *line,
 }
 
 static bool bm_inbox_flush(struct platform_private_file *file,
-                           const char *parent, const char *path)
+                           const char *parent, const char *path, const char **stage)
 {
-    return bm_io_fault(path, 1) == 0 && platform_private_file_flush(file) &&
-           bm_io_fault(path, 2) == 0 && platform_private_parent_flush(parent);
+    *stage = "file_sync";
+    if (bm_io_fault(path, 1) != 0 || !platform_private_file_flush(file)) return false;
+    *stage = "parent_sync";
+    return bm_io_fault(path, 2) == 0 && platform_private_parent_flush(parent);
 }
 
 enum bm_inbox_result {
@@ -1105,53 +1107,90 @@ enum bm_inbox_result {
 static enum bm_inbox_result bm_inbox_commit(struct platform_private_file *file,
                                             const char *parent, const char *path,
                                             const char *line, size_t n,
-                                            uint64_t size, bool found)
+                                            uint64_t size, bool found,
+                                            const char **stage)
 {
     if (found)
-        return bm_inbox_flush(file, parent, path) ? BM_INBOX_PRESENT
-                                                  : BM_INBOX_ERROR;
+        return bm_inbox_flush(file, parent, path, stage) ? BM_INBOX_PRESENT
+                                                         : BM_INBOX_ERROR;
+    *stage = "append";
     if (!bm_inbox_write(file, line, n, size, path)) {
         if (!platform_private_file_truncate(file, size) ||
             !platform_private_file_flush(file))
             LOG_WARN(BM_LOG, "cannot roll back a partial append to %s", path);
         return BM_INBOX_ERROR;
     }
-    return bm_inbox_flush(file, parent, path) ? BM_INBOX_APPENDED
+    return bm_inbox_flush(file, parent, path, stage) ? BM_INBOX_APPENDED
                                               : BM_INBOX_ERROR;
+}
+
+struct bm_inbox_access {
+    struct platform_private_file file;
+    char resolved[BM_PATH_CAP], parent[BM_PATH_CAP];
+    uint64_t size;
+    bool found;
+};
+
+static bool bm_inbox_ready(struct bm_inbox_access *a, const char *path,
+                           const char *text, const char **stage)
+{
+    bool complete = false;
+    *stage = "resolve";
+    if (!platform_private_destination_resolve(path, a->resolved, sizeof(a->resolved),
+                                              a->parent, sizeof(a->parent))) return false;
+    *stage = "open_lock";
+    if (!platform_private_file_open_locked_create(a->resolved, &a->file)) return false;
+    *stage = "size";
+    if (!platform_private_file_size(&a->file, &a->size)) return false;
+    *stage = "scan";
+    if (!bm_inbox_scan_locked(&a->file, a->size, text, &a->found, &complete)) return false;
+    *stage = "incomplete_tail";
+    return complete;
+}
+
+static void bm_inbox_warn(const char *id, const char *stage, const char *match)
+{
+    const char *inspect = "inspect inbox access and node storage";
+    if (!strcmp(stage, "incomplete_tail"))
+        inspect = "inspect the unfinished inbox row and its writer";
+    else if (!strcmp(stage, "file_sync") || !strcmp(stage, "parent_sync"))
+        inspect = "inspect node storage";
+    else if (!strcmp(stage, "open_lock"))
+        inspect = "inspect inbox access and the active writer";
+    LOG_WARN(BM_LOG, "post=%s inbox stage=%s match=%s; receiver holds its cursor; %s",
+             id, stage, match, inspect);
 }
 
 /* Lock dedupe and append together; only a complete, valid carried row dedupes. */
 static enum bm_inbox_result bm_inbox_store(const char *path, const char *text,
                                            const char *id, const char *host)
 {
-    size_t tlen = strlen(text), cap = tlen + 200u, n = 0;
-    char resolved[BM_PATH_CAP], parent[BM_PATH_CAP];
-    struct platform_private_file file;
+    size_t tlen = strlen(text), cap = tlen + 200u;
+    struct bm_inbox_access a = {0};
     enum bm_inbox_result result = BM_INBOX_ERROR;
-    uint64_t size = 0;
-    bool found = false, complete = false;
+    const char *stage = "format", *match = "unknown";
     char *line;
     int w;
-    if (tlen < 2 || text[tlen - 1] != '}')
+    if (tlen < 2 || text[tlen - 1] != '}') {
+        bm_inbox_warn(id, stage, match);
         return BM_INBOX_ERROR;
+    }
     line = zcl_malloc(cap, "boardmail.inbox_append");
-    if (!line)
+    if (!line) {
+        bm_inbox_warn(id, "allocation", match);
         return BM_INBOX_ERROR;
+    }
     w = snprintf(line, cap, "%.*s,\"board_post\":\"%s\",\"board_signer\":"
                  "\"%s\"}\n", (int)(tlen - 1), text, id, host);
-    platform_private_file_init(&file);
-    if (w > 0 && (size_t)w < cap &&
-        platform_private_destination_resolve(path, resolved, sizeof(resolved),
-                                             parent, sizeof(parent)) &&
-        platform_private_file_open_locked_create(resolved, &file) &&
-        platform_private_file_size(&file, &size) &&
-        bm_inbox_scan_locked(&file, size, text, &found, &complete) && complete) {
-        n = (size_t)w;
-        result = bm_inbox_commit(&file, parent, path, line, n, size, found);
+    platform_private_file_init(&a.file);
+    if (w > 0 && (size_t)w < cap && bm_inbox_ready(&a, path, text, &stage)) {
+        match = a.found ? "present" : "absent";
+        result = bm_inbox_commit(&a.file, a.parent, path, line, (size_t)w,
+                                 a.size, a.found, &stage);
     }
-    platform_private_file_close(&file);
+    platform_private_file_close(&a.file);
     if (result == BM_INBOX_ERROR)
-        LOG_WARN(BM_LOG, "cannot durably append a carried row to %s", path);
+        bm_inbox_warn(id, stage, match);
     free(line);
     return result;
 }
