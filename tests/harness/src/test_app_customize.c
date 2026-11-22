@@ -1853,18 +1853,50 @@ static bool ae_refusal(struct ac_fixture *f, const char *head, const char *blob,
     return ok;
 }
 
+static bool ae_noop_legacy(struct ac_fixture *f, const char *head, const char *blob)
+{
+    char object[1600], parked[1610], plan[65] = {0};
+    int n = snprintf(object, sizeof(object), "%s/.zvcs/objects/%.2s/%s", f->world.copy, blob, blob + 2);
+    if (n <= 0 || (size_t)n >= sizeof(object)) return false;
+    int m = snprintf(parked, sizeof(parked), "%s.park", object);
+    if (m <= 0 || (size_t)m >= sizeof(parked) || rename(object, parked)) return false;
+    struct abc_leaf l;
+    bool ok = ae_request(&l, f, "include/boost.h", "#define BOOST 2\n", head, blob, 1, NULL) && abc_pass("app.edit", &l);
+    if (ok) (void)snprintf(plan, sizeof(plan), "%s", abc_get(&l, "plan_id"));
+    abc_close(&l);
+    if (rename(parked, object) != 0) return false;
+    if (!ok || !ae_request(&l, f, "include/boost.h", "#define BOOST 2\n", head, blob, 1, plan)) return false;
+    ok = abc_exec("app.edit", &l) && l.out.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(l.out.error.code, "NO_CHANGES");
+    abc_close(&l); return ok;
+}
+static bool ae_noop_corrupt(struct ac_fixture *f, const char *head, const char *blob)
+{
+    char object[1600], parked[1610];
+    int n = snprintf(object, sizeof(object), "%s/.zvcs/objects/%.2s/%s", f->world.copy, blob, blob + 2);
+    if (n <= 0 || (size_t)n >= sizeof(object)) return false;
+    int m = snprintf(parked, sizeof(parked), "%s.park", object);
+    if (m <= 0 || (size_t)m >= sizeof(parked) || rename(object, parked)) return false;
+    FILE *file = fopen(object, "wb");
+    const char corrupt[] = "#define BOOST 7\n";
+    bool ok = file && fwrite(corrupt, 1, sizeof(corrupt) - 1, file) == sizeof(corrupt) - 1;
+    if (file && fclose(file)) ok = false;
+    struct abc_leaf l; abc_open(&l);
+    if (ok) { abc_close(&l); ok = ae_request(&l, f, "include/boost.h", corrupt, head, blob, 1, NULL) && abc_pass("app.edit", &l) && !l.out.error.mutated; }
+    abc_close(&l);
+    if (unlink(object) && errno != ENOENT) ok = false;
+    if (rename(parked, object)) ok = false;
+    return ok;
+}
 static bool ae_noop(struct ac_fixture *f, const char *head, const char *blob)
 {
     struct abc_leaf l;
     if (!ae_request(&l, f, "include/boost.h", "#define BOOST 2\n", head, blob, 1, NULL)) return false;
-    bool ok = abc_pass("app.edit", &l);
-    char plan[65]; snprintf(plan, sizeof(plan), "%s", abc_get(&l, "plan_id"));
+    bool ok = abc_exec("app.edit", &l) && l.out.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(l.out.error.code, "NO_CHANGES") && !l.out.error.mutated &&
+        strstr(l.out.error.message, "already has these bytes");
     abc_close(&l);
-    if (!ok || !ae_request(&l, f, "include/boost.h", "#define BOOST 2\n", head, blob, 1, plan)) return false;
-    ok = abc_exec("app.edit", &l) && l.out.status != ZCL_COMMAND_STATUS_PASSED &&
-        !strcmp(l.out.error.code, "NO_CHANGES");
-    abc_close(&l);
-    return ok;
+    return ok && ae_noop_corrupt(f, head, blob) && ae_noop_legacy(f, head, blob);
 }
 
 static bool ae_contents(struct ac_fixture *f, const uint8_t root[32])
@@ -2233,6 +2265,21 @@ static bool ae_bound_plans(struct ac_fixture *f)
 #if defined(ZCL_TESTING)
 static int asb_cases(void);
 #endif
+static int ae_empty_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0}; struct abc_leaf l; abc_open(&l);
+    TEST("app.edit refuses an unchanged empty selected file without mutation") {
+        ASSERT(act_save_environment(&f) && abc_world_init_profile(&f.world, false) && act_configure_environment(&f));
+        ASSERT(abc_put(f.world.copy, "include/boost.h", "") && act_snapshot(&f, "save", f.head) &&
+            act_keep(&f) && act_find_kept_blob(&f));
+        char head[65], blob[65]; zcl_hex_encode(f.head, 32, head); zcl_hex_encode(f.blob, 32, blob);
+        abc_close(&l); ASSERT(ae_request(&l, &f, "include/boost.h", "", head, blob, 1, NULL));
+        ASSERT(abc_exec("app.edit", &l) && l.out.status != ZCL_COMMAND_STATUS_PASSED &&
+            !strcmp(l.out.error.code, "NO_CHANGES") && !l.out.error.mutated);
+        PASS();
+    } _test_next:;
+    abc_close(&l); act_cleanup(&f); return failures;
+}
 int test_app_edit(void)
 {
     int failures = 0;
@@ -2245,6 +2292,7 @@ int test_app_edit(void)
         PASS();
     } _test_next:;
     act_cleanup(&f);
+    failures += ae_empty_case();
     failures += ae_stale_case();
     failures += ae_long_case();
     failures += ae_sealed_case();

@@ -13,6 +13,7 @@
 #include "vcs/package_store.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_manifest.h"
+#include "vcs/vcs_object.h"
 #include "zutf8/zutf8.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,7 @@ struct edit {
     struct vcs_manifest manifest;
     const char *name, *path, *content, *source_version;
     uint64_t revision;
+    uint64_t blob_size;
     mode_t mode;
     uint8_t head[32], blob[32], tree[32], version[32], plan[32];
     bool confirm;
@@ -109,10 +111,21 @@ static bool edit_source(struct edit *e)
         if (!strcmp(entry->path, e->path)) {
             if (memcmp(entry->blob, e->blob, 32)) return edit_fail(e, "BLOB_STALE", false, "source blob differs from expected identity");
             e->mode = (mode_t)(entry->mode & 0777u);
+            e->blob_size = entry->size;
             return true;
         }
     }
     return edit_fail(e, "PATH_UNKNOWN", false, "path is not in the selected tree");
+}
+/* A missing or corrupt blob keeps the original plan and confirmation path. */
+static bool edit_identical(struct edit *e)
+{
+    size_t size = strlen(e->content), actual = 0;
+    if ((uint64_t)size != e->blob_size) return false;
+    uint8_t *bytes = NULL;
+    bool same = vcs_object_get_readonly_bounded(e->selection.copy, e->blob, VCS_TAG_BLOB,
+        size, &bytes, &actual) == 0 && actual == size && (!size || !memcmp(bytes, e->content, size));
+    free(bytes); return same;
 }
 /* Fixed-width identities plus length-delimited strings bind the entire plan. */
 static void edit_plan_part(struct sha3_256_ctx *h, const char *s)
@@ -146,6 +159,12 @@ static void edit_make_plan(struct edit *e)
     sha3_256_write(&h, revision, sizeof(revision));
     edit_plan_part(&h, e->path); edit_plan_part(&h, e->content);
     sha3_256_finalize(&h, e->plan);
+}
+static bool edit_prepare_plan(struct edit *e)
+{
+    if (!e->confirm && edit_identical(e))
+        return edit_fail(e, "NO_CHANGES", false, "the selected file already has these bytes");
+    edit_make_plan(e); return true;
 }
 static bool edit_reopen(struct edit *e)
 {
@@ -280,7 +299,7 @@ void zcl_native_handle_app_edit(const struct zcl_command_request *request,
     if (!e) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate draft", EDIT_COMMAND); return; }
     e->reply = reply;
     bool ok = request && edit_inputs(e, request->input) && edit_source(e);
-    if (ok) edit_make_plan(e);
+    if (ok) ok = edit_prepare_plan(e);
     if (ok && !e->confirm) ok = edit_describe_plan(e);
     if (ok && e->confirm)
         ok = zcl_package_copy_plan_matches(request->input, e->plan, reply, EDIT_COMMAND) &&
