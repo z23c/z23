@@ -702,7 +702,10 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.proof.remote", "dev.proof", "",
-    "Expect, execute or verify one independently pinned remote proof",
+    "Check current main or manage one independently pinned remote proof",
+    "operation=check_main compares remote_base with advertised origin main and "
+    "checks local_commit ancestry without fetching; it is one observation, "
+    "not continuing authority. "
     "The local owner supplies an exact source assignment and expected proof "
     "identity. The registered invocation checkout is the only destination. "
     "Returns PASS only after independent signed receipt verification; "

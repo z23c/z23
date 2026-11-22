@@ -160,24 +160,29 @@ tracked edits are refused. `r2gate` runs the gate on the second host. Its own
 queue check can hand the job back to `zgate`, which sets `R2GATE_FORCE=1` to
 skip that check.
 
-For `ONLY=@changed`, bind the sender base explicitly: the receiver
-`origin/main` may be older even when it has the committed candidate. From the
-clean candidate worktree, fetch and calculate its merge-base, then pass it to
-the admitted direct route:
+For an offloaded `agent-verify ONLY=@changed`, the r1 sender checks the
+receiver comparison base against the main advertised by the sender checkout's
+origin before bundling or starting a remote build. The request pins that base
+through test selection. The sender checks the archived selection and observes
+main again before reporting a current-main pass. If the receiver checkout is
+behind, supply the current base from the clean sender checkout explicitly:
 
 ```sh
 set -e
 git fetch origin main
 git rev-parse HEAD
-base=$(git merge-base HEAD origin/main)
+base=$(git rev-parse --verify refs/remotes/origin/main)
 git merge-base --is-ancestor "$base" HEAD
-R2GATE_FORCE=1 "$HOME/.local/lib/z23/tools/r2gate" "$PWD" \
+R2GATE_CURRENT_MAIN=1 R2GATE_FORCE=1 "$HOME/.local/lib/z23/tools/r2gate" "$PWD" \
   agent-verify 'ONLY=@changed' "AGENT_VERIFY_BASE=$base"
 ```
 
 Check the archived `source-identity.txt` for the candidate commit and the
 `agent-verify: selection` line in `job.log` for the intended base and group
-count. A successful remote run with a different base is not that selection.
+count. The preflight and final observations are in the sender custody directory. An
+explicit `AGENT_VERIFY_BASE` without `R2GATE_CURRENT_MAIN=1` requests
+verification of that historical range. The land queue checks its own exact
+commit and base before publication.
 
 `devbuild` keeps the gate local for a dirty tree, a subdirectory, `ZCL_` or
 `Z23_` environment variables, other targets, flags or variables, a nested

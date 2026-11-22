@@ -952,6 +952,163 @@ static bool rcv_fixture_run(void)
     return ok;
 }
 
+static bool rcmd_main_reply(const struct json_value *item, int rc, const char *local,
+                            const char *base, const char *code, const char *expected)
+{
+    if (!code) return rc == 0 && rcmd_expect_field(item, "status", "CURRENT") &&
+        rcmd_expect_field(item, "expected_base", base) &&
+        rcmd_expect_field(item, "observed_base", base) &&
+        rcmd_expect_field(item, "local_commit", local);
+    const char *action = json_get_str(json_get(item, "next_action"));
+    if (rc <= 0 || !rcmd_expect_field(item, "code", code) || !action ||
+        !strstr(action, "Observe origin main") ||
+        !strstr(action, "obtain missing commits or update the candidate") ||
+        !strstr(action, "retry")) return false;
+    if (!expected) return true;
+    const struct json_value *facts = json_get(item, "facts");
+    return rcmd_expect_field(facts, "expected_base", expected) &&
+        rcmd_expect_field(facts, "observed_base", base);
+}
+
+static bool rcmd_main_case(const char *binary, const char *repo, const char *local,
+                           const char *base, const char *code, const char *expected)
+{
+    char input[512], out[16384];
+    int n = snprintf(input, sizeof(input),
+        "--input={\"operation\":\"check_main\",\"local_commit\":\"%s\",\"remote_base\":\"%s\"}",
+        local, base);
+    if (n <= 0 || (size_t)n >= sizeof(input)) return false;
+    int rc = rcmd_run(binary, repo, input, out, sizeof(out));
+    struct json_value envelope = {0};
+    bool ok = json_read(&envelope, out, strlen(out));
+    const struct json_value *item = json_get(&envelope, code ? "error" : "data");
+    ok = ok && rcmd_main_reply(item, rc, local, base, code, expected);
+    json_free(&envelope);
+    if (!ok) printf("check_main %s: rc=%d output=%s\n", code ? code : "CURRENT", rc, out);
+    return ok;
+}
+
+static bool rcmd_main_extra(const char *binary, const char *repo, const char *oid)
+{
+    static const char *fields[] = {"receipt_path", "destination", "bundle", "offer"};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        char input[768], out[16384];
+        int n = snprintf(input, sizeof(input),
+            "--input={\"operation\":\"check_main\",\"local_commit\":\"%s\","
+            "\"remote_base\":\"%s\",\"%s\":\"unexpected\"}", oid, oid, fields[i]);
+        if (n <= 0 || (size_t)n >= sizeof(input)) return false;
+        int rc = rcmd_run(binary, repo, input, out, sizeof(out));
+        struct json_value envelope = {0};
+        bool ok = json_read(&envelope, out, strlen(out)) && rc > 0 &&
+            rcmd_expect_field(json_get(&envelope, "error"), "code", "REMOTE_MAIN_INVALID");
+        json_free(&envelope);
+        if (!ok) { printf("check_main extra %s: rc=%d output=%s\n", fields[i], rc, out); return false; }
+    }
+    return true;
+}
+
+static bool rcmd_main_stream(const char *path, const char *base)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = true;
+    for (unsigned i = 1; i <= 401 && ok; i++) {
+        ok = fprintf(f, "commit refs/heads/fixture\nmark :%u\n"
+                     "committer Fixture <fixture@example.invalid> 1 +0000\n"
+                     "data 7\nadvance\n", i) > 0;
+        if (i == 1) ok = ok && fprintf(f, "from %s\n\n", base) > 0;
+        else ok = ok && fprintf(f, "from :%u\n\n", i - 1) > 0;
+    }
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static bool rcmd_main_history(const char *repo, const char *root, const char *base,
+                              char tip[65])
+{
+    char path[1400], count[64];
+    if (!rpp_path(path, sizeof(path), root, "history.import") ||
+        !rcmd_main_stream(path, base)) return false;
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) {
+        FILE *in = fopen(path, "r");
+        if (!in || dup2(fileno(in), STDIN_FILENO) < 0) _exit(127);
+        execl("/usr/bin/git", "git", "-C", repo, "fast-import", "--quiet", (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0 &&
+        RPP_GIT(repo, tip, 65, "rev-parse", "refs/heads/fixture") &&
+        RPP_GIT(repo, count, sizeof(count), "rev-list", "--count", "refs/heads/fixture", "--not", base) &&
+        strcmp(count, "401") == 0;
+}
+
+struct rcmd_main_fixture {
+    char root[1024], repo[1200], remote[1200];
+    char base[65], tip[65], next[65], tree[65];
+};
+
+static bool rcmd_main_setup(struct rcmd_main_fixture *f)
+{
+    test_make_tmpdir(f->root, sizeof(f->root), "dev_proof_remote_command", "main-authority");
+    return rpp_path(f->repo, sizeof(f->repo), f->root, "repo") &&
+        rpp_path(f->remote, sizeof(f->remote), f->root, "origin.git") && mkdir(f->repo, 0700) == 0 &&
+        RPP_GIT(f->repo, NULL, 0, "init", "-q") && rpp_text(f->repo, "fixture", "base\n") &&
+        RPP_GIT(f->repo, NULL, 0, "add", "fixture") &&
+        RPP_GIT(f->repo, NULL, 0, "commit", "-q", "-m", "base") &&
+        RPP_GIT(f->repo, f->base, sizeof(f->base), "rev-parse", "HEAD") &&
+        RPP_GIT(f->repo, f->tree, sizeof(f->tree), "rev-parse", "HEAD^{tree}") &&
+        RPP_GIT(f->root, NULL, 0, "clone", "-q", "--bare", f->repo, f->remote) &&
+        RPP_GIT(f->repo, NULL, 0, "remote", "add", "origin", f->remote) &&
+        RPP_GIT(f->remote, NULL, 0, "update-ref", "refs/heads/main", f->base);
+}
+
+static bool rcmd_main_freshness(struct rcmd_main_fixture *f, const char *binary)
+{
+    return rcmd_main_history(f->repo, f->root, f->base, f->tip) &&
+        RPP_GIT(f->repo, NULL, 0, "push", "-q", "origin", "refs/heads/fixture:refs/heads/main") &&
+        rcmd_main_case(binary, f->repo, f->tip, f->base, "REMOTE_MAIN_STALE", f->tip) &&
+        rcmd_main_case(binary, f->repo, f->tip, f->tip, NULL, NULL) &&
+        RPP_GIT(f->repo, f->next, sizeof(f->next), "commit-tree", f->tree, "-p", f->tip, "-m", "next") &&
+        RPP_GIT(f->repo, NULL, 0, "update-ref", "refs/heads/fixture", f->next) &&
+        RPP_GIT(f->repo, NULL, 0, "push", "-q", "origin", "refs/heads/fixture:refs/heads/main") &&
+        rcmd_main_case(binary, f->repo, f->next, f->tip, "REMOTE_MAIN_STALE", f->next);
+}
+
+static bool rcmd_main_bad_objects(struct rcmd_main_fixture *f, const char *binary)
+{
+    char divergent[65], tag[65];
+    return RPP_GIT(f->repo, divergent, sizeof(divergent), "commit-tree", f->tree, "-m", "divergent") &&
+        rcmd_main_case(binary, f->repo, divergent, f->next, "REMOTE_MAIN_DIVERGED", f->next) &&
+        rcmd_main_case(binary, f->repo, "1111111111111111111111111111111111111111", f->next,
+                       "REMOTE_MAIN_MISSING", f->next) &&
+        RPP_GIT(f->repo, NULL, 0, "tag", "-a", "fixture-tag", "-m", "tag", f->next) &&
+        RPP_GIT(f->repo, tag, sizeof(tag), "rev-parse", "refs/tags/fixture-tag") &&
+        rcmd_main_case(binary, f->repo, tag, f->next, "REMOTE_MAIN_INVALID", f->next) &&
+        rcmd_main_extra(binary, f->repo, f->next);
+}
+
+static bool rcmd_main_unobservable(struct rcmd_main_fixture *f, const char *binary)
+{
+    return RPP_GIT(f->repo, NULL, 0, "remote", "set-url", "origin", "/nonexistent-z23-main-fixture") &&
+        rcmd_main_case(binary, f->repo, f->next, f->next, "REMOTE_MAIN_UNOBSERVABLE", NULL) &&
+        RPP_GIT(f->repo, NULL, 0, "remote", "set-url", "origin", f->remote) &&
+        RPP_GIT(f->remote, NULL, 0, "update-ref", "-d", "refs/heads/main") &&
+        rcmd_main_case(binary, f->repo, f->next, f->next, "REMOTE_MAIN_UNOBSERVABLE", NULL);
+}
+
+static bool rcmd_main_fixture(const char *binary)
+{
+    struct rcmd_main_fixture f;
+    bool ok = rcmd_main_setup(&f) && rcmd_main_freshness(&f, binary) &&
+        rcmd_main_bad_objects(&f, binary) && rcmd_main_unobservable(&f, binary);
+    if (ok) ok = test_rm_rf_recursive(f.root) == 0;
+    else printf("check_main fixture retained: %s\n", f.root);
+    return ok;
+}
+
 static int rcmd_test_verify(void)
 {
     int failures = 0;
@@ -1089,6 +1246,10 @@ int test_dev_proof_remote_command(void)
     }
     failures += rcmd_test_expect_full_source(current, binary);
     failures += rcmd_test_verify();
+    TEST("dev.proof.remote: authoritative main freshness and ancestry fail closed") {
+        ASSERT(rcmd_main_fixture(binary));
+        PASS();
+    }
 _test_next:;
     return failures;
 }

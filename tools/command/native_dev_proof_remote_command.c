@@ -109,13 +109,8 @@ struct remote_expectation {
 
 /* Existing helpers inherit the environment. Refuse redirection before they
  * inspect Git or execute the pinned source's bounded capture helper. */
-static bool remote_read_environment(char *why, size_t cap)
+static bool remote_read_redirects(char *why, size_t cap)
 {
-    const char *admission = getenv("DEVBUILD_ACTIVE");
-    if (!admission || strcmp(admission, "z23")) {
-        (void)snprintf(why, cap, "remote_host_admission_required");
-        return false;
-    }
     extern char **environ;
     static const char *const prefixes[] = {
         "GIT_", "LD_", "DYLD_", "BASH_ENV=", "ENV=", "ZCL_BIN_DIR=",
@@ -130,6 +125,16 @@ static bool remote_read_environment(char *why, size_t cap)
     return true;
 }
 
+static bool remote_read_environment(char *why, size_t cap)
+{
+    const char *admission = getenv("DEVBUILD_ACTIVE");
+    if (!admission || strcmp(admission, "z23")) {
+        (void)snprintf(why, cap, "remote_host_admission_required");
+        return false;
+    }
+    return remote_read_redirects(why, cap);
+}
+
 /* Only this child gets a fixed Git/helper search path. Preserve the admitted
  * caller's environment and avoid setenv() races in an embedding process. */
 static const char **remote_read_child_env(const char *root, char source[4200])
@@ -137,7 +142,7 @@ static const char **remote_read_child_env(const char *root, char source[4200])
     extern char **environ;
     size_t count = 0;
     while (environ && environ[count]) count++;
-    const char **env = zcl_calloc(count + 3u, sizeof(*env), "remote read environment");
+    const char **env = zcl_calloc(count + 10u, sizeof(*env), "remote read environment");
     if (!env) return NULL;
     int n = snprintf(source, 4200, "ZCL_DEV_SOURCE_ROOT=%s", root);
     if (n <= 0 || n >= 4200) { free(env); return NULL; }
@@ -688,10 +693,186 @@ static void remote_execute_command(const struct zcl_command_request *request,
 #endif
 
 #ifdef ZCL_DEV_BUILD
+#if !defined(_WIN32)
+/* A read-only, bounded Git observation with the qualified host environment. */
+static int remote_main_git_mode(const char *root, const char *const args[], char *out, size_t cap, bool owner_config)
+{
+    char source[4200];
+    const char **env = remote_read_child_env(root, source);
+    struct zcl_devloop_process_result *p = zcl_calloc(1, sizeof(*p), "remote main git");
+    if (!env || !p) { free(env); free(p); return -1; }
+    size_t used = 0;
+    while (env[used]) used++;
+    env[used++] = "GIT_TERMINAL_PROMPT=0";
+    env[used++] = "GIT_NO_LAZY_FETCH=1";
+    if (!owner_config) {
+        env[used++] = "GIT_CONFIG_NOSYSTEM=1";
+        env[used++] = "GIT_CONFIG_GLOBAL=/dev/null";
+    }
+    env[used++] = "GIT_ALLOW_PROTOCOL=file:ssh:https";
+    env[used++] = "GIT_SSH_COMMAND=/usr/bin/ssh -F /dev/null -oBatchMode=yes";
+    env[used] = NULL;
+    const char *argv[28] = {"/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+        "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-c", "protocol.allow=never", "-c", "remote.origin.uploadpack=git-upload-pack",
+        "-c", "credential.helper=", "-c", "credential.interactive=never"};
+    size_t n = 15;
+    for (size_t i = 0; args[i] && n + 1u < sizeof(argv) / sizeof(argv[0]); i++) argv[n++] = args[i];
+    argv[n] = NULL;
+    bool ok = zcl_devloop_process_run_env(root, argv, env, 30000, p) &&
+        !p->timed_out && !p->cancelled && !p->term_signal && !p->output_truncated &&
+        p->output_len < cap;
+    int rc = ok ? p->exit_code : -1;
+    if (ok) { memcpy(out, p->output, p->output_len); out[p->output_len] = '\0'; }
+    free(p); free(env);
+    return rc;
+}
+
+static int remote_main_git(const char *root, const char *const args[], char *out, size_t cap)
+{
+    return remote_main_git_mode(root, args, out, cap, false);
+}
+
+static void remote_main_refuse(struct zcl_command_reply *reply, const char *code,
+                               const char *expected, const char *observed)
+{
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        code, "check_main", false, false, "current main check refused", code);
+    struct json_value facts = {0};
+    json_set_object(&facts);
+    bool ok = (!expected || !*expected || json_push_kv_str(&facts, "expected_base", expected)) &&
+        (!observed || !*observed || json_push_kv_str(&facts, "observed_base", observed)) &&
+        json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
+        ok ? "Observe origin main, obtain missing commits or update the candidate, then retry." :
+             "Failure facts could not be allocated; retry the read-only check.");
+}
+
+static bool remote_main_inputs(const struct json_value *input)
+{
+    if (!input || input->type != JSON_OBJ || json_size(input) != 3) return false;
+    for (size_t i = 0; i < json_size(input); i++)
+        if (strcmp(input->keys[i], "operation") && strcmp(input->keys[i], "local_commit") &&
+            strcmp(input->keys[i], "remote_base")) return false;
+    return remote_text(input, "operation") && remote_text(input, "local_commit") &&
+        remote_text(input, "remote_base");
+}
+
+static bool remote_main_url_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || strchr("@._-/:+", c);
+}
+
+static bool remote_main_url_host(const char *host)
+{
+    const char *slash = strchr(host, '/');
+    return slash && slash > host && *host != '-' && slash[1] != '\0';
+}
+
+/* Accept one literal origin without Git remote-helper or shell syntax. */
+static bool remote_main_url_valid(const char *url)
+{
+    if (!url || !*url || *url == '-') return false;
+    for (const unsigned char *p = (const unsigned char *)url; *p; p++)
+        if (!remote_main_url_char(*p)) return false;
+    if (url[0] == '/') return url[1] != '\0';
+    if (!strncmp(url, "ssh://", 6)) return remote_main_url_host(url + 6);
+    if (!strncmp(url, "https://", 8)) return remote_main_url_host(url + 8);
+    const char *at = strchr(url, '@');
+    const char *colon = strchr(url, ':');
+    return at && at > url && at[1] != '-' && colon && colon > at + 1 && colon[1] != '\0';
+}
+
+static bool remote_main_origin(const char *root, char *url, size_t cap)
+{
+    const char *vcs[] = {"config", "--get-all", "remote.origin.vcs", NULL};
+    if (remote_main_git_mode(root, vcs, url, cap, true) != 1 || url[0]) return false;
+    const char *args[] = {"remote", "get-url", "--all", "origin", NULL};
+    if (remote_main_git_mode(root, args, url, cap, true) != 0) return false;
+    size_t n = strlen(url);
+    if (!n || url[n - 1] != '\n') return false;
+    url[--n] = '\0';
+    return n && !strchr(url, '\n') && !strchr(url, '\r') && remote_main_url_valid(url);
+}
+
+static bool remote_main_observe(const char *root, char expected[65])
+{
+    char origin[2048], output[2048];
+    if (!remote_main_origin(root, origin, sizeof(origin))) return false;
+    const char *args[] = {"ls-remote", "--exit-code", "--", origin, "refs/heads/main", NULL};
+    if (remote_main_git("/", args, output, sizeof(output)) != 0) return false;
+    size_t len = strcspn(output, "\t");
+    if ((len != 40 && len != 64) || strcmp(output + len, "\trefs/heads/main\n")) return false;
+    memcpy(expected, output, len); expected[len] = '\0';
+    return remote_oid(expected);
+}
+
+static const char *remote_main_commits(const char *root, const char *base, const char *local)
+{
+    char output[2048];
+    const char *promisor[] = {"config", "--get-regexp", "^(extensions\\.partialclone$|remote\\..*\\.promisor$)", NULL};
+    if (remote_main_git(root, promisor, output, sizeof(output)) != 1 || output[0])
+        return "REMOTE_MAIN_UNOBSERVABLE";
+    const char *has_candidate[] = {"cat-file", "-t", local, NULL};
+    const char *has_base[] = {"cat-file", "-t", base, NULL};
+    int a = remote_main_git(root, has_candidate, output, sizeof(output));
+    bool candidate_commit = a == 0 && !strcmp(output, "commit\n");
+    int b = remote_main_git(root, has_base, output, sizeof(output));
+    bool base_commit = b == 0 && !strcmp(output, "commit\n");
+    if (a != 0 || b != 0)
+        return a < 0 || b < 0 ? "REMOTE_MAIN_UNOBSERVABLE" : "REMOTE_MAIN_MISSING";
+    if (!candidate_commit || !base_commit) return "REMOTE_MAIN_INVALID";
+    const char *ancestor[] = {"merge-base", "--is-ancestor", base, local, NULL};
+    int rc = remote_main_git(root, ancestor, output, sizeof(output));
+    if (rc != 0) return rc == 1 ? "REMOTE_MAIN_DIVERGED" : "REMOTE_MAIN_UNOBSERVABLE";
+    return NULL;
+}
+
+static bool remote_main_emit(struct zcl_command_reply *reply, const char *expected,
+                             const char *base, const char *local)
+{
+    return json_push_kv_str(&reply->data, "operation", "check_main") &&
+        json_push_kv_str(&reply->data, "status", "CURRENT") &&
+        json_push_kv_str(&reply->data, "expected_base", expected) &&
+        json_push_kv_str(&reply->data, "observed_base", base) &&
+        json_push_kv_str(&reply->data, "local_commit", local);
+}
+
+static void remote_check_main(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply, const char *root)
+{
+    const char *local = remote_text(request->input, "local_commit");
+    const char *base = remote_text(request->input, "remote_base");
+    char expected[65] = {0}, why[256] = {0};
+    if (!remote_main_inputs(request->input) || !remote_oid(local) || !remote_oid(base)) {
+        remote_main_refuse(reply, "REMOTE_MAIN_INVALID", NULL, base); return;
+    }
+    if (!remote_read_redirects(why, sizeof(why)) || !remote_main_observe(root, expected)) {
+        remote_main_refuse(reply, "REMOTE_MAIN_UNOBSERVABLE", NULL, base); return;
+    }
+    if (strcmp(expected, base)) { remote_main_refuse(reply, "REMOTE_MAIN_STALE", expected, base); return; }
+    const char *failure = remote_main_commits(root, base, local);
+    if (failure) { remote_main_refuse(reply, failure, expected, base); return; }
+    if (!remote_main_emit(reply, expected, base, local))
+        remote_main_refuse(reply, "REMOTE_MAIN_UNOBSERVABLE", expected, base);
+}
+
+#else
+static void remote_check_main(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply, const char *root)
+{
+    (void)request; (void)root;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        "REMOTE_MAIN_UNOBSERVABLE", "check_main", false, false, "current main check unavailable", "platform");
+}
+#endif
+
 static bool remote_operation_valid(const char *operation)
 {
     return operation && (!strcmp(operation, "expect") ||
-        !strcmp(operation, "execute") || !strcmp(operation, "verify"));
+        !strcmp(operation, "execute") || !strcmp(operation, "check_main") || !strcmp(operation, "verify"));
 }
 #endif
 
@@ -715,6 +896,10 @@ void zcl_native_handle_dev_proof_remote(const struct zcl_command_request *reques
     const char *operation = remote_text(request->input, "operation");
     if (operation_value && !remote_operation_valid(operation)) {
         remote_fail(reply, "input", operation ? "remote_unknown_operation" : "remote_invalid_operation", false, false);
+        return;
+    }
+    if (operation && !strcmp(operation, "check_main")) {
+        remote_check_main(request, reply, root);
         return;
     }
     if (operation && !strcmp(operation, "verify")) {
