@@ -511,6 +511,28 @@ static bool ejt_soak_ledger(const char *dir, int count, ejt_edit edit)
     return f && fclose(f) == 0 && ok;
 }
 
+static bool ejt_restart_field_missing(FILE *f, int i, int64_t ts, bool missing_counter)
+{
+    if (i != 80) return ejt_healthy(f, i, ts);
+    return fprintf(f,
+        "{\"ts\":%lld,\"soak_height\":100,\"zd_height\":100,\"gap\":0,"
+        "\"nrestarts\":%s,\"active_enter_ts\":%s,\"rss_kb\":1500000,"
+        "\"binary_sha256\":\"%s\",\"security_review_required\":false,"
+        "\"security_posture_ok\":true,\"window_eligible\":true,\"ok\":true}\n",
+        (long long)ts, missing_counter ? "null" : "1",
+        missing_counter ? "1699999500" : "null", EJT_SHA_A) > 0;
+}
+
+static bool ejt_missing_restart_count(FILE *f, int i, int64_t ts)
+{
+    return ejt_restart_field_missing(f, i, ts, true);
+}
+
+static bool ejt_missing_active_time(FILE *f, int i, int64_t ts)
+{
+    return ejt_restart_field_missing(f, i, ts, false);
+}
+
 static bool ejt_hole(FILE *f, int i, int64_t ts)
 {
     return (i >= 50 && i <= 53) || ejt_healthy(f, i, ts);
@@ -634,6 +656,10 @@ static int ejt_case_soak_verdicts(void)
          "reported; the ladder refuses every defect with its named reason") {
         ASSERT(ejt_soak_case("sk_green", 169, ejt_recycle, EJT_FRESH, "MET", "", 0));
         ASSERT(ejt_has("restarts_in_window=1 ambiguous_restarts=1 operator_interventions=0"));
+        ASSERT(ejt_soak_case("sk_nr_missing", 169, ejt_missing_restart_count, EJT_FRESH,
+                             "INSUFFICIENT", "restart_evidence_unknown_in_1_of_169_samples", 2));
+        ASSERT(ejt_soak_case("sk_aet_missing", 169, ejt_missing_active_time, EJT_FRESH,
+                             "INSUFFICIENT", "restart_evidence_unknown_in_1_of_169_samples", 2));
         ASSERT(ejt_soak_case("sk_short", 12, ejt_healthy,
                              EJT_SOAK_BASE + 11 * 3600 + 60, "INSUFFICIENT",
                              "window_short_", 2));
@@ -725,6 +751,8 @@ static int ejt_case_soak_parity(void)
         int64_t now;
     } cases[] = {
         {"pr_green", 169, ejt_recycle, EJT_FRESH},
+        {"pr_nr_missing", 169, ejt_missing_restart_count, EJT_FRESH},
+        {"pr_aet_missing", 169, ejt_missing_active_time, EJT_FRESH},
         {"pr_short", 12, ejt_healthy, EJT_SOAK_BASE + 11 * 3600 + 60},
         {"pr_hole", 169, ejt_hole, EJT_FRESH},
         {"pr_down", 169, ejt_soak_down, EJT_FRESH},
