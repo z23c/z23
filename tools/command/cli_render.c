@@ -1351,11 +1351,8 @@ static void error_search_suggestion(const char *code,
                                     char *suggestion, size_t cap)
 {
     if (code && strcmp(code, "UNKNOWN_COMMAND") == 0 && first &&
-        first->type == JSON_OBJ) {
-        const char *ncmd = json_get_str(json_get(first, "command"));
-        if (ncmd && strcmp(ncmd, "discover.search") == 0)
-            next_as_shell(first, suggestion, cap);
-    }
+        first->type == JSON_OBJ)
+        next_as_shell(first, suggestion, cap);
 }
 
 static void error_table_suggestion(const char *code, const char *command,

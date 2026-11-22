@@ -23,6 +23,7 @@
 #include "command/native_app_launch.h"
 #include "command/native_json_input.h"
 #include "command/native_command_priv.h"
+#include "command/native_command_suggest.h"
 #include "command/refold_rate_verdict.h"
 #include "base/hex.h"
 
@@ -3157,6 +3158,34 @@ static void nc_print_error_next_string(
                    next_reason);
 }
 
+/* UNKNOWN_COMMAND: the standard failure envelope whose next[] names the
+ * nearest real commands (native_command_suggest.c). If it cannot be built
+ * the single discover.search pointer is printed, as before. */
+static void nc_print_unknown(const char *command, const char *message,
+                             const char *evidence, const char *query,
+                             const char *const *words, size_t count)
+{
+    char out[ZCL_COMMAND_ERROR_BUDGET + 1];
+    struct zcl_unknown_command u = {command, message, evidence, query, words,
+                                    count};
+    size_t n = zcl_native_unknown_command_json(catalog(), &u, out,
+                                               sizeof(out));
+    if (n > 0)
+        nc_print_doc(out, command);
+    else
+        nc_print_error_next_string(command, "UNKNOWN_COMMAND", "resolve",
+                                   message, evidence, "discover.search",
+                                   "query", query,
+                                   "search for the intended command");
+}
+
+void zcl_native_print_unknown_command(const char *const *words, size_t count)
+{
+    if (words && count > 0 && words[0])
+        nc_print_unknown(words[0], "unknown command root", words[0], words[0],
+                         words, count);
+}
+
 /* Print a branch menu. Returns a contract exit code. */
 static int nc_emit_menu(const char *path)
 {
@@ -4056,10 +4085,8 @@ static const struct zcl_command_spec *nc_main_resolve(
         reg, st->words, st->count, &st->consumed, &st->was_alias, st->invoked,
         sizeof(st->invoked));
     if (!spec) {
-        nc_print_error_next_string(
-            root_word, "UNKNOWN_COMMAND", "resolve", "unknown command root",
-            root_word, "discover.search", "query", root_word,
-            "search for the intended command");
+        nc_print_unknown(root_word, "unknown command root", root_word,
+                         root_word, st->words, st->count);
         *rc = ZCL_COMMAND_EXIT_INVALID;
         return NULL;
     }
@@ -4715,11 +4742,8 @@ static int nc_main_run_branch(struct nc_main_state *st)
         (void)snprintf(attempted, sizeof(attempted), "%s.%s", st->spec->path,
                        st->positional[0]);
         json_free(&st->flags);
-        nc_print_error_next_string(
-            attempted, "UNKNOWN_COMMAND", "resolve",
-            "no such command under this branch", attempted,
-            "discover.search", "query", st->positional[0],
-            "search for the intended command");
+        nc_print_unknown(attempted, "no such command under this branch",
+                         attempted, st->positional[0], st->words, st->count);
         return ZCL_COMMAND_EXIT_INVALID;
     }
     int rc = nc_emit_menu(st->spec->path);

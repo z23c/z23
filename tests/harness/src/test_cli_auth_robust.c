@@ -28,6 +28,7 @@
 #include "rpc/server.h"
 #include "rpc/httpserver.h"
 #include "kernel/command_registry.h"
+#include "json/json.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -624,6 +625,94 @@ static int car_test_status_lists_local_instances(const char *home,
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Top-level entry (a first word that is no registry root) against a live
+ * fixture node. A word the node does not know: the legacy one-line stderr
+ * diagnostic byte for byte, the standard envelope on stdout whose next[]
+ * names a real nearest command, exit 2. A word the node serves (legacy RPC
+ * style): untouched RPC-client output, no diagnostic, exit 0 - as on
+ * origin/main before the envelope existed. Streams are split with sh. */
+static bool car_run_split(char *const base[], const char *home, bool want_err,
+                          char *out, size_t cap, int *rc)
+{
+    char *argv[16] = {(char *)"/bin/sh", (char *)"-c",
+                      (char *)(want_err ? "\"$@\" 2>&1 >/dev/null"
+                                        : "\"$@\" 2>/dev/null"),
+                      (char *)"sh", NULL};
+    size_t n = 4;
+    for (size_t i = 0; base[i] && n < 15; i++)
+        argv[n++] = base[i];
+    argv[n] = NULL;
+    *rc = car_run(argv, car_build_envp(home, NULL), out, cap);
+    return *rc >= 0;
+}
+
+static bool car_getcount_rpc(const struct json_value *p, bool h,
+                            struct json_value *r)
+{
+    (void)p; (void)h;
+    json_set_int(r, 7);
+    return true;
+}
+
+static int car_test_top_level_unknown_word(const char *home)
+{
+    int failures = 0;
+    TEST("cli entry: an unknown first word prints the legacy stderr line and "
+         "the envelope with a real nearest command; a served RPC word is "
+         "unchanged") {
+        char dir[700], dflag[750], pflag[32];
+        snprintf(dir, sizeof(dir), "%s/.zclassic-c23-carunknown", home);
+        car_mkdir_p(dir);
+        static struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        struct rpc_command cnt = {"test", "getblockcount", car_getcount_rpc,
+                                  true};
+        uint16_t port = car_reserve_port();
+        ASSERT(port != 0 && rpc_table_append(&tbl, &cnt));
+        ASSERT(rpc_http_start(&tbl, port, NULL, NULL, dir));
+        set_rpc_warmup_finished();
+        snprintf(dflag, sizeof(dflag), "-datadir=%s", dir);
+        snprintf(pflag, sizeof(pflag), "-rpcport=%u", port);
+        char out[16384], err[16384];
+        int rc_out, rc_err, rc_ok;
+
+        char *bad[] = {(char *)CAR_BIN, dflag, pflag, (char *)"pluggin",
+                       (char *)"status", NULL};
+        bool ran = car_run_split(bad, home, false, out, sizeof(out), &rc_out) &&
+                   car_run_split(bad, home, true, err, sizeof(err), &rc_err);
+        static const char want[] =
+            "error=UNKNOWN_COMMAND detail=no such command 'pluggin' "
+            "try=z23 discover search pluggin\n";
+        char *good[] = {(char *)CAR_BIN, dflag, pflag,
+                        (char *)"getblockcount", NULL};
+        char gout[4096], gerr[4096];
+        ran = ran && car_run_split(good, home, false, gout, sizeof(gout),
+                                   &rc_ok) &&
+              car_run_split(good, home, true, gerr, sizeof(gerr), &rc_ok);
+        rpc_http_stop();
+        set_rpc_warmup_started("test");
+        ASSERT(ran);
+
+        ASSERT_EQ(rc_out, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_EQ(rc_err, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strcmp(err, want) == 0); /* exactly the legacy line */
+        ASSERT(car_contains(out, "\"schema\":\"zcl.result.v1\""));
+        ASSERT(car_contains(out, "\"code\":\"UNKNOWN_COMMAND\""));
+        ASSERT(car_contains(out, "\"command\":\"plugin.status\""));
+
+        /* Recorded pre-change behaviour of a served legacy word. */
+        ASSERT(car_contains(gout, "7"));
+        ASSERT(!car_contains(gout, "UNKNOWN_COMMAND"));
+        ASSERT(gerr[0] == 0);
+        ASSERT_EQ(rc_ok, 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#endif
+
 int test_cli_auth_robust(void);
 
 int test_cli_auth_robust(void)
@@ -676,6 +765,9 @@ int test_cli_auth_robust(void)
         rpc_http_stop();
     }
 
+#if !defined(_WIN32)
+    failures += car_test_top_level_unknown_word(home);
+#endif
     failures += car_test_response_timeout_case(home, false);
 #if !defined(_WIN32)
     failures += car_test_response_timeout_case(home, true);
@@ -684,7 +776,7 @@ int test_cli_auth_robust(void)
     /* Best-effort cleanup of every fixture path this file creates. */
     static const char *const car_fixture_leaf_names[] = {
         "carduplicate", "cardecoy", "carlive", "carnocookie", "carshared",
-        "carshareddecoy", "cartimeout",
+        "carshareddecoy", "cartimeout", "carunknown",
     };
     for (size_t i = 0;
          i < sizeof(car_fixture_leaf_names) / sizeof(car_fixture_leaf_names[0]);

@@ -2274,7 +2274,8 @@ static bool cli_print_contract_method_skew_diagnostic(
  * index) is built by zcl_native_render_unknown_command so it can be unit
  * tested without a live node; this just prints it. Never touches the node
  * again. */
-static void cli_print_unknown_command_diagnostic(const char *method)
+static void cli_print_unknown_command_diagnostic(
+    const char *method, const struct cli_target_args *t)
 {
     char buf[1024];
     size_t n = zcl_native_render_unknown_command(zcl_command_catalog(),
@@ -2285,6 +2286,13 @@ static void cli_print_unknown_command_diagnostic(const char *method)
         fprintf(stderr, "error=UNKNOWN_COMMAND detail=no such command '%s' "
                         "try=z23 discover search %s\n",
                method ? method : "", method ? method : "");
+    /* The same failure as every other command's: the envelope on stdout. */
+    const char *words[8] = {method}; /* the suggester reads at most 8 */
+    int nwords = 1;
+    for (int i = 0; t && i < t->nparams && nwords < 8; i++)
+        words[nwords++] = t->params[i];
+    if (method && method[0])
+        zcl_native_print_unknown_command(words, (size_t)nwords);
 }
 
 typedef bool (*cli_static_agent_handler)(const struct json_value *params,
@@ -2546,7 +2554,7 @@ static int cli_method_not_found_exit(const char *resp, const char *method,
                                                   t->runtime_profile,
                                                   rpc_error_message))
         return 1;
-    cli_print_unknown_command_diagnostic(method);
+    cli_print_unknown_command_diagnostic(method, t);
     return ZCL_COMMAND_EXIT_INVALID;
 }
 

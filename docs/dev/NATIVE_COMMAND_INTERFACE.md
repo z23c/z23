@@ -1126,6 +1126,30 @@ error=UNKNOWN_COMMAND detail=no such command 'statuss' try=z23 discover search s
 did you mean: core.status core.status.brief ops.state
 ```
 
+The same failure also arrives as the standard `zcl.result.v1` envelope, so an
+agent handles it like every other failure. Top-level typos print it on stdout
+after the stderr lines above (which are unchanged); a wrong word under a valid
+group (`z23 ops ls`, `z23 core wallet lst`) prints the envelope alone. The exit
+code is `2`. `next[]` is computed from the registry (`native_command_suggest.c`,
+no network, no new index): up to 3 real leaf commands whose segment is the same
+word, a common verb synonym (`ls`->`list`, `rm`/`delete`->`drop`/`revoke`/
+`remove`, `get`/`read`->`show`, `new`/`init`->`create`), a prefix, or one edit
+away, ranked nearest first; then `discover.search` for the wrong word; then
+`discover.help` with the valid group's `path` (or no path for the root) to list
+the group's commands. A word with no near match gets only the last two. Only
+leaves the registry marks read-only (effect and risk READ) are suggested as
+commands; a near match that mutates, spends, signs or destroys appears only as
+a `discover.describe` pointer with its path, never as a runnable `next[]`
+command or the human `run:` line.
+
+```
+$ z23 pluggin status        # stdout, abridged
+{"schema":"zcl.result.v1","ok":false,"error":{"code":"UNKNOWN_COMMAND",...},
+ "next":[{"command":"plugin.status",...,"reason":"nearest command"},
+         {"command":"discover.search","input":{"query":"pluggin"},...},
+         {"command":"discover.help","input":{"path":"plugin"},...}]}
+```
+
 **Error contract.** Every error line this contract introduces follows:
 
 ```

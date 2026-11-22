@@ -1196,6 +1196,12 @@ size_t zcl_native_render_unknown_command(
     const struct zcl_command_registry *reg, const char *method, char *out,
     size_t out_cap);
 
+/* The same unknown top-level command as a zcl.result.v1 failure envelope on
+ * stdout (human rendering on a terminal; words[0] is the wrong word, the rest
+ * what followed it), whose next[] names up to 3 real
+ * nearest commands, the search pointer and the group-listing command. */
+void zcl_native_print_unknown_command(const char *const *words, size_t count);
+
 /* core.node.bootstatus / core.node.bootwait — pre-RPC boot observability. Both
  * read <datadir>/boot_status.json directly off disk (util/boot_status.h): no
  * node contact, no RPC. bootstatus returns the current beacon (or BLOCKED when

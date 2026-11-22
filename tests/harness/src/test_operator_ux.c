@@ -1872,6 +1872,7 @@ int test_operator_ux(void)
     failures += test_field_selection_selects_requested_fields();
     failures += test_field_selection_unknown_field_is_typed_error();
     failures += test_unknown_command_diagnostic_has_typed_shape();
+    failures += unknown_command_cases();
     printf("=== operator_ux: %d failures ===\n", failures);
     return failures;
 }
