@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Verify one compile profile, acquire a live-Make lease, and prune old epochs.
-
+# z23-epoch-gc-protocol: lock-before-generation, preserve-staged-v1
 set -euo pipefail
 
 EXPECTED=""

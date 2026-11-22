@@ -444,8 +444,34 @@ static bool he_checkout_git(const char *checkout)
     return zcl_spawn_capture(committed, out, sizeof(out), 10000) == 0 && !out[0];
 }
 
+/* This marker describes a cooperating checkout producer; it is not an
+ * authentication claim and does not replace the Git, lock or mount checks. */
+static bool he_producer_protocol(int root)
+{
+    int tools = he_dir(root, "tools");
+    if (tools < 0) return false;
+    int dev = he_dir(tools, "dev"); close(tools);
+    if (dev < 0) return false;
+    int fd = openat(dev, "build-epoch-session.sh", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    close(dev);
+    if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 1 || st.st_size > 262144) {
+        close(fd); return false;
+    }
+    FILE *f = fdopen(fd, "r");
+    if (!f) { close(fd); return false; }
+    char line[1024]; unsigned found = 0; bool ok = true;
+    while (fgets(line, sizeof(line), f)) {
+        if (!strchr(line, '\n')) { ok = false; break; }
+        if (!strcmp(line, "# z23-epoch-gc-protocol: lock-before-generation, preserve-staged-v1\n")) ++found;
+    }
+    if (ferror(f)) ok = false;
+    if (fclose(f) != 0) ok = false;
+    return ok && found == 1;
+}
 struct he_totals { uint64_t bytes; unsigned refused, pending, partial; };
-static int he_checkout_open(const char *checkout, int *bins)
+static int he_checkout_open(const char *checkout, int *bins, bool *compatible)
 {
     char resolved[HE_PATH];
     if (!checkout || checkout[0] != '/' || !realpath(checkout, resolved) || strcmp(checkout, resolved) ||
@@ -454,6 +480,7 @@ static int he_checkout_open(const char *checkout, int *bins)
     if (root < 0) return -1;
     struct stat st;
     bool valid = fstatat(root, ".git", &st, AT_SYMLINK_NOFOLLOW) == 0 && (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode));
+    *compatible = valid && he_producer_protocol(root);
     int build = valid ? he_dir(root, "build") : -1;
     *bins = build >= 0 ? he_dir(build, "bin") : -1;
     close(root); return build;
@@ -469,8 +496,14 @@ static bool he_report(struct json_value *out, const char *checkout, int keep, bo
 }
 static bool he_epochs_impl(const char *checkout, int keep, bool apply, struct json_value *out)
 {
-    int bins = -1, build = he_checkout_open(checkout, &bins);
+    bool compatible = false;
+    int bins = -1, build = he_checkout_open(checkout, &bins, &compatible);
     if (build < 0) return false;
+    if (!json_push_kv_bool(out, "producer_compatible", compatible)) {
+        if (bins >= 0) close(bins);
+        close(build); return false;
+    }
+    if (apply && !compatible) { if (bins >= 0) close(bins); close(build); return false; }
     struct json_value rows; json_init(&rows); json_set_array(&rows);
     struct he_totals totals = {0};
     for (size_t i = 0; i < sizeof(he_profiles)/sizeof(he_profiles[0]); ++i)

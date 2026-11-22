@@ -210,20 +210,30 @@ static void ohg_project(struct zcl_command_reply *reply,
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 }
 
+static bool ohg_epoch_input_valid(const struct json_value *input, const char *checkout, int64_t keep)
+{
+    const struct json_value *keep_value = json_get(input, "epoch_keep");
+    const struct json_value *apply_value = json_get(input, "apply");
+    return checkout && (!keep_value || keep_value->type == JSON_INT) &&
+        (!apply_value || apply_value->type == JSON_BOOL) && keep >= 1 && keep <= 32 &&
+        !json_get(input, "roots") && !json_get(input, "age_days") && !json_get(input, "floor_hours");
+}
 static bool ohg_epochs(const struct json_value *input, struct zcl_command_reply *reply)
 {
     const struct json_value *checkout_value = json_get(input, "checkout");
     const struct json_value *keep_value = json_get(input, "epoch_keep");
     if (!checkout_value && !keep_value) return false;
     const char *checkout = json_get_str(checkout_value);
-    const struct json_value *apply_value = json_get(input, "apply");
     int64_t keep = json_get_int_or(input, "epoch_keep", 3);
-    bool valid = checkout && (!keep_value || keep_value->type == JSON_INT) &&
-        (!apply_value || apply_value->type == JSON_BOOL) && keep >= 1 && keep <= 32 &&
-        !json_get(input, "roots") && !json_get(input, "age_days") && !json_get(input, "floor_hours");
-    if (!valid || !host_gc_epochs(checkout, (int)keep, json_get_bool_or(input, "apply", false), &reply->data))
-        ohg_fail(reply, "host_gc.epochs_refused", "validate",
+    bool valid = ohg_epoch_input_valid(input, checkout, keep);
+    if (!valid || !host_gc_epochs(checkout, (int)keep, json_get_bool_or(input, "apply", false), &reply->data)) {
+        const struct json_value *compatible = json_get(&reply->data, "producer_compatible");
+        if (compatible && !json_get_bool(compatible))
+            ohg_fail(reply, "host_gc.producer_incompatible", "validate",
+                "This checkout producer does not support safe epoch collection; apply was refused.", "checkout");
+        else ohg_fail(reply, "host_gc.epochs_refused", "validate",
             "Epoch cleanup requires a safe explicit checkout and keep count from 1 to 32.", "checkout");
+    }
     return true;
 }
 

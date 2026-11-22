@@ -1458,10 +1458,19 @@ static bool hgt_epoch_dir(const char *repo, char digit, bool candidate)
         name, name, name, name, name);
     return hgt_write(file, content);
 }
+static bool hgt_epoch_producer(const char *repo, bool compatible)
+{
+    char dir[2048], path[2100];
+    (void)snprintf(dir, sizeof(dir), "%s/tools/dev", repo);
+    if (!zcl_mkdir_p(dir, 0700).ok) return false;
+    (void)snprintf(path, sizeof(path), "%s/build-epoch-session.sh", dir);
+    return hgt_write(path, compatible ?
+        "#!/bin/sh\n# z23-epoch-gc-protocol: lock-before-generation, preserve-staged-v1\n" : "#!/bin/sh\n");
+}
 static bool hgt_epoch_setup(const char *repo)
 {
     char path[2048], name[66]; memset(name, '5', 64); name[64] = '\n'; name[65] = 0;
-    if (!hgt_make_repo(repo)) return false;
+    if (!hgt_make_repo(repo) || !hgt_epoch_producer(repo, true)) return false;
     for (char d = '1'; d <= '5'; ++d)
         if (!hgt_epoch_dir(repo, d, false) || !hgt_epoch_dir(repo, d, true)) return false;
     (void)snprintf(path, sizeof(path), "%s/build/dev-obj/.current-epoch", repo);
@@ -1483,6 +1492,17 @@ static bool hgt_epoch_exists(const char *repo, char digit, bool candidate)
     (void)snprintf(path, sizeof(path), "%s/build/%s/epochs/%s", repo,
         candidate ? "bin/dev" : "dev-obj", name);
     return hgt_exists(path);
+}
+static bool hgt_epoch_downgrade(const char *repo)
+{
+    if (!hgt_epoch_producer(repo, false)) return false;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool ok = host_gc_epochs(repo, 1, false, &out) &&
+        !json_get_bool(json_get(&out, "producer_compatible")) && hgt_epoch_exists(repo, '1', false);
+    json_free(&out); json_init(&out); json_set_object(&out);
+    ok = !host_gc_epochs(repo, 1, true, &out) && hgt_epoch_exists(repo, '1', false) && ok;
+    json_free(&out);
+    return hgt_epoch_producer(repo, true) && ok;
 }
 static bool hgt_epoch_mode(const char *repo, bool apply, size_t expected)
 {
@@ -1592,6 +1612,7 @@ static int hgt_epoch_tests(const char *tmp)
     int failures = 0; char repo[1024];
     (void)snprintf(repo, sizeof(repo), "%s/epoch-checkout", tmp);
     bool ok = hgt_epoch_setup(repo);
+    if (ok) ok = hgt_epoch_downgrade(repo);
     if (ok) ok = hgt_epoch_fifo(repo) && hgt_epoch_locked(repo);
     if (ok) ok = hgt_epoch_mode(repo, false, 2) && hgt_epoch_exists(repo, '1', false) &&
         hgt_epoch_exists(repo, '4', true);

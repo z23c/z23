@@ -177,3 +177,8 @@ physical blocks saved (hardlinks may share blocks). A nonzero
 `profiles_refused` or `partial_possible` means cleanup could not be completed;
 inspect the checkout and rerun after resolving the condition. Interrupted
 retirements are kept as `.gc-...` plus a producer-session marker for retry.
+
+The report's `producer_compatible` describes the producer script currently in
+that checkout. If false, the report is preview-only and apply refuses: upgrade
+the checkout before reclaiming its epochs. The protocol marker identifies a
+cooperating producer; it is not an authentication or trust assertion.

@@ -930,7 +930,7 @@ ZCL_COMMAND_READY_COMMAND(
     "Classify and reclaim dev-proof worktrees or inactive build epochs",
     "On Linux, checkout selects inactive build epochs in that explicit checkout; "
     "epoch_keep defaults to 3, or use 1 to retain only the current and protected "
-    "generations. Dry run unless apply=true. Byte counts estimate logical path sizes, "
+    "generations. Dry run unless apply=true; an older producer is preview-only. Byte counts estimate logical path sizes, "
     "not physical blocks. Without checkout, one report per sweep class over the "
     "dev-proof worktree pools (the disk "
     "pool and its tmpfs twin by default, or --roots): registered, and the "
