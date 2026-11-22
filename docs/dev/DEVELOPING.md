@@ -1066,7 +1066,7 @@ edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
 under `build/scratch/`. Complexity fails fast before selector setup; later failures are collected.
 It prints one
 `agent-verify: <step> rc=<n> secs=<s>` line per step (the `@changed` and
-`@route` forms also print `agent-verify: dev-bin rc=0 secs=<s>` and end the
+`@route` forms also print `agent-verify: dev-proof-producer rc=0 secs=<s>` and end the
 selection line with `select_secs=<s>`), so the log says where the minutes went,
 then `agent-verify: total secs=<total>` and the verdict line, `agent-verify: OK` or
 `agent-verify: FAILED (...)` (the verdict lines carry no timing, so the land rail reads them unchanged), and writes the same lines to

@@ -18347,8 +18347,8 @@ agent-verify:
 	 if [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; then \
 	    rflag=; [ "$$only" = '@route' ] && rflag=--route-only; \
 	    b0=$$(date +%s); \
-	    $(MAKE) --no-print-directory dev-bin ZCL_TEST_WERROR=1 >build/scratch/agent-verify.dev-bin.log 2>&1 || { echo "agent-verify: dev-bin failed; see build/scratch/agent-verify.dev-bin.log" >&2; exit 2; }; \
-	    echo "agent-verify: dev-bin rc=0 secs=$$(($$(date +%s) - b0))" | tee -a build/scratch/agent-verify.rc; \
+	    $(MAKE) --no-print-directory dev-proof-producer ZCL_TEST_WERROR=1 >build/scratch/agent-verify.dev-proof-producer.log 2>&1 || { echo "agent-verify: dev-proof-producer failed; see build/scratch/agent-verify.dev-proof-producer.log" >&2; exit 2; }; \
+	    echo "agent-verify: dev-proof-producer rc=0 secs=$$(($$(date +%s) - b0))" | tee -a build/scratch/agent-verify.rc; \
 	    av_base='$(subst ','"'"',$(value AGENT_VERIFY_BASE))'; \
 	    if [ -n "$$av_base" ]; then \
 	       base=$$(git rev-parse --verify "$${av_base}^{commit}") || { echo "agent-verify: AGENT_VERIFY_BASE=$$av_base is not a commit" >&2; exit 2; }; \

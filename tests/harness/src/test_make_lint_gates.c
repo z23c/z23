@@ -2055,7 +2055,7 @@ static int t_agent_verify_preflight(void)
         "set -eu; cd \"$2\"; mkdir -p build/bin bin\n"
         "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
         "printf '#!/bin/sh\\ncase $1 in status) [ \"${DIRTY:-0}\" = 0 ] || echo dirty;; merge-base) echo base;; *) exit 1;; esac\\n' > bin/git; chmod +x bin/git\n"
-        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\ncase \"$*\" in *check-cyclomatic-complexity*) [ \"${FAIL_COMPLEXITY:-0}\" = 0 ];; *t-fast-exact*) [ \"${FAIL_TEST:-0}\" = 0 ];; *) exit 0;; esac\\n' > submake; chmod +x submake\n"
+        "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\ncase \"$*\" in *dev-proof-producer*) [ \"${FAIL_PRODUCER:-0}\" = 0 ];; *check-cyclomatic-complexity*) [ \"${FAIL_COMPLEXITY:-0}\" = 0 ];; *t-fast-exact*) [ \"${FAIL_TEST:-0}\" = 0 ];; *) exit 0;; esac\\n' > submake; chmod +x submake\n"
         "printf '#!/bin/sh\necho \"$*\" >> selector-calls\ncat <<END\n{\"groups\":\"models\",\"selector\":\"exact\",\"groups_selected\":1}\nEND\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
         "PATH=\"$2/bin:$PATH\"; export PATH\n"
         "if make --no-print-directory MAKE=./submake agent-verify > empty.log 2>&1; then exit 1; fi\n"
@@ -2068,7 +2068,7 @@ static int t_agent_verify_preflight(void)
         "grep -Eq '^agent-verify: check-cyclomatic-complexity rc=[0-9]+ secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@changed > pass.log 2>&1\n"
         "[ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]; sed -n 1p calls | grep -q check-file-size-ceiling; sed -n 2p calls | grep -q check-cyclomatic-complexity\n"
-        "grep -q 'dev-bin ZCL_TEST_WERROR=1' calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n"
+        "grep -q 'dev-proof-producer ZCL_TEST_WERROR=1' calls; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: OK' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
         /* The deduped agent-verify recipe runs no standalone inventory or
@@ -2078,15 +2078,18 @@ static int t_agent_verify_preflight(void)
         "for gate in check-capability-closure proof-lint-prebuild lint-fast; do grep -q \"$gate\" calls; done\n"
         "grep -q 'agent-verify: check-capability-closure rc=0' build/scratch/agent-verify.rc\n"
         "grep -q 'agent-verify: proof-lint-prebuild rc=0' build/scratch/agent-verify.rc\n"
+    ;
+    static const char checks[] =
         "ln1() { grep -n -m1 -- \"$1\" calls | cut -d: -f1; }\n"
         "p0=$(ln1 check-cyclomatic-complexity); p1=$(ln1 t-fast-exact); p2=$(ln1 check-capability-closure); p3=$(ln1 proof-lint-prebuild); p4=$(ln1 lint-fast)\n"
         "[ \"$p0\" -lt \"$p1\" ]; [ \"$p1\" -lt \"$p2\" ]; [ \"$p2\" -lt \"$p3\" ]; [ \"$p3\" -lt \"$p4\" ]\n"
         "for gate in check-file-size-ceiling check-cyclomatic-complexity t-fast-exact check-capability-closure proof-lint-prebuild lint-fast; do grep -Eq \"^agent-verify: $gate rc=0 secs=[0-9]+$\" build/scratch/agent-verify.rc; done\n"
-        "grep -Eq '^agent-verify: dev-bin rc=0 secs=[0-9]+$' build/scratch/agent-verify.rc\n"
+        "grep -Eq '^agent-verify: dev-proof-producer rc=0 secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         "grep -Eq '^agent-verify: selection exact groups=1 .* select_secs=[0-9]+$' build/scratch/agent-verify.rc\n"
         "grep -q -- '--base=base' selector-calls\n"
         ": > calls; : > selector-calls; make --no-print-directory MAKE=./submake agent-verify ONLY=@route > route.log 2>&1\n"
-        "grep -q -- --route-only selector-calls; [ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]\n"
+        "grep -q -- --route-only selector-calls; grep -q 'dev-proof-producer ZCL_TEST_WERROR=1' calls; [ \"$(grep -c check-cyclomatic-complexity calls)\" = 1 ]\n"
+        "for choice in @changed @route; do : > calls; : > selector-calls; if FAIL_PRODUCER=1 make --no-print-directory MAKE=./submake agent-verify ONLY=$choice > producer-fail.log 2>&1; then exit 1; fi; grep -q 'dev-proof-producer ZCL_TEST_WERROR=1' calls; [ ! -s selector-calls ]; if grep -q t-fast-exact calls; then exit 1; fi; grep -q 'agent-verify: dev-proof-producer failed; see build/scratch/agent-verify.dev-proof-producer.log' producer-fail.log; done\n"
         ": > calls; if FAIL_TEST=1 make --no-print-directory MAKE=./submake agent-verify ONLY=models > later.log 2>&1; then exit 1; fi\n"
         /* The deduped agent-verify recipe runs no standalone inventory or
          * KPI step: check-kpi-floor moved inside lint-fast (with
@@ -2095,11 +2098,14 @@ static int t_agent_verify_preflight(void)
         "for gate in check-capability-closure proof-lint-prebuild lint-fast; do grep -q \"$gate\" calls; done\n"
         "[ \"$(tail -n 1 build/scratch/agent-verify.rc)\" = 'agent-verify: FAILED (t-fast-exact)' ]\n"
         "[ \"$(tail -n 2 build/scratch/agent-verify.rc | head -n 1 | grep -Ec '^agent-verify: total secs=[0-9]+$')\" = 1 ]\n"
-        ": > calls; make --no-print-directory MAKE=./submake agent-verify ONLY=models > explicit.log 2>&1\n"
-        "if grep -q dev-bin calls; then exit 1; fi; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n";
+        ": > calls; : > selector-calls; make --no-print-directory MAKE=./submake agent-verify ONLY=models > explicit.log 2>&1\n"
+        "if grep -Eq 'dev-bin|dev-proof-producer' calls; then exit 1; fi; [ ! -s selector-calls ]; grep -q 't-fast-exact ONLY=models ZCL_TEST_WERROR=1' calls\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "preflight");
-    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    char combined[sizeof(script) + sizeof(checks)];
+    int n = snprintf(combined, sizeof(combined), "%s%s", script, checks);
+    if (n < 0 || (size_t)n >= sizeof(combined)) return 1;
+    int bad = build_needs_fixture_run(repo_root(), fixture, combined);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
 }
