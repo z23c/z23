@@ -37,6 +37,7 @@ struct ac_read {
     struct zcl_package_copy copy;
     struct vcs_manifest manifest;
     const char *name, *change, *path, *query, *source_version;
+    char resident_root[65];
     size_t offset, limit, page;
     uint64_t expected;
     bool pinned, resident;
@@ -217,7 +218,8 @@ static bool ac_select(struct ac_read *a)
     struct app_launch_entry entry;
     if (!ac_catalog_entry(a, &entry)) return false;
     enum app_selection_result result = app_selection_load(a->env.state_dir, entry.id, &a->selected);
-    if (result == APP_SELECTION_ABSENT && !strcmp(a->name, "tasks") && a->path && a->source_version) {
+    if (result == APP_SELECTION_ABSENT && !strcmp(a->name, "tasks") && !a->query &&
+        ((a->source_version && a->pinned) || (!a->path && !a->pinned))) {
         a->resident = true;
         (void)snprintf(a->selected.app, sizeof(a->selected.app), "%s", entry.id);
         return true;
@@ -517,19 +519,41 @@ static bool ac_next(struct ac_read *a)
     return ok;
 }
 
+static bool ac_first_try(struct ac_read *a, const char *path, bool *added)
+{
+    *added = false;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = ac_next_identity(a, &input) && json_push_kv_str(&input, "path", path);
+    char wire[2048]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
+    if (!n) ok = false;
+    if (ok && n < sizeof(a->reply->next[0].input_json)) {
+        ok = zcl_command_reply_add_next(a->reply, "app.customize", wire,
+            "read this exact saved file; use other listed paths with the same expected_revision");
+        *added = ok;
+    }
+    json_free(&input); return ok;
+}
+static bool ac_first_resident(struct ac_read *a)
+{
+    const struct json_value *rows = json_get(&a->data, "files");
+    for (size_t i = 0; i < json_size(rows); ++i) {
+        const struct json_value *row = json_at(rows, i), *size = json_get(row, "size");
+        const char *path = json_get_str(json_get(row, "path"));
+        if (!path || strlen(path) > AC_PATH || !size || size->type != JSON_INT ||
+            size->val.i < 0 || (uint64_t)size->val.i > AC_FILE_BYTES) continue;
+        bool added = false;
+        if (!ac_first_try(a, path, &added)) return false;
+        if (added) break;
+    }
+    return true;
+}
 static bool ac_first_file(struct ac_read *a)
 {
-    if (a->query || a->path || a->page >= a->manifest.count) return true;
-    struct json_value input; json_init(&input); json_set_object(&input);
-    bool ok = ac_next_identity(a, &input) &&
-        json_push_kv_str(&input, "path", a->manifest.entries[a->page].path);
-    char wire[2048];
-    size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
-    if (!n) ok = false;
-    if (ok && n < sizeof(a->reply->next[0].input_json))
-        ok = zcl_command_reply_add_next(a->reply,
-            "app.customize", wire, "read this exact saved file; use other listed paths with the same expected_revision");
-    json_free(&input); return ok;
+    if (a->query || a->path) return true;
+    if (a->resident) return ac_first_resident(a);
+    if (a->page >= a->manifest.count) return true;
+    bool added = false;
+    return ac_first_try(a, a->manifest.entries[a->page].path, &added);
 }
 
 static bool ac_tasks_file_row(struct ac_read *a, const struct ac_tasks_file *file)
@@ -539,6 +563,68 @@ static bool ac_tasks_file_row(struct ac_read *a, const struct ac_tasks_file *fil
         json_push_kv_int(&row, "size", (int64_t)file->size) &&
         json_push_kv_int(&row, "mode", file->mode) && json_push_kv(&a->data, "file", &row);
     json_free(&row); return ok;
+}
+
+static bool ac_tasks_page_row(struct json_value *row, const struct vcs_package_file *file)
+{
+    json_set_object(row);
+    return file->size <= INT64_MAX && json_push_kv_str(row, "path", file->path) &&
+        json_push_kv_int(row, "size", (int64_t)file->size) && json_push_kv_int(row, "mode", file->mode);
+}
+
+static bool ac_tasks_page_rows(struct ac_read *a, const struct vcs_package_manifest *m)
+{
+    if (a->page > m->count) return false;
+    struct json_value rows; json_init(&rows); json_set_array(&rows);
+    size_t i = a->page; bool ok = true;
+    while (ok && i < m->count && i - a->page < AC_PAGE) {
+        const struct vcs_package_file *f = &m->files[i];
+        struct json_value row; json_init(&row);
+        ok = ac_tasks_page_row(&row, f);
+        if (ok && json_write(&rows, NULL, 0) + json_write(&row, NULL, 0) > 2048u) {
+            json_free(&row); break;
+        }
+        ok = ok && json_push_back(&rows, &row); json_free(&row);
+        if (ok) ++i;
+    }
+    ok = ok && json_push_kv(&a->data, "files", &rows) &&
+        json_push_kv_int(&a->data, "file_count", (int64_t)m->count) &&
+        json_push_kv_int(&a->data, "next_page", (int64_t)i) &&
+        json_push_kv_bool(&a->data, "complete", i == m->count);
+    json_free(&rows); return ok;
+}
+
+static bool ac_tasks_page_still(struct ac_read *a, const char *directory,
+                                const struct package_resident_record *kept)
+{
+    struct package_resident_record now = {0}; struct app_selection selected;
+    return ac_tasks_kept_read(directory, &now) && now.generation == kept->generation &&
+        package_resident_identity_equal(&now.current, &kept->current) &&
+        app_selection_load(a->env.state_dir, a->selected.app, &selected) == APP_SELECTION_ABSENT;
+}
+
+static bool ac_tasks_page(struct ac_read *a)
+{
+    const char *directory = zcl_native_command_datadir();
+    struct package_resident_record kept = {0}; struct vcs_package_manifest manifest;
+    if (!directory || !ac_tasks_manifest_read(directory, a->source_version, a->expected, &kept, &manifest))
+        return a->pinned ? ac_fail(a, "SOURCE_UNREADABLE", "kept package identity or manifest is unavailable") : ac_selection_required(a);
+    struct app_selection now;
+    bool ok = app_selection_load(a->env.state_dir, a->selected.app, &now) == APP_SELECTION_ABSENT;
+    if (ok) {
+        (void)snprintf(a->resident_root, sizeof(a->resident_root), "%s", kept.current.package_root);
+        a->source_version = a->resident_root; a->selected.revision = (uint64_t)kept.generation;
+        ok = zcl_hex_decode_lower(a->source_version, a->copy.selected_version, 32) &&
+            json_push_kv_str(&a->data, "name", "tasks") &&
+            json_push_kv_int(&a->data, "selection_revision", kept.generation) &&
+            json_push_kv_str(&a->data, "source_version", a->source_version) &&
+            json_push_kv_str(&a->data, "source_root", a->source_version) &&
+            json_push_kv_str(&a->data, "kept_receipt", kept.current.receipt_id) &&
+            json_push_kv_str(&a->data, "change", a->change ? a->change : "") && ac_tasks_page_rows(a, &manifest);
+    }
+    if (ok) ok = ac_tasks_page_still(a, directory, &kept);
+    vcs_package_manifest_free(&manifest);
+    return ok || ac_fail(a, "SOURCE_UNREADABLE", "kept source changed or context is unavailable");
 }
 
 /* Resident source is a content-addressed package, not a saved personal copy. */
@@ -569,7 +655,7 @@ static bool ac_tasks_context(struct ac_read *a)
 static bool ac_read_context(struct ac_read *a, const struct json_value *input)
 {
     bool ok = ac_inputs(a, input) && ac_source_input(a, input) && ac_shape(a, input) && ac_select(a);
-    if (ok && a->resident) return ac_tasks_context(a);
+    if (ok && a->resident) return a->path ? ac_tasks_context(a) : ac_tasks_page(a);
     if (ok) ok = ac_source(a);
     if (ok && !ac_identity(a)) ok = ac_fail(a, "CONTEXT_REFUSED", "context allocation failed");
     if (ok) ok = a->query ? ac_search(a) : (a->path ? ac_file(a) : ac_page(a));
@@ -584,7 +670,7 @@ static bool ac_finish_context(struct ac_read *a, const struct zcl_command_reques
         budget = request->success_data_budget;
     if (ok && json_write(&a->data, NULL, 0) > budget)
         ok = ac_fail(a, "CONTEXT_REFUSED", "escaped context exceeds the reply bound; request a smaller file slice");
-    if (ok && (!ac_next(a) || (!a->resident && !ac_first_file(a)))) ok = ac_fail(a, "CONTEXT_REFUSED", "cannot encode the next pinned read");
+    if (ok && (a->resident ? (!ac_first_file(a) || !ac_next(a)) : (!ac_next(a) || !ac_first_file(a)))) ok = ac_fail(a, "CONTEXT_REFUSED", "cannot encode the next pinned read");
     return ok;
 }
 

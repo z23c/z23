@@ -907,8 +907,12 @@ static bool act_resident_package(struct act_resident_fixture *f)
     uint8_t hash[32], root[32], *wire = NULL; size_t wire_len = 0;
     struct vcs_package_manifest manifest; vcs_package_manifest_init(&manifest);
     bool ok = vcs_package_chunk_hash((const uint8_t *)act_resident_bytes, sizeof(act_resident_bytes) - 1, hash) &&
-        vcs_package_manifest_add(&manifest, "app/main.c", VCS_PACKAGE_MODE_FILE, sizeof(act_resident_bytes) - 1, hash, 1) &&
-        vcs_package_manifest_serialize(&manifest, &wire, &wire_len);
+        vcs_package_manifest_add(&manifest, "app/main.c", VCS_PACKAGE_MODE_FILE, sizeof(act_resident_bytes) - 1, hash, 1);
+    for (unsigned i = 0; ok && i < 6; ++i) {
+        char path[32]; (void)snprintf(path, sizeof(path), "extra/file%u.c", i);
+        ok = vcs_package_manifest_add(&manifest, path, VCS_PACKAGE_MODE_FILE, sizeof(act_resident_bytes) - 1, hash, 1);
+    }
+    if (ok) ok = vcs_package_manifest_serialize(&manifest, &wire, &wire_len);
     struct vcs_package_store *store = ok ? vcs_package_store_open(f->directory, 64u * 1024u * 1024u) : NULL;
     ok = store && vcs_package_store_put_manifest(store, wire, wire_len, root) == VCS_PACKAGE_STORE_OK &&
         vcs_package_store_put_chunk(store, root, "app/main.c", 0, (const uint8_t *)act_resident_bytes,
@@ -943,6 +947,90 @@ static bool act_resident_read(const char *root, int64_t generation, const char *
         json_get_int(json_get(&l.out.data, "selection_revision")) == generation;
     else ok = ok && l.out.status != ZCL_COMMAND_STATUS_PASSED;
     abc_close(&l); return ok;
+}
+static bool act_initial_wire(struct abc_leaf *l)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.customize", NULL);
+    char wire[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &l->out, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n) && json_get_bool(json_get(&doc, "ok"));
+    json_free(&doc); return ok;
+}
+static bool act_initial_page(struct abc_leaf *l)
+{
+    if (l->out.next_count != 2) return false;
+    struct abc_leaf page; abc_open(&page);
+    bool ok = json_read(&page.in, l->out.next[1].input_json, strlen(l->out.next[1].input_json)) &&
+        abc_exec("app.customize", &page) && page.out.status == ZCL_COMMAND_STATUS_PASSED;
+    const struct json_value *rows = json_get(&page.out.data, "files");
+    const char *first = json_get_str(json_get(json_at(rows, 0), "path"));
+    ok = ok && json_size(rows) == 3 && first && !strcmp(first, "extra/file3.c") &&
+        json_get_int(json_get(&page.out.data, "next_page")) == 7 &&
+        json_get_bool(json_get(&page.out.data, "complete")) && act_initial_wire(&page);
+    abc_close(&page); return ok;
+}
+static bool act_initial_follow(struct abc_leaf *l)
+{
+    struct abc_leaf follow; abc_open(&follow);
+    bool ok = json_read(&follow.in, l->out.next[0].input_json, strlen(l->out.next[0].input_json)) &&
+        abc_exec("app.customize", &follow) && follow.out.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(abc_get(&follow, "content"), act_resident_bytes);
+    abc_close(&follow); return ok;
+}
+static bool act_resident_initial(const char *root)
+{
+    struct abc_leaf l; abc_open(&l);
+    bool ok = json_push_kv_str(&l.in, "name", "tasks") &&
+        json_push_kv_str(&l.in, "change", "Change the empty state") && abc_exec("app.customize", &l);
+    ok = ok && l.out.status == ZCL_COMMAND_STATUS_PASSED && l.out.next_count > 0 &&
+        !strcmp(l.out.next[0].command, "app.customize") &&
+        !strcmp(abc_get(&l, "source_root"), root) &&
+        json_get_int(json_get(&l.out.data, "selection_revision")) == 1;
+    ok = ok && json_size(json_get(&l.out.data, "files")) == 4 &&
+        json_get_int(json_get(&l.out.data, "next_page")) == 4 && act_initial_wire(&l) && act_initial_page(&l);
+    ok = ok && act_initial_follow(&l);
+    abc_close(&l); return ok;
+}
+static bool act_oversize_package(struct act_resident_fixture *f)
+{
+    uint8_t hashes[64] = {0}, root[32], *wire = NULL; size_t length = 0;
+    struct vcs_package_manifest m; vcs_package_manifest_init(&m);
+    bool ok = vcs_package_chunk_hash((const uint8_t *)act_resident_bytes, sizeof(act_resident_bytes) - 1, hashes);
+    memcpy(hashes + 32, hashes, 32);
+    char long_path[301]; memset(long_path, 'b', 300);
+    memcpy(long_path, "app/b", 5); long_path[150] = '/'; long_path[300] = 0;
+    ok = ok && vcs_package_manifest_add(&m, "app/aaa.c", VCS_PACKAGE_MODE_FILE,
+                                         VCS_PACKAGE_CHUNK_BYTES + 1, hashes, 2) &&
+        vcs_package_manifest_add(&m, long_path, VCS_PACKAGE_MODE_FILE,
+                                 sizeof(act_resident_bytes) - 1, hashes, 1) &&
+        vcs_package_manifest_add(&m, "app/main.c", VCS_PACKAGE_MODE_FILE,
+                                 sizeof(act_resident_bytes) - 1, hashes, 1) &&
+        vcs_package_manifest_serialize(&m, &wire, &length);
+    struct vcs_package_store *store = ok ? vcs_package_store_open(f->directory, 64u * 1024u * 1024u) : NULL;
+    ok = store && vcs_package_store_put_manifest(store, wire, length, root) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_store_put_chunk(store, root, "app/main.c", 0, (const uint8_t *)act_resident_bytes,
+                                    sizeof(act_resident_bytes) - 1) == VCS_PACKAGE_STORE_OK;
+    if (store) vcs_package_store_close(store);
+    free(wire); vcs_package_manifest_free(&m);
+    if (ok) zcl_hex_encode(root, sizeof(root), f->root);
+    return ok;
+}
+static bool act_resident_oversize(void)
+{
+    struct act_resident_fixture f = {0};
+    if (!test_mkdtemp(f.directory, sizeof(f.directory), "tasks_resident_oversize")) return false;
+    bool ok = act_oversize_package(&f) && act_resident_accept(&f);
+    char old[4096]; (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+    int port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f.directory, port);
+    struct abc_leaf l; abc_open(&l);
+    ok = json_push_kv_str(&l.in, "name", "tasks") && abc_exec("app.customize", &l) && ok;
+    const struct json_value *rows = json_get(&l.out.data, "files");
+    const char *first = json_get_str(json_get(json_at(rows, 0), "path"));
+    ok = ok && l.out.status == ZCL_COMMAND_STATUS_PASSED && json_size(rows) == 3 &&
+        first && !strcmp(first, "app/aaa.c") && l.out.next_count > 0 &&
+        strstr(l.out.next[0].input_json, "app/main.c") && act_initial_wire(&l) && act_initial_follow(&l);
+    abc_close(&l); zcl_native_bridge_bind_rpc(old, port); test_rm_rf(f.directory); return ok;
 }
 static bool act_resident_wire(const char *root)
 {
@@ -1000,7 +1088,7 @@ static bool act_tasks_resident_file(void)
     bool ok = act_resident_package(&f) && act_resident_accept(&f);
     char old[4096]; (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
     int port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f.directory, port);
-    ok = act_resident_read(f.root, 1, "app/main.c", true) && act_resident_wire(f.root) && ok;
+    ok = act_resident_initial(f.root) && act_resident_read(f.root, 1, "app/main.c", true) && act_resident_wire(f.root) && ok;
     ok = act_resident_read(f.root, 2, "app/main.c", false) && ok;
     ok = act_resident_read("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, "app/main.c", false) && ok;
     ok = act_resident_read(f.root, 1, "app/other.c", false) && ok;
@@ -1720,6 +1808,7 @@ int test_app_customize(void)
 #if defined(__linux__) || defined(__APPLE__)
         ASSERT(act_tasks_kept_hint());
         ASSERT(act_tasks_resident_file());
+        ASSERT(act_resident_oversize());
 #endif
         ASSERT(act_no_grant(&f));
         ASSERT(act_reader_bounds(&f));

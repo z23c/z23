@@ -62,6 +62,15 @@ static bool act_manifest(const char *directory, const char *root,
     return ok;
 }
 
+bool ac_tasks_manifest_read(const char *directory, const char *root, uint64_t generation,
+                            struct package_resident_record *kept, struct vcs_package_manifest *manifest)
+{
+    if (!directory || !kept || !manifest || !ac_tasks_kept_read(directory, kept)) return false;
+    if (root && (strcmp(root, kept->current.package_root) || (uint64_t)kept->generation != generation)) return false;
+    vcs_package_manifest_init(manifest);
+    return act_manifest(directory, kept->current.package_root, manifest);
+}
+
 static bool act_chunk(const char *directory, const struct vcs_package_file *entry,
                       struct ac_tasks_file *out)
 {
