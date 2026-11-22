@@ -125,8 +125,8 @@ static bool um_add(struct um_parse *p, const char *id, size_t il,
     if (!bigger)
         return false;
     p->decl = bigger;
-    p->decl[p->n].id = strndup(id, il);
-    p->decl[p->n].glob = strndup(g, gl);
+    p->decl[p->n].id = tgl_strndup(id, il);
+    p->decl[p->n].glob = tgl_strndup(g, gl);
     if (!p->decl[p->n].id || !p->decl[p->n].glob)
         return false;
     p->n++;

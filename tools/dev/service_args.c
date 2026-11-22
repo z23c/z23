@@ -311,7 +311,6 @@ static int svc_rm(const char *path)
     closedir(dir);
     return rmdir(path) == 0 ? 0 : -1;
 }
-#endif
 
 static int svc_write(const char *path, const char *text);
 
@@ -364,6 +363,7 @@ static int svc_expect(const char *domain, const char *want_pid, int want_ok)
         return -1;
     return 0;
 }
+#endif /* !_WIN32: fixture helpers of the POSIX self-test arm */
 
 int zcl_service_args_selftest(void)
 {

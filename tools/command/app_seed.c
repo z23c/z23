@@ -9,6 +9,8 @@
 
 #include "command/app_build_make.h"
 #include "framework/app_definition.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "util/file_io.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
@@ -83,19 +85,30 @@ static bool as_skipped(const char *name)
     return false;
 }
 
+/* A real directory: never a symlink or reparse point, never followed. */
+static bool as_plain_dir(const char *path)
+{
+    return platform_file_shape_read(path) == PLATFORM_FILE_SHAPE_OTHER &&
+           platform_directory_probe_real(path) == PLATFORM_DIRECTORY_PROBE_OK;
+}
+
 static bool as_copy_entry(struct as_ctx *c, const char *name)
 {
     char src[AS_PATH], dst[AS_PATH];
-    struct stat st;
     if (!vcs_package_path_valid(name))
         return as_fail(c->out, "SEED_PATH_ESCAPE", "apps file '%s' is not a "
                        "canonical package path", name);
-    if (!zcl_path_join(src, sizeof(src), c->app_dir, name) ||
-        !zcl_path_join(dst, sizeof(dst), c->dest, name) ||
-        lstat(src, &st) != 0)
+    enum platform_file_shape shape = PLATFORM_FILE_SHAPE_MISSING;
+    if (zcl_path_join(src, sizeof(src), c->app_dir, name) &&
+        zcl_path_join(dst, sizeof(dst), c->dest, name))
+        shape = platform_file_shape_read(src);
+    if (shape == PLATFORM_FILE_SHAPE_MISSING ||
+        shape == PLATFORM_FILE_SHAPE_UNREADABLE)
         return as_fail(c->out, "SEED_IO", "cannot read %s/%s", c->app_dir,
                        name);
-    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
+    if (shape == PLATFORM_FILE_SHAPE_SYMLINK ||
+        (shape == PLATFORM_FILE_SHAPE_OTHER &&
+         platform_directory_probe_real(src) != PLATFORM_DIRECTORY_PROBE_OK))
         return as_fail(c->out, "SEED_NOT_REGULAR", "%s is a symlink or "
                        "special file", src);
     struct zcl_result r = zcl_tree_copy(src, dst, 0, NULL, NULL);
@@ -126,9 +139,8 @@ static bool as_copy_app(struct as_ctx *c)
 static bool as_entrypoint(struct as_ctx *c)
 {
     char path[AS_PATH];
-    struct stat st;
     if (zcl_path_join(path, sizeof(path), c->app_dir, APP_SEED_MAKEFILE) &&
-        lstat(path, &st) == 0 && S_ISREG(st.st_mode))
+        platform_file_shape_read(path) == PLATFORM_FILE_SHAPE_REGULAR)
         return true;
     return as_fail(c->out, "NO_PACKAGE_ENTRYPOINT", "%s is not a regular "
                    "file with the print-app-closure and app targets", path);
@@ -161,20 +173,19 @@ static bool as_repo_file(struct as_ctx *c, const char *rel, char *abs,
                          size_t cap)
 {
     char walk[AS_PATH];
-    struct stat st;
     if (!zcl_path_join(abs, cap, c->repo, rel) ||
         !zcl_path_join(walk, sizeof(walk), c->repo, rel))
         return as_fail(c->out, "SEED_IO", "path too long: %s", rel);
     char *sep = walk + strlen(c->repo) + 1u;
     while ((sep = strchr(sep, '/')) != NULL) {
         *sep = '\0';
-        if (lstat(walk, &st) != 0 || !S_ISDIR(st.st_mode))
+        if (!as_plain_dir(walk))
             return as_fail(c->out, "SEED_NOT_REGULAR", "zcode-seed.def entry "
                            "'%s' passes through %s, which is not a plain "
                            "directory", rel, walk);
         *sep++ = '/';
     }
-    if (lstat(abs, &st) != 0 || !S_ISREG(st.st_mode))
+    if (platform_file_shape_read(abs) != PLATFORM_FILE_SHAPE_REGULAR)
         return as_fail(c->out, "SEED_NOT_REGULAR", "zcode-seed.def entry '%s' "
                        "is not a regular file in the checkout", rel);
     return true;
@@ -193,7 +204,6 @@ static bool as_copy_mapped(struct as_ctx *c, const char *rel,
                            const char *tree)
 {
     char src[AS_PATH], dst[AS_PATH], parent[AS_PATH];
-    struct stat st;
     if (!vcs_package_path_valid(rel) || !vcs_package_path_valid(tree) ||
         as_under_store(tree))
         return as_fail(c->out, "SEED_PATH_ESCAPE", "zcode-seed.def entry "
@@ -202,7 +212,7 @@ static bool as_copy_mapped(struct as_ctx *c, const char *rel,
     if (!as_repo_file(c, rel, src, sizeof(src)))
         return false;
     if (!zcl_path_join(dst, sizeof(dst), c->dest, tree) ||
-        lstat(dst, &st) == 0)
+        platform_file_shape_read(dst) != PLATFORM_FILE_SHAPE_MISSING)
         return as_fail(c->out, "SEED_COLLISION", "zcode-seed.def maps '%s' "
                        "onto '%s', which the tree already holds", rel, tree);
     (void)snprintf(parent, sizeof(parent), "%s", dst);
@@ -240,14 +250,14 @@ static bool as_line(struct as_ctx *c, char *line, size_t lineno)
 static bool as_copy_def(struct as_ctx *c)
 {
     char path[AS_PATH];
-    struct stat st;
     char *text = NULL;
     size_t len = 0;
     if (!zcl_path_join(path, sizeof(path), c->app_dir, APP_SEED_DEF))
         return as_fail(c->out, "SEED_IO", "path too long: %s", c->app_dir);
-    if (lstat(path, &st) != 0)
+    enum platform_file_shape shape = platform_file_shape_read(path);
+    if (shape == PLATFORM_FILE_SHAPE_MISSING)
         return true; /* an app with no host files */
-    if (!S_ISREG(st.st_mode) ||
+    if (shape != PLATFORM_FILE_SHAPE_REGULAR ||
         !zcl_read_whole_file_text(path, APP_SEED_DEF_BYTES_MAX, &text, &len,
                                   "app.seed"))
         return as_fail(c->out, "SEED_DEF_INVALID", "%s is not a readable "
@@ -269,12 +279,10 @@ static bool as_copy_def(struct as_ctx *c)
 static bool as_locate(struct as_ctx *c, const char *app)
 {
     char apps[AS_PATH];
-    struct stat st;
     if (!zcl_path_join(apps, sizeof(apps), c->repo, "apps") ||
         !zcl_path_join(c->app_dir, sizeof(c->app_dir), apps, app))
         return as_fail(c->out, "SEED_IO", "path too long: %s", c->repo);
-    if (lstat(apps, &st) != 0 || !S_ISDIR(st.st_mode) ||
-        lstat(c->app_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    if (!as_plain_dir(apps) || !as_plain_dir(c->app_dir)) {
         char note[400];
         if (app_seed_web_app_note(app, note, sizeof(note)))
             return as_fail(c->out, "APP_UNKNOWN", "%s", note);

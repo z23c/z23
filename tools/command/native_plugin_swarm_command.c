@@ -35,6 +35,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/file_metadata.h"
 #include "platform/time_compat.h"
 #if defined(_WIN32)
 #include "platform/directory_transaction.h"
@@ -192,14 +193,14 @@ static bool psw_scan_entry(const char *dir, const char *leaf,
     int n = snprintf(path, sizeof(path), "%s/%s", dir, leaf);
     if (n < 0 || (size_t)n >= sizeof(path))
         return false;
-    struct stat st;
-    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size < 0 || (!allow_empty && st.st_size == 0) ||
-        (uint64_t)st.st_size > (uint64_t)VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES)
+    struct platform_file_metadata md;
+    if (platform_file_metadata_read(path, &md) != PLATFORM_FILE_METADATA_OK ||
+        (!allow_empty && md.size == 0) ||
+        md.size > (uint64_t)VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES)
         return false;
     struct psw_file *f = &set->files[set->file_count++];
     (void)snprintf(f->leaf, sizeof(f->leaf), "%s", leaf);
-    f->size = (uint64_t)st.st_size;
+    f->size = md.size;
     set->total_bytes += f->size;
     return set->total_bytes <= (uint64_t)VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES;
 }

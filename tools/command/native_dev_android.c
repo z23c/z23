@@ -9,6 +9,8 @@
 #include "crypto/sha256.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
+#include "platform/temp_directory.h"
 #include "util/spawn.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -177,7 +179,7 @@ static bool da_inputs(const struct zcl_command_request *req, struct da_plan *p, 
     const struct json_value *in = req ? req->input : NULL;
     const char *cwd = da_str(in, "cwd"); char inferred[PATH_MAX];
     if (!cwd) {
-        if (!realpath(".", inferred)) { *reason = "Cannot resolve the current worktree."; return false; }
+        if (!platform_directory_canonical_real(".", inferred, sizeof(inferred))) { *reason = "Cannot resolve the current worktree."; return false; }
         cwd = inferred;
     }
     const char *node = da_str(in, "node_bin"), *source = da_str(in, "node_source");
@@ -315,12 +317,20 @@ static bool da_handle_fields(const struct json_value *a, struct da_plan *p, char
         !da_copy(p->tree, sizeof(p->tree), tree)) return false;
     return da_handle_hashes(a, p);
 }
+/* The leaf platform_temp_directory_create_under() gives a run directory: 18
+ * lowercase hex digits, never a separator. */
+static bool da_run_suffix_ok(const char *suffix)
+{
+    unsigned char nonce[9];
+    return strlen(suffix) == 18 && !strchr(suffix, '/') &&
+           zcl_hex_decode_lower(suffix, nonce, sizeof(nonce));
+}
 static bool da_handle_identity(struct da_plan *p, const char *out)
 {
     char prefix[DA_PATH]; int n = snprintf(prefix, sizeof(prefix), "%s/build/android-jobs/run-", p->cwd);
     const char *suffix = n > 0 && (size_t)n < sizeof(prefix) && !strncmp(out, prefix, (size_t)n) ? out + n : NULL;
     unsigned char digest[32], commit[20];
-    return da_path(p->cwd) && da_path(out) && da_path(p->node) && suffix && strlen(suffix) == 6 && !strchr(suffix, '/') &&
+    return da_path(p->cwd) && da_path(out) && da_path(p->node) && suffix && da_run_suffix_ok(suffix) &&
         strlen(p->head) == 40 && zcl_hex_decode_lower(p->head, commit, sizeof(commit)) &&
         zcl_hex_decode_lower(p->source, commit, sizeof(commit)) && zcl_hex_decode_lower(p->tree, commit, sizeof(commit)) &&
         zcl_hex_decode_lower(p->hash, digest, sizeof(digest));
@@ -342,19 +352,18 @@ static bool da_existing_job(const char *id, const struct da_plan *p, const struc
 
 static bool da_prepare_output(const struct da_plan *p, struct zcl_command_reply *r, char out[DA_PATH], bool *changed)
 {
-    char build[DA_PATH], parent[DA_PATH]; struct stat st; bool mutated = false;
+    char build[DA_PATH], parent[DA_PATH]; bool mutated = false;
     int n = snprintf(build, sizeof(build), "%s/build", p->cwd);
     if (n < 0 || (size_t)n >= sizeof(build)) { da_fail(r, "OUTPUT_UNAVAILABLE", "Build path is too long."); return false; }
-    bool missing = lstat(build, &st) != 0 && errno == ENOENT;
+    bool missing = platform_file_shape_read(build) == PLATFORM_FILE_SHAPE_MISSING;
     if (!platform_directory_ensure(build, 0700)) { da_fail(r, "OUTPUT_UNAVAILABLE", "Cannot create the build directory."); return false; }
     mutated = missing;
     n = snprintf(parent, sizeof(parent), "%s/build/android-jobs", p->cwd);
     if (n < 0 || (size_t)n >= sizeof(parent)) { da_emit_failed(r, mutated); return false; }
-    missing = lstat(parent, &st) != 0 && errno == ENOENT;
+    missing = platform_file_shape_read(parent) == PLATFORM_FILE_SHAPE_MISSING;
     if (!platform_directory_ensure(parent, 0700)) { da_emit_failed(r, mutated); return false; }
     mutated = mutated || missing;
-    n = snprintf(out, DA_PATH, "%s/run-XXXXXX", parent);
-    if (n < 0 || (size_t)n >= DA_PATH || !mkdtemp(out)) { da_emit_failed(r, mutated); return false; }
+    if (!platform_temp_directory_create_under(parent, "run-", out, DA_PATH)) { da_emit_failed(r, mutated); return false; }
     *changed = mutated; return true;
 }
 static void da_prepare_reply(struct zcl_command_reply *r, struct da_plan *p, struct json_value *semantic, const char *out)
@@ -440,12 +449,25 @@ static bool da_artifact_files(const char *out, const struct da_plan *expected, s
     ok = ok && n > 0 && (size_t)n < sizeof(file) && da_hash(file, stagedhash) && !strcmp(stagedhash, expected->hash);
     return ok;
 }
+/* The staged output is a real directory this user owns with no group or other
+ * access. Windows keeps that contract in ACLs this command does not read and
+ * refuses Android packaging there, so it never reports a private output. */
+static bool da_output_private(const char *out)
+{
+#if defined(_WIN32)
+    (void)out;
+    return false;
+#else
+    struct stat st;
+    return lstat(out, &st) == 0 && S_ISDIR(st.st_mode) &&
+           st.st_uid == geteuid() && (st.st_mode & 077) == 0;
+#endif
+}
 static bool da_artifact_check(const struct json_value *handle, struct da_plan *expected, const char *out, struct da_artifact *artifact, const char *source_root)
 {
-    struct stat out_st;
     struct da_plan observed = {0}; char nodehash[65];
-    bool ok = lstat(out, &out_st) == 0 && S_ISDIR(out_st.st_mode) && out_st.st_uid == geteuid() &&
-        (out_st.st_mode & 077) == 0 && da_copy(observed.cwd, sizeof(observed.cwd), expected->cwd) && da_source(&observed, source_root) &&
+    bool ok = da_output_private(out) &&
+        da_copy(observed.cwd, sizeof(observed.cwd), expected->cwd) && da_source(&observed, source_root) &&
         !strcmp(observed.head, expected->head) && !strcmp(observed.tree, expected->tree) &&
         da_hash(expected->node, nodehash) && !strcmp(nodehash, expected->hash);
     ok = da_artifact_inputs(handle, expected, ok);

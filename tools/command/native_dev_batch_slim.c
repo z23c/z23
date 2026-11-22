@@ -19,6 +19,8 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 
@@ -108,6 +110,20 @@ static bool sl_path_number(struct sl_set *busy, const char *path)
     return sl_set_add(busy, last, (size_t)(d - last));
 }
 
+/* The working directory of one process. Only /proc has it, so Windows reports
+ * nothing and the scan above it finds no busy stack. */
+static ssize_t sl_cwd_link(const char *link, char *target, size_t cap)
+{
+#if defined(_WIN32)
+    (void)link;
+    (void)target;
+    (void)cap;
+    return -1;
+#else
+    return readlink(link, target, cap);
+#endif
+}
+
 static bool sl_busy_numbers(struct sl_set *busy, const char *proc_dir)
 {
     DIR *dir = opendir(proc_dir);
@@ -123,7 +139,7 @@ static bool sl_busy_numbers(struct sl_set *busy, const char *proc_dir)
         if (snprintf(link, sizeof(link), "%s/%s/cwd", proc_dir,
                      ent->d_name) >= (int)sizeof(link))
             continue;
-        n = readlink(link, target, sizeof(target) - 1);
+        n = sl_cwd_link(link, target, sizeof(target) - 1);
         if (n <= 0)
             continue;
         target[n] = '\0';
@@ -138,13 +154,16 @@ static bool sl_busy_numbers(struct sl_set *busy, const char *proc_dir)
 /* rm -rf that never follows a symlink and stops at SL_DEPTH. */
 static bool sl_rm_rf(const char *path, int depth)
 {
-    struct stat st;
     DIR *dir;
     struct dirent *ent;
     bool ok = true;
-    if (lstat(path, &st) != 0)
-        return errno == ENOENT;
-    if (!S_ISDIR(st.st_mode))
+    enum platform_file_shape shape = platform_file_shape_read(path);
+    if (shape == PLATFORM_FILE_SHAPE_MISSING)
+        return true;
+    if (shape == PLATFORM_FILE_SHAPE_UNREADABLE)
+        return false;
+    if (shape != PLATFORM_FILE_SHAPE_OTHER ||
+        platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK)
         return unlink(path) == 0;
     if (depth >= SL_DEPTH || !(dir = opendir(path)))
         return false;

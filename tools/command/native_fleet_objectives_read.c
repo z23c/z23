@@ -18,6 +18,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/memory_stream.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
@@ -1380,7 +1381,7 @@ static FILE *obj_blob_stream(char *blob, size_t len)
         blob[0] = '\n';
         len = 1;
     }
-    return fmemopen(blob, len, "r");
+    return platform_memory_stream_open_read(blob, len);
 }
 
 /* Counts an open stream, then closes it and frees its blob (NULL for a file).

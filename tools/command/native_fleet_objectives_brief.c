@@ -16,6 +16,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/memory_stream.h"
 #include "util/log_macros.h"
 #include "command/native_dev_cx_next.h"
 #include "command/work_card.h"
@@ -325,7 +326,7 @@ static bool brief_push_pins(struct json_value *card, const struct brief_inputs *
     bool ok = true;
     int m;
     FILE *fp = in->complexity_bytes
-        ? fmemopen(in->complexity_bytes, in->complexity_len, "r")
+        ? platform_memory_stream_open_read(in->complexity_bytes, in->complexity_len)
         : fopen(in->baseline, "r");
     json_init(&arr);
     json_set_array(&arr);
@@ -597,7 +598,7 @@ static int brief_choose_row(const struct brief_inputs *in, const char *owned,
             free(blob);
             return 1;
         }
-        fp = fmemopen(blob, len, "r");
+        fp = platform_memory_stream_open_read(blob, len);
     } else {
         fp = fopen(full, "r");
     }

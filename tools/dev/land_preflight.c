@@ -49,10 +49,21 @@ static bool lp_path_join(char *dst, size_t cap, const char *root,
  * 2026-11-19 queue burned two cold proofs on a mode-0 fixture source, so
  * presence alone is not enough: an unreadable artifact is reported MISSING
  * with the reason named. */
+/* The Windows CRT has no lstat; stat is the same answer there for a presence
+ * check. This tool builds standalone, so it takes no platform seam. */
+static int lp_probe(const char *path, struct stat *st)
+{
+#if defined(_WIN32)
+    return stat(path, st);
+#else
+    return lstat(path, st);
+#endif
+}
+
 static bool lp_artifact_present(const char *path, const char **why)
 {
     struct stat st;
-    if (lstat(path, &st) != 0) {
+    if (lp_probe(path, &st) != 0) {
         if (errno == ENOENT || errno == ENOTDIR) {
             *why = "absent";
             return false;

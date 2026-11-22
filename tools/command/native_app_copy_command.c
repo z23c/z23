@@ -29,6 +29,7 @@
 #include "command/native_app_seed_installed.h"
 
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "platform/os_proc.h"
 #include "base/hex.h"
 #include "config/command_catalog.h"
@@ -163,10 +164,10 @@ static enum app_installed_source_status zac_tasks_share_path(char *out, size_t c
         return APP_INSTALLED_SOURCE_REFUSED;
     n = snprintf(out, cap, "%s/tasks.z23share", selected);
     if (n <= 0 || (size_t)n >= cap) return APP_INSTALLED_SOURCE_REFUSED;
-    struct stat st;
-    if (lstat(out, &st) != 0)
-        return errno == ENOENT ? APP_INSTALLED_SOURCE_UNSELECTED : APP_INSTALLED_SOURCE_REFUSED;
-    return S_ISREG(st.st_mode) ? APP_INSTALLED_SOURCE_VERIFIED : APP_INSTALLED_SOURCE_REFUSED;
+    enum platform_file_shape shape = platform_file_shape_read(out);
+    if (shape == PLATFORM_FILE_SHAPE_MISSING)
+        return APP_INSTALLED_SOURCE_UNSELECTED;
+    return shape == PLATFORM_FILE_SHAPE_REGULAR ? APP_INSTALLED_SOURCE_VERIFIED : APP_INSTALLED_SOURCE_REFUSED;
 }
 
 static bool zac_installed_tasks_plan(struct zac *z)

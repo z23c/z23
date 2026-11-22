@@ -52,6 +52,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(_WIN32)
+#include <sys/utime.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -618,7 +621,7 @@ static void rs_utc_now(char out[32])
 {
     struct tm tm_utc;
     time_t now = platform_time_wall_time_t();
-    (void)gmtime_r(&now, &tm_utc);
+    (void)platform_time_utc_tm(now, &tm_utc);
     (void)strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
 }
 
@@ -672,7 +675,11 @@ static void rs_touch_stamp(const struct rs_ctx *c)
         return;
     fd = open(stamp, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
     if (fd >= 0) {
+#if defined(_WIN32)
+        (void)_futime(fd, NULL);
+#else
         (void)futimens(fd, NULL);
+#endif
         (void)close(fd);
     }
 }

@@ -13,6 +13,7 @@
 #include "base/safe_alloc.h"
 #include "command/lab_exec.h"
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "platform/positioned_file.h"
 #include "platform/temp_directory.h"
 #include "sha3/sha3.h"
@@ -383,14 +384,13 @@ static bool abm_hash_file(const char *copy_dir, const char *rel,
                           uint8_t out[32])
 {
     char path[ABM_PATH];
-    struct stat st;
     uint8_t *bytes = NULL;
     size_t len = 0;
     int n = snprintf(path, sizeof(path), "%s/%s", copy_dir, rel);
     /* The copy already prepared as a package, which refuses symlinks and
-     * special files; lstat keeps a later swap from being followed. */
-    if (n <= 0 || (size_t)n >= sizeof(path) || lstat(path, &st) != 0 ||
-        !S_ISREG(st.st_mode) ||
+     * special files; the shape probe keeps a later swap from being followed. */
+    if (n <= 0 || (size_t)n >= sizeof(path) ||
+        platform_file_shape_read(path) != PLATFORM_FILE_SHAPE_REGULAR ||
         !zcl_read_whole_file(path, ABM_INPUT_MAX, &bytes, &len, "app.build"))
         return false;
     zcl_sha3_256(bytes, len, out);
@@ -725,15 +725,15 @@ static bool abm_walk(struct abm_depcheck *d, const char *dir, int depth)
     struct dirent *e;
     while (ok && (e = readdir(dh)) != NULL) {
         char path[ABM_PATH];
-        struct stat st;
         if (e->d_name[0] == '.' ||
             snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >=
-                (int)sizeof(path) ||
-            lstat(path, &st) != 0)
+                (int)sizeof(path))
             continue;
-        if (S_ISDIR(st.st_mode) && depth < ABM_DEPFILE_DEPTH)
+        enum platform_file_shape shape = platform_file_shape_read(path);
+        if (shape == PLATFORM_FILE_SHAPE_OTHER && depth < ABM_DEPFILE_DEPTH &&
+            platform_directory_probe_real(path) == PLATFORM_DIRECTORY_PROBE_OK)
             ok = abm_walk(d, path, depth + 1);
-        else if (S_ISREG(st.st_mode) && abm_is_depfile(e->d_name))
+        else if (shape == PLATFORM_FILE_SHAPE_REGULAR && abm_is_depfile(e->d_name))
             ok = abm_depfile_check(d, path);
     }
     (void)closedir(dh);

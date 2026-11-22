@@ -47,6 +47,8 @@ FILE *tgl_errf(const struct tgl_ctx *c);
 /* The registered name `name`, or NULL. */
 const char *tgl_find(const struct tgl_ctx *c, const char *name);
 
+/* Bounded duplicate of s (at most n bytes), malloc. */
+char *tgl_strndup(const char *s, size_t n);
 /* The pair-th double-quoted string of a line (awk -F'"' $2, $4), malloc. */
 char *tgl_quoted_field(const char *line, int pair);
 bool tgl_ident_char(int c);

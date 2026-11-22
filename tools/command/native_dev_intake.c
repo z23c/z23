@@ -41,8 +41,10 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/directory_compat.h"
 #include "platform/private_file.h"
 #include "platform/state_root.h"
+#include "platform/temp_directory.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
 #include "session/fleet_board_proto.h"
@@ -867,8 +869,8 @@ static bool in_scratch(struct in_ctx *x)
                           "objects", NULL};
     const char *mainv[] = {"rev-parse", "--verify", "origin/main^{commit}", NULL};
     FILE *f;
-    (void)snprintf(tmpl, sizeof(tmpl), "%s/.intake-XXXXXX", x->bundle_dir);
-    if (!mkdtemp(tmpl))
+    if (!platform_temp_directory_create_under(x->bundle_dir, ".intake-", tmpl,
+                                              sizeof(tmpl)))
         return false;
     (void)snprintf(x->scratch, sizeof(x->scratch), "%s", tmpl);
     if (in_git(x, init) != 0 || !db_git_line(x->repo, objs, obj, sizeof(obj)) ||
@@ -896,10 +898,10 @@ static bool in_lane_valid(const char *lane)
     if (!home || snprintf(root, sizeof(root), "%s/development/lanes/z23", home) >= (int)sizeof(root))
         return false;
     char canonical_root[PATH_MAX];
-    if (!realpath(root, canonical_root))
+    if (!platform_directory_canonical_real(root, canonical_root, sizeof(canonical_root)))
         return false;
     size_t n = strlen(canonical_root);
-    if (!realpath(lane, resolved) || strcmp(resolved, lane) ||
+    if (!platform_directory_canonical_real(lane, resolved, sizeof(resolved)) || strcmp(resolved, lane) ||
         strncmp(resolved, canonical_root, n) || resolved[n] != '/')
         return false;
     return db_git_line(lane, args, top, sizeof(top)) && !strcmp(top, lane);

@@ -63,6 +63,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/file_metadata.h"
 #include "platform/temp_directory.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
@@ -326,9 +327,8 @@ static bool zab_release_recipe(struct zab *z, struct vcs_package_recipe *recipe,
 static bool zab_build_form(struct zab *z)
 {
     char path[ZAB_PATH], short_name[128];
-    struct stat st;
     if (zcl_path_join(path, sizeof(path), zab_source(z), "Makefile") &&
-        lstat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+        platform_file_shape_read(path) == PLATFORM_FILE_SHAPE_REGULAR) {
         z->recipe_build = false;
         return true;
     }
@@ -386,7 +386,6 @@ static bool zab_image_path(const struct zab *z, const uint8_t sha[32],
 static bool zab_cache(struct zab *z)
 {
     char image[ZAB_PATH];
-    struct stat st;
     bool hit = false;
     struct zcl_result r = app_image_build_load(
         z->store.records, z->package_root, z->env_root, z->dependency_root,
@@ -400,7 +399,7 @@ static bool zab_cache(struct zab *z)
                    memcmp(z->cached.closure_root, z->closure.root, 32) == 0 &&
                    zab_image_path(z, z->cached.image_sha3, image,
                                   sizeof(image)) &&
-                   lstat(image, &st) == 0 && S_ISREG(st.st_mode);
+                   platform_file_shape_read(image) == PLATFORM_FILE_SHAPE_REGULAR;
     return true;
 }
 
@@ -852,7 +851,6 @@ static bool zab_store_image(struct zab *z, const char *built, char *final,
 {
     uint8_t *bytes = NULL;
     size_t len = 0;
-    struct stat st;
     if (!zcl_read_whole_file(built, ZAB_IMAGE_MAX, &bytes, &len, ZAB_COMMAND) ||
         len == 0) {
         free(bytes);
@@ -862,7 +860,7 @@ static bool zab_store_image(struct zab *z, const char *built, char *final,
     char hex[65];
     zcl_hex_encode(sha, 32, hex);
     bool ok = zcl_path_join(final, cap, z->store.images, hex);
-    if (ok && lstat(final, &st) != 0)
+    if (ok && platform_file_shape_read(final) == PLATFORM_FILE_SHAPE_MISSING)
         ok = authority_receipt_write_atomic(z->store.images, hex, bytes, len, final,
                                             cap) &&
              chmod(final, 0700) == 0;
@@ -929,7 +927,7 @@ static bool zab_dirs(struct zab *z, char *run, size_t cap)
     if (ok && !zab_make_path(z->store.work) && !zab_work_alias(z, alias, sizeof(alias)))
         return false;
     const char *work = z->temporary_work[0] ? alias : z->store.work;
-    ok = ok && zcl_path_join(run, cap, work, "run-XXXXXX") && mkdtemp(run);
+    ok = ok && platform_temp_directory_create_under(work, "run-", run, cap);
     if (!ok)
         zab_fail(z, "BUILD_DIR_FAILED", true, "the build directories could "
                  "not be created", z->store.work);
@@ -1004,8 +1002,8 @@ static bool zab_snapshot_create(struct zab *z, char snapshot[ZAB_PATH])
     } else {
         if (!zcl_path_join(parent, sizeof(parent), z->datadir, ZAB_STORE "/sources") ||
             !zcl_mkdir_p(parent, 0700).ok ||
-            !zcl_path_join(pattern, sizeof(pattern), parent, "saved-XXXXXX") ||
-            !mkdtemp(pattern)) {
+            !platform_temp_directory_create_under(parent, "saved-", pattern,
+                                                  sizeof(pattern))) {
             zab_fail(z, "SNAPSHOT_CREATE_FAILED", true,
                      "could not create private saved-source directory", z->datadir);
             return false;

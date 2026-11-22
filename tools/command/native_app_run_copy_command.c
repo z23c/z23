@@ -39,6 +39,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/resident_launch.h"
+#include "platform/file_metadata.h"
 #include "services/package_lifecycle.h"
 #include "services/package_resident.h"
 #include "sha3/sha3.h"
@@ -147,7 +148,7 @@ static bool zrc_record(struct zrc *z)
     zcl_hex_encode(z->rec.image_sha3, 32, z->image_hex);
     if (hit && zcl_path_join(z->image_path, sizeof(z->image_path),
                              z->store.images, z->image_hex) &&
-        lstat(z->image_path, &st) == 0 && S_ISREG(st.st_mode))
+        platform_file_shape_read(z->image_path) == PLATFORM_FILE_SHAPE_REGULAR)
         return true;
     if (stat(z->store.work, &st) == 0)
         zrc_fail(z, "STALE_BUILD", "this saved version (or toolchain) is not "

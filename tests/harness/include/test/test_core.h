@@ -32,6 +32,11 @@
 #include "platform/file_metadata.h"
 #if defined(_WIN32)
 #include <direct.h>
+/* Not every Windows CRT header set declares mkdtemp (the compiler that grades
+ * this file from a Linux host has an older set). The shim owns the one
+ * in-place implementation; test TUs get it force-included, and the node TUs
+ * that reach this header through test_helpers.h get it here (idempotent). */
+#include "test/windows_compat.h"
 #endif
 
 /* Only ever used through a pointer here — the definition stays in

@@ -19,6 +19,7 @@
 #include "platform/private_directory.h"
 #include "platform/directory_compat.h"
 #include "platform/directory_transaction.h"
+#include "platform/file_metadata.h"
 #include <fcntl.h>
 #include "platform/toolchain.h"
 #include <dirent.h>
@@ -81,10 +82,11 @@ static bool ag_observation(const struct ag_one *s, const struct json_value *buil
 
 static bool ag_hash(const char *path, const struct zcl_app_offer *offer)
 {
-    struct stat st;
+    struct platform_file_metadata md;
     char sha[65];
-    return lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
-           st.st_size == offer->size && zcl_dlr_file_sha256(path, sha) &&
+    return platform_file_metadata_read(path, &md) == PLATFORM_FILE_METADATA_OK &&
+           offer->size >= 0 && md.size == (uint64_t)offer->size &&
+           zcl_dlr_file_sha256(path, sha) &&
            !strcmp(sha, offer->sha256);
 }
 

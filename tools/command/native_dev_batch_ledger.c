@@ -20,6 +20,7 @@
 
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/file_sync.h"
 #include "base/safe_alloc.h"
 #include "util/spawn.h"
 
@@ -243,7 +244,7 @@ bool db_text_save(const char *path, const char *data, size_t n)
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0)
         return false;
-    ok = db_write_fd(fd, data, n) && fsync(fd) == 0;
+    ok = db_write_fd(fd, data, n) && platform_file_sync(fd) == 0;
     if (close(fd) != 0)
         ok = false;
     if (ok && rename(tmp, path) != 0)

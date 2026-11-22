@@ -320,6 +320,21 @@ bool tgl_resolve_exact(const struct tgl_ctx *c, const char *needle,
 
 /* ── declared proof families ───────────────────────────────────────────── */
 
+/* The first n bytes of s, or fewer when s ends first, as a NUL-terminated
+ * copy. strndup(3) is not declared by every Windows CRT header set. */
+char *tgl_strndup(const char *s, size_t n)
+{
+    size_t len = 0;
+    while (len < n && s[len])
+        len++;
+    char *out = zcl_malloc(len + 1, "tgl_strndup");
+    if (!out)
+        return NULL;
+    memcpy(out, s, len);
+    out[len] = 0;
+    return out;
+}
+
 /* The text of the pair-th quoted string of a line (awk -F'"' $2 and $4). */
 char *tgl_quoted_field(const char *line, int pair)
 {
@@ -331,7 +346,7 @@ char *tgl_quoted_field(const char *line, int pair)
         p++;
     }
     e = strchr(p, '"');
-    return e ? strndup(p, (size_t)(e - p)) : NULL;
+    return e ? tgl_strndup(p, (size_t)(e - p)) : NULL;
 }
 
 static bool family_row(struct tgl_ctx *c, const char *line)

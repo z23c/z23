@@ -10,6 +10,7 @@
 #include "command/native_command.h"
 
 #include "base/safe_alloc.h"
+#include "platform/file_sync.h"
 #include "platform/path_replace.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_store.h"
@@ -331,7 +332,7 @@ static bool promote_write(const char *path, const uint8_t *bytes, size_t len)
                  : -1;
     bool ok = fd >= 0 && zcl_write_all(fd, bytes, len);
     if (fd >= 0) {
-        if (ok && fsync(fd) != 0)
+        if (ok && platform_file_sync(fd) != 0)
             ok = false;
         if (close(fd) != 0)
             ok = false;

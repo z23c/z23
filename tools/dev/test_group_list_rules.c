@@ -106,7 +106,7 @@ static bool rule_patterns(struct rules_state *st, const char *patterns,
     const char *p = patterns;
     for (;;) {
         size_t len = strcspn(p, "|");
-        char *one = strndup(p, len);
+        char *one = tgl_strndup(p, len);
         bool ok = one != NULL;
         if (ok && is_test_source_pattern(one, len))
             ok = pattern_plans(st, one, plan);

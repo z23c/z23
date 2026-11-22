@@ -25,6 +25,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/temp_directory.h"
 #include "util/log_macros.h"
 #include "util/spawn.h"
 
@@ -250,8 +251,8 @@ static bool pt_tmp_make(struct pt_run *run)
     if (pt_git(run, false, args, gitdir, sizeof(gitdir)) != 0)
         PT_INTERNAL(run, "TMPDIR_FAILED", "could not locate the git directory");
     pt_trim(gitdir);
-    n = snprintf(run->tmp, sizeof(run->tmp), "%s/z23-port-table-XXXXXX", gitdir);
-    if (n < 0 || (size_t)n >= sizeof(run->tmp) || !mkdtemp(run->tmp))
+    if (!platform_temp_directory_create_under(gitdir, "z23-port-table-", run->tmp,
+                                              sizeof(run->tmp)))
         PT_INTERNAL(run, "TMPDIR_FAILED", "could not create a private temp dir");
     run->tmp_made = true;
     n = snprintf(run->index, sizeof(run->index), "%s/index", run->tmp);

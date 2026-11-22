@@ -25,6 +25,14 @@
 #include <unistd.h>
 #endif
 
+#if defined(_WIN32)
+#include <io.h>
+/* <unistd.h> supplies this on POSIX. */
+#ifndef STDERR_FILENO
+#define STDERR_FILENO 2
+#endif
+#endif
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
@@ -34,7 +42,11 @@ static void pba_write_all(int fd, const char *text, size_t n)
     if (fd < 0)
         fd = STDERR_FILENO;
     while (n > 0) {
+#if defined(_WIN32)
+        ssize_t w = _write(fd, text, (unsigned int)(n > 0x7fffffffu ? 0x7fffffffu : n));
+#else
         ssize_t w = write(fd, text, n);
+#endif
         if (w < 0) {
             if (errno == EINTR)
                 continue;
