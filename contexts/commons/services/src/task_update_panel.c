@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0
  * purpose: the native Try, Keep and Go back user actions. */
 #include "services/task_list.h"
+#include "services/package_resident.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -32,6 +33,25 @@ static struct zcl_result tup_ready(struct task_list *list, uint32_t action)
     return ZCL_OK;
 }
 
+static struct zcl_result tup_go_back(struct task_list *list)
+{
+    struct task_update *update = list->update;
+    struct package_resident_store store = {0};
+    struct package_resident_record record = {0};
+    struct zcl_result result = package_resident_store_open_app(&store, update->directory, update->app);
+    if (result.ok) result = package_resident_record_read(&store, &record);
+    struct zcl_result closed = package_resident_store_close(&store);
+    if (result.ok && !closed.ok) result = closed;
+    if (!result.ok) return result;
+    if (!record.previous.package_root[0]) {
+        (void)snprintf(update->message, sizeof(update->message), "No earlier program is available to go back to yet.");
+        return ZCL_OK;
+    }
+    list->permission = 2;
+    update->offer_locked = true;
+    return ZCL_OK;
+}
+
 struct zcl_result task_update_panel_action(struct task_list *list, uint32_t action)
 {
     struct task_update *update = list->update;
@@ -56,7 +76,7 @@ struct zcl_result task_update_panel_action(struct task_list *list, uint32_t acti
                 return ZCL_ERR(-1, "No update is waiting. Ask your AI to offer an installed update, then reopen Updates.");
             list->permission = 1; update->offer_locked = true;
         }
-        if (action == 1) { list->permission = 2; update->offer_locked = true; }
+        if (action == 1) return tup_go_back(list);
         if (action == 2) list->updates = false;
         if (action == 3) return task_update_discard(update);
     }

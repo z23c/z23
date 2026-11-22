@@ -1083,6 +1083,9 @@ static int rlc_task_panel(struct task_update *update, struct task_editor *editor
     list.update = update;
     list.menu = true;
     RLC_CHECK("task updates: native menu opens Updates", task_list_action(&list, 3).ok && list.updates);
+    RLC_CHECK("task updates: first program has no rollback consent or execution",
+        task_list_action(&list, 1).ok && !list.permission && !update->pending &&
+        !update->offer_locked && strstr(update->message, "No earlier program"));
     RLC_CHECK("task updates: Try asks permission without execution", task_list_action(&list, 0).ok && list.permission == 1 && !update->pending);
     struct zcl_present_model_v1 model;
     RLC_CHECK("task updates: permission is visible", task_list_model(&list, &model).ok &&
@@ -1145,7 +1148,14 @@ static int rlc_task_return(const struct rlc_task_session *session)
     RLC_CHECK("task journey: reopen exact data plus undo", package_resident_store_open_app(session->store, session->base, "contract/task-journey").ok &&
         task_document_read(session->store, session->document).ok && rlc_task_equal(session->document, session->expected) &&
         task_update_open(session->update, session->base, session->store->app, session->verifier, NULL).ok && task_update_refresh(session->update).ok && rlc_task_wait(session->update));
-    RLC_CHECK("task journey: prior program understands CURRENT data before Go back", task_update_try(session->update, true, true).ok && rlc_task_wait(session->update));
+    struct task_editor editor;
+    bool editor_open = task_editor_open(&editor, session->base, session->store->app).ok;
+    struct task_list list;
+    if (editor_open) { task_list_init(&list, &editor); list.update = session->update; list.updates = true; }
+    RLC_CHECK("task journey: previous program requires consent before rollback", editor_open &&
+        task_list_action(&list, 1).ok && list.permission == 2 && !session->update->pending &&
+        task_list_action(&list, 0).ok && rlc_task_wait(session->update));
+    if (editor_open) RLC_CHECK("task journey: rollback editor closes", task_editor_finish(&editor).ok);
     struct package_resident_record record;
     RLC_CHECK("task journey: exact prior artifact restored without restoring old data", package_resident_record_read(session->store, &record).ok &&
         strcmp(record.current.artifact_sha3, session->n->sha3) == 0 && task_document_read(session->store, session->document).ok && rlc_task_equal(session->document, session->expected));
