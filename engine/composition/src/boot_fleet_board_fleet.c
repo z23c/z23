@@ -143,13 +143,12 @@ static void board_unlock(void)
     zcl_mutex_unlock(&g_lock);
 }
 
-#define BOARD_OBSERVATIONS 64u
 struct board_observation_entry {
     uint8_t peer[32], post[32];
     bool ingest;
     struct boot_fleet_board_observation value;
 };
-static struct board_observation_entry g_observations[BOARD_OBSERVATIONS];
+static struct board_observation_entry g_observations[FLEET_BOARD_OBSERVATION_CAPACITY];
 static uint64_t g_observation_sequence;
 
 static void board_observe(const uint8_t peer[32], const uint8_t *post,
@@ -160,7 +159,7 @@ static void board_observe(const uint8_t peer[32], const uint8_t *post,
 {
     board_lock();
     uint64_t seq = ++g_observation_sequence;
-    struct board_observation_entry *e = &g_observations[(seq - 1u) % BOARD_OBSERVATIONS];
+    struct board_observation_entry *e = &g_observations[(seq - 1u) % FLEET_BOARD_OBSERVATION_CAPACITY];
     memset(e, 0, sizeof *e);
     memcpy(e->peer, peer, 32);
     e->ingest = post != NULL;
@@ -180,7 +179,7 @@ void boot_fleet_board_observe_query(const uint8_t peer[32], const uint8_t post[3
     memset(attempt, 0, sizeof *attempt);
     memset(ingest, 0, sizeof *ingest);
     board_lock();
-    for (size_t i = 0; i < BOARD_OBSERVATIONS; i++) {
+    for (size_t i = 0; i < FLEET_BOARD_OBSERVATION_CAPACITY; i++) {
         const struct board_observation_entry *e = &g_observations[i];
         if (!e->value.found || memcmp(e->peer, peer, 32)) continue;
         struct boot_fleet_board_observation *out = e->ingest ? ingest : attempt;

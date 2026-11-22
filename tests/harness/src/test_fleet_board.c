@@ -10597,6 +10597,29 @@ static bool fbw_status_action(struct fbw *w, const uint8_t peer[32],
     return ok;
 }
 
+/* An absent observation describes bounded process memory, not delivery. */
+static bool fbw_status_missing(struct fbw *w, const uint8_t peer[32],
+                               const uint8_t post[32])
+{
+    struct json_value result;
+    json_init(&result);
+    bool ok = fbw_status_exact(w, peer, post, &result);
+    const struct json_value *ingest = json_get(&result, "post_ingest");
+    const char *scope = json_get_str(json_get(ingest, "retention"));
+    const char *action = json_get_str(json_get(ingest, "next_action"));
+    const char *explanation = json_get_str(json_get(ingest, "explanation"));
+    const char *reason = json_get_str(json_get(ingest, "reason"));
+    ok = ok && reason && strcmp(reason, "not_observed_or_evicted") == 0 &&
+         explanation && strstr(explanation, "Delivery history is unknown") &&
+         strstr(explanation, "fleet_board op=show") &&
+         ingest && !json_get_bool(json_get(ingest, "observed")) &&
+         json_get_int(json_get(ingest, "capacity")) == FLEET_BOARD_OBSERVATION_CAPACITY && scope &&
+         strcmp(scope, "shared_process_local_volatile") == 0 && action &&
+         strcmp(action, "inspect_exact_durable_post") == 0;
+    json_free(&result);
+    return ok;
+}
+
 /* A link can disappear after a valid DATA frame but before the answer CLOSE.
  * The receiver must not treat that partial stream as a delivered page. */
 static int test_fleet_board_midstream_disconnect(void)
@@ -11024,12 +11047,17 @@ static int test_fleet_board_fleet_carriage_gap_free(void)
         boot_fleet_board_fleet_test_bind(&w.a);
         ASSERT(fbw_post(&w.a, 20, FLEET_BOARD_SCOPE_FLEET, "first in 2300",
                         2300, 3600, 2300, &first[0]));
+        ASSERT(fbw_status_missing(&w, w.box_a, first[0].id));
         ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
         struct boot_fleet_board_observation attempt, ingest;
         boot_fleet_board_observe_query(w.box_a, first[0].id, &attempt, &ingest);
         ASSERT(attempt.found && ingest.found && ingest.stored && ingest.epoch_set);
         ASSERT_EQ(ingest.result, FLEET_BOARD_OK);
         ASSERT(fbw_status_observations(&w, first[0].id));
+        for (size_t i = 0; i < FLEET_BOARD_OBSERVATION_CAPACITY; i++)
+            ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        ASSERT(fbw_status_missing(&w, w.box_a, first[0].id));
+        ASSERT(db_fleet_board_have(&w.b, first[0].id));
         boot_fleet_board_observe_query(w.box_b, first[0].id, &attempt, &ingest);
         ASSERT(!ingest.found);
         uint8_t other_post[32];

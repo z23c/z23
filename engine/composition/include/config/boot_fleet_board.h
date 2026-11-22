@@ -348,6 +348,8 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 #define FLEET_BOARD_FLEET_MSG_ANSWER 2u
 #define FLEET_BOARD_FLEET_EPOCH_BYTES 16u
 
+#define FLEET_BOARD_OBSERVATION_CAPACITY 64u
+
 /* Bounded, volatile observations; sequence describes observation order only.
  * The peer identifier is the paired peer's master public key. */
 enum boot_fleet_board_observation_phase {

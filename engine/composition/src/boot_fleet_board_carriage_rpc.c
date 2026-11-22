@@ -383,6 +383,12 @@ bool fb_status_observation(struct json_value *result, const char *key,
     json_set_object(&o);
     bool ok = json_push_kv_bool(&o, "observed", v->found);
     if (v->found) ok = ok && fb_observation_fields(&o, v);
+    else if (strcmp(key, "post_ingest") == 0)
+        ok = ok && json_push_kv_str(&o, "retention", "shared_process_local_volatile") &&
+             json_push_kv_int(&o, "capacity", FLEET_BOARD_OBSERVATION_CAPACITY) &&
+             json_push_kv_str(&o, "reason", "not_observed_or_evicted") &&
+             json_push_kv_str(&o, "explanation", "Other traffic can evict this observation, and a restart clears it. Delivery history is unknown. Check this post ID with fleet_board op=show on the receiver.") &&
+             json_push_kv_str(&o, "next_action", "inspect_exact_durable_post");
     ok = ok && json_push_kv(result, key, &o);
     json_free(&o);
     return ok;
