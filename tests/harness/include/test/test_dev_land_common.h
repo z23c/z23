@@ -326,6 +326,7 @@ bool dlx_pc_outcomes(const char *rows);
 void dlx_pc_row(char *out, size_t cap, int seq, const char *state,
                        const char *dim, int days_ago, const char *detail);
 bool dlx_pc_depfile_case(int mode);
+int dlx_case_precheck_late(void);
 bool dlx_pc_history_ship_pass(void);
 bool dlx_pc_history_ship_refusal(const char *exit_code, bool ready);
 bool dlx_pc_history_ignored(const char *tag, int days_ago,

@@ -46,6 +46,26 @@
 #define PC_DEPFILE_BIN "build/bin/depfile-scope-launch"
 #define PC_MODEL_SQL_GATE "check-model-sql-literals"
 
+/* Always-on gates beside the core list and the ledger's learned set: the two
+ * costliest late lint failures (check-capability-closure 7 and
+ * check-no-new-bash 4 of the 26 lint-dimension failed land rows in the last
+ * 400). They are added in pc_run_gates, so zcl_land_precheck_gate_set stays
+ * the pure core-plus-learned set. no-new-bash is source-only (about 0.3 s);
+ * capability-closure grades compiled objects and exits PC_EXIT_UNPROVEN when
+ * the lane has none, which is reported under precheck_skipped with the
+ * command that proves it. */
+static const char *const k_pc_late[] = {
+    "check-no-new-bash",
+    "check-capability-closure",
+};
+
+/* The one command that decides a gate a lane could not (shown when skipped). */
+static const struct {
+    const char *gate, *command;
+} k_pc_prove[] = {
+    {"check-capability-closure", "make check-capability-closure"},
+};
+
 static const char *const k_pc_core[] = {
     "check-file-size-ceiling", "check-cyclomatic-complexity",
     "check-core-seal", "check-arm-symbol-single",
@@ -67,6 +87,15 @@ static const struct {
     {"check-file-size-ceiling", "a production C file passed the 1500-line "
                                 "ceiling or grew past its baseline; split it "
                                 "along a seam, never raise the baseline"},
+    {"check-no-new-bash", "the shell line count passed its budget or a shell "
+                          "file is new; write the tool in C23, never raise "
+                          "the budget; reproduce: build/bin/z23-lint "
+                          "check-no-new-bash"},
+    {"check-capability-closure", "a source reaches a capability class its "
+                                 "capabilities.def row does not declare, or "
+                                 "an external symbol is unclassified; declare "
+                                 "or remove the reach; reproduce: make "
+                                 "check-capability-closure"},
 };
 
 /* The file-size gate is a make target over its own binary, not a z23-lint
@@ -649,13 +678,17 @@ static const char *pc_unproven_line(const char *out)
  * the reason but never the skip. */
 static void pc_note_unproven(struct pc_run *r, const char *gate)
 {
-    char line[160];
+    char line[320];
     const char *reason = pc_unproven_line(r->out);
     size_t used = strlen(r->unproven), n = strcspn(reason, "\r\n");
-    if (n >= sizeof(line))
-        n = sizeof(line) - 1;
+    if (n >= 160)
+        n = 159;
     memcpy(line, reason, n);
     line[n] = '\0';
+    for (size_t i = 0; i < sizeof(k_pc_prove) / sizeof(k_pc_prove[0]); i++)
+        if (strcmp(k_pc_prove[i].gate, gate) == 0)
+            (void)snprintf(line + n, sizeof(line) - n, " (not run; run: %s)",
+                           k_pc_prove[i].command);
     if (used > 0 && used + 2 < sizeof(r->unproven))
         (void)snprintf(r->unproven + used, sizeof(r->unproven) - used, "; ");
     used = strlen(r->unproven);
@@ -1287,6 +1320,8 @@ static bool pc_run_gates(const char *leaf, const char *wt,
                                pc_now(), g);
     if (pc_model_sql_needed(wt))
         pc_gate_add(g, PC_MODEL_SQL_GATE, strlen(PC_MODEL_SQL_GATE));
+    for (size_t i = 0; i < sizeof(k_pc_late) / sizeof(k_pc_late[0]); i++)
+        pc_gate_add(g, k_pc_late[i], strlen(k_pc_late[i]));
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
     int64_t budget_ms = pc_budget_ms();
 #if defined(ZCL_TESTING)

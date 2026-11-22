@@ -1263,6 +1263,7 @@ int test_dev_land_queued_precheck_cases(void)
     failures += test_dev_land_queued_deadline_left();
     failures += test_dev_land_queued_chain();
     failures += test_dev_land_queued_merge_tip();
+    failures += dlx_case_precheck_late();
     return failures;
 }
 

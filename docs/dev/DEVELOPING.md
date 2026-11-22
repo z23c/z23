@@ -1804,6 +1804,13 @@ devbuild --wait build/bin/z23-dev dev land submit --worktree=<path>
 devbuild --wait build/bin/z23-dev dev land drive --seq=N
 ```
 
+Before queuing, `dev land submit` and `dev land send` run a cheap local
+precheck of the lane: file size ceiling, cyclomatic complexity, core seal,
+KPI floor, describe budget, hardening ratchet, the shell line budget
+(`check-no-new-bash`) and capability closure (`check-capability-closure`, which
+needs the lane's compiled objects and is otherwise reported under
+`precheck_skipped` with the command to run). Each refusal names the gate and the
+command that reproduces it.
 The land proof performs the full lint and affected tests before publication.
 Do not add `--qualify` to the ordinary focused-checks workflow: it repeats
 full lint and affected tests in the lane before the land proof runs them.

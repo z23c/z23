@@ -1996,7 +1996,7 @@ bool dlx_pc_clean_lane_queued(void)
                     "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
                     "check-core-seal\ncheck-arm-symbol-single\n"
                     "check-kpi-floor\ncheck-describe-budget\n"
-                    "check-hardening-ratchet\n"))
+                    "check-hardening-ratchet\ncheck-no-new-bash\ncheck-capability-closure\n"))
         return false;
     dlx_pc_submit(&c, &rig, NULL, NULL);
     ok = dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1 &&

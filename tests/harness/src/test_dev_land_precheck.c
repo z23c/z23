@@ -782,7 +782,8 @@ static bool dlx_pc_bash_order_log(const struct dlx_rig *rig, const char *detail,
     log[n] = '\0';
     const char *bash = strstr(log, "check-no-new-bash\n");
     const char *slow[] = {"check-windows-cross-syntax", "check-zcc-cache"};
-    ok = ok && (!!bash == (strstr(detail, "check-no-new-bash") != NULL));
+    /* The submit precheck always runs the shell budget gate now. */
+    ok = ok && bash != NULL;
     for (size_t i = 0; i < sizeof(slow) / sizeof(slow[0]); i++) {
         const char *p = strstr(log, slow[i]);
         bool selected = strstr(detail, slow[i]) != NULL;
