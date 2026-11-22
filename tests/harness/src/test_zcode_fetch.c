@@ -664,6 +664,21 @@ static const struct json_value *zf_possession(const struct zf_cmd *c)
 
 static int zf_peers_mode;
 static unsigned zf_peers_calls;
+static void zf_peers_offer_mode(char *body, int mode)
+{
+    if (!body) return;
+    if (mode == 6) {
+        char *field = strstr(body, "\"offer_expires_at\":0,");
+        if (field) {
+            size_t n = strlen("\"offer_expires_at\":0,");
+            memmove(field, field + n, strlen(field + n) + 1);
+        }
+    }
+    if (mode == 7) {
+        char *expiry = strstr(body, "\"offer_expires_at\":");
+        if (expiry) expiry[strlen("\"offer_expires_at\":")] = '5';
+    }
+}
 static char *zf_peers_rpc_hook(const char *method, const char *params)
 {
     static const char root[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -674,6 +689,7 @@ static char *zf_peers_rpc_hook(const char *method, const char *params)
     char *body = zcl_strdup("{\"ok\":true,\"data\":{\"package_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"live\":true,\"peer_count\":1,\"peers_truncated\":false,\"peers\":[{\"peer\":42,\"session_key\":\"key\",\"tier\":\"guest\",\"inflight\":1,\"offer_expires_at\":0,\"allowance_exhausted\":false,\"offence_total\":0,\"transfer\":{\"verified_bytes_served\":5,\"verified_bytes_fetched\":7},\"verified_bytes_served\":5,\"verified_bytes_received\":7}],\"possession\":{\"observed\":true,\"tracked\":true,\"complete\":true,\"pinned\":true,\"public_serveable\":true,\"would_serve\":true,\"public_shape\":\"blob\",\"serve_rule\":\"blob\",\"present_bytes\":10,\"total_bytes\":10}}}", "test.zcode_fetch.peers");
     if (body && zf_peers_mode == 4) *strstr(body, root) = 'b';
     if (body && zf_peers_mode == 5) *strstr(body, "inflight") = 'x';
+    zf_peers_offer_mode(body, zf_peers_mode);
     return body;
 }
 
@@ -704,22 +720,29 @@ static int zf_t_peers_resident(void)
 {
     int failures = 0;
     TEST("zcode package peers uses resident exact-root observation") {
-        struct zf_cmd c;
-        json_init(&c.input); json_set_object(&c.input);
-        memset(&c.request, 0, sizeof(c.request)); c.request.input = &c.input;
-        zcl_command_reply_init(&c.reply, "zcl.zcode_test.v1");
-        ASSERT(json_push_kv_str(&c.input, "root", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-        node_rpc_client_set_test_hook(zf_peers_rpc_hook);
-        zcl_native_handle_zcode_package_peers(&c.request, &c.reply);
-        node_rpc_client_set_test_hook(NULL);
-        ASSERT(c.reply.exit_code == ZCL_COMMAND_EXIT_OK);
-        ASSERT(json_get_bool(json_get(&c.reply.data, "live")));
-        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data, "peers"), 0), "peer")), 42);
-        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data, "peers"), 0), "offer_expires_at")), 0);
-        ASSERT(json_get_bool(json_get(zf_possession(&c), "would_serve")));
-        zf_cmd_free(&c);
+        static const int modes[] = {0, 6, 7};
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+            zf_peers_mode = modes[i];
+            struct zf_cmd c;
+            json_init(&c.input); json_set_object(&c.input);
+            memset(&c.request, 0, sizeof(c.request)); c.request.input = &c.input;
+            zcl_command_reply_init(&c.reply, "zcl.zcode_test.v1");
+            ASSERT(json_push_kv_str(&c.input, "root", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+            node_rpc_client_set_test_hook(zf_peers_rpc_hook);
+            zcl_native_handle_zcode_package_peers(&c.request, &c.reply);
+            node_rpc_client_set_test_hook(NULL);
+            ASSERT(c.reply.exit_code == ZCL_COMMAND_EXIT_OK);
+            ASSERT(json_get_bool(json_get(&c.reply.data, "live")));
+            const struct json_value *peer = json_at(json_get(&c.reply.data, "peers"), 0);
+            ASSERT_EQ(json_get_int(json_get(peer, "peer")), 42);
+            if (zf_peers_mode == 6) ASSERT(json_get(peer, "offer_expires_at") == NULL);
+            else ASSERT_EQ(json_get_int(json_get(peer, "offer_expires_at")), zf_peers_mode == 7 ? 5 : 0);
+            ASSERT(json_get_bool(json_get(zf_possession(&c), "would_serve")));
+            zf_cmd_free(&c);
+        }
         PASS();
     } _test_next:;
+    zf_peers_mode = 0;
     node_rpc_client_set_test_hook(NULL);
     return failures;
 }
