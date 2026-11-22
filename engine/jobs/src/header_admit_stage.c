@@ -757,7 +757,7 @@ static void header_admit_stage_lock_main(struct main_state *ms)
 }
 
 /* Never wait for progress-store while holding main: another stage can
- * hold progress-store while waiting for main. The caller retries on idle. */
+ * hold progress-store while waiting for main. Steps return idle; drains retry. */
 static bool header_admit_lock_pair(struct main_state *ms)
 {
     header_admit_stage_lock_main(ms);
@@ -787,7 +787,7 @@ int header_admit_stage_drain(int max_steps)
 {
     struct main_state *ms = g_ms;
     if (max_steps <= 0 || !ms || !g_stage) return 0;
-    if (!header_admit_lock_pair(ms)) return 0;
+    while (!header_admit_lock_pair(ms)) platform_sleep_ms(1);
     int advanced = header_admit_owned_stage_drain(max_steps);
     progress_store_tx_unlock();
     zcl_mutex_unlock(&ms->cs_main);

@@ -199,7 +199,7 @@ ZCL_MODULE_CAPABILITY("engine/jobs/src/body_persist_log_store.c", CAP_FS_READ|CA
 ZCL_MODULE_CAPABILITY("engine/jobs/src/body_persist_stage.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/created_outputs_index.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/header_admit_forward_rewind.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/jobs/src/header_admit_stage.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/jobs/src/header_admit_stage.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "pause between contended drain lock attempts")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/proof_validate_log_store.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/proof_validate_null_hash_rearm.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/proof_validate_stage.c", CAP_FS_READ|CAP_FS_WRITE, "")

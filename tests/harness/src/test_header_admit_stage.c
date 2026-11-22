@@ -346,9 +346,18 @@ static int ha_deferred_context_case(void)
 struct ha_progress_busy {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
-    bool done, drain;
+    bool attempted, done, drain;
     int result;
 };
+
+static void ha_observe_progress_attempt(void *arg)
+{
+    struct ha_progress_busy *c = arg;
+    pthread_mutex_lock(&c->mutex);
+    c->attempted = true;
+    pthread_cond_broadcast(&c->changed);
+    pthread_mutex_unlock(&c->mutex);
+}
 
 static void *ha_progress_busy_worker(void *arg)
 {
@@ -362,11 +371,22 @@ static void *ha_progress_busy_worker(void *arg)
     return NULL;
 }
 
-static bool ha_progress_busy_yields(struct main_state *ms, bool drain)
+static bool ha_main_becomes_available(struct main_state *ms, bool attempted)
+{
+    bool main_free = false;
+    while (attempted && !main_free) {
+        main_free = zcl_mutex_trylock(&ms->cs_main);
+        if (main_free) zcl_mutex_unlock(&ms->cs_main);
+    }
+    return main_free;
+}
+
+static bool ha_progress_busy_behavior(struct main_state *ms, bool drain)
 {
     struct ha_progress_busy c = {.mutex = PTHREAD_MUTEX_INITIALIZER,
                                  .changed = PTHREAD_COND_INITIALIZER, .drain = drain};
     progress_store_tx_lock();
+    header_admit_stage_set_main_hook_for_testing(ha_observe_progress_attempt, &c);
     pthread_t worker;
     bool started = pthread_create(&worker, NULL, ha_progress_busy_worker, &c) == 0;
     struct timespec deadline;
@@ -374,17 +394,25 @@ static bool ha_progress_busy_yields(struct main_state *ms, bool drain)
     deadline.tv_sec += 5;
     pthread_mutex_lock(&c.mutex);
     int rc = 0;
-    while (started && !c.done && rc == 0)
+    while (started && !c.attempted && rc == 0)
         rc = pthread_cond_timedwait(&c.changed, &c.mutex, &deadline);
-    bool done = c.done;
+    bool attempted = c.attempted;
     pthread_mutex_unlock(&c.mutex);
-    bool main_free = done && zcl_mutex_trylock(&ms->cs_main);
-    if (main_free) zcl_mutex_unlock(&ms->cs_main);
+    bool done = false;
+    if (!drain) {
+        pthread_mutex_lock(&c.mutex);
+        while (started && !c.done) pthread_cond_wait(&c.changed, &c.mutex);
+        done = c.done;
+        pthread_mutex_unlock(&c.mutex);
+    }
+    bool main_free = ha_main_becomes_available(ms, attempted);
     progress_store_tx_unlock();
     if (started) pthread_join(worker, NULL);
+    header_admit_stage_set_main_hook_for_testing(NULL, NULL);
     pthread_cond_destroy(&c.changed);
     pthread_mutex_destroy(&c.mutex);
-    return started && done && main_free && c.result == (drain ? 0 : (int)JOB_IDLE);
+    return started && attempted && main_free &&
+        (drain ? c.result == 5 : (done && c.result == (int)JOB_IDLE));
 }
 
 static int ha_drain_five_block_chain_case(void)
@@ -408,12 +436,13 @@ static int ha_drain_five_block_chain_case(void)
     HA_CHECK("init is idempotent (same ms)",
              header_admit_stage_init(&ms));
 
-    HA_CHECK("contended step yields and releases main", ha_progress_busy_yields(&ms, false));
-    HA_CHECK("contended drain yields and releases main", ha_progress_busy_yields(&ms, true));
-    HA_CHECK("contended calls leave cursor unchanged", header_admit_stage_cursor() == 0);
+    HA_CHECK("contended step yields and releases main", ha_progress_busy_behavior(&ms, false));
+    HA_CHECK("contended drain releases main, waits, and advances all five",
+             ha_progress_busy_behavior(&ms, true));
+    HA_CHECK("contended drain advances the cursor to 5", header_admit_stage_cursor() == 5);
     uint64_t audits_before = header_admit_stage_reorg_audit_total();
     int advanced = header_admit_stage_drain(100);
-    HA_CHECK("drain advances 5 times", advanced == 5);
+    HA_CHECK("subsequent drain is idle", advanced == 0);
     HA_CHECK("one bounded reorg audit per drain batch",
              header_admit_stage_reorg_audit_total() == audits_before + 1);
     HA_CHECK("cursor reaches 5",
