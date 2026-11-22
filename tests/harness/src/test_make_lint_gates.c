@@ -2110,6 +2110,29 @@ static int t_agent_verify_preflight(void)
     return bad;
 }
 
+/* The wrapper must not replace values inherited by the recursive build. */
+static int t_agent_verify_inherited_inputs(void)
+{
+    static const char script[] =
+        "set -eu; cd \"$2\"; mkdir -p tools/dev\n"
+        "sed -n '/^override ZCL_AGENT_VERIFY_WRAPPER_ONLY :=/p' \"$1/Makefile\" > Makefile\n"
+        "printf 'ZCL_ZERO_SHA256 := zero\\n' >> Makefile\n"
+        "sed -n '/^ifneq ($(origin BUILD_SOURCE_RECORD),command line)/,/^BUILD_SOURCE_ID :=/{ /^BUILD_SOURCE_ID :=/d; p; }' \"$1/Makefile\" >> Makefile\n"
+        "sed -n '/^ifeq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)$/,/^# Frozen restart bases/{ /^# Frozen restart bases/d; p; }' \"$1/Makefile\" >> Makefile\n"
+        "printf '#!/bin/sh\\nprintf \"real-record 1 mutation\\\\n\"\\n' > tools/dev/source-identity.sh; chmod +x tools/dev/source-identity.sh\n"
+        "printf 'agent-verify:\\n\\t@$(MAKE) --no-print-directory child\\nchild:\\n\\t@echo \"$(BUILD_SOURCE_RECORD)|$(ZCL_DEV_LINKER)\"\\n' >> Makefile\n"
+        "for opt in normal environment; do\n"
+        "  flag=; [ \"$opt\" = normal ] || flag=-e\n"
+        "  BUILD_SOURCE_RECORD='real-record 1 mutation' ZCL_DEV_LINKER=caller-linker make $flag --no-print-directory agent-verify > result\n"
+        "  grep -Fxq 'real-record 1 mutation|caller-linker' result\n"
+        "done\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "inherited_inputs");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_agent_verify_base_override(void)
 {
     static const char setup[] =
@@ -2337,7 +2360,7 @@ int test_make_lint_gates_realroot(void)
     if (lint_resolve_real_root(real_root, sizeof(real_root)) != 0)
         return 1;
     printf("\n=== make_lint_gates real-worktree tests ===\n");
-    return t_worktree_prime_historical_evidence() + t_agent_verify_universal_closure() + t_agent_verify_size_preflight() + t_agent_verify_preflight() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() + t_wcs_supplied_srcs() +
+    return t_worktree_prime_historical_evidence() + t_agent_verify_universal_closure() + t_agent_verify_size_preflight() + t_agent_verify_preflight() + t_agent_verify_inherited_inputs() + t_agent_verify_base_override() + t_agent_verify_inventory_once() + t_agent_verify_empty_exact() + t_shell_host_assumptions_recipe() + t_lint_fast_tor_graph() + t_tor_ready_before_link() + t_tor_waits_for_vendor() + t_ci_install_jobserver() + t_wcs_supplied_srcs() +
            lint_run_owned(LINT_OWNER_REALROOT);
 }
 

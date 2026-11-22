@@ -298,10 +298,12 @@ ZCL_USE_CCACHE ?= 1
 # to install, and fall back to a host cache only if the in-tree one cannot be
 # built here. This is a parse-time $(shell) because $(CC) is fixed before the
 # first recipe runs; see tools/dev/zcc_bootstrap.sh for why and what it costs.
-ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_AGENT_VERIFY_WRAPPER_ONLY)" != "1" ] && [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ] && [ "$(ZCL_ANDROID_STANDALONE_ONLY)" != "1" ]; then \
+ifneq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)
+ZCL_CCACHE_BIN := $(shell if [ "$(ZCL_USE_CCACHE)" != "0" ] && [ "$(ZCL_WINDOWS_STANDALONE_ONLY)" != "1" ] && [ "$(ZCL_ANDROID_STANDALONE_ONLY)" != "1" ]; then \
                               $(CURDIR)/tools/dev/zcc_bootstrap.sh 2>/dev/null \
                               || command -v sccache 2>/dev/null \
                               || command -v ccache 2>/dev/null; fi)
+endif
 ifneq ($(ZCL_CCACHE_BIN),)
 ifeq ($(filter zcc sccache ccache,$(notdir $(firstword $(CC)))),)
 CC := $(ZCL_CCACHE_BIN) $(CC)
@@ -758,9 +760,14 @@ BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
 else ifeq ($(ZCL_GENERATED_HEADER_ONLY),1)
 # Header-only recipes never stamp or publish a node artifact.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
-else ifneq ($(filter 1,$(ZCL_TIMINGS_HELPER_ONLY) $(ZCL_AGENT_VERIFY_WRAPPER_ONLY)),)
-# These standalone helpers do not consume this record.
+else ifeq ($(ZCL_TIMINGS_HELPER_ONLY),1)
+# The standalone timings helper does not consume this record.
 BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
+else ifeq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)
+# Preserve an inherited value for children; this wrapper does not consume it.
+ifeq ($(origin BUILD_SOURCE_RECORD),undefined)
+BUILD_SOURCE_RECORD := $(ZCL_ZERO_SHA256) 1 $(ZCL_ZERO_SHA256)
+endif
 else
 BUILD_SOURCE_RECORD := $(shell ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh capture-record 2>/dev/null || echo unknown 0 unknown)
 endif
@@ -1728,7 +1735,9 @@ BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
 ZCL_DEV_HOT_OPT ?= -O2
 ifeq ($(ZCL_AGENT_VERIFY_WRAPPER_ONLY),1)
+ifeq ($(origin ZCL_DEV_LINKER),undefined)
 ZCL_DEV_LINKER :=
+endif
 else
 ZCL_DEV_LINKER ?= $(eval ZCL_DEV_LINKER := $(shell tools/dev/dev-linker-select.sh))$(ZCL_DEV_LINKER)
 endif
