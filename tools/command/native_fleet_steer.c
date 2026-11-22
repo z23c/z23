@@ -6263,15 +6263,23 @@ static void fmc_evidence_board(const struct zcl_command_request *req,
     zcl_native_handle_fleet_board_show(&sub.request, &sub.reply);
     sub.ran = true;
     if (!fmc_sub_ok(&sub)) {
-        if (sub.reply.error.code[0] &&
-            strstr(sub.reply.error.code, "NODE_UNAVAILABLE"))
-            fmc_fail(reply, "EVIDENCE_UNAVAILABLE",
-                     "no local node answered the board call",
-                     "fleet.board.show");
-        else
+        if (strcmp(sub.reply.error.code, "NOT_FOUND") == 0)
             fmc_fail(reply, "EVIDENCE_NOT_FOUND",
                      "this node holds no post with that id",
                      "fleet.board.show");
+        else {
+            const char *cause = "fleet.board.show";
+            const char *code = sub.reply.error.code;
+            if (strcmp(code, "NODE_UNAVAILABLE") == 0 ||
+                strcmp(code, "BOARD_READ_FAILED") == 0 ||
+                strcmp(code, "BOARD_RPC_UNSUPPORTED") == 0)
+                cause = code;
+            fmc_fail(reply, "EVIDENCE_UNAVAILABLE",
+                     "the board lookup could not establish whether the post is held",
+                     cause);
+            (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                           "inspect the selected node and board storage logs before retrying");
+        }
         fmc_sub_end(&sub);
         return;
     }

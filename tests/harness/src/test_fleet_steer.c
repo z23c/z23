@@ -2961,6 +2961,8 @@ static int fmx_t_board_absent(void)
         ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
         ASSERT(!fmx_ok(&e));
         ASSERT_STR_EQ(e.reply.error.code, "EVIDENCE_UNAVAILABLE");
+        ASSERT_STR_EQ(e.reply.error.evidence, "NODE_UNAVAILABLE");
+        ASSERT(strstr(e.reply.error.next_action, "inspect") != NULL);
         fmx_end(&e);
         fmx_restore();
         PASS();
@@ -7061,6 +7063,43 @@ static char *fmx_board_body_rpc(const char *method, const char *params)
     return strcmp(method, "fleet_board") ? NULL : strdup(g_fmx_board_body);
 }
 
+static int fmx_t_board_evidence_failures(void)
+{
+    int failures = 0;
+    static const struct { const char *body, *want, *cause; } cases[] = {
+        {"{\"ok\":false,\"code\":\"NOT_FOUND\"}", "EVIDENCE_NOT_FOUND", "fleet.board.show"},
+        {"{\"ok\":false,\"code\":\"BOARD_READ_FAILED\"}", "EVIDENCE_UNAVAILABLE", "BOARD_READ_FAILED"},
+        {"{\"ok\":false,\"code\":\"BOARD_RPC_UNSUPPORTED\"}", "EVIDENCE_UNAVAILABLE", "BOARD_RPC_UNSUPPORTED"},
+        {"{\"ok\":false,\"code\":\"ACCESS_DENIED\"}", "EVIDENCE_UNAVAILABLE", "fleet.board.show"},
+        {"{\"ok\":false,\"code\":\"NOT_FOUND_EXTRA\"}", "EVIDENCE_UNAVAILABLE", "fleet.board.show"},
+        {"{\"ok\":false}", "EVIDENCE_UNAVAILABLE", "fleet.board.show"},
+    };
+    TEST("steer: only an exact board not found means evidence is absent") {
+        char gid[64];
+        fmx_isolate("board_evidence_failures");
+        ASSERT(fmx_mint("evidence", gid, sizeof(gid)));
+        node_rpc_client_set_test_hook(fmx_board_body_rpc);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            struct fmx_call e;
+            g_fmx_board_body = cases[i].body;
+            fmx_evidence(&e, gid, "board",
+                         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+            bool ran = fmx_run(&e, zcl_native_handle_fleet_steer_evidence);
+            bool refused = !fmx_ok(&e);
+            bool matched = strcmp(e.reply.error.code, cases[i].want) == 0;
+            bool cause = strcmp(e.reply.error.evidence, cases[i].cause) == 0;
+            bool action = strcmp(cases[i].want, "EVIDENCE_NOT_FOUND") == 0 ||
+                          strstr(e.reply.error.next_action, "inspect") != NULL;
+            fmx_end(&e);
+            ASSERT(ran && refused && matched && cause && action);
+        }
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(fmx_no_node);
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_board_refusal_reason(void)
 {
     int failures = 0;
@@ -7522,6 +7561,7 @@ int test_fleet_steer(void)
     failures += fmx_t_forward_boundary();
     failures += fmx_t_forward_fault();
     failures += fmx_t_board_deadline();
+    failures += fmx_t_board_evidence_failures();
     failures += fmx_t_board_refusal_reason();
     failures += fmx_t_board_incomplete();
     failures += fmx_t_board_cursor_fallback();
