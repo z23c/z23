@@ -569,7 +569,19 @@ The syntax sweep uses `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` and
 discovered `include` directories outside the script's explicitly pruned
 directories (plus `-I.` and `-Itools`, so `command/native_command.h` is
 findable). The file set follows the release build: a translation unit added
-to `NODE_C23_SRCS` joins the gate. When MinGW is not installed, the gate
+to `NODE_C23_SRCS` joins the gate. The gate compiler may be older than the native one (the
+Linux cross compiler can be GCC 13 while the UCRT64 toolchain is GCC 16), and GCC 14 turned
+implicit function declarations, implicit `int`, integer-to-pointer conversion
+and incompatible pointer types from warnings into errors. The gate therefore
+passes `-Werror=` for those four diagnostics so an old compiler rejects what the
+newer one rejects by default, and `--self-test` plants a TU for implicit declarations, integer-to-pointer
+conversion and incompatible pointer types.
+The two diagnostics GCC 14 added (`return-mismatch`,
+`declaration-missing-parameter-type`) are not enabled because GCC 13 refuses an
+unknown `-Werror=` name. Header sets also differ by toolchain version: a POSIX
+name the older headers lack (for example `mkdtemp`, `strndup`) fails the gate
+even where the native headers declare it, so use the portable seams under
+`platform/` rather than the POSIX call. When MinGW is not installed, the gate
 prints `SKIP` and exits 0; that is not a pass. The mandatory
 `windows-portability-acceptance`, pre-push, and hosted-CI paths
 set `ZCL_REQUIRE_MINGW=1`, so a missing compiler is a hard failure there. The

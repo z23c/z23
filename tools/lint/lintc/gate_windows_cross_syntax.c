@@ -782,6 +782,23 @@ static int wcs_setup_sources(void)
     return 0;
 }
 
+/* Diagnostics GCC 14 promoted from warnings to errors. The gate compiler can
+ * be older than the native Windows one (GCC 13 here), where each is only a
+ * warning and the TU still exits 0, so the gate enables them as errors.
+ * return-mismatch and declaration-missing-parameter-type are omitted: they
+ * are new in GCC 14, and GCC 13 rejects unknown -Werror= names outright. */
+static const char *const k_wcs_gcc14_errors[] = {
+    "-Werror=implicit-function-declaration", "-Werror=implicit-int",
+    "-Werror=int-conversion", "-Werror=incompatible-pointer-types", NULL
+};
+
+static int wcs_add_gcc14_errors(void)
+{
+    for (int i = 0; k_wcs_gcc14_errors[i]; i++)
+        if (wcs_flag_add(k_wcs_gcc14_errors[i])) return 2;
+    return 0;
+}
+
 static int wcs_setup(void)
 {
     static char api[WCS_FLAGLEN], block[WCS_LINE];
@@ -795,6 +812,7 @@ static int wcs_setup(void)
     if (wcs_flag_add("-std=c2x") || wcs_flag_add("-fsyntax-only") ||
         wcs_flag_add(api))
         return 2;
+    if (wcs_add_gcc14_errors()) return 2;
     for (int i = 0; i < nplat; i++)
         if (wcs_flag_add(plat[i])) return 2;
     if (build_include_flags() != 0) return 2;

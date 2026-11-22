@@ -957,6 +957,38 @@ static int located_classifier_probes(void)
     return 0;
 }
 
+/* The diagnostics GCC 14 and later reject by default are only warnings on an
+ * older gate compiler, which would exit 0 on them. Each body below is a TU
+ * that native Windows GCC refuses; the flag set must refuse it here too. */
+static int gcc14_error_probes(void)
+{
+    static const struct { const char *name, *body; } k[] = {
+        { "implicit-function-declaration",
+          "int zcl_gate_wincross_implicit(void)\n"
+          "{ return zcl_gate_wincross_undeclared_call(1); }\n" },
+        { "int-conversion",
+          "char *zcl_gate_wincross_intconv(void) { return 1; }\n" },
+        { "incompatible-pointer-types",
+          "int *zcl_gate_wincross_ptrtype(char *c) { return c; }\n" },
+    };
+    static char src[SFP];
+    static char *argv[WCS_ARGS];
+    if (ovf(snprintf(src, sizeof src, "%s/gcc14_error.c", g_wcs_work),
+            sizeof src))
+        return 2;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) {
+        if (csr_write(src, k[i].body) != 0) return 2;
+        build_argv(argv, WCS_ARGS, NULL, NULL, src);
+        if (wcs_run_status(argv) == 0) {
+            printf("FAIL: --self-test — mingw ACCEPTED a TU that triggers "
+                   "-W%s.\n  GCC 14 and later reject it; the gate would "
+                   "pass code native Windows cannot build.\n", k[i].name);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int fake_classifier_probes(void)
 {
     static char fake[SFP], mixed[SFP];
@@ -1073,6 +1105,14 @@ static int wcs_log_setup_test(const char *base)
            wcs_mkdir_selftest(base);
 }
 
+static int diagnostic_probes(void)
+{
+    int rc = fake_classifier_probes();
+    if (!rc) rc = located_classifier_probes();
+    if (!rc) rc = gcc14_error_probes();
+    return rc;
+}
+
 int wcs_selftest_phase(void)
 {
     if (wcs_worker_empty_test(g_wcs_work) != 0 ||
@@ -1116,12 +1156,12 @@ int wcs_selftest_phase(void)
                "TU.\n");
         return 1;
     }
-    int rc = fake_classifier_probes();
-    if (!rc) rc = located_classifier_probes();
+    int rc = diagnostic_probes();
     if (rc) return rc;
     printf("  OK: --self-test — flag set trips on a Windows-only undeclared "
-           "identifier, passes clean and test-compat code, rejects a "
-           "crashed compiler backend\n");
+           "identifier and on the diagnostics GCC 14 makes errors (implicit "
+           "declaration, int and pointer conversion), passes clean and "
+           "test-compat code, rejects a crashed compiler backend\n");
     (void)st;
     char flagsnul[SFP];
     if (ovf(snprintf(flagsnul, sizeof flagsnul, "%s/flags.nul", g_wcs_work),
