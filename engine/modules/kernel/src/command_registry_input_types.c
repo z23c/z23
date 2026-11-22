@@ -102,7 +102,7 @@ static bool cr_bool_key(const char *key)
         "dry_run",           "require_existing_watcher", "allow_external",
         "runner_ok_only",    "dedupe",            "route_only",
         "route-only",        "explain",
-        "shielded_only",
+        "shielded_only", "observations_only",
         "birthday_at_local_tip", "prepare",
     };
     return command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0])) ||
@@ -1368,6 +1368,13 @@ static bool cr_leaf_special_descriptor(const struct zcl_command_spec *spec,
     return false;
 }
 
+static bool cr_exact64_field(const struct zcl_command_spec *spec, const char *key)
+{
+    return (!strcmp(spec->path, "fleet.board.list") && !strcmp(key, "before_id")) ||
+           (!strcmp(spec->path, "fleet.board.status") && (!strcmp(key, "peer") || !strcmp(key, "post"))) ||
+           cr_app_customize_query(spec, key);
+}
+
 bool zcl_command_registry_input_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -1377,17 +1384,10 @@ bool zcl_command_registry_input_descriptor(
     if (!cr_descriptor_declared(spec, key)) return false;
     if (cr_leaf_special_descriptor(spec, key, out)) return true;
     if (cr_dev_control_descriptor(spec, key, out)) return true;
-    if (!strcmp(spec->path, "fleet.board.list")) {
-        if (!strcmp(key, "before_created_at")) {
-            out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX;
-            return true;
-        }
-        if (!strcmp(key, "before_id")) {
-            out->type = JSON_STR; out->max_bytes = 64;
-            return true;
-        }
+    if (!strcmp(spec->path, "fleet.board.list") && !strcmp(key, "before_created_at")) {
+        out->type = JSON_INT; out->minimum = 1; out->maximum = INT64_MAX; return true;
     }
-    if (cr_app_customize_query(spec, key)) {
+    if (cr_exact64_field(spec, key)) {
         out->type = JSON_STR; out->max_bytes = 64; return true;
     }
     if (cr_app_edit_content(spec, key)) {

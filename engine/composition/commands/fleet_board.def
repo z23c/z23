@@ -104,9 +104,11 @@ ZCL_COMMAND_READY_READ(
     "pages exist, this node's own board identity, whether the local "
     "hash chain still verifies end to end, and under carriage the pull "
     "lane per paired peer: last pull, last answer, and why it last did not "
-    "pull.", 0,
+    "pull. Provide both peer and post as 32-byte hex identifiers to inspect "
+    "recent bounded observations. Set observations_only=true to request "
+    "the projection; older nodes may return full status and verify the chain.", 0,
     "board,status,capacity,chain,carriage",
-    "zcl.command.empty_input.v1", "zcl.fleet_board_status.v1", "", "",
+    "zcl.fleet_board_status_input.v1", "zcl.fleet_board_status.v1", "peer,post,observations_only", "",
     "z23 fleet board status",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

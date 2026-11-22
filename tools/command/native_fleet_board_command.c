@@ -16,6 +16,7 @@
 
 #include "command/native_command.h"
 #include "command/native_fleet.h"
+#include "config/boot_fleet_board.h"
 
 #include "controllers/rpc_client.h"
 #include "base/safe_alloc.h"
@@ -185,12 +186,16 @@ static void fb_board_refusal(struct zcl_command_reply *reply,
 {
     const char *code = json_get_str(json_get(body, "code"));
     const char *msg = json_get_str(json_get(body, "message"));
-    bool busy = code && strcmp(code, "BOARD_BUSY") == 0;
+    bool unavailable = code && strcmp(code, "OBSERVATION_UNAVAILABLE") == 0;
+    bool retryable = unavailable || (code && strcmp(code, "BOARD_BUSY") == 0);
     fb_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-            busy ? ZCL_COMMAND_EXIT_TRANSIENT : ZCL_COMMAND_EXIT_INVALID,
-            code && code[0] ? code : "BOARD_REFUSED", "execute", busy,
+            retryable ? ZCL_COMMAND_EXIT_TRANSIENT : ZCL_COMMAND_EXIT_INVALID,
+            code && code[0] ? code : "BOARD_REFUSED", "execute", retryable,
             msg && msg[0] ? msg : "the board refused this request",
             "fleet.board");
+    if (unavailable)
+        (void)zcl_command_reply_add_next(reply, "core.status", "{}",
+                                        "inspect the selected node before retrying");
 }
 
 #ifdef ZCL_TESTING
@@ -790,23 +795,180 @@ void zcl_native_handle_fleet_board_show(
 }
 
 /* ── fleet board status ─────────────────────────────────────────────── */
+static bool fb_status_filter(const struct json_value *input,
+                             struct zcl_command_reply *reply,
+                             struct json_value *out, bool *filtered)
+{
+    const struct json_value *peer = json_get(input, "peer");
+    const struct json_value *post = json_get(input, "post");
+    *filtered = peer || post;
+    if (!*filtered) return true;
+    uint8_t id[32];
+    if (!peer || !post || peer->type != JSON_STR || post->type != JSON_STR ||
+        !fleet_board_id_from_hex(json_get_str(peer), id) ||
+        !fleet_board_id_from_hex(json_get_str(post), id)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "INVALID_FILTER", "normalize", false,
+                "provide both --peer=<paired-master-key> and --post=<post-id>. Each must be 32-byte hex",
+                "fleet.board.status");
+        return false;
+    }
+    if (!json_push_kv(out, "peer", peer) || !json_push_kv(out, "post", post)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "BOARD_PROJECTION_FAILED", "prepare", false,
+                "cannot build the board observation request", "fleet.board.status");
+        return false;
+    }
+    return true;
+}
+
+static bool fb_status_only(const struct json_value *input, struct json_value *out,
+                           struct zcl_command_reply *reply, bool filtered, bool *requested)
+{
+    const struct json_value *v = json_get(input, "observations_only");
+    *requested = false;
+    if (!v) return true;
+    if (v->type != JSON_BOOL || (json_get_bool(v) && !filtered)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "INVALID_FILTER", "normalize", false,
+                "observations_only must be boolean. True requires both peer and post", "fleet.board.status");
+        return false;
+    }
+    *requested = json_get_bool(v);
+    if (!*requested || json_push_kv_bool(out, "observations_only", true)) return true;
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "BOARD_PROJECTION_FAILED", "prepare", false,
+            "cannot build the board observation request", "fleet.board.status");
+    return false;
+}
+
+static bool fb_status_string(const struct json_value *object, const char *key)
+{
+    const struct json_value *v = json_get(object, key);
+    return v && v->type == JSON_STR && json_get_str(v)[0];
+}
+
+static bool fb_status_nonnegative(const struct json_value *object, const char *key)
+{
+    const struct json_value *v = json_get(object, key);
+    return v && v->type == JSON_INT && json_get_int(v) >= 0;
+}
+
+static bool fb_status_attempt_fields(const struct json_value *row, const char *phase)
+{
+    if (!strcmp(phase, "ingest")) return false;
+    if (!strcmp(phase, "gate_refusal")) return fb_status_string(row, "reason");
+    if (!strcmp(phase, "open_attempt")) return fb_status_nonnegative(row, "after");
+    if (!strcmp(phase, "open_failure") || !strcmp(phase, "close") ||
+        !strcmp(phase, "answer_refused") || !strcmp(phase, "answer_deferred") ||
+        !strcmp(phase, "cursor_reset"))
+        return fb_status_nonnegative(row, "after") && fb_status_string(row, "reason");
+    return true; /* a later node may add an attempt phase */
+}
+
+static bool fb_status_ingest_fields(const struct json_value *row, const char *phase)
+{
+    return !strcmp(phase, "ingest") && fb_status_nonnegative(row, "after") &&
+           /* Zero is the pinned roster-head arrival, not a missing row. */
+           fb_status_nonnegative(row, "arrival") &&
+           fb_status_string(row, "disposition") && fb_status_string(row, "result");
+}
+
+static bool fb_status_row(const struct json_value *row, bool ingest)
+{
+    if (!row || row->type != JSON_OBJ) return false;
+    const struct json_value *observed = json_get(row, "observed");
+    if (!observed || observed->type != JSON_BOOL) return false;
+    if (!json_get_bool(observed)) return true;
+    const struct json_value *seq = json_get(row, "sequence");
+    if (!seq || seq->type != JSON_INT || json_get_int(seq) <= 0 ||
+        !fb_status_string(row, "phase")) return false;
+    const struct json_value *epoch = json_get(row, "epoch");
+    uint8_t bytes[FLEET_BOARD_FLEET_EPOCH_BYTES];
+    if (epoch && (epoch->type != JSON_STR ||
+        !zcl_hex_decode(json_get_str(epoch), bytes, sizeof bytes))) return false;
+    const char *phase = json_get_str(json_get(row, "phase"));
+    return ingest ? fb_status_ingest_fields(row, phase)
+                  : fb_status_attempt_fields(row, phase);
+}
+
+static bool fb_status_observation(const struct json_value *body,
+                                  struct zcl_command_reply *reply)
+{
+    const struct json_value *peer = json_get(body, "peer_attempt");
+    const struct json_value *post = json_get(body, "post_ingest");
+    const struct json_value *unavailable = json_get(body, "observation_unavailable");
+    if (!unavailable && !peer && !post) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_INVALID,
+                "BOARD_OBSERVATION_UNSUPPORTED", "execute", false,
+                "the selected node does not provide filtered board observations. "
+                "inspect its running image with core.status", "fleet.board.status");
+        (void)zcl_command_reply_add_next(reply, "core.status", "{}",
+                                        "identify the selected node's running image");
+        return false;
+    }
+    if (unavailable || !fb_status_row(peer, false) || !fb_status_row(post, true)) {
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+                "BOARD_OBSERVATION_UNAVAILABLE", "execute", true,
+                "the node returned an unavailable or incomplete board observation. Retry later",
+                "fleet.board.status");
+        return false;
+    }
+    return true;
+}
+
+/* An unmarked legacy response is usable only if it is a real full status. */
+static bool fb_status_projection(const struct json_value *body,
+                                 struct zcl_command_reply *reply, bool *fallback)
+{
+    const struct json_value *marker = json_get(body, "projection");
+    *fallback = marker == NULL;
+    if (marker && marker->type == JSON_STR &&
+        !strcmp(json_get_str(marker), "observations_only")) return true;
+    const struct json_value *posts = json_get(body, "posts");
+    const struct json_value *checked = json_get(body, "chain_checked");
+    const struct json_value *intact = json_get(body, "chain_intact");
+    if (!marker && posts && posts->type == JSON_INT && checked && checked->type == JSON_INT &&
+        intact && intact->type == JSON_BOOL) return true;
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_TRANSIENT,
+            "BOARD_OBSERVATION_UNAVAILABLE", "execute", true,
+            "the node returned an unrecognized or incomplete status projection. Inspect the selected node", "fleet.board.status");
+    (void)zcl_command_reply_add_next(reply, "core.status", "{}",
+                                    "identify the selected node's running image");
+    return false;
+}
+
 void zcl_native_handle_fleet_board_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    (void)request;
     struct json_value out;
     json_init(&out);
     json_set_object(&out);
-    (void)json_push_kv_str(&out, "op", "status");
-
+    bool filtered = false;
+    bool ready = json_push_kv_str(&out, "op", "status");
+    if (!ready)
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "BOARD_PROJECTION_FAILED", "prepare", false,
+                "cannot build the board status request", "fleet.board.status");
+    if (ready) ready = fb_status_filter(request->input, reply, &out, &filtered);
+    bool only = false;
+    if (ready) ready = fb_status_only(request->input, &out, reply, filtered, &only);
     struct json_value body;
     json_init(&body);
-    bool ok = fb_call(reply, &out, &body, 0);
+    bool ok = ready && fb_call(reply, &out, &body, 0);
     json_free(&out);
-    if (!ok)
-        return;
-    fb_project_object(reply, &body);
+    if (!ok) return;
+    bool fallback = false;
+    if ((!filtered || fb_status_observation(&body, reply)) &&
+        (!only || fb_status_projection(&body, reply, &fallback))) {
+        fb_project_object(reply, &body);
+        if (fallback && reply->status == ZCL_COMMAND_STATUS_PASSED &&
+            !json_push_kv_str(&reply->data, "projection", "full_status_fallback"))
+            fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                    "BOARD_PROJECTION_FAILED", "execute", false,
+                    "cannot describe the legacy full-status fallback", "fleet.board.status");
+    }
     json_free(&body);
 }
 

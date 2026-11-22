@@ -598,13 +598,15 @@ static void fb_status_host_role_fp(struct json_value *result,
 static void fb_op_status(struct node_db *ndb, const struct json_value *in,
                          struct json_value *result, int64_t now)
 {
-    const char *peer = fb_str(in, "peer", NULL);
-    const char *post = fb_str(in, "post", NULL);
-    uint8_t peer_id[32], post_id[32];
-    if ((json_get(in, "peer") || json_get(in, "post")) && (!peer || !post ||
-        !fleet_board_id_from_hex(peer, peer_id) ||
-        !fleet_board_id_from_hex(post, post_id))) {
-        fb_error(result, "INVALID_FILTER", "peer and post must both be 32-byte hex identifiers");
+    struct fb_status_filter filter = {0};
+    if (!fb_status_filter_parse(in, result, &filter)) return;
+    if (filter.only) {
+        json_set_object(result);
+        if (!json_push_kv_bool(result, "ok", true) ||
+            !json_push_kv_str(result, "projection", "observations_only") ||
+            !fb_status_observations(result, filter.peer, filter.post))
+            fb_error(result, "OBSERVATION_UNAVAILABLE",
+                     "the board observations could not be rendered. Retry later");
         return;
     }
     struct fleet_board_status status;
@@ -652,13 +654,8 @@ static void fb_op_status(struct node_db *ndb, const struct json_value *in,
     } else {
         json_push_kv_str(result, "host_unavailable", "identity_not_loaded");
     }
-    if (peer) {
-        struct boot_fleet_board_observation attempt, ingest;
-        boot_fleet_board_observe_query(peer_id, post_id, &attempt, &ingest);
-        if (!fb_status_observation(result, "peer_attempt", &attempt) ||
-            !fb_status_observation(result, "post_ingest", &ingest))
-            json_push_kv_str(result, "observation_unavailable", "render_failed");
-    }
+    if (filter.filtered && !fb_status_observations(result, filter.peer, filter.post))
+        json_push_kv_str(result, "observation_unavailable", "render_failed");
     /* The fleet carriage lane's counters, pull and push, since start. */
     if (!fb_render_carriage(result))
         json_push_kv_str(result, "carriage_unavailable",

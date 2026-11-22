@@ -393,3 +393,36 @@ bool fb_status_observation(struct json_value *result, const char *key,
     json_free(&o);
     return ok;
 }
+
+/* One bounded ring snapshot serves both full status and the opt-in projection. */
+bool fb_status_observations(struct json_value *result,
+                                   const uint8_t peer[32], const uint8_t post[32])
+{
+    struct boot_fleet_board_observation attempt, ingest;
+    boot_fleet_board_observe_query(peer, post, &attempt, &ingest);
+    return fb_status_observation(result, "peer_attempt", &attempt) &&
+           fb_status_observation(result, "post_ingest", &ingest);
+}
+
+bool fb_status_filter_parse(const struct json_value *in,
+                                   struct json_value *result,
+                                   struct fb_status_filter *filter)
+{
+    const char *peer = fb_str(in, "peer", NULL);
+    const char *post = fb_str(in, "post", NULL);
+    if ((json_get(in, "peer") || json_get(in, "post")) && (!peer || !post ||
+        !fleet_board_id_from_hex(peer, filter->peer) ||
+        !fleet_board_id_from_hex(post, filter->post))) {
+        fb_error(result, "INVALID_FILTER", "peer and post must both be 32-byte hex identifiers");
+        return false;
+    }
+    const struct json_value *only = json_get(in, "observations_only");
+    if (only && (only->type != JSON_BOOL || (json_get_bool(only) && !peer))) {
+        fb_error(result, "INVALID_FILTER",
+                 "observations_only must be boolean and true requires both peer and post");
+        return false;
+    }
+    filter->filtered = peer != NULL;
+    filter->only = only && json_get_bool(only);
+    return true;
+}

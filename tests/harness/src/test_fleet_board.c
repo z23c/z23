@@ -2256,6 +2256,232 @@ static char *fb_native_rpc(const char *method, const char *params)
     return wire;
 }
 
+static unsigned fb_status_cli_calls;
+enum fb_status_cli_mode {
+    FB_STATUS_CAPABLE, FB_STATUS_OBSERVED, FB_STATUS_MALFORMED,
+    FB_STATUS_OLD, FB_STATUS_INCOMPLETE, FB_STATUS_LEGACY_FULL
+};
+static enum fb_status_cli_mode fb_status_cli_mode;
+static bool fb_status_cli_forwarded, fb_status_cli_light;
+static const char *fb_status_cli_peer, *fb_status_cli_post;
+
+static char *fb_status_cli_response(void)
+{
+    if (fb_status_cli_mode == FB_STATUS_OLD)
+        return strdup("{\"ok\":true,\"posts\":0}");
+    if (fb_status_cli_mode == FB_STATUS_LEGACY_FULL)
+        return strdup("{\"ok\":true,\"posts\":0,\"chain_checked\":0,"
+                      "\"chain_intact\":true,\"peer_attempt\":{\"observed\":false},"
+                      "\"post_ingest\":{\"observed\":false}}");
+    if (fb_status_cli_light)
+        return strdup("{\"ok\":true,\"projection\":\"observations_only\","
+                      "\"peer_attempt\":{\"observed\":false},"
+                      "\"post_ingest\":{\"observed\":false}}");
+    if (fb_status_cli_mode == FB_STATUS_INCOMPLETE)
+        return strdup("{\"ok\":true,\"posts\":0,\"peer_attempt\":{\"observed\":false},"
+                      "\"observation_unavailable\":\"render_failed\"}");
+    if (fb_status_cli_mode == FB_STATUS_MALFORMED)
+        return strdup("{\"ok\":true,\"posts\":0,\"peer_attempt\":{\"observed\":true},"
+                      "\"post_ingest\":{\"observed\":false}}");
+    if (fb_status_cli_mode == FB_STATUS_OBSERVED)
+        return strdup("{\"ok\":true,\"posts\":0,\"peer_attempt\":{\"observed\":true,"
+                      "\"sequence\":1,\"phase\":\"close\",\"after\":0,"
+                      "\"reason\":\"stream_closed_by_service\"},"
+                      "\"post_ingest\":{\"observed\":true,\"sequence\":2,"
+                      "\"phase\":\"ingest\",\"after\":0,\"arrival\":1,"
+                      "\"disposition\":\"stored\",\"result\":\"ok\"}}");
+    return strdup("{\"ok\":true,\"posts\":0,\"peer_attempt\":{\"observed\":true,"
+                  "\"sequence\":1,\"phase\":\"close\",\"after\":0,"
+                  "\"reason\":\"stream_closed_by_service\"},"
+                  "\"post_ingest\":{\"observed\":false}}");
+}
+
+static char *fb_status_cli_rpc(const char *method, const char *params)
+{
+    struct json_value input;
+    json_init(&input);
+    fb_status_cli_calls++;
+    bool parsed = json_read(&input, params, strlen(params));
+    const struct json_value *item = parsed ? json_at(&input, 0) : NULL;
+    const char *op = json_get_str(json_get(item, "op"));
+    const char *peer = json_get_str(json_get(item, "peer"));
+    const char *post = json_get_str(json_get(item, "post"));
+    const struct json_value *light = json_get(item, "observations_only");
+    fb_status_cli_light = light && light->type == JSON_BOOL && json_get_bool(light);
+    fb_status_cli_forwarded = strcmp(method, "fleet_board") == 0 && op &&
+        strcmp(op, "status") == 0 && peer && post &&
+        strcmp(peer, fb_status_cli_peer) == 0 && strcmp(post, fb_status_cli_post) == 0;
+    json_free(&input);
+    return fb_status_cli_response();
+}
+
+static bool fb_status_cli_run(const char *const *args, int n,
+                              struct json_value *out, int *rc)
+{
+    FILE *capture = tmpfile();
+    int saved = dup(fileno(stdout));
+    bool ok = false;
+    if (!capture || saved < 0 || fflush(stdout) != 0 ||
+        dup2(fileno(capture), fileno(stdout)) < 0) goto done;
+    *rc = zcl_native_command_main("fleet", args, n, "", 0, CHAIN_MAIN, false);
+    if (fflush(stdout) != 0 || fseek(capture, 0, SEEK_SET) != 0) goto done;
+    char wire[8193];
+    size_t len = fread(wire, 1, sizeof wire - 1, capture);
+    wire[len] = '\0';
+    ok = !ferror(capture) && len < sizeof wire - 1 && json_read(out, wire, len);
+done:
+    if (saved >= 0) { if (dup2(saved, fileno(stdout)) < 0) ok = false; close(saved); }
+    if (capture) fclose(capture);
+    return ok;
+}
+
+static int test_fleet_board_native_status_filters(void)
+{
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    const char *peer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const char *post = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    char peer_arg[80], post_arg[80];
+    uint8_t decoded[32];
+    (void)snprintf(peer_arg, sizeof peer_arg, "--peer=%s", peer);
+    (void)snprintf(post_arg, sizeof post_arg, "--post=%s", post);
+    const char *args[] = {"board", "status", peer_arg, post_arg, "--format=json"};
+    fb_status_cli_peer = peer; fb_status_cli_post = post;
+    node_rpc_client_set_test_hook(fb_status_cli_rpc);
+    TEST("fleet board status CLI forwards exact filters and refuses old nodes") {
+        int rc = -1;
+        ASSERT(fleet_board_id_from_hex(peer, decoded));
+        ASSERT(fleet_board_id_from_hex(post, decoded));
+        fb_status_cli_calls = 0; fb_status_cli_mode = FB_STATUS_CAPABLE;
+        ASSERT(fb_status_cli_run(args, 5, &out, &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(fb_status_cli_calls, 1u);
+        ASSERT(fb_status_cli_forwarded);
+        const struct json_value *data = json_get(&out, "data");
+        const struct json_value *attempt = json_get(data, "peer_attempt");
+        const struct json_value *ingest = json_get(data, "post_ingest");
+        ASSERT(json_get_bool(json_get(attempt, "observed")));
+        ASSERT(json_get(ingest, "observed") &&
+               json_get(ingest, "observed")->type == JSON_BOOL &&
+               !json_get_bool(json_get(ingest, "observed")));
+        json_free(&out); json_init(&out);
+        fb_status_cli_mode = FB_STATUS_OBSERVED;
+        ASSERT(fb_status_cli_run(args, 5, &out, &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        data = json_get(&out, "data");
+        ingest = json_get(data, "post_ingest");
+        ASSERT(json_get_bool(json_get(ingest, "observed")));
+        ASSERT_EQ(json_get_int(json_get(ingest, "sequence")), 2);
+        ASSERT_EQ(json_get_int(json_get(ingest, "after")), 0);
+        ASSERT_EQ(json_get_int(json_get(ingest, "arrival")), 1);
+        ASSERT(json_get_str(json_get(ingest, "phase")));
+        ASSERT_STR_EQ(json_get_str(json_get(ingest, "phase")), "ingest");
+        ASSERT(json_get_str(json_get(ingest, "disposition")));
+        ASSERT_STR_EQ(json_get_str(json_get(ingest, "disposition")), "stored");
+        ASSERT(json_get_str(json_get(ingest, "result")));
+        ASSERT_STR_EQ(json_get_str(json_get(ingest, "result")), "ok");
+        json_free(&out); json_init(&out);
+        fb_status_cli_mode = FB_STATUS_MALFORMED;
+        ASSERT(fb_status_cli_run(args, 5, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_forwarded);
+        ASSERT(json_get_str(json_get(json_get(&out, "error"), "code")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&out, "error"), "code")),
+                      "BOARD_OBSERVATION_UNAVAILABLE");
+        json_free(&out); json_init(&out);
+        fb_status_cli_mode = FB_STATUS_INCOMPLETE;
+        ASSERT(fb_status_cli_run(args, 5, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_forwarded);
+        ASSERT(json_get_str(json_get(json_get(&out, "error"), "code")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&out, "error"), "code")),
+                      "BOARD_OBSERVATION_UNAVAILABLE");
+        json_free(&out); json_init(&out);
+        fb_status_cli_mode = FB_STATUS_OLD;
+        ASSERT(fb_status_cli_run(args, 5, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_forwarded);
+        ASSERT(json_get_str(json_get(json_get(&out, "error"), "code")));
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&out, "error"), "code")),
+                      "BOARD_OBSERVATION_UNSUPPORTED");
+        json_free(&out); json_init(&out);
+        const char *plain[] = {"board", "status", "--format=json"};
+        ASSERT(fb_status_cli_run(plain, 3, &out, &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        json_free(&out); json_init(&out);
+        unsigned calls = fb_status_cli_calls;
+        const char *partial[] = {"board", "status", peer_arg, "--format=json"};
+        ASSERT(fb_status_cli_run(partial, 4, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_calls == calls);
+        json_free(&out); json_init(&out);
+        const char *invalid[] = {"board", "status", peer_arg, "--post=not-hex", "--format=json"};
+        ASSERT(!fleet_board_id_from_hex("not-hex", decoded));
+        ASSERT(fb_status_cli_run(invalid, 5, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_calls == calls);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    json_free(&out);
+    return failures;
+}
+
+static int test_fleet_board_native_status_light(void)
+{
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    const char *peer = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const char *post = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    char pa[80], pb[80];
+    (void)snprintf(pa, sizeof pa, "--peer=%s", peer);
+    (void)snprintf(pb, sizeof pb, "--post=%s", post);
+    const char *args[] = {"board", "status", pa, pb, "--observations_only=true", "--format=json"};
+    fb_status_cli_peer = peer; fb_status_cli_post = post;
+    node_rpc_client_set_test_hook(fb_status_cli_rpc);
+    TEST("fleet board status CLI explicitly requests observations only") {
+        int rc = -1;
+        fb_status_cli_calls = 0; fb_status_cli_mode = FB_STATUS_CAPABLE;
+        ASSERT(fb_status_cli_run(args, 6, &out, &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(fb_status_cli_calls, 1u);
+        ASSERT(fb_status_cli_forwarded && fb_status_cli_light);
+        const struct json_value *data = json_get(&out, "data");
+        ASSERT(json_get_str(json_get(data, "projection")));
+        ASSERT_STR_EQ(json_get_str(json_get(data, "projection")), "observations_only");
+        ASSERT(!json_get(data, "posts"));
+        ASSERT(json_get(json_get(data, "post_ingest"), "observed"));
+        ASSERT(!json_get_bool(json_get(json_get(data, "post_ingest"), "observed")));
+        json_free(&out); json_init(&out);
+        fb_status_cli_mode = FB_STATUS_LEGACY_FULL;
+        ASSERT(fb_status_cli_run(args, 6, &out, &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(fb_status_cli_forwarded && fb_status_cli_light);
+        data = json_get(&out, "data");
+        ASSERT(json_get(data, "posts"));
+        ASSERT(json_get_str(json_get(data, "projection")));
+        ASSERT_STR_EQ(json_get_str(json_get(data, "projection")), "full_status_fallback");
+        ASSERT(json_get(json_get(data, "peer_attempt"), "observed"));
+        ASSERT(json_get(json_get(data, "post_ingest"), "observed"));
+        json_free(&out); json_init(&out);
+        fb_status_cli_mode = FB_STATUS_OLD;
+        ASSERT(fb_status_cli_run(args, 6, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_forwarded && fb_status_cli_light);
+        const char *code = json_get_str(json_get(json_get(&out, "error"), "code"));
+        ASSERT(code && strcmp(code, "BOARD_OBSERVATION_UNSUPPORTED") == 0);
+        json_free(&out); json_init(&out);
+        unsigned calls = fb_status_cli_calls;
+        const char *partial[] = {"board", "status", pa, "--observations_only=true", "--format=json"};
+        ASSERT(fb_status_cli_run(partial, 5, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_calls == calls);
+        json_free(&out); json_init(&out);
+        const char *bad[] = {"board", "status", pa, pb, "--observations_only=bad", "--format=json"};
+        ASSERT(fb_status_cli_run(bad, 6, &out, &rc));
+        ASSERT(rc != ZCL_COMMAND_EXIT_OK && fb_status_cli_calls == calls);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    json_free(&out);
+    return failures;
+}
+
 static int test_fleet_board_native_busy(void)
 {
     int failures = 0;
@@ -10682,6 +10908,107 @@ static bool fbw_status_call(const struct rpc_table *table, const char *peer,
     return ok;
 }
 
+struct fbw_sql_counts { unsigned statements, board_selects; };
+
+static int fbw_board_select_trace(unsigned type, void *ctx, void *stmt, void *unused)
+{
+    (void)unused;
+    struct fbw_sql_counts *counts = ctx;
+    if (type == SQLITE_TRACE_STMT) counts->statements++;
+    const char *sql = type == SQLITE_TRACE_STMT ? sqlite3_sql(stmt) : NULL;
+    if (sql && sqlite3_strnicmp(sql, "SELECT", 6) == 0 &&
+        strstr(sql, "fleet_board_posts"))
+        counts->board_selects++;
+    return 0;
+}
+
+static bool fbw_status_mode(const struct rpc_table *table, const char *peer,
+                            const char *post, int mode, struct json_value *out)
+{
+    struct json_value in;
+    json_init(&in); json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "op", "status") &&
+              (!peer || json_push_kv_str(&in, "peer", peer)) &&
+              (!post || json_push_kv_str(&in, "post", post));
+    if (mode == 1) ok = ok && json_push_kv_bool(&in, "observations_only", true);
+    if (mode == 2) ok = ok && json_push_kv_str(&in, "observations_only", "true");
+    if (mode == 3) ok = ok && json_push_kv_bool(&in, "observations_only", false);
+    ok = ok && fb_test_rpc(table, &in, out);
+    json_free(&in);
+    return ok;
+}
+
+static bool fbw_equal_field(const struct json_value *a, const struct json_value *b,
+                            const char *name)
+{
+    const struct json_value *x = json_get(a, name), *y = json_get(b, name);
+    char left[2048], right[2048];
+    if (!x || !y) return false;
+    size_t n = json_write(x, left, sizeof left), m = json_write(y, right, sizeof right);
+    return n > 0 && n < sizeof left && m == n && strcmp(left, right) == 0;
+}
+
+/* The same signed board and observations, with statement counts taken at
+ * the database itself rather than inferred from response shape. */
+static bool fbw_status_bad_modes(const struct rpc_table *table, const char *peer,
+                                 const char *post)
+{
+    struct json_value out;
+    json_init(&out);
+    bool ok = fbw_status_mode(table, peer, post, 2, &out) &&
+              !json_get_bool(json_get(&out, "ok"));
+    json_free(&out); json_init(&out);
+    ok = ok && fbw_status_mode(table, peer, NULL, 1, &out) &&
+         !json_get_bool(json_get(&out, "ok"));
+    json_free(&out); json_init(&out);
+    ok = ok && fbw_status_mode(table, NULL, NULL, 1, &out) &&
+         !json_get_bool(json_get(&out, "ok"));
+    json_free(&out);
+    return ok;
+}
+
+static bool fbw_light_projection(const struct json_value *full,
+                                 const struct json_value *light)
+{
+    return json_get_bool(json_get(full, "ok")) &&
+           json_get_bool(json_get(light, "ok")) &&
+           json_get_str(json_get(light, "projection")) &&
+           strcmp(json_get_str(json_get(light, "projection")), "observations_only") == 0 &&
+           !json_get(light, "posts") && !json_get(light, "chain_intact") &&
+           !json_get(light, "carriage") &&
+           fbw_equal_field(full, light, "peer_attempt") &&
+           fbw_equal_field(full, light, "post_ingest");
+}
+
+static bool fbw_status_light(const struct rpc_table *table, struct node_db *db,
+                             const char *peer, const char *post)
+{
+    struct json_value full, light, legacy;
+    json_init(&full); json_init(&light); json_init(&legacy);
+    struct fbw_sql_counts counts = {0}, full_counts, light_counts;
+    bool traced = sqlite3_trace_v2(db->db, SQLITE_TRACE_STMT,
+                                   fbw_board_select_trace, &counts) == SQLITE_OK;
+    bool ok = traced && fbw_status_mode(table, peer, post, 0, &full);
+    full_counts = counts; memset(&counts, 0, sizeof counts);
+    ok = ok && fbw_status_mode(table, peer, post, 1, &light);
+    light_counts = counts;
+    if (traced) ok = sqlite3_trace_v2(db->db, 0, NULL, NULL) == SQLITE_OK && ok;
+    printf("fleet board status SQL: full statements=%u board_selects=%u; "
+           "observations_only statements=%u board_selects=%u\n",
+           full_counts.statements, full_counts.board_selects,
+           light_counts.statements, light_counts.board_selects);
+    ok = ok && full_counts.board_selects > 0 && light_counts.statements == 0 &&
+         light_counts.board_selects == 0 &&
+         fbw_light_projection(&full, &light);
+    ok = ok && fbw_status_mode(table, peer, post, 3, &legacy) &&
+         json_get_bool(json_get(&legacy, "ok")) && json_get(&legacy, "posts") &&
+         fbw_equal_field(&full, &legacy, "peer_attempt") &&
+         fbw_equal_field(&full, &legacy, "post_ingest") &&
+         fbw_status_bad_modes(table, peer, post);
+    json_free(&full); json_free(&light); json_free(&legacy);
+    return ok;
+}
+
 static bool fbw_status_match(const struct json_value *result)
 {
     const struct json_value *attempt = json_get(result, "peer_attempt");
@@ -10734,7 +11061,8 @@ static bool fbw_status_observations(struct fbw *w, const uint8_t post[32])
     app_runtime_set_current(&runtime);
     fleet_board_id_to_hex(w->box_a, peer_hex);
     fleet_board_id_to_hex(post, post_hex);
-    bool ok = fbw_status_checks(&table, peer_hex, post_hex);
+    bool ok = fbw_status_light(&table, &w->b, peer_hex, post_hex) &&
+              fbw_status_checks(&table, peer_hex, post_hex);
     app_runtime_set_current(&w->runtime);
     if (was_warming) set_rpc_warmup_started(warmup);
     return ok;
@@ -16815,6 +17143,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_created_at();
     failures += test_fleet_board_rpc_fleet_page();
     failures += test_fleet_board_native_busy();
+    failures += test_fleet_board_native_status_filters();
+    failures += test_fleet_board_native_status_light();
     failures += test_fleet_board_ingest_wait_bounded();
     failures += test_fleet_board_durable_wiki();
     failures += test_fleet_board_local_capacity_does_not_score_peer();
