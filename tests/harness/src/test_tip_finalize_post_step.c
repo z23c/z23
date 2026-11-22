@@ -107,6 +107,8 @@ static uint64_t tp_mmb_leaves(void)
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+#include "tip_finalize_scan_gap_test.h"
+
 static int tp_mkdir_p(const char *p)
 {
 #if defined(_WIN32)
@@ -274,7 +276,10 @@ static int tp_vb_late_body_probe(struct wallet *w,
     bi2->nStatus |= BLOCK_VALID_SCRIPTS;
     TP_CHECK("late-body: re-arm pool with height-2 spend tx",
              tp_pool_add(spend_tx2));
-    w->best_block_height = 0;
+    /* Start at height-1: the wallet read through the block before this one.
+     * The old start (0) made the wallet jump over height 1, the very gap a
+     * live tip must never advance across. */
+    w->best_block_height = bi2->nHeight - 1;
     tip_finalize_observe_update_last_advance(bi2->nHeight,
                                              bi2->phashBlock->data);
     TP_CHECK("late-body: probe cursor at block height",
@@ -287,6 +292,44 @@ static int tp_vb_late_body_probe(struct wallet *w,
              !tx_mempool_exists(&g_tp_pool, &spend_tx2->hash));
     TP_CHECK("late-body: wallet height advanced",
              w->best_block_height == bi2->nHeight);
+    return failures;
+}
+
+/* A post-finalize whose wallet step did not run (wallet not READY) must not
+ * stamp the visible-body pair: once the wallet is READY the visible-body pass
+ * comes back for the height and the wallet reads the block. */
+static int tp_vb_unready_wallet_probe(struct app_runtime_context *rt,
+                                      struct block_index *bi,
+                                      stage_t *vb_stage, sqlite3 *vbdb,
+                                      struct main_state *vb_ms)
+{
+    int failures = 0;
+    struct wallet *original = rt->wallet;
+    struct wallet *p = tp_gap_wallet_new(original, true);
+    TP_CHECK("unready-wallet: PENDING wallet built", p != NULL);
+    if (!p) return failures;
+    rt->wallet = p;
+    tip_finalize_visible_body_reset();
+    tip_finalize_run_post_finalize(bi);
+    TP_CHECK("unready-wallet: the PENDING wallet read nothing and says so",
+             p->best_block_height == 0 && p->scan_retry.pending &&
+             p->scan_retry.from == 1);
+    TP_CHECK("unready-wallet: wallet becomes READY",
+             wallet_readiness_complete(p, true, 1));
+    tip_finalize_observe_update_last_advance(bi->nHeight,
+                                             bi->phashBlock->data);
+    TP_CHECK("unready-wallet: probe cursor at block height",
+             stage_set_cursor(vb_stage, vbdb, (uint64_t)bi->nHeight));
+    TP_CHECK("unready-wallet: visible-body pass comes back for the height",
+             tip_finalize_reconcile_visible_cursor_body(vbdb, vb_stage,
+                                                        vb_ms) &&
+             p->best_block_height == bi->nHeight);
+    TP_CHECK("unready-wallet: the late pass reads the block and clears the gap",
+             !p->scan_retry.pending &&
+             wallet_read_scanned_through_height(p) == bi->nHeight);
+    rt->wallet = original;
+    wallet_free(p);
+    free(p);
     return failures;
 }
 
@@ -1416,6 +1459,8 @@ int test_tip_finalize_post_step(void)
     failures += tp_vb_late_body_probe(w, &blk2.vtx[1], &bi2, &pos2, netdir,
                                       vb_stage, vbdb, &vb_ms);
 
+    failures += tp_scan_gap_probe(&rt, &bi);
+    failures += tp_vb_unready_wallet_probe(&rt, &bi, vb_stage, vbdb, &vb_ms);
     failures += tp_boundary_root_probe(dir, &bi);
     failures += tp_mut_tripwire();
     failures += tp_mut_window_walk(netdir);

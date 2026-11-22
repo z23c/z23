@@ -121,6 +121,22 @@ static void boot_wallet_defer_unread(struct wallet *w, int from)
     zcl_mutex_unlock(&w->cs);
 }
 
+/* Every key is newer than the tip (less the timestamp slack), so no block up
+ * to the tip can hold a payment to it: there is nothing to read. Level the
+ * height with the tip, or the next live tip would record a gap from height 1
+ * that no restart ever reads (a range this long defers). A pending marker
+ * stays: it names a range somebody else owns. */
+static void boot_wallet_level_with_tip(struct wallet *w, int scan_from,
+                                       int tip_height)
+{
+    if (scan_from <= tip_height)
+        return;
+    zcl_mutex_lock(&w->cs);
+    if (!w->scan_retry.pending && w->best_block_height < tip_height)
+        w->best_block_height = tip_height;
+    zcl_mutex_unlock(&w->cs);
+}
+
 int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
                          const char *datadir,
                          struct wallet_rescan_report *report)
@@ -136,6 +152,7 @@ int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
         if (bi && (int64_t)bi->nTime < scan_time)
             scan_from = h + 1;
     }
+    boot_wallet_level_with_tip(w, scan_from, tip_height);
     if (scan_from == 0 && w->best_block_height == 0 && tip_height > 1000) {
         printf("Wallet scan height is 0 with %d blocks. Use rescanblockchain "
                "RPC for targeted rescan.\n", tip_height);

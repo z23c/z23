@@ -706,6 +706,9 @@ struct wallet_rescan_report {
 #define WALLET_RESCAN_BLOCKER_INCONCLUSIVE    "RESCAN_INCONCLUSIVE_ZERO"
 /* A restored wallet whose chain range has not been read yet. */
 #define WALLET_RESTORE_BLOCKER_UNREAD         "WALLET_RESTORE_UNREAD"
+/* A live tip finalize skipped a block, or met a block whose predecessor the
+ * wallet never reached: the wallet did not advance over it. */
+#define WALLET_TIP_GAP                        "WALLET_TIP_GAP"
 
 int wallet_scan_block(struct wallet *w, const struct block_index *pindex,
                       const char *datadir);
@@ -728,6 +731,11 @@ int wallet_scanned_through_height(const struct wallet *w);
  * boot catch-up that left bodies unread keeps best_block_height at its stop
  * height while blocks below it were never scanned. */
 int wallet_read_scanned_through_height(struct wallet *w);
+/* Record that heights from `from` up were not read by a live tip, under the
+ * WALLET_TIP_GAP blocker. A marker already pending is left unchanged: its
+ * owner already reports the wallet incomplete. Returns true when this call
+ * created the marker. Caller holds w->cs. */
+bool wallet_note_scan_gap_locked(struct wallet *w, int from);
 /* Thin wrapper over wallet_rescan_report() that discards the report. */
 int wallet_rescan(struct wallet *w, const struct active_chain *chain,
                   int start_height, int stop_height, const char *datadir);

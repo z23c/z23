@@ -368,3 +368,14 @@ int wallet_rescan(struct wallet *w, const struct active_chain *chain,
                                 datadir, NULL);
 }
 
+bool wallet_note_scan_gap_locked(struct wallet *w, int from)
+{
+    if (!w || w->scan_retry.pending)
+        return false;
+    w->scan_retry.pending = true;
+    w->scan_retry.from = from < 0 ? 0 : from;
+    w->scan_retry.since = GetTime();
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_TIP_GAP);
+    return true;
+}

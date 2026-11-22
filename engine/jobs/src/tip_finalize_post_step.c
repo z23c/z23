@@ -42,7 +42,7 @@
 #include "util/util.h"                  /* GetDataDir */
 #include "validation/check_block.h"     /* coinbase-height label check */
 #include "validation/chain_linkage_check.h" /* fail-loud HOLD latch */
-#include "validation/process_block.h"   /* g_body_pull_active */
+#include "validation/process_block.h"
 #include "validation/txmempool.h"
 #include "wallet/wallet.h"
 #include "models/zmsg.h"                /* on-chain ZMSG memo ingest */
@@ -347,23 +347,88 @@ static void tip_finalize_wallet_transactions(struct block_index *pindex_new,
     }
 }
 
+/* A wallet step that did not run for this block must not be forgotten: the
+ * next block would set the wallet height over it and balance replies would
+ * trust a wallet that never read it. Record the unread range from the
+ * wallet's own height, under the wallet lock. A marker already pending is
+ * left exactly as it is: its owner (birthday wait, boot deferral, an unread
+ * catch-up range, the SQLite cutover that compares it with disk) already says
+ * the wallet is incomplete, and best_block_height keeps tracking tips under
+ * it. The marker is announced once, when it is first created. */
+static void tip_finalize_note_wallet_skip(const struct block_index *pindex_new,
+                                          const char *why)
+{
+    struct wallet *wallet = app_runtime_wallet();
+    if (!wallet || !pindex_new)
+        return;
+    zcl_mutex_lock(&wallet->cs);
+    const int best = wallet->best_block_height;
+    bool created = false;
+    if (best < pindex_new->nHeight)
+        created = wallet_note_scan_gap_locked(wallet, best + 1);
+    zcl_mutex_unlock(&wallet->cs);
+    if (created)
+        LOG_WARN("tip_finalize",
+                 "%s: wallet did not read h=%d (%s); scanned through %d, "
+                 "rescan from %d to heal", WALLET_TIP_GAP,
+                 pindex_new->nHeight, why, best, best + 1);
+}
+
+/* A wallet more than one block behind this block would have its height set
+ * over the blocks between. Record that range as unread before applying the
+ * block; the height then moves as before, and wallet_scanned_through_height()
+ * reports the true height from the marker. */
+static void tip_finalize_note_wallet_gap(
+    struct wallet *wallet, const struct block_index *pindex_new)
+{
+    zcl_mutex_lock(&wallet->cs);
+    const bool gap = wallet->best_block_height < pindex_new->nHeight - 1;
+    zcl_mutex_unlock(&wallet->cs);
+    if (gap)
+        tip_finalize_note_wallet_skip(pindex_new, "height gap");
+}
+
+/* The wallet has just applied the block at `height`. The height never moves
+ * down (a replay of an older block leaves it alone). A WALLET_TIP_GAP marker
+ * that starts at exactly this block, set when the body was late or the
+ * wallet not ready, is closed when the wallet was at height-1: every height
+ * from the marker through here has now been read, with no hole. Under any
+ * other circumstance (a later block already applied over the hole, or a
+ * marker of another owner: cutover, birthday wait, rescan, boot deferral) it
+ * stays. */
+static void tip_finalize_wallet_set_height(struct wallet *wallet, int height)
+{
+    zcl_mutex_lock(&wallet->cs);
+    const int before = wallet->best_block_height;
+    if (before < height)
+        wallet->best_block_height = height;
+    if (before == height - 1 && wallet->scan_retry.pending &&
+        wallet->scan_retry.from == height &&
+        strcmp(wallet->scan_retry.blocker, WALLET_TIP_GAP) == 0)
+        memset(&wallet->scan_retry, 0, sizeof(wallet->scan_retry));
+    zcl_mutex_unlock(&wallet->cs);
+}
+
 /* Idempotent wallet subset of post-finalize publication. A body can become
  * visible after another authority already published this height; in that
  * case MMR/MMB must not append twice, but wallet confirmation, Sapling note,
- * nullifier, and derived wallet rows still have to observe the exact body. */
+ * nullifier, and derived wallet rows still have to observe the exact body.
+ * Returns false when the wallet step did not run, so a retry can help. */
 static bool tip_finalize_reconcile_wallet_body(
     struct block_index *pindex_new, const struct block *blk)
 {
-    if (!pindex_new || !blk ||
-        atomic_load_explicit(&g_body_pull_active, memory_order_relaxed))
+    if (!pindex_new || !blk)
         return false;
 
     struct wallet *wallet = app_runtime_wallet();
     struct node_db *ndb = app_runtime_node_db();
     const bool regtest_on_demand = tip_finalize_regtest_on_demand();
     if (!wallet) return true;
-    if (wallet_readiness_get(wallet).state != WALLET_READINESS_READY)
+    if (wallet_readiness_get(wallet).state != WALLET_READINESS_READY) {
+        tip_finalize_note_wallet_skip(pindex_new, "wallet not ready");
         return false;
+    }
+    tip_finalize_note_wallet_gap(wallet, pindex_new);
 
     if (regtest_on_demand)
         (void)wallet_advance_confirmations(wallet, pindex_new->nHeight);
@@ -374,9 +439,7 @@ static bool tip_finalize_reconcile_wallet_body(
     struct main_state *ms = app_runtime_main_state();
     if (ms && ndb && active_chain_at(&ms->chain_active, pindex_new->nHeight) == pindex_new)
         wallet_birthday_reconcile(wallet, ndb, &ms->chain_active, pindex_new);
-    zcl_mutex_lock(&wallet->cs);
-    wallet->best_block_height = pindex_new->nHeight;
-    zcl_mutex_unlock(&wallet->cs);
+    tip_finalize_wallet_set_height(wallet, pindex_new->nHeight);
 
     if (tip_finalize_regtest_connect_enqueue_failed(
             regtest_on_demand, ndb, blk, pindex_new, wallet)) {
@@ -404,6 +467,7 @@ bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new)
                  "wallet reconcile skipped h=%d have_data=%d: body unreadable",
                  pindex_new->nHeight,
                  (pindex_new->nStatus & BLOCK_HAVE_DATA) ? 1 : 0);
+        tip_finalize_note_wallet_skip(pindex_new, "body unreadable");
         block_free(&owned);
         return false;
     }
@@ -431,6 +495,7 @@ bool tip_finalize_run_wallet_mempool_reconcile(
                  "body unreadable",
                  pindex_new->nHeight,
                  (pindex_new->nStatus & BLOCK_HAVE_DATA) ? 1 : 0);
+        tip_finalize_note_wallet_skip(pindex_new, "body unreadable");
         block_free(&owned);
         return false;
     }
@@ -522,6 +587,7 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
                  "body unreadable; wallet/mempool/MMR/MMB deferred",
                  pindex_new->nHeight,
                  (pindex_new->nStatus & BLOCK_HAVE_DATA) ? 1 : 0);
+        tip_finalize_note_wallet_skip(pindex_new, "body unreadable");
         /* A partial injected-reader deserialize can have allocated owned.vtx before the
          * read failed — the success path frees it at the bottom; this
          * early return must too. */
@@ -557,7 +623,8 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
 
     /* Wallet publication is idempotent and is also reused when this body
      * becomes visible after served-tip authority already reached the height. */
-    tip_finalize_reconcile_wallet_body(pindex_new, blk);
+    const bool wallet_reconciled =
+        tip_finalize_reconcile_wallet_body(pindex_new, blk);
 
     /* Publish the committed coins_kv generation to the long-lived read cache
      * before any later relay or block-template selection can consult it. The
@@ -660,7 +727,9 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * identical reconcile (the duplicate per-block wallet/mempool pass
      * measured during catch-up fold-forward). The body-unreadable early
      * return above deliberately does NOT stamp: a late-arriving body stays
-     * eligible for the visible-body retry. */
-    tip_finalize_visible_body_note_reconciled(pindex_new->nHeight,
-                                              pindex_new->phashBlock);
+     * eligible for the visible-body retry. The same holds when the wallet
+     * step did not run (wallet not READY): the retry must come back. */
+    if (wallet_reconciled)
+        tip_finalize_visible_body_note_reconciled(pindex_new->nHeight,
+                                                  pindex_new->phashBlock);
 }

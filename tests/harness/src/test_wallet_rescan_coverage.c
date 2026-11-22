@@ -201,6 +201,21 @@ static int wrc_boot_floor_and_marker(struct wallet *w, struct main_state *ms,
     w->sapling_keys.num_unscannable = 0;
     sapling_keystore_free(&w->sapling_keys);
     sapling_keystore_init(&w->sapling_keys);
+    /* K. Every key is newer than the tip: nothing to read, so the wallet is
+     * level with the tip and the next live tip finds no hole to record. */
+    w->scan_retry.pending = false;
+    w->scan_retry.blocker[0] = 0;
+    w->scan_retry.from = 0;
+    w->best_block_height = 0;
+    w->initial_scan_floor = 0;
+    w->time_first_key = 2000000000;
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("K: keys newer than the tip level the wallet with the tip",
+              w->best_block_height == WRC_NBLOCKS - 1 &&
+              !w->scan_retry.pending &&
+              wallet_scanned_through_height(w) == WRC_NBLOCKS - 1);
+    w->time_first_key = 0;
     w->best_block_height = WRC_NBLOCKS - 1;
     return failures;
 }
