@@ -475,7 +475,14 @@ The items below describe work to prove, not capabilities declared complete.
    lifecycle operations in section 4 and transfer reuse in section 5; a hash or
    a link alone does not preserve the object it names.
 
-   Next concrete task: add a registered case in `tests/harness/src/test_zcode_swarm_net.c` where the late joiner finds the surviving holder by announcement. The existing case `zwn_t_redundant_publish_disappear` fetches through `zwn_fetch_package_from_provider`, which calls `vcs_swarm_engine_fetch_from` with an explicit provider handle.
+   Current main registers `zwn_t_late_joiner_announce_discovery`: A publishes,
+   B retrieves and retains through announcements, A disappears, and fresh C
+   discovers B without an explicit provider. The case drops one announcement,
+   proves bounded retry and exact possession, and reports fixture-only transfer
+   and resource measurements. Next concrete task: run
+   `make commons-multihost-acceptance` on a source including this recovery and
+   record physical-host discovery evidence separately from the wire fixture.
+<!-- claim: symbol-present zwn_t_late_joiner_announce_discovery tests/harness/src/test_zcode_swarm_net.c # provider-free late-joiner announcement discovery -->
 
 <a id="ordered-continuation-queue"></a>
 

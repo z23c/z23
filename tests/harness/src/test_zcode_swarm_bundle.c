@@ -1134,6 +1134,78 @@ static int bundle_case_rotation_on_full_session(void)
     return failures;
 }
 
+static size_t bundle_drop_outbound(struct sw_node *from, uint64_t from_handle)
+{
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0, frames = 0;
+    uint64_t target = 0;
+    while (vcs_swarm_engine_next_outbound(from->engine, from_handle, &target,
+                                          frame, &frame_len))
+        frames++;
+    return frames;
+}
+
+/* A full receiver still accounts for unseen roots. Retries therefore consume
+ * the sender's conservative window too, even though they add no advertisement. */
+static int bundle_case_retry_on_full_receiver(void)
+{
+    int failures = 0;
+    struct bundle_pair p;
+    if (!bundle_pair_open(&p, "brf")) {
+        printf("  zcode_swarm: full-receiver retry fixture... FAIL\n");
+        bundle_pair_close(&p);
+        return 1;
+    }
+    enum { T0 = 2500000 };
+    size_t penalised = 0;
+    bundle_mono_set(0);
+    platform_clock_set_source(&g_bundle_clock);
+    bool filled = true;
+    for (size_t i = 0; i < VCS_SWARM_MAX_PEER_ADS; i++) {
+        uint8_t root[32] = { 0xf6, (uint8_t)i };
+        filled &= vcs_swarm_engine_peer_offer(
+            p.leech.engine, BUNDLE_LEECH_HANDLE, root, T0 + 100000, T0);
+    }
+    SW_CHECK("full receiver: the advertisement table starts full", filled);
+    SW_CHECK("full receiver: the first 64 announcements are queued and lost",
+             bundle_put_shelf(&p.seed, 0xf7, VCS_SWARM_MAX_LOCAL_ANNOUNCES) &&
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) ==
+                 VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+             bundle_drop_outbound(&p.seed, BUNDLE_SEEDER_HANDLE) ==
+                 VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0);
+    SW_CHECK("full receiver: a due retry cannot bypass the closed send window",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 0);
+    bundle_mono_set(BUNDLE_WINDOW);
+    vcs_swarm_engine_tick(p.seed.engine, SW_DAY, T0 + BUNDLE_WINDOW);
+    SW_CHECK("full receiver: 64 retries share the reopened send window",
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) ==
+                 VCS_SWARM_MAX_LOCAL_ANNOUNCES &&
+             bundle_drain_scored(&p.seed, BUNDLE_SEEDER_HANDLE, &p.leech,
+                                 BUNDLE_LEECH_HANDLE, T0 + BUNDLE_WINDOW,
+                                 &penalised, NULL) ==
+                 VCS_SWARM_MAX_LOCAL_ANNOUNCES);
+    struct vcs_swarm_advertised advertised[VCS_SWARM_MAX_PEER_ADS];
+    SW_CHECK("full receiver: retries add no advertisements and no offence",
+             vcs_swarm_engine_advertised(
+                 p.leech.engine, advertised, VCS_SWARM_MAX_PEER_ADS) ==
+                 VCS_SWARM_MAX_PEER_ADS && penalised == 0);
+    uint8_t bytes[] = { 0xf7, 200 }, root[32];
+    SW_CHECK("full receiver: retries consumed the sender's unique-root budget",
+             vcs_bundle_put_to_no_evict(p.seed.store, bytes, sizeof bytes,
+                                        root) == VCS_BUNDLE_OK &&
+             vcs_package_store_pin(p.seed.store, root, true) ==
+                 VCS_PACKAGE_STORE_OK &&
+             vcs_swarm_engine_announce_to(p.seed.engine,
+                                          BUNDLE_SEEDER_HANDLE) == 0);
+    platform_clock_clear_source();
+    bundle_pair_close(&p);
+    return failures;
+}
+
 /* The receiver re-anchors its window at the first frame after expiry. One
  * root at S, then 63 just past the receiver's expiry (its window 2 starts
  * there holding 63): a fixed sender window would roll at S+3660 and send 64
@@ -1417,6 +1489,7 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_full_session_bound_fetch();
     failures += bundle_case_complete_on_full_session();
     failures += bundle_case_rotation_on_full_session();
+    failures += bundle_case_retry_on_full_receiver();
     failures += bundle_case_back_loaded_window();
     failures += bundle_case_timeout_messages();
     failures += bundle_case_summary_fits();
