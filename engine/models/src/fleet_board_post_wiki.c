@@ -287,6 +287,18 @@ static void wiki_view_where(struct qb *q, enum fleet_wiki_view view)
                      FLEET_BOARD_SCOPE_FLEET);
 }
 
+enum fleet_board_lookup_status db_fleet_board_wiki_lookup_checked(
+    struct node_db *ndb, enum fleet_wiki_view view, const uint8_t id[32],
+    struct db_fleet_board_post *out)
+{
+    if (!ndb || !ndb->open || !id || !out) return FLEET_BOARD_LOOKUP_ERROR;
+    struct qb q;
+    fleet_board_select_row(&q);
+    qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_EQ, id, 32);
+    wiki_view_where(&q, view);
+    return fleet_board_lookup_query_checked(ndb, &q, out);
+}
+
 static int board_wiki_next_slug(struct node_db *ndb, enum fleet_wiki_view view,
                                 const char *after, const uint8_t *author,
                                 char slug[FLEET_BOARD_SLUG_MAX + 1])

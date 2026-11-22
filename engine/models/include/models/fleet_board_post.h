@@ -308,6 +308,11 @@ bool fleet_wiki_view_has(enum fleet_wiki_view view, uint8_t scope);
 /* The scope a revision written into `view` is signed under. */
 uint8_t fleet_wiki_view_scope(enum fleet_wiki_view view);
 
+/* Exact revision lookup: visibility is selected before row verification. */
+enum fleet_board_lookup_status db_fleet_board_wiki_lookup_checked(
+    struct node_db *ndb, enum fleet_wiki_view view, const uint8_t id[32],
+    struct db_fleet_board_post *out);
+
 /* db_fleet_board_wiki_read within one view. */
 bool db_fleet_board_wiki_read_in(struct node_db *ndb, enum fleet_wiki_view view,
                                  const char *slug,

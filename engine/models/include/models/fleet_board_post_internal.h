@@ -23,6 +23,10 @@
  * the order fleet_board_row_read decodes them. */
 void fleet_board_select_row(struct qb *q);
 
+/* Execute an exact-row query with checked read and validation. */
+enum fleet_board_lookup_status fleet_board_lookup_query_checked(
+    struct node_db *ndb, struct qb *q, struct db_fleet_board_post *out);
+
 /* Decode the current row of a statement started by fleet_board_select_row
  * and verify the post's id and signature again. A row that fails is logged
  * and zeroed except for its arrival number, and false is returned. */

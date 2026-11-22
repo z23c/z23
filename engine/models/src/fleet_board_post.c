@@ -1127,20 +1127,16 @@ enum fleet_board_reclaim db_fleet_board_reclaim_expired(
     return FLEET_BOARD_RECLAIM_DONE;
 }
 
-enum fleet_board_lookup_status db_fleet_board_post_lookup_checked(
-    struct node_db *ndb, const uint8_t id[32], struct db_fleet_board_post *out)
+enum fleet_board_lookup_status fleet_board_lookup_query_checked(
+    struct node_db *ndb, struct qb *q, struct db_fleet_board_post *out)
 {
-    if (!ndb || !ndb->open || !id || !out)
+    if (!ndb || !ndb->open || !q || !out)
         return FLEET_BOARD_LOOKUP_ERROR;
     memset(out, 0, sizeof(*out));
-    struct qb q;
-    qb_select(&q, QB_T_fleet_board_posts);
-    qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
-    qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_EQ, id, 32);
     sqlite3_stmt *s = NULL;
-    if (!QB_PREPARE(ndb, &q, s)) {
+    if (!QB_PREPARE(ndb, q, s)) {
         LOG_WARN("fleet.board", "post lookup prepare failed: %s",
-                 qb_error(&q));
+                 qb_error(q));
         return FLEET_BOARD_LOOKUP_ERROR;
     }
     enum zcl_step step = ar_step_checked(s, "fleet.board checked lookup", NULL);
@@ -1151,6 +1147,17 @@ enum fleet_board_lookup_status db_fleet_board_post_lookup_checked(
     if (sqlite3_finalize(s) != SQLITE_OK) result = FLEET_BOARD_LOOKUP_ERROR;
     if (result != FLEET_BOARD_LOOKUP_FOUND) memset(out, 0, sizeof(*out));
     return result;
+}
+
+enum fleet_board_lookup_status db_fleet_board_post_lookup_checked(
+    struct node_db *ndb, const uint8_t id[32], struct db_fleet_board_post *out)
+{
+    if (!ndb || !ndb->open || !id || !out)
+        return FLEET_BOARD_LOOKUP_ERROR;
+    struct qb q;
+    fleet_board_select_row(&q);
+    qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_EQ, id, 32);
+    return fleet_board_lookup_query_checked(ndb, &q, out);
 }
 
 bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],

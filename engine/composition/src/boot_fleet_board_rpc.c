@@ -725,8 +725,12 @@ static void fb_op_wiki_chunk(struct node_db *ndb, enum fleet_wiki_view view,
         return;
     }
     struct db_fleet_board_post row;
-    if (!db_fleet_board_post_find(ndb, id, &row) ||
-        !fleet_wiki_view_has(view, row.post.scope)) {
+    enum fleet_board_lookup_status lookup = db_fleet_board_wiki_lookup_checked(ndb, view, id, &row);
+    if (lookup == FLEET_BOARD_LOOKUP_ERROR) {
+        fb_error(result, "BOARD_READ_FAILED", "the revision could not be read; inspect node storage logs");
+        return;
+    }
+    if (lookup == FLEET_BOARD_LOOKUP_ABSENT) {
         fb_error(result, "NOT_FOUND", "no verifying retained revision with that id is held here in this scope (a fleet revision needs scope=fleet)");
         return;
     }

@@ -5129,23 +5129,32 @@ static bool fb_chunk_reassemble(struct fb_rpc_env *e, const char *id,
     return fb_chunk_reassemble_as(e, id, expected, false, 4096);
 }
 
-static bool fb_chunk_refused(struct fb_rpc_env *e, const char *id,
-                             int64_t offset, int64_t bytes, const char *code)
+static bool fb_chunk_refused_scope(struct fb_rpc_env *e, const char *id,
+                                   int64_t offset, int64_t bytes,
+                                   const char *scope, const char *code)
 {
     struct json_value input, result;
     json_init(&input); json_init(&result); json_set_object(&input);
-    (void)json_push_kv_str(&input, "op", "wiki_read");
-    (void)json_push_kv_str(&input, "id", id);
-    (void)json_push_kv_int(&input, "offset", offset);
-    (void)json_push_kv_int(&input, "bytes", bytes);
-    bool ok = fb_test_rpc(&e->table, &input, &result) &&
-        !json_get_bool(json_get(&result, "ok")) &&
-        !strcmp(json_get_str(json_get(&result, "code")), code);
-    json_free(&input); json_free(&result);
-    return ok;
+    bool ok = json_push_kv_str(&input, "op", "wiki_read") &&
+              json_push_kv_str(&input, "id", id) &&
+              json_push_kv_int(&input, "offset", offset) &&
+              json_push_kv_int(&input, "bytes", bytes) &&
+              (!scope || json_push_kv_str(&input, "scope", scope)) &&
+              fb_test_rpc(&e->table, &input, &result);
+    const char *got = json_get_str(json_get(&result, "code"));
+    ok = ok && !json_get_bool(json_get(&result, "ok")) && got &&
+         strcmp(got, code) == 0 && !json_get(&result, "data_hex");
+    json_free(&input); json_free(&result); return ok;
 }
 
-static bool fb_chunk_wrapper_refused(struct fb_rpc_env *e, const char *id)
+static bool fb_chunk_refused(struct fb_rpc_env *e, const char *id,
+                             int64_t offset, int64_t bytes, const char *code)
+{
+    return fb_chunk_refused_scope(e, id, offset, bytes, NULL, code);
+}
+
+static bool fb_chunk_wrapper_refused(struct fb_rpc_env *e, const char *id,
+                                     const char *evidence)
 {
     struct json_value input;
     json_init(&input); json_set_object(&input);
@@ -5159,7 +5168,9 @@ static bool fb_chunk_wrapper_refused(struct fb_rpc_env *e, const char *id)
     node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
     const char *code = reply.error.code;
     bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && code &&
-        !strcmp(code, "WIKI_READ_UNAVAILABLE") && !json_get(&reply.data, "revision");
+        !strcmp(code, "WIKI_READ_UNAVAILABLE") &&
+        (!evidence || !strcmp(reply.error.evidence, evidence)) &&
+        !json_get(&reply.data, "revision");
     zcl_command_reply_free(&reply); json_free(&input);
     return ok;
 }
@@ -6535,7 +6546,14 @@ static int test_fleet_wiki_chunks(void)
         ASSERT(fb_chunk_reassemble_as(&e, id, &row.post, true, 3072));
         ASSERT(fb_chunk_reassemble_as(&e, id, &row.post, true, 4096));
         ASSERT(fb_chunk_reassemble_as(&e, id, &row.post, true, 8192));
+        ASSERT_EQ(sqlite3_set_authorizer(e.db.db, fb_deny_read, NULL), SQLITE_OK);
+        bool denied = fb_chunk_refused_scope(&e, id, 0, 1024, NULL, "BOARD_READ_FAILED");
+        int restored = sqlite3_set_authorizer(e.db.db, NULL, NULL);
+        ASSERT_EQ(restored, SQLITE_OK);
+        ASSERT(denied);
+        ASSERT(fb_chunk_reassemble(&e, id, &row.post));
         ASSERT(fb_chunk_copy_faults(&e, id));
+
         ASSERT(fb_chunk_refused(&e, id, -1, 1024, "BAD_CHUNK"));
         ASSERT(fb_chunk_refused(&e, id, 0, 1025, "BAD_CHUNK"));
         ASSERT(fb_chunk_refused(&e, id, 16385, 1024, "BAD_OFFSET"));
@@ -6543,16 +6561,30 @@ static int test_fleet_wiki_chunks(void)
             "0000000000000000000000000000000000000000000000000000000000000000",
             0, 1024, "NOT_FOUND"));
         ASSERT(fb_chunk_wrapper_refused(&e,
-            "0000000000000000000000000000000000000000000000000000000000000000"));
+            "0000000000000000000000000000000000000000000000000000000000000000", NULL));
         struct json_value end;
         ASSERT(fb_chunk_envelope(&e, id, row.post.text_len, &end));
         ASSERT(json_get_bool(json_get(json_get(&end, "data"), "complete")));
         ASSERT_STR_EQ(json_get_str(json_get(json_get(&end, "data"), "data_hex")), "");
         json_free(&end);
         ASSERT(node_db_exec(&e.db, "UPDATE fleet_board_posts SET text='corrupted' WHERE slug='chunk-page'"));
-        ASSERT(fb_chunk_refused(&e, id, 0, 1024, "NOT_FOUND"));
-        ASSERT(fb_chunk_wrapper_refused(&e, id));
+        ASSERT(fb_chunk_refused(&e, id, 0, 1024, "BOARD_READ_FAILED"));
+        ASSERT(fb_chunk_wrapper_refused(&e, id, "BOARD_READ_FAILED"));
+        uint8_t hidden_seed[32], hidden_pk[32];
+        fb_test_identity(35, hidden_seed, hidden_pk);
+        struct fleet_board_post hidden;
+        fb_test_compose(&hidden, FLEET_BOARD_KIND_WIKI, "scribe", "private bytes", (uint64_t)now, 3600);
+        fb_test_scope(&hidden, FLEET_BOARD_SCOPE_FLEET, "");
+        (void)snprintf(hidden.slug, sizeof(hidden.slug), "hidden-corrupt");
+        (void)snprintf(hidden.title, sizeof(hidden.title), "hidden");
+        ASSERT_EQ(fleet_board_post_sign(&hidden, hidden_seed, hidden_pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&e.db, &hidden, now, NULL), FLEET_BOARD_OK);
+        char hidden_id[65]; fleet_board_id_to_hex(hidden.id, hidden_id);
+        ASSERT(node_db_exec(&e.db, "UPDATE fleet_board_posts SET text='corrupted' WHERE slug='hidden-corrupt'"));
+        ASSERT(fb_chunk_refused_scope(&e, hidden_id, 0, 1024, NULL, "NOT_FOUND"));
+        ASSERT(fb_chunk_refused_scope(&e, hidden_id, 0, 1024, "fleet", "BOARD_READ_FAILED"));
         uint8_t seed[32], pk[32];
+
         fb_test_identity(32, seed, pk);
         struct fleet_board_post note;
         fb_test_compose(&note, FLEET_BOARD_KIND_NOTE, "tester", "a note",
@@ -6562,7 +6594,7 @@ static int test_fleet_wiki_chunks(void)
         ASSERT(db_fleet_board_post_ingest(&e.db, &note, now, NULL) == FLEET_BOARD_OK);
         fleet_board_id_to_hex(note.id, id);
         ASSERT(fb_chunk_refused(&e, id, 0, 1024, "NOT_WIKI"));
-        ASSERT(fb_chunk_wrapper_refused(&e, id));
+        ASSERT(fb_chunk_wrapper_refused(&e, id, NULL));
         PASS();
     } _test_next:;
     node_rpc_client_set_test_hook(NULL);
