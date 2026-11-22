@@ -531,6 +531,14 @@ static bool fb_page_visit(const struct db_fleet_board_post *row, void *ctx)
     return pushed;
 }
 
+static void fb_page_failure(struct json_value *result, const char *stage,
+                            const char *message)
+{
+    fb_error(result, "PAGE_UNAVAILABLE", message);
+    json_push_kv_str(result, "stage", stage);
+    json_push_kv_str(result, "next_action", "keep_cursor_retry_page");
+}
+
 static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
                              struct json_value *result, int64_t now)
 {
@@ -544,8 +552,8 @@ static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
     if (limit <= 0 || limit > (int64_t)FLEET_BOARD_FLEET_ANSWER_POSTS_MAX)
         limit = FLEET_BOARD_FLEET_ANSWER_POSTS_MAX;
     if (!fb_page_epoch_hex(epoch)) {
-        fb_error(result, "PAGE_UNAVAILABLE",
-                 "the CSPRNG did not yield this process's page epoch");
+        fb_page_failure(result, "epoch",
+                        "The process page epoch is unavailable.");
         return;
     }
     struct json_value arr;
@@ -557,8 +565,9 @@ static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
                                        fb_page_visit, &page, &scanned);
     if (n < 0 || page.failed) {
         json_free(&arr);
-        fb_error(result, "PAGE_UNAVAILABLE",
-                 "the fleet page could not be read or rendered");
+        fb_page_failure(result, page.failed ? "row_projection" : "page_read",
+                        page.failed ? "A fleet page row could not be rendered."
+                                    : "The fleet page could not be read.");
         return;
     }
     json_set_object(result);
@@ -569,7 +578,8 @@ static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
               json_push_kv_str(result, "epoch", epoch);
     json_free(&arr);
     if (!ok)
-        fb_error(result, "PAGE_UNAVAILABLE", "the fleet page could not be rendered");
+        fb_page_failure(result, "envelope_projection",
+                        "The fleet page envelope could not be rendered.");
 }
 
 /* The `fleet roles grant --fp=` value for this host key, from the role

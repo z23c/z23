@@ -3048,36 +3048,104 @@ static bool fb_rpc_fleet_page(struct fb_rpc_fixture *f, int64_t after,
     return ok;
 }
 
-static bool fb_page_faults(struct fb_rpc_fixture *f)
+static bool fb_page_refusal(const struct json_value *result, const char *stage)
 {
+    const char *code = json_get_str(json_get(result, "code"));
+    const char *actual = json_get_str(json_get(result, "stage"));
+    const char *action = json_get_str(json_get(result, "next_action"));
+    return !json_get_bool(json_get(result, "ok")) && code && actual && action &&
+           strcmp(code, "PAGE_UNAVAILABLE") == 0 && strcmp(actual, stage) == 0 &&
+           strcmp(action, "keep_cursor_retry_page") == 0 &&
+           !json_get(result, "posts") && !json_get(result, "scanned") &&
+           !json_get(result, "returned") && !json_get(result, "epoch");
+}
+
+static bool fb_page_retry_same(struct fb_rpc_fixture *f, const char *expected)
+{
+    struct json_value result;
+    json_init(&result);
+    bool ok = fb_rpc_fleet_page(f, 0, &result) && json_get_bool(json_get(&result, "ok"));
+    const struct json_value *posts = json_get(&result, "posts");
+    const char *id = json_get_str(json_get(json_at(posts, 0), "id"));
+    ok = ok && id && strcmp(id, expected) == 0;
+    json_free(&result);
+    return ok;
+}
+
+static bool fb_page_read_failure(struct fb_rpc_fixture *f, const char *expected)
+{
+    struct json_value result;
+    json_init(&result);
+    if (sqlite3_set_authorizer(f->db.db, fb_deny_read, NULL) != SQLITE_OK)
+        return false;
+    bool called = fb_rpc_fleet_page(f, 0, &result);
+    int restored = sqlite3_set_authorizer(f->db.db, NULL, NULL);
+    bool ok = restored == SQLITE_OK && called && fb_page_refusal(&result, "page_read");
+    json_free(&result);
+    return ok && fb_page_retry_same(f, expected);
+}
+
+struct fb_page_fault_coverage {
+    bool projection, envelope;
+};
+
+static bool fb_page_fault_verify(struct fb_rpc_fixture *f, const char *expected,
+                                 const struct json_value *result,
+                                 struct fb_page_fault_coverage *coverage)
+{
+    if (json_get_bool(json_get(result, "ok")) || json_get(result, "scanned") ||
+        json_get(result, "posts")) return false;
+    if (!coverage->projection && fb_page_refusal(result, "row_projection")) {
+        coverage->projection = fb_page_retry_same(f, expected);
+        if (!coverage->projection) return false;
+    }
+    if (!coverage->envelope && fb_page_refusal(result, "envelope_projection")) {
+        coverage->envelope = fb_page_retry_same(f, expected);
+        if (!coverage->envelope) return false;
+    }
+    return true;
+}
+
+/* -1 on unsafe output, 0 when this allocation was not reached, 1 on hit. */
+static int fb_page_fault_one(struct fb_rpc_fixture *f, const char *expected,
+                             const char *label, unsigned nth,
+                             struct fb_page_fault_coverage *coverage)
+{
+    struct json_value input, params, result;
+    json_init(&input); json_init(&params); json_init(&result);
+    json_set_object(&input); json_set_array(&params);
+    bool setup = json_push_kv_str(&input, "op", "fleet_page") &&
+                 json_push_kv_int(&input, "after", 0) &&
+                 json_push_back(&params, &input);
+    bool called = false, hit = false, safe = setup;
+    if (setup) {
+        zcl_alloc_fault_fail_nth(label, nth);
+        called = rpc_table_execute(&f->table, "fleet_board", &params, &result);
+        hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        if (hit && called) safe = fb_page_fault_verify(f, expected, &result, coverage);
+    }
+    json_free(&result); json_free(&params); json_free(&input);
+    return !safe ? -1 : hit ? 1 : 0;
+}
+
+static bool fb_page_faults(struct fb_rpc_fixture *f, const char *expected)
+{
+    struct fb_page_fault_coverage coverage = {0};
     static const char *const labels[] = {"json_set_str", "json_push_kv_key",
         "json_children", "json_keys", "json_copy_children", "json_copy_keys",
         "json_copy_key", "json_copy_str"};
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
         bool any = false;
         for (unsigned nth = 1; nth <= 128; nth++) {
-            struct json_value input, params, result;
-            json_init(&input); json_init(&params); json_init(&result);
-            json_set_object(&input); json_set_array(&params);
-            bool setup = json_push_kv_str(&input, "op", "fleet_page") &&
-                         json_push_kv_int(&input, "after", 0) &&
-                         json_push_back(&params, &input);
-            if (!setup) { json_free(&input); json_free(&params); return false; }
-            zcl_alloc_fault_fail_nth(labels[i], nth);
-            bool called = rpc_table_execute(&f->table, "fleet_board", &params, &result);
-            bool hit = zcl_alloc_fault_armed_label() == NULL;
-            zcl_alloc_fault_clear();
-            bool safe = !hit || !called ||
-                (!json_get_bool(json_get(&result, "ok")) &&
-                 !json_get(&result, "scanned") && !json_get(&result, "posts"));
-            json_free(&result); json_free(&params); json_free(&input);
-            if (!safe) return false;
-            if (!hit) break;
+            int outcome = fb_page_fault_one(f, expected, labels[i], nth, &coverage);
+            if (outcome < 0) return false;
+            if (!outcome) break;
             any = true;
         }
         if (!any) return false;
     }
-    return true;
+    return coverage.projection && coverage.envelope;
 }
 
 static int test_fleet_board_rpc_fleet_page(void)
@@ -3098,6 +3166,10 @@ static int test_fleet_board_rpc_fleet_page(void)
         json_init(&out);
         ASSERT(fb_rpc_post_at(&f, "arrives first", now - 100, 3600, &out));
         ASSERT(json_get_bool(json_get(&out, "ok")));
+        char expected_id[65];
+        const char *id = json_get_str(json_get(&out, "id"));
+        ASSERT(id && strlen(id) == 64);
+        (void)snprintf(expected_id, sizeof(expected_id), "%s", id);
         json_free(&out);
         /* Signed EARLIER but arriving later: a created_at cursor would
          * pass it over; the arrival page must not. */
@@ -3110,7 +3182,8 @@ static int test_fleet_board_rpc_fleet_page(void)
                            &out));
         ASSERT(json_get_bool(json_get(&out, "ok")));
         json_free(&out);
-        ASSERT(fb_page_faults(&f));
+        ASSERT(fb_page_read_failure(&f, expected_id));
+        ASSERT(fb_page_faults(&f, expected_id));
 
         json_init(&page);
         ASSERT(fb_rpc_fleet_page(&f, 0, &page));
