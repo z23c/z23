@@ -304,6 +304,13 @@ z23 plugin call name=upper stdin=abc   # runs the new generation at once
 z23 plugin rollback name=upper         # previous generation current again
 ```
 
+A bare `key=value` word is the same as `--key=value` when the command declares
+`key` as an input and either every positional slot is already filled or the
+next unfilled slot is `key` (`name=upper`, `dir=./upper`, `cases=[...]`). Any
+other word stays positional, so free text and paths containing `=` are
+unchanged; a value that begins with its own slot name and `=` is written
+`--K=K=...`.
+
 `cases` is the array `lab.promote` takes: 1..256 objects with `name` and
 optional `stdin`, `args`, `expect_stdout`, `expect_exit`. Before any key, pack,
 publish, install or switch, `plugin dev` runs each case against `DIR/NAME`

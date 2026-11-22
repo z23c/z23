@@ -1062,6 +1062,15 @@ An unknown field name is a typed error (below) naming the bad field and up
 to 12 known field names; nothing is printed on partial failure. `field=` also
 works as a normal dashed flag (`--field=a,b`) on any native registry leaf.
 
+**Bare `key=value` words.** Besides `field=`, a bare word `ident=value` is a
+named input exactly like `--ident=value` (same typing, duplicate and range
+checks) when the resolved leaf declares `ident` and either every positional
+slot is already filled or the next unfilled slot is `ident` itself, for
+example `z23 plugin call name=hello stdin=abc`. Any other word stays
+positional, so `z23 ops logs level=error` still searches for that text; the
+one literal that changes meaning begins with its own slot name and `=`, and is
+written `--K=K=value`.
+
 **Terse by construction.** `status` always uses the bounded money-journey
 body. Its default one-line render is at most 320 bytes and ends with the exact
 `next_action`; control whitespace is collapsed so an action cannot inject a

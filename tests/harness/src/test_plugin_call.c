@@ -492,6 +492,173 @@ static int pct_case_keys_chain(void)
     return failures;
 }
 
+/* Run one `plugin <args>` CLI word list through the real argv normalizer and
+ * copy what it printed to stdout into out. Returns the exit code, or -1 when
+ * the capture itself failed. */
+static int pct_cli_root(const char *root, const char *const *args, int nargs,
+                        const char *datadir, char *out, size_t cap)
+{
+    FILE *tmp = tmpfile();
+    int rc = -1;
+    if (!tmp)
+        return -1;
+    fflush(stdout);
+    int saved = dup(fileno(stdout));
+    if (saved >= 0 && dup2(fileno(tmp), fileno(stdout)) >= 0) {
+        rc = zcl_native_command_main(root, args, nargs, datadir, 0,
+                                     CHAIN_MAIN, true);
+        fflush(stdout);
+        (void)dup2(saved, fileno(stdout));
+    }
+    if (saved >= 0)
+        close(saved);
+    rewind(tmp);
+    size_t n = fread(out, 1, cap - 1, tmp);
+    out[n] = '\0';
+    fclose(tmp);
+    return rc;
+}
+
+static int pct_cli(const char *const *args, int nargs, const char *datadir,
+                   char *out, size_t cap)
+{
+    return pct_cli_root("plugin", args, nargs, datadir, out, cap);
+}
+
+/* A bare `key=value` word is the named input when the leaf declares the
+ * key, exactly like --key=value; every other word stays positional; a
+ * declared key that is repeated is refused like a repeated flag; and
+ * --K=K=v is the documented way to pass a value that begins with `K=`. */
+static int pct_case_cli_named(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_open(&e);
+    char out[8192], base[PATH_MAX], path[PATH_MAX];
+    const char *old = getenv("Z23_LAB_DIR");
+    char old_lab[PATH_MAX] = "";
+    bool had_old = old != NULL;
+    if (old) snprintf(old_lab, sizeof(old_lab), "%s", old);
+    TEST_CASE("plugin call and status accept declared key=value words as named inputs") {
+        ASSERT(ready);
+        ASSERT(pct_publish(&e, "upper", 2));
+        ASSERT(pct_join(base, sizeof(base), e.base, "lab-only-run"));
+        ASSERT_EQ(mkdir(base, 0700), 0);
+        ASSERT(pct_join(path, sizeof(path), base, "run"));
+        ASSERT_EQ(mkdir(path, 0700), 0);
+        ASSERT_EQ(setenv("Z23_LAB_DIR", base, 1), 0);
+        const char *named[] = {"call", "name=upper", "stdin=abc"};
+        ASSERT_EQ(pct_cli(named, 3, e.base, out, sizeof(out)), ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "ABC") != NULL);
+        const char *dashed[] = {"call", "--name=upper", "--stdin=abc"};
+        ASSERT_EQ(pct_cli(dashed, 3, e.base, out, sizeof(out)), ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "ABC") != NULL);
+        /* An undeclared key stays positional: `nokey=1` is the plugin name. */
+        const char *undeclared[] = {"status", "nokey=1"};
+        ASSERT(pct_cli(undeclared, 2, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "PLUGIN_NOT_INSTALLED") != NULL && strstr(out, "nokey=1") != NULL);
+        /* A repeated declared key is refused as a repeated --key is. */
+        const char *twice[] = {"call", "name=upper", "stdin=a", "stdin=b"};
+        ASSERT(pct_cli(twice, 4, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'stdin'") != NULL);
+        /* name= names the plugin, not the literal word `name=nope`. */
+        const char *status[] = {"status", "name=nope"};
+        ASSERT(pct_cli(status, 2, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "PLUGIN_NOT_INSTALLED") != NULL);
+        ASSERT(strstr(out, "name=nope") == NULL);
+        /* --K=K=v keeps the whole word as the value. */
+        const char *literal[] = {"status", "--name=name=nope"};
+        ASSERT(pct_cli(literal, 2, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "name=nope") != NULL);
+    } TEST_END
+    if (had_old) (void)setenv("Z23_LAB_DIR", old_lab, 1);
+    else (void)unsetenv("Z23_LAB_DIR");
+    pct_env_close(&e);
+    return failures;
+}
+
+/* The bare key=value rule: a declared key is named only when every
+ * positional slot is filled or the next open slot is that key; otherwise the
+ * word is free text for the open slot. A `--input` JSON object that already
+ * carries the key makes the two readings observable: named is a duplicate. */
+static int pct_case_cli_slots(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_open(&e);
+    char out[8192];
+    TEST_CASE("bare key=value is free text while its positional slot is open") {
+        ASSERT(ready);
+        /* ops.logs slot is `pattern`: `level=error` stays the pattern. */
+        const char *free_text[] = {"logs", "--input={\"level\":\"warn\"}", "level=error"};
+        (void)pct_cli_root("ops", free_text, 3, e.base, out, sizeof(out));
+        ASSERT(strstr(out, "duplicate input key") == NULL);
+        ASSERT(strstr(out, "TOO_MANY_ARGS") == NULL);
+        /* Pattern filled, then a declared key: the key is named (it was
+         * TOO_MANY_ARGS before); with the key already given it is a duplicate. */
+        const char *after[] = {"logs", "error", "level=warn"};
+        (void)pct_cli_root("ops", after, 3, e.base, out, sizeof(out));
+        ASSERT(strstr(out, "TOO_MANY_ARGS") == NULL);
+        const char *dup[] = {"logs", "--input={\"level\":\"warn\"}", "error", "level=info"};
+        ASSERT(pct_cli_root("ops", dup, 4, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'level'") != NULL);
+        /* Two free words still overflow the single slot, as before. */
+        const char *many[] = {"logs", "a", "b"};
+        (void)pct_cli_root("ops", many, 3, e.base, out, sizeof(out));
+        ASSERT(strstr(out, "TOO_MANY_ARGS") != NULL);
+        /* fleet board post slots are kind,text: scope= is text while text is open. */
+        const char *board[] = {"board", "post", "--input={\"scope\":\"fleet\"}", "note", "scope=x"};
+        (void)pct_cli_root("fleet", board, 5, e.base, out, sizeof(out));
+        ASSERT(strstr(out, "duplicate input key") == NULL);
+        /* text= is the next open slot, so it is named; scope= after it too. */
+        const char *text[] = {"board", "post", "--input={\"text\":\"z\"}", "note", "text=hi"};
+        ASSERT(pct_cli_root("fleet", text, 5, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'text'") != NULL);
+        const char *scope[] = {"board", "post", "--input={\"scope\":\"fleet\"}", "note", "text=hi", "scope=x"};
+        ASSERT(pct_cli_root("fleet", scope, 6, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'scope'") != NULL);
+    } TEST_END
+    pct_env_close(&e);
+    return failures;
+}
+
+static int pct_case_cli_mixed(void)
+{
+    int failures = 0;
+    struct pct_env e;
+    bool ready = pct_env_open(&e);
+    char out[8192];
+    TEST_CASE("bare declared key mixed with a positional, --input and field= keep the dashed meaning") {
+        ASSERT(ready);
+        /* positional fills `name`, so a bare name= is a second name. */
+        const char *mixed[] = {"status", "nope", "name=other"};
+        ASSERT(pct_cli(mixed, 3, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'name'") != NULL);
+        /* --input plus a bare key conflicts exactly like the dashed form. */
+        const char *bare[] = {"status", "--input={\"name\":\"a\"}", "name=b"};
+        const char *dash[] = {"status", "--input={\"name\":\"a\"}", "--name=b"};
+        char out2[8192];
+        ASSERT(pct_cli(bare, 3, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(pct_cli(dash, 3, e.base, out2, sizeof(out2)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'name'") != NULL);
+        ASSERT(strstr(out2, "duplicate input key 'name'") != NULL);
+        /* field= stays the field selector and never an input (its error goes to stderr, not the plugin name). */
+        const char *field[] = {"status", "field=foo"};
+        ASSERT(pct_cli(field, 2, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "field=foo") == NULL && strstr(out, "PLUGIN_NOT_INSTALLED") == NULL);
+        /* plugin dev: dir is the open slot, so name= is free text there and
+         * named once dir is given. */
+        const char *dev_free[] = {"dev", "name=zzz"};
+        (void)pct_cli(dev_free, 2, e.base, out, sizeof(out));
+        ASSERT(strstr(out, "duplicate input key") == NULL);
+        const char *dev_dup[] = {"dev", "--input={\"name\":\"a\"}", "./d", "name=b"};
+        ASSERT(pct_cli(dev_dup, 4, e.base, out, sizeof(out)) != ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "duplicate input key 'name'") != NULL);
+    } TEST_END
+    pct_env_close(&e);
+    return failures;
+}
+
 int test_plugin_call(void)
 {
     int failures = 0;
@@ -504,6 +671,9 @@ int test_plugin_call(void)
     failures += pct_case_keys_refusals();
     failures += pct_case_keys_empty();
     failures += pct_case_keys_chain();
+    failures += pct_case_cli_named();
+    failures += pct_case_cli_slots();
+    failures += pct_case_cli_mixed();
     return failures;
 }
 #endif

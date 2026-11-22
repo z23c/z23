@@ -4460,34 +4460,98 @@ static enum nc_main_flag_result nc_main_apply_flag(
     return NC_FLAG_OK;
 }
 
+/* True when a bare `key=value` word may name `key`: every positional slot is
+ * already filled (by earlier positionals or earlier named inputs), or the next
+ * unfilled slot is `key` itself. Positional words bind to positional_keys in
+ * order and words arrive in order, so st->npos slots are already taken. The
+ * variadic leaves (code.guide, plugin.attest_add) never run out of slots. */
+static bool nc_main_slot_allows(const struct nc_main_state *st, const char *key)
+{
+    const char *at = st->spec->positional_keys ? st->spec->positional_keys : "";
+    size_t idx = 0, klen = strlen(key);
+    for (; *at; idx++) {
+        const char *end = strchr(at, ',');
+        size_t n = end ? (size_t)(end - at) : strlen(at);
+        char slot[64];
+        bool filled = idx < st->npos;
+        if (!filled && n < sizeof(slot)) {
+            memcpy(slot, at, n);
+            slot[n] = 0;
+            filled = json_get(&st->flags, slot) != NULL;
+        }
+        if (!filled)
+            return n == klen && memcmp(at, key, n) == 0;
+        at = end ? end + 1 : "";
+    }
+    return strcmp(st->spec->path, "code.guide") != 0 &&
+           strcmp(st->spec->path, "plugin.attest_add") != 0;
+}
+
+/* `ident=value` as a bare word names an input when the resolved leaf
+ * declares `ident` AND the word is not free text for a still-open positional:
+ * it is named only if every positional slot is already filled or the next
+ * unfilled slot is `ident` itself (nc_main_slot_allows); then it is exactly
+ * `--ident=value`. Otherwise it stays positional, so `ops logs level=error`
+ * still searches for the text `level=error`, and a path such as `./a=b`, or
+ * `x=1` for a leaf without a key `x`, is unchanged. The one literal that
+ * changes meaning begins with its own slot's name and '='; write it
+ * `--K=K=...` (the value is everything after the first '='). There is no `--`
+ * terminator. */
+static bool nc_main_bare_named_input(const struct nc_main_state *st,
+                                     const char *w, char *key, size_t cap,
+                                     const char **value)
+{
+    if (!(isalpha((unsigned char)w[0]) || w[0] == '_'))
+        return false;
+    size_t n = 1;
+    while (isalnum((unsigned char)w[n]) || w[n] == '_')
+        n++;
+    if (w[n] != '=' || n >= cap)
+        return false;
+    memcpy(key, w, n);
+    key[n] = 0;
+    *value = w + n + 1;
+    return nc_main_leaf_declares_key(st, key) && nc_main_slot_allows(st, key);
+}
+
+/* One collected word: a flag, a declared `key=value` input, or a bare
+ * positional. Returns true on a malformed word (*why carries the text). */
+static bool nc_main_parse_word(struct nc_main_state *st, size_t i, char *why,
+                               size_t why_cap)
+{
+    const char *w = st->words[i];
+    char key[128];
+    const char *value = NULL;
+    const char *next = i + 1 < st->count ? st->words[i + 1] : NULL;
+    if (!nc_is_flag(w)) {
+        if (strncmp(w, "field=", 6) != 0 &&
+            nc_main_bare_named_input(st, w, key, sizeof(key), &value))
+            return nc_main_apply_flag(st, key, value, NULL, why, why_cap) ==
+                   NC_FLAG_BAD;
+        return !nc_main_parse_bare_word(w, st, why, why_cap);
+    }
+    return !nc_split_flag(w, key, sizeof(key), &value) ||
+           nc_main_apply_flag(st, key, value, next, why, why_cap) ==
+               NC_FLAG_BAD;
+}
+
 /* Collect the tokens the path did not consume: positionals in order and
  * value flags into a scratch object (st->flags). CLI UX contract: field
  * selector + the bare no-arg entry point's next-command hint. `field=` is
  * accepted BOTH as a bare dash-less word (the documented
  * `z23 status field=a,b` convention) and as a normal `--field=a,b` flag;
  * both set the same field_csv. --next is internal-ish (used by the bare
- * no-arg entry point) but harmless for a caller to pass directly. */
+ * no-arg entry point) but harmless for a caller to pass directly. A bare
+ * `ident=value` word is also a named input when the leaf declares ident
+ * (see nc_main_bare_named_input). */
 static bool nc_main_parse_flags(struct nc_main_state *st, int *rc)
 {
     nc_main_flags_reset(st);
 
     bool flag_error = false;
-    char flag_key[128];
     char flag_why[160] = "malformed or duplicate option";
     for (size_t i = st->consumed; i < st->count; i++) {
-        const char *w = st->words[i];
-        if (!nc_is_flag(w)) {
-            flag_error = !nc_main_parse_bare_word(w, st, flag_why,
-                                                  sizeof(flag_why));
-        } else {
-            const char *value = NULL;
-            const char *next = i + 1 < st->count ? st->words[i + 1] : NULL;
-            flag_error = !nc_split_flag(w, flag_key, sizeof(flag_key),
-                                        &value) ||
-                         nc_main_apply_flag(st, flag_key, value, next,
-                                            flag_why, sizeof(flag_why)) ==
-                             NC_FLAG_BAD;
-        }
+        flag_error = nc_main_parse_word(st, i, flag_why, sizeof(flag_why));
         if (flag_error)
             break;
     }
