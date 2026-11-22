@@ -524,6 +524,10 @@ static struct bg_walk_start bg_validation_walk_start(
 
 /* ── Sampled re-verify loop (after the genesis→tip walk completes) ──── */
 
+static bool bg_validation_catch_up_round(
+    struct bg_validation_service *svc, int tip, const char *datadir,
+    const struct chain_params *params, int num_workers);
+
 static struct zcl_result bg_validation_publish_with_catchup(
     struct bg_validation_service *svc, bool external_seeded,
     const char *datadir, const struct chain_params *params, int num_workers);
@@ -542,14 +546,18 @@ static bool bg_validation_reverify_heal_authority(
 {
     if (cycle % BG_PUBLISH_RETRY_CYCLES != 0)
         return false;
-    if (*published && active_chain_height(&svc->ms->chain_active) <=
-                      atomic_load(&svc->progress.verified_height))
-        return false;
     /* Skipped script checks never heal in this loop (only a refold clears
      * them), so a retry would only repeat the refusal and its operator event
      * (r1 and r5 carry skips today). */
     if (atomic_load(&svc->progress.script_verif_skipped_no_undo) != 0)
         return false;
+    if (*published) {
+        int verified = atomic_load(&svc->progress.verified_height);
+        int tip = active_chain_height(&svc->ms->chain_active);
+        if (bg_validation_authority_catchup_wanted(verified, tip, 0, true))
+            (void)bg_validation_catch_up_round(svc, tip, datadir, params, num_workers);
+        return atomic_load(&svc->progress.state) == BG_VALIDATION_FAILED;
+    }
     struct zcl_result r = bg_validation_publish_with_catchup(
         svc, external_seeded, datadir, params, num_workers);
     *published = r.ok;
