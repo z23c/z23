@@ -10339,6 +10339,7 @@ static bool fbw_status_match(const struct json_value *result)
     size_t len = json_write(result, rendered, sizeof rendered);
     return json_get_bool(json_get(attempt, "observed")) &&
            json_get_bool(json_get(ingest, "observed")) && epoch && disposition &&
+           !json_get(attempt, "next_action") && !json_get(ingest, "next_action") &&
            strlen(epoch) == 32 &&
            strcmp(disposition, "stored") == 0 && len > 0 && len < sizeof rendered &&
            strstr(rendered, epoch) != NULL;
@@ -10384,6 +10385,135 @@ static bool fbw_status_observations(struct fbw *w, const uint8_t post[32])
     app_runtime_set_current(&w->runtime);
     if (was_warming) set_rpc_warmup_started(warmup);
     return ok;
+}
+
+/* Query one real observation by its exact peer and post, without listing. */
+static bool fbw_status_action(struct fbw *w, const uint8_t peer[32],
+                              const uint8_t post[32], const char *field,
+                              const char *phase, const char *action)
+{
+    struct db_service service = {.node_db = &w->b, .started = true};
+    struct app_runtime_context runtime = {.db_service = &service};
+    struct rpc_table table;
+    struct json_value result;
+    char warmup[256], peer_hex[65], post_hex[65];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
+    rpc_table_init(&table);
+    boot_fleet_board_register_rpc(&table);
+    json_init(&result);
+    set_rpc_warmup_finished();
+    app_runtime_set_current(&runtime);
+    fleet_board_id_to_hex(peer, peer_hex);
+    fleet_board_id_to_hex(post, post_hex);
+    bool ok = fbw_status_call(&table, peer_hex, post_hex, &result);
+    const struct json_value *observation = json_get(&result, field);
+    const char *got_phase = json_get_str(json_get(observation, "phase"));
+    const char *got_action = json_get_str(json_get(observation, "next_action"));
+    ok = ok && json_get_bool(json_get(observation, "observed")) &&
+         got_phase && strcmp(got_phase, phase) == 0 && got_action &&
+         strcmp(got_action, action) == 0;
+    json_free(&result);
+    app_runtime_set_current(&w->runtime);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    return ok;
+}
+
+static int test_fleet_board_malformed_answer_status(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post;
+    struct boot_fleet_board_fleet_counts before, after;
+    struct db_service service = {.node_db = &w.b, .started = true};
+    struct app_runtime_context runtime = {.db_service = &service};
+    struct rpc_table table;
+    struct json_value result;
+    char warmup[256], peer_hex[65], post_hex[65];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
+    bool opened = fbw_open(&w);
+    json_init(&result);
+    rpc_table_init(&table);
+    boot_fleet_board_register_rpc(&table);
+    set_rpc_warmup_finished();
+    TEST("fleet board status: a malformed paired answer names the refusal "
+         "and a non-destructive next action") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "malformed answer",
+                        2000, 3600, 2100, &post));
+        w.nm.num_nodes = 0;
+        bool disconnected_open = boot_fleet_board_fleet_test_pull(
+            w.f.resp_noise_pub, w.box_a);
+        w.nm.num_nodes = 2;
+        ASSERT(!disconnected_open);
+        ASSERT(fbw_status_action(&w, w.box_a, post.id, "peer_attempt",
+                                 "open_failure", "inspect_peer_connection"));
+        boot_fleet_board_fleet_counts(&before);
+        ASSERT(boot_fleet_board_fleet_test_pull(w.f.resp_noise_pub, w.box_a));
+        uint8_t frame[MESH_LOOP_WIRE_MAX], kind = 0;
+        uint64_t sid = 0;
+        bool more = false;
+        size_t len = mesh_loop_take(w.asker, w.ask_q, w.f.res_term, frame,
+                                    sizeof frame, &more);
+        ASSERT(more && mesh_stream_test_read_header(frame, len, &kind, &sid));
+        ASSERT_EQ(kind, MESH_STREAM_KIND_OPEN);
+        ASSERT(mesh_stream_frame(&w.mp, w.answerer, frame, len, NULL));
+        boot_fleet_board_fleet_test_serve();
+        boot_fleet_board_fleet_test_serve();
+        len = mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini, frame,
+                             sizeof frame, &more);
+        ASSERT(more && mesh_stream_test_read_header(frame, len, &kind, NULL));
+        ASSERT_EQ(kind, MESH_STREAM_KIND_DATA);
+        const size_t data_off = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u + 2u;
+        ASSERT(len > data_off + FLEET_BOARD_FLEET_ANSWER_HEAD);
+        struct board_answer_head head;
+        ASSERT(board_answer_head_decode(frame + data_off, len - data_off, &head));
+        ASSERT(head.scanned > 0);
+        ASSERT(board_answer_valid(frame + data_off, len - data_off, &head, 0, false));
+        uint8_t truncated[MESH_LOOP_WIRE_MAX];
+        len = mesh_stream_test_data_frame(sid, frame + data_off,
+                                           len - data_off - 1, truncated,
+                                           sizeof truncated);
+        ASSERT(len && mesh_stream_frame(&w.mp, w.asker, truncated, len, NULL));
+        ASSERT_EQ(mesh_loop_pump(w.answerer, w.answer_q, w.f.term_peer.ini,
+                                 &w.mp, w.asker), (size_t)1);
+        ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), (size_t)0);
+        boot_fleet_board_fleet_counts(&after);
+        ASSERT_EQ(after.answer_refused, before.answer_refused + 1);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        fleet_board_id_to_hex(w.box_a, peer_hex);
+        fleet_board_id_to_hex(post.id, post_hex);
+        app_runtime_set_current(&runtime);
+        ASSERT(fbw_status_call(&table, peer_hex, post_hex, &result));
+        const struct json_value *attempt = json_get(&result, "peer_attempt");
+        const struct json_value *ingest = json_get(&result, "post_ingest");
+        ASSERT(json_get_bool(json_get(attempt, "observed")));
+        ASSERT(json_get_str(json_get(attempt, "phase")));
+        ASSERT_STR_EQ(json_get_str(json_get(attempt, "phase")), "answer_refused");
+        ASSERT(json_get_str(json_get(attempt, "reason")));
+        ASSERT_STR_EQ(json_get_str(json_get(attempt, "reason")), "malformed");
+        ASSERT(json_get_str(json_get(attempt, "next_action")));
+        ASSERT_STR_EQ(json_get_str(json_get(attempt, "next_action")),
+                      "inspect_peer_board_protocol");
+        ASSERT(!json_get(attempt, "epoch"));
+        ASSERT(!json_get_bool(json_get(ingest, "observed")));
+        app_runtime_set_current(&w.runtime);
+        mesh_stream_test_reset();
+        ASSERT(boot_fleet_board_fleet_test_pull(w.f.resp_noise_pub, w.box_a));
+        ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), 0);
+        PASS();
+    }
+    _test_next:
+    json_free(&result);
+    app_runtime_set_current(&w.runtime);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    fbw_close(&w);
+    return failures;
 }
 
 #define FBW_BATCH 16
@@ -10458,6 +10588,8 @@ static int test_fleet_board_fleet_carriage_gap_free(void)
         ASSERT_EQ(after.deferred, before.deferred + 1);
         ASSERT(!db_fleet_board_have(&w.b, refused.id));
         ASSERT(db_fleet_board_have(&w.b, beside.id));
+        ASSERT(fbw_status_action(&w, w.box_a, refused.id, "post_ingest",
+                                 "ingest", "inspect_writer_role_and_roster"));
         /* Still refused: the next forward page carries the next post, and
          * the sweep after it offers the refused one again, in vain. */
         ASSERT(fbw_post(&w.a, 23, FLEET_BOARD_SCOPE_FLEET, "behind it",
@@ -12912,6 +13044,9 @@ static int test_fleet_board_roster_relay(void)
         ASSERT(gate.found && gate.phase == FLEET_BOARD_OBS_GATE);
         ASSERT_EQ(gate.result, FLEET_BOARD_GATE_ROSTER);
         ASSERT(!gate.epoch_set && !observed_post.found);
+        ASSERT(fbw_status_action(&w, w.f.term_peer.delegation.doc.master_pubkey,
+                                 after_member.id, "peer_attempt", "gate_refusal",
+                                 "inspect_peer_roster"));
 
         /* The peer joins the roster: served within the next pull. */
         ASSERT(fbr_member_row(&w.a, FBR_ROOT, "peerbox", FBR_PEER, now + 1));
@@ -16008,6 +16143,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_fleet_cursor_heals_lost_rows();
     failures += test_fleet_board_fleet_cursor_table_full();
     failures += test_fleet_board_fleet_carriage_gap_free();
+    failures += test_fleet_board_malformed_answer_status();
     failures += test_fleet_board_fleet_wiki_full_is_final();
     failures += test_fleet_board_fleet_wiki_carriage();
     failures += test_fleet_board_fleet_quota();

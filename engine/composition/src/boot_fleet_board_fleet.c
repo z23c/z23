@@ -913,6 +913,9 @@ static size_t board_drain_slot(struct node_db *ndb,
         !board_answer_valid(slot->rows, slot->len, &h, slot->ask.after,
                             slot->ask.roster)) {
         atomic_fetch_add_explicit(&g_answer_refused, 1, memory_order_relaxed);
+        if (!slot->ask.roster)
+            board_observe(slot->ask.peer_box_id, NULL, slot->ask.after, 0, 0,
+                          FLEET_BOARD_OBS_ANSWER_REFUSED, false, false, NULL);
         LOG_WARN("fleet.board", "fleet answer refused: malformed");
         return 0;
     }

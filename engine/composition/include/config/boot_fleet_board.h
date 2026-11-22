@@ -352,7 +352,8 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * The peer identifier is the paired peer's master public key. */
 enum boot_fleet_board_observation_phase {
     FLEET_BOARD_OBS_OPEN_ATTEMPT, FLEET_BOARD_OBS_OPEN_FAILURE,
-    FLEET_BOARD_OBS_CLOSE, FLEET_BOARD_OBS_INGEST, FLEET_BOARD_OBS_GATE
+    FLEET_BOARD_OBS_CLOSE, FLEET_BOARD_OBS_INGEST, FLEET_BOARD_OBS_GATE,
+    FLEET_BOARD_OBS_ANSWER_REFUSED
 };
 enum boot_fleet_board_gate_reason {
     FLEET_BOARD_GATE_PAIRING, FLEET_BOARD_GATE_DELEGATION_UNRESOLVED,

@@ -161,6 +161,7 @@ static const char *fb_observation_phase(enum boot_fleet_board_observation_phase 
         [FLEET_BOARD_OBS_CLOSE] = "close",
         [FLEET_BOARD_OBS_INGEST] = "ingest",
         [FLEET_BOARD_OBS_GATE] = "gate_refusal",
+        [FLEET_BOARD_OBS_ANSWER_REFUSED] = "answer_refused",
     };
     return (unsigned)phase < sizeof names / sizeof names[0] ? names[phase] : "unknown";
 }
@@ -190,12 +191,78 @@ static bool fb_observation_detail(struct json_value *o,
         return json_push_kv_str(o, "reason", reason < sizeof gate_reasons / sizeof gate_reasons[0]
                                 ? gate_reasons[reason] : "unknown");
     }
+    if (v->phase == FLEET_BOARD_OBS_ANSWER_REFUSED)
+        return json_push_kv_str(o, "reason", "malformed");
     if (v->phase == FLEET_BOARD_OBS_INGEST)
         return fb_observation_ingest(o, v);
     if (v->phase == FLEET_BOARD_OBS_OPEN_ATTEMPT)
         return true;
     return json_push_kv_str(o, "reason", mesh_stream_refusal_string(
                             (enum mesh_stream_refusal)v->result));
+}
+
+/* Advice is descriptive only; the lane still owns all retry decisions. */
+static const char *fb_observation_ingest_action(const struct boot_fleet_board_observation *v)
+{
+    static const char *const actions[] = {
+        [FLEET_BOARD_ERR_ROLE] = "inspect_writer_role_and_roster",
+        [FLEET_BOARD_ERR_FUTURE] = "inspect_clock",
+        [FLEET_BOARD_ERR_QUOTA] = "inspect_author_quota",
+        [FLEET_BOARD_ERR_WIKI_QUOTA] = "wait_for_quota_window",
+        [FLEET_BOARD_ERR_WIKI_FULL] = "inspect_wiki_capacity",
+        [FLEET_BOARD_ERR_CAPACITY] = "inspect_board_capacity",
+        [FLEET_BOARD_ERR_BUSY] = "wait_for_board_store",
+        [FLEET_BOARD_ERR_STORAGE] = "inspect_board_store",
+        [FLEET_BOARD_ERR_SIGNATURE] = "inspect_post_signature",
+    };
+    unsigned r = (unsigned)v->result;
+    if (v->stored || r == FLEET_BOARD_OK || r > FLEET_BOARD_ERR_WIKI_FULL)
+        return NULL;
+    if (r < sizeof actions / sizeof actions[0] && actions[r]) return actions[r];
+    return "inspect_post_refusal";
+}
+
+static const char *fb_observation_stream_action(int result)
+{
+    static const char *const actions[] = {
+        [MESH_STREAM_REFUSED_LINK_NOT_NOISE] = "inspect_peer_noise_session",
+        [MESH_STREAM_REFUSED_PEER_UNPAIRED] = "inspect_peer_pairing_and_capability",
+        [MESH_STREAM_REFUSED_SERVICE_UNKNOWN] = "inspect_peer_board_protocol",
+        [MESH_STREAM_REFUSED_CAP] = "inspect_stream_availability",
+        [MESH_STREAM_REFUSED_CREDIT_EXCEEDED] = "inspect_peer_board_protocol",
+        [MESH_STREAM_REFUSED_MALFORMED] = "inspect_peer_board_protocol",
+        [MESH_STREAM_REFUSED_ID_PARITY] = "inspect_peer_board_protocol",
+        [MESH_STREAM_REFUSED_ID_IN_USE] = "inspect_peer_board_protocol",
+        [MESH_STREAM_REFUSED_RATE] = "inspect_stream_availability",
+        [MESH_STREAM_REFUSED_UNAVAILABLE] = "inspect_stream_availability",
+        [MESH_STREAM_REFUSED_PEER_NOT_CONNECTED] = "inspect_peer_connection",
+        [MESH_STREAM_ENDED_IDLE] = "inspect_peer_connection",
+        [MESH_STREAM_ENDED_SESSION_LOST] = "inspect_peer_connection",
+        [MESH_STREAM_ENDED_SHUTDOWN] = "inspect_peer_connection",
+    };
+    unsigned r = (unsigned)result;
+    return r < sizeof actions / sizeof actions[0] ? actions[r] : NULL;
+}
+
+static const char *fb_observation_action(const struct boot_fleet_board_observation *v)
+{
+    static const char *const gates[] = {
+        [FLEET_BOARD_GATE_PAIRING] = "inspect_peer_pairing",
+        [FLEET_BOARD_GATE_DELEGATION_UNRESOLVED] = "inspect_peer_delegation",
+        [FLEET_BOARD_GATE_DELEGATION_REFUSED] = "inspect_peer_delegation",
+        [FLEET_BOARD_GATE_ROSTER] = "inspect_peer_roster",
+    };
+    if (v->phase == FLEET_BOARD_OBS_ANSWER_REFUSED)
+        return "inspect_peer_board_protocol";
+    if (v->phase == FLEET_BOARD_OBS_GATE) {
+        unsigned r = (unsigned)v->result;
+        return r < sizeof gates / sizeof gates[0] ? gates[r] : NULL;
+    }
+    if (v->phase == FLEET_BOARD_OBS_INGEST)
+        return fb_observation_ingest_action(v);
+    if (v->phase != FLEET_BOARD_OBS_OPEN_FAILURE && v->phase != FLEET_BOARD_OBS_CLOSE)
+        return NULL;
+    return fb_observation_stream_action(v->result);
 }
 
 static bool fb_observation_fields(struct json_value *o,
@@ -206,6 +273,8 @@ static bool fb_observation_fields(struct json_value *o,
     if (v->phase != FLEET_BOARD_OBS_GATE)
         ok = ok && json_push_kv_int(o, "after", v->after);
     ok = ok && fb_observation_detail(o, v);
+    const char *action = fb_observation_action(v);
+    if (action) ok = ok && json_push_kv_str(o, "next_action", action);
     if (v->epoch_set) {
         char hex[33];
         zcl_hex_encode(v->epoch, sizeof v->epoch, hex);
