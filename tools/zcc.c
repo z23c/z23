@@ -5785,6 +5785,42 @@ static int zcc_compile_miss(const struct cache *c, const struct plan *pl,
     return rc;
 }
 
+static bool zcc_job_scratch(void)
+{
+    const char *active = getenv("DEVBUILD_ACTIVE");
+    const char *marked = getenv("DEVBUILD_Z23_JOB_TMPDIR");
+    const char *temp = getenv("TMPDIR");
+    return active && strcmp(active, "z23") == 0 && marked && *marked &&
+           temp && strcmp(marked, temp) == 0;
+}
+
+/* Report the physical path and its digest as two Make words. The scheduler
+ * marks only the disposable TMPDIR it supplies for this Z23 job. */
+static int zcc_compiler_scratch(int argc)
+{
+    if (argc != 2)
+        return 2;
+    if (!zcc_job_scratch())
+        return 0;
+
+    static const char dir[] = "build/zcc-compiler-tmp";
+    struct stat st;
+    if (!mkdir_p(dir) || lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid() || (st.st_mode & 07777) != 0700 ||
+        access(dir, W_OK | X_OK) != 0 || chdir(dir) != 0)
+        return 1;
+    char path[PATH_MAX];
+    static const char allowed[] =
+        "/.-_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if (!getcwd(path, sizeof path) || path[strspn(path, allowed)] != '\0')
+        return 1;
+    unsigned char digest[SHA3_256_OUTPUT_SIZE];
+    char hex[HEXLEN + 1u];
+    zcl_sha3_256((const unsigned char *)path, strlen(path), digest);
+    hex_of(digest, hex);
+    return printf("%s %s\n", path, hex) < 0 ? 1 : 0;
+}
+
 /* The invocations that are not a compile: usage, the epoch publisher and the
  * --zcc-* commands. True with their result in `*rc`. */
 static bool zcc_special_command(int argc, char **argv, int *rc)
@@ -5795,6 +5831,11 @@ static bool zcc_special_command(int argc, char **argv, int *rc)
                 "       zcc --epoch-object dep|coverage OUTPUT SOURCE ...\n"
                 "       zcc --zcc-stats | --zcc-clear | --zcc-trim [MB]\n");
         *rc = 2;
+        return true;
+    }
+
+    if (strcmp(argv[1], "--zcc-compiler-scratch") == 0) {
+        *rc = zcc_compiler_scratch(argc);
         return true;
     }
 

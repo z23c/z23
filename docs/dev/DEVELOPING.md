@@ -112,6 +112,14 @@ Run `devbuild` from inside the worktree, not from `$HOME`: outside a checkout it
 is classified `exclusive` and queues behind shared z23 jobs. Its admission line,
 `devbuild: z23 class normal lane N`, can follow a `devbuild: note:` line.
 
+On Linux, cached native `build-only` jobs can reuse LTO objects across Makefile
+edits. A scheduler that allocates a disposable `TMPDIR` sets
+`DEVBUILD_Z23_JOB_TMPDIR` to that exact path for its Z23 jobs. The object
+compiler then uses the worktree's private `build/zcc-compiler-tmp` directory.
+The compile epoch binds its physical path. The scheduler continues to manage
+job scratch. Supplying your own `TMPDIR` keeps that directory in use.
+Remove worktree compiler scratch only after its jobs finish.
+
 Inspect before editing: `pwd`, `git status --short --branch`,
 `git fetch origin main`, `git rev-parse HEAD origin/main`. On a fresh clone,
 `make setup` (under `devbuild --wait`) arms dependencies and hooks. Descend the

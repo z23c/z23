@@ -220,11 +220,64 @@ static int lt_preprocess_overlap(void)
     return 0;
 }
 
+static int lt_scratch_record(const char *cwd, const char *marker, char out[ZC_OUT])
+{
+    struct zc_cmd c = {
+        .cwd = cwd, .argv = ZC_ARGV(zc.zcc, "--zcc-compiler-scratch"),
+        .env = ZC_ENV("DEVBUILD_ACTIVE=z23", zcf("TMPDIR=%s", zc.work),
+                      zcf("DEVBUILD_Z23_JOB_TMPDIR=%s", marker)),
+        .out = out, .cap = ZC_OUT
+    };
+    return zc_run(&c);
+}
+
+static int lt_compiler_scratch(void)
+{
+    const char *dir = zcw("scratch-case");
+    const char *scratch = zcw("scratch-case/build/zcc-compiler-tmp");
+    char out[ZC_OUT], first[ZC_OUT];
+    if (mkdir(dir, 0700) || lt_scratch_record(dir, "", out) || out[0] ||
+        zc_exists(scratch))
+        return 1;
+    static const char allowed[] =
+        "/.-_0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    int rc = lt_scratch_record(dir, zc.work, first);
+    if (scratch[strspn(scratch, allowed)] != 0)
+        return rc == 0 || first[0] != 0;
+    if (rc != 0)
+        return 1;
+    size_t n = strlen(scratch);
+    if (strncmp(first, scratch, n) || first[n] != ' ' ||
+        strspn(first + n + 1, "0123456789abcdef") != 64 ||
+        strcmp(first + n + 65, "\n") ||
+        lt_scratch_record(dir, zc.work, out) || strcmp(first, out))
+        return 1;
+    return 0;
+}
+
+static int lt_scratch_refusals(void)
+{
+    const char *dir = zcw("scratch-case");
+    const char *scratch = zcw("scratch-case/build/zcc-compiler-tmp");
+    char out[ZC_OUT];
+    if (chmod(scratch, 0755) || lt_scratch_record(dir, zc.work, out) == 0 || out[0])
+        return 1;
+    if (rmdir(scratch) || symlink(dir, scratch) ||
+        lt_scratch_record(dir, zc.work, out) == 0 || out[0])
+        return 1;
+    const char *unsafe = zcw("scratch-case/newline\ncomponent");
+    if (mkdir(unsafe, 0700) || lt_scratch_record(unsafe, zc.work, out) == 0 || out[0])
+        return 1;
+    return 0;
+}
+
 int zc_sec_linux(void)
 {
     char as[ZC_PATH];
     if (!is_linux())
         return 0;
+    zc_want(lt_compiler_scratch() == 0, "private compiler scratch selection failed");
+    zc_want(lt_scratch_refusals() == 0, "unsafe compiler scratch was accepted");
     if (!zc_which("gcc-14", lt_cc, sizeof lt_cc) &&
         !zc_which("gcc", lt_cc, sizeof lt_cc))
         return 1;

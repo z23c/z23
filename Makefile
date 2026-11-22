@@ -2129,7 +2129,19 @@ $(strip $(shell $(BUILD_EPOCH_KEY_TOOL) key "$(BUILD_COMPILER_ID)" "$(1)" "$(str
 endef
 
 ZCL_EPOCH_DEPFILE_ID := deps=-MMD,-MP
+# A scheduler that allocated this job's disposable TMPDIR can identify it to
+# the cached native compiler. Verified builds retain their ordinary inputs.
+override BUILD_ONLY_SCRATCH :=
+ifeq ($(ZCL_BUILD_OS)/$(ZCL_OBJECT_BACKEND)/$(MAKECMDGOALS),Linux/native/build-only)
+ifeq ($(origin ZCC_VERIFIED)/$(origin ZCC_DISABLE)/$(ZCL_MAKE_NO_EXEC),undefined/undefined/)
+override BUILD_ONLY_SCRATCH := $(shell $(BIN_DIR)/zcc --zcc-compiler-scratch 2>/dev/null)
+endif
+endif
+unexport DEVBUILD_Z23_JOB_TMPDIR
 BUILD_ONLY_EPOCH_COMPILE_FLAGS := $(strip $(BUILD_ONLY_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
+ifneq ($(BUILD_ONLY_SCRATCH),)
+override BUILD_ONLY_EPOCH_COMPILE_FLAGS += stable-tmpdir-sha3=$(word 2,$(BUILD_ONLY_SCRATCH))
+endif
 BUILD_ONLY_EPOCH_LINK_FLAGS := no-link
 DEV_EPOCH_COMPILE_FLAGS := $(strip normal=$(DEV_CFLAGS) hot=$(DEV_HOT_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 DEV_EPOCH_LINK_FLAGS := $(strip $(DEV_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))
@@ -12667,7 +12679,7 @@ ci-sync-smoke: zclassic23
 BUILD_ONLY_OBJECT_CFLAGS = $(BUILD_ONLY_CFLAGS)
 $(OBJ_DIR)/platform/modules/util/src/clientversion.o: BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(BUILD_ONLY_LEASE)
-	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
+	@$(if $(BUILD_ONLY_SCRATCH),TMPDIR="$(word 1,$(BUILD_ONLY_SCRATCH))") $(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_ONLY_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(BUILD_ONLY_SESSION)" -- \
 	  $(CC) $(BUILD_ONLY_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
