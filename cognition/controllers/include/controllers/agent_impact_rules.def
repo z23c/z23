@@ -1255,6 +1255,10 @@ AGENT_IMPACT_RULE("engine/composition/src/consensus_state_snapshot_install_check
 AGENT_IMPACT_RULE("engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c|engine/composition/src/boot_wallet_cutover_startup.c|engine/composition/src/boot_wallet_pending_restore.c|contexts/wallet/modules/wallet/src/wallet_sqlite*.c", "snapshot_install_recovery")
 AGENT_IMPACT_RULE("engine/composition/src/boot_pending_island.c|engine/composition/src/boot_pending_island.c.capabilities.def|tests/harness/src/boot_pending_island_test.h", "recovery_no_worse snapshot_install_recovery make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/consensus_state_rung_window_test.h", "consensus_state_install_runtime")
+/* Included recovery fixtures are exercised by the registered recovery group. */
+AGENT_IMPACT_RULE("tests/harness/src/consensus_state_empty_retire_test.h|tests/harness/src/consensus_state_real_postcommit_test.h", "snapshot_install_recovery")
+/* The closed flag catalog is validated by the registered lint integration. */
+AGENT_IMPACT_RULE("engine/composition/flags.def", "make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/consensus_state_pool_fixture.h|tests/harness/src/consensus_state_replay_v2_test.h|tests/harness/src/consensus_state_checkpoint_real_test.h", "snapshot_install_recovery consensus_state_snapshot_install")
 AGENT_IMPACT_RULE("engine/composition/src/consensus_state_install_authority.c|engine/composition/src/consensus_state_install_authority_internal.h|engine/composition/src/consensus_state_install_runtime.c|engine/composition/src/boot_auto_install_bundle.c|engine/composition/include/config/consensus_state_install_runtime.h|tests/harness/src/test_consensus_state_install_runtime.c", "snapshot_install_recovery consensus_state_install_runtime boot_bundle_fetch consensus_state_snapshot_install checkpoint_header_solution_repair make_lint_gates")
 /* The mid-session install-timing RETRY: the checkpoint_bundle_install_ready

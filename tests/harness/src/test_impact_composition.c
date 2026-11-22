@@ -2455,6 +2455,30 @@ static int test_ic_wallet_recovery_status_proof_mapping(void)
     return failures;
 }
 
+static int test_ic_retained_probe_proof_mapping(void)
+{
+    int failures = 0;
+    TEST("impact composition: retained recovery fixtures and flag catalog select proof") {
+        static const char *const paths[] = {
+            "tests/harness/src/consensus_state_empty_retire_test.h",
+            "tests/harness/src/consensus_state_real_postcommit_test.h",
+            "engine/composition/flags.def",
+        };
+        for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+            const char *group = i < 2 ? "snapshot_install_recovery" : "make_lint_gates";
+            struct agent_impact_acc impact = {0};
+            ASSERT(agent_impact_apply_shared_rules(paths[i], &impact));
+            ASSERT(ic_acc_has_group(&impact, group));
+            struct zcl_devloop_plan plan;
+            ASSERT(zcl_devloop_plan_files(&paths[i], 1, &plan));
+            ASSERT(ic_planned(&plan, group));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int test_ic_app_event_sync_proof_mapping(void)
 {
     int failures = 0;
@@ -18131,6 +18155,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_rule_group_capacity();
     failures += test_ic_rule_group_length();
     failures += test_ic_app_event_sync_proof_mapping();
+    failures += test_ic_retained_probe_proof_mapping();
     ic_isolate_state_root();
     failures += test_ic_fuzz_sensor_binding_parser();
     failures += test_ic_foreground_proof_command();
