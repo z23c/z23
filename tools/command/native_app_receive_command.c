@@ -584,10 +584,48 @@ static void ar_run(const struct zcl_command_request *request, struct zcl_command
     json_free(&w->receiver_args);
     free(w);
 }
+static const char *ar_refusal_summary(const struct zcl_command_reply *reply, bool unreadable)
+{
+    if (unreadable) return "Choose a readable share file of at most 64 MiB, then try again.";
+    if (!strcmp(reply->error.evidence, "recipe-root-mismatch"))
+        return "The build recipe does not match the signed release.";
+    if (!strcmp(reply->error.evidence, "the signed release envelope does not verify"))
+        return "The release signature could not be verified.";
+    return "The share file could not be verified.";
+}
+static void ar_refusal_notice(const struct zcl_command_request *request,
+    const struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
+{
+    const struct json_value *preview = request && request->input ? json_get(request->input, "preview") : NULL;
+    if (!preview || preview->type != JSON_BOOL || !json_get_bool(preview) || !reply) return;
+    bool unreadable = !strcmp(reply->error.code, "BUNDLE_UNREADABLE");
+    if (!unreadable && strcmp(reply->error.code, "BUNDLE_REFUSED")) return;
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-receive-refusal");
+    if (!view) return;
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "receive-refused");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "%s",
+        unreadable ? "Could not read this share" : "Could not verify this share");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary), "%s",
+        ar_refusal_summary(reply, unreadable));
+    view->model.action_count = 1;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    char why[256];
+    if (app_confirm_field(&view->model, "", "Nothing was received.") &&
+        app_confirm_field(&view->model, "", "Ask the sender for a new file.") &&
+        app_confirm_prepare(view, why, sizeof(why))) (void)app_confirm_show(view, presenter, context, why, sizeof(why));
+    app_confirm_free(view); free(view);
+}
+static void ar_run_direct(const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context, bool interactive)
+{
+    ar_run(request, reply, NULL, presenter, context, NULL, NULL, NULL);
+    if (interactive) ar_refusal_notice(request, reply, presenter, context);
+}
 void zcl_native_handle_app_receive(const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    ar_run(request, reply, NULL, NULL, NULL, NULL, NULL, NULL);
+    ar_run_direct(request, reply, NULL, NULL, zcl_native_interactive_dispatch());
 }
 void zcl_native_app_receive_expected(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const struct app_receive_identity *expected)
@@ -604,10 +642,15 @@ void zcl_native_app_receive_observed(const struct zcl_command_request *request,
     ar_run(request, reply, expected, presenter, context, worker_path, observer, observer_context);
 }
 #if defined(ZCL_TESTING)
+void zcl_test_app_receive_refusal(const struct zcl_command_request *request,
+    const struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
+{
+    ar_refusal_notice(request, reply, presenter, context);
+}
 void zcl_test_app_receive_run(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context)
 {
-    if (presenter) ar_run(request, reply, NULL, presenter, context, NULL, NULL, NULL);
+    if (presenter) ar_run_direct(request, reply, presenter, context, true);
 }
 void zcl_test_app_receive_expected(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, const struct app_receive_identity *expected,

@@ -1356,6 +1356,124 @@ static int rt_wrap_cases(void)
     } _test_next:;
     return failures;
 }
+struct rb_notice { unsigned calls; bool headless, valid, unreadable; const char *summary; };
+static bool rb_fields_fit(const struct zcl_present_model_v1 *model)
+{
+    bool received = false, request = false;
+    for (uint32_t i = 0; i < model->item_count; ++i) {
+        if (zcl_present_canvas_text_width(model->items[i].value,
+                strlen(model->items[i].value), 16u) > 636u) return false;
+        if (!strcmp(model->items[i].value, "Nothing was received.")) received = true;
+        if (!strcmp(model->items[i].value, "Ask the sender for a new file.")) request = true;
+    }
+    return received && request;
+}
+static bool rb_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)pages; (void)why; (void)cap;
+    struct rb_notice *n = context;
+    n->calls++;
+    n->valid = !strcmp(model->request_id, "receive-refused") && model->action_count == 1 &&
+        !strcmp(model->title, n->unreadable ? "Could not read this share" : "Could not verify this share") &&
+        rb_fields_fit(model) &&
+        !strcmp(model->actions[0].label, "Close") && strstr(model->summary,
+            n->summary ? n->summary : n->unreadable ? "64 MiB" : "could not be verified");
+    if (n->headless) return false;
+    bool close = false, redraw = false;
+    return rt_action(live, 0, &close, &redraw) && close;
+}
+static bool rb_corrupt(struct receive_fixture *f)
+{
+    FILE *in = fopen(f->file, "rb"), *out = fopen(f->backup, "wb");
+    bool ok = in && out && fseek(in, 0, SEEK_END) == 0;
+    long size = ok ? ftell(in) : -1;
+    ok = ok && size > 5 && fseek(in, 0, SEEK_SET) == 0;
+    for (long i = 0; ok && i < size; ++i) {
+        int byte = fgetc(in);
+        ok = byte != EOF && fputc(i == size - 5 ? byte ^ 1 : byte, out) != EOF;
+    }
+    if (in && fclose(in) != 0) ok = false;
+    if (out && fclose(out) != 0) ok = false;
+    if (ok) (void)snprintf(f->file, sizeof(f->file), "%s", f->backup);
+    return ok;
+}
+static bool rb_case(struct receive_fixture *f, bool preview, bool headless, bool unreadable)
+{
+    struct json_value input;
+    if (!rt_input(&input, f)) return false;
+    bool ok = json_push_kv_bool(&input, "preview", preview);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct rb_notice n = {.headless = headless, .unreadable = unreadable};
+    if (ok) zcl_test_app_receive_run(&request, &reply, rb_present, &n);
+    ok = ok && rt_failed_with(&reply, unreadable ? "BUNDLE_UNREADABLE" : "BUNDLE_REFUSED") && !reply.error.mutated && rt_absent(f) &&
+        n.calls == (preview ? 1u : 0u) && (!preview || n.valid);
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+void zcl_test_app_receive_refusal(const struct zcl_command_request *,
+    const struct zcl_command_reply *, app_confirm_presenter, void *);
+static bool rb_reasons(void)
+{
+    static const char *const evidence[] = {"recipe-root-mismatch",
+        "the signed release envelope does not verify", "untrusted package text"};
+    static const char *const summary[] = {"The build recipe does not match the signed release.",
+        "The release signature could not be verified.", "The share file could not be verified."};
+    struct json_value input; json_init(&input); json_set_object(&input);
+    if (!json_push_kv_bool(&input, "preview", true)) { json_free(&input); return false; }
+    struct zcl_command_request request = {.input = &input};
+    bool ok = true;
+    for (size_t i = 0; i < 3 && ok; ++i) {
+        struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+        (void)snprintf(reply.error.code, sizeof(reply.error.code), "BUNDLE_REFUSED");
+        (void)snprintf(reply.error.evidence, sizeof(reply.error.evidence), "%s", evidence[i]);
+        struct rb_notice n = {.summary = summary[i]};
+        zcl_test_app_receive_refusal(&request, &reply, rb_present, &n);
+        ok = n.calls == 1 && n.valid && !strcmp(reply.error.code, "BUNDLE_REFUSED") &&
+             !strcmp(reply.error.evidence, evidence[i]);
+        zcl_command_reply_free(&reply);
+    }
+    json_free(&input); return ok;
+}
+static bool rb_nested(struct receive_fixture *f)
+{
+    struct app_receive_identity expected;
+    if (!zcl_hex_decode_lower(f->release, expected.release_id, sizeof(expected.release_id)) ||
+        !zcl_hex_decode_lower(f->package, expected.package_root, sizeof(expected.package_root)) ||
+        !zcl_hex_decode_lower(f->publisher, expected.publisher, sizeof(expected.publisher))) return false;
+    struct json_value input;
+    if (!rt_input(&input, f)) return false;
+    bool ok = json_push_kv_bool(&input, "preview", true);
+    struct zcl_command_request request = {.input = &input};
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    struct rb_notice n = {0};
+    if (ok) zcl_test_app_receive_expected(&request, &reply, &expected, rb_present, &n);
+    ok = ok && n.calls == 0 && rt_failed_with(&reply, "BUNDLE_REFUSED") &&
+         !reply.error.mutated && rt_absent(f);
+    zcl_command_reply_free(&reply); json_free(&input); return ok;
+}
+static int rb_cases(void)
+{
+    int failures = 0;
+    TEST("preview refusal presents a close-only notice and preserves the original failure") {
+        struct receive_fixture f;
+        ASSERT(rt_setup(&f));
+        ASSERT(rt_attempt(&f, RT_CANCEL));
+        ASSERT(rb_corrupt(&f));
+        ASSERT(rb_reasons());
+        ASSERT(rb_nested(&f));
+        ASSERT(rb_case(&f, true, false, false));
+        ASSERT(rb_case(&f, true, true, false));
+        ASSERT(rb_case(&f, false, false, false));
+        ASSERT(unlink(f.file) == 0);
+        ASSERT(rb_case(&f, true, false, true));
+        ASSERT(rb_case(&f, true, true, true));
+        ASSERT(rb_case(&f, false, false, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int rg_cases(void)
 {
     int failures = 0;
@@ -2569,6 +2687,7 @@ int test_app_receive(void)
 {
     int failures = rz_plan_identity_case();
     failures += rt_wrap_cases();
+    failures += rb_cases();
     failures += rt_stale_sequence_case();
     struct receive_fixture f;
     TEST("app.receive requires all-page native confirmation and rechecks the exact signed file") {

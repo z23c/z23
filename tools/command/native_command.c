@@ -3003,6 +3003,12 @@ static bool nc_next_input_valid(const char *current_command,
 static struct zcl_cli_render_env g_nc_render_env;
 static bool g_nc_render_resolved;
 static bool g_nc_format_json;
+static thread_local bool g_nc_interactive_dispatch;
+
+bool zcl_native_interactive_dispatch(void)
+{
+    return g_nc_interactive_dispatch;
+}
 
 static const struct zcl_cli_render_env *nc_render_env(void)
 {
@@ -5138,6 +5144,11 @@ static bool nc_compare_end(struct nc_main_state *st,
     return true;
 }
 
+static bool nc_presentation_allowed(const struct nc_main_state *st)
+{
+    return !st->seen_format && st->field_csv == NULL;
+}
+
 static bool nc_main_execute(struct nc_main_state *st,
                             const struct zcl_command_registry *reg, char *out,
                             size_t out_cap, size_t *n_out,
@@ -5188,9 +5199,12 @@ static bool nc_main_execute(struct nc_main_state *st,
 
     enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
     g_native_envelope_on_stderr = false;
+    bool previous_interactive_dispatch = g_nc_interactive_dispatch;
+    g_nc_interactive_dispatch = nc_presentation_allowed(st);
     size_t n = zcl_command_registry_execute_json(
         reg, st->spec, &ctx, &st->input, st->was_alias, st->invoked, st->view,
         st->budget, st->max_items, st->cursor, out, out_cap, &exit_code);
+    g_nc_interactive_dispatch = previous_interactive_dispatch;
     if (scoped && !nc_compare_end(st, runtime, out, out_cap, rc)) return false;
     g_native_input_from_stdin = false;
     json_free(&st->input);

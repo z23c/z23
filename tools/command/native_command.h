@@ -19,6 +19,7 @@ extern "C" {
 #endif
 
 bool zcl_native_command_is_root(const char *word);
+bool zcl_native_interactive_dispatch(void);
 
 /* The checkout a request runs against: the request context's source root,
  * then ZCL_DEV_SOURCE_ROOT, then the current directory. */
