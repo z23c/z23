@@ -13,6 +13,10 @@
 #include <stdint.h>
 
 struct platform_directory_transaction { uintptr_t native; };
+struct platform_directory_identity { uint64_t volume, file_low, file_high; };
+/* Identity of the exact retained directory, not a reopened path. */
+bool platform_directory_transaction_identity(const struct platform_directory_transaction *d,
+                                             struct platform_directory_identity *out);
 #define PLATFORM_DIRECTORY_CHILD_LEAF_MAX 255u
 struct platform_directory_child {
     uintptr_t native;

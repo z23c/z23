@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #endif
 #include "platform/private_directory.h"
+#include "platform/directory_transaction.h"
 #include "platform/windows_path.h"
 #include "private_acl_internal.h"
 
@@ -348,4 +349,23 @@ bool platform_private_directory_open_validated_traverse(
 {
     return private_directory_open_validated_traverse_platform(
         path, native_handle);
+}
+
+/* Identity comes from the same owner-private directory handle retained by the
+ * transaction, never from a second pathname lookup. */
+bool platform_directory_transaction_identity(const struct platform_directory_transaction *d,
+                                             struct platform_directory_identity *out)
+{
+    if (!d || !out || d->native == UINTPTR_MAX) return false;
+#if defined(_WIN32)
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle((HANDLE)d->native, &info) ||
+        !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    *out = (struct platform_directory_identity){info.dwVolumeSerialNumber, info.nFileIndexLow, info.nFileIndexHigh};
+#else
+    struct stat st;
+    if (fstat((int)d->native, &st) || !S_ISDIR(st.st_mode)) return false;
+    *out = (struct platform_directory_identity){(uint64_t)st.st_dev, (uint64_t)st.st_ino, 0};
+#endif
+    return true;
 }

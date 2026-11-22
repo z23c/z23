@@ -527,28 +527,35 @@ static bool wi_apps_mock(const struct wi_release *f, char *path, size_t cap)
     return true;
 }
 
-static bool wi_apps_env(struct wi_release *f, const char *const keys[7])
+static bool wi_apps_dirs(const struct wi_release *f, char *home, char *data, char *prefix, char *state)
 {
-    char home[PATH_MAX], data[PATH_MAX], prefix[PATH_MAX], path[PATH_MAX * 2];
+    return snprintf(home, PATH_MAX, "%s/home", f->base) < PATH_MAX &&
+        snprintf(data, PATH_MAX, "%s/data", f->base) < PATH_MAX &&
+        snprintf(prefix, PATH_MAX, "%s/prefix space", f->base) < PATH_MAX &&
+        snprintf(state, PATH_MAX, "%s/state", f->base) < PATH_MAX &&
+        mkdir(home, 0700) == 0 && mkdir(data, 0700) == 0 && mkdir(state, 0700) == 0;
+}
+
+
+static bool wi_apps_env(struct wi_release *f, const char *const keys[8])
+{
+    char home[PATH_MAX], data[PATH_MAX], prefix[PATH_MAX], state[PATH_MAX], path[PATH_MAX * 2];
     if (!wi_apps_mock(f, path, sizeof(path))) return false;
-    return snprintf(home, sizeof(home), "%s/home", f->base) < (int)sizeof(home) &&
-        snprintf(data, sizeof(data), "%s/data", f->base) < (int)sizeof(data) &&
-        snprintf(prefix, sizeof(prefix), "%s/prefix space", f->base) < (int)sizeof(prefix) &&
-        mkdir(home, 0700) == 0 && mkdir(data, 0700) == 0 &&
+    return wi_apps_dirs(f, home, data, prefix, state) &&
         setenv(keys[0], home, 1) == 0 && setenv(keys[1], data, 1) == 0 &&
         setenv(keys[2], prefix, 1) == 0 && setenv(keys[3], "1", 1) == 0 && unsetenv(keys[4]) == 0 &&
-        setenv(keys[5], path, 1) == 0 && unsetenv(keys[6]) == 0;
+        setenv(keys[5], path, 1) == 0 && unsetenv(keys[6]) == 0 && setenv(keys[7], state, 1) == 0;
 }
 
 static bool wi_apps_case(bool tasks)
 {
     struct wi_release f = {0};
-    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM"};
-    char *saved[7] = {0};
-    for (size_t i = 0; i < 7; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM", "XDG_STATE_HOME"};
+    char *saved[8] = {0};
+    for (size_t i = 0; i < 8; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
     bool ok = wi_apps_release(&f, tasks) && wi_apps_manifest(&f, tasks) &&
         wi_apps_env(&f, keys) && wi_apps_output(&f, tasks);
-    for (size_t i = 0; i < 7; ++i) wi_restore_env(keys[i], saved[i]);
+    for (size_t i = 0; i < 8; ++i) wi_restore_env(keys[i], saved[i]);
     if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
     return ok;
 }
@@ -557,9 +564,9 @@ static bool wi_apps_case(bool tasks)
 static bool wi_apps_symlink_refused(void)
 {
     struct wi_release f = {0};
-    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM"};
-    char *saved[7] = {0}, linkpath[PATH_MAX], target[PATH_MAX], source[PATH_MAX + 16], pin[96], output[8192];
-    for (size_t i = 0; i < 7; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM", "XDG_STATE_HOME"};
+    char *saved[8] = {0}, linkpath[PATH_MAX], target[PATH_MAX], source[PATH_MAX + 16], pin[96], output[8192];
+    for (size_t i = 0; i < 8; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
     bool ok = wi_apps_release(&f, true) && wi_apps_manifest(&f, true) && wi_apps_env(&f, keys);
     if (ok) {
         snprintf(linkpath, sizeof(linkpath), "%s/home/.local", f.base);
@@ -567,11 +574,334 @@ static bool wi_apps_symlink_refused(void)
         snprintf(source, sizeof(source), "--source=%s", f.release);
         snprintf(pin, sizeof(pin), "--manifest-sha256=%s", f.pin);
         const char *argv[] = {"bash", f.script, "--apps", source, pin, NULL}; bool timeout = false;
-        ok = symlink(target, linkpath) == 0 && zcl_spawn_capture_merged_in_dir_observed(argv, f.base, output, sizeof(output), WI_DEADLINE_MS, &timeout) != 0 && !timeout && strstr(output, "must not be a symlink");
+        ok = symlink(target, linkpath) == 0 && zcl_spawn_capture_merged_in_dir_observed(argv, f.base, output, sizeof(output), WI_DEADLINE_MS, &timeout) != 0 && !timeout && strstr(output, "app profile lookup refused");
         struct stat st;
         ok = ok && snprintf(target, sizeof(target), "%s/data/share", f.base) < (int)sizeof(target) && lstat(target, &st) != 0 && errno == ENOENT;
     }
-    for (size_t i = 0; i < 7; ++i) wi_restore_env(keys[i], saved[i]);
+    for (size_t i = 0; i < 8; ++i) wi_restore_env(keys[i], saved[i]);
+    if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
+    return ok;
+}
+
+static bool wi_profile_install(const struct wi_release *f, const char *profile, char *output, size_t cap, bool success)
+{
+    char source[PATH_MAX + 16], pin[96], option[PATH_MAX + 32]; bool timeout = false;
+    if (snprintf(source, sizeof(source), "--source=%s", f->release) >= (int)sizeof(source) ||
+        snprintf(pin, sizeof(pin), "--manifest-sha256=%s", f->pin) >= (int)sizeof(pin) ||
+        snprintf(option, sizeof(option), "--app-datadir=%s", profile ? profile : "") >= (int)sizeof(option)) return false;
+    const char *argv[] = {"bash", f->script, "--apps", source, pin, profile ? option : NULL, NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, cap, WI_DEADLINE_MS, &timeout);
+    return !timeout && (success ? rc == 0 : rc != 0);
+}
+
+static bool wi_profile_legacy(struct wi_release *f)
+{
+    const char legacy[] = "#!/bin/sh\nif [ \"$1\" = -version ]; then echo 'tor: full'; exit 0; fi\n"
+        "echo '{\"error\":{\"code\":\"UNKNOWN_COMMAND\",\"evidence\":\"ops.host.app-profile\"}}'; exit 2\n";
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/z23", f->release) >= (int)sizeof(path) || !wi_write(path, legacy, sizeof(legacy) - 1, 0700)) return false;
+    if (snprintf(path, sizeof(path), "%s/zclassic23", f->release) >= (int)sizeof(path) || !wi_write(path, legacy, sizeof(legacy) - 1, 0700)) return false;
+    return wi_apps_manifest(f, true);
+}
+
+static bool wi_profile_desktops(const struct wi_release *f)
+{
+#if defined(__APPLE__)
+    (void)f; return true;
+#else
+    static const char *const names[] = {"org.zclassic.Tasks.desktop", "org.zclassic.ZClassic23.desktop", "org.zclassic.ZClassic23.Library.desktop"};
+    static const char *const commands[] = {"app open tasks", "app receive --preview", "app library"};
+    char path[PATH_MAX], bytes[8192];
+    for (size_t i = 0; i < 3; ++i) {
+        if (snprintf(path, sizeof(path), "%s/data/applications/%s", f->base, names[i]) >= (int)sizeof(path)) return false;
+        FILE *in = fopen(path, "rb"); if (!in) return false;
+        size_t n = fread(bytes, 1, sizeof(bytes) - 1, in); bool ok = !ferror(in);
+        ok = fclose(in) == 0 && ok; bytes[n] = 0;
+        if (!ok || !strstr(bytes, "chosen ' profile") || !strstr(bytes, commands[i])) return false;
+    }
+    return true;
+#endif
+}
+
+static bool wi_profile_token(const struct wi_release *f, const char *profile, char token[65])
+{
+    char exe[PATH_MAX], path[PATH_MAX + 16], output[4096]; bool timeout = false;
+    if (!realpath(WI_EXE, exe) || snprintf(path, sizeof(path), "--path=%s", profile) >= (int)sizeof(path)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "check", path, "--field=plan_id", NULL};
+    if (zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout) || timeout ||
+        strncmp(output, "plan_id=", 8) || strlen(output) != 73 || output[72] != '\n') return false;
+    memcpy(token, output + 8, 64); token[64] = 0; return true;
+}
+
+static bool wi_profile_prepare_stale(const struct wi_release *f, char token[65])
+{
+    char second[PATH_MAX];
+    return snprintf(second, sizeof(second), "%s/second profile", f->base) < (int)sizeof(second) &&
+        mkdir(second, 0700) == 0 && wi_profile_token(f, second, token);
+}
+
+static bool wi_profile_stale(const struct wi_release *f, const char *token)
+{
+    char exe[PATH_MAX], second[PATH_MAX], path[PATH_MAX + 16], plan[80], output[4096]; bool timeout = false;
+    if (!realpath(WI_EXE, exe) || snprintf(second, sizeof(second), "%s/second profile", f->base) >= (int)sizeof(second) ||
+        snprintf(path, sizeof(path), "--path=%s", second) >= (int)sizeof(path) ||
+        snprintf(plan, sizeof(plan), "--plan_id=%s", token) >= (int)sizeof(plan)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "set", path, plan, "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    return !timeout && rc != 0 && strstr(output, "APP_PROFILE_REFUSED");
+}
+
+struct wi_profile_record { char path[PATH_MAX]; unsigned char bytes[1200]; size_t length; };
+static bool wi_profile_record_read(const struct wi_release *f, struct wi_profile_record *saved)
+{
+    if (snprintf(saved->path, sizeof(saved->path), "%s/state/z23/apps/desktop-profile", f->base) >= (int)sizeof(saved->path)) return false;
+    FILE *in = fopen(saved->path, "rb"); if (!in) return false;
+    saved->length = fread(saved->bytes, 1, sizeof(saved->bytes), in);
+    bool ok = !ferror(in) && saved->length > 0 && saved->length < sizeof(saved->bytes);
+    return fclose(in) == 0 && ok;
+}
+
+static bool wi_profile_corrupt(const struct wi_release *f, const char *profile)
+{
+    char exe[PATH_MAX], output[4096]; bool timeout = false; struct wi_profile_record saved;
+    (void)profile; static const char bad[] = {'/', 'x', 0, 'y'};
+    if (!realpath(WI_EXE, exe) || !wi_profile_record_read(f, &saved) ||
+        !wi_write(saved.path, bad, sizeof(bad), 0600)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "get", "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    bool ok = !timeout && rc != 0 && strstr(output, "APP_PROFILE_REFUSED");
+    return wi_write(saved.path, saved.bytes, saved.length, 0600) && ok;
+}
+
+static bool wi_profile_unsafe(const struct wi_release *f, const char *profile)
+{
+    char output[8192], state[PATH_MAX]; struct stat st;
+    if (snprintf(state, sizeof(state), "%s/state/z23", f->base) >= (int)sizeof(state) || chmod(profile, 0777)) return false;
+    bool ok = wi_profile_install(f, profile, output, sizeof(output), false) &&
+        strstr(output, "app profile selection refused") && lstat(state, &st) != 0 && errno == ENOENT &&
+        lstat(profile, &st) == 0 && (st.st_mode & 0777) == 0777;
+    return chmod(profile, 0700) == 0 && ok;
+}
+
+static bool wi_profile_no_setting(const struct wi_release *f)
+{
+    char path[PATH_MAX]; struct stat st;
+    return snprintf(path, sizeof(path), "%s/state/z23", f->base) < (int)sizeof(path) &&
+        lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+static bool wi_profile_legacy_unsafe(const struct wi_release *f)
+{
+    char linkpath[PATH_MAX], target[PATH_MAX], output[8192];
+    if (snprintf(linkpath, sizeof(linkpath), "%s/state/z23", f->base) >= (int)sizeof(linkpath) ||
+        snprintf(target, sizeof(target), "%s/data", f->base) >= (int)sizeof(target) || symlink(target, linkpath)) return false;
+    bool ok = wi_profile_install(f, NULL, output, sizeof(output), false) &&
+        strstr(output, "cannot validate an existing or unsafe app profile");
+    return unlink(linkpath) == 0 && ok;
+}
+
+static bool wi_profile_current_unsafe(const struct wi_release *f, const char *profile)
+{
+    char exe[PATH_MAX], output[4096]; bool timeout = false;
+    if (!realpath(WI_EXE, exe) || chmod(profile, 0777)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "get", "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    struct stat st;
+    bool ok = !timeout && rc != 0 && strstr(output, "APP_PROFILE_REFUSED") &&
+        lstat(profile, &st) == 0 && (st.st_mode & 0777) == 0777;
+    return chmod(profile, 0700) == 0 && ok;
+}
+
+static bool wi_profile_default_untouched(const struct wi_release *f)
+{
+    char path[PATH_MAX]; struct stat st;
+    return snprintf(path, sizeof(path), "%s/home/.local/share", f->base) < (int)sizeof(path) &&
+        lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+static bool wi_profile_target_unchanged(const char *target)
+{
+    char bytes[8] = {0}; FILE *in = fopen(target, "rb");
+    if (!in) return false;
+    size_t n = fread(bytes, 1, sizeof(bytes), in); bool ok = !ferror(in);
+    ok = fclose(in) == 0 && ok;
+    return ok && n == 4 && !memcmp(bytes, "safe", 4);
+}
+
+
+static bool wi_profile_record_symlink(const struct wi_release *f, const char *profile)
+{
+    char exe[PATH_MAX], target[PATH_MAX], output[4096]; bool timeout = false; struct wi_profile_record saved;
+    (void)profile;
+    if (!realpath(WI_EXE, exe) || !wi_profile_record_read(f, &saved) ||
+        snprintf(target, sizeof(target), "%s/profile-target", f->base) >= (int)sizeof(target) || !wi_write(target, "safe", 4, 0600) ||
+        unlink(saved.path) || symlink(target, saved.path)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "get", "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    bool ok = !timeout && rc != 0 && strstr(output, "APP_PROFILE_REFUSED") && wi_profile_target_unchanged(target);
+    return unlink(saved.path) == 0 && wi_write(saved.path, saved.bytes, saved.length, 0600) && ok;
+}
+
+static bool wi_profile_duplicate(const struct wi_release *f, const char *profile)
+{
+    char option[PATH_MAX + 32], output[4096]; bool timeout = false;
+    if (snprintf(option, sizeof(option), "--app-datadir=%s", profile) >= (int)sizeof(option)) return false;
+    const char *argv[] = {"bash", f->script, "--apps", option, option, NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    return !timeout && rc != 0 && strstr(output, "may be supplied once") && wi_profile_no_setting(f);
+}
+
+static bool wi_profile_legacy_case(struct wi_release *f, const char *profile)
+{
+    char output[8192];
+    return wi_profile_legacy(f) && wi_profile_install(f, NULL, output, sizeof(output), true) &&
+        strstr(output, "app open tasks --datadir=") && wi_profile_no_setting(f) && wi_profile_legacy_unsafe(f) &&
+        wi_profile_install(f, profile, output, sizeof(output), false) && strstr(output, "this release cannot select an app profile") && wi_profile_no_setting(f);
+}
+
+static bool wi_profile_wrong_target(const struct wi_release *f, const char *profile, const char *token)
+{
+    char exe[PATH_MAX], path[PATH_MAX + 16], plan[80], record[PATH_MAX], output[4096];
+    bool timeout = false; struct stat st;
+    if (!realpath(WI_EXE, exe) || snprintf(path, sizeof(path), "--path=%s", profile) >= (int)sizeof(path) ||
+        snprintf(plan, sizeof(plan), "--plan_id=%s", token) >= (int)sizeof(plan) ||
+        snprintf(record, sizeof(record), "%s/state/z23/apps/desktop-profile", f->base) >= (int)sizeof(record)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "set", path, plan, "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    return !timeout && rc != 0 && strstr(output, "APP_PROFILE_REFUSED") && lstat(record, &st) != 0 && errno == ENOENT;
+}
+
+static bool wi_profile_target_swapped(const struct wi_release *f, const char *profile)
+{
+    char token[65], held[PATH_MAX], exe[PATH_MAX], path[PATH_MAX + 16], plan[80], output[4096]; bool timeout = false;
+    if (!wi_profile_token(f, profile, token) || !realpath(WI_EXE, exe) ||
+        snprintf(held, sizeof(held), "%s/held-profile", f->base) >= (int)sizeof(held) ||
+        snprintf(path, sizeof(path), "--path=%s", profile) >= (int)sizeof(path) ||
+        snprintf(plan, sizeof(plan), "--plan_id=%s", token) >= (int)sizeof(plan) || rename(profile, held)) return false;
+    bool made = mkdir(profile, 0700) == 0;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "set", path, plan, "--json", NULL};
+    int rc = made ? zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout) : 0;
+    bool refused = made && !timeout && rc != 0 && strstr(output, "APP_PROFILE_REFUSED");
+    bool removed = !made || rmdir(profile) == 0;
+    return rename(held, profile) == 0 && removed && refused;
+}
+
+static bool wi_profile_replaced(const struct wi_release *f, const char *profile)
+{
+    char held[PATH_MAX], output[8192];
+    if (snprintf(held, sizeof(held), "%s/held-profile", f->base) >= (int)sizeof(held) || rename(profile, held)) return false;
+    bool made = mkdir(profile, 0700) == 0;
+    bool refused = made && wi_profile_install(f, NULL, output, sizeof(output), false) && strstr(output, "app profile lookup refused");
+    bool recovered = refused && wi_profile_install(f, profile, output, sizeof(output), true) &&
+        wi_profile_install(f, NULL, output, sizeof(output), true) && strstr(output, "chosen\\ \\'\\ profile");
+    return rmdir(held) == 0 && recovered;
+}
+
+static bool wi_profile_first_install(struct wi_release *f, const char *profile, char token[65])
+{
+    char output[8192];
+    return wi_profile_duplicate(f, profile) && wi_profile_unsafe(f, profile) && wi_profile_prepare_stale(f, token) &&
+        wi_profile_no_setting(f) && wi_profile_wrong_target(f, profile, token) && wi_profile_target_swapped(f, profile) && wi_profile_install(f, profile, output, sizeof(output), true) &&
+        strstr(output, "chosen\\ \\'\\ profile") && wi_profile_default_untouched(f);
+}
+
+static bool wi_profile_reinstall(struct wi_release *f, const char *profile, const char *token)
+{
+    char output[8192];
+    if (!wi_profile_install(f, NULL, output, sizeof(output), true) || !strstr(output, "chosen\\ \\'\\ profile") ||
+        !wi_profile_desktops(f) || !wi_profile_stale(f, token) || !wi_profile_current_unsafe(f, profile) ||
+        !wi_profile_corrupt(f, profile) || !wi_profile_record_symlink(f, profile) || !wi_profile_replaced(f, profile)) return false;
+    return wi_profile_install(f, NULL, output, sizeof(output), true) && strstr(output, "chosen\\ \\'\\ profile") &&
+        wi_profile_legacy(f) && wi_profile_install(f, NULL, output, sizeof(output), false) &&
+        strstr(output, "cannot validate an existing or unsafe app profile");
+}
+
+
+static bool wi_profile_case(bool legacy_first)
+{
+    struct wi_release f = {0};
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM", "XDG_STATE_HOME"};
+    char *saved[8] = {0}, profile[PATH_MAX], token[65];
+    for (size_t i = 0; i < 8; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    bool ok = wi_apps_release(&f, true) && wi_apps_manifest(&f, true) && wi_apps_env(&f, keys) &&
+        snprintf(profile, sizeof(profile), "%s/chosen ' profile", f.base) < (int)sizeof(profile) && mkdir(profile, 0700) == 0;
+    if (ok) ok = legacy_first ? wi_profile_legacy_case(&f, profile) :
+        wi_profile_first_install(&f, profile, token) && wi_profile_reinstall(&f, profile, token);
+    for (size_t i = 0; i < 8; ++i) wi_restore_env(keys[i], saved[i]);
+    if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
+    return ok;
+}
+
+
+static bool wi_macos_manifest_base(struct wi_release *f, FILE *out)
+{
+    static const char *const base[] = {"AGENT_CARD.md", "z23", "zclassic23", "z23-acme", "zclassic23-acme", "z23-package-verify", "zclassic23-package-verify", "installed-source.json", "source.bundle", "manifest.wire", "recipe.wire", "app-build.wire", "z23-skycombat"};
+    char path[PATH_MAX], hash[65];
+    for (size_t i = 0; i < sizeof(base) / sizeof(base[0]); ++i) {
+        int n = snprintf(path, sizeof(path), "%s/%s", f->release, base[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path) || !wi_sha256(path, hash) || fprintf(out, "%s  %s\n", hash, base[i]) <= 0) return false;
+    }
+    return true;
+}
+
+static bool wi_macos_members(struct wi_release *f)
+{
+    static const char launcher[] = "#!/bin/sh\nprintf 'register\\n' >>\"$HOME/launcher-called\"\n";
+    static const char *const names[] = {"z23-app-macos", "Z23Apps-Info.plist"};
+    char path[PATH_MAX], hash[65];
+    FILE *out = fopen(f->manifest, "wb"); if (!out) return false;
+    bool ok = wi_macos_manifest_base(f, out);
+    for (size_t i = 0; ok && i < 2; ++i) {
+        const char *bytes = i ? "fixture\n" : launcher;
+        int n = snprintf(path, sizeof(path), "%s/%s", f->release, names[i]);
+        ok = n > 0 && (size_t)n < sizeof(path) && wi_write(path, bytes, strlen(bytes), i ? 0600 : 0700) &&
+            wi_sha256(path, hash) && fprintf(out, "%s  %s\n", hash, names[i]) > 0;
+    }
+    return fclose(out) == 0 && ok && wi_sha256(f->manifest, f->pin);
+}
+
+static bool wi_profile_apply(const struct wi_release *f, const char *profile)
+{
+    char exe[PATH_MAX], token[65], path[PATH_MAX + 16], plan[80], output[4096]; bool timeout = false;
+    if (!wi_profile_token(f, profile, token) || !realpath(WI_EXE, exe) ||
+        snprintf(path, sizeof(path), "--path=%s", profile) >= (int)sizeof(path) ||
+        snprintf(plan, sizeof(plan), "--plan_id=%s", token) >= (int)sizeof(plan)) return false;
+    const char *argv[] = {exe, "ops", "host", "app-profile", "set", path, plan, "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, output, sizeof(output), WI_DEADLINE_MS, &timeout);
+    return !timeout && rc == 0 && strstr(output, "\"selected\":true");
+}
+
+static bool wi_macos_refuse_custom(struct wi_release *f, const char *profile)
+{
+    char output[8192], prefix[PATH_MAX];
+    return snprintf(prefix, sizeof(prefix), "%s/prefix space", f->base) < (int)sizeof(prefix) &&
+        wi_profile_install(f, profile, output, sizeof(output), false) &&
+        strstr(output, "custom app profiles are not supported on macOS") &&
+        wi_profile_no_setting(f) && access(prefix, F_OK) != 0 && errno == ENOENT;
+}
+
+static bool wi_macos_saved_refused(struct wi_release *f, const char *profile)
+{
+    char output[8192], exe[PATH_MAX], marker[PATH_MAX], before[65], after[65], marker_before[65], marker_after[65];
+    return snprintf(exe, sizeof(exe), "%s/prefix space/bin/z23", f->base) < (int)sizeof(exe) &&
+        snprintf(marker, sizeof(marker), "%s/launcher-called", getenv("HOME")) < (int)sizeof(marker) &&
+        wi_sha256(exe, before) && wi_sha256(marker, marker_before) && wi_profile_apply(f, profile) &&
+        wi_profile_install(f, NULL, output, sizeof(output), false) &&
+        strstr(output, "this macOS launcher cannot use the saved custom app profile") &&
+        wi_sha256(exe, after) && !strcmp(before, after) && wi_sha256(marker, marker_after) && !strcmp(marker_before, marker_after);
+}
+
+static bool wi_macos_profile_case(void)
+{
+    struct wi_release f = {0};
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM", "XDG_STATE_HOME"};
+    char *saved[8] = {0}, profile[PATH_MAX], output[8192];
+    for (size_t i = 0; i < 8; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    bool ok = wi_apps_release(&f, false) && wi_macos_members(&f) && wi_apps_env(&f, keys) && setenv(keys[6], "Darwin", 1) == 0 &&
+        snprintf(profile, sizeof(profile), "%s/chosen profile", f.base) < (int)sizeof(profile) && mkdir(profile, 0700) == 0 &&
+        wi_macos_refuse_custom(&f, profile) && wi_profile_install(&f, NULL, output, sizeof(output), true) &&
+        strstr(output, "app open skycombat --datadir=") && wi_macos_saved_refused(&f, profile);
+    for (size_t i = 0; i < 8; ++i) wi_restore_env(keys[i], saved[i]);
     if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
     return ok;
 }
@@ -583,6 +913,9 @@ static int wi_apps_guidance(void)
         ASSERT(wi_apps_case(true));
         ASSERT(wi_apps_case(false));
         ASSERT(wi_apps_symlink_refused());
+        ASSERT(wi_profile_case(false));
+        ASSERT(wi_profile_case(true));
+        ASSERT(wi_macos_profile_case());
         PASS();
     } _test_next:;
     return failures;

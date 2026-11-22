@@ -30,6 +30,7 @@
 #   Z23_RELEASE_SOURCE=<local-dir> install_z23.sh
 #   install_z23.sh --selftest
 #   install_z23.sh --apps --source=<url-or-dir> [--manifest-sha256=<pin>]
+#   Add --app-datadir=<existing-private-dir> to remember a desktop profile.
 #                        install apps without installing or starting a node
 #                        service; register Linux share files when available
 #   install_z23.sh --generation-status=<generation-dir>
@@ -57,6 +58,8 @@ say() { printf 'install_z23: %s\n' "$*" >&2; }
 
 NEXT_COMMAND="z23 status"
 APPS_ONLY=0
+APP_PROFILE=""
+APP_PROFILE_EXPLICIT=0
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -931,7 +934,7 @@ install_app_desktop() {
             [ -x /usr/bin/env ] || return 1
             exe="/usr/bin/env -- $exe" ;;
     esac
-    arg="$(desktop_exec_argument "--datadir=$HOME/.local/share/z23-app-data")" || return 1
+    arg="$(desktop_exec_argument "--datadir=${APP_PROFILE:-$HOME/.local/share/z23-app-data}")" || return 1
     desktop="$data/applications/org.zclassic.ZClassic23.Library.desktop"
     if ! grep -qsx 'X-Z23-App-Library=1' "$source/org.zclassic.ZClassic23.desktop" && \
         [ -f "$desktop" ] && [ ! -L "$desktop" ] && \
@@ -1490,10 +1493,51 @@ EOF
     fi
 }
 
+# Older verified runtimes cannot read a saved selection. Check each state
+# component before concluding that the single setting record is absent.
+legacy_profile_absent() {
+    local path="$1" part current="" rest
+    case "$path" in /*) rest="${path#/}" ;; *) return 1 ;; esac
+    while [ -n "$rest" ]; do
+        part="${rest%%/*}"
+        [ -n "$part" ] && [ "$part" != . ] && [ "$part" != .. ] || return 1
+        current="$current/$part"
+        [ ! -L "$current" ] || return 1
+        [ -e "$current" ] || return 0
+        [ -d "$current" ] && [ -x "$current" ] || return 1
+        [ "$rest" != "$part" ] || break
+        rest="${rest#*/}"
+    done
+    [ ! -e "$current/desktop-profile" ] && [ ! -L "$current/desktop-profile" ]
+}
+app_profile_select() {
+    local stage="$1" result rc=0 state
+    if [ "$APP_PROFILE_EXPLICIT" = 1 ]; then
+        result="$("$stage/z23" ops host app-profile check "--path=$APP_DATADIR" --field=plan_id </dev/null)" || rc=$?
+        case "$rc:$result" in
+            0:plan_id=*) APP_EXPECTED="${result#plan_id=}" ;;
+            2:*'"code":"UNKNOWN_COMMAND"'*'"evidence":"ops.host.app-profile"'*) die "this release cannot select an app profile" ;;
+            *) die "app profile selection refused; choose an existing private directory" ;;
+        esac
+        APP_PROFILE="$APP_DATADIR"
+        return
+    fi
+    result="$("$stage/z23" ops host app-profile get --field=profile </dev/null)" || rc=$?
+    if [ "$rc" = 0 ]; then
+        case "$result" in profile=*) APP_PROFILE="${result#profile=}" ;; *) die "invalid app profile response" ;; esac
+    else
+        case "$rc:$result" in 2:*'"code":"UNKNOWN_COMMAND"'*'"evidence":"ops.host.app-profile"'*) ;; *) die "app profile lookup refused; select the intended directory with --app-datadir=PATH" ;; esac
+        case "${XDG_STATE_HOME:-}" in /*) state="$XDG_STATE_HOME" ;; *) state="$HOME/.local/state" ;; esac
+        legacy_profile_absent "$state/z23/apps" || die "this release cannot validate an existing or unsafe app profile"
+        APP_PROFILE="$HOME/.local/share/z23-app-data"
+    fi
+}
+
+
 install_from_source() {
     local src="$1" expected_manifest_sha256="$2"
     [ -n "$src" ] || die "no source: pass --source=<url-or-dir> or set Z23_RELEASE_SOURCE"
-    local prefix="${Z23_INSTALL_PREFIX:-$HOME/.local}" install_platform app=skycombat
+    local prefix="${Z23_INSTALL_PREFIX:-$HOME/.local}" install_platform app=skycombat result
     local unit_dir="${Z23_UNIT_DIR:-$HOME/.config/systemd/user}"
     local install_tmp="${TMPDIR:-/tmp}"
     [ -d "$install_tmp" ] || die "temporary directory does not exist: $install_tmp"
@@ -1511,14 +1555,19 @@ install_from_source() {
     if [ "$APPS_ONLY" = 1 ]; then
         has_app_source "$INSTALL_STAGE" || die "--apps requires an app-capable release"
         case "$prefix" in /*) ;; *) die "--apps requires an absolute installation prefix" ;; esac
-        printf -v NEXT_COMMAND '%q app open %s --datadir=%q' \
-            "$prefix/bin/z23" "$app" "$HOME/.local/share/z23-app-data"
     fi
     install_platform="${Z23_INSTALL_TEST_PLATFORM:-$(uname -s)}"
     if [ -n "$(manifest_digest_of "$INSTALL_STAGE" z23-app-macos)" ] && [ "$install_platform" != Darwin ]; then
         die "the macOS app launcher requires a Darwin installation"
     fi
-    if [ "$APPS_ONLY" = 1 ] && [ "$app" = tasks ] && [ ! -d "$HOME/.local/share" ]; then
+    if [ "$APPS_ONLY" = 1 ]; then
+        [ "$install_platform" != Darwin ] || [ "$APP_PROFILE_EXPLICIT" = 0 ] || die "custom app profiles are not supported on macOS"
+        app_profile_select "$INSTALL_STAGE"
+        [ "$install_platform" != Darwin ] || [ "$APP_PROFILE" = "$HOME/.local/share/z23-app-data" ] || die "this macOS launcher cannot use the saved custom app profile"
+        printf -v NEXT_COMMAND '%q app open %s --datadir=%q' \
+            "$prefix/bin/z23" "$app" "$APP_PROFILE"
+    fi
+    if [ "$APPS_ONLY" = 1 ] && [ "$app" = tasks ] && [ "$APP_PROFILE" = "$HOME/.local/share/z23-app-data" ] && [ ! -d "$HOME/.local/share" ]; then
         [ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] || die "Tasks profile parent must not be a symlink"
         install_directories "$HOME/.local/share" || die "could not prepare Tasks profile parent"
     fi
@@ -1532,6 +1581,15 @@ install_from_source() {
             || die "macOS generation provenance check failed for $MACOS_GENERATION"
     else
         install_payload "$INSTALL_STAGE" "$prefix" "$app"
+    fi
+    if [ "$APPS_ONLY" = 1 ]; then
+        if [ "$APP_PROFILE_EXPLICIT" = 1 ]; then
+            result="$("$INSTALL_STAGE/z23" ops host app-profile set "--path=$APP_DATADIR" "--plan_id=$APP_EXPECTED" --field=profile </dev/null)" || die "could not save app profile after installing"
+            [ "$result" = "profile=$APP_DATADIR" ] || die "app profile response changed after installing"
+        else
+            result="$APP_PROFILE"; app_profile_select "$INSTALL_STAGE"
+            [ "$result" = "$APP_PROFILE" ] || die "app profile changed while installing"
+        fi
     fi
     cleanup_install_stage
     trap - EXIT HUP INT TERM
@@ -1748,34 +1806,42 @@ selftest_partial_retry() {
     unset -f curl
 }
 
+selftest_expect_exit() {
+    local expected="$1"; shift
+    SELFTEST_STATUS=0
+    "$@" || SELFTEST_STATUS=$?
+    [ "$SELFTEST_STATUS" -eq "$expected" ]
+}
+
+
+selftest_expect_refusal() {
+    if ("$@") >/dev/null 2>&1; then return 1; fi
+    return 0
+}
+
+
 selftest_local_refusals() {
     local tmp="$SELFTEST_TMP" rc
 
     # Missing source refuses.
-    rc=0
-    run_install "$tmp/prefix" "$tmp/units" "$tmp/no-such" \
-        >/dev/null 2>"$tmp/missing.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: missing source must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/prefix" "$tmp/units" "$tmp/no-such" \
+        >/dev/null 2>"$tmp/missing.err" || die "selftest: missing source must exit 1"
     grep -q 'not a directory' "$tmp/missing.err" \
         || die "selftest: missing source must name the refusal"
 
     # Missing SHA256SUMS refuses.
     mkdir -p "$tmp/nosums"
     printf 'x\n' >"$tmp/nosums/z23"
-    rc=0
-    run_install "$tmp/prefix" "$tmp/units" "$tmp/nosums" \
-        >/dev/null 2>"$tmp/nosums.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: missing SHA256SUMS must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/prefix" "$tmp/units" "$tmp/nosums" \
+        >/dev/null 2>"$tmp/nosums.err" || die "selftest: missing SHA256SUMS must exit 1"
     grep -q 'SHA256SUMS missing' "$tmp/nosums.err" \
         || die "selftest: missing SHA256SUMS must be named"
 
     # Mismatch: dest must stay empty.
     cp -f -- "$tmp/good/"* "$tmp/bad/"
     printf 'TAMPERED\n' >"$tmp/bad/z23"
-    rc=0
-    run_install "$tmp/empty-dest" "$tmp/units" "$tmp/bad" \
-        >/dev/null 2>"$tmp/mismatch.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: checksum mismatch must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/empty-dest" "$tmp/units" "$tmp/bad" \
+        >/dev/null 2>"$tmp/mismatch.err" || die "selftest: checksum mismatch must exit 1"
     grep -qi 'mismatch' "$tmp/mismatch.err" \
         || die "selftest: mismatch must be named"
     if [ -e "$tmp/empty-dest/bin/z23" ]; then
@@ -1798,9 +1864,7 @@ selftest_local_refusals() {
 
     selftest_expect_stamp_refuse() {
         local src="$1" dest="$2" err="$3" reason="$4" label="$5"
-        rc=0
-        run_install "$dest" "$tmp/units" "$src" >/dev/null 2>"$err" || rc=$?
-        [ "$rc" -eq 1 ] || die "selftest: $label must exit 1"
+        selftest_expect_exit 1 run_install "$dest" "$tmp/units" "$src" >/dev/null 2>"$err" || die "selftest: $label must exit 1"
         grep -qF "$reason" "$err" \
             || die "selftest: $label must name $reason"
         grep -qF "$TOR_STUB_REFUSAL" "$err" \
@@ -1893,10 +1957,8 @@ EOF
     printf 'tor: full\nbinary_sha256: %s\n' \
         "$(manifest_digest_of "$tmp/sidecar-bound" z23)" \
         >"$tmp/sidecar-bound/z23.tor-stamp"
-    rc=0
-    run_install "$tmp/sidecar-bound-dest" "$tmp/units" "$tmp/sidecar-bound" \
-        >/dev/null 2>"$tmp/sidecar-bound.err" || rc=$?
-    [ "$rc" -eq 0 ] || die "selftest: a non-executable release with a correctly bound sidecar must install"
+    selftest_expect_exit 0 run_install "$tmp/sidecar-bound-dest" "$tmp/units" "$tmp/sidecar-bound" \
+        >/dev/null 2>"$tmp/sidecar-bound.err" || die "selftest: a non-executable release with a correctly bound sidecar must install"
     SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }tor_stamp_sidecar_bound"
 
     # Positive control: the same shape, stamped full, must install.
@@ -1904,10 +1966,8 @@ EOF
 #!/bin/sh
 printf "z23 v0.1.0 (source 000000000000)\ntor: full\n"
 EOF
-    rc=0
-    run_install "$tmp/full-dest" "$tmp/units" "$tmp/full-release" \
-        >/dev/null 2>"$tmp/full.err" || rc=$?
-    [ "$rc" -eq 0 ] || die "selftest: a tor=full release must install"
+    selftest_expect_exit 0 run_install "$tmp/full-dest" "$tmp/units" "$tmp/full-release" \
+        >/dev/null 2>"$tmp/full.err" || die "selftest: a tor=full release must install"
     if grep -qF "$TOR_STUB_REFUSAL" "$tmp/full.err"; then
         die "selftest: a tor=full release was refused as a stub"
     fi
@@ -1928,11 +1988,9 @@ selftest_remote_authority() {
     # A remote mirror is not the authority for its own checksum manifest.
     # Missing expectation refuses before even fetching SHA256SUMS.
     : >"$tmp/curl.log"
-    rc=0
-    selftest_remote_install "$tmp/remote-missing" \
+    selftest_expect_exit 1 selftest_remote_install "$tmp/remote-missing" \
         --source=https://mirror.invalid/good \
-        >/dev/null 2>"$tmp/remote-missing.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: remote source without manifest digest must exit 1"
+        >/dev/null 2>"$tmp/remote-missing.err" || die "selftest: remote source without manifest digest must exit 1"
     [ ! -s "$tmp/curl.log" ] \
         || die "selftest: missing remote manifest digest still made a request"
     [ ! -e "$tmp/remote-missing/bin/z23" ] \
@@ -1943,13 +2001,11 @@ selftest_remote_authority() {
     # versions before making a transfer request.
     for curl_version in 8.3.0 unreadable; do
         : >"$tmp/curl.log"
-        rc=0
         Z23_INSTALL_TEST_CURL_VERSION="$curl_version" \
-            selftest_remote_install "$tmp/curl-$curl_version" \
+            selftest_expect_exit 1 selftest_remote_install "$tmp/curl-$curl_version" \
             --source=https://mirror.invalid/good \
             --manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-            >/dev/null 2>"$tmp/curl-$curl_version.err" || rc=$?
-        [ "$rc" -eq 1 ] || die "selftest: curl $curl_version must refuse"
+            >/dev/null 2>"$tmp/curl-$curl_version.err" || die "selftest: curl $curl_version must refuse"
         [ ! -s "$tmp/curl.log" ] \
             || die "selftest: curl $curl_version refusal made a request"
     done
@@ -1961,12 +2017,10 @@ selftest_remote_pins() {
     # A wrong expectation may fetch the manifest to compare it, but must not
     # fetch any payload or install anything.
     : >"$tmp/curl.log"
-    rc=0
-    selftest_remote_install "$tmp/remote-wrong" \
+    selftest_expect_exit 1 selftest_remote_install "$tmp/remote-wrong" \
         --source=https://mirror.invalid/good \
         --manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-        >/dev/null 2>"$tmp/remote-wrong.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: wrong remote manifest digest must exit 1"
+        >/dev/null 2>"$tmp/remote-wrong.err" || die "selftest: wrong remote manifest digest must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
         "good/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: wrong manifest digest fetched a payload"
@@ -1977,12 +2031,10 @@ selftest_remote_pins() {
     # the independently obtained digest still binds the selected manifest.
     SELFTEST_MANIFEST_SHA="$(sha256sum "$tmp/http/good/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
-    rc=0
-    selftest_remote_install "$tmp/remote-replaced" \
+    selftest_expect_exit 1 selftest_remote_install "$tmp/remote-replaced" \
         --source=https://mirror.invalid/replaced \
         --manifest-sha256="$SELFTEST_MANIFEST_SHA" \
-        >/dev/null 2>"$tmp/remote-replaced.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: replaced remote release must exit 1"
+        >/dev/null 2>"$tmp/remote-replaced.err" || die "selftest: replaced remote release must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
         "replaced/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: replaced manifest fetched a payload"
@@ -2021,12 +2073,10 @@ selftest_remote_success() {
     local split_sha rc
     split_sha="$(sha256sum "$tmp/http/split-names/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
-    rc=0
-    selftest_remote_install "$tmp/remote-split" \
+    selftest_expect_exit 1 selftest_remote_install "$tmp/remote-split" \
         --source=https://mirror.invalid/split-names \
         --manifest-sha256="$split_sha" \
-        >/dev/null 2>"$tmp/remote-split.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: split z23/zclassic23 digests must exit 1"
+        >/dev/null 2>"$tmp/remote-split.err" || die "selftest: split z23/zclassic23 digests must exit 1"
     grep -q 'different digests' "$tmp/remote-split.err" \
         || die "selftest: split node digests must be named"
     [ "$(cat "$tmp/curl.log")" = \
@@ -2045,12 +2095,10 @@ selftest_remote_bounds() {
     # received and refuses the 2049-byte manifest without copying it.
     oversized_manifest_sha256="$(sha256sum "$tmp/http/oversized/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
-    rc=0
-    selftest_remote_install "$tmp/remote-oversized" \
+    selftest_expect_exit 1 selftest_remote_install "$tmp/remote-oversized" \
         --source=https://mirror.invalid/oversized \
         --manifest-sha256="$oversized_manifest_sha256" \
-        >/dev/null 2>"$tmp/remote-oversized.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: oversized remote manifest must exit 1"
+        >/dev/null 2>"$tmp/remote-oversized.err" || die "selftest: oversized remote manifest must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
         "oversized/SHA256SUMS connect=10 time=30 bytes=2048" ] \
         || die "selftest: oversized manifest request was not bounded"
@@ -2060,12 +2108,10 @@ selftest_remote_bounds() {
     oversized_payload_manifest_sha256="$(sha256sum \
         "$tmp/http/oversized-payload/SHA256SUMS" | awk '{print $1}')"
     : >"$tmp/curl.log"
-    rc=0
-    selftest_remote_install "$tmp/remote-oversized-payload" \
+    selftest_expect_exit 1 selftest_remote_install "$tmp/remote-oversized-payload" \
         --source=https://mirror.invalid/oversized-payload \
         --manifest-sha256="$oversized_payload_manifest_sha256" \
-        >/dev/null 2>"$tmp/remote-oversized-payload.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: oversized remote payload must exit 1"
+        >/dev/null 2>"$tmp/remote-oversized-payload.err" || die "selftest: oversized remote payload must exit 1"
     [ "$(cat "$tmp/curl.log")" = \
         $'oversized-payload/SHA256SUMS connect=10 time=30 bytes=2048\noversized-payload/AGENT_CARD.md connect=10 time=300 bytes=65536\noversized-payload/z23 connect=10 time=300 bytes=67108864' ] \
         || die "selftest: oversized payload request was not bounded"
@@ -2081,13 +2127,10 @@ selftest_remote_manifest_and_signal() {
     for invalid_kind in duplicate malformed; do
         invalid_sha="$(sha256sum "$tmp/http/$invalid_kind/SHA256SUMS" | awk '{print $1}')"
         : >"$tmp/curl.log"
-        rc=0
-        selftest_remote_install "$tmp/remote-$invalid_kind" \
+        selftest_expect_exit 1 selftest_remote_install "$tmp/remote-$invalid_kind" \
             --source="https://mirror.invalid/$invalid_kind" \
             --manifest-sha256="$invalid_sha" \
-            >/dev/null 2>"$tmp/remote-$invalid_kind.err" || rc=$?
-        [ "$rc" -eq 1 ] \
-            || die "selftest: $invalid_kind remote manifest must exit 1"
+            >/dev/null 2>"$tmp/remote-$invalid_kind.err" || die "selftest: $invalid_kind remote manifest must exit 1"
         [ "$(cat "$tmp/curl.log")" = \
             "$invalid_kind/SHA256SUMS connect=10 time=30 bytes=2048" ] \
             || die "selftest: $invalid_kind manifest fetched a payload"
@@ -2118,9 +2161,7 @@ selftest_remote_manifest_and_signal() {
     [ -e "$tmp/signal.ready" ] || die "selftest: signal fixture did not enter curl"
     kill -TERM "$signal_pid"
     : >"$tmp/signal.release"
-    rc=0
-    wait "$signal_pid" || rc=$?
-    [ "$rc" -eq 143 ] || die "selftest: TERM must exit 143, got $rc"
+    selftest_expect_exit 143 wait "$signal_pid" || die "selftest: TERM must exit 143, got $SELFTEST_STATUS"
     [ ! -e "$tmp/remote-signal/bin/z23" ] \
         || die "selftest: signalled install installed z23"
 }
@@ -2171,10 +2212,8 @@ selftest_local_success() {
 
     # A card edited after the manifest was written is instruction injection
     # into whatever assistant reads it, so it refuses like any other payload.
-    rc=0
-    run_install "$tmp/card-dest" "$tmp/units" "$tmp/tampered-card" \
-        >/dev/null 2>"$tmp/card.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: a tampered agent card must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/card-dest" "$tmp/units" "$tmp/tampered-card" \
+        >/dev/null 2>"$tmp/card.err" || die "selftest: a tampered agent card must exit 1"
     grep -qi 'mismatch' "$tmp/card.err" \
         || die "selftest: a tampered agent card must name the mismatch"
     [ ! -e "$tmp/card-dest/bin/z23" ] \
@@ -2188,10 +2227,8 @@ selftest_local_success() {
     cp -f -- "$tmp/good/z23" "$tmp/no-verifier/z23"
     cp -f -- "$tmp/good/zclassic23" "$tmp/no-verifier/zclassic23"
     (cd "$tmp/no-verifier" && sha256sum z23 zclassic23 >SHA256SUMS)
-    rc=0
-    run_install "$tmp/no-verifier-dest" "$tmp/units" "$tmp/no-verifier" \
-        >/dev/null 2>"$tmp/no-verifier.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: missing verifier must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/no-verifier-dest" "$tmp/units" "$tmp/no-verifier" \
+        >/dev/null 2>"$tmp/no-verifier.err" || die "selftest: missing verifier must exit 1"
     grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/no-verifier.err" \
         || die "selftest: missing verifier must name the strict manifest refusal"
     if [ -e "$tmp/no-verifier-dest/bin/z23" ]; then
@@ -2210,10 +2247,8 @@ selftest_local_success() {
     (cd "$tmp/no-acme" && \
         sha256sum z23 zclassic23 zclassic23-package-verify AGENT_CARD.md \
             >SHA256SUMS)
-    rc=0
-    run_install "$tmp/no-acme-dest" "$tmp/units" "$tmp/no-acme" \
-        >/dev/null 2>"$tmp/no-acme.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: missing zclassic23-acme must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/no-acme-dest" "$tmp/units" "$tmp/no-acme" \
+        >/dev/null 2>"$tmp/no-acme.err" || die "selftest: missing zclassic23-acme must exit 1"
     grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/no-acme.err" \
         || die "selftest: missing zclassic23-acme must name the strict manifest refusal"
     if [ -e "$tmp/no-acme-dest/bin/z23" ]; then
@@ -2270,26 +2305,22 @@ selftest_release_pin() {
 
     # REFUSE: three sources agree on a pin that does not describe this
     # release. Agreement is not a substitute for the checksum.
-    rc=0
     Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-wrong" \
-        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        Z23_UNIT_DIR="$tmp/units" selftest_expect_exit 1 "$SCRIPT_DIR/install_z23.sh" \
         --source="$tmp/good" \
         --attest="baked=$wrong_pin" --attest="dns=$wrong_pin" \
-        --attest="repo=$wrong_pin" >/dev/null 2>"$tmp/pin-wrong.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: an agreed pin for other bytes must exit 1"
+        --attest="repo=$wrong_pin" >/dev/null 2>"$tmp/pin-wrong.err" || die "selftest: an agreed pin for other bytes must exit 1"
     grep -q 'SHA256SUMS digest mismatch' "$tmp/pin-wrong.err" \
         || die "selftest: agreed-but-wrong pin must name the digest mismatch"
     [ ! -e "$tmp/pin-wrong/bin/z23" ] \
         || die "selftest: agreed-but-wrong pin installed z23"
 
     # REFUSE: one source disagrees. Never majority-vote, even 2 against 1.
-    rc=0
     Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-split" \
-        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        Z23_UNIT_DIR="$tmp/units" selftest_expect_exit 1 "$SCRIPT_DIR/install_z23.sh" \
         --source="$tmp/good" \
         --attest="baked=$good_pin" --attest="dns=$good_pin" \
-        --attest="repo=$wrong_pin" >/dev/null 2>"$tmp/pin-split.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: a disagreeing source must exit 1"
+        --attest="repo=$wrong_pin" >/dev/null 2>"$tmp/pin-split.err" || die "selftest: a disagreeing source must exit 1"
     grep -q 'release pin disagreement between baked and repo' "$tmp/pin-split.err" \
         || die "selftest: disagreement must name both origins"
     [ ! -e "$tmp/pin-split/bin/z23" ] \
@@ -2311,14 +2342,12 @@ selftest_release_pin() {
     fi
 
     # REFUSE: only one source answered. No silent degradation to one.
-    rc=0
     Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-one" \
-        Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+        Z23_UNIT_DIR="$tmp/units" selftest_expect_exit 1 "$SCRIPT_DIR/install_z23.sh" \
         --source="$tmp/good" --attest="baked=$good_pin" \
         --attest-unreachable=dns=no-dns-tool \
         --attest-unreachable=repo=fetch-failed \
-        >/dev/null 2>"$tmp/pin-one.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: a single answering source must exit 1"
+        >/dev/null 2>"$tmp/pin-one.err" || die "selftest: a single answering source must exit 1"
     grep -q 'release pin quorum: 1 of 3 sources answered' "$tmp/pin-one.err" \
         || die "selftest: quorum refusal must count the sources"
     grep -q 'unreachable: dns=no-dns-tool, repo=fetch-failed' "$tmp/pin-one.err" \
@@ -2343,12 +2372,10 @@ selftest_release_pin() {
                 --attest="dns=$good_pin" --attest="repo=$good_pin"
                 --manifest-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) ;;
         esac
-        rc=0
         Z23_SKIP_SYSTEMD=1 Z23_INSTALL_PREFIX="$tmp/pin-$case_name" \
-            Z23_UNIT_DIR="$tmp/units" "$SCRIPT_DIR/install_z23.sh" \
+            Z23_UNIT_DIR="$tmp/units" selftest_expect_exit 1 "$SCRIPT_DIR/install_z23.sh" \
             --source="$tmp/good" "${case_args[@]}" \
-            >/dev/null 2>"$tmp/pin-$case_name.err" || rc=$?
-        [ "$rc" -eq 1 ] || die "selftest: pin case $case_name must exit 1"
+            >/dev/null 2>"$tmp/pin-$case_name.err" || die "selftest: pin case $case_name must exit 1"
         [ ! -e "$tmp/pin-$case_name/bin/z23" ] \
             || die "selftest: pin case $case_name installed z23"
     done
@@ -2394,10 +2421,8 @@ selftest_local_manifest_refusals() {
     (cd "$tmp/extra" && \
         sha256sum z23 zclassic23 zclassic23-package-verify zclassic23-acme evil \
             >SHA256SUMS)
-    rc=0
-    run_install "$tmp/prefix2" "$tmp/units" "$tmp/extra" \
-        >/dev/null 2>"$tmp/extra.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: extra SHA256SUMS member must refuse"
+    selftest_expect_exit 1 run_install "$tmp/prefix2" "$tmp/units" "$tmp/extra" \
+        >/dev/null 2>"$tmp/extra.err" || die "selftest: extra SHA256SUMS member must refuse"
     grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/extra.err" \
         || die "selftest: extra member must name the strict manifest refusal"
 
@@ -2712,11 +2737,9 @@ EOF
 
     # Readiness can succeed while launchd is still running other bytes. The
     # exact txt-vnode digest must catch that and restore v1 automatically.
-    rc=0
     Z23_INSTALL_TEST_WRONG_IMAGE=1 \
-        selftest_macos_install v2 \
-        >/dev/null 2>"$mac/wrong-image.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: wrong running Mac image must refuse"
+        selftest_expect_exit 1 selftest_macos_install v2 \
+        >/dev/null 2>"$mac/wrong-image.err" || die "selftest: wrong running Mac image must refuse"
     grep -q 'was rolled back' "$mac/wrong-image.err" \
         || die "selftest: wrong running Mac image did not name rollback: $(tr '\n' ';' <"$mac/wrong-image.err")"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
@@ -2724,11 +2747,9 @@ EOF
 
     # lsof's txt pathname can be reused for new bytes while the old vnode
     # remains mapped. A pathname digest of v2 would pass this case falsely.
-    rc=0
     Z23_INSTALL_TEST_REPLACED_IMAGE=1 \
-        selftest_macos_install v2 \
-        >/dev/null 2>"$mac/replaced-image.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: replaced mapped Mac image must refuse"
+        selftest_expect_exit 1 selftest_macos_install v2 \
+        >/dev/null 2>"$mac/replaced-image.err" || die "selftest: replaced mapped Mac image must refuse"
     grep -q 'was rolled back' "$mac/replaced-image.err" \
         || die "selftest: replaced mapped Mac image did not name rollback"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
@@ -2752,11 +2773,9 @@ EOF
     [ "$rc" -eq 1 ] || die "selftest: mapped Mac image outside manifest must refuse"
 
     # A typed bootwait failure is the other rollback edge.
-    rc=0
     Z23_INSTALL_TEST_READY_FAIL=1 \
-        selftest_macos_install v2 \
-        >/dev/null 2>"$mac/not-ready.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: unready Mac generation must refuse"
+        selftest_expect_exit 1 selftest_macos_install v2 \
+        >/dev/null 2>"$mac/not-ready.err" || die "selftest: unready Mac generation must refuse"
     grep -q 'was rolled back' "$mac/not-ready.err" \
         || die "selftest: unready Mac generation did not reach rollback"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
@@ -2766,11 +2785,9 @@ EOF
     # Deliver TERM deterministically from the candidate's bootwait child
     # while activation is pending. The installer's existing trap must restore
     # both the old node selection and working helpers, without a sleep race.
-    rc=0
     Z23_INSTALL_TEST_SIGNAL_PARENT=1 \
-        selftest_macos_install v2 \
-        >/dev/null 2>"$mac/signal-rollback.err" || rc=$?
-    [ "$rc" -eq 143 ] || die "selftest: pending activation TERM must exit 143"
+        selftest_expect_exit 143 selftest_macos_install v2 \
+        >/dev/null 2>"$mac/signal-rollback.err" || die "selftest: pending activation TERM must exit 143"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
         || die "selftest: pending activation TERM did not restore v1"
     selftest_macos_helper_bytes "$prefix" "$mac/v1"
@@ -2807,9 +2824,7 @@ EOF
         || die "selftest: Background macOS install failed"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
         || die "selftest: Background install did not activate v1"
-    rc=0
-    run_headless_install 1 0 v2 >/dev/null 2>"$mac/headless-rollback.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: unready Background generation must refuse"
+    selftest_expect_exit 1 run_headless_install 1 0 v2 >/dev/null 2>"$mac/headless-rollback.err" || die "selftest: unready Background generation must refuse"
     grep -q 'was rolled back' "$mac/headless-rollback.err" \
         || die "selftest: unready Background generation did not reach rollback"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
@@ -2821,9 +2836,7 @@ EOF
     grep -q '^kickstart -k user/' "$mac/headless-launchctl.log" \
         || die "selftest: Background activation did not use user domain"
     : >"$mac/headless-launchctl.log"
-    rc=0
-    run_headless_install 0 1 v2 >/dev/null 2>"$mac/no-domain.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: missing launchd domains must refuse"
+    selftest_expect_exit 1 run_headless_install 0 1 v2 >/dev/null 2>"$mac/no-domain.err" || die "selftest: missing launchd domains must refuse"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
         || die "selftest: missing domain changed the current generation"
     if grep -Eq '^(bootstrap|bootout|kickstart) ' "$mac/headless-launchctl.log"; then
@@ -2848,12 +2861,10 @@ EOF
     # An already ambiguous state must refuse before changing either service.
     : >"$mac/headless.state.gui"
     : >"$mac/headless-launchctl.log"
-    rc=0
     Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
         Z23_INSTALL_TEST_NO_DOMAIN=0 \
-        selftest_macos_install "v1" \
-        >"$mac/dual-domain.out" 2>"$mac/dual-domain.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: dual-domain services must refuse"
+        selftest_expect_exit 1 selftest_macos_install "v1" \
+        >"$mac/dual-domain.out" 2>"$mac/dual-domain.err" || die "selftest: dual-domain services must refuse"
     grep -q 'refusing ambiguous activation' "$mac/dual-domain.err" \
         || die "selftest: dual-domain refusal did not name ambiguity"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v2_id" ] \
@@ -2913,9 +2924,8 @@ selftest_macos_tampered_manifest() {
 
     Z23_INSTALL_TEST_PLATFORM=Darwin Z23_SKIP_SYSTEMD=1 \
         Z23_INSTALL_PREFIX="$prefix" \
-        "$SCRIPT_DIR/install_z23.sh" --source="$mac/release" \
-        >/dev/null 2>"$mac/tamper.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: tampered SHA256SUMS must refuse to install"
+        selftest_expect_exit 1 "$SCRIPT_DIR/install_z23.sh" --source="$mac/release" \
+        >/dev/null 2>"$mac/tamper.err" || die "selftest: tampered SHA256SUMS must refuse to install"
     grep -q 'SHA256SUMS mismatch' "$mac/tamper.err" \
         || die "selftest: tampered SHA256SUMS refusal did not name the mismatch"
 
@@ -2985,10 +2995,8 @@ selftest_current_release() {
         cp -f -- "$cur/"* "$tmp/cur-missing-$name/"
         rm -f "$tmp/cur-missing-$name/$name"
         (cd "$tmp/cur-missing-$name" && grep -v "  $name\$" "$cur/SHA256SUMS" >SHA256SUMS)
-        rc=0
-        run_install "$tmp/cur-missing-$name-dest" "$tmp/units" \
-            "$tmp/cur-missing-$name" >/dev/null 2>"$tmp/cur-missing-$name.err" || rc=$?
-        [ "$rc" -eq 1 ] || die "selftest: a current release missing $name must exit 1"
+        selftest_expect_exit 1 run_install "$tmp/cur-missing-$name-dest" "$tmp/units" \
+            "$tmp/cur-missing-$name" >/dev/null 2>"$tmp/cur-missing-$name.err" || die "selftest: a current release missing $name must exit 1"
         grep -Fq 'supported exact release set with an optional complete docs pair' "$tmp/cur-missing-$name.err" \
             || die "selftest: a current release missing $name must name the strict manifest refusal"
         if [ -e "$tmp/cur-missing-$name-dest/bin/z23" ]; then
@@ -3002,10 +3010,8 @@ selftest_current_release() {
     rm -f "$tmp/cur-split/zclassic23-acme"
     printf 'a-different-acme\n' >"$tmp/cur-split/zclassic23-acme"
     (cd "$tmp/cur-split" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
-    rc=0
-    run_install "$tmp/cur-split-dest" "$tmp/units" "$tmp/cur-split" \
-        >/dev/null 2>"$tmp/cur-split.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: split z23-acme/zclassic23-acme digests must exit 1"
+    selftest_expect_exit 1 run_install "$tmp/cur-split-dest" "$tmp/units" "$tmp/cur-split" \
+        >/dev/null 2>"$tmp/cur-split.err" || die "selftest: split z23-acme/zclassic23-acme digests must exit 1"
     grep -q 'different digests' "$tmp/cur-split.err" \
         || die "selftest: split helper twins must name the digest disagreement"
 
@@ -3083,22 +3089,18 @@ selftest_app_source() {
     run_install "$prefix" "$tmp/units" "$app" >/dev/null || die "selftest: repeated identical app install failed"
     for name in $APP_SOURCE_MEMBERS; do
         grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
-        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || die "selftest: missing app row accepted: $name"
+        selftest_expect_refusal validate_manifest_contract "$app/missing" || die "selftest: missing app row accepted: $name"
     done
     cp "$app/SHA256SUMS" "$app/extra"
     printf '%064d  unlisted\n' 0 >>"$app/extra"
-    rc=0; (validate_manifest_contract "$app/extra") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: extra app row accepted"
+    selftest_expect_refusal validate_manifest_contract "$app/extra" || die "selftest: extra app row accepted"
     printf 'tamper\n' >>"$app/source.bundle"
-    rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: app bundle tamper accepted"
+    selftest_expect_refusal verify_strict "$app" || die "selftest: app bundle tamper accepted"
     printf 'inert source.bundle\n' >"$app/source.bundle"
     # Existing macOS generation identity remains z23's digest. A different
     # member set under that same identity must still refuse, not merge.
     (install_payload_macos_generation "$tmp/good-new" "$tmp/app-mac-prefix") || die "selftest: base generation failed"
-    rc=0; (install_payload_macos_generation "$app" "$tmp/app-mac-prefix") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: same node/different app set collision accepted"
+    selftest_expect_refusal install_payload_macos_generation "$app" "$tmp/app-mac-prefix" || die "selftest: same node/different app set collision accepted"
     (umask 002; install_payload_macos_generation "$app" "$tmp/app-mac-fresh") || die "selftest: fresh app generation failed"
     local node_id="$(manifest_digest_of "$app" z23)"
     selftest_install_ancestors "$tmp/app-mac-fresh" bin lib lib/z23 lib/z23/generations \
@@ -3127,11 +3129,9 @@ selftest_macos_app_manifest() {
     verify_strict "$app"
     for name in $APP_MACOS_MEMBERS; do
         grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
-        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || die "selftest: partial macOS app set accepted"
+        selftest_expect_refusal validate_manifest_contract "$app/missing" || die "selftest: partial macOS app set accepted"
         printf 'tamper\n' >>"$app/$name"
-        rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || die "selftest: macOS app member tampering accepted"
+        selftest_expect_refusal verify_strict "$app" || die "selftest: macOS app member tampering accepted"
         printf 'inert %s\n' "$name" >"$app/$name"
     done
 }
@@ -3159,21 +3159,17 @@ selftest_app_toolchain() {
         cmp -s "$app/$name" "$prefix/share/z23/apps/$id/$name" || die "selftest: retained kit bytes differ"
         [ ! -x "$prefix/share/z23/apps/$id/$name" ] || die "selftest: inert kit member is executable"
         grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
-        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || die "selftest: partial toolchain set accepted"
+        selftest_expect_refusal validate_manifest_contract "$app/missing" || die "selftest: partial toolchain set accepted"
     done
     rc=0; (install_payload_macos_generation "$app" "$tmp/kit-mac-refusal") >/dev/null 2>&1 || rc=$?
     [ "$rc" -ne 0 ] && [ ! -e "$tmp/kit-mac-refusal" ] || die "selftest: unsupported kit mutated a Mac install"
     printf 'tamper\n' >>"$app/app-toolchain.bundle"
-    rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: toolchain tampering accepted"
+    selftest_expect_refusal verify_strict "$app" || die "selftest: toolchain tampering accepted"
     awk 'BEGIN { for (i=0; i<4097; i++) printf "x" }' >"$app/app-toolchain.json"
-    rc=0; (validate_payload_sizes "$app") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: oversized toolchain descriptor accepted"
+    selftest_expect_refusal validate_payload_sizes "$app" || die "selftest: oversized toolchain descriptor accepted"
     printf 'inert app-toolchain.json\n' >"$app/app-toolchain.json"
     dd if=/dev/zero of="$app/app-toolchain.bundle" bs=1 count=0 seek=67108865 2>/dev/null
-    rc=0; (validate_payload_sizes "$app") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: oversized toolchain bundle accepted"
+    selftest_expect_refusal validate_payload_sizes "$app" || die "selftest: oversized toolchain bundle accepted"
 }
 
 # A bound Tor sidecar permits foreign node staging, but an apps install must
@@ -3230,6 +3226,9 @@ selftest_app_mode() {
     done
     cat >"$app/z23" <<'EOF'
 #!/bin/sh
+if [ "$1 $2 $3" = 'ops host app-profile' ]; then
+    echo '{"error":{"code":"UNKNOWN_COMMAND","evidence":"ops.host.app-profile"}}'; exit 2
+fi
 printf '%s\n' "$@" >"$Z23_APPS_ARGV"
 printf 'z23 v0.1.0 (source 000000000000)\ntor: full\n'
 EOF
@@ -3401,12 +3400,10 @@ EOF
     done
     for name in $APP_DESKTOP_MEMBERS; do
         grep -v "  $name\$" "$app/SHA256SUMS" >"$app/missing"
-        rc=0; (validate_manifest_contract "$app/missing") >/dev/null 2>&1 || rc=$?
-        [ "$rc" -ne 0 ] || die "selftest: partial desktop manifest accepted"
+        selftest_expect_refusal validate_manifest_contract "$app/missing" || die "selftest: partial desktop manifest accepted"
     done
     printf 'tampered\n' >>"$app/org.zclassic.ZClassic23.desktop"
-    rc=0; (verify_strict "$app") >/dev/null 2>&1 || rc=$?
-    [ "$rc" -ne 0 ] || die "selftest: desktop tampering accepted"
+    selftest_expect_refusal verify_strict "$app" || die "selftest: desktop tampering accepted"
     rc=0
     HOME="$home" PATH="$mock:$PATH" Z23_APPS_SERVICE_LOG="$tmp/app-services" \
         Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$tmp/app-node-refusal" \
@@ -3421,6 +3418,7 @@ selftest() {
     export Z23_INSTALL_TOR_STAMP_TIMEOUT=10
     SELFTEST_TOR_CASES=""
     selftest_prepare
+    export XDG_STATE_HOME="$SELFTEST_TMP/profile-state"
     selftest_prepare_curl_mock
     selftest_partial_retry
     selftest_local_refusals
@@ -3455,6 +3453,7 @@ ATTEST_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --apps) APPS_ONLY=1; shift ;;
+        --app-datadir=*) [ "$APP_PROFILE_EXPLICIT" = 0 ] || die "--app-datadir may be supplied once"; APP_PROFILE_EXPLICIT=1; APP_DATADIR="${1#--app-datadir=}"; shift ;;
         --selftest) selftest; exit 0 ;;
         --generation-status=*)
             generation_provenance "${1#--generation-status=}"
@@ -3505,6 +3504,8 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+[ "$APP_PROFILE_EXPLICIT" = 0 ] || [ "$APPS_ONLY" = 1 ] || die "--app-datadir requires --apps"
 
 if [ "$ATTEST_OK_COUNT" -gt 0 ] || [ -n "$ATTEST_DOWN" ]; then
     attest_resolve_manifest

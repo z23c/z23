@@ -860,3 +860,36 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_APP_MANIFEST_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_toolchain_verify)
+
+ZCL_COMMAND_BRANCH("ops.host.app-profile", "ops.host", "Desktop app profile", ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "ops.host.app-profile.get", "ops.host.app-profile", "", "Read the desktop app profile",
+    "Read and revalidate the selected owner profile without creating it. When unset, return the default.",
+    ZCL_COMMAND_RESULT_BUDGET, "app,profile,desktop", "zcl.command.empty_input.v1",
+    "zcl.app_profile.v1", "", "", "z23 ops host app-profile get",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_profile_get)
+
+ZCL_COMMAND_READY_COMMAND(
+    "ops.host.app-profile.set", "ops.host.app-profile", "", "Select the desktop app profile",
+    "Store an owner-controlled profile for the installer to apply on installation or reinstall. Existing launchers are not changed; no app data is moved or modified.",
+    ZCL_COMMAND_RESULT_BUDGET, "app,profile,desktop", "zcl.app_profile.input.v1",
+    "zcl.app_profile.v1", "path,plan_id", "path,plan_id", "z23 ops host app-profile set --path=/absolute/profile",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_app_profile_set)
+
+ZCL_COMMAND_READY_READ(
+    "ops.host.app-profile.check", "ops.host.app-profile", "", "Check a desktop app profile",
+    "Validate a proposed owner profile and current selection without modifying either.",
+    ZCL_COMMAND_RESULT_BUDGET, "app,profile,desktop", "zcl.app_profile.input.v1",
+    "zcl.app_profile.v1", "path", "path", "z23 ops host app-profile check --path=/absolute/profile",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_profile_check)
