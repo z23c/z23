@@ -718,16 +718,6 @@ publish_current_epoch()
 publish_current_epoch "$OBJECT_ROOT"
 publish_current_epoch "$CANDIDATE_ROOT"
 
-lease_is_live()
-{
-    local lease="$1" pid start actual
-    pid="$(sed -n 's/^pid=//p' "$lease" 2>/dev/null)"
-    start="$(sed -n 's/^start=//p' "$lease" 2>/dev/null)"
-    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [[ "$start" =~ ^[0-9a-f]+$ ]] || return 1
-    actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null)" || return 1
-    [ "$actual" = "$start" ]
-}
-
 # Keep the current epoch plus the newest KEEP-1 inactive epochs. A directory
 # with any live Make lease is never removed. Dead leases are self-healing.
 mapfile -t epochs < <(
@@ -739,18 +729,14 @@ for old in "${epochs[@]}"; do
     [[ "$old" =~ ^[0-9a-f]{64}$ ]] || continue
     [ "$old" = "$EPOCH" ] && continue
     old_dir="$OBJECT_ROOT/epochs/$old"
-    live=0
-    if [ -d "$old_dir/.leases" ]; then
+    if [ "$HOST_SYSTEM" = Linux ] || [ "$HOST_SYSTEM" = Darwin ]; then
+        "$SELF_DIR/../../build/bin/build-epoch-lock-wait" retire-dead-leases "$old_dir" || continue
+    else
+        [ ! -e "$old_dir/.unverified" ] && [ ! -L "$old_dir/.unverified" ] || continue; live=0
         while IFS= read -r -d '' old_lease; do
-            if lease_is_live "$old_lease"; then
-                live=1
-            else
-                rm -f -- "$old_lease"
-            fi
+            if current_lease_is_live "$old_lease"; then live=1; else rm -f -- "$old_lease"; fi
         done < <(find "$old_dir/.leases" -maxdepth 1 -type f -print0 2>/dev/null)
-    fi
-    if [ "$live" -eq 1 ]; then
-        continue
+        [ "$live" = 0 ] || continue
     fi
     if [ "$kept" -lt "$KEEP" ]; then
         kept=$((kept + 1))

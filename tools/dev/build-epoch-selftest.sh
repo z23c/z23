@@ -1321,9 +1321,11 @@ GC_CANDIDATES="$WORK/gc-candidates"
 GC_LIVE="$(sha_label gc-live)"
 GC_DEAD_1="$(sha_label gc-dead-1)"
 GC_DEAD_2="$(sha_label gc-dead-2)"
+GC_UNKNOWN="$(sha_label gc-unknown)"; GC_UNVERIFIED="$(sha_label gc-unverified)"
+GC_BAD_DIR="$(sha_label gc-bad-dir)"; GC_REUSED="$(sha_label gc-reused)"
 OWNER_START="$("$SELF_DIR/process-start-token.sh" "$$")"
 mkdir -p "$GC_ROOT/epochs/.gc-$GC_DEAD_1"
-for old in "$GC_LIVE" "$GC_DEAD_1" "$GC_DEAD_2"; do
+for old in "$GC_LIVE" "$GC_DEAD_1" "$GC_DEAD_2" "$GC_UNKNOWN" "$GC_UNVERIFIED" "$GC_BAD_DIR" "$GC_REUSED"; do
     mkdir -p "$GC_ROOT/epochs/$old/.leases" "$GC_CANDIDATES/epochs/$old"
     : > "$GC_CANDIDATES/epochs/$old/candidate"
 done
@@ -1333,6 +1335,10 @@ printf 'pid=99999999\nstart=1\n' \
     > "$GC_ROOT/epochs/$GC_DEAD_1/.leases/dead"
 printf 'pid=99999998\nstart=1\n' \
     > "$GC_ROOT/epochs/$GC_DEAD_2/.leases/dead"
+printf 'pid=malformed\nstart=1\n' > "$GC_ROOT/epochs/$GC_UNKNOWN/.leases/unknown"
+: > "$GC_ROOT/epochs/$GC_UNVERIFIED/.unverified"
+rmdir "$GC_ROOT/epochs/$GC_BAD_DIR/.leases"; : > "$GC_ROOT/epochs/$GC_BAD_DIR/.leases"
+printf 'pid=%s\nstart=1\n' "$$" > "$GC_ROOT/epochs/$GC_REUSED/.leases/reused"
 set_state "$SOURCE_A" "$MUTATION_A2"
 STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
     "$GC_ROOT/epochs/$EPOCH_MAIN/.build-session" \
@@ -1349,6 +1355,21 @@ STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
 [ ! -e "$GC_CANDIDATES/epochs/$GC_DEAD_2" ] ||
     fail 'epoch GC retained dead epochs beyond its bound'
 [ -d "$GC_ROOT/epochs/.gc-$GC_DEAD_1" ] || fail 'epoch GC removed staged recovery'
+if [ "$HOST_SYSTEM" = Linux ] || [ "$HOST_SYSTEM" = Darwin ]; then
+for old in "$GC_UNKNOWN" "$GC_UNVERIFIED" "$GC_BAD_DIR" "$GC_REUSED"; do
+    [ -d "$GC_ROOT/epochs/$old" ] && [ -d "$GC_CANDIDATES/epochs/$old" ] ||
+        fail 'epoch GC removed an uncertain generation'
+done
+fi
+GC_OLD="$(sha_label gc-old)"; GC_NEW="$(sha_label gc-new)"
+mkdir -p "$GC_ROOT/epochs/$GC_OLD" "$GC_ROOT/epochs/$GC_NEW"
+touch -t 202001010000 "$GC_ROOT/epochs/$GC_OLD"; touch -t 202101010000 "$GC_ROOT/epochs/$GC_NEW"
+STATE_FILE="$STATE" "$SESSION_TOOL" acquire "$GC_ROOT/epochs/$EPOCH_MAIN/.build-session" \
+    "$GC_ROOT/epochs/$EPOCH_MAIN/.leases/current" "$GC_ROOT" "$GC_CANDIDATES" 2 \
+    "$SOURCE_A" 1 "$MUTATION_A2" "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" \
+    "$LINK_FLAGS" "$SESSION_CC_COMMAND" "$SESSION_CXX_COMMAND" "$$" "$VERIFY" >/dev/null
+[ ! -e "$GC_ROOT/epochs/$GC_OLD" ] && [ -d "$GC_ROOT/epochs/$GC_NEW" ] ||
+    fail 'epoch GC did not retain the newest eligible generation'
 
 if [ "$HOST_SYSTEM" = Linux ]; then
     LOCK_RACE_ROOT="$WORK/gc-lock-race"; mkdir -p "$LOCK_RACE_ROOT"
