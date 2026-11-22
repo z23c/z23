@@ -2356,7 +2356,7 @@ static bool ak_draft_cancel_consent(struct ak_draft_flow_view *v,
 {
     bool close = false, redraw = false; char revision[32]; uint32_t count = 0;
     (void)snprintf(revision, sizeof(revision), "%llu", (unsigned long long)(v->prior_revision + 1));
-    if (strcmp(model->summary, "Review every page before confirming.") ||
+    if (strcmp(model->summary, "Starts from the saved version. A newer saved draft exists: My Apps > Change > Review unkept changes.") ||
         !aj_receive_field(model, "Kept app: ", AK_ROUTE) ||
         !aj_receive_field(model, "Kept revision: ", revision) ||
         !aj_receive_field(model, "Saved version: ", v->nav.head) ||
