@@ -492,10 +492,14 @@ static void zao_board_refusal_reason(const struct json_value *body,
 /* The BOARD_UNREADABLE failure, naming the node's own refusal when it gave
  * one and the start-the-node remedy only when nothing answered. */
 static void zao_board_unreadable_fail(struct zcl_command_reply *out,
-                                      const char *node_reason)
+                                      const char *node_reason, bool unreachable)
 {
     char why[320];
-    if (node_reason[0])
+    if (unreachable)
+        (void)snprintf(why, sizeof(why),
+                       "Could not query the selected node. Check that it is "
+                       "running and this profile has its RPC credentials, then retry.");
+    else if (node_reason[0])
         (void)snprintf(why, sizeof(why),
                        "the node's board refused the listing: %s",
                        node_reason);
@@ -530,6 +534,13 @@ static bool zao_board_params(const struct json_value *input, char *params,
     return true;
 }
 
+static bool zao_board_rpc_unreachable(const struct json_value *body, bool parsed)
+{
+    if (!parsed || json_get(body, "ok")) return false;
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *code = err && err->type == JSON_OBJ ? json_get(err, "code") : NULL;
+    return code && code->type == JSON_INT && json_get_int(code) == NODE_RPC_UNREACHABLE;
+}
 static bool zao_board_list(const struct json_value *input,
                            struct zcl_command_reply *out)
 {
@@ -542,13 +553,15 @@ static bool zao_board_list(const struct json_value *input,
         raw = node_rpc_call("fleet_board", params);
     }
     json_init(&body);
-    ok = raw && json_read(&body, raw, strlen(raw)) && body.type == JSON_OBJ &&
+    bool parsed = raw && json_read(&body, raw, strlen(raw)) && body.type == JSON_OBJ;
+    ok = parsed &&
          json_get_bool_or(&body, "ok", false) &&
          json_get(&body, "posts") &&
          json_get(&body, "posts")->type == JSON_ARR;
     /* A node that ANSWERED with its own refusal (version skew, room policy)
      * has more to say than "start the node": keep its message so the
      * operator sees the real cause while the reply object is still alive. */
+    bool unreachable = zao_board_rpc_unreachable(&body, parsed);
     char node_reason[192];
     zao_board_refusal_reason(!ok ? &body : NULL, node_reason,
                              sizeof(node_reason));
@@ -562,7 +575,7 @@ static bool zao_board_list(const struct json_value *input,
     }
     json_free(&body);
     if (!ok)
-        zao_board_unreadable_fail(out, node_reason);
+        zao_board_unreadable_fail(out, node_reason, unreachable);
     return ok;
 }
 

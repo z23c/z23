@@ -301,9 +301,37 @@ static char *tag_board_rpc(const char *method, const char *params)
     if (g_tag_board_mode == 2)
         return strdup("{\"error\":{\"code\":-32000,\"message\":\"offline\"}}");
     if (g_tag_board_mode == 3) return strdup("{\"ok\":true}");
+    if (g_tag_board_mode == 4) return strdup("{\"error\":{\"code\":-32097,\"message\":\"private cookie detail\"}}");
+    if (g_tag_board_mode == 5) return strdup("{\"error\":{\"code\":\"-32097\",\"message\":\"other refusal\"}}");
+    if (g_tag_board_mode == 6) return strdup("{bad");
+    if (g_tag_board_mode == 7) return strdup("{\"ok\":false,\"code\":\"DENIED\",\"message\":\"board denied\",\"error\":{\"code\":-32097}}");
     return NULL;
 }
 
+static bool tag_board_unreachable_cases(struct zcl_app_offer_row *rows, struct zcl_app_offer_page *page)
+{
+    struct zcl_command_reply why;
+    g_tag_board_mode = 4;
+    bool ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, page, &why);
+    bool unreachable = !ok && !strcmp(why.error.code, "BOARD_UNREADABLE") &&
+        strstr(why.error.message, "Could not query the selected node") &&
+        strstr(why.error.message, "running") && strstr(why.error.message, "RPC credentials") &&
+        !strstr(why.error.message, "private cookie detail") && !strstr(why.error.message, "board refused");
+    zcl_command_reply_free(&why);
+    g_tag_board_mode = 5;
+    ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, page, &why);
+    bool string_refusal = !ok && strstr(why.error.message, "board refused") && strstr(why.error.message, "other refusal");
+    zcl_command_reply_free(&why);
+    g_tag_board_mode = 6;
+    ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, page, &why);
+    bool malformed = !ok && strstr(why.error.message, "did not answer");
+    zcl_command_reply_free(&why);
+    g_tag_board_mode = 7;
+    ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, page, &why);
+    bool mixed = !ok && strstr(why.error.message, "board denied") && !strstr(why.error.message, "Could not query");
+    zcl_command_reply_free(&why);
+    return unreachable && string_refusal && malformed && mixed;
+}
 static int tag_board_refusal_bridge(void)
 {
     int failures = 0;
@@ -332,6 +360,7 @@ static int tag_board_refusal_bridge(void)
             !strcmp(why.error.code, "BOARD_UNREADABLE") &&
             strstr(why.error.message, "did not answer");
         zcl_command_reply_free(&why);
+        bool typed_cases = tag_board_unreachable_cases(rows, &page);
         g_tag_board_mode = 0;
         bool silent_ok = zcl_app_offer_catalog_page(rows, ZCL_APP_OFFER_ROWS_MAX, NULL, &page, &why);
         bool silent_start_node = !silent_ok &&
@@ -340,7 +369,7 @@ static int tag_board_refusal_bridge(void)
         node_rpc_client_set_test_hook(NULL);
         zcl_command_reply_free(&why);
         free(rows);
-        ASSERT(names_db); ASSERT(names_transport);
+        ASSERT(names_db); ASSERT(names_transport); ASSERT(typed_cases);
         ASSERT(ok_body_start_node); ASSERT(silent_start_node);
         PASS();
     } _test_next:;
