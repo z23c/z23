@@ -540,7 +540,10 @@ static bool bg_validation_reverify_heal_authority(
     unsigned cycle, const char *datadir, const struct chain_params *params,
     int num_workers)
 {
-    if (*published || cycle % BG_PUBLISH_RETRY_CYCLES != 0)
+    if (cycle % BG_PUBLISH_RETRY_CYCLES != 0)
+        return false;
+    if (*published && active_chain_height(&svc->ms->chain_active) <=
+                      atomic_load(&svc->progress.verified_height))
         return false;
     /* Skipped script checks never heal in this loop (only a refold clears
      * them), so a retry would only repeat the refusal and its operator event
@@ -556,6 +559,16 @@ static bool bg_validation_reverify_heal_authority(
                  "re-verify loop");
     return atomic_load(&svc->progress.state) == BG_VALIDATION_FAILED;
 }
+
+#ifdef ZCL_TESTING
+bool bg_validation_test_reverify_heal(struct bg_validation_service *svc,
+                                      bool *published)
+{
+    return bg_validation_reverify_heal_authority(
+        svc, false, published, BG_PUBLISH_RETRY_CYCLES, svc->datadir,
+        svc->params, svc->num_workers);
+}
+#endif
 
 /* Highest height the sampler may draw: the active tip (or the walk's end when
  * the chain is empty), clipped below the reducer's apply cursor. Never sample
@@ -1062,7 +1075,7 @@ static void bg_validation_finish_run(struct bg_validation_service *svc,
 
 /* A genesis-only boot has no forward extent yet. Keep the worker alive
  * without reading or changing the persisted walk census until one exists. */
-static bool bg_validation_wait_for_forward_extent(struct bg_validation_service *svc)
+static int bg_validation_wait_for_forward_extent(struct bg_validation_service *svc)
 {
     while (!atomic_load(&svc->stop_requested)) {
         zcl_mutex_lock(&svc->ms->cs_main);
@@ -1070,12 +1083,12 @@ static bool bg_validation_wait_for_forward_extent(struct bg_validation_service *
         zcl_mutex_unlock(&svc->ms->cs_main);
         atomic_store(&svc->progress.chain_height, height);
         if (height > 0)
-            return true;
+            return height;
         atomic_store(&svc->progress.state, BG_VALIDATION_RUNNING);
         bg_validation_supervisor_heartbeat(svc);
         platform_sleep_ms(1000);
     }
-    return false;
+    return -1;
 }
 
 static void *bg_validation_thread(void *arg)
@@ -1096,7 +1109,8 @@ static void *bg_validation_thread(void *arg)
 
     bg_validation_supervisor_heartbeat(svc);
 
-    if (!bg_validation_wait_for_forward_extent(svc)) {
+    int chain_height = bg_validation_wait_for_forward_extent(svc);
+    if (chain_height < 0) {
         bg_validation_supervisor_done();
         return NULL;
     }
@@ -1109,7 +1123,6 @@ static void *bg_validation_thread(void *arg)
     int start_height = ws.height;
     coverage_complete = ws.coverage_complete;
 
-    int chain_height = active_chain_height(&ms->chain_active);
     atomic_store(&svc->progress.chain_height, chain_height);
     atomic_store(&svc->progress.verified_height, start_height - 1);
     atomic_store(&svc->progress.state, BG_VALIDATION_RUNNING);

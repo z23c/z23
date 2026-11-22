@@ -1679,6 +1679,62 @@ static int test_bg_validation_genesis_waits_for_forward_walk(void)
     return failures;
 }
 
+bool bg_validation_test_reverify_heal(struct bg_validation_service *svc,
+                                      bool *published);
+
+static int test_bg_validation_published_walk_tracks_growth(void)
+{
+    int failures = 0;
+    TEST("bg_validation: a published forward walk catches subsequent growth") {
+        struct main_state ms;
+        main_state_init(&ms);
+        struct uint256 h0_hash, h1_hash, h2_hash;
+        struct block_index *h0 = make_repair_index(&ms, &h0_hash);
+        ASSERT(h0 != NULL);
+        struct block_index *h1 = extend_repair_chain(&ms, h0, &h1_hash);
+        ASSERT(h1 != NULL);
+        struct bg_validation_service svc;
+        walk_svc_init(&svc, &ms);
+        atomic_store(&svc.progress.verified_height, 1);
+        atomic_store(&svc.progress.chain_height, 1);
+        atomic_store(&svc.progress.state, BG_VALIDATION_COMPLETE);
+        g_restart_progress = 1;
+        g_catchup_stub_skips = 0;
+        g_catchup_stub_verdict = true;
+        atomic_store(&g_genesis_validated, -1);
+        bg_validation_test_set_body_repair_stubs(genesis_read_stub, body_repair_no_sleep);
+        bg_validation_test_set_validate_stub(genesis_validate_stub);
+        bool published = true;
+        bool unchanged = !bg_validation_test_reverify_heal(&svc, &published) &&
+                         atomic_load(&g_body_read_calls) == 0 && published;
+        memset(&h2_hash, 0, sizeof(h2_hash));
+        h2_hash.data[0] = 4;
+        struct block_index *h2 = chainstate_insert_block_index(
+            (struct chainstate *)&ms, &h2_hash);
+        if (h2) {
+            h2->nHeight = 2;
+            h2->pprev = h1;
+            h2->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+            h2->nFile = 51;
+            h2->nDataPos = 8;
+            arith_uint256_set_u64(&h2->nChainWork, 4);
+            active_chain_move_window_tip(&ms.chain_active, h2);
+        }
+        if (h2) (void)bg_validation_test_reverify_heal(&svc, &published);
+        int validated = atomic_load(&g_genesis_validated);
+        int verified = atomic_load(&svc.progress.verified_height);
+        bg_validation_test_set_validate_stub(NULL);
+        bg_validation_test_set_body_repair_stubs(NULL, NULL);
+        reducer_frontier_body_read_note_reset_for_testing();
+        main_state_free(&ms);
+        ASSERT(unchanged && h2 != NULL);
+        ASSERT_EQ(validated, 2);
+        ASSERT_EQ(verified, 2);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bg_validation_catchup_verifies_new_tip_block(void)
 {
     int failures = 0;
@@ -2069,6 +2125,7 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_empty_stop_preserves_cursor();
     failures += test_bg_validation_genesis_missing_body_stays_unverified();
     failures += test_bg_validation_genesis_waits_for_forward_walk();
+    failures += test_bg_validation_published_walk_tracks_growth();
     failures += test_bg_validation_catchup_verifies_new_tip_block();
     failures += test_bg_validation_catchup_notes_the_validated_tip();
     failures += test_bg_validation_catchup_never_forgives_skips_or_gaps();
