@@ -19,7 +19,11 @@
  * identity the push would refuse, is skipped: it stays queued, untouched,
  * and the train continues with the rest. Any other failure stops the
  * stacking. Lint-land and the proof dependencies run on the
- * stacked tip. A red lint-land halves the stack, keeping its leading members
+ * stacked tip. A red lint-land whose failure names files only some members
+ * changed drops exactly those members (train_solo, so each proves alone and
+ * fails with its own cause) and lints the rest once more; a named head
+ * proves alone while the others stay queued. Any other red lint-land
+ * halves the stack, keeping its leading members
  * (one bad row must not cost the rows ahead of it their shared proof, on this
  * head and every head until it reaches the front); a cohort from a red train
  * is never cut. If no prefix passes the head's own commit is checked out again
@@ -134,6 +138,7 @@ struct dl_train {
     char tip[80];
     struct dl_row m[DL_TRAIN_MAX - 1];
     char commit[DL_TRAIN_MAX - 1][80]; /* each member's commit in the stack */
+    char red[1024];                    /* the last red stacked lint's detail */
 };
 
 static size_t dl_train_width(void)
@@ -756,10 +761,13 @@ static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
     ++g_dl_train_preparations;
 #endif
     (void)snprintf(probe.local, sizeof(probe.local), "%s", t->tip);
+    probe.detail[0] = '\0';
 #if defined(ZCL_TESTING) && !defined(_WIN32)
     if (dl_prepare_test_hook) dl_prepare_test_hook();
 #endif
     enum dl_train_prep lint = dl_train_lint(d, head, &probe);
+    (void)snprintf(t->red, sizeof(t->red), "%s",
+                   lint == DL_TRAIN_PREP_LINT_RED ? probe.detail : "");
     if (lint != DL_TRAIN_PREP_OK) {
         dl_log(head, "train: lint-land failed on the stacked tip\n");
         return lint;
@@ -772,8 +780,111 @@ static enum dl_train_prep dl_train_prepare(const struct dl_dirs *d,
     return DL_TRAIN_PREP_OK;
 }
 
-/* Prepare the stack, keeping the leading half of its members after each red
- * lint-land (7 members: at most 7, 3, 1). The kept prefix's tip is linted and
+/* ── red lint: drop only the members it names ────────────────────────── */
+
+struct dl_train_drop {
+    const struct dl_train *t;
+    const struct dl_culprit *c;
+    size_t marked;
+};
+
+/* Release each named member to prove alone, with the gate and path that
+ * named it on the row itself (what status and the ledger show). A row that
+ * is no longer the queued row that was stacked is left to its owner. */
+static int dl_train_drop_edit(struct dl_row *rows, size_t n, void *context)
+{
+    struct dl_train_drop *u = context;
+    for (size_t j = 0; j < u->t->n; j++) {
+        if (!u->c->hit[j + 1])
+            continue;
+        for (size_t i = 0; i < n; i++) {
+            if (rows[i].seq != u->t->m[j].seq ||
+                strcmp(rows[i].state, "queued") != 0 ||
+                strcmp(rows[i].tip, u->t->m[j].tip) != 0)
+                continue;
+            rows[i].train_solo = 1;
+            (void)snprintf(rows[i].dimension, sizeof(rows[i].dimension), "train");
+            (void)snprintf(rows[i].detail, sizeof(rows[i].detail),
+                           "dropped from the train: lint gate %.63s names %.95s; "
+                           "proves alone next", u->c->gate, u->c->path[j + 1]);
+            u->marked++;
+        }
+    }
+    return u->marked ? 1 : 0;
+}
+
+/* Mark the named members and say so on the head's log, one line each. */
+static bool dl_train_drop_mark(const struct dl_dirs *d, const struct dl_row *head,
+                               const struct dl_train *t,
+                               const struct dl_culprit *c, size_t named)
+{
+    struct dl_train_drop u = { t, c, 0 };
+    char line[400];
+    if (named > (size_t)c->hit[0] &&
+        (!dl_rows_edit(d, dl_train_drop_edit, &u) || u.marked == 0))
+        return false;
+    for (size_t i = 0; i <= t->n; i++) {
+        if (!c->hit[i])
+            continue;
+        (void)snprintf(line, sizeof(line),
+                       "train: seq=%lld %s: lint gate %.63s names %.95s; "
+                       "it proves alone next\n",
+                       i ? t->m[i - 1].seq : head->seq,
+                       i ? "dropped" : "the head is named", c->gate, c->path[i]);
+        dl_log(head, line);
+    }
+    return true;
+}
+
+/* Stack the unnamed members again, in order, on the head's own tip. */
+static bool dl_train_restack(const struct dl_dirs *d, const struct dl_row *head,
+                             struct dl_train *t, const struct dl_culprit *c)
+{
+    struct dl_row keep[DL_TRAIN_MAX - 1];
+    size_t kept = 0;
+    for (size_t j = 0; j < t->n; j++)
+        if (!c->hit[j + 1])
+            keep[kept++] = t->m[j];
+    t->n = 0;
+    (void)snprintf(t->tip, sizeof(t->tip), "%s", head->local);
+    if (!dl_train_checkout(d, t->tip))
+        return false;
+    for (size_t i = 0; i < kept; i++)
+        if (dl_train_add(d, head, t, &keep[i]) < 0)
+            break;
+    return true;
+}
+
+enum dl_cull { DL_CULL_NONE, DL_CULL_RESTACKED, DL_CULL_HEAD, DL_CULL_STOP };
+
+/* A red stacked lint that names members with confidence: drop exactly those.
+ * NONE: the failure does not say, halve as before. HEAD: the head is named;
+ * it is already in flight as the first row, so it proves alone (and fails
+ * with its own cause) while every other row stays queued to lead the next
+ * train. RESTACKED: the rest are stacked again for one more lint. */
+static enum dl_cull dl_train_cull(const struct dl_dirs *d, struct dl_row *head,
+                                  struct dl_train *t)
+{
+    const char *from[DL_TRAIN_MAX], *to[DL_TRAIN_MAX];
+    struct dl_culprit c;
+    from[0] = head->base;
+    to[0] = head->local;
+    for (size_t j = 0; j < t->n; j++) {
+        from[j + 1] = j ? t->commit[j - 1] : head->local;
+        to[j + 1] = t->commit[j];
+    }
+    size_t named = dl_train_culprits(d->wt, t->red, from, to, t->n + 1, &c);
+    if (named == 0 || !dl_train_drop_mark(d, head, t, &c, named))
+        return DL_CULL_NONE;
+    if (c.hit[0])
+        return DL_CULL_HEAD;
+    return dl_train_restack(d, head, t, &c) ? DL_CULL_RESTACKED : DL_CULL_STOP;
+}
+
+/* Prepare the stack. A red lint-land that names members with confidence
+ * drops exactly those (dl_train_cull) and lints the rest once more; any other
+ * red keeps the leading half of the members (7 members: at most 7, 3, 1).
+ * The kept prefix's tip is linted and
  * proved in full, so no check is skipped; a member left out was never written
  * and stays queued, unbound and unmarked. A split cohort names its exact rows,
  * so it is prepared whole or not at all. A lint-land killed by its budget reads
@@ -785,12 +896,22 @@ static enum dl_train_prep dl_train_prepare_stack(const struct dl_dirs *d,
                                    struct dl_train *t)
 {
     int64_t stop_at = platform_time_monotonic_ms() + DL_TRAIN_LINT_RETRY_MS;
+    bool culled = false;
     while (t->n > 0 && dl_train_checkout(d, t->tip)) {
         char line[128];
         enum dl_train_prep prep = dl_train_prepare(d, head, t);
         if (prep != DL_TRAIN_PREP_LINT_RED || head->train_group[0] ||
             platform_time_monotonic_ms() >= stop_at)
             return prep;
+        enum dl_cull cull = culled ? DL_CULL_NONE : dl_train_cull(d, head, t);
+        if (cull == DL_CULL_HEAD)
+            return DL_TRAIN_PREP_SOLO;
+        if (cull == DL_CULL_STOP)
+            break;
+        if (cull == DL_CULL_RESTACKED) {
+            culled = true;
+            continue;
+        }
         t->n /= 2;
         if (t->n == 0)
             return DL_TRAIN_PREP_LINT_RED;

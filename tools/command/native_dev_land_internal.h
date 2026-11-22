@@ -261,6 +261,21 @@ int dl_train_prepare_first(const struct dl_dirs *d, struct dl_row *row,
 #if defined(ZCL_TESTING)
 bool dl_lint_helper_enabled_for_test(void);
 #endif
+/* Which stacked members a red lint-land names (native_dev_land_train_culprit.c).
+ * Member 0 is the head; hit[i] is set for each member whose own commits
+ * changed a path the failure names, path[i] the first such path. */
+#define DL_CULPRIT_MAX 8
+struct dl_culprit {
+    bool hit[DL_CULPRIT_MAX];
+    char path[DL_CULPRIT_MAX][96];
+    char gate[64];
+};
+/* The number of members hit, or 0 when the failure does not name them with
+ * confidence (no path, a path no member changed, a truncated body, a printed
+ * fix, more than half the members). from[i]..to[i] is member i's range. */
+size_t dl_train_culprits(const char *wt, char *detail, const char *const from[],
+                         const char *const to[], size_t n,
+                         struct dl_culprit *out);
 /* The row heads a formed train (train_commit and the stacked proof_intent
  * persist together); false for every plain row, which no train code reads
  * the queue or the outcome history for. */

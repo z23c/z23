@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the land train culprit mapper. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_train_culprit.c", CAP_NONE, "reads a lint failure body already in memory and asks the land leaf's git seam which stacked commits changed a path; no classified symbol is referenced")

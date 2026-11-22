@@ -2,8 +2,9 @@
  * purpose: the failure-log half of dev.batch.culprit (native_dev_batch_
  *          culprit_paths.c): which files a gate failure log names, with the
  *          filters drop_culprit() in the gate-submit.sh bridge applies, and
- *          the small sorted string set the leaf keeps them in. Nothing
- *          outside native_dev_batch_culprit*.c and its test includes it. */
+ *          the small sorted string set the leaf keeps them in. Only
+ *          native_dev_batch_culprit*.c, the land train's culprit mapper
+ *          (native_dev_land_train_culprit.c) and their tests include it. */
 
 #ifndef ZCL_NATIVE_DEV_BATCH_CULPRIT_H
 #define ZCL_NATIVE_DEV_BATCH_CULPRIT_H
