@@ -154,6 +154,22 @@ static bool anw_fetch(const struct anw_request *r, char **argv,
         platform_time_wall_unix(), store, &out->bytes, &out->len, &mutated, &out->error));
     return ok;
 }
+static unsigned anw_bootstrap_budget(bool started, int64_t elapsed, unsigned timeout,
+    enum app_network_error *error)
+{
+    if (elapsed < 0) return 0;
+    if ((uint64_t)elapsed >= timeout) {
+        if (started) *error = APP_NETWORK_TIMEOUT;
+        return 0;
+    }
+    return timeout - (unsigned)elapsed;
+}
+#if defined(ZCL_TESTING)
+unsigned zcl_test_app_network_bootstrap_budget(bool started, int64_t elapsed, unsigned timeout,
+    enum app_network_error *error)
+{ return anw_bootstrap_budget(started, elapsed, timeout, error); }
+#endif
+
 static bool anw_dial(const struct anw_request *r, char **argv,
     struct vcs_package_store *store, struct anw_result *out, int64_t start)
 {
@@ -168,11 +184,15 @@ static bool anw_dial(const struct anw_request *r, char **argv,
            platform_time_monotonic_ms() - start < (int64_t)r->timeout)
         platform_sleep_ms(100);
     int64_t elapsed = platform_time_monotonic_ms() - start;
+    unsigned remaining = anw_bootstrap_budget(started, elapsed, r->timeout, &out->error);
     struct app_network_transport transport = {.fetch = app_network_tor_fetch,
-        .timeout_ms = elapsed >= 0 && elapsed < (int64_t)r->timeout ? (unsigned)(r->timeout - (uint64_t)elapsed) : 0,
+        .timeout_ms = remaining,
         .parallel_safe = true, .fetch_budgeted = app_network_tor_fetch_budgeted,
         .diagnostic = &out->diagnostic};
-    bool ok = started && tor_integration_is_dial_ready() && transport.timeout_ms && anw_fetch(r, argv, &transport, store, out);
+    bool ready = started && tor_integration_is_dial_ready();
+    /* TOR with zero attempts means readiness was not observed before expiry. */
+    if (ready && !remaining) out->diagnostic.phase = APP_NET_PHASE_NONE;
+    bool ok = ready && transport.timeout_ms && anw_fetch(r, argv, &transport, store, out);
     if (started) tor_integration_stop();
     return ok;
 }

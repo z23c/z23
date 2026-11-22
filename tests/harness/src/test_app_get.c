@@ -1345,6 +1345,21 @@ static bool tag_network_exercise(void)
     free(f.bytes); free(f.manifest); return ok;
 }
 /* Exercise sliced retrieval through the same private-store opener as the worker. */
+static bool tag_network_worker_deadline(void)
+{
+    const struct { bool started; int64_t elapsed; unsigned remaining; enum app_network_error error; } cases[] = {
+        {true, 120000, 0, APP_NETWORK_TIMEOUT}, {true, 120001, 0, APP_NETWORK_TIMEOUT},
+        {true, 119999, 1, APP_NETWORK_UNAVAILABLE}, {false, 120000, 0, APP_NETWORK_UNAVAILABLE},
+        {true, -1, 0, APP_NETWORK_UNAVAILABLE}
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        enum app_network_error error = APP_NETWORK_UNAVAILABLE;
+        unsigned remaining = zcl_test_app_network_bootstrap_budget(cases[i].started, cases[i].elapsed, 120000, &error);
+        if (remaining != cases[i].remaining || error != cases[i].error) return false;
+    }
+    return true;
+}
+
 static bool tag_network_worker_capacity(void)
 {
     struct tag_net f; bool ok = tag_net_init(&f, VCS_BUNDLE_MAX_BYTES);
@@ -1643,7 +1658,7 @@ static int tag_network_test(void)
 {
     int failures = 0;
     TEST("app network: independently verify frames and sliced carrier") {
-        ASSERT(tag_network_catalog_disappears()); ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); ASSERT(tag_network_parallel()); PASS();
+        ASSERT(tag_network_catalog_disappears()); ASSERT(tag_network_exercise()); ASSERT(tag_network_worker_capacity()); ASSERT(tag_network_worker_deadline()); ASSERT(tag_network_parallel()); PASS();
     } _test_next:;
     return failures;
 }
@@ -6443,6 +6458,45 @@ static int tag_keep_cases(struct tag_world *w)
     return failures;
 }
 
+static bool tag_tor_deadline_job(void *context, const struct app_network_job_args *args,
+                                 struct app_network_job_result *result)
+{
+    (void)args;
+    unsigned scenario = *(unsigned *)context;
+    result->error = APP_NETWORK_TIMEOUT;
+    result->protocol_valid = scenario != 1;
+    result->diagnostic_valid = scenario != 2;
+    result->diagnostic = (struct app_network_diagnostic){
+        .phase = scenario == 3 ? APP_NET_PHASE_BOARD : APP_NET_PHASE_TOR,
+        .elapsed_ms = scenario == 5 ? 119999u : 120000u, .attempts = scenario == 4 ? 1u : 0u};
+    return false;
+}
+static bool tag_tor_deadline_case(const struct zcl_command_spec *spec, unsigned scenario)
+{
+    struct zcl_command_reply reply;
+    zcl_test_app_discover_job_context = &scenario;
+    if (!tag_discover_call(spec, TAG_ONION, TAG_DISCOVER_OFFER, true, &reply)) return false;
+    bool stated = strstr(reply.error.message, "Tor did not become ready") != NULL;
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(reply.error.code, "NETWORK_TIMEOUT") && stated == (scenario == 0);
+    if (scenario == 0) ok = ok && strstr(reply.error.next_action, "connectivity") != NULL;
+    zcl_command_reply_free(&reply); return ok;
+}
+static int tag_tor_deadline_cases(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("discover reports only validated zero-attempt Tor deadline") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.discover", NULL);
+        ASSERT(spec && spec->handler);
+        (void)snprintf(g_discover_datadir, sizeof(g_discover_datadir), "%s", w->j.b_datadir);
+        zcl_test_app_discover_job = tag_tor_deadline_job;
+        for (unsigned i = 0; i < 6; ++i) ASSERT(tag_tor_deadline_case(spec, i));
+        PASS();
+    } _test_next:;
+    zcl_test_app_discover_job = NULL; zcl_test_app_discover_job_context = NULL;
+    return failures;
+}
+
 static int tag_world_cases(struct tag_world *w)
 {
     int failures = 0;
@@ -6457,6 +6511,7 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_scratch_replacement(w);
     failures += tag_stage_bytes(w);
     failures += tag_stage_unsafe_parent(w);
+    failures += tag_tor_deadline_cases(w);
     failures += tag_discover_cancel(w);
     failures += tag_discover_fetch_close(w);
     failures += tag_fetch_native_profile(w);
