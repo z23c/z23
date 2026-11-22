@@ -4839,6 +4839,7 @@ struct tag_discover_stub {
     bool catalog_url_ok, direct_url_ok;
     char expected[65];
     enum app_network_error direct_error;
+    const char *frame;
 };
 static bool tag_discover_job(void *context, const struct app_network_job_args *args,
                              struct app_network_job_result *result)
@@ -4875,6 +4876,7 @@ static bool tag_discover_job(void *context, const struct app_network_job_args *a
             !strcmp(args->url + sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u, d->expected);
         result->error = d->direct_error;
         result->protocol_valid = true;
+        if (d->frame) (void)snprintf(result->frame, sizeof(result->frame), "%s", d->frame);
         return d->direct_error == APP_NETWORK_OK;
     }
     return false;
@@ -4984,6 +4986,72 @@ static bool tag_discover_timeout_ok(const struct zcl_command_spec *spec,
     return ok;
 }
 
+static char tag_ingest_response[256];
+static bool tag_ingest_no_response;
+static char *tag_ingest_rpc(const char *method, const char *params)
+{
+    (void)params;
+    if (tag_ingest_no_response) return NULL;
+    return strdup(!strcmp(method, "fleet_board_ingest") ? tag_ingest_response : "null");
+}
+
+static bool tag_discover_ingest_case(const struct zcl_command_spec *spec,
+    struct tag_discover_stub *stub, const struct tag_net *frame, const char *response_id,
+    const char *stored, bool accepted)
+{
+    struct zcl_command_reply reply; stub->jobs = 0;
+    stub->direct_error = APP_NETWORK_OK; stub->frame = frame->frame;
+    (void)snprintf(stub->expected, sizeof(stub->expected), "%s", frame->id);
+    (void)snprintf(tag_ingest_response, sizeof(tag_ingest_response),
+        "{\"ok\":true,\"id\":\"%s\",\"stored\":%s}", response_id, stored);
+    if (!tag_discover_call(spec, TAG_ONION, frame->id, true, &reply)) return false;
+    const struct json_value *value = json_get(&reply.data, "stored");
+    bool ok = stub->jobs == 1 && stub->direct_url_ok;
+    if (accepted) ok = ok && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        value && value->type == JSON_BOOL && json_get_bool(value) == !strcmp(stored, "true") &&
+        !strcmp(tag_in(&reply.data, "offer_id"), frame->id);
+    else ok = ok && reply.status != ZCL_COMMAND_STATUS_PASSED && reply.error.mutated &&
+        !json_get(&reply.data, "offer_id") && !json_get(&reply.data, "next");
+    zcl_command_reply_free(&reply); return ok;
+}
+
+static bool tag_discover_ingest_raw(const struct zcl_command_spec *spec,
+    const struct tag_net *frame, const char *raw, const char *code, bool mutated)
+{
+    struct zcl_command_reply reply;
+    tag_ingest_no_response = !raw;
+    if (raw) (void)snprintf(tag_ingest_response, sizeof(tag_ingest_response), "%s", raw);
+    bool called = tag_discover_call(spec, TAG_ONION, frame->id, true, &reply);
+    tag_ingest_no_response = false;
+    if (!called) return false;
+    bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(reply.error.code, code) && reply.error.mutated == mutated &&
+        !json_get(&reply.data, "offer_id") && !json_get(&reply.data, "next");
+    zcl_command_reply_free(&reply); return ok;
+}
+
+static int tag_discover_ingest_receipts(const struct zcl_command_spec *spec,
+                                        struct tag_discover_stub *stub)
+{
+    int failures = 0; struct tag_net frame = {0};
+    node_rpc_client_set_test_hook(tag_ingest_rpc);
+    TEST("app discover: validates the ingest ID and preserves duplicate status") {
+        ASSERT(tag_net_init(&frame, 64));
+        ASSERT(tag_discover_ingest_case(spec, stub, &frame, frame.id, "true", true));
+        ASSERT(tag_discover_ingest_case(spec, stub, &frame,
+            "1111111111111111111111111111111111111111111111111111111111111111", "true", false));
+        ASSERT(tag_discover_ingest_case(spec, stub, &frame, frame.id, "false", true));
+        ASSERT(tag_discover_ingest_case(spec, stub, &frame, frame.id, "null", false));
+        ASSERT(tag_discover_ingest_raw(spec, &frame, NULL, "BOARD_UNREADABLE", true));
+        ASSERT(tag_discover_ingest_raw(spec, &frame, "{bad", "BOARD_UNREADABLE", true));
+        ASSERT(tag_discover_ingest_raw(spec, &frame, "{\"ok\":false,\"message\":\"refused\"}",
+                                       "BOARD_REFUSED", false));
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL); stub->frame = NULL;
+    free(frame.bytes); free(frame.manifest); return failures;
+}
+
 static int tag_discover_command(struct tag_world *w)
 {
     int failures = 0;
@@ -5021,6 +5089,7 @@ static int tag_discover_command(struct tag_world *w)
 
         /* A dead or lying endpoint reports the existing APP_NETWORK_* shape. */
         ASSERT(tag_discover_timeout_ok(spec, &stub, selected));
+        failures += tag_discover_ingest_receipts(spec, &stub);
 
         zcl_test_app_discover_job = NULL;
         zcl_test_app_discover_job_context = NULL;

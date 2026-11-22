@@ -221,8 +221,8 @@ static bool adc_ingest_call(const char *frame, struct json_value *body,
     free(raw);
     if (!ok) {
         json_free(body);
-        zcl_package_copy_fail(reply, "BOARD_UNREADABLE", false,
-                              "the node did not answer the board ingest; start the node (z23) and retry",
+        zcl_package_copy_fail(reply, "BOARD_UNREADABLE", true,
+                              "the node did not confirm the board ingest; the offer may already be stored",
                               ADC_COMMAND);
         return false;
     }
@@ -230,7 +230,7 @@ static bool adc_ingest_call(const char *frame, struct json_value *body,
 }
 
 /* The node's ingest chain answers; a refusal stores nothing and is final. */
-static bool adc_ingest(const char *frame, char post_id[65],
+static bool adc_ingest(const char *frame, const char *expected_id, bool *stored,
                        struct zcl_command_reply *reply)
 {
     struct json_value body;
@@ -238,15 +238,20 @@ static bool adc_ingest(const char *frame, char post_id[65],
     if (!adc_ingest_call(frame, &body, reply)) return false;
     const struct json_value *ok = json_get(&body, "ok");
     const char *id = json_get_str(json_get(&body, "id"));
+    const struct json_value *stored_value = json_get(&body, "stored");
     bool accepted = ok && ok->type == JSON_BOOL && json_get_bool(ok) &&
-        id && strlen(id) == 64u;
+        id && !strcmp(id, expected_id) && stored_value && stored_value->type == JSON_BOOL;
     if (accepted) {
-        (void)snprintf(post_id, 65u, "%s", id);
-    } else {
+        *stored = json_get_bool(stored_value);
+    } else if (ok && ok->type == JSON_BOOL && !json_get_bool(ok)) {
         const char *message = json_get_str(json_get(&body, "message"));
         zcl_package_copy_fail(reply, "BOARD_REFUSED", false,
             message && message[0] ? message
                                   : "the node's board refused the signed offer post",
+            ADC_RPC);
+    } else {
+        zcl_package_copy_fail(reply, "BOARD_UNREADABLE", true,
+            "the node returned an inconsistent board receipt; the offer may already be stored",
             ADC_RPC);
     }
     json_free(&body);
@@ -289,20 +294,20 @@ static bool adc_offer(struct zcl_command_reply *reply,
                               "the fetched offer frame does not verify", ADC_COMMAND);
         return false;
     }
-    char post_id[65];
-    if (!adc_ingest(result.frame, post_id, reply)) return false;
+    bool stored = false;
+    if (!adc_ingest(result.frame, offer, &stored, reply)) return false;
     char next[4900];
     bool hinted = zcl_app_hint(next, sizeof(next), datadir,
         "get %s --root=%s --publisher=%s --offer=%s", row.offer.name,
-        row.offer.root, row.offer.publisher, post_id);
-    bool ok = json_push_kv_str(&reply->data, "offer_id", post_id) &&
+        row.offer.root, row.offer.publisher, offer);
+    bool ok = json_push_kv_str(&reply->data, "offer_id", offer) &&
         json_push_kv_str(&reply->data, "name", row.offer.name) &&
         json_push_kv_str(&reply->data, "root", row.offer.root) &&
         json_push_kv_str(&reply->data, "publisher", row.offer.publisher) &&
         json_push_kv_bool(&reply->data, "ingested", true) &&
-        json_push_kv_bool(&reply->data, "stored", true);
+        json_push_kv_bool(&reply->data, "stored", stored);
     if (hinted) ok = json_push_kv_str(&reply->data, "next", next) && ok;
-    if (!ok) zcl_package_copy_fail(reply, "ALLOC", true, "cannot describe the ingested offer", ADC_COMMAND);
+    if (!ok) zcl_package_copy_fail(reply, "ALLOC", stored, "cannot describe the ingested offer", ADC_COMMAND);
     return ok;
 }
 
