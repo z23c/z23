@@ -2112,22 +2112,54 @@ static int t_agent_verify_preflight(void)
 
 static int t_agent_verify_base_override(void)
 {
-    static const char script[] =
+    static const char setup[] =
         "set -eu; cd \"$2\"; mkdir -p build/bin bin\n"
         "sed -n '/^agent-verify:$/,/^help-selftest:/{ /^help-selftest:/d; p; }' \"$1/Makefile\" > Makefile\n"
-        "printf '#!/bin/sh\\ncase $1 in status) exit 0;; merge-base) if [ \"$2\" = --is-ancestor ]; then [ \"${BAD_ANCESTOR:-0}\" = 0 ]; else echo base; fi;; rev-parse) [ \"${BAD_COMMIT:-0}\" = 0 ] || exit 1; [ \"$3\" = \"refs/heads/a\\$b^{commit}\" ] || exit 1; echo explicit-base;; *) exit 1;; esac\\n' > bin/git; chmod +x bin/git\n"
+        "cat > bin/git <<'GIT'\n"
+        "#!/bin/sh\n"
+        "echo \"$*\" >> git-calls\n"
+        "case $1 in\n"
+        "status) exit 0;;\n"
+        "rev-parse) [ \"${BAD_COMMIT:-0}\" = 0 ] || exit 1; [ \"$3\" = 'refs/heads/a$b^{commit}' ] || exit 1; if [ \"${MOVED:-0}\" = 1 ] && [ -e resolved ]; then echo observed-sha; else touch resolved; echo \"${BASE_VALUE:-historical-sha}\"; fi;;\n"
+        "merge-base) if [ \"$2\" = --is-ancestor ]; then [ \"${BAD_ANCESTOR:-0}\" = 0 ] || exit 1; if [ \"${BAD_FINAL:-0}\" = 1 ] && [ -e checked ]; then exit 1; fi; touch checked; else echo default-base; fi;;\n"
+        "*) exit 1;;\n"
+        "esac\nGIT\n"
+        "chmod +x bin/git\n"
         "printf '#!/bin/sh\\nprintf \"%%s\\n\" \"$*\" >> calls\\n' > submake; chmod +x submake\n"
+        "printf '#!/bin/sh\\necho compiler >> compiler-calls\\nexit 99\\n' > bin/cc; chmod +x bin/cc\n"
+        "printf '#!/bin/sh\\necho lint >> compiler-calls\\nexit 99\\n' > build/bin/z23-lint; chmod +x build/bin/z23-lint\n"
         "printf '#!/bin/sh\necho \"$*\" >> selector-calls\ncat <<END\n{\"groups\":\"models\",\"selector\":\"exact\",\"groups_selected\":1}\nEND\n' > build/bin/z23-dev; chmod +x build/bin/z23-dev\n"
-        "PATH=\"$2/bin:$PATH\"; export PATH\n"
-        "make --no-print-directory MAKE=./submake agent-verify ONLY=@changed AGENT_VERIFY_BASE='refs/heads/a$b' > override.log 2>&1\n"
-        "grep -q -- '--base=explicit-base' selector-calls; grep -q 'base=explicit-base' build/scratch/agent-verify.rc\n"
-        ": > calls; : > selector-calls; if BAD_ANCESTOR=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed AGENT_VERIFY_BASE='refs/heads/a$b' > ancestor.log 2>&1; then exit 1; fi\n"
-        "grep -q 'AGENT_VERIFY_BASE=explicit-base is not an ancestor of HEAD' ancestor.log; [ ! -s selector-calls ]\n"
-        ": > calls; : > selector-calls; if BAD_COMMIT=1 make --no-print-directory MAKE=./submake agent-verify ONLY=@changed AGENT_VERIFY_BASE='refs/heads/a$b' > commit.log 2>&1; then exit 1; fi\n"
-        "grep -q 'AGENT_VERIFY_BASE=refs/heads/a$b is not a commit' commit.log; [ ! -s selector-calls ]\n";
+        "PATH=\"$2/bin:$PATH\"; export PATH\n";
+    static const char rejected[] =
+        "for choice in @changed @route; do\n"
+        "  for mode in BAD_COMMIT BAD_ANCESTOR; do\n"
+        "    : > calls; : > selector-calls; : > git-calls; rm -f resolved checked compiler-calls\n"
+        "    if env \"$mode=1\" make --no-print-directory MAKE=./submake agent-verify ONLY=$choice AGENT_VERIFY_BASE='refs/heads/a$b' > refusal.log 2>&1; then exit 1; fi\n"
+        "    [ ! -s calls ]; [ ! -s selector-calls ]; [ ! -e compiler-calls ]\n"
+        "    case $mode in BAD_COMMIT) grep -Fq 'AGENT_VERIFY_BASE=refs/heads/a$b is not a commit' refusal.log;; BAD_ANCESTOR) grep -Fq 'AGENT_VERIFY_BASE=historical-sha is not an ancestor of HEAD' refusal.log;; esac\n"
+        "    cmp refusal.log build/scratch/agent-verify.rc || grep -Fxf build/scratch/agent-verify.rc refusal.log >/dev/null\n"
+        "  done\n"
+        "done\n";
+    static const char accepted[] =
+        "for choice in @changed @route; do\n"
+        "  for base in historical-sha current-sha; do\n"
+        "    : > calls; : > selector-calls; rm -f resolved checked; BASE_VALUE=$base make --no-print-directory MAKE=./submake agent-verify ONLY=$choice AGENT_VERIFY_BASE='refs/heads/a$b' > accepted.log 2>&1\n"
+        "    grep -q -- \"--base=$base\" selector-calls; grep -q \"base=$base\" build/scratch/agent-verify.rc\n"
+        "    grep -q 'dev-proof-producer ZCL_TEST_WERROR=1' calls\n"
+        "  done\n"
+        "  : > calls; : > selector-calls; rm -f resolved checked; if MOVED=1 BAD_FINAL=1 make --no-print-directory MAKE=./submake agent-verify ONLY=$choice AGENT_VERIFY_BASE='refs/heads/a$b' > moved.log 2>&1; then exit 1; fi\n"
+        "  [ ! -s selector-calls ]; grep -q 'dev-proof-producer' calls; grep -Fq 'AGENT_VERIFY_BASE moved from historical-sha to observed-sha' moved.log; grep -Fq 'AGENT_VERIFY_BASE moved from historical-sha to observed-sha' build/scratch/agent-verify.rc\n"
+        "  : > calls; : > selector-calls; rm -f resolved checked; if BAD_FINAL=1 make --no-print-directory MAKE=./submake agent-verify ONLY=$choice AGENT_VERIFY_BASE='refs/heads/a$b' > final.log 2>&1; then exit 1; fi\n"
+        "  [ ! -s selector-calls ]; grep -Fq 'AGENT_VERIFY_BASE=historical-sha is not an ancestor of HEAD' build/scratch/agent-verify.rc\n"
+        "done\n"
+        ": > calls; : > selector-calls; : > git-calls; BAD_COMMIT=1 make --no-print-directory MAKE=./submake agent-verify ONLY=models AGENT_VERIFY_BASE='refs/heads/a$b' > explicit.log 2>&1\n"
+        "[ ! -s git-calls ]; [ ! -s selector-calls ]; grep -q 't-fast-exact ONLY=models' calls\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "agent_verify", "base_override");
-    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    char combined[sizeof(setup) + sizeof(rejected) + sizeof(accepted)];
+    int n = snprintf(combined, sizeof(combined), "%s%s%s", setup, rejected, accepted);
+    if (n < 0 || (size_t)n >= sizeof(combined)) return 1;
+    int bad = build_needs_fixture_run(repo_root(), fixture, combined);
     if (test_rm_rf_recursive(fixture) != 0) bad = 1;
     return bad;
 }

@@ -181,8 +181,11 @@ Check the archived `source-identity.txt` for the candidate commit and the
 `agent-verify: selection` line in `job.log` for the intended base and group
 count. The preflight and final observations are in the sender custody directory. An
 explicit `AGENT_VERIFY_BASE` without `R2GATE_CURRENT_MAIN=1` requests
-verification of that historical range. The land queue checks its own exact
-commit and base before publication.
+verification of that historical range. For local `@changed` and `@route`,
+the explicit pin is checked before the build and static gates, then resolved
+and checked again immediately before selection. If a symbolic pin moves, the
+run refuses and reports both commit IDs in `build/scratch/agent-verify.rc`.
+The land queue checks its own exact commit and base before publication.
 
 `devbuild` keeps the gate local for a dirty tree, a subdirectory, `ZCL_` or
 `Z23_` environment variables, other targets, flags or variables, a nested

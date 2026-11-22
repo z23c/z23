@@ -18327,6 +18327,15 @@ agent-verify:
 	       exit 2; \
 	    fi; \
 	 fi; \
+	 av_base='$(subst ','"'"',$(value AGENT_VERIFY_BASE))'; pinned_base=; \
+	 av_resolve_base() { \
+	    base=$$(git rev-parse --verify "$${av_base}^{commit}") || { echo "agent-verify: AGENT_VERIFY_BASE=$$av_base is not a commit" | tee -a build/scratch/agent-verify.rc >&2; return 2; }; \
+	    if [ -n "$$pinned_base" ] && [ "$$base" != "$$pinned_base" ]; then echo "agent-verify: AGENT_VERIFY_BASE moved from $$pinned_base to $$base; retry with the intended commit" | tee -a build/scratch/agent-verify.rc >&2; return 2; fi; \
+	    git merge-base --is-ancestor "$$base" HEAD || { echo "agent-verify: AGENT_VERIFY_BASE=$$base is not an ancestor of HEAD" | tee -a build/scratch/agent-verify.rc >&2; return 2; }; \
+	 }; \
+	 if { [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; } && [ -n "$$av_base" ]; then \
+	    av_resolve_base || exit 2; pinned_base=$$base; \
+	 fi; \
 	 av_t0=$$(date +%s); failed=""; closure_early=0; \
 	 av_total() { echo "agent-verify: total secs=$$(($$(date +%s) - av_t0))" | tee -a build/scratch/agent-verify.rc; }; \
 	 av_step() { \
@@ -18349,10 +18358,8 @@ agent-verify:
 	    b0=$$(date +%s); \
 	    $(MAKE) --no-print-directory dev-proof-producer ZCL_TEST_WERROR=1 >build/scratch/agent-verify.dev-proof-producer.log 2>&1 || { echo "agent-verify: dev-proof-producer failed; see build/scratch/agent-verify.dev-proof-producer.log" >&2; exit 2; }; \
 	    echo "agent-verify: dev-proof-producer rc=0 secs=$$(($$(date +%s) - b0))" | tee -a build/scratch/agent-verify.rc; \
-	    av_base='$(subst ','"'"',$(value AGENT_VERIFY_BASE))'; \
 	    if [ -n "$$av_base" ]; then \
-	       base=$$(git rev-parse --verify "$${av_base}^{commit}") || { echo "agent-verify: AGENT_VERIFY_BASE=$$av_base is not a commit" >&2; exit 2; }; \
-	       git merge-base --is-ancestor "$$base" HEAD || { echo "agent-verify: AGENT_VERIFY_BASE=$$base is not an ancestor of HEAD" >&2; exit 2; }; \
+	       av_resolve_base || exit 2; \
 	    else \
 	       base=$$(git merge-base origin/main HEAD) || { echo "agent-verify: no merge-base with origin/main; use ONLY=<group,group>" >&2; exit 2; }; \
 	    fi; \
