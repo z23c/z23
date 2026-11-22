@@ -14,6 +14,13 @@
 #include <string.h>
 #include <unistd.h>
 
+enum { NTD_VERIFIER_MISSING = -31002 };
+#if defined(ZCL_TESTING)
+static _Thread_local bool ntd_force_verifier_missing;
+void zcl_test_task_verifier_missing(bool missing);
+void zcl_test_task_verifier_missing(bool missing) { ntd_force_verifier_missing = missing; }
+#endif
+
 static const char *ntd_string(const struct json_value *input, const char *key)
 {
     const struct json_value *value = json_get(input, key);
@@ -75,6 +82,63 @@ static struct zcl_result ntd_candidate(const struct json_value *input,
     return ZCL_OK;
 }
 
+static struct zcl_result ntd_missing_verifier(bool kept)
+{
+#if defined(_WIN32)
+    (void)kept;
+    return ZCL_ERR(NTD_VERIFIER_MISSING, "tasks: the confined package verifier is unavailable on Windows; your selection and tasks are unchanged");
+#else
+    return kept
+        ? ZCL_ERR(NTD_VERIFIER_MISSING, "tasks: install the confined package verifier to reopen your kept program; your selection and tasks are unchanged")
+        : ZCL_ERR(NTD_VERIFIER_MISSING, "tasks: install the confined package verifier before previewing");
+#endif
+}
+
+static bool ntd_find_companion(const char *directory, char verifier[4096])
+{
+    const char *names[] = { "z23-package-verify-dev", "z23-package-verify",
+                            "zclassic23-package-verify-dev", "zclassic23-package-verify" };
+    for (unsigned i = 0; i < 4; ++i) {
+        int n = snprintf(verifier, 4096, "%s/%s", directory, names[i]);
+        if (n > 0 && n < 4096 && access(verifier, X_OK) == 0) return true;
+    }
+    return false;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_test_task_find_companion(const char *directory, char verifier[4096]);
+bool zcl_test_task_find_companion(const char *directory, char verifier[4096])
+{ return ntd_find_companion(directory, verifier); }
+#endif
+
+static struct zcl_result ntd_verifier(const struct package_resident_record *record,
+    const struct package_resident_identity *candidate, char verifier[4096])
+{
+#if defined(_WIN32)
+    if (record->current.package_root[0] || candidate->package_root[0])
+        return ntd_missing_verifier(record->current.package_root[0] != 0);
+#endif
+    char executable[4096];
+    if (!os_proc_exe_path(executable, sizeof(executable)))
+        return ZCL_ERR(-1, "tasks: cannot find the application executable");
+    char *slash = strrchr(executable, '/');
+    if (!slash) return ZCL_ERR(-1, "tasks: cannot find the verifier directory");
+    *slash = 0;
+    bool found = ntd_find_companion(executable, verifier);
+#if defined(ZCL_TESTING)
+    if (ntd_force_verifier_missing) found = false;
+#endif
+    if (!found && record->current.package_root[0])
+        return ntd_missing_verifier(true);
+    if (!found && candidate->package_root[0])
+        return ntd_missing_verifier(false);
+    if (!found) {
+        int n = snprintf(verifier, 4096, "%s/z23-package-verify", executable);
+        if (n < 0 || n >= 4096) return ZCL_ERR(-1, "tasks: verifier path is too long");
+    }
+    return ZCL_OK;
+}
+
 static struct zcl_result ntd_task_window(const struct json_value *input,
     struct package_resident_store *store, struct task_editor *editor)
 {
@@ -82,29 +146,8 @@ static struct zcl_result ntd_task_window(const struct json_value *input,
     ZCL_CHECK(ntd_candidate(input, &candidate));
     struct package_resident_record record;
     ZCL_CHECK(package_resident_record_read(store, &record));
-    char executable[4096], verifier[4096];
-    if (!os_proc_exe_path(executable, sizeof(executable)))
-        return ZCL_ERR(-1, "tasks: cannot find the application executable");
-    char *slash = strrchr(executable, '/');
-    if (!slash) return ZCL_ERR(-1, "tasks: cannot find the verifier directory");
-    *slash = 0;
-    const char *names[] = { "z23-package-verify-dev", "z23-package-verify",
-                            "zclassic23-package-verify-dev",
-                            "zclassic23-package-verify" };
-    bool found = false;
-    for (unsigned i = 0; i < 4 && !found; ++i) {
-        int n = snprintf(verifier, sizeof(verifier), "%s/%s", executable, names[i]);
-        found = n > 0 && (size_t)n < sizeof(verifier) && access(verifier, X_OK) == 0;
-    }
-    if (!found && record.current.package_root[0])
-        return ZCL_ERR(-1, "tasks: install the confined package verifier to reopen your kept program; your selection and tasks are unchanged");
-    if (!found && candidate.package_root[0])
-        return ZCL_ERR(-1, "tasks: install the confined package verifier before previewing");
-    if (!found) {
-        int n = snprintf(verifier, sizeof(verifier), "%s/z23-package-verify", executable);
-        if (n < 0 || (size_t)n >= sizeof(verifier))
-            return ZCL_ERR(-1, "tasks: verifier path is too long");
-    }
+    char verifier[4096];
+    ZCL_CHECK(ntd_verifier(&record, &candidate, verifier));
     struct task_update update;
     ZCL_CHECK(task_update_open(&update, editor->directory, editor->app, verifier, &candidate));
     ZCL_CHECK(task_update_check_offer(&update));
@@ -259,6 +302,27 @@ static void ntd_stale_recovery(struct zcl_command_reply *reply,
     json_free(&next);
 }
 
+static void ntd_failure(struct zcl_command_reply *reply, const struct json_value *input,
+    const char *directory, bool offering, struct zcl_result result)
+{
+    LOG_ERROR("app.tasks", "%s", result.message);
+    bool verifier_missing = result.code == NTD_VERIFIER_MISSING;
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+        verifier_missing ? "TASK_VERIFIER_UNAVAILABLE" : "TASK_SAVE_FAILED",
+        verifier_missing ? "open" : "save", false, false, result.message, "app.tasks");
+    if (verifier_missing) {
+        reply->error.human_action_required = true;
+#if defined(_WIN32)
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Open the kept program on a supported Linux or macOS Z23 installation.");
+#else
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Reinstall the matching package verifier (z23-package-verify) alongside Z23, then reopen Tasks.");
+#endif
+    } else if (!offering && result.code == TASK_DOCUMENT_STALE)
+        ntd_stale_recovery(reply, input, directory);
+}
+
 void zcl_native_handle_task_document(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
@@ -282,11 +346,5 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
         if (!rendered) result = ZCL_ERR(-1, "tasks: operation completed but confirmation allocation failed; read status before retrying");
     }
     ntd_source_next(reply, directory, &kept, action, result.ok);
-    if (!result.ok) {
-        LOG_ERROR("app.tasks", "%s", result.message);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "TASK_SAVE_FAILED", "save", false, false, result.message, "app.tasks");
-        if (!offering && result.code == TASK_DOCUMENT_STALE)
-            ntd_stale_recovery(reply, request->input, directory);
-    }
+    if (!result.ok) ntd_failure(reply, request->input, directory, offering, result);
 }

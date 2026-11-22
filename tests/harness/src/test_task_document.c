@@ -24,6 +24,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+void zcl_test_task_verifier_missing(bool missing);
+bool zcl_test_task_find_companion(const char *directory, char verifier[4096]);
+
 #define TD_CHECK(label, expression) do { \
     bool ok = (expression); \
     printf("task_document: %s... %s\n", label, ok ? "OK" : "FAIL"); \
@@ -40,6 +43,65 @@ static bool td_call(struct json_value *input, struct zcl_command_reply *reply)
     if (!zcl_command_registry_input_validate(spec, input, why, sizeof(why))) return false;
     spec->handler(&request, reply); return true;
 }
+static bool td_verifier_reply_ok(const struct zcl_command_reply *reply)
+{
+    return reply->status == ZCL_COMMAND_STATUS_FAILED &&
+        strcmp(reply->error.code, "TASK_VERIFIER_UNAVAILABLE") == 0 &&
+        strcmp(reply->error.phase, "open") == 0 && !reply->error.mutated &&
+        reply->error.human_action_required && strstr(reply->error.next_action, "matching") != NULL &&
+        strstr(reply->error.next_action, "z23-package-verify") != NULL;
+}
+static bool td_verifier_state_unchanged(struct package_resident_store *store,
+    const struct task_document *before, const struct package_resident_record *old)
+{
+    struct task_document after = {0}; struct package_resident_record now = {0};
+    return task_document_read(store, &after).ok && package_resident_record_read(store, &now).ok &&
+        before->state.revision == after.state.revision && before->state.count == after.state.count &&
+        old->generation == now.generation && package_resident_identity_equal(&old->current, &now.current);
+}
+
+static int td_verifier_discovery(const char *directory)
+{
+    int failures = 0;
+    char folder[4096], path[4096], found[4096];
+    int n = snprintf(folder, sizeof(folder), "%s/verifier-discovery", directory);
+    TD_CHECK("verifier fixture path", n > 0 && (size_t)n < sizeof(folder));
+    if (n <= 0 || (size_t)n >= sizeof(folder) || mkdir(folder, 0700) != 0) return failures + 1;
+    n = snprintf(path, sizeof(path), "%s/z23-package-verify", folder);
+    TD_CHECK("verifier path", n > 0 && (size_t)n < sizeof(path));
+    if (n <= 0 || (size_t)n >= sizeof(path)) { (void)rmdir(folder); return failures + 1; }
+    TD_CHECK("missing companion is not found", !zcl_test_task_find_companion(folder, found));
+    FILE *f = fopen(path, "wb");
+    bool created = f && fclose(f) == 0 && chmod(path, 0700) == 0;
+    TD_CHECK("executable companion is found", created && zcl_test_task_find_companion(folder, found) && !strcmp(path, found));
+    TD_CHECK("verifier discovery fixture removed", unlink(path) == 0 && rmdir(folder) == 0);
+    return failures;
+}
+
+static int td_verifier_refusal(struct package_resident_store *store, const char *directory)
+{
+    int failures = 0;
+    struct task_document before = {0};
+    struct package_resident_record old = {0};
+    TD_CHECK("verifier fixture initial state", task_document_read(store, &before).ok &&
+        package_resident_record_read(store, &old).ok);
+    struct json_value input = {0}; json_set_object(&input);
+    const char *root = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    bool built = json_push_kv_str(&input, "datadir", directory) &&
+        json_push_kv_str(&input, "action", "open") &&
+        json_push_kv_str(&input, "preview_root", root) &&
+        json_push_kv_str(&input, "preview_receipt", root) &&
+        json_push_kv_str(&input, "preview_program", "bin/ztasks");
+    struct zcl_command_reply reply = {0};
+    zcl_test_task_verifier_missing(true);
+    bool called = built && td_call(&input, &reply);
+    zcl_test_task_verifier_missing(false);
+    TD_CHECK("missing preview verifier has an actionable typed refusal", called && td_verifier_reply_ok(&reply));
+    TD_CHECK("verifier refusal preserves tasks and selection", td_verifier_state_unchanged(store, &before, &old));
+    zcl_command_reply_free(&reply); json_free(&input);
+    return failures;
+}
+
 static bool td_default_call(const char *body, bool success, int64_t revision, const char *title)
 {
     struct json_value input = {0};
@@ -416,6 +478,47 @@ static struct zcl_result td_switch(struct package_resident_store *store,
             transition->target.artifact_sha3, 3, &guard, row);
     return package_resident_record_activate_checked(store, row->revision, row->generation,
         transition->target.artifact_sha3, 2, &guard, row);
+}
+
+static bool td_verifier_kept_setup(struct package_resident_store *store, const char *directory,
+    struct package_resident_record *record, struct task_document *row)
+{
+    struct td_transition transition = {0}; transition.target = td_program('a');
+    return package_resident_store_open_task_app(store, directory, "local/verifier-kept").ok &&
+        task_document_apply(store, 0, TASK_DOCUMENT_ADD, 0, "retained task", row).ok &&
+        package_resident_record_read(store, record).ok && task_document_capture(store, &transition.checkpoint).ok &&
+        td_pending(store, &transition.target, record) && td_switch(store, record, &transition, false).ok;
+}
+static bool td_verifier_kept_unchanged(struct package_resident_store *store,
+    const struct package_resident_record *record, const struct task_document *row)
+{
+    struct task_document checked = {0};
+    return td_verifier_state_unchanged(store, row, record) && task_document_read(store, &checked).ok &&
+        checked.state.count == 1 && strcmp(checked.state.tasks[0].title, "retained task") == 0;
+}
+
+static int td_verifier_kept_refusal(const char *directory)
+{
+    int failures = 0;
+    struct package_resident_store store = {0};
+    struct package_resident_record record = {0};
+    struct task_document row = {0};
+    bool ready = td_verifier_kept_setup(&store, directory, &record, &row);
+    TD_CHECK("kept verifier fixture ready", ready);
+    if (ready) {
+        struct json_value input = {0}; json_set_object(&input);
+        bool built = json_push_kv_str(&input, "datadir", directory) &&
+            json_push_kv_str(&input, "app", "local/verifier-kept") && json_push_kv_str(&input, "action", "open");
+        struct zcl_command_reply reply = {0};
+        zcl_test_task_verifier_missing(true);
+        bool called = built && td_call(&input, &reply);
+        zcl_test_task_verifier_missing(false);
+        TD_CHECK("missing kept verifier has actionable typed refusal", called && td_verifier_reply_ok(&reply));
+        TD_CHECK("kept verifier refusal preserves task and selection", td_verifier_kept_unchanged(&store, &record, &row));
+        zcl_command_reply_free(&reply); json_free(&input);
+    }
+    if (store.db) TD_CHECK("kept verifier fixture closes", package_resident_store_close(&store).ok);
+    return failures;
 }
 
 static int td_stale_preview(struct package_resident_store *store,
@@ -1244,6 +1347,9 @@ int test_task_document(void)
         sqlite3_prepare_v2(store.db, "SELECT app, payload, undo FROM task_documents",
             -1, &schema, NULL) == SQLITE_OK);
     TD_CHECK("task schema statement finalized", sqlite3_finalize(schema) == SQLITE_OK);
+    failures += td_verifier_discovery(directory);
+    failures += td_verifier_refusal(&store, directory);
+    failures += td_verifier_kept_refusal(directory);
     failures += td_default_storage(directory);
     failures += td_stale_reload(directory);
     failures += td_actions(&store, &row);
