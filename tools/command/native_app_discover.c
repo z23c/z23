@@ -246,6 +246,8 @@ static const char *ad_catalog_message(const struct zcl_command_reply *reply)
         return "The catalog response could not be verified. Retry or return to My Apps.";
     if (!strcmp(reply->error.code, "NODE_UNAVAILABLE"))
         return "The selected node did not answer. Check your node profile and connection, then retry.";
+    if (!strcmp(reply->error.code, "BOARD_UNREADABLE"))
+        return "Could not read offers from this node. Check its connection and profile, then Retry.";
     return "The catalog could not be read. Retry or return to My Apps.";
 }
 static bool ad_review(struct discover *d, struct zcl_command_reply *reply)

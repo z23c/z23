@@ -5020,11 +5020,12 @@ static int tag_discover_empty_cases(struct tag_world *w)
         ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
         ASSERT_EQ(d.calls, 2); ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         zcl_command_reply_free(&reply);
-        static const char *const codes[] = {"NODE_UNAVAILABLE", "OTHER_REMOTE_FAILURE"};
+        static const char *const codes[] = {"NODE_UNAVAILABLE", "OTHER_REMOTE_FAILURE", "BOARD_UNREADABLE"};
         static const char *const summaries[] = {
             "The selected node did not answer. Check your node profile and connection, then retry.",
-            "The catalog could not be read. Retry or return to My Apps."};
-        for (size_t i = 0; i < 2; ++i) {
+            "The catalog could not be read. Retry or return to My Apps.",
+            "Could not read offers from this node. Check its connection and profile, then Retry."};
+        for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); ++i) {
             d = (struct tag_discover_empty){.error = true, .summary = summaries[i]};
             g_tag.catalog_error = codes[i]; zcl_command_reply_init(&reply, "zcl.app_open.v1");
             ASSERT(!app_discover_run(w->j.b_datadir, tag_discover_empty_card, NULL, &d, &reply, NULL));
