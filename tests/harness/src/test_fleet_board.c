@@ -57,6 +57,7 @@
 #include "../../../engine/composition/src/boot_fleet_board_frame_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_push_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_authority_internal.h"
+#include "../../../engine/composition/src/boot_fleet_board_cursor_internal.h"
 #include "validation/main_constants.h"
 #include "base/serialize_le.h"
 #include "vcs/zcode_dht_delegation.h"
@@ -12111,6 +12112,32 @@ static int test_fleet_board_public_no_grant_needed(void)
     return failures;
 }
 
+/* Retain the real first cursor, append a second valid peer using the native
+ * codec, then corrupt only the second record's next offset. */
+static bool fbw_corrupt_second_cursor(const char *dir, const uint8_t peer[32])
+{
+    char path[600];
+    struct board_cursor rows[2] = {0}, check[2] = {0};
+    (void)snprintf(path, sizeof path, "%s/fleet-board-cursors", dir);
+    if (board_cursor_read(path, rows, 2) != 1 || rows[0].next <= 0 || rows[0].sweep_turn ||
+        memcmp(rows[0].peer_box_id, peer, 32) != 0)
+        return false;
+    rows[1] = rows[0];
+    rows[1].peer_box_id[0] ^= 1u;
+    board_cursor_write(path, rows, 2);
+    if (board_cursor_read(path, check, 2) != 2 ||
+        memcmp(check[0].peer_box_id, peer, 32) != 0 ||
+        check[0].next != rows[0].next || check[1].next != rows[1].next)
+        return false;
+    const size_t record = 4u + 32u + FLEET_BOARD_FLEET_EPOCH_BYTES + 32u;
+    const size_t next = 36u + FLEET_BOARD_FLEET_EPOCH_BYTES;
+    FILE *f = fopen(path, "r+b");
+    if (!f) return false;
+    bool ok = fseek(f, (long)(8u + record + next), SEEK_SET) == 0 &&
+              fputc(0x80, f) == 0x80;
+    return fclose(f) == 0 && ok;
+}
+
 /* The paired pull's resume point is a file: after a simulated restart the
  * next pull asks where the file says, not from arrival 0. */
 static int test_fleet_board_fleet_cursor_resumes(void)
@@ -12153,6 +12180,19 @@ static int test_fleet_board_fleet_cursor_resumes(void)
         resumed = boot_fleet_board_fleet_test_last_after();
         ASSERT(resumed > 0);
         ASSERT(fbw_holds_all(&w.b, posts, FBW_POSTS));
+        /* Complete one pending sweep turn so a partially loaded first record
+         * would next ask forward at its positive saved position. */
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), 0);
+        ASSERT(fbw_corrupt_second_cursor(dir, w.box_a));
+        boot_fleet_board_fleet_test_restart_cursors();
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), 0);
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        ASSERT(fbw_holds_all(&w.b, posts, FBW_POSTS));
+        struct fleet_board_status status;
+        ASSERT(db_fleet_board_status(&w.b, FBW_NOW, &status));
+        ASSERT_EQ(status.posts, FBW_POSTS);
         PASS();
     }
     _test_next:

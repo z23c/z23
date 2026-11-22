@@ -97,7 +97,6 @@ size_t board_cursor_read(const char *path, struct board_cursor *out,
     uint8_t *buf = NULL;
     uint64_t size = 0;
     uint32_t count = 0;
-    size_t n = 0;
     bool ok = false;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path))
@@ -124,11 +123,16 @@ size_t board_cursor_read(const char *path, struct board_cursor *out,
         return 0;
     }
     for (uint32_t i = 0; i < count; i++) {
-        if (board_cursor_unpack(buf + (size_t)i * BOARD_CURSOR_REC, &out[n]))
-            n++;
+        if (!board_cursor_unpack(buf + (size_t)i * BOARD_CURSOR_REC, &out[i])) {
+            memset(out, 0, (size_t)i * sizeof(*out));
+            free(buf);
+            LOG_WARN("fleet.board", "fleet pull cursor file has an invalid "
+                     "record; inspect the file. Pulls start again from zero");
+            return 0;
+        }
     }
     free(buf);
-    return n;
+    return count;
 }
 
 
