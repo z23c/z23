@@ -2178,6 +2178,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_reindex_sparse_bodies(); }
     *failures += test_waitforheight_provable();
     *failures += test_rpc_chaininfo_nodb();
+    *failures += test_utxo_build_identity();
     *failures += test_refold_progress_floor();
     *failures += test_refold_cadence();
     *failures += test_refold_rate_verdict();

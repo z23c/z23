@@ -465,7 +465,9 @@ ZCL_COMMAND_READY_READ(
     "SHA3 commitment over the UTXO set",
     "A SHA3-256 commitment computed live over the full current UTXO "
     "set at call time; recomputed on every call, not a cached "
-    "snapshot.", 0,
+    "snapshot. The reply (zcl.utxo_commitment.v1) also carries a \"build\" "
+    "object (source_id_sha256, build_commit, version) naming the running "
+    "binary that computed it.", 0,
     "utxo,commitment,sha3",
     "zcl.command.empty_input.v1", "zcl.utxo_commitment.v1", "", "",
     "z23 core consensus utxo commitment",
@@ -479,7 +481,9 @@ ZCL_COMMAND_READY_READ(
     "Audit the UTXO set for drift",
     "Live drift-detection results comparing the running node's UTXO "
     "set against expected invariants at call time; a foreground scan, "
-    "not a cached report.", 0,
+    "not a cached report. The reply (zcl.utxo_audit.v1) also carries a "
+    "\"build\" object (source_id_sha256, build_commit, version) naming the "
+    "running binary that computed it.", 0,
     "utxo,audit,drift",
     "zcl.command.empty_input.v1", "zcl.utxo_audit.v1", "", "",
     "z23 core consensus utxo audit",

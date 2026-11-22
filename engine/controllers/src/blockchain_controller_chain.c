@@ -12,6 +12,7 @@
 #include "controllers/blockchain_controller.h"
 #include "blockchain_controller_internal.h"
 #include "controllers/network_controller.h"
+#include "controllers/node_binary_identity_json.h"
 #include "controllers/strong_params.h"
 #include "controllers/sync_controller.h"
 #include "views/format_helpers.h"
@@ -619,6 +620,10 @@ bool rpc_getutxocommitment(const struct json_value *params, bool help,
     json_push_kv_int(result, "height", tip);
     json_push_kv_int(result, "utxo_count", (int64_t)count);
     json_push_kv_int(result, "elapsed_seconds", elapsed);
+    /* Name the build that computed this commitment (source_id_sha256 is the
+     * authoritative identity) so a parity result is tied to the exact
+     * running binary; reporting only, the commitment is unchanged. */
+    node_binary_identity_push_json(result, "build", true);
     return true;
 }
 
@@ -640,6 +645,7 @@ static void utxo_audit_result_to_json(const struct utxo_audit_result *audit,
         json_push_kv_str(result, "source", audit->source);
     if (audit->error[0])
         json_push_kv_str(result, "error", audit->error);
+    node_binary_identity_push_json(result, "build", true);
 }
 
 bool rpc_getutxoaudit(const struct json_value *params, bool help,
