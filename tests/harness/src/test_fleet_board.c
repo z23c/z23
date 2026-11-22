@@ -8783,9 +8783,14 @@ static bool fbp_case_real_tick(struct fbp *p)
     boot_fleet_board_fleet_test_bind(&p->w.b); /* the pushing box's lane */
     uint64_t s0 = 0, l0 = 0, s = 0, l = 0;
     boot_fleet_board_fleet_test_tick_runs(&s0, &l0);
+    /* An empty scheduled drain has no post to allocate or inspect. */
+    zcl_alloc_fault_fail_next("fleet_board_drain");
     boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW);
+    bool empty_skipped_allocation = zcl_alloc_fault_armed_label() != NULL;
+    zcl_alloc_fault_clear();
     boot_fleet_board_fleet_test_tick_runs(&s, &l);
     FBP_REQUIRE(s == s0 + 1 && l == l0 + 1);
+    FBP_REQUIRE(empty_skipped_allocation);
     for (unsigned t = 0; t < 9; t++) /* the rest of that second */
         boot_fleet_board_fleet_test_tick(&p->w.svc, FBW_NOW);
     boot_fleet_board_fleet_test_tick_runs(&s, &l);
@@ -10646,6 +10651,49 @@ static int test_fleet_board_pull_inbox_pressure(bool fail_alloc)
         struct fleet_board_status status;
         ASSERT(db_fleet_board_status(&w.b, FBW_NOW, &status));
         ASSERT_EQ(status.posts, fail_alloc ? 1 : 2);
+        PASS();
+    }
+    _test_next:
+    zcl_alloc_fault_clear();
+    fbw_close(&w);
+    return failures;
+}
+
+/* A failed scheduled drain must retain the already completed answer. */
+static int test_fleet_board_tick_retains_answer(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post;
+    bool opened = fbw_open(&w);
+    TEST("fleet board tick: allocation failure retains a pending answer") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "pending tick",
+                        2000, 3600, 2100, &post));
+        ASSERT(fbw_pressure_pull(&w, &post, NULL, false));
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        uint64_t before = 0, after = 0;
+        boot_fleet_board_fleet_test_tick_runs(&before, NULL);
+        zcl_alloc_fault_fail_next("fleet_board_drain");
+        boot_fleet_board_fleet_test_tick(&w.svc, FBW_NOW);
+        bool hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        boot_fleet_board_fleet_test_tick_runs(&after, NULL);
+        ASSERT_EQ(after, before + 1);
+        ASSERT(hit);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), (size_t)0);
+        struct fleet_board_status status;
+        ASSERT(db_fleet_board_status(&w.b, FBW_NOW, &status));
+        ASSERT_EQ(status.posts, 1);
         PASS();
     }
     _test_next:
@@ -16284,6 +16332,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_malformed_answer_status();
     failures += test_fleet_board_pull_inbox_pressure(false);
     failures += test_fleet_board_pull_inbox_pressure(true);
+    failures += test_fleet_board_tick_retains_answer();
     failures += test_fleet_board_fleet_wiki_full_is_final();
     failures += test_fleet_board_fleet_wiki_carriage();
     failures += test_fleet_board_fleet_quota();

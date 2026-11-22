@@ -1176,6 +1176,14 @@ static void board_publish_roster_due(struct node_db *ndb, int64_t now)
         (void)boot_fleet_roster_publish(ndb, now);
 }
 
+/* Lane lock held. Arrivals after this snapshot wait for the next second. */
+static bool board_inbox_pending_locked(void)
+{
+    for (size_t i = 0; i < FLEET_BOARD_FLEET_INBOX_MAX; i++)
+        if (g_inbox[i].used) return true;
+    return false;
+}
+
 /* Every FLEET_BOARD_FLEET_TICK_US, with `svc` the wired context and `now` the
  * wall clock: the push work when there is any, then, once a second,
  * everything this lane did before the push. */
@@ -1197,11 +1205,13 @@ static void board_tick_at(struct boot_svc_ctx *svc, int64_t now)
     }
     board_lock();
     g_last_second = now;
+    bool pending = board_inbox_pending_locked();
     board_unlock();
 #ifdef ZCL_TESTING
     atomic_fetch_add_explicit(&g_test_second_runs, 1, memory_order_relaxed);
 #endif
-    (void)board_drain_inbox(ndb, now);
+    if (pending)
+        (void)board_drain_inbox(ndb, now);
     if (now <= 0 ||
         (last != 0 && now - last < FLEET_BOARD_FLEET_PULL_INTERVAL_S)) {
         supervisor_progress_idle(g_child);
