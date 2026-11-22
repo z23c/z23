@@ -162,6 +162,7 @@ static const char *fb_observation_phase(enum boot_fleet_board_observation_phase 
         [FLEET_BOARD_OBS_INGEST] = "ingest",
         [FLEET_BOARD_OBS_GATE] = "gate_refusal",
         [FLEET_BOARD_OBS_ANSWER_REFUSED] = "answer_refused",
+        [FLEET_BOARD_OBS_ANSWER_DEFERRED] = "answer_deferred",
     };
     return (unsigned)phase < sizeof names / sizeof names[0] ? names[phase] : "unknown";
 }
@@ -175,6 +176,19 @@ static bool fb_observation_ingest(struct json_value *o,
     return json_push_kv_int(o, "arrival", v->arrival) &&
            json_push_kv_str(o, "disposition", disposition) &&
            json_push_kv_str(o, "result", fleet_board_result_string(r));
+}
+
+static bool fb_observation_deferred(struct json_value *o, int result)
+{
+    static const struct { const char *reason, *action; } outcomes[] = {
+        [FLEET_BOARD_ANSWER_INBOX_FULL] = {"inbox_full", "wait_for_board_inbox"},
+        [FLEET_BOARD_ANSWER_ALLOCATION_FAILED] = {"allocation_failed", "inspect_node_memory"},
+    };
+    unsigned r = (unsigned)result;
+    if (r >= sizeof outcomes / sizeof outcomes[0] || !outcomes[r].reason)
+        return json_push_kv_str(o, "reason", "unknown");
+    return json_push_kv_str(o, "reason", outcomes[r].reason) &&
+           json_push_kv_str(o, "next_action", outcomes[r].action);
 }
 
 static bool fb_observation_detail(struct json_value *o,
@@ -193,6 +207,8 @@ static bool fb_observation_detail(struct json_value *o,
     }
     if (v->phase == FLEET_BOARD_OBS_ANSWER_REFUSED)
         return json_push_kv_str(o, "reason", "malformed");
+    if (v->phase == FLEET_BOARD_OBS_ANSWER_DEFERRED)
+        return fb_observation_deferred(o, v->result);
     if (v->phase == FLEET_BOARD_OBS_INGEST)
         return fb_observation_ingest(o, v);
     if (v->phase == FLEET_BOARD_OBS_OPEN_ATTEMPT)

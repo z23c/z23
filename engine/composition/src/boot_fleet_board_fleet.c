@@ -500,6 +500,15 @@ static struct board_inbox_slot *board_inbox_claim(void)
     return NULL;
 }
 
+/* Called without the lane lock; only paired pulls have a peer observation. */
+static void board_observe_deferred(const struct board_ask *ask,
+                                   enum boot_fleet_board_answer_deferred_reason reason)
+{
+    if (!ask->roster)
+        board_observe(ask->peer_box_id, NULL, ask->after, 0, (int)reason,
+                      FLEET_BOARD_OBS_ANSWER_DEFERRED, false, false, NULL);
+}
+
 /* The stream ended. A finished answer moves into the inbox by pointer; an
  * answer that did not finish has no standing and is asked for again. Only a
  * pull state ever reaches the inbox: a serve state keeps nothing, a push
@@ -525,8 +534,10 @@ static void board_service_close(struct mesh_stream *st,
         (reason != MESH_STREAM_CLOSED_BY_SERVICE && reason != MESH_STREAM_OK))
         return;
     uint8_t *rows = zcl_malloc(p->len, "fleet_board_inbox");
-    if (!rows)
+    if (!rows) {
+        board_observe_deferred(&p->ask, FLEET_BOARD_ANSWER_ALLOCATION_FAILED);
         return;
+    }
     memcpy(rows, p->rows, p->len);
     board_lock();
     struct board_inbox_slot *slot = board_inbox_claim();
@@ -539,6 +550,7 @@ static void board_service_close(struct mesh_stream *st,
     board_unlock();
     if (!slot) {
         free(rows);
+        board_observe_deferred(&p->ask, FLEET_BOARD_ANSWER_INBOX_FULL);
         atomic_fetch_add_explicit(&g_inbox_full, 1, memory_order_relaxed);
         LOG_WARN("fleet.board",
                  "fleet answer deferred: inbox full (%u slots)",

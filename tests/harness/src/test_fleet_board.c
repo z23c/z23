@@ -10516,6 +10516,144 @@ static int test_fleet_board_malformed_answer_status(void)
     return failures;
 }
 
+/* Prove the actual DATA carries both signed IDs in a valid positive page. */
+static bool fbw_pressure_page(const uint8_t *frame, size_t len,
+                              const struct fleet_board_post *first,
+                              const struct fleet_board_post *second)
+{
+    const size_t start = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u + 2u;
+    if (len <= start + FLEET_BOARD_FLEET_ANSWER_HEAD) return false;
+    const uint8_t *answer = frame + start;
+    size_t answer_len = len - start, off = FLEET_BOARD_FLEET_ANSWER_HEAD;
+    struct board_answer_head head;
+    struct board_record rec;
+    return board_answer_head_decode(answer, answer_len, &head) && head.scanned > 0 &&
+           board_answer_valid(answer, answer_len, &head, 0, false) &&
+           board_record_next(answer, answer_len, &off, &rec) &&
+           memcmp(rec.id, first->id, 32) == 0 &&
+           board_record_next(answer, answer_len, &off, &rec) &&
+           memcmp(rec.id, second->id, 32) == 0 && off == answer_len;
+}
+
+/* Complete a pull without draining. When named, inspect both records before
+ * delivering the actual DATA; the allocation fault is armed only for CLOSE. */
+static bool fbw_pressure_pull(struct fbw *w, const struct fleet_board_post *first,
+                              const struct fleet_board_post *second, bool fail_alloc)
+{
+    mesh_loop_discard(w->asker, w->ask_q, w->f.res_term);
+    mesh_loop_discard(w->answerer, w->answer_q, w->f.term_peer.ini);
+    mesh_stream_test_reset();
+    if (!boot_fleet_board_fleet_test_pull(w->f.resp_noise_pub, w->box_a) ||
+        boot_fleet_board_fleet_test_last_after() != 0 ||
+        mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp, w->answerer) != 1)
+        return false;
+    boot_fleet_board_fleet_test_serve();
+    boot_fleet_board_fleet_test_serve();
+    if (!second && !fail_alloc)
+        return mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini,
+                              &w->mp, w->asker) == 2;
+    uint8_t frame[MESH_LOOP_WIRE_MAX], kind = 0;
+    bool more = false;
+    size_t len = mesh_loop_take(w->answerer, w->answer_q, w->f.term_peer.ini,
+                                frame, sizeof frame, &more);
+    if (!more || !mesh_stream_test_read_header(frame, len, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_DATA)
+        return false;
+    if (second && !fbw_pressure_page(frame, len, first, second)) return false;
+    if (!mesh_stream_frame(&w->mp, w->asker, frame, len, NULL)) return false;
+    if (fail_alloc) zcl_alloc_fault_fail_next("fleet_board_inbox");
+    size_t closed = mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini,
+                                   &w->mp, w->asker);
+    bool hit = !fail_alloc || zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    return closed == 1 && hit;
+}
+
+static bool fbw_pressure_status(struct fbw *w, const uint8_t post[32],
+                                const char *reason, const char *action)
+{
+    struct db_service service = {.node_db = &w->b, .started = true};
+    struct app_runtime_context runtime = {.db_service = &service};
+    struct rpc_table table;
+    struct json_value result;
+    char warmup[256], peer_hex[65], post_hex[65];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
+    rpc_table_init(&table);
+    boot_fleet_board_register_rpc(&table);
+    json_init(&result);
+    set_rpc_warmup_finished();
+    app_runtime_set_current(&runtime);
+    fleet_board_id_to_hex(w->box_a, peer_hex);
+    fleet_board_id_to_hex(post, post_hex);
+    bool ok = fbw_status_call(&table, peer_hex, post_hex, &result);
+    const struct json_value *attempt = json_get(&result, "peer_attempt");
+    const struct json_value *ingest = json_get(&result, "post_ingest");
+    const char *phase = json_get_str(json_get(attempt, "phase"));
+    const char *why = json_get_str(json_get(attempt, "reason"));
+    const char *next = json_get_str(json_get(attempt, "next_action"));
+    ok = ok && json_get_bool(json_get(attempt, "observed")) && phase &&
+         strcmp(phase, "answer_deferred") == 0 && why && strcmp(why, reason) == 0 &&
+         next && strcmp(next, action) == 0 && !json_get(attempt, "epoch") &&
+         !json_get_bool(json_get(ingest, "observed"));
+    json_free(&result);
+    app_runtime_set_current(&w->runtime);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    return ok;
+}
+
+static int test_fleet_board_pull_inbox_pressure(bool fail_alloc)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post first, missing;
+    struct boot_fleet_board_fleet_counts before, after;
+    bool opened = fbw_open(&w);
+    TEST(fail_alloc ? "fleet board: allocation failure defers pull until retry" :
+                      "fleet board: full pull inbox defers page until retry") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer, MESH_PAIRING_CAP_STATUS_READ,
+                                  FBW_PAIRED_AT, FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "first page",
+                        2000, 3600, 2100, &first));
+        boot_fleet_board_fleet_counts(&before);
+        if (!fail_alloc) {
+            for (unsigned i = 0; i < FLEET_BOARD_FLEET_INBOX_MAX; i++)
+                ASSERT(fbw_pressure_pull(&w, &first, NULL, false));
+            ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "dropped page",
+                            2001, 3600, 2100, &missing));
+        } else {
+            missing = first;
+        }
+        ASSERT(fbw_pressure_pull(&w, &first, fail_alloc ? NULL : &missing, fail_alloc));
+        boot_fleet_board_fleet_counts(&after);
+        ASSERT_EQ(after.inbox_full, before.inbox_full + (fail_alloc ? 0 : 1));
+        ASSERT(!db_fleet_board_have(&w.b, first.id));
+        ASSERT(!db_fleet_board_have(&w.b, missing.id));
+        ASSERT(fbw_pressure_status(&w, missing.id,
+                                   fail_alloc ? "allocation_failed" : "inbox_full",
+                                   fail_alloc ? "inspect_node_memory" : "wait_for_board_inbox"));
+        ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), fail_alloc ? (size_t)0 : (size_t)1);
+        if (!fail_alloc) ASSERT(db_fleet_board_have(&w.b, first.id));
+        ASSERT(!db_fleet_board_have(&w.b, missing.id));
+        size_t frames = 0;
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
+        if (fail_alloc) ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), 0);
+        ASSERT(db_fleet_board_have(&w.b, missing.id));
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        struct fleet_board_status status;
+        ASSERT(db_fleet_board_status(&w.b, FBW_NOW, &status));
+        ASSERT_EQ(status.posts, fail_alloc ? 1 : 2);
+        PASS();
+    }
+    _test_next:
+    zcl_alloc_fault_clear();
+    fbw_close(&w);
+    return failures;
+}
+
 #define FBW_BATCH 16
 
 /* The cursor must never pass over a row: same-second arrivals, a refusal
@@ -16144,6 +16282,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_fleet_cursor_table_full();
     failures += test_fleet_board_fleet_carriage_gap_free();
     failures += test_fleet_board_malformed_answer_status();
+    failures += test_fleet_board_pull_inbox_pressure(false);
+    failures += test_fleet_board_pull_inbox_pressure(true);
     failures += test_fleet_board_fleet_wiki_full_is_final();
     failures += test_fleet_board_fleet_wiki_carriage();
     failures += test_fleet_board_fleet_quota();
