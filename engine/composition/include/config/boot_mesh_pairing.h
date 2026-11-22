@@ -40,6 +40,7 @@ struct boot_mesh_pairing_plan {
     uint8_t peer_noise_static[32];
     uint8_t peer_noise_fingerprint[32];
     uint8_t peer_master_pubkey[32];
+    uint8_t peer_online_pubkey[32]; /* the key pull-side role checks use */
     uint64_t delegation_not_before;
     uint64_t delegation_expiry; /* zid doc expiry, unix seconds */
     uint64_t delegation_sequence;
@@ -94,9 +95,33 @@ bool boot_mesh_pairing_selector_matches(const char *selector,
                                         const char *addr_name,
                                         const char fingerprint_hex[65]);
 
+/* One peer seen over several transports (onion, public IP, loopback) holds
+ * several sessions with one Noise fingerprint; those are ONE candidate. */
+#define BOOT_MESH_PAIRING_SHORT_FP 16
+struct boot_mesh_pairing_session {
+    char fingerprint_hex[65];
+    int64_t last_recv; /* wall-clock seconds of the last receive */
+};
+struct boot_mesh_pairing_resolution {
+    size_t distinct; /* different full fingerprints among the sessions */
+    size_t best;     /* most recently active session; valid when distinct==1 */
+    char shown[128]; /* short distinct fingerprints, comma separated */
+};
+void boot_mesh_pairing_resolve(const struct boot_mesh_pairing_session *sessions,
+                               size_t count,
+                               struct boot_mesh_pairing_resolution *out);
+
+/* The short fingerprints of the last AMBIGUOUS_PEER refusal, for the error
+ * text; empty when none. Advisory: a concurrent call may overwrite it. */
+void boot_mesh_pairing_ambiguity(char *out, size_t cap);
+
 /* 64 canonical lowercase hex chars -> 32 bytes (the out-of-band compared
  * Noise fingerprint). */
 bool boot_mesh_pairing_decode_fingerprint(const char *hex, uint8_t out[32]);
+
+/* The `fleet roles grant --fp=` value for `key`, hex, from the role checker's
+ * own derivation (util/fleet_role_check.h). False when none is installed. */
+bool boot_mesh_pairing_role_fp_hex(const uint8_t key[32], char out[65]);
 
 /* Uppercase command-result code for one service refusal reason. */
 const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason);
@@ -114,8 +139,9 @@ enum boot_mesh_pairing_plan_result boot_mesh_pairing_plan(
  * zero with days_given=false selects the default. grant_terminal opts the
  * record into MESH_PAIRING_CAP_TERMINAL_EXEC alongside the always-present
  * status-read; the mask is fixed at commit and never widened afterwards.
- * On MESH_PAIR_COMMIT_OK the durable record (new or identical-existing) is
- * in out. */
+ * On MESH_PAIR_COMMIT_OK the durable record is in out: new, the existing one
+ * unchanged, or the existing one with a later requested expiry (never
+ * shortened). A re-run for the same peer is therefore safe. */
 enum boot_mesh_pairing_commit_result boot_mesh_pairing_commit(
     const char *selector, const uint8_t expected_fingerprint[32],
     int64_t days, bool days_given, bool grant_terminal,

@@ -1088,6 +1088,27 @@ static int test_mesh_pairing_wiring_lifecycle(void)
     return 0;
 }
 
+/* Re-running the ceremony, on its own database so the records the other
+ * tests leave behind stay as they are. */
+static int test_mesh_pairing_rerun_run(const char *dir)
+{
+    extern int test_mesh_pairing_rerun(
+        struct node_db *, const struct vcs_zcode_dht_delegation *,
+        const uint8_t[32], const uint8_t[32]);
+    struct node_db ndb = {0};
+    struct vcs_zcode_dht_delegation delegation;
+    uint8_t fingerprint[32], genesis[32];
+    char path[320];
+    int failures = 1;
+    snprintf(path, sizeof(path), "%s/rerun.db", dir);
+    if (mesh_fixture(&ndb, path, &delegation, fingerprint, genesis))
+        failures = test_mesh_pairing_rerun(&ndb, &delegation, fingerprint,
+                                           genesis);
+    if (ndb.open)
+        node_db_close(&ndb);
+    return failures;
+}
+
 int test_mesh_pairing(void)
 {
     int failures = test_mesh_pairing_wiring_lifecycle();
@@ -1467,6 +1488,7 @@ int test_mesh_pairing(void)
         }
         failures += test_mesh_observation_boundary(which);
     }
+    failures += test_mesh_pairing_rerun_run(dir);
 
 _test_next:
     if (ndb.open)

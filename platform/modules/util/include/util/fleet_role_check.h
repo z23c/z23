@@ -62,8 +62,15 @@ typedef bool (*zcl_fleet_role_check_fn)(const uint8_t key[32],
 typedef bool (*zcl_fleet_role_grandfather_fn)(const uint8_t key[32],
                                               const char *origin, void *ctx);
 
+/* The 32-byte role fingerprint the checker derives from `key` before it looks
+ * a grant up: exactly the value `fleet roles grant --fp=` must be given. */
+typedef void (*zcl_fleet_role_fingerprint_fn)(const uint8_t key[32],
+                                              uint8_t out[32]);
+
 struct zcl_fleet_role_checker {
     zcl_fleet_role_check_fn allow;
+    /* Optional. NULL means this process cannot say what to grant. */
+    zcl_fleet_role_fingerprint_fn fingerprint;
     /* Optional. NULL means this process mints nothing, which is a fine
      * state for a checker that only answers questions. */
     zcl_fleet_role_grandfather_fn grandfather;
@@ -86,6 +93,11 @@ bool zcl_fleet_role_checker_installed(void);
  * when no checker is installed, and logs that fact once per process. */
 bool zcl_fleet_role_allows(const uint8_t key[32], const char *leaf,
                            const char *kind, char *why, size_t why_cap);
+
+/* The fingerprint an operator passes to `fleet roles grant --fp=` for `key`,
+ * computed by the installed checker's own derivation (never re-implemented by
+ * a caller). False when no checker is installed or it offers none. */
+bool zcl_fleet_role_key_fingerprint(const uint8_t key[32], uint8_t out[32]);
 
 /* Mint (or find) the grant `key` already earned by having a row or post of
  * its own stored here. False when no checker is installed, when it installed

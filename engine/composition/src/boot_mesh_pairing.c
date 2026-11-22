@@ -21,6 +21,7 @@
 #include "net/noise_transport.h"
 #include "services/p2p_node_noise.h"
 #include "platform/time_compat.h"
+#include "util/fleet_role_check.h"
 #include "util/log_macros.h"
 #include "util/sync.h"
 #include "vcs/zcode_dht_service.h"
@@ -106,6 +107,62 @@ bool boot_mesh_pairing_selector_matches(const char *selector,
     return len <= 64 && strncmp(fingerprint_hex, selector, len) == 0;
 }
 
+static bool mesh_pair_fingerprint_seen(
+    const struct boot_mesh_pairing_session *sessions, size_t upto,
+    const char *fingerprint_hex)
+{
+    for (size_t i = 0; i < upto; i++)
+        if (strcmp(sessions[i].fingerprint_hex, fingerprint_hex) == 0)
+            return true;
+    return false;
+}
+
+static void mesh_pair_resolution_show(
+    struct boot_mesh_pairing_resolution *out, const char *fingerprint_hex)
+{
+    size_t used = strlen(out->shown);
+    size_t need = BOOT_MESH_PAIRING_SHORT_FP + (used ? 1 : 0);
+    if (used + need + 1 > sizeof(out->shown))
+        return; /* the count still says how many were left out */
+    snprintf(out->shown + used, sizeof(out->shown) - used, "%s%.*s",
+             used ? "," : "", BOOT_MESH_PAIRING_SHORT_FP, fingerprint_hex);
+}
+
+void boot_mesh_pairing_resolve(
+    const struct boot_mesh_pairing_session *sessions, size_t count,
+    struct boot_mesh_pairing_resolution *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!sessions)
+        return;
+    bool have_best = false;
+    for (size_t i = 0; i < count; i++) {
+        if (sessions[i].fingerprint_hex[0] == '\0')
+            continue; /* a failed derivation is no candidate at all */
+        if (!have_best ||
+            sessions[i].last_recv > sessions[out->best].last_recv) {
+            out->best = i;
+            have_best = true;
+        }
+        if (mesh_pair_fingerprint_seen(sessions, i,
+                                       sessions[i].fingerprint_hex))
+            continue;
+        out->distinct++;
+        mesh_pair_resolution_show(out, sessions[i].fingerprint_hex);
+    }
+}
+
+bool boot_mesh_pairing_role_fp_hex(const uint8_t key[32], char out[65])
+{
+    uint8_t fp[32];
+    if (!key || !out || !zcl_fleet_role_key_fingerprint(key, fp))
+        return false;
+    zcl_hex_encode(fp, sizeof(fp), out);
+    return true;
+}
+
 bool boot_mesh_pairing_decode_fingerprint(const char *hex, uint8_t out[32])
 {
     memset(out, 0, 32);
@@ -164,16 +221,58 @@ const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
 
 /* ── Live peer pick + held-delegation lookup ─────────────────────────── */
 
+static char g_pair_ambiguous[128]; /* guarded by g_pair_lock */
+
+void boot_mesh_pairing_ambiguity(char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    pair_lock();
+    snprintf(out, cap, "%s", g_pair_ambiguous);
+    zcl_mutex_unlock(&g_pair_lock);
+}
+
+static void mesh_pair_note_ambiguity(const char *shown)
+{
+    pair_lock();
+    snprintf(g_pair_ambiguous, sizeof(g_pair_ambiguous), "%s", shown);
+    zcl_mutex_unlock(&g_pair_lock);
+}
+
+/* True when the node has an established Noise session the selector accepts;
+ * fills the session snapshot and the candidate row for the resolver. */
+static bool mesh_pair_session_matches(
+    const char *selector, struct p2p_node *node,
+    struct noise_transport_snapshot *snapshot,
+    struct boot_mesh_pairing_session *session)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (!p2p_node_noise_snapshot(node, snapshot) || !snapshot->established)
+        return false;
+    uint8_t fingerprint[32];
+    memset(session, 0, sizeof(*session));
+    if (!v2_identity_public_fingerprint(snapshot->remote_static, fingerprint))
+        return false; /* an empty fingerprint must not merge into one peer */
+    zcl_hex_encode(fingerprint, 32, session->fingerprint_hex);
+    session->last_recv = node->last_recv;
+    return boot_mesh_pairing_selector_matches(selector, node->addr_name,
+                                              session->fingerprint_hex);
+}
+
 /* Snapshot connected peers under cs_nodes, keep those with an established
  * Noise session, then apply the selector (address substring or fingerprint
- * prefix). Returns the match count; on exactly one match *node_out holds an
+ * prefix). Sessions sharing one full fingerprint are one peer seen over
+ * several transports: the most recently active one is kept. Returns the
+ * number of DISTINCT fingerprints matched; on exactly one *node_out holds an
  * owned reference the caller releases. Never dials. */
 static int mesh_pair_pick_peer(struct net_manager *nm, const char *selector,
                                struct p2p_node **node_out,
                                struct noise_transport_snapshot *session_out)
 {
     struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
-    size_t count = 0;
+    struct boot_mesh_pairing_session sessions[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
+    size_t index[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
+    size_t count = 0, matched = 0;
     zcl_mutex_lock(&nm->cs_nodes);
     for (size_t i = 0;
          i < nm->num_nodes && count < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++) {
@@ -184,34 +283,27 @@ static int mesh_pair_pick_peer(struct net_manager *nm, const char *selector,
         p2p_node_add_ref(node);
     }
     zcl_mutex_unlock(&nm->cs_nodes);
-    int matches = 0;
     for (size_t i = 0; i < count; i++) {
         struct noise_transport_snapshot snapshot;
-        memset(&snapshot, 0, sizeof(snapshot));
-        bool established =
-            p2p_node_noise_snapshot(candidates[i], &snapshot) &&
-            snapshot.established;
-        bool matched = false;
-        if (established) {
-            uint8_t fingerprint[32];
-            char fingerprint_hex[65] = {0};
-            if (v2_identity_public_fingerprint(snapshot.remote_static,
-                                               fingerprint))
-                zcl_hex_encode(fingerprint, 32, fingerprint_hex);
-            matched = boot_mesh_pairing_selector_matches(
-                selector, candidates[i]->addr_name, fingerprint_hex);
-        }
-        if (matched) {
-            matches++;
-            if (matches == 1) {
-                *node_out = candidates[i];
-                *session_out = snapshot;
-                continue; /* keep the reference */
-            }
-        }
-        p2p_node_release(candidates[i]);
+        if (!mesh_pair_session_matches(selector, candidates[i], &snapshot,
+                                       &sessions[matched]))
+            continue;
+        if (matched == 0)
+            *session_out = snapshot; /* every match shares remote_static */
+        index[matched++] = i;
     }
-    return matches;
+    struct boot_mesh_pairing_resolution resolved;
+    boot_mesh_pairing_resolve(sessions, matched, &resolved);
+    size_t keep = resolved.distinct == 1 ? index[resolved.best] : count;
+    for (size_t i = 0; i < count; i++) {
+        if (i == keep)
+            *node_out = candidates[i]; /* keep the reference */
+        else
+            p2p_node_release(candidates[i]);
+    }
+    if (resolved.distinct > 1)
+        mesh_pair_note_ambiguity(resolved.shown);
+    return (int)resolved.distinct;
 }
 
 struct mesh_pair_delegation_collect {
@@ -324,6 +416,7 @@ enum boot_mesh_pairing_plan_result boot_mesh_pairing_plan(
         return MESH_PAIR_PLAN_UNAVAILABLE;
     }
     memcpy(out->peer_master_pubkey, delegation.doc.master_pubkey, 32);
+    memcpy(out->peer_online_pubkey, delegation.online_pubkey, 32);
     out->delegation_not_before = delegation.not_before;
     out->delegation_expiry = delegation.doc.expiry;
     out->delegation_sequence = delegation.doc.seq;

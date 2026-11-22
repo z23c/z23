@@ -133,9 +133,7 @@ static bool mesh_pairing_same(const struct db_mesh_pairing *left,
            memcmp(left->peer_noise_pubkey,
                   right->peer_noise_pubkey, 32) == 0 &&
            left->capability_mask == right->capability_mask &&
-           left->delegation_sequence == right->delegation_sequence &&
-           left->paired_at == right->paired_at &&
-           left->expires_at == right->expires_at;
+           left->delegation_sequence == right->delegation_sequence;
 }
 
 static bool mesh_pairing_accept_arguments_valid(
@@ -200,6 +198,27 @@ static enum mesh_pairing_reason mesh_pairing_existing_verdict(
     return MESH_PAIRING_OK;
 }
 
+/* A re-run for the same identity, scope and sequence. paired_at and
+ * expires_at embed the clock of the run that wrote them, so they are not
+ * identity: the stored record stands, and only a later requested expiry
+ * moves it (never earlier, never any other field). */
+static enum mesh_pairing_reason mesh_pairing_accept_existing(
+    struct node_db *ndb, const struct db_mesh_pairing *existing,
+    const struct db_mesh_pairing *next, struct db_mesh_pairing *out)
+{
+    enum mesh_pairing_reason verdict =
+        mesh_pairing_existing_verdict(existing, next);
+    if (verdict != MESH_PAIRING_OK)
+        return verdict;
+    *out = *existing;
+    if (next->expires_at <= existing->expires_at)
+        return MESH_PAIRING_OK;
+    if (!db_mesh_pairing_extend(ndb, existing->pairing_id, next->expires_at))
+        return MESH_PAIRING_PERSIST_FAILED;
+    out->expires_at = next->expires_at;
+    return MESH_PAIRING_OK;
+}
+
 enum mesh_pairing_reason mesh_pairing_service_accept(
     struct node_db *ndb, const uint8_t network_genesis[32],
     const struct vcs_zcode_dht_delegation *delegation,
@@ -238,14 +257,8 @@ enum mesh_pairing_reason mesh_pairing_service_accept(
             next.peer_noise_pubkey, next.pairing_id))
         return MESH_PAIRING_BAD_ARGUMENT;
     struct db_mesh_pairing existing;
-    if (db_mesh_pairing_find(ndb, next.pairing_id, &existing)) {
-        enum mesh_pairing_reason verdict =
-            mesh_pairing_existing_verdict(&existing, &next);
-        if (verdict != MESH_PAIRING_OK)
-            return verdict;
-        *out = existing;
-        return MESH_PAIRING_OK;
-    }
+    if (db_mesh_pairing_find(ndb, next.pairing_id, &existing))
+        return mesh_pairing_accept_existing(ndb, &existing, &next, out);
     if (!db_mesh_pairing_insert(ndb, &next))
         return MESH_PAIRING_PERSIST_FAILED;
     *out = next;

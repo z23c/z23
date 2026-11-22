@@ -735,8 +735,11 @@ ZCL_COMMAND_READY_READ(
     "record: peer address, Noise fingerprint hex to compare out of band, "
     "master pubkey, delegation validity window, the status-read-only "
     "capability, the default expiry, and the pairing id. No durable write. "
-    "Never dials: no matching session peer is PEER_NOT_CONNECTED, more than "
-    "one is AMBIGUOUS_PEER.",
+    "Never dials: no matching session peer is PEER_NOT_CONNECTED. Sessions "
+    "sharing one Noise fingerprint (a peer over onion, public IP and "
+    "loopback) are one candidate; a selector matching different "
+    "fingerprints is AMBIGUOUS_PEER and lists them. Also prints "
+    "peer_online_key_role_fp for `fleet roles grant --fp=`.",
     ZCL_COMMAND_RESULT_BUDGET,
     "mesh,pair,plan,preview,noise,fingerprint,delegation",
     "zcl.ops_mesh_pair_plan.input.v1", "zcl.mesh.pairing.plan.v1",
@@ -757,8 +760,10 @@ ZCL_COMMAND_READY_COMMAND(
     "capability expiring in --days days (default 7, maximum 30). The pairing "
     "authority rechecks genesis, active ZID projection, finality-delayed "
     "beacon, delegation signature, and fingerprint binding; every refusal is "
-    "a named code and writes nothing. An identical existing record is "
-    "returned unchanged; a revoked id stays revoked. Never dials.",
+    "a named code and writes nothing. Re-running is safe: the existing "
+    "record is returned unchanged, or with a later requested expiry "
+    "extended (never shortened); another scope or delegation sequence is "
+    "IDENTITY_COLLISION and a revoked id stays revoked. Never dials.",
     ZCL_COMMAND_RESULT_BUDGET,
     "mesh,pair,commit,noise,fingerprint,ceremony,status-read",
     "zcl.ops_mesh_pair_commit.input.v1", "zcl.mesh.pairing.commit.v1",

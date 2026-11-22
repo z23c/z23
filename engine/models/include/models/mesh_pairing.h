@@ -54,11 +54,16 @@ bool mesh_pairing_id_derive(
 bool db_mesh_pairing_validate(const struct db_mesh_pairing *row,
                               struct ar_errors *errors);
 
-/* Insert-only. A prior record cannot be widened or resurrected through save. */
+/* Insert-only: a prior record cannot be widened or resurrected through save;
+ * only db_mesh_pairing_extend moves expires_at, and only later. */
 bool db_mesh_pairing_insert(struct node_db *ndb,
                             const struct db_mesh_pairing *row);
 bool db_mesh_pairing_find(struct node_db *ndb, const char *pairing_id,
                           struct db_mesh_pairing *out);
+/* Moves only expires_at, and only later, on an unrevoked row. False when the
+ * row is missing, revoked, or expires_at does not exceed the stored value. */
+bool db_mesh_pairing_extend(struct node_db *ndb, const char *pairing_id,
+                            int64_t expires_at);
 int db_mesh_pairing_list(struct node_db *ndb, struct db_mesh_pairing *out,
                          size_t max);
 /* Same order as db_mesh_pairing_list, starting skip rows in. skip 0 is that

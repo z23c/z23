@@ -77,7 +77,14 @@ const char *mesh_pairing_reason_token(enum mesh_pairing_reason reason);
  * out of band. The signed delegation is rechecked against that genesis, the
  * active ZID projection, the finality-delayed beacon row, and current time.
  * The capability set is status-read by default, with confined terminal-exec
- * as the only opt-in addition at accept time. */
+ * as the only opt-in addition at accept time.
+ *
+ * Re-running for the same peer identity, scope and delegation sequence is
+ * idempotent: the stored record is returned unchanged when its window
+ * already reaches `expires_at`, and its expiry alone is extended (never
+ * shortened) when `expires_at` is later. Pairing time, scope and identity are
+ * never rewritten; a different scope or sequence under the same id is
+ * IDENTITY_COLLISION and a revoked id stays revoked. */
 enum mesh_pairing_reason mesh_pairing_service_accept(
     struct node_db *ndb, const uint8_t network_genesis[32],
     const struct vcs_zcode_dht_delegation *delegation,

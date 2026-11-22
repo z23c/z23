@@ -333,6 +333,35 @@ bool db_mesh_pairing_revoke(struct node_db *ndb, const char *pairing_id,
     AR_FINISH_SAVE(mesh_pairing_callbacks_ready(), &row, ok);
 }
 
+bool db_mesh_pairing_extend(struct node_db *ndb, const char *pairing_id,
+                            int64_t expires_at)
+{
+    struct db_mesh_pairing row;
+    if (!ndb || !ndb->open || !pairing_id ||
+        !db_mesh_pairing_find(ndb, pairing_id, &row))
+        LOG_FAIL("mesh_pairing", "extend: pairing not found or bad args");
+    if (row.revoked_at != 0 || expires_at <= row.expires_at)
+        LOG_FAIL("mesh_pairing",
+                 "extend: revoked row or expiry %lld not after %lld",
+                 (long long)expires_at, (long long)row.expires_at);
+    int64_t prior_expires_at = row.expires_at;
+    row.expires_at = expires_at;
+    sqlite3_stmt *st = NULL;
+    AR_BEGIN_SAVE(mesh_pairing_callbacks_ready(), "mesh_pairing", &row,
+                  db_mesh_pairing_validate);
+    AR_PREPARE_BOOL(ndb, st,
+        "UPDATE mesh_pairings SET expires_at=? "
+        "WHERE pairing_id=? AND revoked_at=0 AND expires_at=? "
+        "RETURNING pairing_id");
+    AR_BIND_INT(st, 1, row.expires_at);
+    AR_BIND_TEXT(st, 2, row.pairing_id);
+    AR_BIND_INT(st, 3, prior_expires_at);
+    bool ok = ar_step_checked(st, "mesh_pairing extend", NULL) ==
+              ZCL_STEP_ROW;
+    AR_FINALIZE(st);
+    AR_FINISH_SAVE(mesh_pairing_callbacks_ready(), &row, ok);
+}
+
 bool mesh_pairing_allows(const struct db_mesh_pairing *row,
                          uint64_t required_capability, int64_t now)
 {

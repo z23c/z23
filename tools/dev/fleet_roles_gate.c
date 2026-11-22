@@ -313,6 +313,7 @@ void zcl_fleet_roles_enforcement_start(const char *datadir)
 {
     static const struct zcl_fleet_role_checker checker = {
         .allow = gate_allow,
+        .fingerprint = zcl_role_fingerprint,
         .grandfather = gate_grandfather,
         .ctx = NULL,
         .name = "fleet_roles_store"

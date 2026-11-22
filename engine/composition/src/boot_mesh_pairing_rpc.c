@@ -7,6 +7,7 @@
 
 #include "config/boot_mesh_pairing.h"
 
+#include "config/boot_mesh_status.h"
 #include "config/runtime.h"
 #include "base/hex.h"
 #include "json/json.h"
@@ -14,6 +15,7 @@
 #include "rpc/server.h"
 #include "util/log_macros.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const struct json_value *rpc_input(const struct json_value *params)
@@ -134,8 +136,8 @@ static const char *plan_result_message(
         return "no connected peer with an established Noise session matches; "
                "no dial is attempted";
     case MESH_PAIR_PLAN_AMBIGUOUS_PEER:
-        return "the selector matched more than one session peer; narrow it "
-               "with a longer fingerprint prefix";
+        return "the selector matched more than one peer; narrow it with a "
+               "longer fingerprint prefix";
     case MESH_PAIR_PLAN_NOISE_DISABLED:
         return "the Noise transport is disabled on this node";
     case MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE:
@@ -157,6 +159,45 @@ static const char *plan_result_code(enum boot_mesh_pairing_plan_result result)
     }
 }
 
+/* One peer over several transports is one candidate, so AMBIGUOUS_PEER means
+ * different Noise fingerprints: name them so the operator can pick. */
+static void plan_refusal(struct json_value *result,
+                         enum boot_mesh_pairing_plan_result planned)
+{
+    if (planned != MESH_PAIR_PLAN_AMBIGUOUS_PEER) {
+        rpc_error(result, plan_result_code(planned),
+                  plan_result_message(planned));
+        return;
+    }
+    char shown[128];
+    char message[320];
+    boot_mesh_pairing_ambiguity(shown, sizeof(shown));
+    snprintf(message, sizeof(message),
+             "%s; distinct Noise fingerprints (first %d hex): %s",
+             plan_result_message(planned), BOOT_MESH_PAIRING_SHORT_FP, shown);
+    rpc_error(result, plan_result_code(planned), message);
+}
+
+/* `fleet roles grant --fp=` wants the fingerprint the role checker itself
+ * derives (boot_mesh_pairing_role_fp_hex asks that checker; nothing here
+ * hashes). A fleet pull is answered on the asker's ONLINE key (in the pairing
+ * delegation, printed here) while posts are ingested on the signer's board
+ * HOST key (not in the delegation), so a peer needs a grant for each. */
+static void plan_role_fingerprints(struct json_value *result,
+                                   const struct boot_mesh_pairing_plan *plan)
+{
+    char fp[65];
+    if (boot_mesh_pairing_role_fp_hex(plan->peer_online_pubkey, fp))
+        json_push_kv_str(result, "peer_online_key_role_fp", fp);
+    else
+        json_push_kv_str(result, "peer_online_key_role_fp_unavailable",
+                         "no role checker is installed on this node");
+    json_push_kv_str(
+        result, "peer_board_host_key_role_fp_how",
+        "not in the delegation: run `z23 fleet board status` on the peer and "
+        "pass its `host_role_fp` to `fleet roles grant --fp=`");
+}
+
 static bool rpc_mesh_pairing_plan(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
@@ -173,8 +214,7 @@ static bool rpc_mesh_pairing_plan(const struct json_value *params, bool help,
     enum boot_mesh_pairing_plan_result planned =
         boot_mesh_pairing_plan(selector, &plan);
     if (planned != MESH_PAIR_PLAN_OK) {
-        rpc_error(result, plan_result_code(planned),
-                  plan_result_message(planned));
+        plan_refusal(result, planned);
         return true;
     }
     char hex[65];
@@ -204,6 +244,7 @@ static bool rpc_mesh_pairing_plan(const struct json_value *params, bool help,
     json_push_kv_str(result, "pairing_id", plan.pairing_id);
     if (plan.existing_state[0])
         json_push_kv_str(result, "existing_state", plan.existing_state);
+    plan_role_fingerprints(result, &plan);
     return true;
 }
 
@@ -268,8 +309,7 @@ static bool rpc_mesh_pairing_commit(const struct json_value *params, bool help,
         }
         enum boot_mesh_pairing_plan_result as_plan =
             (enum boot_mesh_pairing_plan_result)committed;
-        rpc_error(result, plan_result_code(as_plan),
-                  plan_result_message(as_plan));
+        plan_refusal(result, as_plan);
         return true;
     }
     json_set_object(result);

@@ -30,6 +30,7 @@
 #include "rpc/server.h"
 #include "session/fleet_wiki_entry.h"
 #include "sha3/sha3.h"
+#include "util/fleet_role_check.h"
 #include "util/log_macros.h"
 
 #include <stdio.h>
@@ -554,6 +555,19 @@ static void fb_op_fleet_page(struct node_db *ndb, const struct json_value *in,
         fb_error(result, "PAGE_UNAVAILABLE", "the fleet page could not be rendered");
 }
 
+/* The `fleet roles grant --fp=` value for this host key, from the role
+ * checker itself (a peer needs it to grant this board's posts). */
+static void fb_status_host_role_fp(struct json_value *result,
+                                   const uint8_t pubkey[32])
+{
+    uint8_t role_fp[32];
+    char hex[65];
+    if (!zcl_fleet_role_key_fingerprint(pubkey, role_fp))
+        return;
+    zcl_hex_encode(role_fp, sizeof(role_fp), hex);
+    json_push_kv_str(result, "host_role_fp", hex);
+}
+
 static void fb_op_status(struct node_db *ndb, const struct json_value *in,
                          struct json_value *result, int64_t now)
 {
@@ -605,6 +619,7 @@ static void fb_op_status(struct node_db *ndb, const struct json_value *in,
         char hex[65];
         fleet_board_id_to_hex(pubkey, hex);
         json_push_kv_str(result, "host", hex);
+        fb_status_host_role_fp(result, pubkey);
     } else {
         json_push_kv_str(result, "host_unavailable", "identity_not_loaded");
     }

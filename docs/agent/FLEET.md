@@ -364,6 +364,22 @@ peer when a reason that needs attention changes (at most one per minute per
 peer), and `z23 fleet doctor --datadir=<node-datadir>` shows the same totals in its informational
 `board_carriage` row. State is volatile: it restarts empty with the node.
 
+Pairing a peer (`ops mesh pair plan`, then `commit`) is not a role grant.
+Fleet-scope board posts need both, and they are checked on two different keys.
+A pull is answered only when the asker's **online** key holds a role for
+`fleet.board.list`; each post it returns is then ingested only when
+the post's **board host** key holds `fleet.board.post` for the post's kind.
+Grant `worker` to both fingerprints of each peer. `ops mesh pair plan` prints
+`peer_online_key_role_fp`; the host key is not in the delegation, so run
+`z23 fleet board status` on the peer and pass its `host_role_fp`. Both values
+come from the same function the role check uses (a plain hash of the key does
+not match it: the grant fingerprint is domain-separated), so never compute one
+by hand. One
+peer reached over onion, public IP and loopback is one candidate for `--peer=`;
+only different fingerprints are `AMBIGUOUS_PEER`. Re-running `pair commit` for
+the same peer is safe: it returns the record unchanged, or extends the expiry
+when `--days` reaches later.
+
 ### Triggers
 
 A closed registry of reactions to local events, evaluated once per call by

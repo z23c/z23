@@ -68,6 +68,18 @@ bool zcl_fleet_role_allows(const uint8_t key[32], const char *leaf,
     return g_checker.allow(key, leaf, kind, why, why_cap, g_checker.ctx);
 }
 
+bool zcl_fleet_role_key_fingerprint(const uint8_t key[32], uint8_t out[32])
+{
+    if (!key || !out)
+        return false;
+    if (!atomic_load_explicit(&g_ready, memory_order_acquire))
+        return false;
+    if (!g_checker.fingerprint)
+        return false;
+    g_checker.fingerprint(key, out);
+    return true;
+}
+
 bool zcl_fleet_role_grandfather(const uint8_t key[32], const char *origin)
 {
     if (!key || !origin)
