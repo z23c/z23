@@ -67,7 +67,8 @@ enum z23_status {
     Z23_ST_MISSING,
     Z23_ST_TOO_OLD,
     Z23_ST_BROKEN,
-    Z23_ST_OPTIONAL
+    Z23_ST_OPTIONAL,
+    Z23_ST_ACTION
 };
 
 enum z23_pkg {
@@ -101,6 +102,7 @@ static const char *status_word(enum z23_status s)
     case Z23_ST_TOO_OLD:  return "TOO OLD";
     case Z23_ST_BROKEN:   return "BROKEN";
     case Z23_ST_OPTIONAL: return "optional";
+    case Z23_ST_ACTION:   return "ACTION";
     }
     return "BROKEN";
 }
@@ -888,6 +890,7 @@ static void check_vendor_tor(struct z23_check *c)
     bool has_git = false;
     bool nonempty = false;
     const char *fix = "git submodule update --init vendor/tor";
+    const char *action = "make z23 (initializes vendor/tor on the first build)";
     if (!join2(path, sizeof path, g_root, "vendor/tor")) {
         set_check(c, "vendor/tor", "vendor_tor", true, Z23_ST_BROKEN,
                   "path too long", fix);
@@ -895,9 +898,9 @@ static void check_vendor_tor(struct z23_check *c)
     }
     inspect_dir(path, &exists, &is_dir, &has_git, &nonempty);
     if (!exists) {
-        set_check(c, "vendor/tor", "vendor_tor", true, Z23_ST_MISSING,
-                  "empty (not initialized; the node would link stub Tor)",
-                  fix);
+        set_check(c, "vendor/tor", "vendor_tor", false, Z23_ST_ACTION,
+                  "empty (not initialized; the build fetches it and links real Tor)",
+                  action);
         return;
     }
     if (!is_dir) {
@@ -911,9 +914,9 @@ static void check_vendor_tor(struct z23_check *c)
         return;
     }
     if (!nonempty) {
-        set_check(c, "vendor/tor", "vendor_tor", true, Z23_ST_MISSING,
-                  "empty (not initialized; the node would link stub Tor)",
-                  fix);
+        set_check(c, "vendor/tor", "vendor_tor", false, Z23_ST_ACTION,
+                  "empty (not initialized; the build fetches it and links real Tor)",
+                  action);
         return;
     }
     /* THE BAD STATE: bytes but no .git. source-identity capture refuses,

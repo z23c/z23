@@ -370,10 +370,12 @@ not. Budget for that before concluding a build has hung.
 **Use `--recurse-submodules` to initialize `vendor/tor`.** A plain
 `git clone` leaves that submodule empty. `make setup` does not establish the
 Tor archives; the default `make z23` path establishes them before linking.
-`make doctor-env` checks the empty submodule before that build and reports
-`MISSING vendor/tor  empty (not initialized; the node would link stub Tor)`.
-`make doctor` passes in that same tree, so the two doctors disagreeing is the
-symptom. If you already cloned without it:
+In an empty checkout, `make doctor-env` and `make doctor` both exit 0 and print
+the same line: `ACTION vendor/tor  empty (not initialized; the build fetches it
+and links real Tor) | make z23 (initializes vendor/tor on the first build)`. The
+build fetches the submodule itself, so `--recurse-submodules` only saves that
+fetch; without network the fetch fails, so clone with it when online. If you
+already cloned without it:
 
 ```bash
 git submodule update --init vendor/tor

@@ -263,10 +263,10 @@ if [ "$hooks_shape" = ok ] && [ -x "$hooks_abs/pre-push" ]; then
 else
     echo "  note     git hooks       not armed (developers only; optional: make setup)"
 fi
-if [ -e "$ROOT/vendor/lib/libcrypto.a" ]; then echo "  ok       vendor/lib      vendored archives present"
-else echo "  note     vendor/lib      archives absent; make z23 builds them (optional: make vendor)"; fi
+if [ -e "$ROOT/vendor/lib/libcrypto.a" ]; then echo "  ok       vendor/lib      vendored archives present"; else echo "  note     vendor/lib      archives absent; make z23 builds them (optional: make vendor)"; fi
 if [ -f "$ROOT/compile_commands.json" ]; then echo "  ok       compile db      compile_commands.json present (clangd/LSP)"
 else echo "  note     compile db      absent (clangd/LSP only; optional: make setup)"; fi
+[ -n "$(ls -A "$ROOT/vendor/tor" 2>/dev/null)" ] || printf '%-8s  %-12s  %s | %s\n' ACTION vendor/tor "empty (not initialized; the build fetches it and links real Tor)" "make z23 (initializes vendor/tor on the first build)"
 
 # The payoff: one install line per manager, listing ONLY what is missing.
 echo

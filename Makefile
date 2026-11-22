@@ -18423,6 +18423,18 @@ help-selftest: $(BIN_DIR)/make-help
 
 doctor-selftest:
 	@tools/scripts/doctor.sh --self-test
+	@d="$$(mktemp -d "$${TMPDIR:-/tmp}/zcl-doctor-env.XXXXXX")" && trap "rm -rf $$d" EXIT HUP INT TERM; \
+	mkdir -p "$$d/tools/scripts" && cp tools/scripts/doctor.sh tools/scripts/vendor_prereqs.tsv tools/scripts/build_vendor.sh tools/scripts/tor_provenance_lib.sh "$$d/tools/scripts/" || { echo "doctor-env selftest: FAIL - fixture copy failed" >&2; exit 1; }; \
+	env_out="$$(GIT_CEILING_DIRECTORIES="$$d" $(MAKE) --no-print-directory -s doctor-env ARGS="--root=$$d" 2>&1)" && env_rc=0 || env_rc=$$?; \
+	doc_out="$$(GIT_CEILING_DIRECTORIES="$$d" bash "$$d/tools/scripts/doctor.sh" 2>&1)" && doc_rc=0 || doc_rc=$$?; \
+	[ "$$env_rc" = "$$doc_rc" ] || { echo "doctor-env selftest: FAIL - doctor-env exits $$env_rc but make doctor exits $$doc_rc on the same empty vendor/tor" >&2; exit 1; }; \
+	[ "$$doc_rc" = 0 ] || { echo "doctor-env selftest: FAIL - an empty vendor/tor exits $$doc_rc; it must be an ACTION, not a failure" >&2; exit 1; }; \
+	echo "$$env_out" | grep -Eq "^ACTION[[:space:]]+vendor/tor[[:space:]].*make z23" || { echo "doctor-env selftest: FAIL - no ACTION naming make z23 for vendor/tor: $$env_out" >&2; exit 1; }; \
+	env_act="$$(printf '%s\n' "$$env_out" | grep -E '^ACTION[[:space:]]+vendor/tor')"; doc_act="$$(printf '%s\n' "$$doc_out" | grep -E '^ACTION[[:space:]]+vendor/tor')"; \
+	[ -n "$$doc_act" ] && [ "$$env_act" = "$$doc_act" ] || { echo "doctor-env selftest: FAIL - the two doctors print different vendor/tor lines: [$$env_act] vs [$$doc_act]" >&2; exit 1; }; \
+	cc_out="$$(CC=/nonexistent/zcl-no-such-cc build/bin/z23_doctor --root="$$d" 2>&1)" && cc_rc=0 || cc_rc=$$?; \
+	[ "$$cc_rc" = 1 ] && echo "$$cc_out" | grep -Eq "^MISSING[[:space:]]+compiler" || { echo "doctor-env selftest: FAIL - a missing compiler must still fail doctor-env: $$cc_out" >&2; exit 1; }; \
+	echo "doctor-env selftest: PASS"
 
 timings-selftest: $(BIN_DIR)/z23-timings
 	@tools/scripts/timings.sh --self-test
