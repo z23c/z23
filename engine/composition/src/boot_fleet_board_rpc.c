@@ -127,12 +127,6 @@ bool fb_render_post_fields(struct json_value *into,
     return ok;
 }
 
-static void fb_render_post(struct json_value *into,
-                           const struct db_fleet_board_post *row)
-{
-    fb_render_post_fields(into, row, true);
-}
-
 /* The two signed times: ttl, and created_at. created_at defaults to this
  * node's clock. A caller retrying the same content passes back the
  * created_at it used the first time: every signed byte is then the same,
@@ -485,8 +479,10 @@ static void fb_op_show(struct node_db *ndb, const struct json_value *in,
         return;
     }
     json_set_object(result);
-    json_push_kv_bool(result, "ok", true);
-    fb_render_post(result, &row);
+    if (!json_push_kv_bool(result, "ok", true) ||
+        !fb_render_post_fields(result, &row, true))
+        fb_error(result, "READ_PROJECTION_FAILED",
+                 "cannot faithfully construct the post; retry the read");
 }
 
 /* ── fleet_page: FLEET-scope posts in this store's arrival order ─────────

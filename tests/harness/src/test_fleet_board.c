@@ -2865,6 +2865,46 @@ static int test_fleet_board_keyset_pages(void)
     return failures;
 }
 
+static int test_fleet_board_rpc_show_projection(void)
+{
+    int failures = 0;
+    TEST("fleet board: show refuses incomplete signed post projection and recovers") {
+        struct fb_rpc_fixture f;
+        struct json_value input, params, out;
+        ASSERT(fb_rpc_fixture_open(&f, "rpc-show-projection"));
+        json_init(&out);
+        ASSERT(fb_rpc_post(&f, "note", "projection witness", "projection", NULL, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        char id[65];
+        (void)snprintf(id, sizeof(id), "%s", json_get_str(json_get(&out, "id")));
+        json_free(&out);
+        json_init(&input); json_set_object(&input);
+        json_init(&params); json_set_array(&params);
+        ASSERT(json_push_kv_str(&input, "op", "show"));
+        ASSERT(json_push_kv_str(&input, "id", id));
+        ASSERT(json_push_back(&params, &input));
+        json_init(&out);
+        zcl_alloc_fault_fail_next("json_set_str");
+        bool called = rpc_table_execute(&f.table, "fleet_board", &params, &out);
+        bool hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(hit && called);
+        ASSERT(!json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "READ_PROJECTION_FAILED");
+        ASSERT(json_get(&out, "id") == NULL && json_get(&out, "signature") == NULL);
+        json_free(&out); json_init(&out);
+        ASSERT(rpc_table_execute(&f.table, "fleet_board", &params, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "id")), id);
+        ASSERT(strlen(json_get_str(json_get(&out, "signature"))) == 128);
+        json_free(&out); json_free(&params); json_free(&input);
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_rpc_scope_default(void)
 {
     int failures = 0;
@@ -16556,6 +16596,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();
+    failures += test_fleet_board_rpc_show_projection();
     failures += test_fleet_board_rpc_incomplete_list();
     failures += test_fleet_board_rpc_show_read_failure();
     failures += test_fleet_board_keyset_pages();
