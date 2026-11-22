@@ -824,7 +824,7 @@ verify_tasks_share() {
 }
 
 install_app_source_linux() {
-    local stage="$1" prefix="$2" root id dest incoming name app
+    local stage="$1" prefix="$2" root id dest incoming name app="${3:-skycombat}"
     has_app_source "$stage" || return 0
     root="$prefix/share/z23/apps"
     [ ! -L "$root" ] || die "apps installation directory must not be a symlink"
@@ -849,7 +849,6 @@ install_app_source_linux() {
     fi
     [ "$(sha256_file "$prefix/bin/z23")" = "$(manifest_digest_of "$dest" z23)" ] \
         || die "installed node is outside the retained app release manifest"
-    app=skycombat; [ -n "$(manifest_digest_of "$dest" z23-tasks)" ] && app=tasks
     [ ! -e "$root/$app" ] || [ -L "$root/$app" ] || die "$app source selector is not an installer-managed link"
     atomic_relative_link "../share/z23/apps/$app/z23-$app" "$prefix/bin/z23-$app" || die "cannot link the installed $app app"
     atomic_relative_link "$id" "$root/$app" || die "cannot select installed app source"
@@ -921,7 +920,7 @@ app_mime_cache_merge() {
 
 install_app_desktop() {
     local prefix="$1" data="${XDG_DATA_HOME:-$HOME/.local/share}"
-    local source="$prefix/share/z23/apps/skycombat" exe arg line desktop tmp name count
+    local app="${2:-skycombat}" source="$prefix/share/z23/apps/${2:-skycombat}" exe arg line desktop tmp name count
     case "$data" in /*) ;; *) return 1 ;; esac
     case "$prefix/bin/z23" in *=*) return 1 ;; esac
     exe="$(desktop_exec_argument "$prefix/bin/z23")" || return 1
@@ -952,19 +951,18 @@ install_app_desktop() {
     install_directories "$data/applications" "$data/icons/hicolor/scalable/apps" "$data/mime/packages" || return 1
     for name in org.zclassic.ZClassic23.desktop org.zclassic.SkyCombat.desktop; do
         desktop="$data/applications/$name"
+        [ "$app:$name" != tasks:org.zclassic.SkyCombat.desktop ] || desktop="$data/applications/org.zclassic.Tasks.desktop"
         tmp="$(mktemp "$data/applications/.z23-desktop.XXXXXX")" || return 1
         count=0
         while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in
-                Exec=*)
-                    if [ "$name" = org.zclassic.SkyCombat.desktop ]; then
-                        printf 'Exec=%s app open skycombat %s\n' "$exe" "$arg"
-                    else
-                        printf 'Exec=%s app receive --preview %s --file=%%f\n' "$exe" "$arg"
-                    fi
-                    count=$((count + 1)) ;;
-                *) printf '%s\n' "$line" ;;
+            case "$name:$line" in
+                org.zclassic.SkyCombat.desktop:Name=*) [ "$app" != tasks ] || line=Name=Tasks ;;
+                org.zclassic.SkyCombat.desktop:Comment=*) [ "$app" != tasks ] || line='Comment=Open Tasks' ;;
+                org.zclassic.SkyCombat.desktop:Categories=*) [ "$app" != tasks ] || line='Categories=Office;' ;;
+                org.zclassic.SkyCombat.desktop:Exec=*) line="Exec=$exe app open $app $arg"; count=$((count + 1)) ;;
+                org.zclassic.ZClassic23.desktop:Exec=*) line="Exec=$exe app receive --preview $arg --file=%f"; count=$((count + 1)) ;;
             esac
+            printf '%s\n' "$line"
         done <"$source/$name" >"$tmp"
         if [ "$count" -ne 1 ] || ! desktop_install_file "$tmp" "$desktop"; then
             rm -f -- "$tmp"
@@ -974,15 +972,12 @@ install_app_desktop() {
     done
     # The marker belongs to the verified payload. Legacy 17-member releases
     # have no library command; never infer support from the member count.
-    tmp="$(mktemp "$data/applications/.z23-library.XXXXXX")" || return 1
-    app_library_desktop_text "$exe" "$arg" >"$tmp"
     if grep -qx 'X-Z23-App-Library=1' "$source/org.zclassic.ZClassic23.desktop"; then
-        if ! desktop_install_file "$tmp" "$data/applications/org.zclassic.ZClassic23.Library.desktop"; then
-            rm -f -- "$tmp"
-            return 1
-        fi
+        tmp="$(mktemp "$data/applications/.z23-library.XXXXXX")" || return 1
+        app_library_desktop_text "$exe" "$arg" >"$tmp"
+        if ! desktop_install_file "$tmp" "$data/applications/org.zclassic.ZClassic23.Library.desktop"; then rm -f -- "$tmp"; return 1; fi
+        rm -f -- "$tmp"
     fi
-    rm -f -- "$tmp"
     desktop_install_file "$source/org.zclassic.ZClassic23.svg" \
         "$data/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg" || return 1
     desktop_install_file "$source/org.zclassic.ZClassic23.xml" \
@@ -995,7 +990,8 @@ install_app_desktop() {
     fi
     # Do not write mimeapps.list or set a default handler. File managers offer
     # the verified Z23 receiver through Open With; confirmation remains native.
-    say "Sky Combat added to your applications; share files registered for Open With Z23; your default application is unchanged"
+    [ "$app" = tasks ] && name=Tasks || name="Sky Combat"
+    say "$name added to your applications; share files registered for Open With Z23; your default application is unchanged"
 }
 
 macos_generation_matches() {
@@ -1087,7 +1083,7 @@ MACOS_ACTIVE_PREFIX=""
 MACOS_ACTIVATION_PENDING=0
 
 install_payload_macos_generation() {
-    local stage="$1" prefix="$2" root generations name helper candidate
+    local stage="$1" prefix="$2" root generations name helper candidate app="${3:-skycombat}"
     [ -z "$(manifest_digest_of "$stage" app-toolchain.json)" ] \
         || die "the bundled app compiler is supported only by the Linux release"
     root="$prefix/lib/z23"
@@ -1160,7 +1156,6 @@ install_payload_macos_generation() {
     if has_app_source "$stage"; then
         [ ! -L "$prefix/share/z23/apps" ] || die "apps installation directory must not be a symlink"
         install_directories "$prefix/share/z23/apps"
-        local app=skycombat; [ -n "$(manifest_digest_of "$stage" z23-tasks)" ] && app=tasks
         [ ! -e "$prefix/share/z23/apps/$app" ] || [ -L "$prefix/share/z23/apps/$app" ] || die "$app selector not installer-managed"
         atomic_relative_link "../lib/z23/current/z23-$app" "$prefix/bin/z23-$app" \
             || die "cannot link the current macOS $app app"
@@ -1172,7 +1167,7 @@ install_payload_macos_generation() {
 }
 
 install_payload() {
-    local stage="$1" prefix="$2" name
+    local stage="$1" prefix="$2" name app="${3:-skycombat}"
     local bindir="$prefix/bin" carddir="$prefix/share/z23"
     install_directories "$bindir" "$carddir"
     for name in $(manifest_members "$stage"); do
@@ -1195,7 +1190,7 @@ install_payload() {
     # The agent card is verified payload, so it is installed like payload:
     # an assistant reading it is reading bytes SHA256SUMS covered.
     install -m 644 "$stage/AGENT_CARD.md" "$carddir/AGENT_CARD.md"
-    install_app_source_linux "$stage" "$prefix"
+    install_app_source_linux "$stage" "$prefix" "$app"
     install_docs "$prefix"
 }
 
@@ -1498,7 +1493,7 @@ EOF
 install_from_source() {
     local src="$1" expected_manifest_sha256="$2"
     [ -n "$src" ] || die "no source: pass --source=<url-or-dir> or set Z23_RELEASE_SOURCE"
-    local prefix="${Z23_INSTALL_PREFIX:-$HOME/.local}"
+    local prefix="${Z23_INSTALL_PREFIX:-$HOME/.local}" install_platform app=skycombat
     local unit_dir="${Z23_UNIT_DIR:-$HOME/.config/systemd/user}"
     local install_tmp="${TMPDIR:-/tmp}"
     [ -d "$install_tmp" ] || die "temporary directory does not exist: $install_tmp"
@@ -1512,19 +1507,23 @@ install_from_source() {
     fetch_into "$src" "$INSTALL_STAGE" "$expected_manifest_sha256"
     verify_strict "$INSTALL_STAGE"
     prepare_bundled_docs "$INSTALL_STAGE"
+    [ -z "$(manifest_digest_of "$INSTALL_STAGE" z23-tasks)" ] || app=tasks
     if [ "$APPS_ONLY" = 1 ]; then
         has_app_source "$INSTALL_STAGE" || die "--apps requires an app-capable release"
         case "$prefix" in /*) ;; *) die "--apps requires an absolute installation prefix" ;; esac
-        printf -v NEXT_COMMAND '%q app open skycombat --datadir=%q' \
-            "$prefix/bin/z23" "$HOME/.local/share/z23-app-data"
+        printf -v NEXT_COMMAND '%q app open %s --datadir=%q' \
+            "$prefix/bin/z23" "$app" "$HOME/.local/share/z23-app-data"
     fi
-    local install_platform
     install_platform="${Z23_INSTALL_TEST_PLATFORM:-$(uname -s)}"
     if [ -n "$(manifest_digest_of "$INSTALL_STAGE" z23-app-macos)" ] && [ "$install_platform" != Darwin ]; then
         die "the macOS app launcher requires a Darwin installation"
     fi
+    if [ "$APPS_ONLY" = 1 ] && [ "$app" = tasks ] && [ ! -d "$HOME/.local/share" ]; then
+        [ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] || die "Tasks profile parent must not be a symlink"
+        install_directories "$HOME/.local/share" || die "could not prepare Tasks profile parent"
+    fi
     if [ "$install_platform" = Darwin ]; then
-        install_payload_macos_generation "$INSTALL_STAGE" "$prefix"
+        install_payload_macos_generation "$INSTALL_STAGE" "$prefix" "$app"
         # Self-check, not re-verification: the ID above was already derived
         # from, and verify_strict already proved against, this exact
         # SHA256SUMS. A mismatch here means the naming/persistence logic
@@ -1532,7 +1531,7 @@ install_from_source() {
         generation_provenance "$MACOS_GENERATION" >&2 \
             || die "macOS generation provenance check failed for $MACOS_GENERATION"
     else
-        install_payload "$INSTALL_STAGE" "$prefix"
+        install_payload "$INSTALL_STAGE" "$prefix" "$app"
     fi
     cleanup_install_stage
     trap - EXIT HUP INT TERM
@@ -1547,7 +1546,7 @@ install_from_source() {
             write_unit "$prefix" "$unit_dir"
     fi
     if [ "$APPS_ONLY" = 1 ] && [ "$install_platform" = Linux ]; then
-        install_app_desktop "$prefix" || say "desktop registration incomplete; use the printed app command or app receive --file=PATH --preview"
+        install_app_desktop "$prefix" "$app" || say "desktop registration incomplete; use the printed app command or app receive --file=PATH --preview"
     fi
     if [ "$APPS_ONLY" = 1 ] && [ "$install_platform" = Darwin ] && \
         [ -n "$(manifest_digest_of "$MACOS_GENERATION" z23-app-macos)" ]; then

@@ -413,11 +413,188 @@ static int wi_standalone_release(void)
     return failures;
 }
 
+/* Fixture wrappers delegate only to the locally built development executable. */
+static bool wi_apps_runtime(struct wi_release *f, bool tasks)
+{
+    char source[PATH_MAX], target[PATH_MAX];
+    if (!wi_fixture_runtime(f, false)) return false;
+    return snprintf(source, sizeof(source), "%s/z23", f->release) < (int)sizeof(source) &&
+        snprintf(target, sizeof(target), "%s/%s", f->release, tasks ? "z23-tasks" : "z23-skycombat") < (int)sizeof(target) &&
+        wi_copy(source, target, 0700);
+}
+
+static bool wi_apps_members(struct wi_release *f)
+{
+    static const char *const data[] = {"AGENT_CARD.md", "installed-source.json",
+        "source.bundle", "manifest.wire", "recipe.wire", "app-build.wire"};
+    static const char *const desktop[] = {"org.zclassic.SkyCombat.desktop",
+        "org.zclassic.ZClassic23.desktop", "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml"};
+    char target[PATH_MAX], source[PATH_MAX];
+    for (size_t i = 0; i < sizeof(data) / sizeof(data[0]); ++i) {
+        if (snprintf(target, sizeof(target), "%s/%s", f->release, data[i]) >= (int)sizeof(target) ||
+            !wi_write(target, "fixture\n", 8, 0600)) return false;
+    }
+    for (size_t i = 0; i < sizeof(desktop) / sizeof(desktop[0]); ++i) {
+        if (snprintf(source, sizeof(source), "platform/packaging/linux/%s", desktop[i]) >= (int)sizeof(source) ||
+            snprintf(target, sizeof(target), "%s/%s", f->release, desktop[i]) >= (int)sizeof(target) ||
+            !wi_copy(source, target, 0600)) return false;
+    }
+    return true;
+}
+
+static bool wi_apps_release(struct wi_release *f, bool tasks)
+{
+    char script[PATH_MAX];
+    return wi_fixture_paths(f) && mkdir(f->release, 0700) == 0 && wi_mkpath(f->base, "standalone/bin") &&
+        realpath("tools/scripts/install_z23.sh", script) && wi_copy(script, f->script, 0700) &&
+        wi_apps_runtime(f, tasks) && wi_apps_members(f);
+}
+
+
+static bool wi_apps_manifest(struct wi_release *f, bool tasks)
+{
+    static const char *const names[] = {"AGENT_CARD.md", "z23", "zclassic23",
+        "z23-acme", "zclassic23-acme", "z23-package-verify", "zclassic23-package-verify",
+        "installed-source.json", "source.bundle", "manifest.wire", "recipe.wire", "app-build.wire",
+        "org.zclassic.SkyCombat.desktop", "org.zclassic.ZClassic23.desktop",
+        "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml"};
+    FILE *out = fopen(f->manifest, "wb"); if (!out) return false;
+    char path[PATH_MAX], hash[65]; bool ok = true;
+    for (size_t i = 0; ok && i <= sizeof(names) / sizeof(names[0]); ++i) {
+        const char *name = i == sizeof(names) / sizeof(names[0]) ? (tasks ? "z23-tasks" : "z23-skycombat") : names[i];
+        int n = snprintf(path, sizeof(path), "%s/%s", f->release, name);
+        ok = n > 0 && (size_t)n < sizeof(path) && wi_sha256(path, hash) && fprintf(out, "%s  %s\n", hash, name) > 0;
+    }
+    return fclose(out) == 0 && ok && wi_sha256(f->manifest, f->pin);
+}
+
+#if !defined(__APPLE__)
+static bool wi_apps_desktop(const struct wi_release *f, bool tasks)
+{
+    char path[PATH_MAX], desktop[8192];
+    int n = snprintf(path, sizeof(path), "%s/data/applications/org.zclassic.%s.desktop",
+                     f->base, tasks ? "Tasks" : "SkyCombat");
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "rb"); if (!file) return false;
+    size_t used = fread(desktop, 1, sizeof(desktop) - 1, file);
+    bool ok = !ferror(file);
+    ok = fclose(file) == 0 && ok;
+    desktop[used] = '\0';
+    return ok && strstr(desktop, tasks ? "Name=Tasks\n" : "Name=Sky Combat\n") &&
+        strstr(desktop, tasks ? " app open tasks " : " app open skycombat ") &&
+        strstr(desktop, "prefix space/bin/z23");
+}
+
+#endif
+
+static bool wi_apps_desktop_if_linux(const struct wi_release *f, bool tasks)
+{
+#if defined(__APPLE__)
+    (void)f; (void)tasks;
+    return true;
+#else
+    return wi_apps_desktop(f, tasks);
+#endif
+}
+
+static bool wi_apps_output(struct wi_release *f, bool tasks)
+{
+    char source[PATH_MAX + 16], pin[96], out[8192]; bool timeout = false;
+    int n = snprintf(source, sizeof(source), "--source=%s", f->release);
+    int m = snprintf(pin, sizeof(pin), "--manifest-sha256=%s", f->pin);
+    if (n <= 0 || (size_t)n >= sizeof(source) || m <= 0 || (size_t)m >= sizeof(pin)) return false;
+    const char *argv[] = {"bash", f->script, "--apps", source, pin, NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
+    if (rc || timeout) { printf("  [apps installer rc=%d timeout=%d output=%.3000s]\n", rc, timeout, out); return false; }
+    const char *hint = tasks ? "app open tasks --datadir=" : "app open skycombat --datadir=";
+    char parent[PATH_MAX]; struct stat st;
+    bool parent_ready = !tasks || (snprintf(parent, sizeof(parent), "%s/home/.local/share", f->base) < (int)sizeof(parent) &&
+        lstat(parent, &st) == 0 && S_ISDIR(st.st_mode) && !(st.st_mode & 0022));
+    return parent_ready && strstr(out, hint) && strstr(out, "prefix\\ space/bin/z23") && wi_apps_desktop_if_linux(f, tasks);
+}
+
+static bool wi_apps_mock(const struct wi_release *f, char *path, size_t cap)
+{
+    char mock[PATH_MAX], tool[PATH_MAX];
+    const char *old_path = getenv("PATH");
+    if (!old_path || snprintf(mock, sizeof(mock), "%s/mock", f->base) >= (int)sizeof(mock) ||
+        mkdir(mock, 0700) != 0 || snprintf(path, cap, "%s:%s", mock, old_path) >= (int)cap) return false;
+    const char *names[] = {"update-mime-database", "update-desktop-database"};
+    for (size_t i = 0; i < 2; ++i) {
+        if (snprintf(tool, sizeof(tool), "%s/%s", mock, names[i]) >= (int)sizeof(tool) ||
+            !wi_write(tool, "#!/bin/sh\nexit 0\n", 17, 0700)) return false;
+    }
+    return true;
+}
+
+static bool wi_apps_env(struct wi_release *f, const char *const keys[7])
+{
+    char home[PATH_MAX], data[PATH_MAX], prefix[PATH_MAX], path[PATH_MAX * 2];
+    if (!wi_apps_mock(f, path, sizeof(path))) return false;
+    return snprintf(home, sizeof(home), "%s/home", f->base) < (int)sizeof(home) &&
+        snprintf(data, sizeof(data), "%s/data", f->base) < (int)sizeof(data) &&
+        snprintf(prefix, sizeof(prefix), "%s/prefix space", f->base) < (int)sizeof(prefix) &&
+        mkdir(home, 0700) == 0 && mkdir(data, 0700) == 0 &&
+        setenv(keys[0], home, 1) == 0 && setenv(keys[1], data, 1) == 0 &&
+        setenv(keys[2], prefix, 1) == 0 && setenv(keys[3], "1", 1) == 0 && unsetenv(keys[4]) == 0 &&
+        setenv(keys[5], path, 1) == 0 && unsetenv(keys[6]) == 0;
+}
+
+static bool wi_apps_case(bool tasks)
+{
+    struct wi_release f = {0};
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM"};
+    char *saved[7] = {0};
+    for (size_t i = 0; i < 7; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    bool ok = wi_apps_release(&f, tasks) && wi_apps_manifest(&f, tasks) &&
+        wi_apps_env(&f, keys) && wi_apps_output(&f, tasks);
+    for (size_t i = 0; i < 7; ++i) wi_restore_env(keys[i], saved[i]);
+    if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
+    return ok;
+}
+
+
+static bool wi_apps_symlink_refused(void)
+{
+    struct wi_release f = {0};
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM"};
+    char *saved[7] = {0}, linkpath[PATH_MAX], target[PATH_MAX], source[PATH_MAX + 16], pin[96], output[8192];
+    for (size_t i = 0; i < 7; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    bool ok = wi_apps_release(&f, true) && wi_apps_manifest(&f, true) && wi_apps_env(&f, keys);
+    if (ok) {
+        snprintf(linkpath, sizeof(linkpath), "%s/home/.local", f.base);
+        snprintf(target, sizeof(target), "%s/data", f.base);
+        snprintf(source, sizeof(source), "--source=%s", f.release);
+        snprintf(pin, sizeof(pin), "--manifest-sha256=%s", f.pin);
+        const char *argv[] = {"bash", f.script, "--apps", source, pin, NULL}; bool timeout = false;
+        ok = symlink(target, linkpath) == 0 && zcl_spawn_capture_merged_in_dir_observed(argv, f.base, output, sizeof(output), WI_DEADLINE_MS, &timeout) != 0 && !timeout && strstr(output, "must not be a symlink");
+        struct stat st;
+        ok = ok && snprintf(target, sizeof(target), "%s/data/share", f.base) < (int)sizeof(target) && lstat(target, &st) != 0 && errno == ENOENT;
+    }
+    for (size_t i = 0; i < 7; ++i) wi_restore_env(keys[i], saved[i]);
+    if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
+    return ok;
+}
+
+static int wi_apps_guidance(void)
+{
+    int failures = 0;
+    TEST("verified app payload chooses matching launch guidance and desktop entry") {
+        ASSERT(wi_apps_case(true));
+        ASSERT(wi_apps_case(false));
+        ASSERT(wi_apps_symlink_refused());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 int test_wiki_docs_install(void)
 {
     int failures = 0;
     failures += wi_layout("linux", "bin/z23");
     failures += wi_layout("macos", "lib/z23/generations/" WI_GEN "/z23");
     failures += wi_standalone_release();
+    failures += wi_apps_guidance();
     return failures;
 }
