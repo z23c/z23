@@ -3686,6 +3686,25 @@ static int case_advertisement_view(void)
     memset(row.post_id, 'e', 64); row.offer.size = 1;
     (void)snprintf(row.offer.onion, sizeof(row.offer.onion), "wvbpy5swzmxu2asl5pgausbbcok733mm2p32ytmylu5iqatewj3axcyd.onion:33133");
     TEST("discover card preserves exact identity and renders every page") {
+        char long_name[sizeof(row.offer.name)];
+        memcpy(long_name, row.offer.name, sizeof(long_name));
+        (void)snprintf(row.offer.name, sizeof(row.offer.name),
+            "p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skycombat");
+        ASSERT(app_discover_page_view(&model, &row, 0, 1, false, false));
+        ASSERT(!strcmp(model.title, "App: skycombat"));
+        ASSERT(zcl_present_canvas_text_width(model.title, strlen(model.title), 30u) <= 636u);
+        ASSERT(adv_field_exact(&model, "App: ", row.offer.name));
+        ASSERT(adv_field_exact(&model, "Publisher: ", row.offer.publisher));
+        ASSERT(adv_field_exact(&model, "Package: ", row.offer.root));
+        memcpy(row.offer.name, long_name, sizeof(long_name));
+        ASSERT(app_discover_page_view(&model, &row, 0, 1, false, false));
+        ASSERT(!strncmp(model.title, "App: ", 5) && !strcmp(model.title + 5, row.offer.name + 64));
+        ASSERT(!strcmp(model.actions[0].id, "review"));
+        ASSERT(adv_field_exact(&model, "App: ", row.offer.name));
+        ASSERT(adv_field_exact(&model, "Publisher: ", row.offer.publisher));
+        ASSERT(adv_field_exact(&model, "Package: ", row.offer.root));
+        ASSERT(zcl_present_model_render_v1(&model, &bitmap, why, sizeof(why)));
+        zcl_present_model_bitmap_free_v1(&bitmap);
         ASSERT(app_discover_view(&model, &row, 0, 1));
         ASSERT(adv_field_exact(&model, "App: ", row.offer.name));
         ASSERT(adv_field_exact(&model, "Publisher: ", row.offer.publisher));

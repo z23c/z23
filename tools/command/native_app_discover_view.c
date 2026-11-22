@@ -69,6 +69,7 @@ bool app_discover_view(struct zcl_present_model_v1 *model,
         app_confirm_action(&m.actions[0], ZCL_PRESENT_ACTION_SELECT, "refresh", "Refresh");
         app_confirm_action(&m.actions[1], ZCL_PRESENT_ACTION_CANCEL, "back", "Back");
     } else {
+        (void)snprintf(m.title, sizeof(m.title), "App: %.63s", strchr(row->offer.name, '/') + 1);
         if (!adv_offer(&m, row, index, count)) return false;
     }
     char why[256]; uint32_t pages;
