@@ -10,6 +10,7 @@
 
 #include "services/agent_spend_policy.h"  // lib-layer-ok:agent-spend-policy-gate
 
+#include <stdio.h>
 #include <string.h>
 
 static bool lane_allowed(const struct zcl_command_spec *spec,
@@ -48,19 +49,34 @@ static bool refuse_planned(const struct zcl_command_spec *spec,
     return true;
 }
 
+/* A leaf this binary has no handler for. Developer leaves name their
+ * z23-dev command: the interactive CLI hands those to a z23-dev in the same
+ * build directory (tools/command/native_command_handoff.c), so reaching this
+ * refusal means no such binary was usable there (installs have none). Say what runs it, never that the
+ * command is unfinished. */
 static bool refuse_no_handler(const struct zcl_command_spec *spec,
                               zcl_command_handler_fn handler,
                               struct zcl_command_reply *reply)
 {
     if (handler)
         return false;
+    const bool dev = spec->compat_target &&
+                     strncmp(spec->compat_target, "z23-dev ", 8) == 0;
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                            ZCL_COMMAND_EXIT_BLOCKED, "COMMAND_COMPAT_ONLY",
                            "dispatch", false, false,
-                           "canonical adapter is not executable yet",
+                           dev ? "this command runs in the developer build"
+                               : "this command is served by its compatibility target",
                            spec->compat_target);
+    char hint[160];
+    int n = dev ? snprintf(hint, sizeof(hint),
+                           "run: %s (make z23-dev builds it in a checkout)",
+                           spec->compat_target)
+                : -1;
     (void)command_registry_reply_add_describe_next(
-        reply, spec, "inspect the compatibility target");
+        reply, spec,
+        n > 0 && (size_t)n < sizeof(hint) ? hint
+                                          : "inspect the compatibility target");
     return true;
 }
 

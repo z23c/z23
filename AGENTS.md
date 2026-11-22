@@ -36,6 +36,8 @@ make lint-fast                                # fast lint subset
 
 For `ONLY=@changed`, commit first. Use the [sender-pinned gate recipe](docs/dev/DEVELOPING.md#where-a-gate-runs) when offloading and the admitted local route in [section 4](docs/dev/DEVELOPING.md#4-receive-fast-local-feedback) for a local run.
 
+`z23` hands `dev ...` commands to a `z23-dev` in the same build directory (owned by you or root; `ZCL_NO_DEV_HANDOFF=1` opts out); elsewhere it names the `z23-dev` command to run.
+
 Never run `test_zcl` directly. Before submission, run focused tests, `lint-fast`
 and the applicable preflight in [section 4](docs/dev/DEVELOPING.md#4-receive-fast-local-feedback).
 The native land proof runs full `make lint` on the exact candidate before publication;

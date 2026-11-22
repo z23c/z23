@@ -51,6 +51,14 @@ Each quality is held by a check that lets it get better and never worse:
 When a change improves a counter, `check-kpi-floor --tighten-baseline` lowers
 its floor in the same commit, so the gain stays.
 
+`z23` lists every command; the developer ones (`dev ...`) run in `z23-dev`. `z23` hands the
+command to it unchanged only when `z23-dev` sits in the same build directory as `z23`
+(`build/bin` in a checkout), is owned by you or root, is not group- or world-writable
+and is not a symlink. An install keeps each binary in its own directory, so there the
+reply is `COMMAND_COMPAT_ONLY` naming exactly which command to run (`z23-dev ...`;
+`make z23-dev` in a checkout). `ZCL_NO_DEV_HANDOFF=1` disables the handoff; Windows and
+macOS keep the refusal.
+
 ## The loop
 
 1. **Get a lane.** On a maintainer host run `devworker prepare z23 NAME <sha>`, the

@@ -1796,8 +1796,10 @@ publication slot and must inspect status before another attempt.
 
 After focused checks, a signed checkpoint and non-author review, submit the
 lane and drive its land proof. The `dev land` leaves run in the
-development build of a checkout (`make dev-bin`); the product build lists them
-and answers `COMMAND_COMPAT_ONLY`.
+development build of a checkout (`make dev-bin`); `z23 dev land ...` hands them to `z23-dev` only when it sits in the same build
+directory as `z23` (owned by you or root); otherwise the product build answers
+`COMMAND_COMPAT_ONLY` naming the exact `z23-dev` command to run (`make z23-dev` in a
+checkout). `ZCL_NO_DEV_HANDOFF=1` pins that refusal.
 
 ```bash
 devbuild --wait build/bin/z23-dev dev land submit --worktree=<path>

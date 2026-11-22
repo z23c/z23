@@ -18,6 +18,7 @@
 
 #define _GNU_SOURCE
 #include "command/native_command.h"
+#include "command/native_command_handoff.h"
 #include "command/native_app_front_door.h"
 #include "command/native_app_launch.h"
 #include "command/native_json_input.h"
@@ -4087,6 +4088,7 @@ static bool nc_main_try_intercepts(const struct zcl_command_spec *spec,
                                    size_t consumed, const char *datadir,
                                    int *rc)
 {
+    zcl_native_handoff_try(spec);
     if (strcmp(spec->path, "ops.debug.rom") == 0 &&
         nc_ops_rom_try_watch(words, count, consumed, datadir, rc))
         return true;

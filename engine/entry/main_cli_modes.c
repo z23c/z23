@@ -85,6 +85,7 @@
 #include "util/ar_step_readonly.h"
 #include "controllers/rpc_client.h"
 #include "command/native_command.h"
+#include "command/native_command_handoff.h"
 #include "command/cli_render.h"
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
@@ -2662,6 +2663,7 @@ int cli_main(int argc, char **argv)
      * arbitrary RPC-method fallback further down. A typo under a canonical
      * branch returns the structured unknown-command error (exit 2) and never
      * becomes an RPC method. */
+    zcl_native_handoff_arm(argc, argv);
     if (zcl_native_command_is_root(method)) {
         return cli_native_registry_dispatch(method,
             (const char *const *)params_storage, t.nparams, datadir, cli_port,
