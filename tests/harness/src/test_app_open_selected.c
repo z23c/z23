@@ -1909,6 +1909,13 @@ static bool ak_preview_keep(struct ak_fixture *f)
     abc_close(&leaf);
     return ok;
 }
+/* Print only fixed fixture stage names, never response contents. */
+static bool ak_stage(bool ok, const char *stage)
+{
+    if (!ok) fprintf(stderr, "app open fixture: %s\n", stage);
+    return ok;
+}
+
 /* Exercise the emitted input through the catalog executor and serializer. */
 static bool ak_discovery_wire(const char *command, const struct json_value *input,
     struct json_value *doc, enum zcl_command_exit *code)
@@ -1948,21 +1955,22 @@ static bool ak_discovery_identity(const struct ak_fixture *f, const struct json_
     bool ok = zcl_package_copy_open_selected_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ,
         &copy, &reply, "app.customize", f->build.version);
     char tree[65]; zcl_hex_encode(copy.selected_tree, 32, tree);
-    ok = ok && !strcmp(aso_string(data, "name"), AK_ROUTE) && aso_revision_is(data, 1) &&
+    ok = ak_stage(ok && !strcmp(aso_string(data, "name"), AK_ROUTE) && aso_revision_is(data, 1) &&
         !strcmp(aso_string(data, "version"), f->build.version) &&
         !strcmp(aso_string(data, "source_root"), tree) &&
-        !strcmp(aso_string(data, "authority"), "read-only-selected-source");
+        !strcmp(aso_string(data, "authority"), "read-only-selected-source"), "list.customize_identity");
     zcl_package_copy_close(&copy); zcl_command_reply_free(&reply); return ok;
 }
 static bool ak_discovery_hint(const struct ak_fixture *f, const struct json_value *entry)
 {
     const struct json_value *hint = json_get(entry, "customize"), *input = json_get(hint, "input");
     struct json_value doc; json_init(&doc); enum zcl_command_exit code;
-    bool ok = !strcmp(aso_string(hint, "command"), "app.customize") &&
+    bool ok = ak_stage(!strcmp(aso_string(hint, "command"), "app.customize") &&
         !strcmp(aso_string(hint, "validation"), "required-on-read") &&
         input && input->type == JSON_OBJ && input->num_children == 1 &&
-        !strcmp(aso_string(input, "name"), AK_ROUTE) &&
-        ak_discovery_wire("app.customize", input, &doc, &code) && code == ZCL_COMMAND_EXIT_OK &&
+        !strcmp(aso_string(input, "name"), AK_ROUTE), "list.customize_hint") &&
+        ak_stage(ak_discovery_wire("app.customize", input, &doc, &code) &&
+                 code == ZCL_COMMAND_EXIT_OK, "list.customize_rpc") &&
         ak_discovery_identity(f, json_get(&doc, "data"));
     json_free(&doc); return ok;
 }
@@ -1975,72 +1983,103 @@ static bool ak_discovery_builtin(void)
     const struct json_value *error = json_get(&doc, "error"), *mutated = json_get(error, "mutated");
     ok = ok && !strcmp(aso_string(error, "code"), "SELECTION_REQUIRED") &&
         mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
-    json_free(&input); json_free(&doc); return ok;
+    json_free(&input); json_free(&doc); return ak_stage(ok, "list.builtin");
 }
-/* app.list offers an app.open next action only for an installed windowed app
- * (0ce7e62e5a); the builtin skycombat binary is absent on hosts that built
- * only the test harness, so the expectation follows the listed installed flag. */
-static bool ak_discovery_open_expected(const struct json_value *doc)
+static bool ak_discovery_installed(const struct json_value *doc, const char *id, bool expected)
 {
     const struct json_value *list = json_get(json_get(doc, "data"), "launchable");
+    size_t found = 0;
     for (size_t i = 0; i < json_size(list); ++i) {
         const struct json_value *entry = json_at(list, i), *installed = json_get(entry, "installed");
-        if (installed && installed->type == JSON_BOOL && json_get_bool(installed) &&
-            !strcmp(aso_string(entry, "id"), "skycombat")) return true;
+        if (strcmp(aso_string(entry, "id"), id)) continue;
+        if (!installed || installed->type != JSON_BOOL || json_get_bool(installed) != expected) return false;
+        ++found;
     }
-    return false;
+    return found == 1;
 }
-static bool ak_discovery_next(const struct json_value *doc)
+static bool ak_discovery_next(const struct json_value *doc, const char *expected)
 {
     const struct json_value *next = json_get(doc, "next");
-    size_t count = 0; bool opened = false;
+    size_t count = 0, opened = 0;
     for (size_t i = 0; i < json_size(next); ++i) {
         const struct json_value *row = json_at(next, i), *input = json_get(row, "input");
-        if (!strcmp(aso_string(row, "command"), "app.open")) opened = true;
+        if (!strcmp(aso_string(row, "command"), "app.open")) {
+            if (!expected || strcmp(aso_string(input, "name"), expected)) return ak_stage(false, "list.open_action_name");
+            ++opened;
+        }
         if (strcmp(aso_string(row, "command"), "app.customize")) continue;
-        if (strcmp(aso_string(input, "name"), AK_ROUTE)) return false;
+        if (strcmp(aso_string(input, "name"), AK_ROUTE))
+            return ak_stage(false, "list.customize_action_name");
         ++count;
     }
-    return opened == ak_discovery_open_expected(doc) && count == 1;
+    return ak_stage(opened == (expected ? 1u : 0u), "list.open_action_count") &&
+           ak_stage(count == 1, "list.customize_action_count");
 }
 static bool ak_discovery_rows(const struct ak_fixture *f, const struct json_value *doc)
 {
     const struct json_value *list = json_get(json_get(doc, "data"), "launchable");
-    if (!list || list->type != JSON_ARR) return false;
-    bool found = false, builtin = false;
+    if (!list || list->type != JSON_ARR) return ak_stage(false, "list.rows_shape");
+    bool found = false, builtin = false, seen = false;
     for (size_t i = 0; i < json_size(list); ++i) {
         const struct json_value *entry = json_at(list, i);
         if (!strcmp(aso_string(entry, "id"), "skycombat")) builtin = true;
         if (strcmp(aso_string(entry, "id"), AK_ROUTE)) continue;
-        found = !strcmp(aso_string(entry, "source"), "kept") &&
+        seen = true;
+        found = ak_stage(!strcmp(aso_string(entry, "source"), "kept") &&
             !strcmp(aso_string(entry, "validation"), "required-on-open") &&
-            !json_get(entry, "installed") && strstr(aso_string(entry, "open"), " app open " AK_ROUTE) &&
-            ak_discovery_hint(f, entry);
+            !json_get(entry, "installed") && strstr(aso_string(entry, "open"), " app open " AK_ROUTE),
+            "list.kept_row") && ak_discovery_hint(f, entry);
     }
-    return builtin && found;
+    if (!seen) return ak_stage(false, "list.kept_row_missing");
+    if (!found) return false;
+    return ak_stage(builtin, "list.builtin_row");
 }
-static bool ak_listed(struct ak_fixture *f)
+static bool ak_listed(struct ak_fixture *f, bool tasks, bool game, const char *expected)
 {
     uint8_t before[6][32], after[6][32];
     struct json_value input, doc; json_init(&input); json_init(&doc); json_set_object(&input);
     enum zcl_command_exit code;
-    bool ok = ak_discovery_state(f, before) &&
-        ak_discovery_wire("app.list", &input, &doc, &code) && code == ZCL_COMMAND_EXIT_OK &&
-        strstr(aso_string(json_get(&doc, "data"), "summary"), "exact kept: ID") &&
-        ak_discovery_rows(f, &doc) && ak_discovery_next(&doc) && ak_discovery_builtin();
-    ok = ok && ak_discovery_state(f, after) && !memcmp(before, after, sizeof(before));
+    bool ok = ak_stage(ak_discovery_state(f, before), "list.before_state") &&
+        ak_stage(ak_discovery_wire("app.list", &input, &doc, &code) &&
+                 code == ZCL_COMMAND_EXIT_OK, "list.rpc") &&
+        ak_stage(strstr(aso_string(json_get(&doc, "data"), "summary"), "exact kept: ID") != NULL,
+                 "list.summary") &&
+        ak_discovery_rows(f, &doc) &&
+        ak_stage(ak_discovery_installed(&doc, "tasks", tasks), "list.tasks_installed") &&
+        ak_stage(ak_discovery_installed(&doc, "skycombat", game), "list.game_installed") &&
+        ak_discovery_next(&doc, expected) && ak_discovery_builtin();
+    ok = ok && ak_stage(ak_discovery_state(f, after), "list.after_state") &&
+         ak_stage(memcmp(before, after, sizeof(before)) == 0, "list.state_changed");
     json_free(&input); json_free(&doc); return ok;
+}
+static bool ak_listed_layouts(struct ak_fixture *f)
+{
+    char dir[ABC_PATH], tasks[ABC_PATH], game[ABC_PATH], exe[PATH_MAX];
+    if (snprintf(dir, sizeof(dir), "%s/list-bin", f->world.root) >= (int)sizeof(dir) ||
+        snprintf(tasks, sizeof(tasks), "%s/z23", dir) >= (int)sizeof(tasks) ||
+        snprintf(game, sizeof(game), "%s/z23-skycombat", dir) >= (int)sizeof(game) ||
+        !realpath("build/bin/z23-dev", exe) || mkdir(dir, 0700)) return false;
+    app_launch_test_set_bin_dir(dir); app_launch_test_set_desktop(1);
+    bool ok = ak_listed(f, false, false, NULL) && symlink(exe, tasks) == 0 &&
+        ak_listed(f, true, false, "tasks") && symlink(exe, game) == 0 &&
+        ak_listed(f, true, true, "skycombat") && unlink(tasks) == 0 &&
+        ak_listed(f, false, true, "skycombat");
+    app_launch_test_set_bin_dir(NULL); app_launch_test_set_desktop(-1);
+    (void)unlink(tasks); (void)unlink(game); (void)rmdir(dir);
+    return ak_stage(ok, "list.executable_layouts");
 }
 static bool ak_mcp_open(struct aso_mcp *server, struct json_value *doc)
 {
     const char *request = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
         "\"params\":{\"name\":\"apps_open\",\"arguments\":{\"name\":\"" AK_ROUTE "\"}}}";
     struct json_value result; json_init(&result);
-    bool ok = aso_mcp_send(server, request, true) && json_read(&result, server->line, strlen(server->line));
+    bool ok = ak_stage(aso_mcp_send(server, request, true), "restart.mcp_send") &&
+              ak_stage(json_read(&result, server->line, strlen(server->line)), "restart.mcp_wire");
     const struct json_value *reply = json_get(&result, "result");
     const struct json_value *part = json_at(json_get(reply, "content"), 0);
     const char *text = json_get_str(json_get(part, "text"));
-    ok = ok && !json_get_bool(json_get(reply, "isError")) && text && json_read(doc, text, strlen(text));
+    ok = ok && ak_stage(!json_get_bool(json_get(reply, "isError")) && text &&
+                        json_read(doc, text, strlen(text)), "restart.mcp_reply");
     json_free(&result);
     return ok;
 }
@@ -2048,16 +2087,20 @@ static bool ak_restart(struct ak_fixture *f)
 {
     struct aso_mcp server = {.pid = -1, .input = -1, .output = -1};
     struct json_value doc; json_init(&doc);
-    bool ok = aso_mcp_spawn(&server) && aso_mcp_init(&server) && ak_mcp_open(&server, &doc);
+    bool ok = ak_stage(aso_mcp_spawn(&server), "restart.mcp_spawn") &&
+              ak_stage(aso_mcp_init(&server), "restart.mcp_init") &&
+              ak_mcp_open(&server, &doc);
     const struct json_value *data = json_get(&doc, "data");
     aso_track_ready(data, &f->build);
-    ok = ok && !strcmp(aso_string(data, "name"), AK_ROUTE) &&
-        !strcmp(aso_string(data, "status"), "opened") && !strcmp(aso_string(data, "ready_basis"), "alive") &&
-        aso_build_facts_match(data, &f->build) && aj_live_identity(data, &f->build);
+    ok = ok && ak_stage(!strcmp(aso_string(data, "name"), AK_ROUTE) &&
+        !strcmp(aso_string(data, "status"), "opened") && !strcmp(aso_string(data, "ready_basis"), "alive"),
+        "restart.result") &&
+        ak_stage(aso_build_facts_match(data, &f->build), "restart.build_identity") &&
+        ak_stage(aj_live_identity(data, &f->build), "restart.process_identity");
     bool closed = aso_mcp_close(&server);
     bool cleaned = aso_cleanup_children();
     json_free(&doc);
-    return ok && closed && cleaned;
+    return ok && ak_stage(closed && cleaned, "restart.cleanup");
 }
 static bool ak_read_source(struct ak_fixture *f, char blob[65])
 {
@@ -2869,7 +2912,7 @@ static int ak_acceptance(struct ak_fixture *f)
         ASSERT(ak_received(f) && ak_environment(f));
         ASSERT(ak_refused(f, "SELECTION_REQUIRED"));
         ASSERT(ak_preview_keep(f));
-        ASSERT(ak_listed(f) && ak_restart(f));
+        ASSERT(ak_listed_layouts(f) && ak_restart(f));
         ASSERT(ak_read_source(f, blob));
         ASSERT(ak_revoked(f) && ak_replaced(f));
         ASSERT(ak_edit_source(f, blob));
