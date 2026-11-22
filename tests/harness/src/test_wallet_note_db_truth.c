@@ -9,12 +9,16 @@
 #include "test/test_core.h"
 #include "chain/chainparams.h"
 #include "config/boot_wallet_phrase.h"
+#include "controllers/sync_controller.h"
 #include "controllers/wallet_controller.h"
 #include "controllers/wallet_helpers.h"
+#include "core/serialize.h"
+#include "core/uint256.h"
 #include "json/json.h"
 #include "models/database.h"
 #include "models/wallet_tx.h"
 #include "rpc/server.h"
+#include "sapling/incremental_merkle_tree.h"
 #include "sapling/sapling.h"
 #include "sapling/zip32.h"
 #include "services/store_buyer_internal.h"
@@ -26,6 +30,7 @@
 #include "wallet/wallet.h"
 #include "wallet/wallet_sqlite.h"
 
+#include <fcntl.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdio.h>
@@ -323,9 +328,123 @@ static int wnt_store_floor(void)
     return failures;
 }
 
+static bool wnt_log_has(const char *path, const char *needle)
+{
+    char buf[16384];
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return false;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
+static bool wnt_expected_nf(struct wnt *f, const struct db_sapling_note *n,
+                            uint8_t nf[32])
+{
+    struct sapling_key_entry acct;
+    if (!sapling_keystore_copy_receive_account(&f->w->sapling_keys, &acct))
+        return false;
+    bool ok = sapling_compute_nf(n->diversifier, n->pk_d, (uint64_t)n->value,
+                                 n->rcm, acct.xfvk.fvk.ak, acct.xfvk.fvk.nk,
+                                 0, nf);
+    memory_cleanse(&acct, sizeof(acct));
+    return ok;
+}
+
+static bool wnt_stored_witness(struct wnt *f, const struct db_sapling_note *n,
+                               int *height, int *bytes)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(f->ndb.db,
+            "SELECT witness_height, length(witness_data) FROM"
+            " wallet_sapling_notes WHERE txid=? AND output_index=?",
+            -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(s, 1, n->txid, 32, SQLITE_STATIC);
+    sqlite3_bind_int(s, 2, (int)n->output_index);
+    bool ok = sqlite3_step(s) == SQLITE_ROW;
+    if (ok) {
+        *height = sqlite3_column_int(s, 0);
+        *bytes = sqlite3_column_int(s, 1);
+    }
+    sqlite3_finalize(s);
+    return ok;
+}
+
+/* A database note the session never decrypted: the production witness save
+ * writes the nullifier and witness to the database, answers true, and logs no
+ * warning about a missing in-memory note. */
+static int wnt_witness_save_quiet(void)
+{
+    struct wnt f = {0};
+    int failures = 0;
+    int saved_err = -1;
+    TEST("a database note missing from the session cache saves without a warning") {
+        ASSERT(wnt_restore(&f));
+        struct db_sapling_note note;
+        ASSERT(wnt_note(&f, 0x61, 0, 4 * WNT_UNIT, "", &note));
+        ASSERT(wnt_save(&f, &note));
+        ASSERT_EQ((int)f.w->num_sapling_notes, 0);
+
+        struct incremental_merkle_tree tree;
+        sapling_tree_init(&tree);
+        struct uint256 cm;
+        memcpy(cm.data, note.cm, 32);
+        incremental_tree_append(&tree, &cm);
+        struct incremental_witness iw;
+        incremental_witness_init(&iw, &tree);
+        struct byte_stream ws;
+        stream_init(&ws, 2048);
+        ASSERT(incremental_witness_serialize(&iw, &ws));
+
+        uint8_t want[32];
+        ASSERT(wnt_expected_nf(&f, &note, want));
+        ASSERT(memcmp(want, note.nullifier, 32) != 0);
+
+        char path[400];
+        snprintf(path, sizeof(path), "%s/capture.log", f.dir);
+        fflush(stderr);
+        saved_err = dup(STDERR_FILENO);
+        int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        ASSERT(saved_err >= 0 && fd >= 0);
+        ASSERT(dup2(fd, STDERR_FILENO) >= 0);
+        close(fd);
+        bool saved = sync_wallet_note_save_witness_for_test(
+            &f.ndb, f.w, &note, &iw, ws.data, ws.size, WNT_TIP);
+        fflush(stderr);
+        dup2(saved_err, STDERR_FILENO);
+        close(saved_err);
+        saved_err = -1;
+        stream_free(&ws);
+
+        ASSERT(saved);
+        struct db_sapling_note rows[4];
+        int count = db_sapling_note_list_all_checked(&f.ndb, rows, 4);
+        ASSERT_EQ(count, 1);
+        ASSERT(memcmp(rows[0].nullifier, want, 32) == 0);
+        int height = 0, bytes = 0;
+        ASSERT(wnt_stored_witness(&f, &note, &height, &bytes));
+        ASSERT_EQ(height, WNT_TIP);
+        ASSERT(bytes > 0);
+        printf("(log has disappeared-warning: %s) ",
+               wnt_log_has(path, "disappeared") ? "yes" : "no");
+        ASSERT(!wnt_log_has(path, "in-memory note"));
+        PASS();
+    } _test_next:;
+    if (saved_err >= 0) {
+        dup2(saved_err, STDERR_FILENO);
+        close(saved_err);
+    }
+    wnt_teardown(&f);
+    return failures;
+}
+
 int test_wallet_note_db_truth(void)
 {
     int failures = wnt_list_from_database();
     failures += wnt_store_floor();
+    failures += wnt_witness_save_quiet();
     return failures;
 }

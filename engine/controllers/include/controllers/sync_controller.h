@@ -187,6 +187,15 @@ void sapling_tree_rebuild_test_reset_persist_deferrals(void);
 bool sync_wallet_note_nullifier_refresh_for_test(
     struct wallet *wallet, const uint8_t txid[32], uint32_t output_index,
     const uint8_t nf[32]);
+/* The production witness save, so a test can drive it with an empty session
+ * cache and read the log. */
+struct db_sapling_note;
+struct incremental_witness;
+bool sync_wallet_note_save_witness_for_test(
+    struct node_db *ndb, struct wallet *wallet,
+    const struct db_sapling_note *note,
+    const struct incremental_witness *witness,
+    const uint8_t *witness_data, size_t witness_len, int height);
 #endif
 
 /* Tip-time wallet witness maintenance for the production path, independent of

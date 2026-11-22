@@ -131,10 +131,13 @@ static bool sync_wallet_note_save_witness(
     bool saved = computed && db_sapling_note_save_witness_and_nullifier(
         ndb, note->txid, note->output_index,
         witness_data, witness_len, height, nf);
-    if (saved && !sync_wallet_note_nullifier_refresh(
-            wallet, note->txid, note->output_index, nf))
-        LOG_WARN("sync", "advance_wallet_witnesses: in-memory note "
-                 "disappeared during nullifier update");
+    /* The database write above is the durable one. The session cache holds
+     * only notes decrypted since this process started, so a database note
+     * that is not cached is the normal case after a restart, not a fault:
+     * there is nothing to refresh and nothing to report. */
+    if (saved)
+        (void)sync_wallet_note_nullifier_refresh(
+            wallet, note->txid, note->output_index, nf);
     memory_cleanse(ak, sizeof(ak));
     memory_cleanse(nk, sizeof(nk));
     memory_cleanse(nf, sizeof(nf));
@@ -148,6 +151,16 @@ bool sync_wallet_note_nullifier_refresh_for_test(
 {
     return sync_wallet_note_nullifier_refresh(
         wallet, txid, output_index, nf);
+}
+
+bool sync_wallet_note_save_witness_for_test(
+    struct node_db *ndb, struct wallet *wallet,
+    const struct db_sapling_note *note,
+    const struct incremental_witness *witness,
+    const uint8_t *witness_data, size_t witness_len, int height)
+{
+    return sync_wallet_note_save_witness(ndb, wallet, note, witness,
+                                         witness_data, witness_len, height);
 }
 #endif
 
