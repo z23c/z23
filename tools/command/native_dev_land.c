@@ -144,6 +144,7 @@
 
 #include "command/native_command.h"
 #include "command/native_submit_claim_guard.h"
+#include "command/native_dev_land_drain.h"
 #include "command/native_dev_land_main_red.h"
 #include "command/native_dev_land_status_compact.h"
 #include "command/native_dev_land_prepare.h"
@@ -14591,30 +14592,10 @@ static void dl_drive_seq(const struct zcl_command_request *req,
  * proof run by this drive. One drive at a time: a non-blocking lock in the
  * land directory (the same flock helper the queue and step locks use; the
  * step lock itself is released between steps, so it cannot span a drive).
- * The first row that does not land stops the drive. A killed drive loses
+ * The first row that does not land stops the drive; ZCL_LAND_DRIVE_BUDGET_S
+ * stops it starting a row once that many seconds passed. A killed drive loses
  * nothing: the lock dies with it, the row stays in flight, and the next
  * drive resumes it, skipping a proof whose receipt already exists. */
-#define DL_DRIVE_MAX_ROWS 16
-
-static bool dl_drive_rows_in(const struct zcl_command_request *req,
-                             int *rows, bool *prove)
-{
-    const struct json_value *m = json_get(req->input, "max_rows");
-    const struct json_value *p = json_get(req->input, "prove");
-    *rows = 1;
-    *prove = false;
-    if (p && p->type != JSON_BOOL)
-        return false;
-    if (p)
-        *prove = json_get_bool(p);
-    if (!m)
-        return true;
-    if (m->type != JSON_INT || json_get_int(m) < 1 ||
-        json_get_int(m) > DL_DRIVE_MAX_ROWS)
-        return false;
-    *rows = (int)json_get_int(m);
-    return true;
-}
 
 static int dl_drive_lock(struct zcl_command_reply *reply)
 {
@@ -14811,11 +14792,12 @@ static void dl_drive_rows(const struct zcl_command_request *req,
     struct json_value report;
     struct dl_drive_verdict v = { .kind = DL_DRIVE_LANDED };
     int done = 0, landed = 0;
+    int64_t deadline = dl_drain_deadline_ms();
     long long last_seq = 0;
     json_init(&report);
     json_set_array(&report);
     g_dl_prove_mode = prove;
-    while (done < max_rows) {
+    while (dl_drain_more(done, max_rows, deadline)) {
         struct dl_drive_verdict row_v = { .kind = DL_DRIVE_CONTINUE };
         struct dl_dirs d;
         struct dl_row *rows = NULL;
@@ -14890,7 +14872,7 @@ static void dl_drive_dispatch(const struct zcl_command_request *req,
     if (json_get(req->input, "max_rows") || json_get(req->input, "prove")) {
         int max_rows;
         bool prove;
-        if (!dl_drive_rows_in(req, &max_rows, &prove)) {
+        if (!dl_drain_rows_in(req, &max_rows, &prove)) {
             dl_fail(reply, "BAD_INPUT", "drive",
                     "max_rows is an integer from 1 to 16; prove is a boolean",
                     "input.max_rows");

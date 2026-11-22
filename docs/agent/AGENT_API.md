@@ -1466,12 +1466,12 @@ push or AI edit loop.
   `tools/scripts/background_quality_lane.sh coverage` weekly.
 - `z23-test-suite.timer` runs
   `tools/scripts/background_quality_lane.sh tests` hourly.
-- `z23-land-step.timer` runs one bounded `dev land drive --prove` row
-  (`build/bin/z23-dev dev land drive --prove --max_rows=1`, under ordinary
-  devbuild admission) 2 minutes after boot and then ~20s after each row
-  finishes. It is the repo-shipped supervisor for the `dev.land` queue on
+- `z23-land-step.timer` runs one bounded `dev land drive --prove` drain
+  (`build/bin/z23-dev dev land drive --prove --max_rows=16`, under ordinary
+  devbuild admission, bounded by ZCL_LAND_DRIVE_BUDGET_S) 2 minutes after boot and then ~20s after each drain
+  finishes; it keeps taking queued rows until one fails to land. It is the repo-shipped supervisor for the `dev.land` queue on
   the land host, survives a crash or reboot on its own, and bounds a stuck
-  row with `TimeoutStartSec=5400` rather than letting a hang stop landing
+  row with `TimeoutStartSec=7200` rather than letting a hang stop landing
   silently. It never publishes on its own: `dev land submit` is the
   deliberate act that queues a tip, and the leaf it calls publishes only a
   tip whose exact sealed proof receipt was admitted

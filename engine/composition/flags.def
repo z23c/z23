@@ -1369,6 +1369,10 @@ Z23_FLAG("ZCL_LAND_ALLOW_UNSIGNED", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_DEPS_TEST_FORCE", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_DRIVE_BUDGET_S", "env_runtime", "-", "-",
+          "wall-clock seconds (1 to 86400) after which one draining dev land drive "
+          "starts no further row; unset means only max_rows bounds it; first use "
+          "tools/command/native_dev_land_drain.c:auto")
 Z23_FLAG("ZCL_LAND_DRAIN_IDLE_SEC", "env_runtime", "900", "-",
           "how long a queued land request with no beat may sit before "
           "status raises drain_absent; a missing land timer raises it "

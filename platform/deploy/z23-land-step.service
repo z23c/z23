@@ -1,12 +1,19 @@
 [Unit]
-Description=Z23 land queue driver (dev land drive --prove, one row)
+Description=Z23 land queue driver (dev land drive --prove, drains queued rows)
 
 [Service]
 Type=oneshot
 WorkingDirectory=%h/development/z23/main
 # Land trains: one exact proof covers up to 4 queued rows (native_dev_land_train.c).
 Environment=ZCL_LAND_TRAIN_WIDTH=4
-# One bounded `dev land drive --prove` row per tick, under ordinary devbuild
+# DRAIN. One row per tick left a 24 s median (165 s p90) idle gap between proofs
+# while rows waited (land ledger, 36 h): the 20 s timer edge plus devbuild
+# admission after every row. A drive now keeps taking the next queued head,
+# re-reading the queue each time, and stops at the first row that does not land,
+# at max_rows, or once the budget passes (no new row starts after it; a running
+# row is never cut). drive.lock still answers DRIVE_BUSY to a second drive.
+Environment=ZCL_LAND_DRIVE_BUDGET_S=1800
+# One bounded drain of `dev land drive --prove` per tick, under ordinary devbuild
 # admission (tools/command/native_dev_land.c): the row is rebased, proved and,
 # when its exact receipt is admitted, fast-forwarded onto origin/main.
 #
@@ -15,12 +22,12 @@ Environment=ZCL_LAND_TRAIN_WIDTH=4
 # receipt gate, the same reasoning that carries native_dev_land.c in the
 # closed allowlist of tools/lint/lintc/gate_no_unattended_publish.c; the unit
 # is not and must never become an allowlist entry.
-ExecStart=%h/bin/devbuild --wait %h/development/z23/main/build/bin/z23-dev dev land drive --prove --max_rows=1
+ExecStart=%h/bin/devbuild --wait %h/development/z23/main/build/bin/z23-dev dev land drive --prove --max_rows=16
 
-# The timeout covers a 13-45 min proof plus queueing; it also bounds a hung
+# The timeout covers the drain budget above plus one last 13-45 min row; it also bounds a hung
 # row, because a oneshot the timer still sees as "activating" never gets a
 # fresh OnUnitInactiveSec edge.
-TimeoutStartSec=5400
+TimeoutStartSec=7200
 TimeoutStopSec=60
 
 # The test harness a proof run drives needs an unlimited stack.

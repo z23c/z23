@@ -443,6 +443,7 @@ int test_dev_land_prove_drive3(void);
 int test_dev_land_prove_drive4(void);
 int test_dev_land_prove_drive5(void);
 int test_dev_land_prove_drive6(void);
+int test_dev_land_drain_cases(void);
 int test_dev_land_qualify_make_caps(void);
 int test_dev_land_qualify_canonical_aliases(void);
 int test_dev_land_qualify_unregistered_group(void);
