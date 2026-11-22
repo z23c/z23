@@ -83,11 +83,15 @@ struct zcl_objectives_landing_cache {
     char reason[ZCL_OBJECTIVES_REASON_MAX];
 };
 
-/* One request.s selected proof; NULL keeps independent selections. */
-struct zcl_objectives_proof_cache {
-    bool filled, ok;
+struct zcl_objectives_proof {
     char logs[1100], key[200];
     int64_t proof_ms;
+};
+
+/* One request's selected proof; NULL keeps independent selections. */
+struct zcl_objectives_proof_cache {
+    bool filled, ok;
+    struct zcl_objectives_proof proof;
     char reason[ZCL_OBJECTIVES_REASON_MAX];
 };
 

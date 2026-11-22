@@ -620,12 +620,6 @@ struct obj_attempt {
     time_t mtime;      /* phases.txt mtime, the last-resort order only */
 };
 
-struct obj_proof {
-    char logs[1100];
-    char key[200];
-    int64_t proof_ms;
-};
-
 struct obj_attempts {
     struct obj_attempt *items;
     size_t n;
@@ -750,7 +744,7 @@ static bool obj_attempt_load(const char *dir, const char *name,
 /* The newest completed attempt, or false. */
 static bool obj_newest_completed_attempt(const char *dir,
                                          const char *outcomes,
-                                         struct obj_proof *out)
+                                         struct zcl_objectives_proof *out)
 {
     DIR *d = opendir(dir);
     struct dirent *e;
@@ -822,7 +816,7 @@ static bool obj_scan_logs(const char *logs, const char *suffix,
  * directory that does not follow that name is scanned for every file with the
  * suffix, and the one that carries the wall line wins, the smallest name
  * first, so readdir order never decides. */
-static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
+static bool obj_log_wall(const struct zcl_objectives_proof *proof, const char *suffix,
                          void (*fn)(const char *line, void *user),
                          char *path, size_t cap, int64_t *ms)
 {
@@ -835,7 +829,7 @@ static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
 }
 
 static bool obj_completed_attempt_read(const struct zcl_objectives_options *options,
-                                  struct obj_proof *proof,
+                                  struct zcl_objectives_proof *proof,
                                   struct zcl_objective_value *v)
 {
     char dirbuf[512], outbuf[512];
@@ -861,7 +855,7 @@ static bool obj_completed_attempt_read(const struct zcl_objectives_options *opti
 /* A request shares its first selection, including a failure. Log reads stay
  * separate so each dimension retains its own missing and parsing behavior. */
 static bool obj_completed_attempt(const struct zcl_objectives_options *options,
-                                  struct obj_proof *proof,
+                                  struct zcl_objectives_proof *proof,
                                   struct zcl_objective_value *v)
 {
     struct zcl_objectives_proof_cache *c = options ? options->proof_cache : NULL;
@@ -871,16 +865,12 @@ static bool obj_completed_attempt(const struct zcl_objectives_options *options,
     if (!c->filled) {
         c->ok = obj_completed_attempt_read(options, proof, v);
         if (c->ok) {
-            memcpy(c->logs, proof->logs, sizeof c->logs);
-            memcpy(c->key, proof->key, sizeof c->key);
-            c->proof_ms = proof->proof_ms;
+            c->proof = *proof;
         }
         (void)snprintf(c->reason, sizeof c->reason, "%s", v->reason);
         c->filled = true;
     } else if (c->ok) {
-        memcpy(proof->logs, c->logs, sizeof proof->logs);
-        memcpy(proof->key, c->key, sizeof proof->key);
-        proof->proof_ms = c->proof_ms;
+        *proof = c->proof;
     }
     if (!c->ok)
         (void)snprintf(v->reason, sizeof v->reason, "%s", c->reason);
@@ -892,7 +882,7 @@ static struct zcl_objective_value obj_log_wall_s(
     void (*fn)(const char *line, void *user))
 {
     struct zcl_objective_value v = {0};
-    struct obj_proof proof;
+    struct zcl_objectives_proof proof;
     char log[1300];
     int64_t ms = -1;
     if (!obj_completed_attempt(options, &proof, &v))
@@ -923,7 +913,7 @@ static struct zcl_objective_value obj_proof_wall_s(
     const struct zcl_objectives_options *options)
 {
     struct zcl_objective_value v = {0};
-    struct obj_proof proof;
+    struct zcl_objectives_proof proof;
     if (!obj_completed_attempt(options, &proof, &v))
         return v;
     v.measured = true;
