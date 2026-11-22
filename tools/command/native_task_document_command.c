@@ -219,6 +219,21 @@ static bool ntd_offer_render(struct json_value *data, const struct task_update_o
         json_push_kv_str(data, "next_action", "In Tasks, choose More / Undo, then Updates. Try update asks permission before running.");
 }
 
+static void ntd_source_next(struct zcl_command_reply *reply, const char *directory,
+    const struct package_resident_record *kept)
+{
+    if (kept->generation <= 0 || !kept->current.package_root[0]) return;
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "root", kept->current.package_root) &&
+        json_push_kv_str(&input, "datadir", directory);
+    char wire[sizeof(reply->next[0].input_json)];
+    size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
+    if (n && n < sizeof(wire))
+        (void)zcl_command_reply_add_next(reply, "zcode.package.checkout", wire,
+            "Choose an absent destination to inspect the exact kept source without executing it.");
+    json_free(&input);
+}
+
 static void ntd_stale_recovery(struct zcl_command_reply *reply,
     const struct json_value *input, const char *directory)
 {
@@ -264,6 +279,7 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
         bool rendered = offering ? ntd_offer_render(&reply->data, &offer, directory, &kept)
             : ntd_render(&reply->data, &row, platform_time_monotonic_us() - began, directory);
         if (!rendered) result = ZCL_ERR(-1, "tasks: operation completed but confirmation allocation failed; read status before retrying");
+        else if (offering && strcmp(action, "offer-status") == 0) ntd_source_next(reply, directory, &kept);
     }
     if (!result.ok) {
         LOG_ERROR("app.tasks", "%s", result.message);

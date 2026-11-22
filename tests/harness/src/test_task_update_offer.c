@@ -121,7 +121,48 @@ static bool offer_command(const char *directory, const char *action, bool succes
     if (ok && !success) ok = strcmp(reply.error.code, "TASK_SAVE_FAILED") == 0 && reply.error.message[0];
     if (!ok) fprintf(stderr, "task-update-offer %s: reply exit=%d code=%s message=%s\n",
                      action, reply.exit_code, reply.error.code, reply.error.message);
-    if (ok && success) ok = offer_empty_status(&reply.data);
+    if (ok && success) ok = offer_empty_status(&reply.data) && reply.next_count == 0;
+    zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+static bool offer_kept_source_hint(const char *directory)
+{
+    struct package_resident_store store = {0};
+    struct package_resident_record record = {0};
+    struct package_resident_identity identity = {0};
+    memset(identity.package_root, 'a', 64);
+    memset(identity.receipt_id, 'b', 64);
+    memset(identity.artifact_sha3, 'c', 64);
+    (void)snprintf(identity.program, sizeof(identity.program), "bin/ztasks");
+    identity.configuration_generation = 1;
+    const char *nonce = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    bool ok = package_resident_store_open_app(&store, directory, "local/command-offer").ok &&
+        package_resident_record_begin(&store, 0, &record).ok &&
+        package_resident_record_accept(&store, record.revision, 0, &identity, nonce, 1, &record).ok &&
+        package_resident_record_activate(&store, record.revision, 0, nonce, 1, &record).ok;
+    if (!package_resident_store_close(&store).ok) ok = false;
+    struct json_value input = {0}; json_set_object(&input);
+    ok = json_push_kv_str(&input, "datadir", directory) &&
+        json_push_kv_str(&input, "app", "local/command-offer") &&
+        json_push_kv_str(&input, "action", "offer-status") && ok;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
+    struct zcl_command_request request = { .spec = spec, .input = &input };
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.task_document.v1");
+    if (ok && spec) spec->handler(&request, &reply); else ok = false;
+    bool found = false;
+    for (size_t i = 0; i < reply.next_count; ++i) {
+        struct json_value next = {0};
+        if (!strcmp(reply.next[i].command, "zcode.package.checkout") &&
+            json_read(&next, reply.next[i].input_json, strlen(reply.next[i].input_json))) {
+            const char *root = json_get_str(json_get(&next, "root"));
+            const char *dir = json_get_str(json_get(&next, "datadir"));
+            found = root && dir && !strcmp(root, identity.package_root) && !strcmp(dir, directory) &&
+                !json_get(&next, "destination");
+        }
+        json_free(&next);
+    }
+    ok = ok && reply.exit_code == 0 && found;
     zcl_command_reply_free(&reply); json_free(&input);
     return ok;
 }
@@ -196,6 +237,7 @@ static int offer_command_checks(const char *directory)
     OFFER_CHECK("native status omits task contents", offer_command(directory, "offer-status", true));
     OFFER_CHECK("native invalid offer refused", offer_command(directory, "offer", false));
     OFFER_CHECK("native invalid offer leaves no record", offer_command(directory, "offer-status", true));
+    OFFER_CHECK("native kept source hint uses exact root and datadir", offer_kept_source_hint(directory));
     return failures;
 }
 

@@ -774,6 +774,19 @@ static bool act_reader_bounds(struct ac_fixture *f)
     return ok;
 }
 
+static bool act_tasks_source_hint(void)
+{
+    struct abc_leaf l; abc_open(&l);
+    bool ok = json_push_kv_str(&l.in, "name", "tasks") &&
+        act_result(&l, "SELECTION_REQUIRED") && strstr(l.out.error.message, "offer-status");
+    bool found = false;
+    for (size_t i = 0; i < l.out.next_count; ++i)
+        if (!strcmp(l.out.next[i].command, "app.tasks") &&
+            strstr(l.out.next[i].input_json, "offer-status")) found = true;
+    abc_close(&l);
+    return ok && found;
+}
+
 static bool act_selection_refusal(struct ac_fixture *f)
 {
     char path[1600], saved[1620];
@@ -1480,6 +1493,7 @@ int test_app_customize(void)
         ASSERT(act_bounds());
         ASSERT(act_blob_refusal(&f));
         ASSERT(act_selection_refusal(&f));
+        ASSERT(act_tasks_source_hint());
         ASSERT(act_no_grant(&f));
         ASSERT(act_reader_bounds(&f));
         ASSERT(act_alias_refusal(&f, false));

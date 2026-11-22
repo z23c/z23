@@ -142,6 +142,10 @@ static bool ac_catalog_entry(struct ac_read *a, struct app_launch_entry *selecte
 /* No version is kept yet: name the two commands that make one. */
 static bool ac_selection_required(struct ac_read *a)
 {
+    if (strcmp(a->name, "tasks") == 0) {
+        (void)ac_fail(a, "SELECTION_REQUIRED", "No app copy is selected. For the program kept in Tasks, read app.tasks offer-status.");
+        return false;
+    }
     char copy[72], save[64], message[192];
     bool made = zcl_app_hint(copy, sizeof(copy), NULL, "copy %s --yes", a->name) &&
         zcl_app_hint(save, sizeof(save), NULL, "save %s", "<copy name>");
@@ -498,6 +502,11 @@ void zcl_native_handle_app_customize(const struct zcl_command_request *request,
     bool ok = ac_read_context(a, request->input);
     ok = ac_finish_context(a, request, ok);
     if (ok) { json_free(&reply->data); reply->data = a->data; json_init(&a->data); }
-    else reply->next_count = 0;
+    else {
+        reply->next_count = 0;
+        if (a->name && !strcmp(a->name, "tasks") && !strcmp(reply->error.code, "SELECTION_REQUIRED"))
+            (void)zcl_command_reply_add_next(reply, "app.tasks", "{\"action\":\"offer-status\"}",
+                "Inspect the exact kept Tasks program before choosing its source.");
+    }
     json_free(&a->data); vcs_manifest_free(&a->manifest); zcl_package_copy_close(&a->copy); free(a);
 }
