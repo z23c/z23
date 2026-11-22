@@ -590,6 +590,9 @@ static const struct agent_interface_expect k_agent_interface_rss_rows[] = {
       .text = "zcl.node_resources.v1" },
     { .key = "schema_version", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 1 },
     { .key = "rss_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 5000 },
+    { .key = "rss_anon_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = -1 },
+    { .key = "rss_file_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = -1 },
+    { .key = "rss_shmem_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = -1 },
     { .key = "rss_warning", .op = AGENT_INTERFACE_OP_BOOL, .flag = true },
     { .key = "memory_pressure", .op = AGENT_INTERFACE_OP_STR_EQ,
       .text = "warn" },
@@ -601,6 +604,9 @@ static const struct agent_interface_expect k_agent_interface_rss_rows[] = {
 
 static const struct agent_interface_expect k_agent_interface_cgroup_ok_rows[] = {
     { .op = AGENT_INTERFACE_OP_TYPE_OBJ },
+    { .key = "rss_anon_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 111 },
+    { .key = "rss_file_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 222 },
+    { .key = "rss_shmem_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 0 },
     { .key = "cgroup_memory_available",
       .op = AGENT_INTERFACE_OP_BOOL, .flag = true },
     { .key = "cgroup_memory_current_mb",
@@ -707,6 +713,10 @@ static bool agent_interface_resource_snapshots_match(bool ok)
 
     struct agent_resource_snapshot cgroup_resources = {
         .rss_mb = 9000,
+        .rss_components_available = true,
+        .rss_anon_mb = 111,
+        .rss_file_mb = 222,
+        .rss_shmem_mb = 0,
         .rss_warn_threshold_mb = 4096,
         .rss_warning = true,
         .cgroup_memory_available = true,

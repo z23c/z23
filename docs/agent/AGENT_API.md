@@ -936,10 +936,10 @@ budget already paged the operator and the marker should only be cleared after
 repair is proven.
 
 The same public status contract includes `resources`
-(`zcl.node_resources.v1`) with cheap process-level RSS, RSS warning threshold,
+(`zcl.node_resources.v1`) with process-level RSS, swap, RSS anonymous/file/shared-memory components, RSS warning threshold,
 Linux cgroup memory usage/limits when available, memory pressure (`ok`,
 `watch`, `warn`, or `unknown`), `memory_pressure_detail`, pressure basis,
-uptime, and source. Cgroup/systemd pressure is preferred over raw RSS because
+uptime, and source. The RSS components are per-process MiB; -1 means unavailable. Cgroup/systemd pressure is preferred over raw RSS because
 canonical can have a large steady RSS while still running comfortably below its
 service memory guardrails. When cgroup v2 `memory.stat` is available, the node
 also reports anon/file/kernel buckets, reclaimable bytes, working set, and

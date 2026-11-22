@@ -385,6 +385,10 @@ void agent_resource_snapshot_collect(struct agent_resource_snapshot *snapshot)
         return;
 
     snapshot->rss_mb = -1;
+    snapshot->rss_anon_mb = -1;
+    snapshot->rss_file_mb = -1;
+    snapshot->rss_shmem_mb = -1;
+    snapshot->rss_components_available = false;
     snapshot->swap_mb = -1;
     snapshot->rss_warn_threshold_mb = AGENT_RESOURCES_RSS_WARN_MB;
     snapshot->rss_warning = false;
@@ -413,6 +417,12 @@ void agent_resource_snapshot_collect(struct agent_resource_snapshot *snapshot)
     if (os_proc_mem_read(&mem)) {
         if (mem.rss_bytes >= 0)
             snapshot->rss_mb = mem.rss_bytes / (1024 * 1024);
+        if (mem.rss_components_available) {
+            snapshot->rss_components_available = true;
+            if (mem.rss_anon_bytes >= 0) snapshot->rss_anon_mb = mem.rss_anon_bytes / (1024 * 1024);
+            if (mem.rss_file_bytes >= 0) snapshot->rss_file_mb = mem.rss_file_bytes / (1024 * 1024);
+            if (mem.rss_shmem_bytes >= 0) snapshot->rss_shmem_mb = mem.rss_shmem_bytes / (1024 * 1024);
+        }
         if (mem.swap_bytes >= 0)
             snapshot->swap_mb = mem.swap_bytes / (1024 * 1024);
     }
@@ -436,6 +446,9 @@ void agent_push_resources_json(struct json_value *out, const char *key,
     json_push_kv_str(&resources, "schema", "zcl.node_resources.v1");
     json_push_kv_int(&resources, "schema_version", 1);
     json_push_kv_int(&resources, "rss_mb", snapshot->rss_mb);
+    json_push_kv_int(&resources, "rss_anon_mb", snapshot->rss_components_available ? snapshot->rss_anon_mb : -1);
+    json_push_kv_int(&resources, "rss_file_mb", snapshot->rss_components_available ? snapshot->rss_file_mb : -1);
+    json_push_kv_int(&resources, "rss_shmem_mb", snapshot->rss_components_available ? snapshot->rss_shmem_mb : -1);
     json_push_kv_int(&resources, "swap_mb", snapshot->swap_mb);
     json_push_kv_int(&resources, "rss_warn_threshold_mb",
                      snapshot->rss_warn_threshold_mb);

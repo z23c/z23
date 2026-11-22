@@ -113,6 +113,10 @@ struct os_proc_cgroup_mem_stat {
 /* Fields are -1 when unreadable or unavailable on the host. */
 struct os_proc_mem {
     int64_t rss_bytes;         /* VmRSS */
+    int64_t rss_anon_bytes;    /* RssAnon */
+    int64_t rss_file_bytes;    /* RssFile */
+    int64_t rss_shmem_bytes;   /* RssShmem */
+    bool rss_components_available; /* component fields initialized */
     int64_t vsize_bytes;       /* VmSize */
     /* VmSwap: pages of this process currently swapped out. The cheap statm
      * read behind os_proc_resident_kib() carries no swap at all, so swap
@@ -363,6 +367,7 @@ bool os_proc_parse_seccomp_filters_for_test(const char *status, uint32_t *out);
  * field's value in bytes, or -1 when the label is absent/unparseable. */
 int64_t os_proc_status_field_bytes_for_test(const char *status,
                                             const char *label);
+void os_proc_status_mem_read_for_test(FILE *f, struct os_proc_mem *out);
 #endif
 
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────

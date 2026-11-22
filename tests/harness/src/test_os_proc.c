@@ -518,6 +518,28 @@ static int os_proc_status_field_parse_checks(void)
     OSPROC_CHECK("the last line needs no trailing newline to parse",
                  os_proc_status_field_bytes_for_test(
                      "VmRSS:\t 512 kB", "VmRSS:") == 512LL * 1024);
+    FILE *fixture = tmpfile();
+    OSPROC_CHECK("status fixture opens", fixture != NULL);
+    if (fixture) {
+        fputs("VmRSS:\t4096 kB\nVmSize:\t9000 kB\nVmSwap:\t7 kB\n"
+              "RssAnon:\t1024 kB\nRssFile:\t3072 kB\nRssShmem:\t0 kB\n", fixture);
+        rewind(fixture);
+        struct os_proc_mem snap = {0};
+        os_proc_status_mem_read_for_test(fixture, &snap);
+        OSPROC_CHECK("one status scan preserves totals and components",
+                     snap.rss_bytes == 4096LL * 1024 &&
+                     snap.vsize_bytes == 9000LL * 1024 &&
+                     snap.swap_bytes == 7LL * 1024 &&
+                     snap.rss_anon_bytes == 1024LL * 1024 &&
+                     snap.rss_file_bytes == 3072LL * 1024 &&
+                     snap.rss_shmem_bytes == 0 && snap.rss_components_available);
+        fclose(fixture);
+    }
+    struct os_proc_mem absent = {0};
+    os_proc_status_mem_read_for_test(NULL, &absent);
+    OSPROC_CHECK("missing status fields remain unknown", absent.rss_bytes == -1 &&
+                 absent.rss_anon_bytes == -1 && absent.rss_file_bytes == -1 &&
+                 absent.rss_shmem_bytes == -1 && absent.swap_bytes == -1);
     /* A real zero swaps to exactly 0 bytes, a known value — never the -1
      * unknown: pin it so a falsy-zero regression cannot pass silently. */
     OSPROC_CHECK("VmSwap 0 kB parses to 0 bytes, not unknown",

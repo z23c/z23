@@ -137,23 +137,39 @@ static bool os_proc_status_line_bytes(const char *line, const char *label,
     return true;
 }
 
-/* Read a single "Label: NNN kB" style line's value (in kB) from a
- * /proc/self/status-shaped file, returned as bytes. -1 if not found. */
-static int64_t os_proc_status_field_bytes(const char *path, const char *label)
+/* Read all process counters from one status open. First matching row wins. */
+static void os_proc_status_mem_read(FILE *f, struct os_proc_mem *out)
 {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-
+    struct status_slot { const char *label; int64_t *value; bool seen; } slots[] = {
+        {"VmRSS:", &out->rss_bytes, false},
+        {"VmSize:", &out->vsize_bytes, false},
+        {"VmSwap:", &out->swap_bytes, false},
+        {"RssAnon:", &out->rss_anon_bytes, false},
+        {"RssFile:", &out->rss_file_bytes, false},
+        {"RssShmem:", &out->rss_shmem_bytes, false},
+    };
+    for (size_t i = 0; i < sizeof slots / sizeof slots[0]; i++)
+        *slots[i].value = -1;
+    out->rss_components_available = true;
+    if (!f) return;
     char line[256];
-    int64_t result = -1;
-    while (fgets(line, sizeof(line), f)) {
-        if (os_proc_status_line_bytes(line, label, &result))
-            break;
+    while (fgets(line, sizeof line, f)) {
+        for (size_t i = 0; i < sizeof slots / sizeof slots[0]; i++) {
+            if (!slots[i].seen && os_proc_status_line_bytes(
+                    line, slots[i].label, slots[i].value)) {
+                slots[i].seen = true;
+                break;
+            }
+        }
     }
-    fclose(f);
-    return result;
 }
+
+#ifdef ZCL_TESTING
+void os_proc_status_mem_read_for_test(FILE *f, struct os_proc_mem *out)
+{
+    os_proc_status_mem_read(f, out);
+}
+#endif
 
 #ifdef ZCL_TESTING
 /* Test-only seam onto the same parser: one status text, line by line,
@@ -377,6 +393,10 @@ bool os_proc_mem_read(struct os_proc_mem *out)
         return true;
     }
 
+    out->rss_anon_bytes = -1;
+    out->rss_file_bytes = -1;
+    out->rss_shmem_bytes = -1;
+    out->rss_components_available = false;
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS counters;
     memset(&counters, 0, sizeof(counters));
@@ -429,11 +449,9 @@ bool os_proc_mem_read(struct os_proc_mem *out)
         os_proc_darwin_available_bytes(out->sys_total_bytes);
     return true;
 #else
-    out->rss_bytes = os_proc_status_field_bytes("/proc/self/status", "VmRSS:");
-    out->vsize_bytes = os_proc_status_field_bytes("/proc/self/status", "VmSize:");
-    /* VmSwap is what VmRSS hides: pages already out of RAM, so a small
-     * machine under pressure still reports a deceptively lean resident set. */
-    out->swap_bytes = os_proc_status_field_bytes("/proc/self/status", "VmSwap:");
+    FILE *status = fopen("/proc/self/status", "r");
+    os_proc_status_mem_read(status, out);
+    if (status) fclose(status);
 
     char dir[768];
     if (os_proc_cgroup_dir(dir, sizeof(dir))) {
