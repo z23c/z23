@@ -10430,6 +10430,79 @@ static bool fbw_status_action(struct fbw *w, const uint8_t peer[32],
     return ok;
 }
 
+/* A link can disappear after a valid DATA frame but before the answer CLOSE.
+ * The receiver must not treat that partial stream as a delivered page. */
+static int test_fleet_board_midstream_disconnect(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post, seed;
+    struct json_value status;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-midstream-test" };
+    uint8_t frame[MESH_LOOP_WIRE_MAX], kind = 0;
+    bool more = false;
+    size_t frames = 0;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+    json_init(&status);
+    TEST("fleet board carriage: an interrupted answer retries without losing or duplicating a post") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer,
+                                  MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                                  FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_post(&w.a, 6, FLEET_BOARD_SCOPE_FLEET, "prior post",
+                        1999, 3600, 2099, &seed));
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "interrupted answer",
+                        2000, 3600, 2100, &post));
+        mesh_loop_discard(w.asker, w.ask_q, w.f.res_term);
+        mesh_loop_discard(w.answerer, w.answer_q, w.f.term_peer.ini);
+        mesh_stream_test_reset();
+        ASSERT(boot_fleet_board_fleet_test_pull(w.f.resp_noise_pub, w.box_a));
+        int64_t prior_after = boot_fleet_board_fleet_test_last_after();
+        ASSERT(prior_after > 0);
+        ASSERT_EQ(mesh_loop_pump(w.asker, w.ask_q, w.f.res_term, &w.mp,
+                                 w.answerer), (size_t)1);
+        boot_fleet_board_fleet_test_serve(); /* DATA, but no CLOSE */
+        size_t len = mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini,
+                                    frame, sizeof(frame), &more);
+        ASSERT(more && mesh_stream_test_read_header(frame, len, &kind, NULL));
+        ASSERT_EQ(kind, MESH_STREAM_KIND_DATA);
+        ASSERT(mesh_stream_frame(&w.mp, w.asker, frame, len, NULL));
+        atomic_store(&w.asker->disconnect, true);
+        atomic_store(&w.answerer->disconnect, true);
+        mesh_stream_test_pump_tick();
+        atomic_store(&w.asker->disconnect, false);
+        atomic_store(&w.answerer->disconnect, false);
+        ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT(fbw_status_exact(&w, w.box_a, post.id, &status));
+        const struct json_value *attempt = json_get(&status, "peer_attempt");
+        ASSERT(json_get_bool(json_get(attempt, "observed")));
+        ASSERT(json_get_str(json_get(attempt, "phase")));
+        ASSERT(json_get_str(json_get(attempt, "reason")));
+        ASSERT(json_get_str(json_get(attempt, "next_action")));
+        ASSERT_STR_EQ(json_get_str(json_get(attempt, "phase")), "close");
+        ASSERT_STR_EQ(json_get_str(json_get(attempt, "reason")), "stream_session_lost");
+        ASSERT_STR_EQ(json_get_str(json_get(attempt, "next_action")), "inspect_peer_connection");
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
+        ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), prior_after);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        PASS();
+    }
+    _test_next:
+    json_free(&status);
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 static int test_fleet_board_malformed_answer_status(void)
 {
     int failures = 0;
@@ -16385,6 +16458,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_fleet_cursor_heals_lost_rows();
     failures += test_fleet_board_fleet_cursor_table_full();
     failures += test_fleet_board_fleet_carriage_gap_free();
+    failures += test_fleet_board_midstream_disconnect();
     failures += test_fleet_board_malformed_answer_status();
     failures += test_fleet_board_pull_inbox_pressure(false);
     failures += test_fleet_board_pull_inbox_pressure(true);
