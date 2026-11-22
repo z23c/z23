@@ -241,7 +241,9 @@ static int ad_model_cases(void)
 enum ad_decision { AD_CANCEL, AD_ESCAPE, AD_ESCAPE_AFTER_CONFIRM, AD_CLOSE, AD_HEADLESS, AD_EARLY, AD_PAINT_FAIL, AD_CANCEL_AFTER_CONFIRM, AD_CLOSE_AFTER_CONFIRM, AD_STALE, AD_CONFIRM };
 struct ad_fake {
     enum ad_decision decision;
-    bool observed, safe, all_pages, complete_details;
+    unsigned calls;
+    bool observed, safe, all_pages, complete_details, continuation;
+    char preview_text[2048];
     char destination[1024], parent[1024];
 };
 static bool ad_destination(const struct zcl_present_model_v1 *m, char *out, size_t cap)
@@ -373,6 +375,17 @@ static bool ad_present(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
 {
     struct ad_fake *f = context;
+    f->calls++;
+    if (f->calls > 1) {
+        f->continuation = !strcmp(model->title, "Your copy is ready");
+        size_t used = 0;
+        for (uint32_t i = 0; i < model->item_count && used < sizeof(f->preview_text) - 1; ++i) {
+            int n = snprintf(f->preview_text + used, sizeof(f->preview_text) - used, "%s ", model->items[i].value);
+            if (n < 0 || (size_t)n >= sizeof(f->preview_text) - used) break;
+            used += (size_t)n;
+        }
+        return f->continuation && ad_default_enter(live);
+    }
     uint32_t pages = 0;
     if (!ad_observe(f, model, page, &pages, why, cap) || f->decision == AD_HEADLESS)
         return false;
@@ -413,7 +426,7 @@ static bool ad_no_commit(const struct abc_world *w, enum ad_decision decision)
     bool rejected = decision == AD_HEADLESS || decision == AD_PAINT_FAIL;
     char key[ABC_PATH];
     (void)snprintf(key, sizeof(key), "%s/.z23/zcode_publisher.key", w->root);
-    bool ok = fake.observed && fake.complete_details && access(key, F_OK) != 0 &&
+    bool ok = fake.calls == 1 && fake.observed && fake.complete_details && access(key, F_OK) != 0 &&
         ad_reply_uncommitted(&reply, rejected) &&
         access(fake.destination, F_OK) != 0;
     if (decision == AD_EARLY || decision == AD_PAINT_FAIL) ok = ok && fake.safe;
@@ -449,6 +462,17 @@ static bool ad_personal_result(const struct json_value *data, const char *root)
     return version && strlen(version) == 64 && root && strcmp(version, root) &&
         publisher && !strncmp(publisher, "p-", 2);
 }
+static bool ad_continuation_result(const struct ad_fake *fake, const struct json_value *data)
+{
+    const char *version = json_get_str(json_get(data, "version"));
+    char prefix[13] = {0}; if (version && strlen(version) == 64) memcpy(prefix, version, 12);
+    const struct json_value *operations = json_get(data, "operations");
+    const struct json_value *executed = json_get(data, "continuation_executed");
+    const char *status = json_get_str(json_get(data, "continuation"));
+    return status && !strcmp(status, "adopted") && executed && executed->type == JSON_BOOL && fake->calls == 2 && fake->continuation && prefix[0] && strstr(fake->preview_text, prefix) &&
+        operations && json_size(operations) == 0 &&
+        !json_get_bool(executed) && !json_get(data, "kept");
+}
 static bool ad_confirm(const struct abc_world *w)
 {
     struct ad_fake fake = {.decision = AD_CONFIRM}; struct zcl_command_reply reply;
@@ -459,7 +483,7 @@ static bool ad_confirm(const struct abc_world *w)
     bool ok = fake.observed && fake.safe && fake.all_pages && reply.status == ZCL_COMMAND_STATUS_PASSED &&
         copy && root && !strcmp(copy, fake.destination) && strlen(root) == 64 &&
         ad_result_adopted(w, copy, root) && release && !strcmp(release, w->origin_release);
-    ok = ok && ad_personal_result(&reply.data, root);
+    ok = ok && ad_personal_result(&reply.data, root) && ad_continuation_result(&fake, &reply.data);
     zcl_command_reply_free(&reply); return ok;
 }
 int test_app_adopt(void)

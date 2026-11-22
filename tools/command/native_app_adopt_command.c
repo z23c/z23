@@ -3,6 +3,7 @@
 #include "command/native_command.h"
 #include "command/native_app_adopt.h"
 #include "command/native_app_installed_copy.h"
+#include "command/native_app_receive_flow.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_personalize_command.h"
 #include "command/native_zcode_package_copy.h"
@@ -367,7 +368,11 @@ static void ac_run(const struct zcl_command_request *request,
     bool shown = app_confirm_show(&w->view, presenter, context, why, sizeof(why));
     app_confirm_free(&w->view);
     if (!shown) ac_fail(reply, "CONFIRMATION_UNAVAILABLE", "Cannot open the confirmation window.", why);
-    else if (w->view.confirmed) ac_commit(request, reply, &w->plan);
+    else if (w->view.confirmed) {
+        ac_commit(request, reply, &w->plan);
+        if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+            app_adopted_flow_run(w->plan.datadir, reply, presenter, context);
+    }
     else (void)json_push_kv_str(&reply->data, "status", "canceled");
     free(w);
 }
