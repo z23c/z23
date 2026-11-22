@@ -297,12 +297,23 @@ static void report_stale(char rows[][WCS_PATH], int n, int *stale, int ns)
         fprintf(stderr, "    %s\n", rows[stale[i]]);
 }
 
+/* Sealed files whose POSIX-only static helper stays in the TU. The Makefile
+ * gives the same two objects -Wno-unused-function on a Windows host; the gate
+ * must not hold them to a stricter rule than the product build does. */
+static const char *const k_wcs_unused_exempt[] = {
+    "core/modules/net/src/https_server_install.c",
+    "core/modules/net/src/rom_fetch.c", NULL
+};
+
 static void build_compile_argv(char *src, size_t l, char **cargv)
 {
     int na = 0;
     cargv[na++] = g_wcs_cc;
     for (int fi = 0; fi < g_wcs_nflag; fi++)
         cargv[na++] = g_wcs_flag[fi];
+    if (wcs_name_in(src[0] == '.' && src[1] == '/' ? src + 2 : src,
+                    k_wcs_unused_exempt))
+        cargv[na++] = (char *)"-Wno-unused-function";
     if (strncmp(src, "tests/harness/include/test/", 27) == 0) {
         cargv[na++] = (char *)"-DZCL_TESTING";
         cargv[na++] = (char *)"-include";

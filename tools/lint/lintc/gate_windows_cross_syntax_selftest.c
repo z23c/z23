@@ -970,6 +970,22 @@ static int gcc14_error_probes(void)
           "char *zcl_gate_wincross_intconv(void) { return 1; }\n" },
         { "incompatible-pointer-types",
           "int *zcl_gate_wincross_ptrtype(char *c) { return c; }\n" },
+        { "unused-function",
+          "static int zcl_gate_wincross_unused(void) { return 1; }\n" },
+        { "unused-const-variable",
+          "static const char zcl_gate_wincross_unused_const[] = \"x\";\n" },
+        /* The plain `printf` archetype is the Microsoft dialect on MinGW and
+         * rejects %zu; this is the shape that broke the native build. */
+        { "format",
+          "__attribute__((format(printf, 1, 2)))\n"
+          "void zcl_gate_wincross_fmt(const char *f, ...);\n"
+          "void zcl_gate_wincross_fmt_use(unsigned long n)\n"
+          "{ zcl_gate_wincross_fmt(\"%zu\", n); }\n" },
+        { "format-extra-args",
+          "__attribute__((__format__(__gnu_printf__, 1, 2)))\n"
+          "void zcl_gate_wincross_fmt2(const char *f, ...);\n"
+          "void zcl_gate_wincross_fmt2_use(void)\n"
+          "{ zcl_gate_wincross_fmt2(\"x\", 1); }\n" },
     };
     static char src[SFP];
     static char *argv[WCS_ARGS];
@@ -1160,7 +1176,9 @@ int wcs_selftest_phase(void)
     if (rc) return rc;
     printf("  OK: --self-test — flag set trips on a Windows-only undeclared "
            "identifier and on the diagnostics GCC 14 makes errors (implicit "
-           "declaration, int and pointer conversion), passes clean and "
+           "declaration, int and pointer conversion) and on the classes the "
+           "native build rejects (unused static function and constant, "
+           "format dialect and extra arguments), passes clean and "
            "test-compat code, rejects a crashed compiler backend\n");
     (void)st;
     char flagsnul[SFP];

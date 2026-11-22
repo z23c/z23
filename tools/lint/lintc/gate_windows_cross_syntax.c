@@ -792,11 +792,32 @@ static const char *const k_wcs_gcc14_errors[] = {
     "-Werror=int-conversion", "-Werror=incompatible-pointer-types", NULL
 };
 
+/* Classes the native Windows build (GCC 16, -Wall -Wextra -Werror) rejects that
+ * the gate previously let through: a static helper used only by POSIX arms, and
+ * printf-family calls checked against the wrong format dialect. Each name is
+ * valid on GCC 13, and -Werror=X also enables X itself. */
+static const char *const k_wcs_native_errors[] = {
+    "-Werror=unused-function", "-Werror=unused-const-variable",
+    "-Werror=format", "-Werror=format-extra-args", NULL
+};
+
 static int wcs_add_gcc14_errors(void)
 {
     for (int i = 0; k_wcs_gcc14_errors[i]; i++)
         if (wcs_flag_add(k_wcs_gcc14_errors[i])) return 2;
+    for (int i = 0; k_wcs_native_errors[i]; i++)
+        if (wcs_flag_add(k_wcs_native_errors[i])) return 2;
     return 0;
+}
+
+/* -S, not -fsyntax-only: GCC emits "defined but not used" only at the end of
+ * code generation, so a syntax-only run exits 0 on -Werror=unused-function
+ * and that class would pass here and fail natively. */
+static int wcs_add_base_flags(const char *api)
+{
+    return wcs_flag_add("-std=c2x") || wcs_flag_add("-S") ||
+           wcs_flag_add("-o") || wcs_flag_add("/dev/null") ||
+           wcs_flag_add(api) || wcs_add_gcc14_errors();
 }
 
 static int wcs_setup(void)
@@ -809,10 +830,7 @@ static int wcs_setup(void)
         return 2;
     int rc = wcs_setup_floor(api, block, plat, &nplat);
     if (rc) return rc;
-    if (wcs_flag_add("-std=c2x") || wcs_flag_add("-fsyntax-only") ||
-        wcs_flag_add(api))
-        return 2;
-    if (wcs_add_gcc14_errors()) return 2;
+    if (wcs_add_base_flags(api)) return 2;
     for (int i = 0; i < nplat; i++)
         if (wcs_flag_add(plat[i])) return 2;
     if (build_include_flags() != 0) return 2;
