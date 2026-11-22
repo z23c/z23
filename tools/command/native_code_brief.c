@@ -10,6 +10,9 @@
  * object never exceeds the caller's budget: sections are removed from the
  * lowest-priority end and every removal is reported in `cut`. */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "command/native_code_brief.h"
 
 #include "base/safe_alloc.h"

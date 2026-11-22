@@ -6,6 +6,9 @@
  * every READY leaf has a live binding — without contacting a node.
  */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 
 #include "config/command_catalog.h"
