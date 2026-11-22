@@ -186,6 +186,58 @@ static int test_focus_missing_run(void)
     return failures;
 }
 
+static int test_focus_malformed_run(void)
+{
+    int failures = 0;
+    TEST("code_focus: malformed timing rows refuse instead of becoming valid evidence") {
+        static const char *const bad[] = {
+            "{}",
+            "{\"groups\":null}",
+            "{\"groups\":[1]}",
+            "{\"groups\":[{\"rc\":1}]}",
+            "{\"groups\":[{\"name\":\"\",\"rc\":1}]}",
+            "{\"groups\":[{\"name\":7,\"rc\":1}]}",
+            "{\"groups\":[{\"name\":\"net\"}]}",
+            "{\"groups\":[{\"name\":\"net\",\"rc\":\"1\"}]}",
+            "{\"groups\":[{\"name\":\"net\",\"rc\":0.5}]}",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json", bad[i]));
+            struct specialist_focus_evidence ev;
+            specialist_focus_evidence_clear(&ev);
+            ASSERT(!specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+            ASSERT(ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+        }
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json",
+            "{\"groups\":[{\"name\":\"test_fleet_parity\",\"rc\":1},"
+            "{\"name\":\"\",\"rc\":0}]}"));
+        struct specialist_focus_evidence ev;
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(!specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        ASSERT(ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+        ASSERT(ev.failed_count == 1);
+        ASSERT_STR_EQ(ev.failed[0], "test_fleet_parity");
+
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/lint-timing/last-run.json",
+                              "{\"gates\":[{\"name\":\"check-malloc\"}]}"));
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(!specialist_focus_load_failed_gates(FOCUS_FIX, &ev));
+        ASSERT(ev.gates_run == SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json",
+            "{\"groups\":[{\"name\":\"net\",\"rc\":0},"
+            "{\"name\":\"test_fleet_parity\",\"rc\":1}]}"));
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        ASSERT(ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+        ASSERT(ev.failed_count == 1);
+        ASSERT_STR_EQ(ev.failed[0], "test_fleet_parity");
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(FOCUS_FIX);
+    return failures;
+}
+
 static bool focus_write_boundary(bool gates, size_t cap, int extra)
 {
     char raw[4096];
@@ -635,6 +687,7 @@ int test_code_focus(void)
     failures += test_focus_list();
     failures += test_focus_unknown();
     failures += test_focus_missing_run();
+    failures += test_focus_malformed_run();
     failures += focus_test_failure_capacity(false);
     failures += focus_test_failure_capacity(true);
     failures += test_focus_recorded_run();

@@ -238,10 +238,28 @@ static bool focus_add_name(char (*table)[SPECIALIST_GROUP_MAX], size_t cap,
     return true;
 }
 
+static bool focus_artifact_row(const struct json_value *row, const char **name,
+                               int64_t *rc)
+{
+    if (row->type != JSON_OBJ)
+        return false;
+    const struct json_value *name_value = json_get(row, "name");
+    const struct json_value *rc_value = json_get(row, "rc");
+    if (!name_value || name_value->type != JSON_STR ||
+        !rc_value || rc_value->type != JSON_INT)
+        return false;
+    const char *text = json_get_str(name_value);
+    if (!text || !text[0])
+        return false;
+    *name = text;
+    *rc = json_get_int(rc_value);
+    return true;
+}
+
 /* One honesty contract over both timing artifacts: ENOENT is a missing run
  * (true, *run set MISSING, names untouched — never a clean score), while a
  * present file is RECORDED even when every rc is 0. Unreadable, OOM after
- * open, or corrupt JSON fails closed. */
+ * open, corrupt JSON, or a malformed timing artifact fails closed. */
 static bool focus_load_failed_artifact(
     const char *root, const char *rel, const char *array_key,
     char (*table)[SPECIALIST_GROUP_MAX], size_t cap, size_t *count,
@@ -270,13 +288,17 @@ static bool focus_load_failed_artifact(
     const struct json_value *rows = json_get(&doc, array_key);
     if (!rows || rows->type != JSON_ARR) {
         json_free(&doc);
-        return true;
+        LOG_FAIL(FOCUS_TAG, "%s is missing or not an array in %s", array_key, rel);
     }
     bool ok = true;
     for (size_t i = 0; i < rows->num_children && ok; i++) {
         const struct json_value *row = &rows->children[i];
-        const char *name = json_get_str(json_get(row, "name"));
-        int64_t rc = json_get_int(json_get(row, "rc"));
+        const char *name = NULL;
+        int64_t rc = 0;
+        if (!focus_artifact_row(row, &name, &rc)) {
+            json_free(&doc);
+            LOG_FAIL(FOCUS_TAG, "malformed %s row %zu in %s", array_key, i, rel);
+        }
         if (rc != 0)
             ok = focus_add_name(table, cap, count, name);
     }

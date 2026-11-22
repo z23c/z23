@@ -95,12 +95,12 @@ bool specialist_path_in_territory(const struct specialist *spec,
 void specialist_focus_evidence_clear(struct specialist_focus_evidence *ev);
 
 /* ENOENT → true with tests_run MISSING (not a clean suite). Unreadable,
- * OOM-after-open, or corrupt JSON → false after logging. A present file
- * sets tests_run RECORDED even when every rc is 0. */
+ * OOM-after-open, corrupt JSON, or a malformed timing artifact → false after logging.
+ * A present file sets tests_run RECORDED even when every rc is 0. */
 bool specialist_focus_load_failed_groups(const char *root,
                                           struct specialist_focus_evidence *ev);
 /* Same honesty contract, over .cache/lint-timing/last-run.json `gates[]`:
- * ENOENT → gates_run MISSING; corrupt or unreadable → false. */
+ * ENOENT → gates_run MISSING; corrupt, malformed, or unreadable → false. */
 bool specialist_focus_load_failed_gates(const char *root,
                                          struct specialist_focus_evidence *ev);
 /* The subset of the artifact's failed gates that `spec` owns (its `gates`
