@@ -30,6 +30,7 @@
 #include "vcs/zcode_dht_identity.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -111,6 +112,16 @@ int64_t board_now(void)
     return (int64_t)platform_time_wall_time_t();
 }
 
+/* One refused pull, logged with the stage that said no and the command that
+ * clears it (boot_fleet_board_refusal.c). */
+static void board_refusal_log(enum boot_fleet_board_stage stage,
+                              const char *why)
+{
+    char line[512];
+    LOG_WARN("fleet.board", "fleet pull refused: %s",
+             boot_fleet_board_stage_line(stage, why, line, sizeof line));
+}
+
 /* The pairing row's own window cannot say whether the peer's master
  * identity is still ACTIVE on chain, so that is asked separately. */
 static enum mesh_pairing_reason board_delegation_reason(
@@ -141,8 +152,7 @@ static bool board_delegation_check(struct node_db *ndb,
     if (!record)
         return false;
     atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
-    LOG_WARN("fleet.board", "fleet pull refused: delegation %s",
-             mesh_pairing_reason_token(reason));
+    board_refusal_log(BOARD_STAGE_DELEGATION, mesh_pairing_reason_token(reason));
     return false;
 }
 
@@ -255,7 +265,7 @@ static bool board_read_check(const uint8_t signer[32], bool record)
     if (!record)
         return false;
     atomic_fetch_add_explicit(&g_role_refused, 1, memory_order_relaxed);
-    LOG_WARN("fleet.board", "fleet pull refused: %s", why);
+    board_refusal_log(BOARD_STAGE_ANSWER_ROLE, why);
     return false;
 }
 
@@ -278,10 +288,12 @@ static bool board_roster_check(const uint8_t online_pubkey[32], bool record)
     uint64_t skipped = 0;
     if (!ok && record &&
         boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_PEER_REFUSED, now,
-                                  &skipped))
-        LOG_WARN("fleet.board", "fleet pull refused: not on the fleet roster "
-                 "(%llu more since the last line)",
-                 (unsigned long long)skipped);
+                                  &skipped)) {
+        char why[96];
+        (void)snprintf(why, sizeof why, "not on the fleet roster (%llu more "
+                       "since the last line)", (unsigned long long)skipped);
+        board_refusal_log(BOARD_STAGE_ROSTER, why);
+    }
     return ok;
 }
 
@@ -296,12 +308,13 @@ bool board_roster_admits(const uint8_t online_pubkey[32])
 
 /* A pull refusal that names no row's check; with `record` it is counted
  * and logged as the pull's. */
-static void board_pull_refused(bool record, const char *why)
+static void board_pull_refused(bool record, enum boot_fleet_board_stage stage,
+                               const char *why)
 {
     if (!record)
         return;
     atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
-    LOG_WARN("fleet.board", "fleet pull refused: %s", why);
+    board_refusal_log(stage, why);
 }
 
 /* One pairing row's whole chain: the delegation of its master resolves, is
@@ -315,7 +328,8 @@ static enum fleet_board_push_refusal board_disclosure_row(
 {
     struct vcs_zcode_dht_delegation peer;
     if (!board_peer_delegation(row, &peer)) {
-        board_pull_refused(record, "delegation_unresolved");
+        board_pull_refused(record, BOARD_STAGE_DELEGATION,
+                           "delegation_unresolved");
         return FLEET_BOARD_PUSH_REFUSAL_DELEGATION;
     }
     if (!board_delegation_check(ndb, row, &peer, peer_noise_static, now,
@@ -351,7 +365,7 @@ static enum fleet_board_push_refusal board_disclosure(
     struct db_mesh_pairing rows[FLEET_BOARD_DISCLOSURE_ROWS_MAX];
     size_t n = board_disclosure_rows(ndb, peer_noise_static, now, rows);
     if (n == 0) {
-        board_pull_refused(record, "no live pairing");
+        board_pull_refused(record, BOARD_STAGE_PAIRING, "no live pairing");
         return FLEET_BOARD_PUSH_REFUSAL_PAIRING;
     }
     enum fleet_board_push_refusal newest = FLEET_BOARD_PUSH_REFUSAL_PAIRING;

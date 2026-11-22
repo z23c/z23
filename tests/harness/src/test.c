@@ -2357,6 +2357,7 @@ static void run_full_suite_late_and_specs(int *failures)
     { extern int test_fleet_wiki_scope(void); *failures += test_fleet_wiki_scope(); }
     { extern int test_fleet_board_bridge(void); *failures += test_fleet_board_bridge(); }
     { extern int test_fleet_board_carriage(void); *failures += test_fleet_board_carriage(); }
+    { extern int test_fleet_board_replication(void); *failures += test_fleet_board_replication(); }
     { extern int test_board_site(void); *failures += test_board_site(); }
 
     /* Spec-based user story tests */

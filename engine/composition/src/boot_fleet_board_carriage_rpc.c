@@ -240,8 +240,10 @@ static bool fb_observation_ingest(struct json_value *o,
                                   const struct boot_fleet_board_observation *v)
 {
     enum fleet_board_result r = (enum fleet_board_result)v->result;
+    /* An expired post is stale, not wrong: it is counted as its own outcome. */
     const char *disposition = v->stored ? "stored" : v->retryable ? "deferred" :
-                              r == FLEET_BOARD_OK ? "held" : "refused";
+                              r == FLEET_BOARD_OK ? "held" :
+                              r == FLEET_BOARD_ERR_EXPIRED ? "expired" : "refused";
     return json_push_kv_int(o, "arrival", v->arrival) &&
            json_push_kv_str(o, "disposition", disposition) &&
            json_push_kv_str(o, "result", fleet_board_result_string(r));
@@ -366,6 +368,11 @@ static bool fb_observation_fields(struct json_value *o,
     ok = ok && fb_observation_detail(o, v);
     const char *action = fb_observation_action(v);
     if (action) ok = ok && json_push_kv_str(o, "next_action", action);
+    enum boot_fleet_board_stage stage;
+    if (boot_fleet_board_observation_stage(v, &stage))
+        ok = ok && json_push_kv_str(o, "stage", boot_fleet_board_stage_name(stage)) &&
+             json_push_kv_str(o, "operator_action",
+                              boot_fleet_board_stage_action(stage));
     if (v->epoch_set) {
         char hex[33];
         zcl_hex_encode(v->epoch, sizeof v->epoch, hex);

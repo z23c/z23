@@ -3,6 +3,9 @@
  * the fixed refusal phrase plus the limit hit and the command that clears it. */
 
 #include "config/boot_fleet_board.h"
+#include "config/mesh_stream.h"
+
+#include "util/log_macros.h"
 
 #include <stdio.h>
 
@@ -52,4 +55,165 @@ const char *boot_fleet_board_write_message(enum fleet_board_result r, char *buf,
     else
         (void)snprintf(buf, cap, "%s", fleet_board_result_string(r));
     return buf;
+}
+
+/* ── the stage a replication refusal happened at ─────────────────────────
+ * Every refusal on the pull path names the stage that said no and one
+ * command an operator can run. Naming only: nobody is admitted or refused
+ * differently because of anything below. */
+
+const char *boot_fleet_board_stage_name(enum boot_fleet_board_stage s)
+{
+    static const char *const names[BOARD_STAGES] = {
+        [BOARD_STAGE_PAIRING] = "pairing",
+        [BOARD_STAGE_DELEGATION] = "delegation",
+        [BOARD_STAGE_STREAM] = "stream",
+        [BOARD_STAGE_ANSWER_ROLE] = "answer-role",
+        [BOARD_STAGE_INGEST_ROLE] = "ingest-role",
+        [BOARD_STAGE_INGEST_LIMIT] = "ingest-limit",
+        [BOARD_STAGE_DECODE] = "decode",
+        [BOARD_STAGE_ROSTER] = "roster",
+    };
+    return (unsigned)s < BOARD_STAGES ? names[s] : "unknown";
+}
+
+const char *boot_fleet_board_stage_action(enum boot_fleet_board_stage s)
+{
+    static const char *const actions[BOARD_STAGES] = {
+        [BOARD_STAGE_PAIRING] = "re-run `z23 ops mesh pair plan --peer=<addr-or-"
+            "fingerprint-prefix>` then `z23 ops mesh pair commit --peer=<selector> "
+            "--fingerprint=<64hex>` (check the window with `z23 ops mesh pair list`)",
+        [BOARD_STAGE_DELEGATION] = "renew the peer's delegation before it "
+            "lapses (`z23 fleet doctor` on the peer names its expiry); the next "
+            "pull retries on its own",
+        [BOARD_STAGE_STREAM] = "confirm the peer is connected and paired with "
+            "`z23 ops mesh pair list`, and read the peer's `fleet pull refused: "
+            "stage=` log line, which names the check that said no",
+        [BOARD_STAGE_ANSWER_ROLE] = "on the answering host run `z23 fleet roles "
+            "grant --fp=<64-hex fingerprint of the asking host's board key> "
+            "--role=observer` (or worker)",
+        [BOARD_STAGE_INGEST_ROLE] = "on the receiving host run `z23 fleet roles "
+            "grant --fp=<64-hex fingerprint of the post's signing key> "
+            "--role=worker`; the refused row is offered again",
+        [BOARD_STAGE_INGEST_LIMIT] = "nothing to grant: the row is offered again "
+            "by a later sweep once the author's quota window, the store or "
+            "the clock clears (`z23 fleet board status` shows the counts)",
+        [BOARD_STAGE_DECODE] = "the peer sent bytes this node cannot read; run "
+            "the same reviewed build on both hosts (`z23 version`)",
+        [BOARD_STAGE_ROSTER] = "enrol the peer's host in the fleet roster "
+            "(`z23 fleet join <token>` on that host)",
+    };
+    return (unsigned)s < BOARD_STAGES ? actions[s] : "";
+}
+
+const char *boot_fleet_board_stage_line(enum boot_fleet_board_stage s,
+                                        const char *detail, char *buf,
+                                        size_t cap)
+{
+    (void)snprintf(buf, cap, "stage=%s: %s; next: %s",
+                   boot_fleet_board_stage_name(s), detail ? detail : "",
+                   boot_fleet_board_stage_action(s));
+    return buf;
+}
+
+enum boot_fleet_board_stage boot_fleet_board_ingest_stage(
+    enum fleet_board_result r)
+{
+    switch (r) {
+    case FLEET_BOARD_ERR_ROLE:
+        return BOARD_STAGE_INGEST_ROLE;
+    case FLEET_BOARD_ERR_FUTURE:
+    case FLEET_BOARD_ERR_QUOTA:
+    case FLEET_BOARD_ERR_WIKI_QUOTA:
+    case FLEET_BOARD_ERR_WIKI_FULL:
+    case FLEET_BOARD_ERR_CAPACITY:
+    case FLEET_BOARD_ERR_BUSY:
+    case FLEET_BOARD_ERR_STORAGE:
+        return BOARD_STAGE_INGEST_LIMIT;
+    default:
+        return BOARD_STAGE_DECODE;
+    }
+}
+
+static bool stage_of_gate(int reason, enum boot_fleet_board_stage *out)
+{
+    switch ((enum boot_fleet_board_gate_reason)reason) {
+    case FLEET_BOARD_GATE_PAIRING:
+        *out = BOARD_STAGE_PAIRING;
+        return true;
+    case FLEET_BOARD_GATE_DELEGATION_UNRESOLVED:
+    case FLEET_BOARD_GATE_DELEGATION_REFUSED:
+        *out = BOARD_STAGE_DELEGATION;
+        return true;
+    case FLEET_BOARD_GATE_ROSTER:
+        *out = BOARD_STAGE_ROSTER;
+        return true;
+    }
+    return false;
+}
+
+bool boot_fleet_board_observation_stage(
+    const struct boot_fleet_board_observation *v,
+    enum boot_fleet_board_stage *out)
+{
+    if (!v || !v->found || !out)
+        return false;
+    switch (v->phase) {
+    case FLEET_BOARD_OBS_GATE:
+        return stage_of_gate(v->result, out);
+    case FLEET_BOARD_OBS_ANSWER_REFUSED:
+        *out = BOARD_STAGE_DECODE;
+        return true;
+    case FLEET_BOARD_OBS_ANSWER_DEFERRED:
+        *out = BOARD_STAGE_INGEST_LIMIT;
+        return true;
+    case FLEET_BOARD_OBS_OPEN_FAILURE:
+        *out = BOARD_STAGE_STREAM;
+        return true;
+    case FLEET_BOARD_OBS_CLOSE:
+        /* A finished or service-ended stream is not a refusal. */
+        *out = BOARD_STAGE_STREAM;
+        return v->result != 0 && v->result != MESH_STREAM_CLOSED_BY_SERVICE;
+    case FLEET_BOARD_OBS_INGEST:
+        if (v->stored || v->result == FLEET_BOARD_OK ||
+            v->result == FLEET_BOARD_ERR_EXPIRED)
+            return false; /* stored, held, or stale: not a refusal */
+        *out = boot_fleet_board_ingest_stage((enum fleet_board_result)v->result);
+        return true;
+    default:
+        return false;
+    }
+}
+
+const char *boot_fleet_board_ingest_line(enum fleet_board_result r, char *buf,
+                                         size_t cap)
+{
+    return boot_fleet_board_stage_line(boot_fleet_board_ingest_stage(r),
+                                       fleet_board_result_string(r), buf, cap);
+}
+
+void boot_fleet_board_stage_warn(const char *what,
+                                 enum boot_fleet_board_stage s,
+                                 const char *detail)
+{
+    char line[512];
+    LOG_WARN("fleet.board", "%s: %s", what,
+             boot_fleet_board_stage_line(s, detail, line, sizeof line));
+}
+
+void boot_fleet_board_ingest_warn(const char *what, enum fleet_board_result r)
+{
+    boot_fleet_board_stage_warn(what, boot_fleet_board_ingest_stage(r),
+                                fleet_board_result_string(r));
+}
+
+const char *boot_fleet_board_deferred_line(enum fleet_board_result r,
+                                           bool roster_only, char *buf,
+                                           size_t cap)
+{
+    if (roster_only && r == FLEET_BOARD_ERR_ROLE)
+        return boot_fleet_board_stage_line(
+            BOARD_STAGE_INGEST_LIMIT, "this box takes only sealed rows until "
+            "they arm its roster", buf, cap);
+    return boot_fleet_board_ingest_line(r, buf, cap);
 }

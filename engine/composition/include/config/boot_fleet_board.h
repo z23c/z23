@@ -684,4 +684,37 @@ void boot_fleet_board_fleet_test_tick_runs(uint64_t *seconds, uint64_t *pulls);
 const char *boot_fleet_board_write_message(enum fleet_board_result r, char *buf,
                                            size_t cap);
 
+/* The stage a replication refusal happened at, and one command an operator
+ * can run. Naming only: no acceptance rule depends on any of it. */
+enum boot_fleet_board_stage {
+    BOARD_STAGE_PAIRING, BOARD_STAGE_DELEGATION, BOARD_STAGE_STREAM,
+    BOARD_STAGE_ANSWER_ROLE, BOARD_STAGE_INGEST_ROLE,
+    BOARD_STAGE_INGEST_LIMIT, BOARD_STAGE_DECODE, BOARD_STAGE_ROSTER,
+    BOARD_STAGES
+};
+const char *boot_fleet_board_stage_name(enum boot_fleet_board_stage s);
+const char *boot_fleet_board_stage_action(enum boot_fleet_board_stage s);
+/* "stage=<name>: <detail>; next: <action>" into buf; returns buf. */
+const char *boot_fleet_board_stage_line(enum boot_fleet_board_stage s,
+                                        const char *detail, char *buf,
+                                        size_t cap);
+enum boot_fleet_board_stage boot_fleet_board_ingest_stage(
+    enum fleet_board_result r);
+/* One WARN line "<what>: stage=...; next: ..." for a refusal at a stage. */
+void boot_fleet_board_stage_warn(const char *what,
+                                 enum boot_fleet_board_stage s,
+                                 const char *detail);
+void boot_fleet_board_ingest_warn(const char *what, enum fleet_board_result r);
+/* The stage line for one refused ingest result. */
+const char *boot_fleet_board_ingest_line(enum fleet_board_result r, char *buf,
+                                         size_t cap);
+/* The stage line for a deferred ingest; a roster-only box says why. */
+const char *boot_fleet_board_deferred_line(enum fleet_board_result r,
+                                           bool roster_only, char *buf,
+                                           size_t cap);
+/* The stage a recorded observation was refused at; false when it is not a
+ * refusal (stored, held, stale, an open attempt, a finished stream). */
+bool boot_fleet_board_observation_stage(
+    const struct boot_fleet_board_observation *v,
+    enum boot_fleet_board_stage *out);
 #endif /* ZCL_CONFIG_BOOT_FLEET_BOARD_H */

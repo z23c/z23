@@ -830,19 +830,17 @@ static bool board_offer(struct node_db *ndb, const struct board_record *rec,
             c->carry_min = rec->arrival;
         atomic_fetch_add_explicit(&g_deferred, 1, memory_order_relaxed);
         uint64_t skipped = 0;
+        char line[512];
         if (boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_DEFERRED, now,
                                       &skipped))
             LOG_WARN("fleet.board", "fleet post deferred: %s (%llu more "
                      "since the last line)",
-                     rec->roster_only && r == FLEET_BOARD_ERR_ROLE
-                         ? "this box takes only sealed rows until they arm "
-                           "its roster"
-                         : fleet_board_result_string(r),
+                     boot_fleet_board_deferred_line(r, rec->roster_only, line,
+                                                    sizeof line),
                      (unsigned long long)skipped);
     } else if (r != FLEET_BOARD_OK && r != FLEET_BOARD_ERR_EXPIRED) {
         /* An expired post is stale, not wrong. */
-        LOG_WARN("fleet.board", "fleet post refused: %s",
-                 fleet_board_result_string(r));
+        boot_fleet_board_ingest_warn("fleet post refused", r);
     }
     return stored;
 }
@@ -935,7 +933,8 @@ static size_t board_drain_slot(struct node_db *ndb,
                           FLEET_BOARD_OBS_ANSWER_REFUSED, false, false, NULL);
             board_carriage_refused(slot->ask.peer_box_id, "malformed", now);
         }
-        LOG_WARN("fleet.board", "fleet answer refused: malformed");
+        boot_fleet_board_stage_warn("fleet answer refused", BOARD_STAGE_DECODE,
+                                    "malformed answer");
         return 0;
     }
     struct board_cursor c;
@@ -1041,8 +1040,8 @@ static bool board_stream_open(const char *service,
         board_observe(p->ask.peer_box_id, NULL, p->ask.after, 0, (int)refusal,
                       FLEET_BOARD_OBS_OPEN_FAILURE, false, false, NULL);
     if (refusal != MESH_STREAM_REFUSED_PEER_NOT_CONNECTED)
-        LOG_WARN("fleet.board", "fleet pull not opened: %s",
-                 mesh_stream_refusal_string(refusal));
+        boot_fleet_board_stage_warn("fleet pull not opened", BOARD_STAGE_STREAM,
+                                    mesh_stream_refusal_string(refusal));
     free(p);
     return false;
 }
