@@ -224,6 +224,12 @@ static void app_open_failed_spawn(const struct app_launch_entry *entry,
                  "session is not reachable from here");
         return;
     }
+    if (sp->spawn_errno) {
+        app_fail(out, APP_STAGE_STATE_FAILED,
+                 "the app started but its readiness could not be observed",
+                 "inspect its window and log before retrying");
+        return;
+    }
     snprintf(text, sizeof(text), "%s did not report ready within %d ms; it is "
              "still running as pid %ld", entry->id, timeout_ms, sp->pid);
     app_fail(out, APP_STAGE_NOT_READY, text,

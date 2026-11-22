@@ -40,6 +40,7 @@ extern char **environ;
 
 #define APP_LOG_SCAN_MAX (256u * 1024u)
 #define APP_POLL_MS 50
+#define APP_CLOCK_STALL_POLLS 20
 
 /* Each public app_proc_* function is defined ONCE, at the end of this file;
  * the per-platform bodies are static app_os_* helpers. */
@@ -345,14 +346,27 @@ static int app_spawn(const struct app_launch_entry *entry, int logfd,
     return rc;
 }
 
-/* One poll: exited (reaped here), ready, or neither. */
-static bool app_wait_step(pid_t pid, const struct app_launch_entry *entry,
-                          const char *log_path, int logfd, int64_t elapsed, int settle_ms,
-                          struct app_spawn_outcome *out)
+#if defined(ZCL_TESTING)
+static _Thread_local pid_t (*app_test_waitpid)(pid_t, int *, int);
+void zcl_test_app_settle_waitpid(pid_t (*hook)(pid_t, int *, int))
+{ app_test_waitpid = hook; }
+#endif
+
+static pid_t app_waitpid(pid_t pid, int *status)
+{
+#if defined(ZCL_TESTING)
+    if (app_test_waitpid) return app_test_waitpid(pid, status, WNOHANG);
+#endif
+    return waitpid(pid, status, WNOHANG);
+}
+
+/* Check child state without rereading a marker that is already known. */
+static bool app_wait_exit(pid_t pid, int logfd, struct app_spawn_outcome *out)
 {
     int status = 0;
-    pid_t waited = waitpid(pid, &status, WNOHANG);
-    if (waited < 0 && errno != EINTR && logfd >= 0) {
+    pid_t waited;
+    do { waited = app_waitpid(pid, &status); } while (waited < 0 && errno == EINTR);
+    if (waited < 0 && logfd >= 0) {
         out->spawn_errno = errno;
         return true;
     }
@@ -362,6 +376,15 @@ static bool app_wait_step(pid_t pid, const struct app_launch_entry *entry,
         out->term_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
         return true;
     }
+    return false;
+}
+
+/* One poll: exited (reaped here), ready, or neither. */
+static bool app_wait_step(pid_t pid, const struct app_launch_entry *entry,
+                          const char *log_path, int logfd, int64_t elapsed, int settle_ms,
+                          struct app_spawn_outcome *out)
+{
+    if (app_wait_exit(pid, logfd, out)) return true;
     if (entry->ready_marker[0] ? (logfd >= 0 ? app_log_fd_has(logfd, entry->ready_marker) : app_log_has(log_path, entry->ready_marker))
                                : elapsed >= settle_ms) {
         out->ready = true;
@@ -376,23 +399,40 @@ static bool app_wait_step(pid_t pid, const struct app_launch_entry *entry,
  * after the marker (an app with no marker already waited settle_ms), and if
  * the child exits in that window report it as exited, not ready. */
 static void app_settle_after_ready(pid_t pid, const struct app_launch_entry *entry,
-                                   const char *log_path, int logfd,
-                                   int settle_ms, struct app_spawn_outcome *out)
+                                   int logfd, int settle_ms, struct app_spawn_outcome *out)
 {
     if (!entry->ready_marker[0] || !out->ready)
         return;
     int64_t ready_ms = out->ready_ms;
-    for (int64_t waited = 0; waited < settle_ms; waited += APP_POLL_MS) {
-        platform_sleep_ms(APP_POLL_MS);
-        (void)app_wait_step(pid, entry, log_path, logfd, ready_ms + waited,
-                            settle_ms, out);
-        if (out->exited || out->spawn_errno)
-            break;
+    int64_t started = platform_time_monotonic_ms();
+    int64_t now = started;
+    unsigned stalled = 0;
+    for (;;) {
+        int64_t elapsed = now - started;
+        if (elapsed >= settle_ms) { (void)app_wait_exit(pid, logfd, out); break; }
+        int64_t remaining = (int64_t)settle_ms - elapsed;
+        platform_sleep_ms(remaining < APP_POLL_MS ? (int)remaining : APP_POLL_MS);
+        if (app_wait_exit(pid, logfd, out)) break;
+        int64_t next = platform_time_monotonic_ms();
+        if (next <= now) {
+            if (++stalled >= APP_CLOCK_STALL_POLLS) { out->spawn_errno = ETIMEDOUT; break; }
+        } else stalled = 0;
+        now = next;
     }
     out->ready_ms = ready_ms;
-    if (out->exited)
+    if (out->exited || out->spawn_errno)
         out->ready = false;
 }
+
+#if defined(ZCL_TESTING)
+void zcl_test_app_settle_after_ready(long pid, bool marker, int settle_ms,
+                                     struct app_spawn_outcome *out)
+{
+    struct app_launch_entry entry = {0};
+    if (marker) (void)snprintf(entry.ready_marker, sizeof(entry.ready_marker), "READY");
+    app_settle_after_ready((pid_t)pid, &entry, -1, settle_ms, out);
+}
+#endif
 
 static bool app_os_spawn_and_wait(const struct app_launch_entry *entry,
                                   const char *log_path, int timeout_ms,
@@ -422,7 +462,7 @@ static bool app_os_spawn_and_wait(const struct app_launch_entry *entry,
         int64_t elapsed = platform_time_monotonic_ms() - start;
         if (app_wait_step(pid, entry, log_path, -1, elapsed, settle_ms, out) ||
             elapsed >= timeout_ms) {
-            app_settle_after_ready(pid, entry, log_path, -1, settle_ms, out);
+            app_settle_after_ready(pid, entry, -1, settle_ms, out);
             return true;
         }
         platform_sleep_ms(APP_POLL_MS);
@@ -439,7 +479,7 @@ static bool app_resident_wait(const struct app_launch_entry *entry,
         int64_t elapsed = platform_time_monotonic_ms() - start;
         if (app_wait_step((pid_t)out->pid, entry, NULL, logfd, elapsed, settle_ms, out) ||
             elapsed >= timeout_ms) {
-            app_settle_after_ready((pid_t)out->pid, entry, NULL, logfd, settle_ms, out);
+            app_settle_after_ready((pid_t)out->pid, entry, logfd, settle_ms, out);
             return out->spawn_errno == 0;
         }
         platform_sleep_ms(APP_POLL_MS);
@@ -563,7 +603,9 @@ bool app_proc_resident_spawn_and_wait(const struct app_launch_entry *entry,
     if (spawned) {
         out->pid = receipt->pid;
         if (!app_resident_wait(entry, logfd, timeout_ms, settle_ms, out)) {
-            (void)resident_launch_cancel(prepared, 20, error, error_size);
+            bool cancelled = resident_launch_cancel(prepared, 20, error, error_size);
+            if (cancelled && out->spawn_errno == ETIMEDOUT && error && error_size)
+                (void)snprintf(error, error_size, "the monotonic clock did not advance during readiness observation");
             spawned = false;
         }
     } else out->spawn_errno = errno;

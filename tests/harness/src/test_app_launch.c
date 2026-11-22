@@ -1316,6 +1316,73 @@ _test_next:
     return failures;
 }
 
+extern void zcl_test_app_settle_waitpid(pid_t (*hook)(pid_t, int *, int));
+extern void zcl_test_app_settle_after_ready(long pid, bool marker, int settle_ms,
+                                            struct app_spawn_outcome *out);
+static struct { int64_t now; unsigned reads, polls; bool exit_at_deadline, stuck; } al_settle;
+static int64_t al_settle_clock(void *unused)
+{
+    (void)unused;
+    int64_t now = al_settle.now; if (!al_settle.stuck) al_settle.now += 250; al_settle.reads++;
+    return now * 1000000;
+}
+static int64_t al_settle_wall(void *unused) { (void)unused; return 0; }
+static pid_t al_settle_wait(pid_t pid, int *status, int flags)
+{
+    (void)flags; al_settle.polls++;
+    if (al_settle.polls == 1) { errno = EINTR; return -1; }
+    if (al_settle.exit_at_deadline && al_settle.now > 1000) {
+        *status = 3 << 8; return pid;
+    }
+    return 0;
+}
+static bool al_settle_control(bool exit_at_deadline)
+{
+    static clock_iface_t clock = {.now_monotonic_ns = al_settle_clock, .now_wall_ms = al_settle_wall};
+    const clock_iface_t *old = clock_default();
+    memset(&al_settle, 0, sizeof(al_settle)); al_settle.exit_at_deadline = exit_at_deadline;
+    struct app_spawn_outcome out = {.ready = true, .ready_ms = 17};
+    clock_set_default(&clock); zcl_test_app_settle_waitpid(al_settle_wait);
+    zcl_test_app_settle_after_ready(42, true, 1000, &out);
+    zcl_test_app_settle_waitpid(NULL); clock_set_default(old);
+    return al_settle.reads >= 5 && al_settle.polls <= 6 && out.ready_ms == 17 &&
+        (exit_at_deadline ? (out.exited && !out.ready && out.exit_code == 3) :
+                            (out.ready && !out.exited));
+}
+static bool al_settle_guard(bool marker, bool ready)
+{
+    memset(&al_settle, 0, sizeof(al_settle));
+    struct app_spawn_outcome out = {.ready = ready, .ready_ms = 17};
+    zcl_test_app_settle_waitpid(al_settle_wait);
+    zcl_test_app_settle_after_ready(42, marker, 1000, &out);
+    zcl_test_app_settle_waitpid(NULL);
+    return al_settle.polls == 0 && out.ready == ready && out.ready_ms == 17;
+}
+static bool al_settle_stalled(void)
+{
+    static clock_iface_t clock = {.now_monotonic_ns = al_settle_clock, .now_wall_ms = al_settle_wall};
+    const clock_iface_t *old = clock_default();
+    memset(&al_settle, 0, sizeof(al_settle)); al_settle.stuck = true;
+    struct app_spawn_outcome out = {.ready = true, .ready_ms = 17};
+    clock_set_default(&clock); zcl_test_app_settle_waitpid(al_settle_wait);
+    zcl_test_app_settle_after_ready(42, true, 1000, &out);
+    zcl_test_app_settle_waitpid(NULL); clock_set_default(old);
+    return !out.ready && !out.exited && out.spawn_errno == ETIMEDOUT && al_settle.polls <= 22;
+}
+static int case_settle_deadline(void)
+{
+    int failures = 0;
+    TEST("marker settle uses elapsed time and checks exit at the deadline") {
+        ASSERT(al_settle_control(false));
+        ASSERT(al_settle_control(true));
+        ASSERT(al_settle_guard(false, true));
+        ASSERT(al_settle_guard(true, false));
+        ASSERT(al_settle_stalled());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int case_resident_mutation(struct al_fx *f)
 {
     int failures = 0;
@@ -4314,6 +4381,7 @@ _test_next:
     failures += case_resident_app(&f, f.bin_ready, "ready", true, false);
     failures += case_resident_app(&f, f.bin_exit, "exit", false, true);
     failures += case_resident_app(&f, f.bin_silent, "silent", false, false);
+    failures += case_settle_deadline();
     failures += case_resident_mutation(&f);
     failures += case_library(&f);
     failures += case_library_utf8_summary();
