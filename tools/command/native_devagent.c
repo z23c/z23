@@ -470,28 +470,3 @@ bool zcl_devagent_closed_pass(const char *verdict, long long rc)
         return false;
     return strcmp(verdict, "pass") == 0 || strcmp(verdict, "PASS") == 0;
 }
-
-/* The alphabet, split out so the predicate itself stays a short sequence of
- * named rules rather than one long boolean. */
-static bool zcl_devagent_name_char(char c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
-}
-
-bool zcl_devagent_name_ok(const char *name)
-{
-    if (!name || !name[0])
-        return false;
-    if (strlen(name) > ZCL_DEVAGENT_NAME_MAX)
-        return false;
-    /* "." and ".." are on the alphabet but would resolve the run directory
-     * to itself or to its parent, so they are refused by identity. */
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
-        return false;
-    for (const char *p = name; *p; p++) {
-        if (!zcl_devagent_name_char(*p))
-            return false;
-    }
-    return true;
-}

@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 struct zcl_command_request;
 struct zcl_command_reply;
@@ -118,7 +119,26 @@ bool zcl_devagent_closed_pass(const char *verdict, long long rc);
  * names queue work validates here, so that gap cannot reopen. */
 #define ZCL_DEVAGENT_NAME_MAX 64u
 
-bool zcl_devagent_name_ok(const char *name);
+static inline bool zcl_devagent_name_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+}
+
+static inline bool zcl_devagent_name_ok(const char *name)
+{
+    if (!name || !name[0])
+        return false;
+    if (strlen(name) > ZCL_DEVAGENT_NAME_MAX)
+        return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return false;
+    for (const char *p = name; *p; p++) {
+        if (!zcl_devagent_name_char(*p))
+            return false;
+    }
+    return true;
+}
 
 /* The queue's engine rules: a registered engine id, and a model of that
  * engine's family when both are named. NULL engine is legacy and passes.
