@@ -238,7 +238,7 @@ static int ad_model_cases(void)
     json_free(&plan); return failures;
 }
 
-enum ad_decision { AD_CANCEL, AD_CLOSE, AD_HEADLESS, AD_EARLY, AD_PAINT_FAIL, AD_CANCEL_AFTER_CONFIRM, AD_CLOSE_AFTER_CONFIRM, AD_STALE, AD_CONFIRM };
+enum ad_decision { AD_CANCEL, AD_ESCAPE, AD_ESCAPE_AFTER_CONFIRM, AD_CLOSE, AD_HEADLESS, AD_EARLY, AD_PAINT_FAIL, AD_CANCEL_AFTER_CONFIRM, AD_CLOSE_AFTER_CONFIRM, AD_STALE, AD_CONFIRM };
 struct ad_fake {
     enum ad_decision decision;
     bool observed, safe, all_pages, complete_details;
@@ -285,6 +285,17 @@ static bool ad_default_enter(const struct zcl_present_window_live_view_v1 *live)
     live->owner.update(live->owner.context, &event, true, &redraw, &close);
     return close;
 }
+static bool ad_escape(const struct zcl_present_window_live_view_v1 *live)
+{
+    struct zcl_present_input_v1 input = {.key = ZCL_PRESENT_INPUT_ESCAPE};
+    uint32_t focus = 3, action = UINT32_MAX;
+    if (!live->input(live->owner.context, &input, &focus, &action) || action != 0)
+        return false;
+    struct zcl_present_window_event_v1 event = {.outcome = ZCL_PRESENT_WINDOW_ACTION, .action_index = action};
+    bool redraw = false, close = false;
+    live->owner.update(live->owner.context, &event, true, &redraw, &close);
+    return close && !((const struct app_confirm *)live->owner.context)->confirmed;
+}
 /* UP/DOWN are also the live backend's translated wheel events. Navigation
  * must preserve the focused consent button without activating it. */
 static bool ad_nav(const struct zcl_present_window_live_view_v1 *live,
@@ -329,6 +340,7 @@ static bool ad_observe(struct ad_fake *f, const struct zcl_present_model_v1 *mod
 static bool ad_after_confirm(const struct ad_fake *f,
     const struct zcl_present_window_live_view_v1 *live, bool *close, bool *redraw)
 {
+    if (f->decision == AD_ESCAPE_AFTER_CONFIRM) return ad_escape(live);
     if (f->decision == AD_CANCEL_AFTER_CONFIRM)
         return ad_action(live, 0, close, redraw) && *close;
     if (f->decision == AD_CLOSE_AFTER_CONFIRM) {
@@ -371,6 +383,7 @@ static bool ad_present(void *context, const struct zcl_present_model_v1 *model,
         return close;
     }
     if (f->decision == AD_CANCEL) return ad_default_enter(live);
+    if (f->decision == AD_ESCAPE) return ad_escape(live);
     return ad_present_confirmation(f, live, pages);
 }
 static bool ad_invoke(const struct abc_world *w, struct ad_fake *fake,
@@ -460,6 +473,8 @@ int test_app_adopt(void)
             chain_params_select(CHAIN_MAIN);
             ASSERT(ad_setup(&world));
             ASSERT(ad_no_commit(&world, AD_CANCEL));
+            ASSERT(ad_no_commit(&world, AD_ESCAPE));
+            ASSERT(ad_no_commit(&world, AD_ESCAPE_AFTER_CONFIRM));
             ASSERT(ad_no_commit(&world, AD_CLOSE));
             ASSERT(ad_no_commit(&world, AD_HEADLESS));
             ASSERT(ad_no_commit(&world, AD_EARLY));

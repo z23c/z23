@@ -119,6 +119,9 @@ static bool ac_input(void *context, const struct zcl_present_input_v1 *input,
 {
     (void)context;
     if (!input || !focus || !action) return false;
+    if (input->key == ZCL_PRESENT_INPUT_ESCAPE) {
+        *action = 0; return true;
+    }
     if (ac_input_key(input, focus, action)) return true;
     if (input->key == ZCL_PRESENT_INPUT_CLICK) {
         uint32_t hit;
