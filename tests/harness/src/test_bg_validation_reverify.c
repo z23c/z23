@@ -1570,6 +1570,16 @@ static bool genesis_read_stub(struct block *block, const struct block_index *ind
     return body_read_always_succeeds(block, index, datadir);
 }
 
+static bool bg_wait_for_running(struct bg_validation_service *svc)
+{
+    for (int i = 0; i < 1000; i++) {
+        if (atomic_load(&svc->progress.state) == BG_VALIDATION_RUNNING)
+            return true;
+        platform_sleep_ms(10); /* real-clock: worker startup has no injected scheduler */
+    }
+    return false;
+}
+
 static int test_bg_validation_empty_stop_preserves_cursor(void)
 {
     int failures = 0;
@@ -1586,10 +1596,9 @@ static int test_bg_validation_empty_stop_preserves_cursor(void)
             g_restart_skips = 9;
             g_restart_version = BG_VALIDATION_COVERAGE_VERSION;
             bool started = bg_validation_start(&svc);
-            while (atomic_load(&svc.progress.state) != BG_VALIDATION_RUNNING)
-                platform_sleep_ms(10);
+            bool ready = started && bg_wait_for_running(&svc);
             bg_validation_stop(&svc);
-            ok = ok && started && g_restart_progress == 27 && g_restart_skips == 9 &&
+            ok = ok && ready && g_restart_progress == 27 && g_restart_skips == 9 &&
                  atomic_load(&svc.progress.state) != BG_VALIDATION_COMPLETE;
             main_state_free(&ms);
         }
@@ -1618,10 +1627,9 @@ static int test_bg_validation_genesis_missing_body_stays_unverified(void)
         bg_validation_test_set_body_repair_stubs(body_read_never_succeeds,
                                                  body_repair_stop_on_sleep);
         bool started = bg_validation_start(&svc);
-        while (atomic_load(&svc.progress.state) != BG_VALIDATION_RUNNING)
-            platform_sleep_ms(10);
+        bool ready = started && bg_wait_for_running(&svc);
         zcl_mutex_lock(&ms.cs_main);
-        bool extended = extend_repair_chain(&ms, h0, &h1_hash) != NULL;
+        bool extended = ready && extend_repair_chain(&ms, h0, &h1_hash) != NULL;
         zcl_mutex_unlock(&ms.cs_main);
         bool read = started && extended && body_read_count_wait_at_least(1);
         bg_validation_stop(&svc);
@@ -1658,10 +1666,9 @@ static int test_bg_validation_genesis_waits_for_forward_walk(void)
         bg_validation_test_set_body_repair_stubs(genesis_read_stub, body_repair_no_sleep);
         bg_validation_test_set_validate_stub(genesis_validate_stub);
         bool started = bg_validation_start(&svc);
-        while (atomic_load(&svc.progress.state) != BG_VALIDATION_RUNNING)
-            platform_sleep_ms(10);
+        bool ready = started && bg_wait_for_running(&svc);
         zcl_mutex_lock(&ms.cs_main);
-        bool extended = extend_repair_chain(&ms, h0, &h1_hash) != NULL;
+        bool extended = ready && extend_repair_chain(&ms, h0, &h1_hash) != NULL;
         zcl_mutex_unlock(&ms.cs_main);
         bool read = started && extended && body_read_count_wait_at_least(1);
         for (int i = 0; i < 50 && atomic_load(&svc.progress.verified_height) < 1; i++)

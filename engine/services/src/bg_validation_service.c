@@ -1096,7 +1096,7 @@ static int bg_validation_wait_for_forward_extent(struct bg_validation_service *s
         bg_validation_supervisor_heartbeat(svc);
         platform_sleep_ms(1000);
     }
-    return -1;
+    return -1; // raw-return-ok:stop-requested-is-normal-shutdown
 }
 
 static void *bg_validation_thread(void *arg)
