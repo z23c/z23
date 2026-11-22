@@ -1060,6 +1060,24 @@ static void bg_validation_finish_run(struct bg_validation_service *svc,
     }
 }
 
+/* A genesis-only boot has no forward extent yet. Keep the worker alive
+ * without reading or changing the persisted walk census until one exists. */
+static bool bg_validation_wait_for_forward_extent(struct bg_validation_service *svc)
+{
+    while (!atomic_load(&svc->stop_requested)) {
+        zcl_mutex_lock(&svc->ms->cs_main);
+        int height = active_chain_height(&svc->ms->chain_active);
+        zcl_mutex_unlock(&svc->ms->cs_main);
+        atomic_store(&svc->progress.chain_height, height);
+        if (height > 0)
+            return true;
+        atomic_store(&svc->progress.state, BG_VALIDATION_RUNNING);
+        bg_validation_supervisor_heartbeat(svc);
+        platform_sleep_ms(1000);
+    }
+    return false;
+}
+
 static void *bg_validation_thread(void *arg)
 {
     struct bg_validation_service *svc = arg;
@@ -1077,6 +1095,11 @@ static void *bg_validation_thread(void *arg)
     zcl_thread_qos_background();
 
     bg_validation_supervisor_heartbeat(svc);
+
+    if (!bg_validation_wait_for_forward_extent(svc)) {
+        bg_validation_supervisor_done();
+        return NULL;
+    }
 
     int32_t seed_floor = 0;
     external_seeded = bg_validation_external_seed_read(&seed_floor);
