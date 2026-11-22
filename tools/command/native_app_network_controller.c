@@ -507,12 +507,27 @@ static bool an_form_input(struct an_controller *c, char url[257], struct app_net
         zcl_package_copy_fail(reply, "BAD_INPUT", false, "The app link is invalid.", "app.library"); return false;
     }
 }
+static const char *an_retry_summary(const struct zcl_command_reply *reply, bool selected)
+{
+    const struct json_value *facts = json_get(&reply->data, "failure_facts");
+    const struct json_value *worker = json_get(facts, "worker");
+    const struct json_value *phase = json_get(worker, "phase");
+    if (phase && phase->type == JSON_INT) {
+        int64_t value = json_get_int(phase);
+        if (value == APP_NET_PHASE_BOARD)
+            return selected ? "Could not retrieve the signed offer. Retry or ask for a share file." :
+                "Could not retrieve the app list. Retry or ask for a share file.";
+        if (value == APP_NET_PHASE_MANIFEST || value == APP_NET_PHASE_SLICE)
+            return "Could not retrieve the app file. Retry or ask for a share file.";
+    }
+    return "Try again, or ask for a share file.";
+}
 /* reply is initialized on entry; cancel preserves the existing failure. */
-static bool an_retry(struct an_controller *c, struct zcl_command_reply *reply, bool *shown)
+static bool an_retry(struct an_controller *c, struct zcl_command_reply *reply, bool selected, bool *shown)
 {
     bool again = false, retry = an_retryable(reply);
-    bool retry_selected = an_notice(c, retry ? "Could not connect" : "Could not verify app",
-        retry ? "Try again, or ask for a share file." : "Ask for a new app link or share file.", retry, &again) && again;
+    bool retry_selected = an_notice(c, retry ? "Could not retrieve app" : "Could not verify app",
+        retry ? an_retry_summary(reply, selected) : "Ask for a new app link or share file.", retry, &again) && again;
     if (retry_selected) {
         c->error_presented = false;
         zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
@@ -525,7 +540,7 @@ static bool an_review_loop(struct an_controller *c, const char *url, const struc
     for (;;) {
         bool done = an_review_bytes(c, url, row, reply);
         if (done || reply->status == ZCL_COMMAND_STATUS_PASSED || reply->error.mutated || !an_retryable(reply)) return done;
-        if (!an_retry(c, reply, shown)) return false;
+        if (!an_retry(c, reply, true, shown)) return false;
     }
 }
 static bool an_selected_review(struct an_controller *c, const char *url,
@@ -546,7 +561,7 @@ static bool an_catalog_loop(struct an_controller *c, const char *url, const stru
     for (;;) {
         struct app_network_job_result catalog = {0};
         if (!an_run_job(c->datadir, link->exact ? "exact" : "catalog", url, NULL, NULL, c, &catalog, reply)) {
-            if (catalog.cancelled || reply->error.mutated || !an_retry(c, reply, shown)) return false;
+            if (catalog.cancelled || reply->error.mutated || !an_retry(c, reply, false, shown)) return false;
             continue;
         }
         if (catalog.incomplete) {
@@ -566,7 +581,7 @@ static bool an_direct_loop(struct an_controller *c, const char *url, const struc
     for (;;) {
         struct app_network_job_result result = {0};
         if (!an_run_job(c->datadir, "direct", url, NULL, NULL, c, &result, reply)) {
-            if (result.cancelled || reply->error.mutated || !an_retry(c, reply, shown)) return false;
+            if (result.cancelled || reply->error.mutated || !an_retry(c, reply, true, shown)) return false;
             continue;
         }
         struct zcl_app_offer_row row = {0};

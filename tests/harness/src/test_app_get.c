@@ -3667,6 +3667,77 @@ static int tag_catalog_navigation_case(struct tag_world *w)
     } _test_next:;
     return failures;
 }
+struct tag_stage_retry { struct zcl_app_offer_row row; unsigned jobs, notices, phase; bool direct, pins, catalog_fail; };
+static bool tag_stage_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
+{
+    struct tag_stage_retry *f = context; (void)why; (void)cap;
+    int n = f->direct ? snprintf(out, 257, "http://%s/board/apps/v1/%s", TAG_ONION, f->row.post_id) :
+        snprintf(out, 257, "http://%s/board/apps/v1", TAG_ONION);
+    *submitted = n > 0 && n < 257; return *submitted;
+}
+static bool tag_stage_pins(const struct tag_stage_retry *f, const char *mode,
+    const struct app_network_link *link, const char *carrier, const struct zcl_app_offer_row *selected)
+{
+    return link->exact && !strcmp(link->post_id, f->row.post_id) &&
+        (f->direct ? (!strcmp(mode, "direct") && !selected && !carrier) :
+         (!strcmp(mode, "carrier") && selected && carrier && !strcmp(carrier, TAG_ONION) &&
+          !strcmp(selected->post_id, f->row.post_id) && !strcmp(selected->offer.root, f->row.offer.root) &&
+          !strcmp(selected->offer.sha256, f->row.offer.sha256) &&
+          !strcmp(selected->offer.publisher, f->row.offer.publisher)));
+}
+static bool tag_stage_job(void *context, const char *mode, const char *url, const char *carrier,
+    const struct zcl_app_offer_row *selected, struct app_network_job_result *result,
+    struct zcl_command_reply *reply)
+{
+    struct tag_stage_retry *f = context; struct app_network_link link;
+    if (!app_network_link_parse(url, &link)) return false;
+    if (!strcmp(mode, "catalog") && !f->catalog_fail) { result->rows[0] = f->row; result->count = 1; return true; }
+    if (!f->catalog_fail) f->pins = f->pins && tag_stage_pins(f, mode, &link, carrier, selected);
+    ++f->jobs; result->error = APP_NETWORK_UNAVAILABLE; result->protocol_valid = true;
+    result->diagnostic_valid = true; result->diagnostic.phase = f->phase;
+    result->diagnostic.transport_ok = true; result->diagnostic.last_http_status = 404;
+    return zcl_test_app_network_failure_reply(result, reply);
+}
+static bool tag_stage_card(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    struct tag_stage_retry *f = context; (void)copy;
+    if (!zcl_present_model_validate_v1(model, why, cap)) return false;
+    event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
+    event->outcome = ZCL_PRESENT_WINDOW_ACTION;
+    if (!strcmp(model->request_id, "app-network-notice")) {
+        const char *message = f->phase == APP_NET_PHASE_BOARD ?
+            (f->catalog_fail ? "Could not retrieve the app list." : "Could not retrieve the signed offer.") :
+            f->phase == APP_NET_PHASE_NONE ? "Try again, or ask for a share file." : "Could not retrieve the app file.";
+        if (strcmp(model->title, "Could not retrieve app") || model->action_count != 2 || strcmp(model->actions[0].label, "Back") ||
+            strcmp(model->actions[1].label, "Retry") || !strstr(model->summary, message)) return false;
+        event->action_index = f->notices++ == 0 ? 1 : 0; return true;
+    }
+    for (uint32_t i = 0; i < model->action_count; ++i)
+        if (!strcmp(model->actions[i].id, "review")) { event->action_index = i; return true; }
+    return false;
+}
+static int tag_stage_case(struct tag_world *w, unsigned phase, bool direct, bool catalog_fail)
+{
+    int failures = 0; struct zcl_command_reply why, reply; size_t count = 0; bool shown = false;
+    struct zcl_app_offer_row rows[4]; struct tag_stage_retry f = {.phase = phase, .direct = direct, .pins = true, .catalog_fail = catalog_fail};
+    TEST("network retry reports the failed stage and preserves the selected offer") {
+        ASSERT(tag_board_variant(w, NULL, NULL, false));
+        ASSERT(zcl_app_offer_catalog(rows, 4, &count, &why)); zcl_command_reply_free(&why);
+        ASSERT_EQ(count, 1u); f.row = rows[0];
+        struct app_network_test_hooks hooks = {.form = tag_stage_form, .job = tag_stage_job};
+        int offers = g_tag.offers, posts = g_tag.posts, fetches = g_tag.fetches;
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        ASSERT(!zcl_test_app_network_open_link(w->j.b_datadir, tag_stage_card, NULL, &f, &reply, &shown, &hooks));
+        ASSERT_EQ(f.jobs, 2u); ASSERT_EQ(f.notices, 2u); ASSERT(f.pins && shown && !reply.error.mutated);
+        const struct json_value *worker = json_get(json_get(&reply.data, "failure_facts"), "worker");
+        ASSERT(worker && json_get_int(json_get(worker, "http_status")) == 404 &&
+            json_get_bool(json_get(worker, "transport_ok")));
+        ASSERT_EQ(g_tag.offers, offers); ASSERT_EQ(g_tag.posts, posts); ASSERT_EQ(g_tag.fetches, fetches);
+        zcl_command_reply_free(&reply); PASS();
+    } _test_next:;
+    return failures;
+}
 struct tag_link_fixture { struct tag_discover discover; struct zcl_app_offer_row row; unsigned homes, jobs, errors, mode; bool action_error_title; };
 static bool tag_link_form(void *context, char out[257], bool *submitted, char *why, size_t cap)
 {
@@ -6663,6 +6734,11 @@ static int tag_world_cases(struct tag_world *w)
     failures += tag_fetch_native_profile(w);
     failures += tag_library_discover(w);
     failures += tag_catalog_navigation_case(w);
+    failures += tag_stage_case(w, APP_NET_PHASE_BOARD, false, false);
+    failures += tag_stage_case(w, APP_NET_PHASE_SLICE, false, false);
+    failures += tag_stage_case(w, APP_NET_PHASE_MANIFEST, true, false);
+    failures += tag_stage_case(w, APP_NET_PHASE_BOARD, false, true);
+    failures += tag_stage_case(w, APP_NET_PHASE_NONE, true, false);
     for (unsigned mode = 0; mode < 4; ++mode) failures += tag_input_retry_case(w, mode);
     failures += tag_library_link_cancel(w);
     failures += tag_library_link_fault(w, 1);
