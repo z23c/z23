@@ -553,10 +553,7 @@ fi
 
 verify_authority
 
-ensure_epoch_generation "$OBJECT_ROOT" object
-ensure_epoch_generation "$CANDIDATE_ROOT" candidate
-ensure_directory "$EPOCH_DIR/.leases" 'object epoch lease directory'
-
+ensure_root_directory "$OBJECT_ROOT" object
 # MSYS2/Git Bash cannot reliably share inherited descriptors with the MSYS2
 # util-linux flock binary. Keep the crash-safe descriptor lock on POSIX and
 # use an identity-bearing atomic directory only on MSYS hosts.
@@ -624,6 +621,9 @@ release_epoch_gc_lock()
 trap 'release_admission_lock; release_epoch_gc_lock; cleanup' EXIT
 trap 'exit 2' HUP INT TERM
 acquire_epoch_gc_lock
+ensure_epoch_generation "$OBJECT_ROOT" object
+ensure_epoch_generation "$CANDIDATE_ROOT" candidate
+ensure_directory "$EPOCH_DIR/.leases" 'object epoch lease directory'
 
 # A prior writer publishes `.unverified` before it can replace any stable
 # artifact and aggregate verification removes it only while holding the same
@@ -697,8 +697,7 @@ tmp_lease=""
 # directory, while still holding the lock that mints it.  Every profile reaches
 # a compiler only through this acquire, so a compile cannot land in an epoch
 # this file does not name, and the file cannot name an epoch no build claimed.
-# The retained generations beside it are receipts of trees that are no longer
-# checked out; a reader that wants the live build inputs -- the code index's
+# A reader that wants the live build inputs -- the code index
 # include graph, above all -- reads this one name instead of guessing from
 # mtimes or scanning every generation.
 publish_current_epoch()
@@ -737,6 +736,7 @@ mapfile -t epochs < <(
 )
 kept=1
 for old in "${epochs[@]}"; do
+    [[ "$old" =~ ^[0-9a-f]{64}$ ]] || continue
     [ "$old" = "$EPOCH" ] && continue
     old_dir="$OBJECT_ROOT/epochs/$old"
     live=0

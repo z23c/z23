@@ -158,3 +158,22 @@ post real mail. Run it directly, or via `make check-host-gc-selftest`.
 - `--check-protected <path>` answers the protection predicate directly and
   exits, so a gate can assert the guarantee against the actual predicate
   rather than grepping the source for tree names.
+
+## Inactive compile epochs in one checkout
+
+On Linux, the installed `z23` can inspect generated epochs without starting a build. Give
+an absolute, canonical checkout path; this mode only examines that checkout's
+known build profiles. It leaves current, leased and uncertain epochs alone.
+First inspect the dry-run report:
+
+```sh
+z23 ops host gc --checkout="$PWD" --epoch_keep=1
+```
+
+`epoch_keep` defaults to 3; 1 retains the current generation and protected
+ones. After reviewing the report, use the same command with `--apply=true` to
+reclaim eligible generated epochs. `estimated_logical_path_bytes` counts path sizes, not
+physical blocks saved (hardlinks may share blocks). A nonzero
+`profiles_refused` or `partial_possible` means cleanup could not be completed;
+inspect the checkout and rerun after resolving the condition. Interrupted
+retirements are kept as `.gc-...` plus a producer-session marker for retry.

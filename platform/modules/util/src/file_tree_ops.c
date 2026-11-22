@@ -9,6 +9,12 @@
  * never followed; recursion is depth-bounded; every error return carries the
  * exact offending path in its struct zcl_result. */
 
+#if defined(__linux__)
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#endif
+
 #include "util/file_tree_ops.h"
 #include "util/safe_alloc.h"
 
@@ -49,10 +55,18 @@ struct zcl_result zcl_tree_remove_contents_fd(int root_fd)
     return ZCL_ERR(-1, "zcl_tree_remove_contents_fd: Windows is unavailable");
 }
 
+struct zcl_result zcl_tree_remove_contents_fd_one_mount(int root_fd)
+{ (void)root_fd; return ZCL_ERR(-1, "mount-preserving removal is unavailable"); }
+
+struct zcl_result zcl_tree_measure_contents_fd_one_mount(int root_fd, uint64_t *bytes)
+{ (void)root_fd; (void)bytes; return ZCL_ERR(-1, "mount-preserving measurement is unavailable"); }
+
 #if defined(ZCL_TESTING)
 struct zcl_result zcl_test_tree_remove_contents_fd(int root_fd,
     void (*hook)(void *, int, const char *, int), void *context)
 { (void)hook; (void)context; return zcl_tree_remove_contents_fd(root_fd); }
+struct zcl_result zcl_test_tree_remove_wrong_mount(int root_fd)
+{ return zcl_tree_remove_contents_fd_one_mount(root_fd); }
 #endif
 
 struct zcl_result zcl_tree_remove(const char *path)
@@ -407,7 +421,27 @@ static bool tree_named_entry_is(int dfd, const char *name, const struct stat *ex
     return tree_same_entry(expected, &named);
 }
 
-struct tree_walk_hook { void (*call)(void *, int, const char *, int); void *context; };
+struct tree_walk_hook { void (*call)(void *, int, const char *, int); void *context; bool one_mount, measure; uint64_t mount_id, bytes; };
+static bool tree_mount_matches(int fd, const char *name, int flags, const struct tree_walk_hook *hook)
+{
+    if (!hook || !hook->one_mount) return true;
+#if defined(__linux__) && defined(STATX_MNT_ID)
+    struct statx st;
+    return statx(fd, name, flags, STATX_MNT_ID, &st) == 0 &&
+        (st.stx_mask & STATX_MNT_ID) && st.stx_mnt_id == hook->mount_id;
+#else
+    (void)fd; (void)name; (void)flags; return false;
+#endif
+}
+
+static bool tree_fd_mount_matches(int fd, const struct tree_walk_hook *hook)
+{
+#if defined(__linux__) && defined(AT_EMPTY_PATH)
+    return tree_mount_matches(fd, "", AT_EMPTY_PATH, hook);
+#else
+    (void)fd; return !hook || !hook->one_mount;
+#endif
+}
 static void tree_hook(struct tree_walk_hook *hook, int fd, const char *name, int phase)
 { if (hook && hook->call) hook->call(hook->context, fd, name, phase); }
 static struct zcl_result remove_dir(DIR *d, int depth, const char *disp, struct tree_walk_hook *hook);
@@ -419,7 +453,7 @@ static struct zcl_result remove_open_directory(DIR *cd, int dfd, const char *nam
     if (r.ok) tree_hook(hook, dfd, name, 2);
     if (r.ok && !tree_named_entry_is(dfd, name, opened, &gone))
         r = ZCL_ERR(-1, "directory identity changed: %s", child);
-    if (r.ok && !gone && unlinkat(dfd, name, AT_REMOVEDIR) != 0 && errno != ENOENT)
+    if (r.ok && !gone && (!hook || !hook->measure) && unlinkat(dfd, name, AT_REMOVEDIR) != 0 && errno != ENOENT)
         r = ZCL_ERR(-1, "rmdir failed: %s: %s", child, strerror(errno));
     if (closedir(cd) != 0 && r.ok) r = ZCL_ERR(-1, "close failed: %s", child);
     return r;
@@ -438,17 +472,40 @@ static struct zcl_result remove_directory_entry(int dfd, const char *name,
     if (fstat(cfd, &opened) != 0 || !tree_same_entry(st, &opened)) {
         close(cfd); return ZCL_ERR(-1, "directory identity changed: %s", child);
     }
+    if (!tree_fd_mount_matches(cfd, hook)) {
+        close(cfd); return ZCL_ERR(-1, "mount boundary refused: %s", child);
+    }
     DIR *cd = fdopendir(cfd);
+
     if (!cd) { int e = errno; close(cfd); return ZCL_ERR(-1, "fdopendir failed: %s: %s", child, strerror(e)); }
     return remove_open_directory(cd, dfd, name, &opened, depth, child, hook);
 }
-/* Remove one already-lstat'd entry without ever following a symlink. */
+static bool tree_supported_entry(const struct stat *st)
+{ return S_ISDIR(st->st_mode) || S_ISREG(st->st_mode) || S_ISLNK(st->st_mode); }
+static bool tree_measure_entry(struct tree_walk_hook *hook, const struct stat *st)
+{
+    if (!tree_supported_entry(st) || st->st_size < 0 || (uint64_t)st->st_size > UINT64_MAX - hook->bytes) return false;
+    hook->bytes += (uint64_t)st->st_size;
+    return true;
+}
+static bool tree_entry_allowed(int dfd, const char *name, const struct stat *st,
+    const struct tree_walk_hook *hook)
+{
+    return tree_mount_matches(dfd, name, AT_SYMLINK_NOFOLLOW, hook) &&
+        (!hook || !hook->one_mount || tree_supported_entry(st));
+}
+/* Remove one already-statted entry without ever following a symlink. */
 static struct zcl_result remove_entry(int dfd, const char *name,
     const struct stat *st, int depth, const char *disp, struct tree_walk_hook *hook)
 {
     tree_hook(hook, dfd, name, 1);
+    if (!tree_entry_allowed(dfd, name, st, hook))
+        return ZCL_ERR(-1, "mount boundary or special entry refused: %s/%s", disp, name);
+    if (hook && hook->measure && !tree_measure_entry(hook, st))
+        return ZCL_ERR(-1, "unknown or oversized entry refused: %s/%s", disp, name);
     if (S_ISDIR(st->st_mode) && !S_ISLNK(st->st_mode))
         return remove_directory_entry(dfd, name, st, depth, disp, hook);
+    if (hook && hook->measure) return ZCL_OK;
     bool gone = false; tree_hook(hook, dfd, name, 2);
     if (!tree_named_entry_is(dfd, name, st, &gone))
         return ZCL_ERR(-1, "entry identity changed: %s/%s", disp, name);
@@ -515,12 +572,56 @@ static struct zcl_result tree_remove_contents_fd(int root_fd, struct tree_walk_h
 
 struct zcl_result zcl_tree_remove_contents_fd(int root_fd)
 { return tree_remove_contents_fd(root_fd, NULL); }
+
+struct zcl_result zcl_tree_remove_contents_fd_one_mount(int root_fd)
+{
+#if defined(__linux__) && defined(STATX_MNT_ID)
+    struct statx st;
+    if (statx(root_fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &st) != 0 || !(st.stx_mask & STATX_MNT_ID))
+        return ZCL_ERR(-1, "mount identity unavailable");
+    struct tree_walk_hook hook = { .one_mount = true, .mount_id = st.stx_mnt_id };
+    return tree_remove_contents_fd(root_fd, &hook);
+#else
+    (void)root_fd; return ZCL_ERR(-1, "mount-preserving removal is unavailable");
+#endif
+}
+
+struct zcl_result zcl_tree_measure_contents_fd_one_mount(int root_fd, uint64_t *bytes)
+{
+#if defined(__linux__) && defined(STATX_MNT_ID)
+    if (bytes) *bytes = 0;
+    struct statx st; struct stat root;
+    if (!bytes || fstat(root_fd, &root) != 0 || root.st_size < 0 ||
+        statx(root_fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &st) != 0 || !(st.stx_mask & STATX_MNT_ID))
+        return ZCL_ERR(-1, "mount identity unavailable");
+    struct tree_walk_hook hook = { .one_mount = true, .measure = true,
+        .mount_id = st.stx_mnt_id, .bytes = (uint64_t)root.st_size };
+    struct zcl_result result = tree_remove_contents_fd(root_fd, &hook);
+    if (result.ok) *bytes = hook.bytes;
+    return result;
+#else
+    (void)root_fd; (void)bytes; return ZCL_ERR(-1, "mount-preserving measurement is unavailable");
+#endif
+}
+
 #if defined(ZCL_TESTING)
 struct zcl_result zcl_test_tree_remove_contents_fd(int root_fd,
     void (*hook)(void *, int, const char *, int), void *context)
 {
     struct tree_walk_hook h = {.call = hook, .context = context};
     return tree_remove_contents_fd(root_fd, &h);
+}
+struct zcl_result zcl_test_tree_remove_wrong_mount(int root_fd)
+{
+#if defined(__linux__) && defined(STATX_MNT_ID)
+    struct statx st;
+    if (statx(root_fd, "", AT_EMPTY_PATH, STATX_MNT_ID, &st) != 0 || !(st.stx_mask & STATX_MNT_ID))
+        return ZCL_ERR(-1, "mount identity unavailable");
+    struct tree_walk_hook h = { .one_mount = true, .mount_id = st.stx_mnt_id + 1 };
+    return tree_remove_contents_fd(root_fd, &h);
+#else
+    (void)root_fd; return ZCL_ERR(-1, "mount identity unavailable");
+#endif
 }
 #endif
 

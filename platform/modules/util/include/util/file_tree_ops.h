@@ -26,6 +26,7 @@
 #include "util/result.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/types.h>   /* mode_t */
 
 /* Maximum directory nesting depth a copy/remove will descend before it
@@ -81,10 +82,15 @@ struct zcl_result zcl_tree_remove(const char *path);
 /* Empty only this retained, owned directory. Does not remove its root; refuses
  * observed entry substitution and never follows symlinks. POSIX only. */
 struct zcl_result zcl_tree_remove_contents_fd(int root_fd);
+/* Linux only: refuse if mount identity is unavailable or any entry crosses a mount. */
+struct zcl_result zcl_tree_remove_contents_fd_one_mount(int root_fd);
+/* Measure a retained tree without mutation, refusing other mounts or special files. */
+struct zcl_result zcl_tree_measure_contents_fd_one_mount(int root_fd, uint64_t *bytes);
 #if defined(ZCL_TESTING)
 /* Callback observes a named entry at phase 1 (after stat) or 2 (before unlink). */
 struct zcl_result zcl_test_tree_remove_contents_fd(int root_fd,
     void (*hook)(void *, int, const char *, int), void *context);
+struct zcl_result zcl_test_tree_remove_wrong_mount(int root_fd);
 #endif
 
 /* Create `path` and any missing parent directories (mkdir -p semantics) with

@@ -249,6 +249,11 @@ static bool devagent_host_gc_input(const char *path, const char *key,
 {
     if (!path || strcmp(path, "ops.host.gc") != 0)
         return false;
+    if (strcmp(key, "epoch_keep") == 0) {
+        *type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+                   json_get_int(value) <= 32;
+        return true;
+    }
     if (strcmp(key, "floor_hours") == 0) {
         *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
                    json_get_int(value) <= 8760;

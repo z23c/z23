@@ -28,6 +28,7 @@
 #include "command/host_gc_sweep.h"
 #include "command/native_command.h"
 #include "util/spawn.h"
+#include "util/file_tree_ops.h"
 #include "platform/os_proc.h"
 
 #include <fcntl.h>
@@ -1436,6 +1437,161 @@ _test_next:;
     return failures;
 }
 
+#if defined(__linux__)
+static bool hgt_epoch_dir(const char *repo, char digit, bool candidate)
+{
+    char name[65], path[2048], file[2100], content[1024];
+    memset(name, digit, 64); name[64] = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/%s/epochs/%s", repo,
+        candidate ? "bin/dev" : "dev-obj", name);
+    if (!zcl_mkdir_p(path, 0700).ok) return false;
+    if (candidate) {
+        (void)snprintf(file, sizeof(file), "%s/program", path);
+        return hgt_write(file, "candidate\n");
+    }
+    (void)snprintf(file, sizeof(file), "%s/.leases", path);
+    if (mkdir(file, 0700) != 0) return false;
+    (void)snprintf(file, sizeof(file), "%s/.build-session", path);
+    (void)snprintf(content, sizeof(content),
+        "schema=zcl.build_epoch_session.v1\nsource_id=%s\ncomplete=1\nmutation=%s\n"
+        "compiler_id=%s\nepoch=%s\nprofile=dev-v2\nflags_sha256=%s\n",
+        name, name, name, name, name);
+    return hgt_write(file, content);
+}
+static bool hgt_epoch_setup(const char *repo)
+{
+    char path[2048], name[66]; memset(name, '5', 64); name[64] = '\n'; name[65] = 0;
+    if (!hgt_make_repo(repo)) return false;
+    for (char d = '1'; d <= '5'; ++d)
+        if (!hgt_epoch_dir(repo, d, false) || !hgt_epoch_dir(repo, d, true)) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/dev-obj/.current-epoch", repo);
+    if (!hgt_write(path, name)) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/dev/.current-epoch", repo);
+    if (!hgt_write(path, name)) return false;
+    (void)snprintf(path, sizeof(path), "%s/build/dev-obj/.epoch-gc.lock", repo);
+    if (!hgt_write(path, "")) return false;
+    memset(name, '2', 64); name[64] = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/dev-obj/epochs/%s/.leases/unknown", repo, name);
+    if (!hgt_write(path, "unverifiable\n")) return false;
+    memset(name, '3', 64);
+    (void)snprintf(path, sizeof(path), "%s/build/dev-obj/epochs/%s/.unverified", repo, name);
+    return hgt_write(path, "unknown\n");
+}
+static bool hgt_epoch_exists(const char *repo, char digit, bool candidate)
+{
+    char name[65], path[2048]; memset(name, digit, 64); name[64] = 0;
+    (void)snprintf(path, sizeof(path), "%s/build/%s/epochs/%s", repo,
+        candidate ? "bin/dev" : "dev-obj", name);
+    return hgt_exists(path);
+}
+static bool hgt_epoch_mode(const char *repo, bool apply, size_t expected)
+{
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool ok = host_gc_epochs(repo, 1, apply, &out);
+    const struct json_value *rows = json_get(&out, "epochs");
+    ok = ok && rows && rows->type == JSON_ARR && rows->num_children == expected &&
+        json_get_int(json_get(&out, "profiles_refused")) == 0;
+    json_free(&out); return ok;
+}
+static bool hgt_epoch_recovery(const char *repo)
+{
+    char name[65], object[2048], candidate[2048], stage[2048], marker[2048], session[2100];
+    memset(name, '6', 64); name[64] = 0;
+    if (!hgt_epoch_dir(repo, '6', false) || !hgt_epoch_dir(repo, '6', true)) return false;
+    (void)snprintf(object, sizeof(object), "%s/build/dev-obj/epochs/%s", repo, name);
+    (void)snprintf(candidate, sizeof(candidate), "%s/build/bin/dev/epochs/%s", repo, name);
+    (void)snprintf(stage, sizeof(stage), "%s/build/dev-obj/epochs/.gc-%s", repo, name);
+    (void)snprintf(marker, sizeof(marker), "%s/build/dev-obj/epochs/.gc-%s.session", repo, name);
+    (void)snprintf(session, sizeof(session), "%s/.build-session", object);
+    if (!zcl_tree_remove(candidate).ok || link(session, marker) != 0 || rename(object, stage) != 0) return false;
+    (void)snprintf(session, sizeof(session), "%s/.build-session", stage);
+    if (unlink(session) != 0) return false;
+    (void)snprintf(session, sizeof(session), "%s/.leases", stage);
+    if (rmdir(session) != 0) return false;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool ok = host_gc_epochs(repo, 1, true, &out) &&
+        json_get_int(json_get(&out, "pending_recovery")) == 1 &&
+        json_get_int(json_get(&out, "profiles_refused")) == 0 && !hgt_exists(stage) && !hgt_exists(marker);
+    json_free(&out); return ok;
+}
+static bool hgt_epoch_locked(const char *repo)
+{
+    char path[2048]; (void)snprintf(path, sizeof(path), "%s/build/dev-obj/.epoch-gc.lock", repo);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    bool ok = flock(fd, LOCK_EX | LOCK_NB) == 0;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    ok = ok && host_gc_epochs(repo, 1, true, &out) &&
+        json_get_int(json_get(&out, "profiles_refused")) == 1 && hgt_epoch_exists(repo, '1', false);
+    json_free(&out); (void)flock(fd, LOCK_UN); close(fd); return ok;
+}
+static bool hgt_epoch_fifo(const char *repo)
+{
+    char current[2048], saved[2056];
+    (void)snprintf(current, sizeof(current), "%s/build/dev-obj/.current-epoch", repo);
+    (void)snprintf(saved, sizeof(saved), "%s.saved", current);
+    if (rename(current, saved) != 0) return false;
+    bool ok = mkfifo(current, 0600) == 0;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    if (ok) ok = host_gc_epochs(repo, 1, false, &out) &&
+        json_get_int(json_get(&out, "profiles_refused")) == 1;
+    json_free(&out);
+    if (unlink(current) != 0 || rename(saved, current) != 0) ok = false;
+    return ok;
+}
+static bool hgt_epoch_candidate_retry(const char *repo)
+{
+    char name[65], candidate[2048]; memset(name, '8', 64); name[64] = 0;
+    if (!hgt_epoch_dir(repo, '8', false) || !hgt_epoch_dir(repo, '8', true)) return false;
+    (void)snprintf(candidate, sizeof(candidate), "%s/build/bin/dev/epochs/%s", repo, name);
+    return zcl_tree_remove(candidate).ok && hgt_epoch_mode(repo, true, 1) &&
+        !hgt_epoch_exists(repo, '8', false);
+}
+static bool hgt_epoch_tracked(const char *repo)
+{
+    if (!hgt_epoch_dir(repo, '7', false) || !hgt_epoch_dir(repo, '7', true)) return false;
+    char name[65], path[512], foreign[1024]; memset(name, '7', 64); name[64] = 0;
+    (void)snprintf(path, sizeof(path), "build/dev-obj/epochs/%s/.build-session", name);
+    const char *add[] = { "add", "-f", "--", path, NULL };
+    const char *commit[] = { "-c", "user.name=z23-test", "-c", "user.email=z23@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", "tracked build", NULL };
+    const char *remove[] = { "rm", "--cached", "-q", "--", path, NULL };
+    if (!hgt_git(repo, add) || !hgt_git(repo, commit) || !hgt_git(repo, remove)) return false;
+    (void)snprintf(foreign, sizeof(foreign), "%s/unrelated-index", repo);
+    if (setenv("GIT_INDEX_FILE", foreign, 1) != 0) return false;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool ok = !host_gc_epochs(repo, 1, true, &out) && hgt_epoch_exists(repo, '7', false) &&
+        hgt_epoch_exists(repo, '7', true);
+    json_free(&out);
+    if (unsetenv("GIT_INDEX_FILE") != 0) ok = false;
+    return ok;
+}
+static bool hgt_epoch_applied(const char *repo)
+{
+    return hgt_epoch_mode(repo, true, 2) && !hgt_epoch_exists(repo, '1', false) &&
+        !hgt_epoch_exists(repo, '1', true) && !hgt_epoch_exists(repo, '4', false) &&
+        !hgt_epoch_exists(repo, '4', true) && hgt_epoch_exists(repo, '2', false) &&
+        hgt_epoch_exists(repo, '3', false) && hgt_epoch_exists(repo, '5', false);
+}
+static int hgt_epoch_tests(const char *tmp)
+{
+    int failures = 0; char repo[1024];
+    (void)snprintf(repo, sizeof(repo), "%s/epoch-checkout", tmp);
+    bool ok = hgt_epoch_setup(repo);
+    if (ok) ok = hgt_epoch_fifo(repo) && hgt_epoch_locked(repo);
+    if (ok) ok = hgt_epoch_mode(repo, false, 2) && hgt_epoch_exists(repo, '1', false) &&
+        hgt_epoch_exists(repo, '4', true);
+    if (ok) ok = hgt_epoch_applied(repo);
+    if (ok) ok = hgt_epoch_recovery(repo);
+    if (ok) ok = hgt_epoch_candidate_retry(repo);
+    if (ok) ok = hgt_epoch_tracked(repo);
+    TEST("epoch GC dry run and paired apply preserve active and uncertain epochs") { ASSERT(ok); PASS(); } _test_next:;
+    return failures;
+}
+#else
+static int hgt_epoch_tests(const char *tmp) { (void)tmp; return 0; }
+#endif
+
 int test_host_gc(void)
 {
     struct hgt_env saved_env;
@@ -1724,6 +1880,7 @@ int test_host_gc(void)
         PASS();
     }
 
+    failures += hgt_epoch_tests(tmp);
     failures += hgt_archive_tests(tmp);
     failures += hgt_disposable_tests(tmp);
     failures += hgt_route_tests();

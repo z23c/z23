@@ -927,8 +927,12 @@ ZCL_COMMAND_BRANCH("ops.host", "ops", "Host maintenance",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(
     "ops.host.gc", "ops.host", "",
-    "Classify and reclaim dead dev-proof worktree generations",
-    "One report per sweep class over the dev-proof worktree pools (the disk "
+    "Classify and reclaim dev-proof worktrees or inactive build epochs",
+    "On Linux, checkout selects inactive build epochs in that explicit checkout; "
+    "epoch_keep defaults to 3, or use 1 to retain only the current and protected "
+    "generations. Dry run unless apply=true. Byte counts estimate logical path sizes, "
+    "not physical blocks. Without checkout, one report per sweep class over the "
+    "dev-proof worktree pools (the disk "
     "pool and its tmpfs twin by default, or --roots): registered, and the "
     "partition of it into reapable / too_young / in_use / locked / "
     "need_review, plus bytes_reclaimable and bytes_reclaimed. Only a clean "
@@ -950,7 +954,7 @@ ZCL_COMMAND_READY_COMMAND(
     "go with the copy.", 65536,
     "host,gc,garbage,worktree,generation,disk,reclaim,janitor",
     "zcl.host_gc.input.v1", "zcl.host_gc.v1",
-    "apply,floor_hours,roots,age_days", "",
+    "apply,floor_hours,roots,age_days,checkout,epoch_keep", "",
     "z23 ops host gc --apply=false",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_DESTRUCTIVE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,

@@ -176,4 +176,7 @@ bool host_gc_path_protected(const struct host_gc_request *req,
 size_t host_gc_protected_leaf_count(void);
 const char *host_gc_protected_leaf(size_t i);
 
+struct json_value;
+bool host_gc_epochs(const char *checkout, int keep, bool apply, struct json_value *out);
+
 #endif /* ZCL_TOOLS_HOST_GC_SWEEP_H */

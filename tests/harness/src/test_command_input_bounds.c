@@ -820,6 +820,20 @@ static int t_package_fetch_maximum_bytes(void)
     return failures;
 }
 
+static int t_host_gc_epoch_keep(void)
+{
+    int failures = 0;
+    TEST("host GC epoch retention accepts only bounded integers") {
+        ASSERT(!cib_accepts_int("ops.host.gc", "epoch_keep", 0));
+        ASSERT(cib_accepts_int("ops.host.gc", "epoch_keep", 1));
+        ASSERT(cib_accepts_int("ops.host.gc", "epoch_keep", 32));
+        ASSERT(!cib_accepts_int("ops.host.gc", "epoch_keep", 33));
+        ASSERT(!cib_accepts("ops.host.gc", "epoch_keep", 1, NULL, 0));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int t_fleet_usage_days(void)
 {
     int failures = 0;
@@ -2147,6 +2161,7 @@ int test_command_input_bounds(void)
     failures += t_lab_include_source();
     failures += t_package_fetch_maximum_bytes();
     failures += t_fleet_usage_days();
+    failures += t_host_gc_epoch_keep();
     failures += t_moved_dual_shape_since();
     failures += t_moved_ttl_bounds();
     failures += t_regtest_mine_blocks();

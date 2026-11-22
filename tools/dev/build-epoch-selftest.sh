@@ -5,14 +5,11 @@
 # timestamp+depfile graph), moves on toolchain/flags/profile/build-system
 # changes, and atomic candidate publication remains bound to the exact source
 # record via the session stamp + publish-time verify-record.
-
 set -euo pipefail
-
 # These fixtures require real links; MSYS otherwise may copy their targets.
 case "$(uname -s 2>/dev/null || printf unknown)" in
     MSYS*|MINGW*|CYGWIN*) export MSYS="${MSYS:+$MSYS }winsymlinks:sys" ;;
 esac
-
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 if ! cd "$ROOT"; then
@@ -25,7 +22,6 @@ OBJECT_TOOL="$SELF_DIR/compile-epoch-object.sh"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
 IDENTITY_TOOL="$SELF_DIR/build-epoch-open-file-identity.sh"
 . "$ROOT/tools/scripts/source_identity_lib.sh"
-
 # Select real, verified compiler drivers for the probe pair. This selftest
 # compiles actual C and fingerprints an actual C++ toolchain, so both sides
 # must demonstrably work before anything runs. That is not cosmetic: this
@@ -43,13 +39,11 @@ c_driver_works()
     "$@" -std=c23 -c -o "$WORK/driver-probe.o" "$WORK/driver-probe.c" \
         >/dev/null 2>&1
 }
-
 cxx_driver_works()
 {
     printf 'int zcl_epoch_driver_probe(void) { return 0; }\n' \
         | "$@" -x c++ -E - >/dev/null 2>&1
 }
-
 select_driver_pair()
 {
     local kind="$1" explicit="$2" worked=0
@@ -75,7 +69,6 @@ select_driver_pair()
     fi
     printf '%s\n' "$explicit"
 }
-
 case "${1:-}" in
     '') COMPILER_ID_ONLY=0 ;;
     --compiler-id-only) COMPILER_ID_ONLY=1 ;;
@@ -87,7 +80,6 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
 WORK="$(cd "$WORK" && pwd -P)"
 CHILD_PIDS=()
 IDENTITY_PAIR_PIDS=()
-
 cleanup()
 {
     local status=$? pid phase_name=unknown
@@ -111,24 +103,20 @@ cleanup()
 }
 trap cleanup EXIT
 trap 'exit 2' HUP INT TERM
-
 PROFILE=fixture-v1
 COMPILE_FLAGS='-std=c23 -O2 -Wall'
 LINK_FLAGS='-pthread -Wl,-z,now'
-
 fail()
 {
     printf 'build-epoch-selftest: FAIL: %s\n' "$*" >&2
     exit 1
 }
-
 # Device, inode, size, and nanosecond mtime/ctime of one path, portably.
 artifact_stamp()
 {
     stat -Lc '%d:%i:%s:%Y:%Z:%y:%z' "$1" 2>/dev/null ||
         stat -f '%d:%i:%z:%m:%c' "$1"
 }
-
 # This self-test runs inside lint and inside test groups, and a landing proof
 # requires both to leave the checkout's source inventory exactly as they found
 # it. The vendored archives (vendor/lib/*.a) and headers (vendor/include) are
@@ -145,7 +133,6 @@ vendor_input_paths()
         find vendor/include ! -type d -print0 || return 1
     fi
 }
-
 # Build once in this selftest's private workspace; never race a shared binary.
 # Compiler-unavailable hosts retain the portable implementation for both
 # snapshots. A runtime capture error is fatal, never a fallback trigger.
@@ -189,14 +176,12 @@ vendor_inputs_unchanged()
              shown++ < 20' >&2 || true
     fail 'the self-test changed vendor/lib/*.a or vendor/include; it must leave the source inventory untouched'
 }
-
 SELFTEST_TIMEOUT="${ZCL_BUILD_EPOCH_SELFTEST_TIMEOUT:-600}"
 [[ "$SELFTEST_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     fail "invalid ZCL_BUILD_EPOCH_SELFTEST_TIMEOUT=$SELFTEST_TIMEOUT (must be a positive integer)"
 SELFTEST_STEP_TIMEOUT="${ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT:-120}"
 [[ "$SELFTEST_STEP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     fail "invalid ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT=$SELFTEST_STEP_TIMEOUT (must be a positive integer)"
-
 # A prior watchdog death reported nothing but a bare rc=2: the lint driver's
 # captured-output block only fires when this script exits with output
 # already flushed, but "budget exceeded" alone does not say WHERE the time
@@ -1337,6 +1322,7 @@ GC_LIVE="$(sha_label gc-live)"
 GC_DEAD_1="$(sha_label gc-dead-1)"
 GC_DEAD_2="$(sha_label gc-dead-2)"
 OWNER_START="$("$SELF_DIR/process-start-token.sh" "$$")"
+mkdir -p "$GC_ROOT/epochs/.gc-$GC_DEAD_1"
 for old in "$GC_LIVE" "$GC_DEAD_1" "$GC_DEAD_2"; do
     mkdir -p "$GC_ROOT/epochs/$old/.leases" "$GC_CANDIDATES/epochs/$old"
     : > "$GC_CANDIDATES/epochs/$old/candidate"
@@ -1362,6 +1348,20 @@ STATE_FILE="$STATE" "$SESSION_TOOL" acquire \
 [ ! -e "$GC_CANDIDATES/epochs/$GC_DEAD_1" ] &&
 [ ! -e "$GC_CANDIDATES/epochs/$GC_DEAD_2" ] ||
     fail 'epoch GC retained dead epochs beyond its bound'
+[ -d "$GC_ROOT/epochs/.gc-$GC_DEAD_1" ] || fail 'epoch GC removed staged recovery'
+
+if [ "$HOST_SYSTEM" = Linux ]; then
+    LOCK_RACE_ROOT="$WORK/gc-lock-race"; mkdir -p "$LOCK_RACE_ROOT"
+    exec 8> "$LOCK_RACE_ROOT/.epoch-gc.lock"; flock -x 8
+    STATE_FILE="$STATE" "$SESSION_TOOL" acquire "$LOCK_RACE_ROOT/epochs/$EPOCH_MAIN/.build-session" \
+        "$LOCK_RACE_ROOT/epochs/$EPOCH_MAIN/.leases/current" "$LOCK_RACE_ROOT" - 1 "$SOURCE_A" 1 "$MUTATION_A2" \
+        "$COMPILER_ID" "$EPOCH_MAIN" "$PROFILE" "$COMPILE_FLAGS" "$LINK_FLAGS" "$SESSION_CC_COMMAND" \
+        "$SESSION_CXX_COMMAND" "$$" "$VERIFY" 8>&- > "$WORK/gc-lock-race.log" 2>&1 & LOCK_RACE_PID=$!
+    for unused in {1..100}; do [ -e "/proc/$LOCK_RACE_PID/fd/9" ] && break; sleep 0.05; done
+    RACE_OK=1; [ -e "/proc/$LOCK_RACE_PID/fd/9" ] && [ ! -e "$LOCK_RACE_ROOT/epochs/$EPOCH_MAIN" ] || RACE_OK=0
+    flock -u 8; exec 8>&-; wait "$LOCK_RACE_PID" || RACE_OK=0
+    [ "$RACE_OK" = 1 ] && [ -f "$LOCK_RACE_ROOT/epochs/$EPOCH_MAIN/.leases/current" ] || fail 'generation created outside GC lock'
+fi
 
 # A writer can die after invalidating an epoch but before aggregate verify.
 # The next acquire must discard every artifact and candidate from that epoch

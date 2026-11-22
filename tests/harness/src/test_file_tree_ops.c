@@ -756,6 +756,39 @@ static int test_retained_tree(void)
 }
 #endif
 
+#if defined(ZCL_TESTING) && defined(__linux__)
+static bool fto_fifo_safety(const char *dir, const char *path, int fd)
+{
+    char fifo[PATH_MAX + 16]; uint64_t bytes = 0;
+    (void)snprintf(fifo, sizeof(fifo), "%s/pipe", dir);
+    bool ok = mkfifo(fifo, 0600) == 0 && !zcl_tree_measure_contents_fd_one_mount(fd, &bytes).ok &&
+        access(path, F_OK) == 0;
+    if (ok) ok = !zcl_tree_remove_contents_fd_one_mount(fd).ok && access(fifo, F_OK) == 0;
+    if (ok) ok = unlink(fifo) == 0 && fto_write(path, "protected");
+    return ok;
+}
+static int test_one_mount_removal(void)
+{
+    int failures = 0; char root[PATH_MAX], path[PATH_MAX + 16];
+    char *dir = test_mkdtemp(root, sizeof(root), "fto_mount");
+    bool ok = dir != NULL;
+    int fd = -1;
+    if (ok) {
+        (void)snprintf(path, sizeof(path), "%s/retained", dir);
+        ok = fto_write(path, "protected") && (fd = open(dir, O_RDONLY | O_DIRECTORY)) >= 0;
+    }
+    uint64_t bytes = 0;
+    if (ok) ok = fto_fifo_safety(dir, path, fd);
+    if (ok) ok = zcl_tree_measure_contents_fd_one_mount(fd, &bytes).ok && bytes >= 9;
+    if (ok) ok = !zcl_test_tree_remove_wrong_mount(fd).ok && access(path, F_OK) == 0;
+    if (ok) ok = zcl_tree_remove_contents_fd_one_mount(fd).ok && access(path, F_OK) != 0;
+    if (fd >= 0) close(fd);
+    if (dir) (void)zcl_tree_remove(dir);
+    TEST("one-mount removal refuses foreign identity before removing files") { ASSERT(ok); PASS(); } _test_next:;
+    return failures;
+}
+#endif
+
 static int test_file_tree_ops_platform_arm(void)
 {
     int failures = 0;
@@ -775,6 +808,9 @@ static int test_file_tree_ops_platform_arm(void)
     failures += test_depth_bound();
 #if defined(ZCL_TESTING)
     failures += test_retained_tree();
+#if defined(__linux__)
+    failures += test_one_mount_removal();
+#endif
 #endif
 
     return failures;
