@@ -273,6 +273,8 @@ void zcl_native_handle_ops_host_gc(const struct zcl_command_request *request,
         return;
     }
     req.age_days = (int)age_days;
+    if (!roots)
+        (void)host_gc_add_land_pool(&req);
     if (roots && !ohg_take_roots(roots, &req)) {
         ohg_fail(reply, "host_gc.roots_invalid", "validate",
                  "roots must be 1..8 entries, each an absolute pool "

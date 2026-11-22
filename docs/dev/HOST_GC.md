@@ -143,6 +143,18 @@ Not preserved: the worktree's own reflog, `config.worktree`, and the gitdir
 of a submodule checked out inside it. A disposable pool keeps its old rule:
 a copy on a branch there is never removed.
 
+The land receiver pool (`<state root>/land-remote`, one detached copy per lane
+from `dev land receive`) is added to the verb's default pools whenever it
+exists. It has no sibling lock and no process open on it, so the queue decides:
+a copy is kept as `locked` while a queued or inflight land row has the copy's
+HEAD as its tip; a terminal row (landed, failed, conflict, fenced, cancelled)
+no longer holds it, and an unreadable queue or HEAD holds every copy. The usual
+floor, process, age and unique-HEAD rules then apply: a copy is removed only
+after `floor_hours` (default 6, above the longest queued-to-landed time in
+the landing ledger, 4.0 h of 2497 landings) and, because its HEAD is
+unlanded or rebased, after `age_days` idle, pinned under `refs/archive/wt`
+first. Explicit `roots` replace the defaults and do not add this pool.
+
 A dirty worktree is reported under `needs_review` as `{path, idle_days,
 dirty_count}`. A worktree is also kept when it is locked, in use by a live
 process, a warm donor, or named by a systemd user unit file

@@ -1274,6 +1274,9 @@ ZCL_TEST_GROUP(host_gc)
 /* ops.host.gc over lanes on a branch: a clean idle one is removed and its
  * branch left alone; a young, dirty or mid-operation one is kept. */
 ZCL_TEST_GROUP(host_gc_branch)
+/* ops.host.gc over the land receiver pool: a copy a queued or inflight land row
+ * names is kept, an old terminal one is removed with its siblings. */
+ZCL_TEST_GROUP(host_gc_land)
 /* ops.host.build: the host build queue. Jobs are admitted in arrival order,
  * never above the lane limit, run with the devbuild wrapper's scope
  * properties through a stub launcher, keep their exit status, release scratch

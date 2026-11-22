@@ -73,6 +73,17 @@
  * (regular files only, never through a symlink). Locks, in-use, protected
  * paths and unique-HEAD archive pinning are unchanged.
  *
+ * THE LAND RECEIVER POOL. `dev land receive` places one detached copy per
+ * lane under <state root>/land-remote/<lane>, takes no sibling lock and holds
+ * no process open on it: a queued row is invisible to the lock, in-use and
+ * git-lock rules. So host_gc_add_land_pool() adds that directory as a
+ * disposable pool marked `queue_gated`, and a copy is kept as `locked` while
+ * the land queue (the existing read-only row view, no second ledger) holds a
+ * queued or inflight row whose tip is the copy's HEAD. A terminal row (landed,
+ * failed, conflict, fenced, cancelled) no longer holds it. A queue that cannot
+ * be read, or a HEAD that cannot be read, holds every copy. The pool is only
+ * ever added by the ops.host.gc verb when no explicit roots were given.
+ *
  * REFUSALS ARE NAMED. A protected path (a canonical datadir by name, a
  * directory that actually holds chain data, the checkout itself, $HOME, /)
  * is never swept and never silently skipped: it is refused by name into
@@ -104,6 +115,7 @@ struct host_gc_pool {
     char name[HOST_GC_NAME_CAP];
     char path[HOST_GC_PATH_CAP];
     bool disposable;   /* gate-copy pool: dirty idle copies are reapable (see below) */
+    bool queue_gated;  /* land receiver pool: a live queue row keeps its copy */
 };
 
 /* Per-class outcome. registered is the number of worktrees of the pool's own
@@ -115,6 +127,7 @@ struct host_gc_class {
     char repo[HOST_GC_PATH_CAP];
     bool present;
     bool disposable;
+    bool queue_gated;
     int registered;
     int reapable;
     int too_young;
@@ -168,6 +181,11 @@ struct host_gc_report {
  * $HOME is absent or too long to hold a pool path, in which case the caller
  * must refuse rather than sweep an unanchored tree. */
 bool host_gc_defaults(struct host_gc_request *req);
+
+/* Append the land receiver pool <state root>/land-remote (see THE LAND
+ * RECEIVER POOL) when that directory exists and a pool slot is free. Returns
+ * whether it was added; absence is not an error. */
+bool host_gc_add_land_pool(struct host_gc_request *req);
 
 /* Classify every registered worktree under every requested pool and, when
  * req->apply, remove exactly the reapable ones through git. Returns false

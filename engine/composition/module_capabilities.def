@@ -1307,6 +1307,7 @@ ZCL_MODULE_CAPABILITY("engine/entry/main_cli_modes_import_shielded.c", CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/entry/main_cli_dispatch.c", CAP_FS_WRITE, "cli_main steps split from main_cli_modes.c: prints a selected-field rendering of a raw RPC reply to stdout and its diagnostics to stderr")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_paths.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_disposable.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/host_gc_landpool.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_epochs.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS, "")
 ZCL_MODULE_CAPABILITY("tools/command/host_gc_sweep.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/build_admit.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "flock lane, ticket and marker files in the build state directory; ticket names carry the wall-clock time")

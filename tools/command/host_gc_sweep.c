@@ -55,6 +55,7 @@ struct hg_cand {
     bool locked;
     bool occupied;
     bool donor;       /* kept: newest complete generation of its identity */
+    bool live;        /* land receiver pool: a queued or inflight row names this copy */
     bool disposable;  /* its pool is a disposable gate-copy pool */
     bool orphan;      /* unregistered directory with the gate-copy shape */
     int dirty;        /* lines of `git status`; -1 unknown */
@@ -69,6 +70,7 @@ struct hg_scan {
     /* Every process was listed, though some could not be read (hg_inventory_allows). */
     bool process_listing_complete;
     bool foreign_ok;  /* every pool is closed to other uids (hg_pool_closed) */
+    struct hg_land_view *land; /* queue snapshot, loaded when a pool is queue_gated */
 };
 
 static int hg_git(const char *dir, const char *const args[], char *out,
@@ -259,6 +261,7 @@ static struct hg_cand *hg_push_cand(struct hg_scan *scan, size_t cls,
     c->occupied = false;
     c->donor = false;
     c->disposable = false;
+    c->live = false;
     c->orphan = false;
     c->dirty = 0;
     scan->n++;
@@ -1067,7 +1070,7 @@ static enum hg_verdict hg_classify(const struct host_gc_request *req,
 {
     int64_t floor_s =
         (int64_t)(req->floor_hours > 0 ? req->floor_hours : 0) * 3600;
-    if (c->locked)
+    if (c->locked || c->live)
         return HG_KEEP_LOCKED;
     if (c->disposable && hg_lock_busy(c->path))
         return HG_KEEP_LOCKED;
@@ -1323,6 +1326,18 @@ static bool hg_holds_worktree(const struct hg_scan *scan, size_t i)
     return false;
 }
 
+/* A land receiver copy a queued or inflight row still names. An orphan has
+ * no HEAD and no row can use it; any other copy whose HEAD cannot be read is
+ * held (hg_land_view_holds with NULL). */
+static bool hg_land_live(const struct hg_scan *scan, const struct hg_cand *c)
+{
+    char sha[HG_STATUS_CAP];
+    if (c->orphan)
+        return false;
+    return hg_land_view_holds(scan->land,
+                              hg_head_sha(c->path, sha, sizeof(sha)) ? sha : NULL);
+}
+
 static void hg_settle(const struct host_gc_request *req,
                       struct host_gc_report *report, struct hg_scan *scan,
                       int64_t now)
@@ -1333,6 +1348,7 @@ static void hg_settle(const struct host_gc_request *req,
         char reason[HOST_GC_REASON_CAP];
         enum hg_verdict v;
         c->disposable = cls->disposable;
+        c->live = cls->queue_gated && hg_land_live(scan, c);
         if (host_gc_path_protected(req, cls->repo, c->path, reason,
                                    sizeof(reason))) {
             hg_refuse(report, c->path, reason);
@@ -1365,6 +1381,7 @@ static void hg_seed_classes(const struct host_gc_request *req,
         (void)hg_copy(report->classes[i].path,
                       sizeof(report->classes[i].path), req->pools[i].path);
         report->classes[i].disposable = req->pools[i].disposable;
+        report->classes[i].queue_gated = req->pools[i].queue_gated;
     }
 }
 
@@ -1393,6 +1410,8 @@ bool host_gc_run(const struct host_gc_request *req,
         if (!hg_pool_open(req, report, cls, buf, HG_LIST_CAP))
             continue;
         hg_parse_worktrees(&scan, i, cls->path, buf, &cls->registered);
+        if (cls->queue_gated && !scan.land)
+            scan.land = hg_land_view_load();
         if (cls->disposable)
             hg_push_orphans(&scan, i, cls->path, cls);
     }
@@ -1401,6 +1420,7 @@ bool host_gc_run(const struct host_gc_request *req,
     hg_mark_units(req, &scan);
     hg_settle(req, report, &scan, now);
     report->truncated = scan.truncated;
+    hg_land_view_free(scan.land);
     free(scan.cands);
     free(buf);
     return true;

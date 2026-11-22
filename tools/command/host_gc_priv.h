@@ -63,4 +63,18 @@ bool hg_proc_foreign(const char *procdir);
  * and other, so a process of another uid cannot open anything under it. */
 bool hg_pool_closed(const char *pool);
 
+/* ---- host_gc_landpool.c: the land receiver pool ---- */
+
+struct hg_land_view;
+
+/* One snapshot of the land queue's rows (the read-only view). Never NULL
+ * except on allocation failure; a queue that cannot be read yields a view
+ * that holds every copy. */
+struct hg_land_view *hg_land_view_load(void);
+void hg_land_view_free(struct hg_land_view *view);
+
+/* True when a queued or inflight row has the tip `head` (or, with head NULL
+ * because HEAD could not be read, always). A NULL view holds everything. */
+bool hg_land_view_holds(const struct hg_land_view *view, const char *head);
+
 #endif /* ZCL_TOOLS_HOST_GC_PRIV_H */
