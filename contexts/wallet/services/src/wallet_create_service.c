@@ -5,21 +5,23 @@
 
 #include "services/wallet_create_service.h"
 
+#include "platform/file_metadata.h"
 #include "support/cleanse.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 /* A <datadir>/wallet directory is a pre-SQLite wallet that boot would import
  * on its next start. It holds keys this command cannot see, so the datadir is
- * not empty. */
+ * not empty. The portable shape probe does not follow a final symlink and
+ * reads an entry it cannot classify as present, the direction that refuses
+ * to create a wallet beside one it could not look at. */
 static bool wcs_legacy_wallet_present(const char *datadir)
 {
     char legacy[2048];
-    struct stat st;
     int n = snprintf(legacy, sizeof(legacy), "%s/wallet", datadir);
-    return n <= 0 || (size_t)n >= sizeof(legacy) || lstat(legacy, &st) == 0;
+    return n <= 0 || (size_t)n >= sizeof(legacy) ||
+           platform_file_shape_read(legacy) != PLATFORM_FILE_SHAPE_MISSING;
 }
 
 struct zcl_result wallet_create_phrase(char *out, size_t cap)
