@@ -122,7 +122,7 @@ bool wallet_db_read_txs(struct wallet_db *wdb, struct wallet *w)
         unsigned char fm;
         stream_read_bytes(&s, &fm, 1);
         wtx.from_me = fm != 0;
-        uint32_t conf;
+        uint32_t conf = 0;
         stream_read_u32_le(&s, &conf);
         wtx.confirms = (int)conf;
 

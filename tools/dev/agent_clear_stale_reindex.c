@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+
 static const char *acr_fallback(const char *value, const char *fallback)
 {
     if (value == NULL || value[0] == '\0')
@@ -68,8 +70,6 @@ static int acr_below(const char *height, const char *anchor, int *below)
     *below = served < marked;
     return 0;
 }
-
-#if !defined(_WIN32)
 
 #include <fcntl.h>
 #include <sys/stat.h>

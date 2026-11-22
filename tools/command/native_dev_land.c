@@ -3785,6 +3785,7 @@ static bool dl_submit_markers_check(const char *root, struct zcl_command_reply *
     return ok;
 }
 
+#if !defined(_WIN32)
 /* Admit the candidate only after verifying this worktree has no unfinished
  * Git operation. Worktrees share objects, but --git-path resolves each marker
  * in the submitting worktree's own Git directory. Unreadable state refuses. */
@@ -3800,6 +3801,7 @@ static bool dl_submit_tip_resolve(const char *root, const char *tip,
     }
     return dl_submit_markers_check(root, reply);
 }
+#endif
 
 /* A qualify refusal as a typed error: QUALIFY_<REFUSAL>, with the step or
  * group, the retained log and the paths it names in data. */

@@ -15,6 +15,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+static const char *const isr_apps[] = { "skycombat", "tasks" };
+#define ISR_APP_COUNT (sizeof(isr_apps) / sizeof(isr_apps[0]))
+bool app_installed_source_supported(const char *app)
+{
+    if (!app) return false;
+    for (size_t i = 0; i < ISR_APP_COUNT; ++i)
+        if (!strcmp(app, isr_apps[i])) return true;
+    return false;
+}
+
 #if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <limits.h>
@@ -119,8 +129,6 @@ static bool isr_exe_path(char *out, size_t cap)
 }
 /* The installed-source grammar is per app: the selector link name under
  * share/z23/apps and the executable member the bin link names. */
-static const char *const isr_apps[] = { "skycombat", "tasks" };
-#define ISR_APP_COUNT (sizeof(isr_apps) / sizeof(isr_apps[0]))
 static const char *isr_game_member(const char *app)
 {
     return strcmp(app, "skycombat") ? "z23-tasks" : "z23-skycombat";
@@ -131,13 +139,6 @@ static const char *isr_selector(const char *app)
     return strcmp(app, "skycombat") ? "tasks" : "skycombat";
 }
 #endif
-bool app_installed_source_supported(const char *app)
-{
-    if (!app) return false;
-    for (size_t i = 0; i < ISR_APP_COUNT; ++i)
-        if (!strcmp(app, isr_apps[i])) return true;
-    return false;
-}
 #if defined(__linux__)
 static bool isr_game_link(const char *prefix, const char *app, bool *untrusted)
 {

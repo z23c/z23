@@ -652,8 +652,8 @@ static bool pe_export_emit(struct zcl_command_reply *reply, const struct pe_expo
     return ok;
 }
 
-void zcl_native_handle_ops_mesh_device_pair_export(const struct zcl_command_request *request,
-                                                   struct zcl_command_reply *reply)
+static void pe_export(const struct zcl_command_request *request,
+                      struct zcl_command_reply *reply)
 {
     struct pe_export_run run;
     struct pe_buf buf = {0};
@@ -786,8 +786,8 @@ static void pe_import_sha_logged(const struct pe_import_in *in, const uint8_t *b
     LOG_ERROR(PE_TAG, "expected %s, the archive digests to %s", in->sha, got);
 }
 
-void zcl_native_handle_ops_mesh_device_pair_import(const struct zcl_command_request *request,
-                                                   struct zcl_command_reply *reply)
+static void pe_import(const struct zcl_command_request *request,
+                      struct zcl_command_reply *reply)
 {
     struct pe_import_in in;
     struct pe_header head;
@@ -848,5 +848,38 @@ done:
     free(bytes);
 }
 #else
-typedef int native_pair_epoch_unsupported_on_windows;
+/* The epoch directory walk composes POSIX descriptor-relative file semantics;
+ * fail closed elsewhere, as pairing renewal does. */
+static void pe_unsupported(struct zcl_command_reply *reply, const char *command)
+{
+    if (reply)
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED, "UNSUPPORTED_PLATFORM", "normalize",
+                               false, false, "pairing epoch export and import need POSIX file semantics", command);
+}
+
+static void pe_export(const struct zcl_command_request *request,
+                      struct zcl_command_reply *reply)
+{
+    (void)request;
+    pe_unsupported(reply, "ops.mesh.device.pair.export");
+}
+
+static void pe_import(const struct zcl_command_request *request,
+                      struct zcl_command_reply *reply)
+{
+    (void)request;
+    pe_unsupported(reply, "ops.mesh.device.pair.import");
+}
 #endif
+
+void zcl_native_handle_ops_mesh_device_pair_export(const struct zcl_command_request *request,
+                                                   struct zcl_command_reply *reply)
+{
+    pe_export(request, reply);
+}
+
+void zcl_native_handle_ops_mesh_device_pair_import(const struct zcl_command_request *request,
+                                                   struct zcl_command_reply *reply)
+{
+    pe_import(request, reply);
+}

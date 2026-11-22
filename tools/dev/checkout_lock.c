@@ -32,9 +32,9 @@ extern char **environ;
 static const char k_prefix[] = "checkout-lock: ";
 static const char k_usage[] =
     "usage: checkout-lock {foreground|watcher} LOCK_FILE -- CMD...";
-static const char k_defer[] = "deferred: foreground build holds the lock";
 
 #if !defined(_WIN32)
+static const char k_defer[] = "deferred: foreground build holds the lock";
 
 static void cl_write_all(int fd, const char *s, size_t n)
 {

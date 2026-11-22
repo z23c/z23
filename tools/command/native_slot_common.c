@@ -350,4 +350,12 @@ enum slot_verify slot_verify_installed(const char *name_dir)
     return memcmp(rec, hex, 64) == 0 ? SLOT_VERIFY_OK : SLOT_VERIFY_MISMATCH;
 }
 
+#else
+/* Slots are a POSIX install layout; a Windows host has none to verify, and a
+ * slot that cannot be verified counts as unsafe. */
+enum slot_verify slot_verify_installed(const char *name_dir)
+{
+    (void)name_dir;
+    return SLOT_VERIFY_UNSAFE;
+}
 #endif /* _WIN32 */

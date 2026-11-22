@@ -273,6 +273,7 @@ struct app_tsv {
     size_t error_size;
 };
 
+#if !defined(_WIN32)
 static bool app_tsv_fail(struct app_tsv *t, const char *what, const char *field)
 {
     snprintf(t->error, t->error_size, "apps.tsv line %u: %s%s%s", t->line,
@@ -394,7 +395,6 @@ static bool app_tsv_parse(struct app_tsv *t, char *text)
     return true;
 }
 
-#if !defined(_WIN32)
 /* Owner-controlled regular file, read whole into buf. */
 static bool app_tsv_read(const char *path, char *buf, size_t cap,
                          bool *present, char *why, size_t why_size)

@@ -563,7 +563,7 @@ static struct zcl_objective_value obj_landing_latency_s(
     struct obj_outcomes_stats stats;
     struct obj_train_stats train;
     char path[512];
-    const char *use;
+    const char *use = "";
 
     bool observed = obj_landing_observe(options, &use, path, sizeof path,
                                         &stats, &train, &v);
@@ -674,7 +674,7 @@ static struct zcl_objective_value obj_landing_attempts_per_train(
     struct obj_outcomes_stats stats;
     struct obj_train_stats train;
     char path[512];
-    const char *use;
+    const char *use = "";
 
     bool observed = obj_landing_observe(options, &use, path, sizeof path,
                                         &stats, &train, &v);

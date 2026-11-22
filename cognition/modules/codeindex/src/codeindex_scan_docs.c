@@ -18,6 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The whole prose scanner (read, parse, store) is POSIX-only; the guard below
+ * opens here and closes after doc_store_one. */
 #if !defined(_WIN32)
 #include <dirent.h>
 #include <errno.h>
@@ -180,7 +182,6 @@ static bool doc_read_file(const char *root, const char *relpath, char **out,
     *len_out = size;
     return true;
 }
-#endif /* !_WIN32 */
 
 /* ── parsing ──────────────────────────────────────────────────────────── */
 
@@ -338,7 +339,6 @@ static bool doc_insert(sqlite3 *db, const struct ci_doc *row,
     return ok;
 }
 
-#if !defined(_WIN32)
 static bool doc_store_one(sqlite3 *db, const char *root, const char *relpath)
 {
     char *buf = NULL;

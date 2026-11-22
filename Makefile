@@ -1068,8 +1068,10 @@ LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_stub.c \
 	platform/modules/util/src/self_backtrace_stub.c \
 	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
-# file_service.c supplies the Windows refusal; the POSIX client is empty there.
+# file_service.c supplies the Windows refusal; the POSIX client and the resume
+# prefix scan are empty there (an empty TU is a -pedantic error).
 LIB_SRCS := $(filter-out core/modules/net/src/file_service_client.c \
+	core/modules/net/src/file_service_prefix.c \
 	platform/modules/platform/src/os_sandbox_linux.c \
 	platform/modules/platform/src/os_sandbox_landlock_linux.c \
 	platform/modules/platform/src/os_sandbox_package_linux.c \
@@ -12753,6 +12755,9 @@ NODE_C23_OBJECT_CFLAGS = $(NODE_C23_OBJECT_CFLAGS_BASE)
 # failing -Werror on Windows alone.
 ifeq ($(ZCL_HOST_WINDOWS),1)
 $(NODE_C23_OBJ_DIR)/core/modules/net/src/https_server_install.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-function
+# rf_peers_first_bad is called only from the POSIX body of
+# rom_fetch_download_parallel; same sealed-file reasoning as above.
+$(NODE_C23_OBJ_DIR)/core/modules/net/src/rom_fetch.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-function
 endif
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)

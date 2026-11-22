@@ -60,12 +60,7 @@ static bool as_id(const char *s)
     return n && n <= APP_SELECTION_ID_MAX &&
         strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789-") == n;
 }
-/* '@' cannot occur in a legacy id; wire identities retain the full route. */
-static void as_stem(const char *app, char stem[40])
-{
-    if (app_selection_route_reserved(app)) (void)snprintf(stem, 40, "@kept-%s", app + 5);
-    else (void)snprintf(stem, 40, "%s", app);
-}
+#if !defined(_WIN32)
 static bool as_path(const char *s)
 {
     size_t n = strnlen(s, APP_SELECTION_PATH_MAX);
@@ -90,13 +85,6 @@ static bool as_valid(const struct app_selection *s, struct ar_errors *errors)
         validates_custom(errors, as_nonzero(roots[i]), "root", "must be nonzero");
     validates_custom(errors, s->revision > 0, "revision", "must be positive");
     return !ar_errors_any(errors);
-}
-static bool as_canonical_dirs(const struct app_selection *s)
-{
-    char copy[APP_SELECTION_PATH_MAX], data[APP_SELECTION_PATH_MAX];
-    return platform_directory_canonical_real(s->copy, copy, sizeof(copy)) &&
-        platform_directory_canonical_real(s->datadir, data, sizeof(data)) &&
-        !strcmp(copy, s->copy) && !strcmp(data, s->datadir);
 }
 static void as_hash(const uint8_t *wire, uint8_t out[32])
 {
@@ -127,6 +115,19 @@ static void as_encode(const struct app_selection *s, uint8_t wire[AS_WIRE])
     for (size_t i = 0; i < 8; ++i, p += 32) memcpy(p, roots[i], 32);
     as_hash(wire, wire + AS_BODY);
 }
+/* '@' cannot occur in a legacy id; wire identities retain the full route. */
+static void as_stem(const char *app, char stem[40])
+{
+    if (app_selection_route_reserved(app)) (void)snprintf(stem, 40, "@kept-%s", app + 5);
+    else (void)snprintf(stem, 40, "%s", app);
+}
+static bool as_canonical_dirs(const struct app_selection *s)
+{
+    char copy[APP_SELECTION_PATH_MAX], data[APP_SELECTION_PATH_MAX];
+    return platform_directory_canonical_real(s->copy, copy, sizeof(copy)) &&
+        platform_directory_canonical_real(s->datadir, data, sizeof(data)) &&
+        !strcmp(copy, s->copy) && !strcmp(data, s->datadir);
+}
 static bool as_decode(const uint8_t wire[AS_WIRE], struct app_selection *out)
 {
     uint8_t hash[32], canonical[AS_WIRE];
@@ -146,7 +147,6 @@ static bool as_decode(const uint8_t wire[AS_WIRE], struct app_selection *out)
     as_encode(out, canonical);
     return memcmp(canonical, wire, AS_WIRE) == 0;
 }
-#if !defined(_WIN32)
 static int as_directory(const char *dir)
 {
     if (!dir || dir[0] != '/') { errno = EINVAL; return -1; }

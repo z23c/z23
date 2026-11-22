@@ -231,12 +231,6 @@ static int zrc_recipe_kept(struct zrc *z)
     zrc_recipe_plan_id(z);
     return 1;
 }
-#else
-static int zrc_recipe_kept(struct zrc *z)
-{
-    (void)z;
-    return 0;
-}
 #endif
 
 static bool zrc_derive(struct zrc *z)

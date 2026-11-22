@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#if !defined(_WIN32) || defined(ZCL_TESTING)
 static bool boot_prebinding_restore_view(struct boot_cutover_env *e,
     struct chain_state_repository *csr, int datadir_fd)
 {
@@ -26,6 +27,7 @@ static bool boot_prebinding_restore_view(struct boot_cutover_env *e,
     LOG_ERROR("wallet", "prebinding old wallet chain restore refused: %d", (int)restored);
     return false;
 }
+#endif
 
 #ifdef ZCL_TESTING
 bool boot_test_prebinding_restore_view(struct main_state *state,

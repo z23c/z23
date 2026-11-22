@@ -648,7 +648,7 @@ static void wrc_offer_row(struct node_db *ndb, int height, struct wrc_floor *f)
 static void wrc_offer_header(struct block_index_flat_cursor *headers,
                              int height, struct wrc_floor *f)
 {
-    uint8_t hash[32];
+    uint8_t hash[32] = {0};
     if (headers && height > 0 &&
         block_index_flat_cursor_best_ancestor(headers, height, hash).ok)
         wrc_floor_offer(f, height, hash);

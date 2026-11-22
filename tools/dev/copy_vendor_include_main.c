@@ -14,13 +14,13 @@
 #include <sys/stat.h>
 #endif
 
+#if !defined(_WIN32)
 static void cvi_usage(const char *argv0)
 {
     fprintf(stderr, "usage: %s --selftest | SOURCE_ROOT DESTINATION_ROOT\n",
             argv0 ? argv0 : "copy-vendor-include");
 }
 
-#if !defined(_WIN32)
 static int cvi_write(const char *path, const char *text)
 {
     FILE *file = fopen(path, "w");

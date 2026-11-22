@@ -848,6 +848,19 @@ static void sosvc_history_cancel(void)
     pthread_mutex_unlock(&g_history_lock);
 }
 
+static bool sosvc_history_parent(char *out, size_t cap)
+{
+    if (snprintf(out, cap, "%s/history-inbox", g_datadir) >= (int)cap) return false;
+#if defined(_WIN32)
+    return false;
+#else
+    if (mkdir(out, 0700) && errno != EEXIST) return false;
+    struct stat st;
+    return !lstat(out, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
+#endif
+}
+
+#if !defined(_WIN32)
 static void sosvc_history_receiver_publish(struct wallet_history_receiver *receiver)
 {
     pthread_mutex_lock(&g_history_lock);
@@ -860,18 +873,6 @@ static void sosvc_history_receiver_clear(struct wallet_history_receiver *receive
     pthread_mutex_lock(&g_history_lock);
     if (g_history_receiver == receiver) g_history_receiver = NULL;
     pthread_mutex_unlock(&g_history_lock);
-}
-
-static bool sosvc_history_parent(char *out, size_t cap)
-{
-    if (snprintf(out, cap, "%s/history-inbox", g_datadir) >= (int)cap) return false;
-#if defined(_WIN32)
-    return false;
-#else
-    if (mkdir(out, 0700) && errno != EEXIST) return false;
-    struct stat st;
-    return !lstat(out, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
-#endif
 }
 
 static bool sosvc_history_endpoint(const struct state_offer_record *target,
@@ -892,7 +893,6 @@ static bool sosvc_history_endpoint(const struct state_offer_record *target,
     return *port && net_addr_to_string(&addr, host, NET_ADDR_STR_MAX + 1) > 0 && host[0];
 }
 
-#if !defined(_WIN32)
 static enum sol_receive_result sosvc_history_probe(const char *host, uint16_t port,
     struct file_manifest *manifest)
 {
@@ -910,7 +910,6 @@ static enum sol_receive_result sosvc_history_probe(const char *host, uint16_t po
     if (received == FS_RECEIVE_COMPLETE) return SOL_RECEIVE_OK;
     return atomic_load(&g_fetch_stopping) ? SOL_RECEIVE_CANCELLED : SOL_RECEIVE_UNAVAILABLE;
 }
-#endif
 
 static enum sol_receive_result sosvc_history_transfer(const struct state_offer_record *target,
     const char *host, uint16_t port, const char *parent, const struct file_manifest *manifest,
@@ -936,6 +935,7 @@ static enum sol_receive_result sosvc_history_transfer(const struct state_offer_r
         LOG_WARN(SOSVC_SUBSYS, "history receive failed: %s", received.message);
     return atomic_load(&g_fetch_stopping) ? SOL_RECEIVE_CANCELLED : SOL_RECEIVE_UNAVAILABLE;
 }
+#endif
 
 static enum sol_receive_result sosvc_history_fetch(const struct state_offer_record *target,
     const char *parent, struct wallet_history_receive_result *out)

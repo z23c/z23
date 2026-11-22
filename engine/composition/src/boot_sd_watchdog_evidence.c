@@ -15,6 +15,7 @@
  * pair (BOOT_SD_LOCK_EVIDENCE_IO_GAP_US); it is already not pinging.
  */
 
+#include "base/format_attribute.h"
 #include "config/boot_internal.h"
 #include "platform/os_proc.h"
 #include "platform/time_compat.h"
@@ -606,7 +607,7 @@ struct ev_text {
     size_t cap, used, lines;
 };
 
-__attribute__((format(printf, 2, 3)))
+ZCL_PRINTF_LIKE(2, 3)
 static void ev_line(struct ev_text *t, const char *fmt, ...)
 {
     if (t->lines >= BOOT_SD_LOCK_EVIDENCE_MAX_LINES || t->used + 2 >= t->cap)

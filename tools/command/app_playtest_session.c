@@ -2,6 +2,7 @@
  * Purpose: scripted v=1 playtest session over resident_launch (see header). */
 #include "command/app_playtest_session.h"
 
+#include "base/format_attribute.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -46,7 +47,7 @@ const char *app_playtest_code_name(enum app_playtest_code code)
     return (size_t)code < n && aps_code_names[code] ? aps_code_names[code] : "UNKNOWN";
 }
 
-[[gnu::format(printf, 3, 4)]]
+ZCL_PRINTF_LIKE(3, 4)
 static bool aps_fail(struct app_playtest_result *out, enum app_playtest_code code,
                      const char *fmt, ...)
 {

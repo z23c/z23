@@ -277,6 +277,7 @@ bool app_private_stage_close(struct app_private_stage *s)
  * whole — carrier included — so a swept husk can never outlive its own
  * guard. Best effort: a sweep that cannot run never fails the get. */
 #define AG_ORPHAN_AGE_S ((int64_t)24 * 60 * 60)
+#if !defined(_WIN32)
 static bool ag_orphan_leaf(const char *name)
 {
     return strlen(name) == 41 && strncmp(name, ".app-get-", 9) == 0 &&
@@ -292,6 +293,7 @@ static bool ag_orphan_sole_carrier(DIR *inner)
             return false;
     return true;
 }
+#endif
 static void ag_orphan_sweep(const char *datadir)
 {
 #if defined(_WIN32)
