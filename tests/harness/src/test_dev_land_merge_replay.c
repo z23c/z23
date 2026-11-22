@@ -753,7 +753,7 @@ static int dlx_progress_blocked_status(void)
             _exit(stopped ? 4 : 0);
         }
         ASSERT(dlx_progress_ready(ready));
-        dlx_begin(&call, "status");
+        dlx_begin_status(&call);
         bool read_ok = dlx_run(&call) && dlx_ok(&call);
         const struct json_value *active = json_get(&call.reply.data, "in_flight");
         const char *phase = json_get_str(json_get(active, "phase"));
@@ -1121,8 +1121,7 @@ int test_dev_land_missing_main(void)
         ASSERT(!c.reply.error.mutated);
         dlx_end(&c);
         ASSERT(!dlx_origin_main(&rig, main_now));
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");
@@ -1244,8 +1243,7 @@ int test_dev_land_final_observation_missing(void)
         ASSERT(memcmp(queue_before, queue_after, before_len) == 0);
         ASSERT(dlx_origin_main(&rig, main_now));
         ASSERT_STR_EQ(main_now, base);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");
@@ -1323,8 +1321,7 @@ int test_dev_land_lost_persistence(void)
         ASSERT(strcmp(dlx_err_code(&c), "REMOTE_OBSERVATION_UNAVAILABLE") == 0);
         ASSERT(c.reply.error.retryable);
         dlx_end(&c);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") != NULL);

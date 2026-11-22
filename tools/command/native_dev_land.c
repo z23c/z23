@@ -145,6 +145,7 @@
 #include "command/native_command.h"
 #include "command/native_submit_claim_guard.h"
 #include "command/native_dev_land_main_red.h"
+#include "command/native_dev_land_status_compact.h"
 #include "command/native_dev_land_prepare.h"
 #include "command/native_dev_land_qualify.h"
 #include "command/native_dev_land_read.h"
@@ -4974,12 +4975,15 @@ static bool dl_status_push_result(struct zcl_command_reply *reply,
                                   const struct json_value *outcomes,
                                   bool have_inflight, bool want_json,
                                   const struct dlmr_suspect *main_red,
-                                  size_t n_red, const char *screen)
+                                  size_t n_red, size_t nlast,
+                                  const char *screen, const struct dlsc_hit *hit)
 {
     return json_push_kv_str(&reply->data, "leaf", DL_LEAF) &&
            json_push_kv(&reply->data, "queued", queued) &&
            (!have_inflight || json_push_kv(&reply->data, "in_flight", inflight)) &&
            json_push_kv(&reply->data, "outcomes", outcomes) &&
+           dlsc_push_mine(&reply->data, hit) &&
+           (want_json || dlsc_push_notes(&reply->data, nlast)) &&
            dlmr_push_status(&reply->data, main_red, n_red) &&
            (want_json || json_push_kv_str(&reply->data, "screen", screen));
 }
@@ -5099,8 +5103,8 @@ static bool dl_push_outcome_times(struct json_value *item, const struct dl_row *
 /* The concrete next command for a row that ended in conflict or failed.
  * Text only: nothing here runs git or touches the queue. Returns false for
  * any other state. `row` may be NULL (placeholders then stand in). */
-static bool dl_row_next_text(const struct dl_row *row, const char *state,
-                             char *out, size_t cap)
+bool dl_row_next_text(const struct dl_row *row, const char *state,
+                      char *out, size_t cap)
 {
     char submit[512];
     bool conflict = strcmp(state, "conflict") == 0;
@@ -5171,6 +5175,7 @@ struct dl_outcome_tail {
     struct dl_row *last;
     size_t *count;
     struct dlmr_window *window;
+    struct dlsc_hit *hit;
 };
 
 static bool dl_collect_outcome_tail(const struct dl_row *row, void *context)
@@ -5178,6 +5183,7 @@ static bool dl_collect_outcome_tail(const struct dl_row *row, void *context)
     struct dl_outcome_tail *tail = context;
     dlmr_note(tail->window, row->seq, row->state, row->dimension,
               row->worktree, row->tip, row->detail);
+    dlsc_hit_outcome(tail->hit, row);
     if (*tail->count == 10) {
         for (size_t k = 1; k < *tail->count; k++)
             tail->last[k - 1] = tail->last[k];
@@ -5188,10 +5194,11 @@ static bool dl_collect_outcome_tail(const struct dl_row *row, void *context)
 }
 
 static enum dl_history_result dl_outcomes_tail(const char *path, struct dl_row last[10], struct dlmr_window *window,
-                             size_t *count, char *why, size_t why_cap)
+                             size_t *count, struct dlsc_hit *hit,
+                             char *why, size_t why_cap)
 {
     *count = 0;
-    struct dl_outcome_tail tail = {last, count, window};
+    struct dl_outcome_tail tail = {last, count, window, hit};
     return dl_history_read_result(path, dl_collect_outcome_tail, &tail, why, why_cap);
 }
 
@@ -5238,27 +5245,41 @@ static bool dl_status_bucket_rows(struct json_value *queued,
     return true;
 }
 
+static bool dl_status_push_outcome(struct json_value *outcomes,
+                                    const struct dl_row *r, bool compact,
+                                    const struct dlmr_suspect *sus, size_t nsus)
+{
+    return (compact ? dlsc_push_row(outcomes, r)
+                    : dl_push_outcome_row(outcomes, r)) &&
+           dlmr_push_row_hint(&outcomes->children[outcomes->num_children - 1],
+                              sus, nsus, r->seq, r->tip);
+}
+
 static bool dl_status_collect_outcomes(const char *opath,
                                        struct dl_row last[10], size_t *nlast,
                                        char *read_why, size_t why_cap,
                                        enum dl_history_result *history_result,
                                        struct json_value *outcomes,
+                                       bool compact, struct dlsc_hit *hit,
                                        struct dlmr_suspect sus[DLMR_SUSPECTS_MAX],
                                        size_t *nsus)
 {
     struct dlmr_window window = {0};
     /* The last ten outcomes, oldest first; the window behind the main-red
      * advisory is folded from the same single pass. */
-    *history_result = dl_outcomes_tail(opath, last, &window, nlast, read_why, why_cap);
+    *history_result = dl_outcomes_tail(opath, last, &window, nlast, hit, read_why,
+                                      why_cap);
     if (*history_result != DL_HISTORY_OK)
         return false;
     *nsus = dlmr_suspects(&window, sus, DLMR_SUSPECTS_MAX);
-    for (size_t k = 0; k < *nlast; k++) {
-        if (!dl_push_outcome_row(outcomes, &last[k]) ||
-            !dlmr_push_row_hint(&outcomes->children[outcomes->num_children - 1],
-                                sus, *nsus, last[k].seq, last[k].tip))
+    /* The caller's own row leads, wherever it sits in the ledger. */
+    if (dlsc_hit_is_listed(hit, &hit->o_row) &&
+        !dl_status_push_outcome(outcomes, &hit->o_row, compact, sus, *nsus))
+        return false;
+    for (size_t k = compact ? dlsc_first(*nlast) : 0; k < *nlast; k++)
+        if (!dlsc_hit_is_listed(hit, &last[k]) &&
+            !dl_status_push_outcome(outcomes, &last[k], compact, sus, *nsus))
             return false;
-    }
     return true;
 }
 
@@ -5370,6 +5391,15 @@ static void dl_status_read_failure(struct zcl_command_reply *reply,
     }
 }
 
+static void dl_status_hit_begin(struct dlsc_hit *hit,
+                                 const struct zcl_command_request *req,
+                                 const struct dl_row *rows, size_t nrows)
+{
+    dlsc_hit_init(hit, req ? req->input : NULL);
+    for (size_t i = 0; i < nrows; i++)
+        dlsc_hit_queue(hit, &rows[i]);
+}
+
 static void dl_status(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -5387,6 +5417,7 @@ static void dl_status(const struct zcl_command_request *req,
     bool want_json = dl_status_wants_json(req);
     bool have_inflight = false;
     size_t used = 0;
+    struct dlsc_hit hit;
     if (!dl_dirs_resolve(&d, false)) {
         dl_fail(reply, "STATE_DIR_FAILED", "status",
                 "the existing owner-private state root is unavailable",
@@ -5410,13 +5441,14 @@ static void dl_status(const struct zcl_command_request *req,
     json_set_object(&inflight);
     json_init(&outcomes);
     json_set_array(&outcomes);
+    dl_status_hit_begin(&hit, req, rows, nrows);
     if (!dl_status_bucket_rows(&queued, &inflight, rows, nrows, d.wt, now,
                                &have_inflight))
         goto fail;
     dl_train_status(&inflight, rows, nrows);
     if (!dl_status_collect_outcomes(opath, last, &nlast, read_why,
                                     sizeof(read_why), &history_result, &outcomes,
-                                    main_red, &n_red))
+                                    !want_json, &hit, main_red, &n_red))
         goto fail;
     if (!want_json) {
         if (!dl_status_screen_header(&queued, have_inflight, screen,
@@ -5435,7 +5467,7 @@ render_done:
     if (!dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
                                 &used, want_json) ||
         !dl_status_push_result(reply, &queued, &inflight, &outcomes,
-                               have_inflight, want_json, main_red, n_red, screen))
+                               have_inflight, want_json, main_red, n_red, nlast, screen, &hit))
         goto fail;
     free(rows);
     json_free(&queued);

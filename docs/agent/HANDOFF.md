@@ -54,7 +54,7 @@ trusting any sentence below:
 
 ```bash
 tail -3 ~/.local/state/z23/dev/land/outcomes.jsonl        # last landings, one row per lane
-z23-dev dev land status | jq -r .data.screen              # queue, in-flight entry, recent outcomes
+z23-dev dev land status                              # queue, in-flight entry, newest 3 outcomes, screen (--json: full rows; --seq=N: your row first)
 cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the maintainer host's handoff notes
 ```
 

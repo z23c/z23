@@ -1898,7 +1898,7 @@ int test_dev_land_gate_diagnostic_window(void)
         stored[len] = '\0';
         ASSERT(strstr(stored, "FAIL check-kpi-floor") != NULL);
         ASSERT(strstr(stored, "observed: exit status 1 response body empty") != NULL);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         outcomes = dlx_arr(&c, "outcomes");
         ASSERT(outcomes && outcomes->num_children >= 1);
@@ -1937,7 +1937,7 @@ int test_dev_land_status_observation(void)
     bool opened = false;
     TEST("land: status observes absent and read-only state without setup") {
         dlx_isolate("observe_only");
-        dlx_begin(&call, "status"); opened = true;
+        dlx_begin_status(&call); opened = true;
         ASSERT(dlx_run(&call));
         ASSERT(!dlx_ok(&call));
         ASSERT(lstat(g_dlx_state, &info) != 0);
@@ -1945,13 +1945,13 @@ int test_dev_land_status_observation(void)
         ASSERT(platform_state_root(root, sizeof(root)));
         ASSERT(snprintf(land, sizeof(land), "%s/land", root) > 0);
         ASSERT(snprintf(logs, sizeof(logs), "%s/logs", land) > 0);
-        dlx_begin(&call, "status"); opened = true;
+        dlx_begin_status(&call); opened = true;
         ASSERT(dlx_run(&call));
         ASSERT(dlx_ok(&call));
         ASSERT(lstat(land, &info) != 0);
         dlx_end(&call); opened = false;
         ASSERT(mkdir(land, 0500) == 0);
-        dlx_begin(&call, "status"); opened = true;
+        dlx_begin_status(&call); opened = true;
         ASSERT(dlx_run(&call));
         ASSERT(dlx_ok(&call));
         ASSERT(stat(land, &info) == 0 && (info.st_mode & 0777) == 0500);
@@ -1959,7 +1959,7 @@ int test_dev_land_status_observation(void)
         dlx_end(&call); opened = false;
         ASSERT(chmod(land, 0700) == 0);
         ASSERT(chmod(root, 0755) == 0);
-        dlx_begin(&call, "status"); opened = true;
+        dlx_begin_status(&call); opened = true;
         ASSERT(dlx_run(&call));
         ASSERT(!dlx_ok(&call));
         ASSERT(stat(root, &info) == 0 && (info.st_mode & 0777) == 0755);

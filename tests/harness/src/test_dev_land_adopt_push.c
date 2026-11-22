@@ -74,8 +74,7 @@ int test_dev_land_publisher_death(void)
         ASSERT(memcmp(received, "invoked\n", 8) == 0);
         /* Remove the injector before a new process takes the existing locks. */
         ASSERT(unlink(hook) == 0);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");
         ASSERT(row && row->type == JSON_OBJ);
@@ -113,7 +112,7 @@ int test_dev_land_publisher_death(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "empty");
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *outcomes = dlx_arr(&c, "outcomes");
         ASSERT(outcomes && outcomes->num_children == 1);
@@ -242,8 +241,7 @@ static bool dlx_adopt_submit(struct dlx_adopt_fix *fx)
 
 bool dlx_status_json(struct dlx_call *c)
 {
-    dlx_begin(c, "status");
-    (void)json_push_kv_bool(&c->input, "json", true);
+    dlx_begin_status(c);
     if (!dlx_run(c) || !dlx_ok(c)) {
         dlx_end(c);
         return false;
@@ -713,8 +711,7 @@ int test_dev_land_postpush_observation_missing(bool lost_ack)
         ASSERT(!c.reply.error.human_action_required);
         ASSERT(c.reply.error.mutated);
         dlx_end(&c);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");
@@ -1272,7 +1269,7 @@ int test_dev_land_attach_publish_moved_base(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, stranger);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *flight = json_get(&c.reply.data, "in_flight");
         ASSERT(flight != NULL);
@@ -1344,7 +1341,7 @@ int test_dev_land_cancel_push_checkpoint(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, base);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") != NULL);
         dlx_end(&c);

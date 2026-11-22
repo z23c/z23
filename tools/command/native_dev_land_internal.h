@@ -235,6 +235,10 @@ bool dl_load_rows(const char *qpath, struct dl_row **rows_out, size_t *n_out,
                   char *why, size_t why_cap);
 bool dl_rewrite_rows(const char *landdir, const char *qpath,
                      const struct dl_row *rows, size_t n);
+/* The concrete next command for a conflict or failed row; false for any
+ * other state. `row` may be NULL. */
+bool dl_row_next_text(const struct dl_row *row, const char *state,
+                      char *out, size_t cap);
 bool dl_history_read(const char *path,
                      bool (*visit)(const struct dl_row *, void *),
                      void *context, char *why, size_t why_cap);

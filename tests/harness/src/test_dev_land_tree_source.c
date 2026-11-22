@@ -331,8 +331,7 @@ int test_dev_land_postpush_result_unconfirmed(void)
         ASSERT(!c.reply.error.human_action_required);
         ASSERT(c.reply.error.mutated);
         dlx_end(&c);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         const struct json_value *row = json_get(&c.reply.data, "in_flight");

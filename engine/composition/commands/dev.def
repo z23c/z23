@@ -2395,9 +2395,16 @@ ZCL_COMMAND_READY_READ(
     "Read the landing queue and the exact proof handoff",
     "Reads the queue rows, the in-flight proof pair and the publication hold "
     "from the private landing state at call time; nothing is fetched or "
-    "mutated.", 65536,
+    "mutated. The default reply is compact: the newest three outcome rows "
+    "(seq, state, 12-hex tips, and dimension, detail, next_action and log "
+    "path when not landed) plus outcomes_omitted and a human screen; --json returns the "
+    "ten-row outcome tail in full, with signatures and full tips, and no "
+    "screen. With seq (what submit returned), else tip (the submitted commit, "
+    "at least 12 hex), else note, the reply adds mine {seq, where: "
+    "queued|in_flight|outcome|unknown, state, hint} and lists that outcome "
+    "row first, however many rows landed since.", 65536,
     "land,status,queue,proof,hold",
-    "zcl.land_status_input.v1", "zcl.land.v1", "json", "",
+    "zcl.land_status_input.v1", "zcl.land.v1", "json,seq,tip,note", "",
     "z23-dev dev land status",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,

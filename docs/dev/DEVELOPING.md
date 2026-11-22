@@ -1711,7 +1711,9 @@ Before committing:
    `build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME`,
    reusing the same train name on any resubmission.
    Do not create a GitHub Issue or pull request for coordination.
-9. Verify with `dev land status` that the row landed, then confirm local
+9. Verify with `dev land status --seq=N` (N from submit; compact by default,
+   lists your row first and says `mine.where`; `--json` returns every outcome
+   row in full) that the row landed, then confirm local
    HEAD, `origin/main`, and the remote branch SHA agree.
 
 When closing a receiver whose owned patch is already in the verified landed
@@ -1845,7 +1847,7 @@ proven pair asks for its signed publication intent, the drive seals it with
 the same checks as `z23 dev land attach --seq=N` and continues. At most six
 rounds run. The reply carries `outcome`, one of:
 
-- `landed`: the row published; `tip_pushed` names the commit.
+- `landed`: the row published; `tip_pushed` names the commit main received after the queue rebased it. Find your row by seq or by `tip` (the submitted commit), never by `tip_pushed`.
 - `proof_failed`: the exact proof settled as failed; `failed_path` names the
   pair's `.failed` record. Error code `DRIVE_PROOF_FAILED`.
 - `refused`: a typed `reason` (the row's own refusal, `unknown_seq_N`, or a

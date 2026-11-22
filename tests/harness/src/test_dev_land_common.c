@@ -142,6 +142,12 @@ void dlx_begin(struct dlx_call *c, const char *action)
         (void)json_push_kv_str(&c->input, "action", action);
 }
 
+void dlx_begin_status(struct dlx_call *c)
+{
+    dlx_begin(c, "status");
+    (void)json_push_kv_bool(&c->input, "json", true);
+}
+
 bool dlx_run(struct dlx_call *c)
 {
     char why[256];
@@ -636,8 +642,7 @@ void dlx_submit(struct dlx_call *c, const struct dlx_rig *rig,
 bool dlx_queue_has_one(void)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
-    (void)json_push_kv_bool(&c.input, "json", true);
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *rows = dlx_arr(&c, "queued");
     ok = ok && rows && rows->num_children == 1;
@@ -695,7 +700,7 @@ done:
 bool dlx_queue_empty(void)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ran = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *rows = ran ? dlx_arr(&c, "queued") : NULL;
     bool ok = rows && json_size(rows) == 0;
@@ -898,7 +903,7 @@ done:
 static bool dlx_failed_admission_visible(const char *expected_tip)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *outcomes = dlx_arr(&c, "outcomes");
     ok = ok && outcomes && outcomes->num_children == 2;

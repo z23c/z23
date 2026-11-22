@@ -735,7 +735,7 @@ int test_dev_land_signed_lost_ack(void)
         ASSERT_STR_EQ(remote, base);
         ASSERT(dlx_slurp(marker, attempts, sizeof(attempts), &attempts_len));
         ASSERT(attempts_len == strlen("attempted\n"));
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *steer = json_get(&c.reply.data, "steer");
         const struct json_value *inflight =
@@ -943,8 +943,7 @@ int test_dev_land_signed_lost_race(void)
         ASSERT(dlx_run(&c) && !dlx_ok(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_OUTCOME_UNKNOWN");
         dlx_end(&c);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *flight = json_get(&c.reply.data, "in_flight");
         ASSERT(flight != NULL);
@@ -1069,7 +1068,7 @@ int test_dev_land_cancel_push_refused(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, sibling);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") == NULL);
         dlx_end(&c);
@@ -1128,7 +1127,7 @@ int test_dev_land_push_declined(void)
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, base);
         /* The drive reads the settled row as failed, not as a wedge. */
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") == NULL);
         dlx_end(&c);
@@ -1225,7 +1224,7 @@ int test_dev_land_push_declined(void)
         ASSERT_STR_EQ(dlx_err_code(&c), "PUSH_IDENTITY_PRIVATE");
         dlx_end(&c);
         ASSERT(!dlx_file_exists(marker));
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") == NULL);
         dlx_end(&c);

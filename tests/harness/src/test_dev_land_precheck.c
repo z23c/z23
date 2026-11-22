@@ -1665,7 +1665,7 @@ int dlx_case_step_lock(void)
             ASSERT(dlx_slurp(qpath, after, sizeof(after), &after_len));
             ASSERT_EQ((long long)before_len, (long long)after_len);
             ASSERT(memcmp(before, after, before_len) == 0);
-            dlx_begin(&c, "status"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+            dlx_begin_status(&c); ASSERT(dlx_run(&c) && dlx_ok(&c));
             const struct json_value *steer = json_get(&c.reply.data, "steer");
             ASSERT(steer && strcmp(dlx_jstr(steer, "owner"), "pid:unknown") == 0);
             dlx_end(&c);
@@ -1709,8 +1709,7 @@ int dlx_case_starts_proof(void)
         ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
         ASSERT(strcmp(dlx_str(&c, "phase"), "prove") == 0);
         dlx_end(&c);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") != NULL);
@@ -1864,8 +1863,7 @@ int dlx_case_lands_proof(void)
         ASSERT(strcmp(after, before) != 0);
         ASSERT(strcmp(after, local) == 0);
         /* The outcome is durable and the queue is empty again. */
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT_EQ((long long)dlx_arr(&c, "queued")->num_children, 0);
@@ -1956,7 +1954,7 @@ int dlx_case_proof_failure(void)
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         const struct json_value *inflight = json_get(&c.reply.data, "in_flight");
@@ -1983,8 +1981,7 @@ int dlx_case_proof_failure(void)
         /* A red proof pushes nothing. */
         ASSERT(dlx_origin_main(&rig, after));
         ASSERT(strcmp(after, before) == 0);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         outcomes = dlx_arr(&c, "outcomes");
@@ -2402,7 +2399,7 @@ static int dlx_lint_queue_error(void)
         bool worker_ok = dlx_lint_worker_ok(worker);
         bool restored = dlx_lint_queue_write(qpath, saved);
         ASSERT(corrupted && restored && worker_ok);
-        dlx_begin(&c, "status"); (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c) && dlx_arr(&c, "queued")->num_children == 1); dlx_end(&c);
         dlx_restore(); PASS();
     }
@@ -2507,8 +2504,7 @@ int dlx_case_cancel_request(void)
         ASSERT(dlx_ok(&c));
         ASSERT(strcmp(dlx_str(&c, "state"), "cancelled") == 0);
         dlx_end(&c);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT_EQ((long long)dlx_arr(&c, "queued")->num_children, 0);
@@ -2644,8 +2640,7 @@ int dlx_case_dense_detail(void)
         /* A second step reads the row back from queue.jsonl: the round
          * trip through dl_encode_row/dl_escape and back through
          * dl_parse_row survived. */
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT(json_get(&c.reply.data, "in_flight") != NULL);

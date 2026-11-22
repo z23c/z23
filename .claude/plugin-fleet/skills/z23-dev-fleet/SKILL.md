@@ -45,7 +45,7 @@ from a checkout; the installed `z23` does not run `dev train` or `dev land`.
 1. `build/bin/z23-dev dev land submit --tip=COMMIT --worktree=LANE`
 2. `z23-fx NAME 'cd LANE && devbuild --wait build/bin/z23-dev dev land drive'`
    Retry only on `STEP_BUSY`.
-3. `build/bin/z23-dev dev land status`: require landed and the remote tip equal to COMMIT.
+3. `build/bin/z23-dev dev land status`: run `dev land status --seq=N` (N from submit) and require `mine.where` outcome with state landed; without N, match the row whose `tip` is the first 12 hex of COMMIT. Never match `tip_pushed`: the queue rebases, so main receives a different commit (`--json` returns full tips).
 4. `git fetch origin && git rev-parse origin/main` from another machine.
 
 Any other result: stop and report. No retry, no force, no manual push.

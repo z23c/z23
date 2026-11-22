@@ -394,6 +394,8 @@ void dlx_isolate(const char *tag);
 void dlx_restore(void);
 void dlx_landdir(char *out, size_t cap);
 void dlx_begin(struct dlx_call *c, const char *action);
+/* A status call that asks for the full outcome rows (json), not the compact default. */
+void dlx_begin_status(struct dlx_call *c);
 bool dlx_run(struct dlx_call *c);
 void dlx_end(struct dlx_call *c);
 void dlx_captured_handler(const struct zcl_command_request *request,

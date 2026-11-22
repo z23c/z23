@@ -424,7 +424,7 @@ static bool dlx_outcome_detail_wire(const char *wire, const char *expected)
     ok = n > 0 && (size_t)n < sizeof(changed) &&
          dlx_write(outcome, changed) && dlx_write(queue, "");
     if (!ok) goto done;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     ok = dlx_run(&c) && dlx_ok(&c) && dlx_outcome_detail_matches(&c, expected);
     dlx_end(&c);
 done:
@@ -549,7 +549,7 @@ static bool dlx_native_detail_roundtrip(const char *detail, bool terminal)
                      terminal ? "outcomes" : "queue");
     ok = ok && n > 0 && (size_t)n < sizeof(path) && dlx_write(path, body);
     if (ok) {
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ok = dlx_run(&c) && dlx_ok(&c);
         ok = ok && dlx_native_detail_matches(&c, detail, terminal);
         dlx_end(&c);
@@ -617,7 +617,7 @@ static int dlx_row_member_boundary_case(unsigned members, bool accepted)
         json_free(&row);
         ASSERT(exact_members);
         ASSERT(dlx_write(path, body));
-        dlx_begin(&c, "status"); ASSERT(dlx_run(&c));
+        dlx_begin_status(&c); ASSERT(dlx_run(&c));
         if (accepted) ASSERT(dlx_ok(&c));
         else ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         dlx_end(&c);
@@ -640,7 +640,7 @@ static int dlx_absent_optional_case(void)
         ASSERT(snprintf(path, sizeof(path), "%s/queue.jsonl", land) < (int)sizeof(path));
         ASSERT(dlx_write(path, "{\"seq\":1,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
                               "\"state\":\"queued\",\"attempt\":1}\n"));
-        dlx_begin(&c, "status"); ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_begin_status(&c); ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *rows = dlx_arr(&c, "queued");
         ASSERT(rows && rows->num_children == 1);
         dlx_end(&c); PASS();
@@ -768,8 +768,7 @@ int dlx_case_unsigned_tip(void)
         ASSERT(!dlx_ok(&c));
         dlx_end(&c);
         /* None of the refused submissions entered the queue. */
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT(dlx_arr(&c, "queued") != NULL);
@@ -837,8 +836,7 @@ int dlx_case_submit_status(void)
         t1 = time(NULL);
         /* Submit is a file append. It cannot have proved anything. */
         ASSERT((long long)(t1 - t0) < 20);
-        dlx_begin(&c, "status");
-        (void)json_push_kv_bool(&c.input, "json", true);
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         rows = dlx_arr(&c, "queued");
@@ -2016,8 +2014,7 @@ bool dlx_pc_queued_note(const char *want)
 {
     struct dlx_call c;
     bool ok;
-    dlx_begin(&c, "status");
-    (void)json_push_kv_bool(&c.input, "json", true);
+    dlx_begin_status(&c);
     ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *rows = dlx_arr(&c, "queued");
     const struct json_value *n =

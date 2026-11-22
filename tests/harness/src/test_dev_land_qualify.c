@@ -1394,7 +1394,7 @@ int test_dev_land_main_moves_converge(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "cancelled");
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *queued = dlx_arr(&c, "queued");
         const struct json_value *outcomes = dlx_arr(&c, "outcomes");
@@ -1429,7 +1429,7 @@ int test_dev_land_main_moves_converge(void)
                 ASSERT_EQ(dlx_int(&c, "seq"), 3);
             }
             dlx_end(&c);
-            dlx_begin(&c, "status");
+            dlx_begin_status(&c);
             ASSERT(dlx_run(&c) && dlx_ok(&c));
             queued = dlx_arr(&c, "queued");
             ASSERT(queued && queued->num_children == 1);
@@ -1459,7 +1459,7 @@ _test_next:;
 
 bool dlx_priority_snapshot(struct dlx_call *c, char ts[64])
 {
-    dlx_begin(c, "status");
+    dlx_begin_status(c);
     bool ok = dlx_run(c) && dlx_ok(c);
     if (ok) {
         const struct json_value *queued = dlx_arr(c, "queued");
@@ -1477,7 +1477,7 @@ bool dlx_priority_snapshot(struct dlx_call *c, char ts[64])
 bool dlx_priority_successor_status(struct dlx_call *c,
                                            const char *original_ts)
 {
-    dlx_begin(c, "status");
+    dlx_begin_status(c);
     bool ok = dlx_run(c) && dlx_ok(c);
     if (ok) {
         const struct json_value *queued = dlx_arr(c, "queued");
@@ -1533,7 +1533,7 @@ int test_dev_land_signed_intent(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *outcomes = dlx_arr(&c, "outcomes");
         ASSERT(outcomes && outcomes->num_children == 1);

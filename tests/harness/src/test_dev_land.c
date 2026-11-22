@@ -515,7 +515,7 @@ static bool dlx_su_signed_landing(const struct json_value *row, const char *expe
 static bool dlx_su_one_landed_outcome(int64_t seq, const char *expected_tip)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *rows = dlx_arr(&c, "outcomes");
     unsigned count = 0;
@@ -533,7 +533,7 @@ static bool dlx_su_one_landed_outcome(int64_t seq, const char *expected_tip)
 static bool dlx_su_no_outcome(int64_t seq)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *rows = dlx_arr(&c, "outcomes");
     if (!rows) ok = false;
@@ -546,7 +546,7 @@ static bool dlx_su_no_outcome(int64_t seq)
 static bool dlx_su_no_landing(int64_t seq)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *rows = dlx_arr(&c, "outcomes");
     if (!rows) ok = false;
@@ -1291,7 +1291,7 @@ static int dlx_scope_requested_head(void)
         ASSERT_EQ(dlx_int(&c, "rounds"), 6);
         ASSERT(dlx_scope_later_unchanged(&t));
         dlx_end(&c); opened = false;
-        dlx_begin(&c, "status"); opened = true;
+        dlx_begin_status(&c); opened = true;
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *active = json_get(&c.reply.data, "in_flight");
         ASSERT(active && json_get_int(json_get(active, "seq")) == 674);
@@ -1790,7 +1790,7 @@ static int dlx_status_encoding_failure_case(void)
     bool opened = false;
     TEST("land: status attachment allocation failure refuses a partial snapshot") {
         ASSERT(dlx_scope_prepare(&t, "status_encode_failure", NULL));
-        dlx_begin(&c, "status"); opened = true;
+        dlx_begin_status(&c); opened = true;
         zcl_native_handle_dev_land_status(&c.request, &c.reply);
         ASSERT(dlx_ok(&c));
         const struct json_value *queued = json_get(&c.reply.data, "queued");
@@ -1799,7 +1799,7 @@ static int dlx_status_encoding_failure_case(void)
         ASSERT(outcomes && outcomes->type == JSON_ARR);
         dlx_end(&c); opened = false;
 
-        dlx_begin(&c, "status"); opened = true;
+        dlx_begin_status(&c); opened = true;
         /* Fail the top-level queued attachment after its rows were built. */
         zcl_alloc_fault_fail_nth("json_push_kv_key", 32);
         zcl_native_handle_dev_land_status(&c.request, &c.reply);

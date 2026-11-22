@@ -111,7 +111,7 @@ int test_dev_land_long_proof_root(void)
         ASSERT(strstr(dlx_str(&c, "detail"), rig.tip) != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"), "exceeds row detail") == NULL);
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         const struct json_value *flight = json_get(&c.reply.data, "in_flight");
@@ -563,7 +563,7 @@ static bool dlx_next_names(const char *next, bool need_submit)
     return next && next[0] && (!need_submit || strstr(next, "submit"));
 }
 
-static bool dlx_row_screen_ok(const struct dlx_call *c,
+static bool dlx_row_screen_ok(const char *screen,
                               const struct json_value *row, bool need_submit)
 {
     const char *detail = json_get_str(json_get(row, "detail"));
@@ -575,7 +575,7 @@ static bool dlx_row_screen_ok(const struct dlx_call *c,
     }
     return dlx_next_names(json_get_str(json_get(row, "next_action")),
                           need_submit) &&
-           n > 8 && strstr(dlx_str(c, "screen"), head) != NULL;
+           n > 8 && strstr(screen, head) != NULL;
 }
 
 static bool dlx_outcome_next_ok(const struct dlx_call *step, const char *state)
@@ -585,12 +585,17 @@ static bool dlx_outcome_next_ok(const struct dlx_call *step, const char *state)
     bool need_submit = strcmp(state, "conflict") == 0, ok = false;
     if (!dlx_next_names(dlx_str(step, "next_action"), need_submit))
         return false;
+    /* The full row (next_action) comes from the json form; the screen only
+     * from the compact default, which carries no row detail beyond 200 bytes. */
+    struct dlx_call full;
+    dlx_begin_status(&full);
     dlx_begin(&c, "status");
-    if (dlx_run(&c) && dlx_ok(&c)) {
-        row = dlx_outcome_row(&c, state);
-        ok = row && dlx_row_screen_ok(&c, row, need_submit);
+    if (dlx_run(&full) && dlx_ok(&full) && dlx_run(&c) && dlx_ok(&c)) {
+        row = dlx_outcome_row(&full, state);
+        ok = row && dlx_row_screen_ok(dlx_str(&c, "screen"), row, need_submit);
     }
     dlx_end(&c);
+    dlx_end(&full);
     return ok;
 }
 
@@ -664,7 +669,7 @@ int test_dev_land_malformed_queue_refusal(void)
             ASSERT(dlx_mkdir_p(parent));
             dlx_landdir(land, sizeof(land));
             ASSERT(dlx_write(land, marker));
-            dlx_begin(&c, "status");
+            dlx_begin_status(&c);
             ASSERT(dlx_run(&c));
             ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
             ASSERT(!c.reply.error.mutated);
@@ -701,7 +706,7 @@ int test_dev_land_malformed_queue_refusal(void)
         ASSERT(fwrite(legacy, 1, sizeof(legacy) - 1, file) == sizeof(legacy) - 1);
         ASSERT(fclose(file) == 0);
         ASSERT(dlx_slurp(qpath, before, sizeof(before), &before_len));
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_2");
@@ -767,7 +772,7 @@ int test_dev_land_malformed_priority_refusal(void)
         priority[2] = '"';
         before_len += 2;
         ASSERT(dlx_write(qpath, before));
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_queue_record_1");
@@ -876,7 +881,7 @@ static int dlx_large_outcome_history(void)
         ASSERT(fclose(f) == 0 && wrote);
         struct stat before, after;
         ASSERT(stat(opath, &before) == 0 && before.st_size > 1024 * 1024);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *outcomes = json_get(&c.reply.data, "outcomes");
         ASSERT(outcomes && outcomes->type == JSON_ARR && outcomes->num_children == 10);
@@ -892,7 +897,7 @@ static int dlx_large_outcome_history(void)
         ASSERT(f != NULL);
         wrote = fputc('!', f) != EOF;
         ASSERT(fclose(f) == 0 && wrote);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_outcome_record_1");
@@ -907,7 +912,7 @@ static int dlx_large_outcome_history(void)
 static bool dlx_history_status_error(const char *evidence)
 {
     struct dlx_call c;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && !dlx_ok(&c) &&
         strcmp(dlx_err_code(&c), "QUEUE_READ_FAILED") == 0 &&
         strcmp(dlx_err_evidence(&c), evidence) == 0 && !c.reply.error.mutated;
@@ -973,7 +978,7 @@ static int dlx_outcome_completion_time(void)
             "\"state\":\"landed\",\"landed_at\":-1}\n"
             "{\"seq\":5,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,"
             "\"state\":\"failed\",\"landed_at\":1793491260}\n"));
-        dlx_begin(&c, "status"); opened = true;
+        dlx_begin_status(&c); opened = true;
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *rows = dlx_arr(&c, "outcomes");
         ASSERT(rows && rows->num_children == 5);
@@ -998,7 +1003,7 @@ static int dlx_outcome_snapshot_changed(void)
         char path[1200];
         ASSERT(dlx_snapshot_setup("history_snapshot_changed", path, sizeof(path)));
         struct dlx_snapshot_fixture f = {.path = path};
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         zcl_native_dev_land_test_history_snapshot_hook(dlx_snapshot_append, &f);
         bool ran = dlx_run(&c);
         zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
@@ -1009,7 +1014,7 @@ static int dlx_outcome_snapshot_changed(void)
         ASSERT_STR_EQ(c.reply.error.next_action, "z23 dev land status");
         ASSERT(!json_get(&c.reply.data, "outcomes") && !json_get(&c.reply.data, "queued"));
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *rows = json_get(&c.reply.data, "outcomes");
         ASSERT(rows && rows->type == JSON_ARR && rows->num_children == 2);
@@ -1031,7 +1036,7 @@ static int dlx_outcome_snapshot_failure(void)
         char path[1200], evidence[96];
         ASSERT(dlx_snapshot_setup("history_snapshot_failure", path, sizeof(path)));
         struct dlx_snapshot_fixture f = {.path = path};
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         zcl_native_dev_land_test_history_snapshot_hook(dlx_snapshot_close, &f);
         bool ran = dlx_run(&c);
         zcl_native_dev_land_test_history_snapshot_hook(NULL, NULL);
@@ -1090,7 +1095,7 @@ static int dlx_outcome_stream_boundaries(void)
         ASSERT(close(fd) == 0 && sized);
         ASSERT(dlx_history_status_error(evidence));
         ASSERT(unlink(opath) == 0 && mkfifo(opath, 0600) == 0);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         ASSERT(!c.reply.error.mutated);
@@ -1123,7 +1128,7 @@ static int dlx_outcome_record_budget(void)
                            "\"state\":\"failed\",\"attempt\":1}\n", i) < 0)
                 wrote = false;
         ASSERT(fclose(f) == 0 && wrote);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *outcomes = json_get(&c.reply.data, "outcomes");
         ASSERT(outcomes && outcomes->num_children == 10);
@@ -1160,7 +1165,7 @@ int test_dev_land_malformed_outcome_refusal(void)
         ASSERT(dlx_write(opath,
             "{\"seq\":1,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
             "\"state\":\"landed\"}\n"));
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c));
         ASSERT_STR_EQ(dlx_err_code(&c), "QUEUE_READ_FAILED");
         ASSERT_STR_EQ(dlx_err_evidence(&c), "malformed_outcome_record_1");
@@ -1199,7 +1204,7 @@ int test_dev_land_missing_worker(void)
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *flight = json_get(&c.reply.data,
                                                    "in_flight");
@@ -1276,7 +1281,7 @@ static int dlx_competing_blocked(const struct dlx_rig *rig,
     ASSERT(dlx_origin_main(rig, observed));
     ASSERT_STR_EQ(observed, base);
     ASSERT(access(count->marker, F_OK) != 0 && errno == ENOENT);
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     ASSERT(dlx_run(&c) && dlx_ok(&c));
     const struct json_value *pending = dlx_arr(&c, "outcomes");
     ASSERT(pending && pending->num_children == 0);
@@ -1377,7 +1382,7 @@ int test_dev_land_competing_publish(const char *winner, const char *loser,
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "empty");
         dlx_end(&c);
-        dlx_begin(&c, "status");
+        dlx_begin_status(&c);
         ASSERT(dlx_run(&c) && dlx_ok(&c));
         const struct json_value *outcomes = dlx_arr(&c, "outcomes");
         ASSERT(outcomes && outcomes->num_children == 1);

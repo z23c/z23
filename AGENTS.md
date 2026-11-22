@@ -85,7 +85,7 @@ Escalate only for consensus or custody risk, a destructive production action (da
 - Commits are authored by the repository owner; an AI-written commit ends with a `Co-Authored-By:` trailer naming the model.
 - Fleet work coordinates through native tasks and receipts, never GitHub issues or pull requests; volunteers use `card:` pull requests.
 - After placement changes run `make check-architecture-tree`.
-- Only the land queue pushes main: submit with `build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME` and follow `dev land status`. Replace the placeholder with one unique train name and reuse it across retries so landing latency and attempt metrics can identify the train. A landing is a checkpoint; fetch, integrate and continue. See [section 6](docs/dev/DEVELOPING.md#6-integrate-and-push-a-coherent-slice).
+- Only the land queue pushes main: submit with `build/bin/z23-dev dev land submit --worktree=$PWD --note=STABLE_TRAIN_NAME` and follow `dev land status --seq=N` (N from submit; or match `tip` to your submitted commit, never `tip_pushed`, which the queue rebases). Replace the placeholder with one unique train name and reuse it across retries so landing latency and attempt metrics can identify the train. A landing is a checkpoint; fetch, integrate and continue. See [section 6](docs/dev/DEVELOPING.md#6-integrate-and-push-a-coherent-slice).
 
 ## Where detail lives
 - The one standard loop (lane, brief, verify, review, land) and the boundaries: [THE_Z23_WAY.md](docs/THE_Z23_WAY.md).

@@ -125,7 +125,7 @@ static int dlx_fence_case_rewind(struct dlx_fence_case *t)
             if (t->scenario == 5) ASSERT(dlx_fence_crash_step("paired"));
             if (t->scenario == 6) {
                 ASSERT(dlx_fence_crash_step("old_projection"));
-                dlx_begin(&t->c, "status");
+                dlx_begin_status(&t->c);
                 ASSERT(dlx_run(&t->c) && dlx_ok(&t->c));
                 const struct json_value *outcomes = dlx_arr(&t->c, "outcomes");
                 ASSERT(outcomes && outcomes->num_children == 1);
@@ -161,7 +161,7 @@ static int dlx_fence_case_settlement(struct dlx_fence_case *t)
             ASSERT(dlx_ok(&t->c));
             ASSERT_STR_EQ(dlx_str(&t->c, "state"), t->scenario == 1 ? "fenced" : "landed");
             dlx_end(&t->c);
-            dlx_begin(&t->c, "status");
+            dlx_begin_status(&t->c);
             ASSERT(dlx_run(&t->c) && dlx_ok(&t->c));
             const struct json_value *outcomes = dlx_arr(&t->c, "outcomes");
             ASSERT(outcomes && outcomes->num_children == 2);
@@ -1015,7 +1015,7 @@ static bool dlx_beat_row_prefix(char *out, size_t cap)
     struct dlx_call c;
     if (out && cap) out[0] = '\0';
     if (!out || !cap) return false;
-    dlx_begin(&c, "status");
+    dlx_begin_status(&c);
     bool ok = dlx_run(&c) && dlx_ok(&c);
     const struct json_value *row = json_get(&c.reply.data, "in_flight");
     int n = 0;
@@ -1322,7 +1322,7 @@ int dlx_guarded_priority_case(void)
             ASSERT(dlx_write(path, canonical));
             ASSERT(dlx_priority_replace(bad[i]));
             ASSERT(dlx_queue_bytes(before, sizeof(before), &first));
-            dlx_begin(&c, "status");
+            dlx_begin_status(&c);
             ASSERT(dlx_run(&c) && !dlx_ok(&c));
             ASSERT_STR_EQ(c.reply.error.code, "QUEUE_READ_FAILED"); dlx_end(&c);
             ASSERT(dlx_queue_bytes(after, sizeof(after), &second));
@@ -1353,7 +1353,7 @@ int dlx_guarded_hold_mismatch_case(void)
             ",\"publication_hold\":true,\"publication_hold\":true"};
         for (size_t i = 0; i < sizeof(hold) / sizeof(hold[0]); i++) {
             ASSERT(dlx_hold_field_replace(hold[i]));
-            dlx_begin(&c, "status");
+            dlx_begin_status(&c);
             ASSERT(dlx_run(&c) && !dlx_ok(&c));
             ASSERT_STR_EQ(c.reply.error.code, "QUEUE_READ_FAILED"); dlx_end(&c);
             ASSERT(dlx_hold_field_replace(",\"publication_hold\":true"));
