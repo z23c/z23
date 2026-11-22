@@ -5,6 +5,7 @@
 #include "command/native_app_compose.h"
 #include "command/app_selection.h"
 #include "command/native_app_customize_source.h"
+#include "command/native_app_customize_tasks.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -38,7 +39,7 @@ struct ac_read {
     const char *name, *change, *path, *query, *source_version;
     size_t offset, limit, page;
     uint64_t expected;
-    bool pinned;
+    bool pinned, resident;
     struct json_value data;
 };
 
@@ -142,16 +143,6 @@ static bool ac_catalog_entry(struct ac_read *a, struct app_launch_entry *selecte
 }
 /* No version is kept yet: name the two commands that make one. */
 /* Existing resident acceptance is the only source of the kept identity. */
-static bool ac_tasks_kept(const char *directory, struct package_resident_record *kept)
-{
-    struct package_resident_store store = {0};
-    struct zcl_result opened = package_resident_store_open_app_readonly(&store, directory, "local/tasks");
-    if (!opened.ok) return false;
-    struct zcl_result read = package_resident_record_read(&store, kept);
-    struct zcl_result closed = package_resident_store_close(&store);
-    return read.ok && closed.ok && kept->generation > 0;
-}
-
 static bool ac_tasks_source_next(struct zcl_command_reply *reply, const char *directory,
                                  const struct package_resident_record *kept)
 {
@@ -182,7 +173,7 @@ static void ac_tasks_recovery(struct zcl_command_reply *reply)
     const char *directory = zcl_native_command_datadir();
     if (!directory || !directory[0]) return;
     struct package_resident_record kept = {0};
-    bool have_kept = ac_tasks_kept(directory, &kept);
+    bool have_kept = ac_tasks_kept_read(directory, &kept);
     struct json_value facts; json_init(&facts); json_set_object(&facts);
     bool facts_ok = json_push_kv_str(&facts, "kind", "tasks-source-profile") &&
         json_push_kv_str(&facts, "data_directory", directory);
@@ -191,7 +182,7 @@ static void ac_tasks_recovery(struct zcl_command_reply *reply)
     json_free(&facts);
     if (have_kept && ac_tasks_source_next(reply, directory, &kept))
         (void)snprintf(reply->error.message, sizeof(reply->error.message),
-            "A kept Tasks program exists. Inspect its package metadata using the first next action.");
+            "A kept Tasks program exists. Inspect its package metadata using the first next action, then call app.customize with path, expected_revision=kept_generation and source_version=kept_root.");
     struct json_value next_args; json_init(&next_args); json_set_object(&next_args);
     bool ok = json_push_kv_str(&next_args, "action", "offer-status") &&
         json_push_kv_str(&next_args, "datadir", directory);
@@ -226,6 +217,11 @@ static bool ac_select(struct ac_read *a)
     struct app_launch_entry entry;
     if (!ac_catalog_entry(a, &entry)) return false;
     enum app_selection_result result = app_selection_load(a->env.state_dir, entry.id, &a->selected);
+    if (result == APP_SELECTION_ABSENT && !strcmp(a->name, "tasks") && a->path && a->source_version) {
+        a->resident = true;
+        (void)snprintf(a->selected.app, sizeof(a->selected.app), "%s", entry.id);
+        return true;
+    }
     if (result == APP_SELECTION_ABSENT) return ac_selection_required(a);
     if (result != APP_SELECTION_OK || a->selected.revision > INT64_MAX)
         return ac_fail(a, "SELECTION_UNREADABLE", "kept selection is invalid or unavailable");
@@ -536,9 +532,45 @@ static bool ac_first_file(struct ac_read *a)
     json_free(&input); return ok;
 }
 
+static bool ac_tasks_file_row(struct ac_read *a, const struct ac_tasks_file *file)
+{
+    struct json_value row; json_init(&row); json_set_object(&row);
+    bool ok = json_push_kv_str(&row, "path", a->path) &&
+        json_push_kv_int(&row, "size", (int64_t)file->size) &&
+        json_push_kv_int(&row, "mode", file->mode) && json_push_kv(&a->data, "file", &row);
+    json_free(&row); return ok;
+}
+
+/* Resident source is a content-addressed package, not a saved personal copy. */
+static bool ac_tasks_context(struct ac_read *a)
+{
+    const char *directory = zcl_native_command_datadir();
+    struct ac_tasks_file file = {0};
+    if (!directory || !ac_tasks_file_read(directory, a->source_version, a->expected, a->path, &file))
+        return ac_fail(a, "SOURCE_UNREADABLE", "kept package, identity or requested member is unavailable, stale or invalid");
+    struct app_selection now;
+    bool selected_absent = app_selection_load(a->env.state_dir, a->selected.app, &now) == APP_SELECTION_ABSENT;
+    if (!selected_absent) { free(file.bytes); return ac_fail(a, "SELECTION_STALE", "selection changed while reading; discard context and request it again"); }
+    bool ok = a->offset <= file.size;
+    if (ok) {
+        a->selected.revision = (uint64_t)file.kept.generation;
+        ok = zcl_hex_decode_lower(a->source_version, a->copy.selected_version, 32) &&
+            json_push_kv_str(&a->data, "name", "tasks") &&
+            json_push_kv_int(&a->data, "selection_revision", file.kept.generation) &&
+            json_push_kv_str(&a->data, "source_version", a->source_version) &&
+            json_push_kv_str(&a->data, "source_root", a->source_version) &&
+            json_push_kv_str(&a->data, "kept_receipt", file.kept.current.receipt_id) &&
+            ac_tasks_file_row(a, &file) && ac_slice(a, file.bytes, file.size);
+    }
+    free(file.bytes);
+    return ok || ac_fail(a, "SOURCE_UNREADABLE", "kept source range or response is unavailable");
+}
+
 static bool ac_read_context(struct ac_read *a, const struct json_value *input)
 {
-    bool ok = ac_inputs(a, input) && ac_source_input(a, input) && ac_shape(a, input) && ac_select(a) && ac_source(a);
+    bool ok = ac_inputs(a, input) && ac_source_input(a, input) && ac_shape(a, input) && ac_select(a);
+    if (ok && a->resident) return ac_tasks_context(a);
+    if (ok) ok = ac_source(a);
     if (ok && !ac_identity(a)) ok = ac_fail(a, "CONTEXT_REFUSED", "context allocation failed");
     if (ok) ok = a->query ? ac_search(a) : (a->path ? ac_file(a) : ac_page(a));
     if (ok) ok = ac_still_selected(a);
@@ -552,7 +584,7 @@ static bool ac_finish_context(struct ac_read *a, const struct zcl_command_reques
         budget = request->success_data_budget;
     if (ok && json_write(&a->data, NULL, 0) > budget)
         ok = ac_fail(a, "CONTEXT_REFUSED", "escaped context exceeds the reply bound; request a smaller file slice");
-    if (ok && (!ac_next(a) || !ac_first_file(a))) ok = ac_fail(a, "CONTEXT_REFUSED", "cannot encode the next pinned read");
+    if (ok && (!ac_next(a) || (!a->resident && !ac_first_file(a)))) ok = ac_fail(a, "CONTEXT_REFUSED", "cannot encode the next pinned read");
     return ok;
 }
 

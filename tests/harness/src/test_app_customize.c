@@ -31,6 +31,7 @@
 #include "platform/time_compat.h"
 #include "vcs/package_prepare.h"
 #include "vcs/package_store.h"
+#include "vcs/package_manifest.h"
 #include "vcs/package_release.h"
 
 #include <stdio.h>
@@ -819,7 +820,9 @@ static bool act_tasks_kept_facts(struct abc_leaf *l, const struct package_reside
 static bool act_tasks_kept_next(struct abc_leaf *l, const char *directory, const char *root)
 {
     if (!l->out.next_count || strcmp(l->out.next[0].command, "zcode.package.show") ||
-        !strstr(l->out.error.message, "first next action")) return false;
+        !strstr(l->out.error.message, "first next action") ||
+        !strstr(l->out.error.message, "expected_revision=kept_generation") ||
+        !strstr(l->out.error.message, "source_version=kept_root")) return false;
     for (size_t i = 0; i < l->out.next_count; ++i)
         if (!strcmp(l->out.next[i].command, "zcode.package.show") &&
             strstr(l->out.next[i].input_json, root) &&
@@ -892,6 +895,117 @@ static bool act_tasks_kept_hint(void)
     ok = act_tasks_locked_fallback(directory) && ok; zcl_native_bridge_bind_rpc(old, port);
     bool removed = unlink(db) == 0 && rmdir(package) == 0 && rmdir(directory) == 0;
     return ok && found && removed;
+}
+
+
+struct act_resident_fixture {
+    char directory[PATH_MAX], root[65], chunk[65];
+};
+static const char act_resident_bytes[] = "verified Tasks source\n";
+static bool act_resident_package(struct act_resident_fixture *f)
+{
+    uint8_t hash[32], root[32], *wire = NULL; size_t wire_len = 0;
+    struct vcs_package_manifest manifest; vcs_package_manifest_init(&manifest);
+    bool ok = vcs_package_chunk_hash((const uint8_t *)act_resident_bytes, sizeof(act_resident_bytes) - 1, hash) &&
+        vcs_package_manifest_add(&manifest, "app/main.c", VCS_PACKAGE_MODE_FILE, sizeof(act_resident_bytes) - 1, hash, 1) &&
+        vcs_package_manifest_serialize(&manifest, &wire, &wire_len);
+    struct vcs_package_store *store = ok ? vcs_package_store_open(f->directory, 64u * 1024u * 1024u) : NULL;
+    ok = store && vcs_package_store_put_manifest(store, wire, wire_len, root) == VCS_PACKAGE_STORE_OK &&
+        vcs_package_store_put_chunk(store, root, "app/main.c", 0, (const uint8_t *)act_resident_bytes,
+                                    sizeof(act_resident_bytes) - 1) == VCS_PACKAGE_STORE_OK;
+    if (store) vcs_package_store_close(store);
+    free(wire); vcs_package_manifest_free(&manifest);
+    if (ok) { zcl_hex_encode(root, sizeof(root), f->root); zcl_hex_encode(hash, sizeof(hash), f->chunk); }
+    return ok;
+}
+static bool act_resident_accept(struct act_resident_fixture *f)
+{
+    struct package_resident_identity id = {0};
+    (void)snprintf(id.package_root, sizeof(id.package_root), "%s", f->root);
+    memset(id.receipt_id, 'b', 64); memset(id.artifact_sha3, 'c', 64);
+    (void)snprintf(id.program, sizeof(id.program), "bin/ztasks"); id.configuration_generation = 1;
+    const char *nonce = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    struct package_resident_store store = {0}; struct package_resident_record row = {0};
+    bool ok = package_resident_store_open_app(&store, f->directory, "local/tasks").ok &&
+        package_resident_record_begin(&store, 0, &row).ok &&
+        package_resident_record_accept(&store, row.revision, 0, &id, nonce, 1, &row).ok &&
+        package_resident_record_activate(&store, row.revision, 0, nonce, 1, &row).ok;
+    return package_resident_store_close(&store).ok && ok;
+}
+static bool act_resident_read(const char *root, int64_t generation, const char *path, bool success)
+{
+    struct abc_leaf l; abc_open(&l);
+    bool ok = json_push_kv_str(&l.in, "name", "tasks") && json_push_kv_str(&l.in, "path", path) &&
+        json_push_kv_str(&l.in, "source_version", root) && json_push_kv_int(&l.in, "expected_revision", generation) &&
+        abc_exec("app.customize", &l);
+    if (success) ok = ok && l.out.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(abc_get(&l, "content"), act_resident_bytes) && !strcmp(abc_get(&l, "source_root"), root) &&
+        json_get_int(json_get(&l.out.data, "selection_revision")) == generation;
+    else ok = ok && l.out.status != ZCL_COMMAND_STATUS_PASSED;
+    abc_close(&l); return ok;
+}
+static bool act_resident_wire(const char *root)
+{
+    struct abc_leaf l; abc_open(&l);
+    bool ok = json_push_kv_str(&l.in, "name", "tasks") &&
+        json_push_kv_str(&l.in, "path", "app/main.c") &&
+        json_push_kv_str(&l.in, "source_version", root) &&
+        json_push_kv_int(&l.in, "expected_revision", 1) &&
+        json_push_kv_int(&l.in, "limit", 4) && abc_exec("app.customize", &l);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.customize", NULL);
+    char wire[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &l.out, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool parsed = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *next = json_get(&doc, "next");
+    ok = ok && parsed && json_get_bool(json_get(&doc, "ok")) && next && json_size(next) == 1;
+    json_free(&doc); abc_close(&l); return ok;
+}
+static bool act_other_manifest(const struct act_resident_fixture *f)
+{
+    uint8_t hash[32], *wire = NULL; size_t length = 0;
+    struct vcs_package_manifest m; vcs_package_manifest_init(&m);
+    bool ok = zcl_hex_decode_lower(f->chunk, hash, sizeof(hash)) &&
+        vcs_package_manifest_add(&m, "app/main.c", VCS_PACKAGE_MODE_EXECUTABLE,
+                                 sizeof(act_resident_bytes) - 1, hash, 1) &&
+        vcs_package_manifest_serialize(&m, &wire, &length);
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/zcode/manifests/%s", f->directory, f->root);
+    FILE *file = ok && n > 0 && (size_t)n < sizeof(path) ? fopen(path, "wb") : NULL;
+    ok = file && fwrite(wire, 1, length, file) == length;
+    if (file && fclose(file)) ok = false;
+    free(wire); vcs_package_manifest_free(&m);
+    return ok;
+}
+static bool act_resident_corruption(struct act_resident_fixture *f)
+{
+    bool ok = true;
+    char chunk_path[PATH_MAX];
+    int n = snprintf(chunk_path, sizeof(chunk_path), "%s/zcode/cas/sha3/%.2s/%s", f->directory, f->chunk, f->chunk);
+    FILE *corrupt = n > 0 && (size_t)n < sizeof(chunk_path) ? fopen(chunk_path, "wb") : NULL;
+    char changed_bytes[sizeof(act_resident_bytes)];
+    memcpy(changed_bytes, act_resident_bytes, sizeof(changed_bytes)); changed_bytes[0] ^= 1;
+    bool changed = corrupt && fwrite(changed_bytes, 1, sizeof(changed_bytes) - 1, corrupt) == sizeof(changed_bytes) - 1;
+    if (corrupt && fclose(corrupt)) changed = false;
+    ok = changed && act_resident_read(f->root, 1, "app/main.c", false) && ok;
+    FILE *restore = fopen(chunk_path, "wb");
+    bool restored = restore && fwrite(act_resident_bytes, 1, sizeof(act_resident_bytes) - 1, restore) == sizeof(act_resident_bytes) - 1;
+    if (restore && fclose(restore)) restored = false;
+    return restored && act_other_manifest(f) && act_resident_read(f->root, 1, "app/main.c", false) && ok;
+}
+static bool act_tasks_resident_file(void)
+{
+    struct act_resident_fixture f = {0};
+    if (!test_mkdtemp(f.directory, sizeof(f.directory), "tasks_resident_source")) return false;
+    bool ok = act_resident_package(&f) && act_resident_accept(&f);
+    char old[4096]; (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+    int port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f.directory, port);
+    ok = act_resident_read(f.root, 1, "app/main.c", true) && act_resident_wire(f.root) && ok;
+    ok = act_resident_read(f.root, 2, "app/main.c", false) && ok;
+    ok = act_resident_read("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, "app/main.c", false) && ok;
+    ok = act_resident_read(f.root, 1, "app/other.c", false) && ok;
+    ok = act_resident_corruption(&f) && ok;
+    zcl_native_bridge_bind_rpc(old, port); test_rm_rf(f.directory); return ok;
 }
 
 #endif
@@ -1605,6 +1719,7 @@ int test_app_customize(void)
         ASSERT(act_tasks_source_hint(&f));
 #if defined(__linux__) || defined(__APPLE__)
         ASSERT(act_tasks_kept_hint());
+        ASSERT(act_tasks_resident_file());
 #endif
         ASSERT(act_no_grant(&f));
         ASSERT(act_reader_bounds(&f));
