@@ -62,7 +62,7 @@ size_t pk_gate_lines(const struct pk_facts *f, char (*out)[PK_GATE_LEN])
     if (f->ngroup > 0)
         (void)snprintf(out[n++], PK_GATE_LEN,
                        "DEVBUILD_NO_OFFLOAD=1 timeout 2400 devbuild --wait make "
-                       "-j\"$(getconf _NPROCESSORS_ONLN)\" "
+                       "-j8 "
                        "agent-verify ONLY=@changed");
     if (preflight)
         (void)snprintf(out[n++], PK_GATE_LEN,

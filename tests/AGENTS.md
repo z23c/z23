@@ -19,4 +19,4 @@ Rules:
 - Some tests pin exact documentation sentences: `git grep -n "<sentence>" tests` before rewording a doc.
 - Add an impact rule when no existing pattern covers a new test file: `cognition/controllers/include/controllers/agent_impact_rules.def`.
 
-Commands: `make t-list`, `make t-fast ONLY=<group>`, `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=<g,g>`.
+Commands: `make t-list`, `make t-fast ONLY=<group>`, `make -j8 agent-verify ONLY=<g,g>`.

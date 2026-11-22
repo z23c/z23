@@ -12,4 +12,4 @@ Rules:
 - A `.def` or new `.c` change can pass `lint-fast` and fail full lint: run lint preflight as documented in `docs/dev/DEVELOPING.md`.
 - Reducer or consensus-adjacent edits need the sealed-core and consensus review in the root `AGENTS.md`.
 
-Tests: find the group with `build/bin/z23 code cost <file>`, then `make t-fast ONLY=<group>` or `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=<g,g>`. Example group: `engine`.
+Tests: find the group with `build/bin/z23 code cost <file>`, then `make t-fast ONLY=<group>` or `make -j8 agent-verify ONLY=<g,g>`. Example group: `engine`.

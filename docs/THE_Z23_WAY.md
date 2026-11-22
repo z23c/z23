@@ -75,7 +75,7 @@ its floor in the same commit, so the gain stays.
    <!-- claim: symbol-present dev.agent.hot engine/composition/commands/dev.def # per-save owning-group reflex -->
    During editing, `make lint-fast` gives standalone lint feedback.
    The verification trip for a committed change is
-   `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`, which runs exactly the
+   `make -j8 agent-verify ONLY=@changed`, which runs exactly the
    test groups the land proof selects for your committed changes (the capped
    `code guide` and `code tests` lists miss groups the proof runs). `ONLY=<exact
    groups>` still works for a hand-picked set; it is mandatory and exact. Check the final

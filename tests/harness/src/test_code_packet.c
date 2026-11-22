@@ -746,7 +746,7 @@ static int test_code_packet_markdown_fields(void)
                        "%s", "test_command_registry_catalog");
         ASSERT_EQ(pk_gate_lines(&facts, gates), 2u);
         ASSERT_STR_EQ(gates[0],
-            "DEVBUILD_NO_OFFLOAD=1 timeout 2400 devbuild --wait make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
+            "DEVBUILD_NO_OFFLOAD=1 timeout 2400 devbuild --wait make -j8 agent-verify ONLY=@changed");
         ASSERT_STR_EQ(gates[1],
             "timeout 2400 devbuild --wait make lint-preflight");
         facts.ngroup = 0;

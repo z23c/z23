@@ -770,7 +770,7 @@ static void cb_push_next(struct cb_brief *b, const char *fmt, const char *arg)
 static void cb_build_next(struct cb_brief *b)
 {
     if (b->ntests) {
-        cb_push_next(b, "%s", "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
+        cb_push_next(b, "%s", "make -j8 agent-verify ONLY=@changed");
         if (cb_needs_preflight(b))
             cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
     } else {

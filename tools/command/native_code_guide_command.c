@@ -18,7 +18,7 @@
 #if defined(__APPLE__)
 #define CG_PROOF_COMMAND "make -j2 agent-verify ONLY=@changed"
 #else
-#define CG_PROOF_COMMAND "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed"
+#define CG_PROOF_COMMAND "make -j8 agent-verify ONLY=@changed"
 #endif
 
 static bool cg_render_static(struct zcl_command_reply *reply)

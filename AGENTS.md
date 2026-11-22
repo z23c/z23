@@ -30,7 +30,7 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23     # build/bin/z23
 make dev-bin                                  # fast development binaries
 make t-list                                   # registered test groups
 make t-fast ONLY=<group>                      # focused tests; ONLY is mandatory
-make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=block_index_node_db_topup  # one-trip verify for a named group
+make -j8 agent-verify ONLY=block_index_node_db_topup  # one-trip verify for a named group
 make lint-fast                                # fast lint subset
 ```
 

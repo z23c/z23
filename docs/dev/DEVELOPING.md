@@ -1063,7 +1063,7 @@ or unknown selector. `lint-fast` is the inner lint's fast gate subset.
 Never run `test_zcl` directly. Do not run full `make lint` on an ordinary
 slice.
 
-`make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed` (the groups the land proof selects for your committed changes; or `ONLY=<group,group>`) is the one verification trip for an
+`make -j8 agent-verify ONLY=@changed` (the groups the land proof selects for your committed changes; or `ONLY=<group,group>`) is the one verification trip for an
 edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
 `check-capability-closure`, `proof-lint-prebuild` (the proof's production-flag prefork build), `docs-capability-inventory`, `check-kpi-floor` and `lint-fast`, each in its own sub-make with a log
 under `build/scratch/`. Complexity fails fast before selector setup; later failures are collected.
@@ -1075,9 +1075,16 @@ then `agent-verify: total secs=<total>` and the verdict line, `agent-verify: OK`
 `agent-verify: FAILED (...)` (the verdict lines carry no timing, so the land rail reads them unchanged), and writes the same lines to
 `build/scratch/agent-verify.rc`. For `ONLY=@changed` on an offloaded gate,
 use the [sender-pinned recipe](#where-a-gate-runs). For a local run, use
-`DEVBUILD_NO_OFFLOAD=1 devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`.
+`DEVBUILD_NO_OFFLOAD=1 devbuild --wait make -j8 agent-verify ONLY=@changed`.
 Select the normal resource class using the host's supported syntax. For named
-groups, use `ONLY=<group,group>` through the admitted route. Full
+groups, use `ONLY=<group,group>`: `devbuild --wait make -j8 agent-verify ONLY=<group,group>`
+from a clean committed worktree is placed by the broker on the less loaded host,
+so do not set `DEVBUILD_NO_OFFLOAD`. `ONLY=@changed` is also placed, but the
+receiver refuses it with `REMOTE_MAIN_STALE` while the receiver's `main` is behind
+origin; then use the sender-pinned recipe, or the local form above. `-j8` is a
+lane's share: `devbuild` caps a job at the host quota, not per lane, and
+exports no make width, so `-j"$(getconf _NPROCESSORS_ONLN)"` from two or three
+lanes oversubscribes the host (load 42-68 on 32 cores); widen only on an idle host. Full
 `make lint` and the wide group list remain the landing step's job.
 The selector bootstrap and exact test step both use `ZCL_TEST_WERROR=1`.
 This aligns their strict test-compile policy.
