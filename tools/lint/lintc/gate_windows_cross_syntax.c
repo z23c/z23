@@ -437,6 +437,32 @@ static int inc_scan(const char *dir, int depth)
     return rc;
 }
 
+static int flag_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+/* Directory enumeration order belongs to the filesystem (NTFS: case-folded
+ * name; ext4: a per-filesystem hash; tmpfs: newest entry first), so one tree
+ * on two filesystems, or rebuilt over history on tmpfs, emitted its walked -I
+ * flags in different orders. The result cache keys the ordered flag list, so
+ * identical trees shared no verdict. Sort bytewise only the flags one walk
+ * appended: the fixed prefix and the order of walk roots stay as written. */
+static void flags_sort_from(int first)
+{
+    if (g_wcs_nflag - first > 1)
+        qsort(g_wcs_flag[first], (size_t)(g_wcs_nflag - first),
+              sizeof g_wcs_flag[0], flag_cmp);
+}
+
+int wcs_inc_walk(const char *dir)
+{
+    int first = g_wcs_nflag;
+    int rc = inc_scan(dir, 0);
+    if (rc == 0) flags_sort_from(first);
+    return rc;
+}
+
 /* Exercise root pruning without excluding a nested directory of the same name. */
 static int inc_scope_selftest(void)
 {
@@ -503,6 +529,15 @@ static int src_walk_cb(const char *fpath, const struct stat *st, int type,
     return 0;
 }
 
+/* One src/ root walk, sorted like wcs_inc_walk; 2 on a failed callback. */
+int wcs_src_walk(const char *root)
+{
+    int first = g_wcs_nflag;
+    if (nftw(root, src_walk_cb, 16, FTW_PHYS) == 1) return 2;
+    flags_sort_from(first);
+    return 0;
+}
+
 static int add_root(char roots[][WCS_PATH], int *nr, const char *p)
 {
     if (*nr >= 16 || wcs_copy(roots[*nr], WCS_PATH, p)) {
@@ -519,7 +554,7 @@ static int build_include_flags(void)
     if (inc_add("tools") != 0 || inc_add("tools/dev") != 0 ||
         inc_add("tools/mind") != 0)
         return 2;
-    if (inc_scan(".", 0) != 0) return 2;
+    if (wcs_inc_walk(".") != 0) return 2;
     /* other walk errors: a walk that found too little is caught by the floor */
     static char roots[16][WCS_PATH];
     int nr = 0;
@@ -529,7 +564,7 @@ static int build_include_flags(void)
             return 2;
     if (add_root(roots, &nr, "tools")) return 2;
     for (int i = 0; i < nr; i++)
-        if (nftw(roots[i], src_walk_cb, 16, FTW_PHYS) == 1) return 2;
+        if (wcs_src_walk(roots[i]) != 0) return 2;
     return 0;
 }
 
@@ -781,6 +816,15 @@ static int wcs_setup(void)
 
 /* ── top-level flow ─────────────────────────────────────────────────── */
 
+/* Include-walk proofs: root pruning, dirent hints, enumeration order. */
+static int inc_selftests(void)
+{
+    int rc = inc_scope_selftest();
+    if (rc == 0) rc = wcs_inc_dirent_test(g_wcs_work);
+    if (rc == 0) rc = wcs_inc_order_test(g_wcs_work);
+    return rc;
+}
+
 int wcs_selftest_phase(void); /* gate_windows_cross_syntax_selftest.c */
 
 int wcs_begin(int selftest_only)
@@ -818,8 +862,7 @@ int wcs_begin(int selftest_only)
         fprintf(stderr, "%s: FATAL — mktemp failed.\n", k_wcs_gate);
         return 2;
     }
-    int rc = inc_scope_selftest();
-    if (rc == 0) rc = wcs_inc_dirent_test(g_wcs_work);
+    int rc = inc_selftests();
     if (rc == 0) rc = wcs_plan_order_test(g_wcs_work);
     if (rc == 0) rc = wcs_setup();
     if (rc == 0) rc = wcs_selftest_phase();

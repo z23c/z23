@@ -301,6 +301,71 @@ int wcs_inc_dirent_test(const char *base)
     return 0;
 }
 
+/* Created in ascending order: tmpfs then enumerates them newest first. */
+static const char *const sh_order_dirs[] = { "alpha", "beta", "delta",
+    "gamma", "kappa", "omega", "sigma", "zeta", NULL };
+enum { SH_ORDER_N = 8 };
+
+static int sh_order_tree(void)
+{
+    static const char *const roots[] = { "r1", "r2" };
+    char p[SH_P];
+    for (int i = 0; i < SH_ORDER_N; i++) {
+        shp(p, sizeof p, "ord/%s/include", sh_order_dirs[i]);
+        if (csr_mkdirs(p) != 0) return 2;
+        for (int r = 0; r < 2; r++) {
+            shp(p, sizeof p, "%s/%s/src", roots[r], sh_order_dirs[i]);
+            if (csr_mkdirs(p) != 0) return 2;
+            shp(p, sizeof p, "%s/%s/src/h.h", roots[r], sh_order_dirs[i]);
+            if (csr_write(p, "#define H 1\n") != 0) return 2;
+        }
+    }
+    return 0;
+}
+
+static bool sh_ascending(int from, int to, const char *prefix)
+{
+    for (int i = from; i < to; i++)
+        if (strncmp(g_wcs_flag[i], prefix, strlen(prefix)) != 0 ||
+            (i > from && strcmp(g_wcs_flag[i - 1], g_wcs_flag[i]) >= 0))
+            return false;
+    return true;
+}
+
+/* Each walk's flags are bytewise ascending; an earlier flag and the order of
+ * walk roots (r2 before r1 here) are kept. */
+static int sh_order_check(void)
+{
+    int before = g_wcs_nflag;
+    if (before >= WCS_FLAGS - 3 * SH_ORDER_N) return 2;
+    snprintf(g_wcs_flag[g_wcs_nflag++], WCS_FLAGLEN, "-Izz-earlier");
+    int walk = g_wcs_nflag;
+    if (wcs_inc_walk(".") != 0) return 2;
+    int mid = g_wcs_nflag;
+    if (wcs_src_walk("r2") != 0 || wcs_src_walk("r1") != 0) return 2;
+    bool ok = strcmp(g_wcs_flag[before], "-Izz-earlier") == 0 &&
+              mid - walk == SH_ORDER_N && g_wcs_nflag - mid == 2 * SH_ORDER_N &&
+              sh_ascending(walk, mid, "-I./ord/") &&
+              sh_ascending(mid, mid + SH_ORDER_N, "-Ir2/") &&
+              sh_ascending(mid + SH_ORDER_N, g_wcs_nflag, "-Ir1/");
+    return ok ? 0 : sh_fail("walked include flags follow directory enumeration order");
+}
+
+int wcs_inc_order_test(const char *base)
+{
+    char root[SH_P];
+    shp(root, sizeof root, "%s/inc-order", base);
+    int old = open(".", O_RDONLY | O_CLOEXEC), before = g_wcs_nflag;
+    if (old < 0) return 2;
+    int rc = csr_mkdirs(root) == 0 && chdir(root) == 0 ? sh_order_tree() : 2;
+    if (rc == 0) rc = sh_order_check();
+    g_wcs_nflag = before;
+    if (fchdir(old) != 0 && rc == 0) rc = 2;
+    close(old);
+    rap_rm_rf(root);
+    return rc;
+}
+
 /* One tree: src/shared.h plus SH_UNITS units that include it. */
 static int sh_producers(const char *tree)
 {
@@ -645,6 +710,72 @@ static int sh_cases(struct sh_env *e, const char *stub, const char *flags)
     return sh_retention(e, stub, flags);
 }
 
+/* The same include roots, created in opposite orders in the two trees. */
+static int sh_order_includes(const char *tree, bool reverse)
+{
+    char p[SH_P];
+    for (int k = 0; k < SH_ORDER_N; k++) {
+        shp(p, sizeof p, "%s/%s/include", tree,
+            sh_order_dirs[reverse ? SH_ORDER_N - 1 - k : k]);
+        if (csr_mkdirs(p) != 0) return 2;
+    }
+    shp(p, sizeof p, "%s/zeta/include/pick.h", tree);
+    return csr_write(p, "#define PICK 1\n") == 0 ? 0 : 2;
+}
+
+/* Derive tree i's include flags as the gate does (cwd = tree), then sweep. */
+static int sh_order_run(const struct sh_env *e, int i, const char *stub,
+                        int *h, int *m, int *s)
+{
+    char flags[SH_P];
+    shp(flags, sizeof flags, "%s/flags.nul", e->work[i]);
+    if (chdir(e->tree[i]) != 0) return 2;
+    int before = g_wcs_nflag, rc = wcs_inc_walk(".") == 0 ? 0 : 2;
+    FILE *f = rc == 0 ? fopen(flags, "wb") : NULL;
+    if (rc == 0 && !f) rc = 2;
+    for (int k = before; rc == 0 && k < g_wcs_nflag; k++)
+        if (fprintf(f, "%s%c", g_wcs_flag[k], '\0') < 0) rc = 2;
+    if (f && fclose(f) != 0) rc = 2;
+    g_wcs_nflag = before;
+    return rc ? rc : sh_sweep(e->work[i], e->list[i], stub, stub, flags, h, m, s);
+}
+
+/* Enumeration order must not split the store; header edits and a new
+ * header that shadows a later include root must still miss every TU. */
+static int sh_order_cases(const struct sh_env *e, const char *stub)
+{
+    static const struct { int tree; const char *file, *text, *what; int hit; } step[] = {
+        { 0, NULL, NULL, "a cold run over walked include roots", 0 },
+        { 1, NULL, NULL, "the same include roots created in the opposite order", 1 },
+        { 1, "zeta/include/pick.h", "#define PICK 2\n", "an edited header under a walked include root", 0 },
+        { 1, "alpha/include/pick.h", "#define PICK 3\n", "a shadowing header in an earlier include root", 0 },
+    };
+    int h, m, s, rc;
+    char p[SH_P];
+    for (size_t i = 0; i < sizeof step / sizeof step[0]; i++) {
+        if (step[i].file) {
+            shp(p, sizeof p, "%s/%s", e->tree[step[i].tree], step[i].file);
+            if (csr_write(p, step[i].text) != 0) return 2;
+        }
+        if ((rc = sh_order_run(e, step[i].tree, stub, &h, &m, &s)) != 0) return rc;
+        int eh = step[i].hit ? SH_UNITS : 0, em = SH_UNITS - eh;
+        if ((rc = sh_expect(step[i].what, h, m, s, eh, em, em)) != 0) return rc;
+    }
+    return 0;
+}
+
+static int sh_order_store(const char *sbase, const char *stub)
+{
+    struct sh_env e;
+    char obase[SH_P];
+    shp(obase, sizeof obase, "%s/order", sbase);
+    if (sh_paths(obase, &e) != 0 || setenv("HOME", e.home, 1) != 0 ||
+        sh_order_includes(e.tree[0], false) != 0 ||
+        sh_order_includes(e.tree[1], true) != 0)
+        return 2;
+    return sh_order_cases(&e, stub);
+}
+
 int wcs_selftest_shared_store(const char *base, const char *stub,
                               const char *flags)
 {
@@ -665,6 +796,7 @@ int wcs_selftest_shared_store(const char *base, const char *stub,
     unsetenv("ZCL_LINT_TU_CACHE_DIR");
     unsetenv("ZCL_LINT_TU_CACHE");
     int rc = sh_cases(&e, stub, flags);
+    if (rc == 0) rc = sh_order_store(sbase, stub);
     if (chdir(cwd) != 0 && rc == 0) rc = 2;
     if (old_home) setenv("HOME", old_home, 1); else unsetenv("HOME");
     if (old_xdg) setenv("XDG_CACHE_HOME", old_xdg, 1);

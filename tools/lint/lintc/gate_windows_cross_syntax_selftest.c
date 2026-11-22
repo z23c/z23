@@ -872,7 +872,8 @@ static int cache_selftest(const char *cc, const char *flags_nul,
            "ZCL_LINT_TU_CACHE=0 stores none, and\n"
            "      %s replays a real TU byte-for-byte, and the default store lives\n"
            "      under the host cache root so a second tree with the same bytes "
-           "hits\n      while a changed header there misses\n", cc);
+           "hits\n      while a changed header there misses; include roots created in\n"
+           "      either order share one store, and an edited or shadowing header misses\n", cc);
     return 0;
 }
 
