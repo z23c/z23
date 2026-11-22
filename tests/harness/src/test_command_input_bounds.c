@@ -18,6 +18,7 @@
 #include "test/test_core.h"
 
 #include "config/command_catalog.h"
+#include "controllers/agent_impact_rules.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "command/native_evidence_judge.h"
@@ -1617,11 +1618,31 @@ static int t_discovery_transport_shapes(void)
         !cib_json_shape("dev.agent.claim", "{\"files\":[3]}"));
     CIB_CHECK("claim string boolean rejected without dispatch",
         !cib_json_shape("dev.agent.claim", "{\"release\":\"false\"}"));
-    CIB_CHECK("status undeclared seq remains rejected",
-        !cib_json_shape("dev.land.status", "{\"seq\":704}"));
+    CIB_CHECK("status declared seq is accepted",
+        cib_json_shape("dev.land.status", "{\"seq\":704}"));
+    CIB_CHECK("status undeclared key remains rejected",
+        !cib_json_shape("dev.land.status", "{\"unsupported_status_key\":704}"));
     CIB_CHECK("drive handler constraints remain outside transport",
         cib_json_shape("dev.land.drive", "{\"seq\":704,\"prove\":true}") &&
         cib_json_shape("dev.land.drive", "{\"max_rows\":17}"));
+    return failures;
+}
+
+static int t_status_input_impact(void)
+{
+    static const char *const paths[] = {
+        "engine/composition/commands/dev.def",
+        "tools/command/native_dev_land_status_compact.c",
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+        struct agent_impact_acc impact = {0};
+        bool found = false;
+        (void)agent_impact_apply_shared_rules(paths[i], &impact);
+        for (size_t j = 0; j < impact.groups_len; j++)
+            if (strcmp(impact.groups[j], "command_input_bounds") == 0) found = true;
+        CIB_CHECK("status descriptor and source select input contract", found);
+    }
     return failures;
 }
 
@@ -2157,6 +2178,7 @@ int test_command_input_bounds(void)
     failures += t_receive_continuation_wire();
     failures += t_ops_state_explain_boolean();
     failures += t_discovery_transport_shapes();
+    failures += t_status_input_impact();
     failures += t_discovery_transport_edges();
     failures += t_discovery_descriptor_contract();
     failures += t_objectives_path_descriptors();
