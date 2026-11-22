@@ -272,6 +272,7 @@ enum boot_fleet_roster_log_kind {
     BOOT_FLEET_ROSTER_LOG_PEER_REFUSED,
     BOOT_FLEET_ROSTER_LOG_DEFERRED,
     BOOT_FLEET_ROSTER_LOG_HEAD_UNCARRIED,
+    BOOT_FLEET_ROSTER_LOG_INGEST_DROPPED,
     BOOT_FLEET_ROSTER_LOG_KINDS
 };
 bool boot_fleet_roster_log_due(enum boot_fleet_roster_log_kind kind,

@@ -192,10 +192,40 @@ static int test_fleet_roster_scan_unreadable(void)
     return failures;
 }
 
+/* A peer that resends a refused post must cost one log line per window. */
+static int test_fleet_ingest_drop_log_window(void)
+{
+    int failures = 0;
+    TEST("fleet board: 50 locally refused posts in one window log one line, "
+         "the next window reports the 49 left out") {
+        boot_fleet_roster_test_reset();
+        const int64_t t0 = 1000000;
+        uint64_t skipped = 99;
+        int lines = 0;
+        for (int i = 0; i < 50; i++)
+            if (boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_INGEST_DROPPED,
+                                          t0 + i % 10, &skipped))
+                lines++;
+        ASSERT_EQ(lines, 1);
+        ASSERT_EQ(skipped, (uint64_t)0);
+        ASSERT(boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_INGEST_DROPPED,
+                                         t0 + BOOT_FLEET_ROSTER_LOG_WINDOW_S,
+                                         &skipped));
+        ASSERT_EQ(skipped, (uint64_t)49);
+        /* The roster-drop kind has its own budget. */
+        ASSERT(boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_POST_DROPPED,
+                                         t0, &skipped));
+        PASS();
+    } _test_next:;
+    boot_fleet_roster_test_reset();
+    return failures;
+}
+
 int test_fleet_roster_scan(void)
 {
     int failures = 0;
     failures += test_fleet_roster_scan_offset();
     failures += test_fleet_roster_scan_unreadable();
+    failures += test_fleet_ingest_drop_log_window();
     return failures;
 }

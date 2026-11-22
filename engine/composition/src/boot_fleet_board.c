@@ -544,6 +544,21 @@ uint64_t boot_fleet_board_role_refused_count(void)
     return atomic_load_explicit(&s_role_refused, memory_order_relaxed);
 }
 
+/* A peer that resends a post this box refuses locally can do so every second;
+ * one line per window, the rest counted, keeps it from filling the log. */
+static void fleet_board_log_ingest_dropped(const struct p2p_node *node,
+                                           enum fleet_board_result r,
+                                           int64_t now)
+{
+    uint64_t skipped = 0;
+    if (boot_fleet_roster_log_due(BOOT_FLEET_ROSTER_LOG_INGEST_DROPPED, now,
+                                  &skipped))
+        LOG_WARN("net.fleet_board",
+                 "dropped post from peer %lld: %s (%llu more since the "
+                 "last line)", (long long)node->id,
+                 fleet_board_result_string(r), (unsigned long long)skipped);
+}
+
 /* Announce this node's newest ids to one peer. The public INV path carries
  * public posts only: a fleet-scoped id announced here would already reveal
  * that a fleet-private post exists, which is exactly what the scope is meant
@@ -700,8 +715,7 @@ static void fleet_board_handle_post(struct msg_processor *mp,
          * sender-owned payload failures and keep their scoring
          * consequence. */
         if (fleet_board_ingest_refused_locally(r))
-            LOG_WARN("net.fleet_board", "dropped post from peer %lld: %s",
-                     (long long)node->id, fleet_board_result_string(r));
+            fleet_board_log_ingest_dropped(node, r, now);
         else if (r != FLEET_BOARD_ERR_EXPIRED)
             fleet_board_offend(mp, node, r);
         return;
