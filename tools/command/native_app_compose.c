@@ -353,6 +353,33 @@ bool zcl_app_optional_fields(struct json_value *out, const struct json_value *da
     return true;
 }
 
+static size_t app_error_reserve(const struct zcl_command_error *error)
+{
+    const char *fields[] = {error->code, error->code, error->message, error->phase, error->current_state,
+        error->next_action, error->evidence, error->failure_id};
+    size_t total = 1000u;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        struct json_value v; json_init(&v); json_set_str(&v, fields[i]);
+        size_t n = v.type == JSON_STR ? json_write(&v, NULL, 0) : 0;
+        json_free(&v);
+        if (!n || n > ZCL_COMMAND_ERROR_BUDGET - total) return ZCL_COMMAND_ERROR_BUDGET;
+        total += n;
+    }
+    return total;
+}
+
+size_t zcl_app_failure_facts_cap(struct zcl_command_reply *reply, bool *omitted)
+{
+    size_t reserve = app_error_reserve(&reply->error);
+    if (reserve > ZCL_COMMAND_ERROR_BUDGET - 600u) {
+        reply->error.phase[0] = reply->error.current_state[0] = reply->error.next_action[0] = 0;
+        reply->error.evidence[0] = reply->error.failure_id[0] = 0;
+        *omitted = true; reserve = app_error_reserve(&reply->error);
+    }
+    size_t cap = reserve + 50u < ZCL_COMMAND_ERROR_BUDGET ? ZCL_COMMAND_ERROR_BUDGET - reserve - 50u : 0;
+    return cap > 1450u ? 1450u : cap;
+}
+
 bool zcl_app_fact_add(struct json_value *facts, const char *key, const struct json_value *value, size_t cap)
 {
     struct json_value candidate; json_init(&candidate);

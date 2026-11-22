@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 /* Checked receipt projection and bounded recovery-fact composition. */
+size_t zcl_app_failure_facts_cap(struct zcl_command_reply *reply, bool *omitted);
 bool zcl_app_recovery_fields(struct json_value *out, const struct json_value *source,
     const char *const *keys, size_t count);
 bool zcl_app_optional_fields(struct json_value *out, const struct json_value *source,

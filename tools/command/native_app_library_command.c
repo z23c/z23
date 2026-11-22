@@ -1143,37 +1143,6 @@ static bool al_preparation_fact(struct json_value *facts, const struct json_valu
     if (ok) ok = zcl_app_fact_add(facts, "library_preparation", &compact, cap);
     json_free(&compact); return ok;
 }
-static size_t al_scalar_size(const char *text)
-{
-    struct json_value value; json_init(&value); json_set_str(&value, text);
-    size_t n = value.type == JSON_STR ? json_write(&value, NULL, 0) : 0;
-    json_free(&value); return n;
-}
-static size_t al_error_reserve(const struct zcl_command_error *error)
-{
-    /* Reserve envelope, authority and default next action separately from
-     * the actual JSON-escaped sizes of the error's string fields. */
-    const char *fields[] = {error->code, error->code, error->message, error->phase, error->current_state,
-        error->next_action, error->evidence, error->failure_id};
-    size_t total = 1000u;
-    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
-        size_t n = al_scalar_size(fields[i]);
-        if (!n || n > ZCL_COMMAND_ERROR_BUDGET - total) return ZCL_COMMAND_ERROR_BUDGET;
-        total += n;
-    }
-    return total;
-}
-static size_t al_failure_facts_cap(struct zcl_command_reply *reply, bool *omitted)
-{
-    size_t reserve = al_error_reserve(&reply->error);
-    if (reserve > ZCL_COMMAND_ERROR_BUDGET - 600u) {
-        reply->error.phase[0] = reply->error.current_state[0] = reply->error.next_action[0] = 0;
-        reply->error.evidence[0] = reply->error.failure_id[0] = 0;
-        *omitted = true; reserve = al_error_reserve(&reply->error);
-    }
-    size_t cap = reserve + 50u < ZCL_COMMAND_ERROR_BUDGET ? ZCL_COMMAND_ERROR_BUDGET - reserve - 50u : 0;
-    return cap > 1450u ? 1450u : cap;
-}
 static struct json_value *al_failure_facts(struct zcl_command_reply *reply)
 {
     for (size_t i = 0; i < reply->data.num_children; ++i)
@@ -1337,7 +1306,7 @@ static void al_bound_failure(struct library *w, struct zcl_command_reply *reply)
         al_recovered_error_normalize(reply);
         if (!al_recovered_facts(w, &facts, &reply->data, false)) omitted = true;
     }
-    size_t cap = al_failure_facts_cap(reply, &omitted);
+    size_t cap = zcl_app_failure_facts_cap(reply, &omitted);
     if (w->publish_result) zcl_app_copy_facts(&facts, &reply->data, al_publish_fact_keys, 4, 4, cap, &omitted);
     if (w->draft_result) zcl_app_copy_facts(&facts, &reply->data, al_draft_fact_keys, 7, 1, cap, &omitted);
     if (w->has_draft && !zcl_app_fact_add(&facts, "historical_draft_keep", &w->draft_receipt, cap)) {

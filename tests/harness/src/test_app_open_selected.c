@@ -206,7 +206,8 @@ static bool abc_license(const char *dir)
 static const char k_main[] =
     "#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include \"boost.h\"\n"
     "int main(int n,char **v){if(n!=2)return 8;"
-    "if(!strcmp(v[1],\"exit\")){sleep(1);return 3;}"
+    "if(!strcmp(v[1],\"exit\")){for(int i=0;i<80;i++)puts(\"INFO: window fixture line of launch output\");fflush(stdout);sleep(1);return 3;}"
+    "if(!strcmp(v[1],\"exit-control\")){for(int i=0;i<100;i++){for(int j=0;j<30;j++)putchar(34);putchar(10);}fflush(stdout);sleep(1);return 3;}"
     "if(!strcmp(v[1],\"ready\")){printf(\"BOOST=%d\\n\",BOOST);puts(\"READY-N\");fflush(stdout);}"
     "for(;;) pause();}\n";
 
@@ -367,8 +368,9 @@ static bool aso_config(struct abc_world *w, const struct aso_build *b)
     int n = snprintf(text, sizeof(text),
         "tiny-ready\t-\t%s\tREADY-N\t-\tready\n"
         "tiny-exit\t-\t%s\tREADY-N\t-\texit\n"
-        "tiny-silent\t-\t%s\tREADY-N\t-\tsilent\n",
-        b->image_path, b->image_path, b->image_path);
+        "tiny-silent\t-\t%s\tREADY-N\t-\tsilent\n"
+        "tiny-control\t-\t%s\tREADY-N\t-\texit-control\n",
+        b->image_path, b->image_path, b->image_path, b->image_path);
     int path_n = snprintf(catalog, sizeof(catalog), "%s/apps.tsv", z23);
     return n > 0 && (size_t)n < sizeof(text) && path_n > 0 &&
         (size_t)path_n < sizeof(catalog) && abc_put(z23, "apps.tsv", text) &&
@@ -564,6 +566,53 @@ static int aso_refusals(const struct abc_world *w, const struct aso_build *b)
     json_free(&doc);
     return failures;
 }
+static bool aso_quoted_state(const struct abc_world *w, char state[APP_LAUNCH_PATH_MAX])
+{
+    int n = snprintf(state, APP_LAUNCH_PATH_MAX, "%s/quoted-state", w->alice_home);
+    bool ok = n > 0 && (size_t)n < APP_LAUNCH_PATH_MAX && mkdir(state, 0700) == 0;
+    char part[81]; memset(part, '"', 80); part[80] = '\0';
+    for (unsigned i = 0; ok && i < 8; ++i) {
+        size_t used = strlen(state);
+        n = snprintf(state + used, APP_LAUNCH_PATH_MAX - used, "/%s", part);
+        ok = n > 0 && (size_t)n < APP_LAUNCH_PATH_MAX - used && mkdir(state, 0700) == 0;
+    }
+    return ok;
+}
+
+static bool aso_long_log_facts(const struct json_value *doc, const struct aso_build *b,
+                               const char *state)
+{
+    char path[APP_LAUNCH_PATH_MAX];
+    const struct json_value *error = json_get(doc, "error"), *facts = json_get(error, "facts");
+    const char *base = aso_string(facts, "log_basename");
+    int n = snprintf(path, sizeof(path), "%s/z23/apps/%s", state, base);
+    struct stat st;
+    return !strcmp(aso_string(error, "code"), "EXITED_EARLY") &&
+        json_get_bool(json_get(facts, "details_unavailable")) &&
+        json_get_bool(json_get(facts, "log_full_path_omitted")) &&
+        strstr(aso_string(facts, "log_location"), "XDG_STATE_HOME/z23/apps") &&
+        !json_get(facts, "log") && !strncmp(base, "selected-", 9) &&
+        json_get_int(json_get(facts, "pid")) > 1 && aso_string(facts, "start_token")[0] &&
+        !strcmp(aso_string(facts, "image_sha3"), b->image) &&
+        json_get_int(json_get(facts, "exit_code")) == 3 && n > 0 &&
+        (size_t)n < sizeof(path) && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static bool aso_long_log_control(const struct abc_world *w, const struct aso_build *b)
+{
+    char state[APP_LAUNCH_PATH_MAX];
+    const char *old = getenv("XDG_STATE_HOME"); char *saved = old ? strdup(old) : NULL;
+    if (old && !saved) return false;
+    bool ok = aso_quoted_state(w, state);
+    struct json_value doc; json_init(&doc);
+    ok = ok && setenv("XDG_STATE_HOME", state, 1) == 0 &&
+        aso_execute(w, b, "tiny-control", true, NULL, NULL, &doc);
+    ok = ok && aso_long_log_facts(&doc, b, state);
+    json_free(&doc);
+    if (saved ? setenv("XDG_STATE_HOME", saved, 1) != 0 : unsetenv("XDG_STATE_HOME") != 0) ok = false;
+    free(saved); return ok;
+}
+
 static int aso_failure_cases(const struct abc_world *w, const struct aso_build *b)
 {
     int failures = 0;
@@ -571,7 +620,21 @@ static int aso_failure_cases(const struct abc_world *w, const struct aso_build *
     TEST("early exit and live timeout serialize exact process and build facts") {
         ASSERT(aso_execute(w, b, "tiny-exit", true, NULL, NULL, &doc));
         ASSERT(aso_facts(&doc, b, "EXITED_EARLY", false));
+        const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+        ASSERT(json_get_bool(json_get(facts, "details_unavailable")) && aso_string(facts, "log")[0]);
+        ASSERT(json_get_int(json_get(facts, "exit_code")) == 3 &&
+               json_get_int(json_get(facts, "signal")) == 0 &&
+               !json_get_bool(json_get(facts, "ready")) && json_get_bool(json_get(facts, "exited")));
         json_free(&doc);
+        ASSERT(aso_execute(w, b, "tiny-control", true, NULL, NULL, &doc));
+        ASSERT(!strcmp(aso_string(json_get(&doc, "error"), "code"), "EXITED_EARLY"));
+        facts = json_get(json_get(&doc, "error"), "facts");
+        ASSERT(json_get_bool(json_get(facts, "details_unavailable")) &&
+               json_get_int(json_get(facts, "exit_code")) == 3 && aso_string(facts, "log")[0] &&
+               json_get_int(json_get(facts, "pid")) > 1 && aso_string(facts, "start_token")[0] &&
+               !strcmp(aso_string(facts, "image_sha3"), b->image));
+        json_free(&doc);
+        ASSERT(aso_long_log_control(w, b));
         ASSERT(aso_execute(w, b, "tiny-silent", true, NULL, NULL, &doc));
         ASSERT(aso_facts(&doc, b, "NOT_READY", true));
         PASS();

@@ -323,7 +323,25 @@ static void as_failure_facts(struct as_open *a)
     char tail[APP_LAUNCH_TAIL_MAX];
     app_proc_log_tail(a->log, tail, sizeof(tail));
     (void)json_push_kv_str(&facts, "log_tail", tail);
-    (void)json_push_kv(&a->reply->data, "failure_facts", &facts);
+    const char *base = strrchr(a->log, '/');
+    if (base && base[1]) (void)json_push_kv_str(&facts, "log_basename", base + 1);
+    static const char *const keys[] = {"pid", "start_token", "mapped_proof", "ready", "exited",
+        "exit_code", "signal", "image_sha3", "log_basename", "log", "version", "package_root", "record_id", "env_root",
+        "dependency_root", "selection_revision", "name", "copy", "datadir", "image_path", "log_tail"};
+    bool omitted = false;
+    size_t cap = zcl_app_failure_facts_cap(a->reply, &omitted);
+    struct json_value bounded; json_init(&bounded); json_set_object(&bounded);
+    if (cap > 200u) {
+        zcl_app_copy_facts(&bounded, &facts, keys, sizeof(keys) / sizeof(keys[0]), 0, cap - 200u, &omitted);
+        if (!json_get(&bounded, "log") && base && base[1]) {
+            (void)json_push_kv_bool(&bounded, "log_full_path_omitted", true);
+            (void)json_push_kv_str(&bounded, "log_location", "Z23 app state directory: XDG_STATE_HOME/z23/apps, or HOME/.local/state/z23/apps");
+            omitted = true;
+        }
+        if (omitted) (void)json_push_kv_bool(&bounded, "details_unavailable", true);
+        (void)json_push_kv(&a->reply->data, "failure_facts", &bounded);
+    }
+    json_free(&bounded);
     json_free(&facts);
 }
 
