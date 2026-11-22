@@ -2599,7 +2599,7 @@ static bool ast_presenter(void *context, const struct zcl_present_model_v1 *mode
 }
 /* Native kept-name personalization; synthetic presenter tests authority and
  * exact saved-source composition, not a physical dialog or executable image. */
-enum apbt_mode { APBT_CANCEL, APBT_HEADLESS, APBT_EARLY, APBT_CANCEL_LATE,
+enum apbt_mode { APBT_CANCEL, APBT_SAME_HEAD, APBT_HEADLESS, APBT_EARLY, APBT_CANCEL_LATE,
     APBT_PAINT_FAIL, APBT_SELECTION, APBT_HEAD, APBT_KEY, APBT_CONFIRM, APBT_EXISTING };
 struct apbt_present {
     struct ac_fixture *f;
@@ -2618,7 +2618,10 @@ static bool apbt_fields(struct apbt_present *p, const struct zcl_present_model_v
     zcl_hex_encode(p->f->kept.version, 32, version); zcl_hex_encode(p->f->tree, 32, source);
     zcl_hex_encode(p->f->head, 32, head);
     snprintf(revision, sizeof(revision), "%llu", (unsigned long long)p->f->kept.revision);
-    return !strcmp(m->title, "Personalize this saved version?") &&
+    const char *summary = memcmp(p->f->kept.version, p->f->head, 32) ?
+        "Starts from the saved version. A newer saved draft exists: My Apps > Change > Review unkept changes." :
+        "Review every page before confirming.";
+    return !strcmp(m->title, "Personalize this saved version?") && !strcmp(m->summary, summary) &&
         ast_field(m, "Kept app: ", "skycombat") && ast_field(m, "Kept revision: ", revision) &&
         ast_field(m, "Copy: ", p->f->world.copy) && ast_field(m, "Datadir: ", p->f->world.alice_datadir) &&
         ast_field(m, "Saved version: ", version) && ast_field(m, "Source: ", source) &&
@@ -2676,7 +2679,8 @@ static bool apbt_presenter(void *context, const struct zcl_present_model_v1 *mod
         zcl_present_model_page_count_v1(model, &count, why, cap) && count > 1;
     if (!p->observed || p->mode == APBT_HEADLESS) return false;
     bool close = false, redraw = false;
-    if (p->mode == APBT_CANCEL) return ast_action(live, 0, &close, &redraw) && close;
+    if (p->mode == APBT_CANCEL || p->mode == APBT_SAME_HEAD)
+        return ast_action(live, 0, &close, &redraw) && close;
     if (!ast_early_guided(live)) return false;
     if (p->mode == APBT_EARLY) return true;
     if (!apbt_visit(live, count, 2)) return false;
@@ -2740,16 +2744,32 @@ static bool apbt_key_preserved(struct apbt_present *p)
     return p->injected && act_hash(p->f->world.alice_home, ".z23/zcode_publisher.key", key) &&
         !memcmp(key, p->key_hash, 32);
 }
+static bool apbt_select_head(struct ac_fixture *f)
+{
+    struct zcl_package_copy copy = {0};
+    struct zcl_command_reply r; zcl_command_reply_init(&r, "zcl.test.same-head.v1");
+    bool ok = zcl_package_copy_open_as(f->world.copy, ZCL_PACKAGE_COPY_READ, &copy, &r, "fixture");
+    if (ok) {
+        memcpy(f->kept.version, copy.head_version, 32);
+        memcpy(f->tree, copy.head_tree, 32);
+        ok = app_selection_save(f->env.state_dir, f->kept.revision, &f->kept, &f->kept) == APP_SELECTION_OK;
+    }
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&r); return ok;
+}
+static bool apbt_setup(struct ac_fixture *f, enum apbt_mode mode)
+{
+    return act_setup(f, false) && (mode != APBT_SAME_HEAD || apbt_select_head(f));
+}
 static bool apbt_one(enum apbt_mode mode)
 {
-    struct ac_fixture f; bool ok = act_setup(&f, false);
+    struct ac_fixture f; bool ok = apbt_setup(&f, mode);
     struct apbt_present p = {.f = &f, .mode = mode};
     struct json_value input; json_init(&input); json_set_object(&input);
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_personalize.v1");
     if (ok && mode == APBT_EXISTING) ok = apt_external_key(&f) &&
         act_hash(f.world.alice_home, ".z23/zcode_publisher.key", p.key_hash);
     ok = ok && act_preserved(&f, true) && json_push_kv_str(&input, "name", "skycombat") &&
-        json_push_kv_int(&input, "expected_revision", 1) && apbt_run(&p, &input, &reply) && p.observed;
+        json_push_kv_int(&input, "expected_revision", (int64_t)f.kept.revision) && apbt_run(&p, &input, &reply) && p.observed;
     if (ok && (mode == APBT_CONFIRM || mode == APBT_EXISTING)) ok = apbt_success(&p, &reply);
     else if (ok) ok = apbt_refusal(&p, &reply) && apbt_key_preserved(&p);
     if (!ok) fprintf(stderr, "personalize view mode=%d observed=%d visited=%d error=%s message=%s\n",
@@ -2793,7 +2813,7 @@ static int apbt_cases(void)
 {
     int failures = 0;
     TEST("kept personalization native consent preserves saved selection and dirty work") {
-        ASSERT(apbt_one(APBT_CANCEL)); ASSERT(apbt_one(APBT_HEADLESS));
+        ASSERT(apbt_one(APBT_CANCEL)); ASSERT(apbt_one(APBT_SAME_HEAD)); ASSERT(apbt_one(APBT_HEADLESS));
         ASSERT(apbt_one(APBT_EARLY)); ASSERT(apbt_one(APBT_CANCEL_LATE));
         ASSERT(apbt_one(APBT_PAINT_FAIL)); ASSERT(apbt_one(APBT_SELECTION));
         ASSERT(apbt_one(APBT_HEAD)); ASSERT(apbt_one(APBT_KEY));
@@ -2816,6 +2836,7 @@ static bool asb_presenter(void *context, const struct zcl_present_model_v1 *mode
     p->called = true;
     char kept[65]; zcl_hex_encode(p->f->kept.version, 32, kept);
     if (strcmp(model->title, "Prepare a personal copy?") ||
+        strcmp(model->summary, "Starts from the saved version. A newer saved draft exists: My Apps > Change > Review unkept changes.") ||
         !ast_field(model, "Saved version: ", kept) ||
         !ast_field(model, "Your choice: ", "Prepare a personal draft for changes or sharing. Review, preview and Keep it; to share, choose Share again. Your current kept app stays available.") ||
         !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;

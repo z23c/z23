@@ -174,7 +174,10 @@ static bool apv_model(struct apv_work *w, bool prepare, char *why, size_t cap)
     (void)snprintf(m->request_id, sizeof(m->request_id), "personalize-%.12s", plan);
     (void)snprintf(m->title, sizeof(m->title), "%s", prepare ?
         "Prepare a personal copy?" : "Personalize this saved version?");
-    (void)snprintf(m->summary, sizeof(m->summary), "Review every page before confirming.");
+    const char *summary = strcmp(w->version, w->head) ?
+        "Starts from the saved version. A newer saved draft exists: My Apps > Change > Review unkept changes." :
+        "Review every page before confirming.";
+    (void)snprintf(m->summary, sizeof(m->summary), "%s", summary);
     m->action_count = 4;
     app_confirm_action(&m->actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Cancel");
     app_confirm_action(&m->actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
