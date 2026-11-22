@@ -44,6 +44,7 @@
 #include "command/native_app_discover.h"
 #include "command/native_app_discover_view.h"
 #include "command/native_app_confirm.h"
+#include "presentation/canvas.h"
 #include "command/app_selection.h"
 #include "config/command_catalog.h"
 #include "config/boot.h"
@@ -4891,6 +4892,13 @@ static int tag_library_cleanup_failure(struct tag_world *w)
     return failures ? failures : tag_library_cleanup_failure_case(w, true);
 }
 struct tag_discover_empty { unsigned calls; bool error, recover; const char *summary; };
+static bool tag_discover_empty_guidance(const struct zcl_present_model_v1 *model)
+{
+    return !strcmp(model->summary, "No verified apps. Link: Back > Discover apps > Open a shared app. File: open .z23share with Z23.") &&
+        zcl_present_canvas_text_width(model->summary, strlen(model->summary), 15u) <= 636u &&
+        model->action_count == 2 && !strcmp(model->actions[0].id, "refresh") &&
+        !strcmp(model->actions[1].id, "back");
+}
 static bool tag_discover_empty_card(void *context, const struct zcl_present_model_v1 *model,
     const char *copy, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -4898,6 +4906,7 @@ static bool tag_discover_empty_card(void *context, const struct zcl_present_mode
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (d->error ? strcmp(model->request_id, "discover-error") : strcmp(model->request_id, "discover-0")) return false;
     if (d->error && (!d->summary || strcmp(model->summary, d->summary))) return false;
+    if (!d->error && !tag_discover_empty_guidance(model)) return false;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
     event->action_index = d->calls++ ? 1 : 0;

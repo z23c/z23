@@ -85,7 +85,7 @@ static void adv_empty_page(struct zcl_present_model_v1 *m, bool previous_page, b
         previous_page && has_more ? "No verified apps on this page. Choose More apps, Previous page or Back." :
         has_more ? "No verified apps on this page. Choose More apps, Refresh or Back." :
         previous_page ? "No verified apps on this page. Choose Previous page, Refresh or Back." :
-        "No verified apps on this page. Refresh or go back.");
+        "No verified apps. Link: Back > Discover apps > Open a shared app. File: open .z23share with Z23.");
     m->action_count = 0;
     if (has_more)
         app_confirm_action(&m->actions[m->action_count++], ZCL_PRESENT_ACTION_SELECT, "next", "More apps");
