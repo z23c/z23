@@ -1493,6 +1493,19 @@ static bool hgt_epoch_mode(const char *repo, bool apply, size_t expected)
         json_get_int(json_get(&out, "profiles_refused")) == 0;
     json_free(&out); return ok;
 }
+static bool hgt_epoch_missing_current(const char *repo, const char *stage, const char *marker, bool candidate)
+{
+    char name[65], current[2048], saved[2056]; memset(name, '5', 64); name[64] = 0;
+    (void)snprintf(current, sizeof(current), "%s/build/%s/epochs/%s", repo, candidate ? "bin/dev" : "dev-obj", name);
+    (void)snprintf(saved, sizeof(saved), "%s.saved", current);
+    if (rename(current, saved) != 0) return false;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool ok = host_gc_epochs(repo, 1, true, &out) &&
+        json_get_int(json_get(&out, "profiles_refused")) == 1 && hgt_exists(stage) && hgt_exists(marker);
+    json_free(&out);
+    if (rename(saved, current) != 0) ok = false;
+    return ok;
+}
 static bool hgt_epoch_recovery(const char *repo)
 {
     char name[65], object[2048], candidate[2048], stage[2048], marker[2048], session[2100];
@@ -1507,7 +1520,8 @@ static bool hgt_epoch_recovery(const char *repo)
     (void)snprintf(session, sizeof(session), "%s/.build-session", stage);
     if (unlink(session) != 0) return false;
     (void)snprintf(session, sizeof(session), "%s/.leases", stage);
-    if (rmdir(session) != 0) return false;
+    if (rmdir(session) != 0 || (!hgt_epoch_missing_current(repo, stage, marker, true) ||
+        !hgt_epoch_missing_current(repo, stage, marker, false))) return false;
     struct json_value out; json_init(&out); json_set_object(&out);
     bool ok = host_gc_epochs(repo, 1, true, &out) &&
         json_get_int(json_get(&out, "pending_recovery")) == 1 &&

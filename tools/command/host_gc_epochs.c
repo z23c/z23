@@ -335,6 +335,18 @@ static void he_run_close(struct he_run *run)
     if (run->lock >= 0) close(run->lock);
     if (run->object >= 0) close(run->object);
 }
+static bool he_current_dirs(const struct he_run *run)
+{
+    int object = he_dir(run->epochs, run->current);
+    if (object < 0) return false;
+    bool ok = close(object) == 0;
+    if (run->candidates >= 0) {
+        int candidate = he_dir(run->candidates, run->current);
+        if (candidate < 0) return false;
+        if (close(candidate) != 0) ok = false;
+    }
+    return ok;
+}
 static bool he_run_open(struct he_run *run, int bins)
 {
     struct stat st; char other[65];
@@ -347,6 +359,7 @@ static bool he_run_open(struct he_run *run, int bins)
             !he_current(run->candidate, other) || strcmp(run->current, other) ||
             (run->candidates = he_dir(run->candidate, "epochs")) < 0) return false;
     }
+    if (!he_current_dirs(run)) return false;
     return he_recover(run->epochs, run->candidates, run->current, run->profile->session,
         run->apply, run->refused, run->pending, run->partial);
 }
