@@ -101,6 +101,43 @@ static bool zrv_receive_input(struct zrv *z, struct json_value *in)
 }
 
 
+static bool zrv_same_identity(const struct zcl_command_reply *verified,
+                              const struct zcl_command_reply *planned)
+{
+    const char *keys[] = {"publisher_fingerprint", "release_id", "package_root"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        const char *a = zcl_app_inner_str(verified, keys[i]);
+        const char *b = zcl_app_inner_str(planned, keys[i]);
+        if (!a || !b || !*a || !*b || strcmp(a, b)) return false;
+    }
+    return true;
+}
+
+static bool zrv_accept_plan(struct zrv *z, const struct zcl_command_reply *inner)
+{
+    const char *plan = zcl_app_inner_str(inner, "plan_id");
+    if (!plan) {
+        zcl_app_inner_fail(z->reply, inner, false);
+        return false;
+    }
+    if (!zrv_same_identity(&z->verify, inner)) {
+        zcl_package_copy_fail(z->reply, "RELEASE_IDENTITY_MISMATCH", false,
+                              "File identity changed; review the signed file again before confirming.", ZRV_COMMAND);
+        return false;
+    }
+    (void)snprintf(z->receive_plan, sizeof(z->receive_plan), "%s", plan);
+    return true;
+}
+#if defined(ZCL_TESTING)
+bool zcl_test_receive_plan_accept(const struct zcl_command_reply *verified,
+                                  const struct zcl_command_reply *planned,
+                                  struct zcl_command_reply *result)
+{
+    struct zrv z = {.reply = result, .verify = *verified};
+    return zrv_accept_plan(&z, planned);
+}
+#endif
+
 /* Verify, name the copy, and run the receive plan. */
 static bool zrv_plan(struct zrv *z)
 {
@@ -121,18 +158,16 @@ static bool zrv_plan(struct zrv *z)
         return false;
     bool ok = zcl_app_inner_call_built("zcode.package.bundle.receive", &in,
                        zrv_receive_input(z, &in), &inner);
-    const char *plan = ok ? zcl_app_inner_str(&inner, "plan_id") : NULL;
-    if (plan)
-        (void)snprintf(z->receive_plan, sizeof(z->receive_plan), "%s", plan);
-    else
-        zcl_app_inner_fail(z->reply, &inner, false);
+    bool accepted = ok ? zrv_accept_plan(z, &inner) : false;
+    if (!ok) zcl_app_inner_fail(z->reply, &inner, false);
     zcl_command_reply_free(&inner);
+    if (!accepted) return false;
     const char *parts[] = {z->file, z->datadir, z->dest, z->receive_plan,
                            zcl_app_inner_str(&z->verify,
                                              "publisher_fingerprint"),
                            zcl_app_inner_str(&z->verify, "package_root")};
     zcl_app_plan_id(ZRV_DOMAIN, parts, 6, z->plan_id);
-    return plan != NULL;
+    return accepted;
 }
 
 static void zrv_describe(struct zrv *z, const char *stage)

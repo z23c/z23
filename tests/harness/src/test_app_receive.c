@@ -5,6 +5,7 @@
 #endif
 #include "test/test_core.h"
 #include "command/native_app_receive_command.h"
+#include "command/native_app_receive_copy.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_library_command.h"
 #include "command/native_app_receive_preview.h"
@@ -2535,9 +2536,39 @@ static int rt_stale_sequence_case(void)
     zcl_command_reply_free(&reply); return failures;
 }
 
+static int rz_plan_identity_case(void)
+{
+    int failures = 0;
+    const char *keys[] = {"publisher_fingerprint", "release_id", "package_root"};
+    TEST("receive plan must match every verified identity field") {
+        for (unsigned scenario = 0; scenario < 10; ++scenario) {
+            struct zcl_command_reply a, b, result;
+            zcl_command_reply_init(&a, "test.verify");
+            zcl_command_reply_init(&b, "test.plan");
+            zcl_command_reply_init(&result, "test.result");
+            ASSERT(json_push_kv_str(&b.data, "plan_id", "plan"));
+            for (unsigned i = 0; i < 3; ++i) {
+                if (scenario != 1 + i) ASSERT(json_push_kv_str(&a.data, keys[i], "same"));
+                if (scenario != 4 + i) ASSERT(json_push_kv_str(&b.data, keys[i], scenario == 7 + i ? "different" : "same"));
+            }
+            bool same = zcl_test_receive_plan_accept(&a, &b, &result);
+            ASSERT(same == (scenario == 0));
+            if (!same) {
+                ASSERT_STR_EQ(result.error.code, "RELEASE_IDENTITY_MISMATCH");
+                ASSERT(!result.error.mutated);
+            }
+            zcl_command_reply_free(&a); zcl_command_reply_free(&b);
+            zcl_command_reply_free(&result);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_app_receive(void)
 {
-    int failures = rt_wrap_cases();
+    int failures = rz_plan_identity_case();
+    failures += rt_wrap_cases();
     failures += rt_stale_sequence_case();
     struct receive_fixture f;
     TEST("app.receive requires all-page native confirmation and rechecks the exact signed file") {
