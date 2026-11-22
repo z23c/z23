@@ -224,15 +224,15 @@ static void ntd_source_next(struct zcl_command_reply *reply, const char *directo
 {
     if (!succeeded || !action || strcmp(action, "offer-status") ||
         kept->generation <= 0 || !kept->current.package_root[0]) return;
-    struct json_value input; json_init(&input); json_set_object(&input);
-    bool ok = json_push_kv_str(&input, "root", kept->current.package_root) &&
-        json_push_kv_str(&input, "datadir", directory);
+    struct json_value next_args; json_init(&next_args); json_set_object(&next_args);
+    bool ok = json_push_kv_str(&next_args, "root", kept->current.package_root) &&
+        json_push_kv_str(&next_args, "datadir", directory);
     char wire[sizeof(reply->next[0].input_json)];
-    size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
+    size_t n = ok ? json_write(&next_args, wire, sizeof(wire)) : 0;
     if (n && n < 384 && n < sizeof(wire) && !strchr(wire, '\''))
         (void)zcl_command_reply_add_next(reply, "zcode.package.checkout", wire,
             "Choose an absent destination to inspect the exact kept source without executing it.");
-    json_free(&input);
+    json_free(&next_args);
 }
 
 static void ntd_stale_recovery(struct zcl_command_reply *reply,

@@ -149,15 +149,15 @@ static void ac_tasks_recovery(struct zcl_command_reply *reply)
         json_push_kv_str(&facts, "data_directory", directory))
         (void)json_push_kv(&reply->data, "failure_facts", &facts);
     json_free(&facts);
-    struct json_value input; json_init(&input); json_set_object(&input);
-    bool ok = json_push_kv_str(&input, "action", "offer-status") &&
-        json_push_kv_str(&input, "datadir", directory);
+    struct json_value next_args; json_init(&next_args); json_set_object(&next_args);
+    bool ok = json_push_kv_str(&next_args, "action", "offer-status") &&
+        json_push_kv_str(&next_args, "datadir", directory);
     char wire[sizeof(reply->next[0].input_json)];
-    size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
+    size_t n = ok ? json_write(&next_args, wire, sizeof(wire)) : 0;
     if (n && n < 384 && n < sizeof(wire) && !strchr(wire, '\''))
         (void)zcl_command_reply_add_next(reply, "app.tasks", wire,
             "Inspect the exact kept Tasks program in this profile.");
-    json_free(&input);
+    json_free(&next_args);
 }
 
 static bool ac_selection_required(struct ac_read *a)
