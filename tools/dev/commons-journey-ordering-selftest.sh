@@ -111,6 +111,11 @@ grep -qF 'intervention=latecomer-restart-toward-survivor-after-requester-exit' <
 grep -qF '[ "$CJ_TWOHOST" = 1 ] || cj_stop_publisher' <<<"$survival" ||
     fail "other topologies lost their publisher-stop operation"
 
+provider_fn="$(awk '/^cj_wait_provider_record\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$JOURNEY")"
+for needle in 'zcode package peers' '[ "$(cj_field data.peer_count "$peers" 0)" = 1 ]' \
+    '[ "$(cj_field data.peers.0.offer_expires_at "$peers" -1)" = 0 ]' '[ "$live" = True ] && [ "$(cj_field ok "$out" False)" = True ]'; do
+    grep -qF "$needle" <<<"$provider_fn" || fail "provider routing lost its live sole-holder assertion: $needle"; done
+
 # A Linux executable cannot run on an arm64 Mac. The physical-host journey
 # must reject that topology before allocating remote scratch or copying bytes.
 setup="$(awk '/^cj_multihost_setup\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$JOURNEY")"

@@ -16,7 +16,9 @@
  *   zcode package peers    the live swarm's view of the peers advertising
  *                          one package root (tier, in-flight, verified
  *                          served/fetched bytes, allowance + offence
- *                          state) plus THIS node's store-side possession:
+ *                          state, offer_expires_at=0 for a live ANNOUNCE
+ *                          or its finite signed-offer Unix expiry) plus
+ *                          THIS node's store-side possession:
  *                          complete, operator-pinned, public-serveable
  *                          (would_serve). Implicit input queries the selected
  *                          resident; explicit input datadir reads offline in
@@ -745,7 +747,8 @@ static bool zw_peers_row_valid(const struct json_value *p)
     const struct json_value *transfer = json_get(p, "transfer");
     return p && p->type == JSON_OBJ && zw_peers_field(p, "peer", JSON_INT) &&
         zw_peers_field(p, "session_key", JSON_STR) && zw_peers_field(p, "tier", JSON_STR) &&
-        zw_peers_field(p, "inflight", JSON_INT) && zw_peers_field(p, "allowance_exhausted", JSON_BOOL) &&
+        zw_peers_field(p, "inflight", JSON_INT) &&
+        zw_peers_field(p, "allowance_exhausted", JSON_BOOL) &&
         zw_peers_field(p, "offence_total", JSON_INT) && transfer && transfer->type == JSON_OBJ &&
         zw_peers_field(transfer, "verified_bytes_served", JSON_INT) &&
         zw_peers_field(transfer, "verified_bytes_fetched", JSON_INT) &&
@@ -907,6 +910,8 @@ static void zw_peers_local(
         (void)json_push_kv_str(&row, "session_key", key_hex);
         (void)json_push_kv_str(&row, "tier", vcs_policy_tier_string(p->tier));
         (void)json_push_kv_int(&row, "inflight", (int64_t)p->inflight);
+        (void)json_push_kv_int(&row, "offer_expires_at",
+                               (int64_t)p->offer_expires_at);
         zw_push_peer_transfer(&row, p);
         (void)json_push_kv_bool(&row, "allowance_exhausted",
                                 p->allowance_exhausted);

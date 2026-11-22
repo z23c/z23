@@ -1900,7 +1900,8 @@ size_t vcs_swarm_engine_peers_for(struct vcs_swarm_engine *engine,
     pthread_mutex_lock(&engine->lock);
     for (size_t i = 0; i < VCS_SWARM_MAX_PEERS && n < out_max; i++) {
         struct swarm_peer *peer = &engine->peers[i];
-        if (!peer->used || !peer_advertises(peer, package_root))
+        int ad = peer->used ? peer_ad_index(peer, package_root) : -1;
+        if (ad < 0)
             continue;
         struct vcs_swarm_peer_info *info = &out[n++];
         memset(info, 0, sizeof(*info));
@@ -1910,6 +1911,7 @@ size_t vcs_swarm_engine_peers_for(struct vcs_swarm_engine *engine,
         info->inflight = peer->inflight;
         info->verified_served = peer->verified_served;
         info->verified_from = peer->verified_from;
+        info->offer_expires_at = peer->ad_expires_at[ad];
         info->allowance_exhausted = peer->allowance_exhausted;
         if (engine->book) {
             struct vcs_service_key_totals totals;

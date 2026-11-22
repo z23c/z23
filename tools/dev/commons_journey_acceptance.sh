@@ -1043,19 +1043,20 @@ cj_pin_root() {
     cj_die "node $node pin commit $root failed: $commit"
 }
 
-# Publishing returns when the author stored and began replicating its signed
-# provider record, not when a different node can already route it. Observe the
-# exact precondition from the consumer before its one bounded fetch lookup.
-# Requiring the expected provider matters after A disappears: an unexpired A
-# record must not stand in for B's independently published survival record.
+# Require one live ANNOUNCE plus the expected provider; finite offers and A's old record do not qualify.
 cj_wait_provider_record() {
     local node="$1" transport="$2" expected_provider="$3"
-    local deadline out count i provider conflicted superseded
-    deadline=$(( $(date +%s) + DHT_WAIT ))
+    local started deadline live peers out count i provider conflicted superseded
+    started="$(date +%s)"; deadline=$((started + DHT_WAIT))
     while [ "$(date +%s)" -lt "$deadline" ]; do
+        peers="$("cj_$node" zcode package peers --input="{\"root\":\"$transport\"}" || true)"
+        live=False; if [ "$(cj_field ok "$peers" False)" = True ] &&
+           [ "$(cj_field data.live "$peers" False)" = True ] &&
+           [ "$(cj_field data.peer_count "$peers" 0)" = 1 ] &&
+           [ "$(cj_field data.peers.0.offer_expires_at "$peers" -1)" = 0 ]; then live=True; fi
         out="$("cj_$node" zcode network records \
             --input="{\"kind\":\"provider\",\"namespace\":\"zclassic23.package\",\"transport_root\":\"$transport\"}" || true)"
-        if [ "$(cj_field ok "$out" False)" = True ]; then
+        if [ "$live" = True ] && [ "$(cj_field ok "$out" False)" = True ]; then
             count="$(cj_field data.count "$out" 0)"
             i=0
             while [ "$i" -lt "$count" ]; do
@@ -1064,6 +1065,7 @@ cj_wait_provider_record() {
                 superseded="$(cj_field "data.records.$i.superseded" "$out" False)"
                 if [ "$provider" = "$expected_provider" ] &&
                    [ "$conflicted" = False ] && [ "$superseded" = False ]; then
+                    cj_note "node $node discovered its sole live ANNOUNCE and provider in $(( $(date +%s) - started ))s"
                     return 0
                 fi
                 i=$((i + 1))
@@ -1071,22 +1073,15 @@ cj_wait_provider_record() {
         fi
         sleep 1
     done
-    cj_die "node $node never discovered provider $expected_provider for $transport: $out"
+    cj_die "node $node never observed one live ANNOUNCE and provider $expected_provider for $transport: $peers; $out"
 }
 
-# Fetch one package over the overlay and reconstruct it locally. Returns only
-# when this node itself reports the exact package tracked and complete.
-# Sets CJ_FETCH_BYTES from the local store's own accounting.
+# Return only when this node reports exact content complete; set CJ_FETCH_BYTES from its store accounting.
 cj_fetch_package() {
     local node="$1" root="$2" transport="$3"
     local out deadline complete=False plan next_resume expected_provider
-    # Admitting the exact carrier root is the whole request. The first call
-    # must be accepted and routed by the live daemon — that is the fact worth
-    # asserting about the network. Everything after it is answered by this
-    # node about itself: `zcode package pin --mode=plan` says whether the
-    # bytes are here and whole. Provider discovery is explicitly retryable,
-    # so re-admitting the same root resumes the same durable download slot;
-    # a refused re-admission is never allowed to stand in for completion.
+    # Admit the root through the live daemon, then use local pin state for completion.
+    # Retrying resumes the same durable slot; a refused retry is not completion.
     case "$node" in
         b) expected_provider="$CJ_NODE_A" ;;
         c) expected_provider="$CJ_NODE_B" ;;

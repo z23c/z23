@@ -671,7 +671,7 @@ static char *zf_peers_rpc_hook(const char *method, const char *params)
     if (strcmp(method, "zcode_package_peers") || !params || !strstr(params, root) || zf_peers_mode == 1) return NULL;
     if (zf_peers_mode == 2) return zcl_strdup("{\"ok\":false,\"code\":\"PEERS_UNAVAILABLE\"}", "test.peers.error");
     if (zf_peers_mode == 3) return zcl_strdup("{", "test.peers.malformed");
-    char *body = zcl_strdup("{\"ok\":true,\"data\":{\"package_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"live\":true,\"peer_count\":1,\"peers_truncated\":false,\"peers\":[{\"peer\":42,\"session_key\":\"key\",\"tier\":\"guest\",\"inflight\":1,\"allowance_exhausted\":false,\"offence_total\":0,\"transfer\":{\"verified_bytes_served\":5,\"verified_bytes_fetched\":7},\"verified_bytes_served\":5,\"verified_bytes_received\":7}],\"possession\":{\"observed\":true,\"tracked\":true,\"complete\":true,\"pinned\":true,\"public_serveable\":true,\"would_serve\":true,\"public_shape\":\"blob\",\"serve_rule\":\"blob\",\"present_bytes\":10,\"total_bytes\":10}}}", "test.zcode_fetch.peers");
+    char *body = zcl_strdup("{\"ok\":true,\"data\":{\"package_root\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"live\":true,\"peer_count\":1,\"peers_truncated\":false,\"peers\":[{\"peer\":42,\"session_key\":\"key\",\"tier\":\"guest\",\"inflight\":1,\"offer_expires_at\":0,\"allowance_exhausted\":false,\"offence_total\":0,\"transfer\":{\"verified_bytes_served\":5,\"verified_bytes_fetched\":7},\"verified_bytes_served\":5,\"verified_bytes_received\":7}],\"possession\":{\"observed\":true,\"tracked\":true,\"complete\":true,\"pinned\":true,\"public_serveable\":true,\"would_serve\":true,\"public_shape\":\"blob\",\"serve_rule\":\"blob\",\"present_bytes\":10,\"total_bytes\":10}}}", "test.zcode_fetch.peers");
     if (body && zf_peers_mode == 4) *strstr(body, root) = 'b';
     if (body && zf_peers_mode == 5) *strstr(body, "inflight") = 'x';
     return body;
@@ -715,6 +715,7 @@ static int zf_t_peers_resident(void)
         ASSERT(c.reply.exit_code == ZCL_COMMAND_EXIT_OK);
         ASSERT(json_get_bool(json_get(&c.reply.data, "live")));
         ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data, "peers"), 0), "peer")), 42);
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data, "peers"), 0), "offer_expires_at")), 0);
         ASSERT(json_get_bool(json_get(zf_possession(&c), "would_serve")));
         zf_cmd_free(&c);
         PASS();

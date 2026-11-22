@@ -459,6 +459,7 @@ struct vcs_swarm_peer_info {
     uint32_t inflight;
     uint64_t verified_served;  /* bytes we verifiably served this peer */
     uint64_t verified_from;    /* verified bytes this peer served us */
+    uint64_t offer_expires_at; /* 0: live ANNOUNCE; else signed-offer Unix expiry */
     bool allowance_exhausted;  /* download-allowance-exhausted this week */
     uint32_t offence_total;    /* book offence tally for the key */
 };

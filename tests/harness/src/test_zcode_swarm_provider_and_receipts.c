@@ -1263,6 +1263,10 @@ int t_swarm_peer_offer(void)
     SW_CHECK("idempotent offer",
              vcs_swarm_engine_peer_offer(n.engine, pid, p.root,
                                          evidence_expiry, 4));
+    struct vcs_swarm_peer_info infos[1];
+    SW_CHECK("signed offer observation reports its finite expiry",
+             vcs_swarm_engine_peers_for(n.engine, p.root, infos, 1) == 1 &&
+             infos[0].offer_expires_at == evidence_expiry);
 
     /* The signed window is scheduler authority, not descriptive metadata.
      * At expiry the peer stops advertising and the unfinished download
@@ -1276,6 +1280,26 @@ int t_swarm_peer_offer(void)
                                           evidence_expiry, evidence_expiry));
     SW_CHECK("renewed evidence accepted",
              vcs_swarm_engine_peer_offer(n.engine, pid, p.root, 100, 51));
+    struct vcs_package_swarm_message live;
+    memset(&live, 0, sizeof live);
+    live.type = VCS_PACKAGE_SWARM_ANNOUNCE;
+    memcpy(live.body.announce.package_root, p.root, 32);
+    live.body.announce.manifest_bytes = (uint32_t)p.wire_len;
+    live.body.announce.file_count = (uint32_t)p.count;
+    live.body.announce.total_bytes = p.wire_len;
+    live.body.announce.total_chunks = (uint32_t)p.count;
+    uint8_t wire[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t wire_len = 0;
+    struct vcs_swarm_frame_result live_result;
+    memset(&live_result, 0, sizeof live_result);
+    SW_CHECK("live announce observation has no finite offer expiry",
+             vcs_package_swarm_serialize(&live, wire, sizeof wire, &wire_len) &&
+             (live_result = vcs_swarm_engine_handle_frame(
+                 n.engine, pid, wire, wire_len, SW_DAY, 52)).penalty ==
+                 VCS_SWARM_PENALTY_NONE &&
+             vcs_swarm_engine_peers_for(n.engine, p.root, infos, 1) == 1 &&
+             infos[0].offer_expires_at == 0);
+    free(live_result.reply);
 
     /* Distinct roots fill the remaining slots exactly; the next one is
      * refused by name instead of writing past ads[]. */
