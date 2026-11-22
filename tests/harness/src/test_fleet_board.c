@@ -2583,6 +2583,48 @@ static int test_fleet_board_rpc_incomplete_list(void)
     return failures;
 }
 
+static int test_fleet_board_rpc_show_read_failure(void)
+{
+    int failures = 0;
+    TEST("fleet board: RPC show distinguishes absent from unreadable") {
+        struct fb_rpc_fixture f;
+        struct json_value input, out;
+        ASSERT(fb_rpc_fixture_open(&f, "rpc-show-read-failure"));
+        json_init(&out);
+        ASSERT(fb_rpc_post(&f, "note", "readable post", "show-test", NULL, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        char id[65];
+        (void)snprintf(id, sizeof(id), "%s", json_get_str(json_get(&out, "id")));
+        json_free(&out);
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "op", "show"));
+        ASSERT(json_push_kv_str(&input, "id", id));
+        json_init(&out);
+        ASSERT(fb_rpc_call(&f, &input, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        json_free(&out);
+        ASSERT_EQ(sqlite3_set_authorizer(f.db.db, fb_deny_read, NULL), SQLITE_OK);
+        json_init(&out);
+        bool called = fb_rpc_call(&f, &input, &out);
+        int restored = sqlite3_set_authorizer(f.db.db, NULL, NULL);
+        ASSERT_EQ(restored, SQLITE_OK);
+        ASSERT(called && !json_get_bool(json_get(&out, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BOARD_READ_FAILED");
+        ASSERT(json_get(&out, "text") == NULL);
+        json_free(&out); json_free(&input);
+        json_init(&input); json_set_object(&input); json_init(&out);
+        ASSERT(json_push_kv_str(&input, "op", "show"));
+        ASSERT(json_push_kv_str(&input, "id", "0000000000000000000000000000000000000000000000000000000000000000"));
+        ASSERT(fb_rpc_call(&f, &input, &out));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "NOT_FOUND");
+        json_free(&out); json_free(&input);
+        fb_rpc_fixture_close(&f);
+        ASSERT(test_rm_rf_recursive(f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fb_page_interrupt(void *unused)
 {
     *(bool *)unused = true;
@@ -16515,6 +16557,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_concurrency();
     failures += test_fleet_board_rpc_scope_default();
     failures += test_fleet_board_rpc_incomplete_list();
+    failures += test_fleet_board_rpc_show_read_failure();
     failures += test_fleet_board_keyset_pages();
     failures += test_fleet_board_page_work();
     failures += test_fleet_board_rpc_room_boundary();

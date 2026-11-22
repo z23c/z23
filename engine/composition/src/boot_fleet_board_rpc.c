@@ -475,7 +475,12 @@ static void fb_op_show(struct node_db *ndb, const struct json_value *in,
         return;
     }
     struct db_fleet_board_post row;
-    if (!db_fleet_board_post_find(ndb, id, &row)) {
+    enum fleet_board_lookup_status lookup = db_fleet_board_post_lookup_checked(ndb, id, &row);
+    if (lookup == FLEET_BOARD_LOOKUP_ERROR) {
+        fb_error(result, "BOARD_READ_FAILED", "the local board post could not be read; inspect node storage logs");
+        return;
+    }
+    if (lookup == FLEET_BOARD_LOOKUP_ABSENT) {
         fb_error(result, "NOT_FOUND", "no post with that id is held here");
         return;
     }
