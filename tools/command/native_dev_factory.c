@@ -5,7 +5,7 @@
  * sources, each overridable by an environment variable for tests:
  *
  *   jobs      ZCL_DEV_FACTORY_JOBS      devbuild job ledger (JSONL)
- *   land      ZCL_DEV_FACTORY_LAND_DIR  directory holding outcomes.jsonl
+ *   land      ZCL_DEV_FACTORY_LAND_DIR  outcomes.jsonl and retained land logs
  *   attempts  ZCL_DEV_FACTORY_ATTEMPTS  proof attempt directories
  *   proc      ZCL_DEV_FACTORY_PROC      stands in for /proc (pressure/ files)
  *   verdicts  ZCL_DEV_FACTORY_VERDICTS  durable scheduler suite observations
@@ -35,6 +35,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "command/native_command.h"
+#include "command/native_fleet_objectives.h"
 #include "dev/dev_proof.h"
 
 #include "base/safe_alloc.h"
@@ -64,7 +65,7 @@
 #define FAC_MAX_DETAILS 1024u
 #define FAC_MAX_ATTEMPTS 20000u
 #define FAC_MAX_GROUPS 64u
-#define FAC_DETAIL_BYTES 60u
+#define FAC_DETAIL_BYTES 255u
 #define FAC_TOP 8u
 #define FAC_LANES 3
 #define FAC_PATH 4096u
@@ -1448,8 +1449,12 @@ static bool fac_outcome_line(const char *line, size_t len, void *ctx,
     if ((double)ts >= o->window_start) {
         idx = fac_state_index(fac_text(&row, "state"));
         o->counts[idx]++;
-        if (idx != 0)
-            fac_note_detail(o, fac_text(&row, "detail"));
+        if (idx != 0) {
+            char capability[256];
+            fac_note_detail(o, zcl_objectives_capability_failure_key(
+                                   &row, capability, sizeof(capability))
+                               ? capability : fac_text(&row, "detail"));
+        }
     }
     json_free(&row);
     return true;

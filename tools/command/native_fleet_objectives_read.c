@@ -1217,8 +1217,8 @@ static bool obj_repeat_capability_line(char *line, char *out, size_t cap,
     return true;
 }
 
-static bool obj_repeat_capability_key(const struct json_value *row, char *out,
-                                      size_t cap)
+bool zcl_objectives_capability_failure_key(const struct json_value *row,
+                                            char *out, size_t cap)
 {
     const char *detail = json_get_str(json_get(row, "detail"));
     const char *path = json_get_str(json_get(row, "log_path"));
@@ -1266,7 +1266,7 @@ static void obj_repeat_key(const struct json_value *row, char *out, size_t cap)
         return;
     }
     if (strcmp(dim, "lint") == 0) {
-        if (obj_repeat_capability_key(row, out, cap))
+        if (zcl_objectives_capability_failure_key(row, out, cap))
             return;
         obj_repeat_lint_key(detail, out, cap);
         return;

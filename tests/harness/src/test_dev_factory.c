@@ -464,6 +464,65 @@ _test_next:;
     return failures;
 }
 
+static int dfx_case_capability_details(const char *base, const char *jobs,
+                                       const char *land, const char *att,
+                                       const char *proc, long now)
+{
+    int failures = 0;
+    struct dfx_call c;
+    TEST("factory: capability outcomes group by the retained source reach") {
+        char dir[700], one[800], two[800], missing[800], outcomes[800];
+        char timestamp[40], all[8192];
+        const char *detail =
+            "FAIL check-capability-closure: z23-lint: cannot open raw_user.c";
+        (void)snprintf(dir, sizeof(dir), "%s/land-capability", base);
+        (void)snprintf(one, sizeof(one), "%s/one.log", dir);
+        (void)snprintf(two, sizeof(two), "%s/two.log", dir);
+        (void)snprintf(missing, sizeof(missing), "%s/missing.log", dir);
+        (void)snprintf(outcomes, sizeof(outcomes), "%s/outcomes.jsonl", dir);
+        dfx_mkdirs(dir);
+        dfx_write(one,
+            "z23-lint: cannot open raw_user.c: Permission denied\n"
+            "== selftest: PASS ==\n"
+            "check_capability_closure: VIOLATION - undeclared reach: tools/command/native_fleet_objectives_read.c uses CAP_FS_READ\n");
+        dfx_write(two,
+            "z23-lint: cannot open raw_user.c: Permission denied\n"
+            "== selftest: PASS ==\n"
+            "check_capability_closure: VIOLATION - undeclared reach: tools/command/native_fleet_objectives_read.c uses CAP_FS_WRITE\n");
+        dfx_iso(now - DFX_HOUR, timestamp, sizeof(timestamp));
+        int n = snprintf(all, sizeof(all),
+            "{\"ts\":\"%s\",\"state\":\"failed\",\"seq\":1,\"dimension\":\"lint\",\"detail\":\"%s\",\"log_path\":\"%s\"}\n"
+            "{\"ts\":\"%s\",\"state\":\"failed\",\"seq\":2,\"dimension\":\"lint\",\"detail\":\"%s\",\"log_path\":\"%s\"}\n"
+            "{\"ts\":\"%s\",\"state\":\"failed\",\"seq\":3,\"dimension\":\"lint\",\"detail\":\"%s\",\"log_path\":\"%s\"}\n"
+            "{\"ts\":\"%s\",\"state\":\"failed\",\"seq\":4,\"dimension\":\"lint\",\"detail\":\"check-capability-closure evidence unavailable\",\"log_path\":\"%s\"}\n",
+            timestamp, detail, one, timestamp, detail, two, timestamp, detail, one,
+            timestamp, missing);
+        ASSERT(n > 0 && (size_t)n < sizeof(all));
+        dfx_write(outcomes, all);
+        (void)setenv("ZCL_DEV_FACTORY_LAND_DIR", dir, 1);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c));
+        ASSERT_EQ((int)dfx_num(&c, "land_outcomes.counts.failed"), 4);
+        const struct json_value *top = dfx_at(&c, "land_outcomes.top_non_landed");
+        ASSERT(top && top->type == JSON_ARR);
+        ASSERT_EQ((int)json_size(top), 3);
+        const char *details[] = {"capability:tools/command/native_fleet_objectives_read.c:CAP_FS_READ",
+                                 "capability:tools/command/native_fleet_objectives_read.c:CAP_FS_WRITE",
+                                 "check-capability-closure evidence unavailable"};
+        const int64_t counts[] = {2, 1, 1};
+        for (size_t i = 0; i < 3; i++) {
+            const struct json_value *row = json_at(top, i);
+            ASSERT_STR_EQ(json_get_str(json_get(row, "detail")), details[i]);
+            ASSERT_EQ(json_get_int(json_get(row, "n")), counts[i]);
+        }
+        dfx_end(&c);
+        dfx_env(jobs, land, att, proc);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_factory(void);
 int test_dev_factory(void)
 {
@@ -893,6 +952,8 @@ int test_dev_factory(void)
         dfx_env(jobs, land, att, proc);
         PASS();
     }
+
+    failures += dfx_case_capability_details(base, jobs, land, att, proc, now);
 
 _test_next:;
     dfx_unenv();

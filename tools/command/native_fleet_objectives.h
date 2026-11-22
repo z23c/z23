@@ -132,6 +132,11 @@ struct zcl_objectives_options {
 struct zcl_objective_value zcl_objectives_measure(
     const struct zcl_objectives_options *options, const char *id);
 
+/* Recover a capability failure's source reach from its retained land log.
+ * False preserves the caller's fallback when the evidence is unavailable. */
+bool zcl_objectives_capability_failure_key(const struct json_value *row,
+                                            char *out, size_t cap);
+
 /* Counts repo-relative `rel` as origin/main has it (its blob, through the
  * no-shell spawn seam), via `count`. A file that origin/main does not hold is
  * unmeasured, never a fallback; only an unresolvable origin/main reads the
