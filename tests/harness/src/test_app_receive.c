@@ -12,6 +12,7 @@
 #include "command/native_app_receive_job.h"
 #include "command/native_app_host_browser.h"
 #include "command/native_app_compose.h"
+#include "command/app_copy_build.h"
 #include "command/native_app_offer.h"
 #include "controllers/rpc_client.h"
 #include "command/app_selection.h"
@@ -2150,7 +2151,7 @@ static bool rt_setup_form(struct receive_fixture *f, bool makefile, bool program
     memset(f, 0, sizeof(*f));
     if (!test_mkdtemp(f->world.root, sizeof(f->world.root), "app_receive")) return false;
     (void)snprintf(f->world.src, sizeof(f->world.src), "%s/source", f->world.root);
-    (void)snprintf(f->datadir, sizeof(f->datadir), "%s/bob-data", f->world.root);
+    (void)snprintf(f->datadir, sizeof(f->datadir), "%s/bob data'quote", f->world.root);
     (void)snprintf(f->destination, sizeof(f->destination), "%s/bob-copy", f->world.root);
     (void)snprintf(f->file, sizeof(f->file), "%s/first.z23share", f->world.root);
     (void)snprintf(f->alternate, sizeof(f->alternate), "%s/second.z23share", f->world.root);
@@ -2317,6 +2318,39 @@ static bool rz_open_build_offer(const struct json_value *build,
         !strcmp(program, "bin/tinyprog") && !strcmp(offer, "bin/tinyprog") &&
         strlen(root) == 64 && !strcmp(root, f->package);
 }
+static bool rz_hint_fields(const struct json_value *input, const struct receive_fixture *f,
+                           const char *receipt, const char *program, const char *digest)
+{
+    const char *dir = json_get_str(json_get(input, "datadir"));
+    const char *root = json_get_str(json_get(input, "package_root"));
+    const char *r = json_get_str(json_get(input, "receipt_id"));
+    const char *prog = json_get_str(json_get(input, "program"));
+    const char *hash = json_get_str(json_get(input, "artifact_sha3"));
+    const char *text = json_get_str(json_get(input, "input_text"));
+    return dir && !strcmp(dir, f->datadir) && root && !strcmp(root, f->package) &&
+        r && !strcmp(r, receipt) && prog && !strcmp(prog, program) && hash &&
+        !strcmp(hash, digest) && text && !strcmp(text, "list") &&
+        json_get_bool(json_get(input, "accept_execution"));
+}
+
+static bool rz_hint_identity(const char *next, const struct receive_fixture *f,
+                             const char *receipt, const char *program, const char *digest)
+{
+    const char *p = strstr(next, " --input\\=");
+    if (!p) return false;
+    p += strlen(" --input\\=");
+    char wire[2 * APP_COPY_BUILD_PATH + 1024]; size_t n = 0;
+    while (*p && *p != 32 && n + 1 < sizeof(wire)) {
+        if (*p == 92 && !*++p) return false;
+        wire[n++] = *p++;
+    }
+    wire[n] = 0;
+    struct json_value input = {0};
+    bool ok = json_read(&input, wire, n);
+    if (ok) ok = rz_hint_fields(&input, f, receipt, program, digest);
+    json_free(&input); return ok;
+}
+
 static bool rz_open_preview_offer(const struct zcl_command_reply *reply,
                                   const struct receive_fixture *f,
                                   const char *digest)
@@ -2330,7 +2364,7 @@ static bool rz_open_preview_offer(const struct zcl_command_reply *reply,
         program && !strcmp(program, "bin/tinyprog") &&
         artifact && !strcmp(artifact, digest) && next &&
         strstr(next, "app invoke package") && strstr(next, f->package) &&
-        strstr(next, "--accept_execution=true");
+        rz_hint_identity(next, f, receipt, program, digest);
 }
 
 static bool rz_open_offer(const struct zcl_command_reply *reply,

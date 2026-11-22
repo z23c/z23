@@ -1691,7 +1691,7 @@ static int afd_recipe_open(const struct afd_world *w)
         ASSERT(strstr(run.text, "next:") != NULL);
         ASSERT(strstr(run.text, "app invoke package") != NULL);
         ASSERT(strstr(run.text, "bin/tinyprog") != NULL);
-        ASSERT(strstr(run.text, "--accept_execution=true") != NULL);
+        ASSERT(strstr(run.text, "accept_execution\\\":true") != NULL);
         ASSERT(afd_recipe_edited(w, home, datadir));
         PASS();
     } _test_next:;

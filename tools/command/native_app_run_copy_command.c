@@ -309,13 +309,22 @@ static bool zrc_invoke_next(struct zrc *z, char *out, size_t cap)
     char root[65], receipt[65];
     zcl_hex_encode(z->package_root, 32, root);
     zcl_hex_encode(z->installed.receipt_id, 32, receipt);
-    return zcl_app_hint(out, cap, z->datadir,
-        "invoke package --package_root=%s --receipt_id=%s "
-        "--artifact_sha3=%s --program=%s --input_text=list "
-        "--accept_execution=true",
-        root, receipt, z->installed.accepted.image_sha3_hex,
-        z->installed.output);
+    struct json_value invoke_args; json_init(&invoke_args); json_set_object(&invoke_args);
+    bool ok = json_push_kv_str(&invoke_args, "datadir", z->datadir) &&
+        json_push_kv_str(&invoke_args, "package_root", root) &&
+        json_push_kv_str(&invoke_args, "receipt_id", receipt) &&
+        json_push_kv_str(&invoke_args, "artifact_sha3", z->installed.accepted.image_sha3_hex) &&
+        json_push_kv_str(&invoke_args, "program", z->installed.output) &&
+        json_push_kv_str(&invoke_args, "input_text", "list") &&
+        json_push_kv_bool(&invoke_args, "accept_execution", true);
+    char arg[2 * APP_COPY_BUILD_PATH + 1024] = "--input=";
+    size_t n = ok ? json_write(&invoke_args, arg + 8, sizeof(arg) - 8) : 0;
+    ok = n && n < sizeof(arg) - 8 &&
+        zcl_app_hint(out, cap, z->datadir, "invoke package %s", arg);
+    json_free(&invoke_args);
+    return ok;
 }
+
 
 /* The recipe form's open: success is the preview offer, never a live
  * process. Nothing is spawned, so no exit can be observed here. The
@@ -323,7 +332,7 @@ static bool zrc_invoke_next(struct zrc *z, char *out, size_t cap)
 static void zrc_recipe_open(struct zrc *z)
 {
     struct json_value *d = &z->reply->data;
-    char next[2 * APP_COPY_BUILD_PATH + 192];
+    char next[6 * APP_COPY_BUILD_PATH + 2048];
     zrc_describe(z, "commit");
     bool ok = zrc_invoke_next(z, next, sizeof(next)) &&
         zrc_offer_render(z, d) &&
