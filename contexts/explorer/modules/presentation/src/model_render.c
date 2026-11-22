@@ -53,7 +53,6 @@ static void text_fit(struct zcl_present_canvas *canvas, int32_t x, int32_t y,
     while (length > 0 && zcl_present_canvas_text_width(
                text, length, height) > max_width)
         length--;
-    zcl_present_canvas_text(canvas, x, y, text, length, height, color);
     if (text[length]) {
         const char dots[] = "...";
         uint32_t used = zcl_present_canvas_text_width(text, length, height);
@@ -62,9 +61,10 @@ static void text_fit(struct zcl_present_canvas *canvas, int32_t x, int32_t y,
             length--;
             used = zcl_present_canvas_text_width(text, length, height);
         }
+        zcl_present_canvas_text(canvas, x, y, text, length, height, color);
         zcl_present_canvas_text(canvas, x + (int32_t)used, y,
                                 dots, 3u, height, color);
-    }
+    } else zcl_present_canvas_text(canvas, x, y, text, length, height, color);
 }
 
 static int32_t render_progress(struct zcl_present_canvas *canvas,

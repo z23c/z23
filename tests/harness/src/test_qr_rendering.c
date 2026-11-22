@@ -630,6 +630,28 @@ void qr_case_qr_text_export_and_backend(void)
                     "org.zclassic.ZClassic23") == 0);
 }
 
+static void qr_check_long_title(const struct zcl_present_model_v1 *model)
+{
+    struct zcl_present_model_v1 long_title = *model, expected = *model;
+    struct zcl_present_model_bitmap_v1 actual = {0}, reference = {0};
+    char why[128];
+    memcpy(long_title.title, "App: ", 5);
+    memset(long_title.title + 5, 'w', 63);
+    long_title.title[68] = '\0';
+    size_t n = strlen(long_title.title);
+    uint32_t dots = zcl_present_canvas_text_width("...", 3, 30u);
+    while (n && zcl_present_canvas_text_width(long_title.title, n, 30u) + dots > 636u) --n;
+    memcpy(expected.title, long_title.title, n);
+    memcpy(expected.title + n, "...", 4);
+    bool a = zcl_present_model_render_v1(&long_title, &actual, why, sizeof(why));
+    bool b = zcl_present_model_render_v1(&expected, &reference, why, sizeof(why));
+    QR_CHECK("long title renders only the fitted prefix and ellipsis",
+             n < strlen(long_title.title) && a && b &&
+             memcmp(actual.pixels, reference.pixels, ZCL_PRESENT_MODEL_BITMAP_BYTES) == 0);
+    zcl_present_model_bitmap_free_v1(&actual);
+    zcl_present_model_bitmap_free_v1(&reference);
+}
+
 void qr_case_progress_model(void)
 {
     char why[128];
@@ -661,6 +683,7 @@ void qr_case_progress_model(void)
                    sizeof(visual.actions[0].label), "Close");
     QR_CHECK("renderer-neutral progress model validates",
              zcl_present_model_validate_v1(&visual, why, sizeof(why)));
+    qr_check_long_title(&visual);
     char visual_text[ZCL_PRESENT_MODEL_TEXT_MAX];
     char visual_text_again[ZCL_PRESENT_MODEL_TEXT_MAX];
     size_t visual_text_len = 0, visual_text_len_again = 0;
