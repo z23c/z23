@@ -353,7 +353,8 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 enum boot_fleet_board_observation_phase {
     FLEET_BOARD_OBS_OPEN_ATTEMPT, FLEET_BOARD_OBS_OPEN_FAILURE,
     FLEET_BOARD_OBS_CLOSE, FLEET_BOARD_OBS_INGEST, FLEET_BOARD_OBS_GATE,
-    FLEET_BOARD_OBS_ANSWER_REFUSED, FLEET_BOARD_OBS_ANSWER_DEFERRED
+    FLEET_BOARD_OBS_ANSWER_REFUSED, FLEET_BOARD_OBS_ANSWER_DEFERRED,
+    FLEET_BOARD_OBS_CURSOR_RESET
 };
 enum boot_fleet_board_gate_reason {
     FLEET_BOARD_GATE_PAIRING, FLEET_BOARD_GATE_DELEGATION_UNRESOLVED,
@@ -361,6 +362,9 @@ enum boot_fleet_board_gate_reason {
 };
 enum boot_fleet_board_answer_deferred_reason {
     FLEET_BOARD_ANSWER_INBOX_FULL, FLEET_BOARD_ANSWER_ALLOCATION_FAILED
+};
+enum boot_fleet_board_cursor_reset_reason {
+    FLEET_BOARD_CURSOR_EPOCH_CHANGED, FLEET_BOARD_CURSOR_EPOCH_UNOBSERVED
 };
 struct boot_fleet_board_observation {
     bool found;

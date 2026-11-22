@@ -10392,25 +10392,34 @@ static bool fbw_status_observations(struct fbw *w, const uint8_t post[32])
     return ok;
 }
 
-/* Query one real observation by its exact peer and post, without listing. */
-static bool fbw_status_action(struct fbw *w, const uint8_t peer[32],
-                              const uint8_t post[32], const char *field,
-                              const char *phase, const char *action)
+/* Query one exact peer and post, restoring the fixture runtime before return. */
+static bool fbw_status_exact(struct fbw *w, const uint8_t peer[32],
+                             const uint8_t post[32], struct json_value *result)
 {
     struct db_service service = {.node_db = &w->b, .started = true};
     struct app_runtime_context runtime = {.db_service = &service};
     struct rpc_table table;
-    struct json_value result;
     char warmup[256], peer_hex[65], post_hex[65];
     bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
     rpc_table_init(&table);
     boot_fleet_board_register_rpc(&table);
-    json_init(&result);
     set_rpc_warmup_finished();
     app_runtime_set_current(&runtime);
     fleet_board_id_to_hex(peer, peer_hex);
     fleet_board_id_to_hex(post, post_hex);
-    bool ok = fbw_status_call(&table, peer_hex, post_hex, &result);
+    bool ok = fbw_status_call(&table, peer_hex, post_hex, result);
+    app_runtime_set_current(&w->runtime);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    return ok;
+}
+
+static bool fbw_status_action(struct fbw *w, const uint8_t peer[32],
+                              const uint8_t post[32], const char *field,
+                              const char *phase, const char *action)
+{
+    struct json_value result;
+    json_init(&result);
+    bool ok = fbw_status_exact(w, peer, post, &result);
     const struct json_value *observation = json_get(&result, field);
     const char *got_phase = json_get_str(json_get(observation, "phase"));
     const char *got_action = json_get_str(json_get(observation, "next_action"));
@@ -10418,8 +10427,6 @@ static bool fbw_status_action(struct fbw *w, const uint8_t peer[32],
          got_phase && strcmp(got_phase, phase) == 0 && got_action &&
          strcmp(got_action, action) == 0;
     json_free(&result);
-    app_runtime_set_current(&w->runtime);
-    if (was_warming) set_rpc_warmup_started(warmup);
     return ok;
 }
 
@@ -10577,20 +10584,9 @@ static bool fbw_pressure_pull(struct fbw *w, const struct fleet_board_post *firs
 static bool fbw_pressure_status(struct fbw *w, const uint8_t post[32],
                                 const char *reason, const char *action)
 {
-    struct db_service service = {.node_db = &w->b, .started = true};
-    struct app_runtime_context runtime = {.db_service = &service};
-    struct rpc_table table;
     struct json_value result;
-    char warmup[256], peer_hex[65], post_hex[65];
-    bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
-    rpc_table_init(&table);
-    boot_fleet_board_register_rpc(&table);
     json_init(&result);
-    set_rpc_warmup_finished();
-    app_runtime_set_current(&runtime);
-    fleet_board_id_to_hex(w->box_a, peer_hex);
-    fleet_board_id_to_hex(post, post_hex);
-    bool ok = fbw_status_call(&table, peer_hex, post_hex, &result);
+    bool ok = fbw_status_exact(w, w->box_a, post, &result);
     const struct json_value *attempt = json_get(&result, "peer_attempt");
     const struct json_value *ingest = json_get(&result, "post_ingest");
     const char *phase = json_get_str(json_get(attempt, "phase"));
@@ -10601,8 +10597,6 @@ static bool fbw_pressure_status(struct fbw *w, const uint8_t post[32],
          next && strcmp(next, action) == 0 && !json_get(attempt, "epoch") &&
          !json_get_bool(json_get(ingest, "observed"));
     json_free(&result);
-    app_runtime_set_current(&w->runtime);
-    if (was_warming) set_rpc_warmup_started(warmup);
     return ok;
 }
 
@@ -10703,6 +10697,63 @@ static int test_fleet_board_tick_retains_answer(void)
 }
 
 #define FBW_BATCH 16
+
+/* Capture the validated answer actually delivered to the pull, including
+ * its epoch, before the real decoder and drain process it. */
+static bool fbw_restart_answer(struct fbw *w, struct board_answer_head *head,
+                               int64_t *asked)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX], kind = 0;
+    bool more = false;
+    mesh_loop_discard(w->asker, w->ask_q, w->f.res_term);
+    mesh_loop_discard(w->answerer, w->answer_q, w->f.term_peer.ini);
+    mesh_stream_test_reset();
+    if (!boot_fleet_board_fleet_test_pull(w->f.resp_noise_pub, w->box_a))
+        return false;
+    *asked = boot_fleet_board_fleet_test_last_after();
+    if (*asked <= 0 || mesh_loop_pump(w->asker, w->ask_q, w->f.res_term,
+                                      &w->mp, w->answerer) != 1)
+        return false;
+    boot_fleet_board_fleet_test_serve();
+    boot_fleet_board_fleet_test_serve();
+    size_t len = mesh_loop_take(w->answerer, w->answer_q, w->f.term_peer.ini,
+                                frame, sizeof frame, &more);
+    const size_t start = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u + 2u;
+    if (!more || !mesh_stream_test_read_header(frame, len, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_DATA || len <= start ||
+        !board_answer_head_decode(frame + start, len - start, head) ||
+        !board_answer_valid(frame + start, len - start, head, *asked, false) ||
+        !mesh_stream_frame(&w->mp, w->asker, frame, len, NULL) ||
+        mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini,
+                       &w->mp, w->asker) != 1)
+        return false;
+    return boot_fleet_board_fleet_test_drain_into(&w->b) == 0;
+}
+
+static bool fbw_reset_status(struct fbw *w, const uint8_t post[32],
+                             const struct board_answer_head *head, int64_t asked)
+{
+    struct json_value result;
+    char epoch_hex[33];
+    json_init(&result);
+    zcl_hex_encode(head->epoch, sizeof head->epoch, epoch_hex);
+    bool ok = fbw_status_exact(w, w->box_a, post, &result);
+    const struct json_value *attempt = json_get(&result, "peer_attempt");
+    const struct json_value *ingest = json_get(&result, "post_ingest");
+    const char *phase = json_get_str(json_get(attempt, "phase"));
+    const char *reason = json_get_str(json_get(attempt, "reason"));
+    const char *action = json_get_str(json_get(attempt, "next_action"));
+    const char *epoch = json_get_str(json_get(attempt, "epoch"));
+    const struct json_value *after = json_get(attempt, "after");
+    ok = ok && json_get_bool(json_get(attempt, "observed")) && phase &&
+         strcmp(phase, "cursor_reset") == 0 && reason &&
+         strcmp(reason, "epoch_changed") == 0 && action &&
+         strcmp(action, "await_next_pull") == 0 && epoch &&
+         strcmp(epoch, epoch_hex) == 0 && after && after->type == JSON_INT &&
+         json_get_int(after) == asked && !json_get_bool(json_get(ingest, "observed"));
+    json_free(&result);
+    return ok;
+}
 
 /* The cursor must never pass over a row: same-second arrivals, a refusal
  * that clears later, a reclaim between pulls, and a restart. */
@@ -10834,10 +10885,15 @@ static int test_fleet_board_fleet_carriage_gap_free(void)
                         2460, 3600, 2460, &restarted));
         /* The first answer is in numbers the cursor cannot trust: nothing
          * from it is taken, and the cursor goes back to 0. */
-        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)0);
+        struct board_answer_head head;
+        int64_t asked = 0;
+        ASSERT(fbw_restart_answer(&w, &head, &asked));
         ASSERT(!db_fleet_board_have(&w.b, restarted.id));
+        ASSERT(fbw_reset_status(&w, restarted.id, &head, asked));
         /* From the beginning: every page is dedupe until the new post. */
-        size_t got = fbw_pull_n(&w, w.box_a, &w.b, 4);
+        size_t got = fbw_pull(&w, w.box_a, &w.b, &frames);
+        ASSERT_EQ(boot_fleet_board_fleet_test_last_after(), 0);
+        got += fbw_pull_n(&w, w.box_a, &w.b, 3);
         ASSERT_EQ(got, (size_t)1);
         ASSERT(db_fleet_board_have(&w.b, restarted.id));
         PASS();

@@ -934,8 +934,14 @@ static size_t board_drain_slot(struct node_db *ndb,
     struct board_cursor c;
     board_cursor_load(slot->ask.peer_box_id, &c);
     size_t stored = 0;
-    if (board_cursor_epoch(&c, &h, &slot->ask) &&
-        board_answer_current(&c, &slot->ask)) {
+    bool prior_epoch_known = c.epoch_known;
+    bool epoch_current = board_cursor_epoch(&c, &h, &slot->ask);
+    if (!epoch_current && !slot->ask.roster)
+        board_observe(slot->ask.peer_box_id, NULL, slot->ask.after, 0,
+                      prior_epoch_known ? FLEET_BOARD_CURSOR_EPOCH_CHANGED
+                                        : FLEET_BOARD_CURSOR_EPOCH_UNOBSERVED,
+                      FLEET_BOARD_OBS_CURSOR_RESET, false, false, h.epoch);
+    if (epoch_current && board_answer_current(&c, &slot->ask)) {
         stored = board_offer_all(ndb, slot, post, now, &c);
         board_cursor_settle(&c, &slot->ask, &h);
     }

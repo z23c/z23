@@ -163,6 +163,7 @@ static const char *fb_observation_phase(enum boot_fleet_board_observation_phase 
         [FLEET_BOARD_OBS_GATE] = "gate_refusal",
         [FLEET_BOARD_OBS_ANSWER_REFUSED] = "answer_refused",
         [FLEET_BOARD_OBS_ANSWER_DEFERRED] = "answer_deferred",
+        [FLEET_BOARD_OBS_CURSOR_RESET] = "cursor_reset",
     };
     return (unsigned)phase < sizeof names / sizeof names[0] ? names[phase] : "unknown";
 }
@@ -209,6 +210,12 @@ static bool fb_observation_detail(struct json_value *o,
         return json_push_kv_str(o, "reason", "malformed");
     if (v->phase == FLEET_BOARD_OBS_ANSWER_DEFERRED)
         return fb_observation_deferred(o, v->result);
+    if (v->phase == FLEET_BOARD_OBS_CURSOR_RESET) {
+        const char *reason = v->result == FLEET_BOARD_CURSOR_EPOCH_CHANGED
+            ? "epoch_changed" : "epoch_unobserved";
+        return json_push_kv_str(o, "reason", reason) &&
+               json_push_kv_str(o, "next_action", "await_next_pull");
+    }
     if (v->phase == FLEET_BOARD_OBS_INGEST)
         return fb_observation_ingest(o, v);
     if (v->phase == FLEET_BOARD_OBS_OPEN_ATTEMPT)
