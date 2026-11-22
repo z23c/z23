@@ -48,6 +48,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -605,10 +606,13 @@ static long long bmx_queued(const char *ref)
     (void)json_push_kv_str(&c.input, "action", "status");
     (void)json_push_kv_bool(&c.input, "json", true);
     zcl_native_handle_dev_agent_queue(&c.request, &c.reply);
-    for (int b = 0; bmx_ok(&c) && b < 2; b++) {
+    for (int b = 0; b < 2; b++) {
         const struct json_value *arr = json_get(&c.reply.data, buckets[b]);
-        size_t n = (arr && arr->type == JSON_ARR) ? json_size(arr) : 0u;
-        for (size_t i = 0; i < n; i++) {
+        if (!bmx_ok(&c) || !arr || arr->type != JSON_ARR) {
+            hits = -1;
+            break;
+        }
+        for (size_t i = 0; i < json_size(arr); i++) {
             if (strcmp(json_get_str(json_get(json_at(arr, i), "name")),
                        ref) == 0)
                 hits++;
@@ -628,11 +632,13 @@ static long long bmx_lines(int box, const char *rel, const char *n1,
     (void)snprintf(path, sizeof(path), "%s/z23/dev/%s", g_bmx_state[box], rel);
     f = fopen(path, "rb");
     if (!f)
-        return 0;
+        return errno == ENOENT ? 0 : -1;
     while (fgets(line, sizeof(line), f)) {
         if ((!n1 || strstr(line, n1)) && (!n2 || strstr(line, n2)))
             hits++;
     }
+    if (ferror(f))
+        hits = -1;
     (void)fclose(f);
     return hits;
 }
@@ -1014,6 +1020,33 @@ _test_next:;
     return failures;
 }
 
+/* Phase 2 runs after file sync and before parent-directory sync. */
+static int bmx_exit_after_inbox_sync(const char *path, int phase)
+{
+    if (phase == 2 && strstr(path, "inbox.node-a.jsonl"))
+        _exit(77);
+    return 0;
+}
+
+static bool bmx_interrupt_import(void)
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        struct rcv_beat_stats stats;
+        zcl_devagent_boardmail_test_io(bmx_exit_after_inbox_sync);
+        (void)bmx_drive(BMX_B, &stats);
+        _exit(1);
+    }
+    int status;
+    pid_t done;
+    do {
+        done = waitpid(child, &status, 0);
+    } while (done < 0 && errno == EINTR);
+    return done == child && WIFEXITED(status) && WEXITSTATUS(status) == 77;
+}
+
 static int bmx_t_crash_between(void)
 {
     int failures = 0;
@@ -1028,10 +1061,16 @@ static int bmx_t_crash_between(void)
         ASSERT_EQ(st.board_out, 1);
         ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
         bmx_carry(BMX_A, BMX_B);
+        ASSERT(bmx_interrupt_import());
+        bmx_use(BMX_B);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "\"job-3\"", NULL), 1);
+        ASSERT_EQ(bmx_queued("job-3"), 0);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", "state=accepted", "\"job-3\""), 0);
+        /* Recover the already synced row and finish admission once. */
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
         ASSERT_EQ(st.admitted, 1);
-        /* B died after the inbox append but before the cursors were saved:
-         * the page is carried again and the intake replayed. */
+        /* Lose both cursors after admission and read the same page again. */
         bmx_forget(BMX_B, "receive/boardmail.state");
         bmx_forget(BMX_B, "receive/intake.state");
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
@@ -1115,7 +1154,8 @@ static int bmx_t_wrong_signer(void)
                             "reason=RECEIVE_PEER_UNGRANTED", "job-5c"), 1);
         ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl",
                             "reason=RECEIVE_PEER_UNENROLLED", "job-5d"), 1);
-        ASSERT_EQ(bmx_queued("job-5c") + bmx_queued("job-5d"), 0);
+        ASSERT_EQ(bmx_queued("job-5c"), 0);
+        ASSERT_EQ(bmx_queued("job-5d"), 0);
         bmx_teardown();
         PASS();
     }
