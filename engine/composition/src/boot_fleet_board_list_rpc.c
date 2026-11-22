@@ -47,6 +47,20 @@ static bool fb_list_cursor(const struct json_value *in, struct json_value *resul
     return true;
 }
 
+static bool fb_list_room(const struct json_value *in, struct json_value *result,
+                         struct fleet_board_filter *filter)
+{
+    const struct json_value *room = json_get(in, "room");
+    const char *name = room && room->type == JSON_STR ? json_get_str(room) : "";
+    if (room && (room->type != JSON_STR || !name || (name[0] && !fleet_board_room_valid(name)))) {
+        fb_error(result, "BAD_ROOM", "Use 1..32 lowercase letters or digits, with internal hyphens allowed, or omit the room filter.");
+        json_push_kv_str(result, "next_action", "use_valid_exact_room_or_omit_filter");
+        return false;
+    }
+    (void)snprintf(filter->room, sizeof(filter->room), "%s", name);
+    return true;
+}
+
 static bool fb_list_filter(const struct json_value *in, struct json_value *result,
                            struct fleet_board_filter *out)
 {
@@ -85,8 +99,7 @@ static bool fb_list_filter(const struct json_value *in, struct json_value *resul
             return false;
         }
     }
-    (void)snprintf(filter.room, sizeof(filter.room), "%s",
-                   fb_str(in, "room", ""));
+    if (!fb_list_room(in, result, &filter)) return false;
     *out = filter;
     return true;
 }

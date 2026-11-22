@@ -2518,6 +2518,82 @@ static int test_fleet_board_rpc_room_boundary(void)
     return failures;
 }
 
+static bool fb_list_room_bad(const struct json_value *out)
+{
+    const char *code = json_get_str(json_get(out, "code"));
+    const char *action = json_get_str(json_get(out, "next_action"));
+    return !json_get_bool(json_get(out, "ok")) && code && action &&
+           strcmp(code, "BAD_ROOM") == 0 &&
+           strcmp(action, "use_valid_exact_room_or_omit_filter") == 0 &&
+           !json_get(out, "posts");
+}
+
+static bool fb_list_room_result(struct fb_rpc_fixture *f, const struct json_value *room,
+                                const char *scope, bool accepted, size_t count)
+{
+    struct json_value input, out;
+    json_init(&input); json_init(&out); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "op", "list") &&
+              (!room || json_push_kv(&input, "room", room)) &&
+              (!scope || json_push_kv_str(&input, "scope", scope)) &&
+              fb_rpc_call(f, &input, &out);
+    if (accepted) {
+        const struct json_value *posts = json_get(&out, "posts");
+        ok = ok && json_get_bool(json_get(&out, "ok")) && posts &&
+             posts->type == JSON_ARR && json_size(posts) == count;
+    }
+    else
+        ok = ok && fb_list_room_bad(&out);
+    json_free(&out); json_free(&input); return ok;
+}
+
+static int test_fleet_board_rpc_list_exact_room(void)
+{
+    int failures = 0;
+    static const clock_iface_t clock = {
+        .now_monotonic_ns = fb_room_boundary_mono_ns,
+        .now_wall_ms = fb_room_boundary_wall_ms,
+    };
+    const clock_iface_t *saved_clock = clock_default();
+    struct fb_rpc_fixture f;
+    struct json_value room;
+    json_init(&room); clock_set_default(&clock);
+    bool opened = fb_rpc_fixture_open(&f, "rpc-list-room");
+    TEST("fleet board: list accepts exact rooms and refuses invalid explicit filters") {
+        ASSERT(opened);
+        char name[FLEET_BOARD_ROOM_MAX + 2];
+        memset(name, 'a', sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
+        name[FLEET_BOARD_ROOM_MAX] = '\0';
+        ASSERT_EQ(fb_rpc_room_acceptance(&f, name), 0);
+        json_set_str(&room, name);
+        ASSERT(fb_list_room_result(&f, &room, NULL, true, 1));
+        json_set_str(&room, "other-room");
+        ASSERT(fb_list_room_result(&f, &room, NULL, true, 0));
+        ASSERT(fb_list_room_result(&f, NULL, NULL, true, 1));
+        json_set_str(&room, "");
+        ASSERT(fb_list_room_result(&f, &room, NULL, true, 1));
+        ASSERT(fb_list_room_result(&f, &room, "legacy", true, 0));
+        name[FLEET_BOARD_ROOM_MAX] = 'a';
+        name[FLEET_BOARD_ROOM_MAX + 1] = '\0';
+        json_set_str(&room, name);
+        ASSERT(fb_list_room_result(&f, &room, NULL, false, 0));
+        json_set_str(&room, "Upper");
+        ASSERT(fb_list_room_result(&f, &room, NULL, false, 0));
+        json_set_int(&room, 7);
+        ASSERT(fb_list_room_result(&f, &room, NULL, false, 0));
+        json_set_null(&room);
+        ASSERT(fb_list_room_result(&f, &room, NULL, false, 0));
+        json_set_array(&room);
+        ASSERT(fb_list_room_result(&f, &room, NULL, false, 0));
+        PASS();
+    } _test_next:;
+    json_free(&room);
+    if (opened) fb_rpc_fixture_close(&f);
+    if (test_rm_rf_recursive(f.dir) != 0) failures++;
+    clock_set_default(saved_clock);
+    return failures;
+}
+
 static bool fb_rpc_list(struct fb_rpc_fixture *f, struct json_value *out)
 {
     struct json_value input;
@@ -16703,6 +16779,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_keyset_pages();
     failures += test_fleet_board_page_work();
     failures += test_fleet_board_rpc_room_boundary();
+    failures += test_fleet_board_rpc_list_exact_room();
     failures += test_fleet_board_rpc_created_at();
     failures += test_fleet_board_rpc_fleet_page();
     failures += test_fleet_board_native_busy();
