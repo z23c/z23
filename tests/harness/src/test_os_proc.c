@@ -542,6 +542,12 @@ static int os_proc_status_field_parse_checks(void)
                  absent.rss_shmem_bytes == -1 && absent.swap_bytes == -1);
     /* A real zero swaps to exactly 0 bytes, a known value — never the -1
      * unknown: pin it so a falsy-zero regression cannot pass silently. */
+    OSPROC_CHECK("oversized status value is unknown",
+                 os_proc_status_field_bytes_for_test(
+                     "VmRSS:\t 9223372036854775807 kB\n", "VmRSS:") == -1);
+    OSPROC_CHECK("unrepresentable status value is unknown",
+                 os_proc_status_field_bytes_for_test(
+                     "VmRSS:\t 999999999999999999999999 kB\n", "VmRSS:") == -1);
     OSPROC_CHECK("VmSwap 0 kB parses to 0 bytes, not unknown",
                  os_proc_status_field_bytes_for_test(
                      "VmSwap:\t 0 kB\n", "VmSwap:") == 0);

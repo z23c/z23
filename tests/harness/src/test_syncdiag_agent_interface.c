@@ -6,6 +6,7 @@
  */
 
 #include "test/syncdiag_rpc_fixture.h"
+#include "platform/os_proc.h"
 
 enum {
     AGENT_INTERFACE_OP_TYPE_OBJ = 1,
@@ -679,6 +680,42 @@ static bool agent_interface_one_resource_matches(
     return ok;
 }
 
+static bool agent_interface_collected_resources_match(bool ok)
+{
+    static const struct agent_interface_expect rows[] = {
+        { .op = AGENT_INTERFACE_OP_TYPE_OBJ },
+        { .key = "rss_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 64 },
+        { .key = "swap_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 4 },
+        { .key = "rss_anon_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 11 },
+        { .key = "rss_file_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 22 },
+        { .key = "rss_shmem_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = 0 },
+    };
+    static const struct agent_interface_expect unknown[] = {
+        { .op = AGENT_INTERFACE_OP_TYPE_OBJ },
+        { .key = "rss_anon_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = -1 },
+        { .key = "rss_file_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = -1 },
+        { .key = "rss_shmem_mb", .op = AGENT_INTERFACE_OP_INT_EQ, .num = -1 },
+    };
+    struct os_proc_mem memory = {
+        .rss_bytes = 64LL * 1024 * 1024, .swap_bytes = 4LL * 1024 * 1024,
+        .rss_anon_bytes = 11LL * 1024 * 1024,
+        .rss_file_bytes = 22LL * 1024 * 1024,
+        .rss_shmem_bytes = 0, .rss_components_available = true,
+    };
+    struct agent_resource_snapshot snapshot;
+    os_proc_mem_set_override(&memory);
+    agent_resource_snapshot_collect(&snapshot);
+    os_proc_mem_set_override(NULL);
+    ok = agent_interface_one_resource_matches(ok, &snapshot, rows,
+                                               sizeof rows / sizeof rows[0]);
+    memory.rss_components_available = false;
+    os_proc_mem_set_override(&memory);
+    agent_resource_snapshot_collect(&snapshot);
+    os_proc_mem_set_override(NULL);
+    return agent_interface_one_resource_matches(ok, &snapshot, unknown,
+                                                 sizeof unknown / sizeof unknown[0]);
+}
+
 static bool agent_interface_resource_snapshots_match(bool ok)
 {
     struct agent_resource_snapshot fixed_resources = {
@@ -1251,6 +1288,7 @@ int syncdiag_cases_agent_interface(void)
         ok = agent_interface_probed_ops_matches(ok, &tbl, &params);
 
         ok = agent_interface_resource_snapshots_match(ok);
+        ok = agent_interface_collected_resources_match(ok);
 
         ok = agent_interface_watchdog_snapshots_match(ok);
 

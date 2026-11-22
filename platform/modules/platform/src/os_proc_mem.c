@@ -131,8 +131,11 @@ static bool os_proc_status_line_bytes(const char *line, const char *label,
     size_t label_len = strlen(label);
     if (strncmp(line, label, label_len) != 0)
         return false;
-    long long kb = 0;
-    *bytes = (sscanf(line + label_len, " %lld", &kb) == 1 && kb >= 0)
+    char *end = NULL;
+    errno = 0;
+    long long kb = strtoll(line + label_len, &end, 10);
+    *bytes = (end != line + label_len && errno != ERANGE &&
+              kb >= 0 && kb <= INT64_MAX / 1024)
         ? (int64_t)kb * 1024 : -1;
     return true;
 }
