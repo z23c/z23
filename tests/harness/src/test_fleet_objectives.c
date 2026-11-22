@@ -385,6 +385,57 @@ _test_next:;
     return failures;
 }
 
+static int fox_case_proof_snapshot(void)
+{
+    int failures = 0;
+    char root[512], attempts[1024], outcomes[1024], log[1400];
+    const char *ids[] = {"proof_wall_s", "proof_lint_wall_s", "proof_test_wall_s"};
+    struct zcl_objectives_options o = {0};
+    struct zcl_objectives_proof_cache cache = {0};
+    test_make_tmpdir(root, sizeof root, "fleet_objectives", "proof_snapshot");
+    (void)snprintf(attempts, sizeof attempts, "%s/attempts", root);
+    (void)snprintf(outcomes, sizeof outcomes, "%s/outcomes", root);
+    TEST("objectives: proof selection is shared and refreshed per request") {
+        ASSERT(fox_mkdir(attempts));
+        ASSERT(fox_write(outcomes, ""));
+        o.attempts_dir = attempts; o.outcomes = outcomes; o.proof_cache = &cache;
+        struct zcl_objective_value missing = zcl_objectives_measure(&o, ids[0]);
+        ASSERT(!missing.measured && missing.reason[0]);
+        ASSERT(fox_attempt(attempts, "first-base.a", true, 1000000, 2000, "3.0", 10));
+        struct zcl_objective_value still_missing = zcl_objectives_measure(&o, ids[1]);
+        ASSERT(!still_missing.measured && strcmp(missing.reason, still_missing.reason) == 0);
+        cache = (struct zcl_objectives_proof_cache){0};
+        struct zcl_objective_value initial[3];
+        o.proof_cache = NULL;
+        for (size_t i = 0; i < 3; i++) initial[i] = zcl_objectives_measure(&o, ids[i]);
+        o.proof_cache = &cache;
+        for (size_t i = 0; i < 3; i++) {
+            struct zcl_objective_value current = zcl_objectives_measure(&o, ids[i]);
+            ASSERT(current.measured && current.value == initial[i].value);
+            ASSERT(strcmp(current.reason, initial[i].reason) == 0);
+        }
+        ASSERT(fox_attempt(attempts, "second-base.b", true, 1200000, 5000, "7.0", 20));
+        struct zcl_objective_value shared = zcl_objectives_measure(&o, ids[0]);
+        ASSERT(shared.measured && shared.value == initial[0].value);
+        (void)snprintf(log, sizeof log, "%s/first-base.a/logs/first-base.lint.log", attempts);
+        ASSERT(remove(log) == 0);
+        shared = zcl_objectives_measure(&o, ids[1]);
+        ASSERT(!shared.measured && strstr(shared.reason, "no wall line"));
+        shared = zcl_objectives_measure(&o, ids[2]);
+        ASSERT(shared.measured && shared.value == initial[2].value);
+        cache = (struct zcl_objectives_proof_cache){0};
+        shared = zcl_objectives_measure(&o, ids[0]);
+        ASSERT(shared.measured && shared.value == 1200);
+        o.proof_cache = NULL;
+        shared = zcl_objectives_measure(&o, ids[1]);
+        ASSERT(shared.measured && shared.value == 5);
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int fox_case_window_snapshot(void)
 {
     int failures = 0;
@@ -1777,6 +1828,7 @@ int test_fleet_objectives(void)
     failures += fox_case_next();
     failures += fox_case_node_cache();
     failures += fox_case_landing_snapshot();
+    failures += fox_case_proof_snapshot();
     failures += fox_case_window_snapshot();
     failures += fox_case_window_failures();
     failures += fox_case_attempt_allocations();

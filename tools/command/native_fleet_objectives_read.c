@@ -834,7 +834,7 @@ static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
     return obj_scan_logs(proof->logs, suffix, fn, path, cap, ms);
 }
 
-static bool obj_completed_attempt(const struct zcl_objectives_options *options,
+static bool obj_completed_attempt_read(const struct zcl_objectives_options *options,
                                   struct obj_proof *proof,
                                   struct zcl_objective_value *v)
 {
@@ -856,6 +856,35 @@ static bool obj_completed_attempt(const struct zcl_objectives_options *options,
         return false;
     }
     return true;
+}
+
+/* A request shares its first selection, including a failure. Log reads stay
+ * separate so each dimension retains its own missing and parsing behavior. */
+static bool obj_completed_attempt(const struct zcl_objectives_options *options,
+                                  struct obj_proof *proof,
+                                  struct zcl_objective_value *v)
+{
+    struct zcl_objectives_proof_cache *c = options ? options->proof_cache : NULL;
+    memset(proof, 0, sizeof *proof);
+    if (!c)
+        return obj_completed_attempt_read(options, proof, v);
+    if (!c->filled) {
+        c->ok = obj_completed_attempt_read(options, proof, v);
+        if (c->ok) {
+            memcpy(c->logs, proof->logs, sizeof c->logs);
+            memcpy(c->key, proof->key, sizeof c->key);
+            c->proof_ms = proof->proof_ms;
+        }
+        (void)snprintf(c->reason, sizeof c->reason, "%s", v->reason);
+        c->filled = true;
+    } else if (c->ok) {
+        memcpy(proof->logs, c->logs, sizeof proof->logs);
+        memcpy(proof->key, c->key, sizeof proof->key);
+        proof->proof_ms = c->proof_ms;
+    }
+    if (!c->ok)
+        (void)snprintf(v->reason, sizeof v->reason, "%s", c->reason);
+    return c->ok;
 }
 
 static struct zcl_objective_value obj_log_wall_s(

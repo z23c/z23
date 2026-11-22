@@ -83,6 +83,14 @@ struct zcl_objectives_landing_cache {
     char reason[ZCL_OBJECTIVES_REASON_MAX];
 };
 
+/* One request.s selected proof; NULL keeps independent selections. */
+struct zcl_objectives_proof_cache {
+    bool filled, ok;
+    char logs[1100], key[200];
+    int64_t proof_ms;
+    char reason[ZCL_OBJECTIVES_REASON_MAX];
+};
+
 struct zcl_objectives_options {
     const char *outcomes;     /* outcomes.jsonl */
     const char *attempts_dir; /* the proof attempts directory */
@@ -102,6 +110,7 @@ struct zcl_objectives_options {
     struct zcl_objectives_node_cache *node_cache; /* NULL fetches per row */
     struct zcl_objectives_window_cache *window_cache; /* NULL reads per row */
     struct zcl_objectives_landing_cache *landing_cache; /* NULL reads per row */
+    struct zcl_objectives_proof_cache *proof_cache; /* NULL selects per row */
     int64_t now;              /* unix seconds the day and window readers
                                * count from; 0 reads the wall clock */
     const char *session;      /* the lead's Claude Code transcript (.jsonl);
