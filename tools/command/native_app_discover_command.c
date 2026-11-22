@@ -77,7 +77,7 @@ static void adc_fail_network(struct zcl_command_reply *reply,
 
 #endif
 
-/* The `app get` catalog shape: one line per distinct identity. */
+/* List each distinct signed post so every displayed offer can be selected. */
 static bool adc_lines(struct zcl_command_reply *reply,
                       const struct zcl_app_offer_row *rows, size_t count)
 {
@@ -88,9 +88,7 @@ static bool adc_lines(struct zcl_command_reply *reply,
     for (size_t i = 0; i < count; i++) {
         bool seen = false;
         for (size_t j = 0; j < i; j++)
-            if (!strcmp(rows[i].offer.name, rows[j].offer.name) &&
-                !strcmp(rows[i].offer.root, rows[j].offer.root) &&
-                !strcmp(rows[i].offer.publisher, rows[j].offer.publisher)) {
+            if (!strcmp(rows[i].post_id, rows[j].post_id)) {
                 seen = true; break;
             }
         if (seen) continue;
@@ -99,8 +97,8 @@ static bool adc_lines(struct zcl_command_reply *reply,
         if (!zcl_app_short_fingerprint(rows[i].offer.publisher, shortfp)) {
             json_free(&lines); return false;
         }
-        int n = snprintf(line, sizeof(line), "%s %s %.16s %s ago",
-                         rows[i].offer.name, shortfp, rows[i].offer.root, age);
+        int n = snprintf(line, sizeof(line), "%s %s %.16s %s ago offer=%s",
+                         rows[i].offer.name, shortfp, rows[i].offer.root, age, rows[i].post_id);
         struct json_value item;
         json_init(&item);
         json_set_str(&item, line);
@@ -334,9 +332,9 @@ void zcl_native_handle_app_discover(const struct zcl_command_request *request,
             ADC_COMMAND);
         return;
     }
-    if (offer && !adc_hex_id(offer)) {
+    if (offer && (!adc_hex_id(offer) || (link.exact && strcmp(link.post_id, offer)))) {
         zcl_package_copy_fail(reply, "BAD_INPUT", false,
-                              "offer must be the 64-hex post id the listing shows", ADC_COMMAND);
+                              "offer must be a 64-hex post id matching any exact link", ADC_COMMAND);
         return;
     }
     if (link.port) {

@@ -4747,6 +4747,7 @@ static bool tag_discover_empty_card(void *context, const struct zcl_present_mode
 struct tag_discover_stub {
     unsigned jobs;
     bool catalog_url_ok, direct_url_ok;
+    char expected[65];
     enum app_network_error direct_error;
 };
 static bool tag_discover_job(void *context, const struct app_network_job_args *args,
@@ -4766,7 +4767,11 @@ static bool tag_discover_job(void *context, const struct app_network_job_args *a
         (void)snprintf(row->post_id, sizeof(row->post_id),
                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
         row->created_at = platform_time_wall_unix() - 90;
-        result->count = 1;
+        result->rows[1] = *row;
+        (void)snprintf(result->rows[1].post_id, sizeof(result->rows[1].post_id),
+                       "1111111111111111111111111111111111111111111111111111111111111111");
+        result->rows[2] = *row;
+        result->count = 3;
         result->error = APP_NETWORK_OK;
         result->protocol_valid = true;
         return true;
@@ -4776,7 +4781,8 @@ static bool tag_discover_job(void *context, const struct app_network_job_args *a
             "http://" TAG_ONION "/board/apps/v1/",
             sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u) &&
             strlen(args->url) ==
-                sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u + 64u;
+                sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u + 64u &&
+            !strcmp(args->url + sizeof("http://" TAG_ONION "/board/apps/v1/") - 1u, d->expected);
         result->error = d->direct_error;
         result->protocol_valid = true;
         return d->direct_error == APP_NETWORK_OK;
@@ -4819,20 +4825,30 @@ static bool tag_discover_call(const struct zcl_command_spec *spec,
     return true;
 }
 
-/* The one listing line, in the app get catalog shape. */
-static bool tag_discover_line_ok(const struct zcl_command_reply *reply)
+static bool tag_discover_line_matches(const char *line, const char *id)
 {
-    const struct json_value *lines = json_get(&reply->data, "lines");
-    const char *line = lines && lines->type == JSON_ARR && json_size(lines) == 1
-        ? json_get_str(json_at(lines, 0)) : NULL;
-    return line && !strncmp(line, "rem/game ", 9) &&
+    const char *field = line ? strstr(line, "offer=") : NULL;
+    return field && !strcmp(field + 6, id) && !strncmp(line, "rem/game ", 9) &&
         strstr(line, "c0ffee00c0ffee00") && strstr(line, "ago");
+}
+
+/* Capture the selectable ID from the rendered listing, not from fixture state. */
+static bool tag_discover_line_ok(const struct zcl_command_reply *reply, char selected[65])
+{
+    static const char second_id[] = "1111111111111111111111111111111111111111111111111111111111111111";
+    const struct json_value *lines = json_get(&reply->data, "lines");
+    if (!lines || lines->type != JSON_ARR || json_size(lines) != 2) return false;
+    const char *first = json_get_str(json_at(lines, 0));
+    const char *second = json_get_str(json_at(lines, 1));
+    if (!tag_discover_line_matches(first, TAG_DISCOVER_OFFER) ||
+        !tag_discover_line_matches(second, second_id)) return false;
+    memcpy(selected, strstr(second, "offer=") + 6, 65); return true;
 }
 
 /* The listing shape: same lines as the app get catalog, nothing stored. */
 static bool tag_discover_listing_ok(const struct zcl_command_spec *spec,
                                     struct tag_discover_stub *stub,
-                                    int posts, int offers)
+                                    int posts, int offers, char selected[65])
 {
     struct zcl_command_reply reply;
     if (!tag_discover_call(spec, TAG_ONION, NULL, false, &reply)) return false;
@@ -4841,9 +4857,9 @@ static bool tag_discover_listing_ok(const struct zcl_command_spec *spec,
     bool ok = reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
         stub->jobs == 1u && stub->catalog_url_ok &&
         g_tag.posts == posts && g_tag.offers == offers &&
-        count && count->type == JSON_INT && json_get_int(count) == 1 &&
+        count && count->type == JSON_INT && json_get_int(count) == 2 &&
         stored && stored->type == JSON_BOOL && !json_get_bool(stored) &&
-        tag_discover_line_ok(&reply);
+        tag_discover_line_ok(&reply, selected);
     zcl_command_reply_free(&reply);
     return ok;
 }
@@ -4863,12 +4879,13 @@ static bool tag_discover_refused(const struct zcl_command_spec *spec,
 
 /* A dead or lying endpoint reports the existing APP_NETWORK_* shape. */
 static bool tag_discover_timeout_ok(const struct zcl_command_spec *spec,
-                                    struct tag_discover_stub *stub)
+                                    struct tag_discover_stub *stub, const char *selected)
 {
     stub->jobs = 0;
     stub->direct_error = APP_NETWORK_TIMEOUT;
+    (void)snprintf(stub->expected, sizeof(stub->expected), "%s", selected);
     struct zcl_command_reply reply;
-    if (!tag_discover_call(spec, TAG_ONION, TAG_DISCOVER_OFFER, true, &reply))
+    if (!tag_discover_call(spec, TAG_ONION, selected, true, &reply))
         return false;
     bool ok = reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
         !strcmp(reply.error.code, "NETWORK_TIMEOUT") && stub->jobs == 1u &&
@@ -4891,7 +4908,8 @@ static int tag_discover_command(struct tag_world *w)
         zcl_test_app_discover_job_context = &stub;
         int posts = g_tag.posts, offers = g_tag.offers;
 
-        ASSERT(tag_discover_listing_ok(spec, &stub, posts, offers));
+        char selected[65] = {0};
+        ASSERT(tag_discover_listing_ok(spec, &stub, posts, offers, selected));
         stub.jobs = 0; /* the refusals below must never fetch */
 
         /* A full link names one offer: without --offer it must not fetch. */
@@ -4899,6 +4917,8 @@ static int tag_discover_command(struct tag_world *w)
         ASSERT(snprintf(link, sizeof(link), "http://%s/board/apps/v1/%s",
                         TAG_ONION, TAG_DISCOVER_OFFER) > 0);
         ASSERT(tag_discover_refused(spec, &stub, link, NULL, false, "BAD_INPUT"));
+        ASSERT(tag_discover_refused(spec, &stub, link, selected, true, "BAD_INPUT"));
+        ASSERT(tag_discover_refused(spec, &stub, link, TAG_DISCOVER_OFFER, false, "CONFIRM_REQUIRED"));
 
         /* host:port parses, but the default-port fetch refuses it up front. */
         ASSERT(snprintf(link, sizeof(link), "%s:28133", TAG_ONION) > 0);
@@ -4910,7 +4930,7 @@ static int tag_discover_command(struct tag_world *w)
                                     false, "CONFIRM_REQUIRED"));
 
         /* A dead or lying endpoint reports the existing APP_NETWORK_* shape. */
-        ASSERT(tag_discover_timeout_ok(spec, &stub));
+        ASSERT(tag_discover_timeout_ok(spec, &stub, selected));
 
         zcl_test_app_discover_job = NULL;
         zcl_test_app_discover_job_context = NULL;
