@@ -343,6 +343,25 @@ and every signer already stored. Refusals are counted as `role_refused` in
 zero means the boot walk hit its 64-key bound and `roles grant` must name the
 rest. A grant is local policy, not consensus.
 
+When a fleet note does not cross between paired boxes, `z23 fleet board
+status --datadir=<node-datadir>` answers why from the carriage object: `carriage.totals` (pulls,
+answers, stored, refused) and one row per paired peer in `carriage.peers`
+(`peer` is the first 12 hex digits of its `peer_master_fingerprint`;
+`last_pull_attempt_at`, `last_answer_at`, `last_skip_reason`, `pulls`,
+`answers`, `stored`, `refused`). `last_skip_reason` is empty once an answer
+drained; otherwise one of `pairing_window_closed`, `no_delegation`,
+`delegation_refused`, `roster_gated`, `pull_in_flight`, `peer_not_connected`,
+`stream_open_failed:<refusal>`, `answer_refused:<refusal or malformed>` or
+`not_due_yet` (the normal wait between 15-second pulls). A peer whose pulls are
+refused by the answering box (`answer_refused:stream_peer_unpaired`) points at
+the answerer's pairing, delegation or role grant for this box's online key (its
+own `fleet board status` counts `delegation_refused` or `role_refused`); a pull that drains
+with `stored` staying 0 while the peer has posts points at this box's role
+check for each post's signing key and kind. The node logs one INFO line per
+peer when a reason that needs attention changes (at most one per minute per
+peer), and `z23 fleet doctor --datadir=<node-datadir>` shows the same totals in its informational
+`board_carriage` row. State is volatile: it restarts empty with the node.
+
 ### Triggers
 
 A closed registry of reactions to local events, evaluated once per call by

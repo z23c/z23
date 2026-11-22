@@ -9,17 +9,20 @@
  * Exact peer and post queries also render the latest matching observations.
  */
 
+#include "boot_fleet_board_carriage_peers_internal.h"
 #include "boot_fleet_board_push_internal.h"
 #include "boot_fleet_board_rpc_internal.h"
 
 #include "base/hex.h"
 #include "config/boot_fleet_board.h"
+#include "config/boot_mesh_status.h"
 #include "config/mesh_stream.h"
 #include "json/json.h"
 #include "models/fleet_board_post.h"
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 static const char *const k_verdicts[FLEET_BOARD_PUSH_VERDICTS] = {
     "stored", "held", "deferred", "refused",
@@ -140,6 +143,70 @@ static bool carriage_push_in(struct json_value *into,
     return ok;
 }
 
+/* One paired peer: its short fingerprint (the first 12 hex digits of the
+ * peer_master_fingerprint `ops mesh pair list` shows), the last pull tried and the last answer drained (0: never),
+ * its counts, and the reason the last pull did not happen or land ("" when
+ * none is on record). */
+static bool carriage_peer_row(struct json_value *peers,
+                              const struct board_carriage_peer *p)
+{
+    char hex[65], reason[BOARD_CARRIAGE_DETAIL_MAX + 40];
+    boot_mesh_status_key_fingerprint("zcl.mesh.master.fingerprint.v1", p->peer,
+                                     hex);
+    hex[12] = '\0';
+    (void)snprintf(reason, sizeof reason, "%s%s%s",
+                   board_carriage_reason_name(p->reason),
+                   p->detail[0] ? ":" : "", p->detail);
+    struct json_value o;
+    json_init(&o);
+    json_set_object(&o);
+    bool ok = json_push_kv_str(&o, "peer", hex) &&
+              json_push_kv_int(&o, "last_pull_attempt_at",
+                               p->last_pull_attempt_at) &&
+              json_push_kv_int(&o, "last_answer_at", p->last_answer_at) &&
+              json_push_kv_str(&o, "last_skip_reason", reason) &&
+              json_push_kv_int(&o, "pulls", (int64_t)p->pulls) &&
+              json_push_kv_int(&o, "answers", (int64_t)p->answers) &&
+              json_push_kv_int(&o, "stored", (int64_t)p->stored) &&
+              json_push_kv_int(&o, "refused", (int64_t)p->refused) &&
+              json_push_back(peers, &o);
+    json_free(&o);
+    return ok;
+}
+
+/* The per-peer pull state and its totals: why "messages do not travel" is
+ * answered here, one row per peer the pull lane has decided about. */
+static bool carriage_peers(struct json_value *into)
+{
+    struct board_carriage_peer rows[FLEET_BOARD_FLEET_PEERS_MAX];
+    size_t n = board_carriage_snapshot(rows, FLEET_BOARD_FLEET_PEERS_MAX);
+    struct board_carriage_peer total = {0};
+    struct json_value peers;
+    json_init(&peers);
+    json_set_array(&peers);
+    bool ok = true;
+    for (size_t i = 0; i < n && i < FLEET_BOARD_FLEET_PEERS_MAX && ok; i++) {
+        total.pulls += rows[i].pulls;
+        total.answers += rows[i].answers;
+        total.stored += rows[i].stored;
+        total.refused += rows[i].refused;
+        ok = carriage_peer_row(&peers, &rows[i]);
+    }
+    struct json_value t;
+    json_init(&t);
+    json_set_object(&t);
+    ok = ok && json_push_kv_int(&t, "peers", (int64_t)n) &&
+         json_push_kv_int(&t, "pulls", (int64_t)total.pulls) &&
+         json_push_kv_int(&t, "answers", (int64_t)total.answers) &&
+         json_push_kv_int(&t, "stored", (int64_t)total.stored) &&
+         json_push_kv_int(&t, "refused", (int64_t)total.refused) &&
+         json_push_kv(into, "peers", &peers) &&
+         json_push_kv(into, "totals", &t);
+    json_free(&t);
+    json_free(&peers);
+    return ok;
+}
+
 bool fb_render_carriage(struct json_value *result)
 {
     struct boot_fleet_board_fleet_counts c = {0};
@@ -147,8 +214,9 @@ bool fb_render_carriage(struct json_value *result)
     struct json_value o;
     json_init(&o);
     json_set_object(&o);
-    bool ok = carriage_pull(&o, &c) && carriage_push_out(&o, &c) &&
-              carriage_push_in(&o, &c) && json_push_kv(result, "carriage", &o);
+    bool ok = carriage_peers(&o) && carriage_pull(&o, &c) &&
+              carriage_push_out(&o, &c) && carriage_push_in(&o, &c) &&
+              json_push_kv(result, "carriage", &o);
     json_free(&o);
     return ok;
 }

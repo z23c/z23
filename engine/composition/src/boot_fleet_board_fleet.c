@@ -25,6 +25,7 @@
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
 #include "boot_fleet_board_authority_internal.h"
+#include "boot_fleet_board_carriage_peers_internal.h"
 #include "boot_fleet_board_cursor_internal.h"
 #include "boot_fleet_board_frame_internal.h"
 #include "boot_fleet_board_push_internal.h"
@@ -527,9 +528,14 @@ static void board_service_close(struct mesh_stream *st,
     if (tag != BOARD_STATE_PULL)
         return;
     struct board_pull_state *p = st->service_state;
-    if (!p->ask.roster)
+    if (!p->ask.roster) {
         board_observe(p->ask.peer_box_id, NULL, p->ask.after, 0, (int)reason,
                       FLEET_BOARD_OBS_CLOSE, false, false, NULL);
+        if (p->len == 0)
+            board_carriage_refused(p->ask.peer_box_id,
+                                   mesh_stream_refusal_string(reason),
+                                   board_now());
+    }
     if (p->len == 0 ||
         (reason != MESH_STREAM_CLOSED_BY_SERVICE && reason != MESH_STREAM_OK))
         return;
@@ -925,9 +931,11 @@ static size_t board_drain_slot(struct node_db *ndb,
         !board_answer_valid(slot->rows, slot->len, &h, slot->ask.after,
                             slot->ask.roster)) {
         atomic_fetch_add_explicit(&g_answer_refused, 1, memory_order_relaxed);
-        if (!slot->ask.roster)
+        if (!slot->ask.roster) {
             board_observe(slot->ask.peer_box_id, NULL, slot->ask.after, 0, 0,
                           FLEET_BOARD_OBS_ANSWER_REFUSED, false, false, NULL);
+            board_carriage_refused(slot->ask.peer_box_id, "malformed", now);
+        }
         LOG_WARN("fleet.board", "fleet answer refused: malformed");
         return 0;
     }
@@ -946,6 +954,8 @@ static size_t board_drain_slot(struct node_db *ndb,
         board_cursor_settle(&c, &slot->ask, &h);
     }
     board_cursor_store(&c);
+    if (!slot->ask.roster)
+        board_carriage_answer(slot->ask.peer_box_id, stored, now);
     return stored;
 }
 
@@ -1021,6 +1031,11 @@ static bool board_stream_open(const char *service,
                       FLEET_BOARD_OBS_OPEN_ATTEMPT, false, false, NULL);
     enum mesh_stream_refusal refusal = mesh_stream_open(
         service, peer_noise, 0, frame, frame_len, p, &stream_id);
+    if (!p->ask.roster)
+        board_carriage_pull(p->ask.peer_box_id, board_now(),
+                            refusal == MESH_STREAM_OK,
+                            refusal == MESH_STREAM_REFUSED_PEER_NOT_CONNECTED,
+                            mesh_stream_refusal_string(refusal));
     if (refusal == MESH_STREAM_OK)
         return true;
     if (!p->ask.roster)
@@ -1110,6 +1125,7 @@ static bool board_peer_due(struct node_db *ndb,
         goto eligible;
     board_observe(row->peer_master_pubkey, NULL, 0, 0, (int)reason,
                   FLEET_BOARD_OBS_GATE, false, false, NULL);
+    board_carriage_gate(row->peer_master_pubkey, reason, now);
     return false;
 eligible:
     struct board_live_probe probe;
@@ -1117,6 +1133,9 @@ eligible:
     memcpy(probe.peer_static, row->peer_noise_pubkey, 32);
     mesh_stream_visit(FLEET_BOARD_FLEET_SERVICE_NAME, board_live_visitor,
                       &probe);
+    if (probe.found)
+        board_carriage_skip(row->peer_master_pubkey,
+                            BOARD_CARRIAGE_PULL_IN_FLIGHT, NULL, now);
     return !probe.found;
 }
 
@@ -1220,6 +1239,7 @@ static void board_tick_at(struct boot_svc_ctx *svc, int64_t now)
         (void)board_drain_inbox(ndb, now);
     if (now <= 0 ||
         (last != 0 && now - last < FLEET_BOARD_FLEET_PULL_INTERVAL_S)) {
+        board_carriage_not_due(now);
         supervisor_progress_idle(g_child);
         return;
     }

@@ -19,8 +19,9 @@
  *   wiki_pages, noise_fingerprint_sha3.
  *
  * state is ok | missing | blocked | unknown. A check that needs the running
- * node is "blocked" while no node answers, never guessed. The mail and
- * roster_gate rows only inform: neither moves the top-level state or next. */
+ * node is "blocked" while no node answers, never guessed. The mail,
+ * roster_gate and board_carriage rows (the board pull lane's totals and why
+ * each paired peer was last not pulled, from `fleet board status`) only inform: neither moves the top-level state or next. */
 
 #include "command/native_command.h"
 #include "command/native_fleet.h"
@@ -80,6 +81,8 @@ struct fd_ctx {
     struct fd_sub pairs;
     int64_t wiki_pages;
     bool wiki_ok;
+    bool carriage_ok;
+    char carriage[FD_TEXT]; /* the board pull lane, one line */
     int worst;
     char next[FD_TEXT];
 };
@@ -209,6 +212,49 @@ static void fd_gather_wiki(struct fd_ctx *ctx)
     json_free(&body);
 }
 
+/* Appends "<peer>=<reason or ok>" for each pull-lane peer that fits. */
+static void fd_carriage_peers(struct fd_ctx *ctx, const struct json_value *c)
+{
+    const struct json_value *peers = json_get(c, "peers");
+    size_t used = strlen(ctx->carriage);
+    for (size_t i = 0; peers && peers->type == JSON_ARR &&
+                       i < peers->num_children && used < sizeof(ctx->carriage);
+         i++) {
+        const struct json_value *p = &peers->children[i];
+        const char *why = fd_str(p, "last_skip_reason");
+        int n = snprintf(ctx->carriage + used, sizeof(ctx->carriage) - used,
+                         "%s%s=%s", i ? ", " : " Peers: ", fd_str(p, "peer"),
+                         why[0] ? why : "ok");
+        if (n < 0)
+            break;
+        used += (size_t)n;
+    }
+}
+
+/* The node's own account of the board pull lane (fleet_board status):
+ * totals, then why each peer was last not pulled. */
+static void fd_gather_carriage(struct fd_ctx *ctx)
+{
+    struct json_value body;
+    if (!ctx->node_up ||
+        !fd_rpc(ctx, "fleet_board", "[{\"op\":\"status\"}]", &body))
+        return;
+    const struct json_value *c = json_get(&body, "carriage");
+    const struct json_value *t = c ? json_get(c, "totals") : NULL;
+    if (fd_bool(&body, "ok") && t && t->type == JSON_OBJ) {
+        ctx->carriage_ok = true;
+        (void)snprintf(ctx->carriage, sizeof(ctx->carriage),
+                       "Board pulls %lld, answers %lld, stored %lld, "
+                       "refused %lld.",
+                       (long long)fd_int(t, "pulls", 0),
+                       (long long)fd_int(t, "answers", 0),
+                       (long long)fd_int(t, "stored", 0),
+                       (long long)fd_int(t, "refused", 0));
+        fd_carriage_peers(ctx, c);
+    }
+    json_free(&body);
+}
+
 /* Runs one sibling leaf in-process with its own spec, exactly as dispatch
  * would, and keeps the reply for the check that reads it. */
 static void fd_sub_run(struct fd_sub *s, const struct zcl_command_request *parent,
@@ -264,7 +310,8 @@ static void fd_check(struct fd_ctx *ctx, struct json_value *checks,
 {
     /* Mail is a developer tool and the roster gate only ever warns: shown,
      * never rolled into state or next. */
-    bool info = strcmp(name, "mail") == 0 || strcmp(name, "roster_gate") == 0;
+    bool info = strcmp(name, "mail") == 0 || strcmp(name, "roster_gate") == 0 ||
+                strcmp(name, "board_carriage") == 0;
     struct json_value row;
     json_init(&row);
     json_set_object(&row);
@@ -544,6 +591,25 @@ static void fd_check_wiki(struct fd_ctx *ctx, struct json_value *checks)
         fd_check(ctx, checks, "wiki", "missing", detail, FD_NEXT_WIKI, NULL);
 }
 
+/* Informational: what the board pull lane did, for "my note never arrived".
+ * It never moves the state or next. */
+static void fd_check_board_carriage(struct fd_ctx *ctx,
+                                    struct json_value *checks)
+{
+    /* With no node there is no pull lane to report; the node row already
+     * says so, and a second blocked row would only repeat it. */
+    if (!ctx->node_up)
+        return;
+    if (!ctx->carriage_ok) {
+        fd_check(ctx, checks, "board_carriage", "unknown",
+                 "The node did not report its board pull lane.",
+                 "z23 fleet board status", NULL);
+        return;
+    }
+    fd_check(ctx, checks, "board_carriage", "ok", ctx->carriage,
+             "z23 fleet board status", NULL);
+}
+
 /* ── bounded row lists ───────────────────────────────────────────────── */
 
 static void fd_push_machines(const struct fd_ctx *ctx, struct json_value *out)
@@ -637,6 +703,7 @@ void zcl_native_handle_fleet_doctor(const struct zcl_command_request *request,
     fd_gather_identity(&ctx);
     fd_gather_gate(&ctx);
     fd_gather_wiki(&ctx);
+    fd_gather_carriage(&ctx);
     fd_sub_run(&ctx.machines, request, "fleet.machines", "zcl.fleet.machines.v1",
                FD_ROWS_MAX);
     fd_sub_run(&ctx.pairs, request, "fleet.nodes.table",
@@ -665,6 +732,7 @@ void zcl_native_handle_fleet_doctor(const struct zcl_command_request *request,
     fd_check_pairing(&ctx, &checks);
     fd_check_mail(&ctx, &checks);
     fd_check_wiki(&ctx, &checks);
+    fd_check_board_carriage(&ctx, &checks);
     fd_emit(&ctx, &checks, &reply->data);
     json_free(&checks);
     fd_sub_free(&ctx.machines);

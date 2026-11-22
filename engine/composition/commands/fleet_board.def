@@ -101,9 +101,11 @@ ZCL_COMMAND_READY_READ(
     "How much board this node is carrying",
     "Post count and stored bytes against their caps, the oldest and newest "
     "post this node holds, how many questions are still open, how many wiki "
-    "pages exist, this node's own board identity, and whether the local "
-    "hash chain still verifies end to end.", 0,
-    "board,status,capacity,chain",
+    "pages exist, this node's own board identity, whether the local "
+    "hash chain still verifies end to end, and under carriage the pull "
+    "lane per paired peer: last pull, last answer, and why it last did not "
+    "pull.", 0,
+    "board,status,capacity,chain,carriage",
     "zcl.command.empty_input.v1", "zcl.fleet_board_status.v1", "", "",
     "z23 fleet board status",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,

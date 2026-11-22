@@ -10340,7 +10340,7 @@ static bool fbw_status_match(const struct json_value *result)
     const struct json_value *ingest = json_get(result, "post_ingest");
     const char *epoch = json_get_str(json_get(ingest, "epoch"));
     const char *disposition = json_get_str(json_get(ingest, "disposition"));
-    char rendered[8192];
+    char rendered[65536];
     size_t len = json_write(result, rendered, sizeof rendered);
     return json_get_bool(json_get(attempt, "observed")) &&
            json_get_bool(json_get(ingest, "observed")) && epoch && disposition &&
