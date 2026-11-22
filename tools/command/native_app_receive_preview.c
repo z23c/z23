@@ -535,6 +535,25 @@ static bool arp_record(const struct app_selection *s, struct zcl_command_reply *
         return arp_fail(r, "PREVIEW_BUILD_MISMATCH", "received build tuple has no matching valid record");
     return true;
 }
+static bool arp_tasks_receipt(const struct app_receive_preview *p, const struct json_value *d)
+{
+    uint8_t receipt[32], image[32];
+    return arp_text(d, "program", "bin/ztasks") && arp_text(d, "preview_program", "bin/ztasks") &&
+        arp_root_is(d, "preview_root", p->choice.package) && arp_root(d, "receipt_id", receipt) &&
+        arp_root_is(d, "preview_receipt", receipt) && arp_root_is(d, "record_id", receipt) &&
+        arp_root(d, "artifact_sha3", image) && arp_root_is(d, "image_sha3", image);
+}
+bool app_receive_preview_bind_tasks_build(struct app_receive_preview *p,
+    const struct json_value *envelope, struct zcl_command_reply *r)
+{
+    const struct json_value *d = arp_envelope(envelope, "app.build");
+    bool ok = p && p->trust == ZCL_PACKAGE_COPY_RECEIVED_TRUSTED && !p->draft && !p->recovered && arp_tuple(p, d) &&
+        arp_text(d, "stage", "commit") && arp_bool(d, "executed", false) &&
+        arp_bool(d, "recipe_build", true) && arp_bool(d, "make_ran", false) &&
+        arp_tasks_receipt(p, d);
+    if (!ok) return arp_fail(r, "PREVIEW_BUILD_MISMATCH", "successful exact Tasks recipe receipt required");
+    return arp_state_current(p, r) && arp_history(&p->choice, p->trust, r);
+}
 bool app_receive_preview_bind_build(struct app_receive_preview *p,
     const struct json_value *envelope, struct zcl_command_reply *r)
 {

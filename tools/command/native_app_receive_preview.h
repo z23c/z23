@@ -66,6 +66,9 @@ bool app_receive_preview_build_input(const struct app_receive_preview *p,
 /* Bind actual successful CLI envelopes (command/ok/status/data), not booleans.
  * A failed rebind clears prior build/preview eligibility. Replies must come from
  * the trusted worker for this request; this helper does not authenticate IPC. */
+/* Bind a Tasks recipe install to this exact trusted received copy. */
+bool app_receive_preview_bind_tasks_build(struct app_receive_preview *p,
+    const struct json_value *build_envelope, struct zcl_command_reply *failure);
 /* Validates app.build success envelope and the exact plan tuple before constructing its confirm request. */
 bool app_receive_preview_confirm_input(const struct app_receive_preview *p,
     const struct json_value *plan_envelope, struct json_value *out,

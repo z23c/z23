@@ -4,6 +4,7 @@
 #include "command/native_app_commit_progress.h"
 #include "command/native_app_receive_job.h"
 #include "command/native_app_receive_preview.h"
+#include "command/native_app_receive_copy.h"
 #include "command/native_app_share_reveal.h"
 #include "command/app_selection.h"
 #include "command/native_app_compose.h"
@@ -34,7 +35,8 @@ struct receive_flow {
     int selection_changed; /* -1 after Keep dispatch until its result proves the outcome. */
     bool plan_retry_eligible, plan_retry_requested, plan_retry_used;
     size_t retry_data_budget;
-    const char *worker_path;
+    const char *worker_path, *datadir;
+    bool tasks_offered;
     int executed; /* 0: no open worker; -1: outcome uncertain; 1: validated open. */
 };
 struct receive_progress {
@@ -491,6 +493,18 @@ static bool arf_job(struct receive_flow *f, enum app_receive_job_command command
     if (notice_failed) return arf_fail(f, "PROGRESS_NOTICE_UNAVAILABLE", "The closing notice could not be displayed; the observed operation result is retained.");
     return arf_progress_outcome(f, shown, closed);
 }
+static bool arf_tasks_plan(struct receive_flow *f, const struct json_value *plan, bool *tasks)
+{
+    *tasks = !f->adopted && !f->draft && !f->recovered && app_receive_tasks_recipe(f->reply, plan);
+    return !*tasks || app_receive_tasks_preflight(f->datadir, f->reply);
+}
+static bool arf_bind_build(struct receive_flow *f, const struct json_value *built, bool tasks)
+{
+    if (!tasks) return app_receive_preview_bind_build(f->preview, built, f->reply);
+    bool ok = app_receive_preview_bind_tasks_build(f->preview, built, f->reply) &&
+        app_receive_tasks_offer(f->datadir, f->reply, built);
+    f->tasks_offered = ok; return ok;
+}
 static bool arf_build(struct receive_flow *f)
 {
     if ((f->draft || f->recovered) && !app_receive_preview_current(f->preview, f->reply)) return false;
@@ -498,9 +512,11 @@ static bool arf_build(struct receive_flow *f)
     json_init(&input); json_init(&plan); json_init(&confirm); json_init(&built);
     bool ok = app_receive_preview_build_input(f->preview, &input) &&
         arf_job(f, APP_RECEIVE_JOB_BUILD, &input, f->adopted ? "Checking the personal saved version" : "Checking the received version", &plan) &&
-        app_receive_preview_confirm_input(f->preview, &plan, &confirm, f->reply) &&
-        arf_job(f, APP_RECEIVE_JOB_BUILD, &confirm, "Building your app", &built) &&
-        app_receive_preview_bind_build(f->preview, &built, f->reply);
+        app_receive_preview_confirm_input(f->preview, &plan, &confirm, f->reply);
+    bool tasks = false;
+    if (ok) ok = arf_tasks_plan(f, &plan, &tasks);
+    if (ok) ok = arf_job(f, APP_RECEIVE_JOB_BUILD, &confirm, "Building your app", &built);
+    if (ok) ok = arf_bind_build(f, &built, tasks);
     if (ok && f->observer) { f->build_evidence = built; json_init(&built); }
     json_free(&input); json_free(&plan); json_free(&confirm); json_free(&built);
     return ok;
@@ -834,10 +850,27 @@ static bool arf_prepare(struct receive_flow *f, const char *datadir, bool *chose
         app_receive_preview_create(&f->reply->data, datadir, &f->preview, f->reply);
     return ok && arf_ready_choice(f, chosen);
 }
+static bool arf_tasks_choice(struct receive_flow *f)
+{
+    bool chosen = false;
+    if (!arf_choose(f, "Tasks update ready",
+            "The update is offered but not running or kept. Open Tasks and choose Updates to try or keep it.",
+            "Open Tasks", ARF_FIELDS_BRIEF, &chosen)) return false;
+    if (!chosen) return true;
+    struct json_value input = {0};
+    const char *kv[] = {"action", "open", "datadir", f->datadir};
+    if (!zcl_app_input(&input, kv, 4)) { json_free(&input); return arf_fail(f, "OUT_OF_MEMORY", "Cannot open Tasks."); }
+    struct zcl_command_reply inner;
+    f->executed = -1; /* The owner may explicitly Try an update inside Tasks. */
+    bool ok = zcl_app_inner_call("app.tasks", &input, &inner, NULL);
+    if (!ok) zcl_app_inner_fail(f->reply, &inner, true);
+    zcl_command_reply_free(&inner); json_free(&input); return ok;
+}
 static bool arf_continue(struct receive_flow *f, bool chosen)
 {
     const char *status = f->recovered ? "recovered" : f->adopted ? "adopted" : "received";
-    bool ok = chosen ? (arf_build(f) && arf_open(f) && arf_keep(f)) : arf_status(f, status);
+    bool ok = chosen ? (arf_build(f) && (f->tasks_offered ?
+        (arf_tasks_choice(f) && arf_status(f, "preview_offered")) : (arf_open(f) && arf_keep(f)))) : arf_status(f, status);
     /* This card offers Keep or Close; Close ends the owner flow. */
     if (ok && chosen && f->observer && !strcmp(f->status, "kept"))
         f->observer(f->observer_context, &f->build_evidence, &f->open_evidence, f->reply);
@@ -906,7 +939,7 @@ static void arf_run(const char *datadir, struct zcl_command_reply *reply,
     app_confirm_presenter presenter, void *context, bool adopted, const char *worker_path,
     app_receive_build_observer observer, void *observer_context, size_t data_budget)
 {
-    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path, .observer = observer, .observer_context = observer_context, .retry_data_budget = data_budget};
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .status = adopted ? "adopted" : "received", .adopted = adopted, .worker_path = worker_path, .observer = observer, .observer_context = observer_context, .retry_data_budget = data_budget, .datadir = datadir};
     json_init(&f.build_evidence); json_init(&f.open_evidence);
     json_init(&f.operations); json_set_array(&f.operations);
     bool chosen = false;

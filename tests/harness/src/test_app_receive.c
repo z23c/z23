@@ -4446,10 +4446,129 @@ static int rud_readiness(void)
     return failures;
 }
 
+struct rtasks_presenter { unsigned ready, progress, offered; };
+static bool rtasks_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)pages; (void)why; (void)cap;
+    struct rtasks_presenter *p = context;
+    if (!strcmp(model->title, "Your copy is ready")) { ++p->ready; return rdiag_choose(model, live); }
+    if (!strcmp(model->title, "Tasks update ready")) {
+        ++p->offered; bool close = false, redraw = false;
+        return strstr(model->summary, "not running or kept") && rt_action(live, 0, &close, &redraw) && close;
+    }
+    if (!strcmp(model->title, "The next step did not finish") || !strcmp(model->title, "Preview opened")) return false;
+    ++p->progress; int64_t end = platform_time_monotonic_ms() + 120000;
+    do {
+        bool redraw = false, close = false;
+        live->owner.update(live->owner.context, NULL, false, &redraw, &close);
+        if (close) return true;
+        platform_sleep_ms(1);
+    } while (platform_time_monotonic_ms() < end);
+    return false;
+}
+static bool rtasks_offer_identity(const struct receive_fixture *f, const struct zcl_command_reply *reply)
+{
+    const struct json_value *offer = json_get(json_get(&reply->data, "preview_offer"), "data");
+    const char *root = json_get_str(json_get(offer, "preview_root"));
+    const char *receipt = json_get_str(json_get(offer, "preview_receipt"));
+    const char *program = json_get_str(json_get(offer, "preview_program"));
+    const struct json_value *operations = json_get(&reply->data, "operations");
+    const char *built_receipt = json_get_str(json_get(json_at(operations, 1), "record_id"));
+    return root && !strcmp(root, f->package) && receipt && built_receipt &&
+        !strcmp(receipt, built_receipt) && program && !strcmp(program, "bin/ztasks");
+}
+static bool rtasks_offer_result(const struct receive_fixture *f, const struct zcl_command_reply *reply,
+                                const struct rtasks_presenter *p)
+{
+    const char *state = json_get_str(json_get(&reply->data, "continuation"));
+    const struct json_value *executed = json_get(&reply->data, "continuation_executed");
+    return reply->status == ZCL_COMMAND_STATUS_PASSED && p->ready == 1 && p->progress == 2 && p->offered == 1 &&
+        rtasks_offer_identity(f, reply) && state && !strcmp(state, "preview_offered") &&
+        json_get_bool(json_get(&reply->data, "preview_offered")) &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) && !json_get(&reply->data, "kept");
+}
+static bool rtasks_build_identity(struct json_value *data, const struct receive_fixture *f,
+                                  const struct zcl_command_reply *reply, const char *receipt)
+{
+    const struct json_value *ops = json_get(&reply->data, "operations");
+    const struct json_value *built = json_at(ops, 1);
+    const char *version = json_get_str(json_get(&reply->data, "version"));
+    const char *image = json_get_str(json_get(built, "image_sha3"));
+    const char *record = json_get_str(json_get(built, "record_id"));
+    return version && image && record && json_push_kv_str(data, "copy", f->destination) &&
+        json_push_kv_str(data, "version", version) && json_push_kv_str(data, "package_root", f->package) &&
+        json_push_kv_str(data, "preview_root", f->package) && json_push_kv_str(data, "receipt_id", record) &&
+        json_push_kv_str(data, "preview_receipt", receipt) && json_push_kv_str(data, "record_id", record) &&
+        json_push_kv_str(data, "image_sha3", image) && json_push_kv_str(data, "artifact_sha3", image);
+}
+static bool rtasks_build_envelope(struct json_value *wire, const struct receive_fixture *f,
+                                  const struct zcl_command_reply *reply, const char *receipt)
+{
+    struct json_value data; json_init(&data); json_set_object(&data); json_init(wire); json_set_object(wire);
+    bool ok = rtasks_build_identity(&data, f, reply, receipt) && json_push_kv_str(&data, "stage", "commit") &&
+        json_push_kv_bool(&data, "executed", false) && json_push_kv_bool(&data, "make_ran", false) &&
+        json_push_kv_bool(&data, "recipe_build", true) && json_push_kv_str(&data, "program", "bin/ztasks") &&
+        json_push_kv_str(&data, "preview_program", "bin/ztasks") && json_push_kv_str(wire, "command", "app.build") &&
+        json_push_kv_str(wire, "status", "passed") && json_push_kv_bool(wire, "ok", true) && json_push_kv(wire, "data", &data);
+    json_free(&data); return ok;
+}
+static bool rtasks_receipt_mismatch(const struct receive_fixture *f, struct zcl_command_reply *reply)
+{
+    const struct json_value *ops = json_get(&reply->data, "operations");
+    const char *receipt = json_get_str(json_get(json_at(ops, 1), "record_id"));
+    if (!receipt || strlen(receipt) != 64) return false;
+    struct app_receive_preview *preview = NULL;
+    struct zcl_command_reply check; zcl_command_reply_init(&check, "zcl.app_receive.v1");
+    bool ok = app_receive_preview_create(&reply->data, f->datadir, &preview, &check);
+    struct json_value wire; json_init(&wire);
+    if (ok) ok = rtasks_build_envelope(&wire, f, reply, receipt) &&
+        app_receive_preview_bind_tasks_build(preview, &wire, &check);
+    json_free(&wire);
+    char wrong[65]; memcpy(wrong, receipt, 65); wrong[63] = wrong[63] == '0' ? '1' : '0';
+    if (ok) ok = rtasks_build_envelope(&wire, f, reply, wrong) &&
+        !app_receive_preview_bind_tasks_build(preview, &wire, &check) &&
+        !strcmp(check.error.code, "PREVIEW_BUILD_MISMATCH");
+    json_free(&wire); app_receive_preview_close(preview); zcl_command_reply_free(&check); return ok;
+}
+static int rtasks_offer_case(void)
+{
+    int failures = 0; size_t saved = 0;
+    struct ru_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
+        {"XDG_RUNTIME_DIR", NULL}, {"XDG_CACHE_HOME", NULL}, {"XDG_DATA_HOME", NULL},
+        {"XAUTHORITY", NULL}, {"ZCL_CLI_TEST_NO_SERVICE_LOOKUP", NULL}};
+    struct receive_fixture f = {0}; struct json_value input; json_init(&input);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST("received Tasks recipe offers verified update without executing or keeping") {
+        char image[PATH_MAX];
+        ASSERT(ru_env_save(env, sizeof(env)/sizeof(env[0]), &saved));
+        ASSERT(rt_setup_tasks(&f) && ru_environment(&f) && realpath("build/bin/z23-dev", image));
+        ASSERT(rt_input(&input, &f));
+        struct zcl_command_request request = {.input = &input};
+        struct rt_presenter receive = {.fixture = &f, .decision = RT_CONFIRM};
+        zcl_test_app_receive_run(&request, &reply, rt_present, &receive);
+        ASSERT(rt_expected_reply(&receive, &reply));
+        struct rtasks_presenter presenter = {0};
+        zcl_native_bridge_ensure_rpc();
+        char old[PATH_MAX]; (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+        int port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f.datadir, 39461);
+        app_receive_flow_run_test(f.datadir, &reply, rtasks_present, &presenter, image);
+        zcl_native_bridge_bind_rpc(old, port);
+        ASSERT(rtasks_offer_result(&f, &reply, &presenter));
+        ASSERT(rtasks_receipt_mismatch(&f, &reply));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); json_free(&input);
+    if (f.world.root[0] && test_rm_rf_recursive(f.world.root) != 0) ++failures;
+    if (!ru_env_restore(env, saved)) ++failures;
+    return failures;
+}
 int test_app_receive_ui(void)
 {
     if (access("/usr/bin/Xvfb", X_OK) != 0) { puts("SKIP (app_receive_ui requires Linux Xvfb)"); return 0; }
-    int failures = rdiag_case(RDIAG_CLOSE);
+    int failures = rtasks_offer_case();
+    failures += rdiag_case(RDIAG_CLOSE);
     failures += rtry_success(false, false);
     failures += rtry_success(true, false);
     failures += rtry_success(false, true);
