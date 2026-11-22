@@ -1435,6 +1435,29 @@ static int test_objectives_catalog_selects_dev_land(void)
     return failures;
 }
 
+/* Every command table (engine/composition/commands/*.def, including the
+ * telemetry subtree) declares command inputs that test_command_input_bounds
+ * pins, so any table change selects that group with the registry catalog. */
+static int test_command_table_selects_input_bounds(void)
+{
+    static const char *const table_units[] = {
+        "engine/composition/commands/dev.def",
+        "engine/composition/commands/telemetry/root.def",
+    };
+    int failures = 0;
+    TEST("command table sources select the input-bounds proof") {
+        for (size_t i = 0; i < sizeof(table_units) / sizeof(table_units[0]); i++) {
+            struct agent_impact_acc acc = {0};
+            ASSERT(agent_impact_apply_shared_rules(table_units[i], &acc));
+            ASSERT(impact_has_group(&acc, "command_input_bounds"));
+            ASSERT(impact_has_group(&acc, "command_registry_catalog"));
+            ASSERT(!acc.groups_lost);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_devagent_routes(void)
 {
     int failures = 0;
@@ -1461,7 +1484,7 @@ static int test_code_devagent_routes(void)
             const char *route = zcl_native_code_route_for_path(path, &actual, &consensus);
             ASSERT(!consensus);
             ASSERT_STR_EQ(route, cases[i].group);
-            agent_impact_add_group_list(&expected, "make_lint_gates command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform");
+            agent_impact_add_group_list(&expected, "make_lint_gates command_input_bounds command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform");
             agent_impact_add_group(&expected, cases[i].group);
             agent_impact_add_group_list(&expected, cases[i].extra);
             ASSERT(agent_impact_apply_shared_rules(path, &shared));
@@ -2722,6 +2745,7 @@ int test_code_impact(void)
     failures += test_registration_gate_impact();
     failures += test_code_brief_selects_mcp_serve();
     failures += test_objectives_catalog_selects_dev_land();
+    failures += test_command_table_selects_input_bounds();
     failures += test_code_route_completeness();
     failures += test_code_route_consumer_bounds();
     failures += test_code_impact_unsafe_narrow();
