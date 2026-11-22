@@ -3735,7 +3735,11 @@ static bool adv_has_action(const struct zcl_present_model_v1 *m,
 }
 static bool adv_empty_guidance(const struct zcl_present_model_v1 *m, bool previous, bool more)
 {
-    return (strstr(m->summary, "Refresh") != NULL) == !(previous && more) &&
+    bool guidance = !previous && !more
+        ? strstr(m->summary, "Back > Discover apps > Open a shared app") != NULL &&
+          strstr(m->summary, "open .z23share with Z23") != NULL
+        : (strstr(m->summary, "Refresh") != NULL) == !(previous && more);
+    return guidance &&
         (strstr(m->summary, "More apps") != NULL) == more &&
         (strstr(m->summary, "Previous page") != NULL) == previous;
 }
@@ -3747,7 +3751,7 @@ static bool adv_empty_page(bool previous, bool more)
     return m.action_count == (previous || more ? 3u : 2u) &&
         m.action_count <= 4 && !adv_has_action(&m, "review", NULL) &&
         adv_empty_guidance(&m, previous, more) &&
-        adv_has_action(&m, "back", NULL) &&
+        adv_has_action(&m, "back", !previous && !more ? "Back" : NULL) &&
         adv_has_action(&m, "next", "More apps") == more &&
         adv_has_action(&m, "previous", "Previous page") == previous &&
         adv_has_action(&m, "refresh", "Refresh") == !(previous && more);
