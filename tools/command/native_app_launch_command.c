@@ -216,8 +216,15 @@ static void app_open_failed_spawn(const struct app_launch_entry *entry,
         out->term_signal = sp->term_signal;
         char brief[APP_LAUNCH_BRIEF_MAX + 1];
         app_proc_log_brief(out->log_path, brief, sizeof(brief));
-        snprintf(text, sizeof(text), "%s exited before its window was ready "
+        if (!sp->exit_code && !sp->term_signal) {
+            snprintf(text, sizeof(text), "%s %s (exit code 0, signal 0); log %.400s:\n%s",
+                     entry->id, app_open_exit_description(0, 0), out->log_path, brief);
+            app_fail(out, APP_STAGE_EXITED_EARLY, text, "open the app again when ready");
+            return;
+        }
+        snprintf(text, sizeof(text), "%s %s "
                  "(exit code %d, signal %d); log %.400s:\n%s", entry->id,
+                 app_open_exit_description(sp->exit_code, sp->term_signal),
                  sp->exit_code, sp->term_signal, out->log_path, brief);
         app_fail(out, APP_STAGE_EXITED_EARLY, text,
                  "read log_tail: a display or GL error means the desktop "

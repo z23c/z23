@@ -98,6 +98,7 @@ struct al_fx {
     char raised[PATH_MAX];
     char bin_ready[PATH_MAX];
     char bin_exit[PATH_MAX];
+    char bin_clean[PATH_MAX];
     char bin_silent[PATH_MAX];
     char bin_quiet[PATH_MAX]; /* declares no raise, has no handler */
     char bin_liar[PATH_MAX];  /* declares raise, has no handler */
@@ -187,6 +188,7 @@ static bool al_paths(struct al_fx *f)
     return ok &&
            al_path(f->bin_ready, sizeof(f->bin_ready), f->root, "app-ready") &&
            al_path(f->bin_exit, sizeof(f->bin_exit), f->root, "app-exit") &&
+           al_path(f->bin_clean, sizeof(f->bin_clean), f->root, "app-clean") &&
            al_path(f->bin_silent, sizeof(f->bin_silent), f->root, "app-silent") &&
            al_path(f->bin_quiet, sizeof(f->bin_quiet), f->root, "app-quiet") &&
            al_path(f->bin_liar, sizeof(f->bin_liar), f->root, "app-liar") &&
@@ -206,6 +208,7 @@ static bool al_setup(struct al_fx *f)
     bool ok = al_paths(f);
     ok = ok && al_copy_exe(fixture, f->bin_ready, 0700) &&
          al_copy_exe(fixture, f->bin_exit, 0700) &&
+         al_copy_exe("/bin/true", f->bin_clean, 0700) &&
          al_copy_exe(fixture, f->bin_silent, 0700) &&
          al_copy_exe(fixture, f->bin_quiet, 0700) &&
          al_copy_exe(fixture, f->bin_liar, 0700) &&
@@ -392,11 +395,29 @@ static int case_refusals(struct al_fx *f)
         ASSERT_EQ(f->res.pid, 0);
     PASS(); }
     TEST("an app that exits before ready is exited_early with its log") {
+        ASSERT_STR_EQ(app_open_exit_description(0, 0), "exited cleanly during the startup check");
+        ASSERT_STR_EQ(app_open_exit_description(3, 0), "exited abnormally during the startup check");
+        ASSERT_STR_EQ(app_open_exit_description(0, 15), "exited abnormally during the startup check");
         al_open(f, "crashy");
         ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "exited_early");
         ASSERT(f->res.exited);
         ASSERT_EQ(f->res.exit_code, 3);
+        ASSERT(strstr(f->res.message, "exited abnormally during the startup check"));
         ASSERT(strstr(f->res.log_tail, "cannot open display"));
+    PASS(); }
+    TEST("clean exit during startup remains a failure without guessing its cause") {
+        struct app_launch_entry *entry = NULL;
+        for (size_t i = 0; i < f->reg.count; ++i)
+            if (!strcmp(f->reg.entries[i].id, "crashy")) entry = &f->reg.entries[i];
+        ASSERT(entry);
+        char saved[sizeof(entry->executable)]; (void)snprintf(saved, sizeof(saved), "%s", entry->executable);
+        (void)snprintf(entry->executable, sizeof(entry->executable), "%s", f->bin_clean);
+        al_open(f, "crashy");
+        (void)snprintf(entry->executable, sizeof(entry->executable), "%s", saved);
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "exited_early");
+        ASSERT(f->res.exited); ASSERT_EQ(f->res.exit_code, 0); ASSERT_EQ(f->res.term_signal, 0);
+        ASSERT(strstr(f->res.message, "exited cleanly during the startup check"));
+        ASSERT(strstr(f->res.hint, "open the app again"));
     PASS(); }
     TEST("an app that prints the marker then dies is not opened and says why") {
         al_open(f, "dyingapp");

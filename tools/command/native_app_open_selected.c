@@ -390,7 +390,8 @@ static void as_launch(struct as_open *a)
     const char *code = a->outcome.exited ? "EXITED_EARLY" : "NOT_READY";
     char brief[APP_LAUNCH_BRIEF_MAX + 1], why[APP_LAUNCH_BRIEF_MAX + 160];
     app_proc_log_brief(a->log, brief, sizeof(brief));
-    (void)snprintf(why, sizeof(why), "the app exited before it was ready (exit code %d, signal %d); last log lines:\n%s",
+    (void)snprintf(why, sizeof(why), "the app %s (exit code %d, signal %d); last log lines:\n%s",
+                   app_open_exit_description(a->outcome.exit_code, a->outcome.term_signal),
                    a->outcome.exit_code, a->outcome.term_signal, brief);
     zcl_command_reply_fail(a->reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                            code, "open", false, true,

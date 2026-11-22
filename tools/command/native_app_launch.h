@@ -186,6 +186,12 @@ void app_launch_open(const struct app_launch_env *env,
                      struct app_open_result *out);
 
 const char *app_open_stage_name(enum app_open_stage stage);
+/* A clean exit is an observation, not evidence of why the app closed. */
+static inline const char *app_open_exit_description(int exit_code, int term_signal)
+{
+    return !exit_code && !term_signal ? "exited cleanly during the startup check" :
+                                      "exited abnormally during the startup check";
+}
 const char *app_open_status_name(enum app_open_status status);
 
 /* ── process layer (native_app_launch_process.c) ─────────────────────── */
