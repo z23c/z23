@@ -7,6 +7,12 @@
 
 size_t wallet_find_slot_internal(const struct wallet *w,
                                  const struct uint256 *hash);
+
+/* Index maintenance; every call holds w->cs. insert: slot is used with its final
+ * txid. remove: call before the slot is cleared. clear: all slots gone. */
+void wallet_tx_index_insert_locked(struct wallet *w, size_t slot);
+void wallet_tx_index_remove_locked(struct wallet *w, size_t slot);
+void wallet_tx_index_clear(struct wallet *w);
 void wallet_key_pool_consume_transaction_outputs_locked(
     struct wallet *w, const struct transaction *tx);
 

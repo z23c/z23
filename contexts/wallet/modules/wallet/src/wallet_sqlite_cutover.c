@@ -7,6 +7,7 @@
 #include "models/ar_after_commit.h"
 #include "models/database.h"
 #include "sha3/sha3.h"
+#include "wallet_internal.h"
 #include "wallet_sqlite_internal.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
@@ -462,6 +463,7 @@ static void wsql_stage_transfer(struct wallet *w, struct wsql_tx_stage *stage, c
             wallet_mark_dirty(dst);
         } else {
             *dst = *src; transaction_init(&src->tx); w->num_wallet_tx++;
+            wallet_tx_index_insert_locked(w, slots[i]);
         }
     }
 }

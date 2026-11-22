@@ -12,6 +12,7 @@
 void wallet_init(struct wallet *w)
 {
     memset(w->map_wallet, 0, sizeof(w->map_wallet));
+    memset(w->tx_index, 0, sizeof(w->tx_index));
     memset(w->key_pool, 0, sizeof(w->key_pool));
     memset(w->keystore.keys, 0, sizeof(w->keystore.keys));
     memset(w->keystore.scripts, 0, sizeof(w->keystore.scripts));
@@ -25,6 +26,7 @@ void wallet_init_zeroed(struct wallet *w)
     memset(&w->readiness, 0, sizeof(w->readiness));
     keystore_init_zeroed(&w->keystore);
     w->num_wallet_tx = 0;
+    w->tx_index_count = 0;
     w->key_pool_size = 0;
     w->next_key_pool_index = 0;
     w->oldest_key_pool_time = 0;

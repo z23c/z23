@@ -158,6 +158,7 @@ void wallet_free(struct wallet *w)
             w->map_wallet[i].used = false;
         }
     }
+    wallet_tx_index_clear(w);
     w->num_wallet_tx = 0;
     wallet_release_note_buffer(w->sapling_notes, w->sapling_notes_cap);
     w->sapling_notes = NULL;
@@ -515,17 +516,6 @@ bool wallet_get_key_from_pool(struct wallet *w, struct pubkey *pk_out)
     return true;
 }
 
-size_t wallet_find_slot_internal(const struct wallet *w,
-                                 const struct uint256 *hash)
-{
-    for (size_t i = 0; i < MAX_WALLET_TX; i++) {
-        if (w->map_wallet[i].used &&
-            uint256_eq(&w->map_wallet[i].tx.hash, hash))
-            return i;
-    }
-    return MAX_WALLET_TX;
-}
-
 static size_t wallet_find_free_slot(const struct wallet *w)
 {
     for (size_t i = 0; i < MAX_WALLET_TX; i++) {
@@ -574,6 +564,7 @@ bool wallet_add_to_wallet(struct wallet *w, const struct wallet_tx *wtx)
     }
     copy.used = true;
     w->map_wallet[idx] = copy;
+    wallet_tx_index_insert_locked(w, idx);
 
     w->num_wallet_tx++;
     zcl_mutex_unlock(&w->cs);
@@ -1132,6 +1123,7 @@ struct zcl_result wallet_rollback_transaction(
         }
     }
 
+    wallet_tx_index_remove_locked(w, idx);
     transaction_free(&w->map_wallet[idx].tx);
     memset(&w->map_wallet[idx], 0, sizeof(w->map_wallet[idx]));
     if (w->num_wallet_tx > 0)
@@ -1252,6 +1244,7 @@ enum wallet_transparent_fold_result wallet_transparent_fold_locked(
             if (wallet_replay_owned_input(w, tx, i))
                 copy.from_me = true;
         w->map_wallet[idx] = copy;
+        wallet_tx_index_insert_locked(w, idx);
         w->num_wallet_tx++;
     }
     w->map_wallet[idx].hash_block = *block_hash;

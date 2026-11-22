@@ -143,6 +143,14 @@ struct wallet_readiness {
     uint64_t epoch;
 };
 
+#define WALLET_TX_INDEX_SIZE (MAX_WALLET_TX * 2u)
+
+/* txid -> slot entry (slot + 1, 0 = empty; low-entropy txid hash). */
+struct wallet_tx_index_entry {
+    uint32_t slot_plus;
+    uint32_t hash;
+};
+
 struct wallet {
     zcl_mutex_t cs;
     struct wallet_readiness readiness;
@@ -150,6 +158,12 @@ struct wallet {
 
     struct wallet_tx map_wallet[MAX_WALLET_TX];
     size_t num_wallet_tx;
+
+    /* Lookup index over map_wallet (1 MiB, embedded, zero = empty), kept by
+     * wallet_tx_index.c under cs. Code that writes a slot directly must call
+     * wallet_tx_index_rebuild_locked. */
+    struct wallet_tx_index_entry tx_index[WALLET_TX_INDEX_SIZE];
+    size_t tx_index_count;
 
     struct wallet_key_pool_entry key_pool[MAX_KEY_POOL];
     size_t key_pool_size;
@@ -205,6 +219,20 @@ struct wallet {
 };
 
 void wallet_init(struct wallet *w);
+
+/* Slot of the used transaction with this txid, or MAX_WALLET_TX. Indexed
+ * lookup and the linear reference scan return identical results (the lowest
+ * slot when a txid is duplicated). Caller holds w->cs. */
+size_t wallet_find_slot_indexed(const struct wallet *w, const struct uint256 *hash);
+size_t wallet_find_slot_scan(const struct wallet *w, const struct uint256 *hash);
+/* Re-derive the index from the table; call after writing slots directly. */
+void wallet_tx_index_rebuild_locked(struct wallet *w);
+#ifdef ZCL_TESTING
+/* Test builds compare every internal lookup with the scan (default on) and
+ * return the scan answer on disagreement. */
+void wallet_tx_index_set_check_for_test(bool on);
+size_t wallet_tx_index_mismatches_for_test(void);
+#endif
 
 /* Public scan-set identity only; locked variant requires wallet, transparent
  * keystore and Sapling keystore mutexes in that order. */

@@ -110,6 +110,7 @@ static void wallet_unspend_notes_for_nullifiers(struct wallet *w,
 static void wallet_erase_wallet_tx_entry(struct wallet *w,
                                          struct wallet_tx *wtx)
 {
+    wallet_tx_index_remove_locked(w, (size_t)(wtx - w->map_wallet));
     transaction_free(&wtx->tx);
     memset(wtx, 0, sizeof(*wtx));
     if (w->num_wallet_tx > 0)

@@ -921,6 +921,8 @@ int test_wallet(void)
 
     { extern int test_wallet_init_zeroed_checks(void);
       failures += test_wallet_init_zeroed_checks(); }
+    { extern int test_wallet_tx_index_checks(void);
+      failures += test_wallet_tx_index_checks(); }
 
     return failures;
 }
