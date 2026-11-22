@@ -1257,6 +1257,37 @@ static bool bm_import_epoch_moved(struct bm_state *s, const char *epoch)
     return moved;
 }
 
+static const char *bm_page_shape_problem(const struct json_value *out,
+                                         const struct json_value *posts)
+{
+    if (!posts || posts->type != JSON_ARR) return "posts";
+    const struct json_value *returned = json_get(out, "returned");
+    if (returned && (returned->type != JSON_INT || json_get_int(returned) < 0 ||
+        (unsigned long long)json_get_int(returned) != json_size(posts))) return "returned";
+    return NULL;
+}
+
+/* Refuse incomplete metadata before adopting an epoch or advancing a cursor. */
+static const char *bm_page_problem(const struct json_value *out, const struct bm_state *s)
+{
+    const struct json_value *posts = json_get(out, "posts");
+    const char *problem = bm_page_shape_problem(out, posts);
+    if (problem) return problem;
+    const struct json_value *epoch_value = json_get(out, "epoch");
+    const struct json_value *scanned_value = json_get(out, "scanned");
+    const char *epoch = epoch_value && epoch_value->type == JSON_STR
+        ? json_get_str(epoch_value) : NULL;
+    uint8_t decoded[16];
+    if (!epoch || !zcl_hex_decode_lower(epoch, decoded, sizeof(decoded))) return "epoch";
+    if (!scanned_value || scanned_value->type != JSON_INT) return "scanned";
+    long long scanned = json_get_int(scanned_value);
+    if (scanned < 0) return "scanned";
+    if (strcmp(epoch, s->import_epoch) != 0 && s->import_after != 0) return NULL;
+    if (scanned < s->import_after || (json_size(posts) > 0 && scanned == s->import_after))
+        return "scanned";
+    return NULL;
+}
+
 /* One fleet page after the cursor. False when no page could be read. */
 static bool bm_import_page(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
@@ -1275,6 +1306,14 @@ static bool bm_import_page(const struct zcl_boardmail_ctx *c,
     (void)json_push_kv_int(&in, "limit", BM_PAGE_LIMIT);
     ok = bm_call(&in, &out) == BM_RPC_OK;
     json_free(&in);
+    if (ok) {
+        const char *problem = bm_page_problem(&out, s);
+        if (problem) {
+            LOG_WARN(BM_LOG, "fleet page field=%s is invalid; receiver holds its cursor; "
+                     "inspect the local fleet_board fleet_page response", problem);
+            ok = false;
+        }
+    }
     if (ok && bm_import_epoch_moved(s, bm_str(&out, "epoch"))) {
         /* A page after a number the new process never handed out: ask
          * again from the start. */

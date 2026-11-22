@@ -92,6 +92,13 @@ struct bmx_post {
     char push_to[80];
 };
 
+enum bmx_page_fault {
+    BMX_PAGE_OK, BMX_PAGE_MISSING_POSTS, BMX_PAGE_WRONG_POSTS,
+    BMX_PAGE_MISSING_EPOCH, BMX_PAGE_MISSING_SCANNED, BMX_PAGE_BAD_EPOCH,
+    BMX_PAGE_BAD_SCANNED, BMX_PAGE_NEGATIVE_SCANNED, BMX_PAGE_SHORT_RETURN,
+    BMX_PAGE_BACKWARD, BMX_PAGE_STALLED, BMX_PAGE_EMPTY_ADVANCE
+};
+
 struct bmx_node {
     struct bmx_post p[BMX_POSTS];
     size_t n;
@@ -99,6 +106,7 @@ struct bmx_node {
     char epoch[33];
     bool down;      /* no node answers at all */
     bool show_down; /* the node answers everything but show */
+    enum bmx_page_fault page_fault; /* malformed successful fleet_page response */
 };
 
 static struct bmx_node g_bmx_node[2];
@@ -333,11 +341,50 @@ static void bmx_op_post(const struct json_value *in, struct json_value *out,
     (void)json_push_kv_str(out, "id", stored->id);
 }
 
+static void bmx_bad_page(struct bmx_node *n, struct json_value *out, long long after)
+{
+    struct json_value posts, item;
+    (void)json_push_kv_bool(out, "ok", true);
+    if (n->page_fault == BMX_PAGE_WRONG_POSTS) {
+        (void)json_push_kv_str(out, "posts", "not an array");
+    } else if (n->page_fault != BMX_PAGE_MISSING_POSTS) {
+        json_init(&posts); json_set_array(&posts);
+        if (n->page_fault == BMX_PAGE_STALLED && n->n) {
+            json_init(&item); json_set_object(&item);
+            bmx_render(&item, &n->p[0]);
+            (void)json_push_back(&posts, &item); json_free(&item);
+        }
+        (void)json_push_kv(out, "posts", &posts); json_free(&posts);
+    }
+    if (n->page_fault != BMX_PAGE_MISSING_EPOCH) {
+        const char *epoch = n->epoch;
+        if (n->page_fault == BMX_PAGE_WRONG_POSTS)
+            epoch = "00000000000000000000000000000003";
+        if (n->page_fault == BMX_PAGE_BAD_EPOCH) epoch = "invalid";
+        (void)json_push_kv_str(out, "epoch", epoch);
+    }
+    if (n->page_fault == BMX_PAGE_SHORT_RETURN)
+        (void)json_push_kv_int(out, "returned", 1);
+    switch (n->page_fault) {
+    case BMX_PAGE_MISSING_SCANNED: break;
+    case BMX_PAGE_BAD_SCANNED: (void)json_push_kv_bool(out, "scanned", true); break;
+    case BMX_PAGE_NEGATIVE_SCANNED: (void)json_push_kv_int(out, "scanned", -1); break;
+    case BMX_PAGE_BACKWARD: (void)json_push_kv_int(out, "scanned", 0); break;
+    case BMX_PAGE_STALLED: (void)json_push_kv_int(out, "scanned", after); break;
+    case BMX_PAGE_EMPTY_ADVANCE: (void)json_push_kv_int(out, "scanned", after + 1); break;
+    default: (void)json_push_kv_int(out, "scanned", 1); break;
+    }
+}
+
 static void bmx_op_page(const struct json_value *in, struct json_value *out,
                         long long now)
 {
     struct bmx_node *n = &g_bmx_node[g_bmx_active];
     long long after = json_get_int(json_get(in, "after"));
+    if (n->page_fault != BMX_PAGE_OK) {
+        bmx_bad_page(n, out, after);
+        return;
+    }
     long long limit = json_get_int(json_get(in, "limit"));
     long long scanned = after;
     bool trace = g_bmx_replay.enabled && g_bmx_active == BMX_A && after == 0;
@@ -1682,6 +1729,74 @@ _test_next:;
     return failures;
 }
 
+static int bmx_t_incomplete_page(void)
+{
+    int failures = 0;
+    TEST("boardmail: incomplete page holds cursor until a healthy retry") {
+        for (int fault = BMX_PAGE_MISSING_POSTS; fault <= BMX_PAGE_SHORT_RETURN; fault++) {
+            struct rcv_beat_stats st;
+            char tag[64];
+            (void)snprintf(tag, sizeof(tag), "incomplete-page-%d", fault);
+            ASSERT(bmx_setup(tag));
+            ASSERT(bmx_sent("job-page"));
+            /* A valid empty page establishes B's current epoch and cursor. */
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
+                                "import_epoch=00000000000000000000000000000002", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=0", NULL), 1);
+            bmx_carry(BMX_A, BMX_B);
+            g_bmx_node[BMX_B].page_fault = (enum bmx_page_fault)fault;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT(st.board_deferred >= 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state",
+                                "import_epoch=00000000000000000000000000000002", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=0", NULL), 1);
+            g_bmx_node[BMX_B].page_fault = BMX_PAGE_OK;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 1);
+            ASSERT_EQ(st.admitted, 1);
+            ASSERT_EQ(bmx_queued("job-page"), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "\"job-page\"", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", "state=accepted", "job-page"), 1);
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_queued("job-page"), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "\"job-page\"", NULL), 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/outbox.jsonl", "state=accepted", "job-page"), 1);
+            /* A same-epoch backward scan must not rewind a saved cursor. */
+            g_bmx_node[BMX_B].page_fault = BMX_PAGE_BACKWARD;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT(st.board_deferred >= 1);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=2", NULL), 1);
+            g_bmx_node[BMX_B].page_fault = BMX_PAGE_STALLED;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT(st.board_deferred >= 1);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=2", NULL), 1);
+            /* An empty page may scan past an unexportable stored row. */
+            g_bmx_node[BMX_B].page_fault = BMX_PAGE_EMPTY_ADVANCE;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_deferred, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.state", "import_after=3", NULL), 1);
+            g_bmx_node[BMX_B].page_fault = BMX_PAGE_OK;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_queued("job-page"), 1);
+            bmx_teardown();
+        }
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
 static int bmx_t_oversize(void)
 {
     int failures = 0;
@@ -1860,6 +1975,7 @@ int test_devagent_boardmail(void)
 #if !defined(_WIN32)
     failures += bmx_t_round_trip();
     failures += bmx_t_regossip();
+    failures += bmx_t_incomplete_page();
     failures += bmx_t_crash_between();
     failures += bmx_t_forged();
     failures += bmx_t_wrong_signer();
