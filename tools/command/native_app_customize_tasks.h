@@ -4,6 +4,7 @@
 #define ZCL_NATIVE_APP_CUSTOMIZE_TASKS_H
 #include "models/package_resident.h"
 #include "vcs/package_manifest.h"
+#include "json/json.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,6 +15,8 @@ struct ac_tasks_file {
     uint32_t mode;
 };
 /* Read the current resident record without modifying the profile. */
+bool ac_tasks_ai_pin(const char *directory, struct package_resident_record *out);
+bool ac_tasks_ai_identity(struct json_value *data, const struct package_resident_record *kept);
 bool ac_tasks_kept_read(const char *directory, struct package_resident_record *out);
 /* Read the verified manifest; caller frees it and rechecks resident identity. */
 bool ac_tasks_manifest_read(const char *directory, const char *root, uint64_t generation,

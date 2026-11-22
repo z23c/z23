@@ -4,6 +4,7 @@
 #endif
 #include "test/test_core.h"
 #include "command/native_app_adopt.h"
+#include "command/native_app_customize_tasks.h"
 #include "command/native_app_confirm.h"
 #include "command/native_command.h"
 #include "command/native_zcode_package_copy.h"
@@ -519,10 +520,37 @@ static bool ad_rejected_pin(const struct abc_world *w, bool complete)
     zcl_command_reply_free(&reply); json_free(&input); return ok;
 }
 
+static bool ad_tasks_request(const char *request)
+{
+    return request && strstr(request, "choose the exact .z23share") &&
+        strstr(request, "zcode.package.bundle.verify") && strstr(request, "apps_adopt") &&
+        strstr(request, "local owner window") && strstr(request, "separate Keep") &&
+        strstr(request, "never choose another release automatically");
+}
+
+static bool ad_tasks_setup(const struct abc_world *w, const struct package_resident_identity *id)
+{
+    struct json_value data = {0}; json_set_object(&data);
+    struct package_resident_record kept = {0};
+    bool ok = ac_tasks_ai_pin(w->alice_datadir, &kept) && ac_tasks_ai_identity(&data, &kept);
+    ok = ok && !ac_tasks_ai_pin(w->alice_datadir, NULL) && !ac_tasks_ai_identity(NULL, &kept);
+    const char *root = json_get_str(json_get(&data, "kept_root"));
+    const char *receipt = json_get_str(json_get(&data, "kept_receipt"));
+    const char *request = json_get_str(json_get(&data, "request"));
+    ok = ok && json_get_int(json_get(&data, "kept_generation")) == 1 &&
+        root && !strcmp(root, id->package_root) && receipt && !strcmp(receipt, id->receipt_id) &&
+        ad_tasks_request(request);
+    json_free(&data);
+    json_set_object(&data);
+    if (ok) ok = !ac_tasks_ai_pin(w->root, &kept);
+    json_free(&data); return ok;
+}
+
 static bool ad_tasks_pinned(const struct abc_world *w)
 {
     struct package_resident_identity id = {0};
     if (!ad_tasks_receipt(w, &id, false) || !ad_tasks_activate(w->alice_datadir, &id)) return false;
+    if (!ad_tasks_setup(w, &id)) return false;
     if (!ad_rejected_pin(w, false) || !ad_rejected_pin(w, true)) return false;
     struct json_value input; json_init(&input); json_set_object(&input);
     bool ok = json_push_kv_str(&input, "release_root", w->origin_release) &&

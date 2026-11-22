@@ -2,6 +2,7 @@
  * purpose: read a bounded member of the exact currently kept Tasks package. */
 #include "command/native_app_customize_tasks.h"
 #include "base/hex.h"
+#include "json/json.h"
 #include "base/safe_alloc.h"
 #include "platform/positioned_file.h"
 #include "vcs/package_manifest.h"
@@ -107,4 +108,33 @@ bool ac_tasks_file_read(const char *directory, const char *root, uint64_t genera
         package_resident_identity_equal(&now.current, &out->kept.current);
     if (!ok) { free(out->bytes); out->bytes = NULL; out->size = 0; }
     return ok;
+}
+
+/* A source-only starting point; choosing a file and native adoption remain
+ * separate owner actions. The returned pin is rechecked by apps_adopt. */
+bool ac_tasks_ai_pin(const char *directory, struct package_resident_record *out)
+{
+    if (!out) return false;
+    struct package_resident_record kept = {0}, now = {0};
+    struct vcs_package_manifest manifest;
+    if (!ac_tasks_manifest_read(directory, NULL, 0, &kept, &manifest)) return false;
+    bool available = manifest.count > 0;
+    vcs_package_manifest_free(&manifest);
+    if (!available || !ac_tasks_kept_read(directory, &now) || now.generation != kept.generation ||
+        !package_resident_identity_equal(&now.current, &kept.current)) return false;
+    *out = kept; return true;
+}
+
+bool ac_tasks_ai_identity(struct json_value *data, const struct package_resident_record *kept)
+{
+    if (!data || !kept) return false;
+    return json_push_kv_int(data, "kept_generation", kept->generation) &&
+        json_push_kv_str(data, "kept_root", kept->current.package_root) &&
+        json_push_kv_str(data, "kept_receipt", kept->current.receipt_id) &&
+        json_push_kv_str(data, "request", "Register a local stdio MCP server using command and args as literal values. "
+        "Use z23_run app.customize with name tasks to read the kept source; verify its selection_revision, source_root and kept_receipt match this setup. "
+        "Ask me to choose the exact .z23share file I received. Use z23_run zcode.package.bundle.verify on that file and require verified=true and its package_root equal kept_root. "
+        "Request apps_adopt with the verified file release_id as release_root and the kept_generation, kept_root and kept_receipt from this setup. "
+        "Only the local owner window can approve Make my copy. If the release is unavailable, the identity changed, verification fails, or I cancel, stop; never choose another release automatically. "
+        "After adoption, follow the native Build and preview and wait for my separate Keep choice. Ask what I want changed only after a personal copy is selected; use pinned app.customize and app.edit plan and confirmation, then preview and wait for my separate Keep and Share choices.");
 }

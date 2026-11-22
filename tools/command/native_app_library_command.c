@@ -6,6 +6,7 @@
 #include "command/native_app_library_command.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_compose.h"
+#include "command/native_app_customize_tasks.h"
 #include "command/native_app_installed_copy.h"
 #include "command/native_app_discover.h"
 #include "command/native_app_host_browser.h"
@@ -494,8 +495,9 @@ static bool al_executable(char *path, size_t cap)
 }
 #define AL_AI_EDIT_GUIDE " Ask what I want to change. Use z23_run with path=app.customize to read the chosen path using name, expected_revision and source_version. Use source_version for every later source read and app.edit. Set the exact expected_head from head_version and expected_blob from file.blob in z23_run with path=app.edit, along with name, expected_revision, source_version, path and content. Request an edit plan, then pass its plan_id and confirm=true with the same inputs. After each edit use the returned version as the next source_version and re-read before another edit. Preview it, then wait for my explicit Keep and Share choices."
 static bool al_setup_identity(struct json_value *data, const struct library_row *r,
-    const char *source_version)
+    const char *source_version, const struct package_resident_record *kept)
 {
+    if (!r->saved && !strcmp(r->entry.id, "tasks")) return ac_tasks_ai_identity(data, kept);
     char version[65];
     if (r->saved) {
         zcl_hex_encode(r->selection.version, 32, version);
@@ -511,13 +513,16 @@ static bool al_setup_encode(struct library *w, const char *exe, const char *data
     struct zcl_command_reply *reply)
 {
     const struct library_row *r = &w->rows[w->index];
+    struct package_resident_record kept = {0};
+    if (!r->saved && !strcmp(r->entry.id, "tasks") && !ac_tasks_ai_pin(datadir, &kept))
+        return al_fail(reply, "TASKS_SOURCE_UNAVAILABLE", "Cannot verify kept Tasks source; reopen the kept version and check the profile.");
     struct json_value data = {0}; json_set_object(&data);
     bool ok = json_push_kv_str(&data, "command", exe) && al_arguments(&data, datadir) &&
-        json_push_kv_str(&data, "name", r->entry.id) && al_setup_identity(&data, r, w->source_version);
+        json_push_kv_str(&data, "name", r->entry.id) && al_setup_identity(&data, r, w->source_version, &kept);
     size_t n = ok ? json_write(&data, NULL, 0) : 0;
     ok = n && n < sizeof(w->setup) && json_write(&data, w->setup, sizeof(w->setup)) == n;
     json_free(&data);
-    if (!ok) { w->setup[0] = 0; return al_fail(reply, "SETUP_TOO_LARGE", "Cannot copy complete AI setup safely."); }
+    if (!ok) { w->setup[0] = 0; return al_fail(reply, "SETUP_TOO_LARGE", "Cannot verify or copy the AI setup safely."); }
     return true;
 }
 static void al_prepare_native(void *context, const struct app_selection *selection,
@@ -624,6 +629,17 @@ static void al_recovery(struct library *w, struct zcl_command_reply *reply)
             complete ? "exact recovery facts attached" : "recovery facts could not be encoded");
     }
 }
+static bool al_setup_supported(const struct library_row *r)
+{
+    return r->saved || (r->entry.builtin &&
+        (!strcmp(r->entry.id, "skycombat") || !strcmp(r->entry.id, "tasks")));
+}
+static bool al_tasks_setup_present(const struct library_row *r, const char *datadir)
+{
+    if (r->saved || strcmp(r->entry.id, "tasks")) return true;
+    struct package_resident_record kept = {0};
+    return ac_tasks_kept_read(datadir, &kept);
+}
 static bool al_setup(struct library *w, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
@@ -631,7 +647,7 @@ static bool al_setup(struct library *w, const struct app_launch_env *env,
     w->setup[0] = 0;
     w->source_version[0] = 0;
     if (!al_current(r, env, reply)) return false;
-    if (!r->saved && (!r->entry.builtin || strcmp(r->entry.id, "skycombat"))) return true;
+    if (!al_setup_supported(r)) return true;
     char executable[APP_SELECTION_PATH_MAX];
     if (!exe) {
         if (!al_executable(executable, sizeof(executable)))
@@ -641,6 +657,7 @@ static bool al_setup(struct library *w, const struct app_launch_env *env,
     if (r->saved) datadir = r->selection.datadir;
     if (!datadir) datadir = zcl_native_command_datadir();
     if (!datadir || !datadir[0]) return al_fail(reply, "MISSING_DATADIR", "No app profile is bound to My Apps.");
+    if (!al_tasks_setup_present(r, datadir)) return true;
     return al_prepare_source(w, env, reply, false) && al_setup_encode(w, exe, datadir, reply);
 }
 static bool al_share_path(struct library *w, const struct library_row *row, struct zcl_command_reply *reply)
@@ -798,6 +815,21 @@ static void al_change_choice(struct zcl_present_model_v1 *m, const struct librar
         app_library_choice(m, "change-options", "Change", "Review unkept changes or connect your assistant.");
     else app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
 }
+static void al_ai_help_model(struct library *w, const struct library_row *r)
+{
+    struct zcl_present_model_v1 *m = &w->model;
+    (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
+    (void)snprintf(m->title, sizeof(m->title), "Change with your AI");
+    (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
+        ? "Copy setup and paste it into your AI. Review and preview its changes here before choosing Keep."
+        : "Editable source is unavailable. Ask the app author for source.");
+    char version[65] = {0};
+    if (r->saved) (void)snprintf(version, sizeof(version), "%s", w->source_version);
+    char first[33]; (void)snprintf(first, sizeof(first), "%.32s", version);
+    app_library_choice(m, "setup", w->setup[0] ? "Copy AI setup (C)" : "No editable source", r->saved ? first : !strcmp(r->entry.id, "tasks") && w->setup[0] ? "Verified source manifest" : "No saved version yet.");
+    app_library_choice(m, "version", r->saved ? "Paste into AI; keep this open" : w->setup[0] ? (!strcmp(r->entry.id, "tasks") ? "Paste into AI; keep open" : "Make my copy first") : "Source needed",
+        r->saved ? version + 32 : w->setup[0] ? (!strcmp(r->entry.id, "tasks") ? "Then choose the received file with your AI." : "Ask your AI to request a copy.") : "Ask the app author for source.");
+}
 static void al_detail_model(struct library *w)
 {
     al_model(w);
@@ -814,17 +846,7 @@ static void al_detail_model(struct library *w)
         app_library_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
         app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
     } else {
-        (void)snprintf(m->request_id, sizeof(m->request_id), "library-help");
-        (void)snprintf(m->title, sizeof(m->title), "Change with your AI");
-        (void)snprintf(m->summary, sizeof(m->summary), "%s", w->setup[0]
-            ? "Copy setup and paste it into your AI. Review and preview its changes here before choosing Keep."
-            : "Editable source is unavailable. Ask the app author for source.");
-        char version[65] = {0};
-        if (r->saved) (void)snprintf(version, sizeof(version), "%s", w->source_version);
-        char first[33]; (void)snprintf(first, sizeof(first), "%.32s", version);
-        app_library_choice(m, "setup", w->setup[0] ? "Copy AI setup (C)" : "No editable source", r->saved ? first : "No saved version yet.");
-        app_library_choice(m, "version", r->saved ? "Paste into AI; keep this open" : w->setup[0] ? "Make my copy first" : "Source needed",
-            r->saved ? version + 32 : w->setup[0] ? "Ask your AI to request a copy." : "Ask the app author for source.");
+        al_ai_help_model(w, r);
     }
     app_library_choice(m, "back", "Back", "Return to your selected app.");
     if (w->page != 1) app_library_choice(m, "cancel", "Cancel", "Close My Apps.");
