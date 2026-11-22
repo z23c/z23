@@ -16,10 +16,13 @@
 #include "config/boot.h"
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_cursor_state.h"
+#include "config/runtime.h"
 #include "validation/main_state.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
+#include "models/block.h"
 #include "models/database.h"
+#include "primitives/block.h"
 #include "coins/coins_view.h"
 #include "event/event.h"
 #include "sha3/sha3.h"
@@ -1898,6 +1901,94 @@ static int t_mg_pprev_edges(void)
     return failures;
 }
 
+static void pp_sql_header(struct block_header *h, const struct uint256 *prev,
+                          unsigned height, struct uint256 *hash)
+{
+    block_header_init(h);
+    h->nVersion = 4;
+    h->hashPrevBlock = *prev;
+    h->hashMerkleRoot.data[0] = (uint8_t)height;
+    h->nTime = height;
+    h->nBits = 0x2007ffff;
+    h->nNonce.data[0] = (uint8_t)height;
+    h->nSolution[0] = (uint8_t)height;
+    h->nSolutionSize = 1;
+    block_header_get_hash(h, hash);
+}
+
+static bool pp_sql_save(struct node_db *ndb, const struct block_header *h,
+                        const struct uint256 *hash, int height)
+{
+    struct db_block row = {0};
+    memcpy(row.hash, hash->data, 32);
+    row.height = height;
+    memcpy(row.prev_hash, h->hashPrevBlock.data, 32);
+    row.version = h->nVersion;
+    memcpy(row.merkle_root, h->hashMerkleRoot.data, 32);
+    row.time = h->nTime;
+    row.bits = h->nBits;
+    memcpy(row.nonce, h->nNonce.data, 32);
+    row.solution = (uint8_t *)h->nSolution;
+    row.solution_len = h->nSolutionSize;
+    row.status = 3;
+    row.num_tx = 1;
+    return db_block_save_canonical(ndb, &row);
+}
+
+static int t_mg_pprev_sqlite_header_fallback(void)
+{
+    int failures = 0;
+    enum { N = 3 };
+    struct block_header headers[N - 1];
+    struct uint256 hashes[N];
+    struct block_index blocks[N];
+    struct main_state ms;
+    struct node_db ndb = {0};
+    struct db_service dbsvc;
+    struct app_runtime_context runtime = {0};
+    memset(&dbsvc, 0, sizeof(dbsvc));
+    main_state_init(&ms);
+    hashes[0] = chain_params_get()->consensus.hashGenesisBlock;
+    memset(&blocks[0], 0, sizeof(blocks[0]));
+    blocks[0].phashBlock = &hashes[0];
+    blocks[0].nBits = 0x2007ffff;
+    test_block_map_insert(&ms.map_block_index, &hashes[0], &blocks[0]);
+    db_service_init(&dbsvc);
+    bool ok = node_db_open(&ndb, ":memory:") && db_service_attach(&dbsvc, &ndb) &&
+              db_service_start(&dbsvc);
+    for (int i = 1; ok && i < N; i++) {
+        pp_sql_header(&headers[i - 1], &hashes[i - 1], (unsigned)i, &hashes[i]);
+        ok = pp_sql_save(&ndb, &headers[i - 1], &hashes[i], i);
+        memset(&blocks[i], 0, sizeof(blocks[i]));
+        blocks[i].phashBlock = &hashes[i];
+        blocks[i].nHeight = i;
+        blocks[i].nBits = 0x2007ffff;
+        blocks[i].nStatus = BLOCK_HAVE_DATA;
+        blocks[i].nDataPos = 8;
+        blocks[i].nTx = 1;
+        test_block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
+    }
+    runtime.db_service = &dbsvc;
+    app_runtime_set_current(&runtime);
+    int r = ok ? block_index_repair_pprev(&ms, "/nonexistent-sqlite-fallback", -1,
+                                          NULL) : -2;
+    BII_RUN("bii: missing body files fall back to hash-bound SQLite headers",
+            ok && r == 2 && blocks[1].pprev == &blocks[0] &&
+            blocks[2].pprev == &blocks[1] && work_is_chain(blocks, N));
+
+    blocks[2].pprev = NULL;
+    ok = node_db_exec(&ndb, "UPDATE blocks SET prev_hash=zeroblob(32) WHERE height=2");
+    r = ok ? block_index_repair_pprev(&ms, "/nonexistent-sqlite-fallback", -1,
+                                      NULL) : -2;
+    BII_RUN("bii: a SQLite header that does not hash-bind still refuses repair",
+            ok && r == -1 && !blocks[2].pprev);
+    app_runtime_set_current(NULL);
+    db_service_stop(&dbsvc);
+    node_db_close(&ndb);
+    main_state_free(&ms);
+    return failures;
+}
+
 /* ── height-repair verdicts and exact counts ────────────────── */
 
 static bool work_all_zero(const struct block_index *b, int n)
@@ -2605,6 +2696,7 @@ int test_block_index_integrity(void)
     failures += t_anchor_repair_null_inputs();
     failures += t_anchor_repair_oom();
     failures += t_pprev_repair_cursor_skip();
+    failures += t_mg_pprev_sqlite_header_fallback();
     failures += t_bcs_fingerprint();
     failures += t_bcs_repair_heights_range_cursor();
     failures += t_bcs_clamp_on_reorg();

@@ -34,10 +34,12 @@
 #include "event/event.h"
 #include "json/json.h"
 #include "core/uint256.h"
+#include "models/block.h"
 #include "validation/main_state.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "storage/disk_block_io.h"
+#include "storage/node_db_runtime.h"
 #include "util/storage_pacing.h"
 
 #include <limits.h>
@@ -625,7 +627,7 @@ struct bii_pprev_tally {
     int read_errors;
 };
 
-/* Read one entry's on-disk parent and fix pprev/height. Returns true when
+/* Read one entry's durable parent and fix pprev/height. Returns true when
  * the entry was resolved (a parent was found), false on a read error or a
  * parent missing from the index. */
 static bool bii_pprev_fix_entry(struct main_state *ms, const char *datadir,
@@ -641,14 +643,21 @@ static bool bii_pprev_fix_entry(struct main_state *ms, const char *datadir,
         .nPos = bi->nDataPos
     };
     ssize_t nr = disk_block_pread(datadir, &pos, "blk", hdr_buf, 36);
-    if (nr < 36) {
-        tally->read_errors++;
-        return false;
-    }
-
-    /* hashPrevBlock is at offset 4 (after nVersion) in little-endian */
     struct uint256 prev_hash;
-    memcpy(prev_hash.data, hdr_buf + 4, 32);
+    if (nr < 36) {
+        struct node_db *ndb = node_db_runtime();
+        struct block_header header;
+        if (!bi->phashBlock || !node_db_runtime_handle_open(ndb) ||
+            !db_block_load_header_by_hash_height(ndb, bi->nHeight,
+                                                 bi->phashBlock->data, &header)) {
+            tally->read_errors++;
+            return false;
+        }
+        prev_hash = header.hashPrevBlock;
+    } else {
+        /* hashPrevBlock is at offset 4 (after nVersion) in little-endian */
+        memcpy(prev_hash.data, hdr_buf + 4, 32);
+    }
 
     /* Look up the correct parent in the block map */
     struct block_index *correct_pprev =
@@ -747,7 +756,8 @@ static bool bii_pprev_alloc_scratch(size_t n, struct block_index ***arr_out,
  * (copied from pprev->phashBlock when pprev was already corrupted).
  * This function reads hashPrevBlock directly from block data on disk
  * for every entry with BLOCK_HAVE_DATA and fixes pprev if it points
- * to the wrong parent.
+ * to the wrong parent. A missing or unreadable body falls back to the
+ * exact height-and-hash-bound SQLite header; without one, repair refuses.
  *
  * Call AFTER block_index_repair_heights() so heights are correct.
  * After pprev repair, recomputes nChainWork and nChainTx. */
