@@ -3,10 +3,11 @@ Description=Z23 Landing Stepper Timer
 
 [Timer]
 # Drives the native land queue on the land host: one `dev land drive --prove`
-# row every ~20s after the previous one finishes, plus once 2 minutes after
-# boot. No long-running process has to stay alive; systemd restarts the timer
-# on its own after a crash or reboot.
+# row at the earlier of 20s after the previous finish or 30s after its
+# start, plus once 2 minutes after boot. A long row can therefore be followed
+# immediately; an idle row retains the 20s post-finish cadence.
 OnBootSec=2min
+OnUnitActiveSec=30s
 OnUnitInactiveSec=20s
 AccuracySec=1s
 Persistent=false

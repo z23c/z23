@@ -28,7 +28,9 @@ you are new; this page is about operating a host, not about building.
   are tolerated); two probers on one ledger would double every row and halve
   the BLIND threshold.
 - **Landing.** `z23-land-step.service` / `.timer` drive the native land queue, one
-  `dev land drive --prove` row per tick.
+  `dev land drive --prove` row per tick. The timer uses the earlier of 30
+  seconds after the prior start and 20 seconds after its finish; short idle
+  runs keep the existing cadence while long rows can be followed immediately.
 - **Receipts and vitals.** `z23-receipts.service` / `.timer` run the daily C5 and
   C7 acceptance producers on a detached worktree of `origin/main`, one `-ExecStart`
   per target so a red one still records its receipt. `z23-parity-receipt.service` /
