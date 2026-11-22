@@ -374,7 +374,7 @@ cmd_judge() {
             hole_max = 0; op = 0; ambiguous = 0; ok_cnt = 0; gap0 = 0; gapgt0 = 0
             soak_null = 0; zd_null = 0
             security_review = 0; security_unknown = 0; security_gap = 0
-            eligible_cnt = 0
+            eligible_cnt = 0; restart_unknown = 0
             max_gap = ""; nr_first = ""; nr_last = ""
             rss_first = ""; rss_last = ""
             bin_id1 = ""; bin_ids = 0; bin_known = 0
@@ -399,7 +399,7 @@ cmd_judge() {
                     if (g > 0)  gapgt0++
                     if (max_gap == "" || g > max_gap + 0) max_gap = g
                 }
-                if (isnum(nrv[i])) {
+                if (!isnum(nrv[i]) || nrv[i]+0 < 0 || !isnum(aetv[i]) || aetv[i]+0 <= 0) restart_unknown++; if (isnum(nrv[i])) {
                     r = nrv[i] + 0
                     a = isnum(aetv[i]) ? aetv[i] + 0 : ""
                     if (nr_first == "") nr_first = r
@@ -483,7 +483,7 @@ cmd_judge() {
                 v = "INSUFFICIENT"; reason = sprintf("security_posture_unknown_in_%d_of_%d_samples", security_unknown, cnt)
             } else if (security_gap > 0) {
                 v = "NOT_MET"; reason = sprintf("security_posture_gap_in_%d_of_%d_samples", security_gap, cnt)
-            } else if (bin_known != cnt) {
+            } else if (restart_unknown > 0) { v = "INSUFFICIENT"; reason = sprintf("restart_evidence_unknown_in_%d_of_%d_samples", restart_unknown, cnt) } else if (bin_known != cnt) {
                 v = "INSUFFICIENT"; reason = sprintf("binary_identity_unknown_in_%d_of_%d_samples", cnt - bin_known, cnt)
             } else {
                 v = "MET"; reason = sprintf("covered_%.1fh_hole_max_%ds_gap0_%.2fpct", covered, hole_max, gap0_pct)

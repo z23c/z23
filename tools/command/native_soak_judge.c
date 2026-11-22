@@ -28,7 +28,7 @@ struct soak_sample {
 struct soak_stats {
     int64_t covered_sec, hole_max, op, ambiguous, soak_null, zd_null;
     int64_t ok_cnt, gap0, gapgt0, review, unknown, sec_gap, eligible;
-    int64_t bin_known, bin_ids, cnt;
+    int64_t bin_known, bin_ids, cnt, restart_unknown;
     bool have_max_gap, have_nr, have_rss;
     int64_t max_gap, nr_first, nr_last, rss_first, rss_last;
     char bin_id1[SOAK_SHA_HEX + 1];
@@ -124,6 +124,8 @@ static void soak_scan_restarts(const struct soak_sample *s, size_t i,
 {
     bool has_a = s[i].aet.kind == EJ_NUM;
     int64_t r, a = has_a ? s[i].aet.n : 0;
+    if (s[i].nrestarts.kind != EJ_NUM || s[i].nrestarts.n < 0 ||
+        !has_a || a <= 0) st->restart_unknown++;
     if (s[i].nrestarts.kind != EJ_NUM)
         return;
     r = s[i].nrestarts.n;
@@ -281,6 +283,9 @@ static void soak_ladder(const struct soak_stats *st, int64_t window_hours,
     else if (st->sec_gap > 0)
         ej_verdictf(out, "NOT_MET", "security_posture_gap_in_%lld_of_%lld_samples",
                  (long long)st->sec_gap, (long long)cnt);
+    else if (st->restart_unknown > 0)
+        ej_verdictf(out, "INSUFFICIENT", "restart_evidence_unknown_in_%lld_of_%lld_samples",
+                    (long long)st->restart_unknown, (long long)cnt);
     else if (st->bin_known != cnt)
         ej_verdictf(out, "INSUFFICIENT", "binary_identity_unknown_in_%lld_of_%lld_samples",
                  (long long)(cnt - st->bin_known), (long long)cnt);
