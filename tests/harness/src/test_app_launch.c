@@ -2502,9 +2502,10 @@ static const char *al_create_first_card(struct al_create_view *s,
         return "home";
     }
     if (s->count == 1) {
-        s->valid = m->action_count == 3 && al_create_action(m, "choose", "Choose app") >= 0 &&
+        s->valid = m->action_count == 4 && al_create_action(m, "choose", "Choose app") >= 0 &&
             al_create_action(m, "create", "Create from Sky Combat") >= 0 &&
             al_create_action(m, "home", "More options") >= 0 &&
+            al_create_action(m, "recover-copies", "Received copies") >= 0 &&
             al_create_action(m, "previous", NULL) < 0 && al_create_action(m, "next", NULL) < 0;
         return "home";
     }
@@ -3547,7 +3548,7 @@ static void al_library_all_rows_actions(struct al_library_script *s)
     for (unsigned i = 31; i < 47; ++i) s->actions[i] = (i & 1u) ? 1u : 2u;
     s->actions[47] = 3;
 }
-struct al_received_nav { unsigned step; bool via_discover, valid; };
+struct al_received_nav { unsigned step; bool via_discover, valid, populated; };
 struct al_nav_step { const char *page, *action; };
 static bool al_received_nav_model(const struct zcl_present_model_v1 *m, unsigned step, unsigned last, bool discover)
 {
@@ -3574,7 +3575,11 @@ static bool al_received_nav_present(void *context, const struct zcl_present_mode
     if (step >= count) return false;
     nav->valid = nav->valid && zcl_present_model_validate_v1(model, why, cap) &&
         !strcmp(model->request_id, steps[step].page) &&
-        al_received_nav_model(model, step, count - 1, nav->via_discover);
+        ((nav->populated && step == 0) ?
+            (model->action_count == 4 && !strcmp(model->actions[0].id, "choose") &&
+             !strcmp(model->actions[1].id, "create") && !strcmp(model->actions[2].id, "home") &&
+             !strcmp(model->actions[3].id, "recover-copies")) :
+            al_received_nav_model(model, step, count - 1, nav->via_discover));
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     if (!steps[step].action) { event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
     int index = al_default_action(model, steps[step].action);
@@ -3602,6 +3607,15 @@ static int case_library_empty(void)
             ASSERT(nav.valid && nav.step == (route ? 5u : 3u));
             ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         }
+        PASS();
+    }
+    TEST("A single installed app can directly review received copies and return") {
+        ASSERT(al_library_catalog(&f, 1));
+        struct al_received_nav nav = {.populated = true, .valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_setup(&f.env, NULL, f.root, &reply, al_received_nav_present, &nav);
+        ASSERT(nav.valid && nav.step == 3);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         PASS();
     }
 _test_next:;

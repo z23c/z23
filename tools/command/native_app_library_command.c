@@ -181,6 +181,8 @@ static void al_model(struct library *w)
     if (w->index + 1 < w->count) app_library_choice(m, "next", "Next app", "Browse forward.");
     else app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
     app_library_choice(m, "home", "More options", "Received copies, discovery, hosting.");
+    if (w->count == 1)
+        app_library_choice(m, "recover-copies", "Received copies", "Review copies received in this profile.");
 }
 static void al_home(struct library *w)
 {
