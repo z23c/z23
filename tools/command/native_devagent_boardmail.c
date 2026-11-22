@@ -417,7 +417,7 @@ struct bm_ref {
 
 struct bm_refs {
     struct bm_ref r[BM_REFS_MAX];
-    size_t n;
+    size_t n, start;
     char path[BM_PATH_CAP];
 };
 
@@ -437,12 +437,15 @@ static bool bm_refs_has(const struct bm_refs *s, char dir, const char *ref,
 static void bm_refs_put(struct bm_refs *s, char dir, const char *ref,
                         const char *peer)
 {
-    struct bm_ref *e;
+    size_t slot;
     if (s->n == BM_REFS_MAX) {
-        memmove(&s->r[0], &s->r[1], (BM_REFS_MAX - 1) * sizeof(s->r[0]));
-        s->n--;
+        slot = s->start;
+        s->start = (s->start + 1) % BM_REFS_MAX;
+    } else {
+        slot = (s->start + s->n) % BM_REFS_MAX;
+        s->n++;
     }
-    e = &s->r[s->n++];
+    struct bm_ref *e = &s->r[slot];
     e->dir = dir;
     (void)snprintf(e->ref, sizeof(e->ref), "%s", ref);
     (void)snprintf(e->peer, sizeof(e->peer), "%s", peer);
@@ -464,6 +467,7 @@ static void bm_refs_load(struct bm_refs *s, const char *recvdir)
     char line[256];
     FILE *f;
     s->n = 0;
+    s->start = 0;
     (void)snprintf(s->path, sizeof(s->path), "%s/%s", recvdir, BM_REFS_FILE);
     f = fopen(s->path, "rb");
     if (!f)
@@ -679,8 +683,9 @@ static const char *bm_ref_peer(const struct bm_refs *refs, const char *ref)
 {
     size_t i;
     for (i = 0; ref[0] && i < refs->n; i++) {
-        if (refs->r[i].dir == 'i' && strcmp(refs->r[i].ref, ref) == 0)
-            return refs->r[i].peer;
+        const struct bm_ref *entry = &refs->r[(refs->start + i) % BM_REFS_MAX];
+        if (entry->dir == 'i' && strcmp(entry->ref, ref) == 0)
+            return entry->peer;
     }
     return NULL;
 }
@@ -754,6 +759,8 @@ static bool bm_refs_observe_line(struct bm_refs *refs, const char *line)
 }
 static bool bm_refs_observe(struct bm_refs *refs, const char *dir)
 {
+    refs->n = 0;
+    refs->start = 0;
     int n = snprintf(refs->path, sizeof(refs->path), "%s/%s", dir, BM_REFS_FILE);
     if (n <= 0 || (size_t)n >= sizeof(refs->path)) return false;
     FILE *f = fopen(refs->path, "rb");

@@ -1687,6 +1687,59 @@ static long long bmx_hinted(int node, int host, const char *push_to)
     return hits;
 }
 
+static bool bmx_fill_refs(void)
+{
+    char path[1600];
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.refs", g_bmx_state[BMX_A]);
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fprintf(f, "in evicted node-b\n") > 0;
+    for (int i = 0; ok && i < 1022; i++)
+        ok = fprintf(f, "in filler-%04d node-b\n", i) > 0;
+    if (ok) ok = fprintf(f, "in choice node-b\nin choice node-c\n") > 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool bmx_advance_refs(void)
+{
+    char path[1600];
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.refs", g_bmx_state[BMX_A]);
+    FILE *f = fopen(path, "ab");
+    if (!f) return false;
+    bool ok = true;
+    for (int i = 0; ok && i < 1023; i++)
+        ok = fprintf(f, "in newest-%04d node-b\n", i) > 0;
+    return fclose(f) == 0 && ok;
+}
+
+static int bmx_t_refs_wrap(void)
+{
+    int failures = 0;
+    TEST("boardmail: retained references route by oldest surviving match across wrap") {
+        struct rcv_beat_stats st;
+        ASSERT(bmx_setup("refs-wrap"));
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT(bmx_fill_refs());
+        bmx_use(BMX_A);
+        ASSERT(bmx_mail("node-a", "*", "result", "evicted", "evicted\n"));
+        ASSERT(bmx_mail("node-a", "*", "result", "choice", "first\n"));
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[0].push_to, g_bmx_host[BMX_B]);
+        /* Another wrap evicts the first match; reload must keep the next. */
+        ASSERT(bmx_advance_refs());
+        ASSERT(bmx_mail("node-a", "*", "result", "choice", "second\n"));
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
+        ASSERT_STR_EQ(g_bmx_node[BMX_A].p[1].push_to, g_bmx_host[2]);
+        bmx_teardown(); PASS();
+    }
+_test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_push_hint(void)
 {
     int failures = 0;
@@ -1985,6 +2038,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_oversize();
     failures += bmx_t_delivery();
     failures += bmx_t_push_hint();
+    failures += bmx_t_refs_wrap();
     failures += bmx_t_directory();
     failures += bmx_t_directory_crowded();
     failures += bmx_t_append_retry();
