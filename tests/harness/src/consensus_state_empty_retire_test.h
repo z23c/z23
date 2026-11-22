@@ -880,6 +880,67 @@ static bool csi_retained_probe_source(const char *source, const char *scratch,
         !strcmp(leaf + 1, expected_leaf) && csi_retained_source_valid(source, scratch) &&
         csi_empty_private_dir(scratch);
 }
+/* These opt-in probes copy a retained input; only their new output is disposable. */
+static bool csi_retained_probe_finish(const char *root, bool ok, bool keep)
+{
+    if (!ok || keep) {
+        fprintf(stderr, "retained probe: fixture retained at %s\n", root);
+    } else if (test_rm_rf_recursive(root) != 0) {
+        fprintf(stderr, "retained probe: cleanup incomplete at %s\n", root);
+    }
+    return ok;
+}
+
+static bool csi_retained_probe_keep(const char *value)
+{
+    return value && !strcmp(value, "1");
+}
+
+static bool csi_retained_probe_marker(const char *path, bool create)
+{
+    int fd = open(path, create ? (O_WRONLY | O_CREAT | O_EXCL) : O_RDONLY, 0600);
+    if (fd < 0) return false;
+    char data[6];
+    bool ok = create ? write(fd, "source", 6) == 6 :
+        read(fd, data, sizeof(data)) == 6 && !memcmp(data, "source", 6);
+    return close(fd) == 0 && ok;
+}
+
+struct csi_retained_probe_fixture {
+    char source[PATH_MAX], marker[PATH_MAX], passed[PATH_MAX], passed_marker[PATH_MAX];
+    char failed[PATH_MAX], kept[PATH_MAX];
+};
+static bool csi_retained_probe_fixture_make(const char *root, struct csi_retained_probe_fixture *f)
+{
+    return csi_real_path(f->source, sizeof(f->source), root, "source") &&
+        csi_real_path(f->marker, sizeof(f->marker), f->source, "marker") &&
+        csi_real_path(f->passed, sizeof(f->passed), root, "passed") &&
+        csi_real_path(f->passed_marker, sizeof(f->passed_marker), f->passed, "marker") &&
+        csi_real_path(f->failed, sizeof(f->failed), root, "failed") &&
+        csi_real_path(f->kept, sizeof(f->kept), root, "kept") &&
+        !mkdir(f->source, 0700) && csi_retained_probe_marker(f->marker, true) &&
+        !mkdir(f->passed, 0700) && !link(f->marker, f->passed_marker) &&
+        !mkdir(f->failed, 0700) && !mkdir(f->kept, 0700);
+}
+static bool csi_retained_probe_fixture_check(const struct csi_retained_probe_fixture *f)
+{
+    bool passed = csi_retained_probe_finish(f->passed, true, false);
+    bool failed = csi_retained_probe_finish(f->failed, false, false);
+    bool kept = csi_retained_probe_finish(f->kept, true, true);
+    return !csi_retained_probe_keep(NULL) && csi_retained_probe_keep("1") &&
+        !csi_retained_probe_keep("0") && !csi_retained_probe_keep("yes") &&
+        passed && !failed && kept && access(f->passed, F_OK) != 0 && errno == ENOENT &&
+        access(f->failed, F_OK) == 0 && access(f->kept, F_OK) == 0 &&
+        csi_retained_probe_marker(f->marker, false);
+}
+static bool csi_retained_probe_lifecycle_test(void)
+{
+    char root[256]; struct csi_retained_probe_fixture f;
+    test_make_tmpdir(root, sizeof(root), "retained_probe_lifecycle", "private");
+    bool ok = csi_retained_probe_fixture_make(root, &f) && csi_retained_probe_fixture_check(&f);
+    return test_rm_rf_recursive(root) == 0 && ok;
+}
+
 static int csi_populated_retained_probe(const char *source)
 {
     const char *scratch = getenv("ZCL_TEST_REAL_INSTALL_SCRATCH");
@@ -902,8 +963,8 @@ static int csi_populated_retained_probe(const char *source)
         ok = n >= 0 && (size_t)n < sizeof(p.history) &&
             csi_empty_retire_restart(&p, &binding, identity) && csi_populated_history_check(&p, &binding);
     }
-    fprintf(stderr, "retained populated probe: restart=%s copy=%s\n", ok ? "PASS" : "FAIL", p.root);
-    return ok ? 0 : 1;
+    fprintf(stderr, "retained populated probe: restart=%s\n", ok ? "PASS" : "FAIL");
+    return csi_retained_probe_finish(p.root, ok, csi_retained_probe_keep(getenv("ZCL_TEST_REAL_PROBE_KEEP"))) ? 0 : 1;
 }
 
 static bool csi_retained_inputs_present(const char *source, const char *scratch, const char *params)
@@ -1170,8 +1231,8 @@ static int csi_retained_old_probe(const char *source)
         csi_retained_old_observe(&p, &witness) && csi_old_request_binding(&request, &witness.binding) &&
         boot_install_bound_bundle_read(p.data, &after) == BOOT_BOUND_READ_READY &&
         csi_empty_observation_equal(&request, &after) && csi_retained_old_restart(&p, &witness, &request);
-    fprintf(stderr, "retained OLD probe=%s copy=%s\n", ok ? "PASS" : "FAIL", p.root);
-    return ok ? 0 : 1;
+    fprintf(stderr, "retained OLD probe=%s\n", ok ? "PASS" : "FAIL");
+    return csi_retained_probe_finish(p.root, ok, csi_retained_probe_keep(getenv("ZCL_TEST_REAL_PROBE_KEEP"))) ? 0 : 1;
 }
 
 static bool csi_empty_retire_prepare(struct csi_real_paths *p, const char *scratch)

@@ -1099,6 +1099,10 @@ static bool csi_real_postcommit_paths(struct csi_real_paths *p)
 static int csi_real_postcommit_test(void)
 {
 #if defined(__linux__)
+    if (!csi_retained_probe_lifecycle_test()) {
+        fprintf(stderr, "retained probe: lifecycle control failed\n");
+        return 1;
+    }
     int selected = csi_real_postcommit_selected();
     if (selected >= 0) return selected;
 #endif
