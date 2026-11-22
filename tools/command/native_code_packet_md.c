@@ -126,17 +126,18 @@ static void pk_md_route(struct pk_sb *sb, const struct pk_facts *f)
 static void pk_md_acceptance(struct pk_sb *sb, const struct pk_facts *f)
 {
     pk_sb_add(sb, "ACCEPTANCE:\n  Registered groups that must run (covering "
-                  "the touched files):\n");
+                  "the touched files; catalog tools/dev/test_group_catalog.def):\n");
     if (f->ngroup == 0)
         pk_sb_add(sb, "    (none resolved: the route above is the floor)\n");
     for (int i = 0; i < f->ngroup; i++) {
         pk_sb_add(sb, "    %-40s", f->group[i].id);
         if (f->group[i].catalog_line > 0)
-            pk_sb_add(sb, " tools/dev/test_group_catalog.def:%d",
-                      f->group[i].catalog_line);
+            pk_sb_add(sb, " line:%d", f->group[i].catalog_line);
         else
             pk_sb_add(sb, " catalog row: not located in this tree");
-        pk_sb_add(sb, "   host: %s\n", f->group[i].need);
+        if (strcmp(f->group[i].need, "none") != 0)
+            pk_sb_add(sb, "   host: %s", f->group[i].need);
+        pk_sb_add(sb, "\n");
     }
     pk_sb_add(sb,
         "  Red then green: a new or changed test must fail with the fix "

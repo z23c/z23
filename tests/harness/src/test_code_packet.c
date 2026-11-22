@@ -647,8 +647,7 @@ static int test_code_packet_tests_match_code_tests(void)
                       json_get_str(json_get(&tests.data, "route")));
         ASSERT(json_get(t, "groups")->num_children > 0);
         ASSERT(strstr(pkt_md(&reply), "test_code_capsule") != NULL);
-        ASSERT(strstr(pkt_md(&reply),
-                      "tools/dev/test_group_catalog.def:3") != NULL);
+        ASSERT(strstr(pkt_md(&reply), " line:3") != NULL);
         zcl_command_reply_free(&reply);
         zcl_command_reply_free(&tests);
         json_free(&in);
@@ -728,6 +727,15 @@ static int test_code_packet_markdown_fields(void)
         ASSERT(strstr(md, "t-fast-exact ONLY=") == NULL);
         ASSERT(strstr(md, "devbuild --wait make lint\n") == NULL);
         ASSERT_EQ(json_size(json_get(&reply.data, "gates")), 1u);
+        const char *acceptance = strstr(md, "\nACCEPTANCE:\n");
+        const char *authority = strstr(md, "\nAUTHORITY:\n");
+        ASSERT(acceptance != NULL && authority != NULL && acceptance < authority);
+        const char *catalog = strstr(acceptance, "tools/dev/test_group_catalog.def");
+        ASSERT(catalog != NULL && catalog < authority);
+        const char *repeat = strstr(catalog + 1, "tools/dev/test_group_catalog.def");
+        ASSERT(repeat == NULL || repeat >= authority);
+        const char *no_host = strstr(acceptance, "host: none");
+        ASSERT(no_host == NULL || no_host >= authority);
         struct pk_facts facts = {0};
         char gates[PK_GATES][PK_GATE_LEN];
         facts.nroute = 1;
