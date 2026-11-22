@@ -1610,18 +1610,57 @@ static bool afd_recipe_refusal(const struct afd_world *w, const char *home,
         afd_same(before_home, home) && afd_same(before_data, datadir);
     free(before_home); free(before_data); return ok;
 }
+static bool afd_head_version(const char *copy_path, char version[65])
+{
+    struct afd_leaf l; afd_open_leaf(&l);
+    struct zcl_package_copy copy = {0};
+    bool ok = zcl_package_copy_open_as(copy_path, ZCL_PACKAGE_COPY_READ, &copy, &l.out, "test");
+    if (ok) zcl_hex_encode(copy.head_version, 32, version);
+    zcl_package_copy_close(&copy); afd_close_leaf(&l); return ok;
+}
+static bool afd_pinned_refusal(const struct afd_leaf *l)
+{
+    return afd_refused(l, "RECIPE_RELEASE_REQUIRED") && !l->out.error.mutated &&
+        l->out.next_count == 0 && strstr(l->out.error.next_action, "release") &&
+        strstr(l->out.error.next_action, "signed") &&
+        strstr(l->out.error.message, "Import that release") && strstr(l->out.error.message, "signed version");
+}
+static bool afd_recipe_pinned(const char *datadir, const char *copy, const char *version, bool signed_release)
+{
+    struct afd_leaf l; afd_open_leaf(&l);
+    bool ok = json_push_kv_str(&l.in, "copy", copy) && json_push_kv_str(&l.in, "datadir", datadir) &&
+        json_push_kv_str(&l.in, "version", version) && afd_exec("app.build", &l);
+    if (!signed_release && ok && l.out.status == ZCL_COMMAND_STATUS_PASSED)
+        printf("  [pinned missing-release plan incorrectly passed]\n");
+    if (signed_release) ok = ok && l.out.status == ZCL_COMMAND_STATUS_PASSED && !l.out.error.mutated;
+    else ok = ok && afd_pinned_refusal(&l);
+    afd_close_leaf(&l); return ok;
+}
+static bool afd_recipe_after_share(const char *datadir, const char *copy,
+                                   const char *old_version, const char *signed_old)
+{
+    char new_version[65] = {0};
+    return afd_head_version(copy, new_version) && strcmp(old_version, new_version) &&
+        afd_recipe_pinned(datadir, copy, old_version, false) &&
+        afd_recipe_pinned(datadir, copy, signed_old, true) &&
+        afd_recipe_pinned(datadir, copy, new_version, true);
+}
 static bool afd_recipe_edited(const struct afd_world *w, const char *home, const char *datadir)
 {
-    char copy[AFD_PATH];
+    char copy[AFD_PATH], signed_old[65] = {0};
     int n = snprintf(copy, sizeof(copy), "%s/copies/tinyprog-1", datadir);
-    if (n <= 0 || (size_t)n >= sizeof(copy) ||
+    if (n <= 0 || (size_t)n >= sizeof(copy) || !afd_head_version(copy, signed_old) ||
+        !afd_recipe_pinned(datadir, copy, signed_old, true) ||
         !afd_put(copy, "src/main.c", "int tinyprog_value(void) { return 8; }\n")) return false;
     struct asf_door save, share, build;
     asf_door_run(home, w->saved_cwd, datadir, "save", "tinyprog-1", ZCL_CLI_CONFIRM_YES, &save);
-    if (save.rc || !afd_recipe_incomplete_inventory(datadir, copy) ||
+    char old_version[65] = {0};
+    if (save.rc || !afd_head_version(copy, old_version) ||
+        !afd_recipe_pinned(datadir, copy, old_version, false) ||
+        !afd_recipe_incomplete_inventory(datadir, copy) ||
         !afd_recipe_refusal(w, home, datadir, copy)) return false;
     asf_door_run(home, home, datadir, "share", "tinyprog-1", ZCL_CLI_CONFIRM_YES, &share);
-    if (share.rc) return false;
+    if (share.rc || !afd_recipe_after_share(datadir, copy, old_version, signed_old)) return false;
     asf_door_run(home, w->saved_cwd, datadir, "build", "tinyprog-1", ZCL_CLI_CONFIRM_PLAN_ONLY, &build);
     return build.rc == 0 && strstr(build.text, "package_root:");
 }

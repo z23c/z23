@@ -645,8 +645,15 @@ static bool zab_release_definitely_absent(struct zab *z)
 }
 static bool zab_recipe_release_ready(struct zab *z)
 {
-    if (z->version || !memcmp(z->recipe_parent_root, z->package_root, 32)) return true;
+    if (!memcmp(z->recipe_parent_root, z->package_root, 32)) return true;
     if (!zab_release_definitely_absent(z)) return true;
+    if (z->version) {
+        zab_fail(z, "RECIPE_RELEASE_REQUIRED", false,
+            "This version needs its matching signed release. Import that release or select a signed version to preview.", ZAB_COMMAND);
+        (void)snprintf(z->reply->error.next_action, sizeof(z->reply->error.next_action),
+            "Import its matching verified release or explicitly choose a signed successor, then plan again.");
+        return false;
+    }
     zab_fail(z, "RECIPE_RELEASE_REQUIRED", false,
         "No verified local release was found for this saved version. You can share it, then plan the build again.", ZAB_COMMAND);
     (void)snprintf(z->reply->error.next_action, sizeof(z->reply->error.next_action),
