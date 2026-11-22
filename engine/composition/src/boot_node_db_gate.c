@@ -24,6 +24,7 @@
 #include "event/event.h"
 #include "util/blocker.h"
 #include "util/boot_phase.h"
+#include "util/boot_status.h"
 #include "util/log_macros.h"
 
 #include <stdio.h>
@@ -78,9 +79,18 @@ bool boot_node_db_open_failed_gate(const char *datadir)
 bool boot_node_db_migration_accept(struct node_db *ndb, int rc)
 {
     if (rc == -2) {
+        node_db_close(ndb);
+        (void)boot_step_fail("node_db_schema_newer");
+        boot_status_set_blocker("node_db_schema_newer",
+            "node.db requires a newer compatible binary; preserve the database files");
+        boot_error_report(BOOT_ERROR_FATAL, "NODE_DB_SCHEMA_NEWER",
+                          "db.open_migrate",
+                          "node.db requires a newer compatible binary; boot stopped. "
+                          "Preserve node.db and its WAL and use a compatible binary.",
+                          NULL, 0, "rc=%d", rc);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                     "node_db_schema_downgrade_refused rc=%d", rc);
-        exit(1);
+        return false;
     }
     if (rc >= 0)
         return true;
