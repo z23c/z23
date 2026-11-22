@@ -117,6 +117,12 @@ static struct soak_sample *soak_parse(char *buf, size_t *n, int64_t *malformed)
     return v;
 }
 
+static bool soak_restart_evidence_missing(const struct soak_sample *s)
+{
+    return s->nrestarts.kind != EJ_NUM || s->nrestarts.n < 0 ||
+           s->aet.kind != EJ_NUM || s->aet.n <= 0;
+}
+
 static void soak_scan_restarts(const struct soak_sample *s, size_t i,
                                struct soak_stats *st, int64_t *prev_nr,
                                int64_t *prev_aet, bool *have_prev_nr,
@@ -124,8 +130,7 @@ static void soak_scan_restarts(const struct soak_sample *s, size_t i,
 {
     bool has_a = s[i].aet.kind == EJ_NUM;
     int64_t r, a = has_a ? s[i].aet.n : 0;
-    if (s[i].nrestarts.kind != EJ_NUM || s[i].nrestarts.n < 0 ||
-        !has_a || a <= 0) st->restart_unknown++;
+    if (soak_restart_evidence_missing(&s[i])) st->restart_unknown++;
     if (s[i].nrestarts.kind != EJ_NUM)
         return;
     r = s[i].nrestarts.n;
