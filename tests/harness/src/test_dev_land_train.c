@@ -495,6 +495,72 @@ _test_next:;
     return failures;
 }
 
+static bool dlx_train_failed_pair(char local[64], char base[64], const char *name)
+{
+    struct dlx_call call;
+    char wt[1300], real_wt[PATH_MAX], dir[1200], script[1300], body[1024], why[256];
+    if (!dlx_status_json(&call)) return false;
+    const struct json_value *f = json_get(&call.reply.data, "in_flight");
+    (void)snprintf(local, 64, "%s", f ? dlx_jstr(f, "local") : "");
+    (void)snprintf(base, 64, "%s", f ? dlx_jstr(f, "base") : "");
+    dlx_end(&call);
+    dlx_land_wt(wt, sizeof(wt));
+    dlx_landdir(dir, sizeof(dir));
+    (void)snprintf(script, sizeof(script), "%s/train-proof-child.sh", dir);
+    (void)snprintf(body, sizeof(body),
+        "printf '%%s\\n' '==================== %s (FAIL, 3s) ====================' "
+        "'FAIL at tests/harness/src/%s.c:42 (fixture assertion)' "
+        "'SOME TESTS FAILED - 1/1 groups failed' 'Failed groups:' "
+        "'  - %s: exit code=1 log=./test-tmp/failure.log'\nexit 1\n",
+        name, name, name);
+    const char *argv[] = { "/bin/sh", script, NULL };
+    return local[0] && base[0] && realpath(wt, real_wt) &&
+           dlx_write(script, body) &&
+           zcl_dev_proof_test_settle_child(real_wt, local, base,
+               ZCL_DEV_PROOF_TEST, argv, why, sizeof(why)) &&
+           dlx_eq_str(why, "child_proof_failed_exit_1");
+}
+
+static int test_dev_land_train_failed_evidence(void)
+{
+    int failures = 0;
+    TEST("land: each failed train pair retains its own bound proof evidence") {
+        struct dlx_rig rig;
+        char b[64], c[64], local1[64], base1[64], local2[64], base2[64];
+        char dir[1200], path[1400], label1[200], label2[200], text[32768];
+        size_t n = 0;
+        dlx_isolate("train_pair_evidence");
+        ASSERT(dlx_tr_rig(&rig, "train_pair_evidence_rig", "running", "b.txt", b, c));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        ASSERT(dlx_tr_beat("started", 2, 1));
+        ASSERT(dlx_train_failed_pair(local1, base1, "test_train_first"));
+        setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        ASSERT(dlx_tr_beat("started", 1, 1));
+        ASSERT(dlx_train_failed_pair(local2, base2, "test_train_second"));
+        ASSERT(strcmp(local1, local2) != 0);
+        ASSERT_STR_EQ(base1, base2);
+        setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+        ASSERT(dlx_tr_beat("rebased", 0, 1));
+        dlx_landdir(dir, sizeof(dir));
+        (void)snprintf(path, sizeof(path), "%s/logs/land-1-a1.log", dir);
+        ASSERT(dlx_slurp(path, text, sizeof(text) - 1, &n));
+        text[n] = '\0';
+        (void)snprintf(label1, sizeof(label1), "train proof evidence local=%s base=%s", local1, base1);
+        (void)snprintf(label2, sizeof(label2), "train proof evidence local=%s base=%s", local2, base2);
+        const char *first = strstr(text, label1), *second = strstr(text, label2);
+        ASSERT(first && second && first < second);
+        const char *first_failure = strstr(first, "FAIL at tests/harness/src/test_train_first.c:42");
+        const char *second_failure = strstr(second, "FAIL at tests/harness/src/test_train_second.c:42");
+        ASSERT(first_failure && first_failure < second && second_failure);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_split_cancel(void)
 {
     int failures = 0;
@@ -1594,6 +1660,7 @@ int test_dev_land_train_cases(void)
     failures += test_dev_land_train_conflict_skipped();
     failures += test_dev_land_train_red_falls_back_to_singles();
     failures += test_dev_land_train_red_bisects();
+    failures += test_dev_land_train_failed_evidence();
     failures += test_dev_land_train_split_cancel();
     failures += test_dev_land_train_split_eight();
     failures += test_dev_land_train_split_crash();

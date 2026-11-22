@@ -282,6 +282,7 @@ size_t dl_train_culprits(const char *wt, char *detail, const char *const from[],
 void dl_train_forget_group(struct dl_row *rows, size_t n, const struct dl_row *hit);
 bool dl_train_group_valid(const struct dl_row *row);
 bool dl_train_formed(const struct dl_row *row);
+void dl_train_failure_evidence(const struct dl_dirs *d, const struct dl_row *row);
 /* A failed train proof is no verdict on any member: requeue the cohort as
  * bounded subgroups or conservative solos. False: not a bound train. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,

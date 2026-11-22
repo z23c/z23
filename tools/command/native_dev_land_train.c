@@ -548,6 +548,7 @@ bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
     char why[640];
     if (!dl_train_bound(d, row))
         return false;
+    if (confirmed) dl_train_failure_evidence(d, row);
     (void)snprintf(why, sizeof(why), "proof failed: %.600s", detail);
     const char *bisect = getenv("ZCL_LAND_TRAIN_BISECT");
     if (!confirmed || (bisect && strcmp(bisect, "0") == 0)) dl_train_requeue(d, row, why, reply);

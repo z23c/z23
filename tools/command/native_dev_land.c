@@ -8861,6 +8861,28 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
 }
 #endif
 
+/* Preserve the exact settled pair before train fallback clears its identity.
+ * Diagnostics are best effort and never participate in the verdict. */
+void dl_train_failure_evidence(const struct dl_dirs *d, const struct dl_row *row)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char evidence[1280], label[384];
+    struct zcl_dev_proof_failure_identity identity;
+    dl_proof_evidence_read(d->wt, row->local, row->base, evidence,
+                           sizeof(evidence), &identity);
+    if (!identity.valid || !evidence[0]) return;
+    (void)snprintf(label, sizeof(label),
+                   "train proof evidence local=%s base=%s attempt=%s:\n",
+                   row->local, row->base, identity.attempt);
+    dl_log(row, label);
+    dl_log(row, evidence);
+    dl_log(row, "\n");
+#else
+    (void)d;
+    (void)row;
+#endif
+}
+
 static bool dl_preparation_observation_failure(const struct dl_dirs *d, struct dl_row *row,
                                                struct zcl_command_reply *reply)
 {
