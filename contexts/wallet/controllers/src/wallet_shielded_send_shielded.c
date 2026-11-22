@@ -698,6 +698,15 @@ static bool z_sendmany_shielded_with_key(
                 selected_notes, &num_sel_notes, &notes_total, &fee, result))
             return false;
 
+        /* Build for the chain tip, never a stale scan cursor: a wallet behind
+         * the tip is refused before any witness is loaded or note touched. */
+        int height = 0;
+        const char *behind = NULL;
+        if (!wallet_send_build_height(ctx->wallet, &height, &behind)) {
+            json_set_str(result, behind);
+            LOG_FAIL("wallet_shielded", "z_sendmany: refused - %s", behind);
+        }
+
         /* Witnesses are maintained incrementally by connect_block and bulk_blocks.
          * The gate loads them at the authoritative tip and checks the anchor
          * they produce against the chain's own Sapling root. */
@@ -719,7 +728,6 @@ static bool z_sendmany_shielded_with_key(
 
         /* Build transaction */
         struct wallet_tx wtx;
-        int height = ctx->wallet->best_block_height;
 
         void *proving_ctx = NULL;
         if (!z_sendmany_shielded_prepare_tx_and_prover(

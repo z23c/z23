@@ -29,6 +29,15 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
+#include "validation/contextual_check_tx.h"
+#include "consensus/upgrades.h"
+#include "chain/chainparams.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
+#include "script/standard.h"
+#include "wallet/wallet.h"
+#include "controllers/wallet_helpers.h"
+#include "services/zslp_command_service.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -921,12 +930,277 @@ static int wfs_test_readiness_projection(void)
     return failures;
 }
 
+
+/* ── sends build for the chain tip, never the wallet scan cursor ─────── */
+
+static int g_wfs_tip;
+static bool g_wfs_gap;
+static struct key_id g_wfs_owner;
+static int wfs_tip_source(void *ctx)
+{
+    (void)ctx;
+    return g_wfs_tip;
+}
+
+/* A wallet holding one confirmed coin of its own key and a change-key pool. */
+static bool wfs_tip_wallet(struct wallet *w, int scan_height)
+{
+    wallet_init(w);
+    if (!wallet_readiness_initialize(w, WALLET_READINESS_READY, true, 7))
+        return false;
+    struct privkey key;
+    struct pubkey pub;
+    privkey_make_new(&key, true);
+    privkey_get_pubkey(&key, &pub);
+    struct key_id kid = pubkey_get_id(&pub);
+    g_wfs_owner = kid;
+    struct script spk;
+    script_for_p2pkh(&spk, &kid);
+    if (!wallet_import_key(w, &key))
+        return false;
+    for (int i = 0; i < 4; i++) {
+        struct privkey ck;
+        struct pubkey cp;
+        privkey_make_new(&ck, true);
+        privkey_get_pubkey(&ck, &cp);
+        struct key_id ckid = pubkey_get_id(&cp);
+        if (!wallet_import_key(w, &ck) ||
+            !wallet_key_pool_restore(w, &ckid, 1000 + i))
+            return false;
+    }
+    struct wallet_tx fund;
+    memset(&fund, 0, sizeof(fund));
+    transaction_init(&fund.tx);
+    transaction_alloc(&fund.tx, 0, 1);
+    fund.tx.version = 1;
+    fund.tx.lock_time = 1;
+    fund.tx.vout[0].value = 100 * COIN_VALUE;
+    fund.tx.vout[0].script_pub_key = spk;
+    transaction_compute_hash(&fund.tx);
+    fund.confirms = 10;
+    fund.used = true;
+    bool ok = wallet_add_to_wallet(w, &fund);
+    transaction_free(&fund.tx);
+    zcl_mutex_lock(&w->cs);
+    w->best_block_height = scan_height;
+    if (g_wfs_gap) {
+        w->scan_retry.pending = true;
+        w->scan_retry.from = 0;
+        snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker),
+                 "restore");
+    }
+    zcl_mutex_unlock(&w->cs);
+    return ok;
+}
+
+/* Build to ourselves at wallet scan height `scan` while the chain is at
+ * `tip`; returns the builder's verdict, error text and the built tx. */
+static bool wfs_tip_send(int scan, int tip, struct wallet_tx *wtx,
+                         const char **why)
+{
+    struct wallet *w = calloc(1, sizeof(*w));
+    struct tx_destination dest = {.type = DEST_KEY_ID};
+    int64_t fee = 0;
+    bool built = false;
+    *why = NULL;
+    memset(wtx, 0, sizeof(*wtx));
+    g_wfs_tip = tip;
+    if (w && wfs_tip_wallet(w, scan))
+        built = wallet_create_transaction(w, &dest, 1 * COIN_VALUE, wtx, &fee,
+                                          why);
+    if (w) {
+        wallet_free(w);
+        free(w);
+    }
+    return built;
+}
+
+static int wfs_test_send_tip_guard(void)
+{
+    int failures = 0;
+    struct chain_params *cp = (struct chain_params *)chain_params_get();
+    struct chain_params saved = *cp;
+    cp->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 0;
+    cp->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 0;
+    wallet_set_chain_tip_source(wfs_tip_source, NULL);
+    struct wallet_tx wtx;
+    const char *why = NULL;
+    bool built;
+
+    built = wfs_tip_send(75, 100, &wtx, &why);
+    WFS_CHECK("wallet 25 blocks behind: send refused, nothing built", !built);
+    WFS_CHECK("refusal names 25 blocks, scanned 75, tip 100",
+              why && strcmp(why, "wallet is 25 blocks behind chain tip "
+                                 "(scanned 75, tip 100)") == 0);
+    if (built)
+        transaction_free(&wtx.tx);
+
+    built = wfs_tip_send(97, 100, &wtx, &why);
+    WFS_CHECK("wallet 3 blocks behind: send refused", !built);
+    WFS_CHECK("refusal names 3 blocks, scanned 97, tip 100",
+              why && strcmp(why, "wallet is 3 blocks behind chain tip "
+                                 "(scanned 97, tip 100)") == 0);
+    if (built)
+        transaction_free(&wtx.tx);
+
+    built = wfs_tip_send(100, 100, &wtx, &why);
+    WFS_CHECK("wallet at the tip builds", built);
+    WFS_CHECK("expiry is tip + 20", built && wtx.tx.expiry_height == 120);
+    WFS_CHECK("not expiring soon for the next block (mempool rule)",
+              built && !is_expiring_soon_tx(&wtx.tx, 101));
+    if (built)
+        transaction_free(&wtx.tx);
+
+    /* Activation boundary: wallet == tip == activation - 1. The mempool
+     * validates the next block (activation height), so the transaction must
+     * already be the Overwinter format. */
+    cp->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 101;
+    cp->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 100000;
+    built = wfs_tip_send(100, 100, &wtx, &why);
+    WFS_CHECK("boundary: builds at wallet == tip == activation - 1", built);
+    WFS_CHECK("boundary: epoch of tip + 1 is Overwinter",
+              consensus_current_epoch(101, &cp->consensus) ==
+                  UPGRADE_OVERWINTER);
+    WFS_CHECK("boundary: tx format matches the next block's epoch",
+              built && wtx.tx.overwintered &&
+                  wtx.tx.version == OVERWINTER_TX_VERSION &&
+                  wtx.tx.expiry_height == 120);
+    if (built)
+        transaction_free(&wtx.tx);
+
+    wallet_set_chain_tip_source(NULL, NULL);
+    *cp = saved;
+    return failures;
+}
+
+
+/* Owner-base builder (naming, identity, directory registrations) and the
+ * OP_RETURN signer take the same chain-tip guard as the module builders. */
+static bool wfs_owner_addr(char *out, size_t out_size)
+{
+    struct tx_destination dest = {.type = DEST_KEY_ID};
+    dest.id.key = g_wfs_owner;
+    return wallet_encode_destination(&dest, out, out_size);
+}
+
+static struct zcl_result wfs_owner_build(struct wallet *w, int scan, int tip,
+                                         struct wallet_tx *wtx,
+                                         const char **why)
+{
+    char addr[128] = {0};
+    int64_t fee = 0;
+    *why = NULL;
+    memset(wtx, 0, sizeof(*wtx));
+    g_wfs_tip = tip;
+    if (!wfs_tip_wallet(w, scan) || !wfs_owner_addr(addr, sizeof(addr)))
+        return ZCL_ERR(-1, "owner fixture setup failed");
+    return zslp_command_build_owner_base_tx(w, addr, wtx, &fee, why);
+}
+
+static int wfs_test_owner_tip_guard(void)
+{
+    int failures = 0;
+    struct chain_params *cp = (struct chain_params *)chain_params_get();
+    struct chain_params saved = *cp;
+    cp->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 0;
+    cp->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 0;
+    wallet_set_chain_tip_source(wfs_tip_source, NULL);
+    struct wallet *w = calloc(1, sizeof(*w));
+    struct wallet_tx wtx;
+    const char *why = NULL;
+    if (!w)
+        return 1;
+
+    struct zcl_result r = wfs_owner_build(w, 75, 100, &wtx, &why);
+    WFS_CHECK("owner base: 25 blocks behind is refused, nothing built",
+              !r.ok && wtx.tx.num_vin == 0 && wtx.tx.num_vout == 0);
+    WFS_CHECK("owner base: refusal names 25 blocks, scanned 75, tip 100",
+              why && strcmp(why, "wallet is 25 blocks behind chain tip "
+                                 "(scanned 75, tip 100)") == 0);
+    wallet_free(w);
+
+    r = wfs_owner_build(w, 99, 100, &wtx, &why);
+    WFS_CHECK("owner base: a one-block lag is a clear retryable refusal",
+              !r.ok && why &&
+                  strcmp(why, "wallet is 1 block behind chain tip "
+                              "(scanned 99, tip 100)") == 0);
+    wallet_free(w);
+
+    r = wfs_owner_build(w, 100, 100, &wtx, &why);
+    WFS_CHECK("owner base: wallet at the tip builds, expiry is tip + 20",
+              r.ok && wtx.tx.expiry_height == 120);
+    if (r.ok) {
+        /* The tip moves on before the OP_RETURN is added: refused, and the
+         * transaction is left exactly as it was. */
+        size_t nout = wtx.tx.num_vout;
+        const uint8_t script[] = {0x6a, 0x01, 0x01};
+        g_wfs_tip = 130;
+        struct zcl_result p = zslp_command_prepare_with_op_return(
+            w, &wtx, script, sizeof(script));
+        WFS_CHECK("op_return: wallet behind the tip is refused untouched",
+                  !p.ok && wtx.tx.num_vout == nout);
+        g_wfs_tip = 100;
+        p = zslp_command_prepare_with_op_return(w, &wtx, script,
+                                                sizeof(script));
+        WFS_CHECK("op_return: wallet at the tip signs and adds the output",
+                  p.ok && wtx.tx.num_vout == nout + 1);
+        transaction_free(&wtx.tx);
+    }
+    wallet_free(w);
+
+    /* Activation boundary: wallet == tip == activation - 1. */
+    cp->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 101;
+    cp->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 100000;
+    r = wfs_owner_build(w, 100, 100, &wtx, &why);
+    WFS_CHECK("owner base boundary: format matches the next block's epoch",
+              r.ok && wtx.tx.overwintered &&
+                  wtx.tx.version == OVERWINTER_TX_VERSION &&
+                  wtx.tx.expiry_height == 120);
+    if (r.ok)
+        transaction_free(&wtx.tx);
+    wallet_free(w);
+    free(w);
+
+    wallet_set_chain_tip_source(NULL, NULL);
+    *cp = saved;
+    return failures;
+}
+
+/* A wallet with a pending scan-gap marker (restore, birthday change) whose
+ * cursor is at the tip keeps sending: the marker lowers the scanned height
+ * and may never clear, so it must not be read as lag. */
+static int wfs_test_tip_guard_gap_marker(void)
+{
+    int failures = 0;
+    struct chain_params *cp = (struct chain_params *)chain_params_get();
+    struct chain_params saved = *cp;
+    cp->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 0;
+    cp->consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 0;
+    wallet_set_chain_tip_source(wfs_tip_source, NULL);
+    struct wallet_tx wtx;
+    const char *why = NULL;
+
+    g_wfs_gap = true;
+    bool built = wfs_tip_send(100, 100, &wtx, &why);
+    g_wfs_gap = false;
+    WFS_CHECK("gap marker pending, cursor at the tip: send still builds",
+              built);
+    if (built)
+        transaction_free(&wtx.tx);
+
+    wallet_set_chain_tip_source(NULL, NULL);
+    *cp = saved;
+    return failures;
+}
 int test_wallet_funds_safety(void);
 int test_wallet_funds_safety(void)
 {
     printf("\n=== wallet funds-safety regression gates ===\n");
     int failures = 0;
     failures += wfs_test_readiness_projection();
+    failures += wfs_test_send_tip_guard();
+    failures += wfs_test_owner_tip_guard();
+    failures += wfs_test_tip_guard_gap_marker();
 
     char dbdir[256], dbpath[320];
     test_make_tmpdir(dbdir, sizeof(dbdir), "wallet_funds_safety", "main");

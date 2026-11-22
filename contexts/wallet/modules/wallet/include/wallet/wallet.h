@@ -132,6 +132,23 @@ typedef bool (*wallet_coin_reservation_probe)(
 void wallet_set_coin_reservation_probe(wallet_coin_reservation_probe probe,
                                        void *ctx);
 
+struct wallet;
+
+/* The authoritative chain tip (0 when unknown). Boot registers the reducer's
+ * tip so the wallet module never reads the reducer itself. */
+typedef int (*wallet_chain_tip_source)(void *ctx);
+void wallet_set_chain_tip_source(wallet_chain_tip_source source, void *ctx);
+
+/* The height a send builds against, resolved BEFORE anything is built or a
+ * key is drawn. Refuses (error "wallet is N blocks behind chain tip (scanned
+ * X, tip Y)") when the wallet height cursor is below the tip (a pending scan
+ * gap marker is not lag); the text is
+ * thread-local, valid until the next call on the thread. Otherwise it is the
+ * chain tip height (the wallet cursor when no tip is registered); the
+ * transaction is built for the block at height + 1. */
+bool wallet_send_build_height(struct wallet *w, int *height_out,
+                              const char **error);
+
 enum wallet_readiness_state {
     WALLET_READINESS_UNKNOWN = 0, WALLET_READINESS_READY, WALLET_READINESS_PENDING
 };

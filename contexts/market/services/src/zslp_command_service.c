@@ -279,6 +279,14 @@ struct zcl_result zslp_command_prepare_with_op_return(
     if (!zslp_command_prevouts_in_range(wallet, wtx))
         return ZCL_ERR(-4, "prepare_with_op_return: input prevout past the previous transaction's outputs");
 
+    /* Resolve the build height before the transaction is touched: a wallet
+     * behind the chain tip is refused with nothing modified. */
+    {
+        const char *tip_error = NULL;
+        if (!wallet_send_build_height(wallet, &height, &tip_error))
+            return ZCL_ERR(-5, "prepare_with_op_return: %s", tip_error);
+    }
+
     old_nout = wtx->tx.num_vout;
     if (old_nout == SIZE_MAX)
         return ZCL_ERR(-2, "prepare_with_op_return: output count overflow");
@@ -297,7 +305,6 @@ struct zcl_result zslp_command_prepare_with_op_return(
     wtx->tx.num_vout = old_nout + 1;
 
     cp = chain_params_get();
-    height = wallet->best_block_height;
     branch_id = consensus_current_epoch_branch_id(height + 1, &cp->consensus);
 
     zcl_mutex_lock(&wallet->cs);
@@ -719,9 +726,18 @@ struct zcl_result zslp_command_build_owner_base_tx(struct wallet *wallet,
                             "address '%s' as P2PKH", owner_address);
     }
 
+    /* Chain-tip build height, resolved before any key, coin or transaction
+     * work: a wallet behind the tip is refused with nothing built. */
+    int height = 0;
+    const char *tip_error = NULL;
+    if (!wallet_send_build_height(wallet, &height, &tip_error)) {
+        if (tx_error)
+            *tx_error = tip_error;
+        return ZCL_ERR(-5, "build_owner_base_tx: %s", tip_error);
+    }
+
     zcl_mutex_lock(&wallet->cs);
     int64_t fee = wallet->default_fee;
-    int height = wallet->best_block_height;
     bool have_key = keystore_have_key(&wallet->keystore, &owner_dest.id.key);
     zcl_mutex_unlock(&wallet->cs);
 
@@ -750,7 +766,7 @@ struct zcl_result zslp_command_build_owner_base_tx(struct wallet *wallet,
     int64_t picked_value = picked->wtx->tx.vout[picked->i].value;
 
     const struct chain_params *cp = chain_params_get();
-    int epoch = consensus_current_epoch(height, &cp->consensus);
+    int epoch = consensus_current_epoch(height + 1, &cp->consensus);
 
     zslp_command_init_owner_tx(wtx, epoch, height);
     struct zcl_result filled = zslp_command_fill_owner_tx(

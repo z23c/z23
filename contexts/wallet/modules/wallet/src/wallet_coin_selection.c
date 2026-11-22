@@ -655,6 +655,9 @@ bool wallet_create_transaction_selected(struct wallet *w,
         *error = "Wallet state is unavailable during cutover";
         return false;
     }
+    int height = 0;
+    if (!wallet_send_build_height(w, &height, error))
+        return false;
 
     int64_t input_value = 0, output_value = 0;
     if (!wallet_sum_explicit_inputs(selected, num_selected, &input_value,
@@ -669,12 +672,9 @@ bool wallet_create_transaction_selected(struct wallet *w,
         return false;
 
     const struct chain_params *cp = chain_params_get();
-    zcl_mutex_lock(&w->cs);
-    int height = w->best_block_height;
-    zcl_mutex_unlock(&w->cs);
     memset(wtx_out, 0, sizeof(*wtx_out));
     transaction_init(&wtx_out->tx);
-    int epoch = consensus_current_epoch(height, &cp->consensus);
+    int epoch = consensus_current_epoch(height + 1, &cp->consensus);
     wallet_tx_set_version_for_epoch(wtx_out, epoch, height);
 
     if (!wallet_tx_build_explicit(w, wtx_out, selected, num_selected, outputs,

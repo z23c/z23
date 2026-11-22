@@ -558,6 +558,12 @@ static bool wprt_rpc_start(struct wprt_fx *f, bool with_db)
                          &f->cm);
     rpc_wallet_set_node_db(f->db_open ? &f->ndb : NULL);
     rpc_wallet_set_coins_tip(&f->coins);
+    /* The fixture publishes a provable tip of 10 (wprt_trust_fixture). A wallet
+     * that has scanned nothing while the chain stands at 10 is exactly the lag
+     * the send path now refuses, so start it level with that tip. */
+    zcl_mutex_lock(&f->wallet->cs);
+    f->wallet->best_block_height = 10;
+    zcl_mutex_unlock(&f->wallet->cs);
     return true;
 }
 

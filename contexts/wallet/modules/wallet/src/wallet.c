@@ -831,6 +831,9 @@ bool wallet_create_transaction(struct wallet *w,
         *error = "Wallet state is unavailable during cutover";
         return false;
     }
+    int height = 0;
+    if (!wallet_send_build_height(w, &height, error))
+        return false;
     if (value <= 0) {
         *error = "Invalid amount";
         return false;
@@ -862,11 +865,9 @@ bool wallet_create_transaction(struct wallet *w,
     memset(wtx_out, 0, sizeof(*wtx_out));
     transaction_init(&wtx_out->tx);
 
-    /* Brief w->cs hold for an atomic height read, never across selection. */
-    zcl_mutex_lock(&w->cs);
-    int height = w->best_block_height;
-    zcl_mutex_unlock(&w->cs);
-    int epoch = consensus_current_epoch(height, &cp->consensus);
+    /* Build for the block after the chain tip (the height the mempool and
+     * the sighash branch use), resolved above. */
+    int epoch = consensus_current_epoch(height + 1, &cp->consensus);
 
     if (epoch >= UPGRADE_SAPLING) {
         wtx_out->tx.overwintered = true;
@@ -943,6 +944,9 @@ bool wallet_create_transaction_multi(struct wallet *w,
         *error = "Wallet state is unavailable during cutover";
         return false;
     }
+    int height = 0;
+    if (!wallet_send_build_height(w, &height, error))
+        return false;
     int64_t total_value = 0;
     if (!wallet_multi_total(values, num_outputs, &total_value, error))
         return false;
@@ -973,11 +977,9 @@ bool wallet_create_transaction_multi(struct wallet *w,
     memset(wtx_out, 0, sizeof(*wtx_out));
     transaction_init(&wtx_out->tx);
 
-    /* Brief w->cs hold for an atomic height read, never across selection. */
-    zcl_mutex_lock(&w->cs);
-    int height = w->best_block_height;
-    zcl_mutex_unlock(&w->cs);
-    int epoch = consensus_current_epoch(height, &cp->consensus);
+    /* Build for the block after the chain tip (the height the mempool and
+     * the sighash branch use), resolved above. */
+    int epoch = consensus_current_epoch(height + 1, &cp->consensus);
 
     if (epoch >= UPGRADE_SAPLING) {
         wtx_out->tx.overwintered = true;

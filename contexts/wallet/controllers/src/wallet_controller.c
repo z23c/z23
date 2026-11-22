@@ -4,6 +4,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "controllers/wallet_controller_internal.h"
+#include "jobs/reducer_frontier.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "controllers/wallet_diagnostic_controller.h"
 #include "controllers/wallet_private_broadcast.h"
@@ -861,6 +862,12 @@ static bool rpc_keypoolrefill(const struct json_value *params, bool help,
     return true;
 }
 
+static int wallet_send_chain_tip(void *unused)
+{
+    (void)unused;
+    return (int)reducer_frontier_external_tip_height();
+}
+
 #if defined(_WIN32) && defined(__clang__)
 /* Prevent Windows whole-program inlining: the child registrars otherwise
  * produce a roughly 1.6 MiB frame and trip the native PE stack probe. */
@@ -870,6 +877,9 @@ __attribute__((optimize("no-inline", "no-inline-functions", "no-inline-small-fun
 #endif
 void register_wallet_rpc_commands(struct rpc_table *t)
 {
+    /* Sends build for the chain tip, not the wallet scan cursor: hand the
+     * wallet module the reducer's authoritative tip (it never reads it). */
+    wallet_set_chain_tip_source(wallet_send_chain_tip, NULL);
     struct rpc_command cmds[] = {
         { "wallet", "getnewaddress",        rpc_getnewaddress,        false },
         { "wallet", "getbalance",           rpc_getbalance,           false },
