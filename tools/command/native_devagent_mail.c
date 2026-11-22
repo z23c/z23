@@ -2803,6 +2803,19 @@ static bool dvm_exact_parse(const char *raw, struct dvm_row *row)
     json_free(&value);
     return ok;
 }
+static const char *dvm_exact_problem(const char *raw, const char *actual,
+    const char *hash, long long seq, const char *ref, struct dvm_row *row)
+{
+    if (strcmp(actual, hash))
+        return "selected mail row_sha3 differs; refresh the locator with dev agent mail pull";
+    if (!dvm_exact_parse(raw, row))
+        return "selected mail row is invalid; inspect the source stream read-only";
+    if (row->seq != seq)
+        return "selected mail sequence differs; refresh the locator with dev agent mail pull";
+    if (strcmp(row->ref, ref))
+        return "selected mail reference differs; refresh the locator with dev agent mail pull";
+    return NULL;
+}
 #endif
 
 static void dvm_exact(const struct zcl_command_request *req,
@@ -2825,9 +2838,9 @@ static void dvm_exact(const struct zcl_command_request *req,
         return;
     }
     dvm_row_hash(raw, strlen(raw), actual);
-    if (strcmp(actual, hash) || !dvm_exact_parse(raw, &row) || row.seq != seq ||
-        strcmp(row.ref, dvm_str(req, "ref"))) {
-        dvm_fail(reply, "MAIL_EXACT_MISMATCH", "selected mail bytes do not match locator", stream);
+    const char *problem = dvm_exact_problem(raw, actual, hash, seq, dvm_str(req, "ref"), &row);
+    if (problem) {
+        dvm_fail(reply, "MAIL_EXACT_MISMATCH", problem, stream);
         return;
     }
     bool ok = dvm_exact_project(reply, &row, stream, offset, actual, raw);

@@ -1322,6 +1322,21 @@ static bool dvx_exact_check(const char *stream, long long offset,
 }
 
 #if !defined(_WIN32)
+static bool dvx_exact_mismatch(const char *stream, long long seq, const char *hash,
+                               const char *ref, const char *message)
+{
+    struct dvx_call c;
+    dvx_exact_input(&c, stream, 0, seq, hash, ref);
+    bool ok = dvx_run(&c) && !dvx_ok(&c) &&
+        !strcmp(c.reply.error.code, "MAIL_EXACT_MISMATCH") &&
+        strstr(c.reply.error.message, message) != NULL &&
+        json_get(&c.reply.data, "raw_line") == NULL;
+    dvx_end(&c);
+    return ok;
+}
+#endif
+
+#if !defined(_WIN32)
 static void dvx_exact_append_race(void)
 {
     dvx_import_append("inbox.a", "{}\n");
@@ -1356,10 +1371,10 @@ static int test_mail_exact_locator(void)
         bool race_refused = dvx_exact_check("inbox.a.jsonl", 0, 7, hash, "repeat", NULL);
         zcl_devagent_mail_test_set_after_exact_read(NULL);
         ASSERT(race_refused);
-        ASSERT(dvx_exact_check("inbox.b.jsonl", 0, 7, hash, "repeat", NULL));
+        ASSERT(dvx_exact_mismatch("inbox.b.jsonl", 7, hash, "repeat", "row_sha3"));
         ASSERT(dvx_exact_check("inbox.a.jsonl", 1, 7, hash, "repeat", NULL));
-        ASSERT(dvx_exact_check("inbox.a.jsonl", 0, 8, hash, "repeat", NULL));
-        ASSERT(dvx_exact_check("inbox.a.jsonl", 0, 7, hash, "wrong", NULL));
+        ASSERT(dvx_exact_mismatch("inbox.a.jsonl", 8, hash, "repeat", "sequence"));
+        ASSERT(dvx_exact_mismatch("inbox.a.jsonl", 7, hash, "wrong", "reference"));
         ASSERT(dvx_exact_check("../inbox.a.jsonl", 0, 7, hash, "repeat", NULL));
         ASSERT(dvx_exact_check("missing.jsonl", 0, 7, hash, "repeat", NULL));
         dvx_import_append("inbox.a", second);
@@ -1454,7 +1469,11 @@ static int test_mail_exact_malformed(void)
             sha3_256_write(&ctx, (const unsigned char *)domain, sizeof(domain));
             sha3_256_write(&ctx, (const unsigned char *)records[i], strlen(records[i]));
             sha3_256_finalize(&ctx, sum); zcl_hex_encode(sum, sizeof(sum), hash);
+#if defined(_WIN32)
             ASSERT(dvx_exact_check("inbox.a.jsonl", 0, 7, hash, "repeat", NULL));
+#else
+            ASSERT(dvx_exact_mismatch("inbox.a.jsonl", 7, hash, "repeat", "invalid"));
+#endif
         }
         struct dvx_call partial;
         dvx_begin(&partial);
