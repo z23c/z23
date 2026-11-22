@@ -14,6 +14,7 @@
 #include "tip_finalize_post_step.h"
 #include "tip_finalize_visible_body.h"  /* visible-body reconcile dedup stamp */
 #include "jobs/catchup_cadence.h"      /* live catch-up boundary-fold defer */
+#include "jobs/tip_finalize_parts.h"    /* per-part timers (observation only) */
 #include "jobs/stage_helpers.h"
 #include "utxo_root_ladder_tripwire.h"   /* OBSERVE-ONLY golden ladder caller */
 
@@ -266,12 +267,16 @@ static void tip_finalize_wallet_sapling_outputs(struct wallet *wallet,
                                                 struct node_db *ndb,
                                                 const struct transaction *tx,
                                                 const struct uint256 *txid,
-                                                struct block_index *pindex_new)
+                                                struct block_index *pindex_new,
+                                                struct tip_finalize_parts_block *pb)
 {
+    int64_t t0 = tip_finalize_parts_start(pb);
     zcl_mutex_lock(&wallet->cs);
     size_t notes_before = wallet->num_sapling_notes;
     zcl_mutex_unlock(&wallet->cs);
     wallet_try_sapling_decrypt(wallet, tx, txid);
+    tip_finalize_parts_add(pb, TF_PART_SAPLING_DECRYPT, t0);
+    t0 = tip_finalize_parts_start(pb);
     if (ndb) {
         size_t n_notes = 0;
         struct sapling_received_note *snap =
@@ -291,6 +296,7 @@ static void tip_finalize_wallet_sapling_outputs(struct wallet *wallet,
         }
         free(snap);
     }
+    tip_finalize_parts_add(pb, TF_PART_NOTE_DB, t0);
 }
 
 static bool tip_finalize_regtest_connect_enqueue_failed(
@@ -321,14 +327,19 @@ static void tip_finalize_wallet_transactions(struct block_index *pindex_new,
                                              const struct block *blk,
                                              struct wallet *wallet,
                                              struct node_db *ndb,
-                                             bool regtest_on_demand)
+                                             bool regtest_on_demand,
+                                             struct tip_finalize_parts_block *pb)
 {
     for (size_t i = 0; i < blk->num_vtx; i++) {
         const struct transaction *tx = &blk->vtx[i];
+        int64_t t0 = tip_finalize_parts_start(pb);
         bool wallet_involved = wallet_sync_transaction(wallet, tx, pindex_new);
-        if (tip_finalize_wallet_confirm_enqueue_failed(
-                regtest_on_demand, wallet_involved, ndb, tx, wallet,
-                pindex_new)) {
+        tip_finalize_parts_add(pb, TF_PART_WALLET_SYNC, t0);
+        t0 = tip_finalize_parts_start(pb);
+        bool enqueue_failed = tip_finalize_wallet_confirm_enqueue_failed(
+            regtest_on_demand, wallet_involved, ndb, tx, wallet, pindex_new);
+        tip_finalize_parts_add(pb, TF_PART_CONFIRM_ENQUEUE, t0);
+        if (enqueue_failed) {
             LOG_WARN("tip_finalize",
                      "wallet confirmation projection enqueue failed "
                      "at height %d tx %zu",
@@ -340,10 +351,13 @@ static void tip_finalize_wallet_transactions(struct block_index *pindex_new,
             if (!transaction_hash_serialized(tx, &txid))
                 continue;
             tip_finalize_wallet_sapling_outputs(wallet, ndb, tx, &txid,
-                                                pindex_new);
+                                                pindex_new, pb);
         }
-        if (tx->num_shielded_spend > 0)
+        if (tx->num_shielded_spend > 0) {
+            t0 = tip_finalize_parts_start(pb);
             wallet_mark_sapling_nullifiers_spent(wallet, tx);
+            tip_finalize_parts_add(pb, TF_PART_NULLIFIERS, t0);
+        }
     }
 }
 
@@ -415,7 +429,8 @@ static void tip_finalize_wallet_set_height(struct wallet *wallet, int height)
  * nullifier, and derived wallet rows still have to observe the exact body.
  * Returns false when the wallet step did not run, so a retry can help. */
 static bool tip_finalize_reconcile_wallet_body(
-    struct block_index *pindex_new, const struct block *blk)
+    struct block_index *pindex_new, const struct block *blk,
+    struct tip_finalize_parts_block *pb)
 {
     if (!pindex_new || !blk)
         return false;
@@ -433,12 +448,15 @@ static bool tip_finalize_reconcile_wallet_body(
     if (regtest_on_demand)
         (void)wallet_advance_confirmations(wallet, pindex_new->nHeight);
 
-    tip_finalize_wallet_transactions(pindex_new, blk, wallet, ndb, regtest_on_demand);
+    tip_finalize_wallet_transactions(pindex_new, blk, wallet, ndb,
+                                     regtest_on_demand, pb);
+    int64_t t0 = tip_finalize_parts_start(pb);
     tip_finalize_advance_witnesses(regtest_on_demand, ndb, blk, pindex_new,
                                    wallet);
     struct main_state *ms = app_runtime_main_state();
     if (ms && ndb && active_chain_at(&ms->chain_active, pindex_new->nHeight) == pindex_new)
         wallet_birthday_reconcile(wallet, ndb, &ms->chain_active, pindex_new);
+    tip_finalize_parts_add(pb, TF_PART_WITNESS_BIRTHDAY, t0);
     tip_finalize_wallet_set_height(wallet, pindex_new->nHeight);
 
     if (tip_finalize_regtest_connect_enqueue_failed(
@@ -471,7 +489,8 @@ bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new)
         block_free(&owned);
         return false;
     }
-    bool wallet_reconciled = tip_finalize_reconcile_wallet_body(pindex_new, blk);
+    bool wallet_reconciled =
+        tip_finalize_reconcile_wallet_body(pindex_new, blk, NULL);
     stage_release_block_view(&owned, &handle, borrowed);
     return wallet_reconciled;
 }
@@ -503,7 +522,8 @@ bool tip_finalize_run_wallet_mempool_reconcile(
     /* Preserve the established late-visible ordering: invalidate the coins
      * cache/remove confirmed mempool entries before publishing wallet state. */
     tip_finalize_reconcile_block(pindex_new, blk);
-    bool wallet_reconciled = tip_finalize_reconcile_wallet_body(pindex_new, blk);
+    bool wallet_reconciled =
+        tip_finalize_reconcile_wallet_body(pindex_new, blk, NULL);
     stage_release_block_view(&owned, &handle, borrowed);
     return wallet_reconciled;
 }
@@ -564,6 +584,8 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * node_health_collect drains it with the correct lock order before every
      * health snapshot, so the mismatch this follow exists to clear is never
      * observed. */
+    struct tip_finalize_parts_block pb = {0};
+    const int64_t parts_t0 = tip_finalize_parts_start(&pb);
     chain_evidence_note_finalized_tip(pindex_new);
 
     char datadir[2048];
@@ -573,9 +595,12 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
     struct block_parse_handle handle;
     const struct block *blk = NULL;
     bool borrowed = false;
-    if (!stage_acquire_block_view(&owned, &handle, &blk, &borrowed,
-                                  pindex_new, pindex_new->nHeight, datadir,
-                                  NULL, NULL)) {
+    int64_t t0 = tip_finalize_parts_start(&pb);
+    const bool have_body = stage_acquire_block_view(
+        &owned, &handle, &blk, &borrowed, pindex_new, pindex_new->nHeight,
+        datadir, NULL, NULL);
+    tip_finalize_parts_add(&pb, TF_PART_BODY_ACQUIRE, t0);
+    if (!have_body) {
         /* No on-disk body (HAVE_DATA absent / read failed). The body is read
          * back from disk, so a missing body is a benign skip — the tip still
          * advanced, only the derived side effects are deferred. The skip must
@@ -624,7 +649,7 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
     /* Wallet publication is idempotent and is also reused when this body
      * becomes visible after served-tip authority already reached the height. */
     const bool wallet_reconciled =
-        tip_finalize_reconcile_wallet_body(pindex_new, blk);
+        tip_finalize_reconcile_wallet_body(pindex_new, blk, &pb);
 
     /* Publish the committed coins_kv generation to the long-lived read cache
      * before any later relay or block-template selection can consult it. The
@@ -634,7 +659,9 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * live and newly-created txids can remain absent. Invalidate exactly the
      * keys this finalized block changed; the next read resolves through the
      * canonical coins_kv path. */
+    t0 = tip_finalize_parts_start(&pb);
     tip_finalize_reconcile_block(pindex_new, blk);
+    tip_finalize_parts_add(&pb, TF_PART_RECONCILE_BLOCK, t0);
 
     /* Projection-deferred DIAGNOSTIC.
      * The reducer consensus path does NOT write the derived block/tx SQLite
@@ -647,7 +674,9 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
     tip_finalize_note_projection_deferred(pindex_new);
 
     /* Append block hash to Merkle Mountain Range */
+    t0 = tip_finalize_parts_start(&pb);
     tip_finalize_append_mmr(pindex_new);
+    tip_finalize_parts_add(&pb, TF_PART_MMR_APPEND, t0);
 
     /* Append rich leaf to Merkle Mountain Belt (O(1) per block).
      *
@@ -688,6 +717,7 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * legacy per-height row is not a function of the height. The block-bound
      * record served by /api/v1/coins/roots is written only when the applied
      * frontier equals height + 1 (tip_finalize_boundary_root.c). */
+    t0 = tip_finalize_parts_start(&pb);
     if (pindex_new->phashBlock) {
         uint8_t utxo_root[32] = {0};
         if (pindex_new->nHeight > 0 &&
@@ -705,6 +735,7 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
             utxo_root);
         rpc_blockchain_mmb_append(&leaf);
     }
+    tip_finalize_parts_add(&pb, TF_PART_MMB_APPEND, t0);
 
     /* OBSERVE-ONLY SHA3 golden-window corroboration tripwire. Runs at most once
      * per 1000-block window, only for windows covered by the locked golden
@@ -732,4 +763,5 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
     if (wallet_reconciled)
         tip_finalize_visible_body_note_reconciled(pindex_new->nHeight,
                                                   pindex_new->phashBlock);
+    tip_finalize_parts_publish(&pb, parts_t0);
 }

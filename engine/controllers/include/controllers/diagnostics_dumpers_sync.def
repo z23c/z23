@@ -133,6 +133,12 @@
     DIAG_STAGE("reducer_stage_profile", reducer_stage_profile_dump_state_json,
                "versioned body_persist + script_validate subphase timings and work counters",
                "core/modules/sync/src/reducer_stage_profile.c", "tests/harness/src/test_stage.c"),
+    DIAG_STAGE("tip_finalize_parts", tip_finalize_parts_dump_state_json,
+               "tip_finalize post-finalize per-part timers (body acquire, wallet sync, "
+               "Sapling decrypt, note db, nullifiers, reconcile, MMR/MMB): count, "
+               "total/mean/max us and p50/p95 per finalized block",
+               "engine/jobs/src/tip_finalize_parts.c",
+               "tests/harness/src/test_tip_finalize_post_step.c"),
     DIAG_STAGE("script_validate", script_validate_dump_state_json,
                "script_validate stage: cursor, script counters, log rows",
                "engine/jobs/src/script_validate_stage_dump.c", "tests/harness/src/test_stage.c"),

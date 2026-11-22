@@ -49,6 +49,10 @@
 #include "sapling/note_encryption.h"
 #include "support/cleanse.h"
 #include "jobs/node_pace.h"
+#include "jobs/tip_finalize_parts.h"
+#include "controllers/diagnostics_controller.h"
+#include "json/json.h"
+#include "platform/clock.h"
 #include "services/node_db_catchup_service.h"
 #include "wallet/sapling_keys.h"
 #include "coins/coins_view.h"
@@ -820,6 +824,56 @@ static int tp_gentle_wallet_tip(void)
     node_pace_set(NODE_PACE_NORMAL); node_pace_test_end_resume_grace();
     x.rt.main_state = NULL; main_state_free(&ms); tp_wire_close(&x); return failures;
 }
+static bool tp_parts_json_ok(void)
+{
+    struct json_value j;  json_init(&j);
+    char csv[8192]; (void)diagnostics_subsystems_csv(csv, sizeof(csv));
+    bool dumped = tip_finalize_parts_dump_state_json(&j, NULL);
+    const struct json_value *ps = dumped ? json_get(&j, "parts") : NULL;
+    const struct json_value *ws = ps ? json_get(ps, "wallet_sync") : NULL;
+    bool ok = ws && json_get_int(json_get(ws, "count")) == 1 &&
+              json_get(&j, "total") && json_get(&j, "parts_sum_us") &&
+              strstr(csv, "tip_finalize_parts");
+    json_free(&j);
+    return ok;
+}
+
+/* Part timers: one post-finalize of the decryptable-note block runs every part
+ * once; the parts are disjoint slices of the whole step. Prints the pair cost. */
+static int tp_parts_probe(void)
+{
+    static struct tp_wire x;
+    memset(&x, 0, sizeof(x));
+    int failures = 0; uint8_t rcm[32] = {0}; struct uint256 txid = {0};
+    bool up = tp_wire_chain(&x) && tp_wire_wallet(&x);
+    bool body = up && tp_gentle_tip_body(&x, rcm, &txid) && tp_gentle_pending(&x);
+    atomic_store(&g_body_pull_active, 0);
+    tip_finalize_parts_reset();
+    if (body)
+        tip_finalize_run_post_finalize(&x.t.bi[2]);
+    uint64_t sum = 0; bool each = body;
+    struct tip_finalize_part_stat st = {0}, tot = {0};
+    for (int p = 0; p < TF_PART_COUNT; p++) {
+        each = each && tip_finalize_parts_stat(p, &st) && st.count == 1;
+        sum += st.total_us;
+    }
+    (void)tip_finalize_parts_stat(TF_PART_TOTAL, &tot);
+    TP_CHECK("parts: every part counted once for one block", each);
+    TP_CHECK("parts: whole step counted once and parts do not exceed it",
+             tot.count == 1 && sum <= tot.total_us);
+    TP_CHECK("parts: unaccounted time within tolerance of the whole",
+             tot.count == 1 && tot.total_us - sum <= tot.total_us / 2 + 5000);
+    TP_CHECK("parts: ops state reply carries the per-part fields",
+             tp_parts_json_ok());
+    struct tip_finalize_parts_block ob = {0};
+    int64_t m0 = clock_now_monotonic_ns();
+    for (int i = 0; i < 1000000; i++)
+        tip_finalize_parts_add(&ob, TF_PART_NULLIFIERS, tip_finalize_parts_start(&ob));
+    printf("tip_finalize_post_step: parts: measured %.1f ns per start+add pair\n",
+           (double)(clock_now_monotonic_ns() - m0) / 1e6);
+    tp_wire_close(&x);
+    return failures;
+}
 #endif
 
 
@@ -1481,6 +1535,7 @@ out_early:
     failures += tp_witness_wiring();
 #ifndef _WIN32
     failures += tp_gentle_wallet_tip();
+    failures += tp_parts_probe();
 #endif
     failures += tp_birthday_live(true);
     failures += tp_birthday_live(false);

@@ -93,6 +93,7 @@
 #include "jobs/utxo_apply_batch_commit.h"
 #include "jobs/utxo_apply_stage.h"
 #include "jobs/tip_finalize_stage.h"
+#include "jobs/tip_finalize_parts.h"
 #include "jobs/stage_repair_coin_backfill.h"
 #include "jobs/refold_progress.h"
 #include "jobs/pv_lookahead.h"
