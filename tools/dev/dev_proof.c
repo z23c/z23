@@ -9660,18 +9660,17 @@ static bool dp_verdict_store_empty(const char *store_root)
     return empty;
 }
 
-/* Skip the advisory probe when its store provably holds no verdict: the
+/* Skip an advisory probe when its store provably holds no verdict: the
  * runner could only report would_reuse=0, and the cold test dimension
- * reads nothing from it. Same note key, so phases.txt readers still find
- * the line. Returns true when the spawn is skipped. */
-static bool dp_preflight_skip_empty(const char *store_root,
-                                    const char *phases)
+ * reads nothing from it. The caller supplies its existing phase-note key.
+ * Returns true when the spawn is skipped. */
+static bool dp_shadow_skip_empty(const char *store_root, const char *key,
+                                 const char *phases)
 {
     if (!dp_verdict_store_empty(store_root)) return false;
     if (phases && phases[0])
         (void)zcl_dev_proof_phase_note(
-            phases, "test_preflight",
-            "advisory skipped reason=empty_verdict_store");
+            phases, key, "advisory skipped reason=empty_verdict_store");
     return true;
 }
 
@@ -9679,7 +9678,7 @@ static bool dp_preflight_skip_empty(const char *store_root,
 bool zcl_dev_proof_test_preflight_skip(const char *store_root,
                                        const char *phases_path)
 {
-    return dp_preflight_skip_empty(store_root, phases_path);
+    return dp_shadow_skip_empty(store_root, "test_preflight", phases_path);
 }
 #endif
 
@@ -11257,8 +11256,9 @@ struct dp_worker {
     bool bundle_z23_covered;
     uint8_t bundle_z23_hash[32];
     /* The shadow lane probed its store before the cold run and still owes
-     * the post-run audit (dp_worker_shadow_audit). */
+     * the post-run audit, or proved the store empty and skipped that probe. */
     bool shadow_probed;
+    bool shadow_empty;
     /* ZCL_DEV_PROOF_VERDICT_MMR armed this proof: the per-pair observation
      * environment is open and the test child runs the cold audit. */
     bool vmmr_armed;
@@ -13896,9 +13896,14 @@ static void dp_worker_shadow_probe(struct dp_worker *w)
     size_t len = 0;
     struct zcl_dev_proof_preflight pf;
     w->shadow_probed = false;
+    w->shadow_empty = false;
     if (!store || !w->generation_binary[0] || !w->only[0] ||
         !dp_shadow_log_path(w, "test-shadow", log, sizeof(log)))
         return;
+    if (dp_shadow_skip_empty(store, "test_shadow", w->paths->phases)) {
+        w->shadow_empty = true;
+        return;
+    }
     (void)dp_shadow_spawn(w, store, "test_shadow", log, false);
     if (!dp_preflight_log_read(log, &bytes, &len) ||
         !dp_preflight_parse(bytes, len, &pf)) {
@@ -13979,11 +13984,41 @@ static bool dp_shadow_seed_note(bool spawned, const char *bytes, size_t len,
     return written >= 0 && (size_t)written < cap;
 }
 
+static bool dp_shadow_seed_decision(bool published, bool probed, bool empty,
+                                    bool cold_complete)
+{
+    return published && cold_complete && (probed || empty);
+}
+
 #if defined(ZCL_TESTING)
 bool zcl_dev_proof_test_shadow_seed_note(bool spawned, const char *bytes,
                                         size_t len, char *note, size_t cap)
 {
     return dp_shadow_seed_note(spawned, bytes, len, note, cap);
+}
+
+bool zcl_dev_proof_test_shadow_skip_empty(const char *store_root,
+                                          const char *phases_path)
+{
+    return dp_shadow_skip_empty(store_root, "test_shadow", phases_path);
+}
+
+bool zcl_dev_proof_test_shadow_seed_decision(bool published, bool probed,
+                                             bool empty, bool cold_complete)
+{
+    return dp_shadow_seed_decision(published, probed, empty, cold_complete);
+}
+
+bool zcl_dev_proof_test_shadow_seed_cold(const char *cold, size_t len,
+                                         uint32_t selected, bool published,
+                                         bool probed, bool empty)
+{
+    struct dp_shadow_audit a = {0};
+    a.probe.groups = selected;
+    return cold && dp_shadow_cold_verdict(cold, len, &a) &&
+           dp_shadow_cold_passed(&a, published) &&
+           dp_shadow_seed_decision(published, probed, empty,
+                                   a.seed_cold_eligible);
 }
 #endif
 
@@ -14012,18 +14047,25 @@ static void dp_worker_shadow_audit(struct dp_worker *w, bool accepted)
     char probe_log[PATH_MAX], cold_log[PATH_MAX], note[200];
     char *probe = NULL, *cold = NULL;
     size_t plen = 0, clen = 0;
-    struct dp_shadow_audit a;
+    struct dp_shadow_audit a = {0};
+    bool probed = w->shadow_probed;
+    bool empty = w->shadow_empty;
     bool ok;
-    if (!w->shadow_probed || !store) return;
+    if (!store || (!probed && !empty)) return;
     w->shadow_probed = false;
+    w->shadow_empty = false;
+    a.probe.groups = w->receipt.dimensions[ZCL_DEV_PROOF_TEST].selected;
     ok = snprintf(cold_log, sizeof(cold_log), "%s/%s.%s.log",
                   w->execution.logs, w->execution.key,
                   zcl_dev_proof_dimension_name(ZCL_DEV_PROOF_TEST)) <
              (int)sizeof(cold_log) &&
-         dp_shadow_log_path(w, "test-shadow", probe_log, sizeof(probe_log)) &&
-         dp_preflight_log_read(probe_log, &probe, &plen) &&
-         dp_shadow_tail_read(cold_log, &cold, &clen) &&
-         dp_shadow_audit_logs(probe, plen, cold, clen, w->paths->phases, &a);
+         dp_shadow_tail_read(cold_log, &cold, &clen);
+    if (ok && probed)
+        ok = dp_shadow_log_path(w, "test-shadow", probe_log, sizeof(probe_log)) &&
+             dp_preflight_log_read(probe_log, &probe, &plen) &&
+             dp_shadow_audit_logs(probe, plen, cold, clen, w->paths->phases, &a);
+    else if (ok)
+        ok = dp_shadow_cold_verdict(cold, clen, &a);
     free(probe);
     free(cold);
     if (!ok) {
@@ -14039,7 +14081,8 @@ static void dp_worker_shadow_audit(struct dp_worker *w, bool accepted)
     (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_audit",
                                    note);
     if (dp_shadow_cold_passed(&a, accepted)) {
-        if (a.seed_cold_eligible)
+        if (dp_shadow_seed_decision(accepted, probed, empty,
+                                    a.seed_cold_eligible))
             dp_worker_shadow_seed(w, store);
         else
             (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow_seed",
@@ -14059,7 +14102,7 @@ static void dp_worker_shadow_audit(struct dp_worker *w, bool accepted)
  * generation's depfiles and admitted runner are exactly what the dimension
  * below will see. The capsule stays in scratch with its sealed bindings;
  * nothing reads it back. A store that provably holds no verdict skips the
- * spawn (dp_preflight_skip_empty): the probe could only count zero. */
+ * spawn (dp_shadow_skip_empty): the probe could only count zero. */
 static void dp_worker_test_preflight(struct dp_worker *w)
 {
     const char *argv[13];
@@ -14076,7 +14119,9 @@ static void dp_worker_test_preflight(struct dp_worker *w)
     int cap_argc = 0;
     size_t i;
     if (!w || !w->generation_binary[0] || !w->only[0]) return;
-    if (dp_preflight_skip_empty(w->generation, w->paths->phases)) return;
+    if (dp_shadow_skip_empty(w->generation, "test_preflight",
+                             w->paths->phases))
+        return;
     if (snprintf(log, sizeof(log), "%s/%s.test-preflight.log",
                  w->execution.logs, w->execution.key) >= (int)sizeof(log))
         return;

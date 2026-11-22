@@ -811,6 +811,14 @@ bool zcl_dev_proof_test_shadow_audit(const char *probe, size_t plen,
                                      const char *phases,
                                      struct zcl_dev_proof_shadow_audit *out);
 bool zcl_dev_proof_test_shadow_tail_read(const char *path, char **bytes, size_t *len);
+/* Exact empty-store probe and post-proof seed decisions used by the worker. */
+bool zcl_dev_proof_test_shadow_skip_empty(const char *store_root,
+                                          const char *phases_path);
+bool zcl_dev_proof_test_shadow_seed_decision(bool published, bool probed,
+                                             bool empty, bool cold_complete);
+bool zcl_dev_proof_test_shadow_seed_cold(const char *cold, size_t len,
+                                         uint32_t selected, bool published,
+                                         bool probed, bool empty);
 /* Seam for the preflight's empty-store skip: the exact decision the proof
  * worker makes before spawning the probe. True means the store provably
  * holds no verdict, the spawn is skipped, and phases_path received

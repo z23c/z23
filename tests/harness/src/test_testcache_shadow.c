@@ -16,6 +16,8 @@
  *      and the test dimension's argv stays --no-cache with the lane enabled.
  *   5. The runner refuses --cache-seed-pass without --cache-probe-only, and
  *      the lane's own variable never perturbs the cache keyspace.
+ *   6. Only a provably empty verdict store skips the advisory probe; accepted
+ *      proofs still seed, while unexpected entries and invalid roots do not.
  */
 
 #include "test/test_core.h"
@@ -23,6 +25,7 @@
 #include "dev_proof.h"
 #include "platform/os_proc.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -282,6 +285,16 @@ static int tcs_seed_eligibility_checks(void)
                 printf("shadow seed case=%s audit=%d seed=%d\n", cases[i].name,
                        ok, a.seed_cold_eligible);
             ASSERT(ok && a.seed_cold_eligible == cases[i].seed);
+            bool empty_seed = zcl_dev_proof_test_shadow_seed_cold(
+                cold, (size_t)n, 1, true, false, true);
+            if (empty_seed != cases[i].seed)
+                printf("shadow empty seed case=%s seed=%d\n", cases[i].name,
+                       empty_seed);
+            ASSERT(empty_seed == cases[i].seed);
+            ASSERT(!zcl_dev_proof_test_shadow_seed_cold(
+                cold, (size_t)n, 1, false, false, true));
+            ASSERT(!zcl_dev_proof_test_shadow_seed_cold(
+                cold, (size_t)n, 1, true, false, false));
         }
         static const char duplicate[] =
             "SUITE VERDICT mode=cold groups_ran=1 groups_failed=0 load_flaky=0\n"
@@ -293,6 +306,10 @@ static int tcs_seed_eligibility_checks(void)
             "SUITE VERDICT mode=cold groups_ran=1 groups_failed=0 load_flaky=0";
         ASSERT(!zcl_dev_proof_test_shadow_audit(probe, strlen(probe), truncated,
                                                 sizeof(truncated) - 1, NULL, &a));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_cold(
+            duplicate, sizeof(duplicate) - 1, 1, true, false, true));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_cold(
+            truncated, sizeof(truncated) - 1, 1, true, false, true));
         PASS();
     }
 _test_next:;
@@ -442,6 +459,63 @@ _test_next:;
     return failures;
 }
 
+static bool tcs_mkdirs(const char *path)
+{
+    char copy[PATH_MAX];
+    if (snprintf(copy, sizeof(copy), "%s", path) >= (int)sizeof(copy))
+        return false;
+    for (char *p = copy + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(copy, 0755) != 0 && errno != EEXIST) return false;
+        *p = '/';
+    }
+    return mkdir(copy, 0755) == 0 || errno == EEXIST;
+}
+
+static int tcs_empty_probe_checks(void)
+{
+    int failures = 0;
+    char objects[PATH_MAX], phases[PATH_MAX];
+    (void)snprintf(objects, sizeof(objects), "%s/.zvcs/objects", tcs_store());
+    (void)snprintf(phases, sizeof(phases), "%s/empty-shadow.phases", tcs_fix());
+    TEST("testcache shadow: only a provably empty store skips its probe; accepted proofs still seed") {
+        ASSERT(tcs_build_fixture(""));
+        ASSERT(tcs_reset_store());
+        ASSERT(tcs_mkdirs(tcs_store()));
+        (void)unlink(phases);
+        ASSERT(zcl_dev_proof_test_shadow_skip_empty(tcs_store(), phases));
+        ASSERT(tcs_file_has(phases,
+                            "test_shadow=advisory skipped reason=empty_verdict_store\n"));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_decision(true, false, true, false));
+        ASSERT(zcl_dev_proof_test_shadow_seed_decision(true, false, true, true));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_decision(false, false, true, true));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_decision(true, false, false, true));
+        ASSERT(zcl_dev_proof_test_shadow_seed_decision(true, true, false, true));
+        ASSERT(!zcl_dev_proof_test_shadow_seed_decision(true, true, false, false));
+
+        ASSERT(tcs_mkdirs(objects));
+        ASSERT(zcl_dev_proof_test_shadow_skip_empty(tcs_store(), NULL));
+        char tmp[PATH_MAX];
+        (void)snprintf(tmp, sizeof(tmp), "%s/tmp", objects);
+        ASSERT(tcs_mkdirs(tmp));
+        ASSERT(zcl_dev_proof_test_shadow_skip_empty(tcs_store(), NULL));
+        char unexpected[PATH_MAX];
+        (void)snprintf(unexpected, sizeof(unexpected), "%s/unexpected", objects);
+        ASSERT(tcs_mkdirs(unexpected));
+        ASSERT(!zcl_dev_proof_test_shadow_skip_empty(tcs_store(), NULL));
+        ASSERT(tcs_reset_store());
+        FILE *root = fopen(tcs_store(), "wb");
+        ASSERT(root != NULL);
+        ASSERT(fclose(root) == 0);
+        ASSERT(!zcl_dev_proof_test_shadow_skip_empty(tcs_store(), NULL));
+        PASS();
+    }
+_test_next:;
+    (void)unlink(phases);
+    return failures;
+}
+
 int test_testcache_shadow(void);
 int test_testcache_shadow(void)
 {
@@ -453,6 +527,7 @@ int test_testcache_shadow(void)
     failures += tcs_tail_boundary_checks();
     failures += tcs_lane_contract_checks();
     failures += tcs_runner_flag_checks();
+    failures += tcs_empty_probe_checks();
     if (!tcs_reset_store())
         failures++;
     {
