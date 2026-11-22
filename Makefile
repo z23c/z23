@@ -2286,10 +2286,23 @@ NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.$(BUILD_INVOCATION_ID).rsp
 NODE_C23_PACKAGE_VERIFY_OBJ = $(NODE_C23_OBJ_DIR)/tools/package_verify.o
 NODE_C23_PACKAGE_VERIFY_NODE_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(ALL_SRCS))
 NODE_C23_PACKAGE_VERIFY_LINK_RSP = $(NODE_C23_OBJ_DIR)/package-verify-link-inputs.$(BUILD_INVOCATION_ID).rsp
-# The qualifier shares the public node graph; only its standalone main is distinct.
 NODE_C23_WIKI_RUNTIME_OBJ = $(NODE_C23_OBJ_DIR)/tools/dev/wiki_runtime_main.o
 NODE_C23_WIKI_RUNTIME_LINK_RSP = $(NODE_C23_OBJ_DIR)/wiki-runtime-link-inputs.$(BUILD_INVOCATION_ID).rsp
 NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED = $(and $(filter Linux,$(ZCL_HOST_OS)),$(if $(ZCL_CC_IS_CLANG),,1))
+# The baseline x86-64-v3 Linux GCC archive link extracts these node-profile units.
+# Filter the node source list so archive members retain their link order.
+WIKI_RUNTIME_ARCHIVE_SRCS = tools/dev/wiki_runtime.c \
+    cognition/modules/session/src/fleet_board_proto.c engine/models/src/database_lifetime.c \
+    core/chainparams/src/chainparamsbase.c core/modules/core/src/random.c \
+    $(addprefix core/modules/crypto/src/,ed25519.c random_secret.c sha512.c) \
+    $(addprefix platform/modules/base/src/,cleanse.c log_level.c result.c safe_alloc.c) \
+    platform/modules/encoding/src/utilstrencodings.c platform/modules/json/src/json.c \
+    $(addprefix platform/modules/platform/src/,clock.c private_directory.c private_file.c rng.c) \
+    platform/modules/sha3/src/sha3.c \
+    $(addprefix platform/modules/util/src/,log_json.c spawn.c spawn_binary.c trace.c util.c)
+NODE_C23_WIKI_RUNTIME_OBJS = $(if $(and $(NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED),$(filter -march=x86-64-v3,$(ZCL_ARCH_CFLAGS))),\
+    $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(filter $(WIKI_RUNTIME_ARCHIVE_SRCS),$(ALL_SRCS))),\
+    $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))
 NODE_C23_PROFILE = node-c23-v1
 NODE_C23_SESSION = $(NODE_C23_OBJ_DIR)/.build-session
 NODE_C23_LEASE = $(NODE_C23_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
@@ -18701,10 +18714,10 @@ export-native-tunnel: $(BIN_DIR)/native-tunnel-export
 .PHONY: z23-wiki-runtime
 z23-wiki-runtime: $(BIN_DIR)/z23-wiki-runtime
 $(BIN_DIR)/z23-wiki-runtime: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
-		$(NODE_C23_WIKI_RUNTIME_OBJ) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS) \
+		$(NODE_C23_WIKI_RUNTIME_OBJ) $(NODE_C23_WIKI_RUNTIME_OBJS) \
 		$(COMMAND_CATALOG_DEFS) $(C23_PORTABLE_RELINK) | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
-	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_WIKI_RUNTIME_LINK_RSP),$(if $(NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED),,$(NODE_C23_WIKI_RUNTIME_OBJ)) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))) set -eu; \
+	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_WIKI_RUNTIME_LINK_RSP),$(if $(NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED),,$(NODE_C23_WIKI_RUNTIME_OBJ)) $(NODE_C23_WIKI_RUNTIME_OBJS))) set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; archive_dir=""; \
 	test -s "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; \
 	trap 'rm -f "$$tmp" "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; if test -n "$$archive_dir"; then rm -f "$$archive_dir/node.a"; rmdir "$$archive_dir"; fi' EXIT HUP INT TERM; \
