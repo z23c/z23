@@ -122,6 +122,7 @@ static void ohg_push_class(struct json_value *arr,
     (void)json_push_kv_int(&row, "need_review", cls->need_review);
     (void)json_push_kv_int(&row, "orphaned", cls->orphaned);
     (void)json_push_kv_int(&row, "unique_archived", cls->unique_archived);
+    (void)json_push_kv_int(&row, "branch_kept", cls->branch_kept);
     (void)json_push_kv_int(&row, "kept_on_failure", cls->kept_on_failure);
     (void)json_push_kv_int(&row, "bytes_reclaimable",
                            (int64_t)cls->bytes_reclaimable);

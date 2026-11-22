@@ -103,6 +103,37 @@ leading `_` removed; a name already bound to another commit gets a `-<n>`
 suffix. Ignored files are build output by repository policy and go with the
 worktree.
 
+A clean worktree on a branch (not detached) is removed when `age_days` is set
+and both its gitdir `index` (or `HEAD`) and its build output (`build/`,
+`build/bin`, `test-tmp/`) are that old; the branch is left untouched and
+counts as `branch_kept`. Recover it with `git worktree add <dir> <branch>`.
+A younger one, or one whose build output changed more recently, is
+`too_young`.
+
+Such a lane is kept for review instead when:
+
+- anything git ignores in it is not reproducible output. Only `build/`,
+  `test-tmp/`, `.cache/`, `.codeindex/`, `.zcl_test_render/` and `vendor/`
+  go with a lane; a local database, a `.zvcs/` commit log, an env or key
+  file, or any other ignored path keeps it;
+- another registered worktree sits inside it;
+- its gitdir holds a half-done rebase, merge, cherry-pick, revert, bisect or
+  sequencer run, a sparse-checkout file or `refs/worktree` refs;
+- a tracked file carries an `assume-unchanged` or `skip-worktree` index
+  flag, which can hide an edit from `git status`;
+- its branch is unborn, or `age_days` is `0`.
+
+The content checks run when the lane is classified and again immediately
+before it is removed; a lane that changed in between is kept and named in
+`refusals` as `changed_since_classified`. The build clock is a hint beside
+the index clock: a directory mtime moves only when an entry is added,
+removed or replaced in it. A separate clone placed inside one of the
+disposable directories is not detected.
+
+Not preserved: the worktree's own reflog, `config.worktree`, and the gitdir
+of a submodule checked out inside it. A disposable pool keeps its old rule:
+a copy on a branch there is never removed.
+
 A dirty worktree is reported under `needs_review` as `{path, idle_days,
 dirty_count}`. A worktree is also kept when it is locked, in use by a live
 process, a warm donor, or named by a systemd user unit file

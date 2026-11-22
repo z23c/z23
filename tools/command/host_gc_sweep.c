@@ -39,6 +39,8 @@ enum {
     HG_STATUS_CAP = 4096,
     HG_REPO_PROBE_MAX = 32,
     HG_DIRTY_CAP = 65536,
+    /* `git ls-files -v` over the whole tree: one short line per tracked file. */
+    HG_LSFILES_CAP = 4 * 1024 * 1024,
     HG_UNITS_CAP = 4 * 1024 * 1024,
     HG_REF_NAME_MAX = 200,
     HG_PIN_TRIES = 100
@@ -863,8 +865,167 @@ enum hg_verdict {
     HG_KEEP_TOO_YOUNG,
     HG_KEEP_NEEDS_REVIEW,
     HG_ARCHIVE_UNIQUE,
-    HG_REAPABLE
+    HG_REAPABLE,
+    HG_REAP_BRANCH
 };
+
+/* A git operation left half done parks state in the worktree's gitdir that
+ * no ref holds: the patches of a stopped `git am`, a rebase's todo list. A
+ * sparse-checkout pattern file and refs/worktree refs are the same kind of
+ * state: they exist only in this worktree's gitdir. */
+static bool hg_mid_operation(const char *wt)
+{
+    static const char *const marks[] = { "rebase-apply", "rebase-merge",
+        "sequencer", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+        "BISECT_LOG", "info/sparse-checkout", "refs/worktree" };
+    char gitdir[HOST_GC_PATH_CAP], file[HOST_GC_PATH_CAP];
+    if (!hg_gitdir(wt, gitdir, sizeof(gitdir)))
+        return true;
+    for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++)
+        if (!zcl_path_join(file, sizeof(file), gitdir, marks[i]) ||
+            platform_file_shape_read(file) != PLATFORM_FILE_SHAPE_MISSING)
+            return true;
+    return false;
+}
+
+/* Ignored paths that are reproducible output: a build regenerates every one
+ * of them. Anything else git ignores (a local ZVCS commit log, a database,
+ * a key or env file, a nested checkout) is content no ref holds, and a lane
+ * carrying it is left for a person. */
+static const char *const hg_disposable_ignored[] = {
+    "build/", "test-tmp/", ".cache/", ".codeindex/", ".zcl_test_render/",
+    "vendor/"
+};
+
+static bool hg_ignored_line_disposable(const char *line)
+{
+    if (strncmp(line, "!! ", 3) != 0)
+        return false;
+    for (size_t i = 0; i < sizeof(hg_disposable_ignored) /
+                               sizeof(hg_disposable_ignored[0]); i++)
+        if (strncmp(line + 3, hg_disposable_ignored[i],
+                    strlen(hg_disposable_ignored[i])) == 0)
+            return true;
+    return false;
+}
+
+/* True when every path git ignores in `wt` is reproducible output. git
+ * lists an ignored directory once and an ignored file by name; a quoted
+ * name, an output that filled the buffer and a failed call all read as
+ * "something else is here", the direction that keeps. */
+static bool hg_ignored_all_disposable(const char *wt)
+{
+    static const char *const args[] = { "--no-optional-locks", "status",
+        "--porcelain", "--ignored=matching", "--untracked-files=all", NULL };
+    char *out = zcl_malloc(HG_DIRTY_CAP, "host_gc ignored");
+    bool ok;
+    if (!out)
+        return false;
+    ok = hg_git(wt, args, out, HG_DIRTY_CAP) == 0 &&
+         strlen(out) + 1 < HG_DIRTY_CAP;
+    for (char *line = out, *nl; ok && *line; line = nl + 1) {
+        nl = strchr(line, '\n');
+        if (!nl) {
+            ok = false;
+            break;
+        }
+        *nl = '\0';
+        ok = hg_ignored_line_disposable(line);
+    }
+    free(out);
+    return ok;
+}
+
+/* True when no tracked file carries an index flag that hides an edit from
+ * `git status`: assume-unchanged (a lowercase tag in `git ls-files -v`) or
+ * skip-worktree (`S`). Such a file can differ from its commit while the lane
+ * reads clean. A listing that failed or filled the buffer reads as "one
+ * might", the direction that keeps. */
+static bool hg_no_hidden_changes(const char *wt)
+{
+    static const char *const args[] = { "ls-files", "-v", NULL };
+    char *out = zcl_malloc(HG_LSFILES_CAP, "host_gc ls-files");
+    bool ok;
+    if (!out)
+        return false;
+    ok = hg_git(wt, args, out, HG_LSFILES_CAP) == 0 &&
+         strlen(out) + 1 < HG_LSFILES_CAP;
+    for (const char *line = out; ok && *line; ) {
+        const char *nl = strchr(line, '\n');
+        if (line[0] == 'S' || (line[0] >= 'a' && line[0] <= 'z'))
+            ok = false;
+        if (!nl)
+            break;
+        line = nl + 1;
+    }
+    free(out);
+    return ok;
+}
+
+/* Everything about a branch lane's content that only its own files can
+ * answer, asked at classification and asked again immediately before the
+ * removal: the sweep measures every candidate first, so minutes can pass in
+ * between, and `git worktree remove --force` would not notice an edit made
+ * in them. */
+static bool hg_branch_content_safe(const char *wt)
+{
+    return hg_dirty_count(wt, false) == 0 && hg_no_hidden_changes(wt) &&
+           hg_ignored_all_disposable(wt) && !hg_mid_operation(wt);
+}
+
+/* Seconds since the lane last gained or replaced build output: the newest of build/,
+ * build/bin and test-tmp/, whose mtimes move when a build links or a test
+ * leaves scratch (a directory mtime moves only when an entry is added,
+ * removed or replaced in it, so this is a hint beside the index clock, not a
+ * build log). INT64_MAX when none exists. A lane that is built every day
+ * and never committed to is in use even though its index is old. */
+static int64_t hg_build_idle_secs(const char *wt, int64_t now)
+{
+    static const char *const dirs[] = { "build", "build/bin", "test-tmp" };
+    char path[HOST_GC_PATH_CAP];
+    int64_t idle = INT64_MAX;
+    struct stat st;
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        int64_t age;
+        if (!zcl_path_join(path, sizeof(path), wt, dirs[i]) ||
+            stat(path, &st) != 0)
+            continue;
+        age = now > (int64_t)st.st_mtime ? now - (int64_t)st.st_mtime : 0;
+        if (age < idle)
+            idle = age;
+    }
+    return idle;
+}
+
+/* A clean worktree on a branch is a checkout of commits its branch already
+ * holds: removing the directory loses nothing git tracks, and `git worktree
+ * add <dir> <branch>` gives it back. It is removed with age_days on, once
+ * its index AND its build output have been idle that long and everything
+ * git ignores in it is reproducible output; the branch is left exactly as
+ * it is. Younger than that it is a lane someone is working in, which is no
+ * reason to ask a person. An unborn branch, an unreadable gitdir, a
+ * half-done git operation or ignored content of any other kind keeps the
+ * old answer. */
+static enum hg_verdict hg_classify_branch(const struct host_gc_request *req,
+                                          const struct hg_cand *c,
+                                          int64_t now)
+{
+    char sha[HG_STATUS_CAP];
+    int64_t idle, built;
+    if (c->dirty != 0 || req->age_days <= 0 ||
+        !hg_head_sha(c->path, sha, sizeof(sha)) || hg_mid_operation(c->path))
+        return HG_KEEP_NEEDS_REVIEW;
+    idle = hg_idle_secs(c->path, now);
+    if (idle < 0)
+        return HG_KEEP_NEEDS_REVIEW;
+    built = hg_build_idle_secs(c->path, now);
+    if (built < idle)
+        idle = built;
+    if (idle < (int64_t)req->age_days * 86400)
+        return HG_KEEP_TOO_YOUNG;
+    return hg_branch_content_safe(c->path) ? HG_REAP_BRANCH
+                                           : HG_KEEP_NEEDS_REVIEW;
+}
 
 /* A clean detached worktree is reapable when its HEAD lives elsewhere, and
  * when it does not, only with age_days on and idle that long (its HEAD is
@@ -877,6 +1038,8 @@ static enum hg_verdict hg_classify_content(const struct host_gc_request *req,
     if (c->orphan)
         return HG_REAPABLE;
     c->dirty = hg_dirty_count(c->path, c->disposable);
+    if (!c->detached && c->dirty == 0 && !c->disposable)
+        return hg_classify_branch(req, c, now);
     if (c->dirty < 0 || !c->detached || (c->dirty > 0 && !c->disposable))
         return HG_KEEP_NEEDS_REVIEW;
     if (!hg_head_unique(c->path))
@@ -919,6 +1082,7 @@ static void hg_count(struct host_gc_class *cls, enum hg_verdict v)
     case HG_KEEP_NEEDS_REVIEW: cls->need_review++; break;
     case HG_ARCHIVE_UNIQUE: cls->unique_archived++; cls->reapable++; break;
     case HG_REAPABLE: cls->reapable++; break;
+    case HG_REAP_BRANCH: cls->branch_kept++; cls->reapable++; break;
     }
 }
 
@@ -1018,6 +1182,13 @@ static bool hg_remove_cand(const struct host_gc_request *req,
         cls->need_review++;
         return false;
     }
+    if (v == HG_REAP_BRANCH && !hg_branch_content_safe(c->path)) {
+        hg_refuse(report, c->path, "changed_since_classified");
+        cls->branch_kept--;
+        cls->reapable--;
+        cls->need_review++;
+        return false;
+    }
     gone = !c->orphan && hg_reap(cls->repo, c->path) && !hg_exists(c->path);
     if (!gone)
         gone = hg_finish_removal(req, report, cls, c->path);
@@ -1025,6 +1196,8 @@ static bool hg_remove_cand(const struct host_gc_request *req,
         /* Nothing moved, and the refusal says why. The generation stands;
          * report it as needing a human rather than counting a reclaim that
          * never happened. */
+        if (v == HG_REAP_BRANCH)
+            cls->branch_kept--;
         cls->reapable--;
         cls->need_review++;
     }
@@ -1036,6 +1209,8 @@ static void hg_became_locked(struct host_gc_class *cls, enum hg_verdict v)
 {
     if (v == HG_ARCHIVE_UNIQUE)
         cls->unique_archived--;
+    if (v == HG_REAP_BRANCH)
+        cls->branch_kept--;
     cls->reapable--;
     cls->locked++;
 }
@@ -1111,6 +1286,17 @@ static bool hg_pool_open(const struct host_gc_request *req,
     return true;
 }
 
+/* Another registered worktree sits inside this one (an agent's nested
+ * checkout under .cache/ or build/). Removing the outer directory would take
+ * the inner one's uncommitted files with it. */
+static bool hg_holds_worktree(const struct hg_scan *scan, size_t i)
+{
+    for (size_t j = 0; j < scan->n; j++)
+        if (j != i && hg_under(scan->cands[i].path, scan->cands[j].path))
+            return true;
+    return false;
+}
+
 static void hg_settle(const struct host_gc_request *req,
                       struct host_gc_report *report, struct hg_scan *scan,
                       int64_t now)
@@ -1128,6 +1314,8 @@ static void hg_settle(const struct host_gc_request *req,
             continue;
         }
         v = hg_classify(req, c, now);
+        if (v == HG_REAP_BRANCH && hg_holds_worktree(scan, i))
+            v = HG_KEEP_NEEDS_REVIEW;
         if (!scan->process_inventory_complete && v >= HG_ARCHIVE_UNIQUE) {
             hg_refuse(report, c->path, "process_inventory_incomplete");
             v = HG_KEEP_NEEDS_REVIEW;

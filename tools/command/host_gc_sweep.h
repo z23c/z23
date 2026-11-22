@@ -34,9 +34,23 @@
  *   in_use       the directory, or something under it, is a live process's
  *                cwd or an open file descriptor's target
  *   too_young    its mtime is younger than the age floor
- *   need_review  git says it carries a branch or uncommitted content; a dirty
- *                worktree (untracked files and nested repositories included)
- *                is listed in report->reviews and never removed
+ *   need_review  git says it carries uncommitted content, or a branch it cannot
+ *                safely release (unborn, unreadable gitdir, a rebase, merge,
+ *                cherry-pick, revert, bisect or sequencer under way, or
+ *                age_days 0); a dirty worktree (untracked files and nested
+ *                repositories included) is listed in report->reviews and
+ *                never removed
+ *
+ * A clean worktree on a branch is removed only with age_days > 0, once its
+ * gitdir index and its build output (build/, build/bin, test-tmp/) have both
+ * been idle that long (counted as branch_kept); the branch is never touched
+ * and `git worktree add <dir> <branch>` restores it. A younger or recently
+ * built one is too_young. It is need_review instead when anything git
+ * ignores in it is not reproducible output (only build/, test-tmp/, .cache/,
+ * .codeindex/, .zcl_test_render/ and vendor/ go with a lane), when another
+ * registered worktree sits inside it, or when its gitdir holds a
+ * sparse-checkout file or refs/worktree refs. A disposable pool never
+ * removes a copy on a branch.
  *
  * A clean detached worktree whose HEAD no refs/remotes/origin or refs/archive
  * ref holds is removed only with age_days > 0 and an index idle that long, and
@@ -109,6 +123,7 @@ struct host_gc_class {
     int need_review;
     int orphaned;           /* unregistered gate-copy dirs (counted in registered) */
     int unique_archived;    /* HEAD pinned under refs/archive/wt, then removed */
+    int branch_kept;        /* clean idle worktree on a branch: removed, branch stays */
     int kept_on_failure;    /* the pin failed: worktree stands */
     uint64_t bytes_reclaimable;
     uint64_t bytes_reclaimed;
