@@ -91,10 +91,11 @@ static bool offer_empty_text(const struct json_value *data, const char *key)
     return value && !*value;
 }
 
-static bool offer_empty_status(const struct json_value *data)
+static bool offer_empty_status(const struct zcl_command_reply *reply)
 {
+    const struct json_value *data = &reply->data;
     const struct json_value *kept = json_get(data, "has_kept_program");
-    return !json_get(data, "tasks") && json_get_int(json_get(data, "offer_revision")) == 0 &&
+    return reply->next_count == 0 && !json_get(data, "tasks") && json_get_int(json_get(data, "offer_revision")) == 0 &&
         kept && !json_get_bool(kept) && json_get_int(json_get(data, "kept_generation")) == 0 &&
         json_get_int(json_get(data, "kept_configuration_generation")) == 0 &&
         offer_empty_text(data, "kept_root") && offer_empty_text(data, "kept_receipt") &&
@@ -121,8 +122,22 @@ static bool offer_command(const char *directory, const char *action, bool succes
     if (ok && !success) ok = strcmp(reply.error.code, "TASK_SAVE_FAILED") == 0 && reply.error.message[0];
     if (!ok) fprintf(stderr, "task-update-offer %s: reply exit=%d code=%s message=%s\n",
                      action, reply.exit_code, reply.error.code, reply.error.message);
-    if (ok && success) ok = offer_empty_status(&reply.data) && reply.next_count == 0;
+    if (ok && success) ok = offer_empty_status(&reply);
     zcl_command_reply_free(&reply); json_free(&input);
+    return ok;
+}
+
+static bool offer_hint_match(const struct zcl_command_next *item, const char *directory,
+    const char *expected_root)
+{
+    struct json_value next = {0};
+    bool ok = !strcmp(item->command, "zcode.package.checkout") &&
+        json_read(&next, item->input_json, strlen(item->input_json));
+    const char *root = json_get_str(json_get(&next, "root"));
+    const char *dir = json_get_str(json_get(&next, "datadir"));
+    ok = ok && root && dir && !strcmp(root, expected_root) && !strcmp(dir, directory) &&
+        !json_get(&next, "destination");
+    json_free(&next);
     return ok;
 }
 
@@ -151,17 +166,8 @@ static bool offer_kept_source_hint(const char *directory)
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.task_document.v1");
     if (ok && spec) spec->handler(&request, &reply); else ok = false;
     bool found = false;
-    for (size_t i = 0; i < reply.next_count; ++i) {
-        struct json_value next = {0};
-        if (!strcmp(reply.next[i].command, "zcode.package.checkout") &&
-            json_read(&next, reply.next[i].input_json, strlen(reply.next[i].input_json))) {
-            const char *root = json_get_str(json_get(&next, "root"));
-            const char *dir = json_get_str(json_get(&next, "datadir"));
-            found = root && dir && !strcmp(root, identity.package_root) && !strcmp(dir, directory) &&
-                !json_get(&next, "destination");
-        }
-        json_free(&next);
-    }
+    for (size_t i = 0; i < reply.next_count; ++i)
+        if (offer_hint_match(&reply.next[i], directory, identity.package_root)) found = true;
     ok = ok && reply.exit_code == 0 && found;
     zcl_command_reply_free(&reply); json_free(&input);
     return ok;

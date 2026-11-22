@@ -140,10 +140,30 @@ static bool ac_catalog_entry(struct ac_read *a, struct app_launch_entry *selecte
     return true;
 }
 /* No version is kept yet: name the two commands that make one. */
+static void ac_tasks_recovery(struct zcl_command_reply *reply)
+{
+    const char *directory = zcl_native_command_datadir();
+    if (!directory || !directory[0]) return;
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    if (json_push_kv_str(&facts, "kind", "tasks-source-profile") &&
+        json_push_kv_str(&facts, "data_directory", directory))
+        (void)json_push_kv(&reply->data, "failure_facts", &facts);
+    json_free(&facts);
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "action", "offer-status") &&
+        json_push_kv_str(&input, "datadir", directory);
+    char wire[sizeof(reply->next[0].input_json)];
+    size_t n = ok ? json_write(&input, wire, sizeof(wire)) : 0;
+    if (n && n < 384 && n < sizeof(wire) && !strchr(wire, '\''))
+        (void)zcl_command_reply_add_next(reply, "app.tasks", wire,
+            "Inspect the exact kept Tasks program in this profile.");
+    json_free(&input);
+}
+
 static bool ac_selection_required(struct ac_read *a)
 {
     if (strcmp(a->name, "tasks") == 0) {
-        (void)ac_fail(a, "SELECTION_REQUIRED", "No app copy is selected. For the program kept in Tasks, read app.tasks offer-status.");
+        (void)ac_fail(a, "SELECTION_REQUIRED", "No app copy is selected. For the program kept in Tasks, read app.tasks offer-status using the same data directory.");
         return false;
     }
     char copy[72], save[64], message[192];
@@ -505,8 +525,7 @@ void zcl_native_handle_app_customize(const struct zcl_command_request *request,
     else {
         reply->next_count = 0;
         if (a->name && !strcmp(a->name, "tasks") && !strcmp(reply->error.code, "SELECTION_REQUIRED"))
-            (void)zcl_command_reply_add_next(reply, "app.tasks", "{\"action\":\"offer-status\"}",
-                "Inspect the exact kept Tasks program before choosing its source.");
+            ac_tasks_recovery(reply);
     }
     json_free(&a->data); vcs_manifest_free(&a->manifest); zcl_package_copy_close(&a->copy); free(a);
 }

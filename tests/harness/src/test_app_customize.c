@@ -774,17 +774,32 @@ static bool act_reader_bounds(struct ac_fixture *f)
     return ok;
 }
 
-static bool act_tasks_source_hint(void)
+static bool act_tasks_source_hint(struct ac_fixture *f)
 {
+    char old[4096];
+    (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+    int port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(f->world.alice_datadir, port);
     struct abc_leaf l; abc_open(&l);
     bool ok = json_push_kv_str(&l.in, "name", "tasks") &&
         act_result(&l, "SELECTION_REQUIRED") && strstr(l.out.error.message, "offer-status");
     bool found = false;
     for (size_t i = 0; i < l.out.next_count; ++i)
         if (!strcmp(l.out.next[i].command, "app.tasks") &&
-            strstr(l.out.next[i].input_json, "offer-status")) found = true;
+            strstr(l.out.next[i].input_json, "offer-status") &&
+            strstr(l.out.next[i].input_json, f->world.alice_datadir)) found = true;
     abc_close(&l);
-    return ok && found;
+    char unsafe_dir[1024];
+    (void)snprintf(unsafe_dir, sizeof(unsafe_dir), "%s\x27s-tasks", f->world.alice_datadir);
+    zcl_native_bridge_bind_rpc(unsafe_dir, port);
+    abc_open(&l);
+    bool unsafe = json_push_kv_str(&l.in, "name", "tasks") &&
+        act_result(&l, "SELECTION_REQUIRED") && l.out.next_count == 0;
+    const char *reported = json_get_str(json_get(json_get(&l.out.data, "failure_facts"), "data_directory"));
+    unsafe = unsafe && reported && !strcmp(reported, unsafe_dir);
+    abc_close(&l);
+    zcl_native_bridge_bind_rpc(old, port);
+    return ok && found && unsafe;
 }
 
 static bool act_selection_refusal(struct ac_fixture *f)
@@ -1493,7 +1508,7 @@ int test_app_customize(void)
         ASSERT(act_bounds());
         ASSERT(act_blob_refusal(&f));
         ASSERT(act_selection_refusal(&f));
-        ASSERT(act_tasks_source_hint());
+        ASSERT(act_tasks_source_hint(&f));
         ASSERT(act_no_grant(&f));
         ASSERT(act_reader_bounds(&f));
         ASSERT(act_alias_refusal(&f, false));
