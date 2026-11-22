@@ -1450,6 +1450,32 @@ static bool isd_docs_pair(struct isd_fixture *f, unsigned mask, bool mac)
         isd_check(f, mac) == (mask == 0 || mask == 3);
 }
 
+static const char *const isd_tasks_names[] = {"tasks.z23share", "tasks-source.root"};
+static bool isd_tasks_members(struct isd_fixture *f)
+{
+    const char *const *names = isd_tasks_names;
+    if (!isd_write_name(f, names[0], "y", 1) || isd_check(f, false) ||
+        unlinkat(f->fd, names[0], 0) != 0 || isd_check(f, false) ||
+        symlinkat(names[1], f->fd, names[0]) != 0 || isd_check(f, false) ||
+        unlinkat(f->fd, names[0], 0) != 0) return false;
+    if (!isd_write_name(f, names[0], "x", 1) || !isd_check(f, false) ||
+        !isd_write_name(f, names[1], "y", 1) || isd_check(f, false) ||
+        !isd_write_name(f, names[1], "x", 1)) return false;
+    return isd_check(f, false);
+}
+
+
+static bool isd_tasks_pair(struct isd_fixture *f)
+{
+    if (!isd_payload(f, 1) || !isd_write_name(f, isd_tasks_names[0], "x", 1) ||
+        !isd_write_name(f, isd_tasks_names[1], "x", 1)) return false;
+    for (unsigned mask = 0; mask < 4; ++mask)
+        if (!isd_wire(f, 8191u, 15u) || !isd_append_pair(f, isd_tasks_names, mask) ||
+            isd_check(f, false) != (mask == 0 || mask == 3)) return false;
+    return isd_tasks_members(f);
+}
+
+
 static bool isd_docs_shapes(struct isd_fixture *f)
 {
     unsigned char bytes[65]; memset(bytes, '1', 64); bytes[64] = '\n';
@@ -1471,6 +1497,18 @@ static bool isd_kit_wire(struct isd_fixture *f, unsigned desktop, unsigned kit)
     static const char *const names[] = {"app-toolchain.json", "app-toolchain.bundle"};
     return isd_wire(f, 8191u, desktop) && isd_append_pair(f, names, kit);
 }
+static bool isd_tasks_kit(struct isd_fixture *f)
+{
+    static const char *const names[] = {"tasks.z23share", "tasks-source.root"};
+    if (!isd_payload(f, 1) || !isd_write_name(f, "app-toolchain.json", "x", 1) ||
+        !isd_write_name(f, "app-toolchain.bundle", "x", 1) ||
+        !isd_kit_wire(f, 15u, 3) || !isd_append_pair(f, names, 3) ||
+        !zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false)) return false;
+    return isd_write_name(f, names[1], "y", 1) &&
+        !zcl_test_installed_toolchain_manifest(f->fd, f->wire, strlen(f->wire), false);
+}
+
+
 static const char *const isd_mac_names[] = {"z23-app-macos", "Z23Apps-Info.plist"};
 static bool isd_mac_append(struct isd_fixture *f, unsigned mask)
 {
@@ -1573,6 +1611,8 @@ static int isd_contract(struct ass_world *w)
         ASSERT(isd_mac_members(&f));
         ASSERT(isd_mac_bounds(&f));
         ASSERT(isd_docs_shapes(&f));
+        ASSERT(isd_tasks_pair(&f));
+        ASSERT(isd_tasks_kit(&f));
         PASS();
     } _test_next:;
     if (f.fd >= 0 && close(f.fd) != 0) ++failures;

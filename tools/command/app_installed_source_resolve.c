@@ -30,7 +30,7 @@ enum { ISR_CARD, ISR_RECORD, ISR_PROJECTION, ISR_PACKAGE, ISR_RECIPE,
     ISR_DESKTOP_RECEIVE = ISR_BASE_ROWS, ISR_DESKTOP_ICON, ISR_DESKTOP_MIME,
     ISR_DESKTOP_GAME, ISR_DESKTOP_END, ISR_KIT_DESCRIPTOR = ISR_DESKTOP_END,
     ISR_KIT_BUNDLE, ISR_MAC_LAUNCHER, ISR_MAC_PLIST, ISR_DOCS_BUNDLE,
-    ISR_DOCS_ROOT, ISR_ROWS };
+    ISR_DOCS_ROOT, ISR_TASKS_SHARE, ISR_TASKS_ROOT, ISR_ROWS };
 static const char *const isr_names[ISR_ROWS] = {
     "AGENT_CARD.md", "app-build.wire", "installed-source.json", // error-doc-ref-ok: generated installed release assets, not checkout documents
     "manifest.wire", "recipe.wire", "source.bundle", "z23", "z23-acme",
@@ -38,14 +38,15 @@ static const char *const isr_names[ISR_ROWS] = {
     "zclassic23-package-verify", "org.zclassic.ZClassic23.desktop",
     "org.zclassic.ZClassic23.svg", "org.zclassic.ZClassic23.xml",
     "org.zclassic.SkyCombat.desktop", "app-toolchain.json", "app-toolchain.bundle",
-    "z23-app-macos", "Z23Apps-Info.plist", "docs.bundle", "docs.root"
+    "z23-app-macos", "Z23Apps-Info.plist", "docs.bundle", "docs.root",
+    "tasks.z23share", "tasks-source.root"
 };
 static const size_t isr_limits[ISR_ROWS] = {
     65536, 240, 4096, ISR_MIB, 256u * 1024u, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB, 64u * ISR_MIB,
     64u * ISR_MIB, 32u * ISR_MIB, 128u * ISR_MIB,
     65536, 65536, 65536, 65536, 4096, 64u * ISR_MIB,
-    4u * ISR_MIB, 65536, 64u * ISR_MIB, 65
+    4u * ISR_MIB, 65536, 64u * ISR_MIB, 65, 64u * ISR_MIB, 65
 };
 struct isr_manifest { char digest[ISR_ROWS][65]; };
 struct isr_layout {
@@ -251,6 +252,7 @@ static bool isr_shape(const struct isr_manifest *m, bool mac)
     unsigned kit = (m->digest[ISR_KIT_DESCRIPTOR][0] != 0) +
         (m->digest[ISR_KIT_BUNDLE][0] != 0);
     if ((m->digest[ISR_DOCS_BUNDLE][0] != 0) != (m->digest[ISR_DOCS_ROOT][0] != 0)) return false;
+    if ((m->digest[ISR_TASKS_SHARE][0] != 0) != (m->digest[ISR_TASKS_ROOT][0] != 0)) return false;
     if (!isr_mac_shape(m, mac, desktop, kit)) return false;
     if (kit && (kit != 2 || mac || desktop != ISR_DESKTOP_END - ISR_BASE_ROWS)) return false;
     return desktop == 0 || (!mac && desktop == ISR_DESKTOP_END - ISR_BASE_ROWS);
@@ -325,7 +327,8 @@ static bool isr_assets_range(int dir, const struct isr_manifest *m, int first, i
 static bool isr_optional_assets(int dir, const struct isr_manifest *m)
 {
     return isr_assets_range(dir, m, ISR_MAC_LAUNCHER, ISR_DOCS_BUNDLE) &&
-        isr_assets_range(dir, m, ISR_DOCS_BUNDLE, ISR_ROWS);
+        isr_assets_range(dir, m, ISR_DOCS_BUNDLE, ISR_TASKS_SHARE) &&
+        isr_assets_range(dir, m, ISR_TASKS_SHARE, ISR_ROWS);
 }
 #if defined(ZCL_TESTING)
 /* Component seam only: never supplies a substitute executing image/ancestor
@@ -489,6 +492,7 @@ bool zcl_test_installed_toolchain_manifest(int dir, const char *wire, size_t len
     memcpy(bytes, wire, length); bytes[length] = 0;
     struct app_installed_toolchain kit = {0};
     bool ok = isr_parse(bytes, length, &manifest, mac, "skycombat") &&
+        isr_optional_assets(dir, &manifest) &&
         manifest.digest[ISR_KIT_DESCRIPTOR][0] &&
         isr_kit_bytes(dir, ISR_KIT_DESCRIPTOR, &manifest, &kit.descriptor) &&
         isr_kit_bytes(dir, ISR_KIT_BUNDLE, &manifest, &kit.bundle);
