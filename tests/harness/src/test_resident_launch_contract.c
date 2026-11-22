@@ -1141,13 +1141,9 @@ static int rlc_task_edits(const struct rlc_task_session *session)
     return failures;
 }
 
-static int rlc_task_return(const struct rlc_task_session *session)
+static int rlc_task_return_consent(const struct rlc_task_session *session)
 {
     int failures = 0;
-    RLC_CHECK("task journey: close", task_update_finish(session->update).ok && package_resident_store_close(session->store).ok);
-    RLC_CHECK("task journey: reopen exact data plus undo", package_resident_store_open_app(session->store, session->base, "contract/task-journey").ok &&
-        task_document_read(session->store, session->document).ok && rlc_task_equal(session->document, session->expected) &&
-        task_update_open(session->update, session->base, session->store->app, session->verifier, NULL).ok && task_update_refresh(session->update).ok && rlc_task_wait(session->update));
     struct task_editor editor;
     bool editor_open = task_editor_open(&editor, session->base, session->store->app).ok;
     struct task_list list;
@@ -1156,6 +1152,17 @@ static int rlc_task_return(const struct rlc_task_session *session)
         task_list_action(&list, 1).ok && list.permission == 2 && !session->update->pending &&
         task_list_action(&list, 0).ok && rlc_task_wait(session->update));
     if (editor_open) RLC_CHECK("task journey: rollback editor closes", task_editor_finish(&editor).ok);
+    return failures;
+}
+
+static int rlc_task_return(const struct rlc_task_session *session)
+{
+    int failures = 0;
+    RLC_CHECK("task journey: close", task_update_finish(session->update).ok && package_resident_store_close(session->store).ok);
+    RLC_CHECK("task journey: reopen exact data plus undo", package_resident_store_open_app(session->store, session->base, "contract/task-journey").ok &&
+        task_document_read(session->store, session->document).ok && rlc_task_equal(session->document, session->expected) &&
+        task_update_open(session->update, session->base, session->store->app, session->verifier, NULL).ok && task_update_refresh(session->update).ok && rlc_task_wait(session->update));
+    failures += rlc_task_return_consent(session);
     struct package_resident_record record;
     RLC_CHECK("task journey: exact prior artifact restored without restoring old data", package_resident_record_read(session->store, &record).ok &&
         strcmp(record.current.artifact_sha3, session->n->sha3) == 0 && task_document_read(session->store, session->document).ok && rlc_task_equal(session->document, session->expected));
