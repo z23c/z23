@@ -120,7 +120,7 @@ static struct soak_sample *soak_parse(char *buf, size_t *n, int64_t *malformed)
 static bool soak_restart_evidence_missing(const struct soak_sample *s)
 {
     return s->nrestarts.kind != EJ_NUM || s->nrestarts.n < 0 ||
-           s->aet.kind != EJ_NUM || s->aet.n <= 0;
+           s->aet.kind != EJ_NUM || s->aet.n <= 0 || s->aet.n > s->ts;
 }
 
 static void soak_scan_restarts(const struct soak_sample *s, size_t i,
@@ -128,19 +128,18 @@ static void soak_scan_restarts(const struct soak_sample *s, size_t i,
                                int64_t *prev_aet, bool *have_prev_nr,
                                bool *have_prev_aet)
 {
-    bool has_a = s[i].aet.kind == EJ_NUM;
-    int64_t r, a = has_a ? s[i].aet.n : 0;
-    if (soak_restart_evidence_missing(&s[i])) st->restart_unknown++;
-    if (s[i].nrestarts.kind != EJ_NUM)
+    if (soak_restart_evidence_missing(&s[i])) {
+        st->restart_unknown++;
         return;
-    r = s[i].nrestarts.n;
+    }
+    int64_t r = s[i].nrestarts.n, a = s[i].aet.n;
     if (!st->have_nr) {
         st->have_nr = true;
         st->nr_first = r;
     }
     st->nr_last = r;
     if (*have_prev_nr) {
-        bool jumped = has_a && *have_prev_aet && a > *prev_aet + 5;
+        bool jumped = *have_prev_aet && a > *prev_aet && a - *prev_aet > 5;
         if (r < *prev_nr || (jumped && r == *prev_nr))
             st->op++;
         else if (jumped && r > *prev_nr)
@@ -148,10 +147,8 @@ static void soak_scan_restarts(const struct soak_sample *s, size_t i,
     }
     *prev_nr = r;
     *have_prev_nr = true;
-    if (has_a) {
-        *prev_aet = a;
-        *have_prev_aet = true;
-    }
+    *prev_aet = a;
+    *have_prev_aet = true;
 }
 
 static void soak_scan_posture(const struct soak_sample *s, struct soak_stats *st)

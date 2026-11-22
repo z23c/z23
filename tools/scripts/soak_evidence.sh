@@ -399,7 +399,7 @@ cmd_judge() {
                     if (g > 0)  gapgt0++
                     if (max_gap == "" || g > max_gap + 0) max_gap = g
                 }
-                if (!isnum(nrv[i]) || nrv[i]+0 < 0 || !isnum(aetv[i]) || aetv[i]+0 <= 0) restart_unknown++; if (isnum(nrv[i])) {
+                if (!isnum(nrv[i]) || nrv[i]+0 < 0 || !isnum(aetv[i]) || aetv[i]+0 <= 0 || aetv[i]+0 > ts[i]) restart_unknown++; else {
                     r = nrv[i] + 0
                     a = isnum(aetv[i]) ? aetv[i] + 0 : ""
                     if (nr_first == "") nr_first = r

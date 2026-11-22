@@ -533,6 +533,23 @@ static bool ejt_missing_active_time(FILE *f, int i, int64_t ts)
     return ejt_restart_field_missing(f, i, ts, false);
 }
 
+static bool ejt_future_active_time(FILE *f, int i, int64_t ts)
+{
+    if (i != 80) return ejt_healthy(f, i, ts);
+    return ejt_soak_line(f, ts, 0, 1, INT64_MAX, 1500000, EJT_SHA_A);
+}
+
+static bool ejt_boundary_active_time(FILE *f, int i, int64_t ts)
+{
+    (void)i;
+    return ejt_soak_line(f, ts, 0, 1, EJT_SOAK_BASE, 1500000, EJT_SHA_A);
+}
+
+static bool ejt_missing_outside_window(FILE *f, int i, int64_t ts)
+{
+    return i == 0 ? ejt_restart_field_missing(f, 80, ts, true) : ejt_healthy(f, i, ts);
+}
+
 static bool ejt_hole(FILE *f, int i, int64_t ts)
 {
     return (i >= 50 && i <= 53) || ejt_healthy(f, i, ts);
@@ -660,6 +677,10 @@ static int ejt_case_soak_verdicts(void)
                              "INSUFFICIENT", "restart_evidence_unknown_in_1_of_169_samples", 2));
         ASSERT(ejt_soak_case("sk_aet_missing", 169, ejt_missing_active_time, EJT_FRESH,
                              "INSUFFICIENT", "restart_evidence_unknown_in_1_of_169_samples", 2));
+        ASSERT(ejt_soak_case("sk_future_aet", 169, ejt_future_active_time, EJT_FRESH,
+                             "INSUFFICIENT", "restart_evidence_unknown_in_1_of_169_samples", 2));
+        ASSERT(ejt_soak_case("sk_boundary_aet", 169, ejt_boundary_active_time, EJT_FRESH, "MET", "", 0));
+        ASSERT(ejt_soak_case("sk_outside", 170, ejt_missing_outside_window, EJT_FRESH + 3600, "MET", "", 0));
         ASSERT(ejt_soak_case("sk_short", 12, ejt_healthy,
                              EJT_SOAK_BASE + 11 * 3600 + 60, "INSUFFICIENT",
                              "window_short_", 2));
@@ -753,6 +774,9 @@ static int ejt_case_soak_parity(void)
         {"pr_green", 169, ejt_recycle, EJT_FRESH},
         {"pr_nr_missing", 169, ejt_missing_restart_count, EJT_FRESH},
         {"pr_aet_missing", 169, ejt_missing_active_time, EJT_FRESH},
+        {"pr_future_aet", 169, ejt_future_active_time, EJT_FRESH},
+        {"pr_boundary_aet", 169, ejt_boundary_active_time, EJT_FRESH},
+        {"pr_outside", 170, ejt_missing_outside_window, EJT_FRESH + 3600},
         {"pr_short", 12, ejt_healthy, EJT_SOAK_BASE + 11 * 3600 + 60},
         {"pr_hole", 169, ejt_hole, EJT_FRESH},
         {"pr_down", 169, ejt_soak_down, EJT_FRESH},
