@@ -11322,13 +11322,14 @@ static bool fbw_pressure_page(const uint8_t *frame, size_t len,
 
 /* Complete a pull without draining. When named, inspect both records before
  * delivering the actual DATA; the allocation fault is armed only for CLOSE. */
-static bool fbw_pressure_pull(struct fbw *w, const struct fleet_board_post *first,
+static bool fbw_pressure_pull(struct fbw *w, const uint8_t box[32],
+                              const struct fleet_board_post *first,
                               const struct fleet_board_post *second, bool fail_alloc)
 {
     mesh_loop_discard(w->asker, w->ask_q, w->f.res_term);
     mesh_loop_discard(w->answerer, w->answer_q, w->f.term_peer.ini);
     mesh_stream_test_reset();
-    if (!boot_fleet_board_fleet_test_pull(w->f.resp_noise_pub, w->box_a) ||
+    if (!boot_fleet_board_fleet_test_pull(w->f.resp_noise_pub, box) ||
         boot_fleet_board_fleet_test_last_after() != 0 ||
         mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp, w->answerer) != 1)
         return false;
@@ -11352,6 +11353,75 @@ static bool fbw_pressure_pull(struct fbw *w, const struct fleet_board_post *firs
     bool hit = !fail_alloc || zcl_alloc_fault_armed_label() == NULL;
     zcl_alloc_fault_clear();
     return closed == 1 && hit;
+}
+
+/* Re-offer both IDs and prove the zero-store drain settled the page. */
+static bool fbw_replay_pair(struct fbw *w, const uint8_t box[32],
+                            struct node_db *into,
+                            const struct fleet_board_post *first,
+                            const struct fleet_board_post *second)
+{
+    struct boot_fleet_board_fleet_counts before, after;
+    boot_fleet_board_fleet_counts(&before);
+    if (!fbw_pressure_pull(w, box, first, second, false) ||
+        boot_fleet_board_fleet_test_drain_into(into) != 0)
+        return false;
+    size_t frames = 0;
+    if (fbw_pull(w, box, into, &frames) != 0 || frames != 2 ||
+        boot_fleet_board_fleet_test_last_after() <= 0)
+        return false;
+    boot_fleet_board_fleet_counts(&after);
+    return after.answer_refused == before.answer_refused &&
+           after.inbox_full == before.inbox_full && after.deferred == before.deferred &&
+           after.stored == before.stored;
+}
+
+static int test_fleet_board_partition_convergence(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post from_a, from_b;
+    bool opened = fbw_open(&w);
+    TEST("fleet board: signed writes on both sides of a partition converge "
+         "once after healing and duplicate redelivery") {
+        ASSERT(opened);
+        ASSERT(mesh_term_pair_row(&w.f, &w.f.term_peer, MESH_PAIRING_CAP_STATUS_READ,
+                                  FBW_PAIRED_AT, FBW_PAIRING_EXPIRES));
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, FBW_NOW);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        w.nm.num_nodes = 0;
+        ASSERT(!boot_fleet_board_fleet_test_pull(w.f.resp_noise_pub, w.box_a));
+        ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "partition A",
+                        2000, 3600, 2100, &from_a));
+        ASSERT(fbw_post(&w.b, 8, FLEET_BOARD_SCOPE_FLEET, "partition B",
+                        2001, 3600, 2100, &from_b));
+        ASSERT(!db_fleet_board_have(&w.a, from_b.id));
+        ASSERT(!db_fleet_board_have(&w.b, from_a.id));
+        w.nm.num_nodes = 2; /* heal the session */
+        size_t frames = 0;
+        ASSERT_EQ(fbw_pull(&w, w.box_a, &w.b, &frames), (size_t)1);
+        boot_fleet_board_fleet_test_bind(&w.b);
+        ASSERT_EQ(fbw_pull(&w, w.box_b, &w.a, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.a, from_a.id));
+        ASSERT(db_fleet_board_have(&w.a, from_b.id));
+        ASSERT(db_fleet_board_have(&w.b, from_a.id));
+        ASSERT(db_fleet_board_have(&w.b, from_b.id));
+        boot_fleet_board_fleet_test_bind(&w.a);
+        ASSERT(fbw_replay_pair(&w, w.box_a, &w.b, &from_a, &from_b));
+        boot_fleet_board_fleet_test_bind(&w.b);
+        ASSERT(fbw_replay_pair(&w, w.box_b, &w.a, &from_b, &from_a));
+        struct fleet_board_status a, b;
+        ASSERT(db_fleet_board_status(&w.a, FBW_NOW, &a));
+        ASSERT(db_fleet_board_status(&w.b, FBW_NOW, &b));
+        ASSERT_EQ(a.posts, 2);
+        ASSERT_EQ(b.posts, 2);
+        PASS();
+    }
+    _test_next:
+    w.nm.num_nodes = 2;
+    fbw_close(&w);
+    return failures;
 }
 
 static bool fbw_pressure_status(struct fbw *w, const uint8_t post[32],
@@ -11393,13 +11463,13 @@ static int test_fleet_board_pull_inbox_pressure(bool fail_alloc)
         boot_fleet_board_fleet_counts(&before);
         if (!fail_alloc) {
             for (unsigned i = 0; i < FLEET_BOARD_FLEET_INBOX_MAX; i++)
-                ASSERT(fbw_pressure_pull(&w, &first, NULL, false));
+                ASSERT(fbw_pressure_pull(&w, w.box_a, &first, NULL, false));
             ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "dropped page",
                             2001, 3600, 2100, &missing));
         } else {
             missing = first;
         }
-        ASSERT(fbw_pressure_pull(&w, &first, fail_alloc ? NULL : &missing, fail_alloc));
+        ASSERT(fbw_pressure_pull(&w, w.box_a, &first, fail_alloc ? NULL : &missing, fail_alloc));
         boot_fleet_board_fleet_counts(&after);
         ASSERT_EQ(after.inbox_full, before.inbox_full + (fail_alloc ? 0 : 1));
         ASSERT(!db_fleet_board_have(&w.b, first.id));
@@ -11443,7 +11513,7 @@ static int test_fleet_board_tick_retains_answer(void)
         boot_fleet_board_fleet_test_bind(&w.a);
         ASSERT(fbw_post(&w.a, 7, FLEET_BOARD_SCOPE_FLEET, "pending tick",
                         2000, 3600, 2100, &post));
-        ASSERT(fbw_pressure_pull(&w, &post, NULL, false));
+        ASSERT(fbw_pressure_pull(&w, w.box_a, &post, NULL, false));
         ASSERT(!db_fleet_board_have(&w.b, post.id));
         uint64_t before = 0, after = 0;
         boot_fleet_board_fleet_test_tick_runs(&before, NULL);
@@ -17197,6 +17267,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_open_cross_room_claim();
     failures += test_fleet_board_reclaim_expired();
     failures += test_fleet_board_fleet_carriage();
+    failures += test_fleet_board_partition_convergence();
     for (unsigned change = 0; change < 4; change++)
         failures += test_fleet_board_delayed_authority(change);
     for (unsigned c = 0; c < 6; c++)
