@@ -4,8 +4,8 @@
  * (tools/command/native_devagent_boardmail.c and its seams in
  * native_devagent_receive.c, native_devagent_mail.c, native_fleet_steer.c):
  * a directive sent on one box reaches another over the signed FLEET board,
- * becomes queued work there exactly once, and its answers come back, with no
- * script and no SSH.
+ * becomes queued work there exactly once, and a modeled worker result returns.
+ * This fixture models RPC and carriage; it does not execute a worker.
  *
  * Two boxes, one process: isolated state roots (XDG_STATE_HOME switched per
  * step), each with mail dir, queue, steer grants, receiver cursors and a
@@ -25,6 +25,7 @@
 
 #include "test/test_core.h"
 
+#include "base/hex.h"
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
@@ -36,7 +37,7 @@
 #include "kernel/command_registry.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
-#include "sha3/sha3.h"
+#include "session/fleet_board_proto.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -78,10 +79,11 @@ static void bmx_use(int box)
 
 struct bmx_post {
     char id[65];
+    uint8_t signature[64];
     char host[65];
     char text[BMX_TEXT];
     char agent[80];
-    char receipt[64];
+    char receipt[FLEET_BOARD_RECEIPT_MAX + 1];
     long long created, ttl, arrival;
     /* The post call's `push_to` delivery hint, as the exporter sent it ("-"
      * when it sent none). Recorded beside the post, never part of its id:
@@ -133,19 +135,68 @@ static void bmx_hex(const uint8_t *in, size_t n, char *out)
     out[2 * n] = '\0';
 }
 
-/* A post id: a digest of every field the real board signs. */
-static void bmx_post_id(const struct bmx_post *p, char out[65])
+/* Reconstruct the signed fields from the modeled RPC record. */
+static bool bmx_post_wire(const struct bmx_post *p,
+                          struct fleet_board_post *wire)
 {
-    struct sha3_256_ctx ctx;
-    unsigned char sum[SHA3_256_OUTPUT_SIZE];
-    char head[256];
-    (void)snprintf(head, sizeof(head), "%s|%lld|%lld|%s|%s|", p->host,
-                   p->created, p->ttl, p->agent, p->receipt);
-    sha3_256_init(&ctx);
-    sha3_256_write(&ctx, (const unsigned char *)head, strlen(head));
-    sha3_256_write(&ctx, (const unsigned char *)p->text, strlen(p->text));
-    sha3_256_finalize(&ctx, sum);
-    bmx_hex(sum, sizeof(sum), out);
+    size_t agent_len = strlen(p->agent), receipt_len = strlen(p->receipt);
+    size_t text_len = strlen(p->text);
+    if (agent_len >= sizeof(wire->agent) || receipt_len >= sizeof(wire->receipt) ||
+        text_len > FLEET_BOARD_TEXT_MAX || p->created < 0 || p->ttl < 0 ||
+        (unsigned long long)p->ttl > UINT32_MAX)
+        return false;
+    memset(wire, 0, sizeof(*wire));
+    if (!zcl_hex_decode(p->host, wire->host_pubkey, sizeof(wire->host_pubkey)) ||
+        !zcl_hex_decode(p->id, wire->id, sizeof(wire->id)))
+        return false;
+    wire->kind = FLEET_BOARD_KIND_NOTE;
+    wire->scope = FLEET_BOARD_SCOPE_FLEET;
+    wire->created_at = (uint64_t)p->created;
+    wire->ttl = (uint32_t)p->ttl;
+    memcpy(wire->agent, p->agent, agent_len + 1);
+    memcpy(wire->receipt, p->receipt, receipt_len + 1);
+    memcpy(wire->text, p->text, text_len + 1);
+    wire->text_len = (uint32_t)text_len;
+    memcpy(wire->signature, p->signature, sizeof(wire->signature));
+    return true;
+}
+
+static bool bmx_sign(struct bmx_post *p, int host)
+{
+    struct fleet_board_post wire;
+    uint8_t seed[32], pub[32];
+    /* The ID is filled by the signer; use a zero placeholder initially. */
+    if (!p->id[0]) memset(p->id, '0', 64);
+    if (!bmx_post_wire(p, &wire)) return false;
+    bmx_key((uint8_t)(0x61 + host), seed, pub);
+    if (fleet_board_post_sign(&wire, seed, pub) != FLEET_BOARD_OK)
+        return false;
+    memcpy(p->signature, wire.signature, sizeof(p->signature));
+    bmx_hex(wire.id, sizeof(wire.id), p->id);
+    return true;
+}
+
+/* Verify the modeled record's identity and signed payload independently. */
+static bool bmx_verified_result(const struct bmx_post *p)
+{
+    struct fleet_board_post wire;
+    struct json_value row;
+    uint8_t computed[32];
+    if (strcmp(p->host, g_bmx_host[BMX_B]) || !bmx_post_wire(p, &wire) ||
+        fleet_board_post_compute_id(&wire, computed) != FLEET_BOARD_OK ||
+        memcmp(computed, wire.id, sizeof(computed)) != 0 ||
+        fleet_board_post_verify(&wire) != FLEET_BOARD_OK)
+        return false;
+    json_init(&row);
+    bool ok = json_read(&row, p->text, strlen(p->text)) &&
+        strcmp(json_get_str(json_get(&row, "ref")), "job-1") == 0 &&
+        strcmp(json_get_str(json_get(&row, "kind")), "result") == 0 &&
+        strcmp(json_get_str(json_get(&row, "body")),
+               "worker=node-b\nstate=done\nverdict=pass\n") == 0;
+    json_free(&row);
+    if (!ok) return false;
+    wire.text[0] ^= 1;
+    return fleet_board_post_verify(&wire) != FLEET_BOARD_OK;
 }
 
 static struct bmx_post *bmx_find(struct bmx_node *n, const char *id)
@@ -176,13 +227,14 @@ static struct bmx_post *bmx_inject(int node, int host, const char *text,
                                    long long created, long long ttl)
 {
     struct bmx_post p;
+    if (!text || strlen(text) > FLEET_BOARD_TEXT_MAX) return NULL;
     memset(&p, 0, sizeof(p));
     (void)snprintf(p.host, sizeof(p.host), "%s", g_bmx_host[host]);
     (void)snprintf(p.text, sizeof(p.text), "%s", text);
     (void)snprintf(p.receipt, sizeof(p.receipt), "z23.mail.v1");
     p.created = created;
     p.ttl = ttl;
-    bmx_post_id(&p, p.id);
+    if (!bmx_sign(&p, host)) return NULL;
     return bmx_store(node, &p);
 }
 
@@ -235,11 +287,18 @@ static void bmx_op_post(const struct json_value *in, struct json_value *out,
 {
     struct bmx_post p, *stored;
     const char *text = json_get_str(json_get(in, "text"));
+    const char *agent = json_get_str(json_get(in, "agent"));
+    const char *receipt = json_get_str(json_get(in, "receipt"));
     memset(&p, 0, sizeof(p));
     p.created = json_get_int(json_get(in, "created_at"));
     p.ttl = json_get_int(json_get(in, "ttl"));
-    if (strlen(text) > 2048) {
+    if (!text || strlen(text) > FLEET_BOARD_TEXT_MAX) {
         bmx_refuse(out, "TEXT_TOO_LONG");
+        return;
+    }
+    if (!agent || !receipt || strlen(agent) > FLEET_BOARD_AGENT_MAX ||
+        strlen(receipt) > FLEET_BOARD_RECEIPT_MAX) {
+        bmx_refuse(out, "BOARD_REFUSED");
         return;
     }
     if (p.created + p.ttl <= now) {
@@ -249,10 +308,13 @@ static void bmx_op_post(const struct json_value *in, struct json_value *out,
     (void)snprintf(p.host, sizeof(p.host), "%s", g_bmx_host[g_bmx_active]);
     (void)snprintf(p.text, sizeof(p.text), "%s", text);
     (void)snprintf(p.agent, sizeof(p.agent), "%s",
-                   json_get_str(json_get(in, "agent")));
+                   agent);
     (void)snprintf(p.receipt, sizeof(p.receipt), "%s",
-                   json_get_str(json_get(in, "receipt")));
-    bmx_post_id(&p, p.id);
+                   receipt);
+    if (!bmx_sign(&p, g_bmx_active)) {
+        bmx_refuse(out, "BOARD_REFUSED");
+        return;
+    }
     const struct json_value *hint = json_get(in, "push_to");
     (void)snprintf(p.push_to, sizeof(p.push_to), "%s",
                    hint ? json_get_str(hint) : "-");
@@ -822,7 +884,7 @@ static int bmx_t_round_trip(void)
                             "\"board_signer\""), 1);
         /* The accept went back onto B's board under the same ref. */
         ASSERT_EQ(st.board_out, 1);
-        /* The worker's result, which it posts to everyone. */
+        /* A modeled worker result, posted to everyone. */
         ASSERT(bmx_mail("node-b", "*", "result", "job-1",
                         "worker=node-b\nstate=done\nverdict=pass\n"));
         ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
@@ -834,6 +896,21 @@ static int bmx_t_round_trip(void)
                             "state=accepted", "\"job-1\""), 1);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "state=done",
                             "\"job-1\""), 1);
+        /* Verify the returned modeled result and its signed identity. */
+        const struct bmx_post *verified = NULL;
+        for (size_t i = 0; i < g_bmx_node[BMX_A].n; i++) {
+            const struct bmx_post *candidate = &g_bmx_node[BMX_A].p[i];
+            if (bmx_verified_result(candidate)) verified = candidate;
+        }
+        ASSERT(verified != NULL);
+        /* A complete valid post under another signer is still not B's. */
+        struct bmx_post counterfeit = *verified;
+        struct fleet_board_post counterfeit_wire;
+        (void)snprintf(counterfeit.host, sizeof(counterfeit.host), "%s", g_bmx_host[2]);
+        ASSERT(bmx_sign(&counterfeit, 2));
+        ASSERT(bmx_post_wire(&counterfeit, &counterfeit_wire));
+        ASSERT_EQ(fleet_board_post_verify(&counterfeit_wire), FLEET_BOARD_OK);
+        ASSERT(!bmx_verified_result(&counterfeit));
         /* Nothing local-only is left: A signed one post, B two, and
          * carriage left the same three on both nodes. */
         ASSERT_EQ(bmx_signed_by(BMX_A, BMX_A), 1);
