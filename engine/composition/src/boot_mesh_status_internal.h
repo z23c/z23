@@ -62,6 +62,13 @@ bool boot_mesh_local_identity(struct node_db *ndb, const char *datadir,
 struct p2p_node *boot_mesh_find_session_peer(
     struct net_manager *nm, const uint8_t peer_noise[32],
     struct noise_transport_snapshot *session_out);
+/* The bound variant: only the ready node whose session carries exactly this
+ * transcript hash and connection generation (see boot_mesh_status.c). Use it
+ * wherever a later step must stay on the session an earlier one chose. */
+struct p2p_node *boot_mesh_find_session_bound(
+    struct net_manager *nm, const uint8_t peer_noise[32],
+    const uint8_t transcript_hash[32], uint64_t connection_generation,
+    struct noise_transport_snapshot *session_out);
 
 /* Most ready nodes one observation captures. The net manager's default is
  * 125 connections and a configured maximum is clamped near 1000, so this

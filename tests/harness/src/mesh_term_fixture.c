@@ -73,7 +73,7 @@ static bool mesh_term_wire_messages_exchanged(struct noise_transport *ini,
 
 /* Full XX handshake between two in-process transports; both sides
  * ESTABLISHED on return. */
-static bool mesh_term_handshake(const uint8_t ini_priv[32],
+bool mesh_term_handshake(const uint8_t ini_priv[32],
                                 const uint8_t res_priv[32],
                                 struct noise_transport **ini_out,
                                 struct noise_transport **res_out)

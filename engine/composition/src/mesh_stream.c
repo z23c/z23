@@ -645,8 +645,13 @@ static struct p2p_node *stream_bound_peer_locked(
         return NULL;
     struct noise_transport_snapshot snap;
     memset(&snap, 0, sizeof(snap));
-    struct p2p_node *peer = boot_mesh_find_session_peer(
-        svc->msg_processor->net_mgr, st->peer_static, &snap);
+    /* The session the stream was opened on, not the first ready one to
+     * this peer: a peer holds several sessions to one static and the node
+     * table's order is not stable. A gone session finds nothing and the
+     * stream ends; it never migrates to a session with another transcript. */
+    struct p2p_node *peer = boot_mesh_find_session_bound(
+        svc->msg_processor->net_mgr, st->peer_static, st->transcript_hash,
+        st->connection_generation, &snap);
     if (!peer)
         return NULL;
     if (!stream_binds_session(st, &snap)) {

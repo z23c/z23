@@ -513,12 +513,62 @@ bool boot_mesh_status_receipt_accept(
 
 /* ── Responder lane ──────────────────────────────────────────────────── */
 
+/* One session lookup: the remote static every match names, and, for a
+ * bound lookup, the exact session (transcript and connection generation)
+ * the match must also carry. A NULL transcript accepts any session. */
+struct mesh_session_want {
+    const uint8_t *peer_noise;
+    const uint8_t *transcript;
+    uint64_t generation;
+};
+
+static bool mesh_session_wanted(const struct noise_transport_snapshot *s,
+                                const struct mesh_session_want *want)
+{
+    if (!s->established ||
+        memcmp(s->remote_static, want->peer_noise, 32) != 0)
+        return false;
+    return !want->transcript ||
+           (memcmp(s->transcript_hash, want->transcript, 32) == 0 &&
+            s->connection_generation == want->generation);
+}
+
+static struct p2p_node *mesh_find_session(
+    struct net_manager *nm, const struct mesh_session_want *want,
+    struct noise_transport_snapshot *session_out);
+
 /* Snapshot connected peers under cs_nodes, then return the first whose
  * established Noise session names the paired Noise static. Caller releases
  * the returned reference. Never dials. Shared with the mesh terminal lane
- * (declared in the internal header). */
+ * (declared in the internal header). A peer can hold several sessions to
+ * the same static (public in/out, onion, loopback), and which one is
+ * "first" follows the node table's order, which disconnects reshuffle:
+ * use this only where ANY session to the peer will do. */
 struct p2p_node *boot_mesh_find_session_peer(
     struct net_manager *nm, const uint8_t peer_noise[32],
+    struct noise_transport_snapshot *session_out)
+{
+    struct mesh_session_want want = {peer_noise, NULL, 0};
+    return mesh_find_session(nm, &want, session_out);
+}
+
+/* The one session a caller is bound to: the ready node whose established
+ * session names `peer_noise` AND carries exactly this transcript hash and
+ * connection generation. Other sessions to the same static never match,
+ * whatever their position in the node table. NULL when that session is
+ * gone; the caller must treat that as loss, never fall back to another. */
+struct p2p_node *boot_mesh_find_session_bound(
+    struct net_manager *nm, const uint8_t peer_noise[32],
+    const uint8_t transcript_hash[32], uint64_t connection_generation,
+    struct noise_transport_snapshot *session_out)
+{
+    struct mesh_session_want want = {peer_noise, transcript_hash,
+                                     connection_generation};
+    return mesh_find_session(nm, &want, session_out);
+}
+
+static struct p2p_node *mesh_find_session(
+    struct net_manager *nm, const struct mesh_session_want *want,
     struct noise_transport_snapshot *session_out)
 {
     struct p2p_node *candidates[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
@@ -538,8 +588,7 @@ struct p2p_node *boot_mesh_find_session_peer(
         struct noise_transport_snapshot snapshot;
         memset(&snapshot, 0, sizeof(snapshot));
         if (!found && p2p_node_noise_snapshot(candidates[i], &snapshot) &&
-            snapshot.established &&
-            memcmp(snapshot.remote_static, peer_noise, 32) == 0) {
+            mesh_session_wanted(&snapshot, want)) {
             found = candidates[i];
             *session_out = snapshot;
         } else {

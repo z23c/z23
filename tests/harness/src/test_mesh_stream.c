@@ -6,7 +6,8 @@
  * decoder opening it — only the socket is elided. Covers the open/data/
  * window/close round trip, the credit window stopping a sender until a
  * WINDOW arrives, close freeing the slot, the per-peer cap and the OPEN
- * cadence, supervised session-loss handling, and the named refusals for an
+ * cadence, supervised session-loss handling, the session a stream is bound to
+ * when a peer holds several, and the named refusals for an
  * unknown service, an unpaired peer and a link that is not Noise. Every
  * refusal is checked by name on the wire, because a stream that fails open
  * would hand a stranger a service.
@@ -21,6 +22,7 @@
 #include "test/mesh_stream_loopback.h"
 #include "test/mesh_term_fixture.h"
 
+#include "base/cleanse.h"
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "models/mesh_pairing.h"
@@ -28,8 +30,11 @@
 #include "net/net.h"
 #include "net/noise_transport.h"
 #include "net/protocol.h"
+#include "net/v2_identity.h"
 #include "platform/clock.h"
+#include "platform/private_directory.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -441,6 +446,264 @@ static int stream_test_case_failed_open_keeps_ended(
         PASS();
     }
 _test_next:
+    return failures;
+}
+
+/* ── Several sessions to one peer static ─────────────────────────────── */
+
+/* Three independent Noise sessions between ONE initiator static and ONE
+ * responder static (the public in/out, onion and loopback links a real node
+ * holds to one peer), each with a node at both ends. The stream is bound to
+ * session 1; sessions 0 and 2 are decoys that match the peer's static but
+ * carry other transcripts. */
+#define STREAM_MULTI_SESSIONS 3u
+#define STREAM_MULTI_BOUND 1u
+
+struct stream_multi {
+    uint8_t ini_pub[32];
+    uint8_t res_pub[32];
+    struct noise_transport *ini[STREAM_MULTI_SESSIONS];
+    struct noise_transport *res[STREAM_MULTI_SESSIONS];
+    struct p2p_node *ia[STREAM_MULTI_SESSIONS]; /* dialled: even ids */
+    struct p2p_node *rb[STREAM_MULTI_SESSIONS]; /* accepted: odd ids */
+    struct send_segment *iq[STREAM_MULTI_SESSIONS];
+    struct send_segment *rq[STREAM_MULTI_SESSIONS];
+    struct p2p_node *order[2u * STREAM_MULTI_SESSIONS];
+};
+
+static bool stream_multi_sessions(struct stream_multi *m, const char *dir)
+{
+    char idir[320], rdir[320], error[160];
+    uint8_t ini_priv[32], res_priv[32];
+    snprintf(idir, sizeof(idir), "%s/multi_ini", dir);
+    snprintf(rdir, sizeof(rdir), "%s/multi_res", dir);
+    bool ok = platform_private_directory_create(idir) &&
+              platform_private_directory_create(rdir) &&
+              v2_identity_load_or_create(idir, ini_priv, m->ini_pub, error,
+                                         sizeof(error)) &&
+              v2_identity_load_or_create(rdir, res_priv, m->res_pub, error,
+                                         sizeof(error));
+    for (size_t k = 0; ok && k < STREAM_MULTI_SESSIONS; k++)
+        ok = mesh_term_handshake(ini_priv, res_priv, &m->ini[k], &m->res[k]);
+    memory_cleanse(ini_priv, sizeof(ini_priv));
+    memory_cleanse(res_priv, sizeof(res_priv));
+    return ok;
+}
+
+static struct p2p_node *stream_multi_node(struct net_manager *nm,
+                                          struct noise_transport *t,
+                                          bool inbound,
+                                          struct send_segment **queue)
+{
+    struct net_address addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.svc.port = 18033;
+    struct p2p_node *n =
+        p2p_node_create(nm, ZCL_INVALID_SOCKET, &addr, "stream-multi",
+                        inbound);
+    if (!n)
+        return NULL;
+    n->transport = t;
+    n->state = PEER_HANDSHAKE_COMPLETE;
+    *queue = mesh_loop_sentinel(n);
+    return *queue ? n : NULL;
+}
+
+static bool stream_multi_open(struct stream_multi *m, struct net_manager *nm,
+                              const char *dir)
+{
+    memset(m, 0, sizeof(*m));
+    if (!stream_multi_sessions(m, dir))
+        return false;
+    for (size_t k = 0; k < STREAM_MULTI_SESSIONS; k++) {
+        m->ia[k] = stream_multi_node(nm, m->ini[k], false, &m->iq[k]);
+        m->rb[k] = stream_multi_node(nm, m->res[k], true, &m->rq[k]);
+        if (!m->ia[k] || !m->rb[k])
+            return false;
+    }
+    return true;
+}
+
+static void stream_multi_close(struct stream_multi *m)
+{
+    for (size_t k = 0; k < STREAM_MULTI_SESSIONS; k++) {
+        if (m->ia[k]) {
+            mesh_loop_free_queue(m->ia[k], m->iq[k]);
+            p2p_node_free(m->ia[k]);
+        }
+        if (m->rb[k]) {
+            mesh_loop_free_queue(m->rb[k], m->rq[k]);
+            p2p_node_free(m->rb[k]);
+        }
+        free(m->iq[k]);
+        free(m->rq[k]);
+        noise_transport_free(m->ini[k]);
+        noise_transport_free(m->res[k]);
+    }
+}
+
+/* The node table, as production reorders it. */
+static void stream_multi_order(struct net_manager *nm, struct stream_multi *m,
+                               struct p2p_node *const *list, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        m->order[i] = list[i];
+    nm->nodes = m->order;
+    nm->num_nodes = count;
+}
+
+/* connman's disconnect: the last node takes the freed slot. */
+static void stream_multi_swap_remove(struct net_manager *nm, size_t index)
+{
+    nm->nodes[index] = nm->nodes[nm->num_nodes - 1u];
+    nm->num_nodes--;
+}
+
+/* Frames queued on the sessions the stream is NOT bound to. */
+static size_t stream_multi_decoy_frames(struct stream_multi *m,
+                                        struct msg_processor *mp)
+{
+    size_t frames = 0;
+    for (size_t k = 0; k < STREAM_MULTI_SESSIONS; k++) {
+        if (k == STREAM_MULTI_BOUND)
+            continue;
+        frames += mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]);
+        frames += mesh_loop_pump(m->rb[k], m->rq[k], m->ini[k], mp, m->ia[k]);
+    }
+    return frames;
+}
+
+/* Opens the echo stream while only the bound session's two nodes are in the
+ * table, so the open binds it, and delivers OPEN and the service's reply. */
+static bool stream_multi_open_stream(struct stream_multi *m,
+                                     struct net_manager *nm,
+                                     struct msg_processor *mp, uint64_t *id)
+{
+    const size_t k = STREAM_MULTI_BOUND;
+    struct p2p_node *only[2] = {m->ia[k], m->rb[k]};
+    stream_multi_order(nm, m, only, 2);
+    mesh_stream_test_reset();
+    stream_test_counters_reset();
+    return mesh_stream_open(STREAM_TEST_ECHO, m->res_pub, STREAM_TEST_WINDOW,
+                            (const uint8_t *)"hi", 2, NULL,
+                            id) == MESH_STREAM_OK &&
+           mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]) ==
+               1u &&
+           mesh_loop_pump(m->rb[k], m->rq[k], m->ini[k], mp, m->ia[k]) ==
+               1u &&
+           mesh_stream_test_live_count(STREAM_TEST_ECHO) == 2u;
+}
+
+static int stream_test_case_bound_session_found(
+    struct stream_multi *m, struct net_manager *nm, struct msg_processor *mp)
+{
+    int failures = 0;
+    const size_t k = STREAM_MULTI_BOUND;
+    TEST("mesh stream: with three sessions to one static, sends, ticks and "
+         "CLOSE use the session the stream is bound to") {
+        uint64_t id = UINT64_MAX;
+        ASSERT(stream_multi_open_stream(m, nm, mp, &id));
+        /* Decoys first, the bound session last, for both ends. */
+        struct p2p_node *table[6] = {m->ia[0], m->rb[0], m->ia[2],
+                                     m->rb[2], m->ia[k], m->rb[k]};
+        stream_multi_order(nm, m, table, 6);
+
+        mesh_stream_test_pump_tick();
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)2);
+        uint8_t chunk[64];
+        memset(chunk, 'x', sizeof(chunk));
+        ASSERT(stream_test_send(id, true, chunk, sizeof(chunk)));
+        ASSERT_EQ(mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]),
+                  (size_t)1);
+        /* The answering side's answer rides the same bound session. */
+        ASSERT(stream_test_send(id, false, "answer", 6));
+        ASSERT_EQ(mesh_loop_pump(m->rb[k], m->rq[k], m->ini[k], mp, m->ia[k]),
+                  (size_t)1);
+        ASSERT(memcmp(g_last_data, "answer", 6) == 0);
+
+        /* A disconnect swap-removes the first node: the table reorders and
+         * the bound session still is not the first match for either end. */
+        stream_multi_swap_remove(nm, 0);
+        mesh_stream_test_pump_tick();
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)2);
+        ASSERT(stream_test_send(id, true, chunk, sizeof(chunk)));
+        ASSERT_EQ(mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]),
+                  (size_t)1);
+
+        /* CLOSE is delivered on the bound session, to both ends. */
+        struct stream_test_visit v;
+        memset(&v, 0, sizeof(v));
+        v.id = id;
+        v.local_initiator = true;
+        mesh_stream_visit(STREAM_TEST_ECHO, stream_test_close_visit, &v);
+        ASSERT(v.found);
+        ASSERT_EQ(mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]),
+                  (size_t)1);
+        ASSERT_EQ(g_closes, (size_t)2);
+        ASSERT_EQ(g_last_close, MESH_STREAM_CLOSED_BY_SERVICE);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)0);
+        ASSERT_EQ(stream_multi_decoy_frames(m, mp), (size_t)0);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
+static int stream_test_case_bound_session_lost(
+    struct stream_multi *m, struct net_manager *nm, struct msg_processor *mp)
+{
+    int failures = 0;
+    TEST("mesh stream: when the bound session is gone and two others to the "
+         "same static remain, the stream ends SESSION_LOST and never "
+         "migrates") {
+        uint64_t id = UINT64_MAX;
+        ASSERT(stream_multi_open_stream(m, nm, mp, &id));
+        struct p2p_node *decoys[4] = {m->ia[0], m->rb[0], m->ia[2], m->rb[2]};
+        stream_multi_order(nm, m, decoys, 4);
+
+        mesh_stream_test_pump_tick();
+        ASSERT_EQ(g_closes, (size_t)2);
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)0);
+        for (uint8_t initiator = 0; initiator < 2; initiator++) {
+            struct stream_test_visit v;
+            memset(&v, 0, sizeof(v));
+            v.id = id;
+            v.local_initiator = initiator != 0;
+            mesh_stream_visit(STREAM_TEST_ECHO, stream_test_read_visit, &v);
+            ASSERT(v.found);
+            ASSERT(v.ended);
+            ASSERT_EQ(v.end_reason, MESH_STREAM_ENDED_SESSION_LOST);
+        }
+        /* Nothing was sent on any other session to that peer. */
+        ASSERT(!stream_test_send(id, true, "late", 4));
+        ASSERT_EQ(stream_multi_decoy_frames(m, mp), (size_t)0);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
+static int stream_test_case_multi_session(const char *dir,
+                                          struct net_manager *nm,
+                                          struct msg_processor *mp)
+{
+    int failures = 0;
+    struct p2p_node **saved_nodes = nm->nodes;
+    size_t saved_count = nm->num_nodes;
+    struct stream_multi m;
+    TEST("mesh stream: the multi-session fixture opens") {
+        ASSERT(stream_multi_open(&m, nm, dir));
+        PASS();
+    }
+    if (failures == 0) {
+        failures += stream_test_case_bound_session_found(&m, nm, mp);
+        failures += stream_test_case_bound_session_lost(&m, nm, mp);
+    }
+_test_next:
+    nm->nodes = saved_nodes;
+    nm->num_nodes = saved_count;
+    mesh_stream_test_reset();
+    stream_multi_close(&m);
     return failures;
 }
 
@@ -1069,6 +1332,7 @@ int test_mesh_stream(void)
                                               b_queue);
     failures += stream_test_case_failed_open_keeps_ended(&f, a, a_queue, b,
                                                          b_queue);
+    failures += stream_test_case_multi_session(dir, &nm, &mp);
 
 _test_next:
     clock_reset_default();

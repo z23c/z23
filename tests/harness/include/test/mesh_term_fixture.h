@@ -84,4 +84,12 @@ bool mesh_term_capsule_text(const uint8_t *capsule, size_t capsule_len,
 
 void mesh_term_fill32(uint8_t out[32], uint8_t value);
 
+/* A fresh in-process XX handshake between two static keys; both sides
+ * ESTABLISHED on return, each call an independent session (its own
+ * transcript). The caller frees both transports. */
+bool mesh_term_handshake(const uint8_t ini_priv[32],
+                         const uint8_t res_priv[32],
+                         struct noise_transport **ini_out,
+                         struct noise_transport **res_out);
+
 #endif /* ZCL_TEST_MESH_TERM_FIXTURE_H */
