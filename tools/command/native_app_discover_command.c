@@ -53,26 +53,26 @@ static bool adc_hex_id(const char *text)
 
 #if !defined(_WIN32)
 /* The same APP_NETWORK_* refusal shape the open-link flow reports. */
-static const char *adc_error_code(enum app_network_error error)
-{
-    static const struct { enum app_network_error error; const char *code; } table[] = {
-        {APP_NETWORK_TIMEOUT, "NETWORK_TIMEOUT"},
-        {APP_NETWORK_INVALID_RESPONSE, "INVALID_SIGNED_RESPONSE"},
-        {APP_NETWORK_CHANGED_OFFER, "OFFER_CHANGED"},
-        {APP_NETWORK_CONTENT_MISMATCH, "CONTENT_MISMATCH"},
-        {APP_NETWORK_STORE_REFUSED, "STORE_REFUSED"},
-    };
-    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
-        if (table[i].error == error) return table[i].code;
-    return "NETWORK_UNAVAILABLE";
-}
-
 static void adc_fail_network(struct zcl_command_reply *reply,
                              enum app_network_error error)
 {
-    zcl_package_copy_fail(reply, adc_error_code(error), false,
-                          "the endpoint could not be reached, or its signed reply did not verify",
-                          ADC_COMMAND);
+    static const struct { enum app_network_error error; const char *code, *message, *action; } table[] = {
+        {APP_NETWORK_CANCELLED, "NETWORK_UNAVAILABLE", "the connection was canceled", "start discovery again when ready"},
+        {APP_NETWORK_TIMEOUT, "NETWORK_TIMEOUT", "the connection timed out; the publisher may be offline", "try again later"},
+        {APP_NETWORK_INVALID_RESPONSE, "INVALID_SIGNED_RESPONSE", "the endpoint returned an invalid or unverifiable reply", "ask the publisher for a fresh link"},
+        {APP_NETWORK_CHANGED_OFFER, "OFFER_CHANGED", "the offer changed", "ask the publisher for a fresh link"},
+        {APP_NETWORK_CONTENT_MISMATCH, "CONTENT_MISMATCH", "the received content did not match the offer", "ask the publisher for a fresh link"},
+        {APP_NETWORK_STORE_REFUSED, "STORE_REFUSED", "the local store refused the received content", "inspect the local store before retrying"},
+    };
+    const char *code = "NETWORK_UNAVAILABLE", *message = "the connection could not be completed";
+    const char *action = "check the link and try again";
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (table[i].error != error) continue;
+        code = table[i].code; message = table[i].message; action = table[i].action;
+        break;
+    }
+    zcl_package_copy_fail(reply, code, false, message, ADC_COMMAND);
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", action);
 }
 
 #endif

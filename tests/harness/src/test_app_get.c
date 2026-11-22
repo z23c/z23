@@ -4941,6 +4941,49 @@ static int tag_discover_command(struct tag_world *w)
     return failures;
 }
 
+static bool tag_discover_network_message(const struct zcl_command_spec *spec,
+                                         struct tag_discover_stub *stub,
+                                         enum app_network_error error,
+                                         const char *code, const char *message,
+                                         const char *action)
+{
+    struct zcl_command_reply reply;
+    stub->direct_error = error;
+    if (!tag_discover_call(spec, TAG_ONION, TAG_DISCOVER_OFFER, true, &reply)) return false;
+    bool ok = !reply.error.mutated && !strcmp(reply.error.code, code) &&
+        strstr(reply.error.message, message) != NULL &&
+        !strcmp(reply.error.next_action, action);
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static int tag_discover_network_messages(struct tag_world *w)
+{
+    int failures = 0;
+    TEST("app discover: connection and invalid reply give distinct guidance") {
+        const struct zcl_command_spec *spec =
+            zcl_command_registry_find(zcl_command_catalog(), "app.discover", NULL);
+        static struct tag_discover_stub stub;
+        ASSERT(spec && spec->handler);
+        memset(&stub, 0, sizeof(stub));
+        (void)snprintf(g_discover_datadir, sizeof(g_discover_datadir), "%s", w->j.b_datadir);
+        zcl_test_app_discover_job = tag_discover_job;
+        zcl_test_app_discover_job_context = &stub;
+        ASSERT(tag_discover_network_message(spec, &stub, APP_NETWORK_TIMEOUT,
+                                            "NETWORK_TIMEOUT", "timed out", "try again later"));
+        ASSERT(tag_discover_network_message(spec, &stub, APP_NETWORK_UNAVAILABLE,
+                                            "NETWORK_UNAVAILABLE", "connection could not", "check the link and try again"));
+        ASSERT(tag_discover_network_message(spec, &stub, APP_NETWORK_INVALID_RESPONSE,
+                                            "INVALID_SIGNED_RESPONSE", "invalid or unverifiable", "ask the publisher for a fresh link"));
+        ASSERT(tag_discover_network_message(spec, &stub, APP_NETWORK_CANCELLED,
+                                            "NETWORK_UNAVAILABLE", "canceled", "start discovery again when ready"));
+        PASS();
+    } _test_next:;
+    zcl_test_app_discover_job = NULL;
+    zcl_test_app_discover_job_context = NULL;
+    return failures;
+}
+
 static int tag_discover_empty_cases(struct tag_world *w)
 {
     int failures = 0; struct zcl_command_reply reply; struct tag_discover_empty d = {0};
@@ -6496,6 +6539,7 @@ int test_app_get(void)
     if (failures == 0) failures += tag_published_continuation(&w);
     if (failures == 0) failures += tag_world_cases(&w);
     failures += tag_discover_command(&w);
+    failures += tag_discover_network_messages(&w);
     zcl_app_offer_set_call(NULL);
     json_free(&g_tag.board);
     free(g_tag.bytes);
