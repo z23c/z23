@@ -1977,6 +1977,19 @@ static bool ak_discovery_builtin(void)
         mutated && mutated->type == JSON_BOOL && !json_get_bool(mutated);
     json_free(&input); json_free(&doc); return ok;
 }
+/* app.list offers an app.open next action only for an installed windowed app
+ * (0ce7e62e5a); the builtin skycombat binary is absent on hosts that built
+ * only the test harness, so the expectation follows the listed installed flag. */
+static bool ak_discovery_open_expected(const struct json_value *doc)
+{
+    const struct json_value *list = json_get(json_get(doc, "data"), "launchable");
+    for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *entry = json_at(list, i), *installed = json_get(entry, "installed");
+        if (installed && installed->type == JSON_BOOL && json_get_bool(installed) &&
+            !strcmp(aso_string(entry, "id"), "skycombat")) return true;
+    }
+    return false;
+}
 static bool ak_discovery_next(const struct json_value *doc)
 {
     const struct json_value *next = json_get(doc, "next");
@@ -1988,7 +2001,7 @@ static bool ak_discovery_next(const struct json_value *doc)
         if (strcmp(aso_string(input, "name"), AK_ROUTE)) return false;
         ++count;
     }
-    return opened && count == 1;
+    return opened == ak_discovery_open_expected(doc) && count == 1;
 }
 static bool ak_discovery_rows(const struct ak_fixture *f, const struct json_value *doc)
 {
