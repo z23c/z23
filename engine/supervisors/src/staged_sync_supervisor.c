@@ -524,6 +524,15 @@ static int64_t staged_paced_period_us(int64_t eff)
     return eff;
 }
 
+/* True when this tick's drain should run inside the reducer's batched
+ * durability scope (see the long comment at the call site). */
+static bool staged_tick_batched_sync(const struct staged_stage_desc *d)
+{
+    return d->drain == header_admit_stage_drain ||
+           catchup_cadence_active() ||
+           catchup_cadence_deferred_sync_active();
+}
+
 /* Generic per-stage tick: drain a bounded batch each tick — keeps
  * progress.kv churn low and avoids starving other supervisor children —
  * then publish the cursor and heartbeat. Recovers its stage from the
@@ -595,7 +604,14 @@ static void staged_stage_tick(struct liveness_contract *c)
      * cadence threshold) otherwise pays event_log_append's two per-append
      * fsync barriers per step ON this shared tick runner, which is what
      * turned a ~55 ms consensus crawl into ~10 s ticks. At tip (gap <= 1)
-     * both gates close, so each write keeps its normal immediate sync. */
+     * both gates close, so most writes keep their normal immediate sync.
+     * header_admit is the exception: its step emits one EV_BLOCK_HEADER event
+     * per admitted header, which at tip cost two fsync barriers each on this
+     * tick for a sub-millisecond Equihash check. Its drain always runs in the
+     * batched scope: the event is buffered and the pre-commit hook fdatasyncs
+     * the log ONCE before the commit that makes the header_admit_log row and
+     * cursor durable (a failed flush vetoes the commit), so recovery sees the
+     * same event-before-marker ordering as the per-append path. */
     const int batch =
         staged_paced_batch(stage_effective_batch(d->batch, d->per_step_fanout));
     if (batch <= 0) {
@@ -605,8 +621,7 @@ static void staged_stage_tick(struct liveness_contract *c)
         supervisor_tick(d->id);
         return;
     }
-    const bool batch_catchup_sync = catchup_cadence_active() ||
-                                    catchup_cadence_deferred_sync_active();
+    const bool batch_catchup_sync = staged_tick_batched_sync(d);
     if (batch_catchup_sync)
         reducer_enter_batched_body_sync();
     (void)d->drain(batch);
