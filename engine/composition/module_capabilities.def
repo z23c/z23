@@ -172,6 +172,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_scan.c", CAP_FS_RE
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_send_once.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_activity.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_activity_rpc.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_controller.c", CAP_FS_WRITE, "zcl_calloc inlines an fprintf(stderr) allocation-failure report; z_listreceivedbyaddress reads SQLite only")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_send.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_send_shielded.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_shielded_shield.c", CAP_FS_WRITE, "")

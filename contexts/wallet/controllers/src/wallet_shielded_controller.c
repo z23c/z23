@@ -494,6 +494,71 @@ bool rpc_z_gettotalbalance(const struct json_value *params, bool help,
     return true;
 }
 
+/* The tip a received note's confirmations are counted against: the wallet's
+ * best block, else the active chain, else the database. A tip the database
+ * cannot give is a failed read only when minconf needs it to filter. */
+static bool wallet_received_tip(struct wallet_rpc_context *ctx, int minconf,
+                                int *tip)
+{
+    *tip = ctx->wallet->best_block_height;
+    if (*tip == 0 && ctx->main_state)
+        *tip = active_chain_height(&ctx->main_state->chain_active);
+    if (*tip == 0) {
+        int db_tip = db_wallet_chain_tip_height(ctx->node_db);
+        if (db_tip >= 0)
+            *tip = db_tip;
+        else if (minconf > 0)
+            return false;
+    }
+    return true;
+}
+
+static void wallet_received_entry_push(struct json_value *result,
+                                       const struct db_sapling_note *n,
+                                       int confirms)
+{
+    struct json_value entry = {0};
+    json_init(&entry);
+    json_set_object(&entry);
+
+    char txid[65];
+    wallet_txid_hex_le(n->txid, txid);
+    json_push_kv_str(&entry, "txid", txid);
+    json_push_kv_int(&entry, "outindex", n->output_index);
+    char amt[32];
+    format_amount(n->value, amt, sizeof(amt));
+    json_push_kv_real(&entry, "amount", strtod(amt, NULL));
+    json_push_kv_int(&entry, "confirmations", confirms);
+    json_push_kv_bool(&entry, "change", false);
+    json_push_kv_bool(&entry, "spent", n->is_spent);
+    /* The database memo is zero-padded to the full 512 bytes the memory copy
+     * always carried, so the memo fields come out the same. */
+    wallet_memo_to_json(&entry, n->memo, 512);
+
+    json_push_back(result, &entry);
+    json_free(&entry);
+}
+
+/* Load every note row, spent or not, with room for rows that land while the
+ * count is taken. More rows than that, or any read failure, is NULL with
+ * *count -1: the caller reports it rather than a shorter list. */
+static struct db_sapling_note *wallet_received_load(struct node_db *ndb,
+                                                    int *count)
+{
+    size_t cap = (size_t)db_sapling_note_count_all(ndb) + 64;
+    struct db_sapling_note *notes =
+        zcl_calloc(cap, sizeof(*notes), "z_listreceivedbyaddress_notes");
+    *count = -1;
+    if (!notes)
+        return NULL;
+    *count = db_sapling_note_list_all_checked(ndb, notes, cap);
+    if (*count < 0) {
+        free(notes);
+        return NULL;
+    }
+    return notes;
+}
+
 bool rpc_z_listreceivedbyaddress(const struct json_value *params,
                                           bool help, struct json_value *result)
 {
@@ -520,41 +585,33 @@ bool rpc_z_listreceivedbyaddress(const struct json_value *params,
         LOG_FAIL("wallet_shielded", "z_listreceivedbyaddress: invalid sapling address");
     }
 
+    /* SQLite is the authoritative shielded-note store: the in-memory array
+     * holds only notes seen since this process started, and its confirms
+     * field is never populated. Answer from the database; an unreadable
+     * database is an explicit error, never a shorter list. */
+    if (!wallet_ctx_db_ready(ctx)) return wallet_balance_unavailable(result);
+    int tip = 0;
+    if (!wallet_received_tip(ctx, minconf, &tip))
+        return wallet_balance_unavailable(result);
+    int count = 0;
+    struct db_sapling_note *notes = wallet_received_load(ctx->node_db, &count);
+    if (count < 0)
+        return wallet_balance_unavailable(result);
+
     json_set_array(result);
-    size_t n_notes = 0;
-    struct sapling_received_note *snap =
-        wallet_copy_sapling_notes(ctx->wallet, &n_notes);
-    for (size_t i = 0; i < n_notes; i++) {
-        const struct sapling_received_note *n = &snap[i];
-        if (!n->used) continue;
+    for (int i = 0; i < count; i++) {
+        const struct db_sapling_note *n = &notes[i];
         if (memcmp(n->diversifier, z_d, 11) != 0 ||
             memcmp(n->pk_d, z_pkd, 32) != 0)
             continue;
-        if (n->confirms < minconf)
+        int confirms = tip - n->block_height + 1;
+        if (confirms < 0)
+            confirms = 0;
+        if (confirms < minconf)
             continue;
-
-        struct json_value entry = {0};
-        json_init(&entry);
-        json_set_object(&entry);
-
-        char txid[65];
-        uint256_get_hex(&n->txid, txid);
-        json_push_kv_str(&entry, "txid", txid);
-        json_push_kv_int(&entry, "outindex", n->output_index);
-        char amt[32];
-        format_amount((int64_t)n->value, amt, sizeof(amt));
-        json_push_kv_real(&entry, "amount", strtod(amt, NULL));
-        json_push_kv_int(&entry, "confirmations", n->confirms);
-        json_push_kv_bool(&entry, "change", false);
-        json_push_kv_bool(&entry, "spent", n->spent);
-
-        /* sapling_received_note has a fixed 512-byte memo (no memo_len). */
-        wallet_memo_to_json(&entry, n->memo, 512);
-
-        json_push_back(result, &entry);
-        json_free(&entry);
+        wallet_received_entry_push(result, n, confirms);
     }
-    free(snap);
+    free(notes);
     return true;
 }
 

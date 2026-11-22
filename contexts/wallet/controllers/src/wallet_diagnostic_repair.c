@@ -85,6 +85,15 @@ bool rpc_scanblockfiles(const struct json_value *params, bool help,
         }
     }
 
+    /* The shielded figure is the database total, the same source
+     * z_gettotalbalance reports. The in-memory note array holds only notes
+     * seen since this process started, so it undercounts after a restart. A
+     * failed read is an explicit error, never a smaller number. */
+    int64_t z_balance = wallet_ctx_db_ready(ctx)
+        ? db_sapling_note_balance(ctx->node_db) : -1;
+    if (z_balance < 0)
+        return wallet_balance_unavailable(result);
+
     json_set_object(result);
     json_push_kv_int(result, "wallet_outputs_found", found);
     json_push_kv_int(result, "spent_outpoints", (int64_t)ctx->wallet->num_spent);
@@ -95,7 +104,6 @@ bool rpc_scanblockfiles(const struct json_value *params, bool help,
     format_amount(balance, tbal, sizeof(tbal));
     json_push_kv_real(result, "transparent_balance", strtod(tbal, NULL));
 
-    int64_t z_balance = wallet_get_sapling_balance(ctx->wallet);
     format_amount(z_balance, zbal, sizeof(zbal));
     json_push_kv_real(result, "shielded_balance", strtod(zbal, NULL));
 

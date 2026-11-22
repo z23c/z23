@@ -20,6 +20,7 @@
 #include "config/runtime.h"
 #include "crypto/sha3.h"
 #include "models/store.h"
+#include "models/wallet_tx.h" // shape-layer-ok:buyer-reads-the-durable-shielded-balance
 #include "net/tor_integration.h" // shape-layer-ok:remote-buyer-rides-the-onion-fetch
 #include "platform/private_file.h"
 #include "sapling/sapling_prover.h"
@@ -162,11 +163,37 @@ static struct zcl_result sb_pay_refuse_without_prover(
     return ZCL_OK;
 }
 
+/* The balance of the pool the funding address draws on. The shielded pool
+ * is read from the wallet database (z_gettotalbalance's source): the
+ * in-memory note array only holds notes seen since this process started, so
+ * after a restart it would understate the pool and refuse a payable order.
+ * A failed read is an explicit error, never a smaller number. */
+struct zcl_result sb_pay_pool_balance(const char *datadir,
+                                      const char *from_addr,
+                                      const struct wallet *w, int64_t *pool)
+{
+    if (!wallet_addr_is_sapling(from_addr)) {
+        *pool = wallet_get_balance(w);
+        return ZCL_OK;
+    }
+    struct node_db ndb;
+    struct zcl_result r = sb_open_db(datadir, &ndb, "store_buyer.pay_floor");
+    if (!r.ok)
+        return r;
+    *pool = db_sapling_note_balance(&ndb);
+    node_db_close(&ndb);
+    if (*pool < 0)
+        return SB_FAILF(STORE_BUYER_ERR_DB,
+                        "cannot read the shielded balance from %s/node.db",
+                        datadir);
+    return ZCL_OK;
+}
+
 /* Both spend-side refusals a payment must survive before any bytes of it
  * are built: the node's guard, then the whole-wallet floor. */
 static struct zcl_result sb_pay_check_spend_readiness(
-    const char *from_addr, const struct db_store_purchase *purchase,
-    int64_t purchase_id)
+    const char *datadir, const char *from_addr,
+    const struct db_store_purchase *purchase, int64_t purchase_id)
 {
     /* The node's own spend guard. Never weakened here: if it refuses, the
      * purchase stays unpaid and says so. */
@@ -185,9 +212,10 @@ static struct zcl_result sb_pay_check_spend_readiness(
     if (w) {
         /* Which balance pool the FUNDING address draws on (t->z and z->z
          * are both allowed; this only picks the floor to check). */
-        int64_t pool = wallet_addr_is_sapling(from_addr)
-                           ? wallet_get_sapling_balance(w)
-                           : wallet_get_balance(w);
+        int64_t pool = 0;
+        struct zcl_result r = sb_pay_pool_balance(datadir, from_addr, w, &pool);
+        if (!r.ok)
+            return r;
         if (pool < purchase->amount_zatoshi) {
             LOG_WARN(SB_TAG, "pay: refusing purchase %lld — wallet holds "
                      "%lld zatoshi, order needs %lld",
@@ -255,7 +283,8 @@ struct zcl_result store_buyer_prepare_payment(const char *datadir,
     if (!r.ok)
         return r;
 
-    r = sb_pay_check_spend_readiness(from_addr, &purchase, purchase_id);
+    r = sb_pay_check_spend_readiness(datadir, from_addr, &purchase,
+                                     purchase_id);
     if (!r.ok)
         return r;
 

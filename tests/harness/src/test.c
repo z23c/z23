@@ -2346,6 +2346,7 @@ static void run_full_suite_late_and_specs(int *failures)
     { extern int test_fact_writers(void); *failures += test_fact_writers(); }
     { extern int test_fleet_board(void); *failures += test_fleet_board(); }
     { extern int test_fleet_roster_scan(void); *failures += test_fleet_roster_scan(); }
+    { extern int test_wallet_note_db_truth(void); *failures += test_wallet_note_db_truth(); }
     { extern int test_wiki_runtime(void); *failures += test_wiki_runtime(); }
     { extern int test_work_card(void); *failures += test_work_card(); }
     { extern int test_lab(void); *failures += test_lab(); }

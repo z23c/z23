@@ -47,6 +47,16 @@ enum { SB_ONION_TIMEOUT_SECS = 120 };
 struct zcl_result sb_open_db(const char *datadir, struct node_db *ndb,
                              const char *tag);
 
+/* The balance of the pool a payment from `from_addr` draws on: the shielded
+ * pool from the wallet database (the source z_gettotalbalance reports), the
+ * transparent pool from the wallet. A failed database read is an error result
+ * and leaves *pool unusable, never a smaller number. Exposed so the floor can
+ * be tested without a prover. */
+struct wallet;
+struct zcl_result sb_pay_pool_balance(const char *datadir,
+                                      const char *from_addr,
+                                      const struct wallet *w, int64_t *pool);
+
 /* Load one purchase row, or fail with UNKNOWN_PURCHASE / INVALID_ARGS. */
 struct zcl_result sb_load_purchase(struct node_db *ndb, int64_t purchase_id,
                                    struct db_store_purchase *out);
