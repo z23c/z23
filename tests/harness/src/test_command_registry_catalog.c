@@ -684,6 +684,9 @@ static int test_code_guide_brief(void)
         const char *proof = json_get_str(json_at(json_get(&reply.data, "next"), 0));
         ASSERT_STR_EQ(proof, "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT(strstr(proof, "make_lint_gates") == NULL);
+        const struct json_value *next = json_get(&reply.data, "next");
+        ASSERT_STR_EQ(json_get_str(json_at(next, json_size(next) - 1)),
+                      "z23 ops host gc --apply=false");
         ASSERT(json_write(&reply.data, NULL, 0) <= 2048);
         zcl_command_reply_free(&reply);
         test_rm_rf_recursive(root);
@@ -821,18 +824,22 @@ static int test_code_guide_lint_catalog(void)
                          &reply, why, sizeof(why)));
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         const struct json_value *next = json_get(&reply.data, "next");
-        ASSERT_EQ(json_size(next), 2u);
+        ASSERT_EQ(json_size(next), 3u);
         ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "build/bin/z23-lint run --list");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 2)),
+                      "z23 ops host gc --apply=false");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,
                          "{\"paths\":[\"tools/guide_catalog" "_fixture.def\"],\"budget\":8192}",
                          &reply, why, sizeof(why)));
         next = json_get(&reply.data, "next");
-        ASSERT_EQ(json_size(next), 3u);
+        ASSERT_EQ(json_size(next), 4u);
         ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
         ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "build/bin/z23-lint run --list");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 3)),
+                      "z23 ops host gc --apply=false");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,
                          "{\"paths\":[\"tools/guide_catalog" "_fixture.def\"],\"budget\":256}",
@@ -844,6 +851,8 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_STR_EQ(json_get_str(json_at(json_get(&reply.data, "next"), 0)),
                       "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT(!brief_array_has(json_get(&reply.data, "next"), "build/bin/z23-lint run --list"));
+        ASSERT(!brief_array_has(json_get(&reply.data, "next"),
+                                "z23 ops host gc --apply=false"));
         zcl_command_reply_free(&reply);
         test_rm_rf_recursive(root);
         PASS();

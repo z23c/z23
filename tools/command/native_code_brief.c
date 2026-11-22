@@ -778,6 +778,7 @@ static void cb_build_next(struct cb_brief *b)
     }
     if (b->ntests == 1 && strcmp(b->tests[0], "make_lint_gates") == 0)
         cb_push_next(b, "%s", "build/bin/z23-lint run --list");
+    cb_push_next(b, "%s", "z23 ops host gc --apply=false");
 }
 
 /* ── render ───────────────────────────────────────────────────────────── */
