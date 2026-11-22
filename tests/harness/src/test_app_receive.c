@@ -109,13 +109,13 @@ struct receive_fixture {
     struct abc_world world;
     char datadir[900], destination[900], file[900], alternate[900], backup[900], key[900];
     char publisher[67], package[65], release[65];
-    const char *release_namespace;
+    const char *release_namespace, *chain_id;
 };
 static bool rt_bundle(struct receive_fixture *f, const char *output, uint64_t sequence)
 {
     struct vcs_package_prepare_options options = {
         .dir = f->world.src, .publisher_sequence = sequence,
-        .reward_address = "", .chain_id = "zclassic-main",
+        .reward_address = "", .chain_id = f->chain_id ? f->chain_id : "zclassic-main",
     };
     struct plugin_dist_published why;
     struct vcs_package_prepared prepared;
@@ -2654,6 +2654,29 @@ static int rt_stale_sequence_case(void)
     zcl_command_reply_free(&reply); return failures;
 }
 
+static int rt_wrong_network_case(void)
+{
+    int failures = 0; struct receive_fixture f;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+    TEST("a share for another network names the profile mismatch") {
+        ASSERT(rt_setup(&f));
+        f.chain_id = "zclassic-regtest";
+        ASSERT(rt_bundle(&f, f.backup, 1));
+        struct rt_sequence_view wrong = {0};
+        bool attempted = rt_sequence_attempt(&f, f.backup, f.destination, &wrong, &reply);
+        ASSERT(attempted && wrong.consent && !wrong.notice);
+        ASSERT(rt_failed_with(&reply, "RECEIVE_STORE_REFUSED") && !reply.error.mutated);
+        ASSERT(strstr(reply.error.message, "network") && strstr(reply.error.message, "profile"));
+        ASSERT(rt_absent(&f));
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_receive.v1");
+        struct rt_sequence_view matching = {0};
+        ASSERT(rt_sequence_attempt(&f, f.file, f.destination, &matching, &reply));
+        ASSERT(matching.consent && reply.status == ZCL_COMMAND_STATUS_PASSED && reply.error.mutated);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply); return failures;
+}
+
 static int rz_plan_identity_case(void)
 {
     int failures = 0;
@@ -2689,6 +2712,7 @@ int test_app_receive(void)
     failures += rt_wrap_cases();
     failures += rb_cases();
     failures += rt_stale_sequence_case();
+    failures += rt_wrong_network_case();
     struct receive_fixture f;
     TEST("app.receive requires all-page native confirmation and rechecks the exact signed file") {
         ASSERT(rt_setup(&f));

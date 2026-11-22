@@ -1362,11 +1362,20 @@ static bool zc_local_wires_valid(const struct zcl_native_local_publication *p)
         p->recipe_wire_len <= VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES;
 }
 
+static enum zcl_local_publication_failure zc_local_failure(const struct vcs_package_publish_report *report)
+{
+    if (!report->failure_count || report->failures[0].rule != VCS_PACKAGE_PUBLISH_RULE_ACCEPT)
+        return ZCL_LOCAL_PUBLICATION_OTHER;
+    if (report->accept == VCS_PACKAGE_ACCEPT_STALE) return ZCL_LOCAL_PUBLICATION_STALE;
+    if (report->accept == VCS_PACKAGE_ACCEPT_CHAIN_ID) return ZCL_LOCAL_PUBLICATION_WRONG_NETWORK;
+    return ZCL_LOCAL_PUBLICATION_OTHER;
+}
+
 void zcl_native_zcode_local_publication_commit_classified(
     const struct zcl_native_local_publication *p,
-    struct zcl_command_reply *reply, bool *stale_publisher_sequence)
+    struct zcl_command_reply *reply, enum zcl_local_publication_failure *failure)
 {
-    if (stale_publisher_sequence) *stale_publisher_sequence = false;
+    if (failure) *failure = ZCL_LOCAL_PUBLICATION_OTHER;
     if (!reply)
         return;
     if (!p || !p->datadir || !p->datadir[0] ||
@@ -1402,10 +1411,7 @@ void zcl_native_zcode_local_publication_commit_classified(
         zc_commit_cleanup(&c);
         return;
     }
-    if (stale_publisher_sequence && c.report.failure_count &&
-        c.report.failures[0].rule == VCS_PACKAGE_PUBLISH_RULE_ACCEPT &&
-        c.report.accept == VCS_PACKAGE_ACCEPT_STALE)
-        *stale_publisher_sequence = true;
+    if (failure) *failure = zc_local_failure(&c.report);
     zc_commit_local(&c);
 }
 
