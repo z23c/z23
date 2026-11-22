@@ -80,28 +80,14 @@ const char *boot_fleet_board_stage_name(enum boot_fleet_board_stage s)
 const char *boot_fleet_board_stage_action(enum boot_fleet_board_stage s)
 {
     static const char *const actions[BOARD_STAGES] = {
-        [BOARD_STAGE_PAIRING] = "re-run `z23 ops mesh pair plan --peer=<addr-or-"
-            "fingerprint-prefix>` then `z23 ops mesh pair commit --peer=<selector> "
-            "--fingerprint=<64hex>` (check the window with `z23 ops mesh pair list`)",
-        [BOARD_STAGE_DELEGATION] = "renew the peer's delegation before it "
-            "lapses (`z23 fleet doctor` on the peer names its expiry); the next "
-            "pull retries on its own",
-        [BOARD_STAGE_STREAM] = "confirm the peer is connected and paired with "
-            "`z23 ops mesh pair list`, and read the peer's `fleet pull refused: "
-            "stage=` log line, which names the check that said no",
-        [BOARD_STAGE_ANSWER_ROLE] = "on the answering host run `z23 fleet roles "
-            "grant --fp=<64-hex fingerprint of the asking host's board key> "
-            "--role=observer` (or worker)",
-        [BOARD_STAGE_INGEST_ROLE] = "on the receiving host run `z23 fleet roles "
-            "grant --fp=<64-hex fingerprint of the post's signing key> "
-            "--role=worker`; the refused row is offered again",
-        [BOARD_STAGE_INGEST_LIMIT] = "nothing to grant: the row is offered again "
-            "by a later sweep once the author's quota window, the store or "
-            "the clock clears (`z23 fleet board status` shows the counts)",
-        [BOARD_STAGE_DECODE] = "the peer sent bytes this node cannot read; run "
-            "the same reviewed build on both hosts (`z23 version`)",
-        [BOARD_STAGE_ROSTER] = "enrol the peer's host in the fleet roster "
-            "(`z23 fleet join <token>` on that host)",
+        [BOARD_STAGE_PAIRING] = "inspect the pairing window with `z23 ops mesh pair list`",
+        [BOARD_STAGE_DELEGATION] = "inspect delegation and expiry with `z23 fleet doctor` on the peer",
+        [BOARD_STAGE_STREAM] = "inspect pairing with `z23 ops mesh pair list` and the refusal log on the peer",
+        [BOARD_STAGE_ANSWER_ROLE] = "inspect the role of the asking key on the answering host with `z23 fleet roles list`",
+        [BOARD_STAGE_INGEST_ROLE] = "inspect the role of the signing key on the receiving host with `z23 fleet roles list`",
+        [BOARD_STAGE_INGEST_LIMIT] = "inspect board counts with `z23 fleet board status` and the node storage logs",
+        [BOARD_STAGE_DECODE] = "inspect build identities on both hosts with `z23 version`",
+        [BOARD_STAGE_ROSTER] = "inspect membership and roster state with `z23 fleet doctor`",
     };
     return (unsigned)s < BOARD_STAGES ? actions[s] : "";
 }

@@ -431,14 +431,14 @@ static int test_rep_stage_text(void)
         enum boot_fleet_board_stage s;
         const char *name, *command;
     } want[] = {
-        { BOARD_STAGE_PAIRING, "pairing", "ops mesh pair commit" },
-        { BOARD_STAGE_DELEGATION, "delegation", "renew the peer" },
+        { BOARD_STAGE_PAIRING, "pairing", "z23 ops mesh pair list" },
+        { BOARD_STAGE_DELEGATION, "delegation", "z23 fleet doctor" },
         { BOARD_STAGE_STREAM, "stream", "z23 ops mesh pair list" },
-        { BOARD_STAGE_ANSWER_ROLE, "answer-role", "z23 fleet roles grant --fp=" },
-        { BOARD_STAGE_INGEST_ROLE, "ingest-role", "z23 fleet roles grant --fp=" },
-        { BOARD_STAGE_INGEST_LIMIT, "ingest-limit", "offered again" },
-        { BOARD_STAGE_DECODE, "decode", "same reviewed build" },
-        { BOARD_STAGE_ROSTER, "roster", "z23 fleet join" },
+        { BOARD_STAGE_ANSWER_ROLE, "answer-role", "z23 fleet roles list" },
+        { BOARD_STAGE_INGEST_ROLE, "ingest-role", "z23 fleet roles list" },
+        { BOARD_STAGE_INGEST_LIMIT, "ingest-limit", "z23 fleet board status" },
+        { BOARD_STAGE_DECODE, "decode", "z23 version" },
+        { BOARD_STAGE_ROSTER, "roster", "z23 fleet doctor" },
     };
     TEST("fleet board replication: every stage line names the stage and "
          "one command") {
@@ -451,8 +451,11 @@ static int test_rep_stage_text(void)
             ASSERT(strstr(line, "why") && strstr(line, "next: "));
             ASSERT(strstr(line, want[i].command));
         }
-        ASSERT(strstr(boot_fleet_board_stage_action(BOARD_STAGE_ANSWER_ROLE),
-                      "--role="));
+        for (size_t i = 0; i < sizeof want / sizeof want[0]; i++) {
+            const char *action = boot_fleet_board_stage_action(want[i].s);
+            ASSERT(!strstr(action, "grant") && !strstr(action, "renew") &&
+                   !strstr(action, "commit") && !strstr(action, "fleet join"));
+        }
         /* Ingest results map to the stage that can clear them. */
         ASSERT_EQ(boot_fleet_board_ingest_stage(FLEET_BOARD_ERR_ROLE),
                   BOARD_STAGE_INGEST_ROLE);
@@ -620,7 +623,7 @@ static int test_rep_decode_refused(void)
         const struct json_value *o = json_get(&out, "peer_attempt");
         ASSERT_STR_EQ(json_get_str(json_get(o, "stage")), "decode");
         ASSERT(strstr(json_get_str(json_get(o, "operator_action")),
-                      "same reviewed build"));
+                      "z23 version"));
         /* An intact answer then delivers from where the cursor still is. */
         ASSERT_EQ(rep_pull(&g_rep), (size_t)1);
         PASS();
@@ -655,7 +658,7 @@ static int test_rep_gate_pairing(void)
         ASSERT(fb_status_observation(&out, "peer_attempt", &attempt));
         ASSERT(strstr(json_get_str(json_get(json_get(&out, "peer_attempt"),
                                             "operator_action")),
-                      "ops mesh pair commit"));
+                      "ops mesh pair list"));
         PASS();
     } _test_next:;
     json_free(&out);
