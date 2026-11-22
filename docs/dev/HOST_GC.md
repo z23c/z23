@@ -123,6 +123,15 @@ Such a lane is kept for review instead when:
   flag, which can hide an edit from `git status`;
 - its branch is unborn, or `age_days` is `0`.
 
+A branch lane does not need the whole process inventory. Every process the
+sweeping user can read is read, and none may be inside the lane,
+but a listed process that cannot be read (a kernel thread, a root daemon, the
+privileged half of an ssh or gpg session) does not hold it: nothing is lost
+when such a lane goes, and it only became eligible after a week idle. Every
+other removal still needs the whole inventory, and a process listing that
+itself failed refuses branch lanes too. Without this rule a non-root timer
+refused every lane on a host with one ssh session.
+
 The content checks run when the lane is classified and again immediately
 before it is removed; a lane that changed in between is kept and named in
 `refusals` as `changed_since_classified`. The build clock is a hint beside

@@ -66,6 +66,8 @@ struct hg_scan {
     size_t cap;
     bool truncated;
     bool process_inventory_complete;
+    /* Every process was listed, though some could not be read (hg_inventory_allows). */
+    bool process_listing_complete;
     bool foreign_ok;  /* every pool is closed to other uids (hg_pool_closed) */
 };
 
@@ -418,23 +420,29 @@ static void hg_mark_occupied(const struct host_gc_request *req,
 #if defined(__APPLE__)
     if (!req->proc_root[0]) {
         scan->process_inventory_complete = os_proc_visit_paths(hg_native_path, scan);
+        scan->process_listing_complete = scan->process_inventory_complete;
         return;
     }
 #endif
     const char *root = req->proc_root[0] ? req->proc_root : "/proc";
     DIR *d = opendir(root);
-    scan->process_inventory_complete = d != NULL;
+    scan->process_inventory_complete = scan->process_listing_complete = d != NULL;
     if (!d) return;
     for (;;) {
         errno = 0;
         struct dirent *e = readdir(d);
-        if (!e) { if (errno) scan->process_inventory_complete = false; break; }
+        if (!e) {
+            if (errno)
+                scan->process_inventory_complete = scan->process_listing_complete = false;
+            break;
+        }
         if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
         char procdir[HOST_GC_PATH_CAP];
         if (!zcl_path_join(procdir, sizeof(procdir), root, e->d_name) ||
             !hg_mark_process(scan, procdir)) scan->process_inventory_complete = false;
     }
-    if (closedir(d) != 0) scan->process_inventory_complete = false;
+    if (closedir(d) != 0)
+        scan->process_inventory_complete = scan->process_listing_complete = false;
 }
 
 /* ------------------------------------------------------------ warm donors */
@@ -1286,6 +1294,24 @@ static bool hg_pool_open(const struct host_gc_request *req,
     return true;
 }
 
+/* What the process inventory must have shown before a removal. Every kind
+ * but one needs it whole. A branch lane is different in kind: nothing is
+ * lost when it goes (its branch holds every commit and its content was just
+ * re-read), and it is only eligible after its index and build output sat
+ * idle for age_days. For it, every process this user CAN read must have
+ * been read and none may be inside, but a listed process that cannot be read
+ * does not hold it. Those are kernel threads, root daemons and the
+ * non-dumpable halves of ssh and gpg sessions, present on every host, and
+ * requiring them made the sweep refuse every lane a non-root timer was ever
+ * asked about. A zombie, whose cwd link is gone, reads the same way. A
+ * listing that itself failed still refuses. */
+static bool hg_inventory_allows(const struct hg_scan *scan, enum hg_verdict v)
+{
+    if (scan->process_inventory_complete)
+        return true;
+    return v == HG_REAP_BRANCH && scan->process_listing_complete;
+}
+
 /* Another registered worktree sits inside this one (an agent's nested
  * checkout under .cache/ or build/). Removing the outer directory would take
  * the inner one's uncommitted files with it. */
@@ -1316,7 +1342,7 @@ static void hg_settle(const struct host_gc_request *req,
         v = hg_classify(req, c, now);
         if (v == HG_REAP_BRANCH && hg_holds_worktree(scan, i))
             v = HG_KEEP_NEEDS_REVIEW;
-        if (!scan->process_inventory_complete && v >= HG_ARCHIVE_UNIQUE) {
+        if (v >= HG_ARCHIVE_UNIQUE && !hg_inventory_allows(scan, v)) {
             hg_refuse(report, c->path, "process_inventory_incomplete");
             v = HG_KEEP_NEEDS_REVIEW;
         }

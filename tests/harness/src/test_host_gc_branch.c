@@ -400,6 +400,86 @@ _test_next:;
     return failures;
 }
 
+static bool hgb_refused(const struct host_gc_report *r, const char *path,
+                        const char *reason)
+{
+    for (size_t i = 0; i < r->nrefusals; i++)
+        if (strcmp(r->refusals[i].path, path) == 0)
+            return strcmp(r->refusals[i].reason, reason) == 0;
+    return false;
+}
+
+/* The restored lane-old made idle again, and one old detached generation
+ * whose HEAD origin holds: reapable under a complete inventory, and the
+ * witness that an inventory is incomplete when it is refused. */
+static bool hgb_inventory_fixture(struct hgb_fix *f, char *gen, char *partial)
+{
+    const char *args[] = { "worktree", "add", "--detach", "-q", gen, "HEAD",
+                           NULL };
+    char unreadable[HGB_PATH + 32];
+    (void)snprintf(gen, HGB_PATH, "%s/gen-detached", f->pool);
+    (void)snprintf(partial, HGB_PATH, "%s/proc-partial", f->tmp);
+    /* A listed process with no cwd link and no status: one this user cannot
+     * read, like a root daemon or an ssh session's privileged half. */
+    (void)snprintf(unreadable, sizeof(unreadable), "%s/7", partial);
+    return hgb_git(f->repo, args) && hgb_backdate(gen) &&
+           hgb_age(f, "lane-old", f->old, true) &&
+           mkdir(partial, 0700) == 0 && mkdir(unreadable, 0700) == 0;
+}
+
+static int hgb_inventory_tests(struct hgb_fix *f)
+{
+    static char gen[HGB_PATH], partial[HGB_PATH];
+    struct host_gc_request req;
+    static struct host_gc_report report;
+    int failures = 0;
+
+    TEST("host gc branch: an unreadable process does not hold an idle branch lane") {
+        ASSERT(hgb_inventory_fixture(f, gen, partial));
+        hgb_request(f, &req, HOST_GC_DEFAULT_AGE_DAYS, false);
+        (void)snprintf(req.proc_root, sizeof(req.proc_root), "%s", partial);
+        ASSERT(host_gc_run(&req, &report));
+        ASSERT_EQ(report.classes[0].branch_kept, 1);
+        ASSERT_EQ(report.classes[0].reapable, 1);
+        /* The same inventory still refuses a removal of any other kind. */
+        ASSERT(hgb_refused(&report, gen, "process_inventory_incomplete"));
+        ASSERT(!hgb_refused(&report, f->old, "process_inventory_incomplete"));
+        PASS();
+    }
+
+    TEST("host gc branch: a readable process inside the lane holds it beside an unreadable one") {
+        char dir[HGB_PATH + 32], link[HGB_PATH + 48];
+        (void)snprintf(dir, sizeof(dir), "%s/8", partial);
+        ASSERT(mkdir(dir, 0700) == 0);
+        (void)snprintf(link, sizeof(link), "%s/fd", dir);
+        ASSERT(mkdir(link, 0700) == 0);
+        (void)snprintf(link, sizeof(link), "%s/cwd", dir);
+        ASSERT(symlink(f->old, link) == 0);
+        hgb_request(f, &req, HOST_GC_DEFAULT_AGE_DAYS, true);
+        (void)snprintf(req.proc_root, sizeof(req.proc_root), "%s", partial);
+        ASSERT(host_gc_run(&req, &report));
+        ASSERT_EQ(report.classes[0].branch_kept, 0);
+        ASSERT_EQ(report.classes[0].in_use, 1);
+        ASSERT(hgb_exists(f->old));
+        PASS();
+    }
+
+    TEST("host gc branch: no process listing at all keeps the branch lane") {
+        hgb_request(f, &req, HOST_GC_DEFAULT_AGE_DAYS, true);
+        (void)snprintf(req.proc_root, sizeof(req.proc_root), "%s/no-such-proc",
+                       f->tmp);
+        ASSERT(host_gc_run(&req, &report));
+        ASSERT_EQ(report.classes[0].branch_kept, 0);
+        ASSERT_EQ(report.classes[0].reapable, 0);
+        ASSERT(hgb_refused(&report, f->old, "process_inventory_incomplete"));
+        ASSERT(hgb_refused(&report, gen, "process_inventory_incomplete"));
+        ASSERT(hgb_exists(f->old) && hgb_exists(gen));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_host_gc_branch(void)
 {
     static struct hgb_fix f;
@@ -413,6 +493,7 @@ int test_host_gc_branch(void)
     }
     failures += hgb_dry_tests(&f);
     failures += hgb_apply_tests(&f);
+    failures += hgb_inventory_tests(&f);
 _test_next:;
     if (f.tmp[0])
         (void)test_rm_rf_recursive(f.tmp);
