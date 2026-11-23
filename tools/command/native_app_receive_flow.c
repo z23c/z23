@@ -1033,6 +1033,15 @@ static void arf_rebuild_failure_facts(struct receive_flow *f)
     json_free(&facts);
     if (!ok) (void)arf_fail(f, "OBSERVATION_UNAVAILABLE", "Cannot retain the rebuild failure details.");
 }
+static void arf_finish_built_choice(struct receive_flow *f, bool ok, const char *what)
+{
+    if (f->rebuild && !ok && f->closed && f->reply->status == ZCL_COMMAND_STATUS_PASSED)
+        (void)arf_fail(f, "REBUILD_CLOSED", "The operation was closed; inspect its result before retrying.");
+    if (!ok && !f->closed && !f->rebuild) arf_notice(f);
+    if (!arf_finish(f, ok || (!f->rebuild && f->closed)))
+        (void)arf_fail(f, "OBSERVATION_UNAVAILABLE", what);
+    if (f->rebuild && f->reply->status != ZCL_COMMAND_STATUS_PASSED) arf_rebuild_failure_facts(f);
+}
 static void arf_run_built_choice(struct receive_flow *f)
 {
     json_init(&f->operations); json_set_array(&f->operations);
@@ -1041,12 +1050,7 @@ static void arf_run_built_choice(struct receive_flow *f)
     if (!json_push_kv(&f->reply->data, "operations", &f->operations))
         ok = arf_fail(f, "OBSERVATION_UNAVAILABLE", what);
     json_free(&f->operations);
-    if (f->rebuild && !ok && f->closed && f->reply->status == ZCL_COMMAND_STATUS_PASSED)
-        (void)arf_fail(f, "REBUILD_CLOSED", "The operation was closed; inspect its result before retrying.");
-    if (!ok && !f->closed && !f->rebuild) arf_notice(f);
-    if (!arf_finish(f, ok || (!f->rebuild && f->closed)))
-        (void)arf_fail(f, "OBSERVATION_UNAVAILABLE", what);
-    if (f->rebuild && f->reply->status != ZCL_COMMAND_STATUS_PASSED) arf_rebuild_failure_facts(f);
+    arf_finish_built_choice(f, ok, what);
     app_receive_preview_close(f->preview);
 }
 

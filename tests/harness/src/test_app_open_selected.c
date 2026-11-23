@@ -3229,9 +3229,37 @@ static bool ak_rebuild_cancel_present(void *context, const struct zcl_present_mo
     v->shown = true; (void)why; (void)cap;
     return aj_receive_action(live, 0, &close, &redraw) && close;
 }
+static bool ak_rebuild_cancel_result(struct ak_fixture *f, const struct app_selection *before,
+    const struct ak_rebuild_cancel *view, const struct zcl_command_reply *reply)
+{
+    struct app_selection after;
+    return view->shown && reply->status == ZCL_COMMAND_STATUS_PASSED && !reply->error.mutated &&
+        !strcmp(aso_string(&reply->data, "status"), "canceled") &&
+        !strcmp(aso_string(&reply->data, "reason"), "IMAGE_REFUSED") &&
+        !json_get(&reply->data, "preview_opened") && !json_get(&reply->data, "operations") &&
+        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        before->revision == after.revision && !memcmp(before->version, after.version, 32);
+}
+static bool ak_rebuild_first_result(bool stopped, const struct ak_rebuild_positive *view,
+    const struct zcl_command_reply *reply)
+{
+    return stopped && view->review && view->keep && reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&reply->data, "reason"), "IMAGE_REFUSED") &&
+        !strcmp(aso_string(&reply->data, "continuation"), "previewed");
+}
+static bool ak_rebuild_second_result(struct ak_fixture *f, bool stopped, const struct app_selection *before,
+    const struct ak_rebuild_positive *view, const struct zcl_command_reply *reply)
+{
+    struct app_selection after;
+    return stopped && view->review && view->keep && reply->status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&reply->data, "reason"), "BUILD_IDENTITY_MISMATCH") &&
+        !strcmp(aso_string(&reply->data, "continuation"), "kept") &&
+        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        after.revision == before->revision + 1 && !memcmp(before->version, after.version, 32);
+}
 static bool ak_rebuild_cancel(struct ak_fixture *f)
 {
-    char saved[ABC_PATH + 8]; struct app_selection before = {0}, after;
+    char saved[ABC_PATH + 8]; struct app_selection before = {0};
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
     struct ak_rebuild_cancel view = {0};
     bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK;
@@ -3243,19 +3271,14 @@ static bool ak_rebuild_cancel(struct ak_fixture *f)
     if (file && fclose(file)) ok = false;
     if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
         ak_rebuild_library, ak_rebuild_cancel_present, &view, NULL);
-    ok = ok && view.shown && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
-        !strcmp(aso_string(&reply.data, "status"), "canceled") &&
-        !strcmp(aso_string(&reply.data, "reason"), "IMAGE_REFUSED") &&
-        !json_get(&reply.data, "preview_opened") && !json_get(&reply.data, "operations") &&
-        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
-        before.revision == after.revision && !memcmp(before.version, after.version, 32);
+    ok = ok && ak_rebuild_cancel_result(f, &before, &view, &reply);
     bool restored = rename(saved, f->build.image_path) == 0;
     zcl_command_reply_free(&reply); return ok && restored;
 }
 
 static bool ak_rebuild_retry(struct ak_fixture *f)
 {
-    struct app_selection before = {0}, after; char worker[PATH_MAX], saved[ABC_PATH + 8];
+    struct app_selection before = {0}; char worker[PATH_MAX], saved[ABC_PATH + 8];
     struct zcl_command_reply first, second;
     zcl_command_reply_init(&first, "zcl.app_library.v1"); zcl_command_reply_init(&second, "zcl.app_library.v1");
     bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
@@ -3272,18 +3295,12 @@ static bool ak_rebuild_retry(struct ak_fixture *f)
     if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &first,
         ak_rebuild_library, ak_rebuild_positive_present, &one, worker);
     bool stopped = ak_draft_stop_preview(f, &first);
-    ok = ok && stopped && one.review && one.keep && first.status == ZCL_COMMAND_STATUS_PASSED &&
-        !strcmp(aso_string(&first.data, "reason"), "IMAGE_REFUSED") &&
-        !strcmp(aso_string(&first.data, "continuation"), "previewed");
+    ok = ok && ak_rebuild_first_result(stopped, &one, &first);
     if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &second,
         ak_rebuild_library, ak_rebuild_positive_present, &two, worker);
     stopped = ak_draft_stop_preview(f, &second);
     zcl_native_bridge_bind_rpc(old_dir, old_port);
-    ok = ok && stopped && two.review && two.keep && second.status == ZCL_COMMAND_STATUS_PASSED &&
-        !strcmp(aso_string(&second.data, "reason"), "BUILD_IDENTITY_MISMATCH") &&
-        !strcmp(aso_string(&second.data, "continuation"), "kept") &&
-        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
-        after.revision == before.revision + 1 && !memcmp(before.version, after.version, 32);
+    ok = ok && ak_rebuild_second_result(f, stopped, &before, &two, &second);
     if (unlink(saved) != 0) ok = false;
 done:
     zcl_command_reply_free(&first); zcl_command_reply_free(&second); return ok;
@@ -3905,6 +3922,20 @@ static int ak_recovery_run(bool run)
     if (recovery.world.root[0]) (void)test_rm_rf_recursive(recovery.world.root);
     return failures;
 }
+static int ak_rebuild_run(void)
+{
+    struct ak_fixture fixture = {0};
+    int failures = ak_rebuild_acceptance(&fixture);
+    if (!aso_cleanup_children()) failures++;
+    if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);
+    return failures;
+}
+static int ak_rebuild_and_draft_history_run(void)
+{
+    int failures = ak_rebuild_run();
+    if (!failures) failures += ak_draft_history_run();
+    return failures;
+}
 static int ak_routes(void)
 {
     struct aso_env env[] = {{"HOME", NULL}, {"XDG_CONFIG_HOME", NULL}, {"XDG_STATE_HOME", NULL},
@@ -3918,10 +3949,6 @@ static int ak_routes(void)
     struct ak_fixture fixture = {0};
     if (!failures) failures += ak_acceptance(&fixture);
     if (!aso_cleanup_children()) failures++;
-    struct ak_fixture rebuild = {0};
-    if (!failures) failures += ak_rebuild_acceptance(&rebuild);
-    if (!aso_cleanup_children()) failures++;
-    if (rebuild.world.root[0]) (void)test_rm_rf_recursive(rebuild.world.root);
     struct ak_fixture continuation = {0};
     if (!failures) failures += arpt_acceptance(&continuation);
     if (!aso_cleanup_children()) failures++;
@@ -3930,7 +3957,7 @@ static int ak_routes(void)
     if (!failures) failures += ak_draft_acceptance(&draft);
     if (!aso_cleanup_children()) failures++;
     if (draft.world.root[0]) (void)test_rm_rf_recursive(draft.world.root);
-    if (!failures) failures += ak_draft_history_run();
+    if (!failures) failures += ak_rebuild_and_draft_history_run();
     failures += ak_recovery_run(!failures);
     aso_env_restore(env, saved);
     if (fixture.world.root[0]) (void)test_rm_rf_recursive(fixture.world.root);

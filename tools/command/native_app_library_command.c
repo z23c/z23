@@ -1564,6 +1564,21 @@ static bool al_rebuild_eligible(bool saved, const char *id, const char *code)
 bool zcl_test_library_rebuild_eligible(bool saved, const char *id, const char *code)
 { return al_rebuild_eligible(saved, id, code); }
 #endif
+static bool al_open_action(struct library *w, const struct app_launch_env *env,
+    const char *datadir, struct zcl_command_reply *reply)
+{
+    w->receive_current = false;
+    al_open_row(w, env, datadir, reply);
+    if (reply->status != ZCL_COMMAND_STATUS_PASSED &&
+        al_rebuild_eligible(w->rows[w->index].saved, w->rows[w->index].entry.id, reply->error.code)) {
+        struct zcl_command_reply recovery;
+        zcl_command_reply_init(&recovery, "zcl.app_library.v1");
+        app_kept_rebuild_flow_run(&w->rows[w->index].selection, reply->error.code, &recovery,
+            w->notice, w->prepare_context, w->test_worker_path);
+        zcl_command_reply_free(reply); *reply = recovery;
+    }
+    return false;
+}
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
@@ -1583,19 +1598,7 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
         if (!al_setup(w, env, exe, datadir, reply)) return false;
         w->page = 2; return true;
     }
-    if (!strcmp(id, "open")) {
-        w->receive_current = false;
-        al_open_row(w, env, datadir, reply);
-        if (reply->status != ZCL_COMMAND_STATUS_PASSED &&
-            al_rebuild_eligible(w->rows[w->index].saved, w->rows[w->index].entry.id, reply->error.code)) {
-            struct zcl_command_reply recovery;
-            zcl_command_reply_init(&recovery, "zcl.app_library.v1");
-            app_kept_rebuild_flow_run(&w->rows[w->index].selection, reply->error.code, &recovery,
-                w->notice, w->prepare_context, w->test_worker_path);
-            zcl_command_reply_free(reply); *reply = recovery;
-        }
-        return false;
-    }
+    if (!strcmp(id, "open")) return al_open_action(w, env, datadir, reply);
     return true;
 }
 static bool al_navigate(struct library *w, unsigned action, const struct app_launch_env *env,
