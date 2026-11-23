@@ -2424,32 +2424,26 @@ static const char *fmc_remote_state(const struct fmc_worker *e,
     return "unknown";
 }
 
-/* A string field, or JSON null when unknown. */
-static void fmc_put_str(struct json_value *o, const char *key, const char *s)
+static bool fmc_put_null(struct json_value *o, const char *key)
 {
     struct json_value nv;
-    if (s && s[0]) {
-        (void)json_push_kv_str(o, key, s);
-        return;
-    }
-    json_init(&nv);
-    json_set_null(&nv);
-    (void)json_push_kv(o, key, &nv);
-    json_free(&nv);
-}
-
-/* A number field, or JSON null when unknown (-1). */
-static bool fmc_put_int(struct json_value *o, const char *key, long long v)
-{
-    struct json_value nv;
-    if (v >= 0) {
-        return json_push_kv_int(o, key, v);
-    }
     json_init(&nv);
     json_set_null(&nv);
     bool ok = json_push_kv(o, key, &nv);
     json_free(&nv);
     return ok;
+}
+
+/* A string field, or JSON null when unknown. */
+static bool fmc_put_str(struct json_value *o, const char *key, const char *s)
+{
+    return s && s[0] ? json_push_kv_str(o, key, s) : fmc_put_null(o, key);
+}
+
+/* A number field, or JSON null when unknown (-1). */
+static bool fmc_put_int(struct json_value *o, const char *key, long long v)
+{
+    return v >= 0 ? json_push_kv_int(o, key, v) : fmc_put_null(o, key);
 }
 
 /* Local resources, measured now through the platform seams. */
@@ -4848,18 +4842,6 @@ static bool fmc_caller_scopes(struct json_value *obj, const char *scopes)
     return ok;
 }
 
-/* Preserve the nullable wire shape while reporting allocation failures. */
-static bool fmc_caller_nullable(struct json_value *o, const char *key, const char *s)
-{
-    if (s && s[0]) return json_push_kv_str(o, key, s);
-    struct json_value null_value;
-    json_init(&null_value);
-    json_set_null(&null_value);
-    bool ok = json_push_kv(o, key, &null_value);
-    json_free(&null_value);
-    return ok;
-}
-
 /* Caller is the validated credential's label, scopes and expiry, never its ID. */
 static bool fmc_caller_emit(struct json_value *data, const struct fmc_caller *c)
 {
@@ -4869,12 +4851,12 @@ static bool fmc_caller_emit(struct json_value *data, const struct fmc_caller *c)
     json_set_object(&o);
     bool ok = json_push_kv_str(&o, "mode", c->grant ? "grant" : "operator");
     if (ok && c->grant) {
-        ok = fmc_caller_nullable(&o, "sender", c->label);
+        ok = fmc_put_str(&o, "sender", c->label);
         if (ok && !c->label[0])
             ok = json_push_kv_str(&o, "sender_reason", "STEER_GRANT_UNLABELLED");
         if (ok) ok = fmc_caller_scopes(&o, c->scopes);
         if (c->expires > 0) fmc_now_iso(c->expires, iso, sizeof(iso));
-        if (ok) ok = fmc_caller_nullable(&o, "expires", iso);
+        if (ok) ok = fmc_put_str(&o, "expires", iso);
     }
     if (ok) ok = json_push_kv(data, "caller", &o);
     json_free(&o);

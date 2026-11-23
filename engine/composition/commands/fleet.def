@@ -725,7 +725,7 @@ ZCL_COMMAND_READY_READ(
     "differs from activity active|completed|blocked|stale|UNKNOWN. "
     "sessions_active_reported: self-reports, not model turns. Unknown "
     "numbers null; capacity known/reason; tokens require receipts. "
-    "Messages report delivery and answer states; reply_to_origin is heuristic. "
+    "Delivery/answer states; reply_to_origin is heuristic. "
     "Own outbox proves no delivery; recipient reply/ACK under "
     "ref required. Queued age>120s without receiver evidence blocks "
     "(newest8, rest counted). tasks: bounded local queue/landing attempts "
