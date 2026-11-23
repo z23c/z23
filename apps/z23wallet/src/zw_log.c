@@ -10,13 +10,17 @@
 #include "base/cleanse.h"
 #include "zw.h"
 
-#define MAX_SECRETS 4
+/* Each credential load registers three strings (the user:pass, the password
+ * alone, the base64 header value); 16 slots keep the last several loads, and a
+ * re-registered secret does not evict an older one. */
+#define MAX_SECRETS 16
 
 /* The worker thread registers secrets while the UI thread logs: one lock covers
  * the secret table and the file. */
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static FILE *g_file;
-static char g_secrets[MAX_SECRETS][128];
+/* A slot holds the longest secret there is: a whole Authorization value. */
+static char g_secrets[MAX_SECRETS][sizeof(((struct zw_endpoint *)0)->auth)];
 static size_t g_next_secret;
 
 void zw_log_open(const char *path)
@@ -41,8 +45,12 @@ void zw_log_secret(const char *secret)
 {
     if (!secret || !secret[0] || strlen(secret) >= sizeof(g_secrets[0])) return;
     pthread_mutex_lock(&g_mu);
-    memcpy(g_secrets[g_next_secret], secret, strlen(secret) + 1);
-    g_next_secret = (g_next_secret + 1) % MAX_SECRETS;
+    bool known = false;
+    for (size_t i = 0; i < MAX_SECRETS && !known; i++) known = !strcmp(g_secrets[i], secret);
+    if (!known) {
+        memcpy(g_secrets[g_next_secret], secret, strlen(secret) + 1);
+        g_next_secret = (g_next_secret + 1) % MAX_SECRETS;
+    }
     pthread_mutex_unlock(&g_mu);
 }
 

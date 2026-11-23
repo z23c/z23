@@ -1,0 +1,1 @@
+{"schema":"zcl.wallet_summary.v1","spendable_zat":800000000,"pending_zat":0,"public_zat":0,"immature_zat":0,"scanned_through_height":1100000,"blocks_behind":134567,"current":false,"locked":false,"encrypted":false,"send_allowed":false,"send_blocked_reason":"Node is still syncing","balance_available":true}

@@ -1,10 +1,26 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: virtual-row table: only visible rows ask the source for cells;
- * header sort, wheel/keyboard scrolling and row selection. */
+ * header sort, wheel/keyboard scrolling, row selection, double-click open
+ * and right-click menu actions. Cell styles: a pill style means the cell
+ * text is "<pill label>\t<text>" (pill, 8 px gap, text elided at the right);
+ * amount styles are drawn right-aligned with 8 px padding. */
 #include <stdio.h>
 #include <string.h>
 
 #include "gui/ui.h"
+
+#define RGB(r, g, b) (((uint32_t)(r) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(b))
+
+size_t gui_ui_glyph_map(const char *in, size_t len, char *out, size_t cap);
+int32_t gui_ui_run_width(enum gui_font f, int32_t px, const char *s, size_t len);
+bool gui_ui_is_pill(enum gui_style st);
+int32_t gui_ui_pill_h(const struct gui_ui *ui, enum gui_style st);
+void gui_ui_run_draw(struct gui_surface *s, enum gui_font f, int32_t px, int32_t x, int32_t baseline,
+                     const char *str, size_t len, uint32_t color, uint32_t dot_color);
+void gui_ui_pill_draw(struct gui_ui *ui, struct gui_surface *s, struct gui_rect r, enum gui_style st,
+                      const char *label, size_t len);
+bool gui_ui_table_row_rect(struct gui_ui *ui, const struct gui_node *n, int64_t row, struct gui_rect *out);
+bool gui_ui_table_menu(struct gui_ui *ui, struct gui_node *n, int32_t x, int32_t y, struct gui_action *out);
 
 struct gui_table_state *gui_ui_table_find(struct gui_ui *ui, const char *id)
 {
@@ -37,16 +53,28 @@ void gui_ui_table_source(struct gui_ui *ui, const struct gui_table_source *s)
         }
 }
 
+/* Row pitch and header height match the beta13 capture (30 and 47 at 100%
+ * with the bundled Inter metrics): row = max(text + 11, pill + 6). */
 static int32_t row_h(const struct gui_ui *ui)
 {
     int32_t asc, desc, lh;
     gui_font_metrics(GUI_FONT_TEXT, gui_ui_text_px(ui, GS_TABLE), &asc, &desc, &lh);
-    return lh + 2 * gui_px(ui, 6);
+    int32_t r = lh + gui_px(ui, 11), p = gui_ui_pill_h(ui, GS_PILL_PRIVATE) + gui_px(ui, 6);
+    return r > p ? r : p;
+}
+
+static int32_t head_px(const struct gui_ui *ui) { return gui_px(ui, 16); }
+
+static int32_t head_h(const struct gui_ui *ui)
+{
+    int32_t asc, desc, lh;
+    gui_font_metrics(GUI_FONT_STRONG, head_px(ui), &asc, &desc, &lh);
+    return lh + gui_px(ui, 31);
 }
 
 static int64_t visible_rows(const struct gui_ui *ui, const struct gui_node *n)
 {
-    int64_t v = (n->frame.h - row_h(ui)) / row_h(ui);
+    int64_t v = (n->frame.h - head_h(ui)) / row_h(ui);
     return v < 1 ? 1 : v;
 }
 
@@ -72,6 +100,16 @@ static void col_geometry(const struct gui_ui *ui, const struct gui_node *n,
         w[c] = n->cols[c].width ? gui_px(ui, n->cols[c].width) : each;
         pos += w[c];
     }
+}
+
+bool gui_ui_table_row_rect(struct gui_ui *ui, const struct gui_node *n, int64_t row, struct gui_rect *out)
+{
+    const struct gui_table_state *st = gui_ui_table_find(ui, n->id);
+    if (!st || row < st->scroll || row >= st->scroll + visible_rows(ui, n)) return false;
+    int32_t rh = row_h(ui);
+    *out = (struct gui_rect){ n->frame.x + 1, n->frame.y + head_h(ui) + (int32_t)(row - st->scroll) * rh,
+                              n->frame.w - 2, rh };
+    return true;
 }
 
 void gui_ui_table_wheel(struct gui_ui *ui, struct gui_node *n, float dy)
@@ -105,6 +143,16 @@ static int64_t key_target(enum gui_key k, int64_t sel, int64_t rows, int64_t vis
     return sel;
 }
 
+static bool row_action(const struct gui_node *n, const struct gui_table_state *st, const char *verb,
+                       struct gui_action *out)
+{
+    if (st->selected < 0) return false;
+    snprintf(out->name, sizeof(out->name), "%.24s.%s", n->bind, verb);
+    snprintf(out->node_id, sizeof(out->node_id), "%s", n->id);
+    out->row = st->selected;
+    return true;
+}
+
 bool gui_ui_table_key(struct gui_ui *ui, struct gui_node *n, const struct gui_event *ev,
                       struct gui_action *out)
 {
@@ -112,13 +160,7 @@ bool gui_ui_table_key(struct gui_ui *ui, struct gui_node *n, const struct gui_ev
     struct gui_table_state *st = gui_ui_table_find(ui, n->id);
     if (!src || !st || !ev->key.down) return false;
     int64_t rows = (int64_t)src->rows(src->ctx), vis = visible_rows(ui, n);
-    if (ev->key.key == GUI_KEY_ENTER) {
-        if (st->selected < 0) return false;
-        snprintf(out->name, sizeof(out->name), "%.26s.open", n->bind);
-        snprintf(out->node_id, sizeof(out->node_id), "%s", n->id);
-        out->row = st->selected;
-        return true;
-    }
+    if (ev->key.key == GUI_KEY_ENTER) return row_action(n, st, "open", out);
     bool known;
     int64_t sel = key_target(ev->key.key, st->selected, rows, vis, &known);
     if (!known) return false;
@@ -130,16 +172,28 @@ bool gui_ui_table_key(struct gui_ui *ui, struct gui_node *n, const struct gui_ev
     return false;
 }
 
+/* Select the row under y; false when y is on the header or past the rows. */
+static bool select_at(struct gui_ui *ui, struct gui_node *n, const struct gui_table_source *src,
+                      struct gui_table_state *st, int32_t y)
+{
+    int32_t rh = row_h(ui), hh = head_h(ui);
+    if (y < n->frame.y + hh) return false;
+    int64_t row = st->scroll + (y - n->frame.y - hh) / rh;
+    gui_ui_mark_rect(ui, n->frame);
+    if (row >= (int64_t)src->rows(src->ctx)) return false;
+    st->selected = row;
+    return true;
+}
+
 bool gui_ui_table_click(struct gui_ui *ui, struct gui_node *n, int32_t x, int32_t y,
                         struct gui_action *out)
 {
-    (void)out;
     const struct gui_table_source *src = gui_ui_source(ui, n->bind);
     struct gui_table_state *st = gui_ui_table_find(ui, n->id);
     if (!src || !st) return false;
-    int32_t rh = row_h(ui), cx[GUI_MAX_COLS], cw[GUI_MAX_COLS];
+    int32_t cx[GUI_MAX_COLS], cw[GUI_MAX_COLS];
     col_geometry(ui, n, cx, cw);
-    if (y < n->frame.y + rh) {
+    if (y < n->frame.y + head_h(ui)) {
         for (uint8_t c = 0; c < n->ncols; c++)
             if (x >= cx[c] && x < cx[c] + cw[c] && n->cols[c].sortable && src->sort) {
                 st->sort_desc = st->sort_col == c ? !st->sort_desc : false;
@@ -149,46 +203,87 @@ bool gui_ui_table_click(struct gui_ui *ui, struct gui_node *n, int32_t x, int32_
             }
         return false;
     }
-    int64_t row = st->scroll + (y - n->frame.y - rh) / rh;
-    if (row < (int64_t)src->rows(src->ctx)) st->selected = row;
-    gui_ui_mark_rect(ui, n->frame);
-    return false;
+    bool hit = select_at(ui, n, src, st, y);
+    return hit && out->row == -2 && row_action(n, st, "open", out); /* row -2: double click */
+}
+
+/* Right button: select the row under the pointer and ask for its menu. */
+bool gui_ui_table_menu(struct gui_ui *ui, struct gui_node *n, int32_t x, int32_t y, struct gui_action *out)
+{
+    (void)x;
+    const struct gui_table_source *src = gui_ui_source(ui, n->bind);
+    struct gui_table_state *st = gui_ui_table_find(ui, n->id);
+    if (!src || !st || !select_at(ui, n, src, st, y)) return false;
+    return row_action(n, st, "menu", out);
 }
 
 static void paint_header(struct gui_ui *ui, struct gui_surface *s, const struct gui_node *n,
                          const struct gui_table_state *st, const int32_t *cx, const int32_t *cw)
 {
-    int32_t px = gui_ui_text_px(ui, GS_TABLE), asc, desc, lh;
-    int32_t rh = row_h(ui), pad = gui_px(ui, 8);
-    gui_font_metrics(GUI_FONT_TEXT, px, &asc, &desc, &lh);
-    gui_fill_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + 1, n->frame.w - 2, rh - 1 },
-                  gui_rgb(0x24, 0x28, 0x32));
+    int32_t px = head_px(ui), asc, desc, lh, hh = head_h(ui), pad = gui_px(ui, 12);
+    gui_font_metrics(GUI_FONT_STRONG, px, &asc, &desc, &lh);
+    gui_fill_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + 1, n->frame.w - 2, hh - 1 },
+                  RGB(0x15, 0x17, 0x1c));
+    gui_fill_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + hh - 1, n->frame.w - 2, 1 },
+                  RGB(0x2a, 0x2d, 0x35));
     for (uint8_t c = 0; c < n->ncols; c++) {
         const char *lbl = n->cols[c].label;
         int32_t tw = gui_text_width(GUI_FONT_STRONG, px, lbl, strlen(lbl));
-        int32_t x = n->cols[c].right ? cx[c] + cw[c] - pad - tw : cx[c] + pad;
-        gui_text_draw(s, GUI_FONT_STRONG, px, x, n->frame.y + gui_px(ui, 6) + asc, lbl, strlen(lbl),
-                      gui_rgb(0xe8, 0xea, 0xf0));
+        int32_t x = n->cols[c].right ? cx[c] + cw[c] - pad - tw : cx[c] + (cw[c] - tw) / 2;
+        gui_text_draw(s, GUI_FONT_STRONG, px, x, n->frame.y + (hh - lh) / 2 + asc, lbl, strlen(lbl),
+                      RGB(0x9a, 0xa0, 0xa6));
         if (st && st->sort_col == c)
-            gui_fill_rect(s, (struct gui_rect){ cx[c] + cw[c] - pad - gui_px(ui, 4), n->frame.y + rh / 2 - 1,
-                          gui_px(ui, 5), gui_px(ui, 2) }, gui_rgb(0x7a, 0xb8, 0xff));
+            gui_fill_rect(s, (struct gui_rect){ cx[c] + cw[c] - pad - gui_px(ui, 4), n->frame.y + hh / 2 - 1,
+                          gui_px(ui, 5), gui_px(ui, 2) }, RGB(0x34, 0xc7, 0x59));
     }
 }
 
-static void paint_cell(struct gui_ui *ui, struct gui_surface *s, const struct gui_node *n,
-                       const struct gui_table_source *src, int64_t row, uint8_t c,
-                       struct gui_rect rr, const int32_t *cx, const int32_t *cw)
+static void draw_fit(struct gui_surface *s, int32_t px, int32_t x, int32_t base, int32_t maxw, const char *t,
+                     size_t len, uint32_t color)
 {
-    int32_t px = gui_ui_text_px(ui, GS_TABLE), asc, desc, lh, pad = gui_px(ui, 8);
-    gui_font_metrics(GUI_FONT_TEXT, px, &asc, &desc, &lh);
-    char cell[128];
+    if (gui_ui_run_width(GUI_FONT_TEXT, px, t, len) <= maxw) {
+        gui_ui_run_draw(s, GUI_FONT_TEXT, px, x, base, t, len, color, color);
+        return;
+    }
+    int32_t dots = gui_text_width(GUI_FONT_TEXT, px, "...", 3);
+    size_t fit = gui_text_fit(GUI_FONT_TEXT, px, t, len, maxw - dots);
+    gui_ui_run_draw(s, GUI_FONT_TEXT, px, x, base, t, fit, color, color);
+    gui_text_draw(s, GUI_FONT_TEXT, px, x + gui_ui_run_width(GUI_FONT_TEXT, px, t, fit), base, "...", 3, color);
+}
+
+struct cell_geo { struct gui_rect rr; int32_t x, w, px, asc, lh; bool selected, right; };
+
+static void paint_pill_cell(struct gui_ui *ui, struct gui_surface *s, const struct cell_geo *g,
+                            enum gui_style cs, const char *cell, size_t cl)
+{
+    const char *tab = memchr(cell, '\t', cl);
+    size_t ll = tab ? (size_t)(tab - cell) : cl;
+    int32_t ph = gui_ui_pill_h(ui, cs), ppx = gui_ui_text_px(ui, cs);
+    int32_t pw = gui_ui_run_width(gui_theme(cs)->font, ppx, cell, ll) + 2 * gui_px(ui, 8);
+    int32_t pad = gui_px(ui, 10);
+    struct gui_rect pr = { g->x + pad, g->rr.y + (g->rr.h - ph) / 2, pw, ph };
+    gui_ui_pill_draw(ui, s, pr, cs, cell, ll);
+    if (!tab) return;
+    int32_t tx = pr.x + pw + gui_px(ui, 8);
+    draw_fit(s, g->px, tx, g->rr.y + (g->rr.h - g->lh) / 2 + g->asc, g->x + g->w - pad - tx, tab + 1,
+             cl - ll - 1, g->selected ? RGB(0xff, 0xff, 0xff) : gui_theme(GS_BODY)->fg);
+}
+
+static void paint_cell(struct gui_ui *ui, struct gui_surface *s, const struct gui_table_source *src,
+                       int64_t row, uint8_t c, struct cell_geo *g)
+{
+    char raw[256], cell[300];
     enum gui_style cs = GS_BODY;
-    if (!src->cell(src->ctx, (size_t)row, c, cell, sizeof(cell), &cs)) return;
-    size_t cl = strlen(cell);
-    size_t fit = gui_text_fit(GUI_FONT_TEXT, px, cell, cl, cw[c] - 2 * pad);
-    int32_t tw = gui_text_width(GUI_FONT_TEXT, px, cell, fit);
-    int32_t x = n->cols[c].right ? cx[c] + cw[c] - pad - tw : cx[c] + pad;
-    gui_text_draw(s, GUI_FONT_TEXT, px, x, rr.y + gui_px(ui, 6) + asc, cell, fit, gui_theme(cs)->fg);
+    if (!src->cell(src->ctx, (size_t)row, c, raw, sizeof(raw), &cs)) return;
+    size_t cl = gui_ui_glyph_map(raw, strlen(raw), cell, sizeof(cell));
+    if (gui_ui_is_pill(cs)) { paint_pill_cell(ui, s, g, cs, cell, cl); return; }
+    bool amount = cs == GS_AMOUNT_MONO || cs == GS_WARN_TEXT || g->right;
+    int32_t pad = gui_px(ui, amount ? 8 : 10);
+    int32_t tw = gui_ui_run_width(GUI_FONT_TEXT, g->px, cell, cl);
+    int32_t x = amount ? g->x + g->w - pad - tw : g->x + pad;
+    if (x < g->x + pad) x = g->x + pad;
+    uint32_t fg = g->selected ? RGB(0xff, 0xff, 0xff) : gui_theme(cs)->fg;
+    draw_fit(s, g->px, x, g->rr.y + (g->rr.h - g->lh) / 2 + g->asc, g->w - 2 * pad, cell, cl, fg);
 }
 
 static void paint_rows(struct gui_ui *ui, struct gui_surface *s, const struct gui_node *n,
@@ -196,14 +291,22 @@ static void paint_rows(struct gui_ui *ui, struct gui_surface *s, const struct gu
 {
     const struct gui_table_source *src = gui_ui_source(ui, n->bind);
     if (!src || !st) return;
-    int32_t rh = row_h(ui);
+    struct cell_geo g;
+    int32_t desc, rh = row_h(ui);
+    g.px = gui_ui_text_px(ui, GS_TABLE);
+    gui_font_metrics(GUI_FONT_TEXT, g.px, &g.asc, &desc, &g.lh);
     int64_t rows = (int64_t)src->rows(src->ctx), vis = visible_rows(ui, n);
     for (int64_t r = 0; r < vis && st->scroll + r < rows; r++) {
         int64_t row = st->scroll + r;
-        struct gui_rect rr = { n->frame.x + 1, n->frame.y + rh + (int32_t)r * rh, n->frame.w - 2, rh };
-        if (row == st->selected) gui_fill_rect(s, rr, gui_rgb(0x2a, 0x33, 0x50));
-        else if (r & 1) gui_fill_rect(s, rr, gui_rgb(0x20, 0x23, 0x2c));
-        for (uint8_t c = 0; c < n->ncols; c++) paint_cell(ui, s, n, src, row, c, rr, cx, cw);
+        g.rr = (struct gui_rect){ n->frame.x + 1, n->frame.y + head_h(ui) + (int32_t)r * rh, n->frame.w - 2, rh };
+        g.selected = row == st->selected;
+        if (g.selected) gui_fill_rect(s, g.rr, RGB(0x24, 0x30, 0x47));
+        for (uint8_t c = 0; c < n->ncols; c++) {
+            g.x = cx[c];
+            g.w = cw[c];
+            g.right = n->cols[c].right;
+            paint_cell(ui, s, src, row, c, &g);
+        }
     }
 }
 
@@ -216,13 +319,14 @@ void gui_ui_table_paint(struct gui_ui *ui, struct gui_surface *s, struct gui_nod
                         rad > 0 ? rad - 1 : 0, th->bg);
     struct gui_table_state *st = gui_ui_table_find(ui, n->id);
     col_geometry(ui, n, cx, cw);
-    gui_clip_push(s, n->frame);
+    if (!gui_clip_push(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + 1, n->frame.w - 2, n->frame.h - 2 }))
+        return;
     paint_header(ui, s, n, st, cx, cw);
     paint_rows(ui, s, n, st, cx, cw);
     gui_clip_pop(s);
     if (ui->focus[0] && !strcmp(ui->focus, n->id) && ui->kbd_focus) {
-        int32_t t = gui_px(ui, 2);
-        gui_stroke_rect(s, (struct gui_rect){ n->frame.x - t, n->frame.y - t, n->frame.w + 2 * t,
-                        n->frame.h + 2 * t }, t, gui_rgb(0x7a, 0xb8, 0xff));
+        int32_t t = gui_px(ui, 2), o = t + gui_px(ui, 2);
+        gui_stroke_rect(s, (struct gui_rect){ n->frame.x - o, n->frame.y - o, n->frame.w + 2 * o,
+                        n->frame.h + 2 * o }, t, RGB(0x34, 0xc7, 0x59));
     }
 }

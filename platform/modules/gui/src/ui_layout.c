@@ -1,10 +1,26 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: measure and arrange the widget tree in physical pixels. Logical
- * values are multiplied by the window scale exactly once, here. */
+ * values are multiplied by the window scale exactly once, here. Also: the
+ * hero amount auto-fit, pill metrics, group titles, anchored drop-down
+ * popups and the interim glyph map used until the vendored fonts cover the
+ * few non-ASCII characters beta13 shows (lane F). */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "gui/ui.h"
+
+/* Shared with ui_paint.c and ui_table.c (ui.h only grows by style tokens). */
+size_t gui_ui_glyph_map(const char *in, size_t len, char *out, size_t cap);
+int32_t gui_ui_run_width(enum gui_font f, int32_t px, const char *s, size_t len);
+int32_t gui_ui_fit_px(const struct gui_ui *ui, const struct gui_node *n, const char *s, size_t len,
+                      int32_t avail);
+bool gui_ui_is_pill(enum gui_style st);
+int32_t gui_ui_pill_h(const struct gui_ui *ui, enum gui_style st);
+bool gui_ui_is_popup(const struct gui_node *n);
+bool gui_ui_table_row_rect(struct gui_ui *ui, const struct gui_node *n, int64_t row, struct gui_rect *out);
+
+#define GROUP_TITLE_X 14
 
 int32_t gui_px(const struct gui_ui *ui, int32_t logical)
 {
@@ -16,6 +32,96 @@ int32_t gui_ui_text_px(const struct gui_ui *ui, enum gui_style st)
     int32_t lp = gui_theme(st)->text_px;
     if (lp < GUI_MIN_TEXT_PX) lp = GUI_MIN_TEXT_PX;
     return gui_px(ui, lp);
+}
+
+/* ---- interim glyph map (the bundled Inter subset is U+0020..U+007E) ----
+ * Byte 1 stands for a middle dot and byte 2 for a filled circle; ui_paint
+ * draws both as shapes. Everything else maps to ASCII look-alikes. */
+static const struct { uint32_t cp; const char *ascii; } k_glyph_map[] = {
+    { 0x00A0, " " }, { 0x00B7, "\001" }, { 0x25CF, "\002" }, { 0x2026, "..." },
+    { 0x2014, "-" }, { 0x2699, " " }, { 0x2713, "v" }, { 0x26A0, "!" }, { 0x2192, "->" },
+    { 0x2715, "x" }, { 0x25B8, ">" }, { 0x25BE, "v" },
+};
+
+static const char *glyph_ascii(uint32_t cp)
+{
+    for (size_t i = 0; i < sizeof(k_glyph_map) / sizeof(k_glyph_map[0]); i++)
+        if (k_glyph_map[i].cp == cp) return k_glyph_map[i].ascii;
+    return NULL;
+}
+
+size_t gui_ui_glyph_map(const char *in, size_t len, char *out, size_t cap)
+{
+    size_t o = 0, i = 0;
+    while (i < len && o + 4 < cap) {
+        size_t at = i;
+        uint32_t cp = (unsigned char)in[i] < 0x80 ? (uint32_t)(unsigned char)in[i++] : gui_utf8_next(in, len, &i);
+        const char *a = cp >= 0x80 ? glyph_ascii(cp) : NULL;
+        if (a) {
+            for (; *a && o + 1 < cap; a++) out[o++] = *a;
+        } else {
+            for (size_t k = at; k < i && o + 1 < cap; k++) out[o++] = in[k];
+        }
+    }
+    out[o] = 0;
+    return o;
+}
+
+int32_t gui_ui_run_width(enum gui_font f, int32_t px, const char *s, size_t len)
+{
+    int32_t w = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i < len && s[i] != 1 && s[i] != 2) continue;
+        w += gui_text_width(f, px, s + start, i - start);
+        if (i < len) w += gui_text_width(f, px, s[i] == 1 ? " " : "o", 1);
+        start = i + 1;
+    }
+    return w;
+}
+
+static const char *node_text(const struct gui_ui *ui, const struct gui_node *n)
+{
+    return n->bind[0] && n->kind == GUI_TEXT ? gui_ui_get(ui, n->bind)
+                                             : gui_tree_text(ui->tree, n);
+}
+
+/* ---- hero auto-fit: 53 px down to 19 px until every digit fits ---- */
+
+static bool is_hero(enum gui_style st)
+{
+    return st == GS_HERO || st == GS_HERO_AMOUNT_OK || st == GS_HERO_AMOUNT_WARM;
+}
+
+int32_t gui_ui_fit_px(const struct gui_ui *ui, const struct gui_node *n, const char *s, size_t len,
+                      int32_t avail)
+{
+    int32_t px = gui_ui_text_px(ui, n->style);
+    if (!is_hero(n->style) || avail <= 0) return px;
+    int32_t floor_px = gui_px(ui, 19);
+    while (px > floor_px && gui_ui_run_width(gui_theme(n->style)->font, px, s, len) > avail) px--;
+    return px;
+}
+
+bool gui_ui_is_pill(enum gui_style st)
+{
+    return (st >= GS_BADGE_PRIVATE && st <= GS_BADGE_DANGER) || (st >= GS_PILL_PRIVATE && st <= GS_PILL_DESHIELD);
+}
+
+/* Pill height = max(20, ascent + descent of the pill font + 6). */
+int32_t gui_ui_pill_h(const struct gui_ui *ui, enum gui_style st)
+{
+    int32_t asc, desc, lh;
+    gui_font_metrics(gui_theme(st)->font, gui_ui_text_px(ui, st), &asc, &desc, &lh);
+    int32_t h = asc + (desc < 0 ? -desc : desc) + gui_px(ui, 6);
+    return h < gui_px(ui, 20) ? gui_px(ui, 20) : h;
+}
+
+/* A dialog without a title is a drop-down: no dimming, anchored, closes on
+ * an outside click. */
+bool gui_ui_is_popup(const struct gui_node *n)
+{
+    return n->kind == GUI_DIALOG && n->text_len == 0;
 }
 
 /* One wrapped line: bytes consumed (including a swallowed space/newline). */
@@ -33,17 +139,6 @@ size_t gui_wrap_line(enum gui_font f, int32_t px, const char *s, size_t len,
     return brk;
 }
 
-static const char *node_text(const struct gui_ui *ui, const struct gui_node *n)
-{
-    return n->bind[0] && n->kind == GUI_TEXT ? gui_ui_get(ui, n->bind)
-                                             : gui_tree_text(ui->tree, n);
-}
-
-static size_t node_text_len(const struct gui_ui *ui, const struct gui_node *n)
-{
-    return strlen(node_text(ui, n));
-}
-
 static bool visible(const struct gui_node *n)
 {
     return !(n->flags & GUI_F_HIDDEN) && n->kind != GUI_DIALOG;
@@ -59,36 +154,53 @@ static int32_t count_visible(const struct gui_ui *ui, const struct gui_node *n)
     return k;
 }
 
+static void measure_wrapped(struct gui_node *n, enum gui_font f, int32_t px, int32_t lh, const char *s,
+                            size_t len, int32_t avail_w)
+{
+    int32_t maxw = 0, lines = 0;
+    size_t at = 0;
+    while (at < len || lines == 0) {
+        size_t k = gui_wrap_line(f, px, s + at, len - at, avail_w);
+        size_t shown = k;
+        while (shown > 0 && (s[at + shown - 1] == ' ' || s[at + shown - 1] == '\n')) shown--;
+        int32_t lw = gui_ui_run_width(f, px, s + at, shown);
+        if (lw > maxw) maxw = lw;
+        lines++;
+        at += k;
+        if (k == 0) break;
+    }
+    n->nat_w = maxw;
+    n->nat_h = lines * lh;
+}
+
 static void measure_text(struct gui_ui *ui, struct gui_node *n, int32_t avail_w)
 {
     const struct gui_theme_entry *th = gui_theme(n->style);
-    int32_t px = gui_ui_text_px(ui, n->style), asc, desc, lh;
+    char s[4200];
+    const char *raw = node_text(ui, n);
+    size_t len = gui_ui_glyph_map(raw, strlen(raw), s, sizeof(s));
+    int32_t px = gui_ui_fit_px(ui, n, s, len, avail_w), asc, desc, lh;
     gui_font_metrics(th->font, px, &asc, &desc, &lh);
-    const char *s = node_text(ui, n);
-    size_t len = node_text_len(ui, n);
     if ((n->flags & GUI_F_WRAP) && avail_w > 0) {
-        int32_t maxw = 0, lines = 0;
-        size_t at = 0;
-        while (at < len || lines == 0) {
-            size_t k = gui_wrap_line(th->font, px, s + at, len - at, avail_w);
-            size_t shown = k;
-            while (shown > 0 && (s[at + shown - 1] == ' ' || s[at + shown - 1] == '\n')) shown--;
-            int32_t lw = gui_text_width(th->font, px, s + at, shown);
-            if (lw > maxw) maxw = lw;
-            lines++;
-            at += k;
-            if (k == 0) break;
-        }
-        n->nat_w = maxw;
-        n->nat_h = lines * lh;
+        measure_wrapped(n, th->font, px, lh, s, len, avail_w);
     } else {
-        n->nat_w = gui_text_width(th->font, px, s, len);
+        n->nat_w = gui_ui_run_width(th->font, px, s, len);
         n->nat_h = lh;
     }
-    if (n->style >= GS_BADGE_PRIVATE && n->style <= GS_BADGE_DANGER) {
-        n->nat_w += 2 * gui_px(ui, 9);
-        n->nat_h += 2 * gui_px(ui, 3);
+    if (gui_ui_is_pill(n->style)) {
+        n->nat_w += 2 * gui_px(ui, 8);
+        n->nat_h = gui_ui_pill_h(ui, n->style);
     }
+    if (n->style == GS_GROUP_TITLE) n->nat_w += gui_px(ui, GROUP_TITLE_X + 4);
+}
+
+static void measure_button(struct gui_ui *ui, struct gui_node *n, enum gui_font f, int32_t px, int32_t lh)
+{
+    char lbl[256];
+    size_t len = gui_ui_glyph_map(gui_tree_text(ui->tree, n), n->text_len, lbl, sizeof(lbl));
+    int32_t padx = n->style == GS_MENU_ITEM ? 22 : n->style == GS_MENUBAR_ITEM ? 9 : 16;
+    n->nat_w = gui_ui_run_width(f, px, lbl, len) + 2 * gui_px(ui, padx);
+    n->nat_h = lh + 2 * gui_px(ui, n->style == GS_MENU_ITEM ? 7 : 8);
 }
 
 static void measure_leaf(struct gui_ui *ui, struct gui_node *n, int32_t avail_w)
@@ -98,11 +210,7 @@ static void measure_leaf(struct gui_ui *ui, struct gui_node *n, int32_t avail_w)
     gui_font_metrics(th->font, px, &asc, &desc, &lh);
     switch (n->kind) {
     case GUI_TEXT: measure_text(ui, n, avail_w); break;
-    case GUI_BUTTON:
-        n->nat_w = gui_text_width(th->font, px, gui_tree_text(ui->tree, n), n->text_len) +
-                   2 * gui_px(ui, 14);
-        n->nat_h = lh + 2 * gui_px(ui, 8);
-        break;
+    case GUI_BUTTON: measure_button(ui, n, th->font, px, lh); break;
     case GUI_INPUT:
         n->nat_w = gui_px(ui, n->w ? n->w : 240);
         n->nat_h = (n->ikind == GUI_IN_MEMO ? 3 * lh : lh) + 2 * gui_px(ui, 8);
@@ -134,7 +242,11 @@ static int32_t child_avail(const struct gui_ui *ui, const struct gui_node *n,
 {
     if (n->dir == GUI_COL) return inner;
     if (ch->grow <= 0 || inner <= 0) return 0;
+    int32_t growers = 0;
+    for (uint16_t c = n->first; c != GUI_NONE; c = ui->tree->nodes[c].next)
+        if (visible(&ui->tree->nodes[c]) && ui->tree->nodes[c].grow > 0) growers += ui->tree->nodes[c].grow;
     int32_t a = inner - fixed_sum - gui_px(ui, n->gap) * (count_visible(ui, n) - 1);
+    if (growers > 1) a = a * ch->grow / growers; /* equal shares, as arrange gives them */
     return a < 0 ? 0 : a;
 }
 
@@ -265,9 +377,51 @@ static void arrange(struct gui_ui *ui, uint16_t i, struct gui_rect fr)
     if (n->kind == GUI_BOX) arrange_children(ui, n, fr, 0);
 }
 
+/* ---- dialogs and drop-down popups ---- */
+
+/* "<anchor>_pop" opens under <anchor>, or under the selected row of a table. */
+static struct gui_rect popup_anchor(struct gui_ui *ui, const struct gui_node *n)
+{
+    char id[GUI_ID_MAX];
+    snprintf(id, sizeof(id), "%s", n->id);
+    size_t l = strlen(id);
+    if (l > 4 && !strcmp(id + l - 4, "_pop")) id[l - 4] = 0;
+    int at = gui_tree_find(ui->tree, id);
+    if (at < 0) return (struct gui_rect){ ui->last_mx, ui->last_my, 0, 0 };
+    const struct gui_node *a = &ui->tree->nodes[at];
+    struct gui_rect r = a->frame;
+    if (a->kind == GUI_TABLE) {
+        const struct gui_table_state *st = gui_ui_table_find(ui, a->id);
+        struct gui_rect row;
+        if (st && gui_ui_table_row_rect(ui, a, st->selected, &row)) {
+            int32_t x = ui->last_mx > row.x && ui->last_mx < row.x + row.w ? ui->last_mx : row.x + gui_px(ui, 24);
+            return (struct gui_rect){ x, row.y, 0, row.h };
+        }
+    }
+    return r;
+}
+
+static void layout_popup(struct gui_ui *ui, uint16_t i)
+{
+    struct gui_node *n = &ui->tree->nodes[i];
+    if (!n->pad) n->pad = 4;
+    measure_box(ui, n, 0);
+    int32_t w = n->w ? gui_px(ui, n->w) : n->nat_w, h = n->nat_h;
+    struct gui_rect a = popup_anchor(ui, n);
+    int32_t x = a.x, y = a.y + a.h;
+    if (x + w > ui->w) x = ui->w - w;
+    if (y + h > ui->h) y = a.y - h > 0 ? a.y - h : ui->h - h;
+    n->frame = (struct gui_rect){ x < 0 ? 0 : x, y < 0 ? 0 : y, w, h };
+    arrange_children(ui, n, n->frame, 0);
+    int32_t pad = gui_px(ui, n->pad);
+    for (uint16_t c = n->first; c != GUI_NONE; c = ui->tree->nodes[c].next)
+        ui->tree->nodes[c].frame.w = w - 2 * pad; /* menu items span the menu */
+}
+
 static void layout_dialog(struct gui_ui *ui, uint16_t i)
 {
     struct gui_node *n = &ui->tree->nodes[i];
+    if (gui_ui_is_popup(n)) { layout_popup(ui, i); return; }
     if (!n->pad) n->pad = 20;
     if (!n->gap) n->gap = 12;
     int32_t dw = gui_px(ui, n->w ? n->w : 440);

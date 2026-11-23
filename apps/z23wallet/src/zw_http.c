@@ -1,7 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: minimal loopback HTTP/1.1 POST client: bounded connect and read,
- * Content-Length bodies only (chunked or oversized replies are BAD_REPLY).
- * The authorization value lives on the stack for one send and is cleansed. */
+ * Purpose: minimal loopback HTTP/1.1 POST client. One total deadline bounds
+ * connect, send and every receive together (measured on gui_now_ns), so a
+ * node that accepts and never answers costs at most the deadline. Waits run
+ * in short slices that look at a cancel flag, so another thread can end the
+ * request in flight without a cross-thread socket call. Content-Length
+ * bodies only (chunked or oversized replies are BAD_REPLY). The
+ * authorization value lives on the stack for one send and is cleansed. */
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,11 +19,10 @@
 #define ZW_CONNECT_MS 500
 #define WAIT_SLICE_MS 50
 
-/* Lets another thread abort the request in flight. The worker never blocks in a
- * single receive: it waits in short slices and looks at this flag between them, so
- * fire is a plain atomic store (no cross-thread socket call, which Winsock can
- * block on) and the request ends within one slice. After fire, every new request
- * fails before it connects. */
+/* Lets another thread abort the request in flight; after fire every new request
+ * fails before it connects. fire is a plain atomic store: Winsock can block a
+ * cross-thread shutdown() while a recv is pending, so the flag is polled
+ * between wait slices instead. */
 struct zw_cancel {
     atomic_bool fired;
 };
@@ -36,24 +39,26 @@ void zw_cancel_fire(struct zw_cancel *c)
     if (c) atomic_store(&c->fired, true);
 }
 
-static bool cancel_fired(struct zw_cancel *c) { return c && atomic_load(&c->fired); }
-
-/* Wait for the socket to become readable in WAIT_SLICE_MS steps, up to timeout_ms.
- * ZW_OK means readable (data or EOF). */
-static enum zw_err wait_readable(platform_socket_t s, struct zw_cancel *c, uint32_t timeout_ms)
+static bool cancel_fired(struct zw_cancel *c)
 {
-    for (uint32_t waited = 0; waited < timeout_ms; waited += WAIT_SLICE_MS) {
-        if (cancel_fired(c)) return ZW_ERR_IO;
-        int r = platform_socket_wait_readable(s, WAIT_SLICE_MS);
-        if (r != 0) return r > 0 ? ZW_OK : ZW_ERR_IO;
-    }
-    return ZW_ERR_TIMEOUT;
+    return c && atomic_load(&c->fired);
 }
 
 void zw_buf_free(struct zw_buf *b)
 {
     free(b->data);
     *b = (struct zw_buf){0};
+}
+
+const char *zw_phase_name(int phase)
+{
+    static const char *const k[] = { "idle", "locate", "connect", "send", "recv" };
+    return phase >= 0 && phase <= ZW_PHASE_RECV ? k[phase] : "idle";
+}
+
+static void set_phase(atomic_int *p, int v)
+{
+    if (p) atomic_store(p, v);
 }
 
 static bool buf_add(struct zw_buf *b, const char *p, size_t n)
@@ -72,14 +77,32 @@ static bool buf_add(struct zw_buf *b, const char *p, size_t n)
     return true;
 }
 
-static enum zw_err connect_loopback(const struct zw_endpoint *ep, struct zw_cancel *c, platform_socket_t *out)
+static int32_t remaining_ms(uint64_t deadline_ns)
 {
+    uint64_t now = gui_now_ns();
+    return now >= deadline_ns ? 0 : (int32_t)((deadline_ns - now) / 1000000u);
+}
+
+/* Wait until s is readable (writable when for_write) or until stop_ns, in
+ * WAIT_SLICE_MS slices that look at the cancel flag. ZW_OK means ready. */
+static enum zw_err wait_ready(platform_socket_t s, struct zw_cancel *c, uint64_t stop_ns, bool for_write)
+{
+    for (;;) {
+        if (cancel_fired(c)) return ZW_ERR_IO;
+        int32_t left = remaining_ms(stop_ns);
+        if (left <= 0) return ZW_ERR_TIMEOUT;
+        int slice = left < WAIT_SLICE_MS ? left : WAIT_SLICE_MS;
+        int r = for_write ? platform_socket_wait_writable(s, slice) : platform_socket_wait_readable(s, slice);
+        if (r != 0) return r > 0 ? ZW_OK : ZW_ERR_IO;
+    }
+}
+
+static enum zw_err connect_loopback(const struct zw_endpoint *ep, uint64_t deadline_ns, struct zw_cancel *c,
+                                    platform_socket_t *out)
+{
+    if (cancel_fired(c)) return ZW_ERR_IO;
     platform_socket_t s = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
     if (s == PLATFORM_SOCKET_INVALID) return ZW_ERR_IO;
-    if (cancel_fired(c)) {
-        platform_socket_close(s);
-        return ZW_ERR_IO;
-    }
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
@@ -92,12 +115,13 @@ static enum zw_err connect_loopback(const struct zw_endpoint *ep, struct zw_canc
         return refused ? ZW_ERR_REFUSED : ZW_ERR_IO;
     }
     if (rc != 0) {
-        int w = platform_socket_wait_writable(s, ZW_CONNECT_MS);
+        uint64_t cap_ns = gui_now_ns() + (uint64_t)ZW_CONNECT_MS * 1000000u;
+        enum zw_err w = wait_ready(s, c, cap_ns < deadline_ns ? cap_ns : deadline_ns, true);
         int err = 0;
-        if (w == 0 || platform_socket_pending_error(s, &err) != 0 || err != 0) {
+        if (w != ZW_OK || platform_socket_pending_error(s, &err) != 0 || err != 0) {
             bool refused = err != 0 && platform_socket_error_refused(err);
             platform_socket_close(s);
-            return w == 0 ? ZW_ERR_TIMEOUT : refused ? ZW_ERR_REFUSED : ZW_ERR_IO;
+            return w != ZW_OK ? w : refused ? ZW_ERR_REFUSED : ZW_ERR_IO;
         }
     }
     platform_socket_set_nonblocking(s, false);
@@ -129,36 +153,9 @@ static enum zw_err parse_reply(struct zw_buf *raw, struct zw_buf *reply, int *st
     return buf_add(reply, body, have) ? ZW_OK : ZW_ERR_NOMEM;
 }
 
-/* Read until the peer closes. Each wait is bounded by timeout_ms and ends at once
- * when the request is cancelled. */
-static enum zw_err read_reply(platform_socket_t s, struct zw_cancel *c, uint32_t timeout_ms,
-                              struct zw_buf *raw)
+static enum zw_err send_request(platform_socket_t s, const struct zw_endpoint *ep, const char *body, size_t len)
 {
-    char chunk[4096];
-    for (;;) {
-        enum zw_err e = wait_readable(s, c, timeout_ms);
-        if (e != ZW_OK) return e;
-        int n = platform_socket_receive(s, chunk, sizeof(chunk));
-        if (n == 0) return ZW_OK;
-        if (n < 0) {
-            int err = platform_socket_last_error();
-            return platform_socket_error_timed_out(err) || platform_socket_error_would_block(err)
-                       ? ZW_ERR_TIMEOUT : ZW_ERR_IO;
-        }
-        if (raw->len + (size_t)n > ZW_REPLY_MAX + 4096) return ZW_ERR_BAD_REPLY;
-        if (!buf_add(raw, chunk, (size_t)n)) return ZW_ERR_NOMEM;
-    }
-}
-
-enum zw_err zw_http_post(const struct zw_endpoint *ep, const char *body, size_t len,
-                         struct zw_buf *reply, uint32_t timeout_ms, int *http_status,
-                         struct zw_cancel *cancel)
-{
-    platform_socket_t s;
-    enum zw_err e = connect_loopback(ep, cancel, &s);
-    if (e != ZW_OK) return e;
-    platform_socket_set_receive_timeout(s, (int)timeout_ms);
-    char head[512];
+    char head[sizeof(ep->auth) + 256];
     int hn = snprintf(head, sizeof(head),
                       "POST / HTTP/1.1\r\nHost: 127.0.0.1:%u\r\nAuthorization: %s\r\n"
                       "Content-Type: application/json\r\nContent-Length: %zu\r\n"
@@ -166,8 +163,44 @@ enum zw_err zw_http_post(const struct zw_endpoint *ep, const char *body, size_t 
     bool sent = hn > 0 && (size_t)hn < sizeof(head) && platform_socket_send_all(s, head, (size_t)hn) &&
                 platform_socket_send_all(s, body, len);
     memory_cleanse(head, sizeof(head));
+    return sent ? ZW_OK : ZW_ERR_IO;
+}
+
+/* Read until the peer closes, the deadline passes or the request is cancelled. */
+static enum zw_err receive_all(platform_socket_t s, uint64_t deadline_ns, struct zw_cancel *c, struct zw_buf *raw)
+{
+    char chunk[4096];
+    for (;;) {
+        enum zw_err w = wait_ready(s, c, deadline_ns, false);
+        if (w != ZW_OK) return w;
+        int n = platform_socket_receive(s, chunk, sizeof(chunk));
+        if (n == 0) return ZW_OK;
+        if (n < 0) {
+            int e = platform_socket_last_error();
+            if (platform_socket_error_would_block(e)) continue;
+            return platform_socket_error_timed_out(e) ? ZW_ERR_TIMEOUT : ZW_ERR_IO;
+        }
+        if (raw->len + (size_t)n > ZW_REPLY_MAX + 4096) return ZW_ERR_BAD_REPLY;
+        if (!buf_add(raw, chunk, (size_t)n)) return ZW_ERR_NOMEM;
+    }
+}
+
+enum zw_err zw_http_post(const struct zw_endpoint *ep, const char *body, size_t len,
+                         struct zw_buf *reply, uint32_t deadline_ms, int *http_status,
+                         atomic_int *phase, struct zw_cancel *cancel)
+{
+    uint32_t ms = deadline_ms ? deadline_ms : 5000u;
+    uint64_t deadline_ns = gui_now_ns() + (uint64_t)ms * 1000000u;
+    platform_socket_t s;
+    set_phase(phase, ZW_PHASE_CONNECT);
+    enum zw_err e = connect_loopback(ep, deadline_ns, cancel, &s);
+    if (e != ZW_OK) return e;
+    platform_socket_set_receive_timeout(s, (int)ms);
+    set_phase(phase, ZW_PHASE_SEND);
+    e = send_request(s, ep, body, len);
     struct zw_buf raw = {0};
-    e = sent ? read_reply(s, cancel, timeout_ms, &raw) : ZW_ERR_IO;
+    set_phase(phase, ZW_PHASE_RECV);
+    if (e == ZW_OK) e = receive_all(s, deadline_ns, cancel, &raw);
     platform_socket_close(s);
     if (e == ZW_OK) e = parse_reply(&raw, reply, http_status);
     zw_buf_free(&raw);

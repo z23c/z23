@@ -1,19 +1,25 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: window open, the event loop, result drain, action dispatch,
- * poll scheduling, scripted headless sessions, --shot and --bench. The UI
- * thread never blocks on node I/O: it waits on the window with deadlines. */
+ * poll scheduling, the first-result watchdog, menus, scripted headless
+ * sessions, --shot and --bench. The UI thread never blocks on node I/O: it
+ * waits on the window with deadlines. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "zw.h"
 
-enum { T_POLL = 1, T_BLINK, T_TOAST, T_SHOT, T_QA, T_BENCH };
+enum { T_POLL = 1, T_BLINK, T_MSG, T_SHOT, T_QA, T_BENCH, T_WATCHDOG };
 
 #define POLL_SYNCED_MS 10000
 #define POLL_SYNCING_MS 2000
 #define WALLET_REFRESH_MS 30000
 #define NET_EVERY_POLLS 3
+#define INFO_EVERY_POLLS 6
+#define WATCHDOG_MS 6000
+#define MSG_MS 3000
+#define NARROW_CONTENT_PX 820
 
 struct app {
     const struct zw_options *o;
@@ -25,14 +31,14 @@ struct app {
     struct zw_bench bench;
     size_t screen;
     uint32_t key;
-    bool blinking, have_key, running, need_wallet, was_online, bench_data, model_dirty;
+    bool blinking, have_key, running, need_wallet, was_online, bench_data, model_dirty, watchdog_armed;
     int polls;
-    int64_t last_height, last_wallet_ns;
+    int64_t last_wallet_ns;
     int frames;
     int exit_code;
 };
 
-static int64_t now_s(void) { return (int64_t)(gui_now_ns() / 1000000000ull); }
+static int64_t wall_s(void) { return (int64_t)time(NULL); }
 
 static bool rebuild(struct app *a)
 {
@@ -50,17 +56,29 @@ static bool rebuild(struct app *a)
     return true;
 }
 
+/* Groups stack when the page is narrower than 820 logical px. */
+static void update_narrow(struct app *a, int32_t w, float sc)
+{
+    int32_t content = (int32_t)((float)w / (sc > 0.0f ? sc : 1.0f)) - 168 - 24;
+    bool narrow = content < NARROW_CONTENT_PX;
+    if (narrow != a->model.narrow) {
+        a->model.narrow = narrow;
+        a->model_dirty = true;
+    }
+}
+
 static void render(struct app *a)
 {
-    if (a->model_dirty) {
-        zw_model_publish(&a->model, a->ui, now_s());
-        rebuild(a);
-        zw_model_publish(&a->model, a->ui, now_s());
-        a->model_dirty = false;
-    }
     int32_t w, h;
     float sc;
     gui_window_size(a->win, &w, &h, &sc);
+    update_narrow(a, w, sc);
+    if (a->model_dirty) {
+        a->model.now_s = wall_s();
+        rebuild(a);
+        zw_model_publish(&a->model, a->ui, a->model.now_s);
+        a->model_dirty = false;
+    }
     gui_ui_set_scale(a->ui, sc);
     if (a->ui->layout_dirty || a->ui->w != w || a->ui->h != h) gui_ui_layout(a->ui, w, h);
     struct gui_rect dirty[8];
@@ -77,9 +95,22 @@ static void render(struct app *a)
     }
 }
 
+static void arm_watchdog(struct app *a)
+{
+    if (a->watchdog_armed) return;
+    gui_window_timer_set(a->win, T_WATCHDOG, WATCHDOG_MS, false);
+    a->watchdog_armed = true;
+}
+
+static void enqueue(struct app *a, enum zw_query q)
+{
+    zw_worker_enqueue(a->worker, q, a->model.generation);
+    arm_watchdog(a);
+}
+
 static void enqueue_all(struct app *a)
 {
-    for (enum zw_query q = 0; q < ZW_Q_COUNT; q++) zw_worker_enqueue(a->worker, q, a->model.generation);
+    for (enum zw_query q = 0; q < ZW_Q_COUNT; q++) enqueue(a, q);
     a->last_wallet_ns = (int64_t)gui_now_ns();
 }
 
@@ -91,63 +122,117 @@ static uint32_t poll_delay_ms(const struct app *a)
     return m->have_chain && m->chain.blocks + 1 < m->chain.headers ? POLL_SYNCING_MS : POLL_SYNCED_MS;
 }
 
+static void page_poll(struct app *a)
+{
+    switch (a->screen) {
+    case ZW_SCREEN_SEND: zw_q_send_poll(a->worker, &a->model); break;
+    case ZW_SCREEN_RECEIVE: zw_q_receive_poll(a->worker, &a->model); break;
+    case ZW_SCREEN_ACTIVITY: zw_q_activity_poll(a->worker, &a->model); break;
+    default: break;
+    }
+}
+
 static void poll_tick(struct app *a)
 {
     struct zw_model *m = &a->model;
-    zw_worker_enqueue(a->worker, ZW_Q_CHAIN, m->generation);
-    if (m->conn != ZW_CONN_ONLINE) {
-        gui_window_timer_set(a->win, T_POLL, poll_delay_ms(a), false);
-        return;
-    }
-    if (a->polls++ % NET_EVERY_POLLS == 0 || !m->have_net) zw_worker_enqueue(a->worker, ZW_Q_NET, m->generation);
-    bool stale = (int64_t)gui_now_ns() - a->last_wallet_ns >= (int64_t)WALLET_REFRESH_MS * 1000000;
-    if (a->need_wallet || !m->have_wallet || stale) {
-        zw_worker_enqueue(a->worker, ZW_Q_WALLET, m->generation);
-        a->last_wallet_ns = (int64_t)gui_now_ns();
-        a->need_wallet = false;
+    enqueue(a, ZW_Q_CHAIN);
+    if (m->conn == ZW_CONN_ONLINE) {
+        int k = a->polls++;
+        if (k % NET_EVERY_POLLS == 0 || !m->have_net) enqueue(a, ZW_Q_NET);
+        if (k % INFO_EVERY_POLLS == 0 || !m->have_info) enqueue(a, ZW_Q_INFO);
+        bool stale = (int64_t)gui_now_ns() - a->last_wallet_ns >= (int64_t)WALLET_REFRESH_MS * 1000000;
+        if (a->need_wallet || !m->have_wallet || !m->bal || stale) {
+            enqueue(a, ZW_Q_WALLET);
+            enqueue(a, ZW_Q_BALANCES);
+            a->last_wallet_ns = (int64_t)gui_now_ns();
+            a->need_wallet = false;
+        }
+        page_poll(a);
     }
     gui_window_timer_set(a->win, T_POLL, poll_delay_ms(a), false);
 }
 
 static void drain(struct app *a)
 {
-    struct zw_result r[16];
-    size_t n;
+    struct zw_result *r = malloc(16 * sizeof(*r));
+    if (!r) { zw_log("drain: out of memory"); return; }
+    size_t n, total = 0;
     while ((n = zw_worker_drain(a->worker, r, 16)) > 0)
-        for (size_t i = 0; i < n; i++) {
+        for (size_t i = 0; i < n; i++, total++) {
             int64_t before = a->model.chain.blocks;
+            bool ok = r[i].err == ZW_OK;
+            enum zw_query kind = r[i].kind;
+            if (!ok) zw_log("query %d failed: kind=%d code=%d", (int)kind, (int)r[i].err, r[i].rpc.code);
             if (zw_model_apply(&a->model, &r[i])) a->model_dirty = true;
-            if (r[i].err == ZW_OK) {
-                a->model.last_update_s = now_s();
-                if (r[i].kind == ZW_Q_CHAIN && a->model.chain.blocks != before) a->need_wallet = true;
-                if (!a->bench_data) {
-                    a->bench_data = true;
-                    a->bench.first_data_ms = zw_process_age_ms() - a->bench.first_frame_ms;
-                }
+            if (!ok) continue;
+            a->model.last_update_s = wall_s();
+            if (kind == ZW_Q_CHAIN && a->model.chain.blocks != before) a->need_wallet = true;
+            if (!a->bench_data) {
+                a->bench_data = true;
+                a->bench.first_data_ms = zw_process_age_ms() - a->bench.first_frame_ms;
             }
-            if (r[i].err != ZW_OK) zw_log("query %d failed: kind=%d code=%d", (int)r[i].kind, (int)r[i].err, r[i].rpc.code);
         }
+    free(r);
+    if (total) { /* a result arrived: the watchdog restarts only if work is still queued */
+        gui_window_timer_cancel(a->win, T_WATCHDOG);
+        a->watchdog_armed = false;
+        if (zw_worker_busy(a->worker)) arm_watchdog(a);
+    }
     bool online = a->model.conn == ZW_CONN_ONLINE;
-    if (online && !a->was_online) a->need_wallet = true; /* came back: refetch everything */
-    if (online && !a->was_online && a->model.have_chain) {
-        zw_worker_enqueue(a->worker, ZW_Q_NET, a->model.generation);
+    if (online && !a->was_online) { /* came back: refetch everything */
+        a->need_wallet = true;
+        enqueue(a, ZW_Q_NET);
+        enqueue(a, ZW_Q_INFO);
+        enqueue(a, ZW_Q_WALLET);
+        enqueue(a, ZW_Q_BALANCES);
     }
     a->was_online = online;
     gui_window_timer_set(a->win, T_POLL, poll_delay_ms(a), false);
 }
 
-static void copy_text(struct app *a, const char *s, const char *toast)
+/* R9: no result within 6 s of an enqueue means a stuck worker or a lost wake. */
+static void watchdog_fired(struct app *a)
 {
-    if (gui_clipboard_set_text(a->win, s, strlen(s))) gui_ui_toast(a->ui, toast, 3000);
-    else gui_ui_toast(a->ui, "Couldn't copy. Try again.", 8000);
-    gui_window_timer_set(a->win, T_TOAST, 3100, false);
+    a->watchdog_armed = false;
+    if (!zw_worker_busy(a->worker)) return;
+    char line[160];
+    zw_watchdog_line(zw_worker_phase(a->worker), zw_worker_port(a->worker), line, sizeof(line));
+    zw_log("%s", line);
+    struct zw_model *m = &a->model;
+    if (m->conn == ZW_CONN_STARTING || m->conn == ZW_CONN_ONLINE) {
+        m->conn = ZW_CONN_REFUSED;
+        m->port = zw_worker_port(a->worker);
+        m->fail_count++;
+    }
+    m->generation++;
+    zw_worker_reset_auth(a->worker);
+    enqueue_all(a);
+    a->model_dirty = true;
+}
+
+static void show_msg(struct app *a, const char *text)
+{
+    snprintf(a->model.msg, sizeof(a->model.msg), "%s", text);
+    gui_window_timer_set(a->win, T_MSG, MSG_MS, false);
+    a->model_dirty = true;
+}
+
+static void copy_text(struct app *a, const char *s, const char *msg)
+{
+    show_msg(a, gui_clipboard_set_text(a->win, s, strlen(s)) ? msg : "Couldn't copy. Try again.");
 }
 
 static void set_screen(struct app *a, size_t s)
 {
     if (s >= ZW_SCREEN_COUNT || s == a->screen) return;
+    if (s == ZW_SCREEN_ADVANCED && a->model.conn != ZW_CONN_ONLINE) { /* the rail check snaps back */
+        show_msg(a, "Advanced (node stats) opens once you're connected to a node.");
+        return;
+    }
     a->screen = s;
+    a->model.menu = ZW_MENU_NONE;
     a->model_dirty = true;
+    page_poll(a);
 }
 
 static void refresh_now(struct app *a)
@@ -156,29 +241,75 @@ static void refresh_now(struct app *a)
     enqueue_all(a);
 }
 
+static void set_menu(struct app *a, enum zw_menu m)
+{
+    a->model.menu = a->model.menu == m ? ZW_MENU_NONE : m;
+    a->model_dirty = true;
+}
+
+static void copy_details(struct app *a)
+{
+    char buf[ZW_TRIED_MAX * (ZW_PATH + 64) + 64];
+    size_t o = 0;
+    buf[0] = 0;
+    for (size_t i = 0; i < a->model.report.ntried && o < sizeof(buf); i++)
+        o += (size_t)snprintf(buf + o, sizeof(buf) - o, "%s - %s\n", a->model.report.tried[i].path,
+                              a->model.report.tried[i].reason);
+    if (!o) zw_connect_text(&a->model, buf, sizeof(buf));
+    copy_text(a, buf, "Copied to clipboard");
+}
+
+static bool dispatch_row(struct app *a, const struct gui_action *act)
+{
+    char addr[100];
+    if (!strcmp(act->name, "home.balances.menu")) {
+        if (!zw_home_row_address(&a->model, act->row, addr, sizeof(addr))) return true;
+        a->model.menu = ZW_MENU_ROW;
+        a->model.menu_row = act->row;
+        a->model_dirty = true;
+    } else if (!strcmp(act->name, "row.copy")) {
+        if (zw_home_row_address(&a->model, a->model.menu_row, addr, sizeof(addr)))
+            copy_text(a, addr, "Copied to clipboard");
+        a->model.menu = ZW_MENU_NONE;
+    } else if (!strcmp(act->name, "row.send") || !strcmp(act->name, "home.balances.open")) {
+        a->model.menu = ZW_MENU_NONE;
+        show_msg(a, "Sending opens in a later version");
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static bool dispatch_menu(struct app *a, const char *name)
+{
+    if (!strcmp(name, "menu.file")) set_menu(a, ZW_MENU_FILE);
+    else if (!strcmp(name, "menu.edit")) set_menu(a, ZW_MENU_EDIT);
+    else if (!strcmp(name, "menu.help")) set_menu(a, ZW_MENU_HELP);
+    else if (!strcmp(name, "menu.close") || !strcmp(name, "menu.none")) set_menu(a, ZW_MENU_NONE);
+    else if (!strcmp(name, "app.exit")) a->running = false;
+    else if (!strcmp(name, "help.about")) { a->model.menu = ZW_MENU_NONE; a->model.about_open = true; a->model_dirty = true; }
+    else if (!strcmp(name, "about.close")) { a->model.about_open = false; a->model_dirty = true; }
+    else return false;
+    return true;
+}
+
 static void dispatch(struct app *a, const struct gui_action *act)
 {
     char buf[1200];
-    if (!strcmp(act->name, "nav.home")) set_screen(a, ZW_SCREEN_HOME);
-    else if (!strcmp(act->name, "nav.node")) set_screen(a, ZW_SCREEN_NODE);
-    else if (!strcmp(act->name, "home.refresh")) refresh_now(a);
+    if (!strncmp(act->name, "nav.", 4)) set_screen(a, zw_screen_by_name(act->name + 4));
+    else if (dispatch_menu(a, act->name) || dispatch_row(a, act)) return;
+    else if (!strcmp(act->name, "home.send")) set_screen(a, ZW_SCREEN_SEND);
+    else if (!strcmp(act->name, "home.receive")) set_screen(a, ZW_SCREEN_RECEIVE);
+    else if (!strcmp(act->name, "home.shield")) show_msg(a, "Shielding opens with Send in a later version");
     else if (!strcmp(act->name, "connect.retry")) {
         zw_worker_reset_auth(a->worker);
         a->model.fail_count = 0;
         refresh_now(a);
-    } else if (!strcmp(act->name, "connect.copy")) {
-        buf[0] = 0;
-        for (size_t i = 0; i < a->model.ntried; i++) {
-            size_t l = strlen(buf);
-            snprintf(buf + l, sizeof(buf) - l, "%s\n", a->model.tried[i]);
-        }
-        copy_text(a, buf, "Copied");
-    } else if (!strcmp(act->name, "node.copy")) {
+    } else if (!strcmp(act->name, "connect.copy")) copy_details(a);
+    else if (!strcmp(act->name, "node.copy")) {
         zw_diagnostics(&a->model, buf, sizeof(buf));
-        copy_text(a, buf, "Copied");
-    } else {
-        zw_log("unhandled action %s", act->name);
-    }
+        copy_text(a, buf, "Copied to clipboard");
+    } else zw_log("unhandled action %s", act->name);
 }
 
 static void write_shot(struct app *a, const char *path)
@@ -199,9 +330,13 @@ static void write_shot(struct app *a, const char *path)
 static void on_key(struct app *a, const struct gui_event *ev)
 {
     if (!ev->key.down) return;
-    if (ev->key.key == GUI_KEY_F5) refresh_now(a);
-    else if ((ev->mods & GUI_MOD_CTRL) && ev->key.key == GUI_KEY_1) set_screen(a, ZW_SCREEN_HOME);
-    else if ((ev->mods & GUI_MOD_CTRL) && ev->key.key == GUI_KEY_2) set_screen(a, ZW_SCREEN_NODE);
+    enum gui_key k = ev->key.key;
+    if (k == GUI_KEY_F5) refresh_now(a);
+    else if ((ev->mods & GUI_MOD_CTRL) && k >= GUI_KEY_1 && k < GUI_KEY_1 + ZW_SCREEN_COUNT)
+        set_screen(a, (size_t)(k - GUI_KEY_1));
+    else if ((ev->mods & GUI_MOD_ALT) && k == GUI_KEY_F) set_menu(a, ZW_MENU_FILE);
+    else if ((ev->mods & GUI_MOD_ALT) && k == GUI_KEY_E) set_menu(a, ZW_MENU_EDIT);
+    else if ((ev->mods & GUI_MOD_ALT) && k == GUI_KEY_H) set_menu(a, ZW_MENU_HELP);
 }
 
 static void on_timer(struct app *a, uint32_t id)
@@ -209,7 +344,8 @@ static void on_timer(struct app *a, uint32_t id)
     switch (id) {
     case T_POLL: poll_tick(a); break;
     case T_BLINK: gui_ui_blink(a->ui); break;
-    case T_TOAST: (void)gui_ui_tick(a->ui); break;
+    case T_MSG: a->model.msg[0] = 0; a->model_dirty = true; break;
+    case T_WATCHDOG: watchdog_fired(a); break;
     case T_SHOT:
         write_shot(a, a->o->shot);
         if (a->o->exit_after_shot || a->exit_code) a->running = false;
@@ -241,7 +377,6 @@ static void handle_event(struct app *a, const struct gui_event *ev)
     if (blink && !blinking) gui_window_timer_set(a->win, T_BLINK, 530, true);
     if (!blink && blinking) gui_window_timer_cancel(a->win, T_BLINK);
     a->blinking = blink;
-    if (a->ui->toast[0]) gui_window_timer_set(a->win, T_TOAST, 3100, false);
 }
 
 /* Run until the worker is idle and no event is queued (headless settling). */
@@ -293,7 +428,7 @@ static int run_script(struct app *a)
 
 static bool open_window(struct app *a, char *err, size_t cap)
 {
-    struct gui_window_desc d = { .title_utf8 = "Z23 Wallet", .width = a->o->width,
+    struct gui_window_desc d = { .title_utf8 = "Z23 Wallet v" ZW_VERSION, .width = a->o->width,
         .height = a->o->height, .min_width = 640, .min_height = 420,
         .flags = GUI_WINDOW_RESIZABLE, .surface = GUI_SURFACE_CPU, .backend = a->o->backend };
     if (!gui_window_open(&d, &a->win, err, cap)) return false;
@@ -331,39 +466,61 @@ static int loop(struct app *a)
     return a->exit_code;
 }
 
+/* One closing line for logs and agents: where the window ended up. Never a
+ * balance or an address. */
+static void log_exit(const struct app *a)
+{
+    zw_log("exit: screen=%s conn=%d node=%s status=\"%s\"", zw_screens[a->screen].name, (int)a->model.conn,
+           zw_node_kind(&a->model), gui_ui_get(a->ui, "status.label"));
+    static const char *const ids[] = { "menubar", "rail", "nav_home", "h_summary", "h_hero", "h_send",
+                                       "h_addrs", "h_balances", "statusbar", "status_label" };
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        int at = gui_tree_find(a->tree, ids[i]);
+        if (at < 0) continue;
+        struct gui_rect r = a->tree->nodes[at].frame;
+        zw_log("layout: %s %d %d %d %d", ids[i], r.x, r.y, r.w, r.h);
+    }
+}
+
 int zw_app_run(const struct zw_options *o)
 {
-    struct app a;
-    memset(&a, 0, sizeof(a));
-    a.o = o;
+    struct app *a = calloc(1, sizeof(*a));
+    if (!a) return 3;
+    a->o = o;
     char err[160];
-    zw_model_init(&a.model);
-    if (!open_window(&a, err, sizeof(err))) {
+    zw_model_init(&a->model, o->profile);
+    if (!open_window(a, err, sizeof(err))) {
         zw_log("cannot open a window: %s", err);
+        free(a);
         return 3;
     }
-    a.tree = gui_tree_new();
-    a.ui = a.tree ? gui_ui_new(a.tree) : NULL;
-    a.worker = a.ui ? zw_worker_start(a.win, o) : NULL;
-    if (!a.worker) {
+    a->tree = gui_tree_new();
+    a->ui = a->tree ? gui_ui_new(a->tree) : NULL;
+    a->worker = a->ui ? zw_worker_start(a->win, o) : NULL;
+    if (!a->worker) {
         zw_log("cannot start (out of memory or thread failure)");
-        gui_ui_free(a.ui);
-        gui_tree_free(a.tree);
-        gui_window_close(a.win);
+        gui_ui_free(a->ui);
+        gui_tree_free(a->tree);
+        gui_window_close(a->win);
+        free(a);
         return 3;
     }
-    gui_ui_set_window(a.ui, a.win);
-    gui_window_set_live_hook(a.win, live_tick, &a);
-    a.model_dirty = true;
-    render(&a);
-    enqueue_all(&a);
-    gui_window_timer_set(a.win, T_POLL, POLL_SYNCED_MS, false);
-    int rc = o->script[0] ? run_script(&a) : loop(&a);
-    if (o->bench[0]) zw_bench_write(o->bench, &a.bench);
-    gui_window_set_live_hook(a.win, NULL, NULL);
-    zw_worker_stop(a.worker); /* joins: nothing touches the window after this line */
-    gui_ui_free(a.ui);
-    gui_tree_free(a.tree);
-    gui_window_close(a.win);
+    gui_ui_set_window(a->ui, a->win);
+    gui_window_set_live_hook(a->win, live_tick, a);
+    zw_home_sources(a->ui, &a->model);
+    a->model_dirty = true;
+    render(a);
+    enqueue_all(a);
+    gui_window_timer_set(a->win, T_POLL, POLL_SYNCED_MS, false);
+    int rc = o->script[0] ? run_script(a) : loop(a);
+    if (o->bench[0]) zw_bench_write(o->bench, &a->bench);
+    log_exit(a);
+    gui_window_set_live_hook(a->win, NULL, NULL);
+    zw_worker_stop(a->worker); /* joins: nothing touches the window after this line */
+    gui_ui_free(a->ui);
+    gui_tree_free(a->tree);
+    gui_window_close(a->win);
+    zw_model_free(&a->model);
+    free(a);
     return rc;
 }

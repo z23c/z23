@@ -267,7 +267,15 @@ static const char *const k_kind[] = { "box", "text", "button", "input", "table",
 static const char *const k_style[GS_COUNT] = { "screen", "card", "card_warn",
     "title", "body", "muted", "hero", "amount", "badge_private", "badge_public",
     "badge_danger", "button", "button_primary", "button_danger", "input",
-    "table", "nav", "nav_active", "status", "toast", "dialog" };
+    "table", "nav", "nav_active", "status", "toast", "dialog",
+    "rail", "nav_item", "nav_item_active", "nav_adv", "nav_adv_active", "page",
+    "group", "group_title", "hero_card", "hero_caption", "hero_amount_ok",
+    "hero_amount_warm", "hero_total", "hero_note", "button_secondary",
+    "button_amber", "card_amber", "amber_text", "pill_private", "pill_public",
+    "pill_deshield", "amount_mono", "sync_pill", "banner_connecting",
+    "banner_syncing", "banner_info", "banner_text", "menubar", "menubar_item",
+    "menu_popup", "menu_item", "statusbar", "status_label", "status_msg",
+    "icon_ok", "icon_warn", "icon_crit", "warn_text" };
 static const char *const k_align[] = { "stretch", "start", "center", "end" };
 static const char *const k_ikind[] = { "text", "amount", "address", "memo", "secret" };
 static const struct { uint16_t f; const char *n; } k_flags[] = {

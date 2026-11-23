@@ -2,15 +2,20 @@
 
 # z23-wallet
 
-A lightweight wallet window for a Z23 node, 100% C23: no C++, no Qt, no
-JavaScript, no web view. It draws its own pixels through
+A lightweight wallet window for a Z23 node or a legacy zclassicd, 100% C23: no
+C++, no Qt, no JavaScript, no web view. It draws its own pixels through
 `platform/modules/gui` and talks to the node over loopback JSON-RPC. It links
 neither `core/` nor `engine/`; it uses platform modules only.
 
-Milestone 1 (this directory): **Connect**, **Home** (balances) and **Node**
-screens. All amounts are integer zatoshi from the RPC boundary on. It is
-read-only: it never sends, never exports keys, never starts or stops a node, and
-it refuses to start when `ZCL_AGENT_SESSION` is set (owner at the keyboard only).
+It mirrors ZclWallet v2.1.2-beta13: the menu bar (File, Edit, Help), the
+navigation rail (Home, Send, Receive, Activity, and Advanced behind the gear),
+the beta13 palette and metrics, and the Home page (sync pill or banner, the
+Summary group with the private-balance hero, Send/Receive, the amber fix-it
+card, and the Address Balances table). Send, Receive and Activity are "Coming
+soon" screens that their own lanes fill. All amounts are integer zatoshi from
+the RPC boundary on. It is read-only: it never sends, never exports keys, never
+starts or stops a node, and it refuses to start when `ZCL_AGENT_SESSION` is set
+(owner at the keyboard only).
 
 Screenshots are generated, not committed: the golden tests write them to
 `build/test-artifacts/z23wallet/` and `build/test-artifacts/gui/`.
@@ -29,80 +34,109 @@ make t-fast ONLY=z23wallet
 On Windows (MSYS2 UCRT64) `.\tools\dev\windows-make.ps1 z23-wallet` builds the
 same program: `-mwindows -static -luser32 -lgdi32 -lshell32 -lws2_32`, no console.
 The same sources build on Linux for the headless backend, which is what the land
-proof tests. A live Linux window needs the X11 backend (lane M1x, not in M1).
+proof tests.
 
 ## Run
 
 ```text
-z23-wallet --datadir=<node folder>            # live window
+z23-wallet                                    # auto: a Z23 node first, then zclassicd
 z23-wallet --node=zclassicd                   # read-only view of a legacy zclassicd
+z23-wallet --datadir=<node folder>            # a Z23 node in that folder
 z23-wallet --backend=headless --datadir=<dir> --shot=home.png --shot-after-ms=2000 --exit-after-shot
 z23-wallet --script=<file> --backend=headless --shot-dir=<dir> --scale=2
-z23-wallet --bench=bench.txt                  # key=value line, see below
+z23-wallet --qa-frames=150 --log=run.log      # self-closing check; the log ends with
+                                              # "exit: screen=... node=... status=..."
 ```
 
-Datadir discovery, first hit wins: `--datadir`, `%LOCALAPPDATA%\Z23\data` (what
-`make windows-service-install` installs), `%USERPROFILE%\.zclassic-c23`,
-`$HOME/.zclassic-c23`. A UNC path attaches the Windows window to a WSL2 node:
-`--datadir=\\wsl.localhost\Ubuntu\home\<u>\.zclassic-c23`. The host is always
-127.0.0.1; the port is `--rpcport`, then `<datadir>/.rpcport`, then 18232
-(legacy 8023, or 18023 with `testnet=1`). Credentials are `<datadir>/.cookie`
-(re-read once on a 401, because the cookie rotates) or, for the legacy profile,
-`zclassic.conf`. Secrets live only in memory; the log withholds any line that
-contains one.
+Node discovery records every folder it looks at with the reason it was
+rejected, so a "not found" screen always lists what was searched.
+
+* Z23 (`--node=z23`, and first under auto): `--datadir`, `%LOCALAPPDATA%\Z23\data`
+  (`make windows-service-install`), `%LOCALAPPDATA%\Z23Node\data` (the per-user
+  scheduled-task install), `%USERPROFILE%\.zclassic-c23`, `$HOME/.zclassic-c23`.
+  Credentials are `<dir>/.cookie`; the port is `--rpcport`, then `<dir>/.rpcport`,
+  then 18232.
+* zclassicd (`--node=zclassicd`, and second under auto): `--datadir`, else
+  `%APPDATA%\ZClassic` (Windows; also the folder the beta13 wallet's embedded
+  node uses), `~/.zclassic` (Linux), `~/Library/Application Support/ZClassic`
+  (macOS). `zclassic.conf` is parsed like zclassicd does: first value wins,
+  keys are case-sensitive, credentials up to 1024 bytes. `rpcuser` +
+  `rpcpassword` win over a `.cookie` (which zclassicd stops refreshing once a
+  password is set); without a password the cookie is read from `datadir=` (or
+  the folder) plus `testnet3/` or `regtest/`. Port: `rpcport`, else 8023, or
+  18023 with `testnet=1` / `regtest=1`.
+* Against zclassicd only these read calls are ever sent; anything else is
+  refused before a byte leaves: getinfo, getblockchaininfo, getnetworkinfo,
+  getpeerinfo, getnetworksolps, getwalletinfo, getwalletsummary,
+  z_gettotalbalance, listunspent, z_listunspent, z_listaddresses,
+  getaddressesbyaccount, listtransactions, z_listreceivedbyaddress,
+  gettransaction.
+* A 401 re-reads the cookie once, but only when the cookie supplied the
+  credentials; refused conf credentials show "Your node refused the login in
+  <conf path>." Secrets live only in memory; the log withholds any line that
+  contains one.
 
 Exit codes: 0 ok, 2 bad arguments, 3 window or backend unavailable, 4 shot failed,
 5 agent session refused.
 
-## Step 0 facts, confirmed on origin/main (3b7047867b)
+## Node facts used
 
-* `walletsummary` is registered (`contexts/wallet/controllers/src/wallet_shielded_activity_rpc.c`,
-  `rpc_walletsummary`). Fields used: `spendable_zat`, `pending_zat`, `public_zat`,
-  `immature_zat`, `scanned_through_height`, `blocks_behind`, `current`, `locked`,
-  `encrypted`, `send_allowed`, `send_blocked_reason`, `balance_available`.
-* `getblockchaininfo` (`blocks`, `headers`, `chain`, `verificationprogress`),
-  `getnetworkinfo` (`connections`, `inbound_connections`, `outbound_connections`,
-  `version`, `subversion`). `getpeerinfo` is not used in M1.
-* The RPC server replies `HTTP/1.1` with `Content-Length` and `Connection: close`
-  (`engine/modules/rpc/src/httpserver_transport.c`); the cookie file holds
-  `user:password`; `.rpcport` holds the bound port.
-* `make windows-service-install` records its datadir as `%LOCALAPPDATA%\Z23\data`
-  (`platform/packaging/windows/install-service.sh`).
-* Fixtures under `tests/fixtures/z23wallet/rpc/<scenario>/` use the real reply
-  shapes with edited, fixture-only values. No real address or key is committed.
-  They were NOT captured from a live isolated regtest node in this lane (see
-  Remaining work); the field names above come from the reply builders.
+* Z23 `walletsummary` (`contexts/wallet/controllers/src/wallet_shielded_activity_rpc.c`):
+  `spendable_zat`, `pending_zat`, `public_zat`, `immature_zat`,
+  `scanned_through_height`, `blocks_behind`, `current`, `locked`, `encrypted`,
+  `send_allowed`, `send_blocked_reason`, `balance_available`.
+* zclassicd beta13 `getwalletsummary [0]` (src/wallet/rpcwallet.cpp at
+  v2.1.2-beta13) returns `transparent`, `private` and `total` as FormatMoney
+  strings, the same fields as `z_gettotalbalance [0]`; a -32601 latches
+  `z_gettotalbalance` for the session.
+* `getblockchaininfo` (`blocks`, `headers`, `chain`, `verificationprogress`,
+  `initialblockdownload`, `tiptime` or `mediantime`), `getnetworkinfo`
+  (`connections`, `inbound_connections`, `outbound_connections`, `version`,
+  `subversion`), `getinfo` (`connections`, `version`), `getnetworksolps`.
+* Per-address balances are the sums of `listunspent [0]` and `z_listunspent [0]`
+  (`address`, `amount`, `confirmations`); both must answer or the previous table
+  stays.
+* Fixtures under `tests/fixtures/z23wallet/rpc/<scenario>/` use these reply
+  shapes with made-up values and addresses (`zs1fixtureaddressa000...`). They
+  were not captured from a live isolated regtest node (see Remaining work).
 
 ## Design in one screen
 
 * UI thread owns the window, widget tree and model; it never blocks on I/O.
   A read worker owns the socket and posts coalesced results, then wakes the window.
-* Polling: chain every 10 s synced (2 s syncing), network every 30 s, wallet on a
-  tip change or every 30 s. About 10 requests per idle minute, zero wakeups between
-  ticks. Failure backoff 1, 2, 4, 8, 15 s (capped), warming repolls every second.
-* A node that answers `-32601` to `walletsummary` is treated as legacy
-  zclassicd (latched for the session) and read through `z_gettotalbalance`.
-  Sending through zclassicd is not supported.
+* Every request has one 5 s deadline covering connect, send and all receives.
+  A 6 s first-result watchdog logs `worker: no reply after 6 s (phase=<p>,
+  127.0.0.1:<port>)`, shows the refused text and restarts the worker.
+* The first frame says "Looking for your node..."; a failure is shown only after
+  a locate attempt has completed.
+* Polling: chain every 10 s synced (2 s syncing), network every 30 s, getinfo
+  every minute, wallet and balances on a tip change or every 30 s. Failure
+  backoff 1, 2, 4, 8, 15 s (capped), warming repolls every second.
+* Screens come from one table, `src/zw_screens.def`; each screen file builds its
+  tree and publishes its bound text.
 * Redraws are dirty-rectangle only; a caret blink presents only the field.
 
-## Measured (this lane)
+## Measured
 
-Windows 10, 175% display scale, MSYS2 UCRT64 gcc 16.2, release link (`-O2 -s`):
+Windows 10, 175% display scale (1925x1260 framebuffer), MSYS2 UCRT64 gcc 16.2,
+release link (`-O2 -s`), 2026-11-23. beta13 numbers are from
+`legacy_measurements` (read-only, same machine, same day).
 
-| | z23-wallet M1 | target | legacy zclwallet beta11 (inventory) |
+| | z23-wallet (this lane) | target | ZclWallet beta13 |
 | --- | --- | --- | --- |
-| exe size | 345,088 bytes | <= 1.5 MB | 36,566,576 bytes (22.8 MB GUI part) |
-| process start to first frame | 33 to 38 ms | <= 150 ms | about 1 minute node warmup |
-| first live data after first frame | 10 to 45 ms (local mock) | <= 300 ms | n/a |
-| working set after 40 s idle (1925x1260 physical) | 21.6 MB | <= 20 MB at 100% | not measured |
-| private bytes | 13.5 MB | | not measured |
-| idle CPU over 30 s | 31 ms (0.10% of a core) | <= 0.05% | not measured |
-| imports | OS DLLs only (KERNEL32, USER32, GDI32, SHELL32, WS2_32, api-ms-win-crt-* UCRT forwarders) | OS DLLs | Qt |
+| exe size | 380,416 bytes | <= 1.5 MB | 45,145,136 bytes + 21.8 MB node |
+| process start to first frame | 38 to 50 ms | <= 150 ms | 489 to 674 ms |
+| first data after first frame, mock node | 10 to 43 ms | <= 300 ms | n/a |
+| first data after first frame, live zclassicd | 7 to 9 ms (Home with height) | <= 1 s | 13.9 s (embedded node start) |
+| idle CPU, 10 s and 30 s windows | 0.0 ms (below the 15.6 ms timer tick) | <= 0.05% | 0.188 s per 30 s (0.63%) |
+| working set after 40 s idle | 19.8 to 21.3 MB | <= 30 MB at 175% | 95.2 MB |
+| private bytes | 13.2 to 13.4 MB | | 121.7 MB |
+| handles / threads | 167 to 193 / 5 to 6 | <= 250 / <= 6 | 578 to 582 / 10 |
+| GDI / USER objects | 9 to 10 / 11 to 13 | <= 30 / <= 30 | 88 / 50 |
 
-The legacy wallet was not measured on the same machine (not installed there), so
-the comparison column is the inventory's file size only. Gaps recorded honestly:
-idle CPU is 2x the target and the working set is 1.6 MB over it at this 175%
-display (the framebuffer alone is 9.7 MB at 1925x1260).
+One earlier 10 s window (seconds 3 to 13, with `--log`) measured 172 ms while
+the second round of startup fetches repainted the full 175% frame; later
+windows measured 0.0 ms.
 
 ## Release profile
 
@@ -201,9 +235,18 @@ Measured follow-ups, largest first (not in this profile):
   (the split debug file keeps `.debug_frame` for gdb); glibc backtraces lose it.
 * Control Flow Guard: only through clang (`-mguard=cf` with lld `--guard-cf`).
 
-## Remaining work (milestones)
+## Remaining work
 
-M2 Receive and QR, M3 Activity, M4 Send (plan, confirm from plan, commit with an
-idempotency key; needs a custody reviewer), M5 Backup, keys, settings, packaging
-and the Start node button, M6a `.zui` markup and HTML export, M6b plugin actions,
-M7 GPU surface for games, M1x X11 backend. See `platform/modules/gui/README.md`.
+* P1 follow-ups: the Back up card and menu actions (custody review), the
+  status-bar right-click "Refresh" menu (F5 works), page scrolling at the
+  minimum window size, pill icons (shield/eye), z_listaddresses for zero-balance
+  Sapling/Sprout classification, and Z23 reply shapes verified against an
+  isolated regtest node.
+* Fonts (lane F): until Ubuntu and DejaVu Sans Mono land, amounts use Inter and
+  the non-ASCII glyphs beta13 shows are drawn by an interim map in
+  `ui_layout.c` (dots and circles as shapes, the rest as ASCII look-alikes);
+  the bound strings already carry the exact UTF-8 text.
+* Later lanes: P2 Receive and QR, P3 Activity, P4 Send (custody reviewer), P5
+  Advanced, menus, settings and backup, A agent dump/diff tools, X X11 and M
+  macOS backends, M6a `.zui` markup, M7 GPU surface. See
+  `platform/modules/gui/README.md`.

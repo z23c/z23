@@ -8,6 +8,10 @@
 #include "base/safe_alloc.h"
 #include "gui/ui.h"
 
+/* Shared with ui_layout.c and ui_table.c (ui.h only grows by style tokens). */
+bool gui_ui_is_popup(const struct gui_node *n);
+bool gui_ui_table_menu(struct gui_ui *ui, struct gui_node *n, int32_t x, int32_t y, struct gui_action *out);
+
 struct gui_ui *gui_ui_new(struct gui_tree *tree)
 {
     struct gui_ui *ui = zcl_calloc(1, sizeof(*ui), "gui_ui");
@@ -261,13 +265,31 @@ static void on_move(struct gui_ui *ui, int32_t x, int32_t y)
         gui_ui_input_click(ui, &ui->tree->nodes[p], x, true);
 }
 
+/* Right button: a table row asks for its context menu; outside an open
+ * drop-down it closes the drop-down like a left click does. */
+static bool on_right_button(struct gui_ui *ui, const struct gui_event *ev, struct gui_action *out)
+{
+    if (!ev->button.down) return false;
+    int h = hit_test(ui, ev->button.x, ev->button.y), dialog = open_dialog(ui->tree);
+    if (h < 0) return dialog >= 0 && gui_ui_is_popup(&ui->tree->nodes[dialog]) && fire(&ui->tree->nodes[dialog], out);
+    struct gui_node *n = &ui->tree->nodes[h];
+    if (n->kind != GUI_TABLE) return false;
+    set_focus(ui, n->id, false);
+    return gui_ui_table_menu(ui, n, ev->button.x, ev->button.y, out);
+}
+
 static bool on_button(struct gui_ui *ui, const struct gui_event *ev, struct gui_action *out)
 {
+    ui->last_mx = ev->button.x;
+    ui->last_my = ev->button.y;
+    if (ev->button.button == 2) return on_right_button(ui, ev, out);
     if (ev->button.button != 1) return false;
     int h = hit_test(ui, ev->button.x, ev->button.y);
     if (ev->button.down) {
         if (h < 0) {
-            if (open_dialog(ui->tree) < 0) set_focus(ui, "", false);
+            int dialog = open_dialog(ui->tree);
+            if (dialog < 0) set_focus(ui, "", false);
+            else if (gui_ui_is_popup(&ui->tree->nodes[dialog])) return fire(&ui->tree->nodes[dialog], out);
             return false;
         }
         struct gui_node *n = &ui->tree->nodes[h];
@@ -282,7 +304,12 @@ static bool on_button(struct gui_ui *ui, const struct gui_event *ev, struct gui_
                 (void)gui_ui_text_key(ui, &all, n);
             }
         }
-        if (n->kind == GUI_TABLE) return gui_ui_table_click(ui, n, ev->button.x, ev->button.y, out);
+        if (n->kind == GUI_TABLE) {
+            out->row = ev->button.clicks >= 2 ? -2 : -1; /* -2 asks the table for "<bind>.open" */
+            bool fired = gui_ui_table_click(ui, n, ev->button.x, ev->button.y, out);
+            if (!fired) out->row = -1;
+            return fired;
+        }
         return false;
     }
     int p = gui_tree_find(ui->tree, ui->pressed);

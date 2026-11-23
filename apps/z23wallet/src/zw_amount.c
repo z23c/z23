@@ -61,31 +61,59 @@ bool zw_amount_from_json(const struct json_value *v, int64_t *zat)
     return false;
 }
 
-size_t zw_amount_format(int64_t zat, char *buf, size_t cap, bool unit)
+/* Settings::getDecimalString + getZCLDisplayFormat: 8 decimals with trailing
+ * zeros (and then a trailing ".") stripped, no grouping, "-0" is "0". */
+size_t zw_amount_format_net(int64_t zat, char *buf, size_t cap, bool testnet)
 {
     if (!cap) return 0;
     bool neg = zat < 0;
     uint64_t u = neg ? (uint64_t)(-(zat + 1)) + 1u : (uint64_t)zat;
     uint64_t whole = u / 100000000u, frac = u % 100000000u;
-    char digits[24];
-    int nd = snprintf(digits, sizeof(digits), "%llu", (unsigned long long)whole);
-    char out[64];
-    size_t o = 0;
-    if (neg) out[o++] = '-';
-    for (int i = 0; i < nd; i++) {
-        if (i && (nd - i) % 3 == 0) out[o++] = ',';
-        out[o++] = digits[i];
-    }
+    char f[16] = "";
     if (frac) {
-        char f[16];
-        snprintf(f, sizeof(f), "%08llu", (unsigned long long)frac);
-        size_t fl = 8;
-        while (fl > 0 && f[fl - 1] == '0') fl--;
-        out[o++] = '.';
-        memcpy(out + o, f, fl);
-        o += fl;
+        snprintf(f, sizeof(f), ".%08llu", (unsigned long long)frac);
+        size_t fl = strlen(f);
+        while (fl > 1 && f[fl - 1] == '0') f[--fl] = 0;
+    }
+    int n = snprintf(buf, cap, "%s%llu%s%s", neg && u ? "-" : "", (unsigned long long)whole, f,
+                     testnet ? " ZCT" : " ZCL");
+    return n < 0 ? 0 : (size_t)n;
+}
+
+size_t zw_amount_format(int64_t zat, char *buf, size_t cap, bool unit)
+{
+    size_t n = zw_amount_format_net(zat, buf, cap, false);
+    if (!unit && n >= 4 && n < cap) {
+        buf[n - 4] = 0;
+        n -= 4;
+    }
+    return n;
+}
+
+void zw_fmt_int(int64_t v, char *buf, size_t cap)
+{
+    char d[24], out[40];
+    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1u : (uint64_t)v;
+    int n = snprintf(d, sizeof(d), "%llu", (unsigned long long)u);
+    size_t o = 0;
+    if (v < 0) out[o++] = '-';
+    for (int i = 0; i < n; i++) {
+        if (i && (n - i) % 3 == 0) out[o++] = ',';
+        out[o++] = d[i];
     }
     out[o] = 0;
-    int n = snprintf(buf, cap, "%s%s", out, unit ? " ZCL" : "");
-    return n < 0 ? 0 : (size_t)n;
+    snprintf(buf, cap, "%s", out);
+}
+
+/* SyncState::formatAge. */
+void zw_fmt_age(int64_t s, char *buf, size_t cap)
+{
+    if (s < 0) s = 0;
+    if (s < 90) snprintf(buf, cap, "%lld s", (long long)s);
+    else if (s < 90 * 60) snprintf(buf, cap, "%lld min", (long long)((s + 30) / 60));
+    else if (s < 36 * 3600) snprintf(buf, cap, "%lld h", (long long)((s + 1800) / 3600));
+    else if (s >= 400 * 86400) {
+        int64_t tenths = (s * 10 + 365 * 86400 / 2) / (365 * 86400);
+        snprintf(buf, cap, "%lld.%lld years", (long long)(tenths / 10), (long long)(tenths % 10));
+    } else snprintf(buf, cap, "%lld days", (long long)((s + 43200) / 86400));
 }

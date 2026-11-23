@@ -19,6 +19,7 @@ struct zw_mock {
     pthread_t thread;
     platform_socket_t listener;
     char dir[512], datadir[512];
+    char userpass[2100]; /* when set, Basic auth must match this instead of the cookie */
     struct script_row rows[16];
     size_t nrows;
     volatile bool stop;
@@ -101,11 +102,17 @@ static void sleep_ms(int ms)
 
 static bool authorized(struct zw_mock *m, const char *req)
 {
-    char p[600], ck[200], want[400];
-    snprintf(p, sizeof(p), "%s/.cookie", m->datadir);
-    size_t n = read_file(p, ck, sizeof(ck));
+    char p[600], ck[2100], want[3000];
+    size_t n;
+    if (m->userpass[0]) {
+        n = strlen(m->userpass);
+        memcpy(ck, m->userpass, n + 1);
+    } else {
+        snprintf(p, sizeof(p), "%s/.cookie", m->datadir);
+        n = read_file(p, ck, sizeof(ck));
+    }
     if (!n) return false;
-    char enc[300];
+    char enc[2900];
     b64((const unsigned char *)ck, n, enc);
     snprintf(want, sizeof(want), "Authorization: Basic %s", enc);
     return strstr(req, want) != NULL;
@@ -134,9 +141,13 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
     for (size_t i = 0; i < m->nrows; i++)
         if ((!strcmp(m->rows[i].method, method) || !strcmp(m->rows[i].method, "*")) &&
             m->rows[i].times != 0) {
+            if (m->rows[i].times > 0) m->rows[i].times--;
+            if (m->rows[i].status == 999) { /* accept, never reply: hold, then hang up */
+                for (int k = 0; k < m->rows[i].delay_ms / 10 && !m->stop; k++) sleep_ms(10);
+                return;
+            }
             if (m->rows[i].delay_ms) sleep_ms(m->rows[i].delay_ms);
             if (m->rows[i].status) status = m->rows[i].status;
-            if (m->rows[i].times > 0) m->rows[i].times--;
             break;
         }
     if (status < 0) { reply_hostile(m, c, status); return; }
@@ -253,3 +264,10 @@ void zw_mock_stop(struct zw_mock *m)
 unsigned zw_mock_request_count(const struct zw_mock *m) { return m->count; }
 
 bool zw_mock_saw(const struct zw_mock *m, const char *needle) { return strstr(m->seen, needle) != NULL; }
+
+void zw_mock_set_auth(struct zw_mock *m, const char *userpass)
+{
+    pthread_mutex_lock(&m->mu);
+    snprintf(m->userpass, sizeof(m->userpass), "%s", userpass ? userpass : "");
+    pthread_mutex_unlock(&m->mu);
+}

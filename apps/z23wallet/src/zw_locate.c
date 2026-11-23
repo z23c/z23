@@ -1,14 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: find the node's data folder, RPC port and credentials for the Z23
- * profile (cookie) and the legacy zclassicd profile (zclassic.conf or
- * cookie). Only .cookie, .rpcport and zclassic.conf are ever read. */
-#include <ctype.h>
+ * profile (.cookie) and the legacy zclassicd profile (zclassic.conf, then
+ * .cookie). Every candidate is recorded with the reason it was rejected, so
+ * "not found" always lists what was searched. Only .cookie, .rpcport and
+ * zclassic.conf are ever read; nothing in a node folder is written. */
 #if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
 #endif
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "base/cleanse.h"
 #include "zw.h"
@@ -23,6 +25,7 @@
 #define Z23_DEFAULT_PORT 18232
 #define LEGACY_PORT 8023
 #define LEGACY_TESTNET_PORT 18023
+#define CONF_LINE_MAX (ZW_CRED_MAX + 160)
 
 FILE *zw_fopen_read(const char *path)
 {
@@ -51,7 +54,20 @@ FILE *zw_fopen_append_private(const char *path)
 #endif
 }
 
-/* Environment variable as UTF-8; empty string when unset. */
+static bool dir_exists(const char *path)
+{
+#if defined(_WIN32)
+    wchar_t w[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, w, 1024) <= 0) return false;
+    DWORD a = GetFileAttributesW(w);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+/* Environment variable as UTF-8; empty string when unset or too long. */
 static const char *env_utf8(const char *name, char *buf, size_t cap)
 {
     buf[0] = 0;
@@ -87,6 +103,15 @@ bool zw_base64(const unsigned char *in, size_t n, char *out, size_t cap)
 
 void zw_endpoint_wipe(struct zw_endpoint *ep) { memory_cleanse(ep->auth, sizeof(ep->auth)); }
 
+static void tried(struct zw_locate_report *rep, const char *path, const char *reason)
+{
+    if (!rep || rep->ntried >= ZW_TRIED_MAX) return;
+    struct zw_tried *t = &rep->tried[rep->ntried++];
+    snprintf(t->path, sizeof(t->path), "%s", path);
+    snprintf(t->reason, sizeof(t->reason), "%s", reason);
+    zw_log("locate: tried %s -> %s", path, reason);
+}
+
 static bool read_small(const char *dir, const char *name, char *buf, size_t cap, size_t *len)
 {
     char path[ZW_PATH + 32];
@@ -102,131 +127,191 @@ static bool read_small(const char *dir, const char *name, char *buf, size_t cap,
 
 static bool set_basic(struct zw_endpoint *ep, const char *userpass, size_t n)
 {
-    char b64[200];
+    char b64[sizeof(ep->auth) - 8];
     if (!zw_base64((const unsigned char *)userpass, n, b64, sizeof(b64))) return false;
     zw_endpoint_wipe(ep);
     snprintf(ep->auth, sizeof(ep->auth), "Basic %s", b64);
+    zw_log_secret(b64);
     memory_cleanse(b64, sizeof(b64));
     return true;
 }
 
 bool zw_cookie_load(struct zw_endpoint *ep)
 {
-    char buf[160];
+    char buf[400];
     size_t n = 0;
-    if (!read_small(ep->datadir, ".cookie", buf, sizeof(buf), &n)) return false;
+    if (!read_small(ep->cookie_dir[0] ? ep->cookie_dir : ep->datadir, ".cookie", buf, sizeof(buf), &n)) {
+        memory_cleanse(buf, sizeof(buf));
+        return false;
+    }
     while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
     zw_log_secret(buf);
     char *colon = strchr(buf, ':');
     if (colon) zw_log_secret(colon + 1); /* the password half alone must not leak either */
-    bool ok = n > 0 && set_basic(ep, buf, n);
+    bool ok = n > 0 && colon && set_basic(ep, buf, n);
     memory_cleanse(buf, sizeof(buf));
+    if (ok) ep->cred_src = ZW_CRED_COOKIE;
     return ok;
 }
 
-static void trim(char *s)
+/* ---- zclassic.conf (first value wins, case-sensitive keys: like zclassicd) ---- */
+
+struct conf {
+    char user[ZW_CRED_MAX + 1], pass[ZW_CRED_MAX + 1], datadir[ZW_PATH];
+    long port;
+    bool testnet, regtest, has_user, has_pass, has_port, has_testnet, has_regtest, has_datadir, found;
+};
+
+static char *trim(char *s)
 {
+    while (*s == ' ' || *s == '\t') s++;
     size_t n = strlen(s);
-    while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
+    while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) s[--n] = 0;
+    return s;
 }
 
-/* zclassic.conf: key=value lines, '#' comments, later keys win. */
-static void parse_conf(const char *dir, char *user, char *pass, long *port, bool *testnet)
+static void conf_str(char *dst, size_t cap, bool *seen, const char *v)
 {
-    char path[ZW_PATH + 32], line[256];
-    snprintf(path, sizeof(path), "%s/zclassic.conf", dir);
+    if (*seen) return;
+    *seen = true;
+    if (strlen(v) < cap) memcpy(dst, v, strlen(v) + 1);
+    else zw_log("locate: a zclassic.conf value is longer than %u bytes; ignored", (unsigned)(cap - 1));
+}
+
+static void conf_line(struct conf *c, char *line)
+{
+    char *h = strchr(line, '#');
+    if (h) *h = 0;
+    char *eq = strchr(line, '=');
+    if (!eq) return;
+    *eq = 0;
+    const char *k = trim(line), *v = trim(eq + 1);
+    if (!strcmp(k, "rpcuser")) conf_str(c->user, sizeof(c->user), &c->has_user, v);
+    else if (!strcmp(k, "rpcpassword")) {
+        conf_str(c->pass, sizeof(c->pass), &c->has_pass, v);
+        if (c->pass[0]) zw_log_secret(c->pass);
+    } else if (!strcmp(k, "datadir")) conf_str(c->datadir, sizeof(c->datadir), &c->has_datadir, v);
+    else if (!strcmp(k, "rpcport") && !c->has_port) { c->has_port = true; c->port = strtol(v, NULL, 10); }
+    else if (!strcmp(k, "testnet") && !c->has_testnet) { c->has_testnet = true; c->testnet = atoi(v) != 0; }
+    else if (!strcmp(k, "regtest") && !c->has_regtest) { c->has_regtest = true; c->regtest = atoi(v) != 0; }
+}
+
+static void parse_conf(const char *path, struct conf *c)
+{
+    char line[CONF_LINE_MAX];
     FILE *f = zw_fopen_read(path);
     if (!f) return;
+    c->found = true;
     while (fgets(line, sizeof(line), f)) {
-        char *h = strchr(line, '#');
-        if (h) *h = 0;
-        trim(line);
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        *eq = 0;
-        char *k = line, *v = eq + 1;
-        while (isspace((unsigned char)*k)) k++;
-        trim(k);
-        for (char *p = k; *p; p++) *p = (char)tolower((unsigned char)*p);
-        if (!strcmp(k, "rpcuser") && strlen(v) < 64) strcpy(user, v); // hardening-ok: the strlen check on this line bounds the copy
-        else if (!strcmp(k, "rpcpassword") && strlen(v) < 96) { strcpy(pass, v); zw_log_secret(v); } // hardening-ok: the strlen check on this line bounds the copy
-        else if (!strcmp(k, "rpcport")) *port = strtol(v, NULL, 10);
-        else if (!strcmp(k, "testnet")) *testnet = atoi(v) != 0;
+        size_t n = strlen(line);
+        bool whole = n == 0 || line[n - 1] == '\n' || feof(f);
+        if (whole) {
+            conf_line(c, line);
+            continue;
+        }
+        int ch; /* an over-long line is skipped entirely, never half-read */
+        while ((ch = fgetc(f)) != EOF && ch != '\n') {}
     }
     fclose(f);
     memory_cleanse(line, sizeof(line));
 }
 
-static void cp_path(char *dst, const char *src)
-{
-    size_t n = strnlen(src, ZW_PATH - 1);
-    memcpy(dst, src, n);
-    dst[n] = 0;
-}
+static void conf_wipe(struct conf *c) { memory_cleanse(c, sizeof(*c)); }
 
-static bool legacy_dir(const struct zw_options *o, char *out, size_t cap)
+/* ---- legacy zclassicd ---- */
+
+static bool legacy_dir(const struct zw_options *o, char *out, size_t cap, struct zw_locate_report *rep)
 {
-    char a[ZW_PATH - 40];
+    char a[ZW_PATH - 48];
     if (o->datadir[0] && o->profile == ZW_PROFILE_ZCLASSICD) {
         snprintf(out, cap, "%s", o->datadir);
         return true;
     }
 #if defined(_WIN32)
-    env_utf8("APPDATA", a, sizeof(a));
-    if (!a[0]) return false;
+    if (!env_utf8("APPDATA", a, sizeof(a))[0]) { tried(rep, "%APPDATA%\\ZClassic", "APPDATA is not set"); return false; }
     snprintf(out, cap, "%s/ZClassic", a);
+#elif defined(__APPLE__)
+    if (!env_utf8("HOME", a, sizeof(a))[0]) { tried(rep, "~/Library/Application Support/ZClassic", "HOME is not set"); return false; }
+    snprintf(out, cap, "%s/Library/Application Support/ZClassic", a);
 #else
-    env_utf8("HOME", a, sizeof(a));
-    if (!a[0]) return false;
+    if (!env_utf8("HOME", a, sizeof(a))[0]) { tried(rep, "~/.zclassic", "HOME is not set"); return false; }
     snprintf(out, cap, "%s/.zclassic", a);
 #endif
     return true;
 }
 
-static bool locate_legacy(const struct zw_options *o, struct zw_endpoint *ep,
-                          struct zw_locate_report *rep)
+static bool legacy_creds(struct zw_endpoint *ep, struct conf *c, const char *dir, struct zw_locate_report *rep)
 {
-    char dir[ZW_PATH], user[64] = "", pass[96] = "";
-    long port = 0;
-    bool testnet = false;
-    if (!legacy_dir(o, dir, sizeof(dir))) return false;
-    if (rep && rep->ntried < 8) snprintf(rep->tried[rep->ntried++], ZW_PATH, "%s", dir);
-    parse_conf(dir, user, pass, &port, &testnet);
-    snprintf(ep->datadir, sizeof(ep->datadir), "%s", dir);
-    bool ok = false;
-    if (user[0] && pass[0]) {
-        char up[200];
-        int n = snprintf(up, sizeof(up), "%s:%s", user, pass);
-        ok = n > 0 && set_basic(ep, up, (size_t)n);
+    if (c->pass[0]) {
+        char up[2 * ZW_CRED_MAX + 2];
+        int n = snprintf(up, sizeof(up), "%s:%s", c->user, c->pass);
+        bool ok = n > 0 && (size_t)n < sizeof(up) && set_basic(ep, up, (size_t)n);
         memory_cleanse(up, sizeof(up));
-    } else {
-        ok = zw_cookie_load(ep);
+        if (ok) ep->cred_src = ZW_CRED_CONF;
+        return ok;
     }
-    memory_cleanse(pass, sizeof(pass));
-    if (!ok) return false;
-    ep->profile = ZW_PROFILE_ZCLASSICD;
-    ep->testnet = testnet;
-    ep->port = o->rpcport ? o->rpcport
-             : port > 0 ? (uint16_t)port : (uint16_t)(testnet ? LEGACY_TESTNET_PORT : LEGACY_PORT);
-    return true;
+    const char *base = c->datadir[0] ? c->datadir : dir;
+    snprintf(ep->cookie_dir, sizeof(ep->cookie_dir), "%.480s%s", base,
+             c->regtest ? "/regtest" : c->testnet ? "/testnet3" : "");
+    char cookie[ZW_PATH + 16];
+    snprintf(cookie, sizeof(cookie), "%s/.cookie", ep->cookie_dir);
+    FILE *f = zw_fopen_read(cookie);
+    if (!f) {
+        tried(rep, dir, c->found ? "no rpcpassword and no .cookie" : "no zclassic.conf");
+        return false;
+    }
+    fclose(f);
+    if (zw_cookie_load(ep)) return true;
+    tried(rep, cookie, ".cookie unreadable");
+    return false;
 }
+
+static bool locate_legacy(const struct zw_options *o, struct zw_endpoint *ep, struct zw_locate_report *rep)
+{
+    char dir[ZW_PATH];
+    if (!legacy_dir(o, dir, sizeof(dir), rep)) return false;
+    if (!dir_exists(dir)) { tried(rep, dir, "not found"); return false; }
+    struct conf *c = calloc(1, sizeof(*c));
+    if (!c) { tried(rep, dir, "out of memory"); return false; }
+    snprintf(ep->conf_path, sizeof(ep->conf_path), "%.480s/zclassic.conf", dir);
+    parse_conf(ep->conf_path, c);
+    snprintf(ep->datadir, sizeof(ep->datadir), "%s", c->datadir[0] ? c->datadir : dir);
+    ep->cookie_dir[0] = 0;
+    bool ok = legacy_creds(ep, c, dir, rep);
+    if (ok) {
+        ep->profile = ZW_PROFILE_ZCLASSICD;
+        ep->testnet = c->testnet;
+        ep->regtest = c->regtest;
+        long port = c->port;
+        ep->port = o->rpcport ? o->rpcport
+                 : port > 0 && port < 65536 ? (uint16_t)port
+                 : (uint16_t)(c->testnet || c->regtest ? LEGACY_TESTNET_PORT : LEGACY_PORT);
+        if (!c->found) ep->conf_path[0] = 0;
+    }
+    conf_wipe(c);
+    free(c);
+    return ok;
+}
+
+/* ---- Z23 ---- */
 
 static void add_unique(char c[6][ZW_PATH], size_t *n, const char *path)
 {
     for (size_t i = 0; i < *n; i++)
         if (!strcmp(c[i], path)) return;
-    if (*n < 6) cp_path(c[(*n)++], path);
+    if (*n < 6) snprintf(c[(*n)++], ZW_PATH, "%s", path);
 }
 
 static void add_candidates(const struct zw_options *o, char c[6][ZW_PATH], size_t *n)
 {
-    char e[ZW_PATH - 40];
+    char e[ZW_PATH - 48], t[ZW_PATH];
     *n = 0;
     if (o->datadir[0]) add_unique(c, n, o->datadir);
-    char t[ZW_PATH];
 #if defined(_WIN32)
     if (env_utf8("LOCALAPPDATA", e, sizeof(e))[0]) {
-        snprintf(t, sizeof(t), "%s/Z23/data", e);
+        snprintf(t, sizeof(t), "%s/Z23/data", e); /* make windows-service-install */
+        add_unique(c, n, t);
+        snprintf(t, sizeof(t), "%s/Z23Node/data", e); /* the per-user scheduled-task install */
         add_unique(c, n, t);
     }
     if (env_utf8("USERPROFILE", e, sizeof(e))[0]) {
@@ -240,36 +325,44 @@ static void add_candidates(const struct zw_options *o, char c[6][ZW_PATH], size_
     }
 }
 
-bool zw_locate(const struct zw_options *o, struct zw_endpoint *ep, struct zw_locate_report *rep)
+static bool try_z23(const struct zw_options *o, const char *dir, struct zw_endpoint *ep,
+                    struct zw_locate_report *rep)
 {
-    char cand[6][ZW_PATH];
-    size_t n = 0;
     char buf[32];
     size_t len = 0;
+    if (!dir_exists(dir)) { tried(rep, dir, "not found"); return false; }
+    snprintf(ep->datadir, sizeof(ep->datadir), "%.*s", (int)(sizeof(ep->datadir) - 1), dir);
+    snprintf(ep->cookie_dir, sizeof(ep->cookie_dir), "%.*s", (int)(sizeof(ep->cookie_dir) - 1), dir);
+    ep->conf_path[0] = 0;
+    if (!zw_cookie_load(ep)) { tried(rep, dir, "no .cookie"); return false; }
+    ep->profile = ZW_PROFILE_Z23;
+    ep->testnet = ep->regtest = false;
+    ep->port = Z23_DEFAULT_PORT;
+    if (o->rpcport) ep->port = o->rpcport;
+    else if (read_small(dir, ".rpcport", buf, sizeof(buf), &len)) {
+        long p = strtol(buf, NULL, 10);
+        if (p > 0 && p < 65536) ep->port = (uint16_t)p;
+    }
+    return true;
+}
+
+static const char *cred_name(enum zw_cred c) { return c == ZW_CRED_CONF ? "conf" : "cookie"; }
+
+bool zw_locate(const struct zw_options *o, struct zw_endpoint *ep, struct zw_locate_report *rep)
+{
     snprintf(ep->host, sizeof(ep->host), "127.0.0.1");
     ep->valid = false;
+    ep->cred_src = ZW_CRED_NONE;
     if (rep) rep->ntried = 0;
     if (o->profile != ZW_PROFILE_ZCLASSICD) {
+        char cand[6][ZW_PATH];
+        size_t n = 0;
         add_candidates(o, cand, &n);
-        for (size_t i = 0; i < n; i++) {
-            if (rep && rep->ntried < 8) cp_path(rep->tried[rep->ntried++], cand[i]);
-            cp_path(ep->datadir, cand[i]);
-            if (!zw_cookie_load(ep)) continue;
-            ep->profile = ZW_PROFILE_Z23;
-            ep->testnet = false;
-            ep->port = Z23_DEFAULT_PORT;
-            if (o->rpcport) ep->port = o->rpcport;
-            else if (read_small(cand[i], ".rpcport", buf, sizeof(buf), &len)) {
-                long p = strtol(buf, NULL, 10);
-                if (p > 0 && p < 65536) ep->port = (uint16_t)p;
-            }
-            ep->valid = true;
-            return true;
-        }
+        for (size_t i = 0; i < n && !ep->valid; i++) ep->valid = try_z23(o, cand[i], ep, rep);
     }
-    if (o->profile != ZW_PROFILE_Z23 && locate_legacy(o, ep, rep)) {
-        ep->valid = true;
-        return true;
-    }
-    return false;
+    if (!ep->valid && o->profile != ZW_PROFILE_Z23) ep->valid = locate_legacy(o, ep, rep);
+    if (ep->valid)
+        zw_log("locate: using %s port %u creds=%s", ep->profile == ZW_PROFILE_Z23 ? "z23" : "zclassicd",
+               (unsigned)ep->port, cred_name(ep->cred_src));
+    return ep->valid;
 }

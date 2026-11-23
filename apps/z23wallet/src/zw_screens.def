@@ -1,0 +1,10 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: the one table of z23-wallet screens, in rail order. Each row is
+ * ZW_SCREEN(ID, "name", "rail label", build function); the rail, the screen
+ * enum, Ctrl+1..5 and the action names "nav.<name>" all come from here.
+ * Advanced is last: the rail pins it to the bottom behind the gear. */
+ZW_SCREEN(HOME, "home", "Home", zw_screen_home_build)
+ZW_SCREEN(SEND, "send", "Send", zw_screen_send_build)
+ZW_SCREEN(RECEIVE, "receive", "Receive", zw_screen_receive_build)
+ZW_SCREEN(ACTIVITY, "activity", "Activity", zw_screen_activity_build)
+ZW_SCREEN(ADVANCED, "advanced", "\xE2\x9A\x99  Advanced", zw_screen_advanced_build)

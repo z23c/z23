@@ -4,8 +4,8 @@
  * <method>.err or _all.err ("code<TAB>message"), and _script.tsv rows
  * "method<TAB>http_status<TAB>delay_ms<TAB>times<TAB>file" (method * matches any).
  * Hostile http_status values: -1 closes without a byte, -2 sends a truncated
- * header and closes, -3 never answers (holds the socket until the peer goes).
- * No real keys. */
+ * header and closes, -3 never answers (holds the socket until the peer goes),
+ * 999 accepts and never replies (holds delay_ms, then hangs up). No real keys. */
 #ifndef Z23WALLET_MOCK_NODE_H
 #define Z23WALLET_MOCK_NODE_H
 
@@ -23,5 +23,8 @@ unsigned zw_mock_request_count(const struct zw_mock *m);
 bool zw_mock_saw(const struct zw_mock *m, const char *needle);
 /* Test helper: create datadir with a fixture cookie; returns false on failure. */
 bool zw_mock_write_cookie(const char *datadir, const char *cookie_body);
+/* Accept Basic "user:pass" (zclassic.conf credentials) instead of the cookie;
+ * NULL or "" goes back to the cookie. */
+void zw_mock_set_auth(struct zw_mock *m, const char *userpass);
 
 #endif
