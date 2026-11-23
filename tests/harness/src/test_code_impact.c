@@ -1435,7 +1435,7 @@ static int test_objectives_catalog_selects_dev_land(void)
     return failures;
 }
 
-/* Every command table (engine/composition/commands/*.def, including the
+/* Every command table (every .def under engine/composition/commands, including the
  * telemetry subtree) declares command inputs that test_command_input_bounds
  * pins, so any table change selects that group with the registry catalog. */
 static int test_command_table_selects_input_bounds(void)
