@@ -374,16 +374,14 @@ static int case_refusals(struct al_fx *f)
     PASS(); }
     /* Without a desktop, Tasks is served by its native command rather than
      * this windowed-open path; the catalog hint still names both apps. */
-    TEST("the known headless tasks name refuses unknown_app, with its hint") {
+    TEST("the known headless Tasks name refuses no_desktop") {
         f->env.desktop = false;
         al_open(f, "tasks");
         f->env.desktop = true;
         ASSERT_STR_EQ(app_open_status_name(f->res.status), "failed");
-        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "unknown_app");
-        ASSERT(strstr(f->res.message, "tasks"));
-        ASSERT(strstr(f->res.hint, "tasks"));
-        ASSERT(strstr(f->res.hint, "skycombat"));
-        ASSERT_EQ(f->res.id[0], '\0');
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "no_desktop");
+        ASSERT_STR_EQ(f->res.id, "tasks");
+        ASSERT(strstr(f->res.message, "no desktop session on this host"));
         ASSERT_EQ(f->res.pid, 0);
     PASS(); }
     TEST("without a desktop session open is refused as no_desktop") {
@@ -508,6 +506,17 @@ static int case_unsafe_tsv(struct al_fx *f)
         ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "config_refused");
         ASSERT_EQ(f->res.pid, 0);
     PASS(); }
+    TEST("malformed catalog keeps CONFIG_REFUSED ahead of headless Tasks") {
+        ASSERT(al_write_file(f->env.config_path, "invalid\n", 0600));
+        app_launch_registry_load(&f->env, &f->reg);
+        f->env.desktop = false;
+        al_open(f, "tasks");
+        f->env.desktop = true;
+        ASSERT_STR_EQ(app_open_stage_name(f->res.stage), "config_refused");
+        ASSERT_EQ(f->res.pid, 0);
+        ASSERT(al_write_tsv(f));
+        app_launch_registry_load(&f->env, &f->reg);
+        PASS(); }
     TEST("a relative executable path refuses the file") {
         const char *why = al_load_tsv(f, "relative.tsv",
                                       "relapp\t-\tbin/app\t-\t-\n", 0600);
@@ -712,7 +721,7 @@ static int case_handlers(struct al_fx *f)
         ASSERT(strstr(msg, "skycombat") != NULL);
     PASS(); }
 #if !defined(_WIN32)
-    TEST("app.open of tasks points to its native list command") {
+    TEST("headless app.open of Tasks reports NO_DESKTOP and points to its native list") {
         struct json_value tasks_in;
         struct zcl_command_request tasks_req = {.input = &tasks_in,
                                                 .view = "normal",
@@ -723,14 +732,16 @@ static int case_handlers(struct al_fx *f)
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_native_handle_app_open(&tasks_req, &reply);
         json_free(&tasks_in);
-        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+        ASSERT_STR_EQ(reply.error.code, "NO_DESKTOP");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "no_desktop");
         ASSERT_EQ(reply.next_count, 2u);
         ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
         ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
         ASSERT_STR_EQ(reply.next[1].command, "app.list");
         zcl_command_reply_free(&reply);
     PASS(); }
-    TEST("app.open of task aliases keeps native next actions headless") {
+    TEST("headless app.open of Tasks aliases reports NO_DESKTOP with native list") {
         const char *aliases[] = {"task", "ztasks"};
         for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
             struct json_value alias_in;
@@ -743,7 +754,9 @@ static int case_handlers(struct al_fx *f)
             zcl_command_reply_init(&reply, "zcl.app_open.v1");
             zcl_native_handle_app_open(&alias_req, &reply);
             json_free(&alias_in);
-            ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+            ASSERT_STR_EQ(reply.error.code, "NO_DESKTOP");
+            ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                          "no_desktop");
             ASSERT_EQ(reply.next_count, 2u);
             ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
             ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
@@ -751,7 +764,7 @@ static int case_handlers(struct al_fx *f)
             zcl_command_reply_free(&reply);
         }
     PASS(); }
-    TEST("headless app.open tasks keeps the private default with an implicit node profile") {
+    TEST("headless app.open Tasks keeps the private default with an implicit node profile") {
         struct json_value in;
         struct zcl_command_request req = {.input = &in, .view = "normal"};
         char old_dir[512];
@@ -765,9 +778,11 @@ static int case_handlers(struct al_fx *f)
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_native_handle_app_open(&req, &reply);
         zcl_native_bridge_bind_rpc(old_dir, old_port);
+        ASSERT_STR_EQ(reply.error.code, "NO_DESKTOP");
         ASSERT_EQ(reply.next_count, 2u);
         ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
         ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");
+        ASSERT_STR_EQ(reply.next[1].command, "app.list");
         zcl_command_reply_free(&reply);
         json_free(&in);
     PASS(); }
@@ -784,7 +799,8 @@ static int case_handlers(struct al_fx *f)
         ASSERT(json_push_kv_str(&in, "datadir", datadir));
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_native_handle_app_open(&req, &reply);
-        ASSERT_EQ(reply.next_count, 2u);
+        ASSERT_STR_EQ(reply.error.code, "NO_DESKTOP");
+        ASSERT_EQ(reply.next_count, 1u);
         /* the datadir travels embedded in one JSON string: each quote in the
          * path is escaped once more on the way through */
         snprintf(expect, sizeof(expect), "{\"action\":\"list\",\"datadir\":\"");
@@ -795,6 +811,9 @@ static int case_handlers(struct al_fx *f)
         }
         snprintf(expect + n, sizeof(expect) - n, "\"}");
         ASSERT_STR_EQ(reply.next[0].input_json, expect);
+        ASSERT(strstr(reply.error.next_action, "-datadir=") != NULL);
+        ASSERT(strstr(reply.error.next_action, "app list") != NULL);
+        ASSERT(strstr(reply.error.next_action, "profile") != NULL);
         zcl_command_reply_free(&reply);
         json_free(&in);
     PASS(); }
@@ -849,8 +868,10 @@ static int case_handlers(struct al_fx *f)
         app_launch_test_set_desktop(0);
         zcl_native_handle_app_open(&req, &reply);
         app_launch_test_set_desktop(-1);
-        ASSERT_EQ(reply.next_count, 1u);
-        ASSERT_STR_EQ(reply.next[0].command, "app.list");
+        ASSERT_EQ(reply.next_count, 0u);
+        ASSERT(strstr(reply.error.next_action, "-datadir=") != NULL);
+        ASSERT(strstr(reply.error.next_action, "app list") != NULL);
+        ASSERT(strstr(reply.error.next_action, "user\\'s\\ profile") != NULL);
         zcl_command_reply_free(&reply);
         json_free(&in);
     PASS(); }
@@ -1113,7 +1134,7 @@ static int case_missing_profiles(struct al_fx *f)
  * an operator apps.tsv row whose executable is missing refuses NO_DESKTOP
  * (the desktop gate precedes the installed check), the same row refuses
  * NOT_INSTALLED once a desktop exists, and headless Tasks is refused
- * UNKNOWN_APP with its native-command next actions — DISPLAY-independent
+ * NO_DESKTOP with its native-command next action — DISPLAY-independent
  * by construction. */
 #if !defined(_WIN32)
 static int case_open_desktop(struct al_fx *f)
@@ -1214,16 +1235,18 @@ static int case_open_desktop(struct al_fx *f)
         ASSERT_STR_EQ(reply.error.evidence, "install it at the path apps.tsv names");
         zcl_command_reply_free(&reply);
     PASS(); }
-    /* Block D: headless Tasks refuses UNKNOWN_APP with native actions;
+    /* Block D: headless Tasks refuses NO_DESKTOP and keeps its native action;
      * case_open_raise_reopen covers the real desktop window separately. */
-    TEST("headless Tasks refuses UNKNOWN_APP with its native next actions") {
+    TEST("headless Tasks refuses NO_DESKTOP with its native list action") {
         json_set_object(&input);
         ASSERT(json_push_kv_str(&input, "name", "tasks"));
         app_launch_test_set_desktop(0);
         zcl_command_reply_init(&reply, "zcl.app_open.v1");
         zcl_native_handle_app_open(&request, &reply);
         app_launch_test_set_desktop(-1);
-        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_APP");
+        ASSERT_STR_EQ(reply.error.code, "NO_DESKTOP");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "no_desktop");
         ASSERT_EQ(reply.next_count, 2u);
         ASSERT_STR_EQ(reply.next[0].command, "app.tasks");
         ASSERT_STR_EQ(reply.next[0].input_json, "{\"action\":\"list\"}");

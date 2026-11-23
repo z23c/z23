@@ -111,10 +111,12 @@ static bool app_open_admit(const struct app_launch_env *env,
 {
     char known[256], text[384], hint[300];
     *entry = app_launch_registry_find(reg, name);
-    /* Built-in pointer rows and headless Tasks use native command actions.
-     * A desktop keeps the real windowed Tasks row. */
+    /* Built-in pointer rows use native command actions. A known windowed app
+     * remains known headless so the desktop gate can report NO_DESKTOP. */
     if (*entry && (!app_launch_entry_is_windowed(*entry) ||
-                   (!env->desktop && strcmp((*entry)->id, "tasks") == 0))) *entry = NULL;
+                   (!env->desktop &&
+                    !strcmp((*entry)->id, "tasks") && reg->config_error[0])))
+        *entry = NULL;
     if (!*entry) {
         (void)app_launch_known_names(reg, known, sizeof(known));
         snprintf(hint, sizeof(hint), "known apps: %s", known);
@@ -431,6 +433,8 @@ static void app_tasks_next(const char *name, const struct json_value *input,
 }
 #endif
 
+static void app_missing_next(const char *datadir, struct zcl_command_reply *reply);
+
 static void app_reply_fail(const struct app_open_result *r, const char *name,
                            const struct json_value *input,
                            struct zcl_command_reply *reply)
@@ -454,6 +458,19 @@ static void app_reply_fail(const struct app_open_result *r, const char *name,
 #endif
         (void)zcl_command_reply_add_next(reply, "app.list", "{}",
                                          "list the launchable apps");
+    } else if (r->stage == APP_STAGE_NO_DESKTOP && !strcmp(r->id, "tasks")) {
+#if !defined(_WIN32)
+        app_tasks_next(name, input, reply);
+#endif
+        const char *input_dir = json_get_str(json_get(input, "datadir"));
+        if (zcl_native_command_datadir_is_explicit()) {
+            const char *global = zcl_native_command_datadir();
+            if (input_dir && (!global || strcmp(input_dir, global))) return;
+        }
+        const char *datadir = zcl_native_command_datadir_is_explicit() ?
+            zcl_native_command_datadir() :
+            input_dir;
+        app_missing_next(datadir, reply);
     }
 }
 
