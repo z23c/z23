@@ -37,9 +37,10 @@
 
 Z23_ROLE(operator, "everything on this node; this node's own key, implicit")
 Z23_ROLE(worker,
-        "post board rows of kind note, result, claim, problem, need or "
-        "chat in fleet-private scope; replicate its own ledger rows into "
-        "this box; write experiment predict/result rows; read everything")
+        "post board rows of kind note, result, claim, problem, need, "
+        "offer, agents or chat in fleet-private scope; replicate its own "
+        "ledger rows into this box; write experiment predict/result rows; "
+        "read everything")
 Z23_ROLE(observer, "read-only leaves")
 Z23_ROLE(landing,
         "the landing machine's key: post board results about trains, "
@@ -55,8 +56,12 @@ Z23_ROLE(scribe,
 #endif
 
 /* worker: read everything, write board rows (restricted kinds) and
- * experiment rows. */
-Z23_ROLE_GRANT(worker, "fleet.board.post", "note,result,claim,problem,need,chat")
+ * experiment rows. Every board kind but wiki (scribe) is a worker kind:
+ * `offer` answers a `need`, and `agents` is the fleet-scoped snapshot
+ * `fleet agents --publish` posts for `--fleet` on other hosts to merge;
+ * left out, both were stored by their author and refused at every peer. */
+Z23_ROLE_GRANT(worker, "fleet.board.post",
+               "note,result,claim,problem,need,offer,agents,chat")
 Z23_ROLE_GRANT(worker, "fleet.board.list", "*")
 Z23_ROLE_GRANT(worker, "fleet.board.show", "*")
 Z23_ROLE_GRANT(worker, "fleet.board.status", "*")

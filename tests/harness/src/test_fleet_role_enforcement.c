@@ -363,14 +363,14 @@ int test_fleet_role_enforcement(void)
         ASSERT_EQ(re_post(&db, op_sk, op_pub, FLEET_BOARD_KIND_NOTE,
                           "a granted key may write here"),
                   FLEET_BOARD_OK);
-        /* worker's declared kinds do not include `offer`, so the SAME
-         * granted key is refused one: a grant is per kind, not per key. */
+        /* worker's declared kinds include `offer` (it answers a `need`), so
+         * the same granted key may post one. */
         ASSERT_EQ(re_post(&db, op_sk, op_pub, FLEET_BOARD_KIND_OFFER,
-                          "a kind this role was never granted"),
-                  FLEET_BOARD_ERR_ROLE);
-        /* Nor may a worker key sign a FLEET-scope wiki page: worker's board
-         * kinds exclude `wiki`, so a fleet-scope wiki write by a worker-role
-         * key is refused. A public-scope page is open to any node key, so
+                          "an offer answering a need"),
+                  FLEET_BOARD_OK);
+        /* A grant is per kind, not per key: worker's board kinds exclude
+         * `wiki`, so the SAME granted key signing a FLEET-scope wiki page
+         * is refused. A public-scope page is open to any node key, so
          * the same key's public page is stored. */
         ASSERT_EQ(re_post_scoped(&db, op_sk, op_pub, FLEET_BOARD_KIND_WIKI,
                                  FLEET_BOARD_SCOPE_FLEET, "worker fleet page"),

@@ -323,7 +323,8 @@ The G7 lookup uses the working directory's code index and can refresh it, writin
 Which key may call which fleet leaf is decided by each node alone, from a
 signed local store (`<datadir>/fleet_roles/roles.chain`). Roles
 (`engine/composition/roles.def`): `operator` (this node's key, implicit),
-`worker` (fleet-private board posts, ledger replication, experiment rows),
+`worker` (fleet-private board posts of every kind but `wiki`, ledger
+replication, experiment rows),
 `observer` (read-only), `landing` (board `result` posts about trains),
 `scribe` (board `wiki` posts only, so fleet wiki pages replicate; grant it
 deliberately, and add `observer` or `worker` on the peer's online key if it

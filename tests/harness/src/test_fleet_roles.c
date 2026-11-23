@@ -13,6 +13,8 @@
 
 #include "crypto/ed25519.h"
 #include "dev/fleet_roles.h"
+#include "session/fleet_board_proto.h"
+#include <stdio.h>
 
 #include <string.h>
 #include <sys/stat.h>
@@ -188,6 +190,29 @@ int test_fleet_roles(void)
         ASSERT(zcl_role_from_name("worker", &worker));
         ASSERT(!zcl_role_leaf_allowed(worker, "fleet.board.post", "wiki"));
         ASSERT(zcl_role_leaf_allowed(worker, "fleet.board.post", "note"));
+    }
+
+    TEST("fleet roles: every board kind can be posted fleet-scoped by some "
+         "catalog role, and worker carries agents and offer") {
+        for (uint8_t k = FLEET_BOARD_KIND_PROBLEM; k < FLEET_BOARD_KIND__COUNT;
+             k++) {
+            const char *kind = fleet_board_kind_name(k);
+            bool granted = false;
+            for (size_t i = 0; i < zcl_role_count(); i++) {
+                uint8_t role = 0;
+                if (zcl_role_from_name(zcl_role_at(i), &role))
+                    granted |= zcl_role_leaf_allowed(role, "fleet.board.post",
+                                                     kind);
+            }
+            if (!granted)
+                fprintf(stderr, "    no role may post fleet kind %s\n", kind);
+            ASSERT(granted);
+        }
+        uint8_t worker = 0;
+        ASSERT(zcl_role_from_name("worker", &worker));
+        ASSERT(zcl_role_leaf_allowed(worker, "fleet.board.post", "agents"));
+        ASSERT(zcl_role_leaf_allowed(worker, "fleet.board.post", "offer"));
+        ASSERT(!zcl_role_leaf_allowed(worker, "fleet.board.post", "wiki"));
     }
 
     TEST("fleet roles: a fingerprint is stable and distinguishes keys") {

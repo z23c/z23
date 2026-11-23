@@ -24,6 +24,7 @@
 #include "test/mesh_stream_fixture.h"
 #include "test/mesh_stream_loopback.h"
 #include "util/fleet_role_check.h"
+#include "dev/fleet_roles.h"
 #include "../../../engine/composition/src/boot_fleet_board_rpc_internal.h"
 
 #include <stdio.h>
@@ -827,6 +828,63 @@ static int test_rep_gate_unresolved(void)
     return failures;
 }
 
+/* ── every fleet kind a CLI posts travels to a box that granted worker ── */
+
+/* B's real catalog answer for a key it granted `worker`: the asker's read
+ * and the author's posts are judged by roles.def, not by a stand-in. */
+static bool rep_worker_role_check(const uint8_t key[32], const char *leaf,
+                                  const char *kind, char *why, size_t why_cap,
+                                  void *ctx)
+{
+    (void)key;
+    (void)ctx;
+    uint8_t worker = 0;
+    bool ok = zcl_role_from_name("worker", &worker) &&
+              zcl_role_leaf_allowed(worker, leaf, kind);
+    if (!ok && why && why_cap)
+        (void)snprintf(why, why_cap, "role_refused: worker lacks %s kind=%s",
+                       leaf, kind ? kind : "-");
+    return ok;
+}
+
+static bool rep_post_kind(struct rep *r, uint8_t kind, const char *text,
+                          int64_t created_at, struct fleet_board_post *out)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(7, seed, pk);
+    fb_test_compose(out, kind, "carrier", text, (uint64_t)created_at, 3600);
+    fb_test_scope(out, FLEET_BOARD_SCOPE_FLEET, "");
+    return fleet_board_post_sign(out, seed, pk) == FLEET_BOARD_OK &&
+           db_fleet_board_post_ingest(&r->w.a, out, created_at + 100, NULL) ==
+               FLEET_BOARD_OK;
+}
+
+static int test_rep_worker_carries_shared_kinds(void)
+{
+    int failures = 0;
+    static const struct zcl_fleet_role_checker worker_checker = {
+        .allow = rep_worker_role_check, .name = "fleet-board-worker-test" };
+    struct fleet_board_post agents, offer;
+    bool opened = rep_open(&g_rep, FBW_PAIRING_EXPIRES, FBW_NOW);
+    TEST("fleet board replication: a fleet `agents` snapshot and a fleet "
+         "offer reach a box that granted the author worker") {
+        ASSERT(opened);
+        /* A stores its own posts (its own key is operator there). */
+        ASSERT(rep_post_kind(&g_rep, FLEET_BOARD_KIND_AGENTS,
+                             "host r1: 3 running", 2000, &agents));
+        ASSERT(rep_post_kind(&g_rep, FLEET_BOARD_KIND_OFFER,
+                             "spare build capacity", 2001, &offer));
+        /* B judges the author by the catalog's worker role. */
+        zcl_fleet_role_checker_install(&worker_checker);
+        ASSERT_EQ(rep_pull_until_quiet(&g_rep, 4, NULL), (size_t)2);
+        ASSERT(db_fleet_board_have(&g_rep.w.b, agents.id));
+        ASSERT(db_fleet_board_have(&g_rep.w.b, offer.id));
+        PASS();
+    } _test_next:;
+    rep_close(&g_rep);
+    return failures;
+}
+
 int test_fleet_board_replication(void)
 {
     return test_rep_happy_path() + test_rep_restart_midway() +
@@ -837,5 +895,6 @@ int test_fleet_board_replication(void)
            test_rep_answer_role_refused() + test_rep_ingest_role_refused() +
            test_rep_ingest_limit() + test_rep_ingest_storage() + test_rep_decode_refused() +
            test_rep_gate_pairing() + test_rep_gate_delegation_expired() +
-           test_rep_gate_unresolved();
+           test_rep_gate_unresolved() +
+           test_rep_worker_carries_shared_kinds();
 }
