@@ -100,12 +100,11 @@ static void kit_environment(struct app_toolchain *kit)
     sha3_256_write(&h, (const uint8_t *)APP_TOOLCHAIN_POLICY, sizeof(APP_TOOLCHAIN_POLICY));
     sha3_256_finalize(&h, kit->env);
 }
-bool app_toolchain_verify(struct app_toolchain *kit, const uint8_t *descriptor,
-    size_t descriptor_size, const uint8_t *bundle, size_t bundle_size,
-    char *why, size_t cap)
+static void kit_ready(struct app_toolchain *kit)
+{ kit->selected = true; kit_environment(kit); }
+static bool kit_verify_begin(struct app_toolchain *kit, const uint8_t *descriptor,
+    size_t descriptor_size, const uint8_t *bundle, size_t bundle_size)
 {
-    if (!kit) return kit_why(why, cap, "Missing kit output.");
-    app_toolchain_free(kit);
     struct json_value doc; json_init(&doc); const char *values[6] = {0};
     uint8_t actual[32];
     bool ok = kit_parse(descriptor, descriptor_size, &doc, values) &&
@@ -118,6 +117,15 @@ bool app_toolchain_verify(struct app_toolchain *kit, const uint8_t *descriptor,
         (void)snprintf(kit->target, sizeof(kit->target), "%s", values[4]);
     }
     json_free(&doc);
+    return ok;
+}
+bool app_toolchain_verify(struct app_toolchain *kit, const uint8_t *descriptor,
+    size_t descriptor_size, const uint8_t *bundle, size_t bundle_size,
+    char *why, size_t cap)
+{
+    if (!kit) return kit_why(why, cap, "Missing kit output.");
+    app_toolchain_free(kit);
+    bool ok = kit_verify_begin(kit, descriptor, descriptor_size, bundle, bundle_size);
     if (ok) ok = vcs_source_bundle_visit_verified(bundle, bundle_size, kit->tree,
         kit_entry, kit, NULL) == VCS_SOURCE_BUNDLE_OK && kit_tools(kit);
     if (ok) {
@@ -126,7 +134,7 @@ bool app_toolchain_verify(struct app_toolchain *kit, const uint8_t *descriptor,
     }
     if (!ok) { app_toolchain_free(kit); return kit_why(why, cap, "Kit descriptor, bundle, rootfs members or required executables invalid."); }
     memcpy(kit->bundle, bundle, bundle_size); kit->bundle_size = bundle_size;
-    kit->selected = true; kit_environment(kit); return true;
+    kit_ready(kit); return true;
 }
 static bool kit_read(const char *dir, const char *name, const char *hash,
     size_t maximum, struct app_installed_source_bytes *out)
@@ -155,8 +163,19 @@ bool app_toolchain_artifact(struct app_toolchain *kit, const char *dir,
     json_free(&doc); free(descriptor.bytes); free(bundle.bytes);
     return ok || kit_why(why, cap, "Pinned compiler-kit artifacts refused.");
 }
-bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap)
+static bool kit_target(const struct app_toolchain *kit, char *why, size_t cap)
 {
+    char target[64];
+    if (!platform_toolchain_canonical_target(target, sizeof(target)))
+        return kit_why(why, cap, "Could not determine this host's compiler-kit target.");
+    if (strcmp(target, kit->target)) return kit_why(why, cap, "Selected compiler kit is for another target.");
+    return true;
+}
+static bool kit_verify_build(struct app_toolchain *, const uint8_t *, size_t,
+    const uint8_t *, size_t, char *, size_t);
+static bool kit_resolve(struct app_toolchain *kit, char *why, size_t cap, bool build)
+{
+    if (!kit) return kit_why(why, cap, "Missing kit output.");
     app_toolchain_free(kit);
     struct app_installed_toolchain retained = {0};
     enum app_installed_toolchain_status state = app_installed_toolchain_resolve(&retained, why, cap);
@@ -166,18 +185,24 @@ bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap)
         kit->untrusted_install_path = true;
         return false;
     }
-    bool ok = state == APP_INSTALLED_TOOLCHAIN_VERIFIED &&
+    bool ok = state == APP_INSTALLED_TOOLCHAIN_VERIFIED && (build ?
+        kit_verify_build(kit, retained.descriptor.bytes, retained.descriptor.length,
+            retained.bundle.bytes, retained.bundle.length, why, cap) :
         app_toolchain_verify(kit, retained.descriptor.bytes, retained.descriptor.length,
-            retained.bundle.bytes, retained.bundle.length, why, cap);
+            retained.bundle.bytes, retained.bundle.length, why, cap));
+    if (ok && build) {
+        kit->bundle = retained.bundle.bytes; kit->bundle_size = retained.bundle.length;
+        retained.bundle.bytes = NULL; retained.bundle.length = 0;
+    }
     app_installed_toolchain_free(&retained);
-    char target[64];
-    if (ok && !platform_toolchain_canonical_target(target, sizeof(target)))
-        ok = kit_why(why, cap, "Could not determine this host's compiler-kit target.");
-    if (ok && strcmp(target, kit->target))
-        ok = kit_why(why, cap, "Selected compiler kit is for another target.");
+    if (ok && !build) ok = kit_target(kit, why, cap);
     if (!ok) { app_toolchain_free(kit); return false; }
     return true;
 }
+bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap)
+{ return kit_resolve(kit, why, cap, false); }
+bool app_toolchain_resolve_build(struct app_toolchain *kit, char *why, size_t cap)
+{ return kit_resolve(kit, why, cap, true); }
 static void kit_seal_clear(struct app_toolchain *kit)
 {
     if (kit->backing_owned) close(kit->backing_fd);
@@ -197,10 +222,8 @@ static bool kit_seal_entry(void *context, const struct vcs_entry *entry,
     if (!os_sandbox_kit_backing_append(kit->backing_fd, bytes, length).ok) return false;
     kit->backing_size += length; ++kit->file_count; return true;
 }
-bool app_toolchain_seal(struct app_toolchain *kit, char *why, size_t cap)
+static bool kit_seal_begin(struct app_toolchain *kit, char *why, size_t cap)
 {
-    if (!kit || !kit->selected) return true;
-    if (kit->backing_owned && kit->file_count == kit->manifest.count) return true;
     kit_seal_clear(kit);
     kit->files = zcl_calloc(kit->manifest.count, sizeof(*kit->files), "app.toolchain.files");
     if (!kit->files) return kit_why(why, cap, "Cannot allocate sealed kit members.");
@@ -208,9 +231,89 @@ bool app_toolchain_seal(struct app_toolchain *kit, char *why, size_t cap)
         kit_seal_clear(kit); return kit_why(why, cap, "Cannot create sealed kit backing.");
     }
     kit->backing_owned = true;
-    bool ok = vcs_source_bundle_visit_verified(kit->bundle, kit->bundle_size, kit->tree,
-        kit_seal_entry, kit, NULL) == VCS_SOURCE_BUNDLE_OK &&
-        kit->file_count == kit->manifest.count && os_sandbox_kit_backing_seal(kit->backing_fd).ok;
+    return true;
+}
+static bool kit_seal_finish(struct app_toolchain *kit, bool ok, char *why, size_t cap)
+{
+    ok = ok && kit->file_count == kit->manifest.count && os_sandbox_kit_backing_seal(kit->backing_fd).ok;
     if (!ok) { kit_seal_clear(kit); return kit_why(why, cap, "Cannot construct and seal verified compiler kit backing."); }
     return true;
 }
+bool app_toolchain_seal(struct app_toolchain *kit, char *why, size_t cap)
+{
+    if (!kit || !kit->selected) return true;
+    if (kit->backing_owned && kit->file_count == kit->manifest.count) return true;
+    if (!kit_seal_begin(kit, why, cap)) return false;
+    bool ok = vcs_source_bundle_visit_verified(kit->bundle, kit->bundle_size, kit->tree,
+        kit_seal_entry, kit, NULL) == VCS_SOURCE_BUNDLE_OK;
+    return kit_seal_finish(kit, ok, why, cap);
+}
+
+struct kit_build_visit {
+    struct app_toolchain *kit;
+    char *why;
+    size_t cap;
+    bool specific_error;
+};
+static bool kit_build_members(struct kit_build_visit *v, const struct vcs_manifest *manifest,
+    const uint8_t *bytes, size_t length)
+{
+    size_t at = 0;
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const struct vcs_entry *entry = &manifest->entries[i];
+        if (entry->size > length - at || !kit_entry(v->kit, entry, bytes + at, (size_t)entry->size)) return false;
+        at += (size_t)entry->size;
+    }
+    return at == length && kit_tools(v->kit);
+}
+static bool kit_build_ready(struct kit_build_visit *v)
+{
+    struct app_toolchain *kit = v->kit;
+    kit_ready(kit);
+    if (!kit_target(kit, v->why, v->cap)) { v->specific_error = true; return false; }
+    return true;
+}
+static bool kit_build_seal(struct kit_build_visit *v, const struct vcs_manifest *manifest,
+    const uint8_t *bytes, size_t length)
+{
+    struct app_toolchain *kit = v->kit;
+    if (!kit_seal_begin(kit, v->why, v->cap)) { v->specific_error = true; return false; }
+    size_t at = 0; bool ok = true;
+    for (size_t i = 0; ok && i < manifest->count; ++i) {
+        const struct vcs_entry *entry = &manifest->entries[i];
+        ok = entry->size <= length - at && kit_seal_entry(kit, entry, bytes + at, (size_t)entry->size);
+        at += ok ? (size_t)entry->size : 0;
+    }
+    if (!kit_seal_finish(kit, ok && at == length, v->why, v->cap)) { v->specific_error = true; return false; }
+    return true;
+}
+static bool kit_build_consume(void *context, const struct vcs_manifest *manifest,
+    const uint8_t *bytes, size_t length)
+{
+    struct kit_build_visit *v = context;
+    return kit_build_members(v, manifest, bytes, length) && kit_build_ready(v) &&
+        kit_build_seal(v, manifest, bytes, length);
+}
+static bool kit_verify_build(struct app_toolchain *kit, const uint8_t *descriptor,
+    size_t descriptor_size, const uint8_t *bundle, size_t bundle_size, char *why, size_t cap)
+{
+    if (!kit) return kit_why(why, cap, "Missing kit output.");
+    app_toolchain_free(kit);
+    struct kit_build_visit visit = {.kit = kit, .why = why, .cap = cap};
+    bool ok = kit_verify_begin(kit, descriptor, descriptor_size, bundle, bundle_size);
+    if (ok) ok = vcs_source_bundle_consume_verified(bundle, bundle_size,
+        kit->tree, kit_build_consume, &visit, NULL) == VCS_SOURCE_BUNDLE_OK;
+    if (!ok) {
+        app_toolchain_free(kit);
+        if (!visit.specific_error)
+            return kit_why(why, cap, "Kit descriptor, bundle, rootfs members or required executables invalid.");
+    }
+    return ok;
+}
+#if defined(ZCL_TESTING)
+bool zcl_test_toolchain_verify_build(struct app_toolchain *, const uint8_t *, size_t,
+    const uint8_t *, size_t, char *, size_t);
+bool zcl_test_toolchain_verify_build(struct app_toolchain *kit, const uint8_t *descriptor,
+    size_t descriptor_size, const uint8_t *bundle, size_t bundle_size, char *why, size_t cap)
+{ return kit_verify_build(kit, descriptor, descriptor_size, bundle, bundle_size, why, cap); }
+#endif

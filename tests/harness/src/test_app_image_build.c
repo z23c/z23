@@ -740,6 +740,41 @@ static int akt_authentication(struct akt_fixture *f)
     return failures;
 }
 #if defined(__linux__)
+bool zcl_test_toolchain_verify_build(struct app_toolchain *, const uint8_t *, size_t,
+    const uint8_t *, size_t, char *, size_t);
+static bool akt_build_same(const struct app_toolchain *old, const struct app_toolchain *built)
+{
+    if (!built->selected || !built->backing_owned || built->file_count != old->file_count ||
+        memcmp(built->tree, old->tree, 32) || memcmp(built->env, old->env, 32)) return false;
+    for (size_t i = 0; i < old->file_count; ++i) {
+        const struct os_sandbox_kit_file *a = &old->files[i], *b = &built->files[i];
+        if (strcmp(a->path, b->path) || a->mode != b->mode || a->length != b->length ||
+            memcmp(a->blob, b->blob, 32)) return false;
+        char x[64], y[64];
+        if (a->length > sizeof(x) || pread(a->fd, x, a->length, (off_t)a->offset) != (ssize_t)a->length ||
+            pread(b->fd, y, b->length, (off_t)b->offset) != (ssize_t)b->length || memcmp(x, y, a->length)) return false;
+    }
+    return true;
+}
+static int akt_one_pass(struct akt_fixture *f)
+{
+    int failures = 0; struct app_toolchain old = {0}, built = {0}; char text[1024], why[256];
+    TEST("app_image_build: one-pass build verifies identical bytes and refuses corruption") {
+        ASSERT(akt_capture(f) && akt_verify(f, 0, &old) && app_toolchain_seal(&old, why, sizeof(why)));
+        ASSERT(akt_descriptor(f, 0, text) && zcl_test_toolchain_verify_build(&built,
+            (const uint8_t *)text, strlen(text), f->wire, f->length, why, sizeof(why)));
+        ASSERT(!zcl_test_toolchain_verify_build(NULL, (const uint8_t *)text, strlen(text),
+            f->wire, f->length, why, sizeof(why)) && !strcmp(why, "Missing kit output."));
+        ASSERT(akt_build_same(&old, &built));
+        ASSERT(akt_descriptor(f, 5, text) && !zcl_test_toolchain_verify_build(&built,
+            (const uint8_t *)text, strlen(text), f->wire, f->length, why, sizeof(why)) && akt_cleared(&built));
+        ASSERT(akt_corrupt_blob(f) && akt_descriptor(f, 0, text) && !zcl_test_toolchain_verify_build(&built,
+            (const uint8_t *)text, strlen(text), f->wire, f->length, why, sizeof(why)) && akt_cleared(&built));
+        ASSERT(akt_capture(f));
+        PASS();
+    } _test_next:;
+    app_toolchain_free(&old); app_toolchain_free(&built); return failures;
+}
 static bool akt_many_setup(struct akt_fixture *f)
 {
     for (unsigned i = 0; i < 1100; ++i) {
@@ -818,6 +853,7 @@ static int test_aib_kit_semantics(void)
         failures += akt_required_tools(&f);
         failures += akt_authentication(&f);
 #if defined(__linux__)
+        failures += akt_one_pass(&f);
         failures += akt_many_members(&f);
 #endif
     }

@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 struct vcs_entry;
+struct vcs_manifest;
 
 #define VCS_SOURCE_BUNDLE_VERSION 1u
 #define VCS_SOURCE_BUNDLE_CODEC_ZLIB 1u
@@ -111,6 +112,13 @@ enum vcs_source_bundle_result vcs_source_bundle_verify(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_tree_root[32],
     struct vcs_source_bundle_metrics *metrics);
+
+/* The entire manifest and contiguous member bytes are authenticated before
+ * this one callback. Both are borrowed only for the callback's duration. */
+enum vcs_source_bundle_result vcs_source_bundle_consume_verified(
+    const uint8_t *wire, size_t wire_len, const uint8_t expected_tree_root[32],
+    bool (*consumer)(void *, const struct vcs_manifest *, const uint8_t *, size_t),
+    void *context, struct vcs_source_bundle_metrics *metrics);
 
 /* Authenticate the complete manifest and ALL blobs before the first callback.
  * Visits manifest order without CAS writes. Entry and bytes are borrowed,

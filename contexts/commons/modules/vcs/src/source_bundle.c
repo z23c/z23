@@ -355,6 +355,22 @@ enum vcs_source_bundle_result vcs_source_bundle_visit_verified(
     return result;
 }
 
+enum vcs_source_bundle_result vcs_source_bundle_consume_verified(
+    const uint8_t *wire, size_t wire_len, const uint8_t expected_tree_root[32],
+    bool (*consumer)(void *, const struct vcs_manifest *, const uint8_t *, size_t),
+    void *context, struct vcs_source_bundle_metrics *metrics)
+{
+    source_bundle_metrics_init(metrics);
+    if (!wire || !expected_tree_root || !consumer) return VCS_SOURCE_BUNDLE_ERR_NULL;
+    struct source_bundle_decoded decoded;
+    enum vcs_source_bundle_result result = source_bundle_decode(wire, wire_len, expected_tree_root, &decoded, metrics);
+    if (result == VCS_SOURCE_BUNDLE_OK && !consumer(context, &decoded.manifest,
+        decoded.payload + decoded.manifest_len, decoded.payload_len - decoded.manifest_len))
+        result = VCS_SOURCE_BUNDLE_ERR_OUTPUT;
+    source_bundle_decoded_free(&decoded);
+    return result;
+}
+
 enum vcs_source_bundle_result vcs_source_bundle_materialize_disposable(
     const uint8_t *wire, size_t wire_len, const uint8_t expected_tree_root[32],
     const char *destination, struct vcs_source_bundle_metrics *metrics)

@@ -33,6 +33,8 @@ bool app_toolchain_artifact(struct app_toolchain *kit, const char *dir,
 /* Shared installed resolver owns release selection. Absence preserves host mode;
  * malformed selected state refuses. Does not execute or materialize source. */
 bool app_toolchain_resolve(struct app_toolchain *kit, char *why, size_t cap);
+/* Build path: authenticate and seal the selected kit in one decoded pass. */
+bool app_toolchain_resolve_build(struct app_toolchain *kit, char *why, size_t cap);
 bool app_toolchain_seal(struct app_toolchain *kit, char *why, size_t cap);
 /* A namespace absolute prerequisite is allowed only if it names a verified kit
  * member; caller separately maps declared /source prerequisites. */

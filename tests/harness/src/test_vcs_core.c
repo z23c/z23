@@ -117,6 +117,7 @@ int vcm_disposable(const char *, const uint8_t[32], const char *, uint64_t, uint
 #define vcs_source_bundle_create vcm_bundle_create
 #define vcs_source_bundle_verify vcm_bundle_verify
 #define vcs_source_bundle_visit_verified vcm_bundle_visit
+#define vcs_source_bundle_consume_verified vcm_bundle_consume
 #define vcs_source_bundle_import vcm_bundle_import
 #define vcs_source_bundle_materialize_disposable vcm_bundle_direct
 const char *vcm_bundle_result(enum vcs_source_bundle_result);
@@ -128,6 +129,9 @@ enum vcs_source_bundle_result vcm_bundle_visit(const uint8_t *, size_t,
     const uint8_t[32],
     bool (*)(void *, const struct vcs_entry *, const uint8_t *, size_t),
     void *, struct vcs_source_bundle_metrics *);
+enum vcs_source_bundle_result vcm_bundle_consume(const uint8_t *, size_t,
+    const uint8_t[32], bool (*)(void *, const struct vcs_manifest *, const uint8_t *, size_t),
+    void *, struct vcs_source_bundle_metrics *);
 enum vcs_source_bundle_result vcm_bundle_import(const uint8_t *, size_t,
     const uint8_t[32], const char *, struct vcs_source_bundle_metrics *);
 enum vcs_source_bundle_result vcm_bundle_direct(const uint8_t *, size_t,
@@ -137,6 +141,7 @@ enum vcs_source_bundle_result vcm_bundle_direct(const uint8_t *, size_t,
 #undef vcs_source_bundle_import
 #undef vcs_source_bundle_verify
 #undef vcs_source_bundle_visit_verified
+#undef vcs_source_bundle_consume_verified
 #undef vcs_source_bundle_create
 #undef vcs_source_bundle_result_string
 #undef vcs_materialize_verified_bytes_disposable
@@ -1282,12 +1287,37 @@ static bool tsbv_visit(void *context, const struct vcs_entry *entry,
     return !state->refuse;
 }
 
+struct tsbc_state { struct tsbv_state visit; size_t calls; };
+static bool tsbc_consume(void *context, const struct vcs_manifest *manifest,
+                         const uint8_t *bytes, size_t length)
+{
+    struct tsbc_state *state = context; size_t at = 0; ++state->calls;
+    for (size_t i = 0; i < manifest->count; ++i) {
+        const struct vcs_entry *entry = &manifest->entries[i];
+        if (entry->size > length - at || !tsbv_visit(&state->visit, entry, bytes + at, (size_t)entry->size)) return false;
+        at += (size_t)entry->size;
+    }
+    return at == length;
+}
+
 static int tsbv_controls(struct tsb_ctx *ctx)
 {
     int failures = 0;
     struct tsbv_state state = {.source = ctx->source, .valid = true};
     struct vcs_source_bundle_metrics metrics;
     uint8_t wrong[32]; memcpy(wrong, ctx->first_root, sizeof(wrong)); wrong[0] ^= 1;
+    struct tsbc_state batch = {.visit = {.source = ctx->source, .valid = true}};
+    VC_CHECK("consumer wrong root has zero callbacks",
+        vcs_source_bundle_consume_verified(ctx->first_wire, ctx->first_wire_len,
+            wrong, tsbc_consume, &batch, NULL) == VCS_SOURCE_BUNDLE_ERR_ROOT && batch.calls == 0);
+    VC_CHECK("consumer receives all exact authenticated files once",
+        vcs_source_bundle_consume_verified(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, tsbc_consume, &batch, NULL) == VCS_SOURCE_BUNDLE_OK && batch.calls == 1 &&
+        batch.visit.valid && batch.visit.calls == ctx->created.file_count && batch.visit.bytes == ctx->created.source_bytes);
+    batch = (struct tsbc_state){.visit = {.source = ctx->source, .valid = true, .refuse = true}};
+    VC_CHECK("consumer refusal is reported once",
+        vcs_source_bundle_consume_verified(ctx->first_wire, ctx->first_wire_len,
+            ctx->first_root, tsbc_consume, &batch, NULL) == VCS_SOURCE_BUNDLE_ERR_OUTPUT && batch.calls == 1);
     VC_CHECK("visitor wrong root has zero callbacks",
         vcs_source_bundle_visit_verified(ctx->first_wire, ctx->first_wire_len,
             wrong, tsbv_visit, &state, &metrics) == VCS_SOURCE_BUNDLE_ERR_ROOT && state.calls == 0);
@@ -1335,6 +1365,10 @@ static int tsbv_late_corruption(struct tsb_ctx *ctx)
         vcs_wr_u64le(wire + 60, compressed);
     }
     struct tsbv_state state = {.source = ctx->source, .valid = true};
+    struct tsbc_state batch = {.visit = {.source = ctx->source, .valid = true}};
+    VC_CHECK("late blob corruption refuses before consumer", ok &&
+        vcs_source_bundle_consume_verified(wire, VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed,
+            ctx->first_root, tsbc_consume, &batch, NULL) == VCS_SOURCE_BUNDLE_ERR_BLOB && batch.calls == 0);
     VC_CHECK("late blob corruption refuses before ANY visitor callback", ok &&
         vcs_source_bundle_visit_verified(wire, VCS_SOURCE_BUNDLE_HEADER_BYTES + compressed,
             ctx->first_root, tsbv_visit, &state, NULL) == VCS_SOURCE_BUNDLE_ERR_BLOB && state.calls == 0);
