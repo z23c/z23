@@ -436,5 +436,16 @@ for mode in parallel serial; do
         fail "$mode libevent started after its OpenSSL dependency failed"
 done
 
+# A failed build step exits non-zero, prints no "built" line, keeps archive and stamp.
+cp "$ROOT/vendor/tor_stub.c" "$SANDBOX/vendor/"
+printf '%s\n' '#!/usr/bin/env bash' 'case " $* " in *" -c "*) echo "stub-cc: boom" >&2; exit 1;; esac' 'exec cc "$@"' > "$SANDBOX/bin/failcc"
+chmod +x "$SANDBOX/bin/failcc"
+build_tor() { (cd "$SANDBOX" && env "$@" tools/scripts/build_vendor.sh libtor_stub.a 2>&1); }
+state() { cksum "$SANDBOX/vendor/lib/.provenance/libtor_stub.a.stamp" "$SANDBOX/vendor/lib/libtor_stub.a"; }
+good="$(build_tor VENDOR_FORCE=1)" && [[ "$good" == *'built   libtor_stub.a'* ]] || fail 'host tor_stub build failed'
+before="$(state)"
+bad="$(build_tor VENDOR_FORCE=1 VENDOR_CC="$SANDBOX/bin/failcc")" && fail 'failing compiler exited 0'
+[[ "$bad" == *'stub-cc: boom'* && "$bad" != *'built   libtor_stub.a'* && "$(state)" == "$before" ]] ||
+    fail 'failed build printed built, hid the step error, or touched archive/stamp'
 printf '%s\n' \
     'build_vendor_offline_selftest: PASS downloader_contacted=false cache_miss_refused=true launcher_vendor_and_tor_skipped=true source_query_vendor_and_tor_skipped=true mixed_goals_bootstrap=true'

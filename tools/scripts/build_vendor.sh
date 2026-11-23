@@ -726,11 +726,18 @@ vendor_cache_put() {
     vp_cache_save "$VENDOR" "$group" "$key" "$mark" "${files[@]}"
 }
 
+vendor_ar_new() {   # deterministic archive OUT from the object files
+    rm -f "$1"
+    "$VENDOR_AR" $ARFLAGS_DET "$@" 2>/dev/null || "$VENDOR_AR" cr "$@"
+}
+
 install_archive() {
     local source="$1" archive="$2" tmp
+    [[ -f "$source" ]] || die "built $archive missing at $source; keeping previous archive and stamp"
     tmp="$LIB/.${archive}.tmp.$$"
     cp -f "$source" "$tmp"
     chmod 0644 "$tmp"
+    invalidate_stamps "$archive"  # only once the fresh archive exists
     mv -f "$tmp" "$LIB/$archive"
 }
 
@@ -757,13 +764,9 @@ build_tor_stub() {     # IN-TREE: vendor/tor_stub.c
     have libtor_stub.a && { say "skip    libtor_stub.a (provenance current)"; return; }
     say "build   libtor_stub.a  (in-tree: vendor/tor_stub.c)"
     [[ -f "$VENDOR/tor_stub.c" ]] || die "vendor/tor_stub.c missing (tracked source expected)"
-    invalidate_stamps libtor_stub.a
     local o="$WORK/tor_stub.o" built="$WORK/libtor_stub.a"
-    mkdir -p "$WORK"
     "$VENDOR_CC" "$VENDOR_C_STD" -O2 -fPIC -c "$VENDOR/tor_stub.c" -o "$o"
-    rm -f "$built"
-    "$VENDOR_AR" $ARFLAGS_DET "$built" "$o" 2>/dev/null ||
-        "$VENDOR_AR" cr "$built" "$o"
+    vendor_ar_new "$built" "$o"
     install_archive "$built" libtor_stub.a
     stamp_archives libtor_stub.a
     ok "built   libtor_stub.a"
@@ -797,7 +800,6 @@ build_sqlite() {       # FETCHED: SQLite amalgamation
     fi
     vendor_cache_try sqlite libsqlite3.a && return
     say "build   libsqlite3.a  (SQLite ${SQLITE_AMALG#sqlite-amalgamation-})"
-    invalidate_stamps libsqlite3.a
     local cmark; cmark="$(vendor_cache_mark)"
     # Build flags mirror a typical Bitcoin/Zcash sqlite vendor build.
     local FLAGS="-DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE \
@@ -805,12 +807,8 @@ build_sqlite() {       # FETCHED: SQLite amalgamation
         -DSQLITE_DEFAULT_FOREIGN_KEYS=1"
     "$VENDOR_CC" -O2 -fPIC $FLAGS -c "$d/sqlite3.c" -o "$WORK/sqlite3.o"
     local built="$WORK/libsqlite3.a"
-    rm -f "$built"
-    "$VENDOR_AR" $ARFLAGS_DET "$built" "$WORK/sqlite3.o" 2>/dev/null ||
-        "$VENDOR_AR" cr "$built" "$WORK/sqlite3.o"
+    vendor_ar_new "$built" "$WORK/sqlite3.o"
     install_archive "$built" libsqlite3.a
-    # Keep the amalgamation source in vendor/ (gitignored) so the rest of the
-    # build (tools/sqlq.c etc.) and the header stay in sync.
     stamp_archives libsqlite3.a
     vendor_cache_put sqlite "$cmark" libsqlite3.a
     ok "built   libsqlite3.a"
@@ -820,7 +818,6 @@ build_zlib() {         # FETCHED: zlib
     have libz.a && { say "skip    libz.a (provenance current)"; return; }
     vendor_cache_try zlib libz.a && return
     say "build   libz.a  (zlib ${ZLIB_VER})"
-    invalidate_stamps libz.a
     local cmark; cmark="$(vendor_cache_mark)"
     local tb; tb="$(fetch "$ZLIB_URL" "$ZLIB_SHA" "zlib-${ZLIB_VER}.tar.gz")"
     local d="$WORK/zlib-${ZLIB_VER}"
@@ -845,7 +842,6 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     { have libcrypto.a && have libssl.a; } && { say "skip    libcrypto.a/libssl.a (provenance current)"; return; }
     vendor_cache_try openssl libcrypto.a libssl.a && return
     say "build   libcrypto.a + libssl.a  (OpenSSL ${OPENSSL_VER}) — this is the slow one"
-    invalidate_stamps libcrypto.a libssl.a
     local cmark; cmark="$(vendor_cache_mark)"
     local tb; tb="$(fetch "$OPENSSL_URL" "$OPENSSL_SHA" "openssl-${OPENSSL_VER}.tar.gz")"
     local d="$WORK/openssl-${OPENSSL_VER}"
@@ -915,7 +911,6 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
     say "build   libevent.a + libevent_openssl.a + libevent_pthreads.a  (libevent ${LIBEVENT_VER})"
     need nm; need patch
     [[ -f "$LIBEVENT_PATCH" ]] || die "missing libevent patch: $LIBEVENT_PATCH"
-    invalidate_stamps libevent.a libevent_openssl.a libevent_pthreads.a
     local cmark; cmark="$(vendor_cache_mark)"
     # Drop any previously staged event2/ BEFORE the build, not after. The build
     # puts -I$INC on the compile line (LIBEVENT_CPPFLAGS), so leaving a stale
@@ -1125,16 +1120,13 @@ EOF
             -c "$src" -o "$obj" )
         objs+=("$obj")
     done
-    rm -f "$WORK/libleveldb.a"
-    "$VENDOR_AR" $ARFLAGS_DET "$WORK/libleveldb.a" "${objs[@]}" 2>/dev/null ||
-        "$VENDOR_AR" cr "$WORK/libleveldb.a" "${objs[@]}"
+    vendor_ar_new "$WORK/libleveldb.a" "${objs[@]}"
 }
 
 build_leveldb() {      # FETCHED: LevelDB -> libleveldb.a
     have libleveldb.a && { say "skip    libleveldb.a (provenance current)"; return; }
     vendor_cache_try leveldb libleveldb.a && return
     say "build   libleveldb.a  (LevelDB ${LEVELDB_VER})"
-    invalidate_stamps libleveldb.a
     local cmark; cmark="$(vendor_cache_mark)"
     local tb; tb="$(fetch "$LEVELDB_URL" "$LEVELDB_SHA" "leveldb-${LEVELDB_VER}.tar.gz")"
     local d="$WORK/leveldb-${LEVELDB_VER}"
@@ -1164,7 +1156,6 @@ build_secp_native() {
     }
     need cmake
     say "build   $archive  (secp256k1 ${SECP_VER})"
-    invalidate_stamps "$archive"
     local tb d
     tb="$(fetch "$SECP_URL" "$SECP_SHA" "secp256k1-${SECP_VER}.tar.gz")"
     d="$WORK/secp256k1-${SECP_VER}"
@@ -1263,10 +1254,7 @@ VENDOR_AR_ID="$(vp_tool_identity_sha "$VENDOR_AR")"
 
 check_one_provenance() {
     local archive="$1" descriptor
-    if [[ "$archive" == "libsecp256k1.a" ]]; then
-        verify_committed_secp
-        return
-    fi
+    [[ "$archive" != libsecp256k1.a ]] || { verify_committed_secp; return; }
     descriptor="$(archive_descriptor "$archive")" || return 1
     vp_verify_stamp "$LIB" "$archive" "$descriptor"
 }
@@ -1418,7 +1406,7 @@ vendor_run_builders() {
         fi
     fi
     vendor_drain
-    return "$failed"
+    (( failed == 0 )) || die "vendor build failed: a builder step exited non-zero (stderr above); no stamp was written for it"
 }
 
 BUILD_LIST=()
@@ -1436,7 +1424,7 @@ if [[ $# -gt 0 ]]; then
 else
     for b in "${ALL[@]}"; do build_submit "$b"; done
 fi
-vendor_run_builders "${BUILD_LIST[@]}" || die "parallel vendor build failed"
+vendor_run_builders "${BUILD_LIST[@]}"
 
 # --- verify the full set ----------------------------------------------------
 stale=()
