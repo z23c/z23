@@ -3731,12 +3731,27 @@ _test_next:;
     zcl_command_reply_free(&reply);
     return failures;
 }
+extern bool zcl_test_library_received_model(const char *, struct zcl_present_model_v1 *);
 static int case_library_bounds(void)
 {
     int failures = 0;
     static struct al_fx f;
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
     if (!al_setup(&f) || !al_write_file(f.env.config_path, "", 0600)) { zcl_command_reply_free(&reply); return 1; }
+    TEST("Received-copy choice identifies its local folder") {
+        struct zcl_present_model_v1 model;
+        ASSERT(zcl_test_library_received_model("skycombat-1", &model));
+        ASSERT(!strcmp(model.items[0].value, "Folder: skycombat-1"));
+        ASSERT(zcl_present_canvas_text_width(model.items[0].value, strlen(model.items[0].value), 14u) <= 296u);
+        ASSERT(zcl_test_library_received_model("skycombat-2", &model));
+        ASSERT(!strcmp(model.items[0].value, "Folder: skycombat-2"));
+        ASSERT(zcl_test_library_received_model("a b\\c\n", &model));
+        ASSERT(!strcmp(model.items[0].value, "Folder: a\\x20b\\\\c\\x0a"));
+        ASSERT(zcl_test_library_received_model("WWWWWWWWWWWWWWWWWWWWWWWW-2", &model));
+        ASSERT(strstr(model.items[0].value, "...") && strstr(model.items[0].value, "-2"));
+        ASSERT(zcl_present_canvas_text_width(model.items[0].value, strlen(model.items[0].value), 14u) <= 296u);
+        PASS();
+    }
     TEST("My Apps reaches all32 rows including duplicate friendly saved labels") {
         ASSERT(al_library_fill(&f));
         struct al_library_script s = {.count = 48, .valid = true};

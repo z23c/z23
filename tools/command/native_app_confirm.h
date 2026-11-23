@@ -22,6 +22,7 @@ typedef bool (*app_confirm_presenter)(void *context,
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap);
 bool app_confirm_path(struct zcl_present_model_v1 *model, const char *label, const char *path);
+size_t app_confirm_path_atom(unsigned char byte, char atom[5]);
 bool app_confirm_field(struct zcl_present_model_v1 *model, const char *label, const char *value);
 void app_confirm_action(struct zcl_present_model_action_v1 *action,
     uint16_t kind, const char *id, const char *label);

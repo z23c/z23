@@ -60,6 +60,15 @@ bool app_confirm_field(struct zcl_present_model_v1 *model, const char *label,
     }
     return true;
 }
+size_t app_confirm_path_atom(unsigned char byte, char atom[5])
+{
+    if (byte == '\\') { atom[0] = '\\'; atom[1] = '\\'; return 2; }
+    if (byte && (byte <= 32 || byte > 126)) {
+        atom[0] = '\\'; atom[1] = 'x'; zcl_hex_encode(&byte, 1, atom + 2); return 4;
+    }
+    if (byte) { atom[0] = (char)byte; return 1; }
+    return 0;
+}
 /* Render raw path bytes reversibly. Spaces, controls and non-ASCII bytes use
  * \\xHH; literal backslashes are doubled. Input remains unchanged. */
 bool app_confirm_path(struct zcl_present_model_v1 *model, const char *label,
@@ -68,11 +77,7 @@ bool app_confirm_path(struct zcl_present_model_v1 *model, const char *label,
     if (!path || !*path) return false;
     char part[33]; size_t used = 0; bool first = true;
     for (const unsigned char *p = (const unsigned char *)path; ; ++p) {
-        char atom[5]; size_t n = 0;
-        if (*p == '\\') { atom[0] = '\\'; atom[1] = '\\'; n = 2; }
-        else if (*p && (*p <= 32 || *p > 126)) {
-            atom[0] = '\\'; atom[1] = 'x'; zcl_hex_encode(p, 1, atom + 2); n = 4;
-        } else if (*p) { atom[0] = (char)*p; n = 1; }
+        char atom[5]; size_t n = app_confirm_path_atom(*p, atom);
         if (used && (!*p || used + n > sizeof(part) - 1)) {
             part[used] = 0;
             if (!app_confirm_field(model, first ? label : "  ", part)) return false;

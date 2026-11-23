@@ -214,6 +214,23 @@ static void al_discover_options(struct library *w)
     app_library_choice(m, "discover-back", "Back", "Return to My Apps.");
     app_library_choice(m, "recover-copies", "Review received copies", "Find an earlier received copy.");
 }
+static void al_folder_value(const char *name, char value[64])
+{
+    char atom[5], suffix[17] = {0};
+    size_t n = strlen(name), start = n, used = 0;
+    while (start) {
+        size_t len = app_confirm_path_atom((unsigned char)name[start - 1], atom);
+        if (used + len > sizeof(suffix) - 1) break;
+        used += len; --start;
+    }
+    used = 0;
+    for (size_t i = start; i < n; ++i) {
+        size_t len = app_confirm_path_atom((unsigned char)name[i], atom);
+        memcpy(suffix + used, atom, len); used += len;
+    }
+    suffix[used] = 0;
+    (void)snprintf(value, 64, "Folder: %s%s", start ? "..." : "", suffix);
+}
 static void al_recovered_model(struct library *w)
 {
     struct zcl_present_model_v1 *m = &w->model;
@@ -234,12 +251,25 @@ static void al_recovered_model(struct library *w)
     }
     label[i] = 0;
     (void)snprintf(m->summary, sizeof(m->summary), "Copy %zu of %zu: %.72s", w->recovered_index + 1, w->recovered_count, label);
+    char folder[64];
+    if (row->available) al_folder_value(row->name, folder);
     app_library_choice(m, "recover-select", row->available ? "Review original" : "Unavailable",
-        row->available ? "Review this trusted received copy." : "Other, saved, or unavailable copy.");
+        row->available ? folder : "Other, saved, or unavailable copy.");
     if (w->recovered_index) app_library_choice(m, "recover-previous", "Previous", "Browse back.");
     if (w->recovered_index + 1 < w->recovered_count) app_library_choice(m, "recover-next", "Next", "Browse forward.");
     app_library_choice(m, "recover-back", "Back", back);
 }
+#if defined(ZCL_TESTING)
+bool zcl_test_library_received_model(const char *name, struct zcl_present_model_v1 *out)
+{
+    struct library *w = zcl_calloc(1, sizeof(*w), "library-received-model-test");
+    if (!w) return false;
+    w->recovered_count = 1; w->recovered[0].available = true;
+    (void)snprintf(w->recovered[0].name, sizeof(w->recovered[0].name), "%s", name);
+    (void)snprintf(w->recovered[0].display, sizeof(w->recovered[0].display), "skycombat");
+    al_recovered_model(w); *out = w->model; free(w); return true;
+}
+#endif
 
 struct al_help_view {
     struct zcl_present_model_v1 model;
