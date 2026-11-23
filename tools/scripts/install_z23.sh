@@ -1640,7 +1640,7 @@ SELFTEST_TOR_CASES=""
 
 selftest_prepare() {
     local tmp
-    tmp="$(mktemp -d /tmp/zcl-install-z23-selftest.XXXXXX)" || die "mktemp failed"
+    tmp="$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/zcl-install-z23-selftest.XXXXXX")" || die "mktemp failed" # physical TMPDIR: /tmp is a symlink on macOS
     SELFTEST_TMP="$tmp"
     trap 'chmod -R u+w "$SELFTEST_TMP" 2>/dev/null || true; rm -rf "$SELFTEST_TMP"' EXIT
 

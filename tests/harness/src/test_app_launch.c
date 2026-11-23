@@ -208,7 +208,7 @@ static bool al_setup(struct al_fx *f)
     bool ok = al_paths(f);
     ok = ok && al_copy_exe(fixture, f->bin_ready, 0700) &&
          al_copy_exe(fixture, f->bin_exit, 0700) &&
-         al_copy_exe("/bin/true", f->bin_clean, 0700) &&
+         al_write_file(f->bin_clean, "#!/bin/sh\nexit 0\n", 0700) &&
          al_copy_exe(fixture, f->bin_silent, 0700) &&
          al_copy_exe(fixture, f->bin_quiet, 0700) &&
          al_copy_exe(fixture, f->bin_liar, 0700) &&

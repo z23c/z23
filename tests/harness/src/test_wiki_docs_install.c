@@ -546,7 +546,7 @@ static bool wi_apps_env(struct wi_release *f, const char *const keys[8])
     return wi_apps_dirs(f, home, data, prefix, state) &&
         setenv(keys[0], home, 1) == 0 && setenv(keys[1], data, 1) == 0 &&
         setenv(keys[2], prefix, 1) == 0 && setenv(keys[3], "1", 1) == 0 && unsetenv(keys[4]) == 0 &&
-        setenv(keys[5], path, 1) == 0 && unsetenv(keys[6]) == 0 && setenv(keys[7], state, 1) == 0;
+        setenv(keys[5], path, 1) == 0 && setenv(keys[6], "Linux", 1) == 0 && setenv(keys[7], state, 1) == 0;
 }
 
 static bool wi_apps_case(bool tasks)
