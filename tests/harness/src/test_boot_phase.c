@@ -30,6 +30,8 @@
 #include "wallet/wallet_keystore.h"
 #include "config/boot_wallet_cutover_replay.h"
 #include "config/boot_error.h"
+#include "controllers/snapshot_controller.h"
+#include "platform/clock.h"
 #include "config/boot_internal.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "util/blocker.h"
@@ -713,6 +715,118 @@ static int bp_node_db_gate_refuses(void)
  * left exactly as it was. The step used to unlink zclassicd's LOCK on any
  * snapshot failure and open the directory itself, which lets a second
  * process write a live zclassicd's index. Returns its own failure count. */
+static int64_t bp_snapshot_clock(void *unused)
+{
+    (void)unused;
+    return 1704067200000LL;
+}
+
+static int bp_snapshot_collision_preserves_existing(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], snapshots[PATH_MAX + 16], target[PATH_MAX + 40];
+    char sentinel[PATH_MAX + 56], other[PATH_MAX + 40], ts[16];
+    test_make_tmpdir(dir, sizeof(dir), "bootphase", "snapshot_collision");
+    time_t fixed = 1704067200;
+    struct tm *tm = localtime(&fixed);
+    bool clock_ok = tm && strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm) == 15;
+    snprintf(snapshots, sizeof(snapshots), "%s/snapshots", dir);
+    snprintf(target, sizeof(target), "%s/%s", snapshots, clock_ok ? ts : "invalid");
+    snprintf(sentinel, sizeof(sentinel), "%s/sentinel", target);
+    snprintf(other, sizeof(other), "%s/99991231_235959", snapshots);
+    bool dirs_ok = mkdir(snapshots, 0700) == 0 && mkdir(target, 0700) == 0 && mkdir(other, 0700) == 0;
+    FILE *f = dirs_ok ? fopen(sentinel, "w") : NULL;
+    if (f) { fputs("preserve", f); fclose(f); }
+    BP_CHECK("snapshot collision fixture", clock_ok && dirs_ok && f);
+    const clock_iface_t fake = { .now_monotonic_ns = bp_snapshot_clock, .now_wall_ms = bp_snapshot_clock };
+    const clock_iface_t *saved = clock_default();
+    clock_set_default(&fake);
+    const char *result = snapshot_create(dir, dir, 1);
+    clock_set_default(saved);
+    struct stat st;
+    BP_CHECK("snapshot collision refuses", result == NULL);
+    BP_CHECK("snapshot collision preserves sentinel", stat(sentinel, &st) == 0);
+    char content[16] = {0};
+    f = fopen(sentinel, "r");
+    if (f) { (void)fread(content, 1, sizeof(content) - 1, f); fclose(f); }
+    BP_CHECK("snapshot collision preserves sentinel bytes", strcmp(content, "preserve") == 0);
+    BP_CHECK("snapshot collision preserves other snapshot", stat(other, &st) == 0);
+    test_rm_rf(dir);
+    return failures;
+}
+
+#if !defined(_WIN32)
+static bool bp_snapshot_file_is(const char *path, const char *expected)
+{
+    char data[32] = {0};
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(data, 1, sizeof(data) - 1, f);
+    bool ok = !ferror(f) && feof(f) && n == strlen(expected) && strcmp(data, expected) == 0;
+    fclose(f);
+    return ok;
+}
+
+static bool bp_snapshot_write(const char *path, const char *data)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(data, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static int bp_snapshot_failure_and_retention(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], source[PATH_MAX + 16], blocks[PATH_MAX + 32];
+    char index[PATH_MAX + 48], chain[PATH_MAX + 32], block[PATH_MAX + 48];
+    char snapshots[PATH_MAX + 32], old[PATH_MAX + 64], newer[PATH_MAX + 64];
+    char index_file[PATH_MAX + 64], chain_file[PATH_MAX + 48], kept[PATH_MAX + 80];
+    char copied[PATH_MAX + 96];
+    test_make_tmpdir(dir, sizeof(dir), "bootphase", "snapshot_retention");
+    snprintf(source, sizeof(source), "%s/source", dir);
+    snprintf(blocks, sizeof(blocks), "%s/blocks", source);
+    snprintf(index, sizeof(index), "%s/index", blocks);
+    snprintf(chain, sizeof(chain), "%s/chainstate", source);
+    snprintf(block, sizeof(block), "%s/blk00000.dat", blocks);
+    snprintf(snapshots, sizeof(snapshots), "%s/snapshots", dir);
+    snprintf(old, sizeof(old), "%s/20000101_000000", snapshots);
+    snprintf(newer, sizeof(newer), "%s/20010101_000000", snapshots);
+    snprintf(index_file, sizeof(index_file), "%s/CURRENT", index);
+    snprintf(chain_file, sizeof(chain_file), "%s/CURRENT", chain);
+    snprintf(kept, sizeof(kept), "%s/sentinel", newer);
+    bool ok = mkdir(snapshots, 0700) == 0 && mkdir(old, 0700) == 0 && mkdir(newer, 0700) == 0;
+    ok = ok && bp_snapshot_write(kept, "retained");
+    const clock_iface_t fake = { .now_monotonic_ns = bp_snapshot_clock, .now_wall_ms = bp_snapshot_clock };
+    const clock_iface_t *saved = clock_default();
+    clock_set_default(&fake);
+    const char *failed = snapshot_create(source, dir, 1);
+    struct stat st;
+    BP_CHECK("snapshot failed copy preserves old snapshots", ok && !failed && stat(old, &st) == 0 && stat(newer, &st) == 0);
+    ok = ok && mkdir(source, 0700) == 0 && mkdir(blocks, 0700) == 0 &&
+         mkdir(index, 0700) == 0 && mkdir(chain, 0700) == 0;
+    ok = ok && bp_snapshot_write(block, "block") && bp_snapshot_write(index_file, "index") &&
+         bp_snapshot_write(chain_file, "chain");
+    const char *created = ok ? snapshot_create(source, dir, 1) : NULL;
+    BP_CHECK("snapshot success retains one previous snapshot", created && stat(created, &st) == 0 &&
+             stat(old, &st) != 0 && bp_snapshot_file_is(kept, "retained"));
+    if (created) {
+        snprintf(copied, sizeof(copied), "%s/blocks/blk00000.dat", created);
+        BP_CHECK("snapshot copies block bytes", bp_snapshot_file_is(copied, "block"));
+        snprintf(copied, sizeof(copied), "%s/blocks/index/CURRENT", created);
+        BP_CHECK("snapshot copies index bytes", bp_snapshot_file_is(copied, "index"));
+        snprintf(copied, sizeof(copied), "%s/chainstate/CURRENT", created);
+        BP_CHECK("snapshot copies chainstate bytes", bp_snapshot_file_is(copied, "chain"));
+    } else {
+        BP_CHECK("snapshot copies block bytes", false);
+        BP_CHECK("snapshot copies index bytes", false);
+        BP_CHECK("snapshot copies chainstate bytes", false);
+    }
+    clock_set_default(saved);
+    test_rm_rf(dir);
+    return failures;
+}
+#endif
 static int bp_legacy_snapshot_keeps_source_lock(void)
 {
     int failures = 0;
@@ -2573,6 +2687,10 @@ int test_boot_phase(void)
     failures += bp_test_illegal_transition_aborts();
     failures += bp_test_step_classification();
     failures += bp_test_step_state_names();
+    failures += bp_snapshot_collision_preserves_existing();
+#if !defined(_WIN32)
+    failures += bp_snapshot_failure_and_retention();
+#endif
     failures += bp_test_step_api_with_no_step_open();
     failures += bp_test_step_budget_earning();
     failures += bp_test_step_evidence_probe();

@@ -22,6 +22,7 @@
 #include "controllers/snapshot_controller.h"
 #include "snapshot_controller_internal.h"
 #include "config/file_ops.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -94,7 +95,7 @@ static bool snapshot_name_valid(const char *name)
     return true;
 }
 
-static void rotate_snapshots(const char *snapshots_dir, int max_keep)
+static void rotate_snapshots(const char *snapshots_dir, int max_keep, const char *current)
 {
     struct platform_directory_list list;
     if (!platform_directory_list_real_sorted(snapshots_dir, &list)) return;
@@ -102,7 +103,7 @@ static void rotate_snapshots(const char *snapshots_dir, int max_keep)
     /* Count real snapshot dirs (YYYYMMDD_HHMMSS format) */
     int count = 0;
     for (size_t i = 0; i < list.count; i++) {
-        if (snapshot_name_valid(list.entries[i].name))
+        if (snapshot_name_valid(list.entries[i].name) && strcmp(list.entries[i].name, current) != 0)
             count++;
     }
 
@@ -110,7 +111,7 @@ static void rotate_snapshots(const char *snapshots_dir, int max_keep)
     int to_remove = count - max_keep;
     if (to_remove > 0) {
         for (size_t i = 0; i < list.count && to_remove > 0; i++) {
-            if (!snapshot_name_valid(list.entries[i].name))
+            if (!snapshot_name_valid(list.entries[i].name) || strcmp(list.entries[i].name, current) == 0)
                 continue;
             char path[1024];
             int path_len = snprintf(path, sizeof(path), "%s/%s",
@@ -132,24 +133,35 @@ const char *snapshot_create(const char *legacy_datadir,
                             int max_keep)
 {
     if (max_keep < 1) max_keep = 2;
+    if (!legacy_datadir || !c23_datadir ||
+        strlen(legacy_datadir) + sizeof("/blocks/index") > 2048)
+        return NULL;
 
     /* Create snapshots directory */
     char snapshots_dir[2048];
-    snprintf(snapshots_dir, sizeof(snapshots_dir),
-             "%s/snapshots", c23_datadir);
+    int len = snprintf(snapshots_dir, sizeof(snapshots_dir),
+                       "%s/snapshots", c23_datadir);
+    if (len < 0 || (size_t)len >= sizeof(snapshots_dir)) return NULL;
+    /* Reserve room for the timestamp and longest suffix used below. */
+    if ((size_t)len + 1 + 15 + sizeof("/blocks/index") > 2048) return NULL;
     if (!platform_directory_ensure(snapshots_dir, 0700)) return NULL;
-
-    /* Rotate old snapshots first */
-    rotate_snapshots(snapshots_dir, max_keep);
 
     /* Create timestamped snapshot dir */
     time_t now = platform_time_wall_time_t();
     struct tm *tm = localtime(&now);
     static char snap_dir[2048];
     char ts[16];
-    strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm);
-    snprintf(snap_dir, sizeof(snap_dir), "%s/%s", snapshots_dir, ts);
-    if (!platform_directory_ensure(snap_dir, 0700)) return NULL;
+    if (!tm || strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm) != 15) return NULL;
+    len = snprintf(snap_dir, sizeof(snap_dir), "%s/%s", snapshots_dir, ts);
+    if (len < 0 || (size_t)len >= sizeof(snap_dir)) return NULL;
+    if (platform_directory_create(snap_dir, 0700) != 0) {
+        int error = errno;
+        if (error == EEXIST)
+            LOG_WARN("snapshot", "snapshot: %s already exists; keep it and retry with a new timestamp", snap_dir);
+        else
+            LOG_WARN("snapshot", "snapshot: cannot create directory %s: %s", snap_dir, strerror(error));
+        return NULL;
+    }
 
     struct timespec t0;
     platform_time_monotonic_timespec(&t0);
@@ -207,6 +219,7 @@ const char *snapshot_create(const char *legacy_datadir,
     platform_time_monotonic_timespec(&t1);
     double elapsed = (double)(t1.tv_sec - t0.tv_sec) +
                      (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+    rotate_snapshots(snapshots_dir, max_keep, ts);
     printf("snapshot: created %s in %.1fs\n", ts, elapsed);
     fflush(stdout);
 
