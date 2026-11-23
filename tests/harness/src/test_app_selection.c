@@ -272,6 +272,51 @@ static int sel_routes(void)
     (void)test_rm_rf_recursive(dir);
     return failures;
 }
+static int sel_previous(void)
+{
+    int failures = 0; char dir[512] = {0}, path[600];
+    struct app_selection a, b, out, prior;
+    TEST("previous Keep survives migration, repeated Keep and undo") {
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "selection_previous"));
+        sel_fixture(&a, dir);
+        ASSERT(app_selection_save(dir, 0, &a, &out) == APP_SELECTION_OK);
+        (void)snprintf(path, sizeof(path), "%s/skycombat.selection", dir);
+        struct stat st; ASSERT(stat(path, &st) == 0 && st.st_size > 0);
+        off_t v1_size = (st.st_size - 40) / 2;
+        ASSERT(truncate(path, v1_size) == 0); /* v1 current-only record */
+        ASSERT(app_selection_load_previous(dir, a.app, &prior) == APP_SELECTION_ABSENT);
+        {
+            char alias[600]; (void)snprintf(alias, sizeof(alias), "%s/other.selection", dir);
+            ASSERT(link(path, alias) == 0);
+            ASSERT(app_selection_load_previous(dir, "other", &prior) == APP_SELECTION_INVALID);
+            ASSERT(unlink(alias) == 0);
+        }
+        {
+            int legacy = open(path, O_RDWR); char byte;
+            ASSERT(legacy >= 0 && pread(legacy, &byte, 1, 0) == 1);
+            ASSERT(pwrite(legacy, "x", 1, 0) == 1);
+            ASSERT(app_selection_load_previous(dir, a.app, &prior) == APP_SELECTION_INVALID);
+            ASSERT(pwrite(legacy, &byte, 1, 0) == 1 && close(legacy) == 0);
+        }
+        b = a; b.version[0] = 99;
+        ASSERT(app_selection_save(dir, 1, &b, &out) == APP_SELECTION_OK);
+        ASSERT(app_selection_load_previous(dir, a.app, &prior) == APP_SELECTION_OK && prior.revision == 1 && prior.version[0] == a.version[0]);
+        ASSERT(app_selection_save(dir, 2, &b, &out) == APP_SELECTION_OK);
+        ASSERT(app_selection_load_previous(dir, a.app, &prior) == APP_SELECTION_OK && prior.revision == 1);
+        ASSERT(app_selection_save(dir, 2, &a, &out) == APP_SELECTION_STALE);
+        ASSERT(app_selection_save(dir, 3, &prior, &out) == APP_SELECTION_OK);
+        ASSERT(app_selection_load_previous(dir, a.app, &prior) == APP_SELECTION_OK && prior.revision == 3 && prior.version[0] == 99);
+        int fd = open(path, O_WRONLY); ASSERT(fd >= 0);
+        char zeros[4096] = {0}; ASSERT(v1_size > 0 && (size_t)v1_size <= sizeof(zeros));
+        ASSERT(pwrite(fd, zeros, (size_t)v1_size, v1_size) == v1_size && close(fd) == 0);
+        ASSERT(app_selection_load(dir, a.app, &out) == APP_SELECTION_OK && out.revision == 4);
+        ASSERT(app_selection_load_previous(dir, a.app, &prior) == APP_SELECTION_INVALID);
+        ASSERT(app_selection_save(dir, 4, &a, &out) == APP_SELECTION_INVALID);
+        PASS();
+    } _test_next:;
+    if (dir[0]) (void)test_rm_rf_recursive(dir);
+    return failures;
+}
 int test_app_selection(void)
 {
     char dir[512] = {0};
@@ -283,5 +328,6 @@ int test_app_selection(void)
     if (!failures) failures += sel_invalid(dir, input);
     if (dir[0]) (void)test_rm_rf_recursive(dir);
     failures += sel_routes();
+    failures += sel_previous();
     return failures;
 }

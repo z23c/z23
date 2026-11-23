@@ -28,10 +28,11 @@ struct app_receive_preview {
     struct app_selection kept;
     char state_dir[APP_LAUNCH_PATH_MAX];
     char recovered_name[257], recovered_publisher[67];
-    bool built, previewed, draft, recovered;
+    bool built, previewed, draft, recovered, previous;
     enum zcl_package_copy_adoption trust;
 };
 static bool arp_same(const struct app_selection *a, const struct app_selection *b);
+static bool arp_record(const struct app_selection *s, struct zcl_command_reply *r);
 static bool arp_recovered_paths(struct app_receive_preview *p, const char *copy_dir,
                                 const char *datadir, struct zcl_command_reply *r);
 static bool arp_fail(struct zcl_command_reply *r, const char *code, const char *why)
@@ -263,6 +264,15 @@ static bool arp_state_valid(const struct app_receive_preview *p, struct zcl_comm
     if (!app_launch_env_from_process(&env, why, sizeof(why)) || strcmp(env.state_dir, p->state_dir))
         return arp_fail(r, "PREVIEW_STATE_CHANGED", "launcher selection environment changed during preview");
     if (p->recovered && !arp_recovered_path_current(p, r)) return false;
+    if (p->previous) {
+        struct app_selection current, previous;
+        if (app_selection_load(p->state_dir, p->kept.app, &current) != APP_SELECTION_OK ||
+            current.revision != p->kept.revision || !arp_same(&current, &p->kept) ||
+            app_selection_load_previous(p->state_dir, p->kept.app, &previous) != APP_SELECTION_OK ||
+            previous.revision != p->choice.revision || !arp_same(&previous, &p->choice))
+            return arp_fail(r, "SELECTION_STALE", "the kept or previous selection changed; review again");
+        return true;
+    }
     return !p->draft || arp_draft_current(p, r, check_head);
 }
 static bool arp_state_current(const struct app_receive_preview *p, struct zcl_command_reply *r)
@@ -503,6 +513,34 @@ bool app_saved_draft_preview_create(const struct app_selection *selection,
     p->kept = p->choice = *selection; p->draft = true;
     if (!arp_draft_prepare(p, selection, expected_head, r)) { free(p); return false; }
     *out = p; return true;
+}
+
+static bool arp_previous_prepare(struct app_receive_preview *p, const struct app_selection *selection,
+    const struct app_selection *previous, struct zcl_command_reply *r)
+{
+    uint8_t head[32];
+    return arp_state(p, r) &&
+        app_selection_load_previous(p->state_dir, selection->app, &p->choice) == APP_SELECTION_OK &&
+        p->choice.revision == previous->revision && arp_same(&p->choice, previous) &&
+        arp_draft_state(&p->choice, head, &p->trust, r) != APP_DRAFT_UNAVAILABLE &&
+        arp_state_current(p, r) && arp_history(&p->choice, p->trust, r) && arp_record(&p->choice, r);
+}
+bool app_previous_preview_create(const struct app_selection *selection, const struct app_selection *previous,
+    struct app_receive_preview **out, struct zcl_command_reply *r)
+{
+    if (!selection || !previous || !out || !selection->revision || selection->revision > INT64_MAX)
+        return arp_fail(r, "BAD_PREVIEW_INPUT", "a current kept selection is required");
+    *out = NULL;
+    struct app_receive_preview *p = zcl_calloc(1, sizeof(*p), "app-previous-preview");
+    if (!p) return arp_fail(r, "OUT_OF_MEMORY", "cannot allocate previous preview identity");
+    p->kept = *selection; p->draft = true; p->previous = true;
+    bool ok = arp_previous_prepare(p, selection, previous, r);
+    if (!ok) {
+        if (r->status == ZCL_COMMAND_STATUS_PASSED)
+            (void)arp_fail(r, "PREVIOUS_UNAVAILABLE", "The previous Keep cannot be verified. The current Keep remains available.");
+        free(p); return false;
+    }
+    p->built = true; *out = p; return true;
 }
 
 bool app_receive_preview_build_input(const struct app_receive_preview *p, struct json_value *out)

@@ -45,6 +45,7 @@ struct library_row {
     struct app_launch_entry entry;
     struct app_selection selection;
     bool saved;
+    enum app_selection_result previous;
 };
 struct library {
     struct app_launch_registry registry;
@@ -106,6 +107,10 @@ static bool al_add(struct library *w, const struct app_launch_env *env,
         (!r->saved && app_selection_route_reserved(entry->id)))
         return al_fail(reply, "SELECTION_UNREADABLE", "A saved app cannot be read. No apps were opened.");
     if (!r->saved && !entry->installed) return true;
+    if (r->saved) {
+        struct app_selection prior;
+        r->previous = app_selection_load_previous(env->state_dir, entry->id, &prior);
+    } else r->previous = APP_SELECTION_ABSENT;
     ++w->count;
     return true;
 }
@@ -811,10 +816,10 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
 static void al_change_choice(struct zcl_present_model_v1 *m, const struct library_row *r)
 {
     enum app_saved_draft_state state = r->saved ? app_saved_draft_state(&r->selection) : APP_DRAFT_NONE;
-    if (state == APP_DRAFT_UNAVAILABLE) {
+    if (state == APP_DRAFT_UNAVAILABLE && (!r->saved || r->previous == APP_SELECTION_ABSENT)) {
         (void)snprintf(m->summary, sizeof(m->summary), "Saved source could not be verified. Restore access to the copy, then retry.");
         app_library_choice(m, "help", "Retry source access", "Check the saved copy again.");
-    } else if (state == APP_DRAFT_AVAILABLE)
+    } else if (state == APP_DRAFT_AVAILABLE || (r->saved && r->previous != APP_SELECTION_ABSENT))
         app_library_choice(m, "change-options", "Change", "Review unkept changes or connect your assistant.");
     else app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
 }
@@ -846,13 +851,17 @@ static void al_detail_model(struct library *w)
     } else if (w->page == 7) {
         if (w->share_review)
             (void)snprintf(m->summary, sizeof(m->summary), "Review, preview and Keep the prepared draft, then choose Share again.");
-        app_library_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
+        if (r->saved && app_saved_draft_state(&r->selection) == APP_DRAFT_AVAILABLE)
+            app_library_choice(m, "draft", "Review unkept changes", "Preview the exact saved draft before choosing Keep.");
+        if (r->saved && r->previous != APP_SELECTION_ABSENT)
+            app_library_choice(m, "previous-keep", "Review previous Keep", "Preview the last previously kept version.");
         app_library_choice(m, "help", "Change with your AI", "Connect your existing assistant.");
     } else {
         al_ai_help_model(w, r);
     }
     app_library_choice(m, "back", "Back", "Return to your selected app.");
-    if (w->page != 1) app_library_choice(m, "cancel", "Cancel", "Close My Apps.");
+    if (w->page != 1 && !(w->page == 7 && m->action_count >= 4))
+        app_library_choice(m, "cancel", "Cancel", "Close My Apps.");
 }
 /* Return true only while navigation should continue. Open is terminal. */
 static void al_share_options(struct library *w)
@@ -1403,7 +1412,12 @@ static bool al_finish_draft_keep(struct library *w, const struct app_launch_env 
     if (!al_reload(w, env, reply)) return false;
     return al_received_selection(w, &reply->data, reply);
 }
-static bool al_draft_action(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply)
+static bool al_draft_canceled(const char *status, const char *continuation, bool previous)
+{
+    return (status && !strcmp(status, "canceled")) ||
+        (previous && continuation && !strcmp(continuation, "canceled"));
+}
+static bool al_draft_action(struct library *w, const struct app_launch_env *env, struct zcl_command_reply *reply, bool previous)
 {
     if (!al_history_available(w))
         return al_fail(reply, "RECOVERY_TOO_LARGE", "Reopen My Apps before keeping another draft so both earlier receipts remain available.");
@@ -1412,7 +1426,17 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
     w->receive_current = false;
     struct zcl_command_reply attempt;
     zcl_command_reply_init(&attempt, "zcl.app_library.v1");
-    app_saved_draft_flow_run(&row->selection, &attempt, w->notice, w->prepare_context, w->test_worker_path);
+    if (previous) {
+        struct app_selection prior;
+        enum app_selection_result loaded = app_selection_load_previous(env->state_dir, row->entry.id, &prior);
+        if (loaded != APP_SELECTION_OK) {
+            zcl_command_reply_free(&attempt);
+            return al_fail(reply, "PREVIOUS_UNAVAILABLE", loaded == APP_SELECTION_ABSENT
+                ? "No previous Keep was recorded. Keep a different version first."
+                : "Previous Keep cannot be read. Your current kept app remains available; restore its selection data from a trusted backup.");
+        }
+        app_previous_flow_run(&row->selection, &prior, &attempt, w->notice, w->prepare_context, w->test_worker_path);
+    } else app_saved_draft_flow_run(&row->selection, &attempt, w->notice, w->prepare_context, w->test_worker_path);
     bool canceled_without_mutation = !attempt.error.mutated;
     bool prior_mutated = reply->error.mutated;
     zcl_command_reply_free(reply); *reply = attempt;
@@ -1421,7 +1445,7 @@ static bool al_draft_action(struct library *w, const struct app_launch_env *env,
     w->draft_result = reply->status == ZCL_COMMAND_STATUS_PASSED && continuation && !strcmp(continuation, "kept");
     const char *status = zcl_package_copy_str(&reply->data, "status");
     if (reply->status == ZCL_COMMAND_STATUS_PASSED && canceled_without_mutation &&
-        status && !strcmp(status, "canceled")) {
+        al_draft_canceled(status, continuation, previous)) {
         json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
         w->operation_canceled = true; w->page = 1; return true;
     }
@@ -1466,7 +1490,7 @@ static bool al_host_link(struct library *w, const struct app_launch_env *env,
 static bool al_receipt_operation(const char *id)
 {
     return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-link") || !strcmp(id, "share-original") ||
-        !strcmp(id, "help") || !strcmp(id, "open") || !strcmp(id, "draft");
+        !strcmp(id, "help") || !strcmp(id, "open") || !strcmp(id, "draft") || !strcmp(id, "previous-keep");
 }
 static bool al_share_prepare(struct library *w, const struct app_launch_env *env,
     struct zcl_command_reply *reply)
@@ -1537,7 +1561,8 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
     if (w->has_received && !w->recovery_ready && al_receipt_operation(id))
         return al_fail(reply, "RECOVERY_TOO_LARGE", "The previous receipt cannot be safely retained for another operation.");
     if (al_change_page(w, id)) return true;
-    if (!strcmp(id, "draft")) return al_draft_action(w, env, reply);
+    if (!strcmp(id, "draft")) return al_draft_action(w, env, reply, false);
+    if (!strcmp(id, "previous-keep")) return al_draft_action(w, env, reply, true);
     if (al_signing_share(id)) return al_share_dispatch(w, id, env, exe, reply);
     if (!strcmp(id, "share-original")) { w->receive_current = false; return al_host_original(w, env, reply); }
     if (!strcmp(id, "help")) {

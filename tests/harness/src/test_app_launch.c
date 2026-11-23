@@ -1465,6 +1465,7 @@ _test_next:
 
 struct al_library_script {
     unsigned actions[64], count, calls, errors, home_calls;
+    const char *action_ids[64];
     bool valid, saved_label, fresh_copy_prompt;
     char last_summary[241];
     char error_summary[241];
@@ -1636,6 +1637,17 @@ static bool al_library_special_menu(struct al_library_script *s,
     *handled = false;
     return true;
 }
+static bool al_script_action(struct al_library_script *s, const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event)
+{
+    if (s->calls >= s->count) { s->valid = false; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return false; }
+    event->action_index = s->actions[s->calls];
+    if (!s->action_ids[s->calls]) return true;
+    unsigned i = 0;
+    while (i < model->action_count && strcmp(model->actions[i].id, s->action_ids[s->calls])) ++i;
+    if (i == model->action_count) { s->valid = false; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return false; }
+    event->action_index = i; return true;
+}
 static bool al_library_present(void *context, const struct zcl_present_model_v1 *model,
     const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
 {
@@ -1662,8 +1674,8 @@ static bool al_library_present(void *context, const struct zcl_present_model_v1 
     s->valid = s->valid && zcl_present_canvas_text_width(model->items[0].value,
         strlen(model->items[0].value), 14u) <= 296u;
     (void)snprintf(s->last_summary, sizeof(s->last_summary), "%s", model->summary);
-    if (s->calls >= s->count) { s->valid = false; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
-    event->action_index = s->actions[s->calls++];
+    if (!al_script_action(s, model, event)) return true;
+    ++s->calls;
     if (s->change_fixture && s->calls == s->change_at) al_library_change(s);
     return true;
 }
@@ -2499,8 +2511,8 @@ static int al_refresh_refusal_test(struct al_fx *f, struct zcl_command_reply *re
         ASSERT(al_path(saved, sizeof(saved), f->env.state_dir, "fixtureapp.selection.saved"));
         for (unsigned mode = 1; mode <= 2; ++mode) {
             zcl_command_reply_free(reply); zcl_command_reply_init(reply, "zcl.app_open.v1");
-            struct al_library_script s = {.actions = {0, 1, 2}, .count = 3, .valid = true,
-                .change_fixture = f, .change_at = 3, .break_selection = mode};
+            struct al_library_script s = {.action_ids = {"choose", "change-options", "help", "back"}, .count = 4, .valid = true,
+                .change_fixture = f, .change_at = 4, .break_selection = mode};
             zcl_test_app_library_refresh(&f->env, reply, al_library_present, &s,
                 al_library_prepare, al_library_share, al_library_notice);
             ASSERT(s.valid && s.errors == 1 && s.share_calls == 0);
@@ -3226,8 +3238,8 @@ static bool al_share_prepare_review(struct al_fx *f, unsigned choice)
 {
     struct app_selection before, after;
     if (app_selection_load(f->env.state_dir, "fixtureapp", &before) != APP_SELECTION_OK) return false;
-    struct al_library_script s = {.actions = {0, 2, 3}, .count = 3, .valid = true, .share_choice = choice};
-    if (choice == 2) { s.actions[2] = 0; s.actions[3] = 3; s.count = 4; }
+    struct al_library_script s = {.action_ids = {"choose", "share", "cancel"}, .count = 3, .valid = true, .share_choice = choice};
+    if (choice == 2) { s.action_ids[2] = "publish"; s.action_ids[3] = "cancel"; s.count = 4; }
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_open.v1");
     zcl_test_app_library_share(&f->env, &reply, al_library_present, &s,
         al_library_prepare, al_library_share, al_library_notice);

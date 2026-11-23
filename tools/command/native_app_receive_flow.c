@@ -32,7 +32,7 @@ struct receive_flow {
     app_receive_build_observer observer;
     void *observer_context;
     const char *status;
-    bool adopted, closed, draft, recovered, identity_verified;
+    bool adopted, closed, draft, recovered, identity_verified, previous;
     int selection_changed; /* -1 after Keep dispatch until its result proves the outcome. */
     bool plan_retry_eligible, plan_retry_requested, plan_retry_used;
     size_t retry_data_budget;
@@ -77,13 +77,15 @@ static bool arf_brief_fields(struct receive_flow *f, struct app_confirm *view)
     return app_confirm_path(&view->model, f->adopted ? "Personal copy: " : "Received copy: ", zcl_path_leaf(name)) &&
         app_confirm_field(&view->model, "Saved version prefix: ", prefix);
 }
+static const char *arf_version_label(const struct receive_flow *f)
+{ return f->draft && !f->previous ? "Draft version: " : "Saved version: "; }
 static bool arf_fields_named(struct receive_flow *f, struct app_confirm *view, bool leaf)
 {
     const char *name = zcl_package_copy_str(&f->reply->data, f->adopted ? "copy" : "name");
     const char *version = zcl_package_copy_str(&f->reply->data, "version");
     if (name && leaf) name = zcl_path_leaf(name);
     return name && (!leaf || *name) && version && app_confirm_field(&view->model, f->adopted ? "Personal copy: " : "App: ", name) &&
-        app_confirm_field(&view->model, f->draft ? "Draft version: " : "Saved version: ", version) &&
+        app_confirm_field(&view->model, arf_version_label(f), version) &&
         (!f->recovered || (app_confirm_field(&view->model, "Publisher: ",
             zcl_package_copy_str(&f->reply->data, "publisher_fingerprint")) &&
             app_confirm_field(&view->model, "Package: ", zcl_package_copy_str(&f->reply->data, "package_root")) &&
@@ -558,6 +560,7 @@ static bool arf_keep_result(struct receive_flow *f, const struct zcl_command_rep
 }
 static const char *arf_keep_summary(const struct receive_flow *f)
 {
+    if (f->previous) return "Keep this previous version. Your current version can be restored later.";
     if (f->draft) return "Keep this previewed version. Newer changes remain available.";
     if (f->adopted) return "Check the app before choosing Keep. Closing leaves your personal copy available.";
     if (f->recovered) return "Check the app before choosing Keep. Closing ends this review.";
@@ -1032,6 +1035,35 @@ void app_saved_draft_flow_run(const struct app_selection *selection,
     if (!ok && !f.closed) arf_notice(&f);
     if (!arf_finish(&f, ok || f.closed))
         (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Inspect the retained draft before retrying.");
+    app_receive_preview_close(f.preview);
+}
+static bool arf_previous_choose(struct receive_flow *f, const struct app_selection *selection,
+    const struct app_selection *previous, bool *chosen)
+{
+    char hex[65]; zcl_hex_encode(previous->version, 32, hex);
+    return json_push_kv_str(&f->reply->data, "name", selection->app) &&
+        json_push_kv_str(&f->reply->data, "version", hex) &&
+        arf_choose(f, "Review previous Keep", "Preview this previously kept version. Keep is a separate choice.",
+            "Preview", ARF_FIELDS_FULL, chosen);
+}
+void app_previous_flow_run(const struct app_selection *selection, const struct app_selection *previous,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path)
+{
+    if (!selection || !previous || !reply) return;
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context,
+        .status = "previous", .draft = true, .previous = true, .worker_path = worker_path};
+    bool chosen = false;
+    if (!app_previous_preview_create(selection, previous, &f.preview, reply)) return;
+    bool ok = arf_previous_choose(&f, selection, previous, &chosen);
+    if (ok && !chosen) ok = arf_status(&f, "canceled");
+    json_init(&f.operations); json_set_array(&f.operations);
+    if (ok && chosen) ok = arf_open(&f) && arf_keep(&f);
+    if (!json_push_kv(&reply->data, "operations", &f.operations)) ok = false;
+    json_free(&f.operations);
+    if (!ok && !f.closed) arf_notice(&f);
+    if (!arf_finish(&f, ok || f.closed))
+        (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Inspect the kept selection before retrying.");
     app_receive_preview_close(f.preview);
 }
 #ifdef ZCL_TESTING

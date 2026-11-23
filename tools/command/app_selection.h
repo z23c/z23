@@ -33,6 +33,10 @@ enum app_selection_result {
 /* No creation or recovery. INVALID or IO must not fall back to a default. */
 enum app_selection_result app_selection_load(const char *state_dir, const char *app,
                                               struct app_selection *out);
+/* Previous successful distinct Keep, if recorded. It remains subject to the
+ * normal trust, ancestry and image checks before preview or execution. */
+enum app_selection_result app_selection_load_previous(const char *state_dir, const char *app,
+                                                       struct app_selection *out);
 /* Read-only, bounded enumeration of valid kept records. No partial result on
  * error/overflow. This lists choices, not current executable authority. */
 enum app_selection_result app_selection_routes_load(const char *state_dir,

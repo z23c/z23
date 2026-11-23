@@ -2452,7 +2452,7 @@ static bool ak_draft_confirm_pages(struct ak_draft_flow_view *v, bool keep_view,
     if (keep_view && v->keep && !v->history) {
         v->advanced = abc_put(v->fixture->world.bob_copy, "include/boost.h", "#define BOOST 9\n") &&
             abc_save(v->fixture->world.bob_copy, v->newer);
-        if (!v->advanced) return false;
+        if (!v->advanced || !strcmp(v->nav.head, v->newer)) return false;
     }
     return aj_receive_action(live, 3, &close, &redraw) && close;
 }
@@ -2904,6 +2904,157 @@ static bool ak_draft_stale_controls(struct ak_fixture *f)
         !app_receive_preview_current(p, &reply) && !strcmp(reply.error.code, "SELECTION_STALE");
     app_receive_preview_close(p); zcl_command_reply_free(&reply); return ok;
 }
+static bool ak_previous_stale_controls(struct ak_fixture *f)
+{
+    struct app_selection current, prior, advanced;
+    struct app_receive_preview *preview = NULL;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.preview.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &current) == APP_SELECTION_OK &&
+        app_selection_load_previous(f->env.state_dir, AK_ROUTE, &prior) == APP_SELECTION_OK &&
+        memcmp(current.version, prior.version, 32) &&
+        app_previous_preview_create(&current, &prior, &preview, &reply) &&
+        app_receive_preview_current(preview, &reply) &&
+        app_selection_save(f->env.state_dir, current.revision, &current, &advanced) == APP_SELECTION_OK &&
+        !app_receive_preview_current(preview, &reply) && !strcmp(reply.error.code, "SELECTION_STALE");
+    app_receive_preview_close(preview); zcl_command_reply_free(&reply); return ok;
+}
+/* mode 0 cancels review, 1 declines Keep, 2 keeps, 3 keeps then cancels. */
+struct ak_previous_view {
+    char version[65]; bool review, keep, returned, revisited; int mode;
+    struct ak_fixture *fixture; struct app_selection current, prior;
+};
+static bool ak_previous_card(const struct ak_previous_view *v, const struct zcl_present_model_v1 *model)
+{
+    struct app_selection actual;
+    const struct app_selection *expected = v->mode >= 2 ? &v->prior : &v->current;
+    const char *leaf = strrchr(expected->copy, '/');
+    return leaf && leaf[1] && !strcmp(model->title, "My Apps") &&
+        !strncmp(model->request_id, "library-", 8) && model->action_count &&
+        !strcmp(model->actions[0].id, "open") && strstr(model->summary, leaf + 1) &&
+        app_selection_load(v->fixture->env.state_dir, AK_ROUTE, &actual) == APP_SELECTION_OK &&
+        actual.revision == v->current.revision + (v->mode >= 2 ? 1u : 0u) &&
+        !memcmp(actual.version, expected->version, 32) && !strcmp(actual.copy, expected->copy);
+}
+static bool ak_previous_revisit(struct ak_previous_view *v, const struct zcl_present_model_v1 *model,
+    struct zcl_present_window_event_v1 *event)
+{
+    if (!ak_previous_card(v, model)) return false;
+    struct app_selection old = v->current;
+    v->current = v->prior; v->current.revision = old.revision + 1;
+    v->prior = old; v->mode = 0; v->review = v->keep = false; v->revisited = true;
+    zcl_hex_encode(old.version, 32, v->version);
+    return ak_draft_press(model, event, "change-options");
+}
+static bool ak_previous_library(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)copy_text; (void)why; (void)cap;
+    struct ak_previous_view *v = context;
+    if (v->keep && v->mode == 3) return ak_previous_revisit(v, model, event);
+    if (v->keep || (v->review && v->mode == 0)) { v->returned = ak_previous_card(v, model); if (!v->returned) return false; event->struct_size = sizeof(*event);
+        event->abi_version = ZCL_PRESENT_ABI_V1; event->outcome = ZCL_PRESENT_WINDOW_DISMISSED; return true; }
+    if (!strcmp(model->request_id, "library-home")) return ak_draft_press(model, event, "myapps");
+    if (ak_draft_press(model, event, "choose")) return true;
+    if (ak_draft_press(model, event, "previous-keep")) return true;
+    return ak_draft_press(model, event, "change-options");
+}
+static bool ak_previous_answer(struct ak_previous_view *v, bool review,
+    const struct zcl_present_window_live_view_v1 *live)
+{
+    bool close = false, redraw = false;
+    if (review) v->review = true; else v->keep = true;
+    bool cancel = (review && v->mode == 0) || (!review && v->mode == 1);
+    return aj_receive_action(live, cancel ? 0 : 3, &close, &redraw) && close;
+}
+static bool ak_previous_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct ak_previous_view *v = context; bool close = false, redraw = false; uint32_t count = 0;
+    if (!pages || !live) return false;
+    if (!model->action_count) return ak_draft_wait_worker(live);
+    bool review = !strcmp(model->title, "Review previous Keep");
+    bool keep = !strcmp(model->title, "Preview opened");
+    if ((!review && !keep) || !aj_receive_field(model, "Saved version: ", v->version) ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close) return false;
+    return ak_previous_answer(v, review, live);
+}
+static bool ak_previous_head(const struct ak_fixture *f, uint8_t head[32])
+{
+    struct zcl_package_copy copy = {0}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.previous.v1");
+    bool ok = zcl_package_copy_open_as(f->world.bob_copy, ZCL_PACKAGE_COPY_READ, &copy, &reply, "test");
+    if (ok) memcpy(head, copy.head_version, 32);
+    zcl_package_copy_close(&copy); zcl_command_reply_free(&reply); return ok;
+}
+static bool ak_previous_saved(struct ak_fixture *f, int mode, const uint8_t head[32],
+    const struct app_selection *before, const struct app_selection *prior)
+{
+    struct app_selection after, redo; uint8_t after_head[32];
+    return app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        app_selection_load_previous(f->env.state_dir, AK_ROUTE, &redo) == APP_SELECTION_OK &&
+        ak_previous_head(f, after_head) && !memcmp(head, after_head, 32) &&
+        after.revision == before->revision + (mode == 2 ? 1u : 0u) &&
+        !memcmp(after.version, mode == 2 ? prior->version : before->version, 32) &&
+        !memcmp(redo.version, mode == 2 ? before->version : prior->version, 32);
+}
+static bool ak_previous_result(struct ak_fixture *f, int mode, const uint8_t head[32],
+    const struct app_selection *before, const struct app_selection *prior,
+    const struct ak_previous_view *view, const struct zcl_command_reply *reply, bool stopped)
+{
+    return stopped && view->review && view->keep == (mode != 0) && view->returned &&
+        reply->status == ZCL_COMMAND_STATUS_PASSED && ak_previous_saved(f, mode, head, before, prior) &&
+        (mode != 0 || !reply->error.mutated) &&
+        (mode != 0 || !json_get(&reply->data, "continuation"));
+}
+static bool ak_previous_receipt(struct ak_fixture *f, const uint8_t head[32],
+    const struct app_selection *before, const struct app_selection *prior,
+    const struct ak_previous_view *view, const struct zcl_command_reply *reply, bool stopped)
+{
+    const struct json_value *kept = json_get(&reply->data, "historical_keep");
+    char version[65], record[65], image[65];
+    zcl_hex_encode(prior->version, 32, version); zcl_hex_encode(prior->record, 32, record);
+    zcl_hex_encode(prior->image, 32, image);
+    return stopped && view->revisited && view->review && view->returned && !view->keep &&
+        reply->status == ZCL_COMMAND_STATUS_PASSED && reply->error.mutated &&
+        ak_previous_saved(f, 2, head, before, prior) && kept &&
+        !strcmp(aso_string(kept, "name"), AK_ROUTE) &&
+        json_get_int(json_get(kept, "selection_revision")) == (int64_t)(before->revision + 1) &&
+        !strcmp(aso_string(kept, "version"), version) && !strcmp(aso_string(kept, "record_id"), record) &&
+        !strcmp(aso_string(kept, "image_sha3"), image);
+}
+static bool ak_previous_action(struct ak_fixture *f, int mode)
+{
+    struct app_selection before = {0}, prior = {0};
+    char worker[PATH_MAX]; uint8_t head[32];
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
+        app_selection_load_previous(f->env.state_dir, AK_ROUTE, &prior) == APP_SELECTION_OK && ak_previous_head(f, head) &&
+        realpath("build/bin/z23-dev", worker);
+    struct ak_previous_view view = {.mode = mode, .fixture = f, .current = before, .prior = prior};
+    zcl_hex_encode(prior.version, 32, view.version);
+    zcl_native_bridge_ensure_rpc(); char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
+    if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_previous_library, ak_previous_present, &view, worker);
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
+    const struct json_value *evidence = mode == 3 ? json_get(&reply.data, "historical_keep") : &reply.data;
+    const struct json_value *operation = json_at(json_get(evidence, "operations"), 0);
+    if (operation) {
+        struct aso_build opened = f->build;
+        (void)snprintf(opened.image_path, sizeof(opened.image_path), "%s/app_build/images/%s",
+            f->world.bob_datadir, aso_string(operation, "image_sha3"));
+        aso_track_ready(operation, &opened);
+    }
+    bool stopped = aso_cleanup_children();
+    ok = ok && (mode == 3 ? ak_previous_receipt(f, head, &before, &prior, &view, &reply, stopped)
+                          : ak_previous_result(f, mode, head, &before, &prior, &view, &reply, stopped));
+    zcl_command_reply_free(&reply); return ok;
+}
 static bool ak_refused(struct ak_fixture *f, const char *code)
 {
     struct abc_leaf leaf;
@@ -3213,6 +3364,9 @@ static int ak_draft_acceptance(struct ak_fixture *f)
         ASSERT(ak_draft_preview_keep_variant(f, false, false, false, false, false, true));
         ASSERT(ak_draft_preview_keep_variant(f, false, true, false, false, false, true));
         ASSERT(ak_draft_preview_keep(f, true));
+        ASSERT(ak_previous_action(f, 0) && ak_previous_action(f, 1) &&
+            ak_previous_action(f, 2) && ak_previous_action(f, 2) && ak_previous_action(f, 3));
+        ASSERT(ak_previous_stale_controls(f));
         ASSERT(ak_draft_stale_controls(f));
         PASS();
     } _test_next:;

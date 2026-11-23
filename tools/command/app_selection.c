@@ -2,6 +2,7 @@
  * purpose: Persist and validate revisioned owner selections of exact app versions.
  */
 #include "command/app_selection.h"
+#include "native_app_scratch.h"
 #include "base/serialize_le.h"
 #include "models/activerecord.h"
 #include "platform/directory_compat.h"
@@ -23,6 +24,10 @@
 #define AS_TAG 24u
 #define AS_BODY (AS_TAG + 8u + 33u + 2u * APP_SELECTION_PATH_MAX + 8u * 32u)
 #define AS_WIRE (AS_BODY + 32u)
+/* The first independently checked v1 record stays readable if the optional
+ * previous record is damaged. The trailer identifies the two-record format. */
+#define AS_V2_TAG "Z23SEL2"
+#define AS_V2_WIRE (2u * AS_WIRE + sizeof(AS_V2_TAG) + 32u)
 static struct ar_callbacks as_callbacks;
 static zcl_once_t as_callbacks_once = ZCL_ONCE_INIT;
 static void as_callbacks_init(void) { ar_callbacks_init(&as_callbacks); }
@@ -101,6 +106,13 @@ static void as_hash(const uint8_t *wire, uint8_t out[32])
     sha3_256_write(&sha, wire, AS_BODY);
     sha3_256_finalize(&sha, out);
 }
+static void as_pair_hash(const uint8_t first[AS_WIRE], const uint8_t second[AS_WIRE], uint8_t out[32])
+{
+    struct sha3_256_ctx sha; sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)AS_V2_TAG, sizeof(AS_V2_TAG));
+    sha3_256_write(&sha, first, AS_WIRE); sha3_256_write(&sha, second, AS_WIRE);
+    sha3_256_finalize(&sha, out);
+}
 static void as_encode(const struct app_selection *s, uint8_t wire[AS_WIRE])
 {
     memset(wire, 0, AS_WIRE);
@@ -146,7 +158,31 @@ static int as_directory(const char *dir)
     }
     return fd;
 }
-static enum app_selection_result as_read_fd(int dirfd, const char *app, struct app_selection *out)
+static enum app_selection_result as_read_previous_fd(int fd, off_t size, const char *app, struct app_selection *out)
+{
+    uint8_t first[AS_WIRE], wire[AS_WIRE], trailer[sizeof(AS_V2_TAG) + 32u], hash[32];
+    struct app_selection current;
+    if (!an_scratch_read_exact(fd, first, sizeof(first))) return APP_SELECTION_IO;
+    if (!as_decode(first, &current) || strcmp(current.app, app)) return APP_SELECTION_INVALID;
+    if (size == AS_WIRE) return APP_SELECTION_ABSENT;
+    if (!an_scratch_read_exact(fd, wire, sizeof(wire)) || !an_scratch_read_exact(fd, trailer, sizeof(trailer)))
+        return APP_SELECTION_IO;
+    as_pair_hash(first, wire, hash);
+    if (memcmp(trailer, AS_V2_TAG, sizeof(AS_V2_TAG)) ||
+        memcmp(trailer + sizeof(AS_V2_TAG), hash, sizeof(hash))) return APP_SELECTION_INVALID;
+    uint8_t empty[AS_WIRE] = {0};
+    if (!memcmp(wire, empty, sizeof(wire))) return APP_SELECTION_ABSENT;
+    if (!as_decode(wire, out) || strcmp(out->app, app) || out->revision >= current.revision)
+        return APP_SELECTION_INVALID;
+    return APP_SELECTION_OK;
+}
+static enum app_selection_result as_read_current_fd(int fd, const char *app, struct app_selection *out)
+{
+    uint8_t wire[AS_WIRE];
+    if (!an_scratch_read_exact(fd, wire, sizeof(wire))) return APP_SELECTION_IO;
+    return as_decode(wire, out) && !strcmp(out->app, app) ? APP_SELECTION_OK : APP_SELECTION_INVALID;
+}
+static enum app_selection_result as_read_part(int dirfd, const char *app, struct app_selection *out, bool previous)
 {
     char name[64], stem[40]; as_stem(app, stem);
     (void)snprintf(name, sizeof(name), "%s.selection", stem);
@@ -154,20 +190,17 @@ static enum app_selection_result as_read_fd(int dirfd, const char *app, struct a
     if (fd < 0) return errno == ENOENT ? APP_SELECTION_ABSENT : APP_SELECTION_IO;
     struct stat st;
     if (fstat(fd, &st) != 0) { close(fd); return APP_SELECTION_IO; }
-    if (!S_ISREG(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 0777) != 0600 || st.st_size != AS_WIRE) {
+    if (!S_ISREG(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 0777) != 0600 ||
+        (st.st_size != AS_WIRE && st.st_size != AS_V2_WIRE)) {
         close(fd); return APP_SELECTION_INVALID;
     }
-    uint8_t wire[AS_WIRE]; size_t at = 0;
-    while (at < sizeof(wire)) {
-        ssize_t got = read(fd, wire + at, sizeof(wire) - at);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) { close(fd); return APP_SELECTION_IO; }
-        at += (size_t)got;
-    }
+    enum app_selection_result result = previous ? as_read_previous_fd(fd, st.st_size, app, out)
+                                                 : as_read_current_fd(fd, app, out);
     if (close(fd) != 0) return APP_SELECTION_IO;
-    if (!as_decode(wire, out) || strcmp(out->app, app)) return APP_SELECTION_INVALID;
-    return APP_SELECTION_OK;
+    return result;
 }
+static enum app_selection_result as_read_fd(int dirfd, const char *app, struct app_selection *out)
+{ return as_read_part(dirfd, app, out, false); }
 static bool as_sync(int fd)
 {
     int rc;
@@ -198,15 +231,21 @@ static int as_temp_open(int dirfd, const char *app, char name[96])
 }
 /* All names, including the temp and destination, are resolved relative to
  * the retained and verified directory used for locking and the CAS read. */
-static bool as_publish(int dirfd, const struct app_selection *s)
+static bool as_publish(int dirfd, const struct app_selection *s, const struct app_selection *previous)
 {
-    char name[64], temp[96], stem[40]; uint8_t wire[AS_WIRE];
+    char name[64], temp[96], stem[40]; uint8_t wire[AS_WIRE], first[AS_WIRE], hash[32];
     as_stem(s->app, stem);
     (void)snprintf(name, sizeof(name), "%s.selection", stem);
     as_encode(s, wire);
+    memcpy(first, wire, sizeof(first));
     int fd = as_temp_open(dirfd, s->app, temp);
     if (fd < 0) return false;
-    bool ok = as_write_all(fd, wire, sizeof(wire)) && as_sync(fd);
+    bool ok = as_write_all(fd, wire, sizeof(wire));
+    if (previous) as_encode(previous, wire); else memset(wire, 0, sizeof(wire));
+    as_pair_hash(first, wire, hash);
+    ok = ok && as_write_all(fd, wire, sizeof(wire)) &&
+        as_write_all(fd, (const uint8_t *)AS_V2_TAG, sizeof(AS_V2_TAG)) &&
+        as_write_all(fd, hash, sizeof(hash)) && as_sync(fd);
     if (close(fd) != 0) ok = false;
     if (ok) ok = renameat(dirfd, temp, dirfd, name) == 0;
     if (!ok) { (void)unlinkat(dirfd, temp, 0); return false; }
@@ -215,12 +254,12 @@ static bool as_publish(int dirfd, const struct app_selection *s)
 #endif
     return as_sync(dirfd);
 }
-static bool as_write(int dirfd, const struct app_selection *s)
+static bool as_write(int dirfd, const struct app_selection *s, const struct app_selection *previous)
 {
     struct ar_callbacks *cbs = db_app_selection_callbacks();
     if (!cbs) return false;
     AR_BEGIN_SAVE(cbs, "app_selection", s, as_valid);
-    bool ok = as_publish(dirfd, s);
+    bool ok = as_publish(dirfd, s, previous);
     AR_FINISH_SAVE(cbs, s, ok);
 }
 /* A replaced pathname is not the directory whose lock and record we hold. */
@@ -286,6 +325,22 @@ static enum app_selection_result as_routes_read(DIR *directory, struct app_selec
     return APP_SELECTION_INVALID; /* Explicit scan bound, never a partial list. */
 }
 
+static enum app_selection_result as_prior_for_save(int dirfd, const struct app_selection *current,
+    const struct app_selection *next, struct app_selection *prior, bool *has_prior)
+{
+    enum app_selection_result result = as_read_part(dirfd, next->app, prior, true);
+    if (result != APP_SELECTION_OK && result != APP_SELECTION_ABSENT) return result;
+    struct app_selection comparable = *next; comparable.revision = current->revision;
+    uint8_t a[AS_WIRE], b[AS_WIRE]; as_encode(current, a); as_encode(&comparable, b);
+    if (memcmp(a, b, sizeof(a))) { *prior = *current; *has_prior = true; }
+    else *has_prior = result == APP_SELECTION_OK;
+    return APP_SELECTION_OK;
+}
+static bool as_stale(enum app_selection_result result, uint64_t expected, const struct app_selection *current)
+{
+    return (result == APP_SELECTION_ABSENT && expected != 0) ||
+        (result == APP_SELECTION_OK && current->revision != expected);
+}
 static enum app_selection_result as_locked_save(const char *dir, int dirfd,
     uint64_t expected, const struct app_selection *next, struct app_selection *out)
 {
@@ -296,10 +351,14 @@ static enum app_selection_result as_locked_save(const char *dir, int dirfd,
 #endif
     struct app_selection current;
     enum app_selection_result result = as_read_fd(dirfd, next->app, &current);
-    if ((result == APP_SELECTION_ABSENT && expected != 0) ||
-        (result == APP_SELECTION_OK && current.revision != expected)) result = APP_SELECTION_STALE;
+    if (as_stale(result, expected, &current)) result = APP_SELECTION_STALE;
     else if (result == APP_SELECTION_ABSENT || result == APP_SELECTION_OK) {
-        bool published = as_directory_current(dir, dirfd) && as_write(dirfd, next);
+        struct app_selection previous; bool has_prior = false;
+        if (result == APP_SELECTION_OK) {
+            enum app_selection_result old = as_prior_for_save(dirfd, &current, next, &previous, &has_prior);
+            if (old != APP_SELECTION_OK) { close(lockfd); return old; }
+        }
+        bool published = as_directory_current(dir, dirfd) && as_write(dirfd, next, has_prior ? &previous : NULL);
         result = published && as_directory_current(dir, dirfd) ? APP_SELECTION_OK : APP_SELECTION_IO;
         if (result == APP_SELECTION_OK) *out = *next;
     }
@@ -342,6 +401,23 @@ enum app_selection_result app_selection_load(const char *dir, const char *app,
     int fd = as_directory(dir);
     if (fd < 0) return errno == ENOENT ? APP_SELECTION_ABSENT : APP_SELECTION_IO;
     enum app_selection_result result = as_read_fd(fd, app, out);
+    close(fd);
+    return result;
+#endif
+}
+
+enum app_selection_result app_selection_load_previous(const char *dir, const char *app,
+                                                       struct app_selection *out)
+{
+    if (!as_id(app) || !out) return APP_SELECTION_INVALID;
+    memset(out, 0, sizeof(*out));
+#if defined(_WIN32)
+    (void)dir;
+    return APP_SELECTION_IO;
+#else
+    int fd = as_directory(dir);
+    if (fd < 0) return errno == ENOENT ? APP_SELECTION_ABSENT : APP_SELECTION_IO;
+    enum app_selection_result result = as_read_part(fd, app, out, true);
     close(fd);
     return result;
 #endif
