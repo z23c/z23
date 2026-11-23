@@ -1616,6 +1616,134 @@ static int test_rep_fanout_held_counted(void)
     return failures;
 }
 
+/* ── push-first, fleet scope: what it costs and saves ───────────────────
+ * Twenty fleet notes by the pushing box (A), each carried on its own into
+ * the answering box (B): by the policy before the fan-out (no addressee, so
+ * B's pull carries it) and by the fan-out push. Then B's pull of A (the
+ * repair path, which still runs after a push; its cursor knows nothing of
+ * the push, so it carries the post again) and a third box C's pull of
+ * B (B -> A -> C in the relay's terms: the pushing box's post reaching a box
+ * it is not paired with). Bytes are the sealed bytes both ways on the wire
+ * (mesh_loop_wire_bytes), Noise and message framing included. Time is this
+ * process's work from the store to the post being visible at B; the wait for
+ * the lane's next tick (FLEET_BOARD_FLEET_TICK_US) or next pull
+ * (FLEET_BOARD_FLEET_PULL_INTERVAL_S) is the schedule's, not measured here.
+ * One line per policy is printed. */
+
+#define RFM_POSTS 20
+
+struct rfm {
+    int64_t us[RFM_POSTS];
+    uint64_t first;  /* A -> B: the push and its receipt, or B's pull */
+    uint64_t repair; /* B's pull of A after a push */
+    uint64_t relay;  /* C's pull of B */
+    struct node_db c;
+};
+
+/* What a finished pull still has queued (the asker's credit back for the
+ * answer), carried, so it counts to that pull. */
+static void rfm_drain(struct rfo *o)
+{
+    struct fbw *w = &o->w;
+    mesh_loop_discard(w->asker, w->ask_q, w->f.res_term);
+    mesh_loop_discard(w->answerer, w->answer_q, w->f.term_peer.ini);
+}
+
+/* B's pull of A: the posts it stored. */
+static size_t rfm_pull_b(struct rfo *o)
+{
+    size_t stored = rfo_pull_into_addressee(o);
+    rfm_drain(o);
+    return stored;
+}
+
+/* Note `i` by A, carried into B by the push or by the pull. */
+static bool rfm_carry(struct rfo *o, bool push, int i,
+                      const struct fleet_board_post *p, const uint8_t pk[32])
+{
+    if (!push)
+        return boot_fleet_board_fleet_push_enqueue_to(p, pk, NULL) ==
+                   FLEET_BOARD_PUSH_HINT_NONE &&
+               rfm_pull_b(o) == 1;
+    return boot_fleet_board_fleet_push_enqueue_all(p, pk, NULL) ==
+               FLEET_BOARD_PUSH_HINT_NONE &&
+           boot_fleet_board_fleet_test_push_send_at(&o->w.svc, &o->w.b,
+                                                    FBW_NOW + 2 * i) == 1 &&
+           rfo_addressee_commit(o) == 1;
+}
+
+static bool rfm_one(struct rfo *o, struct rfm *m, bool push, int i)
+{
+    struct fleet_board_post p;
+    uint8_t seed[32], pk[32];
+    char text[32];
+    size_t frames = 0;
+    (void)snprintf(text, sizeof text, "measured %d", i);
+    fb_test_identity(RFO_PUSHER, seed, pk);
+    if (!fbw_post(&o->w.b, RFO_PUSHER, FLEET_BOARD_SCOPE_FLEET, text, 2001 + i,
+                  3600, 2100 + i, &p))
+        return false;
+    uint64_t b0 = mesh_loop_wire_bytes();
+    int64_t t0 = platform_time_monotonic_us();
+    bool ok = rfm_carry(o, push, i, &p, pk) && db_fleet_board_have(&o->w.a, p.id);
+    m->us[i] = platform_time_monotonic_us() - t0;
+    uint64_t b1 = mesh_loop_wire_bytes();
+    m->first += b1 - b0;
+    if (push) /* the pull still runs; the post is already held */
+        ok = ok && rfm_pull_b(o) == 0;
+    uint64_t b2 = mesh_loop_wire_bytes();
+    m->repair += b2 - b1;
+    boot_fleet_board_fleet_test_bind(&o->w.a);
+    ok = ok && fbw_pull(&o->w, o->w.box_b, &m->c, &frames) == 1;
+    rfm_drain(o);
+    m->relay += mesh_loop_wire_bytes() - b2;
+    return ok;
+}
+
+static int rfm_cmp(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+static bool rfm_run(struct rfm *m, bool push)
+{
+    memset(m, 0, sizeof *m);
+    bool ok = rfo_open(&g_rfo, RFO_UNPAIRED) && node_db_open(&m->c, ":memory:");
+    for (int i = 0; ok && i < RFM_POSTS; i++)
+        ok = rfm_one(&g_rfo, m, push, i);
+    rfo_close(&g_rfo);
+    if (m->c.open)
+        node_db_close(&m->c);
+    qsort(m->us, RFM_POSTS, sizeof m->us[0], rfm_cmp);
+    printf("    fleet %s: A->B in-process p50 %lld us p95 %lld us max %lld us; "
+           "bytes/post A->B %llu, repair pull %llu, B->C pull %llu\n",
+           push ? "fan-out push" : "pull only (before)",
+           (long long)m->us[RFM_POSTS / 2], (long long)m->us[RFM_POSTS - 2],
+           (long long)m->us[RFM_POSTS - 1],
+           (unsigned long long)(m->first / RFM_POSTS),
+           (unsigned long long)(m->repair / RFM_POSTS),
+           (unsigned long long)(m->relay / RFM_POSTS));
+    return ok;
+}
+
+static int test_rep_fanout_measure(void)
+{
+    int failures = 0;
+    static struct rfm before, after;
+    TEST("fleet board fan-out: twenty fleet notes each reach the paired box "
+         "by the push alone in fewer wire bytes than the pull that carried "
+         "it, the pull after it stores nothing new, and the relay pull is "
+         "the same bytes either way") {
+        ASSERT(rfm_run(&before, false));
+        ASSERT(rfm_run(&after, true));
+        ASSERT(after.first < before.first);
+        ASSERT_EQ(after.relay, before.relay);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_board_replication(void)
 {
     return test_rep_happy_path() + test_rep_restart_midway() +
@@ -1631,5 +1759,5 @@ int test_fleet_board_replication(void)
            test_rep_public_relay_two_hops() + test_rep_public_relay_cycle() +
            test_rep_public_relay_flood_bound() + test_rep_fanout_eligible() +
            test_rep_fanout_ineligible() + test_rep_fanout_pull_repairs() +
-           test_rep_fanout_held_counted();
+           test_rep_fanout_held_counted() + test_rep_fanout_measure();
 }

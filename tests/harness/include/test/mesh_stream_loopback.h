@@ -38,6 +38,11 @@ size_t mesh_loop_take(struct p2p_node *from, struct send_segment *sentinel,
                       struct noise_transport *to_transport, uint8_t *out,
                       size_t out_cap, bool *more);
 
+/* The sealed bytes every mesh_loop_take has taken off any queue since the
+ * process started: what crossed the wire, Noise and message framing
+ * included, below TCP. A caller measures by difference. */
+uint64_t mesh_loop_wire_bytes(void);
+
 /* Every queued frame, opened on the peer's transport and thrown away.
  * Noise records must be opened in the order they were sealed, so a test
  * that wants a clean queue still has to feed every record through. */

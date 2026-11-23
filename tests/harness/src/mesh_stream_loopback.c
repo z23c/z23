@@ -24,6 +24,13 @@ struct send_segment *mesh_loop_sentinel(struct p2p_node *node)
     return sentinel;
 }
 
+static uint64_t g_wire_bytes;
+
+uint64_t mesh_loop_wire_bytes(void)
+{
+    return g_wire_bytes;
+}
+
 size_t mesh_loop_take(struct p2p_node *from, struct send_segment *sentinel,
                       struct noise_transport *to_transport, uint8_t *out,
                       size_t out_cap, bool *more)
@@ -33,6 +40,7 @@ size_t mesh_loop_take(struct p2p_node *from, struct send_segment *sentinel,
     if (!seg)
         return 0;
     *more = true;
+    g_wire_bytes += seg->size;
     sentinel->next = seg->next;
     if (from->send_tail == seg)
         from->send_tail = sentinel;
