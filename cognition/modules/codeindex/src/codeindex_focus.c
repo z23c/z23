@@ -29,6 +29,8 @@
 #define FOCUS_REASON_PART 8
 #define FOCUS_REASON_PART_MAX 160
 #define FOCUS_FILE_CAP (256u * 1024u)
+/* Full-suite timing includes input keys and metadata for every test group. */
+#define FOCUS_TIMING_CAP (4u * 1024u * 1024u)
 #define FOCUS_GIT_CAP (256u * 1024u)
 #define FOCUS_PAGE 64
 #define FOCUS_ROUTE_CAP 12
@@ -271,7 +273,7 @@ static bool focus_load_failed_artifact(
         LOG_FAIL(FOCUS_TAG, "evidence path");
     char *raw = NULL;
     size_t len = 0;
-    int st = focus_read_file(path, FOCUS_FILE_CAP, &raw, &len);
+    int st = focus_read_file(path, FOCUS_TIMING_CAP, &raw, &len);
     if (st == FOCUS_READ_MISSING)
         return true;
     if (st != FOCUS_READ_OK)

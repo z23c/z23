@@ -681,6 +681,67 @@ static int test_focus_primary_only(void)
     return failures;
 }
 
+static bool focus_pad_timing(FILE *f)
+{
+    long pos = ftell(f);
+    if (pos < 0) return false;
+    while (pos++ <= 4L * 1024 * 1024)
+        if (fputc(' ', f) == EOF) return false;
+    return true;
+}
+
+/* Emit the timing writer's row fields, with the only failure past 256 KiB. */
+static bool focus_write_full_timing(bool corrupt, bool oversized, long *size)
+{
+    if (!focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json", "")) return false;
+    FILE *f = fopen(FOCUS_FIX "/.cache/test-timing/last-run.json", "wb");
+    if (!f) return false;
+    bool ok = fputs("{\"schema\":\"zcl.test_timing.v1\",\"groups\":[\n", f) >= 0;
+    for (unsigned i = 0; i < 1800 && ok; i++) {
+        ok = fprintf(f, "%s{\"name\":\"%s%04u\",\"ms\":123,\"timing_valid\":true,"
+            "\"rc\":%d,\"signaled\":false,\"cached\":false,\"measured\":true,"
+            "\"key_valid\":true,\"input_key\":\"0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef\",\"proof_contract\":0,"
+            "\"skip_markers\":0,\"env_unobserved\":0,\"load_flaky\":0}",
+            i ? ",\n" : "", i == 1799 ? "test_late_failure_" : "test_suite_group_",
+            i, i == 1799 ? 1 : 0) > 0;
+    }
+    if (ok) ok = fputs(corrupt ? ",{\"name\":]" : "]}", f) >= 0;
+    if (ok && oversized) ok = focus_pad_timing(f);
+    *size = ftell(f);
+    if (*size < 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int test_focus_full_timing(void)
+{
+    int failures = 0;
+    TEST("code_focus: full-suite timing retains the late failure and bounds reads") {
+        long size = 0;
+        struct specialist_focus_evidence ev;
+        test_rm_rf_recursive(FOCUS_FIX);
+        ASSERT(focus_write_full_timing(false, false, &size));
+        ASSERT(size > 256L * 1024 && size < 4L * 1024 * 1024);
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        ASSERT_EQ(ev.tests_run, SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+        ASSERT_EQ(ev.failed_count, 1);
+        ASSERT_STR_EQ(ev.failed[0], "test_late_failure_1799");
+        ASSERT(focus_write_full_timing(true, false, &size));
+        ASSERT(size > 256L * 1024 && size < 4L * 1024 * 1024);
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(!specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        ASSERT(focus_write_full_timing(false, true, &size));
+        ASSERT(size > 4L * 1024 * 1024);
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(!specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(FOCUS_FIX);
+    return failures;
+}
+
 int test_code_focus(void)
 {
     int failures = 0;
@@ -688,6 +749,7 @@ int test_code_focus(void)
     failures += test_focus_unknown();
     failures += test_focus_missing_run();
     failures += test_focus_malformed_run();
+    failures += test_focus_full_timing();
     failures += focus_test_failure_capacity(false);
     failures += focus_test_failure_capacity(true);
     failures += test_focus_recorded_run();
