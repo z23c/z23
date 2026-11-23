@@ -437,6 +437,13 @@ static int qa_check_restored_state(int result)
 }
 #endif
 
+static void qa_report_held_ctrl(void)
+{
+    if (qa_hold_left_ctrl && !(qa_original_closed & 2u))
+        fprintf(stdout, "QA_HELD_CTRL weapon_calls=%u bullet_calls=%u\n",
+                qa_weapon_manager_calls, qa_bullet_calls);
+}
+
 static int qa_finish(int result, FILE *agent_input)
 {
     if (qa_bad_stdio) result = 4;
@@ -451,9 +458,6 @@ static int qa_finish(int result, FILE *agent_input)
     if (agent_input) fclose(agent_input);
     if (!(qa_original_closed & 4u)) fprintf(qa_agent ? stderr : stdout, "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u\n",
         result, qa_windows, qa_frames, qa_closed, qa_destroyed, qa_unloads);
-    if (qa_hold_left_ctrl && !(qa_original_closed & 4u))
-        fprintf(stdout, "QA_HELD_CTRL weapon_calls=%u bullet_calls=%u\n",
-                qa_weapon_manager_calls, qa_bullet_calls);
     if (qa_agent && !(qa_original_closed & 4u)) fprintf(stderr, "QA_AGENT ticks=%u keys=%u polls=%u stick=%.3f,%.3f\n",
         qa_ticks, qa_keys, qa_polls, (double)qa_stick_x, (double)qa_stick_y);
     if (qa_resident && !(qa_original_closed & 4u)) fprintf(stderr, "QA_RESIDENT events=%u\n", qa_events);
@@ -472,5 +476,6 @@ int main(int argc, char **argv)
 #if !defined(_WIN32)
     result = qa_check_restored_state(result);
 #endif
+    qa_report_held_ctrl();
     return qa_finish(result, agent_input);
 }
