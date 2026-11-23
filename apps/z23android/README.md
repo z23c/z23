@@ -29,6 +29,11 @@ Quirc preparation is incremental: unchanged pinned sources and patches are
 reused, while changed inputs or missing generated sources trigger regeneration.
 <!-- claim: symbol-present QUIRC_STAMP apps/z23android/Makefile # incremental pinned quirc preparation -->
 
+The Linux prerequisites in the ANDROID.md guide apply. Before the first
+command below, put the NDK's LLVM `bin` directory on `PATH`; `VENDOR_CC` is
+needed only when the NDK compiler is not on `PATH` as
+`aarch64-linux-android35-clang`.
+
 From the repository root, build the Android node and its pinned dependencies,
 then package the app:
 

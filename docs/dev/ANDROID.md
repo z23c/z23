@@ -21,6 +21,25 @@ export ANDROID_NDK_ROOT=/path/to/android-ndk-r30
 make -j4 ZCL_TARGET=android-arm64 z23
 ```
 
+Two prerequisites apply to `make ZCL_TARGET=android-arm64 z23`, including the
+`tor-full` step it runs first:
+
+- Put the NDK's LLVM `bin` directory on `PATH` before running make. The build
+  compiles with `aarch64-linux-android$ANDROID_API-clang` and archives with
+  `llvm-ar` and `llvm-ranlib`, all from that directory. On Linux it is
+  `$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin`; on macOS it is
+  `.../prebuilt/darwin-x86_64/bin`.
+
+  ```sh
+  export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+  ```
+
+- `VENDOR_CC` is not needed in the normal flow. `ANDROID_API` defaults to 35,
+  and the build selects `aarch64-linux-android35-clang`, which the Tor
+  provenance probe also resolves. Set `VENDOR_CC` only when that compiler is
+  not on `PATH` under that name (for example a ccache wrapper or an absolute
+  path). Export the same value for both `make tor-full` and the node build.
+
 On managed development hosts, run the make command through the installed
 build-admission command. The first build fetches and builds the pinned
 dependencies. Target archives are separate from host archives. Host tools

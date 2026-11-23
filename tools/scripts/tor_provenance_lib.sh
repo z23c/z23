@@ -60,12 +60,12 @@ zcl_tor_prepare_environment() {
 # what "the compiler" was.
 zcl_tor_effective_cc() {
     local build_dir="$1" triple="${2:-}" cc
-    if [ -n "$triple" ]; then printf '%s\n' "${VENDOR_CC:-$triple-gcc}"; return 0; fi
     if [ -n "${VENDOR_CC:-}" ]; then printf '%s\n' "$VENDOR_CC"; return 0; fi
-    cc="$(awk -F'=' '/^CC[ \t]*=/{ sub(/^[ \t]*/, "", $2); print $2; exit }' \
-        "$build_dir/Makefile" 2>/dev/null || true)"
-    [ -n "$cc" ] || cc="${CC:-cc}"
-    printf '%s\n' "$cc"
+    if [ -n "$triple" ]; then cc="$triple-gcc"
+        if [ "${triple#*android}" != "$triple" ] || { ! command -v "$cc" >/dev/null 2>&1 && command -v "$triple-clang" >/dev/null 2>&1; }; then cc="$triple-clang"; fi
+        printf '%s\n' "$cc"; return 0; fi
+    cc="$(awk -F'=' '/^CC[ \t]*=/{ sub(/^[ \t]*/, "", $2); print $2; exit }' "$build_dir/Makefile" 2>/dev/null || true)"
+    printf '%s\n' "${cc:-${CC:-cc}}"
 }
 
 # The ONE derivation of "what compiler identity does the Tor provenance
