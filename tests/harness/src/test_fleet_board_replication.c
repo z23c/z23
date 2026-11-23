@@ -18,6 +18,7 @@
 #include "json/json.h"
 #include "models/fleet_board_post.h"
 #include "models/mesh_pairing.h"
+#include "rpc/server.h"
 #include "session/fleet_board_proto.h"
 #include "test/fleet_board_two_node_fixture.h"
 #include "test/mesh_stream_fixture.h"
@@ -26,6 +27,7 @@
 #include "../../../engine/composition/src/boot_fleet_board_rpc_internal.h"
 
 #include <stdio.h>
+#include <sqlite3.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -150,6 +152,26 @@ static void rep_observe(const uint8_t peer[32], const uint8_t post[32],
                         struct boot_fleet_board_observation *ingest)
 {
     boot_fleet_board_observe_query(peer, post, attempt, ingest);
+}
+
+/* Query the native status RPC against B, restoring the fixture's authority. */
+static bool rep_status_rpc(struct rep *r, const uint8_t post[32], struct json_value *out)
+{
+    struct rpc_table table; struct json_value in, params;
+    struct node_db *saved = r->w.dbsvc.node_db;
+    char peer_hex[65], post_hex[65], warmup[256];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof warmup);
+    fleet_board_id_to_hex(r->w.box_a, peer_hex); fleet_board_id_to_hex(post, post_hex);
+    json_init(&in); json_init(&params); json_set_object(&in); json_set_array(&params);
+    rpc_table_init(&table); boot_fleet_board_register_rpc(&table);
+    r->w.dbsvc.node_db = &r->w.b; set_rpc_warmup_finished();
+    bool ok = json_push_kv_str(&in, "op", "status") &&
+        json_push_kv_str(&in, "peer", peer_hex) && json_push_kv_str(&in, "post", post_hex) &&
+        json_push_back(&params, &in) && rpc_table_execute(&table, "fleet_board", &params, out) &&
+        json_get_bool(json_get(out, "ok"));
+    r->w.dbsvc.node_db = saved;
+    if (was_warming) set_rpc_warmup_started(warmup);
+    json_free(&params); json_free(&in); return ok;
 }
 
 static bool rep_stage_is(const struct boot_fleet_board_observation *v,
@@ -437,6 +459,7 @@ static int test_rep_stage_text(void)
         { BOARD_STAGE_ANSWER_ROLE, "answer-role", "z23 fleet roles list" },
         { BOARD_STAGE_INGEST_ROLE, "ingest-role", "z23 fleet roles list" },
         { BOARD_STAGE_INGEST_LIMIT, "ingest-limit", "z23 fleet board status" },
+        { BOARD_STAGE_INGEST_STORAGE, "ingest-storage", "storage logs" },
         { BOARD_STAGE_DECODE, "decode", "z23 version" },
         { BOARD_STAGE_ROSTER, "roster", "z23 fleet doctor" },
     };
@@ -461,6 +484,8 @@ static int test_rep_stage_text(void)
                   BOARD_STAGE_INGEST_ROLE);
         ASSERT_EQ(boot_fleet_board_ingest_stage(FLEET_BOARD_ERR_QUOTA),
                   BOARD_STAGE_INGEST_LIMIT);
+        ASSERT_EQ(boot_fleet_board_ingest_stage(FLEET_BOARD_ERR_STORAGE),
+                  BOARD_STAGE_INGEST_STORAGE);
         ASSERT_EQ(boot_fleet_board_ingest_stage(FLEET_BOARD_ERR_SIGNATURE),
                   BOARD_STAGE_DECODE);
         PASS();
@@ -598,6 +623,52 @@ static int test_rep_ingest_limit(void)
         PASS();
     } _test_next:;
     rep_close(&g_rep);
+    return failures;
+}
+
+/* Deny only B's board insertion, leaving reads and the stream intact. */
+static int rep_deny_board_insert(void *ctx, int op, const char *table,
+                                 const char *arg, const char *db, const char *trigger)
+{
+    (void)arg; (void)db; (void)trigger;
+    if (op == SQLITE_INSERT && table && !strcmp(table, "fleet_board_posts")) {
+        *(bool *)ctx = true;
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int test_rep_ingest_storage(void)
+{
+    int failures = 0;
+    bool denied = false, authorized = false;
+    struct boot_fleet_board_observation attempt, ingest;
+    struct fleet_board_post post;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool opened = rep_open(&g_rep, FBW_PAIRING_EXPIRES, FBW_NOW);
+    TEST("fleet board replication: storage refusal names the receiving store") {
+        ASSERT(opened && rep_post_n(&g_rep, 7, 0, 1, &post));
+        ASSERT_EQ(sqlite3_set_authorizer(g_rep.w.b.db, rep_deny_board_insert, &denied), SQLITE_OK);
+        authorized = true;
+        ASSERT_EQ(rep_pull(&g_rep), (size_t)0);
+        ASSERT_EQ(sqlite3_set_authorizer(g_rep.w.b.db, NULL, NULL), SQLITE_OK);
+        authorized = false;
+        ASSERT(denied && !db_fleet_board_have(&g_rep.w.b, post.id));
+        rep_observe(g_rep.w.box_a, post.id, &attempt, &ingest);
+        ASSERT(ingest.found && ingest.retryable && !ingest.stored);
+        ASSERT_EQ(ingest.result, (int)FLEET_BOARD_ERR_STORAGE);
+        ASSERT(rep_status_rpc(&g_rep, post.id, &out));
+        const struct json_value *row = json_get(&out, "post_ingest");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "stage")), "ingest-storage");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "next_action")), "inspect_board_store");
+        ASSERT(strstr(json_get_str(json_get(row, "operator_action")), "storage logs"));
+        ASSERT(rep_restart_b(&g_rep));
+        ASSERT(!db_fleet_board_have(&g_rep.w.b, post.id));
+        PASS();
+    } _test_next:;
+    if (authorized) (void)sqlite3_set_authorizer(g_rep.w.b.db, NULL, NULL);
+    db_fleet_board_test_clear_quarantine();
+    json_free(&out); rep_close(&g_rep);
     return failures;
 }
 
@@ -764,7 +835,7 @@ int test_fleet_board_replication(void)
            test_rep_duplicate_delivery() + test_rep_stage_text() +
            test_rep_clock_and_roster_guidance() +
            test_rep_answer_role_refused() + test_rep_ingest_role_refused() +
-           test_rep_ingest_limit() + test_rep_decode_refused() +
+           test_rep_ingest_limit() + test_rep_ingest_storage() + test_rep_decode_refused() +
            test_rep_gate_pairing() + test_rep_gate_delegation_expired() +
            test_rep_gate_unresolved();
 }

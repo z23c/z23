@@ -62,36 +62,48 @@ const char *boot_fleet_board_write_message(enum fleet_board_result r, char *buf,
  * command an operator can run. Naming only: nobody is admitted or refused
  * differently because of anything below. */
 
+struct board_stage_words {
+    const char *name;
+    const char *action;
+};
+
+static const struct board_stage_words board_stages[BOARD_STAGES] = {
+    [BOARD_STAGE_PAIRING] = {"pairing",
+        "inspect the pairing window with `z23 ops mesh pair list`"},
+    [BOARD_STAGE_DELEGATION] = {"delegation",
+        "inspect delegation and expiry with `z23 fleet doctor` on the peer"},
+    [BOARD_STAGE_STREAM] = {"stream",
+        "inspect pairing with `z23 ops mesh pair list` and the refusal log on the peer"},
+    [BOARD_STAGE_ANSWER_ROLE] = {"answer-role",
+        "inspect the role of the asking key on the answering host with `z23 fleet roles list`"},
+    [BOARD_STAGE_INGEST_ROLE] = {"ingest-role",
+        "inspect the role of the signing key on the receiving host with `z23 fleet roles list`"},
+    [BOARD_STAGE_INGEST_LIMIT] = {"ingest-limit",
+        "inspect board counts with `z23 fleet board status` and the node storage logs"},
+    [BOARD_STAGE_INGEST_STORAGE] = {"ingest-storage",
+        "inspect the receiving board store and node storage logs"},
+    [BOARD_STAGE_DECODE] = {"decode",
+        "inspect build identities on both hosts with `z23 version`"},
+    [BOARD_STAGE_ROSTER] = {"roster",
+        "inspect membership and roster state with `z23 fleet doctor`"},
+    [BOARD_STAGE_CLOCK] = {"clock",
+        "inspect sender and receiver clocks and the signed timestamp"},
+};
+
+static const struct board_stage_words *board_stage_words(enum boot_fleet_board_stage s)
+{
+    static const struct board_stage_words unknown = {"unknown", ""};
+    return (unsigned)s < BOARD_STAGES ? &board_stages[s] : &unknown;
+}
+
 const char *boot_fleet_board_stage_name(enum boot_fleet_board_stage s)
 {
-    static const char *const names[BOARD_STAGES] = {
-        [BOARD_STAGE_PAIRING] = "pairing",
-        [BOARD_STAGE_DELEGATION] = "delegation",
-        [BOARD_STAGE_STREAM] = "stream",
-        [BOARD_STAGE_ANSWER_ROLE] = "answer-role",
-        [BOARD_STAGE_INGEST_ROLE] = "ingest-role",
-        [BOARD_STAGE_INGEST_LIMIT] = "ingest-limit",
-        [BOARD_STAGE_DECODE] = "decode",
-        [BOARD_STAGE_ROSTER] = "roster",
-        [BOARD_STAGE_CLOCK] = "clock",
-    };
-    return (unsigned)s < BOARD_STAGES ? names[s] : "unknown";
+    return board_stage_words(s)->name;
 }
 
 const char *boot_fleet_board_stage_action(enum boot_fleet_board_stage s)
 {
-    static const char *const actions[BOARD_STAGES] = {
-        [BOARD_STAGE_PAIRING] = "inspect the pairing window with `z23 ops mesh pair list`",
-        [BOARD_STAGE_DELEGATION] = "inspect delegation and expiry with `z23 fleet doctor` on the peer",
-        [BOARD_STAGE_STREAM] = "inspect pairing with `z23 ops mesh pair list` and the refusal log on the peer",
-        [BOARD_STAGE_ANSWER_ROLE] = "inspect the role of the asking key on the answering host with `z23 fleet roles list`",
-        [BOARD_STAGE_INGEST_ROLE] = "inspect the role of the signing key on the receiving host with `z23 fleet roles list`",
-        [BOARD_STAGE_INGEST_LIMIT] = "inspect board counts with `z23 fleet board status` and the node storage logs",
-        [BOARD_STAGE_DECODE] = "inspect build identities on both hosts with `z23 version`",
-        [BOARD_STAGE_ROSTER] = "inspect membership and roster state with `z23 fleet doctor`",
-        [BOARD_STAGE_CLOCK] = "inspect sender and receiver clocks and the signed timestamp",
-    };
-    return (unsigned)s < BOARD_STAGES ? actions[s] : "";
+    return board_stage_words(s)->action;
 }
 
 const char *boot_fleet_board_stage_line(enum boot_fleet_board_stage s,
@@ -117,8 +129,9 @@ enum boot_fleet_board_stage boot_fleet_board_ingest_stage(
     case FLEET_BOARD_ERR_WIKI_FULL:
     case FLEET_BOARD_ERR_CAPACITY:
     case FLEET_BOARD_ERR_BUSY:
-    case FLEET_BOARD_ERR_STORAGE:
         return BOARD_STAGE_INGEST_LIMIT;
+    case FLEET_BOARD_ERR_STORAGE:
+        return BOARD_STAGE_INGEST_STORAGE;
     default:
         return BOARD_STAGE_DECODE;
     }
