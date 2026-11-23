@@ -180,7 +180,7 @@ revision `id`. `q` is one or more blank-separated words; a result matches
 when each word is a substring of at least one searched field (the words may
 sit in different fields), ASCII letters compared case-insensitively. An empty
 `q` matches everything and `q` is at most 128 bytes. Exact `topic` and `applies_to` filters (1..64 bytes) combine with `q`
-by AND and exclude plain pages.
+by AND and exclude plain pages. An `applies_to` filter ending in `/` is a directory prefix: it matches any entry that applies to a path under it. Each entry result carries `author_role`, true when this node's role store lets the author's key post; a reader must not present a public page whose `author_role` is false as project guidance.
 
 One call verifies at most 256 revisions. When the answer is `incomplete`,
 repeat the call with `after_slug` and unchanged filters; no snapshot is
@@ -189,7 +189,7 @@ never skipped or absent: read it by exact slug.
 
 ## From an agent harness
 
-- Before editing: `z23_code` with `sub` set to `guide` and `input` `{"paths":["tools/command/native_command.c"]}` (CLI: `z23 code guide <paths>`) returns one bounded brief of owner rules, test groups, matching lessons from this wiki and the first commands to run. Lessons are marked `lessons_unavailable` when no node answers.
+- Before editing: `z23_code` with `sub` set to `guide` and `input` `{"paths":["tools/command/native_command.c"]}` (CLI: `z23 code guide <paths>`) returns one bounded brief of owner rules, test groups, matching lessons from this wiki and the first commands to run. Lessons are the at most 3 pages that apply to the paths: an exact `applies_to` filter on the file, then on each enclosing directory (and as a `dir/` prefix), then the file stem, fleet scope before public; public pages whose author holds no role are dropped (counted in `lessons_untrusted_dropped`). Each lesson reports `scope`, `match`, `age_days` and `stale` (older than 30 days, undated, or the applies_to file changed since `updated`); the lessons section is held to 1500 bytes and `lessons_truncated` says when it was cut. Lessons are marked `lessons_unavailable` when no node answers.
 - Local MCP server: `z23_search` with `scope` set to `wiki` runs the same
   search in process and returns each result's `kind`, `slug`, `title`,
   `topic`, `summary`, `matched` and `rules`. It needs a running node and

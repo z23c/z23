@@ -328,9 +328,13 @@ bool fleet_wiki_entry_matches(const struct json_value *entry,
 static bool wiki_query_applies(const struct json_value *entry, const char *exact)
 {
     if (!exact || !exact[0]) return true;
+    /* A filter ending in '/' is a directory prefix: any applies_to under it. */
+    size_t len = strlen(exact);
+    bool prefix = exact[len - 1] == '/';
     const struct json_value *applies = json_get(entry, "applies_to");
     for (size_t i = 0; i < json_size(applies); i++) {
-        if (!strcmp(json_get_str(json_at(applies, i)), exact)) return true;
+        const char *a = json_get_str(json_at(applies, i));
+        if (prefix ? !strncmp(a, exact, len) : !strcmp(a, exact)) return true;
     }
     return false;
 }

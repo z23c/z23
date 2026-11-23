@@ -1207,7 +1207,12 @@ static bool fb_find_item_identity(const struct db_fleet_board_post *row,
     char id[65], host[65];
     fleet_board_id_to_hex(row->post.id, id);
     fleet_board_id_to_hex(row->post.host_pubkey, host);
+    /* Whether THIS node's role store lets the author's key post: a reader
+     * must not present a roleless key's public page as project guidance. */
+    bool author_role = zcl_fleet_role_allows(row->post.host_pubkey,
+        ZCL_FLEET_LEAF_BOARD_POST, NULL, NULL, 0);
     return json_push_kv_str(item, "kind", "entry") &&
+        json_push_kv_bool(item, "author_role", author_role) &&
         json_push_kv(item, "topic", json_get(entry, "topic")) &&
         json_push_kv_str(item, "slug", row->post.slug) &&
         json_push_kv_str(item, "id", id) &&

@@ -3,8 +3,9 @@
  *
  * Given the paths an agent will edit and an optional topic, one bounded reply
  * names the nearest AGENTS.md owner of each path, the test groups the shared
- * impact rules route those paths to, the fleet-wiki lessons that match, and
- * the first commands to run. Local reads also resolve HEAD and inspect the
+ * impact rules route those paths to, the fleet-wiki lessons that concern those paths (at most 3, ranked exact
+ * applies_to, directory prefix, file stem; public pages from keys without a
+ * role are dropped), and the first commands to run. Local reads also resolve HEAD and inspect the
  * latest test-run artifact; that artifact has no source revision, so its
  * failures are always labeled revision-unbound. AGENTS.md reads and wiki
  * searches retain their existing bounds; with no node the lessons are marked
@@ -20,6 +21,7 @@
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex_focus.h"
 #include "command/native_code_priv.h"
+#include "native_fleet_objectives.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
 #include "json/json.h"
@@ -43,15 +45,16 @@
 #define CB_OWNER_RULES 4
 #define CB_RULE_CAP 200
 #define CB_MAX_TESTS 12
-#define CB_MAX_LESSONS 5
-#define CB_MAX_QUERIES 4
+#define CB_MAX_LESSONS 3
+#define CB_MAX_QUERIES 64
 #define CB_QUERY_CAP 129
 #define CB_MAX_NEXT 5
 #define CB_NEXT_CAP (CB_PATH_CAP * 4 + sizeof("build/bin/z23 code cost --path=") + 2)
 #define CB_HEAD_CAP 4096
 #define CB_WIKI_DEADLINE_MS 1000
 #define CB_DIR_PAGES 4
-#define CB_POOL_MAX 128
+#define CB_LESSON_BYTES 1500
+#define CB_STALE_DAYS 30
 
 struct cb_owner {
     char file[CB_PATH_CAP];
@@ -63,6 +66,12 @@ struct cb_lesson {
     char slug[CB_TOPIC_MAX + 1];
     char rule[CB_RULE_CAP];
     struct json_value matched;
+    char updated[24];
+    char applies[CB_QUERY_CAP]; /* exact-match file, else empty */
+    unsigned char rank;
+    bool pub, author_role;
+    int64_t age_days; /* -1 when undated */
+    const char *stale_reason; /* NULL when fresh */
 };
 
 struct cb_brief {
@@ -75,13 +84,15 @@ struct cb_brief {
     char tests[CB_MAX_TESTS][ZCL_AGENT_IMPACT_GROUP_MAX];
     size_t ntests;
     bool unmapped, test_evidence_unavailable;
-    struct cb_lesson lessons[CB_MAX_LESSONS];
+    struct cb_lesson lessons[CB_MAX_LESSONS + 1];
     size_t nlessons;
     char unavailable[64];
     char next[CB_MAX_NEXT][CB_NEXT_CAP];
     size_t nnext;
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
-    bool lessons_capped;
+    bool lessons_capped, lessons_truncated;
+    unsigned lessons_untrusted; /* public pages dropped: author holds no role */
+    int64_t now;
     bool lesson_lost; /* a lesson could not be copied: the query fails */
     char revision[41];
     bool revision_unavailable;
@@ -438,91 +449,180 @@ static void cb_collect_tests(struct cb_brief *b)
 
 /* ── lessons ──────────────────────────────────────────────────────────── */
 
-static void cb_add_query(char q[][CB_QUERY_CAP], size_t *n, const char *s,
-                         size_t len)
+enum cb_rank { CB_EXACT, CB_PREFIX, CB_STEM };
+
+struct cb_query {
+    char q[CB_QUERY_CAP];
+    char applies[CB_QUERY_CAP];
+    enum cb_rank rank;
+};
+
+static const char *cb_rank_name(enum cb_rank rank)
 {
-    char tmp[CB_QUERY_CAP];
-    if (!len || *n >= CB_MAX_QUERIES)
+    return rank == CB_EXACT ? "exact" : rank == CB_PREFIX ? "prefix" : "stem";
+}
+
+static void cb_add_query(struct cb_query *qs, size_t *n, enum cb_rank rank,
+                         const char *q, const char *applies)
+{
+    struct cb_query *t = &qs[*n];
+    if ((!q[0] && !applies[0]) || *n >= CB_MAX_QUERIES ||
+        strlen(q) >= CB_QUERY_CAP || strlen(applies) > CB_TOPIC_MAX)
         return;
-    (void)cb_copy(tmp, sizeof(tmp), s, len);
-    if (!cb_has(q, *n, CB_QUERY_CAP, tmp))
-        memcpy(q[(*n)++], tmp, strlen(tmp) + 1);
+    for (size_t i = 0; i < *n; i++)
+        if (qs[i].rank == rank && !strcmp(qs[i].q, q) &&
+            !strcmp(qs[i].applies, applies))
+            return;
+    memcpy(t->q, q, strlen(q) + 1);
+    memcpy(t->applies, applies, strlen(applies) + 1);
+    t->rank = rank;
+    (*n)++;
 }
 
-static void cb_stem_query(char q[][CB_QUERY_CAP], size_t *n, const char *p)
+static void cb_path_queries(struct cb_query *qs, size_t *n, enum cb_rank rank,
+                            const char *p)
 {
-    const char *base = strrchr(p, '/');
-    const char *dot;
-    base = base ? base + 1 : p;
-    dot = strrchr(base, '.');
-    cb_add_query(q, n, base, dot && dot != base ? (size_t)(dot - base)
-                                                : strlen(base));
+    const char *slash = strrchr(p, '/');
+    char dir[CB_QUERY_CAP];
+    if (rank == CB_EXACT) {
+        cb_add_query(qs, n, rank, "", p);
+    } else if (rank == CB_PREFIX) {
+        /* Each enclosing directory as an exact applies_to, nearest first,
+         * then anything the wiki applies under the nearest one. */
+        size_t len = slash ? (size_t)(slash - p) : 0;
+        bool nearest = true;
+        while (len > 0 && len < sizeof(dir) - 1) {
+            memcpy(dir, p, len);
+            dir[len] = '\0';
+            cb_add_query(qs, n, rank, "", dir);
+            if (nearest) {
+                dir[len] = '/';
+                dir[len + 1] = '\0';
+                cb_add_query(qs, n, rank, "", dir);
+                nearest = false;
+            }
+            while (len > 0 && p[len - 1] != '/')
+                len--;
+            len = len > 0 ? len - 1 : 0;
+        }
+    } else if (rank == CB_STEM) {
+        const char *base = slash ? slash + 1 : p;
+        const char *dot = strrchr(base, '.');
+        char stem[CB_QUERY_CAP];
+        (void)cb_copy(stem, sizeof(stem), base,
+                      dot && dot != base ? (size_t)(dot - base) : strlen(base));
+        cb_add_query(qs, n, rank, stem, "");
+    }
 }
 
-/* The topic when given, else each path's file stem, then each path's
- * top-level directory: stems are specific, directories match broadly, so a
- * directory can only fill slots the stems left open. *first_dir is the
- * index where the directory queries begin (n when there are none). */
-static size_t cb_queries(const struct cb_brief *b, char q[][CB_QUERY_CAP],
-                         size_t *first_dir)
+/* The queries best rank first: an exact applies_to filter for each path,
+ * then each enclosing directory (the nearest also as a prefix), then its file
+ * stem. A topic
+ * is a stem query. Top-level directory words are never queries: they match
+ * every page that happens to mention them. */
+static size_t cb_queries(const struct cb_brief *b, struct cb_query *qs)
 {
     size_t n = 0;
     if (b->topic[0]) {
-        cb_add_query(q, &n, b->topic, strlen(b->topic));
-        *first_dir = n;
+        cb_add_query(qs, &n, CB_STEM, b->topic, "");
         return n;
     }
-    for (size_t i = 0; i < b->npaths; i++)
-        cb_stem_query(q, &n, b->paths[i]);
-    *first_dir = n;
-    for (size_t i = 0; i < b->npaths; i++) {
-        const char *slash = strchr(b->paths[i], '/');
-        if (slash)
-            cb_add_query(q, &n, b->paths[i], (size_t)(slash - b->paths[i]));
-    }
+    for (enum cb_rank rank = CB_EXACT; rank <= CB_STEM; rank++)
+        for (size_t i = 0; i < b->npaths; i++)
+            cb_path_queries(qs, &n, rank, b->paths[i]);
     return n;
 }
 
-static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e)
+/* Best first: nearer match, then an author holding a role on this node,
+ * then the fleet scope, then newer, then slug. */
+static bool cb_lesson_before(const struct cb_lesson *a, const struct cb_lesson *c)
+{
+    if (a->rank != c->rank)
+        return a->rank < c->rank;
+    if (a->author_role != c->author_role)
+        return a->author_role;
+    if (a->pub != c->pub)
+        return !a->pub;
+    int cmp = strcmp(a->updated, c->updated);
+    return cmp ? cmp > 0 : strcmp(a->slug, c->slug) < 0;
+}
+
+/* Offer one built lesson to the ranked slots, taking ownership of its
+ * `matched`. A page seen again keeps its better ranking; a lesson past the
+ * last slot is dropped and the brief is marked capped. */
+static void cb_offer_lesson(struct cb_brief *b, struct cb_lesson *in)
+{
+    for (size_t i = 0; i < b->nlessons; i++) {
+        struct cb_lesson *ex = &b->lessons[i];
+        if (ex->pub != in->pub || strcmp(ex->slug, in->slug))
+            continue;
+        if (!cb_lesson_before(in, ex)) {
+            json_free(&in->matched);
+            return;
+        }
+        json_free(&ex->matched);
+        memmove(ex, ex + 1, (b->nlessons - i - 1) * sizeof(*ex));
+        b->nlessons--;
+        break;
+    }
+    size_t at = b->nlessons;
+    b->lessons[b->nlessons++] = *in;
+    while (at > 0 && cb_lesson_before(&b->lessons[at], &b->lessons[at - 1])) {
+        struct cb_lesson tmp = b->lessons[at - 1];
+        b->lessons[at - 1] = b->lessons[at];
+        b->lessons[at] = tmp;
+        at--;
+    }
+    if (b->nlessons > CB_MAX_LESSONS) {
+        json_free(&b->lessons[--b->nlessons].matched);
+        b->lessons_capped = true;
+    }
+}
+
+static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e,
+                           enum cb_rank rank, bool pub, const char *applies)
 {
     const char *slug = json_get_str(json_get(e, "slug"));
     const struct json_value *rules = json_get(e, "rules");
     const struct json_value *r0 = rules ? json_at(rules, 0) : NULL;
     const char *text = r0 && r0->type == JSON_STR ? json_get_str(r0)
                                                   : json_get_str(json_get(e, "summary"));
-    struct cb_lesson *l;
+    const char *updated = json_get_str(json_get(e, "updated"));
+    struct cb_lesson l = {0};
     if (!slug[0] || !text[0] || strlen(slug) > CB_TOPIC_MAX)
         return true;
-    for (size_t i = 0; i < b->nlessons; i++)
-        if (strcmp(b->lessons[i].slug, slug) == 0)
-            return true;
-    if (b->nlessons >= CB_MAX_LESSONS) {
-        b->lessons_capped = true;
+    l.author_role = json_get_bool(json_get(e, "author_role"));
+    if (pub && !l.author_role) {
+        /* A public page from a key with no role is untrusted text. */
+        b->lessons_untrusted++;
         return true;
     }
-    l = &b->lessons[b->nlessons];
-    memcpy(l->slug, slug, strlen(slug) + 1);
-    bool clipped = cb_copy(l->rule, CB_RULE_CAP, text, strlen(text));
-    json_init(&l->matched);
+    memcpy(l.slug, slug, strlen(slug) + 1);
+    bool clipped = cb_copy(l.rule, CB_RULE_CAP, text, strlen(text));
+    (void)cb_copy(l.updated, sizeof(l.updated), updated, strlen(updated));
+    l.rank = rank;
+    l.pub = pub;
+    memcpy(l.applies, applies, strlen(applies) + 1);
+    json_init(&l.matched);
     const struct json_value *matched = json_get(e, "matched");
-    if (matched && !json_copy_checked(&l->matched, matched)) {
+    if (matched && !json_copy_checked(&l.matched, matched)) {
         b->lesson_lost = true;
         if (!b->unavailable[0])
             (void)snprintf(b->unavailable, sizeof(b->unavailable), "%s", "WIKI_UNAVAILABLE");
         return false;
     }
     if (!matched)
-        json_set_array(&l->matched);
+        json_set_array(&l.matched);
     b->lessons_capped = b->lessons_capped || clipped;
-    b->nlessons++;
+    cb_offer_lesson(b, &l);
     return true;
 }
 
 /* One fleet.wiki.find under the brief's absolute deadline. The leaf is
  * called directly, so the caller's authority ceiling is checked here. */
 static void cb_wiki_run(const struct zcl_command_request *request,
-                        const char *q, const char *after, int64_t deadline_ms,
-                        struct zcl_command_reply *reply)
+                        const struct cb_query *qq, bool pub, const char *after,
+                        int64_t deadline_ms, struct zcl_command_reply *reply)
 {
     const struct zcl_command_spec *spec = zcl_command_registry_find(
         zcl_command_catalog(), "fleet.wiki.find", NULL);
@@ -536,7 +636,9 @@ static void cb_wiki_run(const struct zcl_command_request *request,
     sub.view = "normal";
     sub.spec = spec;
     zcl_command_reply_init(reply, "zcl.fleet_wiki_find.v1");
-    if (!spec || !json_push_kv_str(&input, "q", q) ||
+    if (!spec || !json_push_kv_str(&input, "q", qq->q) ||
+        (qq->applies[0] && !json_push_kv_str(&input, "applies_to", qq->applies)) ||
+        !json_push_kv_str(&input, "scope", pub ? "public" : "fleet") ||
         (after[0] && !json_push_kv_str(&input, "after_slug", after)))
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "WIKI_UNAVAILABLE",
@@ -551,82 +653,32 @@ static void cb_wiki_run(const struct zcl_command_request *request,
     json_free(&input);
 }
 
-/* Newer first by the ISO-8601 `updated` string, ties by slug. */
-static bool cb_pool_before(const struct json_value *a,
-                           const struct json_value *c)
+/* The exact-file query is the only one whose applies_to names a file the
+ * lesson can be checked against for change. */
+static const char *cb_check_file(const struct cb_query *qq)
 {
-    int cmp = strcmp(json_get_str(json_get(a, "updated")),
-                     json_get_str(json_get(c, "updated")));
-    if (cmp != 0)
-        return cmp > 0;
-    return strcmp(json_get_str(json_get(a, "slug")),
-                  json_get_str(json_get(c, "slug"))) < 0;
+    return qq->rank == CB_EXACT ? qq->applies : "";
 }
 
-/* Offer one entry to the ranking pool, bounded at `max`. A full pool keeps
- * the newest `max` entries seen: the entry replaces the pool's oldest one
- * when it ranks before it, else it is the one dropped. An entry whose slug
- * is already pooled is a repeat from another search and takes no slot, so
- * repeats never push out distinct lessons. A pool that keeps nothing (max 0)
- * drops every entry. False when the entry should have been kept but could
- * not be copied. */
-bool zcl_code_brief_pool_offer(struct json_value *pool, size_t max,
-                               const struct json_value *entry)
-{
-    size_t n = json_size(pool);
-    size_t oldest = 0;
-    const char *slug = json_get_str(json_get(entry, "slug"));
-    struct json_value copy;
-    if (max == 0)
-        return true;
-    for (size_t i = 0; i < n; i++) {
-        if (strcmp(json_get_str(json_get(json_at(pool, i), "slug")), slug) == 0)
-            return true;
-        if (cb_pool_before(json_at(pool, oldest), json_at(pool, i)))
-            oldest = i;
-    }
-    if (n < max)
-        return json_push_back(pool, entry);
-    if (!cb_pool_before(entry, json_at(pool, oldest)))
-        return true;
-    json_init(&copy);
-    if (!json_copy_checked(&copy, entry))
-        return false;
-    json_free(&pool->children[oldest]);
-    pool->children[oldest] = copy;
-    return true;
-}
-
-static bool cb_accept_wiki_entry(struct cb_brief *b, struct json_value *pool,
-                                 const struct json_value *entry)
-{
-    if (!pool)
-        return cb_take_lesson(b, entry);
-    if (zcl_code_brief_pool_offer(pool, CB_POOL_MAX, entry))
-        return true;
-    b->lesson_lost = true;
-    return false;
-}
-
-/* One page of one search. With a pool the entries are collected for
- * ranking, else taken in the order the wiki gave them; *next is the
- * after_slug to resume from, empty when the wiki has no more. False when it
- * failed; b->unavailable then names why. A query that used up its time cap,
- * or ran past the brief's deadline, is WIKI_DEADLINE rather than a refusal. */
+/* One page of one search in one scope; *next is the after_slug to resume
+ * from, empty when the wiki has no more. False when it failed; b->unavailable
+ * then names why. A query that used up its time cap, or ran past the brief's
+ * deadline, is WIKI_DEADLINE rather than a refusal. */
 static bool cb_wiki_find(const struct zcl_command_request *request,
-                         struct cb_brief *b, const char *q, const char *after,
-                         struct json_value *pool, char *next)
+                         struct cb_brief *b, const struct cb_query *qq,
+                         bool pub, const char *after, char *next)
 {
     struct zcl_command_reply reply;
     int64_t start = platform_time_monotonic_ms();
     const struct json_value *entries;
     const char *more;
     bool ok;
-    cb_wiki_run(request, q, after, b->deadline_ms, &reply);
+    cb_wiki_run(request, qq, pub, after, b->deadline_ms, &reply);
     ok = reply.exit_code == ZCL_COMMAND_EXIT_OK;
     entries = ok ? json_get(&reply.data, "entries") : NULL;
     for (size_t i = 0; entries && i < json_size(entries); i++) {
-        if (!cb_accept_wiki_entry(b, pool, json_at(entries, i))) {
+        if (!cb_take_lesson(b, json_at(entries, i), qq->rank, pub,
+                            cb_check_file(qq))) {
             ok = false;
             break;
         }
@@ -651,18 +703,17 @@ static bool cb_wiki_find(const struct zcl_command_request *request,
     return ok;
 }
 
-/* A directory query matches broadly: read up to CB_DIR_PAGES pages (while
- * the wiki says more and the deadline allows) into the pool. A page that
- * fails after the first still leaves the query answered, unless a lesson
- * could not be kept: a partial pool would rank the wrong lessons first. */
-static bool cb_wiki_dir(const struct zcl_command_request *request,
-                        struct cb_brief *b, const char *q,
-                        struct json_value *pool)
+/* A broad query reads up to CB_DIR_PAGES pages (while the wiki says more and
+ * the deadline allows). A page that fails after the first still leaves the
+ * query answered, unless a lesson could not be kept. */
+static bool cb_wiki_query(const struct zcl_command_request *request,
+                          struct cb_brief *b, const struct cb_query *qq,
+                          bool pub)
 {
     char after[CB_TOPIC_MAX + 1] = "";
     char next[CB_TOPIC_MAX + 1];
     for (int page = 0; page < CB_DIR_PAGES; page++) {
-        if (!cb_wiki_find(request, b, q, after, pool, next))
+        if (!cb_wiki_find(request, b, qq, pub, after, next))
             return page > 0 && !b->lesson_lost;
         if (!next[0] || platform_time_monotonic_ms() >= b->deadline_ms)
             break;
@@ -671,47 +722,99 @@ static bool cb_wiki_dir(const struct zcl_command_request *request,
     return true;
 }
 
-/* Take every pooled entry best first; the slots fill in that order and the
- * rest only mark the brief capped. */
-static void cb_take_pool(struct cb_brief *b, const struct json_value *pool)
+/* Rank dominates the ordering, so once every slot holds a nearer match than
+ * this query can produce, it cannot change the answer. */
+static bool cb_query_useless(const struct cb_brief *b, const struct cb_query *qq)
 {
-    bool done[CB_POOL_MAX] = {false};
-    size_t n = json_size(pool);
-    for (size_t round = 0; round < n; round++) {
-        size_t best = n;
-        for (size_t i = 0; i < n; i++)
-            if (!done[i] &&
-                (best == n || cb_pool_before(json_at(pool, i), json_at(pool, best))))
-                best = i;
-        done[best] = true;
-        if (!cb_take_lesson(b, json_at(pool, best))) break;
+    return b->nlessons == CB_MAX_LESSONS &&
+           b->lessons[CB_MAX_LESSONS - 1].rank < qq->rank;
+}
+
+/* Seconds since the epoch of the newest commit touching `file`, or 0 when
+ * unknown (no checkout, no history, git failed). */
+static int64_t cb_file_commit_time(const struct cb_brief *b, const char *file)
+{
+    const char *argv[] = {"git", "log", "-1", "--format=%ct", "--", file, NULL};
+    char out[64];
+    if (!b->revision[0] ||
+        zcl_spawn_capture_in_dir_observed(argv, b->root, out, sizeof(out),
+                                          250, NULL) != 0)
+        return 0;
+    return (int64_t)strtoll(out, NULL, 10);
+}
+
+/* Age and staleness for what was kept. Stale: undated, older than
+ * CB_STALE_DAYS, or the file the lesson applies to changed after it was
+ * written. */
+static void cb_judge_lessons(struct cb_brief *b)
+{
+    for (size_t i = 0; i < b->nlessons; i++) {
+        struct cb_lesson *l = &b->lessons[i];
+        int64_t when = 0;
+        l->age_days = -1;
+        l->stale_reason = NULL;
+        if (!zcl_objectives_parse_iso8601(l->updated, &when)) {
+            l->stale_reason = "undated";
+            continue;
+        }
+        l->age_days = b->now > when ? (b->now - when) / 86400 : 0;
+        if (l->applies[0] && cb_file_commit_time(b, l->applies) > when)
+            l->stale_reason = "applies_to_changed";
+        else if (l->age_days > CB_STALE_DAYS)
+            l->stale_reason = "age";
+    }
+}
+
+static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b);
+
+/* Serialized size of the lessons array as the brief would emit it. */
+static size_t cb_lessons_bytes(const struct cb_brief *b)
+{
+    struct json_value tmp;
+    size_t n = 0;
+    json_init(&tmp);
+    json_set_object(&tmp);
+    if (cb_push_lessons(&tmp, b))
+        n = json_write(json_get(&tmp, "lessons"), NULL, 0);
+    json_free(&tmp);
+    return n;
+}
+
+/* Judge, then hold the lessons section to CB_LESSON_BYTES by dropping the
+ * lowest-ranked lesson until it fits; the drop is reported. */
+static void cb_finish_lessons(struct cb_brief *b)
+{
+    cb_judge_lessons(b);
+    while (b->nlessons && cb_lessons_bytes(b) > CB_LESSON_BYTES) {
+        json_free(&b->lessons[--b->nlessons].matched);
+        b->lessons_truncated = true;
     }
 }
 
 static void cb_collect_lessons(const struct zcl_command_request *request,
                                struct cb_brief *b)
 {
-    char q[CB_MAX_QUERIES][CB_QUERY_CAP];
-    char none[1] = "";
-    char unused[CB_TOPIC_MAX + 1];
-    size_t first_dir;
-    size_t n = cb_queries(b, q, &first_dir);
+    struct cb_query qs[CB_MAX_QUERIES];
+    size_t n = cb_queries(b, qs);
     size_t answered = 0;
-    bool ok = true;
-    struct json_value pool;
+    bool dead[2] = {false, false}; /* fleet, public: a scope that failed */
+    b->now = (int64_t)platform_time_wall_time_t();
     b->deadline_ms = platform_time_monotonic_ms() + CB_WIKI_DEADLINE_MS;
-    for (size_t i = 0; ok && i < first_dir && b->nlessons < CB_MAX_LESSONS; i++) {
-        ok = cb_wiki_find(request, b, q[i], none, NULL, unused);
-        answered += ok;
+    for (size_t i = 0; i < n && !b->lesson_lost; i++) {
+        if (platform_time_monotonic_ms() >= b->deadline_ms)
+            break;
+        if (cb_query_useless(b, &qs[i]))
+            continue;
+        /* Fleet pages first: they come only from keys with a role. */
+        for (int pub = 0; pub < 2; pub++) {
+            if (dead[pub] || b->lesson_lost)
+                continue;
+            bool ok = cb_wiki_query(request, b, &qs[i], pub != 0);
+            answered += ok;
+            dead[pub] = !ok;
+        }
     }
-    json_init(&pool);
-    json_set_array(&pool);
-    for (size_t i = first_dir; ok && i < n && b->nlessons < CB_MAX_LESSONS; i++) {
-        ok = cb_wiki_dir(request, b, q[i], &pool);
-        answered += ok;
-    }
-    cb_take_pool(b, &pool);
-    json_free(&pool);
+    cb_finish_lessons(b);
     if (answered > 0 && !b->lesson_lost)
         b->unavailable[0] = '\0';
 }
@@ -913,9 +1016,16 @@ static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b)
         struct json_value o;
         json_init(&o);
         json_set_object(&o);
-        ok = json_push_kv_str(&o, "slug", b->lessons[i].slug) &&
-             json_push_kv_str(&o, "rule", b->lessons[i].rule) &&
-             json_push_kv(&o, "matched", &b->lessons[i].matched) &&
+        const struct cb_lesson *l = &b->lessons[i];
+        ok = json_push_kv_str(&o, "slug", l->slug) &&
+             json_push_kv_str(&o, "rule", l->rule) &&
+             json_push_kv(&o, "matched", &l->matched) &&
+             json_push_kv_str(&o, "scope", l->pub ? "public" : "fleet") &&
+             json_push_kv_str(&o, "match", cb_rank_name((enum cb_rank)l->rank)) &&
+             json_push_kv_bool(&o, "author_role", l->author_role) &&
+             (l->age_days < 0 || json_push_kv_int(&o, "age_days", l->age_days)) &&
+             json_push_kv_bool(&o, "stale", l->stale_reason != NULL) &&
+             (!l->stale_reason || json_push_kv_str(&o, "stale_reason", l->stale_reason)) &&
              json_push_back(&arr, &o);
         json_free(&o);
     }
@@ -925,25 +1035,30 @@ static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b)
 }
 
 #if defined(ZCL_TESTING)
-/* Exercise the same direct/pooled collectors without a fleet wiki service. */
+static bool cb_push_lesson_evidence(struct json_value *data, const struct cb_brief *b);
+
+/* Exercise the lesson ranking, trust, staleness and size cap without a fleet
+ * wiki service. Each entry may carry test_rank (0 exact, 1 prefix, 2 stem)
+ * and test_scope ("public"; fleet when absent); `now` is the wall clock. */
 bool zcl_code_brief_test_collect_lessons(const struct json_value *entries,
-                                          bool pooled, const char *prior_error,
+                                          const char *prior_error, int64_t now,
                                           struct json_value *data)
 {
     struct cb_brief *b = zcl_calloc(1, sizeof(*b), "code_guide_test_brief");
     if (!b) return false;
+    b->now = now;
     b->lesson_lost = prior_error != NULL;
     if (prior_error)
         (void)snprintf(b->unavailable, sizeof(b->unavailable), "%s", prior_error);
-    if (pooled) {
-        cb_take_pool(b, entries);
-    } else {
-        for (size_t i = 0; i < json_size(entries); i++)
-            if (!cb_take_lesson(b, json_at(entries, i))) break;
+    for (size_t i = 0; i < json_size(entries); i++) {
+        const struct json_value *e = json_at(entries, i);
+        bool pub = !strcmp(json_get_str(json_get(e, "test_scope")), "public");
+        if (!cb_take_lesson(b, e, (enum cb_rank)json_get_int(json_get(e, "test_rank")),
+                            pub, json_get_str(json_get(e, "test_applies"))))
+            break;
     }
-    bool ok = cb_push_lessons(data, b) &&
-              (!b->unavailable[0] || json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
-              (!b->lessons_capped || json_push_kv_bool(data, "lessons_capped", true));
+    cb_finish_lessons(b);
+    bool ok = cb_push_lesson_evidence(data, b);
     for (size_t i = 0; i < b->nlessons; i++)
         json_free(&b->lessons[i].matched);
     free(b);
@@ -1055,7 +1170,11 @@ static bool cb_push_lesson_evidence(struct json_value *data, const struct cb_bri
            (omitted || !b->unavailable[0] ||
             json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
            (omitted || !b->lessons_capped ||
-            json_push_kv_bool(data, "lessons_capped", true));
+            json_push_kv_bool(data, "lessons_capped", true)) &&
+           (omitted || !b->lessons_truncated ||
+            json_push_kv_bool(data, "lessons_truncated", true)) &&
+           (omitted || !b->lessons_untrusted ||
+            json_push_kv_int(data, "lessons_untrusted_dropped", (int64_t)b->lessons_untrusted));
 }
 
 static bool cb_build(const struct cb_brief *b, struct json_value *data)

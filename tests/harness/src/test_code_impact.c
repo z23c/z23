@@ -1078,7 +1078,8 @@ static int test_code_guide_render_sweep(void)
 }
 
 bool zcl_code_brief_test_collect_lessons(const struct json_value *entries,
-                                          bool pooled, const char *prior_error, struct json_value *data);
+                                          const char *prior_error, int64_t now,
+                                          struct json_value *data);
 
 static int test_code_guide_lesson_provenance(void)
 {
@@ -1091,12 +1092,12 @@ static int test_code_guide_lesson_provenance(void)
         struct json_value entries;
         json_init(&entries);
         ASSERT(json_read(&entries, text, strlen(text)));
-        for (size_t pooled = 0; pooled < 2; pooled++) {
+        {
             struct json_value data;
             size_t live = json_test_live_blocks();
             json_init(&data);
             json_set_object(&data);
-            ASSERT(zcl_code_brief_test_collect_lessons(&entries, pooled != 0, NULL, &data));
+            ASSERT(zcl_code_brief_test_collect_lessons(&entries, NULL, 0, &data));
             const struct json_value *normal = json_get(&data, "lessons");
             ASSERT_EQ(json_size(normal), 3u);
             ASSERT_STR_EQ(json_get_str(json_at(json_get(json_at(normal, 0), "matched"), 0)), "summary");
@@ -1107,7 +1108,7 @@ static int test_code_guide_lesson_provenance(void)
             json_init(&data);
             json_set_object(&data);
             zcl_alloc_fault_fail_nth("json_copy_children", 2);
-            bool ok = zcl_code_brief_test_collect_lessons(&entries, pooled != 0, NULL, &data);
+            bool ok = zcl_code_brief_test_collect_lessons(&entries, NULL, 0, &data);
             bool fired = zcl_alloc_fault_armed_label() == NULL;
             zcl_alloc_fault_clear();
             ASSERT(ok && fired);
@@ -1122,14 +1123,14 @@ static int test_code_guide_lesson_provenance(void)
         struct json_value partial;
         json_init(&partial);
         json_set_object(&partial);
-        ASSERT(zcl_code_brief_test_collect_lessons(&entries, true, "WIKI_DEADLINE", &partial));
+        ASSERT(zcl_code_brief_test_collect_lessons(&entries, "WIKI_DEADLINE", 0, &partial));
         ASSERT_EQ(json_size(json_get(&partial, "lessons")), 3u);
         ASSERT_STR_EQ(json_get_str(json_get(&partial, "lessons_unavailable")), "WIKI_DEADLINE");
         json_free(&partial);
         json_init(&partial);
         json_set_object(&partial);
         zcl_alloc_fault_fail_nth("json_copy_children", 2);
-        bool partial_ok = zcl_code_brief_test_collect_lessons(&entries, true, "WIKI_DEADLINE", &partial);
+        bool partial_ok = zcl_code_brief_test_collect_lessons(&entries, "WIKI_DEADLINE", 0, &partial);
         bool partial_fired = zcl_alloc_fault_armed_label() == NULL;
         zcl_alloc_fault_clear();
         ASSERT(partial_ok && partial_fired);
@@ -1141,6 +1142,8 @@ static int test_code_guide_lesson_provenance(void)
     } _test_next:;
     return failures;
 }
+
+int test_code_guide_lessons(void);
 
 static int test_code_guide_lesson_cap(void)
 {
@@ -1158,12 +1161,12 @@ static int test_code_guide_lesson_cap(void)
         struct json_value entries;
         json_init(&entries);
         ASSERT(json_read(&entries, text, strlen(text)));
-        for (size_t pooled = 0; pooled < 2; pooled++) {
+        {
             struct json_value data;
             json_init(&data);
             json_set_object(&data);
-            ASSERT(zcl_code_brief_test_collect_lessons(&entries, pooled != 0, NULL, &data));
-            ASSERT_EQ(json_size(json_get(&data, "lessons")), 5u);
+            ASSERT(zcl_code_brief_test_collect_lessons(&entries, NULL, 0, &data));
+            ASSERT_EQ(json_size(json_get(&data, "lessons")), 3u);
             ASSERT(json_get_bool(json_get(&data, "lessons_capped")));
             ASSERT(json_get(&data, "lessons_unavailable") == NULL);
             json_free(&data);
@@ -2747,6 +2750,7 @@ int test_code_impact(void)
     failures += test_code_guide_render_sweep();
     failures += test_code_guide_lesson_provenance();
     failures += test_code_guide_lesson_cap();
+    failures += test_code_guide_lessons();
     failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();
