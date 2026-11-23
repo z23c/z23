@@ -4,6 +4,7 @@
 #include "test/host_tool_capture.h"
 #include "sky_combat/qa_frames.h"
 #include "sky_combat/qa_timing.h"
+#include "../../../apps/skycombat/src/qa_timing.c"
 #include "platform/resident_launch.h"
 #include "json/json.h"
 #include <string.h>
@@ -938,6 +939,7 @@ static int skycombat_timing_pure(void)
         ASSERT(skycombat_times_parse(line, &back));
         ASSERT_EQ(back.frames, 100u); ASSERT_EQ(back.p99_us, 990u);
         ASSERT(!sky_qa_summary_format(&s, line, 20));
+        PASS();
     }
     TEST("QA timing: one frame, empty run, clock regression and the 3600 ceiling") {
         sky_qa_timing_begin(&timing, 10);
@@ -951,10 +953,12 @@ static int skycombat_timing_pure(void)
         ASSERT(sky_qa_timing_summarize(&timing, &s));
         ASSERT_EQ(s.frames, SKY_COMBAT_QA_FRAMES_MAX);
         ASSERT(skycombat_times_ordered(&s));
+        PASS();
     }
     TEST("QA timing: monotonic clock never goes backwards") {
         uint64_t a = sky_qa_now_us(), b = sky_qa_now_us();
         ASSERT(a > 0 && b >= a);
+        PASS();
     }
 _test_next:;
     return failures;
@@ -976,13 +980,13 @@ static int skycombat_version_output(void)
         const char *id = strstr(output, "source-id ");
         ASSERT(id != NULL);
         ASSERT_EQ(sscanf(id, "source-id %64s\n", hex), 1);
-        bool unknown = strcmp(hex, "unknown") == 0;
-        ASSERT(unknown || strlen(hex) == 64);
+        /* the fixture is built with the Makefile's identity flags: a real digest */
+        ASSERT_EQ(strlen(hex), 64u);
         ASSERT(strncmp(short_id, hex, strlen(short_id)) == 0);
-        for (size_t i = 0; !unknown && i < 64; ++i)
+        for (size_t i = 0; i < 64; ++i)
             ASSERT((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f'));
         /* the fixture counts every InitWindow: none may have happened */
-        ASSERT(strstr(output, "windows=1") == NULL);
+        ASSERT(strstr(output, "windows=0") != NULL);
         ASSERT(strstr(output, "QA_FRAME_TIMES") == NULL);
         PASS();
     }
@@ -1007,6 +1011,30 @@ static int skycombat_frame_times_output(unsigned frames)
         ASSERT(s.first_frame_us > 0);
         /* existing output is kept */
         ASSERT(strstr(output, "QA_TEST status=0") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static bool skycombat_seed_of(const char *seed_arg, unsigned *calls, unsigned *last)
+{
+    char output[4096] = {0};
+    const char *args[] = {QA_ENTRY, "--qa-frames=1", seed_arg, NULL};
+    if (test_host_tool_capture(args, output, sizeof(output), 10000) != 0) return false;
+    const char *line = strstr(output, "QA_SEED ");
+    return line && sscanf(line, "QA_SEED calls=%u last=%u", calls, last) == 2;
+}
+
+static int skycombat_qa_seed_output(void)
+{
+    int failures = 0;
+    TEST("--qa-frames: seeds both RNG streams (default 1, --seed overrides) so runs match") {
+        unsigned calls = 0, last = 0;
+        ASSERT(skycombat_seed_of(NULL, &calls, &last));
+        ASSERT(calls >= 2u); ASSERT_EQ(last, 1u);
+        ASSERT(skycombat_seed_of("--seed=77", &calls, &last));
+        ASSERT_EQ(last, 77u);
         PASS();
     }
 _test_next:;
@@ -1080,6 +1108,7 @@ _test_next:;
     failures += skycombat_version_output();
     failures += skycombat_frame_times_output(1);
     failures += skycombat_frame_times_output(60);
+    failures += skycombat_qa_seed_output();
     failures += skycombat_capture_file();
     failures += skycombat_capture_colour();
     failures += skycombat_capture_usage();

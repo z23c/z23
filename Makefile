@@ -3419,20 +3419,22 @@ skycombat-model-replay: $(SKYCOMBAT_REPLAY_BIN) $(BIN_DIR)/z23_bounded_run
 
 # Source-bound QA entrypoint fixture: no window-system headers or GPU needed.
 SKYCOMBAT_QA_BIN := $(BIN_DIR)/skycombat-qa-entrypoint
-$(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(SKYCOMBAT_MAKE_INPUTS) \
+$(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(SKYCOMBAT_MAKE_INPUTS) $(BUILD_IDENTITY_STAMP) \
 	               $(SKYCOMBAT_DIR)/src/agent_session.c \
 	               $(SKYCOMBAT_DIR)/src/agent_resident.c \
 	               $(SKYCOMBAT_DIR)/src/game_runtime.c \
 	               $(SKYCOMBAT_DIR)/src/game_match_reset.c \
+	               $(SKYCOMBAT_DIR)/src/qa_timing.c \
                    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(wildcard $(SKYCOMBAT_DIR)/part/*.h) \
                    $(SKYCOMBAT_SUPPORT_SRCS) \
                    $(wildcard apps/skycombat/include/sky_combat/*.h) \
                    $(wildcard apps/skycombat/include/sky_combat/*/*.h) | $(BIN_DIR)
-	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) $< \
+	$(CC) $(SKYCOMBAT_CFLAGS) $(BUILD_IDENTITY_CPPFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) $< \
 	    $(SKYCOMBAT_DIR)/src/agent_session.c \
 	    $(SKYCOMBAT_DIR)/src/agent_resident.c \
 	    $(SKYCOMBAT_DIR)/src/game_runtime.c \
 	    $(SKYCOMBAT_DIR)/src/game_match_reset.c \
+	    $(SKYCOMBAT_DIR)/src/qa_timing.c \
 	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o $@ -lm
 .PHONY: skycombat-qa-entrypoint
 skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)

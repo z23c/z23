@@ -7,12 +7,13 @@
 #include <stdlib.h>
 
 static bool sky_runtime_agent;
+static bool sky_runtime_fixed_seed;
 static uint32_t sky_runtime_seed = 1;
 static uint64_t sky_runtime_ticks;
 
 void sky_game_runtime_reseed(void)
 {
-    if (sky_runtime_agent) {
+    if (sky_runtime_agent || sky_runtime_fixed_seed) {
         srand(sky_runtime_seed);
         SetRandomSeed(sky_runtime_seed);
     }
@@ -23,6 +24,7 @@ void sky_game_runtime_begin(bool agent, uint32_t seed)
     sky_runtime_agent = agent;
     sky_runtime_seed = seed;
     sky_runtime_ticks = 0;
+    sky_runtime_fixed_seed = false;
     sky_game_runtime_reseed();
 }
 
@@ -117,4 +119,12 @@ void sky_game_metrics_report(void)
     sky_metric_report_one("frame_work", sky_metric_work, sky_metric_work_count);
     sky_metric_report_one("frame_interval", sky_metric_interval, sky_metric_interval_count);
     sky_metric_report_one("input_to_frame", sky_metric_input, sky_metric_input_count);
+}
+
+/* A bounded --qa-frames run seeds both RNG streams from the session seed so
+ * two runs build the same world; time and cosmetics stay interactive-style. */
+void sky_game_runtime_fix_seed(void)
+{
+    sky_runtime_fixed_seed = true;
+    sky_game_runtime_reseed();
 }

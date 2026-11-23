@@ -8,26 +8,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 #include "sky_combat/qa_frames.h"
 
-/* Monotonic microseconds; the origin is arbitrary, only differences matter. */
-static inline uint64_t sky_qa_now_us(void)
-{
-#if defined(_WIN32)
-    LARGE_INTEGER freq, now;
-    if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&now) ||
-        freq.QuadPart <= 0) return 0;
-    uint64_t ticks = (uint64_t)now.QuadPart, hz = (uint64_t)freq.QuadPart;
-    return ticks / hz * 1000000u + ticks % hz * 1000000u / hz;
-#else
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
-#endif
-}
+/* Monotonic microseconds; the origin is arbitrary, only differences matter.
+ * Defined in qa_timing.c, which includes no raylib (windows.h clashes with it). */
+uint64_t sky_qa_now_us(void);
 
 /* Fixed storage sized for the QA frame ceiling: recording never allocates. */
 struct sky_qa_timing {

@@ -165,6 +165,7 @@ SKYCOMBAT_GAME_SRCS := $(SKYCOMBAT_GAME_MAIN) \
 	$(SKYCOMBAT_DIR)/src/agent_resident.c \
 	$(SKYCOMBAT_DIR)/src/game_runtime.c \
 	$(SKYCOMBAT_DIR)/src/game_match_reset.c \
+	$(SKYCOMBAT_DIR)/src/qa_timing.c \
 	$(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) \
 	$(SKYCOMBAT_DIR)/src/controllers/input_controller_fast.c \
 	$(SKYCOMBAT_DIR)/src/controllers/input_mvc_fast.c \

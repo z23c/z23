@@ -14,6 +14,7 @@ enum sky_game_visual_domain {
  * interactive time delegates to raylib. Reseed after fixed-layout world init. */
 void sky_game_runtime_begin(bool agent, uint32_t seed);
 void sky_game_runtime_reseed(void);
+void sky_game_runtime_fix_seed(void);
 void sky_game_runtime_tick(void);
 bool sky_game_runtime_agent(void);
 uint64_t sky_game_runtime_ticks(void);

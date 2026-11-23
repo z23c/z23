@@ -646,7 +646,7 @@ static bool parse_game_options(int argc, char **argv,
     struct sky_expr_option candidate;
     if (input.agent && input.seen_frames) return false;
     if (input.capture_path && (input.agent || !input.seen_frames)) return false;
-    if (input.resident_agent != (input.nonce != NULL) || (input.seen_seed && !input.agent)) return false;
+    if (input.resident_agent != (input.nonce != NULL) || (input.seen_seed && !input.agent && !input.seen_frames)) return false;
     if (!sky_expr_option_parse(input.hud_argc, input.hud_argv, &candidate)) return false;
     *option = candidate;
     *frames = input.frames;
@@ -717,7 +717,7 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
     uint32_t seed;
     if (!parse_game_options(argc, argv, option, qa_frames, agent_mode, &nonce, &seed,
                             capture_path)) {
-        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --resident <64 lower hex nonce> --agent | --qa-frames=1..%u [--capture=PATH, needs --qa-frames]] [--seed=UINT32] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
+        fprintf(stderr, "Usage: z23-skycombat [--agent-stdio | --resident <64 lower hex nonce> --agent | --qa-frames=1..%u [--capture=PATH, needs --qa-frames]] [--seed=UINT32, default 1; agent or --qa-frames only] [--hud-part=<64 hex SHA-256>:<file> [--hud-pin-file=<file>]]\n",
                 SKY_COMBAT_QA_FRAMES_MAX);
         return 2;
     }
@@ -746,6 +746,7 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
     }
     SetTargetFPS(TARGET_FPS);
     sky_game_runtime_begin(*agent_mode, seed);
+    if (*qa_frames) sky_game_runtime_fix_seed();
     return 0;
 }
 static bool game_systems_ready(const multiplayer_game_t *game)
