@@ -1056,6 +1056,25 @@ static bool pc_need_present(const char *path, int mode)
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+/* The lane Makefile defines the strict-compile target. A lane whose base
+ * predates it would otherwise fail with make exit 2, a false red. */
+static bool pc_makefile_has_target(const char *wt, const char *target)
+{
+    char path[4096 + 80], want[128];
+    if (snprintf(path, sizeof(path), "%s/Makefile", wt) >= (int)sizeof(path) ||
+        snprintf(want, sizeof(want), "%s:", target) >= (int)sizeof(want))
+        return false;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    char line[1024];
+    size_t wl = strlen(want);
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), fp))
+        found = strncmp(line, want, wl) == 0;
+    fclose(fp);
+    return found;
+}
+
 /* The launcher derives its root from its executable location. This is a
  * point-in-time location check, not executable freshness or identity proof. */
 static bool pc_depfile_lane_launcher(const char *wt)
@@ -1097,6 +1116,13 @@ static const char *pc_missing_need(struct pc_run *r, const char *gate)
         (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s",
                        k_pc_needs[i].file);
         return k_pc_needs[i].file;
+    }
+    if (strcmp(gate, PC_STRICT_GATE) == 0 &&
+        !pc_makefile_has_target(r->wt, PC_STRICT_GATE)) {
+        (void)snprintf(r->out, PC_OUT_CAP,
+                       "prerequisite unavailable: Makefile target %s (rebase onto origin/main)",
+                       PC_STRICT_GATE);
+        return "Makefile";
     }
     if (strcmp(gate, PC_DEPFILE_GATE) == 0 && !pc_depfile_lane_launcher(r->wt)) {
         (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s (noncanonical launcher)",

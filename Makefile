@@ -719,7 +719,7 @@ else ifneq ($(filter lint lint-preflight lint-fast-preflight,$(ZCL_EPOCH_SINGLE_
 # post-link toolchain-integrity check. lint-preflight shares this because
 # check-capability-closure (one of its gates) reads the same dev-obj epoch.
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast android-snapshot-recovery-build test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel_fast android-snapshot-recovery-build test-parallel-fast-active test-parallel-fast-active-locked t-fast-locked t-fast-exact-locked ff-test-lint proof-compile-changed-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_EPOCH_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-strict
@@ -737,7 +737,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGL
 ZCL_EPOCH_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := coverage
-else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css proof-compile-changed,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 endif
 endif
@@ -2087,7 +2087,7 @@ $(TEST_PARALLEL_BIN) $(TEST_PARALLEL_FAST_BIN) $(TEST_ASAN_BIN) $(TEST_TSAN_BIN)
 CHECKOUT_LOCKED_TEST_GOALS := test-parallel-active-locked \
 	test-parallel-fast-active-locked test-parallel-locked t-locked \
 	t-fast-locked t-fast-exact-locked test-locked test-full-locked \
-	secure-release-regressions-locked
+	secure-release-regressions-locked proof-compile-changed-locked
 ifneq ($(filter $(CHECKOUT_LOCKED_TEST_GOALS),$(MAKECMDGOALS)),)
 ifneq ($(ZCL_CHECKOUT_LOCK_HELD),1)
 $(error internal locked test goal requires the checkout lock; invoke its public target)
@@ -18317,9 +18317,10 @@ proof-compile-changed:
 	 else grep -E "error:|\*\*\*" "$$log" | head -n 12 | cut -c1-240; \
 	   echo "proof-compile-changed: FAILED; full log: $$log"; exit 1; fi
 
+PROOF_COMPILE_SKIPPED = $(strip $(filter-out $(TEST_PARALLEL_FAST_SRCS),$(CHANGED_TU)))
 PROOF_COMPILE_OBJS = $(patsubst %.c,$(TEST_FAST_OBJ_DIR)/%.o,$(filter $(CHANGED_TU),$(TEST_PARALLEL_FAST_SRCS)))
 proof-compile-changed-locked: $(PROOF_COMPILE_OBJS)
-	@echo "proof-compile-changed: OK ($(words $(PROOF_COMPILE_OBJS)) changed TU(s) compiled under the proof profile)"
+	@echo "proof-compile-changed: OK ($(words $(PROOF_COMPILE_OBJS)) changed TU(s) compiled under the proof profile$(if $(PROOF_COMPILE_SKIPPED),; NOT checked (outside the test-fast set): $(PROOF_COMPILE_SKIPPED)))"
 
 # agent-verify: the one verification trip for an edit. It runs the required
 # checks, each as its own sub-make with its own log. Complexity fails fast before

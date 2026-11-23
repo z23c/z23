@@ -1378,12 +1378,14 @@ static bool dlx_pc_size_clean(void)
  * diagnostic (refused with that diagnostic, nothing queued). */
 static bool dlx_pc_strict_rig(struct dlx_rig *rig, int mode)
 {
-    static const char *const tag[] = {"strict_absent", "strict_clean", "strict_red"};
+    static const char *const tag[] = {"strict_absent", "strict_clean", "strict_red",
+                                        "strict_notarget"};
     static const char *const rule[] = {
         "proof-compile-changed:\n\t@echo unused\n",
         "proof-compile-changed:\n\t@echo proof-compile-changed: OK\n",
         "proof-compile-changed:\n\t@echo \"tests/harness/src/t.c:7:5: error: ignoring "
-        "return value of fread [-Werror=unused-result]\"; exit 1\n"};
+        "return value of fread [-Werror=unused-result]\"; exit 1\n",
+        "other-target:\n\t@echo older lane Makefile\n"};
     char path[1400];
     if (!dlx_pc_rig(rig, tag[mode], true, "check-core-seal\n"))
         return false;
@@ -1439,6 +1441,7 @@ static int dlx_pc_ratchet_cases(void)
         ASSERT(dlx_pc_strict_case(0));
         ASSERT(dlx_pc_strict_case(1));
         ASSERT(dlx_pc_strict_case(2));
+        ASSERT(dlx_pc_strict_case(3)); /* epochs present, target missing: unproven */
         PASS();
     }
     TEST("land: submit runs the file-size binary, and continues when it is missing") {
