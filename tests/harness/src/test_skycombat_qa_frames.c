@@ -7,6 +7,7 @@
 #include "../../../apps/skycombat/src/qa_timing.c"
 #include "platform/resident_launch.h"
 #include "json/json.h"
+#include <math.h>
 #include <string.h>
 #if !defined(_WIN32)
 #include <errno.h>
@@ -899,17 +900,21 @@ static int skycombat_held_keyboard_fire(void)
         ASSERT(strstr(output, "QA_HELD_CTRL weapon_calls=4 bullet_calls=4"));
         PASS();
     } _test_next:;
+    return failures;
+}
+
 /* Parse the one QA_FRAME_TIMES line; false when absent or malformed. */
 static bool skycombat_times_parse(const char *output, struct sky_qa_summary *s)
 {
     const char *line = strstr(output, "QA_FRAME_TIMES ");
-    unsigned long long first = 0;
+    unsigned long long first = 0, digest = 0;
     if (!line) return false;
     int fields = sscanf(line,
-        "QA_FRAME_TIMES frames=%u first_frame_us=%llu min_us=%u median_us=%u p95_us=%u p99_us=%u max_us=%u",
-        &s->frames, &first, &s->min_us, &s->median_us, &s->p95_us, &s->p99_us, &s->max_us);
+        "QA_FRAME_TIMES frames=%u first_frame_us=%llu min_us=%u median_us=%u p95_us=%u p99_us=%u max_us=%u state_digest=%llx",
+        &s->frames, &first, &s->min_us, &s->median_us, &s->p95_us, &s->p99_us, &s->max_us, &digest);
     s->first_frame_us = first;
-    return fields == 7 && !strstr(line + 1, "QA_FRAME_TIMES ");
+    s->state_digest = digest;
+    return fields == 8 && !strstr(line + 1, "QA_FRAME_TIMES ");
 }
 
 static bool skycombat_times_ordered(const struct sky_qa_summary *s)
@@ -938,6 +943,14 @@ static int skycombat_timing_pure(void)
         struct sky_qa_summary back;
         ASSERT(skycombat_times_parse(line, &back));
         ASSERT_EQ(back.frames, 100u); ASSERT_EQ(back.p99_us, 990u);
+        ASSERT_EQ(back.state_digest, 0u);
+        s.state_digest = UINT64_C(0x00c0ffee12345678);
+        ASSERT(sky_qa_summary_format(&s, line, sizeof(line)));
+        ASSERT(strstr(line, " state_digest=00c0ffee12345678") != NULL);
+        ASSERT(skycombat_times_parse(line, &back));
+        ASSERT_EQ(back.state_digest, s.state_digest);
+        ASSERT(sky_qa_digest_f32(SKY_QA_DIGEST_SEED, 1.0f) != sky_qa_digest_f32(SKY_QA_DIGEST_SEED, 1.0000001f));
+        ASSERT(sky_qa_digest_i32(SKY_QA_DIGEST_SEED, 1) != sky_qa_digest_i32(SKY_QA_DIGEST_SEED, 2));
         ASSERT(!sky_qa_summary_format(&s, line, 20));
         PASS();
     }
@@ -1011,6 +1024,44 @@ static int skycombat_frame_times_output(unsigned frames)
         ASSERT(s.first_frame_us > 0);
         /* existing output is kept */
         ASSERT(strstr(output, "QA_TEST status=0") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* The digest and clock of one fixture --qa-frames run; skew shifts its wall clock. */
+static bool skycombat_clock_of(unsigned skew, struct sky_qa_summary *s,
+                               unsigned long long *ticks, double *seconds)
+{
+    char skew_arg[40], output[4096] = {0};
+    snprintf(skew_arg, sizeof(skew_arg), "--fixture-time-skew=%u", skew);
+    const char *args[] = {QA_ENTRY, skew_arg, "--qa-frames=40", NULL};
+    if (test_host_tool_capture(args, output, sizeof(output), 10000) != 0 ||
+        !skycombat_times_parse(output, s)) return false;
+    const char *line = strstr(output, "QA_CLOCK ");
+    unsigned frames = 0;
+    return line && sscanf(line, "QA_CLOCK frames=%u ticks=%llu time=%lf", &frames, ticks, seconds) == 3 &&
+           frames == 40u;
+}
+
+static int skycombat_qa_determinism(void)
+{
+    int failures = 0;
+    TEST("--qa-frames: simulation time is the frame number, whatever the wall clock reads") {
+        struct sky_qa_summary a = {0}, b = {0}, c = {0};
+        unsigned long long ticks_a = 0, ticks_b = 0, ticks_c = 0;
+        double time_a = 0, time_b = 0, time_c = 0;
+        ASSERT(skycombat_clock_of(0, &a, &ticks_a, &time_a));
+        ASSERT(skycombat_clock_of(0, &b, &ticks_b, &time_b));
+        ASSERT(skycombat_clock_of(9, &c, &ticks_c, &time_c));
+        /* one tick per frame and time = ticks / 60, with a loader/pacing skew or without */
+        ASSERT_EQ(ticks_a, 40u); ASSERT_EQ(ticks_b, 40u); ASSERT_EQ(ticks_c, 40u);
+        /* printed to 6 decimals, so 40 / 60 compares to within 1e-6 */
+        ASSERT(fabs(time_a - 40.0 / 60.0) < 1e-6 && time_b == time_a && time_c == time_a);
+        ASSERT(a.state_digest != 0);
+        ASSERT_EQ(a.state_digest, b.state_digest);
+        ASSERT_EQ(a.state_digest, c.state_digest);
         PASS();
     }
 _test_next:;
@@ -1109,6 +1160,7 @@ _test_next:;
     failures += skycombat_frame_times_output(1);
     failures += skycombat_frame_times_output(60);
     failures += skycombat_qa_seed_output();
+    failures += skycombat_qa_determinism();
     failures += skycombat_capture_file();
     failures += skycombat_capture_colour();
     failures += skycombat_capture_usage();

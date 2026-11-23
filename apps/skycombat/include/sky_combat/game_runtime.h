@@ -11,10 +11,12 @@ enum sky_game_visual_domain {
 };
 
 /* One game process/session. Agent time advances only at an accepted tick;
- * interactive time delegates to raylib. Reseed after fixed-layout world init. */
+ * interactive time delegates to raylib (a fixed-step QA run uses ticks too). Reseed after fixed-layout world init. */
 void sky_game_runtime_begin(bool agent, uint32_t seed);
 void sky_game_runtime_reseed(void);
-void sky_game_runtime_fix_seed(void);
+/* Fixed-step QA run (after begin): seed both RNG streams and drive the tick
+ * clock, one sky_game_runtime_tick per frame, so time is ticks / 60. */
+void sky_game_runtime_fix_step(void);
 void sky_game_runtime_tick(void);
 bool sky_game_runtime_agent(void);
 uint64_t sky_game_runtime_ticks(void);

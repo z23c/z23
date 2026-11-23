@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include "sky_combat/qa_frames.h"
 
@@ -26,6 +27,7 @@ struct sky_qa_summary {
     unsigned frames;
     uint64_t first_frame_us;
     uint32_t min_us, median_us, p95_us, p99_us, max_us;
+    uint64_t state_digest;   /* simulation state at the last frame (see the game) */
 };
 
 static inline void sky_qa_timing_begin(struct sky_qa_timing *timing, uint64_t now_us)
@@ -77,13 +79,32 @@ static inline bool sky_qa_timing_summarize(struct sky_qa_timing *timing,
     return true;
 }
 
+/* FNV-1a over fixed-width values: stable across runs and platforms. */
+#define SKY_QA_DIGEST_SEED UINT64_C(0xcbf29ce484222325)
+static inline uint64_t sky_qa_digest_u32(uint64_t digest, uint32_t value)
+{
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        digest = (digest ^ ((value >> shift) & 0xffu)) * UINT64_C(0x100000001b3);
+    return digest;
+}
+static inline uint64_t sky_qa_digest_i32(uint64_t digest, int value)
+{
+    return sky_qa_digest_u32(digest, (uint32_t)value);
+}
+static inline uint64_t sky_qa_digest_f32(uint64_t digest, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return sky_qa_digest_u32(digest, bits);
+}
+
 /* The one machine-readable line: key=value pairs, space separated, no newline. */
 static inline bool sky_qa_summary_format(const struct sky_qa_summary *s, char *buffer, size_t capacity)
 {
     int n = snprintf(buffer, capacity,
-        "QA_FRAME_TIMES frames=%u first_frame_us=%llu min_us=%u median_us=%u p95_us=%u p99_us=%u max_us=%u",
+        "QA_FRAME_TIMES frames=%u first_frame_us=%llu min_us=%u median_us=%u p95_us=%u p99_us=%u max_us=%u state_digest=%016llx",
         s->frames, (unsigned long long)s->first_frame_us, s->min_us, s->median_us,
-        s->p95_us, s->p99_us, s->max_us);
+        s->p95_us, s->p99_us, s->max_us, (unsigned long long)s->state_digest);
     return n > 0 && (size_t)n < capacity;
 }
 #endif

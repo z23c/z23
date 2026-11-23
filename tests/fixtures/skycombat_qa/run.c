@@ -52,6 +52,8 @@ static void qa_self_signal(void)
 }
 #endif
 static unsigned qa_random_calls, qa_seed_calls, qa_last_seed;
+/* --fixture-time-skew=N: wall clock offset and jitter, standing in for loader time and frame pacing. */
+static unsigned qa_time_skew;
 static int sky_qa_entry(int argc, char **argv);
 /* Adapt only the entry signature for the pre-fix main(void) removal witness.
  * The entire production function body, argument admission and loop are used. */
@@ -231,7 +233,7 @@ void cyberpunk_set_theme_blade_runner([[maybe_unused]] cyberpunk_world_t* world)
 RenderTexture2D LoadRenderTexture([[maybe_unused]] int width, [[maybe_unused]] int height) { return (RenderTexture2D){0}; }
 bool WindowShouldClose(void) { return qa_frames >= qa_close_after; }
 float GetFrameTime(void) { return 1.0f / 60.0f; }
-double GetTime(void) { return (double)qa_frames / 60.0; }
+double GetTime(void) { return (double)qa_frames / 60.0 + (double)qa_time_skew * (0.37 + 0.013 * (double)(qa_frames % 7)); }
 bool IsKeyDown(int key) {
     ++qa_keys;
     return (qa_hold_left_ctrl && key == KEY_LEFT_CONTROL) || qa_agent;
@@ -336,6 +338,7 @@ static void qa_window_options(int *argc, char ***argv)
     if (strcmp(option, "--fixture-hud-keys") == 0) qa_hud_keys = true;
     else if (strcmp(option, "--fixture-close=2") == 0) qa_close_after = 2;
     else if (strcmp(option, "--fixture-window-fails") == 0) qa_window_failed = true;
+    else if (strncmp(option, "--fixture-time-skew=", 20) == 0) qa_time_skew = (unsigned)atoi(option + 20);
     else return;
     --*argc;
     ++*argv;
@@ -450,6 +453,13 @@ static void qa_print_seed(void)
     if (!qa_agent && !(qa_original_closed & 4u))
         fprintf(stdout, "QA_SEED calls=%u last=%u\n", qa_seed_calls, qa_last_seed);
 }
+/* Non-agent runs report the explicit clock: ticks and time follow frames, never GetTime. */
+static void qa_print_clock(void)
+{
+    if (!qa_agent && !(qa_original_closed & 4u))
+        fprintf(stdout, "QA_CLOCK frames=%u ticks=%llu time=%.6f\n", qa_frames,
+                (unsigned long long)sky_game_runtime_ticks(), sky_game_runtime_time());
+}
 static int qa_finish(int result, FILE *agent_input)
 {
     if (qa_bad_stdio) result = 4;
@@ -465,6 +475,7 @@ static int qa_finish(int result, FILE *agent_input)
     if (!(qa_original_closed & 4u)) fprintf(qa_agent ? stderr : stdout, "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u\n",
         result, qa_windows, qa_frames, qa_closed, qa_destroyed, qa_unloads);
     qa_print_seed();
+    qa_print_clock();
     if (qa_agent && !(qa_original_closed & 4u)) fprintf(stderr, "QA_AGENT ticks=%u keys=%u polls=%u stick=%.3f,%.3f\n",
         qa_ticks, qa_keys, qa_polls, (double)qa_stick_x, (double)qa_stick_y);
     if (qa_resident && !(qa_original_closed & 4u)) fprintf(stderr, "QA_RESIDENT events=%u\n", qa_events);

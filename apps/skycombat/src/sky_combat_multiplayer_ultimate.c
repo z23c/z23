@@ -92,7 +92,9 @@ typedef struct {
     /* --capture run: fixed time step and a chase view centred on the player */
     bool capture_view;
 
-    /* --qa-frames run: fixed 1/60 s step; with the fixed RNG seed (default 1) two runs do identical work */
+    /* --qa-frames run: fixed 1/60 s step and the explicit tick clock (one tick per
+     * frame), so simulation time is a function of the frame number; with the fixed
+     * RNG seed (default 1) two runs do identical work and end on the same state_digest */
     bool fixed_step;
     game_flow_t flow;
     int best_score;
@@ -491,7 +493,7 @@ static void score_unlock(int fd, const char *path)
     (void)path;
 #if defined(_WIN32)
     OVERLAPPED overlap = {0};
-    (void)UnlockFileEx((HANDLE)_get_osfhandle(fd), MAXDWORD, 0, &overlap);
+    (void)UnlockFileEx((HANDLE)_get_osfhandle(fd), 0, MAXDWORD, 0, &overlap);
     (void)_close(fd);
 #else
     (void)flock(fd, LOCK_UN);
@@ -746,7 +748,7 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
     }
     SetTargetFPS(TARGET_FPS);
     sky_game_runtime_begin(*agent_mode, seed);
-    if (*qa_frames) sky_game_runtime_fix_seed();
+    if (*qa_frames) sky_game_runtime_fix_step();
     return 0;
 }
 static bool game_systems_ready(const multiplayer_game_t *game)
@@ -1159,7 +1161,7 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
     float interval_ms;
     double metric_start = game_metrics_begin(game, &interval_ms);
     float dt = external_input || game->capture_view || game->fixed_step ? 1.0f / 60.0f : GetFrameTime();
-    if (external_input) {
+    if (external_input || game->fixed_step) {
         sky_game_runtime_tick();
         *game_time = (float)sky_game_runtime_time();
     } else *game_time += dt;
@@ -1198,11 +1200,34 @@ static int game_print_version(void)
     return fflush(stdout) == 0 ? 0 : 1;
 }
 
-static void qa_timing_report(void)
+/* Simulation state at the last frame: every aircraft pose, health and tally
+ * plus the team scores. Two --qa-frames runs agree on it iff they did the same work. */
+static uint64_t game_state_digest(const multiplayer_game_t *game)
+{
+    uint64_t digest = SKY_QA_DIGEST_SEED;
+    int count = game->aircraft_mgr->aircraft_count;
+    digest = sky_qa_digest_i32(digest, count);
+    for (int i = 0; i < count && i < MAX_MANAGED_AIRCRAFT; ++i) {
+        const managed_aircraft_t *ship = &game->aircraft_mgr->aircraft[i];
+        const float pose[] = {ship->aircraft->position.x, ship->aircraft->position.y,
+                              ship->aircraft->position.z, ship->aircraft->yaw,
+                              ship->aircraft->pitch, ship->aircraft->roll, ship->health};
+        for (size_t k = 0; k < sizeof(pose) / sizeof(pose[0]); ++k)
+            digest = sky_qa_digest_f32(digest, pose[k]);
+        digest = sky_qa_digest_i32(digest, ship->kills);
+        digest = sky_qa_digest_i32(digest, ship->deaths);
+    }
+    for (int team = 0; team < 4; ++team)
+        digest = sky_qa_digest_i32(digest, game->match->team_scores[team]);
+    return digest;
+}
+
+static void qa_timing_report(const multiplayer_game_t *game)
 {
     struct sky_qa_summary summary;
     char line[256];
     if (!sky_qa_timing_summarize(&qa_timing, &summary)) return;
+    summary.state_digest = game_state_digest(game);
     if (!sky_qa_summary_format(&summary, line, sizeof(line))) {
         fputs("Sky Combat: QA frame-time line did not fit\n", stderr);
         return;
@@ -1231,7 +1256,7 @@ static int run_frame_loop(multiplayer_game_t *game, const struct sky_expr_option
     int result = game_frame_result(qa_frames, rendered_frames);
     if (!result && capture_path && !game_capture_save(capture_path, &shot)) result = 1;
     free(shot.png);
-    if (qa_frames) qa_timing_report();
+    if (qa_frames) qa_timing_report(game);
     return result;
 }
 

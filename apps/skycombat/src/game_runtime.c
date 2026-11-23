@@ -8,6 +8,7 @@
 
 static bool sky_runtime_agent;
 static bool sky_runtime_fixed_seed;
+static bool sky_runtime_stepped; /* fixed-step QA run: time is ticks / 60 */
 static uint32_t sky_runtime_seed = 1;
 static uint64_t sky_runtime_ticks;
 
@@ -25,27 +26,28 @@ void sky_game_runtime_begin(bool agent, uint32_t seed)
     sky_runtime_seed = seed;
     sky_runtime_ticks = 0;
     sky_runtime_fixed_seed = false;
+    sky_runtime_stepped = false;
     sky_game_runtime_reseed();
 }
 
 void sky_game_runtime_tick(void)
 {
-    /* The agent protocol caps a session at 36000 ticks. */
-    if (sky_runtime_agent) ++sky_runtime_ticks;
+    /* The agent protocol caps a session at 36000 ticks; a QA run at 3600. */
+    if (sky_runtime_agent || sky_runtime_stepped) ++sky_runtime_ticks;
 }
 
 bool sky_game_runtime_agent(void) { return sky_runtime_agent; }
 uint64_t sky_game_runtime_ticks(void) { return sky_runtime_ticks; }
 double sky_game_runtime_time(void)
 {
-    return sky_runtime_agent ? (double)sky_runtime_ticks / 60.0 : GetTime();
+    return sky_runtime_agent || sky_runtime_stepped ? (double)sky_runtime_ticks / 60.0 : GetTime();
 }
 
 int sky_game_visual_sample(uint32_t domain, uint32_t index, int minimum, int maximum)
 {
     if (maximum <= minimum) return minimum;
     uint64_t tick = sky_runtime_ticks;
-    if (!sky_runtime_agent) {
+    if (!sky_runtime_agent && !sky_runtime_stepped) {
         double seconds = GetTime();
         tick = isfinite(seconds) && seconds >= 0 && seconds < 1.0e12
             ? (uint64_t)(seconds * 60.0) : 0;
@@ -121,10 +123,12 @@ void sky_game_metrics_report(void)
     sky_metric_report_one("input_to_frame", sky_metric_input, sky_metric_input_count);
 }
 
-/* A bounded --qa-frames run seeds both RNG streams from the session seed so
- * two runs build the same world; time and cosmetics stay interactive-style. */
-void sky_game_runtime_fix_seed(void)
+/* A bounded --qa-frames run seeds both RNG streams from the session seed and
+ * drives the explicit tick clock (one tick per frame, see sky_game_runtime_tick),
+ * so the simulation is a pure function of the frame number and the seed. */
+void sky_game_runtime_fix_step(void)
 {
     sky_runtime_fixed_seed = true;
+    sky_runtime_stepped = true;
     sky_game_runtime_reseed();
 }
