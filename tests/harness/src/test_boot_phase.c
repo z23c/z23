@@ -721,6 +721,17 @@ static int64_t bp_snapshot_clock(void *unused)
     return 1704067200000LL;
 }
 
+static bool bp_snapshot_file_is(const char *path, const char *expected)
+{
+    char data[32] = {0};
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(data, 1, sizeof(data) - 1, f);
+    bool ok = !ferror(f) && feof(f) && n == strlen(expected) && strcmp(data, expected) == 0;
+    fclose(f);
+    return ok;
+}
+
 static int bp_snapshot_collision_preserves_existing(void)
 {
     int failures = 0;
@@ -746,27 +757,13 @@ static int bp_snapshot_collision_preserves_existing(void)
     struct stat st;
     BP_CHECK("snapshot collision refuses", result == NULL);
     BP_CHECK("snapshot collision preserves sentinel", stat(sentinel, &st) == 0);
-    char content[16] = {0};
-    f = fopen(sentinel, "r");
-    if (f) { (void)fread(content, 1, sizeof(content) - 1, f); fclose(f); }
-    BP_CHECK("snapshot collision preserves sentinel bytes", strcmp(content, "preserve") == 0);
+    BP_CHECK("snapshot collision preserves sentinel bytes", bp_snapshot_file_is(sentinel, "preserve"));
     BP_CHECK("snapshot collision preserves other snapshot", stat(other, &st) == 0);
     test_rm_rf(dir);
     return failures;
 }
 
 #if !defined(_WIN32)
-static bool bp_snapshot_file_is(const char *path, const char *expected)
-{
-    char data[32] = {0};
-    FILE *f = fopen(path, "r");
-    if (!f) return false;
-    size_t n = fread(data, 1, sizeof(data) - 1, f);
-    bool ok = !ferror(f) && feof(f) && n == strlen(expected) && strcmp(data, expected) == 0;
-    fclose(f);
-    return ok;
-}
-
 static bool bp_snapshot_write(const char *path, const char *data)
 {
     FILE *f = fopen(path, "w");
