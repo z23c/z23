@@ -2046,6 +2046,7 @@ static int al_reveal_tests(struct al_fx *f, struct zcl_command_reply *reply)
             if (mode) ASSERT(!strcmp(s.shared, s.revealed));
             if (mode >= 2) {
                 ASSERT(!strcmp(reply->error.code, "REVEAL_FAILED") && s.notice_calls == 2);
+                ASSERT(!strcmp(reply->error.next_action, "Use the saved .z23share at the location shown in Z23."));
                 ASSERT(s.errors == (mode == 3 ? 1u : 0u));
                 ASSERT(!strcmp(zcl_package_copy_str(json_get(&reply->data, "failure_facts"), "output"), s.shared));
                 if (mode == 3) {

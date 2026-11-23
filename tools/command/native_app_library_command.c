@@ -793,6 +793,8 @@ static bool al_share_result(struct library *w, struct app_confirm *notice,
     else if (al_reveal_enabled(notice) && !(w->revealer ? w->revealer : al_reveal_native)(w->prepare_context, w->shared_path)) {
         al_share_notice_failure(w, reply, "REVEAL_FAILED",
             "The share file was created, but opening its location could not be confirmed.", true, original);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Use the saved .z23share at the location shown in Z23.");
         w->error_presented = al_reveal_failure_notice(w);
     }
     return false;
