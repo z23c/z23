@@ -736,6 +736,36 @@ static int bp_legacy_snapshot_keeps_source_lock(void)
     test_rm_rf(dir);
     return failures;
 }
+
+static int bp_legacy_snapshot_refusals(void)
+{
+    int failures = 0;
+    char dir[PATH_MAX], source[PATH_MAX + 16], destination[PATH_MAX + 16], rendered[4096];
+    test_make_tmpdir(dir, sizeof(dir), "bootphase", "snapshot_refusal");
+    snprintf(source, sizeof(source), "%s/source \n", dir);
+    snprintf(destination, sizeof(destination), "%s/destination", dir);
+    FILE *file = fopen(destination, "w");
+    BP_CHECK("snapshot destination fixture", file != NULL);
+    if (file) fclose(file);
+    struct app_context ctx = { .snapshot_dir = source, .datadir = destination };
+    struct node_db db = {0};
+    boot_error_reset_for_testing();
+    BP_CHECK("snapshot unavailable database refuses", !boot_step_create_legacy_snapshot(&ctx, &db, NULL));
+    boot_error_last_render(rendered, sizeof(rendered));
+    BP_CHECK("snapshot database refusal typed", strstr(rendered, "BOOT_LEGACY_SNAPSHOT_DB_UNAVAILABLE") &&
+             strstr(rendered, "legacy_snapshot.database") && strstr(rendered, "source%20%0a") &&
+             strstr(rendered, destination) && strstr(rendered, "df -h"));
+    boot_error_reset_for_testing();
+    db.open = true;
+    BP_CHECK("snapshot creation failure refuses", file && !boot_step_create_legacy_snapshot(&ctx, &db, NULL));
+    boot_error_last_render(rendered, sizeof(rendered));
+    BP_CHECK("snapshot creation refusal typed", strstr(rendered, "BOOT_LEGACY_SNAPSHOT_CREATE_FAILED") &&
+             strstr(rendered, "legacy_snapshot.create") && strstr(rendered, "source%20%0a") &&
+             strstr(rendered, destination) && strstr(rendered, "df -h"));
+    boot_error_reset_for_testing();
+    test_rm_rf(dir);
+    return failures;
+}
 static int bp_test_thread_io_evidence(void);  /* end of file */
 static bool bp_event_log_binding_cycle(event_log_t *first)
 {
@@ -2536,6 +2566,7 @@ int test_boot_phase(void)
     failures += bp_node_db_newer_schema_refuses();
 #endif
     failures += bp_legacy_snapshot_keeps_source_lock();
+    failures += bp_legacy_snapshot_refusals();
     failures += bp_test_legacy_header_pull_predicates();
     failures += bp_test_blocks_table_hydrate_predicates();
     failures += bp_test_legal_forward_jumps();

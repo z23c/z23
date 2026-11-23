@@ -1566,25 +1566,25 @@ static bool boot_step_open_progress_store(struct app_context *ctx)
 }
 
 /* -snapshot: create a snapshot of a legacy datadir and import it. */
-static bool boot_step_create_legacy_snapshot(struct app_context *ctx)
+bool boot_step_create_legacy_snapshot(struct app_context *ctx, struct node_db *ndb, struct wallet *wallet)
 {
     /* -snapshot: Create snapshot of legacy data dir, import in parallel,
      * then start normally with P2P sync to catch up any delta. */
     if (ctx->snapshot_dir) {
-        if (!g_node_db.open) {
-            fprintf(stderr, "Error: SQLite database required for snapshot\n");
+        if (!ndb->open) {
+            boot_report_legacy_snapshot_failure(false, ctx->snapshot_dir, ctx->datadir);
             return false;
         }
         /* Step 1: Create snapshot (hardlink block files, copy LevelDB) */
         const char *snap = snapshot_create(ctx->snapshot_dir,
                                            ctx->datadir, 2);
         if (!snap) {
-            fprintf(stderr, "Error: Failed to create snapshot\n");
+            boot_report_legacy_snapshot_failure(true, ctx->snapshot_dir, ctx->datadir);
             return false;
         }
         /* Step 2: Parallel import (block index + UTXOs + wallet) */
         if (snapshot_import(snap, ctx->datadir,
-                            &g_node_db, &g_wallet) < 0) {
+                            ndb, wallet) < 0) {
             fprintf(stderr, "Warning: snapshot import failed; the blocks table "
                     "may be partial and the import must be rerun\n");
         }
@@ -1934,7 +1934,7 @@ static bool boot_seq_open_coins_state(struct app_context *ctx, struct boot_seq *
     }
     if (s->replay_pending) ctx->reindex_chainstate = true;
     t_sub = boot_submark("coins.snapshot_first", t_sub);
-    if (!s->replay_pending && !boot_step_create_legacy_snapshot(ctx))
+    if (!s->replay_pending && !boot_step_create_legacy_snapshot(ctx, &g_node_db, &g_wallet))
         return false;
     boot_step_open_block_tree(ctx);
     if (!boot_step_open_coins_view(ctx, s->replay_pending))

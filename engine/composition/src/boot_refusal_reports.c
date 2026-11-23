@@ -7,6 +7,7 @@
 #include "config/boot_refusal_reports.h"
 
 #include "config/boot_error.h"
+#include "base/hex.h"
 #include "platform/current_identity.h"
 #include "util/result.h"
 
@@ -16,6 +17,45 @@
 
 #define WALLET_PHASE "wallet_load"
 #define WALLET_RECOVERY_DOC "docs/node/WALLET_PERSISTENCE_RECOVERY.md"
+
+/* Paths are evidence, never shell commands. Escape control bytes and delimiters. */
+static void snapshot_path_evidence(const char *path, char *out, size_t cap)
+{
+    size_t n = 0;
+    const unsigned char *p = (const unsigned char *)(path ? path : "(unset)");
+    while (*p && n + 7 < cap) {
+        if (*p >= 33 && *p <= 126 && *p != '%' && *p != '=')
+            out[n++] = (char)*p;
+        else {
+            out[n++] = '%';
+            zcl_hex_encode(p, 1, out + n);
+            n += 2;
+        }
+        ++p;
+    }
+    if (*p && n + 4 < cap) {
+        memcpy(out + n, "...", 3);
+        n += 3;
+    }
+    out[n] = '\0';
+}
+
+void boot_report_legacy_snapshot_failure(bool creation_failed, const char *source,
+                                         const char *datadir)
+{
+    char src[192], dst[192];
+    snapshot_path_evidence(source, src, sizeof(src));
+    snapshot_path_evidence(datadir, dst, sizeof(dst));
+    const struct boot_error_next next[] = {
+        { "df -h", "check available storage; inspect the -snapshot source and -datadir destination permissions before retrying" },
+    };
+    boot_error_report(BOOT_ERROR_FATAL,
+                      creation_failed ? "BOOT_LEGACY_SNAPSHOT_CREATE_FAILED" : "BOOT_LEGACY_SNAPSHOT_DB_UNAVAILABLE",
+                      creation_failed ? "legacy_snapshot.create" : "legacy_snapshot.database",
+                      creation_failed ? "Legacy snapshot creation failed; startup stopped. Preserve existing data while investigating."
+                                      : "SQLite database is required to import a legacy snapshot; startup stopped.",
+                      next, 1, "snapshot_source=%s datadir=%s", src, dst);
+}
 
 /* Write the parent directory of `path` into `out`. "/a/b" -> "/a";
  * "/a" -> "/"; "a" -> ".". */

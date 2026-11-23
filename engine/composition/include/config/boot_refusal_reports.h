@@ -17,6 +17,11 @@
 #ifndef ZCL_CONFIG_BOOT_REFUSAL_REPORTS_H
 #define ZCL_CONFIG_BOOT_REFUSAL_REPORTS_H
 
+#include <stdbool.h>
+
+void boot_report_legacy_snapshot_failure(bool creation_failed, const char *source,
+                                         const char *datadir);
+
 #include <stddef.h>
 #include <stdint.h>
 

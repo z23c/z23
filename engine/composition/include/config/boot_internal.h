@@ -1172,6 +1172,8 @@ bool boot_refuse_at_permanent_gate(const char *gate_name, const char *message,
  * progress_kv_open). Always returns false (never advances past the gate);
  * app_init does `return boot_node_db_open_failed_gate(ctx->datadir);`. */
 bool boot_node_db_open_failed_gate(const char *datadir);
+bool boot_step_create_legacy_snapshot(struct app_context *ctx, struct node_db *ndb,
+                                      struct wallet *wallet);
 bool boot_node_db_migration_accept(struct node_db *ndb, int rc);
 
 /* Opens the "db.open_migrate" boot step and arms its process-I/O evidence
