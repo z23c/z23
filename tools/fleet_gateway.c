@@ -932,11 +932,11 @@ struct gw_tool {
 static const struct gw_tool gw_tools[] = {
     {"steer_brief", "brief", "Observe fleet",
      "Read-only fleet snapshot from existing authenticated state: agents, work, blockers, capacity, candidates, evidence refs, changes since a cursor. Missing and stale observations remain explicit. "
-     "Preferred: pass cursor_token as since for the next forward page, including when changes_truncated. It covers only rows actually returned after row and byte limits. Start with since=0| to read held history. Token pages omit the optional human screen; no-fitting-row pages refuse without advancing. "
+     "Preferred: pass cursor_token (or the legacy since union) for the next forward page, including when changes_truncated. cursor_token and since are mutually exclusive. It covers only rows actually returned after row and byte limits. Start with since=0| to read held history. Token pages omit the optional human screen; no-fitting-row pages refuse without advancing. "
      "An integer is a legacy global floor that hides independently-numbered streams. "
      "A refused token names dev.agent.mail in missing[]; replay from the start. "
      "caller reports the grant sender label, scopes and expiry the node authenticated.",
-     "{\"type\":\"object\",\"properties\":{\"grant\":{\"type\":\"string\",\"description\":\"Optional credential token. Omit when Authorization supplies it. Never caller.sender or an agent label; from is sender identity.\"},\"since\":{\"type\":[\"integer\",\"string\"]},\"limit\":{\"type\":\"integer\"}}}"},
+     "{\"type\":\"object\",\"properties\":{\"grant\":{\"type\":\"string\",\"description\":\"Optional credential token. Omit when Authorization supplies it. Never caller.sender or an agent label; from is sender identity.\"},\"since\":{\"type\":[\"integer\",\"string\"]},\"cursor_token\":{\"type\":\"string\",\"minLength\":1,\"description\":\"Optional opaque resume cursor for clients that cannot preserve a union-typed since; mutually exclusive with since.\"},\"limit\":{\"type\":\"integer\"}}}"},
     {"steer_send", "send", "Delegate work",
      "Delegate by sending one bounded batch of directives to named agents; acceptance records delivery intent, not worker execution or completion. Reconcile receiver evidence before retrying an uncertain effect. Retries with the same idempotency keys never duplicate. Every item carries a ref naming the work: 1-64 of [A-Za-z0-9_.-], never a path. An agent answers a directive with kind result under the same ref. An explicit disposition verifies full body bytes against exact mail evidence and requires send and evidence scopes. ACCEPTED also requires queue_seq, queue_attempt and resolved_sha3 to match durable native admission; this does not claim execution.",
      "{\"type\":\"object\",\"required\":[\"items\"],\"properties\":{\"grant\":{\"type\":\"string\",\"description\":\"Optional credential token. Omit when Authorization supplies it. Never caller.sender or an agent label; from is sender identity.\"},\"items\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"object\",\"required\":[\"to\",\"body\",\"ref\",\"idempotency_key\"],\"properties\":{\"to\":{\"type\":\"string\"},\"body\":{\"type\":\"string\"},\"ref\":{\"type\":\"string\",\"pattern\":\"^[A-Za-z0-9_.-]{1,64}$\"},\"idempotency_key\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"directive\",\"result\"]},\"disposition\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"stream\",\"row_offset\",\"seq\",\"row_sha3\",\"read\",\"read_bytes\",\"read_sha3\",\"state\"],\"properties\":{\"stream\":{\"type\":\"string\",\"maxLength\":128},\"row_offset\":{\"type\":\"integer\",\"minimum\":0},\"seq\":{\"type\":\"integer\",\"minimum\":1},\"row_sha3\":{\"type\":\"string\",\"pattern\":\"^[0-9a-f]{64}$\"},\"read\":{\"type\":\"boolean\"},\"read_bytes\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4096},\"read_sha3\":{\"type\":\"string\",\"pattern\":\"^[0-9a-f]{64}$\"},\"state\":{\"type\":\"string\",\"enum\":[\"ACCEPTED\",\"DEFERRED\",\"BLOCKED\"]},\"queue_seq\":{\"type\":\"integer\",\"minimum\":1},\"queue_attempt\":{\"type\":\"integer\",\"minimum\":0},\"resolved_sha3\":{\"type\":\"string\",\"pattern\":\"^[0-9a-f]{64}$\"}}}}}},\"from\":{\"type\":\"string\"}}}"},
@@ -1509,6 +1509,42 @@ static void gw_forward_call(struct gw_buf *b, const struct json_value *id,
     json_free(&env);
 }
 
+/* Preserve legacy argument bytes unless a schema-flattening client supplies
+ * the string-only cursor_token. Map that one field to the existing native
+ * since, never to a second cursor or a different authority. */
+static int gw_brief_cursor_map(const struct gw_tool *t, const struct json_value *args,
+                               struct gw_buf *mapped)
+{
+    const struct json_value *token;
+    struct json_value doc;
+    size_t seen = 0;
+    if (strcmp(t->verb, "brief") != 0 || !args || args->type != JSON_OBJ)
+        return 0;
+    token = json_get(args, "cursor_token");
+    if (!token) return 0;
+    if (json_get(args, "since")) return -1;
+    if (token->type != JSON_STR || !json_get_str(token)[0]) return -2;
+    for (size_t i = 0; i < args->num_children; i++)
+        if (strcmp(args->keys[i], "cursor_token") == 0) seen++;
+    if (seen != 1) return -2;
+    json_init(&doc);
+    json_set_object(&doc);
+    for (size_t i = 0; i < args->num_children; i++) {
+        if (strcmp(args->keys[i], "cursor_token") == 0) continue;
+        if (!json_push_kv(&doc, args->keys[i], &args->children[i])) {
+            json_free(&doc);
+            return -3;
+        }
+    }
+    if (!json_push_kv_str(&doc, "since", json_get_str(token))) {
+        json_free(&doc);
+        return -3;
+    }
+    gw_json_write(mapped, &doc);
+    json_free(&doc);
+    return mapped->oom || !mapped->p ? -3 : 1;
+}
+
 static void gw_reply_tool_call(struct gw_buf *b, const struct json_value *id,
                                const struct json_value *params,
                                const struct gw_call_plan *pl,
@@ -1518,8 +1554,11 @@ static void gw_reply_tool_call(struct gw_buf *b, const struct json_value *id,
     const struct gw_tool *t;
     const char *name, *carry = NULL;
     const struct json_value *args;
-    struct gw_buf arg;
+    struct gw_buf arg, mapped;
+    struct gw_call_plan mapped_plan;
+    const struct gw_call_plan *effective = pl;
     size_t n;
+    int cursor;
     name = gw_json_str(params, "name");
     t = gw_tool_by_name(name);
     if (!t) {
@@ -1530,19 +1569,40 @@ static void gw_reply_tool_call(struct gw_buf *b, const struct json_value *id,
     if (!gw_credential(b, id, bearer, bearer_bad, args, pl->args_obj, &carry,
                        challenge))
         return;
+    memset(&mapped, 0, sizeof(mapped));
+    cursor = gw_brief_cursor_map(t, args, &mapped);
+    if (cursor < 0) {
+        gw_buf_free(&mapped);
+        if (cursor == -3)
+            gw_rpc_error(b, id, -32603, "gateway resources exhausted");
+        else if (cursor == -1)
+            gw_rpc_error(b, id, -32602, "since and cursor_token are mutually exclusive");
+        else
+            gw_rpc_error(b, id, -32602, "cursor_token must be one nonempty string");
+        return;
+    }
+    if (cursor > 0) {
+        mapped_plan = *pl;
+        mapped_plan.args = mapped.p;
+        mapped_plan.args_len = mapped.len;
+        mapped_plan.args_empty = false;
+        effective = &mapped_plan;
+    }
     /* gw_refuse_oversize already held this bound; stating it again here
      * keeps the fork unreachable for an input execv cannot carry, whatever
      * the plan and the tree might ever disagree on. */
-    n = gw_input_len(pl, carry);
+    n = gw_input_len(effective, carry);
     if (n > GW_CAP_NODE_INPUT) {
         char msg[128];
         gw_input_refusal(msg, sizeof(msg), n);
+        gw_buf_free(&mapped);
         gw_rpc_error(b, id, -32602, msg);
         return;
     }
     memset(&arg, 0, sizeof(arg));
     gw_buf_reserve(&arg, n + 1u);
-    gw_input_write(&arg, pl, carry);
+    gw_input_write(&arg, effective, carry);
+    gw_buf_free(&mapped);
     if (arg.oom || !arg.p) {
         gw_buf_free(&arg);
         gw_rpc_error(b, id, -32603, "gateway resources exhausted");

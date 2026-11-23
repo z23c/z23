@@ -31,8 +31,9 @@ relayed message is not acceptance.
    brief (`isError:false`).
 3. **Send.** The client calls `steer_send` with one item addressed to the
    receiving worker, carrying a fresh idempotency key recorded for this run.
-   Save the returned item sequence. Call `steer_brief` with `since` set to
-   the exact `cursor_token` string from step 2. Look in `changes` for the
+   Save the returned item sequence. Call `steer_brief` with `cursor_token` set to
+   the exact `cursor_token` string from step 2 (legacy clients may continue to
+   use `since`, but do not supply both). Look in `changes` for the
    outbound row with the same sequence, recipient and work ref. If absent,
    follow the returned token while `changes_truncated` is true. An unavailable
    mail source leaves the check inconclusive. A healthy, exhausted page without

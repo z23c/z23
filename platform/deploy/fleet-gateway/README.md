@@ -362,6 +362,9 @@ oldest row first; rows keep their stream's file order and are not re-sorted by
 timestamp. `changes_truncated` and `changes_dropped` count pending rows; they do
 not require replaying the old cursor and deduplicating. The integer cursor is
 informational, and integer `since` retains the legacy latest-snapshot behavior.
+Clients that flatten a union-typed `since` may instead send the same string in
+`cursor_token`; do not supply both. The gateway maps that field to the identical
+native resume path.
 Projection failure or a page with no room for a complete pending row refuses
 without a successful advanced token. Keep the input cursor and follow the
 error's next action. Token pages omit the optional human screen to keep the

@@ -3295,6 +3295,8 @@ static int gw_t_brief_token(void)
         ASSERT_EQ(st, 200);
         ASSERT(gw_body_has(b, "\"name\":\"steer_brief\""));
         ASSERT(gw_body_has(b, "\"since\":{\"type\":[\"integer\",\"string\"]}"));
+        ASSERT(gw_body_has(b, "\"cursor_token\":{\"type\":\"string\",\"minLength\":1"));
+        ASSERT(gw_body_has(b, "mutually exclusive with since"));
         ASSERT(gw_body_has(b, "\"name\":\"steer_mailbox\""));
         ASSERT(gw_body_has(b, "\"anyOf\":[{\"type\":\"string\",\"minLength\":1},{\"type\":\"integer\",\"minimum\":0}]"));
         ASSERT(gw_body_has(b, "cursor_token"));
@@ -3340,7 +3342,7 @@ static int gw_t_brief_token(void)
         ASSERT(gw_seed_inbox("stream-y", "2026-09-20T00:00:01Z", 980, "y",
                              "mgr", "note", "y-fresh", "ref-gw-y"));
         sn = snprintf(args, sizeof(args),
-                      "{\"grant\":\"%s\",\"since\":\"%s\"}", gid, token);
+                      "{\"grant\":\"%s\",\"cursor_token\":\"%s\"}", gid, token);
         ASSERT(sn > 0 && (size_t)sn < sizeof(args));
         b = gw_tool("steer_brief", args, 53, &st);
         ASSERT(b != NULL);
@@ -3367,6 +3369,31 @@ static int gw_t_brief_token(void)
         ASSERT(gw_body_has(b, "\"isError\":false"));
         ASSERT(gw_body_has(b, "ref-gw-x"));
         ASSERT(gw_body_has(b, "ref-gw-y"));
+        free(b);
+        /* The string-only field is the same native cursor, never a second
+         * cursor channel: dual, empty and non-string inputs refuse. */
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":0,\"cursor_token\":\"%s\"}", gid, token2);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 61, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "-32602"));
+        ASSERT(gw_body_has(b, "mutually exclusive"));
+        free(b);
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"cursor_token\":\"\"}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 62, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "-32602"));
+        ASSERT(gw_body_has(b, "one nonempty string"));
+        free(b);
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"cursor_token\":7}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 63, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "-32602"));
         free(b);
         PASS();
     }
