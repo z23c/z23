@@ -52,7 +52,7 @@ static bool ahf_confirm(struct app_confirm *v, const struct ahf_identity *id,
         app_confirm_field(&v->model, "Publisher: ", id->publisher) &&
         app_confirm_field(&v->model, "Release: ", id->release) &&
         app_confirm_field(&v->model, "Availability: ", "Anyone with the link can receive this version while this window stays open, for up to 24 hours.") &&
-        app_confirm_field(&v->model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.") &&
+        app_confirm_field(&v->model, "Recipient: ", APP_HOST_RECIPIENT_GUIDANCE) &&
         app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, presenter, ctx, why, sizeof(why));
 }
 static bool ahf_file_same(const struct stat *a, const struct stat *b)

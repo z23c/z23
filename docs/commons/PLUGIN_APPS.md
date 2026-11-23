@@ -116,8 +116,8 @@ that window open while they receive it; the link is available for up to 24
 hours and stops when you close or stop sharing. Anyone with the link can
 receive that version while it is available.
 
-Your friend opens My Apps with their own app profile, chooses **Discover apps →
-Open a shared app**, pastes the link and chooses **Open**. They review the
+Your friend opens My Apps with their own app profile, chooses **More options →
+Discover apps → Open a shared app**, pastes the link and chooses **Open**. They review the
 verified offer and publisher, then separately confirm **Receive**. Receiving
 does not build or run the app: **Build and preview** and **Keep this version**
 are separate choices. The link flow does not require signup or a configured
@@ -144,7 +144,7 @@ newer local edits. Already-kept versions remain in **My apps**.
 To browse public offers, run a node with package hosting enabled and use its
 data directory for My Apps. See [Joining the software commons](../node/JOIN.md#2-joining-the-c23-software-commons--z23-join)
 for node setup. Open My Apps with `z23 app library --datadir=/absolute/path/to/node-data`,
-then choose **Discover apps → Browse offers**, select an offer, and review its
+then choose **More options → Discover apps → Browse offers**, select an offer, and review its
 publisher and package before choosing Receive. Once received, **Build and
 preview** and **Keep this version** are separate choices. A matching-build
 count, when available, describes signing keys in the local snapshot; it does

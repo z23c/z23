@@ -712,7 +712,7 @@ static bool host_flow_present(void *context, const struct zcl_present_model_v1 *
         host_flow_field(model, "Package: ", f->package) && host_flow_field(model, "Release: ", f->release) &&
         host_flow_field(model, "Saved version: ", f->version) &&
         host_flow_field(model, "Availability: ", "Anyone with the link can receive this version while this window stays open, for up to 24 hours.") &&
-        host_flow_field(model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.");
+        host_flow_field(model, "Recipient: ", "In Z23: My Apps > More options > Discover apps > Open a shared app. Paste the link. No account needed.");
     if (!f->identity_ok) return false;
     if (f->stale) {
         f->cas_ok = app_selection_save(f->env.state_dir, f->selection.revision, &f->selection, &f->changed) == APP_SELECTION_OK;
@@ -1562,7 +1562,7 @@ static bool host_view_copy_check(struct host_view_probe *p, const struct zcl_pre
     const struct zcl_present_window_live_view_v1 *live, uint32_t *focus, char *why, size_t cap)
 {
     if (!host_view_wait(model, live, false)) return false;
-    if (!host_flow_field(model, "Recipient: ", "In Z23: My Apps > Discover apps > Open a shared app. Paste the link. No account needed.")) return false;
+    if (!host_flow_field(model, "Recipient: ", "In Z23: My Apps > More options > Discover apps > Open a shared app. Paste the link. No account needed.")) return false;
     uint32_t page_count = 0;
     if (!zcl_present_model_page_count_v1(model, &page_count, why, cap) || page_count != 1) return false;
     int copy_key = p->numbered ? '1' : 'c';

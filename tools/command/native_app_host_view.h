@@ -3,6 +3,8 @@
 #ifndef ZCL_NATIVE_APP_HOST_VIEW_H
 #define ZCL_NATIVE_APP_HOST_VIEW_H
 #include "command/native_app_confirm.h"
+#define APP_HOST_RECIPIENT_GUIDANCE \
+    "In Z23: My Apps > More options > Discover apps > Open a shared app. Paste the link. No account needed."
 struct app_host_owner;
 /* Owner was started only after explicit confirmation. On close/failure this
  * requests Stop; caller must join/reap and safely clean its retained scratch. */
