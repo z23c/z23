@@ -163,12 +163,24 @@ static bool sh_plan_fields(struct sh_work *w, const struct json_value *data)
 {
     return sh_plan_describe(w, data) && sh_plan_matches(w, data);
 }
+static void sh_forward_plan_failure(struct zcl_command_reply *reply, struct zcl_command_reply *plan)
+{
+    app_confirm_forward_failure(reply, plan);
+    if (!strcmp(plan->error.code, "SHARE_NO_CHANGES"))
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s", plan->error.next_action);
+}
+#if defined(ZCL_TESTING)
+void zcl_test_app_share_forward_plan(struct zcl_command_reply *reply, struct zcl_command_reply *plan)
+{
+    sh_forward_plan_failure(reply, plan);
+}
+#endif
 static bool sh_plan(const struct zcl_command_request *request, struct sh_work *w, struct zcl_command_reply *reply)
 {
     struct zcl_command_reply plan; zcl_command_reply_init(&plan, "zcl.zcode_package_share.v1");
     bool called = sh_call(request, w, false, &plan), ok = false;
     if (!called) sh_fail(reply, "SHARE_PLAN_FAILED", "The share plan could not be prepared.");
-    else if (plan.status != ZCL_COMMAND_STATUS_PASSED) app_confirm_forward_failure(reply, &plan);
+    else if (plan.status != ZCL_COMMAND_STATUS_PASSED) sh_forward_plan_failure(reply, &plan);
     else if (!(ok = sh_plan_fields(w, &plan.data))) sh_fail(reply, "SHARE_PLAN_INVALID", "The exact kept version and output could not be verified.");
     zcl_command_reply_free(&plan); return ok;
 }

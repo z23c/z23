@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #if defined(ZCL_TESTING)
+void zcl_test_app_share_forward_plan(struct zcl_command_reply *reply, struct zcl_command_reply *plan);
 void zcl_test_app_share_result_mismatch(const char *planned, const char *reported,
     struct zcl_command_reply *reply);
 #endif
@@ -4019,6 +4020,35 @@ static bool ast_mismatch_long_path(void)
     zcl_command_reply_free(&reply);
     return ok;
 }
+static bool ast_forward_action(const char *code, bool expected)
+{
+    struct zcl_command_reply inner, outer;
+    zcl_command_reply_init(&inner, "zcl.test.share.v1");
+    zcl_command_reply_init(&outer, "zcl.test.share.v1");
+    zcl_command_reply_fail(&inner, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+        code, "share", false, false, "refused", "fixture");
+    snprintf(inner.error.next_action, sizeof(inner.error.next_action), "Choose a changed saved version.");
+    zcl_test_app_share_forward_plan(&outer, &inner);
+    const struct zcl_command_spec *spec = abc_spec("app.share");
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t len = spec ? zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &outer, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool parsed = len > 0 && len < sizeof(wire) && json_read(&doc, wire, len);
+    const char *action = json_get_str(json_get(json_get(&doc, "error"), "next_action"));
+    bool ok = parsed && action && (strstr(action, "changed saved version") != NULL) == expected &&
+        !strcmp(outer.error.code, code) && !outer.error.mutated;
+    json_free(&doc); zcl_command_reply_free(&outer); zcl_command_reply_free(&inner); return ok;
+}
+static int ast_forward_action_test(void)
+{
+    int failures = 0;
+    TEST("share forwards only unchanged-version recovery action") {
+        ASSERT(ast_forward_action("SHARE_NO_CHANGES", true));
+        ASSERT(ast_forward_action("SHARE_UNSAVED_CHANGES", false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int ast_mismatch_test(void)
 {
     int failures = 0;
@@ -4045,7 +4075,7 @@ int test_app_share(void)
     TEST("native share confirms the exact Keep and cancel does not mutate it") {
         ASSERT(act_setup(&f, false)); ASSERT(ast_journey(&f)); PASS();
     } _test_next:;
-    act_cleanup(&f); failures += ast_snapshot_case(); failures += ast_publish_case(); failures += ast_partial_case(); failures += ast_kept_case(); failures += ast_mismatch_test(); return failures;
+    act_cleanup(&f); failures += ast_snapshot_case(); failures += ast_publish_case(); failures += ast_partial_case(); failures += ast_kept_case(); failures += ast_mismatch_test(); failures += ast_forward_action_test(); return failures;
 }
 #else
 int test_app_share(void) { return 0; }
