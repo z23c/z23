@@ -198,7 +198,16 @@ static void abm_run_plain(const struct abm_child *c, const char *cwd,
     bool timed_out = false;
     int rc = zcl_spawn_capture_merged_in_dir_observed(
         c->argv, cwd, p->out, LAB_CAPTURE_MAX, (int)timeout_ms, &timed_out);
-    p->launch = rc < 0 && !timed_out ? LAB_LAUNCH_FAILED : LAB_LAUNCHED;
+    /* The spawn helper reports a child that could not enter its directory
+     * (chdir) or exec as exit 126/127, which GNU make never returns itself
+     * (it exits 0, 1 or 2); that child never started. Linux lab_exec says so
+     * through its setup pipe, so the unconfined path must agree. */
+    bool never_ran = !timed_out && (rc < 0 || rc == 126 || rc == 127);
+    p->launch = never_ran ? LAB_LAUNCH_FAILED : LAB_LAUNCHED;
+    if (never_ran)
+        (void)snprintf(p->detail, sizeof(p->detail),
+                       "could not enter %s or run make (status %d)",
+                       cwd, rc);
     p->exit_code = rc;
     p->timed_out = timed_out;
     p->out_len = strnlen(p->out, LAB_CAPTURE_MAX);

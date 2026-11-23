@@ -539,6 +539,8 @@ static bool wi_apps_dirs(const struct wi_release *f, char *home, char *data, cha
 }
 
 
+/* The installer fixtures are Linux-shaped (XDG desktop entries); name that platform
+ * so a macOS host does not run them as Darwin. Darwin cases override it. */
 static bool wi_apps_env(struct wi_release *f, const char *const keys[8])
 {
     char home[PATH_MAX], data[PATH_MAX], prefix[PATH_MAX], state[PATH_MAX], path[PATH_MAX * 2];
@@ -799,6 +801,7 @@ static bool wi_profile_replaced(const struct wi_release *f, const char *profile)
     return rmdir(held) == 0 && recovered;
 }
 
+static bool wi_profile_library_arguments(const struct wi_release *f, const char *exe);
 static bool wi_profile_bad_arguments(const struct wi_release *f, const char *exe)
 {
     char out[4096]; bool timeout = false;
@@ -808,6 +811,24 @@ static bool wi_profile_bad_arguments(const struct wi_release *f, const char *exe
     const char *conflict[] = {exe, "app", "receive", "--file=/absent.z23share", "--app_profile=desktop", "--datadir=/private", "--json", NULL};
     rc = zcl_spawn_capture_merged_in_dir_observed(conflict, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
     if (timeout || rc == 0 || !strstr(out, "BAD_INPUT") || !strstr(out, "not both")) { fprintf(stderr, "profile conflict rc=%d: %s\n", rc, out); return false; }
+    return wi_profile_library_arguments(f, exe);
+}
+/* app library: a bad value names the accepted value; both keys keep "not both". */
+static bool wi_profile_library_arguments(const struct wi_release *f, const char *exe)
+{
+    static const struct { const char *arg, *arg2, *code, *want, *unwanted; } k[] = {
+        {"--app_profile=bogus", NULL, "BAD_INPUT", "must be desktop", "not both"},
+        {"--app_profile=", NULL, "INVALID_INPUT", "input key 'app_profile'", "not both"},
+        {"--app_profile=desktop", "--datadir=/private", "BAD_INPUT", "not both", "must be desktop"},
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) {
+        char out[4096]; bool timeout = false;
+        const char *argv[] = {exe, "app", "library", k[i].arg, "--json", k[i].arg2, NULL};
+        int rc = zcl_spawn_capture_merged_in_dir_observed(argv, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
+        if (timeout || rc == 0 || !strstr(out, k[i].code) || !strstr(out, k[i].want) || strstr(out, k[i].unwanted)) {
+            fprintf(stderr, "library profile case %zu rc=%d: %s\n", i, rc, out); return false;
+        }
+    }
     return true;
 }
 static bool wi_profile_stale_commands(const struct wi_release *f, const char *exe)

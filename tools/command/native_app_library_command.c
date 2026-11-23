@@ -2044,7 +2044,10 @@ static bool al_profile_input(const struct zcl_command_request *request, const ch
     const struct json_value *choice = request ? json_get(request->input, "app_profile") : NULL;
     if (choice) {
         const char *name = json_get_str(choice); bool selected;
-        if (value || zcl_native_command_datadir_is_explicit() || !name || strcmp(name, "desktop")) return al_fail(reply, "BAD_INPUT", "Choose desktop profile or datadir, not both.");
+        if (!name || strcmp(name, "desktop"))
+            return al_fail(reply, "BAD_INPUT", "app_profile must be desktop (the only accepted value); to use another profile, pass datadir instead.");
+        if (value || zcl_native_command_datadir_is_explicit())
+            return al_fail(reply, "BAD_INPUT", "Choose desktop profile or datadir, not both.");
         if (!app_desktop_profile_resolve(profile, APP_LAUNCH_PATH_MAX, &selected, reply)) return false;
         *datadir = profile; return true;
     }
