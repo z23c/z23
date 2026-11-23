@@ -137,6 +137,13 @@ bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *in
 bool zapp_wallet_setup_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 enum zapp_preview_result { ZAPP_PREVIEW_OK, ZAPP_PREVIEW_FAILED, ZAPP_PREVIEW_CANCELLED };
+enum zapp_review_result { ZAPP_REVIEW_OK, ZAPP_REVIEW_FILE_UNAVAILABLE,
+    ZAPP_REVIEW_REFUSED, ZAPP_REVIEW_UNAVAILABLE, ZAPP_REVIEW_CANCELED };
+enum { ZAPP_REVIEW_OUTPUT_MIN = 8192 };
+/* Verify a private temporary_root/z23-review-* spool without starting a node. A normal
+ * verifier refusal leaves its complete JSON in out; cancellation clears it. */
+enum zapp_review_result zapp_review_verify_file(struct zapp_runtime *r,
+    const char *absolute_private_file, char *out, size_t cap, const atomic_bool *cancel);
 enum zapp_preview_result zapp_fleet_preview_cancelable(struct zapp_runtime *, const char *, char *, size_t, const atomic_bool *);
 enum zapp_preview_result zapp_fleet_machine_preview_cancelable(struct zapp_runtime *, const char *, char *, size_t, const atomic_bool *);
 /* Verify an invitation without enrolling this phone or creating a key. */

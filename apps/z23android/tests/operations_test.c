@@ -8,6 +8,7 @@
 #include "params.h"
 #include "setup_state.h"
 #include "startup_auth.h"
+#include "json/json.h"
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -46,7 +47,8 @@ static bool child_fixed_environment(void)
     const char *cache = getenv("ZCL_BIP_PAGE_CACHE_KIB");
     if (cache_entries != 1 || !cache || strcmp(cache, "32768")) return false;
     const char *temp = getenv("TMPDIR");
-    return temp && !strcmp(temp, "/tmp/private-tmp");
+    const char *expected = getenv("ZAPP_TEST_TMPDIR");
+    return temp && !strcmp(temp, expected ? expected : "/tmp/private-tmp");
 }
 
 /* The state root, and HOME: the parent's HOME when one is inherited, else the state root. */
@@ -315,9 +317,55 @@ static int install_child(int argc, char **argv)
     return -1;
 }
 
+static int review_child_output(int c)
+{
+    if (c == 'S') {
+        const char *started = getenv("ZAPP_TEST_REVIEW_STARTED");
+        FILE *marker = started ? fopen(started, "w") : NULL;
+        if (!marker || fclose(marker)) return 10;
+        puts("partial"); fflush(stdout); sleep(10); return 0;
+    }
+    if (c == 'B') {
+        puts("{\"command\":\"zcode.package.bundle.verify\",\"ok\":false,\"error\":{\"code\":\"BUNDLE_REFUSED\"}}");
+        return 2;
+    }
+    if (c == 'E') {
+        puts("{\"command\":\"zcode.package.bundle.verify\",\"ok\":false,\"error\":{\"code\":\"ALLOC\"}}");
+        return 2;
+    }
+    if (c == 'L') { for (int i = 0; i < ZAPP_REVIEW_OUTPUT_MIN + 100; ++i) putchar('x'); return 0; }
+    if (c == 'W') puts("warning: local diagnostic");
+    puts("{\"command\":\"zcode.package.bundle.verify\",\"ok\":true,\"data\":{\"verified\":true}}");
+    return 0;
+}
+static bool review_child_args(int argc, char **argv)
+{
+    return argc == 8 && !strcmp(argv[5], "--json") && !strncmp(argv[6], "-datadir=", 9) && !strcmp(argv[7], "--input=-");
+}
+static int review_child(int argc, char **argv)
+{
+    if (argc > 4 && !strcmp(argv[1], "zcode") && !strcmp(argv[2], "package") &&
+        !strcmp(argv[3], "bundle") && !strcmp(argv[4], "verify")) {
+        if (!review_child_args(argc, argv)) return 8;
+        char input[8192]; size_t n = fread(input, 1, sizeof(input) - 1, stdin); input[n] = 0;
+        struct json_value doc = {0};
+        bool ok = json_read(&doc, input, n);
+        const char *file = json_get_str(json_get(&doc, "file"));
+        const char *expected = getenv("ZAPP_TEST_REVIEW_FILE");
+        ok = ok && file && expected && !strcmp(file, expected);
+        FILE *f = ok ? fopen(file, "rb") : NULL;
+        int c = f ? fgetc(f) : EOF; if (f) (void)fclose(f);
+        json_free(&doc);
+        if (!ok || c == EOF) return 9;
+        return review_child_output(c);
+    }
+    return -1;
+}
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
+    int review = review_child(argc, argv);
+    if (review >= 0) return review;
     int installer = install_child(argc, argv);
     if (installer >= 0) return installer;
     if (getenv("ZCL_DEPLOY_ALLOW_CANONICAL")) return 12;
@@ -336,6 +384,123 @@ static int child(int argc, char **argv)
         return 0;
     }
     return 2;
+}
+
+struct review_test { struct zapp_runtime *r; const char *file; atomic_bool cancel;
+    enum zapp_review_result result; char out[ZAPP_REVIEW_OUTPUT_MIN]; };
+static void *review_thread(void *arg)
+{
+    struct review_test *t = arg;
+    t->result = zapp_review_verify_file(t->r, t->file, t->out, sizeof(t->out), &t->cancel);
+    return NULL;
+}
+static bool review_fixture_copy(const char *source, const char *dest)
+{
+    int in = open(source, O_RDONLY), out = -1; char buf[8192]; bool ok = in >= 0;
+    if (ok) { out = open(dest, O_WRONLY | O_TRUNC); ok = out >= 0; }
+    while (ok) {
+        ssize_t n = read(in, buf, sizeof(buf));
+        if (!n) break;
+        if (n < 0) { ok = false; break; }
+        size_t at = 0;
+        while (at < (size_t)n) {
+            ssize_t put = write(out, buf + at, (size_t)n - at);
+            if (put <= 0) { ok = false; break; }
+            at += (size_t)put;
+        }
+    }
+    if (in >= 0 && close(in)) ok = false;
+    if (out >= 0 && close(out)) ok = false;
+    return ok;
+}
+static void review_real_tests(struct zapp_runtime *r, const char *file, char *out, atomic_bool *cancel)
+{
+    const char *real_cli = getenv("ZAPP_TEST_REAL_VERIFY_CLI");
+    if (!real_cli || !real_cli[0]) return;
+    char old_executable[sizeof(r->executable)]; memcpy(old_executable, r->executable, sizeof(old_executable));
+    assert(strlen(real_cli) < sizeof(r->executable));
+    snprintf(r->executable, sizeof(r->executable), "%s", real_cli);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_REFUSED && strstr(out, "BUNDLE_REFUSED"));
+    const char *bundle = getenv("ZAPP_TEST_REAL_VERIFY_BUNDLE");
+    if (bundle && bundle[0]) {
+        assert(review_fixture_copy(bundle, file));
+        assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_OK && strstr(out, "\"verified\":true"));
+        puts("review real CLI signed-bundle control passed");
+    }
+    memcpy(r->executable, old_executable, sizeof(old_executable));
+    puts("review real CLI invalid-bundle control passed");
+}
+static void review_path_tests(struct zapp_runtime *r, const char *root, const char *file,
+    const char *link, const char *fifo, const char *outside, char *out, atomic_bool *cancel)
+{
+    assert(symlink(file, link) == 0);
+    assert(mkfifo(fifo, 0600) == 0);
+    assert(zapp_review_verify_file(r, link, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_FILE_UNAVAILABLE && !out[0]);
+    assert(zapp_review_verify_file(r, fifo, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_FILE_UNAVAILABLE && !out[0]);
+    assert(zapp_review_verify_file(r, outside, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_FILE_UNAVAILABLE && !out[0]);
+    assert(chmod(root, 0755) == 0);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_FILE_UNAVAILABLE && !out[0]);
+    assert(chmod(root, 0700) == 0);
+    assert(chmod(file, 0644) == 0);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_FILE_UNAVAILABLE && !out[0]);
+    assert(chmod(file, 0600) == 0);
+}
+static void review_cancel_tests(struct zapp_runtime *r, const char *file, const char *started,
+    char *out, atomic_bool *cancel)
+{
+    int fd = open(file, O_WRONLY | O_TRUNC); assert(fd >= 0 && write(fd, "S", 1) == 1 && close(fd) == 0);
+    assert(setenv("ZAPP_TEST_REVIEW_STARTED", started, 1) == 0);
+    struct review_test t = {.r = r, .file = file}; atomic_init(&t.cancel, false);
+    pthread_t worker; assert(pthread_create(&worker, NULL, review_thread, &t) == 0);
+    for (int i = 0; i < 200 && access(started, F_OK) != 0; ++i) {
+        struct timespec d = {.tv_nsec = 10000000}; nanosleep(&d, NULL);
+    }
+    assert(access(started, F_OK) == 0); atomic_store(&t.cancel, true);
+    assert(pthread_join(worker, NULL) == 0 && t.result == ZAPP_REVIEW_CANCELED && !t.out[0]);
+    char executable[sizeof(r->executable)]; memcpy(executable, r->executable, sizeof(executable));
+    snprintf(r->executable, sizeof(r->executable), "/nonexistent-z23-review-test");
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_UNAVAILABLE && !out[0]);
+    memcpy(r->executable, executable, sizeof(executable));
+}
+static void review_result_tests(struct zapp_runtime *r, const char *file, char *out, atomic_bool *cancel)
+{
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_CANCELED && !out[0]);
+    atomic_store(cancel, false);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_OK && strstr(out, "\"verified\":true"));
+    int fd = open(file, O_WRONLY | O_TRUNC); assert(fd >= 0 && write(fd, "W", 1) == 1 && close(fd) == 0);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_OK && out[0] == '{');
+    fd = open(file, O_WRONLY | O_TRUNC); assert(fd >= 0 && write(fd, "B", 1) == 1 && close(fd) == 0);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_REFUSED && strstr(out, "BUNDLE_REFUSED"));
+    review_real_tests(r, file, out, cancel);
+    fd = open(file, O_WRONLY | O_TRUNC); assert(fd >= 0 && write(fd, "E", 1) == 1 && close(fd) == 0);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_UNAVAILABLE && !out[0]);
+    fd = open(file, O_WRONLY | O_TRUNC); assert(fd >= 0 && write(fd, "L", 1) == 1 && close(fd) == 0);
+    assert(zapp_review_verify_file(r, file, out, ZAPP_REVIEW_OUTPUT_MIN, cancel) == ZAPP_REVIEW_UNAVAILABLE && !out[0]);
+}
+static void review_tests(struct zapp_runtime *r)
+{
+    const char *temp = getenv("TMPDIR");
+    char root[1024], file[1200], link[1200], fifo[1200], outside[1200], started[1200], out[ZAPP_REVIEW_OUTPUT_MIN];
+    int n = snprintf(root, sizeof(root), "%s/zapp-review-XXXXXX", temp && temp[0] == '/' ? temp : "/tmp");
+    assert(n > 0 && (size_t)n < sizeof(root) && mkdtemp(root));
+    assert(snprintf(file, sizeof(file), "%s/z23-review-a' b", root) > 0);
+    assert(snprintf(link, sizeof(link), "%s/z23-review-link", root) > 0);
+    assert(snprintf(fifo, sizeof(fifo), "%s/z23-review-fifo", root) > 0);
+    assert(snprintf(outside, sizeof(outside), "%s/not-a-spool", root) > 0);
+    assert(snprintf(started, sizeof(started), "%s/started", root) > 0);
+    int fd = open(file, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(fd >= 0 && write(fd, "V", 1) == 1 && close(fd) == 0);
+    assert(setenv("ZAPP_TEST_REVIEW_FILE", file, 1) == 0);
+    char old_tmp[sizeof(r->temporary_root)]; memcpy(old_tmp, r->temporary_root, sizeof(old_tmp));
+    assert(snprintf(r->temporary_root, sizeof(r->temporary_root), "%s", root) > 0);
+    assert(setenv("ZAPP_TEST_TMPDIR", root, 1) == 0);
+    atomic_bool cancel; atomic_init(&cancel, true);
+    review_result_tests(r, file, out, &cancel);
+    review_path_tests(r, root, file, link, fifo, outside, out, &cancel);
+    review_cancel_tests(r, file, started, out, &cancel);
+    memcpy(r->temporary_root, old_tmp, sizeof(old_tmp));
+    assert(unsetenv("ZAPP_TEST_REVIEW_FILE") == 0 && unsetenv("ZAPP_TEST_REVIEW_STARTED") == 0 && unsetenv("ZAPP_TEST_TMPDIR") == 0 &&
+        unlink(started) == 0 && unlink(fifo) == 0 && unlink(link) == 0 && unlink(file) == 0 && rmdir(root) == 0);
 }
 
 static void plain_text_tests(void)
@@ -1447,6 +1612,7 @@ int main(int argc, char **argv)
     assert(setenv("ZAPP_TEST_HOME", "/tmp/parent-home", 1) == 0);
     command_cases(&r);
     preview_cancel_tests(&r);
+    review_tests(&r);
     assert(unsetenv("HOME") == 0 && unsetenv("ZAPP_TEST_HOME") == 0);
     char directory[] = "/tmp/zapp-ops-test-XXXXXX", log[256], out[128];
     assert(mkdtemp(directory));

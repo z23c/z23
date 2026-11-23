@@ -1119,6 +1119,96 @@ static bool command_run_cancel(struct zapp_runtime *r, const char *const *args, 
 static bool command_run(struct zapp_runtime *r, const char *const *args, const char *input,
                         unsigned timeout_ms, char *out, size_t cap, bool *started)
 { return command_run_cancel(r, args, input, timeout_ms, out, cap, started, NULL, NULL, NULL); }
+
+/* The Activity stages provider content as an owner-private immediate child.
+ * Validate it without following the final component or blocking on a FIFO. */
+static const char *review_leaf(const struct zapp_runtime *r, const char *file)
+{
+    if (!r || !file || r->temporary_root[0] != '/' || file[0] != '/') return NULL;
+    size_t n = strnlen(r->temporary_root, sizeof(r->temporary_root));
+    if (!n || n >= sizeof(r->temporary_root) || r->temporary_root[n - 1] == '/' ||
+        strncmp(file, r->temporary_root, n) || file[n] != '/') return NULL;
+    const char *leaf = file + n + 1;
+    static const char prefix[] = "z23-review-";
+    return strncmp(leaf, prefix, sizeof(prefix) - 1) || !leaf[sizeof(prefix) - 1] || strchr(leaf, '/') ? NULL : leaf;
+}
+static bool review_file_shape(int fd)
+{
+    struct stat st;
+    return fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+        !(st.st_mode & 077) && st.st_nlink == 1 && st.st_size > 0 && st.st_size <= 64LL * 1024 * 1024;
+}
+static bool review_directory_shape(int fd)
+{
+    struct stat st;
+    return fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077);
+}
+static bool review_file_private(const struct zapp_runtime *r, const char *file)
+{
+    const char *leaf = review_leaf(r, file);
+    if (!leaf) return false;
+    int dir = open(r->temporary_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (dir < 0) return false;
+    bool ok = review_directory_shape(dir);
+    int fd = ok ? openat(dir, leaf, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    if (fd < 0) ok = false;
+    if (ok) ok = review_file_shape(fd);
+    if (fd >= 0 && close(fd) != 0) ok = false;
+    if (close(dir) != 0) ok = false;
+    return ok;
+}
+
+static enum zapp_review_result review_failed_code(const struct json_value *root)
+{
+    const char *code = json_get_str(json_get(json_get(root, "error"), "code"));
+    if (code && !strcmp(code, "BUNDLE_REFUSED")) return ZAPP_REVIEW_REFUSED;
+    if (code && !strcmp(code, "BUNDLE_UNREADABLE")) return ZAPP_REVIEW_FILE_UNAVAILABLE;
+    return ZAPP_REVIEW_UNAVAILABLE;
+}
+static bool review_success(int exit_code, const struct json_value *ok, const struct json_value *verified)
+{
+    return exit_code == 0 && json_get_bool(ok) && verified && verified->type == JSON_BOOL && json_get_bool(verified);
+}
+static enum zapp_review_result review_reply(char *out, int exit_code)
+{
+    const char *text = zapp_json_object(out);
+    struct json_value root = {0};
+    bool parsed = text && json_read(&root, text, strlen(text));
+    const struct json_value *ok = json_get(&root, "ok"), *data = json_get(&root, "data");
+    const char *command = json_get_str(json_get(&root, "command"));
+    const struct json_value *verified = json_get(data, "verified");
+    enum zapp_review_result result = ZAPP_REVIEW_UNAVAILABLE;
+    if (parsed && command && !strcmp(command, "zcode.package.bundle.verify") && ok && ok->type == JSON_BOOL) {
+        if (review_success(exit_code, ok, verified))
+            result = ZAPP_REVIEW_OK;
+        else if (exit_code > 0 && !json_get_bool(ok)) result = review_failed_code(&root);
+    }
+    json_free(&root);
+    if (result != ZAPP_REVIEW_UNAVAILABLE && text != out) memmove(out, text, strlen(text) + 1);
+    return result;
+}
+
+enum zapp_review_result zapp_review_verify_file(struct zapp_runtime *r, const char *file,
+    char *out, size_t cap, const atomic_bool *cancel)
+{
+    if (!out || cap < ZAPP_REVIEW_OUTPUT_MIN) return ZAPP_REVIEW_UNAVAILABLE;
+    out[0] = 0;
+    if (cancel && atomic_load(cancel)) return ZAPP_REVIEW_CANCELED;
+    if (!review_file_private(r, file)) return ZAPP_REVIEW_FILE_UNAVAILABLE;
+    struct json_value input = {0}; json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "file", file);
+    char wire[8192]; size_t n = ok ? json_write(&input, wire, sizeof(wire)) : sizeof(wire);
+    json_free(&input);
+    const char *args[] = {"zcode", "package", "bundle", "verify", "--json", NULL};
+    bool cancelled = false; int exit_code = -1;
+    if (n && n < sizeof(wire))
+        (void)command_run_cancel(r, args, wire, 60000u, out, cap, NULL, cancel, &cancelled, &exit_code);
+    memory_cleanse(wire, sizeof(wire));
+    if (cancelled || (cancel && atomic_load(cancel))) { memory_cleanse(out, cap); return ZAPP_REVIEW_CANCELED; }
+    enum zapp_review_result result = review_reply(out, exit_code);
+    if (result == ZAPP_REVIEW_UNAVAILABLE) out[0] = 0;
+    return result;
+}
 static bool command_timed(struct zapp_runtime *r, const char *const *args, const char *input,
                           unsigned timeout_ms, char *out, size_t cap)
 {
