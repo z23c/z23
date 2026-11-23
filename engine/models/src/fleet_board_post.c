@@ -329,11 +329,11 @@ void db_fleet_board_test_clear_quarantine(void)
  * node database is shared with every other subsystem and with the runtime
  * reopens, so a perfectly good append still meets SQLITE_BUSY when one of
  * them holds the write lock. That is a moment to retry, not a fault in the
- * post and not a fault in the caller's arguments. Anything else means the
- * store rejected the row itself and re-offering it will fail identically. */
+ * post and not a fault in the caller's arguments. Other failures remain
+ * storage errors, but may become retryable when the store recovers. */
 static enum fleet_board_result board_insert_result(int rc)
 {
-    if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED)
+    if ((rc & 0xff) == SQLITE_BUSY || (rc & 0xff) == SQLITE_LOCKED)
         return FLEET_BOARD_ERR_BUSY;
     return FLEET_BOARD_ERR_STORAGE;
 }
@@ -375,24 +375,6 @@ static bool board_insert_stmt(struct node_db *ndb,
                   db_fleet_board_post_validate);
 }
 
-/* Same append, with the database's own verdict carried back out. The two
- * checked reads the caller runs immediately before this (have / append_fits)
- * both complete successfully on this connection, so the connection's error
- * code is SQLITE_OK on entry and any code left behind by a failure here is
- * this statement's own. */
-static bool board_insert(struct node_db *ndb,
-                         const struct db_fleet_board_post *record,
-                         int *rc_out)
-{
-    if (rc_out)
-        *rc_out = SQLITE_OK;
-    if (board_insert_stmt(ndb, record))
-        return true;
-    if (rc_out)
-        *rc_out = sqlite3_errcode(ndb->db);
-    return false;
-}
-
 /* True when this id needs no append at all: the board already holds it, or
  * the store has already refused it in a way that will not change. Caller
  * holds the board write lock. */
@@ -408,6 +390,12 @@ static bool board_skip_known_id(struct node_db *ndb, const uint8_t id[32],
         return true;
     }
     return false;
+}
+
+static bool board_permanent_constraint(int rc)
+{
+    return rc == SQLITE_CONSTRAINT_UNIQUE || rc == SQLITE_CONSTRAINT_PRIMARYKEY ||
+           rc == SQLITE_CONSTRAINT_CHECK || rc == SQLITE_CONSTRAINT_NOTNULL;
 }
 
 /* The append failed. Say which of the two failures it was, put the database's
@@ -426,7 +414,7 @@ static enum fleet_board_result board_append_failed(
              "(sqlite rc=%d: %s)",
              (long long)record->seq, id_hex, fleet_board_result_string(why),
              insert_rc, sqlite3_errmsg(ndb->db));
-    if (why == FLEET_BOARD_ERR_STORAGE) {
+    if (board_permanent_constraint(insert_rc)) {
         board_quarantine_add(record->post.id);
         LOG_WARN("fleet.board",
                  "quarantined post id=%.16s: the store rejected it and will "
@@ -656,9 +644,8 @@ enum fleet_board_result fleet_board_append_record(
     fleet_board_chain_step(record.chain_prev, record.post.id,
                            record.chain_hash);
 
-    int insert_rc = SQLITE_OK;
-    if (!board_insert(ndb, &record, &insert_rc))
-        return board_append_failed(ndb, &record, insert_rc);
+    if (!board_insert_stmt(ndb, &record))
+        return board_append_failed(ndb, &record, sqlite3_extended_errcode(ndb->db));
     s_board_arrival_high = record.arrival;
     return FLEET_BOARD_OK;
 }

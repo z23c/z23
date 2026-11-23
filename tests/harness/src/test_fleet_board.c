@@ -1195,6 +1195,53 @@ static int test_fleet_board_busy_append_names_contention(void)
     return failures;
 }
 
+static bool fb_page_limit(struct node_db *db, int extra)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db->db, "PRAGMA page_count", -1, &s, NULL) != SQLITE_OK) return false;
+    bool ok = sqlite3_step(s) == SQLITE_ROW;
+    int count = ok ? sqlite3_column_int(s, 0) : 0;
+    if (sqlite3_finalize(s) != SQLITE_OK || count <= 0) return false;
+    char sql[80];
+    int n = snprintf(sql, sizeof(sql), "PRAGMA max_page_count=%d", count + extra);
+    return n > 0 && (size_t)n < sizeof(sql) && node_db_exec(db, sql);
+}
+
+static int test_fleet_board_full_retry(void)
+{
+    int failures = 0; struct node_db db = {0}; bool opened = false;
+    TEST("fleet board: a signed post is retried after SQLITE_FULL clears") {
+        opened = node_db_open(&db, ":memory:");
+        ASSERT(opened);
+        db_fleet_board_test_clear_quarantine();
+        ASSERT(node_db_exec(&db, "PRAGMA page_size=512; VACUUM"));
+        ASSERT(fb_page_limit(&db, 0));
+        uint8_t seed[32], pk[32]; fb_test_identity(17, seed, pk);
+        char text[FLEET_BOARD_TEXT_MAX + 1]; memset(text, 'x', sizeof(text) - 1); text[sizeof(text) - 1] = 0;
+        struct fleet_board_post post; bool stored = true; int code = SQLITE_OK;
+        enum fleet_board_result first = FLEET_BOARD_OK;
+        for (unsigned i = 0; i < 128 && first == FLEET_BOARD_OK; ++i) {
+            char agent[32]; (void)snprintf(agent, sizeof(agent), "full-%u", i);
+            fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, agent, text, 100 + i, 1000);
+            ASSERT_EQ(fleet_board_post_sign(&post, seed, pk), FLEET_BOARD_OK);
+            first = db_fleet_board_post_ingest(&db, &post, 100 + i, &stored);
+            code = sqlite3_errcode(db.db);
+        }
+        ASSERT_EQ(first, FLEET_BOARD_ERR_STORAGE);
+        ASSERT_EQ(code, SQLITE_FULL);
+        ASSERT(!stored && !db_fleet_board_have(&db, post.id));
+        ASSERT(fb_page_limit(&db, 128));
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &post, post.created_at, &stored), FLEET_BOARD_OK);
+        ASSERT(stored && db_fleet_board_have(&db, post.id));
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &post, post.created_at, &stored), FLEET_BOARD_OK);
+        ASSERT(!stored);
+        PASS();
+    } _test_next:;
+    db_fleet_board_test_clear_quarantine();
+    if (opened) node_db_close(&db);
+    return failures;
+}
+
 /* An append the store refuses every round must not be retried forever nor
  * block the posts behind it. */
 static int test_fleet_board_permanent_refusal_quarantines(void)
@@ -16970,6 +17017,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_transaction_busy();
     failures += test_fleet_board_busy_append_names_contention();
     failures += test_fleet_board_permanent_refusal_quarantines();
+    failures += test_fleet_board_full_retry();
     failures += test_fleet_board_store_boundaries();
     failures += test_fleet_board_byte_boundary();
     failures += test_fleet_board_corrupt_reads();
