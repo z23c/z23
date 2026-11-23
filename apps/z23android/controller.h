@@ -2,6 +2,7 @@
 #ifndef ZAPP_CONTROLLER_H
 #define ZAPP_CONTROLLER_H
 #include "app.h"
+#include <stdatomic.h>
 /* notify may finish concurrently with detach; it must guard its own UI handle. */
 bool zapp_controller_start(const char *files, const char *libs, bool preview, void (*notify)(void));
 void zapp_controller_snapshot(struct zapp_view *view);
@@ -22,6 +23,8 @@ bool zapp_controller_setup_node_active(void);
 /* Runs one wallet command on the calling thread (see zapp_wallet_run); the controller worker stays free,
  * so a slow wallet command never delays the node status. Safe from any thread. */
 bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size_t cap);
+bool zapp_controller_review_path(char *out, size_t cap);
+int zapp_controller_review_run(const char *path, char *out, size_t cap, const atomic_bool *cancel);
 /* Read a validated process-local preload; ready is only a hint. */
 bool zapp_controller_preload_ready(void);
 bool zapp_controller_preload_get(char *out, size_t cap, char identity[65], uint64_t *epoch, bool *command_ok);

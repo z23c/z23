@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "hosts.h"
 #include "pairing.h"
+#include "review_result.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -425,8 +426,33 @@ static void lone_liar_tests(void)
     ev.fleet_height = p.height;
     assert(zapp_chain_check(3306213, 0, 1, &ev).state == ZAPP_CHAIN_CURRENT);
 }
+static void review_result_tests(void)
+{
+    const char *valid = "{\"command\":\"zcode.package.bundle.verify\",\"ok\":true,\"data\":{\"verified\":true,\"executed\":false,"
+        "\"release_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"package_root\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+        "\"publisher_fingerprint\":\"02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}";
+    char out[512];
+    assert(zapp_review_result_text(valid, out, sizeof(out)));
+    assert(strstr(out, "Publisher: 02cccc") && strstr(out, "No node or app was started."));
+    assert(!zapp_review_result_text("{\"ok\":false}", out, sizeof(out)) && !out[0]);
+    assert(!zapp_review_result_text("{\"ok\":true,\"data\":{\"verified\":true}}", out, sizeof(out)) && !out[0]);
+    char changed[512];
+    snprintf(changed, sizeof(changed), "%s", valid);
+    char *flag = strstr(changed, "\"executed\":false");
+    assert(flag);
+    memcpy(flag + strlen("\"executed\":"), "true ", 5);
+    assert(!zapp_review_result_text(changed, out, sizeof(out)) && !out[0]);
+    snprintf(changed, sizeof(changed), "%s", valid);
+    char *hex = strstr(changed, "aaaaaaaa");
+    assert(hex);
+    hex[0] = 'g';
+    assert(!zapp_review_result_text(changed, out, sizeof(out)) && !out[0]);
+    assert(!zapp_review_result_text(valid, out, 8) && !out[0]);
+}
 int main(void)
 {
+    review_result_tests();
     fleet_peer_tests();
     fleet_peer_height();
     fleet_peer_names();

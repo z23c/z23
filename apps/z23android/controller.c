@@ -1645,6 +1645,21 @@ bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size
     }
     return zapp_wallet_run(&c->runtime, op, arg, out, cap);
 }
+bool zapp_controller_review_path(char *out, size_t cap)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    int n = c && out && cap ? snprintf(out, cap, "%s/z23-review-XXXXXX", c->runtime.temporary_root) : -1;
+    pthread_mutex_unlock(&startup_lock);
+    return n > 0 && (size_t)n < cap;
+}
+int zapp_controller_review_run(const char *path, char *out, size_t cap, const atomic_bool *cancel)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    return c ? zapp_review_verify_file(&c->runtime, path, out, cap, cancel) : ZAPP_REVIEW_UNAVAILABLE;
+}
 bool zapp_controller_preload_ready(void)
 {
     pthread_mutex_lock(&startup_lock);

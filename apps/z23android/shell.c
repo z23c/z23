@@ -13,6 +13,7 @@
 #include "private.h"
 #include "secure_window.h"
 #include "share.h"
+#include "review.h"
 #include "surface.h"
 #include "pay_stash.h"
 #include "setup_state.h"
@@ -37,7 +38,7 @@
 #define GRAVITY_CENTER_HORIZONTAL 1
 
 enum screen { SCREEN_HOME, SCREEN_NODE_DETAILS, SCREEN_MORE, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_FLEET_REVIEW, SCREEN_WALLET, SCREEN_SEND, SCREEN_SETUP, SCREEN_GAME, SCREEN_COUNT };
-enum command { CMD_HOME, CMD_MORE, CMD_MORE_SCAN, CMD_MORE_ASSISTANT, CMD_MORE_START, CMD_MORE_STOP, CMD_APPS, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_PEER_MODE, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
+enum command { CMD_HOME, CMD_MORE, CMD_MORE_SCAN, CMD_MORE_ASSISTANT, CMD_MORE_START, CMD_MORE_STOP, CMD_APPS, CMD_REVIEW_FILE, CMD_SETTINGS, CMD_PLAY, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_PEER_MODE, CMD_SCAN_CANCEL, CMD_CAMERA_SETTINGS, CMD_CAMERA_RETRY, CMD_CAMERA_PASTE, CMD_PASTE_REVIEW, CMD_OUTCOME_DISMISS, CMD_FLEET_JOIN, CMD_FLEET_START, CMD_FLEET_BACK, CMD_FLEET_COPY };
 enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND, TARGET_SETUP };
 
 struct nav { jobject view; enum command command; size_t arg; };
@@ -50,7 +51,7 @@ static enum screen camera_settings_origin;
 static struct {
     jobject activity, stage, roots[SCREEN_COUNT];
     zapp_native_action send;
-    jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list;
+    jobject notice_views[SCREEN_COUNT], outcome_view, outcome_panel, status_view, scan_view, scan_hint_view, scan_camera, scan_panel, apps_list, review_status;
     jobject fleet_review_text, fleet_review_result, fleet_review_qr, fleet_join_button, fleet_copy_button, fleet_back_button;
     jobject fleet_review_scroll, fleet_review_hint, fleet_review_status, fleet_start_button, fleet_result_scroll;
     jobject camera_retry, camera_settings, more_start, more_stop, node_details_text;
@@ -287,14 +288,22 @@ static bool build_more(JNIEnv *env, jobject root)
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
+static bool build_apps_content(JNIEnv *env, jobject scroll, jobject content, jobject list, jobject status)
+{
+    return button(env, content, "Review signed app file", CMD_REVIEW_FILE, 0, 0) &&
+        zj_typography(env, status, 15.0f, (jint)WHITE) && zj_append(env, content, status) &&
+        zj_append(env, content, list) && zj_append(env, scroll, content) &&
+        zj_keep(env, &shell.review_status, status) && zj_keep(env, &shell.apps_list, list);
+}
 static bool build_apps(JNIEnv *env, jobject root)
 {
     jobject header = column(env, DARK, 0, true), scroll = zj_widget(env, "android/widget/ScrollView", shell.activity);
-    jobject list = column(env, DARK, 8, false);
-    bool ok = header && scroll && list && add_notice(env, root, SCREEN_APPS) && button(env, header, "Home", CMD_HOME, 0, 1) &&
+    jobject content = column(env, DARK, 8, false), list = column(env, DARK, 0, false);
+    jobject status = zj_widget(env, "android/widget/TextView", shell.activity);
+    bool ok = header && scroll && content && list && status && add_notice(env, root, SCREEN_APPS) && button(env, header, "Home", CMD_HOME, 0, 1) &&
         button(env, header, "Android home settings", CMD_HOME_SETTINGS, 0, 2) && zj_append(env, root, header) &&
-        zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, list) && zj_append(env, root, scroll) &&
-        zj_keep(env, &shell.apps_list, list);
+        zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && build_apps_content(env, scroll, content, list, status) &&
+        zj_append(env, root, scroll);
     return ok;
 }
 /* A scroll view filling the rest of root around a column for the screen's content, so large text or a sideways
@@ -1035,6 +1044,7 @@ static void choose_peer_mode(JNIEnv *env, size_t mode)
     else shell.action_notice[0] = 0;
     settings_status(env); show_notice(env);
 }
+static void review_file(JNIEnv *env);
 static bool run_more_nav(JNIEnv *env, enum command command)
 {
     switch (command) {
@@ -1044,7 +1054,20 @@ static bool run_more_nav(JNIEnv *env, enum command command)
     case CMD_MORE_START: shell.send("node_start", ""); go(env, SCREEN_HOME); return true;
     case CMD_MORE_STOP: shell.send("node_stop", ""); go(env, SCREEN_HOME); return true;
     case CMD_PLAY: go(env, SCREEN_GAME); return true;
+    case CMD_REVIEW_FILE: review_file(env); return true;
     default: return false;
+    }
+}
+static void review_file(JNIEnv *env)
+{
+    char package[ZAPP_APP_PACKAGE_CAP];
+    jstring name = zj_object_property(env, shell.activity, "getPackageName", "()Ljava/lang/String;");
+    bool prepared = zapp_review_prepare();
+    bool ok = prepared && name && zj_copy_utf(env, name, package, sizeof(package)) &&
+        zapp_launcher_start(env, shell.activity, package, "org.z23.nativeapp.ReviewActivity");
+    if (!ok) {
+        if (prepared) zapp_review_abandon();
+        (void)zj_text(env, shell.review_status, "Could not open the file picker. Try again.");
     }
 }
 static void run_nav(JNIEnv *env, const struct nav *nav)
@@ -1504,6 +1527,11 @@ void zapp_shell_dropped(JNIEnv *env)
 void zapp_shell_tick(JNIEnv *env)
 {
     if (!shell.activity) return;
+    if (shell.current == SCREEN_APPS) {
+        char status[512];
+        zapp_review_snapshot(status, sizeof(status));
+        (void)zj_text(env, shell.review_status, status);
+    }
     if (shell.current == SCREEN_GAME) zapp_game_view_render(env);
     if (shell.current == SCREEN_FLEET_REVIEW) fleet_scroll_hint(env);
     if (shell.current == SCREEN_SCAN && shell.paste_mode && shell.paste_result_ready) {
@@ -1536,19 +1564,24 @@ void zapp_shell_focus(JNIEnv *env)
     zapp_shell_immersive(env);
     if (shell.current == SCREEN_SEND) zapp_send_ui_focus(env);
 }
+static bool resume_external_result(JNIEnv *env)
+{
+    if (zapp_review_take_return() || zapp_review_is_pending()) { go(env, SCREEN_APPS); return true; }
+    char share_notice[96];
+    if (!zapp_share_take_result(share_notice, sizeof(share_notice))) return false;
+    open_receive(env);
+    if (shell.current == SCREEN_WALLET && share_notice[0]) wallet_screens_receive_notice(share_notice);
+    zapp_wallet_ui_render(env);
+    return true;
+}
 void zapp_shell_resume(JNIEnv *env)
 {
     if (!shell.activity) return;
     zapp_shell_immersive(env);
     refresh_apps(env);
     load_layout();
-    char share_notice[96];
-    if (zapp_share_take_result(share_notice, sizeof(share_notice))) {
-        open_receive(env);
-        if (shell.current == SCREEN_WALLET && share_notice[0]) wallet_screens_receive_notice(share_notice);
-        zapp_wallet_ui_render(env);
-    }
-    else if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
+    if (resume_external_result(env)) return;
+    if (shell.current == SCREEN_SETUP) zapp_setup_ui_render(env);
     else if (shell.current == SCREEN_SCAN) {
         if (shell.paste_mode && !protect_window(env, true)) {
             back(env);
@@ -1576,7 +1609,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.node_details_text, &shell.notice_views[SCREEN_MORE], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.node_details_text, &shell.notice_views[SCREEN_MORE], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.notice_views[SCREEN_SETUP], &shell.notice_views[SCREEN_FLEET_REVIEW], &shell.outcome_view, &shell.outcome_panel, &shell.status_view, &shell.scan_view, &shell.scan_hint_view, &shell.scan_camera, &shell.scan_panel, &shell.paste_panel, &shell.paste_field, &shell.paste_error, &shell.fleet_review_text, &shell.fleet_review_result, &shell.fleet_review_qr, &shell.fleet_review_scroll, &shell.fleet_review_hint, &shell.fleet_review_status, &shell.fleet_result_scroll, &shell.apps_list, &shell.review_status};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     if (shell.phone_ok) json_free(&shell.phone);

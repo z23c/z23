@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "share.h"
+#include "review.h"
 #include "share_media.h"
 #include "base/cleanse.h"
 #include "jni_util.h"
@@ -248,7 +249,7 @@ void zapp_share_destroy(void)
 }
 static bool prepare(bool with_media)
 {
-    if (pending) return false;
+    if (pending || zapp_review_is_pending()) return false;
 #ifdef ZAPP_SHARE_FIXTURE
     snprintf(payment_code, sizeof(payment_code), "zclassic:t1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?amount=0.001");
 #else
@@ -259,6 +260,7 @@ static bool prepare(bool with_media)
     return true;
 }
 bool zapp_share_prepare(void) { return prepare(true); }
+bool zapp_share_busy(void) { return pending; }
 bool zapp_share_prepare_text(void) { return prepare(false); }
 bool zapp_share_begin(JNIEnv *env, jobject activity)
 {
@@ -322,6 +324,7 @@ static enum picker_result share_picker_data(JNIEnv *env, jobject activity, jobje
 }
 bool zapp_share_result(JNIEnv *env, jobject activity, jint request, jint result, jobject data)
 {
+    if (request == ZAPP_REVIEW_PICK_REQUEST) return zapp_review_picker_result(env, activity, result, data);
     if (request == ZAPP_SHARE_SEND_REQUEST) {
         /* Recipient launches and cancellations can share one result; neither result proves delivery. */
         if (result == -1) return_with_notice("Android completed the share action. Delivery is not confirmed.");
@@ -350,6 +353,10 @@ static void finish_activity(JNIEnv *env, jobject activity)
 }
 JNIEXPORT void JNICALL Java_org_z23_nativeapp_ShareActivity_shareCreate(JNIEnv *env, jobject activity)
 {
+    if (zapp_review_is_activity(env, activity) || zapp_review_is_pending()) {
+        if (!zapp_review_begin(env, activity)) finish_activity(env, activity);
+        return;
+    }
     if (!zapp_share_begin(env, activity)) {
         return_with_notice(media ? "Could not open the media picker." : "Could not open the share sheet.");
         finish_activity(env, activity);

@@ -1,6 +1,8 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _POSIX_C_SOURCE 200809L
 #include "private.h"
+#include "review_stage.h"
+#include "review_event.h"
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -127,8 +129,58 @@ static void peer_mode(const char *dir)
     assert(!zapp_direct_peers_load(dir));
     assert(unlink(path) == 0);
 }
+static void review_cleanup_tests(const char *dir)
+{
+    char spool[1024], stale[1100], other[1100];
+    assert(snprintf(spool, sizeof(spool), "%s/review-spool", dir) > 0);
+    assert(mkdir(spool, 0700) == 0);
+    assert(snprintf(stale, sizeof(stale), "%s/z23-review-ABC123", spool) > 0);
+    assert(snprintf(other, sizeof(other), "%s/keep", spool) > 0);
+    int old = open(stale, O_WRONLY | O_CREAT | O_EXCL, 0600), keep = open(other, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    assert(old >= 0 && keep >= 0 && close(old) == 0 && close(keep) == 0);
+    assert(zapp_review_stage_cleanup(spool));
+    assert(access(stale, F_OK) != 0 && access(other, F_OK) == 0);
+    assert(symlink("keep", stale) == 0 && !zapp_review_stage_cleanup(spool));
+    assert(unlink(stale) == 0 && chmod(spool, 0775) == 0 && !zapp_review_stage_cleanup(spool));
+    assert(chmod(spool, 0700) == 0 && unlink(other) == 0 && rmdir(spool) == 0);
+}
+static void review_event_tests(void)
+{
+    assert(zapp_review_event_matches(7, true, 4, 7, 4));
+    /* A ready wake removes the timer: a queued timer callback must not read. */
+    assert(!zapp_review_event_matches(7, false, 5, 7, 5));
+    /* A later job can reuse the same descriptor, but never the old generation. */
+    assert(!zapp_review_event_matches(8, true, 5, 7, 5));
+    assert(!zapp_review_event_matches(8, true, 5, 8, 4));
+    assert(!zapp_review_event_matches(0, true, 5, 0, 5));
+}
+static void review_stage_tests(const char *dir)
+{
+    char path[1024], result[4] = {0};
+    assert(snprintf(path, sizeof(path), "%s/review-stage", dir) > 0);
+    int out = open(path, O_RDWR | O_CREAT | O_EXCL, 0600), p[2];
+    assert(out >= 0 && pipe(p) == 0);
+    assert(write(p[1], "abc", 3) == 3 && close(p[1]) == 0);
+    assert(zapp_review_stage_copy(p[0], out, 3, 1000, NULL) == ZAPP_STAGE_OK);
+    assert(lseek(out, 0, SEEK_SET) == 0 && read(out, result, 3) == 3 && !strcmp(result, "abc"));
+    assert(close(p[0]) == 0 && ftruncate(out, 0) == 0 && lseek(out, 0, SEEK_SET) == 0);
+    assert(pipe(p) == 0 && write(p[1], "abcd", 4) == 4 && close(p[1]) == 0);
+    assert(zapp_review_stage_copy(p[0], out, 3, 1000, NULL) == ZAPP_STAGE_TOO_LARGE);
+    assert(close(p[0]) == 0 && pipe(p) == 0 && close(p[1]) == 0);
+    assert(zapp_review_stage_copy(p[0], out, 3, 1000, NULL) == ZAPP_STAGE_EMPTY);
+    assert(close(p[0]) == 0 && pipe(p) == 0);
+    atomic_bool cancel = true;
+    assert(zapp_review_stage_copy(p[0], out, 3, 1000, &cancel) == ZAPP_STAGE_CANCELED);
+    atomic_store(&cancel, false);
+    assert(zapp_review_stage_copy(p[0], out, 3, 10, &cancel) == ZAPP_STAGE_UNAVAILABLE);
+    assert(close(p[0]) == 0 && close(p[1]) == 0 && close(out) == 0 && unlink(path) == 0);
+}
 int main(int argc, char **argv)
 {
+    assert(argc > 1);
+    review_stage_tests(argv[1]);
+    review_cleanup_tests(argv[1]);
+    review_event_tests();
     assert(argc == 2);
     validation();
     arguments();
