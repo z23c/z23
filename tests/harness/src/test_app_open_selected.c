@@ -3888,6 +3888,10 @@ static bool rr_setup_guide(const struct json_value *setup)
 {
     const char *request = aso_string(setup, "request");
     return strstr(request, "expected_head from head_version") && strstr(request, "expected_blob from file.blob") &&
+        strstr(request, "literal query of 1–64 UTF-8 bytes") && strstr(request, "follow next_offset without page or limit") &&
+        strstr(request, "returned match.offset") && strstr(request, "verify surrounding bytes") &&
+        strstr(request, "offset and delete_length as byte counts plus UTF-8 replacement") &&
+        strstr(request, "full file in slices") && strstr(request, "without splice fields") &&
         strstr(request, "plan_id and confirm=true") && strstr(request, "re-read before another edit") &&
         strstr(request, "explicit Keep and Share choices");
 }
@@ -3896,6 +3900,7 @@ static bool rr_setup_identity(struct rr_cycle *r, const struct rr_consent *view,
 {
     char key[4400]; bool exists = false;
     bool ok = reply->status == ZCL_COMMAND_STATUS_PASSED && view->confirmed &&
+        strlen(view->setup) <= ZCL_PRESENT_COPY_TEXT_MAX &&
         json_read(setup, view->setup, strlen(view->setup)) && rr_setup_guide(setup) &&
         !strcmp(aso_string(setup, "name"), AK_ROUTE) &&
         json_get(setup, "revision") && json_get(setup, "revision")->type == JSON_INT &&
