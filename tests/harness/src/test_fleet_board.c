@@ -11213,6 +11213,16 @@ static int test_fleet_board_partition_convergence(void)
     return failures;
 }
 
+static bool fbw_pressure_stage(const struct json_value *attempt, bool allocation)
+{
+    const char *stage = json_get_str(json_get(attempt, "stage"));
+    const char *action = json_get_str(json_get(attempt, "operator_action"));
+    return stage && strcmp(stage, allocation ? "answer-allocation" : "answer-inbox") == 0 &&
+           action && strcmp(action, allocation
+               ? "inspect memory pressure on the receiving node before retrying"
+               : "wait for the receiving board inbox to drain before retrying") == 0;
+}
+
 static bool fbw_pressure_status(struct fbw *w, const uint8_t post[32],
                                 const char *reason, const char *action)
 {
@@ -11226,7 +11236,9 @@ static bool fbw_pressure_status(struct fbw *w, const uint8_t post[32],
     const char *next = json_get_str(json_get(attempt, "next_action"));
     ok = ok && json_get_bool(json_get(attempt, "observed")) && phase &&
          strcmp(phase, "answer_deferred") == 0 && why && strcmp(why, reason) == 0 &&
-         next && strcmp(next, action) == 0 && !json_get(attempt, "epoch") &&
+         next && strcmp(next, action) == 0 &&
+         fbw_pressure_stage(attempt, strcmp(reason, "allocation_failed") == 0) &&
+         !json_get(attempt, "epoch") &&
          !json_get_bool(json_get(ingest, "observed"));
     json_free(&result);
     return ok;
@@ -11266,6 +11278,11 @@ static int test_fleet_board_pull_inbox_pressure(bool fail_alloc)
         ASSERT(fbw_pressure_status(&w, missing.id,
                                    fail_alloc ? "allocation_failed" : "inbox_full",
                                    fail_alloc ? "inspect_node_memory" : "wait_for_board_inbox"));
+        struct boot_fleet_board_observation unknown = {
+            .found = true, .phase = FLEET_BOARD_OBS_ANSWER_DEFERRED, .result = -1,
+        };
+        enum boot_fleet_board_stage stage;
+        ASSERT(!boot_fleet_board_observation_stage(&unknown, &stage));
         ASSERT_EQ(boot_fleet_board_fleet_test_drain_into(&w.b), fail_alloc ? (size_t)0 : (size_t)1);
         if (!fail_alloc) ASSERT(db_fleet_board_have(&w.b, first.id));
         ASSERT(!db_fleet_board_have(&w.b, missing.id));

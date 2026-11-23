@@ -82,6 +82,10 @@ static const struct board_stage_words board_stages[BOARD_STAGES] = {
         "inspect board counts with `z23 fleet board status` and the node storage logs"},
     [BOARD_STAGE_INGEST_STORAGE] = {"ingest-storage",
         "inspect the receiving board store and node storage logs"},
+    [BOARD_STAGE_ANSWER_INBOX] = {"answer-inbox",
+        "wait for the receiving board inbox to drain before retrying"},
+    [BOARD_STAGE_ANSWER_ALLOCATION] = {"answer-allocation",
+        "inspect memory pressure on the receiving node before retrying"},
     [BOARD_STAGE_DECODE] = {"decode",
         "inspect build identities on both hosts with `z23 version`"},
     [BOARD_STAGE_ROSTER] = {"roster",
@@ -154,6 +158,20 @@ static bool stage_of_gate(int reason, enum boot_fleet_board_stage *out)
     return false;
 }
 
+static bool stage_of_answer_deferred(int reason, enum boot_fleet_board_stage *out)
+{
+    switch (reason) {
+    case FLEET_BOARD_ANSWER_INBOX_FULL:
+        *out = BOARD_STAGE_ANSWER_INBOX;
+        return true;
+    case FLEET_BOARD_ANSWER_ALLOCATION_FAILED:
+        *out = BOARD_STAGE_ANSWER_ALLOCATION;
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool boot_fleet_board_observation_stage(
     const struct boot_fleet_board_observation *v,
     enum boot_fleet_board_stage *out)
@@ -167,8 +185,7 @@ bool boot_fleet_board_observation_stage(
         *out = BOARD_STAGE_DECODE;
         return true;
     case FLEET_BOARD_OBS_ANSWER_DEFERRED:
-        *out = BOARD_STAGE_INGEST_LIMIT;
-        return true;
+        return stage_of_answer_deferred(v->result, out);
     case FLEET_BOARD_OBS_OPEN_FAILURE:
         *out = BOARD_STAGE_STREAM;
         return true;
