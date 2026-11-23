@@ -40,6 +40,7 @@
 #include "sky_combat/controllers/input_mvc_fast.h"
 #include "sky_combat/views/combat_effects.h"
 #include "sky_combat/qa_frames.h"
+#include "sky_combat/qa_timing.h"
 #include "sky_combat/agent_session.h"
 #include "sky_combat/game_runtime.h"
 
@@ -90,6 +91,9 @@ typedef struct {
 
     /* --capture run: fixed time step and a chase view centred on the player */
     bool capture_view;
+
+    /* --qa-frames run: fixed 1/60 s step; with the fixed RNG seed (default 1) two runs do identical work */
+    bool fixed_step;
     game_flow_t flow;
     int best_score;
     bool score_save_failed;
@@ -1153,7 +1157,7 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
 {
     float interval_ms;
     double metric_start = game_metrics_begin(game, &interval_ms);
-    float dt = external_input || game->capture_view ? 1.0f / 60.0f : GetFrameTime();
+    float dt = external_input || game->capture_view || game->fixed_step ? 1.0f / 60.0f : GetFrameTime();
     if (external_input) {
         sky_game_runtime_tick();
         *game_time = (float)sky_game_runtime_time();
@@ -1167,6 +1171,67 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
     render_ultimate_frame(game, *game_time, part_hud, notice, capture);
     game_metrics_end(game, metric_start, interval_ms, external_input != NULL);
     ++*rendered_frames;
+}
+
+#ifndef ZCL_BUILD_SOURCE_ID
+#define ZCL_BUILD_SOURCE_ID "unknown"
+#endif
+#define SKY_COMBAT_PROGRAM_VERSION 1
+
+/* One monotonic origin per process, sampled at main entry. */
+static struct sky_qa_timing qa_timing;
+
+/* `--version` alone: identity only, before any window or option parsing. */
+static bool game_version_requested(int argc, char **argv)
+{
+    return argc == 2 && argv[1] && strcmp(argv[1], "--version") == 0;
+}
+
+/* Same build identity the node reports: ZCL_BUILD_SOURCE_ID, the 64-hex
+ * source-tree digest the Makefile stamps (`z23 --version` prints its first 12). */
+static int game_print_version(void)
+{
+    printf("z23-skycombat v%d (source %.12s)\n", SKY_COMBAT_PROGRAM_VERSION,
+           ZCL_BUILD_SOURCE_ID);
+    printf("source-id %s\n", ZCL_BUILD_SOURCE_ID);
+    return fflush(stdout) == 0 ? 0 : 1;
+}
+
+static void qa_timing_report(void)
+{
+    struct sky_qa_summary summary;
+    char line[256];
+    if (!sky_qa_timing_summarize(&qa_timing, &summary)) return;
+    if (!sky_qa_summary_format(&summary, line, sizeof(line))) {
+        fputs("Sky Combat: QA frame-time line did not fit\n", stderr);
+        return;
+    }
+    puts(line);
+}
+
+/* The windowed (non-agent) loop. QA runs time each frame with a monotonic
+ * clock into fixed storage; interactive runs take no timing at all. */
+static int run_frame_loop(multiplayer_game_t *game, const struct sky_expr_option *option,
+                          struct sky_expr_hud *part_hud, struct sky_expr_notice *notice,
+                          unsigned qa_frames,
+                          const char *capture_path)
+{
+    struct sky_agent_capture shot = {0};
+    float game_time = 0;
+    unsigned rendered_frames = 0;
+    while (game_frame_pending(qa_frames, rendered_frames)) {
+        sky_game_raise_apply();
+        bool last = capture_path && rendered_frames + 1 == qa_frames;
+        uint64_t began = qa_frames ? sky_qa_now_us() : 0;
+        advance_ultimate_frame(game, option, part_hud, notice,
+                               &game_time, &rendered_frames, NULL, last ? &shot : NULL);
+        if (qa_frames) sky_qa_timing_record(&qa_timing, began, sky_qa_now_us());
+    }
+    int result = game_frame_result(qa_frames, rendered_frames);
+    if (!result && capture_path && !game_capture_save(capture_path, &shot)) result = 1;
+    free(shot.png);
+    if (qa_frames) qa_timing_report();
+    return result;
 }
 
 struct game_agent_context {
@@ -1274,6 +1339,7 @@ static bool game_init(multiplayer_game_t *game, unsigned qa_frames,
     game->camera_distance = 35.0f;
     game->motion_blur_enabled = true;
     game->capture_view = capture_path != NULL;
+    game->fixed_step = qa_frames != 0;
     cyberpunk_world_generate(game->world, 42);
     cyberpunk_set_theme_blade_runner(game->world);
     sky_game_runtime_reseed();
@@ -1287,30 +1353,21 @@ static int game_run(multiplayer_game_t *game, unsigned qa_frames,
                     struct sky_expr_hud *part_hud, struct sky_expr_notice *notice,
                     const char *capture_path)
 {
-    float game_time = 0;
-    unsigned rendered_frames = 0;
     sky_game_metrics_reset();
     int result;
     if (agent_mode) {
         struct game_agent_context context = {game, option, part_hud, notice, 0, 0};
         result = sky_agent_run(session, &context, game_agent_frame);
     } else {
-        struct sky_agent_capture shot = {0};
-        while (game_frame_pending(qa_frames, rendered_frames)) {
-            sky_game_raise_apply();
-            bool last = capture_path && rendered_frames + 1 == qa_frames;
-            advance_ultimate_frame(game, option, part_hud, notice,
-                                   &game_time, &rendered_frames, NULL, last ? &shot : NULL);
-        }
-        result = game_frame_result(qa_frames, rendered_frames);
-        if (!result && capture_path && !game_capture_save(capture_path, &shot)) result = 1;
-        free(shot.png);
+        result = run_frame_loop(game, option, part_hud, notice, qa_frames, capture_path);
     }
     sky_game_metrics_report();
     return result;
 }
 
 int main(int argc, char **argv) {
+    sky_qa_timing_begin(&qa_timing, sky_qa_now_us());
+    if (game_version_requested(argc, argv)) return game_print_version();
     unsigned qa_frames;
     bool agent_mode = false;
     struct sky_agent_session session = {0};

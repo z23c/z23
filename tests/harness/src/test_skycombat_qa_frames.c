@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 #include "test/host_tool_capture.h"
 #include "sky_combat/qa_frames.h"
+#include "sky_combat/qa_timing.h"
 #include "platform/resident_launch.h"
 #include "json/json.h"
 #include <string.h>
@@ -897,6 +898,118 @@ static int skycombat_held_keyboard_fire(void)
         ASSERT(strstr(output, "QA_HELD_CTRL weapon_calls=4 bullet_calls=4"));
         PASS();
     } _test_next:;
+/* Parse the one QA_FRAME_TIMES line; false when absent or malformed. */
+static bool skycombat_times_parse(const char *output, struct sky_qa_summary *s)
+{
+    const char *line = strstr(output, "QA_FRAME_TIMES ");
+    unsigned long long first = 0;
+    if (!line) return false;
+    int fields = sscanf(line,
+        "QA_FRAME_TIMES frames=%u first_frame_us=%llu min_us=%u median_us=%u p95_us=%u p99_us=%u max_us=%u",
+        &s->frames, &first, &s->min_us, &s->median_us, &s->p95_us, &s->p99_us, &s->max_us);
+    s->first_frame_us = first;
+    return fields == 7 && !strstr(line + 1, "QA_FRAME_TIMES ");
+}
+
+static bool skycombat_times_ordered(const struct sky_qa_summary *s)
+{
+    return s->min_us <= s->median_us && s->median_us <= s->p95_us &&
+           s->p95_us <= s->p99_us && s->p99_us <= s->max_us;
+}
+
+static int skycombat_timing_pure(void)
+{
+    int failures = 0;
+    static struct sky_qa_timing timing;
+    struct sky_qa_summary s;
+    char line[256];
+    TEST("QA timing: nearest-rank summary of a known series, order independent") {
+        sky_qa_timing_begin(&timing, 1000);
+        for (unsigned i = 100; i >= 1; --i)
+            sky_qa_timing_record(&timing, 5000, 5000 + i * 10u);
+        ASSERT(sky_qa_timing_summarize(&timing, &s));
+        ASSERT_EQ(s.frames, 100u);
+        ASSERT_EQ(s.first_frame_us, 5000u);
+        ASSERT_EQ(s.min_us, 10u); ASSERT_EQ(s.median_us, 500u);
+        ASSERT_EQ(s.p95_us, 950u); ASSERT_EQ(s.p99_us, 990u); ASSERT_EQ(s.max_us, 1000u);
+        ASSERT(skycombat_times_ordered(&s));
+        ASSERT(sky_qa_summary_format(&s, line, sizeof(line)));
+        struct sky_qa_summary back;
+        ASSERT(skycombat_times_parse(line, &back));
+        ASSERT_EQ(back.frames, 100u); ASSERT_EQ(back.p99_us, 990u);
+        ASSERT(!sky_qa_summary_format(&s, line, 20));
+    }
+    TEST("QA timing: one frame, empty run, clock regression and the 3600 ceiling") {
+        sky_qa_timing_begin(&timing, 10);
+        ASSERT(!sky_qa_timing_summarize(&timing, &s));
+        sky_qa_timing_record(&timing, 50, 40);
+        ASSERT(sky_qa_timing_summarize(&timing, &s));
+        ASSERT_EQ(s.frames, 1u); ASSERT_EQ(s.min_us, 0u); ASSERT_EQ(s.max_us, 0u);
+        sky_qa_timing_begin(&timing, 0);
+        for (unsigned i = 0; i < SKY_COMBAT_QA_FRAMES_MAX + 5u; ++i)
+            sky_qa_timing_record(&timing, 0, i);
+        ASSERT(sky_qa_timing_summarize(&timing, &s));
+        ASSERT_EQ(s.frames, SKY_COMBAT_QA_FRAMES_MAX);
+        ASSERT(skycombat_times_ordered(&s));
+    }
+    TEST("QA timing: monotonic clock never goes backwards") {
+        uint64_t a = sky_qa_now_us(), b = sky_qa_now_us();
+        ASSERT(a > 0 && b >= a);
+    }
+_test_next:;
+    return failures;
+}
+
+static int skycombat_version_output(void)
+{
+    int failures = 0;
+    const char *args[] = {QA_ENTRY, "--version", NULL};
+    char output[2048] = {0}, hex[65] = {0}, short_id[13] = {0};
+    TEST("--version: names program and source identity, exits 0, opens no window") {
+        int rc = test_host_tool_capture(args, output, sizeof(output), 5000);
+        if (rc) fprintf(stderr, "%s", output);
+        ASSERT_EQ(rc, 0);
+        unsigned version = 0;
+        ASSERT_EQ(sscanf(output, "z23-skycombat v%u (source %12[0-9a-fnouwk])\n",
+                         &version, short_id), 2);
+        ASSERT_EQ(version, 1u);
+        const char *id = strstr(output, "source-id ");
+        ASSERT(id != NULL);
+        ASSERT_EQ(sscanf(id, "source-id %64s\n", hex), 1);
+        bool unknown = strcmp(hex, "unknown") == 0;
+        ASSERT(unknown || strlen(hex) == 64);
+        ASSERT(strncmp(short_id, hex, strlen(short_id)) == 0);
+        for (size_t i = 0; !unknown && i < 64; ++i)
+            ASSERT((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f'));
+        /* the fixture counts every InitWindow: none may have happened */
+        ASSERT(strstr(output, "windows=1") == NULL);
+        ASSERT(strstr(output, "QA_FRAME_TIMES") == NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int skycombat_frame_times_output(unsigned frames)
+{
+    int failures = 0;
+    char argument[32], output[4096] = {0};
+    snprintf(argument, sizeof(argument), "--qa-frames=%u", frames);
+    const char *args[] = {QA_ENTRY, argument, NULL};
+    TEST("--qa-frames: prints one ordered frame-time line with frames == N") {
+        struct sky_qa_summary s = {0};
+        int rc = test_host_tool_capture(args, output, sizeof(output), 10000);
+        if (rc) fprintf(stderr, "%s", output);
+        ASSERT_EQ(rc, 0);
+        ASSERT(skycombat_times_parse(output, &s));
+        ASSERT_EQ(s.frames, frames);
+        ASSERT(skycombat_times_ordered(&s));
+        ASSERT(s.first_frame_us > 0);
+        /* existing output is kept */
+        ASSERT(strstr(output, "QA_TEST status=0") != NULL);
+        PASS();
+    }
+_test_next:;
     return failures;
 }
 
@@ -963,6 +1076,10 @@ _test_next:;
     failures += skycombat_qa_launch(NULL, "--fixture-close=2", 2, 0, 1);
     failures += skycombat_qa_launch("--qa-frames=3", "--fixture-close=2", 2, 1, 1);
     failures += skycombat_qa_launch("--qa-frames=1", "--fixture-window-fails", 0, 1, 1);
+    failures += skycombat_timing_pure();
+    failures += skycombat_version_output();
+    failures += skycombat_frame_times_output(1);
+    failures += skycombat_frame_times_output(60);
     failures += skycombat_capture_file();
     failures += skycombat_capture_colour();
     failures += skycombat_capture_usage();

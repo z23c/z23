@@ -195,6 +195,15 @@ $(SKYCOMBAT_SIM_OBJS): $(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c $(SKYCOMBA
 	@mkdir -p $(dir $@)
 	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) -MD -MP -MF $(@:.o=.d) -c $< -o $@
 
+# `z23-skycombat --version` names the source tree this binary was built from,
+# through the node's own mechanism: the Makefile's BUILD_SOURCE_ID, baked as
+# ZCL_BUILD_SOURCE_ID into this one object. The identity stamp is a prerequisite
+# so the object is rebuilt whenever the source identity changes. A standalone
+# copy defines neither, and the program then reports "unknown".
+SKYCOMBAT_IDENTITY_OBJ := $(SKYCOMBAT_OBJ_DIR)/src/sky_combat_multiplayer_ultimate.o
+$(SKYCOMBAT_IDENTITY_OBJ): $(BUILD_IDENTITY_STAMP)
+$(SKYCOMBAT_IDENTITY_OBJ): SKYCOMBAT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
+
 # The probe is a FILE target, not just a phony one. Only raylib's SDK-using
 # objects take it as an order-only prerequisite; game/support objects consume
 # portable declarations and remain available to headless tests. Under `make -j`

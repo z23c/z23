@@ -41,6 +41,13 @@ numbers move.
   `xvfb-run -a`, for example `xvfb-run -a build/bin/z23-skycombat --qa-frames=120`.
   Wrap the command from the `Preview:` line that the app build step prints the same way:
   `xvfb-run -a <that command>`.
+  `build/bin/z23-skycombat --version` prints `z23-skycombat v1 (source <12 hex>)` and
+  `source-id <64 hex>` (the node's build source identity, `unknown` outside the root build),
+  exits 0 and opens no window. A `--qa-frames=N` run steps a fixed 1/60 s and, on exit, prints
+  one line: `QA_FRAME_TIMES frames=N first_frame_us=U min_us=.. median_us=.. p95_us=.. p99_us=..
+  max_us=..` (monotonic clock around each frame, nearest-rank percentiles; `first_frame_us` is
+  main entry to the first presented frame, excluding loader time; frames are paced by
+  `SetTargetFPS`, so they measure present-to-present time, not CPU cost).
 
 ## Tests
 
