@@ -28,7 +28,7 @@ const char k_wcs_baseline[] =
     "tools/lint/windows_cross_syntax_baseline.txt";
 static const char *const k_wcs_scan_roots[] = {
     "core", "engine", "contexts", "cognition", "platform", "tools/command",
-    "apps/skycombat", NULL,
+    "apps/skycombat", "apps/z23wallet", NULL,
 };
 
 char g_wcs_work[WCS_PATH];

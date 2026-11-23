@@ -184,6 +184,10 @@ LIB_MODULE("bloom")
  * remaining upward reach is util -> health (4 symbols), one of the 4
  * grandfathered back edges. */
 LIB_MODULE("util")
+/* gui: the software window and widget layer (z23-wallet, later games). It
+ * includes base, json, sha3 and util (png_writer) only, and the node build
+ * never compiles it (Makefile filters platform/modules/gui/src from LIB_SRCS). */
+LIB_MODULE("gui")
 LIB_MODULE("sapling")
 LIB_MODULE("crypto_registry")
 LIB_MODULE("event")

@@ -2,7 +2,7 @@
 
 # apps/
 
-Separate C23 programs: `skycombat/`, `z23kernel/` (`build.sh`, `main.c`), `zcl-ledger/` (`CMakeLists.txt`, `DEVELOPMENT.md`). They link neither `core/` nor `engine/`.
+Separate C23 programs: `skycombat/`, `z23wallet/` (the lightweight wallet window, `make z23-wallet`), `z23kernel/` (`build.sh`, `main.c`), `zcl-ledger/` (`CMakeLists.txt`, `DEVELOPMENT.md`). They link neither `core/` nor `engine/`.
 
 Rules:
 - Keep strict warnings and portability; the node architecture gates do not scan this tree.

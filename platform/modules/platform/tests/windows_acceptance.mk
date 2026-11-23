@@ -39,6 +39,8 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	file_service_transport \
 	format_attribute \
 	glob_match \
+	gui_gl_smoke \
+	gui_window \
 	headless_run \
 	hotswap_elf_probe_refusal \
 	logical_cpu \
@@ -471,6 +473,23 @@ ZCL_WINDOWS_ACCEPTANCE_format_attribute_SOURCES := \
 	platform/modules/base/tests/format_attribute_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \
 	platform/modules/platform/tests/glob_match_windows_acceptance.c
+# ── GUI window layer (platform/modules/gui) ─────────────────────────────────
+# The real Win32 CPU window and the optional GL smoke test. user32/gdi32 are
+# linked directly; opengl32 is loaded at run time and the smoke test prints
+# "SKIP gui_gl_smoke: <reason>" (exit 0) where no GL is available.
+ZCL_WINDOWS_ACCEPTANCE_GUI_DEPS := \
+	$(wildcard platform/modules/gui/src/*.c) \
+	platform/modules/base/src/safe_alloc.c platform/modules/base/src/cleanse.c \
+	platform/modules/json/src/json.c platform/modules/util/src/png_writer.c \
+	platform/modules/sha3/src/sha3.c
+ZCL_WINDOWS_ACCEPTANCE_gui_window_SOURCES := \
+	platform/modules/gui/tests/gui_window_windows_acceptance.c \
+	$(ZCL_WINDOWS_ACCEPTANCE_GUI_DEPS)
+ZCL_WINDOWS_ACCEPTANCE_gui_window_LIBS := -luser32 -lgdi32 -lshell32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+ZCL_WINDOWS_ACCEPTANCE_gui_gl_smoke_SOURCES := \
+	platform/modules/gui/tests/gui_gl_windows_acceptance.c \
+	$(ZCL_WINDOWS_ACCEPTANCE_GUI_DEPS)
+ZCL_WINDOWS_ACCEPTANCE_gui_gl_smoke_LIBS := -luser32 -lgdi32 -lshell32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 # ── The Windows-only headless process launcher ──────────────────────────────
 # tools/dev/windows_headless_run.c is NOT a platform-seam acceptance program
 # like every other row here: it is a standalone TOOL. Its

@@ -997,3 +997,5 @@ READY → SHUTDOWN_REQUESTED → SHUTDOWN_COMPLETE`. Migrations run at `DB_OPEN`
 Frozen: the 8 shapes, 10 laws, lint ratchet, folder layout, event-log schema.
 Replaceable: C23, SQLite, systemd, Tor v3, crypto algos (behind the agility
 ladder). Build to the contract, not the implementation.
+
+- `platform/modules/gui/`: software window and widget layer (CPU framebuffer now, GL surface interface for games later). Not linked into the node; used by `apps/z23wallet/` and the `gui` test group.

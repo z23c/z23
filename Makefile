@@ -521,7 +521,7 @@ ZCL_GIT_HOOK_GOALS := git-hook git-hook-selftest install-hooks
 # Keep configured values (including deferred variable references) conservative:
 # the packer links zlib. Mixed node goals still require normal bootstrap.
 ZCL_GUEST_STUB_GOALS := $(if $(strip $(value Z23_GUEST_KERNEL)),,build/gen/guest_kernel_data.c)
-ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(if $(ZCL_AGENT_VERIFY_WRAPPER_ONLY),$(MAKECMDGOALS)) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
+ZCL_BOOTSTRAP_HELPER_ONLY := $(if $(ZCL_TIMINGS_HELPER_ONLY),1,$(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(if $(ZCL_AGENT_VERIFY_WRAPPER_ONLY),$(MAKECMDGOALS)) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_WINDOWS_LAUNCHER_GOALS) $(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) $(ZCL_GENERATED_HEADER_GOALS) check-capability-inventory-generated docs-proof-tools game game-check z23-wallet z23-wallet-check z23-wallet-windows game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe,$(MAKECMDGOALS))),,1),))
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
@@ -1088,6 +1088,10 @@ LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
 	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 endif
 
+# The GUI window layer is not node code: the node never compiles or links it
+# (platform/modules/gui/gui.mk lists it for z23-wallet and the gui test group).
+LIB_SRCS := $(filter-out platform/modules/gui/src/%,$(LIB_SRCS))
+
 # Platform ports say what the product needs. Platform adapters provide those
 # contracts without leaking operating-system or persistence choices inward.
 # See platform/ports/include/ports/README.md for the convention.
@@ -1183,7 +1187,7 @@ ZCL_ALL_INCLUDES = $(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) \
 	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(REDUCER_INCLUDES) \
 	$(TOOLS_INCLUDES) $(MIND_INCLUDES) \
 	$(DEVLOOP_INCLUDES) -Itests/harness/include -Ivendor/include -Ivendor/x11/include \
-	$(SKYCOMBAT_TEST_INCLUDES)
+	$(SKYCOMBAT_TEST_INCLUDES) $(Z23WALLET_TEST_INCLUDES)
 
 .PHONY: print-includes
 print-includes:
@@ -1887,7 +1891,7 @@ TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCH
 ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
 	worktree-prime-selftest $(ZCL_GIT_HOOK_GOALS) $(ZCL_PUBLIC_FIXTURE_GOALS) $(ZCL_GUEST_STUB_GOALS) setup \
-	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe \
+	check-% lint lint-% %-selftest docs docs-% $(ZCL_WINDOWS_LAUNCHER_GOALS) game game-check z23-wallet z23-wallet-check z23-wallet-windows game-platform-probe skycombat-agent-client skycombat-model-replay skycombat-qa-entrypoint p2p-version-probe \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) $(ZCL_BUILD_QUERY_GOALS) $(ZCL_GENERATED_HEADER_GOALS) $(if $(ZCL_AGENT_VERIFY_WRAPPER_ONLY),$(MAKECMDGOALS)) $(ZCL_WINDOWS_STANDALONE_GOALS) $(ZCL_ANDROID_ACCEPTANCE_GOALS) $(if $(ZCL_TIMINGS_HELPER_ONLY),$(MAKECMDGOALS))
 ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
 	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
@@ -3367,6 +3371,8 @@ new-app-selftest:
 # viewer still wants a system raylib; pointing it at this vendored copy is a
 # separate change and a separate owner (docs/commons/GAME.md notes it).
 include apps/skycombat/skycombat.mk
+include platform/modules/gui/gui.mk
+include apps/z23wallet/z23wallet.mk
 
 SKYCOMBAT_FP_CONTRACT_BIN := $(BIN_DIR)/skycombat-fp-contract
 $(SKYCOMBAT_FP_CONTRACT_BIN): tools/dev/fixtures/skycombat/fp_contract_rounding.c \
@@ -3881,6 +3887,7 @@ plugin-builtin-pack: $(PLUGIN_BUILTIN_BINS) | $(Z23_BIN)
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard tests/harness/src/*.c))
 TEST_SRCS += contexts/commons/packages/zmap/src/zmap.c
+TEST_SRCS += $(GUI_TEST_SRCS) $(Z23WALLET_TEST_SRCS)
 # test_skycombat_macho_loader.c already includes the actual zsha256 source.
 TEST_DEV_EXECUTOR_SRCS = tools/contrib_inbox_process.c tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/component_receiver.c \

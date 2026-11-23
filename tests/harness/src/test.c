@@ -1212,6 +1212,8 @@ static void run_full_suite_foundation(int *failures)
     { extern int test_arena_view(void); *failures += test_arena_view(); }
     { extern int test_skycombat_models(void); *failures += test_skycombat_models(); }
     { extern int test_skycombat_expr(void); *failures += test_skycombat_expr(); }
+    { extern int test_gui(void); *failures += test_gui(); }
+    { extern int test_z23wallet(void); *failures += test_z23wallet(); }
     { extern int test_z23android(void); *failures += test_z23android(); }
     { extern int test_qr(void); *failures += test_qr(); }
     { extern int test_shared_validators_zcl_address(void);
