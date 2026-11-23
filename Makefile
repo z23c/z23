@@ -3429,13 +3429,21 @@ $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(
                    $(SKYCOMBAT_SUPPORT_SRCS) \
                    $(wildcard apps/skycombat/include/sky_combat/*.h) \
                    $(wildcard apps/skycombat/include/sky_combat/*/*.h) | $(BIN_DIR)
+	@set -eu; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	$(CC) $(SKYCOMBAT_CFLAGS) $(BUILD_IDENTITY_CPPFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) $< \
 	    $(SKYCOMBAT_DIR)/src/agent_session.c \
 	    $(SKYCOMBAT_DIR)/src/agent_resident.c \
 	    $(SKYCOMBAT_DIR)/src/game_runtime.c \
 	    $(SKYCOMBAT_DIR)/src/game_match_reset.c \
 	    $(SKYCOMBAT_DIR)/src/qa_timing.c \
-	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o $@ -lm
+	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o "$$tmp" -lm; \
+	chmod 0755 "$$tmp"; \
+	"$$tmp" --version | grep -qxF "source-id $(BUILD_SOURCE_ID)" || { echo "skycombat-qa-entrypoint: embedded source id differs from $(BUILD_SOURCE_ID)" >&2; exit 3; }; \
+	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
 .PHONY: skycombat-qa-entrypoint
 skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)
 ifeq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
