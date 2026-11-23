@@ -7,6 +7,7 @@
 #include "command/native_app_receive_copy.h"
 #include "command/native_app_share_reveal.h"
 #include "command/app_selection.h"
+#include "command/app_build_make.h"
 #include "command/native_app_compose.h"
 #include "command/native_zcode_package_copy.h"
 #include "base/safe_alloc.h"
@@ -105,38 +106,48 @@ static const char *arf_choice_failure_message(const struct receive_flow *f)
         "The next choice could not be displayed; the received copy is retained.";
 }
 enum arf_field_mode { ARF_FIELDS_FULL, ARF_FIELDS_BRIEF, ARF_FIELDS_APP_LEAF };
-static bool arf_choose(struct receive_flow *f, const char *title, const char *summary,
-    const char *action, enum arf_field_mode mode, bool *chosen)
+static bool arf_choose_mode(struct receive_flow *f, const char *title, const char *summary,
+    const char *action, enum arf_field_mode mode, bool warn_unconfined, bool *chosen)
 {
     struct app_confirm *view = zcl_calloc(1, sizeof(*view), "receive-flow/choice");
     *chosen = false;
     if (!view) return arf_fail(f, "OUT_OF_MEMORY", "Cannot show the next choice.");
     arf_model(f, view, title, summary); arf_actions(view, action);
     char why[256] = {0};
-    bool ok = (mode == ARF_FIELDS_BRIEF ? arf_brief_fields(f, view) :
+    bool ok = (!warn_unconfined ||
+        (app_confirm_field(&view->model, "Build sandbox: ", "Unavailable on this host.") &&
+         app_confirm_field(&view->model, "Instructions: ", "May run with your permissions.") &&
+         app_confirm_field(&view->model, "Before building: ", "Continue only if you trust the source."))) &&
+        (mode == ARF_FIELDS_BRIEF ? arf_brief_fields(f, view) :
         arf_fields_named(f, view, mode == ARF_FIELDS_APP_LEAF)) && app_confirm_prepare(view, why, sizeof(why)) &&
         app_confirm_show(view, f->presenter, f->context, why, sizeof(why));
     if (ok) *chosen = view->confirmed;
     app_confirm_free(view); free(view);
     return ok || arf_fail(f, "CONTINUATION_UNAVAILABLE", arf_choice_failure_message(f));
 }
-static bool arf_ready_choice(struct receive_flow *f, bool *chosen)
+static bool arf_choose(struct receive_flow *f, const char *title, const char *summary,
+    const char *action, enum arf_field_mode mode, bool *chosen)
+{ return arf_choose_mode(f, title, summary, action, mode, false, chosen); }
+static bool arf_ready_choice_mode(struct receive_flow *f, bool *chosen, bool confined)
 {
-    return arf_choose(f, "Your copy is ready", f->recovered ?
+    bool ok = arf_choose_mode(f, "Your copy is ready", f->recovered ?
         "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice." : f->adopted ?
         "Build and run this personal saved version to preview it. Keep remains a separate choice." :
         "Build and run this received version to preview it. Keep remains a separate choice.",
-        "Build and preview", f->recovered ? ARF_FIELDS_FULL : ARF_FIELDS_BRIEF, chosen);
+        "Build and preview", f->recovered ? ARF_FIELDS_FULL : ARF_FIELDS_BRIEF, !confined, chosen);
+    return ok;
 }
+static bool arf_ready_choice(struct receive_flow *f, bool *chosen)
+{ return arf_ready_choice_mode(f, chosen, app_build_make_confinable()); }
 static enum arf_field_mode arf_keep_field_mode(const struct receive_flow *f)
 { return (!f->adopted && !f->draft && !f->recovered) ? ARF_FIELDS_APP_LEAF : ARF_FIELDS_FULL; }
 #if defined(ZCL_TESTING)
 bool app_receive_flow_test_ready_choices(struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context, bool adopted)
+    app_confirm_presenter presenter, void *context, bool adopted, bool confined)
 {
     struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context, .adopted = adopted};
     bool chosen = false;
-    return arf_ready_choice(&f, &chosen) && !chosen &&
+    return arf_ready_choice_mode(&f, &chosen, confined) && !chosen &&
         arf_choose(&f, "Preview opened", "Review before Keep.", "Keep this version", arf_keep_field_mode(&f), &chosen) && !chosen;
 }
 #endif
@@ -965,7 +976,7 @@ void app_recovered_flow_run(const char *copy_dir, const char *datadir, const uin
         if (!data_size || data_size > data_budget || data_budget - data_size < APP_RECEIVE_CONTINUATION_RESERVE)
             ok = arf_fail(&f, "BUDGET_TOO_SMALL", "The recovered result cannot fit safely; no build was started.");
     }
-    if (ok) ok = arf_choose(&f, "Your copy is ready", "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice.", "Build and preview", ARF_FIELDS_FULL, &chosen);
+    if (ok) ok = arf_choose_mode(&f, "Your copy is ready", "Build and preview the original received snapshot, even if newer edits exist. Keep is a separate choice.", "Build and preview", ARF_FIELDS_FULL, !app_build_make_confinable(), &chosen);
     if (ok) ok = arf_continue(&f, chosen);
     arf_complete(&f, datadir, ok);
 }
@@ -996,8 +1007,8 @@ static bool arf_draft_confirm(struct receive_flow *f, const struct app_selection
     if (!json_push_kv_str(&f->reply->data, "name", selection->app) ||
         !json_push_kv_str(&f->reply->data, "version", hex))
         return arf_fail(f, "OUT_OF_MEMORY", "Cannot describe the draft.");
-    if (!arf_choose(f, "Review unkept changes", "Build and preview this exact draft. Keep remains a separate choice.",
-            "Build and preview", ARF_FIELDS_FULL, &chosen)) return false;
+    if (!arf_choose_mode(f, "Review unkept changes", "Build and preview this exact draft. Keep remains a separate choice.",
+            "Build and preview", ARF_FIELDS_FULL, !app_build_make_confinable(), &chosen)) return false;
     if (chosen) return true;
     if (!json_push_kv_str(&f->reply->data, "status", "canceled"))
         (void)arf_fail(f, "OUT_OF_MEMORY", "Cannot describe cancellation.");

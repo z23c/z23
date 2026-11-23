@@ -1566,8 +1566,20 @@ static bool rloc_case(const char *path, const char *encoded, bool adopted)
     return ok;
 }
 bool app_receive_flow_test_ready_choices(struct zcl_command_reply *reply,
-    app_confirm_presenter presenter, void *context, bool adopted);
-struct rbrief_probe { unsigned shown; bool adopted; };
+    app_confirm_presenter presenter, void *context, bool adopted, bool confined);
+struct rbrief_probe { unsigned shown; bool adopted, confined; };
+static bool rbrief_warning(const struct zcl_present_model_v1 *model, bool confined)
+{
+    if (confined) return true;
+    if (model->item_count < 3) return false;
+    for (unsigned i = 0; i < 3; ++i) {
+        const char *line = model->items[i].value;
+        if (zcl_present_canvas_text_width(line, strlen(line), 16u) > 636u) return false;
+    }
+    return rt_field(model, "Build sandbox: ", "Unavailable on this host.") &&
+        rt_field(model, "Instructions: ", "May run with your permissions.") &&
+        rt_field(model, "Before building: ", "Continue only if you trust the source.");
+}
 static bool rbrief_actions(const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, bool ready, uint32_t *count,
     char *why, size_t cap)
@@ -1585,24 +1597,25 @@ static bool rbrief_present(void *context, const struct zcl_present_model_v1 *mod
     uint32_t count = 0;
     bool ready = probe->shown++ == 0;
     bool ok = rbrief_actions(model, pages, ready, &count, why, cap);
-    if (ready) ok = ok && count == 1 && model->item_count == 2 &&
+    if (ready) ok = ok && count == 1 && model->item_count == (probe->confined ? 2u : 5u) &&
         rt_field(model, probe->adopted ? "Personal copy: " : "Received copy: ", "copy\\x20name") &&
-        rt_field(model, "Saved version prefix: ", "0123456789ab");
+        rt_field(model, "Saved version prefix: ", "0123456789ab") &&
+        rbrief_warning(model, probe->confined);
     else ok = ok && rt_field(model, probe->adopted ? "Personal copy: " : "App: ",
         probe->adopted ? "/private/long/path/copy name" : "fixture-app") &&
         rt_field(model, "Saved version: ", version);
     bool close = false, redraw = false;
     return ok && rt_action(live, 0, &close, &redraw) && close;
 }
-static bool rbrief_case(bool adopted, const char *name)
+static bool rbrief_case(bool adopted, const char *name, bool confined)
 {
     struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_receive.v1");
     json_set_object(&reply.data);
     bool ok = json_push_kv_str(&reply.data, adopted ? "copy" : "destination", "/private/long/path/copy name") &&
         json_push_kv_str(&reply.data, "name", name) &&
         json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
-    struct rbrief_probe probe = {.adopted = adopted};
-    if (ok) ok = app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, adopted);
+    struct rbrief_probe probe = {.adopted = adopted, .confined = confined};
+    if (ok) ok = app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, adopted, confined);
     ok = ok && probe.shown == 2 &&
         !strcmp(json_get_str(json_get(&reply.data, adopted ? "copy" : "destination")), "/private/long/path/copy name") &&
         !strcmp(json_get_str(json_get(&reply.data, "version")), "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
@@ -1615,7 +1628,7 @@ static bool rbrief_invalid(const char *path, const char *version)
     bool ok = (!path || json_push_kv_str(&reply.data, "destination", path)) &&
         (!version || json_push_kv_str(&reply.data, "version", version));
     struct rbrief_probe probe = {0};
-    if (ok) ok = !app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, false) &&
+    if (ok) ok = !app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, false, true) &&
         probe.shown == 0 && !strcmp(reply.error.code, "CONTINUATION_UNAVAILABLE");
     zcl_command_reply_free(&reply); return ok;
 }
@@ -1627,7 +1640,7 @@ static bool rbrief_bad_app(void)
         json_push_kv_str(&reply.data, "name", "publisher/") &&
         json_push_kv_str(&reply.data, "version", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
     struct rbrief_probe probe = {0};
-    if (ok) ok = !app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, false) &&
+    if (ok) ok = !app_receive_flow_test_ready_choices(&reply, rbrief_present, &probe, false, true) &&
         probe.shown == 1 && !strcmp(reply.error.code, "CONTINUATION_UNAVAILABLE");
     zcl_command_reply_free(&reply); return ok;
 }
@@ -1635,8 +1648,8 @@ static int rbrief_cases(void)
 {
     int failures = 0;
     TEST("ready choices preserve exact identity and reject invalid received inputs") {
-        ASSERT(rbrief_case(true, "fixture-app")); ASSERT(rbrief_case(false, "publisher/fixture-app"));
-        ASSERT(rbrief_case(false, "fixture-app"));
+        ASSERT(rbrief_case(true, "fixture-app", true)); ASSERT(rbrief_case(false, "publisher/fixture-app", true));
+        ASSERT(rbrief_case(false, "fixture-app", false)); ASSERT(rbrief_case(true, "fixture-app", false));
         const char *valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         ASSERT(rbrief_bad_app()); ASSERT(rbrief_invalid(NULL, valid)); ASSERT(rbrief_invalid("", valid));
         ASSERT(rbrief_invalid("/private/", valid)); ASSERT(rbrief_invalid("/private/copy", NULL));
