@@ -1854,6 +1854,87 @@ _test_next:;
     return failures;
 }
 
+static bool bmx_state_text(int box, char out[256])
+{
+    char path[1600];
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.state", g_bmx_state[box]);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    size_t used = fread(out, 1, 255, f);
+    bool ok = !ferror(f) && feof(f);
+    if (fclose(f) != 0) ok = false;
+    out[used] = 0; return ok;
+}
+static bool bmx_signed_peer_post(const struct bmx_post *p)
+{
+    struct fleet_board_post wire; uint8_t id[32];
+    return p && !strcmp(p->host, g_bmx_host[BMX_B]) && bmx_post_wire(p, &wire) &&
+        fleet_board_post_compute_id(&wire, id) == FLEET_BOARD_OK && !memcmp(id, wire.id, 32) &&
+        fleet_board_post_verify(&wire) == FLEET_BOARD_OK;
+}
+static bool bmx_post_target(const struct bmx_post *p, const char *target)
+{
+    struct json_value row; json_init(&row);
+    bool ok = p && json_read(&row, p->text, strlen(p->text));
+    const char *to = ok ? json_get_str(json_get(&row, "to")) : NULL;
+    ok = to && !strcmp(to, target); json_free(&row); return ok;
+}
+static int bmx_t_refs_unreadable(void)
+{
+    int failures = 0;
+    TEST("boardmail: unreadable refs hold cursor until signed returns can be routed") {
+        struct rcv_beat_stats st; char path[1600], saved[1650], before[256], after[256];
+        ASSERT(bmx_setup("unreadable-refs"));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.refs", g_bmx_state[BMX_A]);
+        ASSERT(access(path, F_OK) != 0 && errno == ENOENT);
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_deferred, 0);
+        ASSERT(bmx_sent("job-1"));
+        ASSERT_EQ(bmx_lines(BMX_A, "receive/boardmail.refs", "out job-1 node-b", NULL), 1);
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT(bmx_mail("node-b", "*", "result", "job-1", "worker=node-b\nstate=done\nverdict=pass\n"));
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(g_bmx_node[BMX_B].n, (size_t)3);
+        ASSERT(bmx_signed_peer_post(&g_bmx_node[BMX_B].p[1]));
+        ASSERT(bmx_post_target(&g_bmx_node[BMX_B].p[1], "chatgpt"));
+        ASSERT(bmx_verified_result(&g_bmx_node[BMX_B].p[2]));
+        ASSERT(bmx_post_target(&g_bmx_node[BMX_B].p[2], "*"));
+        bmx_carry(BMX_B, BMX_A);
+        const char *unrelated = "{\"seq\":8,\"ts\":\"2026-01-01T00:00:00Z\",\"from\":\"node-b\",\"to\":\"*\",\"kind\":\"result\",\"body\":\"unrelated\",\"ref\":\"other-ref\"}";
+        ASSERT(bmx_signed_peer_post(bmx_inject(BMX_A, BMX_B, unrelated, (long long)time(NULL), 3600)));
+        ASSERT(bmx_state_text(BMX_A, before));
+        (void)snprintf(saved, sizeof(saved), "%s.saved", path);
+        bool moved = rename(path, saved) == 0;
+        bool blocked = moved && mkdir(path, 0700) == 0;
+        if (moved && !blocked) (void)rename(saved, path);
+        ASSERT(blocked);
+        unsigned before_page = g_bmx_node[BMX_A].page_calls;
+        long long result = bmx_drive(BMX_A, &st);
+        unsigned page_calls = g_bmx_node[BMX_A].page_calls - before_page;
+        bool restored = rmdir(path) == 0 && rename(saved, path) == 0;
+        bool deferred = st.board_deferred >= 1;
+        ASSERT(restored);
+        bool cursor_same = bmx_state_text(BMX_A, after) && !strcmp(before, after);
+        long long before_rows = bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", NULL);
+        long long resumed = bmx_drive(BMX_A, &st), delivered = st.board_in;
+        long long ack = bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", "state=accepted");
+        long long done = bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", "state=done");
+        long long other = bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "other-ref", NULL);
+        printf("REFS_READ_PROBE page_calls=%u deferred=%d cursor_same=%d before=%lld resumed=%lld in=%lld ack=%lld result=%lld unrelated=%lld\n",
+               page_calls, deferred, cursor_same, before_rows, resumed, delivered, ack, done, other);
+        ASSERT(result == 1 && page_calls == 0 && deferred && cursor_same && before_rows == 0);
+        ASSERT(resumed == 1 && delivered == 2 && ack == 1 && done == 1 && other == 0);
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", NULL), 2);
+        bmx_teardown(); PASS();
+    }
+_test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_state_unreadable(void)
 {
     int failures = 0;
@@ -2076,6 +2157,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_expired();
     failures += bmx_t_deferred();
     failures += bmx_t_state_unreadable();
+    failures += bmx_t_refs_unreadable();
     failures += bmx_t_oversize();
     failures += bmx_t_delivery();
     failures += bmx_t_push_hint();

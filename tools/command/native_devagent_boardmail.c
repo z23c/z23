@@ -462,19 +462,23 @@ static void bm_refs_line(struct bm_refs *s, const char *line)
     bm_refs_put(s, dir[0] == 'o' ? 'o' : 'i', ref, peer);
 }
 
-static void bm_refs_load(struct bm_refs *s, const char *recvdir)
+static bool bm_refs_load(struct bm_refs *s, const char *recvdir)
 {
     char line[256];
     FILE *f;
     s->n = 0;
     s->start = 0;
-    (void)snprintf(s->path, sizeof(s->path), "%s/%s", recvdir, BM_REFS_FILE);
+    int n = snprintf(s->path, sizeof(s->path), "%s/%s", recvdir, BM_REFS_FILE);
+    if (n <= 0 || (size_t)n >= sizeof(s->path)) return false;
     f = fopen(s->path, "rb");
     if (!f)
-        return;
+        return errno == ENOENT;
     while (fgets(line, sizeof(line), f))
         bm_refs_line(s, line);
-    (void)fclose(f);
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok) { s->n = 0; s->start = 0; }
+    return ok;
 }
 
 /* Record one ref once. The ledger file is the receiver's own. */
@@ -744,7 +748,7 @@ static void bm_route_load(struct bm_route *v)
     }
     if (platform_state_root(root, sizeof(root)) &&
         snprintf(dir, sizeof(dir), "%s/receive", root) > 0)
-        bm_refs_load(&v->refs, dir);
+        (void)bm_refs_load(&v->refs, dir);
 }
 
 /* Bound the snapshot: an incomplete ledger cannot establish a local route. */
@@ -1374,7 +1378,12 @@ static struct bm_beat *bm_beat_open(const struct zcl_boardmail_ctx *c, bool *sta
         free(b);
         return NULL;
     }
-    bm_refs_load(&b->refs, c->recvdir);
+    if (!bm_refs_load(&b->refs, c->recvdir)) {
+        LOG_WARN(BM_LOG, "boardmail references unreadable; carriage held; inspect receive/boardmail.refs read-only");
+        *state_failed = true;
+        free(b);
+        return NULL;
+    }
     if (!bm_state_load(c->recvdir, &b->s)) {
         LOG_WARN(BM_LOG, "boardmail checkpoint unreadable; carriage held; inspect receive/boardmail.state read-only");
         *state_failed = true;
