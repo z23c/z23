@@ -3,7 +3,9 @@
  * translation unit because windows.h redeclares CloseWindow/ShowCursor/Rectangle. */
 #include "sky_combat/qa_timing.h"
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 uint64_t sky_qa_now_us(void)
