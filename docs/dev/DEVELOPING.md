@@ -1801,8 +1801,23 @@ directory as `z23` (owned by you or root); otherwise the product build answers
 `COMMAND_COMPAT_ONLY` naming the exact `z23-dev` command to run (`make z23-dev` in a
 checkout). `ZCL_NO_DEV_HANDOFF=1` pins that refusal.
 
+For ordinary submit, select the `normal` admission class using the interface
+supported by the installed launcher. Use one of these forms:
+
 ```bash
-devbuild --wait build/bin/z23-dev dev land submit --worktree=<path>
+# Launcher with --class support:
+devbuild --wait --class normal build/bin/z23-dev dev land submit --worktree=<path>
+```
+
+```bash
+# Launcher with DEVBUILD_CLASS support:
+DEVBUILD_CLASS=normal devbuild --wait build/bin/z23-dev dev land submit --worktree=<path>
+```
+
+Choose the admission class for `drive` and `--qualify` separately under the
+installed host policy:
+
+```bash
 devbuild --wait build/bin/z23-dev dev land drive --seq=N
 ```
 
