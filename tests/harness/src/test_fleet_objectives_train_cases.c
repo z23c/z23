@@ -19,7 +19,9 @@ struct ftr_case {
     int64_t latency;
 };
 
-/* ts 00:01:40 = 100 s, 00:16:40 = 1000 s, 00:17:40 = 1060 s. */
+/* ts 00:01:40 = 100 s, 00:16:40 = 1000 s, 00:17:40 = 1060 s. latency is the
+ * final landed row's landed_at minus its own ts; the attempts column still
+ * counts the whole train. */
 static const struct ftr_case ftr_cases[] = {
     {"landing train: an earlier landed row of the same note ends the train "
      "(rows carry seq)",
@@ -31,7 +33,7 @@ static const struct ftr_case ftr_cases[] = {
      "{\"note\":\"lane\",\"state\":\"landed\",\"seq\":3,"
      "\"ts\":\"1970-01-01T00:17:40Z\",\"attempt\":2,\"started\":3,"
      "\"landed_at\":1600}\n",
-     2, 600},
+     2, 540},
     {"landing train: legacy rows without seq or landed_at still split "
      "at the earlier landed row",
      "{\"note\":\"lane\",\"state\":\"landed\","
@@ -41,7 +43,7 @@ static const struct ftr_case ftr_cases[] = {
      "{\"note\":\"lane\",\"state\":\"landed\","
      "\"ts\":\"1970-01-01T00:17:40Z\",\"attempt\":2,\"started\":3,"
      "\"landed_at\":1600}\n",
-     2, 600},
+     2, 540},
     {"landing train: back-to-back landings of one note are one attempt each",
      "{\"note\":\"lane\",\"state\":\"landed\",\"seq\":1,"
      "\"ts\":\"1970-01-01T00:01:40Z\",\"attempt\":1,\"started\":1,"
@@ -63,7 +65,7 @@ static const struct ftr_case ftr_cases[] = {
      "{\"note\":\"lane\",\"state\":\"landed\",\"seq\":3,"
      "\"ts\":\"1970-01-01T00:17:40Z\",\"attempt\":2,\"started\":3,"
      "\"landed_at\":1600}\n",
-     2, 600},
+     2, 540},
     {"landing train: an older row without seq is a different landing from "
      "the newest row that has seq",
      "{\"note\":\"lane\",\"state\":\"landed\","
@@ -74,7 +76,7 @@ static const struct ftr_case ftr_cases[] = {
      "{\"note\":\"lane\",\"state\":\"landed\",\"seq\":3,"
      "\"ts\":\"1970-01-01T00:17:40Z\",\"attempt\":2,\"started\":3,"
      "\"landed_at\":1600}\n",
-     2, 600},
+     2, 540},
     {"landing train: another note's landing never ends this train",
      "{\"note\":\"lane\",\"state\":\"failed\",\"seq\":1,"
      "\"ts\":\"1970-01-01T00:01:40Z\",\"attempt\":1,\"started\":1}\n"
@@ -84,7 +86,7 @@ static const struct ftr_case ftr_cases[] = {
      "{\"note\":\"lane\",\"state\":\"landed\",\"seq\":3,"
      "\"ts\":\"1970-01-01T00:17:40Z\",\"attempt\":2,\"started\":3,"
      "\"landed_at\":1600}\n",
-     2, 1500},
+     2, 540},
 };
 
 static int ftr_case_run(const char *path, const struct ftr_case *c)

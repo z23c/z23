@@ -40,12 +40,11 @@
  */
 
 Z23_OBJECTIVE("landing_latency_s", "lab", "outcomes.jsonl", "min", 1200, "s",
-             "per train, by its note; a landed row ends its train, so a "
-             "lane that lands many times under one note is not one train: "
-             "wall seconds from the first submission after the note's "
-             "previous landed row (its earliest row ts) to the newest landed "
-             "row's landed_at; a train should land in the time one proof "
-             "takes, not several")
+             "wall seconds from the newest landed row's own submit (its ts) "
+             "to its landed_at, queue wait included; a land should take the "
+             "time one proof takes, not several; earlier failed submits of "
+             "the same note and the lane's gap before it resubmitted are "
+             "not queue latency, so the row's note reports them instead")
 
 Z23_OBJECTIVE("landing_attempts_per_train", "lab", "outcomes.jsonl", "min", 1,
              "count",

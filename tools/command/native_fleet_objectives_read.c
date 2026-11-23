@@ -485,6 +485,8 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
             c->train_ok = obj_train_stats_for_note(*use, stats->last_landed_note,
                                       &stats->last_landed_id, train);
             c->landed_at = stats->last_landed_at;
+            c->submitted = stats->last_landed_ts;
+            c->started = stats->last_landed_id.started;
             c->found = train->found;
             c->earliest = train->earliest_epoch;
             c->attempts = train->attempts.n;
@@ -503,6 +505,8 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
     }
     memset(stats, 0, sizeof *stats);
     stats->last_landed_at = c->landed_at;
+    stats->last_landed_ts = c->submitted;
+    stats->last_landed_id.started = c->started;
     train->found = c->found;
     train->earliest_epoch = c->earliest;
     train->attempts.n = c->attempts;
@@ -533,13 +537,27 @@ static struct zcl_objective_value obj_landing_latency_s(
         return v;
     }
     if (train.earliest_epoch < 0 ||
-        stats.last_landed_at < train.earliest_epoch) {
+        stats.last_landed_ts < train.earliest_epoch ||
+        stats.last_landed_at < stats.last_landed_ts) {
         obj_set_reason(&v, "invalid landing chronology in %s", use);
         obj_train_stats_free(&train);
         return v;
     }
+    /* The value is the landing's own submit-to-landed time. What came
+     * before that submit (earlier failed attempts, the lane's idle gap
+     * before it resubmitted) is not the land queue's latency, but it is
+     * real waiting, so the note states it instead of hiding it. */
     v.measured = true;
-    v.value = stats.last_landed_at - train.earliest_epoch;
+    v.value = stats.last_landed_at - stats.last_landed_ts;
+    int64_t queued = stats.last_landed_id.started - stats.last_landed_ts;
+    (void)snprintf(v.note, sizeof(v.note),
+                   "final submit to landed; queued %llds before proof start; "
+                   "train total %llds over %zu attempt%s, %llds before the "
+                   "final submit",
+                   (long long)(queued > 0 ? queued : 0),
+                   (long long)(stats.last_landed_at - train.earliest_epoch),
+                   train.attempts.n, train.attempts.n == 1 ? "" : "s",
+                   (long long)(stats.last_landed_ts - train.earliest_epoch));
     obj_train_stats_free(&train);
     return v;
 }

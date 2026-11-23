@@ -1861,7 +1861,8 @@ int test_fleet_objectives(void)
      * or `base` (both change on every rebase). Each row's `ts` is its SUBMIT
      * time and `started` its proof start; only the landed row's `landed_at`
      * says when it landed. The train is first submitted at epoch 36030,
-     * fails twice, then lands at epoch 38490: latency 2460, 3 attempts. A row
+     * fails twice, then the last submit (epoch 38460) lands at 38490: latency 30,
+     * train total 2460 over 3 attempts (2430 before the final submit). A row
      * for a different train ("traintrainY") sits first in the file and must
      * not count toward either number. */
     ASSERT(fox_write(
@@ -1970,7 +1971,10 @@ int test_fleet_objectives(void)
         const struct json_value *latency = fox_row(&c, "landing_latency_s");
         ASSERT(latency != NULL);
         ASSERT(json_get_bool(json_get(latency, "measured")));
-        ASSERT_EQ(fox_row_int(latency, "value"), (int64_t)2460);
+        ASSERT_EQ(fox_row_int(latency, "value"), (int64_t)30);
+        ASSERT_STR_EQ(fox_row_str(latency, "note"),
+            "final submit to landed; queued 0s before proof start; train "
+            "total 2460s over 3 attempts, 2430s before the final submit");
         const struct json_value *attempts =
             fox_row(&c, "landing_attempts_per_train");
         ASSERT(attempts != NULL);
@@ -2057,13 +2061,18 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: latency runs from the train's first submission, not "
-         "the landed row's own ts") {
+    TEST("objectives: latency is the landed row's own submit to landed; the "
+         "earlier failed submit is exposed in the note, not folded in") {
+        /* The shape behind the live 56147 s reading (z23-r1 ledger seq
+         * 3921 failed, seq 3953 landed): a lane's proof failed at 01:25:41,
+         * it resubmitted 15 h later and the resubmit landed in 479 s. The
+         * objective is the 479 s; the gap is reported, not folded in. */
         ASSERT(fox_write(outcomes_missing,
-            "{\"note\":\"chronology\",\"state\":\"failed\","
-            "\"ts\":\"1970-01-01T09:59:59Z\"}\n"
-            "{\"note\":\"chronology\",\"state\":\"landed\","
-            "\"ts\":\"1970-01-01T10:00:00Z\",\"landed_at\":36001}\n"));
+            "{\"seq\":1,\"note\":\"chronology\",\"state\":\"failed\","
+            "\"ts\":\"1970-01-01T01:25:41Z\",\"attempt\":1,\"started\":5173}\n"
+            "{\"seq\":2,\"note\":\"chronology\",\"state\":\"landed\","
+            "\"ts\":\"1970-01-01T16:53:29Z\",\"attempt\":1,"
+            "\"started\":60825,\"landed_at\":61288}\n"));
         struct fox_call c;
         fox_begin(&c);
         fox_set(&c, "outcomes", outcomes_missing);
@@ -2071,8 +2080,11 @@ int test_fleet_objectives(void)
         const struct json_value *row = fox_row(&c, "landing_latency_s");
         ASSERT(row != NULL);
         ASSERT(json_get_bool(json_get(row, "measured")));
-        ASSERT_EQ(fox_row_int(row, "value"), (int64_t)2);
+        ASSERT_EQ(fox_row_int(row, "value"), (int64_t)479);
         ASSERT_STR_EQ(fox_row_str(row, "status"), "met");
+        ASSERT_STR_EQ(fox_row_str(row, "note"),
+            "final submit to landed; queued 16s before proof start; train "
+            "total 56147s over 2 attempts, 55668s before the final submit");
         fox_end(&c);
         ASSERT(remove(outcomes_missing) == 0);
         PASS();

@@ -194,7 +194,7 @@ static int rpr_case_missing_train_note(const char *root)
             struct zcl_objective_value latency = zcl_objectives_measure(&o, "landing_latency_s");
             struct zcl_objective_value attempts = zcl_objectives_measure(&o, "landing_attempts_per_train");
             ASSERT(latency.measured && attempts.measured);
-            ASSERT_EQ(latency.value, 7200);
+            ASSERT_EQ(latency.value, 3600);
             ASSERT_EQ(attempts.value, 2);
         }
         PASS();
