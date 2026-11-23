@@ -270,7 +270,7 @@ static int cgl_guide_cases(void)
     int failures = 0;
     char root[512], fresh[32];
     struct zcl_command_reply r;
-    time_t t = time(NULL) - 2 * 86400;
+    time_t t = CGL_NOW - 2 * 86400;
     struct tm tmv;
     TEST("code.guide returns the lessons that apply to the path, by exact and prefix rank") {
         ASSERT(gmtime_r(&t, &tmv) != NULL);
