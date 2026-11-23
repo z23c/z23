@@ -1387,8 +1387,8 @@ static void render_error_run(struct buf *b, const struct zcl_cli_render_env *e,
         buf_putc(b, ' ');
         if (e->ansi)
             buf_puts(b, "\033[1m");
-        size_t room = (size_t)e->width > 5 ? (size_t)e->width - 5 : 1;
-        buf_puts_trunc(b, suggestion, room);
+        /* Keep the command intact so terminal wrapping preserves copyable bytes. */
+        buf_puts(b, suggestion);
         if (e->ansi)
             buf_puts(b, "\033[0m");
         buf_putc(b, '\n');

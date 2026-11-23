@@ -309,6 +309,97 @@ static char *tag_board_rpc(const char *method, const char *params)
     return NULL;
 }
 
+static bool tag_offline_next(const struct asf_leaf *leaf, const char *profile)
+{
+    if (leaf->out.next_count != 1 || strcmp(leaf->out.next[0].command, "app.library")) return false;
+    struct json_value args; json_init(&args);
+    bool ok = json_read(&args, leaf->out.next[0].input_json,
+                        strlen(leaf->out.next[0].input_json));
+    const struct json_value *dir = json_get(&args, "datadir");
+    ok = ok && dir && dir->type == JSON_STR && json_get_str(dir) &&
+         !strcmp(json_get_str(dir), profile) && json_size(&args) == 1 &&
+         strstr(leaf->out.next[0].reason, "saved apps") != NULL;
+    json_free(&args); return ok;
+}
+
+static bool tag_offline_case(const char *profile, int mode, bool expect_next)
+{
+    struct asf_leaf leaf; asf_open(&leaf);
+    g_tag_board_mode = mode;
+    bool ok = json_push_kv_str(&leaf.in, "datadir", profile) && asf_exec("app.get", &leaf);
+    ok = ok && leaf.out.status != ZCL_COMMAND_STATUS_PASSED &&
+        leaf.out.exit_code == ZCL_COMMAND_EXIT_TRANSIENT &&
+        !strcmp(leaf.out.error.code, "BOARD_UNREADABLE") &&
+        leaf.out.error.retryable && !leaf.out.error.mutated &&
+        strstr(leaf.out.error.message, mode == 1 ? "NODE_DB_UNAVAILABLE" :
+               "Could not query the selected node") &&
+        !strstr(leaf.out.error.message, "private cookie detail");
+    if (expect_next) ok = ok && tag_offline_next(&leaf, profile);
+    else ok = ok && leaf.out.next_count == 0 &&
+        strstr(leaf.out.error.next_action, "could not be prepared") != NULL;
+    asf_close(&leaf);
+    return ok;
+}
+
+static bool tag_offline_long_profile(const char *root, char *profile, size_t cap)
+{
+    int n = snprintf(profile, cap, "%s", root);
+    if (n < 0 || (size_t)n >= cap) return false;
+    char component[101];
+    memset(component, 'x', sizeof(component) - 1);
+    component[sizeof(component) - 1] = '\0';
+    for (int i = 0; i < 4; ++i) {
+        size_t used = strlen(profile);
+        n = snprintf(profile + used, cap - used, "/%s", component);
+        if (n < 0 || (size_t)n >= cap - used || mkdir(profile, 0700) != 0) return false;
+    }
+    return true;
+}
+
+static int tag_offline_unsafe_profile(void)
+{
+    int failures = 0;
+    char root[TAG_PATH] = "", profile[TAG_PATH];
+    TEST("app get: unsafe or oversized saved-app navigation stays omitted") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_get_unsafe_profile"));
+        int n = snprintf(profile, sizeof(profile), "%s/person's profile", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(profile));
+        ASSERT(mkdir(profile, 0700) == 0);
+        node_rpc_client_set_test_hook(tag_board_rpc);
+        ASSERT(tag_offline_case(profile, 4, false));
+        ASSERT(tag_offline_long_profile(root, profile, sizeof(profile)));
+        ASSERT(strlen(profile) > 384);
+        ASSERT(tag_offline_case(profile, 4, false));
+        PASS();
+    } _test_next:;
+    g_tag_board_mode = 0;
+    node_rpc_client_set_test_hook(NULL);
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+
+static int tag_offline_catalog_recovery(void)
+{
+    int failures = 0;
+    char root[TAG_PATH] = "", profile[TAG_PATH];
+    TEST("app get: catalog failures offer same-profile saved apps without hiding the cause") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_get_offline"));
+        int n = snprintf(profile, sizeof(profile), "%s/private profile \"quoted\"", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(profile));
+        ASSERT(mkdir(profile, 0700) == 0);
+        node_rpc_client_set_test_hook(tag_board_rpc);
+        const int modes[] = {4, 1};
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
+            ASSERT(tag_offline_case(profile, modes[i], true));
+        }
+        PASS();
+    } _test_next:;
+    g_tag_board_mode = 0;
+    node_rpc_client_set_test_hook(NULL);
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+
 static bool tag_board_unreachable_cases(struct zcl_app_offer_row *rows, struct zcl_app_offer_page *page)
 {
     struct zcl_command_reply why;
@@ -6892,6 +6983,8 @@ int test_app_get(void)
     memset(&g_tag, 0, sizeof(g_tag));
     failures += tag_busy_onion_bridge();
     failures += tag_board_refusal_bridge();
+    failures += tag_offline_catalog_recovery();
+    failures += tag_offline_unsafe_profile();
     tag_board_reset();
     zcl_app_offer_set_call(tag_call);
     failures += tag_rebuild_catalog();

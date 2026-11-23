@@ -485,6 +485,32 @@ static int test_error_explicit_action(const char *name, const char *next)
     return failures;
 }
 
+static int test_error_profile_command_complete(void)
+{
+    int failures = 0;
+    TEST("error recovery preserves the complete same-profile shell command") {
+        const char *doc =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"app.get\","
+            "\"ok\":false,\"status\":\"failed\",\"error\":{"
+            "\"code\":\"BOARD_UNREADABLE\",\"message\":\"The catalog is unavailable.\"},"
+            "\"next\":[{\"command\":\"app.library\",\"input\":{"
+            "\"datadir\":\"/fixture/private profile with spaces and \\\"quotes\\\"/long-saved-copy\"},"
+            "\"reason\":\"Browse saved apps\"}]}";
+        const char *expected =
+            "run: z23 app library --input='{\"datadir\":\"/fixture/private profile with spaces and \\\"quotes\\\"/long-saved-copy\"}'";
+        const int widths[] = {40, 80};
+        for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+            struct zcl_cli_render_env e = cr_env(widths[i], false);
+            char out[4096];
+            ASSERT(zcl_cli_render_doc(doc, strlen(doc), "app.get", &e, out, sizeof(out)) > 0);
+            ASSERT(strstr(out, expected) != NULL);
+            ASSERT(strstr(out, "\xe2\x80\xa6") == NULL);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_error_unknown_command_uses_envelope_query(void)
 {
     int failures = 0;
@@ -1873,6 +1899,7 @@ int test_cli_render(void)
     failures += test_menu_row_cap();
     failures += test_menu_width_and_ansi();
     failures += test_error_render();
+    failures += test_error_profile_command_complete();
     failures += test_error_explicit_action(
         "explicit error recovery survives an empty next array", "[]");
     failures += test_error_explicit_action(

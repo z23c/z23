@@ -1293,6 +1293,32 @@ static void ag_attempts(struct ag_request *r, const struct zcl_app_offer *identi
     else zcl_package_copy_fail(r->reply, "OFFER_UNAVAILABLE", false, "no matching endpoint could be verified", AG_COMMAND);
 }
 
+/* The saved-library alternative is optional and remains bound to this profile.
+ * The terminal renderer shell-quotes action JSON, so reject apostrophes. */
+static void ag_catalog_local_next(struct zcl_command_reply *reply, const char *datadir)
+{
+    struct json_value args;
+    json_init(&args);
+    const char *kv[] = {"datadir", datadir};
+    bool built = datadir && datadir[0] && !strchr(datadir, '\'') &&
+                 zcl_app_input(&args, kv, 2);
+    if (!built) {
+        json_free(&args);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "Saved-app navigation could not be prepared for this profile.");
+        return;
+    }
+    char wire[sizeof(reply->next[0].input_json)];
+    size_t n = json_write(&args, wire, sizeof(wire));
+    bool added = n && n < sizeof(wire) && n < 384 &&
+        zcl_command_reply_add_next(reply, "app.library", wire,
+                                   "Optionally browse saved apps in this profile.");
+    json_free(&args);
+    if (!added)
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "Saved-app navigation could not be prepared for this profile.");
+}
+
 static bool ag_load_rows(struct ag_request *r)
 {
     size_t capacity = r->offer ? 1 : ZCL_APP_OFFER_ROWS_MAX;
@@ -1301,7 +1327,11 @@ static bool ag_load_rows(struct ag_request *r)
     struct zcl_command_reply why;
     bool found = r->offer ? zcl_app_offer_exact(r->offer, r->rows, &why) :
         zcl_app_offer_catalog(r->rows, capacity, &r->count, &why);
-    if (!found) zcl_app_inner_fail(r->reply, &why, false);
+    if (!found) {
+        zcl_app_inner_fail(r->reply, &why, false);
+        if (!strcmp(why.error.code, "BOARD_UNREADABLE"))
+            ag_catalog_local_next(r->reply, r->datadir);
+    }
     zcl_command_reply_free(&why);
     if (found && r->offer) r->count = 1;
     return found;
