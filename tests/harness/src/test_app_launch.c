@@ -3481,6 +3481,14 @@ static int case_library_profile_input(void)
         zcl_native_handle_app_library(&request, &reply);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
         ASSERT_STR_EQ(reply.error.code, "BAD_INPUT");
+        zcl_command_reply_free(&reply); json_free(&input); json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "app_profile", "desktop"));
+        ASSERT(zcl_command_registry_input_validate(spec, &input, why, sizeof(why)));
+        ASSERT(json_push_kv_str(&input, "datadir", "/private"));
+        zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_native_handle_app_library(&request, &reply);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT_STR_EQ(reply.error.code, "BAD_INPUT");
         zcl_command_reply_free(&reply); json_free(&input); PASS();
     } _test_next:;
     return failures;

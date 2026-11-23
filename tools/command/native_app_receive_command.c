@@ -17,12 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "command/native_app_launch.h"
 #define AR_PATH 4400u
 #define AR_PREVIEW_RECEIPT_MAX 8192u
 struct receive_work {
     struct app_confirm view;
     struct json_value receiver_args;
-    bool default_destination, parents_may_have_changed, preview;
+    bool default_destination, parents_may_have_changed, preview, desktop_profile;
     char datadir[AR_PATH];
     char plan[65], release[65], package[65], publisher[67];
     char name[257], version[257], parent[65], destination[AR_PATH];
@@ -48,8 +49,8 @@ static bool ar_root(const char *text, size_t bytes)
 }
 static bool ar_input_keys(const struct json_value *input)
 {
-    static const char *const allowed[] = {"file", "datadir", "destination", "day", "preview"};
-    if (!input || input->type != JSON_OBJ || input->num_children < 1 || input->num_children > 5)
+    static const char *const allowed[] = {"file", "datadir", "destination", "day", "preview", "app_profile"};
+    if (!input || input->type != JSON_OBJ || input->num_children < 1 || input->num_children > 6)
         return false;
     for (size_t i = 0; i < input->num_children; ++i) {
         bool known = false;
@@ -68,9 +69,19 @@ static bool ar_preview_input(struct receive_work *w, const struct json_value *in
     w->preview = preview && json_get_bool(preview);
     return true;
 }
+static bool ar_profile_input(struct receive_work *w, const struct json_value *input)
+{
+    const struct json_value *profile = json_get(input, "app_profile");
+    if (profile) {
+        const char *name = json_get_str(profile);
+        if (json_get(input, "datadir") || zcl_native_command_datadir_is_explicit() || !name || strcmp(name, "desktop")) return false;
+        w->desktop_profile = true;
+    }
+    return true;
+}
 static bool ar_inputs(struct receive_work *w, const struct json_value *input)
 {
-    if (!ar_input_keys(input) || !ar_preview_input(w, input)) return false;
+    if (!ar_input_keys(input) || !ar_preview_input(w, input) || !ar_profile_input(w, input)) return false;
     static const char *const paths[] = {"file", "datadir", "destination"};
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
         if (i && !json_get(input, paths[i])) continue;
@@ -86,6 +97,12 @@ static bool ar_inputs(struct receive_work *w, const struct json_value *input)
 }
 static bool ar_datadir(struct receive_work *w, struct zcl_command_reply *reply)
 {
+    if (w->desktop_profile) {
+        bool selected;
+        if (!app_desktop_profile_resolve(w->datadir, sizeof(w->datadir), &selected, reply)) return false;
+        return json_push_kv_str(&w->receiver_args, "datadir", w->datadir) ||
+            ar_fail(reply, "OUT_OF_MEMORY", "Cannot retain the resolved datadir.");
+    }
     const char *dir = zcl_package_copy_datadir(&w->receiver_args, reply, "app.receive");
     if (!dir) return false;
     if (dir[0] != '/' || strlen(dir) >= sizeof(w->datadir))
@@ -571,7 +588,7 @@ static void ar_run(const struct zcl_command_request *request, struct zcl_command
     struct receive_work *w = zcl_calloc(1, sizeof(*w), "app-receive");
     if (!w) { ar_fail(reply, "OUT_OF_MEMORY", "Cannot prepare receive confirmation."); return; }
     json_init(&w->receiver_args); json_set_object(&w->receiver_args);
-    if (!ar_inputs(w, request->input)) ar_fail(reply, "BAD_INPUT", "Provide an absolute file; optional datadir/destination are absolute, day is nonnegative, and preview is boolean.");
+    if (!ar_inputs(w, request->input)) ar_fail(reply, "BAD_INPUT", "Provide an absolute file. Use app_profile=desktop or an absolute datadir, not both; destination is absolute, day is nonnegative, and preview is boolean.");
     else if (ar_paths(request, w, reply) && ar_plan(request, w, reply, expected)) {
         char why[256] = {0};
         if (!ar_model(w, why, sizeof(why)) || !app_confirm_show(&w->view, presenter, context, why, sizeof(why)))

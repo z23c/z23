@@ -14,6 +14,8 @@
 #include "base/hex.h"
 #include "crypto/sha256.h"
 #include "util/spawn.h"
+#include "command/native_app_launch.h"
+#include "command/native_command.h"
 #include "vcs/source_bundle.h"
 #include "vcs/vcs.h"
 
@@ -797,12 +799,46 @@ static bool wi_profile_replaced(const struct wi_release *f, const char *profile)
     return rmdir(held) == 0 && recovered;
 }
 
+static bool wi_profile_bad_arguments(const struct wi_release *f, const char *exe)
+{
+    char out[4096]; bool timeout = false;
+    const char *invalid[] = {exe, "app", "receive", "--file=/absent.z23share", "--app_profile=other", "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(invalid, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
+    if (timeout || rc == 0 || !strstr(out, "BAD_INPUT") || !strstr(out, "app_profile=desktop")) { fprintf(stderr, "profile invalid rc=%d: %s\n", rc, out); return false; }
+    const char *conflict[] = {exe, "app", "receive", "--file=/absent.z23share", "--app_profile=desktop", "--datadir=/private", "--json", NULL};
+    rc = zcl_spawn_capture_merged_in_dir_observed(conflict, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
+    if (timeout || rc == 0 || !strstr(out, "BAD_INPUT") || !strstr(out, "not both")) { fprintf(stderr, "profile conflict rc=%d: %s\n", rc, out); return false; }
+    return true;
+}
+static bool wi_profile_stale_commands(const struct wi_release *f, const char *exe)
+{
+    char out[4096]; bool timeout = false;
+    const char *library[] = {exe, "app", "library", "--app_profile=desktop", "--json", NULL};
+    int rc = zcl_spawn_capture_merged_in_dir_observed(library, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
+    bool ok = !timeout && rc != 0 && strstr(out, "APP_PROFILE_REFUSED");
+    if (!ok) fprintf(stderr, "profile stale library rc=%d: %s\n", rc, out);
+    const char *receive[] = {exe, "app", "receive", "--file=/absent.z23share", "--app_profile=desktop", "--json", NULL};
+    rc = zcl_spawn_capture_merged_in_dir_observed(receive, f->base, out, sizeof(out), WI_DEADLINE_MS, &timeout);
+    if (timeout || rc == 0 || !strstr(out, "APP_PROFILE_REFUSED")) { fprintf(stderr, "profile stale receive rc=%d: %s\n", rc, out); ok = false; }
+    return ok;
+}
+static bool wi_profile_resolve_case(const struct wi_release *f, const char *profile)
+{
+    char path[APP_LAUNCH_PATH_MAX], exe[PATH_MAX], moved[PATH_MAX]; bool selected = false;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_profile.v1");
+    bool ok = app_desktop_profile_resolve(path, sizeof(path), &selected, &reply) && selected && !strcmp(path, profile);
+    zcl_command_reply_free(&reply);
+    if (!ok || !realpath(WI_EXE, exe) || !wi_profile_bad_arguments(f, exe) ||
+        snprintf(moved, sizeof(moved), "%s/moved-profile", f->base) >= (int)sizeof(moved) || rename(profile, moved)) return false;
+    ok = wi_profile_stale_commands(f, exe);
+    return rename(moved, profile) == 0 && ok;
+}
 static bool wi_profile_first_install(struct wi_release *f, const char *profile, char token[65])
 {
     char output[8192];
     return wi_profile_duplicate(f, profile) && wi_profile_unsafe(f, profile) && wi_profile_prepare_stale(f, token) &&
         wi_profile_no_setting(f) && wi_profile_wrong_target(f, profile, token) && wi_profile_target_swapped(f, profile) && wi_profile_install(f, profile, output, sizeof(output), true) &&
-        strstr(output, "chosen\\ \\'\\ profile") && wi_profile_default_untouched(f);
+        strstr(output, "chosen\\ \\'\\ profile") && wi_profile_default_untouched(f) && wi_profile_resolve_case(f, profile);
 }
 
 static bool wi_profile_reinstall(struct wi_release *f, const char *profile, const char *token)
@@ -844,15 +880,16 @@ static bool wi_macos_manifest_base(struct wi_release *f, FILE *out)
     return true;
 }
 
-static bool wi_macos_members(struct wi_release *f)
+static bool wi_macos_members(struct wi_release *f, bool modern)
 {
-    static const char launcher[] = "#!/bin/sh\nprintf 'register\\n' >>\"$HOME/launcher-called\"\n";
+    static const char launcher[] = "#!/bin/sh\n[ \"$1\" != --supports-desktop-profile ] || exit 2\nprintf 'register\\n' >>\"$HOME/launcher-called\"\n";
+    static const char modern_launcher[] = "#!/bin/sh\n[ \"$1\" != --supports-desktop-profile ] || exit 0\nprintf 'register\\n' >>\"$HOME/launcher-called\"\n";
     static const char *const names[] = {"z23-app-macos", "Z23Apps-Info.plist"};
     char path[PATH_MAX], hash[65];
     FILE *out = fopen(f->manifest, "wb"); if (!out) return false;
     bool ok = wi_macos_manifest_base(f, out);
     for (size_t i = 0; ok && i < 2; ++i) {
-        const char *bytes = i ? "fixture\n" : launcher;
+        const char *bytes = i ? "fixture\n" : modern ? modern_launcher : launcher;
         int n = snprintf(path, sizeof(path), "%s/%s", f->release, names[i]);
         ok = n > 0 && (size_t)n < sizeof(path) && wi_write(path, bytes, strlen(bytes), i ? 0600 : 0700) &&
             wi_sha256(path, hash) && fprintf(out, "%s  %s\n", hash, names[i]) > 0;
@@ -876,7 +913,7 @@ static bool wi_macos_refuse_custom(struct wi_release *f, const char *profile)
     char output[8192], prefix[PATH_MAX];
     return snprintf(prefix, sizeof(prefix), "%s/prefix space", f->base) < (int)sizeof(prefix) &&
         wi_profile_install(f, profile, output, sizeof(output), false) &&
-        strstr(output, "custom app profiles are not supported on macOS") &&
+        strstr(output, "this macOS launcher cannot use the saved custom app profile") &&
         wi_profile_no_setting(f) && access(prefix, F_OK) != 0 && errno == ENOENT;
 }
 
@@ -897,10 +934,48 @@ static bool wi_macos_profile_case(void)
     const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM", "XDG_STATE_HOME"};
     char *saved[8] = {0}, profile[PATH_MAX], output[8192];
     for (size_t i = 0; i < 8; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
-    bool ok = wi_apps_release(&f, false) && wi_macos_members(&f) && wi_apps_env(&f, keys) && setenv(keys[6], "Darwin", 1) == 0 &&
+    bool ok = wi_apps_release(&f, false) && wi_macos_members(&f, false) && wi_apps_env(&f, keys) && setenv(keys[6], "Darwin", 1) == 0 &&
         snprintf(profile, sizeof(profile), "%s/chosen profile", f.base) < (int)sizeof(profile) && mkdir(profile, 0700) == 0 &&
         wi_macos_refuse_custom(&f, profile) && wi_profile_install(&f, NULL, output, sizeof(output), true) &&
         strstr(output, "app open skycombat --datadir=") && wi_macos_saved_refused(&f, profile);
+    for (size_t i = 0; i < 8; ++i) wi_restore_env(keys[i], saved[i]);
+    if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
+    return ok;
+}
+
+static bool wi_macos_schema_runtime(struct wi_release *f, bool receive)
+{
+    char exe[PATH_MAX], path[PATH_MAX], text[PATH_MAX + 1024];
+    if (!realpath(WI_EXE, exe) || strchr(exe, '\'')) return false;
+    int n = snprintf(text, sizeof(text),
+        "#!/bin/sh\nif [ \"$1 $2 $3\" = 'discover schema app.library' ]; then echo '{\"allowed_keys\":\"extra,datadir,app_profile,more\"}'; exit 0; fi\n"
+        "if [ \"$1 $2 $3\" = 'discover schema app.receive' ]; then echo '{\"allowed_keys\":\"file,%s,preview\"}'; exit 0; fi\n"
+        "if [ \"$1\" = -version ]; then echo 'tor: full'; exit 0; fi\nexec '%s' \"$@\"\n", receive ? "app_profile" : "datadir", exe);
+    if (n <= 0 || (size_t)n >= sizeof(text)) return false;
+    static const char *const names[] = {"z23", "zclassic23"};
+    for (size_t i = 0; i < 2; ++i) {
+        n = snprintf(path, sizeof(path), "%s/%s", f->release, names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path) || !wi_write(path, text, strlen(text), 0700)) return false;
+    }
+    return wi_macos_members(f, true);
+}
+static bool wi_macos_modern_install(struct wi_release *f, const char *profile)
+{
+    char output[8192];
+    return wi_macos_schema_runtime(f, false) && wi_profile_install(f, profile, output, sizeof(output), false) &&
+        strstr(output, "this runtime cannot use the desktop app profile") && wi_profile_no_setting(f) &&
+        wi_macos_schema_runtime(f, true) && wi_profile_install(f, profile, output, sizeof(output), true) &&
+        wi_profile_install(f, NULL, output, sizeof(output), true) && strstr(output, "chosen\\ profile");
+}
+static bool wi_macos_modern_case(void)
+{
+    struct wi_release f = {0};
+    const char *keys[] = {"HOME", "XDG_DATA_HOME", "Z23_INSTALL_PREFIX", "Z23_SKIP_SYSTEMD", "Z23_INSTALL_DOCS_DIR", "PATH", "Z23_INSTALL_TEST_PLATFORM", "XDG_STATE_HOME"};
+    char *saved[8] = {0}, profile[PATH_MAX];
+    for (size_t i = 0; i < 8; ++i) { const char *v = getenv(keys[i]); if (v && !(saved[i] = strdup(v))) return false; }
+    bool ok = wi_apps_release(&f, false) && wi_apps_env(&f, keys) && setenv(keys[6], "Darwin", 1) == 0 &&
+        snprintf(profile, sizeof(profile), "%s/chosen profile", f.base) < (int)sizeof(profile) && mkdir(profile, 0700) == 0 &&
+        wi_macos_modern_install(&f, profile);
     for (size_t i = 0; i < 8; ++i) wi_restore_env(keys[i], saved[i]);
     if (f.base[0]) TEST_DISCARD(test_rm_rf_recursive(f.base));
     return ok;
@@ -916,6 +991,7 @@ static int wi_apps_guidance(void)
         ASSERT(wi_profile_case(false));
         ASSERT(wi_profile_case(true));
         ASSERT(wi_macos_profile_case());
+        ASSERT(wi_macos_modern_case());
         PASS();
     } _test_next:;
     return failures;

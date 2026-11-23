@@ -29,7 +29,6 @@ static struct app_child children[Z23_APP_CHILD_MAX];
 static size_t child_count;
 static bool reaping;
 static char runtime_path[PATH_MAX];
-static char profile_arg[PATH_MAX];
 extern char **environ;
 
 static id send_id(id obj, const char *selector)
@@ -85,10 +84,7 @@ static bool launcher_paths(void)
     if (n < 0 || (size_t)n >= sizeof(runtime_path)) return false;
     struct stat st;
     if (stat(runtime_path, &st) != 0 || !S_ISREG(st.st_mode) || access(runtime_path, X_OK) != 0) return false;
-    const char *home = getenv("HOME");
-    if (!home || home[0] != '/') return false;
-    n = snprintf(profile_arg, sizeof(profile_arg), "--datadir=%s/.local/share/z23-app-data", home);
-    return n >= 0 && (size_t)n < sizeof(profile_arg);
+    return true;
 }
 static bool spawn_app(const char *file)
 {
@@ -99,8 +95,8 @@ static bool spawn_app(const char *file)
         int n = snprintf(file_arg, sizeof(file_arg), "--file=%s", file);
         if (n < 0 || (size_t)n >= sizeof(file_arg)) { alert("The shared file path is too long."); return false; }
     }
-    char *receive[] = {runtime_path, "app", "receive", "--preview", profile_arg, file_arg, NULL};
-    char *library[] = {runtime_path, "app", "library", profile_arg, NULL};
+    char *receive[] = {runtime_path, "app", "receive", "--preview", "--app_profile=desktop", file_arg, NULL};
+    char *library[] = {runtime_path, "app", "library", "--app_profile=desktop", NULL};
     pid_t pid;
     int error = posix_spawn(&pid, runtime_path, NULL, NULL, file ? receive : library, environ);
     if (error) { alert(strerror(error)); return false; }
@@ -166,6 +162,7 @@ static bool add_method(Class cls, const char *selector, IMP method, const char *
 { return class_addMethod(cls, sel_registerName(selector), method, types) != 0; }
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--supports-desktop-profile")) return 0;
     if (argc > 1) return z23_app_macos_install(argc, argv);
     id pool = send_id(send_id((id)objc_getClass("NSAutoreleasePool"), "alloc"), "init");
     id app = send_id((id)objc_getClass("NSApplication"), "sharedApplication");

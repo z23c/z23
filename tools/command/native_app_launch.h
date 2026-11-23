@@ -31,6 +31,7 @@
 #define APP_LAUNCH_PATH_MAX 1024u
 #define APP_LAUNCH_TAIL_MAX 1024u
 #define APP_LAUNCH_READY_TIMEOUT_MS 15000
+bool app_desktop_profile_resolve(char *path, size_t cap, bool *selected, struct zcl_command_reply *reply);
 #define APP_LAUNCH_SETTLE_MS 1000
 
 struct zcl_command_request;

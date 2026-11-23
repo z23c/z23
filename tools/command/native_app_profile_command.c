@@ -116,28 +116,33 @@ static bool profile_select_result(struct zcl_command_reply *reply, const char *p
 {
     return json_push_kv_str(&reply->data, "profile", path) && json_push_kv_bool(&reply->data, "selected", selected);
 }
-void zcl_native_handle_app_profile_get(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+bool app_desktop_profile_resolve(char *path, size_t cap, bool *selected, struct zcl_command_reply *reply)
 {
 #if defined(_WIN32)
-    (void)request; profile_select_fail(reply, "Desktop profile selection is not supported on this platform."); return;
+    (void)path; (void)cap; (void)selected; profile_select_fail(reply, "Desktop profile selection is not supported on this platform."); return false;
 #endif
-    (void)request;
-    struct app_launch_env env; struct platform_directory_transaction dir; char path[APP_LAUNCH_PATH_MAX]; bool selected = false;
+    struct app_launch_env env; struct platform_directory_transaction dir; *selected = false;
     struct platform_directory_identity saved = {0}, current = {0};
     platform_directory_transaction_init(&dir);
-    if (!profile_select_env(&env, reply)) { profile_select_fail(reply, "The app state location is unsafe."); return; }
+    if (!profile_select_env(&env, reply)) { profile_select_fail(reply, "The app state location is unsafe."); return false; }
     enum platform_directory_probe_result state = platform_directory_probe_real(env.state_dir);
     bool ok = state == PLATFORM_DIRECTORY_PROBE_MISSING || (state == PLATFORM_DIRECTORY_PROBE_OK &&
-        platform_directory_transaction_open(&dir, env.state_dir) && profile_select_read(&dir, path, sizeof(path), &selected, &saved));
+        platform_directory_transaction_open(&dir, env.state_dir) && profile_select_read(&dir, path, cap, selected, &saved));
     platform_directory_transaction_close(&dir);
-    if (!ok) { profile_select_fail(reply, "The saved app profile is unsafe or unreadable."); return; }
-    if (selected && (!profile_select_selected_path(path, reply, &current) || !profile_select_same(&saved, &current))) {
-        profile_select_fail(reply, "The saved app profile changed. Select the intended directory again with --app-datadir."); return;
+    if (!ok) { profile_select_fail(reply, "The saved app profile is unsafe or unreadable."); return false; }
+    if (*selected && (!profile_select_selected_path(path, reply, &current) || !profile_select_same(&saved, &current))) {
+        profile_select_fail(reply, "The saved app profile changed. Select the intended directory again with --app-datadir."); return false;
     }
-    if (!selected) {
-        const char *home = getenv("HOME"); int n = home ? snprintf(path, sizeof(path), "%s/.local/share/z23-app-data", home) : -1;
-        if (n <= 0 || (size_t)n >= sizeof(path) || !profile_select_path(path, reply)) { profile_select_fail(reply, "Cannot resolve the default app profile."); return; }
+    if (!*selected) {
+        const char *home = getenv("HOME"); int n = home ? snprintf(path, cap, "%s/.local/share/z23-app-data", home) : -1;
+        if (n <= 0 || (size_t)n >= cap || !profile_select_path(path, reply)) { profile_select_fail(reply, "Cannot resolve the default app profile."); return false; }
     }
+    return true;
+}
+void zcl_native_handle_app_profile_get(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request; char path[APP_LAUNCH_PATH_MAX]; bool selected = false;
+    if (!app_desktop_profile_resolve(path, sizeof(path), &selected, reply)) return;
     if (!profile_select_result(reply, path, selected)) profile_select_fail(reply, "The app profile cannot be reported.");
 }
 

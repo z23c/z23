@@ -87,9 +87,9 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.library", "app", "", "Apps",
-    "Browse saved apps and node advertisements. Review a verified offer before native Receive asks for owner approval.",
+    "Browse saved apps and node advertisements. app_profile=desktop selects the saved desktop profile instead of datadir.",
     32768, "apps,library,desktop,kept,discover",
-    "zcl.app_library.input.v1", "zcl.app_open.v1", "datadir", "", "z23 app library",
+    "zcl.app_library.input.v1", "zcl.app_open.v1", "datadir,app_profile", "", "z23 app library",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
@@ -599,9 +599,9 @@ ZCL_COMMAND_READY_COMMAND(
     "Preview, then separate Keep. A committed receipt stays successful; inspect "
     "continuation for later failure. Pre-receive Cancel keeps nothing. "
     "executed describes Receive only. Unavailable changes are labeled. "
-    "No personalization or catalog registration.",
+    "app_profile=desktop selects the saved desktop profile instead of datadir. No personalization or catalog registration.",
     16384, "apps,receive,share,copy", "zcl.app_receive.input.v1", "zcl.app_receive.v1",
-    "file,datadir,destination,day,preview", "file",
+    "file,datadir,destination,day,preview,app_profile", "file",
     "z23 app receive --input=-",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,

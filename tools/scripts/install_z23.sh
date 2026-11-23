@@ -1510,6 +1510,11 @@ legacy_profile_absent() {
     done
     [ ! -e "$current/desktop-profile" ] && [ ! -L "$current/desktop-profile" ]
 }
+app_profile_schema_supports() {
+    local keys
+    keys="$("$1/z23" discover schema "$2" --json | sed -n 's/.*"allowed_keys":"\([^"]*\)".*/\1/p')" || return 1
+    case ",$keys," in *,app_profile,*) return 0 ;; *) return 1 ;; esac
+}
 app_profile_select() {
     local stage="$1" result rc=0 state
     if [ "$APP_PROFILE_EXPLICIT" = 1 ]; then
@@ -1561,9 +1566,14 @@ install_from_source() {
         die "the macOS app launcher requires a Darwin installation"
     fi
     if [ "$APPS_ONLY" = 1 ]; then
-        [ "$install_platform" != Darwin ] || [ "$APP_PROFILE_EXPLICIT" = 0 ] || die "custom app profiles are not supported on macOS"
         app_profile_select "$INSTALL_STAGE"
-        [ "$install_platform" != Darwin ] || [ "$APP_PROFILE" = "$HOME/.local/share/z23-app-data" ] || die "this macOS launcher cannot use the saved custom app profile"
+        if [ "$install_platform" = Darwin ]; then
+            if [ -x "$INSTALL_STAGE/z23-app-macos" ] && "$INSTALL_STAGE/z23-app-macos" --supports-desktop-profile >/dev/null 2>&1; then
+                app_profile_schema_supports "$INSTALL_STAGE" app.library && app_profile_schema_supports "$INSTALL_STAGE" app.receive || die "this runtime cannot use the desktop app profile"
+            elif [ "$APP_PROFILE_EXPLICIT" = 1 ] || [ "$APP_PROFILE" != "$HOME/.local/share/z23-app-data" ]; then
+                die "this macOS launcher cannot use the saved custom app profile"
+            fi
+        fi
         printf -v NEXT_COMMAND '%q app open %s --datadir=%q' \
             "$prefix/bin/z23" "$app" "$APP_PROFILE"
     fi
@@ -3215,6 +3225,14 @@ selftest_app_runtime_refusal() {
     done
 }
 
+selftest_desktop_argv() {
+    local label="$1" entry="$2" file="$3" tries=0; shift 3
+    rm -f -- "$tmp/app-argv"
+    Z23_APPS_ARGV="$tmp/app-argv" gio launch "$entry" ${file:+"$file"} >/dev/null || die "selftest: $label launcher refused the installed entry"
+    while [ ! -f "$tmp/app-argv" ] && [ "$tries" -lt 50 ]; do sleep 0.02; tries=$((tries + 1)); done
+    printf '%s\n' "$@" >"$tmp/app-expected-argv"
+    cmp -s "$tmp/app-expected-argv" "$tmp/app-argv" || die "selftest: $label launcher changed argument boundaries"
+}
 selftest_app_mode() {
     local tmp="$SELFTEST_TMP" app="$SELFTEST_TMP/app-desktop-release"
     local home="$tmp/app home" data="$tmp/app home/data" mock="$tmp/app-mode-tools"
@@ -3329,29 +3347,11 @@ EOF
             desktop-file-validate "$desktop" "$data/applications/org.zclassic.SkyCombat.desktop" \
                 || die "selftest: invalid installed desktop entry"
         fi
-        rm -f -- "$tmp/app-argv"
         : >"$home/received share %name.z23share"
-        Z23_APPS_ARGV="$tmp/app-argv" gio launch "$desktop" "$home/received share %name.z23share" \
-            >/dev/null || die "selftest: desktop launcher refused the installed entry"
-        local tries=0
-        while [ ! -f "$tmp/app-argv" ] && [ "$tries" -lt 50 ]; do sleep 0.02; tries=$((tries + 1)); done
-        printf '%s\n' app receive --preview "--datadir=$home/.local/share/z23-app-data" \
-            "--file=$home/received share %name.z23share" >"$tmp/app-expected-argv"
-        cmp -s "$tmp/app-expected-argv" "$tmp/app-argv" || die "selftest: desktop launcher changed argument boundaries"
-        rm -f -- "$tmp/app-argv"
-        Z23_APPS_ARGV="$tmp/app-argv" gio launch "$data/applications/org.zclassic.SkyCombat.desktop" \
-            >/dev/null || die "selftest: game launcher refused the installed entry"
-        tries=0
-        while [ ! -f "$tmp/app-argv" ] && [ "$tries" -lt 50 ]; do sleep 0.02; tries=$((tries + 1)); done
-        printf '%s\n' app open skycombat "--datadir=$home/.local/share/z23-app-data" >"$tmp/app-expected-argv"
-        cmp -s "$tmp/app-expected-argv" "$tmp/app-argv" || die "selftest: game launcher changed argument boundaries"
-        rm -f -- "$tmp/app-argv"
-        Z23_APPS_ARGV="$tmp/app-argv" gio launch "$data/applications/org.zclassic.ZClassic23.Library.desktop" \
-            >/dev/null || die "selftest: My Apps launcher refused the installed entry"
-        tries=0
-        while [ ! -f "$tmp/app-argv" ] && [ "$tries" -lt 50 ]; do sleep 0.02; tries=$((tries + 1)); done
-        printf '%s\n' app library "--datadir=$home/.local/share/z23-app-data" >"$tmp/app-expected-argv"
-        cmp -s "$tmp/app-expected-argv" "$tmp/app-argv" || die "selftest: My Apps launcher changed argument boundaries"
+        selftest_desktop_argv desktop "$desktop" "$home/received share %name.z23share" app receive --preview \
+            "--datadir=$home/.local/share/z23-app-data" "--file=$home/received share %name.z23share"
+        selftest_desktop_argv game "$data/applications/org.zclassic.SkyCombat.desktop" "" app open skycombat "--datadir=$home/.local/share/z23-app-data"
+        selftest_desktop_argv 'My Apps' "$data/applications/org.zclassic.ZClassic23.Library.desktop" "" app library "--datadir=$home/.local/share/z23-app-data"
     else
         say "selftest: real Linux GIO desktop launch UNOBSERVED on this host"
     fi

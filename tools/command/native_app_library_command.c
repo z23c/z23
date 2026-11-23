@@ -4,6 +4,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #include "command/native_app_library_command.h"
+#include "command/native_app_launch.h"
 #include "command/native_app_confirm.h"
 #include "command/native_app_compose.h"
 #include "command/native_app_customize_tasks.h"
@@ -1902,11 +1903,18 @@ static void al_run(const struct app_launch_env *env, struct zcl_command_reply *r
     if (w->has_discover_error) zcl_command_reply_free(&w->discover_error);
     free(w);
 }
-static bool al_profile_input(const struct zcl_command_request *request, const char **datadir,
+static bool al_profile_input(const struct zcl_command_request *request, const char **datadir, char *profile,
     struct zcl_command_reply *reply)
 {
     *datadir = NULL;
     const struct json_value *value = request ? json_get(request->input, "datadir") : NULL;
+    const struct json_value *choice = request ? json_get(request->input, "app_profile") : NULL;
+    if (choice) {
+        const char *name = json_get_str(choice); bool selected;
+        if (value || zcl_native_command_datadir_is_explicit() || !name || strcmp(name, "desktop")) return al_fail(reply, "BAD_INPUT", "Choose desktop profile or datadir, not both.");
+        if (!app_desktop_profile_resolve(profile, APP_LAUNCH_PATH_MAX, &selected, reply)) return false;
+        *datadir = profile; return true;
+    }
     if (!value) return true;
     const char *path = json_get_str(value);
     if (!path || path[0] != '/' || strnlen(path, 4097) > 4096)
@@ -1923,8 +1931,8 @@ void zcl_native_handle_app_library(const struct zcl_command_request *request,
     if (request && request->budget_bytes && !request->success_data_budget_provided) {
         al_fail(reply, "BUDGET_UNAVAILABLE", "My Apps needs a measured reply allowance before opening."); return;
     }
-    const char *datadir;
-    if (!al_profile_input(request, &datadir, reply)) return;
+    const char *datadir; char profile[APP_LAUNCH_PATH_MAX];
+    if (!al_profile_input(request, &datadir, profile, reply)) return;
     struct app_launch_env env;
     char why[256];
     if (!app_launch_env_from_process(&env, why, sizeof(why))) {
@@ -1955,8 +1963,8 @@ void zcl_test_app_library_request(const struct app_launch_env *env, const struct
     struct zcl_command_reply *reply, app_library_presenter presenter,
     app_confirm_presenter receive_presenter, void *context)
 {
-    const char *datadir;
-    if (al_profile_input(request, &datadir, reply))
+    const char *datadir; char profile[APP_LAUNCH_PATH_MAX];
+    if (al_profile_input(request, &datadir, profile, reply))
         al_run(env, reply, presenter, context, NULL, datadir, NULL, NULL, receive_presenter, NULL, NULL, NULL, 30000u, NULL, NULL);
 }
 void zcl_test_app_library_discover(const struct app_launch_env *env, const char *datadir,
