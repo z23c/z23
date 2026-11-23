@@ -32,7 +32,7 @@ struct receive_flow {
     app_receive_build_observer observer;
     void *observer_context;
     const char *status;
-    bool adopted, closed, draft, recovered, identity_verified, previous;
+    bool adopted, closed, draft, recovered, identity_verified, previous, rebuild;
     int selection_changed; /* -1 after Keep dispatch until its result proves the outcome. */
     bool plan_retry_eligible, plan_retry_requested, plan_retry_used;
     size_t retry_data_budget;
@@ -78,7 +78,7 @@ static bool arf_brief_fields(struct receive_flow *f, struct app_confirm *view)
         app_confirm_field(&view->model, "Saved version prefix: ", prefix);
 }
 static const char *arf_version_label(const struct receive_flow *f)
-{ return f->draft && !f->previous ? "Draft version: " : "Saved version: "; }
+{ return f->draft && !f->previous && !f->rebuild ? "Draft version: " : "Saved version: "; }
 static bool arf_fields_named(struct receive_flow *f, struct app_confirm *view, bool leaf)
 {
     const char *name = zcl_package_copy_str(&f->reply->data, f->adopted ? "copy" : "name");
@@ -560,6 +560,7 @@ static bool arf_keep_result(struct receive_flow *f, const struct zcl_command_rep
 }
 static const char *arf_keep_summary(const struct receive_flow *f)
 {
+    if (f->rebuild) return "Keep this rebuilt version. Newer changes remain available.";
     if (f->previous) return "Keep this previous version. Your current version can be restored later.";
     if (f->draft) return "Keep this previewed version. Newer changes remain available.";
     if (f->adopted) return "Check the app before choosing Keep. Closing leaves your personal copy available.";
@@ -670,6 +671,7 @@ static void arf_notice_show(struct receive_flow *f, struct app_confirm *view)
 static const char *arf_notice_summary(const struct receive_flow *f)
 {
     if (f->recovered) return "Review the received copy before continuing. Nothing is retried automatically.";
+    if (f->rebuild) return "Your kept version is retained. Nothing is retried automatically.";
     if (f->draft) return "Your unkept draft is retained. Nothing is retried automatically.";
     if (f->adopted) return "Your adopted copy is retained. Nothing is retried automatically.";
     return "Your received copy is retained. Nothing is retried automatically.";
@@ -748,7 +750,7 @@ static bool arf_finish_failure(struct receive_flow *f, bool saved)
         json_push_kv_bool(&error, "automatic_retry", false) &&
         json_push_kv(&f->reply->data, "continuation_error", &error);
     json_free(&error);
-    if (saved && !f->recovered) {
+    if (saved && !f->recovered && !f->rebuild) {
         bool mutated = f->reply->error.mutated;
         memset(&f->reply->error, 0, sizeof(f->reply->error));
         f->reply->error.mutated = mutated;
@@ -1017,6 +1019,37 @@ static bool arf_draft_confirm(struct receive_flow *f, const struct app_selection
         (void)arf_fail(f, "OUT_OF_MEMORY", "Cannot describe cancellation.");
     return false;
 }
+static void arf_rebuild_failure_facts(struct receive_flow *f)
+{
+    struct json_value facts; json_init(&facts); json_set_object(&facts);
+    const struct json_value *executed = json_get(&f->reply->data, "continuation_executed");
+    const struct json_value *opened = json_get(&f->reply->data, "preview_opened");
+    const char *reason = zcl_package_copy_str(&f->reply->data, "reason");
+    bool ok = reason && executed && json_push_kv_str(&facts, "kind", "kept-rebuild") &&
+        json_push_kv_str(&facts, "reason", reason) &&
+        json_push_kv(&facts, "continuation_executed", executed) &&
+        (!opened || json_push_kv(&facts, "preview_opened", opened)) &&
+        json_push_kv(&f->reply->data, "failure_facts", &facts);
+    json_free(&facts);
+    if (!ok) (void)arf_fail(f, "OBSERVATION_UNAVAILABLE", "Cannot retain the rebuild failure details.");
+}
+static void arf_run_built_choice(struct receive_flow *f)
+{
+    json_init(&f->operations); json_set_array(&f->operations);
+    bool ok = arf_build(f) && arf_open(f) && arf_keep(f);
+    const char *what = f->rebuild ? "Inspect the kept selection before retrying." : "Inspect the retained draft before retrying.";
+    if (!json_push_kv(&f->reply->data, "operations", &f->operations))
+        ok = arf_fail(f, "OBSERVATION_UNAVAILABLE", what);
+    json_free(&f->operations);
+    if (f->rebuild && !ok && f->closed && f->reply->status == ZCL_COMMAND_STATUS_PASSED)
+        (void)arf_fail(f, "REBUILD_CLOSED", "The operation was closed; inspect its result before retrying.");
+    if (!ok && !f->closed && !f->rebuild) arf_notice(f);
+    if (!arf_finish(f, ok || (!f->rebuild && f->closed)))
+        (void)arf_fail(f, "OBSERVATION_UNAVAILABLE", what);
+    if (f->rebuild && f->reply->status != ZCL_COMMAND_STATUS_PASSED) arf_rebuild_failure_facts(f);
+    app_receive_preview_close(f->preview);
+}
+
 void app_saved_draft_flow_run(const struct app_selection *selection,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
     const char *worker_path)
@@ -1027,16 +1060,40 @@ void app_saved_draft_flow_run(const struct app_selection *selection,
     uint8_t head[32];
     if (!arf_draft_confirm(&f, selection, head)) return;
     if (!app_saved_draft_preview_create(selection, head, &f.preview, reply)) return;
-    json_init(&f.operations); json_set_array(&f.operations);
-    bool ok = arf_build(&f) && arf_open(&f) && arf_keep(&f);
-    if (!json_push_kv(&reply->data, "operations", &f.operations))
-        ok = arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Inspect the retained draft before retrying.");
-    json_free(&f.operations);
-    if (!ok && !f.closed) arf_notice(&f);
-    if (!arf_finish(&f, ok || f.closed))
-        (void)arf_fail(&f, "OBSERVATION_UNAVAILABLE", "Inspect the retained draft before retrying.");
-    app_receive_preview_close(f.preview);
+    arf_run_built_choice(&f);
 }
+void app_kept_rebuild_flow_run(const struct app_selection *selection, const char *reason,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path)
+{
+    if (!selection || !reply || !reason || (strcmp(reason, "IMAGE_REFUSED") &&
+        strcmp(reason, "BUILD_IDENTITY_MISMATCH"))) return;
+    struct receive_flow f = {.reply = reply, .presenter = presenter, .context = context,
+        .status = "rebuild", .draft = true, .rebuild = true, .worker_path = worker_path};
+    char hex[65]; zcl_hex_encode(selection->version, 32, hex);
+    bool chosen = false;
+    if (!json_push_kv_str(&reply->data, "name", selection->app) ||
+        !json_push_kv_str(&reply->data, "version", hex) ||
+        !json_push_kv_str(&reply->data, "reason", reason)) {
+        (void)arf_fail(&f, "OUT_OF_MEMORY", "Cannot describe the kept version."); return;
+    }
+    if (!arf_choose_mode(&f, "Rebuild kept app", "The saved image could not be verified. Build and preview this exact kept version; Keep is a separate choice.",
+            "Build and preview", ARF_FIELDS_FULL, !app_build_make_confinable(), &chosen)) {
+        (void)json_push_kv_bool(&reply->data, "continuation_executed", false);
+        arf_rebuild_failure_facts(&f); return;
+    }
+    if (!chosen) {
+        if (!json_push_kv_str(&reply->data, "status", "canceled"))
+            (void)arf_fail(&f, "OUT_OF_MEMORY", "Cannot describe cancellation.");
+        return;
+    }
+    if (!app_kept_rebuild_preview_create(selection, &f.preview, reply)) {
+        (void)json_push_kv_bool(&reply->data, "continuation_executed", false);
+        arf_rebuild_failure_facts(&f); return;
+    }
+    arf_run_built_choice(&f);
+}
+
 static bool arf_previous_choose(struct receive_flow *f, const struct app_selection *selection,
     const struct app_selection *previous, bool *chosen)
 {

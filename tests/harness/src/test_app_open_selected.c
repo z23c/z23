@@ -26,6 +26,7 @@
 #include "command/native_zcode_package_bundle.h"
 #include "command/native_zcode_package_copy.h"
 #include "config/command_catalog.h"
+#include "config/file_ops.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "mcp/mcp_policy.h"
@@ -2904,6 +2905,97 @@ static bool ak_draft_stale_controls(struct ak_fixture *f)
         !app_receive_preview_current(p, &reply) && !strcmp(reply.error.code, "SELECTION_STALE");
     app_receive_preview_close(p); zcl_command_reply_free(&reply); return ok;
 }
+struct ak_rebuild_positive { char version[65]; bool review, keep, want_keep; };
+static bool ak_rebuild_positive_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct ak_rebuild_positive *v = context; bool close = false, redraw = false; uint32_t count = 0;
+    if (!pages || !live) return false;
+    if (!model->action_count) return ak_draft_wait_worker(live);
+    bool review = !strcmp(model->title, "Rebuild kept app");
+    bool keep = !strcmp(model->title, "Preview opened");
+    if ((!review && !keep) || !aj_receive_field(model, "Saved version: ", v->version) ||
+        !zcl_present_model_page_count_v1(model, &count, why, cap)) return false;
+    for (uint32_t i = 1; i < count; ++i)
+        if (!aj_receive_action(live, 2, &close, &redraw) || close) return false;
+    if (review) v->review = true; else v->keep = true;
+    return aj_receive_action(live, keep && !v->want_keep ? 0 : 3, &close, &redraw) && close;
+}
+static bool ak_kept_rebuild_positive(struct ak_fixture *f)
+{
+    struct app_selection before = {0}, after; uint8_t head[32], next_head[32]; char worker[PATH_MAX];
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
+        app_saved_draft_head(&before, head, &reply) && memcmp(head, before.version, 32) &&
+        realpath("build/bin/z23-dev", worker);
+    struct ak_rebuild_positive view = {.want_keep = true}; zcl_hex_encode(before.version, 32, view.version);
+    zcl_native_bridge_ensure_rpc(); char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
+    if (ok) app_kept_rebuild_flow_run(&before, "IMAGE_REFUSED", &reply, ak_rebuild_positive_present, &view, worker);
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
+    bool stopped = ak_draft_stop_preview(f, &reply);
+    ok = ok && view.review && view.keep && stopped && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&reply.data, "continuation"), "kept") &&
+        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        after.revision == before.revision + 1 && !memcmp(after.version, before.version, 32);
+    struct zcl_command_reply check; zcl_command_reply_init(&check, "zcl.test.preview.v1");
+    ok = ok && app_saved_draft_head(&after, next_head, &check) && !memcmp(head, next_head, 32);
+    zcl_command_reply_free(&check); zcl_command_reply_free(&reply); return ok;
+}
+
+static bool ak_rebuild_failure_wire(struct zcl_command_reply *reply)
+{
+    const struct zcl_command_registry *registry = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(registry, "app.library", NULL);
+    char wire[ZCL_COMMAND_ERROR_BUDGET + 1];
+    size_t n = spec ? zcl_command_registry_test_reply_wire(registry, spec, reply, wire, sizeof(wire)) : 0;
+    struct json_value doc; json_init(&doc);
+    bool ok = n && n < sizeof(wire) && json_read(&doc, wire, n);
+    const struct json_value *facts = json_get(json_get(&doc, "error"), "facts");
+    const struct json_value *executed = json_get(facts, "continuation_executed");
+    ok = ok && !strcmp(aso_string(facts, "kind"), "kept-rebuild") &&
+        !strcmp(aso_string(facts, "reason"), "IMAGE_REFUSED") &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        !json_get(facts, "preview_opened");
+    json_free(&doc); return ok;
+}
+
+static bool ak_kept_rebuild_failure(struct ak_fixture *f)
+{
+    struct app_selection before = {0}, after; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK;
+    struct ak_rebuild_positive view = {.want_keep = true}; zcl_hex_encode(before.version, 32, view.version);
+    zcl_native_bridge_ensure_rpc(); char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
+    if (ok) app_kept_rebuild_flow_run(&before, "IMAGE_REFUSED", &reply, ak_rebuild_positive_present, &view, "/bin/false");
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
+    const struct json_value *executed = json_get(&reply.data, "continuation_executed");
+    ok = ok && view.review && !view.keep && reply.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(reply.error.code, "PREVIEW_WORKER_FAILED") && !reply.error.mutated &&
+        executed && executed->type == JSON_BOOL && !json_get_bool(executed) &&
+        !json_get(&reply.data, "preview_opened") && ak_rebuild_failure_wire(&reply) &&
+        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        before.revision == after.revision && !memcmp(before.version, after.version, 32);
+    zcl_command_reply_free(&reply); return ok;
+}
+
+static bool ak_kept_rebuild_stale(struct ak_fixture *f)
+{
+    struct app_selection kept, advanced; uint8_t head[32];
+    struct app_receive_preview *p = NULL;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.test.preview.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &kept) == APP_SELECTION_OK &&
+        app_saved_draft_head(&kept, head, &reply) && memcmp(head, kept.version, 32) &&
+        app_kept_rebuild_preview_create(&kept, &p, &reply) && app_receive_preview_current(p, &reply) &&
+        app_selection_save(f->env.state_dir, kept.revision, &kept, &advanced) == APP_SELECTION_OK &&
+        !app_receive_preview_current(p, &reply) && !strcmp(reply.error.code, "SELECTION_STALE");
+    app_receive_preview_close(p); zcl_command_reply_free(&reply); return ok;
+}
+
 static bool ak_previous_stale_controls(struct ak_fixture *f)
 {
     struct app_selection current, prior, advanced;
@@ -3119,6 +3211,106 @@ static bool ak_replaced(struct ak_fixture *f)
     bool restored = rename(saved, f->build.image_path) == 0;
     return ok && restored;
 }
+struct ak_rebuild_cancel { bool shown; char version[65]; };
+static bool ak_rebuild_library(void *context, const struct zcl_present_model_v1 *model,
+    const char *copy_text, struct zcl_present_window_event_v1 *event, char *why, size_t cap)
+{
+    (void)context; (void)copy_text; (void)why; (void)cap;
+    if (ak_draft_press(model, event, "choose")) return true;
+    return ak_draft_press(model, event, "open");
+}
+static bool ak_rebuild_cancel_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    struct ak_rebuild_cancel *v = context; bool close = false, redraw = false;
+    if (!pages || !live || strcmp(model->title, "Rebuild kept app") ||
+        !aj_receive_field(model, "Saved version: ", v->version)) return false;
+    v->shown = true; (void)why; (void)cap;
+    return aj_receive_action(live, 0, &close, &redraw) && close;
+}
+static bool ak_rebuild_cancel(struct ak_fixture *f)
+{
+    char saved[ABC_PATH + 8]; struct app_selection before = {0}, after;
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.app_library.v1");
+    struct ak_rebuild_cancel view = {0};
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK;
+    zcl_hex_encode(before.version, 32, view.version);
+    (void)snprintf(saved, sizeof(saved), "%s.saved", f->build.image_path);
+    if (!ok || rename(f->build.image_path, saved)) { zcl_command_reply_free(&reply); return false; }
+    FILE *file = fopen(f->build.image_path, "wb");
+    ok = file && fputs("not an executable", file) >= 0;
+    if (file && fclose(file)) ok = false;
+    if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &reply,
+        ak_rebuild_library, ak_rebuild_cancel_present, &view, NULL);
+    ok = ok && view.shown && reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated &&
+        !strcmp(aso_string(&reply.data, "status"), "canceled") &&
+        !strcmp(aso_string(&reply.data, "reason"), "IMAGE_REFUSED") &&
+        !json_get(&reply.data, "preview_opened") && !json_get(&reply.data, "operations") &&
+        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        before.revision == after.revision && !memcmp(before.version, after.version, 32);
+    bool restored = rename(saved, f->build.image_path) == 0;
+    zcl_command_reply_free(&reply); return ok && restored;
+}
+
+static bool ak_rebuild_retry(struct ak_fixture *f)
+{
+    struct app_selection before = {0}, after; char worker[PATH_MAX], saved[ABC_PATH + 8];
+    struct zcl_command_reply first, second;
+    zcl_command_reply_init(&first, "zcl.app_library.v1"); zcl_command_reply_init(&second, "zcl.app_library.v1");
+    bool ok = app_selection_load(f->env.state_dir, AK_ROUTE, &before) == APP_SELECTION_OK &&
+        realpath("build/bin/z23-dev", worker);
+    (void)snprintf(saved, sizeof(saved), "%s.saved", f->build.image_path);
+    ok = ok && rename(f->build.image_path, saved) == 0;
+    if (!ok) goto done;
+    ok = file_copy(saved, f->build.image_path) && chmod(f->build.image_path, 0700) == 0;
+    struct ak_rebuild_positive one = {0}, two = {.want_keep = true};
+    zcl_hex_encode(before.version, 32, one.version); memcpy(two.version, one.version, sizeof(two.version));
+    zcl_native_bridge_ensure_rpc(); char old_dir[512];
+    (void)snprintf(old_dir, sizeof(old_dir), "%s", zcl_native_command_datadir());
+    int old_port = zcl_native_command_rpc_port(); zcl_native_bridge_bind_rpc(f->world.bob_datadir, 39461);
+    if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &first,
+        ak_rebuild_library, ak_rebuild_positive_present, &one, worker);
+    bool stopped = ak_draft_stop_preview(f, &first);
+    ok = ok && stopped && one.review && one.keep && first.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&first.data, "reason"), "IMAGE_REFUSED") &&
+        !strcmp(aso_string(&first.data, "continuation"), "previewed");
+    if (ok) zcl_test_app_library_discover_worker(&f->env, f->world.bob_datadir, &second,
+        ak_rebuild_library, ak_rebuild_positive_present, &two, worker);
+    stopped = ak_draft_stop_preview(f, &second);
+    zcl_native_bridge_bind_rpc(old_dir, old_port);
+    ok = ok && stopped && two.review && two.keep && second.status == ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(aso_string(&second.data, "reason"), "BUILD_IDENTITY_MISMATCH") &&
+        !strcmp(aso_string(&second.data, "continuation"), "kept") &&
+        app_selection_load(f->env.state_dir, AK_ROUTE, &after) == APP_SELECTION_OK &&
+        after.revision == before.revision + 1 && !memcmp(before.version, after.version, 32);
+    if (unlink(saved) != 0) ok = false;
+done:
+    zcl_command_reply_free(&first); zcl_command_reply_free(&second); return ok;
+}
+
+static int ak_rebuild_acceptance(struct ak_fixture *f)
+{
+    int failures = 0; char newer[65];
+    TEST("My Apps rebuilds the exact kept source after a restored image") {
+        ASSERT(zcl_test_library_rebuild_eligible(true, "skycombat", "IMAGE_REFUSED"));
+        ASSERT(zcl_test_library_rebuild_eligible(true, "skycombat", "BUILD_IDENTITY_MISMATCH"));
+        ASSERT(!zcl_test_library_rebuild_eligible(true, "tasks", "IMAGE_REFUSED"));
+        ASSERT(!zcl_test_library_rebuild_eligible(true, "tasks", "BUILD_IDENTITY_MISMATCH"));
+        ASSERT(!zcl_test_library_rebuild_eligible(false, "skycombat", "IMAGE_REFUSED"));
+        ASSERT(!zcl_test_library_rebuild_eligible(true, "skycombat", "NOT_ADOPTED"));
+        ASSERT(ak_received(f) && ak_environment(f) && ak_preview_keep(f));
+        ASSERT(ak_rebuild_cancel(f) && ak_rebuild_retry(f));
+        ASSERT(abc_put(f->world.bob_copy, "include/boost.h", "#define BOOST 11\n") &&
+            abc_save(f->world.bob_copy, newer));
+        ASSERT(ak_kept_rebuild_failure(f));
+        ASSERT(ak_kept_rebuild_positive(f));
+        ASSERT(ak_kept_rebuild_stale(f));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int ak_acceptance(struct ak_fixture *f)
 {
     int failures = 0; char blob[65];
@@ -3128,7 +3320,8 @@ static int ak_acceptance(struct ak_fixture *f)
         ASSERT(ak_preview_keep(f));
         ASSERT(ak_listed_layouts(f) && ak_restart(f));
         ASSERT(ak_read_source(f, blob));
-        ASSERT(ak_revoked(f) && ak_replaced(f));
+        ASSERT(ak_revoked(f));
+        ASSERT(ak_replaced(f));
         ASSERT(ak_edit_source(f, blob));
         ASSERT(ak_draft_cancel(f));
         ASSERT(ak_collision(f));
@@ -3725,6 +3918,10 @@ static int ak_routes(void)
     struct ak_fixture fixture = {0};
     if (!failures) failures += ak_acceptance(&fixture);
     if (!aso_cleanup_children()) failures++;
+    struct ak_fixture rebuild = {0};
+    if (!failures) failures += ak_rebuild_acceptance(&rebuild);
+    if (!aso_cleanup_children()) failures++;
+    if (rebuild.world.root[0]) (void)test_rm_rf_recursive(rebuild.world.root);
     struct ak_fixture continuation = {0};
     if (!failures) failures += arpt_acceptance(&continuation);
     if (!aso_cleanup_children()) failures++;

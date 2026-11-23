@@ -35,6 +35,9 @@ void app_adopted_flow_run(const char *datadir, struct zcl_command_reply *reply,
 void app_saved_draft_flow_run(const struct app_selection *selection,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
     const char *worker_path);
+void app_kept_rebuild_flow_run(const struct app_selection *selection, const char *reason,
+    struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
+    const char *worker_path);
 void app_previous_flow_run(const struct app_selection *selection, const struct app_selection *previous,
     struct zcl_command_reply *reply, app_confirm_presenter presenter, void *context,
     const char *worker_path);

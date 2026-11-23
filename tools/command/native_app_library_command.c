@@ -1555,6 +1555,15 @@ static void al_open_row(struct library *w, const struct app_launch_env *env,
     zcl_native_app_open_snapshot(&selected, &row->entry, row->saved ? &row->selection : NULL, reply);
 }
 
+static bool al_rebuild_eligible(bool saved, const char *id, const char *code)
+{
+    return saved && id && strcmp(id, "tasks") && code &&
+        (!strcmp(code, "IMAGE_REFUSED") || !strcmp(code, "BUILD_IDENTITY_MISMATCH"));
+}
+#ifdef ZCL_TESTING
+bool zcl_test_library_rebuild_eligible(bool saved, const char *id, const char *code)
+{ return al_rebuild_eligible(saved, id, code); }
+#endif
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
@@ -1577,6 +1586,14 @@ static bool al_action(struct library *w, const char *id, const struct app_launch
     if (!strcmp(id, "open")) {
         w->receive_current = false;
         al_open_row(w, env, datadir, reply);
+        if (reply->status != ZCL_COMMAND_STATUS_PASSED &&
+            al_rebuild_eligible(w->rows[w->index].saved, w->rows[w->index].entry.id, reply->error.code)) {
+            struct zcl_command_reply recovery;
+            zcl_command_reply_init(&recovery, "zcl.app_library.v1");
+            app_kept_rebuild_flow_run(&w->rows[w->index].selection, reply->error.code, &recovery,
+                w->notice, w->prepare_context, w->test_worker_path);
+            zcl_command_reply_free(reply); *reply = recovery;
+        }
         return false;
     }
     return true;

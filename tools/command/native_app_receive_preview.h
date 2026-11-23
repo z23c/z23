@@ -57,6 +57,8 @@ bool app_saved_draft_head(const struct app_selection *selection, uint8_t head[32
 bool app_saved_draft_preview_create(const struct app_selection *selection,
     const uint8_t expected_head[32], struct app_receive_preview **out,
     struct zcl_command_reply *failure);
+bool app_kept_rebuild_preview_create(const struct app_selection *selection,
+    struct app_receive_preview **out, struct zcl_command_reply *failure);
 bool app_previous_preview_create(const struct app_selection *selection, const struct app_selection *previous,
     struct app_receive_preview **out, struct zcl_command_reply *failure);
 bool app_receive_preview_current(const struct app_receive_preview *p,

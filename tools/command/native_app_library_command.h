@@ -69,6 +69,7 @@ void zcl_test_app_library_run(const struct app_launch_env *env,
 void zcl_test_app_library_setup(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context);
+bool zcl_test_library_rebuild_eligible(bool saved, const char *id, const char *code);
 void zcl_test_app_library_setup_prepared(const struct app_launch_env *env, const char *exe,
     const char *datadir, struct zcl_command_reply *reply,
     app_library_presenter presenter, void *context, app_library_preparer preparer);

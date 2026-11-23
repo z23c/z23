@@ -28,7 +28,7 @@ struct app_receive_preview {
     struct app_selection kept;
     char state_dir[APP_LAUNCH_PATH_MAX];
     char recovered_name[257], recovered_publisher[67];
-    bool built, previewed, draft, recovered, previous;
+    bool built, previewed, draft, recovered, previous, rebuild;
     enum zcl_package_copy_adoption trust;
 };
 static bool arp_same(const struct app_selection *a, const struct app_selection *b);
@@ -273,7 +273,7 @@ static bool arp_state_valid(const struct app_receive_preview *p, struct zcl_comm
             return arp_fail(r, "SELECTION_STALE", "the kept or previous selection changed; review again");
         return true;
     }
-    return !p->draft || arp_draft_current(p, r, check_head);
+    return !p->draft || arp_draft_current(p, r, check_head && !p->rebuild);
 }
 static bool arp_state_current(const struct app_receive_preview *p, struct zcl_command_reply *r)
 {
@@ -515,6 +515,29 @@ bool app_saved_draft_preview_create(const struct app_selection *selection,
     *out = p; return true;
 }
 
+bool app_kept_rebuild_preview_create(const struct app_selection *selection,
+    struct app_receive_preview **out, struct zcl_command_reply *r)
+{
+    if (!r) return false;
+    if (!selection || !out || !selection->revision || selection->revision > INT64_MAX)
+        return arp_fail(r, "BAD_PREVIEW_INPUT", "a current kept selection is required");
+    *out = NULL;
+    struct app_receive_preview *p = zcl_calloc(1, sizeof(*p), "app-kept-rebuild");
+    if (!p) return arp_fail(r, "OUT_OF_MEMORY", "cannot allocate kept preview identity");
+    p->kept = p->choice = *selection; p->draft = true; p->rebuild = true;
+    uint8_t head[32], package[32];
+    memcpy(package, selection->package, sizeof(package));
+    bool ok = arp_draft_state(selection, head, &p->trust, r) != APP_DRAFT_UNAVAILABLE &&
+        arp_state(p, r) && arp_state_current(p, r) && arp_adopted_derive(p, r) &&
+        !memcmp(package, p->choice.package, sizeof(package)) && arp_state_current(p, r);
+    if (!ok) {
+        if (r->status == ZCL_COMMAND_STATUS_PASSED)
+            (void)arp_fail(r, "KEPT_SOURCE_UNAVAILABLE", "The kept source or selection cannot be verified.");
+        free(p); return false;
+    }
+    *out = p; return true;
+}
+
 static bool arp_previous_prepare(struct app_receive_preview *p, const struct app_selection *selection,
     const struct app_selection *previous, struct zcl_command_reply *r)
 {
@@ -556,7 +579,7 @@ bool app_receive_preview_confirm_input(const struct app_receive_preview *p,
     const struct json_value *d = arp_envelope(envelope, "app.build"); uint8_t plan[32];
     if (!p || !arp_tuple(p, d) || !arp_text(d, "stage", "plan") || !arp_root(d, "plan_id", plan))
         return arp_fail(r, "PREVIEW_PLAN_MISMATCH", "build plan does not match the received saved version");
-    if (p->recovered && !arp_state_current(p, r)) return false;
+    if ((p->recovered || p->rebuild) && !arp_state_current(p, r)) return false;
     if (!arp_history(&p->choice, p->trust, r)) return false;
     return (app_receive_preview_build_input(p, out) && zcl_package_copy_push_root(out, "plan_id", plan) &&
         json_push_kv_bool(out, "confirm", true)) || arp_fail(r, "OUT_OF_MEMORY", "cannot assemble build confirmation");
