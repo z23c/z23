@@ -421,3 +421,26 @@ enum fleet_wiki_review_status fleet_wiki_review_parse(
     json_free(out); json_init(out);
     return FLEET_WIKI_REVIEW_INVALID;
 }
+
+bool fleet_wiki_entry_push_applies(const struct json_value *entry,
+                                   struct json_value *item)
+{
+    const struct json_value *a = json_get(entry, "applies_to");
+    struct json_value out;
+    json_init(&out); json_set_array(&out);
+    bool ok = true;
+    for (size_t i = 0, kept = 0; ok && a && i < json_size(a) &&
+                                 kept < FLEET_WIKI_APPLIES_OUT_MAX; i++) {
+        const struct json_value *v = json_at(a, i);
+        const char *s = v && v->type == JSON_STR ? json_get_str(v) : "";
+        struct json_value str;
+        if (!s[0] || strlen(s) > FLEET_WIKI_APPLIES_OUT_BYTES) continue;
+        json_init(&str); json_set_str(&str, s);
+        ok = json_push_back(&out, &str);
+        json_free(&str);
+        kept++;
+    }
+    if (ok) ok = json_push_kv(item, "applies_to", &out);
+    json_free(&out);
+    return ok;
+}

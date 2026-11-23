@@ -64,6 +64,14 @@ bool fleet_wiki_entry_matches(const struct json_value *entry,
 size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
     const char *slug, const char *needle, const char *out[FLEET_WIKI_MATCH_FIELDS]);
 
+#define FLEET_WIKI_APPLIES_OUT_MAX 3
+#define FLEET_WIKI_APPLIES_OUT_BYTES 96
+/* Adds `applies_to` to `item`: the entry's first few applies_to paths,
+ * each bounded, so a reader can check a directory-ranked lesson against the
+ * code it is about. False when it could not be allocated. */
+bool fleet_wiki_entry_push_applies(const struct json_value *entry,
+                                   struct json_value *item);
+
 #define FLEET_WIKI_SUMMARY_MAX 120
 /* First line of a plain-text page (ends at CR, LF or `len`), at most
  * FLEET_WIKI_SUMMARY_MAX bytes, cut so a UTF-8 sequence is never split. */
