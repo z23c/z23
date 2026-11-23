@@ -444,6 +444,12 @@ static void qa_report_held_ctrl(void)
                 qa_weapon_manager_calls, qa_bullet_calls);
 }
 
+/* Non-agent runs report the RNG seeding so tests can prove runs are seeded. */
+static void qa_print_seed(void)
+{
+    if (!qa_agent && !(qa_original_closed & 4u))
+        fprintf(stdout, "QA_SEED calls=%u last=%u\n", qa_seed_calls, qa_last_seed);
+}
 static int qa_finish(int result, FILE *agent_input)
 {
     if (qa_bad_stdio) result = 4;
@@ -458,7 +464,7 @@ static int qa_finish(int result, FILE *agent_input)
     if (agent_input) fclose(agent_input);
     if (!(qa_original_closed & 4u)) fprintf(qa_agent ? stderr : stdout, "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u\n",
         result, qa_windows, qa_frames, qa_closed, qa_destroyed, qa_unloads);
-    if (!qa_agent && !(qa_original_closed & 4u)) fprintf(stdout, "QA_SEED calls=%u last=%u\n", qa_seed_calls, qa_last_seed);
+    qa_print_seed();
     if (qa_agent && !(qa_original_closed & 4u)) fprintf(stderr, "QA_AGENT ticks=%u keys=%u polls=%u stick=%.3f,%.3f\n",
         qa_ticks, qa_keys, qa_polls, (double)qa_stick_x, (double)qa_stick_y);
     if (qa_resident && !(qa_original_closed & 4u)) fprintf(stderr, "QA_RESIDENT events=%u\n", qa_events);
