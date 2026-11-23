@@ -1546,6 +1546,52 @@ static int test_ic_capacity_provenance(void)
     return failures;
 }
 
+extern const char *zcl_dev_proof_test_universal_trigger(
+    char *out, size_t cap, const struct zcl_devloop_plan *plan, bool widened,
+    const char *detail, const char *structural_path);
+
+/* Every universal decision names its trigger: the structural row, the
+ * capacity bound with its value, or the dimension reasons; exact says "-". */
+static int test_ic_universal_trigger(void)
+{
+    int failures = 0;
+    TEST("impact composition: a universal selection records its precise trigger") {
+        struct zcl_devloop_plan plan = {0};
+        char line[1024];
+        ASSERT_STR_EQ(zcl_dev_proof_test_universal_trigger(line, sizeof(line), &plan, false, NULL, NULL), "-");
+        plan.closure_universal = true;
+        ASSERT_STR_EQ(zcl_dev_proof_test_universal_trigger(line, sizeof(line), &plan, true,
+                          "fresh_scope_unproven", "tests/harness/src/test new.c"),
+                      "changed-input-structure rule=fresh_scope_unproven "
+                      "input=tests/harness/src/test%20new.c cap=-");
+        ASSERT_STR_EQ(zcl_dev_proof_test_universal_trigger(line, sizeof(line), &plan, true, NULL, NULL),
+                      "changed-input-structure rule=not_classified input=unknown cap=-");
+        plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].reason = "closure-universal";
+        ASSERT_STR_EQ(zcl_dev_proof_test_universal_trigger(line, sizeof(line), &plan, false, NULL, NULL),
+                      "unattributed rule=semantic:closure-universal cap=-");
+        zcl_devloop_capacity_note(&plan, "semantic", "caller_query_saturated", "batch");
+        zcl_devloop_capacity_set_node(&plan, "printf#tests/harness/src/test_skycombat_models.c");
+        zcl_devloop_capacity_set_cap(&plan, 4096);
+        zcl_devloop_capacity_set_cap(&plan, 7);  /* first bound only */
+        ASSERT_STR_EQ(zcl_dev_proof_test_universal_trigger(line, sizeof(line), &plan, false, NULL, NULL),
+                      "capacity rule=semantic/caller_query_saturated input=batch "
+                      "node=printf#tests/harness/src/test_skycombat_models.c cap=4096");
+        zcl_devloop_capacity_reset_closure(&plan);
+        ASSERT(plan.capacity_cap == 0);
+        zcl_devloop_capacity_set_cap(&plan, 9);  /* no origin: not recorded */
+        ASSERT(plan.capacity_cap == 0);
+        zcl_devloop_capacity_note(&plan, "include", "group-cap", "engine/composition/commands/core.def");
+        zcl_devloop_capacity_set_cap(&plan, 512);
+        ASSERT_STR_EQ(zcl_dev_proof_test_universal_trigger(line, sizeof(line), &plan, false, NULL, NULL),
+                      "capacity rule=include/group-cap input=engine/composition/commands/core.def "
+                      "node=unknown cap=512");
+        char tiny[24];
+        ASSERT(strlen(zcl_dev_proof_test_universal_trigger(tiny, sizeof(tiny), &plan, false, NULL, NULL)) < sizeof(tiny));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_capacity_bound_runs_everything(void)
 {
     int failures = 0;
@@ -18197,6 +18243,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_incomplete_dimension_refuses_proof();
     failures += test_ic_capacity_bound_runs_everything();
     failures += test_ic_capacity_provenance();
+    failures += test_ic_universal_trigger();
     failures += test_ic_include_capacity_runs_everything();
     failures += test_ic_path_group_cap_runs_everything();
     failures += test_ic_host_need_table_is_closed();

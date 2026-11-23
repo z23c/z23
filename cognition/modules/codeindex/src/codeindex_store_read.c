@@ -183,19 +183,39 @@ static bool ci_edge_read_row(sqlite3_stmt *stmt, struct ci_ref *out)
     return true;
 }
 
-int ci_store_caller_edges(struct ci_store *s, const char *callee,
-                          struct ci_ref *out, int cap)
+#define CI_EDGE_SELECT \
+    "SELECT coalesce(ref_file,''), coalesce(enclosing,''), min(ref_line), max(typeof(ref_file) NOT IN ('text','null') OR typeof(enclosing) NOT IN ('text','null')) " \
+    "FROM refs WHERE callee_name=?1 "
+#define CI_EDGE_GROUP \
+    "GROUP BY coalesce(ref_file,''), coalesce(enclosing,'') " \
+    "ORDER BY coalesce(ref_file,''), min(ref_line), coalesce(enclosing,'')"
+/* The refs a macro or declaration of the .c file ?2 can bind, when that
+ * file's includer set is complete: refs in ?2 itself, in any file that is not
+ * a .c translation unit (a header or fragment may be compiled inside ?2's
+ * TU), in a .c with no recorded depfile, and in a .c whose depfile lists ?2.
+ * This is exactly the per-row filter of the closure's ci_macro_ref_binds();
+ * asking it in SQL keeps the irrelevant rows out of the bounded batch, so a
+ * file-local `#define printf(...)` no longer saturates on every printf call
+ * in the tree. */
+#define CI_EDGE_SCOPED \
+    "AND (coalesce(ref_file,'')=?2" \
+    " OR NOT (length(coalesce(ref_file,''))>2 AND substr(coalesce(ref_file,''),-2)='.c')" \
+    " OR NOT EXISTS (SELECT 1 FROM includes i JOIN files f ON f.id=i.file_id WHERE f.path=refs.ref_file)" \
+    " OR EXISTS (SELECT 1 FROM includes i JOIN files f ON f.id=i.file_id" \
+    " WHERE f.path=refs.ref_file AND i.dep_path=?2)) "
+
+static int ci_store_edges_run(struct ci_store *s, const char *callee,
+                              const char *scope, struct ci_ref *out, int cap)
 {
-    if (!s || !callee || !out || cap <= 0)
-        LOG_ERR("codeindex", "bad arg to caller_edges");
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
-    const char *sql = "SELECT coalesce(ref_file,''), coalesce(enclosing,''), min(ref_line), max(typeof(ref_file) NOT IN ('text','null') OR typeof(enclosing) NOT IN ('text','null')) "
-        "FROM refs WHERE callee_name=? GROUP BY coalesce(ref_file,''), coalesce(enclosing,'') "
-        "ORDER BY coalesce(ref_file,''), min(ref_line), coalesce(enclosing,'')";
+    const char *sql = scope ? CI_EDGE_SELECT CI_EDGE_SCOPED CI_EDGE_GROUP
+                            : CI_EDGE_SELECT CI_EDGE_GROUP;
     int rc = sqlite3_prepare_v2(s->db, sql, -1, &stmt, NULL);
     if (rc == SQLITE_OK)
         rc = sqlite3_bind_text(stmt, 1, callee, -1, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK && scope)
+        rc = sqlite3_bind_text(stmt, 2, scope, -1, SQLITE_TRANSIENT);
     int n = 0;
     while (rc == SQLITE_OK && n < cap) {
         int step = sqlite3_step(stmt); // raw-sql-ok:codeindex-derived // raw-sql-ok:codeindex-derived
@@ -211,6 +231,23 @@ int ci_store_caller_edges(struct ci_store *s, const char *callee,
     pthread_mutex_unlock(&s->lock);
     if (rc != SQLITE_OK) LOG_ERR("codeindex", "caller edge query failed");
     return n;
+}
+
+int ci_store_caller_edges(struct ci_store *s, const char *callee,
+                          struct ci_ref *out, int cap)
+{
+    if (!s || !callee || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to caller_edges");
+    return ci_store_edges_run(s, callee, NULL, out, cap);
+}
+
+int ci_store_scoped_caller_edges(struct ci_store *s, const char *callee,
+                                 const char *scope_path,
+                                 struct ci_ref *out, int cap)
+{
+    if (!s || !callee || !scope_path || !scope_path[0] || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to scoped_caller_edges");
+    return ci_store_edges_run(s, callee, scope_path, out, cap);
 }
 
 enum ci_ref_query { CI_REF_CALLEE, CI_REF_ENCLOSING, CI_REF_CALLEE_FILE, CI_REF_ENCLOSING_FILE };

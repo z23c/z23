@@ -237,6 +237,8 @@ struct zcl_devloop_plan {
     const char *capacity_cause;
     char capacity_input[256];
     char capacity_node[128];
+    /* The bound that fired (groups, rows or symbols); 0 when not recorded. */
+    uint64_t capacity_cap;
 
     /* ── C5: why every selected group is here ── */
     struct zcl_devloop_selection selections[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
@@ -251,6 +253,8 @@ void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
                                const char *origin, const char *cause,
                                const char *input);
 void zcl_devloop_capacity_set_node(struct zcl_devloop_plan *plan, const char *node);
+/* Record the value of the bound that fired; first trigger only, like node. */
+void zcl_devloop_capacity_set_cap(struct zcl_devloop_plan *plan, uint64_t cap);
 void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan);
 /* Add the groups the shared impact rules map `path` to, as if `path` were a
  * changed row, to the plan's path floor. For a path that is not itself in the

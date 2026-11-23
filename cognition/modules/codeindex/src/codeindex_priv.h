@@ -218,6 +218,12 @@ int  ci_store_search_text(struct ci_store *s, const char *q,
                           struct ci_search_hit *out, int cap);
 int  ci_store_caller_edges(struct ci_store *s, const char *callee,
                            struct ci_ref *out, int cap);
+/* caller_edges restricted to the refs a macro or declaration of the .c file
+ * `scope_path` can bind when that file's includer set is complete (see
+ * ci_macro_ref_binds in codeindex_impact.c); same row shape and order. */
+int  ci_store_scoped_caller_edges(struct ci_store *s, const char *callee,
+                                  const char *scope_path,
+                                  struct ci_ref *out, int cap);
 int  ci_store_refs_by_callee(struct ci_store *s, const char *callee,
                              struct ci_ref *out, int cap);
 /* Refs whose enclosing function is `enclosing` (the callee side of the call

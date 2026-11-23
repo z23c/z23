@@ -650,6 +650,13 @@ void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan)
     plan->capacity_cause = NULL;
     plan->capacity_node[0] = 0;
     plan->capacity_input[0] = '\0';
+    plan->capacity_cap = 0;
+}
+
+void zcl_devloop_capacity_set_cap(struct zcl_devloop_plan *plan, uint64_t cap)
+{
+    if (plan && plan->capacity_origin && plan->capacity_cap == 0)
+        plan->capacity_cap = cap;
 }
 
 /* The path floor outgrew path_groups. Like a closure bound this is capacity,
@@ -676,7 +683,10 @@ static void plan_take_path_group(struct zcl_devloop_plan *plan,
     if (plan->path_universal)
         return;
     if (!plan_add_path_group(plan, group)) {
+        bool first_capacity = !plan->capacity_origin;
         zcl_devloop_capacity_note(plan, "path", "group-cap", via);
+        if (first_capacity)
+            zcl_devloop_capacity_set_cap(plan, ZCL_DEVLOOP_MAX_PLAN_GROUPS);
         plan_path_go_universal(plan);
         return;
     }
@@ -1046,7 +1056,10 @@ static bool plan_include_verdict(struct zcl_devloop_plan *plan,
         return false;
     }
     if (capacity > 0) {
+        bool first_capacity = !plan->capacity_origin;
         zcl_devloop_capacity_note(plan, "include", "file-cap", path);
+        if (first_capacity)
+            zcl_devloop_capacity_set_cap(plan, (uint64_t)plan_cap);
         plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
     } else {
         plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
@@ -1141,6 +1154,22 @@ bool zcl_devloop_plan_proof_owner(const char *path)
     return plan_reached_proof_owner(path, NULL);
 }
 
+/* The reverse-caller walk hit an index bound: record which bound, on which
+ * symbol, at what value, and take the universal closure. */
+static void plan_semantic_truncated(struct zcl_devloop_plan *plan,
+                                    const struct ci_impact_cause *cause)
+{
+    bool first_capacity = !plan->capacity_origin;
+    zcl_devloop_capacity_note(plan, "semantic",
+        cause->reason == CI_IMPACT_CAUSE_NONE ? "closure-truncated" :
+        codeindex_impact_cause_label(cause->reason), "batch");
+    if (first_capacity) {
+        zcl_devloop_capacity_set_node(plan, cause->node_truncated ? NULL : cause->node);
+        zcl_devloop_capacity_set_cap(plan, cause->capacity);
+    }
+    plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
+}
+
 /* Fold the reverse-caller closure of `changed` into the SEMANTIC dimension.
  * Returns false only when the index could not be asked. */
 static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
@@ -1178,22 +1207,17 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * in below — a partial closure is real evidence. What a CAPACITY bound
      * changes is the answer's shape, not its availability: see
      * plan_go_universal(). */
-    if (truncated) {
-        bool first_capacity = !plan->capacity_origin;
-        zcl_devloop_capacity_note(plan, "semantic",
-            cause.reason == CI_IMPACT_CAUSE_NONE ? "closure-truncated" :
-            codeindex_impact_cause_label(cause.reason), "batch");
-        if (first_capacity)
-            zcl_devloop_capacity_set_node(plan, cause.node_truncated ? NULL : cause.node);
-        plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
-    }
+    if (truncated)
+        plan_semantic_truncated(plan, &cause);
     for (int i = 0; i < n; i++) {
         if (!plan_fold_reached_file(plan, impacted[i],
                                     ZCL_DEVLOOP_DIM_SEMANTIC)) {
             bool first_capacity = !plan->capacity_origin;
             zcl_devloop_capacity_note(plan, "semantic", "group-cap", "batch");
-            if (first_capacity)
+            if (first_capacity) {
                 zcl_devloop_capacity_set_node(plan, impacted[i]);
+                zcl_devloop_capacity_set_cap(plan, plan_group_cap());
+            }
             plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
             break;
         }
@@ -1287,8 +1311,10 @@ static bool plan_closure_include_walk(struct zcl_devloop_plan *plan,
                                         ZCL_DEVLOOP_DIM_INCLUDE)) {
                 bool first_capacity = !plan->capacity_origin;
                 zcl_devloop_capacity_note(plan, "include", "group-cap", files[i]);
-                if (first_capacity)
+                if (first_capacity) {
                     zcl_devloop_capacity_set_node(plan, impacted[d]);
+                    zcl_devloop_capacity_set_cap(plan, plan_group_cap());
+                }
                 plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
                 break;
             }

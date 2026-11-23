@@ -8928,6 +8928,98 @@ void zcl_dev_proof_test_capacity_note(FILE *f, const struct zcl_devloop_plan *pl
 }
 #endif
 
+static bool dp_capacity_encode(const char *input, char *out, size_t cap);
+
+/* Append to a bounded buffer; a field that does not fit is cut, never
+ * overrun, and the line still ends at `cap`. */
+static void dp_trigger_append(char *out, size_t cap, size_t *pos,
+                              const char *text)
+{
+    if (*pos >= cap) return;
+    int n = snprintf(out + *pos, cap - *pos, "%s", text);
+    *pos = n < 0 ? cap : *pos + (size_t)n;
+    if (*pos >= cap) *pos = cap;
+}
+
+static void dp_trigger_field(char *out, size_t cap, size_t *pos,
+                             const char *key, const char *value)
+{
+    char encoded[PROOF_CHANGED_PATH_MAX * 3 + 1];
+    if (!value || !value[0] || !dp_capacity_encode(value, encoded, sizeof(encoded)))
+        (void)snprintf(encoded, sizeof(encoded), "unknown");
+    dp_trigger_append(out, cap, pos, key);
+    dp_trigger_append(out, cap, pos, encoded);
+}
+
+/* A universal plan with no structural row and no capacity note: name every
+ * dimension that carries a reason, so the decision is never blind. */
+static void dp_trigger_dim_reasons(char *out, size_t cap, size_t *pos,
+                                   const struct zcl_devloop_plan *plan)
+{
+    bool any = false;
+    for (int d = 0; d < ZCL_DEVLOOP_DIM__COUNT; d++) {
+        const char *reason = plan->dims[d].reason;
+        if (!reason || !reason[0]) continue;
+        dp_trigger_append(out, cap, pos, any ? "," : "");
+        dp_trigger_append(out, cap, pos,
+                          zcl_devloop_dim_name((enum zcl_devloop_dim)d));
+        dp_trigger_field(out, cap, pos, ":", reason);
+        any = true;
+    }
+    if (!any) dp_trigger_append(out, cap, pos, "none");
+}
+
+/* What made the selection universal: the structural row (its classification
+ * and path), the capacity bound (origin/cause, the input and node it fired on,
+ * and the bound's value), or, failing both, the dimension reasons. "-" for an
+ * exact selection. Observability only: no selection reads it. */
+static const char *dp_universal_trigger(char *out, size_t cap,
+                                        const struct zcl_devloop_plan *plan,
+                                        bool widened, const char *detail,
+                                        const char *structural_path)
+{
+    size_t pos = 0;
+    out[0] = '\0';
+    if (!plan->closure_universal) {
+        dp_trigger_append(out, cap, &pos, "-");
+        return out;
+    }
+    char head[160];
+    if (widened) {
+        (void)snprintf(head, sizeof(head), "changed-input-structure rule=%s",
+                       detail ? detail : "not_classified");
+        dp_trigger_append(out, cap, &pos, head);
+        dp_trigger_field(out, cap, &pos, " input=", structural_path);
+    } else if (plan->capacity_origin) {
+        (void)snprintf(head, sizeof(head), "capacity rule=%s/%s",
+                       plan->capacity_origin,
+                       plan->capacity_cause ? plan->capacity_cause : "unknown");
+        dp_trigger_append(out, cap, &pos, head);
+        dp_trigger_field(out, cap, &pos, " input=", plan->capacity_input);
+        dp_trigger_field(out, cap, &pos, " node=", plan->capacity_node);
+    } else {
+        dp_trigger_append(out, cap, &pos, "unattributed rule=");
+        dp_trigger_dim_reasons(out, cap, &pos, plan);
+    }
+    if (!widened && plan->capacity_cap > 0)
+        (void)snprintf(head, sizeof(head), " cap=%llu",
+                       (unsigned long long)plan->capacity_cap);
+    else
+        (void)snprintf(head, sizeof(head), " cap=-");
+    dp_trigger_append(out, cap, &pos, head);
+    return out;
+}
+
+#if defined(ZCL_TESTING)
+const char *zcl_dev_proof_test_universal_trigger(
+    char *out, size_t cap, const struct zcl_devloop_plan *plan, bool widened,
+    const char *detail, const char *structural_path)
+{
+    return dp_universal_trigger(out, cap, plan, widened, detail,
+                                structural_path);
+}
+#endif
+
 /* Record the test-selection shape beside the dimension logs. "universal" is
  * the whole catalog, chosen because the plan's closure was capacity-bounded
  * (reason closure-universal), because its path floor outgrew the group cap
@@ -8944,7 +9036,8 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
                                       bool widened, bool split, bool fresh,
                                       bool deleted,
                                       uint32_t selected,
-                                      const char *host_gated, const char *detail)
+                                      const char *host_gated,
+                                      const char *trigger, const char *detail)
 {
     bool universal = plan->closure_universal;
     const char *reason = dp_selection_reason(plan, widened, split, fresh,
@@ -8960,6 +9053,7 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
                   (unsigned)selected);
     if (widened) (void)fprintf(f, "structural_detail=%s\n", detail ? detail : "not_classified");
     dp_write_capacity_note(f, plan);
+    (void)fprintf(f, "universal_trigger=%s\n", trigger && trigger[0] ? trigger : "-");
     (void)fprintf(f, "host_gated=%s\n",
                   (host_gated && host_gated[0]) ? host_gated : "-");
     return fclose(f) == 0;
@@ -11657,14 +11751,21 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
     /* Say why the run is this large, in a file a reader finds beside the test
      * log. Without this a universal selection looks like an unexplained
      * whole-catalog run. */
+    const char *detail = w->changed ? w->changed->structural_detail : NULL;
+    char trigger[PROOF_CHANGED_PATH_MAX * 3 + 640];
+    (void)dp_universal_trigger(trigger, sizeof(trigger), &w->plan,
+                               w->structure_widened, detail,
+                               w->changed ? w->changed->structural_path : NULL);
     if (!proof_note_test_selection(&w->execution, &w->plan,
                                    w->structure_widened, w->split_closure,
                                    w->fresh_closure, w->deleted_closure,
-                                   test_count, host_gated,
-                                   w->changed ? w->changed->structural_detail : NULL)) {
+                                   test_count, host_gated, trigger, detail)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;
     }
+    if (w->plan.closure_universal && w->paths->phases[0])
+        (void)zcl_dev_proof_phase_note(w->paths->phases,
+                                       "test_selection_universal", trigger);
     return true;
 }
 

@@ -38,6 +38,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -246,6 +247,7 @@ struct ci_closure_ctx {
     struct ci_ref    *refbuf;      /* CI_CLOSURE_QUERY_BATCH rows */
     struct ci_symbol *symbuf;      /* CI_CLOSURE_QUERY_BATCH rows */
     char            (*incbuf)[256];/* CI_CLOSURE_QUERY_BATCH include rows (fwd) */
+    struct ci_symbol *namebuf;     /* CI_SEED_NAME_ROWS rows, allocated on demand */
 };
 
 static void ci_closure_cause(struct ci_closure_ctx *c,
@@ -275,6 +277,7 @@ static void ci_closure_ctx_free(struct ci_closure_ctx *c)
     free(c->refbuf);
     free(c->symbuf);
     free(c->incbuf);
+    free(c->namebuf);
 }
 
 /* Record an impacted file (dedup). *hit_cap=true if the file cap is exceeded. */
@@ -365,6 +368,151 @@ static bool ci_closure_queue_symbol(struct ci_closure_ctx *c,
            ci_closure_queue(c, key, frontier, truncated);
 }
 
+/* ── statement-macro invocations are references, not definitions ─────────
+ * The scanner sees a file-scope `NAME(args);` as a partial data row named
+ * NAME. In a test file whose function bodies open inside a macro
+ * (`PL_CASE(fn, "...") ... PL_END`) every `ASSERT(x);` in those bodies is
+ * such a row, and seeding it walked every caller of ASSERT in the tree: the
+ * batch saturated and the proof went universal for an edit that changed no
+ * assertion. Such a row is dropped from the seeds only when it provably
+ * defines nothing: every definition the index holds for NAME is a
+ * function-like macro whose body opens a statement (`do`, `if`, `for`,
+ * `while`, `switch` or a `{` block), and one of them is in a header the
+ * file's depfile records (or the file itself). C23 has no implicit int, so
+ * `NAME(args);` at file scope is valid only as a declaration; a statement
+ * expansion is not one, so the site sits inside a function body the scanner
+ * did not see, and the file's real definitions are seeded as before. Any
+ * other shape -- a typedef or function of that name, a declaration-making
+ * macro, a body on a continuation line, an unknown depfile, a clipped name
+ * answer -- keeps today's name walk. A change to the header that defines
+ * NAME seeds the macro row itself, which still walks every caller. */
+#define CI_SEED_NAME_ROWS 256
+
+static bool ci_word_at(const char *p, const char *word)
+{
+    size_t n = strlen(word);
+    return strncmp(p, word, n) == 0 &&
+           !(isalnum((unsigned char)p[n]) || p[n] == '_');
+}
+
+static const char *ci_skip_blank(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
+/* `#define NAME(params) <statement opener>` on the signature's first line. */
+static bool ci_macro_body_is_statement(const char *sig, const char *name)
+{
+    const char *p = ci_skip_blank(sig);
+    if (*p++ != '#')
+        return false;
+    p = ci_skip_blank(p);
+    if (!ci_word_at(p, "define"))
+        return false;
+    p = ci_skip_blank(p + 6);
+    if (!ci_word_at(p, name))
+        return false;
+    p += strlen(name);
+    if (*p != '(')
+        return false;  /* object-like: it may expand to anything */
+    const char *close = strchr(p, ')');
+    if (!close)
+        return false;
+    p = ci_skip_blank(close + 1);
+    return *p == '{' || ci_word_at(p, "do") || ci_word_at(p, "if") ||
+           ci_word_at(p, "for") || ci_word_at(p, "while") ||
+           ci_word_at(p, "switch");
+}
+
+/* Does `file`'s recorded depfile list `dep`? Unrecorded answers no. */
+static bool ci_file_reads(struct ci_closure_ctx *c, struct codeindex *ci,
+                          const char *file, const char *dep, bool *reads)
+{
+    *reads = strcmp(file, dep) == 0;
+    for (int off = 0; !*reads;) {
+        int n = codeindex_includes_of_file_page(ci, file, off, c->incbuf,
+                                                CI_CLOSURE_QUERY_BATCH);
+        if (n < 0)
+            LOG_FAIL("codeindex", "includes_of_file failed for %s", file);
+        for (int i = 0; i < n && !*reads; i++)
+            *reads = strcmp(c->incbuf[i], dep) == 0;
+        if (n < CI_CLOSURE_QUERY_BATCH)
+            break;
+        off += n;
+    }
+    return true;
+}
+
+/* A partial file-scope `NAME(...);` row of the .c `file` itself. */
+static bool ci_row_is_call_shape(const struct ci_symbol *sym, const char *file)
+{
+    return sym->kind == 'D' && sym->partial && sym->def_line == 0 &&
+           !sym->def_path[0] && sym->decl_line > 0 && ci_path_is_c(file) &&
+           strcmp(sym->decl_path, file) == 0;
+}
+
+/* Every named row is a statement macro or another call-shaped row, and one
+ * statement macro is visible to `file`. */
+static bool ci_rows_statement_macro(struct ci_closure_ctx *c,
+                                    struct codeindex *ci, const char *file,
+                                    int n, bool *skip)
+{
+    bool visible = false;
+    for (int i = 0; i < n; i++) {
+        const struct ci_symbol *row = &c->namebuf[i];
+        if (ci_row_is_call_shape(row, row->decl_path))
+            continue;
+        if (row->kind != 'M' || !row->def_path[0] ||
+            !ci_macro_body_is_statement(row->signature, row->name))
+            return true;
+        bool reads = false;
+        if (!visible && !ci_file_reads(c, ci, file, row->def_path, &reads))
+            return false;
+        visible = visible || reads;
+    }
+    *skip = visible;
+    return true;
+}
+
+static bool ci_seed_is_statement_call(struct ci_closure_ctx *c,
+                                      struct codeindex *ci,
+                                      const struct ci_symbol *sym,
+                                      const char *file, bool *skip)
+{
+    *skip = false;
+    if (!ci_row_is_call_shape(sym, file))
+        return true;
+    if (!c->namebuf) {
+        c->namebuf = zcl_calloc(CI_SEED_NAME_ROWS, sizeof(*c->namebuf),
+                                "ci_seed_namebuf");
+        if (!c->namebuf)
+            LOG_FAIL("codeindex", "seed name buffer alloc failed");
+    }
+    int n = 0;
+    enum codeindex_exact_status st = ci_store_find_symbols_exact_checked(
+        ci->store, sym->name, c->namebuf, CI_SEED_NAME_ROWS, &n);
+    if (st == CODEINDEX_EXACT_ERROR)
+        LOG_FAIL("codeindex", "exact symbol lookup failed for %s", sym->name);
+    if (st != CODEINDEX_EXACT_COMPLETE)
+        return true;  /* clipped or corrupt: keep the name walk */
+    return ci_rows_statement_macro(c, ci, file, n, skip);
+}
+
+/* Queue one seed row of `file` unless it is a statement-macro invocation. */
+static bool ci_closure_seed_symbol(struct ci_closure_ctx *c,
+                                   struct codeindex *ci, const char *file,
+                                   const struct ci_symbol *sym,
+                                   struct ci_strlist *frontier,
+                                   bool *truncated)
+{
+    bool skip = false;
+    if (!ci_seed_is_statement_call(c, ci, sym, file, &skip))
+        return false;
+    return skip || ci_closure_queue_symbol(c, sym, frontier, truncated);
+}
+
 /* Seed the frontier from a changed file's symbols and record the file itself. */
 static bool ci_closure_seed_file(struct ci_closure_ctx *c, struct codeindex *ci,
                                  const char *file, struct ci_strlist *frontier,
@@ -390,7 +538,8 @@ static bool ci_closure_seed_file(struct ci_closure_ctx *c, struct codeindex *ci,
                              CI_CLOSURE_MAX_SYMS, c->seen_syms.len, file, NULL);
             break;
         }
-        if (!ci_closure_queue_symbol(c, &c->symbuf[i], frontier, truncated))
+        if (!ci_closure_seed_symbol(c, ci, file, &c->symbuf[i], frontier,
+                                    truncated))
             return false;
     }
     return true;
@@ -570,6 +719,30 @@ static bool ci_closure_key_scope(char *name, struct ci_static_scope *scope)
     return macro;
 }
 
+/* The caller edges of one frontier name. A macro or declaration keyed to a
+ * .c file whose includer set is COMPLETE asks only for the refs
+ * ci_macro_ref_binds() would keep, so a file-local `#define printf(...)`
+ * reads its own TU's few refs instead of saturating the batch on every printf
+ * in the tree. The filter is the per-row rule moved into the query, so the
+ * kept rows, their order and the files they add are unchanged; an incomplete
+ * or clipped includer answer keeps the whole-name query. */
+static int ci_closure_caller_edges(struct ci_closure_ctx *c,
+                                   struct codeindex *ci, const char *name,
+                                   struct ci_static_scope *scope, bool macro)
+{
+    if (macro && scope->path && ci_path_is_c(scope->path)) {
+        bool includes = false;
+        if (!ci_static_includer(c, ci, scope, scope->path, &includes))
+            return -1;
+        if (scope->includers_complete && !scope->includers_unbounded)
+            return ci_store_scoped_caller_edges(ci->store, name, scope->path,
+                                                c->refbuf,
+                                                CI_CLOSURE_QUERY_BATCH);
+    }
+    return ci_store_caller_edges(ci->store, name, c->refbuf,
+                                 CI_CLOSURE_QUERY_BATCH);
+}
+
 /* Expand one symbol: pull its callers, record their files, queue new callers. */
 static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
                                      struct codeindex *ci, const char *key,
@@ -582,7 +755,7 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
     struct ci_static_scope scope = {0};
     bool macro = ci_closure_key_scope(name, &scope);
     /* Distinct file and enclosing edges, filtered below for a static. */
-    int nc = ci_store_caller_edges(ci->store, name, c->refbuf, CI_CLOSURE_QUERY_BATCH);
+    int nc = ci_closure_caller_edges(c, ci, name, &scope, macro);
     if (nc < 0)
         LOG_FAIL("codeindex", "callers failed for %s", name);
     if (nc == CI_CLOSURE_QUERY_BATCH) {
@@ -619,6 +792,8 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
 
 struct ci_overlay_seed {
     struct ci_closure_ctx *closure;
+    struct codeindex *ci;
+    const char *file;
     struct ci_strlist *frontier;
     bool *truncated;
     bool failed;
@@ -628,8 +803,8 @@ static void ci_overlay_sym(const struct ci_symbol *sym, void *user)
 {
     struct ci_overlay_seed *seed = user;
     if (seed->failed || !sym || !sym->name[0]) return;
-    if (!ci_closure_queue_symbol(seed->closure, sym, seed->frontier,
-                                 seed->truncated))
+    if (!ci_closure_seed_symbol(seed->closure, seed->ci, seed->file, sym,
+                                seed->frontier, seed->truncated))
         seed->failed = true;
 }
 
@@ -654,6 +829,8 @@ static bool ci_closure_seed_all(
         if (overlay_root) {
             struct ci_overlay_seed seed = {
                 .closure = c,
+                .ci = ci,
+                .file = changed_files[i],
                 .frontier = frontier,
                 .truncated = truncated,
             };

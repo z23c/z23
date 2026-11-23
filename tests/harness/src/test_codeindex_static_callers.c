@@ -211,6 +211,48 @@ static bool sc_write_fixture_decl(void)
         sc_write(SC_SRC "sc_decl_mixed.c", "int sc_decl_target(void);\nint sc_decl_target(void) { return 1; }\n");
 }
 
+/* A test file whose bodies open inside a macro: the scanner reads each
+ * `SC_CHECK(...);` as a file-scope row named SC_CHECK. sc_check.h defines the
+ * statement macro SC_CHECK and the declaration macro SC_DECLARE. */
+#define SC_HIDDEN_BODY \
+    "#include \"net/sc_check.h\"\n" \
+    "#define SC_CASE(fn) static int fn(void) {\n" \
+    "#define SC_END return 0; }\n" \
+    "SC_CASE(sc_hidden_case)\n" \
+    "    int sc_v = 1;\n" \
+    "    SC_CHECK(sc_v == 1);\n" \
+    "SC_END\n"
+
+static bool sc_write_fixture_stmt_macro(void)
+{
+    return sc_write(SC_INC "sc_check.h",
+        "#define SC_CHECK(c) do { if (!(c)) return 1; } while (0)\n"
+        "#define SC_DECLARE(n) int n(void)\n") &&
+        sc_write(SC_SRC "sc_hidden.c", SC_HIDDEN_BODY) &&
+        sc_write("build/obj/sc_hidden.d",
+        "build/obj/sc_hidden.o: " SC_SRC "sc_hidden.c " SC_INC "sc_check.h\n") &&
+        sc_write(SC_SRC "sc_hidden_nodep.c", SC_HIDDEN_BODY) &&
+        sc_write(SC_SRC "sc_check_user.c",
+        "#include \"net/sc_check.h\"\n"
+        "int sc_check_user(void) { SC_CHECK(2 > 1); return 0; }\n") &&
+        sc_write("build/obj/sc_check_user.d",
+        "build/obj/sc_check_user.o: " SC_SRC "sc_check_user.c " SC_INC "sc_check.h\n") &&
+        sc_write(SC_SRC "sc_declarer.c",
+        "#include \"net/sc_check.h\"\nSC_DECLARE(sc_declared);\n") &&
+        sc_write("build/obj/sc_declarer.d",
+        "build/obj/sc_declarer.o: " SC_SRC "sc_declarer.c " SC_INC "sc_check.h\n") &&
+        sc_write(SC_SRC "sc_declare_user.c",
+        "#include \"net/sc_check.h\"\n"
+        "int sc_declare_user(void) { SC_DECLARE(sc_local); return sc_local(); }\n") &&
+        sc_write("build/obj/sc_declare_user.d",
+        "build/obj/sc_declare_user.o: " SC_SRC "sc_declare_user.c " SC_INC "sc_check.h\n") &&
+        sc_write(SC_SRC "sc_local_macro.c",
+        "#define sc_lm_call(x) ((x) + 1)\n"
+        "int sc_local_macro(void) { return sc_lm_call(1); }\n") &&
+        sc_write("build/obj/sc_local_macro.d",
+        "build/obj/sc_local_macro.o: " SC_SRC "sc_local_macro.c\n");
+}
+
 static bool sc_write_fixture(void)
 {
     return sc_write_fixture_two_tus() &&
@@ -218,7 +260,8 @@ static bool sc_write_fixture(void)
            sc_write_fixture_static_caller() &&
            sc_write_fixture_static_inline() &&
            sc_write_fixture_macro_includes() &&
-           sc_write_fixture_macro_other() && sc_write_fixture_decl();
+           sc_write_fixture_macro_other() && sc_write_fixture_decl() &&
+           sc_write_fixture_stmt_macro();
 }
 
 /* Run the store walk (or, with `overlay`, the fresh-bytes walk) for one
@@ -984,6 +1027,107 @@ static int test_sc_exact_checked(void)
     return failures;
 }
 
+/* The fixture really holds the shape the rule is about: a partial file-scope
+ * row named SC_CHECK in sc_hidden.c, and the statement macro in the header. */
+static bool sc_stmt_rows_present(struct codeindex *ci)
+{
+    struct ci_symbol rows[32];
+    int n = ci_store_symbols_in_file(ci->store, SC_SRC "sc_hidden.c", rows, 32);
+    bool call = false;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(rows[i].name, "SC_CHECK") && rows[i].kind == 'D' &&
+            rows[i].partial && rows[i].def_line == 0)
+            call = true;
+    n = ci_store_symbols_in_file(ci->store, SC_INC "sc_check.h", rows, 32);
+    bool macro = false;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(rows[i].name, "SC_CHECK") && rows[i].kind == 'M')
+            macro = true;
+    if (!call || !macro)
+        fprintf(stderr, "statement macro fixture: call_row=%d macro_row=%d\n", call, macro);
+    return call && macro;
+}
+
+static int test_sc_statement_macro_call(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: a statement-macro call in a changed test "
+         "file is a reference, its definition still walks every caller") {
+        ASSERT(sc_stmt_rows_present(ci));
+        for (int overlay = 0; overlay < 2; ++overlay) {
+            /* Calling SC_CHECK changes no SC_CHECK: its other users stay out. */
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden.c", SC_SRC "sc_hidden.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden.c", SC_SRC "sc_check_user.c", overlay, false));
+            /* No depfile: the header's macro cannot be shown visible. */
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden_nodep.c", SC_SRC "sc_check_user.c", overlay, true));
+            /* A declaration-making macro keeps today's name walk. */
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_declarer.c", SC_SRC "sc_declare_user.c", overlay, true));
+        }
+        /* Editing the header that defines SC_CHECK still reaches its users. */
+        ASSERT(sc_decl_has(ci, SC_INC "sc_check.h", SC_SRC "sc_check_user.c", false, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* 4200 refs to the file-local macro sc_lm_call from .c files whose depfiles
+ * do not read sc_local_macro.c, one from a depfile-less .c and one from a
+ * header. `trusted` keeps the include graph's narrow-safe bit. */
+static bool sc_lm_setup(sqlite3 *db, bool trusted)
+{
+    static const char sql[] =
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4200) "
+        "INSERT INTO files(path,\"group\",purpose,content_sha3,mtime,line_count) "
+        "SELECT printf('lm-synthetic-%d.c',x),'','','',0,0 FROM n;"
+        "INSERT INTO includes(file_id,dep_path) SELECT id,'" SC_INC "sc_check.h' "
+        "FROM files WHERE path LIKE 'lm-synthetic-%.c';"
+        "INSERT INTO refs(callee_name,ref_file,ref_line,enclosing) "
+        "SELECT 'sc_lm_call',path,1,'' FROM files WHERE path LIKE 'lm-synthetic-%.c';"
+        "INSERT INTO refs(callee_name,ref_file,ref_line,enclosing) VALUES"
+        "('sc_lm_call','lm-nodep.c',1,''),('sc_lm_call','" SC_INC "lm_frag.h',1,'');";
+    if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) return false;
+    return trusted || sqlite3_exec(db, "DELETE FROM meta WHERE k='include_narrow_unsafe'",
+                                   NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static bool sc_lm_closure(struct codeindex *ci, bool trusted)
+{
+    struct ci_store *store = sc_macro_copy_store(ci);
+    if (!store) return false;
+    struct codeindex copy = *ci; copy.store = store;
+    bool ok = sc_lm_setup(ci_store_db(store), trusted);
+    char changed[1][256], out[SC_OUT_CAP][256];
+    snprintf(changed[0], sizeof(changed[0]), "%s", SC_SRC "sc_local_macro.c");
+    bool truncated = !trusted, nodep = false, frag = false, synthetic = false;
+    int n = ok ? codeindex_impact_closure(&copy, changed, 1, 0, out, SC_OUT_CAP, &truncated) : -1;
+    for (int i = 0; i < n; i++) {
+        nodep = nodep || !strcmp(out[i], "lm-nodep.c");
+        frag = frag || !strcmp(out[i], SC_INC "lm_frag.h");
+        synthetic = synthetic || !strncmp(out[i], "lm-synthetic-", 13);
+    }
+    ci_store_close(store);
+    /* Trusted: the scoped query answers in full and keeps every row the
+     * per-row rule keeps. Untrusted: the whole-name query saturates. */
+    bool want = trusted ? n > 0 && !truncated && nodep && frag && !synthetic
+                        : n >= 0 && truncated;
+    if (!want)
+        fprintf(stderr, "file-local macro closure trusted=%d n=%d truncated=%d nodep=%d frag=%d synthetic=%d\n",
+                trusted, n, truncated, nodep, frag, synthetic);
+    return want;
+}
+
+static int test_sc_local_macro_scoped_query(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: a file-local macro asks only its own TU's "
+         "refs and does not saturate on the tree-wide name") {
+        ASSERT(sc_lm_closure(ci, true));
+        ASSERT(sc_lm_closure(ci, false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_codeindex_static_callers(void)
 {
     int failures = test_sc_cause_labels() + test_sc_cause_value();
@@ -1010,6 +1154,8 @@ int test_codeindex_static_callers(void)
         failures += test_sc_decl_scope(ci);
         failures += test_sc_decl_untrusted(ci);
         failures += test_sc_decl_invalid(ci);
+        failures += test_sc_statement_macro_call(ci);
+        failures += test_sc_local_macro_scoped_query(ci);
         codeindex_close(ci);
     }
      TEST_DISCARD(system("rm -rf " SC_FIX));
