@@ -61,6 +61,16 @@ static void manifest_blocks_extraction(void)
 }
 
 /* Only the launcher activity is exported; the node service is not reachable from other apps. */
+static void review_alias_is_private(void)
+{
+    char *m = slurp("AndroidManifest.xml");
+    const char *alias = strstr(m, "<activity-alias android:name=\"org.z23.nativeapp.ReviewActivity\"");
+    const char *end = alias ? strstr(alias, "/>") : NULL;
+    const char *target = alias ? strstr(alias, "android:targetActivity=\"org.z23.nativeapp.ShareActivity\"") : NULL;
+    const char *private = alias ? strstr(alias, "android:exported=\"false\"") : NULL;
+    assert(alias && end && target && target < end && private && private < end);
+    free(m);
+}
 static void manifest_exports_only_the_launcher(void)
 {
     char *m = slurp("AndroidManifest.xml");
@@ -355,6 +365,7 @@ int main(int argc, char **argv)
     if (argc > 1 && chdir(argv[1])) { perror(argv[1]); return 1; }
     manifest_blocks_extraction();
     manifest_exports_only_the_launcher();
+    review_alias_is_private();
     text_entry_is_private();
     paste_stays_available();
     secret_screens_are_protected();

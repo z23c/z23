@@ -1,4 +1,5 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "review.h"
 #include "share.h"
@@ -108,6 +109,7 @@ static bool review_waiting_view(JNIEnv *env, jobject activity)
 {
     jobject text = zj_widget(env, "android/widget/TextView", activity);
     bool ok = text && zj_typography(env, text, 18.0f, (jint)0xffffffffu) &&
+        zj_int_property(env, text, "setBackgroundColor", (jint)0xff121212u) &&
         zj_padding(env, text, 24, 24) && zj_text(env, text, "Opening the file… Press Back to cancel.");
     jmethodID set = ok ? zj_method(env, activity, "setContentView", "(Landroid/view/View;)V") : NULL;
     if (set) (*env)->CallVoidMethod(env, activity, set, text);
@@ -116,41 +118,26 @@ static bool review_waiting_view(JNIEnv *env, jobject activity)
     return ok && set && clean;
 }
 
-bool zapp_review_begin(JNIEnv *env, jobject activity)
+/* review_lock keeps the current job alive while the main activity is rebound. */
+static bool review_bind_activity(JNIEnv *env, jobject activity, bool *decided)
 {
-    pthread_mutex_lock(&review_lock);
-    bool start = review_phase == REVIEW_PREPARED;
-    bool active = review_phase != REVIEW_IDLE;
-    bool working = review_phase == REVIEW_WORKING;
-    bool decided = false;
-    if (review_job) {
-        jobject next = (*env)->NewGlobalRef(env, activity);
-        bool clean = zj_clean(env);
-        if (!next || !clean) {
-            if (next) (*env)->DeleteGlobalRef(env, next);
-            active = false;
-        }
-        else {
-            pthread_mutex_lock(&review_job->lock);
-            decided = review_job->decided;
-            jobject previous = review_job->activity;
-            review_job->activity = next;
-            pthread_mutex_unlock(&review_job->lock);
-            if (previous) (*env)->DeleteGlobalRef(env, previous);
-        }
+    if (!review_job) return true;
+    jobject next = (*env)->NewGlobalRef(env, activity);
+    bool clean = zj_clean(env);
+    if (!next || !clean) {
+        if (next) (*env)->DeleteGlobalRef(env, next);
+        return false;
     }
-    if (start) review_phase = REVIEW_PICKING;
-    pthread_mutex_unlock(&review_lock);
-    if (!start) {
-        if (!active) {
-            pthread_mutex_lock(&review_lock);
-            review_return = true;
-            if (!review_alias_known) snprintf(review_status, sizeof(review_status), "Review was interrupted. Choose the file again.");
-            pthread_mutex_unlock(&review_lock);
-        }
-        return active && !decided && (!working || review_waiting_view(env, activity));
-    }
-    if ((*env)->PushLocalFrame(env, 12) != JNI_OK) { zapp_review_abandon(); return false; }
+    pthread_mutex_lock(&review_job->lock);
+    *decided = review_job->decided;
+    jobject previous = review_job->activity;
+    review_job->activity = next;
+    pthread_mutex_unlock(&review_job->lock);
+    if (previous) (*env)->DeleteGlobalRef(env, previous);
+    return true;
+}
+static jobject review_picker_intent(JNIEnv *env)
+{
     jclass cls = (*env)->FindClass(env, "android/content/Intent");
     jmethodID ctor = cls ? (*env)->GetMethodID(env, cls, "<init>", "(Ljava/lang/String;)V") : NULL;
     jstring action = ctor ? zj_string(env, "android.intent.action.OPEN_DOCUMENT") : NULL;
@@ -161,13 +148,37 @@ bool zapp_review_begin(JNIEnv *env, jobject activity)
     jmethodID type = intent ? zj_method(env, intent, "setType", "(Ljava/lang/String;)Landroid/content/Intent;") : NULL;
     jstring mime = type ? zj_string(env, "*/*") : NULL;
     if (mime) (*env)->CallObjectMethod(env, intent, type, mime);
-    jmethodID start_method = intent ? zj_method(env, activity, "startActivityForResult", "(Landroid/content/Intent;I)V") : NULL;
-    if (start_method && openable && mime) (*env)->CallVoidMethod(env, activity, start_method, intent, ZAPP_REVIEW_PICK_REQUEST);
     bool clean = zj_clean(env);
-    bool ok = start_method && openable && mime && clean;
+    return openable && mime && clean ? intent : NULL;
+}
+static bool review_launch_picker(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 12) != JNI_OK) { zapp_review_abandon(); return false; }
+    jobject intent = review_picker_intent(env);
+    jmethodID start_method = intent ? zj_method(env, activity, "startActivityForResult", "(Landroid/content/Intent;I)V") : NULL;
+    if (start_method) (*env)->CallVoidMethod(env, activity, start_method, intent, ZAPP_REVIEW_PICK_REQUEST);
+    bool clean = zj_clean(env);
+    bool ok = start_method && clean;
     (*env)->PopLocalFrame(env, NULL);
     if (!ok) zapp_review_abandon();
     return ok;
+}
+bool zapp_review_begin(JNIEnv *env, jobject activity)
+{
+    pthread_mutex_lock(&review_lock);
+    bool start = review_phase == REVIEW_PREPARED;
+    bool active = review_phase != REVIEW_IDLE;
+    bool working = review_phase == REVIEW_WORKING;
+    bool decided = false;
+    if (!review_bind_activity(env, activity, &decided)) active = false;
+    if (start) review_phase = REVIEW_PICKING;
+    if (!start && !active) {
+        review_return = true;
+        if (!review_alias_known) snprintf(review_status, sizeof(review_status), "Review was interrupted. Choose the file again.");
+    }
+    pthread_mutex_unlock(&review_lock);
+    if (start) return review_launch_picker(env, activity);
+    return active && !decided && (!working || review_waiting_view(env, activity));
 }
 
 static JNIEnv *review_env(struct review_job *job)
@@ -201,11 +212,12 @@ static int review_ready(int fd, int events, void *opaque)
     (void)events;
     pthread_mutex_lock(&review_lock);
     struct review_job *job = review_job;
-    if (!job || !zapp_review_event_matches(job->generation, job->wake_active, job->wake[0], (uintptr_t)opaque, fd)) {
+    bool remove_timer = false;
+    if (!job || !zapp_review_take_wake(job->generation, job->wake[0], (uintptr_t)opaque, fd,
+                                       &job->wake_active, &job->timer_active, &remove_timer)) {
         pthread_mutex_unlock(&review_lock);
         return 1;
     }
-    job->wake_active = false;
     ALooper_removeFd(job->looper, fd);
     char byte;
     (void)read(fd, &byte, 1);
@@ -217,8 +229,7 @@ static int review_ready(int fd, int events, void *opaque)
     bool canceled = atomic_load(&job->cancel);
     bool proceed = opened && env && !canceled && review_still_open(env, job);
     if (!proceed) atomic_store(&job->cancel, true);
-    if (job->timer_active) {
-        job->timer_active = false;
+    if (remove_timer) {
         ALooper_removeFd(job->looper, job->timer);
         close(job->timer);
         job->timer = -1;
@@ -338,6 +349,42 @@ static void review_job_free(JNIEnv *env, struct review_job *job)
     pthread_mutex_destroy(&job->lock);
     free(job);
 }
+static bool review_spool_path(char *path, size_t cap)
+{
+    if (!zapp_controller_review_path(path, cap)) return false;
+    char *separator = strrchr(path, '/');
+    if (!separator) return false;
+    *separator = 0;
+    bool ok = zapp_review_stage_cleanup(path);
+    *separator = '/';
+    return ok;
+}
+static void review_report(int result, enum zapp_review_stage stage, const char *response)
+{
+    char display[512];
+    if (result == ZAPP_REVIEW_OK && zapp_review_result_text(response, display, sizeof(display))) review_message(display, false);
+    else if (result == ZAPP_REVIEW_OK) review_message("The verifier did not return complete identity details. Nothing was run.", false);
+    else if (result == ZAPP_REVIEW_CANCELED || stage == ZAPP_STAGE_CANCELED) review_message("Review canceled. Nothing was run.", false);
+    else if (stage == ZAPP_STAGE_EMPTY) review_message("The selected file is empty. Choose a signed app file.", false);
+    else if (stage == ZAPP_STAGE_TOO_LARGE) review_message("The selected file is too large to review (64 MiB maximum).", false);
+    else if (stage != ZAPP_STAGE_OK || result == ZAPP_REVIEW_FILE_UNAVAILABLE) review_message("Could not read or stage the file. Check private storage and try again.", false);
+    else if (result == ZAPP_REVIEW_REFUSED) review_message("Could not verify this signed file. Nothing was run.", false);
+    else review_message("The verifier could not start or finish. Try a full Z23 build and review again.", false);
+}
+static void review_process(struct review_job *job, int input)
+{
+    char path[1200], response[ZAPP_REVIEW_OUTPUT_MIN] = {0};
+    int output = review_spool_path(path, sizeof(path)) ? mkostemp(path, O_CLOEXEC) : -1;
+    enum zapp_review_stage stage = output >= 0 ?
+        zapp_review_stage_copy(input, output, 64u * 1024u * 1024u, 30000, &job->cancel) : ZAPP_STAGE_UNAVAILABLE;
+    if (output >= 0 && close(output)) stage = ZAPP_STAGE_UNAVAILABLE;
+    int result = stage == ZAPP_STAGE_OK ? zapp_controller_review_run(path, response, sizeof(response), &job->cancel) : ZAPP_REVIEW_UNAVAILABLE;
+    if (output >= 0 && unlink(path)) {
+        review_message("Could not remove the private temporary file. Choose a file for another review to retry cleanup.", false);
+        return;
+    }
+    review_report(result, stage, response);
+}
 static void *review_worker(void *opaque)
 {
     struct review_job *job = opaque;
@@ -351,6 +398,7 @@ static void *review_worker(void *opaque)
     }
     (void)pthread_detach(pthread_self());
     int input = review_open(env, job);
+    if (input >= 0 && fcntl(input, F_SETFD, FD_CLOEXEC)) { close(input); input = -1; }
     pthread_mutex_lock(&job->lock);
     job->opened = input >= 0;
     pthread_mutex_unlock(&job->lock);
@@ -359,30 +407,7 @@ static void *review_worker(void *opaque)
     while (!job->decided) pthread_cond_wait(&job->changed, &job->lock);
     bool proceed = job->proceed;
     pthread_mutex_unlock(&job->lock);
-    if (proceed) {
-        char path[1200], response[ZAPP_REVIEW_OUTPUT_MIN], display[512];
-        bool ready = zapp_controller_review_path(path, sizeof(path));
-        char *separator = ready ? strrchr(path, '/') : NULL;
-        if (separator) {
-            *separator = 0;
-            ready = zapp_review_stage_cleanup(path);
-            *separator = '/';
-        } else ready = false;
-        int output = ready ? mkstemp(path) : -1;
-        enum zapp_review_stage stage = output >= 0 ?
-            zapp_review_stage_copy(input, output, 64u * 1024u * 1024u, 30000, &job->cancel) : ZAPP_STAGE_UNAVAILABLE;
-        if (output >= 0 && close(output)) stage = ZAPP_STAGE_UNAVAILABLE;
-        int result = stage == ZAPP_STAGE_OK ? zapp_controller_review_run(path, response, sizeof(response), &job->cancel) : ZAPP_REVIEW_UNAVAILABLE;
-        if (output >= 0) (void)unlink(path);
-        if (result == ZAPP_REVIEW_OK && zapp_review_result_text(response, display, sizeof(display))) review_message(display, false);
-        else if (result == ZAPP_REVIEW_OK) review_message("The verifier did not return complete identity details. Nothing was run.", false);
-        else if (result == ZAPP_REVIEW_CANCELED || stage == ZAPP_STAGE_CANCELED) review_message("Review canceled. Nothing was run.", false);
-        else if (stage == ZAPP_STAGE_EMPTY) review_message("The selected file is empty. Choose a signed app file.", false);
-        else if (stage == ZAPP_STAGE_TOO_LARGE) review_message("The selected file is too large to review (64 MiB maximum).", false);
-        else if (stage != ZAPP_STAGE_OK || result == ZAPP_REVIEW_FILE_UNAVAILABLE) review_message("Could not read or stage the file. Check private storage and try again.", false);
-        else if (result == ZAPP_REVIEW_REFUSED) review_message("Could not verify this signed file. Nothing was run.", false);
-        else review_message("The verifier could not start or finish. Try a full Z23 build and review again.", false);
-    }
+    if (proceed) review_process(job, input);
     if (input >= 0) close(input);
     JavaVM *vm = job->vm;
     review_job_free(env, job);
@@ -407,6 +432,87 @@ static void review_picker_failure(const char *text)
     pthread_mutex_unlock(&review_lock);
 }
 
+static jobject review_new_cancellation(JNIEnv *env)
+{
+    jclass cls = (*env)->FindClass(env, "android/os/CancellationSignal");
+    jmethodID ctor = cls ? (*env)->GetMethodID(env, cls, "<init>", "()V") : NULL;
+    jobject signal = ctor ? (*env)->NewObject(env, cls, ctor) : NULL;
+    jobject result = signal ? (*env)->NewGlobalRef(env, signal) : NULL;
+    if (signal) (*env)->DeleteLocalRef(env, signal);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return result;
+}
+static struct review_job *review_job_new(JNIEnv *env, jobject activity, jobject uri)
+{
+    struct review_job *job = calloc(1, sizeof(*job));
+    if (!job) return NULL;
+    job->wake[0] = job->wake[1] = job->timer = -1;
+    if (pthread_mutex_init(&job->lock, NULL)) {
+        free(job);
+        return NULL;
+    }
+    if (pthread_cond_init(&job->changed, NULL)) {
+        pthread_mutex_destroy(&job->lock);
+        free(job);
+        return NULL;
+    }
+    atomic_init(&job->cancel, false);
+    pthread_mutex_lock(&review_lock);
+    bool generation_ok = review_generation != UINTPTR_MAX;
+    if (generation_ok) job->generation = ++review_generation;
+    pthread_mutex_unlock(&review_lock);
+    job->activity = (*env)->NewGlobalRef(env, activity);
+    job->uri = (*env)->NewGlobalRef(env, uri);
+    job->cancellation = review_new_cancellation(env);
+    bool clean = zj_clean(env);
+    bool ok = generation_ok && clean && job->activity && job->uri && job->cancellation &&
+        (*env)->GetJavaVM(env, &job->vm) == JNI_OK && (job->looper = ALooper_forThread());
+    if (ok) { ALooper_acquire(job->looper); return job; }
+    {
+        if (job->activity) (*env)->DeleteGlobalRef(env, job->activity);
+        if (job->uri) (*env)->DeleteGlobalRef(env, job->uri);
+        if (job->cancellation) (*env)->DeleteGlobalRef(env, job->cancellation);
+        pthread_cond_destroy(&job->changed);
+        pthread_mutex_destroy(&job->lock);
+        free(job);
+    }
+    return NULL;
+}
+static bool review_register_wake(struct review_job *job)
+{
+    bool ok = pipe2(job->wake, O_CLOEXEC | O_NONBLOCK) == 0 &&
+        ALooper_addFd(job->looper, job->wake[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT,
+                      review_ready, (void *)job->generation) == 1;
+    job->wake_active = ok;
+    return ok;
+}
+static bool review_register_timer(struct review_job *job)
+{
+    job->timer = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    struct itimerspec expiry = {.it_value = {.tv_sec = 30}, .it_interval = {.tv_sec = 1}};
+    bool ok = job->timer >= 0 && timerfd_settime(job->timer, 0, &expiry, NULL) == 0 &&
+        ALooper_addFd(job->looper, job->timer, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT,
+                      review_timeout, (void *)job->generation) == 1;
+    job->timer_active = ok;
+    return ok;
+}
+static void review_job_abort(JNIEnv *env, struct review_job *job)
+{
+    if (job->wake_active) { job->wake_active = false; ALooper_removeFd(job->looper, job->wake[0]); }
+    if (job->timer_active) { job->timer_active = false; ALooper_removeFd(job->looper, job->timer); }
+    if (job->timer >= 0) close(job->timer);
+    review_job_free(env, job);
+}
+static bool review_job_start(struct review_job *job)
+{
+    if (!review_register_wake(job) || !review_register_timer(job)) return false;
+    pthread_mutex_lock(&review_lock);
+    review_job = job;
+    review_phase = REVIEW_WORKING;
+    snprintf(review_status, sizeof(review_status), "Opening the file. The node is not needed.");
+    pthread_mutex_unlock(&review_lock);
+    return pthread_create(&job->thread, NULL, review_worker, job) == 0;
+}
 bool zapp_review_picker_result(JNIEnv *env, jobject activity, jint result, jobject data)
 {
     pthread_mutex_lock(&review_lock);
@@ -418,90 +524,11 @@ bool zapp_review_picker_result(JNIEnv *env, jobject activity, jint result, jobje
         return true;
     }
     jobject uri = zj_object_property(env, data, "getData", "()Landroid/net/Uri;");
-    if (!review_content_uri(env, uri)) {
-        if (uri) (*env)->DeleteLocalRef(env, uri);
-        review_picker_failure("Could not open the selected file. Choose a file from the picker.");
-        return true;
-    }
-    if (!review_waiting_view(env, activity)) {
-        (*env)->DeleteLocalRef(env, uri);
-        review_picker_failure("Could not start file review. Try again.");
-        return true;
-    }
-    struct review_job *job = calloc(1, sizeof(*job));
-    if (!job) {
-        (*env)->DeleteLocalRef(env, uri);
-        review_picker_failure("Could not start file review. Try again.");
-        return true;
-    }
-    job->wake[0] = job->wake[1] = job->timer = -1;
-    if (pthread_mutex_init(&job->lock, NULL)) {
-        (*env)->DeleteLocalRef(env, uri);
-        free(job);
-        review_picker_failure("Could not start file review. Try again.");
-        return true;
-    }
-    if (pthread_cond_init(&job->changed, NULL)) {
-        (*env)->DeleteLocalRef(env, uri);
-        pthread_mutex_destroy(&job->lock);
-        free(job);
-        review_picker_failure("Could not start file review. Try again.");
-        return true;
-    }
-    atomic_init(&job->cancel, false);
-    pthread_mutex_lock(&review_lock);
-    bool generation_ok = review_generation != UINTPTR_MAX;
-    if (generation_ok) job->generation = ++review_generation;
-    pthread_mutex_unlock(&review_lock);
-    job->activity = (*env)->NewGlobalRef(env, activity);
-    job->uri = (*env)->NewGlobalRef(env, uri);
-    (*env)->DeleteLocalRef(env, uri);
-    jclass cls = (*env)->FindClass(env, "android/os/CancellationSignal");
-    jmethodID ctor = cls ? (*env)->GetMethodID(env, cls, "<init>", "()V") : NULL;
-    jobject signal = ctor ? (*env)->NewObject(env, cls, ctor) : NULL;
-    job->cancellation = signal ? (*env)->NewGlobalRef(env, signal) : NULL;
-    if (signal) (*env)->DeleteLocalRef(env, signal);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    bool clean = zj_clean(env);
-    bool ok = generation_ok && clean && job->activity && job->uri && job->cancellation &&
-        (*env)->GetJavaVM(env, &job->vm) == JNI_OK && (job->looper = ALooper_forThread());
-    if (ok) {
-        ALooper_acquire(job->looper);
-        ok = pipe(job->wake) == 0 && fcntl(job->wake[0], F_SETFL, O_NONBLOCK) == 0 && fcntl(job->wake[0], F_SETFD, FD_CLOEXEC) == 0 &&
-             fcntl(job->wake[1], F_SETFD, FD_CLOEXEC) == 0 &&
-             ALooper_addFd(job->looper, job->wake[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, review_ready, (void *)job->generation) == 1;
-        job->wake_active = ok;
-    }
-    if (ok) {
-        job->timer = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
-        struct itimerspec expiry = {.it_value = {.tv_sec = 30}, .it_interval = {.tv_sec = 1}};
-        ok = job->timer >= 0 && timerfd_settime(job->timer, 0, &expiry, NULL) == 0 &&
-             ALooper_addFd(job->looper, job->timer, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, review_timeout, (void *)job->generation) == 1;
-        job->timer_active = ok;
-    }
-    if (ok) {
-        pthread_mutex_lock(&review_lock);
-        review_job = job;
-        review_phase = REVIEW_WORKING;
-        snprintf(review_status, sizeof(review_status), "Opening the file. The node is not needed.");
-        pthread_mutex_unlock(&review_lock);
-        ok = pthread_create(&job->thread, NULL, review_worker, job) == 0;
-    }
-    if (ok) return false;
-    if (job->looper) {
-        if (job->wake_active) { job->wake_active = false; ALooper_removeFd(job->looper, job->wake[0]); }
-        if (job->timer_active) { job->timer_active = false; ALooper_removeFd(job->looper, job->timer); }
-    }
-    if (job->timer >= 0) close(job->timer);
-    if (job->looper) review_job_free(env, job);
-    else {
-        if (job->activity) (*env)->DeleteGlobalRef(env, job->activity);
-        if (job->uri) (*env)->DeleteGlobalRef(env, job->uri);
-        if (job->cancellation) (*env)->DeleteGlobalRef(env, job->cancellation);
-        pthread_cond_destroy(&job->changed);
-        pthread_mutex_destroy(&job->lock);
-        free(job);
-    }
-    review_picker_failure("Could not start file review. Try again.");
+    bool valid = review_content_uri(env, uri);
+    struct review_job *job = valid && review_waiting_view(env, activity) ? review_job_new(env, activity, uri) : NULL;
+    if (uri) (*env)->DeleteLocalRef(env, uri);
+    if (job && review_job_start(job)) return false;
+    if (job) review_job_abort(env, job);
+    review_picker_failure(valid ? "Could not start file review. Try again." : "Could not open the selected file. Choose a file from the picker.");
     return true;
 }

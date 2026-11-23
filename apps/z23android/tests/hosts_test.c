@@ -428,7 +428,7 @@ static void lone_liar_tests(void)
 }
 static void review_result_tests(void)
 {
-    const char *valid = "{\"command\":\"zcode.package.bundle.verify\",\"ok\":true,\"data\":{\"verified\":true,\"executed\":false,"
+    const char *valid = "{\"schema\":\"zcl.result.v1\",\"status\":\"passed\",\"command\":\"zcode.package.bundle.verify\",\"ok\":true,\"data\":{\"verified\":true,\"executed\":false,"
         "\"release_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
         "\"package_root\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
         "\"publisher_fingerprint\":\"02cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}}";

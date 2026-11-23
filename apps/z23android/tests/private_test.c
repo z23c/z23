@@ -146,9 +146,11 @@ static void review_cleanup_tests(const char *dir)
 }
 static void review_event_tests(void)
 {
-    assert(zapp_review_event_matches(7, true, 4, 7, 4));
-    /* A ready wake removes the timer: a queued timer callback must not read. */
-    assert(!zapp_review_event_matches(7, false, 5, 7, 5));
+    bool wake = true, timer = true, remove_timer = false;
+    assert(zapp_review_take_wake(7, 4, 7, 4, &wake, &timer, &remove_timer));
+    assert(!wake && !timer && remove_timer);
+    /* Both were ready: after the wake, the queued timer callback must not read. */
+    assert(!zapp_review_event_matches(7, timer, 5, 7, 5));
     /* A later job can reuse the same descriptor, but never the old generation. */
     assert(!zapp_review_event_matches(8, true, 5, 7, 5));
     assert(!zapp_review_event_matches(8, true, 5, 8, 4));
