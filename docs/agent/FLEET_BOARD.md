@@ -81,6 +81,13 @@ that verdict to distinguish a newly stored post from one already held or
 deferred. If the peer is busy, lacks PUSH support or the stream closes
 without a receipt, the periodic pull still carries eligible posts.
 
+A new fleet post from the local post path is also fanned out, once, to every
+paired peer with a live session that a pull would be served the post to.
+Only paired peers are pushed to. A machine on the fleet roster with no
+pairing row gets fleet posts only from its 15 s roster pull. Carriage status
+counts those roster-only peers per post in `push_out.fanout_roster_unpushed`,
+so a fleet that relies on the roster can see what the push does not cover.
+
 A pull resumes from the answering box's own arrival number for the last row
 it consumed. Each stored row gets that number once, at ingest, strictly above
 every number already assigned, and a reclaim never rewrites it, so rows that

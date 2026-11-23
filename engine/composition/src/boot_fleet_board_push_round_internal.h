@@ -37,6 +37,7 @@ struct push_queued {
     bool waiting; /* held once already: the peer it was meant for */
     uint8_t waiting_peer[32];
     bool fanout; /* also offered to every connected peer a pull would serve */
+    bool fanned; /* held by the fan-out for one peer: counted when it rides */
 };
 
 /* One pairing row as this round sees it. The first (newest) row of each
@@ -70,6 +71,12 @@ struct push_round {
     size_t n_held;
     struct db_fleet_board_post *row;     /* the post being offered */
     struct db_fleet_board_post *ref_row; /* the post it answers */
+    /* Connected roster-only peers the roster answer would serve, which the
+     * fan-out cannot reach (they have no pairing row): counted once a round
+     * for the author key in roster_host. */
+    bool roster_counted;
+    uint8_t roster_host[32];
+    size_t roster_unpushed;
 };
 
 /* ── boot_fleet_board_push.c ─────────────────────────────────────────── */
@@ -94,9 +101,13 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
 
 /* Offer the round's resolved post `q` to every lead peer but `done` (the
  * addressed push's peer, or NULL): connected, served by the pull's own
- * disclosure decision, and not proving the post's author key. */
+ * disclosure decision, and not proving the post's author key. Connected
+ * roster-only peers the roster answer would serve are counted as not
+ * pushed (push_fanout_roster_unpushed). */
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
                        const struct push_peer *done);
+/* A post the fan-out held for one peer rode a push after its wait. */
+void board_push_fanout_sent(void);
 /* Fill the fan-out fields of the lane's counters. */
 void board_push_fanout_counts(struct boot_fleet_board_fleet_counts *out);
 

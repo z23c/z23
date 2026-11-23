@@ -677,6 +677,31 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
     }
 }
 
+/* The addressed push's step for `q`: resolve, match (the peer in `*out`),
+ * judge once a round per peer and board key, batch. A post the fan-out held
+ * for one peer is counted fanned out when it rides. */
+static int push_addressed(struct push_round *r, const struct push_queued *q,
+                          struct push_peer **out)
+{
+    uint8_t to[32];
+    int step = push_resolve(r, q, to);
+    if (step == PUSH_OK)
+        step = push_match(r, to, out);
+    if (step != PUSH_OK)
+        return step;
+    struct push_peer *p = *out;
+    if (p->ready == PUSH_UNASKED || memcmp(p->ready_to, to, 32) != 0) {
+        p->ready = push_peer_judge(r, p, to);
+        memcpy(p->ready_to, to, 32);
+    }
+    step = p->ready;
+    if (step == PUSH_OK)
+        step = board_push_batch_add(r, p, q);
+    if (step == PUSH_OK && q->fanned)
+        board_push_fanout_sent();
+    return step;
+}
+
 static void push_offer(struct push_round *r, const struct push_queued *q)
 {
     /* A post held for a peer whose push is still open waits again without
@@ -690,20 +715,7 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
         return;
     }
     struct push_peer *p = NULL;
-    uint8_t to[32];
-    int step = push_resolve(r, q, to);
-    if (step == PUSH_OK)
-        step = push_match(r, to, &p);
-    if (step == PUSH_OK) {
-        /* Judged once a round per peer and board key. */
-        if (p->ready == PUSH_UNASKED || memcmp(p->ready_to, to, 32) != 0) {
-            p->ready = push_peer_judge(r, p, to);
-            memcpy(p->ready_to, to, 32);
-        }
-        step = p->ready;
-    }
-    if (step == PUSH_OK)
-        step = board_push_batch_add(r, p, q);
+    int step = push_addressed(r, q, &p);
     if (step == PUSH_HOLD)
         board_push_hold(r, q, p);
     else if (step != PUSH_OK && step != PUSH_UNASKED)

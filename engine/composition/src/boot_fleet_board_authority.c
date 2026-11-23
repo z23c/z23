@@ -276,6 +276,11 @@ bool board_peer_may_read(const uint8_t signer[32])
     return board_read_check(signer, true);
 }
 
+bool board_push_may_read(const uint8_t signer[32])
+{
+    return board_read_check(signer, false);
+}
+
 /* The roster question; with `record` a refusal is logged as the pull's,
  * rate limited. */
 static bool board_roster_check(const uint8_t online_pubkey[32], bool record)

@@ -40,6 +40,9 @@ bool board_delegation_current(struct node_db *ndb,
 /* The key holds a role granting FLEET_BOARD_FLEET_READ_LEAF here; refusals
  * are counted. */
 bool board_peer_may_read(const uint8_t signer[32]);
+/* The same question with nothing counted or logged (the push's sending
+ * half). */
+bool board_push_may_read(const uint8_t signer[32]);
 /* The fleet roster admits this board key here. */
 bool board_roster_admits(const uint8_t online_pubkey[32]);
 /* Everything the answering half proves before it reads a post for a peer:

@@ -94,7 +94,8 @@ static bool carriage_pull(struct json_value *into,
 }
 
 /* The sending half: what was queued and opened, why posts were not pushed,
- * what each receipt said, and what became of each hint. */
+ * what each receipt said, what became of each hint, what the fan-out sent
+ * and refused, and the roster-only peers it could not reach. */
 static bool carriage_push_out(struct json_value *into,
                               const struct boot_fleet_board_fleet_counts *c)
 {
@@ -119,6 +120,8 @@ static bool carriage_push_out(struct json_value *into,
         json_push_kv_int(&o, "fanout", (int64_t)c->push_fanout) &&
         carriage_group(&o, "fanout_refused", c->push_fanout_refused, 0,
                        FLEET_BOARD_PUSH_REFUSALS, carriage_refusal, false) &&
+        json_push_kv_int(&o, "fanout_roster_unpushed",
+                         (int64_t)c->push_fanout_roster_unpushed) &&
         json_push_kv(into, "push_out", &o);
     json_free(&o);
     return ok;

@@ -68,12 +68,29 @@ bool fleet_board_roster_answer_open(struct node_db *ndb,
                                     uint8_t *rows, size_t *len, int64_t now,
                                     bool *roster_only);
 
-/* Remember the peer of a session that proved a member key to this box, so the
- * pull goes back over the session it dialled (a box behind NAT has no onion
- * to be dialled at). Bounded; the oldest entry goes first. */
+/* Remember the peer of a session that proved a member key to this box, and
+ * that session (transcript, generation), so the pull goes back over the
+ * session it dialled (a box behind NAT has no onion to be dialled at).
+ * Bounded; the oldest entry goes first. */
 void fleet_board_roster_learn(const uint8_t peer_noise[32],
-                              const uint8_t key[32]);
+                              const uint8_t key[32],
+                              const uint8_t transcript[32],
+                              uint64_t generation);
 void fleet_board_roster_forget(void);
+
+/* The push's sending half asks what the roster answer would decide for this
+ * exact session, counting and logging nothing: the key its peer proved here
+ * with a verified asking proof ON THIS SESSION (the binding a roster OPEN
+ * checks), in `key_out`, and that key's standing now. The read role is the
+ * caller's to ask, as the answering half asks it. learned_peers copies the
+ * Noise keys of the remembered peers, at most `cap`. */
+bool fleet_board_roster_session_standing(struct node_db *pairings,
+                                         struct node_db *store,
+                                         const uint8_t peer_noise[32],
+                                         const uint8_t transcript[32],
+                                         uint64_t generation, int64_t now,
+                                         uint8_t key_out[32]);
+size_t fleet_board_roster_learned_peers(uint8_t (*out)[32], size_t cap);
 
 /* The head row a roster answer leads with. The lane tick finds it, at most once
  * per ONIONS_REUSE_S from fleet_board_roster_targets; _pinned_head then costs an

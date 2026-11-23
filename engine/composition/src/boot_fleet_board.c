@@ -685,10 +685,13 @@ static bool fleet_board_relay_target(const struct p2p_node *peer,
 /* A public post `source` delivered and this node just stored for the first
  * time: one inventory line naming it to every other peer, now, rather than
  * at each peer's next FLEET_BOARD_ANNOUNCE_PERIOD_SECONDS announce. Never
- * back to the peer it came from. Only a NEW store relays, so each node names
- * a given id to a given peer at most once whatever the topology: in a cycle
- * the post comes back as already held, stores nothing, and stops. A peer
- * that holds it says nothing; the rest ask for it with GET as before.
+ * back to the peer it came from. Only a NEW store relays, so each node
+ * RELAYS a given id to a given peer at most once whatever the topology: in a
+ * cycle the post comes back as already held, stores nothing, and stops. A
+ * peer that holds it says nothing; the rest ask for it with GET as before.
+ * The relay suppresses nothing else: each peer's periodic announce still
+ * walks its inventory cursor over every held public id, this one included,
+ * exactly as before.
  *
  * The bound on a peer posting many valid posts: each relay is triggered by
  * one POST frame that fleet_board_admit let in, so a peer causes at most

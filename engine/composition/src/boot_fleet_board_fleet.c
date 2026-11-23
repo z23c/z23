@@ -409,7 +409,8 @@ static enum mesh_stream_refusal board_roster_open(struct mesh_stream *st,
     if (!fleet_board_roster_proof_make(FLEET_BOARD_ROSTER_SIDE_ANSWER, &bind,
                                        answer_proof))
         return MESH_STREAM_REFUSED_UNAVAILABLE;
-    fleet_board_roster_learn(st->peer_static, proof);
+    fleet_board_roster_learn(st->peer_static, proof, st->transcript_hash,
+                             st->connection_generation);
     return board_serve_compose(st, store, after, answer_proof, proof);
 }
 

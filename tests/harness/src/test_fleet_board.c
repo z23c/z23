@@ -16254,6 +16254,119 @@ static int test_fleet_board_roster_carriage(void)
     return failures;
 }
 
+/* Frames the answering box queued toward the asking box, each read. */
+static size_t fbc_answer_frames(struct fbw *w)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX];
+    size_t n = 0;
+    for (bool more = true; more; n += more)
+        (void)mesh_loop_take(w->answerer, w->answer_q, w->f.term_peer.ini,
+                             frame, sizeof frame, &more);
+    return n;
+}
+
+/* A fleet note by the answering box, offered as the local post path offers
+ * it, and one sending round: the pushes it opened. */
+static size_t fbc_offer(struct fbw *w, const char *text, int64_t at,
+                        struct fleet_board_post *out)
+{
+    uint8_t own[32];
+    fbr_key(FBR_MEMBER, own);
+    if (!fbw_post(&w->a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, text, at, FBC_TTL,
+                  at, out) ||
+        boot_fleet_board_fleet_push_enqueue_all(out, own, NULL) !=
+            FLEET_BOARD_PUSH_HINT_NONE)
+        return SIZE_MAX;
+    return boot_fleet_board_fleet_test_push_send_at(&w->svc, &w->a, at);
+}
+
+static int test_fleet_board_roster_push_gap(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post, denied;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-roster-push-test" };
+    struct boot_fleet_board_fleet_counts cb, ca;
+    size_t frames = 0;
+    const int64_t now = FBW_NOW;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+    TEST("fleet board fan-out: a connected roster-only peer the roster answer "
+         "serves is not pushed to, and is counted as not pushed") {
+        ASSERT(opened);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbr_install(FBR_ROOT, false);
+        ASSERT(fbc_plant(&w.a, &w.b, "answerbox", FBR_MEMBER, now));
+        ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
+        /* Before any roster pull on this session nothing is counted: the
+         * peer has proved no key here. */
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_offer(&w, "before the pull", 2001, &post), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.push_fanout_roster_unpushed,
+                  cb.push_fanout_roster_unpushed);
+        /* The roster pull proves the asking box's key on this session. */
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT(fbc_pull(&w, &w.b, &frames) != SIZE_MAX);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_offer(&w, "for the roster", 2002, &post), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.push_fanout_roster_unpushed,
+                  cb.push_fanout_roster_unpushed + 1);
+        ASSERT_EQ(ca.push_opened, cb.push_opened);
+        ASSERT_EQ(ca.push_fanout, cb.push_fanout);
+        /* Asked with nothing recorded as a pull's refusal. */
+        ASSERT_EQ(ca.roster_refused, cb.roster_refused);
+        ASSERT_EQ(ca.role_refused, cb.role_refused);
+        ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        /* Its roster pull still carries the post. */
+        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        PASS();
+    }
+    TEST("fleet board fan-out: a roster-only peer without the read role is "
+         "neither pushed to nor counted") {
+        g_fbw_deny_read = true;
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_offer(&w, "not for that box", 2003, &denied), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.push_fanout_roster_unpushed,
+                  cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_opened, cb.push_opened);
+        ASSERT_EQ(ca.role_refused, cb.role_refused);
+        ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, denied.id));
+        g_fbw_deny_read = false;
+        PASS();
+    }
+    TEST("fleet board fan-out: a roster-only peer the roster revoked is "
+         "neither pushed to nor counted") {
+        fbc_revoke(FBR_PEER);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_offer(&w, "after revocation", 2004, &denied), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.push_fanout_roster_unpushed,
+                  cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
+        fbc_unrevoke();
+        PASS();
+    }
+    _test_next:;
+    g_fbw_deny_read = false;
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    fbr_uninstall();
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 /* The onion every stub line claims. A box is never its own peer here. */
 static bool fbc_endpoint_cb(const char *line, const uint8_t root[32],
                             char *onion, size_t cap, bool *self, void *ctx)
@@ -17126,6 +17239,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_dial_own_key();
     failures += test_fleet_board_roster_carriage_proof();
     failures += test_fleet_board_roster_carriage();
+    failures += test_fleet_board_roster_push_gap();
     failures += test_fleet_board_roster_carriage_lane();
     failures += test_fleet_board_head_row_carriage();
     failures += test_fleet_board_head_row_bootstrap();

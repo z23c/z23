@@ -1580,6 +1580,42 @@ static int test_rep_fanout_pull_repairs(void)
     return failures;
 }
 
+static int test_rep_fanout_held_counted(void)
+{
+    int failures = 0;
+    struct fleet_board_post first, second;
+    size_t carrying = 0;
+    bool opened = rfo_open(&g_rfo, RFO_ELIGIBLE);
+    TEST("fleet board fan-out: a post held behind an open push is counted "
+         "fanned out when it rides after the wait") {
+        ASSERT(opened);
+        ASSERT(rfo_post_offered(&g_rfo, "first", &first));
+        ASSERT_EQ(boot_fleet_board_fleet_test_push_send(&g_rfo.w.svc,
+                                                        &g_rfo.w.b),
+                  (size_t)2);
+        /* Both pushes are open: the second post waits for each peer. */
+        ASSERT(rfo_post_offered(&g_rfo, "second", &second));
+        ASSERT_EQ(boot_fleet_board_fleet_test_push_send_at(
+                      &g_rfo.w.svc, &g_rfo.w.b, FBW_NOW + 1),
+                  (size_t)0);
+        ASSERT_EQ(rfo_counts().push_fanout, g_rfo.before.push_fanout + 2);
+        /* The answering box's receipt ends its push; the held post rides. */
+        ASSERT_EQ(rfo_addressee_commit(&g_rfo), (size_t)1);
+        ASSERT_EQ(boot_fleet_board_fleet_test_push_send_at(
+                      &g_rfo.w.svc, &g_rfo.w.b, FBW_NOW + 2),
+                  (size_t)1);
+        ASSERT_EQ(rfo_counts().push_fanout, g_rfo.before.push_fanout + 3);
+        ASSERT_EQ(rfo_addressee_commit(&g_rfo), (size_t)1);
+        ASSERT(db_fleet_board_have(&g_rfo.w.a, second.id));
+        /* The third box's push is still open: nothing more reached it. */
+        ASSERT_EQ(rfo_third_frames(&g_rfo, second.id, &carrying), (size_t)1);
+        ASSERT_EQ(carrying, (size_t)0);
+        PASS();
+    } _test_next:;
+    rfo_close(&g_rfo);
+    return failures;
+}
+
 int test_fleet_board_replication(void)
 {
     return test_rep_happy_path() + test_rep_restart_midway() +
@@ -1594,5 +1630,6 @@ int test_fleet_board_replication(void)
            test_rep_worker_carries_shared_kinds() +
            test_rep_public_relay_two_hops() + test_rep_public_relay_cycle() +
            test_rep_public_relay_flood_bound() + test_rep_fanout_eligible() +
-           test_rep_fanout_ineligible() + test_rep_fanout_pull_repairs();
+           test_rep_fanout_ineligible() + test_rep_fanout_pull_repairs() +
+           test_rep_fanout_held_counted();
 }

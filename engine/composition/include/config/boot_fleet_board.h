@@ -205,6 +205,18 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * that could not have pulled it. The addressed push described next runs
  * first for the same post and its addressee is not pushed to twice.
  *
+ * LIMIT: only PAIRED peers are pushed to. A machine on the fleet roster with
+ * no pairing row (the "board.roster" lane below) is not: the push rides the
+ * paired "board" service, whose stream primitive refuses a peer with no
+ * pairing row, and the receiving half proves a pusher only through pairing
+ * rows. Such a peer keeps getting fleet posts by its 15 s roster pull. Each
+ * fan-out post counts, in push_fanout_roster_unpushed (carriage status
+ * push_out.fanout_roster_unpushed), the connected roster-only peers the
+ * roster answer would serve it to now (the key proved on that session, its
+ * standing, the read role, asked with nothing recorded), so a fleet that
+ * relies on the roster sees how much of its carriage the push does not
+ * cover.
+ *
  * The addressed push offers a post to ONE box, once, in a stream whose whole
  * payload rides the OPEN (FLEET_BOARD_FLEET_MSG_PUSH). Which box: the board key the local
  * caller named in the post RPC's `push_to` delivery hint when it gave a
@@ -571,11 +583,15 @@ struct boot_fleet_board_fleet_counts {
     uint64_t push_refused_out[FLEET_BOARD_PUSH_REFUSALS];
     uint64_t push_refused_in[FLEET_BOARD_PUSH_REFUSALS];
     uint64_t push_hint[FLEET_BOARD_PUSH_HINTS];
-    /* The fan-out: posts added to a push for one more peer, and connected
-     * paired peers it did not push to because a pull from them would not be
-     * served, by the check that failed. */
+    /* The fan-out: posts added to a push for one more peer (a post held for
+     * an open push counted when it rides), and connected paired peers it did
+     * not push to because a pull from them would not be served, by the check
+     * that failed. roster_unpushed: per fan-out post, the connected peers on
+     * the roster with no pairing row that the roster answer would serve and
+     * the push cannot reach (see PUSH); they get the post by pull. */
     uint64_t push_fanout;
     uint64_t push_fanout_refused[FLEET_BOARD_PUSH_REFUSALS];
+    uint64_t push_fanout_roster_unpushed;
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
 

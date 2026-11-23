@@ -53,6 +53,8 @@ struct learned_peer {
     bool used;
     uint8_t noise[32];
     uint8_t key[32];
+    uint8_t transcript[32]; /* the session the key was proved on */
+    uint64_t generation;
 };
 
 struct onion_set {
@@ -203,22 +205,65 @@ static bool pairing_row_held(struct node_db *pairings,
     return held;
 }
 
+/* The standing question; with `record` a refusal is counted and logged. */
+static bool roster_standing(struct node_db *pairings, struct node_db *store,
+                            const uint8_t peer_noise[32], const uint8_t key[32],
+                            int64_t now, bool record)
+{
+    if (!pairings || !store || !peer_noise || !key)
+        return false;
+    if (pairing_row_held(pairings, peer_noise)) {
+        if (record)
+            roster_refuse("peer_has_pairing_row", now);
+        return false;
+    }
+    if (!boot_fleet_roster_carries_peer(store, key, now)) {
+        if (record)
+            roster_refuse("not_a_member_of_an_armed_roster", now);
+        return false;
+    }
+    return true;
+}
+
 bool fleet_board_roster_standing(struct node_db *pairings,
                                  struct node_db *store,
                                  const uint8_t peer_noise[32],
                                  const uint8_t key[32], int64_t now)
 {
-    if (!pairings || !store || !peer_noise || !key)
-        return false;
-    if (pairing_row_held(pairings, peer_noise)) {
-        roster_refuse("peer_has_pairing_row", now);
-        return false;
+    return roster_standing(pairings, store, peer_noise, key, now, true);
+}
+
+bool fleet_board_roster_session_standing(struct node_db *pairings,
+                                         struct node_db *store,
+                                         const uint8_t peer_noise[32],
+                                         const uint8_t transcript[32],
+                                         uint64_t generation, int64_t now,
+                                         uint8_t key_out[32])
+{
+    bool known = false;
+    roster_lock();
+    for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX && !known; i++) {
+        const struct learned_peer *l = &g_learned[i];
+        known = l->used && memcmp(l->noise, peer_noise, 32) == 0 &&
+                memcmp(l->transcript, transcript, 32) == 0 &&
+                l->generation == generation;
+        if (known)
+            memcpy(key_out, l->key, 32);
     }
-    if (!boot_fleet_roster_carries_peer(store, key, now)) {
-        roster_refuse("not_a_member_of_an_armed_roster", now);
-        return false;
-    }
-    return true;
+    roster_unlock();
+    return known &&
+           roster_standing(pairings, store, peer_noise, key_out, now, false);
+}
+
+size_t fleet_board_roster_learned_peers(uint8_t (*out)[32], size_t cap)
+{
+    size_t n = 0;
+    roster_lock();
+    for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX && n < cap; i++)
+        if (g_learned[i].used)
+            memcpy(out[n++], g_learned[i].noise, 32);
+    roster_unlock();
+    return n;
 }
 
 bool fleet_board_roster_admit(struct node_db *pairings, struct node_db *store,
@@ -266,7 +311,9 @@ bool fleet_board_roster_answer_open(struct node_db *ndb,
 /* ── who to ask ──────────────────────────────────────────────────────── */
 
 void fleet_board_roster_learn(const uint8_t peer_noise[32],
-                              const uint8_t key[32])
+                              const uint8_t key[32],
+                              const uint8_t transcript[32],
+                              uint64_t generation)
 {
     roster_lock();
     struct learned_peer *slot = &g_learned[g_learned_next];
@@ -283,6 +330,8 @@ void fleet_board_roster_learn(const uint8_t peer_noise[32],
     slot->used = true;
     memcpy(slot->noise, peer_noise, 32);
     memcpy(slot->key, key, 32);
+    memcpy(slot->transcript, transcript, 32);
+    slot->generation = generation;
     roster_unlock();
 }
 
