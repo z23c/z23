@@ -209,6 +209,10 @@ static void inputs_are_gated(void)
     assert(!strstr(src, "0770"));
     require(src, "mkdir(layouts, 0700)", "owner-only layouts folder");
     require(src, "zapp_layout_read(", "checked read of home.json");
+    const char *resume = strstr(src, "void zapp_shell_resume(JNIEnv *env)");
+    const char *resume_end = resume ? strstr(resume, "\n}\n") : NULL;
+    const char *reload = resume ? strstr(resume, "load_layout()") : NULL;
+    assert(resume && resume_end && reload && reload < resume_end);
     free(src);
     src = slurp("layout.c");
     require(src, "O_NOFOLLOW", "no symbolic link for home.json");

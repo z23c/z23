@@ -68,7 +68,6 @@ static struct {
     char builtin[ZAPP_NAME_CAP], layout_notice[320], action_notice[160];
     char node_notice[sizeof(((struct zapp_view *)0)->node_action_notice)]; /* shown when the shell has no notice of its own */
     char files[PATH_CAP], external[PATH_CAP];
-    struct timespec user_stamp;
     struct json_value phone, app_cards[ZAPP_LAUNCHER_MAX];
     bool phone_ok;
     struct zapp_launcher_app apps[ZAPP_LAUNCHER_MAX];
@@ -146,8 +145,7 @@ static void adopt_user(const char *path)
     snprintf(notice, sizeof(notice), "Layout file not used: %s. Showing the built-in layout.", reason);
     adopt_builtin(notice);
 }
-/* Reads layouts/home.json from the app's external files folder when it is new or changed; no file
- * means the built-in layout. */
+/* Read layouts/home.json on creation and resume; no file means the built-in layout. */
 static void load_layout(void)
 {
     char path[PATH_CAP];
@@ -156,11 +154,8 @@ static void load_layout(void)
     bool present = shell.external[0] && lstat(path, &info) == 0 && S_ISREG(info.st_mode);
     if (!present) {
         if (shell.user_layout || !shell.layout || shell.layout_notice[0]) adopt_builtin("");
-        memset(&shell.user_stamp, 0, sizeof(shell.user_stamp));
         return;
     }
-    if (shell.layout && info.st_mtim.tv_sec == shell.user_stamp.tv_sec && info.st_mtim.tv_nsec == shell.user_stamp.tv_nsec) return;
-    shell.user_stamp = info.st_mtim;
     adopt_user(path);
 }
 

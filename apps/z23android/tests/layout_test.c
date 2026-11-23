@@ -2,11 +2,16 @@
 #define _POSIX_C_SOURCE 200809L
 #include "layout.h"
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#define st_atim st_atimespec
+#define st_mtim st_mtimespec
+#endif
 
 #define HEAD "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"t\","
 static char reason[160];
@@ -269,6 +274,28 @@ static void read_checks(const char *scratch)
     snprintf(link, sizeof(link), "%s/fifo", scratch);
     assert(unlink(link) == 0);
 }
+static void replaced_layout_same_mtime(const char *scratch)
+{
+    char path[512], replacement[512]; struct stat before, after;
+    const char *first = "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"first\",\"screens\":{\"home\":{\"container\":\"column\",\"children\":[]}}}";
+    const char *second = "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"other\",\"screens\":{\"home\":{\"container\":\"column\",\"children\":[]}}}";
+    snprintf(path, sizeof(path), "%s/home.json", scratch);
+    snprintf(replacement, sizeof(replacement), "%s/replacement.json", scratch);
+    write_file(path, first);
+    size_t length = 0; char *data = zapp_layout_read(path, &length, reason, sizeof(reason));
+    assert(data); struct zapp_layout *layout = parse(data); free(data);
+    assert(layout && !strcmp(layout->id, "first") && zapp_layout_screen(layout, "home"));
+    zapp_layout_free(layout);
+    assert(stat(path, &before) == 0); write_file(replacement, second);
+    struct timespec times[2] = {before.st_atim, before.st_mtim};
+    assert(utimensat(AT_FDCWD, replacement, times, 0) == 0 && rename(replacement, path) == 0);
+    assert(stat(path, &after) == 0 && before.st_ino != after.st_ino &&
+           before.st_mtim.tv_sec == after.st_mtim.tv_sec && before.st_mtim.tv_nsec == after.st_mtim.tv_nsec);
+    data = zapp_layout_read(path, &length, reason, sizeof(reason));
+    assert(data); layout = parse(data); free(data);
+    assert(layout && !strcmp(layout->id, "other") && zapp_layout_screen(layout, "home"));
+    zapp_layout_free(layout); assert(unlink(path) == 0);
+}
 /* A node that names its lines is that tall whatever its text, an empty text included; one that does not follows its text up
  * to max_lines and takes no space when empty. Lines are clamped to 0..20. */
 static void text_lines(void)
@@ -292,6 +319,7 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     read_checks(argv[1]);
+    replaced_layout_same_mtime(argv[1]);
     valid_layout();
     unknown_fields_are_ignored();
     unknown_primitive_is_refused();
