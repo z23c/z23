@@ -668,13 +668,13 @@ static bool al_setup(struct library *w, const struct app_launch_env *env,
     if (!al_tasks_setup_present(r, datadir)) return true;
     return al_prepare_source(w, env, reply, false) && al_setup_encode(w, exe, datadir, reply);
 }
-static bool al_share_path(struct library *w, const struct library_row *row, struct zcl_command_reply *reply)
+static bool al_share_path(struct library *w, const uint8_t source[32], struct zcl_command_reply *reply)
 {
 #if !defined(_WIN32)
     const char *home = getenv("HOME"); char resolved[4096], version[65]; struct stat st;
     if (!home || home[0] != '/' || !realpath(home, resolved) || stat(resolved, &st) || !S_ISDIR(st.st_mode))
         return al_fail(reply, "HOME_UNAVAILABLE", "Cannot locate your home folder.");
-    zcl_hex_encode(row->selection.version, 32, version);
+    zcl_hex_encode(source, 32, version);
     for (unsigned i = 0; i < 1000; ++i) {
         int n = snprintf(w->shared_path, sizeof(w->shared_path), "%s/z23-share-%.12s-%u.z23share", resolved, version, i);
         if (n < 0 || (size_t)n >= sizeof(w->shared_path)) return al_fail(reply, "PATH_TOO_LONG", "Home path is too long to display safely.");
@@ -687,7 +687,7 @@ static bool al_share_path(struct library *w, const struct library_row *row, stru
     }
     return al_fail(reply, "OUTPUT_UNAVAILABLE", "No free share filename is available.");
 #else
-    (void)w; (void)row; return al_fail(reply, "PLATFORM_UNAVAILABLE", "Sharing is unavailable on this platform.");
+    (void)w; (void)source; return al_fail(reply, "PLATFORM_UNAVAILABLE", "Sharing is unavailable on this platform.");
 #endif
 }
 static void al_share_notice_failure(struct library *w, struct zcl_command_reply *reply,
@@ -799,7 +799,7 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
 {
     const struct library_row *row = &w->rows[w->index];
     if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before sharing.");
-    if (!al_current(row, env, reply) || !al_share_path(w, row, reply)) return false;
+    if (!al_current(row, env, reply) || !al_share_path(w, row->selection.version, reply)) return false;
     struct app_confirm *notice = zcl_calloc(1, sizeof(*notice), "library-share-notice");
     char why[256] = {0};
     if (!notice) return al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare share notice.");
@@ -884,8 +884,10 @@ static void al_more_share_options(struct library *w)
     (void)snprintf(m->request_id, sizeof(m->request_id), "library-more-share-options");
     (void)snprintf(m->summary, sizeof(m->summary), "Choose another way to share.");
     app_library_choice(m, "publish", "Publish publicly", "Offer this version on the public apps board.");
-    if (w->rows[w->index].saved && app_received_original_available(&w->rows[w->index].selection))
+    if (w->rows[w->index].saved && app_received_original_available(&w->rows[w->index].selection)) {
         app_library_choice(m, "share-original", "Help share original", "Offer the received original without changing your saved version.");
+        app_library_choice(m, "save-original", "Save original share file", "Save the received original for private sharing.");
+    }
     app_library_choice(m, "more-share-back", "Back", "Return to sharing options.");
 }
 struct al_host_check { const struct library_row *row; const struct app_launch_env *env; };
@@ -905,6 +907,30 @@ static bool al_host_original(struct library *w, const struct app_launch_env *env
                               w->notice, w->prepare_context, &canceled, reply);
     if (ok && canceled) { w->operation_canceled = true; return true; }
     return false;
+}
+static bool al_original_file(struct library *w, const struct app_launch_env *env,
+                             struct zcl_command_reply *reply)
+{
+    const struct library_row *row = &w->rows[w->index];
+    struct al_host_check check = {row, env}; bool canceled = false;
+    if (!row->saved || !al_current(row, env, reply) || !al_share_path(w, row->selection.parent, reply)) return false;
+    if (!app_original_file_run(&row->selection, w->shared_path, al_host_current, &check,
+                               w->notice, w->prepare_context, &canceled, reply)) return false;
+    if (canceled) { w->operation_canceled = true; w->shared_path[0] = 0; return true; }
+    struct app_confirm *notice = zcl_calloc(1, sizeof(*notice), "library-original-file-notice");
+    char why[256] = {0}; const char *carrier = zcl_package_copy_str(&reply->data, "carrier");
+    if (!notice || !carrier || !al_share_notice(notice, w->shared_path, why, sizeof(why))) {
+        if (notice) { app_confirm_free(notice); free(notice); }
+        al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "The original file was saved; inspect its location.", true);
+        return false;
+    }
+    app_confirm_free(notice); memset(notice->bitmaps, 0, sizeof(notice->bitmaps));
+    (void)snprintf(notice->model.title, sizeof(notice->model.title), "Original app file created");
+    (void)snprintf(notice->model.summary, sizeof(notice->model.summary), "Send the reconstructed original signed app to a friend.");
+    bool ok = app_confirm_field(&notice->model, "Carrier: ", carrier) && app_confirm_prepare(notice, why, sizeof(why));
+    if (ok) ok = al_share_result(w, notice, reply, why, sizeof(why));
+    else al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "The original file was saved; inspect its location.", true);
+    app_confirm_free(notice); free(notice); return ok;
 }
 static void al_publish_notice(struct library *w, struct zcl_command_reply *reply)
 {
@@ -1489,8 +1515,13 @@ static bool al_host_link(struct library *w, const struct app_launch_env *env,
 }
 static bool al_receipt_operation(const char *id)
 {
+    if (!strcmp(id, "save-original")) return true;
     return !strcmp(id, "share-file") || !strcmp(id, "publish") || !strcmp(id, "share-link") || !strcmp(id, "share-original") ||
         !strcmp(id, "help") || !strcmp(id, "open") || !strcmp(id, "draft") || !strcmp(id, "previous-keep");
+}
+static bool al_receipt_blocked(const struct library *w, const char *id)
+{
+    return w->has_received && !w->recovery_ready && al_receipt_operation(id);
 }
 static bool al_share_prepare(struct library *w, const struct app_launch_env *env,
     struct zcl_command_reply *reply)
@@ -1582,13 +1613,14 @@ static bool al_open_action(struct library *w, const struct app_launch_env *env,
 static bool al_action(struct library *w, const char *id, const struct app_launch_env *env,
     const char *exe, const char *datadir, struct zcl_command_reply *reply)
 {
-    if (w->has_received && !w->recovery_ready && al_receipt_operation(id))
+    if (al_receipt_blocked(w, id))
         return al_fail(reply, "RECOVERY_TOO_LARGE", "The previous receipt cannot be safely retained for another operation.");
     if (al_change_page(w, id)) return true;
     if (!strcmp(id, "draft")) return al_draft_action(w, env, reply, false);
     if (!strcmp(id, "previous-keep")) return al_draft_action(w, env, reply, true);
     if (al_signing_share(id)) return al_share_dispatch(w, id, env, exe, reply);
     if (!strcmp(id, "share-original")) { w->receive_current = false; return al_host_original(w, env, reply); }
+    if (!strcmp(id, "save-original")) { w->receive_current = false; return al_original_file(w, env, reply); }
     if (!strcmp(id, "help")) {
         w->receive_current = false;
         if (w->page == 1 && w->rows[w->index].saved &&

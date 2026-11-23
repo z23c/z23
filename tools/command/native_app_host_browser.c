@@ -8,8 +8,12 @@
 #include "command/native_app_offer.h"
 #include "command/native_app_get_stage.h"
 #include "command/native_zcode_package_copy.h"
+#include "command/native_command.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "crypto/sha256.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -450,5 +454,120 @@ bool app_host_original_run(const struct app_selection *selection,
     }
     if (!ok && reply->status == ZCL_COMMAND_STATUS_PASSED)
         return ho_fail(&a, "ORIGINAL_UNAVAILABLE", false, "The original hosting request could not be prepared.");
+    return ok;
+}
+
+static bool of_fail(struct zcl_command_reply *r, const char *code, bool mutated,
+                    const char *message, const char *path)
+{
+    zcl_package_copy_fail(r, code, mutated, message, path); return false;
+}
+
+static bool of_confirm(const struct app_received_original *o, const char *path,
+    app_confirm_presenter confirm, void *context, bool *chosen, struct zcl_command_reply *r)
+{
+    struct app_confirm *v = zcl_calloc(1, sizeof(*v), "original-file/confirm");
+    if (!v) return of_fail(r, "OUT_OF_MEMORY", false, "Cannot prepare the original file choice.", path);
+    zcl_present_model_init_v1(&v->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(v->model.request_id, sizeof(v->model.request_id), "library-original-file");
+    (void)snprintf(v->model.title, sizeof(v->model.title), "Save the original signed app?");
+    (void)snprintf(v->model.summary, sizeof(v->model.summary), "Rebuild the original signed release as a share file.");
+    v->model.action_count = 4;
+    app_confirm_action(&v->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "cancel", "Not now");
+    app_confirm_action(&v->model.actions[1], ZCL_PRESENT_ACTION_SELECT, "back", "Back");
+    app_confirm_action(&v->model.actions[2], ZCL_PRESENT_ACTION_SELECT, "next", "Next");
+    app_confirm_action(&v->model.actions[3], ZCL_PRESENT_ACTION_CONFIRM, "save", "Save original file");
+    char publisher[67], release[65], package[65], sha[65], why[256] = {0};
+    zcl_hex_encode(o->publisher, 33, publisher); zcl_hex_encode(o->release, 32, release);
+    zcl_hex_encode(o->package, 32, package); zcl_hex_encode(o->sha256, 32, sha);
+    bool shown = app_confirm_field(&v->model, "Original app: ", o->name) &&
+        app_confirm_field(&v->model, "Contents: ", "Original signed app, not your edited version.") &&
+        app_confirm_field(&v->model, "Original publisher: ", publisher) &&
+        app_confirm_field(&v->model, "Original release: ", release) &&
+        app_confirm_field(&v->model, "Original package: ", package) &&
+        app_confirm_field(&v->model, "File SHA-256: ", sha) &&
+        app_confirm_path(&v->model, "Save to: ", path) &&
+        app_confirm_prepare(v, why, sizeof(why)) && app_confirm_show(v, confirm, context, why, sizeof(why));
+    *chosen = shown && v->confirmed; app_confirm_free(v); free(v);
+    return shown || of_fail(r, "PRESENTATION_FAILED", false, "The original file choice could not be displayed.", path);
+}
+
+static bool of_destination(const char *output, char parent[4400])
+{
+    char resolved[4400];
+    return platform_private_destination_resolve(output, resolved, sizeof(resolved), parent, 4400) &&
+        !strcmp(output, resolved) && platform_private_directory_ancestors_safe(parent);
+}
+static bool of_write(const char *output, const uint8_t *bytes, size_t size, const char *sha,
+                     struct zcl_command_reply *r)
+{
+    char parent[4400];
+    if (!of_destination(output, parent))
+        return of_fail(r, "OUTPUT_UNAVAILABLE", false, "The share destination cannot be safely resolved.", output);
+    struct app_private_stage *stage = NULL;
+    if (!app_private_stage_open(parent, &stage, r)) return false;
+    const char *staging = app_private_stage_path(stage);
+    struct platform_private_file f; platform_private_file_init(&f);
+    bool exists = false, published = false;
+    bool ok = platform_private_file_create(staging, &f) && platform_private_file_write_at(&f, bytes, size, 0) &&
+        app_private_stage_matches(stage, sha, (int64_t)size) && platform_private_directory_ancestors_safe(parent);
+    if (ok) { published = true; ok = platform_private_file_publish_no_clobber(&f, staging, output, &exists) && !exists; }
+    platform_private_file_close(&f);
+    bool cleaned = app_private_stage_close(stage);
+    return (ok && cleaned) || of_fail(r, !cleaned ? "TEMP_CLEANUP_FAILED" : exists ? "OUTPUT_EXISTS" : "OUTPUT_UNAVAILABLE", (published && !exists) || !cleaned,
+        "The original file could not be safely finalized; inspect the destination before retrying.", output);
+}
+
+struct of_action {
+    const struct app_selection *selection; const char *output;
+    app_host_selection_check check; void *check_context;
+    app_confirm_presenter confirm; void *context;
+    struct zcl_command_reply *reply; struct app_private_stage *stage;
+    struct app_received_original original; uint8_t *bytes; size_t size;
+};
+static bool of_prepare(struct of_action *a)
+{
+    if (!app_private_stage_open(a->selection->datadir, &a->stage, a->reply)) return false;
+    bool ok = app_received_original_stage(a->selection, app_private_stage_path(a->stage), &a->original, a->reply);
+    a->bytes = ok ? zcl_native_source_bundle_read(app_private_stage_path(a->stage), &a->size) : NULL;
+    uint8_t digest[32]; struct sha256_ctx hash;
+    if (a->bytes) { sha256_init(&hash); sha256_write(&hash, a->bytes, a->size); sha256_finalize(&hash, digest); }
+    ok = ok && a->bytes && a->size == a->original.size && !memcmp(digest, a->original.sha256, 32);
+    if (!ok && a->reply->status == ZCL_COMMAND_STATUS_PASSED)
+        of_fail(a->reply, "ORIGINAL_UNAVAILABLE", false, "The original file could not be verified.", a->output);
+    if (!ok && !strcmp(a->reply->error.code, "ORIGINAL_UNAVAILABLE"))
+        (void)snprintf(a->reply->error.next_action, sizeof(a->reply->error.next_action),
+            "Ask a trusted sender for the original signed file again.");
+    return ok;
+}
+static bool of_apply(struct of_action *a)
+{
+    char sha[65], carrier[65]; zcl_hex_encode(a->original.sha256, 32, sha);
+    bool ok = a->check(a->check_context, a->reply) && app_received_original_available(a->selection) &&
+        app_private_stage_matches(a->stage, sha, (int64_t)a->size);
+    if (!ok && a->reply->status == ZCL_COMMAND_STATUS_PASSED)
+        of_fail(a->reply, "ORIGINAL_CHANGED", false, "The selected original changed; reopen My Apps.", a->output);
+    if (ok) ok = of_write(a->output, a->bytes, a->size, sha, a->reply);
+    if (!ok) return false;
+    zcl_hex_encode(a->original.carrier, 32, carrier); a->reply->error.mutated = true;
+    ok = json_push_kv_str(&a->reply->data, "share_file", a->output) &&
+        json_push_kv_str(&a->reply->data, "sha256", sha) && json_push_kv_str(&a->reply->data, "carrier", carrier);
+    return ok || of_fail(a->reply, "SHARE_RESULT_UNAVAILABLE", true, "The file was saved; inspect the destination.", a->output);
+}
+bool app_original_file_run(const struct app_selection *selection, const char *output,
+    app_host_selection_check check, void *check_context,
+    app_confirm_presenter confirm, void *context, bool *canceled, struct zcl_command_reply *reply)
+{
+    if (!selection || !output || !check || !canceled || !reply) return false;
+    *canceled = false;
+    struct of_action a = {.selection = selection, .output = output, .check = check,
+        .check_context = check_context, .confirm = confirm, .context = context, .reply = reply};
+    bool chosen = false, ok = of_prepare(&a);
+    if (ok) ok = of_confirm(&a.original, output, confirm, context, &chosen, reply);
+    if (ok && !chosen) *canceled = true;
+    if (ok && chosen) ok = of_apply(&a);
+    free(a.bytes);
+    if (a.stage && !app_private_stage_close(a.stage))
+        return of_fail(reply, "TEMP_CLEANUP_FAILED", true, "Private original staging could not be safely removed.", output);
     return ok;
 }

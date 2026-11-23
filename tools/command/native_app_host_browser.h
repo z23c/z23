@@ -13,4 +13,8 @@ bool app_host_original_run(const struct app_selection *selection,
     app_host_selection_check check, void *check_context,
     app_confirm_presenter confirm, void *context, bool *canceled,
     struct zcl_command_reply *reply);
+bool app_original_file_run(const struct app_selection *selection, const char *output,
+    app_host_selection_check check, void *check_context,
+    app_confirm_presenter confirm, void *context, bool *canceled,
+    struct zcl_command_reply *reply);
 #endif
