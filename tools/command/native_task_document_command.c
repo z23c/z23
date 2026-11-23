@@ -178,12 +178,17 @@ static struct zcl_result ntd_editor(const struct json_value *input,
     return result;
 }
 
+static bool ntd_interactive(const char *action)
+{
+    return action && (!strcmp(action, "open") || !strcmp(action, "new"));
+}
+
 static struct zcl_result ntd_change(const struct json_value *input,
     struct package_resident_store *store, const char *directory, struct task_document *row)
 {
     const char *action = ntd_string(input, "action");
     if (!action || strcmp(action, "list") == 0) return task_document_read(store, row);
-    if (strcmp(action, "open") == 0 || strcmp(action, "new") == 0)
+    if (ntd_interactive(action))
         return ntd_editor(input, store, directory, strcmp(action, "new") == 0, row);
     static const char *const actions[] = { "add", "edit", "complete", "reopen", "delete", "undo" };
     size_t selected = 0;
@@ -204,7 +209,6 @@ static struct zcl_result ntd_change(const struct json_value *input,
 static bool ntd_render(struct json_value *data, const struct task_document *row,
                         int64_t elapsed, const char *directory, const char *action)
 {
-    bool interactive = action && (!strcmp(action, "open") || !strcmp(action, "new"));
     json_set_object(data);
     if (!json_push_kv_str(data, "data_directory", directory) ||
         !json_push_kv_str(data, "save_state", "Saved") ||
@@ -213,7 +217,7 @@ static bool ntd_render(struct json_value *data, const struct task_document *row,
         !json_push_kv_int(data, "operation_us", elapsed)) return false;
     /* The legacy noninteractive duration includes open/read-or-write/close.
      * A window's lifetime includes user interaction, not storage latency. */
-    if (!interactive && !json_push_kv_int(data, "storage_us", elapsed)) return false;
+    if (!ntd_interactive(action) && !json_push_kv_int(data, "storage_us", elapsed)) return false;
     struct json_value tasks = {0};
     json_set_array(&tasks);
     bool ok = true;

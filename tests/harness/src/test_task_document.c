@@ -102,6 +102,14 @@ static int td_verifier_refusal(struct package_resident_store *store, const char 
     return failures;
 }
 
+static bool td_noninteractive_timing(const struct json_value *data)
+{
+    const struct json_value *operation = json_get(data, "operation_us");
+    const struct json_value *storage = json_get(data, "storage_us");
+    return operation && operation->type == JSON_INT && storage && storage->type == JSON_INT &&
+        json_get_int(operation) >= 0 && json_get_int(operation) == json_get_int(storage);
+}
+
 static bool td_default_call(const char *body, bool success, int64_t revision, const char *title)
 {
     struct json_value input = {0};
@@ -112,12 +120,8 @@ static bool td_default_call(const char *body, bool success, int64_t revision, co
         const struct json_value *tasks = json_get(&reply.data, "tasks");
         const char *saved = json_get_str(json_get(&reply.data, "save_state"));
         const char *actual = json_get_str(json_get(json_at(tasks, 0), "title"));
-        const struct json_value *operation = json_get(&reply.data, "operation_us");
-        const struct json_value *storage = json_get(&reply.data, "storage_us");
         ok = saved && strcmp(saved, "Saved") == 0 &&
-            operation && operation->type == JSON_INT && storage && storage->type == JSON_INT &&
-            json_get_int(operation) >= 0 &&
-            json_get_int(operation) == json_get_int(storage) &&
+            td_noninteractive_timing(&reply.data) &&
             json_get_int(json_get(&reply.data, "revision")) == revision &&
             (title ? actual && strcmp(title, actual) == 0 : json_size(tasks) == 0);
     }
