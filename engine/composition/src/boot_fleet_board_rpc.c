@@ -1199,6 +1199,32 @@ static bool fb_find_query_read(const struct json_value *in,
     return !q->after[0] || fleet_board_slug_valid(q->after);
 }
 
+/* The paths the entry applies to, a few and bounded, so a reader can check
+ * a directory-ranked lesson against the code it is really about. */
+enum { FB_FIND_APPLIES_MAX = 3, FB_FIND_APPLIES_BYTES = 96 };
+static bool fb_find_item_applies(const struct json_value *entry,
+                                 struct json_value *item)
+{
+    const struct json_value *a = json_get(entry, "applies_to");
+    struct json_value out;
+    json_init(&out); json_set_array(&out);
+    bool ok = true;
+    for (size_t i = 0, kept = 0; ok && a && i < json_size(a) &&
+                                 kept < FB_FIND_APPLIES_MAX; i++) {
+        const struct json_value *v = json_at(a, i);
+        const char *s = v && v->type == JSON_STR ? json_get_str(v) : "";
+        struct json_value str;
+        if (!s[0] || strlen(s) > FB_FIND_APPLIES_BYTES) continue;
+        json_init(&str); json_set_str(&str, s);
+        ok = json_push_back(&out, &str);
+        json_free(&str);
+        kept++;
+    }
+    if (ok) ok = json_push_kv(item, "applies_to", &out);
+    json_free(&out);
+    return ok;
+}
+
 static bool fb_find_item_identity(const struct db_fleet_board_post *row,
                                   const struct json_value *entry,
                                   struct json_value *item)
@@ -1207,12 +1233,14 @@ static bool fb_find_item_identity(const struct db_fleet_board_post *row,
     char id[65], host[65];
     fleet_board_id_to_hex(row->post.id, id);
     fleet_board_id_to_hex(row->post.host_pubkey, host);
-    /* Whether THIS node's role store lets the author's key post: a reader
-     * must not present a roleless key's public page as project guidance. */
+    /* Whether THIS node's role store lets the author's key post THIS kind
+     * (wiki: scribe only), the predicate admission uses: a reader must not
+     * present a page from a key that could not have posted it as guidance. */
     bool author_role = zcl_fleet_role_allows(row->post.host_pubkey,
-        ZCL_FLEET_LEAF_BOARD_POST, NULL, NULL, 0);
+        ZCL_FLEET_LEAF_BOARD_POST, fleet_board_kind_name(row->post.kind), NULL, 0);
     return json_push_kv_str(item, "kind", "entry") &&
         json_push_kv_bool(item, "author_role", author_role) &&
+        fb_find_item_applies(entry, item) &&
         json_push_kv(item, "topic", json_get(entry, "topic")) &&
         json_push_kv_str(item, "slug", row->post.slug) &&
         json_push_kv_str(item, "id", id) &&

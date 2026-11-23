@@ -155,14 +155,16 @@ static int cgl_cap_cases(void)
 
 static struct rpc_table *cgl_table;
 static bool cgl_role_ok;
+static bool cgl_role_worker; /* a worker-only key: every kind but wiki */
 
 static bool cgl_role(const uint8_t key[32], const char *leaf, const char *kind,
                      char *why, size_t why_cap, void *ctx)
 {
-    (void)key; (void)leaf; (void)kind; (void)ctx;
-    if (!cgl_role_ok && why && why_cap)
+    (void)key; (void)leaf; (void)ctx;
+    bool allowed = cgl_role_ok && !(cgl_role_worker && kind && !strcmp(kind, "wiki"));
+    if (!allowed && why && why_cap)
         (void)snprintf(why, why_cap, "no role in this fixture");
-    return cgl_role_ok;
+    return allowed;
 }
 
 static char *cgl_rpc(const char *method, const char *params)
@@ -317,9 +319,20 @@ static int cgl_guide_cases(void)
         ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));
         ASSERT(cgl_has(&r, "board-boot-lesson", "exact"));
         ASSERT(!cgl_has(&r, "public-board-lesson", NULL));
-        ASSERT(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")) >= 1);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")), 1);
         zcl_command_reply_free(&r);
+        /* A worker-only key may post a note but never a wiki page: its public
+         * wiki page is dropped, a scribe's is kept. */
         cgl_role_ok = true;
+        cgl_role_worker = true;
+        ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));
+        ASSERT(!cgl_has(&r, "public-board-lesson", NULL));
+        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")), 1);
+        zcl_command_reply_free(&r);
+        cgl_role_worker = false;
+        ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));
+        ASSERT(cgl_has(&r, "public-board-lesson", "exact"));
+        zcl_command_reply_free(&r);
         /* A file changed after the lesson was written marks it stale, even
          * when the lesson is only two days old. */
         ASSERT(cgl_commit_file(root, "engine/composition/src/boot_fleet_board.c"));
@@ -328,6 +341,17 @@ static int cgl_guide_cases(void)
         ASSERT_STR_EQ(json_get_str(json_get(json_at(l, 0), "slug")), "board-boot-lesson");
         ASSERT(json_get_bool(json_get(json_at(l, 0), "stale")));
         ASSERT_STR_EQ(json_get_str(json_get(json_at(l, 0), "stale_reason")), "applies_to_changed");
+        zcl_command_reply_free(&r);
+        /* The same lesson reached by directory prefix is checked against its own
+         * applies_to, not reported fresh. */
+        ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board_ingest.c", &r));
+        l = json_get(&r.data, "lessons");
+        for (size_t i = 0; i < json_size(l); i++)
+            if (!strcmp(json_get_str(json_get(json_at(l, i), "slug")), "board-boot-lesson")) {
+                ASSERT_STR_EQ(json_get_str(json_get(json_at(l, i), "match")), "prefix");
+                ASSERT_STR_EQ(json_get_str(json_get(json_at(l, i), "stale_reason")), "applies_to_changed");
+            }
+        ASSERT(cgl_has(&r, "board-boot-lesson", "prefix"));
         zcl_command_reply_free(&r);
         ASSERT_EQ(test_rm_rf_recursive(root), 0);
         PASS();

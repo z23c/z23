@@ -55,6 +55,8 @@
 #define CB_DIR_PAGES 4
 #define CB_LESSON_BYTES 1500
 #define CB_STALE_DAYS 30
+#define CB_LESSON_APPLIES 3
+#define CB_MAX_DROPPED 64
 
 struct cb_owner {
     char file[CB_PATH_CAP];
@@ -67,7 +69,8 @@ struct cb_lesson {
     char rule[CB_RULE_CAP];
     struct json_value matched;
     char updated[24];
-    char applies[CB_QUERY_CAP]; /* exact-match file, else empty */
+    char applies[CB_LESSON_APPLIES][CB_QUERY_CAP]; /* paths checked for change */
+    size_t napplies;
     unsigned char rank;
     bool pub, author_role;
     int64_t age_days; /* -1 when undated */
@@ -92,6 +95,8 @@ struct cb_brief {
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
     bool lessons_capped, lessons_truncated;
     unsigned lessons_untrusted; /* public pages dropped: author holds no role */
+    uint64_t dropped[CB_MAX_DROPPED]; /* hashes of the pages counted */
+    size_t ndropped;
     int64_t now;
     bool lesson_lost; /* a lesson could not be copied: the query fails */
     char revision[41];
@@ -579,6 +584,36 @@ static void cb_offer_lesson(struct cb_brief *b, struct cb_lesson *in)
     }
 }
 
+/* Count a roleless public page once, however many queries return it. */
+static void cb_count_untrusted(struct cb_brief *b, const char *slug)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (const char *p = slug; *p; p++)
+        h = (h ^ (unsigned char)*p) * 1099511628211ULL;
+    for (size_t i = 0; i < b->ndropped; i++)
+        if (b->dropped[i] == h)
+            return;
+    if (b->ndropped < CB_MAX_DROPPED)
+        b->dropped[b->ndropped++] = h;
+    b->lessons_untrusted++;
+}
+
+/* The paths a lesson says it applies to, to be checked for change: the
+ * entry's own applies_to (bounded), else the file of an exact query. */
+static void cb_lesson_applies(struct cb_lesson *l, const struct json_value *e,
+                              const char *fallback)
+{
+    const struct json_value *a = json_get(e, "applies_to");
+    for (size_t i = 0; a && i < json_size(a) && l->napplies < CB_LESSON_APPLIES; i++) {
+        const struct json_value *v = json_at(a, i);
+        const char *s = v && v->type == JSON_STR ? json_get_str(v) : "";
+        if (s[0] && strlen(s) < CB_QUERY_CAP)
+            memcpy(l->applies[l->napplies++], s, strlen(s) + 1);
+    }
+    if (!l->napplies && fallback[0] && strlen(fallback) < CB_QUERY_CAP)
+        memcpy(l->applies[l->napplies++], fallback, strlen(fallback) + 1);
+}
+
 static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e,
                            enum cb_rank rank, bool pub, const char *applies)
 {
@@ -594,7 +629,7 @@ static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e,
     l.author_role = json_get_bool(json_get(e, "author_role"));
     if (pub && !l.author_role) {
         /* A public page from a key with no role is untrusted text. */
-        b->lessons_untrusted++;
+        cb_count_untrusted(b, slug);
         return true;
     }
     memcpy(l.slug, slug, strlen(slug) + 1);
@@ -602,7 +637,7 @@ static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e,
     (void)cb_copy(l.updated, sizeof(l.updated), updated, strlen(updated));
     l.rank = rank;
     l.pub = pub;
-    memcpy(l.applies, applies, strlen(applies) + 1);
+    cb_lesson_applies(&l, e, applies);
     json_init(&l.matched);
     const struct json_value *matched = json_get(e, "matched");
     if (matched && !json_copy_checked(&l.matched, matched)) {
@@ -743,6 +778,16 @@ static int64_t cb_file_commit_time(const struct cb_brief *b, const char *file)
     return (int64_t)strtoll(out, NULL, 10);
 }
 
+/* True when any path the lesson applies to has a commit after `when`. */
+static bool cb_applies_changed(const struct cb_brief *b, const struct cb_lesson *l,
+                               int64_t when)
+{
+    for (size_t i = 0; i < l->napplies; i++)
+        if (cb_file_commit_time(b, l->applies[i]) > when)
+            return true;
+    return false;
+}
+
 /* Age and staleness for what was kept. Stale: undated, older than
  * CB_STALE_DAYS, or the file the lesson applies to changed after it was
  * written. */
@@ -758,7 +803,7 @@ static void cb_judge_lessons(struct cb_brief *b)
             continue;
         }
         l->age_days = b->now > when ? (b->now - when) / 86400 : 0;
-        if (l->applies[0] && cb_file_commit_time(b, l->applies) > when)
+        if (cb_applies_changed(b, l, when))
             l->stale_reason = "applies_to_changed";
         else if (l->age_days > CB_STALE_DAYS)
             l->stale_reason = "age";
