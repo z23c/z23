@@ -886,6 +886,20 @@ _test_next:;
     return failures;
 }
 
+static int skycombat_held_keyboard_fire(void)
+{
+    int failures = 0;
+    const char *args[] = {QA_ENTRY, "--fixture-held-left-ctrl", "--qa-frames=4", NULL};
+    char output[8192] = {0}, diagnostics[513] = {0};
+    TEST("gameplay: holding Left Ctrl fires the continuous gun stream each frame") {
+        ASSERT_EQ(skycombat_agent_capture(args, output, sizeof(output), diagnostics), 0);
+        ASSERT(strstr(output, "QA_TEST status=0 windows=1 frames=4"));
+        ASSERT(strstr(output, "QA_HELD_CTRL weapon_calls=4 bullet_calls=4"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_skycombat_qa_frames(void);
 int test_skycombat_qa_frames(void)
 {
@@ -953,6 +967,7 @@ _test_next:;
     failures += skycombat_capture_colour();
     failures += skycombat_capture_usage();
     failures += skycombat_capture_write_failures();
+    failures += skycombat_held_keyboard_fire();
     failures += skycombat_agent_session();
     failures += skycombat_agent_refusals();
     failures += skycombat_agent_resize_failure();

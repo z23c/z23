@@ -32,6 +32,8 @@ static float qa_stick_x, qa_stick_y;
 static bool qa_agent;
 static bool qa_resize_fails;
 static bool qa_capture_ok;
+static bool qa_hold_left_ctrl;
+static unsigned qa_weapon_manager_calls, qa_bullet_calls;
 static bool qa_broken_reply;
 static unsigned qa_close_after = 64;
 static bool qa_window_failed;
@@ -230,10 +232,14 @@ RenderTexture2D LoadRenderTexture([[maybe_unused]] int width, [[maybe_unused]] i
 bool WindowShouldClose(void) { return qa_frames >= qa_close_after; }
 float GetFrameTime(void) { return 1.0f / 60.0f; }
 double GetTime(void) { return (double)qa_frames / 60.0; }
-bool IsKeyDown([[maybe_unused]] int key) { ++qa_keys; return qa_agent; }
+bool IsKeyDown(int key) {
+    ++qa_keys;
+    return (qa_hold_left_ctrl && key == KEY_LEFT_CONTROL) || qa_agent;
+}
 void aircraft_update_responsive([[maybe_unused]] aircraft_t* aircraft, float stick_x, float stick_y, [[maybe_unused]] float dt) { ++qa_ticks; qa_stick_x = stick_x; qa_stick_y = stick_y; }
 bool IsKeyPressed(int key) {
     ++qa_keys;
+    if (qa_hold_left_ctrl && key == KEY_LEFT_CONTROL) return qa_frames == 0;
     if (qa_agent) return true;
     return qa_hud_keys && ((key == KEY_F6 && qa_frames == 1) ||
         (key == KEY_F7 && (qa_frames == 2 || qa_frames == 3)));
@@ -243,8 +249,8 @@ Vector3 aircraft_get_forward_vector([[maybe_unused]] aircraft_t* aircraft) { ret
 void effects_screen_shake([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] float intensity, [[maybe_unused]] float duration) {  }
 void effects_screen_flash([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] Color color, [[maybe_unused]] float duration) {  }
 void effects_spawn_powerup_collect([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] Vector3 pos, [[maybe_unused]] Color color) {  }
-void aircraft_manager_fire_weapon([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] int aircraft_id) {  }
-void weapons_fire_bullet([[maybe_unused]] weapons_system_t* weapons, [[maybe_unused]] Vector3 position, [[maybe_unused]] Vector3 direction, [[maybe_unused]] float yaw) {  }
+void aircraft_manager_fire_weapon([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] int aircraft_id) { ++qa_weapon_manager_calls; }
+void weapons_fire_bullet([[maybe_unused]] weapons_system_t* weapons, [[maybe_unused]] Vector3 position, [[maybe_unused]] Vector3 direction, [[maybe_unused]] float yaw) { ++qa_bullet_calls; }
 void effects_spawn_laser_hit([[maybe_unused]] effects_manager_t* manager, [[maybe_unused]] Vector3 pos, [[maybe_unused]] Vector3 normal, [[maybe_unused]] Color color) {  }
 void aircraft_manager_update([[maybe_unused]] aircraft_manager_t* manager, [[maybe_unused]] float dt) {  }
 void powerup_manager_update([[maybe_unused]] powerup_manager_t* manager, [[maybe_unused]] float dt) {  }
@@ -276,6 +282,10 @@ static bool qa_agent_flag(const char *arg, int *prefix)
 {
     if (strcmp(arg, "--fixture-resize-fails") == 0) qa_resize_fails = true;
     else if (strcmp(arg, "--fixture-capture-ok") == 0) qa_capture_ok = true;
+    else if (strcmp(arg, "--fixture-held-left-ctrl") == 0) {
+        qa_hold_left_ctrl = true;
+        qa_capture_ok = true;
+    }
     else if (strcmp(arg, "--fixture-prefix-nul") == 0) *prefix = 0;
     else if (strcmp(arg, "--fixture-prefix-sub") == 0) *prefix = 26;
     else if (strcmp(arg, "--fixture-broken-reply") == 0) qa_broken_reply = true;
@@ -441,6 +451,9 @@ static int qa_finish(int result, FILE *agent_input)
     if (agent_input) fclose(agent_input);
     if (!(qa_original_closed & 4u)) fprintf(qa_agent ? stderr : stdout, "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u\n",
         result, qa_windows, qa_frames, qa_closed, qa_destroyed, qa_unloads);
+    if (qa_hold_left_ctrl && !(qa_original_closed & 4u))
+        fprintf(stdout, "QA_HELD_CTRL weapon_calls=%u bullet_calls=%u\n",
+                qa_weapon_manager_calls, qa_bullet_calls);
     if (qa_agent && !(qa_original_closed & 4u)) fprintf(stderr, "QA_AGENT ticks=%u keys=%u polls=%u stick=%.3f,%.3f\n",
         qa_ticks, qa_keys, qa_polls, (double)qa_stick_x, (double)qa_stick_y);
     if (qa_resident && !(qa_original_closed & 4u)) fprintf(stderr, "QA_RESIDENT events=%u\n", qa_events);

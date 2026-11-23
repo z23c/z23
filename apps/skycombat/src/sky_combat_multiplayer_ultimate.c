@@ -844,7 +844,7 @@ static void control_local_player(multiplayer_game_t *game, input_state_fast_t in
         apply_boost_and_throttle(game, player, input, dt, external);
 
         /* Weapons */
-        if (input.fire_guns || (!external && !game->input_system->model.connected && IsKeyPressed(KEY_LEFT_CONTROL))) {
+        if (input.fire_guns || (!external && !game->input_system->model.connected && IsKeyDown(KEY_LEFT_CONTROL))) {
             aircraft_manager_fire_weapon(game->aircraft_mgr, game->local_player_id);
 
             /* Weapon effects */
