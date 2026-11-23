@@ -668,12 +668,13 @@ static bool al_setup(struct library *w, const struct app_launch_env *env,
     if (!al_tasks_setup_present(r, datadir)) return true;
     return al_prepare_source(w, env, reply, false) && al_setup_encode(w, exe, datadir, reply);
 }
-static bool al_share_path(struct library *w, const uint8_t source[32], struct zcl_command_reply *reply)
+static bool al_share_path(struct library *w, const uint8_t source[32], const char *directory, struct zcl_command_reply *reply)
 {
 #if !defined(_WIN32)
-    const char *home = getenv("HOME"); char resolved[4096], version[65]; struct stat st;
+    const char *home = directory ? directory : getenv("HOME"); char resolved[4096], version[65]; struct stat st;
     if (!home || home[0] != '/' || !realpath(home, resolved) || stat(resolved, &st) || !S_ISDIR(st.st_mode))
-        return al_fail(reply, "HOME_UNAVAILABLE", "Cannot locate your home folder.");
+        return al_fail(reply, directory ? "OUTPUT_UNAVAILABLE" : "HOME_UNAVAILABLE",
+                       directory ? "Cannot locate the share destination." : "Cannot locate your home folder.");
     zcl_hex_encode(source, 32, version);
     for (unsigned i = 0; i < 1000; ++i) {
         int n = snprintf(w->shared_path, sizeof(w->shared_path), "%s/z23-share-%.12s-%u.z23share", resolved, version, i);
@@ -687,7 +688,7 @@ static bool al_share_path(struct library *w, const uint8_t source[32], struct zc
     }
     return al_fail(reply, "OUTPUT_UNAVAILABLE", "No free share filename is available.");
 #else
-    (void)w; (void)source; return al_fail(reply, "PLATFORM_UNAVAILABLE", "Sharing is unavailable on this platform.");
+    (void)w; (void)source; (void)directory; return al_fail(reply, "PLATFORM_UNAVAILABLE", "Sharing is unavailable on this platform.");
 #endif
 }
 static void al_share_notice_failure(struct library *w, struct zcl_command_reply *reply,
@@ -700,7 +701,7 @@ static void al_share_notice_failure(struct library *w, struct zcl_command_reply 
     if (created) ok = ok && json_push_kv_str(&facts, "output", w->shared_path);
     if (!ok || !json_push_kv(&reply->data, "failure_facts", &facts))
         (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                       "Look for z23-share files in your home folder before retrying.");
+                       "Look for z23-share files in the displayed destination before retrying.");
     json_free(&facts);
 }
 static bool al_share_notice(struct app_confirm *view, const char *path, char *why, size_t cap)
@@ -786,7 +787,7 @@ static bool al_share_result(struct library *w, struct app_confirm *notice,
             "Share completed but its file location could not be verified.", false);
     else if (!app_confirm_show(notice, w->notice, w->prepare_context, why, cap))
         al_share_notice_failure(w, reply, "PRESENTATION_FAILED",
-            "Share file created, but confirmation could not be shown. Look for z23-share files in your home folder.", true);
+            "Share file created, but confirmation could not be shown. Inspect the displayed destination.", true);
     else if (al_reveal_enabled(notice) && !(w->revealer ? w->revealer : al_reveal_native)(w->prepare_context, w->shared_path)) {
         al_share_notice_failure(w, reply, "REVEAL_FAILED",
             "The share file was created, but opening its location could not be confirmed.", true);
@@ -799,7 +800,7 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
 {
     const struct library_row *row = &w->rows[w->index];
     if (!row->saved) return al_fail(reply, "SELECTION_UNAVAILABLE", "Keep a version before sharing.");
-    if (!al_current(row, env, reply) || !al_share_path(w, row->selection.version, reply)) return false;
+    if (!al_current(row, env, reply) || !al_share_path(w, row->selection.version, NULL, reply)) return false;
     struct app_confirm *notice = zcl_calloc(1, sizeof(*notice), "library-share-notice");
     char why[256] = {0};
     if (!notice) return al_fail(reply, "OUT_OF_MEMORY", "Cannot prepare share notice.");
@@ -908,12 +909,33 @@ static bool al_host_original(struct library *w, const struct app_launch_env *env
     if (ok && canceled) { w->operation_canceled = true; return true; }
     return false;
 }
+static bool al_original_path(struct library *w, const struct library_row *row,
+                             struct zcl_command_reply *reply)
+{
+#if defined(_WIN32)
+    return al_share_path(w, row->selection.parent, NULL, reply);
+#else
+    const char *directory = getenv("HOME");
+    char resolved_home[4096];
+    if (directory && directory[0] == '/' && realpath(directory, resolved_home)) directory = resolved_home;
+    else directory = NULL;
+    if (app_original_parent_safe(directory)) return al_share_path(w, row->selection.parent, directory, reply);
+    directory = row->selection.datadir;
+    if (!app_original_parent_safe(directory)) {
+        al_fail(reply, "OUTPUT_UNAVAILABLE", "No safe folder. Restore private access to your app profile, then retry.");
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Choose a private app profile you own, then retry Save original share file.");
+        return false;
+    }
+    return al_share_path(w, row->selection.parent, directory, reply);
+#endif
+}
 static bool al_original_file(struct library *w, const struct app_launch_env *env,
                              struct zcl_command_reply *reply)
 {
     const struct library_row *row = &w->rows[w->index];
     struct al_host_check check = {row, env}; bool canceled = false;
-    if (!row->saved || !al_current(row, env, reply) || !al_share_path(w, row->selection.parent, reply)) return false;
+    if (!row->saved || !al_current(row, env, reply) || !al_original_path(w, row, reply)) return false;
     if (!app_original_file_run(&row->selection, w->shared_path, al_host_current, &check,
                                w->notice, w->prepare_context, &canceled, reply)) return false;
     if (canceled) { w->operation_canceled = true; w->shared_path[0] = 0; return true; }

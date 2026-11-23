@@ -675,7 +675,7 @@ static bool rr_null_presenter_case(const struct app_selection *selection)
     ok = !ok && !canceled && rr_plans == 1 && rr_pins == 0 && rr_commits == 0 && !reply.error.mutated;
     zcl_command_reply_free(&reply); return ok;
 }
-struct rr_route { struct rr_ui ui; bool confirmed; const struct app_launch_env *env; const struct app_selection *saved; struct receive_fixture *fixture; };
+struct rr_route { struct rr_ui ui; bool confirmed; const struct app_launch_env *env; const struct app_selection *saved; struct receive_fixture *fixture; const char *expected_path; };
 static bool rr_tamper_stage(const char *datadir)
 {
     DIR *dir = opendir(datadir); if (!dir) return false;
@@ -765,7 +765,10 @@ static bool rr_file_case(struct receive_fixture *f, const struct app_selection *
     struct rr_file_presenter p = {.fixture = f, .selection = selection}; bool canceled = false;
     rr_mode = mode;
     bool result = app_original_file_run(selection, path, rr_selection_current, NULL, rr_file_present, &p, &canceled, &reply);
-    bool ok = p.shown && rr_file_outcome(mode, path, result, canceled, &reply);
+    bool ok = (mode == 5 ? !p.shown && strstr(reply.error.next_action, "private folder") : p.shown) &&
+        rr_file_outcome(mode, path, result, canceled, &reply);
+    if (!ok) printf("original file mode=%u shown=%d result=%d canceled=%d code=%s action=%s\n",
+                    mode, p.shown, result, canceled, reply.error.code, reply.error.next_action);
     if (mode == 1 && ok) ok = rr_file_verify(f, path, &reply);
     zcl_command_reply_free(&reply); return ok;
 }
@@ -803,12 +806,26 @@ static bool rr_route_present(void *context, const struct zcl_present_model_v1 *m
         if (!strcmp(model->actions[i].id, rr_mode == 8 ? "save-original" : "share-original")) { event->action_index = i; return true; }
     return false;
 }
+static bool rr_expected_path(const struct zcl_present_model_v1 *model, const char *path)
+{
+    if (!path) return true;
+    struct zcl_present_model_v1 expected;
+    zcl_present_model_init_v1(&expected, ZCL_PRESENT_MODEL_STATUS_CARD);
+    if (!app_confirm_path(&expected, "Save to: ", path)) return false;
+    unsigned start = 0;
+    while (start < model->item_count && strncmp(model->items[start].value, "Save to: ", 9)) ++start;
+    if (start + expected.item_count > model->item_count) return false;
+    for (uint32_t i = 0; i < expected.item_count; ++i)
+        if (strcmp(model->items[start + i].value, expected.items[i].value)) return false;
+    return true;
+}
 static bool rr_route_confirm(void *context, const struct zcl_present_model_v1 *model,
     const struct zcl_present_window_pages_v1 *pages, const struct zcl_present_window_live_view_v1 *live,
     char *why, size_t cap)
 {
     struct rr_route *route = context;
     if (rr_mode == 8 && !strcmp(model->request_id, "library-original-file")) {
+        if (!rr_expected_path(model, route->expected_path)) return false;
         struct rr_file_presenter p = {.fixture = route->fixture, .selection = route->saved};
         bool ok = rr_file_present(&p, model, pages, live, why, cap);
         route->confirmed = p.shown; return ok;
@@ -827,25 +844,60 @@ static bool rr_route_confirm(void *context, const struct zcl_present_model_v1 *m
     }
     return rr_cancel_original(&route->confirmed, model, pages, live, why, cap);
 }
-static bool rr_file_route(struct receive_fixture *f, const struct app_launch_env *env, const struct app_selection *saved)
+static bool rr_file_route_home(const char *home, bool unsafe_home)
 {
-    const char *old = getenv("HOME"); char *copy = old ? strdup(old) : NULL;
-    if ((old && !copy) || setenv("HOME", f->world.root, 1)) { free(copy); return false; }
-    struct rr_route route = {.env = env, .saved = saved, .fixture = f}; struct zcl_command_reply reply;
-    zcl_command_reply_init(&reply, "zcl.test.original-file-route.v1"); rr_mode = 8;
-    zcl_test_app_library_native_at(env, NULL, NULL, &reply, rr_route_present, &route, rr_route_confirm);
-    char path[1100], release[65]; zcl_hex_encode(saved->parent, 32, release);
-    int n = snprintf(path, sizeof(path), "%s/z23-share-%.12s-0.z23share", f->world.root, release);
+    return (!unsafe_home || (mkdir(home, 0700) == 0 && chmod(home, 0775) == 0)) &&
+        setenv("HOME", home, 1) == 0;
+}
+static bool rr_file_route_restore(const char *home)
+{ return home ? setenv("HOME", home, 1) == 0 : unsetenv("HOME") == 0; }
+static bool rr_file_route_verify(struct receive_fixture *f, const char *path)
+{
     struct zcl_package_copy source = {0}; struct zcl_command_reply inspect;
     zcl_command_reply_init(&inspect, "zcl.test.original-file-route.inspect.v1");
     bool opened = zcl_package_copy_open_as(f->destination, ZCL_PACKAGE_COPY_READ, &source, &inspect, "test");
     uint8_t carrier[32], sha[32];
-    bool ok = route.confirmed && n > 0 && (size_t)n < sizeof(path) && opened && rr_verify(path, f, source.fork_tree, carrier, sha);
+    bool ok = opened && rr_verify(path, f, source.fork_tree, carrier, sha);
     if (opened) zcl_package_copy_close(&source);
-    zcl_command_reply_free(&inspect); zcl_command_reply_free(&reply);
-    if (copy) { if (setenv("HOME", copy, 1)) ok = false; } else if (unsetenv("HOME")) ok = false;
+    zcl_command_reply_free(&inspect); return ok;
+}
+static bool rr_file_route_once(struct receive_fixture *f, const struct app_launch_env *env,
+    const struct app_selection *saved, bool unsafe_home)
+{
+    const char *old = getenv("HOME"); char *copy = old ? strdup(old) : NULL;
+    char home[1100], path[1100], release[65]; zcl_hex_encode(saved->parent, 32, release);
+    int h = snprintf(home, sizeof(home), "%s/unsafe-save-home", f->world.root);
+    int n = snprintf(path, sizeof(path), "%s/z23-share-%.12s-0.z23share",
+                     unsafe_home ? saved->datadir : f->world.root, release);
+    if ((old && !copy) || h <= 0 || (size_t)h >= sizeof(home) || n <= 0 || (size_t)n >= sizeof(path) ||
+        !rr_file_route_home(unsafe_home ? home : f->world.root, unsafe_home)) { free(copy); return false; }
+    struct rr_route route = {.env = env, .saved = saved, .fixture = f, .expected_path = path}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.original-file-route.v1"); rr_mode = 8;
+    zcl_test_app_library_native_at(env, NULL, NULL, &reply, rr_route_present, &route, rr_route_confirm);
+    bool ok = route.confirmed && rr_file_route_verify(f, path);
+    if (!ok) printf("original file route unsafe_home=%d confirmed=%d code=%s\n", unsafe_home, route.confirmed, reply.error.code);
+    zcl_command_reply_free(&reply);
+    if (!rr_file_route_restore(copy)) ok = false;
     free(copy); return ok;
 }
+static bool rr_file_route_blocked(struct receive_fixture *f, const struct app_launch_env *env,
+    const struct app_selection *saved)
+{
+    const char *old = getenv("HOME"); char *copy = old ? strdup(old) : NULL;
+    char home[1100]; int n = snprintf(home, sizeof(home), "%s/unsafe-save-home", f->world.root);
+    if ((old && !copy) || n <= 0 || (size_t)n >= sizeof(home) || setenv("HOME", home, 1)) { free(copy); return false; }
+    if (chmod(saved->datadir, 0775)) { (void)rr_file_route_restore(copy); free(copy); return false; }
+    struct rr_route route = {.env = env, .saved = saved, .fixture = f}; struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.test.original-file-route.v1"); rr_mode = 8;
+    zcl_test_app_library_native_at(env, NULL, NULL, &reply, rr_route_present, &route, rr_route_confirm);
+    bool ok = !route.confirmed && !reply.error.mutated && !strcmp(reply.error.code, "OUTPUT_UNAVAILABLE") &&
+        strstr(reply.error.message, "Restore private access to your app profile");
+    if (chmod(saved->datadir, 0700)) ok = false;
+    if (!rr_file_route_restore(copy)) ok = false;
+    zcl_command_reply_free(&reply); free(copy); return ok;
+}
+static bool rr_file_route(struct receive_fixture *f, const struct app_launch_env *env, const struct app_selection *saved)
+{ return rr_file_route_once(f, env, saved, false) && rr_file_route_once(f, env, saved, true) && rr_file_route_blocked(f, env, saved); }
 static bool rr_library_route(const struct app_launch_env *env, const struct app_selection *saved, unsigned mode)
 {
     struct rr_route route = {.env = env, .saved = saved}; struct zcl_command_reply reply;

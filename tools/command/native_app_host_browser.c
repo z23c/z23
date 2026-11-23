@@ -17,6 +17,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define HB_PAGES 16u
 struct hb_position { char host[65], carrier[65]; };
@@ -492,11 +497,25 @@ static bool of_confirm(const struct app_received_original *o, const char *path,
     return shown || of_fail(r, "PRESENTATION_FAILED", false, "The original file choice could not be displayed.", path);
 }
 
+bool app_original_parent_safe(const char *path)
+{
+#if defined(_WIN32)
+    (void)path; return false;
+#else
+    if (!path || !platform_private_directory_ancestors_safe(path)) return false;
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    bool ok = fd >= 0 && fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) &&
+        st.st_uid == geteuid() && !(st.st_mode & 022) && access(path, W_OK | X_OK) == 0;
+    if (fd >= 0) close(fd);
+    return ok;
+#endif
+}
 static bool of_destination(const char *output, char parent[4400])
 {
     char resolved[4400];
     return platform_private_destination_resolve(output, resolved, sizeof(resolved), parent, 4400) &&
-        !strcmp(output, resolved) && platform_private_directory_ancestors_safe(parent);
+        !strcmp(output, resolved) && app_original_parent_safe(parent);
 }
 static bool of_write(const char *output, const uint8_t *bytes, size_t size, const char *sha,
                      struct zcl_command_reply *r)
@@ -510,7 +529,7 @@ static bool of_write(const char *output, const uint8_t *bytes, size_t size, cons
     struct platform_private_file f; platform_private_file_init(&f);
     bool exists = false, published = false;
     bool ok = platform_private_file_create(staging, &f) && platform_private_file_write_at(&f, bytes, size, 0) &&
-        app_private_stage_matches(stage, sha, (int64_t)size) && platform_private_directory_ancestors_safe(parent);
+        app_private_stage_matches(stage, sha, (int64_t)size) && app_original_parent_safe(parent);
     if (ok) { published = true; ok = platform_private_file_publish_no_clobber(&f, staging, output, &exists) && !exists; }
     platform_private_file_close(&f);
     bool cleaned = app_private_stage_close(stage);
@@ -562,6 +581,13 @@ bool app_original_file_run(const struct app_selection *selection, const char *ou
     *canceled = false;
     struct of_action a = {.selection = selection, .output = output, .check = check,
         .check_context = check_context, .confirm = confirm, .context = context, .reply = reply};
+    char parent[4400];
+    if (!of_destination(output, parent)) {
+        of_fail(reply, "OUTPUT_UNAVAILABLE", false, "The share destination cannot be safely resolved.", output);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Choose a private folder you own, then retry saving the original file.");
+        return false;
+    }
     bool chosen = false, ok = of_prepare(&a);
     if (ok) ok = of_confirm(&a.original, output, confirm, context, &chosen, reply);
     if (ok && !chosen) *canceled = true;
