@@ -3483,6 +3483,39 @@ static bool ast_receive(struct ac_fixture *f, const char *output, const char *pu
     free(text);
     return abc_as(f->world.alice_home) && ok;
 }
+static bool ast_missing_key_next(const struct json_value *next, const char *output)
+{
+    const struct json_value *input = json_get(next, "input");
+    return acs_string(next, "command", "discover.describe") && input && input->type == JSON_OBJ &&
+        json_size(input) == 1 && acs_string(input, "path", "app.library") && access(output, F_OK) != 0;
+}
+static bool ast_missing_key_doc(const struct json_value *doc, const char *output)
+{
+    const struct json_value *err = json_get(doc, "error"), *next = json_at(json_get(doc, "next"), 0);
+    const char *message = json_get_str(json_get(err, "message"));
+    const char *action = json_get_str(json_get(err, "next_action"));
+    const struct json_value *mutated = json_get(err, "mutated");
+    const struct json_value *human = json_get(err, "human_action_required");
+    return acs_string(err, "code", "SIGNING_KEY_REQUIRED") && message && strstr(message, "My Apps in this profile") &&
+        action && strstr(action, "Create share file") && strstr(action, "Keep") && mutated &&
+        mutated->type == JSON_BOOL && !json_get_bool(mutated) && human && human->type == JSON_BOOL &&
+        json_get_bool(human) && ast_missing_key_next(next, output);
+}
+static bool ast_missing_key_wire(const char *output)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = abc_spec("app.share");
+    struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+        .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+    struct json_value input, doc; json_init(&input); json_init(&doc); json_set_object(&input);
+    bool ok = spec && json_push_kv_str(&input, "name", "skycombat") && json_push_kv_str(&input, "output", output);
+    char wire[8193]; enum zcl_command_exit code;
+    size_t n = ok ? zcl_command_registry_execute_json(reg, spec, &ctx, &input, false,
+        spec->path, "normal", 0, 0, NULL, wire, sizeof(wire), &code) : 0;
+    ok = n && n <= 8192 && code != ZCL_COMMAND_EXIT_OK && json_read(&doc, wire, n);
+    ok = ok && ast_missing_key_doc(&doc, output);
+    json_free(&doc); json_free(&input); return ok;
+}
 static bool ast_missing_key(struct ac_fixture *f, const char *version, const char *output, const char *publisher)
 {
     char key[900], backup[900];
@@ -3494,7 +3527,7 @@ static bool ast_missing_key(struct ac_fixture *f, const char *version, const cha
     bool ok = ast_run(&p, &reply) && !p.observed && reply.status != ZCL_COMMAND_STATUS_PASSED &&
         !strcmp(reply.error.code, "SIGNING_KEY_REQUIRED") && !reply.error.mutated;
     zcl_command_reply_free(&reply);
-    ok = ok && ast_expected_key_refused(f, version, output, publisher);
+    ok = ok && ast_missing_key_wire(output) && ast_expected_key_refused(f, version, output, publisher);
     bool restored = rename(backup, key) == 0;
     return ok && restored;
 }

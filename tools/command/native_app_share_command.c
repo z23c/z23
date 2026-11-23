@@ -81,7 +81,13 @@ static bool sh_key(struct sh_work *w, struct zcl_command_reply *reply)
 {
     bool exists = false;
     if (!app_personalize_key_probe(reply, w->key, sizeof(w->key), w->publisher, &exists)) return false;
-    return exists || sh_fail(reply, "SIGNING_KEY_REQUIRED", "No local signing key exists; personalize this copy first.");
+    if (exists) return true;
+    sh_fail(reply, "SIGNING_KEY_REQUIRED", "No local signing key exists. Open My Apps in this profile, select this app and choose Share this version.");
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+        "Choose Create share file, review the personal copy, then preview and Keep it before sharing.");
+    reply->error.human_action_required = true;
+    (void)zcl_command_reply_add_next(reply, "discover.describe", "{\"path\":\"app.library\"}", "Open My Apps in this profile to prepare the selected app for sharing.");
+    return false;
 }
 static bool sh_call(const struct zcl_command_request *request, struct sh_work *w,
                     bool commit, struct zcl_command_reply *out)
