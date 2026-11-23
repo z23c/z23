@@ -18,6 +18,10 @@
  *      the lane's own variable never perturbs the cache keyspace.
  *   6. Only a provably empty verdict store skips the advisory probe; accepted
  *      proofs still seed, while unexpected entries and invalid roots do not.
+ *   7. The lane samples about one exact attempt in eight by attempt key and
+ *      never a universal one; on, off or sampled out, the receipt and the
+ *      test dimension's child receipt are byte-identical, and a sampled
+ *      proof still audits divergences=0 and seeds.
  */
 
 #include "test/test_core.h"
@@ -516,6 +520,183 @@ _test_next:;
     return failures;
 }
 
+/* ── Sampling: the lane runs on about one exact selection in eight ── */
+
+static int tcs_sampling_checks(void)
+{
+    int failures = 0;
+    TEST("testcache shadow: about one exact attempt in eight is sampled, deterministically; universal never") {
+        unsigned sampled = 0;
+        for (unsigned i = 0; i < 4096; i++) {
+            char key[64];
+            (void)snprintf(key, sizeof(key), "%040u-%040u", i, i * 7u + 3u);
+            bool once = zcl_dev_proof_test_shadow_sampled(key, false);
+            ASSERT(once == zcl_dev_proof_test_shadow_sampled(key, false));
+            ASSERT(!zcl_dev_proof_test_shadow_sampled(key, true));
+            sampled += once ? 1u : 0u;
+        }
+        ASSERT(sampled >= 384u && sampled <= 640u);
+        ASSERT(!zcl_dev_proof_test_shadow_sampled("", false));
+        ASSERT(!zcl_dev_proof_test_shadow_sampled(NULL, false));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* An attempt key the lane does (`want`) or does not sample. */
+static bool tcs_lane_key(bool want, char out[64])
+{
+    for (unsigned i = 0; i < 4096; i++) {
+        (void)snprintf(out, 64, "lane-%u-base", i);
+        if (zcl_dev_proof_test_shadow_sampled(out, false) == want)
+            return true;
+    }
+    return false;
+}
+
+/* A stub runner: the probe-only output of two groups (one predicted PASS),
+ * or the seed summary when asked to seed. */
+static bool tcs_lane_runner(const char *dir, char *runner, size_t cap)
+{
+    static const char body[] =
+        "#!/bin/sh\n"
+        "for a in \"$@\"; do\n"
+        "  if [ \"$a\" = --cache-seed-pass ]; then\n"
+        "    echo 'SEED-SUMMARY stored=2 attempted=2 failed=0'; exit 0\n"
+        "  fi\n"
+        "done\n"
+        "echo 'PROBE test_lane_a HIT ok 0123456789ab'\n"
+        "echo 'PROBE test_lane_b MISS ok 0123456789ab'\n"
+        "echo 'PROBE-SUMMARY groups=2 would_reuse=1 must_run=1 uncacheable=0'\n";
+    if (snprintf(runner, cap, "%s/runner", dir) >= (int)cap) return false;
+    FILE *f = fopen(runner, "wb");
+    if (!f) return false;
+    bool ok = fwrite(body, 1, sizeof(body) - 1, f) == sizeof(body) - 1;
+    return fclose(f) == 0 && ok && chmod(runner, 0700) == 0;
+}
+
+/* The cold test log the audit reads for `key`: both groups ran and passed. */
+static bool tcs_lane_cold(const char *dir, const char *key)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s.test.log", dir, key) >=
+        (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    int n = fprintf(f, "[done    ] noise\nSUITE VERDICT mode=cold "
+                       "groups_total=2 groups_ran=2 groups_cached=0 "
+                       "groups_gated=0 groups_failed=0 self_skips=0 "
+                       "env_unobserved=0 load_flaky=0\n");
+    return fclose(f) == 0 && n > 0;
+}
+
+static void tcs_lane_receipt(struct zcl_dev_acceptance_receipt_v1 *r)
+{
+    memset(r, 0, sizeof(*r));
+    r->local_commit_len = 20;
+    r->remote_base_len = 20;
+    memset(r->local_commit, 0x11, 20);
+    memset(r->remote_base, 0x22, 20);
+    memset(r->source_cas_root, 0x33, sizeof(r->source_cas_root));
+    r->dimensions[ZCL_DEV_PROOF_TEST].selected = 2;
+    r->dimensions[ZCL_DEV_PROOF_TEST].ran = 2;
+    memset(r->dimensions[ZCL_DEV_PROOF_TEST].receipt_root, 0x44,
+           sizeof(r->dimensions[ZCL_DEV_PROOF_TEST].receipt_root));
+    r->dimensions[ZCL_DEV_PROOF_LINT].selected = 1;
+    r->dimensions[ZCL_DEV_PROOF_LINT].ran = 1;
+    r->complete = 1;
+    r->has_signature = true;
+    memset(r->signer_pubkey, 0x55, sizeof(r->signer_pubkey));
+    memset(r->signature, 0x66, sizeof(r->signature));
+}
+
+/* Run the lane once and return the serialized receipt and the test
+ * dimension's child receipt it left behind. */
+static bool tcs_lane_run(const struct zcl_dev_proof_shadow_lane *c,
+                         uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES],
+                         uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES])
+{
+    struct zcl_dev_acceptance_receipt_v1 r;
+    tcs_lane_receipt(&r);
+    (void)unlink(c->phases);
+    return tcs_lane_cold(c->dir, c->key) &&
+           zcl_dev_proof_test_shadow_lane(c, &r) &&
+           zcl_dev_proof_receipt_serialize(&r, wire) &&
+           zcl_dev_proof_child_receipt_create(
+               ZCL_DEV_PROOF_TEST, &r.dimensions[ZCL_DEV_PROOF_TEST], child);
+}
+
+static int tcs_lane_checks(void)
+{
+    int failures = 0;
+    char cwd[PATH_MAX], dir[PATH_MAX], store[PATH_MAX], objects[PATH_MAX];
+    char runner[PATH_MAX], phases[PATH_MAX], on_key[64], off_key[64];
+    uint8_t base_wire[ZCL_DEV_PROOF_WIRE_BYTES], wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    uint8_t base_child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
+    struct zcl_dev_proof_shadow_lane c = {0};
+    TEST("testcache shadow: probe on, off and sampled out leave the receipt and test verdict byte-identical") {
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        ASSERT(snprintf(dir, sizeof(dir), "%s/%s/lane", cwd, tcs_fix()) <
+               (int)sizeof(dir));
+        ASSERT(snprintf(store, sizeof(store), "%s/%s", cwd, tcs_store()) <
+               (int)sizeof(store));
+        ASSERT(snprintf(objects, sizeof(objects), "%s/.zvcs/objects/held",
+                        store) < (int)sizeof(objects));
+        ASSERT(snprintf(phases, sizeof(phases), "%s/phases.txt", dir) <
+               (int)sizeof(phases));
+        ASSERT(tcs_reset_store());
+        ASSERT(tcs_mkdirs(dir) && tcs_mkdirs(objects));
+        ASSERT(tcs_lane_runner(dir, runner, sizeof(runner)));
+        ASSERT(tcs_lane_key(true, on_key) && tcs_lane_key(false, off_key));
+        c = (struct zcl_dev_proof_shadow_lane){.runner = runner, .dir = dir,
+            .key = on_key, .phases = phases, .accepted = true};
+
+        /* Lane off: no store configured. */
+        ASSERT(unsetenv("ZCL_DEV_PROOF_SHADOW_STORE") == 0);
+        ASSERT(tcs_lane_run(&c, base_wire, base_child));
+        ASSERT(!tcs_file_has(phases, "test_shadow"));
+
+        /* Lane on, sampled: probed, audited with no divergence, seeded. */
+        ASSERT(setenv("ZCL_DEV_PROOF_SHADOW_STORE", store, 1) == 0);
+        ASSERT(tcs_lane_run(&c, wire, child));
+        ASSERT(memcmp(wire, base_wire, sizeof(wire)) == 0);
+        ASSERT(memcmp(child, base_child, sizeof(child)) == 0);
+        ASSERT(tcs_file_has(phases, "test_shadow=groups=2 would_reuse=1 "
+                                    "must_run=1 uncacheable=0\n"));
+        ASSERT(tcs_file_has(phases, "test_shadow_audit=groups=2 hits=1 "
+                                    "divergences=0 cold_ran=2 "
+                                    "cold_matches_groups=1\n"));
+        ASSERT(tcs_file_has(phases, "test_shadow_seed=stored=2 attempted=2 "
+                                    "failed=0\n"));
+        ASSERT(!tcs_file_has(phases, "sampled_out"));
+
+        /* Lane on, sampled out: one note, no probe, audit or seed. */
+        c.key = off_key;
+        ASSERT(tcs_lane_run(&c, wire, child));
+        ASSERT(memcmp(wire, base_wire, sizeof(wire)) == 0);
+        ASSERT(memcmp(child, base_child, sizeof(child)) == 0);
+        ASSERT(tcs_file_has(phases, "test_shadow=sampled_out\n"));
+        ASSERT(!tcs_file_has(phases, "test_shadow_audit"));
+        ASSERT(!tcs_file_has(phases, "test_shadow_seed"));
+
+        /* A universal selection is never sampled, even on a sampled key. */
+        c.key = on_key;
+        c.universal = true;
+        ASSERT(tcs_lane_run(&c, wire, child));
+        ASSERT(memcmp(wire, base_wire, sizeof(wire)) == 0);
+        ASSERT(memcmp(child, base_child, sizeof(child)) == 0);
+        ASSERT(tcs_file_has(phases, "test_shadow=sampled_out\n"));
+        ASSERT(!tcs_file_has(phases, "test_shadow_audit"));
+        PASS();
+    }
+_test_next:;
+    (void)unsetenv("ZCL_DEV_PROOF_SHADOW_STORE");
+    return failures;
+}
+
 int test_testcache_shadow(void);
 int test_testcache_shadow(void)
 {
@@ -528,6 +709,8 @@ int test_testcache_shadow(void)
     failures += tcs_lane_contract_checks();
     failures += tcs_runner_flag_checks();
     failures += tcs_empty_probe_checks();
+    failures += tcs_sampling_checks();
+    failures += tcs_lane_checks();
     if (!tcs_reset_store())
         failures++;
     {

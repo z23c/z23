@@ -120,6 +120,18 @@ could only count zero, so the spawn is skipped and the line reads
 `test_preflight=advisory skipped reason=empty_verdict_store`; any stored
 object or unreadable store runs the probe as before.
 
+The optional shadow lane (`ZCL_DEV_PROOF_SHADOW_STORE`, an absolute directory;
+unset = off) probes a persistent store before the cold run, audits every
+predicted PASS against the cold verdict afterwards (`test_shadow_audit=...
+divergences=N`), and seeds PASS records only after an accepted proof
+(`test_shadow_seed=...`). No verdict reads it, so it is sampled rather than
+paid on every proof: an exact selection runs the lane when a domain-separated
+SHA3-256 of its attempt key (`<candidate>-<base>`) lands in one bucket of
+eight, so a given pair always gets the same answer, and a universal selection
+never runs it. A sampled-out proof writes `test_shadow=sampled_out` and runs
+no probe, audit or seed. The receipt and the test dimension are identical
+either way (`testcache_shadow` proves it byte for byte).
+
 ## Using it (inner dev loop)
 
 ```bash

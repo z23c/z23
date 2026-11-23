@@ -13629,7 +13629,17 @@ static bool dp_preflight_log_read(const char *path, char **bytes, size_t *len)
  * with --no-cache and never reads this store, a skipped group is
  * impossible by construction, and any failure here logs a note and never
  * fails the proof. The store holds unsigned records any same-uid process
- * can write, which is exactly why nothing may act on them yet. */
+ * can write, which is exactly why nothing may act on them yet.
+ *
+ * Because no verdict reads it, the lane is sampled rather than run on every
+ * proof: the probe sits on the critical path before the dimensions start
+ * and the seed after publication, and together they cost tens of seconds
+ * per proof (a minute or more on a universal selection). An exact
+ * selection is probed and seeded when a domain-separated SHA3-256 of its
+ * attempt key falls in one of DP_SHADOW_SAMPLE_MOD buckets, so the same
+ * candidate/base pair always gets the same answer; a universal selection
+ * is never sampled. A sampled-out proof writes `test_shadow=sampled_out`
+ * and owes no audit and no seed. */
 struct dp_shadow_audit {
     struct zcl_dev_proof_preflight probe;
     uint32_t hits;
@@ -13888,6 +13898,24 @@ static bool dp_shadow_log_path(const struct dp_worker *w, const char *what,
                     w->execution.key, what) < (int)out_len;
 }
 
+/* One proof in DP_SHADOW_SAMPLE_MOD exact selections runs the shadow lane. */
+#define DP_SHADOW_SAMPLE_MOD 8u
+
+/* Is this attempt in the shadow sample? Deterministic in the attempt key
+ * (candidate-base), never for a universal selection or a missing key. */
+static bool dp_shadow_sampled(const char *attempt_key, bool universal)
+{
+    static const char domain[] = "z23-dev-proof-shadow-sample-v1";
+    struct sha3_256_ctx sha;
+    uint8_t digest[32];
+    if (universal || !attempt_key || !attempt_key[0]) return false;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    sha3_256_write(&sha, (const uint8_t *)attempt_key, strlen(attempt_key));
+    sha3_256_finalize(&sha, digest);
+    return digest[0] % DP_SHADOW_SAMPLE_MOD == 0;
+}
+
 /* Before the cold run: what would the shadow store reuse? */
 static void dp_worker_shadow_probe(struct dp_worker *w)
 {
@@ -13900,6 +13928,12 @@ static void dp_worker_shadow_probe(struct dp_worker *w)
     if (!store || !w->generation_binary[0] || !w->only[0] ||
         !dp_shadow_log_path(w, "test-shadow", log, sizeof(log)))
         return;
+    /* Sampled out: no probe, so the audit and the seed below never run. */
+    if (!dp_shadow_sampled(w->execution.key, w->plan.closure_universal)) {
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_shadow",
+                                       "sampled_out");
+        return;
+    }
     if (dp_shadow_skip_empty(store, "test_shadow", w->paths->phases)) {
         w->shadow_empty = true;
         return;
@@ -14089,6 +14123,65 @@ static void dp_worker_shadow_audit(struct dp_worker *w, bool accepted)
                                            "skipped: cold_retry_or_unknown");
     }
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_shadow_sampled(const char *attempt_key, bool universal)
+{
+    return dp_shadow_sampled(attempt_key, universal);
+}
+
+/* The worker's own probe-then-audit sequence over a fixture worker: the
+ * runner, logs, state and phases all live in `c->dir`, the cold test log is
+ * `<dir>/<key>.test.log`, and the store comes from the environment exactly
+ * as in production. `*receipt` goes in as the proof's receipt and comes
+ * back as the lane left it. Every fixture path must fit a PATH_MAX field
+ * and the key the attempt-key field; nothing is truncated. */
+static bool dp_shadow_lane_fits(const struct zcl_dev_proof_shadow_lane *c)
+{
+    return strlen(c->dir) < PATH_MAX && strlen(c->phases) < PATH_MAX &&
+           strlen(c->runner) < PATH_MAX &&
+           strlen(c->key) < sizeof(((struct proof_paths *)0)->key);
+}
+
+/* The fixture worker reads its root, state and logs from one directory. */
+static void dp_shadow_lane_paths(const struct zcl_dev_proof_shadow_lane *c,
+                                 struct proof_paths *paths)
+{
+    char *dir_fields[] = {paths->root, paths->state, paths->logs};
+    for (size_t i = 0; i < sizeof(dir_fields) / sizeof(dir_fields[0]); i++)
+        (void)snprintf(dir_fields[i], PATH_MAX, "%s", c->dir);
+    (void)snprintf(paths->key, sizeof(paths->key), "%s", c->key);
+    (void)snprintf(paths->phases, sizeof(paths->phases), "%s", c->phases);
+}
+
+bool zcl_dev_proof_test_shadow_lane(const struct zcl_dev_proof_shadow_lane *c,
+                                    struct zcl_dev_acceptance_receipt_v1 *receipt)
+{
+    if (!c || !c->runner || !c->dir || !c->key || !c->phases || !receipt ||
+        !dp_shadow_lane_fits(c))
+        return false;
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof_shadow_lane_seam");
+    struct proof_paths *paths =
+        zcl_calloc(1, sizeof(*paths), "proof_shadow_lane_seam_paths");
+    bool ok = w && paths;
+    if (ok) {
+        dp_shadow_lane_paths(c, paths);
+        (void)snprintf(w->generation_binary, sizeof(w->generation_binary),
+                       "%s", c->runner);
+        w->paths = paths;
+        w->execution = *paths;
+        (void)snprintf(w->only, sizeof(w->only), "--only=test_shadow_lane");
+        w->plan.closure_universal = c->universal;
+        w->receipt = *receipt;
+        dp_worker_shadow_probe(w);
+        dp_worker_shadow_audit(w, c->accepted);
+        *receipt = w->receipt;
+    }
+    free(paths);
+    free(w);
+    return ok;
+}
+#endif
 
 /* The routed-group preflight: probe the candidate's whole required set
  * through the runner's batch path and record what a verdict cache WOULD

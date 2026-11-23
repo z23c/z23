@@ -819,6 +819,25 @@ bool zcl_dev_proof_test_shadow_seed_decision(bool published, bool probed,
 bool zcl_dev_proof_test_shadow_seed_cold(const char *cold, size_t len,
                                          uint32_t selected, bool published,
                                          bool probed, bool empty);
+/* Seam for the shadow lane's sampling: the exact decision the worker makes
+ * from the attempt key (about one exact selection in eight, never a
+ * universal one). */
+bool zcl_dev_proof_test_shadow_sampled(const char *attempt_key, bool universal);
+/* Seam for the whole shadow lane: the worker's probe, audit and seed over a
+ * fixture worker whose runner, logs, state and phases live in `dir`; the
+ * cold test log is `<dir>/<key>.test.log` and the store is read from
+ * ZCL_DEV_PROOF_SHADOW_STORE exactly as in production. `*receipt` is the
+ * proof's receipt going in and what the lane left of it coming out. */
+struct zcl_dev_proof_shadow_lane {
+    const char *runner;
+    const char *dir;
+    const char *key;
+    const char *phases;
+    bool universal;
+    bool accepted;
+};
+bool zcl_dev_proof_test_shadow_lane(const struct zcl_dev_proof_shadow_lane *c,
+                                    struct zcl_dev_acceptance_receipt_v1 *receipt);
 /* Seam for the preflight's empty-store skip: the exact decision the proof
  * worker makes before spawning the probe. True means the store provably
  * holds no verdict, the spawn is skipped, and phases_path received
