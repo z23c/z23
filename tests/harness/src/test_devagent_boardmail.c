@@ -118,10 +118,11 @@ static struct {
     unsigned zero_pages, ack_seen, result_seen;
 } g_bmx_replay;
 static int g_bmx_io_phase = -1;
+static bool g_bmx_ref_fault;
 
 static int bmx_io_fault(const char *path, int phase)
 {
-    if (phase == g_bmx_io_phase && strstr(path, "inbox.node-a.jsonl")) {
+    if (phase == g_bmx_io_phase && strstr(path, g_bmx_ref_fault ? "boardmail.refs" : "inbox.node-a.jsonl")) {
         g_bmx_io_phase = -1;
         return -1;
     }
@@ -2100,6 +2101,230 @@ _test_next:;
     return failures;
 }
 
+struct bmx_ref_append_probe {
+    long long in, admitted, queued, inbox, ref, ack_local, result_local;
+    long long sent_before, sent_after, delivered, ack_received, result_received;
+    long long import_before, import_after, export_before, export_after, ref_after;
+    bool signed_ack, signed_result;
+};
+
+static long long bmx_ref_probe_cursor(int box, const char *key)
+{
+    char path[1600], line[256];
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.state", g_bmx_state[box]);
+    FILE *f = fopen(path, "rb"); if (!f) return -1;
+    long long value = -1; size_t len = strlen(key);
+    while (fgets(line, sizeof(line), f))
+        if (!strncmp(line, key, len) && line[len] == '=') value = strtoll(line + len + 1, NULL, 10);
+    if (ferror(f)) value = -1;
+    if (fclose(f) != 0) value = -1;
+    return value;
+}
+static bool bmx_ref_probe_signature(const struct bmx_post *post)
+{
+    struct fleet_board_post wire; uint8_t id[32];
+    return post && !strcmp(post->host, g_bmx_host[BMX_B]) && bmx_post_wire(post, &wire) &&
+        fleet_board_post_compute_id(&wire, id) == FLEET_BOARD_OK && !memcmp(id, wire.id, 32) &&
+        fleet_board_post_verify(&wire) == FLEET_BOARD_OK;
+}
+
+static bool bmx_ref_probe_result(void)
+{
+    struct rcv_beat_stats st;
+    return bmx_mail("node-b", "*", "result", "job-1", "worker=node-b\nstate=done\nverdict=pass\n") &&
+        bmx_drive(BMX_B, &st) == 1;
+}
+
+static bool bmx_ref_probe_unrelated(void)
+{
+    struct rcv_beat_stats st;
+    return bmx_mail("node-b", "*", "result", "unrelated", "worker=node-b\nstate=done\nverdict=pass\n") &&
+        bmx_drive(BMX_B, &st) == 1;
+}
+
+static bool bmx_ref_probe_prepare(bool deny)
+{
+    struct rcv_beat_stats st;
+    if (!bmx_setup(deny ? "ref-append-denied" : "ref-append-control") ||
+        !bmx_sent("job-1") || bmx_drive(BMX_B, &st) != 1 ||
+        !bmx_write(BMX_B, "receive/boardmail.refs", "", "wb")) return false;
+    return geteuid() != 0;
+}
+
+static bool bmx_ref_probe_restore(bool deny, struct bmx_ref_append_probe *p)
+{
+    struct rcv_beat_stats st;
+    if (bmx_drive(BMX_B, &st) != 1) return false;
+    if (deny && (!bmx_ref_probe_result() || !bmx_ref_probe_unrelated())) return false;
+    p->sent_after = bmx_signed_by(BMX_B, BMX_B);
+    p->import_after = bmx_ref_probe_cursor(BMX_B, "import_after");
+    p->export_after = bmx_ref_probe_cursor(BMX_B, "export_offset");
+    p->ref_after = bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL);
+    if (p->sent_after == 2) {
+        p->signed_ack = bmx_ref_probe_signature(&g_bmx_node[BMX_B].p[1]);
+        p->signed_result = bmx_verified_result(&g_bmx_node[BMX_B].p[2]);
+    }
+    bmx_carry(BMX_B, BMX_A);
+    if (bmx_drive(BMX_A, &st) != 1) return false;
+    p->delivered = st.board_in;
+    p->ack_received = bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", "state=accepted");
+    p->result_received = bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "job-1", "state=done");
+    return true;
+}
+
+static bool bmx_ref_append_probe(bool deny, struct bmx_ref_append_probe *p)
+{
+    struct rcv_beat_stats st; char path[1600]; bool restricted = false;
+    bool ok = bmx_ref_probe_prepare(deny);
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.refs", g_bmx_state[BMX_B]);
+    ok = ok && n > 0 && (size_t)n < sizeof(path) && geteuid() != 0;
+    if (ok && deny) { restricted = chmod(path, 0400) == 0; ok = restricted; }
+    if (ok) {
+        bmx_carry(BMX_A, BMX_B);
+        ok = bmx_drive(BMX_B, &st) == 1;
+        p->in = st.board_in; p->admitted = st.admitted; p->queued = bmx_queued("job-1");
+        p->inbox = bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", "board_signer");
+        p->ref = bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL);
+        p->ack_local = bmx_lines(BMX_B, "mail/outbox.jsonl", "job-1", "state=accepted");
+        if (!deny)
+            ok = ok && bmx_ref_probe_result();
+        p->result_local = bmx_lines(BMX_B, "mail/outbox.jsonl", "job-1", "state=done");
+        p->sent_before = bmx_signed_by(BMX_B, BMX_B);
+        p->import_before = bmx_ref_probe_cursor(BMX_B, "import_after");
+        p->export_before = bmx_ref_probe_cursor(BMX_B, "export_offset");
+    }
+    if (restricted && chmod(path, 0600) != 0) ok = false;
+    if (ok) ok = bmx_ref_probe_restore(deny, p);
+    bmx_teardown(); return ok;
+}
+
+static int bmx_t_refs_append_observation(void)
+{
+    int failures = 0; struct bmx_ref_append_probe control = {0}, denied = {0};
+    TEST("boardmail: observe return routing after a reference append refusal") {
+        ASSERT(bmx_ref_append_probe(false, &control));
+        ASSERT(bmx_ref_append_probe(true, &denied));
+        printf("REFS_APPEND_CONTROL in=%lld admitted=%lld queued=%lld inbox=%lld ref=%lld/%lld ack_local=%lld result_local=%lld sent=%lld/%lld delivered=%lld ack=%lld result=%lld signed=%d/%d cursor=%lld/%lld,%lld/%lld\n",
+            control.in, control.admitted, control.queued, control.inbox, control.ref, control.ref_after,
+            control.ack_local, control.result_local, control.sent_before, control.sent_after, control.delivered,
+            control.ack_received, control.result_received, control.signed_ack, control.signed_result,
+            control.import_before, control.import_after, control.export_before, control.export_after);
+        printf("REFS_APPEND_DENIED in=%lld admitted=%lld queued=%lld inbox=%lld ref=%lld/%lld ack_local=%lld result_local=%lld sent=%lld/%lld delivered=%lld ack=%lld result=%lld signed=%d/%d cursor=%lld/%lld,%lld/%lld\n",
+            denied.in, denied.admitted, denied.queued, denied.inbox, denied.ref, denied.ref_after,
+            denied.ack_local, denied.result_local, denied.sent_before, denied.sent_after, denied.delivered,
+            denied.ack_received, denied.result_received, denied.signed_ack, denied.signed_result,
+            denied.import_before, denied.import_after, denied.export_before, denied.export_after);
+        ASSERT_EQ(control.in, 1); ASSERT_EQ(control.admitted, 1); ASSERT_EQ(control.queued, 1); ASSERT_EQ(control.ref, 1);
+        ASSERT_EQ(control.sent_after, 2); ASSERT_EQ(control.delivered, 2); ASSERT(control.signed_ack); ASSERT(control.signed_result);
+        ASSERT_EQ(denied.in, 0); ASSERT_EQ(denied.admitted, 0); ASSERT_EQ(denied.queued, 0); ASSERT_EQ(denied.ref, 0); ASSERT_EQ(denied.ref_after, 1);
+        ASSERT_EQ(denied.sent_before, 0); ASSERT_EQ(denied.sent_after, 2); ASSERT_EQ(denied.delivered, 2);
+        ASSERT(denied.signed_ack); ASSERT(denied.signed_result); ASSERT_EQ(denied.ack_received, 1); ASSERT_EQ(denied.result_received, 1);
+        PASS();
+    }
+_test_next:;
+    bmx_teardown(); return failures;
+}
+
+static int bmx_t_refs_durable_retry(void)
+{
+    int failures = 0;
+    TEST("boardmail: incoming ref append and sync failures defer and retry once") {
+        for (int phase = 0; phase < 3; phase++) {
+            struct rcv_beat_stats st;
+            ASSERT(bmx_setup("refs-durable-retry"));
+            ASSERT(bmx_sent("job-1"));
+            bmx_carry(BMX_A, BMX_B);
+            g_bmx_ref_fault = true;
+            g_bmx_io_phase = phase;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(g_bmx_io_phase, -1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.admitted, 0);
+            ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", NULL), 0);
+            g_bmx_ref_fault = false;
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 1);
+            ASSERT_EQ(st.admitted, 1);
+            ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
+            ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+            ASSERT_EQ(st.board_in, 0);
+            ASSERT_EQ(st.admitted, 0);
+            bmx_teardown();
+        }
+        PASS();
+    }
+_test_next:;
+    g_bmx_ref_fault = false; g_bmx_io_phase = -1;
+    bmx_teardown(); return failures;
+}
+
+static int bmx_exit_before_inbox(const char *path, int phase)
+{
+    if (phase == 0 && strstr(path, "inbox.node-a.jsonl")) _exit(78);
+    return 0;
+}
+
+static int bmx_t_refs_before_inbox_crash(void)
+{
+    int failures = 0, status = 0;
+    pid_t child = -1;
+    TEST("boardmail: restart after durable incoming ref before inbox admits once") {
+        struct rcv_beat_stats st;
+        ASSERT(bmx_setup("refs-before-inbox-crash"));
+        ASSERT(bmx_sent("job-1"));
+        bmx_carry(BMX_A, BMX_B);
+        child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            zcl_devagent_boardmail_test_io(bmx_exit_before_inbox);
+            (void)bmx_drive(BMX_B, &st);
+            _exit(1);
+        }
+        ASSERT_EQ(waitpid(child, &status, 0), child);
+        child = -1;
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 78);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", NULL), 0);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        ASSERT_EQ(st.admitted, 0);
+        PASS();
+    }
+_test_next:;
+    if (child > 0) (void)waitpid(child, NULL, 0);
+    bmx_teardown(); return failures;
+}
+
+static int bmx_t_refs_invalid_successor(void)
+{
+    int failures = 0;
+    TEST("boardmail: unroutable ref does not pin a valid successor") {
+        struct rcv_beat_stats st;
+        char row[4096], ts[32];
+        long long now = (long long)platform_time_wall_time_t();
+        ASSERT(bmx_setup("refs-invalid-successor"));
+        bmx_ts(now, ts, sizeof(ts));
+        bmx_row(row, sizeof(row), ts, "", "No return reference.");
+        ASSERT(bmx_inject(BMX_B, BMX_A, row, now, 3600) != NULL);
+        ASSERT(bmx_sent("job-1"));
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 2);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(bmx_queued("job-1"), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/boardmail.refs", "in job-1 node-a", NULL), 1);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 0);
+        PASS();
+    }
+_test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_locked_append(void)
 {
     int failures = 0;
@@ -2167,6 +2392,10 @@ int test_devagent_boardmail(void)
     failures += bmx_t_append_retry();
     failures += bmx_t_partial_row();
     failures += bmx_t_locked_append();
+    failures += bmx_t_refs_append_observation();
+    failures += bmx_t_refs_durable_retry();
+    failures += bmx_t_refs_before_inbox_crash();
+    failures += bmx_t_refs_invalid_successor();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

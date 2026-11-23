@@ -1138,6 +1138,43 @@ static enum bm_inbox_result bm_inbox_commit(struct platform_private_file *file,
                                               : BM_INBOX_ERROR;
 }
 
+/* The receive drive serializes refs writers. Reflush a loaded match on retry:
+ * a previous append may have reached the file but failed its sync. */
+static bool bm_incoming_ref_store(struct bm_refs *refs, const char *ref,
+                                  const char *peer)
+{
+    struct platform_private_file file;
+    char resolved[BM_PATH_CAP], parent[BM_PATH_CAP], line[160], last;
+    const char *stage = "resolve";
+    uint64_t size;
+    bool found = bm_refs_has(refs, 'i', ref, peer), ok = false;
+    int n = snprintf(line, sizeof(line), "in %s %s\n", ref, peer);
+    platform_private_file_init(&file);
+    if (!zcl_devagent_name_ok(ref) || !fleet_enrol_name_valid(peer) ||
+        n <= 0 || (size_t)n >= sizeof(line) ||
+        !platform_private_destination_resolve(refs->path, resolved, sizeof(resolved),
+                                              parent, sizeof(parent)))
+        goto done;
+    stage = "open_lock";
+    if (!platform_private_file_open_locked_create(resolved, &file))
+        goto done;
+    stage = "size";
+    if (!platform_private_file_size(&file, &size))
+        goto done;
+    stage = "verify_tail";
+    if (size && (!platform_private_file_read_at(&file, &last, 1, size - 1) || last != '\n'))
+        goto done;
+    ok = bm_inbox_commit(&file, parent, refs->path, line, (size_t)n,
+                         size, found, &stage) != BM_INBOX_ERROR;
+    if (ok && !found)
+        bm_refs_put(refs, 'i', ref, peer);
+done:
+    platform_private_file_close(&file);
+    if (!ok)
+        LOG_WARN(BM_LOG, "cannot durably record incoming ref %s at stage %s; receiver holds its cursor. Inspect receive/boardmail.refs read-only; retry after storage repair", ref, stage);
+    return ok;
+}
+
 struct bm_inbox_access {
     struct platform_private_file file;
     char resolved[BM_PATH_CAP], parent[BM_PATH_CAP];
@@ -1246,9 +1283,11 @@ static bool bm_import_post(const struct zcl_boardmail_ctx *c,
     if (mine || bm_refs_has(refs, 'o', r.ref, p->name)) {
         (void)snprintf(path, sizeof(path), "%s/inbox.%s.jsonl", c->maildir,
                        p->name);
-        if (mine)
-            bm_refs_add(refs, 'i', r.ref, p->name);
-        stored = bm_inbox_store(path, text, id, bm_str(post, "host"));
+        if (mine && zcl_devagent_name_ok(r.ref) &&
+            !bm_incoming_ref_store(refs, r.ref, p->name))
+            stored = BM_INBOX_ERROR;
+        else
+            stored = bm_inbox_store(path, text, id, bm_str(post, "host"));
         if (stored == BM_INBOX_APPENDED)
             st->board_in++;
     }
