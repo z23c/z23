@@ -1415,6 +1415,71 @@ static bool act_search_next_refusals(void)
         "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"BOOST\",\"page\":0,\"offset\":128}", true);
 }
 
+static bool act_path_search_next(void)
+{
+    static const char data[] = "{\"name\":\"skycombat\",\"selection_revision\":1,\"query\":\"QQ\",\"path\":\"src/a.c\",\"offset\":0,\"matches\":[],\"complete\":false,\"next_offset\":128}";
+    const char *bad[] = {
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"QQ\",\"path\":\"src/b.c\",\"offset\":128}",
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"QQ\",\"path\":\"src/a.c\",\"offset\":127}",
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"QQ\",\"path\":\"src/a.c\",\"offset\":128,\"page\":0}",
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"XX\",\"path\":\"src/a.c\",\"offset\":128}"
+    };
+    for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i)
+        if (!act_next_case("app.customize", data, bad[i], false)) return false;
+    return act_next_case("app.customize", data,
+        "{\"name\":\"skycombat\",\"expected_revision\":1,\"query\":\"QQ\",\"path\":\"src/a.c\",\"offset\":128}", true);
+}
+
+static bool act_path_page(const struct json_value *doc, struct ac_fixture *f, const char *query, size_t seen[2])
+{
+    const struct json_value *d = json_get(doc, "data");
+    const char *got = json_get_str(json_get(d, "path"));
+    return act_wire_identity(doc, f) && got && !strcmp(got, "src/sky_combat_multiplayer_ultimate.c") &&
+        act_search_rows(json_get(d, "matches"), f, query, seen) &&
+        json_get_int(json_get(d, "scanned_files")) == 1;
+}
+
+static bool act_path_continue(const struct json_value *doc, struct json_value *next_doc)
+{
+    const struct json_value *next = act_wire_next(doc, "query");
+    return next && !json_get(next, "page") && act_wire(next, next_doc);
+}
+
+static bool act_path_search_refusals(void)
+{
+    struct abc_leaf l;
+    bool ok = act_call(&l, "missing.h", true) && json_push_kv_str(&l.in, "query", "BOOST") &&
+        act_result(&l, "PATH_UNKNOWN");
+    abc_close(&l);
+    ok = act_call(&l, "include/boost.h", true) && json_push_kv_str(&l.in, "query", "BOOST") &&
+        json_push_kv_int(&l.in, "page", 0) && act_result(&l, "BAD_INPUT") && ok;
+    abc_close(&l);
+    ok = act_call(&l, "include/boost.h", true) && json_push_kv_str(&l.in, "query", "BOOST") &&
+        json_push_kv_int(&l.in, "limit", 1) && act_result(&l, "BAD_INPUT") && ok;
+    abc_close(&l); return ok;
+}
+
+static bool act_path_search(struct ac_fixture *f)
+{
+    struct abc_leaf l; struct json_value doc, next_doc;
+    json_init(&doc); json_init(&next_doc);
+    char query[65]; memset(query, 'Q', 64); query[64] = 0;
+    const char *path = "src/sky_combat_multiplayer_ultimate.c";
+    bool ok = act_call(&l, NULL, true) && json_push_kv_str(&l.in, "query", query) &&
+        json_push_kv_str(&l.in, "path", path) && act_wire(&l.in, &doc);
+    size_t seen[2] = {0}, pages = 0; bool complete = false;
+    while (ok && pages++ < 16) {
+        const struct json_value *d = json_get(&doc, "data");
+        ok = act_path_page(&doc, f, query, seen);
+        if (json_get_bool(json_get(d, "complete"))) { complete = true; break; }
+        ok = ok && act_path_continue(&doc, &next_doc);
+        if (ok) { json_free(&doc); doc = next_doc; json_init(&next_doc); }
+    }
+    json_free(&doc); json_free(&next_doc); abc_close(&l);
+    return ok && complete && seen[0] == 0 && seen[1] == 9 &&
+        act_path_search_next() && act_path_search_refusals() && act_preserved(f, false);
+}
+
 static bool act_pinned_next_identity(struct json_value *data, struct json_value *input,
     const char *kept, const char *draft)
 {
@@ -1800,6 +1865,7 @@ int test_app_customize(void)
         ASSERT(act_escaped_reads());
         ASSERT(act_serialized_navigation(&f));
         ASSERT(act_searches(&f));
+        ASSERT(act_path_search(&f));
         ASSERT(act_refusals());
         ASSERT(act_bounds());
         ASSERT(act_blob_refusal(&f));

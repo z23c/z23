@@ -539,7 +539,9 @@ ZCL_COMMAND_READY_READ(
     "file reads pin its current resident generation and exact package root. "
     "query searches "
     "literal non-overlapping bytes in the pinned tree: UTF-8 1..64 bytes, "
-    "expected_revision required. At most four files/4 MiB and two matches "
+    "expected_revision required. An optional path restricts search to that "
+    "exact file; use its offset continuation without page or limit. "
+    "At most four files/4 MiB and two matches "
     "per call; complete is cursor end, not exhaustive coverage: files over "
     "1 MiB are explicitly unsearched.",
     ZCL_COMMAND_LIST_BUDGET,

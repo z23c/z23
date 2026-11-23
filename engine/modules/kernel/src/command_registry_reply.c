@@ -207,8 +207,25 @@ static bool source_search_advance(const struct json_value *input, const struct j
     int64_t next_offset = json_get_int(json_get(input, "offset"));
     return next_page > page->val.i || (next_page == page->val.i && next_offset > offset->val.i);
 }
+static bool source_search_path_advance(const struct json_value *input, const struct json_value *data)
+{
+    const struct json_value *offset = json_get(data, "offset");
+    return offset && offset->type == JSON_INT && offset->val.i >= 0 &&
+        source_search_coordinate(input, "offset", data, "next_offset") &&
+        json_get_int(json_get(input, "offset")) > offset->val.i;
+}
+static bool source_next_path_search(const struct json_value *input, const struct json_value *data)
+{
+    const struct json_value *complete = json_get(data, "complete"), *matches = json_get(data, "matches");
+    size_t keys = json_get(input, "source_version") ? 6u : 5u;
+    return input->num_children == keys && source_next_text(input, "query", data, "query") &&
+        source_next_text(input, "path", data, "path") && !json_get(input, "page") && !json_get(input, "limit") &&
+        complete && complete->type == JSON_BOOL && !json_get_bool(complete) &&
+        matches && matches->type == JSON_ARR && source_search_path_advance(input, data);
+}
 static bool source_next_search(const struct json_value *input, const struct json_value *data)
 {
+    if (json_get(data, "path")) return source_next_path_search(input, data);
     const struct json_value *complete = json_get(data, "complete"), *matches = json_get(data, "matches");
     size_t keys = json_get(input, "source_version") ? 6u : 5u;
     return input->num_children == keys && source_next_text(input, "query", data, "query") &&
