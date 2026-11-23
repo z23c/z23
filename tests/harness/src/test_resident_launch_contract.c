@@ -60,6 +60,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -948,6 +949,19 @@ static bool rlc_task_equal(const struct task_document *a, const struct task_docu
         nx == ny && memcmp(x, y, nx) == 0;
 }
 
+static bool rlc_task_undo_equal(const struct task_document *actual,
+                                const struct task_document *before)
+{
+    struct ta_state expected = before->undo;
+    expected.revision = before->state.revision + 1;
+    expected.last_write = expected.revision;
+    unsigned char a[TA_PAYLOAD], b[TA_PAYLOAD];
+    uint32_t na, nb;
+    return before->can_undo && !actual->can_undo &&
+        ta_state_encode(&expected, a, &na) && ta_state_encode(&actual->state, b, &nb) &&
+        na == nb && memcmp(a, b, na) == 0;
+}
+
 static bool rlc_task_try_keep(struct task_update *update)
 {
     return task_update_try(update, true, false).ok && rlc_task_wait(update) &&
@@ -1109,6 +1123,91 @@ struct rlc_task_session {
     const struct rlc_binding *n, *n1, *n2, *broken;
 };
 
+/* Pause the rollback worker just before its first write transaction. The
+ * checkpoint has already been captured; the independent writer can commit
+ * before the worker starts its preview and checked rollback. */
+static atomic_bool rlc_rollback_read, rlc_rollback_waiting, rlc_rollback_release;
+static char rlc_rollback_database[4096];
+
+static int rlc_rollback_trace(unsigned event, void *context, void *statement, void *sql)
+{
+    (void)event; (void)statement;
+    const char *filename = sqlite3_db_filename(context, "main");
+    if (!filename || strcmp(filename, rlc_rollback_database) != 0) return 0;
+    const char *text = sql;
+    if (text && strstr(text, "SELECT") && strstr(text, "task_documents"))
+        atomic_store(&rlc_rollback_read, true);
+    if (text && atomic_load(&rlc_rollback_read) && strcmp(text, "BEGIN IMMEDIATE") == 0 &&
+        !atomic_exchange(&rlc_rollback_waiting, true)) {
+        const struct timespec tick = { 0, 1000000 };
+        while (!atomic_load(&rlc_rollback_release)) (void)nanosleep(&tick, NULL);
+    }
+    return 0;
+}
+
+static int rlc_rollback_extension(sqlite3 *db, char **error,
+                                  const sqlite3_api_routines *api)
+{
+    (void)error; (void)api;
+    return sqlite3_trace_v2(db, SQLITE_TRACE_STMT, rlc_rollback_trace, db);
+}
+
+struct rlc_rollback_fixture {
+    struct package_resident_store writer;
+    struct package_resident_record before, after;
+    struct task_document newer, observed;
+    bool paused, edited, refused;
+};
+
+static bool rlc_rollback_prepare(const struct rlc_task_session *session, struct rlc_rollback_fixture *f)
+{
+    bool ready = package_resident_store_open_app(&f->writer, session->base, session->store->app).ok &&
+        package_resident_record_read(session->store, &f->before).ok;
+    const char *filename = ready ? sqlite3_db_filename(f->writer.db, "main") : NULL;
+    ready = filename && snprintf(rlc_rollback_database, sizeof(rlc_rollback_database), "%s", filename) > 0 &&
+        strlen(filename) < sizeof(rlc_rollback_database);
+    atomic_store(&rlc_rollback_waiting, false);
+    atomic_store(&rlc_rollback_release, false);
+    atomic_store(&rlc_rollback_read, false);
+    return ready && sqlite3_auto_extension((void (*)(void))rlc_rollback_extension) == SQLITE_OK;
+}
+
+static void rlc_rollback_interleave(const struct rlc_task_session *session, struct rlc_rollback_fixture *f)
+{
+    bool started = task_update_try(session->update, true, true).ok;
+    int64_t deadline = platform_time_monotonic_us() + INT64_C(30000000);
+    const struct timespec tick = { 0, 1000000 };
+    while (started && !atomic_load(&rlc_rollback_waiting) && platform_time_monotonic_us() < deadline)
+        (void)nanosleep(&tick, NULL);
+    f->paused = started && atomic_load(&rlc_rollback_waiting);
+    f->edited = f->paused && task_document_apply(&f->writer, session->document->state.revision,
+        TASK_DOCUMENT_EDIT, session->document->state.tasks[0].id, "Concurrent rollback edit", &f->newer).ok && f->newer.can_undo;
+    atomic_store(&rlc_rollback_release, true);
+    f->refused = started && !rlc_task_wait(session->update) && session->update->phase == TASK_UPDATE_FAILED &&
+        strstr(session->update->message, "task-preview-stale");
+    (void)sqlite3_cancel_auto_extension((void (*)(void))rlc_rollback_extension);
+}
+
+static int rlc_task_rollback_race(const struct rlc_task_session *session)
+{
+    int failures = 0;
+    struct rlc_rollback_fixture f = {0};
+    if (rlc_rollback_prepare(session, &f)) rlc_rollback_interleave(session, &f);
+    RLC_CHECK("task rollback race: checkpoint precedes independent edit", f.paused && f.edited);
+    RLC_CHECK("task rollback race: stale rollback retains program and newer tasks and undo",
+        f.refused && package_resident_record_read(session->store, &f.after).ok &&
+        package_resident_identity_equal(&f.before.current, &f.after.current) &&
+        task_document_read(session->store, &f.observed).ok && rlc_task_equal(&f.newer, &f.observed));
+    if (f.edited) { *session->document = f.newer; *session->expected = f.newer; }
+    RLC_CHECK("task rollback race: fresh rollback preserves newer data and undo",
+        f.edited && task_update_try(session->update, true, true).ok && rlc_task_wait(session->update) &&
+        package_resident_record_read(session->store, &f.after).ok &&
+        package_resident_identity_equal(&f.before.previous, &f.after.current) &&
+        task_document_read(session->store, &f.observed).ok && rlc_task_equal(&f.newer, &f.observed));
+    RLC_CHECK("task rollback race: writer closes", package_resident_store_close(&f.writer).ok);
+    return failures;
+}
+
 static int rlc_task_edits(const struct rlc_task_session *session)
 {
     int failures = 0;
@@ -1267,7 +1366,7 @@ static int rlc_task_cycles(const struct rlc_task_session *session)
     }
     printf("task journey: return maximum_us=%lld real_gui=OPEN\n", (long long)maximum_us);
     RLC_CHECK("task journey: undo survives all program changes", task_document_apply(session->store, session->document->state.revision,
-        TASK_DOCUMENT_UNDO, 0, NULL, session->document).ok && strcmp(session->document->state.tasks[0].title, "Edited before preview") == 0);
+        TASK_DOCUMENT_UNDO, 0, NULL, session->document).ok && rlc_task_undo_equal(session->document, session->expected));
     return failures;
 }
 
@@ -1638,6 +1737,8 @@ static int rlc_task_journey(const char *base, const struct rlc_binding *n,
     } else ++failures;
     const struct rlc_task_session session = { base, verifier, &store, &document, &expected, &update, n, n1, n2, broken };
     failures += rlc_task_edits(&session);
+    failures += rlc_task_rollback_race(&session);
+    RLC_CHECK("task journey: restore newer program before return", rlc_task_try_keep(&update));
     failures += rlc_task_return(&session);
     failures += rlc_task_failed_program(&session);
     failures += rlc_task_failures(&session);
