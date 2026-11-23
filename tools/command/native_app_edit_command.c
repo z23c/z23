@@ -67,7 +67,7 @@ static bool edit_input_keys(struct edit *e, const struct json_value *in)
 {
     static const char *const keys[] = {"name", "expected_revision", "expected_head", "path", "expected_blob", "content", "offset", "delete_length", "replacement", "plan_id", "confirm", "source_version"};
     if (!in || in->type != JSON_OBJ || in->num_children < 6 || in->num_children > 11)
-        return edit_fail(e, "BAD_INPUT", false, "six edit inputs and optional plan_id/confirm are required");
+        return edit_fail(e, "BAD_INPUT", false, "provide content or offset, delete_length and replacement with the required edit identities");
     for (size_t i = 0; i < in->num_children; ++i) {
         bool found = false;
         for (size_t j = 0; j < sizeof(keys)/sizeof(keys[0]); ++j)
@@ -95,7 +95,7 @@ static bool edit_splice_input(struct edit *e, const struct json_value *in)
             !del || del->type != JSON_INT || del->val.i < 0 || !e->replacement ||
             (uint64_t)offset->val.i > ZCL_COMMAND_APP_EDIT_CONTENT_MAX ||
             (uint64_t)del->val.i > ZCL_COMMAND_APP_EDIT_CONTENT_MAX)
-            return edit_fail(e, "BAD_INPUT", false, "invalid splice inputs");
+            return edit_fail(e, "BAD_INPUT", false, "provide content or valid offset, delete_length and replacement, not both");
         e->offset = (size_t)offset->val.i; e->delete_length = (size_t)del->val.i;
     }
     return true;
@@ -124,13 +124,8 @@ static bool edit_inputs(struct edit *e, const struct json_value *in)
 }
 static bool edit_source_text(struct edit *e, const uint8_t *bytes, size_t size)
 {
-    char *original = zcl_malloc(size + 1, "app-edit-source-text");
-    if (!original) return edit_fail(e, "OUT_OF_MEMORY", false, "cannot read selected file");
-    if (size) memcpy(original, bytes, size);
-    original[size] = 0;
-    bool valid = zutf8_validate(original);
-    free(original);
-    return valid || edit_fail(e, "BAD_INPUT", false, "splice range or selected text is invalid");
+    return zutf8_validate_n((const char *)bytes, size) ||
+        edit_fail(e, "BAD_INPUT", false, "splice range or selected text is invalid");
 }
 static bool edit_splice_range(struct edit *e, const uint8_t *bytes, size_t size, size_t insert)
 {

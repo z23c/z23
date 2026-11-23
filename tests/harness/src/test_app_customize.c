@@ -2368,6 +2368,18 @@ static int ae_splice_utf8_case(void)
     } _test_next:;
     abc_close(&l); act_cleanup(&f); return failures;
 }
+static int ae_splice_empty_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0}; struct abc_leaf l; abc_open(&l);
+    TEST("app.edit splice can insert into an empty selected file") {
+        ASSERT(act_save_environment(&f) && abc_world_init_profile(&f.world, false) && act_configure_environment(&f));
+        ASSERT(abc_put(f.world.copy, "include/boost.h", "") && act_snapshot(&f, "save", f.head) &&
+            act_keep(&f) && act_find_kept_blob(&f)); abc_close(&l);
+        ASSERT(ae_splice_input(&l, &f, 0, 0, "x", NULL) && abc_pass("app.edit", &l));
+        PASS();
+    } _test_next:;
+    abc_close(&l); act_cleanup(&f); return failures;
+}
 int test_app_edit(void)
 {
     int failures = 0;
@@ -2383,6 +2395,7 @@ int test_app_edit(void)
     failures += ae_empty_case();
     failures += ae_splice_case();
     failures += ae_splice_utf8_case();
+    failures += ae_splice_empty_case();
     failures += ae_stale_case();
     failures += ae_long_case();
     failures += ae_sealed_case();
