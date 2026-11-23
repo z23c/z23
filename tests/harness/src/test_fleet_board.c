@@ -9838,8 +9838,11 @@ static bool fbh_case_rpc_refusals(struct fbp *p, struct fbh_node *h)
                               false, created, "not_stored", keys, id_again,
                               NULL));
     FBP_REQUIRE(memcmp(id_again, id_self, 32) == 0);
-    /* None of them was queued, and no reply ever named a key. */
-    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 0);
+    /* No hint was queued for the box it named, and no reply ever named a
+     * key. Each of the three NEW fleet posts is queued exactly once, for the
+     * fan-out to the peers a pull would serve; the public posts and the
+     * post stored again are not. */
+    FBP_REQUIRE(boot_fleet_board_fleet_test_push_queued() == 3);
     FBP_REQUIRE(db_fleet_board_have(&p->w.b, id_bad) &&
                 db_fleet_board_have(&p->w.b, id_num) &&
                 db_fleet_board_have(&p->w.b, id_public) &&

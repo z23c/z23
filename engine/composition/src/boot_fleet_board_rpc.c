@@ -643,6 +643,9 @@ static void fb_op_status(struct node_db *ndb, const struct json_value *in,
      * bound stopped it: a refusal above may be that, not a decision. */
     json_push_kv_int(result, "grandfather_truncated",
                      (int64_t)boot_fleet_board_grandfather_truncated_count());
+    /* Public posts peers delivered, re-announced on first store. */
+    json_push_kv_int(result, "relayed",
+                     (int64_t)boot_fleet_board_relayed_count());
     /* Status is read-only: inspecting the board must never create a signing
      * identity or copy private key material into the RPC path. */
     uint8_t pubkey[32];

@@ -36,6 +36,9 @@ static _Atomic uint64_t s_role_refused;
  * as `grandfather_truncated`: above zero means some key that has posted
  * here was never looked at, and its posts are refused for that reason. */
 static _Atomic uint64_t s_grandfather_truncated;
+/* Inventory lines sent relaying a public post a peer delivered and this node
+ * stored for the first time (fleet_board_relay), one per receiving peer. */
+static _Atomic uint64_t s_relayed;
 
 static struct boot_svc_ctx *s_svc;      /* borrowed; set by wire() */
 
@@ -666,6 +669,63 @@ static void fleet_board_handle_get(struct msg_processor *mp,
     }
 }
 
+/* A completed fast-sync peer other than `source`: one the public INV path
+ * may talk to. The same test the flood and the periodic announce apply. */
+static bool fleet_board_relay_target(const struct p2p_node *peer,
+                                     const struct p2p_node *source)
+{
+    if (!peer || peer == source || peer->id == source->id)
+        return false;
+    enum peer_state state = atomic_load(&peer->state);
+    return state >= PEER_HANDSHAKE_COMPLETE &&
+           !atomic_load(&peer->disconnect) &&
+           peer_supports_fast_sync(peer->services);
+}
+
+/* A public post `source` delivered and this node just stored for the first
+ * time: one inventory line naming it to every other peer, now, rather than
+ * at each peer's next FLEET_BOARD_ANNOUNCE_PERIOD_SECONDS announce. Never
+ * back to the peer it came from. Only a NEW store relays, so each node names
+ * a given id to a given peer at most once whatever the topology: in a cycle
+ * the post comes back as already held, stores nothing, and stops. A peer
+ * that holds it says nothing; the rest ask for it with GET as before.
+ *
+ * The bound on a peer posting many valid posts: each relay is triggered by
+ * one POST frame that fleet_board_admit let in, so a peer causes at most
+ * FLEET_BOARD_PEER_FRAMES_PER_WINDOW relays per FLEET_BOARD_PEER_WINDOW_SECONDS
+ * and all peers together FLEET_BOARD_RECEIVE_FRAMES_PER_WINDOW; each relay
+ * is one id line (one INV frame) per other peer, and only for a post that
+ * passed signature, expiry, public quota and capacity checks. */
+static void fleet_board_relay(struct msg_processor *mp,
+                              const struct p2p_node *source,
+                              const uint8_t id[32])
+{
+    if (!mp || !mp->net_mgr || !mp->params || !source)
+        return;
+    uint8_t ids[1][32];
+    memcpy(ids[0], id, 32);
+    uint8_t frame[FLEET_BOARD_FRAME_MAX];
+    size_t frame_len = 0;
+    if (fleet_board_frame_encode_ids(FLEET_BOARD_FRAME_INV, ids, 1, frame,
+                                     sizeof(frame),
+                                     &frame_len) != FLEET_BOARD_OK)
+        return;
+    struct net_manager *nm = mp->net_mgr;
+    uint64_t sent = 0;
+    zcl_mutex_lock(&nm->cs_nodes);
+    for (size_t i = 0; i < nm->num_nodes; i++)
+        if (fleet_board_relay_target(nm->nodes[i], source) &&
+            fleet_board_send(mp, nm->nodes[i], frame, frame_len))
+            sent++;
+    zcl_mutex_unlock(&nm->cs_nodes);
+    atomic_fetch_add_explicit(&s_relayed, sent, memory_order_relaxed);
+}
+
+uint64_t boot_fleet_board_relayed_count(void)
+{
+    return atomic_load_explicit(&s_relayed, memory_order_relaxed);
+}
+
 /* One delivered POST frame: decode, ingest, and decide whose problem a
  * refusal is. Its own function so the multiplexer above stays a dispatch
  * table rather than a place where one leg's policy accumulates. */
@@ -720,15 +780,18 @@ static void fleet_board_handle_post(struct msg_processor *mp,
             fleet_board_offend(mp, node, r);
         return;
     }
-    if (stored && boot_fleet_roster_is_row(&post))
+    if (!stored)
+        return;
+    if (boot_fleet_roster_is_row(&post))
         boot_fleet_roster_invalidate();
-    if (stored) {
-        char id_hex[65];
-        fleet_board_id_to_hex(post.id, id_hex);
-        LOG_INFO("net.fleet_board", "stored %s post %.16s from peer %lld",
-                 fleet_board_kind_name(post.kind), id_hex,
-                 (long long)node->id);
-    }
+    char id_hex[65];
+    fleet_board_id_to_hex(post.id, id_hex);
+    LOG_INFO("net.fleet_board", "stored %s post %.16s from peer %lld",
+             fleet_board_kind_name(post.kind), id_hex, (long long)node->id);
+    /* Announced only once durable, as a local post is; a fleet-scoped post
+     * never rides this public path. */
+    if (post.scope != FLEET_BOARD_SCOPE_FLEET)
+        fleet_board_relay(mp, node, post.id);
 }
 
 bool boot_fleet_board_frame(struct msg_processor *mp, struct p2p_node *node,
@@ -900,8 +963,9 @@ enum fleet_board_result boot_fleet_board_publish(
 }
 
 /* After a stored publish: announce a public post, offer a new fleet post to
- * the push queue with the caller's hint, and account for a hint that had
- * nothing to ride. Returns what was done with the hint. */
+ * the push queue for every connected peer a pull would serve it to (and the
+ * caller's hint), and account for a hint that had nothing to ride. Returns
+ * what was done with the hint. */
 static enum fleet_board_push_hint fleet_board_after_store(
     const struct fleet_board_post *post, bool stored, const char *push_to)
 {
@@ -914,7 +978,7 @@ static enum fleet_board_push_hint fleet_board_after_store(
                        : FLEET_BOARD_PUSH_HINT_NONE;
     }
     if (stored && (have_own || push_to))
-        return boot_fleet_board_fleet_push_enqueue_to(
+        return boot_fleet_board_fleet_push_enqueue_all(
             post, have_own ? own : NULL, push_to);
     return push_to ? boot_fleet_board_fleet_push_hint_unused(push_to)
                    : FLEET_BOARD_PUSH_HINT_NONE;

@@ -3,9 +3,10 @@
  * (config/boot_fleet_board.h). The sending half: a bounded queue of post ids
  * this box signed and stored, filled in O(1) from the publish path and
  * drained on the board lane's tick into one-shot streams whose whole payload
- * rides the OPEN, each to the one paired peer the local caller's delivery
- * hint names or else the post answers, and only when a pull from that peer
- * would be served the post. The receiving half:
+ * rides the OPEN, to the one paired peer the local caller's delivery hint
+ * names or else the post answers and, for a post from the local post path,
+ * to every other connected peer (boot_fleet_board_push_fanout.c), each only
+ * when a pull from that peer would be served the post. The receiving half:
  * the OPEN is framed-checked and copied into a preallocated push inbox on
  * the frame path, nothing else; the lane tick re-proves the pusher, stores
  * every record through the checks a pulled post meets, and closes the
@@ -17,6 +18,7 @@
 // refusal rides the receipt, and failure logging happens here, named.
 
 #include "boot_fleet_board_push_internal.h"
+#include "boot_fleet_board_push_round_internal.h"
 
 #include "boot_fleet_board_authority_internal.h"
 #include "boot_fleet_board_frame_internal.h"
@@ -78,19 +80,6 @@ struct push_slot {
     uint8_t bytes[FLEET_BOARD_PUSH_MAX];
 };
 
-/* One post id waiting for the tick, with the post it answers or the box the
- * local caller's hint named (the hint lives here and nowhere else). */
-struct push_queued {
-    uint8_t id[32];
-    uint8_t ref[32];
-    uint8_t host[32];
-    int64_t queued;
-    bool has_to; /* `to` is the hinted addressee's board key; ref unused */
-    uint8_t to[32];
-    bool waiting; /* held once already: the peer it was meant for */
-    uint8_t waiting_peer[32];
-};
-
 /* A session that answered the push type stream_malformed: an older node. */
 struct push_session {
     bool used;
@@ -101,10 +90,6 @@ struct push_session {
 
 #define PUSH_SESSIONS_MAX 8u
 #define PUSH_LOG_WINDOW_S 60
-/* Results a sending step returns beyond the skip reasons. */
-#define PUSH_OK ((int)FLEET_BOARD_PUSH_SKIPS)
-#define PUSH_HOLD ((int)FLEET_BOARD_PUSH_SKIPS + 1)
-#define PUSH_UNASKED ((int)FLEET_BOARD_PUSH_SKIPS + 2)
 
 /* The most board keys one pusher's live pairing rows can prove at once. */
 #define PUSH_PUSHER_KEYS_MAX 4u
@@ -228,7 +213,7 @@ static bool push_log_due(enum push_log_kind kind, uint64_t *skipped)
 
 /* Count `n` posts not pushed for `why`; the reasons a push could have gone
  * and did not are logged, rate limited. */
-static void push_skip(enum fleet_board_push_skip why, uint64_t n)
+void board_push_skip(enum fleet_board_push_skip why, uint64_t n)
 {
     push_bump(&g_skipped[why], n);
     uint64_t skipped = 0;
@@ -341,7 +326,7 @@ static void push_queue_put(const struct push_queued *q)
     push_bump(&g_send_gen, 1);
     push_bump(&g_queued, 1);
     if (dropped)
-        push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, 1);
 }
 
 /* A hinted post kept out of the queue is counted once, by its hint. */
@@ -349,7 +334,7 @@ static void push_skip_unhinted(enum fleet_board_push_hint hint,
                                enum fleet_board_push_skip why)
 {
     if (hint == FLEET_BOARD_PUSH_HINT_NONE)
-        push_skip(why, 1);
+        board_push_skip(why, 1);
 }
 
 /* A post that is not this box's own FLEET post, and a usable hint on it
@@ -365,9 +350,11 @@ static enum fleet_board_push_hint push_not_own(
     return push_hint_count(hint);
 }
 
-enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
+/* The queue entry for this box's own new FLEET post; with `fanout` it is
+ * queued even with no addressee, and also offered to every connected peer. */
+static enum fleet_board_push_hint push_enqueue(
     const struct fleet_board_post *post, const uint8_t own_key[32],
-    const char *push_to)
+    const char *push_to, bool fanout)
 {
     uint8_t to[32];
     enum fleet_board_push_hint hint = push_hint_parse(push_to, to);
@@ -379,7 +366,7 @@ enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
     /* A refused hint is as if there were none: the ref decides, or nothing;
      * with nothing, the post is counted once, under its hint verdict. */
     bool use_to = hint == FLEET_BOARD_PUSH_HINT_QUEUED;
-    if (!use_to &&
+    if (!use_to && !fanout &&
         (push_id_zero(post->ref) || memcmp(post->ref, post->id, 32) == 0)) {
         push_skip_unhinted(hint, FLEET_BOARD_PUSH_SKIP_NO_ADDRESSEE);
         return push_hint_count(hint);
@@ -392,9 +379,24 @@ enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
     q.has_to = use_to;
     if (use_to)
         memcpy(q.to, to, 32);
+    q.fanout = fanout;
     q.queued = board_now();
     push_queue_put(&q);
     return push_hint_count(hint);
+}
+
+enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
+    const struct fleet_board_post *post, const uint8_t own_key[32],
+    const char *push_to)
+{
+    return push_enqueue(post, own_key, push_to, false);
+}
+
+enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_all(
+    const struct fleet_board_post *post, const uint8_t own_key[32],
+    const char *push_to)
+{
+    return push_enqueue(post, own_key, push_to, true);
 }
 
 /* Put held posts back behind whatever arrived since; a full queue keeps the
@@ -415,7 +417,7 @@ static void push_requeue(const struct push_queued *held, size_t n)
     atomic_store_explicit(&g_queue_count, g_queue_len, memory_order_relaxed);
     push_unlock();
     if (lost)
-        push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, lost);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_QUEUE_FULL, lost);
 }
 
 static size_t push_take_queue(struct push_queued out[FLEET_BOARD_PUSH_QUEUE_MAX])
@@ -445,8 +447,8 @@ static void push_session_mark_unsupported(const struct mesh_stream *st)
     push_unlock();
 }
 
-static bool push_session_unsupported(const uint8_t peer_static[32],
-                                     const struct noise_transport_snapshot *snap)
+bool board_push_session_unsupported(const uint8_t peer_static[32],
+                                    const struct noise_transport_snapshot *snap)
 {
     bool found = false;
     push_lock();
@@ -461,37 +463,6 @@ static bool push_session_unsupported(const uint8_t peer_static[32],
 }
 
 /* ── the sending half, on the lane tick ───────────────────────────────── */
-
-/* One pairing row as this round sees it. The first (newest) row of each
- * Noise key leads it: the lead holds that peer's judgment and the push being
- * built for it, so one peer gets one push however many rows it has. */
-struct push_peer {
-    struct db_mesh_pairing row;
-    uint8_t online[32];
-    struct push_peer *lead; /* this row's Noise key's newest row */
-    int ready;              /* lead only: PUSH_UNASKED until judged */
-    uint8_t ready_to[32];   /* lead only: the board key it was judged for */
-    uint8_t n;
-    size_t len;
-    uint8_t ids[FLEET_BOARD_PUSH_POSTS_MAX][32];
-    uint8_t *frame; /* FLEET_BOARD_PUSH_MAX bytes once it holds a record */
-};
-
-/* A round allocates its peer table and post buffers, and walks the pairing
- * rows, only when an entry needs resolving: a round whose every entry waits
- * for a push still open does neither. */
-struct push_round {
-    struct boot_svc_ctx *svc;
-    struct node_db *store;
-    int64_t now;
-    bool ready;  /* the peer table and the buffers below are built */
-    struct push_peer *peers;
-    size_t n_peers;
-    struct push_queued held[FLEET_BOARD_PUSH_QUEUE_MAX];
-    size_t n_held;
-    struct db_fleet_board_post *row;     /* the post being offered */
-    struct db_fleet_board_post *ref_row; /* the post it answers */
-};
 
 static struct push_peer *push_peer_lead(struct push_round *r,
                                         const uint8_t noise[32])
@@ -534,6 +505,7 @@ static void push_round_peers(struct push_round *r)
         memcpy(p->online, peer.online_pubkey, 32);
         p->lead = lead ? lead : p;
         p->ready = PUSH_UNASKED;
+        p->fan_ready = PUSH_UNASKED;
     }
     free(rows);
 }
@@ -576,7 +548,7 @@ static bool push_live_visitor(struct mesh_stream *st, void *ctx)
 }
 
 /* A push to this peer is still waiting for its receipt. */
-static bool push_out_live(const uint8_t peer_static[32])
+bool board_push_out_live(const uint8_t peer_static[32])
 {
     struct push_live_probe probe = { peer_static, false };
     mesh_stream_visit(FLEET_BOARD_FLEET_SERVICE_NAME, push_live_visitor,
@@ -603,6 +575,9 @@ static int push_resolve(struct push_round *r, const struct push_queued *q,
         memcpy(to, q->to, 32);
         return PUSH_OK;
     }
+    /* No addressee at all: only a fan-out entry is queued so. */
+    if (push_id_zero(q->ref) || memcmp(q->ref, q->id, 32) == 0)
+        return PUSH_UNASKED;
     if (db_fleet_board_post_lookup_checked(r->store, q->ref, r->ref_row) !=
             FLEET_BOARD_LOOKUP_FOUND ||
         memcmp(r->ref_row->post.host_pubkey, q->host, 32) == 0)
@@ -659,15 +634,15 @@ static int push_peer_judge(const struct push_round *r,
     p2p_node_release(node);
     if (over)
         return FLEET_BOARD_PUSH_SKIP_OVER_BUDGET;
-    if (push_session_unsupported(noise, &snap))
+    if (board_push_session_unsupported(noise, &snap))
         return FLEET_BOARD_PUSH_SKIP_UNSUPPORTED;
-    return push_out_live(noise) ? PUSH_HOLD : PUSH_OK;
+    return board_push_out_live(noise) ? PUSH_HOLD : PUSH_OK;
 }
 
 /* Add the resolved post to the peer's push. A push that is full waits for
  * the next tick; a post that cannot ride an OPEN alone is never pushed. */
-static int push_batch_add(struct push_round *r, struct push_peer *p,
-                          const struct push_queued *q)
+int board_push_batch_add(struct push_round *r, struct push_peer *p,
+                         const struct push_queued *q)
 {
     if (!p->frame) {
         p->frame = zcl_malloc(FLEET_BOARD_PUSH_MAX, "fleet_board_push_frame");
@@ -685,16 +660,17 @@ static int push_batch_add(struct push_round *r, struct push_peer *p,
 
 /* A post waits for the next tick while its peer's push is open, for at most
  * FLEET_BOARD_PUSH_WAIT_S; then it is left to the pull. */
-static void push_hold(struct push_round *r, const struct push_queued *q,
-                      const struct push_peer *p)
+void board_push_hold(struct push_round *r, const struct push_queued *q,
+                     const struct push_peer *p)
 {
     if (r->now < q->queued || r->now - q->queued >= FLEET_BOARD_PUSH_WAIT_S ||
         r->n_held >= FLEET_BOARD_PUSH_QUEUE_MAX) {
-        push_skip(FLEET_BOARD_PUSH_SKIP_BUSY, 1);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_BUSY, 1);
         return;
     }
     struct push_queued *h = &r->held[r->n_held++];
     *h = *q;
+    h->fanout = false; /* held for one peer: never fanned out again */
     if (p) {
         h->waiting = true;
         memcpy(h->waiting_peer, p->row.peer_noise_pubkey, 32);
@@ -705,12 +681,12 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
 {
     /* A post held for a peer whose push is still open waits again without
      * a store read. */
-    if (q->waiting && push_out_live(q->waiting_peer)) {
-        push_hold(r, q, NULL);
+    if (q->waiting && board_push_out_live(q->waiting_peer)) {
+        board_push_hold(r, q, NULL);
         return;
     }
     if (!push_round_ready(r)) {
-        push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, 1);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, 1);
         return;
     }
     struct push_peer *p = NULL;
@@ -727,11 +703,15 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
         step = p->ready;
     }
     if (step == PUSH_OK)
-        step = push_batch_add(r, p, q);
+        step = board_push_batch_add(r, p, q);
     if (step == PUSH_HOLD)
-        push_hold(r, q, p);
-    else if (step != PUSH_OK)
-        push_skip((enum fleet_board_push_skip)step, 1);
+        board_push_hold(r, q, p);
+    else if (step != PUSH_OK && step != PUSH_UNASKED)
+        board_push_skip((enum fleet_board_push_skip)step, 1);
+    /* The fan-out needs the post a pull would still serve, in r->row. */
+    if (q->fanout && step != FLEET_BOARD_PUSH_SKIP_GONE &&
+        step != FLEET_BOARD_PUSH_SKIP_EXPIRED)
+        board_push_fanout(r, q, p);
 }
 
 /* Open one push. The stream owns the state once it opens. */
@@ -740,7 +720,7 @@ static void push_open(const struct push_peer *p)
     struct board_push_out_state *s =
         zcl_calloc(1, sizeof *s, "fleet_board_push_out");
     if (!s) {
-        push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, p->n);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, p->n);
         return;
     }
     s->tag = BOARD_STATE_PUSH_OUT;
@@ -805,7 +785,7 @@ static size_t push_send_round(struct boot_svc_ctx *svc, struct node_db *store,
     struct push_round *r = zcl_calloc(1, sizeof *r, "fleet_board_push_round");
     if (!r || !store) {
         free(r);
-        push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, n);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_OPEN_FAILED, n);
         return 0;
     }
     r->svc = svc;
@@ -1249,7 +1229,7 @@ void board_push_stream_tick(struct mesh_stream *st, enum board_state_tag tag,
     }
     struct board_push_out_state *s = st->service_state;
     s->self_closed = true;
-    push_skip(FLEET_BOARD_PUSH_SKIP_NO_RECEIPT, s->n);
+    board_push_skip(FLEET_BOARD_PUSH_SKIP_NO_RECEIPT, s->n);
     mesh_stream_close(st, MESH_STREAM_CLOSED_BY_SERVICE, NULL, 0);
 }
 
@@ -1301,7 +1281,7 @@ static void push_out_closed(struct mesh_stream *st,
         /* What a node from before the push answers the type: remember the
          * session, so it is not asked again while it lasts. */
         push_session_mark_unsupported(st);
-        push_skip(FLEET_BOARD_PUSH_SKIP_UNSUPPORTED, s->n);
+        board_push_skip(FLEET_BOARD_PUSH_SKIP_UNSUPPORTED, s->n);
         return;
     }
     push_bump(&g_closed[(unsigned)reason & 15u], 1);
@@ -1366,6 +1346,7 @@ void board_push_counts(struct boot_fleet_board_fleet_counts *out)
     push_copy(out->push_refused_out, g_refused_out, FLEET_BOARD_PUSH_REFUSALS);
     push_copy(out->push_refused_in, g_refused_in, FLEET_BOARD_PUSH_REFUSALS);
     push_copy(out->push_hint, g_hint, FLEET_BOARD_PUSH_HINTS);
+    board_push_fanout_counts(out);
 }
 
 const char *board_push_skip_name(unsigned why)

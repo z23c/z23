@@ -116,6 +116,9 @@ static bool carriage_push_out(struct json_value *into,
                        FLEET_BOARD_PUSH_REFUSALS, carriage_refusal, false) &&
         carriage_group(&o, "hint", c->push_hint, FLEET_BOARD_PUSH_HINT_QUEUED,
                        FLEET_BOARD_PUSH_HINTS, carriage_hint, false) &&
+        json_push_kv_int(&o, "fanout", (int64_t)c->push_fanout) &&
+        carriage_group(&o, "fanout_refused", c->push_fanout_refused, 0,
+                       FLEET_BOARD_PUSH_REFUSALS, carriage_refusal, false) &&
         json_push_kv(into, "push_out", &o);
     json_free(&o);
     return ok;

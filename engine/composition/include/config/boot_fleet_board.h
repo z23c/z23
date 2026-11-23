@@ -162,8 +162,12 @@ enum fleet_board_wiki_write_status boot_fleet_board_wiki_write(
     struct db_fleet_board_post *out, enum fleet_board_result *refusal);
 
 /* Announce a specific id to every connected peer. Used right after a local
- * post so the fleet sees it without waiting for the announce period. */
+ * post so the fleet sees it without waiting for the announce period. A
+ * public post a peer delivers is announced the same way, once, when this
+ * node first stores it, to every peer but the one it came from; this counts
+ * those relayed inventory lines since the process started. */
 void boot_fleet_board_announce(const uint8_t id[32]);
+uint64_t boot_fleet_board_relayed_count(void);
 
 struct rpc_table;
 /* Register the `fleet_board` RPC method — the node-side half of every board
@@ -190,14 +194,23 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * share, including one the ANSWERING box dialled, so a box behind NAT that
  * dials out can still be pulled from.
  *
- * PUSH only speeds one post up; it is never the only way a post arrives.
- * After this box durably stores a new fleet post it signed itself, the lane
- * tick offers it to ONE box, once, in a stream whose whole payload rides the
- * OPEN (FLEET_BOARD_FLEET_MSG_PUSH). Which box: the board key the local
+ * PUSH only speeds posts up; it is never the only way a post arrives.
+ * After this box durably stores a new fleet post it signed itself (the
+ * local post path), the lane tick FANS IT OUT: once, to every paired peer
+ * that has a live session now and that the answering half's own disclosure
+ * decision would serve on a pull (below), except a peer proving this box's
+ * own board key; a peer with no session is left to the pull, and a peer the
+ * decision refuses is counted in push_fanout_refused by the check that
+ * failed and never pushed to. A fanned-out post is never pushed to a box
+ * that could not have pulled it. The addressed push described next runs
+ * first for the same post and its addressee is not pushed to twice.
+ *
+ * The addressed push offers a post to ONE box, once, in a stream whose whole
+ * payload rides the OPEN (FLEET_BOARD_FLEET_MSG_PUSH). Which box: the board key the local
  * caller named in the post RPC's `push_to` delivery hint when it gave a
  * usable one, else the author of the post this one answers (`ref`) when
- * this box holds that post and another box wrote it; a post with neither is
- * not pushed and waits for the pull. Nothing in a signed post names a
+ * this box holds that post and another box wrote it; a post with neither has
+ * no addressed push (the fan-out still offers it). Nothing in a signed post names a
  * recipient (a mail row's `to` is text the node does not read), so agent
  * mail is pushed only by the hint its exporter passes. The hint is never
  * signed, stored, put in a frame or echoed to a peer; it decides only whom
@@ -224,7 +237,7 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * wiki page). Where the pull would refuse, the post is skipped ineligible
  * and the pull remains its only carrier. So a push never reaches a peer a
  * pull from that peer would not be served, and no hint can make a post
- * reach more than one box: a local process able to call the post RPC can
+ * reach a box the pull would not serve: a local process able to call the post RPC can
  * already publish the post to every eligible box by pull, and gains only
  * the choice of which one of those is tried first. Which pairing rows that
  * decision judges: a pairing is one row, keyed by its pairing id, the hash
@@ -558,6 +571,11 @@ struct boot_fleet_board_fleet_counts {
     uint64_t push_refused_out[FLEET_BOARD_PUSH_REFUSALS];
     uint64_t push_refused_in[FLEET_BOARD_PUSH_REFUSALS];
     uint64_t push_hint[FLEET_BOARD_PUSH_HINTS];
+    /* The fan-out: posts added to a push for one more peer, and connected
+     * paired peers it did not push to because a pull from them would not be
+     * served, by the check that failed. */
+    uint64_t push_fanout;
+    uint64_t push_fanout_refused[FLEET_BOARD_PUSH_REFUSALS];
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
 
@@ -574,6 +592,12 @@ void boot_fleet_board_fleet_push_enqueue(const struct fleet_board_post *post,
  * place of the ref's. The hint is copied into the queue entry only; the
  * post is untouched. Returns what was done with the hint, counted. */
 enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_to(
+    const struct fleet_board_post *post, const uint8_t own_key[32],
+    const char *push_to);
+/* The local post path's offer: the same entry, also fanned out to every
+ * connected peer a pull would serve the post to (see PUSH above), and queued
+ * even when it has neither a usable hint nor a `ref`. */
+enum fleet_board_push_hint boot_fleet_board_fleet_push_enqueue_all(
     const struct fleet_board_post *post, const uint8_t own_key[32],
     const char *push_to);
 /* A hint whose publish stored nothing new (the same post again, or a typed
