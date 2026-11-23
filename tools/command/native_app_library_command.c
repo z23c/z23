@@ -692,7 +692,7 @@ static bool al_share_path(struct library *w, const uint8_t source[32], const cha
 #endif
 }
 static void al_share_notice_failure(struct library *w, struct zcl_command_reply *reply,
-    const char *code, const char *message, bool created)
+    const char *code, const char *message, bool created, bool original)
 {
     w->share_result = created; w->share_inspect = !created;
     zcl_package_copy_fail(reply, code, true, message, w->shared_path);
@@ -701,7 +701,8 @@ static void al_share_notice_failure(struct library *w, struct zcl_command_reply 
     if (created) ok = ok && json_push_kv_str(&facts, "output", w->shared_path);
     if (!ok || !json_push_kv(&reply->data, "failure_facts", &facts))
         (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                       "Look for z23-share files in the displayed destination before retrying.");
+                       "%s", original ? "Look for z23-share files in the displayed destination before retrying." :
+                       "Look for z23-share files in your home folder before retrying.");
     json_free(&facts);
 }
 static bool al_share_notice(struct app_confirm *view, const char *path, char *why, size_t cap)
@@ -769,7 +770,7 @@ static void al_share_failure_evidence(struct library *w, const struct zcl_comman
     else if (requested && !strcmp(requested, w->shared_path)) w->share_inspect = true;
 }
 static bool al_share_result(struct library *w, struct app_confirm *notice,
-    struct zcl_command_reply *reply, char *why, size_t cap)
+    struct zcl_command_reply *reply, char *why, size_t cap, bool original)
 {
     if (reply->status != ZCL_COMMAND_STATUS_PASSED) {
         al_share_failure_evidence(w, reply);
@@ -784,13 +785,14 @@ static bool al_share_result(struct library *w, struct app_confirm *notice,
     const char *file = zcl_package_copy_str(&reply->data, "share_file");
     if (!file || strcmp(file, w->shared_path))
         al_share_notice_failure(w, reply, "SHARE_RESULT_MISMATCH",
-            "Share completed but its file location could not be verified.", false);
+            "Share completed but its file location could not be verified.", false, original);
     else if (!app_confirm_show(notice, w->notice, w->prepare_context, why, cap))
         al_share_notice_failure(w, reply, "PRESENTATION_FAILED",
-            "Share file created, but confirmation could not be shown. Inspect the displayed destination.", true);
+            original ? "Share file created, but confirmation could not be shown. Inspect the displayed destination." :
+            "Share file created, but confirmation could not be shown. Look for z23-share files in your home folder.", true, original);
     else if (al_reveal_enabled(notice) && !(w->revealer ? w->revealer : al_reveal_native)(w->prepare_context, w->shared_path)) {
         al_share_notice_failure(w, reply, "REVEAL_FAILED",
-            "The share file was created, but opening its location could not be confirmed.", true);
+            "The share file was created, but opening its location could not be confirmed.", true, original);
         w->error_presented = al_reveal_failure_notice(w);
     }
     return false;
@@ -810,7 +812,7 @@ static bool al_share(struct library *w, const struct app_launch_env *env, struct
     }
     if (w->sharer) w->sharer(w->prepare_context, &row->selection, w->shared_path, reply);
     else zcl_native_app_share_snapshot(row->entry.id, w->shared_path, reply, &row->selection);
-    bool resume = al_share_result(w, notice, reply, why, sizeof(why));
+    bool resume = al_share_result(w, notice, reply, why, sizeof(why), false);
     app_confirm_free(notice); free(notice);
     return resume;
 }
@@ -943,15 +945,15 @@ static bool al_original_file(struct library *w, const struct app_launch_env *env
     char why[256] = {0}; const char *carrier = zcl_package_copy_str(&reply->data, "carrier");
     if (!notice || !carrier || !al_share_notice(notice, w->shared_path, why, sizeof(why))) {
         if (notice) { app_confirm_free(notice); free(notice); }
-        al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "The original file was saved; inspect its location.", true);
+        al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "The original file was saved; inspect its location.", true, true);
         return false;
     }
     app_confirm_free(notice); memset(notice->bitmaps, 0, sizeof(notice->bitmaps));
     (void)snprintf(notice->model.title, sizeof(notice->model.title), "Original app file created");
     (void)snprintf(notice->model.summary, sizeof(notice->model.summary), "Send the reconstructed original signed app to a friend.");
     bool ok = app_confirm_field(&notice->model, "Carrier: ", carrier) && app_confirm_prepare(notice, why, sizeof(why));
-    if (ok) ok = al_share_result(w, notice, reply, why, sizeof(why));
-    else al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "The original file was saved; inspect its location.", true);
+    if (ok) ok = al_share_result(w, notice, reply, why, sizeof(why), true);
+    else al_share_notice_failure(w, reply, "PRESENTATION_FAILED", "The original file was saved; inspect its location.", true, true);
     app_confirm_free(notice); free(notice); return ok;
 }
 static void al_publish_notice(struct library *w, struct zcl_command_reply *reply)
