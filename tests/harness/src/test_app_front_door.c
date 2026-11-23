@@ -874,11 +874,30 @@ static int afd_b_plan_pin(struct afd_world *w)
 }
 
 
+static bool afd_receive_leaf_hint(const char *path, const char *datadir)
+{
+    char prior[AFD_PATH], pin[80];
+    const int port = zcl_native_command_rpc_port();
+    (void)snprintf(prior, sizeof(prior), "%s", zcl_native_command_datadir());
+    zcl_native_bridge_bind_rpc(datadir, port);
+    struct afd_leaf l; afd_open_leaf(&l);
+    bool ok = json_push_kv_str(&l.in, "file", path) && afd_exec("app.receive-copy", &l) &&
+              l.out.status == ZCL_COMMAND_STATUS_PASSED && !l.out.error.mutated;
+    const char *plan = afd_get(&l, "plan_id");
+    const char *next = afd_get(&l, "next");
+    (void)snprintf(pin, sizeof(pin), "--plan-id=%s", plan);
+    ok = ok && strlen(plan) == 64 && strstr(next, "recipient\\ data") &&
+         strstr(next, "shared\\ copy.z23share") && strstr(next, pin) && strstr(next, " --yes");
+    afd_close_leaf(&l);
+    zcl_native_bridge_bind_rpc(prior, port);
+    return ok;
+}
+
 static int afd_b_spaced_plan(struct afd_world *w)
 {
     int failures = 0;
     TEST("B: the pinned retry shell-quotes a chosen share filename containing a space") {
-        char path[AFD_PATH], hint[AFD_PATH + 200];
+        char path[AFD_PATH], hint[AFD_PATH + 200], datadir[AFD_PATH];
         int n = snprintf(path, sizeof(path), "%s/shared copy.z23share", w->b_home);
         ASSERT(n > 0 && (size_t)n < sizeof(path));
         ASSERT(link(w->share, path) == 0);
@@ -887,6 +906,9 @@ static int afd_b_spaced_plan(struct afd_world *w)
         ASSERT_EQ(run.rc, 0);
         ASSERT(afd_hint_of(run.text, hint, sizeof(hint)));
         ASSERT(strstr(hint, "shared\\ copy.z23share") && strstr(hint, "--plan-id="));
+        n = snprintf(datadir, sizeof(datadir), "%s/recipient data", w->root);
+        ASSERT(n > 0 && (size_t)n < sizeof(datadir) && mkdir(datadir, 0700) == 0);
+        ASSERT(afd_receive_leaf_hint(path, datadir));
         ASSERT(unlink(path) == 0);
         PASS();
     } _test_next:;
