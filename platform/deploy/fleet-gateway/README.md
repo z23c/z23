@@ -365,7 +365,7 @@ informational, and integer `since` retains the legacy latest-snapshot behavior.
 Clients that flatten a union-typed `since` may instead send the same string in
 `cursor_token`; do not supply both. The gateway maps that field to the identical
 native resume path.
-n<!-- claim: symbol-present gw_brief_cursor_map tools/fleet_gateway.c # string-only cursor field maps to the existing native since -->
+<!-- claim: symbol-present gw_brief_cursor_map tools/fleet_gateway.c # string-only cursor field maps to the existing native since -->
 Projection failure or a page with no room for a complete pending row refuses
 without a successful advanced token. Keep the input cursor and follow the
 error's next action. Token pages omit the optional human screen to keep the
