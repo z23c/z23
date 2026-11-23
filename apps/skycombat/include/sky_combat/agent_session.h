@@ -32,6 +32,8 @@ struct sky_agent_observation {
     double time;
     bool player_present;
     float x, y, z, yaw, speed, health;
+    bool match_started, match_ended;
+    int score_red, score_blue, winning_team, best_score;
 };
 
 struct sky_agent_session {

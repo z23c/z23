@@ -57,6 +57,19 @@ static int sky_qa_entry(int argc, char **argv);
 #include "../../../apps/skycombat/src/sky_combat_multiplayer_ultimate.c"
 #undef main
 
+void powerup_effects_init(powerup_effects_t *effects)
+{
+    if (!effects) return;
+    memset(effects, 0, sizeof(*effects));
+    effects->fire_rate_multiplier = 1.0f;
+    effects->speed_multiplier = 1.0f;
+}
+Vector3 aircraft_manager_get_spawn_point(aircraft_manager_t *manager)
+{
+    (void)manager;
+    return (Vector3){0, 50, 0};
+}
+
 static aircraft_manager_t qa_aircraft;
 static powerup_manager_t qa_powerups;
 static match_state_t qa_match;

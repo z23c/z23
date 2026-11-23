@@ -3,6 +3,7 @@
 #include "sky_combat/game_runtime.h"
 #include <raylib.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 static bool sky_runtime_agent;
@@ -57,4 +58,63 @@ int sky_game_visual_sample(uint32_t domain, uint32_t index, int minimum, int max
     value ^= value >> 31;
     uint64_t span = (uint64_t)((int64_t)maximum - (int64_t)minimum) + 1;
     return (int)((int64_t)minimum + (int64_t)(value % span));
+}
+
+#define SKY_METRICS_CAPACITY 36000u
+static float sky_metric_work[SKY_METRICS_CAPACITY];
+static float sky_metric_interval[SKY_METRICS_CAPACITY];
+static float sky_metric_input[SKY_METRICS_CAPACITY];
+static size_t sky_metric_work_count;
+static size_t sky_metric_interval_count;
+static size_t sky_metric_input_count;
+
+void sky_game_metrics_reset(void)
+{
+    sky_metric_work_count = 0;
+    sky_metric_interval_count = 0;
+    sky_metric_input_count = 0;
+}
+
+void sky_game_metrics_record(float work_ms, float input_ms, float interval_ms, bool external_input)
+{
+    if (!isfinite(work_ms) || work_ms < 0) return;
+    if (sky_metric_work_count < SKY_METRICS_CAPACITY)
+        sky_metric_work[sky_metric_work_count++] = work_ms;
+    if (external_input) {
+        if (isfinite(input_ms) && input_ms >= 0 &&
+            sky_metric_input_count < SKY_METRICS_CAPACITY)
+            sky_metric_input[sky_metric_input_count++] = input_ms;
+    } else if (isfinite(interval_ms) && interval_ms >= 0 &&
+               sky_metric_interval_count < SKY_METRICS_CAPACITY) {
+        sky_metric_interval[sky_metric_interval_count++] = interval_ms;
+    }
+}
+
+static int sky_metric_compare(const void *left, const void *right)
+{
+    float a = *(const float *)left, b = *(const float *)right;
+    return (a > b) - (a < b);
+}
+
+static void sky_metric_report_one(const char *name, float *values, size_t count)
+{
+    if (!count) {
+        fprintf(stderr, "Sky Combat metrics %s count=0\n", name);
+        return;
+    }
+    qsort(values, count, sizeof(values[0]), sky_metric_compare);
+    size_t p50 = count * 50 / 100, p95 = count * 95 / 100, p99 = count * 99 / 100;
+    if (p50 >= count) p50 = count - 1;
+    if (p95 >= count) p95 = count - 1;
+    if (p99 >= count) p99 = count - 1;
+    fprintf(stderr, "Sky Combat metrics %s count=%zu p50_ms=%.3f p95_ms=%.3f p99_ms=%.3f max_ms=%.3f\n",
+            name, count, (double)values[p50], (double)values[p95],
+            (double)values[p99], (double)values[count - 1]);
+}
+
+void sky_game_metrics_report(void)
+{
+    sky_metric_report_one("frame_work", sky_metric_work, sky_metric_work_count);
+    sky_metric_report_one("frame_interval", sky_metric_interval, sky_metric_interval_count);
+    sky_metric_report_one("input_to_frame", sky_metric_input, sky_metric_input_count);
 }

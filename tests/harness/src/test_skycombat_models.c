@@ -106,6 +106,14 @@ static int skycombat_powerup_printf(const char *format, const char *name,
 #include "../../../apps/skycombat/src/models/powerups.c"
 #undef printf
 
+#include "sky_combat/models/aircraft_manager.h"
+Vector3 aircraft_manager_get_spawn_point(aircraft_manager_t *manager)
+{
+    (void)manager;
+    return (Vector3){0, 50, 0};
+}
+#include "../../../apps/skycombat/src/game_match_reset.c"
+
 static int skycombat_collect_diagnostic_tests(void)
 {
     int failures = 0;
@@ -249,6 +257,7 @@ static int skycombat_match_lifecycle_tests(void)
     TEST("match: unstarted ledger refuses progress, finish and snapshots") {
         match_state_update(s, 2.0f); match_add_score(s, 0, 0, 1);
         ASSERT(!match_state_set_team_scores(s, scores)); ASSERT(!match_state_finish(s));
+        ASSERT(!match_state_restart(s));
         ASSERT(!match_check_win_condition(s, &winner, &team)); ASSERT_EQ(winner, 99);
         ASSERT(memcmp(s, &before, sizeof(before)) == 0); PASS();
     }
@@ -272,6 +281,18 @@ static int skycombat_match_lifecycle_tests(void)
         memcpy(&before, s, sizeof(before)); match_state_update(s, 3.0f); match_add_score(s, 0, 0, 2);
         ASSERT(!match_state_set_team_scores(s, scores)); ASSERT(!match_state_finish(s));
         ASSERT(memcmp(s, &before, sizeof(before)) == 0); PASS();
+    }
+    TEST("match: restart resets the ledger but preserves configured rules") {
+        int limit = s->rules.score_limit;
+        ASSERT(match_state_restart(s));
+        ASSERT(s->match_started && !s->match_ended && s->elapsed_time == 0);
+        ASSERT_EQ(s->winning_team, -1); ASSERT_EQ(s->rules.score_limit, limit);
+        for (int i = 0; i < 4; ++i) ASSERT_EQ(s->team_scores[i], 0);
+        int next[4] = {30, 2, 0, 0};
+        ASSERT(match_state_set_team_scores(s, next));
+        ASSERT(match_is_over(s) && s->winning_team == 0);
+        ASSERT(match_state_restart(s));
+        ASSERT(s->match_started && !s->match_ended && s->team_scores[0] == 0); PASS();
     }
 _test_next:;
     match_state_destroy(s);
@@ -298,6 +319,19 @@ static int skycombat_match_bounds_tests(void)
         s->elapsed_time = 0; s->team_scores[0] = 2; s->team_scores[1] = 4;
         s->rules.time_limit = 1.0f; match_state_update(s, 1.0f);
         ASSERT(match_is_over(s)); ASSERT_EQ(s->winning_team, 1); PASS();
+    }
+    TEST("match: 60 Hz ticks reach the time limit at the exact frame") {
+        match_state_t *clock = match_state_create(MATCH_TYPE_TEAM_DEATHMATCH);
+        ASSERT(clock != NULL);
+        clock->rules.time_limit = 15.0f;
+        ASSERT(match_state_begin(clock));
+        for (int i = 0; i < 899; ++i) {
+            match_state_update(clock, 1.0f / 60.0f);
+            ASSERT(!match_is_over(clock));
+        }
+        match_state_update(clock, 1.0f / 60.0f);
+        ASSERT(match_is_over(clock));
+        match_state_destroy(clock); PASS();
     }
 _test_next:;
     match_state_destroy(s);
@@ -347,6 +381,18 @@ static int skycombat_gun_pattern_tests(void)
         weapons_destroy(b); b = weapons_create();
         ASSERT(b && skycombat_gun_shot(b, 1, 1)); PASS();
     }
+    TEST("guns: reset releases projectiles and restores pristine controls") {
+        int old_count = a->bullet_count;
+        weapons_fire_bullet(a, (Vector3){100, 200, 300}, (Vector3){0, 0, 1}, 0.0f);
+        ASSERT_EQ(a->bullet_count, old_count + 1);
+        weapons_apply_upgrade(a, WEAPON_UPGRADE_SPREAD_SHOT, 10.0f);
+        weapons_reset(a);
+        ASSERT(a->bullets_head == NULL && a->bullet_count == 0);
+        ASSERT_EQ(a->current_weapon, WEAPON_MACHINE_GUN);
+        ASSERT_EQ(a->current_upgrade, WEAPON_UPGRADE_NONE);
+        ASSERT(a->damage_multiplier == 1.0f && a->fire_rate_multiplier == 1.0f);
+        ASSERT(skycombat_gun_shot(a, 1, 1)); PASS();
+    }
 _test_next:;
     weapons_destroy(reference); weapons_destroy(b); weapons_destroy(a);
     return failures;
@@ -370,6 +416,8 @@ static int skycombat_document_tests(void)
     }
     bool read_ok = !ferror(f);
     int close_result = fclose(f); f = NULL;
+    printf("game documentation: bounded=%d read_ok=%d close=%d used=%zu\n",
+           bounded, read_ok, close_result, used);
     TEST("game documentation: playable topology and match lifecycle are explicit") {
         ASSERT(bounded && read_ok && close_result == 0);
         ASSERT(strstr(prose, "one local player") != NULL);

@@ -19,49 +19,11 @@
 weapons_system_t* weapons_create(void) {
     weapons_system_t* weapons;
     SAFE_CALLOC(weapons, 1, sizeof(weapons_system_t));
-    
-    // Initialize linked list
-    weapons->bullets_head = NULL;
-    weapons->bullet_count = 0;
-    weapons->fire_pattern = 0;
-    
-    for (int i = 0; i < MAX_MISSILES; i++) {
-        weapons->missiles[i].active = false;
-    }
-    
-    for (int i = 0; i < MAX_LASERS; i++) {
-        weapons->lasers[i].active = false;
-    }
-    
-    for (int i = 0; i < MAX_PLASMA; i++) {
-        weapons->plasma[i].active = false;
-    }
-    
-    // Initialize weapon state
-    weapons->current_weapon = WEAPON_MACHINE_GUN;
-    weapons->recoil_amount = 0.0f;
-    weapons->muzzle_flash_timer = 0.0f;
-    
-    // Initialize upgrade state
-    weapons->current_upgrade = WEAPON_UPGRADE_NONE;
-    weapons->upgrade_timer = 0.0f;
-    weapons->damage_multiplier = 1.0f;
-    weapons->fire_rate_multiplier = 1.0f;
-    
-    // Initialize gun fine-tuning
-    weapons->bullet_bend_x = 0.0f;        // No bend by default
-    weapons->bullet_bend_y = 0.0f;        // No bend by default
-    weapons->bend_strength = 450.0f;      // 15x stronger bend force (insane curves!)
-    
-    // Set unlimited ammo for now (can be changed later)
-    for (int i = 0; i < WEAPON_COUNT; i++) {
-        weapons->ammo[i] = -1; // -1 means unlimited
-        weapons->fire_cooldown[i] = 0.0f;
-        weapons->weapon_heat[i] = 0.0f;
-    }
-    
+    weapons_reset(weapons);
     return weapons;
 }
+
+
 
 void weapons_destroy(weapons_system_t* weapons) {
     if (!weapons) return;

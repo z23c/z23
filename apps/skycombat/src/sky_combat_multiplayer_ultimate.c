@@ -8,6 +8,10 @@
 #pragma STDC FP_CONTRACT OFF
 #endif
 
+#if defined(_WIN32)
+#undef WIN32_LEAN_AND_MEAN
+#include <external/fix_win32_compatibility.h>
+#endif
 #include <raylib.h>
 #include <raymath.h>
 #include <stdarg.h>
@@ -15,6 +19,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#if defined(_WIN32)
+#include <direct.h>
+#include <io.h>
+#else
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 #include <rlgl.h>
 
 #include "sky_combat/models/aircraft_manager.h"
@@ -44,6 +58,12 @@ void camera_update_responsive(Camera3D* camera, Vector3 target, float yaw,
                             float distance, float height, float dt);
 
 /* Game state */
+typedef enum {
+    GAME_FLOW_START,
+    GAME_FLOW_PLAYING,
+    GAME_FLOW_ENDED
+} game_flow_t;
+
 typedef struct {
     /* Core systems */
     aircraft_manager_t* aircraft_mgr;
@@ -70,7 +90,18 @@ typedef struct {
 
     /* --capture run: fixed time step and a chase view centred on the player */
     bool capture_view;
+    game_flow_t flow;
+    int best_score;
+    bool score_save_failed;
+    bool action_latched;
+    bool agent_mode;
+    bool qa_mode;
+    bool metrics_enabled;
+    double metric_previous;
+    double metric_start;
+    float metric_work_ms;
 } multiplayer_game_t;
+static void render_match_flow(const multiplayer_game_t *game);
 
 /* Draw speed lines effect */
 static void draw_speed_effects(multiplayer_game_t* game) {
@@ -352,6 +383,147 @@ static void report_game_input(const multiplayer_game_t *game)
     printf("Joystick: %s\n", game->input_system->model.connected ? "CONNECTED" : "Keyboard Mode");
     if (game->input_system->model.is_astro_c40)printf("ASTRO C40 TR Controller detected!\n");
 }
+
+static bool score_directory(const char *path)
+{
+    struct stat st;
+#if defined(_WIN32)
+    if (_mkdir(path) != 0 && errno != EEXIST) return false;
+#else
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+#endif
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool score_directories(char *path)
+{
+    for (char *at = path + 1; *at; ++at) {
+        if (*at != '/') continue;
+        *at = 0;
+        bool ok = at[-1] == ':' || score_directory(path);
+        *at = '/';
+        if (!ok) return false;
+    }
+    return score_directory(path);
+}
+
+static bool score_join(char *out, size_t cap, const char *left, const char *right)
+{
+    int n = snprintf(out, cap, "%s%s", left, right);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool score_root(char *dir, size_t cap)
+{
+    const char *state = getenv("XDG_STATE_HOME");
+    if (state && state[0]) return score_join(dir, cap, state, "/z23");
+#if defined(_WIN32)
+    const char *home = getenv("APPDATA");
+    if (!home || !home[0]) home = getenv("USERPROFILE");
+    const char *suffix = "";
+#else
+    const char *home = getenv("HOME");
+    const char *suffix = "/.local/state";
+#endif
+    if (!home || !home[0]) return false;
+    char root[512];
+    return score_join(root, sizeof(root), home, suffix) &&
+        score_join(dir, cap, root, "/z23");
+}
+
+static bool score_store_path(char *out, size_t cap, bool create)
+{
+    char dir[512];
+    if (!score_root(dir, sizeof(dir))) return false;
+    if (create && !score_directories(dir)) return false;
+    if (!score_join(out, cap, dir, "/skycombat")) return false;
+    if (create && !score_directory(out)) return false;
+    size_t used = strlen(out);
+    if (used >= cap) return false;
+    int n = snprintf(out + used, cap - used, "/best-score");
+    return n > 0 && (size_t)n < cap - used;
+}
+
+static int score_store_load(void)
+{
+    char path[512], line[64], extra;
+    if (!score_store_path(path, sizeof(path), false)) return 0;
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    bool ok = fgets(line, sizeof(line), file) != NULL;
+    if (file && fclose(file) != 0) ok = false;
+    int score = 0;
+    return ok && sscanf(line, "v1 %d %c", &score, &extra) == 1 &&
+        score >= 0 && score <= 1000000 ? score : 0;
+}
+
+static int score_lock(const char *path)
+{
+    char lock[520];
+    int n = snprintf(lock, sizeof(lock), "%s.lock", path);
+    if (n <= 0 || (size_t)n >= sizeof(lock)) return -1;
+#if defined(_WIN32)
+    int fd = _open(lock, _O_CREAT | _O_WRONLY | _O_BINARY, 0600);
+    OVERLAPPED overlap = {0};
+    if (fd >= 0 && !LockFileEx((HANDLE)_get_osfhandle(fd),
+                               LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                               0, MAXDWORD, 0, &overlap)) {
+        _close(fd);
+        return -1;
+    }
+    return fd;
+#else
+    int fd = open(lock, O_CREAT | O_WRONLY, 0600);
+    if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+#endif
+}
+
+static void score_unlock(int fd, const char *path)
+{
+    (void)path;
+#if defined(_WIN32)
+    OVERLAPPED overlap = {0};
+    (void)UnlockFileEx((HANDLE)_get_osfhandle(fd), MAXDWORD, 0, &overlap);
+    (void)_close(fd);
+#else
+    (void)flock(fd, LOCK_UN);
+    (void)close(fd);
+#endif
+}
+
+static bool score_store_save(int score)
+{
+    char path[512], temp[520];
+    if (score < 0 || score > 1000000 ||
+        !score_store_path(path, sizeof(path), true)) return false;
+    int lock = score_lock(path);
+    if (lock < 0) return false;
+    if (score_store_load() >= score) {
+        score_unlock(lock, path);
+        return true;
+    }
+    int n = snprintf(temp, sizeof(temp), "%s.tmp", path);
+    if (n <= 0 || (size_t)n >= sizeof(temp)) {
+        score_unlock(lock, path);
+        return false;
+    }
+    FILE *file = fopen(temp, "wb");
+    bool ok = file && fprintf(file, "v1 %d\n", score) > 0;
+    if (file && fclose(file) != 0) ok = false;
+#if defined(_WIN32)
+    ok = ok && MoveFileExA(temp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    ok = ok && rename(temp, path) == 0;
+#endif
+    if (!ok && file) (void)remove(temp);
+    score_unlock(lock, path);
+    return ok;
+}
+
 static void update_part_hud(const struct sky_expr_option *option,multiplayer_game_t *game,struct sky_expr_hud *hud,bool reload,struct sky_expr_notice *notice)
 {
     const managed_aircraft_t *player=aircraft_manager_get(game->aircraft_mgr,game->local_player_id);
@@ -750,16 +922,13 @@ static void set_capture_probe(const multiplayer_game_t *game, struct sky_agent_c
     capture->probe_y = (int)(at.y * (float)GetRenderHeight() / (float)screen_height);
 }
 
-static void render_ultimate_frame(multiplayer_game_t *game,
-                                  RenderTexture2D screen_buffer, float game_time,
+static void render_ultimate_frame(multiplayer_game_t *game, float game_time,
                                   const struct sky_expr_hud *part_hud,
                                   const struct sky_expr_notice *notice,
                                   struct sky_agent_capture *capture)
 {
-    /* Render to texture for post-processing */
-    BeginTextureMode(screen_buffer);
+    BeginDrawing();
     ClearBackground(BLACK);
-
     BeginMode3D(game->camera);
 
     /* Draw world */
@@ -783,16 +952,6 @@ static void render_ultimate_frame(multiplayer_game_t *game,
 
     EndMode3D();
 
-    EndTextureMode();
-
-    /* Final render with post-processing */
-    BeginDrawing();
-
-    /* Draw screen buffer */
-    DrawTextureRec(screen_buffer.texture, 
-                  (Rectangle){0, 0, screen_buffer.texture.width, -screen_buffer.texture.height},
-                  (Vector2){0, 0}, WHITE);
-
     /* Speed effects */
     draw_speed_effects(game);
 
@@ -805,24 +964,195 @@ static void render_ultimate_frame(multiplayer_game_t *game,
         DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), 
                      Fade(RED, game->damage_flash * 0.3f));
     }
+    render_match_flow(game);
 
     if (capture) {
         set_capture_probe(game, capture);
         sky_agent_capture_frame(capture);
     }
+    if (game->metric_start > 0)
+        game->metric_work_ms = (float)((GetTime() - game->metric_start) * 1000.0);
     EndDrawing();
+}
+
+static bool game_action_pressed(multiplayer_game_t *game,
+                                const input_state_fast_t *input, bool external)
+{
+    bool down = input->fire_guns;
+    if (!external)
+        down = down || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_R) ||
+            IsKeyPressed(KEY_LEFT_CONTROL);
+    if (!down) {
+        game->action_latched = false;
+        return false;
+    }
+    if (game->action_latched) return false;
+    game->action_latched = true;
+    return true;
+}
+
+static void game_reset_effects(effects_manager_t *effects)
+{
+    for (int i = 0; i < effects->max_effects; ++i)
+        effects->effects[i].active = false;
+    for (int i = 0; i < effects->max_particles; ++i)
+        effects->global_particles[i].active = false;
+    memset(effects->feedbacks, 0, (size_t)effects->max_feedbacks * sizeof(effects->feedbacks[0]));
+    effects->active_effects = 0;
+    effects->active_particles = 0;
+    effects->active_feedbacks = 0;
+    effects->screen_shake = 0;
+    effects->motion_blur = 0;
+    effects->chromatic_aberration = 0;
+    effects->flash_intensity = 0;
+    effects->time_scale = 1.0f;
+    effects->bullet_time_active = false;
+    effects->bullet_time_remaining = 0;
+}
+
+static bool game_restart_match(multiplayer_game_t *game)
+{
+    aircraft_manager_reset_match(game->aircraft_mgr);
+    weapons_reset(game->weapons);
+    memset(game->powerup_mgr->powerups, 0, sizeof(game->powerup_mgr->powerups));
+    game->powerup_mgr->powerup_count = 0;
+    game->powerup_mgr->spawn_check_timer = 0;
+    game_reset_effects(game->effects);
+    game->boost_timer = 0;
+    game->damage_flash = 0;
+    game->speed_lines_intensity = 0;
+    game->camera_yaw = 0;
+    sky_game_runtime_reseed();
+    return match_state_restart(game->match);
+}
+
+static void game_finish_match(multiplayer_game_t *game)
+{
+    game->flow = GAME_FLOW_ENDED;
+    int score = game->match->team_scores[0];
+    if (!game->qa_mode && score > game->best_score) {
+        game->best_score = score;
+        if (!score_store_save(score)) {
+            game->score_save_failed = true;
+            fprintf(stderr, "Sky Combat: could not save best score %d\n", score);
+        }
+    }
+    printf("Sky Combat: match ended red=%d blue=%d winner_team=%d best=%d\n",
+           game->match->team_scores[0], game->match->team_scores[1],
+           game->match->winning_team, game->best_score);
+}
+
+static void render_match_flow(const multiplayer_game_t *game)
+{
+    if (game->flow == GAME_FLOW_PLAYING) return;
+    int width = GetScreenWidth(), height = GetScreenHeight();
+    DrawRectangle(0, 0, width, height, Fade(BLACK, 0.72f));
+    const char *title = "SKY COMBAT";
+    const char *result = NULL;
+    if (game->flow == GAME_FLOW_ENDED) {
+        if (game->match->winning_team < 0) result = "DRAW";
+        else result = game->match->winning_team == 0 ? "YOU WIN" : "YOU LOSE";
+    }
+    int title_size = result ? 64 : 76;
+    DrawText(title, width / 2 - MeasureText(title, title_size) / 2,
+             height / 2 - 190, title_size, SKYBLUE);
+    if (result)
+        DrawText(result, width / 2 - MeasureText(result, 56) / 2,
+                 height / 2 - 105, 56,
+                 game->match->winning_team == 0 ? GOLD : WHITE);
+    char score[128];
+    snprintf(score, sizeof(score), "RED %d  -  BLUE %d     BEST %d",
+             game->match->team_scores[0], game->match->team_scores[1],
+             game->best_score);
+    DrawText(score, width / 2 - MeasureText(score, 30) / 2,
+             height / 2 - 30, 30, WHITE);
+    const char *action = game->flow == GAME_FLOW_START
+        ? "ENTER / FIRE TO START" : "R / FIRE TO RESTART";
+    DrawText(action, width / 2 - MeasureText(action, 32) / 2,
+             height / 2 + 45, 32, GOLD);
+    DrawText("WASD / ARROWS: FLY   LCTRL: GUNS   SPACE: BOOST   SHIFT: THROTTLE",
+             width / 2 - MeasureText("WASD / ARROWS: FLY   LCTRL: GUNS   SPACE: BOOST   SHIFT: THROTTLE", 20) / 2,
+             height / 2 + 105, 20, GRAY);
+    if (game->score_save_failed)
+        DrawText("BEST SCORE SAVE UNAVAILABLE", 20, height - 35, 20, RED);
+}
+
+static double game_metrics_begin(multiplayer_game_t *game, float *interval_ms)
+{
+    double started = game->metrics_enabled ? GetTime() : 0;
+    game->metric_start = started;
+    *interval_ms = game->metrics_enabled && game->metric_previous > 0
+        ? (float)((started - game->metric_previous) * 1000.0) : -1.0f;
+    if (game->metrics_enabled) game->metric_previous = started;
+    return started;
+}
+
+static void game_metrics_end(multiplayer_game_t *game, double started,
+                             float interval_ms, bool external_input)
+{
+    if (game->metrics_enabled)
+        sky_game_metrics_record(game->metric_work_ms,
+                                (float)((GetTime() - started) * 1000.0),
+                                interval_ms, external_input);
+}
+
+static input_state_fast_t game_read_input(multiplayer_game_t *game,
+                                          const input_state_fast_t *external_input)
+{
+    if (external_input) return *external_input;
+    input_view_fast_t view = input_mvc_fast_update(game->input_system);
+    return input_view_get_state(view);
+}
+
+static void game_handle_action(multiplayer_game_t *game,
+                               const struct sky_expr_option *option,
+                               struct sky_expr_hud *part_hud,
+                               struct sky_expr_notice *notice,
+                               const input_state_fast_t *input, bool external,
+                               float *game_time)
+{
+    bool action = game_action_pressed(game, input, external);
+    if (game->flow == GAME_FLOW_START && action) {
+        if (match_state_begin(game->match)) game->flow = GAME_FLOW_PLAYING;
+        else fprintf(stderr, "Sky Combat: could not start match\n");
+    } else if (game->flow == GAME_FLOW_ENDED && (action || game->qa_mode)) {
+        if (game_restart_match(game)) {
+            game->flow = GAME_FLOW_PLAYING;
+            *game_time = 0;
+            update_part_hud(option, game, part_hud, false, notice);
+        } else {
+            fprintf(stderr, "Sky Combat: could not restart match\n");
+        }
+    }
+}
+
+static void game_simulate(multiplayer_game_t *game, input_state_fast_t input,
+                          float dt, bool external)
+{
+    if (game->flow != GAME_FLOW_PLAYING) return;
+    control_local_player(game, input, dt, external);
+    aircraft_manager_update(game->aircraft_mgr, dt);
+    powerup_manager_update(game->powerup_mgr, dt);
+    weapons_update(game->weapons, dt);
+    effects_update(game->effects, dt);
+    update_camera_ultimate(game, dt);
+    collect_aircraft_powerups(game);
+    update_match_ledger(game, dt);
+    if (game->damage_flash > 0) game->damage_flash -= dt;
+    update_damage_smoke(game);
+    if (game->match->match_ended) game_finish_match(game);
 }
 
 static void advance_ultimate_frame(multiplayer_game_t *game,
                                    const struct sky_expr_option *option,
                                    struct sky_expr_hud *part_hud,
                                    struct sky_expr_notice *notice,
-                                   RenderTexture2D screen_buffer,
                                    float *game_time, unsigned *rendered_frames,
                                    const input_state_fast_t *external_input,
                                    struct sky_agent_capture *capture)
 {
-    /* A capture run steps a fixed 1/60 s so the captured scene repeats. */
+    float interval_ms;
+    double metric_start = game_metrics_begin(game, &interval_ms);
     float dt = external_input || game->capture_view ? 1.0f / 60.0f : GetFrameTime();
     if (external_input) {
         sky_game_runtime_tick();
@@ -830,35 +1160,12 @@ static void advance_ultimate_frame(multiplayer_game_t *game,
     } else *game_time += dt;
     if (!external_input) poll_part_hud(option,game,part_hud,notice,dt);
     else sky_expr_notice_tick(notice, dt);
-
-    /* Update input system */
-    input_state_fast_t input;
-    if (external_input) input = *external_input;
-    else {
-        input_view_fast_t view = input_mvc_fast_update(game->input_system);
-        input = input_view_get_state(view);
-    }
-
-    control_local_player(game, input, dt, external_input != NULL);
-
-    /* Update systems */
-    aircraft_manager_update(game->aircraft_mgr, dt);
-    powerup_manager_update(game->powerup_mgr, dt);
-    weapons_update(game->weapons, dt);
-    effects_update(game->effects, dt);
-    update_camera_ultimate(game, dt);
-
-    collect_aircraft_powerups(game);
-
-    /* Snapshot this tick's kills before advancing/finishing the ledger. */
-    update_match_ledger(game, dt);
-
-    /* Damage flash */
-    if (game->damage_flash > 0) game->damage_flash -= dt;
-
-    update_damage_smoke(game);
-    render_ultimate_frame(game, screen_buffer, *game_time, part_hud, notice, capture);
-
+    input_state_fast_t input = game_read_input(game, external_input);
+    game_handle_action(game, option, part_hud, notice, &input,
+                       external_input != NULL, game_time);
+    game_simulate(game, input, dt, external_input != NULL);
+    render_ultimate_frame(game, *game_time, part_hud, notice, capture);
+    game_metrics_end(game, metric_start, interval_ms, external_input != NULL);
     ++*rendered_frames;
 }
 
@@ -867,7 +1174,6 @@ struct game_agent_context {
     const struct sky_expr_option *option;
     struct sky_expr_hud *hud;
     struct sky_expr_notice *notice;
-    RenderTexture2D screen;
     float time;
     unsigned frames;
 };
@@ -890,9 +1196,9 @@ static void game_agent_frame(void *context, const input_state_fast_t *input,
     struct game_agent_context *agent = context;
     if (input) {
         advance_ultimate_frame(agent->game, agent->option, agent->hud, agent->notice,
-            agent->screen, &agent->time, &agent->frames, input, capture);
+            &agent->time, &agent->frames, input, capture);
     } else {
-        render_ultimate_frame(agent->game, agent->screen, agent->time,
+        render_ultimate_frame(agent->game, agent->time,
                                agent->hud, agent->notice, capture);
     }
     *state = (struct sky_agent_observation){.frame = agent->frames, .time = sky_game_runtime_time()};
@@ -907,6 +1213,101 @@ static void game_agent_frame(void *context, const input_state_fast_t *input,
         state->speed = player->aircraft->speed;
         state->health = player->health;
     }
+    state->match_started = agent->game->match->match_started;
+    state->match_ended = agent->game->match->match_ended;
+    state->score_red = agent->game->match->team_scores[0];
+    state->score_blue = agent->game->match->team_scores[1];
+    state->winning_team = agent->game->match->winning_team;
+    state->best_score = agent->game->best_score;
+}
+
+static bool game_init(multiplayer_game_t *game, unsigned qa_frames,
+                      bool agent_mode, const struct sky_expr_option *option,
+                      struct sky_expr_hud *part_hud, struct sky_expr_notice *notice,
+                      const char *capture_path)
+{
+    game->agent_mode = agent_mode;
+    game->metrics_enabled = true;
+    game->aircraft_mgr = aircraft_manager_create();
+    game->powerup_mgr = powerup_manager_create();
+    game->match = match_state_create(MATCH_TYPE_TEAM_DEATHMATCH);
+    game->world = cyberpunk_world_create();
+    game->input_system = game_input_create(agent_mode);
+    game->effects = effects_create(1000, 10000);
+    game->weapons = weapons_create();
+    if (!game_systems_ready(game)) {
+        fprintf(stderr, "Failed to create game systems\n");
+        return false;
+    }
+    report_game_input(game);
+    game->match->rules.score_limit = 3;
+    game->match->rules.time_limit = 15.0f;
+    game->match->rules.respawn_time = 3.0f;
+    game->match->rules.friendly_fire = false;
+    game->match->rules.team_count = 2;
+    game->qa_mode = qa_frames != 0;
+    game->best_score = game->qa_mode ? 0 : score_store_load();
+    game->flow = qa_frames || agent_mode ? GAME_FLOW_PLAYING : GAME_FLOW_START;
+    if (game->flow == GAME_FLOW_PLAYING && !match_state_begin(game->match)) {
+        fprintf(stderr, "Could not begin match\n");
+        return false;
+    }
+    game->local_player_id = aircraft_manager_add_with_team(game->aircraft_mgr, "PLAYER 1", RED, false, true, 0);
+    aircraft_manager_add_with_team(game->aircraft_mgr, "BLUE LEADER", BLUE, true, false, 1);
+    aircraft_manager_add_with_team(game->aircraft_mgr, "BLUE WING", SKYBLUE, true, false, 1);
+    aircraft_manager_add_with_team(game->aircraft_mgr, "RED LEADER", MAROON, true, false, 0);
+    aircraft_manager_add_with_team(game->aircraft_mgr, "RED WING", ORANGE, true, false, 0);
+    for (int i = 1; i < game->aircraft_mgr->aircraft_count; i++)
+        game->aircraft_mgr->aircraft[i].ai_skill = 0.6f + (float)(rand() % 40) / 100.0f;
+    Vector3 spawn_points[] = {
+        {0, 100, 0}, {150, 50, 150}, {-150, 50, 150}, {150, 50, -150},
+        {-150, 50, -150}, {0, 150, 200}, {0, 150, -200}, {200, 75, 0}, {-200, 75, 0}
+    };
+    for (int i = 0; i < 9; i++)
+        powerup_manager_add_spawn_point(game->powerup_mgr, spawn_points[i],
+                                        POWERUP_HEALTH + (i % 8), 20.0f);
+    game->camera.position = (Vector3){0, 50, -50};
+    game->camera.target = (Vector3){0, 50, 0};
+    game->camera.up = (Vector3){0, 1, 0};
+    game->camera.fovy = 65.0f;
+    game->camera.projection = CAMERA_PERSPECTIVE;
+    game->camera_distance = 35.0f;
+    game->motion_blur_enabled = true;
+    game->capture_view = capture_path != NULL;
+    cyberpunk_world_generate(game->world, 42);
+    cyberpunk_set_theme_blade_runner(game->world);
+    sky_game_runtime_reseed();
+    update_part_hud(option, game, part_hud, false, notice);
+    return true;
+}
+
+static int game_run(multiplayer_game_t *game, unsigned qa_frames,
+                    bool agent_mode, struct sky_agent_session *session,
+                    const struct sky_expr_option *option,
+                    struct sky_expr_hud *part_hud, struct sky_expr_notice *notice,
+                    const char *capture_path)
+{
+    float game_time = 0;
+    unsigned rendered_frames = 0;
+    sky_game_metrics_reset();
+    int result;
+    if (agent_mode) {
+        struct game_agent_context context = {game, option, part_hud, notice, 0, 0};
+        result = sky_agent_run(session, &context, game_agent_frame);
+    } else {
+        struct sky_agent_capture shot = {0};
+        while (game_frame_pending(qa_frames, rendered_frames)) {
+            sky_game_raise_apply();
+            bool last = capture_path && rendered_frames + 1 == qa_frames;
+            advance_ultimate_frame(game, option, part_hud, notice,
+                                   &game_time, &rendered_frames, NULL, last ? &shot : NULL);
+        }
+        result = game_frame_result(qa_frames, rendered_frames);
+        if (!result && capture_path && !game_capture_save(capture_path, &shot)) result = 1;
+        free(shot.png);
+    }
+    sky_game_metrics_report();
+    return result;
 }
 
 int main(int argc, char **argv) {
@@ -920,123 +1321,16 @@ int main(int argc, char **argv) {
     int launch = prepare_game_window(argc, argv, &qa_frames, &option, &agent_mode, &session,
                                      &capture_path);
     if (launch) { sky_agent_close(&session); return launch; }
-    
-    /* Create game state */
     multiplayer_game_t game = {0};
-    
-    /* Create systems */
-    game.aircraft_mgr = aircraft_manager_create();
-    game.powerup_mgr = powerup_manager_create();
-    game.match = match_state_create(MATCH_TYPE_TEAM_DEATHMATCH);
-    game.world = cyberpunk_world_create();
-    game.input_system = game_input_create(agent_mode);
-    game.effects = effects_create(1000, 10000);  /* Lots of particles! */
-    game.weapons = weapons_create();
-    
-    if (!game_systems_ready(&game)) {
-        fprintf(stderr, "Failed to create game systems\n");
+    if (!game_init(&game, qa_frames, agent_mode, &option, &part_hud, &notice, capture_path)) {
         destroy_game_systems(&game);
         CloseWindow();
         sky_agent_close(&session);
         return 1;
     }
-    
-    report_game_input(&game);
-    
-    /* Configure match */
-    game.match->rules.score_limit = 30;
-    game.match->rules.time_limit = 300.0f;
-    game.match->rules.respawn_time = 3.0f;
-    game.match->rules.friendly_fire = false;
-    game.match->rules.team_count = 2;
-    if (!match_state_begin(game.match)) {
-        fprintf(stderr, "Could not begin match\n");
-        destroy_game_systems(&game);
-        CloseWindow();
-        sky_agent_close(&session);
-        return 1;
-    }
-    
-    /* Add players with teams */
-    game.local_player_id = aircraft_manager_add_with_team(game.aircraft_mgr, "PLAYER 1", RED, false, true, 0);
-    aircraft_manager_add_with_team(game.aircraft_mgr, "BLUE LEADER", BLUE, true, false, 1);
-    aircraft_manager_add_with_team(game.aircraft_mgr, "BLUE WING", SKYBLUE, true, false, 1);
-    aircraft_manager_add_with_team(game.aircraft_mgr, "RED LEADER", MAROON, true, false, 0);
-    aircraft_manager_add_with_team(game.aircraft_mgr, "RED WING", ORANGE, true, false, 0);
-    
-    /* Set AI skill levels */
-    for (int i = 1; i < game.aircraft_mgr->aircraft_count; i++) {
-        game.aircraft_mgr->aircraft[i].ai_skill = 0.6f + (float)(rand() % 40) / 100.0f;
-    }
-    
-    /* Add power-up spawn points in cool locations */
-    Vector3 spawn_points[] = {
-        {0, 100, 0},      /* Center high */
-        {150, 50, 150},   /* Corners */
-        {-150, 50, 150},
-        {150, 50, -150},
-        {-150, 50, -150},
-        {0, 150, 200},    /* High points */
-        {0, 150, -200},
-        {200, 75, 0},
-        {-200, 75, 0}
-    };
-    
-    for (int i = 0; i < 9; i++) {
-        powerup_manager_add_spawn_point(game.powerup_mgr, spawn_points[i], 
-                                      POWERUP_HEALTH + (i % 8), 20.0f);
-    }
-    
-    /* Setup camera */
-    game.camera.position = (Vector3){0, 50, -50};
-    game.camera.target = (Vector3){0, 50, 0};
-    game.camera.up = (Vector3){0, 1, 0};
-    game.camera.fovy = 65.0f;
-    game.camera.projection = CAMERA_PERSPECTIVE;
-    game.camera_distance = 35.0f;
-    
-    /* Visual settings */
-    game.motion_blur_enabled = true;
-    game.capture_view = capture_path != NULL;
-    
-    /* Generate cyberpunk world */
-    cyberpunk_world_generate(game.world, 42);
-    cyberpunk_set_theme_blade_runner(game.world);
-    /* Layout stays fixed at 42. Actor/system initialization above used the
-     * session seed; restart both active RNG streams after world's srand(42). */
-    sky_game_runtime_reseed();
-    
-    update_part_hud(&option,&game,&part_hud,false,&notice);
-
-    /* Create render texture for post-processing */
-    RenderTexture2D screen_buffer = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
-    
-    /* Main game loop */
-    float game_time = 0;
-    unsigned rendered_frames = 0;
-    
-    int result;
-    if (agent_mode) {
-        struct game_agent_context context = {&game, &option, &part_hud, &notice,
-                                              screen_buffer, 0, 0};
-        result = sky_agent_run(&session, &context, game_agent_frame);
-    } else {
-        struct sky_agent_capture shot = {0};
-        while (game_frame_pending(qa_frames, rendered_frames)) {
-            sky_game_raise_apply();
-            bool last = capture_path && rendered_frames + 1 == qa_frames;
-            advance_ultimate_frame(&game, &option, &part_hud, &notice, screen_buffer,
-                                   &game_time, &rendered_frames, NULL, last ? &shot : NULL);
-        }
-        result = game_frame_result(qa_frames, rendered_frames);
-        if (!result && capture_path && !game_capture_save(capture_path, &shot)) result = 1;
-        free(shot.png);
-    }
-    
-    /* Cleanup */
-    UnloadRenderTexture(screen_buffer);
+    int result = game_run(&game, qa_frames, agent_mode, &session, &option,
+                          &part_hud, &notice, capture_path);
     destroy_game_systems(&game);
-    
     CloseWindow();
     if (!sky_agent_close(&session)) result = 1;
     return result;

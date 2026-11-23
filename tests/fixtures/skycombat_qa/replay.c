@@ -593,6 +593,7 @@ static bool replay_setup(struct replay_session *session, uint32_t seed)
     memset(session, 0, sizeof(*session));
     sky_game_runtime_begin(true, seed);
     multiplayer_game_t *game = &session->game;
+    game->metrics_enabled = false;
     game->aircraft_mgr = aircraft_manager_create();
     game->powerup_mgr = powerup_manager_create();
     game->match = match_state_create(MATCH_TYPE_TEAM_DEATHMATCH);
@@ -605,6 +606,7 @@ static bool replay_setup(struct replay_session *session, uint32_t seed)
     game->match->rules.time_limit = 300;
     game->match->rules.team_count = 2;
     if (!match_state_begin(game->match)) return false;
+    game->flow = GAME_FLOW_PLAYING;
     if (aircraft_manager_add_with_team(game->aircraft_mgr, "player", RED, false, true, 0) != 0 ||
         aircraft_manager_add_with_team(game->aircraft_mgr, "chase", BLUE, true, false, 1) != 1 ||
         aircraft_manager_add_with_team(game->aircraft_mgr, "patrol", SKYBLUE, true, false, 1) != 2)
@@ -637,7 +639,7 @@ static bool replay_setup(struct replay_session *session, uint32_t seed)
                               .up = {0, 1, 0}, .fovy = 60, .projection = CAMERA_PERSPECTIVE};
     session->context = (struct game_agent_context){
         .game = game, .option = &session->option, .hud = &session->hud,
-        .notice = &session->notice, .screen = {0}, .time = 0, .frames = 0
+        .notice = &session->notice, .time = 0, .frames = 0
     };
     return game->effects->screen_shake > 0 && game->powerup_mgr->powerup_count == 1;
 }

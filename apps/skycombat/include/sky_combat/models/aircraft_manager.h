@@ -143,6 +143,7 @@ int aircraft_manager_add_with_team(aircraft_manager_t* manager, const char* name
  * @note IDs of remaining aircraft may change after removal
  */
 void aircraft_manager_remove(aircraft_manager_t* manager, int id);
+void aircraft_manager_reset_match(aircraft_manager_t* manager);
 
 /**
  * @brief Get aircraft by ID

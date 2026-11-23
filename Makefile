@@ -3423,6 +3423,7 @@ $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(
 	               $(SKYCOMBAT_DIR)/src/agent_session.c \
 	               $(SKYCOMBAT_DIR)/src/agent_resident.c \
 	               $(SKYCOMBAT_DIR)/src/game_runtime.c \
+	               $(SKYCOMBAT_DIR)/src/game_match_reset.c \
                    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(wildcard $(SKYCOMBAT_DIR)/part/*.h) \
                    $(SKYCOMBAT_SUPPORT_SRCS) \
                    $(wildcard apps/skycombat/include/sky_combat/*.h) \
@@ -3431,6 +3432,7 @@ $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(
 	    $(SKYCOMBAT_DIR)/src/agent_session.c \
 	    $(SKYCOMBAT_DIR)/src/agent_resident.c \
 	    $(SKYCOMBAT_DIR)/src/game_runtime.c \
+	    $(SKYCOMBAT_DIR)/src/game_match_reset.c \
 	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o $@ -lm
 .PHONY: skycombat-qa-entrypoint
 skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)

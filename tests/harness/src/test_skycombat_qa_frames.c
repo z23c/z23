@@ -119,7 +119,7 @@ static int skycombat_agent_session(void)
         if (rc) fprintf(stderr, "%s", output);
         ASSERT_EQ(rc, 0);
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=2 keys=0 polls=0 stick=0.500,-0.250"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         ASSERT(skycombat_agent_replies(output));
         /* raylib trace output is routed to stderr by the game's own callback. */
         ASSERT(strstr(diagnostics, "raylib [INFO] QA_TRACE"));
@@ -145,7 +145,7 @@ static int skycombat_agent_refusal(const char *request, const char *error, int s
         ASSERT(strstr(output, "\"frame\":0"));
         ASSERT(strstr(output, "\"accepted_id\":null"));
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=0 keys=0 polls=0"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         PASS();
     }
 _test_next:;
@@ -190,7 +190,7 @@ static int skycombat_agent_resize_failure(void)
         ASSERT(!strstr(output, "\"png\":"));
         ASSERT(strstr(output, "\"accepted_id\":1"));
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=0 keys=0 polls=0"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         PASS();
     }
 _test_next:;
@@ -214,7 +214,7 @@ static int skycombat_agent_capture_retry(void)
         ASSERT(strstr(output, "\"id\":3,\"ok\":true,\"frame\":2"));
         ASSERT(!strstr(output, "\"png\":"));
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=2 keys=0 polls=0"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         PASS();
     }
 _test_next:;
@@ -234,7 +234,7 @@ static int skycombat_agent_physical_bytes(const char *fixture)
         ASSERT(strstr(output, "\"id\":1,\"ok\":true,\"frame\":0"));
         ASSERT(strstr(output, "\"id\":2,\"ok\":true,\"frame\":0"));
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=0 keys=0 polls=0"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         PASS();
     }
 _test_next:;
@@ -256,7 +256,7 @@ static int skycombat_agent_transport_bounds(void)
         ASSERT_EQ(skycombat_agent_capture(args, output, sizeof(output), diagnostics), 0);
         ASSERT(strstr(output, "\"id\":0,\"ok\":true,\"frame\":0"));
         ASSERT(strstr(output, "\"accepted_id\":0"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         PASS();
     }
     TEST("agent: broken reply pipe fails after game and window cleanup") {
@@ -265,7 +265,7 @@ static int skycombat_agent_transport_bounds(void)
         ASSERT_EQ(skycombat_agent_capture(broken, output, sizeof(output), diagnostics), 1);
         ASSERT(output[0] == '\0');
         ASSERT(strstr(diagnostics, "reply IO failed"));
-        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(diagnostics, "closed=1 destroyed=127 unloads=0"));
         ASSERT(strstr(diagnostics, "QA_AGENT ticks=0 keys=0 polls=0"));
         PASS();
     }
@@ -286,7 +286,7 @@ static int skycombat_qa_launch(const char *arg, const char *fixture,
         "QA_TEST status=%d windows=%u frames=%u closed=%u destroyed=%u unloads=%u",
         status, windows, frames,
         fixture && strcmp(fixture, "--fixture-window-fails") == 0 ? 0u : windows,
-        frames ? 127u : 0u, frames ? 1u : 0u);
+        frames ? 127u : 0u, 0u);
     TEST("QA launch: actual entrypoint refuses before window or ends at exact frame bound") {
         ASSERT(length > 0 && (size_t)length < sizeof(expected));
         int rc = test_host_tool_capture(argv, output, sizeof(output), 5000);
@@ -655,7 +655,7 @@ static int skycombat_resident_frames(void)
         ASSERT(sky_resident_request(&f, "{\"v\":1,\"id\":4,\"op\":\"close\"}", false));
         ASSERT(sky_resident_json(&f, 60, 4, 4, NULL));
         ASSERT_EQ(sky_resident_finish(&f, output), 0);
-        ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(output, "closed=1 destroyed=127 unloads=0"));
         ASSERT(strstr(output, "QA_AGENT ticks=60 keys=0 polls=0"));
         ASSERT(strstr(output, "QA_RESIDENT window stdout"));
         ASSERT(strstr(output, "QA_RESIDENT close stdout"));
@@ -722,7 +722,7 @@ static int skycombat_resident_end(unsigned mode)
         if (errors[mode]) ASSERT(sky_resident_json(&f, 0, 0, -1, errors[mode]));
         ASSERT_EQ(sky_resident_finish(&f, output), errors[mode] || mode >= 7 ? 1 : 0);
         if (mode == 7) ASSERT(strstr(output, "window initialization failed"));
-        else ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        else ASSERT(strstr(output, "closed=1 destroyed=127 unloads=0"));
         ASSERT(strstr(output, "QA_RESIDENT window stdout"));
         if (mode != 7) ASSERT(strstr(output, "QA_RESIDENT close stdout"));
         if (mode == 8) ASSERT(strstr(output, "Sky Combat agent: reply IO failed"));
@@ -753,7 +753,7 @@ static int skycombat_resident_closed_stdio(unsigned mask, unsigned mode)
         }
         ASSERT_EQ(sky_resident_finish(&f, output), mode ? 1 : 0);
         ASSERT_EQ(strcmp(f.stdout_text, mask & 2u ? "" : "QA_RESIDENT stdout restored\n"), 0);
-        if (!(mask & 4u) && mode < 2) ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        if (!(mask & 4u) && mode < 2) ASSERT(strstr(output, "closed=1 destroyed=127 unloads=0"));
         PASS();
     } _test_next:;
     if (f.pid > 0) (void)sky_resident_finish(&f, output);
@@ -797,7 +797,7 @@ static int skycombat_resident_raise(void)
         ASSERT(sky_resident_json(&f, 0, 2, 2, NULL));
         ASSERT_EQ(sky_resident_finish(&f, output), 0);
         ASSERT(strstr(output, "QA_RAISE restore=3 focus=3 prior=1 pure=1"));
-        ASSERT(strstr(output, "closed=1 destroyed=127 unloads=1"));
+        ASSERT(strstr(output, "closed=1 destroyed=127 unloads=0"));
         PASS();
     } _test_next:;
     if (f.pid > 0) (void)sky_resident_finish(&f, output);

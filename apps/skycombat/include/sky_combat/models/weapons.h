@@ -128,6 +128,7 @@ typedef struct {
 
 // Weapon system management
 weapons_system_t* weapons_create(void);
+void weapons_reset(weapons_system_t* weapons);
 void weapons_destroy(weapons_system_t* weapons);
 void weapons_update(weapons_system_t* weapons, float dt);
 void weapons_draw(weapons_system_t* weapons);

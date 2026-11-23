@@ -1,3 +1,7 @@
+#if defined(_WIN32)
+#undef WIN32_LEAN_AND_MEAN
+#include <external/fix_win32_compatibility.h>
+#endif
 #include "sky_combat/agent_session.h"
 #include "json/json.h"
 #include "util/png_writer.h"
@@ -12,7 +16,6 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
-#include <windows.h>
 #define sky_dup _dup
 #define sky_dup2 _dup2
 #define sky_fdopen _fdopen
@@ -418,6 +421,14 @@ static bool sky_agent_player(FILE *out, const struct sky_agent_observation *stat
             (double)state->yaw, (double)state->speed, (double)state->health) >= 0;
 }
 
+static bool sky_agent_match(FILE *out, const struct sky_agent_observation *state)
+{
+    return fprintf(out, ",\"match\":{\"started\":%s,\"ended\":%s,\"score_red\":%d,\"score_blue\":%d,\"winning_team\":%d,\"best_score\":%d}",
+        state->match_started ? "true" : "false",
+        state->match_ended ? "true" : "false", state->score_red,
+        state->score_blue, state->winning_team, state->best_score) >= 0;
+}
+
 static bool sky_agent_image(FILE *out, const struct sky_agent_capture *capture)
 {
     if (!capture || !capture->png) return true;
@@ -434,7 +445,7 @@ static bool sky_agent_reply_body(FILE *out, struct sky_agent_session *session, u
 {
     if (fprintf(out, "{\"v\":1,\"id\":%u,\"ok\":%s,\"frame\":%u,\"time\":%.17g,\"player\":",
         id, error ? "false" : "true", state->frame, (double)state->time) < 0 ||
-        !sky_agent_player(out, state)) return false;
+        !sky_agent_player(out, state) || !sky_agent_match(out, state)) return false;
     if (session->has_accepted_id) {
         if (fprintf(out, ",\"accepted_id\":%u", session->accepted_id) < 0) return false;
     } else if (fputs(",\"accepted_id\":null", out) == EOF) return false;

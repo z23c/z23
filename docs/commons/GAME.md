@@ -50,6 +50,15 @@ window and is what a headless gate box proves. These game-only goals build no
 node vendor archive or embedded Tor archive; mixed game and node goals retain
 the node's vendor and Tor prerequisites.
 
+## Start, play and restart
+
+With no option, Enter or fire starts. WASD or arrows fly, Space boosts and Left Shift throttles. First to three or highest after 15 seconds wins. R or fire restarts.
+
+The best Red team score is saved atomically as `skycombat/best-score` in the `z23` state directory.
+
+<!-- claim: symbol-present match_state_restart apps/skycombat/src/game_match_reset.c # restart -->
+<!-- claim: symbol-present score_store_save apps/skycombat/src/sky_combat_multiplayer_ultimate.c # best score -->
+
 The playable simulation and its mixed update/draw entrypoint compile with
 `-ffp-contract=off`. Their sources also set `STDC FP_CONTRACT OFF` on Clang;
 GCC enforces the build flag. Simulation raymath helpers are local to those
@@ -275,17 +284,6 @@ both finish; if a concurrent edit exposes a mismatched pair, SHA admission
 refuses it and retains the previous recipe. The captured recipe stays fixed
 between key presses; neither file is reopened for ordinary frames.
 
-## Controls
-
-Gamepad (ASTRO C40 / PlayStation layout; the mapping is locked in
-`include/sky_combat/models/input_model.h`): left stick flies, inverted; right
-stick aims the camera; **R2** fires guns; **L2** fires missiles; **L1/R1**
-barrel-roll; **gas** boosts; **brake** throttles up. Keyboard, used when no
-pad is connected: **WASD** or the **arrow keys** fly, **space** boosts, **left
-ctrl** fires guns, **left shift** throttles up. The playable binary acts
-on fly, boost, throttle and guns; missiles and barrel rolls are in the input
-model but not yet bound in it.
-
 ## Playable scope and incomplete integration
 
 The selected entrypoint is `apps/skycombat/src/sky_combat_multiplayer_ultimate.c`,
@@ -294,11 +292,11 @@ the Makefile. Imported demo mains and model APIs are available source, not
 additional features of `build/bin/z23-skycombat`. This is one local player
 with four AI aircraft in a single view; it does not provide local split-screen.
 
-The match starts once after rule configuration. Each live tick snapshots team
+The match starts once after the start action. Each live tick snapshots team
 kill totals and advances the timer. On reaching the score or time limit, scores freeze
-and the winner remains fixed. Normal shutdown finishes an unfinished match.
-An ended-match screen, a new-round flow and match save/reopen are not wired.
-These ledger guarantees do not imply that aircraft simulation stops at match end.
+and the winner remains fixed until R or fire starts a fresh match. Start and end
+screens report the result and best score; aircraft simulation stops at match end.
+Normal shutdown finishes an unfinished match.
 
 Building entry is not yet wired: the playable link closure excludes the
 building system. The main draws a cyberpunk city but does not update ground

@@ -79,6 +79,7 @@ void match_state_destroy(match_state_t* state);
 void match_state_update(match_state_t* state, float dt);
 // Begin a pristine configured ledger; terminal ledgers cannot be restarted.
 bool match_state_begin(match_state_t* state);
+bool match_state_restart(match_state_t* state);
 bool match_state_finish(match_state_t* state); // Tied teams have winner -1.
 // Validate all four before replacement; invalid/inactive calls change nothing.
 bool match_state_set_team_scores(match_state_t* state, const int scores[4]);

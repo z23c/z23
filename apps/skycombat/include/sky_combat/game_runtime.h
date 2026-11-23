@@ -22,4 +22,8 @@ double sky_game_runtime_time(void);
 /* Inclusive range, pure keyed sample: never touches libc/raylib RNG state.
  * Interactive cosmetics use a real-time 60 Hz bucket instead of agent ticks. */
 int sky_game_visual_sample(uint32_t domain, uint32_t index, int minimum, int maximum);
+
+void sky_game_metrics_reset(void);
+void sky_game_metrics_record(float work_ms, float input_ms, float interval_ms, bool external_input);
+void sky_game_metrics_report(void);
 #endif

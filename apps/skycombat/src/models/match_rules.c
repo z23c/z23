@@ -142,7 +142,8 @@ void match_state_update(match_state_t* state, float dt) {
     state->elapsed_time += dt;
     
     // Check time limit
-    if (state->rules.time_limit > 0 && state->elapsed_time >= state->rules.time_limit) {
+    if (state->rules.time_limit > 0 &&
+        state->elapsed_time + 0.0001f >= state->rules.time_limit) {
         (void)match_state_finish(state);
         return;
     }

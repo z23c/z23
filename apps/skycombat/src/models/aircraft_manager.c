@@ -247,6 +247,8 @@ managed_aircraft_t* aircraft_manager_get(aircraft_manager_t* manager, int id) {
     return &manager->aircraft[id];
 }
 
+
+
 /*
  * Update Functions
  */
