@@ -223,6 +223,49 @@ static bool sia_worktree_intact(const char *wt, const char *seed)
         !memcmp(data, "int seed;\n", n) && sia_clean_git(wt, args, status, sizeof status) && !status[0];
 }
 
+struct sia_digest_paths { char seed[PATH_MAX], table[PATH_MAX], links[PATH_MAX], preimage[PATH_MAX]; };
+static bool sia_digest_paths_init(const char *root, struct sia_digest_paths *p)
+{
+    return snprintf(p->seed, sizeof p->seed, "%s/seed.c", root) < (int)sizeof p->seed &&
+        snprintf(p->table, sizeof p->table, "%s/digests", root) < (int)sizeof p->table &&
+        snprintf(p->links, sizeof p->links, "%s/links", root) < (int)sizeof p->links &&
+        snprintf(p->preimage, sizeof p->preimage, "%s/preimage", root) < (int)sizeof p->preimage &&
+        sia_write_file(p->links, "");
+}
+static bool sia_digest_write(const struct sia_digest_paths *p, FILE *input, unsigned mode)
+{
+    FILE *file = fopen(p->table, "wb");
+    if (!file) return false;
+    bool ok = true;
+    if (mode) ok = fprintf(file, "%s  ", SIA_BAKED) == 66 &&
+        fwrite(p->seed, 1, strlen(p->seed) + 1, file) == strlen(p->seed) + 1 &&
+        fwrite(p->seed, 1, strlen(p->seed) + 1, input) == strlen(p->seed) + 1;
+    if (mode >= 2) ok = ok && fprintf(file, "%s  ", SIA_BAKED) == 66;
+    if (mode == 3) ok = ok && fputs("partial", file) >= 0;
+    if (fclose(file)) ok = false;
+    if (fflush(input) || fseek(input, 0, SEEK_SET)) ok = false;
+    return ok;
+}
+/* Exercise the real helper with an expected file and a digest stream tail. */
+static bool sia_digest_tail(const char *root, const char *helper, unsigned mode)
+{
+    struct sia_digest_paths p;
+    if (!sia_digest_paths_init(root, &p)) return false;
+    FILE *input = tmpfile();
+    if (!input) return false;
+    bool ok = sia_digest_write(&p, input, mode);
+    pid_t child = ok ? fork() : -1;
+    if (child == 0) {
+        if (dup2(fileno(input), STDIN_FILENO) < 0) _exit(127);
+        execl(helper, helper, "token", "identity", p.preimage, p.links, p.table, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    if (child < 0 || waitpid(child, &status, 0) != child || !WIFEXITED(status)) ok = false;
+    else ok = ok && (mode >= 2 ? WEXITSTATUS(status) == 1 : WEXITSTATUS(status) == 0);
+    fclose(input); return ok;
+}
+
 static int sia_selftest_git_isolation(void)
 {
     int failures = 0; char work[PATH_MAX] = {0}, root[PATH_MAX], foreign[PATH_MAX], scratch[PATH_MAX];
@@ -246,6 +289,10 @@ static int sia_selftest_git_isolation(void)
         ASSERT(access(helper, X_OK) == 0 && sia_worktree_intact(wt, seed));
         ASSERT(sia_run_isolation(root, foreign, scratch, "source-identity-batch-selftest.sh"));
         ASSERT(sia_worktree_intact(wt, seed));
+        ASSERT(sia_digest_tail(root, helper, 0));
+        ASSERT(sia_digest_tail(root, helper, 1));
+        ASSERT(sia_digest_tail(root, helper, 2));
+        ASSERT(sia_digest_tail(root, helper, 3));
         PASS();
     } _test_next:;
     if (work[0]) test_rm_rf_recursive(work);

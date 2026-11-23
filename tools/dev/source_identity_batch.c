@@ -859,7 +859,12 @@ static int read_digest_record(FILE *table, char hex[65], char **path,
                 "source-identity-batch: digest table separator is malformed\n");
         return -1;
     }
-    return read_delimited_record(table, path, capacity);
+    int path_result = read_delimited_record(table, path, capacity);
+    if (path_result == 0) {
+        fprintf(stderr, "source-identity-batch: digest table path is missing\n");
+        return -1;
+    }
+    return path_result;
 }
 
 static int load_digest_table(const char *digests_path,
