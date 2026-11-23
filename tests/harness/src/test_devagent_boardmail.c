@@ -26,6 +26,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
@@ -2264,6 +2265,54 @@ static int bmx_exit_before_inbox(const char *path, int phase)
     return 0;
 }
 
+static bool bmx_inbox_alloc_log(struct rcv_beat_stats *st)
+{
+    FILE *capture = tmpfile();
+    int saved = -1;
+    bool ok = false;
+    if (!capture || (saved = dup(STDERR_FILENO)) < 0 || dup2(fileno(capture), STDERR_FILENO) < 0) goto done;
+    zcl_alloc_fault_fail_next("boardmail.inbox_append");
+    int drove = bmx_drive(BMX_B, st);
+    zcl_alloc_fault_clear();
+    fflush(stderr);
+    if (dup2(saved, STDERR_FILENO) < 0) goto done;
+    close(saved);
+    saved = -1;
+    if (fseek(capture, 0, SEEK_SET)) goto done;
+    char line[2048];
+    while (fgets(line, sizeof(line), capture)) {
+        if (strstr(line, "inbox stage=allocation") && strstr(line, "inspect available memory") &&
+            strstr(line, "receiver retries on a later beat") && !strstr(line, "inspect inbox access")) ok = true;
+    }
+    ok = ok && drove == 1;
+done:
+    zcl_alloc_fault_clear();
+    if (saved >= 0) {
+        (void)dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    if (capture) fclose(capture);
+    return ok;
+}
+static int bmx_t_inbox_alloc_diagnostic(void)
+{
+    int failures = 0;
+    TEST("boardmail: inbox allocation failure reports memory and retries") {
+        struct rcv_beat_stats st;
+        ASSERT(bmx_setup("inbox-allocation-guidance"));
+        ASSERT(bmx_sent("job-1")); bmx_carry(BMX_A, BMX_B);
+        long long before = bmx_ref_probe_cursor(BMX_B, "import_after");
+        ASSERT(bmx_inbox_alloc_log(&st));
+        ASSERT(st.board_deferred >= 1); ASSERT_EQ(st.board_in, 0); ASSERT_EQ(st.admitted, 0);
+        ASSERT_EQ(bmx_ref_probe_cursor(BMX_B, "import_after"), before);
+        ASSERT_EQ(bmx_lines(BMX_B, "mail/inbox.node-a.jsonl", "job-1", NULL), 0);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1); ASSERT_EQ(st.board_in, 1); ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1); ASSERT_EQ(st.board_in, 0);
+        PASS();
+    }
+_test_next:;
+    bmx_teardown(); return failures;
+}
 static int bmx_t_refs_before_inbox_crash(void)
 {
     int failures = 0, status = 0;
@@ -2394,6 +2443,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_locked_append();
     failures += bmx_t_refs_append_observation();
     failures += bmx_t_refs_durable_retry();
+    failures += bmx_t_inbox_alloc_diagnostic();
     failures += bmx_t_refs_before_inbox_crash();
     failures += bmx_t_refs_invalid_successor();
 #endif

@@ -1202,7 +1202,9 @@ static bool bm_inbox_ready(struct bm_inbox_access *a, const char *path,
 static void bm_inbox_warn(const char *id, const char *stage, const char *match)
 {
     const char *inspect = "inspect inbox access and node storage";
-    if (!strcmp(stage, "incomplete_tail"))
+    if (!strcmp(stage, "allocation"))
+        inspect = "inspect available memory; receiver retries on a later beat";
+    else if (!strcmp(stage, "incomplete_tail"))
         inspect = "inspect the unfinished inbox row and its writer";
     else if (!strcmp(stage, "file_sync") || !strcmp(stage, "parent_sync"))
         inspect = "inspect node storage";
