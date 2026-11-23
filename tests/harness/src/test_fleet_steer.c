@@ -7171,6 +7171,35 @@ static bool fmx_board_brief(const char *body, struct fmx_call *call)
     return passed;
 }
 
+static int fmx_t_board_budget_recovery(void)
+{
+    int failures = 0;
+    TEST("steer: board observation budget refusal keeps an explicit normal-view recovery target") {
+        struct fmx_call call;
+        char body[160];
+        fmx_isolate("board_budget_recovery");
+        (void)snprintf(body, sizeof(body),
+            "{\"error\":{\"code\":%d,\"message\":\"deadline expired before request\"}}",
+            NODE_RPC_DEADLINE_EXPIRED);
+        ASSERT(fmx_board_brief(body, &call));
+        ASSERT_STR_EQ(fmx_missing_reason(&call, "fleet.board"),
+                      "observation_budget_exhausted");
+        const struct json_value *missing = fmx_missing_find(
+            &call, "fleet.board", "observation_budget_exhausted");
+        const char *next = missing ? json_get_str(json_get(missing, "next")) : NULL;
+        ASSERT(next && strstr(next, "same selected node, datadir, and RPC port"));
+        ASSERT(strstr(next, "one open board post in normal view"));
+        ASSERT(strstr(next, "fleet board list, limit 1"));
+        ASSERT(!strstr(next, g_fmx_state));
+        ASSERT(!strstr(next, "--view=summary"));
+        fmx_end(&call);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(fmx_no_node);
+    fmx_restore();
+    return failures;
+}
+
 /* A page of n open problem posts, newest first, then the has_more flag. */
 static void fmx_problem_page(char *out, size_t cap, int n, const char *more)
 {
@@ -7563,6 +7592,7 @@ int test_fleet_steer(void)
     failures += fmx_t_board_deadline();
     failures += fmx_t_board_evidence_failures();
     failures += fmx_t_board_refusal_reason();
+    failures += fmx_t_board_budget_recovery();
     failures += fmx_t_board_incomplete();
     failures += fmx_t_board_cursor_fallback();
     failures += fmx_task_projection_checks();

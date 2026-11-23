@@ -4305,9 +4305,17 @@ static const char *fmc_board_refusal(const struct fmc_sub *sub)
     return "sibling_refused";
 }
 
-/* Next step for a board refusal; only an oversized first post has one. */
+/* Recovery guidance for board refusals: observation-budget exhaustion can
+ * be retried as a bounded normal-view page on the same selected endpoint.
+ * Keep it contextual and non-pasteable so the response neither discloses a
+ * private datadir nor suggests switching nodes. Oversized posts retain their
+ * existing summary-view recovery. */
 static const char *fmc_board_refusal_next(const struct fmc_sub *sub)
 {
+    if (sub && strcmp(sub->reply.error.code,
+                      "BOARD_OBSERVATION_BUDGET_EXHAUSTED") == 0)
+        return "On the same selected node, datadir, and RPC port, inspect "
+               "one open board post in normal view (fleet board list, limit 1).";
     if (sub && strcmp(sub->reply.error.code, "BOARD_PAGE_BUDGET") == 0)
         return "z23 fleet board list --open --limit=1 --view=summary";
     return NULL;
