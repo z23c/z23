@@ -1892,9 +1892,9 @@ static int case_wallet_reads(const char *home, const char *checkout)
     return failures;
 }
 
-/* Directory queries match broadly and must not crowd out the stem lesson; a
- * node that accepts and never answers must not hold the brief past its
- * deadline. */
+/* An exact applies_to match outranks directory hits and a public page from an
+ * unknown key is dropped; a node that accepts and never answers must not hold
+ * the brief past its deadline. */
 static int case_guide_lessons(const char *home, const char *checkout,
                               struct ms_cleanup_probe *probe)
 {
@@ -1909,7 +1909,7 @@ static int case_guide_lessons(const char *home, const char *checkout,
     snprintf(dd, sizeof(dd), "%s/guidedd", home);
     snprintf(err, sizeof(err), "%s/err_guide.txt", home);
     (void)mkdir(dd, 0700);
-    TEST_CASE("code.guide keeps the stem lesson ahead of directory hits and bounds a silent node") {
+    TEST_CASE("code.guide keeps the exact lesson ahead of directory hits and bounds a silent node") {
         int port = 0;
         stub = ms_stub_start(dd, &port);
         if (probe) probe->stub = stub;
@@ -1923,21 +1923,22 @@ static int case_guide_lessons(const char *home, const char *checkout,
         ASSERT(ms_tool(&m, 2, "z23_code", args));
         ASSERT(has(&m, "native-stem"));
         ASSERT(has(&m, "tools-a"));
-        ASSERT(!has(&m, "tools-e"));
+        ASSERT(has(&m, "tools-b"));
+        ASSERT(!has(&m, "tools-c"));
         ASSERT(has(&m, "lessons_capped"));
+        /* The stub's entries carry no author_role, so its public pages go. */
+        ASSERT(has(&m, "lessons_untrusted_dropped"));
         ASSERT_EQ(ms_finish(&m), 0);
         ASSERT(ms_stop_child(&stub));
 
-        /* A directory query paged over three replies: the newest entry sits
-         * on the last page and still beats the older ones, while the stem
-         * lesson stays first. */
+        /* A query paged over three replies: the newest entry sits on the last
+         * page and still beats the older ones of the same rank. */
         stub = ms_stub_start(dd, &port);
         ASSERT(stub > 0);
         ASSERT(ms_start_node(&m, home, checkout, dd, port, err));
         ASSERT(ms_tool(&m, 2, "z23_code", paged));
-        ASSERT(has(&m, "native-stem"));
         ASSERT(has(&m, "dir-new"));
-        ASSERT(strstr(m.line, "native-stem") < strstr(m.line, "dir-new"));
+        ASSERT(strstr(m.line, "dir-new") < strstr(m.line, "dir-a"));
         ASSERT(has(&m, "dir-a"));
         ASSERT(!has(&m, "dir-d"));
         ASSERT(has(&m, "lessons_capped"));

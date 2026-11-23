@@ -1143,7 +1143,7 @@ static int test_code_guide_lesson_provenance(void)
     return failures;
 }
 
-int test_code_guide_lessons(void);
+int cgl_run_cases(void);
 
 static int test_code_guide_lesson_cap(void)
 {
@@ -2750,7 +2750,7 @@ int test_code_impact(void)
     failures += test_code_guide_render_sweep();
     failures += test_code_guide_lesson_provenance();
     failures += test_code_guide_lesson_cap();
-    failures += test_code_guide_lessons();
+    failures += cgl_run_cases();
     failures += test_code_guide_route_parity();
     failures += test_code_guide();
     failures += test_code_guide_paths();

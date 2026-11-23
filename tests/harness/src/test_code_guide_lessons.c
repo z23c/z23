@@ -335,7 +335,7 @@ static int cgl_guide_cases(void)
     return failures;
 }
 
-int test_code_guide_lessons(void)
+int cgl_run_cases(void)
 {
     int failures = cgl_ranking_cases() + cgl_trust_stale_cases() + cgl_cap_cases();
     struct node_db db = {0};
