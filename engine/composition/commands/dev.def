@@ -2161,14 +2161,20 @@ ZCL_COMMAND_DEV_COMMAND(
     "line in a ledger beside the shared object store, and refuses when any "
     "of them is already live in another worktree's claim, naming the file, "
     "that worktree, and its story. A second claim from the same worktree "
-    "replaces its own line rather than stacking, and release removes every "
-    "line this worktree owns. Explicit retire_worktree archives exact legacy "
+    "replaces its own unguarded line rather than stacking; release removes "
+    "unguarded lines this worktree owns. Optional exclusive_owner is a 32 "
+    "lowercase hex coordination ID, not authentication; it permits empty files "
+    "and acquires or renews only when no other live own-worktree owner exists. "
+    "Ordinary claims cannot replace or release a guarded row; guarded release "
+    "requires the matching ID even after expiry. An absent row releases "
+    "idempotently. Explicit retire_worktree cannot combine with exclusive_owner "
+    "and archives exact legacy "
     "rows only for an absent, unregistered owner; leases remain protected. "
     "It writes only development coordination state; it touches no "
     "source file, ref, datadir, or wallet.", 16384,
     "agent,claim,ledger,files,lane,conflict",
     "zcl.agent_claim_input.v1", "zcl.agent_claim.v1",
-    "cwd,story,files,release,retire_worktree", "story",
+    "cwd,story,files,release,retire_worktree,exclusive_owner", "story",
     "z23-dev dev agent claim hex-codec",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,

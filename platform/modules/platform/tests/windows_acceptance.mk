@@ -312,6 +312,7 @@ ZCL_WINDOWS_ACCEPTANCE_dev_agent_claim_SOURCES := \
 	contexts/commons/packages/zutf8/src/zutf8.c \
 	platform/modules/json/src/json.c \
 	platform/modules/util/src/file_io.c \
+	platform/modules/util/src/path_util.c \
 	platform/modules/util/src/spawn.c platform/modules/util/src/spawn_binary.c \
 	platform/modules/platform/src/file_stream.c \
 	platform/modules/platform/src/process_lifecycle.c \

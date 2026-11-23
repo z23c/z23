@@ -24,6 +24,10 @@
  *            "CLAIM_PATH_REFUSED", with a message naming the path.
  *            May be omitted only when release is true; supplied files must
  *            still be an array, but release ignores its contents.
+ *   exclusive_owner optional 32 lowercase hex coordination ID, not authentication.
+ *            It permits empty files, and guards this worktree row from other
+ *            owners. A matching ID renews or releases it; release compares
+ *            even expired rows. A missing row releases idempotently.
  *   release  optional bool, default false.
  *   retire_worktree optional exact ASCII absolute path. Archive one legacy
  *            row only after its owner is missing and unregistered. Files must
@@ -52,9 +56,9 @@
  *     offending file, plus ledger location. Missing historical metadata is
  *     empty; age alone never reclaims a legacy claim.
  *     Nothing is written on overlap refusal.
- *   - A claim from the SAME worktree REPLACES that worktree's own line, so
+ *   - An unguarded claim from the SAME worktree REPLACES its own unguarded line, so
  *     re-claiming is idempotent and never overlaps itself.
- *   - release=true removes every line whose worktree is this one and reports
+ *   - Unguarded release=true removes unguarded lines whose worktree is this one and reports
  *     released (count). `files` may be empty and `story` is not required to
  *     match anything.
  *   - The rewrite must be whole-file: read every line, drop the ones being
@@ -101,6 +105,7 @@
 #include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "util/file_io.h"
+#include "util/path_util.h"
 #include "util/spawn.h"
 
 #include <errno.h>
@@ -1413,6 +1418,99 @@ static bool dvc_check_overlap(const struct dvc_facts *facts,
     return nconf == 0;
 }
 
+/* A duplicate, malformed, or non-string owner must never become unguarded. */
+static bool dvc_exclusive_field(const struct json_value *row, const char **id)
+{
+    size_t count = 0;
+    *id = NULL;
+    if (!row || row->type != JSON_OBJ) return false;
+    for (size_t i = 0; i < row->num_children; i++) {
+        if (strcmp(row->keys[i], "exclusive_owner")) continue;
+        count++;
+        *id = row->children[i].type == JSON_STR ? json_get_str(&row->children[i]) : NULL;
+    }
+    return count == 0 || (count == 1 && zcl_is_lower_hex(*id, 32));
+}
+
+struct dvc_exclusive_scan {
+    const struct dvc_facts *facts;
+    const char *id, *retire;
+    bool release;
+    long long now;
+    size_t own_guarded;
+};
+
+static bool dvc_exclusive_conflict(struct zcl_command_reply *reply,
+                                   const char *held, const struct json_value *row)
+{
+    char evidence[256];
+    const char *story = json_get_str(json_get(row, "story"));
+    (void)snprintf(evidence, sizeof(evidence), "owner=%s story=%s",
+                   held ? held : "ordinary", story ? story : "unknown");
+    dvc_fail(reply, "CLAIM_OWNER_CONFLICT", "claim",
+             "worktree claim belongs to another owner", evidence);
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "Coordinate with the named claim holder before retrying.");
+    return false;
+}
+
+static bool dvc_exclusive_owner_row(const char *line, const char *wt,
+                                    const char *held, const struct json_value *row,
+                                    struct dvc_exclusive_scan *s,
+                                    struct zcl_command_reply *reply)
+{
+    bool own = strcmp(wt, s->facts->toplevel) == 0;
+    bool relevant = s->release || !dvc_line_expired(line, s->now);
+    if (own && held) s->own_guarded++;
+    bool conflict = (s->retire && held && strcmp(wt, s->retire) == 0) ||
+        (own && relevant && ((s->id && (!held || strcmp(s->id, held))) ||
+                             (!s->id && held)));
+    return !conflict || dvc_exclusive_conflict(reply, held, row);
+}
+
+static bool dvc_exclusive_row(const char *line, struct dvc_exclusive_scan *s,
+                              struct zcl_command_reply *reply)
+{
+    struct json_value row;
+    json_init(&row);
+    const char *held = NULL;
+    char wt[PATH_MAX];
+    bool parsed = zutf8_validate_n(line, strlen(line)) &&
+                  json_read(&row, line, strlen(line)) && row.type == JSON_OBJ;
+    bool metadata = parsed && dvc_exclusive_field(&row, &held);
+    bool owner = dvc_line_owner(line, wt, sizeof(wt));
+    bool suspect = strstr(line, "exclusive_owner") != NULL;
+    bool ok = true;
+    if ((parsed && !metadata) || (!parsed && suspect) ||
+        (!owner && (held || s->id))) {
+        dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "claim",
+                 "claim owner metadata is malformed or ambiguous", s->facts->ledger);
+        ok = false;
+    } else if (owner) {
+        ok = dvc_exclusive_owner_row(line, wt, held, &row, s, reply);
+    }
+    json_free(&row);
+    return ok;
+}
+
+/* Called with the ledger lock held, before any rewrite, including retirement. */
+static bool dvc_exclusive_check(const struct dvc_facts *facts,
+                                const struct dvc_ledger *lg, const char *id,
+                                bool release, const char *retire, long long now,
+                                struct zcl_command_reply *reply)
+{
+    struct dvc_exclusive_scan s = {facts, id, retire, release, now, 0};
+    for (size_t i = 0; i < lg->n; i++)
+        if (!dvc_exclusive_row(lg->lines[i], &s, reply)) return false;
+    if (s.own_guarded > 1) {
+        dvc_fail(reply, "CLAIM_LEDGER_UNREADABLE", "claim",
+                 "multiple guarded rows have the same worktree owner", facts->ledger);
+        return false;
+    }
+    return true;
+}
+
+
 static bool dvc_now_iso(char *ts, size_t cap)
 {
     time_t now = (time_t)(clock_now_wall_ms() / 1000);
@@ -1425,7 +1523,7 @@ static bool dvc_now_iso(char *ts, size_t cap)
 static bool dvc_build_line(const char *ts, long long expires_unix,
                            const char *story,
                            const struct dvc_facts *facts,
-                           const struct json_value *norm, char *line,
+                           const struct json_value *norm, const char *exclusive_owner, char *line,
                            size_t cap)
 {
     char esc_story[1024], esc_wt[PATH_MAX + 8], esc_br[512];
@@ -1450,13 +1548,15 @@ static bool dvc_build_line(const char *ts, long long expires_unix,
             return false;
         used += (size_t)w;
     }
-    w = snprintf(line + used, cap - used, "]}");
+    w = exclusive_owner
+        ? snprintf(line + used, cap - used, "],\"exclusive_owner\":\"%s\"}", exclusive_owner)
+        : snprintf(line + used, cap - used, "]}");
     return w >= 0 && (size_t)w < cap - used;
 }
 
 static void dvc_claim(const struct dvc_facts *facts,
                       const struct dvc_ledger *lg, const char *story,
-                      const struct json_value *norm,
+                      const struct json_value *norm, const char *exclusive_owner,
                       struct zcl_command_reply *reply)
 {
     uint64_t now_ms = clock_now_wall_ms();
@@ -1478,7 +1578,7 @@ static void dvc_claim(const struct dvc_facts *facts,
         return;
     }
     char newline[DVC_LINE_CAP];
-    if (!dvc_build_line(ts, expires_unix, story, facts, norm, newline,
+    if (!dvc_build_line(ts, expires_unix, story, facts, norm, exclusive_owner, newline,
                         sizeof(newline))) {
         dvc_fail(reply, "BAD_INPUT", "escape",
                  "claim text is invalid UTF-8 or exceeds the ledger budget",
@@ -1489,6 +1589,7 @@ static void dvc_claim(const struct dvc_facts *facts,
     if (!dvc_ledger_write(facts->ledger, lg, facts->toplevel, newline, now,
                           &kept, &replaced, &expired, reply))
         return;
+    if (exclusive_owner) (void)json_push_kv_str(&reply->data, "exclusive_owner", exclusive_owner);
     (void)json_push_kv_str(&reply->data, "leaf", DVC_LEAF);
     (void)json_push_kv(&reply->data, "claimed", norm);
     (void)json_push_kv_str(&reply->data, "ledger", facts->ledger);
@@ -1518,7 +1619,7 @@ static bool dvc_lock(const char *ledger, struct platform_private_file *lock,
 }
 
 static void dvc_run(const char *cwd, const char *story, bool release,
-                    const char *retire,
+                    const char *retire, const char *exclusive_owner,
                     const struct json_value *norm,
                     struct zcl_command_reply *reply)
 {
@@ -1530,12 +1631,18 @@ static void dvc_run(const char *cwd, const char *story, bool release,
     platform_private_file_init(&lock);
     if (dvc_lock(facts.ledger, &lock, reply) &&
         dvc_ledger_load(facts.ledger, &lg, false, reply)) {
+        if (!dvc_exclusive_check(&facts, &lg, exclusive_owner, release, retire,
+                                 (long long)(clock_now_wall_ms() / 1000), reply)) {
+            dvc_ledger_free(&lg);
+            platform_private_file_close(&lock);
+            return;
+        }
         if (retire)
             dvc_retire_orphan(&facts, &lg, retire, reply);
         else if (release)
             dvc_release(&facts, &lg, reply);
         else
-            dvc_claim(&facts, &lg, story, norm, reply);
+            dvc_claim(&facts, &lg, story, norm, exclusive_owner, reply);
         dvc_ledger_free(&lg);
     }
     /* Persistent sidecar: unlinking it would split the lock identity. */
@@ -1589,6 +1696,22 @@ static bool dvc_retire_input(const struct json_value *input, bool release,
     return true;
 }
 
+static bool dvc_input_owner(const struct json_value *input, const char *retire,
+                            const char **owner, struct zcl_command_reply *reply)
+{
+    if (dvc_exclusive_field(input, owner) && !(retire && *owner)) return true;
+    dvc_fail(reply, "BAD_INPUT", "validate",
+             "exclusive_owner must be 32 lowercase hex characters and cannot retire",
+             "input.exclusive_owner");
+    return false;
+}
+
+static bool dvc_release_requested(const struct json_value *input)
+{
+    const struct json_value *v = json_get(input, "release");
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
 void zcl_native_handle_dev_agent_claim(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1600,15 +1723,16 @@ void zcl_native_handle_dev_agent_claim(
                  "request.input was missing");
         return;
     }
-    const struct json_value *releasev = json_get(request->input, "release");
-    const bool release = releasev && releasev->type == JSON_BOOL &&
-                         json_get_bool(releasev);
+    const bool release = dvc_release_requested(request->input);
     const char *retire = NULL;
     if (!dvc_retire_input(request->input, release, &retire, reply))
         return;
+    const char *exclusive_owner = NULL;
+    if (!dvc_input_owner(request->input, retire, &exclusive_owner, reply))
+        return;
     const char *story = NULL;
     const struct json_value *filesv = NULL;
-    if (!dvc_validate(request->input, release || retire, release, &story,
+    if (!dvc_validate(request->input, release || retire || exclusive_owner, release, &story,
                       &filesv, reply))
         return;
     if (retire && filesv->num_children != 0) {
@@ -1623,7 +1747,7 @@ void zcl_native_handle_dev_agent_claim(
     json_init(&norm);
     json_set_array(&norm);
     if (release || retire || dvc_normalize_files(filesv, &norm, reply))
-        dvc_run(dvc_cwd(request), story, release, retire, &norm, reply);
+        dvc_run(dvc_cwd(request), story, release, retire, exclusive_owner, &norm, reply);
     json_free(&norm);
 }
 
@@ -1834,11 +1958,24 @@ bool zcl_submit_claim_lock(struct zcl_submit_claim_guard *g,
     return false;
 }
 
+static bool dvc_submit_paths_valid(const struct json_value *files)
+{
+    for (size_t i = 0; i < files->num_children; i++) {
+        const struct json_value *item = &files->children[i];
+        const char *path = item->type == JSON_STR ? json_get_str(item) : NULL;
+        char normalized[DVC_PATH_CAP];
+        if (!path || dvc_path_normalize(path, normalized, sizeof(normalized)))
+            return false;
+    }
+    return true;
+}
+
 static bool dvc_submit_row_valid(const char *line)
 {
     struct json_value row;
     json_init(&row);
     size_t len = strlen(line), count = 0;
+    const char *exclusive_owner = NULL;
     char owner[PATH_MAX];
     bool ok = dvc_line_owner(line, owner, sizeof(owner)) &&
         zutf8_validate_n(line, len) && json_read(&row, line, len) && row.type == JSON_OBJ;
@@ -1846,13 +1983,9 @@ static bool dvc_submit_row_valid(const char *line)
     for (size_t i = 0; ok && i < row.num_children; i++) {
         if (strcmp(row.keys[i], "files") == 0) { files = &row.children[i]; count++; }
     }
-    ok = ok && count == 1 && files && files->type == JSON_ARR && files->num_children > 0;
-    for (size_t i = 0; ok && i < files->num_children; i++) {
-        const struct json_value *item = &files->children[i];
-        const char *path = item->type == JSON_STR ? json_get_str(item) : NULL;
-        char normalized[DVC_PATH_CAP];
-        ok = path && !dvc_path_normalize(path, normalized, sizeof(normalized));
-    }
+    ok = ok && dvc_exclusive_field(&row, &exclusive_owner) && count == 1 && files &&
+        files->type == JSON_ARR && (files->num_children > 0 || exclusive_owner);
+    if (ok) ok = dvc_submit_paths_valid(files);
     json_free(&row);
     return ok;
 }
@@ -1868,8 +2001,9 @@ bool zcl_submit_claim_check(struct zcl_submit_claim_guard *g,
             return false;
         }
     }
-    bool ok = dvc_check_overlap(&g->facts, &lg, &g->paths,
-                                (long long)(clock_now_wall_ms() / 1000), reply);
+    long long now = (long long)(clock_now_wall_ms() / 1000);
+    bool ok = dvc_exclusive_check(&g->facts, &lg, NULL, false, NULL, now, reply) &&
+        dvc_check_overlap(&g->facts, &lg, &g->paths, now, reply);
     dvc_ledger_free(&lg);
     if (!ok && strcmp(reply->error.code, "CLAIM_OVERLAP") == 0) {
         (void)snprintf(reply->error.phase, sizeof(reply->error.phase), "%s", "submit");

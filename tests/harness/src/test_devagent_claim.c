@@ -11,6 +11,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_submit_claim_guard.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "zutf8/zutf8.h"
@@ -169,6 +170,15 @@ static void dvx_claim(struct dvx_call *c, const char *dir, const char *story,
         (void)dvx_push_files(c, "files", files);
     if (release)
         (void)json_push_kv_bool(&c->input, "release", true);
+}
+
+/* An exclusive owner claim reserves the worktree even when its file list is
+ * empty. Keep this helper separate so tests still exercise registry validation. */
+static void dvx_guard(struct dvx_call *c, const char *dir, const char *story,
+                      const char *owner, bool release)
+{
+    dvx_claim(c, dir, story, (const char *const[]){NULL}, release);
+    (void)json_push_kv_str(&c->input, "exclusive_owner", owner);
 }
 
 /* Append `count` synthetic claim rows from foreign worktrees to the ledger. */
@@ -1017,10 +1027,234 @@ static int dvx_release_input_tests(void)
     return failures;
 }
 
+static const char dvx_guard_a[] = "0123456789abcdef0123456789abcdef";
+static const char dvx_guard_b[] = "abcdef0123456789abcdef0123456789";
+
+static int dvx_guard_lifecycle(void)
+{
+    int failures = 0;
+    TEST("claim: guarded worktree preserves its owner and requires matching release") {
+        char repo[512], ledger[1024];
+        char *before = NULL, *after = NULL;
+        size_t before_len = 0, after_len = 0;
+        static const char *const files[] = {"engine/a.c", NULL};
+        struct dvx_call c;
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "guard-lifecycle");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", repo);
+        dvx_claim(&c, repo, "ordinary", files, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        dvx_guard(&c, repo, "guard", dvx_guard_a, false);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        dvx_claim(&c, repo, NULL, NULL, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        dvx_guard(&c, repo, "guard", dvx_guard_a, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "exclusive_owner"), dvx_guard_a); dvx_end(&c);
+        dvx_guard(&c, repo, "guard", dvx_guard_a, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &before, &before_len, "guard_before"));
+        dvx_claim(&c, repo, "ordinary", files, false);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        dvx_claim(&c, repo, NULL, NULL, true);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        dvx_guard(&c, repo, NULL, dvx_guard_b, true);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &after, &after_len, "guard_after"));
+        ASSERT_EQ(before_len, after_len);
+        ASSERT(memcmp(before, after, before_len) == 0);
+        free(before); free(after);
+        dvx_guard(&c, repo, NULL, dvx_guard_a, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 1); dvx_end(&c);
+        dvx_guard(&c, repo, NULL, dvx_guard_a, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 0); dvx_end(&c);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvx_guard_expiry(void)
+{
+    int failures = 0;
+    TEST("claim: expired guard permits takeover but stale release preserves new owner") {
+        char repo[512], row[2048], ledger[1024];
+        struct dvx_call c;
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "guard-expiry");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", repo);
+        (void)snprintf(row, sizeof(row), "{\"expires_unix\":1,\"worktree\":\"%s\","
+                       "\"story\":\"old\",\"files\":[],\"exclusive_owner\":\"%s\"}\n", repo, dvx_guard_a);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        dvx_guard(&c, repo, NULL, dvx_guard_b, true);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        ASSERT(dvx_ledger_matches(ledger, row));
+        dvx_guard(&c, repo, "new", dvx_guard_b, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        char *before = NULL, *after = NULL; size_t n = 0, m = 0;
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &before, &n, "guard_new"));
+        dvx_guard(&c, repo, NULL, dvx_guard_a, true);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &after, &m, "guard_stale"));
+        ASSERT_EQ(n, m); ASSERT(memcmp(before, after, n) == 0);
+        free(before); free(after);
+        dvx_guard(&c, repo, NULL, dvx_guard_b, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        static const char *const files[] = {"engine/a.c", NULL};
+        dvx_claim(&c, repo, "ordinary-new", files, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &before, &n, "ordinary_new"));
+        dvx_guard(&c, repo, NULL, dvx_guard_a, true);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &after, &m, "ordinary_stale"));
+        ASSERT_EQ(n, m); ASSERT(memcmp(before, after, n) == 0);
+        free(before); free(after);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvx_guard_bad_rows(void)
+{
+    int failures = 0;
+    TEST("claim: malformed or duplicated guarded metadata cannot be rewritten") {
+        char repo[512], row[4096], ledger[1024];
+        struct dvx_call c;
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "guard-bad");
+        ASSERT(dvx_fixture(repo));
+        (void)snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", repo);
+        (void)snprintf(row, sizeof(row), "{\"worktree\":\"%s\",\"files\":[],\"\\u006deta\":1}\n", DVX_FOREIGN);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        dvx_claim(&c, repo, NULL, NULL, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        ASSERT(dvx_ledger_matches(ledger, row));
+        const char *fields[] = {"\"exclusive_owner\":null",
+            "\"\\u0065xclusive_owner\":\"0123456789abcdef0123456789abcdef\"",
+            "\"exclusive_owner\":\"0123456789abcdef0123456789abcdef\",\"\\u0065xclusive_owner\":\"0123456789abcdef0123456789abcdef\"", "\"exclusive_owner\":\"bad\"",
+            "\"exclusive_owner\":\"0123456789abcdef0123456789abcdef\",\"exclusive_owner\":\"0123456789abcdef0123456789abcdef\"", NULL};
+        for (size_t i = 0; fields[i]; i++) {
+            (void)snprintf(row, sizeof(row), "{\"worktree\":\"%s\",\"files\":[],%s}\n", repo, fields[i]);
+            ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+            dvx_claim(&c, repo, NULL, NULL, true);
+            ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+            ASSERT(dvx_ledger_matches(ledger, row));
+        }
+        (void)snprintf(row, sizeof(row), "{\"worktree\":\"%s\",\"files\":[],\"exclusive_owner\":\"%s\"}\n"
+                       "{\"worktree\":\"%s\",\"files\":[],\"exclusive_owner\":\"%s\"}\n", repo, dvx_guard_a, repo, dvx_guard_a);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        dvx_guard(&c, repo, NULL, dvx_guard_a, true);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        ASSERT(dvx_ledger_matches(ledger, row));
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", ""));
+        dvx_guard(&c, repo, "guard", dvx_guard_a, false);
+        (void)json_push_kv_str(&c.input, "exclusive_owner", dvx_guard_a);
+        zcl_native_handle_dev_agent_claim(&c.request, &c.reply);
+        ASSERT(!dvx_ok(&c)); dvx_end(&c);
+        ASSERT(dvx_ledger_matches(ledger, ""));
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvx_guard_concurrent(void)
+{
+    int failures = 0;
+#if !defined(_WIN32)
+    TEST("claim: concurrent owners cannot both acquire the same worktree") {
+        char repo[512], ledger[1024], *before = NULL, *after = NULL;
+        size_t n = 0, m = 0;
+        int start[2], status[2];
+        pid_t children[2];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "guard-race");
+        ASSERT(dvx_fixture(repo));
+        ASSERT_EQ(pipe(start), 0);
+        for (int i = 0; i < 2; i++) {
+            children[i] = fork();
+            ASSERT(children[i] >= 0);
+            if (children[i] == 0) {
+                char byte;
+                close(start[1]);
+                if (read(start[0], &byte, 1) != 1) _exit(2);
+                struct dvx_call c;
+                dvx_guard(&c, repo, "race", i ? dvx_guard_b : dvx_guard_a, false);
+                bool ran = dvx_run(&c), ok = dvx_ok(&c);
+                dvx_end(&c);
+                _exit(!ran ? 2 : ok ? 0 : 1);
+            }
+        }
+        close(start[0]);
+        ASSERT_EQ(write(start[1], "xx", 2), 2); close(start[1]);
+        for (int i = 0; i < 2; i++) {
+            ASSERT_EQ(waitpid(children[i], &status[i], 0), children[i]);
+            ASSERT(WIFEXITED(status[i]) && WEXITSTATUS(status[i]) <= 1);
+        }
+        ASSERT(WEXITSTATUS(status[0]) != WEXITSTATUS(status[1]));
+        const char *winner = WEXITSTATUS(status[0]) == 0 ? dvx_guard_a : dvx_guard_b;
+        const char *loser = winner == dvx_guard_a ? dvx_guard_b : dvx_guard_a;
+        (void)snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", repo);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &before, &n, "race_winner"));
+        ASSERT(strstr(before, winner) != NULL);
+        struct dvx_call c;
+        dvx_guard(&c, repo, "race", loser, false);
+        ASSERT(dvx_run(&c) && !dvx_ok(&c)); dvx_end(&c);
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &after, &m, "race_loser"));
+        ASSERT_EQ(n, m); ASSERT(memcmp(before, after, n) == 0);
+        free(before); free(after);
+        dvx_guard(&c, repo, NULL, winner, true);
+        ASSERT(dvx_run(&c) && dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 1); dvx_end(&c);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
+
+static int dvx_guard_submit(void)
+{
+    int failures = 0;
+    TEST("claim: submit refuses own live guard and accepts foreign empty guard") {
+        char repo[512], common[600], row[2048];
+        struct dvx_call c;
+        struct zcl_command_reply reply;
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "guard-submit");
+        ASSERT(dvx_fixture(repo));
+        const char *ref[] = {"update-ref", "refs/remotes/origin/main", "HEAD", NULL};
+        ASSERT(dvx_git(repo, ref));
+        dvx_guard(&c, repo, "guard", dvx_guard_a, false);
+        ASSERT(dvx_run(&c) && dvx_ok(&c)); dvx_end(&c);
+        (void)snprintf(common, sizeof(common), "%s/.git", repo);
+        zcl_command_reply_init(&reply, "zcl.agent_claim.v1");
+        struct zcl_submit_claim_guard *guard =
+            zcl_submit_claim_prepare(repo, repo, common, "HEAD", &reply);
+        ASSERT(guard != NULL);
+        ASSERT(zcl_submit_claim_lock(guard, &reply));
+        ASSERT(!zcl_submit_claim_check(guard, &reply));
+        zcl_submit_claim_free(guard);
+        zcl_command_reply_free(&reply);
+        (void)snprintf(row, sizeof(row), "{\"worktree\":\"%s\",\"files\":[],\"exclusive_owner\":\"%s\"}\n", DVX_FOREIGN, dvx_guard_a);
+        ASSERT(dvx_write(repo, ".git/z23-agent-claims.jsonl", row));
+        zcl_command_reply_init(&reply, "zcl.agent_claim.v1");
+        guard = zcl_submit_claim_prepare(repo, repo, common, "HEAD", &reply);
+        ASSERT(guard != NULL);
+        ASSERT(zcl_submit_claim_lock(guard, &reply));
+        ASSERT(zcl_submit_claim_check(guard, &reply));
+        zcl_submit_claim_free(guard);
+        zcl_command_reply_free(&reply);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
-    int failures = dvx_lease_tests() + dvx_expiry_scope_tests() +
+    int failures = dvx_guard_lifecycle() + dvx_guard_expiry() + dvx_guard_bad_rows() + dvx_guard_concurrent() + dvx_guard_submit() + dvx_lease_tests() + dvx_expiry_scope_tests() +
                    dvx_owner_authority_tests() + dvx_owner_roundtrip_tests() +
                    dvx_orphan_retirement_tests() + dvx_metadata_tests() +
                    dvx_missing_story_evidence_test() + dvx_long_owner_evidence_test() +
@@ -1036,7 +1270,7 @@ int test_devagent_claim(void)
     static const char *const files_b[] = {"engine/b.c", NULL};
     static const char *const files_none[] = {NULL};
 
-    TEST("claim: the leaf is registered and accepts its four keys") {
+    TEST("claim: the leaf is registered and accepts its exclusive owner key") {
         const struct zcl_command_spec *spec =
             zcl_command_registry_find(zcl_command_catalog(), DVX_PATH, NULL);
         ASSERT(spec != NULL);
@@ -1044,6 +1278,7 @@ int test_devagent_claim(void)
         ASSERT(spec->input_keys && strstr(spec->input_keys, "files") != NULL);
         ASSERT(spec->input_keys && strstr(spec->input_keys, "release") != NULL);
         ASSERT(spec->input_keys && strstr(spec->input_keys, "cwd") != NULL);
+        ASSERT(spec->input_keys && strstr(spec->input_keys, "exclusive_owner") != NULL);
         PASS();
     }
 
@@ -1084,7 +1319,7 @@ int test_devagent_claim(void)
         PASS();
     }
 
-    TEST("claim: another worktree wanting the same file is refused by name") {
+     TEST("claim: another worktree wanting the same file is refused by name") {
         char ledger_path[1024];
         (void)snprintf(ledger_path, sizeof(ledger_path),
                        "%s/.git/z23-agent-claims.jsonl", one);

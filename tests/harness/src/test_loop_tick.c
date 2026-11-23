@@ -368,14 +368,31 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
         return false;
     const char *edit = c->edit ? c->edit : "";
     return lt_script(e, "dev",
-               "case \"$1\" in\n fleet) echo \"$@\" >> '%s/step_args.txt'; cat '%s/step.json' ;;\n"
+               "d='%s'\n"
+               "case \"$*\" in *exclusive_owner*)\n"
+               " echo \"$@\" >> \"$d/base_claims.txt\"\n"
+               " [ -e \"$d/base_claim.fail\" ] && { echo '{\"ok\":false}'; exit 1; }\n"
+               " owner=$(printf '%%s' \"$*\" | sed -n 's/.*\"exclusive_owner\":\"\\([0-9a-f]*\\)\".*/\\1/p')\n"
+               " case \"$*\" in *'\"release\":true'*)\n"
+               " [ \"$(cat \"$d/base_claim.live\")\" = \"$owner\" ] || exit 1\n"
+               " rm -f \"$d/base_claim.live\" ;;"
+               " *) printf '%%s' \"$owner\" > \"$d/base_claim.live\" ;; esac\n"
+               " expiry=$(($(date +%%s)+900))\n"
+               " printf '{\"ok\":true,\"data\":{\"exclusive_owner\":\"%%s\",\"expires_unix\":%%s}}\\n' \"$owner\" \"$expiry\"\n"
+               " exit 0 ;; esac\n"
+               "case \"$1\" in\n fleet) echo \"$@\" >> '%s/step_args.txt'; cat '%s/step.json'\n"
+               " [ -e \"$d/base_claim.live\" ] && echo saw > \"$d/step_saw_guard.txt\"\n"
+               " [ -e \"$d/step.sleep\" ] && sleep 2\n"
+               " [ -e \"$d/step.fail\" ] && exit 1\n exit 0 ;;\n"
                " dev) if [ \"$2\" = agent ]; then\n"
                "  echo \"$@\" >> '%s/claims.txt'\n"
                "  [ -e '%s/claim.fail' ] && { echo '{\"ok\":false}'; exit 1; }\n"
                "  case \"$*\" in *release*) rm -f '%s/claim.live' ;; *) : > '%s/claim.live' ;; esac\n"
                "  echo '{\"ok\":true}'\n"
-               " else echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{\"seq\":7}}'; fi ;;\nesac",
-               e->d, e->d, e->d, e->d, e->d, e->d, e->d) &&
+               " else echo \"$@\" > '%s/submit.txt';\n"
+               " if [ -e \"$d/submit.no_seq\" ]; then echo '{\"data\":{}}';"
+               " else echo '{\"data\":{\"seq\":7}}'; fi; fi ;;\nesac",
+               e->d, e->d, e->d, e->d, e->d, e->d, e->d, e->d) &&
            lt_script(e, "eu",
                "echo \"$@\" >> '%s/eu_args.txt'\n"
                "while [ $# -gt 0 ]; do\n"
@@ -1297,11 +1314,10 @@ static int case_tick_no_sequence(void)
     struct lt_env e;
     const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
     char out[8192];
-    const bool ready = lt_setup(&e, "tseq", &c, "run", "claude-haiku") &&
-                       lt_script(&e, "dev",
-                           "case \"$1\" in\n fleet) cat '%s/step.json' ;;\n"
-                           " dev) echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{}}' ;;\nesac",
-                           e.d, e.d);
+    bool ready = lt_setup(&e, "tseq", &c, "run", "claude-haiku");
+    char fault[900];
+    (void)snprintf(fault, sizeof(fault), "%s/submit.no_seq", e.d);
+    ready = ready && lt_wf(fault, "fault\n");
     LT_CHECK("the no-sequence tick fixtures are written", ready);
     if (!ready)
         return failures + 1;
@@ -1747,6 +1763,92 @@ static int case_card_refused(void)
     return failures;
 }
 
+static int case_base_branch_preserved(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
+    if (!lt_setup(&e, "base_owner", &c, "none", "claude-haiku"))
+        return 1;
+    char main_dir[900], base[900], out[8192], branch[256];
+    (void)snprintf(main_dir, sizeof(main_dir), "%s/main", e.d);
+    (void)snprintf(base, sizeof(base), "%s/lanes/loop-base", e.d);
+    if (!lt_git(main_dir, "worktree", "add", "-q", "-b", "active-owner", base,
+                "origin/main", NULL))
+        return 1;
+    LT_CHECK("an attached base skips the tick", lt_tick(&e, NULL, NULL, out, sizeof(out)) == 0);
+    const char *const sym[] = { "git", "-C", base, "symbolic-ref", "--short", "HEAD", NULL };
+    LT_CHECK("the timer preserves the active owner's branch",
+             lt_run(sym, branch, sizeof(branch), NULL) && strstr(branch, "active-owner"));
+    LT_CHECK("an attached base never starts the objectives step",
+             !lt_exists("%s/%s", e.d, "step_args.txt"));
+    LT_CHECK("attached base refusal releases its guard",
+             lt_file_has(&e, "base_claims.txt", "\"release\":true") &&
+             !lt_exists("%s/%s", e.d, "base_claim.live"));
+    return failures;
+}
+
+static int case_base_local_work(const char *kind)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
+    if (!lt_setup(&e, kind, &c, "none", "claude-haiku"))
+        return 1;
+    char main_dir[900], base[900], file[1000], before[128], after[128];
+    (void)snprintf(main_dir, sizeof(main_dir), "%s/main", e.d);
+    (void)snprintf(base, sizeof(base), "%s/lanes/loop-base", e.d);
+    if (!lt_git(main_dir, "worktree", "add", "-q", "--detach", base, "origin/main", NULL))
+        return 1;
+    (void)snprintf(file, sizeof(file), "%s/%s", base,
+                   strcmp(kind, "untracked") == 0 ? "untracked.c" : "owned.c");
+    if (!lt_wf(file, "preserved owner work\n"))
+        return 1;
+    if (strcmp(kind, "unlanded") == 0 &&
+        (!lt_git(base, "add", "owned.c", NULL) ||
+         !lt_git(base, "-c", "user.name=fixture", "-c", "user.email=f@example.invalid",
+                 "commit", "-q", "-m", "unlanded", NULL)))
+        return 1;
+    const char *const head[] = { "git", "-C", base, "rev-parse", "HEAD", NULL };
+    if (!lt_run(head, before, sizeof(before), NULL))
+        return 1;
+    LT_CHECK("a base with local work skips", lt_tick(&e, NULL, NULL, NULL, 0) == 0);
+    LT_CHECK("base HEAD is preserved",
+             lt_run(head, after, sizeof(after), NULL) && strcmp(before, after) == 0);
+    LT_CHECK("base file bytes are preserved", lt_has(file, "preserved owner work\n"));
+    LT_CHECK("local work blocks objectives step", !lt_exists("%s/%s", e.d, "step_args.txt"));
+    LT_CHECK("local work refusal releases guard", !lt_exists("%s/%s", e.d, "base_claim.live"));
+    return failures;
+}
+
+static int case_base_guard_failure(const char *fault)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL, NULL };
+    if (!lt_setup(&e, fault, &c, "run", "claude-haiku"))
+        return 1;
+    char file[900];
+    (void)snprintf(file, sizeof(file), "%s/%s", e.d, fault);
+    if (!lt_wf(file, "fault\n"))
+        return 1;
+    LT_CHECK("guard or step failure skips", lt_tick(&e, "--step-timeout-s", "1", NULL, 0) == 0);
+    LT_CHECK("failure creates no work lane", !lt_exists("%s/%s", e.d, "lanes/loop-t1"));
+    LT_CHECK("failure leaves no held guard", !lt_exists("%s/%s", e.d, "base_claim.live"));
+    if (strcmp(fault, "base_claim.fail") == 0) {
+        LT_CHECK("claim refusal never starts objectives step",
+                 !lt_exists("%s/%s", e.d, "step_args.txt"));
+        LT_CHECK("claim refusal never releases another holder",
+                 !lt_file_has(&e, "base_claims.txt", "\"release\":true"));
+    } else {
+        LT_CHECK("objectives step executes while guard held",
+                 lt_file_has(&e, "step_saw_guard.txt", "saw"));
+        LT_CHECK("step failure releases exact owner",
+                 lt_file_has(&e, "base_claims.txt", "\"release\":true"));
+    }
+    return failures;
+}
+
 int test_loop_tick(void)
 {
     int failures = 0;
@@ -1755,6 +1857,13 @@ int test_loop_tick(void)
         printf("loop_tick: FAIL (%s is a required test prerequisite)\n", LT_BIN);
         return 1;
     }
+    failures += case_base_branch_preserved();
+    failures += case_base_local_work("dirty");
+    failures += case_base_local_work("untracked");
+    failures += case_base_local_work("unlanded");
+    failures += case_base_guard_failure("base_claim.fail");
+    failures += case_base_guard_failure("step.fail");
+    failures += case_base_guard_failure("step.sleep");
     failures += case_run_submits();
     failures += case_scope_hold();
     failures += case_baseline_growth_hold();

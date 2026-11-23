@@ -90,6 +90,7 @@ enum {
     LT_SHOW_MAX = 90000,
     LT_BUILD_TIMEOUT_MS = 6 * 3600 * 1000,
     LT_SHORT_TIMEOUT_MS = 600 * 1000,
+    LT_BASE_TIMEOUT_MS = 30 * 1000,
     LT_BASE_ROWS = 4096, /* changed baseline rows the judgement can hold */
     LT_ATTEMPT_ID = 65 /* 64 lowercase hex and the NUL */
 };
@@ -167,6 +168,9 @@ struct tick {
     bool finish;        /* --finish mode: adopt a committed lane, judge origin/main..HEAD */
     char *claim_in;     /* the lane claim input, repeated to renew the lease */
     bool claimed;       /* the lane holds a claim row to release */
+    char base_owner[33]; /* coordination ID, not an authentication credential */
+    bool base_claimed;
+    int64_t base_expires;
     /* a kind=baseline_row card (one shrink-only lint baseline row) */
     bool card;
     char baseline[LT_PATH], row[LT_PATH], recipe[1024], verify[512], focus[1024];
@@ -571,19 +575,94 @@ static bool dup_find(struct tick *t, const char *name, const char *target, void 
     return true;
 }
 
+static bool base_claim_call(struct tick *t, bool release)
+{
+    char input[256];
+    (void)fmt(input, sizeof(input),
+        "--input={\"story\":\"loop-base-step\",\"files\":[],"
+        "\"exclusive_owner\":\"%s\",\"release\":%s}",
+        t->base_owner, release ? "true" : "false");
+    const char *const av[] = { O(t, LT_O_DEV), "dev", "agent", "claim", input, NULL };
+    if (run(t, O(t, LT_O_BASE), av, LT_BASE_TIMEOUT_MS) != 0)
+        return false;
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, t->buf, strlen(t->buf));
+    const struct json_value *passed = json_get(&doc, "ok");
+    ok = ok && passed && passed->type == JSON_BOOL && json_get_bool(passed);
+    if (ok && !release) {
+        ok = strcmp(jstr(&doc, "data.exclusive_owner"), t->base_owner) == 0;
+        if (ok) {
+            t->base_claimed = true;
+            t->base_expires = json_get_int(jpath(&doc, "data.expires_unix"));
+        }
+    }
+    json_free(&doc);
+    return ok;
+}
+
+static bool base_release(struct tick *t)
+{
+    if (!t->base_claimed)
+        return true;
+    /* One bounded attempt. A failed release leaves the existing lease to expire. */
+    t->base_claimed = false;
+    if (base_claim_call(t, true))
+        return true;
+    say(t, "loop-base guard release failed; retained lease must expire before reuse");
+    return false;
+}
+
+static bool base_has_time(const struct tick *t, int seconds)
+{
+    const int64_t now = clock_now_wall_ms() / 1000;
+    return now > 0 && t->base_expires > now && t->base_expires - now > seconds;
+}
+
+static int base_clean_detached(struct tick *t)
+{
+    const char *const sym[] = { O(t, LT_O_GIT), "-C", O(t, LT_O_BASE),
+                                "symbolic-ref", "-q", "HEAD", NULL };
+    if (run(t, NULL, sym, LT_BASE_TIMEOUT_MS) != 1)
+        return skip(t, "loop-base has an attached branch or unreadable HEAD");
+    const char *const status[] = { O(t, LT_O_GIT), "-C", O(t, LT_O_BASE),
+        "status", "--porcelain", "--untracked-files=all", NULL };
+    if (run(t, NULL, status, LT_BASE_TIMEOUT_MS) != 0 || *t->buf)
+        return skip(t, "loop-base has local work or unreadable status");
+    const char *const ancestor[] = { O(t, LT_O_GIT), "-C", O(t, LT_O_BASE),
+        "merge-base", "--is-ancestor", "HEAD", "origin/main", NULL };
+    if (run(t, NULL, ancestor, LT_BASE_TIMEOUT_MS) != 0)
+        return skip(t, "loop-base has unlanded history or unreadable ancestry");
+    return LT_GO;
+}
+
 static int ensure_base(struct tick *t)
 {
+    if (oms(t, LT_O_STEP_TIMEOUT) > 600000)
+        return skip(t, "step timeout exceeds the bounded loop-base lease");
     if (!is_dir(O(t, LT_O_BASE))) {
         const char *const add[] = { O(t, LT_O_GIT), "-C", O(t, LT_O_MAIN),
                                     "worktree", "add", "-q", "--detach",
                                     O(t, LT_O_BASE), "origin/main", NULL };
-        if (run(t, NULL, add, LT_SHORT_TIMEOUT_MS) != 0)
+        if (run(t, NULL, add, LT_BASE_TIMEOUT_MS) != 0)
             return skip(t, "cannot create loop-base");
     }
+    uint8_t id[16];
+    if (!rng_fill(id, sizeof(id)))
+        return skip(t, "cannot generate loop-base owner ID");
+    zcl_hex_encode(id, sizeof(id), t->base_owner);
+    if (!base_claim_call(t, false))
+        return skip(t, "loop-base ownership unavailable");
+    if (!base_has_time(t, oms(t, LT_O_STEP_TIMEOUT) / 1000 + 180))
+        return skip(t, "loop-base lease cannot cover the bounded step");
+    int rc = base_clean_detached(t);
+    if (rc != LT_GO)
+        return rc;
     const char *const co[] = { O(t, LT_O_GIT), "-C", O(t, LT_O_BASE),
                                "checkout", "-q", "--detach", "origin/main",
                                NULL };
-    if (run(t, NULL, co, LT_SHORT_TIMEOUT_MS) != 0)
+    if (!base_has_time(t, oms(t, LT_O_STEP_TIMEOUT) / 1000 + 90) ||
+        run(t, NULL, co, LT_BASE_TIMEOUT_MS) != 0)
         return skip(t, "loop-base checkout failed");
     return LT_GO;
 }
@@ -782,9 +861,15 @@ static int stage_step(struct tick *t)
                                   NULL };
     const char *const excl[] = { O(t, LT_O_DEV), "fleet", "objectives", "step",
                                  flag, NULL };
-    (void)run(t, O(t, LT_O_BASE), *t->excl ? excl : plain, oms(t, LT_O_STEP_TIMEOUT));
+    if (!base_has_time(t, oms(t, LT_O_STEP_TIMEOUT) / 1000 + 60))
+        return skip(t, "loop-base lease expired before objectives step");
+    if (run(t, O(t, LT_O_BASE), *t->excl ? excl : plain,
+             oms(t, LT_O_STEP_TIMEOUT)) != 0)
+        return skip(t, "objectives step failed or timed out");
     if (!step_collect(t))
         return skip(t, "cannot allocate the step document");
+    if (!base_release(t))
+        return skip(t, "cannot release loop-base ownership");
     const char *action = jstr(&t->root, "data.action");
     if (strcmp(action, "run") != 0) {
         const char *reason = jstr(&t->root, "data.reason");
@@ -2311,6 +2396,8 @@ int main(int argc, char **argv)
         return 1;
     }
     rc = t.finish ? finish_stages(&t) : tick_stages(&t);
+    if (!base_release(&t))
+        rc = 1;
     claim_release(&t);
     run_free(&t);
     free(t.buf);

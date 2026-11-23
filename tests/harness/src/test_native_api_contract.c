@@ -4584,6 +4584,15 @@ static bool api_schema_array_bounds(const struct json_value *shape, bool dual)
         api_schema_int_is(also, "max_bytes", 4096);
 }
 
+static bool api_schema_claim_fields(const struct json_value *fields)
+{
+    const struct json_value *story = json_get(fields, "story");
+    const struct json_value *represented = json_get(story, "represented");
+    return fields->num_children == 6 && json_get(fields, "exclusive_owner") && represented &&
+        represented->type == JSON_BOOL && !represented->val.b &&
+        story->num_children == 1 && !json_get(fields, "seq");
+}
+
 static bool api_schema_array_details(bool dual)
 {
     struct json_value input;
@@ -4601,13 +4610,8 @@ static bool api_schema_array_details(bool dual)
     ok = ok && reply.exit_code == ZCL_COMMAND_EXIT_OK && scope &&
         strcmp(scope, "transport") == 0 &&
         api_schema_array_bounds(json_get(fields, dual ? "paths" : "files"), dual);
-    if (ok && !dual) {
-        const struct json_value *story = json_get(fields, "story");
-        const struct json_value *represented = json_get(story, "represented");
-        ok = fields->num_children == 5 && represented &&
-            represented->type == JSON_BOOL && !represented->val.b &&
-            story->num_children == 1 && !json_get(fields, "seq");
-    }
+    if (ok && !dual)
+        ok = api_schema_claim_fields(fields);
     zcl_command_reply_free(&reply);
     json_free(&input);
     return ok;
@@ -4651,7 +4655,7 @@ static bool api_schema_legacy_output(void)
     const char *keys = json_get_str(json_get(&reply.data, "allowed_keys"));
     ok = ok && reply.exit_code == ZCL_COMMAND_EXIT_OK && id && keys &&
         strcmp(id, "zcl.agent_claim.v1") == 0 &&
-        strcmp(keys, "cwd,story,files,release,retire_worktree") == 0 &&
+        strcmp(keys, "cwd,story,files,release,retire_worktree,exclusive_owner") == 0 &&
         reply.data.num_children == 4 && !json_get(&reply.data, "input_transport");
     zcl_command_reply_free(&reply);
     json_free(&input);
