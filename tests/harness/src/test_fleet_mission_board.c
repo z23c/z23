@@ -545,6 +545,89 @@ _test_next:;
     return failures;
 }
 
+static int mbx_landed_time(void)
+{
+    int failures = 0;
+    TEST("mission board: landed age and window use landing time with legacy fallback") {
+        static char outcomes[8192];
+        struct mbx_call c;
+        char old[32], recent[32], two_hours[32];
+        long long now = (long long)platform_time_wall_time_t();
+        outcomes[0] = '\0';
+        ASSERT(mbx_isolate("landed-time", true));
+        mbx_ago(old, 30 * 3600);
+        mbx_ago(recent, 3600);
+        mbx_ago(two_hours, 2 * 3600);
+        ASSERT(now > 30 * 3600);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":1,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"landed\",\"attempt\":1,\"landed_at\":%lld}\n",
+            old, MBX_TIP_A, now - 120);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":2,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"landed\",\"attempt\":1,\"landed_at\":%lld}\n",
+            recent, MBX_TIP_B, now - 30 * 3600);
+        mbx_lrow(outcomes, sizeof(outcomes), 3, MBX_TIP_C, "landed", 3600, "");
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":4,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"landed\",\"attempt\":1,\"landed_at\":0}\n",
+            two_hours, MBX_TIP_B);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":5,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"failed\",\"attempt\":1,\"dimension\":\"failed-recent\",\"landed_at\":%lld}\n",
+            recent, MBX_TIP_A, now - 120);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":6,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"failed\",\"attempt\":1,\"dimension\":\"failed-old\",\"landed_at\":%lld}\n",
+            old, MBX_TIP_C, now - 120);
+        ASSERT(mbx_write("land", "outcomes.jsonl", outcomes));
+        ASSERT(mbx_run(&c, 24, -1) && mbx_ok(&c));
+        ASSERT_EQ(mbx_count(&c, "LANDED"), 3);
+        ASSERT(mbx_has_card(&c, "LANDED", "#1 aaaaaaaa landed 2m"));
+        ASSERT(!mbx_has_card(&c, "LANDED", "#2 bbbbbbbb"));
+        ASSERT(mbx_has_card(&c, "LANDED", "#3 cccccccc landed 1h"));
+        ASSERT(mbx_has_card(&c, "LANDED", "#4 bbbbbbbb landed 2h"));
+        ASSERT_EQ(mbx_count(&c, "FAILED"), 1);
+        ASSERT(mbx_has_card(&c, "FAILED", "#5 aaaaaaaa failed-recent 1h"));
+        ASSERT(!mbx_has_card(&c, "FAILED", "failed-old"));
+        mbx_end(&c);
+        mbx_restore();
+        PASS();
+    } _test_next:;
+    mbx_restore();
+    return failures;
+}
+
+static int mbx_bad_landed_time(void)
+{
+    int failures = 0;
+    TEST("mission board: non-root or non-integer landing times use submission time") {
+        static char outcomes[4096];
+        struct mbx_call c;
+        char ts[32];
+        long long now = (long long)platform_time_wall_time_t();
+        outcomes[0] = '\0';
+        ASSERT(mbx_isolate("bad-landed-time", true));
+        mbx_ago(ts, 3600);
+        ASSERT(now > 120);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":11,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"landed\",\"attempt\":1,\"landed_at\":%lld.5}\n",
+            ts, MBX_TIP_A, now - 120);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":12,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"landed\",\"attempt\":1,\"landed_at\":\"%lld\"}\n",
+            ts, MBX_TIP_B, now - 120);
+        mbx_cat(outcomes, sizeof(outcomes),
+            "{\"seq\":13,\"ts\":\"%s\",\"tip\":\"%s\",\"state\":\"landed\",\"attempt\":1,\"failed_proof_root\":{\"landed_at\":%lld}}\n",
+            ts, MBX_TIP_C, now - 120);
+        ASSERT(mbx_write("land", "outcomes.jsonl", outcomes));
+        ASSERT(mbx_run(&c, 24, -1) && mbx_ok(&c));
+        ASSERT_EQ(mbx_count(&c, "LANDED"), 3);
+        ASSERT(mbx_has_card(&c, "LANDED", "#11 aaaaaaaa landed 1h"));
+        ASSERT(mbx_has_card(&c, "LANDED", "#12 bbbbbbbb landed 1h"));
+        ASSERT(mbx_has_card(&c, "LANDED", "#13 cccccccc landed 1h"));
+        mbx_end(&c);
+        mbx_restore();
+        PASS();
+    } _test_next:;
+    mbx_restore();
+    return failures;
+}
+
 int test_fleet_mission_board(void);
 int test_fleet_mission_board(void)
 {
@@ -552,6 +635,8 @@ int test_fleet_mission_board(void)
     failures += mbx_case_1();
     failures += mbx_case_2();
     failures += mbx_case_3();
+    failures += mbx_landed_time();
+    failures += mbx_bad_landed_time();
     failures += mbx_case_4();
     failures += mbx_case_5();
     failures += mbx_case_6();

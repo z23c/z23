@@ -1473,9 +1473,29 @@ struct dl_view_set {
     size_t n, cap, skipped;
 };
 
-static bool dl_view_push(struct dl_view_set *s, const struct dl_row *r)
+/* Rows already passed the queue codec, including top-level key uniqueness.
+ * Do not promote its legacy substring integer reader into projection time. */
+static bool dl_view_landed_at(const char *line, long long *out)
+{
+    struct json_value doc = {0};
+    *out = 0;
+    /* Embedded nulls can obscure decoded key identity; leave the clock unknown. */
+    if (strstr(line, "\\u0000")) return true;
+    bool ok = json_read(&doc, line, strlen(line)) && doc.type == JSON_OBJ;
+    const struct json_value *field = ok ? json_get(&doc, "landed_at") : NULL;
+    long long value = field && field->type == JSON_INT ? json_get_int(field) : 0;
+    if (value > 0) *out = value;
+    json_free(&doc);
+    return ok;
+}
+
+static bool dl_view_push(struct dl_view_set *s, const struct dl_row *r,
+                         const char *line)
 {
     struct zcl_dl_row_view *v;
+    long long landed_at = 0;
+    if (strcmp(r->state, "landed") == 0 && !dl_view_landed_at(line, &landed_at))
+        return false;
     if (s->n == s->cap) {
         size_t ncap = s->cap ? s->cap * 2 : 32;
         struct zcl_dl_row_view *grow;
@@ -1491,6 +1511,7 @@ static bool dl_view_push(struct dl_view_set *s, const struct dl_row *r)
     v = &s->rows[s->n++];
     memset(v, 0, sizeof(*v));
     v->seq = r->seq;
+    v->landed_at = landed_at;
     (void)snprintf(v->tip12, sizeof(v->tip12), "%.12s", r->tip);
     (void)snprintf(v->state, sizeof(v->state), "%s", r->state);
     (void)snprintf(v->phase, sizeof(v->phase), "%s", r->phase);
@@ -1514,7 +1535,7 @@ static bool dl_view_lines(struct dl_view_set *s, char *text, size_t len)
             if (!dl_parse_row(line, row))
                 s->skipped++;
             else
-                ok = dl_view_push(s, row);
+                ok = dl_view_push(s, row, line);
         }
         line = next;
     }

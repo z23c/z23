@@ -13,6 +13,7 @@
 
 struct zcl_dl_row_view {
     long long seq;
+    long long landed_at; /* Positive root integer for landed rows; 0 unknown. */
     char tip12[13];
     char state[16]; /* queued, inflight, landed, failed, ... */
     char phase[16];

@@ -238,7 +238,7 @@ static void mb_fill_land(struct mb_board *b)
             mb_card_proving(b, &rows[i]);
     }
     for (size_t i = n; i-- > 0;) { /* outcomes, newest first */
-        long long t = mb_ts_unix(rows[i].ts);
+        long long t = rows[i].landed_at > 0 ? rows[i].landed_at : mb_ts_unix(rows[i].ts);
         bool done = strcmp(rows[i].state, "landed") == 0 ||
                     strcmp(rows[i].state, "failed") == 0;
         if (done && mb_in_window(b, t))
