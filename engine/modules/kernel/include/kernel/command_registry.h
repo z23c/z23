@@ -39,6 +39,9 @@ extern "C" {
 /* Complete, unpaged catalogs whose bounded row count legitimately exceeds the
  * ordinary list ceiling. Prefer ZCL_COMMAND_LIST_BUDGET for paged lists. */
 #define ZCL_COMMAND_EXTENDED_LIST_BUDGET 16384U
+/* The registry ceiling (see command_registry_validate.c): a list whose rows are
+ * whole signed posts, so a page of dozens still fits one reply. */
+#define ZCL_COMMAND_LARGE_LIST_BUDGET 65536U
 #define ZCL_COMMAND_SEARCH_LIMIT 5U
 #define ZCL_COMMAND_MAX_NEXT 3U
 #define ZCL_COMMAND_MAX_PATH 128U

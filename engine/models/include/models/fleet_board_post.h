@@ -127,6 +127,22 @@ struct fleet_board_filter {
     bool before_set;
     int64_t before_created_at;
     uint8_t before_id[32];
+    /* Replies to one post: ref equality. */
+    bool ref_set;
+    uint8_t ref[32];
+    /* Exclusions, applied in the query before the page limit. A zero/empty
+     * field excludes nothing; exclude_room matches the room a post READS as. */
+    uint8_t exclude_kind;
+    char exclude_agent[FLEET_BOARD_AGENT_MAX + 1];
+    char exclude_room[FLEET_BOARD_ROOM_MAX + 1];
+    /* Oldest-first forward walk: rows whose local arrival number is strictly
+     * above after_arrival, ascending. Arrival is assigned once at ingest and
+     * never rewritten, so a late-replicated post with an old created_at still
+     * lands after the reader's mark. */
+    bool after_set;
+    int64_t after_arrival;
+    /* Snapshot bound: arrival <= max_arrival (0 = none). */
+    int64_t max_arrival;
 };
 
 struct fleet_board_status {
@@ -274,6 +290,11 @@ int db_fleet_board_list_page(struct node_db *ndb,
                             const struct fleet_board_filter *filter,
                             int64_t now, struct db_fleet_board_post *out,
                             size_t max, bool *complete, bool *has_more);
+
+/* The highest local arrival number stored (0 when the board is empty); false
+ * when the read failed. A reader that records it before a page and later asks
+ * for rows `after` it misses nothing: arrival is assigned once and only grows. */
+bool db_fleet_board_head_arrival(struct node_db *ndb, int64_t *head_out);
 
 /* The listing for a caller that has no use for the difference. */
 static inline int db_fleet_board_list(

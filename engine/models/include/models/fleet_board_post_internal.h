@@ -40,6 +40,10 @@ void fleet_board_where_discoverable(struct qb *q, int64_t now);
 void board_apply_filter(struct qb *q, const struct fleet_board_filter *filter,
                         int64_t now, struct qb *sub_storage);
 
+/* The reply-thread, exclusion and arrival-cursor predicates of that filter
+ * (fleet_board_post_scan.c); board_apply_filter calls it. */
+void board_apply_filter_more(struct qb *q, const struct fleet_board_filter *filter);
+
 /* Which per-key leg is spent. The window leg clears by itself; the stored
  * leg does not. */
 enum board_quota {

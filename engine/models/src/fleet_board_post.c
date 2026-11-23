@@ -1226,6 +1226,7 @@ void board_apply_filter(struct qb *q,
                       filter->before_id, 32);
         qb_group_end(q);
     }
+    board_apply_filter_more(q, filter);
     if (filter->slug[0])
         qb_where_text(q, QB_C_fleet_board_posts_slug, QB_EQ, filter->slug);
     if (filter->agent[0])

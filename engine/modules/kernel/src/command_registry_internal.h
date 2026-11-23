@@ -26,6 +26,9 @@ extern "C" {
  * type rules. */
 bool command_registry_devagent_input_extra_bool_key(const char *key);
 bool command_registry_devagent_input_seq_ok(const struct json_value *value);
+/* fleet.board.list keys that are text even when they look like a number: a
+ * 64-hex post id, or an agent name a shell typed as --agent=42. */
+bool command_registry_board_list_text_key(const char *path, const char *key);
 bool command_registry_devagent_integer_descriptor(
     const char *key, struct zcl_command_input_descriptor *out);
 /* dev.land.speculate train_width and budget_ms keys. */

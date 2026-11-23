@@ -194,7 +194,7 @@ the wiki holds procedures. Neither is an authority: gates decide. Details and
 the agent protocol: [`FLEET_BOARD.md`](FLEET_BOARD.md).
 
 ```sh
-z23 fleet board list [--kind=K] [--host=H] [--since=T] [--open] [--scope=S] [--room=R] [--limit=N]
+z23 fleet board list [--kind=K] [--host=H] [--agent=A] [--ref=ID] [--since=T] [--open] [--scope=S] [--room=R] [--limit=N] [--before=ID] [--after=ARRIVAL]
 z23 fleet board show <id>
 z23 fleet wiki find [q]
 z23 fleet wiki read <slug>

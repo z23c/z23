@@ -17207,6 +17207,481 @@ static int test_fleet_board_head_row_publish(void)
     return failures;
 }
 
+/* ── board list paging: limit, cursors, filters before the limit ─────────── */
+
+enum { FLP_MAX_IDS = 512 };
+
+struct flp_world {
+    struct fb_rpc_fixture f;
+    int64_t base;
+    char target[65];
+    int next_late;
+};
+
+struct flp_q {
+    const char *scope, *room, *kind, *agent, *ref, *ex_agent, *ex_kind;
+    const char *ex_room, *before;
+    int64_t limit, after, before_created_at;
+    const char *before_id;
+};
+
+static bool flp_put(struct flp_world *w, uint8_t who, uint8_t scope, uint8_t kind,
+                    const char *agent, const char *room, const uint8_t *ref,
+                    uint64_t created_at, char id_out[65])
+{
+    uint8_t seed[32], pk[32];
+    struct fleet_board_post post;
+    char text[64];
+    (void)snprintf(text, sizeof(text), "post %s at %llu", agent,
+                   (unsigned long long)created_at);
+    fb_test_identity(who, seed, pk);
+    fb_test_compose(&post, kind, agent, text, created_at, 3600);
+    fb_test_scope(&post, scope, scope == FLEET_BOARD_SCOPE_PUBLIC ? room : "");
+    if (ref) memcpy(post.ref, ref, 32);
+    bool ok = fleet_board_post_sign(&post, seed, pk) == FLEET_BOARD_OK &&
+              db_fleet_board_post_ingest(&w->f.db, &post,
+                  (int64_t)platform_time_wall_time_t(), NULL) == FLEET_BOARD_OK;
+    if (ok && id_out) fleet_board_id_to_hex(post.id, id_out);
+    return ok;
+}
+
+/* 6 fleet notes by gamma (oldest), 70 public posts in general (agents alpha
+ * and beta, every fifth a problem, six replies to the first), and 10 vitals
+ * posts that are the newest of all: 86 stored, 76 outside the vitals room. */
+static bool flp_seed(struct flp_world *w)
+{
+    uint8_t target[32] = {0};
+    w->base = (int64_t)platform_time_wall_time_t() - 900;
+    for (int i = 0; i < 6; i++)
+        if (!flp_put(w, 1, FLEET_BOARD_SCOPE_FLEET, FLEET_BOARD_KIND_NOTE, "gamma",
+                     "", NULL, (uint64_t)(w->base + i), NULL)) return false;
+    for (int i = 0; i < 70; i++) {
+        bool reply = i > 0 && i % 10 == 0;
+        uint8_t kind = i % 5 == 0 ? FLEET_BOARD_KIND_PROBLEM : FLEET_BOARD_KIND_NOTE;
+        char id[65];
+        if (!flp_put(w, (uint8_t)(2 + i % 3), FLEET_BOARD_SCOPE_PUBLIC, kind,
+                     i % 3 == 0 ? "alpha" : "beta", "general",
+                     reply ? target : NULL, (uint64_t)(w->base + 100 + i), id))
+            return false;
+        if (i == 0) {
+            (void)snprintf(w->target, sizeof(w->target), "%s", id);
+            if (!fleet_board_id_from_hex(id, target)) return false;
+        }
+    }
+    for (int i = 0; i < 10; i++)
+        if (!flp_put(w, 6, FLEET_BOARD_SCOPE_PUBLIC, FLEET_BOARD_KIND_NOTE,
+                     "vitals-r1", "vitals", NULL, (uint64_t)(w->base + 300 + i), NULL))
+            return false;
+    return true;
+}
+
+static bool flp_list(struct flp_world *w, const struct flp_q *q, struct json_value *out)
+{
+    const struct { const char *key, *value; } strs[] = {
+        {"scope", q->scope}, {"room", q->room}, {"kind", q->kind},
+        {"agent", q->agent}, {"ref", q->ref}, {"exclude_agent", q->ex_agent},
+        {"exclude_kind", q->ex_kind}, {"exclude_room", q->ex_room},
+        {"before", q->before}, {"before_id", q->before_id},
+    };
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "op", "list") &&
+              json_push_kv_int(&in, "limit", q->limit ? q->limit : 50) &&
+              (q->after <= 0 || json_push_kv_int(&in, "after", q->after)) &&
+              (!q->before_id || json_push_kv_int(&in, "before_created_at", q->before_created_at));
+    for (size_t i = 0; ok && i < sizeof(strs) / sizeof(strs[0]); i++)
+        if (strs[i].value)
+            ok = json_push_kv_str(&in, strs[i].key, strs[i].value);
+    ok = ok && fb_rpc_call(&w->f, &in, out);
+    json_free(&in);
+    return ok && json_get_bool(json_get(out, "ok"));
+}
+
+static size_t flp_count(struct flp_world *w, const struct flp_q *q)
+{
+    struct json_value out;
+    json_init(&out);
+    size_t n = flp_list(w, q, &out) ? json_size(json_get(&out, "posts")) : (size_t)-1;
+    json_free(&out);
+    return n;
+}
+
+/* Every returned post satisfies `keep`; false on an empty or failed page. */
+static bool flp_all(struct flp_world *w, const struct flp_q *q, const char *field,
+                    const char *want, bool equal, size_t expect)
+{
+    struct json_value out;
+    json_init(&out);
+    bool ok = flp_list(w, q, &out);
+    const struct json_value *posts = json_get(&out, "posts");
+    ok = ok && json_size(posts) == expect;
+    for (size_t i = 0; ok && i < json_size(posts); i++) {
+        const char *got = json_get_str(json_get(json_at(posts, i), field));
+        ok = got && (!strcmp(got, want) == equal);
+    }
+    json_free(&out);
+    return ok;
+}
+
+static bool flp_limit_honoured(struct flp_world *w)
+{
+    struct json_value out;
+    json_init(&out);
+    bool ok = flp_list(w, &(struct flp_q){.limit = 60}, &out) &&
+              json_size(json_get(&out, "posts")) == 60 &&
+              json_get_int(json_get(&out, "limit")) == 60 &&
+              json_get_int(json_get(&out, "limit_applied")) == 60 &&
+              json_get_bool(json_get(&out, "has_more")) &&
+              !strcmp(json_get_str(json_get(&out, "stopped_by")), "limit") &&
+              json_get(&out, "next_id") != NULL;
+    json_free(&out);
+    json_init(&out);
+    ok = ok && flp_list(w, &(struct flp_q){.limit = 5000}, &out) &&
+         json_size(json_get(&out, "posts")) == 76 &&
+         json_get_int(json_get(&out, "limit")) == 5000 &&
+         json_get_int(json_get(&out, "limit_applied")) == FLEET_BOARD_LIST_MAX &&
+         json_get_int(json_get(&out, "limit_max")) == FLEET_BOARD_LIST_MAX &&
+         !json_get_bool(json_get(&out, "has_more")) &&
+         !strcmp(json_get_str(json_get(&out, "stopped_by")), "end");
+    json_free(&out);
+    return ok;
+}
+
+static bool flp_filters(struct flp_world *w)
+{
+    /* The gamma rows are the oldest on the board: a filter applied after the
+     * limit would find none of them in the newest three rows. */
+    bool ok = flp_all(w, &(struct flp_q){.agent = "gamma", .limit = 3}, "agent", "gamma", true, 3) &&
+              flp_all(w, &(struct flp_q){.kind = "problem", .limit = 5}, "kind", "problem", true, 5) &&
+              flp_all(w, &(struct flp_q){.ex_agent = "alpha", .limit = 40}, "agent", "alpha", false, 40) &&
+              flp_all(w, &(struct flp_q){.ex_kind = "note", .limit = 40}, "kind", "note", false, 14) &&
+              flp_all(w, &(struct flp_q){.ref = w->target, .limit = 2}, "ref", w->target, true, 2) &&
+              flp_all(w, &(struct flp_q){.room = "vitals", .limit = 50}, "agent", "vitals-r1", true, 10);
+    return ok && flp_count(w, &(struct flp_q){.ref = w->target, .limit = 50}) == 6 &&
+           flp_count(w, &(struct flp_q){.agent = "gamma", .ex_agent = "gamma"}) == 0;
+}
+
+static bool flp_vitals_default(struct flp_world *w)
+{
+    return flp_count(w, &(struct flp_q){.limit = 200}) == 76 &&
+           flp_count(w, &(struct flp_q){.limit = 200, .ex_room = "none"}) == 86 &&
+           flp_count(w, &(struct flp_q){.limit = 200, .ex_room = "general"}) == 16 &&
+           flp_count(w, &(struct flp_q){.limit = 200, .scope = "all"}) == 76;
+}
+
+static bool flp_scope_unchanged(struct flp_world *w)
+{
+    return flp_all(w, &(struct flp_q){.scope = "fleet", .limit = 200}, "scope", "fleet", true, 6) &&
+           flp_all(w, &(struct flp_q){.scope = "public", .limit = 200}, "scope", "fleet", false, 70) &&
+           flp_count(w, &(struct flp_q){.scope = "fleet", .agent = "alpha"}) == 0 &&
+           flp_count(w, &(struct flp_q){.scope = "legacy", .limit = 200}) == 0;
+}
+
+static bool flp_seen(char (*ids)[65], size_t n, const char *id)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!strcmp(ids[i], id)) return true;
+    return false;
+}
+
+/* Walk the whole board newest first, 7 rows a page, and put a new post and a
+ * late-replicated (old created_at) post on the board between pages. */
+static bool flp_walk_back(struct flp_world *w, char (*ids)[65], size_t *total)
+{
+    char token[65] = "";
+    *total = 0;
+    for (int page = 0; page < 40; page++) {
+        struct json_value out;
+        json_init(&out);
+        bool ok = flp_list(w, &(struct flp_q){.limit = 7, .before = token[0] ? token : NULL}, &out);
+        const struct json_value *posts = json_get(&out, "posts");
+        for (size_t i = 0; ok && i < json_size(posts); i++) {
+            const char *id = json_get_str(json_get(json_at(posts, i), "id"));
+            if (!id || *total >= FLP_MAX_IDS || flp_seen(ids, *total, id)) ok = false;
+            else (void)snprintf(ids[(*total)++], 65, "%s", id);
+        }
+        bool more = ok && json_get_bool(json_get(&out, "has_more"));
+        if (more) (void)snprintf(token, sizeof(token), "%s", json_get_str(json_get(&out, "next_before")));
+        json_free(&out);
+        if (!ok) return false;
+        if (page == 2 && (!flp_put(w, 7, FLEET_BOARD_SCOPE_PUBLIC, FLEET_BOARD_KIND_NOTE, "newest", "general", NULL, (uint64_t)(w->base + 500), NULL) ||
+                          !flp_put(w, 7, FLEET_BOARD_SCOPE_PUBLIC, FLEET_BOARD_KIND_NOTE, "late", "general", NULL, (uint64_t)(w->base + 101) , NULL)))
+            return false;
+        if (!more) return true;
+    }
+    return false;
+}
+
+static bool flp_cursor_walk(struct flp_world *w)
+{
+    static char ids[FLP_MAX_IDS][65];
+    size_t total = 0;
+    if (!flp_walk_back(w, ids, &total)) return false;
+    /* All 76 original rows exactly once (the helper refuses a duplicate); the
+     * post that arrived behind the cursor may or may not be reached by the
+     * backward walk, and the newer one is not, which is what `after` is for. */
+    struct json_value out;
+    json_init(&out);
+    bool ok = total == 77 &&
+              flp_list(w, &(struct flp_q){.limit = 200, .ex_room = "none"}, &out);
+    const struct json_value *posts = json_get(&out, "posts");
+    size_t original = 0;
+    for (size_t i = 0; ok && i < json_size(posts); i++) {
+        const char *agent = json_get_str(json_get(json_at(posts, i), "agent"));
+        if (!strcmp(agent, "newest") || !strcmp(agent, "late") || !strcmp(agent, "vitals-r1")) continue;
+        original++;
+        ok = flp_seen(ids, total, json_get_str(json_get(json_at(posts, i), "id")));
+    }
+    json_free(&out);
+    return ok && original == 76;
+}
+
+static bool flp_pair_equals_id(struct flp_world *w)
+{
+    struct json_value a, b;
+    json_init(&a); json_init(&b);
+    bool ok = flp_list(w, &(struct flp_q){.limit = 4}, &a);
+    const char *id = json_get_str(json_get(&a, "next_id"));
+    int64_t when = json_get_int(json_get(&a, "next_created_at"));
+    ok = ok && id && flp_list(w, &(struct flp_q){.limit = 9, .before = id}, &b);
+    struct json_value c;
+    json_init(&c);
+    ok = ok && flp_list(w, &(struct flp_q){.limit = 9, .before_id = id, .before_created_at = when}, &c);
+    ok = ok && json_size(json_get(&b, "posts")) == 9 &&
+         json_size(json_get(&c, "posts")) == 9;
+    for (size_t i = 0; ok && i < 9; i++)
+        ok = !strcmp(json_get_str(json_get(json_at(json_get(&b, "posts"), i), "id")),
+                     json_get_str(json_get(json_at(json_get(&c, "posts"), i), "id")));
+    json_free(&a); json_free(&b); json_free(&c);
+    return ok;
+}
+
+static bool flp_after_page(struct flp_world *w, int64_t after, int64_t limit,
+                           struct json_value *out)
+{
+    struct json_value in;
+    json_init(&in);
+    json_set_object(&in);
+    bool ok = json_push_kv_str(&in, "op", "list") &&
+              json_push_kv_int(&in, "limit", limit) &&
+              json_push_kv_int(&in, "after", after) &&
+              fb_rpc_call(&w->f, &in, out);
+    json_free(&in);
+    return ok && json_get_bool(json_get(out, "ok"));
+}
+
+/* Read forward from `mark` four rows a page until the walk ends; every row
+ * must be the next one inserted, in arrival order. *mark ends at the last
+ * arrival read and *got counts the rows. */
+static bool flp_forward_read(struct flp_world *w, int64_t *mark, char (*want)[65],
+                             size_t *got)
+{
+    for (int page = 0; page < 6; page++) {
+        struct json_value out;
+        json_init(&out);
+        bool ok = flp_after_page(w, *mark, 4, &out) &&
+                  !strcmp(json_get_str(json_get(&out, "order")), "oldest_first");
+        const struct json_value *posts = json_get(&out, "posts");
+        for (size_t i = 0; ok && i < json_size(posts); i++) {
+            const struct json_value *row = json_at(posts, i);
+            ok = *got < 10 && !strcmp(json_get_str(json_get(row, "id")), want[*got]) &&
+                 json_get_int(json_get(row, "arrival")) > *mark;
+            *mark = json_get_int(json_get(row, "arrival"));
+            (*got)++;
+        }
+        bool more = json_get_bool(json_get(&out, "has_more"));
+        ok = ok && json_get_int(json_get(&out, "next_after")) == *mark;
+        json_free(&out);
+        if (!ok) return false;
+        if (!more) return true;
+    }
+    return false;
+}
+
+/* Mark the head, add 10 posts (one with an old created_at), then read exactly
+ * those 10 forward, 4 at a time: in arrival order, once each, no gap. */
+static bool flp_forward_walk(struct flp_world *w)
+{
+    struct json_value out;
+    json_init(&out);
+    bool ok = flp_list(w, &(struct flp_q){.limit = 1}, &out);
+    int64_t mark = json_get_int(json_get(&out, "head_arrival"));
+    json_free(&out);
+    char want[10][65];
+    for (int i = 0; ok && i < 10; i++)
+        ok = flp_put(w, (uint8_t)(2 + i % 3), FLEET_BOARD_SCOPE_PUBLIC, FLEET_BOARD_KIND_NOTE,
+                     "fresh", "general", NULL,
+                     (uint64_t)(i == 4 ? w->base + 7 : w->base + 600 + i), want[i]);
+    size_t got = 0;
+    ok = ok && flp_forward_read(w, &mark, want, &got) && got == 10;
+    json_init(&out);
+    ok = ok && flp_after_page(w, mark, 4, &out) &&
+         json_size(json_get(&out, "posts")) == 0 &&
+         json_get_int(json_get(&out, "next_after")) == mark &&
+         !json_get_bool(json_get(&out, "has_more"));
+    json_free(&out);
+    return ok;
+}
+
+static bool flp_bad_cursors(struct flp_world *w)
+{
+    static const char *const zeros =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    struct json_value in, out;
+    bool ok = true;
+    for (int i = 0; ok && i < 3; i++) {
+        json_init(&in); json_set_object(&in); json_init(&out);
+        ok = json_push_kv_str(&in, "op", "list") &&
+             (i == 0 ? json_push_kv_str(&in, "before", zeros) :
+              i == 1 ? json_push_kv_int(&in, "after", -1) :
+                       (json_push_kv_int(&in, "after", 1) &&
+                        json_push_kv_str(&in, "before", w->target))) &&
+             fb_rpc_call(&w->f, &in, &out) &&
+             !strcmp(json_get_str(json_get(&out, "code")), "BAD_CURSOR");
+        json_free(&in); json_free(&out);
+    }
+    return ok;
+}
+
+static bool flp_budget_fields_ok(const struct json_value *d, size_t kept)
+{
+    return kept > 0 && kept < 40 &&
+           json_get_int(json_get(d, "returned")) == (int64_t)kept &&
+           json_get_int(json_get(d, "limit")) == 40 &&
+           json_get_int(json_get(d, "node_returned")) == 40 &&
+           json_get_bool(json_get(d, "has_more")) &&
+           json_get_bool(json_get(d, "truncated_by_budget")) &&
+           !strcmp(json_get_str(json_get(d, "stopped_by")), "byte_budget") &&
+           json_get_int(json_get(d, "byte_budget")) == 4096 &&
+           json_get_str(json_get(d, "notice")) != NULL;
+}
+
+static bool flp_budget_cursor_ok(const struct json_value *d,
+                                 const struct json_value *last, bool forward)
+{
+    if (forward)
+        return json_get_int(json_get(d, "next_after")) ==
+               json_get_int(json_get(last, "arrival"));
+    return !strcmp(json_get_str(json_get(d, "next_id")), json_get_str(json_get(last, "id"))) &&
+           !strcmp(json_get_str(json_get(d, "next_before")), json_get_str(json_get(last, "id")));
+}
+
+/* The page the byte budget cut: counts, marker and cursor all say so, and
+ * every line carries the whole post id. */
+static bool flp_budget_cut_ok(const struct zcl_command_reply *reply, bool forward)
+{
+    const struct json_value *d = &reply->data;
+    const struct json_value *posts = json_get(d, "posts");
+    const struct json_value *lines = json_get(d, "lines");
+    size_t kept = json_size(posts);
+    if (!flp_budget_fields_ok(d, kept) ||
+        !flp_budget_cursor_ok(d, json_at(posts, kept - 1), forward))
+        return false;
+    for (size_t i = 0; i < kept; i++)
+        if (!strstr(json_get_str(json_at(lines, i)),
+                    json_get_str(json_get(json_at(posts, i), "id"))))
+            return false;
+    return true;
+}
+
+/* The command layer: a byte budget that cuts the page says so. */
+static bool flp_budget_marker(struct flp_world *w, bool forward)
+{
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), "fleet.board.list", NULL);
+    struct json_value out;
+    json_init(&out);
+    bool ok = spec && (forward ? flp_after_page(w, 0, 40, &out)
+                               : flp_list(w, &(struct flp_q){.limit = 40}, &out));
+    struct zcl_command_request req = {.spec = spec, .budget_bytes = 4096};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+    if (ok) zcl_native_fleet_board_project_list(&req, &out, &reply);
+    ok = ok && flp_budget_cut_ok(&reply, forward);
+    zcl_command_reply_free(&reply);
+    /* The leaf's own budget holds the whole 40-row page: stopped by the limit. */
+    zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+    req.budget_bytes = 0;
+    if (ok) zcl_native_fleet_board_project_list(&req, &out, &reply);
+    ok = ok && json_size(json_get(&reply.data, "posts")) == 40 &&
+         !json_get_bool(json_get(&reply.data, "truncated_by_budget")) &&
+         !strcmp(json_get_str(json_get(&reply.data, "stopped_by")), "limit");
+    zcl_command_reply_free(&reply);
+    json_free(&out);
+    return ok;
+}
+
+static int test_fleet_board_list_paging(void)
+{
+    int failures = 0;
+    TEST("fleet board list: limit is honoured to the documented maximum and says why it stopped") {
+        struct flp_world w;
+        memset(&w, 0, sizeof(w));
+        ASSERT(fb_rpc_fixture_open(&w.f, "list-limit"));
+        ASSERT(flp_seed(&w));
+        ASSERT(flp_limit_honoured(&w));
+        fb_rpc_fixture_close(&w.f);
+        ASSERT(test_rm_rf_recursive(w.f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_list_filters(void)
+{
+    int failures = 0;
+    TEST("fleet board list: filters apply before the limit and vitals stay out of a bare listing") {
+        struct flp_world w;
+        memset(&w, 0, sizeof(w));
+        ASSERT(fb_rpc_fixture_open(&w.f, "list-filters"));
+        ASSERT(flp_seed(&w));
+        ASSERT(flp_filters(&w));
+        ASSERT(flp_vitals_default(&w));
+        ASSERT(flp_scope_unchanged(&w));
+        fb_rpc_fixture_close(&w.f);
+        ASSERT(test_rm_rf_recursive(w.f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_list_cursors(void)
+{
+    int failures = 0;
+    TEST("fleet board list: cursors walk both ways without duplicates or gaps under inserts") {
+        struct flp_world w;
+        memset(&w, 0, sizeof(w));
+        ASSERT(fb_rpc_fixture_open(&w.f, "list-cursors"));
+        ASSERT(flp_seed(&w));
+        ASSERT(flp_pair_equals_id(&w));
+        ASSERT(flp_cursor_walk(&w));
+        ASSERT(flp_forward_walk(&w));
+        ASSERT(flp_bad_cursors(&w));
+        fb_rpc_fixture_close(&w.f);
+        ASSERT(test_rm_rf_recursive(w.f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_list_budget(void)
+{
+    int failures = 0;
+    TEST("fleet board list: a byte budget that cuts the page is stated with a cursor") {
+        struct flp_world w;
+        memset(&w, 0, sizeof(w));
+        ASSERT(fb_rpc_fixture_open(&w.f, "list-budget"));
+        ASSERT(flp_seed(&w));
+        ASSERT(flp_budget_marker(&w, false));
+        ASSERT(flp_budget_marker(&w, true));
+        fb_rpc_fixture_close(&w.f);
+        ASSERT(test_rm_rf_recursive(w.f.dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -17238,6 +17713,10 @@ int test_fleet_board(void)
     failures += test_fleet_board_identity_consent();
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
+    failures += test_fleet_board_list_paging();
+    failures += test_fleet_board_list_filters();
+    failures += test_fleet_board_list_cursors();
+    failures += test_fleet_board_list_budget();
     failures += test_fleet_board_rpc_scope_default();
     failures += test_fleet_board_rpc_show_projection();
     failures += test_fleet_board_rpc_incomplete_list();

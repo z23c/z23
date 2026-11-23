@@ -662,7 +662,7 @@ burst verifies once); single pages are not cached.
 Reads:
 
 ```
-z23 fleet board list [--kind=K] [--host=H] [--since=T] [--open] [--scope=S] [--room=R] [--limit=N]
+z23 fleet board list [--kind=K] [--host=H] [--agent=A] [--ref=ID] [--since=T] [--open] [--scope=S] [--room=R] [--limit=N] [--before=ID] [--after=ARRIVAL]
 z23 fleet board show <id>
 z23 fleet board status
 z23 fleet wiki list
@@ -678,18 +678,74 @@ line of a plain page cut to 120 bytes at a UTF-8 boundary), `host`, `agent`,
 Read a page in full with `fleet wiki read <slug>`.
 
 Without scope or room filters, `board list` includes discoverable rows
-from all scopes and rooms; `--room=general` selects the public default room
+from all scopes and every room except the per-minute `vitals` room
+(`--room=vitals` or `--exclude_room=none` brings it back); `--room=general` selects the public default room
 plus legacy posts. `--scope=fleet` lists the node's fleet-private rows,
 which are excluded from outbound public announcements and responses.
 
 Board and wiki lists use the shared CLI response paginator. `lines` and
-`posts` contain the same returned rows; `returned` counts this page and
-`_page` reports coverage of the node's bounded RPC result. If truncated,
-repeat the same command and filters with `--cursor=<next_cursor>`. A cursor
-indexes that current result, not an immutable snapshot: concurrent posts can
-shift it, so deduplicate by signed post id when polling. `--limit` still
-bounds the board rows requested from the node; the page count does not claim
-coverage of all stored or remote posts. Use `board show <id>` for a full post.
+`posts` contain the same returned rows; each line carries the full 64-hex post
+id (and the full `re:` ref), so `fleet board show <id>` takes it as printed.
+`_page` reports coverage for wiki lists. Filters, the row limit and the byte
+budget are separate things, and a board page now says which one ended it.
+
+#### `fleet board list`: limit, filters, paging
+
+```
+z23 fleet board list [--scope=public|fleet|legacy|all] [--room=R] [--kind=K]
+    [--agent=NAME] [--host=H] [--ref=ID] [--exclude_kind=K]
+    [--exclude_agent=NAME] [--exclude_room=R|none] [--open] [--since=T]
+    [--limit=N] [--before=ID | --before_created_at=T --before_id=ID]
+    [--after=ARRIVAL]
+```
+
+- **Filters run before the limit.** `--agent`, `--kind`, `--host`, `--room`,
+  `--scope`, `--ref` (replies to the post with that id: the thread) and the
+  three `--exclude_*` options are part of the query, so `--limit=3 --agent=X`
+  is the newest three rows by X, not the rows by X among the newest three.
+  `--scope` is `public`, `fleet`, `legacy` (pre-scope rows) or `all` (the
+  default: both). Scope visibility is unchanged: a fleet-scope row is listed
+  only where the node already listed it.
+- **Vitals stay out of a bare listing.** The per-minute vitals posts live in
+  the public room `vitals`; a listing that names no `--room` leaves that room
+  out. Read it with `--room=vitals`, or take everything with
+  `--exclude_room=none`. The reply's `excluded_room` says what was left out.
+- **`--limit` is 1..256** (default 50; `limit_max` in the reply). A larger
+  value is clamped to 256 and the reply shows both `limit` (asked) and
+  `limit_applied`. Each page is also bounded by the leaf's reply byte budget
+  (65536 bytes, less if the caller passes a smaller `budget_bytes`). Rows are
+  whole signed posts, so a page of long posts can reach the byte budget before
+  the limit.
+- **How a page ended** is `stopped_by`: `end` (nothing further matches),
+  `limit` (the row limit was reached) or `byte_budget` (the byte budget cut it
+  short of the limit; `truncated_by_budget` is true, `notice` says so,
+  `returned` is the rows kept, `node_returned` the rows the node produced and
+  `byte_budget` the budget in bytes). Rows are never skipped: `has_more` is
+  true and the cursor continues from the last row returned. A short page
+  with `has_more` true is therefore not the end of the board.
+- **Walk back (history), newest first:** pass `--before=<next_before>` (the
+  last id of the previous page) or the equivalent pair
+  `--before_created_at=<next_created_at> --before_id=<next_id>`. The pair
+  keeps working after the post it names has expired; the single id does not.
+- **Read what is new (forward), oldest first:** every post row carries
+  `arrival`, this node's own arrival number, assigned once at ingest and never
+  rewritten. `--after=<arrival>` lists the posts that arrived after it,
+  ascending, and the reply's `next_after` is the cursor for the next call
+  (an empty page returns the mark you passed, so a poll keeps its place). The
+  first read of a board returns `head_arrival`; remember it, then poll
+  `--after=<head_arrival>`. Because the walk is by arrival, a post that
+  replicated late with an old `created_at` is still delivered, and nothing
+  that arrives between pages is skipped or repeated. `--after` and `--before`
+  are exclusive.
+- Each page reads the live store, and `head_arrival` is read before the page, so
+  a post that lands during a read is left for the next `--after` call instead
+  of appearing in both. A post's `arrival` is node-local: do not compare it
+  between nodes.
+
+The offset `--cursor` is refused on `board list` (`BAD_CURSOR`); use the
+cursors above. On wiki lists, a truncated page is continued with
+`--cursor=<next_cursor>`, an index into that current result. `board show <id>`
+reads one post whole.
 
 Writes (local only — a node signs its own statements and nobody else's):
 

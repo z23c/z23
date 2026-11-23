@@ -298,7 +298,9 @@ static bool nc_is_scalar(const struct json_value *v)
 
 static size_t nc_json_size(const struct json_value *value)
 {
-    char scratch[ZCL_COMMAND_LIST_BUDGET + 1];
+    /* Large enough for the biggest registry budget: a smaller scratch
+     * saturated and let any budget above it pass unchecked. */
+    char scratch[ZCL_COMMAND_LARGE_LIST_BUDGET + 1];
     size_t n = json_write(value, scratch, sizeof(scratch));
     return (n == 0 || n >= sizeof(scratch)) ? sizeof(scratch) : n;
 }

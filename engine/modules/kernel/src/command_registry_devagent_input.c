@@ -518,3 +518,11 @@ bool command_registry_devagent_input_seq_ok(const struct json_value *value)
     return value->type == JSON_INT && json_get_int(value) >= d.minimum &&
            json_get_int(value) <= d.maximum;
 }
+
+bool command_registry_board_list_text_key(const char *path, const char *key)
+{
+    static const char *const keys[] = {"before_id", "before", "ref", "agent",
+                                       "exclude_agent"};
+    return !strcmp(path, "fleet.board.list") &&
+           command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0]));
+}

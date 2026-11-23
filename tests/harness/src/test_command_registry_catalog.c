@@ -4416,6 +4416,9 @@ static int test_board_list_budget_pages(void)
 {
     int failures = 0;
     TEST("board list: large messages page with paired lines and intact posts") {
+        /* Enough 1800-byte posts that the 64 KiB list budget, not the row limit,
+         * must cut the first page (48 x ~3.7 KiB with their paired lines). */
+        const size_t total = 48;
         const struct zcl_command_spec *spec =
             find_spec(zcl_command_catalog(), "fleet.board.list");
         ASSERT(spec != NULL);
@@ -4428,17 +4431,17 @@ static int test_board_list_budget_pages(void)
         size_t seen = 0;
         char previous_id[65] = "";
         int64_t previous_time = 0;
-        for (size_t attempt = 0; attempt < 8 && seen < 8; attempt++) {
+        for (size_t attempt = 0; attempt < total && seen < total; attempt++) {
             struct json_value page_posts, input;
             json_init(&page_posts); json_set_array(&page_posts);
             json_init(&input); json_set_object(&input);
-            for (size_t i = seen; i < 8; i++) {
+            for (size_t i = seen; i < total; i++) {
                 struct json_value post;
                 char id[65];
                 json_init(&post); json_set_object(&post);
                 (void)snprintf(id, sizeof(id), "%064zu", i);
                 ASSERT(json_push_kv_int(&post, "seq", (int64_t)i));
-                ASSERT(json_push_kv_int(&post, "created_at", (int64_t)(8 - i)));
+                ASSERT(json_push_kv_int(&post, "created_at", (int64_t)(total - i)));
                 ASSERT(json_push_kv_str(&post, "id", id));
                 ASSERT(json_push_kv_str(&post, "text", text));
                 ASSERT(json_push_kv_str(&post, "signature", "fixture-signature"));
@@ -4452,7 +4455,7 @@ static int test_board_list_budget_pages(void)
                 ASSERT(json_push_kv_int(&input, "before_created_at", previous_time));
                 ASSERT(json_push_kv_str(&input, "before_id", previous_id));
             }
-            char encoded[ZCL_COMMAND_LIST_BUDGET + 1];
+            char encoded[ZCL_COMMAND_LARGE_LIST_BUDGET + 1];
             struct zcl_command_request req = {
                 .spec = spec, .view = "normal", .input = &input,
             };
@@ -4463,7 +4466,7 @@ static int test_board_list_budget_pages(void)
             ASSERT(n > 0 && n < (size_t)spec->budget_bytes - 512);
             const struct json_value *rows = json_get(&reply.data, "posts");
             size_t count = json_size(rows);
-            ASSERT(count > 0 && count < 8);
+            ASSERT(count > 0 && count < total);
             ASSERT_EQ(json_size(json_get(&reply.data, "lines")), count);
             ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), (int64_t)count);
             for (size_t i = 0; i < count; i++) {
@@ -4473,18 +4476,18 @@ static int test_board_list_budget_pages(void)
                 ASSERT_STR_EQ(json_get_str(json_get(row, "signature")), "fixture-signature");
             }
             seen += count;
-            ASSERT_EQ(json_get_bool(json_get(&reply.data, "has_more")), seen < 8);
-            if (seen < 8) {
+            ASSERT_EQ(json_get_bool(json_get(&reply.data, "has_more")), seen < total);
+            if (seen < total) {
                 previous_time = json_get_int(json_get(&reply.data, "next_created_at"));
                 const char *next_id = json_get_str(json_get(&reply.data, "next_id"));
                 ASSERT(next_id != NULL);
                 (void)snprintf(previous_id, sizeof(previous_id), "%s", next_id);
-                ASSERT_EQ(previous_time, (int64_t)(9 - seen));
+                ASSERT_EQ(previous_time, (int64_t)(total + 1 - seen));
             }
             zcl_command_reply_free(&reply);
             json_free(&input); json_free(&page_posts);
         }
-        ASSERT_EQ(seen, (size_t)8);
+        ASSERT_EQ(seen, total);
         json_free(&body);
         PASS();
     } _test_next:;

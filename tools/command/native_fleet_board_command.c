@@ -390,7 +390,7 @@ static const char *fb_index_text(const struct json_value *post, char *buf, size_
 }
 
 /* The line an agent's script greps, one per post:
- *   <ts> <host12> [<kind>] <agent>: <text>  (id <id>) re:<ref>
+ *   <ts> <host12> [<kind>] <agent>: <text>  (id <64-hex id>) re:<64-hex ref>
  * The renderer prints a scalar array one entry per line, so pushing this as
  * the FIRST key of a list reply gives a line-oriented reading of the board
  * without a second output mode to keep in step. */
@@ -408,7 +408,7 @@ static void fb_post_line(const struct json_value *post, char *out, size_t cap)
     static const char k_no_ref[] =
         "0000000000000000000000000000000000000000000000000000000000000000";
     bool has_ref = ref && strcmp(ref, k_no_ref) != 0;
-    (void)snprintf(out, cap, "%lld %.12s [%s] %s: %s  (id %.16s)%s%.16s",
+    (void)snprintf(out, cap, "%lld %.12s [%s] %s: %s  (id %s)%s%s",
                    ts && ts->type == JSON_INT ? (long long)json_get_int(ts) : 0,
                    host ? host : "", kind ? kind : "?",
                    agent && agent[0] ? agent : "-", text ? text : "",
@@ -479,30 +479,95 @@ static bool fb_page_cursor(const struct zcl_command_request *request,
          (json_get_int(when) < json_get_int(prior) ||
           (json_get_int(when) == json_get_int(prior) && memcmp(parsed, previous, 32) < 0)))) &&
         json_push_kv(data, "next_created_at", when) &&
-        json_push_kv_str(data, "next_id", next_id);
+        json_push_kv_str(data, "next_id", next_id) &&
+        json_push_kv_str(data, "next_before", next_id);
+}
+
+/* The forward walk's cursor: the arrival number of the last row returned, or,
+ * when the page is empty, the mark the caller passed (so a poll that found
+ * nothing new keeps its place). It must advance past the caller's mark. */
+static bool fb_page_after_cursor(const struct zcl_command_request *request,
+                                 const struct json_value *body,
+                                 const struct json_value *last,
+                                 struct json_value *data)
+{
+    const struct json_value *arrival = last ? json_get(last, "arrival")
+                                            : json_get(body, "next_after");
+    const struct json_value *prior = json_get(request->input, "after");
+    if (!arrival || arrival->type != JSON_INT || json_get_int(arrival) < 0)
+        return false;
+    if (last && prior && prior->type == JSON_INT &&
+        json_get_int(arrival) <= json_get_int(prior))
+        return false;
+    return json_push_kv(data, "next_after", arrival);
+}
+
+enum { FB_PAGE_META_RESERVE = 1024 };
+
+static size_t fb_wiki_response_cap(const struct zcl_command_request *request);
+
+/* Say how the page ended and what was asked: the limit as typed and as
+ * applied, rows the node returned and rows kept, and `stopped_by` — `end`
+ * (nothing further matches), `limit` (the row limit was reached) or
+ * `byte_budget` (the reply budget cut the page short of the limit). */
+static bool fb_page_describe(const struct zcl_command_request *request,
+                             const struct json_value *body, bool node_more,
+                             bool budget_cut, struct json_value *data)
+{
+    static const char *const keys[] = {"limit", "limit_applied", "limit_max",
+                                       "head_arrival", "order", "excluded_room"};
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(keys) / sizeof(keys[0]); i++)
+        if (json_get(body, keys[i]))
+            ok = json_push_kv(data, keys[i], json_get(body, keys[i]));
+    ok = ok &&
+         json_push_kv_str(data, "stopped_by", budget_cut ? "byte_budget" : node_more ? "limit" : "end") &&
+         json_push_kv_bool(data, "truncated_by_budget", budget_cut) &&
+         json_push_kv_int(data, "byte_budget", (int64_t)fb_wiki_response_cap(request)) &&
+         json_push_kv_int(data, "node_returned", (int64_t)json_size(json_get(body, "posts")));
+    if (budget_cut)
+        ok = ok && json_push_kv_str(data, "notice",
+            "The reply byte budget cut this page before the row limit; the rows are in order, nothing is skipped. Continue with next_before (or next_after).");
+    return ok;
+}
+
+/* The cursor that continues this page: forward reads always carry one (an
+ * empty page keeps the caller's mark), backward reads only while more remain. */
+static bool fb_page_continue(const struct zcl_command_request *request,
+                             const struct json_value *body,
+                             const struct json_value *selected, bool has_more,
+                             struct json_value *data)
+{
+    const char *order = json_get_str(json_get(body, "order"));
+    size_t count = json_size(selected);
+    const struct json_value *last = count ? json_at(selected, count - 1) : NULL;
+    if (order && !strcmp(order, "oldest_first"))
+        return fb_page_after_cursor(request, body, last, data);
+    return !(has_more && last) || fb_page_cursor(request, last, data);
 }
 
 static bool fb_page_finish(const struct zcl_command_request *request,
-                           const struct json_value *more,
+                           const struct json_value *body,
                            const struct json_value *truncation,
                            const struct json_value *selected,
                            struct json_value *data, struct zcl_command_reply *reply)
 {
-    bool has_more = json_get_bool(more) || json_get_bool(truncation);
-    size_t count = json_size(selected);
+    bool node_more = json_get_bool(json_get(body, "has_more"));
+    bool has_more = node_more || json_get_bool(truncation);
     bool summary = request->view && !strcmp(request->view, "summary");
-    if (has_more && count == 0 && !summary) {
+    if (has_more && json_size(selected) == 0 && !summary) {
         fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                 "BOARD_PAGE_BUDGET", "serialize", false,
                 "the first post does not fit the response budget", "fleet.board.list");
         return false;
     }
-    bool ok = json_push_kv_bool(data, "has_more", has_more);
-    if (summary && has_more)
-        ok = ok && json_push_kv_str(data, "notice",
+    bool ok = json_push_kv_bool(data, "has_more", has_more) &&
+              fb_page_describe(request, body, node_more,
+                               !summary && json_get_bool(truncation), data) &&
+              fb_page_continue(request, body, selected, has_more, data);
+    if (ok && summary && has_more)
+        ok = json_push_kv_str(data, "notice",
             "Repeat in normal view with the same filters to read posts.");
-    if (has_more && count)
-        ok = ok && fb_page_cursor(request, json_at(selected, count - 1), data);
     if (!ok)
         fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
                 "BOARD_PAGE_ALLOC_FAILED", "serialize", false,
@@ -558,7 +623,14 @@ void zcl_native_fleet_board_project_list(
      * disconnect a human-readable line from its signed post. */
     size_t prior_next = reply->next_count;
     struct zcl_command_request projected = *request;
-    if (board_list) projected.input = NULL;
+    if (board_list) {
+        projected.input = NULL;
+        /* The paging fields added below (stopped_by, notice, cursors) share
+         * the reply budget with the rows; leave them room. */
+        size_t cap = fb_wiki_response_cap(request);
+        if (cap > 2u * FB_PAGE_META_RESERVE)
+            projected.budget_bytes = cap - FB_PAGE_META_RESERVE;
+    }
     zcl_native_bridge_project(&projected, &rows, reply);
     if (board_list) reply->next_count = prior_next;
     json_free(&rows);
@@ -583,7 +655,7 @@ void zcl_native_fleet_board_project_list(
         return;
     }
     if (board_list) {
-        if (!fb_page_finish(request, more, truncation, &selected, &data, reply)) {
+        if (!fb_page_finish(request, body, truncation, &selected, &data, reply)) {
             json_free(&selected); json_free(&data);
             return;
         }
@@ -733,6 +805,13 @@ static void fb_list(const struct zcl_command_request *request,
     fb_forward_int(&out, in, "limit");
     fb_forward_int(&out, in, "before_created_at");
     fb_forward_str(&out, in, "before_id", NULL);
+    fb_forward_str(&out, in, "before", NULL);
+    fb_forward_int(&out, in, "after");
+    fb_forward_str(&out, in, "agent", NULL);
+    fb_forward_str(&out, in, "ref", NULL);
+    fb_forward_str(&out, in, "exclude_kind", NULL);
+    fb_forward_str(&out, in, "exclude_agent", NULL);
+    fb_forward_str(&out, in, "exclude_room", NULL);
     const struct json_value *open = json_get(in, "open");
     if (open && ((open->type == JSON_BOOL && json_get_bool(open)) ||
                  open->type == JSON_STR))

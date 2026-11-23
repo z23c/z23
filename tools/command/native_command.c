@@ -2789,7 +2789,7 @@ static bool nc_set_host_value(const struct zcl_command_spec *spec,
     struct zcl_command_input_descriptor descriptor;
     if (value && spec && spec->path &&
         (!strncmp(spec->path, "app.host.", 9) ||
-         (!strcmp(spec->path, "fleet.board.list") && !strcmp(key, "before_id"))) &&
+         !strcmp(spec->path, "fleet.board.list")) &&
         zcl_command_registry_input_descriptor(spec, key, &descriptor) &&
         descriptor.type == JSON_STR)
         return json_push_kv_str(obj, key, value);

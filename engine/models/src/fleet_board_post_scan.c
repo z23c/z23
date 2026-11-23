@@ -315,8 +315,12 @@ int db_fleet_board_list_page(struct node_db *ndb,
     struct qb q, sub;
     fleet_board_select_row(&q);
     board_apply_filter(&q, filter, now, &sub);
-    qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
-    qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
+    if (filter && filter->after_set) {
+        qb_order_by(&q, QB_C_fleet_board_posts_arrival, QB_ASC);
+    } else {
+        qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
+        qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
+    }
     qb_limit(&q, (int64_t)max + (has_more ? 1 : 0));
     sqlite3_stmt *s = NULL;
     if (!QB_PREPARE(ndb, &q, s))
@@ -334,4 +338,55 @@ int db_fleet_board_list_checked(struct node_db *ndb,
                                 size_t max, bool *complete)
 {
     return db_fleet_board_list_page(ndb, filter, now, out, max, complete, NULL);
+}
+
+bool db_fleet_board_head_arrival(struct node_db *ndb, int64_t *head_out)
+{
+    if (head_out)
+        *head_out = 0;
+    if (!ndb || !ndb->open || !head_out)
+        return false;
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_agg(&q, QB_MAX, QB_C_fleet_board_posts_arrival, true);
+    int64_t head = 0;
+    if (!fleet_board_aggregate_checked(ndb, &q, &head)) {
+        LOG_WARN("fleet.board", "arrival head aggregate failed");
+        return false;
+    }
+    *head_out = head;
+    return true;
+}
+
+/* Leave out one room. A legacy (scope 0) row reads as the default room, so
+ * excluding the default must drop those rows too. */
+static void board_apply_exclude_room(struct qb *q, const char *room)
+{
+    if (!room[0])
+        return;
+    qb_where_text(q, QB_C_fleet_board_posts_room, QB_NE, room);
+    if (strcmp(room, FLEET_BOARD_ROOM_DEFAULT) == 0)
+        qb_where_int(q, QB_C_fleet_board_posts_scope, QB_NE,
+                     FLEET_BOARD_SCOPE_LEGACY_PUBLIC);
+}
+
+void board_apply_filter_more(struct qb *q, const struct fleet_board_filter *filter)
+{
+    if (filter->ref_set)
+        qb_where_blob(q, QB_C_fleet_board_posts_ref, QB_EQ, filter->ref, 32);
+    if (filter->exclude_kind)
+        qb_where_int(q, QB_C_fleet_board_posts_kind, QB_NE,
+                     filter->exclude_kind);
+    if (filter->exclude_agent[0])
+        qb_where_text(q, QB_C_fleet_board_posts_agent, QB_NE,
+                      filter->exclude_agent);
+    /* Keyset bounds on the local arrival number: the forward walk and the
+     * snapshot ceiling. */
+    if (filter->after_set)
+        qb_where_int(q, QB_C_fleet_board_posts_arrival, QB_GT,
+                     filter->after_arrival);
+    if (filter->max_arrival > 0)
+        qb_where_int(q, QB_C_fleet_board_posts_arrival, QB_LE,
+                     filter->max_arrival);
+    board_apply_exclude_room(q, filter->exclude_room);
 }

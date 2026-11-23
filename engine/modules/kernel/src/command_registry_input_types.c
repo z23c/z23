@@ -1373,7 +1373,7 @@ static bool cr_leaf_special_descriptor(const struct zcl_command_spec *spec,
 
 static bool cr_exact64_field(const struct zcl_command_spec *spec, const char *key)
 {
-    return (!strcmp(spec->path, "fleet.board.list") && !strcmp(key, "before_id")) ||
+    return command_registry_board_list_text_key(spec->path, key) ||
            (!strcmp(spec->path, "fleet.board.status") && (!strcmp(key, "peer") || !strcmp(key, "post"))) ||
            cr_app_customize_query(spec, key);
 }

@@ -101,6 +101,9 @@ enum fleet_board_scope {
  * carry an empty room and read as this room, so the board everybody already
  * uses is the default room rather than a migration artifact. */
 #define FLEET_BOARD_ROOM_DEFAULT "general"
+/* The room the per-minute vitals posts live in; a bare board listing leaves it
+ * out so it cannot crowd out everything else. Name it to read it. */
+#define FLEET_BOARD_ROOM_VITALS "vitals"
 
 /* One decoded post. Text fields are NUL-terminated; `text_len` is the exact
  * signed byte count and never counts the terminator. */

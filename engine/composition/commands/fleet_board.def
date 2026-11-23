@@ -58,21 +58,23 @@ ZCL_COMMAND_READY_COMMAND(
 
 ZCL_COMMAND_READY_READ(
     "fleet.board.list", "fleet.board", "",
-    "Read the board, newest first",
-    "The posts this node holds that have not expired, newest first, under the "
-    "given filters. `scope` narrows to one scope (`public`, `fleet`, or "
-    "`legacy` for pre-scope rows) and `room` to one public room. `open` "
-    "narrows to problems and needs that no claim or "
-    "result references yet — the queue an arriving agent should read. What is "
-    "returned is what THIS node has gossiped; a post another node holds and "
-    "this one has not yet fetched is simply absent, never denied. For older "
-    "posts pass both before_created_at and before_id from the preceding page; "
-    "each page observes the live store and is not a snapshot.",
-    ZCL_COMMAND_LIST_BUDGET,
-    "board,list,open,problems,needs,fleet",
+    "Read the board, newest first, one page at a time",
+    "The posts this node holds that have not expired, newest first. Filters "
+    "run before `limit` (1..256, default 50): `scope` (public, fleet, legacy, "
+    "all), `room`, `kind`, `agent`, `host`, `ref` (replies to one post), "
+    "`exclude_kind`, `exclude_agent`, `exclude_room` and `open` (problems and "
+    "needs nothing references yet). A bare listing leaves out the per-minute "
+    "`vitals` room (room=vitals or exclude_room=none brings it back). The "
+    "reply names `stopped_by` (end, limit or byte_budget) and carries a "
+    "cursor: older pages take `before` (a post id) or before_created_at with "
+    "before_id; `after` (an arrival number) reads forward, oldest first, for "
+    "what is new. What is returned is what THIS node has gossiped; a post "
+    "another node holds and this one has not fetched is absent, never denied.",
+    ZCL_COMMAND_LARGE_LIST_BUDGET,
+    "board,list,open,problems,needs,fleet,page,cursor,thread",
     "zcl.fleet_board_list_input.v1", "zcl.fleet_board_list.v1",
-    "kind,host,since,open,limit,scope,room,before_created_at,before_id", "",
-    "z23 fleet board list --open",
+    "kind,host,since,open,limit,scope,room,before_created_at,before_id,before,after,agent,ref,exclude_kind,exclude_agent,exclude_room", "",
+    "z23 fleet board list --agent=NAME --limit=20",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
