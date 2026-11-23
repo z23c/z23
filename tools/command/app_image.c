@@ -110,8 +110,16 @@ static bool aib_hash_handle(const struct platform_positioned_file *file,
     return true;
 }
 
-struct zcl_result app_image_capture(const char *image_path,
-                                    struct app_image_build *rec)
+static bool aib_capture_expected(const struct platform_positioned_file_snapshot *s,
+    bool executable, const struct app_image_build *expected)
+{
+    if (!s->size || (executable && s->size > APP_IMAGE_BUILD_MAX_IMAGE_BYTES)) return false;
+    return !expected || (s->size == expected->image_size && s->volume == expected->image_volume &&
+        s->file_low == expected->image_low && s->file_high == expected->image_high);
+}
+static struct zcl_result aib_capture(const char *image_path,
+                                     struct app_image_build *rec, bool executable,
+                                     const struct app_image_build *expected)
 {
     if (!image_path || !image_path[0] || !rec)
         return ZCL_ERR(-1, "app build record: capture needs an image path");
@@ -121,8 +129,15 @@ struct zcl_result app_image_capture(const char *image_path,
     if (!platform_positioned_file_open(&file, image_path))
         return ZCL_ERR(-1, "app build record: cannot open image %s: %s",
                        image_path, strerror(errno));
-    bool ok = platform_positioned_file_snapshot(&file, &before) &&
-              before.size > 0 &&
+    if (!platform_positioned_file_snapshot(&file, &before)) {
+        platform_positioned_file_close(&file);
+        return ZCL_ERR(-1, "app build record: image %s is empty, unreadable or changed while it was hashed", image_path);
+    }
+    if (executable && !platform_positioned_file_is_executable(&file)) {
+        platform_positioned_file_close(&file);
+        return ZCL_ERR(-1, "app build record: stored image %s is not executable", image_path);
+    }
+    bool ok = aib_capture_expected(&before, executable, expected) &&
               aib_hash_handle(&file, before.size, rec->image_sha3) &&
               platform_positioned_file_snapshot(&file, &after) &&
               platform_positioned_file_snapshot_equal(&before, &after);
@@ -136,6 +151,13 @@ struct zcl_result app_image_capture(const char *image_path,
     rec->image_size = before.size;
     return ZCL_OK;
 }
+
+struct zcl_result app_image_capture(const char *path, struct app_image_build *rec)
+{ return aib_capture(path, rec, false, NULL); }
+
+struct zcl_result app_image_capture_executable(const char *path, struct app_image_build *rec,
+                                               const struct app_image_build *expected)
+{ return aib_capture(path, rec, true, expected); }
 
 void app_image_build_accepted(const struct app_image_build *rec,
                               struct resident_launch_accepted *out)

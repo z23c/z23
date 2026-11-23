@@ -661,6 +661,86 @@ static int abc_restore_is_cache_hit(struct abc_world *w)
     return failures;
 }
 
+static bool abc_replace_image_inode(const char *path)
+{
+    char tmp[ABC_PATH + 128];
+    if (snprintf(tmp, sizeof(tmp), "%s.copy", path) >= (int)sizeof(tmp)) return false;
+    FILE *in = fopen(path, "rb"), *out = fopen(tmp, "wb");
+    bool ok = in && out; unsigned char buf[4096]; size_t n;
+    while (ok && (n = fread(buf, 1, sizeof(buf), in)) != 0) ok = fwrite(buf, 1, n, out) == n;
+    if (in) { if (ferror(in)) ok = false; if (fclose(in)) ok = false; }
+    if (out && fclose(out)) ok = false;
+    if (ok) ok = chmod(tmp, 0700) == 0 && rename(tmp, path) == 0;
+    if (!ok) (void)unlink(tmp);
+    return ok;
+}
+static int abc_stale_image_cache(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: a copied image is not a valid cache hit") {
+        char image[ABC_PATH + 128]; struct abc_leaf l; struct stat before, after;
+        ASSERT(snprintf(image, sizeof(image), "%s/app_build/images/%s", w->alice_datadir, w->image_v1) < (int)sizeof(image));
+        ASSERT(stat(image, &before) == 0 && abc_replace_image_inode(image) && stat(image, &after) == 0);
+        ASSERT(before.st_dev != after.st_dev || before.st_ino != after.st_ino);
+        abc_build_input(&l, w->copy, w->alice_datadir);
+        ASSERT(abc_pass("app.build", &l) && !abc_flag(&l, "cache_hit"));
+        ASSERT(abc_confirm("app.build", &l) && abc_flag(&l, "make_ran") && abc_record_matches(&l, w->alice_datadir));
+        abc_close(&l);
+        abc_build_input(&l, w->copy, w->alice_datadir);
+        ASSERT(abc_pass("app.build", &l) && abc_flag(&l, "cache_hit"));
+        abc_close(&l); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool abc_bad_image_plan(const struct abc_world *w, bool corrupt)
+{
+    struct abc_leaf l; abc_build_input(&l, w->copy, w->alice_datadir);
+    bool ok = abc_pass("app.build", &l) && !abc_flag(&l, "cache_hit") &&
+        abc_confirm("app.build", &l) && l.out.status != ZCL_COMMAND_STATUS_PASSED &&
+        !strcmp(l.out.error.code, "RECORD_SAVE_FAILED") &&
+        (corrupt || strstr(l.out.error.evidence, "not executable"));
+    abc_close(&l); return ok;
+}
+static bool abc_occupant_same(const char *image, int fd, const struct stat *before, bool corrupt, unsigned char altered)
+{
+    struct stat after; unsigned char observed = 0;
+    if (stat(image, &after) != 0 || before->st_dev != after.st_dev ||
+        before->st_ino != after.st_ino || before->st_size != after.st_size) return false;
+    return corrupt ? (pread(fd, &observed, 1, 0) == 1 && observed == altered) : !(after.st_mode & 0111);
+}
+static bool abc_bad_occupied_image(const struct abc_world *w, bool corrupt)
+{
+    char image[ABC_PATH + 128];
+    if (snprintf(image, sizeof(image), "%s/app_build/images/%s", w->alice_datadir, w->image_v1) >= (int)sizeof(image)) return false;
+    int fd = open(image, O_RDWR); unsigned char original = 0, altered = 0; struct stat before;
+    bool ok = fd >= 0 && fstat(fd, &before) == 0 && pread(fd, &original, 1, 0) == 1;
+    altered = original ^ 1u;
+    bool changed = ok && (corrupt ? pwrite(fd, &altered, 1, 0) == 1 : fchmod(fd, 0600) == 0);
+    ok = changed && abc_bad_image_plan(w, corrupt) && abc_occupant_same(image, fd, &before, corrupt, altered);
+    bool restored = !changed || (corrupt ? pwrite(fd, &original, 1, 0) == 1 : fchmod(fd, 0700) == 0);
+    if (fd >= 0 && close(fd) != 0) restored = false;
+    return ok && restored;
+}
+static int abc_bad_occupied_images(const struct abc_world *w)
+{
+    int failures = 0;
+    TEST("app.build: unsafe occupied image is not reused or overwritten") {
+        ASSERT(abc_bad_occupied_image(w, false));
+        ASSERT(abc_bad_occupied_image(w, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int abc_cache_controls(struct abc_world *w)
+{
+    int failures = abc_restore_is_cache_hit(w);
+    if (!failures) failures += abc_stale_image_cache(w);
+    if (!failures) failures += abc_bad_occupied_images(w);
+    return failures;
+}
+
 static int abc_refuses_dirty(const struct abc_world *w)
 {
     int failures = 0;
@@ -1711,7 +1791,7 @@ int test_app_build_copy(void)
     if (!failures)
         failures += abc_friend_builds(&w);
     if (!failures) {
-        failures += abc_restore_is_cache_hit(&w);
+        failures += abc_cache_controls(&w);
         failures += abc_refuses_dirty(&w);
         failures += abc_refuses_bad_builds(&w);
         failures += abc_closure_launch_status(&w);

@@ -88,7 +88,7 @@
 #define ZAB_PATH APP_COPY_BUILD_PATH
 #define ZAB_STORE "app_build"
 #define ZAB_PLAN_DOMAIN "zcl.app_build.plan.v1"
-#define ZAB_IMAGE_MAX (512u << 20)
+#define ZAB_IMAGE_MAX APP_IMAGE_BUILD_MAX_IMAGE_BYTES
 #define ZAB_COMMAND "app.build"
 
 struct zab {
@@ -395,11 +395,13 @@ static bool zab_cache(struct zab *z)
                  "copy is unreadable", r.message);
         return false;
     }
-    z->cache_hit = hit &&
-                   memcmp(z->cached.closure_root, z->closure.root, 32) == 0 &&
-                   zab_image_path(z, z->cached.image_sha3, image,
-                                  sizeof(image)) &&
-                   platform_file_shape_read(image) == PLATFORM_FILE_SHAPE_REGULAR;
+    z->cache_hit = false;
+    if (hit && memcmp(z->cached.closure_root, z->closure.root, 32) == 0 &&
+        zab_image_path(z, z->cached.image_sha3, image, sizeof(image))) {
+        struct app_image_build observed = {0};
+        struct zcl_result captured = app_image_capture_executable(image, &observed, &z->cached);
+        z->cache_hit = captured.ok && !memcmp(observed.image_sha3, z->cached.image_sha3, 32);
+    }
     return true;
 }
 
@@ -880,7 +882,7 @@ static bool zab_record(struct zab *z, const char *image,
     memcpy(rec->closure_root, z->closure.root, 32);
     memcpy(rec->env_root, z->env_root, 32);
     memcpy(rec->dependency_root, z->dependency_root, 32);
-    struct zcl_result r = app_image_capture(image, rec);
+    struct zcl_result r = app_image_capture_executable(image, rec, NULL);
     if (r.ok && memcmp(rec->image_sha3, sha, 32) != 0)
         r = ZCL_ERR(-1, "the stored image at %s is not the bytes built",
                     image);

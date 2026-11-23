@@ -72,6 +72,7 @@ void app_image_dependency_root(const struct vcs_package_lock *lock, uint8_t out[
 #define APP_IMAGE_BUILD_FILE_SUFFIX ".appbuild"
 /* Most compile actions one closure root folds. */
 #define APP_IMAGE_BUILD_MAX_ACTIONS 256u
+#define APP_IMAGE_BUILD_MAX_IMAGE_BYTES (512u << 20)
 
 struct app_image_build {
     uint8_t package_root[32];
@@ -91,6 +92,10 @@ struct zcl_result app_image_env_root(uint8_t out[32]);
  * proving the handle's snapshot did not change while it was read. */
 struct zcl_result app_image_capture(const char *image_path,
                                     struct app_image_build *rec);
+
+/* Like capture, but the same pinned image must also be executable. */
+struct zcl_result app_image_capture_executable(const char *image_path,
+    struct app_image_build *rec, const struct app_image_build *expected);
 
 struct zcl_result app_image_build_validate(const struct app_image_build *rec);
 struct zcl_result app_image_build_encode(
