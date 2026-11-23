@@ -524,7 +524,7 @@ static void bm_state_line(const char *line, struct bm_state *st)
                        line + 13);
 }
 
-static void bm_state_load(const char *recvdir, struct bm_state *st)
+static bool bm_state_load(const char *recvdir, struct bm_state *st)
 {
     char path[BM_PATH_CAP], line[128];
     FILE *f;
@@ -532,16 +532,19 @@ static void bm_state_load(const char *recvdir, struct bm_state *st)
     bm_state_path(recvdir, path, sizeof(path));
     f = fopen(path, "rb");
     if (!f)
-        return;
+        return errno == ENOENT;
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';
         bm_state_line(line, st);
     }
-    (void)fclose(f);
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok) return false;
     if (st->export_offset < 0)
         st->export_offset = 0;
     if (st->import_after < 0)
         st->import_after = 0;
+    return true;
 }
 
 /* Publish flushed cursor bytes and their parent-directory barrier together. */
@@ -1355,9 +1358,10 @@ struct bm_beat {
 
 /* Load what one step needs. NULL when this box has no enrolled peer, which
  * makes both steps no-ops: nothing to carry to, nothing to trust. */
-static struct bm_beat *bm_beat_open(const struct zcl_boardmail_ctx *c)
+static struct bm_beat *bm_beat_open(const struct zcl_boardmail_ctx *c, bool *state_failed)
 {
     struct bm_beat *b;
+    *state_failed = false;
     if (!c || c->dry || !c->receiver || !c->recvdir || !c->maildir)
         return NULL;
     b = zcl_calloc(1, sizeof(*b), "boardmail.beat");
@@ -1371,18 +1375,26 @@ static struct bm_beat *bm_beat_open(const struct zcl_boardmail_ctx *c)
         return NULL;
     }
     bm_refs_load(&b->refs, c->recvdir);
-    bm_state_load(c->recvdir, &b->s);
+    if (!bm_state_load(c->recvdir, &b->s)) {
+        LOG_WARN(BM_LOG, "boardmail checkpoint unreadable; carriage held; inspect receive/boardmail.state read-only");
+        *state_failed = true;
+        free(b);
+        return NULL;
+    }
     return b;
 }
 
 bool zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
                                    struct rcv_beat_stats *st)
 {
-    struct bm_beat *b = bm_beat_open(c);
+    bool state_failed;
+    struct bm_beat *b = bm_beat_open(c, &state_failed);
     unsigned pages = 0;
     bool more = true, storage_failed = false;
-    if (!b)
-        return true;
+    if (!b) {
+        if (state_failed) st->board_deferred++;
+        return !state_failed;
+    }
     while (more && pages++ < BM_IMPORT_PAGES) {
         more = false;
         if (!bm_import_page(c, &b->ro, &b->refs, &b->s, &more,
@@ -1403,12 +1415,13 @@ bool zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
 void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
                                    struct rcv_beat_stats *st)
 {
-    struct bm_beat *b = bm_beat_open(c);
+    bool state_failed;
+    struct bm_beat *b = bm_beat_open(c, &state_failed);
     long long before;
-    if (!b)
+    if (!b) {
+        if (state_failed) st->board_deferred++;
         return;
-    /* Re-read the cursors: import may have saved them this beat. */
-    bm_state_load(c->recvdir, &b->s);
+    }
     before = b->s.export_offset;
     bm_export_walk(c, &b->ro, &b->refs, &b->s, st);
     if (b->s.export_offset != before && !bm_state_save(c->recvdir, &b->s))

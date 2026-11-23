@@ -103,6 +103,7 @@ struct bmx_node {
     struct bmx_post p[BMX_POSTS];
     size_t n;
     long long next_arrival;
+    unsigned post_calls, page_calls;
     char epoch[33];
     bool down;      /* no node answers at all */
     bool show_down; /* the node answers everything but show */
@@ -445,10 +446,13 @@ static char *bmx_rpc(const char *method, const char *params)
         op = json_get_str(json_get(in, "op"));
         if (n->down || (n->show_down && strcmp(op, "show") == 0))
             op = "";
-        else if (strcmp(op, "post") == 0)
+        else if (strcmp(op, "post") == 0) {
+            n->post_calls++;
             bmx_op_post(in, &out, now);
-        else if (strcmp(op, "fleet_page") == 0)
+        } else if (strcmp(op, "fleet_page") == 0) {
+            n->page_calls++;
             bmx_op_page(in, &out, now);
+        }
         else if (strcmp(op, "show") == 0)
             bmx_op_show(in, &out);
     }
@@ -1850,6 +1854,42 @@ _test_next:;
     return failures;
 }
 
+static int bmx_t_state_unreadable(void)
+{
+    int failures = 0;
+    TEST("boardmail: unreadable checkpoint holds import and export") {
+        struct rcv_beat_stats st;
+        char path[1600], saved[1650];
+        ASSERT(bmx_setup("unreadable-state"));
+        ASSERT(bmx_sent("job-state"));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/boardmail.state", g_bmx_state[BMX_A]);
+        (void)snprintf(saved, sizeof(saved), "%s.saved", path);
+        ASSERT(rename(path, saved) == 0);
+        ASSERT(mkdir(path, 0700) == 0);
+        unsigned before_post = g_bmx_node[BMX_A].post_calls;
+        unsigned before_page = g_bmx_node[BMX_A].page_calls;
+        long long result = bmx_drive(BMX_A, &st);
+        unsigned post_calls = g_bmx_node[BMX_A].post_calls - before_post;
+        unsigned page_calls = g_bmx_node[BMX_A].page_calls - before_page;
+        bool restored = rmdir(path) == 0 && rename(saved, path) == 0;
+        printf("STATE_READ_PROBE post_calls=%u page_calls=%u deferred=%lld\n",
+               post_calls, page_calls, (long long)st.board_deferred);
+        ASSERT(restored);
+        ASSERT_EQ(result, 1);
+        ASSERT_EQ(post_calls, 0);
+        ASSERT_EQ(page_calls, 0);
+        ASSERT(st.board_deferred >= 1);
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(g_bmx_node[BMX_A].post_calls, before_post);
+        ASSERT(bmx_sent("job-state-next"));
+        ASSERT_EQ(g_bmx_node[BMX_A].post_calls, before_post + 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 2);
+        bmx_teardown(); PASS();
+    }
+_test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_oversize(void)
 {
     int failures = 0;
@@ -2035,6 +2075,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_unsigned();
     failures += bmx_t_expired();
     failures += bmx_t_deferred();
+    failures += bmx_t_state_unreadable();
     failures += bmx_t_oversize();
     failures += bmx_t_delivery();
     failures += bmx_t_push_hint();
