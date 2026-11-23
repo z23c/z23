@@ -361,6 +361,28 @@ static bool obj_row_start_epoch(const struct json_value *row, int64_t *out)
     return ts[0] && obj_parse_iso8601(ts, out);
 }
 
+/* Fold one new attempt into the train's queue wait and resubmit gap. */
+static void obj_train_note_wait(const struct json_value *row,
+                               int64_t started, struct obj_train_stats *out)
+{
+    int64_t ts = 0, seq = json_get_int(json_get(row, "seq"));
+    bool have_ts = obj_row_start_epoch(row, &ts);
+    /* A second attempt under one seq shares its submit ts: its start is
+     * not queue wait, and no resubmit happened. */
+    if (have_ts && started >= ts && started > 0 &&
+        !(seq > 0 && seq == out->last_seq)) {
+        out->queue_wait += started - ts;
+        out->queue_known++;
+    }
+    if (have_ts && out->prev_terminal > 0 && ts >= out->prev_terminal &&
+        !(seq > 0 && seq == out->last_seq)) {
+        out->resubmit_gap += ts - out->prev_terminal;
+        out->gap_known++;
+    }
+    out->last_seq = seq;
+    out->prev_terminal = json_get_int(json_get(row, "terminal_recorded_at"));
+}
+
 static void obj_train_stats_row(const struct json_value *row,
                                 const char *note,
                                 struct obj_train_stats *out)
@@ -399,22 +421,7 @@ static void obj_train_stats_row(const struct json_value *row,
     if (!obj_pair_add_new(&out->attempts,
                           json_get_int(json_get(row, "attempt")), started))
         return;
-    int64_t ts = 0, seq = json_get_int(json_get(row, "seq"));
-    bool have_ts = obj_row_start_epoch(row, &ts);
-    /* A second attempt under one seq shares its submit ts: its start is
-     * not queue wait, and no resubmit happened. */
-    if (have_ts && started >= ts && started > 0 &&
-        !(seq > 0 && seq == out->last_seq)) {
-        out->queue_wait += started - ts;
-        out->queue_known++;
-    }
-    if (have_ts && out->prev_terminal > 0 && ts >= out->prev_terminal &&
-        !(seq > 0 && seq == out->last_seq)) {
-        out->resubmit_gap += ts - out->prev_terminal;
-        out->gap_known++;
-    }
-    out->last_seq = seq;
-    out->prev_terminal = json_get_int(json_get(row, "terminal_recorded_at"));
+    obj_train_note_wait(row, started, out);
 }
 
 /* Rows whose train identity is `note`, in file order, since the previous
