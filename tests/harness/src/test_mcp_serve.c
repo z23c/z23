@@ -1294,7 +1294,7 @@ static int case_session(const char *home, const char *checkout)
 static const char ms_find_result[] =
     "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
     "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[{\"topic\":"
-    "\"push-gate\",\"slug\":\"push-gate\",\"author_role\":true,\"id\":\"%064d\",\"host\":\"%064d\","
+    "\"push-gate\",\"slug\":\"push-gate\",\"author_role\":%s,\"id\":\"%064d\",\"host\":\"%064d\","
     "\"created_at\":1,\"expires_at\":2,\"updated\":\"2026-10-12T09:00:00Z\","
     "\"summary\":\"The push gate runs the full lint.\",\"rules\":[\"Run the "
     "full lint before pushing.\"],\"rules_omitted\":false,\"summary_omitted\":"
@@ -1303,17 +1303,19 @@ static const char ms_find_result[] =
     "\"blocked_slug\":\"\",\"reason\":\"exhausted\"},\"error\":null,\"id\":1}";
 
 static bool g_ms_stub_silent;
+/* The stub vouches for the fleet scope only: a public page has no role. */
+static const char *g_ms_vouch = "true";
 
 /* One entry of a recorded wiki_find body, with its own slug, rule and time. */
 static int ms_stub_entry_at(char *out, size_t cap, const char *slug, int n,
                             const char *updated)
 {
     return snprintf(out, cap,
-        "%s{\"topic\":\"%s\",\"slug\":\"%s\",\"author_role\":true,\"id\":\"%064d\",\"host\":\"%064d\","
+        "%s{\"topic\":\"%s\",\"slug\":\"%s\",\"author_role\":%s,\"id\":\"%064d\",\"host\":\"%064d\","
         "\"created_at\":1,\"expires_at\":2,\"updated\":\"%s\","
         "\"summary\":\"s\",\"rules\":[\"Rule of %s.\"],\"rules_omitted\":false,"
         "\"summary_omitted\":false,\"matched\":[\"slug\"]}",
-        n ? "," : "", slug, slug, n + 1, n + 2, updated, slug);
+        n ? "," : "", slug, slug, g_ms_vouch, n + 1, n + 2, updated, slug);
 }
 
 static int ms_stub_entry(char *out, size_t cap, const char *slug, int n)
@@ -1368,6 +1370,7 @@ static const char ms_stub_blocked[] =
  * finds the push-gate page. */
 static int ms_stub_body(char *body, size_t cap, const char *req)
 {
+    g_ms_vouch = strstr(req, "public") ? "false" : "true";
     static const char tail[] =
         "],\"returned\":1,\"scanned\":1,\"verified\":1,\"truncated\":false,"
         "\"incomplete\":false,\"after_slug\":\"\",\"blocked_slug\":\"\","
@@ -1378,7 +1381,7 @@ static int ms_stub_body(char *body, size_t cap, const char *req)
     if (strstr(req, "wikiblock"))
         return snprintf(body, cap, "%s", ms_stub_blocked);
     if (!strstr(req, "native_command") && !strstr(req, "tools"))
-        return snprintf(body, cap, ms_find_result, 1, 2);
+        return snprintf(body, cap, ms_find_result, g_ms_vouch, 1, 2);
     n = snprintf(body, cap,
         "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
         "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[");
@@ -1926,8 +1929,8 @@ static int case_guide_lessons(const char *home, const char *checkout,
         ASSERT(has(&m, "tools-b"));
         ASSERT(!has(&m, "tools-c"));
         ASSERT(has(&m, "lessons_capped"));
-        /* The stub vouches for every author, so nothing is dropped. */
-        ASSERT(!has(&m, "lessons_untrusted_dropped"));
+        /* The stub answers a public query with roleless authors, so those go. */
+        ASSERT(has(&m, "lessons_untrusted_dropped"));
         ASSERT_EQ(ms_finish(&m), 0);
         ASSERT(ms_stop_child(&stub));
 
