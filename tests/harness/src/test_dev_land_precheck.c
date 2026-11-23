@@ -1372,6 +1372,58 @@ static bool dlx_pc_size_clean(void)
     return ok;
 }
 
+/* proof-compile-changed runs `make proof-compile-changed` in the lane. mode 0:
+ * the strict-profile object tree is absent (unproven, queues); 1: the target
+ * compiles clean (ran, queues); 2: the target reports the bundle profile's
+ * diagnostic (refused with that diagnostic, nothing queued). */
+static bool dlx_pc_strict_rig(struct dlx_rig *rig, int mode)
+{
+    static const char *const tag[] = {"strict_absent", "strict_clean", "strict_red"};
+    static const char *const rule[] = {
+        "proof-compile-changed:\n\t@echo unused\n",
+        "proof-compile-changed:\n\t@echo proof-compile-changed: OK\n",
+        "proof-compile-changed:\n\t@echo \"tests/harness/src/t.c:7:5: error: ignoring "
+        "return value of fread [-Werror=unused-result]\"; exit 1\n"};
+    char path[1400];
+    if (!dlx_pc_rig(rig, tag[mode], true, "check-core-seal\n"))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/Makefile", rig->clone);
+    return dlx_write(path, rule[mode]) &&
+           (mode == 0 || dlx_write_dep(rig->clone, "build/test-obj/epochs/.keep", "x"));
+}
+
+static bool dlx_pc_strict_refused(const struct dlx_call *c)
+{
+    return !dlx_ok(c) && strcmp(dlx_err_code(c), "PRECHECK_FAILED") == 0 &&
+           strcmp(dlx_str(c, "gate"), "proof-compile-changed") == 0 &&
+           strstr(c->reply.error.evidence, "-Werror=unused-result") != NULL &&
+           strstr(dlx_str(c, "hint"), "make proof-compile-changed") != NULL;
+}
+
+static bool dlx_pc_strict_case(int mode)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_strict_rig(&rig, mode))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "s");
+    ok = dlx_run(&c);
+    if (mode == 2)
+        ok = ok && dlx_pc_strict_refused(&c);
+    else if (mode == 1)
+        ok = ok && dlx_ok(&c) &&
+             dlx_pc_has(dlx_arr(&c, "precheck_ran"), "proof-compile-changed");
+    else
+        ok = ok && dlx_ok(&c) &&
+             dlx_pc_has(dlx_arr(&c, "precheck_skipped"), "proof-compile-changed") &&
+             strstr(dlx_str(&c, "precheck_unproven"), "make proof-compile-changed") != NULL;
+    dlx_end(&c);
+    ok = ok && (mode == 2 ? dlx_queue_empty() : dlx_queue_has_one());
+    dlx_restore();
+    return ok;
+}
+
 static int dlx_pc_ratchet_cases(void)
 {
     int failures = 0;
@@ -1381,6 +1433,12 @@ static int dlx_pc_ratchet_cases(void)
                                       "never raise the budget"));
         ASSERT(dlx_pc_ratchet_refused("check-hardening-ratchet",
                                       "never raise the baseline"));
+        PASS();
+    }
+    TEST("land: submit compiles changed sources under the proof profile and refuses its diagnostic") {
+        ASSERT(dlx_pc_strict_case(0));
+        ASSERT(dlx_pc_strict_case(1));
+        ASSERT(dlx_pc_strict_case(2));
         PASS();
     }
     TEST("land: submit runs the file-size binary, and continues when it is missing") {

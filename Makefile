@@ -18291,6 +18291,36 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 	@tools/scripts/first_build_timing.sh --self-test
 	@echo "══ pr-check: passed ══"
 
+# proof-compile-changed: compile the C sources this lane changed since the
+# merge-base with origin/main under the land proof bundle's test-fast profile
+# (-O1 -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror -pedantic via ZCL_TEST_WERROR=1,
+# the same epoch dev-proof-bundle and agent-verify build), so a diagnostic such
+# as -Werror=unused-result or -Werror=misleading-indentation in a changed test
+# or production TU fails before a land queue slot is spent. It compiles only
+# the changed TUs (a warm lane: seconds); objects are shared with the bundle
+# epoch, so the proof reuses them. `dev land submit` runs it as a precheck gate.
+#   make proof-compile-changed                       (base: merge-base origin/main HEAD)
+#   make proof-compile-changed PROOF_COMPILE_BASE=<commit>
+.PHONY: proof-compile-changed proof-compile-changed-locked
+proof-compile-changed:
+	@mkdir -p "$(BUILD_DIR)"
+	@base="$(PROOF_COMPILE_BASE)"; \
+	 [ -n "$$base" ] || base=$$(git merge-base origin/main HEAD 2>/dev/null) || { echo "proof-compile-changed: no merge-base with origin/main; nothing compared" >&2; exit 0; }; \
+	 files=$$(git diff --name-only --diff-filter=AMR "$$base" HEAD -- "*.c" | tr "\n" " "); \
+	 if [ -z "$$files" ]; then echo "proof-compile-changed: no changed C sources"; exit 0; fi; \
+	 log=build/scratch/proof-compile-changed.log; mkdir -p build/scratch; \
+	 if $(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
+	   $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) proof-compile-changed-locked \
+	     ZCL_TEST_WERROR=1 CHANGED_TU="$$files" \
+	     BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	     $(ZCL_FROZEN_TOOLCHAIN_ARGS) >"$$log" 2>&1; then tail -n 1 "$$log"; \
+	 else grep -E "error:|\*\*\*" "$$log" | head -n 12 | cut -c1-240; \
+	   echo "proof-compile-changed: FAILED; full log: $$log"; exit 1; fi
+
+PROOF_COMPILE_OBJS = $(patsubst %.c,$(TEST_FAST_OBJ_DIR)/%.o,$(filter $(CHANGED_TU),$(TEST_PARALLEL_FAST_SRCS)))
+proof-compile-changed-locked: $(PROOF_COMPILE_OBJS)
+	@echo "proof-compile-changed: OK ($(words $(PROOF_COMPILE_OBJS)) changed TU(s) compiled under the proof profile)"
+
 # agent-verify: the one verification trip for an edit. It runs the required
 # checks, each as its own sub-make with its own log. Complexity fails fast before
 # selector setup; later failures are collected so one trip shows each red step. Full lint and the
@@ -18326,6 +18356,8 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # universal. A path that routes to no group is named on the selection line
 # (detail=unrouted=N first=<path>); with no routed group the test step is
 # skipped. The stack gate still runs the proof's full set.
+# proof-compile-changed compiles every changed C source (not only those of a
+# selected group) under the proof bundle profile, as `dev land submit` does.
 # File-size and complexity checks stop the run before building or selecting.
 # The check-capability-closure step is the land proof's closure gate; it
 # prepares and grades the dev epoch before universal tests, or after focused tests.
@@ -18424,6 +18456,7 @@ agent-verify:
 	       closure_early=1; av_step check-capability-closure; \
 	    fi; \
 	 fi; \
+	 av_step proof-compile-changed; \
 	 if [ -n "$$only" ] && { [ "$$closure_early" != 1 ] || [ -z "$$failed" ]; }; then \
 	    av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1 T_FAST_EXACT_ARGS=--cache; \
 	 fi; \

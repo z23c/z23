@@ -45,6 +45,12 @@
 #define PC_DEPFILE_GATE "check-make-depfile-scope-selftest"
 #define PC_DEPFILE_BIN "build/bin/depfile-scope-launch"
 #define PC_MODEL_SQL_GATE "check-model-sql-literals"
+/* Not a lint gate: compiles the lane's changed C sources under the land proof's
+ * warning, fortify and optimisation profile (make proof-compile-changed), so
+ * a -Werror diagnostic the bundle build would raise refuses here instead of
+ * after a queue slot. Runs through make like the depfile and ship adapters. */
+#define PC_STRICT_GATE "proof-compile-changed"
+#define PC_STRICT_NEED "build/test-obj/epochs" /* a directory: mode 0 below */
 
 /* Always-on gates beside the core list and the ledger's learned set: the two
  * costliest late lint failures (check-capability-closure 7 and
@@ -64,6 +70,7 @@ static const struct {
     const char *gate, *command;
 } k_pc_prove[] = {
     {"check-capability-closure", "make check-capability-closure"},
+    {PC_STRICT_GATE, "make proof-compile-changed"},
 };
 
 static const char *const k_pc_core[] = {
@@ -78,6 +85,9 @@ static const char *const k_pc_core[] = {
 static const struct {
     const char *gate, *hint;
 } k_pc_hints[] = {
+    {PC_STRICT_GATE, "a changed C source fails the land proof bundle's strict compile "
+                     "(-O1 -D_FORTIFY_SOURCE=2 -Werror); fix the diagnostic above; "
+                     "reproduce: make proof-compile-changed"},
     {"check-kpi-floor", "a tracked KPI fell below its recorded floor; "
                         "restore the metric, never lower the floor"},
     {"check-describe-budget", "a describe leaf exceeds its byte budget; "
@@ -1006,6 +1016,9 @@ static int pc_gate_exec(struct pc_run *r, const char *gate, bool ship,
     if (size)
         return pc_size_run(r);
     r->gate_output_available = true;
+    if (strcmp(gate, PC_STRICT_GATE) == 0)
+        return pc_run(r->wt, "make", PC_STRICT_GATE, r->deadline, r->out,
+                      PC_OUT_CAP, &r->capture);
     if (strcmp(gate, PC_DEPFILE_GATE) == 0)
         return pc_run(r->wt, "./" PC_DEPFILE_BIN, NULL,
                       r->deadline, r->out, PC_OUT_CAP, &r->capture);
@@ -1028,11 +1041,20 @@ static const struct {
     {"check-windows-cross-syntax", "build/gen/guest_kernel_data.c", R_OK},
     {"check-doc-claims", "build/bin/z23_bounded_run", X_OK},
     {"check-package-anatomy", "build/bin/z23_bounded_run", X_OK},
+    {PC_STRICT_GATE, PC_STRICT_NEED, 0},
     {PC_DEPFILE_GATE, PC_DEPFILE_BIN, X_OK},
     {PC_DEPFILE_GATE, "Makefile", R_OK},
     {PC_DEPFILE_GATE, "tools/dev/make_depfile_scope_selftest.c", R_OK},
     {PC_DEPFILE_GATE, "tools/dev/make_depfile_scope_process.h", R_OK},
 };
+
+/* A need is a regular file with the given access mode, or (mode 0) a directory. */
+static bool pc_need_present(const char *path, int mode)
+{
+    struct stat st;
+    if (mode != 0) return pc_ship_file(path, mode);
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
 
 /* The launcher derives its root from its executable location. This is a
  * point-in-time location check, not executable freshness or identity proof. */
@@ -1070,7 +1092,7 @@ static const char *pc_missing_need(struct pc_run *r, const char *gate)
         if (strcmp(k_pc_needs[i].gate, gate) != 0)
             continue;
         if (snprintf(path, sizeof(path), "%s/%s", r->wt, k_pc_needs[i].file) <
-                (int)sizeof(path) && pc_ship_file(path, k_pc_needs[i].mode))
+                (int)sizeof(path) && pc_need_present(path, k_pc_needs[i].mode))
             continue;
         (void)snprintf(r->out, PC_OUT_CAP, "prerequisite unavailable: %s",
                        k_pc_needs[i].file);
@@ -1144,7 +1166,8 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                                       struct zcl_command_reply *reply)
 {
     bool ship = strcmp(gate, PC_SHIP_GATE) == 0;
-    bool script = ship || strcmp(gate, PC_DEPFILE_GATE) == 0;
+    bool script = ship || strcmp(gate, PC_DEPFILE_GATE) == 0 ||
+                  strcmp(gate, PC_STRICT_GATE) == 0;
     bool size = strcmp(gate, PC_SIZE_GATE) == 0 && !pc_known(list, gate);
     int rc;
     if (ship && !pc_ship_ready(r)) {
@@ -1318,6 +1341,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     }
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
                                pc_now(), g);
+    pc_gate_add(g, PC_STRICT_GATE, strlen(PC_STRICT_GATE));
     if (pc_model_sql_needed(wt))
         pc_gate_add(g, PC_MODEL_SQL_GATE, strlen(PC_MODEL_SQL_GATE));
     for (size_t i = 0; i < sizeof(k_pc_late) / sizeof(k_pc_late[0]); i++)

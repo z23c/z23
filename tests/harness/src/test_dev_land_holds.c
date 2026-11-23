@@ -1987,6 +1987,15 @@ static bool dlx_pc_named_train_note(void)
     return ok;
 }
 
+/* The strict-compile gate only runs in a lane that has a test object tree. */
+static bool dlx_pc_strict_lane(const struct dlx_rig *rig)
+{
+    char mk[1400];
+    (void)snprintf(mk, sizeof(mk), "%s/Makefile", rig->clone);
+    return dlx_write(mk, "proof-compile-changed:\n\t@echo proof-compile-changed: OK\n") &&
+           dlx_write_dep(rig->clone, "build/test-obj/epochs/.keep", "x");
+}
+
 bool dlx_pc_clean_lane_queued(void)
 {
     struct dlx_rig rig;
@@ -1997,6 +2006,8 @@ bool dlx_pc_clean_lane_queued(void)
                     "check-core-seal\ncheck-arm-symbol-single\n"
                     "check-kpi-floor\ncheck-describe-budget\n"
                     "check-hardening-ratchet\ncheck-no-new-bash\ncheck-capability-closure\n"))
+        return false;
+    if (!dlx_pc_strict_lane(&rig))
         return false;
     dlx_pc_submit(&c, &rig, NULL, NULL);
     ok = dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1 &&
