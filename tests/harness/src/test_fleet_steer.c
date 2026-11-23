@@ -6832,6 +6832,211 @@ static bool fmx_forward_seen(const struct json_value *changes, unsigned *seen)
     return true;
 }
 
+static bool fmx_compact_page(struct fmx_call *call, const char *token, size_t budget)
+{
+    fmx_brief_since(call, NULL, token);
+    (void)json_push_kv_bool(&call->input, "changes_only", true);
+    (void)json_push_kv_int(&call->input, "limit", 8);
+    call->request.budget_bytes = budget;
+    return fmx_run(call, zcl_native_handle_fleet_steer_brief) && fmx_ok(call);
+}
+
+static bool fmx_json_equal(const struct json_value *a, const struct json_value *b)
+{
+    char left[32768], right[32768];
+    if (!a || !b) return false;
+    size_t x = json_write(a, left, sizeof(left)), y = json_write(b, right, sizeof(right));
+    return x && x < sizeof(left) && x == y && y < sizeof(right) && !strcmp(left, right);
+}
+
+static int fmx_compact_equivalence(void)
+{
+    int failures = 0;
+    const clock_iface_t *saved = clock_default();
+    clock_iface_t fixed = {fmx_activity_monotonic_ns, fmx_activity_wall_ms, (void *)saved};
+    TEST("steer: opt-in mail pages omit snapshots and preserve exact projected changes") {
+        ASSERT(fmx_forward_setup("compact_equivalence"));
+        clock_set_default(&fixed);
+        fmx_seed_inbox("compact", "2026-09-20T00:00:00Z", 1, "sender", "agent",
+                       "directive", "bounded request", "compact-ref");
+        fmx_seed_inbox("compact", "2026-09-20T00:00:01Z", 2, "agent", "sender",
+                       "result", "accepted", "compact-ref");
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, "0|", 8, 65536));
+        ASSERT(fmx_compact_page(&compact, "0|", 65536));
+        ASSERT_EQ(fmx_changes_n(&full), fmx_changes_n(&compact));
+        ASSERT_EQ(fmx_changes_n(&compact), 2);
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        ASSERT_EQ(fmx_int(&full, "changes_dropped"), fmx_int(&compact, "changes_dropped"));
+        ASSERT_EQ(fmx_bool(&full, "changes_truncated"), fmx_bool(&compact, "changes_truncated"));
+        ASSERT(fmx_get(&compact, "snapshot_included") && !fmx_bool(&compact, "snapshot_included"));
+        ASSERT_STR_EQ(fmx_str(&compact, "changes_scope"), "mail");
+        ASSERT(fmx_get(&compact, "workers") == NULL && fmx_get(&compact, "sessions") == NULL);
+        ASSERT(fmx_get(&compact, "tasks") == NULL && fmx_get(&compact, "candidates") == NULL);
+        ASSERT(fmx_get(&compact, "caller") && fmx_get(&compact, "evidence") && fmx_get(&compact, "missing"));
+        ASSERT(fmx_get(&full, "workers") && fmx_get(&full, "tasks"));
+        ASSERT(json_write(&compact.reply.data, NULL, 0) + 100 < json_write(&full.reply.data, NULL, 0));
+        fmx_end(&full); fmx_end(&compact);
+        fmx_restore(); PASS();
+    } _test_next:;
+    clock_set_default(saved); fmx_restore();
+    return failures;
+}
+
+static int fmx_compact_input(void)
+{
+    int failures = 0;
+    TEST("steer: compact mode requires a boolean and a composite cursor") {
+        ASSERT(fmx_forward_setup("compact_input"));
+        for (int i = 0; i < 4; ++i) {
+            struct fmx_call c;
+            fmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+            if (i == 1) (void)json_push_kv_int(&c.input, "since", 0);
+            if (i == 2) (void)json_push_kv_str(&c.input, "since", "bad|token");
+            if (i == 3) (void)json_push_kv_str(&c.input, "since", "0|");
+            if (i == 3) (void)json_push_kv_str(&c.input, "changes_only", "true");
+            else (void)json_push_kv_bool(&c.input, "changes_only", true);
+            bool ran = fmx_run(&c, zcl_native_handle_fleet_steer_brief);
+            ASSERT(!ran || !fmx_ok(&c));
+            if (ran) ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+            fmx_end(&c);
+        }
+        struct fmx_call full;
+        fmx_brief(&full, NULL, 0);
+        (void)json_push_kv_bool(&full.input, "changes_only", false);
+        ASSERT(fmx_run(&full, zcl_native_handle_fleet_steer_brief) && fmx_ok(&full));
+        ASSERT(fmx_get(&full, "workers") && fmx_get(&full, "tasks"));
+        fmx_end(&full); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_budget(void)
+{
+    int failures = 0;
+    TEST("steer: compact byte cuts resume and zero-fit never advances") {
+        ASSERT(fmx_forward_setup("compact_budget"));
+        char body[1300]; memset(body, 'x', sizeof(body) - 1); body[sizeof(body) - 1] = 0;
+        for (unsigned i = 1; i <= 8; i++) {
+            char ref[32]; (void)snprintf(ref, sizeof(ref), "compact-%u", i);
+            fmx_seed_inbox("compact", "2026-09-20T00:00:00Z", i, "a", "b", "note", body, ref);
+        }
+        struct fmx_call first;
+        ASSERT(fmx_compact_page(&first, "0|", 4096));
+        size_t count = json_size(fmx_arr(&first, "changes"));
+        ASSERT(count > 0 && count < 8 && fmx_bool(&first, "changes_truncated"));
+        char token[4096], expected[32];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&first, "cursor_token"));
+        (void)snprintf(expected, sizeof(expected), "compact-%u", (unsigned)count + 1);
+        fmx_end(&first);
+        struct fmx_call next;
+        ASSERT(fmx_compact_page(&next, token, 4096));
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(fmx_arr(&next, "changes"), 0), "ref")), expected);
+        fmx_end(&next);
+        struct fmx_call stalled;
+        ASSERT(!fmx_compact_page(&stalled, "0|", 1024));
+        ASSERT_STR_EQ(stalled.reply.error.code, "BRIEF_PAGE_STALLED");
+        fmx_end(&stalled); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_stale(void)
+{
+    int failures = 0;
+    TEST("steer: compact stale stream refuses without returning a fresh cursor") {
+        ASSERT(fmx_forward_setup("compact_stale"));
+        fmx_seed_inbox("compact-stale", "2026-09-20T00:00:00Z", 1, "a", "b", "note",
+                       "a longer original retained row", "stale-original");
+        struct fmx_call first;
+        ASSERT(fmx_compact_page(&first, "0|", 65536));
+        char token[4096]; (void)snprintf(token, sizeof(token), "%s", fmx_str(&first, "cursor_token"));
+        ASSERT(token[0]); fmx_end(&first);
+        fmx_rewrite_inbox("compact-stale", "");
+        struct fmx_call stale;
+        ASSERT(!fmx_compact_page(&stale, token, 65536));
+        ASSERT(stale.reply.status != ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(fmx_missing_reason(&stale, "dev.agent.mail"), "MAIL_CURSOR_STALE"));
+        ASSERT(fmx_missing_has(&stale, "fleet.board"));
+        ASSERT(fmx_get(&stale, "caller") && fmx_get(&stale, "evidence"));
+        ASSERT(fmx_get(&stale, "cursor_token") == NULL || !fmx_str(&stale, "cursor_token")[0]);
+        fmx_end(&stale); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_multi(void)
+{
+    int failures = 0;
+    TEST("steer: compact pages cover two streams without gaps") {
+        ASSERT(fmx_forward_setup("compact_multi"));
+        for (unsigned i = 1; i <= 3; i++) {
+            char ref[32];
+            (void)snprintf(ref, sizeof(ref), "page-a-%u", i);
+            fmx_seed_inbox("a", "2026-09-20T00:00:00Z", i, "m", "b", "note", "a", ref);
+            (void)snprintf(ref, sizeof(ref), "page-b-%u", i);
+            fmx_seed_inbox("b", "2026-09-20T00:00:00Z", i, "m", "b", "note", "b", ref);
+        }
+        char token[4096] = "0|"; unsigned seen = 0;
+        for (unsigned p = 0; p < 8; p++) {
+            struct fmx_call c;
+            fmx_brief_since(&c, NULL, token);
+            (void)json_push_kv_bool(&c.input, "changes_only", true);
+            (void)json_push_kv_int(&c.input, "limit", 2);
+            ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief) && fmx_ok(&c));
+            const struct json_value *rows = fmx_arr(&c, "changes");
+            ASSERT(fmx_forward_seen(rows, &seen));
+            bool done = json_size(rows) == 0;
+            (void)snprintf(token, sizeof(token), "%s", fmx_str(&c, "cursor_token"));
+            fmx_end(&c);
+            if (done) break;
+        }
+        ASSERT_EQ(seen, 63u); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_authority(void)
+{
+    int failures = 0;
+    TEST("steer: compact mode retains grant scope and mail completion") {
+        char brief[64], denied[64];
+        fmx_isolate("compact_authority");
+        ASSERT(fmx_mint_as("brief,send", "oauth", brief, sizeof(brief)));
+        ASSERT(fmx_mint("send", denied, sizeof(denied)));
+        ASSERT(fmx_send_one(brief, "oauth", "worker-b", "compact-complete", "compact-key") >= 1);
+        fmx_seed_inbox("worker", "2099-09-20T00:00:00Z", 5, "worker-b", "oauth", "result", "accepted", "compact-complete");
+        for (int compact = 0; compact < 2; compact++) {
+            struct fmx_call c;
+            fmx_brief_since(&c, brief, "0|");
+            if (compact) (void)json_push_kv_bool(&c.input, "changes_only", true);
+            ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief) && fmx_ok(&c));
+            ASSERT_STR_EQ(fmx_change_state(fmx_arr(&c, "changes"), "oauth", "compact-complete"), "acknowledged");
+            fmx_end(&c);
+        }
+        fmx_seed_outcome("compact-complete", 0);
+        for (int compact = 0; compact < 2; compact++) {
+            struct fmx_call c;
+            fmx_brief_since(&c, brief, "0|");
+            if (compact) (void)json_push_kv_bool(&c.input, "changes_only", true);
+            ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief) && fmx_ok(&c));
+            ASSERT_STR_EQ(fmx_change_state(fmx_arr(&c, "changes"), "oauth", "compact-complete"), "completed");
+            ASSERT(fmx_get(&c, "caller")); fmx_end(&c);
+            fmx_brief_since(&c, denied, "0|");
+            if (compact) (void)json_push_kv_bool(&c.input, "changes_only", true);
+            ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief) && !fmx_ok(&c));
+            fmx_end(&c);
+            fmx_brief_since(&c, "00000000000000000000000000000000", "0|");
+            if (compact) (void)json_push_kv_bool(&c.input, "changes_only", true);
+            ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief) && !fmx_ok(&c));
+            fmx_end(&c);
+        }
+        fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
 static int fmx_t_forward_prefix(void)
 {
     int failures = 0;
@@ -7585,6 +7790,12 @@ int test_fleet_steer(void)
 #endif
 
     node_rpc_client_set_test_hook(fmx_no_node);
+    failures += fmx_compact_equivalence();
+    failures += fmx_compact_input();
+    failures += fmx_compact_budget();
+    failures += fmx_compact_stale();
+    failures += fmx_compact_multi();
+    failures += fmx_compact_authority();
     failures += fmx_t_forward_prefix();
     failures += fmx_t_forward_budget();
     failures += fmx_t_forward_boundary();

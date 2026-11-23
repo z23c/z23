@@ -481,13 +481,12 @@ bool command_registry_devagent_input_extra_bool_key(const char *key)
      * chain in command_registry.c already owns `units` as a positive token
      * amount, so a bool named `units` would be refused before any handler
      * ran — and renaming the ZSLP key would change a shipped money surface. */
-    return strcmp(key, "json") == 0 || strcmp(key, "force") == 0 ||
-           strcmp(key, "include_evidence_wires") == 0 ||
-           strcmp(key, "include_units") == 0 ||
-           strcmp(key, "list") == 0 || strcmp(key, "open") == 0 ||
-           strcmp(key, "publish") == 0 || strcmp(key, "fleet") == 0 ||
-           strcmp(key, "terminate") == 0 || strcmp(key, "qualify") == 0 ||
-           strcmp(key, "prove") == 0;
+    static const char *const keys[] = {
+        "json", "force", "include_evidence_wires", "include_units",
+        "list", "open", "publish", "fleet", "terminate", "qualify",
+        "prove", "changes_only",
+    };
+    return command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0]));
 }
 
 /* dev.land cancel names one request by its sequence number, and `--seq=3`

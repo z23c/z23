@@ -4820,57 +4820,65 @@ static void fmc_brief_evidence(struct fmc_brief_lists *l,
 }
 
 /* The scope words of a comma/space list, as a JSON array member. */
-static void fmc_caller_scopes(struct json_value *obj, const char *scopes)
+static bool fmc_caller_scopes(struct json_value *obj, const char *scopes)
 {
     struct json_value arr, word;
     char buf[sizeof(((struct fmc_caller *)0)->scopes)];
     size_t n = 0;
+    bool ok = true;
     json_init(&arr);
     json_set_array(&arr);
-    for (const char *p = scopes;; p++) {
+    for (const char *p = scopes; ok; p++) {
         if (*p != '\0' && *p != ',' && *p != ' ') {
-            if (n + 1 < sizeof(buf))
-                buf[n++] = *p;
+            if (n + 1 < sizeof(buf)) buf[n++] = *p;
             continue;
         }
         if (n > 0) {
             buf[n] = '\0';
             json_init(&word);
             json_set_str(&word, buf);
-            (void)json_push_back(&arr, &word);
+            ok = word.type == JSON_STR && json_push_back(&arr, &word);
             json_free(&word);
             n = 0;
         }
-        if (*p == '\0')
-            break;
+        if (*p == '\0') break;
     }
-    (void)json_push_kv(obj, "scopes", &arr);
+    if (ok) ok = json_push_kv(obj, "scopes", &arr);
     json_free(&arr);
+    return ok;
 }
 
-/* caller: the validated credential's own sender label, scopes and expiry.
- * An unlabelled grant names no sender and says why; the local operator is
- * its own mode and carries no grant fields. Never the grant id or token. */
-static void fmc_caller_emit(struct json_value *data,
-                            const struct fmc_caller *c)
+/* Preserve the nullable wire shape while reporting allocation failures. */
+static bool fmc_caller_nullable(struct json_value *o, const char *key, const char *s)
+{
+    if (s && s[0]) return json_push_kv_str(o, key, s);
+    struct json_value null_value;
+    json_init(&null_value);
+    json_set_null(&null_value);
+    bool ok = json_push_kv(o, key, &null_value);
+    json_free(&null_value);
+    return ok;
+}
+
+/* Caller is the validated credential's label, scopes and expiry, never its ID. */
+static bool fmc_caller_emit(struct json_value *data, const struct fmc_caller *c)
 {
     struct json_value o;
     char iso[32] = "";
     json_init(&o);
     json_set_object(&o);
-    (void)json_push_kv_str(&o, "mode", c->grant ? "grant" : "operator");
-    if (c->grant) {
-        fmc_put_str(&o, "sender", c->label);
-        if (!c->label[0])
-            (void)json_push_kv_str(&o, "sender_reason",
-                                   "STEER_GRANT_UNLABELLED");
-        fmc_caller_scopes(&o, c->scopes);
-        if (c->expires > 0)
-            fmc_now_iso(c->expires, iso, sizeof(iso));
-        fmc_put_str(&o, "expires", iso);
+    bool ok = json_push_kv_str(&o, "mode", c->grant ? "grant" : "operator");
+    if (ok && c->grant) {
+        ok = fmc_caller_nullable(&o, "sender", c->label);
+        if (ok && !c->label[0])
+            ok = json_push_kv_str(&o, "sender_reason", "STEER_GRANT_UNLABELLED");
+        if (ok) ok = fmc_caller_scopes(&o, c->scopes);
+        if (c->expires > 0) fmc_now_iso(c->expires, iso, sizeof(iso));
+        if (ok) ok = fmc_caller_nullable(&o, "expires", iso);
     }
-    (void)json_push_kv(data, "caller", &o);
+    if (ok) ok = json_push_kv(data, "caller", &o);
     json_free(&o);
+    return ok;
 }
 
 /* A verified local roster snapshot is not a receiver-liveness observation.
@@ -4938,7 +4946,7 @@ static bool fmc_brief_tasks_update(struct json_value *data, long long base_dropp
 }
 
 static bool fmc_brief_cursor_finish(struct zcl_command_reply *reply,
-    const struct fmc_mail_view *view, size_t budget, long long base_tasks_dropped)
+    const struct fmc_mail_view *view, size_t budget, long long base_tasks_dropped, bool include_tasks)
 {
     struct json_value *data = &reply->data;
     size_t initial = json_size(json_get(data, "changes"));
@@ -4948,7 +4956,7 @@ static bool fmc_brief_cursor_finish(struct zcl_command_reply *reply,
         char token[FMC_MAIL_SINCE_CAP];
         if (!zcl_devagent_mail_cursor_prefix(view->start_token, view->cursor_token, changes, token, sizeof(token)) ||
             !fmc_brief_cursor_set(data, token) || !fmc_brief_changes_set(data, view) ||
-            !fmc_brief_tasks_update(data, base_tasks_dropped)) {
+            (include_tasks && !fmc_brief_tasks_update(data, base_tasks_dropped))) {
             fmc_fail(reply, "BRIEF_CURSOR_PROJECTION", "native mail cursor could not be projected faithfully", "same since token retained by caller");
             return false;
         }
@@ -5009,7 +5017,7 @@ static bool fmc_brief_tasks_emit(struct fmc_brief_lists *lists,
 
 static void fmc_brief_finalize(const struct zcl_command_request *req,
                                struct zcl_command_reply *reply,
-                               const struct fmc_mail_view *mv)
+                               const struct fmc_mail_view *mv, bool include_tasks)
 {
     long long base_tasks_dropped = json_get_int(json_get(&reply->data, "tasks_dropped"));
     size_t budget = mv && mv->forward ? fmc_brief_data_budget(req) : FMC_REPLY_SOFT_BUDGET - 512u;
@@ -5017,8 +5025,8 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "brief budget metadata could not be copied", "json");
         return;
     }
-    if (mv && mv->forward && !fmc_brief_cursor_finish(reply, mv, budget, base_tasks_dropped)) return;
-    if (!fmc_brief_tasks_update(&reply->data, base_tasks_dropped)) {
+    if (mv && mv->forward && !fmc_brief_cursor_finish(reply, mv, budget, base_tasks_dropped, include_tasks)) return;
+    if (include_tasks && !fmc_brief_tasks_update(&reply->data, base_tasks_dropped)) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count projection is incomplete", "json");
         return;
     }
@@ -5026,44 +5034,96 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
     reply->exit_code = 0;
 }
 
+static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lists *l,
+                           struct fmc_roster *ro, const struct fmc_emit_ctx *ec,
+                           bool changes_only)
+{
+    if (!changes_only && !fmc_mailbox_directory(&reply->data, ec->caller, ec->now)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "mailbox directory could not be copied", "json");
+        return false;
+    }
+    if (changes_only && (!json_push_kv_bool(&reply->data, "snapshot_included", false) ||
+                         !json_push_kv_str(&reply->data, "changes_scope", "mail"))) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "compact metadata could not be copied", "json");
+        return false;
+    }
+    if (!changes_only) {
+        (void)json_push_kv(&reply->data, "agents", &l->agents);
+        fmc_workers_emit(&reply->data, ro, ec);
+        fmc_sessions_emit(&reply->data, ro, ec->now);
+        (void)json_push_kv(&reply->data, "work", &l->work);
+        (void)json_push_kv(&reply->data, "blockers", &l->blockers);
+        (void)json_push_kv(&reply->data, "capacity", &l->capacity);
+    }
+    struct json_value compact_summary;
+    json_init(&compact_summary); json_set_object(&compact_summary);
+    zcl_fmc_cand_emit(&l->cand, &l->candidates,
+                       changes_only ? &compact_summary : &reply->data, &l->missing);
+    json_free(&compact_summary);
+    if (!changes_only) (void)json_push_kv(&reply->data, "candidates", &l->candidates);
+    return true;
+}
+
 static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_command_reply *reply,
                             struct fmc_brief_lists *l,
                             struct fmc_roster *ro,
                             const struct fmc_emit_ctx *ec,
                             const struct fmc_mail_view *mv,
-                            long long mail_cursor)
+                            long long mail_cursor, bool changes_only)
 {
     if (mv && mv->projection_failed) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "mail change projection failed; cursor is unchanged", "json");
         return;
     }
     (void)json_push_kv_str(&reply->data, "leaf", FMC_LEAF);
-    fmc_caller_emit(&reply->data, ec->caller);
-    if (!fmc_mailbox_directory(&reply->data, ec->caller, ec->now)) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "mailbox directory could not be copied", "json");
+    if (!fmc_caller_emit(&reply->data, ec->caller)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "caller could not be copied", "json");
         return;
     }
-    (void)json_push_kv(&reply->data, "agents", &l->agents);
-    fmc_workers_emit(&reply->data, ro, ec);
-    fmc_sessions_emit(&reply->data, ro, ec->now);
-    (void)json_push_kv(&reply->data, "work", &l->work);
-    (void)json_push_kv(&reply->data, "blockers", &l->blockers);
-    (void)json_push_kv(&reply->data, "capacity", &l->capacity);
-    zcl_fmc_cand_emit(&l->cand, &l->candidates, &reply->data, &l->missing);
-    (void)json_push_kv(&reply->data, "candidates", &l->candidates);
-    (void)json_push_kv(&reply->data, "evidence", &l->evidence);
+    if (!fmc_brief_view(reply, l, ro, ec, changes_only)) return;
+    if (!json_push_kv(&reply->data, "evidence", &l->evidence) && changes_only) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "evidence could not be copied", "json");
+        return;
+    }
     if (!fmc_brief_changes_copy(&reply->data, &l->changes) ||
         !fmc_brief_mail_meta(&reply->data, mv, mail_cursor)) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "mail changes or cursor metadata could not be copied", "json");
         return;
     }
-    (void)json_push_kv(&reply->data, "missing", &l->missing);
-    if (!fmc_brief_tasks_emit(l, reply)) return;
-    if (!json_push_kv_int(&reply->data, "tasks_shown", 0)) {
+    if (!json_push_kv(&reply->data, "missing", &l->missing) && changes_only) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "missing metadata could not be copied", "json");
+        return;
+    }
+    if (!changes_only && !fmc_brief_tasks_emit(l, reply)) return;
+    if (!changes_only && !json_push_kv_int(&reply->data, "tasks_shown", 0)) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count could not be copied", "json");
         return;
     }
-    fmc_brief_finalize(req, reply, mv);
+    fmc_brief_finalize(req, reply, mv, !changes_only);
+}
+
+/* Keep source diagnostics on a failed compact read, never a usable cursor. */
+static void fmc_compact_read_failure(struct zcl_command_reply *reply,
+                                     struct fmc_brief_lists *l,
+                                     const struct fmc_caller *caller)
+{
+    struct json_value summary;
+    json_init(&summary); json_set_object(&summary);
+    zcl_fmc_cand_emit(&l->cand, &l->candidates, &summary, &l->missing);
+    json_free(&summary);
+    bool ok = fmc_caller_emit(&reply->data, caller) &&
+        json_push_kv_bool(&reply->data, "snapshot_included", false) &&
+        json_push_kv_str(&reply->data, "changes_scope", "mail") &&
+        json_push_kv(&reply->data, "evidence", &l->evidence) &&
+        json_push_kv(&reply->data, "missing", &l->missing);
+    const struct json_value *missing = json_get(&reply->data, "missing");
+    ok = ok && missing && json_size(missing) == json_size(&l->missing);
+    if (!ok) {
+        json_free(&reply->data); json_init(&reply->data); json_set_object(&reply->data);
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "failure diagnostics could not be copied", "since token unchanged");
+        return;
+    }
+    fmc_fail(reply, "STEER_BRIEF_DEGRADED", "mail cursor could not be observed", "since token unchanged");
 }
 
 /* A receiver that has run on this box (the lock file exists) and is not
@@ -5078,6 +5138,25 @@ static void fmc_receiver_down_incident(struct json_value *blockers,
         return;
     fmc_push_blocker(blockers,
                      "local receiver down: receive.lock free");
+}
+
+/* A compact view is a mail feed, and must never silently become a snapshot. */
+static bool fmc_brief_compact(const struct zcl_command_request *req,
+                              bool *compact, struct zcl_command_reply *reply)
+{
+    const struct json_value *flag = req && req->input ? json_get(req->input, "changes_only") : NULL;
+    *compact = false;
+    if (!flag) return true;
+    if (flag->type != JSON_BOOL) goto invalid;
+    if (!json_get_bool(flag)) return true;
+    const struct json_value *since = json_get(req->input, "since");
+    const char *token = since && since->type == JSON_STR ? json_get_str(since) : NULL;
+    if (!token || !strchr(token, '|') || !zcl_devagent_mail_cursor_valid(token)) goto invalid;
+    *compact = true;
+    return true;
+invalid:
+    fmc_fail(reply, "BAD_INPUT", "changes_only requires a valid composite since token", "changes_only");
+    return false;
 }
 
 static void fmc_do_brief(const struct zcl_command_request *req,
@@ -5096,6 +5175,8 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     struct fmc_ledger_view ledger;
     struct fmc_board_observation board;
     long long mail_cursor, tmp;
+    bool changes_only;
+    if (!fmc_brief_compact(req, &changes_only, reply)) return;
     if (!fmc_roster_init(&ro)) {
         fmc_roster_free(&ro);
         fmc_fail(reply, "STEER_BRIEF_ALLOC", "cannot allocate the worker "
@@ -5142,7 +5223,10 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     ec.outcomes = &l.outcomes;
     ec.qv = &qv;
     ec.lo = &lo;
-    fmc_brief_reply(req, reply, &l, &ro, &ec, &mv, mail_cursor);
+    if (changes_only && (!mv.ok || !mv.forward))
+        fmc_compact_read_failure(reply, &l, who);
+    else
+        fmc_brief_reply(req, reply, &l, &ro, &ec, &mv, mail_cursor, changes_only);
     if (reply->status == ZCL_COMMAND_STATUS_PASSED && !mv.forward &&
         !json_get_bool(json_get(req->input, "json"))) {
         char screen[4096];

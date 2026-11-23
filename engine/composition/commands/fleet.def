@@ -725,15 +725,15 @@ ZCL_COMMAND_READY_READ(
     "differs from activity active|completed|blocked|stale|UNKNOWN. "
     "sessions_active_reported: self-reports, not model turns. Unknown "
     "numbers null; capacity known/reason; tokens require receipts. "
-    "Messages queued/delivered/acknowledged/completed; reply answered|"
-    "ambiguous|acked|queued. reply_to_origin is heuristic (answer_heuristic). "
+    "Messages report delivery and answer states; reply_to_origin is heuristic. "
     "Own outbox proves no delivery; recipient reply/ACK under "
     "ref required. Queued age>120s without receiver evidence blocks "
     "(newest8, rest counted). tasks: bounded local queue/landing attempts "
     "with identity/owner/dependency/proof/detail; no canonical joins. "
     "review/publication unknown; tasks_inventory_complete=false. "
     "tasks_sources_complete/tasks_shown/tasks_dropped report coverage. "
-    "json=true omits screen. Token since: native "
+    "json=true omits screen. changes_only=true needs token since; mail changes, "
+    "no snapshots. Token since: "
     "stream-order prefixes: start 0|, resume returned cursor_token even when "
     "changes_truncated. Credit displayed changes after row/byte limits; "
     "omitted rows pending. Zero-fit pending pages refuse without "
@@ -743,7 +743,7 @@ ZCL_COMMAND_READY_READ(
     "expiry, never grant id; local operator: mode only. Read-only.", 65536,
     "fleet,steer,brief,steering,chatgpt,cursor,agents,blockers,capacity",
     "zcl.fleet_steer_brief.input.v1", "zcl.fleet_steer_brief.v1",
-    "grant,since,limit,json", "",
+    "grant,since,limit,json,changes_only", "",
     "z23 fleet steer brief",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
