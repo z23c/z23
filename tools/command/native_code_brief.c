@@ -1006,6 +1006,20 @@ static bool cb_push_owners(struct json_value *data, const struct cb_brief *b)
     return ok;
 }
 
+/* One lesson as the brief reports it. */
+static bool cb_lesson_object(struct json_value *o, const struct cb_lesson *l)
+{
+    return json_push_kv_str(o, "slug", l->slug) &&
+           json_push_kv_str(o, "rule", l->rule) &&
+           json_push_kv(o, "matched", &l->matched) &&
+           json_push_kv_str(o, "scope", l->pub ? "public" : "fleet") &&
+           json_push_kv_str(o, "match", cb_rank_name((enum cb_rank)l->rank)) &&
+           json_push_kv_bool(o, "author_role", l->author_role) &&
+           (l->age_days < 0 || json_push_kv_int(o, "age_days", l->age_days)) &&
+           json_push_kv_bool(o, "stale", l->stale_reason != NULL) &&
+           (!l->stale_reason || json_push_kv_str(o, "stale_reason", l->stale_reason));
+}
+
 static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b)
 {
     struct json_value arr;
@@ -1016,17 +1030,7 @@ static bool cb_push_lessons(struct json_value *data, const struct cb_brief *b)
         struct json_value o;
         json_init(&o);
         json_set_object(&o);
-        const struct cb_lesson *l = &b->lessons[i];
-        ok = json_push_kv_str(&o, "slug", l->slug) &&
-             json_push_kv_str(&o, "rule", l->rule) &&
-             json_push_kv(&o, "matched", &l->matched) &&
-             json_push_kv_str(&o, "scope", l->pub ? "public" : "fleet") &&
-             json_push_kv_str(&o, "match", cb_rank_name((enum cb_rank)l->rank)) &&
-             json_push_kv_bool(&o, "author_role", l->author_role) &&
-             (l->age_days < 0 || json_push_kv_int(&o, "age_days", l->age_days)) &&
-             json_push_kv_bool(&o, "stale", l->stale_reason != NULL) &&
-             (!l->stale_reason || json_push_kv_str(&o, "stale_reason", l->stale_reason)) &&
-             json_push_back(&arr, &o);
+        ok = cb_lesson_object(&o, &b->lessons[i]) && json_push_back(&arr, &o);
         json_free(&o);
     }
     if (ok) ok = json_push_kv(data, "lessons", &arr);
