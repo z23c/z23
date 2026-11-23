@@ -3105,8 +3105,15 @@ static bool arpt_preview(struct ak_fixture *f, struct app_receive_preview *p,
     ok = ok && arpt_failed_open(f, p, failure) && app_receive_preview_open_input(p, &leaf.in) &&
         abc_pass("app.open", &leaf) && arpt_wire(&leaf, "app.open", &wire);
     aso_track_ready(&leaf.out.data, &f->build);
-    ok = ok && aj_live_identity(&leaf.out.data, &f->build) &&
+    struct json_value *data = (struct json_value *)json_get(&wire, "data");
+    struct json_value *basis = (struct json_value *)json_get(data, "ready_basis");
+    ok = ok && aj_live_identity(&leaf.out.data, &f->build) && basis &&
         app_receive_preview_bind_preview(p, &wire, failure);
+    if (ok) json_set_str(basis, "unknown");
+    ok = ok && !app_receive_preview_bind_preview(p, &wire, failure) &&
+        !strcmp(failure->error.code, "PREVIEW_NOT_READY");
+    if (ok) json_set_str(basis, "marker");
+    ok = ok && app_receive_preview_bind_preview(p, &wire, failure);
     json_free(&wire); abc_close(&leaf);
     bool cleaned = aso_cleanup_children(); return ok && cleaned;
 }

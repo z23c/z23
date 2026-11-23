@@ -604,8 +604,9 @@ bool app_receive_preview_bind_preview(struct app_receive_preview *p,
     p->previewed = false;
     const struct json_value *d = arp_envelope(envelope, "app.open");
     if (!p->built || !arp_open_tuple(p, d) || !arp_text(d, "status", "opened") ||
-        !arp_bool(d, "ready", true) || !arp_bool(d, "exited", false) || !arp_text(d, "ready_basis", "alive"))
-        return arp_fail(r, "PREVIEW_NOT_READY", "exact selected app must report successful alive preview");
+        !arp_bool(d, "ready", true) || !arp_bool(d, "exited", false) ||
+        (!arp_text(d, "ready_basis", "alive") && !arp_text(d, "ready_basis", "marker")))
+        return arp_fail(r, "PREVIEW_NOT_READY", "exact selected app must report a successful ready preview");
     if (!arp_process(d)) return arp_fail(r, "PREVIEW_NOT_READY", "preview process identity is missing or unsupported");
     if (!arp_state_current(p, r) || !arp_history(&p->choice, p->trust, r) || !arp_record(&p->choice, r)) return false;
     p->previewed = true; return true;
