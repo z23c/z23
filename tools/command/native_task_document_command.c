@@ -202,14 +202,18 @@ static struct zcl_result ntd_change(const struct json_value *input,
 }
 
 static bool ntd_render(struct json_value *data, const struct task_document *row,
-                        int64_t elapsed, const char *directory)
+                        int64_t elapsed, const char *directory, const char *action)
 {
+    bool interactive = action && (!strcmp(action, "open") || !strcmp(action, "new"));
     json_set_object(data);
     if (!json_push_kv_str(data, "data_directory", directory) ||
         !json_push_kv_str(data, "save_state", "Saved") ||
         !json_push_kv_int(data, "revision", (int64_t)row->state.revision) ||
         !json_push_kv_bool(data, "can_undo", row->can_undo) ||
-        !json_push_kv_int(data, "storage_us", elapsed)) return false;
+        !json_push_kv_int(data, "operation_us", elapsed)) return false;
+    /* The legacy noninteractive duration includes open/read-or-write/close.
+     * A window's lifetime includes user interaction, not storage latency. */
+    if (!interactive && !json_push_kv_int(data, "storage_us", elapsed)) return false;
     struct json_value tasks = {0};
     json_set_array(&tasks);
     bool ok = true;
@@ -342,7 +346,7 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
     if (result.ok && !closed.ok) result = closed;
     if (result.ok) {
         bool rendered = offering ? ntd_offer_render(&reply->data, &offer, directory, &kept)
-            : ntd_render(&reply->data, &row, platform_time_monotonic_us() - began, directory);
+            : ntd_render(&reply->data, &row, platform_time_monotonic_us() - began, directory, action);
         if (!rendered) result = ZCL_ERR(-1, "tasks: operation completed but confirmation allocation failed; read status before retrying");
     }
     ntd_source_next(reply, directory, &kept, action, result.ok);
