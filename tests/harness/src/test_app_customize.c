@@ -1099,23 +1099,42 @@ static bool act_tasks_resident_file(void)
 
 #endif
 
+static bool act_selection_recovery(const char *directory, bool expect_next)
+{
+    char old[4096];
+    (void)snprintf(old, sizeof(old), "%s", zcl_native_command_datadir());
+    int port = zcl_native_command_rpc_port();
+    zcl_native_bridge_bind_rpc(directory, port);
+    struct abc_leaf l;
+    bool ok = act_call(&l, NULL, false);
+    if (ok) {
+        ok = act_result(&l, "SELECTION_REQUIRED") && !l.out.error.mutated &&
+            strstr(l.out.error.message, "same data directory") &&
+            !strstr(l.out.error.message, "--yes") &&
+            l.out.next_count == (expect_next ? 1u : 0u);
+        if (ok && expect_next)
+            ok = !strcmp(l.out.next[0].command, "app.copy") &&
+                strstr(l.out.next[0].input_json, "\"app\":\"skycombat\"") &&
+                strstr(l.out.next[0].input_json, directory) &&
+                !strstr(l.out.next[0].input_json, "confirm");
+        abc_close(&l);
+    }
+    zcl_native_bridge_bind_rpc(old, port);
+    return ok;
+}
+
 static bool act_selection_refusal(struct ac_fixture *f)
 {
     char path[1600], saved[1620];
     (void)snprintf(path, sizeof(path), "%s/skycombat.selection", f->env.state_dir);
     (void)snprintf(saved, sizeof(saved), "%s.saved", path);
     if (rename(path, saved)) return false;
+    char long_dir[600]; memset(long_dir, 'x', sizeof(long_dir) - 1);
+    long_dir[0] = '/'; long_dir[sizeof(long_dir) - 1] = '\0';
+    bool ok = act_selection_recovery("/private/profile with spaces", true) &&
+              act_selection_recovery(long_dir, false) &&
+              act_selection_recovery("/private/profile'quoted", false);
     struct abc_leaf l;
-    bool ok = act_call(&l, NULL, false);
-    if (ok) {
-        ok = act_result(&l, "SELECTION_REQUIRED");
-        if (ok && (!strstr(l.out.error.message, "app copy skycombat --yes") ||
-                   !strstr(l.out.error.message, "app save"))) {
-            printf("selection refusal does not name the commands: %s\n", l.out.error.message);
-            ok = false;
-        }
-        abc_close(&l);
-    }
     FILE *file = fopen(path, "wb");
     bool wrote = file && fputs("corrupt selection", file) >= 0;
     if (file && fclose(file)) wrote = false;

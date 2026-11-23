@@ -201,13 +201,23 @@ static bool ac_selection_required(struct ac_read *a)
         (void)ac_fail(a, "SELECTION_REQUIRED", "No app copy is selected. For the program kept in Tasks, read app.tasks offer-status using the same data directory.");
         return false;
     }
-    char copy[72], save[64], message[192];
-    bool made = zcl_app_hint(copy, sizeof(copy), NULL, "copy %s --yes", a->name) &&
-        zcl_app_hint(save, sizeof(save), NULL, "save %s", "<copy name>");
-    (void)snprintf(message, sizeof(message),
-        "no version was selected; run '%s', then '%s' to keep one",
-        made ? copy : "z23 app copy <app> --yes", made ? save : "z23 app save <copy name>");
-    return ac_fail(a, "SELECTION_REQUIRED", message);
+    return ac_fail(a, "SELECTION_REQUIRED", "No version is selected. Plan a copy of this app in the same data directory, then save the new copy.");
+}
+
+/* Offer only a complete, inert copy plan bound to the selected profile. */
+static void ac_copy_recovery(struct ac_read *a)
+{
+    const char *directory = zcl_native_command_datadir();
+    if (!directory || !directory[0]) return;
+    struct json_value args; json_init(&args); json_set_object(&args);
+    bool ok = json_push_kv_str(&args, "app", a->name) &&
+              json_push_kv_str(&args, "datadir", directory);
+    char wire[sizeof(a->reply->next[0].input_json)];
+    size_t n = ok ? json_write(&args, wire, sizeof(wire)) : 0;
+    if (n && n < 384 && n < sizeof(wire) && !strchr(wire, '\''))
+        (void)zcl_command_reply_add_next(a->reply, "app.copy", wire,
+            "Review a copy plan in the same data directory.");
+    json_free(&args);
 }
 
 static bool ac_select(struct ac_read *a)
@@ -704,8 +714,10 @@ void zcl_native_handle_app_customize(const struct zcl_command_request *request,
     if (ok) { json_free(&reply->data); reply->data = a->data; json_init(&a->data); }
     else {
         reply->next_count = 0;
-        if (a->name && !strcmp(a->name, "tasks") && !strcmp(reply->error.code, "SELECTION_REQUIRED"))
-            ac_tasks_recovery(reply);
+        if (a->name && !strcmp(reply->error.code, "SELECTION_REQUIRED")) {
+            if (!strcmp(a->name, "tasks")) ac_tasks_recovery(reply);
+            else ac_copy_recovery(a);
+        }
     }
     json_free(&a->data); vcs_manifest_free(&a->manifest); zcl_package_copy_close(&a->copy); free(a);
 }
