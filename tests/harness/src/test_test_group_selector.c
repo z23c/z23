@@ -2661,11 +2661,15 @@ static bool tgs_retry_timing(void)
     struct json_value timing = {0};
     if (!selector_timing_read(&timing)) return false;
     const struct json_value *rows = json_get(&timing, "groups");
-    const struct json_value *row = rows ? json_at(rows, 0) : NULL;
-    const struct json_value *ms = row ? json_get(row, "ms") : NULL;
-    bool ok = rows && json_size(rows) == 1 && ms && ms->type == JSON_INT &&
-        json_get_int(ms) >= 0 && json_get_bool(json_get(row, "measured")) &&
-        json_get_bool(json_get(row, "timing_valid")) && !json_get_bool(json_get(row, "cached"));
+    bool ok = rows && json_size(rows) == 2;
+    for (size_t i = 0; ok && i < 2; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const struct json_value *ms = row ? json_get(row, "ms") : NULL;
+        ok = ms && ms->type == JSON_INT && json_get_int(ms) >= 0 &&
+            json_get_bool(json_get(row, "measured")) &&
+            json_get_bool(json_get(row, "timing_valid")) &&
+            !json_get_bool(json_get(row, "cached"));
+    }
     json_free(&timing);
     return ok;
 }
@@ -3334,7 +3338,7 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
         int n = snprintf(command, sizeof(command),
             "cd '%s' && '%s' --jobs=2 --no-cache "
-            "%s --exact=test_hex_codec 2>&1", root, exe, mode);
+            "%s --exact=test_hex_codec,test_codec_cursor 2>&1", root, exe, mode);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         int rc = capture_command(command, out, sizeof(out));
         ASSERT(tgs_retry_timing());
@@ -3362,9 +3366,45 @@ static int tgs_retry_case(const char *mode, bool rename_failure)
     return failures;
 }
 
+static int tgs_single_admitted_case(const char *mode, bool unobserved)
+{
+    int failures = 0;
+    TEST("runner: one admitted group keeps its first result without retry") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], command[3 * PATH_MAX];
+        char count_path[PATH_MAX + 32];
+        test_make_tmpdir(root, sizeof(root), "tgs_single", "evidence");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --jobs=2 --no-cache %s --exact=test_hex_codec 2>&1",
+            root, exe, mode);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        int rc = capture_command(command, out, sizeof(out));
+        ASSERT_EQ(rc, 1);
+        n = snprintf(count_path, sizeof(count_path), "%s/retry-evidence-count", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(count_path));
+        FILE *f = fopen(count_path, "r");
+        unsigned count = 0;
+        bool read_ok = f && fscanf(f, "%u", &count) == 1;
+        if (f && fclose(f) != 0) read_ok = false;
+        ASSERT(read_ok);
+        ASSERT_EQ(count, 1u);
+        ASSERT(strstr(out, "RETRY-EVIDENCE-FIRST") != NULL);
+        ASSERT(strstr(out, "[rerun-alone]") == NULL);
+        ASSERT(strstr(out, "LOAD-FLAKY") == NULL);
+        ASSERT(strstr(out, unobserved ? "groups_failed=0" : "groups_failed=1") != NULL);
+        if (unobserved) ASSERT(strstr(out, "env_unobserved=1") != NULL);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_runner_retry_evidence(void)
 {
-    return (proof_retry_fixture_edges() ? 0 : 1) + tgs_retry_case("--retry-evidence-probe", false) +
+    return tgs_single_admitted_case("--retry-evidence-probe", false) +
+           tgs_single_admitted_case("--retry-evidence-unobserved", true) +
+           (proof_retry_fixture_edges() ? 0 : 1) + tgs_retry_case("--retry-evidence-probe", false) +
            tgs_retry_case("--retry-evidence-unobserved", false) +
            tgs_retry_case("--retry-evidence-rename-failure", true);
 }
@@ -3534,7 +3574,7 @@ static int test_runner_retry_probe_bounds(void)
         char exe[PATH_MAX], command[3 * PATH_MAX], out[8192];
         const char *options[] = {
             "--exact=test_hex_codec",
-            "--no-cache --exact=test_hex_codec,test_codec_cursor",
+            "--no-cache --exact=test_codec_cursor",
             "--no-cache --exact=test_hex_codec --list",
             "--no-cache --exact=test_hex_codec --cache-probe-only",
             "--no-cache --exact=test_hex_codec --cache"

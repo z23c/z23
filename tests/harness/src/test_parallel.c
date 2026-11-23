@@ -1199,17 +1199,17 @@ static bool retry_probe_options(int argc, char **argv)
         "--jobs=2", "--verbose", "--no-cache", "--exact=test_hex_codec",
         "--retry-evidence-probe", "--retry-evidence-unobserved",
         "--retry-evidence-rename-failure", "--diagnostic-once", "--retry-evidence-always-fail",
-        "--retry-evidence-signal"
+        "--retry-evidence-signal", "--exact=test_hex_codec,test_codec_cursor"
     };
-    unsigned seen[10] = {0};
+    unsigned seen[11] = {0};
     for (int i = 1; i < argc; i++) {
         size_t j = 0;
-        while (j < 10 && strcmp(argv[i], allowed[j]) != 0) j++;
-        if (j == 10 || seen[j]++) return false;
+        while (j < 11 && strcmp(argv[i], allowed[j]) != 0) j++;
+        if (j == 11 || seen[j]++) return false;
     }
-    return seen[2] == 1 && seen[3] == 1 &&
+    return seen[2] == 1 && seen[3] + seen[10] == 1 &&
         seen[4] + seen[5] + seen[6] + seen[8] + seen[9] == 1 &&
-        (!seen[9] || seen[7] == 1) && !getenv("ZCL_TEST_CACHE_DUMP");
+        (!seen[9] || (seen[7] == 1 && seen[3] == 1)) && !getenv("ZCL_TEST_CACHE_DUMP");
 }
 
 static bool retry_probe_admit(int argc, char **argv)
@@ -1222,7 +1222,7 @@ static bool retry_probe_admit(int argc, char **argv)
     }
 #endif
     if (!retry_probe_options(argc, argv)) {
-        fprintf(stderr, "retry evidence fixture requires --no-cache and exact test_hex_codec only\n");
+        fprintf(stderr, "retry evidence fixture requires --no-cache and exact test_hex_codec, optionally with test_codec_cursor\n");
         return false;
     }
     printf("SYNTHETIC RETRY EVIDENCE FIXTURE: forced failure, no verdict reuse\n");
@@ -4344,11 +4344,14 @@ static int run_execute(struct run_ctx *c)
 
     if (!run_phases_ok(c)) return run_phases_abort(c);
 
-    /* Every group that FAILed or was WEDGED under the shared pool gets one
+    /* Only a run with multiple selected groups can have runner pool contention.
+     * A lone selected group already ran without another group competing.
+     * Every group that FAILed or was WEDGED under the shared pool gets one
      * clean shot alone before it counts — see rerun_load_flaky_groups. This
      * runs before the pass/fail accounting below so a load-flaky group's
      * alone verdict is what gets counted, cached, and reported. */
-    if (!c->o.diagnostic_once)
+    if (!c->o.diagnostic_once &&
+        g_num_groups - c->pre_skipped > 1)
         rerun_load_flaky_groups(c->results, c->parent_pid, c->o.timeout_secs,
                                 c->o.verbose, c->o.activate_proof_contracts);
     return RUN_CONTINUE;
