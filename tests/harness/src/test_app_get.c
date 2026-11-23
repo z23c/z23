@@ -3058,14 +3058,12 @@ static void tag_xdg_leave(struct tag_xdg *x)
 static bool tag_discover_library_layout(const struct zcl_present_model_v1 *model, bool detail)
 {
     if (detail) return model->action_count == 4u && strstr(model->summary, "tinyapp");
-    if (model->action_count == 3u)
-        return strstr(model->summary, "tinyapp") &&
-            !strcmp(model->actions[0].id, "choose") &&
-            !strcmp(model->actions[1].id, "create") &&
-            !strcmp(model->actions[2].id, "home");
-    return model->action_count == 4u && strstr(model->summary, "tinyapp") &&
-        !strcmp(model->actions[0].id, "choose") &&
-        !strcmp(model->actions[1].id, "previous") &&
+    if (model->action_count != 4u || !strstr(model->summary, "tinyapp") ||
+        strcmp(model->actions[0].id, "choose")) return false;
+    if (!strcmp(model->actions[1].id, "create"))
+        return !strcmp(model->actions[2].id, "home") &&
+            !strcmp(model->actions[3].id, "recover-copies");
+    return !strcmp(model->actions[1].id, "previous") &&
         !strcmp(model->actions[2].id, "create") &&
         !strcmp(model->actions[3].id, "home");
 }
@@ -3073,7 +3071,14 @@ static bool tag_discover_library_card(struct tag_discover *d, const struct zcl_p
     struct zcl_present_window_event_v1 *event)
 {
     bool detail = !strcmp(model->actions[0].id, "open");
-    if (!tag_discover_library_layout(model, detail)) return false;
+    if (!tag_discover_library_layout(model, detail)) {
+        printf("[discover library layout rejected: request=%.*s actions=%u",
+               (int)sizeof(model->request_id), model->request_id, model->action_count);
+        for (uint32_t i = 0; i < model->action_count && i < ZCL_PRESENT_MODEL_ACTIONS_MAX; ++i)
+            printf(" %.*s", (int)sizeof(model->actions[i].id), model->actions[i].id);
+        printf("]\n");
+        return false;
+    }
     if (detail) ++d->detail;
     else ++d->browser;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
