@@ -1774,10 +1774,9 @@ static int afd_recipe_open(const struct afd_world *w)
             printf("  [recipe open rc=%d text=%s]\n", run.rc, run.text);
         ASSERT_EQ(run.rc, 0);
         ASSERT(strstr(run.text, "copy: tinyprog-1") != NULL);
-        /* Nothing was spawned: the reported pid is 0, never a live child.
-         * (The door prints "opened tinyprog-1 pid 0"; the receive-copy
-         * leaf copies the inner pid verbatim.) */
-        ASSERT(asf_door_pid(run.text) == 0);
+        /* The recipe is ready to invoke, but did not spawn a window. */
+        ASSERT(strstr(run.text, "ready to invoke tinyprog-1") != NULL);
+        ASSERT(strstr(run.text, "opened tinyprog-1 pid 0") == NULL);
         ASSERT(strstr(run.text, "next:") != NULL);
         ASSERT(strstr(run.text, "app invoke package") != NULL);
         ASSERT(strstr(run.text, "bin/tinyprog") != NULL);

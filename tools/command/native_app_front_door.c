@@ -382,6 +382,21 @@ static bool fd_confirm_input(struct fd_run *r)
                                 json_push_kv_str(&r->in, "image_sha3", image)));
 }
 
+static void fd_print_result_line(struct fd_run *r)
+{
+    const struct json_value *pid = json_get(&r->reply.data, "pid");
+    if (pid && pid->type == JSON_INT && json_get_int(pid) > 0)
+        (void)fprintf(r->out, "opened %s pid %lld\n",
+                      fd_str(r, "copy") ? fd_str(r, "copy") : r->target,
+                      (long long)json_get_int(pid));
+    else if (pid && pid->type == JSON_INT && json_get_int(pid) == 0 && fd_str(r, "next"))
+        (void)fprintf(r->out, "ready to invoke %s\n",
+                      fd_str(r, "copy") ? fd_str(r, "copy") : r->target);
+    else
+        (void)fprintf(r->out, "done: z23 app %s %s\n", r->door->verb,
+                      r->door->target);
+}
+
 static void fd_print_done(struct fd_run *r)
 {
     static const char *const keys[] = {
@@ -389,14 +404,7 @@ static void fd_print_done(struct fd_run *r)
         "post_id", "public_link", "image_sha3", "image_path", "log", "next",
         "rebuild_report", "rebuild_count_status", "rebuild_retry", "hosting_status", "hosting_host",
         "hosting_carrier", "hosting_status_command", "hosting_stop_command", "hosting_retry", "hosting_retry_note"};
-    const struct json_value *pid = json_get(&r->reply.data, "pid");
-    if (pid && pid->type == JSON_INT)
-        (void)fprintf(r->out, "opened %s pid %lld\n",
-                      fd_str(r, "copy") ? fd_str(r, "copy") : r->target,
-                      (long long)json_get_int(pid));
-    else
-        (void)fprintf(r->out, "done: z23 app %s %s\n", r->door->verb,
-                      r->door->target);
+    fd_print_result_line(r);
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
         if (fd_str(r, keys[i]))
             (void)fprintf(r->out, "  %s: %s\n", keys[i], fd_str(r, keys[i]));
