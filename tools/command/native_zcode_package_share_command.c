@@ -389,6 +389,15 @@ static bool zps_local_key(struct zps_share *s)
                                       &s->key_created, s->reply, s->command);
 }
 
+static void zps_no_changes(struct zps_share *s, bool source_unchanged)
+{
+    zcl_package_copy_fail(s->reply, "SHARE_NO_CHANGES", false,
+        source_unchanged ? "Source unchanged. Send the original verified .z23share if you have it." :
+        "Same package contents. Send the original verified .z23share if you have it.", s->dir);
+    (void)snprintf(s->reply->error.next_action, sizeof(s->reply->error.next_action),
+        "Choose a changed saved version. For an app, preview that version and choose Keep before sharing.");
+}
+
 /* Saved, changed, and the recorded parent is a persisted, valid release. */
 static bool zps_admit(struct zps_share *s)
 {
@@ -402,9 +411,7 @@ static bool zps_admit(struct zps_share *s)
         return false;
     }
     if (memcmp(s->copy.selected_tree, s->copy.fork_tree, 32) == 0) {
-        zcl_package_copy_fail(s->reply, "SHARE_NO_CHANGES", false,
-                              "the saved version is the forked package "
-                              "unchanged", s->dir);
+        zps_no_changes(s, true);
         return false;
     }
     if (zcl_package_copy_find_release(s->datadir, s->copy.parent_release,
@@ -503,9 +510,7 @@ static bool zps_prepare_head(struct zps_share *s)
                               "the release envelope did not validate",
                               s->dir);
     else if (memcmp(s->prepared.package_root, s->parent.package_root, 32) == 0) {
-        zcl_package_copy_fail(s->reply, "SHARE_NO_CHANGES", false,
-                              "the saved version prepares to the parent's "
-                              "package root", s->dir);
+        zps_no_changes(s, false);
         ok = false;
     }
     return ok;

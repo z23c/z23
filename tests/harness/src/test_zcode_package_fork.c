@@ -25,6 +25,7 @@
 #include "mcp/mcp_policy.h"
 #include "platform/directory_compat.h"
 #include "platform/file_metadata.h"
+#include "presentation/canvas.h"
 #include "sha3/sha3.h"
 #include "storage/event_log.h"
 #include "vcs/package_prepare.h"
@@ -140,6 +141,15 @@ static bool zpf_refused(const struct zpf_call *c, const char *code)
                (int)c->reply.status, c->reply.error.code,
                c->reply.error.message);
     return ok;
+}
+
+static bool zpf_unchanged_guidance(const struct zpf_call *c)
+{
+    return !c->reply.error.mutated && strstr(c->reply.error.message, "Source unchanged.") &&
+        strstr(c->reply.error.message, "original verified .z23share") &&
+        strstr(c->reply.error.next_action, "changed saved version") &&
+        strstr(c->reply.error.next_action, "preview") && strstr(c->reply.error.next_action, "Keep") &&
+        zcl_present_canvas_text_width(c->reply.error.message, strlen(c->reply.error.message), 15u) <= 636u;
 }
 
 static const char *zpf_data_str(const struct zpf_call *c, const char *key)
@@ -482,11 +492,42 @@ static int zpf_no_change_refusals(const struct zpf_world *w)
         zpf_end(&c);
         ASSERT(zpf_share_plan(&c, w, w->copy));
         ASSERT(zpf_refused(&c, "SHARE_NO_CHANGES"));
+        ASSERT(zpf_unchanged_guidance(&c));
         zpf_end(&c);
         PASS();
     } _test_next:;
     return failures;
 }
+
+#if !defined(_WIN32)
+static int zpf_same_package_mode(const struct zpf_world *w)
+{
+    int failures = 0;
+    TEST("share: different source mode with same package") {
+        char dir[900], path[1400], fork_version[65], saved[65];
+        struct zpf_call c;
+        snprintf(dir, sizeof(dir), "%s/mode-copy", w->root);
+        snprintf(path, sizeof(path), "%s/%s", dir, ZPF_EDITED);
+        ASSERT(zpf_fork(w, w->origin_package_hex, dir, fork_version));
+        ASSERT(chmod(path, 0600) == 0);
+        ASSERT(zpf_save(dir, saved) && strcmp(saved, fork_version));
+        struct zcl_package_copy copy = {0};
+        struct zcl_command_reply read; zcl_command_reply_init(&read, "zcl.test.zcode_package_fork.v1");
+        bool opened = zcl_package_copy_open_as(dir, ZCL_PACKAGE_COPY_READ, &copy, &read, "test");
+        bool changed = opened && memcmp(copy.selected_tree, copy.fork_tree, 32) != 0;
+        zcl_package_copy_close(&copy); zcl_command_reply_free(&read);
+        ASSERT(changed);
+        ASSERT(zpf_share_plan(&c, w, dir) && zpf_refused(&c, "SHARE_NO_CHANGES"));
+        ASSERT(!c.reply.error.mutated && strstr(c.reply.error.message, "Same package contents.") &&
+            strstr(c.reply.error.message, "original verified .z23share") &&
+            zcl_present_canvas_text_width(c.reply.error.message, strlen(c.reply.error.message), 15u) <= 636u);
+        zpf_end(&c);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#endif
 
 static bool zpf_mismatch_index(const char *dir, bool missing)
 {
@@ -839,6 +880,7 @@ static int zpf_selected_share(const struct zpf_world *w, const char *fork_versio
         ASSERT(zpf_selected_plan(&c, w, other_version) && zpf_refused(&c, "VERSION_UNKNOWN"));
         zpf_end(&c);
         ASSERT(zpf_selected_plan(&c, w, fork_version) && zpf_refused(&c, "SHARE_NO_CHANGES"));
+        ASSERT(zpf_unchanged_guidance(&c));
         zpf_end(&c);
         ASSERT(zpf_selected_plan(&c, w, n) && zpf_passed(&c));
         ASSERT(strcmp(zpf_data_str(&c, "version"), n) == 0 && strcmp(zpf_data_str(&c, "package_root"), root) == 0);
@@ -1488,6 +1530,9 @@ int test_zcode_package_fork(void)
     failures += zpf_mcp_confirmation(&w);
     failures += zpf_fork_records_parent(&w, fork_version);
     failures += zpf_no_change_refusals(&w);
+#if !defined(_WIN32)
+    failures += zpf_same_package_mode(&w);
+#endif
     failures += zpf_index_head_refusal(&w);
     failures += zpf_save_and_restore(&w, fork_version);
     failures += zpf_unsaved_refusal(&w);
