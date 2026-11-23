@@ -226,7 +226,7 @@ static bool rt_finish(struct rt_presenter *p, const struct zcl_present_window_li
 }
 static bool rt_copy_guidance(const struct zcl_present_model_v1 *m)
 {
-    const char *summary = "Review all pages for a new editable copy. Resume in My Apps > Received copies.";
+    const char *summary = "Review a new editable copy. Resume in My Apps > More options > Discover apps > Review received copies.";
     struct zcl_present_model_v1 old = *m;
     uint32_t before = 0, after = 0; char why[128];
     (void)snprintf(old.summary, sizeof(old.summary), "Review all pages. Nothing runs now.");

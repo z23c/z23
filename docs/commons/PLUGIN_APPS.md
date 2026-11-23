@@ -131,8 +131,9 @@ Opening and sharing app links explicitly refuse on Windows.
 The detailed command contracts and current distribution limitations are below.
 
 If you received a copy without keeping a version, reopen **My Apps** with
-the same data directory. Choose **Discover apps → Review received copies →
-Review original**, then **Build and preview** and **Keep this version**.
+the same data directory. Choose **Received copies** when it appears, or use
+**More options → Discover apps → Review received copies**. Choose **Review
+original**, then **Build and preview** and **Keep this version**.
 Recovery previews the original received snapshot; it does not substitute
 newer local edits. Already-kept versions remain in **My apps**.
 
