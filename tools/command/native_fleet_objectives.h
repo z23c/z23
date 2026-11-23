@@ -79,7 +79,8 @@ struct zcl_objectives_window_cache {
 struct zcl_objectives_landing_cache {
     bool filled, ready, train_ok, found;
     int64_t landed_at, earliest, submitted, started;
-    size_t attempts;
+    int64_t queue_wait, resubmit_gap;
+    size_t attempts, queue_known, gap_known;
     char reason[ZCL_OBJECTIVES_REASON_MAX];
 };
 

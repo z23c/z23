@@ -341,6 +341,13 @@ struct obj_train_stats {
     bool invalid_start;
     int64_t earliest_epoch; /* the earliest row's `ts`: its submit time */
     struct obj_pair_set attempts; /* distinct (attempt, started) landed/failed */
+    /* Genuine waiting, per attempt in file order. queue_wait sums
+     * (started - ts) over each submit whose start is known; resubmit_gap
+     * sums (next submit ts - previous attempt terminal_recorded_at), the
+     * time a lane sat idle before it asked again. *_known count the
+     * attempts that contributed, so an unknown stays unknown, not 0. */
+    int64_t queue_wait, resubmit_gap, prev_terminal, last_seq;
+    size_t queue_known, gap_known;
     /* The newest landed row. An EARLIER distinct landed row of the same note
      * ended its own train: what came before it is not this train. */
     const struct obj_landing_id *newest;
@@ -376,6 +383,9 @@ static void obj_train_stats_row(const struct json_value *row,
             out->invalid_start = false;
             out->attempts.n = 0;
             out->attempts.oom = false; /* moot: segment discarded */
+            out->queue_wait = out->resubmit_gap = 0;
+            out->prev_terminal = out->last_seq = 0;
+            out->queue_known = out->gap_known = 0;
             return;
         }
     }
@@ -383,10 +393,28 @@ static void obj_train_stats_row(const struct json_value *row,
         out->found = obj_row_start_epoch(row, &out->earliest_epoch);
         out->invalid_start = !out->found;
     }
-    if (strcmp(state, "landed") == 0 || strcmp(state, "failed") == 0)
-        (void)obj_pair_add_new(&out->attempts,
-                               json_get_int(json_get(row, "attempt")),
-                               json_get_int(json_get(row, "started")));
+    if (strcmp(state, "landed") != 0 && strcmp(state, "failed") != 0)
+        return;
+    int64_t started = json_get_int(json_get(row, "started"));
+    if (!obj_pair_add_new(&out->attempts,
+                          json_get_int(json_get(row, "attempt")), started))
+        return;
+    int64_t ts = 0, seq = json_get_int(json_get(row, "seq"));
+    bool have_ts = obj_row_start_epoch(row, &ts);
+    /* A second attempt under one seq shares its submit ts: its start is
+     * not queue wait, and no resubmit happened. */
+    if (have_ts && started >= ts && started > 0 &&
+        !(seq > 0 && seq == out->last_seq)) {
+        out->queue_wait += started - ts;
+        out->queue_known++;
+    }
+    if (have_ts && out->prev_terminal > 0 && ts >= out->prev_terminal &&
+        !(seq > 0 && seq == out->last_seq)) {
+        out->resubmit_gap += ts - out->prev_terminal;
+        out->gap_known++;
+    }
+    out->last_seq = seq;
+    out->prev_terminal = json_get_int(json_get(row, "terminal_recorded_at"));
 }
 
 /* Rows whose train identity is `note`, in file order, since the previous
@@ -490,6 +518,10 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
             c->found = train->found;
             c->earliest = train->earliest_epoch;
             c->attempts = train->attempts.n;
+            c->queue_wait = train->queue_wait;
+            c->resubmit_gap = train->resubmit_gap;
+            c->queue_known = train->queue_known;
+            c->gap_known = train->gap_known;
             obj_train_stats_free(train);
         }
         (void)snprintf(c->reason, sizeof c->reason, "%s", v->reason);
@@ -510,6 +542,10 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
     train->found = c->found;
     train->earliest_epoch = c->earliest;
     train->attempts.n = c->attempts;
+    train->queue_wait = c->queue_wait;
+    train->resubmit_gap = c->resubmit_gap;
+    train->queue_known = c->queue_known;
+    train->gap_known = c->gap_known;
     return c->train_ok;
 }
 
@@ -543,23 +579,85 @@ static struct zcl_objective_value obj_landing_latency_s(
         obj_train_stats_free(&train);
         return v;
     }
-    /* The value is the landing's own submit-to-landed time. What came
-     * before that submit (earlier failed attempts, the lane's idle gap
-     * before it resubmitted) is not the land queue's latency, but it is
-     * real waiting, so the note states it instead of hiding it. */
+    /* The value is the landing's own submit-to-landed time. The waiting
+     * outside it (queue wait on every attempt, the lane's gap before each
+     * resubmit) is exposed by landing_queue_wait_s and
+     * landing_resubmit_gap_s, and summarised here. */
     v.measured = true;
     v.value = stats.last_landed_at - stats.last_landed_ts;
     int64_t queued = stats.last_landed_id.started - stats.last_landed_ts;
+    char qbuf[48], gbuf[40];
+    if (train.attempts.n > 1 && train.gap_known == 0)
+        (void)snprintf(gbuf, sizeof gbuf, "resubmit gap unknown");
+    else
+        (void)snprintf(gbuf, sizeof gbuf, "resubmit gap %llds",
+                       (long long)train.resubmit_gap);
+    if (stats.last_landed_id.started > 0 && queued >= 0)
+        (void)snprintf(qbuf, sizeof qbuf, "queued %llds before proof start",
+                       (long long)queued);
+    else
+        (void)snprintf(qbuf, sizeof qbuf, "queue wait unknown");
     (void)snprintf(v.note, sizeof(v.note),
-                   "final submit to landed; queued %llds before proof start; "
-                   "train total %llds over %zu attempt%s, %llds before the "
-                   "final submit",
-                   (long long)(queued > 0 ? queued : 0),
+                   "final submit to landed; %s; train total %llds over %zu "
+                   "attempt%s, %llds before the final submit (queue wait "
+                   "%llds, %s across the train)",
+                   qbuf,
                    (long long)(stats.last_landed_at - train.earliest_epoch),
                    train.attempts.n, train.attempts.n == 1 ? "" : "s",
-                   (long long)(stats.last_landed_ts - train.earliest_epoch));
+                   (long long)(stats.last_landed_ts - train.earliest_epoch),
+                   (long long)train.queue_wait, gbuf);
     obj_train_stats_free(&train);
     return v;
+}
+
+/* The newest landed train's genuine waiting, summed over its attempts:
+ * time rows sat queued before their proof started (queue), or the lane sat
+ * idle between an attempt ending and its resubmit (gap). */
+static struct zcl_objective_value obj_landing_wait(
+    const struct zcl_objectives_options *options, bool gap)
+{
+    struct zcl_objective_value v = {0};
+    struct obj_outcomes_stats stats;
+    struct obj_train_stats train;
+    char path[512];
+    const char *use;
+
+    bool observed = obj_landing_observe(options, &use, path, sizeof path,
+                                        &stats, &train, &v);
+    if (!observed && v.reason[0]) return v;
+    if (!observed || !train.found) {
+        obj_set_reason(&v, "unavailable rows for the landed train in %s", use);
+        obj_train_stats_free(&train);
+        return v;
+    }
+    size_t known = gap ? train.gap_known : train.queue_known;
+    if (known == 0 && !(gap && train.attempts.n <= 1)) {
+        obj_set_reason(&v, gap ? "no terminal_recorded_at before a resubmit for "
+                              "the landed train in %s"
+                          : "no started time after a submit for the landed "
+                              "train in %s", use);
+        obj_train_stats_free(&train);
+        return v;
+    }
+    v.measured = true;
+    v.value = gap ? train.resubmit_gap : train.queue_wait;
+    (void)snprintf(v.note, sizeof(v.note),
+                   "summed over %zu attempt%s of the newest landed train",
+                   train.attempts.n, train.attempts.n == 1 ? "" : "s");
+    obj_train_stats_free(&train);
+    return v;
+}
+
+static struct zcl_objective_value obj_landing_queue_wait_s(
+    const struct zcl_objectives_options *options)
+{
+    return obj_landing_wait(options, false);
+}
+
+static struct zcl_objective_value obj_landing_resubmit_gap_s(
+    const struct zcl_objectives_options *options)
+{
+    return obj_landing_wait(options, true);
 }
 
 static struct zcl_objective_value obj_landing_attempts_per_train(
@@ -2331,6 +2429,8 @@ static const struct obj_producer k_producers[] = {
     {"baseline_hardening_banned_str",
      zcl_objectives_baseline_hardening_banned_str},
     {"device_pair_ttl_h", zcl_objectives_device_pair_ttl_h},
+    {"landing_queue_wait_s", obj_landing_queue_wait_s},
+    {"landing_resubmit_gap_s", obj_landing_resubmit_gap_s},
 };
 
 struct zcl_objective_value zcl_objectives_measure(

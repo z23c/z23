@@ -42,9 +42,9 @@
 Z23_OBJECTIVE("landing_latency_s", "lab", "outcomes.jsonl", "min", 1200, "s",
              "wall seconds from the newest landed row's own submit (its ts) "
              "to its landed_at, queue wait included; a land should take the "
-             "time one proof takes, not several; earlier failed submits of "
-             "the same note and the lane's gap before it resubmitted are "
-             "not queue latency, so the row's note reports them instead")
+             "time one proof takes, not several; queue wait across the whole "
+             "train and the lane's resubmit gap are measured separately by "
+             "landing_queue_wait_s and landing_resubmit_gap_s")
 
 Z23_OBJECTIVE("landing_attempts_per_train", "lab", "outcomes.jsonl", "min", 1,
              "count",
@@ -138,3 +138,17 @@ Z23_OBJECTIVE("device_pair_ttl_h", "lab", "pair_state", "max", 72, "h",
              "window a tunnel grant is about to lapse and deliveries over it "
              "will fail, and 0 means a current pairing is already expired or "
              "revoked")
+
+Z23_OBJECTIVE("landing_queue_wait_s", "lab", "outcomes.jsonl", "min", 1200,
+             "s",
+             "seconds the newest landed train's submits sat queued before "
+             "their proof started, summed over every attempt (started minus "
+             "ts); a row that waits longer than one proof is the land "
+             "queue's own latency, even when the attempt then fails")
+
+Z23_OBJECTIVE("landing_resubmit_gap_s", "lab", "outcomes.jsonl", "min", 3600,
+             "s",
+             "seconds the newest landed train's lane sat idle between an "
+             "attempt ending (terminal_recorded_at) and its next submit "
+             "(ts), summed; a lane that fails and is not resubmitted for "
+             "hours is work the fleet owes, not queue latency")

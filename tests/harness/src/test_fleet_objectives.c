@@ -1974,7 +1974,8 @@ int test_fleet_objectives(void)
         ASSERT_EQ(fox_row_int(latency, "value"), (int64_t)30);
         ASSERT_STR_EQ(fox_row_str(latency, "note"),
             "final submit to landed; queued 0s before proof start; train "
-            "total 2460s over 3 attempts, 2430s before the final submit");
+            "total 2460s over 3 attempts, 2430s before the final submit (queue "
+            "wait 70s, resubmit gap unknown across the train)");
         const struct json_value *attempts =
             fox_row(&c, "landing_attempts_per_train");
         ASSERT(attempts != NULL);
@@ -2069,7 +2070,8 @@ int test_fleet_objectives(void)
          * objective is the 479 s; the gap is reported, not folded in. */
         ASSERT(fox_write(outcomes_missing,
             "{\"seq\":1,\"note\":\"chronology\",\"state\":\"failed\","
-            "\"ts\":\"1970-01-01T01:25:41Z\",\"attempt\":1,\"started\":5173}\n"
+            "\"ts\":\"1970-01-01T01:25:41Z\",\"attempt\":1,\"started\":17314,"
+            "\"terminal_recorded_at\":17434}\n"
             "{\"seq\":2,\"note\":\"chronology\",\"state\":\"landed\","
             "\"ts\":\"1970-01-01T16:53:29Z\",\"attempt\":1,"
             "\"started\":60825,\"landed_at\":61288}\n"));
@@ -2084,7 +2086,23 @@ int test_fleet_objectives(void)
         ASSERT_STR_EQ(fox_row_str(row, "status"), "met");
         ASSERT_STR_EQ(fox_row_str(row, "note"),
             "final submit to landed; queued 16s before proof start; train "
-            "total 56147s over 2 attempts, 55668s before the final submit");
+            "total 56147s over 2 attempts, 55668s before the final submit "
+            "(queue "
+            "wait 12189s, resubmit gap 43375s across the train)");
+        fox_end(&c);
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_missing);
+        ASSERT(fox_run(&c));
+        const struct json_value *qw = fox_row(&c, "landing_queue_wait_s");
+        ASSERT(qw != NULL);
+        ASSERT(json_get_bool(json_get(qw, "measured")));
+        ASSERT_EQ(fox_row_int(qw, "value"), (int64_t)12189);
+        ASSERT_STR_EQ(fox_row_str(qw, "status"), "unmet");
+        const struct json_value *gp = fox_row(&c, "landing_resubmit_gap_s");
+        ASSERT(gp != NULL);
+        ASSERT(json_get_bool(json_get(gp, "measured")));
+        ASSERT_EQ(fox_row_int(gp, "value"), (int64_t)43375);
+        ASSERT_STR_EQ(fox_row_str(gp, "status"), "unmet");
         fox_end(&c);
         ASSERT(remove(outcomes_missing) == 0);
         PASS();

@@ -229,7 +229,8 @@ results print `n/a (n<3)`; executors with no predictions are capped at C.
 `z23-dev fleet objectives [--format=json]` prints each named objective with
 its current value, target and status (`met`, `unmet`, `unmet(<reason>)`, `unmeasured(<reason>)`).
 The closed catalog is [`engine/composition/objectives.def`](../../engine/composition/objectives.def):
-`landing_latency_s`, `landing_attempts_per_train`, `proof_lint_wall_s`,
+`landing_latency_s`, `landing_queue_wait_s`, `landing_resubmit_gap_s`,
+`landing_attempts_per_train`, `proof_lint_wall_s`,
 `proof_test_wall_s`, `proof_wall_s`, `commits_landed_today`,
 `lint_families_over_ceiling`, `functions_over_complexity_cap`,
 `fresh_node_sync_eta_s`, `tokens_per_landed_commit`, `landed_rows_today`,
@@ -283,10 +284,15 @@ lint log, test from the test log (the two run concurrently inside one dimension)
 `proof_wall_s` from the final cumulative. `commits_landed_today` and the git gauges
 count `origin/main` from UTC midnight and never fetch. `landing_latency_s` is the
 newest landed row's `landed_at` minus that row's own submit `ts` (queue wait
-included). Earlier failed submits of the same note and the lane's idle gap
-before it resubmitted are not queue latency, so they are not in the value; the
-row's note states them (`queued Ns before proof start; train total Ns over K
-attempts, Ns before the final submit`). `landing_attempts_per_train` counts the
+included). The waiting outside that submit is its own pair of measured
+objectives over the same train: `landing_queue_wait_s` sums `started - ts` over
+every attempt (a row that sat queued for hours is queue latency even when the
+attempt then failed), and `landing_resubmit_gap_s` sums each resubmit's `ts`
+minus the previous attempt's `terminal_recorded_at` (a lane idle after a
+failure). The latency note repeats both (`queued Ns before proof start; train
+total Ns over K attempts, Ns before the final submit (queue wait Ns, resubmit
+gap Ns across the train)`); an unknown start or gap is stated as unknown, never
+0. `landing_attempts_per_train` counts the
 whole train, from the first submission after the note's previous landed row (a
 landed row ends its train, so a lane that reuses one note is not one train); an
 outcome row written before `landed_at` existed stays unmeasured.

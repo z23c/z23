@@ -153,3 +153,15 @@ Z23_OBJECTIVE_WORK("device_pair_ttl_h", 0,
                    "the pairing grant is renewed through the device pairing "
                    "store and the tunnel scripts, which sit outside a lane's "
                    "reach")
+
+Z23_OBJECTIVE_WORK("landing_queue_wait_s", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "the wait sits in queue ordering or the proof host's "
+                   "capacity rather than in the land driver")
+
+Z23_OBJECTIVE_WORK("landing_resubmit_gap_s", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "the lane's owner, not the land driver, decides when to "
+                   "resubmit")
