@@ -1512,11 +1512,32 @@ static void gw_forward_call(struct gw_buf *b, const struct json_value *id,
 /* Preserve legacy argument bytes unless a schema-flattening client supplies
  * the string-only cursor_token. Map that one field to the existing native
  * since, never to a second cursor or a different authority. */
+static bool gw_brief_cursor_doc(const struct json_value *args, const char *token,
+                                struct gw_buf *mapped)
+{
+    struct json_value doc;
+    json_init(&doc);
+    json_set_object(&doc);
+    for (size_t i = 0; i < args->num_children; i++) {
+        if (strcmp(args->keys[i], "cursor_token") == 0) continue;
+        if (!json_push_kv(&doc, args->keys[i], &args->children[i])) {
+            json_free(&doc);
+            return false;
+        }
+    }
+    if (!json_push_kv_str(&doc, "since", token)) {
+        json_free(&doc);
+        return false;
+    }
+    gw_json_write(mapped, &doc);
+    json_free(&doc);
+    return !mapped->oom && mapped->p;
+}
+
 static int gw_brief_cursor_map(const struct gw_tool *t, const struct json_value *args,
                                struct gw_buf *mapped)
 {
     const struct json_value *token;
-    struct json_value doc;
     size_t seen = 0;
     if (strcmp(t->verb, "brief") != 0 || !args || args->type != JSON_OBJ)
         return 0;
@@ -1527,22 +1548,7 @@ static int gw_brief_cursor_map(const struct gw_tool *t, const struct json_value 
     for (size_t i = 0; i < args->num_children; i++)
         if (strcmp(args->keys[i], "cursor_token") == 0) seen++;
     if (seen != 1) return -2;
-    json_init(&doc);
-    json_set_object(&doc);
-    for (size_t i = 0; i < args->num_children; i++) {
-        if (strcmp(args->keys[i], "cursor_token") == 0) continue;
-        if (!json_push_kv(&doc, args->keys[i], &args->children[i])) {
-            json_free(&doc);
-            return -3;
-        }
-    }
-    if (!json_push_kv_str(&doc, "since", json_get_str(token))) {
-        json_free(&doc);
-        return -3;
-    }
-    gw_json_write(mapped, &doc);
-    json_free(&doc);
-    return mapped->oom || !mapped->p ? -3 : 1;
+    return gw_brief_cursor_doc(args, json_get_str(token), mapped) ? 1 : -3;
 }
 
 static void gw_reply_tool_call(struct gw_buf *b, const struct json_value *id,
