@@ -94,7 +94,7 @@ struct cb_brief {
     size_t nnext;
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
     bool lessons_capped, lessons_truncated;
-    unsigned lessons_untrusted; /* public pages dropped: author holds no role */
+    unsigned lessons_untrusted; /* pages dropped: author holds no role (capped) */
     uint64_t dropped[CB_MAX_DROPPED]; /* hashes of the pages counted */
     size_t ndropped;
     int64_t now;
@@ -584,7 +584,7 @@ static void cb_offer_lesson(struct cb_brief *b, struct cb_lesson *in)
     }
 }
 
-/* Count a roleless public page once, however many queries return it. */
+/* Count a roleless page once, however many queries return it. */
 static void cb_count_untrusted(struct cb_brief *b, const char *slug)
 {
     uint64_t h = 1469598103934665603ULL;
@@ -593,8 +593,9 @@ static void cb_count_untrusted(struct cb_brief *b, const char *slug)
     for (size_t i = 0; i < b->ndropped; i++)
         if (b->dropped[i] == h)
             return;
-    if (b->ndropped < CB_MAX_DROPPED)
-        b->dropped[b->ndropped++] = h;
+    if (b->ndropped == CB_MAX_DROPPED)
+        return; /* a lower bound beyond the set: never count a page twice */
+    b->dropped[b->ndropped++] = h;
     b->lessons_untrusted++;
 }
 
@@ -627,8 +628,9 @@ static bool cb_take_lesson(struct cb_brief *b, const struct json_value *e,
     if (!slug[0] || !text[0] || strlen(slug) > CB_TOPIC_MAX)
         return true;
     l.author_role = json_get_bool(json_get(e, "author_role"));
-    if (pub && !l.author_role) {
-        /* A public page from a key with no role is untrusted text. */
+    if (!l.author_role) {
+        /* A page whose author the node no longer vouches for (never a role, or
+         * revoked) is untrusted text in any scope. */
         cb_count_untrusted(b, slug);
         return true;
     }
@@ -778,14 +780,24 @@ static int64_t cb_file_commit_time(const struct cb_brief *b, const char *file)
     return (int64_t)strtoll(out, NULL, 10);
 }
 
-/* True when any path the lesson applies to has a commit after `when`. */
-static bool cb_applies_changed(const struct cb_brief *b, const struct cb_lesson *l,
-                               int64_t when)
+/* The wiki deadline also bounds the staleness check (0: no deadline). */
+static bool cb_past_deadline(const struct cb_brief *b)
 {
-    for (size_t i = 0; i < l->napplies; i++)
+    return b->deadline_ms && platform_time_monotonic_ms() >= b->deadline_ms;
+}
+
+/* Why the paths a lesson applies to may have moved on after `when`: a commit
+ * after it, or "applies_to_unchecked" when the deadline ran out first. */
+static const char *cb_applies_changed(const struct cb_brief *b,
+                                      const struct cb_lesson *l, int64_t when)
+{
+    for (size_t i = 0; i < l->napplies; i++) {
+        if (b->revision[0] && cb_past_deadline(b))
+            return "applies_to_unchecked";
         if (cb_file_commit_time(b, l->applies[i]) > when)
-            return true;
-    return false;
+            return "applies_to_changed";
+    }
+    return NULL;
 }
 
 /* Age and staleness for what was kept. Stale: undated, older than
@@ -803,9 +815,10 @@ static void cb_judge_lessons(struct cb_brief *b)
             continue;
         }
         l->age_days = b->now > when ? (b->now - when) / 86400 : 0;
-        if (cb_applies_changed(b, l, when))
-            l->stale_reason = "applies_to_changed";
-        else if (l->age_days > CB_STALE_DAYS)
+        l->stale_reason = cb_applies_changed(b, l, when);
+        if (l->stale_reason)
+            continue;
+        if (l->age_days > CB_STALE_DAYS)
             l->stale_reason = "age";
     }
 }

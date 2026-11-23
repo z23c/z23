@@ -65,13 +65,14 @@ static int cgl_ranking_cases(void)
         ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&data, "lessons"), 2), "match")), "prefix");
         ASSERT(json_get_bool(json_get(&data, "lessons_capped")));
         json_free(&data);
-        /* An author holding a role outranks one without, at the same rank. */
+        /* A fleet page whose author holds no role is dropped like a public one. */
         ASSERT(cgl_collect("["
             "{\"slug\":\"norole\",\"summary\":\"N\",\"test_rank\":0,\"updated\":\"2026-11-22T00:00:00Z\"},"
             "{\"slug\":\"role\",\"summary\":\"R\",\"author_role\":true,\"test_rank\":0,\"updated\":\"2026-11-01T00:00:00Z\"}]",
             CGL_NOW, &data));
+        ASSERT_EQ(json_size(json_get(&data, "lessons")), 1u);
         ASSERT_STR_EQ(cgl_slug(&data, 0), "role");
-        ASSERT_STR_EQ(cgl_slug(&data, 1), "norole");
+        ASSERT_EQ(json_get_int(json_get(&data, "lessons_untrusted_dropped")), 1);
         json_free(&data);
         PASS();
     } _test_next:;
@@ -87,8 +88,8 @@ static int cgl_trust_stale_cases(void)
             "{\"slug\":\"public-norole\",\"summary\":\"Untrusted\",\"test_scope\":\"public\"},"
             "{\"slug\":\"public-role\",\"summary\":\"Trusted\",\"test_scope\":\"public\",\"author_role\":true,"
             "\"updated\":\"2026-11-21T00:00:00Z\"},"
-            "{\"slug\":\"fleet-old\",\"summary\":\"Old\",\"updated\":\"2026-01-01T00:00:00Z\"},"
-            "{\"slug\":\"fleet-undated\",\"summary\":\"Undated\",\"updated\":\"soon\"}]",
+            "{\"slug\":\"fleet-old\",\"author_role\":true,\"summary\":\"Old\",\"updated\":\"2026-01-01T00:00:00Z\"},"
+            "{\"slug\":\"fleet-undated\",\"author_role\":true,\"summary\":\"Undated\",\"updated\":\"soon\"}]",
             CGL_NOW, &data));
         const struct json_value *l = json_get(&data, "lessons");
         ASSERT_EQ(json_size(l), 3u);
@@ -314,20 +315,21 @@ static int cgl_guide_cases(void)
         ASSERT(cgl_has(&r, "wallet-lesson", "prefix"));
         ASSERT(!cgl_has(&r, "board-boot-lesson", NULL));
         zcl_command_reply_free(&r);
-        /* The node no longer vouches for the author: the public page goes. */
+        /* The node no longer vouches for any author (a revoked scribe): the
+         * fleet and the public page both go, so no revoked key steers an agent. */
         cgl_role_ok = false;
         ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));
-        ASSERT(cgl_has(&r, "board-boot-lesson", "exact"));
+        ASSERT(!cgl_has(&r, "board-boot-lesson", NULL));
         ASSERT(!cgl_has(&r, "public-board-lesson", NULL));
-        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")), 1);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")), 3);
         zcl_command_reply_free(&r);
-        /* A worker-only key may post a note but never a wiki page: its public
-         * wiki page is dropped, a scribe's is kept. */
+        /* A worker-only key may post a note but never a wiki page: a wiki page
+         * of its in either scope is dropped. */
         cgl_role_ok = true;
         cgl_role_worker = true;
         ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));
         ASSERT(!cgl_has(&r, "public-board-lesson", NULL));
-        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")), 1);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_untrusted_dropped")), 3);
         zcl_command_reply_free(&r);
         cgl_role_worker = false;
         ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));

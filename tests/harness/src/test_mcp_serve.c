@@ -1294,7 +1294,7 @@ static int case_session(const char *home, const char *checkout)
 static const char ms_find_result[] =
     "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
     "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[{\"topic\":"
-    "\"push-gate\",\"slug\":\"push-gate\",\"id\":\"%064d\",\"host\":\"%064d\","
+    "\"push-gate\",\"slug\":\"push-gate\",\"author_role\":true,\"id\":\"%064d\",\"host\":\"%064d\","
     "\"created_at\":1,\"expires_at\":2,\"updated\":\"2026-10-12T09:00:00Z\","
     "\"summary\":\"The push gate runs the full lint.\",\"rules\":[\"Run the "
     "full lint before pushing.\"],\"rules_omitted\":false,\"summary_omitted\":"
@@ -1309,7 +1309,7 @@ static int ms_stub_entry_at(char *out, size_t cap, const char *slug, int n,
                             const char *updated)
 {
     return snprintf(out, cap,
-        "%s{\"topic\":\"%s\",\"slug\":\"%s\",\"id\":\"%064d\",\"host\":\"%064d\","
+        "%s{\"topic\":\"%s\",\"slug\":\"%s\",\"author_role\":true,\"id\":\"%064d\",\"host\":\"%064d\","
         "\"created_at\":1,\"expires_at\":2,\"updated\":\"%s\","
         "\"summary\":\"s\",\"rules\":[\"Rule of %s.\"],\"rules_omitted\":false,"
         "\"summary_omitted\":false,\"matched\":[\"slug\"]}",
@@ -1926,8 +1926,8 @@ static int case_guide_lessons(const char *home, const char *checkout,
         ASSERT(has(&m, "tools-b"));
         ASSERT(!has(&m, "tools-c"));
         ASSERT(has(&m, "lessons_capped"));
-        /* The stub's entries carry no author_role, so its public pages go. */
-        ASSERT(has(&m, "lessons_untrusted_dropped"));
+        /* The stub vouches for every author, so nothing is dropped. */
+        ASSERT(!has(&m, "lessons_untrusted_dropped"));
         ASSERT_EQ(ms_finish(&m), 0);
         ASSERT(ms_stop_child(&stub));
 

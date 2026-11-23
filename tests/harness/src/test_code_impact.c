@@ -1086,9 +1086,9 @@ static int test_code_guide_lesson_provenance(void)
     int failures = 0;
     TEST("guide retains valid lesson provenance when a later copy fails") {
         const char *text = "["
-            "{\"slug\":\"first\",\"updated\":\"3\",\"summary\":\"First lesson\",\"matched\":[\"summary\"]},"
-            "{\"slug\":\"second\",\"updated\":\"2\",\"summary\":\"Second lesson\",\"matched\":[\"rule\"]},"
-            "{\"slug\":\"third\",\"updated\":\"1\",\"summary\":\"Third lesson\"}]";
+            "{\"slug\":\"first\",\"author_role\":true,\"updated\":\"3\",\"summary\":\"First lesson\",\"matched\":[\"summary\"]},"
+            "{\"slug\":\"second\",\"author_role\":true,\"updated\":\"2\",\"summary\":\"Second lesson\",\"matched\":[\"rule\"]},"
+            "{\"slug\":\"third\",\"author_role\":true,\"updated\":\"1\",\"summary\":\"Third lesson\"}]";
         struct json_value entries;
         json_init(&entries);
         ASSERT(json_read(&entries, text, strlen(text)));
@@ -1150,14 +1150,14 @@ static int test_code_guide_lesson_cap(void)
     int failures = 0;
     TEST("lesson collection keeps dedupe and cap behavior") {
         const char *text = "["
-            "{\"slug\":\"a\",\"summary\":\"A\"},"
-            "{\"slug\":\"a\",\"summary\":\"duplicate\"},"
-            "{\"slug\":\"\",\"summary\":\"invalid\"},"
-            "{\"slug\":\"b\",\"summary\":\"B\"},"
-            "{\"slug\":\"c\",\"summary\":\"C\"},"
-            "{\"slug\":\"d\",\"summary\":\"D\"},"
-            "{\"slug\":\"e\",\"summary\":\"E\"},"
-            "{\"slug\":\"f\",\"summary\":\"F\"}]";
+            "{\"slug\":\"a\",\"author_role\":true,\"summary\":\"A\"},"
+            "{\"slug\":\"a\",\"author_role\":true,\"summary\":\"duplicate\"},"
+            "{\"slug\":\"\",\"author_role\":true,\"summary\":\"invalid\"},"
+            "{\"slug\":\"b\",\"author_role\":true,\"summary\":\"B\"},"
+            "{\"slug\":\"c\",\"author_role\":true,\"summary\":\"C\"},"
+            "{\"slug\":\"d\",\"author_role\":true,\"summary\":\"D\"},"
+            "{\"slug\":\"e\",\"author_role\":true,\"summary\":\"E\"},"
+            "{\"slug\":\"f\",\"author_role\":true,\"summary\":\"F\"}]";
         struct json_value entries;
         json_init(&entries);
         ASSERT(json_read(&entries, text, strlen(text)));
