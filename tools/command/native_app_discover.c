@@ -211,12 +211,12 @@ static bool ad_consume(void *context, const char *path,
     }
     json_free(&in); return ok;
 }
-static bool ad_error(struct discover *d, const char *message, bool retry)
+static bool ad_error(struct discover *d, const char *title, const char *message, bool retry)
 {
     struct zcl_present_model_v1 m; struct zcl_present_window_event_v1 event = {0};
     zcl_present_model_init_v1(&m, ZCL_PRESENT_MODEL_STATUS_CARD);
     (void)snprintf(m.request_id, sizeof(m.request_id), "discover-error");
-    (void)snprintf(m.title, sizeof(m.title), "Discover unavailable");
+    (void)snprintf(m.title, sizeof(m.title), "%s", title);
     (void)snprintf(m.summary, sizeof(m.summary), "%s", message);
     m.action_count = retry ? 2 : 1;
     if (retry) app_confirm_action(&m.actions[0], ZCL_PRESENT_ACTION_SELECT, "retry", "Retry");
@@ -253,10 +253,10 @@ static const char *ad_catalog_message(const struct zcl_command_reply *reply)
 static bool ad_review(struct discover *d, struct zcl_command_reply *reply)
 {
     if (!app_get_stage_consume_progress(&d->rows[d->index], d->datadir, ad_consume, d, reply, d->receive_presenter, d->context)) {
-        (void)ad_error(d, reply->error.message, false);
+        (void)ad_error(d, "Selected app", reply->error.message, false);
         return false;
     }
-    if (!ad_host_result(d, reply)) { (void)ad_error(d, reply->error.message, false); return false; }
+    if (!ad_host_result(d, reply)) { (void)ad_error(d, "Hosting result", reply->error.message, false); return false; }
     const char *status = zcl_package_copy_str(&reply->data, "status");
     return !status || strcmp(status, "canceled");
 }
@@ -306,7 +306,7 @@ static bool ad_loop(struct discover *d, struct zcl_command_reply *reply)
     for (;;) {
         if (!loaded) {
             if (!ad_catalog(d, reply)) {
-                if (ad_error(d, ad_catalog_message(reply), true)) continue;
+                if (ad_error(d, "Discover unavailable", ad_catalog_message(reply), true)) continue;
                 return false;
             }
             loaded = true;

@@ -2991,6 +2991,7 @@ static int tag_stage_unsafe_parent(struct tag_world *w)
 }
 struct tag_discover {
     int cards, receive, home, errors, detail, browser;
+    char error_title[128];
     bool keep, kept, cleanup_swap, oversized_share, fail_error_view, recovery_shown, host_original, host_prompted, host_identity, fail_host_result;
     bool report_rebuild, report_prompted, report_count_visible, close_keep, report_result, fetch_close, fetch_presenter_fail;
     bool report_result_unavailable, report_result_count, report_result_one, report_result_two, report_result_publish; int comparison_mode;
@@ -3141,7 +3142,10 @@ static bool tag_discover_card(void *context, const struct zcl_present_model_v1 *
         return tag_discover_share_menu(d, model, event);
     if (d->keep && !strncmp(model->request_id, "library-", 8) && strcmp(model->request_id, "library-error"))
         return tag_discover_library_card(d, model, event);
-    if (!strcmp(model->request_id, "discover-error")) return tag_discover_error_card(d, event);
+    if (!strcmp(model->request_id, "discover-error")) {
+        (void)snprintf(d->error_title, sizeof(d->error_title), "%s", model->title);
+        return tag_discover_error_card(d, event);
+    }
     if (strcmp(model->request_id, "discover-0")) return false;
     ++d->cards; event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION; event->action_index = 0; return true;
@@ -3378,6 +3382,7 @@ static int tag_discover_fetch_close(struct tag_world *w)
         tag_require_fetch_progress = false; g_tag.fetch_failures = 0;
         ASSERT(atomic_load(&tag_fetch_progress_seen)); ASSERT(!atomic_load(&tag_fetch_progress_timeout)); ASSERT_EQ(d.receive, 0);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(!strcmp(d.error_title, "Selected app"));
         ASSERT_EQ(tag_glob(w->j.b_datadir, ".app-get-*"), 0u);
         zcl_command_reply_free(&reply); PASS();
     } _test_next:;
@@ -3556,6 +3561,7 @@ static int tag_library_discover(struct tag_world *w)
         g_tag.tamper = false;
         ASSERT_EQ(d.home, 2); ASSERT_EQ(d.cards, 1); ASSERT_EQ(d.errors, 1); ASSERT_EQ(d.receive, 0);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        ASSERT(!strcmp(d.error_title, "Selected app"));
         ASSERT(!strcmp(reply.error.code, "SHA256_MISMATCH"));
         zcl_command_reply_free(&reply); PASS();
     } _test_next:;
@@ -4178,6 +4184,7 @@ static int tag_host_result_failure(struct tag_world *w)
         ASSERT(!app_discover_run_test(fresh.j.b_datadir, tag_discover_card, tag_discover_receive, &d, &reply, NULL, worker));
         tag_discover_capture(&d);
         ASSERT(d.host_prompted && d.pid > 0 && reply.error.mutated && !strcmp(reply.error.code, "HOSTING_RESULT_UNAVAILABLE"));
+        ASSERT_EQ(d.errors, 1); ASSERT(!strcmp(d.error_title, "Hosting result"));
         ASSERT(tag_host_failure_wire(&reply, fresh.offer.carrier)); PASS();
     } _test_next:;
     if (fixture_ready && !tag_stop_receipt(&d, fresh.j.b_datadir)) ++failures;
@@ -4986,7 +4993,8 @@ static bool tag_discover_empty_card(void *context, const struct zcl_present_mode
     struct tag_discover_empty *d = context; (void)copy;
     if (!zcl_present_model_validate_v1(model, why, cap)) return false;
     if (d->error ? strcmp(model->request_id, "discover-error") : strcmp(model->request_id, "discover-0")) return false;
-    if (d->error && (!d->summary || strcmp(model->summary, d->summary))) return false;
+    if (d->error && (strcmp(model->title, "Discover unavailable") ||
+                     !d->summary || strcmp(model->summary, d->summary))) return false;
     if (!d->error && !tag_discover_empty_guidance(model)) return false;
     event->struct_size = sizeof(*event); event->abi_version = ZCL_PRESENT_ABI_V1;
     event->outcome = ZCL_PRESENT_WINDOW_ACTION;
