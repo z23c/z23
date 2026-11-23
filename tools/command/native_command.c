@@ -3004,6 +3004,14 @@ static struct zcl_cli_render_env g_nc_render_env;
 static bool g_nc_render_resolved;
 static bool g_nc_format_json;
 static thread_local bool g_nc_interactive_dispatch;
+static thread_local bool g_nc_gio_open_dispatch;
+
+bool zcl_native_take_gio_open_dispatch(void)
+{
+    bool result = g_nc_gio_open_dispatch;
+    g_nc_gio_open_dispatch = false;
+    return result;
+}
 
 bool zcl_native_interactive_dispatch(void)
 {
@@ -5144,6 +5152,21 @@ static bool nc_compare_end(struct nc_main_state *st,
     return true;
 }
 
+#if defined(__linux__)
+static bool nc_gio_open_pid(const char *gio_id, long pid)
+{
+    char process_id[32];
+    (void)snprintf(process_id, sizeof(process_id), "%ld", pid);
+    return gio_id && strcmp(gio_id, process_id) == 0;
+}
+#ifdef ZCL_TESTING
+bool zcl_test_gio_open_pid(const char *gio_id, long pid)
+{
+    return nc_gio_open_pid(gio_id, pid);
+}
+#endif
+#endif
+
 static bool nc_presentation_allowed(const struct nc_main_state *st)
 {
     return !st->seen_format && st->field_csv == NULL;
@@ -5200,11 +5223,20 @@ static bool nc_main_execute(struct nc_main_state *st,
     enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
     g_native_envelope_on_stderr = false;
     bool previous_interactive_dispatch = g_nc_interactive_dispatch;
+    bool previous_gio_open_dispatch = g_nc_gio_open_dispatch;
     g_nc_interactive_dispatch = nc_presentation_allowed(st);
+    g_nc_gio_open_dispatch = false;
+#if defined(__linux__)
+    if (g_nc_interactive_dispatch && strcmp(st->spec->path, "app.open") == 0) {
+        g_nc_gio_open_dispatch = nc_gio_open_pid(
+            getenv("GIO_LAUNCHED_DESKTOP_FILE_PID"), (long)getpid());
+    }
+#endif
     size_t n = zcl_command_registry_execute_json(
         reg, st->spec, &ctx, &st->input, st->was_alias, st->invoked, st->view,
         st->budget, st->max_items, st->cursor, out, out_cap, &exit_code);
     g_nc_interactive_dispatch = previous_interactive_dispatch;
+    g_nc_gio_open_dispatch = previous_gio_open_dispatch;
     if (scoped && !nc_compare_end(st, runtime, out, out_cap, rc)) return false;
     g_native_input_from_stdin = false;
     json_free(&st->input);

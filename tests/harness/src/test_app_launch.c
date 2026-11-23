@@ -4391,6 +4391,55 @@ static int case_library_keep_receipt(void)
     return failures;
 }
 
+#if defined(__linux__)
+bool zcl_test_gio_open_pid(const char *, long);
+#endif
+void zcl_test_app_open_notice(struct zcl_command_reply *, bool, bool, app_confirm_presenter, void *);
+struct open_notice_probe { int count; bool valid; };
+static bool open_notice_present(void *context, const struct zcl_present_model_v1 *model,
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_live_view_v1 *live, char *why, size_t cap)
+{
+    (void)pages; (void)live; (void)why; (void)cap;
+    struct open_notice_probe *p = context;
+    p->count++;
+    p->valid = !strcmp(model->title, "Could not open this app") &&
+        strstr(model->summary, "saved") && model->action_count == 1 &&
+        !strcmp(model->actions[0].id, "close");
+    return true;
+}
+static int case_open_notice(void)
+{
+    int failures = 0; struct zcl_command_reply reply;
+    struct open_notice_probe p = {0};
+    zcl_command_reply_init(&reply, "zcl.app_open.v1");
+    TEST("GIO open notice is restricted to image refusal and presentation intent") {
+#if defined(__linux__)
+        ASSERT(zcl_test_gio_open_pid("123", 123));
+        ASSERT(!zcl_test_gio_open_pid(NULL, 123));
+        ASSERT(!zcl_test_gio_open_pid("122", 123));
+        ASSERT(!zcl_test_gio_open_pid("0123", 123));
+#endif
+        (void)snprintf(reply.error.code, sizeof(reply.error.code), "IMAGE_REFUSED");
+        zcl_test_app_open_notice(&reply, false, true, open_notice_present, &p);
+        ASSERT_EQ(p.count, 0);
+        zcl_test_app_open_notice(&reply, true, true, open_notice_present, &p);
+        ASSERT_EQ(p.count, 1); ASSERT(p.valid);
+        ASSERT(!strcmp(reply.error.code, "IMAGE_REFUSED"));
+        (void)snprintf(reply.error.code, sizeof(reply.error.code), "BUILD_IDENTITY_MISMATCH");
+        zcl_test_app_open_notice(&reply, true, false, open_notice_present, &p);
+        ASSERT_EQ(p.count, 1);
+        zcl_test_app_open_notice(&reply, true, true, open_notice_present, &p);
+        ASSERT_EQ(p.count, 2); ASSERT(p.valid);
+        (void)snprintf(reply.error.code, sizeof(reply.error.code), "STATE_FAILED");
+        zcl_test_app_open_notice(&reply, true, true, open_notice_present, &p);
+        ASSERT_EQ(p.count, 2);
+        PASS();
+    }
+_test_next:;
+    zcl_command_reply_free(&reply); return failures;
+}
+
 int test_app_launch(void);
 int test_app_launch(void)
 {
@@ -4409,6 +4458,7 @@ _test_next:
     failures += case_stale_record(&f);
     failures += case_process_env(&f);
     failures += case_handlers(&f);
+    failures += case_open_notice();
     failures += case_list_guide(&f);
     failures += case_list_profiles(&f);
     failures += case_missing_profiles(&f);

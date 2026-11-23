@@ -490,8 +490,8 @@ static bool app_open_has_selection(const struct json_value *input)
     return false;
 }
 
-void zcl_native_handle_app_open(const struct zcl_command_request *request,
-                                struct zcl_command_reply *reply)
+static void app_open_run(const struct zcl_command_request *request,
+                         struct zcl_command_reply *reply)
 {
     const char *name = json_get_str(json_get(request->input, "name"));
     char why[256];
@@ -541,6 +541,47 @@ void zcl_native_handle_app_open(const struct zcl_command_request *request,
         app_missing_next(selected_datadir, reply);
     free(w);
 }
+
+static void app_open_notice(struct zcl_command_reply *reply, bool present, bool name_only,
+                            app_confirm_presenter presenter, void *context)
+{
+    bool image = strcmp(reply->error.code, "IMAGE_REFUSED") == 0;
+    bool stale = name_only && strcmp(reply->error.code, "BUILD_IDENTITY_MISMATCH") == 0;
+    if (!present || (!image && !stale)) return;
+    struct app_confirm *view = zcl_calloc(1, sizeof(*view), "app-open-refusal");
+    if (!view) return;
+    zcl_present_model_init_v1(&view->model, ZCL_PRESENT_MODEL_STATUS_CARD);
+    (void)snprintf(view->model.request_id, sizeof(view->model.request_id), "open-refused");
+    (void)snprintf(view->model.title, sizeof(view->model.title), "Could not open this app");
+    (void)snprintf(view->model.summary, sizeof(view->model.summary),
+                   "%s", image ? "The saved app image could not be verified." :
+                   "The saved build no longer matches this version.");
+    view->model.action_count = 1;
+    app_confirm_action(&view->model.actions[0], ZCL_PRESENT_ACTION_CANCEL, "close", "Close");
+    char why[256];
+    if (app_confirm_field(&view->model, "", "Open My Apps to review your saved version.") &&
+        app_confirm_prepare(view, why, sizeof(why)))
+        (void)app_confirm_show(view, presenter, context, why, sizeof(why));
+    app_confirm_free(view);
+    free(view);
+}
+
+void zcl_native_handle_app_open(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    bool present = zcl_native_take_gio_open_dispatch();
+    app_open_run(request, reply);
+    if (present)
+        app_open_notice(reply, true, !app_open_has_selection(request->input), NULL, NULL);
+}
+
+#ifdef ZCL_TESTING
+void zcl_test_app_open_notice(struct zcl_command_reply *reply, bool present, bool name_only,
+    app_confirm_presenter presenter, void *context)
+{
+    app_open_notice(reply, present, name_only, presenter, context);
+}
+#endif
 
 /* ── app.list launchable section ──────────────────────────────────────── */
 
