@@ -484,8 +484,8 @@ POSIX-only, so the Windows `z23.exe` refuses it with `MCP_SERVE_PLATFORM` and
 the message names the next step. The working alternative is the same server
 over ssh to a Linux host that holds the checkout:
 
-```sh
-claude mcp add --scope user <name> -- ssh <host> 'cd <checkout> && build/bin/z23 mcp serve --checkout=<checkout>'
+```text
+claude mcp add --scope user <name> -- ssh <host> "cd <checkout> && build/bin/z23 mcp serve --checkout=<checkout>"
 ```
 
 Replace `<name>`, `<host>` and `<checkout>` with your MCP name, Linux host alias

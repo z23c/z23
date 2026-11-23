@@ -27,7 +27,7 @@ because the stdio adapter is POSIX-only, and Claude Code shows the server as
 "Connection closed". Run the same server on a Linux host over ssh instead:
 
 ```sh
-claude mcp add --scope user z23-local -- ssh <host> 'cd <checkout> && build/bin/z23 mcp serve --checkout=<checkout>'
+claude mcp add --scope user z23-local -- ssh <host> "cd <checkout> && build/bin/z23 mcp serve --checkout=<checkout>"
 ```
 
 Replace `<host>` with your Linux host alias and `<checkout>` with the absolute

@@ -239,6 +239,10 @@ static int case_windows_refusal_text(void)
     TEST_CASE("Windows refusal names the reason and the ssh next step") {
         ASSERT(strstr(ZCL_MCP_SERVE_WINDOWS_REFUSAL, "POSIX-only") != NULL);
         ASSERT(strstr(ZCL_MCP_SERVE_WINDOWS_REFUSAL, "ssh <host>") != NULL);
+        /* Double quotes survive cmd.exe; single quotes do not. The inner
+         * quotes arrive JSON-escaped so the emitted line stays valid JSON. */
+        ASSERT(strstr(ZCL_MCP_SERVE_WINDOWS_REFUSAL, "\\\"cd <checkout>") != NULL);
+        ASSERT(strchr(ZCL_MCP_SERVE_WINDOWS_REFUSAL, '\'') == NULL);
     } TEST_END
     return failures;
 }

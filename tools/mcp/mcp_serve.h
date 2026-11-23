@@ -19,8 +19,8 @@ extern "C" {
     "\"message\":\"z23 mcp serve needs a POSIX host: the stdio MCP adapter "   \
     "is POSIX-only, so this Windows z23 cannot start it. Run the same server " \
     "on a Linux host over ssh instead: claude mcp add --scope user <name> -- " \
-    "ssh <host> 'cd <checkout> && build/bin/z23 mcp serve "                   \
-    "--checkout=<checkout>'\"}}\n"
+    "ssh <host> \\\"cd <checkout> && build/bin/z23 mcp serve "                \
+    "--checkout=<checkout>\\\"\"}}\n"
 
 /* argv is the full process argv; argv[1] is "mcp" and argv[2] "serve".
  * Reads newline-delimited JSON-RPC from stdin and writes replies to stdout
