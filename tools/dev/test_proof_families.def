@@ -17,6 +17,7 @@ ZCL_TEST_PROOF_FAMILY("oracle_policy", "test_*oracle")
 ZCL_TEST_PROOF_FAMILY("make_lint_gates", "test_make_lint_gates*")
 ZCL_TEST_PROOF_FAMILY("block_index_projection", "test_block_index_projection*")
 ZCL_TEST_PROOF_FAMILY("dev_platform", "test_dev_platform*")
+ZCL_TEST_PROOF_FAMILY("wallet_create", "test_wallet_create*")
 ZCL_TEST_PROOF_FAMILY("fleet_gateway", "test_fleet_gateway*")
 /* Umbrellas (test_group_umbrellas.def): the token reaches every shard, and
  * the umbrella it names is subsumed by them rather than run a second time. */

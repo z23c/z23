@@ -2166,7 +2166,15 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_wallet_diversified_receive();
     *failures += test_simnet_wallet_diversified_send();
     { extern int test_wallet_create(void);
-      *failures += test_wallet_create(); }
+      extern int test_wallet_create_shard_01(void);
+      extern int test_wallet_create_shard_02(void);
+      extern int test_wallet_create_shard_03(void);
+      extern int test_wallet_create_shard_04(void);
+      *failures += test_wallet_create();
+      *failures += test_wallet_create_shard_01();
+      *failures += test_wallet_create_shard_02();
+      *failures += test_wallet_create_shard_03();
+      *failures += test_wallet_create_shard_04(); }
     { extern int test_hstar_integrity(void);
       *failures += test_hstar_integrity(); }
     { extern int test_install_verb_warm(void);

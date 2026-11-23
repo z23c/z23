@@ -42,12 +42,14 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "test/test_core.h"
+#include "test_group_catalog.h"
 
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "chain/checkpoints.h"
 #include "chain/pow.h"
 #include "config/boot_internal.h"
+#include "platform/time_compat.h"
 #include "platform/wallet_startup_auth_protocol.h"
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -3960,50 +3962,138 @@ static int creation_fresh_history_fixture(void)
     return failures;
 }
 
+/* Case identity and ownership live in one table. The registered base group
+ * proves the partition; each shard group runs its assigned cases in table
+ * order, so a case only ever moves between shards and none is dropped.
+ * `pre_setup` marks the two cases that ran before the main-chain selection
+ * and the no-anchor override were installed. */
+#define WCR_SHARD_COUNT 4u
+struct wcr_case {
+    const char *name;
+    int (*run)(void);
+    unsigned shard;
+    bool pre_setup;
+};
+#define WCR_CASE(fn, owner) {#fn, fn, owner, false}
+#define WCR_PRE(fn, owner) {#fn, fn, owner, true}
+static const struct wcr_case g_wcr_cases[] = {
+    WCR_PRE(birthday_proof_atomic, 1),
+    WCR_PRE(birthday_identity_change, 1),
+    WCR_CASE(birthday_fresh_ignores_supplied_phrase, 1),
+    WCR_CASE(creation_prepare_fixture, 1),
+    WCR_CASE(creation_cancel_fixture, 1),
+    WCR_CASE(creation_atomic_failure_fixture, 2),
+    WCR_CASE(creation_cli_fixture, 2),
+    WCR_CASE(creation_exit_fixture, 2),
+    WCR_CASE(creation_fresh_history_fixture, 1),
+    WCR_CASE(t_round_trip, 3),
+    WCR_CASE(t_refusals, 2),
+    WCR_CASE(t_phrase_not_captured_and_encrypted, 3),
+    WCR_CASE(t_birthday, 1),
+    WCR_CASE(t_weak_passphrases, 0),
+    WCR_CASE(t_authority, 0),
+    WCR_CASE(t_stdout_is_the_document, 2),
+    WCR_CASE(t_core_dumps_disabled, 2),
+    WCR_CASE(t_legacy_wallet_directory, 0),
+    WCR_CASE(t_boot_guards, 3),
+    WCR_CASE(t_locked_wallet, 0),
+    WCR_CASE(restore_address_reopens, 3),
+    WCR_CASE(t_restore_inputs, 3),
+    WCR_CASE(t_unreadable_file_fails_scan, 0),
+    WCR_CASE(t_seed_proof_needs_a_full_read, 0),
+    WCR_CASE(t_wallet_free_wipes_sapling_keys, 3),
+    WCR_CASE(t_live_wallet_refused, 3),
+    WCR_CASE(t_create_failure_codes, 0),
+    WCR_CASE(t_recovery_new, 3),
+    WCR_CASE(t_recovery_reply_fields, 0),
+    WCR_CASE(t_restore_at_local_tip, 3),
+    WCR_CASE(t_scan_positive_control, 3),
+    WCR_CASE(wcr_history_errors, 3),
+    WCR_CASE(wcr_postcount_failure, 3),
+    WCR_CASE(t_unsynced_create, 3),
+};
+#undef WCR_CASE
+#undef WCR_PRE
+#define WCR_CASE_COUNT (sizeof(g_wcr_cases) / sizeof(g_wcr_cases[0]))
+
+static int wcr_run_case(const struct wcr_case *c, unsigned shard)
+{
+    int64_t started = platform_time_monotonic_ms();
+    int added = c->run();
+    int64_t finished = platform_time_monotonic_ms();
+    printf("[wallet-create-case] shard=%u name=%s ms=%lld failures=%d\n",
+           shard + 1u, c->name,
+           (long long)(finished >= started ? finished - started : -1), added);
+    return added;
+}
+
+static int wcr_run_shard(unsigned shard)
+{
+    int failures = 0;
+    for (size_t i = 0; i < WCR_CASE_COUNT; i++)
+        if (g_wcr_cases[i].shard == shard && g_wcr_cases[i].pre_setup)
+            failures += wcr_run_case(&g_wcr_cases[i], shard);
+    chain_params_select(CHAIN_MAIN);
+    checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
+    for (size_t i = 0; i < WCR_CASE_COUNT; i++)
+        if (g_wcr_cases[i].shard == shard && !g_wcr_cases[i].pre_setup)
+            failures += wcr_run_case(&g_wcr_cases[i], shard);
+    checkpoints_reset_sha3_override_for_test();
+    if (failures == 0)
+        printf("wallet_create: shard %u complete\n", shard + 1u);
+    else
+        printf("=== wallet_create shard %u: %d failure(s) ===\n",
+               shard + 1u, failures);
+    return failures;
+}
+
+/* The base group proves the partition: every shard owns a case and no case
+ * or name appears twice. The cases themselves run in the shard groups. */
 int test_wallet_create(void);
 int test_wallet_create(void)
 {
     int failures = 0;
-    failures += birthday_proof_atomic();
-    failures += birthday_identity_change();
-    chain_params_select(CHAIN_MAIN);
-    checkpoints_set_sha3_override_for_test(&wcr_no_anchor);
-    failures += birthday_fresh_ignores_supplied_phrase();
-    failures += creation_prepare_fixture();
-    failures += creation_cancel_fixture();
-    failures += creation_atomic_failure_fixture();
-    failures += creation_cli_fixture();
-    failures += creation_exit_fixture();
-    failures += creation_fresh_history_fixture();
-    failures += t_round_trip();
-    failures += t_refusals();
-    failures += t_phrase_not_captured_and_encrypted();
-    failures += t_birthday();
-    failures += t_weak_passphrases();
-    failures += t_authority();
-    failures += t_stdout_is_the_document();
-    failures += t_core_dumps_disabled();
-    failures += t_legacy_wallet_directory();
-    failures += t_boot_guards();
-    failures += t_locked_wallet();
-    failures += restore_address_reopens();
-    failures += t_restore_inputs();
-    failures += t_unreadable_file_fails_scan();
-    failures += t_seed_proof_needs_a_full_read();
-    failures += t_wallet_free_wipes_sapling_keys();
-    failures += t_live_wallet_refused();
-    failures += t_create_failure_codes();
-    failures += t_recovery_new();
-    failures += t_recovery_reply_fields();
-    failures += t_restore_at_local_tip();
-    failures += t_scan_positive_control();
-    failures += wcr_history_errors();
-    failures += wcr_postcount_failure();
-    failures += t_unsynced_create();
-    checkpoints_reset_sha3_override_for_test();
-    if (failures == 0)
-        printf("wallet_create: OK (all wallet creation gates pass)\n");
-    else
-        printf("=== wallet_create: %d failure(s) ===\n", failures);
+    unsigned counts[WCR_SHARD_COUNT] = {0};
+    bool unique = true;
+    for (size_t i = 0; i < WCR_CASE_COUNT; i++) {
+        if (g_wcr_cases[i].shard >= WCR_SHARD_COUNT) {
+            unique = false;
+            continue;
+        }
+        counts[g_wcr_cases[i].shard]++;
+        for (size_t j = 0; j < i; j++)
+            if (g_wcr_cases[i].run == g_wcr_cases[j].run ||
+                strcmp(g_wcr_cases[i].name, g_wcr_cases[j].name) == 0)
+                unique = false;
+    }
+    bool nonempty = true;
+    for (unsigned s = 0; s < WCR_SHARD_COUNT; s++)
+        nonempty &= counts[s] > 0;
+    if (WCR_CASE_COUNT != 34u || !unique || !nonempty) {
+        fprintf(stderr, "wallet_create: case partition invalid\n");
+        failures++;
+    }
+    /* A change to wallet creation selects the base group and every shard. */
+    const char *plans[] = {"wallet_create"};
+    char expanded[WCR_SHARD_COUNT + 1u][ZCL_TEST_GROUP_FULL_MAX];
+    bool truncated = false;
+    size_t selected = zcl_test_group_expand_plan(plans, 1, expanded,
+                                                  WCR_SHARD_COUNT + 1u,
+                                                  &truncated);
+    if (selected != WCR_SHARD_COUNT + 1u || truncated) {
+        fprintf(stderr, "wallet_create: proof family omits a shard\n");
+        failures++;
+    }
+    printf("wallet_create partition: cases=%zu shards=%u failures=%d\n",
+           WCR_CASE_COUNT, WCR_SHARD_COUNT, failures);
     return failures;
 }
+
+int test_wallet_create_shard_01(void);
+int test_wallet_create_shard_02(void);
+int test_wallet_create_shard_03(void);
+int test_wallet_create_shard_04(void);
+int test_wallet_create_shard_01(void) { return wcr_run_shard(0); }
+int test_wallet_create_shard_02(void) { return wcr_run_shard(1); }
+int test_wallet_create_shard_03(void) { return wcr_run_shard(2); }
+int test_wallet_create_shard_04(void) { return wcr_run_shard(3); }

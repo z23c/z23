@@ -1303,6 +1303,14 @@ static int test_native_catalog_resolution(void)
             "tests/harness/src/test_stage_repair_coin_backfill.c"));
         ASSERT(!zcl_test_group_source_is_semantic_leaf(
             "tests/harness/src/test_dev_platform.c"));
+        /* wallet_create is a base group plus four shards: not a leaf, and
+         * its token reaches every shard. */
+        ASSERT(!zcl_test_group_source_is_semantic_leaf(
+            "tests/harness/src/test_wallet_create.c"));
+        ASSERT(zcl_test_group_plan_selects("wallet_create",
+                                           "test_wallet_create_shard_01"));
+        ASSERT(zcl_test_group_plan_selects("wallet_create",
+                                           "test_wallet_create_shard_04"));
         ASSERT(zcl_test_group_source_is_semantic_leaf(
             "tests/harness/src/test_file_controller.c"));
         ASSERT(zcl_test_group_source_is_semantic_leaf(
