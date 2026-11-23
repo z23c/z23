@@ -23,9 +23,14 @@ to inspect) and optionally `since` (an opaque `cursor_token` string).
    `ref`, `seq`, `stream`, `row_offset` and `row_sha3` when present. These
    locator fields let mail triage fetch that exact retained row instead of the
    latest held row under a reused ref.
-4. From `blockers`, keep strings containing `label`. From `work`, keep exact
-   entries containing `->label` or `label->` (no spaces around the arrow).
-   Do not infer state from a work entry.
+4. Filter `work` by its native entry form `<kind> <from>-><to> <ref>`:
+   include the original literal entry only when the complete `from` or `to`
+   token exactly equals `label`. Parse the two endpoint tokens; never search
+   the whole entry or its `ref` for a label substring. Omit malformed entries
+   whose endpoints cannot be parsed. Do not infer state from a work entry.
+   From free-form `blockers`, keep a string only when `label` appears as a
+   whole token bounded on both sides by start/end or characters outside
+   `[A-Za-z0-9_.-]`; preserve the exact string and do not infer ownership.
 5. Copy `caller`, `capacity` and `missing` exactly. Copy the returned
    `cursor_token` exactly and report truncation and source coverage. Include
    available truncation/completeness fields without turning unknown values
