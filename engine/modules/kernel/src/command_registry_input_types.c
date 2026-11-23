@@ -755,6 +755,10 @@ static const struct cr_int_bound *cr_app_customize_bound(const char *path,
         static const struct cr_int_bound revision = { "expected_revision", 1, INT64_MAX };
         return &revision;
     }
+    if (!strcmp(path, "app.edit")) {
+        static const struct cr_int_bound edit[] = {{"offset", 0, ZCL_COMMAND_APP_EDIT_CONTENT_MAX}, {"delete_length", 0, ZCL_COMMAND_APP_EDIT_CONTENT_MAX}};
+        return cr_bound_in(key, edit, sizeof edit / sizeof edit[0]);
+    }
     if (strcmp(path, "app.customize") != 0) return NULL;
     static const struct cr_int_bound bounds[] = {
         { "expected_revision", 0, INT64_MAX },
@@ -1218,8 +1222,7 @@ static bool cr_execution_choice_descriptor(const struct zcl_command_spec *spec,
 
 static bool cr_app_edit_content(const struct zcl_command_spec *spec, const char *key)
 {
-    return spec && spec->path && !strcmp(spec->path, "app.edit") &&
-        !strcmp(key, "content");
+    return spec && spec->path && !strcmp(spec->path, "app.edit") && (!strcmp(key, "content") || !strcmp(key, "replacement"));
 }
 static bool cr_app_customize_query(const struct zcl_command_spec *spec, const char *key)
 {
@@ -1392,7 +1395,7 @@ bool zcl_command_registry_input_descriptor(
     }
     if (cr_app_edit_content(spec, key)) {
         out->type = JSON_STR; out->max_bytes = ZCL_COMMAND_APP_EDIT_CONTENT_MAX;
-        out->required = true; return true;
+        return true;
     }
     if (cr_app_host_descriptor(spec, key, out) || cr_soak_descriptor(spec, key, out) ||
         cr_execution_choice_descriptor(spec, key, out)) return true;
@@ -1466,8 +1469,6 @@ bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
         *type_ok = cr_app_customize_query_ok(value);
         return true;
     }
-    /* Empty replacement is valid (an empty saved file). Match the handler's
-     * UTF-8 and byte bound without widening any other leaf's content field. */
     if (cr_app_edit_content(spec, key)) {
         *type_ok = cr_app_edit_text_ok(value);
         return true;

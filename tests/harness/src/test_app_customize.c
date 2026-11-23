@@ -2223,7 +2223,7 @@ static bool ae_catalog_bounds(void)
     const struct zcl_command_spec *spec = abc_spec("app.edit");
     struct zcl_command_input_descriptor d;
     if (!spec || !zcl_command_registry_input_descriptor(spec, "content", &d) ||
-        d.type != JSON_STR || d.max_bytes != ZCL_COMMAND_APP_EDIT_CONTENT_MAX || !d.required) return false;
+        d.type != JSON_STR || d.max_bytes != ZCL_COMMAND_APP_EDIT_CONTENT_MAX || d.required) return false;
     char *text = malloc(ZCL_COMMAND_APP_EDIT_CONTENT_MAX + 2u);
     if (!text) return false;
     bool ok = ae_catalog_types(spec) && ae_catalog_boundaries(spec, text) &&
@@ -2280,6 +2280,94 @@ static int ae_empty_case(void)
     } _test_next:;
     abc_close(&l); act_cleanup(&f); return failures;
 }
+static bool ae_splice_input(struct abc_leaf *l, struct ac_fixture *f, int offset,
+                            int length, const char *replacement, const char *plan)
+{
+    char head[65], blob[65]; zcl_hex_encode(f->head, 32, head); zcl_hex_encode(f->blob, 32, blob);
+    abc_open(l);
+    return json_push_kv_str(&l->in, "name", "skycombat") &&
+        json_push_kv_int(&l->in, "expected_revision", 1) &&
+        json_push_kv_str(&l->in, "expected_head", head) &&
+        json_push_kv_str(&l->in, "path", "include/boost.h") &&
+        json_push_kv_str(&l->in, "expected_blob", blob) &&
+        json_push_kv_int(&l->in, "offset", offset) &&
+        json_push_kv_int(&l->in, "delete_length", length) &&
+        json_push_kv_str(&l->in, "replacement", replacement) &&
+        (!plan || (json_push_kv_str(&l->in, "plan_id", plan) && json_push_kv_bool(&l->in, "confirm", true)));
+}
+static bool ae_splice_bad_inputs(struct abc_leaf *l, struct ac_fixture *f)
+{
+    bool ok = ae_splice_input(l, f, 100, 1, "9", NULL) && abc_exec("app.edit", l) &&
+        l->out.status != ZCL_COMMAND_STATUS_PASSED && !l->out.error.mutated; abc_close(l);
+    ok = ok && ae_splice_input(l, f, 14, 1, "2", NULL) && abc_exec("app.edit", l) &&
+        !strcmp(l->out.error.code, "NO_CHANGES") && !l->out.error.mutated; abc_close(l);
+    ok = ok && ae_splice_input(l, f, 14, 1, "9", NULL) && json_push_kv_str(&l->in, "content", "9") &&
+        abc_exec("app.edit", l) && !strcmp(l->out.error.code, "BAD_INPUT") && !l->out.error.mutated; abc_close(l);
+    return ok;
+}
+static bool ae_splice_refusals(struct abc_leaf *l, struct ac_fixture *f, const char *plan)
+{
+    bool ok = ae_splice_input(l, f, 14, 1, "8", plan) && ae_bound_mismatch(l); abc_close(l);
+    ok = ok && ae_splice_input(l, f, 13, 2, " 9", plan) && ae_bound_mismatch(l); abc_close(l);
+    return ok && ae_splice_bad_inputs(l, f);
+}
+static bool ae_full_content_root(char root[65])
+{
+    struct ac_fixture f = {0}; struct abc_leaf l; abc_open(&l);
+    char head[65], blob[65], plan[65] = {0};
+    bool ok = act_setup(&f, false);
+    if (ok) {
+        zcl_hex_encode(f.head, 32, head); zcl_hex_encode(f.blob, 32, blob); abc_close(&l);
+        ok = ae_request(&l, &f, "include/boost.h", "#define BOOST 9\n", head, blob, 1, NULL) && abc_pass("app.edit", &l);
+        if (ok) snprintf(plan, sizeof(plan), "%s", abc_get(&l, "plan_id"));
+        abc_close(&l);
+    }
+    if (ok) {
+        ok = ae_request(&l, &f, "include/boost.h", "#define BOOST 9\n", head, blob, 1, plan) && abc_pass("app.edit", &l);
+        if (ok) snprintf(root, 65, "%s", abc_get(&l, "source_root"));
+    }
+    abc_close(&l); act_cleanup(&f); return ok;
+}
+static int ae_tree_equivalence_case(const char *root)
+{
+    int failures = 0; char full_root[65] = {0};
+    TEST("app.edit splice and full content produce the same tree") {
+        ASSERT(ae_full_content_root(full_root) && root[0] && !strcmp(root, full_root)); PASS();
+    } _test_next:;
+    return failures;
+}
+static int ae_splice_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0}; struct abc_leaf l; char plan[65] = {0}, root[65] = {0};
+    abc_open(&l);
+    TEST("app.edit plans and confirms a pinned byte splice") {
+        ASSERT(act_setup(&f, false) && act_preserved(&f, true)); abc_close(&l);
+        ASSERT(ae_splice_input(&l, &f, 14, 1, "9", NULL) && abc_pass("app.edit", &l));
+        ASSERT(strlen(abc_get(&l, "plan_id")) == 64); memcpy(plan, abc_get(&l, "plan_id"), 65); abc_close(&l);
+        ASSERT(ae_splice_refusals(&l, &f, plan));
+        ASSERT(act_preserved(&f, false));
+        ASSERT(ae_splice_input(&l, &f, 14, 1, "9", plan) && abc_pass("app.edit", &l));
+        ASSERT(ae_verify_draft(&f, abc_get(&l, "version"), abc_get(&l, "source_root")));
+        snprintf(root, sizeof(root), "%s", abc_get(&l, "source_root"));
+        PASS();
+    } _test_next:;
+    abc_close(&l); act_cleanup(&f);
+    return failures + ae_tree_equivalence_case(root);
+}
+static int ae_splice_utf8_case(void)
+{
+    int failures = 0; struct ac_fixture f = {0}; struct abc_leaf l; abc_open(&l);
+    TEST("app.edit splice rejects a split UTF-8 character") {
+        ASSERT(act_save_environment(&f) && abc_world_init_profile(&f.world, false) && act_configure_environment(&f));
+        ASSERT(abc_put(f.world.copy, "include/boost.h", "a\xc3\xa9z") && act_snapshot(&f, "save", f.head) &&
+            act_keep(&f) && act_find_kept_blob(&f)); abc_close(&l);
+        ASSERT(ae_splice_input(&l, &f, 2, 0, "x", NULL) && abc_exec("app.edit", &l) &&
+            !strcmp(l.out.error.code, "BAD_INPUT") && !l.out.error.mutated); abc_close(&l);
+        ASSERT(ae_splice_input(&l, &f, 1, 2, "x", NULL) && abc_pass("app.edit", &l));
+        PASS();
+    } _test_next:;
+    abc_close(&l); act_cleanup(&f); return failures;
+}
 int test_app_edit(void)
 {
     int failures = 0;
@@ -2293,6 +2381,8 @@ int test_app_edit(void)
     } _test_next:;
     act_cleanup(&f);
     failures += ae_empty_case();
+    failures += ae_splice_case();
+    failures += ae_splice_utf8_case();
     failures += ae_stale_case();
     failures += ae_long_case();
     failures += ae_sealed_case();

@@ -555,15 +555,15 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_COMMAND(
     "app.edit", "app", "", "Edit",
-    "Plan and confirm one UTF-8 replacement against the kept source at request "
+    "Plan and confirm one UTF-8 replacement or bounded byte splice against the kept source at request "
     "start. expected_revision anchors Keep; optional source_version selects "
     "an authorized successor source. Keep is untouched. "
     "expected_head protects the current copy history. The snapshot advances "
     "HEAD while preserving working files. Build and preview are separate.",
     ZCL_COMMAND_LIST_BUDGET,
     "app,edit,draft,source,preview", "zcl.app_edit.input.v1", "zcl.app_edit.v1",
-    "name,expected_revision,source_version,expected_head,path,expected_blob,content,plan_id,confirm",
-    "name,expected_revision,expected_head,path,expected_blob,content",
+    "name,expected_revision,source_version,expected_head,path,expected_blob,content,offset,delete_length,replacement,plan_id,confirm",
+    "name,expected_revision,expected_head,path,expected_blob",
     "z23 app edit --input='{\"name\":\"skycombat\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,

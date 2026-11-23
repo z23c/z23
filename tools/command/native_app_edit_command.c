@@ -33,6 +33,10 @@ struct edit {
     struct zcl_package_copy copy;
     struct vcs_manifest manifest;
     const char *name, *path, *content, *source_version;
+    const char *replacement;
+    char *splice_content;
+    size_t offset, delete_length;
+    bool splice;
     uint64_t revision;
     uint64_t blob_size;
     mode_t mode;
@@ -61,8 +65,8 @@ static const char *edit_string(const struct json_value *in, const char *key, siz
 }
 static bool edit_input_keys(struct edit *e, const struct json_value *in)
 {
-    static const char *const keys[] = {"name", "expected_revision", "expected_head", "path", "expected_blob", "content", "plan_id", "confirm", "source_version"};
-    if (!in || in->type != JSON_OBJ || in->num_children < 6 || in->num_children > 9)
+    static const char *const keys[] = {"name", "expected_revision", "expected_head", "path", "expected_blob", "content", "offset", "delete_length", "replacement", "plan_id", "confirm", "source_version"};
+    if (!in || in->type != JSON_OBJ || in->num_children < 6 || in->num_children > 11)
         return edit_fail(e, "BAD_INPUT", false, "six edit inputs and optional plan_id/confirm are required");
     for (size_t i = 0; i < in->num_children; ++i) {
         bool found = false;
@@ -80,23 +84,84 @@ static bool edit_source_input(struct edit *e, const struct json_value *in)
     return (e->source_version && edit_hex(in, "source_version", root)) ||
         edit_fail(e, "BAD_INPUT", false, "source_version must be an exact lowercase root");
 }
+static bool edit_splice_input(struct edit *e, const struct json_value *in)
+{
+    const struct json_value *offset = json_get(in, "offset"), *del = json_get(in, "delete_length");
+    const struct json_value *replacement = json_get(in, "replacement");
+    e->splice = offset || del || replacement;
+    if (e->splice) {
+        e->replacement = edit_string(in, "replacement", ZCL_COMMAND_APP_EDIT_CONTENT_MAX);
+        if (json_get(in, "content") || !offset || offset->type != JSON_INT || offset->val.i < 0 ||
+            !del || del->type != JSON_INT || del->val.i < 0 || !e->replacement ||
+            (uint64_t)offset->val.i > ZCL_COMMAND_APP_EDIT_CONTENT_MAX ||
+            (uint64_t)del->val.i > ZCL_COMMAND_APP_EDIT_CONTENT_MAX)
+            return edit_fail(e, "BAD_INPUT", false, "invalid splice inputs");
+        e->offset = (size_t)offset->val.i; e->delete_length = (size_t)del->val.i;
+    }
+    return true;
+}
+static bool edit_confirmation_input(struct edit *e, const struct json_value *in)
+{
+    const struct json_value *confirm = json_get(in, "confirm");
+    if (confirm && confirm->type != JSON_BOOL)
+        return edit_fail(e, "BAD_INPUT", false, "confirm must be boolean");
+    e->confirm = confirm && json_get_bool(confirm);
+    return true;
+}
 static bool edit_inputs(struct edit *e, const struct json_value *in)
 {
-    if (!edit_input_keys(e, in)) return false;
+    if (!edit_input_keys(e, in) || !edit_splice_input(e, in)) return false;
     const struct json_value *rev = json_get(in, "expected_revision");
     e->name = edit_string(in, "name", APP_SELECTION_ID_MAX);
     e->path = edit_string(in, "path", EDIT_PATH_MAX);
     e->content = edit_string(in, "content", ZCL_COMMAND_APP_EDIT_CONTENT_MAX);
     if (!e->name || !e->name[0] || !e->path || !vcs_package_path_valid(e->path) ||
-        !e->content || !rev || rev->type != JSON_INT || rev->val.i < 1 ||
+        (!e->splice && !e->content) || !rev || rev->type != JSON_INT || rev->val.i < 1 ||
         !edit_hex(in, "expected_head", e->head) || !edit_hex(in, "expected_blob", e->blob))
         return edit_fail(e, "BAD_INPUT", false, "invalid revision, path, text or identity");
-    const struct json_value *confirm = json_get(in, "confirm");
-    if (confirm && confirm->type != JSON_BOOL)
-        return edit_fail(e, "BAD_INPUT", false, "confirm must be boolean");
-    e->confirm = confirm && json_get_bool(confirm);
     e->revision = (uint64_t)rev->val.i;
-    return edit_source_input(e, in);
+    return edit_confirmation_input(e, in) && edit_source_input(e, in);
+}
+static bool edit_source_text(struct edit *e, const uint8_t *bytes, size_t size)
+{
+    char *original = zcl_malloc(size + 1, "app-edit-source-text");
+    if (!original) return edit_fail(e, "OUT_OF_MEMORY", false, "cannot read selected file");
+    if (size) memcpy(original, bytes, size);
+    original[size] = 0;
+    bool valid = zutf8_validate(original);
+    free(original);
+    return valid || edit_fail(e, "BAD_INPUT", false, "splice range or selected text is invalid");
+}
+static bool edit_splice_range(struct edit *e, const uint8_t *bytes, size_t size, size_t insert)
+{
+    bool valid = e->offset <= size && e->delete_length <= size - e->offset;
+    size_t end = valid ? e->offset + e->delete_length : 0;
+    if (valid) valid = (!e->offset || e->offset == size || (bytes[e->offset] & 0xc0) != 0x80) &&
+        (end == size || (bytes[end] & 0xc0) != 0x80) &&
+        insert <= ZCL_COMMAND_APP_EDIT_CONTENT_MAX - (size - e->delete_length) && (!size || !memchr(bytes, 0, size));
+    if (!valid) return edit_fail(e, "BAD_INPUT", false, "splice range or selected text is invalid");
+    return edit_source_text(e, bytes, size);
+}
+/* Splice only authenticated, bounded UTF-8 bytes from the selected blob. */
+static bool edit_splice(struct edit *e)
+{
+    if (!e->splice) return true;
+    uint8_t *bytes = NULL; size_t size = 0, insert = strlen(e->replacement);
+    if (e->blob_size > ZCL_COMMAND_APP_EDIT_CONTENT_MAX ||
+        vcs_object_get_readonly_bounded(e->selection.copy, e->blob, VCS_TAG_BLOB,
+            ZCL_COMMAND_APP_EDIT_CONTENT_MAX, &bytes, &size) != 0 || size != e->blob_size) {
+        free(bytes); return edit_fail(e, "SOURCE_UNREADABLE", false, "selected file is unavailable");
+    }
+    if (!edit_splice_range(e, bytes, size, insert)) { free(bytes); return false; }
+    size_t end = e->offset + e->delete_length;
+    size_t total = size - e->delete_length + insert;
+    e->splice_content = zcl_malloc(total + 1, "app-edit-splice");
+    if (!e->splice_content) { free(bytes); return edit_fail(e, "OUT_OF_MEMORY", false, "cannot allocate edited text"); }
+    if (e->offset) memcpy(e->splice_content, bytes, e->offset);
+    memcpy(e->splice_content + e->offset, e->replacement, insert);
+    if (size > end) memcpy(e->splice_content + e->offset + insert, bytes + end, size - end);
+    e->splice_content[total] = 0; e->content = e->splice_content;
+    free(bytes); return true;
 }
 static bool edit_source(struct edit *e)
 {
@@ -139,7 +204,7 @@ static void edit_plan_part(struct sha3_256_ctx *h, const char *s)
 static void edit_make_plan(struct edit *e)
 {
     struct sha3_256_ctx h; sha3_256_init(&h);
-    edit_plan_part(&h, "zcl.app_edit.plan.v2");
+    edit_plan_part(&h, e->splice ? "zcl.app_edit.splice.v1" : "zcl.app_edit.plan.v2");
     edit_plan_part(&h, e->selection.app);
     edit_plan_part(&h, e->selection.copy);
     edit_plan_part(&h, e->selection.datadir);
@@ -158,6 +223,11 @@ static void edit_make_plan(struct edit *e)
     zcl_write_u64_le(revision, e->revision);
     sha3_256_write(&h, revision, sizeof(revision));
     edit_plan_part(&h, e->path); edit_plan_part(&h, e->content);
+    if (e->splice) {
+        uint8_t part[8]; zcl_write_u64_le(part, e->offset); sha3_256_write(&h, part, sizeof(part));
+        zcl_write_u64_le(part, e->delete_length); sha3_256_write(&h, part, sizeof(part));
+        edit_plan_part(&h, e->replacement);
+    }
     sha3_256_finalize(&h, e->plan);
 }
 static bool edit_prepare_plan(struct edit *e)
@@ -291,24 +361,36 @@ static void edit_describe_commit(struct edit *e)
 }
 #endif
 
+#if !defined(_WIN32)
+static void edit_execute(struct edit *e, const struct zcl_command_request *request)
+{
+    bool ok = request && edit_inputs(e, request->input) && edit_source(e) && edit_splice(e);
+    if (ok) ok = edit_prepare_plan(e);
+    if (ok && !e->confirm) ok = edit_describe_plan(e);
+    if (ok && e->confirm)
+        ok = zcl_package_copy_plan_matches(request->input, e->plan, e->reply, EDIT_COMMAND) &&
+             edit_reopen(e) && edit_write(e) && edit_save(e);
+    if (ok && e->confirm) edit_describe_commit(e);
+}
+static void edit_run(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    struct edit *e = zcl_calloc(1, sizeof(*e), "app-edit");
+    if (!e) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate draft", EDIT_COMMAND); return; }
+    e->reply = reply;
+    edit_execute(e, request);
+    if (e->scratch[0]) (void)zcl_tree_remove(e->scratch);
+    vcs_manifest_free(&e->manifest);
+    zcl_package_copy_close(&e->copy);
+    free(e->splice_content);
+    free(e);
+}
+#endif
+
 void zcl_native_handle_app_edit(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
 #if !defined(_WIN32)
-    struct edit *e = zcl_calloc(1, sizeof(*e), "app-edit");
-    if (!e) { zcl_package_copy_fail(reply, "OUT_OF_MEMORY", false, "cannot allocate draft", EDIT_COMMAND); return; }
-    e->reply = reply;
-    bool ok = request && edit_inputs(e, request->input) && edit_source(e);
-    if (ok) ok = edit_prepare_plan(e);
-    if (ok && !e->confirm) ok = edit_describe_plan(e);
-    if (ok && e->confirm)
-        ok = zcl_package_copy_plan_matches(request->input, e->plan, reply, EDIT_COMMAND) &&
-             edit_reopen(e) && edit_write(e) && edit_save(e);
-    if (ok && e->confirm) edit_describe_commit(e);
-    if (e->scratch[0]) (void)zcl_tree_remove(e->scratch);
-    vcs_manifest_free(&e->manifest);
-    zcl_package_copy_close(&e->copy);
-    free(e);
+    edit_run(request, reply);
 #else
     (void)request;
     zcl_package_copy_fail(reply, "PLATFORM_UNAVAILABLE", false,
