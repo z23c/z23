@@ -128,20 +128,17 @@ static void rotate_snapshots(const char *snapshots_dir, int max_keep, const char
     platform_directory_list_free(&list);
 }
 
-const char *snapshot_create(const char *legacy_datadir,
-                            const char *c23_datadir,
-                            int max_keep)
+static const char *snapshot_claim_directory(const char *legacy_datadir,
+                                            const char *c23_datadir,
+                                            char snapshots_dir[2048], char ts[16])
 {
-    if (max_keep < 1) max_keep = 2;
     if (!legacy_datadir || !c23_datadir ||
         strlen(legacy_datadir) + sizeof("/blocks/index") > 2048)
         return NULL;
 
-    /* Create snapshots directory */
-    char snapshots_dir[2048];
-    int len = snprintf(snapshots_dir, sizeof(snapshots_dir),
+    int len = snprintf(snapshots_dir, 2048,
                        "%s/snapshots", c23_datadir);
-    if (len < 0 || (size_t)len >= sizeof(snapshots_dir)) return NULL;
+    if (len < 0 || (size_t)len >= 2048) return NULL;
     /* Reserve room for the timestamp and longest suffix used below. */
     if ((size_t)len + 1 + 15 + sizeof("/blocks/index") > 2048) return NULL;
     if (!platform_directory_ensure(snapshots_dir, 0700)) return NULL;
@@ -150,8 +147,7 @@ const char *snapshot_create(const char *legacy_datadir,
     time_t now = platform_time_wall_time_t();
     struct tm *tm = localtime(&now);
     static char snap_dir[2048];
-    char ts[16];
-    if (!tm || strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", tm) != 15) return NULL;
+    if (!tm || strftime(ts, 16, "%Y%m%d_%H%M%S", tm) != 15) return NULL;
     len = snprintf(snap_dir, sizeof(snap_dir), "%s/%s", snapshots_dir, ts);
     if (len < 0 || (size_t)len >= sizeof(snap_dir)) return NULL;
     if (platform_directory_create(snap_dir, 0700) != 0) {
@@ -162,6 +158,18 @@ const char *snapshot_create(const char *legacy_datadir,
             LOG_WARN("snapshot", "snapshot: cannot create directory %s: %s", snap_dir, strerror(error));
         return NULL;
     }
+    return snap_dir;
+}
+
+const char *snapshot_create(const char *legacy_datadir,
+                            const char *c23_datadir,
+                            int max_keep)
+{
+    if (max_keep < 1) max_keep = 2;
+    char snapshots_dir[2048], ts[16];
+    const char *snap_dir = snapshot_claim_directory(legacy_datadir, c23_datadir,
+                                                    snapshots_dir, ts);
+    if (!snap_dir) return NULL;
 
     struct timespec t0;
     platform_time_monotonic_timespec(&t0);

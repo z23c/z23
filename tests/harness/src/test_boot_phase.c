@@ -775,6 +775,34 @@ static bool bp_snapshot_write(const char *path, const char *data)
     return fclose(f) == 0 && ok;
 }
 
+static int bp_snapshot_check_contents(const char *created)
+{
+    int failures = 0;
+    char copied[PATH_MAX + 96];
+    if (!created) {
+        BP_CHECK("snapshot content available", false);
+        return failures;
+    }
+    snprintf(copied, sizeof(copied), "%s/blocks/blk00000.dat", created);
+    BP_CHECK("snapshot copies block bytes", bp_snapshot_file_is(copied, "block"));
+    snprintf(copied, sizeof(copied), "%s/blocks/index/CURRENT", created);
+    BP_CHECK("snapshot copies index bytes", bp_snapshot_file_is(copied, "index"));
+    snprintf(copied, sizeof(copied), "%s/chainstate/CURRENT", created);
+    BP_CHECK("snapshot copies chainstate bytes", bp_snapshot_file_is(copied, "chain"));
+    return failures;
+}
+
+static bool bp_snapshot_make_source(const char *source, const char *blocks,
+                                    const char *index, const char *chain,
+                                    const char *block, const char *index_file,
+                                    const char *chain_file)
+{
+    return mkdir(source, 0700) == 0 && mkdir(blocks, 0700) == 0 &&
+           mkdir(index, 0700) == 0 && mkdir(chain, 0700) == 0 &&
+           bp_snapshot_write(block, "block") && bp_snapshot_write(index_file, "index") &&
+           bp_snapshot_write(chain_file, "chain");
+}
+
 static int bp_snapshot_failure_and_retention(void)
 {
     int failures = 0;
@@ -782,7 +810,6 @@ static int bp_snapshot_failure_and_retention(void)
     char index[PATH_MAX + 48], chain[PATH_MAX + 32], block[PATH_MAX + 48];
     char snapshots[PATH_MAX + 32], old[PATH_MAX + 64], newer[PATH_MAX + 64];
     char index_file[PATH_MAX + 64], chain_file[PATH_MAX + 48], kept[PATH_MAX + 80];
-    char copied[PATH_MAX + 96];
     test_make_tmpdir(dir, sizeof(dir), "bootphase", "snapshot_retention");
     snprintf(source, sizeof(source), "%s/source", dir);
     snprintf(blocks, sizeof(blocks), "%s/blocks", source);
@@ -803,25 +830,11 @@ static int bp_snapshot_failure_and_retention(void)
     const char *failed = snapshot_create(source, dir, 1);
     struct stat st;
     BP_CHECK("snapshot failed copy preserves old snapshots", ok && !failed && stat(old, &st) == 0 && stat(newer, &st) == 0);
-    ok = ok && mkdir(source, 0700) == 0 && mkdir(blocks, 0700) == 0 &&
-         mkdir(index, 0700) == 0 && mkdir(chain, 0700) == 0;
-    ok = ok && bp_snapshot_write(block, "block") && bp_snapshot_write(index_file, "index") &&
-         bp_snapshot_write(chain_file, "chain");
+    ok = ok && bp_snapshot_make_source(source, blocks, index, chain, block, index_file, chain_file);
     const char *created = ok ? snapshot_create(source, dir, 1) : NULL;
     BP_CHECK("snapshot success retains one previous snapshot", created && stat(created, &st) == 0 &&
              stat(old, &st) != 0 && bp_snapshot_file_is(kept, "retained"));
-    if (created) {
-        snprintf(copied, sizeof(copied), "%s/blocks/blk00000.dat", created);
-        BP_CHECK("snapshot copies block bytes", bp_snapshot_file_is(copied, "block"));
-        snprintf(copied, sizeof(copied), "%s/blocks/index/CURRENT", created);
-        BP_CHECK("snapshot copies index bytes", bp_snapshot_file_is(copied, "index"));
-        snprintf(copied, sizeof(copied), "%s/chainstate/CURRENT", created);
-        BP_CHECK("snapshot copies chainstate bytes", bp_snapshot_file_is(copied, "chain"));
-    } else {
-        BP_CHECK("snapshot copies block bytes", false);
-        BP_CHECK("snapshot copies index bytes", false);
-        BP_CHECK("snapshot copies chainstate bytes", false);
-    }
+    failures += bp_snapshot_check_contents(created);
     clock_set_default(saved);
     test_rm_rf(dir);
     return failures;
