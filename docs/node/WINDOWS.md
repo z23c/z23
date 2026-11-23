@@ -477,6 +477,22 @@ catalog. The platform-neutral half (caps, outcome mapping, job hand-off,
 write-root and environment selection, and refusal when unarmed) runs on
 Linux in `make t-fast ONLY=devagent_worker`.
 
+## AI assistant tools on Windows
+
+`z23 mcp serve` (the local MCP adapter that Claude Code and Codex use) is
+POSIX-only, so the Windows `z23.exe` refuses it with `MCP_SERVE_PLATFORM` and
+the message names the next step. The working alternative is the same server
+over ssh to a Linux host that holds the checkout:
+
+```sh
+claude mcp add --scope user <name> -- ssh <host> 'cd <checkout> && build/bin/z23 mcp serve --checkout=<checkout>'
+```
+
+Replace `<name>`, `<host>` and `<checkout>` with your MCP name, Linux host alias
+and absolute checkout path. The Claude Code plugin's `.mcp.json` launches
+`z23 mcp serve` locally, so on Windows it reports "Connection closed" until you
+register the ssh form.
+
 ## Remote terminal on Windows
 
 The mesh terminal lane lets a paired machine that holds the terminal

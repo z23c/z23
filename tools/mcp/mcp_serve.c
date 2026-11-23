@@ -1665,9 +1665,7 @@ int zcl_mcp_serve_main(int argc, char **argv)
 #if defined(_WIN32)
     (void)argc;
     (void)argv;
-    fputs("{\"ok\":false,\"error\":{\"code\":\"MCP_SERVE_PLATFORM\","
-          "\"message\":\"z23 mcp serve needs a POSIX host\"}}\n",
-          stderr);
+    fputs(ZCL_MCP_SERVE_WINDOWS_REFUSAL, stderr);
     return 2;
 #else
     return serve_posix(argc, argv);

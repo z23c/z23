@@ -21,6 +21,7 @@
 
 #include "config/command_catalog.h"
 #include "mcp/mcp_policy.h"
+#include "mcp/mcp_serve.h"
 #include "mcp/mcp_rpc.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -230,6 +231,16 @@ static bool read_file(const char *path, char *out, size_t cap)
     fclose(f);
     out[n] = '\0';
     return true;
+}
+
+static int case_windows_refusal_text(void)
+{
+    int failures = 0;
+    TEST_CASE("Windows refusal names the reason and the ssh next step") {
+        ASSERT(strstr(ZCL_MCP_SERVE_WINDOWS_REFUSAL, "POSIX-only") != NULL);
+        ASSERT(strstr(ZCL_MCP_SERVE_WINDOWS_REFUSAL, "ssh <host>") != NULL);
+    } TEST_END
+    return failures;
 }
 
 static int case_no_checkout(const char *home)
@@ -2328,6 +2339,7 @@ int test_mcp_serve(void)
     failures += case_wallet_reads(home, checkout);
     failures += case_guide_lessons(home, checkout, NULL);
     failures += case_fixture_cleanup(home, checkout);
+    failures += case_windows_refusal_text();
     TEST_DISCARD(test_rm_rf_recursive(home));
 #endif
     printf("=== mcp_serve: %d failures ===\n", failures);

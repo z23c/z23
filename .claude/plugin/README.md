@@ -22,6 +22,18 @@ issued by a maintainer; see [`../plugin-fleet/README.md`](../plugin-fleet/README
 
 ## Local tools: `z23 mcp serve`
 
+On Windows the `z23` binary refuses `mcp serve` with `MCP_SERVE_PLATFORM`,
+because the stdio adapter is POSIX-only, and Claude Code shows the server as
+"Connection closed". Run the same server on a Linux host over ssh instead:
+
+```sh
+claude mcp add --scope user z23-local -- ssh <host> 'cd <checkout> && build/bin/z23 mcp serve --checkout=<checkout>'
+```
+
+Replace `<host>` with your Linux host alias and `<checkout>` with the absolute
+path of the checkout on that host. The connection takes about a second and each
+call about 100 ms.
+
 The plugin registers `z23-local`, a stdio MCP server that Claude Code
 starts itself: `z23 mcp serve --checkout=${CLAUDE_PROJECT_DIR}`. It runs the
 node binary's command registry in process for the checkout you opened, with

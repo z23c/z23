@@ -11,6 +11,17 @@
 extern "C" {
 #endif
 
+/* Windows refusal for `z23 mcp serve`: a one-line JSON error that names the
+ * reason and the working next step (run the same server over ssh on a Linux
+ * host, registered with `claude mcp add`). */
+#define ZCL_MCP_SERVE_WINDOWS_REFUSAL                                         \
+    "{\"ok\":false,\"error\":{\"code\":\"MCP_SERVE_PLATFORM\","               \
+    "\"message\":\"z23 mcp serve needs a POSIX host: the stdio MCP adapter "   \
+    "is POSIX-only, so this Windows z23 cannot start it. Run the same server " \
+    "on a Linux host over ssh instead: claude mcp add --scope user <name> -- " \
+    "ssh <host> 'cd <checkout> && build/bin/z23 mcp serve "                   \
+    "--checkout=<checkout>'\"}}\n"
+
 /* argv is the full process argv; argv[1] is "mcp" and argv[2] "serve".
  * Reads newline-delimited JSON-RPC from stdin and writes replies to stdout
  * until EOF; logs go to stderr. Requires --checkout=<git toplevel>; optional
