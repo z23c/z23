@@ -465,12 +465,11 @@ static bool present_live_pump(
     RGFW_surface **surface, uint8_t **scaled_pixels,
     struct zcl_present_window_form_v1 *form, uint32_t focus,
     bool required_invalid, struct zcl_present_window_event_v1 *event,
-    bool paint)
+    bool paint, bool close_requested)
 {
     if (!live) return true;
     bool redraw = false, close = false;
-    live->owner.update(live->owner.context, event, RGFW_window_shouldClose(window),
-                 &redraw, &close);
+    live->owner.update(live->owner.context, event, close_requested, &redraw, &close);
     if (redraw) RGFW_window_setName(window, page->title ? page->title : "ZClassic23");
     if (redraw && paint &&
         !present_redraw(window, page, surface, scaled_pixels, action_count,
@@ -581,7 +580,29 @@ struct present_pages_run {
     uint32_t focused_control;
     bool required_invalid;
     bool redraw_failed;
+    bool exit_down;
 };
+
+/* The one rule for ending a pages window: a static window keeps RGFW's answer. */
+static bool present_pages_closing(struct present_pages_run *run)
+{
+    return run->live ? run->window->internal.shouldClose != RGFW_FALSE
+                     : RGFW_window_shouldClose(run->window);
+}
+/* In a live window the exit key is one close request per press, never a
+ * verdict: the first press after a release raises the flag once; a repeat or a
+ * held key raises nothing; the release or a focus loss rearms the key. */
+static void present_live_exit_key(struct present_pages_run *run, const RGFW_event *event)
+{
+    bool exit = event->type == RGFW_keyPressed || event->type == RGFW_keyReleased ?
+        event->key.value == RGFW_window_getExitKey(run->window) : false;
+    if (event->type == RGFW_focusOut || (exit && event->type == RGFW_keyReleased))
+        run->exit_down = false;
+    else if (exit && !run->exit_down) {
+        run->exit_down = true;
+        RGFW_window_setShouldClose(run->window, RGFW_TRUE);
+    }
+}
 
 static const char *present_pages_open(struct present_pages_run *run)
 {
@@ -652,12 +673,11 @@ static void present_pages_pump(struct present_pages_run *run, bool paint)
     if (!present_live_pump(run->live, run->action_count, run->window,
                       run->request, &run->surface, &run->scaled_pixels,
                       run->form, run->focused_control, run->required_invalid,
-                      run->result, paint))
+                      run->result, paint, present_pages_closing(run)))
         run->redraw_failed = true;
 }
 
-static void present_pages_finish(struct present_pages_run *run,
-    uint32_t action)
+static void present_pages_finish(struct present_pages_run *run, uint32_t action)
 {
     run->result->outcome = ZCL_PRESENT_WINDOW_ACTION;
     run->result->action_index = action;
@@ -809,8 +829,7 @@ static void present_pages_resize(struct present_pages_run *run,
     }
 }
 
-static bool present_pages_live_event(struct present_pages_run *run,
-    RGFW_event *event)
+static bool present_pages_live_event(struct present_pages_run *run, RGFW_event *event)
 {
     uint32_t previous_focus = run->focused_control;
     if (!present_live_input(run->live, run->window, run->request, event,
@@ -820,7 +839,7 @@ static bool present_pages_live_event(struct present_pages_run *run,
     present_pages_pump(run, true);
     /* Focus belongs to the native view, not the owner's page-update flag. */
     if (previous_focus != run->focused_control && !run->redraw_failed &&
-        !RGFW_window_shouldClose(run->window) &&
+        !present_pages_closing(run) &&
         !present_pages_redraw(run, run->focused_control, run->hover_index)) {
         run->redraw_failed = true;
         run->result->outcome = ZCL_PRESENT_WINDOW_DISMISSED;
@@ -1206,7 +1225,6 @@ bool zcl_present_window_copy_text_v1(const char *text)
 #endif
 }
 
-
 static void present_pages_plain_key(struct present_pages_run *run,
     const RGFW_event *event)
 {
@@ -1221,33 +1239,19 @@ static void present_pages_plain_key(struct present_pages_run *run,
              * copy capacity-1 bytes; Windows needs room for its wide NUL). */
             RGFW_writeClipboard(run->request->copy_text, (u32)(copy_len + 1u));
 #if defined(ZCL_TESTING)
-#if defined(__APPLE__)
-            /* RGFW's reader reports an encoding-size upper bound on macOS.
-             * Verify the actual OS pasteboard UTF-8 bytes without that copy. */
-            const char *copied = NSPasteboard_stringForType(
-                NSPasteboard_generalPasteboard(), NSPasteboardTypeString, NULL);
-            present_test_copy_matches = copied && strlen(copied) == copy_len &&
-                !memcmp(copied, run->request->copy_text, copy_len + 1u);
-#else
-            char copied[ZCL_PRESENT_COPY_TEXT_MAX + 1u] = {0};
-            RGFW_ssize_t length = RGFW_readClipboardPtr(copied, sizeof(copied));
-            present_test_copy_matches = length == (RGFW_ssize_t)copy_len &&
-                !memcmp(copied, run->request->copy_text, copy_len + 1u);
-#endif
+            present_test_copy_readback(run->request->copy_text, copy_len);
 #endif
         }
     }
     present_pages_number_keys(run, event);
 }
 
-static void present_pages_event(struct present_pages_run *run,
-    RGFW_event *event)
+static void present_pages_event(struct present_pages_run *run, RGFW_event *event)
 {
+    if (run->live) present_live_exit_key(run, event);
     if (present_pages_live_event(run, event)) return;
-    /* RGFW marks native close before returning its event. Give the live
-     * owner its veto/redraw opportunity before the loop sees shouldClose.
-     * Consumed actions already pumped above and must not dispatch twice. */
-    if (run->live && RGFW_window_shouldClose(run->window)) {
+    /* A close reaches the owner before any loop exit check; the event is then spent. */
+    if (run->live && present_pages_closing(run)) {
         present_pages_pump(run, true);
         return;
     }
@@ -1269,31 +1273,23 @@ static void present_pages_event(struct present_pages_run *run,
 static bool present_pages_poll_event(RGFW_window *window, RGFW_event *event)
 {
 #if defined(ZCL_TESTING)
-    if (present_test_cursor < present_test_count) {
-        memset(event, 0, sizeof(*event));
-        event->type = RGFW_keyPressed;
-        unsigned scripted = present_test_events[present_test_cursor++];
-        event->key.value = scripted == UINT_MAX ? RGFW_c : (u8)(RGFW_1 + scripted);
-        event->key.sym = scripted == UINT_MAX ? 'c' : (u32)('1' + scripted);
-        return true;
-    }
+    if (present_test_cursor < present_test_count) return present_test_key(window, event);
 #endif
     return RGFW_window_checkEvent(window, event);
 }
 
 static void present_pages_loop(struct present_pages_run *run)
 {
-    while (!RGFW_window_shouldClose(run->window)) {
-        RGFW_event event;
-        bool saw_event = false;
+    while (!present_pages_closing(run)) {
+        RGFW_event event; bool saw_event = false;
         while (present_pages_poll_event(run->window, &event)) {
             saw_event = true;
             present_pages_event(run, &event);
-            if (run->redraw_failed || (run->live && RGFW_window_shouldClose(run->window))) break;
+            if (run->redraw_failed || (run->live && present_pages_closing(run))) break;
         }
-        if (run->redraw_failed || (run->live && RGFW_window_shouldClose(run->window))) break;
+        if (run->redraw_failed || (run->live && present_pages_closing(run))) break;
         present_pages_pump(run, true);
-        if (!saw_event && !RGFW_window_shouldClose(run->window))
+        if (!saw_event && !present_pages_closing(run))
             RGFW_waitForEvent(100);
     }
 }

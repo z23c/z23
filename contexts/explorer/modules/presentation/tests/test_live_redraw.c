@@ -482,12 +482,124 @@ static bool clipboard_roundtrip_cases(void)
     return clipboard_roundtrip(maximum);
 }
 
+/* A live owner facing the exit key. The key is one close request per press and
+ * never a verdict: only the owner's answer may end the window. `requests`
+ * counts requests, `later` the keys delivered after one, `ticks` the owner's
+ * calls that carry no request. */
+struct close_probe { unsigned requests, later, ticks, close_at_tick; bool allow_requests; };
+static void close_update(void *context, const struct zcl_present_window_event_v1 *event,
+                         bool close_requested, bool *redraw, bool *allow_close)
+{
+    struct close_probe *p = context;
+    *redraw = false;
+    if (close_requested && event->outcome != ZCL_PRESENT_WINDOW_ACTION) ++p->requests;
+    else if (p->requests) ++p->ticks;
+    /* A request is refused unless `allow_requests`; after a refused one only a
+     * call that carries no request ends the window, at `close_at_tick`. */
+    *allow_close = event->outcome == ZCL_PRESENT_WINDOW_ACTION ||
+        (close_requested ? p->allow_requests : p->close_at_tick && p->ticks == p->close_at_tick);
+}
+static bool close_input(void *context, const struct zcl_present_input_v1 *event,
+                        uint32_t *focus, uint32_t *action)
+{
+    struct close_probe *p = context;
+    (void)focus;
+    /* Escape is left unconsumed, as the task owners leave it. */
+    if (event->key != ZCL_PRESENT_INPUT_TEXT || event->character != '1') return false;
+    ++p->later; *action = 0;
+    return true;
+}
+static char close_error[256];
+static bool close_run(unsigned first, unsigned second, struct close_probe *p,
+                      struct zcl_present_window_event_v1 *result)
+{
+    static uint8_t pixels[16 * 16 * 3];
+    struct zcl_present_window_v1 page = {
+        .struct_size = sizeof(page), .abi_version = ZCL_PRESENT_ABI_V1,
+        .title = "Live close regression", .pixels = pixels,
+        .width = 16, .height = 16, .pixel_format = ZCL_PRESENT_RGB8,
+    };
+    struct zcl_present_window_pages_v1 pages = {
+        .struct_size = sizeof(pages), .abi_version = ZCL_PRESENT_ABI_V1,
+        .pages = &page, .page_count = 1,
+    };
+    const struct zcl_present_window_live_view_v1 live = {
+        .owner = {.context = p, .update = close_update}, .input = close_input,
+    };
+    zcl_present_test_script(first, second, false);
+    bool ok = zcl_present_window_run_live_view_v1(&pages, 4, &live, close_error, sizeof(close_error)) &&
+        !close_error[0];
+    *result = zcl_present_test_result();
+#if defined(__linux__)
+    if (!zcl_present_test_x11_libraries_retired()) {
+        fputs("live close: last-window close retained X11 library state\n", stderr);
+        return false;
+    }
+#endif
+    return ok;
+}
+
 static bool live_redraw_cases(void)
 {
     return run(1, true, false, 1, false, false) && run(0, false, true, 1, false, false) &&
         run(1, false, true, 2, true, false) && run(2, true, false, 1, false, false) &&
         run(2, false, true, 2, true, false) &&
         run(1, false, true, 2, true, true);
+}
+#define KEY_1 0u
+#define NO_KEY 200u
+#define EXIT_HELD (UINT_MAX - 1u) /* a press RGFW shows as a fresh edge until a release */
+#define EXIT_TAP (UINT_MAX - 2u) /* a quick tap: its release was read in the same poll */
+#define EXIT_AGAIN EXIT_HELD /* no release between: what a server's repeat looks like */
+/* One close scenario and what it must end with: the scripted keys, the
+ * owner's settings, then the counters and the result of the run. */
+struct close_case {
+    unsigned first, second, requests, later, ticks, close_at_tick;
+    bool allow_requests;
+    uint32_t outcome, action;
+    const char *failure;
+};
+static const struct close_case close_cases[] = {
+    /* A refused exit key keeps the loop running: the next key still arrives. */
+    { EXIT_HELD, KEY_1, 1, 1, 1, 0, false, ZCL_PRESENT_WINDOW_ACTION, 0,
+      "live close: exit key ended the loop over the owner's veto" },
+    /* An accepted exit key closes the window on that press. */
+    { EXIT_HELD, NO_KEY, 1, 0, 0, 0, true, ZCL_PRESENT_WINDOW_DISMISSED, UINT32_MAX,
+      "live close: accepted exit key did not close on that press" },
+    /* One press, one request: only the owner's later call ends the window. */
+    { EXIT_HELD, NO_KEY, 1, 0, 2, 2, false, ZCL_PRESENT_WINDOW_DISMISSED, UINT32_MAX,
+      "live close: exit key was requested again or the loop ended over a veto" },
+    /* A quick tap is the same one request; refused here, so the next key arrives. */
+    { EXIT_TAP, KEY_1, 1, 1, 1, 0, false, ZCL_PRESENT_WINDOW_ACTION, 0,
+      "live close: a quick exit key was not one refused request" },
+    /* A quick tap the owner accepts closes the window on that press. */
+    { EXIT_TAP, KEY_1, 1, 0, 0, 0, true, ZCL_PRESENT_WINDOW_DISMISSED, UINT32_MAX,
+      "live close: a quick exit key was not one accepted request" },
+    /* The key stays down: another press event before a release is no request. */
+    { EXIT_HELD, EXIT_AGAIN, 1, 0, 1, 1, false, ZCL_PRESENT_WINDOW_DISMISSED, UINT32_MAX,
+      "live close: a held exit key was requested more than once" },
+};
+static bool close_case_passes(const struct close_case *c)
+{
+    struct close_probe p = {.allow_requests = c->allow_requests, .close_at_tick = c->close_at_tick};
+    struct zcl_present_window_event_v1 result = {0};
+    bool ok = close_run(c->first, c->second, &p, &result) && p.requests == c->requests &&
+        p.later == c->later && p.ticks == c->ticks && result.outcome == c->outcome &&
+        result.action_index == c->action;
+    if (!ok) fprintf(stderr, "%s: requests=%u later=%u ticks=%u outcome=%u action=%u error=%s\n",
+        c->failure, p.requests, p.later, p.ticks, result.outcome, result.action_index, close_error);
+    return ok;
+}
+static bool live_close_cases(void)
+{
+    bool ok = true;
+    for (unsigned i = 0; i < sizeof(close_cases) / sizeof(close_cases[0]); i++)
+        ok = close_case_passes(&close_cases[i]) && ok;
+    return ok;
+}
+static bool live_cases(void)
+{
+    return live_redraw_cases() && live_close_cases();
 }
 int main(int argc, char **argv)
 {
@@ -508,7 +620,7 @@ int main(int argc, char **argv)
 #if defined(__linux__)
     fputs("live-redraw: native redraw cases\n", stderr);
 #endif
-    if (!live_redraw_cases()) { fputs("live-redraw: redraw cases failed\n", stderr); return 1; }
+    if (!live_cases()) { fputs("live-redraw: redraw or live close cases failed\n", stderr); return 1; }
 #if defined(__APPLE__)
     if (!mac_window_closed()) { fputs("live-redraw: mac window close case failed\n", stderr); return 1; }
 #endif
@@ -533,5 +645,6 @@ int main(int argc, char **argv)
 #endif
     puts("clipboard: JSON closing byte, empty, UTF8 and maximum text roundtrip exactly");
     puts("live redraw: failure and terminal cancel reject queued confirm; successful redraw proceeds");
+    puts("live close: one exit-key request per press, held or quick; the owner's answer alone ends a live window");
     return 0;
 }
