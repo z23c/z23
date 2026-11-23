@@ -224,10 +224,25 @@ static bool rt_finish(struct rt_presenter *p, const struct zcl_present_window_li
     }
     return p->decision != RT_PAINT_FAIL;
 }
+static bool rt_copy_guidance(const struct zcl_present_model_v1 *m)
+{
+    const char *summary = "Review all pages for a new editable copy. Resume in My Apps > Received copies.";
+    struct zcl_present_model_v1 old = *m;
+    uint32_t before = 0, after = 0; char why[128];
+    (void)snprintf(old.summary, sizeof(old.summary), "Review all pages. Nothing runs now.");
+    return zcl_present_model_page_count_v1(&old, &before, why, sizeof(why)) &&
+        zcl_present_model_page_count_v1(m, &after, why, sizeof(why)) && before == after &&
+        !strcmp(m->summary, summary) &&
+        zcl_present_canvas_text_width(summary, strlen(summary), 15u) <= 636u &&
+        m->action_count == 4 && !strcmp(m->actions[0].id, "cancel") &&
+        !strcmp(m->actions[1].id, "back") && !strcmp(m->actions[2].id, "next") &&
+        !strcmp(m->actions[3].id, "receive") &&
+        rt_field(m, "Permission: ", "Allow future requested builds and runs of this exact publisher and package. Receiving this copy runs nothing.");
+}
 static bool rt_observe(struct rt_presenter *p, const struct zcl_present_model_v1 *m,
     const struct zcl_present_window_pages_v1 *pages, uint32_t *count, char *why, size_t cap)
 {
-    return pages && pages->page_count == 1 && pages->pages->pixels && !m->exact_root[0] &&
+    return rt_copy_guidance(m) && pages && pages->page_count == 1 && pages->pages->pixels && !m->exact_root[0] &&
         zcl_present_model_page_count_v1(m, count, why, cap) && *count > 1 &&
         rt_field(m, "Publisher: ", p->fixture->publisher) &&
         rt_field(m, "Release: ", p->fixture->release) &&
