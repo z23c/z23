@@ -68,8 +68,8 @@
  * command/native_devagent.h — the same code path dev.agent.test and
  * dev.agent.mutate use. No second runner, no shell, no popen()/system().
  * A leaf invoked outside every host development slice self-admits that
- * make through the host launcher's light class, so the reflex neither
- * queues behind build-lane work nor compiles unadmitted.
+ * make through the host launcher; its selected class controls queueing and
+ * the build remains admitted.
  * Dev builds read residency through the watcher's own probe. Other builds
  * do not link the watcher and always take the rebuild path.
  * The leaf starts no node, touches no datadir, and writes nothing itself;
@@ -342,8 +342,7 @@ static void dvh_format_next_command(char next[512], const char *verdict,
 /* The executed-run reply: the verdict and its one next command off the
  * runner's own counts. Mode says which path the leaf took; hotswapped
  * says what the runner's SUITE VERDICT line itself reported;
- * rebuild_admitted says the rebuild self-admitted through the launcher's
- * light class rather than running bare. */
+ * rebuild_admitted says the rebuild self-admitted through the launcher rather than running bare. */
 static void dvh_emit_run_outcome(struct zcl_command_reply *reply,
                                  const char *path, const char *group,
                                  bool loop_resident, bool rebuild_admitted,
@@ -427,9 +426,8 @@ void zcl_native_handle_dev_agent_hot(
             char msg[640];
             (void)snprintf(msg, sizeof(msg),
                            "make --no-print-directory test_parallel exited "
-                           "%d in '%s'%s; rerun the named command by hand "
-                           "(its own output names the real cause), then "
-                           "rerun this leaf",
+                           "%d in '%s'%s; inspect the build failure, then "
+                           "retry this leaf",
                            build_rc, root,
                            rebuild_admitted
                                ? " through the admission rail"
@@ -438,9 +436,7 @@ void zcl_native_handle_dev_agent_hot(
                        ZCL_COMMAND_EXIT_FAILED, "RUNNER_FAILED", "build", msg,
                        msg,
                        rebuild_admitted
-                           ? "env DEVBUILD_CLASS=light devbuild --wait "
-                             "--project z23 make -j\"$(getconf "
-                             "_NPROCESSORS_ONLN)\" test_parallel"
+                           ? "retry this leaf to use the host admission rail"
                            : "make -j\"$(getconf _NPROCESSORS_ONLN)\" "
                              "test_parallel");
             return;

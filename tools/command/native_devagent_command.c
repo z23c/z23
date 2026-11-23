@@ -421,16 +421,8 @@ static int dva_spawn_at(const char *root, const char *const argv[], char *buf,
     return rc;
 }
 
-/* ── self-admission for the shared make runner ────────────────────────────
- * The host contract admits every heavy build through its launcher. A leaf
- * invoked bare (an agent's per-save reflex) is NOT inside any development
- * slice, so its make would run unadmitted; wrapped in the launcher it would
- * queue as ordinary build-lane work behind multi-minute proofs, which erases
- * the seconds-scale purpose of a reflex. The launcher's light class solves
- * both: its own single lane that no normal or landing waiter can take, at a
- * 2-CPU quota. Callers already inside a slice keep the direct make — the
- * enclosing budget admits the work and the launcher refuses a nested class
- * switch — and a host without a launcher on PATH keeps today's behavior. */
+/* A bare make must use the host admission rail. An enclosing development
+ * slice already admits it; hosts without a launcher retain direct execution. */
 static bool dva_inside_build_slice(void)
 {
     char dir[PATH_MAX];
@@ -465,14 +457,35 @@ static bool dva_host_launcher_present(void)
     return false;
 }
 
-/* argv for the shared make runner. An unadmitted run wraps the make in the
- * launcher's light class — the class travels as an `env` assignment rather
- * than a setenv(), so an embedding process never sees its environment
- * mutated. Static: test_devagent_surface.c proves it through its direct
- * include of this file, and a public symbol would be defined twice in the
- * linked runner (production object plus the test's included copy). */
-static size_t zcl_devagent_make_argv(bool admit, const char *jobs,
-                                     const char *target, const char *argv[11])
+/* A broker plan identifies support for an explicit normal class.  The older
+ * Linux launcher accepts --plan but ignores --class; its output names light.
+ * Unknown or refused plans retain the existing admission path. */
+static bool dva_broker_normal_plan(const char *plan)
+{
+    return plan && strstr(plan, "project=z23 class=normal ") &&
+           strstr(plan, " cpu_tokens=") && strstr(plan, " pool_cpu=");
+}
+
+static bool dva_broker_normal(const char *root)
+{
+#if defined(__linux__)
+    const char *argv[] = { "env", "DEVBUILD_CLASS=light", "devbuild", "--plan",
+                           "--project", "z23", "--class", "normal", NULL };
+    char plan[2048] = {0};
+    return dva_spawn_at(root, argv, plan, sizeof(plan), 3000) == 0 &&
+           dva_broker_normal_plan(plan);
+#else
+    (void)root;
+    (void)dva_broker_normal_plan;
+    return false;
+#endif
+}
+
+/* Keep the legacy environment assignment for older launchers. The broker
+ * receives normal explicitly: test_parallel is a full harness build, not a
+ * hotload job. The plan probe never runs make. */
+static size_t zcl_devagent_make_argv(bool admit, bool broker, const char *jobs,
+                                     const char *target, const char *argv[13])
 {
     size_t n = 0;
     if (admit) {
@@ -482,6 +495,7 @@ static size_t zcl_devagent_make_argv(bool admit, const char *jobs,
         argv[n++] = "--wait";
         argv[n++] = "--project";
         argv[n++] = "z23";
+        if (broker) { argv[n++] = "--class"; argv[n++] = "normal"; }
     }
     argv[n++] = "make";
     argv[n++] = "--no-print-directory";
@@ -505,8 +519,9 @@ int zcl_devagent_run_make(const char *root, const char *target, int timeout_ms,
     bool admit = !dva_inside_build_slice() && dva_host_launcher_present();
     if (admitted)
         *admitted = admit;
-    const char *argv[11];
-    (void)zcl_devagent_make_argv(admit, jobs, target, argv);
+    const char *argv[13];
+    bool broker = admit && dva_broker_normal(root);
+    (void)zcl_devagent_make_argv(admit, broker, jobs, target, argv);
     char *buf = zcl_malloc(DVA_CAPTURE_BYTES, "devagent.capture");
     if (!buf)
         return -1;

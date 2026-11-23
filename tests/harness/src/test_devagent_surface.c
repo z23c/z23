@@ -435,7 +435,7 @@ int test_devagent_surface(void)
      * z23 budget rather than the exclusive one. */
     TEST("make argv: an unadmitted make wraps devbuild light") {
         const char *argv[11];
-        size_t n = zcl_devagent_make_argv(true, "-j4", "test_parallel", argv);
+        size_t n = zcl_devagent_make_argv(true, false, "-j4", "test_parallel", argv);
         ASSERT_EQ(n, 10);
         ASSERT_STR_EQ(argv[0], "env");
         ASSERT_STR_EQ(argv[1], "DEVBUILD_CLASS=light");
@@ -451,12 +451,27 @@ int test_devagent_surface(void)
         PASS();
     }
 
+    TEST("broker plan selects explicit normal for full harness") {
+        ASSERT(dva_broker_normal_plan("project=z23 class=normal cpu_tokens=8 ram_gib=8 pool_cpu=28"));
+        ASSERT(!dva_broker_normal_plan("project=z23 class=light memory_max=4G"));
+        ASSERT(!dva_broker_normal_plan("host=mac admission_bytes=5000000000"));
+        ASSERT(!dva_broker_normal_plan("project=z23 class=normal"));
+        const char *argv[13];
+        size_t n = zcl_devagent_make_argv(true, true, "-j4", "test_parallel", argv);
+        ASSERT_EQ(n, 12);
+        ASSERT_STR_EQ(argv[6], "--class");
+        ASSERT_STR_EQ(argv[7], "normal");
+        ASSERT_STR_EQ(argv[11], "test_parallel");
+        ASSERT(argv[12] == NULL);
+        PASS();
+    }
+
     /* A caller already inside a development slice must not nest a second
      * admission: the enclosing budget governs it and the launcher refuses
      * a class switch. The argv is exactly today's direct make. */
     TEST("make argv: an admitted make runs directly") {
         const char *argv[11];
-        size_t n = zcl_devagent_make_argv(false, "-j4", "test_parallel", argv);
+        size_t n = zcl_devagent_make_argv(false, false, "-j4", "test_parallel", argv);
         ASSERT_EQ(n, 4);
         ASSERT_STR_EQ(argv[0], "make");
         ASSERT_STR_EQ(argv[1], "--no-print-directory");
