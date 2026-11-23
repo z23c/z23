@@ -390,6 +390,7 @@ bool dlx_qp_file_has(const char *path, const char *needle);
 int test_dev_land_queued_precheck_cases(void);
 int test_dev_land_train_cases(void);
 int test_dev_land_train_culprit_cases(void);
+int test_dev_land_red_breaker_cases(void);
 #endif /* !defined(_WIN32) */
 
 void dlx_isolate(const char *tag);

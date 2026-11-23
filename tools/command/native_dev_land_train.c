@@ -161,6 +161,7 @@ bool dl_train_formed(const struct dl_row *row)
 bool dl_train_joinable(const struct dl_row *r, const struct dl_row *head)
 {
     return r->seq != head->seq && strcmp(r->train_group, head->train_group) == 0 && strcmp(r->state, "queued") == 0 &&
+           strcmp(r->phase, "parked") != 0 &&
            dl_train_fresh(r) && !r->proof_intent[0] &&
            !r->publication_signature[0] && !r->pushed[0] &&
            !r->push_diagnostic_pending;
@@ -280,9 +281,9 @@ bool dl_commit_merge_durable(struct dl_row *row, const struct dl_row *durable,
 
 /* Run `edit` over the live rows under queue.lock: it returns -1 to refuse,
  * 0 when nothing changed, 1 to rewrite the queue with its edits. */
-static bool dl_rows_edit(const struct dl_dirs *d,
-                         int (*edit)(struct dl_row *, size_t, void *),
-                         void *context)
+bool dl_rows_edit(const struct dl_dirs *d,
+                  int (*edit)(struct dl_row *, size_t, void *),
+                  void *context)
 {
     struct dl_row *rows = NULL;
     size_t n = 0;
@@ -549,6 +550,24 @@ bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
     const char *bisect = getenv("ZCL_LAND_TRAIN_BISECT");
     if (!confirmed || (bisect && strcmp(bisect, "0") == 0)) dl_train_requeue(d, row, why, reply);
     else (void)dl_train_split(d, row, reply);
+    return true;
+}
+
+/* Main is red on the one group this train failed (the red-main breaker,
+ * native_dev_land_red_breaker.c): halving would only re-fail innocent
+ * halves, so every member proves alone next instead, and each one that then
+ * fails only that group is parked. */
+bool dl_train_release_solo(const struct dl_dirs *d, struct dl_row *row,
+                           const char *detail, struct zcl_command_reply *reply)
+{
+    char why[640];
+    if (!dl_train_bound(d, row))
+        return false;
+    dl_train_failure_evidence(d, row);
+    (void)snprintf(why, sizeof(why),
+                   "failed only a group main itself is red on, so it is not "
+                   "bisected: %.540s", detail);
+    dl_train_requeue(d, row, why, reply);
     return true;
 }
 

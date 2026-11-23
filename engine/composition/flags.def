@@ -1396,6 +1396,18 @@ Z23_FLAG("ZCL_LAND_MAKE", "env_test", "-", "-",
           "test build only: the make program dev land drive prove runs to build the landing-worktree producer; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_PROOF_STUB", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_PROOF_STUB_RED_GROUP", "env_test", "-", "-",
+          "test build only: the test group the red proof stub fails on every pair whose tree lacks red-fix; first use tools/command/native_dev_land_red_breaker.c:auto")
+Z23_FLAG("ZCL_LAND_RED_MAIN", "env_runtime", "1", "-",
+          "0 turns the land driver's red-main breaker off and releases every parked row; first use tools/command/native_dev_land_red_breaker.c:auto")
+Z23_FLAG("ZCL_LAND_RED_MAIN_K", "env_runtime", "2", "-",
+          "earlier failed rows on one test group, from distinct lanes with disjoint changed files, that trip the red-main breaker, 1 to 8; first use tools/command/native_dev_land_red_breaker.c:auto")
+Z23_FLAG("ZCL_LAND_RED_MAIN_AGE_S", "env_runtime", "7200", "-",
+          "seconds red-main evidence and the newest parked row stay live before the parked rows are released; first use tools/command/native_dev_land_red_breaker.c:auto")
+Z23_FLAG("ZCL_LAND_RED_MAIN_MAX_S", "env_runtime", "43200", "-",
+          "seconds after a red-main episode's first evidence when its parked rows are released and forgotten; first use tools/command/native_dev_land_red_breaker.c:auto")
+Z23_FLAG("ZCL_LAND_RED_MAIN_NOW", "env_test", "-", "-",
+          "test build only: the unix time the red-main breaker ages its evidence against; first use tools/command/native_dev_land_red_breaker.c:auto")
 Z23_FLAG("ZCL_LAND_START_PROOF_WATCHER", "env_runtime", "0", "-",
           "explicit opt-in for dev.land to start a resident proof watcher "
           "when a queued proof has no worker; otherwise the land row "

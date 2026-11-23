@@ -57,6 +57,36 @@ signed-commit promoter. Planned commuting tickets or fleet protocols are not
 permission to skip a dimension; only implemented receiver admission can accept
 exact reusable evidence.
 
+## Red main: park, do not bisect
+
+When main itself is red on one test group, the driver's circuit breaker
+(`tools/command/native_dev_land_red_breaker.h`) stops charging innocent rows
+for it. A settled failure naming test group G parks instead of failing when
+the outcomes ledger already holds `ZCL_LAND_RED_MAIN_K` (default 2) failed
+rows on G within `ZCL_LAND_RED_MAIN_AGE_S` (default 7200 s) and after the last
+landing that cleared G, from distinct lanes (worktree plus note) with pairwise
+disjoint changed files; while G is red (a row parked on G within the age bound)
+further failures on G park too. A parked row stays `queued` with phase
+`parked` and `red_main` naming G; a train failing G is never bisected: its
+members prove alone, so rows that do not run G still land, and each one that
+fails only G is parked. A row that changes the source file of group G under `tests/harness/src/` is never
+parked, and a lane failing its own change again, or overlapping files, never
+counts.
+
+A proof whose test log shows G passing clears it: that row carries the
+`cleared` marker to its landing and every row parked on G returns to the
+queue to rebase and take a complete fresh proof (a conflict is the normal
+conflict state). Parked rows are also released when the newest one is older
+than the age bound, or the episode began more than `ZCL_LAND_RED_MAIN_MAX_S`
+(default 43200 s) ago. `dev land status` prints `main red on G since seq S: N
+parked` (`main_red_breaker` in JSON) and the trip posts one `main_red` board
+note per episode.
+
+Parking only delays a row. Nothing lands without its own full green proof, no
+group is skipped or excused, and consensus and custody groups get no waiver:
+they are parked and reproven exactly like every other group.
+`ZCL_LAND_RED_MAIN=0` turns the breaker off.
+
 ## Historical observations: 2026-09-04
 
 These records explain earlier batching choices. They are not current resource

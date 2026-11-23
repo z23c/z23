@@ -208,6 +208,12 @@ another node with an attributable `wiki-write` grant. Keep endpoints,
 credentials and private paths out of public scope.
 <!-- claim: symbol-present fleet.steer.wiki-write engine/composition/commands/fleet.def -->
 
+When main is red on a test group, the land driver posts one `main_red` note per
+episode (at the trip, not per parked row); `z23 dev land status` names the
+group, the first failing seq and the parked count. Fix the group on main; the
+parked rows requeue by themselves. See
+[`TRAIN_PROTOCOL.md`](TRAIN_PROTOCOL.md#red-main-park-do-not-bisect).
+
 ### Agents
 
 `z23-dev fleet agents` lists the agent workspaces on this box, the processes

@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the land red-main breaker. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_red_breaker.c", CAP_FS_READ|CAP_FS_WRITE, "reads the land queue and outcome rows through the land leaf's loaders and rewrites queue rows (park, release) only through its locked rewrite and row-commit helpers; asks the land leaf's git seam for a row's changed paths; reads a passed pair's retained test log under the landing worktree's proof attempts; reads ZCL_LAND_RED_MAIN settings")

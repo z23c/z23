@@ -123,6 +123,11 @@ struct dl_row {
      * the new main. Both "" when nothing was re-derived. Optional on disk. */
     char seal_old_root[65];
     char seal_new_root[65];
+    /* The red-main breaker mark (native_dev_land_red_breaker.c): "" or
+     * "parked:<group>:<since seq>:<since unix>:<at unix>" on a queued row,
+     * "cleared:..." on the row whose passing proof cleared the group.
+     * Optional on disk; a malformed value loads as "". */
+    char red_main[128];
 };
 
 /* ── core seal re-derivation (native_dev_land_reseal.c) ───────────────── */
@@ -264,6 +269,14 @@ bool dl_row_next_text(const struct dl_row *row, const char *state,
 bool dl_history_read(const char *path,
                      bool (*visit)(const struct dl_row *, void *),
                      void *context, char *why, size_t why_cap);
+/* Run `edit` over the live queue rows under queue.lock: it returns -1 to
+ * refuse, 0 when nothing changed, 1 to rewrite the queue with its edits. */
+bool dl_rows_edit(const struct dl_dirs *d,
+                  int (*edit)(struct dl_row *, size_t, void *), void *context);
+/* Post one land event row to the board through the mail leaf, the same
+ * advisory path every phase and outcome mail takes. */
+bool dl_board_post(const struct dl_dirs *d, const struct dl_row *r,
+                   const char *event);
 /* Seal one bound member under its own bundle and signed landing intent
  * (its own seq; `head`'s target and proof digest); an already sealed
  * member is verified again. */
@@ -309,6 +322,10 @@ void dl_train_failure_evidence(const struct dl_dirs *d, const struct dl_row *row
  * bounded subgroups or conservative solos. False: not a bound train. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
                        const char *detail, struct zcl_command_reply *reply, bool confirmed);
+/* Main red on the group the train failed: every member proves alone next,
+ * without bisection. False when no queued row rides in the pair. */
+bool dl_train_release_solo(const struct dl_dirs *d, struct dl_row *row,
+                           const char *detail, struct zcl_command_reply *reply);
 /* A superseded pair can never publish: release the rows bound to it. */
 void dl_train_unbind(const struct dl_dirs *d, const char *intent,
                      long long head, bool solo);

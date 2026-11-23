@@ -146,6 +146,7 @@
 #include "command/native_submit_claim_guard.h"
 #include "command/native_dev_land_drain.h"
 #include "command/native_dev_land_main_red.h"
+#include "command/native_dev_land_red_breaker.h"
 #include "command/native_dev_land_status_compact.h"
 #include "command/native_dev_land_prepare.h"
 #include "command/native_dev_land_qualify.h"
@@ -834,7 +835,8 @@ static bool dl_row_phase_ok(const struct dl_row *r)
            strcmp(r->phase, "regen") == 0 ||
            strcmp(r->phase, "prebuild") == 0 ||
            strcmp(r->phase, "prove") == 0 ||
-           strcmp(r->phase, "push") == 0;
+           strcmp(r->phase, "push") == 0 ||
+           strcmp(r->phase, DLRB_PHASE) == 0;
 }
 
 static bool dl_row_pair_ok(const struct dl_row *r)
@@ -1094,7 +1096,8 @@ static bool dl_row_strings(const char *line, struct dl_row *r)
         { "log_path", r->log_path, sizeof(r->log_path) },
         { "detail", r->detail, sizeof(r->detail) },
         { "seal_old_root", r->seal_old_root, sizeof(r->seal_old_root) },
-        { "seal_new_root", r->seal_new_root, sizeof(r->seal_new_root) }
+        { "seal_new_root", r->seal_new_root, sizeof(r->seal_new_root) },
+        { "red_main", r->red_main, sizeof(r->red_main) }
     };
     struct json_value doc;
     json_init(&doc);
@@ -1152,6 +1155,8 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
     (void)dl_line_int(line, "landed_at", &r->landed_at);
     dl_failure_parse(line, r);
     dl_terminal_time_parse(line, r);
+    if (!dlrb_field_ok(r->red_main))
+        r->red_main[0] = 0;
     return dl_prechecked_parse(line, r) && dl_parse_dispatch_fields(line, r) &&
            dl_row_semantics_ok(r);
 }
@@ -1323,6 +1328,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
     size_t size = dl_failure_append(r, out, cap, (size_t)w);
     size = dl_terminal_time_append(r, out, cap, size);
     size = dl_seal_append(r, out, cap, size);
+    size = dlrb_append(r, out, cap, size);
     if (len_out)
         *len_out = size;
     return true;
@@ -2030,6 +2036,12 @@ static bool dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
         return true;
     dl_outbox_body_reduced(r, event, full, sizeof(full));
     return dl_mail_post(full, r->tip);
+}
+
+bool dl_board_post(const struct dl_dirs *d, const struct dl_row *r,
+                   const char *event)
+{
+    return dl_outbox(d, r, event);
 }
 
 /* ── outcomes ──────────────────────────────────────────────────────────── */
@@ -3317,6 +3329,9 @@ static enum dl_proof dl_proof_stub_read(const char *stub, const char *wt,
     if (dl_proof_stub_producer(stub, &produced, dimension, dim_cap, detail,
                                cap))
         return produced;
+    int red = dlrb_stub_read(stub, wt, local, dimension, dim_cap, detail, cap);
+    if (red)
+        return red == 1 ? DL_PROOF_PASSED : DL_PROOF_FAILED;
 #endif
     if (strcmp(stub, "status") == 0)
         return dl_proof_stub_status(wt, local, base, dimension, dim_cap,
@@ -4622,7 +4637,7 @@ static const struct dl_row *dl_pick_steer(const struct dl_row *rows, size_t n)
             return &rows[i];
     }
     for (i = 0; i < n; i++)
-        if (strcmp(rows[i].state, "queued") == 0 &&
+        if (strcmp(rows[i].state, "queued") == 0 && !dlrb_is_parked(&rows[i]) &&
             dl_queued_precedes(&rows[i], best))
             best = &rows[i];
     return best;
@@ -5048,7 +5063,8 @@ static bool dl_status_push_result(struct zcl_command_reply *reply,
                                   bool have_inflight, bool want_json,
                                   const struct dlmr_suspect *main_red,
                                   size_t n_red, size_t nlast,
-                                  const char *screen, const struct dlsc_hit *hit)
+                                  const char *screen, const struct dlsc_hit *hit,
+                                  const struct dl_row *rows, size_t nrows)
 {
     return json_push_kv_str(&reply->data, "leaf", DL_LEAF) &&
            json_push_kv(&reply->data, "queued", queued) &&
@@ -5057,6 +5073,7 @@ static bool dl_status_push_result(struct zcl_command_reply *reply,
            dlsc_push_mine(&reply->data, hit) &&
            (want_json || dlsc_push_notes(&reply->data, nlast)) &&
            dlmr_push_status(&reply->data, main_red, n_red) &&
+           dlrb_push_status(&reply->data, rows, nrows) &&
            (want_json || json_push_kv_str(&reply->data, "screen", screen));
 }
 
@@ -5082,6 +5099,7 @@ static bool dl_push_queued(struct json_value *arr, const struct dl_row *r)
          json_push_kv_str(&item, "note", r->note) &&
          json_push_kv_str(&item, "train_intent", r->proof_intent) &&
          json_push_kv_str(&item, "train_commit", r->train_commit) &&
+         json_push_kv_str(&item, "phase", r->phase) &&
          json_push_back(arr, &item);
     json_free(&item);
     return ok;
@@ -5400,13 +5418,15 @@ static bool dl_status_screen_queued(struct dl_row *rows, size_t nrows,
         if (strcmp(rows[i].state, "queued") != 0)
             continue;
         w = snprintf(screen + *used, cap - *used,
-                     "  #%lld %.12s queued priority #%lld%s\n",
-                     rows[i].seq, rows[i].tip, rows[i].priority_seq, dl_hold_display(&rows[i]));
+                     "  #%lld %.12s %s priority #%lld%s\n",
+                     rows[i].seq, rows[i].tip,
+                     dlrb_is_parked(&rows[i]) ? "parked" : "queued",
+                     rows[i].priority_seq, dl_hold_display(&rows[i]));
         if (w <= 0 || (size_t)w >= cap - *used)
             return false;
         *used += (size_t)w;
     }
-    return true;
+    return dlrb_screen(rows, nrows, screen, cap, used);
 }
 
 /* One screen line for a non-landed outcome. A conflict or failed row also
@@ -5539,7 +5559,8 @@ render_done:
     if (!dl_status_attach_steer(reply, &d, rows, nrows, now, screen, sizeof(screen),
                                 &used, want_json) ||
         !dl_status_push_result(reply, &queued, &inflight, &outcomes,
-                               have_inflight, want_json, main_red, n_red, nlast, screen, &hit))
+                               have_inflight, want_json, main_red, n_red, nlast, screen, &hit,
+                               rows, nrows))
         goto fail;
     free(rows);
     json_free(&queued);
@@ -10773,6 +10794,40 @@ static void dl_resume_stale_no_verdict(enum dl_proof *p, char dimension[48],
 }
 #endif
 
+/* The test group a settled failure names first ("test G: FAIL ..."): from
+ * the settled detail, else the first line of the attempt's evidence digest.
+ * "" when it names none. Read for the red-main breaker only. */
+static void dl_red_group(const struct dl_dirs *d, const struct dl_row *row,
+                         const char *detail, char group[DLRB_GROUP_MAX])
+{
+    group[0] = '\0';
+    if (dlmr_group_of("test", detail, group, DLRB_GROUP_MAX))
+        return;
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    char evidence[1280];
+    struct zcl_dev_proof_failure_identity identity;
+    dl_proof_evidence_read(d->wt, row->local, row->base, evidence,
+                           sizeof(evidence), &identity);
+    (void)dlmr_group_of("test", evidence, group, DLRB_GROUP_MAX);
+#else
+    (void)d;
+    (void)row;
+#endif
+}
+
+/* Main itself red on the group this failure names: the breaker parks the
+ * row (and its train) instead of failing or bisecting it. A host-load
+ * failure is never a verdict on main. */
+static bool dl_red_park(const struct dl_dirs *d, struct dl_row *row,
+                        const char *detail, struct zcl_command_reply *reply)
+{
+    char group[DLRB_GROUP_MAX];
+    if (dl_host_load_failure(detail))
+        return false;
+    dl_red_group(d, row, detail, group);
+    return dlrb_on_failure(d, row, group, detail, reply);
+}
+
 static void dl_resume_failed_proof(const struct dl_dirs *d,
                                     struct dl_row *row,
                                     const char dimension[48],
@@ -10796,6 +10851,8 @@ static void dl_resume_failed_proof(const struct dl_dirs *d,
         dl_resume_interrupted_proof(d, row, detail, reply))
         return;
 #endif
+    if (dl_red_park(d, row, detail, reply))
+        return;
     if (dl_train_fallback(d, row, detail, reply, confirmed))
         return;
     bool host_load = dl_host_load_failure(detail);
@@ -10940,6 +10997,9 @@ static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply
 #if defined(ZCL_TESTING)
     dl_test_die_after_proof();
 #endif
+    /* A pass whose test log shows a red group passing clears that group:
+     * the rows parked on it go back to the queue for fresh proofs. */
+    dlrb_on_pass(d, row);
     /* The proof passed for THIS (local, base) pair. If main moved while it
      * ran, the receipt is about a base nobody is on any more: rebase again
      * and prove again rather than pushing evidence that no longer applies. */
@@ -11844,7 +11904,7 @@ bool dl_step_pick_row(const struct dl_row *rows,
         }
     }
     for (size_t i = 0; i < nrows; i++)
-        if (strcmp(rows[i].state, "queued") == 0 &&
+        if (strcmp(rows[i].state, "queued") == 0 && !dlrb_is_parked(&rows[i]) &&
             dl_queued_precedes(&rows[i], best))
             best = &rows[i];
     if (!best)
@@ -12692,6 +12752,9 @@ static void dl_step(const struct zcl_command_request *req,
         dl_unlock(slot);
         return;
     }
+    /* Release the parked rows of a red-main episode that cleared or aged
+     * out before picking, so they rebase and prove again in queue order. */
+    dlrb_tend(&d);
     char queue_why[128] = {0};
     if (!dl_load_rows(qpath, &rows, &nrows, queue_why,
                       sizeof(queue_why))) {
