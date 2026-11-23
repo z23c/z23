@@ -4,6 +4,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "test/test_core.h"
+#include "test/test_scratch_reap.h"
 #include "test/runner_timing.h"
 #include "test/test_group_selector.h"
 #include "test/test_home_isolation.h"
@@ -3777,7 +3778,8 @@ static int tgs_tmpfs_roots_for(const char *cwd)
         hash = (hash ^ *p) * 16777619u;
     char prefix[16];
     snprintf(prefix, sizeof(prefix), "%08x.", hash);
-    DIR *d = opendir("/dev/shm/z23-scratch");
+    const char *parent = getenv("ZCL_TEST_TMPFS_PARENT");
+    DIR *d = opendir(parent ? parent : "/dev/shm/z23-scratch");
     if (!d) return errno == ENOENT ? 0 : -1;
     int n = 0;
     for (struct dirent *e; (e = readdir(d)) != NULL; )
@@ -3808,209 +3810,6 @@ static int test_tmpfs_early_exit_removed(void)
             ASSERT(tgs_tmpfs_roots_for(real) == 0);
         }
         ASSERT(test_rm_rf_recursive(root) == 0);
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
-#define TGS_REAP_PARENT "/dev/shm/z23-scratch"
-#define TGS_REAP_STALE_SECONDS (72 * 60 * 60)
-
-enum { TGS_FX_STALE, TGS_FX_LOCKED, TGS_FX_FRESH, TGS_FX_SHORT, TGS_FX_UPPER,
-       TGS_FX_LINK, TGS_FX_LIVE, TGS_FX_COUNT };
-
-struct tgs_reap_fx {
-    char path[TGS_FX_COUNT][PATH_MAX];
-    char target[PATH_MAX];      /* directory the symlink fixture points at */
-    char behind[PATH_MAX];      /* file inside target */
-    int lock_fd;                /* flock held on the locked fixture, or -1 */
-};
-
-/* Fixture names carry a tag unique to this process and call, so parallel
- * shards never collide; the shapes mirror "%08x.XXXXXX". */
-static void tgs_reap_names(struct tgs_reap_fx *fx)
-{
-    static unsigned seq;
-    char tag[16];
-    snprintf(tag, sizeof(tag), "%04x%04x", (unsigned)getpid() & 0xffffu, ++seq & 0xffffu);
-    snprintf(fx->path[TGS_FX_STALE], PATH_MAX, TGS_REAP_PARENT "/%s.STALE0", tag);
-    snprintf(fx->path[TGS_FX_LOCKED], PATH_MAX, TGS_REAP_PARENT "/%s.LOCKED", tag);
-    snprintf(fx->path[TGS_FX_FRESH], PATH_MAX, TGS_REAP_PARENT "/%s.FRESH0", tag);
-    snprintf(fx->path[TGS_FX_SHORT], PATH_MAX, TGS_REAP_PARENT "/%.7s.SHORT0", tag + 1);
-    snprintf(fx->path[TGS_FX_UPPER], PATH_MAX, TGS_REAP_PARENT "/A%.7s.UPPER0", tag + 1);
-    snprintf(fx->path[TGS_FX_LINK], PATH_MAX, TGS_REAP_PARENT "/%s.LINK00", tag);
-    snprintf(fx->path[TGS_FX_LIVE], PATH_MAX, TGS_REAP_PARENT "/%s.LIVE00", tag);
-    fx->lock_fd = -1;
-}
-
-static bool tgs_reap_age(const char *path, int seconds_back)
-{
-    struct timespec ts[2];
-    ts[0].tv_sec = time(NULL) - seconds_back;
-    ts[0].tv_nsec = 0;
-    ts[1] = ts[0];
-    return utimensat(AT_FDCWD, path, ts, AT_SYMLINK_NOFOLLOW) == 0;
-}
-
-/* A root holding a nested directory and a file, then dated back. */
-static bool tgs_reap_make_root(const char *path, int seconds_back)
-{
-    char inner[PATH_MAX + 8];
-    if (mkdir(path, 0700) != 0) return false;
-    snprintf(inner, sizeof(inner), "%s/sub", path);
-    if (mkdir(inner, 0700) != 0) return false;
-    snprintf(inner, sizeof(inner), "%s/sub/file", path);
-    FILE *f = fopen(inner, "w");
-    if (!f) return false;
-    if (fputs("retained failure evidence\n", f) == EOF) { fclose(f); return false; }
-    if (fclose(f) != 0) return false;
-    snprintf(inner, sizeof(inner), "%s/sub", path);
-    return (seconds_back == 0 || tgs_reap_age(inner, seconds_back)) &&
-           (seconds_back == 0 || tgs_reap_age(path, seconds_back));
-}
-
-static bool tgs_reap_make_link(struct tgs_reap_fx *fx, const char *root)
-{
-    snprintf(fx->target, sizeof(fx->target), "%s/behind", root);
-    snprintf(fx->behind, sizeof(fx->behind), "%s/behind/file", root);
-    if (mkdir(fx->target, 0700) != 0) return false;
-    FILE *f = fopen(fx->behind, "w");
-    if (!f) return false;
-    if (fputs("x\n", f) == EOF) { fclose(f); return false; }
-    if (fclose(f) != 0) return false;
-    if (symlink(fx->target, fx->path[TGS_FX_LINK]) != 0) return false;
-    return tgs_reap_age(fx->path[TGS_FX_LINK], TGS_REAP_STALE_SECONDS);
-}
-
-static bool tgs_reap_build(struct tgs_reap_fx *fx, const char *root)
-{
-    if (mkdir(TGS_REAP_PARENT, 0700) != 0 && errno != EEXIST) return false;
-    if (!tgs_reap_make_root(fx->path[TGS_FX_STALE], TGS_REAP_STALE_SECONDS) ||
-        !tgs_reap_make_root(fx->path[TGS_FX_LIVE], TGS_REAP_STALE_SECONDS) ||
-        !tgs_reap_make_root(fx->path[TGS_FX_LOCKED], TGS_REAP_STALE_SECONDS) ||
-        !tgs_reap_make_root(fx->path[TGS_FX_FRESH], 0) ||
-        !tgs_reap_make_root(fx->path[TGS_FX_SHORT], TGS_REAP_STALE_SECONDS) ||
-        !tgs_reap_make_root(fx->path[TGS_FX_UPPER], TGS_REAP_STALE_SECONDS))
-        return false;
-    fx->lock_fd = open(fx->path[TGS_FX_LOCKED], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fx->lock_fd < 0 || flock(fx->lock_fd, LOCK_EX | LOCK_NB) != 0) return false;
-    return tgs_reap_make_link(fx, root);
-}
-
-/* Removes every fixture that exists; safe to call after a partial build. */
-static bool tgs_reap_remove(struct tgs_reap_fx *fx)
-{
-    bool ok = true;
-    if (fx->lock_fd >= 0) { close(fx->lock_fd); fx->lock_fd = -1; }
-    for (int i = 0; i < TGS_FX_COUNT; i++)
-        if (fx->path[i][0] && test_rm_rf_recursive(fx->path[i]) != 0) ok = false;
-    return ok;
-}
-
-static bool tgs_exists(const char *path)
-{
-    struct stat st;
-    return lstat(path, &st) == 0;
-}
-
-static bool tgs_reap_survivors_ok(const struct tgs_reap_fx *fx)
-{
-    return tgs_exists(fx->path[TGS_FX_STALE]) && tgs_exists(fx->path[TGS_FX_LIVE]) &&
-           tgs_exists(fx->path[TGS_FX_LOCKED]) && tgs_exists(fx->path[TGS_FX_FRESH]) &&
-           tgs_exists(fx->path[TGS_FX_SHORT]) && tgs_exists(fx->path[TGS_FX_UPPER]) &&
-           tgs_exists(fx->path[TGS_FX_LINK]) && tgs_exists(fx->behind);
-}
-
-/* Result of one runner start: 0 ran, 1 tmpfs unusable (skip), -1 failed. */
-static int tgs_reap_run(const char *root, const char *exe, char *out, size_t cap)
-{
-    const char *env = tgs_fixture_executable("/usr/bin/env", "/bin/env");
-    if (!env) return -1;
-    const char *args[] = {env, "-u", "ZCL_TEST_TMPROOT", "-u", "ZCL_TEST_TMPFS_ACTIVE",
-        "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=2048", exe, "--list", NULL};
-    bool timed_out = false;
-    int rc = zcl_spawn_capture_merged_in_dir_observed(args, root, out, cap, 60000, &timed_out);
-    if (timed_out || rc != 0) return -1;
-    return strstr(out, "tmpfs unavailable or disabled") ? 1 : 0;
-}
-
-/* Hold a legacy root as the current directory without taking a flock. */
-static pid_t tgs_legacy_start(const char *path, int *release_fd)
-{
-    int ready[2], release[2];
-    if (pipe(ready) != 0) return -1;
-    if (pipe(release) != 0) { close(ready[0]); close(ready[1]); return -1; }
-    pid_t child = fork();
-    if (child == 0) {
-        close(ready[0]); close(release[1]);
-        if (chdir(path) != 0 || write(ready[1], "r", 1) != 1) _exit(1);
-        close(ready[1]);
-        char byte;
-        _exit(read(release[0], &byte, 1) == 0 ? 0 : 1);
-    }
-    close(ready[1]); close(release[0]);
-    char byte;
-    bool started = child > 0 && read(ready[0], &byte, 1) == 1 && byte == 'r';
-    close(ready[0]);
-    if (!started) {
-        close(release[1]);
-        if (child > 0) (void)waitpid(child, NULL, 0);
-        return -1;
-    }
-    *release_fd = release[1];
-    return child;
-}
-
-static bool tgs_marker_exists(const char *path)
-{
-    char marker[PATH_MAX + 16];
-    int n = snprintf(marker, sizeof(marker), "%s/sub/file", path);
-    if (n <= 0 || (size_t)n >= sizeof(marker)) return false;
-    FILE *f = fopen(marker, "r");
-    if (!f) return false;
-    char body[64];
-    bool ok = fgets(body, sizeof(body), f) && strcmp(body, "retained failure evidence\n") == 0;
-    return fclose(f) == 0 && ok;
-}
-
-/* A runner does not own foreign roots or retained failure evidence. */
-static int tgs_reap_scenario(struct tgs_reap_fx *fx, const char *root,
-                              const char *exe, char *out, size_t cap)
-{
-    if (!tgs_reap_build(fx, root)) return -1;
-    int release_fd = -1;
-    pid_t child = tgs_legacy_start(fx->path[TGS_FX_LIVE], &release_fd);
-    if (child < 0) return -1;
-    int ran = tgs_reap_run(root, exe, out, cap);
-    int status = 0;
-    pid_t observed = waitpid(child, &status, WNOHANG);
-    bool live = observed == 0;
-    bool ok = ran >= 0 && live && tgs_reap_survivors_ok(fx);
-    for (int i = 0; i < TGS_FX_COUNT; ++i)
-        if (i != TGS_FX_LINK && !tgs_marker_exists(fx->path[i])) ok = false;
-    close(release_fd);
-    if (observed != child && waitpid(child, &status, 0) != child) ok = false;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) ok = false;
-    return ok ? ran : -1;
-}
-
-static int test_tmpfs_preserves_foreign_roots(void)
-{
-    int failures = 0;
-    TEST("runner: start preserves foreign tmpfs roots") {
-        static char out[1024 * 1024];
-        char root[PATH_MAX], exe[PATH_MAX];
-        struct tgs_reap_fx fx;
-        memset(&fx, 0, sizeof(fx));
-        tgs_reap_names(&fx);
-        test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "reap");
-        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
-        int result = tgs_reap_scenario(&fx, root, exe, out, sizeof(out));
-        bool cleaned = tgs_reap_remove(&fx);
-        ASSERT(test_rm_rf_recursive(root) == 0);
-        ASSERT(cleaned);
-        ASSERT(result >= 0);
-        if (result == 1) { printf("SKIP (tmpfs unavailable)\n"); goto _test_next; }
         PASS();
     } _test_next:;
     return failures;
@@ -4286,7 +4085,8 @@ static int test_tmpfs_fallback(void)
         ASSERT(strstr(out, "/test-tmp/runner-state-") != NULL);
         ASSERT(tgs_tmpfs_launch(root, exe, "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=2048", false, out, sizeof(out)) == 0);
         if (!strstr(out, "tmpfs unavailable or disabled")) {
-            const char *start = strstr(out, "/dev/shm/z23-scratch/");
+            const char *parent = getenv("ZCL_TEST_TMPFS_PARENT");
+            const char *start = strstr(out, parent ? parent : "/dev/shm/z23-scratch/");
             ASSERT(start != NULL);
             const char *end = strstr(start, "/runner-state-");
             ASSERT(end != NULL && (size_t)(end - start) < PATH_MAX);
@@ -4578,6 +4378,27 @@ static int test_proof_resolver_umbrella_sources(void)
     return failures;
 }
 
+#if defined(__linux__)
+/* Every runner these cases start reaps and creates scratch roots; a private
+ * parent keeps them off the real /dev/shm/z23-scratch. */
+static int tgs_tmpfs_cases(void)
+{
+    char parent[] = "/dev/shm/z23-scratch-selector.XXXXXX";
+    int failures = 0;
+    bool private_parent = mkdtemp(parent) != NULL && setenv("ZCL_TEST_TMPFS_PARENT", parent, 1) == 0;
+    failures += test_tmpfs_fallback();
+    failures += test_tmpfs_exhaustion();
+    failures += test_tmpfs_inherited_root();
+    failures += test_tmpfs_failure_retained();
+    failures += test_tmpfs_early_exit_removed();
+    if (private_parent) {
+        (void)unsetenv("ZCL_TEST_TMPFS_PARENT");
+        if (test_rm_rf_recursive(parent) != 0) failures++;
+    }
+    return failures + scratch_reap_run_cases();
+}
+#endif
+
 int test_test_group_selector(void)
 {
     if (g_tgs_state_probe) return tgs_state_probe();
@@ -4591,12 +4412,7 @@ int test_test_group_selector(void)
 #endif
 #if defined(__linux__)
     failures += tgs_durable_verdict();
-    failures += test_tmpfs_fallback();
-    failures += test_tmpfs_exhaustion();
-    failures += test_tmpfs_inherited_root();
-    failures += test_tmpfs_failure_retained();
-    failures += test_tmpfs_early_exit_removed();
-    failures += test_tmpfs_preserves_foreign_roots();
+    failures += tgs_tmpfs_cases();
 #endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();

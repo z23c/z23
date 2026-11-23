@@ -86,8 +86,7 @@ TRAINS_DIR="${ZCL_HOST_GC_TRAINS_DIR:-$GC_HOME/.z23/trains}"
 SCRATCH_MIN_AGE_D="${ZCL_HOST_GC_SCRATCH_MIN_AGE_D:-7}"
 SCRATCH_DIR="${ZCL_HOST_GC_SCRATCH_DIR:-$GC_HOME/.local/state/zclassic23/scratch}"
 DEVSCRATCH_DIR="${ZCL_HOST_GC_DEVSCRATCH_DIR-$GC_HOME/.cache/development-scratch/z23}"
-# ramscratch: the test runner's tmpfs scratch root; empty disables. RAM turns over
-# faster than disk and 6 h outlasts any run plus its triage, so the floor is hours.
+# ramscratch: the test runner's tmpfs scratch root; empty disables. RAM turns over faster than disk, so the floor is hours.
 RAM_SCRATCH_DIR="${ZCL_HOST_GC_RAM_SCRATCH_DIR-/dev/shm/z23-scratch}"
 RAM_SCRATCH_MIN_AGE_H="${ZCL_HOST_GC_RAM_SCRATCH_MIN_AGE_H:-6}"
 # pressure: below this free-space percentage, every age floor above is
@@ -1531,19 +1530,24 @@ scratch_is_live_tree() {
 }
 
 sweep_scratch_root() {
-    local root="$1" min_age="$2" cat="${3:-scratch}" total=0 removed=0 kept=0 d name bytes
+    local root="$1" min_age="$2" cat="${3:-scratch}" total=0 removed=0 kept=0 d name bytes proof l why live=0 dead_bytes=0
     [ -n "$root" ] || return 0
     [ -d "$root" ] || { say "$cat: no $root — skipped"; return 0; }
     for d in "$root"/*; do
         [ -d "$d" ] || continue
-        [ "$cat" = ramscratch ] && [ -L "$d" ] && continue
-        name="$(basename -- "$d")"
+        [ "$cat" = ramscratch ] && { [ -L "$d" ] || [ ! -O "$d" ]; } && continue
+        name="$(basename -- "$d")"; proof=""; why=""; l="$d/.z23-runner.lock"
         case "$SCRATCH_NEVER_NAMES" in *" $name "*) continue ;; esac
         total=$(( total + 1 ))
         if scratch_is_kept_by_name "$root" "$name"; then
             kept=$(( kept + 1 )); say "$cat: KEEP (.gc_keep): $d"; continue
         fi
-        if [ "$(age_secs "$d")" -lt "$min_age" ]; then
+        if [ "$cat" = ramscratch ]; then
+            { [ -f "$d/.z23-keep" ] && [ "$(age_secs "$d/.z23-keep")" -lt 86400 ]; } && why=".z23-keep marker, bounded"
+            [ -f "$l" ] && [ -z "$why" ] && { flock -n "$l" true 2>/dev/null || { why="runner lock held"; live=$(( live + 1 )); }; [ -n "$why" ] || { [ "$(age_secs "$d")" -ge 120 ] && proof=lock || why="inside the 120 s grace"; }; }
+            [ -z "$why" ] || { kept=$(( kept + 1 )); say "$cat: KEEP ($why): $d"; continue; }
+        fi
+        if [ "$proof" != lock ] && [ "$(age_secs "$d")" -lt "$min_age" ]; then
             kept=$(( kept + 1 )); continue
         fi
         if cwd_occupied "$d"; then
@@ -1552,11 +1556,11 @@ sweep_scratch_root() {
         if scratch_has_live_worktree "$name"; then
             kept=$(( kept + 1 )); say "$cat: KEEP (worktree still exists): $d"; continue
         fi
-        if scratch_is_live_tree "$d" "$min_age"; then
+        if [ "$proof" != lock ] && scratch_is_live_tree "$d" "$min_age"; then
             kept=$(( kept + 1 )); say "$cat: KEEP (worktree or written within the age floor): $d"; continue
         fi
         if [ "$cat" = ramscratch ]; then  # RAM: delete in place, no quarantine
-            reap_tree "$cat" ramscratch-remove "$d" "tmpfs idle>${min_age}s" || { kept=$(( kept + 1 )); continue; }
+            reap_tree "$cat" ramscratch-remove "$d" "tmpfs ${proof:-idle>${min_age}s}" || { kept=$(( kept + 1 )); continue; }; dead_bytes=$(( dead_bytes + REAP_BYTES ))
         else
             bytes="$(quarantine_path "$d" scratch)" || { kept=$(( kept + 1 )); continue; }
             add_result scratch "$bytes" 1
@@ -1564,7 +1568,7 @@ sweep_scratch_root() {
         fi
         removed=$(( removed + 1 ))
     done
-    say "$cat: $total dir(s) under $root — $removed reapable, $kept kept"
+    say "$cat: $total dir(s) under $root — $removed reapable, $kept kept$([ "$cat" != ramscratch ] || echo "; scratch_bytes=$(dir_bytes "$root") live=$live dead=$removed shm_scratch_dead_bytes=$dead_bytes applied=$APPLY")"
 }
 
 sweep_scratch() {
@@ -1577,12 +1581,8 @@ sweep_scratch() {
     sweep_scratch_root "$DEVSCRATCH_DIR" "$min_age"
 }
 
-# ramscratch: the test runner's tmpfs root (/dev/shm/z23-scratch/<hash>.<rand>).
-# The runner removes an entry only on a green exit; a failed run keeps it on
-# purpose and a killed run never gets to, and nothing bounds the directory, so
-# it filled the 47 GB tmpfs (every tmpfs-using test then failed ENOSPC). Same
-# rules as scratch, but the root must be a canonical absolute path on a
-# tmpfs/ramfs mount, free space is the tmpfs's own, and removal is in place.
+# ramscratch: the runner's tmpfs roots (/dev/shm/z23-scratch/<hash>.<rand>). Same rules as scratch, but on a
+# tmpfs/ramfs mount, measured on the tmpfs, removed in place; a runner's flock'd lock file decides live or dead.
 ram_scratch_root_ok() {
     local fs
     case "$1" in /*) ;; *) say "ramscratch: REFUSED relative root $1"; return 1 ;; esac

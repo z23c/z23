@@ -73,6 +73,7 @@
 #include "util/clientversion.h"
 #include "util/log_json.h"
 #include "test/test_verdict_json.h"
+#include "test/test_scratch_reap.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -140,8 +141,28 @@ static void tmpfs_note_group_started(void)
     g_tmpfs_started = true;
 }
 
-/* Retain the lock for compatibility with older runners that scan scratch. */
+/* Held for the runner's whole life: the proof that this root is not dead. */
 static int g_tmpfs_lock_fd = -1;
+
+#define TMPFS_DEFAULT_PARENT "/dev/shm/z23-scratch"
+
+/* ZCL_TEST_TMPFS_PARENT lets a test point the runner at a private parent so
+ * no test ever touches the real scratch directory. */
+static const char *tmpfs_parent(void)
+{
+    const char *p = getenv("ZCL_TEST_TMPFS_PARENT");
+    return (p && p[0] == '/') ? p : TMPFS_DEFAULT_PARENT;
+}
+
+/* Failure evidence is kept on purpose, for a bounded time: the marker lets
+ * every later runner and the host janitor reap it once it expires. */
+static void tmpfs_retain(void)
+{
+    bool marked = tsr_keep_mark(g_tmpfs_root);
+    fprintf(stderr, "test_parallel: retained tmpfs root=%s (%s; reaped after %d h)\n",
+            g_tmpfs_root, marked ? "keep marker written" : "keep marker FAILED",
+            TSR_KEEP_SECONDS / 3600);
+}
 
 static void tmpfs_cleanup(void)
 {
@@ -149,13 +170,57 @@ static void tmpfs_cleanup(void)
     /* An exit before any group ran (usage, listing, empty selection) holds no
      * evidence: remove the root whatever the exit code. */
     if (g_tmpfs_started && (!g_tmpfs_green || g_tmpfs_retained)) {
-        fprintf(stderr, "test_parallel: retained tmpfs root=%s\n", g_tmpfs_root);
+        tmpfs_retain();
         return;
     }
-    if (test_rm_rf_recursive(g_tmpfs_root) != 0)
+    char *slash = strrchr(g_tmpfs_root, '/');
+    int parent = -1;
+    if (slash && slash != g_tmpfs_root) {
+        *slash = '\0';
+        parent = open(g_tmpfs_root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        *slash = '/';
+    }
+    if (parent < 0 || tsr_remove_tree(parent, slash + 1, true, NULL) != 0)
         fprintf(stderr, "test_parallel: tmpfs cleanup failed: %s\n", strerror(errno));
+    if (parent >= 0) close(parent);
     if (g_tmpfs_lock_fd >= 0) { close(g_tmpfs_lock_fd); g_tmpfs_lock_fd = -1; }
 }
+
+/* Every start reaps the roots of any cwd hash that are provably dead (lock
+ * free, or old and unused when they predate the lock), so a killed, timed-out
+ * or scope-stopped runner cannot leak RAM past the next run. */
+static void tmpfs_reap_dead_roots(const char *parent)
+{
+    struct tsr_report rep;
+    if (tsr_reap_parent(parent, geteuid(), (int64_t)time(NULL), true, &rep) != 0) {
+        fprintf(stderr, "test_parallel: tmpfs reap skipped: %s\n", strerror(errno));
+        return;
+    }
+    if (rep.reaped || rep.failed)
+        fprintf(stderr, "test_parallel: reaped %zu dead tmpfs root(s), %llu bytes "
+                "(failed %zu, live %zu, kept %zu)\n", rep.reaped,
+                (unsigned long long)rep.reaped_bytes, rep.failed, rep.live, rep.kept);
+}
+
+static bool tmpfs_fs_ok(const char *path)
+{
+    struct statfs fs;
+    return statfs(path, &fs) == 0 &&
+           (unsigned long)fs.f_type == (unsigned long)TMPFS_MAGIC &&
+           test_tmpfs_space_available(&fs);
+}
+
+static bool tmpfs_parent_ready(const char *parent)
+{
+    bool is_default = !strcmp(parent, TMPFS_DEFAULT_PARENT);
+    /* Check the mount before creating the default parent, so a host whose
+     * /dev/shm is not tmpfs gains no stray directory. */
+    if (is_default && !tmpfs_fs_ok("/dev/shm")) return false;
+    if (mkdir(parent, 0700) != 0 && errno != EEXIST) return false;
+    if (!is_default && !tmpfs_fs_ok(parent)) return false;
+    return test_tmpfs_parent_safe(parent);
+}
+
 /* The parent directory is named "z23-scratch" on purpose: leaves such as
  * zcode.workspace.source.bundle.fetch accept an output path only when a
  * segment of it (and of its canonical form) is "tmp", "test-tmp" or contains
@@ -163,27 +228,27 @@ static void tmpfs_cleanup(void)
  * made every fixture under the tmpfs root fail that check. */
 static bool tmpfs_create_root(void)
 {
-    struct statfs fs;
-    if (statfs("/dev/shm", &fs) != 0 ||
-        (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC ||
-        !test_tmpfs_space_available(&fs)) return false;
-    if (mkdir("/dev/shm/z23-scratch", 0700) != 0 && errno != EEXIST) return false;
-    if (!test_tmpfs_parent_safe("/dev/shm/z23-scratch")) return false;
+    const char *parent = tmpfs_parent();
+    if (!tmpfs_parent_ready(parent)) return false;
+    tmpfs_reap_dead_roots(parent);
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd))) return false;
     uint32_t hash = 2166136261u;
     for (const unsigned char *p = (const unsigned char *)cwd; *p; ++p)
         hash = (hash ^ *p) * 16777619u;
-    int n = snprintf(g_tmpfs_root, sizeof(g_tmpfs_root),
-                     "/dev/shm/z23-scratch/%08x.XXXXXX", hash);
+    int n = snprintf(g_tmpfs_root, sizeof(g_tmpfs_root), "%s/%08x.XXXXXX", parent, hash);
     if (n < 0 || (size_t)n >= sizeof(g_tmpfs_root) || !mkdtemp(g_tmpfs_root)) {
         g_tmpfs_root[0] = '\0';
         return false;
     }
     g_tmpfs_owner = getpid();
-    int fd = open(g_tmpfs_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); fd = -1; }
-    g_tmpfs_lock_fd = fd;
+    g_tmpfs_lock_fd = tsr_lock_root(g_tmpfs_root);
+    if (g_tmpfs_lock_fd < 0) {   /* a root that cannot prove it is live is not used */
+        fprintf(stderr, "test_parallel: cannot lock tmpfs root: %s\n", strerror(errno));
+        tmpfs_cleanup();
+        g_tmpfs_root[0] = '\0';
+        return false;
+    }
     return true;
 }
 
@@ -199,9 +264,7 @@ static void tmpfs_setup(void)
         atexit(tmpfs_cleanup) != 0) {
         (void)unsetenv("ZCL_TEST_TMPROOT");
         (void)unsetenv("ZCL_TEST_TMPFS_ACTIVE");
-        g_tmpfs_green = true;
         tmpfs_cleanup();
-        g_tmpfs_green = false;
         g_tmpfs_root[0] = '\0';
         goto fallback;
     }
