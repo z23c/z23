@@ -184,8 +184,10 @@ static bool ntd_interactive(const char *action)
 }
 
 static struct zcl_result ntd_change(const struct json_value *input,
-    struct package_resident_store *store, const char *directory, struct task_document *row)
+    struct package_resident_store *store, const char *directory, struct task_document *row,
+    bool *mutated)
 {
+    *mutated = false;
     const char *action = ntd_string(input, "action");
     if (!action || strcmp(action, "list") == 0) return task_document_read(store, row);
     if (ntd_interactive(action))
@@ -202,8 +204,10 @@ static struct zcl_result ntd_change(const struct json_value *input,
     if (selected != TASK_DOCUMENT_ADD && selected != TASK_DOCUMENT_UNDO &&
         !ntd_integer(input, "task_id", &id))
         return ZCL_ERR(-1, "tasks: choose a task ID");
-    return task_document_apply(store, revision, (enum task_document_action)selected,
-        id, ntd_string(input, "title"), row);
+    struct zcl_result result = task_document_apply(store, revision,
+        (enum task_document_action)selected, id, ntd_string(input, "title"), row);
+    if (result.ok) *mutated = true;
+    return result;
 }
 
 static bool ntd_render(struct json_value *data, const struct task_document *row,
@@ -342,14 +346,11 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
     const char *action = ntd_string(request->input, "action");
     bool offering = action && (strcmp(action, "offer") == 0 || strcmp(action, "offer-status") == 0);
     char directory[4096];
+    bool mutated = false;
     struct zcl_result result = ntd_open(request->input, &store, directory);
     if (result.ok && offering) result = package_resident_record_read(&store, &kept);
     if (result.ok) result = offering ? ntd_offer(request->input, &store, directory, &offer)
-        : ntd_change(request->input, &store, directory, &row);
-    /* A successful noninteractive write has committed before close or render.
-     * A window's result does not tell us whether the user changed anything. */
-    bool mutated = result.ok && !offering && action &&
-        !ntd_interactive(action) && strcmp(action, "list") != 0;
+        : ntd_change(request->input, &store, directory, &row, &mutated);
     struct zcl_result closed = package_resident_store_close(&store);
     if (result.ok && !closed.ok) result = closed;
     if (result.ok) {

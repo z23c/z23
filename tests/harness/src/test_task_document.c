@@ -45,15 +45,51 @@ static bool td_call(struct json_value *input, struct zcl_command_reply *reply)
     spec->handler(&request, reply); return true;
 }
 
+static bool td_confirmation_input(struct json_value *input, const char *directory,
+                                  bool write)
+{
+    json_init(input); json_set_object(input);
+    return json_push_kv_str(input, "datadir", directory) &&
+        json_push_kv_str(input, "app", "local/confirmation-fault") &&
+        json_push_kv_str(input, "action", write ? "add" : "list") &&
+        (!write || (json_push_kv_str(input, "title", "Persisted before confirmation") &&
+                    json_push_kv_int(input, "expected_revision", 0)));
+}
+
+static int td_confirmation_durable(const char *directory)
+{
+    int failures = 0;
+    struct package_resident_store store = {0};
+    struct task_document row = {0};
+    bool opened = package_resident_store_open_task_app(&store, directory, "local/confirmation-fault").ok;
+    TD_CHECK("confirmation fault leaves the exact new task durable", opened &&
+        task_document_read(&store, &row).ok && row.state.revision == 1 && row.state.count == 1 &&
+        strcmp(row.state.tasks[0].title, "Persisted before confirmation") == 0);
+    if (store.db) TD_CHECK("confirmation fault store closes", package_resident_store_close(&store).ok);
+    return failures;
+}
+
+static int td_confirmation_read_fault(const char *directory)
+{
+    int failures = 0;
+    struct json_value input;
+    bool built = td_confirmation_input(&input, directory, false);
+    struct zcl_command_reply reply = {0};
+    zcl_alloc_fault_fail_next("json_push_kv_key");
+    bool called = built && td_call(&input, &reply);
+    zcl_alloc_fault_clear();
+    TD_CHECK("read-only confirmation fault reports no mutation", called &&
+        reply.status == ZCL_COMMAND_STATUS_FAILED && !reply.error.mutated &&
+        strstr(reply.error.message, "operation completed but confirmation") != NULL);
+    zcl_command_reply_free(&reply); json_free(&input);
+    return failures;
+}
+
 static int td_confirmation_fault(const char *directory)
 {
     int failures = 0;
-    struct json_value input; json_init(&input); json_set_object(&input);
-    bool built = json_push_kv_str(&input, "datadir", directory) &&
-        json_push_kv_str(&input, "app", "local/confirmation-fault") &&
-        json_push_kv_str(&input, "action", "add") &&
-        json_push_kv_str(&input, "title", "Persisted before confirmation") &&
-        json_push_kv_int(&input, "expected_revision", 0);
+    struct json_value input;
+    bool built = td_confirmation_input(&input, directory, true);
     struct zcl_command_reply reply = {0};
     zcl_alloc_fault_fail_next("json_push_kv_key");
     bool called = built && td_call(&input, &reply);
@@ -61,30 +97,14 @@ static int td_confirmation_fault(const char *directory)
     TD_CHECK("confirmation fault is reported after the operation", called &&
         reply.status == ZCL_COMMAND_STATUS_FAILED &&
         strstr(reply.error.message, "operation completed but confirmation") != NULL);
-    struct package_resident_store store = {0};
-    struct task_document row = {0};
-    bool opened = package_resident_store_open_task_app(&store, directory, "local/confirmation-fault").ok;
-    TD_CHECK("confirmation fault leaves the exact new task durable", opened &&
-        task_document_read(&store, &row).ok && row.state.revision == 1 && row.state.count == 1 &&
-        strcmp(row.state.tasks[0].title, "Persisted before confirmation") == 0);
+    failures += td_confirmation_durable(directory);
     TD_CHECK("confirmation fault admits the completed mutation", called && reply.error.mutated);
-    if (store.db) TD_CHECK("confirmation fault store closes", package_resident_store_close(&store).ok);
     zcl_command_reply_free(&reply);
     called = built && td_call(&input, &reply);
     TD_CHECK("stale write refuses before mutation", called &&
         reply.status == ZCL_COMMAND_STATUS_FAILED && !reply.error.mutated);
     zcl_command_reply_free(&reply); json_free(&input);
-    json_init(&input); json_set_object(&input);
-    built = json_push_kv_str(&input, "datadir", directory) &&
-        json_push_kv_str(&input, "app", "local/confirmation-fault") &&
-        json_push_kv_str(&input, "action", "list");
-    zcl_alloc_fault_fail_next("json_push_kv_key");
-    called = built && td_call(&input, &reply);
-    zcl_alloc_fault_clear();
-    TD_CHECK("read-only confirmation fault reports no mutation", called &&
-        reply.status == ZCL_COMMAND_STATUS_FAILED && !reply.error.mutated &&
-        strstr(reply.error.message, "operation completed but confirmation") != NULL);
-    zcl_command_reply_free(&reply); json_free(&input);
+    failures += td_confirmation_read_fault(directory);
     return failures;
 }
 static bool td_verifier_reply_ok(const struct zcl_command_reply *reply)
