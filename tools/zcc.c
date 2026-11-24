@@ -131,6 +131,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/resource.h>
+#define ZCC_HAVE_RUSAGE 1
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -3096,20 +3100,63 @@ static void epoch_timing_append(const char *path, const char *line, int n)
     close(fd);
 }
 
+struct epoch_cpu_sample {
+    int64_t self_user, self_system, children_user, children_system;
+};
+
+#if defined(ZCC_HAVE_RUSAGE)
+static int64_t epoch_cpu_time(const struct timeval *tv)
+{
+    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000 ||
+        (uint64_t)tv->tv_sec > (uint64_t)(INT64_MAX - tv->tv_usec) / 1000000u)
+        return -1;
+    return (int64_t)tv->tv_sec * 1000000 + tv->tv_usec;
+}
+#endif
+
+static struct epoch_cpu_sample epoch_cpu_read(void)
+{
+    struct epoch_cpu_sample s = {-1, -1, -1, -1};
+#if defined(ZCC_HAVE_RUSAGE)
+    struct rusage r;
+    if (getrusage(RUSAGE_SELF, &r) == 0) {
+        s.self_user = epoch_cpu_time(&r.ru_utime);
+        s.self_system = epoch_cpu_time(&r.ru_stime);
+    }
+    if (getrusage(RUSAGE_CHILDREN, &r) == 0) {
+        s.children_user = epoch_cpu_time(&r.ru_utime);
+        s.children_system = epoch_cpu_time(&r.ru_stime);
+    }
+#endif
+    return s;
+}
+
+static void epoch_cpu_delta(char out[32], int64_t start, int64_t end)
+{
+    if (start < 0 || end < start) (void)snprintf(out, 32, "unknown");
+    else (void)snprintf(out, 32, "%lld", (long long)(end - start));
+}
+
 /* Best-effort, non-authoritative measurements; contention drops a record. */
 static void epoch_dispatch_timing(const char *source, const char *output,
-                                  int rc, int64_t start, int64_t end)
+                                  int rc, int64_t start, int64_t end,
+                                  struct epoch_cpu_sample before,
+                                  struct epoch_cpu_sample after)
 {
     const char *path = getenv("ZCC_DISPATCH_TIMING");
     if (!path || !path[0]) return;
     char src[4u * PATH_MAX + 1u], obj[4u * PATH_MAX + 1u];
     if (!log_escape_path(source, src, sizeof src) ||
         !log_escape_path(output, obj, sizeof obj)) return;
-    char line[8u * PATH_MAX + 192u], duration[32];
+    char line[8u * PATH_MAX + 384u], duration[32], cu[32], cs[32], su[32], ss[32];
     if (start < 0 || end < start) snprintf(duration, sizeof duration, "unknown");
     else snprintf(duration, sizeof duration, "%lld", (long long)(end - start));
-    int n = snprintf(line, sizeof line, "dispatch_wall_ms=%s rc=%d source=%s output=%s\n",
-                     duration, rc, src, obj);
+    epoch_cpu_delta(cu, before.children_user, after.children_user);
+    epoch_cpu_delta(cs, before.children_system, after.children_system);
+    epoch_cpu_delta(su, before.self_user, after.self_user);
+    epoch_cpu_delta(ss, before.self_system, after.self_system);
+    int n = snprintf(line, sizeof line, "dispatch_wall_ms=%s rc=%d local_children_user_us=%s local_children_system_us=%s local_self_user_us=%s local_self_system_us=%s source=%s output=%s\n",
+                     duration, rc, cu, cs, su, ss, src, obj);
     if (n <= 0 || (size_t)n >= sizeof line) return;
     epoch_timing_append(path, line, n);
 }
@@ -5381,6 +5428,24 @@ static int epoch_compile_or_serve(int argc, char **argv, const char *mode,
     return zcc_dispatch(compiler_argc, cc, false, output);
 }
 
+static int epoch_compile_timed(int argc, char **argv, const char *mode,
+                               const char *output, const char *source,
+                               const struct epoch_artifacts *artifacts,
+                               int compiler_argc, char **cc)
+{
+    const char *timing = getenv("ZCC_DISPATCH_TIMING");
+    bool enabled = timing && timing[0];
+    struct epoch_cpu_sample before = {-1, -1, -1, -1}, after = before;
+    int64_t started = flight_clock_ms();
+    if (enabled) before = epoch_cpu_read();
+    int rc = epoch_compile_or_serve(argc, argv, mode, output, source,
+                                    artifacts, compiler_argc, cc);
+    if (enabled) after = epoch_cpu_read();
+    int64_t finished = flight_clock_ms();
+    epoch_dispatch_timing(source, output, rc, started, finished, before, after);
+    return rc;
+}
+
 /* Drops the staged artifacts and the coverage lock, if one is held. */
 static void epoch_abort_stage(struct epoch_artifacts *artifacts, int lock_fd)
 {
@@ -5443,11 +5508,8 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
         epoch_abort_stage(&artifacts, lock_fd);
         return epoch_fail("could not allocate compiler argv");
     }
-    int64_t started = flight_clock_ms();
-    int rc = epoch_compile_or_serve(argc, argv, mode, output, source,
-                                    &artifacts, compiler_argc, cc);
-    int64_t finished = flight_clock_ms();
-    epoch_dispatch_timing(source, output, rc, started, finished);
+    int rc = epoch_compile_timed(argc, argv, mode, output, source,
+                                 &artifacts, compiler_argc, cc);
     free(cc);
     bool complete = epoch_compile_complete(rc, coverage, &artifacts);
     const char *reason = complete ? epoch_stage_reason(authority, &artifacts) : NULL;

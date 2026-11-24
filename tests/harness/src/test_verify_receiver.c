@@ -1603,20 +1603,40 @@ static int vrt_test_planted(struct vrt_fx *f)
     return failures;
 }
 
+static bool vrt_timing_cpu_field(const char *text, const char *key, unsigned long long *value)
+{
+    const char *p = strstr(text, key);
+    if (!p) return false;
+    p += strlen(key);
+    if (*p < '0' || *p > '9') return false;
+    char *end;
+    errno = 0;
+    *value = strtoull(p, &end, 10);
+    return errno == 0 && *end == ' ';
+}
+
 static int vrt_test_dispatch_timing(struct vrt_fx *f)
 {
     int failures = 0;
     char out[ZCL_FR_TARGET_LEN + 1u], path[PATH_MAX];
     struct vr_bytes log = {0};
+    unsigned long long cu, cs, su, ss;
     TEST("verify receiver: epoch dispatch emits optional timing without changing compile") {
         ASSERT(snprintf(path, sizeof path, "%s/dispatch-timing.log", f->root) < (int)sizeof path);
         ASSERT(vrt_write(path, "", 0, 0600));
         const struct vrt_zcc_env z = {.verified = true, .timing = path};
+        unsigned launches = vrt_launches(f);
         ASSERT(vrt_zcc(f, 'd', &z, out) == 0);
+        ASSERT_EQ(vrt_launches(f), launches + 1u);
         ASSERT(vrt_obj_is(f, out, &f->obj));
         ASSERT(vrt_read(path, &log));
         log.p[log.n] = 0;
         ASSERT(log.n && strstr((char *)log.p, "dispatch_wall_ms="));
+        ASSERT(vrt_timing_cpu_field((char *)log.p, "local_children_user_us=", &cu));
+        ASSERT(vrt_timing_cpu_field((char *)log.p, "local_children_system_us=", &cs));
+        ASSERT(vrt_timing_cpu_field((char *)log.p, "local_self_user_us=", &su));
+        ASSERT(vrt_timing_cpu_field((char *)log.p, "local_self_system_us=", &ss));
+        ASSERT(cu > 0 || cs > 0);
         ASSERT(strstr((char *)log.p, VRT_SOURCE));
         ASSERT(strstr((char *)log.p, out));
         PASS();
