@@ -1445,13 +1445,94 @@ static bool gw_credential(struct gw_buf *b, const struct json_value *id,
 /* Fork the node for one credentialed call and format its own envelope as
  * the tool result content (a node refusal is content with isError:true,
  * never a transport error). arg is the input JSON, fed over stdin. */
+enum gw_native_next_projection {
+    GW_NATIVE_NEXT_UNCHANGED,
+    GW_NATIVE_NEXT_ATTACHED,
+    GW_NATIVE_NEXT_NOMEM
+};
+
+static enum gw_native_next_projection
+gw_project_native_next(const struct json_value *env,
+                       const struct json_value *error,
+                       struct json_value *projected)
+{
+    const struct json_value *next;
+    if (!error || error->type != JSON_OBJ)
+        return GW_NATIVE_NEXT_UNCHANGED;
+    if (json_get(error, "native_next"))
+        return GW_NATIVE_NEXT_UNCHANGED;
+    next = json_get(env, "next");
+    if (!next || next->type != JSON_ARR || next->num_children == 0)
+        return GW_NATIVE_NEXT_UNCHANGED;
+    json_init(projected);
+    if (!json_copy_checked(projected, error))
+        return GW_NATIVE_NEXT_NOMEM;
+    if (!json_push_kv(projected, "native_next", next))
+        return GW_NATIVE_NEXT_NOMEM;
+    return GW_NATIVE_NEXT_ATTACHED;
+}
+
+/* The node's data becomes tool text. A typed node refusal remains MCP
+ * content with isError=true; its root recovery command is explicitly labeled
+ * native_next so a caller cannot mistake it for a hosted gateway tool. */
+static void gw_reply_node_envelope(struct gw_buf *b,
+                                   const struct json_value *id,
+                                   const struct json_value *env,
+                                   int exit_code)
+{
+    struct json_value projected;
+    const struct json_value *data;
+    bool projected_init = false;
+    const struct json_value *okv = json_get(env, "ok");
+    bool ok = okv && okv->type == JSON_BOOL && okv->val.b;
+    /* The exit status must agree with the envelope: the CLI exits 0 for
+     * ok:true and non-zero (1 failed, 2 input refused) for a typed refusal. */
+    if (exit_code != 0 && ok) {
+        gw_rpc_error(b, id, -32000, "node did not answer");
+        return;
+    }
+    data = json_get(env, ok ? "data" : "error");
+    if (!ok) {
+        enum gw_native_next_projection projection =
+            gw_project_native_next(env, data, &projected);
+        projected_init = projection != GW_NATIVE_NEXT_UNCHANGED;
+        if (projection == GW_NATIVE_NEXT_NOMEM) {
+            json_free(&projected);
+            gw_rpc_error(b, id, -32603,
+                         "gateway resources exhausted preserving native recovery");
+            return;
+        }
+        if (projection == GW_NATIVE_NEXT_ATTACHED)
+            data = &projected;
+    }
+    gw_buf_str(b, "{\"jsonrpc\":\"2.0\",\"id\":");
+    gw_json_write(b, id);
+    gw_buf_str(b, ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":");
+    {
+        struct gw_buf text;
+        memset(&text, 0, sizeof(text));
+        gw_json_write(&text, data);
+        if (text.oom || !text.p)
+            gw_buf_json_str(b, "");
+        else
+            gw_buf_json_str(b, text.p);
+        gw_buf_free(&text);
+    }
+    gw_buf_str(b, "}],\"isError\":");
+    gw_buf_str(b, ok ? "false" : "true");
+    gw_buf_str(b, "}}");
+    if (projected_init)
+        json_free(&projected);
+}
+
+/* Fork the node for one credentialed call. arg is the input JSON, fed over
+ * stdin; the returned typed envelope is formatted by the bounded helper. */
 static void gw_forward_call(struct gw_buf *b, const struct json_value *id,
                             const struct gw_tool *t, const char *node,
                             const char *arg)
 {
     struct gw_node_out out;
     struct json_value env;
-    const struct json_value *data;
     out = gw_node_exec(node, t->verb, arg);
     if (out.nomem) {
         gw_rpc_error(b, id, -32603, "gateway resources exhausted");
@@ -1469,43 +1550,7 @@ static void gw_forward_call(struct gw_buf *b, const struct json_value *id,
         return;
     }
     free(out.text);
-    /* The node's own data becomes the tool result content. A refused node
-     * call (ok:false) is content, not a transport error: the caller sees
-     * the exact typed refusal (the error object, never a bare null) and
-     * its evidence. The exit status must agree with the envelope: the CLI
-     * exits 0 for ok:true and non-zero (1 failed, 2 input refused) with a
-     * typed ok:false refusal. A failing exit claiming success is not an
-     * answer, whatever the bytes say; a signal never reaches here. */
-    {
-        const struct json_value *okv = json_get(&env, "ok");
-        bool ok = okv && okv->type == JSON_BOOL && okv->val.b;
-        if (out.exit_code != 0 && ok) {
-            json_free(&env);
-            gw_rpc_error(b, id, -32000, "node did not answer");
-            return;
-        }
-        data = json_get(&env, ok ? "data" : "error");
-    }
-    gw_buf_str(b, "{\"jsonrpc\":\"2.0\",\"id\":");
-    gw_json_write(b, id);
-    gw_buf_str(b, ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":");
-    {
-        struct gw_buf text;
-        memset(&text, 0, sizeof(text));
-        gw_json_write(&text, data);
-        if (text.oom || !text.p)
-            gw_buf_json_str(b, "");
-        else
-            gw_buf_json_str(b, text.p);
-        gw_buf_free(&text);
-    }
-    gw_buf_str(b, "}],\"isError\":");
-    {
-        const struct json_value *okv = json_get(&env, "ok");
-        bool ok = okv && okv->type == JSON_BOOL && okv->val.b;
-        gw_buf_str(b, ok ? "false" : "true");
-    }
-    gw_buf_str(b, "}}");
+    gw_reply_node_envelope(b, id, &env, out.exit_code);
     json_free(&env);
 }
 

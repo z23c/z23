@@ -2608,6 +2608,25 @@ static bool gw_fake_node(const char *path, int code)
     return chmod(path, 0755) == 0;
 }
 
+/* Emit one fixed test envelope without shell interpolation. */
+static bool gw_fake_node_envelope(const char *path, const char *envelope,
+                                  int code)
+{
+    char text[4096];
+    int n = snprintf(text, sizeof(text),
+                     "#!/bin/sh\n"
+                     "cat <<'Z23_REPLY'\n%s\nZ23_REPLY\n"
+                     "exit %d\n",
+                     envelope, code);
+    if (n <= 0 || (size_t)n >= sizeof(text)) {
+        /* Refuse an incomplete script rather than run a partial fixture. */
+        return false;
+    }
+    if (!gw_write_text(path, text))
+        return false;
+    return chmod(path, 0755) == 0;
+}
+
 /* One steer_brief through a gateway whose node is `node`; the suite's own
  * gateway is parked and restored around it. */
 static char *gw_call_via(const char *bin, const char *node, int *st)
@@ -2657,6 +2676,84 @@ static int gw_t_child_status(void)
         GW_ASSERT_BODY(b, "\"code\":-32000");
         GW_ASSERT_BODY(b, "node did not answer");
         GW_ASSERT_BODY_NOT(b, "child-status");
+        PASS();
+    }
+_test_next:;
+    free(b);
+    return failures;
+}
+
+static int gw_t_error_next(void)
+{
+    int failures = 0;
+    char *b = NULL;
+    TEST("gateway: failed node reply labels native next separately") {
+        const char *bin = gw_bin("Z23_TEST_GATEWAY_BIN", GW_TEST_BIN_DEFAULT);
+        const char *with_next =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"fleet.steer.evidence\","
+            "\"ok\":false,\"status\":\"failed\",\"error\":{"
+            "\"code\":\"EVIDENCE_UNAVAILABLE\","
+            "\"error_code\":\"EVIDENCE_UNAVAILABLE\","
+            "\"message\":\"landing status did not answer\","
+            "\"phase\":\"execute\",\"current_state\":\"REQUEST_FAILED\","
+            "\"retryable\":false,\"human_action_required\":false,"
+            "\"next_action\":\"follow the first next command\","
+            "\"mutated\":false,\"evidence\":\"dev.land\",\"blockers\":[]},"
+            "\"next\":[{\"command\":\"discover.describe\","
+            "\"input\":{\"path\":\"fleet.steer.evidence\"},"
+            "\"reason\":\"inspect this command's contract and availability\"}]}";
+        const char *without_next =
+            "{\"schema\":\"zcl.result.v1\",\"command\":\"fleet.steer.evidence\","
+            "\"ok\":false,\"status\":\"failed\",\"error\":{"
+            "\"code\":\"EVIDENCE_UNAVAILABLE\","
+            "\"error_code\":\"EVIDENCE_UNAVAILABLE\","
+            "\"message\":\"landing status did not answer\","
+            "\"phase\":\"execute\",\"current_state\":\"REQUEST_FAILED\","
+            "\"retryable\":false,\"human_action_required\":false,"
+            "\"next_action\":\"follow the first next command\","
+            "\"mutated\":false,\"evidence\":\"dev.land\",\"blockers\":[]}}";
+        char dir[512], fake[600];
+        int st = 0;
+        test_make_tmpdir(dir, sizeof(dir), "fleet_gateway", "native_next");
+        ASSERT(snprintf(fake, sizeof(fake), "%s/node", dir) > 0);
+
+        ASSERT(gw_fake_node_envelope(fake, with_next, 1));
+        b = gw_call_via(bin, fake, &st);
+        ASSERT(b != NULL);
+        ASSERT_EQ(st, 200);
+        GW_ASSERT_BODY(b, "\"isError\":true");
+        GW_ASSERT_BODY(b, "\\\"code\\\":\\\"EVIDENCE_UNAVAILABLE\\\"");
+        GW_ASSERT_BODY(b, "\\\"message\\\":\\\"landing status did not answer\\\"");
+        GW_ASSERT_BODY(b, "\\\"phase\\\":\\\"execute\\\"");
+        GW_ASSERT_BODY(b, "\\\"current_state\\\":\\\"REQUEST_FAILED\\\"");
+        GW_ASSERT_BODY(b, "\\\"retryable\\\":false");
+        GW_ASSERT_BODY(b, "\\\"human_action_required\\\":false");
+        GW_ASSERT_BODY(b, "\\\"evidence\\\":\\\"dev.land\\\"");
+        GW_ASSERT_BODY(b, "\\\"blockers\\\":[]");
+        GW_ASSERT_BODY(b, "\\\"next_action\\\":\\\"follow the first next command\\\"");
+        GW_ASSERT_BODY(b, "\\\"native_next\\\":[{\\\"command\\\":\\\"discover.describe\\\"");
+        GW_ASSERT_BODY(b, "\\\"path\\\":\\\"fleet.steer.evidence\\\"");
+        GW_ASSERT_BODY(b, "\\\"reason\\\":\\\"inspect this command's contract and availability\\\"");
+        GW_ASSERT_BODY_NOT(b, "\\\"code\\\":-32000");
+        free(b);
+        b = NULL;
+
+        ASSERT(gw_fake_node_envelope(fake, without_next, 1));
+        b = gw_call_via(bin, fake, &st);
+        ASSERT(b != NULL);
+        ASSERT_EQ(st, 200);
+        GW_ASSERT_BODY(b, "\"isError\":true");
+        GW_ASSERT_BODY(b, "\\\"code\\\":\\\"EVIDENCE_UNAVAILABLE\\\"");
+        GW_ASSERT_BODY(b, "\\\"message\\\":\\\"landing status did not answer\\\"");
+        GW_ASSERT_BODY(b, "\\\"phase\\\":\\\"execute\\\"");
+        GW_ASSERT_BODY(b, "\\\"current_state\\\":\\\"REQUEST_FAILED\\\"");
+        GW_ASSERT_BODY(b, "\\\"retryable\\\":false");
+        GW_ASSERT_BODY(b, "\\\"human_action_required\\\":false");
+        GW_ASSERT_BODY(b, "\\\"next_action\\\":\\\"follow the first next command\\\"");
+        GW_ASSERT_BODY(b, "\\\"evidence\\\":\\\"dev.land\\\"");
+        GW_ASSERT_BODY(b, "\\\"blockers\\\":[]");
+        GW_ASSERT_BODY_NOT(b, "native_next");
+        GW_ASSERT_BODY_NOT(b, "\\\"code\\\":-32000");
         PASS();
     }
 _test_next:;
@@ -4446,6 +4543,7 @@ static const struct gw_case g_gw_cases[] = {
     GW_CASE(gw_t_bound_pressure, 0),
 #endif
     GW_CASE(gw_t_child_status, 2),
+    GW_CASE(gw_t_error_next, 2),
     GW_CASE(gw_t_auth, 1),
     GW_CASE(gw_t_oauth, 1),
     GW_CASE(gw_t_register_bounds, 0),
@@ -4484,7 +4582,8 @@ static const char *const g_gw_original[] = {
 #if defined(__linux__)
     "gw_t_bound_pressure",
 #endif
-    "gw_t_child_status", "gw_t_auth", "gw_t_oauth", "gw_t_register_bounds",
+    "gw_t_child_status", "gw_t_error_next", "gw_t_auth", "gw_t_oauth",
+    "gw_t_register_bounds",
     "gw_t_conn_bounds", "gw_t_csrf", "gw_t_life_send_ack",
     "gw_t_life_complete", "gw_t_life_restart", "gw_t_compat_pass",
     "gw_t_compat_terminal", "gw_t_compat_crash", "gw_t_compat_case",
