@@ -1745,8 +1745,9 @@ static int t_lint_fast_tor_graph(void)
 {
     static const char script[] =
         "set -eu; cd \"$2\"\n"
-        "mkdir -p platform/modules/platform/tests engine/composition tools/dev tools/lint home tmp\n"
+        "mkdir -p platform/modules/platform/tests engine/composition tools/dev tools/lint/lintc home tmp\n"
         "cp \"$1/Makefile\" Makefile\n"
+        "cp \"$1/tools/lint/lintc/gates.def\" tools/lint/lintc/\n"
         "mkdir -p apps/skycombat; cp \"$1/apps/skycombat/skycombat.mk\" apps/skycombat/\n"
         "cp \"$1/platform/modules/platform/tests/windows_acceptance.mk\" platform/modules/platform/tests/\n"
         "cp \"$1/platform/modules/platform/tests/android_acceptance.mk\" platform/modules/platform/tests/\n"
@@ -1754,7 +1755,7 @@ static int t_lint_fast_tor_graph(void)
         "if [ -f \"$1/tools/retrieval_pair_sources.mk\" ]; then cp \"$1/tools/retrieval_pair_sources.mk\" tools/; fi\n"
         "printf '#!/bin/sh\\necho compiler >> \"$HOME/compiler-calls\"\\nexit 0\\n' > tools/dev/check-toolchain.sh\n"
         "printf '#!/bin/sh\\necho epoch >> \"$HOME/epoch-calls\"\\nprintf fixture\\n' > tools/dev/process-start-token.sh\n"
-        "printf '#!/bin/sh\\necho \"$1\" >> \"$HOME/calls\"\\nif [ \"$1\" = run ]; then printf \"%%s\\\\n\" \"$@\" > \"$HOME/args\"; fi\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
+        "printf '#!/bin/sh\\necho \"$1\" >> \"$HOME/calls\"\\nprintf \"%%s\\\\n\" \"$@\" > \"$HOME/$1-args\"\\nif [ \"$1\" = run ]; then cp \"$HOME/run-args\" \"$HOME/args\"; fi\\n[ \"${FAIL_STAGE:-}\" != \"$1\" ]\\n' > stub-lint\n"
         "chmod +x tools/dev/check-toolchain.sh tools/dev/process-start-token.sh stub-lint\n"
         "printf '%s\\n' '.PHONY: tor-provenance-ready check-native-tunnel-export-binding' 'tor-provenance-ready:' '\t@printf called > \"$(HOME)/tor\"; exit 77' 'check-native-tunnel-export-binding:' '\t@printf binding > \"$(HOME)/binding\"' 'fixture-print-gates:' '\t@printf \"%s\\\\n\" $(LINT_FAST_GATES)' > overlay.mk\n"
         "HOME=\"$2/home\" TMPDIR=\"$2/tmp\"; export HOME TMPDIR\n"
@@ -1766,11 +1767,13 @@ static int t_lint_fast_tor_graph(void)
         "if git -C \"$2\" merge-base HEAD refs/remotes/origin/main >/dev/null 2>&1; then grep -q '^--changed-files=' \"$HOME/args\"; else ! grep -q '^--changed-files=' \"$HOME/args\"; fi\n"
         "tail -n +6 \"$HOME/args\" | grep -v '^--changed-files=' > actual; cmp expected actual\n"
         "grep -qx check-vendor-provenance actual\n"
+        "grep '^--skip=' \"$HOME/precheck-args\" | tr ',' '\\n' | grep -qx check-windows-acceptance || { echo 'windows acceptance missing from precheck skip' >&2; exit 1; }\n"
         "fixture_make -n -p ZCL_LINT_SERIAL=1 lint-fast > serial.db 2>&1 || :\n"
         "grep -E '^lint-fast: .*stub-lint' serial.db >/dev/null\n"
         "grep -E '^check-vendor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"
         "grep -E '^check-tor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"
         "grep -E '^lint: .*check-tor-provenance' serial.db >/dev/null\n"
+        "grep -E '^lint: .*check-windows-acceptance([[:space:]]|$)' serial.db >/dev/null\n"
         "fixture_make -n -p lint-land > land.db 2>&1 || :\n"
         "grep -E '^lint-land: .*tor-provenance-ready' land.db >/dev/null\n";
     static const char checks[] =

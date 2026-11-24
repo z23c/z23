@@ -7530,7 +7530,7 @@ LINT_FAST_GATES := \
 # Opt out with ZCL_LINT_FAST_PRECHECK=0.
 LINT_FAST_PRECHECK_HEAVY := \
     check-standalone-tools-link check-vcs-no-sha1 check-codeindex-coverage \
-    check-windows-cross-syntax check-z23-release-install \
+    check-windows-cross-syntax check-windows-acceptance check-z23-release-install \
     check-shell-host-assumptions check-zcode-package-registry \
     check-no-wallclock-assertion check-zcc-cache check-command-input-keys \
     check-clang-portability check-object-reproducible \
