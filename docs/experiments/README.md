@@ -100,6 +100,106 @@ Commands: `discover.wiki`, `discover.read`
 | 2026-10-11 | [Guest loopback SSH with hybrid post-quantum key exchange](./2026-10-11-guest-pq-ssh-loopback.md) | See the record. |
 | 2026-10-13 | [MCP workhorse qualification](./2026-10-13-mcp-workhorse.md) | See the record. |
 | 2026-10-15 | [Four-host shell and transfer observation — 2026-10-15](./FLEET_SHELL_ROUTES_2026-10-15.md) | See the record. |
+| 2026-10-20 | [Plugin peer-to-peer distribution — 2026-10-20](./PLUGIN_P2P_DIST_2026-10-20.md) | See the record. |
+| 2026-10-26 | [Optional Groth16 reference-byte guard](./GROTH16_REFERENCE_GUARD.md) | See the record. |
+| 2026-10-26 | [Incomplete R1CS reference diagnostics](./R1CS_REFERENCE_TRUNCATION.md) | See the record. |
+| 2026-10-27 | [Canary sentinel durability](./CANARY_SENTINEL_DURABILITY.md) | See the record. |
+| 2026-10-27 | [SQLite transaction trace statement lifetime](./DB_TXN_TRACE_LIFETIME.md) | See the record. |
+| 2026-10-27 | [Canonical file-purpose mode during intake](./LAND_PRECHECK_CANONICAL_MODE.md) | See the record. |
+| 2026-10-27 | [Landing status during foreground proof](./LAND_STATUS_LIVE_DRIVER.md) | See the record. |
+| 2026-10-27 | [Loop tick fixture worker ownership](./LOOP_TICK_FIXTURE_LIFETIME.md) | See the record. |
+| 2026-10-27 | [Projection MVCC test progress](./PROJECTION_MVCC_PROGRESS.md) | See the record. |
+| 2026-10-27 | [Remote shipping service binding](./SHIP_REMOTE_SERVICE_BINDING.md) | See the record. |
+| 2026-10-28 | [Android ARM64 executable acceptance](./2026-10-28-android-arm64.md) | See the record. |
+| 2026-10-28 | [Pixel shielded transaction API](./2026-10-28-pixel-shielded-api.md) | See the record. |
+| 2026-10-31 | [Wallet private relay (2026-10-31)](./2026-10-31-wallet-private-relay.md) | See the record. |
+| 2026-11-03 | [Wallet creation before chain synchronization](./wallet-birthday-scan-coverage.md) | See the record. |
+| 2026-11-04 | [Empty initial wallet summary](./android-empty-summary.md) | See the record. |
+| 2026-11-04 | [Fleet scan checking state](./android-scan-checking.md) | See the record. |
+| 2026-11-04 | [Android scan and fleet feedback](./android-scan-fleet-feedback.md) | See the record. |
+| 2026-11-04 | [Android setup recovery](./android-setup-recovery.md) | See the record. |
+| 2026-11-04 | [Android update signer guard](./android-signer-guard.md) | See the record. |
+| 2026-11-04 | [Fleet admission machine code](./fleet-admission-machine-code.md) | See the record. |
+| 2026-11-04 | [Compact unavailable wallet](./wallet-compact-unavailable.md) | See the record. |
+| 2026-11-04 | [Receive lifecycle test](./wallet-receive-lifecycle.md) | See the record. |
+| 2026-11-05 | [Verified state transfer over existing peers](./2026-11-05-state-offer-peer-link.md) | See the record. |
+| 2026-11-05 | [Camera denial recovery](./android-camera-denial.md) | See the record. |
+| 2026-11-05 | [Paste correction](./android-paste-inline-error.md) | See the record. |
+| 2026-11-05 | [Android user-flow verification](./android-user-flow-verification.md) | See the record. |
+| 2026-11-06 | [Receive address during node startup](./2026-11-06-receive-address.md) | See the record. |
+| 2026-11-06 | [Receive amount field during redraw](./2026-11-06-receive-focus.md) | See the record. |
+| 2026-11-06 | [Wallet recovery fixture validation](./2026-11-06-wallet-recovery-fixtures.md) | See the record. |
+| 2026-11-07 | [Android automatic snapshot startup](./2026-11-07-android-flysync-auto.md) | See the record. |
+| 2026-11-07 | [Android compact history index memory](./2026-11-07-android-history-memory.md) | See the record. |
+| 2026-11-07 | [Android snapshot recovery acceptance](./2026-11-07-android-snapshot-recovery.md) | See the record. |
+| 2026-11-07 | [Absent app log paths in the strict build](./2026-11-07-app-log-null-path.md) | See the record. |
+| 2026-11-07 | [Real checkpoint install interruption](./2026-11-07-real-install-postcommit.md) | See the record. |
+| 2026-11-07 | [ROM crash resume with a real state bundle](./2026-11-07-rom-real-resume.md) | See the record. |
+| 2026-11-07 | [Ship test isolation and package hint paths](./2026-11-07-ship-test-isolation.md) | See the record. |
+| 2026-11-07 | [DISCOVER replay checkpoint evidence](./2026-11-07-wallet-discover-resume.md) | See the record. |
+| 2026-11-07 | [Wallet scan identity snapshots](./2026-11-07-wallet-scan-snapshot.md) | See the record. |
+| 2026-11-07 | [Test group selector extra coverage](./TEST_GROUP_SELECTOR_EXTRAS.md) | See the record. |
+| 2026-11-07 | [Pending wallet startup authentication](./wallet-pending-startup-auth.md) | See the record. |
+| 2026-11-08 | [Retained history evidence](./2026-11-08-history-evidence-api.md) | See the record. |
+| 2026-11-08 | [Immutable history manifest](./2026-11-08-immutable-history-manifest.md) | See the record. |
+| 2026-11-08 | [Prebinding frontier restoration](./2026-11-08-prebinding-frontier.md) | See the record. |
+| 2026-11-08 | [Retained projection snapshot](./2026-11-08-projection-snapshot.md) | See the record. |
+| 2026-11-08 | [Cold Sapling replay vector](./2026-11-08-sapling-cold-vector.md) | See the record. |
+| 2026-11-08 | [Retained history verification](./2026-11-08-wallet-history-capability.md) | See the record. |
+| 2026-11-08 | [Private wallet history export](./2026-11-08-wallet-history-export.md) | See the record. |
+| 2026-11-08 | [Archive reverse prefetch](./ARCHIVE_REVERSE_PREFETCH.md) | See the record. |
+| 2026-11-08 | [Shipment SSH arguments](./SHIP_SSH_ARGUMENTS.md) | See the record. |
+| 2026-11-08 | [Android stopping guidance](./android-slow-stop.md) | See the record. |
+| 2026-11-13 | [Android home startup status](./android-home-startup-status.md) | See the record. |
+| 2026-11-13 | [Android peer network choice](./android-mixed-peers.md) | See the record. |
+| 2026-11-13 | [Android peer version probe build](./android-p2p-probe-build.md) | See the record. |
+| 2026-11-13 | [Catchup pause and resume](./catchup-thermal-pause.md) | See the record. |
+| 2026-11-13 | [Real checkpoint bundle install](./checkpoint-rom-real-install.md) | See the record. |
+| 2026-11-13 | [Advertised peer height](./status-advertised-peer-height.md) | See the record. |
+| 2026-11-13 | [Progress store busy status retry](./status-progress-store-retry.md) | See the record. |
+| 2026-11-14 | [Agent verification preflight](./agent-verify-preflight.md) | See the record. |
+| 2026-11-14 | [Android Home unexpected exit](./android-home-exit.md) | See the record. |
+| 2026-11-14 | [Android node details copy](./android-node-details-copy.md) | See the record. |
+| 2026-11-14 | [Android node details](./android-node-details.md) | See the record. |
+| 2026-11-14 | [Receive sharing](./android-receive-share.md) | See the record. |
+| 2026-11-14 | [Receive during startup](./android-receive-startup.md) | See the record. |
+| 2026-11-14 | [Android unsigned package acceptance](./android-unsigned-package.md) | See the record. |
+| 2026-11-14 | [Catchup pause and Sapling witness parity](./catchup-stop-resume-parity.md) | See the record. |
+| 2026-11-14 | [Chain snapshot tip pair](./csr-snapshot-tip-pair.md) | See the record. |
+| 2026-11-14 | [Peer latency without a sample](./peer-latency-unknown.md) | See the record. |
+| 2026-11-14 | [Proof wait timeout guidance](./proof-wait-timeout-guidance.md) | See the record. |
+| 2026-11-14 | [Pending replay preparation diagnostics](./recovery-prepare-diagnostics.md) | See the record. |
+| 2026-11-15 | [Agent summary synthetic timing](./agent-summary-timing.md) | See the record. |
+| 2026-11-15 | [Android recent-block status](./android-recent-block-label.md) | See the record. |
+| 2026-11-15 | [Capability query coherence](./code-have-coherence-1115.md) | See the record. |
+| 2026-11-15 | [Event-log audit thermal pacing](./event-log-audit-pacing.md) | See the record. |
+| 2026-11-15 | [Synthetic frontier evidence query](./hstar-projection-timing.md) | See the record. |
+| 2026-11-15 | [Landing claim overlap](./land-claim-conflict-1115.md) | See the record. |
+| 2026-11-15 | [Peer observation prune diagnostics](./network-observation-prune-1115.md) | See the record. |
+| 2026-11-15 | [Peer observation user-agent persistence](./network-observation-ua-1115.md) | See the record. |
+| 2026-11-15 | [Original signed app: offline build parent](./original-app-offline-build-1115.md) | See the record. |
+| 2026-11-15 | [Projection status write experiment](./projection-cache-scale.md) | See the record. |
+| 2026-11-15 | [Block index projection catch-up](./projection-catchup-timing.md) | See the record. |
+| 2026-11-15 | [Sovereignty projection lock race](./sovereignty-lock-race.md) | See the record. |
+| 2026-11-15 | [Runner scratch ownership](./tmpfs-owned-cleanup-1115.md) | See the record. |
+| 2026-11-16 | [Split-role app journey arguments](./APP_JOURNEY_SPLIT_GATE_ARGS_20261116.md) | See the record. |
+| 2026-11-16 | [Original catalog receiver graphical observation](./APP_ORIGINAL_CATALOG_GUI_20261116.md) | See the record. |
+| 2026-11-16 | [Hosting a caller-pinned original share](./APP_ORIGINAL_SHARE_SENDER_20261116.md) | See the record. |
+| 2026-11-16 | [Fleet mailbox discovery](./FLEET_MAILBOX_DISCOVERY_20261116.md) | See the record. |
+| 2026-11-16 | [Mint preflight inspection phases](./MINT_PREFLIGHT_INSPECTION_PHASES_20261116.md) | See the record. |
+| 2026-11-16 | [Native fleet test cache selection](./NATIVE_REMOTE_COLD_TEST_20261116.md) | See the record. |
+| 2026-11-17 | [Block-index arena reservation errors](./BLOCK_INDEX_ARENA_RESERVATION_20261117.md) | See the record. |
+| 2026-11-17 | [Dependency ownership across linked checkouts](./CODEINDEX_LINKED_DEPFILES_20261117.md) | See the record. |
+| 2026-11-17 | [Landing rollback fixture preparation](./LAND_COLD_FIXTURE_PREPARATION_20261117.md) | See the record. |
+| 2026-11-17 | [Standalone fast lint Tor readiness](./LINT_FAST_TOR_READY_20261117.md) | See the record. |
+| 2026-11-17 | [Admission unit and compiler cache](./ZCC_ADMISSION_CACHE_20261117.md) | See the record. |
+| 2026-11-21 | [Generated view header rebuilds](./2026-11-21-generated-view-header-rebuild.md) | See the record. |
+| 2026-11-22 | [Compiler scratch and Makefile edit costs](./2026-11-22-build-only-compiler-scratch.md) | See the record. |
+| 2026-11-22 | [Current-main verification on a remote development host](./2026-11-22-current-main-preflight.md) | See the record. |
+| 2026-11-22 | [Selector producer setup](./2026-11-22-selector-producer.md) | See the record. |
+| 2026-11-22 | [Standalone wiki qualifier link inputs](./2026-11-22-wiki-runtime-link-inputs.md) | See the record. |
+| 2026-11-22 | [Landing timer cadence](./land-step-timer-1122.md) | See the record. |
+| 2026-11-22 | [Explicit selector pin preflight](./local-range-preflight-1122.md) | See the record. |
 | undated | [C23 download performance laboratory](./C3_DOWNLOAD_PERF_LAB.md) | See the record. |
 | undated | [Historical C23 speed-contract baseline](./C3_SPEED_BASELINE.md) | See the record. |
 | undated | [Fleet ledger column integrity](./FLEET_LEDGER_COLUMNS.md) | See the record. |
