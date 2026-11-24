@@ -374,7 +374,11 @@ static void consistency_probes(void)
         /* Query parsed profile selection without printing or running recipes.
          * Keep bootstrap vendor inputs disabled, as in the old dry-run. */
         const char *argv[] = {"make", "-f", makefile, "-q", "--no-print-directory",
-                              "VENDOR_LIBS=", "ZCL_TOR=stub", goals[i], NULL};
+                              "VENDOR_LIBS=", "ZCL_TOR=stub",
+                              "ALL_SRCS=tools/dev/make_depfile_scope_selftest.c",
+                              "TEST_SRCS_NO_MAIN=tools/dev/make_depfile_scope_selftest.c",
+                              "SPEC_SRCS=tools/dev/make_depfile_scope_selftest.c",
+                              "CHAOS_SIM_SRCS=tools/dev/make_depfile_scope_selftest.c", goals[i], NULL};
         logs[i] = text("%s/consistency.%s", work, goals[i]);
         children[i] = probe_start(argv, logs[i], true);
     }
