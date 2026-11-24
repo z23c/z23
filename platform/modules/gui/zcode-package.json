@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "name": "zclassic23/gui",
+  "semver": "0.1.0-dev.1",
+  "language": "c23",
+  "license": "Apache-2.0",
+  "include_dir": "include",
+  "source_dir": "src",
+  "dependencies": [
+    {
+      "root": "a4de0ccb82fd5e4d708e6624dd1fc529a5cb4b226caf1bf27bc196b9d99a9d11",
+      "name": "zclassic23/base",
+      "semver": "0.1.0-dev.1"
+    },
+    {
+      "root": "ee1f8432a62e15de875a1cf5b45a5c13c4b6c53e754f3eb8f12f1c952baec603",
+      "name": "zclassic23/sha3",
+      "semver": "0.1.0-dev.1"
+    }
+  ],
+  "capabilities": [
+    "CAP_CLOCK",
+    "CAP_DYNLOAD",
+    "CAP_FS_WRITE"
+  ]
+}

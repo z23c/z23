@@ -91,6 +91,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	watcher_lease \
 	watcher_store \
 	workpool \
+	z23wallet_headless \
 	zcode_benchmark_executor_refusal
 
 ZCL_WINDOWS_ACCEPTANCE_block_swarm_scale_SOURCES := \
@@ -490,6 +491,14 @@ ZCL_WINDOWS_ACCEPTANCE_gui_gl_smoke_SOURCES := \
 	platform/modules/gui/tests/gui_gl_windows_acceptance.c \
 	$(ZCL_WINDOWS_ACCEPTANCE_GUI_DEPS)
 ZCL_WINDOWS_ACCEPTANCE_gui_gl_smoke_LIBS := -luser32 -lgdi32 -lshell32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+# The whole z23-wallet pipeline on the headless backend against a fixture node on
+# loopback: real Winsock, worker thread, model, layout, paint and a PNG shot.
+ZCL_WINDOWS_ACCEPTANCE_z23wallet_headless_SOURCES := \
+	tests/harness/src/z23wallet_headless_windows_acceptance.c \
+	tests/harness/src/z23wallet_mock_node.c \
+	$(filter-out apps/z23wallet/src/main.c,$(wildcard apps/z23wallet/src/*.c)) \
+	$(ZCL_WINDOWS_ACCEPTANCE_GUI_DEPS)
+ZCL_WINDOWS_ACCEPTANCE_z23wallet_headless_LIBS := -luser32 -lgdi32 -lshell32 -lws2_32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 # ── The Windows-only headless process launcher ──────────────────────────────
 # tools/dev/windows_headless_run.c is NOT a platform-seam acceptance program
 # like every other row here: it is a standalone TOOL. Its
