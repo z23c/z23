@@ -45,7 +45,6 @@ static bool fph_path(const char *role, char *out, size_t cap, bool ensure)
         return false;
     return snprintf(out, cap, "%s/role-%s", dir, role) < (int)cap;
 }
-}
 
 static void fph_field(struct zcl_presence_rec *r, const char *line)
 {
