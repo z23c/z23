@@ -910,7 +910,8 @@ static int test_code_guide_next_commands(void)
             for (size_t j = 0; j < json_size(next); j++) {
                 const char *cmd = json_get_str(json_at(next, j));
                 ASSERT(cmd != NULL);
-                verify |= strstr(cmd, "agent-verify ONLY=@changed") != NULL;
+                verify |= strstr(cmd, "t-fast-exact ONLY=") != NULL &&
+                          strstr(cmd, " # first mapped group") != NULL;
                 preflight |= strstr(cmd, " lint-preflight") != NULL;
                 union_gate |= strstr(cmd, " lint-fast-preflight") != NULL;
                 if (i < 2) ASSERT(strcmp(cmd, "make lint-fast") != 0);

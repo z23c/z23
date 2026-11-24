@@ -26,6 +26,7 @@
 #include "controllers/agent_impact_rules.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "test_group_catalog.h"
 #include "util/log_macros.h"
 #include "util/spawn.h"
 
@@ -931,10 +932,19 @@ static void cb_push_next(struct cb_brief *b, const char *fmt, const char *arg)
     b->nnext++;
 }
 
+static bool cb_first_group(const struct cb_brief *b,
+                           char first[ZCL_TEST_GROUP_FULL_MAX])
+{
+    for (size_t i = 0; i < b->ntests; i++)
+        if (zcl_test_group_resolve_exact(b->tests[i], first)) return true;
+    return false;
+}
+
 static void cb_build_next(struct cb_brief *b)
 {
-    if (b->ntests) {
-        cb_push_next(b, "%s", "make -j8 agent-verify ONLY=@changed");
+    char first[ZCL_TEST_GROUP_FULL_MAX];
+    if (cb_first_group(b, first)) {
+        cb_push_next(b, "make -j8 t-fast-exact ONLY=%s # first mapped group", first);
         if (cb_needs_preflight(b))
             cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
     } else {
