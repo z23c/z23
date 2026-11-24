@@ -276,6 +276,40 @@ static bool sc_write_fixture_stmt_macro(void)
         "build/obj/sc_local_macro.o: " SC_SRC "sc_local_macro.c\n");
 }
 
+static bool sc_write_fixture_external_twin(void)
+{
+    return sc_write(SC_SRC "sc_external.c",
+        "int sc_shared(void) { return 1; }\n") &&
+        sc_write(SC_SRC "sc_external_user.c",
+        "int sc_shared(void);\nint sc_external_user(void) { return sc_shared(); }\n") &&
+        sc_write(SC_SRC "sc_external_twin.c",
+        "static int sc_shared(void) { return 2; }\n"
+        "int sc_external_twin(void) { return sc_shared(); }\n") &&
+        sc_write(SC_SRC "sc_external_twin_user.c",
+        "int sc_external_twin(void);\nint sc_external_twin_user(void) { return sc_external_twin(); }\n") &&
+        sc_write(SC_SRC "sc_external_conditional.c",
+        "#ifdef SC_ALT\nstatic int sc_shared(void) { return 3; }\n"
+        "#else\n#include \"sc_external.c\"\n#endif\n"
+        "int sc_external_conditional(void) { return sc_shared(); }\n") &&
+        sc_write("build/obj/sc_external_conditional.d",
+        "build/obj/sc_external_conditional.o: " SC_SRC "sc_external_conditional.c " SC_SRC "sc_external.c\n") &&
+        sc_write(SC_INC "sc_header_shared.h",
+        "static int sc_header_shared(void) { return 1; }\n") &&
+        sc_write(SC_SRC "sc_header_external.c",
+        "int sc_header_shared(void) { return 2; }\n") &&
+        sc_write(SC_SRC "sc_header_twin.c",
+        "#ifdef SC_ALT\nstatic int sc_header_shared(void) { return 3; }\n"
+        "#else\n#include \"net/sc_header_shared.h\"\n#endif\n"
+        "int sc_header_twin(void) { return sc_header_shared(); }\n") &&
+        sc_write("build/obj/sc_header_twin.d",
+        "build/obj/sc_header_twin.o: " SC_SRC "sc_header_twin.c " SC_INC "sc_header_shared.h\n") &&
+        sc_write(SC_SRC "sc_multi_a.c", "int sc_multi(void) { return 1; }\n") &&
+        sc_write(SC_SRC "sc_multi_b.c", "int sc_multi(void) { return 2; }\n") &&
+        sc_write(SC_SRC "sc_multi_twin.c",
+        "static int sc_multi(void) { return 3; }\n"
+        "int sc_multi_twin(void) { return sc_multi(); }\n");
+}
+
 static bool sc_write_fixture(void)
 {
     return sc_write_fixture_two_tus() &&
@@ -285,7 +319,7 @@ static bool sc_write_fixture(void)
            sc_write_fixture_macro_includes() &&
            sc_write_fixture_macro_other() && sc_write_fixture_decl() &&
            sc_write_fixture_tag_namespace() &&
-           sc_write_fixture_stmt_macro();
+           sc_write_fixture_stmt_macro() && sc_write_fixture_external_twin();
 }
 
 /* Run the store walk (or, with `overlay`, the fresh-bytes walk) for one
@@ -404,6 +438,24 @@ static int test_sc_decl_scope(struct codeindex *ci)
             ASSERT(sc_decl_has(ci, SC_SRC "sc_decl_def.c", SC_SRC "sc_decl_other.c", overlay, true));
             ASSERT(sc_decl_has(ci, SC_INC "sc_decl_header.h", SC_SRC "sc_decl_other.c", overlay, true));
             ASSERT(sc_decl_has(ci, SC_SRC "sc_decl_mixed.c", SC_SRC "sc_decl_other.c", overlay, true));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sc_external_static_twin(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: an external function ignores static twins only") {
+        for (int overlay = 0; overlay < 2; ++overlay) {
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_external.c", SC_SRC "sc_external_user.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_external.c", SC_SRC "sc_external_twin.c", overlay, false));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_external.c", SC_SRC "sc_external_twin_user.c", overlay, false));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_external.c", SC_SRC "sc_external_conditional.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_INC "sc_header_shared.h", SC_SRC "sc_header_twin.c", overlay, true));
+            /* Multiple external definitions keep the conservative name walk. */
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_multi_a.c", SC_SRC "sc_multi_twin.c", overlay, true));
         }
         PASS();
     } _test_next:;
@@ -669,6 +721,29 @@ static int test_sc_decl_untrusted(struct codeindex *ci)
     int failures = 0;
     TEST("codeindex_static_callers: untrusted declaration include graphs retain callers") {
         for (unsigned mode = 0; mode < 3; ++mode) ASSERT(sc_decl_untrusted(ci, mode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_sc_external_untrusted(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: unavailable external-twin includes stay conservative") {
+        struct ci_store *store = sc_macro_copy_store(ci);
+        ASSERT(store != NULL);
+        bool ok = sc_macro_untrusted_setup(ci_store_db(store), 2);
+        struct codeindex copy = *ci;
+        copy.store = store;
+        char paths[16][256];
+        enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_COMPLETE;
+        int n = codeindex_reverse_includes(&copy, SC_SRC "sc_external.c", paths, 16, &dim);
+        ok = ok && n >= 0 && dim == CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+        for (int overlay = 0; overlay < 2; ++overlay)
+            ok = sc_decl_has(&copy, SC_SRC "sc_external.c", SC_SRC "sc_external_twin.c",
+                             overlay, true) && ok;
+        ci_store_close(store);
+        ASSERT(ok);
         PASS();
     } _test_next:;
     return failures;
@@ -1245,9 +1320,11 @@ int test_codeindex_static_callers(void)
         failures += test_sc_macro_scoping(ci);
         failures += test_sc_macro_untrusted(ci);
         failures += test_sc_decl_scope(ci);
+        failures += test_sc_external_static_twin(ci);
         failures += test_sc_tag_namespace(ci);
         failures += test_sc_tag_incomplete_includes(ci);
         failures += test_sc_decl_untrusted(ci);
+        failures += test_sc_external_untrusted(ci);
         failures += test_sc_decl_invalid(ci);
         failures += test_sc_statement_macro_call(ci);
         failures += test_sc_local_macro_scoped_query(ci);

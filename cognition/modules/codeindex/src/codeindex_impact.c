@@ -445,6 +445,20 @@ static bool ci_file_defines_function(struct codeindex *ci, const char *name,
     return true;
 }
 
+static bool ci_file_defines_static_function(struct codeindex *ci,
+                                            const char *name, const char *file,
+                                            bool *defines)
+{
+    struct ci_symbol s;
+    bool found = false;
+    *defines = false;
+    if (!ci_store_symbol_by_name_path(ci->store, name, file, &s, &found))
+        LOG_FAIL("codeindex", "static definition lookup failed for %s in %s",
+                 name, file);
+    *defines = found && s.kind == 't';
+    return true;
+}
+
 /* The static `name` defined in `path`: which of its name's refs can bind to
  * it? One per expansion; the per-file answer and the include answer are
  * cached because refs arrive ordered by file. */
@@ -456,8 +470,37 @@ struct ci_static_scope {
     bool        includers_loaded;
     bool        includers_unbounded;
     bool        includers_complete;
+    bool        external_loaded;
     int         n_includers;
 };
+
+/* Find the one external definition whose static twins can be filtered. More
+ * than one definition, or a clipped answer, keeps the conservative name walk. */
+static bool ci_external_scope(struct ci_closure_ctx *c, struct codeindex *ci,
+                              struct ci_static_scope *scope)
+{
+    int n = 0;
+    enum codeindex_exact_status st = ci_store_find_symbols_exact_checked(
+        ci->store, scope->name, c->symbuf, CI_CLOSURE_QUERY_BATCH, &n);
+    if (st == CODEINDEX_EXACT_ERROR)
+        LOG_FAIL("codeindex", "external definition lookup failed for %s",
+                 scope->name);
+    if (st != CODEINDEX_EXACT_COMPLETE)
+        return true;
+    const char *path = NULL;
+    for (int i = 0; i < n; i++) {
+        const struct ci_symbol *row = &c->symbuf[i];
+        if (row->kind == 't' && row->def_path[0] && !ci_path_is_c(row->def_path))
+            return true;  /* a header static deliberately keeps the name walk */
+        if (row->kind != 'T' || !ci_path_is_c(row->def_path))
+            continue;
+        if (path && strcmp(path, row->def_path) != 0)
+            return true;
+        path = row->def_path;
+    }
+    scope->path = path;
+    return true;
+}
 
 static bool ci_static_includer(struct ci_closure_ctx *c, struct codeindex *ci,
                                struct ci_static_scope *scope,
@@ -552,10 +595,48 @@ static bool ci_static_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
     return true;
 }
 
+/* A static definition in `file` captures every call to its name in that TU.
+ * It cannot call the external definition of the same name unless an #ifdef
+ * twin's depfile shows that this TU also contains that definition. Resolve
+ * the external path lazily, only when a static twin actually occurs. */
+static bool ci_external_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
+                                  struct ci_static_scope *scope, const char *file,
+                                  bool *keep)
+{
+    *keep = true;
+    if (!ci_path_is_c(file))
+        return true;
+    if (strcmp(file, scope->last_file) == 0) {
+        *keep = scope->last_keep;
+        return true;
+    }
+    bool defines = false;
+    if (!ci_file_defines_static_function(ci, scope->name, file, &defines))
+        return false;
+    if (!defines)
+        return true;
+    if (!scope->external_loaded) {
+        if (!ci_external_scope(c, ci, scope))
+            return false;
+        scope->external_loaded = true;
+    }
+    if (!scope->path || strcmp(file, scope->path) == 0)
+        return true;
+    if (!ci_static_includer(c, ci, scope, file, keep))
+        return false;
+    if (!scope->includers_complete)
+        *keep = true;  /* unavailable evidence cannot prove non-inclusion */
+    snprintf(scope->last_file, sizeof(scope->last_file), "%s", file);
+    scope->last_keep = *keep;
+    return true;
+}
+
 static bool ci_closure_ref_binds(struct ci_closure_ctx *c, struct codeindex *ci,
                                  struct ci_static_scope *scope, bool macro,
-                                 const char *file, bool *keep)
+                                 bool external, const char *file, bool *keep)
 {
+    if (external)
+        return ci_external_ref_binds(c, ci, scope, file, keep);
     if (!scope->path) return true;
     return macro ? ci_macro_ref_binds(c, ci, scope, file, keep)
                  : ci_static_ref_binds(c, ci, scope, file, keep);
@@ -610,6 +691,8 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
     snprintf(name, sizeof(name), "%s", key);
     struct ci_static_scope scope = {0};
     bool macro = ci_closure_key_scope(name, &scope);
+    bool external = !macro && !scope.path;
+    if (external) scope.name = name;
     /* Distinct file and enclosing edges, filtered below for a static. */
     int nc = ci_closure_caller_edges(c, ci, name, &scope, macro);
     if (nc < 0)
@@ -623,8 +706,8 @@ static bool ci_closure_expand_symbol(struct ci_closure_ctx *c,
     for (int i = 0; i < nc; i++) {
         const struct ci_ref *ref = &c->refbuf[i];
         bool keep = true;
-        if (!ci_closure_ref_binds(c, ci, &scope, macro, ref->ref_file, &keep))
-            return false;
+        if (!ci_closure_ref_binds(c, ci, &scope, macro, external,
+                                  ref->ref_file, &keep)) return false;
         if (!keep)
             continue;  /* a same-named function of another TU */
         if (!ci_closure_add_file(c, ref->ref_file, truncated))
