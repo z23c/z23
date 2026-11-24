@@ -3112,9 +3112,10 @@ static int t_test_debug_profile(void)
         "system=1111111111111111111111111111111111111111111111111111111111111111\n"
         "make -s -f Fixture.mk \"BUILD_SYSTEM_ID=$system\" || fail system-identity; if cmp -s epoch-default epoch; then fail same-system-epoch; fi\n"
         "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=1 || fail explicit-one; checkflags -g1 -g; cmp flags-default flags || fail flags-default-one; cmp epoch-default epoch || fail epoch-default-one\n"
+        "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=0 || fail explicit-zero; checkflags -g0 -g1; if cmp -s epoch-default epoch; then fail same-debug-epoch; fi\n"
         "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=2 || fail explicit-two; checkflags -g -g1; awk '{for(i=1;i<=NF;i++) {if($i==\"-g1\") $i=\"-g\"} $1=$1; print}' flags-default > normalized-default; awk '{$1=$1; print}' flags > normalized-two; cmp normalized-default normalized-two || fail changed-unrelated-flags; if cmp -s epoch-default epoch; then fail same-epoch; fi\n"
         "make -s -f Fixture.mk ZCL_TEST_WERROR=1 || fail werror; hasflag flags -Werror || fail missing-werror; checkflags -g1 -g\n"
-        "for bad in '' 0 3 text '1 2'; do if make -s -f Fixture.mk \"ZCL_TEST_DEBUG_LEVEL=$bad\" > bad.log 2>&1; then fail invalid-accepted; fi; grep -F 'ZCL_TEST_DEBUG_LEVEL must be 1 or 2' bad.log >/dev/null || fail wrong-invalid-reason; done\n";
+        "for bad in '' 3 text '1 2'; do if make -s -f Fixture.mk \"ZCL_TEST_DEBUG_LEVEL=$bad\" > bad.log 2>&1; then fail invalid-accepted; fi; grep -F 'ZCL_TEST_DEBUG_LEVEL must be 0, 1 or 2' bad.log >/dev/null || fail wrong-invalid-reason; done\n";
     char fixture[PATH_MAX] = {0};
     test_make_tmpdir(fixture, sizeof(fixture), "test_debug", "profile");
     int bad = build_needs_fixture_run(repo_root(), fixture, script);

@@ -3992,16 +3992,16 @@ ZCL_TEST_RETURN_TYPE_GATE = -Werror=return-type
 # warning fails the proof instead of scrolling past. Unset (make t-fast, dev
 # iteration) keeps the warn-only profile. It is part of the compile epoch.
 ZCL_TEST_WERROR_FLAG = $(if $(filter 1,$(ZCL_TEST_WERROR)),-Werror,)
-# Test-fast defaults to line-level debug info; select 2 for full local/type
+# Test-fast defaults to line-level debug info; select 0 for no debug info, 1 for line-level, 2 for full local/type
 # debug information. Public release and other build profiles are unchanged.
 ZCL_TEST_DEBUG_LEVEL ?= 1
 ifneq ($(words ${ZCL_TEST_DEBUG_LEVEL}),1)
-$(error ZCL_TEST_DEBUG_LEVEL must be 1 or 2)
+$(error ZCL_TEST_DEBUG_LEVEL must be 0, 1 or 2)
 endif
-ifneq ($(filter-out 1 2,${ZCL_TEST_DEBUG_LEVEL}),)
-$(error ZCL_TEST_DEBUG_LEVEL must be 1 or 2)
+ifneq ($(filter-out 0 1 2,${ZCL_TEST_DEBUG_LEVEL}),)
+$(error ZCL_TEST_DEBUG_LEVEL must be 0, 1 or 2)
 endif
-TEST_FAST_DEBUG_FLAG = $(if $(filter 2,${ZCL_TEST_DEBUG_LEVEL}),-g,-g1)
+TEST_FAST_DEBUG_FLAG = $(if $(filter 2,${ZCL_TEST_DEBUG_LEVEL}),-g,$(if $(filter 0,${ZCL_TEST_DEBUG_LEVEL}),-g0,-g1))
 TEST_FAST_CFLAGS = $(patsubst -g,$(TEST_FAST_DEBUG_FLAG),$(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS))) -O1 $(TEST_FAST_DEBUG_FLAG) -DZCL_TESTING \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) \
 	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS) $(ZCL_TEST_RETURN_TYPE_GATE) $(ZCL_TEST_WERROR_FLAG)
