@@ -23,7 +23,7 @@ static bool cs_digest(const char *path, struct cm_cc_snapshot *s)
 static bool cs_hit(const char *path, struct cm_cc_snapshot *s)
 {
     struct cm_cc_snapshot_entry *e = NULL;
-    for (size_t i = 0; i < 2; ++i)
+    for (size_t i = 0; i < CM_CC_SNAPSHOT_SLOTS; ++i)
         if (s->entries[i].bytes && !strcmp(s->entries[i].path, path)) e = &s->entries[i];
     if (!e) return false;
     uint8_t d[32], saved[32];
@@ -35,15 +35,21 @@ static bool cs_initial(const char *a, const char *b, const char *c, struct cm_cc
 {
     return cs_write(a, 30, 'a') && cs_write(b, 20, 'b') && cs_write(c, 5, 'c') &&
         cs_digest(a, s) && cs_digest(b, s) && cs_hit(a, s) && cs_hit(b, s) &&
-        cs_digest(c, s) && cs_hit(a, s) && cs_hit(b, s);
+        cs_digest(c, s) && cs_hit(a, s) && cs_hit(b, s) && cs_hit(c, s);
+}
+static size_t cs_total(const struct cm_cc_snapshot *s)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < CM_CC_SNAPSHOT_SLOTS; ++i) total += s->entries[i].len;
+    return total;
 }
 static bool cs_changes(const char *a, const char *d, struct cm_cc_snapshot *s)
 {
     return cs_write(a, 30, 'x') && cs_digest(a, s) && cs_write(a, 7, 'y') && cs_digest(a, s) &&
         cs_write(d, 50, 'd') && cs_digest(d, s) && cs_hit(d, s) &&
-        s->entries[0].len + s->entries[1].len <= 64 &&
+        cs_total(s) <= 64 &&
         cs_write(a, 65, 'z') && cs_digest(a, s) && cs_hit(d, s) &&
-        s->entries[0].len + s->entries[1].len <= 64;
+        cs_total(s) <= 64;
 }
 int main(void)
 {
@@ -55,7 +61,7 @@ int main(void)
     (void)snprintf(absent, sizeof(absent), "%s/absent", dir);
     struct cm_cc_snapshot s = {0}; uint8_t out[32];
     bool ok = cs_initial(a, b, c, &s) && cs_changes(a, d, &s) && !cm_cc_digest(absent, &s, out);
-    for (size_t i = 0; i < 2; ++i) free(s.entries[i].bytes);
+    for (size_t i = 0; i < CM_CC_SNAPSHOT_SLOTS; ++i) free(s.entries[i].bytes);
     (void)unlink(a); (void)unlink(b); (void)unlink(c); (void)unlink(d); (void)rmdir(dir);
     puts(ok ? "cc snapshot fixture PASS" : "cc snapshot fixture FAIL");
     return ok ? 0 : 1;

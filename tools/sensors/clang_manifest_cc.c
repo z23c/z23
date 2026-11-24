@@ -157,21 +157,48 @@ static int cm_cc_snapshot_read(FILE *fp, size_t size, struct cm_cc_snapshot_entr
     return *candidate ? cm_cc_capture(fp, size, *candidate, digest) : 0;
 }
 
+static struct cm_cc_snapshot_entry *cm_cc_victim(struct cm_cc_snapshot *s,
+                                                 struct cm_cc_snapshot_entry *slot,
+                                                 size_t size)
+{
+    struct cm_cc_snapshot_entry *victim = NULL;
+    for (size_t i = 0; i < CM_CC_SNAPSHOT_SLOTS; ++i) {
+        struct cm_cc_snapshot_entry *e = &s->entries[i];
+        if (e == slot || !e->len || e->len >= size) continue;
+        if (!victim || e->len < victim->len) victim = e;
+    }
+    return victim;
+}
+
+static bool cm_cc_make_room(struct cm_cc_snapshot *s, struct cm_cc_snapshot_entry *slot,
+                            size_t size, size_t used)
+{
+    size_t evictable = slot->len;
+    for (size_t i = 0; i < CM_CC_SNAPSHOT_SLOTS; ++i)
+        if (&s->entries[i] != slot && s->entries[i].len < size)
+            evictable += s->entries[i].len;
+    if (used - evictable + size > CM_CC_SNAPSHOT_MAX) return false;
+    size_t needed = used - slot->len + size;
+    while (needed > CM_CC_SNAPSHOT_MAX) {
+        struct cm_cc_snapshot_entry *other = cm_cc_victim(s, slot, size);
+        if (!other) return false;
+        needed -= other->len;
+        free(other->bytes); other->bytes = NULL; other->len = 0;
+    }
+    return true;
+}
+
 static struct cm_cc_snapshot_entry *cm_cc_choose(struct cm_cc_snapshot *s, const char *path, size_t size)
 {
     size_t used = 0; struct cm_cc_snapshot_entry *slot = NULL;
-    for (size_t i = 0; i < 2; ++i) {
+    for (size_t i = 0; i < CM_CC_SNAPSHOT_SLOTS; ++i) {
         struct cm_cc_snapshot_entry *e = &s->entries[i];
         if (e->bytes && !strcmp(e->path, path) && e->len == size) return e;
         used += e->len;
         if (!slot || e->len < slot->len) slot = e;
     }
     if (slot->len >= size) return NULL;
-    if (used - slot->len + size > CM_CC_SNAPSHOT_MAX) {
-        struct cm_cc_snapshot_entry *other = slot == &s->entries[0] ? &s->entries[1] : &s->entries[0];
-        if (other->len >= size) return NULL;
-        free(other->bytes); other->bytes = NULL; other->len = 0;
-    }
+    if (!cm_cc_make_room(s, slot, size, used)) return NULL;
     return slot;
 }
 

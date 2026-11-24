@@ -964,7 +964,7 @@ int cm_session_main(int argc, char **argv)
     for (size_t k = 0; k < ss.ntus; k++)
         cm_tu_free(&ss.tus[k]);
     free(ss.tus);
-    for (size_t k = 0; k < 2; ++k) free(ss.cc_snapshot.entries[k].bytes);
+    for (size_t k = 0; k < CM_CC_SNAPSHOT_SLOTS; ++k) free(ss.cc_snapshot.entries[k].bytes);
     cm_reply_summary(&ss);
     return ss.s.refused == 0 ? 0 : 3;
 }

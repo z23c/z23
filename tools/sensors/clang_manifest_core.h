@@ -127,7 +127,8 @@ struct cm_entry {
 };
 
 struct cm_cc_snapshot_entry { char path[PATH_MAX]; unsigned char *bytes; size_t len; uint8_t digest[32]; };
-struct cm_cc_snapshot { struct cm_cc_snapshot_entry entries[2]; };
+#define CM_CC_SNAPSHOT_SLOTS 3u
+struct cm_cc_snapshot { struct cm_cc_snapshot_entry entries[CM_CC_SNAPSHOT_SLOTS]; };
 
 struct cm_core {
     struct cm_cc_snapshot *cc_snapshot; /* owned by one session, NULL for cold calls */
