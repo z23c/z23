@@ -1,7 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: the Windows manifest and version resource linked into z23-wallet.exe. */
 #include <winver.h>
+/* Neutral language, like the mingw-w64 default manifest: the resource merge
+ * keeps this one and drops the default, so the binary carries one manifest. */
+LANGUAGE 0, 0
 1 24 "z23wallet.manifest"
+LANGUAGE 0x09, 0x01
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 0,1,0,0
 PRODUCTVERSION 0,1,0,0

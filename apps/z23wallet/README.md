@@ -137,13 +137,24 @@ interleaved runs, medians; the real window at 175% scale for the last rows:
 | working set / private bytes, real window | 21.7 / 13.9 MB | 21.7 / 13.9 MB |
 | golden images and tests | pass | bit-identical (46 of 46; the later preview: identical results, including its 4 not-yet-updated goldens) |
 
+How the golden claim was shown: the registered `gui` and `z23wallet` test groups
+build these sources with the test harness's own flags, not the release profile,
+so they do not prove it. The identity above comes from running the wallet's test
+suites, linked against release-profile objects, on Windows (and on Linux at `-O3`
+and under the sanitizers). `make z23-wallet-release-goldens` does the same for
+any profile: it links every `test_gui*.c` / `test_z23wallet*.c` suite against the
+objects of the profile being built and runs them, goldens included (milestone 1
+on Windows: 159 checks ok, 0 failed, 11 goldens identical).
+
 Hardening, each verified in the produced binary: ASLR with high entropy and
 relocations kept, DEP (`objdump -p`: `HIGH_ENTROPY_VA DYNAMIC_BASE NX_COMPAT`),
 no section both writable and executable (`llvm-readobj --sections`),
 `-fstack-protector-strong` (187 `__stack_chk_fail` call sites),
 `_FORTIFY_SOURCE=3` (`__memcpy_chk` and friends linked), an `asInvoker`
 manifest with per-monitor DPI v2 and the Windows 10 compatibility GUID plus a
-version resource (`llvm-readobj --coff-resources`), DLL search limited to
+version resource (one manifest in the binary: ours is language-neutral like
+mingw's default, so the resource merge drops the default; `llvm-readobj
+--coff-resources`), DLL search limited to
 System32 (`SetDefaultDllDirectories`, and `opengl32.dll` through
 `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`). Together they cost 8 KB
 (2%). Not available: Control Flow Guard (gcc has no `-mguard=cf` for
@@ -162,6 +173,13 @@ On Linux the profile adds PIE, full RELRO with BIND_NOW, a non-executable stack,
 cost 0 bytes there; the flags keep them on other distributions. The tests pass
 under AddressSanitizer plus UndefinedBehaviorSanitizer (Linux, `-O1`) and
 UndefinedBehaviorSanitizer at `-O3` (Linux, and in trap mode on Windows).
+
+On macOS (Apple clang 17, arm64) the same target builds with the platform's
+equivalents: PIE and a non-executable stack are the default (`otool -hv`:
+`PIE`), `-Wl,-dead_strip` replaces `--gc-sections`, `-fcf-protection` and the
+`-z` flags do not exist there, and `dsymutil` writes `z23-wallet.dSYM` (UUID
+matched with `dwarfdump --uuid`) before the debug symbols are stripped:
+240,472 bytes against 268,712 for the dev profile (milestone 1 sources).
 
 `make check-z23-wallet-size` builds the wallet and compares it with
 `apps/z23wallet/size/budget.tsv`: per reference toolchain, a byte budget (the integrated
@@ -182,8 +200,6 @@ Measured follow-ups, largest first (not in this profile):
 * Linux: `-fno-asynchronous-unwind-tables` drops 28,672 bytes of `.eh_frame`
   (the split debug file keeps `.debug_frame` for gdb); glibc backtraces lose it.
 * Control Flow Guard: only through clang (`-mguard=cf` with lld `--guard-cf`).
-* mingw's default manifest is still linked beside ours (800 bytes of dead
-  `.rsrc`, one 512-byte file block).
 
 ## Remaining work (milestones)
 
