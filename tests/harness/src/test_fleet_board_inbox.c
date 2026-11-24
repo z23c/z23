@@ -11,6 +11,7 @@
 
 #include "config/boot.h"
 #include "config/boot_fleet_board.h"
+#include "config/boot_fleet_roster.h"
 #include "config/boot_internal.h"
 #include "config/runtime.h"
 #include "base/hex.h"
@@ -26,6 +27,7 @@
 #include "session/fleet_board_proto.h"
 #include "test/fleet_board_two_node_fixture.h"
 #include "util/fleet_role_check.h"
+#include "util/fleet_roster_check.h"
 #include "../../../engine/composition/src/boot_fleet_board_frame_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_push_internal.h"
 
@@ -506,6 +508,98 @@ static int test_fbi_inbox_forged_mail(void)
         ASSERT(fbi_inbox(&f, "inbox", "lane-a", 0, 0, NULL, -1, &out));
         ASSERT(fbi_row_of(&out, &b.mail_me) == NULL);
         json_free(&out);
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── an armed roster ──────────────────────────────────────────────────── */
+
+/* A roster provider that stands in for the operator seal: a roster row whose
+ * text is "member:<id>" names test identity <id> as a member. The production
+ * scan, cache and verdicts run on top of it. */
+static bool fbi_roster_root(uint8_t root[32], bool *present, bool *manager,
+                            void *ctx)
+{
+    (void)ctx;
+    memset(root, 0x42, 32);
+    *present = true;
+    *manager = false;
+    return true;
+}
+
+static bool fbi_roster_verify(const char *line, const uint8_t root[32],
+                              enum zcl_fleet_root_state state, bool require,
+                              uint8_t signer[32], uint8_t box[32], bool *sealed,
+                              const char **why, void *ctx)
+{
+    (void)root;
+    (void)state;
+    (void)require;
+    (void)ctx;
+    uint8_t seed[32];
+    *sealed = false;
+    if (strncmp(line, "member:", 7) != 0) {
+        *why = "fleetboard.roster_signature_invalid";
+        return false;
+    }
+    fb_test_identity((uint8_t)atoi(line + 7), seed, signer);
+    memcpy(box, signer, 32);
+    *sealed = true;
+    return true;
+}
+
+static bool fbi_roster_each(void (*visit)(const char *line, void *user),
+                            void *user, void *ctx)
+{
+    (void)visit;
+    (void)user;
+    (void)ctx;
+    return true;
+}
+
+static int test_fbi_inbox_roster_gates_mail(void)
+{
+    int failures = 0;
+    TEST("board inbox: with an armed roster, mail from a role holder off the roster is not mail") {
+        static const struct zcl_fleet_roster_provider k_provider = {
+            .root = fbi_roster_root, .verify = fbi_roster_verify,
+            .each_line = fbi_roster_each, .name = "fbi-roster"};
+        static const char k_mail[] =
+            "{\"to\":\"lane-a\",\"from\":\"lead\",\"body\":\"run X\"}";
+        struct fbi_fixture f;
+        struct fleet_board_post line, member_mail, stranger_mail;
+        struct json_value out;
+        ASSERT(fbi_open(&f, "roster"));
+        int64_t t = f.now - 50;
+        /* Keys 3 and 6 both hold the role (the fixture store is permissive);
+         * only key 3 is on the roster. */
+        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                        "fleet-roster", "member:3", NULL, NULL, t, t, &line));
+        ASSERT(fbi_post(&f, 3, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                        "box-r1", k_mail, NULL, FLEET_BOARD_MAIL_RECEIPT,
+                        t + 1, t + 1, &member_mail));
+        ASSERT(fbi_post(&f, 6, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                        "box-r1", k_mail, NULL, FLEET_BOARD_MAIL_RECEIPT,
+                        t + 2, t + 2, &stranger_mail));
+        /* Unarmed: both are vouched by the role alone. */
+        boot_fleet_roster_test_reset();
+        ASSERT(fbi_inbox(&f, "inbox", "lane-a", 0, 0, NULL, -1, &out));
+        ASSERT(fbi_row_of(&out, &member_mail) != NULL);
+        ASSERT(fbi_row_of(&out, &stranger_mail) != NULL);
+        json_free(&out);
+        /* Armed: the off-roster key is no row at all, the member is mail. */
+        zcl_fleet_roster_provider_install(&k_provider);
+        boot_fleet_roster_test_reset();
+        ASSERT(fbi_inbox(&f, "inbox", "lane-a", 0, 0, NULL, -1, &out));
+        const struct json_value *row = fbi_row_of(&out, &member_mail);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "why")), "mail");
+        ASSERT(fbi_row_of(&out, &stranger_mail) == NULL);
+        json_free(&out);
+        zcl_fleet_roster_provider_install(NULL);
+        boot_fleet_roster_test_reset();
         fbi_close(&f);
         PASS();
     } _test_next:;
@@ -1126,6 +1220,7 @@ int test_fleet_board_inbox(void)
     failures += test_fbi_inbox_refusals();
     failures += test_fbi_inbox_visibility();
     failures += test_fbi_inbox_forged_mail();
+    failures += test_fbi_inbox_roster_gates_mail();
     failures += test_fbi_inbox_read_counts_unverified();
     failures += test_fbi_wait_returns_on_arrival();
     failures += test_fbi_wait_reads_past_full_page();

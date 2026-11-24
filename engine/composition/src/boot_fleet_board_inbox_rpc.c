@@ -17,9 +17,14 @@
  * WHO IS SPEAKING. Every row carries its scope, the start of its signer key
  * and author_role: whether this node's role store lets that key post that
  * kind (board_author_may_post, the predicate admission and wiki find use).
- * A row is `mail` only under the conditions board mail import accepts it: a
- * FLEET-scope note carrying the mail receipt, from a key that holds the role
- * and that the fleet roster admits, whose `to` names the reader. Any other
+ * A row is `mail` only when it is a FLEET-scope note carrying the mail
+ * receipt, from a key that holds the role and that an armed roster admits (an
+ * unarmed roster gates nothing), whose `to` names the reader. This is a subset
+ * of board mail import's admission, not the same predicate: import also
+ * needs a verified roster line (an unarmed roster admits nobody), a signer
+ * that is not this box and a live peer grant for `from`. The inbox checks
+ * none of those three, so `from` is the sender's own claim and a key of this
+ * node can post mail that shows here. Any other
  * row carrying the receipt string is shown only as the reply it is (its ref
  * names one of the reader's posts), or not at all. */
 
@@ -171,9 +176,11 @@ static bool fb_inbox_roster_admits(struct node_db *ndb, const uint8_t key[32])
     return v == BOOT_FLEET_ROSTER_UNARMED || v == BOOT_FLEET_ROSTER_MEMBER;
 }
 
-/* Board mail import's own conditions on the carrier: a FLEET-scope note
- * from a key that holds the role to post it here and is on the fleet roster
- * (native_devagent_boardmail.c, ADMISSION 3-4). */
+/* The carrier conditions the inbox checks, a subset of board mail import's
+ * (native_devagent_boardmail.c, ADMISSION 3-5): a FLEET-scope note from a key
+ * that holds the role to post it here and that an armed roster admits. Import
+ * additionally refuses an unarmed roster, this box's own key and an
+ * ungranted `from`; the inbox does not. */
 static bool fb_inbox_mail_signer(const struct fb_inbox_page *p,
                                  const struct db_fleet_board_post *row,
                                  bool author_role)

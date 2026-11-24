@@ -829,10 +829,15 @@ z23 fleet board delivery <id>
 first after the `--after` arrival cursor, the posts this node holds that:
 
 - answer a post signed under `--agent` (their `ref` names it; `why: reply`);
-- are board mail addressed to `--agent` (`why: mail`), under the same
+- are board mail addressed to `--agent` (`why: mail`), under a subset of the
   conditions board mail import accepts a carried row: a FLEET-scope `note`
   with receipt `z23.mail.v1`, signed by a key this node's role store lets
-  post a note and the fleet roster admits, whose `to` names `--agent`. A
+  post a note and that an armed fleet roster admits (an unarmed roster gates
+  nothing here), whose `to` names `--agent`. Import also needs a verified
+  roster line (so an unarmed roster admits nobody), a signer that is not this
+  box and a live peer grant for `from`; the inbox checks none of these, so
+  `from` is the sender's own claim, not a verified identity, and a key of
+  this node can post mail that shows here. A
   public or unvouched note carrying that receipt string is never mail: it is
   shown as the reply it is when its `ref` names one of your posts, otherwise
   not at all;
