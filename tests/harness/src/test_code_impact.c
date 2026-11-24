@@ -888,6 +888,59 @@ static int test_code_guide_source_changes(void)
     return failures;
 }
 
+static bool cg_owner_cut(const struct zcl_command_reply *reply)
+{
+    const struct json_value *cut = json_get(&reply->data, "cut");
+    for (size_t i = 0; i < json_size(cut); i++)
+        if (strcmp(json_get_str(json_at(cut, i)), "owner_rules") == 0)
+            return true;
+    return false;
+}
+
+static int test_code_guide_owner_cuts(void)
+{
+    int failures = 0;
+    TEST("guide marks omitted and incomplete owner rules") {
+        char root[512];
+        ASSERT(test_mkdtemp(root, sizeof root, "guide_owner_cuts"));
+        const char *rules[] = {
+            "Rules:\n- One.\n- Two.\n- Three.\n- Four.\n",
+            "Rules:\n- One.\n- Two.\n- Three.\n- Four.\n- Five.\n",
+            "Rules:\n- A wrapped rule\n  continues here.\n- Two.\n",
+            "Rules:\n- A deliberately long rule with a stable prefix and enough content to exceed the bounded owner rule buffer, preserving the need to read the complete original instruction and its conditions before acting on it, including this extra text.\n",
+            "Rules:\n- A wrapped rule\ncontinues without indentation.\n",
+            "Rules:\n- A wrapped rule\n\n  continues after a blank.\n",
+            "Rules:\n- One.\n- Two.\n- Three.\n- Four.\n\n## Notes\nIndependent prose.\n",
+            "Rules:\n- One.\n##not-a-heading\n",
+            "Rules:\n- One.\n#\nIndependent prose.\n"
+        };
+        const size_t counts[] = {4, 4, 2, 1, 1, 1, 4, 1, 1};
+        const char *first[] = {"One.", "One.", "A wrapped rule", "A deliberately long rule",
+                               "A wrapped rule", "A wrapped rule", "One.", "One.", "One."};
+        for (size_t i = 0; i < sizeof(rules) / sizeof(rules[0]); i++) {
+            ASSERT(ci_impact_mk_write(root, "AGENTS.md", rules[i]));
+            struct zcl_command_reply reply;
+            cg_guide_paths(root, "fixture.c", &reply);
+            ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+            ASSERT_EQ(cg_owner_cut(&reply), i != 0 && i != 6 && i != 8);
+            const struct json_value *owners = json_get(&reply.data, "owners");
+            ASSERT_STR_EQ(json_get_str(json_get(json_at(owners, 0), "file")), "AGENTS.md");
+            const struct json_value *shown = json_get(json_at(owners, 0), "rules");
+            ASSERT_EQ(json_size(shown), counts[i]);
+            const char *first_rule = json_get_str(json_at(shown, 0));
+            ASSERT(first_rule && strstr(first_rule, first[i]) == first_rule);
+            if (i == 3) {
+                const char *rule = json_get_str(json_at(shown, 0));
+                ASSERT(rule && strstr(rule, "...") != NULL);
+            }
+            zcl_command_reply_free(&reply);
+        }
+        ASSERT_EQ(test_rm_rf_recursive(root), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_next_commands(void)
 {
     int failures = 0;
@@ -2796,6 +2849,7 @@ int test_code_impact(void)
     failures += test_boot_services_rule_capacity();
     failures += test_code_context_map_warm_follows_generation();
     failures += test_code_guide_source_changes();
+    failures += test_code_guide_owner_cuts();
     failures += test_code_guide_next_commands();
     failures += test_code_guide_revision_and_failures();
     failures += test_code_guide_long_cost();

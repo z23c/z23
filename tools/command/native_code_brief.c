@@ -321,11 +321,16 @@ static bool cb_line(const char *text, size_t *pos, const char **line,
 static void cb_owner_push(struct cb_brief *b, struct cb_owner *o,
                           const char *s, size_t len)
 {
-    if (o->nrules < CB_OWNER_RULES &&
-        cb_copy(o->rules[o->nrules], CB_RULE_CAP, s, len))
+    if (o->nrules >= CB_OWNER_RULES) {
         b->cut_rules = true;
-    if (o->nrules < CB_OWNER_RULES)
-        o->nrules++;
+        return;
+    }
+    char *rule = o->rules[o->nrules++];
+    if (cb_copy(rule, CB_RULE_CAP, s, len)) {
+        (void)cb_copy(rule, CB_RULE_CAP - 3, s, len);
+        (void)strcat(rule, "...");
+        b->cut_rules = true;
+    }
 }
 
 static bool cb_is_bullet(const char *l, size_t n)
@@ -333,17 +338,27 @@ static bool cb_is_bullet(const char *l, size_t n)
     return n > 2 && l[0] == '-' && l[1] == ' ';
 }
 
-/* Bullets from base until the first non-bullet line after one. */
+static bool cb_is_heading(const char *line, size_t len)
+{
+    size_t n = 0;
+    while (n < len && n < 6 && line[n] == '#')
+        n++;
+    return n && (n == len || line[n] == ' ' || line[n] == '\t');
+}
+
+/* Keep scanning a rule section through blank lines; unrepresented text is cut. */
 static void cb_scan_bullets(struct cb_brief *b, struct cb_owner *o,
                             const char *base)
 {
     size_t pos = 0, len;
     const char *line;
-    while (cb_line(base, &pos, &line, &len) && o->nrules < CB_OWNER_RULES) {
+    while (cb_line(base, &pos, &line, &len)) {
+        if (o->nrules && cb_is_heading(line, len))
+            break;
         if (cb_is_bullet(line, len))
             cb_owner_push(b, o, line + 2, len - 2);
-        else if (o->nrules)
-            break;
+        else if (o->nrules && len)
+            b->cut_rules = true;
     }
 }
 
