@@ -120,6 +120,14 @@ capture defaults to false. Each step uses the maintained simulation with fixed
 keyboard fallbacks. Guns are held on each requested tick; boost triggers on a
 rising edge between accepted step inputs, on the first tick only. `throttle`
 uses the existing normal-throttle control. Observe renders without advancing.
+
+On clean session close, stderr reports `frame_work`, `frame_interval` and
+`input_to_frame`. The `input_to_frame` metric retains up to 36000 finite,
+nonnegative external-step samples; observe-only and `--qa-frames` runs without
+external input report `count=0`. The metric covers accepted external-input
+processing through the rendered frame, not physical keyboard event timestamps.
+
+<!-- claim: symbol-present sky_game_metrics_record apps/skycombat/src/game_runtime.c # external-input and ordinary-frame metrics stay distinct -->
 Window events are pumped while waiting, without ticking the simulation.
 
 IDs are integers from 0 through 4294967295, strictly increasing within this
