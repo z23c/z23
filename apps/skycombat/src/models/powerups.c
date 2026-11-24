@@ -15,6 +15,10 @@
 #include <math.h>
 #include <stdio.h>
 
+#ifndef SKYCOMBAT_POWERUP_PRINTF
+#define SKYCOMBAT_POWERUP_PRINTF(...) printf(__VA_ARGS__)
+#endif
+
 powerup_manager_t* powerup_manager_create(void) {
     powerup_manager_t* manager = calloc(1, sizeof(powerup_manager_t));
     if (!manager) return NULL;
@@ -171,7 +175,7 @@ void powerup_manager_spawn_at_point(powerup_manager_t* manager, int spawn_point_
     p->duration = powerup_get_default_duration(p->type);
     p->value = powerup_get_default_value(p->type);
     
-    printf("Spawned %s powerup at spawn point %d\n", powerup_get_name(p->type), spawn_point_id);
+    SKYCOMBAT_POWERUP_PRINTF("Spawned %s powerup at spawn point %d\n", powerup_get_name(p->type), spawn_point_id);
 }
 
 void powerup_manager_spawn_random(powerup_manager_t* manager) {
@@ -216,7 +220,7 @@ void powerup_manager_collect(powerup_manager_t* manager, int powerup_id) {
         p->respawn_timer = 20.0f;  // Default respawn time
     }
     
-    printf("Collected %s powerup (respawn in %.1fs)\n", powerup_get_name(p->type), (double)p->respawn_timer);
+    SKYCOMBAT_POWERUP_PRINTF("Collected %s powerup (respawn in %.1fs)\n", powerup_get_name(p->type), (double)p->respawn_timer);
 }
 
 void powerup_effects_init(powerup_effects_t* effects) {

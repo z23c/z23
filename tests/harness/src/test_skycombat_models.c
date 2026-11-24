@@ -104,11 +104,11 @@ static int skycombat_powerup_printf(const char *format, const char *name,
     return snprintf(skycombat_collect_message, sizeof(skycombat_collect_message),
                     format, name, value);
 }
-#define printf(format, name, value) \
+#define SKYCOMBAT_POWERUP_PRINTF(format, name, value) \
     skycombat_powerup_printf((format), (name), \
                             _Generic((value), double: true, default: false), (double)(value))
 #include "../../../apps/skycombat/src/models/powerups.c"
-#undef printf
+#undef SKYCOMBAT_POWERUP_PRINTF
 
 #include "sky_combat/models/aircraft_manager.h"
 Vector3 aircraft_manager_get_spawn_point(aircraft_manager_t *manager)
