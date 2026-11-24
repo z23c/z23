@@ -1,0 +1,27 @@
+{"case":"fund_deshield.result","request":"z_getoperationresult [\"opid-e13e9121-0e37-4f18-bef2-4d80765cd131\"]","exit":0,"reply":[
+  {
+    "id": "opid-e13e9121-0e37-4f18-bef2-4d80765cd131",
+    "status": "success",
+    "creation_time": 1795502708,
+    "result": {
+      "txid": "98c3aeb2912e9a24e81995a7a648ecf53396693f5631926beb7a2c564f66e68d"
+    },
+    "execution_secs": 0.5925631,
+    "method": "z_sendmany",
+    "params": {
+      "fromaddress": "zregtestsapling1shrsq9szhflqjdaryag604xttknxut7xlqsq62y9mjx24myp457edsc4vzj3t2mvqxgux53k2hv",
+      "amounts": [
+        {
+          "address": "tmYrB9z6wAeJUNE9cYLQi4dKanxxuUs6iG7",
+          "amount": 20.0
+        },
+        {
+          "address": "tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh",
+          "amount": 20.0
+        }
+      ],
+      "minconf": 1,
+      "fee": 0.0001
+    }
+  }
+]}

@@ -1,0 +1,11 @@
+{"case":"fund.getwalletinfo","request":"getwalletinfo","exit":0,"reply":{
+  "walletversion": 60000,
+  "balance": 12.50000000,
+  "unconfirmed_balance": 0.00000000,
+  "immature_balance": 1250.00000000,
+  "txcount": 101,
+  "keypoololdest": 1795502701,
+  "keypoolsize": 101,
+  "paytxfee": 0.00000000,
+  "seedfp": "39a117a0a64cad21864fa7ce01661878640d66292427ca2aa979aa5b502a93c8"
+}}

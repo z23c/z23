@@ -1,0 +1,59 @@
+{"case":"t2t.listtransactions_pending","request":"listtransactions * 3","exit":0,"reply":[
+  {
+    "account": "",
+    "address": "tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh",
+    "category": "receive",
+    "amount": 20.00000000,
+    "vout": 1,
+    "confirmations": 1,
+    "blockhash": "02c79afafb127cef14d9add0f983d54de85803a16f05e63cd46d5d4334be0027",
+    "blockindex": 1,
+    "blocktime": 1795502737,
+    "expiryheight": 223,
+    "txid": "98c3aeb2912e9a24e81995a7a648ecf53396693f5631926beb7a2c564f66e68d",
+    "walletconflicts": [
+    ],
+    "time": 1795502709,
+    "timereceived": 1795502709,
+    "vjoinsplit": [
+    ],
+    "size": 1493
+  },
+  {
+    "account": "",
+    "address": "tmYrB9z6wAeJUNE9cYLQi4dKanxxuUs6iG7",
+    "category": "receive",
+    "amount": 20.00000000,
+    "vout": 0,
+    "confirmations": 1,
+    "blockhash": "02c79afafb127cef14d9add0f983d54de85803a16f05e63cd46d5d4334be0027",
+    "blockindex": 1,
+    "blocktime": 1795502737,
+    "expiryheight": 223,
+    "txid": "98c3aeb2912e9a24e81995a7a648ecf53396693f5631926beb7a2c564f66e68d",
+    "walletconflicts": [
+    ],
+    "time": 1795502709,
+    "timereceived": 1795502709,
+    "vjoinsplit": [
+    ],
+    "size": 1493
+  },
+  {
+    "account": "",
+    "address": "tmJ3riuRtngp6NzgJoFHG5Sz328zZWjLXRj",
+    "category": "send",
+    "amount": -1.00000000,
+    "vout": 0,
+    "fee": -0.00010000,
+    "confirmations": 0,
+    "txid": "1c234519166eed519dde5356cf216aa88dd9961998640688e13e047f15e4e669",
+    "walletconflicts": [
+    ],
+    "time": 1795502709,
+    "timereceived": 1795502709,
+    "vjoinsplit": [
+    ],
+    "size": 244
+  }
+]}

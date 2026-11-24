@@ -1,0 +1,17 @@
+{"case":"fund.shieldcoinbase.result","request":"z_getoperationresult [\"opid-8f71a5a8-f4f1-416b-a3ef-b4154af314ca\"]","exit":0,"reply":[
+  {
+    "id": "opid-8f71a5a8-f4f1-416b-a3ef-b4154af314ca",
+    "status": "success",
+    "creation_time": 1795502707,
+    "result": {
+      "txid": "ff83e3deb2616d07de8ceeab17ef97740033ef795363c59d3f9e18cc5059a1f0"
+    },
+    "execution_secs": 0.110617529,
+    "method": "z_shieldcoinbase",
+    "params": {
+      "fromaddress": "*",
+      "toaddress": "zregtestsapling1shrsq9szhflqjdaryag604xttknxut7xlqsq62y9mjx24myp457edsc4vzj3t2mvqxgux53k2hv",
+      "fee": 0.00010000
+    }
+  }
+]}

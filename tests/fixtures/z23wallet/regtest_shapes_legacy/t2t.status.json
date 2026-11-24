@@ -1,0 +1,23 @@
+{"case":"t2t.status","request":"z_getoperationstatus [\"opid-9ef6fef3-f3df-4eb2-9947-f22b29b20d4c\"]","exit":0,"reply":[
+  {
+    "id": "opid-9ef6fef3-f3df-4eb2-9947-f22b29b20d4c",
+    "status": "success",
+    "creation_time": 1795502709,
+    "result": {
+      "txid": "1c234519166eed519dde5356cf216aa88dd9961998640688e13e047f15e4e669"
+    },
+    "execution_secs": 0.017897536,
+    "method": "z_sendmany",
+    "params": {
+      "fromaddress": "tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh",
+      "amounts": [
+        {
+          "address": "tmJ3riuRtngp6NzgJoFHG5Sz328zZWjLXRj",
+          "amount": 1.0
+        }
+      ],
+      "minconf": 1,
+      "fee": 0.0001
+    }
+  }
+]}

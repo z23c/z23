@@ -1,0 +1,5 @@
+{"case":"t2t.z_gettotalbalance_pending","request":"z_gettotalbalance","exit":0,"reply":{
+  "transparent": "682.50",
+  "private": "584.9998",
+  "total": "1267.4998"
+}}

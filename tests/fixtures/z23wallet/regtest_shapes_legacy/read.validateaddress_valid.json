@@ -1,0 +1,11 @@
+{"case":"read.validateaddress_valid","request":"validateaddress tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh","exit":0,"reply":{
+  "isvalid": true,
+  "address": "tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh",
+  "scriptPubKey": "76a914601be7693be6f313ff3678802bdad392ddf9d39b88ac",
+  "ismine": true,
+  "iswatchonly": false,
+  "isscript": false,
+  "pubkey": "03709e06129eced42dbb59ff4ee15d4d295f9ab7b5a6fcd0e8f7f35b9cfce2912e",
+  "iscompressed": true,
+  "account": ""
+}}

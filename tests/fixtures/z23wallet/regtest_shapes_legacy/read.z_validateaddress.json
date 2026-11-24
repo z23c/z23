@@ -1,0 +1,8 @@
+{"case":"read.z_validateaddress","request":"z_validateaddress zregtestsapling13v97td8l0fcjc4hspn5qm639vhsrq95vhvp2r2j2r2xfvwk62w39d2uet8dgakwx709dgck5jz8","exit":0,"reply":{
+  "isvalid": true,
+  "address": "zregtestsapling13v97td8l0fcjc4hspn5qm639vhsrq95vhvp2r2j2r2xfvwk62w39d2uet8dgakwx709dgck5jz8",
+  "type": "sapling",
+  "diversifier": "8b0be5b4ff7a712c56f00c",
+  "diversifiedtransmissionkey": "d4caf3c6d98eda5999ab56a253da3a968c1a4aaaa102bb8c1630e06525ea0de8",
+  "ismine": true
+}}

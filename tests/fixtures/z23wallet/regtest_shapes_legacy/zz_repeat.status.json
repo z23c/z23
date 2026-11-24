@@ -1,0 +1,24 @@
+{"case":"zz_repeat.status","request":"z_getoperationstatus [\"opid-a5e4c84d-324e-4580-940f-0e754828a957\"]","exit":0,"reply":[
+  {
+    "id": "opid-a5e4c84d-324e-4580-940f-0e754828a957",
+    "status": "success",
+    "creation_time": 1795502712,
+    "result": {
+      "txid": "953dec2afd23124578670bd0b1b5a6afc6bbde67829bc892c9946a9b231fe93b"
+    },
+    "execution_secs": 0.689966263,
+    "method": "z_sendmany",
+    "params": {
+      "fromaddress": "zregtestsapling1shrsq9szhflqjdaryag604xttknxut7xlqsq62y9mjx24myp457edsc4vzj3t2mvqxgux53k2hv",
+      "amounts": [
+        {
+          "address": "zregtestsapling13v97td8l0fcjc4hspn5qm639vhsrq95vhvp2r2j2r2xfvwk62w39d2uet8dgakwx709dgck5jz8",
+          "amount": 2.0,
+          "memo": "636166c3a920e2989520e697a5e69cac"
+        }
+      ],
+      "minconf": 1,
+      "fee": 0.0001
+    }
+  }
+]}

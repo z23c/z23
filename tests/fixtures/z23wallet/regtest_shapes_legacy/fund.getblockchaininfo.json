@@ -1,0 +1,103 @@
+{"case":"fund.getblockchaininfo","request":"getblockchaininfo","exit":0,"reply":{
+  "chain": "regtest",
+  "blocks": 101,
+  "headers": 101,
+  "estimatedheight": 101,
+  "bestblockhash": "0c1365c8796b69ccb5553e9fc2c1438bbf70563d7db9dc51e4b52247d99635d7",
+  "mediantime": 1795502719,
+  "difficulty": 1.000005066420776,
+  "verificationprogress": 1,
+  "chainwork": "00000000000000000000000000000000000000000000000000000000000006c6",
+  "pruned": false,
+  "size_on_disk": 37444,
+  "commitments": 0,
+  "valuePools": [
+    {
+      "id": "sprout",
+      "monitored": true,
+      "chainValue": 0.00000000,
+      "chainValueZat": 0
+    },
+    {
+      "id": "sapling",
+      "monitored": true,
+      "chainValue": 0.00000000,
+      "chainValueZat": 0
+    }
+  ],
+  "softforks": [
+    {
+      "id": "bip34",
+      "version": 2,
+      "enforce": {
+        "status": false,
+        "found": 102,
+        "required": 750,
+        "window": 1000
+      },
+      "reject": {
+        "status": false,
+        "found": 102,
+        "required": 950,
+        "window": 1000
+      }
+    },
+    {
+      "id": "bip66",
+      "version": 3,
+      "enforce": {
+        "status": false,
+        "found": 102,
+        "required": 750,
+        "window": 1000
+      },
+      "reject": {
+        "status": false,
+        "found": 102,
+        "required": 950,
+        "window": 1000
+      }
+    },
+    {
+      "id": "bip65",
+      "version": 4,
+      "enforce": {
+        "status": false,
+        "found": 102,
+        "required": 750,
+        "window": 1000
+      },
+      "reject": {
+        "status": false,
+        "found": 102,
+        "required": 950,
+        "window": 1000
+      }
+    }
+  ],
+  "upgrades": {
+    "5ba81b19": {
+      "name": "Overwinter",
+      "activationheight": 1,
+      "status": "active",
+      "info": "See https://z.cash/upgrade/overwinter.html for details."
+    },
+    "76b809bb": {
+      "name": "Sapling",
+      "activationheight": 1,
+      "status": "active",
+      "info": "See https://z.cash/upgrade/sapling.html for details."
+    }
+  },
+  "consensus": {
+    "chaintip": "76b809bb",
+    "nextblock": "76b809bb"
+  },
+  "bootstrap_validation": {
+    "state": "disabled",
+    "tip_hold": false
+  },
+  "finalization_hold": {
+    "held": false
+  }
+}}

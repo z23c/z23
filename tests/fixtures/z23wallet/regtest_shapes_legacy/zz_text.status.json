@@ -1,0 +1,24 @@
+{"case":"zz_text.status","request":"z_getoperationstatus [\"opid-cf19a26d-4bdf-4343-8b33-e61e454674ac\"]","exit":0,"reply":[
+  {
+    "id": "opid-cf19a26d-4bdf-4343-8b33-e61e454674ac",
+    "status": "success",
+    "creation_time": 1795502711,
+    "result": {
+      "txid": "e0b3919961d973a589dba10d689509a8fb1dcac8eb98a0c903195f31992b659f"
+    },
+    "execution_secs": 0.66924632,
+    "method": "z_sendmany",
+    "params": {
+      "fromaddress": "zregtestsapling1shrsq9szhflqjdaryag604xttknxut7xlqsq62y9mjx24myp457edsc4vzj3t2mvqxgux53k2hv",
+      "amounts": [
+        {
+          "address": "zregtestsapling13v97td8l0fcjc4hspn5qm639vhsrq95vhvp2r2j2r2xfvwk62w39d2uet8dgakwx709dgck5jz8",
+          "amount": 2.0,
+          "memo": "636166c3a920e2989520e697a5e69cac"
+        }
+      ],
+      "minconf": 1,
+      "fee": 0.0001
+    }
+  }
+]}

@@ -1,0 +1,3 @@
+{"case":"read.z_validateaddress_invalid","request":"z_validateaddress notanaddress","exit":0,"reply":{
+  "isvalid": false
+}}

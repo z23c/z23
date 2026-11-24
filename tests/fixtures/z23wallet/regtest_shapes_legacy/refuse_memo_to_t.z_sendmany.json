@@ -1,0 +1,1 @@
+{"case":"refuse_memo_to_t.z_sendmany","request":"z_sendmany zregtestsapling13v97td8l0fcjc4hspn5qm639vhsrq95vhvp2r2j2r2xfvwk62w39d2uet8dgakwx709dgck5jz8 [{\"address\":\"tmJ3riuRtngp6NzgJoFHG5Sz328zZWjLXRj\",\"amount\":0.1,\"memo\":\"6869\"}]","exit":8,"reply":"error code: -8 error message: Memo cannot be used with a taddr.  It can only be used with a zaddr."}

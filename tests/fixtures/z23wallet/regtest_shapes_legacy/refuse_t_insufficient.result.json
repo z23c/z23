@@ -1,0 +1,23 @@
+{"case":"refuse_t_insufficient.result","request":"z_getoperationresult [\"opid-300248ce-6b85-4424-8bb2-fc416f93cd51\"]","exit":0,"reply":[
+  {
+    "id": "opid-300248ce-6b85-4424-8bb2-fc416f93cd51",
+    "status": "failed",
+    "creation_time": 1795502720,
+    "error": {
+      "code": -6,
+      "message": "Insufficient transparent funds, have 1.60, need 9000.0001"
+    },
+    "method": "z_sendmany",
+    "params": {
+      "fromaddress": "tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh",
+      "amounts": [
+        {
+          "address": "tmJ3riuRtngp6NzgJoFHG5Sz328zZWjLXRj",
+          "amount": 9000.0
+        }
+      ],
+      "minconf": 1,
+      "fee": 0.0001
+    }
+  }
+]}

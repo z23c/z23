@@ -1,0 +1,1 @@
+{"case":"fund_deshield.z_sendmany","request":"z_sendmany zregtestsapling1shrsq9szhflqjdaryag604xttknxut7xlqsq62y9mjx24myp457edsc4vzj3t2mvqxgux53k2hv [{\"address\":\"tmYrB9z6wAeJUNE9cYLQi4dKanxxuUs6iG7\",\"amount\":20.0},{\"address\":\"tmJUXdPSa59DBQ3Zt55jGYYAu8PnSGG13hh\",\"amount\":20.0}]","exit":0,"reply":"opid-e13e9121-0e37-4f18-bef2-4d80765cd131"}

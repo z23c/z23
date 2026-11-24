@@ -1,0 +1,28 @@
+{"case":"t2t.gettransaction","request":"gettransaction 1c234519166eed519dde5356cf216aa88dd9961998640688e13e047f15e4e669","exit":0,"reply":{
+  "amount": -1.00000000,
+  "fee": -0.00010000,
+  "confirmations": 1,
+  "blockhash": "08ae185f5d8fb8881a780d5a15cccca2b8b87a80cd2abed5096f1a557419e54c",
+  "blockindex": 1,
+  "blocktime": 1795502737,
+  "expiryheight": 224,
+  "txid": "1c234519166eed519dde5356cf216aa88dd9961998640688e13e047f15e4e669",
+  "walletconflicts": [
+  ],
+  "time": 1795502709,
+  "timereceived": 1795502709,
+  "vjoinsplit": [
+  ],
+  "details": [
+    {
+      "account": "",
+      "address": "tmJ3riuRtngp6NzgJoFHG5Sz328zZWjLXRj",
+      "category": "send",
+      "amount": -1.00000000,
+      "vout": 0,
+      "fee": -0.00010000,
+      "size": 244
+    }
+  ],
+  "hex": "0400008085202f89018de6664f562c7aeb6b9231563f699633f5ec48a6a79519e8249a2e91b2aec398010000006a47304402203a9c8a20802c657c1a02d7a3ee7e1e6bd5e96d692d4d2138f9e5bc555c9c9b6702205005eca501d69072904fb2f8dc3649c4719fbdc69a4246c208817fc79c799df6012103709e06129eced42dbb59ff4ee15d4d295f9ab7b5a6fcd0e8f7f35b9cfce2912effffffff0200e1f505000000001976a9145b7171d8791a0919b0e5ab66a80e987adb52f92088acf08b3f71000000001976a914afeec65ea363b8e9f41b559fdfa1fb7bfea6864688ac00000000e00000000000000000000000000000"
+}}

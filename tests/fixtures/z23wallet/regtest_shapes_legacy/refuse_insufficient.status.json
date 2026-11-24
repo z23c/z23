@@ -1,0 +1,23 @@
+{"case":"refuse_insufficient.status","request":"z_getoperationstatus [\"opid-7014b9b2-0e1a-48ce-bc24-97feb901eab2\"]","exit":0,"reply":[
+  {
+    "id": "opid-7014b9b2-0e1a-48ce-bc24-97feb901eab2",
+    "status": "failed",
+    "creation_time": 1795502718,
+    "error": {
+      "code": -6,
+      "message": "Insufficient shielded funds, have 3.7499, need 900.0001"
+    },
+    "method": "z_sendmany",
+    "params": {
+      "fromaddress": "zregtestsapling13v97td8l0fcjc4hspn5qm639vhsrq95vhvp2r2j2r2xfvwk62w39d2uet8dgakwx709dgck5jz8",
+      "amounts": [
+        {
+          "address": "zregtestsapling1shrsq9szhflqjdaryag604xttknxut7xlqsq62y9mjx24myp457edsc4vzj3t2mvqxgux53k2hv",
+          "amount": 900.0
+        }
+      ],
+      "minconf": 1,
+      "fee": 0.0001
+    }
+  }
+]}

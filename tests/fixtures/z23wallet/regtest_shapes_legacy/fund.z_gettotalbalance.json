@@ -1,0 +1,5 @@
+{"case":"fund.z_gettotalbalance","request":"z_gettotalbalance","exit":0,"reply":{
+  "transparent": "12.50",
+  "private": "0.00",
+  "total": "12.50"
+}}
