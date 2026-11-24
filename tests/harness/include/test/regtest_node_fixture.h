@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -227,7 +228,7 @@ static inline bool rnf_node_start(struct rnf *e)
               "-regtestshielded", "-operator-lane=dev",
               "-private-listeners", "-bind=127.0.0.1", "-no-tor", p2p,
               "-connect=127.0.0.1:1", "-packagehost=0",
-              "-wallet-no-phrase-backup", "-nobgvalidation",
+              "-wallet-no-phrase-backup", "-walletbackup=0", "-nobgvalidation",
               "-nolegacyimport", "-showmetrics=0", (char *)NULL);
         _exit(127);
     }
@@ -288,6 +289,23 @@ static inline int rnf_exec(const struct rnf *e, const char *const *words,
     return rc;
 }
 
+/* Read fd until EOF, `cap - 1` bytes or the deadline (a hung command cannot
+ * block the test); NUL-terminates raw and returns the bytes read. */
+static inline size_t rnf_read_until(int fd, char *raw, size_t cap, long deadline)
+{
+    size_t got = 0;
+    while (got + 1 < cap) {
+        long left = deadline - rnf_now_ms();
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        if (left <= 0 || poll(&pfd, 1, (int)left) <= 0) break;
+        ssize_t r = read(fd, raw + got, cap - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    raw[got] = '\0';
+    return got;
+}
+
 /* Like rnf_exec with `input` on the command's stdin: the way a passphrase
  * reaches `core wallet security unlock|encrypt` (never argv). Waits at most
  * RNF_STDIN_MS for the command; returns its exit status, -1 on failure. */
@@ -311,7 +329,10 @@ static inline int rnf_exec_stdin(const struct rnf *e, const char *const *words,
         return -1;
     }
     pid_t pid = fork();
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+        return -1;
+    }
     if (pid == 0) {
         dup2(in[0], STDIN_FILENO);
         dup2(out[1], STDOUT_FILENO);
@@ -326,14 +347,9 @@ static inline int rnf_exec_stdin(const struct rnf *e, const char *const *words,
     size_t len = strlen(input);
     bool wrote = write(in[1], input, len) == (ssize_t)len;
     close(in[1]);
-    size_t got = 0;
     long deadline = rnf_now_ms() + RNF_STDIN_MS;
-    while (wrote && got + 1 < cap && rnf_now_ms() < deadline) {
-        ssize_t r = read(out[0], raw + got, cap - 1 - got);
-        if (r <= 0) break;
-        got += (size_t)r;
-    }
-    raw[got] = '\0';
+    if (wrote) rnf_read_until(out[0], raw, cap, deadline);
+    else raw[0] = '\0';
     close(out[0]);
     int status = 0;
     if (rnf_now_ms() >= deadline) kill(pid, SIGKILL);

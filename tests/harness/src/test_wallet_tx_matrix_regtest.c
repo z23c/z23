@@ -18,8 +18,11 @@
  *   z->t      de-shielding
  *   multi     legacy z_sendmany with transparent and shielded recipients
  *   max       amount = balance - fee from a shielded and a transparent address
- *   refusals  insufficient funds, invalid address, memo to a transparent
- *             recipient, zero amount: each must fail and change no balance
+ *   refusals  insufficient funds, invalid address, zero amount: each must fail
+ *             and change no balance; then the KNOWN DIVERGENCE cases (a memo to a
+ *             transparent recipient, the legacy memo key, a repeated transparent
+ *             commit) pin what the node does today against zclassicd or the
+ *             idempotency contract
  *   legacy    the legacy-compatible methods of the node's RPC table that a
  *             legacy front end uses, with the refusal for each one missing
  *   lock      a send committed with the wallet locked is refused
@@ -35,6 +38,7 @@
  * make t-fast ONLY=wallet_tx_matrix_regtest */
 
 #include "test/regtest_node_fixture.h"
+#include <dirent.h>
 #include "sapling/params_init.h"
 #include "sapling/sapling_prover.h"
 
@@ -575,13 +579,22 @@ static int step_t_to_t(struct wtm *w)
         ASSERT(wtm_totals(w, "t2t.totals", &after));
         ASSERT_EQ(after.t, before.t - WTM_COIN - WTM_FEE);
         ASSERT_EQ(after.z, before.z);
-        /* The same commit again: transaction.send records the key only to
-         * correlate plan and commit, so a repeat is a second payment. */
+        /* KNOWN GAP against the idempotency-key contract: core.wallet.
+         * transaction.send records the key only to correlate plan and
+         * commit, so committing the same key again is a SECOND PAYMENT. This
+         * pins today's behaviour; a node that makes the repeat idempotent
+         * fails this test, and then the assertions below must flip to
+         * "same txid, no second movement". */
         r = WTM_CALL(w, "t2t.commit_repeat", "core", "wallet", "transaction",
                      "send", commit);
-        printf("\n  [evidence] t->t commit repeated on its key: ok=%d second txid %s the first ",
-               r->ok, strcmp(rnf_str(&r->doc, "data.txid"), txid) == 0 ? "equals" : "differs from");
+        ASSERT(r->ok);
+        ASSERT_EQ((int64_t)strlen(rnf_str(&r->doc, "data.txid")), 64);
+        ASSERT(strcmp(rnf_str(&r->doc, "data.txid"), txid) != 0);
         ASSERT(wtm_mine(w, 1));
+        struct totals twice;
+        ASSERT(wtm_totals(w, NULL, &twice));
+        ASSERT_EQ(twice.t, before.t - 2 * (WTM_COIN + WTM_FEE));
+        ASSERT_EQ(twice.z, before.z);
         PASS();
     } _test_next:;
     return failures;
@@ -751,9 +764,12 @@ static int step_multi(struct wtm *w)
         ASSERT(wtm_totals(w, "multi.totals", &after));
         ASSERT_EQ(after.t, before.t + 10000000);
         ASSERT_EQ(after.z, before.z - 10000000 - 5000000 - 5000000 - WTM_FEE);
-        /* A legacy front end passes the memo as hex under "memo" (zclassicd's
-         * z_sendmany). This node reads "memo" as text and hex only under
-         * "memo_hex": print what the recipient is given. */
+        /* KNOWN DIVERGENCE from zclassicd: its z_sendmany reads the "memo"
+         * key as hex (so "6c6567" is the memo "leg"). This node reads "memo"
+         * as UTF-8 text and hex only under "memo_hex", so the recipient is
+         * given the literal text "6c6567". Pinned as it is today; a legacy
+         * front end must send memo_hex to this node. If the node adopts the
+         * zclassicd reading this assertion must flip to "leg". */
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS)); /* the change note is spendable */
         char one[400];
         snprintf(one, sizeof(one),
@@ -767,8 +783,8 @@ static int step_multi(struct wtm *w)
         n = wtm_notes(w, NULL, w->zb, txid);
         ASSERT_EQ(n.count, 1);
         ASSERT_EQ(n.zat, 1000000);
-        printf("\n  [evidence] z_sendmany memo \"6c6567\" under the legacy \"memo\" key is stored as memo=\"%s\" (legacy zclassicd: hex, i.e. \"leg\") ",
-               n.memo);
+        ASSERT_STR_EQ(n.memo, "6c6567");
+        ASSERT_STR_EQ(n.memo_hex, "");
         PASS();
     } _test_next:;
     return failures;
@@ -820,8 +836,32 @@ static int step_max(struct wtm *w)
 
 struct refusal {
     const char *name, *tag, *from, *to, *amount, *memo;
-    bool may_accept;  /* a node that accepts it is reported, not failed */
+    /* A KNOWN DIVERGENCE case: zclassicd refuses the request, this node
+     * accepts and sends it today. moved_zat is what must leave the wallet
+     * (amount + fee) once it is mined; a node that starts refusing fails the
+     * case, and the case must then become an ordinary refusal. */
+    int64_t moved_zat;
 };
+
+static int step_divergence_one(struct wtm *w, const struct refusal *c)
+{
+    int failures = 0;
+    TEST(c->name) {
+        struct totals before, after;
+        ASSERT(wtm_totals(w, NULL, &before));
+        struct send s = { .from = c->from, .to = c->to, .amount = c->amount,
+                          .memo = c->memo, .key = "matrix-divergence" };
+        char tag[64];
+        snprintf(tag, sizeof(tag), "refuse.%s", c->tag);
+        ASSERT(send_run(w, tag, &s));
+        ASSERT(wtm_mine(w, 1));
+        ASSERT(wtm_totals(w, NULL, &after));
+        ASSERT_EQ(after.t, before.t);
+        ASSERT_EQ(after.z, before.z - c->moved_zat);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 
 static int step_refusal_one(struct wtm *w, const struct refusal *c)
 {
@@ -838,13 +878,6 @@ static int step_refusal_one(struct wtm *w, const struct refusal *c)
         s.key = key;
         snprintf(tag, sizeof(tag), "refuse.%s", c->tag);
         bool refused = send_refused(w, tag, &s);
-        if (!refused && c->may_accept) {
-            printf("\n  [evidence] GAP: the node accepted and sent this "
-                   "request (legacy zclassicd refuses it) ");
-            ASSERT(wtm_mine(w, 1));
-            PASS();
-            break;
-        }
         ASSERT(refused);
         printf("\n  [evidence] refused (%s): %.150s ", s.code, s.message);
         ASSERT(s.code[0]);
@@ -865,18 +898,21 @@ static int step_refusals(struct wtm *w)
     if (!wtm_mine(w, WTM_SPENDABLE_CONFS)) return 1;
     const struct refusal cases[] = {
         { "wallet_tx_matrix_regtest: refused: shielded insufficient funds", "shielded_insufficient",
-          w->zb, w->za, "900.00000000", NULL, false },
+          w->zb, w->za, "900.00000000", NULL, 0 },
         { "wallet_tx_matrix_regtest: refused: transparent insufficient funds", "transparent_insufficient",
-          w->t2, WTM_FOREIGN_T, "900.00000000", NULL, false },
+          w->t2, WTM_FOREIGN_T, "900.00000000", NULL, 0 },
         { "wallet_tx_matrix_regtest: refused: invalid address (to)", "invalid_address",
-          w->zb, "notanaddress", "0.10000000", NULL, false },
-        { "wallet_tx_matrix_regtest: refused: memo to a transparent recipient", "memo_to_transparent",
-          w->zb, WTM_FOREIGN_T, "0.10000000", "this cannot be delivered", true },
+          w->zb, "notanaddress", "0.10000000", NULL, 0 },
         { "wallet_tx_matrix_regtest: refused: amount of zero", "zero_amount",
-          w->zb, w->za, "0.00000000", NULL, false },
+          w->zb, w->za, "0.00000000", NULL, 0 },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]) && !failures; i++)
         failures += step_refusal_one(w, &cases[i]);
+    const struct refusal memo_to_t = {
+        "wallet_tx_matrix_regtest: KNOWN DIVERGENCE from zclassicd: a memo to a transparent recipient is ACCEPTED and sent (zclassicd refuses: \"Memo cannot be used with a taddr\")",
+        "memo_to_transparent", w->zb, WTM_FOREIGN_T, "0.10000000",
+        "this cannot be delivered", 10000000 + WTM_FEE };
+    if (!failures) failures += step_divergence_one(w, &memo_to_t);
     return failures;
 }
 
@@ -923,13 +959,13 @@ static int step_legacy_unsupported(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: legacy methods this node lacks (z_validateaddress, z_getoperationstatus, z_getoperationresult) are refused by name") {
-        struct reply *r = WTM_CALL(w, NULL, "z_validateaddress", w->zb);
+        struct reply *r = WTM_CALL(w, "legacy.z_validateaddress", "z_validateaddress", w->zb);
         ASSERT(!r->ok && strstr(r->raw, "UNKNOWN_") != NULL);
         printf("\n  [evidence] UNSUPPORTED z_validateaddress: %.120s ", r->raw);
-        r = WTM_CALL(w, NULL, "z_getoperationstatus");
+        r = WTM_CALL(w, "legacy.z_getoperationstatus", "z_getoperationstatus");
         ASSERT(!r->ok && strstr(r->raw, "UNKNOWN_") != NULL);
         printf("\n  [evidence] UNSUPPORTED z_getoperationstatus: %.120s ", r->raw);
-        r = WTM_CALL(w, NULL, "z_getoperationresult");
+        r = WTM_CALL(w, "legacy.z_getoperationresult", "z_getoperationresult");
         ASSERT(!r->ok && strstr(r->raw, "UNKNOWN_") != NULL);
         printf("\n  [evidence] UNSUPPORTED z_getoperationresult: %.120s ", r->raw);
         PASS();
@@ -973,7 +1009,7 @@ static int step_lock(struct wtm *w)
         ASSERT(!r->ok);
         printf("\n  [evidence] locked commit refused (%s): %.150s ",
                rnf_str(&r->doc, "error.code"), rnf_str(&r->doc, "error.message"));
-        ASSERT(strstr(rnf_str(&r->doc, "error.message"), "ock") != NULL);
+        ASSERT_STR_EQ(rnf_str(&r->doc, "error.code"), "SEND_REFUSED_KEY_RELEASED");
         r = wtm_call_in(w, "lock.security_unlock",
             (const char *const[]){ "core", "wallet", "security", "unlock", "--input=-", NULL },
             WTM_PASS_UNLOCK);
@@ -990,8 +1026,12 @@ static int step_lock(struct wtm *w)
         ASSERT_EQ(after.z, before.z);
         r = WTM_CALL(w, "lock.commit_after_unlock", "core", "wallet", "shielded",
                      "send", commit);
-        printf("\n  [evidence] the same commit after unlock: ok=%d %s ", r->ok,
-               r->ok ? "committed" : rnf_str(&r->doc, "error.code"));
+        ASSERT(r->ok);
+        ASSERT_STR_EQ(rnf_str(&r->doc, "data.stage"), "committed");
+        ASSERT(wtm_mine(w, 1));
+        ASSERT(wtm_totals(w, NULL, &after));
+        ASSERT_EQ(after.t, before.t);
+        ASSERT_EQ(after.z, before.z - 10000000 - WTM_FEE);
         PASS();
     } _test_next:;
     return failures;
@@ -1030,6 +1070,35 @@ static bool wtm_params_available(void)
     return false;
 }
 
+/* Files in $HOME/wallet_backups/regtest, the directory the node's backup
+ * service writes to when not told otherwise: the test node runs with
+ * -walletbackup=0 and must add nothing there. -1 when HOME is unset. */
+static long wtm_backup_files(void)
+{
+    const char *home = getenv("HOME");
+    char dir[PATH_MAX];
+    if (!home || !*home) return -1;
+    snprintf(dir, sizeof(dir), "%s/wallet_backups/regtest", home);
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    long n = 0;
+    for (struct dirent *e = readdir(d); e; e = readdir(d))
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) n++;
+    closedir(d);
+    return n;
+}
+
+static int wtm_check_backups(long before)
+{
+    int failures = 0;
+    TEST("wallet_tx_matrix_regtest: the test node wrote no wallet backup under HOME") {
+        ASSERT(before >= 0);
+        ASSERT_EQ(wtm_backup_files(), before);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_wallet_tx_matrix_regtest(void);
 int test_wallet_tx_matrix_regtest(void)
 {
@@ -1043,6 +1112,7 @@ int test_wallet_tx_matrix_regtest(void)
     int failures = 0;
     const char *rec = getenv("ZCL_REGTEST_SHAPES_RECORD");
     w.record = rec && rec[0] == '1';
+    long backups_before = wtm_backup_files();
     rnf_live = &w.n;
     atexit(rnf_atexit_reap);
     TEST("wallet_tx_matrix_regtest: isolated fixture and node start") {
@@ -1057,5 +1127,6 @@ int test_wallet_tx_matrix_regtest(void)
     reply_free(&wtm_r);
     rnf_cleanup(&w.n);
     rnf_live = NULL;
+    failures += wtm_check_backups(backups_before);
     return failures;
 }
