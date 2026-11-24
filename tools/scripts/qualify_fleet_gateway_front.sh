@@ -70,7 +70,7 @@ done
 say() { printf 'qualify: %s\n' "$*"; }
 fail() {
     printf 'qualify: FAIL: %s\n' "$*" >&2
-    verdict="FAIL: $*"
+    exit 1
 }
 
 PASS=0
@@ -86,8 +86,6 @@ skip() { SKIPN=$((SKIPN + 1)); note SKIP "$1"; }
 say "fetching origin (parent + pins must resolve from the network)"
 git fetch origin main >&2 || {
     fail "git fetch origin main failed"
-    printf 'verdict: %s (pass=%d fail=%d skip=%d)\n' "$verdict" "$PASS" "$FAILN" "$SKIPN"
-    exit 1
 }
 # No default: the final run qualifies the SHA it is given and nothing else.
 # An omitted --sha fails closed instead of blessing whatever HEAD is.

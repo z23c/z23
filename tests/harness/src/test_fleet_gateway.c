@@ -23,6 +23,7 @@
 #include "json/json.h"
 #include "sha3/sha3.h"
 #include "kernel/command_registry.h"
+#include "util/spawn.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -4952,12 +4953,54 @@ static bool gw_family_complete(void)
     return true;
 }
 
+/* Extract the actual qualification fatal function without starting its rig. */
+static bool gw_qualification_fatal_script(char script[4096])
+{
+    FILE *f = fopen("tools/scripts/qualify_fleet_gateway_front.sh", "r");
+    if (!f) return false;
+    char line[512];
+    memcpy(script, "exec 2>&1\n", sizeof("exec 2>&1\n"));
+    size_t used = sizeof("exec 2>&1\n") - 1;
+    bool in = false, complete = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (!in && strcmp(line, "fail() {\n") == 0) in = true;
+        if (!in) continue;
+        size_t len = strlen(line);
+        if (len >= 4096 - used) break;
+        memcpy(script + used, line, len + 1);
+        used += len;
+        if (strcmp(line, "}\n") == 0) { complete = true; break; }
+    }
+    fclose(f);
+    if (!complete) return false;
+    int written = snprintf(script + used, 4096 - used,
+                           "\nfail witness\nprintf CONTINUED\n");
+    return written >= 0 && (size_t)written < 4096 - used;
+}
+
+static bool gw_qualification_fatal_stops(void)
+{
+    char script[4096];
+    if (!gw_qualification_fatal_script(script)) return false;
+    char output[512] = {0};
+    const char *argv[] = {"/bin/sh", "-c", script, NULL};
+    struct zcl_spawn_evidence evidence = {0};
+    return zcl_spawn_capture_evidence(argv, output, sizeof(output), 5000, &evidence) == 1 &&
+           evidence.exit_observed && evidence.exit_code == 1 &&
+           evidence.stdout_complete && !evidence.stdout_truncated && !evidence.timed_out &&
+           strstr(output, "qualify: FAIL: witness") && !strstr(output, "CONTINUED");
+}
+
 /* The registered base group: proves the partition and the family, runs no
  * gateway. Each shard group runs its owned sub-suites. */
 int test_fleet_gateway(void);
 int test_fleet_gateway(void)
 {
     int failures = 0;
+    if (!gw_qualification_fatal_stops()) {
+        printf("FAIL fleet_gateway: qualification fatal must stop execution\n");
+        failures++;
+    }
     if (!gw_partition_valid()) {
         printf("FAIL fleet_gateway: shard partition is not exactly the "
                "original %zu sub-suites, each owned once\n",
