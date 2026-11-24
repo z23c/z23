@@ -962,6 +962,9 @@ static int code_impact_direct_callers(struct codeindex *ci, const char *path)
     static struct ci_ref callerbuf[CODE_IMPACT_REF_CAP];
     int direct_callers = 0;
     for (int i = 0; i < nsym; i++) {
+        /* C tags occupy a separate namespace and cannot name a call. */
+        if (syms[i].kind == 'S' || syms[i].kind == 'E')
+            continue;
         int nc = codeindex_callers(ci, syms[i].name, callerbuf,
                                    CODE_IMPACT_REF_CAP);
         if (nc > 0) direct_callers += nc;

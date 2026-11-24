@@ -324,6 +324,33 @@ static int test_code_impact_leaf(void)
     return failures;
 }
 
+static int test_code_impact_tag_callers(void)
+{
+    int failures = 0;
+    TEST("code_impact: tag names do not count unrelated calls") {
+        TEST_DISCARD(system("rm -rf " CI_IMPACT_FIX));
+        ASSERT(ci_impact_mk_write(CI_IMPACT_FIX, "core/modules/net/include/net/ci_tags.h",
+                                  "struct stat;\nunion ci_union;\nenum ci_enum;\n"));
+        ASSERT(ci_impact_mk_write(CI_IMPACT_FIX, "core/modules/net/src/ci_tags_user.c",
+                                  "#include \"net/ci_tags.h\"\nstruct stat *ci_tag_value;\n"));
+        ASSERT(ci_impact_mk_write(CI_IMPACT_FIX, "build/obj/ci_tags_user.d",
+                                  "build/obj/ci_tags_user.o: core/modules/net/src/ci_tags_user.c "
+                                  "core/modules/net/include/net/ci_tags.h\n"));
+        ASSERT(ci_impact_mk_write(CI_IMPACT_FIX, "core/modules/net/src/ci_tags_other.c",
+                                  "int ci_other(void) { return stat() + ci_union() + ci_enum(); }\n"));
+        struct zcl_command_reply reply;
+        ci_impact_call("core/modules/net/include/net/ci_tags.h", CI_IMPACT_FIX, &reply);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(json_get_int(json_get(&reply.data, "direct_callers")) == 0);
+        ASSERT(json_array_has_string(json_get(&reply.data, "include_dependents"),
+                                     "core/modules/net/src/ci_tags_user.c"));
+        zcl_command_reply_free(&reply);
+        TEST_DISCARD(system("rm -rf " CI_IMPACT_FIX));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── 3: missing path input — a typed error body, never a bare failure ── */
 static int test_code_impact_missing_path(void)
 {
@@ -2757,6 +2784,7 @@ int test_code_impact(void)
     failures += test_code_impact_scope_refusals();
     failures += test_code_impact_hub();
     failures += test_code_impact_leaf();
+    failures += test_code_impact_tag_callers();
     failures += test_code_impact_missing_path();
     failures += test_code_impact_unknown_path();
     failures += test_code_room_route_storage();
