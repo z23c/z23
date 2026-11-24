@@ -211,9 +211,10 @@ static bool sc_write_fixture_decl(void)
         sc_write(SC_SRC "sc_decl_mixed.c", "int sc_decl_target(void);\nint sc_decl_target(void) { return 1; }\n");
 }
 
-/* A test file whose bodies open inside a macro: the scanner reads each
- * `SC_CHECK(...);` as a file-scope row named SC_CHECK. sc_check.h defines the
- * statement macro SC_CHECK and the declaration macro SC_DECLARE. */
+/* Bodies the scanner cannot see: each `SC_CHECK(...);` inside a function
+ * opened by a macro is a file-scope row named SC_CHECK. sc_hidden.c opens a
+ * static function; sc_handler.c opens a NON-static one, sc_h_run, that
+ * sc_h_caller.c calls. The index holds no definition of sc_h_run. */
 #define SC_HIDDEN_BODY \
     "#include \"net/sc_check.h\"\n" \
     "#define SC_CASE(fn) static int fn(void) {\n" \
@@ -226,26 +227,27 @@ static bool sc_write_fixture_decl(void)
 static bool sc_write_fixture_stmt_macro(void)
 {
     return sc_write(SC_INC "sc_check.h",
-        "#define SC_CHECK(c) do { if (!(c)) return 1; } while (0)\n"
-        "#define SC_DECLARE(n) int n(void)\n") &&
+        "#define SC_CHECK(c) do { if (!(c)) return 1; } while (0)\n") &&
         sc_write(SC_SRC "sc_hidden.c", SC_HIDDEN_BODY) &&
         sc_write("build/obj/sc_hidden.d",
         "build/obj/sc_hidden.o: " SC_SRC "sc_hidden.c " SC_INC "sc_check.h\n") &&
-        sc_write(SC_SRC "sc_hidden_nodep.c", SC_HIDDEN_BODY) &&
+        sc_write(SC_SRC "sc_handler.c",
+        "#include \"net/sc_check.h\"\n"
+        "#define SC_HANDLER(n) int n(void) {\n"
+        "SC_HANDLER(sc_h_run)\n"
+        "    SC_CHECK(2 > 1);\n"
+        "    return 0; }\n") &&
+        sc_write("build/obj/sc_handler.d",
+        "build/obj/sc_handler.o: " SC_SRC "sc_handler.c " SC_INC "sc_check.h\n") &&
+        sc_write(SC_SRC "sc_h_caller.c",
+        "int sc_h_run(void);\nint sc_h_caller(void) { return sc_h_run(); }\n") &&
+        sc_write("build/obj/sc_h_caller.d",
+        "build/obj/sc_h_caller.o: " SC_SRC "sc_h_caller.c\n") &&
         sc_write(SC_SRC "sc_check_user.c",
         "#include \"net/sc_check.h\"\n"
         "int sc_check_user(void) { SC_CHECK(2 > 1); return 0; }\n") &&
         sc_write("build/obj/sc_check_user.d",
         "build/obj/sc_check_user.o: " SC_SRC "sc_check_user.c " SC_INC "sc_check.h\n") &&
-        sc_write(SC_SRC "sc_declarer.c",
-        "#include \"net/sc_check.h\"\nSC_DECLARE(sc_declared);\n") &&
-        sc_write("build/obj/sc_declarer.d",
-        "build/obj/sc_declarer.o: " SC_SRC "sc_declarer.c " SC_INC "sc_check.h\n") &&
-        sc_write(SC_SRC "sc_declare_user.c",
-        "#include \"net/sc_check.h\"\n"
-        "int sc_declare_user(void) { SC_DECLARE(sc_local); return sc_local(); }\n") &&
-        sc_write("build/obj/sc_declare_user.d",
-        "build/obj/sc_declare_user.o: " SC_SRC "sc_declare_user.c " SC_INC "sc_check.h\n") &&
         sc_write(SC_SRC "sc_local_macro.c",
         "#define sc_lm_call(x) ((x) + 1)\n"
         "int sc_local_macro(void) { return sc_lm_call(1); }\n") &&
@@ -1027,43 +1029,65 @@ static int test_sc_exact_checked(void)
     return failures;
 }
 
-/* The fixture really holds the shape the rule is about: a partial file-scope
- * row named SC_CHECK in sc_hidden.c, and the statement macro in the header. */
-static bool sc_stmt_rows_present(struct codeindex *ci)
+/* `file` holds a partial file-scope row named SC_CHECK, and the index holds
+ * no definition named `hidden` (empty: no such check). */
+static bool sc_stmt_rows_present(struct codeindex *ci, const char *file,
+                                 const char *hidden)
 {
     struct ci_symbol rows[32];
-    int n = ci_store_symbols_in_file(ci->store, SC_SRC "sc_hidden.c", rows, 32);
-    bool call = false;
-    for (int i = 0; i < n; i++)
+    int n = ci_store_symbols_in_file(ci->store, file, rows, 32);
+    bool call = false, seen = false;
+    for (int i = 0; i < n; i++) {
         if (!strcmp(rows[i].name, "SC_CHECK") && rows[i].kind == 'D' &&
             rows[i].partial && rows[i].def_line == 0)
             call = true;
-    n = ci_store_symbols_in_file(ci->store, SC_INC "sc_check.h", rows, 32);
-    bool macro = false;
-    for (int i = 0; i < n; i++)
-        if (!strcmp(rows[i].name, "SC_CHECK") && rows[i].kind == 'M')
-            macro = true;
-    if (!call || !macro)
-        fprintf(stderr, "statement macro fixture: call_row=%d macro_row=%d\n", call, macro);
-    return call && macro;
+        if (hidden[0] && !strcmp(rows[i].name, hidden))
+            seen = true;
+    }
+    if (!call || seen)
+        fprintf(stderr, "statement macro fixture %s: call_row=%d hidden_row=%d\n",
+                file, call, seen);
+    return call && !seen;
+}
+
+/* 4200 synthetic users of SC_CHECK, as many as a real harness ASSERT has:
+ * the walk of the call-shaped row must saturate and report truncated. */
+static bool sc_handler_saturates(struct codeindex *ci, const char *changed_path)
+{
+    static const char sql[] =
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4200) "
+        "INSERT INTO refs(callee_name,ref_file,ref_line,enclosing) "
+        "SELECT 'SC_CHECK',printf('chk-synthetic-%d.c',x),1,'' FROM n;";
+    struct ci_store *store = sc_macro_copy_store(ci);
+    if (!store) return false;
+    struct codeindex copy = *ci; copy.store = store;
+    bool ok = sqlite3_exec(ci_store_db(store), sql, NULL, NULL, NULL) == SQLITE_OK;
+    char changed[1][256], out[SC_OUT_CAP][256];
+    snprintf(changed[0], sizeof(changed[0]), "%s", changed_path);
+    bool truncated = false;
+    int n = ok ? codeindex_impact_closure(&copy, changed, 1, 0, out, SC_OUT_CAP, &truncated) : -1;
+    ci_store_close(store);
+    if (n < 0 || !truncated)
+        fprintf(stderr, "statement macro saturation %s: n=%d truncated=%d\n",
+                changed_path, n, truncated);
+    return n >= 0 && truncated;
 }
 
 static int test_sc_statement_macro_call(struct codeindex *ci)
 {
     int failures = 0;
-    TEST("codeindex_static_callers: a statement-macro call in a changed test "
-         "file is a reference, its definition still walks every caller") {
-        ASSERT(sc_stmt_rows_present(ci));
+    TEST("codeindex_static_callers: a statement-macro call row in a hidden "
+         "body stays a seed, so its fan-out still stands in for the body") {
+        ASSERT(sc_stmt_rows_present(ci, SC_SRC "sc_hidden.c", ""));
+        ASSERT(sc_stmt_rows_present(ci, SC_SRC "sc_handler.c", "sc_h_run"));
         for (int overlay = 0; overlay < 2; ++overlay) {
-            /* Calling SC_CHECK changes no SC_CHECK: its other users stay out. */
-            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden.c", SC_SRC "sc_hidden.c", overlay, true));
-            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden.c", SC_SRC "sc_check_user.c", overlay, false));
-            /* No depfile: the header's macro cannot be shown visible. */
-            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden_nodep.c", SC_SRC "sc_check_user.c", overlay, true));
-            /* A declaration-making macro keeps today's name walk. */
-            ASSERT(sc_decl_has(ci, SC_SRC "sc_declarer.c", SC_SRC "sc_declare_user.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_hidden.c", SC_SRC "sc_check_user.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_handler.c", SC_SRC "sc_check_user.c", overlay, true));
         }
-        /* Editing the header that defines SC_CHECK still reaches its users. */
+        /* The hidden non-static sc_h_run has callers no seed names; with a
+         * harness-sized fan-out the walk saturates and the proof widens. */
+        ASSERT(sc_handler_saturates(ci, SC_SRC "sc_handler.c"));
+        ASSERT(sc_handler_saturates(ci, SC_SRC "sc_hidden.c"));
         ASSERT(sc_decl_has(ci, SC_INC "sc_check.h", SC_SRC "sc_check_user.c", false, true));
         PASS();
     } _test_next:;

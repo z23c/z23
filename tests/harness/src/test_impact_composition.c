@@ -1592,6 +1592,151 @@ static int test_ic_universal_trigger(void)
     return failures;
 }
 
+/* ── adversarial change shapes: each selects its observers or runs all ────
+ *
+ * One tree, every shape a narrowing could get wrong. download.c (group
+ * "download") observes each changed input through exactly one route: a
+ * caller edge, a header it reads, a .def row it includes, a .c-local macro
+ * it reads through an #include of that .c. Each changed input must name
+ * "download", or the plan must be universal. The two fan-out files give a
+ * libc name and a harness statement macro more than one query batch of
+ * distinct callers, as the real tree does. */
+#define IC_FIX_ADV IC_FIX_ROOT "/adversarial"
+#define IC_ADV_NET "core/modules/net/"
+#define IC_ADV_ASSERT_H "tests/harness/include/test/ic_assert.h"
+
+static bool ic_adv_fanout(const char *rel, const char *head, const char *call)
+{
+    const size_t calls = 5000;
+    size_t cap = calls * 64 + 256;
+    char *body = malloc(cap);
+    if (!body) return false;
+    size_t pos = (size_t)snprintf(body, cap, "%s", head);
+    for (size_t i = 0; i < calls && pos + 64 < cap; i++)
+        pos += (size_t)snprintf(body + pos, cap - pos,
+                                "int zadv%zu(void) { %s; return 0; }\n", i, call);
+    bool ok = ic_write(IC_FIX_ADV, rel, body);
+    free(body);
+    return ok;
+}
+
+static bool ic_adv_sources(void)
+{
+    return ic_write(IC_FIX_ADV, IC_ADV_NET "src/tor_integration.c",
+                    "#include \"net/clp.h\"\n"
+                    "int tor_leaf(int x) { return x + 1; }\n"
+                    "int tor_twice(int x) { return tor_leaf(x) * 2; }\n") &&
+           ic_write(IC_FIX_ADV, IC_ADV_NET "src/download.c",
+                    "#include \"net/clp.h\"\n#include \"net/ic_redef.h\"\n"
+                    "#include \"net/ic_inline.h\"\n#include \"ic_local_printf.c\"\n"
+                    "int dl_top(int x) { return tor_leaf(x) + ic_inl(IC_W) + printf(\"d\"); }\n") &&
+           ic_write(IC_FIX_ADV, IC_ADV_NET "include/net/clp.h",
+                    "int tor_leaf(int x);\nint tor_twice(int x);\nint dl_top(int x);\n") &&
+           ic_write(IC_FIX_ADV, IC_ADV_NET "include/net/ic_redef.h",
+                    "#undef IC_W\n#define IC_W 2\n") &&
+           ic_write(IC_FIX_ADV, IC_ADV_NET "include/net/ic_inline.h",
+                    "static inline int ic_inl(int x) { return x; }\n") &&
+           ic_write(IC_FIX_ADV, "engine/controllers/include/controllers/ic_rows.def",
+                    "IC_ROW(alpha, 1)\n") &&
+           ic_write(IC_FIX_ADV, IC_ADV_NET "src/ic_local_printf.c",
+                    "#define printf(...) 0\n"
+                    "int ic_lp(void) { return printf(\"x\"); }\n") &&
+           ic_write(IC_FIX_ADV, IC_ADV_ASSERT_H,
+                    "#define IC_ASSERT(c) do { if (!(c)) return 1; } while (0)\n") &&
+           ic_write(IC_FIX_ADV, "tests/harness/src/test_download.c",
+                    "#include \"test/ic_assert.h\"\n"
+                    "int test_download(void) { IC_ASSERT(1 > 0); return 0; }\n") &&
+           ic_write(IC_FIX_ADV, "tests/harness/src/test_tor.c",
+                    "#include \"test/ic_assert.h\"\n"
+                    "#define TC(fn) int fn(void) {\n"
+                    "TC(test_tor_case)\n    IC_ASSERT(1 > 0);\n    return 0; }\n") &&
+           ic_adv_fanout(IC_ADV_NET "src/zprintf.c", "#include \"net/clp.h\"\n",
+                         "printf(\"z\")") &&
+           ic_adv_fanout("tests/harness/src/zassert.c",
+                         "#include \"test/ic_assert.h\"\n", "IC_ASSERT(1)");
+}
+
+static bool ic_adv_depfiles(bool zprintf_depfile)
+{
+    return ic_write(IC_FIX_ADV, "build/obj/tor_integration.d",
+                    "build/obj/tor_integration.o: " IC_ADV_NET "src/tor_integration.c "
+                    IC_ADV_NET "include/net/clp.h\n") &&
+           ic_write(IC_FIX_ADV, "build/obj/download.d",
+                    "build/obj/download.o: " IC_ADV_NET "src/download.c "
+                    IC_ADV_NET "include/net/clp.h " IC_ADV_NET "include/net/ic_redef.h "
+                    IC_ADV_NET "include/net/ic_inline.h " IC_ADV_NET "src/ic_local_printf.c "
+                    "engine/controllers/include/controllers/ic_rows.def\n") &&
+           ic_write(IC_FIX_ADV, "build/obj/ic_local_printf.d",
+                    "build/obj/ic_local_printf.o: " IC_ADV_NET "src/ic_local_printf.c\n") &&
+           ic_write(IC_FIX_ADV, "build/obj/test_download.d",
+                    "build/obj/test_download.o: tests/harness/src/test_download.c "
+                    IC_ADV_ASSERT_H "\n") &&
+           ic_write(IC_FIX_ADV, "build/obj/test_tor.d",
+                    "build/obj/test_tor.o: tests/harness/src/test_tor.c "
+                    IC_ADV_ASSERT_H "\n") &&
+           ic_write(IC_FIX_ADV, "build/obj/zassert.d",
+                    "build/obj/zassert.o: tests/harness/src/zassert.c "
+                    IC_ADV_ASSERT_H "\n") &&
+           (zprintf_depfile
+                ? ic_write(IC_FIX_ADV, "build/obj/zprintf.d",
+                           "build/obj/zprintf.o: " IC_ADV_NET "src/zprintf.c "
+                           IC_ADV_NET "include/net/clp.h\n")
+                : (unlink(IC_FIX_ADV "/build/obj/zprintf.d") == 0 || errno == ENOENT));
+}
+
+/* 1: "download" is named and the plan is exact; 2: the plan is universal;
+ * 0: neither, an observer was dropped. */
+static int ic_adv_verdict(const char *changed)
+{
+    const char *files[] = { changed };
+    static struct zcl_devloop_plan plan;
+    if (!zcl_devloop_plan_files(files, 1, &plan) ||
+        !zcl_devloop_plan_add_closure(IC_FIX_ADV, files, 1, &plan))
+        return -1;
+    int verdict = plan.closure_universal ? 2 : ic_planned(&plan, "download") ? 1 : 0;
+    printf("invariant=adversarial_shape changed=%s verdict=%d groups=%zu+%zu "
+           "capacity=%s/%s node=%s\n",
+           changed, verdict, plan.path_groups_len, plan.closure_groups_len,
+           plan.capacity_origin ? plan.capacity_origin : "-",
+           plan.capacity_cause ? plan.capacity_cause : "-", plan.capacity_node);
+    return verdict;
+}
+
+static int test_ic_adversarial_change_shapes(void)
+{
+    int failures = 0;
+    TEST("impact composition: adversarial change shapes select their observers or run everything") {
+        TEST_DISCARD(system("rm -rf " IC_FIX_ADV));
+        ASSERT(ic_adv_sources() && ic_adv_depfiles(true));
+        /* A symbol defined and referenced in the same change. */
+        ASSERT(ic_adv_verdict(IC_ADV_NET "src/tor_integration.c") == 1);
+        /* A header that #undefs and redefines a macro. */
+        ASSERT(ic_adv_verdict(IC_ADV_NET "include/net/ic_redef.h") == 1);
+        /* A static inline defined in a header. */
+        ASSERT(ic_adv_verdict(IC_ADV_NET "include/net/ic_inline.h") == 1);
+        /* A .def registry row. */
+        ASSERT(ic_adv_verdict("engine/controllers/include/controllers/ic_rows.def") == 1);
+        /* A .c-local redefinition of a libc name: the TU that #includes the .c
+         * is named, and the 5000 printf callers whose depfiles do not read it
+         * do not saturate the walk. */
+        ASSERT(ic_adv_verdict(IC_ADV_NET "src/ic_local_printf.c") == 1);
+        /* A test file whose visible body calls a statement macro. */
+        ASSERT(ic_adv_verdict("tests/harness/src/test_download.c") == 1);
+        /* A hidden (macro-opened, non-static) body calling the same macro:
+         * the call row stays a seed and its fan-out widens the proof. */
+        ASSERT(ic_adv_verdict("tests/harness/src/test_tor.c") == 2);
+        /* The harness header that defines the macro. */
+        ASSERT(ic_adv_verdict(IC_ADV_ASSERT_H) == 2);
+        /* A printf caller with no depfile may read the .c: the walk must keep
+         * every printf caller, saturate, and widen. */
+        ASSERT(ic_adv_depfiles(false));
+        ASSERT(ic_adv_verdict(IC_ADV_NET "src/ic_local_printf.c") == 2);
+        TEST_DISCARD(system("rm -rf " IC_FIX_ADV));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_capacity_bound_runs_everything(void)
 {
     int failures = 0;
@@ -18244,6 +18389,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_capacity_bound_runs_everything();
     failures += test_ic_capacity_provenance();
     failures += test_ic_universal_trigger();
+    failures += test_ic_adversarial_change_shapes();
     failures += test_ic_include_capacity_runs_everything();
     failures += test_ic_path_group_cap_runs_everything();
     failures += test_ic_host_need_table_is_closed();
