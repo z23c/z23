@@ -65,7 +65,10 @@
  * it is never just the item-result count.
  *
  * STATES. queued, read, acknowledged, completed — four different facts.
- * Absence of evidence stays at the earlier state. "read" is only the
+ * Absence of evidence stays at the earlier state. On a mail pass that was
+ * cut the absence itself is not known, and a directive that would read
+ * queued or recipient_gone by that absence reads "unresolved" instead
+ * (MAIL WINDOW, below). "read" is only the
  * receiver's mail/read.<to> file covering the row. It is not an
  * acknowledgement and it is not execution. "completed" stays a retained
  * queue outcome with an explicit pass verdict and rc 0.
@@ -119,8 +122,9 @@
  * A closure is a new row and rewrites nothing; a real answer still wins
  * over it. `class` sorts every directive: broadcast (to `*`), owner (to a
  * name in ZCL_FLEET_OWNER_NAMES, comma-separated, default the host $USER), else
- * worker. An answered, closed or recipient_gone directive, a broadcast and
- * an owner-addressed row are never "no receiver evidence" blockers.
+ * worker. An answered, closed, recipient_gone or unresolved directive, a
+ * broadcast and an owner-addressed row are never "no receiver evidence"
+ * blockers (unresolved exists only on a cut pass).
  *
  * DIRECTIVE BACKLOG. Over the newest FMC_DIRECTIVE_SCAN (64) directives,
  * open_worker_directives counts worker directives that are not answered,
@@ -198,6 +202,53 @@
  * items, body at most 2048 bytes each (under mail's own 4096 ceiling and
  * refusal scanners, which still apply). Mail bodies over-long or tripping
  * refusal rules come back per-item as refused, never as a crash.
+ *
+ * MAIL WINDOW. Every brief that is not compact makes one pass over mail,
+ * for agents, work, candidates, workers (a worker is known only by a
+ * receiver= or worker= row), sessions and the directive tallies, and for
+ * the rows a change's state resolves against. That pass starts each stream
+ * at its newest ZCL_DEVAGENT_MAIL_WINDOW_BYTES of whole rows and never
+ * past a position the caller's own `since` token names. The pages it
+ * follows are that window's, not the history's; the leaf still lists
+ * every stream to place the start, and the last page replays through the
+ * public pull, which reads every stream once more for its newest seq (the
+ * scan that keeps cursor exact).
+ * When older rows were left unread, evidence.mail_window_cut is true, and
+ * once the pass read the first row of every cut stream,
+ * evidence.mail_window_reach_ts is the newest stamp any cut stream began
+ * at. The first key is present only when rows were cut and the pass
+ * succeeded; the second only when it is known. With the keys absent,
+ * either the whole history was read, the pass failed (missing[] names
+ * dev.agent.mail) or the brief is compact. Every list above then means
+ * "seen back to that stamp", never "ever": a directive whose row stands
+ * before it is not tallied, a worker whose last row stands before it is
+ * not listed, candidates_total is unknown (candidates_complete false, and
+ * missing[] names candidates.mail), tokens_total_exact is false,
+ * workers_total_exact is false, a remote worker's tokens_total sums only
+ * the receipts inside the window (a floor with no flag of its own), and
+ * a session whose presence note is outside the window reads UNKNOWN with
+ * a reason that says the pass was cut.
+ * What such a pass fails to find for a row it did read is not evidence.
+ * A directive, whoever sent it, stamped at or before the reach, that
+ * would read "queued" or "recipient_gone" from that absence reads
+ * "unresolved" instead: what would show it received or answered, or the
+ * recipient gone, may stand in the rows not read. A directive reads so in
+ * reply.state too, is counted in directive_counts.unresolved (present
+ * only when nonzero), is in neither open number, is never a stale
+ * blocker, and carries a next_action naming the exact read by ref. An
+ * unknown reach reads every such row that way. Two things a cut pass
+ * still gets wrong both err towards alarm and are written at the reach
+ * (fmc_window_finish): a directive stamped after the reach to a recipient
+ * whose presence note is outside the window, and a stream appended out
+ * of stamp order.
+ * changes stay exact for a token-resumed brief: they are the rows after
+ * its token, in order and under the changes cap as before, each resolved
+ * against the rows this pass read. A brief without a token shows the
+ * newest rows of the window.
+ * A window the leaf cannot hand out, or a cut start that fails, is the
+ * walk from the start as before (the cut start's reason is logged), so
+ * history past FMC_MAIL_PAGES_MAX pages without a window is still an
+ * explicit failure.
  *
  * TASKS. tasks[] is an additive, bounded LOCAL snapshot over agent queue
  * and landing status; it never joins names to canonical work. Exact seq +
@@ -1479,6 +1530,14 @@ struct fmc_mail_view {
      * recover them; the advanced token moves past. */
     bool truncated;
     long long dropped;
+    /* The pass over mail began inside the history, at each stream's newest
+     * window: cut says older rows exist that this brief did not read, and
+     * window_reach_ts is the newest stamp at which any cut stream began,
+     * once the pass read that row of every cut stream ("" when it did not,
+     * and when nothing was cut). Every compact path reads no window and
+     * stays exact. */
+    bool window_cut;
+    char window_reach_ts[32];
 };
 
 /* One parsed mail row. String pointers borrow the sibling reply and are
@@ -2065,7 +2124,7 @@ struct fmc_dq_entry {
 
 struct fmc_directive_tally {
     long long scanned, open_worker, overdue_worker;
-    long long answered, closed, gone;
+    long long answered, closed, gone, unresolved;
     long long broadcast, broadcast_open, owner, owner_open;
     struct fmc_dq_entry q[FMC_DQ_CAP];
     size_t nq;
@@ -2119,6 +2178,9 @@ struct fmc_roster {
     struct fmc_session *ss;
     size_t nss;
     size_t ss_untracked;
+    /* The brief's mail pass was cut to its newest window: a worker seen
+     * only before it is unknown here, so the total is not exact. */
+    bool window_cut;
 };
 
 static void fmc_sessions_seed(struct fmc_roster *ro);
@@ -2716,7 +2778,8 @@ static void fmc_workers_emit(struct json_value *data, struct fmc_roster *ro,
         fmc_worker_emit(&arr, &ro->w[i], c);
     (void)json_push_kv(data, "workers", &arr);
     (void)json_push_kv_int(data, "workers_total", (long long)total);
-    (void)json_push_kv_bool(data, "workers_total_exact", ro->untracked == 0);
+    (void)json_push_kv_bool(data, "workers_total_exact",
+                            ro->untracked == 0 && !ro->window_cut);
     (void)json_push_kv_bool(data, "workers_truncated",
                             total > json_size(&arr) || ro->untracked > 0);
     (void)json_push_kv_int(data, "alive_window_s", FMC_ALIVE_WINDOW_S);
@@ -3024,12 +3087,19 @@ static bool fmc_put_known_int(struct json_value *o, const char *key,
 }
 
 static const char *fmc_session_state(const struct fmc_session *s,
-                                     long long age, char *why, size_t cap)
+                                     long long age, bool cut, char *why,
+                                     size_t cap)
 {
     const char *state = "UNKNOWN";
     if (!s->seen)
-        (void)snprintf(why, cap, "no note row under ref presence-%s in the "
-                       "mail this host pulls", s->role);
+        /* On a cut pass the note may stand in the rows not read, so the
+         * absence is not of the whole mailbox. */
+        (void)snprintf(why, cap, cut
+                           ? "no note row under ref presence-%s in the rows "
+                             "this pass read (cut: older rows unread)"
+                           : "no note row under ref presence-%s in the "
+                             "mail this host pulls",
+                       s->role);
     else if (age < 0)
         (void)snprintf(why, cap, "%s",
                        "presence row carries no parseable ts");
@@ -3132,7 +3202,8 @@ static void fmc_session_emit(struct json_value *arr,
     struct json_value o;
     char why[160];
     long long age = s->seen ? fmc_age_s(now, s->ts) : -1;
-    const char *state = fmc_session_state(s, age, why, sizeof(why));
+    const char *state = fmc_session_state(s, age, ro->window_cut, why,
+                                          sizeof(why));
     json_init(&o);
     json_set_object(&o);
     (void)json_push_kv_str(&o, "role", s->role);
@@ -3179,8 +3250,11 @@ static void fmc_spend_emit(struct json_value *data,
     json_init(&o);
     json_set_object(&o);
     fmc_put_known_int(&o, "tokens_total", counted > 0 ? sum : -1);
+    /* Exact only over a whole pass: a worker seen before a cut window is
+     * not summed, and one inside it sums only the receipts there. */
     (void)json_push_kv_bool(&o, "tokens_total_exact",
-                            unknown == 0 && ro->untracked == 0);
+                            unknown == 0 && ro->untracked == 0 &&
+                                !ro->window_cut);
     (void)json_push_kv_int(&o, "workers_counted", counted);
     (void)json_push_kv_int(&o, "workers_without_receipt", unknown);
     (void)json_push_kv_str(&o, "reservations", "UNKNOWN");
@@ -3194,14 +3268,23 @@ static void fmc_spend_emit(struct json_value *data,
 /* Emitted in snapshots only: a forward page's caller-chosen byte budget
  * belongs to its changes, and these fixed scalars cannot be trimmed. */
 #define FMC_DIRECTIVE_DEFINITION \
-    "open_worker_directives: among the newest 64 directives in this host's " \
-    "mail, those addressed to a worker (not '*', not an owner name) with no " \
+    "open_worker_directives: among the newest 64 directives in the rows " \
+    "this brief read of this host's mail, those addressed to a worker " \
+    "(not '*', not an owner name) with no " \
     "later result from the addressee or back to the origin, no later " \
     "'closed by sender:' note or result from the origin or an owner, and not " \
     "recipient_gone (no ack or read covers it, the recipient posted a " \
-    "presence-<name> note here, and its newest presence note or row whose from is that name is older " \
+    "presence-<name> note here, and its newest presence note or row whose " \
+    "from is that name is older " \
     "than 86400 s). overdue_worker_directives: the open ones this host sent " \
-    "with no receiver evidence after 120 s. Directives carry no deadline."
+    "with no receiver evidence after 120 s. Directives carry no deadline. " \
+    "On a brief whose mail pass was cut (evidence.mail_window_cut), a " \
+    "directive stamped at or before evidence.mail_window_reach_ts (any " \
+    "such directive, when no reach is known) that nothing read answers, " \
+    "closes or acknowledges is unresolved: counted in " \
+    "directive_counts.unresolved, in neither open number, never " \
+    "overdue; a change row shown for it carries next_action, the latest " \
+    "row held under its ref."
 
 static bool fmc_directive_queue_emit(struct json_value *data,
                                      const struct fmc_directive_tally *t)
@@ -3249,6 +3332,9 @@ static void fmc_directives_emit(struct json_value *data,
     bool ok = true;
     for (size_t i = 0; i < sizeof(n) / sizeof(n[0]); i++)
         ok &= json_push_kv_int(&o, n[i].key, n[i].v);
+    /* Present only when some directive was unresolved (a cut pass). */
+    if (t->unresolved > 0)
+        ok &= json_push_kv_int(&o, "unresolved", t->unresolved);
     char owners[72];
     (void)snprintf(owners, sizeof(owners), "%.64s", fmc_owner_names());
     ok &= json_push_kv_str(&o, "owner_names", owners);
@@ -3357,7 +3443,9 @@ static void fmc_stale_summary(struct json_value *blockers, int stale)
  *             user, so the reply's author need not carry the role name);
  *             an attempt= stated on both sides must agree;
  *   state     answered, closed, ambiguous, recipient_gone, else acked, else
- *             queued (see fmc_directive_resolve).
+ *             queued (see fmc_directive_resolve); on a cut pass,
+ *             unresolved replaces recipient_gone and queued at or before
+ *             the reach (fmc_directive_window).
  *             Unbound reply-to-origin matches are marked as heuristics.
  * sent_ts/sent_age_s are the directive's own time; answer_ts/answer_age_s
  * the reply's. The lifecycle `state` beside it keeps its closed
@@ -3661,8 +3749,8 @@ static bool fmc_recipient_gone(const struct json_value *rows,
            !fmc_dir_covered(rows, d, acked);
 }
 
-/* answered, closed, ambiguous, recipient_gone, acked, queued: a real
- * answer wins over a closure, a closure over everything else. */
+/* answered, closed, ambiguous, recipient_gone, acked, queued, unresolved:
+ * a real answer wins over a closure, a closure over everything else. */
 static void fmc_directive_resolve(const struct json_value *rows,
                                   const struct fmc_row *d, long long now,
                                   bool acked, struct fmc_dstatus *st)
@@ -3686,10 +3774,22 @@ static void fmc_directive_resolve(const struct json_value *rows,
         st->state = acked ? "acked" : "queued";
 }
 
+/* What a cut pass cannot know. A directive at or before the reach that
+ * nothing read answers or closes is unresolved, from queued (its answer
+ * may stand in the rows not read) and from recipient_gone (the
+ * recipient's newer rows may stand there). */
+static void fmc_directive_window(struct fmc_dstatus *st, bool past)
+{
+    if (past && (!strcmp(st->state, "queued") ||
+                 !strcmp(st->state, "recipient_gone")))
+        st->state = "unresolved";
+}
+
 static bool fmc_dstate_open(const char *state)
 {
     return strcmp(state, "answered") != 0 && strcmp(state, "closed") != 0 &&
-           strcmp(state, "recipient_gone") != 0;
+           strcmp(state, "recipient_gone") != 0 &&
+           strcmp(state, "unresolved") != 0;
 }
 
 /* The closure and expiry facts beside a directive's reply state. */
@@ -3718,13 +3818,30 @@ static bool fmc_reply_disposition(struct json_value *out, const char *typed,
            json_push_kv_bool(out, "disposition_verified", typed != NULL);
 }
 
+/* How to settle an unresolved row: the exact read by its ref, spelled out
+ * when the ref is a name the queue's grammar admits (safe to paste), else
+ * in general terms. */
+static const char *fmc_unresolved_action(const struct fmc_row *v, char *buf,
+                                         size_t cap)
+{
+    if (!v->ref[0] || !zcl_devagent_name_ok(v->ref))
+        return "fleet steer evidence --type=mail --ref=<the row's ref>";
+    (void)snprintf(buf, cap, "fleet steer evidence --type=mail --ref=%s", v->ref);
+    return buf;
+}
+
+/* An unresolved directive (fmc_directive_window) says so in its reply
+ * object and names the read that settles it. */
 static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
-                           const struct json_value *rows, long long now, const char *typed)
+                           const struct json_value *rows, long long now,
+                           const char *typed, bool past)
 {
     struct json_value o;
     struct fmc_dstatus st;
+    char action[FMC_REF_MAX + 64];
     bool acked = fmc_row_acked(v) || typed || fmc_alias_ack(v);
     fmc_directive_resolve(rows, v, now, acked, &st);
+    fmc_directive_window(&st, past);
     const struct fmc_answer *a = &st.a;
     bool answered = strcmp(st.state, "answered") == 0;
     json_init(&o);
@@ -3744,6 +3861,9 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
     if (answered)
         ok &= json_push_kv_bool(&o, "answer_heuristic",
                                 !strcmp(a->match, "reply_to_origin"));
+    if (strcmp(st.state, "unresolved") == 0)
+        ok &= json_push_kv_str(&o, "next_action",
+                               fmc_unresolved_action(v, action, sizeof(action)));
     if (ok) ok = json_push_kv(item, "reply", &o);
     json_free(&o);
     return ok;
@@ -3803,16 +3923,22 @@ static bool fmc_change_shape(const struct json_value *item, const struct fmc_row
 /* One bounded change row, carrying the state fmc_row_state resolves from
  * receiver evidence; completed is resolved later against queue outcomes
  * and board results. queued_age_s is how long a row has sat "queued"
- * (null for every other state, and when its stamp does not parse). */
+ * (null for every other state, and when its stamp does not parse). A row
+ * at or before a cut pass's reach that would read "queued" reads
+ * "unresolved": what would show it received may be in the rows not read. */
 static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
                            const struct json_value *rows,
-                           const char *sent_path, long long now)
+                           const char *sent_path, long long now, bool past)
 {
     struct json_value item;
     char lead[FMC_LEAD_MAX + 1];
     const char *typed = fmc_typed_read(rows, v);
     const char *state = fmc_row_state_with_read(v, rows, sent_path, typed);
     bool queued = strcmp(state, "queued") == 0;
+    if (past && queued) {
+        state = "unresolved";
+        queued = false;
+    }
 #ifdef ZCL_TESTING
     if (s_fmc_before_change_projection) s_fmc_before_change_projection();
 #endif
@@ -3837,7 +3963,8 @@ static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
         ok &= json_push_kv_bool(&item, "disposition_verified", false);
     }
     ok &= fmc_put_int(&item, "queued_age_s", queued ? fmc_age_s(now, v->ts) : -1);
-    if (!strcmp(v->kind, "directive")) ok &= fmc_reply_emit(&item, v, rows, now, typed);
+    if (!strcmp(v->kind, "directive"))
+        ok &= fmc_reply_emit(&item, v, rows, now, typed, past);
     ok = ok && fmc_change_shape(&item, v);
     size_t before = json_size(changes);
     if (ok) ok = json_push_back(changes, &item);
@@ -3847,7 +3974,7 @@ static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
 }
 
 /* dev.agent.mail answers in bounded pages, and every mail reader in this
- * file needs the whole history: follow next_since until a page says it was
+ * file reads its walk whole: follow next_since until a page says it was
  * the last, appending each page's rows to *rows (an initialized array).
  * FMC_MAIL_PAGES_MAX bounds the walk so a runaway history is an explicit
  * failure, never a silently partial view. NULL on success with *cursor set
@@ -4027,6 +4154,237 @@ static const char *fmc_mail_drain(const struct zcl_command_request *req,
                                false, ref);
 }
 
+/* The pass over mail every brief that is not compact makes, for the
+ * roster, the work list, the directive tallies and the rows a change's
+ * state resolves against. It begins each stream at its newest window and
+ * never past a position the caller's own token names
+ * (zcl_devagent_mail_brief_window), so the rows it parses follow what is
+ * still live and not the history. *cut says whether that left older rows
+ * unread; when it did, start keeps the token that pass began at (its
+ * entries name each cut stream's first row), else start is "". No window,
+ * none that cuts anything, or a cut start that fails is the walk from the
+ * start as before: whole, cut false, and on failure no better than it
+ * ever was (the cut start's reason is logged, not dropped). */
+static const char *fmc_mail_pass(const struct zcl_command_request *req,
+                                 struct json_value *rows, long long *cursor,
+                                 const char *resume, bool resumed,
+                                 char *end_token, size_t end_cap,
+                                 char *why_buf, size_t why_cap, bool *cut,
+                                 char *start, size_t start_cap)
+{
+    const char *fail = NULL;
+    start[0] = '\0';
+    if (zcl_devagent_mail_brief_window(start, start_cap,
+                                       ZCL_DEVAGENT_MAIL_WINDOW_BYTES,
+                                       resumed ? resume : NULL, cut) && *cut) {
+        fail = fmc_mail_drain_from(req, rows, cursor, start, end_token,
+                                   end_cap, why_buf, why_cap, true, NULL);
+        if (!fail)
+            return NULL;
+        /* `fail`, not why_buf: only a page the leaf refused writes that
+         * buffer; the other failures return a static string of their own. */
+        LOG_WARN(FMC_LOG, "brief window start refused (%s); reading from the start",
+                 fail);
+        json_free(rows);
+        json_init(rows);
+        json_set_array(rows);
+        *cursor = -1;
+        end_token[0] = '\0';
+    }
+    *cut = false;
+    start[0] = '\0';
+    return fmc_mail_drain_from(req, rows, cursor, "", end_token, end_cap,
+                               why_buf, why_cap, true, NULL);
+}
+
+/* ── the reach of a cut pass ─────────────────────────────────────────────
+ *
+ * A pass that began inside the history read each cut stream from one
+ * position on. What it did not read cannot settle a row it did read, so
+ * "nothing found" for a row old enough to have its answer back there is
+ * not a finding. The reach is the newest stamp at which any cut stream
+ * began: a row stamped after it was sent after every position the pass
+ * started from, so what answers it was read.
+ *
+ * That rests on stamps ascending in each stream's file order. The pull
+ * merges the streams' heads by stamp and reads each stream as its file
+ * holds it; the leaf lets a transport append a row stamped older than
+ * the row before it. A row appended after an answer and stamped older
+ * than it leaves the answer unread when the window starts at that row,
+ * while a directive stamped between the two reads past the reach:
+ * "queued" where the truth is answered. It errs towards alarm.
+ *
+ * The reach cannot settle a recipient's absence either. recipient_gone
+ * needs a presence row the pass read: a recipient silent for over a day
+ * whose own stream holds more than a window after its note reads as a
+ * name with no presence row, so a directive to it stamped after the
+ * reach stays open, overdue and a stale blocker where a whole read says
+ * recipient_gone and raises nothing. That too errs towards alarm; reading
+ * an unseen recipient as unresolved would silence real alarms to new
+ * workers. */
+#define FMC_WINDOW_STREAMS 16u /* the leaf refuses more */
+#define FMC_WINDOW_NAME 160u  /* longer than any name the leaf admits */
+
+struct fmc_window_entry {
+    char name[FMC_WINDOW_NAME];
+    long long off;
+    char ts[32];
+    bool seen;
+};
+
+struct fmc_window {
+    bool cut;
+    bool known;         /* the first row of every cut stream was read */
+    long long reach;    /* its stamp, in seconds; -1 when unknown */
+    char reach_ts[32];  /* "" when unknown, and when nothing was cut */
+    struct fmc_window_entry e[FMC_WINDOW_STREAMS];
+    size_t n;
+};
+
+/* One "<stream>:<offset>" entry of the token a cut pass began at. */
+static bool fmc_window_entry(struct fmc_window *w, const char *entry)
+{
+    const char *colon;
+    char *end = NULL;
+    struct fmc_window_entry *e;
+    size_t nlen;
+    long long off;
+    colon = entry ? strchr(entry, ':') : NULL;
+    if (!colon || colon == entry || w->n == FMC_WINDOW_STREAMS)
+        return false;
+    nlen = (size_t)(colon - entry);
+    if (nlen >= sizeof(w->e[0].name))
+        return false;
+    errno = 0;
+    off = strtoll(colon + 1, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0' || off < 0)
+        return false;
+    e = &w->e[w->n++];
+    memcpy(e->name, entry, nlen);
+    e->name[nlen] = '\0';
+    e->off = off;
+    return true;
+}
+
+/* Every entry of the token, after its integer floor. False when the token
+ * is not that shape: the reach then stays unknown. */
+static bool fmc_window_entries(struct fmc_window *w, const char *token)
+{
+    const char *bar = token ? strchr(token, '|') : NULL;
+    char entry[192];
+    if (!bar || !bar[1])
+        return false;
+    for (bar++; *bar;) {
+        const char *comma = strchr(bar, ',');
+        size_t n = comma ? (size_t)(comma - bar) : strlen(bar);
+        if (n == 0 || n >= sizeof(entry))
+            return false;
+        memcpy(entry, bar, n);
+        entry[n] = '\0';
+        if (!fmc_window_entry(w, entry))
+            return false;
+        if (!comma)
+            break;
+        bar = comma + 1;
+    }
+    return true;
+}
+
+/* The pass began at `token` when it was cut: keep its entries, or none
+ * (an unknown reach) when the token is not that shape. */
+static void fmc_window_begin(struct fmc_window *w, bool cut, const char *token)
+{
+    memset(w, 0, sizeof(*w));
+    w->cut = cut;
+    if (cut && !fmc_window_entries(w, token))
+        w->n = 0;
+}
+
+/* The cut stream's first row, once that row is among the pass's: the
+ * entry it begins (the stream it names, at the position that stream's
+ * window began, not noted yet), else NULL. `row` is an object. */
+static struct fmc_window_entry *fmc_window_at(struct fmc_window *w,
+                                              const struct json_value *row)
+{
+    const struct json_value *s = json_get(row, "stream");
+    const struct json_value *o = json_get(row, "row_offset");
+    if (!s || s->type != JSON_STR || !o || o->type != JSON_INT)
+        return NULL;
+    for (size_t i = 0; i < w->n; i++) {
+        struct fmc_window_entry *e = &w->e[i];
+        if (e->off > 0 && !e->seen && json_get_int(o) == e->off &&
+            strcmp(e->name, json_get_str(s)) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+/* One row of the pass: when it begins exactly where a cut stream began it
+ * is the oldest row read there, so its stamp is kept. */
+static void fmc_window_note(struct fmc_window *w, const struct json_value *row)
+{
+    struct fmc_window_entry *e;
+    const struct json_value *t;
+    if (!row || row->type != JSON_OBJ)
+        return;
+    e = fmc_window_at(w, row);
+    if (!e)
+        return;
+    t = json_get(row, "ts");
+    if (!t || t->type != JSON_STR || !json_get_str(t))
+        return;
+    (void)snprintf(e->ts, sizeof(e->ts), "%s", json_get_str(t));
+    e->seen = true;
+}
+
+/* The reach, once the pass has read its rows: the newest stamp at which a
+ * cut stream began, known only when every cut stream's first row was
+ * among them with a stamp that parses. It is the view's window evidence. */
+static void fmc_window_finish(struct fmc_window *w, const struct json_value *rows,
+                              struct fmc_mail_view *view)
+{
+    size_t i, n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u;
+    w->known = false;
+    w->reach = -1;
+    w->reach_ts[0] = '\0';
+    if (!w->cut)
+        return;
+    for (i = 0; i < n; i++)
+        fmc_window_note(w, json_at(rows, i));
+    for (i = 0; i < w->n; i++) {
+        long long t = w->e[i].seen ? fmc_ts_unix(w->e[i].ts) : -1;
+        if (w->e[i].off <= 0)
+            continue;
+        if (t < 0) {
+            w->reach = -1;
+            w->reach_ts[0] = '\0';
+            break;
+        }
+        if (t > w->reach) {
+            w->reach = t;
+            (void)snprintf(w->reach_ts, sizeof(w->reach_ts), "%s", w->e[i].ts);
+        }
+    }
+    w->known = w->reach >= 0;
+    (void)snprintf(view->window_reach_ts, sizeof(view->window_reach_ts),
+                   "%s", w->reach_ts);
+}
+
+/* Whether a row may have its answer among the rows a cut pass did not
+ * read: it is stamped at or before the reach. A reach that is not known,
+ * or a stamp that does not parse, reads the same way. False whenever
+ * nothing was cut. */
+static bool fmc_window_past(const struct fmc_window *w, const struct fmc_row *v)
+{
+    long long t;
+    if (!w->cut)
+        return false;
+    if (!w->known)
+        return true;
+    t = fmc_ts_unix(v->ts);
+    return t < 0 || t <= w->reach;
+}
+
 /* Everything the mail walk writes into, so each row is one call. */
 struct fmc_mail_ctx {
     bool projection_failed;
@@ -4042,8 +4400,19 @@ struct fmc_mail_ctx {
     long long shown;
     int scanned;
     int stale;
+    /* Where the pass began when it was cut: what makes an absence unknowable. */
+    struct fmc_window win;
     char sent_path[4096 + 32];
 };
+
+/* Mail counts as a read candidates source only when the pass read it
+ * whole: a cut pass leaves the total unknown, never a floor for one. */
+static void fmc_mail_source_note(const struct fmc_mail_ctx *c,
+                                 const struct fmc_mail_view *view)
+{
+    if (!view->window_cut)
+        zcl_fmc_cand_source_ok(c->cand, ZCL_FMC_CAND_SRC_MAIL);
+}
 
 /* ── candidates from each source ─────────────────────────────────────────
  *
@@ -4138,6 +4507,9 @@ static void fmc_tally_note(struct fmc_directive_tally *t,
     t->answered += strcmp(st->state, "answered") == 0;
     t->closed += strcmp(st->state, "closed") == 0;
     t->gone += strcmp(st->state, "recipient_gone") == 0;
+    /* unresolved is in neither open number: a cut pass did not see what
+     * would settle it. */
+    t->unresolved += strcmp(st->state, "unresolved") == 0;
     if (strcmp(st->cls, "broadcast") == 0) {
         t->broadcast++;
         t->broadcast_open += open;
@@ -4158,7 +4530,11 @@ static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
 {
     struct fmc_dstatus st;
     long long age = fmc_age_s(c->now, v->ts);
+    /* At or before a cut pass's reach, a directive nothing read resolves
+     * is unresolved: tallied apart, never open, never a blocker. */
+    bool past = fmc_window_past(&c->win, v);
     fmc_directive_resolve(rows, v, c->now, fmc_row_acked(v) || fmc_alias_ack(v), &st);
+    fmc_directive_window(&st, past);
     bool open = fmc_dstate_open(st.state);
     if (c->ro)
         fmc_tally_note(&c->ro->dt, &st, v, age, open);
@@ -4188,7 +4564,8 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
     }
     if (c->projection_failed || v->seq <= c->since || c->shown >= c->changes_cap)
         return;
-    if (fmc_row_change(c->changes, v, rows, c->sent_path, c->now)) c->shown++;
+    if (fmc_row_change(c->changes, v, rows, c->sent_path, c->now,
+                       fmc_window_past(&c->win, v))) c->shown++;
     else c->projection_failed = true;
 }
 
@@ -4230,7 +4607,8 @@ static void fmc_brief_token_changes(struct fmc_mail_ctx *c,
     for (i = 0; i < n && c->shown < c->changes_cap; i++) {
         struct fmc_row v;
         if (!fmc_row_parse(json_at(rows_new, i), &v) ||
-            !fmc_row_change(c->changes, &v, rows_full, c->sent_path, c->now)) {
+            !fmc_row_change(c->changes, &v, rows_full, c->sent_path, c->now,
+                            fmc_window_past(&c->win, &v))) {
             c->projection_failed = true;
             break;
         }
@@ -4243,7 +4621,7 @@ static void fmc_brief_token_changes(struct fmc_mail_ctx *c,
 
 /* Second drain for a token resume: rows that arrived after the caller's
  * watermark become changes (bounded, counted); tallies already ran over
- * the full drain, so this walk is display-only. False when the resume
+ * the pass's rows, so this walk is display-only. False when the resume
  * position failed: missing[] names it, nothing is shown, and the token
  * does not advance — the caller replays an older token or the start. */
 static bool fmc_brief_resume_changes(const struct zcl_command_request *req,
@@ -4378,6 +4756,7 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
 {
     struct json_value rows;
     char resume[FMC_MAIL_SINCE_CAP];
+    char window_start[FMC_MAIL_SINCE_CAP];
     char why[128];
     const char *fail;
     long long saved_cap;
@@ -4390,6 +4769,8 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     view->cursor_token[0] = '\0';
     view->truncated = false;
     view->dropped = 0;
+    view->window_cut = false;
+    view->window_reach_ts[0] = '\0';
     view->forward = false;
     view->projection_failed = false;
     view->start_token[0] = '\0';
@@ -4418,10 +4799,11 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
         return view->cursor;
     }
     t0 = clock_now_wall_ms();
-    fail = fmc_mail_drain_from(req, &rows, &view->cursor, "",
-                               view->cursor_token,
-                               sizeof(view->cursor_token), why,
-                               sizeof(why), true, NULL);
+    fail = fmc_mail_pass(req, &rows, &view->cursor, resume,
+                         resume_state > 0, view->cursor_token,
+                         sizeof(view->cursor_token), why, sizeof(why),
+                         &view->window_cut, window_start,
+                         sizeof(window_start));
     t1 = clock_now_wall_ms();
     if (fail) {
         fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);
@@ -4431,10 +4813,14 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
         return -1;
     }
     view->ok = true;
-    zcl_fmc_cand_source_ok(c->cand, ZCL_FMC_CAND_SRC_MAIL);
+    /* The reach comes from the rows of the pass itself before any row is
+     * read against it. */
+    fmc_window_begin(&c->win, view->window_cut, window_start);
+    fmc_window_finish(&c->win, &rows, view);
+    fmc_mail_source_note(c, view);
     n = json_size(&rows);
     view->count = (long long)n;
-    /* The full drain feeds roster, tallies, candidates and the
+    /* The pass feeds roster, tallies, candidates and the
      * stale-directive scan on every path. The changes feed differs: the
      * legacy integer path filters it by the global floor here, while the
      * token path fills it from the resume drain below (and a malformed
@@ -4446,8 +4832,9 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
      * above `since`, each with its lifecycle state. */
     for (i = n; i > 0; i--) {
         struct fmc_row v;
-        if (fmc_row_parse(json_at(&rows, i - 1), &v))
-            fmc_mail_row(c, &v, &rows);
+        if (!fmc_row_parse(json_at(&rows, i - 1), &v))
+            continue;
+        fmc_mail_row(c, &v, &rows);
     }
     c->changes_cap = saved_cap;
     view->projection_failed = c->projection_failed;
@@ -5326,6 +5713,15 @@ static void fmc_brief_evidence(struct fmc_brief_lists *l,
     char ts[32];
     (void)json_push_kv_int(&l->evidence, "mail_cursor", mail_cursor);
     fmc_put_int(&l->evidence, "mail_count", mv->count);
+    /* Present only when the pass was cut: a page answer at a tight budget
+     * has room for neither key when nothing was cut (the forward budget
+     * test stalls one row sooner with 72 bytes more beside its rows). */
+    if (mv->window_cut) {
+        (void)json_push_kv_bool(&l->evidence, "mail_window_cut", true);
+        if (mv->window_reach_ts[0])
+            (void)json_push_kv_str(&l->evidence, "mail_window_reach_ts",
+                                   mv->window_reach_ts);
+    }
     fmc_put_int(&l->evidence, "ledger_boxes", ledger->boxes);
     fmc_put_int(&l->evidence, "ledger_rows", ledger->rows);
     fmc_put_int(&l->evidence, "ledger_max_age_s", ledger->max_age);
@@ -5774,6 +6170,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     fmc_receiver_down_incident(&l.blockers, lo.receive_lock);
     mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv, changes_only);
     ro.dt.forward_page = mv.forward;
+    ro.window_cut = mv.window_cut;
     fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes, &l.tasks);
     fmc_brief_land(req, &l.tasks, &l.missing);

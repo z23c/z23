@@ -1617,6 +1617,158 @@ static int test_mail_prefix_cursor(void)
     return failures;
 }
 
+/* The token a brief's pass over mail drains from: every stream at the
+ * start of its newest `window` bytes, and no further back than a position
+ * the caller's own token names. A pull resumes from it like from any
+ * next_since, so the window is whole rows; a stream the window covers
+ * whole starts at 0, and one whose cut falls inside a last line no newline
+ * ends yet is read whole, never skipped past the row a writer may still be
+ * appending. */
+static int test_mail_brief_window(void)
+{
+    int failures = 0;
+    TEST("mail: the brief window token parks each stream on a line start") {
+        char token[4096], want[256], dir[1024], path[1200];
+        struct stat st;
+        struct dvx_call p;
+        const struct json_value *rows;
+        bool cut = true;
+        char since[256];
+        long long size, row, short_size, off3, off9;
+        dvx_isolate("brief_window");
+        /* Three rows of one length, and one other stream. */
+        dvx_import_stream("inbox.long",
+            "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"*\","
+            "\"kind\":\"note\",\"body\":\"row-1\",\"ref\":\"\"}\n"
+            "{\"seq\":2,\"ts\":\"2020-01-01T00:00:01Z\",\"from\":\"C\",\"to\":\"*\","
+            "\"kind\":\"note\",\"body\":\"row-2\",\"ref\":\"\"}\n"
+            "{\"seq\":3,\"ts\":\"2020-01-01T00:00:02Z\",\"from\":\"C\",\"to\":\"*\","
+            "\"kind\":\"note\",\"body\":\"row-3\",\"ref\":\"\"}\n");
+        dvx_import_stream("inbox.short",
+            "{\"seq\":9,\"ts\":\"2020-01-02T00:00:00Z\",\"from\":\"D\",\"to\":\"*\","
+            "\"kind\":\"note\",\"body\":\"row-9\",\"ref\":\"\"}\n");
+        dvx_maildir(dir, sizeof(dir));
+        (void)snprintf(path, sizeof(path), "%s/inbox.long.jsonl", dir);
+        ASSERT(stat(path, &st) == 0);
+        size = (long long)st.st_size;
+        ASSERT(size > 0 && size % 3 == 0);
+        row = size / 3;
+        (void)snprintf(path, sizeof(path), "%s/inbox.short.jsonl", dir);
+        ASSERT(stat(path, &st) == 0);
+        short_size = (long long)st.st_size;
+        /* Half the long stream: the cut falls inside its second row, so the
+         * window is its third row; the short stream lies inside the window. */
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), size / 2, NULL, &cut));
+        ASSERT(cut);
+        (void)snprintf(want, sizeof(want),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:0", 2 * row);
+        ASSERT_STR_EQ(token, want);
+        ASSERT(zcl_devagent_mail_cursor_valid(token));
+        dvx_pull_token(&p, token, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        rows = dvx_arr(&p, "rows");
+        ASSERT(rows != NULL);
+        ASSERT_EQ((long long)json_size(rows), 2);
+        off3 = off9 = -1;
+        for (size_t k = 0; k < json_size(rows); k++) {
+            const struct json_value *r = json_at(rows, k);
+            const char *body = json_get_str(json_get(r, "body"));
+            if (body && strcmp(body, "row-3") == 0)
+                off3 = json_get_int(json_get(r, "row_offset"));
+            if (body && strcmp(body, "row-9") == 0)
+                off9 = json_get_int(json_get(r, "row_offset"));
+        }
+        ASSERT_EQ(off3, 2 * row);
+        ASSERT_EQ(off9, 0);
+        dvx_end(&p);
+        /* A window no shorter than either stream: nothing is cut. */
+        cut = true;
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), size, NULL, &cut));
+        ASSERT(!cut);
+        ASSERT_STR_EQ(token, "0|inbox.long.jsonl:0,inbox.short.jsonl:0");
+        /* One row exactly: the cut already is a line start and stays one. */
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), row, NULL, &cut));
+        ASSERT(cut);
+        (void)snprintf(want, sizeof(want),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:0", 2 * row);
+        ASSERT_STR_EQ(token, want);
+        /* The caller's own token folds in. A position older than the window
+         * is kept, so the brief still has every row that came after it;
+         * one inside the window moves back to the window's start. */
+        (void)snprintf(since, sizeof(since),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:0", row);
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), row,
+                                              since, &cut));
+        ASSERT(cut);
+        (void)snprintf(want, sizeof(want),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:0", row);
+        ASSERT_STR_EQ(token, want);
+        (void)snprintf(since, sizeof(since),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:%lld",
+                       2 * row, short_size);
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), 2 * row,
+                                              since, &cut));
+        ASSERT_STR_EQ(token, want);
+        /* A stream the token does not name is read whole by the resume, so
+         * it is not skipped here either. One the dir no longer holds
+         * changes nothing. */
+        (void)snprintf(since, sizeof(since),
+                       "0|inbox.gone.jsonl:5,inbox.long.jsonl:%lld", 2 * row);
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), 10,
+                                              since, &cut));
+        ASSERT(cut);
+        (void)snprintf(want, sizeof(want),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:0", 2 * row);
+        ASSERT_STR_EQ(token, want);
+        /* Not a token this leaf hands out: no window, nothing cut. */
+        cut = true;
+        ASSERT(!zcl_devagent_mail_brief_window(token, sizeof(token), row,
+                                               "1|inbox.long.jsonl", &cut));
+        ASSERT(!cut);
+        (void)snprintf(since, sizeof(since),
+                       "0|inbox.long.jsonl:%lld,inbox.long.jsonl:%lld",
+                       row, row);
+        cut = true;
+        ASSERT(!zcl_devagent_mail_brief_window(token, sizeof(token), row,
+                                               since, &cut));
+        ASSERT(!cut);
+        /* A pull token's seq.max hint is not a stream. The caller's
+         * positions fold in as above, the hint moves no stream, and the
+         * token handed back names streams only: the hint is a pull's
+         * observation, not a position this pass parked. */
+        (void)snprintf(since, sizeof(since),
+                        "0|inbox.long.jsonl:%lld,inbox.short.jsonl:%lld,"
+                        "seq.max:9", row, short_size);
+        cut = false;
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), row,
+                                               since, &cut));
+        ASSERT(cut);
+        (void)snprintf(want, sizeof(want),
+                       "0|inbox.long.jsonl:%lld,inbox.short.jsonl:0", row);
+        ASSERT_STR_EQ(token, want);
+        ASSERT(zcl_devagent_mail_cursor_valid(token));
+        /* A last line no newline ends yet, with the cut inside it: the long
+         * stream is read whole. The short stream's only row began before its
+         * cut, so that stream starts at its end. */
+        dvx_import_append("inbox.long",
+            "{\"seq\":4,\"ts\":\"2020-01-01T00:00:03Z\",\"from\":\"C\",\"to\":\"*\","
+            "\"kind\":\"note\",\"body\":\"row-4\",\"ref\":\"\"}");
+        ASSERT(zcl_devagent_mail_brief_window(token, sizeof(token), 10, NULL, &cut));
+        ASSERT(cut);
+        (void)snprintf(want, sizeof(want),
+                       "0|inbox.long.jsonl:0,inbox.short.jsonl:%lld", short_size);
+        ASSERT_STR_EQ(token, want);
+        /* No window asked: no token, and nothing said to be cut. */
+        cut = true;
+        ASSERT(!zcl_devagent_mail_brief_window(token, sizeof(token), 0, NULL, &cut));
+        ASSERT(!cut);
+        dvx_restore();
+        PASS();
+    } _test_next:;
+    dvx_restore();
+    return failures;
+}
+
 /* The registry entry for the leaf, pinned to its declared keys. */
 static int test_mail_leaf_registered(void)
 {
@@ -2513,6 +2665,7 @@ static int test_mail_read_side_checks(void)
     failures += test_mail_prefix_cursor();
     failures += test_mail_paging();
     failures += test_mail_brief_drain();
+    failures += test_mail_brief_window();
     failures += test_mail_ref_filter_and_agent_resume();
     failures += test_mail_ref_escaped_and_skipped();
     failures += test_mail_stored_cursor();

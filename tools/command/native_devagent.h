@@ -48,6 +48,30 @@ bool zcl_devagent_mail_cursor_prefix(const char *resume, const char *end_token,
  * mail/read.<agent> only. It does not move the ack cursor. */
 bool zcl_devagent_mail_record_read(const char *agent, const char *token);
 
+/* Newest bytes of every mail stream a fleet brief reads when it starts
+ * from the beginning. The pages a brief follows are this window's, not
+ * the history's: the leaf still lists every stream to place the start,
+ * and the final page replays through the normal pull, which reads every
+ * stream once more whole for its newest seq. The changes of a walk that
+ * resumes from a token stay exact; every other list it returns covers
+ * the rows the pass read. */
+#define ZCL_DEVAGENT_MAIL_WINDOW_BYTES 1048576LL
+
+/* Internal fleet-brief seam: the resume token a brief's pass over mail
+ * drains from. Every stream is parked `window` bytes from its end, narrowed
+ * to a whole row at the start, and never past a position the caller's own
+ * token `since` names for that stream: a brief resuming from `since`
+ * resolves what came after it against these rows. A stream no longer than
+ * the window starts at 0, and so does one whose size or first whole row
+ * cannot be measured. *cut says whether any stream starts past its
+ * beginning, so older rows exist that the pass will not read. False, with
+ * *cut false, when a stream cannot be named, opened or fitted, or `since`
+ * is not a token this leaf hands out: the caller then reads everything
+ * from the start and takes no window. Reads only; grants no authority. */
+bool zcl_devagent_mail_brief_window(char *token, size_t cap,
+                                    long long window, const char *since,
+                                    bool *cut);
+
 /* Internal fleet-brief mail pull. It skips global-max scans while pages
  * remain and replays the final page through the normal path; direct mail
  * commands retain per-page cursor behavior. Call only from fleet brief. */

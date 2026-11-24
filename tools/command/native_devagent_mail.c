@@ -2245,6 +2245,184 @@ static void dvm_post_attach_resume(struct zcl_command_reply *reply,
     (void)json_push_kv_str(&reply->data, "next_since", token);
 }
 
+/* ── the brief's window ── */
+
+/* Where a stream of `size` bytes is read from when only its newest
+ * `window` bytes are wanted: `from` when that already is a line start,
+ * else the first line start after it, so the window is whole rows and at
+ * most one row shorter than asked. 0 when no line start follows: the cut
+ * falls inside the last line, which has no end yet (a writer may still be
+ * appending it), and that stream is read whole rather than skipped past
+ * the row being written. */
+static long long dvm_window_start(FILE *f, long long from, long long size)
+{
+    long long at;
+    if (from <= 0)
+        return 0;
+    if (fseek(f, (long)(from - 1), SEEK_SET) != 0)
+        return 0;
+    if (fgetc(f) == '\n')
+        return from;
+    for (at = from; at < size; at++) {
+        int c = fgetc(f);
+        if (c < 0)
+            return 0;
+        if (c == '\n')
+            return at + 1;
+    }
+    return 0;
+}
+
+/* Record one directory entry for the window token. A non-stream is
+ * skipped. False when a stream cannot be named, opened or fitted: the
+ * caller then hands out no token and the brief reads everything. A size
+ * or first whole row that cannot be measured parks the stream at 0, so
+ * that one is read whole too. */
+static bool dvm_window_add(struct dvm_pull_state *ps, const char *maildir,
+                           const char *name, long long window)
+{
+    struct dvm_stream *s;
+    struct stat st;
+    FILE *f;
+    size_t n;
+    int w;
+    if (!dvm_is_stream_name(name))
+        return true;
+    if (!dvm_cursor_name_ok(name) || ps->nstreams >= DVM_STREAMS_MAX)
+        return false;
+    s = &ps->streams[ps->nstreams];
+    n = strlen(name);
+    if (n >= sizeof(s->name))
+        return false;
+    memcpy(s->name, name, n + 1);
+    w = snprintf(s->path, sizeof(s->path), "%s/%s", maildir, name);
+    if (w <= 0 || (size_t)w >= sizeof(s->path))
+        return false;
+    f = fopen(s->path, "rb");
+    if (!f)
+        return false;
+    s->off = 0;
+    if (fstat(fileno(f), &st) == 0 && st.st_size > 0 &&
+        (long long)st.st_size > window)
+        s->off = dvm_window_start(f, (long long)st.st_size - window,
+                                  (long long)st.st_size);
+    (void)fclose(f);
+    ps->nstreams++;
+    return true;
+}
+
+/* Every stream of the mail dir, parked for a window of `window` bytes.
+ * False when one cannot be named, opened or fitted, or the dir cannot be
+ * read: the caller then hands out no token and the brief reads everything
+ * through the pull, which makes the same checks it always made. */
+static bool dvm_window_list(const char *maildir, long long window,
+                            struct dvm_pull_state *ps)
+{
+    DIR *d = opendir(maildir);
+    struct dirent *ent;
+    bool ok = d != NULL;
+#if defined(_WIN32)
+    uintptr_t retained = 0;
+    if (d && !platform_private_directory_open_validated_traverse(maildir,
+                                                                &retained)) {
+        (void)closedir(d);
+        return false;
+    }
+    if (d)
+        platform_private_directory_close(retained);
+#endif
+    while (ok && (ent = readdir(d)) != NULL)
+        ok = dvm_window_add(ps, maildir, ent->d_name, window);
+    if (d)
+        (void)closedir(d);
+    return ok;
+}
+
+/* One entry of the caller's token: a stream it names starts no later than
+ * the position it names, because the brief resolves what came after that
+ * position against these rows. */
+static void dvm_window_resume_entry(struct dvm_pull_state *ps,
+                                     const char *name, long long off)
+{
+    for (size_t i = 0; i < ps->nstreams; i++) {
+        struct dvm_stream *s = &ps->streams[i];
+        if (strcmp(s->name, name) != 0)
+            continue;
+        s->named = true;
+        if (s->off > off)
+            s->off = off;
+    }
+}
+
+/* Fold the caller's token `since` into the parked streams. A stream the
+ * token does not name is read whole by the resume, so it starts at its
+ * beginning here too; one the token names that the dir no longer holds
+ * changes nothing. False when `since` is not a token this leaf hands out:
+ * the caller then reads everything. */
+static bool dvm_window_resume(struct dvm_pull_state *ps, const char *since)
+{
+    struct dvm_pull_filter filter = {0};
+    char name[DVM_STREAM_NAME_MAX + 1];
+    const char *p;
+    long long off;
+    if (!since || !since[0])
+        return true;
+    /* The leaf's own rule for a token it hands out, then its entries. */
+    if (!zcl_devagent_mail_cursor_valid(since) || !dvm_since_token(since, &filter))
+        return false;
+    p = filter.token;
+    while (*p) {
+        if (dvm_token_entry(p, name, sizeof(name), &off, &p))
+            return false;
+        dvm_window_resume_entry(ps, name, off);
+    }
+    for (size_t i = 0; i < ps->nstreams; i++)
+        if (!ps->streams[i].named)
+            ps->streams[i].off = 0;
+    return true;
+}
+
+/* Whether any stream starts past its beginning: older rows exist that a
+ * walk from this token does not read. */
+static bool dvm_window_cut(const struct dvm_pull_state *ps)
+{
+    for (size_t i = 0; i < ps->nstreams; i++)
+        if (ps->streams[i].off > 0)
+            return true;
+    return false;
+}
+
+/* "<floor>|<name>:<offset>,..." parking every stream at the start of its
+ * newest `window` bytes, in name order, the same shape a post returns:
+ * the pull that resumes from it needs no other rule. Floor 0, as a
+ * positive scalar floor is refused once a second stream exists. */
+bool zcl_devagent_mail_brief_window(char *token, size_t cap, long long window,
+                                    const char *since, bool *cut)
+{
+    struct dvm_pull_state ps;
+    char maildir[DVM_PATH_CAP];
+    bool ok;
+    if (cut)
+        *cut = false;
+    if (!token || !dvm_mail_dir(maildir, sizeof(maildir), false))
+        return false;
+    memset(&ps, 0, sizeof(ps));
+    ps.streams = (struct dvm_stream *)zcl_calloc(
+        DVM_STREAMS_MAX, sizeof(*ps.streams), "devagent_mail.window");
+    if (!ps.streams)
+        return false;
+    ok = window > 0 && dvm_window_list(maildir, window, &ps);
+    if (ok && ps.nstreams > 1)
+        qsort(ps.streams, ps.nstreams, sizeof(*ps.streams),
+              dvm_stream_name_cmp);
+    ok = ok && dvm_window_resume(&ps, since) && ps.nstreams > 0 &&
+         dvm_token_build(&ps, 0, token, cap);
+    if (ok && cut)
+        *cut = dvm_window_cut(&ps);
+    free(ps.streams);
+    return ok;
+}
+
 static bool dvm_prefix_streams(struct dvm_pull_state *ps, const char *token)
 {
     struct dvm_pull_filter filter = {0};

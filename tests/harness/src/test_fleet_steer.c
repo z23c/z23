@@ -5166,6 +5166,603 @@ _test_next:;
     return failures;
 }
 
+/* ── the brief over a long history ────────────────────────────────────────
+ *
+ * A brief that started from the beginning once walked every page of every
+ * stream, so a host with more history than FMC_MAIL_PAGES_MAX pages hold
+ * lost its whole mail view: missing dev.agent.mail page_limit and
+ * mail_count 0. It now begins every stream at its newest bounded window
+ * and says so in evidence: mail_window_cut, and the reach when it is
+ * known. The fixtures here are a few hundred pages, under the limit: they
+ * prove the window, its evidence, and what a cut pass may still claim.
+ * That the limit is out of reach behind the window is neither tested
+ * here nor true by construction. A page stops at 64 rows or at 16,384
+ * cost bytes, a row costing 352 bytes plus its text fields
+ * (dvm_row_cost in the leaf), so the 1 MiB window of one stream is
+ * about 285 pages of the smallest rows the leaf writes (about 4,560 for
+ * sixteen streams: over the limit) and about 230 pages of 120-byte rows.
+ * Rows of about 110 bytes or more in every stream stay under it; a
+ * mailbox of tiny rows still meets the explicit failure.
+ * What such a pass cannot settle by what it read reads "unresolved",
+ * never "queued". The same mailbox read whole is the control: nothing
+ * is unresolved there. */
+
+/* String reply field under evidence, or "" when absent/wrong-typed. */
+static const char *fmx_evidence_str(const struct fmx_call *b, const char *key)
+{
+    const struct json_value *evidence = fmx_get(b, "evidence");
+    const struct json_value *v = evidence ? json_get(evidence, key) : NULL;
+    return v && v->type == JSON_STR && json_get_str(v) ? json_get_str(v) : "";
+}
+
+/* Boolean reply field under evidence, false when absent/wrong-typed. */
+static bool fmx_evidence_bool(const struct fmx_call *b, const char *key)
+{
+    const struct json_value *evidence = fmx_get(b, "evidence");
+    const struct json_value *v = evidence ? json_get(evidence, key) : NULL;
+    return v && v->type == JSON_BOOL && json_get_bool(v);
+}
+
+/* Whether evidence holds `key` at all: a key that is present only when
+ * something happened is checked by its presence, which the two readers
+ * above cannot tell from a false or an empty value. */
+static bool fmx_evidence_has(const struct fmx_call *b, const char *key)
+{
+    const struct json_value *evidence = fmx_get(b, "evidence");
+    return evidence && json_get(evidence, key) != NULL;
+}
+
+/* `rows` rows of about 1.6 KiB into each of two streams, one second of
+ * stamp apart. The first row of each carries `old_name` and every later
+ * one `new_name`: two names a whole-history read and a window read tell
+ * apart. Stream a is stamped on 2026-09-20 and stream b on 2026-09-`b_day`
+ * at the same time of day: one day makes the streams identical, two make
+ * their windows begin at different stamps. */
+static bool fmx_seed_long_history(size_t rows, const char *old_name,
+                                  const char *new_name, int b_day)
+{
+    char body[1600], ts[32], ref[48];
+    for (size_t i = 0; i < rows; i++) {
+        long long sec = (long long)i;
+        const char *name = i == 0 ? old_name : new_name;
+        int n = snprintf(body, sizeof(body), "row-%05zu ", i);
+        if (n <= 0 || (size_t)n + 1500u >= sizeof(body))
+            return false;
+        memset(body + n, 'x', 1500);
+        body[(size_t)n + 1500u] = '\0';
+        (void)snprintf(ts, sizeof(ts), "2026-09-20T%02lld:%02lld:%02lldZ",
+                       sec / 3600, sec / 60 % 60, sec % 60);
+        (void)snprintf(ref, sizeof(ref), "long-%05zu", i);
+        fmx_seed_inbox("long-a", ts, (long long)i + 1, name, "*", "note",
+                       body, ref);
+        if (b_day != 20)
+            (void)snprintf(ts, sizeof(ts), "2026-09-%02dT%02lld:%02lld:%02lldZ",
+                           b_day, sec / 3600, sec / 60 % 60, sec % 60);
+        fmx_seed_inbox("long-b", ts, (long long)i + 1, name, "*", "note",
+                       body, ref);
+    }
+    return true;
+}
+
+static int fmx_t_brief_window(void)
+{
+    int failures = 0;
+    const size_t rows = 1500; /* about 2.4 MiB a stream: past the 1 MiB window */
+    TEST("steer: brief reads the newest window of a long history and says so") {
+        struct fmx_call b, r, o;
+        char token[4096], reach_ts[32];
+        long long count, first;
+        const char *reach;
+        size_t reach_len;
+        fmx_isolate("brief_window");
+        /* The mail dir chain first: fmx_seed_inbox makes one level only. */
+        fmx_prime_mail();
+        ASSERT(fmx_seed_long_history(rows, "window-old-name", "window-new-name",
+                                     20));
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        /* The cursor is the newest row's seq, wherever the walk began. */
+        ASSERT_EQ(fmx_int(&b, "cursor"), (long long)rows);
+        ASSERT_EQ(fmx_evidence_int(&b, "mail_cursor"), (long long)rows);
+        /* Each stream's window is 1 MiB of rows under 1.7 KiB long, so at
+         * least 1 MiB / 1.7 KiB of its 1500 rows, and fewer than all. */
+        count = fmx_evidence_int(&b, "mail_count");
+        ASSERT(count >= (long long)(2 * ZCL_DEVAGENT_MAIL_WINDOW_BYTES / 1700));
+        ASSERT(count < (long long)rows * 2);
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        /* The reach is the stamp of the first row of a cut stream's
+         * window. Both streams hold identical rows, so each began at the
+         * same row, and the pass read exactly the rows from there on in
+         * both. Row i is stamped i seconds past midnight of the fixture's
+         * day, so the reach's minute and second are that row's index. */
+        reach = fmx_evidence_str(&b, "mail_window_reach_ts");
+        reach_len = strlen(reach);
+        ASSERT(reach_len == 20 && strncmp(reach, "2026-09-20T00:", 14) == 0 &&
+                reach[16] == ':' && reach[19] == 'Z');
+        first = ((reach[14] - '0') * 10 + (reach[15] - '0')) * 60 +
+                (reach[17] - '0') * 10 + (reach[18] - '0');
+        ASSERT(first > 0 && first < (long long)rows);
+        ASSERT_EQ(count, (long long)rows * 2 - 2 * first);
+        (void)snprintf(reach_ts, sizeof(reach_ts), "%s", reach);
+        /* Mail was not read to its end, so it is not a read candidates
+         * source: the total is unknown, never a floor for one. */
+        ASSERT(fmx_get(&b, "candidates_total") &&
+               json_is_null(fmx_get(&b, "candidates_total")));
+        ASSERT(fmx_get(&b, "candidates_complete") &&
+               fmx_get(&b, "candidates_complete")->type == JSON_BOOL &&
+               !json_get_bool(fmx_get(&b, "candidates_complete")));
+        ASSERT(fmx_missing_has(&b, "candidates.mail"));
+        ASSERT(fmx_get(&b, "muse_spend") &&
+               !json_get_bool(json_get(fmx_get(&b, "muse_spend"),
+                                       "tokens_total_exact")));
+        /* A name last seen before the window is not reported as seen, and
+         * the worker total no longer claims to be the whole roster. */
+        ASSERT(fmx_arr_has(fmx_arr(&b, "agents"), "window-new-name"));
+        ASSERT(!fmx_arr_has(fmx_arr(&b, "agents"), "window-old-name"));
+        ASSERT(!fmx_bool(&b, "workers_total_exact"));
+        /* The newest rows are the changes, as for a whole-history read. */
+        ASSERT(fmx_brief_has_mail_ref(&b, "long-01499"));
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
+        fmx_end(&b);
+        ASSERT(strstr(token, "inbox.long-a.jsonl:") != NULL);
+        /* Resumed from that token with nothing new: the same window, still
+         * cut, and nothing to show. */
+        fmx_brief_since(&r, NULL, token);
+        ASSERT(fmx_run(&r, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&r));
+        ASSERT_STR_EQ(fmx_missing_reason(&r, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&r, "mail_window_cut"));
+        ASSERT_EQ(fmx_evidence_int(&r, "mail_count"), count);
+        ASSERT_STR_EQ(fmx_evidence_str(&r, "mail_window_reach_ts"), reach_ts);
+        ASSERT(!fmx_brief_has_mail_ref(&r, "long-01499"));
+        fmx_end(&r);
+        /* Resumed from a token older than the window: every row after it
+         * is read, so nothing is cut and the whole history is in view. */
+        fmx_brief_since(&o, NULL,
+                        "0|inbox.long-a.jsonl:0,inbox.long-b.jsonl:0");
+        ASSERT(fmx_run(&o, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&o));
+        ASSERT_STR_EQ(fmx_missing_reason(&o, "dev.agent.mail"), "");
+        ASSERT(!fmx_evidence_bool(&o, "mail_window_cut"));
+        ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), (long long)rows * 2);
+        /* Nothing was cut, so neither window key is present: the pass
+         * reached the first row, and the evidence says so by its absence.
+         * Mail read whole is a read candidates source again. */
+        ASSERT(!fmx_evidence_has(&o, "mail_window_cut"));
+        ASSERT_STR_EQ(fmx_evidence_str(&o, "mail_window_reach_ts"), "");
+        ASSERT(!fmx_missing_has(&o, "candidates.mail"));
+        ASSERT(fmx_arr_has(fmx_arr(&o, "agents"), "window-old-name"));
+        ASSERT(fmx_bool(&o, "workers_total_exact"));
+        fmx_end(&o);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: the reach is the latest stamp any cut stream began at") {
+        struct fmx_call b;
+        const size_t rows = 1500;
+        long long count, first;
+        const char *reach;
+        fmx_isolate("brief_window_reach_latest");
+        fmx_prime_mail();
+        /* The rows above with stream b stamped a day later. Both windows
+         * begin at the same row of their stream, so at different stamps:
+         * the reach is the later one. A directive this host sent between
+         * the two starts has its answer, if anywhere, in what stream b's
+         * pass did not read, so it reads as before the reach; the earlier
+         * start would leave it queued, open and overdue. */
+        ASSERT(fmx_seed_long_history(rows, "window-old-name", "window-new-name",
+                                     21));
+        fmx_sent_directive("2026-09-20T12:00:00Z", 5000, "silent-box",
+                           "mid-ref");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reach = fmx_evidence_str(&b, "mail_window_reach_ts");
+        ASSERT(strlen(reach) == 20 &&
+               strncmp(reach, "2026-09-21T00:", 14) == 0);
+        first = ((reach[14] - '0') * 10 + (reach[15] - '0')) * 60 +
+                (reach[17] - '0') * 10 + (reach[18] - '0');
+        /* Stream a began here on its own day: before noon, so the
+         * directive stands between the two starts. */
+        ASSERT(first > 0 && first < (long long)rows && first < 43200);
+        /* Each window holds the same rows of its stream. */
+        count = fmx_evidence_int(&b, "mail_count");
+        ASSERT_EQ(count, (long long)rows * 2 - 2 * first + 1);
+        ASSERT_EQ(fmx_dcount(&b, "scanned"), 1);
+        ASSERT_EQ(fmx_dcount(&b, "unresolved"), 1);
+        ASSERT(fmx_get(&b, "open_worker_directives") &&
+               json_get_int(fmx_get(&b, "open_worker_directives")) == 0);
+        ASSERT(fmx_get(&b, "overdue_worker_directives") &&
+               json_get_int(fmx_get(&b, "overdue_worker_directives")) == 0);
+        ASSERT(!fmx_blocker_has(&b, "mid-ref"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* ── what a cut pass may not conclude ──────────────────────────────────
+ *
+ * A directive this host sent sits in its outbox; its answer sits in the
+ * recipient's inbox. The window is each stream's own, so a recipient with
+ * more than a window of newer mail has the answer outside the pass while
+ * the directive is inside it. Nothing the pass read then settles the
+ * directive. It is unresolved: not queued, counted open by neither
+ * number, and no stale alarm. */
+
+/* `rows` rows of about 1.6 KiB into `peer`'s inbox from `from`, stamped
+ * one second apart from 2026-09-20T00:00:01Z, or "not-a-stamp" when
+ * `stamps` is false: more than the brief's window holds either way. */
+static void fmx_seed_pad(const char *peer, const char *from, size_t rows,
+                         bool stamps)
+{
+    char body[1600], ts[32], ref[48];
+    for (size_t i = 0; i < rows; i++) {
+        long long sec = (long long)i + 1;
+        int n = snprintf(body, sizeof(body), "pad-%05zu ", i);
+        if (n <= 0 || (size_t)n + 1500u >= sizeof(body))
+            fmx_fixture_fail("padding row exceeds its bound");
+        memset(body + n, 'x', 1500);
+        body[(size_t)n + 1500u] = '\0';
+        if (stamps)
+            (void)snprintf(ts, sizeof(ts), "2026-09-20T%02lld:%02lld:%02lldZ",
+                           sec / 3600, sec / 60 % 60, sec % 60);
+        else
+            (void)snprintf(ts, sizeof(ts), "not-a-stamp");
+        (void)snprintf(ref, sizeof(ref), "pad-%05zu", i);
+        fmx_seed_inbox(peer, ts, (long long)i + 2, from, "*", "note", body,
+                       ref);
+    }
+}
+
+/* old-ref was answered two seconds later; the recipient then wrote `rows`
+ * rows of newer mail; new-ref went out after all of it. The outbox holds
+ * the two directives and nothing else, so it is never cut. 700 rows are
+ * more than the brief's window holds and 100 fewer: the first is a cut
+ * pass, the second a whole read. `rows` plus 3 rows in all. */
+static void fmx_seed_window_directives(bool stamps, size_t rows)
+{
+    fmx_prime_mail();
+    fmx_sent_directive("2026-09-20T00:00:00Z", 7000, "silent-box", "old-ref");
+    fmx_seed_inbox("silent-box", "2026-09-20T00:00:02Z", 1, "silent-box",
+                   FMX_SENDER, "result", "receiver=silent-box\\ndone\\n",
+                   "old-ref");
+    fmx_seed_pad("silent-box", "silent-box", rows, stamps);
+    fmx_sent_directive("2026-09-20T00:20:00Z", 9000, "silent-box", "new-ref");
+}
+
+/* A recipient that fell silent for good after posting presence as its
+ * newest row, behind `rows` rows of mail: one directive went out before
+ * all of that mail and one after it. The outbox holds the two directives
+ * and nothing else, so it is never cut. 700 rows cut the recipient's
+ * stream with its presence row inside the window; 100 do not cut it.
+ * `rows` plus 1 row in that stream, and the 2 directives in the outbox. */
+static void fmx_seed_window_gone(size_t rows)
+{
+    fmx_prime_mail();
+    fmx_sent_directive("2026-09-20T00:00:00Z", 7000, "silent-box", "gone-old");
+    fmx_seed_pad("silent-box", "silent-box", rows, true);
+    fmx_seed_inbox("silent-box", "2026-09-20T00:11:41Z", 702, "silent-box", "*",
+                   "note", "presence.v1; role=silent-box; phase=active",
+                   "presence-silent-box");
+    fmx_sent_directive("2026-09-20T00:20:00Z", 9000, "silent-box", "gone-new");
+}
+
+/* directive_counts holds `key`: unresolved is emitted only when some
+ * directive is. */
+static bool fmx_dcount_has(const struct fmx_call *b, const char *key)
+{
+    return json_get(fmx_get(b, "directive_counts"), key) != NULL;
+}
+
+static int fmx_t_brief_window_unresolved(void)
+{
+    int failures = 0;
+
+    TEST("steer: a directive whose answer fell out of the window is unresolved, not overdue") {
+        struct fmx_call b;
+        const struct json_value *row, *reply;
+        const char *reach;
+        fmx_isolate("brief_window_unresolved");
+        fmx_seed_window_directives(true, 700);
+        /* The integer floor keeps the padding out of changes[], so each
+         * directive's row is on show. */
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reach = fmx_evidence_str(&b, "mail_window_reach_ts");
+        ASSERT(strcmp(reach, "2026-09-20T00:00:00Z") > 0);
+        ASSERT(strcmp(reach, "2026-09-20T00:20:00Z") < 0);
+        /* old-ref: stamped before the reach, and nothing the pass read
+         * settles it. */
+        reply = fmx_dir_reply(&b, FMX_SENDER, "old-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "unresolved");
+        ASSERT_STR_EQ(fmx_wstr(reply, "next_action"),
+                      "fleet steer evidence --type=mail --ref=old-ref");
+        row = fmx_change_row(&b, FMX_SENDER, "old-ref");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "unresolved");
+        ASSERT(fmx_wnull(row, "queued_age_s"));
+        ASSERT(!fmx_blocker_has(&b, "old-ref"));
+        /* new-ref: stamped after the reach, so whatever would answer it
+         * was read. It is queued, and overdue, as on a whole read. */
+        reply = fmx_dir_reply(&b, FMX_SENDER, "new-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(reply, "next_action"), "");
+        row = fmx_change_row(&b, FMX_SENDER, "new-ref");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT(fmx_wint(row, "queued_age_s") > 0);
+        ASSERT(fmx_blocker_has(&b, "new-ref"));
+        ASSERT(fmx_get(&b, "open_worker_directives") &&
+               json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
+        ASSERT(fmx_get(&b, "overdue_worker_directives") &&
+               json_get_int(fmx_get(&b, "overdue_worker_directives")) == 1);
+        ASSERT(fmx_dcount_has(&b, "unresolved"));
+        ASSERT_EQ(fmx_dcount(&b, "unresolved"), 1);
+        ASSERT_EQ(fmx_dcount(&b, "answered"), 0);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a cut pass that cannot date its start concludes nothing by absence") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_unknown_reach");
+        fmx_seed_window_directives(false, 700);
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        ASSERT(!fmx_evidence_has(&b, "mail_window_reach_ts"));
+        /* Both directives are unresolved, new-ref too: with no reach, no
+         * stamp says a row's answer was inside the pass. */
+        reply = fmx_dir_reply(&b, FMX_SENDER, "old-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "unresolved");
+        reply = fmx_dir_reply(&b, FMX_SENDER, "new-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "unresolved");
+        ASSERT_STR_EQ(fmx_wstr(reply, "next_action"),
+                      "fleet steer evidence --type=mail --ref=new-ref");
+        ASSERT(!fmx_blocker_has(&b, "old-ref"));
+        ASSERT(!fmx_blocker_has(&b, "new-ref"));
+        ASSERT(fmx_get(&b, "open_worker_directives") &&
+               json_get_int(fmx_get(&b, "open_worker_directives")) == 0);
+        ASSERT(fmx_get(&b, "overdue_worker_directives") &&
+               json_get_int(fmx_get(&b, "overdue_worker_directives")) == 0);
+        ASSERT_EQ(fmx_dcount(&b, "unresolved"), 2);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: the same directives in a mailbox the window holds are answered and overdue") {
+        struct fmx_call o;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_uncut");
+        fmx_seed_window_directives(true, 100);
+        /* 100 rows fit the window: the pass reads whole, so the answer is
+         * read and nothing is unresolved. This is the control the cut
+         * pass above is read against. */
+        fmx_brief(&o, NULL, 6000);
+        ASSERT(fmx_run(&o, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&o));
+        ASSERT_STR_EQ(fmx_missing_reason(&o, "dev.agent.mail"), "");
+        ASSERT(!fmx_evidence_has(&o, "mail_window_cut"));
+        ASSERT(!fmx_evidence_has(&o, "mail_window_reach_ts"));
+        ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), 103);
+        reply = fmx_dir_reply(&o, FMX_SENDER, "old-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "answered");
+        ASSERT(!fmx_blocker_has(&o, "old-ref"));
+        reply = fmx_dir_reply(&o, FMX_SENDER, "new-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(fmx_blocker_has(&o, "new-ref"));
+        ASSERT(fmx_get(&o, "open_worker_directives") &&
+               json_get_int(fmx_get(&o, "open_worker_directives")) == 1);
+        ASSERT(fmx_get(&o, "overdue_worker_directives") &&
+               json_get_int(fmx_get(&o, "overdue_worker_directives")) == 1);
+        ASSERT_EQ(fmx_dcount(&o, "scanned"), 2);
+        ASSERT_EQ(fmx_dcount(&o, "answered"), 1);
+        ASSERT(!fmx_dcount_has(&o, "unresolved"));
+        fmx_end(&o);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: the same mailbox read whole through the caller's token is answered and overdue") {
+        struct fmx_call o;
+        const struct json_value *reply, *row;
+        fmx_isolate("brief_window_uncut_token");
+        fmx_seed_window_directives(true, 700);
+        /* A token that names every cut stream at its beginning cuts
+         * nothing: the pass reads whole, so the answer is read. A resumed
+         * brief is a forward page: it shows the rows after its token and
+         * no snapshot numbers. */
+        fmx_brief_since(&o, NULL,
+                        "0|inbox.self.jsonl:0,inbox.silent-box.jsonl:0");
+        ASSERT(fmx_run(&o, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&o));
+        ASSERT_STR_EQ(fmx_missing_reason(&o, "dev.agent.mail"), "");
+        ASSERT(!fmx_evidence_has(&o, "mail_window_cut"));
+        ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), 703);
+        reply = fmx_dir_reply(&o, FMX_SENDER, "old-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "answered");
+        row = fmx_change_row(&o, FMX_SENDER, "old-ref");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "acknowledged");
+        ASSERT(!fmx_blocker_has(&o, "old-ref"));
+        /* new-ref is the newest row, behind the forward page's first rows;
+         * the pass still scanned it. */
+        ASSERT(fmx_blocker_has(&o, "new-ref"));
+        fmx_end(&o);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a window start the drain refuses is the walk from the start") {
+        struct fmx_call f;
+        fmx_isolate("brief_window_fallback");
+        fmx_seed_window_directives(true, 700);
+        /* Offset 5 of the recipient's stream follows no newline, so it is
+         * no boundary the leaf handed out: the cut start cannot be
+         * drained. The pass then reads everything, said by a whole count
+         * and no window evidence; the resume the caller asked for still
+         * names why it could not be honoured. */
+        fmx_brief_since(&f, NULL,
+                        "0|inbox.self.jsonl:0,inbox.silent-box.jsonl:5");
+        ASSERT(fmx_run(&f, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&f));
+        ASSERT(fmx_missing_has(&f, "dev.agent.mail"));
+        ASSERT(strstr(fmx_missing_reason(&f, "dev.agent.mail"),
+                      "MAIL_CURSOR_STALE") != NULL);
+        ASSERT_EQ(fmx_changes_n(&f), 0);
+        ASSERT(fmx_get(&f, "evidence") != NULL);
+        ASSERT(!fmx_evidence_has(&f, "mail_window_cut"));
+        ASSERT_EQ(fmx_evidence_int(&f, "mail_count"), 703);
+        fmx_end(&f);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a gone recipient is unresolved too when the directive predates the reach") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        const char *reach;
+        fmx_isolate("brief_window_gone_cut");
+        fmx_seed_window_gone(700);
+        /* The presence row is the newest, so the pass read it, and the
+         * recipient's newest row is days old: what was read says the
+         * recipient is gone. For the older directive that verdict rests
+         * on absence as much as "queued" would (the recipient's rows
+         * before the window are unread), and the directive is stamped at
+         * the reach or before: unresolved, from recipient_gone. */
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reach = fmx_evidence_str(&b, "mail_window_reach_ts");
+        ASSERT(strcmp(reach, "2026-09-20T00:00:00Z") > 0);
+        ASSERT(strcmp(reach, "2026-09-20T00:11:41Z") < 0);
+        reply = fmx_dir_reply(&b, FMX_SENDER, "gone-old");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "unresolved");
+        ASSERT_STR_EQ(fmx_wstr(reply, "next_action"),
+                      "fleet steer evidence --type=mail --ref=gone-old");
+        /* The later directive stands after the reach, so the verdict
+         * rests on rows that were read: gone, as on a whole read. */
+        reply = fmx_dir_reply(&b, FMX_SENDER, "gone-new");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "recipient_gone");
+        ASSERT(fmx_wint(reply, "recipient_silent_s") > 86400);
+        ASSERT_EQ(fmx_dcount(&b, "scanned"), 2);
+        ASSERT_EQ(fmx_dcount(&b, "unresolved"), 1);
+        ASSERT_EQ(fmx_dcount(&b, "recipient_gone"), 1);
+        ASSERT(fmx_get(&b, "open_worker_directives") &&
+               json_get_int(fmx_get(&b, "open_worker_directives")) == 0);
+        ASSERT(fmx_get(&b, "overdue_worker_directives") &&
+               json_get_int(fmx_get(&b, "overdue_worker_directives")) == 0);
+        ASSERT(!fmx_blocker_has(&b, "gone-old"));
+        ASSERT(!fmx_blocker_has(&b, "gone-new"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a gone recipient in a mailbox the window holds is gone for both directives") {
+        struct fmx_call o;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_gone_whole");
+        fmx_seed_window_gone(100);
+        /* The control the cut pass above is read against: nothing is
+         * cut, both verdicts rest on rows that were read, and no
+         * directive is unresolved. */
+        fmx_brief(&o, NULL, 6000);
+        ASSERT(fmx_run(&o, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&o));
+        ASSERT_STR_EQ(fmx_missing_reason(&o, "dev.agent.mail"), "");
+        ASSERT(!fmx_evidence_has(&o, "mail_window_cut"));
+        ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), 103);
+        reply = fmx_dir_reply(&o, FMX_SENDER, "gone-old");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "recipient_gone");
+        ASSERT(fmx_wint(reply, "recipient_silent_s") > 86400);
+        reply = fmx_dir_reply(&o, FMX_SENDER, "gone-new");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "recipient_gone");
+        ASSERT_EQ(fmx_dcount(&o, "scanned"), 2);
+        ASSERT_EQ(fmx_dcount(&o, "recipient_gone"), 2);
+        ASSERT(!fmx_dcount_has(&o, "unresolved"));
+        ASSERT(!fmx_blocker_has(&o, "gone-old"));
+        ASSERT(!fmx_blocker_has(&o, "gone-new"));
+        fmx_end(&o);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a cut token-resumed brief shows its directive change row unresolved") {
+        struct fmx_call r;
+        const struct json_value *row, *reply;
+        char start[1024];
+        bool cut = false;
+        fmx_isolate("brief_window_token_unresolved");
+        fmx_seed_window_directives(true, 700);
+        /* The token the pass itself begins at: every stream at its
+         * window. Resuming from it cuts the recipient's stream as the
+         * plain brief does, and both directives follow it in the outbox,
+         * so the older one is the first row the page shows. Its answer
+         * is outside the window: the change row and its reply read
+         * unresolved, as on the plain brief, with no queued age. */
+        ASSERT(zcl_devagent_mail_brief_window(start, sizeof(start),
+                                              ZCL_DEVAGENT_MAIL_WINDOW_BYTES,
+                                              NULL, &cut));
+        ASSERT(cut);
+        fmx_brief_since(&r, NULL, start);
+        ASSERT(fmx_run(&r, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&r));
+        ASSERT_STR_EQ(fmx_missing_reason(&r, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&r, "mail_window_cut"));
+        row = fmx_change_row(&r, FMX_SENDER, "old-ref");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "unresolved");
+        ASSERT(fmx_wnull(row, "queued_age_s"));
+        reply = fmx_dir_reply(&r, FMX_SENDER, "old-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "unresolved");
+        ASSERT_STR_EQ(fmx_wstr(reply, "next_action"),
+                      "fleet steer evidence --type=mail --ref=old-ref");
+        ASSERT(!fmx_blocker_has(&r, "old-ref"));
+        /* new-ref is the newest row, behind the page's first rows; the
+         * pass still scanned it: after the reach, so queued and overdue
+         * as before. */
+        ASSERT(fmx_blocker_has(&r, "new-ref"));
+        fmx_end(&r);
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* Request/result correlation: a directive is answered by a later result
  * on its ref from the other side, acked only by the receiver's own ack
  * cursor, and queued with neither. A reply is never read as an ack. */
@@ -8772,6 +9369,8 @@ int test_fleet_steer(void)
     failures += fmx_t_brief_newer_low_seq();
     failures += fmx_t_brief_watermark();
     failures += fmx_t_brief_deferred_cursor();
+    failures += fmx_t_brief_window();
+    failures += fmx_t_brief_window_unresolved();
     failures += fmx_t_evidence();
 #if !defined(_WIN32)
     failures += fmx_t_lost_receipt_retry();
