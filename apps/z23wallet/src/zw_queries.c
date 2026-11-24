@@ -174,7 +174,10 @@ static bool acc_unspent(struct bal_acc *acc, const struct json_value *arr)
     for (size_t i = 0; i < n; i++) {
         const struct json_value *u = json_at(arr, i), *a = u ? json_get(u, "address") : NULL;
         int64_t zat = 0;
-        if (!a || a->type != JSON_STR || !amount_key(u, "amount", &zat)) return false;
+        if (!u || !amount_key(u, "amount", &zat)) return false;
+        /* listunspent leaves "address" out when the script has no single
+         * destination (multisig, nonstandard): that row has nothing to show. */
+        if (!a || a->type != JSON_STR) continue;
         const char *s = json_get_str(a);
         if (!s[0] || strlen(s) >= sizeof(acc->rows[0].addr)) continue; /* not an address we can show */
         if (acc->n == acc->cap) {

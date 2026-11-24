@@ -3,6 +3,7 @@
 #include "z23wallet_mock_node.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,8 @@
 
 #define SEEN_CAP 8192
 
+static void shift_times(char *text, size_t cap, int64_t shift);
+
 struct script_row { char method[48]; int status; int delay_ms; int times; char file[96]; };
 
 struct zw_mock {
@@ -20,6 +23,7 @@ struct zw_mock {
     platform_socket_t listener;
     char dir[512], datadir[512];
     char userpass[2100]; /* when set, Basic auth must match this instead of the cookie */
+    _Atomic int64_t clock_shift; /* seconds added to fixture tiptime/mediantime */
     struct script_row rows[16];
     size_t nrows;
     volatile bool stop;
@@ -172,6 +176,7 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
         send_reply(c, 404, "{\"result\":null,\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}");
         return;
     }
+    shift_times(text, sizeof(text), atomic_load(&m->clock_shift));
     snprintf(out, sizeof(out), "{\"result\":%s,\"error\":null,\"id\":1}", text);
     send_reply(c, status, out);
 }
@@ -270,4 +275,96 @@ void zw_mock_set_auth(struct zw_mock *m, const char *userpass)
     pthread_mutex_lock(&m->mu);
     snprintf(m->userpass, sizeof(m->userpass), "%s", userpass ? userpass : "");
     pthread_mutex_unlock(&m->mu);
+}
+
+void zw_mock_set_clock_shift(struct zw_mock *m, int64_t seconds)
+{
+    atomic_store(&m->clock_shift, seconds);
+}
+
+/* Adds the clock shift to every "tiptime" and "mediantime" integer of a reply. */
+static void shift_times(char *text, size_t cap, int64_t shift)
+{
+    static const char *const keys[] = { "\"tiptime\":", "\"mediantime\":" };
+    for (size_t k = 0; k < 2 && shift; k++) {
+        char *p = strstr(text, keys[k]);
+        if (!p) continue;
+        char *num = p + strlen(keys[k]), *end = NULL;
+        long long v = strtoll(num, &end, 10);
+        if (end == num) continue;
+        char tail[8192], digits[24];
+        snprintf(tail, sizeof(tail), "%s", end);
+        int n = snprintf(digits, sizeof(digits), "%lld", v + (long long)shift);
+        if ((size_t)(num - text) + (size_t)n + strlen(tail) + 1 > cap) continue;
+        memcpy(num, digits, (size_t)n);
+        memcpy(num + n, tail, strlen(tail) + 1);
+    }
+}
+
+/* A listener whose accept queue is full and never drained: a connect to it
+ * neither completes nor is refused before the client's connect cap. This is
+ * the shape of a dead loopback port on Windows (the stack retries the SYN
+ * after a reset for about 2 s), reproduced on every platform. */
+#define BLACKHOLE_FILL 64
+struct zw_blackhole {
+    platform_socket_t listener;
+    platform_socket_t fill[BLACKHOLE_FILL];
+    size_t nfill;
+};
+
+static bool blackhole_bind(struct zw_blackhole *b, uint16_t *port_out)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    b->listener = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (b->listener == PLATFORM_SOCKET_INVALID ||
+        platform_socket_bind(b->listener, (const struct sockaddr *)&a, sizeof(a)) != 0 ||
+        platform_socket_listen(b->listener, 0) != 0) return false;
+    struct sockaddr_in got;
+    memset(&got, 0, sizeof(got));
+    socklen_t gl = sizeof(got);
+    if (getsockname(b->listener, (struct sockaddr *)&got, &gl) != 0) return false;
+    *port_out = ntohs(got.sin_port);
+    return true;
+}
+
+/* Connect fillers until one no longer completes within 100 ms. */
+static bool blackhole_fill(struct zw_blackhole *b, uint16_t port)
+{
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(port);
+    while (b->nfill < BLACKHOLE_FILL) {
+        platform_socket_t s = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
+        if (s == PLATFORM_SOCKET_INVALID) return false;
+        b->fill[b->nfill++] = s;
+        int rc = platform_socket_connect(s, (const struct sockaddr *)&a, sizeof(a));
+        if (rc != 0 && !platform_socket_error_in_progress(platform_socket_last_error())) return true;
+        int err = 0;
+        if (rc != 0 && (platform_socket_wait_writable(s, 100) <= 0 ||
+                        platform_socket_pending_error(s, &err) != 0 || err != 0)) return true;
+    }
+    return false;
+}
+
+struct zw_blackhole *zw_mock_blackhole_start(uint16_t *port_out)
+{
+    struct zw_blackhole *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    b->listener = PLATFORM_SOCKET_INVALID;
+    if (blackhole_bind(b, port_out) && blackhole_fill(b, *port_out)) return b;
+    zw_mock_blackhole_stop(b);
+    return NULL;
+}
+
+void zw_mock_blackhole_stop(struct zw_blackhole *b)
+{
+    if (!b) return;
+    for (size_t i = 0; i < b->nfill; i++) platform_socket_close(b->fill[i]);
+    if (b->listener != PLATFORM_SOCKET_INVALID) platform_socket_close(b->listener);
+    free(b);
 }

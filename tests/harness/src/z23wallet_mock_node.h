@@ -27,4 +27,15 @@ bool zw_mock_write_cookie(const char *datadir, const char *cookie_body);
  * NULL or "" goes back to the cookie. */
 void zw_mock_set_auth(struct zw_mock *m, const char *userpass);
 
+/* Seconds added to every fixture "tiptime"/"mediantime" in replies. Tests keep
+ * 0 (goldens use a fixed clock); the standalone mock shifts the fixture epoch
+ * to now, so a manual run of a synced scenario shows a fresh tip. */
+#define ZW_MOCK_FIXTURE_NOW INT64_C(1700000016) /* fixture tiptime + 16 s */
+void zw_mock_set_clock_shift(struct zw_mock *m, int64_t seconds);
+/* A loopback port whose connects neither complete nor get refused within the
+ * wallet's connect cap (a full accept queue): a dead port as Windows shows it. */
+struct zw_blackhole;
+struct zw_blackhole *zw_mock_blackhole_start(uint16_t *port_out);
+void zw_mock_blackhole_stop(struct zw_blackhole *b);
+
 #endif

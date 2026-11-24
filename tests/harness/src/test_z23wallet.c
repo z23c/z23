@@ -470,6 +470,7 @@ static void test_rpc_stalled(void)
     uint64_t ms = (gui_now_ns() - t0) / 1000000u;
     int phase_after = atomic_load(&n.rpc->phase);
     CHECK("[29] accept-and-never-reply ends at the total deadline as TIMEOUT", e == ZW_ERR_TIMEOUT && ms < 1500);
+    CHECK("[30] a node that accepted but did not answer is not handed over to zclassicd", !n.rpc->z23_refused);
     char line[160];
     zw_watchdog_line(ZW_PHASE_RECV, 8023, line, sizeof(line));
     CHECK("[29] the watchdog line names the phase and endpoint",
@@ -518,6 +519,91 @@ static void test_rpc_auto_prefers_z23(void)
     node_stop(&l);
 }
 
+#if defined(_WIN32)
+#define LEGACY_HOME TMP "/fbprofile/roaming/ZClassic"
+#else
+#define LEGACY_HOME TMP "/fbprofile/.zclassic"
+#endif
+
+/* R7 on the owner's machine: a stale Z23 cookie whose port is dead, and a
+ * zclassicd in its default folder. The dead port is a full accept queue, so
+ * the connect times out (as a refused loopback connect does on Windows)
+ * instead of being refused at once (as on Linux). */
+static void test_rpc_auto_fallback_dead_port(void)
+{
+    struct node l;
+    hermetic_env();
+    set_env("HOME", TMP "/fbprofile"); /* its own profile: the shared one never holds a zclassicd */
+    set_env("APPDATA", TMP "/fbprofile/roaming");
+    uint16_t dead = 0;
+    struct zw_blackhole *bh = zw_mock_blackhole_start(&dead);
+    CHECK("a dead Z23 port and a zclassicd start", bh && node_start(&l, "legacy_conf", "fb_legacy"));
+    zw_mock_set_auth(l.mock, "u:p");
+    char conf[128], port[16];
+    mkdirs(LEGACY_HOME);
+    snprintf(conf, sizeof(conf), "rpcuser=u\nrpcpassword=p\nrpcport=%u\n", (unsigned)l.port);
+    write_file(LEGACY_HOME, "zclassic.conf", conf);
+    mkdirs(TMP "/dd_fb_z23");
+    zw_mock_write_cookie(TMP "/dd_fb_z23", COOKIE);
+    snprintf(port, sizeof(port), "%u", (unsigned)dead);
+    write_file(TMP "/dd_fb_z23", ".rpcport", port);
+    struct zw_options o = { .profile = ZW_PROFILE_AUTO, .datadir = TMP "/dd_fb_z23" };
+    struct zw_rpc *r = calloc(1, sizeof(*r));
+    struct zw_result res;
+    memset(&res, 0, sizeof(res));
+    if (r) r->opt = &o;
+    uint64_t t0 = gui_now_ns();
+    enum zw_err e = r ? zw_query_run(r, ZW_Q_CHAIN, &res) : ZW_ERR_NOMEM;
+    uint64_t ms = (gui_now_ns() - t0) / 1000000u;
+    printf("    fallback took %llu ms\n", (unsigned long long)ms);
+    CHECK("[30] a connect TIMEOUT counts as unreachable; a receive TIMEOUT does not",
+          zw_rpc_unreachable(ZW_ERR_TIMEOUT, ZW_PHASE_CONNECT) && zw_rpc_unreachable(ZW_ERR_REFUSED, ZW_PHASE_CONNECT) &&
+          !zw_rpc_unreachable(ZW_ERR_TIMEOUT, ZW_PHASE_RECV));
+    CHECK("[30] auto: a Z23 port that does not answer falls back to zclassicd in the same query",
+          e == ZW_OK && res.profile == ZW_PROFILE_ZCLASSICD && res.port == l.port && ms < 1500);
+    memset(&res, 0, sizeof(res));
+    unsigned before = zw_mock_request_count(l.mock);
+    CHECK("[30] later queries stay on zclassicd", r && zw_query_run(r, ZW_Q_CHAIN, &res) == ZW_OK &&
+          res.profile == ZW_PROFILE_ZCLASSICD && zw_mock_request_count(l.mock) == before + 1);
+    if (r) zw_endpoint_wipe(&r->ep);
+    free(r);
+    remove_file(LEGACY_HOME, "zclassic.conf");
+    hermetic_env(); /* back to the profile without a zclassicd */
+    zw_mock_blackhole_stop(bh);
+    node_stop(&l);
+}
+
+/* listunspent leaves "address" out for multisig and nonstandard scripts. */
+static void test_rpc_unspent_without_address(void)
+{
+    struct node n;
+    struct zw_result res;
+    CHECK("multisig node starts", node_start(&n, "home_multisig", "msig"));
+    memset(&res, 0, sizeof(res));
+    enum zw_err e = zw_query_run(n.rpc, ZW_Q_BALANCES, &res);
+    CHECK("[12] a UTXO without an address is skipped; the other rows still show",
+          e == ZW_OK && res.bal && res.bal->n == 4 && !strcmp(res.bal->rows[0].addr, TA) &&
+          res.bal->rows[0].zat == 340000000);
+    zw_result_release(&res);
+    node_stop(&n);
+}
+
+/* The standalone mock moves fixture tip times; the tests keep the fixed clock. */
+static void test_mock_clock_shift(void)
+{
+    struct node n;
+    struct zw_result res;
+    CHECK("clock node starts", node_start(&n, "home_synced", "clock"));
+    memset(&res, 0, sizeof(res));
+    bool fixed = zw_query_run(n.rpc, ZW_Q_CHAIN, &res) == ZW_OK && res.chain.tiptime == NOW_S - 16;
+    zw_mock_set_clock_shift(n.mock, 1000);
+    memset(&res, 0, sizeof(res));
+    CHECK("the mock clock shift moves tiptime and leaves the default fixed", fixed &&
+          zw_query_run(n.rpc, ZW_Q_CHAIN, &res) == ZW_OK && res.chain.tiptime == NOW_S - 16 + 1000 &&
+          res.chain.blocks == 1234567);
+    node_stop(&n);
+}
+
 static void test_rpc(void)
 {
     hermetic_env();
@@ -535,6 +621,9 @@ static void test_rpc(void)
     test_rpc_balances_partial();
     test_rpc_stalled();
     test_rpc_auto_prefers_z23();
+    test_rpc_auto_fallback_dead_port();
+    test_rpc_unspent_without_address();
+    test_mock_clock_shift();
 }
 
 /* A peer that accepts and closes without a byte, and one that sends half a header,

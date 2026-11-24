@@ -114,6 +114,8 @@ struct zw_rpc {
 bool zw_rpc_legacy_allowed(const char *method);
 /* Locate the node now if needed; false when none was found. */
 bool zw_rpc_ensure(struct zw_rpc *r);
+/* REFUSED, or a TIMEOUT while connecting: nothing listens on the port. */
+bool zw_rpc_unreachable(enum zw_err err, int fail_phase);
 enum zw_err zw_rpc_call(struct zw_rpc *r, const char *method, const char *params_json,
                         struct json_value *result, struct zw_rpc_error *e);
 

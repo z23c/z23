@@ -2,7 +2,7 @@
  * Purpose: JSON-RPC over the loopback HTTP client: endpoint location, the
  * zclassicd read-only allowlist (refused calls send no bytes), the 401
  * cookie re-read (cookie credentials only), the auto profile's fall back
- * from a refusing Z23 node to zclassicd, error mapping (-28 warming,
+ * from an unreachable Z23 port to zclassicd, error mapping (-28 warming,
  * -32601 missing method) and strict reply validation. */
 #include <stdio.h>
 #include <string.h>
@@ -89,12 +89,24 @@ bool zw_rpc_ensure(struct zw_rpc *r)
     return zw_locate(r->opt, &r->ep, &r->report);
 }
 
-/* A failure decides where the next call looks for the node. */
-static void after_failure(struct zw_rpc *r, enum zw_err err)
+/* Nobody is listening on the port. A loopback connect that does not finish
+ * within the connect cap counts too: Windows retries the SYN after a reset and
+ * reports "refused" only after about 2 s, past the cap (R7: a Z23 node is
+ * preferred only if its port answers). */
+bool zw_rpc_unreachable(enum zw_err err, int fail_phase)
 {
-    if (err == ZW_ERR_REFUSED && r->ep.profile == ZW_PROFILE_Z23 && r->opt->profile == ZW_PROFILE_AUTO)
-        r->z23_refused = true;
+    return err == ZW_ERR_REFUSED || (err == ZW_ERR_TIMEOUT && fail_phase == ZW_PHASE_CONNECT);
+}
+
+/* A failure decides where the next call looks for the node. True when this
+ * failure just handed the auto profile over from Z23 to zclassicd. */
+static bool after_failure(struct zw_rpc *r, enum zw_err err, int fail_phase)
+{
+    bool handover = zw_rpc_unreachable(err, fail_phase) && r->ep.profile == ZW_PROFILE_Z23 &&
+                    r->opt->profile == ZW_PROFILE_AUTO && !r->z23_refused;
+    if (handover) r->z23_refused = true;
     if (err == ZW_ERR_REFUSED || err == ZW_ERR_AUTH || err == ZW_ERR_TIMEOUT) r->ep.valid = false; /* locate again */
+    return handover;
 }
 
 /* SEARCHING, or the client-side refusal of a non-allowlisted zclassicd call. */
@@ -115,8 +127,8 @@ static enum zw_err precheck(struct zw_rpc *r, const char *method, struct zw_rpc_
     return ZW_OK;
 }
 
-enum zw_err zw_rpc_call(struct zw_rpc *r, const char *method, const char *params_json,
-                        struct json_value *result, struct zw_rpc_error *e)
+static enum zw_err call_once(struct zw_rpc *r, const char *method, const char *params_json,
+                             struct json_value *result, struct zw_rpc_error *e, bool *handover)
 {
     set_err(e, ZW_OK, 0, "");
     enum zw_err err = precheck(r, method, e);
@@ -137,8 +149,21 @@ enum zw_err zw_rpc_call(struct zw_rpc *r, const char *method, const char *params
         if (err == ZW_ERR_BAD_REPLY && status == 403) err = ZW_ERR_AUTH;
     }
     zw_buf_free(&reply);
-    atomic_store(&r->phase, ZW_PHASE_IDLE);
+    int fail_phase = atomic_exchange(&r->phase, ZW_PHASE_IDLE);
     if (err != ZW_OK && e->kind == ZW_OK) set_err(e, err, 0, method);
-    after_failure(r, err);
+    *handover = after_failure(r, err, fail_phase);
     return err;
+}
+
+/* When the auto profile's Z23 port turns out dead, the same call is asked of
+ * zclassicd at once (still under its read-only allowlist), so Home does not
+ * wait a poll interval for the fall back. */
+enum zw_err zw_rpc_call(struct zw_rpc *r, const char *method, const char *params_json,
+                        struct json_value *result, struct zw_rpc_error *e)
+{
+    bool handover = false;
+    enum zw_err err = call_once(r, method, params_json, result, e, &handover);
+    if (!handover) return err;
+    zw_log("rpc: Z23 port did not answer; trying zclassicd");
+    return call_once(r, method, params_json, result, e, &handover);
 }
