@@ -773,11 +773,6 @@ static bool dlx_pc_purpose_order(const char *detail, bool fail)
     return ok;
 }
 
-static void dlx_pc_deferred_fault(void)
-{
-    zcl_alloc_fault_fail_next("json_set_str");
-}
-
 static bool dlx_pc_heavy_setup(struct dlx_rig *rig, const char *metadata, bool fail_light)
 {
     char row[1024], path[1400];
@@ -815,12 +810,12 @@ static bool dlx_pc_heavy_case(const char *metadata, bool defer, bool fail_light,
     struct dlx_call c;
     if (!dlx_pc_heavy_setup(&rig, metadata, fail_light)) return false;
     dlx_pc_submit(&c, &rig, NULL, NULL);
-    if (fail_report) zcl_land_precheck_test_before_deferred(dlx_pc_deferred_fault);
+    if (fail_report) zcl_land_precheck_test_fail_deferred(true);
     bool ok = dlx_run(&c);
     if (fail_report) {
         bool consumed = zcl_alloc_fault_armed_label() == NULL;
         zcl_alloc_fault_clear();
-        zcl_land_precheck_test_before_deferred(NULL);
+        zcl_land_precheck_test_fail_deferred(false);
         ok = ok && consumed && !dlx_ok(&c) && dlx_queue_empty() &&
             !strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE");
     } else if (fail_light) ok = ok && !dlx_ok(&c) && !strcmp(dlx_str(&c, "gate"), "check-light-fixture");

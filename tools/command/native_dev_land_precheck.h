@@ -50,7 +50,7 @@ bool zcl_land_precheck_heavy_valid(const char *text, const char *list);
 bool zcl_land_precheck_deferred_report(struct json_value *data,
                                        const char *const *names, size_t count);
 #if defined(ZCL_TESTING)
-void zcl_land_precheck_test_before_deferred(void (*hook)(void));
+void zcl_land_precheck_test_fail_deferred(bool enabled);
 #endif
 bool zcl_dev_land_precheck_input_valid(const struct json_value *input,
                                       bool checked_elsewhere, struct zcl_command_reply *reply);

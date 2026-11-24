@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: validate optional lane lint cost classifications before use. */
 #include "command/native_dev_land_precheck.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include <string.h>
 
@@ -38,10 +39,10 @@ bool zcl_land_precheck_heavy_valid(const char *text, const char *list)
 }
 
 #if defined(ZCL_TESTING)
-static void (*pc_before_deferred)(void);
-void zcl_land_precheck_test_before_deferred(void (*hook)(void))
+static bool pc_fail_deferred_alloc;
+void zcl_land_precheck_test_fail_deferred(bool enabled)
 {
-    pc_before_deferred = hook;
+    pc_fail_deferred_alloc = enabled;
 }
 #endif
 
@@ -51,7 +52,10 @@ bool zcl_land_precheck_deferred_report(struct json_value *data,
     struct json_value list;
     json_init(&list); json_set_array(&list);
 #if defined(ZCL_TESTING)
-    if (pc_before_deferred) pc_before_deferred();
+    if (pc_fail_deferred_alloc) {
+        pc_fail_deferred_alloc = false;
+        zcl_alloc_fault_fail_next("json_set_str");
+    }
 #endif
     bool ok = true;
     for (size_t i = 0; i < count && ok; i++) {
