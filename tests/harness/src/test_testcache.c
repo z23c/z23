@@ -3954,7 +3954,12 @@ static int tc_phase_makefile_toolkey(void)
              file_contains("Makefile",
                            "$(call TESTCACHE_TOOLKEY_CPPFLAGS,"
                            "$(TEST_FAST_PROFILE),"
-                           "TEST_FAST_EPOCH_COMPILE_FLAGS)") &&
+                           "TEST_FAST_CACHE_FLAGS)") &&
+             file_contains("Makefile",
+                           "override TEST_FAST_CACHE_FLAGS = "
+                           "$(TEST_FAST_EPOCH_COMPILE_FLAGS) "
+                           "harness-src-opt=$(TEST_FAST_HARNESS_OPT);"
+                           "except=test_parallel,testcache") &&
              file_contains("Makefile",
                            "$(call TESTCACHE_TOOLKEY_CPPFLAGS,"
                            "$(TEST_REL_PROFILE),"

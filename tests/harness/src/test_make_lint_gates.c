@@ -3035,6 +3035,39 @@ static int t_proof_plan_metadata(void)
     return bad;
 }
 
+static int t_test_harness_opt_profile(void)
+{
+    static const char script[] =
+        "set -eu; root=$1; work=$2; cd \"$work\"\n"
+        "fail() { echo \"test harness opt: $1\" >&2; exit 1; }\n"
+        "awk '/^zcl_testcache_toolkey =/{on=1} on && /^# ── Module mode/{exit} on{print}' \"$root/Makefile\" > key.mk\n"
+        "awk '/^TEST_FAST_OBJECT_CFLAGS =/{on=1} on && /^\\$\\(TEST_FAST_OBJ_DIR\\)\\/%.o:/{exit} on{print}' \"$root/Makefile\" > objects.mk\n"
+        "cat > Fixture.mk <<'MAKE'\n"
+        ".DEFAULT_GOAL := all\n"
+        "TEST_FAST_OBJ_DIR := obj\nTEST_FAST_CFLAGS := -O1 -Werror\nTEST_FAST_EPOCH_COMPILE_FLAGS := -O1 deps=-MMD,-MP\nTEST_FAST_PROFILE := test-fast-v2\nBUILD_COMPILER_ID := compiler\nTEST_FAST_COMPILE_EPOCH := epoch\n"
+        "HOTSWAP_TEST_LOADER_REL := engine/loader.o\nARENA_VIEW_INCLUDES := -DARENA_FIXTURE\n"
+        "TEST_PARALLEL_FAST_SRCS := tests/harness/src/test_hex_codec.c tests/harness/src/test_arena_view.c tests/harness/src/test_parallel.c tests/harness/src/testcache.c engine/other.c\n"
+        "include key.mk\ninclude objects.mk\n"
+        "all: obj/tests/harness/src/test_hex_codec.o obj/tests/harness/src/test_arena_view.o obj/tests/harness/src/test_parallel.o obj/tests/harness/src/testcache.o obj/engine/other.o\n"
+        "\t@printf '%s\\n' '$(call zcl_testcache_toolkey,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)' > old-key\n"
+        "\t@printf '%s\\n' '$(call zcl_testcache_toolkey,$(TEST_FAST_PROFILE),TEST_FAST_CACHE_FLAGS)' > new-key\n"
+        "obj/%.o:\n\t@mkdir -p $(dir $@); printf '%s\\n' '$(TEST_FAST_OBJECT_CFLAGS)' > $@.args; cc $(TEST_FAST_OBJECT_CFLAGS) -x c -c /dev/null -o $@\nMAKE\n"
+        "make -s -f Fixture.mk || fail build\n"
+        "awk '{if($0 !~ /-O1.*-Og/ || $0 !~ /-Werror/) exit 1}' obj/tests/harness/src/test_hex_codec.o.args || fail test-argv\n"
+        "grep -F -- '-DARENA_FIXTURE' obj/tests/harness/src/test_arena_view.o.args >/dev/null || fail arena-flags\n"
+        "for f in obj/tests/harness/src/test_parallel.o.args obj/tests/harness/src/testcache.o.args obj/engine/other.o.args; do if grep -F -- '-Og' \"$f\" >/dev/null; then fail excluded-argv; fi; done\n"
+        "test -s old-key && test -s new-key && ! cmp -s old-key new-key || fail cache-policy\n"
+        "cp new-key stable-key; make -s -f Fixture.mk || fail repeat; cmp stable-key new-key || fail unstable-key\n"
+        "rm obj/tests/harness/src/test_hex_codec.o; make -s -f Fixture.mk TEST_FAST_HARNESS_OPT=-O3 TEST_FAST_HARNESS_OBJECTS= TEST_FAST_CACHE_FLAGS=-O1 TEST_FAST_OBJECT_CFLAGS=-O3 || fail override-build\n"
+        "awk '{if($0 !~ /-O3.*-Og/) exit 1}' obj/tests/harness/src/test_hex_codec.o.args || fail override-opt; cmp stable-key new-key || fail override-key\n";
+    char fixture[PATH_MAX] = {0};
+    test_make_tmpdir(fixture, sizeof(fixture), "test_harness_opt", "profile");
+    int bad = build_needs_fixture_run(repo_root(), fixture, script);
+    if (bad) fprintf(stderr, "test harness opt fixture retained: %s\n", fixture);
+    else if (test_rm_rf_recursive(fixture) != 0) bad = 1;
+    return bad;
+}
+
 static int t_test_debug_profile(void)
 {
     static const char script[] =
@@ -3060,6 +3093,8 @@ static int t_test_debug_profile(void)
         "checkflags() { hasflag flags \"$1\" || fail missing-debug; if hasflag flags \"$2\"; then fail wrong-debug; fi; hasflag flags -gno-record-gcc-switches && hasflag flags -DPROFILE_FIXTURE || fail lost-input-flags; grep -Fx \"TEST_CFLAGS=$(cat flags)\" plan >/dev/null || fail plan-flags; grep -F -- \"$1\" epoch-flags >/dev/null || fail epoch-flags; }\n"
         "make -s -f Fixture.mk || fail default; checkflags -g1 -g; if hasflag flags -Werror; then fail unexpected-werror; fi; cp flags flags-default; cp epoch epoch-default\n"
         "test -s epoch && test \"$(cat epoch)\" != \"$zero\" || fail epoch-empty\n"
+        "system=1111111111111111111111111111111111111111111111111111111111111111\n"
+        "make -s -f Fixture.mk \"BUILD_SYSTEM_ID=$system\" || fail system-identity; if cmp -s epoch-default epoch; then fail same-system-epoch; fi\n"
         "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=1 || fail explicit-one; checkflags -g1 -g; cmp flags-default flags || fail flags-default-one; cmp epoch-default epoch || fail epoch-default-one\n"
         "make -s -f Fixture.mk ZCL_TEST_DEBUG_LEVEL=2 || fail explicit-two; checkflags -g -g1; awk '{for(i=1;i<=NF;i++) {if($i==\"-g1\") $i=\"-g\"} $1=$1; print}' flags-default > normalized-default; awk '{$1=$1; print}' flags > normalized-two; cmp normalized-default normalized-two || fail changed-unrelated-flags; if cmp -s epoch-default epoch; then fail same-epoch; fi\n"
         "make -s -f Fixture.mk ZCL_TEST_WERROR=1 || fail werror; hasflag flags -Werror || fail missing-werror; checkflags -g1 -g\n"
@@ -3104,7 +3139,7 @@ int test_make_lint_gates(void)
     if (t_secure_release_host_support_rebuild() != 0) return 1;
     if (t_registry_query_scope() != 0) return 1;
     if (t_proof_plan_metadata() != 0) return 1;
-    if (t_test_debug_profile() != 0) return 1;
+    if (t_test_debug_profile() != 0 || t_test_harness_opt_profile() != 0) return 1;
     if (t_hotswap_ledger_dependencies() != 0) return 1;
     if (t_lint_command_rebuild() != 0) return 1;
     if (t_lint_inventory_dispatch() != 0) return 1;

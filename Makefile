@@ -12858,6 +12858,11 @@ zcl_testcache_toolkey = $(strip $(shell printf '%s\0%s\0%s\0%s\0' \
 TESTCACHE_TOOLKEY_CPPFLAGS = \
   -DZCL_TESTCACHE_TOOLKEY=\"$(call zcl_testcache_toolkey,$(1),$(2))\"
 
+# The harness-only optimization is part of the test verdict identity even
+# though it is not a common compiler flag. Never pass this descriptor to cc.
+override TEST_FAST_HARNESS_OPT := -Og
+override TEST_FAST_CACHE_FLAGS = $(TEST_FAST_EPOCH_COMPILE_FLAGS) harness-src-opt=$(TEST_FAST_HARNESS_OPT);except=test_parallel,testcache
+
 # ── Module mode: the test harness carries the REAL hot-swap loader ────────
 # Two per-object injections, and no other build is affected.
 #
@@ -12879,13 +12884,18 @@ TESTCACHE_TOOLKEY_CPPFLAGS = \
 # HOTSWAP_TEST_LOADER_REL and HOTSWAP_TEST_LOADER_FLAGS are defined beside the
 # test-asan epoch, which keys on them.
 TEST_FAST_OBJECT_CFLAGS = $(TEST_FAST_CFLAGS)
+override TEST_FAST_HARNESS_OBJECTS = $(filter-out \
+  $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_parallel.o \
+  $(TEST_FAST_OBJ_DIR)/tests/harness/src/testcache.o, \
+  $(patsubst %.c,$(TEST_FAST_OBJ_DIR)/%.o,$(filter tests/harness/src/%.c,$(TEST_PARALLEL_FAST_SRCS))))
+$(TEST_FAST_HARNESS_OBJECTS): private override TEST_FAST_OBJECT_CFLAGS += $(TEST_FAST_HARNESS_OPT)
 $(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS += -DZCL_DEV_BUILD
 $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
   -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_FAST_COMPILE_EPOCH)\"
 $(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_FAST_OBJ_DIR)/tests/harness/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
-  $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
-$(TEST_FAST_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_FAST_OBJECT_CFLAGS += \
+  $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_CACHE_FLAGS)
+$(TEST_FAST_OBJ_DIR)/tests/harness/src/test_arena_view.o: private override TEST_FAST_OBJECT_CFLAGS += \
   $(ARENA_VIEW_INCLUDES)
 $(TEST_FAST_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(TEST_FAST_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
