@@ -148,8 +148,8 @@ static void parse_conf(const char *dir, char *user, char *pass, long *port, bool
         while (isspace((unsigned char)*k)) k++;
         trim(k);
         for (char *p = k; *p; p++) *p = (char)tolower((unsigned char)*p);
-        if (!strcmp(k, "rpcuser") && strlen(v) < 64) strcpy(user, v);
-        else if (!strcmp(k, "rpcpassword") && strlen(v) < 96) { strcpy(pass, v); zw_log_secret(v); }
+        if (!strcmp(k, "rpcuser") && strlen(v) < 64) strcpy(user, v); // hardening-ok: the strlen check on this line bounds the copy
+        else if (!strcmp(k, "rpcpassword") && strlen(v) < 96) { strcpy(pass, v); zw_log_secret(v); } // hardening-ok: the strlen check on this line bounds the copy
         else if (!strcmp(k, "rpcport")) *port = strtol(v, NULL, 10);
         else if (!strcmp(k, "testnet")) *testnet = atoi(v) != 0;
     }

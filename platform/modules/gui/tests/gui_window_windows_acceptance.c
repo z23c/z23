@@ -7,6 +7,7 @@
  * WM_TIMER do inside the OS size loop, and close. Prints PASS or the failing
  * step and exits non-zero. A window the session cannot read back (locked
  * desktop, no display) prints SKIP for the readback step and still exits 0. */
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -267,3 +268,6 @@ int main(void)
     if (ok) printf("gui_window: PASS scale=%.2f size=%dx%d\n", (double)scale, pw, ph);
     return ok ? 0 : 1;
 }
+#else
+typedef int gui_window_windows_acceptance_not_built; /* Windows-only program */
+#endif

@@ -3,6 +3,7 @@
  * message pump with zero idle CPU, UTF-16 text input, CPU framebuffer
  * presented with SetDIBitsToDevice, clipboard, cursor, fullscreen and raw
  * relative mouse. GL windows are created by window_win32_gl.c. */
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -617,3 +618,6 @@ const struct gui_backend_ops gui_backend_win32 = {
     .gl_make_current = gui_win32_gl_make_current, .gl_swap = gui_win32_gl_swap,
     .gl_interval = gui_win32_gl_interval, .gl_proc = gui_win32_gl_proc,
 };
+#else
+typedef int gui_window_win32_not_built; /* Windows-only translation unit */
+#endif

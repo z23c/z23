@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: WGL context for a GL-surface window. opengl32.dll is loaded at
  * run time so a CPU-only program never links or loads it. */
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -115,3 +116,6 @@ void *gui_win32_gl_proc(struct gui_window *w, const char *name)
     if (v > 3 && v != (uintptr_t)-1) return GUI_FN_CAST(void *, p); /* real extension entry */
     return GUI_FN_CAST(void *, GetProcAddress(s->lib, name));       /* GL 1.1 export */
 }
+#else
+typedef int gui_window_win32_gl_not_built; /* Windows-only translation unit */
+#endif

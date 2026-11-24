@@ -49,14 +49,14 @@ creation and clear on Windows with `platform/modules/gui/tests/gui_gl_windows_ac
 (prints `SKIP gui_gl_smoke: <reason>` and exits 0 where no GL exists).
 
 How `apps/skycombat` moves over later (lane M7): add
-`apps/skycombat/platform/rcore_desktop_z23.c`, which implements raylib's platform
+`apps/skycombat/platform/rcore_desktop_z23.c`, which implements raylib's platform <!-- doc-path-ok: the M7 lane adds this file -->
 contract over this layer (`InitPlatform` = `gui_window_open` GL 3.3 core plus
 `rlLoadExtensions(gui_gl_proc)`, `PollInputEvents` drains `gui_window_wait(0)`,
 `SwapScreenBuffer` = `gui_gl_swap`, `GetTime` = `gui_now_ns`, cursor and clipboard
 and fullscreen forwarders, `DisableCursor` = `GUI_MOUSE_RELATIVE`, `SetTargetFPS`
 = swap interval), one `#elif defined(PLATFORM_DESKTOP_Z23)` in `rcore.c`, and
 `skycombat.mk` switches `-DPLATFORM_DESKTOP_RGFW` to `-DPLATFORM_DESKTOP_Z23`.
-That replaces raylib's `src/platforms/rcore_desktop_rgfw.c` and its private RGFW
+That replaces raylib's `src/platforms/rcore_desktop_rgfw.c` and its private RGFW <!-- doc-path-ok: raylib upstream path, not in this tree -->
 copy (`vendor/raylib/src/external/RGFW`), so window and input code lives only here.
 Needed first: `wglCreateContextAttribsARB` (3.3 core), GLX/EGL, XInput and evdev
 gamepads (`GUI_EV_GAMEPAD` is reserved, never emitted in M1).

@@ -2,6 +2,7 @@
  * Purpose: Win32 clipboard (CF_UNICODETEXT) and UTF-8 to UTF-16 conversion
  * used by the window backend. Split from window_win32.c to keep each file
  * small; compiles with and without UNICODE (every API is the W form). */
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -73,3 +74,6 @@ size_t gui_win32_clip_get(void *hwnd, char *buf, size_t cap)
     CloseClipboard();
     return out;
 }
+#else
+typedef int gui_window_win32_clip_not_built; /* Windows-only translation unit */
+#endif

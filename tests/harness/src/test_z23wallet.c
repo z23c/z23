@@ -335,7 +335,7 @@ static void test_worker_shutdown(void)
     zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
     for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++) {
         struct timespec ts = { 0, 5000000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
     }
     CHECK("the worker is blocked on a node that never answers", zw_mock_request_count(n.mock) >= 1 &&
           zw_worker_busy(w));
@@ -367,7 +367,7 @@ static void test_worker_coalescing(void)
     zw_worker_enqueue(w, ZW_Q_NET, 0);
     for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++) {
         struct timespec ts = { 0, 5000000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
     }
     bool first = zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
     bool again = zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
@@ -377,7 +377,7 @@ static void test_worker_coalescing(void)
     int chains = 0, nets = 0;
     for (int i = 0; i < 600 && (chains + nets < 2 || zw_worker_busy(w)); i++) {
         struct timespec ts = { 0, 5000000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
         size_t k = zw_worker_drain(w, out, 8);
         for (size_t j = 0; j < k; j++) {
             chains += out[j].kind == ZW_Q_CHAIN;
@@ -451,7 +451,7 @@ static void test_model_and_worker(void)
         struct gui_event ev;
         gui_window_wait(win, 0, &ev);
         struct timespec ts = { 0, 5000000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
         got += zw_worker_drain(w, out + got, 8 - got);
     }
     CHECK("the worker answers queued jobs", got >= 2 && out[0].err == ZW_OK);
