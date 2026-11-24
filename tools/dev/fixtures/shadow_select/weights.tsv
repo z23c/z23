@@ -634,6 +634,7 @@ test_group	test_golden_staleness_canary	0	17
 test_group	test_groth16_msm_parity	1412	17
 test_group	test_groth16_r1cs_oracle	459	37
 test_group	test_groth16_selfverify	59026	39
+test_group	test_gui	300	1
 test_group	test_have_data_unreadable	169	59
 test_group	test_hd_keychain	0	17
 test_group	test_header_admit_stage	2588	17
@@ -1087,8 +1088,6 @@ test_group	test_simnet_zmsg_onchain	22619	42
 test_group	test_single_peer_ban_recovery	77	26
 test_group	test_site_routes	61	66
 test_group	test_skycombat_models	111	18
-test_group	test_gui	300	1
-test_group	test_z23wallet	900	1
 test_group	test_slo_ledger_summary	44	45
 test_group	test_slp	132	53
 test_group	test_small_projections	3417	36
@@ -1282,6 +1281,7 @@ test_group	test_x25519_safe	0	17
 test_group	test_yardsale_app	10630	73
 test_group	test_yardsale_wallet	313	48
 test_group	test_z23_front_door	83	60
+test_group	test_z23wallet	900	1
 test_group	test_zanc	146	48
 test_group	test_zcl_ids	0	17
 test_group	test_zcl_result	0	17
