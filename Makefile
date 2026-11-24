@@ -4376,6 +4376,9 @@ templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 # and Tor copied from this checkout) before its first make; a fresh worktree
 # otherwise rebuilds them inside that make, which took ~200 s. Each step prints
 # one progress line first, so the group output never goes silent for long.
+# The private CSS-copy consumer has no node or vendor dependency. Suppress
+# unrelated bootstrap only for that goal, and keep failing script sentinels
+# (including original metadata for Make's readers) to prove it stays isolated.
 .PHONY: gen-stamps-selftest
 gen-stamps-selftest:
 	@set -eu; t0=$$(date +%s); p() { echo "gen-stamps-selftest: $$1 (+$$(( $$(date +%s) - t0 ))s)"; }; \
@@ -4459,11 +4462,19 @@ gen-stamps-selftest:
 	  expect "deleted $$h" "$$mask" "$$g"; \
 	done; \
 	p "same-invocation CSS consumer"; \
+	: > "$$d/bootstrap-calls"; \
+	for script in tor_archives_ready.sh build_vendor.sh; do \
+	  cp "$$w/tools/scripts/$$script" "$$d/$$script"; \
+	  { printf '%s\n' '#!/bin/sh' "echo '$$script' >> '$$d/bootstrap-calls'" 'exit 97'; cat "$$d/$$script"; } > "$$w/tools/scripts/$$script"; \
+	  chmod +x "$$w/tools/scripts/$$script"; \
+	done; \
 	printf '%s: %s\n\t@cp $$< $$@\n' "$$d/css-copy" "$(SITE_CSS_GEN)" >"$$d/consumer.mk"; \
-	consumer() { (cd "$$w" && $(MAKE) --no-print-directory -s -f Makefile -f "$$d/consumer.mk" "$$d/css-copy"); }; \
+	consumer() { (cd "$$w" && $(MAKE) --no-print-directory -s ZCL_TOR=stub VENDOR_MISSING_INPUTS= -f Makefile -f "$$d/consumer.mk" "$$d/css-copy"); }; \
 	consumer || fail "initial CSS consumer"; \
+	[ ! -s "$$d/bootstrap-calls" ] || fail "CSS consumer invoked unrelated bootstrap"; \
 	printf '\n.gen-stamps-proof { display: block; }\n' >>"$$w/$(SITE_CSS_SRC)"; \
 	consumer && grep -Fq .gen-stamps-proof "$$d/css-copy" || fail "CSS consumer stale after generation"; \
+	[ ! -s "$$d/bootstrap-calls" ] || fail "updated CSS consumer invoked unrelated bootstrap"; \
 	echo "gen-stamps-selftest: PASS"
 
 # Focused parses must not pay for the commit stamp: BUILD_COMMIT is lazy, so a
