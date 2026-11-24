@@ -760,19 +760,17 @@ static bool dlrb_proof_ran(const struct dl_dirs *d, const struct dl_row *row,
     return dlrb_attempts_show(d->wt, row->local, row->base, group);
 }
 
-/* The distinct groups a pass may have cleared. */
-struct dlrb_groups {
-    char g[DLRB_EPISODES][DLRB_GROUP_MAX];
-    size_t n;
-};
-
-static void dlrb_groups_add(struct dlrb_groups *gs, const char *group)
+/* Add a distinct group. A group past DLRB_RECENT_MAX is never dropped
+ * silently: the set is marked overflowed and the caller stays conservative. */
+void dlrb_groups_add(struct dlrb_groups *gs, const char *group)
 {
     for (size_t i = 0; i < gs->n; i++)
         if (strcmp(gs->g[i], group) == 0)
             return;
-    if (gs->n < DLRB_EPISODES)
+    if (gs->n < DLRB_RECENT_MAX)
         (void)snprintf(gs->g[gs->n++], DLRB_GROUP_MAX, "%s", group);
+    else
+        gs->overflow = true;
 }
 
 /* Groups queued rows are parked on or remember. */
@@ -816,13 +814,17 @@ static void dlrb_recent_groups(const struct dl_dirs *d,
         (void)dl_history_read(path, dlrb_recent_visit, &rc, NULL, 0);
 }
 
-/* Append `group` to the '+'-joined `list` when it fits. */
-static void dlrb_list_add(char *list, size_t cap, const char *group)
+/* Append `group` to the '+'-joined `list` when it fits; false when it does
+ * not (the list is left unchanged). */
+bool dlrb_list_add(char *list, size_t cap, const char *group)
 {
     size_t have = strlen(list);
     int w = snprintf(list + have, cap - have, "%s%s", have ? "+" : "", group);
-    if (w < 0 || (size_t)w >= cap - have)
+    if (w < 0 || (size_t)w >= cap - have) {
         list[have] = '\0';
+        return false;
+    }
+    return true;
 }
 
 void dlrb_on_pass(const struct dl_dirs *d, struct dl_row *row)
@@ -838,10 +840,20 @@ void dlrb_on_pass(const struct dl_dirs *d, struct dl_row *row)
     dlrb_marked_groups(rows, n, &gs);
     free(rows);
     dlrb_recent_groups(d, &p, &gs);
+    if (gs.overflow)
+        dl_log(row, "main red: more recently failed groups than one pass "
+                    "checks; the extra ones keep their evidence until a "
+                    "clean signal\n");
     for (size_t i = 0; i < gs.n; i++) {
         if (!dlrb_proof_ran(d, row, gs.g[i]))
             continue;
-        dlrb_list_add(mk.group, sizeof(mk.group), gs.g[i]);
+        /* A group the marker cannot name must keep its evidence and its
+         * parked rows, or the landing would clear what it never records. */
+        if (!dlrb_list_add(mk.group, sizeof(mk.group), gs.g[i])) {
+            dl_log(row, "main red: a passed group does not fit the cleared "
+                        "marker; its evidence stays until a later pass\n");
+            continue;
+        }
         dl_log(row, "main red: this proof passed a group with recent "
                     "failures; its evidence and parked rows are cleared\n");
         dlrb_release(d, gs.g[i], true, 0);

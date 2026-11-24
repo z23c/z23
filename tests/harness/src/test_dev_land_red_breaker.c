@@ -634,13 +634,50 @@ _test_next:;
     return failures;
 }
 
+/* More than 8 distinct recent groups are all kept; past the real bound the
+ * set says so, and a cleared list that cannot name a group refuses it. */
+static int dlrb_t_many_groups(void)
+{
+    int failures = 0;
+    TEST("land red main: 9 and more failing groups are never dropped silently") {
+        static struct dlrb_groups gs;
+        char name[DLRB_GROUP_MAX], list[DLRB_GROUP_MAX] = "";
+        size_t added = 0;
+        for (unsigned i = 0; i < 9; i++) {
+            (void)snprintf(name, sizeof(name), "test_group_%u", i);
+            dlrb_groups_add(&gs, name);
+            dlrb_groups_add(&gs, name);
+        }
+        ASSERT_EQ(gs.n, (size_t)9);
+        ASSERT(!gs.overflow);
+        ASSERT(strcmp(gs.g[8], "test_group_8") == 0);
+        for (unsigned i = 9; i < DLRB_RECENT_MAX + 3; i++) {
+            (void)snprintf(name, sizeof(name), "test_group_%u", i);
+            dlrb_groups_add(&gs, name);
+        }
+        ASSERT_EQ(gs.n, (size_t)DLRB_RECENT_MAX);
+        ASSERT(gs.overflow);
+        for (unsigned i = 0; i < 6; i++) {
+            (void)snprintf(name, sizeof(name), "long_group_name_number_%u", i);
+            if (dlrb_list_add(list, sizeof(list), name))
+                added++;
+        }
+        ASSERT_EQ(added, (size_t)2);
+        ASSERT(strcmp(list, "long_group_name_number_0+long_group_name_number_1") == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_land_red_breaker_cases(void)
 {
     return dlrb_t_trip_pure() + dlrb_t_no_trip_pure() + dlrb_t_age_pure() +
            dlrb_t_only_group() + dlrb_t_trip_and_park() + dlrb_t_same_lane() +
            dlrb_t_no_bisect_then_clear() + dlrb_t_age_out() + dlrb_t_off() +
            dlrb_t_attempt_logs() + dlrb_t_cleared_list() +
-           dlrb_t_fix_before_trip() + dlrb_t_skip_clears_nothing();
+           dlrb_t_fix_before_trip() + dlrb_t_skip_clears_nothing() +
+           dlrb_t_many_groups();
 }
 
 #else

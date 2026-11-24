@@ -63,6 +63,9 @@
 #define DLRB_FILES_MAX 128u
 #define DLRB_CANDS 16u
 #define DLRB_EPISODES 8u
+/* Distinct recently failed groups one pass can check; beyond it the pass is
+ * conservative (see dlrb_groups.overflow). */
+#define DLRB_RECENT_MAX 64u
 #define DLRB_PHASE "parked"
 
 struct dlrb_policy {
@@ -127,6 +130,15 @@ size_t dlrb_trip_pick(const struct dlrb_fail *cands, size_t n,
                       long long *since, long long *since_at);
 /* Is `group` the only failed group of the settled attempt's retained test
  * log (row->failed_proof root and attempt)? False when unreadable. */
+/* The distinct groups a landing pass may have cleared. */
+struct dlrb_groups {
+    char g[DLRB_RECENT_MAX][DLRB_GROUP_MAX];
+    size_t n;
+    bool overflow; /* a group did not fit: treat the set as not reset */
+};
+void dlrb_groups_add(struct dlrb_groups *gs, const char *group);
+/* Append to a '+'-joined list; false (list unchanged) when it does not fit. */
+bool dlrb_list_add(char *list, size_t cap, const char *group);
 bool dlrb_failed_only(const struct dl_row *row, const char *group);
 /* Does a retained attempt of the pair (local, base) under worktree `wt`
  * show `group` passing in its test log? */
