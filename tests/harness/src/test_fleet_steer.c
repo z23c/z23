@@ -3436,6 +3436,224 @@ _test_next:;
     return failures;
 }
 
+/* Set (or, with NULL, clear) the brief's owner-name list for one case. */
+static void fmx_owner_names(const char *names)
+{
+#if defined(_WIN32)
+    if (_putenv_s("ZCL_FLEET_OWNER_NAMES", names ? names : "") != 0)
+        fmx_fixture_fail("could not set ZCL_FLEET_OWNER_NAMES");
+#else
+    if ((names ? setenv("ZCL_FLEET_OWNER_NAMES", names, 1)
+               : unsetenv("ZCL_FLEET_OWNER_NAMES")) != 0)
+        fmx_fixture_fail("could not set ZCL_FLEET_OWNER_NAMES");
+#endif
+}
+
+/* The reply object of the directive change row `from` wrote under `ref`. */
+static const struct json_value *fmx_dir_reply(const struct fmx_call *c,
+                                              const char *from,
+                                              const char *ref)
+{
+    const struct json_value *arr = fmx_arr(c, "changes");
+    size_t n = arr ? json_size(arr) : 0u;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *ch = json_at(arr, i);
+        if (strcmp(fmx_wstr(ch, "from"), from) == 0 &&
+            strcmp(fmx_wstr(ch, "ref"), ref) == 0 &&
+            strcmp(fmx_wstr(ch, "kind"), "directive") == 0)
+            return json_get(ch, "reply");
+    }
+    return NULL;
+}
+
+/* One directive this host sent: its outbox row plus the send receipt. */
+static void fmx_sent_directive(const char *ts, long long seq, const char *to,
+                               const char *ref)
+{
+    char line[256];
+    fmx_seed_inbox("self", ts, seq, FMX_SENDER, to, "directive", "do it", ref);
+    (void)snprintf(line, sizeof(line),
+                   "{\"key\":\"k-%s\",\"seq\":%lld,\"to\":\"%s\","
+                   "\"ref\":\"%s\"}\n", ref, seq, to, ref);
+    fmx_state_file("steer", "sent.jsonl", line, true);
+}
+
+static bool fmx_brief_ok(struct fmx_call *b)
+{
+    fmx_brief(b, NULL, 0);
+    return fmx_run(b, zcl_native_handle_fleet_steer_brief) && fmx_ok(b);
+}
+
+static long long fmx_dcount(const struct fmx_call *b, const char *key)
+{
+    return fmx_wint(fmx_get(b, "directive_counts"), key);
+}
+
+static int fmx_t_directive_close_expiry(void)
+{
+    int failures = 0;
+
+    TEST("steer: a sender close clears the blocker; a real answer wins") {
+        struct fmx_call b;
+        const struct json_value *r;
+        fmx_isolate("directive_close");
+        fmx_prime_mail();
+        fmx_sent_directive("2026-01-01T00:00:00Z", 7, "dead-box", "close-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "close-ref"));
+        ASSERT(fmx_get(&b, "open_worker_directives") != NULL);
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
+        ASSERT(json_get_int(fmx_get(&b, "overdue_worker_directives")) == 1);
+        ASSERT(fmx_get(&b, "directive_definition") != NULL);
+        ASSERT(strstr(json_get_str(fmx_get(&b, "directive_definition")),
+                      "newest 64 directives") != NULL);
+        fmx_end(&b);
+        /* Someone other than the sender or an owner cannot close it. */
+        fmx_seed_inbox("other", "2026-01-01T00:05:00Z", 3, "intruder",
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "close-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "close-ref"));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "close-ref"),
+                               "state"), "queued");
+        fmx_end(&b);
+        /* The sender's own closure is a new row: the blocker goes away. */
+        fmx_seed_inbox("self", "2026-01-01T00:10:00Z", 8, FMX_SENDER,
+                       "dead-box", "note",
+                       "closed by sender: superseded by close-ref-2",
+                       "close-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT(!fmx_blocker_has(&b, "close-ref"));
+        r = fmx_dir_reply(&b, FMX_SENDER, "close-ref");
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "closed");
+        ASSERT_STR_EQ(fmx_wstr(r, "close_reason"), "superseded");
+        ASSERT_STR_EQ(fmx_wstr(r, "closed_by"), FMX_SENDER);
+        ASSERT_STR_EQ(fmx_wstr(r, "class"), "worker");
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 0);
+        ASSERT(json_get_int(fmx_get(&b, "overdue_worker_directives")) == 0);
+        ASSERT(fmx_dcount(&b, "closed") == 1);
+        fmx_end(&b);
+        /* The recipient's real result still wins over the closure. */
+        fmx_seed_inbox("dead-box", "2026-01-01T00:20:00Z", 1, "dead-box",
+                       FMX_SENDER, "result", "receiver=dead-box\\ndone\\n",
+                       "close-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "close-ref"),
+                               "state"), "answered");
+        ASSERT(fmx_dcount(&b, "closed") == 0);
+        ASSERT(fmx_dcount(&b, "answered") == 1);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a recipient silent past 24 h expires; a fresh one does not") {
+        struct fmx_call b;
+        const struct json_value *r;
+        char now[40];
+        fmx_isolate("directive_gone");
+        fmx_prime_mail();
+        /* Session G announced presence long ago and its last mail row is
+         * old too; then a directive went to it. */
+        fmx_seed_inbox("box-g", "2026-01-01T00:00:00Z", 1, "box-g", "*",
+                       "note", "presence.v1; role=G; phase=active",
+                       "presence-G");
+        fmx_seed_inbox("box-g", "2026-01-01T06:00:00Z", 2, "G", "*", "note",
+                       "hello", "hello-ref");
+        fmx_sent_directive("2026-01-02T00:00:00Z", 7, "G", "gone-ref");
+        /* quiet-box spoke long ago but never posted presence: no session
+         * liveness to lose, so it never expires. */
+        fmx_seed_inbox("quiet-box", "2026-01-01T00:00:00Z", 1, "quiet-box",
+                       "*", "note", "hello", "quiet-hello");
+        fmx_sent_directive("2026-01-02T00:00:00Z", 10, "quiet-box",
+                           "quiet-ref");
+        /* Role B's presence row is stale too. */
+        fmx_seed_inbox("box-b", "2026-01-01T00:00:00Z", 1, "box-b", "*",
+                       "note", "presence.v1; role=B; phase=active",
+                       "presence-B");
+        fmx_sent_directive("2026-01-02T00:00:00Z", 8, "B", "gone-b-ref");
+        /* Session L announced presence long ago and is live now. */
+        fmx_seed_inbox("box-l", "2026-01-01T00:00:00Z", 1, "box-l", "*",
+                       "note", "presence.v1; role=L; phase=active",
+                       "presence-L");
+        fmx_now_ts(now, sizeof(now));
+        fmx_seed_inbox("box-l", now, 2, "box-l", "*", "note",
+                       "presence.v1; role=L; phase=active", "presence-L");
+        fmx_sent_directive("2026-01-02T00:00:00Z", 9, "L", "live-ref");
+        ASSERT(fmx_brief_ok(&b));
+        r = fmx_dir_reply(&b, FMX_SENDER, "gone-ref");
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "recipient_gone");
+        ASSERT(fmx_wint(r, "recipient_silent_s") > 86400);
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "gone-b-ref"),
+                               "state"), "recipient_gone");
+        ASSERT(!fmx_blocker_has(&b, "gone-ref"));
+        ASSERT(!fmx_blocker_has(&b, "gone-b-ref"));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "live-ref"),
+                               "state"), "queued");
+        ASSERT(fmx_blocker_has(&b, "live-ref"));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "quiet-ref"),
+                               "state"), "queued");
+        ASSERT(fmx_blocker_has(&b, "quiet-ref"));
+        ASSERT(fmx_dcount(&b, "recipient_gone") == 2);
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 2);
+        ASSERT(json_get_int(fmx_get(&b, "overdue_worker_directives")) == 2);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: broadcast and owner rows stay out of worker backlog") {
+        struct fmx_call b;
+        const struct json_value *q;
+        fmx_isolate("directive_classes");
+        fmx_prime_mail();
+        fmx_sent_directive("2026-01-01T00:00:00Z", 7, "*", "all-ref");
+        fmx_owner_names("owner-human,second-owner");
+        fmx_sent_directive("2026-01-01T00:00:00Z", 8, "owner-human", "owner-ref");
+        fmx_sent_directive("2026-01-01T00:00:00Z", 9, "w-box", "w-ref-1");
+        fmx_sent_directive("2026-01-01T00:01:00Z", 10, "w-box", "w-ref-2");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT(!fmx_blocker_has(&b, "all-ref"));
+        ASSERT(!fmx_blocker_has(&b, "owner-ref"));
+        ASSERT(fmx_blocker_has(&b, "w-ref-1"));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "all-ref"),
+                               "class"), "broadcast");
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "owner-ref"),
+                               "class"), "owner");
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 2);
+        ASSERT(json_get_int(fmx_get(&b, "overdue_worker_directives")) == 2);
+        ASSERT(fmx_dcount(&b, "broadcast") == 1);
+        ASSERT(fmx_dcount(&b, "owner") == 1);
+        ASSERT(fmx_dcount(&b, "owner_open") == 1);
+        ASSERT(fmx_dcount(&b, "scanned") == 4);
+        q = fmx_arr(&b, "directive_queue");
+        ASSERT(q && json_size(q) == 1);
+        ASSERT_STR_EQ(fmx_wstr(json_at(q, 0), "to"), "w-box");
+        ASSERT(fmx_wint(json_at(q, 0), "open") == 2);
+        ASSERT(fmx_wint(json_at(q, 0), "oldest_age_s") > 86400);
+        fmx_end(&b);
+        /* An owner may close a worker directive too. */
+        fmx_seed_inbox("owner", "2026-01-01T00:30:00Z", 1, "second-owner",
+                       "w-box", "note", "closed by sender: withdrawn",
+                       "w-ref-2");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "w-ref-2"),
+                               "closed_by"), "second-owner");
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "w-ref-2"),
+                               "close_reason"), "withdrawn");
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
+        fmx_end(&b);
+        fmx_owner_names(NULL);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_owner_names(NULL);
+    fmx_restore();
+    return failures;
+}
+
 /* The outcome projection of one reaped name through the real queue leaf. */
 static const struct json_value *fmx_outcome_named(const struct fmx_call *q,
                                                   const char *name)
@@ -8252,6 +8470,7 @@ int test_fleet_steer(void)
     failures += fmx_t_capacity_queue_domain();
     failures += fmx_t_worker_answers();
     failures += fmx_t_queued_stale();
+    failures += fmx_t_directive_close_expiry();
     failures += fmx_t_receiver_down();
     failures += fmx_t_receipt_tokens();
     failures += fmx_t_process_not_work();

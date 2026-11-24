@@ -103,12 +103,33 @@
  * REPLIES. Each directive change row also carries `reply`, correlating
  * the rows already pulled by ref (+ attempt when both state one):
  * answered (a later `result` under the ref, from the addressee or
- * addressed back to the origin by anyone but the origin), else acked (the
+ * addressed back to the origin by anyone but the origin), else closed (a
+ * later `note` or `result` under the same ref from the origin itself, or
+ * from an owner name, whose body starts with "closed by sender:"; the
+ * words after it name superseded, recipient gone, withdrawn or other),
+ * else ambiguous, else recipient_gone (a worker directive with no ack,
+ * typed read or read file covering it, whose recipient has posted a
+ * presence-<name> session note here and whose newest row, presence or
+ * mail, is older than FMC_RECIPIENT_GONE_S, 24 h; a name with no presence
+ * row is never gone, it stays open), else acked (the
  * receiver's ack cursor covers the row, including a string next_since
  * token; a reply is never an ack and a read file is never an ack), else
  * queued; with
  * the directive's own sent_ts/sent_age_s apart from answer_ts/answer_age_s.
- * An answered directive is never a "no receiver evidence" blocker.
+ * A closure is a new row and rewrites nothing; a real answer still wins
+ * over it. `class` sorts every directive: broadcast (to `*`), owner (to a
+ * name in ZCL_FLEET_OWNER_NAMES, comma-separated, default the host $USER), else
+ * worker. An answered, closed or recipient_gone directive, a broadcast and
+ * an owner-addressed row are never "no receiver evidence" blockers.
+ *
+ * DIRECTIVE BACKLOG. Over the newest FMC_DIRECTIVE_SCAN (64) directives,
+ * open_worker_directives counts worker directives that are not answered,
+ * closed or recipient_gone; overdue_worker_directives counts the open ones
+ * this host sent that have no receiver evidence (no ack, read or reply)
+ * after FMC_QUEUED_STALE_S, exactly the stale blockers. No deadline is
+ * invented. directive_queue[] groups the open ones by recipient (count,
+ * oldest age), at most FMC_DQ_CAP (16) recipients; directive_counts holds
+ * the other classes and the definition the output states.
  *
  * WORKERS. `agents` is only the names seen in mail and on the board. The
  * `workers` array is evidence: an identity appears only after it answered
@@ -274,6 +295,12 @@
 #define FMC_STALE_BLOCKER_CAP 8
 #define FMC_ALIVE_WINDOW_S 900LL
 #define FMC_QUEUED_STALE_S 120LL
+/* Directive backlog: a seen recipient silent this long is gone; at most
+ * FMC_DQ_CAP recipients are grouped in directive_queue[]. */
+#define FMC_RECIPIENT_GONE_S (24LL * 60 * 60)
+#define FMC_DQ_CAP 16u
+#define FMC_CLOSE_PREFIX "closed by sender:"
+#define FMC_OWNER_ENV "ZCL_FLEET_OWNER_NAMES"
 #define FMC_REPLY_SOFT_BUDGET 49152u
 /* Leave time after board observation for local projection/serialization. */
 #define FMC_BRIEF_FINISH_RESERVE_MS 50
@@ -2028,7 +2055,64 @@ struct fmc_worker {
     bool local;
 };
 
+/* Directive backlog over the newest FMC_DIRECTIVE_SCAN directives (see
+ * DIRECTIVE BACKLOG at the top of this file). */
+struct fmc_dq_entry {
+    char to[FMC_NAME_MAX + 1];
+    long long open;
+    long long oldest_age_s;
+};
+
+struct fmc_directive_tally {
+    long long scanned, open_worker, overdue_worker;
+    long long answered, closed, gone;
+    long long broadcast, broadcast_open, owner, owner_open;
+    struct fmc_dq_entry q[FMC_DQ_CAP];
+    size_t nq;
+    long long q_untracked;
+    bool forward_page;
+};
+
+/* True when name is one comma-separated entry of list. */
+static bool fmc_name_listed(const char *list, const char *name)
+{
+    size_t len = name ? strlen(name) : 0u;
+    for (const char *p = list; len && p && *p; ) {
+        const char *end = strchr(p, ',');
+        size_t n = end ? (size_t)(end - p) : strlen(p);
+        if (n == len && strncmp(p, name, len) == 0)
+            return true;
+        p = end ? end + 1 : NULL;
+    }
+    return false;
+}
+
+/* The configured human owner names (comma-separated), else the host's
+ * own user, the name the owner's local posts carry; else none. */
+static const char *fmc_owner_names(void)
+{
+    const char *env = getenv(FMC_OWNER_ENV);
+    if (env && env[0])
+        return env;
+    env = getenv("USER");
+    return env ? env : "";
+}
+
+static bool fmc_owner_name(const char *name)
+{
+    return fmc_name_listed(fmc_owner_names(), name);
+}
+
+/* broadcast (to `*`), owner (a configured human name), else worker. */
+static const char *fmc_directive_class(const struct fmc_row *d)
+{
+    if (strcmp(d->to, "*") == 0)
+        return "broadcast";
+    return fmc_owner_name(d->to) ? "owner" : "worker";
+}
+
 struct fmc_roster {
+    struct fmc_directive_tally dt;
     struct fmc_worker *w;
     size_t n;
     size_t untracked;
@@ -3109,6 +3193,77 @@ static void fmc_spend_emit(struct json_value *data,
     json_free(&o);
 }
 
+/* Emitted in snapshots only: a forward page's caller-chosen byte budget
+ * belongs to its changes, and these fixed scalars cannot be trimmed. */
+#define FMC_DIRECTIVE_DEFINITION \
+    "open_worker_directives: among the newest 64 directives in this host's " \
+    "mail, those addressed to a worker (not '*', not an owner name) with no " \
+    "later result from the addressee or back to the origin, no later " \
+    "'closed by sender:' note or result from the origin or an owner, and not " \
+    "recipient_gone (no ack or read covers it, the recipient posted a " \
+    "presence-<name> note here, and its newest presence or mail row is older " \
+    "than 86400 s). overdue_worker_directives: the open ones this host sent " \
+    "with no receiver evidence after 120 s. Directives carry no deadline."
+
+static bool fmc_directive_queue_emit(struct json_value *data,
+                                     const struct fmc_directive_tally *t)
+{
+    struct json_value q;
+    bool ok = true;
+    json_init(&q);
+    json_set_array(&q);
+    for (size_t i = 0; ok && i < t->nq; i++) {
+        struct json_value e;
+        json_init(&e);
+        json_set_object(&e);
+        ok = json_push_kv_str(&e, "to", t->q[i].to) &&
+             json_push_kv_int(&e, "open", t->q[i].open) &&
+             fmc_put_known_int(&e, "oldest_age_s", t->q[i].oldest_age_s) &&
+             json_push_back(&q, &e);
+        json_free(&e);
+    }
+    ok = ok && json_push_kv(data, "directive_queue", &q) &&
+         json_push_kv_bool(data, "directive_queue_truncated", t->q_untracked > 0);
+    json_free(&q);
+    return ok;
+}
+
+/* The directive backlog: one defined number a dashboard reads
+ * (open_worker_directives), its overdue part, the other classes apart.
+ * Snapshots only; a forward page carries changes. */
+static void fmc_directives_emit(struct json_value *data,
+                                const struct fmc_directive_tally *t)
+{
+    struct json_value o;
+    if (t->forward_page)
+        return;
+    json_init(&o);
+    json_set_object(&o);
+    const struct { const char *key; long long v; } n[] = {
+        {"scanned", t->scanned}, {"answered", t->answered},
+        {"closed", t->closed}, {"recipient_gone", t->gone},
+        {"broadcast", t->broadcast}, {"broadcast_open", t->broadcast_open},
+        {"owner", t->owner}, {"owner_open", t->owner_open},
+        {"scan_window", FMC_DIRECTIVE_SCAN},
+        {"recipient_gone_after_s", FMC_RECIPIENT_GONE_S},
+        {"overdue_after_s", FMC_QUEUED_STALE_S},
+        {"queue_recipients_untracked", t->q_untracked}};
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(n) / sizeof(n[0]); i++)
+        ok &= json_push_kv_int(&o, n[i].key, n[i].v);
+    char owners[72];
+    (void)snprintf(owners, sizeof(owners), "%.64s", fmc_owner_names());
+    ok &= json_push_kv_str(&o, "owner_names", owners);
+    ok = ok && json_push_kv_int(data, "open_worker_directives", t->open_worker) &&
+         json_push_kv_int(data, "overdue_worker_directives", t->overdue_worker) &&
+         json_push_kv_str(data, "directive_definition", FMC_DIRECTIVE_DEFINITION) &&
+         json_push_kv(data, "directive_counts", &o) &&
+         fmc_directive_queue_emit(data, t);
+    json_free(&o);
+    if (!ok)
+        LOG_ERROR(FMC_LOG, "directive backlog projection incomplete (%s)", FMC_LEAF);
+}
+
 /* sessions[] plus its bound, after workers[] so the local worker's
  * receipt tokens are filled before they are summed. */
 static void fmc_sessions_emit(struct json_value *data,
@@ -3137,6 +3292,7 @@ static void fmc_sessions_emit(struct json_value *data,
                            "not model-turn proof or a complete fleet count");
     json_free(&arr);
     fmc_spend_emit(data, ro);
+    fmc_directives_emit(data, &ro->dt);
 }
 
 /* Push one bounded blocker string. */
@@ -3372,6 +3528,158 @@ static bool fmc_answer_find(const struct json_value *rows,
     return a->row != NULL;
 }
 
+/* ── directive close and expiry ──────────────────────────────────────────
+ *
+ * A sender (or an owner) closes its own directive with a new row; nothing
+ * is rewritten. A recipient that announced itself as a presence session
+ * (a presence-<name> note) and then wrote nothing, presence or mail, for
+ * FMC_RECIPIENT_GONE_S expires the directive. A name with no presence row
+ * has no session liveness to lose, so it never expires. Both read only the rows the
+ * brief already pulled, in one pass, and only when no answer exists. */
+
+struct fmc_close {
+    struct fmc_row keep;
+    bool found;
+    long long last_seen;
+    long long last_presence;
+};
+
+struct fmc_dstatus {
+    const char *cls;
+    const char *state;
+    struct fmc_answer a;
+    struct fmc_close c;
+};
+
+/* The reason after FMC_CLOSE_PREFIX, as one closed word. */
+static const char *fmc_close_reason(const char *body)
+{
+    const char *p = body + sizeof(FMC_CLOSE_PREFIX) - 1u;
+    while (*p == ' ')
+        p++;
+    if (strncmp(p, "superseded", 10) == 0)
+        return "superseded";
+    if (strncmp(p, "recipient gone", 14) == 0)
+        return "recipient_gone";
+    if (strncmp(p, "withdrawn", 9) == 0)
+        return "withdrawn";
+    return "other";
+}
+
+/* True when r closes d: a later note or result under the same ref, from
+ * the origin or an owner, whose body starts with FMC_CLOSE_PREFIX. */
+static bool fmc_close_match(const struct fmc_row *d, const struct fmc_row *r)
+{
+    if (strcmp(r->kind, "note") != 0 && strcmp(r->kind, "result") != 0)
+        return false;
+    if (!d->ref[0] || r->observed_disposition[0] || strcmp(r->ref, d->ref) != 0)
+        return false;
+    if (strcmp(r->from, d->from) != 0 && !fmc_owner_name(r->from))
+        return false;
+    return strncmp(r->body, FMC_CLOSE_PREFIX, sizeof(FMC_CLOSE_PREFIX) - 1u) == 0 &&
+           fmc_reply_compatible(d, r);
+}
+
+/* Fold r into the recipient's newest presence note and newest own row. */
+static void fmc_recipient_seen(const struct fmc_row *d, const struct fmc_row *r,
+                               struct fmc_close *c)
+{
+    const char *role = fmc_presence_role(r);
+    bool presence = role && strcmp(role, d->to) == 0;
+    if (!presence && strcmp(r->from, d->to) != 0)
+        return;
+    long long t = fmc_ts_unix(r->ts);
+    if (t > c->last_seen)
+        c->last_seen = t;
+    if (presence && t > c->last_presence)
+        c->last_presence = t;
+}
+
+/* One pass: d's newest closure and its recipient's newest rows. */
+static void fmc_close_find(const struct json_value *rows,
+                           const struct fmc_row *d, struct fmc_close *c)
+{
+    size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u;
+    c->found = false;
+    c->last_seen = -1;
+    c->last_presence = -1;
+    for (size_t i = 0; i < n; i++) {
+        struct fmc_row r;
+        if (!fmc_row_parse(json_at(rows, i), &r))
+            continue;
+        fmc_recipient_seen(d, &r, c);
+        if (fmc_close_match(d, &r) && (!c->found || strcmp(r.ts, c->keep.ts) > 0)) {
+            c->keep = r;
+            c->found = true;
+        }
+    }
+}
+
+/* Receiver evidence with no time on it: an ack, a typed read or a read
+ * file covering d. Evaluated only when expiry is otherwise due. */
+static bool fmc_dir_covered(const struct json_value *rows,
+                            const struct fmc_row *d, bool acked)
+{
+    return acked || fmc_read_covers(d) || fmc_typed_read(rows, d) != NULL;
+}
+
+static bool fmc_recipient_gone(const struct json_value *rows,
+                               const struct fmc_row *d,
+                               const struct fmc_dstatus *st, long long now,
+                               bool acked)
+{
+    return strcmp(st->cls, "worker") == 0 && st->c.last_presence >= 0 &&
+           now - st->c.last_seen > FMC_RECIPIENT_GONE_S &&
+           !fmc_dir_covered(rows, d, acked);
+}
+
+/* answered, closed, ambiguous, recipient_gone, acked, queued: a real
+ * answer wins over a closure, a closure over everything else. */
+static void fmc_directive_resolve(const struct json_value *rows,
+                                  const struct fmc_row *d, long long now,
+                                  bool acked, struct fmc_dstatus *st)
+{
+    st->cls = fmc_directive_class(d);
+    st->c.found = false;
+    st->c.last_seen = -1;
+    st->c.last_presence = -1;
+    if (fmc_answer_find(rows, d, &st->a)) {
+        st->state = "answered";
+        return;
+    }
+    fmc_close_find(rows, d, &st->c);
+    if (st->c.found)
+        st->state = "closed";
+    else if (st->a.ambiguous)
+        st->state = "ambiguous";
+    else if (fmc_recipient_gone(rows, d, st, now, acked))
+        st->state = "recipient_gone";
+    else
+        st->state = acked ? "acked" : "queued";
+}
+
+static bool fmc_dstate_open(const char *state)
+{
+    return strcmp(state, "answered") != 0 && strcmp(state, "closed") != 0 &&
+           strcmp(state, "recipient_gone") != 0;
+}
+
+/* The closure and expiry facts beside a directive's reply state. */
+static bool fmc_reply_close_emit(struct json_value *o,
+                                 const struct fmc_dstatus *st, long long now)
+{
+    bool ok = json_push_kv_str(o, "class", st->cls);
+    if (strcmp(st->state, "closed") == 0) {
+        ok &= json_push_kv_str(o, "close_reason", fmc_close_reason(st->c.keep.body));
+        ok &= fmc_put_known(o, "closed_by", st->c.keep.from);
+        ok &= fmc_put_known(o, "close_ts", st->c.keep.ts);
+        ok &= fmc_put_known_int(o, "close_age_s", fmc_age_s(now, st->c.keep.ts));
+    }
+    if (strcmp(st->state, "recipient_gone") == 0)
+        ok &= fmc_put_known_int(o, "recipient_silent_s", now - st->c.last_seen);
+    return ok;
+}
+
 /* The reply object for one directive change row. */
 static bool fmc_reply_disposition(struct json_value *out, const char *typed,
                                   const struct fmc_answer *answer)
@@ -3386,27 +3694,28 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
                            const struct json_value *rows, long long now, const char *typed)
 {
     struct json_value o;
-    struct fmc_answer a;
+    struct fmc_dstatus st;
     bool acked = fmc_row_acked(v) || typed || fmc_alias_ack(v);
-    bool answered = fmc_answer_find(rows, v, &a);
+    fmc_directive_resolve(rows, v, now, acked, &st);
+    const struct fmc_answer *a = &st.a;
+    bool answered = strcmp(st.state, "answered") == 0;
     json_init(&o);
     json_set_object(&o);
-    bool ok = json_push_kv_str(&o, "state", answered ? "answered"
-                                         : a.ambiguous ? "ambiguous"
-                                         : acked ? "acked" : "queued");
+    bool ok = json_push_kv_str(&o, "state", st.state);
     ok &= json_push_kv_bool(&o, "acked", acked);
-    ok &= fmc_reply_disposition(&o, typed, &a);
+    ok &= fmc_reply_close_emit(&o, &st, now);
+    ok &= fmc_reply_disposition(&o, typed, a);
     ok &= fmc_put_known(&o, "sent_ts", fmc_ts_unix(v->ts) >= 0 ? v->ts : "");
     ok &= fmc_put_known_int(&o, "sent_age_s", fmc_age_s(now, v->ts));
-    ok &= fmc_put_known_int(&o, "answer_seq", answered ? a.row->seq : -1);
-    ok &= fmc_put_known(&o, "answer_ts", answered ? a.row->ts : "");
+    ok &= fmc_put_known_int(&o, "answer_seq", answered ? a->row->seq : -1);
+    ok &= fmc_put_known(&o, "answer_ts", answered ? a->row->ts : "");
     ok &= fmc_put_known_int(&o, "answer_age_s",
-                      answered ? fmc_age_s(now, a.row->ts) : -1);
-    ok &= fmc_put_known(&o, "answered_by", answered ? a.row->from : "");
-    ok &= fmc_put_known(&o, "answer_match", answered ? a.match : "");
+                      answered ? fmc_age_s(now, a->row->ts) : -1);
+    ok &= fmc_put_known(&o, "answered_by", answered ? a->row->from : "");
+    ok &= fmc_put_known(&o, "answer_match", answered ? a->match : "");
     if (answered)
         ok &= json_push_kv_bool(&o, "answer_heuristic",
-                                !strcmp(a.match, "reply_to_origin"));
+                                !strcmp(a->match, "reply_to_origin"));
     if (ok) ok = json_push_kv(item, "reply", &o);
     json_free(&o);
     return ok;
@@ -3774,10 +4083,72 @@ static void fmc_cand_from_outcomes(struct zcl_fmc_cand_reg *cand,
 /* One pulled row: roster, tallies, the stale-directive check (bounded to
  * the newest FMC_DIRECTIVE_SCAN directives), and — above `since`, under
  * the cap — one change row. */
+/* One open directive into directive_queue[], grouped by recipient. */
+static void fmc_dq_note(struct fmc_directive_tally *t, const char *to,
+                        long long age)
+{
+    for (size_t i = 0; i < t->nq; i++) {
+        if (strcmp(t->q[i].to, to) != 0)
+            continue;
+        t->q[i].open++;
+        if (age > t->q[i].oldest_age_s)
+            t->q[i].oldest_age_s = age;
+        return;
+    }
+    if (t->nq >= FMC_DQ_CAP) {
+        t->q_untracked++;
+        return;
+    }
+    struct fmc_dq_entry *e = &t->q[t->nq++];
+    (void)snprintf(e->to, sizeof(e->to), "%s", to);
+    e->open = 1;
+    e->oldest_age_s = age;
+}
+
+static void fmc_tally_note(struct fmc_directive_tally *t,
+                           const struct fmc_dstatus *st,
+                           const struct fmc_row *v, long long age, bool open)
+{
+    t->scanned++;
+    t->answered += strcmp(st->state, "answered") == 0;
+    t->closed += strcmp(st->state, "closed") == 0;
+    t->gone += strcmp(st->state, "recipient_gone") == 0;
+    if (strcmp(st->cls, "broadcast") == 0) {
+        t->broadcast++;
+        t->broadcast_open += open;
+    } else if (strcmp(st->cls, "owner") == 0) {
+        t->owner++;
+        t->owner_open += open;
+    } else if (open) {
+        t->open_worker++;
+        fmc_dq_note(t, v->to, age);
+    }
+}
+
+/* One scanned directive: its class and state into the tally, and — open,
+ * a worker's, sent from here with no receiver evidence past
+ * FMC_QUEUED_STALE_S — one stale blocker (overdue_worker_directives). */
+static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
+                               const struct json_value *rows)
+{
+    struct fmc_dstatus st;
+    long long age = fmc_age_s(c->now, v->ts);
+    fmc_directive_resolve(rows, v, c->now, fmc_row_acked(v) || fmc_alias_ack(v), &st);
+    bool open = fmc_dstate_open(st.state);
+    if (c->ro)
+        fmc_tally_note(&c->ro->dt, &st, v, age, open);
+    if (!open || strcmp(st.cls, "worker") != 0 ||
+        strcmp(fmc_row_state(v, rows, c->sent_path), "queued") != 0 ||
+        !fmc_stale_blocker(c->blockers, v, age, c->stale < FMC_STALE_BLOCKER_CAP))
+        return;
+    c->stale++;
+    if (c->ro)
+        c->ro->dt.overdue_worker++;
+}
+
 static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
                          const struct json_value *rows)
 {
-    struct fmc_answer a;
     fmc_row_tally(c->agents, c->work, v);
     fmc_roster_note(c->ro, v);
     fmc_sessions_note(c->ro, v);
@@ -3785,11 +4156,7 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
     if (strcmp(v->kind, "directive") == 0 &&
         c->scanned < FMC_DIRECTIVE_SCAN) {
         c->scanned++;
-        if (strcmp(fmc_row_state(v, rows, c->sent_path), "queued") == 0 &&
-            !fmc_answer_find(rows, v, &a) &&
-            fmc_stale_blocker(c->blockers, v, fmc_age_s(c->now, v->ts),
-                              c->stale < FMC_STALE_BLOCKER_CAP))
-            c->stale++;
+        fmc_directive_scan(c, v, rows);
     }
     if (c->projection_failed || v->seq <= c->since || c->shown >= c->changes_cap)
         return;
@@ -5312,6 +5679,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     lo.receive_lock = fmc_lock_state("receive", "receive.lock");
     fmc_receiver_down_incident(&l.blockers, lo.receive_lock);
     mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv, changes_only);
+    ro.dt.forward_page = mv.forward;
     fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes, &l.tasks);
     fmc_brief_land(req, &l.tasks, &l.missing);
