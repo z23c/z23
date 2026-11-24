@@ -883,8 +883,16 @@ static void test_http_deadline_headless(void)
            (unsigned long long)recv_ms, (unsigned long long)connect_ms);
     CHECK("[29] under the virtual clock a silent node still ends at its real deadline",
           e == ZW_ERR_TIMEOUT && recv_ms >= 300 && recv_ms < 1500);
+#ifdef _WIN32
+    /* Windows loopback connects run without SYN retransmission (platform_socket_connect_fail_fast),
+     * so a full accept queue fails the connect at once instead of hanging to the cap: the
+     * bound that matters, never later than the cap, is still asserted. */
+    CHECK("[30] under the virtual clock a dead port ends no later than the real connect cap",
+          c != ZW_OK && connect_ms < 1500);
+#else
     CHECK("[30] under the virtual clock a dead port still ends at the real connect cap",
           c == ZW_ERR_TIMEOUT && connect_ms >= 400 && connect_ms < 1500);
+#endif
     zw_buf_free(&reply);
     zw_mock_blackhole_stop(bh);
     node_stop(&n);
