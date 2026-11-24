@@ -13262,6 +13262,18 @@ static uint32_t dp_test_children_started(const struct proof_dimension_run *runs,
     return n;
 }
 
+/* Diagnostic only: the signed receipt remains the authority for this binding. */
+static void dp_note_test_receipt_inputs(const struct dp_worker *w,
+                                        const struct zcl_dev_proof_dimension *test)
+{
+    char test_root[65], helper_root[65], note[160];
+    zcl_hex_encode(test->receipt_root, 32, test_root);
+    zcl_hex_encode(w->helper_root, 32, helper_root);
+    int n = snprintf(note, sizeof(note), "test_root=%s helper_root=%s", test_root, helper_root);
+    if (n > 0 && (size_t)n < sizeof(note))
+        (void)zcl_dev_proof_phase_note(w->paths->phases, "test_receipt_inputs", note);
+}
+
 static bool dp_check_finish(struct dp_worker *w,
                             struct zcl_dev_proof_dimension *test,
                             const struct dp_check_hold *hold,
@@ -13270,8 +13282,10 @@ static bool dp_check_finish(struct dp_worker *w,
     if (hold->skip) test->selected = hold->selected;
     if (!dimensions_ok) return false;
     if (!hold->skip) {
-        if (test->selected)
+        if (test->selected) {
+            dp_note_test_receipt_inputs(w, test);
             test_receipt_bind_helpers(test, w->helper_root);
+        }
         return true;
     }
     if (w->test_children_started != 0) {
@@ -13285,6 +13299,32 @@ static bool dp_check_finish(struct dp_worker *w,
     test->reused = 1;
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_receipt_inputs(const char *phases, const char *log,
+    const uint8_t helper[32], bool selected, bool reused, bool dimensions_ok,
+    uint8_t out[32]);
+bool zcl_dev_proof_test_receipt_inputs(const char *phases, const char *log,
+    const uint8_t helper[32], bool selected, bool reused, bool dimensions_ok,
+    uint8_t out[32])
+{
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof receipt inputs fixture");
+    if (!w) return false;
+    struct proof_paths paths = {0};
+    struct zcl_dev_proof_dimension test = {.selected = selected};
+    struct dp_check_hold hold = {.selected = selected, .skip = reused};
+    char why[128] = {0};
+    int n = snprintf(paths.phases, sizeof(paths.phases), "%s", phases);
+    bool ok = n > 0 && (size_t)n < sizeof(paths.phases) &&
+              hash_file("test", log, test.receipt_root);
+    w->paths = &paths;
+    memcpy(w->helper_root, helper, 32);
+    if (ok) ok = dp_check_finish(w, &test, &hold, dimensions_ok, why, sizeof(why));
+    memcpy(out, test.receipt_root, 32);
+    free(w);
+    return ok;
+}
+#endif
 
 /* The test child's argv: the cold --no-cache dimension, or (only when the
  * verdict MMR is armed for this proof) the cold audit that also emits the

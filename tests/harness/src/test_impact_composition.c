@@ -18431,11 +18431,62 @@ static int test_ic_proof_umbrella_union(void)
     return failures;
 }
 
+extern bool zcl_dev_proof_test_receipt_inputs(const char *, const char *,
+    const uint8_t[32], bool, bool, bool, uint8_t[32]);
+
+static int test_ic_receipt_input_note(void)
+{
+    int failures = 0;
+    TEST("proof test receipt: note binds actual log and helper inputs") {
+        char dir[4096], log[4352], phases[4352], missing[4352], text[512], expected[256];
+        uint8_t helper[32], raw[32], root[32], calculated[32], changed[32];
+        struct sha3_256_ctx sha;
+        static const char body[] = "fixture test output\n";
+        static const char domain[] = "zcl.dev_proof_test_child_with_helpers.v1";
+        test_make_tmpdir(dir, sizeof(dir), "impact_composition", "receipt-inputs");
+        ASSERT(ic_write(dir, "test.log", body));
+        ASSERT(snprintf(log, sizeof(log), "%s/test.log", dir) > 0);
+        ASSERT(snprintf(phases, sizeof(phases), "%s/phases.txt", dir) > 0);
+        ASSERT(snprintf(missing, sizeof(missing), "%s/absent/phases.txt", dir) > 0);
+        memset(helper, 0x47, sizeof(helper));
+        ASSERT(zcl_dev_proof_test_receipt_inputs(phases, log, helper, true, false, true, root));
+        sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)"test", sizeof("test"));
+        sha3_256_write(&sha, (const uint8_t *)body, sizeof(body) - 1); sha3_256_finalize(&sha, raw);
+        char raw_hex[65], helper_hex[65];
+        zcl_hex_encode(raw, 32, raw_hex); zcl_hex_encode(helper, 32, helper_hex);
+        ASSERT(snprintf(expected, sizeof(expected), "test_receipt_inputs=test_root=%s helper_root=%s\n", raw_hex, helper_hex) > 0);
+        ASSERT(ic_union_read(dir, "phases.txt", text, sizeof(text)) && !strcmp(text, expected));
+        sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+        sha3_256_write(&sha, raw, 32); sha3_256_write(&sha, helper, 32); sha3_256_finalize(&sha, calculated);
+        ASSERT(!memcmp(root, calculated, 32));
+        ASSERT(zcl_dev_proof_test_receipt_inputs(missing, log, helper, true, false, true, changed));
+        ASSERT(!memcmp(root, changed, 32)); /* diagnostic failure cannot fail proof */
+        helper[0] ^= 1;
+        ASSERT(zcl_dev_proof_test_receipt_inputs(missing, log, helper, true, false, true, changed));
+        ASSERT(memcmp(root, changed, 32));
+        helper[0] ^= 1;
+        ASSERT(ic_write(dir, "test.log", "changed\n"));
+        ASSERT(zcl_dev_proof_test_receipt_inputs(missing, log, helper, true, false, true, changed));
+        ASSERT(memcmp(root, changed, 32));
+        ASSERT(unlink(phases) == 0);
+        ASSERT(zcl_dev_proof_test_receipt_inputs(phases, log, helper, false, false, true, changed));
+        ASSERT(access(phases, F_OK) != 0);
+        ASSERT(zcl_dev_proof_test_receipt_inputs(phases, log, helper, true, true, true, changed));
+        ASSERT(access(phases, F_OK) != 0);
+        ASSERT(!zcl_dev_proof_test_receipt_inputs(phases, log, helper, true, false, false, changed));
+        ASSERT(access(phases, F_OK) != 0);
+        ASSERT(test_rm_rf_recursive(dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int ic_run_bundle(void)
 {
 #if !defined(_WIN32)
     int failures = test_ic_worker_bundle_make_once();
     failures += test_ic_worker_bundle_union();
+    failures += test_ic_receipt_input_note();
     return failures;
 #else
     printf("SKIP (proof bundle fixtures require POSIX processes)\n");
