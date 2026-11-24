@@ -1608,8 +1608,9 @@ static int test_code_packet_root_routes(void)
     TEST("code_packet: routes referrers from the selected source root") {
         test_rm_rf_recursive(PKT_FIX);
         ASSERT(pkt_fixture());
+        ASSERT(pkt_write("tools/command/packet_root_probe.c", "int packet_root_probe(void) { return 0; }\n"));
         ASSERT(pkt_write("tests/harness/src/test_dev_job.c",
-                         "const char *s = \"native_code_capsule\";\n"));
+                         "const char *s = \"packet_root_probe\";\n"));
         ASSERT(pkt_write("tests/harness/src/packet_windows_fixture.c", "int fixture;\n"));
         ASSERT(pkt_write("platform/modules/platform/tests/windows_acceptance.mk",
                          "ZCL_WINDOWS_ACCEPTANCE_probe_SOURCES := tests/harness/src/packet_windows_fixture.c\n"));
@@ -1621,7 +1622,7 @@ static int test_code_packet_root_routes(void)
         ASSERT(n > 0 && (size_t)n < sizeof root);
         struct json_value input;
         json_init(&input);
-        const char *text = "{\"goal\":\"Root routes\",\"files\":[\"tools/command/native_code_capsule.c\"],\"max_lines\":20}";
+        const char *text = "{\"goal\":\"Root routes\",\"files\":[\"tools/command/packet_root_probe.c\"],\"max_lines\":20}";
         ASSERT(json_read(&input, text, strlen(text)));
         struct zcl_command_reply reply;
         pkt_run(root, &input, &reply);
@@ -1634,7 +1635,7 @@ static int test_code_packet_root_routes(void)
         zcl_command_reply_free(&reply);
         json_free(&input);
         json_init(&input);
-        text = "{\"goal\":\"Root routes\",\"files\":[\"tools/command/native_code_capsule.c\",\"tests/harness/src/packet_windows_fixture.c\"],\"max_lines\":20}";
+        text = "{\"goal\":\"Root routes\",\"files\":[\"tools/command/packet_root_probe.c\",\"tests/harness/src/packet_windows_fixture.c\"],\"max_lines\":20}";
         ASSERT(json_read(&input, text, strlen(text)));
         pkt_run(root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
