@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "base/safe_alloc.h"
 #include "gui/window.h"
 
 #define TITLE_UTF8 "z23 gui acceptance"
@@ -88,7 +89,7 @@ static uint32_t *copy_dib(HDC mem, HDC wdc, const BITMAPINFO *bi, int32_t w, int
         HGDIOBJ old = SelectObject(mem, bm);
         if (BitBlt(mem, 0, 0, w, ht, wdc, 0, 0, SRCCOPY)) {
             GdiFlush();
-            out = malloc((size_t)w * (size_t)ht * 4u);
+            out = zcl_malloc((size_t)w * (size_t)ht * 4u, "gui_acceptance_readback");
             if (out) memcpy(out, bits, (size_t)w * (size_t)ht * 4u);
         }
         SelectObject(mem, old);

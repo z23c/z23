@@ -9,20 +9,7 @@
 #include "gui/draw.h"
 #include "gui_internal.h"
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-static void real_sleep_ms(unsigned ms) { Sleep(ms); }
-#else
-#include <time.h>
-static void real_sleep_ms(unsigned ms)
-{
-    struct timespec ts = { 0, (long)ms * 1000000L };
-    nanosleep(&ts, NULL);
-}
-#endif
+#include "platform/time_compat.h"
 
 struct headless {
     bool hold;
@@ -62,7 +49,7 @@ static void hl_wait(struct gui_window *w, int32_t ms)
 {
     if (w->count || atomic_load(&w->wake_pending)) return;
     if (hl(w)->hold) {
-        real_sleep_ms(1);
+        platform_sleep_ms(1);
         gui_virtual_clock_advance(1000000ull);
         return;
     }

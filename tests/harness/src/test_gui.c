@@ -506,12 +506,6 @@ static bool golden_check(const char *name, const struct gui_cpu_frame *f)
             w == f->width && hh == f->height) snprintf(want, sizeof(want), "%.64s", hx);
     }
     if (g) fclose(g);
-    if (getenv("ZCL_GOLDEN_UPDATE")) {
-        FILE *a = fopen("tests/fixtures/gui/golden.tsv", "a");
-        if (a) { fprintf(a, "%s\t%d\t%d\t%s\n", name, f->width, f->height, hex); fclose(a); }
-        printf("    golden %s recorded %s\n", name, hex);
-        return true;
-    }
     if (strcmp(want, hex)) printf("    golden %s: got %s want %s\n", name, hex, want[0] ? want : "(none)");
     return !strcmp(want, hex);
 }

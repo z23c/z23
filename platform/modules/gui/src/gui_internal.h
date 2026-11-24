@@ -81,6 +81,8 @@ struct gui_window {
 
 /* Win32 text helpers shared by window_win32.c and window_win32_clip.c. */
 #if defined(_WIN32)
+/* "what (Windows error N)" into err; shared by the window and GL halves. */
+void gui_win32_err_last(char *err, size_t cap, const char *what);
 int gui_win32_utf8_to_wide(const char *s, size_t len, wchar_t *out, int cap);
 bool gui_win32_clip_set(void *hwnd, const char *utf8, size_t len);
 size_t gui_win32_clip_get(void *hwnd, char *buf, size_t cap);

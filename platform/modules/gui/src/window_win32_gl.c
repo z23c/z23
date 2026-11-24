@@ -37,11 +37,6 @@ bool gui_win32_gl_probe(void)
     return true;
 }
 
-static void gl_err(char *err, size_t cap, const char *what)
-{
-    if (err && cap) snprintf(err, cap, "%s (Windows error %lu)", what, GetLastError());
-}
-
 bool gui_win32_gl_create(struct gui_window *w, void *hwnd,
                          const struct gui_gl_desc *g, char *err, size_t cap)
 {
@@ -49,7 +44,7 @@ bool gui_win32_gl_create(struct gui_window *w, void *hwnd,
     if (!s) return false;
     s->hwnd = (HWND)hwnd;
     s->lib = LoadLibraryW(L"opengl32.dll");
-    if (!s->lib) { gl_err(err, cap, "opengl32.dll is not available"); free(s); return false; }
+    if (!s->lib) { gui_win32_err_last(err, cap, "opengl32.dll is not available"); free(s); return false; }
     s->create = GUI_FN_CAST(wgl_create_fn, GetProcAddress(s->lib, "wglCreateContext"));
     s->del = GUI_FN_CAST(wgl_delete_fn, GetProcAddress(s->lib, "wglDeleteContext"));
     s->make = GUI_FN_CAST(wgl_make_fn, GetProcAddress(s->lib, "wglMakeCurrent"));
@@ -66,11 +61,11 @@ bool gui_win32_gl_create(struct gui_window *w, void *hwnd,
     pfd.cStencilBits = g && g->stencil_bits ? g->stencil_bits : 8;
     int fmt = (s->create && s->dc) ? ChoosePixelFormat(s->dc, &pfd) : 0;
     if (!fmt || !SetPixelFormat(s->dc, fmt, &pfd)) {
-        gl_err(err, cap, "no usable OpenGL pixel format");
+        gui_win32_err_last(err, cap, "no usable OpenGL pixel format");
     } else if (!(s->rc = s->create(s->dc))) {
-        gl_err(err, cap, "cannot create an OpenGL context");
+        gui_win32_err_last(err, cap, "cannot create an OpenGL context");
     } else if (!s->make(s->dc, s->rc)) {
-        gl_err(err, cap, "cannot make the OpenGL context current");
+        gui_win32_err_last(err, cap, "cannot make the OpenGL context current");
         s->del(s->rc);
         s->rc = NULL;
     }

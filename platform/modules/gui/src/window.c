@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "base/safe_alloc.h"
+#include "base/serialize_le.h"
 #include "sha3/sha3.h"
 #include "util/png_writer.h"
 
@@ -364,11 +365,9 @@ void gui_frame_sha3(const struct gui_cpu_frame *f, uint8_t out[32])
 {
     struct sha3_256_ctx c;
     sha3_256_init(&c);
-    unsigned char hdr[8];
-    for (int i = 0; i < 4; i++) {
-        hdr[i] = (unsigned char)((uint32_t)f->width >> (8 * i));
-        hdr[4 + i] = (unsigned char)((uint32_t)f->height >> (8 * i));
-    }
+    uint8_t hdr[8];
+    zcl_write_u32_le(hdr, (uint32_t)f->width);
+    zcl_write_u32_le(hdr + 4, (uint32_t)f->height);
     sha3_256_write(&c, hdr, 8);
     for (int32_t y = 0; y < f->height; y++) {
         unsigned char row[3 * 4096];

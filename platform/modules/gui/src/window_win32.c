@@ -419,7 +419,7 @@ static bool register_class(const wchar_t *name, bool own_dc)
     return RegisterClassExW(&wc) != 0;
 }
 
-static void err_last(char *err, size_t cap, const char *what)
+void gui_win32_err_last(char *err, size_t cap, const char *what)
 {
     if (err && cap) snprintf(err, cap, "%s (Windows error %lu)", what, GetLastError());
 }
@@ -438,7 +438,7 @@ static bool w32_open(struct gui_window *w, const struct gui_window_desc *d,
     s->resizable = (d->flags & GUI_WINDOW_RESIZABLE) != 0;
     const wchar_t *cls = s->gl ? L"Z23GuiGl" : L"Z23GuiCpu";
     if (!register_class(cls, s->gl)) {
-        err_last(err, cap, "cannot register window class");
+        gui_win32_err_last(err, cap, "cannot register window class");
         free(s);
         w->be = NULL;
         return false;
@@ -455,7 +455,7 @@ static bool w32_open(struct gui_window *w, const struct gui_window_desc *d,
                               r.right - r.left, r.bottom - r.top, NULL, NULL,
                               GetModuleHandleW(NULL), w);
     if (!s->hwnd) {
-        err_last(err, cap, "cannot create window");
+        gui_win32_err_last(err, cap, "cannot create window");
         free(s);
         w->be = NULL;
         return false;
