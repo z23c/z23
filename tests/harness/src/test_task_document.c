@@ -1077,6 +1077,215 @@ static int tl_actions_test(struct task_list *list)
     return failures;
 }
 
+/* Actions chosen while a save is pending wait in a bounded queue and apply in
+ * order once the editor is idle. Stated through saves, revisions and notices,
+ * so the file also builds where the queue does not. */
+static int tl_queue_wait_test(struct task_list *list)
+{
+    int failures = 0;
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    struct task_editor *editor = list->editor;
+    uint32_t action = UINT32_MAX, selected = list->selected;
+    struct ta_task prior = editor->saved.state.tasks[selected];
+    uint64_t revision = editor->saved.state.revision;
+    TE_CHECK("Undo chosen during a save waits instead of refusing", task_list_action(list, 2).ok &&
+        editor->pending && task_list_input(list, &undo, &list->focus, &action) && action == UINT32_MAX &&
+        !list->notice[0]);
+    TE_CHECK("waiting Undo applies after that save on fresh state", tl_wait_test(list).ok &&
+        editor->saved.state.revision == revision + 2 &&
+        memcmp(&editor->saved.state.tasks[selected], &prior, sizeof(prior)) == 0 && !editor->saved.can_undo);
+    return failures;
+}
+
+/* The list names the task at its row and the editor a saved task, or none. */
+static bool tl_selection_stands(const struct task_list *list)
+{
+    const struct task_editor *editor = list->editor;
+    const struct ta_task *tasks = editor->saved.state.tasks;
+    uint32_t count = editor->saved.state.count;
+    uint64_t expected = list->selected < count ? tasks[list->selected].id : 0;
+    if (list->selected_id != expected || (count && list->selected >= count)) return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (editor->selected_id == tasks[i].id) return true;
+    return !editor->selected_id;
+}
+
+/* Undo is pressed while the Delete removing its row still saves: the row is
+ * selected when the key is pressed and gone when the Undo must apply. */
+static int tl_queue_undo_delete_test(struct task_list *list)
+{
+    int failures = 0;
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    struct task_editor *editor = list->editor;
+    uint32_t action = UINT32_MAX;
+    struct ta_state prior = editor->saved.state;
+    list->focus = UINT32_MAX;
+    TE_CHECK("Undo waits behind the Delete removing its row", tl_key_test(list, ZCL_PRESENT_INPUT_DELETE, false) &&
+        editor->pending && task_list_input(list, &undo, &list->focus, &action) && action == UINT32_MAX &&
+        !list->notice[0]);
+    TE_CHECK("Undo behind its own Delete brings the row back", tl_wait_test(list).ok &&
+        editor->saved.state.revision == prior.revision + 2 && editor->saved.state.count == prior.count &&
+        !editor->saved.can_undo && memcmp(editor->saved.state.tasks, prior.tasks, sizeof(prior.tasks)) == 0 &&
+        tl_selection_stands(list));
+    return failures;
+}
+
+/* A Delete waits behind a toggle and an Undo behind both: the row is gone
+ * from the state the waiting Undo is read against. */
+static int tl_queue_undo_queued_test(struct task_list *list)
+{
+    int failures = 0;
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    struct task_editor *editor = list->editor;
+    uint32_t action = UINT32_MAX, selected = list->selected;
+    struct ta_state prior = editor->saved.state;
+    uint32_t toggled = prior.tasks[selected].done ? 0 : 1;
+    list->focus = UINT32_MAX;
+    TE_CHECK("Delete and Undo wait behind a save in order", task_list_action(list, 2).ok && editor->pending &&
+        tl_key_test(list, ZCL_PRESENT_INPUT_DELETE, false) && task_list_input(list, &undo, &list->focus, &action) &&
+        action == UINT32_MAX && !list->notice[0]);
+    TE_CHECK("Undo behind a queued Delete brings the row back toggled", tl_wait_test(list).ok &&
+        editor->saved.state.revision == prior.revision + 3 && editor->saved.state.count == prior.count &&
+        !editor->saved.can_undo && editor->saved.state.tasks[selected].id == prior.tasks[selected].id &&
+        editor->saved.state.tasks[selected].done == toggled && tl_selection_stands(list));
+    return failures;
+}
+
+/* One task added through the editor: a single Undo removes the list's row. */
+static int tl_undo_twice_open(struct task_editor *editor, struct task_list *list,
+    const char *directory)
+{
+    int failures = 0;
+    TE_CHECK("open list over one new task", task_editor_open(editor, directory, "local/undo-queue").ok &&
+        task_editor_type(editor, 'a', false).ok && task_editor_submit(editor, TASK_DOCUMENT_ADD).ok &&
+        task_editor_finish(editor).ok && editor->saved.state.count == 1 && editor->saved.can_undo);
+    task_list_init(list, editor);
+    return failures;
+}
+
+/* A second Undo waits behind the first, which lands a state without the row.
+ * The waiting Undo must still reach the saved state, which has nothing left. */
+static int tl_queue_undo_twice_test(const char *directory)
+{
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    struct task_editor editor = {0};
+    struct task_list list;
+    uint32_t action = UINT32_MAX;
+    int failures = tl_undo_twice_open(&editor, &list, directory);
+    TE_CHECK("two Undos wait inside the first save", task_list_input(&list, &undo, &list.focus, &action) &&
+        editor.pending && task_list_input(&list, &undo, &list.focus, &action) && action == UINT32_MAX &&
+        !list.notice[0]);
+    struct zcl_result landed = tl_wait_test(&list);
+    TE_CHECK("the first Undo lands without the row", !editor.saved.state.count && editor.saved.state.revision == 2);
+    TE_CHECK("second Undo is refused by the saved state, not the missing row", !landed.ok &&
+        editor.status == TASK_EDITOR_FAILED && strstr(editor.failure, "nothing to undo") &&
+        !strstr(list.notice, "no longer exists") && tl_selection_stands(&list));
+    return failures;
+}
+
+static int tl_queue_hold_test(struct task_list *list)
+{
+    int failures = 0;
+    const struct zcl_present_input_v1 add = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'n', .command = true };
+    struct task_editor *editor = list->editor;
+    uint32_t action = UINT32_MAX;
+    TE_CHECK("refused action stays held through the save completion", task_list_action(list, 2).ok &&
+        editor->pending && task_list_input(list, &add, &list->focus, &action) && action == UINT32_MAX &&
+        tl_wait_test(list).ok && !strcmp(list->notice, "Wait for the current save."));
+    TE_CHECK("next input releases the held refusal", tl_key_test(list, ZCL_PRESENT_INPUT_HOME, false) &&
+        !list->notice[0]);
+    return failures;
+}
+
+static int tl_queue_order_test(struct task_list *list)
+{
+    int failures = 0;
+    struct task_editor *editor = list->editor;
+    uint32_t selected = list->selected;
+    struct ta_task prior = editor->saved.state.tasks[selected];
+    uint64_t revision = editor->saved.state.revision;
+    /* Eight waiting actions is the bound; nine toggles leave the task done. */
+    enum { waiting = 8 };
+    unsigned accepted = task_list_action(list, 2).ok;
+    bool quiet = true;
+    for (unsigned i = 0; i < waiting; ++i) {
+        accepted += task_list_action(list, 2).ok;
+        quiet &= !list->notice[0];
+    }
+    TE_CHECK("eight actions wait behind the save", accepted == waiting + 1u && quiet);
+    TE_CHECK("the ninth waiting action is refused", !task_list_action(list, 2).ok &&
+        !strcmp(list->notice, "Wait for the current save."));
+    TE_CHECK("waiting toggles apply in order on fresh state", tl_wait_test(list).ok &&
+        editor->saved.state.revision == revision + waiting + 1u &&
+        editor->saved.state.tasks[selected].done != 0 &&
+        !strcmp(editor->saved.state.tasks[selected].title, prior.title) &&
+        !strcmp(list->notice, "Wait for the current save."));
+    return failures;
+}
+
+/* Another window completes and reopens the selected task: the durable revision
+ * moves on while the tasks still read as the list's last save left them. */
+static bool tl_advance_revision(struct package_resident_store *other, const char *directory,
+    const struct task_list *list, struct task_document *row)
+{
+    bool done = list->editor->saved.state.tasks[list->selected].done != 0;
+    enum task_document_action first = done ? TASK_DOCUMENT_REOPEN : TASK_DOCUMENT_COMPLETE;
+    enum task_document_action second = done ? TASK_DOCUMENT_COMPLETE : TASK_DOCUMENT_REOPEN;
+    if (!package_resident_store_open_app(other, directory, "local/list").ok) return false;
+    if (!task_document_read(other, row).ok) return false;
+    return task_document_apply(other, row->state.revision, first, list->selected_id, NULL, row).ok &&
+        task_document_apply(other, row->state.revision, second, list->selected_id, NULL, row).ok;
+}
+
+static int tl_queue_stale_test(struct task_list *list, const char *directory)
+{
+    int failures = 0;
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    struct task_editor *editor = list->editor;
+    struct package_resident_store other = {0};
+    struct task_document row, after;
+    uint32_t action = UINT32_MAX;
+    TE_CHECK("independent writer advances the durable revision", tl_advance_revision(&other, directory, list, &row));
+    TE_CHECK("failed save drops the waiting Undo", task_list_action(list, 2).ok && editor->pending &&
+        task_list_input(list, &undo, &list->focus, &action) && !list->notice[0] &&
+        !tl_wait_test(list).ok && editor->status == TASK_EDITOR_FAILED);
+    TE_CHECK("dropped actions are named beside the failure", strstr(list->notice, "reload before saving") &&
+        strstr(list->notice, "1 later action not applied"));
+    TE_CHECK("dropped Undo leaves the other window's data exact", task_document_read(&other, &after).ok &&
+        after.state.revision == row.state.revision && after.can_undo &&
+        memcmp(after.state.tasks, row.state.tasks, sizeof(row.state.tasks)) == 0);
+    TE_CHECK("stale-queue writer closes", package_resident_store_close(&other).ok);
+    return failures;
+}
+
+/* With no task to act on, an action cannot apply later any more than now, so
+ * it is refused at once instead of waiting behind a save. */
+static int tl_queue_empty_test(const char *directory)
+{
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    const struct zcl_present_input_v1 space = { .key = ZCL_PRESENT_INPUT_TEXT, .character = ' ' };
+    struct task_editor editor = {0};
+    struct task_list list;
+    uint32_t action = UINT32_MAX;
+    int failures = 0;
+    TE_CHECK("open empty list for waiting actions", task_editor_open(&editor, directory, "local/empty-queue").ok);
+    task_list_init(&list, &editor);
+    TE_CHECK("Undo on an empty list starts a save", task_list_input(&list, &undo, &list.focus, &action) && editor.pending);
+    action = UINT32_MAX;
+    TE_CHECK("Complete on an empty list is refused, not queued, during a save", task_list_input(&list, &space, &list.focus, &action) &&
+        action == 2 && !task_list_action(&list, action).ok && !strcmp(list.notice, "Add a task first."));
+    TE_CHECK("the refused Complete starts no save of its own", !tl_wait_test(&list).ok && task_list_poll(&list).ok &&
+        tl_wait_test(&list).ok && editor.status == TASK_EDITOR_FAILED && !editor.saved.state.count && !editor.pending);
+    return failures;
+}
+
+static int tl_queue_test(struct task_list *list, const char *directory)
+{
+    return tl_queue_wait_test(list) + tl_queue_hold_test(list) + tl_queue_order_test(list) +
+        tl_queue_undo_delete_test(list) + tl_queue_undo_queued_test(list) + tl_queue_undo_twice_test(directory) +
+        tl_queue_stale_test(list, directory) + tl_queue_empty_test(directory);
+}
+
 static bool tl_populate(struct task_editor *editor)
 {
     for (unsigned i = 0; i < 12; ++i) {
@@ -1305,6 +1514,7 @@ static int tl_acceptance(const char *directory)
     TE_CHECK("Home restores first row and viewport", tl_key_test(&list, ZCL_PRESENT_INPUT_HOME, false) && list.selected == 0 && list.first == 0);
     failures += tl_visual_test(&list);
     failures += tl_actions_test(&list);
+    failures += tl_queue_test(&list, directory);
     struct task_editor reopened = {0};
     TE_CHECK("reopen retains exact list contents", task_editor_open(&reopened, directory, "local/list").ok &&
         reopened.saved.state.count == editor.saved.state.count &&

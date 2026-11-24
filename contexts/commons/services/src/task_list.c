@@ -32,26 +32,98 @@ void task_list_init(struct task_list *list, struct task_editor *editor)
     tl_select(list, 0);
 }
 
-static struct zcl_result tl_failure(struct task_list *list, struct zcl_result result)
+/* A held notice has been read once the user acts again. */
+static void tl_read_notice(struct task_list *list)
+{
+    if (!list->notice_held) return;
+    list->notice_held = false;
+    list->notice[0] = '\0';
+    list->repaint = true;
+}
+
+static struct zcl_result tl_report(struct task_list *list, struct zcl_result result,
+    const char *text)
 {
     list->repaint = true;
-    (void)snprintf(list->notice, sizeof(list->notice), "%.127s", result.message);
+    list->notice_held = true;
+    (void)snprintf(list->notice, sizeof(list->notice), "%.127s", text);
     LOG_ERROR("task-list", "%s", result.message);
     return result;
 }
 
+/* A refused action stays visible until the next input. */
+static struct zcl_result tl_failure(struct task_list *list, struct zcl_result result)
+{
+    return tl_report(list, result, result.message);
+}
+
+/* A failed save leaves later actions chosen against state that never landed. */
+static struct zcl_result tl_save_failed(struct task_list *list, struct zcl_result result)
+{
+    if (!list->queued) return tl_failure(list, result);
+    char text[128];
+    (void)snprintf(text, sizeof(text), "%.89s; %u later action%s not applied",
+        result.message, list->queued, list->queued == 1u ? "" : "s");
+    list->queued = 0;
+    return tl_report(list, result, text);
+}
+
+/* One action through the same select-and-save path, now or when drained.
+ * Undo names no task: the row it was pressed on may be gone by the time a
+ * waiting Undo applies. */
+static struct zcl_result tl_apply(struct task_list *list, uint64_t id,
+    enum task_document_action action)
+{
+    struct task_editor *editor = list->editor;
+    struct zcl_result result = ZCL_OK;
+    if (action != TASK_DOCUMENT_UNDO) result = task_editor_select(editor, id);
+    if (result.ok) result = task_editor_submit(editor, action);
+    if (!result.ok) return tl_save_failed(list, result);
+    list->repaint = true;
+    return ZCL_OK;
+}
+
+/* A queued toggle is read against the state the previous save produced. */
+static enum task_document_action tl_fresh(const struct task_list *list, uint64_t id,
+    enum task_document_action action)
+{
+    if (action != TASK_DOCUMENT_COMPLETE && action != TASK_DOCUMENT_REOPEN) return action;
+    const struct task_document *saved = &list->editor->saved;
+    for (uint32_t i = 0; i < saved->state.count; ++i)
+        if (saved->state.tasks[i].id == id)
+            return saved->state.tasks[i].done ? TASK_DOCUMENT_REOPEN : TASK_DOCUMENT_COMPLETE;
+    return action;
+}
+
+/* An action on a task that does not exist can never apply, so it is refused
+ * before it could wait behind a save. */
 static struct zcl_result tl_write(struct task_list *list, enum task_document_action action)
 {
     struct task_editor *editor = list->editor;
-    if (editor->pending) return tl_failure(list, ZCL_ERR(-1, "Wait for the current save."));
     if (action != TASK_DOCUMENT_UNDO && !list->selected_id)
         return tl_failure(list, ZCL_ERR(-1, "Add a task first."));
-    struct zcl_result result = task_editor_select(editor, list->selected_id);
-    if (result.ok) result = task_editor_submit(editor, action);
-    if (!result.ok) return tl_failure(list, result);
+    if (editor->pending) {
+        if (list->queued == TASK_LIST_QUEUED_MAX)
+            return tl_failure(list, ZCL_ERR(-1, "Wait for the current save."));
+        /* Undo ignores the id, so it is not bound to the row chosen then. */
+        list->queue[list->queued++] = (struct task_list_queued){
+            .id = action == TASK_DOCUMENT_UNDO ? 0 : list->selected_id, .action = action };
+        return ZCL_OK;
+    }
     list->notice[0] = '\0';
-    list->repaint = true;
-    return ZCL_OK;
+    list->notice_held = false;
+    return tl_apply(list, list->selected_id, action);
+}
+
+/* The oldest waiting action starts once the editor is idle, so each one is
+ * read against the state the previous save produced. */
+static struct zcl_result tl_drain(struct task_list *list)
+{
+    if (!list->queued || list->editor->pending) return ZCL_OK;
+    struct task_list_queued next = list->queue[0];
+    --list->queued;
+    memmove(list->queue, list->queue + 1, list->queued * sizeof(list->queue[0]));
+    return tl_apply(list, next.id, tl_fresh(list, next.id, next.action));
 }
 
 static struct zcl_result tl_edit(struct task_list *list, bool new_task)
@@ -84,6 +156,7 @@ static struct zcl_result tl_menu(struct task_list *list, uint32_t action)
 struct zcl_result task_list_action(struct task_list *list, uint32_t action)
 {
     if (!list || !list->editor) return ZCL_ERR(-1, "task-list: durable editor required");
+    tl_read_notice(list);
     if (action >= 4) return tl_failure(list, ZCL_ERR(-1, "Unknown task action."));
     if (list->updates && list->update) return task_update_panel_action(list, action);
     if (list->menu) return tl_menu(list, action);
@@ -126,9 +199,11 @@ struct zcl_result task_list_poll(struct task_list *list)
     struct zcl_result result = task_editor_poll(list->editor, &changed);
     if (changed) {
         task_list_refresh(list);
-        if (result.ok) list->notice[0] = '\0';
+        if (result.ok && !list->notice_held) list->notice[0] = '\0';
     }
-    if (!result.ok) return tl_failure(list, result);
+    if (!result.ok) return tl_save_failed(list, result);
+    result = tl_drain(list);
+    if (!result.ok) return result;
     if (list->update) {
         bool updated = false;
         result = task_update_poll(list->update, &updated);
@@ -216,6 +291,7 @@ bool task_list_input(void *context, const struct zcl_present_input_v1 *input,
         LOG_ERROR("task-list", "input requires an owner and outputs");
         return false;
     }
+    tl_read_notice(list);
     list->focus = *focus;
     if (list->updates && list->update)
         return task_update_panel_input(list, input, focus, action);

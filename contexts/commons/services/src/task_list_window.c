@@ -120,6 +120,8 @@ static struct zcl_result tlw_journey(struct task_editor *editor, struct task_upd
         if (!back) return ZCL_OK;
         window.list.open_editor = false;
         window.list.menu = false;
+        window.list.notice[0] = '\0';
+        window.list.notice_held = false;
         window.list.focus = UINT32_MAX;
         window.list.selected_id = editor->selected_id;
         task_list_refresh(&window.list);

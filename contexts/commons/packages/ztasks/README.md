@@ -29,7 +29,9 @@ Tab/Shift-Tab move between the list and action buttons; Enter edits the selected
 task, Space toggles completion, Delete removes it, and Cmd/Ctrl+Z undoes the last
 durable change. Cmd/Ctrl+N opens a new task. Selected rows have a visible focus
 border. The list displays eight rows at a time and retains selection while a
-save completes.
+save completes. Actions chosen during a save wait in order, up to eight, and
+apply to the saved result; a failed save drops the waiting actions and says so.
+A refused or failed action stays visible until the next key press or click.
 
 Save keeps the editor open; Back to tasks saves the latest valid draft before
 returning to the list. Closing the editor window saves before exiting the app.

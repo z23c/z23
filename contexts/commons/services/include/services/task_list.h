@@ -5,6 +5,9 @@
 #include "services/task_editor.h"
 #include "services/task_update.h"
 enum { TASK_LIST_ROWS = 8, TASK_LIST_TOP = 184, TASK_LIST_ROW_HEIGHT = 45 };
+/* Actions chosen while a save is pending wait here and apply in order. */
+#define TASK_LIST_QUEUED_MAX 8u
+struct task_list_queued { uint64_t id; enum task_document_action action; };
 struct task_list {
     struct task_editor *editor;
     struct task_update *update;
@@ -14,6 +17,9 @@ struct task_list {
     uint64_t selected_id;
     bool menu, repaint, closing, open_editor, new_task, update_ack_error;
     char notice[128];
+    struct task_list_queued queue[TASK_LIST_QUEUED_MAX];
+    uint32_t queued;
+    bool notice_held;
 };
 void task_list_init(struct task_list *list, struct task_editor *editor);
 void task_list_refresh(struct task_list *list);
