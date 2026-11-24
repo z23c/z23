@@ -885,6 +885,12 @@ static void cb_finish_lessons(struct cb_brief *b)
             shown = shown || cb_slug_hash(b->lessons[j].slug) == b->withheld[i];
         b->lessons_more += !shown;
     }
+    /* The printed follow-up (an explicit budget) returns at most CB_MAX_LESSONS
+     * lessons in all, so promise no more than the room left; the rest is
+     * lessons_capped. */
+    size_t room = b->nlessons < CB_MAX_LESSONS ? CB_MAX_LESSONS - b->nlessons : 0;
+    if (b->lessons_more > room)
+        b->lessons_more = (unsigned)room;
 }
 
 static void cb_collect_lessons(const struct zcl_command_request *request,

@@ -21,8 +21,10 @@ ZCL_COMMAND_READY_READ(
     "and the first commands. previous_failure filters the latest test artifact "
     "to routed failures and labels it unbound_last_run because the artifact has "
     "no commit identity; tight budgets drop lessons before failure evidence. Lessons are unavailable "
-    "when no node answers or one second passes; lessons_capped marks results "
-    "beyond five or trimmed text.", 12288,
+    "when no node answers or one second passes; with no budget the brief carries at most two lessons plus "
+    "lessons_more and lessons_more_command (the same call with an explicit budget, "
+    "which lifts the limit to three); lessons_capped marks withheld or trimmed "
+    "lessons.", 12288,
     "code,guide,develop,proof,lint,t-fast,impact,agent",
     "zcl.code_guide.input.v1", "zcl.code_guide.v1", "paths,topic,budget",
     "paths",

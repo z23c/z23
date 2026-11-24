@@ -428,6 +428,22 @@ static int cgl_guide_cases(void)
             }
         ASSERT(cgl_has(&r, "board-boot-lesson", "prefix"));
         zcl_command_reply_free(&r);
+        /* Six pages match one path: the default shows two and promises only the
+         * one more that the printed follow-up can return (three in all); the
+         * explicit-budget call returns three and no more-marker. */
+        static const char *const six[] = {"six-a", "six-b", "six-c", "six-d", "six-e", "six-f"};
+        for (size_t i = 0; i < sizeof(six) / sizeof(six[0]); i++)
+            ASSERT(cgl_write(six[i], "fleet", "contexts/market/six.c", fresh, "Six pages apply here."));
+        ASSERT(cgl_guide_budget(root, "contexts/market/six.c", 0, &r));
+        ASSERT_EQ(json_size(json_get(&r.data, "lessons")), 2u);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_more")), 1);
+        ASSERT(json_get_bool(json_get(&r.data, "lessons_capped")));
+        zcl_command_reply_free(&r);
+        ASSERT(cgl_guide(root, "contexts/market/six.c", &r));
+        ASSERT_EQ(json_size(json_get(&r.data, "lessons")), 3u);
+        ASSERT(json_get(&r.data, "lessons_more") == NULL);
+        ASSERT(json_get_bool(json_get(&r.data, "lessons_capped")));
+        zcl_command_reply_free(&r);
         ASSERT_EQ(test_rm_rf_recursive(root), 0);
         PASS();
     } _test_next:;
