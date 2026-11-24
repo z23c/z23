@@ -128,6 +128,21 @@ copied literally. Report format: [LANE_REPORT.md](LANE_REPORT.md). Queue and
 proof rules: [TRAIN_PROTOCOL.md](TRAIN_PROTOCOL.md). A board post or a worker
 name never replaces a native proof receipt.
 
+After the native queue reports a landing, post a compact `result` receipt with
+`landed=<40-hex landed SHA>` in its body (`landed=true` is also accepted):
+
+```sh
+build/bin/z23-dev dev agent mail post --to=<box-or-*> --kind=result \
+  --ref=<candidate-sha> --body="landed=<full-landed-sha>"
+```
+
+The candidate feed treats prose such as `LANDED:` without this field as
+delivered but `landing-unattested`. The mail attestation only sets
+`publication_state=reported_landed`; it does not set the verified `landed`
+field or replace independent remote verification.
+
+<!-- claim: symbol-present fmc_cand_from_mail tools/command/native_fleet_steer.c # candidate mail classification requires the explicit landed field -->
+
 ## 4. The fleet wiki
 
 The wiki is durable pages on the same signed board ledger. Every revision is
