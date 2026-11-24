@@ -1965,8 +1965,12 @@ static int case_guide_lessons(const char *home, const char *checkout,
         ASSERT(ms_tool(&m, 2, "z23_code", args));
         ASSERT(has(&m, "native-stem"));
         ASSERT(has(&m, "tools-a"));
-        ASSERT(has(&m, "tools-b"));
+        /* No budget key: the default returns the two best lessons and says how
+         * many more exist and how to get them. */
+        ASSERT(!has(&m, "tools-b"));
         ASSERT(!has(&m, "tools-c"));
+        ASSERT(has(&m, "lessons_more"));
+        ASSERT(has(&m, "lessons_more_command"));
         ASSERT(has(&m, "lessons_capped"));
         /* The stub answers a public query with roleless authors, so those go. */
         ASSERT(has(&m, "lessons_untrusted_dropped"));

@@ -266,12 +266,14 @@ static bool cgl_write(const char *slug, const char *scope, const char *applies,
 }
 
 /* The brief for one path in an isolated source root. */
-static bool cgl_guide(const char *root, const char *path, struct zcl_command_reply *reply)
+static bool cgl_guide_budget(const char *root, const char *path, int budget,
+                             struct zcl_command_reply *reply)
 {
     struct json_value in;
     json_init(&in);
     json_set_object(&in);
-    bool ok = json_push_kv_str(&in, "paths", path) && json_push_kv_int(&in, "budget", 8192);
+    bool ok = json_push_kv_str(&in, "paths", path) &&
+              (!budget || json_push_kv_int(&in, "budget", budget));
     struct zcl_command_context ctx = {.source_root = root, .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
     struct zcl_command_request request = {.input = &in, .context = &ctx};
     zcl_command_reply_init(reply, "zcl.test.code_guide.v1");
@@ -279,6 +281,11 @@ static bool cgl_guide(const char *root, const char *path, struct zcl_command_rep
         zcl_native_handle_code_guide(&request, reply);
     json_free(&in);
     return ok;
+}
+
+static bool cgl_guide(const char *root, const char *path, struct zcl_command_reply *reply)
+{
+    return cgl_guide_budget(root, path, 8192, reply);
 }
 
 static bool cgl_has(const struct zcl_command_reply *reply, const char *slug, const char *match)
@@ -343,6 +350,25 @@ static int cgl_guide_cases(void)
         ASSERT(cgl_has(&r, "public-board-lesson", "exact"));
         ASSERT(!cgl_has(&r, "wallet-lesson", NULL));
         ASSERT(json_get(&r.data, "lessons_unavailable") == NULL);
+        zcl_command_reply_free(&r);
+        /* The default call (no budget key) returns at most two lessons, says
+         * how many more exist and names the exact command that returns them;
+         * owners and tests stay. The explicit-budget call above returns all
+         * three and carries no more-marker. */
+        ASSERT(cgl_guide_budget(root, "engine/composition/src/boot_fleet_board.c", 0, &r));
+        ASSERT_EQ(r.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(json_size(json_get(&r.data, "lessons")), 2u);
+        ASSERT_EQ(json_get_int(json_get(&r.data, "lessons_more")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&r.data, "lessons_more_command")),
+                      "build/bin/z23 code guide engine/composition/src/boot_fleet_board.c --budget=4096");
+        ASSERT(json_get(&r.data, "tests") != NULL);
+        ASSERT(json_size(json_get(&r.data, "lessons")) == 2u &&
+               json_write(json_get(&r.data, "lessons"), NULL, 0) < 700);
+        ASSERT(json_write(&r.data, NULL, 0) <= 2048);
+        zcl_command_reply_free(&r);
+        ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board.c", &r));
+        ASSERT_EQ(json_size(json_get(&r.data, "lessons")), 3u);
+        ASSERT(json_get(&r.data, "lessons_more") == NULL);
         zcl_command_reply_free(&r);
         ASSERT(cgl_guide(root, "engine/composition/src/boot_fleet_board_ingest.c", &r));
         ASSERT(cgl_has(&r, "board-boot-lesson", "prefix"));

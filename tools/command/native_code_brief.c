@@ -47,6 +47,9 @@
 #define CB_RULE_CAP 200
 #define CB_MAX_TESTS 12
 #define CB_MAX_LESSONS 3
+#define CB_LESSON_DEFAULT 2 /* lessons returned when the caller sets no budget */
+#define CB_MAX_WITHHELD 16
+#define CB_MORE_BUDGET 4096
 #define CB_MAX_QUERIES 64
 #define CB_QUERY_CAP 129
 #define CB_MAX_NEXT 5
@@ -90,6 +93,10 @@ struct cb_brief {
     bool unmapped, test_evidence_unavailable;
     struct cb_lesson lessons[CB_MAX_LESSONS + 1];
     size_t nlessons;
+    size_t lesson_limit; /* 0 = CB_MAX_LESSONS */
+    uint64_t withheld[CB_MAX_WITHHELD]; /* pages kept off by lesson_limit */
+    size_t nwithheld;
+    unsigned lessons_more; /* withheld pages not shown */
     char unavailable[64];
     char next[CB_MAX_NEXT][CB_NEXT_CAP];
     size_t nnext;
@@ -264,6 +271,7 @@ static const char *cb_parse(struct cb_brief *b, const struct json_value *in)
     const struct json_value *v;
     const char *err;
     b->budget = CB_BUDGET_DEFAULT;
+    b->lesson_limit = json_get(in, "budget") ? CB_MAX_LESSONS : CB_LESSON_DEFAULT;
     if ((v = json_get(in, "paths")) && (err = cb_parse_paths(b, v)))
         return err;
     if ((v = json_get(in, "topic")) && (err = cb_parse_topic(b, v)))
@@ -554,6 +562,26 @@ static bool cb_lesson_before(const struct cb_lesson *a, const struct cb_lesson *
     return cmp ? cmp > 0 : strcmp(a->slug, c->slug) < 0;
 }
 
+static uint64_t cb_slug_hash(const char *slug)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (const char *p = slug; *p; p++)
+        h = (h ^ (unsigned char)*p) * 1099511628211ULL;
+    return h;
+}
+
+/* A page the default lesson limit kept off: remembered once, so the brief can
+ * say how many more exist. */
+static void cb_note_withheld(struct cb_brief *b, const char *slug)
+{
+    uint64_t h = cb_slug_hash(slug);
+    for (size_t i = 0; i < b->nwithheld; i++)
+        if (b->withheld[i] == h)
+            return;
+    if (b->nwithheld < CB_MAX_WITHHELD)
+        b->withheld[b->nwithheld++] = h;
+}
+
 /* Offer one built lesson to the ranked slots, taking ownership of its
  * `matched`. A page seen again keeps its better ranking; a lesson past the
  * last slot is dropped and the brief is marked capped. */
@@ -580,7 +608,9 @@ static void cb_offer_lesson(struct cb_brief *b, struct cb_lesson *in)
         b->lessons[at] = tmp;
         at--;
     }
-    if (b->nlessons > CB_MAX_LESSONS) {
+    size_t limit = b->lesson_limit ? b->lesson_limit : CB_MAX_LESSONS;
+    if (b->nlessons > limit) {
+        cb_note_withheld(b, b->lessons[b->nlessons - 1].slug);
         json_free(&b->lessons[--b->nlessons].matched);
         b->lessons_capped = true;
     }
@@ -589,9 +619,7 @@ static void cb_offer_lesson(struct cb_brief *b, struct cb_lesson *in)
 /* Count a roleless page once, however many queries return it. */
 static void cb_count_untrusted(struct cb_brief *b, const char *slug)
 {
-    uint64_t h = 1469598103934665603ULL;
-    for (const char *p = slug; *p; p++)
-        h = (h ^ (unsigned char)*p) * 1099511628211ULL;
+    uint64_t h = cb_slug_hash(slug);
     for (size_t i = 0; i < b->ndropped; i++)
         if (b->dropped[i] == h)
             return;
@@ -850,6 +878,12 @@ static void cb_finish_lessons(struct cb_brief *b)
     while (b->nlessons && cb_lessons_bytes(b) > CB_LESSON_BYTES) {
         json_free(&b->lessons[--b->nlessons].matched);
         b->lessons_truncated = true;
+    }
+    for (size_t i = 0; i < b->nwithheld; i++) {
+        bool shown = false;
+        for (size_t j = 0; j < b->nlessons; j++)
+            shown = shown || cb_slug_hash(b->lessons[j].slug) == b->withheld[i];
+        b->lessons_more += !shown;
     }
 }
 
@@ -1249,10 +1283,43 @@ static bool cb_push_lesson_flags(struct json_value *data, const struct cb_brief 
             json_push_kv_bool(data, "lessons_untrusted_incomplete", true));
 }
 
+/* The exact command that returns the lessons the default limit kept off: the
+ * same paths or topic with an explicit budget, which lifts the limit. */
+static bool cb_more_command(const struct cb_brief *b, char *out, size_t cap)
+{
+    size_t n = (size_t)snprintf(out, cap, "build/bin/z23 code guide");
+    for (size_t i = 0; i < b->npaths && n < cap; i++) {
+        char arg[CB_NEXT_CAP];
+        if (!cb_cost_arg(b->paths[i], arg))
+            return false;
+        n += (size_t)snprintf(out + n, cap - n, " %s", arg);
+    }
+    if (b->topic[0] && n < cap) {
+        char arg[CB_NEXT_CAP];
+        if (!cb_cost_arg(b->topic, arg))
+            return false;
+        n += (size_t)snprintf(out + n, cap - n, " --topic=%s", arg);
+    }
+    if (n < cap)
+        n += (size_t)snprintf(out + n, cap - n, " --budget=%d", CB_MORE_BUDGET);
+    return n < cap;
+}
+
+static bool cb_push_lessons_more(struct json_value *data, const struct cb_brief *b)
+{
+    char cmd[CB_NEXT_CAP + 96];
+    if (!b->lessons_more)
+        return true;
+    return json_push_kv_int(data, "lessons_more", (int64_t)b->lessons_more) &&
+           (!cb_more_command(b, cmd, sizeof(cmd)) ||
+            json_push_kv_str(data, "lessons_more_command", cmd));
+}
+
 static bool cb_push_lesson_evidence(struct json_value *data, const struct cb_brief *b)
 {
     bool omitted = b->cut_lessons && b->nlessons == 0;
     return (omitted || cb_push_lessons(data, b)) &&
+           (omitted || cb_push_lessons_more(data, b)) &&
            (omitted || !b->unavailable[0] ||
             json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
            cb_push_lesson_flags(data, b, omitted) &&

@@ -1666,6 +1666,9 @@ static void render_code_guide_brief(struct buf *b, const struct zcl_cli_render_e
     const struct json_value *truncated = json_get(data, "truncated");
     if (capped && capped->type == JSON_BOOL && json_get_bool(capped))
         emit_kv_wrap(b, e, 6, "note", "Wiki lessons are capped.");
+    const char *more_cmd = json_get_str(json_get(data, "lessons_more_command"));
+    if (more_cmd && more_cmd[0])
+        emit_kv_wrap(b, e, 6, "more lessons", more_cmd);
     if (truncated && truncated->type == JSON_BOOL && json_get_bool(truncated))
         emit_kv_wrap(b, e, 6, "note", "Guide is truncated; some context omitted.");
     code_guide_strings(b, e, json_get(data, "cut"), "cut");
