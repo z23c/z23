@@ -111,7 +111,8 @@ Z23WALLET_LIBS = -lm -lpthread -ldl
 Z23WALLET_RES :=
 endif
 
-$(Z23WALLET_OBJ_DIR)/%.o: %.c $(wildcard $(Z23WALLET_DIR)/src/*.h $(GUI_DIR)/include/gui/*.h $(GUI_DIR)/src/*.h) $(Z23WALLET_DIR)/z23wallet.mk
+Z23WALLET_HEADERS := $(wildcard $(Z23WALLET_DIR)/src/*.h $(GUI_DIR)/include/gui/*.h $(GUI_DIR)/src/*.h)
+$(Z23WALLET_OBJ_DIR)/%.o: %.c $(Z23WALLET_HEADERS) $(Z23WALLET_DIR)/z23wallet.mk
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23WALLET_CFLAGS) -c $< -o $@
 
@@ -186,7 +187,7 @@ $(Z23WALLET_GOLDEN_DIR)/main.c: $(Z23WALLET_GOLDEN_SRCS) $(Z23WALLET_DIR)/z23wal
 	     grep -q "^int $$n(void)" $$f && printf '    bad |= %s() != 0;\n' $$n; done; \
 	   printf '    return bad;\n}\n'; } > $@
 
-$(Z23WALLET_GOLDEN_DIR)/%.o: tests/harness/src/%.c $(Z23WALLET_DIR)/z23wallet.mk
+$(Z23WALLET_GOLDEN_DIR)/%.o: tests/harness/src/%.c $(Z23WALLET_HEADERS) $(Z23WALLET_DIR)/z23wallet.mk
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23WALLET_CFLAGS) -Itests/harness/src -c $< -o $@
 
