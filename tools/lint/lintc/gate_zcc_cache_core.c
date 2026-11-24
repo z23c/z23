@@ -90,19 +90,20 @@ int zc_sec_envfilter(void)
     const char *eo = zcw("environment.o");
     const char *cv = zcw("compiler-environment");
     const char *const base[] = { zc_zd("environment-cache"),
-        "BUILD_SOURCE_RECORD=first", "DEVBUILD_UNIT=unit-a", "ZCC_REAL_FLAG=1", NULL };
+        "BUILD_SOURCE_RECORD=first", "DEVBUILD_UNIT=unit-a", "ZCL_DEV_LINKER=-fuse-ld=gold", "ZCC_REAL_FLAG=1", NULL };
     const char *const second[] = { base[0], "BUILD_SOURCE_RECORD=second",
-        "DEVBUILD_UNIT=unit-b", "ZCC_REAL_FLAG=1", NULL };
+        "DEVBUILD_UNIT=unit-b", "ZCL_DEV_LINKER=-fuse-ld=bfd", "ZCC_REAL_FLAG=1", NULL };
     const char *const audited[] = { base[0], "BUILD_SOURCE_RECORD=second",
-        "DEVBUILD_UNIT=unit-b", "ZCC_REAL_FLAG=1", "ZCC_AUDIT=1", NULL };
+        "DEVBUILD_UNIT=unit-b", "ZCL_DEV_LINKER=-fuse-ld=bfd", "ZCC_REAL_FLAG=1", "ZCC_AUDIT=1", NULL };
     const char *const third[] = { base[0], "BUILD_SOURCE_RECORD=third",
-        "DEVBUILD_UNIT=unit-b", "ZCC_REAL_FLAG=2", NULL };
+        "DEVBUILD_UNIT=unit-b", "ZCL_DEV_LINKER=-fuse-ld=bfd", "ZCC_REAL_FLAG=2", NULL };
     const char *const av[] = { zc.zcc, cv, "-c", zcw("environment.c"), "-o",
                                eo, NULL };
     char e1[ZC_SHA], warm[ZC_SHA], audit[ZC_SHA], e2[ZC_SHA];
     if (zc_put("compiler-environment",
                "#!/bin/sh\n[ -z \"${BUILD_SOURCE_RECORD+x}\" ] || exit 71\n"
                "[ -z \"${DEVBUILD_UNIT+x}\" ] || exit 72\n"
+               "[ -z \"${ZCL_DEV_LINKER+x}\" ] || exit 73\n"
                "exec cc \"-DZCC_ENV_VALUE=${ZCC_REAL_FLAG:-1}\" \"$@\"\n") ||
         chmod(cv, 0755) != 0 ||
         zc_put("environment.c",

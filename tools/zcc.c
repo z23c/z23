@@ -403,7 +403,7 @@ static bool orchestration_env(const char *entry)
         /* Parent lint's read-only CFLAGS-query receipt, never a compiler input. */
         "ZCL_CAP_CLOSURE_SOURCE_RECORD=",
         "BUILD_SOURCE_RECORD=", "BUILD_COMPILER_ID=", "BUILD_SYSTEM_ID=",
-        "BUILD_EPOCH_KEEP=", "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=",
+        "BUILD_EPOCH_KEEP=", "ZCL_DEV_LINKER=", "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=",
         "ZCL_CHECKOUT_LOCK_HELD=", "ZCL_HOST_JOBS=", "PWD=",
         /* Per-session and per-job bookkeeping. Each of these differs between
          * two otherwise identical compiles (measured: 17,780 compiles in an
