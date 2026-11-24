@@ -1506,7 +1506,7 @@ static int wsr_e2e_tip_guard(struct wsr_e2e *e, const struct chain_params *cp)
     static const char *const want[2] = {"wallet is 3 blocks behind chain tip",
                                         "wallet is catching up to the chain "
                                         "tip"};
-    wallet_set_send_tip_wait_ms(20);
+    wallet_set_send_tip_wait_ms_for_test(20);
     for (int i = 0; i < 2; i++) {
         struct json_value result = {0};
         memset(&prepared, 0, sizeof(prepared));
@@ -1529,7 +1529,7 @@ static int wsr_e2e_tip_guard(struct wsr_e2e *e, const struct chain_params *cp)
             transaction_free(&prepared.tx);
         json_free(&result);
     }
-    wallet_set_send_tip_wait_ms(3000);
+    wallet_set_send_tip_wait_ms_for_test(3000);
     zcl_mutex_lock(&e->w->cs);
     e->w->best_block_height = WSR_TIP;
     zcl_mutex_unlock(&e->w->cs);

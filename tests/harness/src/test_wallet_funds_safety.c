@@ -1117,7 +1117,7 @@ static int wfs_test_owner_tip_guard(void)
         *cp = saved;
         return 1;
     }
-    wallet_set_send_tip_wait_ms(20);
+    wallet_set_send_tip_wait_ms_for_test(20);
 
     struct zcl_result r = wfs_owner_build(w, 75, 100, &wtx, &why);
     WFS_CHECK("owner base: 25 blocks behind is refused, nothing built",
@@ -1169,7 +1169,7 @@ static int wfs_test_owner_tip_guard(void)
     wallet_free(w);
     free(w);
 
-    wallet_set_send_tip_wait_ms(3000);
+    wallet_set_send_tip_wait_ms_for_test(3000);
     wallet_set_chain_tip_source(NULL, NULL);
     *cp = saved;
     return failures;
@@ -1190,7 +1190,7 @@ struct wfs_advance {
 static void *wfs_advance_thread(void *arg)
 {
     struct wfs_advance *a = arg;
-    while (wallet_send_tip_waits_entered() == a->waits_before &&
+    while (wallet_send_tip_waits_entered_for_test() == a->waits_before &&
            !atomic_load(&a->send_done))
         platform_sleep_ms(1);
     zcl_mutex_lock(&a->w->cs);
@@ -1220,10 +1220,10 @@ static int wfs_test_tip_guard_waits_one_block(void)
         return 1;
     }
     g_wfs_tip = 100;
-    wallet_set_send_tip_wait_ms(5000);
+    wallet_set_send_tip_wait_ms_for_test(5000);
 
     struct wfs_advance adv = {.w = w, .height = 100,
-                              .waits_before = wallet_send_tip_waits_entered()};
+                              .waits_before = wallet_send_tip_waits_entered_for_test()};
     atomic_init(&adv.send_done, false);
     pthread_t th;
     bool started = pthread_create(&th, NULL, wfs_advance_thread, &adv) == 0;
@@ -1234,9 +1234,9 @@ static int wfs_test_tip_guard_waits_one_block(void)
     WFS_CHECK("one block behind: the send waits for the advance and proceeds",
               started && ok && height == 100);
     WFS_CHECK("that send entered the wait exactly once",
-              wallet_send_tip_waits_entered() == adv.waits_before + 1);
+              wallet_send_tip_waits_entered_for_test() == adv.waits_before + 1);
 
-    int waits = wallet_send_tip_waits_entered();
+    int waits = wallet_send_tip_waits_entered_for_test();
     wfs_set_cursor(w, 98);
     ok = wallet_send_build_height(w, &height, &why);
     WFS_CHECK("two blocks behind: refused with the lag message",
@@ -1244,19 +1244,19 @@ static int wfs_test_tip_guard_waits_one_block(void)
                   strcmp(why, "wallet is 2 blocks behind chain tip "
                               "(scanned 98, tip 100)") == 0);
     WFS_CHECK("two blocks behind: refused without entering the wait",
-              wallet_send_tip_waits_entered() == waits);
+              wallet_send_tip_waits_entered_for_test() == waits);
 
     wfs_set_cursor(w, 99);
-    wallet_set_send_tip_wait_ms(20);
+    wallet_set_send_tip_wait_ms_for_test(20);
     ok = wallet_send_build_height(w, &height, &why);
     WFS_CHECK("one block behind and no advance: refused once the wait is spent",
-              !ok && wallet_send_tip_waits_entered() == waits + 1);
+              !ok && wallet_send_tip_waits_entered_for_test() == waits + 1);
     WFS_CHECK("the refusal says the wallet is catching up and to retry",
               why && strcmp(why, "wallet is catching up to the chain tip "
                                  "(scanned 99, tip 100); retry in a moment") ==
                          0);
 
-    wallet_set_send_tip_wait_ms(3000);
+    wallet_set_send_tip_wait_ms_for_test(3000);
     wallet_set_chain_tip_source(NULL, NULL);
     wallet_free(w);
     free(w);
