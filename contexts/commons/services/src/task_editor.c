@@ -57,15 +57,23 @@ static const struct ta_task *te_selected(const struct task_editor *editor, uint6
     return NULL;
 }
 
+/* The draft is unsaved exactly while it differs from the durable title. */
+static bool te_dirty(const struct task_editor *editor)
+{
+    const struct ta_task *task = te_selected(editor, editor->selected_id);
+    return strcmp(editor->form.fields[0].value, task ? task->title : "") != 0;
+}
+
 static void te_observe(struct task_editor *editor)
 {
     if (strcmp(editor->observed, editor->form.fields[0].value) == 0) return;
     (void)snprintf(editor->observed, sizeof(editor->observed), "%s",
                    editor->form.fields[0].value);
     if (editor->edit_serial != UINT64_MAX) ++editor->edit_serial;
-    editor->dirty = true;
+    editor->dirty = te_dirty(editor);
     editor->failure[0] = '\0';
-    editor->status = editor->pending ? TASK_EDITOR_SAVING : TASK_EDITOR_UNSAVED;
+    editor->status = editor->pending ? TASK_EDITOR_SAVING : editor->dirty ? TASK_EDITOR_UNSAVED
+        : editor->selected_id ? TASK_EDITOR_SAVED : TASK_EDITOR_NEW;
 }
 
 static void te_title(struct task_editor *editor)
@@ -117,7 +125,7 @@ struct zcl_result task_editor_select(struct task_editor *editor, uint64_t id)
     editor->closing = false;
     te_title(editor);
     editor->failure[0] = '\0';
-    editor->status = TASK_EDITOR_SAVED;
+    editor->status = id ? TASK_EDITOR_SAVED : TASK_EDITOR_NEW;
     return ZCL_OK;
 }
 
@@ -178,8 +186,8 @@ static struct zcl_result te_receive(struct task_editor *editor)
     if (result.ok) {
         editor->saved = job->saved;
         if (job->action == TASK_DOCUMENT_ADD) editor->selected_id = job->revision + 1;
-        editor->dirty = editor->edit_serial == UINT64_MAX || editor->edit_serial != job->serial;
-        if (!editor->dirty) te_title(editor);
+        if (editor->edit_serial == job->serial) te_title(editor);
+        editor->dirty = te_dirty(editor);
         editor->status = editor->dirty ? TASK_EDITOR_UNSAVED : TASK_EDITOR_SAVED;
     }
     editor->pending = NULL;

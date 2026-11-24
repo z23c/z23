@@ -34,11 +34,15 @@ apply to the saved result; a failed save drops the waiting actions and says so.
 A refused or failed action stays visible until the next key press or click.
 
 Save keeps the editor open; Back to tasks saves the latest valid draft before
-returning to the list. Closing the editor window saves before exiting the app.
-Saving runs on an owned worker. Saving, Saved and Save failed describe the durable
-save state; a failed save retains the draft. Tab and Shift-Tab move focus between
-the title and actions. Titles currently use up to 95 Basic Latin characters and
-the reused state codec bounds a document to 32 tasks.
+returning to the list, so its button reads Save & back to tasks while the title
+differs from the saved one and Back to tasks once nothing is unsaved. Closing the
+editor window saves before exiting the app. Saving runs on an owned worker. Not
+saved yet, Unsaved changes, Saving, Saved and Save failed describe the durable
+save state: a new task is not saved until its first save, a draft that again
+matches the saved title is not unsaved, and a failed save retains the draft. Tab
+and Shift-Tab move focus between the title and actions. Titles currently use up
+to 95 Basic Latin characters and the reused state codec bounds a document to 32
+tasks.
 
 Headless `app tasks` actions are `list`, `add`, `edit`, `complete`, `reopen`,
 `delete` and `undo`. Changes require `expected_revision` from the last read;

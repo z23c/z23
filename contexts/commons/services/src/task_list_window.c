@@ -66,6 +66,22 @@ static void tlw_update(void *context, const struct zcl_present_window_event_v1 *
     }
 }
 
+/* Back in the list the editor holds no draft, new or otherwise. */
+static void tlw_resumed(struct task_list_window *window, struct task_editor *editor)
+{
+    struct task_list *list = &window->list;
+    list->open_editor = false;
+    list->menu = false;
+    list->notice[0] = '\0';
+    list->notice_held = false;
+    list->focus = UINT32_MAX;
+    list->selected_id = editor->selected_id;
+    /* Back means the close finished; nothing is left to save on close. */
+    editor->closing = false;
+    if (editor->status == TASK_EDITOR_NEW) editor->status = TASK_EDITOR_SAVED;
+    task_list_refresh(list);
+}
+
 #ifdef ZCL_TESTING
 struct zcl_result zcl_test_task_list_window_action(struct task_list *list, uint32_t action)
 {
@@ -78,6 +94,14 @@ struct zcl_result zcl_test_task_list_window_action(struct task_list *list, uint3
     *list = window.list;
     zcl_present_model_bitmap_free_v1(&window.bitmap);
     return window.display;
+}
+
+/* The list as its window resumes it once the editor window went Back. */
+void zcl_test_task_list_window_resumed(struct task_list *list, struct task_editor *editor)
+{
+    struct task_list_window window = { .list = *list };
+    tlw_resumed(&window, editor);
+    *list = window.list;
 }
 #endif
 
@@ -118,13 +142,7 @@ static struct zcl_result tlw_journey(struct task_editor *editor, struct task_upd
         bool back = false;
         ZCL_CHECK(task_editor_window_back(editor, &back));
         if (!back) return ZCL_OK;
-        window.list.open_editor = false;
-        window.list.menu = false;
-        window.list.notice[0] = '\0';
-        window.list.notice_held = false;
-        window.list.focus = UINT32_MAX;
-        window.list.selected_id = editor->selected_id;
-        task_list_refresh(&window.list);
+        tlw_resumed(&window, editor);
     }
 }
 

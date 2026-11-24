@@ -33,7 +33,8 @@ struct zcl_result task_editor_model(const struct task_editor *editor,
         return ZCL_ERR(-1, "task-editor: durable task snapshot is invalid");
     sha3_256(payload, length, digest);
     zcl_hex_encode(digest, sizeof(digest), model->exact_root);
-    static const char *const labels[] = { "Saved", "Unsaved changes", "Saving...", "Save failed" };
+    static const char *const labels[] = { "Saved", "Unsaved changes", "Saving...",
+                                          "Save failed", "Not saved yet" };
     if ((unsigned)editor->status >= sizeof(labels)/sizeof(labels[0]))
         return ZCL_ERR(-1, "task-editor: unknown save state");
     (void)snprintf(model->summary, sizeof(model->summary), "%s%s%.200s",
@@ -57,14 +58,26 @@ struct zcl_result task_editor_model(const struct task_editor *editor,
     return ZCL_OK;
 }
 
+/* The first action names what it does from the state it leaves. */
+static void tw_labels(const struct task_editor_window *window,
+    struct zcl_present_model_v1 *model)
+{
+    const struct task_editor *editor = window->editor;
+    char *label = model->actions[0].label;
+    if (editor->status == TASK_EDITOR_FAILED)
+        (void)snprintf(label, sizeof(model->actions[0].label), "%s",
+                       window->back ? "Discard & go back" : "Discard & close");
+    else if (editor->dirty)
+        (void)snprintf(label, sizeof(model->actions[0].label), "%s",
+                       window->back ? "Save & back to tasks" : "Save & close");
+    else if (window->back) (void)snprintf(label, sizeof(model->actions[0].label), "Back to tasks");
+}
+
 static struct zcl_result tw_paint(struct task_editor_window *window)
 {
     struct zcl_present_model_v1 model;
     ZCL_CHECK(task_editor_model(window->editor, &model));
-    if (window->editor->status == TASK_EDITOR_FAILED)
-        (void)snprintf(model.actions[0].label, sizeof(model.actions[0].label), "%s",
-                       window->back ? "Discard & go back" : "Discard & close");
-    else if (window->back) (void)snprintf(model.actions[0].label, sizeof(model.actions[0].label), "Back to tasks");
+    tw_labels(window, &model);
     struct zcl_present_model_bitmap_v1 next = {0};
     char error[256];
     if (!zcl_present_model_render_editor_v1(&model, &next, error, sizeof(error)))
@@ -153,6 +166,17 @@ bool zcl_test_task_editor_window_action(struct task_editor *editor,
     tw_update(&window, &event, close_requested, &redraw, &allow_close);
     zcl_present_model_bitmap_free_v1(&window.bitmap);
     return allow_close;
+}
+
+/* The action labels exactly as the window paints them for this editor. */
+struct zcl_result zcl_test_task_editor_window_model(struct task_editor *editor,
+    bool from_list, struct zcl_present_model_v1 *model)
+{
+    bool back = false;
+    const struct task_editor_window window = { .editor = editor, .back = from_list ? &back : NULL };
+    ZCL_CHECK(task_editor_model(editor, model));
+    tw_labels(&window, model);
+    return ZCL_OK;
 }
 #endif
 

@@ -13,6 +13,7 @@
 #include "services/task_list.h"
 #include "platform/time_compat.h"
 #include "platform/os_proc.h"
+#include "base/compiler.h"
 #include "util/thread_registry.h"
 #include "presentation/model_render.h"
 #include "../../../contexts/explorer/modules/presentation/src/presentation_form_internal.h"
@@ -827,6 +828,12 @@ static struct zcl_result te_wait(struct task_editor *editor)
 #if defined(ZCL_TESTING)
 bool zcl_test_task_editor_window_action(struct task_editor *editor,
     enum task_editor_status painted, bool display_ok, bool close_requested, bool *back);
+/* Weak so this file still links, and its label checks fail, where the window
+ * does not expose its labels (the optional-seam idiom of test_tor.c). */
+extern struct zcl_result zcl_test_task_editor_window_model(struct task_editor *editor,
+    bool from_list, struct zcl_present_model_v1 *model) ZCL_WEAK_IMPORT;
+extern void zcl_test_task_list_window_resumed(struct task_list *list,
+    struct task_editor *editor) ZCL_WEAK_IMPORT;
 
 struct te_conflict {
     struct package_resident_store store;
@@ -922,6 +929,238 @@ static int te_normal_back(const char *directory)
     TE_CHECK("ordinary Back completes durable save", te_wait(&editor).ok && editor.closing && !editor.dirty &&
         editor.saved.state.count == 1 && !strcmp(editor.saved.state.tasks[0].title, "N"));
     return failures;
+}
+
+/* The action labels exactly as the window paints them; false without the seam. */
+static bool te_labels(struct task_editor *editor, bool from_list, struct zcl_present_model_v1 *model)
+{
+    return zcl_test_task_editor_window_model &&
+        zcl_test_task_editor_window_model(editor, from_list, model).ok;
+}
+
+/* The list as its window resumes it after Back; false without the seam. */
+static bool tl_resumed(struct task_list *list, struct task_editor *editor)
+{
+    if (!zcl_test_task_list_window_resumed) return false;
+    zcl_test_task_list_window_resumed(list, editor);
+    return true;
+}
+
+/* A new task has nothing durable yet, and a draft is unsaved exactly while its
+ * title differs from the saved one. The status is read by its label so that
+ * this file also builds where the status does not exist. */
+static int te_new_task_test(const char *directory)
+{
+    int failures = 0;
+    struct task_editor editor = {0};
+    bool back = false;
+    TE_CHECK("open new-task truth fixture", task_editor_open(&editor, directory, "local/editor-new").ok);
+    TE_CHECK("new task is not saved yet", task_editor_select(&editor, 0).ok && !editor.dirty &&
+        te_summary(&editor, "Not saved yet"));
+    TE_CHECK("Back from an untouched new task returns without saving", zcl_test_task_editor_window_action(&editor,
+        editor.status, true, false, &back) && back && editor.closing && !editor.pending &&
+        editor.saved.state.count == 0);
+    return failures;
+}
+
+/* Typed and erased again, a new draft equals the saved title while nothing
+ * durable stands behind it: it is still new, and Back still only returns. */
+static int te_new_task_retyped_test(const char *directory)
+{
+    int failures = 0;
+    struct task_editor editor = {0};
+    bool back = false;
+    TE_CHECK("open retyped new-task fixture", task_editor_open(&editor, directory, "local/editor-new").ok);
+    TE_CHECK("draft retyped to the saved title is not unsaved", task_editor_select(&editor, 0).ok &&
+        task_editor_type(&editor, 'a', false).ok && task_editor_type(&editor, 0, true).ok &&
+        !editor.dirty && te_summary(&editor, "Not saved yet"));
+    TE_CHECK("Back from a retyped new draft returns without saving", zcl_test_task_editor_window_action(&editor,
+        editor.status, true, false, &back) && back && editor.closing && !editor.pending &&
+        editor.saved.state.count == 0);
+    return failures;
+}
+
+/* Back as the window paints it, from opening the editor to the list resuming.
+ * Each step is one function so that every one stays within the complexity
+ * cap, as te_conflict's steps do. */
+struct te_back {
+    struct task_editor editor;
+    struct task_list list;
+    struct zcl_present_model_v1 model;
+    bool back;
+};
+
+static int te_back_open(struct te_back *b, const char *directory)
+{
+    int failures = 0;
+    TE_CHECK("open Back label fixture", task_editor_open(&b->editor, directory, "local/editor-back").ok);
+    task_list_init(&b->list, &b->editor);
+    TE_CHECK("the empty list opens the editor on a new task", task_list_action(&b->list, 0).ok &&
+        b->list.open_editor && b->list.new_task);
+    return failures;
+}
+
+/* The first action names what it does from the state it leaves. */
+static int te_back_labels_plain(struct te_back *b)
+{
+    int failures = 0;
+    TE_CHECK("an untouched new task offers plain Back and Close",
+        task_editor_select(&b->editor, b->list.new_task ? 0 : b->list.selected_id).ok && !b->editor.dirty &&
+        te_labels(&b->editor, true, &b->model) && !strcmp(b->model.actions[0].label, "Back to tasks") &&
+        te_labels(&b->editor, false, &b->model) && !strcmp(b->model.actions[0].label, "Close"));
+    return failures;
+}
+
+static int te_back_labels_saving(struct te_back *b)
+{
+    int failures = 0;
+    TE_CHECK("an unsaved draft says that Back and Close save", task_editor_type(&b->editor, 'a', false).ok &&
+        b->editor.dirty && te_labels(&b->editor, true, &b->model) &&
+        !strcmp(b->model.actions[0].label, "Save & back to tasks") &&
+        te_labels(&b->editor, false, &b->model) && !strcmp(b->model.actions[0].label, "Save & close") &&
+        !strcmp(b->model.actions[1].label, "Save"));
+    return failures;
+}
+
+/* Back saves a valid draft and then returns to the list. */
+static int te_back_saves(struct te_back *b)
+{
+    int failures = 0;
+    TE_CHECK("Back starts the save instead of discarding", !zcl_test_task_editor_window_action(&b->editor,
+        TASK_EDITOR_UNSAVED, true, false, &b->back) && b->back && b->editor.pending && b->editor.dirty);
+    TE_CHECK("the landed save lets the window return to the list", te_wait(&b->editor).ok &&
+        zcl_test_task_editor_window_action(&b->editor, TASK_EDITOR_SAVING, true, false, &b->back) && b->back &&
+        b->editor.closing && !b->editor.pending && !b->editor.dirty && b->editor.status == TASK_EDITOR_SAVED);
+    return failures;
+}
+
+static int te_back_resumes(struct te_back *b)
+{
+    int failures = 0;
+    TE_CHECK("the list resumes over the saved task", tl_resumed(&b->list, &b->editor) && !b->list.open_editor &&
+        b->list.selected_id == b->editor.selected_id && task_list_model(&b->list, &b->model).ok &&
+        !strcmp(b->model.title, "Tasks (1)") && !strcmp(b->model.summary, "Saved") &&
+        b->model.item_count == 1 && !strcmp(b->model.items[0].value, "a"));
+    TE_CHECK("Back to tasks ends its close request", !b->editor.closing);
+    return failures;
+}
+
+static int te_back_label_test(const char *directory)
+{
+    struct te_back b = {0};
+    int failures = te_back_open(&b, directory);
+    failures += te_back_labels_plain(&b);
+    failures += te_back_labels_saving(&b);
+    failures += te_back_saves(&b);
+    failures += te_back_resumes(&b);
+    return failures;
+}
+
+/* For a saved task the draft is unsaved exactly while its title differs,
+ * also when it is retyped while its own save is in flight. */
+static int te_saved_again_saves(struct task_editor *editor, const char *directory)
+{
+    int failures = 0;
+    TE_CHECK("open saved-again fixture", task_editor_open(editor, directory, "local/editor-again").ok);
+    TE_CHECK("save a title to edit again", task_editor_select(editor, 0).ok &&
+        task_editor_type(editor, 'a', false).ok && task_editor_submit(editor, TASK_DOCUMENT_ADD).ok &&
+        te_wait(editor).ok && !editor->dirty && editor->saved.state.count == 1);
+    return failures;
+}
+
+static int te_saved_again_reads(struct task_editor *editor)
+{
+    int failures = 0;
+    TE_CHECK("saved task reads Saved until its title differs",
+        task_editor_select(editor, editor->saved.state.tasks[0].id).ok &&
+        editor->status == TASK_EDITOR_SAVED && !editor->dirty && te_summary(editor, "Saved") &&
+        task_editor_type(editor, 'x', false).ok && editor->dirty && editor->status == TASK_EDITOR_UNSAVED &&
+        task_editor_type(editor, 0, true).ok && !editor->dirty && editor->status == TASK_EDITOR_SAVED &&
+        te_summary(editor, "Saved"));
+    return failures;
+}
+
+static int te_saved_again_in_flight(struct task_editor *editor)
+{
+    int failures = 0;
+    TE_CHECK("draft retyped to the saved title during its save is Saved when it lands",
+        task_editor_type(editor, 'x', false).ok && task_editor_submit(editor, TASK_DOCUMENT_EDIT).ok &&
+        task_editor_type(editor, 'y', false).ok && task_editor_type(editor, 0, true).ok &&
+        te_wait(editor).ok && !editor->dirty && editor->status == TASK_EDITOR_SAVED &&
+        te_summary(editor, "Saved") && !strcmp(editor->form.fields[0].value, "ax") &&
+        !strcmp(editor->saved.state.tasks[0].title, "ax"));
+    return failures;
+}
+
+static int te_saved_again_test(const char *directory)
+{
+    struct task_editor editor = {0};
+    int failures = te_saved_again_saves(&editor, directory);
+    failures += te_saved_again_reads(&editor);
+    failures += te_saved_again_in_flight(&editor);
+    return failures;
+}
+
+/* A title of TA_TITLE characters can never be saved: both leaving paths stay
+ * open with the reason, and their labels then say Discard. */
+static int te_unsaveable_types(struct task_editor *editor, const char *directory)
+{
+    int failures = 0;
+    char wide[TA_TITLE + 1u];
+    TE_CHECK("open unsaveable-draft fixture", task_editor_open(editor, directory, "local/editor-wide").ok);
+    memset(wide, 'w', TA_TITLE);
+    wide[TA_TITLE] = '\0';
+    bool typed = task_editor_select(editor, 0).ok;
+    for (size_t i = 0; wide[i]; ++i) typed &= task_editor_type(editor, (uint8_t)wide[i], false).ok;
+    TE_CHECK("a title of 96 characters is typed as an unsaved draft", typed && editor->dirty);
+    return failures;
+}
+
+static int te_unsaveable_back(struct task_editor *editor, bool *back)
+{
+    int failures = 0;
+    TE_CHECK("Back from an unsaveable draft stays open with the reason",
+        !zcl_test_task_editor_window_action(editor, TASK_EDITOR_UNSAVED, true, false, back) && *back &&
+        !editor->pending && !editor->closing && editor->status == TASK_EDITOR_FAILED &&
+        te_summary(editor, "Save failed: Enter visible task text"));
+    return failures;
+}
+
+static int te_unsaveable_close(struct task_editor *editor, bool *back)
+{
+    int failures = 0;
+    TE_CHECK("window close from an unsaveable draft stays open with the reason",
+        !zcl_test_task_editor_window_action(editor, TASK_EDITOR_FAILED, true, true, back) && !*back &&
+        !editor->pending && !editor->closing && editor->status == TASK_EDITOR_FAILED && editor->dirty &&
+        te_summary(editor, "Save failed: Enter visible task text"));
+    return failures;
+}
+
+static int te_unsaveable_labels(struct task_editor *editor)
+{
+    int failures = 0;
+    struct zcl_present_model_v1 model;
+    TE_CHECK("a failed save names its leaving actions Discard", te_labels(editor, true, &model) &&
+        !strcmp(model.actions[0].label, "Discard & go back") &&
+        te_labels(editor, false, &model) && !strcmp(model.actions[0].label, "Discard & close"));
+    return failures;
+}
+
+static int te_unsaveable_test(const char *directory)
+{
+    struct task_editor editor = {0};
+    bool back = false;
+    int failures = te_unsaveable_types(&editor, directory);
+    failures += te_unsaveable_back(&editor, &back);
+    failures += te_unsaveable_close(&editor, &back);
+    failures += te_unsaveable_labels(&editor);
+    return failures;
+}
+
+static int te_truth_test(const char *directory)
+{
+    return te_new_task_test(directory) + te_new_task_retyped_test(directory) +
+        te_back_label_test(directory) + te_saved_again_test(directory) + te_unsaveable_test(directory);
 }
 
 static int te_conflict_recovery(const char *directory)
@@ -1543,6 +1782,7 @@ static int td_editor_acceptance(const char *directory)
     failures += te_busy(&editor, directory);
 #if defined(ZCL_TESTING)
     failures += te_conflict_recovery(directory);
+    failures += te_truth_test(directory);
 #endif
     struct task_editor reopened = {0};
     TE_CHECK("restart keeps exact latest editor contents", task_editor_open(&reopened,

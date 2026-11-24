@@ -7,8 +7,10 @@
 #include "presentation/model.h"
 
 struct task_editor_save;
+/* NEW is a new task with nothing durable yet; a draft is unsaved exactly while
+ * its title differs from the saved one. */
 enum task_editor_status { TASK_EDITOR_SAVED, TASK_EDITOR_UNSAVED,
-                          TASK_EDITOR_SAVING, TASK_EDITOR_FAILED };
+                          TASK_EDITOR_SAVING, TASK_EDITOR_FAILED, TASK_EDITOR_NEW };
 struct task_editor {
     struct task_document saved;
     struct zcl_present_window_form_v1 form;
