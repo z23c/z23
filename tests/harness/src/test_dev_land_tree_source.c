@@ -435,6 +435,10 @@ int test_dev_land_vendor_dependencies(void)
         FILE *file;
         dlx_isolate("depsok");
         ASSERT(dlx_rig_make(&rig, "depsok_rig"));
+        ASSERT(dlx_commit(rig.clone, "Makefile",
+            "build/hotswap/zcl_rollback_fixture_%.so:\n"
+            "\tmkdir -p build/hotswap\n"
+            "\techo fixture > $@\n", rig.tip));
         ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/.provenance", "stamp\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/Makefile", "CC=gcc\n"));
@@ -460,12 +464,6 @@ int test_dev_land_vendor_dependencies(void)
         ASSERT(dlx_write_dep(
             rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
             "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone,
-                             "build/hotswap/zcl_rollback_fixture_a.so",
-                             "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone,
-                             "build/hotswap/zcl_rollback_fixture_b.so",
-                             "fake\n"));
         /* Forces dl_wt_vendor_ensure()/dl_wt_hotswap_ensure() to run for
          * real even though ZCL_LAND_PROOF_STUB replaces the proof itself —
          * see dl_deps_test_force()'s comment in native_dev_land.c. The
@@ -490,10 +488,9 @@ int test_dev_land_vendor_dependencies(void)
         ASSERT(dlx_ok(&c));
         ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
         dlx_end(&c);
-        /* Every dependency the proof's own dependencies[] array names (the
-         * vendor group, plus the Linux hotswap fixtures) is now present in
-         * the landing worktree, materialized from the submitting checkout
-         * rather than left for the proof to discover missing. */
+        /* Vendor inputs are materialized from the submitting checkout;
+         * rollback fixtures are built from the candidate. Both groups
+         * must be present before requesting the proof. */
         dlx_landdir(wt, sizeof(wt));
         const char *const required_inputs[] = {
             "vendor/sqlite3.c", "vendor/tor/.provenance", "vendor/tor/Makefile",
@@ -675,10 +672,10 @@ int test_dev_land_vendor_dependencies(void)
             ASSERT(fclose(file) == 0);
             ASSERT(memcmp(bytes[i], "fake\n", 5) == 0);
         }
-        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
-        dlx_restore();
         PASS();
     } _test_next:;
+    unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+    dlx_restore();
 #if defined(__linux__)
     failures += dlx_cold_fixture_integration();
 #endif

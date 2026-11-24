@@ -3027,6 +3027,10 @@ int dlx_case_dependency_links(void)
         struct stat before_st, after_st, gen_st;
         dlx_isolate("gendeplink");
         ASSERT(dlx_rig_make(&rig, "gendeplink_rig"));
+        ASSERT(dlx_commit(rig.clone, "Makefile",
+            "build/hotswap/zcl_rollback_fixture_%.so:\n"
+            "\tmkdir -p build/hotswap\n"
+            "\techo fixture > $@\n", rig.tip));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/sqlite3.c", "sqlite\n"));
@@ -3043,12 +3047,6 @@ int dlx_case_dependency_links(void)
         ASSERT(dlx_write_dep(
             rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
             "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone,
-                             "build/hotswap/zcl_rollback_fixture_a.so",
-                             "fake\n"));
-        ASSERT(dlx_write_dep(rig.clone,
-                             "build/hotswap/zcl_rollback_fixture_b.so",
-                             "fake\n"));
         ASSERT(dlx_plant_hook_bin(rig.clone));
         setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
@@ -3117,11 +3115,10 @@ int dlx_case_dependency_links(void)
         ASSERT(gen_st.st_nlink == 1);
         ASSERT(gen_st.st_dev == before_st.st_dev &&
               gen_st.st_ino == before_st.st_ino);
-        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
-        dlx_restore();
         PASS();
     }
 _test_next:;
+    unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
     dlx_restore();
     return failures;
 }
