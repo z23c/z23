@@ -31,7 +31,14 @@ durable change. Cmd/Ctrl+N opens a new task. Selected rows have a visible focus
 border. The list displays eight rows at a time and retains selection while a
 save completes. Actions chosen during a save wait in order, up to eight, and
 apply to the saved result; a failed save drops the waiting actions and says so.
-A refused or failed action stays visible until the next key press or click.
+A refused action stays visible until the next key press or click; a failed one
+keeps its reason until the next save.
+
+Delete and Undo likewise report what they did. A failed action shows its reason,
+without a leading "task-" origin, as in "Nothing to undo"; a store failure
+keeps its own, as in "Resident-store: database open refused". With no
+tasks, Tab skips the empty rows. Once more tasks exist than the eight rows show,
+the title counts them and names the rows shown, as in "Tasks (12), showing 1-8".
 
 Save keeps the editor open; Back to tasks saves the latest valid draft before
 returning to the list, so its button reads Save & back to tasks while the title

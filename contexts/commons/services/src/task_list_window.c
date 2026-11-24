@@ -13,6 +13,10 @@ struct task_list_window {
     struct zcl_result display;
 };
 
+/* The keys the list answers to, as its window title names them. */
+static const char tlw_title[] =
+    "Tasks - Arrows select; Enter edit; Space complete; Cmd/Ctrl+N new; Delete removes; Cmd/Ctrl+Z undoes";
+
 static struct zcl_result tlw_paint(struct task_list_window *window)
 {
     struct zcl_present_model_v1 model;
@@ -24,7 +28,7 @@ static struct zcl_result tlw_paint(struct task_list_window *window)
     zcl_present_model_bitmap_free_v1(&window->bitmap);
     window->bitmap = next;
     window->page.pixels = next.pixels;
-    window->page.title = "Tasks - Arrows select; Delete removes; Cmd/Ctrl+Z undoes";
+    window->page.title = tlw_title;
     window->list.repaint = false;
     return ZCL_OK;
 }
@@ -103,6 +107,12 @@ void zcl_test_task_list_window_resumed(struct task_list *list, struct task_edito
     tlw_resumed(&window, editor);
     *list = window.list;
 }
+
+/* The title exactly as the window shows it. */
+const char *zcl_test_task_list_window_title(void)
+{
+    return tlw_title;
+}
 #endif
 
 static struct zcl_result tlw_run(struct task_list_window *window)
@@ -110,8 +120,7 @@ static struct zcl_result tlw_run(struct task_list_window *window)
     ZCL_CHECK(tlw_paint(window));
     window->page = (struct zcl_present_window_v1){
         .struct_size = sizeof(window->page), .abi_version = ZCL_PRESENT_ABI_V1,
-        .title = "Tasks - Arrows select; Delete removes; Cmd/Ctrl+Z undoes",
-        .pixels = window->bitmap.pixels, .width = window->bitmap.width,
+        .title = tlw_title, .pixels = window->bitmap.pixels, .width = window->bitmap.width,
         .height = window->bitmap.height, .pixel_format = ZCL_PRESENT_RGB8 };
     struct zcl_present_window_pages_v1 pages = {
         .struct_size = sizeof(pages), .abi_version = ZCL_PRESENT_ABI_V1,

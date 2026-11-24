@@ -32,11 +32,12 @@ void task_list_init(struct task_list *list, struct task_editor *editor)
     tl_select(list, 0);
 }
 
-/* A held notice has been read once the user acts again. */
+/* A held refusal or a report has been read once the user acts again. */
 static void tl_read_notice(struct task_list *list)
 {
-    if (!list->notice_held) return;
+    if (!list->notice_held && !list->notice_report) return;
     list->notice_held = false;
+    list->notice_report = false;
     list->notice[0] = '\0';
     list->repaint = true;
 }
@@ -46,24 +47,44 @@ static struct zcl_result tl_report(struct task_list *list, struct zcl_result res
 {
     list->repaint = true;
     list->notice_held = true;
+    list->notice_report = false;
     (void)snprintf(list->notice, sizeof(list->notice), "%.127s", text);
     LOG_ERROR("task-list", "%s", result.message);
     return result;
 }
 
+/* The save worker names its origin first; the user needs only the reason. */
+static const char *tl_reason(const char *text)
+{
+    if (strncmp(text, "task-", 5) != 0) return text;
+    size_t i = 5;
+    while ((text[i] >= 'a' && text[i] <= 'z') || text[i] == '-') ++i;
+    return text[i] == ':' && text[i + 1] == ' ' ? text + i + 2 : text;
+}
+
+/* Writes a reason into a 128-byte buffer, starting it with a capital. */
+static void tl_plain(char *out, const char *text)
+{
+    (void)snprintf(out, 128, "%.127s", text);
+    if (*out >= 'a' && *out <= 'z') *out = (char)(*out - 'a' + 'A');
+}
+
 /* A refused action stays visible until the next input. */
 static struct zcl_result tl_failure(struct task_list *list, struct zcl_result result)
 {
-    return tl_report(list, result, result.message);
+    char reason[128];
+    tl_plain(reason, tl_reason(result.message));
+    return tl_report(list, result, reason);
 }
 
 /* A failed save leaves later actions chosen against state that never landed. */
 static struct zcl_result tl_save_failed(struct task_list *list, struct zcl_result result)
 {
     if (!list->queued) return tl_failure(list, result);
-    char text[128];
+    char reason[128], text[128];
+    tl_plain(reason, tl_reason(result.message));
     (void)snprintf(text, sizeof(text), "%.89s; %u later action%s not applied",
-        result.message, list->queued, list->queued == 1u ? "" : "s");
+        reason, list->queued, list->queued == 1u ? "" : "s");
     list->queued = 0;
     return tl_report(list, result, text);
 }
@@ -79,6 +100,9 @@ static struct zcl_result tl_apply(struct task_list *list, uint64_t id,
     if (action != TASK_DOCUMENT_UNDO) result = task_editor_select(editor, id);
     if (result.ok) result = task_editor_submit(editor, action);
     if (!result.ok) return tl_save_failed(list, result);
+    /* Delete and Undo change what the user sees without a row saying so. */
+    list->announce = action == TASK_DOCUMENT_DELETE ? "Deleted. Cmd/Ctrl+Z undoes."
+        : action == TASK_DOCUMENT_UNDO ? "Undone." : NULL;
     list->repaint = true;
     return ZCL_OK;
 }
@@ -112,6 +136,7 @@ static struct zcl_result tl_write(struct task_list *list, enum task_document_act
     }
     list->notice[0] = '\0';
     list->notice_held = false;
+    list->notice_report = false;
     return tl_apply(list, list->selected_id, action);
 }
 
@@ -192,15 +217,25 @@ static void tl_update_result(struct task_list *list, struct zcl_result result, b
     if (previous != list->update_ack_error) list->repaint = true;
 }
 
+/* A landed save refreshes the rows and reports what it did until the next
+ * input. A refusal already shown is not displaced. */
+static void tl_landed(struct task_list *list, bool ok)
+{
+    task_list_refresh(list);
+    if (!ok || list->notice_held) { list->announce = NULL; return; }
+    list->notice[0] = '\0';
+    list->notice_report = list->announce != NULL;
+    if (list->announce)
+        (void)snprintf(list->notice, sizeof(list->notice), "%.127s", list->announce);
+    list->announce = NULL;
+}
+
 struct zcl_result task_list_poll(struct task_list *list)
 {
     if (!list || !list->editor) return ZCL_ERR(-1, "task-list: durable editor required");
     bool changed = false;
     struct zcl_result result = task_editor_poll(list->editor, &changed);
-    if (changed) {
-        task_list_refresh(list);
-        if (result.ok && !list->notice_held) list->notice[0] = '\0';
-    }
+    if (changed) tl_landed(list, result.ok);
     if (!result.ok) return tl_save_failed(list, result);
     result = tl_drain(list);
     if (!result.ok) return result;
@@ -283,6 +318,15 @@ static bool tl_input_valid(const struct task_list *list, const struct zcl_presen
     return list && list->editor && input && focus && action;
 }
 
+/* With no tasks there are no rows for Tab to stop on. */
+static void tl_tab(struct task_list *list, const struct zcl_present_input_v1 *input)
+{
+    uint32_t index = list->focus == UINT32_MAX ? 0 : list->focus + 1;
+    index = (index + (input->shift ? 4 : 1)) % 5;
+    if (!index && !list->editor->saved.state.count) index = input->shift ? 4 : 1;
+    list->focus = index ? index - 1 : UINT32_MAX;
+}
+
 bool task_list_input(void *context, const struct zcl_present_input_v1 *input,
                      uint32_t *focus, uint32_t *action)
 {
@@ -297,9 +341,7 @@ bool task_list_input(void *context, const struct zcl_present_input_v1 *input,
         return task_update_panel_input(list, input, focus, action);
     bool consumed = true;
     if (input->key == ZCL_PRESENT_INPUT_TAB) {
-        uint32_t index = list->focus == UINT32_MAX ? 0 : list->focus + 1;
-        index = (index + (input->shift ? 4 : 1)) % 5;
-        list->focus = index ? index - 1 : UINT32_MAX;
+        tl_tab(list, input);
     } else if (tl_click(list, input)) {
         /* Selection changed through the same source-space row geometry. */
     } else if (tl_activate_key(list, input, action)) {
@@ -379,6 +421,42 @@ static bool tl_empty_render(const struct task_list *list, struct zcl_present_mod
     return true;
 }
 
+/* Once the rows no longer all show, the title counts what it hides. */
+static void tl_title(const struct task_list *list, struct zcl_present_model_v1 *model)
+{
+    uint32_t count = list->editor->saved.state.count, first = list->first + 1u;
+    if (count <= TASK_LIST_ROWS) {
+        (void)snprintf(model->title, sizeof(model->title), "Tasks (%u)", count);
+        return;
+    }
+    (void)snprintf(model->title, sizeof(model->title), "Tasks (%u), showing %u-%u",
+        count, first, first + TASK_LIST_ROWS <= count ? first + TASK_LIST_ROWS - 1u : count);
+}
+
+/* A notice or a failure is shown beside the save state: a failure as its
+ * reason, a notice as the list wrote it. */
+static void tl_summary(const struct task_list *list, struct zcl_present_model_v1 *model)
+{
+    const struct task_editor *editor = list->editor;
+    uint32_t count = editor->saved.state.count;
+    if (!list->notice[0] && !editor->failure[0]) {
+        if (tl_update_ack_error_visible(list))
+            (void)snprintf(model->summary, sizeof(model->summary), "%.255s", list->update->message);
+        else if (!count && editor->status == TASK_EDITOR_SAVED && !tl_empty_render(list, model))
+            (void)snprintf(model->summary, sizeof(model->summary), "Saved. No tasks yet - choose New task.");
+        return;
+    }
+    /* The editor's summary opens with its save state, before the first colon. */
+    char status[64], reason[128];
+    (void)snprintf(status, sizeof(status), "%.63s", model->summary);
+    char *colon = strstr(status, ": ");
+    if (colon) *colon = '\0';
+    /* A notice is the list's own sentence; only a failure needs its reason made plain. */
+    if (list->notice[0]) (void)snprintf(reason, sizeof(reason), "%.127s", list->notice);
+    else tl_plain(reason, tl_reason(editor->failure));
+    (void)snprintf(model->summary, sizeof(model->summary), "%.63s: %.127s", status, reason);
+}
+
 struct zcl_result task_list_model(const struct task_list *list, struct zcl_present_model_v1 *model)
 {
     if (!list || !list->editor || !model) return ZCL_ERR(-1, "task-list: visual owner and output required");
@@ -386,16 +464,8 @@ struct zcl_result task_list_model(const struct task_list *list, struct zcl_prese
     model->kind = ZCL_PRESENT_MODEL_TABLE;
     model->item_count = 0;
     memset(model->items, 0, sizeof(model->items));
-    uint32_t count = list->editor->saved.state.count;
-    (void)snprintf(model->title, sizeof(model->title), "Tasks (%u)", count);
-    if (list->notice[0]) {
-        char status[sizeof(model->summary)];
-        (void)snprintf(status, sizeof(status), "%s", model->summary);
-        (void)snprintf(model->summary, sizeof(model->summary), "%.128s: %.127s", status, list->notice);
-    } else if (tl_update_ack_error_visible(list)) {
-        (void)snprintf(model->summary, sizeof(model->summary), "%.255s", list->update->message);
-    } else if (!count && list->editor->status == TASK_EDITOR_SAVED && !tl_empty_render(list, model))
-        (void)snprintf(model->summary, sizeof(model->summary), "Saved. No tasks yet - choose New task.");
+    tl_title(list, model);
+    tl_summary(list, model);
     tl_model_rows(list, model);
     tl_model_actions(list, model);
     if (list->updates && list->update) task_update_panel_model(list, model);

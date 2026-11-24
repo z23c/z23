@@ -834,6 +834,7 @@ extern struct zcl_result zcl_test_task_editor_window_model(struct task_editor *e
     bool from_list, struct zcl_present_model_v1 *model) ZCL_WEAK_IMPORT;
 extern void zcl_test_task_list_window_resumed(struct task_list *list,
     struct task_editor *editor) ZCL_WEAK_IMPORT;
+extern const char *zcl_test_task_list_window_title(void) ZCL_WEAK_IMPORT;
 
 struct te_conflict {
     struct package_resident_store store;
@@ -1631,6 +1632,16 @@ static int tl_update_notice_test(const char *directory)
     TE_CHECK("release update fixture", task_update_finish(&update).ok);
     return failures;
 }
+
+/* Weak so this file still links where the window does not expose its title. */
+static int tl_window_title_test(void)
+{
+    const char *title = zcl_test_task_list_window_title ? zcl_test_task_list_window_title() : NULL;
+    int failures = 0;
+    TE_CHECK("window title names the keys of the list", title && !strcmp(title,
+        "Tasks - Arrows select; Enter edit; Space complete; Cmd/Ctrl+N new; Delete removes; Cmd/Ctrl+Z undoes"));
+    return failures;
+}
 #endif
 
 static int tl_adopt_snapshot_test(struct task_list *list, const struct task_document *newer,
@@ -1735,6 +1746,182 @@ static int tl_empty_render_test(struct task_list *list)
     return failures;
 }
 
+/* With no tasks there are no rows to focus, so Tab never stops on them. */
+static int tl_tab_empty_test(struct task_editor *editor)
+{
+    const struct zcl_present_input_v1 tab = { .key = ZCL_PRESENT_INPUT_TAB };
+    const struct zcl_present_input_v1 back = { .key = ZCL_PRESENT_INPUT_TAB, .shift = true };
+    struct task_list empty;
+    uint32_t action = UINT32_MAX, focus = 3;
+    int failures = 0;
+    task_list_init(&empty, editor);
+    TE_CHECK("Tab from the last action skips the empty rows", task_list_input(&empty, &tab, &focus, &action) &&
+        focus == 0);
+    focus = 0;
+    TE_CHECK("Shift+Tab from the first action skips the empty rows", task_list_input(&empty, &back, &focus, &action) &&
+        focus == 3);
+    return failures;
+}
+
+/* Delete and Undo report their result until the next input, and the list shows
+ * a failure as its reason, once, without an internal origin. One step per
+ * function keeps each within the complexity cap. */
+struct tl_feedback {
+    struct task_editor editor;
+    struct task_list list;
+    struct zcl_present_model_v1 model;
+    uint32_t action;
+};
+
+static int tl_feedback_open(struct tl_feedback *f, const char *directory)
+{
+    int failures = 0;
+    TE_CHECK("open feedback fixture", task_editor_open(&f->editor, directory, "local/feedback").ok &&
+        task_editor_type(&f->editor, 'a', false).ok && task_editor_submit(&f->editor, TASK_DOCUMENT_ADD).ok &&
+        task_editor_finish(&f->editor).ok && f->editor.saved.state.count == 1);
+    task_list_init(&f->list, &f->editor);
+    f->action = UINT32_MAX;
+    return failures;
+}
+
+static int tl_report_delete(struct tl_feedback *f)
+{
+    int failures = 0;
+    TE_CHECK("Delete reports what can be undone", task_list_action(&f->list, 3).ok &&
+        task_list_action(&f->list, 1).ok && f->editor.pending && tl_wait_test(&f->list).ok &&
+        f->editor.saved.state.count == 0 && f->editor.saved.can_undo &&
+        !strcmp(f->list.notice, "Deleted. Cmd/Ctrl+Z undoes."));
+    TE_CHECK("the report reads beside Saved and outlasts polls", task_list_model(&f->list, &f->model).ok &&
+        !strcmp(f->model.summary, "Saved: Deleted. Cmd/Ctrl+Z undoes.") && task_list_poll(&f->list).ok &&
+        task_list_poll(&f->list).ok && !strcmp(f->list.notice, "Deleted. Cmd/Ctrl+Z undoes."));
+    return failures;
+}
+
+static int tl_report_release(struct tl_feedback *f)
+{
+    const struct zcl_present_input_v1 tab = { .key = ZCL_PRESENT_INPUT_TAB };
+    int failures = 0;
+    TE_CHECK("the next input releases the report", task_list_input(&f->list, &tab, &f->list.focus, &f->action) &&
+        !f->list.notice[0] && task_list_model(&f->list, &f->model).ok &&
+        !strcmp(f->model.summary, "Saved. No tasks yet - choose New task."));
+    return failures;
+}
+
+static int tl_report_undo(struct tl_feedback *f)
+{
+    int failures = 0;
+    TE_CHECK("Undo reports its result", task_list_action(&f->list, 2).ok && f->editor.pending &&
+        tl_wait_test(&f->list).ok && f->editor.saved.state.count == 1 &&
+        !strcmp(f->editor.saved.state.tasks[0].title, "a") && !strcmp(f->list.notice, "Undone.") &&
+        task_list_model(&f->list, &f->model).ok && !strcmp(f->model.summary, "Saved: Undone."));
+    return failures;
+}
+
+/* An Undo chosen while its own Delete still saves lands right after it. The
+ * list then reports the Undo, and the next input releases that report. No
+ * poll runs between the two keys, so the Undo is queued by construction. */
+static int tl_report_undo_behind_delete(struct tl_feedback *f)
+{
+    const struct zcl_present_input_v1 undo = { .key = ZCL_PRESENT_INPUT_TEXT, .character = 'z', .command = true };
+    const struct zcl_present_input_v1 tab = { .key = ZCL_PRESENT_INPUT_TAB };
+    int failures = 0;
+    f->list.focus = UINT32_MAX;
+    TE_CHECK("Undo behind its own Delete waits in the queue and restores the task",
+        tl_key_test(&f->list, ZCL_PRESENT_INPUT_DELETE, false) && f->editor.pending &&
+        task_list_input(&f->list, &undo, &f->list.focus, &f->action) && f->action == UINT32_MAX &&
+        f->list.queued == 1 && tl_wait_test(&f->list).ok && f->editor.saved.state.count == 1);
+    TE_CHECK("the list then reports the Undo, not the Delete", !strcmp(f->list.notice, "Undone.") &&
+        task_list_model(&f->list, &f->model).ok && !strcmp(f->model.summary, "Saved: Undone."));
+    TE_CHECK("the next input releases that report", task_list_input(&f->list, &tab, &f->list.focus, &f->action) &&
+        !f->list.notice[0]);
+    return failures;
+}
+
+/* An Undo with nothing left to undo fails in the save worker: the list names
+ * the reason once, and keeps naming it plainly after the notice is read. */
+static int tl_report_reason(struct tl_feedback *f)
+{
+    const struct zcl_present_input_v1 tab = { .key = ZCL_PRESENT_INPUT_TAB };
+    int failures = 0;
+    TE_CHECK("a failed action shows its reason once", task_list_action(&f->list, 2).ok && f->editor.pending &&
+        !tl_wait_test(&f->list).ok && f->editor.status == TASK_EDITOR_FAILED &&
+        !strcmp(f->list.notice, "Nothing to undo") && task_list_model(&f->list, &f->model).ok &&
+        !strcmp(f->model.summary, "Save failed: Nothing to undo"));
+    TE_CHECK("the reason stays plain once the notice is read",
+        task_list_input(&f->list, &tab, &f->list.focus, &f->action) && !f->list.notice[0] &&
+        task_list_model(&f->list, &f->model).ok && !strcmp(f->model.summary, "Save failed: Nothing to undo"));
+    return failures;
+}
+
+/* "Task limit reached" cannot come from a list action, which never adds or
+ * edits: the editor reaches it, and the list then shows the reason alone. */
+static bool tl_limit_fill(const char *directory)
+{
+    struct package_resident_store store = {0};
+    struct task_document row = {0};
+    bool filled = package_resident_store_open_app(&store, directory, "local/limit").ok;
+    for (unsigned i = 0; filled && i < TA_MAX_TASKS; ++i)
+        filled = task_document_apply(&store, row.state.revision, TASK_DOCUMENT_ADD, 0, "Full", &row).ok;
+    if (filled) filled = row.state.count == TA_MAX_TASKS;
+    return (store.db ? package_resident_store_close(&store).ok : false) && filled;
+}
+
+static int tl_limit_reason(const char *directory)
+{
+    int failures = 0;
+    struct task_editor full = {0};
+    struct task_list at_limit;
+    struct zcl_present_model_v1 model;
+    TE_CHECK("fill a document to its task limit", tl_limit_fill(directory));
+    TE_CHECK("a save past the task limit fails with its origin in the editor", task_editor_open(&full,
+        directory, "local/limit").ok && task_editor_type(&full, 'b', false).ok &&
+        task_editor_submit(&full, TASK_DOCUMENT_ADD).ok && !te_wait(&full).ok &&
+        full.status == TASK_EDITOR_FAILED && !strcmp(full.failure, "task-add: task limit reached"));
+    task_list_init(&at_limit, &full);
+    TE_CHECK("the list names that failure by its reason only", task_list_model(&at_limit, &model).ok &&
+        !strcmp(model.title, "Tasks (32), showing 1-8") &&
+        !strcmp(model.summary, "Save failed: Task limit reached"));
+    return failures;
+}
+
+static int tl_feedback_test(const char *directory)
+{
+    struct tl_feedback f = {0};
+    int failures = tl_feedback_open(&f, directory);
+    failures += tl_report_undo_behind_delete(&f);
+    failures += tl_report_delete(&f);
+    failures += tl_report_release(&f);
+    failures += tl_report_undo(&f);
+    failures += tl_report_reason(&f);
+    failures += tl_limit_reason(directory);
+    return failures;
+}
+
+/* Once the tasks no longer all fit, the title counts them and names the rows
+ * shown. Tab from the last action still returns to those rows. */
+static int tl_title_test(struct task_list *list)
+{
+    const struct zcl_present_input_v1 tab = { .key = ZCL_PRESENT_INPUT_TAB };
+    struct zcl_present_model_v1 model;
+    uint32_t action = UINT32_MAX, focus = 3;
+    int failures = 0;
+    TE_CHECK("Tab from the last action still returns to the rows", task_list_input(list, &tab, &focus, &action) &&
+        focus == UINT32_MAX);
+    TE_CHECK("title counts tasks that no longer all fit", task_list_model(list, &model).ok &&
+        !strcmp(model.title, "Tasks (12), showing 1-8"));
+    TE_CHECK("End scrolls selected row into viewport", tl_key_test(list, ZCL_PRESENT_INPUT_END, false) && list->selected == 11 && list->first == 4);
+    TE_CHECK("title names the rows shown at the end", task_list_model(list, &model).ok &&
+        !strcmp(model.title, "Tasks (12), showing 5-12"));
+    TE_CHECK("Home restores first row and viewport", tl_key_test(list, ZCL_PRESENT_INPUT_HOME, false) && list->selected == 0 && list->first == 0);
+    TE_CHECK("title names the first rows again", task_list_model(list, &model).ok &&
+        !strcmp(model.title, "Tasks (12), showing 1-8"));
+    bool down = true;
+    for (int i = 0; i < 10 && down; ++i) down = tl_key_test(list, ZCL_PRESENT_INPUT_DOWN, false);
+    TE_CHECK("title stops at the last row on screen", down && list->first == 3 &&
+        task_list_model(list, &model).ok && !strcmp(model.title, "Tasks (12), showing 4-11"));
+    return failures;
+}
+
 static int tl_acceptance(const char *directory)
 {
     int failures = 0;
@@ -1742,6 +1929,7 @@ static int tl_acceptance(const char *directory)
     TE_CHECK("open empty task-list store", task_editor_open(&editor, directory, "local/list").ok);
     struct task_list list;
     task_list_init(&list, &editor);
+    failures += tl_tab_empty_test(&editor);
     struct zcl_present_model_v1 model;
     char error[256];
     TE_CHECK("empty list validates with obvious New action", task_list_model(&list, &model).ok &&
@@ -1749,8 +1937,7 @@ static int tl_acceptance(const char *directory)
     failures += tl_empty_render_test(&list);
     TE_CHECK("create twelve durable tasks", tl_populate(&editor) && editor.saved.state.count == 12);
     task_list_refresh(&list);
-    TE_CHECK("End scrolls selected row into viewport", tl_key_test(&list, ZCL_PRESENT_INPUT_END, false) && list.selected == 11 && list.first == 4);
-    TE_CHECK("Home restores first row and viewport", tl_key_test(&list, ZCL_PRESENT_INPUT_HOME, false) && list.selected == 0 && list.first == 0);
+    failures += tl_title_test(&list);
     failures += tl_visual_test(&list);
     failures += tl_actions_test(&list);
     failures += tl_queue_test(&list, directory);
@@ -1761,8 +1948,10 @@ static int tl_acceptance(const char *directory)
     failures += tl_failure_test(&list, directory);
 #if defined(ZCL_TESTING)
     failures += tl_update_notice_test(directory);
+    failures += tl_window_title_test();
 #endif
     failures += tl_newer_snapshot_test(directory);
+    failures += tl_feedback_test(directory);
     TE_CHECK("list releases its save worker", task_editor_finish(&editor).ok && !editor.pending);
     return failures;
 }

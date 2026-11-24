@@ -20,6 +20,11 @@ struct task_list {
     struct task_list_queued queue[TASK_LIST_QUEUED_MAX];
     uint32_t queued;
     bool notice_held;
+    /* What a submitted Delete or Undo will report once its save lands. */
+    const char *announce;
+    /* The notice is such a report: the next input releases it and a later
+     * report replaces it, where a refusal is not replaced. */
+    bool notice_report;
 };
 void task_list_init(struct task_list *list, struct task_editor *editor);
 void task_list_refresh(struct task_list *list);
