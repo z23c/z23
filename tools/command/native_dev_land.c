@@ -6658,7 +6658,8 @@ static bool dl_lint_attributed_fail(const char *line, const char *gate)
 static bool dl_lint_selftest_done(const char *line)
 {
     return strstr(line, "selftest ok") ||
-        (strstr(line, "selftest") && (strstr(line, ": PASS") || strstr(line, ": OK")));
+        ((strstr(line, "selftest") || strstr(line, "self-test")) &&
+         (strstr(line, ": PASS") || strstr(line, ": OK")));
 }
 static bool dl_lint_verdict_line(const char *line)
 {

@@ -588,12 +588,33 @@ static bool dlx_lint_selftest_verdict(void)
         "check-outparam-init-before-return: 2 NEW out-parameter(s) whose\n"
         "  initialization sits BELOW a failure return:\n"
         "    ls_invoke(): struct zcl_command_reply *reply\n";
+    static const char input_keys[] =
+        "z23-lint: cannot open /h/cik-selftest/baseline.txt: Permission denied\n"
+        "z23-lint: read failed: /h/cik-selftest/baseline.txt: Is a directory\n"
+        "check-command-input-keys self-test: PASS (14 cases)\n\n"
+        "check_command_input_keys: 2 input key(s) READ by a handler but NOT declared in the leaf's input_keys:\n"
+        "  engine/composition/commands/fleet_board.def:176: fleet.wiki.list reads after\n";
     return dlx_lint_selftest_verdict_of("check-capability-closure", capclosure,
                "VIOLATION", "land_preflight.c") &&
         dlx_lint_selftest_verdict_of("check-no-bare-tmp-fixture", baretmp,
                "NEW/GROWN", "test_app_launch.c") &&
         dlx_lint_selftest_verdict_of("check-outparam-init-before-return", outparam,
-               "NEW out-parameter", "initialization sits BELOW");
+               "NEW out-parameter", "initialization sits BELOW") &&
+        dlx_lint_selftest_verdict_of("check-command-input-keys", input_keys,
+               "NOT declared", "fleet_board.def:176");
+}
+
+static bool dlx_lint_selftest_guards(const char *marker)
+{
+    FILE *f = tmpfile();
+    if (!f) return false;
+    dlx_put_frame(f, "check-command-input-keys");
+    (void)fputs("useful prefix\n", f);
+    (void)fputs(marker, f);
+    char detail[250] = {0};
+    bool ok = dlx_lint_snapshot_of(f, detail, sizeof(detail)) &&
+              strstr(detail, "useful prefix") != NULL;
+    return fclose(f) == 0 && ok;
 }
 
 static bool dlx_lint_late_failure(const char *log)
@@ -619,6 +640,8 @@ static int dlx_lint_failure_detail(void)
         ASSERT(dlx_lint_cause_survives());
         ASSERT(dlx_lint_cause_stays_in_frame());
         ASSERT(dlx_lint_selftest_verdict());
+        ASSERT(dlx_lint_selftest_guards("check-command-input-keys self-test: FAIL\nordinary later text\n"));
+        ASSERT(dlx_lint_selftest_guards("check-command-input-keys self-test: PASS\n"));
         PASS();
     }
     TEST("land: lint failure detail retains the failed gate stderr body") {
