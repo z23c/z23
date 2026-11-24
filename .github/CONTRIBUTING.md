@@ -55,7 +55,7 @@ After the first build, builds are offline. Common targets:
 make vendor                  # rebuild missing vendor/lib archives from pinned sources
 make build-only              # compile check, no final link
 make dev-bin                 # faster non-LTO build/bin/z23-dev
-make t-fast ONLY=<group>     # one registered test group; make t-list names them
+make t-fast ONLY=<group>     # one registered test group; make t-list ONLY=<substring> finds the name
 make fast-ci                 # cache-aware lint, build and focused tests
 make lint                    # defensive-coding gates; must be clean
 ```

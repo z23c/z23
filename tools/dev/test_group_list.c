@@ -12,6 +12,8 @@
  * Modes (all read-only, no network):
  *   (none) | list      every registered group name, one per line
  *   --count            the number of registered groups
+ *   --summary          one line: the count and how to filter
+ *   --find S           --match, with a stderr hint on a miss
  *   --match S          groups a `--only=S` run selects (substring of the FULL
  *                      name); exit 1, no output, when nothing matches
  *   --resolve-exact ID...   proof-plan IDs to canonical full names; the full
@@ -473,6 +475,15 @@ static int mode_count(struct tgl_ctx *c)
     return 0;
 }
 
+/* One line an agent can act on: the count and how to narrow it. */
+static int mode_summary(struct tgl_ctx *c)
+{
+    fprintf(c->out, "%zu registered test groups; filter: make t-list "
+            "ONLY=<substring>; full list: make t-list; run: make t-fast "
+            "ONLY=<group>\n", c->reg.n);
+    return 0;
+}
+
 static int mode_match(struct tgl_ctx *c, int argc, const char *const *argv)
 {
     const char *needle = argc > 1 ? argv[1] : "";
@@ -488,6 +499,17 @@ static int mode_match(struct tgl_ctx *c, int argc, const char *const *argv)
         }
     }
     return found ? 0 : 1;
+}
+
+/* --match for a human or agent: a miss explains itself on stderr. */
+static int mode_find(struct tgl_ctx *c, int argc, const char *const *argv)
+{
+    int rc = mode_match(c, argc, argv);
+    if (rc == 1)
+        fprintf(tgl_errf(c), "test-group-list: no registered group contains "
+                "%s; try a shorter substring or: make t-list T_LIST=count\n",
+                argv[1]);
+    return rc;
 }
 
 static int mode_resolve_exact(struct tgl_ctx *c, int argc,
@@ -791,7 +813,7 @@ static int mode_impact_rules(struct tgl_ctx *c, int argc,
 
 static int usage(struct tgl_ctx *c)
 {
-    fprintf(tgl_errf(c), "usage: test-group-list [--count | --match SUBSTR | "
+    fprintf(tgl_errf(c), "usage: test-group-list [--count | --summary | --find SUBSTR | --match SUBSTR | "
             "--resolve-exact ID... | --resolve-proof ID... | "
             "--resolve-exact-set CSV | --check-impact-rules [FILE] | "
             "--suggest SUBSTR | --params-gated | --report]\n");
@@ -805,6 +827,10 @@ static int dispatch(struct tgl_ctx *c, int argc, const char *const *argv)
         return mode_list(c);
     if (strcmp(m, "--count") == 0)
         return mode_count(c);
+    if (strcmp(m, "--summary") == 0)
+        return mode_summary(c);
+    if (strcmp(m, "--find") == 0)
+        return mode_find(c, argc, argv);
     if (strcmp(m, "--match") == 0)
         return mode_match(c, argc, argv);
     if (strcmp(m, "--resolve-exact") == 0)

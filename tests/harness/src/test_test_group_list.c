@@ -158,6 +158,35 @@ static int test_exact_set_and_suggest(void)
     return failures;
 }
 
+/* The cheap agent forms: `make t-list T_LIST=count` is one short line and
+ * `make t-list ONLY=<substr>` prints only the matches. The plain list keeps
+ * returning every group, byte for byte. */
+static int test_summary_and_find(void)
+{
+    int failures = 0;
+    TEST("summary is one bounded line; find filters; list stays complete") {
+        struct tglt t;
+        const char *sum[] = {"--summary"}, *find[] = {"--find", "a"};
+        const char *miss[] = {"--find", "zzz"}, *list[] = {"list"};
+        char out[TGL_T_OUT], err[TGL_T_OUT];
+        ASSERT(tglt_setup(&t, "summary", TGLT_RUNNER));
+        ASSERT_EQ(tglt_run(&t, sum, 1, out, err), 0);
+        ASSERT(strncmp(out, "3 registered test groups; ", 26) == 0);
+        ASSERT(strstr(out, "make t-list ONLY=<substring>") != NULL);
+        ASSERT(strlen(out) < 160);
+        ASSERT_EQ(tglt_run(&t, find, 2, out, err), 0);
+        ASSERT_STR_EQ(out, "test_alpha\ntest_beta\nspec_gamma\n");
+        ASSERT_EQ(tglt_run(&t, miss, 2, out, err), 1);
+        ASSERT(out[0] == '\0');
+        ASSERT(strstr(err, "no registered group contains zzz") != NULL);
+        ASSERT_EQ(tglt_run(&t, list, 1, out, err), 0);
+        ASSERT_STR_EQ(out, "test_alpha\ntest_beta\nspec_gamma\n");
+        test_rm_rf_recursive(t.root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* The leaf writes to the process stdout and stderr, so each call is captured
  * by pointing fds 1 and 2 at temp files for its duration. */
 static bool tglt_slurp(FILE *f, char *buf)
@@ -384,6 +413,7 @@ int test_test_group_list(void)
     failures += test_report_verdicts();
     failures += test_params_gated_refusal();
     failures += test_exact_set_and_suggest();
+    failures += test_summary_and_find();
     failures += test_leaf_end_to_end();
     failures += test_registry_read_error();
     failures += test_leaf_registry_read_error();

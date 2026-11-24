@@ -28,7 +28,7 @@ Volunteers and the agents they drive: start at [`.github/CONTRIBUTING.md`](.gith
 make doctor                                   # toolchain check
 make -j"$(getconf _NPROCESSORS_ONLN)" z23     # build/bin/z23
 make dev-bin                                  # fast development binaries
-make t-list                                   # registered test groups
+make t-list ONLY=<substring>                  # matching test groups only (bare `make t-list` prints all ~1,600 names; T_LIST=count prints one line)
 make t-fast ONLY=<group>                      # focused tests; ONLY is mandatory
 make -j8 agent-verify ONLY=block_index_node_db_topup  # one-trip verify for a named group
 make lint-fast                                # fast lint subset

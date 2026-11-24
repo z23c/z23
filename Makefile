@@ -5313,9 +5313,17 @@ endif
 # it parses the X-macro registry in tests/harness/src/test_parallel.c. This is THE
 # documented way to enumerate groups; the old `git grep -hoE 'X\(...\)'`
 # incantation drops the test_/spec_ prefixes and mislabels 28 spec groups.
+# Cheap forms for an agent that wants one name or a yes/no, not 1,600 lines:
+#   make t-list ONLY=<substring>   only the groups t-fast ONLY= would select
+#                                  (the same --match substring rule)
+#   make t-list T_LIST=count       one line: the count and how to filter
+# The plain `make t-list` stays the full listing; scripts and habits pipe it.
 .PHONY: t-list
+ifneq ($(and $(filter t-list,$(MAKECMDGOALS)),$(findstring ',$(ONLY))),)
+  $(error make t-list: ONLY= must not contain a single quote)
+endif
 t-list: $(TEST_GROUP_LIST_BIN)
-	@$(T_LIST_TOOL)
+	@$(T_LIST_TOOL) $(if $(strip $(ONLY)),--find '$(ONLY)',$(if $(filter count,$(T_LIST)),--summary))
 
 # One memorable custody regression command for contributors. Keep the list
 # exact: a substring silently selecting a sibling group is not rollout proof.
