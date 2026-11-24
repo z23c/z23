@@ -1041,7 +1041,7 @@ static int skycombat_viewport_output(void)
         memset(output, 0, sizeof(output));
         const char *interactive[] = {QA_ENTRY, "--fixture-close=2", NULL};
         ASSERT_EQ(test_host_tool_capture(interactive, output, sizeof(output), 10000), 0);
-        ASSERT(strstr(output, "QA_VIEWPORT width=1920 height=1080") != NULL);
+        ASSERT(strstr(output, "QA_VIEWPORT width=1280 height=720") != NULL);
         PASS();
     }
 _test_next:;

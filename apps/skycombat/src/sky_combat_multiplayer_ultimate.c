@@ -46,8 +46,8 @@
 
 #include "../part/expr_use.h"
 
-#define SCREEN_WIDTH 1920
-#define SCREEN_HEIGHT 1080
+#define SCREEN_WIDTH 1280
+#define SCREEN_HEIGHT 720
 #define TARGET_FPS 60
 
 /* Forward declarations */

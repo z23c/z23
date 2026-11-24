@@ -18,8 +18,8 @@
 #include "sky_combat/views/camera_controller.h"
 #include "sky_combat/controllers/input_mvc_fast.h"
 
-#define SCREEN_WIDTH 1920
-#define SCREEN_HEIGHT 1080
+#define SCREEN_WIDTH 1280
+#define SCREEN_HEIGHT 720
 #define TARGET_FPS 60
 
 /* Render aircraft using basic shapes */
