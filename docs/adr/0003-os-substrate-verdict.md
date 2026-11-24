@@ -42,7 +42,7 @@ already uses for ported concepts, e.g. `core/modules/net/src/tor_integration.c`'
 
 ### Evidence (a): no measured bottleneck is scheduler-shaped
 
-[`docs/work/refold-fold-rate-bottlenecks.md`](../work/refold-fold-rate-bottlenecks.md)
+[`docs/archive/work/refold-fold-rate-bottlenecks.md`](../archive/work/refold-fold-rate-bottlenecks.md)
 is a source-grounded bottleneck pass against a live `-refold-staged` run.
 Its ranked list:
 

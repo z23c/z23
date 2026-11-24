@@ -958,7 +958,7 @@ static bool mirror_sync_pass_suspended(
      * mirror (O(total_coins)) every 5s — quadratic against fold progress. The
      * mirror is a node.db read model (explorer/wallet), not consensus; skip it
      * while refolding and let the first post-refold pass rebuild it once.
-     * See docs/work/refold-fold-rate-bottlenecks.md (#3). */
+     * See docs/archive/work/refold-fold-rate-bottlenecks.md (#3). */
     return refold_in_progress();
 }
 
@@ -971,7 +971,7 @@ static bool mirror_sync_pass_suspended(
  * the first within-N-of-tip pass rebuilds it once, and the count-mismatch
  * self-heal below still runs near tip. Fail-open: header tip unknown (-1)
  * leaves the original every-tick behavior. See
- * docs/work/refold-fold-rate-bottlenecks.md (#3).
+ * docs/archive/work/refold-fold-rate-bottlenecks.md (#3).
  *
  * header_tip MUST come from the in-process chain_state_repository
  * (csr_header_height), not chain_projection_best_header_height(): that

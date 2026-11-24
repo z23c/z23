@@ -751,7 +751,7 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
      * is safe during a refold — the stages read at/below the fold frontier and
      * the watchdog/reconcile are suspended (refold_in_progress()). Normal sync
      * keeps the retraction (the window must track the finalized frontier). See
-     * docs/work/refold-fold-rate-bottlenecks.md (#1). */
+     * docs/archive/work/refold-fold-rate-bottlenecks.md (#1). */
     bool tf_do_window = step_fin_window_wanted(new_tip);
     int64_t tf_win_t0 = platform_time_monotonic_us();
     if (tf_do_window &&

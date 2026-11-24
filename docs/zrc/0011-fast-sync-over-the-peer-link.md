@@ -84,7 +84,7 @@ already named in the tree:
   knobs above — is not asserted here; it is being measured directly (a
   pinned 2-CPU cold-start run on the Linux side) and will be recorded as
   z23 fact rows per section 4, not projected from code comments.
-  `docs/work/refold-fold-rate-bottlenecks.md` describes an older scheduler
+  `docs/archive/work/refold-fold-rate-bottlenecks.md` describes an older scheduler
   shape (a flat 2s/100-batch ceiling with no catchup-cadence override) and
   is cited in this ZRC only as history of the problem, not as the current
   bottleneck — see the superseded note at the top of that document.
@@ -470,7 +470,7 @@ to "any-height header commitment."
   (`catchup_cadence.c`/`catchup_cadence.h`) or to whatever foreground
   ceiling the pinned 2-CPU measurement (Problem section) finds — that
   applies after a bundle installs, to blocks minted since, and is a
-  separate performance lane. `docs/work/refold-fold-rate-bottlenecks.md`
+  separate performance lane. `docs/archive/work/refold-fold-rate-bottlenecks.md`
   is superseded as a description of the current scheduler and is cited in
   this ZRC only as history.
 - Any change to the default background body-history backfill throttle

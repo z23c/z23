@@ -7,3 +7,9 @@ evidence of what was considered. They are not current procedure and grant no
 authority. Current procedure starts at [THE_Z23_WAY.md](../THE_Z23_WAY.md) and
 [AGENTS.md](../../AGENTS.md). Search skips this directory by default; open
 files here by path.
+
+## Archived records
+
+| File | What it decided | Where the outcome lives |
+|---|---|---|
+| [`work/refold-fold-rate-bottlenecks.md`](./work/refold-fold-rate-bottlenecks.md) | From-genesis `-refold-staged` analysis: the split-brain root cause and ranked fold-rate bottlenecks. Its flat 2 s / 100-batch live-scheduler ceiling is superseded. | Live catch-up cadence in `engine/jobs/src/catchup_cadence.c`; scheduler and bundle decision in [`../../zrc/0011-fast-sync-over-the-peer-link.md`](../../zrc/0011-fast-sync-over-the-peer-link.md) |
