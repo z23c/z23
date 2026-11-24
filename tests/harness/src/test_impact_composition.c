@@ -10719,6 +10719,10 @@ static int ic_preflight_bad_capture(const char *root, const char *local,
         ASSERT(chmod(tool, 0700) == 0);
         ASSERT(!ic_preflight_timed(root, local, producer, log, why, sizeof(why)));
         ASSERT_STR_EQ(why, "malformed capture fixture\n");
+        ASSERT(!zcl_dev_proof_generation_source_qualified(root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            producer, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_original_source_recapture_unavailable");
         ASSERT(access(log, F_OK) != 0);
         ASSERT(unlink(tool) == 0);
         ASSERT(rename(saved, tool) == 0);
@@ -10734,10 +10738,29 @@ static int ic_preflight_cases(const char *root, char local[65], const char *log)
         char why[256] = {0};
         struct dev_source_record old = {0}, current = {0}, history = {0};
         ASSERT(zcl_dev_source_identity_capture(root, &old, why, sizeof(why)));
+        ASSERT(!zcl_dev_proof_generation_source_qualified(root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            old.source_id, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generation_source_mismatch");
+        char absent[4096];
+        ASSERT(snprintf(absent, sizeof(absent), "%s/absent-source", root) < (int)sizeof(absent));
+        ASSERT(zcl_dev_proof_generation_source_qualified(absent, old.source_id,
+                                                          old.source_id, why, sizeof(why)));
+        ASSERT(!zcl_dev_proof_generation_source_qualified(absent,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            old.source_id, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_original_source_recapture_unavailable");
         ASSERT(ic_write(root, "sample.c", "int value = 3;\n"));
         ASSERT(ic_preflight_commit(root, local));
         ASSERT(zcl_dev_source_identity_capture(root, &current, why, sizeof(why)));
         ASSERT(strcmp(old.source_id, current.source_id) != 0);
+        ASSERT(!zcl_dev_proof_generation_source_qualified(root,
+            current.source_id, old.source_id, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_producer_source_mismatch");
+        ASSERT(!zcl_dev_proof_generation_source_qualified(root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            old.source_id, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_original_source_changed_during_generation");
         ASSERT(!ic_preflight_timed(root, local, old.source_id, log, why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_producer_source_mismatch");
         ASSERT(access(log, F_OK) != 0); /* run_step must not even open its log. */
@@ -11492,6 +11515,16 @@ static int test_ic_proof_producer_source_qualification(void)
         ASSERT(!zcl_dev_proof_producer_source_qualified(zero, candidate,
                                                         why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_candidate_source_id_invalid");
+        ASSERT(!zcl_dev_proof_generation_source_qualified("unused", zero,
+                                                        candidate, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_candidate_source_id_invalid");
+        ASSERT(!zcl_dev_proof_generation_source_qualified("unused", candidate,
+                                                        upper, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_producer_source_id_unavailable");
+        ASSERT(zcl_dev_proof_test_failure_no_verdict("proof_producer_source_mismatch"));
+        ASSERT(!zcl_dev_proof_test_failure_no_verdict("proof_generation_source_mismatch"));
+        ASSERT(!zcl_dev_proof_test_failure_no_verdict("proof_original_source_recapture_unavailable"));
+        ASSERT(!zcl_dev_proof_test_failure_no_verdict("proof_original_source_changed_during_generation"));
         PASS();
     } _test_next:;
     return failures;

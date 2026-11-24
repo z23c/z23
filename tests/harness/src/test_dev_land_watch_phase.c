@@ -923,6 +923,13 @@ int test_dev_land_step_producer_recovery(void)
     int failures = 0;
 #if !defined(_WIN32)
     static const char *const stale = "proof_producer_source_mismatch";
+    TEST("land step: generation and unknown source failures never trigger stale producer recovery") {
+        ASSERT(zcl_native_dev_land_test_producer_stale(stale));
+        ASSERT(!zcl_native_dev_land_test_producer_stale("proof_generation_source_mismatch"));
+        ASSERT(!zcl_native_dev_land_test_producer_stale("proof_original_source_recapture_unavailable"));
+        ASSERT(!zcl_native_dev_land_test_producer_stale("proof_original_source_changed_during_generation"));
+        PASS();
+    }
     TEST("land step: a spent producer recovery is earned again when a dead step's rebase finds main moved") {
         struct dlx_rig rig;
         ASSERT(dlx_recovered_dead(&rig, "step_producer_moved", "step_producer_moved_rig"));

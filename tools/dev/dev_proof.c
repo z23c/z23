@@ -189,6 +189,48 @@ bool zcl_dev_proof_producer_source_qualified(const char *candidate_source,
     return true;
 }
 
+bool zcl_dev_proof_generation_source_qualified(const char *root,
+    const char *generation_source, const char *producer_source,
+    char *why, size_t why_len)
+{
+    char reason[128];
+    if (zcl_dev_proof_producer_source_qualified(generation_source,
+                                                producer_source, reason, sizeof(reason))) {
+        proof_why(why, why_len, "");
+        return true;
+    }
+    if (strcmp(reason, "proof_producer_source_mismatch") != 0) {
+        proof_why(why, why_len, reason);
+        return false;
+    }
+    struct dev_source_record original = {0};
+    char capture_why[256] = {0};
+    if (!zcl_dev_source_identity_capture(root, &original, capture_why,
+                                          sizeof(capture_why)) ||
+        !proof_source_id_valid(original.source_id)) {
+        fprintf(stderr, "[devproof] original source recapture unavailable: %.200s\n",
+                capture_why);
+        proof_why(why, why_len, "proof_original_source_recapture_unavailable");
+        return false;
+    }
+    fprintf(stderr, "[devproof] source mismatch generation=%.64s original=%.64s producer=%.64s\n",
+            generation_source, original.source_id, producer_source);
+    const char *reason_out = "proof_original_source_changed_during_generation";
+    if (strcmp(original.source_id, producer_source) == 0)
+        reason_out = "proof_generation_source_mismatch";
+    else if (strcmp(original.source_id, generation_source) == 0)
+        reason_out = "proof_producer_source_mismatch";
+    proof_why(why, why_len, reason_out);
+    return false;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_failure_no_verdict(const char *detail)
+{
+    return dp_failure_no_verdict(detail);
+}
+#endif
+
 static bool proof_root_nonzero(const uint8_t root[32])
 {
     uint8_t any = 0;
@@ -14545,7 +14587,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
     if (!dp_worker_seal_source(&w, why, why_len)) return false;
     /* The loaded producer owns selection and impact policy. Admitting a
      * candidate test runner alone cannot qualify that compiled metadata. */
-    if (!zcl_dev_proof_producer_source_qualified(w.source_before.source_id,
+    if (!zcl_dev_proof_generation_source_qualified(paths->root, w.source_before.source_id,
             zcl_build_source_id_sha256(), why, why_len)) return false;
     if (!dp_worker_plan(&w, changed->files, changed->count, true, why, why_len))
         return false;

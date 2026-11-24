@@ -38,6 +38,15 @@ enum zcl_dev_proof_memory_scope zcl_dev_proof_memory_scope_verdict(
  * pure clientversion getter, never an environment or request field. */
 bool zcl_dev_proof_producer_source_qualified(const char *candidate_source,
     const char *producer_source, char *why, size_t why_len);
+/* generation_source is the sealed candidate identity. If a fresh original
+ * matches it, a different producer is stale for those bytes; a match to
+ * neither leaves the cause unknown. This does not lock the checkout. */
+bool zcl_dev_proof_generation_source_qualified(const char *root,
+    const char *generation_source, const char *producer_source,
+    char *why, size_t why_len);
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_failure_no_verdict(const char *detail);
+#endif
 
 /* Compiled-in lint-dimension allowances until this checkout has measured
  * its own. Publishable proofs use the full landing allowance everywhere;
