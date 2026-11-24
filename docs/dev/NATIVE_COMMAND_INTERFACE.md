@@ -459,6 +459,20 @@ returns a job ID. `blocked` names an external or safety precondition. `failed`
 means the command attempted work and failed. `ok` reports whether the requested
 operation succeeded; it cannot be true merely because valid JSON was produced.
 
+#### Compact envelope (opt-in)
+
+`Z23_OUTPUT=compact` in the environment of the process that executes a command
+leaves `schema`, `command`, `ok`, `status`, `request_id`, `data_schema` and
+`data`. It omits `elapsed_us`, `budget_ms`, `elapsed_ms` and `budget_exceeded`,
+the `authority` block of an exempt local operator (a bounded agent session
+keeps its block, which carries the spend debit), an empty `next`, and the
+`reason` of each `next` item (`command` and `input` remain). Any other value
+leaves the envelope byte-identical. The Claude plugin sets it on its
+`z23 mcp serve` launch. A z23 child that a tool spawns through
+`util/spawn.h` never inherits it (the spawn helper strips `Z23_OUTPUT`), so a
+parent that parses a child envelope, such as the land self-upgrade trial or
+windows-acceptance, always reads the default shape.
+
 ### Error result
 
 Schema: `zcl.result.v1` with `ok=false` and an `error` object

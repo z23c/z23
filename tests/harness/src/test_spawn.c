@@ -144,6 +144,31 @@ static int test_spawn_capture_echo(void)
     return failures;
 }
 
+/* A spawned child answers in the default envelope: Z23_OUTPUT=compact in the
+ * parent is not inherited, every other variable is. */
+static int test_spawn_capture_drops_z23_output(void)
+{
+    int failures = 0;
+    TEST("spawn: capture child does not inherit Z23_OUTPUT but keeps the rest of the environment") {
+        const char *argv[] = { "/bin/sh", "-c",
+            "printf '%s|%s' \"${Z23_OUTPUT-unset}\" \"${Z23_SPAWN_KEEP-lost}\"", NULL };
+        char buf[128] = {0};
+        char *old = getenv("Z23_OUTPUT") ? strdup(getenv("Z23_OUTPUT")) : NULL;
+        ASSERT(setenv("Z23_OUTPUT", "compact", 1) == 0);
+        ASSERT(setenv("Z23_SPAWN_KEEP", "kept", 1) == 0);
+        int rc = zcl_spawn_capture(argv, buf, sizeof(buf), 3000);
+        ASSERT(getenv("Z23_OUTPUT") != NULL); /* the parent keeps its own setting */
+        if (old) (void)setenv("Z23_OUTPUT", old, 1);
+        else (void)unsetenv("Z23_OUTPUT");
+        free(old);
+        (void)unsetenv("Z23_SPAWN_KEEP");
+        ASSERT(rc == 0);
+        ASSERT_STR_EQ(buf, "unset|kept");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #if defined(__linux__)
 static int test_spawn_capture_pinned_fd(void)
 {
@@ -1235,6 +1260,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_detached_writes_log_no_zombie();
     failures += test_spawn_detached_delivers_private_stdin();
     failures += test_spawn_capture_echo();
+    failures += test_spawn_capture_drops_z23_output();
 #if defined(__linux__)
     failures += test_spawn_capture_pinned_fd();
 #endif
