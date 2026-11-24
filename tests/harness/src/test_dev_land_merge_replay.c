@@ -289,12 +289,20 @@ static int dlx_fixture_preparation_test(void)
         ASSERT(calls.count == 2);
         (void)snprintf(path, sizeof(path),
             "%s/build/hotswap/zcl_rollback_fixture_a.so", fixtures);
+        /* dlx_slurp reads bytes, not a C string. Poison the unused tail so
+         * string assertions cannot accidentally depend on zeroed stack data. */
+        memset(body, 'x', sizeof(body));
+        body[sizeof(body) - 1] = '\0';
         ASSERT(dlx_slurp(path, body, sizeof(body), &len));
+        ASSERT(len < sizeof(body));
+        body[len] = '\0';
         ASSERT_STR_EQ(body, "fixture\n");
         ASSERT_STR_EQ(calls.names[0], "build/hotswap/zcl_rollback_fixture_a.so");
         ASSERT_STR_EQ(calls.names[1], "build/hotswap/zcl_rollback_fixture_b.so");
         (void)snprintf(log, sizeof(log), "%s/build/fixture.log", fixtures);
         ASSERT(dlx_slurp(log, body, sizeof(body), &len));
+        ASSERT(len < sizeof(body));
+        body[len] = '\0';
         ASSERT(strstr(body, "zcl_rollback_fixture_a.so") != NULL);
         ASSERT(strstr(body, "zcl_rollback_fixture_b.so") != NULL);
         ASSERT(zcl_dev_land_fixtures_prepare_observed(
