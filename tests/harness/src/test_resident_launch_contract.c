@@ -1794,11 +1794,11 @@ static bool rlc_offer_fault_input(struct json_value *input, const char *base,
 static bool rlc_offer_fault_call(const struct json_value *input,
                                  struct zcl_command_reply *reply, bool fault)
 {
+    zcl_command_reply_init(reply, "zcl.task_document.v1");
     const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
     char why[256];
     if (!spec || !zcl_command_registry_input_validate(spec, input, why, sizeof(why))) return false;
     struct zcl_command_request request = {.spec = spec, .input = input};
-    zcl_command_reply_init(reply, "zcl.task_document.v1");
     if (fault) zcl_alloc_fault_fail_next("json_push_kv_key");
     spec->handler(&request, reply);
     zcl_alloc_fault_clear();
