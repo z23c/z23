@@ -2011,7 +2011,7 @@ static bool exact_selector_set_valid(const char *selectors,
 static void run_group_exclusive(size_t idx, pid_t parent_pid,
                                 struct group_result *results,
                                 int timeout_secs, bool verbose,
-                                bool activate_proof_contracts)
+                                bool activate_proof_contracts, bool retry)
 {
     char out_path[128];
     make_tempfile_path(out_path, sizeof(out_path), idx, parent_pid);
@@ -2076,8 +2076,13 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
         results[idx].exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
     }
     memcpy(results[idx].out_path, out_path, sizeof(results[idx].out_path));
-    if (successfully_reaped)
+    if (successfully_reaped) {
         results[idx].measured = 1;
+        runner_timing_interval(stdout, g_groups[idx].name, retry ? "retry" : "exclusive",
+                               retry ? 2u : 1u, &results[idx].timing,
+                               results[idx].signaled ? -1 : results[idx].exit_code,
+                               results[idx].signaled ? results[idx].exit_code : 0);
+    }
 }
 
 enum pool_phase {
@@ -2203,6 +2208,10 @@ static void phase_record_reaped(const struct phase_run *pr, int slot, int status
     memcpy(r->out_path, pr->slots[slot].out_path,
            sizeof(r->out_path));
     r->measured = 1;
+    runner_timing_interval(stdout, g_groups[idx].name,
+                           pr->phase == POOL_PHASE_QUIET_LINT ? "quiet-lint" : "general",
+                           1u, &r->timing, r->signaled ? -1 : r->exit_code,
+                           r->signaled ? r->exit_code : 0);
     char elapsed_label[32];
     if (!g_pooled_failure_reported && (r->signaled || r->exit_code != 0)) {
         g_pooled_failure_reported = true;
@@ -2395,7 +2404,7 @@ static void rerun_attempt_alone(struct group_result *results, size_t i,
     memset(&results[i], 0, sizeof(results[i]));
     results[i].status = -1;
     run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,
-                        activate_proof_contracts);
+                        activate_proof_contracts, true);
 }
 
 /* A FAIL or WEDGED first attempt that passed alone: load-flaky, not a fail. */
@@ -4329,7 +4338,7 @@ static size_t run_exclusive_pass(struct run_ctx *c, bool priority)
             printf("[exclusive] [%zu/%zu] %s\n",
                    i + 1, g_num_groups, g_groups[i].name);
         run_group_exclusive(i, c->parent_pid, c->results, c->o.timeout_secs,
-                            c->o.verbose, c->o.activate_proof_contracts);
+                            c->o.verbose, c->o.activate_proof_contracts, false);
         c->reaped++;
         exclusive_ran++;
     }

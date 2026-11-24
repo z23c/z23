@@ -303,6 +303,15 @@ static int test_runner_timing_arithmetic(void)
         t.start_us = -1; runner_timing_finish(&t, INT64_MAX); ASSERT(!t.valid);
         t.start_us = 1; runner_timing_finish(&t, INT64_MAX);
         ASSERT(t.valid && t.elapsed_ms == (INT64_MAX - 1) / 1000);
+        FILE *f = tmpfile();
+        ASSERT(f != NULL);
+        t.start_us = 0; runner_timing_finish(&t, 5);
+        runner_timing_interval(f, "test_fixture", "quiet-lint", 1, &t, -1, 9);
+        rewind(f);
+        char line[256];
+        ASSERT(fgets(line, sizeof(line), f) != NULL);
+        ASSERT(strstr(line, "phase=quiet-lint attempt=1 clock=monotonic_suite valid=0 start_us=unknown end_us=unknown exit_code=unknown signal=9") != NULL);
+        ASSERT(fclose(f) == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -3313,6 +3322,14 @@ static bool tgs_pooled_provisional(const char *out, bool expected)
            !strstr(marker + 1, "test_parallel: provisional pooled failure ");
 }
 
+static bool tgs_interval_exit_zero(const char *out)
+{
+    const char *line = strstr(out, "attempt_interval group=test_hex_codec phase=general attempt=1 ");
+    const char *end = line ? strchr(line, '\n') : NULL;
+    const char *exit_zero = line ? strstr(line, "exit_code=0 signal=0") : NULL;
+    return end && exit_zero && exit_zero < end;
+}
+
 static int tgs_retry_assertions(const char *out, int rc, unsigned count,
                                 bool read_ok, bool rename_failure, bool retained, bool pooled_failure)
 {
@@ -3327,6 +3344,9 @@ static int tgs_retry_assertions(const char *out, int rc, unsigned count,
                                          : "RETRY-FIRST-PRESERVED") != NULL);
         ASSERT(rename_failure || retained);
         ASSERT(tgs_pooled_provisional(out, pooled_failure));
+        ASSERT(strstr(out, "attempt_interval group=test_hex_codec phase=general attempt=1 ") != NULL);
+        ASSERT(strstr(out, "attempt_interval group=test_hex_codec phase=retry attempt=2 ") != NULL);
+        ASSERT(pooled_failure || tgs_interval_exit_zero(out));
         ASSERT(strstr(out, "SUITE VERDICT mode=cold") != NULL);
         ASSERT(strstr(out, "groups_failed=0") != NULL);
         ASSERT(strstr(out, pooled_failure ? "LOAD-FLAKY test_hex_codec first=FAIL alone=PASS"
