@@ -99,6 +99,11 @@ bool zcl_app_hint(char *out, size_t cap, const char *datadir, const char *fmt,
  * unquotable input restores the plain "z23". */
 void zcl_app_set_program(const char *argv0);
 
+/* Render one whole POSIX-shell argument with the same bytewise escaping used
+ * by app command hints. False, with out emptied, when unsupported control
+ * bytes occur or the escaped word does not fit. */
+bool zcl_app_hint_word(char *out, size_t cap, const char *word);
+
 /* Same as zcl_app_hint but always starts with the plain "z23 ", never the
  * recorded program path: for a command another person runs on their own
  * machine, where the sender's path does not exist. */

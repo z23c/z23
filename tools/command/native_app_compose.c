@@ -280,6 +280,20 @@ static bool app_hint_word(char **out, size_t *left, const char *text)
     return true;
 }
 
+bool zcl_app_hint_word(char *out, size_t cap, const char *word)
+{
+    if (!out || cap == 0u)
+        return false;
+    out[0] = '\0';
+    char *at = out;
+    size_t left = cap;
+    if (!app_hint_word(&at, &left, word)) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 /* All callers use trusted literal syntax with one whole argument per %s. */
 static bool app_hint_tail(char **out, size_t *left, const char *fmt, va_list ap)
 {

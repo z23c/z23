@@ -2,6 +2,7 @@
  * purpose: Agent-readable local GCC toolchain capsule identity. */
 
 #include "command/native_command.h"
+#include "command/native_app_compose.h"
 #include "command/native_zcode_join.h"
 
 #include "base/hex.h"
@@ -92,7 +93,30 @@ static bool ztc_verifier_name_reported(bool verifier_present,
 
 static const char *ztc_next_safe_command(bool joined)
 {
+    /* Stable command-leaf selector; next_action carries the pasteable CLI. */
     return !joined ? "join" : "zcode work toolchain";
+}
+
+static bool ztc_datadir_has_control(const char *datadir)
+{
+    for (const unsigned char *p = (const unsigned char *)datadir; *p; p++)
+        if (*p < 32u || *p == 127u)
+            return true;
+    return false;
+}
+
+static const char *ztc_join_hint_too_long(void)
+{
+    return "Safe join command unavailable: selected datadir is too long to "
+           "render. Shorten the path, then invoke z23 with -datadir=<path> "
+           "before join.";
+}
+
+static const char *ztc_join_hint_control(void)
+{
+    return "Safe join command unavailable: selected datadir contains a "
+           "control character. Choose a path without control characters, "
+           "then invoke z23 with -datadir=<path> before join.";
 }
 
 static const char *ztc_next_action(bool joined, bool verifier_present,
@@ -101,16 +125,25 @@ static const char *ztc_next_action(bool joined, bool verifier_present,
     /* A live package-host flag does not prove the durable config also carries
      * buildworker=1. `z23 join` is idempotent and detects the compiler before
      * writing that fact, so it is the truthful action until both live flags
-     * prove this process joined compile work. Name THIS datadir: a bare
-     * `z23 join` would write the canonical node instead of the one just
-     * inspected. */
+     * prove this process joined compile work. Put the global option before
+     * the command so ParseParameters honors it, and escape it as one shell
+     * argument. Never fall back to a bare join when a selected path cannot
+     * be rendered safely. */
     if (!joined) {
         const char *dd = zcl_native_command_datadir();
-        int n = (dd && dd[0])
-            ? snprintf(buf, cap, "z23 join -datadir=%s", dd)
-            : snprintf(buf, cap, "z23 join");
+        if (!dd || !dd[0]) {
+            int n = snprintf(buf, cap, "z23 join");
+            return n >= 0 && (size_t)n < cap
+                ? buf : ztc_join_hint_too_long();
+        }
+        char shell_datadir[1024];
+        if (ztc_datadir_has_control(dd))
+            return ztc_join_hint_control();
+        if (!zcl_app_hint_word(shell_datadir, sizeof(shell_datadir), dd))
+            return ztc_join_hint_too_long();
+        int n = snprintf(buf, cap, "z23 -datadir=%s join", shell_datadir);
         if (n < 0 || (size_t)n >= cap)
-            (void)snprintf(buf, cap, "z23 join");
+            return ztc_join_hint_too_long();
         return buf;
     }
     if (!verifier_present)

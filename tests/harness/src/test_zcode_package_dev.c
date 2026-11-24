@@ -9,6 +9,7 @@
 #include "base/cleanse.h"
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
+#include "command/native_app_compose.h"
 #include "command/native_zcode_discovery.h"
 #include "command/native_zcode_join.h"
 #include "command/native_zcode_work_map.h"
@@ -6470,30 +6471,94 @@ static int zpd_test_work_toolchain(void)
         zcl_command_reply_free(&reply);
         PASS();
     }
+    char toolchain_spaced_dir[256] = "";
+    struct zcl_command_request toolchain_request = { .input = NULL };
+    struct zcl_command_reply toolchain_reply;
+    const char *toolchain_next = NULL;
     TEST("zcode work toolchain: join next names this datadir") {
         const char *reset[] = { "z23" };
         ParseParameters(1, reset);
-        char dir[256], abs[4096];
-        test_make_tmpdir(dir, sizeof(dir), "zcode_package_dev",
-                         "toolchain-join-dd");
-        ASSERT(platform_directory_canonical_real(dir, abs, sizeof(abs)));
+        char abs[4096];
+        test_make_tmpdir(toolchain_spaced_dir, sizeof(toolchain_spaced_dir),
+                         "zcode package dev",
+                         "toolchain join dd");
+        ASSERT(platform_directory_canonical_real(toolchain_spaced_dir, abs,
+                                                 sizeof(abs)));
         zcl_native_bridge_bind_rpc(abs, 0);
-        struct zcl_command_request request = { .input = NULL };
-        struct zcl_command_reply reply;
-        zcl_command_reply_init(&reply, "zcl.zcode_toolchain_show.v1");
-        zcl_native_handle_zcode_toolchain_show(&request, &reply);
-        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
-        const char *next = json_get_str(json_get(&reply.data, "next_action"));
-        ASSERT(next && strstr(next, "z23 join") != NULL);
-        ASSERT(strstr(next, "-datadir=") != NULL);
-        ASSERT(strstr(next, abs) != NULL);
-        ASSERT(strstr(next, "-packagehost") == NULL);
-        ASSERT(strstr(next, "-buildworker") == NULL);
-        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&toolchain_reply,
+                               "zcl.zcode_toolchain_show.v1");
+        zcl_native_handle_zcode_toolchain_show(&toolchain_request,
+                                               &toolchain_reply);
+        ASSERT(toolchain_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        toolchain_next = json_get_str(json_get(&toolchain_reply.data,
+                                               "next_action"));
+        char escaped[4096], expected[4608];
+        ASSERT(zcl_app_hint_word(escaped, sizeof(escaped), abs));
+        int expected_len = snprintf(expected, sizeof(expected),
+                                    "z23 -datadir=%s join", escaped);
+        ASSERT(expected_len > 0 && (size_t)expected_len < sizeof(expected));
+        ASSERT(toolchain_next && strcmp(toolchain_next, expected) == 0);
+        ASSERT(strstr(toolchain_next, "-packagehost") == NULL);
+        ASSERT(strstr(toolchain_next, "-buildworker") == NULL);
+        zcl_command_reply_free(&toolchain_reply);
+        PASS();
+    }
+
+    TEST("zcode work toolchain: overlong datadir never falls back to bare "
+         "join") {
+        const char *reset[] = { "z23" };
+        ParseParameters(1, reset);
+        char quoted_path[512];
+        memset(quoted_path, '\'', sizeof(quoted_path) - 1u);
+        quoted_path[sizeof(quoted_path) - 1u] = '\0';
+        zcl_native_bridge_bind_rpc(quoted_path, 0);
+        zcl_command_reply_init(&toolchain_reply,
+                               "zcl.zcode_toolchain_show.v1");
+        zcl_native_handle_zcode_toolchain_show(&toolchain_request,
+                                               &toolchain_reply);
+        ASSERT(toolchain_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        toolchain_next = json_get_str(json_get(&toolchain_reply.data,
+                                               "next_action"));
+        ASSERT(toolchain_next && strstr(toolchain_next, "z23 join") == NULL);
+        ASSERT(strstr(toolchain_next, "too long") != NULL);
+        ASSERT(strstr(toolchain_next, "datadir") != NULL);
+        ASSERT(strcmp(json_get_str(json_get(&toolchain_reply.data,
+                                            "next_safe_command")),
+                      "join") == 0);
+        zcl_command_reply_free(&toolchain_reply);
         zcl_native_bridge_bind_rpc("", 0);
-        test_rm_rf(dir);
+        PASS();
+    }
+    TEST("zcode work toolchain: control-byte datadir gets safe guidance") {
+        const char *reset[] = { "z23" };
+        ParseParameters(1, reset);
+        char control_root[4096], control_path[8192];
+        ASSERT(platform_directory_canonical_real(toolchain_spaced_dir,
+                                                 control_root,
+                                                 sizeof(control_root)));
+        int control_len = snprintf(control_path, sizeof(control_path),
+                                   "%s/zcode\nprofile", control_root);
+        ASSERT(control_len > 0 && (size_t)control_len < sizeof(control_path));
+        zcl_native_bridge_bind_rpc(control_path, 0);
+        zcl_command_reply_init(&toolchain_reply,
+                               "zcl.zcode_toolchain_show.v1");
+        zcl_native_handle_zcode_toolchain_show(&toolchain_request,
+                                               &toolchain_reply);
+        ASSERT(toolchain_reply.status == ZCL_COMMAND_STATUS_PASSED);
+        toolchain_next = json_get_str(json_get(&toolchain_reply.data,
+                                               "next_action"));
+        ASSERT(toolchain_next && strstr(toolchain_next,
+                                       "control character") != NULL);
+        ASSERT(strstr(toolchain_next, "z23 join") == NULL);
+        ASSERT(strcmp(json_get_str(json_get(&toolchain_reply.data,
+                                            "next_safe_command")),
+                      "join") == 0);
+        zcl_command_reply_free(&toolchain_reply);
+        zcl_native_bridge_bind_rpc("", 0);
         PASS();
     } _test_next:;
+    if (toolchain_spaced_dir[0])
+        test_rm_rf(toolchain_spaced_dir);
     {
         const char *reset[] = { "z23" };
         ParseParameters(1, reset);
