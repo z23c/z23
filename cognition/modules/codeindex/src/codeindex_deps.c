@@ -153,14 +153,19 @@ static void note_include_narrow_unsafe(const char *rule, const char *path)
 {
     g_unsafe_events++;
     if (!g_include_narrow_unsafe) {
+        int n;
         if (path && path[0])
-            (void)snprintf(g_include_narrow_cause,
+            n = snprintf(g_include_narrow_cause,
                            sizeof g_include_narrow_cause, "%s %s -> %s", rule,
                            g_scan_depfile, path);
         else
-            (void)snprintf(g_include_narrow_cause,
+            n = snprintf(g_include_narrow_cause,
                            sizeof g_include_narrow_cause, "%s %s", rule,
                            g_scan_depfile);
+        if (n >= 0 && (size_t)n >= sizeof g_include_narrow_cause) {
+            size_t end = sizeof g_include_narrow_cause;
+            memcpy(g_include_narrow_cause + end - 4, "...", 4);
+        }
     }
     g_include_narrow_unsafe = 1;
 }

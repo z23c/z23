@@ -1119,6 +1119,45 @@ static bool cis_watch_directory(const char *path, void *user)
     return true;
 }
 
+static int test_cis_unsafe_cause_truncation(void)
+{
+    int failures = 0;
+    char dir[256] = {0}, rel[256], full[512], component[181];
+    uint8_t digest[32];
+    bool peer_edge = false;
+    TEST("codeindex stale: unsafe causes identify truncation") {
+        test_make_tmpdir(dir, sizeof dir, "cistale", "cause");
+        ASSERT(cis_seed(dir));
+        ASSERT(cis_write(dir, "build/a.d", "foo.o: core/modules/net/src/foo.c missing.h\n"));
+        ASSERT(ci_deps_scan(dir, cis_capture_peer_edge, &peer_edge, digest));
+        ASSERT(ci_deps_include_narrow_unsafe());
+        ASSERT(strcmp(ci_deps_include_narrow_cause(),
+                      "prereq_not_regular build/a.d -> missing.h") == 0);
+        ASSERT((size_t)snprintf(full, sizeof full, "%s/build/a.d", dir) < sizeof full);
+        ASSERT(unlink(full) == 0);
+        memset(component, 'a', sizeof component - 1);
+        component[sizeof component - 1] = '\0';
+        ASSERT((size_t)snprintf(rel, sizeof rel, "build/%s/a.d", component) < sizeof rel);
+        ASSERT(cis_write(dir, rel, "foo.o: core/modules/net/src/foo.c missing.h\n"));
+        ASSERT(ci_deps_scan(dir, cis_capture_peer_edge, &peer_edge, digest));
+        ASSERT(ci_deps_include_narrow_unsafe());
+        const char *cause = ci_deps_include_narrow_cause();
+        ASSERT(strncmp(cause, "prereq_not_regular ", strlen("prereq_not_regular ")) == 0);
+        ASSERT(strlen(cause) == CODEINDEX_INCLUDE_UNSAFE_CAUSE_MAX - 1);
+        ASSERT(strcmp(cause + strlen(cause) - 3, "...") == 0);
+        ASSERT(cis_write(dir, rel, "foo.o: core/modules/net/src/foo.c"));
+        ASSERT(ci_deps_scan(dir, cis_capture_peer_edge, &peer_edge, digest));
+        ASSERT(ci_deps_include_narrow_unsafe());
+        cause = ci_deps_include_narrow_cause();
+        ASSERT(strncmp(cause, "depfile_incomplete ", strlen("depfile_incomplete ")) == 0);
+        ASSERT(strlen(cause) == CODEINDEX_INCLUDE_UNSAFE_CAUSE_MAX - 1);
+        ASSERT(strcmp(cause + strlen(cause) - 3, "...") == 0);
+        PASS();
+    } _test_next:;
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int test_cis_nested_worktree_scope(void)
 {
     int failures = 0;
@@ -1165,6 +1204,7 @@ int test_codeindex_stale(void)
     int failures = 0;
     failures += test_cis_null_refuses();
 #if !defined(_WIN32)
+    failures += test_cis_unsafe_cause_truncation();
     failures += test_cis_nested_worktree_scope();
 #endif
     failures += test_cis_one_shot_full_freshness();
