@@ -65,6 +65,9 @@ static bool sul_rig_open(struct sul_rig *r)
            sul_script(r->src_y, PLAN_Y);
 }
 
+/* The probe is compiled only inside the Linux self-upgrade trial. Other
+ * hosts must not reference it: the fast harness links every group at once. */
+#if defined(__linux__)
 bool zcl_native_dev_land_test_su_env_has(const char *prefix);
 
 /* The trial child answers `dev land drive --json`; dl_su_next needs a reason on
@@ -88,6 +91,7 @@ static int sul_environment_cases(void)
     } _test_next:;
     return failures;
 }
+#endif
 
 static int sul_pure_cases(void)
 {
@@ -620,7 +624,9 @@ int test_dev_land_selfupgrade(void)
     int failures = 0;
 #if !defined(_WIN32)
     failures += sul_pure_cases();
+#if defined(__linux__)
     failures += sul_environment_cases();
+#endif
     failures += sul_switch_cases();
     failures += sul_disagree_cases();
     failures += sul_invalid_decisions();
