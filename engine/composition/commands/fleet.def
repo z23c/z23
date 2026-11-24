@@ -795,15 +795,23 @@ ZCL_COMMAND_READY_COMMAND(
     "build, test, blocked or completed; task is short text. Optional: pid "
     "(the session's own process, must be alive on this host; default this "
     "process), session, started (session start, YYYY-MM-DDTHH:MM:SSZ; default "
-    "now) and source (default claude). A bad role, phase, pid or a "
-    "credential-shaped value is refused with an explanatory body and posts "
-    "nothing. The brief dates the row by its mail ts: a session is live for "
-    "900 s, so run this at start and at least every 300 s; a session that "
-    "ends stops being reported within 900 s, or at once with "
-    "phase=completed. It posts only when run and contacts no peer.", 4096,
+    "the recorded start of this role's live session, else now) and source "
+    "(default claude). Every field is an unauthenticated self-report: the pid "
+    "check only proves some process exists, and any local caller can post any "
+    "role. A bad role, phase, pid or a credential-shaped value is refused "
+    "with an explanatory body and posts nothing. A repeat of the same role "
+    "and phase within 60 s is answered as skipped and adds no row. hook=start"
+    "|beat|end is the Claude Code session hook: it reads session_id from the "
+    "hook JSON on stdin (or session), takes a role from a fixed pool "
+    "<source>-1..8 per host (reusing the lowest whose last row is completed "
+    "or older than 900 s), posts at most once per 300 s on beat and "
+    "phase=completed on end. The brief dates the row by its mail ts: a "
+    "session is live for 900 s, so run this at start and at least every 300 "
+    "s; completed reads as activity completed at once. It posts only when "
+    "run and contacts no peer.", 4096,
     "fleet,steer,presence,heartbeat,session,agent,liveness",
     "zcl.fleet_steer_presence.input.v1", "zcl.fleet_steer_presence.v1",
-    "role,task,phase,pid,session,started,source", "role,task,phase",
+    "role,task,phase,pid,session,started,source,hook", "",
     "z23 fleet steer presence --role=A --task=card-1 --phase=active",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,

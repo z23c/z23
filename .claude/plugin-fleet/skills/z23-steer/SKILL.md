@@ -53,20 +53,28 @@ revocation on every call.
 
 The brief counts a session as live only from its own `presence.v1` mail row,
 no older than 900 s; nothing else writes it. The plugin's hooks run
-`bin/z23-presence` at session start, after tool use (at most once per 300 s)
-and at session end, so a Claude Code session on a node host is reported
-without any step from you. If hooks are off, or you drive the node over ssh,
-post it yourself at start and at least every 5 minutes:
+`z23 fleet steer presence --hook=start|beat|end` at session start, after tool
+use (posting at most once per 300 s) and at session end, so a Claude Code
+session on a node host is reported without any step from you; `z23` must be
+on PATH there. Each session takes a role from a small fixed pool
+(`claude-1` to `claude-8`, reusing the lowest whose last row is completed or
+older than 900 s), because the brief tracks a bounded table of roles. If
+hooks are off, or you drive the node over ssh, post it yourself at start and
+at least every 5 minutes:
 
 ```sh
 z23 fleet steer presence --role=<ROLE> --task=<card-or-ref> --phase=active
 ```
 
 `phase` is active, running, build, test, blocked or completed; post
-`--phase=completed` when you finish. The row is yours alone: post it only
-while the session runs, and never for another agent. It states the node
-host's name and a live pid, refuses credential-shaped text, and ages out by
-itself. The release `z23` answers it directly; `z23-dev` accepts the same
+`--phase=completed` when you finish (the brief then shows activity
+`completed`). Every field is an unauthenticated self-report: the node host's
+name is real, but `--role` and `--pid` are only what the caller states (the
+pid check proves a process exists, not whose), so post only while your
+session runs and never for another agent. A repeat of the same role and phase
+inside 60 s adds no row. Credential-shaped text is refused and the row ages
+out by itself. The release `z23` answers it directly once a build containing
+this command is deployed; until then an older `z23` refuses it as an unknown
 command.
 
 Follow the repository contract in `AGENTS.md`: builds and proofs run on the

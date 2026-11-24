@@ -319,12 +319,208 @@ _test_next:
     return failures;
 }
 
+/* Hook mode through the registry validator, as the CLI would call it. */
+static bool fpt_hook(struct fpt_call *c, const char *mode, const char *sid)
+{
+    char why[256];
+    fpt_call_begin(c, FPT_PRESENCE, "zcl.fleet_steer_presence.v1");
+    (void)json_push_kv_str(&c->input, "hook", mode);
+    (void)json_push_kv_str(&c->input, "session", sid);
+    if (!c->request.spec ||
+        !zcl_command_registry_input_validate(c->request.spec, &c->input, why,
+                                             sizeof(why))) {
+        printf("[input rejected: %s] ", c->request.spec ? why : "no spec");
+        return false;
+    }
+    zcl_native_handle_fleet_steer_presence(&c->request, &c->reply);
+    return c->reply.status == ZCL_COMMAND_STATUS_PASSED;
+}
+
+static bool fpt_hook_ok(const char *mode, const char *sid, bool *skipped)
+{
+    struct fpt_call c;
+    const struct json_value *sk;
+    bool ok = fpt_hook(&c, mode, sid);
+    sk = ok ? json_get(&c.reply.data, "skipped") : NULL;
+    if (skipped)
+        *skipped = sk != NULL;
+    fpt_call_end(&c);
+    return ok;
+}
+
+static int fpt_t_pool(void)
+{
+    int failures = 0;
+    TEST("presence hook: the 20th session on a host is still counted") {
+        struct fpt_call b;
+        char sid[32];
+        fpt_begin_case("pool");
+        for (int i = 1; i <= 19; i++) {
+            (void)snprintf(sid, sizeof(sid), "sess%02d", i);
+            ASSERT(fpt_hook_ok("start", sid, NULL));
+            g_fpt_offset_s += 2;
+            ASSERT(fpt_hook_ok("end", sid, NULL));
+            g_fpt_offset_s += 2;
+        }
+        /* Five live sessions now; the table never saw more than the pool. */
+        for (int i = 20; i <= 24; i++) {
+            (void)snprintf(sid, sizeof(sid), "sess%02d", i);
+            ASSERT(fpt_hook_ok("start", sid, NULL));
+            g_fpt_offset_s += 2;
+        }
+        fpt_brief(&b);
+        ASSERT(b.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 5);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-1"), "activity"), "active");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-5"), "activity"), "active");
+        ASSERT(fpt_session(&b, "claude-9") == NULL);
+        ASSERT(fpt_i(&b.reply.data, "sessions_total") <= 12);
+        fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_hook_cadence(void)
+{
+    int failures = 0;
+    TEST("presence hook: beat is rate limited, end retires the role and is idempotent") {
+        struct fpt_call b, c;
+        bool skipped = false;
+        fpt_begin_case("cadence");
+        ASSERT(fpt_hook_ok("start", "abc123", &skipped) && !skipped);
+        g_fpt_offset_s = 100;
+        ASSERT(fpt_hook_ok("beat", "abc123", &skipped) && skipped);
+        g_fpt_offset_s = 301;
+        ASSERT(fpt_hook_ok("beat", "abc123", &skipped) && !skipped);
+        ASSERT(fpt_hook_ok("beat", "abc123", &skipped) && skipped);
+        g_fpt_offset_s = 330;
+        ASSERT(fpt_hook_ok("end", "abc123", &skipped) && !skipped);
+        ASSERT(fpt_hook_ok("end", "abc123", &skipped) && skipped);
+        ASSERT(fpt_hook_ok("end", "never-started", &skipped) && skipped);
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-1"), "activity"), "completed");
+        ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 0);
+        fpt_call_end(&b);
+        /* A bad mode is refused by name. */
+        ASSERT(!fpt_hook(&c, "dance", "abc123"));
+        ASSERT_STR_EQ(fpt_code(&c), "PRESENCE_BAD_HOOK");
+        fpt_call_end(&c);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_floor_and_started(void)
+{
+    int failures = 0;
+    TEST("presence: a same-role same-phase repeat inside 60 s adds no row; started and end hold") {
+        struct fpt_call c, b;
+        char first[32];
+        fpt_begin_case("floor");
+        ASSERT(fpt_presence(&c, "A", "t", "active", NULL, NULL));
+        fpt_call_end(&c);
+        ASSERT(fpt_presence(&c, "A", "t", "active", NULL, NULL));
+        ASSERT(json_get(&c.reply.data, "skipped") != NULL);
+        ASSERT(json_get(&c.reply.data, "seq") == NULL);
+        fpt_call_end(&c);
+        g_fpt_offset_s = 61;
+        ASSERT(fpt_presence(&c, "A", "t", "active", NULL, NULL));
+        ASSERT(json_get(&c.reply.data, "skipped") == NULL);
+        fpt_call_end(&c);
+        fpt_brief(&b);
+        (void)snprintf(first, sizeof(first), "%s",
+                       fpt_s(fpt_session(&b, "A"), "started"));
+        ASSERT(strlen(first) == 20);
+        fpt_call_end(&b);
+        /* The same live role keeps its start time across later posts. */
+        g_fpt_offset_s = 200;
+        ASSERT(fpt_post_ok("A", "running"));
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "started"), first);
+        fpt_call_end(&b);
+        /* completed in the same second as the previous post still wins. */
+        ASSERT(fpt_post_ok("A", "completed"));
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "activity"), "completed");
+        fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+/* The real dispatch path: registry execute with the CLI's string pid. */
+static bool fpt_exec(const char *role, const char *phase, const char *task,
+                     char *out, size_t cap, enum zcl_command_exit *code)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(reg, FPT_PRESENCE, NULL);
+    struct zcl_command_context ctx;
+    struct json_value in;
+    char pid[24];
+    bool ok;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.registry = reg;
+    ctx.granted_capabilities = ~(uint64_t)0;
+    ctx.authority_ceiling = ZCL_COMMAND_AUTH_OWNER;
+    json_init(&in);
+    json_set_object(&in);
+    (void)snprintf(pid, sizeof(pid), "%lld", (long long)getpid());
+    ok = spec && json_push_kv_str(&in, "role", role) &&
+         json_push_kv_str(&in, "phase", phase) &&
+         json_push_kv_str(&in, "task", task) &&
+         json_push_kv_str(&in, "pid", pid) &&
+         zcl_command_registry_execute_json(reg, spec, &ctx, &in, false,
+                                           FPT_PRESENCE, "normal", 0, 0, NULL,
+                                           out, cap, code) > 0;
+    json_free(&in);
+    return ok;
+}
+
+static int fpt_t_dispatch(void)
+{
+    int failures = 0;
+    TEST("presence: the registry dispatch path posts a row the brief counts") {
+        char out[8192];
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_FAILED;
+        struct fpt_call b;
+        fpt_begin_case("dispatch");
+        ASSERT(fpt_exec("D", "active", "task-frisk-cleanup", out, sizeof(out), &code));
+        ASSERT(code == ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(out, "presence-D") != NULL);
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "D"), "state"), "live");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "D"), "task"), "task-frisk-cleanup");
+        ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 1);
+        fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
 int test_fleet_presence(void)
 {
     int failures = 0;
     failures += fpt_t_round_trip();
     failures += fpt_t_expiry();
     failures += fpt_t_refusals();
+    failures += fpt_t_pool();
+    failures += fpt_t_hook_cadence();
+    failures += fpt_t_floor_and_started();
+    failures += fpt_t_dispatch();
     if (failures == 0)
         printf("test_fleet_presence: all passed\n");
     else

@@ -122,13 +122,20 @@ test. A session writes that row itself, on the node host, with
 (release `z23` or `z23-dev`; it posts through the `dev.agent.mail` leaf, never
 a second writer). Run it at start and at least every 5 minutes; run it once with
 `--phase=completed` when done. Claude Code sessions with the `z23-fleet`
-plugin do this from hooks (`bin/z23-presence`). Any other agent, including one
-driven over ssh from another machine, runs the one-liner on the node:
+plugin do this from hooks (`z23 fleet steer presence --hook=start|beat|end`,
+session id read from the hook JSON); each takes a role from the pool
+`claude-1`..`claude-8`, reusing the lowest whose last row is completed or
+stale, because the brief tracks a bounded table of roles. Any other agent,
+including one driven over ssh from another machine, runs the one-liner on the
+node:
 `ssh <node> 'z23 fleet steer presence --role=<ROLE> --task=<ref> --phase=active --source=ssh-from-<machine>'`.
-Post it only while the session is alive and only for yourself: a stated
-`--pid` must be a running process on the node (refused otherwise), credential-
-shaped text is refused, and a session that stops posting reads stale within
-900 s.
+All fields are unauthenticated self-reports: a stated `--pid` must be a running
+process on the node, but that proves only that a process exists, and any local
+caller can post any role, so post only while your session is alive and only
+for yourself. Credential-shaped text is refused, the same role and phase
+within 60 s adds no row, and a session that stops posting reads stale within
+900 s. A `z23` older than the build that added this command refuses it as an
+unknown command.
 
 **Claim convention.** Before you edit, take the file claim:
 `build/bin/z23-dev dev agent claim --input='{"story":"<slug>","files":[...]}'`.

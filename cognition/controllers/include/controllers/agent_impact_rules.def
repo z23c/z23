@@ -3543,6 +3543,8 @@ AGENT_IMPACT_RULE("tools/fleet_gateway.c|tools/zcl_fleet_front.c|tools/scripts/q
  * accepted at ingress must satisfy the queue's grammar, so either end runs
  * both groups. Keep the split paths explicit; projection fixtures are pure. */
 AGENT_IMPACT_RULE("tools/command/native_fleet_steer.c|tools/command/native_fleet_steer_tasks.c|tools/command/native_fleet_steer_deliver.c|tools/command/native_fleet_steer_inbox.c|tools/command/native_fleet_steer_inbox.h|tests/harness/src/test_fleet_steer_deliver.c|tools/command/native_fleet_steer_tasks.h|tools/command/native_fleet_steer_machines.c|tools/command/native_fleet_steer_machines.h|tests/harness/src/test_fleet_steer_machines.c|tests/harness/src/test_fleet_steer.c|tests/harness/src/test_fleet_steer_tasks.c", "fleet_steer fleet_steer_machines devagent_queue fleet_gateway make_lint_gates")
+/* The presence writer and the two leaves its round-trip test pins (the brief reader and the mail post leaf): a change to either re-runs it. */
+AGENT_IMPACT_RULE("tools/command/native_fleet_presence.c|tools/command/native_fleet_presence_hook.c|tools/command/native_fleet_presence.h|tests/harness/src/test_fleet_presence.c|tools/command/native_fleet_steer.c|tools/command/native_devagent_mail.c|.claude/plugin-fleet/hooks/hooks.json", "fleet_presence make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_fleet_mission_board.c|tools/command/native_dev_land_read.h|tools/command/native_devagent_queue_read.h|tests/harness/src/test_fleet_mission_board.c", "fleet_mission_board dev_land devagent_queue make_lint_gates")
 /* The Muse executor seam and its suites. Both groups exist in the catalog
  * but nothing mapped their sources, so a change to the executor would not

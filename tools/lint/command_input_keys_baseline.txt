@@ -55,6 +55,13 @@ fleet.steer.grant priority # grant revoke sub-dispatches a fixed cancel+name obj
 fleet.steer.grant json      # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; request->input never reaches the nested json key.
 fleet.steer.grant engine   # grant revoke sub-dispatches a fixed cancel+name object to dev.agent.queue; engine is read only on the post branch.
 fleet.steer.grant terminate # grant revoke injects terminate only into its private cancel object when the stored grant scopes name it; request->input never reaches that nested key.
+fleet.steer.presence action # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested action key.
+fleet.steer.presence to # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested to key.
+fleet.steer.presence kind # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested kind key.
+fleet.steer.presence ref # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested ref key.
+fleet.steer.presence body # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested body key.
+fleet.steer.presence since # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested since key.
+fleet.steer.presence cursor # posts a fixed private object to dev.agent.mail in process; request->input never reaches that nested cursor key.
 zcode.science.fetch namespace # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch semantic_root # pointer resolver reads its private RPC selector built by fetch; request->input never reaches that helper.
 zcode.science.fetch transport_root # provider discovery reads its private RPC selector built by fetch; request->input never reaches that helper.

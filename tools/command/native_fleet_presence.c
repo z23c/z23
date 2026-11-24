@@ -23,6 +23,7 @@
 #include "command/native_dev_agents.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
+#include "command/native_fleet_presence.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -51,7 +52,7 @@
 static const char *const fpr_phases[] = {"active", "running", "build", "test",
                                          "blocked", "completed"};
 
-static void fpr_fail(struct zcl_command_reply *reply, const char *code,
+void zcl_presence_fail(struct zcl_command_reply *reply, const char *code,
                      const char *message, const char *evidence)
 {
     LOG_ERROR(FPR_LOG, "%s: %s (%s)", code, message, evidence);
@@ -60,20 +61,32 @@ static void fpr_fail(struct zcl_command_reply *reply, const char *code,
                            false, message, evidence);
 }
 
+/* Mirrors the reader's fmc_has_secret_word: a secret word anywhere, a vendor
+ * key prefix only at the start of a word. */
 static bool fpr_has_word(const char *s)
 {
     static const char *const words[] = {
         "bearer", "password", "passwd", "secret", "apikey", "api_key",
-        "api-key", "authorization", "private_key", "privkey", "sk-", "xai-",
-        "gsk_", "ghp_", "gho_", "ghs_", "github_pat_", "glpat-", "akia"};
+        "api-key", "authorization", "private_key", "privkey"};
+    static const char *const prefixes[] = {"sk-", "xai-", "gsk_", "ghp_",
+                                           "gho_", "ghs_", "github_pat_",
+                                           "glpat-", "akia"};
     char low[160];
-    size_t i;
+    size_t i, j;
     for (i = 0; s[i] && i + 1 < sizeof(low); i++)
         low[i] = (char)tolower((unsigned char)s[i]);
     low[i] = '\0';
-    for (i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
-        if (strstr(low, words[i]))
+    for (j = 0; j < sizeof(words) / sizeof(words[0]); j++) {
+        if (strstr(low, words[j]))
             return true;
+    }
+    for (i = 0; low[i]; i++) {
+        if (i > 0 && isalnum((unsigned char)low[i - 1]))
+            continue;
+        for (j = 0; j < sizeof(prefixes) / sizeof(prefixes[0]); j++) {
+            if (strncmp(low + i, prefixes[j], strlen(prefixes[j])) == 0)
+                return true;
+        }
     }
     return false;
 }
@@ -150,12 +163,7 @@ static bool fpr_pid_live(long long pid)
 #endif
 }
 
-struct fpr_in {
-    const char *role, *task, *phase, *session, *started, *source;
-    long long pid;
-};
-
-static const char *fpr_str(const struct zcl_command_request *req,
+const char *zcl_presence_str(const struct zcl_command_request *req,
                            const char *key)
 {
     const struct json_value *v = req->input ? json_get(req->input, key) : NULL;
@@ -163,7 +171,7 @@ static const char *fpr_str(const struct zcl_command_request *req,
 }
 
 /* pid arrives as a string from the CLI, or an integer from a JSON caller. */
-static bool fpr_pid_in(const struct zcl_command_request *req, long long *pid)
+bool zcl_presence_pid_in(const struct zcl_command_request *req, long long *pid)
 {
     const struct json_value *v = req->input ? json_get(req->input, "pid") : NULL;
     const char *s;
@@ -184,40 +192,9 @@ static bool fpr_pid_in(const struct zcl_command_request *req, long long *pid)
     return errno == 0 && end && *end == '\0';
 }
 
-static bool fpr_read(const struct zcl_command_request *req,
-                     struct zcl_command_reply *reply, struct fpr_in *in)
-{
-    memset(in, 0, sizeof(*in));
-    in->role = fpr_str(req, "role");
-    in->task = fpr_str(req, "task");
-    in->phase = fpr_str(req, "phase");
-    in->session = fpr_str(req, "session");
-    in->started = fpr_str(req, "started");
-    in->source = fpr_str(req, "source");
-    if (!in->role || !fpr_value_ok(in->role, FPR_ROLE_MAX, false) ||
-        strpbrk(in->role, ":@+")) {
-        fpr_fail(reply, "PRESENCE_BAD_ROLE",
-                 "role must be 1..32 characters of letters, digits, '.', '_' or '-' (for example A, B or claude-main), and no credential-shaped text",
-                 "role");
-        return false;
-    }
-    if (!fpr_phase_ok(in->phase)) {
-        fpr_fail(reply, "PRESENCE_BAD_PHASE",
-                 "phase must be one of active, running, build, test, blocked or completed; the first four count as active work, completed ends the session",
-                 "phase");
-        return false;
-    }
-    if (!fpr_pid_in(req, &in->pid) || !fpr_pid_live(in->pid)) {
-        fpr_fail(reply, "PRESENCE_PID_NOT_LIVE",
-                 "pid must name a running process on this host; presence is posted only by a live session, so a dead or foreign pid is refused",
-                 "pid");
-        return false;
-    }
-    return true;
-}
 
 /* Validate the optional/free fields against the reader's shapes. */
-static bool fpr_check(struct zcl_command_reply *reply, const struct fpr_in *in,
+static bool fpr_check(struct zcl_command_reply *reply, const struct zcl_presence_in *in,
                       const char *host)
 {
     const char *bad = NULL;
@@ -233,13 +210,13 @@ static bool fpr_check(struct zcl_command_reply *reply, const struct fpr_in *in,
         bad = "source";
     if (!bad)
         return true;
-    fpr_fail(reply, "PRESENCE_BAD_FIELD",
+    zcl_presence_fail(reply, "PRESENCE_BAD_FIELD",
              "a presence field is missing, too long, outside the allowed characters (letters, digits, . _ : @ + -, plus spaces / , # in task and source), timestamp-shaped wrongly (started is YYYY-MM-DDTHH:MM:SSZ) or credential-shaped; nothing was posted",
              bad);
     return false;
 }
 
-static bool fpr_body(char *out, size_t cap, const struct fpr_in *in,
+static bool fpr_body(char *out, size_t cap, const struct zcl_presence_in *in,
                      const char *host, const char *now)
 {
     char sess[72];
@@ -285,7 +262,7 @@ static bool fpr_post(const struct zcl_command_request *req,
         zcl_native_handle_dev_agent_mail(&sub, &sr);
     ok = ok && sr.status == ZCL_COMMAND_STATUS_PASSED;
     if (!ok)
-        fpr_fail(reply, "PRESENCE_POST_REFUSED",
+        zcl_presence_fail(reply, "PRESENCE_POST_REFUSED",
                  sr.error.message[0] ? sr.error.message
                                      : "the mail leaf did not accept the presence row; nothing was posted",
                  sr.error.code[0] ? sr.error.code : "dev.agent.mail");
@@ -296,30 +273,160 @@ static bool fpr_post(const struct zcl_command_request *req,
     return ok;
 }
 
-void zcl_native_handle_fleet_steer_presence(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+
+void zcl_presence_reply_skipped(struct zcl_command_reply *reply,
+                                const char *role, const char *why)
 {
-    struct fpr_in in;
-    char host[96], now[32], ref[64], body[512];
-    long long seq = -1;
+    (void)json_push_kv_str(&reply->data, "role", role);
+    (void)json_push_kv_bool(&reply->data, "skipped", true);
+    (void)json_push_kv_str(&reply->data, "reason", why);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+}
+
+/* Role, phase and pid: the fields every caller states. */
+static bool fpr_validate(struct zcl_command_reply *reply,
+                         const struct zcl_presence_in *in)
+{
+    if (!in->role || !fpr_value_ok(in->role, FPR_ROLE_MAX, false) ||
+        strpbrk(in->role, ":@+")) {
+        zcl_presence_fail(reply, "PRESENCE_BAD_ROLE",
+                 "role must be 1..32 characters of letters, digits, '.', '_' or '-' (for example A, B or claude-main), and no credential-shaped text",
+                 "role");
+        return false;
+    }
+    if (!fpr_phase_ok(in->phase)) {
+        zcl_presence_fail(reply, "PRESENCE_BAD_PHASE",
+                 "phase must be one of active, running, build, test, blocked or completed; the first four count as active work, completed ends the session",
+                 "phase");
+        return false;
+    }
+    if (!fpr_pid_live(in->pid)) {
+        zcl_presence_fail(reply, "PRESENCE_PID_NOT_LIVE",
+                 "pid must name a running process on this host; a dead or missing pid is refused (this is a self-report, not proof of who the caller is)",
+                 "pid");
+        return false;
+    }
+    return true;
+}
+
+/* A repeat of the same role and phase inside the floor adds no ledger row. */
+static bool fpr_floor_hit(const struct zcl_presence_rec *rec, bool have,
+                          const char *phase, long long now)
+{
+    return have && rec->beat <= now && now - rec->beat < ZCL_PRESENCE_FLOOR_S &&
+           strcmp(rec->phase, phase) == 0;
+}
+
+/* Mail ts has one-second resolution and the reader keeps the row it saw
+ * first on a tie, so a completed row in the second of the previous post
+ * would be ignored: wait out that second. */
+static long long fpr_settle(const struct zcl_presence_rec *rec, bool have,
+                            const char *phase, long long now)
+{
+    if (have && strcmp(phase, "completed") == 0 && rec->beat >= now) {
+        platform_sleep_ms(1100);
+        return (long long)platform_time_wall_time_t();
+    }
+    return now;
+}
+
+static void fpr_record(const struct zcl_presence_in *in,
+                       const char *started, long long now)
+{
+    struct zcl_presence_rec rec;
+    memset(&rec, 0, sizeof(rec));
+    (void)snprintf(rec.owner, sizeof(rec.owner), "%s", in->owner ? in->owner : "");
+    (void)snprintf(rec.started, sizeof(rec.started), "%s", started);
+    (void)snprintf(rec.phase, sizeof(rec.phase), "%s", in->phase);
+    rec.beat = now;
+    if (!zcl_presence_rec_store(in->role, &rec))
+        LOG_WARN(FPR_LOG, "cannot record presence state for role %s", in->role);
+}
+
+/* The start of the session this row continues: the caller's, else the
+ * recorded start of a still-live row of the same owner, else now. */
+static const char *fpr_started(const struct zcl_presence_in *in,
+                               const struct zcl_presence_rec *rec, bool have,
+                               long long now, const char *now_ts)
+{
+    if (in->started)
+        return in->started;
+    if (have && rec->started[0] && strcmp(rec->phase, "completed") != 0 &&
+        rec->beat <= now && now - rec->beat < FPR_WINDOW_S &&
+        strcmp(rec->owner, in->owner ? in->owner : "") == 0)
+        return rec->started;
+    return now_ts;
+}
+
+void zcl_presence_emit(const struct zcl_command_request *req,
+                       struct zcl_command_reply *reply,
+                       const struct zcl_presence_in *in)
+{
+    struct zcl_presence_in w = *in;
+    struct zcl_presence_rec rec;
+    char host[96], now_ts[32], ref[64], body[512], sess[72];
+    long long seq = -1, now = (long long)platform_time_wall_time_t();
+    bool have;
     zcl_agents_host_name(host, sizeof(host));
-    fpr_now_ts(now, sizeof(now));
-    if (!fpr_read(request, reply, &in) || !fpr_check(reply, &in, host))
+    if (!fpr_validate(reply, in))
         return;
-    if (!now[0] || !fpr_body(body, sizeof(body), &in, host, now)) {
-        fpr_fail(reply, "PRESENCE_BAD_FIELD",
+    have = in->role && zcl_presence_rec_load(in->role, &rec);
+    if (fpr_floor_hit(&rec, have, in->phase, now)) {
+        zcl_presence_reply_skipped(reply, in->role,
+                                   "the same role and phase was posted less than 60 s ago");
+        return;
+    }
+    now = fpr_settle(&rec, have, in->phase, now);
+    fpr_now_ts(now_ts, sizeof(now_ts));
+    if (!w.session) {
+        (void)snprintf(sess, sizeof(sess), "r-%s", in->role);
+        w.session = sess;
+    }
+    w.started = fpr_started(in, &rec, have, now, now_ts);
+    if (!fpr_check(reply, &w, host))
+        return;
+    if (!now_ts[0] || !fpr_body(body, sizeof(body), &w, host, now_ts)) {
+        zcl_presence_fail(reply, "PRESENCE_BAD_FIELD",
                  "the presence line could not be built within its size bound; shorten task or source",
                  "body");
         return;
     }
-    (void)snprintf(ref, sizeof(ref), "presence-%s", in.role);
-    if (!fpr_post(request, reply, ref, body, &seq))
+    (void)snprintf(ref, sizeof(ref), "presence-%s", in->role);
+    if (!fpr_post(req, reply, ref, body, &seq))
         return;
+    fpr_record(&w, w.started, now);
     (void)json_push_kv_str(&reply->data, "ref", ref);
+    (void)json_push_kv_str(&reply->data, "role", in->role);
     (void)json_push_kv_str(&reply->data, "body", body);
     (void)json_push_kv_int(&reply->data, "seq", seq);
     (void)json_push_kv_int(&reply->data, "live_window_s", FPR_WINDOW_S);
     (void)json_push_kv_int(&reply->data, "repeat_every_s", FPR_REPEAT_S);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
+}
+
+void zcl_native_handle_fleet_steer_presence(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    struct zcl_presence_in in;
+    const char *hook = zcl_presence_str(request, "hook");
+    if (hook) {
+        zcl_presence_hook(request, reply, hook);
+        return;
+    }
+    memset(&in, 0, sizeof(in));
+    in.role = zcl_presence_str(request, "role");
+    in.task = zcl_presence_str(request, "task");
+    in.phase = zcl_presence_str(request, "phase");
+    in.session = zcl_presence_str(request, "session");
+    in.started = zcl_presence_str(request, "started");
+    in.source = zcl_presence_str(request, "source");
+    if (!zcl_presence_pid_in(request, &in.pid)) {
+        zcl_presence_fail(reply, "PRESENCE_PID_NOT_LIVE",
+                 "pid must be a whole number naming a running process on this host",
+                 "pid");
+        return;
+    }
+    zcl_presence_emit(request, reply, &in);
 }

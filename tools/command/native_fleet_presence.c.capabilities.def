@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_presence.c", CAP_PROCESS|CAP_CLOCK, "Probes with kill(pid, 0) that a stated pid names a live process (sends no signal) and waits at most 1.1 s so a completed row lands in a later second than the previous post; posts through the dev.agent.mail leaf in process")
