@@ -171,6 +171,11 @@ bool mcp_select_valid(const struct json_value *select, const char **why);
 bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
                       const struct json_value *select);
 
+/* Project a packet onto every structured data member except the duplicate
+ * Markdown rendering. False leaves out untouched; valid JSON that cannot be
+ * parsed for lack of memory sets out->oom. */
+bool mcp_compact_packet_reply(struct mcp_buf *out, const char *text, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

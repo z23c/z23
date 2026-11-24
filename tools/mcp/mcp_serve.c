@@ -104,7 +104,10 @@ static const struct mcp_tool mcp_tools[] = {
      "sub=guide with input {paths:[files you will touch], topic?, budget?}: one "
      "brief of AGENTS.md rules, test groups, wiki lessons and first commands. "
      "sub is guide, capsule, tests, "
-     "impact or packet (when available); input is that leaf's input. select "
+     "impact or packet (when available); input is that leaf's input. Packet "
+     "defaults to structured data without the duplicate Markdown field; use "
+     "select [data.markdown] for prose or select [data] for the full packet. "
+     "select "
      "works as in z23_run." MCP_DATA_NOTE,
      "{\"type\":\"object\",\"properties\":{\"sub\":{\"type\":\"string\","
      "\"enum\":[\"guide\",\"capsule\",\"tests\",\"impact\",\"packet\"]},\"input\":"
@@ -1455,6 +1458,21 @@ static void exec_select(struct mcp_buf *text, const char *reply, size_t n,
     mcp_buf_free(&picked);
 }
 
+static void exec_compact_packet(struct mcp_buf *text, const char *reply,
+                                size_t n, size_t budget, bool *is_error)
+{
+    struct mcp_buf picked;
+    mcp_buf_init(&picked);
+    if (!mcp_compact_packet_reply(&picked, reply, n) || picked.oom) {
+        text_error(text, picked.oom ? "OUT_OF_MEMORY" : "EXECUTE_FAILED",
+                   "cannot compact the packet reply");
+        *is_error = true;
+    } else {
+        mcp_cap_text(text, picked.p, picked.len, budget);
+    }
+    mcp_buf_free(&picked);
+}
+
 static bool tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
                       const struct json_value *args, struct mcp_buf *text,
                       bool *is_error)
@@ -1466,6 +1484,7 @@ static bool tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
     bool alias;
     size_t n;
     const struct json_value *select = json_get(args, "select");
+    bool compact_packet = false;
     const char *bad_select = NULL;
     if (!resolve_target(s, tool, args, &spec, &alias, &input, &why)) {
         if (why.did_you_mean_json)
@@ -1480,6 +1499,8 @@ static bool tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
         *is_error = true;
         return true;
     }
+    compact_packet = !select && tool == &mcp_tools[T_CODE] &&
+                     strcmp(spec->path, "code.packet") == 0;
     /* budget 0: take the leaf's whole reply, then cap it here so truncation
      * is flagged in the text instead of the registry dropping the reply. */
     n = zcl_command_registry_execute_json(s->cmd.registry, spec, &s->cmd, input,
@@ -1493,7 +1514,9 @@ static bool tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
     }
     *is_error = code != ZCL_COMMAND_EXIT_OK;
     /* A failed command keeps its whole reply: the error is the answer. */
-    if (select && !*is_error)
+    if (compact_packet && !*is_error)
+        exec_compact_packet(text, s->out, n, arg_budget(args), is_error);
+    else if (select && !*is_error)
         exec_select(text, s->out, n, select, arg_budget(args), is_error);
     else
         mcp_cap_text(text, s->out, n, arg_budget(args));

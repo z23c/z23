@@ -567,6 +567,39 @@ bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
     return true;
 }
 
+bool mcp_compact_packet_reply(struct mcp_buf *out, const char *text, size_t n)
+{
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, text, n)) {
+        out->oom = out->oom || json_valid(text, n);
+        return false;
+    }
+    const struct json_value *data = json_get(&doc, "data");
+    if (doc.type != JSON_OBJ || !data || data->type != JSON_OBJ) {
+        json_free(&doc);
+        return false;
+    }
+    mcp_buf_str(out, "{\"ok\":");
+    mcp_select_walk(out, json_get(&doc, "ok"), "");
+    mcp_buf_str(out, ",\"status\":");
+    mcp_select_walk(out, json_get(&doc, "status"), "");
+    mcp_buf_str(out, ",\"select\":{\"data\":{");
+    const char *sep = "";
+    for (size_t i = 0; i < json_size(data); i++) {
+        if (strcmp(data->keys[i], "markdown") == 0)
+            continue;
+        mcp_buf_str(out, sep);
+        sep = ",";
+        mcp_buf_json_str(out, data->keys[i]);
+        mcp_buf_str(out, ":");
+        mcp_select_walk(out, &data->children[i], "");
+    }
+    mcp_buf_str(out, "}}}");
+    json_free(&doc);
+    return true;
+}
+
 static void mcp_cap_raw(struct mcp_buf *out, const char *text, size_t n,
                         size_t max_bytes)
 {

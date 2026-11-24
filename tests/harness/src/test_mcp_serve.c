@@ -768,7 +768,7 @@ static int case_select(struct ms *m)
     return failures;
 }
 
-static int case_code(struct ms *m)
+static int case_code(struct ms *m, const char *checkout)
 {
     int failures = 0;
     TEST_CASE("z23_code runs code leaves read-only") {
@@ -778,6 +778,52 @@ static int case_code(struct ms *m)
                        "{\"sub\":\"tests\",\"input\":"
                        "{\"path\":\"tools/mcp/mcp_rpc.c\"}}"));
         ASSERT(has(m, "\"result\""));
+        char tools[PATH_MAX + 32], mcp[PATH_MAX + 48];
+        snprintf(tools, sizeof(tools), "%s/tools", checkout);
+        snprintf(mcp, sizeof(mcp), "%s/tools/mcp", checkout);
+        ASSERT(mkdir(tools, 0700) == 0);
+        ASSERT(mkdir(mcp, 0700) == 0);
+        char source[8192];
+        size_t off = (size_t)snprintf(source, sizeof(source),
+            "/* MCP packet fixture. */\nint mcp_rpc_answer(int x)\n{\n");
+        for (int i = 0; i < 80; i++)
+            off += (size_t)snprintf(source + off, sizeof(source) - off,
+                "    x += %d; /* duplicate source context padding padding */\n", i);
+        off += (size_t)snprintf(source + off, sizeof(source) - off,
+            "    return x;\n}\n");
+        ASSERT(off < sizeof(source));
+        ASSERT(ms_write_page(mcp, "mcp_rpc.c", source));
+        ASSERT(ms_tool(m, 18, "z23_run", "{\"path\":\"code.map\"}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(ms_tool(m, 19, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(!has(m, "data.markdown"));
+        ASSERT(!has(m, "\\\"markdown\\\":"));
+        ASSERT(has(m, "\\\"excerpts\\\":"));
+        size_t compact = strlen(m->line);
+        ASSERT(ms_tool(m, 20, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"select\":[\"data\"],\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(has(m, "\\\"excerpts\\\":"));
+        ASSERT(has(m, "\\\"markdown\\\":"));
+        size_t full = strlen(m->line);
+        printf("compact=%zu full=%zu\n", compact, full);
+        ASSERT(compact * 2 < full);
+        ASSERT(ms_tool(m, 21, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"select\":[\"data.markdown\"],\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(has(m, "data.markdown"));
+        ASSERT(!has(m, "\\\"excerpts\\\":"));
     } TEST_END
     return failures;
 }
@@ -1353,7 +1399,7 @@ static int case_session(const char *home, const char *checkout)
     failures += case_plan_commit(&m, home, checkout);
     failures += case_budget(&m);
     failures += case_select(&m);
-    failures += case_code(&m);
+    failures += case_code(&m, checkout);
     failures += case_malformed(&m);
     failures += case_nul_frame(&m);
     failures += case_wire_version(&m);
