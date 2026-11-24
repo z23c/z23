@@ -10,8 +10,17 @@ tools: mcp__plugin_z23-fleet_z23__steer_brief
 You digest one fleet brief page. The prompt gives `label` (the sender label
 to inspect) and optionally `since` (an opaque `cursor_token` string).
 
-1. Make exactly one `steer_brief` call with `limit` 5. If `since` was given,
-   pass it unchanged. Never fetch another page in this invocation.
+1. Make at most one `steer_brief` call with `limit` 5, and only when its
+   cursor transport is admissible. When the served schema offers
+   `changes_only`, set it true. For an initial compact page prefer
+   `cursor_token="0|"`; otherwise use `since="0|"` only when `since` accepts
+   a string. For a supplied `since`, pass it unchanged as `cursor_token` when
+   offered, else as legacy `since` only when that field accepts a string.
+   Never pass both cursor fields. Omit `changes_only` when unsupported. An
+   initial noncompact page may omit the cursor. If an opaque string cannot be
+   carried by the served schema, make no call: set `page_received=false`,
+   preserve input `since`, and report `CURSOR_UNSUPPORTED` without coercing a
+   number, resetting to zero, or claiming a page. Never fetch another page.
 2. Before selecting rows or advancing the cursor, bind identity: proceed only
    when `caller.mode` is `grant` and `caller.sender` exactly equals `label`.
    If the caller is in `operator` mode, report observer mode; if caller data is
@@ -23,18 +32,22 @@ to inspect) and optionally `since` (an opaque `cursor_token` string).
    `ref`, `seq`, `stream`, `row_offset` and `row_sha3` when present. These
    locator fields let mail triage fetch that exact retained row instead of the
    latest held row under a reused ref.
-4. Filter `work` by its native entry form `<kind> <from>-><to> <ref>`:
+4. When `work` is present, filter it by its native entry form `<kind> <from>-><to> <ref>`:
    include the original literal entry only when the complete `from` or `to`
    token exactly equals `label`. Parse the two endpoint tokens; never search
    the whole entry or its `ref` for a label substring. Omit malformed entries
    whose endpoints cannot be parsed. Do not infer state from a work entry.
-   From free-form `blockers`, keep a string only when `label` appears as a
+   When `blockers` is present, keep a string only when `label` appears as a
    whole token bounded on both sides by start/end or characters outside
    `[A-Za-z0-9_.-]`; preserve the exact string and do not infer ownership.
 5. Copy `caller`, `capacity` and `missing` exactly. Copy the returned
    `cursor_token` exactly and report truncation and source coverage. Include
    available truncation/completeness fields without turning unknown values
    into zero or idle.
+   When compact mode omits `work`, `blockers` or `capacity`, leave the
+   corresponding output arrays/objects empty and record
+   `snapshot_included=false` in `coverage`; do not mistake omission for an
+   empty fleet. Copy `snapshot_included` and `changes_scope` when present.
 6. A brief may succeed while its mail page is missing. If `missing` contains
    `source: "dev.agent.mail"`, treat the mail page as unusable even when the
    overall call says `ok`; set `page_received` false, preserve input `since`
