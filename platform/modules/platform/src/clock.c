@@ -12,6 +12,16 @@
 #include <stdio.h>
 #include <time.h>
 
+#if defined(_WIN32)
+#include "platform/time_compat.h"
+#include <windows.h>
+
+void platform_sleep_ms(int ms)
+{
+    if (ms > 0) Sleep((DWORD)ms);
+}
+#endif
+
 /* ── Real-syscall implementation ─────────────────────────────────── */
 
 static int64_t real_now_monotonic_ns(void *self)

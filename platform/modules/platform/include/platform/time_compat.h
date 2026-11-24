@@ -14,9 +14,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 static inline int64_t platform_time_wall_unix(void)
 {
@@ -72,14 +69,14 @@ static inline int64_t platform_time_monotonic_ms(void)
 /* Sleep helper: deliberately uses raw nanosleep and does NOT route
  * through platform.clock — sleeping is not a clock read. Matches the
  * prior behavior of the per-service sleep_ms wrappers it replaces. */
+#if defined(_WIN32)
+void platform_sleep_ms(int ms);
+#else
 static inline void platform_sleep_ms(int ms)
 {
-#if defined(_WIN32)
-    if (ms > 0) Sleep((DWORD)ms);
-#else
     struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
     nanosleep(&ts, NULL);
-#endif
 }
+#endif
 
 #endif /* ZCL_PLATFORM_TIME_COMPAT_H */
