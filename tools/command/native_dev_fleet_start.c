@@ -45,13 +45,19 @@
  *              muse-, oc_, eu-: name, minutes. BRIDGE: a running unit is
  *              evidence of ACTIVITY, never of a result. Verdicts come from
  *              receipts in a later increment, never from a scratch .out file.
- *   hosts      one row per <host>.jsonl in the board dir: host, the last
- *              `offer` row's text and ts, and the last ts posted by any agent
- *              other than the two automated ones.
+ *   hosts      one row per host seen in the newest posts or the newest
+ *              offers (native: three bounded calls; legacy: one row per
+ *              <host>.jsonl in the board dir): host, its newest `offer`
+ *              row's text and ts, and the last ts posted by any agent other
+ *              than the two automated ones (newest-posts window only).
+ *              `truncated` when either window holds more rows than it
+ *              returned, since a host with no row in them is then unseen.
  *   board      unanswered rows: every `need` or `problem` whose `id` is not
  *              the `ref` of a LATER `claim`/`result`, newest first, `text`
  *              cut to 160 bytes on a UTF-8 boundary, automated agents
- *              excluded. With `since`, only rows newer than it.
+ *              excluded. Legacy `since`: only rows newer than it. Native:
+ *              all open rows, each with `new` (created after the cursor).
+ *              `total` counts the rows the section is drawn from.
  *   main       origin/main short head, subject, age in hours, and the red
  *              lint gates this checkout's own receipt chain reports (read
  *              through zcl_dev_fleet_receipts_json — the same reader
@@ -73,8 +79,9 @@
  * Git is the only authority for refs and worktrees. The signed native board
  * is the only authority for fleet posts and it is read through the existing
  * fleet.board.list call (the same store `fleet board list` reads, default
- * scope rules, limit FS_NATIVE_LIMIT, one bounded deadline) — two calls: the
- * newest posts and the open ones. A node that does not answer makes the
+ * scope rules, limit FS_NATIVE_LIMIT, one bounded deadline) — three calls: the
+ * newest posts, the open ones and the newest offers. A node that does not
+ * answer makes the
  * board and hosts sections `unavailable` with reason source_unavailable; it
  * never reads as an empty board. The legacy per-host directory is read only
  * when `board_dir` is passed, and is labelled `legacy_file`. Both sections
@@ -140,9 +147,10 @@
 #define FS_CAPTURE_BYTES (1024u * 1024u)
 #define FS_MAX_WORKTREES 1024u
 #define FS_MAX_BOARD_ROWS 8192u
-/* Native board window: one call for the newest posts, one for the open ones. */
+/* Native board window: one call for the newest posts, one for the open
+ * ones, one for the newest offers (hosts). Segments of FS_NATIVE_LIMIT. */
 #define FS_NATIVE_LIMIT 20u
-#define FS_NATIVE_ROWS (2u * FS_NATIVE_LIMIT)
+#define FS_NATIVE_ROWS (3u * FS_NATIVE_LIMIT)
 #define FS_MAX_HOSTS 64u
 #define FS_MAX_UNITS 64u
 #define FS_TEXT_CUT 160u
@@ -516,8 +524,8 @@ static bool fs_board_read(const char *dir, struct fs_board_row *rows,
 /* ── native board: the existing fleet.board.list call ────────────────────
  * The node answers with the newest posts first; rows land oldest-first so
  * the walks below read them exactly like the legacy sorted array. Ids are
- * content hashes here, so ORDER comes from `at` (created_at seconds), never
- * from comparing ids. */
+ * content hashes here, so they are never compared: order is the node's own
+ * array order (newest first), reversed once in fs_native_rows. */
 
 static void fs_native_row(const struct json_value *post,
                           struct fs_board_row *out)
@@ -984,6 +992,8 @@ struct fs_start {
     size_t board_count;
     size_t open_count;   /* native: open posts, in board + FS_NATIVE_LIMIT */
     bool open_more;      /* native: the node holds more open posts */
+    size_t offer_count;  /* native: offers, in board + 2 * FS_NATIVE_LIMIT */
+    bool hosts_more;     /* native: newest posts or offers hold more rows */
     bool native;         /* source is the node board, not board_dir */
     size_t board_cap;
     size_t unit_count;
@@ -1445,21 +1455,29 @@ static void fs_section_units(struct fs_start *st)
     json_free(&sec);
 }
 
-/* Newest posts (hosts, freshness) and open posts (the unanswered list)
- * under one deadline; open posts need ids only when the node says so. */
+/* Newest posts (freshness, last agent), open posts (the unanswered list) and
+ * newest offers (each host's offer) under one deadline. `hosts_more` is set
+ * when either the posts or the offers hold rows beyond the window, so the
+ * hosts section can say it may be missing hosts. */
 static bool fs_native_load(struct fs_start *st,
                            const struct zcl_command_request *request)
 {
     int64_t deadline = platform_time_monotonic_ms() +
                        ZCL_COMMAND_LATENCY_BUDGET_FAST_MS;
-    bool more_recent = false;
-    return fs_native_list(request, "{\"limit\":20}", deadline, st->board,
-                          &st->board_count, &more_recent, st->board_why,
-                          sizeof(st->board_why)) &&
-           fs_native_list(request, "{\"open\":true,\"limit\":20}", deadline,
-                          st->board + FS_NATIVE_LIMIT, &st->open_count,
-                          &st->open_more, st->board_why,
-                          sizeof(st->board_why));
+    bool more_recent = false, more_offers = false;
+    bool ok = fs_native_list(request, "{\"limit\":20}", deadline, st->board,
+                             &st->board_count, &more_recent, st->board_why,
+                             sizeof(st->board_why)) &&
+              fs_native_list(request, "{\"open\":true,\"limit\":20}", deadline,
+                             st->board + FS_NATIVE_LIMIT, &st->open_count,
+                             &st->open_more, st->board_why,
+                             sizeof(st->board_why)) &&
+              fs_native_list(request, "{\"kind\":\"offer\",\"limit\":20}",
+                             deadline, st->board + 2u * FS_NATIVE_LIMIT,
+                             &st->offer_count, &more_offers, st->board_why,
+                             sizeof(st->board_why));
+    st->hosts_more = more_recent || more_offers;
+    return ok;
 }
 
 static void fs_board_load(struct fs_start *st,
@@ -1474,6 +1492,8 @@ static void fs_board_load(struct fs_start *st,
     if (!st->board_ok) {
         st->board_count = 0;
         st->open_count = 0;
+        st->offer_count = 0;
+        st->hosts_more = false;
     }
     if (st->board_ok && st->board_count)
         (void)snprintf(st->newest_board_id, sizeof(st->newest_board_id),
@@ -1482,7 +1502,8 @@ static void fs_board_load(struct fs_start *st,
 
 /* Where the rows came from and how fresh they are. Written into the hosts
  * and board sections so a stale source can never pass for a quiet fleet.
- * `newest_age_s` is -1 when the source carries no created_at (legacy). */
+ * `newest_age_s` is -1 when there is no row; legacy rows carry their ts
+ * through fs_iso_epoch, which reads only "Z" (UTC) stamps. */
 static void fs_board_source_fields(const struct fs_start *st,
                                    struct json_value *sec)
 {
@@ -1502,21 +1523,33 @@ static void fs_board_source_fields(const struct fs_start *st,
     (void)json_push_kv_int(sec, "newest_age_s", age);
 }
 
+/* Where the offers live: native keeps them in their own segment (the newest
+ * offers, whatever their age); legacy offers are rows of the one array. */
+static const struct fs_board_row *fs_offer_src(const struct fs_start *st,
+                                               size_t *count)
+{
+    *count = !st->board_ok ? 0 : st->native ? st->offer_count : st->board_count;
+    return st->native ? st->board + 2u * FS_NATIVE_LIMIT : st->board;
+}
+
+static void fs_host_add(char hosts[][80], size_t *host_count,
+                        const char *name)
+{
+    for (size_t j = 0; j < *host_count; j++)
+        if (strcmp(hosts[j], name) == 0) return;
+    if (*host_count < FS_MAX_HOSTS)
+        (void)snprintf(hosts[(*host_count)++], sizeof(hosts[0]), "%s", name);
+}
+
 static size_t fs_host_collect(const struct fs_start *st, char hosts[][80])
 {
-    size_t host_count = 0;
+    size_t host_count = 0, n;
+    const struct fs_board_row *offers = fs_offer_src(st, &n);
 
-    for (size_t i = 0; st->board_ok && i < st->board_count; i++) {
-        bool seen = false;
-        for (size_t j = 0; j < host_count; j++)
-            if (strcmp(hosts[j], st->board[i].fhost) == 0) {
-                seen = true;
-                break;
-            }
-        if (!seen && host_count < FS_MAX_HOSTS)
-            (void)snprintf(hosts[host_count++], sizeof(hosts[0]), "%s",
-                           st->board[i].fhost);
-    }
+    for (size_t i = 0; st->board_ok && i < st->board_count; i++)
+        fs_host_add(hosts, &host_count, st->board[i].fhost);
+    for (size_t i = 0; st->native && i < n; i++)
+        fs_host_add(hosts, &host_count, offers[i].fhost);
     return host_count;
 }
 
@@ -1530,15 +1563,18 @@ static size_t fs_host_rows(struct fs_start *st, char hosts[][80],
         struct json_value row;
         const char *offer_text = "", *offer_ts = "", *last_human_ts = "";
         char cut[FS_TEXT_CUT + 8];
-        size_t next_len;
+        size_t next_len, offer_n;
+        const struct fs_board_row *offers = fs_offer_src(st, &offer_n);
         for (size_t i = 0; i < st->board_count; i++) {
             if (strcmp(st->board[i].fhost, hosts[h]) != 0) continue;
-            if (strcmp(st->board[i].kind, "offer") == 0) {
-                offer_text = st->board[i].text;
-                offer_ts = st->board[i].ts;
-            }
             if (!fs_board_automated(st->board[i].agent))
                 last_human_ts = st->board[i].ts;
+        }
+        for (size_t i = 0; i < offer_n; i++) {
+            if (strcmp(offers[i].fhost, hosts[h]) != 0 ||
+                strcmp(offers[i].kind, "offer") != 0) continue;
+            offer_text = offers[i].text;
+            offer_ts = offers[i].ts;
         }
         fs_cut_utf8(offer_text, FS_TEXT_CUT, cut, sizeof(cut));
         json_init(&row);
@@ -1584,7 +1620,7 @@ static void fs_section_hosts(struct fs_start *st)
     json_init(&sec);
     fs_head(&sec, st->board_ok ? "observed" : "unavailable",
             (long long)emitted, (long long)host_count,
-            emitted < host_count);
+            emitted < host_count || st->hosts_more);
     fs_board_source_fields(st, &sec);
     if (!st->board_ok) (void)json_push_kv_str(&sec, "reason", st->board_why);
     (void)json_push_kv(&sec, "rows", &rows);
@@ -1603,15 +1639,31 @@ static const struct fs_board_row *fs_board_src(const struct fs_start *st,
     return st->native ? st->board + FS_NATIVE_LIMIT : st->board;
 }
 
-/* Rows already reported in an earlier packet: legacy ids sort by time, native
- * ids are hashes, so native compares created_at with the cursor's seconds. */
+/* Rows already reported in an earlier packet. Legacy ids sort by time. Native
+ * ids are hashes and created_at is the AUTHOR's clock, while a post can reach
+ * this node later by gossip, so no native post is ever filtered by time: the
+ * open set is state, always reported in full (it shrinks when a claim or
+ * result lands). A native row says `new` instead (see fs_board_new). */
 static bool fs_board_seen(const struct fs_start *st,
                           const struct fs_board_row *r)
 {
-    if (!st->since.present) return false;
-    if (st->native)
-        return r->at > 0 && r->at <= st->since.unix_seconds;
+    if (!st->since.present || st->native) return false;
     return strcmp(r->id, st->since.board_id) <= 0;
+}
+
+/* Native rows only: created after the cursor was issued, by the author's
+ * clock. Advisory; absence of the flag never hides a row. */
+static bool fs_board_new(const struct fs_start *st,
+                         const struct fs_board_row *r)
+{
+    return st->since.present && r->at > st->since.unix_seconds;
+}
+
+/* What `total` counts: the rows the section is drawn from (native: the open
+ * posts, not the unrelated newest-posts window). */
+static long long fs_board_total(const struct fs_start *st)
+{
+    return (long long)(st->native ? st->open_count : st->board_count);
 }
 
 static bool fs_board_wanted(const struct fs_start *st,
@@ -1669,6 +1721,8 @@ static size_t fs_board_rows(struct fs_start *st, struct json_value *rows,
         (void)json_push_kv_str(&row, "agent", r->agent);
         (void)json_push_kv_str(&row, "kind", r->kind);
         (void)json_push_kv_str(&row, "text", cut);
+        if (st->native && st->since.present)
+            (void)json_push_kv_bool(&row, "new", fs_board_new(st, r));
         next_len = rows_len + fs_len(&st->ctx, &row) + 1u;
         if (!fs_row_fits(&st->ctx, st->data, "board", head_len, next_len)) {
             json_free(&row);
@@ -1692,7 +1746,7 @@ static void fs_section_board(struct fs_start *st)
 
     json_init(&head_probe);
     fs_head(&head_probe, "observed", (long long)st->unanswered_total,
-            (long long)st->board_count, false);
+            fs_board_total(st), false);
     (void)json_push_kv_int(&head_probe, "unanswered",
                            (long long)st->unanswered_total);
     fs_board_source_fields(st, &head_probe);
@@ -1707,7 +1761,7 @@ static void fs_section_board(struct fs_start *st)
 
     json_init(&sec);
     fs_head(&sec, st->board_ok ? "observed" : "unavailable",
-            (long long)emitted, (long long)st->board_count,
+            (long long)emitted, fs_board_total(st),
             emitted < st->unanswered_total || st->open_more);
     (void)json_push_kv_int(&sec, "unanswered",
                            (long long)st->unanswered_total);
@@ -1715,8 +1769,7 @@ static void fs_section_board(struct fs_start *st)
     (void)json_push_kv_bool(&sec, "more_open", st->open_more);
     if (!st->board_ok) (void)json_push_kv_str(&sec, "reason", st->board_why);
     (void)json_push_kv(&sec, "rows", &rows);
-    (void)fs_commit(&st->ctx, st->data, "board", &sec,
-                    (long long)st->board_count);
+    (void)fs_commit(&st->ctx, st->data, "board", &sec, fs_board_total(st));
     json_free(&rows);
     json_free(&sec);
 }

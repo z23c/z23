@@ -525,20 +525,30 @@ _test_next:;
 static int g_fsx_rpc_calls;
 static bool g_fsx_rpc_down;
 static char g_fsx_rpc_params[4][160];
-static char g_fsx_ids[3][65];
+static char g_fsx_ids[4][65];
 
 static char *fsx_node_hook(const char *method, const char *params)
 {
     long long now = (long long)time(NULL);
     char body[2048];
     bool open = params && strstr(params, "\"open\":true") != NULL;
+    bool offers = params && strstr(params, "\"kind\":\"offer\"") != NULL;
     if (g_fsx_rpc_calls < 4)
         (void)snprintf(g_fsx_rpc_params[g_fsx_rpc_calls], 160, "%s",
                        params ? params : "");
     g_fsx_rpc_calls++;
     if (g_fsx_rpc_down || !method || strcmp(method, "fleet_board") != 0)
         return NULL;
-    if (open)
+    if (offers)
+        (void)snprintf(body, sizeof(body),
+            "{\"ok\":true,\"has_more\":true,\"posts\":["
+            "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostA\","
+            "\"agent\":\"a1\",\"kind\":\"offer\",\"text\":\"hostA offers\"},"
+            "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostC\","
+            "\"agent\":\"c1\",\"kind\":\"offer\",\"text\":\"hostC offers\"}"
+            "]}",
+            g_fsx_ids[2], now - 7200, g_fsx_ids[3], now - 90000);
+    else if (open)
         (void)snprintf(body, sizeof(body),
             "{\"ok\":true,\"has_more\":false,\"posts\":[{\"id\":\"%s\","
             "\"created_at\":%lld,\"host\":\"hostA\",\"agent\":\"a1\","
@@ -546,23 +556,20 @@ static char *fsx_node_hook(const char *method, const char *params)
             g_fsx_ids[1], now - 3600);
     else
         (void)snprintf(body, sizeof(body),
-            "{\"ok\":true,\"has_more\":false,\"posts\":["
+            "{\"ok\":true,\"has_more\":true,\"posts\":["
             "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostB\","
             "\"agent\":\"w1\",\"kind\":\"note\",\"text\":\"fresh\"},"
             "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostA\","
-            "\"agent\":\"a1\",\"kind\":\"need\",\"text\":\"need the lane\"},"
-            "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostA\","
-            "\"agent\":\"a1\",\"kind\":\"offer\",\"text\":\"hostA offers\"}"
+            "\"agent\":\"a1\",\"kind\":\"need\",\"text\":\"need the lane\"}"
             "]}",
-            g_fsx_ids[0], now - 60, g_fsx_ids[1], now - 3600,
-            g_fsx_ids[2], now - 7200);
+            g_fsx_ids[0], now - 60, g_fsx_ids[1], now - 3600);
     return strdup(body);
 }
 
 static int fsx_case_native_board(void)
 {
     int failures = 0;
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
         (void)snprintf(g_fsx_ids[i], sizeof(g_fsx_ids[i]), "%064d", i + 1);
 
     TEST("start: the default board is the live native board, with freshness") {
@@ -575,10 +582,11 @@ static int fsx_case_native_board(void)
         ASSERT(fsx_run(&c));
         node_rpc_client_set_test_hook(NULL);
         ASSERT(fsx_ok(&c));
-        /* One bounded call for the newest posts, one for the open ones. */
-        ASSERT_EQ(g_fsx_rpc_calls, 2);
+        /* Three bounded calls: newest posts, open posts, newest offers. */
+        ASSERT_EQ(g_fsx_rpc_calls, 3);
         ASSERT(strstr(g_fsx_rpc_params[0], "\"limit\":20") != NULL);
         ASSERT(strstr(g_fsx_rpc_params[1], "\"open\":true") != NULL);
+        ASSERT(strstr(g_fsx_rpc_params[2], "\"kind\":\"offer\"") != NULL);
         ASSERT_STR_EQ(fsx_sec_str(&c, "board", "state"), "observed");
         ASSERT_STR_EQ(fsx_sec_str(&c, "board", "source"), "native_board");
         ASSERT_EQ(fsx_sec_int(&c, "board", "unanswered"), 1);
@@ -592,7 +600,58 @@ static int fsx_case_native_board(void)
         ASSERT(fsx_sec_int(&c, "board", "newest_age_s") < 600);
         ASSERT(fsx_sec_str(&c, "board", "newest_ts")[0] != '\0');
         ASSERT_STR_EQ(fsx_sec_str(&c, "hosts", "source"), "native_board");
-        ASSERT_EQ(fsx_sec_int(&c, "hosts", "count"), 2);
+        /* hostC posted only an old offer, outside the newest-posts window:
+         * it must still be a row, and the window must say it is partial. */
+        ASSERT_EQ(fsx_sec_int(&c, "hosts", "count"), 3);
+        ASSERT(fsx_sec_bool(&c, "hosts", "truncated"));
+        const struct json_value *hrows = fsx_rows(&c, "hosts");
+        ASSERT(hrows != NULL);
+        size_t hosta = SIZE_MAX, hostc = SIZE_MAX;
+        for (size_t i = 0; i < 3; i++) {
+            if (!strcmp(fsx_row_str(hrows, i, "host"), "hostA")) hosta = i;
+            if (!strcmp(fsx_row_str(hrows, i, "host"), "hostC")) hostc = i;
+        }
+        ASSERT(hosta != SIZE_MAX && hostc != SIZE_MAX);
+        ASSERT_STR_EQ(fsx_row_str(hrows, hosta, "offer"), "hostA offers");
+        ASSERT_STR_EQ(fsx_row_str(hrows, hostc, "offer"), "hostC offers");
+        fsx_end(&c);
+        PASS();
+    }
+    return failures;
+_test_next:;
+    return failures;
+}
+
+static int fsx_case_native_delta(void)
+{
+    int failures = 0;
+    TEST("start: a native since packet still lists a post older than the cursor") {
+        struct fsx_call c;
+        char fresh[256];
+        g_fsx_rpc_down = false;
+        node_rpc_client_set_test_hook(fsx_node_hook);
+        fsx_begin(&c);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        ASSERT(fsx_ok(&c));
+        (void)snprintf(fresh, sizeof(fresh), "%s",
+                       json_get_str(json_get(&c.reply.data, "cursor")));
+        fsx_end(&c);
+        /* The need carries the author's clock (an hour ago) and reached this
+         * node after the cursor was issued: gossip can do that. */
+        fsx_begin(&c);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        (void)json_push_kv_str(&c.input, "since", fresh);
+        ASSERT(fsx_run(&c));
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(fsx_ok(&c));
+        ASSERT_EQ(fsx_sec_int(&c, "board", "unanswered"), 1);
+        const struct json_value *rows = fsx_rows(&c, "board");
+        ASSERT(rows != NULL);
+        ASSERT_EQ((long long)rows->num_children, 1);
+        ASSERT_STR_EQ(fsx_row_str(rows, 0, "id"), g_fsx_ids[1]);
+        /* total counts the open rows, not the unrelated newest-posts window. */
+        ASSERT_EQ(fsx_sec_int(&c, "board", "total"), 1);
         fsx_end(&c);
         PASS();
     }
@@ -797,6 +856,7 @@ int test_dev_fleet_start(void)
     }
 
     failures += fsx_case_native_board();
+    failures += fsx_case_native_delta();
     failures += fsx_case_native_down();
 
     /* (d) budget */

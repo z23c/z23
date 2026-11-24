@@ -1240,10 +1240,10 @@ ZCL_COMMAND_READY_READ(
     "defaults to the process working directory, and include_units is the "
     "systemd read. Pass the returned cursor back as since for the changes "
     "alone. It never fetches and never reads a datadir. The board is the "
-    "node's native board through fleet.board.list (limit 20, one bounded "
+    "node's native board through fleet.board.list (three calls of limit 20: newest posts, open posts, newest offers; one bounded "
     "deadline); a node that does not answer reads source_unavailable, and "
     "board_dir selects the legacy_file directory instead. Board and hosts "
-    "carry source, newest_ts and newest_age_s.", 16384,
+    "carry source, newest_ts and newest_age_s; hosts says truncated when the windows hold more, and a native since packet lists every open post with a new flag.", 16384,
     "fleet,orchestrator,start,orient,board,worktrees,units,cursor,budget",
     "zcl.fleet_start_input.v1", "zcl.fleet_start.v1",
     "since,budget_bytes,board_dir,include_units,cwd", "",

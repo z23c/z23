@@ -1396,7 +1396,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_devagent_start.c", CAP_FS_READ, "sta
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_ticketkey.c", CAP_FS_READ|CAP_FS_WRITE, "reads the ticket key material from disk and writes the derived key file back")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_receipts.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_start.c", CAP_FS_READ|CAP_FS_WRITE, "opens the board jsonl files, the forward plan and each worktree admin HEAD/index for reading; the write class comes with the stdio file API it uses, and this leaf never opens one for writing")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_start.c", CAP_FS_READ|CAP_FS_WRITE, "reads the board through fleet.board.list (and the legacy jsonl files only when board_dir is passed), the forward plan and each worktree admin HEAD/index for reading; the write class comes with the stdio file API it uses, and this leaf never opens one for writing")
 ZCL_MODULE_CAPABILITY("tools/command/native_fleet_command.c", CAP_FS_WRITE, "appends signed fleet-ledger rows under the datadir; host facts are read through the platform seam, never by opening /proc from this leaf")
 ZCL_MODULE_CAPABILITY("tools/command/native_fleet_enrol_command.c", CAP_FS_WRITE, "fleet.import and fleet.roster.head replace the owner fleet state through the fleet store (roster head, sequence record, pinned rows); fleet.join records the operator pin and creates this box's fleet key on first join; fleet.invite creates the key when absent")
 ZCL_MODULE_CAPABILITY("tools/command/native_fleet_vitals_read.c", CAP_FS_READ, "")
