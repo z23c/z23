@@ -2000,7 +2000,7 @@ static int case_guide_lessons(const char *home, const char *checkout,
         ASSERT(has(&m, "\"isError\":false"));
         ASSERT(has(&m, "WIKI_DEADLINE"));
         ASSERT(has(&m, "t-fast-exact ONLY="));
-        ASSERT(has(&m, "lint-preflight"));
+        ASSERT(has(&m, "lint-fast-preflight"));
         ASSERT(!has(&m, "make lint-fast"));
         ASSERT_EQ(ms_finish(&m), 0);
         ASSERT(ms_stop_child(&stub));

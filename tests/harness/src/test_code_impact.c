@@ -919,8 +919,8 @@ static int test_code_guide_next_commands(void)
             if (i < 2) {
                 ASSERT(verify);
                 ASSERT(json_size(json_get(&reply.data, "tests")) > 0);
-                ASSERT_EQ(preflight, i == 0);
-                ASSERT(!union_gate);
+                ASSERT(!preflight);
+                ASSERT_EQ(union_gate, i == 0);
             } else {
                 ASSERT(!verify && !preflight);
                 ASSERT_EQ(union_gate, i == 3);

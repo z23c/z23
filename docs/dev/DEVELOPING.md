@@ -615,7 +615,9 @@ git fetch origin main
 git rev-parse HEAD origin/main
 ```
 
-Read [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md), then consult:
+Follow the assigned task. If unassigned, run `build/bin/z23-dev fleet objectives brief`
+and consult the [current work order](../work/FORWARD_PLAN.md#now). For context, consult:
+<!-- claim: symbol-present zcl_native_handle_fleet_objectives_brief tools/command/native_fleet_objectives_brief.c # native work-card brief -->
 
 - [`HOW_THE_NODE_WORKS.md`](../node/HOW_THE_NODE_WORKS.md) for the state-machine mental
   model;

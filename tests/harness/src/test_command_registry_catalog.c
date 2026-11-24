@@ -844,7 +844,7 @@ static int test_code_guide_devagent_focus(void)
             ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
             const struct json_value *next = json_get(&reply.data, "next");
             ASSERT_STR_EQ(json_get_str(json_at(next, 0)), proof);
-            ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
+            ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-fast-preflight");
             ASSERT(brief_array_has(json_get(&reply.data, "tests"), group));
             ASSERT(brief_array_has(json_get(&reply.data, "tests"), "command_registry_catalog"));
             ASSERT(brief_array_has(json_get(&reply.data, "tests"), "make_lint_gates"));
@@ -914,7 +914,7 @@ static int test_code_guide_lint_catalog(void)
         next = json_get(&reply.data, "next");
         ASSERT_EQ(json_size(next), 4u);
         ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j8 t-fast-exact ONLY=test_make_lint_gates # first mapped group");
-        ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-fast-preflight");
         ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "build/bin/z23-lint run --list");
         ASSERT_STR_EQ(json_get_str(json_at(next, 3)),
                       "z23 ops host gc --apply=false");

@@ -986,7 +986,7 @@ static void cb_build_next(struct cb_brief *b)
     if (cb_first_group(b, first)) {
         cb_push_next(b, "make -j8 t-fast-exact ONLY=%s # first mapped group", first);
         if (cb_needs_preflight(b))
-            cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-preflight");
+            cb_push_next(b, "%s", "make -j\"$(nproc 2>/dev/null || echo 2)\" lint-fast-preflight");
     } else {
         if (b->npaths) {
             char arg[CB_NEXT_CAP];
