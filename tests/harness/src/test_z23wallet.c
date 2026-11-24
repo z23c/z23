@@ -14,6 +14,7 @@
 
 #include "../../../apps/z23wallet/src/zw.h"
 #include "z23wallet_mock_node.h"
+#include "platform/time_compat.h"
 
 /* From ui_layout.c (not in ui.h). */
 int32_t gui_ui_fit_px(const struct gui_ui *ui, const struct gui_node *n, const char *s, size_t len,
@@ -700,12 +701,6 @@ static void test_worker_shutdown(void)
     node_stop(&n);
 }
 
-static void sleep_real_ms(long ms)
-{
-    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
-}
-
 /* Wait (real time) for one result; returns its error or -1 after limit_ms. */
 static int wait_result(struct zw_worker *w, uint64_t limit_ms, uint64_t *took_ms)
 {
@@ -719,7 +714,7 @@ static int wait_result(struct zw_worker *w, uint64_t limit_ms, uint64_t *took_ms
             for (size_t i = 0; i < k; i++) zw_result_release(&out[i]);
             return err;
         }
-        sleep_real_ms(5);
+        platform_sleep_ms(5); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
     }
     return -1;
 }
@@ -739,8 +734,9 @@ static void test_worker_restart(void)
     gui_window_open(&d, &win, err, sizeof(err));
     struct zw_worker *w = zw_worker_start(win, &n.opt);
     zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
-    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++) sleep_real_ms(5);
-    sleep_real_ms(100);
+    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++)
+        platform_sleep_ms(5); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
+    platform_sleep_ms(100); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
     CHECK("the worker is stuck on a node that never answers", zw_worker_busy(w));
     zw_worker_restart(w);
     uint64_t ms = 0;
@@ -750,8 +746,9 @@ static void test_worker_restart(void)
     CHECK("[29] the restart is still pending for the next job", zw_worker_reset_pending(w));
     unsigned before = zw_mock_request_count(n.mock);
     zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
-    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == before; i++) sleep_real_ms(5);
-    sleep_real_ms(300);
+    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == before; i++)
+        platform_sleep_ms(5); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
+    platform_sleep_ms(300); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
     CHECK("[29] the next job applied the reset and is not aborted by the old restart",
           !zw_worker_reset_pending(w) && zw_mock_request_count(n.mock) > before && zw_worker_busy(w));
     zw_worker_stop(w);
