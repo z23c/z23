@@ -41,6 +41,7 @@ numbers move.
   `xvfb-run -a`, for example `xvfb-run -a build/bin/z23-skycombat --qa-frames=120`.
   Wrap the command from the `Preview:` line that the app build step prints the same way:
   `xvfb-run -a <that command>`.
+  QA and agent sessions use the 960×540 agent viewport; interactive mode keeps the full-resolution window.
   `build/bin/z23-skycombat --version` prints `z23-skycombat v1 (source <12 hex>)` and
   `source-id <64 hex>` (the node's build source identity, `unknown` outside the root build),
   exits 0 and opens no window. A `--qa-frames=N` run steps a fixed 1/60 s, drives the explicit tick clock (`sky_game_runtime_time()` is frame/60, never the wall clock, so AI trajectories do not depend on loader time or pacing), seeds libc and raylib RNG with seed 1 (override with `--seed=UINT32`) so two runs do identical work, and on exit prints

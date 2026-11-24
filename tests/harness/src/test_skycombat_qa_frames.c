@@ -1030,6 +1030,24 @@ _test_next:;
     return failures;
 }
 
+static int skycombat_viewport_output(void)
+{
+    int failures = 0;
+    char output[4096] = {0};
+    TEST("QA uses the agent viewport and interactive mode keeps full resolution") {
+        const char *qa[] = {QA_ENTRY, "--qa-frames=1", NULL};
+        ASSERT_EQ(test_host_tool_capture(qa, output, sizeof(output), 10000), 0);
+        ASSERT(strstr(output, "QA_VIEWPORT width=960 height=540") != NULL);
+        memset(output, 0, sizeof(output));
+        const char *interactive[] = {QA_ENTRY, "--fixture-close=2", NULL};
+        ASSERT_EQ(test_host_tool_capture(interactive, output, sizeof(output), 10000), 0);
+        ASSERT(strstr(output, "QA_VIEWPORT width=1920 height=1080") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 /* The digest and clock of one fixture --qa-frames run; skew shifts its wall clock. */
 static bool skycombat_clock_of(unsigned skew, struct sky_qa_summary *s,
                                unsigned long long *ticks, double *seconds)
@@ -1159,6 +1177,7 @@ _test_next:;
     failures += skycombat_version_output();
     failures += skycombat_frame_times_output(1);
     failures += skycombat_frame_times_output(60);
+    failures += skycombat_viewport_output();
     failures += skycombat_qa_seed_output();
     failures += skycombat_qa_determinism();
     failures += skycombat_capture_file();

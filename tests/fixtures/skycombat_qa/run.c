@@ -187,8 +187,9 @@ static void qa_raylib_info(const char *format, ...)
     else { printf("INFO: "); vprintf(format, args); printf("\n"); }
     va_end(args);
 }
-void InitWindow([[maybe_unused]] int width, [[maybe_unused]] int height, [[maybe_unused]] const char *title) {
+void InitWindow(int width, int height, [[maybe_unused]] const char *title) {
     ++qa_windows;
+    printf("QA_VIEWPORT width=%d height=%d\n", width, height);
     if (qa_agent) qa_raylib_info("QA_TRACE");
 #if !defined(_WIN32)
     if (qa_original_closed) {

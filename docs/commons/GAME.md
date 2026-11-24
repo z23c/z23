@@ -33,6 +33,7 @@ exit 2 before any window opens. Window initialization failure or closing the
 window before the requested frames complete exits 1. With no argument the
 game remains interactive. A health check still needs a working native display
 and graphics driver, and its own watchdog for a stalled driver or process.
+QA uses the same 960×540 viewport as agent sessions; interactive mode keeps the full-resolution window.
 
 ```bash
 # No display (ssh, a server, a CI box): run under a virtual display.

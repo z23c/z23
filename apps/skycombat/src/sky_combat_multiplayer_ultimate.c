@@ -740,7 +740,8 @@ static int prepare_game_window(int argc, char **argv, unsigned *qa_frames,
     if (*agent_mode) SetTraceLogCallback(agent_trace_to_stderr);
     /* Initialize window */
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
-    InitWindow(*agent_mode ? 960 : SCREEN_WIDTH, *agent_mode ? 540 : SCREEN_HEIGHT,
+    InitWindow((*agent_mode || *qa_frames) ? 960 : SCREEN_WIDTH,
+               (*agent_mode || *qa_frames) ? 540 : SCREEN_HEIGHT,
                "Sky Combat - Multiplayer Ultimate");
     if (!IsWindowReady()) {
         fprintf(stderr, "Sky Combat: window initialization failed\n");
