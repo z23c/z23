@@ -275,7 +275,8 @@ static const char *const k_style[GS_COUNT] = { "screen", "card", "card_warn",
     "pill_deshield", "amount_mono", "sync_pill", "banner_connecting",
     "banner_syncing", "banner_info", "banner_text", "menubar", "menubar_item",
     "menu_popup", "menu_item", "statusbar", "status_label", "status_msg",
-    "icon_ok", "icon_warn", "icon_crit", "warn_text" };
+    "icon_ok", "icon_warn", "icon_crit", "warn_text",
+    "input_valid", "input_invalid" };
 static const char *const k_align[] = { "stretch", "start", "center", "end" };
 static const char *const k_ikind[] = { "text", "amount", "address", "memo", "secret" };
 static const struct { uint16_t f; const char *n; } k_flags[] = {

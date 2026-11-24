@@ -21,6 +21,7 @@
 #define GUI_DATA_KEYS 256u
 #define GUI_DATA_BYTES 32768u
 #define GUI_MIN_TEXT_PX 13
+#define GUI_MAX_INPUTS 32u /* live text fields (Send alone has seven) */
 
 enum gui_kind {
     GUI_BOX, GUI_TEXT, GUI_BUTTON, GUI_INPUT, GUI_TABLE, GUI_PROGRESS,
@@ -46,6 +47,8 @@ enum gui_style {
     GS_BANNER_TEXT, GS_MENUBAR, GS_MENUBAR_ITEM, GS_MENU_POPUP, GS_MENU_ITEM,
     GS_STATUSBAR, GS_STATUS_LABEL, GS_STATUS_MSG, GS_ICON_OK, GS_ICON_WARN,
     GS_ICON_CRIT, GS_WARN_TEXT,
+    /* Send: address and amount borders (visual_spec: valid #34c759, invalid #c0392b). */
+    GS_INPUT_VALID, GS_INPUT_INVALID,
     GS_COUNT
 };
 
@@ -182,7 +185,7 @@ struct gui_table_state {
 struct gui_ui {
     struct gui_tree *tree;
     struct gui_data data;
-    struct gui_input_state inputs[8];
+    struct gui_input_state inputs[GUI_MAX_INPUTS];
     struct gui_table_state tables_st[4];
     const struct gui_table_source *sources[4];
     char focus[GUI_ID_MAX], hover[GUI_ID_MAX], pressed[GUI_ID_MAX];

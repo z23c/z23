@@ -31,7 +31,7 @@ struct gui_ui *gui_ui_new(struct gui_tree *tree)
 void gui_ui_free(struct gui_ui *ui)
 {
     if (!ui) return;
-    for (size_t i = 0; i < 8; i++)
+    for (size_t i = 0; i < GUI_MAX_INPUTS; i++)
         if (ui->inputs[i].buf) {
             memory_cleanse(ui->inputs[i].buf, ui->inputs[i].cap + 1);
             free(ui->inputs[i].buf);

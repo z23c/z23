@@ -16,7 +16,7 @@ struct gui_input_state *gui_ui_input_find(struct gui_ui *ui, const char *id,
                                           bool create, size_t cap)
 {
     struct gui_input_state *free_slot = NULL;
-    for (size_t i = 0; i < 8; i++) {
+    for (size_t i = 0; i < GUI_MAX_INPUTS; i++) {
         struct gui_input_state *s = &ui->inputs[i];
         if (s->buf && !strcmp(s->id, id)) return s;
         if (!s->buf && !free_slot) free_slot = s;
@@ -273,7 +273,7 @@ void gui_ui_input_click(struct gui_ui *ui, struct gui_node *n, int32_t x, bool e
 
 bool gui_ui_input_text(const struct gui_ui *ui, const char *id, char *buf, size_t cap)
 {
-    for (size_t i = 0; i < 8; i++)
+    for (size_t i = 0; i < GUI_MAX_INPUTS; i++)
         if (ui->inputs[i].buf && !strcmp(ui->inputs[i].id, id)) {
             if (ui->inputs[i].len + 1 > cap) return false;
             memcpy(buf, ui->inputs[i].buf, ui->inputs[i].len + 1);
@@ -319,7 +319,9 @@ struct ictx {
 
 static void ictx_init(struct ictx *c, struct gui_ui *ui, const struct gui_node *n)
 {
-    c->th = gui_theme(GS_INPUT);
+    /* A validation style only recolours the border; metrics stay GS_INPUT's. */
+    bool v = n->style == GS_INPUT_VALID || n->style == GS_INPUT_INVALID;
+    c->th = gui_theme(v ? n->style : GS_INPUT);
     c->st = gui_ui_input_find(ui, n->id, false, 0);
     c->txt = c->st ? c->st->buf : "";
     c->len = c->st ? c->st->len : 0;

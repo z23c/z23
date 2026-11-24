@@ -96,6 +96,8 @@ static const struct gui_theme_entry k_theme[GS_COUNT] = {
     [GS_ICON_WARN] = { C_APP, C_APP, C_AMBER, 0, 16, T },
     [GS_ICON_CRIT] = { C_APP, C_APP, C_RED, 0, 16, T },
     [GS_WARN_TEXT] = { C_DANGER_TEXT, C_INSET, 0, 0, 19, T },
+    [GS_INPUT_VALID] = { C_TEXT, C_INSET, C_HERO, 8, 19, T },
+    [GS_INPUT_INVALID] = { C_TEXT, C_INSET, C_RED, 8, 19, T },
 };
 
 const struct gui_theme_entry *gui_theme(enum gui_style s)
