@@ -7,6 +7,7 @@
 #define LINTC_RUN_PRIV_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/types.h>
@@ -88,12 +89,23 @@ struct lr_gate {
     char name[LR_NAME];
     char cmd[LR_CMD];
     long long ms;
+    int64_t cpu_user_us, cpu_system_us;
+    bool cpu_valid;
     int rc;
     bool have_rc;
     bool blocked;
     pid_t pid;
     long long t0;
 };
+
+/* A wait4 sample covers the worker and descendants it actually waited for. */
+static inline bool lr_cpu_time(int64_t sec, int64_t usec, int64_t *out)
+{
+    if (sec < 0 || usec < 0 || usec >= 1000000 ||
+        sec > (INT64_MAX - usec) / 1000000) return false;
+    *out = sec * 1000000 + usec;
+    return true;
+}
 
 struct lr_run {
     const struct lr_opts *o;

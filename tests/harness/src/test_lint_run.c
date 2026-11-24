@@ -56,6 +56,15 @@ static bool lrun_read(const char *path, char *buf, size_t cap)
 #define LRUN_RV "sh -c 'touch %s/%s; i=0; while [ ! -e %s/%s ] && [ $i -lt 15 ]; " \
     "do sleep 0.1; i=$((i+1)); done; [ -e %s/%s ]'"
 
+static int lrun_simple(const char *gate, char *cmd, size_t cap)
+{
+    if (strcmp(gate, "check-fx-pass") == 0)
+        return snprintf(cmd, cap, "true") < 0;
+    if (strcmp(gate, "check-fx-cpu") == 0)
+        return snprintf(cmd, cap, "sh -c '(i=0; while [ $i -lt 10000 ]; do i=$((i+1)); done) & wait'") < 0;
+    return -1;
+}
+
 /* Fixture gate -> command. Names: check-fx-<kind>; check-fx-ord-<tag> appends
  * <tag> to <root>/order; the rendezvous pair waits for each other's file. */
 static int lrun_resolve(void *ctx, const char *gate, char *cmd, size_t cap)
@@ -74,8 +83,8 @@ static int lrun_resolve(void *ctx, const char *gate, char *cmd, size_t cap)
         int n = snprintf(cmd, cap, "%s", row->cmd);
         return n < 0 || (size_t)n >= cap;
     }
-    if (strcmp(gate, "check-fx-pass") == 0)
-        return snprintf(cmd, cap, "true") < 0;
+    int simple = lrun_simple(gate, cmd, cap);
+    if (simple >= 0) return simple;
     if (strcmp(gate, "check-fx-fail") == 0)
         return snprintf(cmd, cap, "sh -c 'echo boom-diagnosis; exit 3'") < 0;
     if (strcmp(gate, "check-fx-silent") == 0)
@@ -436,6 +445,77 @@ static int test_lrun_verdicts(void)
         ASSERT(strstr(out, "\"schema\":\"zcl.lint_timing.v1\"") != NULL);
         ASSERT(strstr(out, "\"failed_count\":3") != NULL);
         ASSERT(strstr(out, "\"name\":\"check-fx-fail\",\"ms\":") != NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lrun_cpu(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: checked worker CPU is attributed to its gate") {
+        struct lrun_fx fx;
+        struct lrun_cfg c = { 2, "", "", "" };
+        char out[8192], err[8192], path[PATH_MAX + 64];
+        char *gates[] = {(char *)"check-fx-pass", (char *)"check-fx-cpu"};
+        int64_t value = -1;
+        ASSERT(lr_cpu_time(1, 123, &value));
+        ASSERT_EQ(value, 1000123);
+        ASSERT(lr_cpu_time(0, 0, &value));
+        ASSERT_EQ(value, 0);
+        ASSERT(!lr_cpu_time(-1, 0, &value));
+        ASSERT(!lr_cpu_time(0, -1, &value));
+        ASSERT(!lr_cpu_time(0, 1000000, &value));
+        ASSERT(!lr_cpu_time(INT64_MAX, 0, &value));
+        ASSERT(lrun_plant(&fx));
+        ASSERT_EQ(lrun_go(&fx, &c, gates, 2, out, err, sizeof out), 0);
+        (void)snprintf(path, sizeof path, "%s/state/last-run.json", fx.root);
+        ASSERT(lrun_read(path, out, sizeof out));
+        char *row = strstr(out, "\"name\":\"check-fx-cpu\"");
+        ASSERT(row != NULL);
+        char *end = strchr(row, '}');
+        ASSERT(end != NULL);
+        *end = '\0';
+#if defined(__linux__)
+        ASSERT(strstr(row, "\"cpu_valid\":true") != NULL);
+        char *user = strstr(row, "\"cpu_user_us\":");
+        ASSERT(user != NULL);
+        ASSERT(strtoll(user + strlen("\"cpu_user_us\":"), NULL, 10) > 0);
+#else
+        ASSERT(strstr(row, "\"cpu_valid\":false,\"cpu_user_us\":null,\"cpu_system_us\":null") != NULL);
+#endif
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lrun_cpu_unknown(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_run: unavailable CPU reports null even with nonzero slots") {
+        struct lrun_fx fx;
+        static struct lr_run run;
+        char path[PATH_MAX + 64], body[4096];
+        ASSERT(lrun_plant(&fx));
+        (void)snprintf(path, sizeof path, "%s/state", fx.root);
+        ASSERT_EQ(mkdir(path, 0700), 0);
+        FILE *out = tmpfile();
+        FILE *err = tmpfile();
+        ASSERT(out != NULL && err != NULL);
+        struct lr_opts opts = {.jobs = 1, .state_dir = path, .out = out, .err = err};
+        memset(&run, 0, sizeof run);
+        run.o = &opts;
+        run.n = 1;
+        (void)snprintf(run.g[0].name, sizeof run.g[0].name, "check-fx-unknown");
+        run.g[0].have_rc = true;
+        run.g[0].cpu_user_us = 42;
+        run.g[0].cpu_system_us = 99;
+        ASSERT_EQ(lr_report(&run, 0), 0);
+        (void)snprintf(path, sizeof path, "%s/state/last-run.json", fx.root);
+        ASSERT(lrun_read(path, body, sizeof body));
+        ASSERT(strstr(body, "\"cpu_valid\":false,\"cpu_user_us\":null,\"cpu_system_us\":null") != NULL);
+        (void)fclose(out);
+        (void)fclose(err);
         test_rm_rf_recursive(fx.root);
     } TEST_END
     return failures;
@@ -993,6 +1073,8 @@ int test_lint_run(void)
     failures += test_lrun_build_jobs();
     failures += test_lrun_seal();
     failures += test_lrun_verdicts();
+    failures += test_lrun_cpu();
+    failures += test_lrun_cpu_unknown();
     failures += test_lrun_catch_ledger();
     failures += test_lrun_catch_ledger_blocked();
     failures += test_lrun_green();

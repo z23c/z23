@@ -6,6 +6,9 @@
  * the former shell driver), times each from fork to reap, writes the .ms/.rc artifacts,
  * and prints one PASS/FAIL line per finished gate.
  */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -14,6 +17,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -110,8 +116,15 @@ static int reap_gate(struct lr_run *r, int i, int options)
     struct lr_gate *g = &r->g[i];
     int status = 0;
     pid_t pid;
+#if defined(__linux__)
+    struct rusage usage = {0};
+#endif
     do {
+#if defined(__linux__)
+        pid = wait4(g->pid, &status, options, &usage);
+#else
         pid = waitpid(g->pid, &status, options);
+#endif
     } while (pid < 0 && errno == EINTR);
     if (pid < 0) {
         (void)fprintf(r->o->err, "z23-lint run: cannot wait for gate %s: %s\n",
@@ -122,6 +135,12 @@ static int reap_gate(struct lr_run *r, int i, int options)
     }
     if (pid == 0)
         return 0;
+#if defined(__linux__)
+    g->cpu_valid = lr_cpu_time(usage.ru_utime.tv_sec, usage.ru_utime.tv_usec,
+                               &g->cpu_user_us) &&
+                   lr_cpu_time(usage.ru_stime.tv_sec, usage.ru_stime.tv_usec,
+                               &g->cpu_system_us);
+#endif
     finish_gate(r, i, status);
     return 1;
 }

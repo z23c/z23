@@ -135,9 +135,16 @@ static void write_json_gates(FILE *f, const struct lr_run *r,
                              const struct lr_gate **rank, int nrank)
 {
     (void)r;
-    for (int i = 0; i < nrank; i++)
-        (void)fprintf(f, "%s    {\"name\":\"%s\",\"ms\":%lld,\"rc\":%d}",
-                      i ? ",\n" : "", rank[i]->name, rank[i]->ms, rank[i]->rc);
+    for (int i = 0; i < nrank; i++) {
+        const struct lr_gate *g = rank[i];
+        (void)fprintf(f, "%s    {\"name\":\"%s\",\"ms\":%lld,\"rc\":%d,\"cpu_valid\":%s,",
+                      i ? ",\n" : "", g->name, g->ms, g->rc, g->cpu_valid ? "true" : "false");
+        if (g->cpu_valid)
+            (void)fprintf(f, "\"cpu_user_us\":%lld,\"cpu_system_us\":%lld}",
+                          (long long)g->cpu_user_us, (long long)g->cpu_system_us);
+        else
+            (void)fputs("\"cpu_user_us\":null,\"cpu_system_us\":null}", f);
+    }
 }
 
 /* The shared run timestamp: UTC, "YYYY-MM-DDTHH:MM:SSZ", the shape both
