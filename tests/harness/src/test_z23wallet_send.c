@@ -680,6 +680,55 @@ static void sv_page_states(void)
     page_down(&p);
 }
 
+static void home_shield_draft(void)
+{
+    struct page p;
+    if (!page_up(&p, "send_success", true, 1.0f)) { CHECK("shield preview fixture", false); return; }
+    struct zw_model *m = &p.n.m;
+    free(m->rcv.list);
+    m->rcv.list = NULL;
+    CHECK("cold shield waits on Home", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_WAIT);
+    m->rcv.list = calloc(1, sizeof(*m->rcv.list));
+    if (!m->rcv.list || !m->bal) {
+        CHECK("shield balances allocated", false);
+        free(m->rcv.list);
+        m->rcv.list = NULL;
+        page_down(&p);
+        return;
+    }
+    m->bal->n = 2;
+    m->bal->rows[0] = (struct zw_bal_row){.addr = T1, .kind = ZW_ADDR_PUBLIC, .zat = 900000000};
+    m->bal->rows[1] = (struct zw_bal_row){.addr = T2, .kind = ZW_ADDR_PUBLIC, .zat = 200000000,
+                                           .confirmed_zat = 200000000};
+    m->rcv.list->rows[0] = (struct zw_bal_row){.addr = ZC, .kind = ZW_ADDR_SPROUT};
+    m->rcv.list->n = 1;
+    CHECK("Sprout-only wallet requests Sapling provisioning", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_CREATE);
+    m->rcv.list->rows[1] = (struct zw_bal_row){.addr = Z0, .kind = ZW_ADDR_SAPLING};
+    m->rcv.list->n = 2;
+    CHECK("shield selects largest confirmed and first Sapling", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_READY &&
+          !strcmp(p.s->form.from,T2) && !strcmp(p.s->form.to[0].addr,Z0) && p.s->max_on);
+    page_frame(&p, NULL);
+    char expected[40];
+    zw_decimal(200000000 - ZW_DEFAULT_FEE, expected, sizeof(expected));
+    CHECK("shield Max deducts ordinary fee and waits for user review", !strcmp(p.s->form.to[0].amount,expected) &&
+          p.s->dlg == ZW_DLG_NONE && !p.s->pend.active && !p.s->runner);
+    zw_send_cancel_review(p.s);
+    page_frame(&p, NULL);
+    CHECK("handover removes prior shield recipient and Max", !p.s->form.to[0].addr[0] && !p.s->max_on);
+    m->bal->rows[1].confirmed_zat = 0;
+    CHECK("with only unconfirmed public funds choose largest displayed", zw_send_home_shield(p.s,&p.env,Z1) == ZW_SHIELD_READY &&
+          !strcmp(p.s->form.from,T1) && !strcmp(p.s->form.to[0].addr,Z1));
+    zw_send_clear_form(p.s,p.ui);
+    m->bal->rows[0].zat = m->bal->rows[1].zat = 10;
+    CHECK("dust opens Send without preparing a doomed payment", zw_send_home_shield(p.s,&p.env,NULL) == ZW_SHIELD_EMPTY);
+    p.s->pend.active = true;
+    CHECK("shield never replaces an unresolved payment", zw_send_home_shield(p.s,&p.env,NULL) == ZW_SHIELD_BUSY && !p.s->runner);
+    p.s->pend.active = false;
+    free(m->rcv.list);
+    m->rcv.list = NULL;
+    page_down(&p);
+}
+
 int test_z23wallet_send(void)
 {
     printf("\n=== z23wallet_send ===\n");
@@ -700,5 +749,6 @@ int test_z23wallet_send(void)
     sv_runner_executing();
     sv_page_flow();
     sv_page_states();
+    home_shield_draft();
     return g_fail;
 }

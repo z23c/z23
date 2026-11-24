@@ -14,6 +14,7 @@
 #define ZW_SEND_RCPT_MAX 3     /* recipient boxes the page shows (no scrolling page) */
 #define ZW_MEMO_MAX 512        /* memo bytes (UTF-8), beta13's memo dialog limit */
 #define ZW_ADDR_MAX 128        /* address field bytes; a valid address is at most 95 */
+#define ZW_PAY_TO_MAX ZW_ADDR_MAX
 #define ZW_AMOUNT_TEXT 24      /* [0-9]{0,8}.[0-9]{0,8} plus slack */
 #define ZW_DEFAULT_FEE INT64_C(10000) /* Settings::getMinerFee(): 0.0001 ZCL */
 #define ZW_SEND_KEY_MAX 40     /* "zq-" + 32 base62 + NUL */
@@ -148,6 +149,7 @@ struct zw_send {
     size_t shown;               /* recipient boxes on the page */
     bool from_user, from_open, max_on, reveal_open, reply_warned, details_open, fail_pending;
     enum zw_send_dlg dlg;
+    bool shield_draft, clear_shield;
     size_t memo_for;
     char dlg_title[96], dlg_body[1200], dlg_detail[700];
     struct zw_send_plan pending; /* the plan the confirm dialog shows and commits */
@@ -155,6 +157,8 @@ struct zw_send {
     char pending_look[400];
     struct zw_sender *runner;
     struct zw_send_status st;
+    struct { bool active; } pend; /* mirrors the current runner for Home's occupancy check */
+    bool locked_out;              /* this Send implementation has no record-store lock */
     bool card;
     char card_title[64], card_text[96], card_info[320], card_txid[80];
     char from_addr[ZW_FROM_ITEMS][100];
@@ -162,6 +166,7 @@ struct zw_send {
     uint32_t key;
 };
 struct zw_send *zw_send_new(void);
+void zw_send_cancel_review(struct zw_send *s);
 void zw_send_free(struct zw_send *s);
 struct zw_send_env {
     struct gui_window *win;
@@ -186,6 +191,9 @@ void zw_send_show_failure(struct zw_send *s, struct gui_ui *ui); /* the "Couldn'
 void zw_send_seed(struct gui_ui *ui, const char *id, const char *text, size_t cap);
 /* Home's "Send from <address>": preselect the pay-from address. */
 void zw_send_prefill_from(struct zw_send *s, const char *addr);
+enum zw_shield_choice { ZW_SHIELD_READY, ZW_SHIELD_EMPTY, ZW_SHIELD_WAIT, ZW_SHIELD_CREATE, ZW_SHIELD_BUSY };
+enum zw_shield_choice zw_send_home_shield(struct zw_send *s, const struct zw_send_env *env, const char *issued);
+void zw_send_clear_form(struct zw_send *s, struct gui_ui *ui);
 uint32_t zw_send_structure_key(const struct zw_send *s);
 void zw_send_build(struct gui_tree *t, const struct zw_model *m, const struct zw_send *s);
 /* Test hooks: the plan the page would confirm, and the dialog shown. */

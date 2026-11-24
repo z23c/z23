@@ -44,6 +44,16 @@ static void close_dlg(struct zw_send *s)
     s->dlg_title[0] = s->dlg_body[0] = s->dlg_detail[0] = 0;
 }
 
+void zw_send_cancel_review(struct zw_send *s)
+{
+    if (!s) return;
+    if (s->shield_draft) s->clear_shield = true;
+    if (s->dlg != ZW_DLG_SYNC_GATE && s->dlg != ZW_DLG_CONFIRM && s->dlg != ZW_DLG_DESHIELD) return;
+    close_dlg(s);
+    memset(&s->pending, 0, sizeof(s->pending));
+    s->pending_look[0] = 0;
+}
+
 static int64_t peers_of(const struct zw_model *m)
 {
     return m->have_net ? m->net.connections : m->have_info ? m->info.connections : 0;
@@ -73,7 +83,7 @@ static struct zw_funds funds_of(const struct zw_model *m, const char *addr)
 }
 
 /* removeExtraAddresses: one empty recipient, fee reset, Send all off. */
-static void clear_form(struct zw_send *s, struct gui_ui *ui)
+void zw_send_clear_form(struct zw_send *s, struct gui_ui *ui)
 {
     char id[GUI_ID_MAX];
     for (size_t i = 0; i < ZW_SEND_RCPT_MAX; i++) {
@@ -83,6 +93,7 @@ static void clear_form(struct zw_send *s, struct gui_ui *ui)
         gui_ui_input_clear(ui, id);
         memset(&s->form.to[i], 0, sizeof(s->form.to[i]));
     }
+    s->shield_draft = s->clear_shield = false;
     s->shown = s->form.n = 1;
     s->form.fee = ZW_DEFAULT_FEE;
     s->max_on = false;
@@ -189,7 +200,7 @@ static void commit(struct zw_send *s, const struct zw_send_env *env, struct zw_s
         return;
     }
     zw_log("send: confirmed by the user; sending");
-    clear_form(s, env->ui);
+    zw_send_clear_form(s, env->ui);
     s->card = false;
     say(out, ZW_TXT_SENDING, 0);
 }
@@ -344,7 +355,7 @@ static bool act_steps(struct zw_send *s, const struct zw_send_env *env, const ch
         close_dlg(s);
         if (validate_form(s, env)) open_confirm(s, env);
     } else if (!strcmp(a, "send.discard.yes") && s->dlg == ZW_DLG_DISCARD) {
-        clear_form(s, env->ui);
+        zw_send_clear_form(s, env->ui);
         close_dlg(s);
     } else {
         return false;
@@ -407,7 +418,7 @@ static void cancel(struct zw_send *s, const struct zw_send_env *env)
         open_dlg(s, ZW_DLG_DISCARD, "Discard this payment?", "Your typed recipients and amounts will be cleared.");
         gui_ui_focus(env->ui, "sx_no");
     } else {
-        clear_form(s, env->ui);
+        zw_send_clear_form(s, env->ui);
     }
 }
 

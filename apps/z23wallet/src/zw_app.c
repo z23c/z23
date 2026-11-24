@@ -40,6 +40,8 @@ struct app {
 };
 
 static int64_t wall_s(void) { return (int64_t)time(NULL); }
+static void home_shield(struct app *a, const char *issued);
+static void set_screen(struct app *a, size_t s);
 
 static bool rebuild(struct app *a)
 {
@@ -271,6 +273,29 @@ static void send_wake(struct app *a)
     send_apply(a, &out);
 }
 
+static void home_shield(struct app *a, const char *issued)
+{
+    if (a->model.bal) {
+        if (!a->model.rcv.list) a->model.rcv.list = calloc(1, sizeof(*a->model.rcv.list));
+        if (a->model.rcv.list) *a->model.rcv.list = *a->model.bal;
+    }
+    struct zw_send_env env = send_env(a);
+    switch (zw_send_home_shield(a->model.send, &env, issued)) {
+    case ZW_SHIELD_WAIT:
+        show_msg(a, "ZClassic is still getting ready. Try shielding again in a moment.");
+        break;
+    case ZW_SHIELD_CREATE:
+        show_msg(a, "Shielding needs a Sapling address in the wallet.");
+        break;
+    case ZW_SHIELD_BUSY:
+        show_msg(a, "Finish or clear your existing payment before preparing a shielding draft.");
+        break;
+    default:
+        set_screen(a, ZW_SCREEN_SEND);
+        break;
+    }
+}
+
 static void set_screen(struct app *a, size_t s)
 {
     if (s >= ZW_SCREEN_COUNT || s == a->screen) return;
@@ -278,6 +303,7 @@ static void set_screen(struct app *a, size_t s)
         show_msg(a, "Advanced (node stats) opens once you're connected to a node.");
         return;
     }
+    if (a->screen == ZW_SCREEN_SEND) zw_send_cancel_review(a->model.send);
     a->screen = s;
     a->model.menu = ZW_MENU_NONE;
     a->model_dirty = true;
@@ -354,7 +380,7 @@ static void dispatch(struct app *a, const struct gui_action *act)
     else if (dispatch_menu(a, act->name) || dispatch_row(a, act)) return;
     else if (!strcmp(act->name, "home.send")) set_screen(a, ZW_SCREEN_SEND);
     else if (!strcmp(act->name, "home.receive")) set_screen(a, ZW_SCREEN_RECEIVE);
-    else if (!strcmp(act->name, "home.shield")) show_msg(a, "Shielding opens with Send in a later version");
+    else if (!strcmp(act->name, "home.shield")) home_shield(a, NULL);
     else if (!strcmp(act->name, "connect.retry")) {
         zw_worker_reset_auth(a->worker);
         a->model.fail_count = 0;
@@ -577,6 +603,8 @@ int zw_app_run(const struct zw_options *o)
     gui_ui_free(a->ui);
     gui_tree_free(a->tree);
     gui_window_close(a->win);
+    free(a->model.rcv.list);
+    a->model.rcv.list = NULL;
     zw_model_free(&a->model);
     free(a);
     return rc;

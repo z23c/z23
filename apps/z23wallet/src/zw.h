@@ -200,6 +200,12 @@ enum zw_sync { ZW_SYNC_CONNECTING, ZW_SYNC_SYNCED, ZW_SYNC_SYNCING, ZW_SYNC_FIND
                ZW_SYNC_STALE, ZW_SYNC_PEERLESS, ZW_SYNC_SKEW, ZW_SYNC_LOCAL };
 enum zw_menu { ZW_MENU_NONE, ZW_MENU_FILE, ZW_MENU_EDIT, ZW_MENU_HELP, ZW_MENU_ROW };
 
+struct zw_receive {
+    struct zw_balances *list; /* Home's shield-target snapshot; owned by its caller */
+    bool creating;
+    char fresh_z[100];
+};
+
 struct zw_send; /* the Send page state (zw_send.h) */
 
 struct zw_model {
@@ -214,6 +220,7 @@ struct zw_model {
     struct zw_info info;
     struct zw_wallet wallet;
     struct zw_balances *bal; /* owned; NULL until both unspent lists answered */
+    struct zw_receive rcv;   /* Home shielding only; the Receive page remains a stub */
     enum zw_profile profile;
     enum zw_cred cred_src;
     uint16_t port;
