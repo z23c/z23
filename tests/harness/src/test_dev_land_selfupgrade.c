@@ -65,6 +65,30 @@ static bool sul_rig_open(struct sul_rig *r)
            sul_script(r->src_y, PLAN_Y);
 }
 
+bool zcl_native_dev_land_test_su_env_has(const char *prefix);
+
+/* The trial child answers `dev land drive --json`; dl_su_next needs a reason on
+ * every next item, so Z23_OUTPUT=compact must not reach it. Other variables
+ * pass through. */
+static int sul_environment_cases(void)
+{
+    int failures = 0;
+    TEST("selfupgrade: the trial child environment drops Z23_OUTPUT and keeps the rest") {
+        ASSERT(setenv("Z23_OUTPUT", "compact", 1) == 0);
+        ASSERT(setenv("Z23_SUL_KEEP", "kept", 1) == 0);
+        bool dropped = !zcl_native_dev_land_test_su_env_has("Z23_OUTPUT=");
+        bool kept = zcl_native_dev_land_test_su_env_has("Z23_SUL_KEEP=kept");
+        bool source = zcl_native_dev_land_test_su_env_has("ZCL_DEV_SOURCE_ROOT=/src");
+        (void)unsetenv("Z23_OUTPUT");
+        (void)unsetenv("Z23_SUL_KEEP");
+        ASSERT(dropped);
+        ASSERT(kept);
+        ASSERT(source);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int sul_pure_cases(void)
 {
     int failures = 0;
@@ -596,6 +620,7 @@ int test_dev_land_selfupgrade(void)
     int failures = 0;
 #if !defined(_WIN32)
     failures += sul_pure_cases();
+    failures += sul_environment_cases();
     failures += sul_switch_cases();
     failures += sul_disagree_cases();
     failures += sul_invalid_decisions();

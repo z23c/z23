@@ -169,11 +169,13 @@ struct zcl_result zcl_spawn_capture_binary_merged(
 
 #ifndef _WIN32
 /* Z23_OUTPUT=compact shapes the result envelope of the process that sets it.
- * A z23 child that a tool spawns and parses (the land self-upgrade trial
- * wants every next hint's reason; windows-acceptance greps budget_exceeded)
- * must answer in the default envelope, so a spawned child never inherits it.
- * The filtered environment is built before fork(); the child only assigns
- * `environ`, which is async-signal-safe. NULL means nothing to filter. */
+ * A z23 child whose reply a tool parses must answer in the default envelope.
+ * This helper covers only the capture spawn paths (zcl_spawn_capture* and the
+ * evidence capture); the detached and pty paths still inherit the variable. The
+ * land self-upgrade trial does not use these paths: native_dev_land.c builds
+ * that child's envp itself and strips the variable there. The filtered
+ * environment is built before fork(); the child only assigns `environ`, which
+ * is async-signal-safe. NULL means nothing to filter. */
 extern char **environ;
 char **zcl_spawn_env_without_z23_output(void)
 {

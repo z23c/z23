@@ -14245,7 +14245,11 @@ static bool dl_su_environment(struct dl_su_args *a, const char *source,
     a->env = zcl_calloc(count + 7, sizeof(*a->env), "land selfupgrade child env");
     if (!a->env) return false;
     for (size_t i = 0; i < count; ++i) {
+        /* Z23_OUTPUT=compact would drop the next-hint reasons dl_su_next
+         * requires from the child driver's reply: the trial always reads the
+         * default envelope. */
         if (!strncmp(environ[i], "ZCL_LAND_SU_", 12) ||
+            !strncmp(environ[i], "Z23_OUTPUT=", 11) ||
             !strncmp(environ[i], "ZCL_DEV_SOURCE_ROOT=", 20)) continue;
         a->env[used++] = environ[i];
     }
@@ -14263,6 +14267,24 @@ static bool dl_su_environment(struct dl_su_args *a, const char *source,
     a->env[used] = NULL;
     return true;
 }
+
+#if defined(ZCL_TESTING)
+/* Whether the self-upgrade trial child environment holds an entry starting
+ * with `prefix`. */
+bool zcl_native_dev_land_test_su_env_has(const char *prefix);
+bool zcl_native_dev_land_test_su_env_has(const char *prefix)
+{
+    struct dl_su_args *a = zcl_calloc(1, sizeof(*a), "land selfupgrade test args");
+    bool has = false;
+    if (!a) return false;
+    if (dl_su_environment(a, "/src", 0, NULL))
+        for (size_t i = 0; a->env[i]; ++i)
+            has = has || !strncmp(a->env[i], prefix, strlen(prefix));
+    free(a->env);
+    free(a);
+    return has;
+}
+#endif
 
 static bool dl_su_arguments(struct dl_su_args *a,
     const struct zcl_command_request *req, long long seq, const char *row)

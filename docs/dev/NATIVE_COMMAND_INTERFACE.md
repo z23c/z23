@@ -468,10 +468,15 @@ the `authority` block of an exempt local operator (a bounded agent session
 keeps its block, which carries the spend debit), an empty `next`, and the
 `reason` of each `next` item (`command` and `input` remain). Any other value
 leaves the envelope byte-identical. The Claude plugin sets it on its
-`z23 mcp serve` launch. A z23 child that a tool spawns through
-`util/spawn.h` never inherits it (the spawn helper strips `Z23_OUTPUT`), so a
-parent that parses a child envelope, such as the land self-upgrade trial or
-windows-acceptance, always reads the default shape.
+`z23 mcp serve` launch. Two places strip it so a parent that parses a child
+reply always reads the default shape: the capture spawn helper
+(`zcl_spawn_capture*` and the evidence capture in `util/spawn.h`; the detached
+and pty spawn paths still inherit it) and the environment the land
+self-upgrade trial builds for its `dev land drive` child
+(`dl_su_environment`, whose parser requires a reason on every `next` item).
+The `windows-acceptance` make recipe runs the Windows binary from the make
+shell, so there the variable is controlled by whoever invokes make; the helper
+does not protect it.
 
 ### Error result
 
