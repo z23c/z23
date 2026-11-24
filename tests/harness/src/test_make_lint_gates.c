@@ -1749,6 +1749,7 @@ static int t_lint_fast_tor_graph(void)
         "cp \"$1/Makefile\" Makefile\n"
         "cp \"$1/tools/lint/lintc/gates.def\" tools/lint/lintc/\n"
         "mkdir -p apps/skycombat; cp \"$1/apps/skycombat/skycombat.mk\" apps/skycombat/\n"
+        "mkdir -p apps/z23wallet platform/modules/gui; cp \"$1/apps/z23wallet/z23wallet.mk\" apps/z23wallet/; cp \"$1/platform/modules/gui/gui.mk\" platform/modules/gui/\n"
         "cp \"$1/platform/modules/platform/tests/windows_acceptance.mk\" platform/modules/platform/tests/\n"
         "cp \"$1/platform/modules/platform/tests/android_acceptance.mk\" platform/modules/platform/tests/\n"
         "cp \"$1/engine/composition/lib_module_order.def\" engine/composition/\n"
