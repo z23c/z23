@@ -86,10 +86,14 @@ void zw_endpoint_wipe(struct zw_endpoint *ep);
 bool zw_base64(const unsigned char *in, size_t n, char *out, size_t cap);
 
 /* ---- http / rpc ---- */
-struct zw_cancel; /* aborts the request in flight from another thread */
+/* Aborts requests from another thread: fire is permanent (shutdown), abort ends
+ * only the request in flight and is cleared before the next job (watchdog). */
+struct zw_cancel;
 struct zw_cancel *zw_cancel_new(void);
 void zw_cancel_free(struct zw_cancel *c);
 void zw_cancel_fire(struct zw_cancel *c);
+void zw_cancel_abort(struct zw_cancel *c);
+void zw_cancel_clear_abort(struct zw_cancel *c);
 enum zw_phase { ZW_PHASE_IDLE, ZW_PHASE_LOCATE, ZW_PHASE_CONNECT, ZW_PHASE_SEND, ZW_PHASE_RECV };
 const char *zw_phase_name(int phase);
 struct zw_buf { char *data; size_t len, cap; };
@@ -175,6 +179,8 @@ bool zw_worker_busy(struct zw_worker *w);
 int zw_worker_phase(struct zw_worker *w);
 uint16_t zw_worker_port(struct zw_worker *w);
 void zw_worker_reset_auth(struct zw_worker *w);
+void zw_worker_restart(struct zw_worker *w); /* watchdog: abort the request in flight, locate afresh */
+bool zw_worker_reset_pending(struct zw_worker *w);
 void zw_worker_stop(struct zw_worker *w);
 /* "worker: no reply after 6 s (phase=recv, 127.0.0.1:8023)" */
 void zw_watchdog_line(int phase, uint16_t port, char *buf, size_t cap);
@@ -217,6 +223,7 @@ struct zw_model {
 
 void zw_model_init(struct zw_model *m, enum zw_profile requested);
 void zw_model_free(struct zw_model *m);
+void zw_model_watchdog(struct zw_model *m, uint16_t port);
 /* Returns true when the model changed. Takes r->bal either way. */
 bool zw_model_apply(struct zw_model *m, struct zw_result *r);
 void zw_model_publish(const struct zw_model *m, struct gui_ui *ui, int64_t now_s);

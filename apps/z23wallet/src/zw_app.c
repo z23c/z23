@@ -198,14 +198,8 @@ static void watchdog_fired(struct app *a)
     char line[160];
     zw_watchdog_line(zw_worker_phase(a->worker), zw_worker_port(a->worker), line, sizeof(line));
     zw_log("%s", line);
-    struct zw_model *m = &a->model;
-    if (m->conn == ZW_CONN_STARTING || m->conn == ZW_CONN_ONLINE) {
-        m->conn = ZW_CONN_REFUSED;
-        m->port = zw_worker_port(a->worker);
-        m->fail_count++;
-    }
-    m->generation++;
-    zw_worker_reset_auth(a->worker);
+    zw_model_watchdog(&a->model, zw_worker_port(a->worker));
+    zw_worker_restart(a->worker);
     enqueue_all(a);
     a->model_dirty = true;
 }

@@ -28,6 +28,19 @@ void zw_model_free(struct zw_model *m)
     m->bal = NULL;
 }
 
+/* R9 watchdog: no result for 6 s. A node that was (or was about to be) online
+ * is shown as unreachable on its port, and the generation moves on so a late
+ * reply of the stuck request is dropped instead of applied. */
+void zw_model_watchdog(struct zw_model *m, uint16_t port)
+{
+    if (m->conn == ZW_CONN_STARTING || m->conn == ZW_CONN_ONLINE) {
+        m->conn = ZW_CONN_REFUSED;
+        m->port = port;
+        m->fail_count++;
+    }
+    m->generation++;
+}
+
 uint32_t zw_backoff_s(int fail_count)
 {
     static const uint32_t k[] = { 1, 2, 4, 8, 15 };

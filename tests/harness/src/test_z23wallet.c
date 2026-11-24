@@ -700,6 +700,89 @@ static void test_worker_shutdown(void)
     node_stop(&n);
 }
 
+static void sleep_real_ms(long ms)
+{
+    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* Wait (real time) for one result; returns its error or -1 after limit_ms. */
+static int wait_result(struct zw_worker *w, uint64_t limit_ms, uint64_t *took_ms)
+{
+    struct zw_result out[4];
+    uint64_t t0 = real_ms();
+    while (real_ms() - t0 < limit_ms) {
+        size_t k = zw_worker_drain(w, out, 4);
+        if (k) {
+            *took_ms = real_ms() - t0;
+            int err = (int)out[0].err;
+            for (size_t i = 0; i < k; i++) zw_result_release(&out[i]);
+            return err;
+        }
+        sleep_real_ms(5);
+    }
+    return -1;
+}
+
+/* R9 restart: the watchdog's zw_worker_restart ends the stuck request within a
+ * wait slice (not at the 5 s deadline), the next job locates afresh, and the
+ * abort does not leak into that next job. */
+static void test_worker_restart(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("silent node starts", node_start(&n, "peer_silent", "restart"));
+    struct gui_window_desc d = { .title_utf8 = "w", .width = 100, .height = 100, .surface = GUI_SURFACE_CPU,
+                                 .backend = GUI_BACKEND_HEADLESS };
+    struct gui_window *win = NULL;
+    char err[64];
+    gui_window_open(&d, &win, err, sizeof(err));
+    struct zw_worker *w = zw_worker_start(win, &n.opt);
+    zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
+    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++) sleep_real_ms(5);
+    sleep_real_ms(100);
+    CHECK("the worker is stuck on a node that never answers", zw_worker_busy(w));
+    zw_worker_restart(w);
+    uint64_t ms = 0;
+    int e1 = wait_result(w, 3000, &ms);
+    printf("    restart ended the stuck request in %llu ms\n", (unsigned long long)ms);
+    CHECK("[29] restart ends the stuck request well before its 5 s deadline", e1 == (int)ZW_ERR_IO && ms < 1000);
+    CHECK("[29] the restart is still pending for the next job", zw_worker_reset_pending(w));
+    unsigned before = zw_mock_request_count(n.mock);
+    zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
+    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == before; i++) sleep_real_ms(5);
+    sleep_real_ms(300);
+    CHECK("[29] the next job applied the reset and is not aborted by the old restart",
+          !zw_worker_reset_pending(w) && zw_mock_request_count(n.mock) > before && zw_worker_busy(w));
+    zw_worker_stop(w);
+    gui_window_close(win);
+    node_stop(&n);
+}
+
+/* What watchdog_fired does to the model: unreachable on the worker's port, one
+ * more failure, and a new generation so the stuck request's late reply is dropped. */
+static void test_model_watchdog(void)
+{
+    struct zw_model m;
+    zw_model_init(&m, ZW_PROFILE_AUTO);
+    m.conn = ZW_CONN_ONLINE;
+    uint32_t gen = m.generation;
+    zw_model_watchdog(&m, 8023);
+    struct zw_result late;
+    memset(&late, 0, sizeof(late));
+    late.generation = gen;
+    late.kind = ZW_Q_CHAIN;
+    late.chain.blocks = late.chain.headers = 5;
+    CHECK("[29] the watchdog marks the node unreachable on its port, one more failure",
+          m.conn == ZW_CONN_REFUSED && m.port == 8023 && m.fail_count == 1 && m.generation == gen + 1);
+    CHECK("[29] a late reply of the stuck request is dropped", !zw_model_apply(&m, &late) &&
+          m.conn == ZW_CONN_REFUSED && !m.have_chain);
+    m.conn = ZW_CONN_AUTH;
+    zw_model_watchdog(&m, 8023);
+    CHECK("[29] an AUTH problem stays on screen through a watchdog", m.conn == ZW_CONN_AUTH && m.fail_count == 1);
+    zw_model_free(&m);
+}
+
 /* Coalescing, deterministically: the worker is held in a 400 ms getnetworkinfo, so
  * the first CHAIN enqueue is queued and the second finds it still pending. */
 static void test_worker_coalescing(void)
@@ -1268,8 +1351,10 @@ int test_z23wallet(void)
     test_hostile_peers();
     test_worker_shutdown();
     test_worker_coalescing();
+    test_worker_restart();
     test_hostile_numbers();
     test_model();
+    test_model_watchdog();
     test_sync_texts();
     test_worker();
     test_shell();

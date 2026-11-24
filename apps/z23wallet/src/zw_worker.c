@@ -62,6 +62,7 @@ static void *worker_main(void *arg)
         enum zw_query q = next_job(w);
         uint32_t gen = w->gens[q];
         w->busy = true;
+        zw_cancel_clear_abort(w->cancel); /* an abort ends one request, never the next */
         if (w->reset_auth) { /* applied here, by the only thread that touches rpc */
             w->rpc->ep.valid = false;
             w->rpc->z23_refused = false;
@@ -160,6 +161,26 @@ void zw_worker_reset_auth(struct zw_worker *w)
     pthread_mutex_lock(&w->mu);
     w->reset_auth = true; /* the next job locates and re-reads the credentials */
     pthread_mutex_unlock(&w->mu);
+}
+
+/* The watchdog's restart: end the request in flight within one wait slice and
+ * have the next job locate afresh. Both are flags the worker applies itself,
+ * set under the lock it takes when it picks a job, so the abort hits either
+ * the stuck request or nothing. */
+void zw_worker_restart(struct zw_worker *w)
+{
+    pthread_mutex_lock(&w->mu);
+    w->reset_auth = true;
+    if (w->busy) zw_cancel_abort(w->cancel);
+    pthread_mutex_unlock(&w->mu);
+}
+
+bool zw_worker_reset_pending(struct zw_worker *w)
+{
+    pthread_mutex_lock(&w->mu);
+    bool r = w->reset_auth;
+    pthread_mutex_unlock(&w->mu);
+    return r;
 }
 
 void zw_worker_stop(struct zw_worker *w)

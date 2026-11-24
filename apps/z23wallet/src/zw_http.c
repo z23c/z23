@@ -19,12 +19,13 @@
 #define ZW_CONNECT_MS 500
 #define WAIT_SLICE_MS 50
 
-/* Lets another thread abort the request in flight; after fire every new request
- * fails before it connects. fire is a plain atomic store: Winsock can block a
- * cross-thread shutdown() while a recv is pending, so the flag is polled
- * between wait slices instead. */
+/* Lets another thread abort the request in flight. fired is permanent (shutdown:
+ * every later request fails before it connects); abort ends only the request in
+ * flight and is cleared by the worker before its next job (the watchdog). Both
+ * are plain atomic stores: Winsock can block a cross-thread shutdown() while a
+ * recv is pending, so the flags are polled between wait slices instead. */
 struct zw_cancel {
-    atomic_bool fired;
+    atomic_bool fired, abort;
 };
 
 struct zw_cancel *zw_cancel_new(void)
@@ -39,9 +40,19 @@ void zw_cancel_fire(struct zw_cancel *c)
     if (c) atomic_store(&c->fired, true);
 }
 
+void zw_cancel_abort(struct zw_cancel *c)
+{
+    if (c) atomic_store(&c->abort, true);
+}
+
+void zw_cancel_clear_abort(struct zw_cancel *c)
+{
+    if (c) atomic_store(&c->abort, false);
+}
+
 static bool cancel_fired(struct zw_cancel *c)
 {
-    return c && atomic_load(&c->fired);
+    return c && (atomic_load(&c->fired) || atomic_load(&c->abort));
 }
 
 void zw_buf_free(struct zw_buf *b)
