@@ -1316,8 +1316,8 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_no_uncited_victory),
     /* Read-only root probe retained in the historical base group. */
     X_(t_no_stray_root_files),
-    /* Slow, hermetic epoch fixtures own a group in the normal worker pool.
-     * Append after existing heavy entries to preserve heavy_01/02 IDs. */
+    /* Keep the fast-CI contract's historical group identity. Real epoch
+     * probe execution is owned by dev_platform_shard_01 and full lint. */
     H_(t_agent_fast_ci_contract),
 };
 #undef S_

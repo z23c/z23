@@ -1152,21 +1152,9 @@ int t_agent_fast_ci_contract(void)
          * ahead of its upstream still yields the committed file list. */
         ASSERT(run_gate_script_arg("tools/agent_fast_ci.sh", NULL,
                                    "changed-set-selftest") == 0);
-        int epoch_selftest_rc = run_gate_script(
-            "tools/dev/build-epoch-selftest.sh", NULL);
-        if (epoch_selftest_rc != 0) {
-            char epoch_output_path[PATH_MAX];
-            char *epoch_output = NULL;
-            if (lint_gate_out_path(epoch_output_path,
-                                   sizeof(epoch_output_path)) == 0 &&
-                read_entire_file(epoch_output_path, &epoch_output) == 0) {
-                fprintf(stderr,
-                        "build-epoch-selftest rc=%d output:\n%s\n",
-                        epoch_selftest_rc, epoch_output);
-            }
-            free(epoch_output);
-        }
-        ASSERT(epoch_selftest_rc == 0);
+        /* Real epoch probes belong to check-build-epoch-integrity and
+         * test_cold_epoch_integrity_gate (dev_platform_shard_01). The native
+         * selector routes probe edits there through epoch_probes.c. */
         PASS();
     } _test_next:;
     free(buf);
