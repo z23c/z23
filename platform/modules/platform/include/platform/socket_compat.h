@@ -15,6 +15,7 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h> /* SIO_TCP_INITIAL_RTO */
 typedef SOCKET platform_socket_t;
 typedef WSAPOLLFD platform_socket_pollfd;
 #define PLATFORM_SOCKET_INVALID INVALID_SOCKET
@@ -426,6 +427,24 @@ static inline int platform_socket_connect(platform_socket_t sock,
 #endif
 }
 
+/* Windows retries a SYN after the RST of a closed loopback port for about 2 s before it
+ * reports a refusal. Without SYN retransmissions a refused connect fails at once.
+ * Call before platform_socket_connect; inert on POSIX, where a refusal is already immediate.
+ * Best effort: a stack that rejects the option keeps its default timing. */
+static inline void platform_socket_connect_fail_fast(platform_socket_t sock)
+{
+#if defined(_WIN32)
+    TCP_INITIAL_RTO_PARAMETERS rto = {
+        .Rtt = TCP_INITIAL_RTO_UNSPECIFIED_RTT,
+        .MaxSynRetransmissions = TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS,
+    };
+    DWORD returned = 0;
+    (void)WSAIoctl(sock, SIO_TCP_INITIAL_RTO, &rto, sizeof(rto), NULL, 0, &returned, NULL, NULL);
+#else
+    (void)sock;
+#endif
+}
+
 static inline const char *platform_socket_error_string(int error, char *out,
                                                        size_t out_size)
 {
@@ -459,13 +478,16 @@ static inline int platform_socket_wait_writable(platform_socket_t sock,
 #if defined(_WIN32)
     if (timeout_ms < 0) return SOCKET_ERROR;
     fd_set writable;
+    fd_set failed; /* Winsock reports a refused non-blocking connect in the exception set */
     FD_ZERO(&writable);
     FD_SET(sock, &writable);
+    FD_ZERO(&failed);
+    FD_SET(sock, &failed);
     struct timeval timeout = {
         .tv_sec = timeout_ms / 1000,
         .tv_usec = (timeout_ms % 1000) * 1000,
     };
-    return select(0, NULL, &writable, NULL, &timeout);
+    return select(0, NULL, &writable, &failed, &timeout);
 #else
     if (sock < 0 || timeout_ms < 0) {
         errno = EINVAL;

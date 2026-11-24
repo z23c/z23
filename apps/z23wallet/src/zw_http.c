@@ -122,6 +122,7 @@ static enum zw_err connect_loopback(const struct zw_endpoint *ep, uint64_t deadl
     a.sin_family = AF_INET;
     a.sin_port = htons(ep->port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); /* the host is always 127.0.0.1 */
+    platform_socket_connect_fail_fast(s); /* a refused loopback connect must not retry the SYN on Windows */
     int rc = platform_socket_connect(s, (const struct sockaddr *)&a, sizeof(a));
     if (rc != 0 && !platform_socket_error_in_progress(platform_socket_last_error())) {
         bool refused = platform_socket_error_refused(platform_socket_last_error());
