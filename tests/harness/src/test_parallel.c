@@ -1647,8 +1647,9 @@ static int child_spawn(size_t idx, const char *out_path,
 
 /* Non-blocking reap of one worker: 1 = exited (*status set), 0 = still
  * running, -1 = harness error (already logged). */
-static int child_poll(zcl_child_t child, int *status)
+static int child_poll(zcl_child_t child, int *status, struct runner_cpu *cpu)
 {
+    (void)cpu;
 #if defined(_WIN32)
     DWORD wr = WaitForSingleObject(child, 0);
     if (wr == WAIT_TIMEOUT) return 0;
@@ -1666,7 +1667,15 @@ static int child_poll(zcl_child_t child, int *status)
     *status = (int)code;
     return 1;
 #else
+#if defined(__linux__)
+    struct rusage ru = {0};
+    pid_t done = wait4(child, status, WNOHANG, &ru);
+    if (done > 0 && cpu)
+        runner_cpu_set(cpu, ru.ru_utime.tv_sec, ru.ru_utime.tv_usec,
+                       ru.ru_stime.tv_sec, ru.ru_stime.tv_usec);
+#else
     pid_t done = waitpid(child, status, WNOHANG);
+#endif
     if (done == 0) return 0;
     if (done < 0) {
         if (errno == EINTR) return 0;
@@ -1730,13 +1739,14 @@ static void child_close(zcl_child_t child)
 static int find_slot_by_pid(struct child_slot *slots, int jobs, pid_t pid);
 #endif
 static int reap_any(struct child_slot *slots, int jobs, int *status,
-                    int64_t *peak_bytes)
+                    int64_t *peak_bytes, struct runner_cpu *cpu)
 {
     (void)peak_bytes;   /* only Linux wait4 reports a peak */
+    (void)cpu;
 #if defined(_WIN32)
     for (int i = 0; i < jobs; i++) {
         if (slots[i].pid == ZCL_CHILD_NONE) continue;
-        int r = child_poll(slots[i].pid, status);
+        int r = child_poll(slots[i].pid, status, cpu);
         if (r == 1) return i;
         if (r < 0) return -1;
     }
@@ -1746,8 +1756,11 @@ static int reap_any(struct child_slot *slots, int jobs, int *status,
     struct rusage ru;
     memset(&ru, 0, sizeof ru);
     pid_t done = wait4(-1, status, WNOHANG, &ru);
-    if (done > 0)   /* Linux reports ru_maxrss in KiB */
+    if (done > 0) {   /* Linux reports ru_maxrss in KiB */
         *peak_bytes = (int64_t)ru.ru_maxrss * 1024;
+        runner_cpu_set(cpu, ru.ru_utime.tv_sec, ru.ru_utime.tv_usec,
+                       ru.ru_stime.tv_sec, ru.ru_stime.tv_usec);
+    }
 #else
     pid_t done = waitpid(-1, status, WNOHANG);
 #endif
@@ -2042,7 +2055,7 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
     bool killed = false;
     bool successfully_reaped = false;
     for (;;) {
-        int pr = child_poll(child, &status);
+        int pr = child_poll(child, &status, &results[idx].timing.cpu);
         if (pr == 1) {
             successfully_reaped = true;
             runner_timing_finish(&results[idx].timing, platform_time_monotonic_us());
@@ -2186,10 +2199,11 @@ static void phase_watchdog_sweep(const struct phase_run *pr)
 
 /* Record one reaped slot's exit status and capture into its group result. */
 static void phase_record_reaped(const struct phase_run *pr, int slot, int status,
-                                int64_t peak_bytes)
+                                int64_t peak_bytes, struct runner_cpu cpu)
 {
     size_t idx = pr->slots[slot].group_idx;
     struct group_result *r = &pr->results[idx];
+    r->timing.cpu = cpu;
     runner_timing_finish(&r->timing, platform_time_monotonic_us());
     child_close(pr->slots[slot].pid);
     if (peak_bytes >= (INT64_C(256) << 20))
@@ -2263,7 +2277,8 @@ static bool run_parallel_phase(
 
         int status = 0;
         int64_t peak_bytes = 0;
-        int slot = reap_any(slots, jobs, &status, &peak_bytes);
+        struct runner_cpu cpu = {0};
+        int slot = reap_any(slots, jobs, &status, &peak_bytes, &cpu);
         if (slot == -2) {
             struct timespec ts = {
                 .tv_sec = 0, .tv_nsec = 10 * 1000 * 1000,
@@ -2276,7 +2291,7 @@ static bool run_parallel_phase(
                 return false;
             continue;   /* reaped a slot-less child; nothing to record */
         }
-        phase_record_reaped(&pr, slot, status, peak_bytes);
+        phase_record_reaped(&pr, slot, status, peak_bytes, cpu);
         remaining--;
         (*reaped)++;
     }

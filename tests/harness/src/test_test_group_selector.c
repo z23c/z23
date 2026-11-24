@@ -35,6 +35,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/resource.h>
 #endif
 #if !defined(_WIN32)
 #include <sys/wait.h>
@@ -311,11 +312,56 @@ static int test_runner_timing_arithmetic(void)
         char line[256];
         ASSERT(fgets(line, sizeof(line), f) != NULL);
         ASSERT(strstr(line, "phase=quiet-lint attempt=1 clock=monotonic_suite valid=0 start_us=unknown end_us=unknown exit_code=unknown signal=9") != NULL);
+        ASSERT(strstr(line, "cpu_valid=0 cpu_user_us=unknown cpu_system_us=unknown") != NULL);
         ASSERT(fclose(f) == 0);
+        runner_cpu_set(&t.cpu, 2, 34, 1, 56);
+        ASSERT(t.cpu.valid && t.cpu.user_us == 2000034 && t.cpu.system_us == 1000056);
+        f = tmpfile(); ASSERT(f != NULL);
+        runner_timing_interval(f, "test_fixture", "exclusive", 1, &t, 0, 0);
+        rewind(f); ASSERT(fgets(line, sizeof(line), f) != NULL);
+        ASSERT(strstr(line, "cpu_valid=1 cpu_user_us=2000034 cpu_system_us=1000056") != NULL);
+        ASSERT(fclose(f) == 0);
+        runner_cpu_set(&t.cpu, -1, 0, 0, 0); ASSERT(!t.cpu.valid);
+        runner_cpu_set(&t.cpu, 0, 1000000, 0, 0); ASSERT(!t.cpu.valid);
+        runner_cpu_set(&t.cpu, INT64_MAX, 0, 0, 0); ASSERT(!t.cpu.valid);
         PASS();
     } _test_next:;
     return failures;
 }
+
+#if defined(__linux__)
+static int test_runner_waited_child_cpu(void)
+{
+    int failures = 0, status = 0;
+    TEST("runner: wait4 includes CPU from a waited descendant") {
+        pid_t child = fork(); ASSERT(child >= 0);
+        if (child == 0) {
+            pid_t nested = fork();
+            if (nested < 0) _exit(2);
+            if (nested == 0) {
+                for (volatile unsigned long i = 0; i < 2000000UL; i++) { }
+                _exit(0);
+            }
+            int s = 0;
+            if (waitpid(nested, &s, 0) != nested || !WIFEXITED(s) || WEXITSTATUS(s)) _exit(3);
+            struct rusage descendants = {0};
+            if (getrusage(RUSAGE_CHILDREN, &descendants) != 0 ||
+                (descendants.ru_utime.tv_sec == 0 && descendants.ru_utime.tv_usec == 0 &&
+                 descendants.ru_stime.tv_sec == 0 && descendants.ru_stime.tv_usec == 0)) _exit(4);
+            _exit(0);
+        }
+        struct rusage ru = {0};
+        ASSERT(wait4(child, &status, 0, &ru) == child);
+        ASSERT(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        struct runner_cpu cpu;
+        runner_cpu_set(&cpu, ru.ru_utime.tv_sec, ru.ru_utime.tv_usec,
+                       ru.ru_stime.tv_sec, ru.ru_stime.tv_usec);
+        ASSERT(cpu.valid && cpu.user_us + cpu.system_us > 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 static int test_selector_predicate(void)
 {
@@ -2719,6 +2765,18 @@ static bool tgs_both_phase_timings(void)
     return ok && pool && exclusive;
 }
 
+static bool tgs_interval_cpu(const char *out, const char *identity)
+{
+    const char *line = strstr(out, identity);
+    const char *end = line ? strchr(line, '\n') : NULL;
+#if defined(__linux__)
+    const char *cpu = line ? strstr(line, "cpu_valid=1 cpu_user_us=") : NULL;
+#else
+    const char *cpu = line ? strstr(line, "cpu_valid=0 cpu_user_us=unknown cpu_system_us=unknown") : NULL;
+#endif
+    return end && cpu && cpu < end;
+}
+
 static int test_failure_priority_phase_barrier(void)
 {
     int failures = 0;
@@ -2737,6 +2795,7 @@ static int test_failure_priority_phase_barrier(void)
         const char *done = strstr(out, "test_parallel: exclusive pass done groups=1");
         const char *dispatch = strstr(out, "[dispatch]");
         ASSERT(exclusive && done && dispatch && exclusive < done && done < dispatch);
+        ASSERT(tgs_interval_cpu(out, "attempt_interval group=test_selector_exclusive_fixture phase=exclusive attempt=1 "));
         const char *fixture = strstr(exclusive, "test_selector_exclusive_fixture");
         ASSERT(fixture && fixture < done);
         ASSERT(strstr(out, "selector exclusive fixture executed") != NULL);
@@ -3346,6 +3405,8 @@ static int tgs_retry_assertions(const char *out, int rc, unsigned count,
         ASSERT(tgs_pooled_provisional(out, pooled_failure));
         ASSERT(strstr(out, "attempt_interval group=test_hex_codec phase=general attempt=1 ") != NULL);
         ASSERT(strstr(out, "attempt_interval group=test_hex_codec phase=retry attempt=2 ") != NULL);
+        ASSERT(tgs_interval_cpu(out, "attempt_interval group=test_hex_codec phase=general attempt=1 "));
+        ASSERT(tgs_interval_cpu(out, "attempt_interval group=test_hex_codec phase=retry attempt=2 "));
         ASSERT(pooled_failure || tgs_interval_exit_zero(out));
         ASSERT(strstr(out, "SUITE VERDICT mode=cold") != NULL);
         ASSERT(strstr(out, "groups_failed=0") != NULL);
@@ -4463,6 +4524,9 @@ int test_test_group_selector(void)
 #endif
     failures += test_selector_predicate();
     failures += test_runner_timing_arithmetic();
+#if defined(__linux__)
+    failures += test_runner_waited_child_cpu();
+#endif
     failures += test_registry_exact_resolution();
     failures += test_exact_set_diagnostics();
     failures += test_exact_set_mixed();
