@@ -211,6 +211,27 @@ static bool sc_write_fixture_decl(void)
         sc_write(SC_SRC "sc_decl_mixed.c", "int sc_decl_target(void);\nint sc_decl_target(void) { return 1; }\n");
 }
 
+static bool sc_write_fixture_tag_namespace(void)
+{
+    return sc_write(SC_INC "sc_tags.h",
+        "struct stat;\nunion sc_union;\nenum sc_enum;\n"
+        "#define sc_tag_macro(x) ((x) + 1)\n"
+        "typedef int (*sc_tag_callable)(void);\n") &&
+        sc_write(SC_SRC "sc_tag_include.c",
+        "#include \"net/sc_tags.h\"\nstruct stat *sc_tag_value;\n") &&
+        sc_write("build/obj/sc_tag_include.d",
+        "build/obj/sc_tag_include.o: " SC_SRC "sc_tag_include.c " SC_INC "sc_tags.h\n") &&
+        sc_write(SC_SRC "sc_tag_unrelated.c",
+        "int sc_tag_unrelated(void) { return stat() + sc_union() + sc_enum(); }\n") &&
+        sc_write(SC_SRC "sc_tag_local.c", "struct sc_local_tag;\n") &&
+        sc_write(SC_SRC "sc_tag_local_other.c",
+        "int sc_tag_local_other(void) { return sc_local_tag(); }\n") &&
+        sc_write(SC_SRC "sc_tag_macro_user.c",
+        "int sc_tag_macro_user(void) { return sc_tag_macro(1); }\n") &&
+        sc_write(SC_SRC "sc_tag_callable_user.c",
+        "int sc_tag_callable_user(void) { return sc_tag_callable(); }\n");
+}
+
 /* Bodies the scanner cannot see: each `SC_CHECK(...);` inside a function
  * opened by a macro is a file-scope row named SC_CHECK. sc_hidden.c opens a
  * static function; sc_handler.c opens a NON-static one, sc_h_run, that
@@ -263,6 +284,7 @@ static bool sc_write_fixture(void)
            sc_write_fixture_static_inline() &&
            sc_write_fixture_macro_includes() &&
            sc_write_fixture_macro_other() && sc_write_fixture_decl() &&
+           sc_write_fixture_tag_namespace() &&
            sc_write_fixture_stmt_macro();
 }
 
@@ -344,6 +366,28 @@ static bool sc_decl_graph(struct codeindex *ci)
         if (!strcmp(paths[i], SC_SRC "sc_decl_other.c")) other = true;
     }
     return header && n >= 0 && includer && !other && dim == CODEINDEX_INCLUDE_DIM_COMPLETE;
+}
+
+static int test_sc_tag_namespace(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: tags do not create unrelated call edges") {
+        char paths[16][256];
+        enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
+        int n = codeindex_reverse_includes(ci, SC_INC "sc_tags.h", paths, 16, &dim);
+        bool found = false;
+        for (int i = 0; i < n; ++i)
+            if (!strcmp(paths[i], SC_SRC "sc_tag_include.c")) found = true;
+        ASSERT(n >= 0 && dim == CODEINDEX_INCLUDE_DIM_COMPLETE && found);
+        for (int overlay = 0; overlay < 2; ++overlay) {
+            ASSERT(sc_decl_has(ci, SC_INC "sc_tags.h", SC_SRC "sc_tag_unrelated.c", overlay, false));
+            ASSERT(sc_decl_has(ci, SC_INC "sc_tags.h", SC_SRC "sc_tag_macro_user.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_INC "sc_tags.h", SC_SRC "sc_tag_callable_user.c", overlay, true));
+            ASSERT(sc_decl_has(ci, SC_SRC "sc_tag_local.c", SC_SRC "sc_tag_local_other.c", overlay, false));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_sc_decl_scope(struct codeindex *ci)
@@ -537,6 +581,31 @@ static bool sc_macro_untrusted_setup(sqlite3 *db, unsigned mode)
     };
     return mode < sizeof(sql) / sizeof(sql[0]) &&
            sqlite3_exec(db, sql[mode], NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static int test_sc_tag_incomplete_includes(struct codeindex *ci)
+{
+    int failures = 0;
+    TEST("codeindex_static_callers: incomplete tag include evidence stays untrusted") {
+        struct ci_store *store = sc_macro_copy_store(ci);
+        ASSERT(store != NULL);
+        bool ok = sc_macro_untrusted_setup(ci_store_db(store), 2);
+        struct codeindex copy = *ci;
+        copy.store = store;
+        char paths[16][256];
+        enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_COMPLETE;
+        int n = codeindex_reverse_includes(&copy, SC_INC "sc_tags.h", paths, 16, &dim);
+        ok = ok && (n < 0 || dim != CODEINDEX_INCLUDE_DIM_COMPLETE);
+        for (int overlay = 0; overlay < 2; ++overlay) {
+            ok = sc_decl_has(&copy, SC_INC "sc_tags.h", SC_SRC "sc_tag_unrelated.c", overlay, false) && ok;
+            ok = sc_decl_has(&copy, SC_INC "sc_tags.h", SC_SRC "sc_tag_macro_user.c", overlay, true) && ok;
+            ok = sc_decl_has(&copy, SC_INC "sc_tags.h", SC_SRC "sc_tag_callable_user.c", overlay, true) && ok;
+        }
+        ci_store_close(store);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 static bool sc_macro_untrusted_dim(struct codeindex *ci, unsigned mode,
                                    enum codeindex_include_dim *dim)
@@ -1176,6 +1245,8 @@ int test_codeindex_static_callers(void)
         failures += test_sc_macro_scoping(ci);
         failures += test_sc_macro_untrusted(ci);
         failures += test_sc_decl_scope(ci);
+        failures += test_sc_tag_namespace(ci);
+        failures += test_sc_tag_incomplete_includes(ci);
         failures += test_sc_decl_untrusted(ci);
         failures += test_sc_decl_invalid(ci);
         failures += test_sc_statement_macro_call(ci);

@@ -351,6 +351,11 @@ static bool ci_closure_queue_symbol(struct ci_closure_ctx *c,
                                     bool *truncated)
 {
     char key[CI_CLOSURE_KEY_MAX];
+    /* Struct/union and enum tags have their own C namespace and cannot be
+     * the callable name in a reference. Their file/include dependencies are
+     * handled separately; data and typedef rows remain conservative. */
+    if (sym->kind == 'S' || sym->kind == 'E')
+        return true;
     bool local_decl = sym->kind == 'T' && !sym->def_path[0] &&
         sym->def_line == 0 && sym->decl_line > 0 && !sym->partial &&
         ci_path_is_c(sym->decl_path);
