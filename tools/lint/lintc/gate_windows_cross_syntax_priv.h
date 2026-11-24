@@ -57,7 +57,7 @@ int wcs_compile_kind(const char *log, const char *rc, char *kind,
 int wcs_sweep(void);
 int wcs_log_shape(const char *path);
 int wcs_reap_workers(const pid_t *pids, int count);
-void wcs_worker_child(const char *misslist, int jobs, int index);
+int wcs_worker_list_selftest(void);
 int wcs_worker_status_test(void);
 int wcs_worker_run(const char *misslist, int jobs, int *started_out);
 int wcs_worker_empty_test(const char *base);

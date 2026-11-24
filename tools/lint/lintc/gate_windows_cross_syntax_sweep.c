@@ -15,12 +15,15 @@
 #include <fcntl.h>
 #include <ftw.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "base/safe_alloc.h"
 #include "lintc.h"
 #include "gate_windows_cross_syntax_priv.h"
 
@@ -335,26 +338,14 @@ static void compile_one(char *src, size_t l)
     wcs_cache_compile(log, rcf, g_wcs_cc, cargv, src);
 }
 
-void wcs_worker_child(const char *misslist, int jobs, int k)
+static void wcs_worker_child(char (*rows)[WCS_PATH], int count, _Atomic int *next)
 {
-    FILE *mf = fopen(misslist, "r");
-    if (!mf) {
-        fprintf(stderr, "%s: worker %d cannot open %s: %s\n", k_wcs_gate, k, misslist, strerror(errno));
-        _exit(2);
+    for (;;) {
+        int i = atomic_fetch_add_explicit(next, 1, memory_order_relaxed);
+        if (i >= count) break;
+        compile_one(rows[i], strlen(rows[i]));
     }
-    static char src[WCS_PATH];
-    int i = 0;
-    while (fgets(src, sizeof src, mf)) {
-        size_t l = strlen(src);
-        if (l && src[l - 1] == '\n') src[--l] = '\0';
-        if (l && (i % jobs) == k) compile_one(src, l);
-        i++;
-    }
-    int failed = ferror(mf);
-    if (failed) fprintf(stderr, "%s: worker %d cannot read %s\n", k_wcs_gate, k, misslist);
-    if (fclose(mf) != 0) failed = 1;
-    if (failed) fprintf(stderr, "%s: worker %d failed reading or closing %s\n", k_wcs_gate, k, misslist);
-    _exit(failed ? 2 : 0);
+    _exit(0);
 }
 
 /* Retries wait only on EINTR; any other wait error, or a failed fork, is
@@ -382,8 +373,63 @@ int wcs_reap_workers(const pid_t *pids, int count)
     return rc;
 }
 
-/* Count the worker's fgets frames up to the configured pool size. */
-static int worker_list_count(const char *path, int limit)
+/* Append one validated path, bounded by the gate's TU and path limits. */
+static int worker_list_append(char (**rows)[WCS_PATH], int *count,
+                              int *capacity, const char *row, size_t len)
+{
+    if (!len || len >= WCS_PATH || *count >= WCS_TUS) return EINVAL;
+    if (*count == *capacity) {
+        int n = *capacity ? *capacity * 2 : 64;
+        if (n > WCS_TUS) n = WCS_TUS;
+        void *p = zcl_realloc(*rows, (size_t)n * sizeof **rows, "wcs_work_rows");
+        if (!p) return ENOMEM;
+        *rows = p;
+        *capacity = n;
+    }
+    memcpy((*rows)[(*count)++], row, len + 1);
+    return 0;
+}
+
+/* Read the full private miss list before forking. The extra byte distinguishes
+ * a maximal unterminated path from an overlong row without a speculative read. */
+static int worker_list_stream(FILE *f, char (**rows)[WCS_PATH], int *count)
+{
+    char row[WCS_PATH + 1];
+    int capacity = 0;
+    while (fgets(row, sizeof row, f)) {
+        size_t len = strlen(row);
+        if (len && row[len - 1] == '\n') row[--len] = '\0';
+        int error = worker_list_append(rows, count, &capacity, row, len);
+        if (error) return error;
+    }
+    return ferror(f) ? EIO : 0;
+}
+
+int wcs_worker_list_selftest(void)
+{
+    FILE *f = tmpfile();
+    if (!f) return 2;
+    for (int i = 0; i < WCS_PATH - 1; i++)
+        if (fputc('x', f) == EOF) { fclose(f); return 2; }
+    if (fflush(f) != 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 2; }
+    char (*rows)[WCS_PATH] = NULL;
+    int count = 0;
+    int rc = worker_list_stream(f, &rows, &count);
+    int ok = rc == 0 && count == 1 && strlen(rows[0]) == WCS_PATH - 1;
+    if (fclose(f) != 0) ok = 0;
+    free(rows);
+    rows = NULL;
+    int cap = 0;
+    count = WCS_TUS;
+    ok = ok && worker_list_append(&rows, &count, &cap, "x", 1) == EINVAL;
+    count = 0;
+    ok = ok && worker_list_append(&rows, &count, &cap, "", 0) == EINVAL;
+    ok = ok && worker_list_append(&rows, &count, &cap, "x", WCS_PATH) == EINVAL;
+    free(rows);
+    return ok ? 0 : 1;
+}
+
+static int worker_list_read(const char *path, char (**rows)[WCS_PATH])
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0) return -1;
@@ -392,15 +438,19 @@ static int worker_list_count(const char *path, int limit)
     if (!S_ISREG(st.st_mode)) { close(fd); errno = EINVAL; return -1; }
     FILE *f = fdopen(fd, "r");
     if (!f) { close(fd); return -1; }
-    char row[WCS_PATH];
     int count = 0;
-    errno = 0;
-    while (count < limit && fgets(row, sizeof row, f)) count++;
-    int read_error = ferror(f) ? (errno ? errno : EIO) : 0;
+    int read_error = worker_list_stream(f, rows, &count);
     int closed = fclose(f);
     if (read_error) { errno = read_error; return -1; }
     if (closed != 0) return -1;
     return count;
+}
+
+static int worker_index_unmap(_Atomic int *next)
+{
+    if (munmap(next, sizeof *next) == 0) return 0;
+    fprintf(stderr, "%s: cannot unmap shared work index: %s\n", k_wcs_gate, strerror(errno));
+    return 2;
 }
 
 int wcs_worker_run(const char *misslist, int jobs, int *started_out)
@@ -408,27 +458,45 @@ int wcs_worker_run(const char *misslist, int jobs, int *started_out)
     int started = 0;
     if (started_out) *started_out = 0;
     if (jobs < 1 || jobs > 32) { errno = EINVAL; return 2; }
-    int rows = worker_list_count(misslist, jobs);
-    if (rows < 0) {
+    char (*rows)[WCS_PATH] = NULL;
+    int count = worker_list_read(misslist, &rows);
+    if (count < 0) {
         fprintf(stderr, "%s: cannot read miss list %s: %s\n",
                 k_wcs_gate, misslist, strerror(errno));
+        free(rows);
         return 2;
     }
-    if (!rows) return 0;
-    if (rows < jobs) jobs = rows;
+    if (!count) { free(rows); return 0; }
+    if (count < jobs) jobs = count;
+    _Atomic int *next = mmap(NULL, sizeof *next, PROT_READ | PROT_WRITE,
+                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (next == MAP_FAILED) {
+        fprintf(stderr, "%s: cannot map shared work index: %s\n", k_wcs_gate, strerror(errno));
+        free(rows); return 2;
+    }
+    atomic_init(next, 0);
+    if (!atomic_is_lock_free(next)) {
+        fprintf(stderr, "%s: shared work index is not lock-free\n", k_wcs_gate);
+        (void)worker_index_unmap(next); free(rows); return 2;
+    }
     pid_t pids[32];
     for (int k = 0; k < jobs; k++) {
         pid_t pid = fork();
         if (pid < 0) {
             fprintf(stderr, "%s: fork failed for worker %d\n", k_wcs_gate, k);
+            atomic_store_explicit(next, count, memory_order_relaxed);
             wcs_reap_workers(pids, started);
+            (void)worker_index_unmap(next); free(rows);
             return 2;
         }
-        if (pid == 0) wcs_worker_child(misslist, jobs, k);
+        if (pid == 0) wcs_worker_child(rows, count, next);
         pids[started++] = pid;
         if (started_out) *started_out = started;
     }
-    return wcs_reap_workers(pids, started);
+    int rc = wcs_reap_workers(pids, started);
+    if (worker_index_unmap(next) != 0) rc = 2;
+    free(rows);
+    return rc;
 }
 
 static int jobs_from_env(void)

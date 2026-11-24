@@ -93,7 +93,7 @@ int wcs_worker_empty_test(const char *base)
     int started = -1;
     shp(path, sizeof path, "%s/worker-empty-list", base);
     shp(absent, sizeof absent, "%s/worker-absent-list", base);
-    if (csr_write(path, "") != 0) return 2;
+    if (wcs_worker_list_selftest() != 0 || csr_write(path, "") != 0) return 2;
     if (wcs_worker_run(path, 2, &started) != 0 || started != 0)
         return sh_fail("empty miss list started workers");
     if (wcs_worker_run(path, 0, &started) == 0 ||
@@ -148,6 +148,55 @@ static int sh_worker_case(const char *base, int rows, int limit)
     return started == (rows < limit ? rows : limit) ? 0 : 1;
 }
 
+static int sh_dynamic_results(const char *calls)
+{
+    FILE *f = fopen(calls, "r");
+    if (!f) return 1;
+    char row[64];
+    unsigned seen = 0, before_zero = 0;
+    int n = 0;
+    while (fgets(row, sizeof row, f)) {
+        if (strncmp(row, "unit", 4) != 0 || row[4] < '0' || row[4] > '5' ||
+            strcmp(row + 5, ".c\n") != 0) { fclose(f); return 1; }
+        unsigned bit = 1u << (row[4] - '0');
+        if (seen & bit) { fclose(f); return 1; }
+        if (bit == 1) before_zero = seen;
+        seen |= bit;
+        n++;
+    }
+    int bad = ferror(f);
+    if (fclose(f) != 0) bad = 1;
+    return bad || n != 6 || seen != 63 || (before_zero & 20) != 20;
+}
+
+/* Row zero waits for row five. With two workers, rows two and four must
+ * finish before zero when the free worker takes the next available row. */
+static int sh_worker_dynamic(const char *base)
+{
+    char compiler[SH_P], marker[SH_P], calls[SH_P], list[SH_P], out[SH_P];
+    shp(compiler, sizeof compiler, "%s/dynamic-cc", base);
+    shp(marker, sizeof marker, "%s/dynamic-marker", base);
+    shp(calls, sizeof calls, "%s/dynamic-calls", base);
+    shp(list, sizeof list, "%s/dynamic.list", base);
+    shp(out, sizeof out, "%s/dynamic.out", base);
+    const char *script = "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        " unit0.c) while [ ! -f \"$WCS_TEST_MARKER\" ]; do sleep 0.01; done ;;\n"
+        " unit5.c) : > \"$WCS_TEST_MARKER\" ;;\n"
+        "esac\n"
+        "printf '%s\\n' \"$1\" >> \"$WCS_TEST_CALLS\"\n";
+    if (csr_write(compiler, script) != 0 || chmod(compiler, 0700) != 0 ||
+        csr_write(list, "unit0.c\nunit1.c\nunit2.c\nunit3.c\nunit4.c\nunit5.c\n") != 0 ||
+        mkdir(out, 0700) != 0 || setenv("WCS_TEST_MARKER", marker, 1) != 0 ||
+        setenv("WCS_TEST_CALLS", calls, 1) != 0 ||
+        wcs_copy(g_wcs_cc, sizeof g_wcs_cc, compiler) ||
+        wcs_copy(g_wcs_out, sizeof g_wcs_out, out)) return 2;
+    g_wcs_nflag = 0;
+    if (wcs_worker_run(list, 2, NULL) != 0 || sh_worker_results(out, 6) != 0)
+        return 1;
+    return sh_dynamic_results(calls);
+}
+
 int wcs_worker_cap_test(const char *base)
 {
     pid_t pid = fork();
@@ -156,7 +205,7 @@ int wcs_worker_cap_test(const char *base)
         if (wcs_copy(g_wcs_cc, sizeof g_wcs_cc, "/bin/true")) _exit(2);
         g_wcs_nflag = 0;
         int rc = sh_worker_case(base, 1, 3) || sh_worker_case(base, 2, 3) ||
-                 sh_worker_case(base, 5, 3);
+                 sh_worker_case(base, 5, 3) || sh_worker_dynamic(base);
         _exit(rc ? 1 : 0);
     }
     int status;
@@ -809,8 +858,8 @@ int wcs_selftest_shared_store(const char *base, const char *stub,
 static void worker_test_child(int mode, int index, const char *missing)
 {
     if (index == 0 && mode == 2) raise(SIGKILL);
-    if (index == 0 && mode == 3) wcs_worker_child(missing, 1, 0);
-    if (index == 0 && mode == 4) wcs_worker_child(".", 1, 0);
+    if (index == 0 && mode == 3) _exit(wcs_worker_run(missing, 1, NULL));
+    if (index == 0 && mode == 4) _exit(wcs_worker_run(".", 1, NULL));
     _exit(index == 0 && mode == 1 ? 7 : 0);
 }
 
