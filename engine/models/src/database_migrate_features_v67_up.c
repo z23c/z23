@@ -778,7 +778,7 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
             "CREATE TABLE IF NOT EXISTS fleet_board_deliveries("
             "post_id BLOB NOT NULL CHECK(length(post_id)=32),"
             "peer BLOB NOT NULL CHECK(length(peer)=32),"
-            "verdict INTEGER NOT NULL CHECK(verdict BETWEEN 0 AND 3),"
+            "verdict INTEGER NOT NULL CHECK(verdict BETWEEN 0 AND 4),"
             "reason TEXT NOT NULL DEFAULT '' CHECK(length(reason)<=40),"
             "at INTEGER NOT NULL CHECK(at>=0),"
             "PRIMARY KEY(post_id,peer)) WITHOUT ROWID;"

@@ -108,6 +108,33 @@ static void delivery_put_locked(const uint8_t peer[32], const uint8_t id[32],
     atomic_store_explicit(&g_ring_count, g_ring_len, memory_order_relaxed);
 }
 
+/* What record `i` of a receipt says. A committed receipt that names no
+ * verdict for the record says nothing about it (unknown, never "stored"). A
+ * refusal the receiver gives about itself rather than the post (busy, store
+ * full, storage, a node-wide quota) comes without a result code by design;
+ * it is named as such rather than left blank. */
+static void delivery_receipt_answer(const struct board_push_receipt *rc,
+                                    unsigned i, uint8_t *verdict,
+                                    const char **reason)
+{
+    *verdict = k_code_verdict[rc->code];
+    *reason = board_push_code_name(rc->code);
+    if (rc->code != FLEET_BOARD_PUSH_CODE_COMMITTED)
+        return;
+    if (i >= rc->n) {
+        *verdict = FLEET_BOARD_DELIVERY_UNKNOWN;
+        *reason = "no_record_verdict";
+        return;
+    }
+    *verdict = rc->rec[i].verdict;
+    if (*verdict <= FLEET_BOARD_DELIVERY_HELD)
+        *reason = "";
+    else if (rc->rec[i].result == FLEET_BOARD_OK)
+        *reason = "receiver_state";
+    else
+        *reason = delivery_result_name(rc->rec[i].result);
+}
+
 void board_delivery_note_receipt(const uint8_t peer[32], const uint8_t ids[][32],
                                  uint8_t n, const struct board_push_receipt *rc,
                                  int64_t at)
@@ -116,13 +143,9 @@ void board_delivery_note_receipt(const uint8_t peer[32], const uint8_t ids[][32]
         return;
     delivery_lock();
     for (unsigned i = 0; i < n && i < FLEET_BOARD_PUSH_POSTS_MAX; i++) {
-        uint8_t verdict = k_code_verdict[rc->code];
-        const char *reason = board_push_code_name(rc->code);
-        if (rc->code == FLEET_BOARD_PUSH_CODE_COMMITTED && i < rc->n) {
-            verdict = rc->rec[i].verdict;
-            reason = verdict <= FLEET_BOARD_DELIVERY_HELD
-                         ? "" : delivery_result_name(rc->rec[i].result);
-        }
+        uint8_t verdict;
+        const char *reason;
+        delivery_receipt_answer(rc, i, &verdict, &reason);
         delivery_put_locked(peer, ids[i], verdict, reason, at);
     }
     zcl_mutex_unlock(&g_delivery_lock);
@@ -134,8 +157,10 @@ void board_delivery_note_unanswered(const uint8_t peer[32], const uint8_t ids[][
     if (!peer || !ids || !reason)
         return;
     delivery_lock();
+    /* No receipt: the receiver may have committed just before the deadline,
+     * so its state is unknown, not "deferred". */
     for (unsigned i = 0; i < n && i < FLEET_BOARD_PUSH_POSTS_MAX; i++)
-        delivery_put_locked(peer, ids[i], FLEET_BOARD_DELIVERY_DEFERRED, reason, at);
+        delivery_put_locked(peer, ids[i], FLEET_BOARD_DELIVERY_UNKNOWN, reason, at);
     zcl_mutex_unlock(&g_delivery_lock);
 }
 

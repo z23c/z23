@@ -15,7 +15,7 @@
 DEFINE_MODEL_CALLBACKS(fleet_board_delivery)
 
 static const char *const k_verdict_names[FLEET_BOARD_DELIVERY_VERDICTS] = {
-    "stored", "held", "deferred", "refused",
+    "stored", "held", "deferred", "refused", "unknown",
 };
 
 const char *fleet_board_delivery_verdict_name(int64_t verdict)
@@ -65,6 +65,47 @@ bool db_fleet_board_delivery_validate(const struct db_fleet_board_delivery *d,
     return !ar_errors_any(errors);
 }
 
+/* The verdict recorded for (post_id, peer): 1 found, 0 none, -1 unreadable. */
+static int delivery_recorded(struct node_db *ndb, const uint8_t post_id[32],
+                             const uint8_t peer[32], int64_t *verdict)
+{
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_deliveries);
+    qb_select_column(&q, QB_C_fleet_board_deliveries_verdict);
+    qb_where_blob(&q, QB_C_fleet_board_deliveries_post_id, QB_EQ, post_id, 32);
+    qb_where_blob(&q, QB_C_fleet_board_deliveries_peer, QB_EQ, peer, 32);
+    qb_limit(&q, 1);
+    sqlite3_stmt *s = NULL;
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "delivery lookup prepare failed: %s", qb_error(&q));
+        return -1;
+    }
+    enum zcl_step step = ar_step_checked(s, "fleet_board.delivery lookup", NULL);
+    if (step == ZCL_STEP_ROW)
+        *verdict = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    if (step == ZCL_STEP_ERROR)
+        return -1;
+    return step == ZCL_STEP_ROW ? 1 : 0;
+}
+
+/* Whether `d` would only weaken a known answer: "not now" or silence over a
+ * peer's own "I have it". */
+static bool delivery_would_downgrade(struct node_db *ndb,
+                                     const struct db_fleet_board_delivery *d,
+                                     bool *unreadable)
+{
+    *unreadable = false;
+    if (d->verdict != FLEET_BOARD_DELIVERY_DEFERRED &&
+        d->verdict != FLEET_BOARD_DELIVERY_UNKNOWN)
+        return false;
+    int64_t have = -1;
+    int found = delivery_recorded(ndb, d->post_id, d->peer, &have);
+    *unreadable = found < 0;
+    return found == 1 && (have == FLEET_BOARD_DELIVERY_STORED ||
+                          have == FLEET_BOARD_DELIVERY_HELD);
+}
+
 bool db_fleet_board_delivery_save(struct node_db *ndb,
                                   const struct db_fleet_board_delivery *d)
 {
@@ -75,6 +116,11 @@ bool db_fleet_board_delivery_save(struct node_db *ndb,
     node_db_get_status(ndb, &status);
     if (status.tx_open)
         return false; // raw-return-ok:caller-keeps-the-note-and-retries
+    bool unreadable = false;
+    if (delivery_would_downgrade(ndb, d, &unreadable))
+        return true; // raw-return-ok:a-known-stored-or-held-answer-is-kept
+    if (unreadable)
+        return false; // raw-return-ok:lookup-failed-caller-counts-a-dropped-note
     struct ar_callbacks *cbs = db_fleet_board_delivery_callbacks();
     struct qb q;
     qb_insert(&q, QB_T_fleet_board_deliveries, QB_INSERT_OR_REPLACE);

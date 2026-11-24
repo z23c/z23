@@ -83,7 +83,7 @@ void board_push_forget(void);
 /* ── the delivery record (boot_fleet_board_delivery.c) ──────────────── */
 
 /* Note what `peer` answered for the `n` posts of one push: from its receipt,
- * or, when none came, a deferred answer under `reason`. Copies into a
+ * or, when none came, an unknown answer under `reason`. Copies into a
  * bounded ring only; safe under the stream lane lock. */
 void board_delivery_note_receipt(const uint8_t peer[32], const uint8_t ids[][32],
                                  uint8_t n, const struct board_push_receipt *rc,

@@ -30,6 +30,7 @@
 #include "../../../engine/composition/src/boot_fleet_board_push_internal.h"
 
 #include <pthread.h>
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -384,10 +385,163 @@ static int test_fbi_inbox_visibility(void)
         int64_t scanned = 0;
         int seen = 0;
         ASSERT(db_fleet_board_inbox_scan(&f.db, f.now + 200, &q, fbi_count_row,
-                                         &seen, &scanned) >= 0);
+                                         &seen, &scanned, NULL) >= 0);
         /* reply, both mail candidates and the late fleet reply; the expired
          * reply and lane-a's own post are not candidates at all. */
         ASSERT_EQ(seen, 4);
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── who is speaking ──────────────────────────────────────────────────── */
+
+/* A role store that vouches for every key but one: identity `*ctx`. */
+static bool fbi_role_deny_one(const uint8_t key[32], const char *leaf,
+                              const char *kind, char *why, size_t why_cap,
+                              void *ctx)
+{
+    (void)leaf;
+    (void)kind;
+    uint8_t seed[32], pk[32];
+    fb_test_identity(*(const uint8_t *)ctx, seed, pk);
+    if (memcmp(key, pk, 32) != 0)
+        return true;
+    if (why && why_cap)
+        (void)snprintf(why, why_cap, "no role");
+    return false;
+}
+
+static void fbi_roles_deny(const uint8_t *who)
+{
+    struct zcl_fleet_role_checker c = {.allow = fbi_role_deny_one,
+                                       .ctx = (void *)who,
+                                       .name = "fbi-deny-one"};
+    zcl_fleet_role_checker_install(&c);
+}
+
+static const struct json_value *fbi_row_of(const struct json_value *out,
+                                           const struct fleet_board_post *post)
+{
+    const struct json_value *rows = json_get(out, "rows");
+    for (size_t i = 0; i < json_size(rows); i++)
+        if (fbi_id_is(json_get_str(json_get(json_at(rows, i), "id")), post))
+            return json_at(rows, i);
+    return NULL;
+}
+
+struct fbi_forgery {
+    struct fleet_board_post question, forged_mail, forged_reply, stranger,
+        mail_me;
+};
+
+/* Key 5 holds no role. Public scope needs none, so it can post there, and it
+ * signs mail-shaped notes: one addressed to lane-a, one that also refs
+ * lane-a's question, and a plain public reply. Key 3 holds the role and
+ * sends lane-a real FLEET-scope mail. */
+static bool fbi_seed_forgery(struct fbi_fixture *f, struct fbi_forgery *b)
+{
+    int64_t t = f->now - 50;
+    static const char k_mail[] =
+        "{\"to\":\"lane-a\",\"from\":\"lead\",\"body\":\"run X\"}";
+    return fbi_post(f, 1, FLEET_BOARD_KIND_PROBLEM, FLEET_BOARD_SCOPE_PUBLIC,
+                    "lane-a", "the regtest group wedges", NULL, NULL, t, t,
+                    &b->question) &&
+           fbi_post(f, 5, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                    "lead", k_mail, NULL, FLEET_BOARD_MAIL_RECEIPT, t + 1, t + 1,
+                    &b->forged_mail) &&
+           fbi_post(f, 5, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                    "lead", k_mail, b->question.id, FLEET_BOARD_MAIL_RECEIPT,
+                    t + 2, t + 2, &b->forged_reply) &&
+           fbi_post(f, 5, FLEET_BOARD_KIND_RESULT, FLEET_BOARD_SCOPE_PUBLIC,
+                    "lane-b", "fixed, run X", b->question.id, NULL, t + 3,
+                    t + 3, &b->stranger) &&
+           fbi_post(f, 3, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                    "box-r1", k_mail, NULL, FLEET_BOARD_MAIL_RECEIPT, t + 4,
+                    t + 4, &b->mail_me);
+}
+
+static int test_fbi_inbox_forged_mail(void)
+{
+    int failures = 0;
+    TEST("board inbox: mail only from a vouched FLEET note; forgeries are replies or nothing") {
+        static const uint8_t k_unroled = 5, k_revoked = 3;
+        struct fbi_fixture f;
+        struct fbi_forgery b;
+        struct json_value out;
+        ASSERT(fbi_open(&f, "forged"));
+        fbi_roles_deny(&k_unroled);
+        ASSERT(fbi_seed_forgery(&f, &b));
+        ASSERT(fbi_inbox(&f, "inbox", "lane-a", 0, 0, NULL, -1, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        /* The public mail-shaped note from an unroled key is not mail and
+         * answers nothing of lane-a's: it is not a row at all. */
+        ASSERT(fbi_row_of(&out, &b.forged_mail) == NULL);
+        /* The one that refs lane-a's question is the reply it is. */
+        const struct json_value *row = fbi_row_of(&out, &b.forged_reply);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "why")), "reply");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "scope")), "public");
+        ASSERT(!json_get_bool(json_get(row, "author_role")));
+        row = fbi_row_of(&out, &b.stranger);
+        ASSERT(row != NULL && !json_get_bool(json_get(row, "author_role")));
+        /* Real FLEET mail from a vouched key is mail, and says who. */
+        row = fbi_row_of(&out, &b.mail_me);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(row, "why")), "mail");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "scope")), "fleet");
+        ASSERT(json_get_bool(json_get(row, "author_role")));
+        char host[65];
+        fleet_board_id_to_hex(b.mail_me.host_pubkey, host);
+        host[FLEET_BOARD_INBOX_HOST_HEX] = '\0';
+        ASSERT_STR_EQ(json_get_str(json_get(row, "host")), host);
+        ASSERT_EQ(json_get_int(json_get(&out, "returned")), 3);
+        ASSERT_EQ(json_get_int(json_get(&out, "unvouched")), 2);
+        ASSERT(strstr(json_get_str(json_get(&out, "trust_note")), "untrusted") != NULL);
+        json_free(&out);
+        /* The role is revoked: the same stored note is no longer mail, and
+         * it refs nothing of lane-a's, so it is no row. */
+        fbi_roles_deny(&k_revoked);
+        ASSERT(fbi_inbox(&f, "inbox", "lane-a", 0, 0, NULL, -1, &out));
+        ASSERT(fbi_row_of(&out, &b.mail_me) == NULL);
+        json_free(&out);
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A page of rows that fail verification still counts toward has_more. */
+static bool fbi_corrupt(struct fbi_fixture *f, const struct fleet_board_post *post)
+{
+    char hex[65], sql[160];
+    fleet_board_id_to_hex(post->id, hex);
+    (void)snprintf(sql, sizeof(sql),
+                   "UPDATE fleet_board_posts SET text='tampered' WHERE id=X'%s'",
+                   hex);
+    return sqlite3_exec(f->db.db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static int test_fbi_inbox_read_counts_unverified(void)
+{
+    int failures = 0;
+    TEST("board inbox: rows that fail verification still count as read") {
+        struct fbi_fixture f;
+        struct fbi_board b;
+        ASSERT(fbi_open(&f, "unverified"));
+        ASSERT(fbi_seed(&f, &b));
+        ASSERT(fbi_corrupt(&f, &b.reply));
+        struct fleet_board_inbox_query q = {.agent = "lane-a", .after = 0,
+                                            .limit = 1};
+        int64_t scanned = 0;
+        unsigned read = 0;
+        int seen = 0;
+        ASSERT_EQ(db_fleet_board_inbox_scan(&f.db, f.now, &q, fbi_count_row,
+                                            &seen, &scanned, &read), 0);
+        ASSERT_EQ(seen, 0);
+        ASSERT_EQ(read, 1u); /* read == limit: more may follow */
+        ASSERT(scanned > 0); /* and the cursor moved past it */
         fbi_close(&f);
         PASS();
     } _test_next:;
@@ -400,6 +554,7 @@ struct fbi_waiter {
     struct fbi_fixture *f;
     const char *agent;
     int64_t timeout_ms;
+    int64_t after; /* the cursor the wait starts from */
     struct json_value out;
     bool ok;
 };
@@ -407,8 +562,8 @@ struct fbi_waiter {
 static void *fbi_waiter_run(void *arg)
 {
     struct fbi_waiter *w = arg;
-    w->ok = fbi_inbox(w->f, "inbox_wait", w->agent, 0, 0, NULL, w->timeout_ms,
-                      &w->out);
+    w->ok = fbi_inbox(w->f, "inbox_wait", w->agent, w->after, 0, NULL,
+                      w->timeout_ms, &w->out);
     return NULL;
 }
 
@@ -451,13 +606,133 @@ static int test_fbi_wait_returns_on_arrival(void)
     return failures;
 }
 
+/* More candidates than one page reads (mail to another reader), then a reply
+ * for lane-a: the wait reads on past the full page and returns the reply,
+ * instead of sleeping on an arrival that already happened and timing out. */
+static bool fbi_mail_burst(struct fbi_fixture *f, int n)
+{
+    bool ok = true;
+    for (int i = 0; ok && i < n; i++) {
+        char text[96];
+        struct fleet_board_post m;
+        (void)snprintf(text, sizeof(text),
+                       "{\"to\":\"lane-z\",\"from\":\"lead\",\"body\":\"%d\"}", i);
+        /* Spread over keys: one key may store 60 posts per window. */
+        ok = fbi_post(f, (uint8_t)(10 + i % 8), FLEET_BOARD_KIND_NOTE,
+                      FLEET_BOARD_SCOPE_FLEET, "box-r1", text, NULL,
+                      FLEET_BOARD_MAIL_RECEIPT, f->now, f->now, &m);
+    }
+    return ok;
+}
+
+static int test_fbi_wait_reads_past_full_page(void)
+{
+    int failures = 0;
+    TEST("board wait: a full page of other readers' mail does not hide a row already stored") {
+        struct fbi_fixture f;
+        struct fleet_board_post q, r;
+        struct json_value out;
+        ASSERT(fbi_open(&f, "burst"));
+        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NEED, FLEET_BOARD_SCOPE_PUBLIC,
+                        "lane-a", "need a reviewer", NULL, NULL, f.now, f.now, &q));
+        ASSERT(fbi_mail_burst(&f, (int)FLEET_BOARD_INBOX_SCAN_MAX + 44));
+        ASSERT(fbi_post(&f, 2, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC,
+                        "lane-b", "I can review", q.id, NULL, f.now, f.now, &r));
+        ASSERT(fbi_inbox(&f, "inbox_wait", "lane-a", 0, 0, NULL, 2000, &out));
+        ASSERT(json_get_bool(json_get(&out, "ok")));
+        ASSERT(json_get(&out, "timed_out") == NULL);
+        ASSERT_EQ(json_get_int(json_get(&out, "returned")), 1);
+        ASSERT(fbi_id_is(fbi_row_id(&out, 0), &r));
+        json_free(&out);
+        /* A zero-length wait that stops on a full page says has_more, never
+         * that nothing came. */
+        ASSERT(fbi_inbox(&f, "inbox_wait", "lane-a", 0, 0, NULL, 0, &out));
+        ASSERT(json_get_bool(json_get(&out, "has_more")));
+        ASSERT(json_get(&out, "timed_out") == NULL);
+        json_free(&out);
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fbi_cmp_i64(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* The measurement the docs quote: store-to-waiter latency over 20 posts on
+ * an isolated in-memory node (the node-side half; a cross-host post adds the
+ * push), and the bytes "anything for me" costs as list versus inbox. It
+ * asserts only that every wait returned through its arrival. */
+static int test_fbi_wait_latency_and_bytes(void)
+{
+    int failures = 0;
+    TEST("board wait: 20 post-to-waiter latencies and the list/inbox byte cost, measured") {
+        enum { N = 20 };
+        struct fbi_fixture f;
+        struct fbi_board b;
+        struct fleet_board_post r;
+        int64_t lat[N];
+        ASSERT(fbi_open(&f, "latency"));
+        ASSERT(fbi_seed(&f, &b));
+        for (int i = 0; i < 40; i++) {
+            char text[64];
+            (void)snprintf(text, sizeof(text), "unrelated chatter %d", i);
+            ASSERT(fbi_post(&f, (uint8_t)(6 + i % 4), FLEET_BOARD_KIND_NOTE,
+                            FLEET_BOARD_SCOPE_PUBLIC, "lane-x", text, NULL, NULL,
+                            f.now, f.now, &r));
+        }
+        struct json_value in, out;
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "op", "list") && fbi_rpc(&f, &in, &out));
+        size_t list_bytes = json_write(&out, NULL, 0);
+        json_free(&out);
+        json_free(&in);
+        ASSERT(fbi_inbox(&f, "inbox", "lane-a", 0, 0, NULL, -1, &out));
+        size_t inbox_bytes = json_write(&out, NULL, 0);
+        int64_t after = json_get_int(json_get(&out, "next_after"));
+        json_free(&out);
+        for (int i = 0; i < N; i++) {
+            struct fbi_waiter w = {.f = &f, .agent = "lane-a",
+                                   .timeout_ms = FLEET_BOARD_WAIT_SLICE_MS,
+                                   .after = after};
+            pthread_t th;
+            ASSERT(pthread_create(&th, NULL, fbi_waiter_run, &w) == 0);
+            platform_sleep_ms(30); /* the waiter is asleep on the counter */
+            char text[64];
+            (void)snprintf(text, sizeof(text), "answer %d", i);
+            int64_t t0 = platform_time_monotonic_ms();
+            ASSERT(fbi_post(&f, 2, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                            "lane-b", text, b.question.id, NULL, f.now, f.now, &r));
+            ASSERT(pthread_join(th, NULL) == 0);
+            lat[i] = platform_time_monotonic_ms() - t0;
+            ASSERT(w.ok && json_get(&w.out, "timed_out") == NULL);
+            ASSERT(json_size(json_get(&w.out, "rows")) >= 1);
+            after = json_get_int(json_get(&w.out, "next_after"));
+            json_free(&w.out);
+        }
+        qsort(lat, N, sizeof(lat[0]), fbi_cmp_i64);
+        printf("    board wait measured: post-to-waiter p50=%lld ms p95=%lld ms "
+               "max=%lld ms over %d posts; anything-for-me: list %zu B, inbox "
+               "%zu B\n", (long long)lat[N / 2], (long long)lat[N * 95 / 100],
+               (long long)lat[N - 1], N, list_bytes, inbox_bytes);
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 
 /* A waiter retries while a probe of the main thread holds its slot for a
- * moment, so the test waits on the event (the slot held), not the clock. */
+ * moment, so the test waits on the event (the slot held), not the clock. A
+ * refused wait is an ok reply: the plain inbox page, marked wait_busy. */
 static bool fbi_busy(const struct json_value *out)
 {
-    const char *code = json_get_str(json_get(out, "code"));
-    return code && strcmp(code, "WAIT_BUSY") == 0;
+    return json_get_bool(json_get(out, "ok")) &&
+           json_get_bool(json_get(out, "wait_busy"));
 }
 
 static void *fbi_slot_waiter_run(void *arg)
@@ -466,7 +741,8 @@ static void *fbi_slot_waiter_run(void *arg)
     for (;;) { /* unbounded: a true wedge is the group watchdog's to catch */
         w->ok = fbi_inbox(w->f, "inbox_wait", w->agent, 0, 0, NULL, w->timeout_ms,
                           &w->out);
-        if (!w->ok || !fbi_busy(&w->out))
+        if (!w->ok || !fbi_busy(&w->out) ||
+            json_get_int(json_get(&w->out, "returned")) > 0)
             break;
         json_free(&w->out);
         platform_sleep_ms(2);
@@ -491,15 +767,19 @@ static bool fbi_until_busy(struct fbi_fixture *f, const char *agent,
 static int test_fbi_wait_slots(void)
 {
     int failures = 0;
-    TEST("board wait: at most 2 open waits in the node, one per agent; a refusal says when to retry") {
+    TEST("board wait: at most 2 open waits in the node, one per agent; a refused wait answers the inbox page and when to retry") {
         struct fbi_fixture f;
-        struct fleet_board_post qa, qb, ra, rb;
+        struct fleet_board_post qa, qb, qc, ra, rb, rc;
         struct json_value out;
         ASSERT(fbi_open(&f, "slots"));
         ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NEED, FLEET_BOARD_SCOPE_PUBLIC,
                         "lane-a", "a needs", NULL, NULL, f.now, f.now, &qa));
         ASSERT(fbi_post(&f, 2, FLEET_BOARD_KIND_NEED, FLEET_BOARD_SCOPE_PUBLIC,
                         "lane-b", "b needs", NULL, NULL, f.now, f.now, &qb));
+        ASSERT(fbi_post(&f, 4, FLEET_BOARD_KIND_NEED, FLEET_BOARD_SCOPE_PUBLIC,
+                        "lane-c", "c needs", NULL, NULL, f.now, f.now, &qc));
+        ASSERT(fbi_post(&f, 5, FLEET_BOARD_KIND_OFFER, FLEET_BOARD_SCOPE_PUBLIC,
+                        "lane-d", "for c", qc.id, NULL, f.now, f.now, &rc));
         struct fbi_waiter a = {.f = &f, .agent = "lane-a",
                                .timeout_ms = FLEET_BOARD_WAIT_SLICE_MS};
         struct fbi_waiter b = {.f = &f, .agent = "lane-b",
@@ -507,12 +787,17 @@ static int test_fbi_wait_slots(void)
         pthread_t ta, tb;
         ASSERT(pthread_create(&ta, NULL, fbi_slot_waiter_run, &a) == 0);
         ASSERT(fbi_until_busy(&f, "lane-a", &out));
-        ASSERT(strstr(json_get_str(json_get(&out, "message")), "1 per agent") != NULL);
+        ASSERT(strstr(json_get_str(json_get(&out, "wait_note")), "1 per agent") != NULL);
         json_free(&out);
         ASSERT(pthread_create(&tb, NULL, fbi_slot_waiter_run, &b) == 0);
         ASSERT(fbi_until_busy(&f, "lane-c", &out));
-        ASSERT(strstr(json_get_str(json_get(&out, "message")), "2 open waits") != NULL);
+        ASSERT(strstr(json_get_str(json_get(&out, "wait_note")), "2 open waits") != NULL);
         ASSERT_EQ(json_get_int(json_get(&out, "retry_after_ms")), FLEET_BOARD_WAIT_RETRY_MS);
+        /* The refusal is the inbox page itself: lane-c has its row in the
+         * same call, with the cursor to wait from later. */
+        ASSERT_EQ(json_get_int(json_get(&out, "returned")), 1);
+        ASSERT(fbi_id_is(fbi_row_id(&out, 0), &rc));
+        ASSERT(json_get_int(json_get(&out, "next_after")) > 0);
         json_free(&out);
         /* The plain read is never refused while waits hold their slots. */
         ASSERT(fbi_inbox(&f, "inbox", "lane-c", 0, 0, NULL, -1, &out));
@@ -565,8 +850,26 @@ static int test_fbi_delivery_model(void)
         (void)snprintf(d.reason, sizeof(d.reason), "Has Space");
         ASSERT(!db_fleet_board_delivery_save(&db, &d));
         d.reason[0] = '\0';
-        d.verdict = 4;
+        d.verdict = FLEET_BOARD_DELIVERY_VERDICTS;
         ASSERT(!db_fleet_board_delivery_save(&db, &d));
+        /* Silence or "not now" never takes back a peer's "I have it". */
+        d.verdict = FLEET_BOARD_DELIVERY_UNKNOWN;
+        (void)snprintf(d.reason, sizeof(d.reason), "no_receipt");
+        d.at = 102;
+        ASSERT(db_fleet_board_delivery_save(&db, &d));
+        d.verdict = FLEET_BOARD_DELIVERY_DEFERRED;
+        (void)snprintf(d.reason, sizeof(d.reason), "busy");
+        ASSERT(db_fleet_board_delivery_save(&db, &d));
+        ASSERT_EQ(db_fleet_board_delivery_for_post(&db, d.post_id, rows, 4), 1);
+        ASSERT_EQ(rows[0].verdict, FLEET_BOARD_DELIVERY_STORED);
+        ASSERT_EQ(rows[0].at, 101);
+        /* A real refusal is a new answer and replaces it. */
+        d.verdict = FLEET_BOARD_DELIVERY_REFUSED;
+        (void)snprintf(d.reason, sizeof(d.reason), "no_role");
+        ASSERT(db_fleet_board_delivery_save(&db, &d));
+        ASSERT_EQ(db_fleet_board_delivery_for_post(&db, d.post_id, rows, 4), 1);
+        ASSERT_EQ(rows[0].verdict, FLEET_BOARD_DELIVERY_REFUSED);
+        d.reason[0] = '\0';
         d.verdict = 0;
         for (int i = 0; i < 40; i++) {
             d.peer[0] = (uint8_t)(i + 10);
@@ -614,7 +917,22 @@ static int test_fbi_delivery_record(void)
         rc.n = 0;
         board_delivery_note_receipt(peer_c, ids, 1, &rc, f.now);
         board_delivery_note_unanswered(peer_d, ids, 1, "no_receipt", f.now);
-        ASSERT_EQ(board_delivery_flush(&f.db), 4u);
+        /* A committed receipt naming no record, and a refusal the receiver
+         * gave about itself (no result code by design). */
+        uint8_t peer_e[32], peer_g[32];
+        memset(peer_e, 0xe5, 32);
+        memset(peer_g, 0x67, 32);
+        rc.code = FLEET_BOARD_PUSH_CODE_COMMITTED;
+        rc.n = 0;
+        board_delivery_note_receipt(peer_e, ids, 1, &rc, f.now);
+        rc.n = 1;
+        rc.rec[0].verdict = FLEET_BOARD_PUSH_RECORD_DEFERRED;
+        rc.rec[0].result = FLEET_BOARD_OK;
+        board_delivery_note_receipt(peer_g, ids, 1, &rc, f.now);
+        /* peer_a stored it; a later push to it that got no receipt does not
+         * take that back. */
+        board_delivery_note_unanswered(peer_a, ids, 1, "no_receipt", f.now + 1);
+        ASSERT_EQ(board_delivery_flush(&f.db), 7u);
         ASSERT_EQ(board_delivery_flush(&f.db), 0u);
 
         char hex[65];
@@ -631,18 +949,56 @@ static int test_fbi_delivery_record(void)
         const struct json_value *counts = json_get(&out, "counts");
         ASSERT_EQ(json_get_int(json_get(counts, "stored")), 1);
         ASSERT_EQ(json_get_int(json_get(counts, "refused")), 1);
+        /* push_inbox_full and receiver_state are "not now"; no receipt and
+         * a receipt naming no record are unknown, never deferred. */
         ASSERT_EQ(json_get_int(json_get(counts, "deferred")), 2);
+        ASSERT_EQ(json_get_int(json_get(counts, "unknown")), 2);
+        ASSERT_EQ(json_get_int(json_get(&out, "notes_dropped")), 0);
         const struct json_value *peers = json_get(&out, "peers");
-        ASSERT_EQ(json_size(peers), 4u);
-        bool saw_role = false, saw_full = false, saw_receipt = false;
+        ASSERT_EQ(json_size(peers), 6u);
+        bool saw_role = false, saw_full = false, saw_receipt = false,
+             saw_norec = false, saw_state = false;
         for (size_t i = 0; i < json_size(peers); i++) {
-            const char *reason = json_get_str(json_get(json_at(peers, i), "reason"));
+            const struct json_value *pr = json_at(peers, i);
+            const char *reason = json_get_str(json_get(pr, "reason"));
+            const char *verdict = json_get_str(json_get(pr, "verdict"));
             saw_role = saw_role || !strcmp(reason, "no_role");
             saw_full = saw_full || !strcmp(reason, "push_inbox_full");
-            saw_receipt = saw_receipt || !strcmp(reason, "no_receipt");
+            saw_receipt = saw_receipt || (!strcmp(reason, "no_receipt") &&
+                                          !strcmp(verdict, "unknown"));
+            saw_norec = saw_norec || (!strcmp(reason, "no_record_verdict") &&
+                                      !strcmp(verdict, "unknown"));
+            saw_state = saw_state || (!strcmp(reason, "receiver_state") &&
+                                      !strcmp(verdict, "deferred"));
         }
-        ASSERT(saw_role && saw_full && saw_receipt);
+        ASSERT(saw_role && saw_full && saw_receipt && saw_norec && saw_state);
         json_free(&out);
+
+        /* Answers lost to a full note ring are counted and said: a post with
+         * no recorded answer no longer claims that no peer answered. */
+        struct fleet_board_post p2;
+        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                        "lane-a", "second for the fleet", NULL, NULL, f.now,
+                        f.now, &p2));
+        for (unsigned i = 0; i <= FLEET_BOARD_DELIVERY_RING; i++) {
+            uint8_t px[32];
+            memset(px, 0x11, 32);
+            px[0] = (uint8_t)(i + 1);
+            board_delivery_note_unanswered(px, ids, 1, "no_receipt", f.now);
+        }
+        ASSERT(board_delivery_dropped() >= 1u);
+        (void)board_delivery_flush(&f.db);
+        fleet_board_id_to_hex(p2.id, hex);
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "op", "delivery") &&
+               json_push_kv_str(&in, "id", hex));
+        ASSERT(fbi_rpc(&f, &in, &out));
+        json_free(&in);
+        ASSERT(json_get_int(json_get(&out, "notes_dropped")) >= 1);
+        ASSERT(strstr(json_get_str(json_get(&out, "note")), "may have answered") != NULL);
+        json_free(&out);
+        board_delivery_forget();
 
         /* An id nobody pushed: absent, said plainly. */
         json_init(&in);
@@ -748,8 +1104,12 @@ int test_fleet_board_inbox(void)
     failures += test_fbi_inbox_thread_and_paging();
     failures += test_fbi_inbox_refusals();
     failures += test_fbi_inbox_visibility();
+    failures += test_fbi_inbox_forged_mail();
+    failures += test_fbi_inbox_read_counts_unverified();
     failures += test_fbi_wait_returns_on_arrival();
+    failures += test_fbi_wait_reads_past_full_page();
     failures += test_fbi_wait_slots();
+    failures += test_fbi_wait_latency_and_bytes();
     failures += test_fbi_delivery_model();
     failures += test_fbi_delivery_record();
     failures += test_fbi_cli();

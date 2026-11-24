@@ -27,12 +27,16 @@ enum {
     FLEET_BOARD_DELIVERY_PEERS_MAX = 64,
 };
 
-/* The four answers a peer can give, in the push receipt's own order. */
+/* The four answers a peer can give, in the push receipt's own order, and
+ * UNKNOWN: no per-record answer came (no receipt by the deadline, a peer
+ * that cannot take pushes, or a committed receipt that named no record), so
+ * the peer may or may not hold the post. */
 enum fleet_board_delivery_verdict {
     FLEET_BOARD_DELIVERY_STORED = 0,   /* the peer stored it now */
     FLEET_BOARD_DELIVERY_HELD = 1,     /* the peer already had it */
     FLEET_BOARD_DELIVERY_DEFERRED = 2, /* not now; the pull carries it later */
     FLEET_BOARD_DELIVERY_REFUSED = 3,  /* the peer will not keep it */
+    FLEET_BOARD_DELIVERY_UNKNOWN = 4,  /* no answer came: state unknown */
     FLEET_BOARD_DELIVERY_VERDICTS
 };
 
@@ -51,7 +55,10 @@ const char *fleet_board_delivery_verdict_name(int64_t verdict);
 bool db_fleet_board_delivery_validate(const struct db_fleet_board_delivery *d,
                                       struct ar_errors *errors);
 
-/* Insert or replace the answer for (post_id, peer). Refuses (false) while a
+/* Insert or replace the answer for (post_id, peer). A DEFERRED or UNKNOWN
+ * answer never replaces a recorded STORED or HELD one: the peer said it has
+ * the post, and a later "not now" or silence does not take that back (the
+ * call succeeds and keeps the known row). Refuses (false) while a
  * transaction is open on the handle, so a delivery note never joins somebody
  * else's transaction; the caller keeps the note and tries again later. */
 bool db_fleet_board_delivery_save(struct node_db *ndb,

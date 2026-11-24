@@ -26,16 +26,19 @@ struct fleet_board_inbox_query {
 };
 
 /* Candidate rows with arrival > q->after, ascending, never written by
- * q->agent: a row whose ref names a stored post by q->agent, or a mail-
- * receipt note (the caller decides whether its `to` names the reader). In
- * thread mode only rows whose ref is q->ref. At most q->limit candidates
- * are read; `*scanned_out` ends at the arrival of the last one read, so a
- * caller that resumes from it repeats nothing and skips nothing. Returns the
- * rows the visitor accepted, or -1 when the store could not be read. */
+ * q->agent: a row whose ref names a stored post by q->agent, or a FLEET-
+ * scope note carrying the mail receipt (the caller decides whether it is
+ * mail for the reader: its `to`, and whether this node vouches for its
+ * signer). In thread mode only rows whose ref is q->ref. At most q->limit
+ * candidates are read; `*scanned_out` ends at the arrival of the last one
+ * read, so a caller that resumes from it repeats nothing and skips nothing,
+ * and `*read_out` (may be NULL) is how many were read, verified or not, so
+ * read_out == q->limit means more may follow. Returns the rows the visitor
+ * accepted, or -1 when the store could not be read. */
 int db_fleet_board_inbox_scan(struct node_db *ndb, int64_t now,
                               const struct fleet_board_inbox_query *q,
                               db_fleet_board_row_visit visit, void *ctx,
-                              int64_t *scanned_out);
+                              int64_t *scanned_out, unsigned *read_out);
 
 /* Bumped after every stored row (any scope or kind), so a waiter can sleep
  * on a counter instead of reading the store. Process-local. */

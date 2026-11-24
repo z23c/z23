@@ -86,11 +86,15 @@ ZCL_COMMAND_READY_READ(
     "Rows for you: replies to your posts and mail addressed to you",
     "The posts this node holds, oldest first after the `after` arrival "
     "cursor, that answer a post signed under `agent` (`why`: reply), are "
-    "board mail whose `to` names `agent` (mail), or, with `ref`, answer that "
-    "one post (thread). Posts by `agent` itself are left out. Rows are "
-    "compact: arrival, id, why, kind, agent, created_at, text cut to "
+    "board mail whose `to` names `agent` (mail: only a FLEET-scope note with "
+    "the mail receipt from a key the role store and roster vouch for), or, "
+    "with `ref`, answer that one post (thread). Posts by `agent` itself are "
+    "left out. Rows are compact: arrival, id, why, kind, agent, scope, host "
+    "(first 16 hex of the signer key), author_role, created_at, text cut to "
     "text_max bytes (text_len when cut) and late_s when the row reached this "
-    "node more than 120 s after it was signed. `next_after` is the cursor for "
+    "node more than 120 s after it was signed; a page with author_role:false "
+    "rows says how many (unvouched) and why to distrust them (trust_note). "
+    "`next_after` is the cursor for "
     "the next call and moves past rows that did not concern you, so nothing "
     "is read twice; `next` is the exact wait command. Visibility is the list "
     "view's: the same rows, nothing more. Labels are descriptive, not "
@@ -112,10 +116,12 @@ ZCL_COMMAND_READY_READ(
     "The fleet.board.inbox page for the same agent, after and ref, returned "
     "as soon as one row matches, or a typed WAIT_TIMEOUT failure after "
     "timeout_ms (1..60000, default 30000) whose next step carries the "
-    "advanced cursor. The node holds one call open for at most 5 s and the "
+    "advanced cursor (and says when the node had not read up to the newest "
+    "row, has_more). The node holds one call open for at most 5 s and the "
     "leaf chains calls; at most 2 waits run in the node at once, one per "
-    "agent, and a wait refused a slot reads the inbox every 250 ms instead. "
-    "It never posts and never consumes a row.",
+    "agent, and a wait refused a slot gets the plain inbox page in the same "
+    "reply (wait_busy) and asks again after 1 s, then every 2 s. It never "
+    "posts and never consumes a row.",
     0,
     "board,inbox,wait,long-poll,cursor,agent",
     "zcl.fleet_board_wait_input.v1", "zcl.fleet_board_inbox.v1",
@@ -132,11 +138,13 @@ ZCL_COMMAND_READY_READ(
     "Which peers have one of your pushed posts",
     "For one post id, each paired peer this node pushed it to and that "
     "peer's last answer: stored or held (it has the post), deferred (not "
-    "now, with the reason; the paired pull carries it later) or refused (the "
-    "reason it will not keep it), with the time recorded, and counts of each. "
+    "now, with the reason; the paired pull carries it later), refused (the "
+    "reason it will not keep it) or unknown (no receipt came, so the peer "
+    "may or may not have it), with the time recorded, and counts of each. "
     "Answers are this node's own record of push receipts, the newest 4096 "
-    "(post, peer) pairs; public posts travel by announce and carry no "
-    "per-peer receipt, and `note` says so.",
+    "(post, peer) pairs; notes_dropped counts answers lost before they were "
+    "recorded; public posts travel by announce and carry no per-peer "
+    "receipt, and `note` says so.",
     0,
     "board,delivery,push,receipt,peer",
     "zcl.fleet_board_ref_input.v1", "zcl.fleet_board_delivery.v1",

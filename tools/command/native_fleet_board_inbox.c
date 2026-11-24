@@ -10,8 +10,10 @@
  * the node for one bounded wait slice (FLEET_BOARD_WAIT_SLICE_MS) at a time,
  * carrying the cursor forward between slices, for at most
  * FLEET_BOARD_WAIT_MAX_MS in all. When the node's few wait slots are taken
- * it reads the inbox every FLEET_BOARD_WAIT_RETRY_MS instead, so a busy node
- * makes a wait slower, never wrong. It never posts and never consumes.
+ * the node answers the plain inbox page in the same call and the leaf asks
+ * again after FLEET_BOARD_WAIT_RETRY_MS, doubling to
+ * FLEET_BOARD_WAIT_RETRY_MAX_MS, so a busy node makes a wait slower, never
+ * wrong, and never a busy loop. It never posts and never consumes.
  *
  * Bound by engine/composition/commands/fleet_board.def. */
 
@@ -208,45 +210,62 @@ static bool fbi_wait_timeout(const struct json_value *in,
 
 enum fbi_slice { FBI_SLICE_ROWS, FBI_SLICE_EMPTY, FBI_SLICE_BUSY, FBI_SLICE_FAILED };
 
-/* One node call: a wait slice, or a plain inbox read when `poll`. */
-static enum fbi_slice fbi_slice(const struct fbi_req *r, bool poll, int64_t slice_ms,
+/* One wait slice. A node with no free wait slot answers the plain inbox
+ * page in the same call, marked wait_busy: BUSY when it carries no row. */
+static enum fbi_slice fbi_slice(const struct fbi_req *r, int64_t slice_ms,
                                 struct zcl_command_reply *reply,
                                 struct json_value *body)
 {
-    if (!fbi_call(r, poll ? "inbox" : "inbox_wait", poll ? -1 : slice_ms, reply,
-                  body))
-        return strcmp(reply->error.code, "WAIT_BUSY") == 0 ? FBI_SLICE_BUSY
-                                                           : FBI_SLICE_FAILED;
+    if (!fbi_call(r, "inbox_wait", slice_ms, reply, body))
+        return FBI_SLICE_FAILED;
     const struct json_value *rows = json_get(body, "rows");
-    return rows && rows->type == JSON_ARR && json_size(rows) > 0 ? FBI_SLICE_ROWS
-                                                                 : FBI_SLICE_EMPTY;
+    if (rows && rows->type == JSON_ARR && json_size(rows) > 0)
+        return FBI_SLICE_ROWS;
+    return json_get_bool(json_get(body, "wait_busy")) ? FBI_SLICE_BUSY
+                                                       : FBI_SLICE_EMPTY;
 }
 
 static void fbi_wait_timed_out(struct zcl_command_reply *reply,
-                               const struct fbi_req *r, int64_t waited_ms)
+                               const struct fbi_req *r, int64_t waited_ms,
+                               bool has_more)
 {
     char evidence[128];
-    (void)snprintf(evidence, sizeof(evidence), "after=%lld waited_ms=%lld",
-                   (long long)r->after, (long long)waited_ms);
+    (void)snprintf(evidence, sizeof(evidence), "after=%lld waited_ms=%lld%s",
+                   (long long)r->after, (long long)waited_ms,
+                   has_more ? " has_more=true" : "");
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
                            ZCL_COMMAND_EXIT_BLOCKED, "WAIT_TIMEOUT", "wait",
                            true, false,
-                           "nothing for you arrived before the timeout; "
-                           "nothing was consumed", evidence);
+                           has_more ? "the timeout came before the node had read "
+                                      "up to the newest row (has_more); rows for "
+                                      "you may be waiting: wait or read the inbox "
+                                      "again from the cursor. Nothing was consumed"
+                                    : "nothing for you arrived before the "
+                                      "timeout; nothing was consumed",
+                           evidence);
     fbi_next(reply, "fleet.board.wait", r, "wait again from the advanced cursor");
-}
-
-/* Reset a refused slice's reply so the next call starts clean. */
-static void fbi_reply_reset(struct zcl_command_reply *reply)
-{
-    const char *schema = reply->data_schema;
-    zcl_command_reply_free(reply);
-    zcl_command_reply_init(reply, schema);
 }
 
 static int64_t fbi_min(int64_t a, int64_t b)
 {
     return a < b ? a : b;
+}
+
+static int64_t fbi_left(int64_t timeout_ms, int64_t start)
+{
+    int64_t left = timeout_ms - (platform_time_monotonic_ms() - start);
+    return left > 0 ? left : 0;
+}
+
+/* Between slices: read on at once when the last page stopped short
+ * (has_more); after a refused slot, back off (doubling to the ceiling). */
+static void fbi_wait_pause(enum fbi_slice got, bool has_more, int64_t left,
+                           int64_t *retry_ms)
+{
+    if (got != FBI_SLICE_BUSY || has_more)
+        return;
+    platform_sleep_ms((int)fbi_min(left, *retry_ms));
+    *retry_ms = fbi_min(*retry_ms * 2, FLEET_BOARD_WAIT_RETRY_MAX_MS);
 }
 
 void zcl_native_handle_fleet_board_wait(const struct zcl_command_request *request,
@@ -259,11 +278,12 @@ void zcl_native_handle_fleet_board_wait(const struct zcl_command_request *reques
         !fbi_parse(request, reply, &r))
         return;
     int64_t start = platform_time_monotonic_ms();
-    bool poll = false;
+    int64_t retry_ms = FLEET_BOARD_WAIT_RETRY_MS;
+    bool has_more = false;
     for (;;) {
-        int64_t left = timeout_ms - (platform_time_monotonic_ms() - start);
-        enum fbi_slice got = fbi_slice(&r, poll, fbi_min(left > 0 ? left : 0,
-                                       FLEET_BOARD_WAIT_SLICE_MS), reply, &body);
+        enum fbi_slice got = fbi_slice(
+            &r, fbi_min(fbi_left(timeout_ms, start), FLEET_BOARD_WAIT_SLICE_MS),
+            reply, &body);
         if (got == FBI_SLICE_ROWS && fbi_project(reply, &body)) {
             r.after = fbi_next_after(&body, r.after);
             fbi_next(reply, "fleet.board.wait", &r, "wait for the row after these");
@@ -272,18 +292,15 @@ void zcl_native_handle_fleet_board_wait(const struct zcl_command_request *reques
             json_free(&body);
             return;
         }
-        poll = got == FBI_SLICE_BUSY;
-        if (poll)
-            fbi_reply_reset(reply);
+        has_more = json_get_bool(json_get(&body, "has_more"));
         r.after = fbi_next_after(&body, r.after);
         json_free(&body);
-        left = timeout_ms - (platform_time_monotonic_ms() - start);
+        int64_t left = fbi_left(timeout_ms, start);
         if (left <= 0)
             break;
-        if (poll)
-            platform_sleep_ms((int)fbi_min(left, FLEET_BOARD_WAIT_RETRY_MS));
+        fbi_wait_pause(got, has_more, left, &retry_ms);
     }
-    fbi_wait_timed_out(reply, &r, platform_time_monotonic_ms() - start);
+    fbi_wait_timed_out(reply, &r, platform_time_monotonic_ms() - start, has_more);
 }
 
 /* ── fleet board delivery ───────────────────────────────────────────── */

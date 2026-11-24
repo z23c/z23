@@ -770,18 +770,24 @@ bool boot_fleet_board_observation_stage(
 #define FLEET_BOARD_INBOX_SCAN_MAX 256u
 #define FLEET_BOARD_INBOX_TEXT_DEFAULT 160
 #define FLEET_BOARD_INBOX_LATE_S 120
+/* Hex characters of the signer key a compact row shows (show has it all). */
+#define FLEET_BOARD_INBOX_HOST_HEX 16
 /* One node-side wait holds an RPC worker for at most this long; the CLI
  * chains slices up to FLEET_BOARD_WAIT_MAX_MS. At most FLEET_BOARD_WAIT_SLOTS
  * waits run at once in the node (one per agent label), so waits can never
- * hold every RPC worker; a refused wait is told when to retry. A waiter
- * sleeps FLEET_BOARD_WAIT_TICK_MS between looks at the arrival counter and
- * reads the store only when the counter moved. */
+ * hold more than half the RPC workers. A wait refused a slot answers the
+ * plain inbox page in the same call, and the CLI asks again after
+ * FLEET_BOARD_WAIT_RETRY_MS, doubling to FLEET_BOARD_WAIT_RETRY_MAX_MS: an
+ * agent without a slot costs one short read a second or two, never a busy
+ * loop. A waiter sleeps FLEET_BOARD_WAIT_TICK_MS between looks at the
+ * arrival counter and reads the store only when the counter moved. */
 #define FLEET_BOARD_WAIT_SLICE_MS 5000
 #define FLEET_BOARD_WAIT_MAX_MS 60000
 #define FLEET_BOARD_WAIT_DEFAULT_MS 30000
 #define FLEET_BOARD_WAIT_SLOTS 2
 #define FLEET_BOARD_WAIT_TICK_MS 20
-#define FLEET_BOARD_WAIT_RETRY_MS 250
+#define FLEET_BOARD_WAIT_RETRY_MS 1000
+#define FLEET_BOARD_WAIT_RETRY_MAX_MS 2000
 /* DELIVERY (boot_fleet_board_delivery.c): push answers waiting for the lane
  * tick to write them into fleet_board_deliveries. */
 #define FLEET_BOARD_DELIVERY_RING 64u
