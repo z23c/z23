@@ -923,8 +923,9 @@ int test_dev_land_step_producer_recovery(void)
     int failures = 0;
 #if !defined(_WIN32)
     static const char *const stale = "proof_producer_source_mismatch";
-    TEST("land step: generation and unknown source failures never trigger stale producer recovery") {
+    TEST("land step: producer identity failures recover; generation and unknown source failures do not") {
         ASSERT(zcl_native_dev_land_test_producer_stale(stale));
+        ASSERT(zcl_native_dev_land_test_producer_stale("proof_producer_source_id_unavailable"));
         ASSERT(!zcl_native_dev_land_test_producer_stale("proof_generation_source_mismatch"));
         ASSERT(!zcl_native_dev_land_test_producer_stale("proof_original_source_recapture_unavailable"));
         ASSERT(!zcl_native_dev_land_test_producer_stale("proof_original_source_changed_during_generation"));
@@ -1007,11 +1008,23 @@ int test_dev_land_step_producer_recovery(void)
         dlx_restore();
         PASS();
     }
+    TEST("land step: unavailable producer identity earns one recovery before settling") {
+        struct dlx_rig rig;
+        ASSERT(dlx_started(&rig, "step_nv_unavailable", "step_nv_unavailable_rig"));
+        ASSERT(dlx_step_dim("producer_stale_nv_unavailable", "proving", "",
+                            "producer rebuilt from the candidate"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        ASSERT(dlx_step_dim("producer_stale_nv_unavailable", "failed", stale,
+                            "producer recovery tried once"));
+        ASSERT_EQ(dlx_producer_runs(), 1);
+        dlx_restore();
+        PASS();
+    }
     TEST("land step: a no-verdict status with another detail stays pending and never recovers the producer") {
         struct dlx_rig rig;
         ASSERT(dlx_started(&rig, "step_nv_other", "step_nv_other_rig"));
         ASSERT(dlx_step_dim("no_verdict_other", "proving", NULL,
-                            "proof_producer_source_id_unavailable"));
+                            "proof_unclassified_no_verdict"));
         ASSERT(dlx_step_dim("no_verdict_other", "proving", NULL, NULL));
         ASSERT_EQ(dlx_producer_runs(), 0);
         dlx_restore();

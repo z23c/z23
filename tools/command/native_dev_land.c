@@ -3289,6 +3289,7 @@ static bool dl_proof_stub_producer(const char *stub, enum dl_proof *out,
     bool nv = strncmp(stub, "producer_stale_nv", 17) == 0;
     bool once = strstr(stub, "_once") != NULL;
     bool other = strcmp(stub, "no_verdict_other") == 0;
+    bool unavailable = strstr(stub, "_nv_unavailable") != NULL;
     if (strcmp(stub, "producer_host_load") == 0) {
         (void)snprintf(dimension, dim_cap, "test");
         (void)snprintf(detail, cap, "proof stub: timed out");
@@ -3309,9 +3310,10 @@ static bool dl_proof_stub_producer(const char *stub, enum dl_proof *out,
         *out = DL_PROOF_PASSED;
         return true;
     }
-    (void)snprintf(detail, cap, "%s", other
-                   ? "proof_producer_source_id_unavailable"
-                   : "proof_producer_source_mismatch");
+    const char *refusal = "proof_producer_source_mismatch";
+    if (other) refusal = "proof_unclassified_no_verdict";
+    else if (unavailable) refusal = "proof_producer_source_id_unavailable";
+    (void)snprintf(detail, cap, "%s", refusal);
     (void)snprintf(dimension, dim_cap, "%s",
                    nv || other ? "proof_no_verdict" : detail);
     *out = nv || other ? DL_PROOF_PENDING : DL_PROOF_FAILED;
@@ -13396,7 +13398,9 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
 
 [[maybe_unused]] static bool dl_producer_stale(const char *detail)
 {
-    return detail && strstr(detail, "proof_producer_source_mismatch") != NULL;
+    return detail &&
+        (strstr(detail, "proof_producer_source_mismatch") != NULL ||
+         strstr(detail, "proof_producer_source_id_unavailable") != NULL);
 }
 
 /* Build the development binary in the landing worktree — the candidate's
