@@ -27,6 +27,7 @@
 #include "command/native_code_packet_priv.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
+#include "test_group_catalog.h"
 
 #include <dirent.h>
 #include <stddef.h>
@@ -643,6 +644,12 @@ static int test_code_packet_tests_match_code_tests(void)
         const struct json_value *want = json_get(&tests.data, "test_groups");
         ASSERT(want && want->num_children > 0);
         ASSERT(pkt_same_array(json_get(t, "test_groups"), want));
+        ASSERT(json_get(t, "test_groups_retained_count") != NULL);
+        ASSERT_EQ(json_get_int(json_get(t, "test_groups_retained_count")),
+                  json_get_int(json_get(&tests.data, "test_groups_retained_count")));
+        ASSERT(json_get(t, "test_groups_truncated") != NULL);
+        ASSERT(json_get_bool(json_get(t, "test_groups_truncated")) ==
+               json_get_bool(json_get(&tests.data, "test_groups_truncated")));
         ASSERT_STR_EQ(json_get_str(json_get(t, "route")),
                       json_get_str(json_get(&tests.data, "route")));
         ASSERT(json_get(t, "groups")->num_children > 0);
@@ -1628,6 +1635,12 @@ static int test_code_packet_root_routes(void)
         pkt_run(root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         const struct json_value *groups = json_get(pkt_first(&reply, "tests"), "test_groups");
+        ASSERT(json_get(pkt_first(&reply, "tests"), "test_groups_truncated") != NULL);
+        ASSERT(!json_get_bool(json_get(pkt_first(&reply, "tests"), "test_groups_truncated")));
+        ASSERT(json_get(&reply.data, "test_guidance_incomplete") != NULL);
+        ASSERT(!json_get_bool(json_get(&reply.data, "test_guidance_incomplete")));
+        ASSERT(json_get(&reply.data, "group_inventory_truncated") != NULL);
+        ASSERT(!json_get_bool(json_get(&reply.data, "group_inventory_truncated")));
         bool found = false;
         for (size_t i = 0; i < json_size(groups); i++)
             if (strcmp(json_get_str(json_at(groups, i)), "dev_job") == 0) found = true;
@@ -1656,9 +1669,51 @@ static int test_code_packet_root_routes(void)
         pkt_run(root, &input, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get_bool(json_get(pkt_first(&reply, "tests"), "test_evidence_unavailable")));
+        ASSERT(json_get_bool(json_get(&reply.data, "test_guidance_incomplete")));
+        ASSERT(strstr(pkt_md(&reply), "Test guidance is incomplete") != NULL);
         zcl_command_reply_free(&reply);
         json_free(&input);
 #endif
+        PASS();
+    } _test_next:;
+    test_rm_rf_recursive(PKT_FIX);
+    return failures;
+}
+
+static int test_code_packet_group_inventory_bound(void)
+{
+    int failures = 0;
+    TEST("code_packet: bounded group inventory reports incomplete guidance") {
+        const char *paths[] = {"tests/harness/src/packet_probe_alpha.fixture",
+            "tests/harness/src/packet_probe_bravo.fixture", "tests/harness/src/packet_probe_charlie.fixture"};
+        const char *stems[] = {"packet_probe_alpha.fixture", "packet_probe_bravo.fixture", "packet_probe_charlie.fixture"};
+        test_rm_rf_recursive(PKT_FIX);
+        ASSERT(pkt_fixture());
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+            ASSERT(pkt_write(paths[i], "int fixture(void) { return 0; }\n"));
+        for (size_t i = 0; i < 39; ++i) {
+            const char *group = zcl_test_group_catalog_at(i);
+            char path[256], body[128];
+            ASSERT(group != NULL);
+            int n = snprintf(path, sizeof(path), "tests/harness/src/%s.c", group);
+            ASSERT(n > 0 && (size_t)n < sizeof(path));
+            n = snprintf(body, sizeof(body), "const char *s = \"%s\";\n", stems[i / 13]);
+            ASSERT(n > 0 && (size_t)n < sizeof(body));
+            ASSERT(pkt_write(path, body));
+        }
+        ASSERT(pkt_index_build());
+        struct zcl_command_reply reply;
+        pkt_call("Bounded groups", NULL, 0, paths, 3, 20, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_bool(json_get(pkt_first(&reply, "tests"), "test_groups_truncated")));
+        const struct json_value *first = pkt_first(&reply, "tests");
+        size_t shown = json_size(json_get(first, "test_groups"));
+        ASSERT(shown <= 12 && json_get_int(json_get(first, "test_groups_retained_count")) > (int64_t)shown);
+        ASSERT(!json_get_bool(json_get(first, "groups_lost")));
+        ASSERT(json_get_bool(json_get(&reply.data, "group_inventory_truncated")));
+        ASSERT(json_get_bool(json_get(&reply.data, "test_guidance_incomplete")));
+        ASSERT(strstr(pkt_md(&reply), "Test guidance is incomplete") != NULL);
+        zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
     test_rm_rf_recursive(PKT_FIX);
@@ -1695,6 +1750,7 @@ int test_code_packet(void)
     failures += test_code_packet_batch_fallback();
     failures += test_code_packet_partial_routes();
     failures += test_code_packet_root_routes();
+    failures += test_code_packet_group_inventory_bound();
     failures += test_code_packet_exact_name();
     failures += test_code_packet_exact_capped();
     failures += test_code_packet_definition_evidence();

@@ -736,6 +736,7 @@ static void pk_group_add(struct pk_run *run, const char *raw,
 {
     char full[ZCL_TEST_GROUP_FULL_MAX];
     if (!zcl_test_group_resolve_exact(raw, full)) {
+        run->f.test_guidance_incomplete = true;
         pk_claim(run, false, "tools/dev/test_group_catalog.def",
                  "group %s resolves to one registered test group", raw);
         return;
@@ -744,8 +745,11 @@ static void pk_group_add(struct pk_run *run, const char *raw,
     for (int i = 0; i < run->f.ngroup; i++)
         if (strcmp(run->f.group[i].id, full) == 0)
             return;
-    if (run->f.ngroup >= PK_GROUPS_MAX)
+    if (run->f.ngroup >= PK_GROUPS_MAX) {
+        run->f.group_inventory_truncated = true;
+        run->f.test_guidance_incomplete = true;
         return;
+    }
     struct pk_group_line *g = &run->f.group[run->f.ngroup++];
     (void)snprintf(g->id, sizeof(g->id), "%s", full);
     g->catalog_line = pk_catalog_line(&run->ctx, full);
@@ -766,6 +770,8 @@ static void pk_do_tests(struct pk_run *run, const char *path, int index)
     json_init(&ids); json_set_array(&ids);
     size_t shown = acc->groups_len < (size_t)CODE_TESTS_CAP
                        ? acc->groups_len : (size_t)CODE_TESTS_CAP;
+    bool truncated = shown < acc->groups_len || acc->groups_lost;
+    if (truncated || acc->referrer_read_failed) run->f.test_guidance_incomplete = true;
     for (size_t i = 0; i < shown; i++) {
         code_push_line(&raw, acc->groups[i]);
         pk_group_add(run, acc->groups[i], &ids);
@@ -776,6 +782,8 @@ static void pk_do_tests(struct pk_run *run, const char *path, int index)
     (void)json_push_kv_bool(&o, "consensus_risk", crisk);
     (void)json_push_kv_bool(&o, "matched", acc->shared_rule_hits > 0);
     (void)json_push_kv_bool(&o, "groups_lost", acc->groups_lost);
+    (void)json_push_kv_int(&o, "test_groups_retained_count", (int64_t)acc->groups_len);
+    (void)json_push_kv_bool(&o, "test_groups_truncated", truncated);
     if (acc->referrer_read_failed)
         (void)json_push_kv_bool(&o, "test_evidence_unavailable", true);
     (void)json_push_kv(&o, "test_groups", &raw);
@@ -1091,7 +1099,7 @@ static void pk_failure_note(struct pk_run *run)
             pk_sb_add(&run->notes, "%s%s", shown++ == 0 ? " " : ", ",
                       run->f.group[i].id);
         }
-        if (!shown) pk_sb_add(&run->notes, " (none routed)");
+        if (!shown) pk_sb_add(&run->notes, " (none among listed groups)");
     }
     pk_sb_add(&run->notes,
               "\n  Previous run only; the artifact has no commit identity and "
@@ -1181,7 +1189,7 @@ static void pk_assemble(struct pk_run *run, int max_lines)
     for (int i = 0; i < run->f.ngroup; i++)
         missing += run->f.group[i].catalog_line == 0;
     pk_claim(run, missing == 0, "tools/dev/test_group_catalog.def",
-             "all %d covering group(s) are registered in the catalog",
+             "%d listed group(s) are registered in the catalog",
              run->f.ngroup);
     for (int i = 0; i < run->in.nsym; i++)
         pk_do_pattern(run, i);
@@ -1229,6 +1237,7 @@ static bool pk_json_previous_failure(const struct pk_run *run,
             ok = pk_tail_line(&groups, run->f.group[i].id);
     if (ok)
         ok = json_push_kv(&obj, "failed_groups", &groups) &&
+             json_push_kv_str(&obj, "groups_scope", "listed_groups") &&
              json_push_kv(out, "previous_failure", &obj);
     json_free(&groups);
     json_free(&obj);
@@ -1257,6 +1266,8 @@ static bool pk_tail_sections(const struct pk_run *run, struct json_value *out)
     if (!json_push_kv(out, "excerpts", &run->excerpts) ||
         !json_push_kv(out, "files", &run->files) ||
         !json_push_kv(out, "tests", &run->tests) ||
+        !json_push_kv_bool(out, "test_guidance_incomplete", run->f.test_guidance_incomplete) ||
+        !json_push_kv_bool(out, "group_inventory_truncated", run->f.group_inventory_truncated) ||
         !json_push_kv(out, "pattern", &run->pattern) ||
         !json_push_kv(out, "impact", &run->impact) ||
         !json_push_kv(out, "capabilities", &run->caps) ||
@@ -1553,7 +1564,7 @@ void zcl_native_handle_code_packet(const struct zcl_command_request *request,
     }
     char summary[300];
     (void)snprintf(summary, sizeof(summary),
-                   "packet %s: %d excerpt line(s), %d covering group(s), size "
+                   "packet %s: %d excerpt line(s), %d listed group(s), size "
                    "%s", run->f.name, run->f.excerpt_lines, run->f.ngroup,
                    pk_size_class(run->f.max_dependents));
     if (!pk_finish(reply, &out, summary))

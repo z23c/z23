@@ -125,8 +125,10 @@ static void pk_md_route(struct pk_sb *sb, const struct pk_facts *f)
 
 static void pk_md_acceptance(struct pk_sb *sb, const struct pk_facts *f)
 {
-    pk_sb_add(sb, "ACCEPTANCE:\n  Registered groups that must run (covering "
-                  "the touched files; catalog tools/dev/test_group_catalog.def):\n");
+    pk_sb_add(sb, "ACCEPTANCE:\n  Listed registered groups (catalog "
+                  "tools/dev/test_group_catalog.def):\n");
+    if (f->test_guidance_incomplete)
+        pk_sb_add(sb, "  Test guidance is incomplete; use the committed agent-verify ONLY=@changed gate below.\n");
     if (f->ngroup == 0)
         pk_sb_add(sb, "    (none resolved: the route above is the floor)\n");
     for (int i = 0; i < f->ngroup; i++) {

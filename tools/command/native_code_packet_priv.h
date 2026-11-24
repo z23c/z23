@@ -154,6 +154,8 @@ struct pk_facts {
     int nroute;
     struct pk_route_line route[PK_TOUCH_MAX];
     int ngroup;
+    bool test_guidance_incomplete;
+    bool group_inventory_truncated;
     struct pk_group_line group[PK_GROUPS_MAX];
     int excerpt_lines;
     int max_dependents;
