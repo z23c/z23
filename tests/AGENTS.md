@@ -7,7 +7,9 @@
 For focused editing, use `make t-list` to discover registered groups and inspect
 the test's registration and shard table to find its owner. In `g_dlx_shard_cases`
 in `harness/src/test_dev_land.c`, `dlx_case_precheck` has owner `1u`.
-Committed-candidate proof uses `make agent-verify ONLY=@changed`.
+For ordinary native fleet slices, the land queue runs committed-candidate proof.
+Run `make agent-verify ONLY=@changed` when an explicit task or another applicable
+workflow requires it. Focused tests provide feedback, not exhaustive proof.
 
 Rules:
 - Use `make t-fast ONLY=<group>` (substring) or `make t-fast-exact ONLY=<group>` (exact). For `test_dev_land_precheck.c`, run `make t-fast-exact ONLY=dev_land_shard_02`. Never run `test_zcl` directly.

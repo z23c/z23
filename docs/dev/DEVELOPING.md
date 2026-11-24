@@ -1065,8 +1065,15 @@ or unknown selector. `lint-fast` is the inner lint's fast gate subset.
 Never run `test_zcl` directly. Do not run full `make lint` on an ordinary
 slice.
 
-`make -j8 agent-verify ONLY=@changed` (the groups the land proof selects for your committed changes; or `ONLY=<group,group>`) is the one verification trip for an
-edit. It runs `check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
+For ordinary native fleet slices, the land queue runs the required candidate
+proof.
+<!-- claim: symbol-present dl_producer_reproof_log tools/command/native_dev_land.c # native land reproof -->
+Run focused tests, `lint-fast` and the applicable preflight before submission;
+focused tests are not exhaustive proof. An additional
+`make -j8 agent-verify ONLY=@changed` (the groups the land proof selects for
+your committed changes; or `ONLY=<group,group>`) is optional for that workflow.
+Run it when an explicit task or another applicable workflow requires it. It runs
+`check-cyclomatic-complexity`, `t-fast-exact` on the named groups,
 `check-capability-closure`, `proof-lint-prebuild` (the proof's production-flag prefork build), `docs-capability-inventory`, `check-kpi-floor` and `lint-fast`, each in its own sub-make with a log
 under `build/scratch/`. Complexity fails fast before selector setup; later failures are collected.
 It prints one
