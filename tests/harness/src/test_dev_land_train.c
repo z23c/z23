@@ -180,6 +180,34 @@ static size_t dlx_tr_members(int64_t out[8])
     return n;
 }
 
+static bool dlx_tr_member_fields(const struct json_value *m,
+                                 const struct json_value *f, bool member)
+{
+    const struct json_value *head = m ? json_get(m, "train_head_seq") : NULL;
+    const struct json_value *phase = m ? json_get(m, "train_phase") : NULL;
+    if (!member) return !head && !phase;
+    return head && phase && json_get_int(head) == json_get_int(json_get(f, "seq")) &&
+           strcmp(json_get_str(phase), dlx_jstr(f, "phase")) == 0 &&
+           strstr(dlx_jstr(m, "hint"), "in_flight") != NULL;
+}
+
+static bool dlx_tr_mine(const char *tip, int64_t seq, bool member)
+{
+    struct dlx_call c;
+    dlx_begin_status(&c);
+    bool ok = tip ? json_push_kv_str(&c.input, "tip", tip)
+                  : json_push_kv_int(&c.input, "seq", seq);
+    ok = ok && dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *m = json_get(&c.reply.data, "mine");
+    const struct json_value *f = json_get(&c.reply.data, "in_flight");
+    ok = ok && m && f && json_get_int(json_get(m, "seq")) == seq &&
+         strcmp(dlx_jstr(m, "where"), "queued") == 0 &&
+         strcmp(dlx_jstr(m, "state"), "queued") == 0 &&
+         dlx_tr_member_fields(m, f, member);
+    dlx_end(&c);
+    return ok;
+}
+
 /* The quoted value of `key` on seq's last line in the land directory's
  * `file` (queue.jsonl or outcomes.jsonl). */
 static bool dlx_tr_file_field(const char *file, long long seq, const char *key,
@@ -414,6 +442,9 @@ static int test_dev_land_train_conflict_skipped(void)
         ASSERT(dlx_tr_inflight_intent(head, sizeof(head)));
         ASSERT_EQ((int64_t)dlx_tr_members(members), 1);
         ASSERT_EQ(members[0], 3);
+        ASSERT(dlx_tr_mine(NULL, 3, true));
+        ASSERT(dlx_tr_mine(c, 3, true));
+        ASSERT(dlx_tr_mine(NULL, 2, false));
         ASSERT(dlx_tr_queued(2, &attempt, intent, sizeof(intent)));
         ASSERT_EQ(attempt, 1);
         ASSERT_STR_EQ(intent, "");

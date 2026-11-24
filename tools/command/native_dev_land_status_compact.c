@@ -180,6 +180,24 @@ static const char *dlsc_where_hint(const struct dlsc_hit *hit, enum dlsc_where w
     return "still in the queue: poll status again; no outcome exists yet";
 }
 
+static const struct json_value *dlsc_train_member(const struct json_value *data,
+                                                   int64_t seq)
+{
+    const struct json_value *flight = json_get(data, "in_flight");
+    const struct json_value *members = flight ? json_get(flight, "train_members") : NULL;
+    const struct json_value *head = flight ? json_get(flight, "seq") : NULL;
+    const struct json_value *phase = flight ? json_get(flight, "phase") : NULL;
+    if (!members || members->type != JSON_ARR || !head || head->type != JSON_INT ||
+        json_get_int(head) <= 0 || !phase || phase->type != JSON_STR)
+        return NULL;
+    for (size_t i = 0; i < json_size(members); i++) {
+        const struct json_value *item = json_at(members, i);
+        if (item && item->type == JSON_INT && json_get_int(item) == seq)
+            return flight;
+    }
+    return NULL;
+}
+
 bool dlsc_push_mine(struct json_value *data, const struct dlsc_hit *hit)
 {
     struct json_value obj;
@@ -196,12 +214,16 @@ bool dlsc_push_mine(struct json_value *data, const struct dlsc_hit *hit)
         seq = hit->q_seq;
         state = hit->q_state;
     }
+    const struct json_value *train = w == DLSC_QUEUED
+                                      ? dlsc_train_member(data, seq) : NULL;
     json_init(&obj);
     json_set_object(&obj);
     ok = (seq <= 0 || json_push_kv_int(&obj, "seq", seq)) &&
          json_push_kv_str(&obj, "where", dlsc_where_name(w)) &&
          json_push_kv_str(&obj, "state", state) &&
-         json_push_kv_str(&obj, "hint", dlsc_where_hint(hit, w)) &&
+         json_push_kv_str(&obj, "hint", train ? "train member: see in_flight for the exact candidate and proof phase" : dlsc_where_hint(hit, w)) &&
+         (!train || (json_push_kv_int(&obj, "train_head_seq", json_get_int(json_get(train, "seq"))) &&
+                     json_push_kv_str(&obj, "train_phase", json_get_str(json_get(train, "phase"))))) &&
          json_push_kv(data, "mine", &obj);
     json_free(&obj);
     return ok;
