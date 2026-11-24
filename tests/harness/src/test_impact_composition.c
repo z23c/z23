@@ -13200,8 +13200,13 @@ static int test_ic_local_selection_build_needs(void)
         ASSERT(zcl_test_selection_build_needs("test_skycombat_qa_frames",
                                               true, NULL, needs, 19, &n));
         ASSERT(n == 1);
+#if defined(_WIN32)
+        ASSERT(ic_needs_have(needs, n, "skycombat-qa-entrypoint",
+                             "build/bin/skycombat-qa-entrypoint.exe"));
+#else
         ASSERT(ic_needs_have(needs, n, "skycombat-qa-entrypoint",
                              "build/bin/skycombat-qa-entrypoint"));
+#endif
 
         /* The POSIX CLI fixture needs exactly its runner. */
 #if !defined(_WIN32)

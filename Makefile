@@ -3418,7 +3418,7 @@ endif
 skycombat-model-replay: $(SKYCOMBAT_REPLAY_BIN) $(BIN_DIR)/z23_bounded_run
 
 # Source-bound QA entrypoint fixture: no window-system headers or GPU needed.
-SKYCOMBAT_QA_BIN := $(BIN_DIR)/skycombat-qa-entrypoint
+SKYCOMBAT_QA_BIN := $(BIN_DIR)/skycombat-qa-entrypoint$(ZCL_HOST_EXEEXT)
 $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(SKYCOMBAT_MAKE_INPUTS) $(BUILD_IDENTITY_STAMP) \
 	               $(SKYCOMBAT_DIR)/src/agent_session.c \
 	               $(SKYCOMBAT_DIR)/src/agent_resident.c \
@@ -3431,18 +3431,20 @@ $(SKYCOMBAT_QA_BIN): tests/fixtures/skycombat_qa/run.c $(SKYCOMBAT_GAME_MAIN) $(
                    $(wildcard apps/skycombat/include/sky_combat/*/*.h) | $(BIN_DIR)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
-	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	out="$$tmp$(ZCL_HOST_EXEEXT)"; \
+	trap 'rm -f "$$tmp" "$$out"' EXIT HUP INT TERM; \
 	$(CC) $(SKYCOMBAT_CFLAGS) $(BUILD_IDENTITY_CPPFLAGS) $(SKYCOMBAT_SIM_FP_FLAGS) $< \
 	    $(SKYCOMBAT_DIR)/src/agent_session.c \
 	    $(SKYCOMBAT_DIR)/src/agent_resident.c \
 	    $(SKYCOMBAT_DIR)/src/game_runtime.c \
 	    $(SKYCOMBAT_DIR)/src/game_match_reset.c \
 	    $(SKYCOMBAT_DIR)/src/qa_timing.c \
-	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o "$$tmp" -lm; \
-	chmod 0755 "$$tmp"; \
-	"$$tmp" --version | grep -qxF "source-id $(BUILD_SOURCE_ID)" || { echo "skycombat-qa-entrypoint: embedded source id differs from $(BUILD_SOURCE_ID)" >&2; exit 3; }; \
+	    $(wildcard $(SKYCOMBAT_DIR)/part/expr_*.c) $(SKYCOMBAT_SUPPORT_SRCS) -o "$$out" -lm; \
+	chmod 0755 "$$out"; \
+	"$$out" --version | grep -qxF "source-id $(BUILD_SOURCE_ID)" || { echo "skycombat-qa-entrypoint: embedded source id differs from $(BUILD_SOURCE_ID)" >&2; exit 3; }; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
-	mv -f -- "$$tmp" "$@"; \
+	mv -f -- "$$out" "$@"; \
+	rm -f -- "$$tmp"; \
 	trap - EXIT HUP INT TERM
 .PHONY: skycombat-qa-entrypoint
 skycombat-qa-entrypoint: $(SKYCOMBAT_QA_BIN)

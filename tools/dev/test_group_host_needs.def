@@ -212,8 +212,13 @@ ZCL_TEST_GROUP_BUILD_NEED("test_skycombat_fp_contract",
                           "build/bin/skycombat-fp-contract", "skycombat-fp-contract")
 
 /* Actual playable entrypoint with inert window/draw and model fixtures. */
+#if defined(_WIN32)
+ZCL_TEST_GROUP_BUILD_NEED("test_skycombat_qa_frames",
+                          "build/bin/skycombat-qa-entrypoint.exe", "skycombat-qa-entrypoint")
+#else
 ZCL_TEST_GROUP_BUILD_NEED("test_skycombat_qa_frames",
                           "build/bin/skycombat-qa-entrypoint", "skycombat-qa-entrypoint")
+#endif
 
 /* The operator-contract acceptance runs the public claim command against
  * disposable Git ledgers. Build the candidate-owned dev binary rather than
