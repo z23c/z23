@@ -1930,8 +1930,20 @@ static bool tag_tamper(struct fleet_board_post *p)
     return true;
 }
 
+/* Model a wall-clock boundary between the two signed paging posts. */
+static bool tag_page_clock_shift;
+static unsigned tag_page_clock_calls;
+static int64_t tag_page_clock_base;
+
+static int64_t tag_board_clock(void)
+{
+    if (!tag_page_clock_shift) return platform_time_wall_unix();
+    if (!tag_page_clock_calls++) tag_page_clock_base = platform_time_wall_unix();
+    return tag_page_clock_base + (tag_page_clock_calls > 1 ? 2 : 0);
+}
+
 /* One signed post appended to the stub board. */
-static bool tag_board_add_as(const struct tag_post_spec *s, int64_t age,
+static bool tag_board_add_at(const struct tag_post_spec *s, int64_t created,
                              uint8_t identity)
 {
     uint8_t sk[32], pk[32];
@@ -1942,7 +1954,7 @@ static bool tag_board_add_as(const struct tag_post_spec *s, int64_t age,
     if (ok) {
         p->kind = s->kind;
         p->scope = FLEET_BOARD_SCOPE_PUBLIC;
-        p->created_at = (uint64_t)(platform_time_wall_unix() - age);
+        p->created_at = (uint64_t)created;
         p->ttl = 86400;
         (void)snprintf(p->room, sizeof(p->room), "%s", s->room);
         (void)snprintf(p->agent, sizeof(p->agent), "app.publish");
@@ -1958,6 +1970,12 @@ static bool tag_board_add_as(const struct tag_post_spec *s, int64_t age,
         json_free(&o);
     free(p);
     return ok;
+}
+
+static bool tag_board_add_as(const struct tag_post_spec *s, int64_t age,
+                             uint8_t identity)
+{
+    return tag_board_add_at(s, tag_board_clock() - age, identity);
 }
 
 static bool tag_board_add(const struct tag_post_spec *s, int64_t age)
@@ -6447,7 +6465,8 @@ static bool tag_pages_board(struct tag_world *w, char target[65])
             json_push_kv_str(&p, "id", id) && json_push_back(&g_tag.board, &p);
         json_free(&p); if (!ok) return false;
     }
-    if (!tag_board_valid(w, 512)) return false;
+    const struct tag_post_spec s = {g_tag.text, "apps", FLEET_BOARD_KIND_OFFER, false};
+    if (!w->offer.root[0] || !tag_board_add_at(&s, now - 512, 0x5a)) return false;
     (void)snprintf(target, 65, "%s", tag_in(json_at(&g_tag.board, 512), "id"));
     return strlen(target) == 64;
 }
@@ -6532,7 +6551,14 @@ static int tag_paged_discover_case(struct tag_world *w, int mode)
     char target[65] = {0};
     zcl_command_reply_init(&reply, "zcl.app_open.v1");
     TEST("Discover pages across filtered results and preserves Receive consent") {
+        tag_page_clock_shift = mode == 5; tag_page_clock_calls = 0;
         ASSERT(tag_pages_board(w, target));
+        if (mode == 5) {
+            ASSERT_EQ(tag_page_clock_calls, 1u);
+            ASSERT_EQ(json_get_int(json_get(json_at(&g_tag.board, 512), "created_at")),
+                      tag_page_clock_base - 512);
+        }
+        tag_page_clock_shift = false;
         ASSERT(setenv("HOME", w->j.b_home, 1) == 0);
         int offers = g_tag.offers, posts = g_tag.posts, enables = g_tag.enables;
         int shows = g_tag.shows, fetches = g_tag.fetches;
@@ -6565,6 +6591,7 @@ static int tag_paged_discover_case(struct tag_world *w, int mode)
         }
         PASS();
     } _test_next:;
+    tag_page_clock_shift = false;
     g_tag.page_mode = 0; tag_retry_cursor.active = false; zcl_command_reply_free(&reply);
     return failures;
 }
