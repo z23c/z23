@@ -82,7 +82,7 @@ be flipped on purpose.
 
 | Case | Z23 node today | zclassicd |
 |---|---|---|
-| Memo to a transparent recipient | accepted, sent, memo dropped (`refuse.memo_to_transparent.*`) | refused: `Memo cannot be used with a taddr.  It can only be used with a zaddr.` |
+| Memo to a transparent recipient | accepted and sent (`refuse.memo_to_transparent.*`) | refused: `Memo cannot be used with a taddr.  It can only be used with a zaddr.` |
 | `z_sendmany` `memo` key | read as UTF-8 text: `"6c6567"` is delivered as the text `6c6567` (`multi.z_sendmany_legacy_memo_key`); hex goes under `memo_hex` | `memo` is hex: `"6c6567"` is the memo `leg` |
 | Same idempotency key committed twice on `core.wallet.transaction.send` | a second payment with a new txid (`t2t.commit_repeat`) | no idempotency key exists; a repeated `z_sendmany` also pays twice |
 | Zero amount | refused at the plan, `INVALID_AMOUNT` | `z_sendmany` accepts it as a fee-only transaction |
