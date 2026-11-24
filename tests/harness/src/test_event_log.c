@@ -740,7 +740,7 @@ static int run_benchmark_ab(const char *dir, const uint8_t pay[128])
 /* Measures append throughput and prints events/sec. The 50K/sec target is
  * reported, not asserted: parallel groups contend on fsync. Opt-in via
  * ZCL_EVENT_LOG_BENCH=1, run in isolation for the real number. */
-static int run_benchmark(int *failures_out)
+static int event_log_run_benchmark(int *failures_out)
 {
     int failures = 0;
     bool full_benchmark = getenv("ZCL_EVENT_LOG_BENCH") != NULL;
@@ -1692,7 +1692,7 @@ static int test_event_log_benchmark_platform_arm(void)
 {
     int failures = 0;
     printf("\n=== event_log benchmark integration proof ===\n");
-    run_benchmark(&failures);
+    event_log_run_benchmark(&failures);
     return failures;
 }
 #else  /* _WIN32 */

@@ -503,7 +503,21 @@ SQLITE_VENDOR_STALE = $(shell test ! -f $(ZCL_VENDOR_LIB)/libsqlite3.a || \
     grep -qx "source_sha256=$(SQLITE_VENDOR_PIN)" \
     $(ZCL_VENDOR_LIB)/.provenance/libsqlite3.a.stamp 2>/dev/null || \
     printf "%s" $(ZCL_VENDOR_LIB)/libsqlite3.a)
-VENDOR_MISSING_INPUTS = $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS)) $(SQLITE_VENDOR_STALE)
+# The in-tree Tor stub has no pin: its source is vendor/tor_stub.c, and
+# build_vendor.sh stamps that file's sha256 into the archive. A stamp that no
+# longer matches means the archive predates the source, so cross vendor repair
+# before source identity capture instead of linking a stale stub.
+TOR_STUB_SHA256 = $(shell if command -v sha256sum >/dev/null 2>&1; then \
+    tor_stub_digest="$$(sha256sum vendor/tor_stub.c)" || exit 1; \
+    else tor_stub_digest="$$(shasum -a 256 vendor/tor_stub.c)" || exit 1; fi; \
+    printf "%s\n" "$$tor_stub_digest" | cut -d " " -f 1)
+TOR_STUB_VENDOR_STALE = $(shell test ! -f $(ZCL_VENDOR_LIB)/libtor_stub.a || \
+    { tor_stub_digest="$(TOR_STUB_SHA256)"; \
+      printf "%s\n" "$$tor_stub_digest" | grep -Eq '^[0-9a-f]{64}$$' && \
+      grep -qx "source_sha256=$$tor_stub_digest" \
+        $(ZCL_VENDOR_LIB)/.provenance/libtor_stub.a.stamp 2>/dev/null; } || \
+    printf "%s" $(ZCL_VENDOR_LIB)/libtor_stub.a)
+VENDOR_MISSING_INPUTS = $(filter-out $(wildcard $(VENDOR_LIBS)),$(VENDOR_LIBS)) $(SQLITE_VENDOR_STALE) $(TOR_STUB_VENDOR_STALE)
 VENDOR_REPAIR_GOALS := vendor-ready deploy install
 VENDOR_REPAIR_REQUESTED := $(filter $(VENDOR_REPAIR_GOALS),$(MAKECMDGOALS))
 # windows-make.ps1 builds this launcher before it can contain the build's

@@ -998,7 +998,7 @@ static int hooks_pin_makefile(const char *dir)
     const char *end = start ? strstr(start, "\nVENDOR_REPAIR_GOALS") : NULL;
     FILE *file = fopen(path, "wb");
     bool ok = file && end &&
-        fputs("ZCL_VENDOR_LIB := vendor/lib\nVENDOR_LIBS := vendor/lib/libsqlite3.a\n", file) >= 0 &&
+        fputs("ZCL_VENDOR_LIB := vendor/lib\nVENDOR_LIBS := vendor/lib/libsqlite3.a vendor/lib/libtor_stub.a\n", file) >= 0 &&
         fwrite(start, 1, (size_t)(end - start), file) == (size_t)(end - start) &&
         fputs("\nshow:\n\t@echo x$(strip $(VENDOR_MISSING_INPUTS))\n", file) >= 0;
     if (file && fclose(file) != 0) ok = false;
@@ -1017,6 +1017,62 @@ static int hooks_pin_run(const struct hooks_fx *fx, const char *dir,
 }
 
 
+static int hooks_tor_bad_hash(const struct hooks_fx *fx, const char *dir,
+                              const char *script, const char *stamp_text)
+{
+    char bin[PATH_MAX], hash[PATH_MAX], stamp[PATH_MAX], path_env[HOOKS_KV_CAP], out[HOOKS_OUT_CAP];
+    const char *envp[HOOKS_ENV_MAX], *path = getenv("PATH");
+    const char *argv[] = {"make", "-s", "-C", dir, "-f", "pin.mk", "show", NULL};
+    if (!path) path = "/usr/bin:/bin";
+    if (dip_join(bin, sizeof bin, dir, "fake-hash") ||
+        (mkdir(bin, 0755) && errno != EEXIST) ||
+        dip_join(hash, sizeof hash, bin, "sha256sum") ||
+        dip_join(stamp, sizeof stamp, dir, "vendor/lib/.provenance/libtor_stub.a.stamp") ||
+        snprintf(path_env, sizeof path_env, "PATH=%s:%s", bin, path) >= (int)sizeof path_env ||
+        write_file(hash, script) || chmod(hash, 0755) || write_file(stamp, stamp_text))
+        return 1;
+    envp[0] = path_env;
+    size_t i = 1;
+    for (; i + 1 < HOOKS_ENV_MAX && fx->genv.vp[i]; i++) envp[i] = fx->genv.vp[i];
+    envp[i] = NULL;
+    return hooks_spawn(argv, envp, out, sizeof out) ||
+           strcmp(out, "xvendor/lib/libtor_stub.a\n") != 0;
+}
+
+static int hooks_tor_pin_checks(const struct hooks_fx *fx, const char *dir)
+{
+    /* SHA-256 of the exact fixture source, not a Make variable override. */
+    static const char current[] = "source_sha256=d5f75761d15032e535d1fcb13cbf86b4a48899d3816be718d6c48f2a8aaeb6cd\n";
+    char source[PATH_MAX], archive[PATH_MAX], stamp[PATH_MAX];
+    if (dip_join(source, sizeof source, dir, "vendor/tor_stub.c") ||
+        dip_join(archive, sizeof archive, dir, "vendor/lib/libtor_stub.a") ||
+        dip_join(stamp, sizeof stamp, dir, "vendor/lib/.provenance/libtor_stub.a.stamp"))
+        return 1;
+    if (hooks_pin_run(fx, dir, stamp, current, "x\n") ||
+        hooks_pin_run(fx, dir, stamp, "source_sha256=old\n", "xvendor/lib/libtor_stub.a\n") ||
+        write_file(source, "changed tor source\n") ||
+        hooks_pin_run(fx, dir, stamp, current, "xvendor/lib/libtor_stub.a\n") ||
+        write_file(source, "fixture tor source\n") ||
+        hooks_tor_bad_hash(fx, dir, "#!/bin/sh\nexit 1\n", "source_sha256=\n") ||
+        hooks_tor_bad_hash(fx, dir,
+            "#!/bin/sh\nprintf 'd5f75761d15032e535d1fcb13cbf86b4a48899d3816be718d6c48f2a8aaeb6cd\\n'\nexit 1\n", current) ||
+        hooks_tor_bad_hash(fx, dir, "#!/bin/sh\nprintf 'bad\\n'\n", "source_sha256=bad\n") ||
+        unlink(archive) ||
+        hooks_pin_run(fx, dir, stamp, current, "xvendor/lib/libtor_stub.a\n"))
+        return 1;
+    return 0;
+}
+
+static int hooks_tor_pin_setup(const char *dir)
+{
+    char source[PATH_MAX], archive[PATH_MAX], stamp[PATH_MAX];
+    return dip_join(source, sizeof source, dir, "vendor/tor_stub.c") ||
+           dip_join(archive, sizeof archive, dir, "vendor/lib/libtor_stub.a") ||
+           dip_join(stamp, sizeof stamp, dir, "vendor/lib/.provenance/libtor_stub.a.stamp") ||
+           write_file(source, "fixture tor source\n") || write_file(archive, "archive") ||
+           write_file(stamp, "source_sha256=d5f75761d15032e535d1fcb13cbf86b4a48899d3816be718d6c48f2a8aaeb6cd\n");
+}
+
 static int hooks_pin_checks(const struct hooks_fx *fx, const char *dir)
 {
     char path[PATH_MAX];
@@ -1030,9 +1086,11 @@ static int hooks_pin_checks(const struct hooks_fx *fx, const char *dir)
         write_file(path, "archive") ||
         dip_join(path, sizeof path, dir, "vendor/lib/.provenance/libsqlite3.a.stamp"))
         return 1;
+    if (hooks_tor_pin_setup(dir)) return 1;
     return hooks_pin_run(fx, dir, path, "source_sha256=old\n",
                          "xvendor/lib/libsqlite3.a\n") ||
-           hooks_pin_run(fx, dir, path, "source_sha256=abc123\n", "x\n");
+           hooks_pin_run(fx, dir, path, "source_sha256=abc123\n", "x\n") ||
+           hooks_tor_pin_checks(fx, dir);
 }
 
 
