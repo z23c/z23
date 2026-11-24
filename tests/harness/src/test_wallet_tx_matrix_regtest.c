@@ -62,7 +62,7 @@ struct wtm {
     long shapes_checked;
 };
 
-struct reply {
+struct wtm_reply {
     int rc;
     bool parsed;      /* the output is one JSON document */
     bool ok;          /* exit 0 and no error member or error text */
@@ -70,49 +70,49 @@ struct reply {
     char raw[RNF_RAW];
 };
 
-static struct reply wtm_r; /* the one live reply; valid until the next call */
+static struct wtm_reply wtm_r; /* the one live reply; valid until the next call */
 
 /* ── reply shapes: field names and value types, never values ──────── */
 
-struct sb {
+struct wtm_sb {
     char *p;
     size_t cap, len;
 };
 
-static void sb_add(struct sb *s, const char *t)
+static void wtm_sb_add(struct wtm_sb *s, const char *t)
 {
     for (; *t && s->len + 1 < s->cap; t++) s->p[s->len++] = *t;
     s->p[s->len] = '\0';
 }
 
-static void shape_of(const struct json_value *v, struct sb *s)
+static void wtm_shape_of(const struct json_value *v, struct wtm_sb *s)
 {
     static const char *const scalar[] = { [JSON_NULL] = "null",
         [JSON_BOOL] = "bool", [JSON_INT] = "number", [JSON_REAL] = "number",
         [JSON_STR] = "string" };
     if (v->type != JSON_ARR && v->type != JSON_OBJ) {
-        sb_add(s, scalar[v->type]);
+        wtm_sb_add(s, scalar[v->type]);
         return;
     }
     bool obj = v->type == JSON_OBJ;
-    sb_add(s, obj ? "{" : "[");
+    wtm_sb_add(s, obj ? "{" : "[");
     for (size_t i = 0; i < v->num_children && (obj || i == 0); i++) {
         if (obj) {
-            sb_add(s, v->keys[i]);
-            sb_add(s, ":");
+            wtm_sb_add(s, v->keys[i]);
+            wtm_sb_add(s, ":");
         }
-        shape_of(&v->children[i], s);
-        if (obj) sb_add(s, ",");
+        wtm_shape_of(&v->children[i], s);
+        if (obj) wtm_sb_add(s, ",");
     }
-    sb_add(s, obj ? "}" : "]");
+    wtm_sb_add(s, obj ? "}" : "]");
 }
 
-static void reply_shape(const struct reply *r, char *out, size_t cap)
+static void wtm_reply_shape(const struct wtm_reply *r, char *out, size_t cap)
 {
-    struct sb s = { out, cap, 0 };
+    struct wtm_sb s = { out, cap, 0 };
     out[0] = '\0';
-    if (r->parsed) shape_of(&r->doc, &s);
-    else sb_add(&s, "text");
+    if (r->parsed) wtm_shape_of(&r->doc, &s);
+    else wtm_sb_add(&s, "text");
 }
 
 /* ── one node call, recorded or checked against its fixture ───────── */
@@ -124,7 +124,7 @@ static bool wtm_text_error(const char *raw)
 
 /* The output is one JSON document when it starts like one, or is a bare JSON
  * scalar (a decimal balance); an `Error: ...` line is text. */
-static bool reply_parse(struct reply *r, const char *p)
+static bool wtm_reply_parse(struct wtm_reply *r, const char *p)
 {
     size_t n = strlen(p);
     json_init(&r->doc);
@@ -132,18 +132,18 @@ static bool reply_parse(struct reply *r, const char *p)
     return *p && *p != 'E' && json_valid(p, n) && json_read(&r->doc, p, n);
 }
 
-static void reply_load(struct reply *r)
+static void wtm_reply_load(struct wtm_reply *r)
 {
     const char *p = r->raw;
     while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
-    r->parsed = reply_parse(r, p);
+    r->parsed = wtm_reply_parse(r, p);
     const struct json_value *flag = r->parsed && r->doc.type == JSON_OBJ
                                         ? json_get(&r->doc, "ok") : NULL;
     r->ok = r->rc == 0 && !wtm_text_error(p) &&
             !(flag && !json_get_bool(flag));
 }
 
-static void reply_free(struct reply *r)
+static void wtm_reply_free(struct wtm_reply *r)
 {
     json_free(&r->doc);
     json_init(&r->doc);
@@ -171,7 +171,7 @@ static bool wtm_fixture_path(char *path, size_t cap, const char *tag)
 /* The fixture document: the request words, the exit status and the reply. */
 static bool wtm_fixture_compose(const struct wtm *w, const char *tag,
                                 const char *const *words,
-                                const struct reply *r, char *out, size_t cap)
+                                const struct wtm_reply *r, char *out, size_t cap)
 {
     struct json_value doc, req, body;
     json_init(&doc);
@@ -216,7 +216,7 @@ static bool wtm_fixture_write(const char *path, const char *text)
 
 /* The fixture's reply must have the live reply's field names and types, and
  * the same exit class. */
-static bool wtm_fixture_match(const char *path, const struct reply *live)
+static bool wtm_fixture_match(const char *path, const struct wtm_reply *live)
 {
     static char text[WTM_DOC];
     FILE *f = fopen(path, "r");
@@ -230,14 +230,14 @@ static bool wtm_fixture_match(const char *path, const struct reply *live)
     struct json_value fx;
     json_init(&fx);
     bool ok = json_read(&fx, text, n);
-    struct reply want = { 0 };
+    struct wtm_reply want = { 0 };
     char a[8192], b[8192];
     if (ok) {
         const struct json_value *body = json_get(&fx, "reply");
         want.parsed = body && body->type != JSON_STR;
         if (want.parsed) json_copy(&want.doc, body);
-        reply_shape(&want, a, sizeof(a));
-        reply_shape(live, b, sizeof(b));
+        wtm_reply_shape(&want, a, sizeof(a));
+        wtm_reply_shape(live, b, sizeof(b));
         ok = (json_get_int(json_get(&fx, "exit")) == 0) == (live->rc == 0) &&
              strcmp(a, b) == 0;
         if (!ok)
@@ -250,7 +250,7 @@ static bool wtm_fixture_match(const char *path, const struct reply *live)
 }
 
 static bool wtm_shape(struct wtm *w, const char *tag, const char *const *words,
-                      const struct reply *r)
+                      const struct wtm_reply *r)
 {
     static char out[WTM_DOC];
     char path[256];
@@ -266,15 +266,15 @@ static bool wtm_shape(struct wtm *w, const char *tag, const char *const *words,
 /* Run a node command and return the live reply (valid until the next call).
  * A NULL tag records nothing. A reply whose shape differs from its fixture
  * fails the call. */
-static struct reply *wtm_call_in(struct wtm *w, const char *tag,
+static struct wtm_reply *wtm_call_in(struct wtm *w, const char *tag,
                                  const char *const *words, const char *input)
 {
-    reply_free(&wtm_r);
+    wtm_reply_free(&wtm_r);
     wtm_r.raw[0] = '\0';
     wtm_r.rc = input ? rnf_exec_stdin(&w->n, words, input, wtm_r.raw,
                                       sizeof(wtm_r.raw))
                      : rnf_exec(&w->n, words, wtm_r.raw, sizeof(wtm_r.raw));
-    reply_load(&wtm_r);
+    wtm_reply_load(&wtm_r);
     test_note("wtm %s exit=%d", tag ? tag : words[0], wtm_r.rc);
     test_note_bytes("wtm reply", wtm_r.raw, strnlen(wtm_r.raw, 4000));
     if (!wtm_shape(w, tag, words, &wtm_r)) {
@@ -285,7 +285,7 @@ static struct reply *wtm_call_in(struct wtm *w, const char *tag,
     return &wtm_r;
 }
 
-static struct reply *wtm_call(struct wtm *w, const char *tag,
+static struct wtm_reply *wtm_call(struct wtm *w, const char *tag,
                               const char *const *words)
 {
     return wtm_call_in(w, tag, words, NULL);
@@ -308,13 +308,13 @@ static bool wtm_mine(struct wtm *w, int blocks)
 
 /* The wallet's two totals, in zats, through the legacy z_gettotalbalance a
  * legacy front end shows; the transparent one must equal getbalance. */
-struct totals {
+struct wtm_totals {
     int64_t t, z;
 };
 
-static bool wtm_totals(struct wtm *w, const char *tag, struct totals *out)
+static bool wtm_totals(struct wtm *w, const char *tag, struct wtm_totals *out)
 {
-    struct reply *r = WTM_CALL(w, tag, "z_gettotalbalance");
+    struct wtm_reply *r = WTM_CALL(w, tag, "z_gettotalbalance");
     bool ok = r->ok && r->parsed;
     if (ok) {
         out->t = rnf_zats(rnf_str(&r->doc, "transparent"));
@@ -325,7 +325,7 @@ static bool wtm_totals(struct wtm *w, const char *tag, struct totals *out)
     return ok && r->ok && rnf_zats(r->raw) == out->t;
 }
 
-struct note {
+struct wtm_note {
     int count;        /* notes of the txid at the address */
     int64_t zat;      /* that note's amount */
     int confs;
@@ -335,11 +335,11 @@ struct note {
     int held_count;
 };
 
-static struct note wtm_notes(struct wtm *w, const char *tag, const char *addr,
+static struct wtm_note wtm_notes(struct wtm *w, const char *tag, const char *addr,
                              const char *txid)
 {
-    struct note out = { 0 };
-    struct reply *r = WTM_CALL(w, tag, "core", "wallet", "shielded", "notes");
+    struct wtm_note out = { 0 };
+    struct wtm_reply *r = WTM_CALL(w, tag, "core", "wallet", "shielded", "notes");
     const struct json_value *l = r->ok ? rnf_at(&r->doc, "data.notes") : NULL;
     for (size_t i = 0; l && i < l->num_children; i++) {
         const struct json_value *n = &l->children[i];
@@ -356,7 +356,7 @@ static struct note wtm_notes(struct wtm *w, const char *tag, const char *addr,
     return out;
 }
 
-struct hist {
+struct wtm_hist {
     bool found;
     char status[16], direction[16], kind[16];
     int confs;
@@ -365,12 +365,12 @@ struct hist {
 };
 
 /* One transaction's wallet history entry (core.wallet.history txid filter). */
-static struct hist wtm_hist(struct wtm *w, const char *tag, const char *txid)
+static struct wtm_hist wtm_hist(struct wtm *w, const char *tag, const char *txid)
 {
-    struct hist h = { 0 };
+    struct wtm_hist h = { 0 };
     char input[160];
     snprintf(input, sizeof(input), "--input={\"txid\":\"%s\"}", txid);
-    struct reply *r = WTM_CALL(w, tag, "core", "wallet", "history", input);
+    struct wtm_reply *r = WTM_CALL(w, tag, "core", "wallet", "history", input);
     const struct json_value *e = r->ok ? rnf_at(&r->doc, "data.entry") : NULL;
     if (!e || strcmp(rnf_str(e, "txid"), txid) != 0) return h;
     h.found = true;
@@ -388,7 +388,7 @@ static struct hist wtm_hist(struct wtm *w, const char *tag, const char *txid)
 /* The newest history entry's txid: a refused send must not change it. */
 static bool wtm_newest(struct wtm *w, char *txid, size_t cap)
 {
-    struct reply *r = WTM_CALL(w, NULL, "core", "wallet", "history",
+    struct wtm_reply *r = WTM_CALL(w, NULL, "core", "wallet", "history",
                                "--input={\"limit\":1}");
     const struct json_value *e = r->ok ? rnf_at(&r->doc, "data.entries") : NULL;
     if (!e || e->num_children == 0) return false;
@@ -399,13 +399,13 @@ static bool wtm_newest(struct wtm *w, char *txid, size_t cap)
 /* Zats at one address through z_getbalance (minconf 1); -1 on failure. */
 static int64_t wtm_addr_bal(struct wtm *w, const char *tag, const char *addr)
 {
-    struct reply *r = WTM_CALL(w, tag, "z_getbalance", addr);
+    struct wtm_reply *r = WTM_CALL(w, tag, "z_getbalance", addr);
     return r->ok ? rnf_zats(r->raw) : -1;
 }
 
 /* ── one send: plan, then commit with the plan's own commit_input ─── */
 
-struct send {
+struct wtm_send {
     const char *from, *to, *amount;
     const char *memo, *memo_hex;  /* NULL for none */
     const char *key;
@@ -415,7 +415,7 @@ struct send {
     char code[64], message[256];  /* a refusal's error code and message */
 };
 
-static void send_input(const struct send *s, char *out, size_t cap)
+static void wtm_send_input(const struct wtm_send *s, char *out, size_t cap)
 {
     char memo[640] = "", hex[640] = "";
     if (s->memo) snprintf(memo, sizeof(memo), ",\"memo\":\"%s\"", s->memo);
@@ -427,12 +427,12 @@ static void send_input(const struct send *s, char *out, size_t cap)
              s->from, s->to, s->amount, s->key, memo, hex);
 }
 
-static bool send_plan(struct wtm *w, const char *tag, const struct send *s,
+static bool wtm_send_plan(struct wtm *w, const char *tag, const struct wtm_send *s,
                       char *commit, size_t cap)
 {
     char input[2048];
-    send_input(s, input, sizeof(input));
-    struct reply *r = WTM_CALL(w, tag, "core", "wallet", "shielded", "send",
+    wtm_send_input(s, input, sizeof(input));
+    struct wtm_reply *r = WTM_CALL(w, tag, "core", "wallet", "shielded", "send",
                                input);
     const char *ci = rnf_str(&r->doc, "data.commit_input");
     bool ok = r->ok && strcmp(rnf_str(&r->doc, "data.stage"), "plan") == 0 &&
@@ -442,7 +442,7 @@ static bool send_plan(struct wtm *w, const char *tag, const struct send *s,
     return ok;
 }
 
-static void send_note_refusal(const struct reply *r, struct send *s)
+static void wtm_send_note_refusal(const struct wtm_reply *r, struct wtm_send *s)
 {
     snprintf(s->code, sizeof(s->code), "%s", rnf_str(&r->doc, "error.code"));
     snprintf(s->message, sizeof(s->message), "%s",
@@ -450,13 +450,13 @@ static void send_note_refusal(const struct reply *r, struct send *s)
 }
 
 /* Plan and commit one shielded-send. Fills txid and fee on success. */
-static bool send_run(struct wtm *w, const char *tag, struct send *s)
+static bool wtm_send_run(struct wtm *w, const char *tag, struct wtm_send *s)
 {
     char commit[2300], ptag[96], ctag[96];
     snprintf(ptag, sizeof(ptag), "%s.plan", tag);
     snprintf(ctag, sizeof(ctag), "%s.commit", tag);
-    if (!send_plan(w, ptag, s, commit, sizeof(commit))) return false;
-    struct reply *r = WTM_CALL(w, ctag, "core", "wallet", "shielded", "send",
+    if (!wtm_send_plan(w, ptag, s, commit, sizeof(commit))) return false;
+    struct wtm_reply *r = WTM_CALL(w, ctag, "core", "wallet", "shielded", "send",
                                commit);
     bool ok = r->ok && strcmp(rnf_str(&r->doc, "data.stage"), "committed") == 0 &&
               strlen(rnf_str(&r->doc, "data.txid")) == 64;
@@ -468,17 +468,17 @@ static bool send_run(struct wtm *w, const char *tag, struct send *s)
 
 /* The node's refusal of a send: true when the plan or the commit is refused
  * and nothing was sent (code and message in s). */
-static bool send_refused(struct wtm *w, const char *tag, struct send *s)
+static bool wtm_send_refused(struct wtm *w, const char *tag, struct wtm_send *s)
 {
     char commit[2300], ptag[96], ctag[96];
     snprintf(ptag, sizeof(ptag), "%s.plan", tag);
     snprintf(ctag, sizeof(ctag), "%s.commit", tag);
     char input[2048];
-    send_input(s, input, sizeof(input));
-    struct reply *r = WTM_CALL(w, ptag, "core", "wallet", "shielded", "send",
+    wtm_send_input(s, input, sizeof(input));
+    struct wtm_reply *r = WTM_CALL(w, ptag, "core", "wallet", "shielded", "send",
                                input);
     if (!r->ok) {
-        send_note_refusal(r, s);
+        wtm_send_note_refusal(r, s);
         return true;
     }
     const char *ci = rnf_str(&r->doc, "data.commit_input");
@@ -486,7 +486,7 @@ static bool send_refused(struct wtm *w, const char *tag, struct send *s)
     snprintf(commit, sizeof(commit), "--input=%s", ci);
     r = WTM_CALL(w, ctag, "core", "wallet", "shielded", "send", commit);
     if (r->ok) return false;
-    send_note_refusal(r, s);
+    wtm_send_note_refusal(r, s);
     return true;
 }
 
@@ -498,7 +498,7 @@ static bool wtm_new_address(struct wtm *w, const char *tag, bool shielded,
     /* Key derivation can outlast the client's RPC deadline on a loaded host;
      * an extra derived address is harmless, so retry. */
     for (int i = 0; i < 3; i++) {
-        struct reply *r = shielded
+        struct wtm_reply *r = shielded
             ? WTM_CALL(w, tag, "core", "wallet", "shielded", "address")
             : WTM_CALL(w, tag, "core", "wallet", "address", "new");
         if (r->ok) snprintf(out, cap, "%s", rnf_str(&r->doc, "data.address"));
@@ -507,12 +507,12 @@ static bool wtm_new_address(struct wtm *w, const char *tag, bool shielded,
     return false;
 }
 
-static int step_boot_fund(struct wtm *w)
+static int wtm_step_boot_fund(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: node boots as regtest; wallet funded with mature coinbase") {
         ASSERT(rnf_wait_up(&w->n));
-        struct reply *r = WTM_CALL(w, "boot.getblockchaininfo", "getblockchaininfo");
+        struct wtm_reply *r = WTM_CALL(w, "boot.getblockchaininfo", "getblockchaininfo");
         ASSERT(r->ok);
         ASSERT_STR_EQ(rnf_str(&r->doc, "chain"), "regtest");
         ASSERT_EQ(json_get_int(json_get(&r->doc, "blocks")), 0);
@@ -523,7 +523,7 @@ static int step_boot_fund(struct wtm *w)
         ASSERT(strcmp(w->za, w->zb) != 0);
         ASSERT(rnf_mine_to(&w->n, w->t1, WTM_FUND_BLOCKS));
         ASSERT(wtm_mine(w, WTM_MATURE_BLOCKS));
-        struct totals t;
+        struct wtm_totals t;
         ASSERT(wtm_totals(w, "fund.totals", &t));
         ASSERT_EQ(t.t, WTM_FUND_BLOCKS * 1250000000LL);
         ASSERT_EQ(t.z, 0);
@@ -533,11 +533,11 @@ static int step_boot_fund(struct wtm *w)
 }
 
 /* Transparent to transparent: pending, then the confirmation counts. */
-static int step_t_to_t(struct wtm *w)
+static int wtm_step_t_to_t(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: t -> t (transaction.send): pending, then 1 and 3 confirmations") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_totals(w, NULL, &before));
         char plan[600], commit[700], amt[32];
         snprintf(amt, sizeof(amt), "%lld.00000000", 1LL);
@@ -545,7 +545,7 @@ static int step_t_to_t(struct wtm *w)
                  "--input={\"wallet_scope\":\"dev\",\"address\":\"%s\","
                  "\"amount\":%s,\"idempotency_key\":\"matrix-tt\"}",
                  WTM_FOREIGN_T, amt);
-        struct reply *r = WTM_CALL(w, "t2t.plan", "core", "wallet",
+        struct wtm_reply *r = WTM_CALL(w, "t2t.plan", "core", "wallet",
                                    "transaction", "send", plan);
         ASSERT(r->ok);
         ASSERT_STR_EQ(rnf_str(&r->doc, "data.stage"), "plan");
@@ -558,13 +558,13 @@ static int step_t_to_t(struct wtm *w)
         char txid[80];
         snprintf(txid, sizeof(txid), "%s", rnf_str(&r->doc, "data.txid"));
         ASSERT_EQ((int64_t)strlen(txid), 64);
-        struct hist h = wtm_hist(w, "t2t.history_pending", txid);
+        struct wtm_hist h = wtm_hist(w, "t2t.history_pending", txid);
         ASSERT(h.found);
         ASSERT_STR_EQ(h.status, "pending");
         ASSERT_EQ(h.confs, 0);
         ASSERT_EQ(h.fee, WTM_FEE);
         ASSERT_EQ(h.amount, WTM_COIN);
-        struct reply *lt = WTM_CALL(w, "t2t.listtransactions_pending",
+        struct wtm_reply *lt = WTM_CALL(w, "t2t.listtransactions_pending",
                                     "listtransactions");
         ASSERT(lt->ok && lt->parsed);
         ASSERT_STR_EQ(rnf_str(json_at(&lt->doc, 0), "txid"), txid);
@@ -591,7 +591,7 @@ static int step_t_to_t(struct wtm *w)
         ASSERT_EQ((int64_t)strlen(rnf_str(&r->doc, "data.txid")), 64);
         ASSERT(strcmp(rnf_str(&r->doc, "data.txid"), txid) != 0);
         ASSERT(wtm_mine(w, 1));
-        struct totals twice;
+        struct wtm_totals twice;
         ASSERT(wtm_totals(w, NULL, &twice));
         ASSERT_EQ(twice.t, before.t - 2 * (WTM_COIN + WTM_FEE));
         ASSERT_EQ(twice.z, before.z);
@@ -600,22 +600,22 @@ static int step_t_to_t(struct wtm *w)
     return failures;
 }
 
-static int step_shield(struct wtm *w, struct send *s)
+static int wtm_step_shield(struct wtm *w, struct wtm_send *s)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: t -> z (shielding) with a text memo: note, memo, history") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_totals(w, NULL, &before));
-        *s = (struct send){ .from = w->t1, .to = w->za, .amount = "5.00000000",
+        *s = (struct wtm_send){ .from = w->t1, .to = w->za, .amount = "5.00000000",
                             .memo = "hello shield", .key = "matrix-shield" };
-        ASSERT(send_run(w, "shield", s));
+        ASSERT(wtm_send_run(w, "shield", s));
         ASSERT_EQ(s->fee_zat, WTM_FEE);
         ASSERT(!s->replayed);
-        struct hist h = wtm_hist(w, "shield.history_pending", s->txid);
+        struct wtm_hist h = wtm_hist(w, "shield.history_pending", s->txid);
         ASSERT_STR_EQ(h.status, "pending");
         ASSERT_EQ(h.confs, 0);
         ASSERT(wtm_mine(w, 1));
-        struct note n = wtm_notes(w, "shield.notes", w->za, s->txid);
+        struct wtm_note n = wtm_notes(w, "shield.notes", w->za, s->txid);
         ASSERT_EQ(n.count, 1);
         ASSERT_EQ(n.zat, 5 * WTM_COIN);
         ASSERT_EQ(n.confs, 1);
@@ -633,19 +633,19 @@ static int step_shield(struct wtm *w, struct send *s)
 }
 
 /* z->z with a multi-byte UTF-8 memo; the same commit repeated on its key. */
-static int step_z_to_z_text(struct wtm *w, struct send *s)
+static int wtm_step_z_to_z_text(struct wtm *w, struct wtm_send *s)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: z -> z with a UTF-8 memo; repeated commit on one key sends once") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS));
         ASSERT(wtm_totals(w, NULL, &before));
-        *s = (struct send){ .from = w->za, .to = w->zb, .amount = "2.00000000",
+        *s = (struct wtm_send){ .from = w->za, .to = w->zb, .amount = "2.00000000",
                             .memo = "caf\xc3\xa9 \xe2\x98\x95 \xe6\x97\xa5\xe6\x9c\xac",
                             .key = "matrix-zz-text" };
         char commit[2300];
-        ASSERT(send_plan(w, "zz_text.plan", s, commit, sizeof(commit)));
-        struct reply *r = WTM_CALL(w, "zz_text.commit", "core", "wallet",
+        ASSERT(wtm_send_plan(w, "zz_text.plan", s, commit, sizeof(commit)));
+        struct wtm_reply *r = WTM_CALL(w, "zz_text.commit", "core", "wallet",
                                    "shielded", "send", commit);
         ASSERT(r->ok);
         snprintf(s->txid, sizeof(s->txid), "%s", rnf_str(&r->doc, "data.txid"));
@@ -657,8 +657,8 @@ static int step_z_to_z_text(struct wtm *w, struct send *s)
         ASSERT_STR_EQ(rnf_str(&r->doc, "data.txid"), s->txid);
         ASSERT(json_get_bool(rnf_at(&r->doc, "data.replayed")));
         ASSERT(wtm_mine(w, 1));
-        struct note to_b = wtm_notes(w, "zz_text.notes", w->zb, s->txid);
-        struct note change = wtm_notes(w, NULL, w->za, s->txid);
+        struct wtm_note to_b = wtm_notes(w, "zz_text.notes", w->zb, s->txid);
+        struct wtm_note change = wtm_notes(w, NULL, w->za, s->txid);
         ASSERT_EQ(to_b.count, 1);
         ASSERT_EQ(to_b.zat, 2 * WTM_COIN);
         ASSERT_STR_EQ(to_b.memo, s->memo);
@@ -671,9 +671,9 @@ static int step_z_to_z_text(struct wtm *w, struct send *s)
         ASSERT_EQ(after.z, before.z - WTM_FEE);
         ASSERT_EQ(after.t, before.t);
         /* the same key with other parameters is refused and sends nothing */
-        struct send other = *s;
+        struct wtm_send other = *s;
         other.amount = "1.00000000";
-        ASSERT(send_refused(w, "zz_text.key_reuse", &other));
+        ASSERT(wtm_send_refused(w, "zz_text.key_reuse", &other));
         printf("\n  [evidence] key reused for other parameters: %s: %s ",
                other.code, other.message);
         ASSERT(wtm_totals(w, NULL, &before));
@@ -684,24 +684,24 @@ static int step_z_to_z_text(struct wtm *w, struct send *s)
 }
 
 /* z->z with a memo that is not valid UTF-8, given as memo_hex. */
-static int step_z_to_z_binary(struct wtm *w, struct send *s)
+static int wtm_step_z_to_z_binary(struct wtm *w, struct wtm_send *s)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: z -> z with a memo that is not UTF-8 (memo_hex): hex fallback") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS));
         ASSERT(wtm_totals(w, NULL, &before));
-        *s = (struct send){ .from = w->za, .to = w->zb, .amount = "1.00000000",
+        *s = (struct wtm_send){ .from = w->za, .to = w->zb, .amount = "1.00000000",
                             .memo_hex = "fffe00ff41", .key = "matrix-zz-bin" };
-        ASSERT(send_run(w, "zz_bin", s));
+        ASSERT(wtm_send_run(w, "zz_bin", s));
         ASSERT(wtm_mine(w, 1));
-        struct note n = wtm_notes(w, "zz_bin.notes", w->zb, s->txid);
+        struct wtm_note n = wtm_notes(w, "zz_bin.notes", w->zb, s->txid);
         ASSERT_EQ(n.count, 1);
         ASSERT_EQ(n.zat, WTM_COIN);
         printf("\n  [evidence] non-UTF-8 memo read back as: %s ", n.memo);
         ASSERT_STR_EQ(n.memo_hex, "fffe00ff41");
         ASSERT_STR_EQ(n.memo, "");
-        struct hist h = wtm_hist(w, "zz_bin.history", s->txid);
+        struct wtm_hist h = wtm_hist(w, "zz_bin.history", s->txid);
         ASSERT(h.found && h.memo_present);
         ASSERT(wtm_totals(w, "zz_bin.totals", &after));
         ASSERT_EQ(after.z, before.z - WTM_FEE);
@@ -710,18 +710,18 @@ static int step_z_to_z_binary(struct wtm *w, struct send *s)
     return failures;
 }
 
-static int step_z_to_t(struct wtm *w, struct send *s)
+static int wtm_step_z_to_t(struct wtm *w, struct wtm_send *s)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: z -> t (de-shielding) to a wallet address: balances move exactly") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS));
         ASSERT(wtm_totals(w, NULL, &before));
-        *s = (struct send){ .from = w->zb, .to = w->t2, .amount = "1.50000000",
+        *s = (struct wtm_send){ .from = w->zb, .to = w->t2, .amount = "1.50000000",
                             .key = "matrix-z-to-t" };
-        ASSERT(send_run(w, "deshield", s));
+        ASSERT(wtm_send_run(w, "deshield", s));
         ASSERT(wtm_mine(w, 1));
-        struct hist h = wtm_hist(w, "deshield.history", s->txid);
+        struct wtm_hist h = wtm_hist(w, "deshield.history", s->txid);
         ASSERT(h.found);
         ASSERT_STR_EQ(h.kind, "public");
         ASSERT(wtm_totals(w, "deshield.totals", &after));
@@ -736,11 +736,11 @@ static int step_z_to_t(struct wtm *w, struct send *s)
 
 /* One legacy z_sendmany with a shielded recipient (with memo), two
  * transparent ones (one the wallet's own) and a foreign shielded one. */
-static int step_multi(struct wtm *w)
+static int wtm_step_multi(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: one transaction, four recipients, mixed private and public (z_sendmany)") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS));
         ASSERT(wtm_totals(w, NULL, &before));
         char recips[1400];
@@ -750,14 +750,14 @@ static int step_multi(struct wtm *w)
                  "{\"address\":\"%s\",\"amount\":0.05},"
                  "{\"address\":\"%s\",\"amount\":0.05}]",
                  w->zb, w->t2, WTM_FOREIGN_T, WTM_FOREIGN_Z);
-        struct reply *r = WTM_CALL(w, "multi.z_sendmany", "z_sendmany", w->za,
+        struct wtm_reply *r = WTM_CALL(w, "multi.z_sendmany", "z_sendmany", w->za,
                                    recips);
         ASSERT(r->ok);
         char txid[80];
         snprintf(txid, sizeof(txid), "%.64s", r->raw);
         ASSERT_EQ((int64_t)strlen(txid), 64);
         ASSERT(wtm_mine(w, 1));
-        struct note n = wtm_notes(w, "multi.notes", w->zb, txid);
+        struct wtm_note n = wtm_notes(w, "multi.notes", w->zb, txid);
         ASSERT_EQ(n.count, 1);
         ASSERT_EQ(n.zat, 25000000);
         ASSERT_STR_EQ(n.memo, "multi");
@@ -792,22 +792,22 @@ static int step_multi(struct wtm *w)
 
 /* amount = balance - fee, from a shielded address and a transparent one:
  * nothing is left at the source. */
-static int step_max(struct wtm *w)
+static int wtm_step_max(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: exact-balance send (amount = balance - fee) leaves nothing, shielded and transparent") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS));
         ASSERT(wtm_totals(w, NULL, &before));
-        struct note held = wtm_notes(w, NULL, w->za, NULL);
+        struct wtm_note held = wtm_notes(w, NULL, w->za, NULL);
         ASSERT(held.held_count >= 1 && held.held > WTM_FEE);
         char amt[40];
         int64_t zmax = held.held - WTM_FEE;
         snprintf(amt, sizeof(amt), "%lld.%08lld", (long long)(zmax / WTM_COIN),
                  (long long)(zmax % WTM_COIN));
-        struct send s = { .from = w->za, .to = WTM_FOREIGN_T, .amount = amt,
+        struct wtm_send s = { .from = w->za, .to = WTM_FOREIGN_T, .amount = amt,
                           .key = "matrix-max-z" };
-        ASSERT(send_run(w, "max_z", &s));
+        ASSERT(wtm_send_run(w, "max_z", &s));
         ASSERT(wtm_mine(w, 1));
         held = wtm_notes(w, "max_z.notes", w->za, NULL);
         ASSERT_EQ(held.held_count, 0);
@@ -819,12 +819,12 @@ static int step_max(struct wtm *w)
         ASSERT(tmax > 0);
         snprintf(amt, sizeof(amt), "%lld.%08lld", (long long)(tmax / WTM_COIN),
                  (long long)(tmax % WTM_COIN));
-        struct send t = { .from = w->t1, .to = WTM_FOREIGN_T, .amount = amt,
+        struct wtm_send t = { .from = w->t1, .to = WTM_FOREIGN_T, .amount = amt,
                           .key = "matrix-max-t" };
-        ASSERT(send_run(w, "max_t", &t));
+        ASSERT(wtm_send_run(w, "max_t", &t));
         ASSERT(wtm_mine(w, 1));
         ASSERT_EQ(wtm_addr_bal(w, "max_t.z_getbalance", w->t1), 0);
-        struct totals last;
+        struct wtm_totals last;
         ASSERT(wtm_totals(w, NULL, &last));
         ASSERT_EQ(last.t, after.t - tmax - WTM_FEE);
         PASS();
@@ -834,7 +834,7 @@ static int step_max(struct wtm *w)
 
 /* ── refusals: each must fail and change no balance ───────────────── */
 
-struct refusal {
+struct wtm_refusal {
     const char *name, *tag, *from, *to, *amount, *memo;
     /* A KNOWN DIVERGENCE case: zclassicd refuses the request, this node
      * accepts and sends it today. moved_zat is what must leave the wallet
@@ -843,17 +843,17 @@ struct refusal {
     int64_t moved_zat;
 };
 
-static int step_divergence_one(struct wtm *w, const struct refusal *c)
+static int wtm_step_divergence_one(struct wtm *w, const struct wtm_refusal *c)
 {
     int failures = 0;
     TEST(c->name) {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_totals(w, NULL, &before));
-        struct send s = { .from = c->from, .to = c->to, .amount = c->amount,
+        struct wtm_send s = { .from = c->from, .to = c->to, .amount = c->amount,
                           .memo = c->memo, .key = "matrix-divergence" };
         char tag[64];
         snprintf(tag, sizeof(tag), "refuse.%s", c->tag);
-        ASSERT(send_run(w, tag, &s));
+        ASSERT(wtm_send_run(w, tag, &s));
         ASSERT(wtm_mine(w, 1));
         ASSERT(wtm_totals(w, NULL, &after));
         ASSERT_EQ(after.t, before.t);
@@ -863,21 +863,21 @@ static int step_divergence_one(struct wtm *w, const struct refusal *c)
     return failures;
 }
 
-static int step_refusal_one(struct wtm *w, const struct refusal *c)
+static int wtm_step_refusal_one(struct wtm *w, const struct wtm_refusal *c)
 {
     int failures = 0;
     TEST(c->name) {
-        struct totals before, after;
+        struct wtm_totals before, after;
         char newest_before[80], newest_after[80], tag[64];
         ASSERT(wtm_totals(w, NULL, &before));
         ASSERT(wtm_newest(w, newest_before, sizeof(newest_before)));
-        struct send s = { .from = c->from, .to = c->to, .amount = c->amount,
+        struct wtm_send s = { .from = c->from, .to = c->to, .amount = c->amount,
                           .memo = c->memo, .key = "matrix-refusal" };
         char key[64];
         snprintf(key, sizeof(key), "matrix-refusal-%s", c->tag);
         s.key = key;
         snprintf(tag, sizeof(tag), "refuse.%s", c->tag);
-        bool refused = send_refused(w, tag, &s);
+        bool refused = wtm_send_refused(w, tag, &s);
         ASSERT(refused);
         printf("\n  [evidence] refused (%s): %.150s ", s.code, s.message);
         ASSERT(s.code[0]);
@@ -892,11 +892,11 @@ static int step_refusal_one(struct wtm *w, const struct refusal *c)
     return failures;
 }
 
-static int step_refusals(struct wtm *w)
+static int wtm_step_refusals(struct wtm *w)
 {
     int failures = 0;
     if (!wtm_mine(w, WTM_SPENDABLE_CONFS)) return 1;
-    const struct refusal cases[] = {
+    const struct wtm_refusal cases[] = {
         { "wallet_tx_matrix_regtest: refused: shielded insufficient funds", "shielded_insufficient",
           w->zb, w->za, "900.00000000", NULL, 0 },
         { "wallet_tx_matrix_regtest: refused: transparent insufficient funds", "transparent_insufficient",
@@ -907,23 +907,23 @@ static int step_refusals(struct wtm *w)
           w->zb, w->za, "0.00000000", NULL, 0 },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]) && !failures; i++)
-        failures += step_refusal_one(w, &cases[i]);
-    const struct refusal memo_to_t = {
+        failures += wtm_step_refusal_one(w, &cases[i]);
+    const struct wtm_refusal memo_to_t = {
         "wallet_tx_matrix_regtest: KNOWN DIVERGENCE from zclassicd: a memo to a transparent recipient is ACCEPTED and sent (zclassicd refuses: \"Memo cannot be used with a taddr\")",
         "memo_to_transparent", w->zb, WTM_FOREIGN_T, "0.10000000",
         "this cannot be delivered", 10000000 + WTM_FEE };
-    if (!failures) failures += step_divergence_one(w, &memo_to_t);
+    if (!failures) failures += wtm_step_divergence_one(w, &memo_to_t);
     return failures;
 }
 
 /* ── the legacy-compatible methods a legacy front end calls ───────── */
 
 
-static int step_legacy(struct wtm *w)
+static int wtm_step_legacy(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: legacy-compatible reads answer with the shapes a legacy front end parses") {
-        struct reply *r = WTM_CALL(w, "legacy.z_listaddresses", "z_listaddresses");
+        struct wtm_reply *r = WTM_CALL(w, "legacy.z_listaddresses", "z_listaddresses");
         ASSERT(r->ok && r->parsed && r->doc.type == JSON_ARR);
         ASSERT(r->doc.num_children >= 2);
         r = WTM_CALL(w, "legacy.listunspent", "listunspent");
@@ -955,11 +955,11 @@ static int step_legacy(struct wtm *w)
 
 /* The legacy methods the node's RPC table does not have: each is refused by
  * name. A gap a legacy front end must cover (operations are polled there). */
-static int step_legacy_unsupported(struct wtm *w)
+static int wtm_step_legacy_unsupported(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: legacy methods this node lacks (z_validateaddress, z_getoperationstatus, z_getoperationresult) are refused by name") {
-        struct reply *r = WTM_CALL(w, "legacy.z_validateaddress", "z_validateaddress", w->zb);
+        struct wtm_reply *r = WTM_CALL(w, "legacy.z_validateaddress", "z_validateaddress", w->zb);
         ASSERT(!r->ok && strstr(r->raw, "UNKNOWN_") != NULL);
         printf("\n  [evidence] UNSUPPORTED z_validateaddress: %.120s ", r->raw);
         r = WTM_CALL(w, "legacy.z_getoperationstatus", "z_getoperationstatus");
@@ -983,23 +983,23 @@ static int step_legacy_unsupported(struct wtm *w)
 
 static bool wtm_wallet_locked(struct wtm *w, const char *tag, bool want)
 {
-    struct reply *r = WTM_CALL(w, tag, "core", "wallet", "security", "status");
+    struct wtm_reply *r = WTM_CALL(w, tag, "core", "wallet", "security", "status");
     return r->ok && json_get_bool(rnf_at(&r->doc, "data.locked")) == want &&
            json_get_bool(rnf_at(&r->doc, "data.encrypted_at_rest"));
 }
 
-static int step_lock(struct wtm *w)
+static int wtm_step_lock(struct wtm *w)
 {
     int failures = 0;
     TEST("wallet_tx_matrix_regtest: a send committed with the wallet locked is refused; after unlock it goes through") {
-        struct totals before, after;
+        struct wtm_totals before, after;
         ASSERT(wtm_mine(w, WTM_SPENDABLE_CONFS));
         ASSERT(wtm_totals(w, NULL, &before));
         char commit[2300];
-        struct send plan = { .from = w->zb, .to = WTM_FOREIGN_Z,
+        struct wtm_send plan = { .from = w->zb, .to = WTM_FOREIGN_Z,
                              .amount = "0.10000000", .key = "matrix-locked" };
-        ASSERT(send_plan(w, "lock.plan", &plan, commit, sizeof(commit)));
-        struct reply *r = wtm_call_in(w, "lock.security_encrypt",
+        ASSERT(wtm_send_plan(w, "lock.plan", &plan, commit, sizeof(commit)));
+        struct wtm_reply *r = wtm_call_in(w, "lock.security_encrypt",
             (const char *const[]){ "core", "wallet", "security", "encrypt", "--input=-", NULL },
             WTM_PASS_ENCRYPT);
         ASSERT(r->ok);
@@ -1017,10 +1017,10 @@ static int step_lock(struct wtm *w)
         ASSERT(wtm_wallet_locked(w, "lock.security_status_unlocked", false));
         ASSERT(wtm_mine(w, 1));
         /* the wallet's shielded view is reloaded just after an unlock */
-        after = (struct totals){ -1, -1 };
+        after = (struct wtm_totals){ -1, -1 };
         for (int i = 0; i < 40 && (after.t != before.t || after.z != before.z); i++) {
             if (i > 0) rnf_sleep_ms(500);
-            if (!wtm_totals(w, NULL, &after)) after = (struct totals){ -1, -1 };
+            if (!wtm_totals(w, NULL, &after)) after = (struct wtm_totals){ -1, -1 };
         }
         ASSERT_EQ(after.t, before.t);
         ASSERT_EQ(after.z, before.z);
@@ -1039,19 +1039,19 @@ static int step_lock(struct wtm *w)
 
 static int wtm_run_steps(struct wtm *w)
 {
-    struct send a, b, c;
-    int failures = step_boot_fund(w);
-    if (!failures) failures += step_t_to_t(w);
-    if (!failures) failures += step_shield(w, &a);
-    if (!failures) failures += step_z_to_z_text(w, &b);
-    if (!failures) failures += step_z_to_z_binary(w, &c);
-    if (!failures) failures += step_z_to_t(w, &a);
-    if (!failures) failures += step_multi(w);
-    if (!failures) failures += step_refusals(w);
-    if (!failures) failures += step_legacy(w);
-    if (!failures) failures += step_legacy_unsupported(w);
-    if (!failures) failures += step_max(w);
-    if (!failures) failures += step_lock(w);
+    struct wtm_send a, b, c;
+    int failures = wtm_step_boot_fund(w);
+    if (!failures) failures += wtm_step_t_to_t(w);
+    if (!failures) failures += wtm_step_shield(w, &a);
+    if (!failures) failures += wtm_step_z_to_z_text(w, &b);
+    if (!failures) failures += wtm_step_z_to_z_binary(w, &c);
+    if (!failures) failures += wtm_step_z_to_t(w, &a);
+    if (!failures) failures += wtm_step_multi(w);
+    if (!failures) failures += wtm_step_refusals(w);
+    if (!failures) failures += wtm_step_legacy(w);
+    if (!failures) failures += wtm_step_legacy_unsupported(w);
+    if (!failures) failures += wtm_step_max(w);
+    if (!failures) failures += wtm_step_lock(w);
     return failures;
 }
 
@@ -1124,7 +1124,7 @@ int test_wallet_tx_matrix_regtest(void)
     printf("  [evidence] %ld call shapes %s\n", w.shapes_checked,
            w.record ? "recorded" : "checked");
     if (failures && w.n.work[0]) rnf_log_tail(&w.n);
-    reply_free(&wtm_r);
+    wtm_reply_free(&wtm_r);
     rnf_cleanup(&w.n);
     rnf_live = NULL;
     failures += wtm_check_backups(backups_before);
