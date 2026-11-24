@@ -12,6 +12,7 @@
 #include "util/supervisor.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 size_t command_registry_write_bounded_json(struct json_value *root, char *out,
@@ -330,6 +331,18 @@ static bool ordinary_self_link_valid(const struct zcl_command_spec *spec,
         supervisor_next_valid(spec, input, data) || android_job_next_valid(spec, input, data);
 }
 
+/* Opt-in compact envelope: Z23_OUTPUT=compact leaves the envelope with its
+ * identity (schema, command, ok, status, request_id), data_schema, data and a
+ * `next` of {command, input} only when there is something to run next. The
+ * timing fields, an exempt authority block (a bounded agent session keeps its
+ * block: it carries the spend debit) and an empty `next` are omitted. Any other
+ * value, or none, leaves every byte of the default envelope as it was. */
+static bool envelope_compact(void)
+{
+    const char *mode = getenv("Z23_OUTPUT");
+    return mode && strcmp(mode, "compact") == 0;
+}
+
 static bool push_next_item_valid(const struct zcl_command_next *next,
                                  const struct zcl_command_registry *registry,
                                  const struct zcl_command_spec *current_spec,
@@ -375,7 +388,8 @@ static bool push_next_item(struct json_value *array,
     }
     bool ok = json_push_kv_str(&item, "command", next->command) &&
               json_push_kv(&item, "input", &input) &&
-              json_push_kv_str(&item, "reason", next->reason) &&
+              (envelope_compact() ||
+               json_push_kv_str(&item, "reason", next->reason)) &&
               json_push_back(array, &item);
     json_free(&input);
     json_free(&item);
@@ -394,7 +408,8 @@ bool command_registry_push_next_array(
     bool ok = true;
     for (size_t i = 0; ok && i < reply->next_count; i++)
         ok = push_next_item(&array, &reply->next[i], registry, current_spec, reply, failure);
-    ok = ok && json_push_kv(root, "next", &array);
+    ok = ok && ((envelope_compact() && reply->next_count == 0) ||
+                json_push_kv(root, "next", &array));
     json_free(&array);
     return ok;
 }
@@ -411,11 +426,14 @@ static bool serialize_envelope(struct json_value *root,
               json_push_kv_str(root, "status",
                                zcl_command_status_name(reply->status)) &&
               json_push_kv_str(root, "request_id", request_id) &&
-              json_push_kv_int(root, "elapsed_us",
-                               elapsed_us < 0 ? 0 : elapsed_us);
+              (envelope_compact() ||
+               json_push_kv_int(root, "elapsed_us",
+                                elapsed_us < 0 ? 0 : elapsed_us));
     int64_t budget_ms = zcl_command_latency_budget_ms(spec->latency);
     int64_t elapsed_ms = elapsed_us < 0 ? 0 : elapsed_us / 1000;
     bool budget_exceeded = elapsed_us > budget_ms * 1000;
+    if (envelope_compact())
+        return ok;
     return ok && json_push_kv_int(root, "budget_ms", budget_ms) &&
            json_push_kv_int(root, "elapsed_ms", elapsed_ms) &&
            json_push_kv_bool(root, "budget_exceeded", budget_exceeded);
@@ -482,6 +500,15 @@ static bool serialize_authority(
     return ok;
 }
 
+/* The authority block, except for a compact envelope of an exempt operator. */
+static bool serialize_authority_block(
+    struct json_value *root, bool agent_session_presented,
+    const struct agent_spend_policy_decision *policy)
+{
+    return (envelope_compact() && !agent_session_presented) ||
+           serialize_authority(root, agent_session_presented, policy);
+}
+
 static bool serialize_body(struct json_value *root,
                            const struct zcl_command_registry *registry,
                            const struct zcl_command_spec *spec,
@@ -527,7 +554,7 @@ bool command_registry_success_data_budget(
     json_set_object(&root);
     bool ok = serialize_envelope(&root, spec, &reply,
         "local-ffffffffffffffff", INT64_MAX, true) &&
-        serialize_authority(&root, agent_session_presented, policy) &&
+        serialize_authority_block(&root, agent_session_presented, policy) &&
         serialize_body(&root, NULL, spec, &reply, true, invoked_by_alias, NULL);
     if (ok) {
         size_t cap = spec->budget_bytes > 0
@@ -609,7 +636,7 @@ size_t command_registry_serialize_reply(
                       reply->status == ZCL_COMMAND_STATUS_ACCEPTED;
     bool ok = serialize_envelope(&root, spec, reply, request_id, elapsed_us,
                                  successful) &&
-              serialize_authority(&root, agent_session_presented, policy) &&
+              serialize_authority_block(&root, agent_session_presented, policy) &&
               serialize_body(&root, registry, spec, reply, successful,
                              invoked_by_alias, failure);
     size_t contract = successful ? (spec->budget_bytes > 0

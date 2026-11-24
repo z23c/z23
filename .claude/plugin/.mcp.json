@@ -3,7 +3,8 @@
     "z23-local": {
       "type": "stdio",
       "command": "z23",
-      "args": ["mcp", "serve", "--checkout=${CLAUDE_PROJECT_DIR}"]
+      "args": ["mcp", "serve", "--checkout=${CLAUDE_PROJECT_DIR}"],
+      "env": { "Z23_OUTPUT": "compact" }
     }
   }
 }

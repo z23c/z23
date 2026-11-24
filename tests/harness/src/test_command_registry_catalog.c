@@ -8237,9 +8237,65 @@ static int test_separator_fold_legacy_rows_still_need_it(void)
     return failures;
 }
 
+/* The opt-in compact envelope (Z23_OUTPUT=compact): the default wire is
+ * untouched, the compact wire keeps identity, data_schema and data, and drops
+ * timing, an exempt authority block, an empty next and next reasons. The size
+ * bound is pinned so the envelope cannot silently grow back. */
+static size_t envelope_wire_for(const char *mode, bool with_next, char *wire, size_t cap)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "code.guide", NULL);
+    struct zcl_command_reply reply;
+    size_t n = 0;
+    if (mode) setenv("Z23_OUTPUT", mode, 1);
+    else unsetenv("Z23_OUTPUT");
+    if (spec) {
+        zcl_command_reply_init(&reply, "zcl.test.envelope.v1");
+        bool ok = json_push_kv_str(&reply.data, "k", "v") &&
+            (!with_next || zcl_command_reply_add_next(&reply, "discover.help", "{}",
+                                                      "a long reason that compact drops"));
+        if (ok) n = zcl_command_registry_test_reply_wire(reg, spec, &reply, wire, cap);
+        zcl_command_reply_free(&reply);
+    }
+    unsetenv("Z23_OUTPUT");
+    return n;
+}
+
+static int test_compact_envelope_opt_in(void)
+{
+    int failures = 0;
+    TEST("Z23_OUTPUT=compact omits timing, exempt authority and empty next; default and other values are byte-identical") {
+        char plain[2048], other[2048], compact[2048], with_next[2048];
+        size_t p = envelope_wire_for(NULL, false, plain, sizeof(plain));
+        size_t o = envelope_wire_for("verbose", false, other, sizeof(other));
+        size_t c = envelope_wire_for("compact", false, compact, sizeof(compact));
+        size_t cn = envelope_wire_for("compact", true, with_next, sizeof(with_next));
+        ASSERT(p > 0 && c > 0 && cn > 0);
+        ASSERT_EQ((int64_t)o, (int64_t)p);
+        ASSERT_STR_EQ(other, plain);
+        ASSERT(strstr(plain, "\"elapsed_us\"") && strstr(plain, "\"authority\"") &&
+               strstr(plain, "\"budget_exceeded\"") && strstr(plain, "\"next\":[]"));
+        ASSERT(!strstr(compact, "elapsed") && !strstr(compact, "authority") &&
+               !strstr(compact, "budget") && !strstr(compact, "\"next\""));
+        ASSERT(strstr(compact, "\"schema\":\"zcl.result.v1\"") && strstr(compact, "\"ok\":true") &&
+               strstr(compact, "\"status\":\"passed\"") && strstr(compact, "\"request_id\"") &&
+               strstr(compact, "\"data_schema\":\"zcl.test.envelope.v1\"") &&
+               strstr(compact, "\"data\":{\"k\":\"v\"}"));
+        /* Pinned: the compact envelope of a one-field answer stays under 190
+         * bytes and saves at least 100 bytes against the default. */
+        ASSERT(c < 190);
+        ASSERT(c + 100 <= p);
+        ASSERT(strstr(with_next, "\"next\":[{\"command\":\"discover.help\",\"input\":{}}]") != NULL);
+        ASSERT(strstr(with_next, "reason") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_command_registry_catalog(void)
 {
     int failures = 0;
+    failures += test_compact_envelope_opt_in();
     failures += test_app_sync_unknown_topic_guidance();
     failures += test_catalog_wellformed();
     failures += test_code_corpus_roots_follow_registry();
