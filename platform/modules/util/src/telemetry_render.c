@@ -471,19 +471,6 @@ bool telemetry_evaluate(const struct telemetry_domain_schema *schema,
  * Builders accumulate with `&=` rather than returning early, so every
  * json_free() still runs on the way out. */
 
-static bool push_int_or_null(struct json_value *obj, const char *key,
-                             bool known, int64_t v)
-{
-    if (known)
-        return json_push_kv_int(obj, key, v);
-    struct json_value nul;
-    json_init(&nul);
-    json_set_null(&nul);
-    bool ok = json_push_kv(obj, key, &nul);
-    json_free(&nul);
-    return ok;
-}
-
 /* Presence tallies, over the WHOLE leaf set — completeness is a property of
  * the snapshot the provider filled, not of the slice the caller asked to see. */
 struct presence_tally {
@@ -567,8 +554,8 @@ static bool push_freshness(struct json_value *out,
     json_init(&f);
     json_set_object(&f);
     bool ok = true;
-    ok &= push_int_or_null(&f, "oldest_observed_unix", have_observed, oldest);
-    ok &= push_int_or_null(&f, "max_age_ms", have_age, max_age);
+    ok &= json_push_kv_int_or_null(&f, "oldest_observed_unix", have_observed, oldest);
+    ok &= json_push_kv_int_or_null(&f, "max_age_ms", have_age, max_age);
     ok &= json_push_kv_int(&f, "leaves_with_unknown_age", (int64_t)unknown_age);
     ok &= json_push_kv_bool(&f, "any_unknown_age", unknown_age > 0);
     ok &= json_push_kv(out, "freshness", &f);
@@ -609,9 +596,9 @@ static bool push_leaves(struct json_value *out,
         ok &= json_push_kv_str(&e, "presence",
                                telemetry_presence_name(m->presence));
         ok &= json_push_kv_str(&e, "source", telemetry_source_name(m->source));
-        ok &= push_int_or_null(&e, "observed_unix", m->observed_unix >= 0,
+        ok &= json_push_kv_int_or_null(&e, "observed_unix", m->observed_unix >= 0,
                                m->observed_unix);
-        ok &= push_int_or_null(&e, "age_ms", m->age_ms >= 0, (int64_t)m->age_ms);
+        ok &= json_push_kv_int_or_null(&e, "age_ms", m->age_ms >= 0, (int64_t)m->age_ms);
         ok &= json_push_kv_str(&e, "reason", m->reason ? m->reason : "");
         ok &= json_push_kv(&arr, lf->path, &e);
         json_free(&e);
@@ -652,7 +639,7 @@ static bool push_health(struct json_value *out, const char *domain,
         if (fi->value_known && fi->value_is_bool)
             ok &= json_push_kv_bool(&o, "value", fi->value_b);
         else
-            ok &= push_int_or_null(&o, "value",
+            ok &= json_push_kv_int_or_null(&o, "value",
                                    fi->value_known && !fi->value_is_bool,
                                    fi->value_i);
         ok &= json_push_kv_str(&o, "healthy_range", fi->healthy_range);

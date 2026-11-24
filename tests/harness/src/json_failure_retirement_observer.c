@@ -18,6 +18,7 @@
 #define json_push_kv jr_json_push_kv
 #define json_push_kv_str jr_json_push_kv_str
 #define json_push_kv_int jr_json_push_kv_int
+#define json_push_kv_int_or_null jr_json_push_kv_int_or_null
 #define json_push_kv_real jr_json_push_kv_real
 #define json_push_kv_bool jr_json_push_kv_bool
 #define json_copy jr_json_copy
@@ -56,6 +57,7 @@
 #undef json_push_kv_bool
 #undef json_push_kv_real
 #undef json_push_kv_int
+#undef json_push_kv_int_or_null
 #undef json_push_kv_str
 #undef json_push_kv
 #undef json_push_back

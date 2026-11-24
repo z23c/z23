@@ -78,6 +78,8 @@ bool json_push_kv(struct json_value *obj, const char *key,
                   const struct json_value *child);
 bool json_push_kv_str(struct json_value *obj, const char *key, const char *s);
 bool json_push_kv_int(struct json_value *obj, const char *key, int64_t i);
+bool json_push_kv_int_or_null(struct json_value *obj, const char *key,
+                              bool known, int64_t i);
 bool json_push_kv_real(struct json_value *obj, const char *key, double d);
 bool json_push_kv_bool(struct json_value *obj, const char *key, bool b);
 

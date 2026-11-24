@@ -2171,10 +2171,33 @@ static int t_adopt_tasks_generation(void)
     return failures;
 }
 
+static int cib_factory_dispatch_bool(void)
+{
+    int failures = 0;
+    TEST("factory dispatch_cpu is a boolean command input") {
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            zcl_command_catalog(), "dev.agent.factory", NULL);
+        ASSERT(spec != NULL);
+        ASSERT(zcl_command_registry_input_key_is_boolean(spec, "dispatch_cpu"));
+        struct json_value input;
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_bool(&input, "dispatch_cpu", true));
+        ASSERT(zcl_command_registry_input_validate(spec, &input, NULL, 0));
+        json_free(&input); json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "dispatch_cpu", "true"));
+        ASSERT(!zcl_command_registry_input_validate(spec, &input, NULL, 0));
+        json_free(&input);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
     int failures = 0;
+    failures += cib_factory_dispatch_bool();
     failures += t_receive_continuation_wire();
     failures += t_ops_state_explain_boolean();
     failures += t_discovery_transport_shapes();

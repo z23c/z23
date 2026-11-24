@@ -502,7 +502,7 @@ bool command_registry_devagent_input_extra_bool_key(const char *key)
     static const char *const keys[] = {
         "json", "force", "include_evidence_wires", "include_units",
         "list", "open", "publish", "fleet", "terminate", "qualify",
-        "prove", "changes_only",
+        "prove", "changes_only", "dispatch_cpu",
     };
     return command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0]));
 }

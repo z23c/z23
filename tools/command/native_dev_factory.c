@@ -35,6 +35,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include "command/native_command.h"
+#include "command/native_dev_factory_dispatch.h"
 #include "command/native_fleet_objectives.h"
 #include "dev/dev_proof.h"
 
@@ -1951,6 +1952,7 @@ void zcl_native_handle_dev_factory(const struct zcl_command_request *request,
     }
     now = (double)platform_time_wall_unix();
     window_s = (double)hours * 3600.0;
+    if (!zcl_dev_factory_dispatch(request ? request->input : NULL, now, window_s, reply)) return;
     fac_new_obj(&jobs);
     fac_new_obj(&land);
     fac_new_obj(&att);

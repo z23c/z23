@@ -281,6 +281,15 @@ bool json_push_kv_str(struct json_value *obj, const char *key, const char *s)
     return json_push_kv_owned(obj, key, &v);
 }
 
+bool json_push_kv_int_or_null(struct json_value *obj, const char *key,
+                              bool known, int64_t i)
+{
+    struct json_value v;
+    json_init(&v);
+    if (known) json_set_int(&v, i);
+    return json_push_kv_owned(obj, key, &v);
+}
+
 bool json_push_kv_int(struct json_value *obj, const char *key, int64_t i)
 {
     struct json_value v;

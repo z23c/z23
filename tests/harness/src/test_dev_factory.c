@@ -26,9 +26,11 @@ int test_dev_factory(void)
     return 0;
 }
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 #define DFX_HOUR 3600
 #define DFX_NAME_40A "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -545,6 +547,142 @@ _test_next:;
     return failures;
 }
 
+static int dfx_case_dispatch_cpu(const char *base, const char *jobs,
+                                 const char *land, const char *proc)
+{
+    int failures = 0;
+    char attempts[640], logs[800], path[900];
+    struct dfx_call c;
+    TEST("factory: opt-in dispatch CPU is sampled and refuses invalid input") {
+        (void)snprintf(attempts, sizeof(attempts), "%s/cpu-attempts", base);
+        (void)snprintf(logs, sizeof(logs), "%s/recent/logs", attempts);
+        dfx_mkdirs(logs);
+        (void)snprintf(path, sizeof(path), "%s/dispatch-timing.log", logs);
+        dfx_write(path,
+            "dispatch_wall_ms=7 rc=0 local_children_user_us=10 local_children_system_us=20 local_self_user_us=3 local_self_system_us=4 source=a.c output=build/test-obj/epochs/x/a.o\n"
+            "dispatch_wall_ms=2 rc=0 source=old.c output=build/dev-obj/epochs/x/old.o\n"
+            "dispatch_wall_ms=1 rc=0 local_children_user_us=unknown local_children_system_us=1 local_self_user_us=2 local_self_system_us=3 source=u.c output=build/node-obj/epochs/x/u.o\n"
+            "dispatch_wall_ms=1 rc=0 local_children_user_us=1 local_children_user_us=2 local_children_system_us=1 local_self_user_us=1 local_self_system_us=1 source=dup.c output=build/test-obj/epochs/x/d.o\n"
+            "dispatch_wall_ms=1 rc=0 local_children_user_us=9223372036854775808 local_children_system_us=0 local_self_user_us=0 local_self_system_us=0 source=overflow.c output=build/test-obj/epochs/x/o.o\n");
+        FILE *extra = fopen(path, "a");
+        ASSERT(extra != NULL);
+        char long_source[601]; memset(long_source, 'q', sizeof(long_source) - 1); long_source[600] = 0;
+        for (int i = 0; i < 6; i++)
+            ASSERT(fprintf(extra, "dispatch_wall_ms=1 rc=0 local_children_user_us=%d local_children_system_us=0 local_self_user_us=0 local_self_system_us=0 source=%s output=build/other/o.o\n", 100 + i, i == 5 ? long_source : "short.c") > 0);
+        ASSERT(fclose(extra) == 0);
+        dfx_env(jobs, land, attempts, proc);
+        dfx_run(&c, 48);
+        ASSERT(dfx_ok(&c) && dfx_at(&c, "dispatch_cpu") == NULL);
+        dfx_end(&c);
+        dfx_begin(&c);
+        ASSERT(json_push_kv_bool(&c.input, "dispatch_cpu", false));
+        zcl_native_handle_dev_factory(&c.request, &c.reply);
+        ASSERT(dfx_ok(&c) && dfx_at(&c, "dispatch_cpu") == NULL);
+        dfx_end(&c);
+        dfx_begin(&c);
+        ASSERT(json_push_kv_bool(&c.input, "dispatch_cpu", true));
+        zcl_native_handle_dev_factory(&c.request, &c.reply);
+        ASSERT(dfx_ok(&c));
+        ASSERT(dfx_str_is(&c, "dispatch_cpu.status", "ok"));
+        ASSERT(dfx_bool_is(&c, "dispatch_cpu.sampled_complete", false));
+        ASSERT_EQ((int)dfx_num(&c, "dispatch_cpu.profiles.test.known_rows"), 1);
+        ASSERT_EQ((int)dfx_num(&c, "dispatch_cpu.profiles.test.local_child_us"), 30);
+        ASSERT_EQ((int)dfx_num(&c, "dispatch_cpu.profiles.test.local_self_us"), 7);
+        ASSERT(dfx_is_null(&c, "dispatch_cpu.profiles.dev.local_child_us"));
+        ASSERT_EQ((int)dfx_num(&c, "dispatch_cpu.malformed_rows"), 2);
+        ASSERT_EQ((int)dfx_num(&c, "dispatch_cpu.unknown_rows"), 2);
+        ASSERT_EQ((int)dfx_num(&c, "dispatch_cpu.profiles.node.local_self_us"), 5);
+        ASSERT(dfx_is_null(&c, "dispatch_cpu.profiles.node.local_child_us"));
+        const struct json_value *top = dfx_at(&c, "dispatch_cpu.top");
+        ASSERT(top && json_size(top) == 5);
+        ASSERT_EQ(json_get_int(json_get(json_at(top, 0), "local_cpu_us")), 105);
+        ASSERT(json_get_bool(json_get(json_at(top, 0), "source_truncated")));
+        ASSERT_EQ(strlen(json_get_str(json_get(json_at(top, 0), "source"))), 512);
+        ASSERT_EQ(json_get_int(json_get(json_at(top, 0), "line")), 11);
+        dfx_end(&c);
+        dfx_begin(&c);
+        ASSERT(json_push_kv_str(&c.input, "dispatch_cpu", "true"));
+        zcl_native_handle_dev_factory(&c.request, &c.reply);
+        ASSERT(!dfx_ok(&c));
+        ASSERT_STR_EQ(c.reply.error.code, "INVALID_INPUT");
+        dfx_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static bool dfx_dispatch_status(const char *want)
+{
+    struct dfx_call c;
+    dfx_begin(&c);
+    bool ok = json_push_kv_bool(&c.input, "dispatch_cpu", true);
+    zcl_native_handle_dev_factory(&c.request, &c.reply);
+    ok = ok && dfx_ok(&c) && dfx_str_is(&c, "dispatch_cpu.status", want) &&
+        dfx_bool_is(&c, "dispatch_cpu.sampled_complete", false);
+    dfx_end(&c);
+    return ok;
+}
+
+static int dfx_case_dispatch_sources(const char *base, const char *jobs,
+                                     const char *land, const char *proc)
+{
+    int failures = 0;
+    char attempts[640], logs[800], path[900];
+    TEST("factory: dispatch input refuses hostile and oversized files") {
+        (void)snprintf(attempts, sizeof(attempts), "%s/cpu-hostile", base);
+        (void)snprintf(logs, sizeof(logs), "%s/a/logs", attempts);
+        dfx_mkdirs(logs);
+        (void)snprintf(path, sizeof(path), "%s/dispatch-timing.log", logs);
+        dfx_env(jobs, land, attempts, proc);
+        ASSERT(dfx_dispatch_status("missing"));
+        ASSERT(symlink("absent", path) == 0);
+        ASSERT(dfx_dispatch_status("refused"));
+        ASSERT(unlink(path) == 0);
+        ASSERT(mkfifo(path, 0600) == 0);
+        ASSERT(dfx_dispatch_status("refused"));
+        ASSERT(unlink(path) == 0);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        ASSERT(fd >= 0);
+        ASSERT(ftruncate(fd, 8 * 1024 * 1024 + 1) == 0);
+        ASSERT(close(fd) == 0);
+        ASSERT(dfx_dispatch_status("refused_oversize"));
+        ASSERT(unlink(path) == 0);
+        dfx_write(path, "dispatch_wall_ms=1 rc=0 source=broken");
+        ASSERT(dfx_dispatch_status("truncated"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dfx_case_dispatch_latest(const char *base, const char *jobs,
+                                    const char *land, const char *proc)
+{
+    int failures = 0;
+    char attempts[640], logs[800], a[900], b[900];
+    struct dfx_call c;
+    TEST("factory: dispatch selects latest observed log deterministically") {
+        (void)snprintf(attempts, sizeof(attempts), "%s/cpu-latest", base);
+        (void)snprintf(logs, sizeof(logs), "%s/a/logs", attempts); dfx_mkdirs(logs);
+        (void)snprintf(a, sizeof(a), "%s/dispatch-timing.log", logs); dfx_write(a, "# a\n");
+        (void)snprintf(logs, sizeof(logs), "%s/b/logs", attempts); dfx_mkdirs(logs);
+        (void)snprintf(b, sizeof(b), "%s/dispatch-timing.log", logs); dfx_write(b, "# b\n");
+        struct timeval tv[2]; ASSERT(gettimeofday(&tv[0], NULL) == 0); tv[1] = tv[0];
+        ASSERT(utimes(a, tv) == 0 && utimes(b, tv) == 0);
+        dfx_env(jobs, land, attempts, proc); dfx_begin(&c);
+        ASSERT(json_push_kv_bool(&c.input, "dispatch_cpu", true));
+        zcl_native_handle_dev_factory(&c.request, &c.reply);
+        ASSERT(dfx_ok(&c) && dfx_str_is(&c, "dispatch_cpu.status", "ok"));
+        ASSERT(dfx_str_is(&c, "dispatch_cpu.attempt", "b"));
+        ASSERT(dfx_bool_is(&c, "dispatch_cpu.sampled_complete", false));
+        ASSERT(dfx_is_null(&c, "dispatch_cpu.local_child_us"));
+        dfx_end(&c); PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_dev_factory(void);
 int test_dev_factory(void)
 {
@@ -980,6 +1118,9 @@ int test_dev_factory(void)
     }
 
     failures += dfx_case_capability_details(base, jobs, land, att, proc, now);
+    failures += dfx_case_dispatch_cpu(base, jobs, land, proc);
+    failures += dfx_case_dispatch_sources(base, jobs, land, proc);
+    failures += dfx_case_dispatch_latest(base, jobs, land, proc);
 
 _test_next:;
     dfx_unenv();

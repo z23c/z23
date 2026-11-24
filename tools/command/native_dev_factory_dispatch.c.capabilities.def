@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_factory_dispatch.c", CAP_FS_READ|CAP_FS_WRITE, "opens and reads bounded attempt timing logs without writing; descriptor traversal and stdio are conservatively classified as filesystem writes")

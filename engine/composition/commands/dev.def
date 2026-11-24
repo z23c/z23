@@ -3488,9 +3488,10 @@ ZCL_COMMAND_DEV_READ(
     "per test-selection cost, memory, io and cpu pressure and /dev/shm "
     "use. A malformed ledger line is counted and skipped, an oversized one "
     "is counted and refused, an absent source is reported as absent. It "
-    "reads only and writes nothing.", 32768,
+    "reads only and writes nothing. Optional dispatch_cpu reports sampled local "
+    "CPU from the latest observed attempt log, never a complete proof.", 32768,
     "factory,waste,devbuild,land,proof,pressure,measure",
-    "zcl.dev_factory_input.v1", "zcl.dev_factory.v1", "hours", "",
+    "zcl.dev_factory_input.v1", "zcl.dev_factory.v1", "hours,dispatch_cpu", "",
     "z23-dev dev factory --hours=48", ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
