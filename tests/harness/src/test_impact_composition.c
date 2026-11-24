@@ -15099,8 +15099,8 @@ static bool ic_union_fixture(const char *generation, bool selected, unsigned mod
         ic_write(generation, "rpc-input", variant == 2 ? "rpc-two" : "rpc-one") &&
         ic_write(generation, "lint-source",
             "#!/bin/sh\n[ \"$1\" = check-standalone-tools-link ] && [ \"$2\" = --list-targets ] || exit 2\n"
-            "echo list >> invocations\n[ ! -e list-fail ] || exit 3\n"
-            "if [ -e list-fail-output ]; then printf '%s\\n' build/bin/lint-union-fixture; exit 3; fi\n"
+            "echo list >> invocations\nif [ -e list-fail ]; then echo fixture-list-failure >&2; exit 3; fi\n"
+            "if [ -e list-fail-output ]; then echo fixture-list-failure >&2; printf '%s\\n' build/bin/lint-union-fixture; exit 3; fi\n"
             "[ -e list-empty ] || printf '%s\\n' build/bin/lint-union-fixture\n") &&
         ic_write(generation, "Makefile", makefile);
 }
@@ -15296,9 +15296,38 @@ static bool ic_union_bootstrap_case(unsigned mode, const uint8_t expected[32])
     bool node_read = ic_union_read(generation, "build/bin/z23", node, sizeof(node));
     bool valid = mode == 5 ? ic_union_warm_result(ok, covered, why, node_read, node, root, expected, log) :
         !node_read && ic_union_bootstrap_failure(mode, ok, covered, why, log);
+    if (mode == 2 || mode == 4) {
+        char bundle_log[4096] = {0};
+        valid = ic_union_read(generation, "bundle-union.log", bundle_log, sizeof(bundle_log)) &&
+            strstr(bundle_log, "fixture-list-failure") &&
+            strstr(bundle_log, "standalone tool list command failed (exit 3)") && valid;
+    }
     if (!valid || !have_log) fprintf(stderr, "bundle bootstrap mode=%u ok=%d covered=%d node=%d why=%s log=%s\n",
                                      mode, ok, covered, node_read, why, log);
     return valid && have_log;
+}
+static bool ic_union_quiet_fallback(void)
+{
+    char generation[4096], guard[4096], makefile[8192];
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-quiet");
+    if (!ic_union_fixture(generation, true, 0, 0) || !ic_union_warm_linter(generation) ||
+        !ic_write(generation, "list-fail", "x") || !ic_union_guard(guard, sizeof(guard))) return false;
+    int n = snprintf(makefile, sizeof(makefile), "%s\nproof-lint-prebuild:\n\t@echo fixture-fallback\n", guard);
+    if (n < 0 || (size_t)n >= sizeof(makefile) || !ic_write(generation, "Makefile", makefile)) return false;
+    const char *argv[] = {"sh", "-c", "unset ZCL_PROOF_LINT_REQUIRE_LIST; exec make --no-print-directory proof-lint-prebuild", NULL};
+    struct zcl_devloop_process_result result = {0};
+    const char *prior = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    char *saved = prior ? strdup(prior) : NULL;
+    if (prior && !saved) return false;
+    bool enabled = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0;
+    bool ok = enabled && zcl_devloop_process_run(generation, argv, 30000, &result) &&
+        result.exit_code == 0 && !result.term_signal && !result.timed_out &&
+        !result.cancelled && !result.output_truncated &&
+        strstr(result.output, "fixture-fallback") && !strstr(result.output, "fixture-list-failure");
+    int restored = saved ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    free(saved);
+    (void)test_rm_rf_recursive(generation);
+    return ok && restored == 0;
 }
 static int test_ic_worker_bundle_union(void)
 {
@@ -15317,6 +15346,7 @@ static int test_ic_worker_bundle_union(void)
         ok = ic_union_empty_needs() && ok;
         ok = ic_union_clear_failure() && ok;
         ok = ic_union_retry(roots[0]) && ok;
+        ok = ic_union_quiet_fallback() && ok;
         for (unsigned i = 0; i < 7; ++i) ok = ic_union_bootstrap_case(i, roots[0]) && ok;
         ASSERT(ok);
 #endif
