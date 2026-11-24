@@ -507,6 +507,11 @@ static bool obj_landing_observe(const struct zcl_objectives_options *options,
     struct zcl_objective_value *v)
 {
     memset(train, 0, sizeof *train);
+    /* A cache hit returns before the reader below names the ledger, so give the
+     * caller a valid (empty) string on every path: callers print *use in their
+     * reasons. */
+    if (path_cap) path[0] = 0;
+    *use = path;
     struct zcl_objectives_landing_cache *c = options ? options->landing_cache : NULL;
     if (!c) {
         if (!obj_newest_landed_train(options, use, path, path_cap, stats, v))

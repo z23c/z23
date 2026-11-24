@@ -380,6 +380,34 @@ static int fox_case_landing_snapshot(void)
         ASSERT(!b.measured && strstr(b.reason, "no landed row"));
         PASS();
     }
+    TEST("objectives: cache-hit landing reasons name the ledger on every caller") {
+        const char *wait_ids[] = {"landing_latency_s", "landing_queue_wait_s",
+                                  "landing_resubmit_gap_s",
+                                  "landing_attempts_per_train"};
+        /* No ts: the newest landed row is found but its train is not. An empty
+         * ledger: the observation is not ready. Both are served from the cache
+         * after the first caller and must still print a valid path. */
+        const char *shapes[] = {
+            "{\"state\":\"landed\",\"note\":\"a\",\"attempt\":1,\"started\":4,\"landed_at\":5}\n",
+            ""
+        };
+        struct zcl_objectives_options o = {0};
+        o.outcomes = path;
+        for (size_t s = 0; s < 2; s++) {
+            struct zcl_objectives_landing_cache cache = {0};
+            ASSERT(fox_write(path, shapes[s]));
+            o.landing_cache = &cache;
+            for (size_t j = 0; j < 4; j++) {
+                struct zcl_objective_value r = zcl_objectives_measure(&o, wait_ids[j]);
+                ASSERT(!r.measured);
+                ASSERT(strstr(r.reason, path) != NULL);
+                ASSERT(strstr(r.reason, "(null)") == NULL);
+            }
+            ASSERT(cache.filled);
+        }
+        o.landing_cache = NULL;
+        PASS();
+    }
 _test_next:;
     (void)test_rm_rf_recursive(root);
     return failures;
