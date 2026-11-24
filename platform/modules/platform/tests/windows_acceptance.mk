@@ -481,6 +481,7 @@ ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \
 # "SKIP gui_gl_smoke: <reason>" (exit 0) where no GL is available.
 ZCL_WINDOWS_ACCEPTANCE_GUI_DEPS := \
 	$(wildcard platform/modules/gui/src/*.c) \
+	platform/modules/platform/src/clock.c \
 	platform/modules/base/src/safe_alloc.c platform/modules/base/src/cleanse.c \
 	platform/modules/json/src/json.c platform/modules/util/src/png_writer.c \
 	platform/modules/sha3/src/sha3.c
