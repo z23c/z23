@@ -153,9 +153,11 @@ answered, post a new row; nothing is deleted or rewritten:
 from the directive's `from` name or from a name in `ZCL_FLEET_OWNER_NAMES`
 (default: none; the host user is never an owner, every agent on the host posts
 as it). That is a name check; `--from` is unauthenticated, so it is not proof
-of sender. A directive sent with a grant label carries a sender binding, and
-the brief then accepts the sender's closure only from a row carrying a live
-binding for that label; an owner name closes it regardless. A real result
+of sender. The same recipe closes a directive sent with a grant label: the brief
+checks the name, not the grant's sender binding, which the directive row
+already shows and which can expire or live on another host. A closure dated
+in the same second as the directive counts when it is a later row in the same
+stream. A real result
 from the recipient still wins. `steer_brief` reports
 `open_worker_directives`: among the newest 64 directives, the ones to a
 worker (not `*`, not an owner) that are not answered, closed or

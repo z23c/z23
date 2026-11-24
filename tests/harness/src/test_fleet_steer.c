@@ -3710,29 +3710,57 @@ static int fmx_t_directive_close_expiry(void)
         PASS();
     }
 
-    TEST("steer: a bound directive needs a live binding or an owner") {
+    TEST("steer: a granted or plain directive closes by its sender only") {
         struct fmx_call b;
         fmx_isolate("directive_close_bound");
         fmx_prime_mail();
-        fmx_owner_names("owner-human");
+        fmx_owner_names(NULL);
         fmx_seed_inbox_bound("self", "2026-01-01T00:00:00Z", 7, FMX_SENDER,
                              "dead-box", "directive", "do it", "bound-ref",
                              "0123456789abcdef0123456789abcdef");
-        fmx_seed_inbox("self", "2026-01-01T00:10:00Z", 8, FMX_SENDER,
+        fmx_seed_inbox("self", "2026-01-01T00:00:00Z", 8, FMX_SENDER,
+                       "dead-box", "directive", "do it", "plain-ref");
+        /* A stranger's closure, bound or not, closes neither. */
+        fmx_seed_inbox_bound("stranger", "2026-01-01T00:10:00Z", 1, "stranger",
+                             "dead-box", "note", "closed by sender: withdrawn",
+                             "bound-ref", "0123456789abcdef0123456789abcdef");
+        fmx_seed_inbox("stranger", "2026-01-01T00:10:00Z", 2, "stranger",
                        "dead-box", "note", "closed by sender: withdrawn",
-                       "bound-ref");
+                       "plain-ref");
         ASSERT(fmx_brief_ok(&b));
         ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "bound-ref"),
                                "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "plain-ref"),
+                               "state"), "queued");
         fmx_end(&b);
-        fmx_seed_inbox("owner", "2026-01-01T00:20:00Z", 1, "owner-human",
+        /* The sender closes both: unbound for the granted one, in the
+         * same second as the directive for a third. */
+        fmx_seed_inbox("self", "2026-01-01T00:10:00Z", 9, FMX_SENDER,
                        "dead-box", "note", "closed by sender: withdrawn",
                        "bound-ref");
+        fmx_seed_inbox("self", "2026-01-01T00:10:00Z", 10, FMX_SENDER,
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "plain-ref");
+        fmx_seed_inbox("self", "2026-01-01T00:30:00Z", 11, FMX_SENDER,
+                       "dead-box", "directive", "do it", "same-sec-ref");
+        fmx_seed_inbox("self", "2026-01-01T00:30:00Z", 12, FMX_SENDER,
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "same-sec-ref");
         ASSERT(fmx_brief_ok(&b));
         ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "bound-ref"),
                                "state"), "closed");
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "plain-ref"),
+                               "state"), "closed");
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "same-sec-ref"),
+                               "state"), "closed");
         fmx_end(&b);
-        fmx_owner_names(NULL);
+        /* A recipient's real result still wins over a closure. */
+        fmx_seed_inbox("dead", "2026-01-01T00:40:00Z", 1, "dead-box",
+                       FMX_SENDER, "result", "done", "bound-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "bound-ref"),
+                               "state"), "answered");
+        fmx_end(&b);
         fmx_restore();
         PASS();
     }

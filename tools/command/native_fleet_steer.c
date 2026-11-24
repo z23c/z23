@@ -3438,7 +3438,7 @@ static bool fmc_ref_answers(const char *dref, const char *rref)
 static const char *fmc_answer_match(const struct fmc_row *d,
                                     const struct fmc_row *r)
 {
-/* A closure note never answers, even as a result to the origin. */
+    /* A closure note never answers, even as a result to the origin. */
     if (strcmp(r->kind, "result") != 0 || !fmc_ref_answers(d->ref, r->ref) ||
         strcmp(r->from, d->from) == 0 ||
         strncmp(r->body, FMC_CLOSE_PREFIX, sizeof(FMC_CLOSE_PREFIX) - 1u) == 0)
@@ -3567,18 +3567,30 @@ static const char *fmc_close_reason(const char *body)
     return "other";
 }
 
-/* Who may close d: an owner name, or the origin; when the directive carries
- * a sender binding the origin's row must carry a live binding for the
- * same label, as a typed read does. */
+/* Who may close d: an owner name, or the origin by name. A sender binding is
+ * a fixed digest the directive row already shows, so it proves nothing and
+ * is not required; a closure must not depend on a grant that can expire or
+ * live on another host. */
 static bool fmc_close_author_ok(const struct fmc_row *d, const struct fmc_row *r)
 {
     if (fmc_owner_name(r->from))
         return true;
     if (strcmp(r->from, d->from) != 0)
         return false;
-    return !d->sender_binding[0] ||
-        (r->sender_binding[0] &&
-         !zcl_fleet_steer_grant_binding_live(r->from, r->sender_binding, "send"));
+    return true;
+}
+
+/* A closure is dated before d, or at the same second but not later in the
+ * same stream. ts has one-second resolution, so seq breaks the tie. */
+static bool fmc_closure_before(const struct fmc_row *d, const struct fmc_row *r)
+{
+    long long dt = fmc_ts_unix(d->ts), rt = fmc_ts_unix(r->ts);
+    if (dt < 0 || rt < 0 || !fmc_reply_calendar_valid(d->ts) ||
+        !fmc_reply_calendar_valid(r->ts))
+        return true;
+    if (rt != dt)
+        return rt < dt;
+    return !(d->stream[0] && strcmp(r->stream, d->stream) == 0 && r->seq > d->seq);
 }
 
 /* True when r closes d: a later note or result under the same ref, from
@@ -3588,12 +3600,12 @@ static bool fmc_close_match(const struct fmc_row *d, const struct fmc_row *r)
     if (strcmp(r->kind, "note") != 0 && strcmp(r->kind, "result") != 0)
         return false;
     if (!d->ref[0] || r->observed_disposition[0] || strcmp(r->ref, d->ref) != 0 ||
-        strcmp(r->ts, d->ts) <= 0)
+        fmc_closure_before(d, r))
         return false;
     if (!fmc_close_author_ok(d, r))
         return false;
     return strncmp(r->body, FMC_CLOSE_PREFIX, sizeof(FMC_CLOSE_PREFIX) - 1u) == 0 &&
-           fmc_reply_compatible(d, r);
+           fmc_attempt_agrees(d->body, r->body);
 }
 
 /* Fold r into the recipient's newest presence note and newest own row. */
