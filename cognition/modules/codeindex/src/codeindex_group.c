@@ -344,6 +344,7 @@ static const char *ci_purpose_modules_g(const char *group)
 {
     if (module_group_is(group, "clips_codec")) return "Clips record, body and manifest codecs: signed record ids, chain checks and strict refusals over the codec cursor; no I/O";
     if (module_group_is(group, "clips_rating")) return "Clips content-rating decision over plain evidence structs; no I/O and no codec dependency";
+    if (module_group_is(group, "gui")) return "software window and widget layer: CPU framebuffer windows (Win32, headless), drawing, text and the widget tree; used by apps/z23wallet and never linked into the node";
     return "";
 }
 
