@@ -191,9 +191,24 @@ void zcl_app_inner_fail(struct zcl_command_reply *reply,
                                             : ZCL_COMMAND_EXIT_FAILED,
                            inner->error.code[0] ? inner->error.code
                                                 : "INNER_FAILED",
-                           "execute", inner->error.retryable,
+                           inner->error.phase[0] ? inner->error.phase : "execute", inner->error.retryable,
                            mutated || inner->error.mutated,
                            inner->error.message, inner->error.evidence);
+    reply->error.human_action_required |= inner->error.human_action_required;
+    if (!reply->error.next_action[0] && inner->error.next_action[0])
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "%s", inner->error.next_action);
+    bool omitted = inner->next_count > ZCL_COMMAND_MAX_NEXT;
+    for (size_t i = 0; i < inner->next_count && i < ZCL_COMMAND_MAX_NEXT; ++i) {
+        const struct zcl_command_next *next = &inner->next[i];
+        if (!zcl_command_reply_add_next(reply, next->command, next->input_json, next->reason))
+            omitted = true;
+    }
+    if (omitted) {
+        reply->error.human_action_required = true;
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+            "Some recovery commands could not be included; inspect the underlying failure evidence before retrying.");
+    }
 }
 
 bool zcl_app_input(struct json_value *in, const char *const *kv, size_t n)

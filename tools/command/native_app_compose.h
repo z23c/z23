@@ -60,6 +60,8 @@ bool zcl_app_copy_recovery(struct json_value *out, const struct json_value *sour
 /* Fail `reply` with the inner leaf's own refusal (code, message, evidence),
  * marking it mutated when the inner leaf did or `mutated` says an earlier
  * step already did. */
+/* Preserve actionable inner guidance when it fits; otherwise report omission.
+ * Effect-bound state and failure identity are not transferred. */
 void zcl_app_inner_fail(struct zcl_command_reply *reply,
                         const struct zcl_command_reply *inner, bool mutated);
 

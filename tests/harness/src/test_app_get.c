@@ -356,6 +356,107 @@ static bool tag_offline_long_profile(const char *root, char *profile, size_t cap
     return true;
 }
 
+void zcl_test_task_verifier_missing(bool missing);
+
+static int tag_composed_tasks_verifier(void)
+{
+    int failures = 0;
+    char root[TAG_PATH] = "", wire[32768];
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct zcl_command_reply inner, outer;
+    zcl_command_reply_init(&inner, "zcl.task_document.v1");
+    zcl_command_reply_init(&outer, "zcl.app_open.v1");
+    TEST("composed Tasks verifier refusal keeps actionable recovery") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_tasks_compose"));
+        ASSERT(json_push_kv_str(&input, "datadir", root));
+        ASSERT(json_push_kv_str(&input, "app", "local/tasks"));
+        ASSERT(json_push_kv_str(&input, "action", "open"));
+        ASSERT(json_push_kv_str(&input, "preview_root", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        ASSERT(json_push_kv_str(&input, "preview_receipt", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        ASSERT(json_push_kv_str(&input, "preview_program", "bin/ztasks"));
+        zcl_test_task_verifier_missing(true);
+        bool ok = zcl_app_inner_call("app.tasks", &input, &inner, NULL);
+        zcl_test_task_verifier_missing(false);
+        ASSERT(!ok && !strcmp(inner.error.code, "TASK_VERIFIER_UNAVAILABLE"));
+        zcl_app_inner_fail(&outer, &inner, false);
+        ASSERT(!strcmp(outer.error.phase, "open") && outer.error.human_action_required);
+        ASSERT(!strcmp(outer.error.next_action, inner.error.next_action));
+        ASSERT(strstr(outer.error.next_action, "z23-package-verify") != NULL);
+        const struct zcl_command_spec *spec = asf_spec("app.open");
+        ASSERT(spec && zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &outer, wire, sizeof(wire)));
+        ASSERT(strstr(wire, "TASK_VERIFIER_UNAVAILABLE") && strstr(wire, "z23-package-verify"));
+        ASSERT(strstr(wire, "\"phase\":\"open\"") && strstr(wire, "\"human_action_required\":true"));
+        ASSERT(!outer.error.mutated);
+        PASS();
+    } _test_next:;
+    zcl_test_task_verifier_missing(false);
+    zcl_command_reply_free(&inner); zcl_command_reply_free(&outer); json_free(&input);
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+
+static int tag_composed_tasks_stale(void)
+{
+    int failures = 0;
+    char root[TAG_PATH] = "", wire[32768];
+    struct json_value input; json_init(&input); json_set_object(&input);
+    struct zcl_command_reply inner, outer;
+    zcl_command_reply_init(&inner, "zcl.task_document.v1");
+    zcl_command_reply_init(&outer, "zcl.app_open.v1");
+    TEST("composed stale Tasks failure keeps the same-profile reload command") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "app_tasks_stale_compose"));
+        ASSERT(json_push_kv_str(&input, "datadir", root));
+        ASSERT(json_push_kv_str(&input, "app", "local/tasks"));
+        ASSERT(json_push_kv_str(&input, "action", "add"));
+        ASSERT(json_push_kv_str(&input, "title", "Winner"));
+        ASSERT(json_push_kv_int(&input, "expected_revision", 0));
+        ASSERT(zcl_app_inner_call("app.tasks", &input, &inner, NULL));
+        zcl_command_reply_free(&inner);
+        ASSERT(!zcl_app_inner_call("app.tasks", &input, &inner, NULL));
+        ASSERT(inner.next_count == 1 && !strcmp(inner.next[0].command, "app.tasks"));
+        zcl_app_inner_fail(&outer, &inner, false);
+        ASSERT(outer.next_count == 1 && !strcmp(outer.next[0].input_json, inner.next[0].input_json));
+        ASSERT(!strcmp(outer.error.next_action, inner.error.next_action));
+        ASSERT(strstr(outer.next[0].input_json, root) && strstr(outer.next[0].input_json, "list"));
+        const struct zcl_command_spec *spec = asf_spec("app.open");
+        ASSERT(spec && zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &outer, wire, sizeof(wire)));
+        ASSERT(strstr(wire, "TASK_SAVE_FAILED") && strstr(wire, "app.tasks"));
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&inner); zcl_command_reply_free(&outer); json_free(&input);
+    if (root[0]) test_rm_rf_recursive(root);
+    return failures;
+}
+
+static int tag_composed_recovery_full(void)
+{
+    int failures = 0;
+    struct zcl_command_reply inner, outer;
+    zcl_command_reply_init(&inner, "zcl.task_document.v1");
+    zcl_command_reply_init(&outer, "zcl.app_open.v1");
+    TEST("full composed recovery retains existing actions and admits omission") {
+        zcl_command_reply_fail(&inner, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                               "TASK_SAVE_FAILED", "save", false, false, "stale", "app.tasks");
+        (void)snprintf(inner.error.current_state, sizeof(inner.error.current_state), "retained_replay");
+        (void)snprintf(inner.error.failure_id, sizeof(inner.error.failure_id), "inner-failure");
+        ASSERT(zcl_command_reply_add_next(&inner, "app.tasks", "{}", "reload"));
+        for (size_t i = 0; i < ZCL_COMMAND_MAX_NEXT; ++i)
+            ASSERT(zcl_command_reply_add_next(&outer, "app.library", "{}", "existing"));
+        zcl_app_inner_fail(&outer, &inner, true);
+        ASSERT(outer.next_count == ZCL_COMMAND_MAX_NEXT && outer.error.mutated);
+        ASSERT(!outer.error.current_state[0] && !outer.error.failure_id[0]);
+        ASSERT(outer.error.human_action_required && strstr(outer.error.next_action, "could not be included"));
+        for (size_t i = 0; i < outer.next_count; ++i)
+            ASSERT(!strcmp(outer.next[i].command, "app.library"));
+        char wire[32768]; const struct zcl_command_spec *spec = asf_spec("app.open");
+        ASSERT(spec && zcl_command_registry_test_reply_wire(zcl_command_catalog(), spec, &outer, wire, sizeof(wire)));
+        ASSERT(strstr(wire, "\"mutated\":true") != NULL);
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&inner); zcl_command_reply_free(&outer);
+    return failures;
+}
+
 static int tag_offline_unsafe_profile(void)
 {
     int failures = 0;
@@ -6984,6 +7085,9 @@ int test_app_get(void)
     failures += tag_busy_onion_bridge();
     failures += tag_board_refusal_bridge();
     failures += tag_offline_catalog_recovery();
+    failures += tag_composed_tasks_verifier();
+    failures += tag_composed_tasks_stale();
+    failures += tag_composed_recovery_full();
     failures += tag_offline_unsafe_profile();
     tag_board_reset();
     zcl_app_offer_set_call(tag_call);
