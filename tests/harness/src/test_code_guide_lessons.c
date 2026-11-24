@@ -118,6 +118,28 @@ static int cgl_trust_stale_cases(void)
     return failures;
 }
 
+static int cgl_plain_page_cases(void)
+{
+    int failures = 0;
+    struct json_value data;
+    TEST("code.guide keeps a plain page its node vouches for and counts an unvouched one once") {
+        ASSERT(cgl_collect("["
+            "{\"kind\":\"page\",\"slug\":\"page-scribe\",\"title\":\"T\",\"author_role\":true,"
+            "\"summary\":\"From a scribe\"},"
+            "{\"kind\":\"page\",\"slug\":\"page-rogue\",\"title\":\"T\",\"author_role\":false,"
+            "\"summary\":\"From a key with no wiki role\"},"
+            "{\"kind\":\"page\",\"slug\":\"page-old-node\",\"title\":\"T\","
+            "\"summary\":\"A node that sends no field\"}]",
+            CGL_NOW, &data));
+        ASSERT_EQ(json_size(json_get(&data, "lessons")), 1u);
+        ASSERT_STR_EQ(cgl_slug(&data, 0), "page-scribe");
+        ASSERT_EQ(json_get_int(json_get(&data, "lessons_untrusted_dropped")), 2);
+        json_free(&data);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cgl_drop_overflow_case(void)
 {
     int failures = 0;
@@ -388,7 +410,7 @@ static int cgl_guide_cases(void)
 
 int cgl_run_cases(void)
 {
-    int failures = cgl_ranking_cases() + cgl_trust_stale_cases() + cgl_drop_overflow_case() + cgl_cap_cases();
+    int failures = cgl_ranking_cases() + cgl_trust_stale_cases() + cgl_plain_page_cases() + cgl_drop_overflow_case() + cgl_cap_cases();
     struct node_db db = {0};
     char dir[256] = {0}, warmup[256];
     bool was_warming = rpc_is_in_warmup(warmup, sizeof(warmup));

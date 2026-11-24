@@ -6977,6 +6977,78 @@ static bool fb_find_matched(struct fb_rpc_env *e, const char *q, size_t *returne
     return true;
 }
 
+/* Allows only the key whose first byte is in `ctx`: a node whose role store
+ * vouches for one scribe and no one else. */
+static bool fb_author_role_check(const uint8_t key[32], const char *leaf,
+    const char *kind, char *why, size_t why_cap, void *ctx)
+{
+    (void)leaf; (void)kind;
+    uint8_t scribe_pk[32], seed[32];
+    fb_test_identity(*(const int *)ctx, seed, scribe_pk);
+    if (!memcmp(key, scribe_pk, 32)) return true;
+    if (why && why_cap) (void)snprintf(why, why_cap, "no role");
+    return false;
+}
+
+static bool fb_test_ingest_page_as(struct node_db *db, int who,
+                                   const char *slug, const char *text, int64_t now)
+{
+    uint8_t seed[32], pk[32];
+    fb_test_identity(who, seed, pk);
+    struct fleet_board_post p;
+    fb_test_compose(&p, FLEET_BOARD_KIND_WIKI, "scribe", text, (uint64_t)now, 3600);
+    fb_test_scope(&p, FLEET_BOARD_SCOPE_PUBLIC, "general");
+    (void)snprintf(p.slug, sizeof(p.slug), "%s", slug);
+    (void)snprintf(p.title, sizeof(p.title), "Note %s", slug);
+    return fleet_board_post_sign(&p, seed, pk) == FLEET_BOARD_OK &&
+           db_fleet_board_post_ingest(db, &p, now, NULL) == FLEET_BOARD_OK;
+}
+
+static const struct json_value *fb_find_entry_slug(const struct json_value *r,
+                                                   const char *slug)
+{
+    const struct json_value *entries = json_get(r, "entries");
+    for (size_t i = 0; i < json_size(entries); i++) {
+        const struct json_value *e = json_at(entries, i);
+        if (!strcmp(json_get_str(json_get(e, "slug")), slug)) return e;
+    }
+    return NULL;
+}
+
+static int test_fleet_wiki_find_page_author_role(void)
+{
+    int failures = 0;
+    TEST("fleet wiki: find reports author_role on plain pages from the same "
+         "role predicate entries use") {
+        static struct fb_rpc_env e;
+        struct json_value r;
+        int scribe = 31;
+        const int64_t now = INT64_C(5000000);
+        ASSERT(fb_rpc_env_open(&e));
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        ASSERT(fb_test_ingest_page_as(&e.db, 31, "ranknote-ok", "reducer prose", now));
+        ASSERT(fb_test_ingest_page_as(&e.db, 32, "ranknote-bad", "reducer prose", now));
+        struct zcl_fleet_role_checker checker = {
+            .allow = fb_author_role_check, .ctx = &scribe,
+            .name = "fleet-board-page-author-role" };
+        zcl_fleet_role_checker_install(&checker);
+        ASSERT(fb_rpc_op(&e, "wiki_find", "q", "ranknote", NULL, NULL, &r));
+        ASSERT_EQ(json_get_int(json_get(&r, "returned")), 2);
+        const struct json_value *ok = fb_find_entry_slug(&r, "ranknote-ok");
+        const struct json_value *bad = fb_find_entry_slug(&r, "ranknote-bad");
+        ASSERT(ok && bad);
+        ASSERT_STR_EQ(json_get_str(json_get(ok, "kind")), "page");
+        ASSERT_STR_EQ(json_get_str(json_get(bad, "kind")), "page");
+        ASSERT(json_get(ok, "author_role") != NULL && json_get_bool(json_get(ok, "author_role")));
+        ASSERT(json_get(bad, "author_role") != NULL && !json_get_bool(json_get(bad, "author_role")));
+        json_free(&r);
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        fb_rpc_env_close(&e);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_wiki_find_matched_fields(void)
 {
     int failures = 0;
@@ -11977,6 +12049,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_wiki_find_edges();
     failures += test_fleet_wiki_find_page_cap();
     failures += test_fleet_wiki_find_matched_fields();
+    failures += test_fleet_wiki_find_page_author_role();
     failures += test_fleet_wiki_list_is_an_index();
     failures += test_fleet_wiki_list_reaches_every_page();
     failures += test_fleet_board_write_refusal_reasons();

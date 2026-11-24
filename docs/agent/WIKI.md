@@ -180,7 +180,7 @@ revision `id`. `q` is one or more blank-separated words; a result matches
 when each word is a substring of at least one searched field (the words may
 sit in different fields), ASCII letters compared case-insensitively. An empty
 `q` matches everything and `q` is at most 128 bytes. Exact `topic` and `applies_to` filters (1..64 bytes) combine with `q`
-by AND and exclude plain pages. An `applies_to` filter ending in `/` is a directory prefix: it matches any entry that applies to a path under it. Each entry result carries `author_role`, true when this node's role store lets the author's key post that kind (a wiki page needs the scribe role), and `applies_to` (at most 3 paths); a reader must not present a public page whose `author_role` is false as project guidance.
+by AND and exclude plain pages. An `applies_to` filter ending in `/` is a directory prefix: it matches any entry that applies to a path under it. Each result, entry or plain page, carries `author_role`, true when this node's role store lets the author's key post that kind (a wiki page needs the scribe role); an entry also carries `applies_to` (at most 3 paths); a reader must not present a public page whose `author_role` is false as project guidance.
 
 One call verifies at most 256 revisions. When the answer is `incomplete`,
 repeat the call with `after_slug` and unchanged filters; no snapshot is

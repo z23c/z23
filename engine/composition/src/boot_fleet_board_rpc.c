@@ -1165,6 +1165,9 @@ struct fb_find_context {
     struct json_value entries;
     size_t used;
     unsigned returned;
+    uint8_t role_host[FLEET_BOARD_PUBKEY_BYTES];
+    uint8_t role_kind;
+    bool role_known, role_allowed;
 };
 
 static bool fb_find_string(const struct json_value *in, const char *key,
@@ -1199,19 +1202,33 @@ static bool fb_find_query_read(const struct json_value *in,
     return !q->after[0] || fleet_board_slug_valid(q->after);
 }
 
+/* Whether THIS node's role store lets the author's key post THIS kind (wiki:
+ * scribe only), the predicate admission uses: a reader must not present a
+ * page from a key that could not have posted it as guidance. Entries and
+ * plain pages both report it. The last (key, kind) answer is reused, so a
+ * find does not reopen the role store for every row of one author. */
+static bool fb_find_author_role(struct fb_find_context *c,
+    const struct db_fleet_board_post *row)
+{
+    if (!c->role_known || c->role_kind != row->post.kind ||
+        memcmp(c->role_host, row->post.host_pubkey, sizeof c->role_host) != 0) {
+        c->role_allowed = zcl_fleet_role_allows(row->post.host_pubkey,
+            ZCL_FLEET_LEAF_BOARD_POST, fleet_board_kind_name(row->post.kind), NULL, 0);
+        memcpy(c->role_host, row->post.host_pubkey, sizeof c->role_host);
+        c->role_kind = row->post.kind;
+        c->role_known = true;
+    }
+    return c->role_allowed;
+}
+
 static bool fb_find_item_identity(const struct db_fleet_board_post *row,
                                   const struct json_value *entry,
-                                  struct json_value *item)
+                                  bool author_role, struct json_value *item)
 {
     json_set_object(item);
     char id[65], host[65];
     fleet_board_id_to_hex(row->post.id, id);
     fleet_board_id_to_hex(row->post.host_pubkey, host);
-    /* Whether THIS node's role store lets the author's key post THIS kind
-     * (wiki: scribe only), the predicate admission uses: a reader must not
-     * present a page from a key that could not have posted it as guidance. */
-    bool author_role = zcl_fleet_role_allows(row->post.host_pubkey,
-        ZCL_FLEET_LEAF_BOARD_POST, fleet_board_kind_name(row->post.kind), NULL, 0);
     return json_push_kv_str(item, "kind", "entry") &&
         json_push_kv_bool(item, "author_role", author_role) &&
         fleet_wiki_entry_push_applies(entry, item) &&
@@ -1239,9 +1256,10 @@ static bool fb_find_item_rules(const struct json_value *entry,
 }
 
 static bool fb_find_item_project(const struct db_fleet_board_post *row,
-    const struct json_value *entry, unsigned mode, struct json_value *item)
+    const struct json_value *entry, bool author_role, unsigned mode,
+    struct json_value *item)
 {
-    if (!fb_find_item_identity(row, entry, item)) return false;
+    if (!fb_find_item_identity(row, entry, author_role, item)) return false;
     if (mode < 2 && !json_push_kv(item, "summary", json_get(entry, "summary"))) return false;
     if (mode == 0 && !fb_find_item_rules(entry, item)) return false;
     return json_push_kv_bool(item, "rules_omitted", mode != 0) &&
@@ -1291,11 +1309,12 @@ static enum fleet_wiki_visit_result fb_find_append(struct fb_find_context *c,
 static enum fleet_wiki_visit_result fb_find_emit(struct fb_find_context *c,
     const struct db_fleet_board_post *row, const struct json_value *entry)
 {
+    bool author_role = fb_find_author_role(c, row);
     for (unsigned mode = 0; mode < 3; mode++) {
         struct json_value item;
         bool fits = false;
         json_init(&item);
-        if (!fb_find_item_project(row, entry, mode, &item) ||
+        if (!fb_find_item_project(row, entry, author_role, mode, &item) ||
             !fb_find_item_matched(c, row, entry, &item)) {
             json_free(&item);
             return FLEET_WIKI_VISIT_FAILED;
@@ -1308,7 +1327,7 @@ static enum fleet_wiki_visit_result fb_find_emit(struct fb_find_context *c,
 }
 
 static bool fb_find_page_item(const struct db_fleet_board_post *row,
-    const char *summary, const char *const *fields, size_t n,
+    bool author_role, const char *summary, const char *const *fields, size_t n,
     struct json_value *item)
 {
     char id[65], host[65];
@@ -1316,6 +1335,7 @@ static bool fb_find_page_item(const struct db_fleet_board_post *row,
     fleet_board_id_to_hex(row->post.host_pubkey, host);
     json_set_object(item);
     return json_push_kv_str(item, "kind", "page") &&
+        json_push_kv_bool(item, "author_role", author_role) &&
         json_push_kv_str(item, "slug", row->post.slug) &&
         json_push_kv_str(item, "title", row->post.title) &&
         json_push_kv_str(item, "id", id) &&
@@ -1344,7 +1364,7 @@ static enum fleet_wiki_visit_result fb_find_visit_page(struct fb_find_context *c
                                               summary, f->q, fields);
     if (f->q[0] && n == 0) return FLEET_WIKI_VISIT_CONTINUE;
     json_init(&item);
-    if (!fb_find_page_item(row, summary, fields, n, &item)) {
+    if (!fb_find_page_item(row, fb_find_author_role(c, row), summary, fields, n, &item)) {
         json_free(&item);
         return FLEET_WIKI_VISIT_FAILED;
     }
