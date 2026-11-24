@@ -3378,11 +3378,47 @@ _test_next:;
  * independently-numbered stream, so the schema must admit the reply's
  * cursor_token as `since` — otherwise the real caller can never resume
  * per-stream and fresh lower-seq rows stay invisible to it. */
-static int gw_t_brief_token(void)
+static int gw_t_brief_changes_only(const char *gid, const char *token,
+                                   const char *expected_token,
+                                   size_t full_bytes)
+{
+    int failures = 0, st = 0, sn;
+    size_t compact_bytes;
+    char args[2048], reply_token[1024];
+    char *b;
+    TEST("gateway: changes_only returns compact data with the same caller and cursor") {
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"cursor_token\":\"%s\","
+                      "\"changes_only\":true}", gid, token);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 64, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"caller\\\":{\\\"mode\\\":\\\"grant\\\","
+                           "\\\"sender\\\":\\\"" GW_SENDER));
+        ASSERT(gw_body_has(b, "changes_scope\\\":\\\"mail"));
+        ASSERT(gw_body_has(b, "snapshot_included\\\":false"));
+        ASSERT(gw_body_has(b, "ref-gw-y"));
+        ASSERT(gw_body_has(b, "\"missing\\\":["));
+        ASSERT(!gw_body_has(b, "mailbox_directory"));
+        ASSERT(gw_body_token(b, reply_token, sizeof(reply_token)));
+        ASSERT_STR_EQ(expected_token, reply_token);
+        compact_bytes = strlen(b);
+        ASSERT(compact_bytes < full_bytes);
+        fprintf(stderr,
+                "gateway changes_only loopback response body bytes: full=%zu compact=%zu\n",
+                full_bytes, compact_bytes);
+        free(b);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_brief_schema(void)
 {
     int failures = 0;
-
-    TEST("gateway: steer_brief schema admits a resume token for since") {
+    TEST("gateway: steer_brief schema admits a resume token and changes_only") {
         int st = 0;
         char *b = gw_post("/steer",
                           "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":"
@@ -3393,6 +3429,8 @@ static int gw_t_brief_token(void)
         ASSERT(gw_body_has(b, "\"name\":\"steer_brief\""));
         ASSERT(gw_body_has(b, "\"since\":{\"type\":[\"integer\",\"string\"]}"));
         ASSERT(gw_body_has(b, "\"cursor_token\":{\"type\":\"string\",\"minLength\":1"));
+        ASSERT(gw_body_has(b, "\"changes_only\":{\"type\":\"boolean\""));
+        ASSERT(gw_body_has(b, "valid composite cursor_token or since"));
         ASSERT(gw_body_has(b, "mutually exclusive with since"));
         ASSERT(gw_body_has(b, "\"name\":\"steer_mailbox\""));
         ASSERT(gw_body_has(b, "\"anyOf\":[{\"type\":\"string\",\"minLength\":1},{\"type\":\"integer\",\"minimum\":0}]"));
@@ -3400,11 +3438,93 @@ static int gw_t_brief_token(void)
         free(b);
         PASS();
     }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_brief_full_false(const char *gid, const char *token,
+                                 const char *expected_token)
+{
+    int failures = 0, st = 0, sn;
+    char args[2048], reply_token[1024];
+    char *b;
+    TEST("gateway: changes_only=false preserves the full snapshot") {
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"cursor_token\":\"%s\","
+                      "\"changes_only\":false}", gid, token);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 65, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "\"caller\\\":{\\\"mode\\\":\\\"grant\\\","
+                           "\\\"sender\\\":\\\"" GW_SENDER));
+        ASSERT(gw_body_has(b, "mailbox_directory"));
+        ASSERT(gw_body_has(b, "ref-gw-y"));
+        ASSERT(gw_body_token(b, reply_token, sizeof(reply_token)));
+        ASSERT_STR_EQ(expected_token, reply_token);
+        free(b);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_brief_reject_no_cursor(const char *gid)
+{
+    int failures = 0, st = 0, sn;
+    char args[1024];
+    char *b;
+    TEST("gateway: changes_only without a cursor returns native BAD_INPUT") {
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"changes_only\":true}", gid);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 66, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "BAD_INPUT"));
+        ASSERT(gw_body_has(b, "changes_only requires a valid composite since token"));
+        free(b);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_brief_reject_malformed_flag(const char *gid, const char *token)
+{
+    int failures = 0, st = 0, sn;
+    char args[2048];
+    char *b;
+    TEST("gateway: malformed changes_only preserves native normalization refusal") {
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"cursor_token\":\"%s\","
+                      "\"changes_only\":\"true\"}", gid, token);
+        ASSERT(sn > 0 && (size_t)sn < sizeof(args));
+        b = gw_tool("steer_brief", args, 67, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":true"));
+        ASSERT(gw_body_has(b, "INVALID_INPUT"));
+        ASSERT(gw_body_has(b, "phase\\\":\\\"normalize"));
+        ASSERT(gw_body_has(b, "input key 'changes_only'"));
+        ASSERT(!gw_body_has(b, "cursor_token"));
+        ASSERT(!gw_body_has(b, "changes_scope"));
+        ASSERT(!gw_body_has(b, "snapshot_included"));
+        free(b);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int gw_t_brief_token(void)
+{
+    int failures = 0;
+    failures += gw_t_brief_schema();
 
     TEST("gateway: a token since carries a lower-seq row exactly once") {
         const char *node = gw_bin("Z23_TEST_NODE_BIN", GW_TEST_NODE_DEFAULT);
         char gid[64], args[2048], token[1024], token2[1024];
         char *b;
+        size_t full_bytes;
         int st = 0, sn;
         ASSERT(gw_mint(node, "brief,send,evidence", gid));
         /* A real send first so the mail tree exists; the outbox row is
@@ -3446,7 +3566,12 @@ static int gw_t_brief_token(void)
         ASSERT(gw_body_has(b, "\"isError\":false"));
         ASSERT(gw_body_has(b, "\"ref\\\":\\\"ref-gw-y\\\""));
         ASSERT(gw_body_token(b, token2, sizeof(token2)));
+        full_bytes = strlen(b);
         free(b);
+        ASSERT_EQ(gw_t_brief_changes_only(gid, token, token2, full_bytes), 0);
+        failures += gw_t_brief_full_false(gid, token, token2);
+        failures += gw_t_brief_reject_no_cursor(gid);
+        failures += gw_t_brief_reject_malformed_flag(gid, token);
         /* The advanced watermark shows it exactly once. */
         sn = snprintf(args, sizeof(args),
                       "{\"grant\":\"%s\",\"since\":\"%s\"}", gid, token2);
@@ -3470,7 +3595,8 @@ static int gw_t_brief_token(void)
         /* The string-only field is the same native cursor, never a second
          * cursor channel: dual, empty and non-string inputs refuse. */
         sn = snprintf(args, sizeof(args),
-                      "{\"grant\":\"%s\",\"since\":0,\"cursor_token\":\"%s\"}", gid, token2);
+                      "{\"grant\":\"%s\",\"since\":0,\"cursor_token\":\"%s\","
+                      "\"changes_only\":true}", gid, token2);
         ASSERT(sn > 0 && (size_t)sn < sizeof(args));
         b = gw_tool("steer_brief", args, 61, &st);
         ASSERT(b != NULL);
