@@ -121,14 +121,11 @@ keyboard fallbacks. Guns are held on each requested tick; boost triggers on a
 rising edge between accepted step inputs, on the first tick only. `throttle`
 uses the existing normal-throttle control. Observe renders without advancing.
 
-On clean session close, stderr reports `frame_work`, `frame_interval` and
-`input_to_frame`. The `input_to_frame` metric retains up to 36000 finite,
-nonnegative external-step samples; observe-only and `--qa-frames` runs without
-external input report `count=0`. The metric covers accepted external-input
-processing through the rendered frame, not physical keyboard event timestamps.
+On clean close, stderr reports `frame_work`, `frame_interval` and
+`input_to_frame`: up to 36000 external-step samples, `count=0` without external
+input. It times accepted input through the rendered frame, not keyboard events.
 
-<!-- claim: symbol-present sky_game_metrics_record apps/skycombat/src/game_runtime.c # external-input and ordinary-frame metrics stay distinct -->
-Window events are pumped while waiting, without ticking the simulation.
+<!-- claim: symbol-present sky_game_metrics_record apps/skycombat/src/game_runtime.c # metrics -->
 
 IDs are integers from 0 through 4294967295, strictly increasing within this
 process session. A fully validated fresh request consumes its ID before
@@ -149,8 +146,6 @@ with integer rounding, without upscaling. PNG replies contain
 `png:{width,height,bytes,base64}` with actual encoded dimensions. PNG is capped
 at 1 MiB and the JSON reply at 2 MiB. Capture failures return no image, never a
 previous frame. A failed capture after a step still reports the advanced frame.
-The resampler's allocation and resize result are checked directly; the void
-`ImageResize` wrapper does not expose resize failure.
 There is no full-resolution capture option in v1.
 
 Sessions allow at most 4096 requests and 36000 simulation ticks. EOF, close and
@@ -167,9 +162,8 @@ is separate and does not establish phone hosting or cross-platform replay.
 The explicit Linux real-display client is built with `make skycombat-agent-client`;
 it is not run by generic tests. It uses private pipes to the actual game and
 checks observe, neutral/turn steps, refused requests and close. Saved PNGs are
-checked for complete RGBA8/stored-DEFLATE structure, checksums and raster size,
-not merely a PNG header. This validates the current encoder profile, not every
-PNG format. With Xvfb installed, an example admitted, bounded invocation is:
+checked for complete RGBA8/stored-DEFLATE structure, checksums and raster size.
+With Xvfb installed, an example admitted, bounded invocation is:
 
 ```sh
 # Set sky_output to a new, owned mode-0700 directory in sanctioned scratch.
@@ -209,9 +203,8 @@ verified but not run. Running the game still uses `./build/bin/z23-skycombat`.
 **Static linking.** `plugin run` expects a static ELF (`docs/dev/PLUGINS.md`).
 `plugin pack` does not check that, so a dynamically linked game still packs.
 A static link of the game needs static GL and X11 libraries (libGL, libXrandr,
-libXi, libXcursor) plus the Xrandr, XInput2 and Xcursor headers, which most
-distributions do not ship; check the binary with `readelf -l` before you
-distribute it.
+libXi, libXcursor) plus the Xrandr, XInput2 and Xcursor headers; check the
+binary with `readelf -l`.
 
 ## Pinned data-only HUD
 
