@@ -31,6 +31,7 @@
 #include <math.h>
 #include <float.h>
 #include <limits.h>
+#include <string.h>
 
 /* raymath.h picks its implementation on this macro and warns under -Wundef if
  * it is merely absent. Spelled out here so the node flag set stays intact. */
@@ -514,6 +515,82 @@ _test_next:;
     return failures;
 }
 
+#include "../../../apps/skycombat/src/building_part_admit.c"
+
+static void skycombat_building_put_u32(unsigned char *part, size_t offset, uint32_t value)
+{
+    memcpy(part + offset, &value, sizeof value);
+}
+
+static void skycombat_building_put_f32(unsigned char *part, size_t offset, float value)
+{
+    memcpy(part + offset, &value, sizeof value);
+}
+
+static uint32_t skycombat_building_fbits(float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof bits);
+    return bits;
+}
+
+static void skycombat_building_pack(unsigned char *part, float width, float depth,
+                                    float height, uint32_t floors, uint32_t interior,
+                                    float min_x, float min_y, float min_z,
+                                    float max_x, float max_y, float max_z)
+{
+    memset(part, 0, SKY_BUILDING_PART_BYTES);
+    skycombat_building_put_u32(part, SKY_BUILDING_OFF_MAGIC, SKY_BUILDING_PART_MAGIC);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_WIDTH, width);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_DEPTH, depth);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_HEIGHT, height);
+    skycombat_building_put_u32(part, SKY_BUILDING_OFF_FLOORS, floors);
+    skycombat_building_put_u32(part, SKY_BUILDING_OFF_INTERIOR, interior);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_MIN_X, min_x);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_MIN_Y, min_y);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_MIN_Z, min_z);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_MAX_X, max_x);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_MAX_Y, max_y);
+    skycombat_building_put_f32(part, SKY_BUILDING_OFF_MAX_Z, max_z);
+}
+
+static int skycombat_building_part_tests(void)
+{
+    int failures = 0;
+    unsigned char good[SKY_BUILDING_PART_BYTES];
+    unsigned char bad[SKY_BUILDING_PART_BYTES];
+    struct sky_building_bounds admitted;
+    struct sky_building_bounds sentinel;
+    struct sky_building_bounds refused;
+    skycombat_building_pack(good, 20.0f, 20.0f, 12.0f, 2u, 1u,
+                            0.0f, 0.0f, 0.0f, 20.0f, 12.0f, 20.0f);
+    skycombat_building_pack(bad, 20.0f, 20.0f, 12.0f, 2u, 1u,
+                            0.0f, 0.0f, 0.0f, 10.0f, 12.0f, 20.0f);
+    memset(&sentinel, 0x5a, sizeof sentinel);
+    refused = sentinel;
+    TEST("building part: admit a walkable interior and refuse a short collision box") {
+        int status = sky_building_part_admit(good, sizeof good, &admitted);
+        ASSERT_EQ(status, SKY_BUILDING_PART_OK);
+        ASSERT_EQ(skycombat_building_fbits(admitted.width), skycombat_building_fbits(20.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.depth), skycombat_building_fbits(20.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.height), skycombat_building_fbits(12.0f));
+        ASSERT_EQ(admitted.floors, 2u);
+        ASSERT_EQ(skycombat_building_fbits(admitted.min_x), skycombat_building_fbits(0.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.min_y), skycombat_building_fbits(0.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.min_z), skycombat_building_fbits(0.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.max_x), skycombat_building_fbits(20.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.max_y), skycombat_building_fbits(12.0f));
+        ASSERT_EQ(skycombat_building_fbits(admitted.max_z), skycombat_building_fbits(20.0f));
+        status = sky_building_part_admit(bad, sizeof bad, &refused);
+        ASSERT_EQ(status, SKY_BUILDING_PART_COLLISION);
+        ASSERT_STR_EQ(sky_building_part_reason(status), "collision");
+        ASSERT(memcmp(&refused, &sentinel, sizeof refused) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_skycombat_models(void);
 int test_skycombat_models(void)
 {
@@ -725,6 +802,7 @@ _test_next:;
     failures += skycombat_document_tests();
     failures += skycombat_gun_pattern_tests();
     failures += skycombat_runtime_tests();
+    failures += skycombat_building_part_tests();
     if (failures == 0)
         printf("test_skycombat_models: all passed\n");
     else

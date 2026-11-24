@@ -55,6 +55,7 @@ static unsigned qa_random_calls, qa_seed_calls, qa_last_seed;
 /* --fixture-time-skew=N: wall clock offset and jitter, standing in for loader time and frame pacing. */
 static unsigned qa_time_skew;
 static int sky_qa_entry(int argc, char **argv);
+#include "../../../apps/skycombat/src/building_part_admit.c"
 /* Adapt only the entry signature for the pre-fix main(void) removal witness.
  * The entire production function body, argument admission and loop are used. */
 #define main(...) sky_qa_entry([[maybe_unused]] int argc, [[maybe_unused]] char **argv)
@@ -483,9 +484,33 @@ static int qa_finish(int result, FILE *agent_input)
     return result;
 }
 
+static int qa_report_building_parts(int *argc, char ***argv)
+{
+    int index = 1;
+    const char prefix[] = "--building-part=";
+    if (argc == NULL || argv == NULL || *argv == NULL)
+        return 3;
+    while (index < *argc) {
+        char **args = *argv;
+        const char *argument = args[index];
+        if (argument == NULL || strncmp(argument, prefix, sizeof prefix - 1) != 0) {
+            index++;
+            continue;
+        }
+        if (sky_building_part_report_file(argument + (sizeof prefix - 1)) != 0)
+            return 3;
+        for (int next = index + 1; next < *argc; next++)
+            args[next - 1] = args[next];
+        *argc -= 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     FILE *agent_input = NULL;
+    if (qa_report_building_parts(&argc, &argv) != 0)
+        return 3;
     if (!qa_parse_options(&argc, &argv, &agent_input)) return 3;
     if (qa_broken_reply && !qa_close_reply_reader()) {
         if (agent_input) fclose(agent_input);
