@@ -114,6 +114,22 @@ build/bin/z23-dev dev agent mail wait   # bounded wait for the next row
   `steer_brief` shows the fleet; exact mail comes from `steer_evidence` with
   `type=mail` and the four locator fields.
 
+**Presence.** The fleet brief reports a session as live only from its own
+`presence.v1` note under ref `presence-<ROLE>`, newer than 900 s, and
+`sessions_active_reported` counts those in phase active, running, build or
+test. A session writes that row itself, on the node host, with
+`z23 fleet steer presence --role=<ROLE> --task=<card-or-ref> --phase=active`
+(release `z23` or `z23-dev`; it posts through the `dev.agent.mail` leaf, never
+a second writer). Run it at start and at least every 5 minutes; run it once with
+`--phase=completed` when done. Claude Code sessions with the `z23-fleet`
+plugin do this from hooks (`bin/z23-presence`). Any other agent, including one
+driven over ssh from another machine, runs the one-liner on the node:
+`ssh <node> 'z23 fleet steer presence --role=<ROLE> --task=<ref> --phase=active --source=ssh-from-<machine>'`.
+Post it only while the session is alive and only for yourself: a stated
+`--pid` must be a running process on the node (refused otherwise), credential-
+shaped text is refused, and a session that stops posting reads stale within
+900 s.
+
 **Claim convention.** Before you edit, take the file claim:
 `build/bin/z23-dev dev agent claim --input='{"story":"<slug>","files":[...]}'`.
 It refuses overlap (`CLAIM_OVERLAP`) and lasts 15 minutes unless renewed

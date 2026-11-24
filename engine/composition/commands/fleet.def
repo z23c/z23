@@ -784,6 +784,35 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_fleet_steer_send)
 
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.steer.presence", "fleet.steer", "",
+    "A live session posts its own presence row so the fleet brief counts it",
+    "Builds the strict presence.v1 line (host, pid, started, observed, role, "
+    "task, phase, source; never binary_sha256) and posts it as a note to * "
+    "under ref presence-<role> through the dev.agent.mail post path in "
+    "process, so it works from the release z23 without the developer build. "
+    "role is 1..32 of letters, digits, . _ - ; phase is active, running, "
+    "build, test, blocked or completed; task is short text. Optional: pid "
+    "(the session's own process, must be alive on this host; default this "
+    "process), session, started (session start, YYYY-MM-DDTHH:MM:SSZ; default "
+    "now) and source (default claude). A bad role, phase, pid or a "
+    "credential-shaped value is refused with an explanatory body and posts "
+    "nothing. The brief dates the row by its mail ts: a session is live for "
+    "900 s, so run this at start and at least every 300 s; a session that "
+    "ends stops being reported within 900 s, or at once with "
+    "phase=completed. It posts only when run and contacts no peer.", 4096,
+    "fleet,steer,presence,heartbeat,session,agent,liveness",
+    "zcl.fleet_steer_presence.input.v1", "zcl.fleet_steer_presence.v1",
+    "role,task,phase,pid,session,started,source", "role,task,phase",
+    "z23 fleet steer presence --role=A --task=card-1 --phase=active",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_steer_presence)
+
 ZCL_COMMAND_READY_READ(
     "fleet.steer.evidence", "fleet.steer", "",
     "One bounded evidence object by exact reference",

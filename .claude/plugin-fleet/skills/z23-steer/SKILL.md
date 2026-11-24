@@ -49,6 +49,26 @@ revocation on every call.
    not execution. Reconcile receiver evidence before retrying an uncertain
    send, and retry with the same key and body.
 
+## Presence
+
+The brief counts a session as live only from its own `presence.v1` mail row,
+no older than 900 s; nothing else writes it. The plugin's hooks run
+`bin/z23-presence` at session start, after tool use (at most once per 300 s)
+and at session end, so a Claude Code session on a node host is reported
+without any step from you. If hooks are off, or you drive the node over ssh,
+post it yourself at start and at least every 5 minutes:
+
+```sh
+z23 fleet steer presence --role=<ROLE> --task=<card-or-ref> --phase=active
+```
+
+`phase` is active, running, build, test, blocked or completed; post
+`--phase=completed` when you finish. The row is yours alone: post it only
+while the session runs, and never for another agent. It states the node
+host's name and a live pid, refuses credential-shaped text, and ages out by
+itself. The release `z23` answers it directly; `z23-dev` accepts the same
+command.
+
 Follow the repository contract in `AGENTS.md`: builds and proofs run on the
 hosts it sanctions, existing agents' work and claims are preserved, and a
 grant confers no shell, deployment, wallet or consensus authority.
