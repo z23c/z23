@@ -437,10 +437,10 @@ out.
   each mutated file against its saved original and read the whole `git diff`
   for the tree.
 
-- **`dev land submit` moves the lane HEAD before its gates run.** The qualify
+- **`dev land submit --qualify` may move the lane HEAD.** The qualify
   step calls `dlq_rebase`, which rebases the lane worktree onto `origin/main`
   (`tools/command/native_dev_land_qualify.c:281-292`, called at `:886`). The HEAD
-  changes even when qualify refuses. Range-diff the old and new heads, for
+  can change even when qualify refuses. If it changed, range-diff the old and new heads, for
   example `git range-diff OLD_BASE..OLD_HEAD NEW_BASE..NEW_HEAD`, then resubmit
   at the new head with `build/bin/z23-dev dev land submit --worktree=$PWD
   --note=STABLE_TRAIN_NAME`, reusing the original train name. The old head is
