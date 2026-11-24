@@ -36,6 +36,10 @@
  * it is merely absent. Spelled out here so the node flag set stays intact. */
 #define RAYMATH_USE_SIMD_INTRINSICS 0
 
+/* Match the standalone game: keep raymath definitions private even when the
+ * compiler leaves calls out of line. Plain C inline requires external definitions. */
+#define RAYMATH_STATIC_INLINE
+
 #include <raylib.h>
 #include <raymath.h>
 
