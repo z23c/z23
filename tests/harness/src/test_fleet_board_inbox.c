@@ -886,6 +886,19 @@ static int test_fbi_delivery_model(void)
     return failures;
 }
 
+/* Whether one peer row carries this reason under this verdict. */
+static bool fbi_peer_has(const struct json_value *peers, const char *reason,
+                         const char *verdict)
+{
+    for (size_t i = 0; i < json_size(peers); i++) {
+        const struct json_value *pr = json_at(peers, i);
+        if (!strcmp(json_get_str(json_get(pr, "reason")), reason) &&
+            !strcmp(json_get_str(json_get(pr, "verdict")), verdict))
+            return true;
+    }
+    return false;
+}
+
 static int test_fbi_delivery_record(void)
 {
     int failures = 0;
@@ -956,49 +969,12 @@ static int test_fbi_delivery_record(void)
         ASSERT_EQ(json_get_int(json_get(&out, "notes_dropped")), 0);
         const struct json_value *peers = json_get(&out, "peers");
         ASSERT_EQ(json_size(peers), 6u);
-        bool saw_role = false, saw_full = false, saw_receipt = false,
-             saw_norec = false, saw_state = false;
-        for (size_t i = 0; i < json_size(peers); i++) {
-            const struct json_value *pr = json_at(peers, i);
-            const char *reason = json_get_str(json_get(pr, "reason"));
-            const char *verdict = json_get_str(json_get(pr, "verdict"));
-            saw_role = saw_role || !strcmp(reason, "no_role");
-            saw_full = saw_full || !strcmp(reason, "push_inbox_full");
-            saw_receipt = saw_receipt || (!strcmp(reason, "no_receipt") &&
-                                          !strcmp(verdict, "unknown"));
-            saw_norec = saw_norec || (!strcmp(reason, "no_record_verdict") &&
-                                      !strcmp(verdict, "unknown"));
-            saw_state = saw_state || (!strcmp(reason, "receiver_state") &&
-                                      !strcmp(verdict, "deferred"));
-        }
-        ASSERT(saw_role && saw_full && saw_receipt && saw_norec && saw_state);
+        ASSERT(fbi_peer_has(peers, "no_role", "refused"));
+        ASSERT(fbi_peer_has(peers, "push_inbox_full", "deferred"));
+        ASSERT(fbi_peer_has(peers, "no_receipt", "unknown"));
+        ASSERT(fbi_peer_has(peers, "no_record_verdict", "unknown"));
+        ASSERT(fbi_peer_has(peers, "receiver_state", "deferred"));
         json_free(&out);
-
-        /* Answers lost to a full note ring are counted and said: a post with
-         * no recorded answer no longer claims that no peer answered. */
-        struct fleet_board_post p2;
-        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
-                        "lane-a", "second for the fleet", NULL, NULL, f.now,
-                        f.now, &p2));
-        for (unsigned i = 0; i <= FLEET_BOARD_DELIVERY_RING; i++) {
-            uint8_t px[32];
-            memset(px, 0x11, 32);
-            px[0] = (uint8_t)(i + 1);
-            board_delivery_note_unanswered(px, ids, 1, "no_receipt", f.now);
-        }
-        ASSERT(board_delivery_dropped() >= 1u);
-        (void)board_delivery_flush(&f.db);
-        fleet_board_id_to_hex(p2.id, hex);
-        json_init(&in);
-        json_set_object(&in);
-        ASSERT(json_push_kv_str(&in, "op", "delivery") &&
-               json_push_kv_str(&in, "id", hex));
-        ASSERT(fbi_rpc(&f, &in, &out));
-        json_free(&in);
-        ASSERT(json_get_int(json_get(&out, "notes_dropped")) >= 1);
-        ASSERT(strstr(json_get_str(json_get(&out, "note")), "may have answered") != NULL);
-        json_free(&out);
-        board_delivery_forget();
 
         /* An id nobody pushed: absent, said plainly. */
         json_init(&in);
@@ -1009,6 +985,51 @@ static int test_fbi_delivery_record(void)
         ASSERT_STR_EQ(json_get_str(json_get(&out, "code")), "BAD_ID");
         json_free(&out);
         json_free(&in);
+        fbi_close(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fbi_delivery_dropped(void)
+{
+    int failures = 0;
+    TEST("board delivery: answers lost before they were recorded are counted and said") {
+        struct fbi_fixture f;
+        struct fleet_board_post p, p2;
+        struct json_value in, out;
+        ASSERT(fbi_open(&f, "dropped"));
+        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                        "lane-a", "for the fleet", NULL, NULL, f.now, f.now, &p));
+        ASSERT(fbi_post(&f, 1, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET,
+                        "lane-a", "second for the fleet", NULL, NULL, f.now,
+                        f.now, &p2));
+        uint8_t ids[1][32];
+        memcpy(ids[0], p.id, 32);
+        board_delivery_forget();
+        /* One note more than the ring holds, before any lane tick. */
+        for (unsigned i = 0; i <= FLEET_BOARD_DELIVERY_RING; i++) {
+            uint8_t px[32];
+            memset(px, 0x11, 32);
+            px[0] = (uint8_t)(i + 1);
+            board_delivery_note_unanswered(px, ids, 1, "no_receipt", f.now);
+        }
+        ASSERT_EQ(board_delivery_dropped(), 1u);
+        (void)board_delivery_flush(&f.db);
+        /* p2 has no recorded answer, and the node no longer claims that no
+         * peer answered it. */
+        char hex[65];
+        fleet_board_id_to_hex(p2.id, hex);
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "op", "delivery") &&
+               json_push_kv_str(&in, "id", hex));
+        ASSERT(fbi_rpc(&f, &in, &out));
+        json_free(&in);
+        ASSERT_EQ(json_get_int(json_get(&out, "notes_dropped")), 1);
+        ASSERT(strstr(json_get_str(json_get(&out, "note")), "may have answered") != NULL);
+        json_free(&out);
+        board_delivery_forget();
         fbi_close(&f);
         PASS();
     } _test_next:;
@@ -1112,6 +1133,7 @@ int test_fleet_board_inbox(void)
     failures += test_fbi_wait_latency_and_bytes();
     failures += test_fbi_delivery_model();
     failures += test_fbi_delivery_record();
+    failures += test_fbi_delivery_dropped();
     failures += test_fbi_cli();
     return failures;
 }

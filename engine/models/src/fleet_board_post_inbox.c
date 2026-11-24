@@ -85,6 +85,13 @@ static int inbox_walk(struct node_db *ndb, sqlite3_stmt *s,
     return -1;
 }
 
+static bool inbox_query_ok(const struct node_db *ndb,
+                           const struct fleet_board_inbox_query *iq)
+{
+    return ndb && ndb->open && iq && iq->agent && iq->agent[0] &&
+           iq->after >= 0 && iq->limit > 0 && iq->limit <= FLEET_BOARD_LIST_MAX;
+}
+
 int db_fleet_board_inbox_scan(struct node_db *ndb, int64_t now,
                               const struct fleet_board_inbox_query *iq,
                               db_fleet_board_row_visit visit, void *ctx,
@@ -92,9 +99,7 @@ int db_fleet_board_inbox_scan(struct node_db *ndb, int64_t now,
 {
     if (read_out)
         *read_out = 0;
-    if (!ndb || !ndb->open || !iq || !iq->agent || !iq->agent[0] || !visit ||
-        !scanned_out || iq->after < 0 || iq->limit == 0 ||
-        iq->limit > FLEET_BOARD_LIST_MAX)
+    if (!inbox_query_ok(ndb, iq) || !visit || !scanned_out)
         return -1;
     *scanned_out = iq->after;
     struct qb q, sub, mail;
