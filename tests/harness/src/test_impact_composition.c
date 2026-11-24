@@ -15281,6 +15281,13 @@ static bool ic_union_warm_result(bool ok, bool covered, const char *why, bool no
         ic_union_log_count(log, "docs\n") == 1 &&
         ic_union_log_count(log, "list\n") == 1 && ic_union_log_count(log, "lint-tool\n") == 1;
 }
+static bool ic_union_failure_diagnostic(const char *generation)
+{
+    char log[4096] = {0};
+    return ic_union_read(generation, "bundle-union.log", log, sizeof(log)) &&
+        strstr(log, "fixture-list-failure") &&
+        strstr(log, "standalone tool list command failed (exit 3)");
+}
 static bool ic_union_bootstrap_case(unsigned mode, const uint8_t expected[32])
 {
     static const char *const marker[] = {"bootstrap-fail", "bootstrap-no-output", "list-fail", "list-empty", "list-fail-output", "", "docs-fail"};
@@ -15296,24 +15303,13 @@ static bool ic_union_bootstrap_case(unsigned mode, const uint8_t expected[32])
     bool node_read = ic_union_read(generation, "build/bin/z23", node, sizeof(node));
     bool valid = mode == 5 ? ic_union_warm_result(ok, covered, why, node_read, node, root, expected, log) :
         !node_read && ic_union_bootstrap_failure(mode, ok, covered, why, log);
-    if (mode == 2 || mode == 4) {
-        char bundle_log[4096] = {0};
-        valid = ic_union_read(generation, "bundle-union.log", bundle_log, sizeof(bundle_log)) &&
-            strstr(bundle_log, "fixture-list-failure") &&
-            strstr(bundle_log, "standalone tool list command failed (exit 3)") && valid;
-    }
+    if (mode == 2 || mode == 4) valid = ic_union_failure_diagnostic(generation) && valid;
     if (!valid || !have_log) fprintf(stderr, "bundle bootstrap mode=%u ok=%d covered=%d node=%d why=%s log=%s\n",
                                      mode, ok, covered, node_read, why, log);
     return valid && have_log;
 }
-static bool ic_union_quiet_fallback(void)
+static bool ic_union_quiet_run(const char *generation)
 {
-    char generation[4096], guard[4096], makefile[8192];
-    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-quiet");
-    if (!ic_union_fixture(generation, true, 0, 0) || !ic_union_warm_linter(generation) ||
-        !ic_write(generation, "list-fail", "x") || !ic_union_guard(guard, sizeof(guard))) return false;
-    int n = snprintf(makefile, sizeof(makefile), "%s\nproof-lint-prebuild:\n\t@echo fixture-fallback\n", guard);
-    if (n < 0 || (size_t)n >= sizeof(makefile) || !ic_write(generation, "Makefile", makefile)) return false;
     const char *argv[] = {"sh", "-c", "unset ZCL_PROOF_LINT_REQUIRE_LIST; exec make --no-print-directory proof-lint-prebuild", NULL};
     struct zcl_devloop_process_result result = {0};
     const char *prior = getenv("ZCL_DEVLOOP_TEST_PROCESS");
@@ -15326,8 +15322,28 @@ static bool ic_union_quiet_fallback(void)
         strstr(result.output, "fixture-fallback") && !strstr(result.output, "fixture-list-failure");
     int restored = saved ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1) : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
     free(saved);
-    (void)test_rm_rf_recursive(generation);
     return ok && restored == 0;
+}
+static bool ic_union_quiet_fallback(void)
+{
+    char generation[4096], guard[4096], makefile[8192];
+    test_make_tmpdir(generation, sizeof(generation), "impact_composition", "bundle-quiet");
+    if (!ic_union_fixture(generation, true, 0, 0) || !ic_union_warm_linter(generation) ||
+        !ic_write(generation, "list-fail", "x") || !ic_union_guard(guard, sizeof(guard))) return false;
+    int n = snprintf(makefile, sizeof(makefile), "%s\nproof-lint-prebuild:\n\t@echo fixture-fallback\n", guard);
+    if (n < 0 || (size_t)n >= sizeof(makefile) || !ic_write(generation, "Makefile", makefile)) return false;
+    bool ok = ic_union_quiet_run(generation);
+    (void)test_rm_rf_recursive(generation);
+    return ok;
+}
+static bool ic_union_extra_cases(const uint8_t expected[32])
+{
+    bool ok = ic_union_empty_needs();
+    ok = ic_union_clear_failure() && ok;
+    ok = ic_union_retry(expected) && ok;
+    ok = ic_union_quiet_fallback() && ok;
+    for (unsigned i = 0; i < 7; ++i) ok = ic_union_bootstrap_case(i, expected) && ok;
+    return ok;
 }
 static int test_ic_worker_bundle_union(void)
 {
@@ -15343,11 +15359,7 @@ static int test_ic_worker_bundle_union(void)
         ok = ic_union_case(5, 0, roots[3]) && ok;
         ok = memcmp(roots[0], roots[1], 32) && memcmp(roots[0], roots[2], 32) && ok;
         ok = !memcmp(roots[0], roots[3], 32) && ok;
-        ok = ic_union_empty_needs() && ok;
-        ok = ic_union_clear_failure() && ok;
-        ok = ic_union_retry(roots[0]) && ok;
-        ok = ic_union_quiet_fallback() && ok;
-        for (unsigned i = 0; i < 7; ++i) ok = ic_union_bootstrap_case(i, roots[0]) && ok;
+        ok = ic_union_extra_cases(roots[0]) && ok;
         ASSERT(ok);
 #endif
         PASS();
