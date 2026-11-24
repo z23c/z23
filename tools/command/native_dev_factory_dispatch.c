@@ -397,7 +397,7 @@ bool zcl_dev_factory_dispatch(const struct json_value *input, double now,
 #if defined(_WIN32)
     (void)now; (void)window_s; r.status = "unavailable";
 #else
-    char path[FDC_PATH]; struct stat chosen;
+    char path[FDC_PATH]; struct stat chosen = {0};
     if (!fdc_path(path)) r.status = "unavailable";
     else {
         int fd = fdc_select(path, now - window_s, now, &r, &chosen);
