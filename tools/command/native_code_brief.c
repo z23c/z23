@@ -328,7 +328,7 @@ static void cb_owner_push(struct cb_brief *b, struct cb_owner *o,
     char *rule = o->rules[o->nrules++];
     if (cb_copy(rule, CB_RULE_CAP, s, len)) {
         (void)cb_copy(rule, CB_RULE_CAP - 3, s, len);
-        (void)strcat(rule, "...");
+        memcpy(rule + strlen(rule), "...", sizeof("..."));
         b->cut_rules = true;
     }
 }
