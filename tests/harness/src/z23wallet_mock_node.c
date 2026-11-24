@@ -111,17 +111,35 @@ static bool authorized(struct zw_mock *m, const char *req)
     return strstr(req, want) != NULL;
 }
 
+/* Hostile peers: -1 closes without a byte, -2 sends half a header, -3 stays silent
+ * until the client gives up or the mock stops. */
+static void reply_hostile(struct zw_mock *m, platform_socket_t c, int status)
+{
+    if (status == -2) {
+        static const char half[] = "HTTP/1.1 200 OK\r\nContent-Le";
+        platform_socket_send_all(c, half, sizeof(half) - 1);
+        return;
+    }
+    while (status == -3 && !m->stop) {
+        char b[64];
+        int r = platform_socket_wait_readable(c, 50);
+        if (r < 0 || (r > 0 && platform_socket_receive(c, b, sizeof(b)) <= 0)) break;
+    }
+}
+
 static void reply_method(struct zw_mock *m, platform_socket_t c, const char *method)
 {
     char path[700], text[8192], out[9000];
     int status = 200;
     for (size_t i = 0; i < m->nrows; i++)
-        if (!strcmp(m->rows[i].method, method) && m->rows[i].times != 0) {
+        if ((!strcmp(m->rows[i].method, method) || !strcmp(m->rows[i].method, "*")) &&
+            m->rows[i].times != 0) {
             if (m->rows[i].delay_ms) sleep_ms(m->rows[i].delay_ms);
             if (m->rows[i].status) status = m->rows[i].status;
             if (m->rows[i].times > 0) m->rows[i].times--;
             break;
         }
+    if (status < 0) { reply_hostile(m, c, status); return; }
     if (status == 503) { send_reply(c, 503, ""); return; }
     snprintf(path, sizeof(path), "%s/%s.err", m->dir, method);
     size_t n = read_file(path, text, sizeof(text));

@@ -60,8 +60,8 @@ static void hermetic_env(void)
     mkdirs(TMP "/home");
     set_env("HOME", TMP "/home");
     set_env("USERPROFILE", TMP "/home");
-    set_env("LOCALAPPDATA", TMP "/home/local");
-    set_env("APPDATA", TMP "/home/roaming");
+    set_env("LOCALAPPDATA", TMP "/appdata_l");
+    set_env("APPDATA", TMP "/appdata_r");
 }
 
 static void test_amount(void)
@@ -195,19 +195,24 @@ static void test_rpc_basic(struct node *n)
           res.wallet.send_allowed && res.wallet.current && res.profile == ZW_PROFILE_Z23);
 }
 
+/* The log was opened before the mock session, so it holds every line the session
+ * wrote (cookie rotation, 401 retry), not one hand-made probe. */
 static void test_log_redaction(void)
 {
-    zw_log_open(TMP "/session.log");
     zw_log("probe line with %s inside", "rotatedcookie9876543210");
+    zw_log("probe line with %s inside", "fixturecookie0123456789");
     zw_log("probe line without a secret");
     zw_log_close();
     FILE *f = fopen(TMP "/session.log", "rb");
-    char log[2048] = "";
+    char log[4096] = "";
     size_t got = f ? fread(log, 1, sizeof(log) - 1, f) : 0;
     if (f) fclose(f);
     log[got] = 0;
-    CHECK("the session log never holds the cookie", got > 0 && !strstr(log, "rotatedcookie") &&
-          strstr(log, "without a secret"));
+    CHECK("the session log holds the real session lines", strstr(log, "re-reading the cookie") != NULL &&
+          strstr(log, "without a secret") != NULL);
+    CHECK("the session log never holds either cookie or an auth header", got > 0 &&
+          !strstr(log, "rotatedcookie") && !strstr(log, "fixturecookie") && !strstr(log, "Basic ") &&
+          strstr(log, "line withheld") != NULL);
 }
 
 static void test_rpc_legacy(void)
@@ -261,6 +266,8 @@ static void test_rpc_refused(void)
 static void test_rpc(void)
 {
     hermetic_env();
+    remove(TMP "/session.log");
+    zw_log_open(TMP "/session.log");
     struct node n;
     CHECK("mock node starts", node_start(&n, "home_synced", "rpc"));
     test_rpc_basic(&n);
@@ -269,6 +276,149 @@ static void test_rpc(void)
     test_rpc_legacy();
     test_rpc_warming();
     test_rpc_refused();
+}
+
+/* A peer that accepts and closes without a byte, and one that sends half a header,
+ * must be an error, never a crash: parse_reply used to strstr a NULL buffer. */
+static void test_hostile_peers(void)
+{
+    static const struct { const char *scenario, *what; } cases[] = {
+        { "peer_closes", "a peer that closes without a byte" },
+        { "peer_truncated", "a peer that sends half a header" },
+    };
+    hermetic_env();
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct node n;
+        char label[128];
+        snprintf(label, sizeof(label), "%s starts", cases[i].what);
+        CHECK(label, node_start(&n, cases[i].scenario, cases[i].scenario));
+        struct json_value r;
+        struct zw_rpc_error e;
+        json_init(&r);
+        enum zw_err err = zw_rpc_call(n.rpc, "getblockchaininfo", "[]", &r, &e);
+        snprintf(label, sizeof(label), "%s is a BAD_REPLY, not a crash", cases[i].what);
+        CHECK(label, err == ZW_ERR_BAD_REPLY && zw_mock_request_count(n.mock) >= 1);
+        json_free(&r);
+        struct zw_result res;
+        memset(&res, 0, sizeof(res));
+        struct zw_model m;
+        zw_model_init(&m);
+        zw_query_run(n.rpc, ZW_Q_CHAIN, &res);
+        zw_model_apply(&m, &res);
+        snprintf(label, sizeof(label), "%s shows as a bad reply on Connect", cases[i].what);
+        CHECK(label, m.conn == ZW_CONN_BAD_REPLY);
+        node_stop(&n);
+    }
+}
+
+/* Wall-clock milliseconds: gui_now_ns is the virtual clock once a headless window exists. */
+static uint64_t real_ms(void)
+{
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
+/* Shutdown while the node never answers: stop must shut the socket down and join
+ * well inside the 5 s receive timeout, and only then may the window be freed. */
+static void test_worker_shutdown(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("silent node starts", node_start(&n, "peer_silent", "silent"));
+    struct gui_window_desc d = { .title_utf8 = "w", .width = 100, .height = 100, .surface = GUI_SURFACE_CPU,
+                                 .backend = GUI_BACKEND_HEADLESS };
+    struct gui_window *win = NULL;
+    char err[64];
+    gui_window_open(&d, &win, err, sizeof(err));
+    struct zw_worker *w = zw_worker_start(win, &n.opt);
+    zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
+    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++) {
+        struct timespec ts = { 0, 5000000 };
+        nanosleep(&ts, NULL);
+    }
+    CHECK("the worker is blocked on a node that never answers", zw_mock_request_count(n.mock) >= 1 &&
+          zw_worker_busy(w));
+    struct timespec hold = { 0, 300000000L };
+    nanosleep(&hold, NULL);
+    CHECK("it is still blocked 300 ms later", zw_worker_busy(w));
+    uint64_t t0 = real_ms();
+    zw_worker_stop(w);
+    uint64_t ms = real_ms() - t0;
+    printf("    worker stop took %llu ms\n", (unsigned long long)ms);
+    CHECK("stop returns within 1 s (the receive timeout is 5 s)", ms < 1000);
+    gui_window_close(win); /* nothing may wake or read this window any more (run under ASan) */
+    node_stop(&n);
+}
+
+/* Coalescing, deterministically: the worker is held in a 400 ms getnetworkinfo, so
+ * the first CHAIN enqueue is queued and the second finds it still pending. */
+static void test_worker_coalescing(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("slow node starts", node_start(&n, "slow_net", "slow"));
+    struct gui_window_desc d = { .title_utf8 = "w", .width = 100, .height = 100, .surface = GUI_SURFACE_CPU,
+                                 .backend = GUI_BACKEND_HEADLESS };
+    struct gui_window *win = NULL;
+    char err[64];
+    gui_window_open(&d, &win, err, sizeof(err));
+    struct zw_worker *w = zw_worker_start(win, &n.opt);
+    zw_worker_enqueue(w, ZW_Q_NET, 0);
+    for (int i = 0; i < 400 && zw_mock_request_count(n.mock) == 0; i++) {
+        struct timespec ts = { 0, 5000000 };
+        nanosleep(&ts, NULL);
+    }
+    bool first = zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
+    bool again = zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
+    CHECK("the second enqueue of a pending kind is coalesced", first && !again);
+    struct zw_result out[8];
+    size_t got = 0;
+    int chains = 0, nets = 0;
+    for (int i = 0; i < 600 && (chains + nets < 2 || zw_worker_busy(w)); i++) {
+        struct timespec ts = { 0, 5000000 };
+        nanosleep(&ts, NULL);
+        size_t k = zw_worker_drain(w, out, 8);
+        for (size_t j = 0; j < k; j++) {
+            chains += out[j].kind == ZW_Q_CHAIN;
+            nets += out[j].kind == ZW_Q_NET;
+        }
+        got += k;
+    }
+    CHECK("one result per kind, no duplicate CHAIN", got == 2 && chains == 1 && nets == 1);
+    zw_worker_stop(w);
+    gui_window_close(win);
+    node_stop(&n);
+}
+
+/* Numbers from the node are untrusted: a double outside int64 and INT64_MIN must
+ * neither be cast (undefined) nor negated (undefined). Run under UBSan too. */
+static void test_hostile_numbers(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("hostile-number node starts", node_start(&n, "hostile_numbers", "numbers"));
+    struct zw_result res;
+    memset(&res, 0, sizeof(res));
+    enum zw_err e = zw_query_run(n.rpc, ZW_Q_CHAIN, &res);
+    CHECK("1e300 block heights fall back to the default instead of being cast",
+          e == ZW_OK && res.chain.blocks == 0 && res.chain.headers == 0);
+    memset(&res, 0, sizeof(res));
+    e = zw_query_run(n.rpc, ZW_Q_NET, &res);
+    CHECK("1e300 connection counts fall back too", e == ZW_OK && res.net.connections == 0 && res.net.version == 0);
+    node_stop(&n);
+    struct zw_model m;
+    zw_model_init(&m);
+    m.conn = ZW_CONN_ONLINE;
+    m.have_chain = true;
+    m.chain.blocks = INT64_MIN;
+    m.chain.headers = INT64_MAX;
+    struct gui_tree *t = gui_tree_new();
+    struct gui_ui *ui = gui_ui_new(t);
+    zw_model_publish(&m, ui, 0);
+    CHECK("INT64_MIN formats without negating it", strstr(gui_ui_get(ui, "status.text"), "9,223,372,036,854,775,808") != NULL);
+    gui_ui_free(ui);
+    gui_tree_free(t);
 }
 
 static void test_model_and_worker(void)
@@ -294,7 +444,6 @@ static void test_model_and_worker(void)
     gui_window_open(&d, &win, err, sizeof(err));
     struct zw_worker *w = zw_worker_start(win, &n.opt);
     bool first = zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
-    bool again = zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
     zw_worker_enqueue(w, ZW_Q_NET, 0);
     struct zw_result out[8];
     size_t got = 0;
@@ -306,7 +455,7 @@ static void test_model_and_worker(void)
         got += zw_worker_drain(w, out + got, 8 - got);
     }
     CHECK("the worker answers queued jobs", got >= 2 && out[0].err == ZW_OK);
-    CHECK("a queued kind is coalesced (usually; timing can run it first)", first && (!again || got >= 2));
+    CHECK("an idle worker accepts a queued job", first);
     zw_worker_stop(w);
     gui_window_close(win);
     node_stop(&n);
@@ -462,6 +611,10 @@ int test_z23wallet(void)
     test_args();
     test_locate();
     test_rpc();
+    test_hostile_peers();
+    test_worker_shutdown();
+    test_worker_coalescing();
+    test_hostile_numbers();
     test_model_and_worker();
     test_screens();
     return g_fail;

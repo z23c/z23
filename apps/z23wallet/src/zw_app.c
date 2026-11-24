@@ -303,6 +303,18 @@ static bool open_window(struct app *a, char *err, size_t cap)
     return true;
 }
 
+/* While Windows owns the thread in its border-drag loop the main loop below does
+ * not run; the backend calls this every ~16 ms and on every size change so the
+ * window keeps rendering at its live size and the app timers keep firing. */
+static void live_tick(void *user)
+{
+    struct app *a = user;
+    struct gui_event ev;
+    for (int guard = 0; guard < 64 && a->running && gui_window_wait(a->win, 0, &ev); guard++)
+        handle_event(a, &ev);
+    render(a);
+}
+
 static int loop(struct app *a)
 {
     struct gui_event ev;
@@ -341,13 +353,15 @@ int zw_app_run(const struct zw_options *o)
         return 3;
     }
     gui_ui_set_window(a.ui, a.win);
+    gui_window_set_live_hook(a.win, live_tick, &a);
     a.model_dirty = true;
     render(&a);
     enqueue_all(&a);
     gui_window_timer_set(a.win, T_POLL, POLL_SYNCED_MS, false);
     int rc = o->script[0] ? run_script(&a) : loop(&a);
     if (o->bench[0]) zw_bench_write(o->bench, &a.bench);
-    zw_worker_stop(a.worker);
+    gui_window_set_live_hook(a.win, NULL, NULL);
+    zw_worker_stop(a.worker); /* joins: nothing touches the window after this line */
     gui_ui_free(a.ui);
     gui_tree_free(a.tree);
     gui_window_close(a.win);

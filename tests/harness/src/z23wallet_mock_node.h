@@ -2,7 +2,10 @@
  * Purpose: loopback JSON-RPC mock node for z23-wallet tests. Replies come
  * from tests/fixtures/z23wallet/rpc/<scenario>/<method>.json (the result),
  * <method>.err or _all.err ("code<TAB>message"), and _script.tsv rows
- * "method<TAB>http_status<TAB>delay_ms<TAB>times<TAB>file". No real keys. */
+ * "method<TAB>http_status<TAB>delay_ms<TAB>times<TAB>file" (method * matches any).
+ * Hostile http_status values: -1 closes without a byte, -2 sends a truncated
+ * header and closes, -3 never answers (holds the socket until the peer goes).
+ * No real keys. */
 #ifndef Z23WALLET_MOCK_NODE_H
 #define Z23WALLET_MOCK_NODE_H
 

@@ -52,6 +52,7 @@ size_t zw_amount_format(int64_t zat, char *buf, size_t cap, bool unit);
 
 /* ---- locate ---- */
 FILE *zw_fopen_read(const char *path_utf8);
+FILE *zw_fopen_append_private(const char *path_utf8);
 struct zw_endpoint {
     char host[16];
     uint16_t port;
@@ -70,15 +71,21 @@ void zw_endpoint_wipe(struct zw_endpoint *ep);
 bool zw_base64(const unsigned char *in, size_t n, char *out, size_t cap);
 
 /* ---- http / rpc ---- */
+struct zw_cancel; /* aborts the request in flight from another thread */
+struct zw_cancel *zw_cancel_new(void);
+void zw_cancel_free(struct zw_cancel *c);
+void zw_cancel_fire(struct zw_cancel *c);
 struct zw_buf { char *data; size_t len, cap; };
 void zw_buf_free(struct zw_buf *b);
 enum zw_err zw_http_post(const struct zw_endpoint *ep, const char *body, size_t len,
-                         struct zw_buf *reply, uint32_t timeout_ms, int *http_status);
+                         struct zw_buf *reply, uint32_t timeout_ms, int *http_status,
+                         struct zw_cancel *cancel);
 
 struct zw_rpc_error { int code; enum zw_err kind; char message[160]; };
 struct zw_rpc {
     struct zw_endpoint ep;
     const struct zw_options *opt;
+    struct zw_cancel *cancel; /* may be NULL */
     struct zw_locate_report report;
     bool missing_walletsummary, missing_gettotal;
     uint32_t next_id;

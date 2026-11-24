@@ -15,7 +15,8 @@ static int64_t geti(const struct json_value *o, const char *k, int64_t dflt)
     const struct json_value *v = json_get(o, k);
     if (!v) return dflt;
     if (v->type == JSON_INT) return v->val.i;
-    if (v->type == JSON_REAL) return (int64_t)v->val.d;
+    /* The node is untrusted: an out-of-range or NaN double is not convertible. */
+    if (v->type == JSON_REAL) return v->val.d > -9.0e18 && v->val.d < 9.0e18 ? (int64_t)v->val.d : dflt;
     return dflt;
 }
 

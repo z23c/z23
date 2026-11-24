@@ -20,12 +20,12 @@ static void set_err(struct zw_rpc_error *e, enum zw_err kind, int code, const ch
 static enum zw_err post_with_auth_retry(struct zw_rpc *r, const char *body, size_t len,
                                         struct zw_buf *reply, int *status)
 {
-    enum zw_err e = zw_http_post(&r->ep, body, len, reply, READ_TIMEOUT_MS, status);
+    enum zw_err e = zw_http_post(&r->ep, body, len, reply, READ_TIMEOUT_MS, status, r->cancel);
     if (e == ZW_OK && *status == 401) {
         zw_log("rpc: 401, re-reading the cookie once");
         zw_buf_free(reply);
         if (zw_cookie_load(&r->ep))
-            e = zw_http_post(&r->ep, body, len, reply, READ_TIMEOUT_MS, status);
+            e = zw_http_post(&r->ep, body, len, reply, READ_TIMEOUT_MS, status, r->cancel);
         if (e == ZW_OK && *status == 401) return ZW_ERR_AUTH;
     }
     return e;

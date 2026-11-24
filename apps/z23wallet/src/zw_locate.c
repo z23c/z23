@@ -3,6 +3,10 @@
  * profile (cookie) and the legacy zclassicd profile (zclassic.conf or
  * cookie). Only .cookie, .rpcport and zclassic.conf are ever read. */
 #include <ctype.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +32,22 @@ FILE *zw_fopen_read(const char *path)
     return _wfopen(w, L"rb");
 #else
     return fopen(path, "rb");
+#endif
+}
+
+/* Log files hold lifecycle lines only, but stay owner-only on POSIX (0600). */
+FILE *zw_fopen_append_private(const char *path)
+{
+#if defined(_WIN32)
+    wchar_t w[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, w, 1024) <= 0) return NULL;
+    return _wfopen(w, L"ab");
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "ab");
+    if (!f) close(fd);
+    return f;
 #endif
 }
 

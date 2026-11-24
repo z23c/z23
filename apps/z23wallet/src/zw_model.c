@@ -86,7 +86,8 @@ bool zw_model_apply(struct zw_model *m, const struct zw_result *r)
 static void fmt_int(int64_t v, char *buf, size_t cap)
 {
     char d[24];
-    int n = snprintf(d, sizeof(d), "%lld", (long long)(v < 0 ? -v : v));
+    uint64_t mag = v < 0 ? 0u - (uint64_t)v : (uint64_t)v; /* INT64_MIN has no int64 negation */
+    int n = snprintf(d, sizeof(d), "%llu", (unsigned long long)mag);
     size_t o = 0;
     char out[40];
     if (v < 0) out[o++] = '-';

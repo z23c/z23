@@ -5,7 +5,6 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "base/safe_alloc.h"
 #include "zw.h"
@@ -22,14 +21,9 @@ struct zw_worker {
     uint32_t gens[ZW_Q_COUNT];
     struct zw_result *ring;
     size_t head, count;
-    bool stop, busy, started;
+    struct zw_cancel *cancel;
+    bool stop, busy, started, reset_auth;
 };
-
-static void sleep_ms(long ms)
-{
-    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
-}
 
 static void push_result(struct zw_worker *w, const struct zw_result *r)
 {
@@ -55,6 +49,10 @@ static void *worker_main(void *arg)
         w->pending &= ~(1u << q);
         uint32_t gen = w->gens[q];
         w->busy = true;
+        if (w->reset_auth) { /* applied here, by the only thread that touches ep */
+            w->rpc->ep.valid = false;
+            w->reset_auth = false;
+        }
         pthread_mutex_unlock(&w->mu);
         memset(res, 0, sizeof(*res));
         res->generation = gen;
@@ -78,7 +76,10 @@ struct zw_worker *zw_worker_start(struct gui_window *win, const struct zw_option
     w->ring = zcl_calloc(RESULT_CAP, sizeof(*w->ring), "zw_results");
     w->rpc = zcl_calloc(1, sizeof(*w->rpc), "zw_rpc");
     if (!w->ring || !w->rpc) goto fail;
+    w->cancel = zw_cancel_new();
+    if (!w->cancel) goto fail;
     w->rpc->opt = o;
+    w->rpc->cancel = w->cancel;
     w->win = win;
     pthread_mutex_init(&w->mu, NULL);
     pthread_cond_init(&w->cv, NULL);
@@ -89,6 +90,7 @@ struct zw_worker *zw_worker_start(struct gui_window *win, const struct zw_option
     w->started = true;
     return w;
 fail:
+    zw_cancel_free(w->cancel);
     free(w->ring);
     free(w->rpc);
     free(w);
@@ -128,7 +130,7 @@ bool zw_worker_busy(struct zw_worker *w)
 void zw_worker_reset_auth(struct zw_worker *w)
 {
     pthread_mutex_lock(&w->mu);
-    w->rpc->ep.valid = false; /* next job locates and re-reads the cookie */
+    w->reset_auth = true; /* the next job locates and re-reads the cookie */
     pthread_mutex_unlock(&w->mu);
 }
 
@@ -139,23 +141,13 @@ void zw_worker_stop(struct zw_worker *w)
     w->stop = true;
     pthread_cond_broadcast(&w->cv);
     pthread_mutex_unlock(&w->mu);
-    for (int i = 0; i < 200; i++) {
-        pthread_mutex_lock(&w->mu);
-        bool busy = w->busy;
-        pthread_mutex_unlock(&w->mu);
-        if (!busy) break;
-        sleep_ms(10);
-    }
-    pthread_mutex_lock(&w->mu);
-    bool busy = w->busy;
-    pthread_mutex_unlock(&w->mu);
-    if (busy) {
-        zw_log("read worker still busy at exit; detaching");
-        pthread_detach(w->thread); /* the process is exiting; do not free under it */
-        return;
-    }
+    /* A request in flight is aborted by shutting its socket down, so the join below
+     * is bounded by one loopback connect, not by the node. Only after the join may
+     * the caller free the window the worker wakes. */
+    zw_cancel_fire(w->cancel);
     pthread_join(w->thread, NULL);
     zw_endpoint_wipe(&w->rpc->ep);
+    zw_cancel_free(w->cancel);
     free(w->ring);
     free(w->rpc);
     free(w);
