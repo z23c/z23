@@ -1379,8 +1379,8 @@ static bool fmc_clean_agent(const char *agent, char *out, size_t cap)
 
 /* Receiver ack cursor from the mail leaf's cursor.<agent> file. Returns -1
  * when the receiver never acked (nothing acknowledged). */
-/* Matches DVM_TOKEN_CAP in native_devagent_mail.c. */
-#define FMC_ACK_TOKEN_CAP (16u * (128u + 24u) + 32u)
+/* Matches DVM_TOKEN_CAP in native_devagent_mail.c, including seq.max. */
+#define FMC_ACK_TOKEN_CAP (16u * (128u + 24u) + 64u)
 
 static bool fmc_ack_token_ok(const char *token)
 {
@@ -5455,10 +5455,11 @@ static bool fmc_brief_tasks_update(struct json_value *data, long long base_dropp
     return true;
 }
 
-static bool fmc_brief_cursor_finish(struct zcl_command_reply *reply,
-    const struct fmc_mail_view *view, size_t budget, long long base_tasks_dropped, bool include_tasks)
+/* 0 closed, 1 cursor projection failed, 2 budget metadata failed, 3 stalled. */
+static int fmc_brief_cursor_finish(struct json_value *data,
+    const struct fmc_mail_view *view, size_t budget, long long base_tasks_dropped,
+    bool include_tasks)
 {
-    struct json_value *data = &reply->data;
     size_t initial = json_size(json_get(data, "changes"));
     for (size_t attempt = 0; attempt <= initial + 1; attempt++) {
         const struct json_value *changes = json_get(data, "changes");
@@ -5466,19 +5467,28 @@ static bool fmc_brief_cursor_finish(struct zcl_command_reply *reply,
         char token[FMC_MAIL_SINCE_CAP];
         if (!zcl_devagent_mail_cursor_prefix(view->start_token, view->cursor_token, changes, token, sizeof(token)) ||
             !fmc_brief_cursor_set(data, token) || !fmc_brief_changes_set(data, view) ||
-            (include_tasks && !fmc_brief_tasks_update(data, base_tasks_dropped))) {
-            fmc_fail(reply, "BRIEF_CURSOR_PROJECTION", "native mail cursor could not be projected faithfully", "same since token retained by caller");
-            return false;
-        }
+            (include_tasks && !fmc_brief_tasks_update(data, base_tasks_dropped)))
+            return 1;
         if (json_write(data, NULL, 0) <= budget) {
-            if (json_size(changes) || json_get_int(json_get(data, "changes_dropped")) == 0) return true;
+            if (json_size(changes) || json_get_int(json_get(data, "changes_dropped")) == 0) return 0;
             break;
         }
-        if (!fmc_fit_budget(data, budget, true)) {
-            fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "brief budget projection failed", "json");
-            return false;
-        }
+        if (!fmc_fit_budget(data, budget, true))
+            return 2;
         if (json_write(data, NULL, 0) > budget && json_size(json_get(data, "changes")) == count) break;
+    }
+    return 3;
+}
+
+static bool fmc_brief_cursor_fail(struct zcl_command_reply *reply, int rc)
+{
+    if (rc == 1) {
+        fmc_fail(reply, "BRIEF_CURSOR_PROJECTION", "native mail cursor could not be projected faithfully", "same since token retained by caller");
+        return false;
+    }
+    if (rc == 2) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "brief budget projection failed", "json");
+        return false;
     }
     fmc_fail(reply, "BRIEF_PAGE_STALLED", "no complete forward mail row fits this response budget; cursor is unchanged", "same since token");
     (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
@@ -5525,21 +5535,77 @@ static bool fmc_brief_tasks_emit(struct fmc_brief_lists *lists,
     return false;
 }
 
+static void fmc_brief_observe_if_fits(struct json_value *data, size_t budget);
+
+/* Compact ",\"observation_generation\":\"<16 hex>\",\"not_modified\":false"
+ * on a non-empty object. The fit keeps this slack so the fields land inside
+ * the budget the page already closed. */
+#define FMC_BRIEF_OBS_BYTES 65u
+
+static bool fmc_brief_close_budget(struct zcl_command_reply *reply,
+                                   const struct fmc_mail_view *mv, size_t budget,
+                                   long long base_tasks_dropped, bool include_tasks,
+                                   bool report)
+{
+    if (!fmc_fit_budget(&reply->data, budget, mv && mv->forward)) {
+        if (report)
+            fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
+                     "brief budget metadata could not be copied", "json");
+        return false;
+    }
+    if (mv && mv->forward) {
+        int rc = fmc_brief_cursor_finish(&reply->data, mv, budget, base_tasks_dropped,
+                                         include_tasks);
+        if (rc != 0) {
+            if (report)
+                fmc_brief_cursor_fail(reply, rc);
+            return false;
+        }
+    }
+    return true;
+}
+
 static void fmc_brief_finalize(const struct zcl_command_request *req,
                                struct zcl_command_reply *reply,
                                const struct fmc_mail_view *mv, bool include_tasks)
 {
     long long base_tasks_dropped = json_get_int(json_get(&reply->data, "tasks_dropped"));
     size_t budget = mv && mv->forward ? fmc_brief_data_budget(req) : FMC_REPLY_SOFT_BUDGET - 512u;
-    if (!fmc_fit_budget(&reply->data, budget, mv && mv->forward)) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "brief budget metadata could not be copied", "json");
-        return;
+    size_t fit = budget > FMC_BRIEF_OBS_BYTES ? budget - FMC_BRIEF_OBS_BYTES : budget;
+    struct json_value saved;
+    bool held = false;
+    bool stamped = false;
+    json_init(&saved);
+    if (fit < budget && json_copy_checked(&saved, &reply->data))
+        held = true;
+    if (held &&
+        fmc_brief_close_budget(reply, mv, fit, base_tasks_dropped, include_tasks, false))
+        stamped = true;
+    else {
+        if (held) {
+            json_free(&reply->data);
+            if (!json_copy_checked(&reply->data, &saved)) {
+                json_free(&saved);
+                fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
+                         "brief budget metadata could not be copied", "json");
+                return;
+            }
+        }
+        if (!fmc_brief_close_budget(reply, mv, budget, base_tasks_dropped,
+                                    include_tasks, true)) {
+            json_free(&saved);
+            return;
+        }
     }
-    if (mv && mv->forward && !fmc_brief_cursor_finish(reply, mv, budget, base_tasks_dropped, include_tasks)) return;
+    json_free(&saved);
     if (include_tasks && !fmc_brief_tasks_update(&reply->data, base_tasks_dropped)) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count projection is incomplete", "json");
         return;
     }
+    /* Reserved slack carries the observation. A row that needed those bytes
+     * keeps the page and omits the fields. */
+    if (stamped)
+        fmc_brief_observe_if_fits(&reply->data, budget);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -7731,11 +7797,202 @@ static void fmc_enter_who(const struct zcl_command_request *request,
         run(request, reply, &who);
 }
 
+static bool fmc_mail_obs_name(const char *name)
+{
+    size_t n;
+    if (!name)
+        return false;
+    n = strlen(name);
+    if (n >= 7 && memcmp(name + (n - 6), ".jsonl", 6) == 0)
+        return true;
+    if (strncmp(name, "cursor.", 7) == 0)
+        return true;
+    return strncmp(name, "read.", 5) == 0;
+}
+
+static void fmc_fnv_bytes(uint64_t *h, const void *p, size_t n)
+{
+    const unsigned char *b = p;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        *h ^= b[i];
+        *h *= UINT64_C(0x100000001b3);
+    }
+}
+
+static void fmc_fnv_str(uint64_t *h, const char *s)
+{
+    if (s)
+        fmc_fnv_bytes(h, s, strlen(s));
+    fmc_fnv_bytes(h, "\n", 1);
+}
+
+static void fmc_gen_hex_out(uint64_t h, char out[17])
+{
+    snprintf(out, 17, "%016llx", (unsigned long long)h);
+}
+
+static bool fmc_gen_hex(const char *s)
+{
+    size_t i;
+    if (!s)
+        return false;
+    for (i = 0; i < 16; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return s[16] == '\0';
+}
+
+/* Names and sizes of every mail stream and ack file. A later file's size
+ * is part of the generation: skipping a tail would hide a new message.
+ * Missing mail is a stable empty generation. Bodies and mtimes are not read. */
+static void fmc_observation_mix(uint64_t *h,
+                                const struct platform_directory_list *files)
+{
+    size_t i;
+    for (i = 0; i < files->count; i++) {
+        const struct platform_directory_entry *e = &files->entries[i];
+        char size[32];
+        int n;
+        if (!fmc_mail_obs_name(e->name))
+            continue;
+        fmc_fnv_str(h, e->name);
+        if (!e->snapshot_valid) {
+            fmc_fnv_str(h, "nosnap");
+            continue;
+        }
+        n = snprintf(size, sizeof(size), "%llu", (unsigned long long)e->size);
+        if (n > 0)
+            fmc_fnv_str(h, size);
+    }
+}
+
+static void fmc_observation_generation(char out[17])
+{
+    char root[4096], dir[4200];
+    struct platform_directory_list files;
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    int n;
+    memset(&files, 0, sizeof(files));
+    if (!platform_state_root_existing(root, sizeof(root))) {
+        fmc_gen_hex_out(h, out);
+        return;
+    }
+    n = snprintf(dir, sizeof(dir), "%s/mail", root);
+    if (n <= 0 || (size_t)n >= sizeof(dir) ||
+        platform_directory_probe_real(dir) != PLATFORM_DIRECTORY_PROBE_OK ||
+        !platform_directory_list_regular_sorted(dir, &files)) {
+        fmc_gen_hex_out(h, out);
+        return;
+    }
+    fmc_observation_mix(&h, &files);
+    platform_directory_list_free(&files);
+    fmc_gen_hex_out(h, out);
+}
+
+/* Token echoed when the mail directory is unchanged. A string is the
+ * caller's resume token. Integer 0 is the legacy start, whose brief cursor
+ * is empty. Any other shape, including a positive floor, is not echoed:
+ * the caller builds the real brief so the floor is not wiped to "". */
+static bool fmc_brief_obs_since(const struct zcl_command_request *req,
+                                char *out, size_t cap)
+{
+    const struct json_value *v;
+    const char *s;
+    long long iv;
+    if (!req || !req->input || !out || cap == 0)
+        return false;
+    v = json_get(req->input, "since");
+    if (!v) {
+        out[0] = '\0';
+        return true;
+    }
+    if (v->type == JSON_STR) {
+        s = json_get_str(v);
+        if (!s)
+            s = "";
+        if (strlen(s) >= cap)
+            return false;
+        memcpy(out, s, strlen(s) + 1);
+        return true;
+    }
+    if (v->type != JSON_INT)
+        return false;
+    iv = (long long)json_get_int(v);
+    if (iv != 0)
+        return false;
+    out[0] = '\0';
+    return true;
+}
+
+/* True when this call already answered. A matching generation skips the
+ * roster, board and ledger. A mismatch falls through to the full brief. */
+static bool fmc_brief_not_modified(const struct zcl_command_request *req,
+                                   struct zcl_command_reply *reply)
+{
+    const char *held = fmc_str(req, "generation");
+    char since[FMC_MAIL_SINCE_CAP];
+    char live[17];
+    bool ok;
+    if (!fmc_gen_hex(held))
+        return false;
+    fmc_observation_generation(live);
+    if (strcmp(held, live) != 0)
+        return false;
+    if (!fmc_brief_obs_since(req, since, sizeof(since)))
+        return false;
+    ok = json_push_kv_bool(&reply->data, "not_modified", true);
+    ok = ok && json_push_kv_str(&reply->data, "observation_generation", live);
+    ok = ok && json_push_kv_str(&reply->data, "cursor_token", since);
+    if (!ok) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
+                 "observation could not be recorded", "json");
+        return true;
+    }
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
+    return true;
+}
+
+static void fmc_brief_put_observation(struct json_value *data)
+{
+    char live[17];
+    if (!data || json_get(data, "observation_generation"))
+        return;
+    fmc_observation_generation(live);
+    (void)json_push_kv_str(data, "observation_generation", live);
+    (void)json_push_kv_bool(data, "not_modified", false);
+}
+
+/* Stamp only when the measured fields fit in the slack the fit held. */
+static void fmc_brief_observe_if_fits(struct json_value *data, size_t budget)
+{
+    size_t used;
+    if (!data || budget == 0 || json_get(data, "observation_generation"))
+        return;
+    used = json_write(data, NULL, 0);
+    if (used > budget || budget - used < FMC_BRIEF_OBS_BYTES)
+        return;
+    fmc_brief_put_observation(data);
+}
+
+static void fmc_do_brief_observed(const struct zcl_command_request *req,
+                                  struct zcl_command_reply *reply,
+                                  const struct fmc_caller *who)
+{
+    if (fmc_brief_not_modified(req, reply))
+        return;
+    fmc_do_brief(req, reply, who);
+}
+
 void zcl_native_handle_fleet_steer_brief(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     fmc_enter_who(request, reply, "brief",
-                  "fleet.steer.brief takes grant,since,limit", fmc_do_brief);
+                  "fleet.steer.brief takes grant,since,limit,json,changes_only,generation",
+                  fmc_do_brief_observed);
 }
 
 void zcl_native_handle_fleet_steer_send(

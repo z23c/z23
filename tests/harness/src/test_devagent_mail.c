@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -2249,12 +2250,261 @@ _test_next:;
 }
 #endif /* !defined(_WIN32) */
 
+static long long dvx_mono_ns(void)
+{
+#if defined(_WIN32)
+    return -1;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return -1;
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#endif
+}
+
+static unsigned long long dvx_fnv_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    unsigned long long h = 14695981039346656037ull;
+    int c;
+    if (!f)
+        return 0;
+    while ((c = fgetc(f)) != EOF) {
+        h ^= (unsigned long long)(unsigned char)c;
+        h *= 1099511628211ull;
+    }
+    (void)fclose(f);
+    return h;
+}
+
+static unsigned long long dvx_dir_bytes(const char *dir)
+{
+    unsigned long long n = 0;
+#if !defined(_WIN32)
+    DIR *d = opendir(dir);
+    struct dirent *ent;
+    if (!d)
+        return 0;
+    while ((ent = readdir(d)) != NULL) {
+        char path[1200];
+        struct stat st;
+        int wr;
+        if (ent->d_name[0] == '.')
+            continue;
+        wr = snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        if (wr <= 0 || (size_t)wr >= sizeof(path))
+            continue;
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
+            n += (unsigned long long)st.st_size;
+    }
+    (void)closedir(d);
+#else
+    (void)dir;
+#endif
+    return n;
+}
+
+static bool dvx_cursor_matches(const char *agent, const char *token)
+{
+    char dir[1024], path[1200], buf[4096];
+    FILE *f;
+    size_t n;
+    dvx_maildir(dir, sizeof(dir));
+    if (snprintf(path, sizeof(path), "%s/cursor.%s", dir, agent) <= 0)
+        return false;
+    f = fopen(path, "rb");
+    if (!f || !fgets(buf, (int)sizeof(buf), f)) {
+        if (f)
+            (void)fclose(f);
+        return false;
+    }
+    (void)fclose(f);
+    n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        buf[--n] = '\0';
+    return strcmp(buf, token) == 0;
+}
+
+static bool dvx_drain_any(char *token, size_t cap, long long *pages)
+{
+    bool more = true;
+    *pages = 0;
+    while (more && *pages < 1000) {
+        struct dvx_call p;
+        const struct json_value *tr;
+        dvx_pull_token(&p, token, NULL);
+        if (!dvx_run(&p) || !dvx_ok(&p)) {
+            dvx_end(&p);
+            return false;
+        }
+        tr = json_get(&p.reply.data, "truncated");
+        more = tr && tr->type == JSON_BOOL && json_get_bool(tr);
+        if (snprintf(token, cap, "%s", dvx_str(&p, "next_since")) <= 0) {
+            dvx_end(&p);
+            return false;
+        }
+        dvx_end(&p);
+        (*pages)++;
+    }
+    return !more;
+}
+
+/* One imported stream of `want` bytes, each line a real mail row. */
+static bool dvx_write_bulk(const char *name, unsigned long long want)
+{
+    char dir[1024], path[1200], line[512], body[201], root[1024];
+    FILE *f;
+    unsigned long long n = 0;
+    long long seq = 1;
+    if (!platform_state_root(root, sizeof(root)))
+        return false;
+    dvx_maildir(dir, sizeof(dir));
+    if (!platform_private_directory_ensure(dir))
+        return false;
+    if (snprintf(path, sizeof(path), "%s/%s.jsonl", dir, name) <= 0)
+        return false;
+    memset(body, 'b', 200);
+    body[200] = '\0';
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    while (n < want) {
+        int w = snprintf(line, sizeof(line),
+                         "{\"seq\":%lld,\"ts\":\"2020-01-01T00:00:00Z\","
+                         "\"from\":\"bob\",\"to\":\"*\","
+                         "\"kind\":\"note\",\"body\":\"%s-%lld\","
+                         "\"ref\":\"bulk\"}\n",
+                         seq, body, seq);
+        if (w <= 0 || (size_t)w >= sizeof(line) || fputs(line, f) < 0) {
+            (void)fclose(f);
+            return false;
+        }
+        n += (unsigned long long)w;
+        seq++;
+    }
+    return fclose(f) == 0;
+}
+
+/* Admitted rows survive a truncated page, a durable ack, and a second open.
+ * The timed call is only the incremental pull, after the prefix is acked. */
+static int test_mail_incremental_feed(void)
+{
+    int failures = 0;
+    TEST("mail: incremental pull resumes without rereading the ack prefix") {
+        static unsigned char seen[DVX_PAGE_ROWS + 1u];
+        char token[4096], dir[1024], outbox[1200];
+        struct dvx_call p;
+        const struct json_value *rows;
+        unsigned long long hash, bytes;
+        long long small_ns, large_ns, pages, t0, t1;
+        size_t total = 0;
+        memset(seen, 0, sizeof(seen));
+        dvx_isolate("feed");
+        ASSERT(dvx_post_history(70));
+        dvx_pull(&p, 0, NULL, "directive");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT(json_get_bool(json_get(&p.reply.data, "truncated")));
+        ASSERT(dvx_int(&p, "count") > 0 && dvx_int(&p, "count") < 70);
+        ASSERT(dvx_mark_rows(dvx_arr(&p, "rows"), seen, &total, NULL, 0, NULL));
+        ASSERT(snprintf(token, sizeof(token), "%s",
+                        dvx_str(&p, "next_since")) > 0);
+        dvx_end(&p);
+        (void)zcl_devagent_mail_test_prefix_bytes(true);
+        (void)zcl_devagent_mail_test_content_reads(true);
+        dvx_pull_token(&p, token, "directive");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        /* This is the defect: the resume still reads bytes before the ack. */
+        ASSERT_EQ(zcl_devagent_mail_test_prefix_bytes(false), 0ull);
+        ASSERT(dvx_mark_rows(dvx_arr(&p, "rows"), seen, &total, NULL, 0, NULL));
+        ASSERT(snprintf(token, sizeof(token), "%s",
+                        dvx_str(&p, "next_since")) > 0);
+        dvx_end(&p);
+        ASSERT(dvx_drain(token, sizeof(token), seen, &total) > 0);
+        ASSERT_EQ(total, (size_t)70);
+        dvx_maildir(dir, sizeof(dir));
+        ASSERT(snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", dir) > 0);
+        hash = dvx_fnv_file(outbox);
+        ASSERT(hash != 0);
+        (void)zcl_devagent_mail_test_ack_writes(true);
+        ASSERT(dvx_ack_token("owner", token));
+        ASSERT_EQ(zcl_devagent_mail_test_ack_writes(false), (size_t)1);
+        ASSERT(dvx_cursor_matches("owner", token));
+        ASSERT_EQ(dvx_fnv_file(outbox), hash);
+        bytes = dvx_dir_bytes(dir);
+        (void)zcl_devagent_mail_test_prefix_bytes(true);
+        (void)zcl_devagent_mail_test_content_reads(true);
+        dvx_pull_token(&p, token, "directive");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 0);
+        ASSERT(dvx_sources_complete(&p, 1));
+        ASSERT_EQ(zcl_devagent_mail_test_prefix_bytes(false), 0ull);
+        ASSERT_EQ(zcl_devagent_mail_test_content_reads(false), 0ull);
+        ASSERT_STR_EQ(dvx_str(&p, "next_since"), token);
+        dvx_end(&p);
+        ASSERT_EQ(dvx_dir_bytes(dir), bytes);
+        ASSERT_EQ(dvx_fnv_file(outbox), hash);
+        ASSERT(dvx_ack_token("owner", token));
+        ASSERT_EQ(zcl_devagent_mail_test_ack_writes(false), (size_t)1);
+        ASSERT_EQ(dvx_dir_bytes(dir), bytes);
+        dvx_pull_agent(&p, "owner", NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        ASSERT_EQ(dvx_int(&p, "count"), 0);
+        ASSERT_STR_EQ(dvx_str(&p, "next_since"), token);
+        dvx_end(&p);
+        ASSERT(dvx_post_history(1));
+        (void)zcl_devagent_mail_test_prefix_bytes(true);
+        t0 = dvx_mono_ns();
+        dvx_pull_token(&p, token, "directive");
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        t1 = dvx_mono_ns();
+        small_ns = t1 - t0;
+        ASSERT_EQ(zcl_devagent_mail_test_prefix_bytes(false), 0ull);
+        ASSERT(dvx_int(&p, "count") >= 1);
+        ASSERT(snprintf(token, sizeof(token), "%s",
+                        dvx_str(&p, "next_since")) > 0);
+        dvx_end(&p);
+        ASSERT(small_ns >= 0 && small_ns < 1000000000LL);
+        dvx_restore();
+        dvx_isolate("feed-bulk");
+        ASSERT(dvx_write_bulk("inbox.bulk", 1536ull * 1024ull));
+        ASSERT(snprintf(token, sizeof(token), "%s", "0|") > 0);
+        ASSERT(dvx_drain_any(token, sizeof(token), &pages));
+        ASSERT(pages > 1);
+        dvx_import_append("inbox.bulk",
+            "{\"seq\":1,\"ts\":\"2019-01-01T00:00:00Z\",\"from\":\"bob\","
+            "\"to\":\"*\",\"kind\":\"note\",\"body\":\"suffix-row\","
+            "\"ref\":\"bulk\"}\n");
+        (void)zcl_devagent_mail_test_prefix_bytes(true);
+        t0 = dvx_mono_ns();
+        dvx_pull_token(&p, token, NULL);
+        ASSERT(dvx_run(&p) && dvx_ok(&p));
+        t1 = dvx_mono_ns();
+        large_ns = t1 - t0;
+        ASSERT_EQ(zcl_devagent_mail_test_prefix_bytes(false), 0ull);
+        ASSERT_EQ(dvx_int(&p, "count"), 1);
+        rows = dvx_arr(&p, "rows");
+        ASSERT(rows != NULL && rows->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "body")),
+                      "suffix-row");
+        dvx_end(&p);
+        ASSERT(large_ns >= 0 && large_ns < 1000000000LL);
+        printf("incremental feed small_ns=%lld large_ns=%lld bulk_pages=%lld\n",
+               small_ns, large_ns, pages);
+        dvx_restore();
+        PASS();
+    }
+_test_next:;
+    dvx_restore();
+    return failures;
+}
+
 /* The read-side checks (cursor, paging, refs, board), in original order.
  * Every call runs even after a failure, as the original calls did. */
 static int test_mail_read_side_checks(void)
 {
     int failures = 0;
 
+    failures += test_mail_incremental_feed();
     failures += test_mail_independent_cursor();
     failures += test_mail_exact_locator();
     failures += test_mail_exact_maximum();

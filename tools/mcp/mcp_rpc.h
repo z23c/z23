@@ -122,8 +122,12 @@ enum mcp_dispatch_result mcp_dispatch(const struct mcp_endpoint *ep,
 /* Envelope builders, exposed for reuse and tests. id may be NULL (null). */
 void mcp_reply_error(struct mcp_buf *b, const struct json_value *id, int code,
                      const char *message);
+/* params may carry schema_generation. A match answers not_modified and
+ * omits inputSchema. Any other value returns the live schemas and that
+ * generation, never the caller's stale token. */
 void mcp_reply_tools_list(struct mcp_buf *b, const struct json_value *id,
-                          const struct mcp_endpoint *ep);
+                          const struct mcp_endpoint *ep,
+                          const struct json_value *params);
 /* Wrap text as a tools/call result, capped at ep->max_reply_bytes. */
 void mcp_reply_tool_text(struct mcp_buf *b, const struct json_value *id,
                          const struct mcp_endpoint *ep, const char *text,
@@ -138,7 +142,13 @@ void mcp_reply_tool_text(struct mcp_buf *b, const struct json_value *id,
  * when it truncated. A prefix never splits a UTF-8 sequence. When the object
  * parses and has a `data` object, "fields" follows original_bytes: the
  * serialized size of each data member (at most 32), so the caller can pick a
- * select instead of reading an escaped prefix. */
+ * select instead of reading an escaped prefix. A non-empty cursor_token or
+ * after_slug, at the top level, under data, or under select.data, covers
+ * rows this cap did not keep. So does a select path whose key is
+ * data.cursor_token, data.after_slug, or data.cursor. The truncated object
+ * then sets resume_cursor_missing and includes neither that cursor nor a
+ * partial prefix, so the caller cannot skip ahead. A reply that fits is
+ * copied unchanged, cursor included. */
 bool mcp_cap_text(struct mcp_buf *out, const char *text, size_t n,
                   size_t max_bytes);
 

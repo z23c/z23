@@ -393,6 +393,31 @@ static void fmx_brief_opt(struct fmx_call *c, const char *grant,
         (void)json_push_kv_int(&c->input, "limit", limit);
 }
 
+/* Brief that may repeat an observation_generation. json omits the screen. */
+static void fmx_brief_gen(struct fmx_call *c, const char *token,
+                          const char *generation)
+{
+    fmx_begin(c, FMX_BRIEF_PATH, "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_bool(&c->input, "json", true);
+    if (token)
+        (void)json_push_kv_str(&c->input, "since", token);
+    else
+        (void)json_push_kv_int(&c->input, "since", 0);
+    if (generation && generation[0])
+        (void)json_push_kv_str(&c->input, "generation", generation);
+}
+
+static size_t fmx_payload(const struct fmx_call *c)
+{
+    return json_write(&c->reply.data, NULL, 0);
+}
+
+static bool fmx_bool_is(const struct fmx_call *c, const char *key, bool want)
+{
+    const struct json_value *v = fmx_get(c, key);
+    return v && v->type == JSON_BOOL && json_get_bool(v) == want;
+}
+
 /* Missing reason for a source, or "" when the source is not missing. */
 static const char *fmx_missing_reason(const struct fmx_call *c,
                                       const char *source)
@@ -8494,6 +8519,197 @@ _test_next:;
     return failures;
 }
 
+static int fmx_t_observation(void)
+{
+    int failures = 0;
+
+    TEST("steer: an unchanged brief is not-modified and a new row is visible") {
+        struct fmx_call b;
+        char gid[64], gen[32], token[4096], next[32];
+        size_t full, small;
+        fmx_isolate("observe");
+        ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
+        fmx_brief_gen(&b, NULL, NULL);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
+        ASSERT(strlen(fmx_str(&b, "observation_generation")) == 16);
+        snprintf(gen, sizeof(gen), "%s", fmx_str(&b, "observation_generation"));
+        snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
+        full = fmx_payload(&b);
+        fmx_end(&b);
+        fmx_brief_gen(&b, token[0] ? token : NULL, gen);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", true));
+        small = fmx_payload(&b);
+        ASSERT(small < full);
+        ASSERT_STR_EQ(fmx_str(&b, "observation_generation"), gen);
+        ASSERT_STR_EQ(fmx_str(&b, "cursor_token"), token);
+        fmx_end(&b);
+        ASSERT(fmx_send_one(gid, FMX_SENDER, "field-agent", "obs-row",
+                            "obs-key") >= 1);
+        fmx_brief_gen(&b, token[0] ? token : NULL, gen);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
+        ASSERT(fmx_change_row(&b, FMX_SENDER, "obs-row") != NULL);
+        ASSERT(strlen(fmx_str(&b, "observation_generation")) == 16);
+        ASSERT(strcmp(fmx_str(&b, "observation_generation"), gen) != 0);
+        snprintf(next, sizeof(next), "%s",
+                 fmx_str(&b, "observation_generation"));
+        snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
+        full = fmx_payload(&b);
+        fmx_end(&b);
+        fmx_brief_gen(&b, token[0] ? token : NULL, next);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", true));
+        ASSERT(fmx_payload(&b) < full);
+        ASSERT(fmx_change_row(&b, FMX_SENDER, "obs-row") == NULL);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static bool fmx_ensure_dir(const char *path)
+{
+    return path && path[0] && platform_private_directory_ensure(path);
+}
+
+/* Parents first: ensure does not create them. */
+static bool fmx_mail_dir(char *dir, size_t cap)
+{
+    char z23[1200], dev[1200];
+    int n = snprintf(z23, sizeof(z23), "%s/z23", g_fmx_state);
+    if (n <= 0 || (size_t)n >= sizeof(z23) || !fmx_ensure_dir(z23))
+        return false;
+    n = snprintf(dev, sizeof(dev), "%s/dev", z23);
+    if (n <= 0 || (size_t)n >= sizeof(dev) || !fmx_ensure_dir(dev))
+        return false;
+    n = snprintf(dir, cap, "%s/mail", dev);
+    return n > 0 && (size_t)n < cap && fmx_ensure_dir(dir);
+}
+
+/* One hundred sixty read.zNNN pads, so a size change of the last name is
+ * past any fixed prefix of the mail directory. */
+static bool fmx_pad_reads(void)
+{
+    char dir[1200], path[1400];
+    int n;
+    if (!fmx_mail_dir(dir, sizeof(dir)))
+        return false;
+    for (int i = 0; i < 160; i++) {
+        FILE *f;
+        n = snprintf(path, sizeof(path), "%s/read.z%03d", dir, i);
+        if (n <= 0 || (size_t)n >= sizeof(path))
+            return false;
+        f = fopen(path, "w");
+        if (!f)
+            return false;
+        if (fputs("x", f) == EOF) {
+            fclose(f);
+            return false;
+        }
+        if (fclose(f) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool fmx_grow_last_read(void)
+{
+    char path[1400];
+    FILE *f;
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/mail/read.z159",
+                     g_fmx_state);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    f = fopen(path, "a");
+    if (!f)
+        return false;
+    if (fputs("y", f) == EOF) {
+        fclose(f);
+        return false;
+    }
+    return fclose(f) == 0;
+}
+
+static int fmx_t_observation_floor(void)
+{
+    int failures = 0;
+
+    TEST("steer: a positive integer since is not wiped by not-modified") {
+        struct fmx_call b;
+        char gen[32];
+        fmx_isolate("observe_floor");
+        fmx_brief_gen(&b, NULL, NULL);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        snprintf(gen, sizeof(gen), "%s",
+                 fmx_str(&b, "observation_generation"));
+        fmx_end(&b);
+        fmx_begin(&b, FMX_BRIEF_PATH, "zcl.fleet_steer_brief.v1");
+        (void)json_push_kv_bool(&b.input, "json", true);
+        (void)json_push_kv_int(&b.input, "since", 7);
+        (void)json_push_kv_str(&b.input, "generation", gen);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_t_observation_tail(void)
+{
+    int failures = 0;
+
+    TEST("steer: a late mail file size changes the observation") {
+        struct fmx_call b;
+        char gen[32], next[32];
+        fmx_isolate("observe_tail");
+        fmx_brief_gen(&b, NULL, NULL);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        snprintf(gen, sizeof(gen), "%s",
+                 fmx_str(&b, "observation_generation"));
+        fmx_end(&b);
+        ASSERT(fmx_pad_reads());
+        fmx_brief_gen(&b, NULL, gen);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
+        snprintf(next, sizeof(next), "%s",
+                 fmx_str(&b, "observation_generation"));
+        ASSERT(strcmp(next, gen) != 0);
+        fmx_end(&b);
+        ASSERT(fmx_grow_last_read());
+        fmx_brief_gen(&b, NULL, next);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
+        ASSERT(strcmp(fmx_str(&b, "observation_generation"), next) != 0);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int fsd_deliver_checks(void);
 int test_fleet_steer(void);
 int fmx_task_projection_checks(void);
@@ -8545,6 +8761,9 @@ int test_fleet_steer(void)
 #endif
     failures += fmx_t_register();
     failures += fmx_t_brief_empty();
+    failures += fmx_t_observation();
+    failures += fmx_t_observation_floor();
+    failures += fmx_t_observation_tail();
     failures += fmx_t_mailbox_access();
     failures += fmx_t_send_flow();
     failures += fmx_t_send_refusal_guidance(false);

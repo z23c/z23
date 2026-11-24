@@ -197,13 +197,113 @@ static void mcp_fields_hint(struct mcp_buf *hint, const char *text, size_t n)
     json_free(&doc);
 }
 
+static const char *const mcp_resume_keys[] = {"cursor_token", "after_slug"};
+/* Select stores one path as a key. These name the same resume string. */
+static const char *const mcp_resume_paths[] = {
+    "data.cursor_token", "data.after_slug", "data.cursor"};
+
+static bool mcp_str_set(const struct json_value *v)
+{
+    const char *s = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+    return s && s[0];
+}
+
+/* A non-empty resume string covers every row in this reply. */
+static bool mcp_obj_resume(const struct json_value *obj)
+{
+    size_t i;
+    if (!obj || obj->type != JSON_OBJ)
+        return false;
+    for (i = 0; i < sizeof(mcp_resume_keys) / sizeof(mcp_resume_keys[0]); i++) {
+        if (mcp_str_set(json_get(obj, mcp_resume_keys[i])))
+            return true;
+    }
+    return false;
+}
+
+static bool mcp_named_resume(const char *key)
+{
+    size_t i;
+    for (i = 0; i < sizeof(mcp_resume_paths) / sizeof(mcp_resume_paths[0]); i++) {
+        if (key && strcmp(key, mcp_resume_paths[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* select.data.cursor_token, or the path keys data.cursor_token and data.cursor. */
+static bool mcp_select_resume(const struct json_value *sel)
+{
+    const struct json_value *data;
+    size_t i;
+    if (!sel || sel->type != JSON_OBJ)
+        return false;
+    data = json_get(sel, "data");
+    if (mcp_obj_resume(data) || (data && mcp_str_set(json_get(data, "cursor"))))
+        return true;
+    if (!sel->keys)
+        return false;
+    for (i = 0; i < sel->num_children; i++) {
+        if (mcp_named_resume(sel->keys[i]) && mcp_str_set(&sel->children[i]))
+            return true;
+    }
+    return false;
+}
+
+static bool mcp_reply_has_resume(const char *text, size_t n)
+{
+    struct json_value doc;
+    bool found;
+    json_init(&doc);
+    found = json_read(&doc, text, n) && doc.type == JSON_OBJ &&
+            (mcp_obj_resume(&doc) || mcp_obj_resume(json_get(&doc, "data")) ||
+             mcp_select_resume(json_get(&doc, "select")));
+    json_free(&doc);
+    return found;
+}
+
+/* The cursor names rows this budget did not keep. Omit it and say so. */
+static void mcp_cap_held(struct mcp_buf *out, const char *text, size_t n,
+                         size_t max_bytes)
+{
+    char head[96];
+    struct mcp_buf hint;
+    const char *tail = ",\"resume_cursor_missing\":true}";
+    const char *bare = "{\"truncated\":true,\"resume_cursor_missing\":true}";
+    int hl = snprintf(head, sizeof(head),
+                      "{\"truncated\":true,\"original_bytes\":%zu", n);
+    size_t tail_n = strlen(tail);
+    size_t bare_n = strlen(bare);
+    mcp_buf_init(&hint);
+    mcp_fields_hint(&hint, text, n);
+    if (hl < 0 || hint.oom || (size_t)hl + hint.len + tail_n > max_bytes)
+        hint.len = 0;
+    if (hl >= 0 && (size_t)hl + hint.len + tail_n <= max_bytes) {
+        mcp_buf_put(out, head, (size_t)hl);
+        mcp_buf_put(out, hint.p, hint.len);
+        mcp_buf_put(out, tail, tail_n);
+        mcp_buf_free(&hint);
+        return;
+    }
+    mcp_buf_free(&hint);
+    if (bare_n <= max_bytes)
+        mcp_buf_put(out, bare, bare_n);
+    else
+        mcp_buf_put(out, "{\"truncated\":true}", max_bytes >= 18 ? 18 : 0);
+}
+
 static void mcp_cap_object(struct mcp_buf *out, const char *text, size_t n,
                            size_t max_bytes)
 {
     char head[96];
     struct mcp_buf hint;
-    int hl = snprintf(head, sizeof(head),
-                      "{\"truncated\":true,\"original_bytes\":%zu", n);
+    int hl;
+    if (mcp_reply_has_resume(text, n)) {
+        mcp_cap_held(out, text, n, max_bytes);
+        return;
+    }
+    hl = snprintf(head, sizeof(head),
+                  "{\"truncated\":true,\"original_bytes\":%zu", n);
     mcp_buf_init(&hint);
     mcp_fields_hint(&hint, text, n);
     if (hint.oom || (size_t)hl + hint.len + 16 > max_bytes)
@@ -541,10 +641,50 @@ const char *mcp_negotiate_version(const char *asked)
     return mcp_versions[0];
 }
 
-void mcp_reply_tools_list(struct mcp_buf *b, const struct json_value *id,
-                          const struct mcp_endpoint *ep)
+static const char *mcp_str_member(const struct json_value *obj,
+                                  const char *key);
+
+/* FNV-1a 64 of the live tool table. Not a security hash: it only tells a
+ * caller whether the schemas it already holds are still the ones served. */
+static uint64_t mcp_fnv_str(uint64_t h, const char *s)
 {
+    const unsigned char *p = (const unsigned char *)(s ? s : "");
+    if (!s)
+        return h;
+    for (; *p; p++) {
+        h ^= *p;
+        h *= UINT64_C(0x100000001b3);
+    }
+    return h;
+}
+
+static void mcp_schema_generation(const struct mcp_endpoint *ep, char out[17])
+{
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    size_t i;
+    for (i = 0; ep && i < ep->tool_count; i++) {
+        h = mcp_fnv_str(h, ep->tools[i].name);
+        h = mcp_fnv_str(h, "\n");
+        h = mcp_fnv_str(h, ep->tools[i].input_schema_json);
+        h = mcp_fnv_str(h, ep->tools[i].read_only ? "\n1" : "\n0");
+    }
+    snprintf(out, 17, "%016llx", (unsigned long long)h);
+}
+
+void mcp_reply_tools_list(struct mcp_buf *b, const struct json_value *id,
+                          const struct mcp_endpoint *ep,
+                          const struct json_value *params)
+{
+    char gen[17];
+    const char *held = mcp_str_member(params, "schema_generation");
+    mcp_schema_generation(ep, gen);
     mcp_reply_open(b, id);
+    if (held && held[0] && strcmp(held, gen) == 0) {
+        mcp_buf_str(b, ",\"result\":{\"not_modified\":true,\"schema_generation\":");
+        mcp_buf_json_str(b, gen);
+        mcp_buf_str(b, "}}");
+        return;
+    }
     mcp_buf_str(b, ",\"result\":{\"tools\":[");
     for (size_t i = 0; i < ep->tool_count; i++) {
         const struct mcp_tool *t = &ep->tools[i];
@@ -560,7 +700,11 @@ void mcp_reply_tools_list(struct mcp_buf *b, const struct json_value *id,
         mcp_buf_str(b, t->read_only ? "true" : "false");
         mcp_buf_str(b, "}}");
     }
-    mcp_buf_str(b, "]}}");
+    mcp_buf_str(b, "],\"schema_generation\":");
+    mcp_buf_json_str(b, gen);
+    if (held && held[0])
+        mcp_buf_str(b, ",\"not_modified\":false");
+    mcp_buf_str(b, "}}");
 }
 
 void mcp_reply_tool_text(struct mcp_buf *b, const struct json_value *id,
@@ -704,7 +848,7 @@ static void mcp_route(const struct mcp_endpoint *ep, const char *method,
         mcp_reply_open(reply, id);
         mcp_buf_str(reply, ",\"result\":{}}");
     } else if (strcmp(method, "tools/list") == 0) {
-        mcp_reply_tools_list(reply, id, ep);
+        mcp_reply_tools_list(reply, id, ep, params);
     } else if (strcmp(method, "tools/call") == 0) {
         mcp_do_tools_call(ep, id, params, reply);
     } else {

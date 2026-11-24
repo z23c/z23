@@ -30,6 +30,7 @@
 #include "../../../cognition/modules/codeindex/src/codeindex_priv.h"
 #include <sqlite3.h>
 #include "codeindex/codeindex_capability.h"
+#include "command/native_command.h"
 #include "json/json.h"
 #include "config/command_catalog.h"
 #include "kernel/command_registry.h"
@@ -784,6 +785,77 @@ static int ch_check_known_answers(void)
     return failures;
 }
 
+/* One known-answer question through the shipped leaf. Tokens are the reply
+ * bytes divided by four. The unscoped dump is the answer file itself. */
+#define HAVE_SITE_Q \
+    "where is the block subsidy reward amount worked out for a given height"
+#define HAVE_SITE_PATH "core/consensus/src/subsidy.c"
+
+static size_t ch_file_bytes(const char *path)
+{
+    struct stat st;
+    if (!path || stat(path, &st) != 0 || st.st_size <= 0) return 0;
+    return (size_t)st.st_size;
+}
+
+static void ch_have_call(struct zcl_command_reply *reply)
+{
+    struct zcl_command_context ctx = { .source_root = "." };
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "text", HAVE_SITE_Q);
+    struct zcl_command_request request = {
+        .input = &input, .context = &ctx,
+        .view = "normal", .invoked_name = "code.have",
+    };
+    zcl_command_reply_init(reply, "zcl.code_have.v1");
+    zcl_native_handle_code_have(&request, reply);
+    json_free(&input);
+}
+
+/* Copy the capability header that is the known edit site, and the token
+ * count of the whole reply. */
+static bool ch_have_site(char *site, size_t site_cap, size_t *tokens)
+{
+    struct zcl_command_reply reply;
+    ch_have_call(&reply);
+    *tokens = json_write(&reply.data, NULL, 0) / 4;
+    site[0] = '\0';
+    const struct json_value *caps = json_get(&reply.data, "capabilities");
+    bool named = false;
+    for (size_t i = 0; caps && i < json_size(caps); i++) {
+        const char *header = json_get_str(json_get(json_at(caps, i), "header"));
+        if (!header || strncmp(header, HAVE_SITE_PATH, strlen(HAVE_SITE_PATH)) != 0)
+            continue;
+        snprintf(site, site_cap, "%s", header);
+        named = true;
+        break;
+    }
+    printf("  code_have: subsidy reply tokens=%zu site=%s\n",
+           *tokens, named ? site : "-");
+    zcl_command_reply_free(&reply);
+    return named;
+}
+
+static int ch_check_subsidy_context(void)
+{
+    int failures = 0;
+    size_t dump_tokens = ch_file_bytes(HAVE_SITE_PATH) / 4;
+    char site1[256], site2[256];
+    size_t tokens1 = 0, tokens2 = 0;
+    bool named1 = ch_have_site(site1, sizeof(site1), &tokens1);
+    bool named2 = ch_have_site(site2, sizeof(site2), &tokens2);
+    printf("  code_have: subsidy dump_tokens=%zu run1=%zu run2=%zu\n",
+           dump_tokens, tokens1, tokens2);
+    CH_CHECK("both runs name the subsidy edit site",
+             named1 && named2 && strcmp(site1, site2) == 0);
+    CH_CHECK("the reply is fewer tokens than the unscoped file",
+             dump_tokens > 0 && tokens1 < dump_tokens &&
+             tokens2 < dump_tokens);
+    return failures;
+}
+
 int test_code_have(void)
 {
     int failures = 0;
@@ -802,6 +874,7 @@ int test_code_have(void)
     /* ── 1: the real tree ──────── */
     failures += ch_check_real_tree(caps, &q);
     failures += ch_check_known_answers();
+    failures += ch_check_subsidy_context();
 
     /* ── 2, 3, 6, 7: the hermetic fixture ─────────────────────────────── */
  TEST_DISCARD(system("rm -rf " HAVE_FIX));

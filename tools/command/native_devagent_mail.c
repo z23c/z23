@@ -211,6 +211,9 @@ void zcl_devagent_mail_test_set_after_exact_read(zcl_devagent_mail_test_hook_fn 
     dvm_test_after_exact_read = hook;
 }
 static size_t dvm_test_max_seq_scans;
+static unsigned long long dvm_test_prefix_bytes;
+static unsigned long long dvm_test_content_reads;
+static size_t dvm_test_ack_writes;
 
 void zcl_devagent_mail_test_set_after_brief_probe(
     zcl_devagent_mail_test_hook_fn hook)
@@ -224,6 +227,30 @@ size_t zcl_devagent_mail_test_max_seq_scans(bool reset)
     if (reset)
         dvm_test_max_seq_scans = 0;
     return scans;
+}
+
+unsigned long long zcl_devagent_mail_test_prefix_bytes(bool reset)
+{
+    unsigned long long n = dvm_test_prefix_bytes;
+    if (reset)
+        dvm_test_prefix_bytes = 0;
+    return n;
+}
+
+unsigned long long zcl_devagent_mail_test_content_reads(bool reset)
+{
+    unsigned long long n = dvm_test_content_reads;
+    if (reset)
+        dvm_test_content_reads = 0;
+    return n;
+}
+
+size_t zcl_devagent_mail_test_ack_writes(bool reset)
+{
+    size_t n = dvm_test_ack_writes;
+    if (reset)
+        dvm_test_ack_writes = 0;
+    return n;
 }
 #endif
 
@@ -1479,7 +1506,8 @@ static void dvm_post(const struct zcl_command_request *req,
 #define DVM_PAGE_BYTES 16384u
 #define DVM_STREAMS_MAX 16u
 #define DVM_STREAM_NAME_MAX 128u
-#define DVM_TOKEN_CAP (DVM_STREAMS_MAX * (DVM_STREAM_NAME_MAX + 24u) + 32u)
+/* +64 holds the floor and a trailing ",seq.max:<int64>" hint. */
+#define DVM_TOKEN_CAP (DVM_STREAMS_MAX * (DVM_STREAM_NAME_MAX + 24u) + 64u)
 
 struct dvm_pull_filter {
     zcl_devagent_mail_ref_filter keep;
@@ -1509,9 +1537,11 @@ struct dvm_stream {
 
 struct dvm_pull_state {
     bool read_failed;
+    bool have_seen_max; /* token or this scan already knows the max seq */
     struct dvm_stream *streams;
     size_t nstreams;
     long long cursor;  /* largest seq seen anywhere, or the floor */
+    long long seen_max; /* carried max; not a stream and not the floor */
     long long skipped; /* malformed lines this page consumed */
     char line[DVM_LINE_CAP];
 };
@@ -1740,6 +1770,23 @@ static const char *dvm_token_entry(const char *p, char *name, size_t cap,
     return NULL;
 }
 
+/* seq.max is the largest seq already observed. It is not a stream, so it
+ * must not consume a stream slot or move the caller's floor. */
+static void dvm_note_seq_max(struct dvm_pull_state *ps, long long seq)
+{
+    if (seq < 0)
+        return;
+    if (!ps->have_seen_max || seq > ps->seen_max)
+        ps->seen_max = seq;
+    ps->have_seen_max = true;
+}
+
+static void dvm_raise_seen_max(struct dvm_pull_state *ps)
+{
+    if (ps->have_seen_max && ps->seen_max > ps->cursor)
+        ps->cursor = ps->seen_max;
+}
+
 static bool dvm_cursor_duplicate(char names[][DVM_STREAM_NAME_MAX + 1],
                                  size_t count)
 {
@@ -1804,6 +1851,10 @@ static const char *dvm_token_apply(const char *token,
             dvm_token_entry(p, name, sizeof(name), &off, &p);
         if (why)
             return why;
+        if (strcmp(name, "seq.max") == 0) {
+            dvm_note_seq_max(ps, off);
+            continue;
+        }
         if (++entries > DVM_STREAMS_MAX)
             return "a resume token names more streams than a pull reads";
         for (size_t i = 0; i < ps->nstreams; i++) {
@@ -1935,7 +1986,49 @@ static void dvm_stream_next(struct dvm_stream *s,
     }
 }
 
-/* The largest seq in one whole stream, whatever the page and filters. */
+/* Bytes this max scan read. A read that starts before the resume offset is
+ * acknowledged prefix: the caller already has those rows. */
+static void dvm_count_scan(long long start, long long end, long long prefix_at)
+{
+#ifdef ZCL_TESTING
+    long long cut;
+    if (end <= start)
+        return;
+    dvm_test_content_reads += (unsigned long long)(end - start);
+    if (start >= prefix_at)
+        return;
+    cut = end < prefix_at ? end : prefix_at;
+    if (cut > start)
+        dvm_test_prefix_bytes += (unsigned long long)(cut - start);
+#else
+    (void)start;
+    (void)end;
+    (void)prefix_at;
+#endif
+}
+
+/* 1 = scan from the current position. 0 = the ack already covers this
+ * file, so its body is not a poll. -1 = the position could not be read. */
+static int dvm_max_seq_position(FILE *f, const struct dvm_stream *s,
+                                struct dvm_pull_state *ps)
+{
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) {
+        ps->read_failed = true;
+        return -1;
+    }
+    if (ps->have_seen_max && s->off >= (long long)st.st_size)
+        return 0;
+    if (ps->have_seen_max && s->off > 0 &&
+        fseek(f, (long)s->off, SEEK_SET) != 0) {
+        ps->read_failed = true;
+        return -1;
+    }
+    return 1;
+}
+
+/* The largest seq in one stream. A token that already carries seq.max reads
+ * only the suffix after the resume offset; the first page still reads all. */
 static void dvm_stream_max_seq(const struct dvm_stream *s,
                                struct dvm_pull_state *ps)
 {
@@ -1944,10 +2037,20 @@ static void dvm_stream_max_seq(const struct dvm_stream *s,
 #endif
     FILE *f = fopen(s->path, "rb");
     struct dvm_row r;
+    int placed;
     if (!f)
         return;
+    placed = dvm_max_seq_position(f, s, ps);
+    if (placed != 1) {
+        (void)fclose(f);
+        return;
+    }
     for (;;) {
+        long long start = (long long)ftell(f);
         enum dvm_line_kind k = dvm_read_line(f, ps->line, sizeof(ps->line));
+        long long end = (long long)ftell(f);
+        if (start >= 0 && end >= start)
+            dvm_count_scan(start, end, s->off);
         if (k == DVM_LINE_EOF || k == DVM_LINE_PARTIAL)
             break;
         if (k == DVM_LINE_OK && dvm_parse_row(ps->line, &r) &&
@@ -2098,7 +2201,12 @@ static bool dvm_token_build(const struct dvm_pull_state *ps, long long floor,
             return false;
         used += (size_t)n;
     }
-    return true;
+    if (!ps->have_seen_max)
+        return true;
+    n = snprintf(out + used, cap - used, "%sseq.max:%lld",
+                 (used > 0 && out[used - 1] != '|') ? "," : "",
+                 ps->seen_max);
+    return n > 0 && (size_t)n < cap - used;
 }
 
 /* Park every current stream at its end. Floor stays 0: a positive scalar
@@ -2144,9 +2252,17 @@ static bool dvm_prefix_streams(struct dvm_pull_state *ps, const char *token)
     ps->cursor = filter.since;
     const char *p = filter.token;
     while (*p) {
+        char name[DVM_STREAM_NAME_MAX + 1];
+        long long off = 0;
+        if (dvm_token_entry(p, name, sizeof(name), &off, &p)) return false;
+        if (strcmp(name, "seq.max") == 0) {
+            dvm_note_seq_max(ps, off);
+            continue;
+        }
         if (ps->nstreams >= DVM_STREAMS_MAX) return false;
         struct dvm_stream *stream = &ps->streams[ps->nstreams];
-        if (dvm_token_entry(p, stream->name, sizeof(stream->name), &stream->head_end, &p)) return false;
+        memcpy(stream->name, name, strlen(name) + 1u);
+        stream->head_end = off;
         if (ps->nstreams && strcmp(ps->streams[ps->nstreams - 1].name, stream->name) >= 0) return false;
         ps->nstreams++;
     }
@@ -2226,6 +2342,8 @@ bool zcl_devagent_mail_cursor_prefix(const char *resume, const char *end_token,
     long long floor = 0;
     bool ok = dvm_prefix_streams(&ps, end_token) && dvm_prefix_base(&ps, resume, &floor) && floor == ps.cursor;
     for (size_t i = 0; ok && i < rows->num_children; i++) ok = dvm_prefix_row(&ps, json_at(rows, i));
+    /* Coverage is the stream prefix only. seq.max stays on pull tokens. */
+    ps.have_seen_max = false;
     if (ok) ok = dvm_token_build(&ps, floor, out, cap);
     free(ps.streams);
     return ok;
@@ -2336,6 +2454,7 @@ static bool dvm_streams_start(struct zcl_command_reply *reply,
         dvm_fail(reply, "BAD_INPUT", why, "input.since resume token");
         return false;
     }
+    dvm_raise_seen_max(ps);
     for (size_t i = 0; i < ps->nstreams; i++) {
         struct dvm_stream *s = &ps->streams[i];
         if (!defer_cursor)
@@ -2486,7 +2605,12 @@ static void dvm_pull(const struct zcl_command_request *req,
             return;
         }
         /* Keep the merge's per-stream byte order: a later append may have
-         * an older timestamp, but must remain after its consumed prefix. */
+         * an older timestamp, but must remain after its consumed prefix.
+         * A brief page that deferred the scan must not invent seq.max. */
+        if (!brief_drain) {
+            ps->have_seen_max = true;
+            ps->seen_max = ps->cursor;
+        }
         if (dvm_token_build(ps, filter.since, token, sizeof(token)))
             dvm_pull_build_reply(reply, &pg, ps, token, filter.resumed);
         else
@@ -2671,15 +2795,18 @@ static void dvm_ack(const struct zcl_command_request *req,
                  "format budget exceeded");
         return;
     }
-    /* Write to a temp file in the SAME directory, then rename it over the
-     * cursor: rename(2) is atomic, so a crash mid-write leaves the previous
-     * cursor intact instead of an empty file that would silently rewind or
-     * lose every reader's position. */
-    struct dvm_ack_write_result written = dvm_ack_write_cursor(tmp, path,
-                                                               text, len);
-    if (written.code) {
-        dvm_fail(reply, written.code, written.message, written.evidence);
-        return;
+    /* Same bytes are already durable. Rewriting them wakes a directory
+     * watcher and turns an idle ack into a poll. */
+    if (!dvm_file_same(path, text, len)) {
+        struct dvm_ack_write_result written = dvm_ack_write_cursor(tmp, path,
+                                                                   text, len);
+        if (written.code) {
+            dvm_fail(reply, written.code, written.message, written.evidence);
+            return;
+        }
+#ifdef ZCL_TESTING
+        dvm_test_ack_writes++;
+#endif
     }
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_str(&reply->data, "agent", agent);

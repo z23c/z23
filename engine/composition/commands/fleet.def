@@ -737,13 +737,13 @@ ZCL_COMMAND_READY_READ(
     "stream-order prefixes: start 0|, resume returned cursor_token even when "
     "changes_truncated. Credit displayed changes after row/byte limits; "
     "omitted rows pending. Zero-fit pending pages refuse without "
-    "advance; token pages omit screen. Integer since is lossy; integer cursor "
-    "informational. changes_truncated/changes_dropped and budget_truncated "
+    "advance; token pages omit screen. Integer since is lossy; integer cursor. "
+    "changes_truncated/changes_dropped and budget_truncated "
     "report cuts. caller: grant mode/sender label or null+reason/scopes/"
     "expiry, never grant id; local operator: mode only. Read-only.", 65536,
     "fleet,steer,brief,steering,chatgpt,cursor,agents,blockers,capacity",
     "zcl.fleet_steer_brief.input.v1", "zcl.fleet_steer_brief.v1",
-    "grant,since,limit,json,changes_only", "",
+    "grant,since,limit,json,changes_only,generation", "",
     "z23 fleet steer brief",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

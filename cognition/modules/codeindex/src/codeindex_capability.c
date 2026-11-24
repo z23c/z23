@@ -889,6 +889,27 @@ static bool cap_is_header(const char *path)
     return n >= 2 && path[n - 2] == '.' && path[n - 1] == 'h';
 }
 
+static bool cap_is_c_file(const char *path)
+{
+    size_t n = path ? strlen(path) : 0;
+    return n >= 2 && path[n - 2] == '.' && path[n - 1] == 'c';
+}
+
+/* Basename minus one extension equals `stem`. "subsidy.c" matches "subsidy";
+ * "test_amount_subsidy_edge.c" does not. */
+static bool cap_basename_eq(const char *path, const char *stem)
+{
+    const char *slash;
+    const char *base;
+    size_t n;
+    if (!path || !stem || !stem[0]) return false;
+    slash = strrchr(path, '/');
+    base = slash ? slash + 1 : path;
+    n = strlen(stem);
+    if (strncmp(base, stem, n) != 0) return false;
+    return base[n] == '.' || base[n] == '\0';
+}
+
 /* Base-term groups covered by a mask over the stem set. An alias hit covers
  * the term it stands for. */
 static uint32_t cap_groups(const struct cap_stemset *ss, uint32_t mask)
@@ -1147,8 +1168,105 @@ static void cap_admit_pass(const struct cap_scan *s, int need,
     }
 }
 
+static bool cap_pool_has(const int *pool_idx, int pool_n, int idx)
+{
+    for (int i = 0; i < pool_n; i++)
+        if (pool_idx[i] == idx) return true;
+    return false;
+}
+
+/* A stem this common is a word like "block", not the name of the edit. */
+#define CI_CAP_RARE_PATH_MAX 32
+
+/* True when stem b is a better "file named for the question" than best.
+ * More of the question matched by that filename wins; a tie prefers the
+ * stem that occurs in fewer paths. */
+static bool cap_named_better(int b, int best, const int *hits, const int *cover)
+{
+    if (best < 0) return true;
+    if (cover[b] != cover[best]) return cover[b] > cover[best];
+    return hits[b] < hits[best];
+}
+
+/* The query stem whose filename covers the most of the question, when that
+ * stem still occurs in few paths. "amount" may name a file and be rare, but
+ * subsidy.c covers block, subsidy and height, so "subsidy" wins. NULL when
+ * nothing qualifies. */
+static const char *cap_rarest_named(const struct cap_scan *s,
+                                    const struct ci_capability_query *q)
+{
+    int hits[CI_CAPABILITY_TERM_CAP];
+    int cover[CI_CAPABILITY_TERM_CAP];
+    bool named[CI_CAPABILITY_TERM_CAP];
+    int nterms = q->term_count;
+    int best = -1;
+    if (nterms > CI_CAPABILITY_TERM_CAP) nterms = CI_CAPABILITY_TERM_CAP;
+    for (int b = 0; b < nterms; b++) {
+        hits[b] = 0;
+        cover[b] = 0;
+        named[b] = false;
+    }
+    for (int i = 0; i < s->n; i++) {
+        uint32_t covered = cap_groups(&s->ss,
+                                      s->a[i].path_mask | s->a[i].stem_mask);
+        int matched = cap_terms_matched(s, &s->a[i]);
+        for (int b = 0; b < nterms; b++) {
+            if (covered & (1u << b)) hits[b]++;
+            if (!cap_basename_eq(s->a[i].path, q->stems[b])) continue;
+            named[b] = true;
+            if (matched > cover[b]) cover[b] = matched;
+        }
+    }
+    for (int b = 0; b < nterms; b++) {
+        if (!named[b] || hits[b] > CI_CAP_RARE_PATH_MAX) continue;
+        if (cap_named_better(b, best, hits, cover)) best = b;
+    }
+    return best < 0 ? NULL : q->stems[best];
+}
+
+/* The fixed score pool dropped this named file. Keep it by replacing the
+ * lowest-scoring occupant that is not itself named for `rare`. */
+static void cap_pool_keep_named(const struct cap_scan *s, const char *rare,
+                                int *pool_idx, int pool_n, int named_i)
+{
+    int at = -1;
+    int low = 0;
+    if (pool_n < CI_CAP_RANK_POOL) return;
+    for (int i = 0; i < pool_n; i++) {
+        int sc;
+        if (cap_basename_eq(s->a[pool_idx[i]].path, rare)) continue;
+        sc = cap_score(s, &s->a[pool_idx[i]]);
+        if (at < 0 || sc < low ||
+            (sc == low && strcmp(s->a[pool_idx[i]].path,
+                                 s->a[pool_idx[at]].path) > 0)) {
+            at = i;
+            low = sc;
+        }
+    }
+    if (at >= 0) pool_idx[at] = named_i;
+}
+
+/* Term-count admission drops a file that is literally named for the rare
+ * stem when the question also carries words that file does not use. Keep
+ * those files when they still match at least half the question. */
+static void cap_admit_named(const struct cap_scan *s, const char *rare,
+                            int floor_need, int *pool_idx, int *pool_n)
+{
+    if (!rare || !rare[0]) return;
+    for (int i = 0; i < s->n; i++) {
+        if (!cap_basename_eq(s->a[i].path, rare)) continue;
+        if (cap_terms_matched(s, &s->a[i]) < floor_need) continue;
+        if (cap_pool_has(pool_idx, *pool_n, i)) continue;
+        int sc = cap_score(s, &s->a[i]);
+        if (sc <= 0) continue;
+        cap_pool_insert(s, pool_idx, pool_n, i, sc);
+        if (!cap_pool_has(pool_idx, *pool_n, i))
+            cap_pool_keep_named(s, rare, pool_idx, *pool_n, i);
+    }
+}
+
 static int cap_admit(const struct cap_scan *s, struct ci_capability_query *q,
-                     int *pool_idx)
+                     const char *rare, int *pool_idx)
 {
     /* Admission. Every term must be matched. Only if that is empty do we
      * relax one term at a time, down to half the question (rounded up), and
@@ -1164,6 +1282,10 @@ static int cap_admit(const struct cap_scan *s, struct ci_capability_query *q,
         if (need < q->term_count) q->relaxed = true;
         cap_admit_pass(s, need, pool_idx, &pool_n);
     }
+    /* Only a question that already had to drop a term. An all-term hit
+     * keeps the order it had. */
+    if (q->relaxed)
+        cap_admit_named(s, rare, floor_need, pool_idx, &pool_n);
     return pool_n;
 }
 
@@ -1217,12 +1339,30 @@ static bool cap_fill_pool(struct codeindex *ci, struct cap_scan *s,
     return true;
 }
 
-/* Ranking order after usage is known: terms answered, then whether the path or
- * purpose covers the whole question, a filename covering at least two terms,
- * how load-bearing the file is, the cheap score, then path for determinism. */
-static int cap_order(const struct ci_capability *p,
-                     const struct ci_capability *k)
+/* <0 when `p` is the file named for `rare` and `k` is not. Two such files
+ * put the .c (the edit) ahead of the header. 0 when this key does not
+ * decide. */
+static int cap_named_cmp(const struct ci_capability *p,
+                         const struct ci_capability *k, const char *rare)
 {
+    bool pn = rare && cap_basename_eq(p->header, rare);
+    bool kn = rare && cap_basename_eq(k->header, rare);
+    if (pn != kn) return pn ? -1 : 1;
+    if (!pn) return 0;
+    bool pc = cap_is_c_file(p->header), kc = cap_is_c_file(k->header);
+    if (pc != kc) return pc ? -1 : 1;
+    return 0;
+}
+
+/* Ranking order after usage is known: a file named for the rarest stem,
+ * then terms answered, then whether the path or purpose covers the whole
+ * question, then how load-bearing the file is, then the cheap score, then
+ * path for determinism. Returns <0 when `p` goes first. */
+static int cap_order(const struct ci_capability *p,
+                     const struct ci_capability *k, const char *rare)
+{
+    int named = cap_named_cmp(p, k, rare);
+    if (named) return named;
     if (p->terms_matched != k->terms_matched)
         return p->terms_matched > k->terms_matched ? -1 : 1;
     bool ps = p->score >= CI_W_WHOLE_COVER, ks = k->score >= CI_W_WHOLE_COVER;
@@ -1236,12 +1376,12 @@ static int cap_order(const struct ci_capability *p,
     return strcmp(p->header, k->header);
 }
 
-static void cap_rerank(struct ci_capability *pool, int pool_n)
+static void cap_rerank(struct ci_capability *pool, int pool_n, const char *rare)
 {
     for (int i = 1; i < pool_n; i++) {
         struct ci_capability key = pool[i];
         int j = i - 1;
-        while (j >= 0 && cap_order(&pool[j], &key) > 0) {
+        while (j >= 0 && cap_order(&pool[j], &key, rare) > 0) {
             pool[j + 1] = pool[j];
             j--;
         }
@@ -1268,8 +1408,9 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
     if (!cap_scan_run(ci, &s, q))
         LOG_ERR("codeindex", "capability scan failed");
 
+    const char *rare = cap_rarest_named(&s, q);
     int pool_idx[CI_CAP_RANK_POOL];
-    int pool_n = cap_admit(&s, q, pool_idx);
+    int pool_n = cap_admit(&s, q, rare, pool_idx);
     if (pool_n == 0) { free(s.a); return 0; }
 
     /* Materialise the pool, then buy the usage count for it. */
@@ -1278,7 +1419,7 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
     if (!cap_fill_pool(ci, &s, pool_idx, pool_n, pool))
         LOG_ERR("codeindex", "capability usage failed");
 
-    cap_rerank(pool, pool_n);
+    cap_rerank(pool, pool_n, q->relaxed ? rare : NULL);
     int n = pool_n < cap ? pool_n : cap;
     for (int i = 0; i < n; i++) out[i] = pool[i];
     return n;

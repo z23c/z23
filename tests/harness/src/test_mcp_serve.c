@@ -959,6 +959,68 @@ static bool ms_unit_dispatch(struct ms_unit *u, const char *frame,
     return mcp_dispatch(&ep, frame, strlen(frame), reply) == MCP_REPLY;
 }
 
+/* The 16 hex chars of result.schema_generation, or false when absent. */
+static bool ms_copy_gen(const char *reply, char out[17])
+{
+    const char *p = reply ? strstr(reply, "\"schema_generation\":\"") : NULL;
+    size_t i;
+    if (!p)
+        return false;
+    p += strlen("\"schema_generation\":\"");
+    for (i = 0; i < 16; i++) {
+        char c = p[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+        out[i] = c;
+    }
+    if (p[16] != '"')
+        return false;
+    out[16] = '\0';
+    return true;
+}
+
+static int case_unit_schema(void)
+{
+    int failures = 0;
+    TEST_CASE("tools/list serves the live schema and a repeat is not-modified") {
+        struct zcl_command_spec spec = {0};
+        struct ms_unit u = {0, &spec};
+        struct mcp_buf first, again, stale;
+        char gen[17], req[192];
+        spec.path = "unit.read";
+        spec.mode = ZCL_COMMAND_MODE_SYNC;
+        spec.effect = ZCL_COMMAND_EFFECT_READ;
+        ASSERT(ms_unit_dispatch(
+            &u, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
+            &first));
+        ASSERT(strstr(first.p, "\"name\":\"unit_run\"") != NULL);
+        ASSERT(strstr(first.p, "inputSchema") != NULL);
+        ASSERT(ms_copy_gen(first.p, gen));
+        snprintf(req, sizeof(req),
+                 "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\","
+                 "\"params\":{\"schema_generation\":\"%s\"}}",
+                 gen);
+        ASSERT(ms_unit_dispatch(&u, req, &again));
+        ASSERT(again.len < first.len);
+        ASSERT(strstr(again.p, "\"not_modified\":true") != NULL);
+        ASSERT(strstr(again.p, "inputSchema") == NULL);
+        ASSERT(strstr(again.p, gen) != NULL);
+        ASSERT(ms_unit_dispatch(
+            &u, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\","
+                "\"params\":{\"schema_generation\":\"stale-schema\"}}",
+            &stale));
+        ASSERT(strstr(stale.p, "\"not_modified\":false") != NULL);
+        ASSERT(strstr(stale.p, "inputSchema") != NULL);
+        ASSERT(strstr(stale.p, "\"name\":\"unit_run\"") != NULL);
+        ASSERT(strstr(stale.p, "stale-schema") == NULL);
+        ASSERT(strstr(stale.p, gen) != NULL);
+        mcp_buf_free(&first);
+        mcp_buf_free(&again);
+        mcp_buf_free(&stale);
+    } TEST_END
+    return failures;
+}
+
 static int case_unit_version(void)
 {
     int failures = 0;
@@ -2082,6 +2144,50 @@ static int case_units(void)
     return failures;
 }
 
+/* The cursor is in the prefix a byte cap would echo, and it covers the
+ * changes row the cap cuts. Echoing it would skip that row. A select
+ * projection puts that same token under select.data or on the path key. */
+static int case_resume_held(void)
+{
+    int failures = 0;
+    struct mcp_buf b;
+    char src[4200];
+    char blob[3600];
+    size_t i;
+    static const char *const fmts[] = {
+        "{\"ok\":true,\"data\":{\"cursor_token\":\"9|mail:40\","
+        "\"changes\":\"%s\"}}",
+        "{\"ok\":true,\"status\":\"ok\",\"select\":{\"data\":{"
+        "\"cursor_token\":\"9|mail:40\",\"changes\":\"%s\"}}}",
+        "{\"ok\":true,\"status\":\"ok\",\"select\":{"
+        "\"data.cursor_token\":\"9|mail:40\",\"data.changes\":\"%s\"}}",
+        "{\"ok\":true,\"status\":\"ok\",\"select\":{"
+        "\"data.cursor\":\"9|mail:40\",\"data.changes\":\"%s\"}}",
+    };
+    TEST_CASE("a truncated reply does not echo a cursor past cut rows") {
+        memset(blob, 'B', sizeof(blob) - 1);
+        blob[sizeof(blob) - 1] = '\0';
+        for (i = 0; i < sizeof(fmts) / sizeof(fmts[0]); i++) {
+            ASSERT(snprintf(src, sizeof(src), fmts[i], blob) > 0);
+            mcp_buf_init(&b);
+            ASSERT(mcp_cap_text(&b, src, strlen(src), 512));
+            ASSERT(b.len <= 512);
+            ASSERT(json_valid(b.p, b.len));
+            ASSERT(strstr(b.p, "\"truncated\":true") != NULL);
+            ASSERT(strstr(b.p, "\"resume_cursor_missing\":true") != NULL);
+            ASSERT(strstr(b.p, "9|mail:40") == NULL);
+            ASSERT(strstr(b.p, "\"partial\":") == NULL);
+            mcp_buf_free(&b);
+            mcp_buf_init(&b);
+            ASSERT(!mcp_cap_text(&b, src, strlen(src), sizeof(src)));
+            ASSERT(strstr(b.p, "9|mail:40") != NULL);
+            ASSERT(strstr(b.p, "resume_cursor_missing") == NULL);
+            mcp_buf_free(&b);
+        }
+    } TEST_END
+    return failures;
+}
+
 /* Project one reply through mcp_select_reply; true when it projected and the
  * whole projection fits out. */
 static bool sm_project(const char *reply, const char *select, char *out,
@@ -2327,10 +2433,12 @@ int test_mcp_serve(void)
 #else
     char home[PATH_MAX], checkout[PATH_MAX + 16], head[128];
     failures += case_units();
+    failures += case_resume_held();
     failures += case_select_missing();
     failures += case_policy_reads();
     failures += case_policy_wallet_data();
     failures += case_policy_wallet_catalog();
+    failures += case_unit_schema();
     failures += case_unit_version();
     failures += case_policy_mutations();
     failures += case_policy_idempotency();

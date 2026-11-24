@@ -818,6 +818,15 @@ static int gw_t_handshake(void)
             ASSERT_EQ(json_get_int(json_get(property, "maxLength")), 64);
         }
         ASSERT_STR_EQ(json_get_str(json_get(brief, "name")), "steer_brief");
+        const struct json_value *brief_properties =
+            json_get(json_get(brief, "inputSchema"), "properties");
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(brief_properties, "json"),
+                                            "type")),
+                      "boolean");
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(brief_properties,
+                                                     "generation"),
+                                            "type")),
+                      "string");
         const struct json_value *annotations = json_get(brief, "annotations");
         ASSERT(annotations && json_get_bool(json_get(annotations, "readOnlyHint")));
         ASSERT(!json_get_bool(json_get(annotations, "destructiveHint")));

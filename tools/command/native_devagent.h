@@ -65,6 +65,12 @@ void zcl_devagent_mail_test_set_after_brief_probe(
     zcl_devagent_mail_test_hook_fn hook);
 void zcl_devagent_mail_test_set_after_exact_read(zcl_devagent_mail_test_hook_fn hook);
 size_t zcl_devagent_mail_test_max_seq_scans(bool reset);
+/* Bytes of an acknowledged prefix reread while computing the cursor, and
+ * bytes actually read from stream files during that scan. An empty
+ * incremental pull at a durable end must leave both at zero. */
+unsigned long long zcl_devagent_mail_test_prefix_bytes(bool reset);
+unsigned long long zcl_devagent_mail_test_content_reads(bool reset);
+size_t zcl_devagent_mail_test_ack_writes(bool reset);
 #endif
 
 /* ── SUITE VERDICT ────────────────────────────────────────────────────────
