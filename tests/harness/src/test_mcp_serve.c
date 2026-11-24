@@ -1560,6 +1560,18 @@ static int case_wiki_search(const char *home, const char *checkout,
         snprintf(before, sizeof(before), "%.*s", (int)sizeof(before) - 1, strstr(m.line, "core.status.brief"));
         ASSERT(ms_tool(&m, 5, "z23_search", "{\"query\":\"status brief\",\"scope\":\"commands\"}"));
         ASSERT(strstr(m.line, before) != NULL);
+        const char *scopes[] = {"commands", "wiki"};
+        const char *valid[] = {"", ",\"limit\":1", ",\"limit\":5"};
+        char search_args[256];
+        for (size_t s = 0; s < 2; s++) {
+            for (size_t i = 0; i < 3; i++) {
+                snprintf(search_args, sizeof(search_args),
+                         "{\"query\":\"lint\",\"scope\":\"%s\"%s}",
+                         scopes[s], valid[i]);
+                ASSERT(ms_tool(&m, 20, "z23_search", search_args));
+                ASSERT(has(&m, "\"isError\":false"));
+            }
+        }
         ASSERT(ms_tool(&m, 6, "z23_code", MS_GUIDE_ARGS));
         ASSERT(has(&m, "\"isError\":false"));
         ASSERT(has(&m, "zcl.code_guide_brief.v1"));
@@ -1606,6 +1618,18 @@ static int case_wiki_search(const char *home, const char *checkout,
         ASSERT(stub > 0);
         ASSERT(ms_stop_child(&stub));
         ASSERT(ms_start_node(&m, home, checkout, dd, dead, err));
+        const char *invalid[] = {"0", "-1", "6", "1.5", "\"1\"", "null"};
+        for (size_t s = 0; s < 2; s++) {
+            for (size_t i = 0; i < 6; i++) {
+                snprintf(search_args, sizeof(search_args),
+                         "{\"query\":\"lint\",\"scope\":\"%s\",\"limit\":%s}",
+                         scopes[s], invalid[i]);
+                ASSERT(ms_tool(&m, 21, "z23_search", search_args));
+                ASSERT(has(&m, "\"isError\":true"));
+                ASSERT(has(&m, "BAD_ARGUMENT"));
+                ASSERT(!has(&m, "NODE_UNAVAILABLE"));
+            }
+        }
         ASSERT(ms_tool(&m, 2, "z23_search", "{\"query\":\"lint\",\"scope\":\"wiki\"}"));
         ASSERT(has(&m, "\"isError\":true"));
         ASSERT(has(&m, "NODE_UNAVAILABLE"));

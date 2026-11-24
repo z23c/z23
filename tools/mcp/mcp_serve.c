@@ -1401,6 +1401,13 @@ static bool tool_search(struct mcp_serve *s, const struct json_value *args,
         *is_error = true;
         return true;
     }
+    const struct json_value *lim = json_get(args, "limit");
+    if (lim && (lim->type != JSON_INT || json_get_int(lim) < 1 ||
+                json_get_int(lim) > ZCL_COMMAND_SEARCH_LIMIT)) {
+        text_error(text, "BAD_ARGUMENT", "limit must be an integer from 1 to 5");
+        *is_error = true;
+        return true;
+    }
     if (scope && !strcmp(scope, "wiki"))
         return tool_search_wiki(s, args, query, text, is_error);
     return tool_search_commands(s, args, query, text, is_error);
