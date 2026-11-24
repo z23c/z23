@@ -85,19 +85,52 @@ static int64_t max_scroll(const struct gui_ui *ui, const struct gui_node *n,
     return m < 0 ? 0 : m;
 }
 
+/* Rows a fit column measures: the first ones, so widths never jump on scroll. */
+#define FIT_ROWS_MAX 64
+
+static int32_t cell_fit_w(const struct gui_ui *ui, const struct gui_table_source *src, size_t row, uint8_t c,
+                          int32_t px)
+{
+    char raw[256], cell[300];
+    enum gui_style cs = GS_BODY;
+    if (!src->cell(src->ctx, row, c, raw, sizeof(raw), &cs)) return 0;
+    size_t cl = gui_ui_glyph_map(raw, strlen(raw), cell, sizeof(cell));
+    return gui_ui_run_width(GUI_FONT_TEXT, px, cell, cl) + 2 * gui_px(ui, 10);
+}
+
+/* A negative width fits the header and the first rows' cells (at least
+ * -width logical px, at most half the table), like Qt's ResizeToContents. */
+static int32_t fit_width(const struct gui_ui *ui, const struct gui_node *n, uint8_t c)
+{
+    const struct gui_column *col = &n->cols[c];
+    int32_t w = gui_px(ui, -col->width);
+    int32_t hw = gui_text_width(GUI_FONT_STRONG, head_px(ui), col->label, strlen(col->label)) + 2 * gui_px(ui, 12);
+    if (hw > w) w = hw;
+    const struct gui_table_source *src = gui_ui_source(ui, n->bind);
+    int32_t px = gui_ui_text_px(ui, GS_TABLE);
+    size_t rows = src ? src->rows(src->ctx) : 0;
+    for (size_t r = 0; r < rows && r < FIT_ROWS_MAX; r++) {
+        int32_t cw = cell_fit_w(ui, src, r, c, px);
+        if (cw > w) w = cw;
+    }
+    return w < n->frame.w / 2 ? w : n->frame.w / 2;
+}
+
 static void col_geometry(const struct gui_ui *ui, const struct gui_node *n,
                          int32_t *x, int32_t *w)
 {
     int32_t fixed = 0, grow = 0;
     for (uint8_t c = 0; c < n->ncols; c++) {
-        if (n->cols[c].width) fixed += gui_px(ui, n->cols[c].width);
+        int32_t cw = n->cols[c].width;
+        w[c] = cw > 0 ? gui_px(ui, cw) : cw < 0 ? fit_width(ui, n, c) : 0;
+        if (cw) fixed += w[c];
         else grow++;
     }
     int32_t rest = n->frame.w - fixed;
     int32_t each = grow && rest > 0 ? rest / grow : 0, pos = n->frame.x;
     for (uint8_t c = 0; c < n->ncols; c++) {
         x[c] = pos;
-        w[c] = n->cols[c].width ? gui_px(ui, n->cols[c].width) : each;
+        if (!n->cols[c].width) w[c] = each;
         pos += w[c];
     }
 }
@@ -222,7 +255,13 @@ static void paint_header(struct gui_ui *ui, struct gui_surface *s, const struct 
 {
     int32_t px = head_px(ui), asc, desc, lh, hh = head_h(ui), pad = gui_px(ui, 12);
     gui_font_metrics(GUI_FONT_STRONG, px, &asc, &desc, &lh);
-    gui_fill_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + 1, n->frame.w - 2, hh - 1 },
+    /* The header band follows the table's rounded top corners (beta13), so no
+     * strip of the table border shows above it as a separate rule. */
+    int32_t rad = gui_px(ui, gui_theme(GS_TABLE)->radius) - 1;
+    rad = rad < 0 ? 0 : rad > hh / 2 ? hh / 2 : rad;
+    gui_fill_round_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + 1, n->frame.w - 2, hh - 1 }, rad,
+                        RGB(0x15, 0x17, 0x1c));
+    gui_fill_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + 1 + rad, n->frame.w - 2, hh - 1 - rad },
                   RGB(0x15, 0x17, 0x1c));
     gui_fill_rect(s, (struct gui_rect){ n->frame.x + 1, n->frame.y + hh - 1, n->frame.w - 2, 1 },
                   RGB(0x2a, 0x2d, 0x35));

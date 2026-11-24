@@ -174,7 +174,8 @@ static void summary(struct gui_tree *t, const struct zw_model *m)
 
 static void balances(struct gui_tree *t)
 {
-    static const struct gui_column cols[2] = { { "Address", 0, false, false }, { "Amount", 170, true, false } };
+    static const struct gui_column cols[2] = { { "Address", 0, false, false },
+                                               { "Amount", GUI_COL_FIT, true, false } };
     zw_group_begin(t, "h_addrs", "Address Balances", 15, 14, true);
     gui_table(t, "h_balances", "home.balances", cols, 2);
     gui_attr(t, GUI_A_GROW, 1);

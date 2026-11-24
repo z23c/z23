@@ -66,9 +66,10 @@ enum {
 enum gui_attr { GUI_A_GAP, GUI_A_PAD, GUI_A_W, GUI_A_H, GUI_A_GROW,
                 GUI_A_ALIGN };
 
+#define GUI_COL_FIT (-1) /* gui_column.width: as wide as its header and cells */
 struct gui_column {
     const char *label;
-    int32_t width; /* logical px; 0 = grow */
+    int32_t width; /* logical px; 0 = grow; < 0 = fit header and first rows, at least -width */
     bool right, sortable;
 };
 
