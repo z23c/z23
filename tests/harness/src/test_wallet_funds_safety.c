@@ -44,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -1175,16 +1176,23 @@ static int wfs_test_owner_tip_guard(void)
 }
 
 /* The block post-step publishes the tip before it advances the wallet, so a
- * send landing in that window waits for the advance instead of failing. */
+ * send landing in that window waits for the advance instead of failing. The
+ * test grades outcomes and counted waits, never elapsed time: the advancer
+ * moves the height only once the send has entered its wait (a counted event),
+ * and a send that never sees an advance is refused when its budget runs out. */
 struct wfs_advance {
     struct wallet *w;
     int height;
+    int waits_before;
+    atomic_bool send_done;
 };
 
 static void *wfs_advance_thread(void *arg)
 {
     struct wfs_advance *a = arg;
-    platform_sleep_ms(100);
+    while (wallet_send_tip_waits_entered() == a->waits_before &&
+           !atomic_load(&a->send_done))
+        platform_sleep_ms(1);
     zcl_mutex_lock(&a->w->cs);
     a->w->best_block_height = a->height;
     zcl_mutex_unlock(&a->w->cs);
@@ -1192,11 +1200,11 @@ static void *wfs_advance_thread(void *arg)
     return NULL;
 }
 
-static int64_t wfs_now_ms(void)
+static void wfs_set_cursor(struct wallet *w, int height)
 {
-    struct timespec ts;
-    platform_time_monotonic_timespec(&ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    zcl_mutex_lock(&w->cs);
+    w->best_block_height = height;
+    zcl_mutex_unlock(&w->cs);
 }
 
 static int wfs_test_tip_guard_waits_one_block(void)
@@ -1214,39 +1222,35 @@ static int wfs_test_tip_guard_waits_one_block(void)
     g_wfs_tip = 100;
     wallet_set_send_tip_wait_ms(5000);
 
-    struct wfs_advance adv = {.w = w, .height = 100};
+    struct wfs_advance adv = {.w = w, .height = 100,
+                              .waits_before = wallet_send_tip_waits_entered()};
+    atomic_init(&adv.send_done, false);
     pthread_t th;
     bool started = pthread_create(&th, NULL, wfs_advance_thread, &adv) == 0;
-    int64_t t0 = wfs_now_ms();
     bool ok = wallet_send_build_height(w, &height, &why);
-    int64_t took = wfs_now_ms() - t0;
+    atomic_store(&adv.send_done, true);
     if (started)
         pthread_join(th, NULL);
     WFS_CHECK("one block behind: the send waits for the advance and proceeds",
               started && ok && height == 100);
-    WFS_CHECK("the wait ended on the advance, well inside the 5 s budget",
-              took >= 50 && took < 3000);
+    WFS_CHECK("that send entered the wait exactly once",
+              wallet_send_tip_waits_entered() == adv.waits_before + 1);
 
-    zcl_mutex_lock(&w->cs);
-    w->best_block_height = 98;
-    zcl_mutex_unlock(&w->cs);
-    t0 = wfs_now_ms();
+    int waits = wallet_send_tip_waits_entered();
+    wfs_set_cursor(w, 98);
     ok = wallet_send_build_height(w, &height, &why);
-    took = wfs_now_ms() - t0;
-    WFS_CHECK("two blocks behind: refused at once, no wait",
-              !ok && took < 1000 && why &&
+    WFS_CHECK("two blocks behind: refused with the lag message",
+              !ok && why &&
                   strcmp(why, "wallet is 2 blocks behind chain tip "
                               "(scanned 98, tip 100)") == 0);
+    WFS_CHECK("two blocks behind: refused without entering the wait",
+              wallet_send_tip_waits_entered() == waits);
 
-    zcl_mutex_lock(&w->cs);
-    w->best_block_height = 99;
-    zcl_mutex_unlock(&w->cs);
-    wallet_set_send_tip_wait_ms(150);
-    t0 = wfs_now_ms();
+    wfs_set_cursor(w, 99);
+    wallet_set_send_tip_wait_ms(20);
     ok = wallet_send_build_height(w, &height, &why);
-    took = wfs_now_ms() - t0;
-    WFS_CHECK("one block behind and no advance: refused after the bounded wait",
-              !ok && took >= 100 && took < 3000);
+    WFS_CHECK("one block behind and no advance: refused once the wait is spent",
+              !ok && wallet_send_tip_waits_entered() == waits + 1);
     WFS_CHECK("the refusal says the wallet is catching up and to retry",
               why && strcmp(why, "wallet is catching up to the chain tip "
                                  "(scanned 99, tip 100); retry in a moment") ==

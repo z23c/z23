@@ -145,6 +145,9 @@ void wallet_set_chain_tip_source(wallet_chain_tip_source source, void *ctx);
  * cursor, which wakes any waiting send. */
 void wallet_set_send_tip_wait_ms(int ms);
 void wallet_notify_height_advanced(void);
+/* Count of sends that entered the one-block-lag wait since process start;
+ * lets a test assert the wait ran (or did not) without reading a clock. */
+int wallet_send_tip_waits_entered(void);
 
 /* The height a send builds against, resolved BEFORE anything is built or a
  * key is drawn. Refuses (error "wallet is N blocks behind chain tip (scanned

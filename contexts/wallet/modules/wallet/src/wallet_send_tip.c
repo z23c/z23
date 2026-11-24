@@ -6,6 +6,7 @@
 #include "wallet/wallet.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -20,6 +21,7 @@
 static wallet_chain_tip_source g_tip_source;
 static void *g_tip_ctx;
 static int g_wait_ms = WALLET_SEND_TIP_WAIT_MS_DEFAULT;
+static atomic_int g_waits_entered;
 
 static zcl_once_t g_gate_once = ZCL_ONCE_INIT;
 static zcl_mutex_t g_gate;
@@ -42,6 +44,11 @@ void wallet_set_chain_tip_source(wallet_chain_tip_source source, void *ctx)
 void wallet_set_send_tip_wait_ms(int ms)
 {
     g_wait_ms = ms < 0 ? 0 : ms;
+}
+
+int wallet_send_tip_waits_entered(void)
+{
+    return atomic_load(&g_waits_entered);
 }
 
 void wallet_notify_height_advanced(void)
@@ -106,6 +113,7 @@ static int wallet_settle_one_block_lag(struct wallet *w, int *best_out)
         *best_out = best;
         return tip;
     }
+    atomic_fetch_add(&g_waits_entered, 1);
     for (;;) {
         zcl_mutex_lock(&g_gate);
         best = wallet_cursor(w);
