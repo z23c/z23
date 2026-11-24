@@ -3332,6 +3332,7 @@ AGENT_IMPACT_RULE("contexts/commons/services/src/metaverse_telemetry_fill.c|plat
 AGENT_IMPACT_RULE("engine/models/include/models/def/model_fields_tables.def|engine/models/include/models/model_fields.h|tests/harness/src/test_model_fields.c", "model_fields models schema_migration make_lint_gates")
 AGENT_IMPACT_RULE("engine/models/include/models/def/blog_post_fields.def", "model_fields models blog make_lint_gates")
 AGENT_IMPACT_RULE("engine/models/include/models/def/tx_index_fields.def", "model_fields models make_lint_gates")
+AGENT_IMPACT_RULE("engine/models/include/models/def/fleet_board_delivery_fields.def", "model_fields models fleet_board_inbox schema_migration make_lint_gates")
 AGENT_IMPACT_RULE("contexts/market/models/include/models/def/market_download_fields.def", "model_fields models make_lint_gates")
 
 /* ── Remote authority for command leaves ──────────────────────────────
