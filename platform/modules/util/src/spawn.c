@@ -8,6 +8,7 @@
 
 #include "util/spawn.h"
 #include "spawn_binary_internal.h"
+extern char **environ; /* the capture child adopts a filtered copy */
 
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -852,35 +853,6 @@ static bool spawn_capture_anchor_parent(struct spawn_capture_anchor *anchor)
     return launched;
 }
 
-/* Z23_OUTPUT=compact shapes the result envelope of the process that sets it.
- * A z23 child that a tool spawns and parses (the land self-upgrade trial
- * wants every next hint's reason; windows-acceptance greps budget_exceeded)
- * must answer in the default envelope, so a spawned child never inherits it.
- * The filtered environment is built before fork(); the child only assigns
- * `environ`, which is async-signal-safe. NULL means nothing to filter. */
-extern char **environ;
-static char **spawn_env_without_z23_output(void)
-{
-    static const char key[] = "Z23_OUTPUT=";
-    size_t n = 0;
-    bool found = false;
-    for (; environ && environ[n]; n++)
-        found = found || strncmp(environ[n], key, sizeof(key) - 1) == 0;
-    if (!found)
-        return NULL;
-    char **copy = malloc((n + 1) * sizeof(*copy));
-    if (!copy) {
-        LOG_ERROR("spawn", "cannot filter Z23_OUTPUT from the child environment");
-        return NULL;
-    }
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++)
-        if (strncmp(environ[i], key, sizeof(key) - 1) != 0)
-            copy[k++] = environ[i];
-    copy[k] = NULL;
-    return copy;
-}
-
 /* Initialize the two optional out-params and validate/prep the capture
  * buffer. Folded out of spawn_capture_impl() to keep that function's
  * cyclomatic complexity under the cap: this carries every early-exit
@@ -929,7 +901,7 @@ static int spawn_capture_impl_cwd_observed(
     }
 
     int64_t launched_us = platform_time_monotonic_us();
-    char **child_env = spawn_env_without_z23_output();
+    char **child_env = zcl_spawn_env_without_z23_output(); /* see spawn_binary.c */
     pid_t pid = fork();
     if (pid < 0) {
         close(outpipe[0]); close(outpipe[1]);

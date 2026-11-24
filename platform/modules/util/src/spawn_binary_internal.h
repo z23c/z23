@@ -5,6 +5,8 @@
 #include "util/spawn.h"
 #if !defined(_WIN32)
 bool zcl_spawn_private_pipe(int p[2]);
+/* A copy of environ without Z23_OUTPUT (NULL when nothing to strip). */
+char **zcl_spawn_env_without_z23_output(void);
 #if defined(ZCL_TESTING)
 void zcl_spawn_private_prefork(const int *fds, size_t count);
 #endif

@@ -3,7 +3,9 @@
 #define _GNU_SOURCE
 #include "util/spawn.h"
 #include "spawn_binary_internal.h"
+#include <stdlib.h>
 #include <string.h>
+#include "util/log_macros.h"
 #ifndef _WIN32
 #include <errno.h>
 #include <fcntl.h>
@@ -164,3 +166,35 @@ struct zcl_result zcl_spawn_capture_binary_merged(
 {
     return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, true, out);
 }
+
+#ifndef _WIN32
+/* Z23_OUTPUT=compact shapes the result envelope of the process that sets it.
+ * A z23 child that a tool spawns and parses (the land self-upgrade trial
+ * wants every next hint's reason; windows-acceptance greps budget_exceeded)
+ * must answer in the default envelope, so a spawned child never inherits it.
+ * The filtered environment is built before fork(); the child only assigns
+ * `environ`, which is async-signal-safe. NULL means nothing to filter. */
+extern char **environ;
+char **zcl_spawn_env_without_z23_output(void)
+{
+    static const char key[] = "Z23_OUTPUT=";
+    size_t n = 0;
+    bool found = false;
+    for (; environ && environ[n]; n++)
+        found = found || strncmp(environ[n], key, sizeof(key) - 1) == 0;
+    if (!found)
+        return NULL;
+    char **copy = malloc((n + 1) * sizeof(*copy)); // raw-alloc-ok:spawn-prefork-env
+    if (!copy) {
+        LOG_ERROR("spawn", "cannot filter Z23_OUTPUT from the child environment");
+        return NULL;
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++)
+        if (strncmp(environ[i], key, sizeof(key) - 1) != 0)
+            copy[k++] = environ[i];
+    copy[k] = NULL;
+    return copy;
+}
+
+#endif
