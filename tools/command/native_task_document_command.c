@@ -311,13 +311,13 @@ static void ntd_stale_recovery(struct zcl_command_reply *reply,
 }
 
 static void ntd_failure(struct zcl_command_reply *reply, const struct json_value *input,
-    const char *directory, bool offering, struct zcl_result result)
+    const char *directory, bool offering, bool mutated, struct zcl_result result)
 {
     LOG_ERROR("app.tasks", "%s", result.message);
     bool verifier_missing = result.code == NTD_VERIFIER_MISSING;
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
         verifier_missing ? "TASK_VERIFIER_UNAVAILABLE" : "TASK_SAVE_FAILED",
-        verifier_missing ? "open" : "save", false, false, result.message, "app.tasks");
+        verifier_missing ? "open" : "save", false, mutated, result.message, "app.tasks");
     if (verifier_missing) {
         reply->error.human_action_required = true;
 #if defined(_WIN32)
@@ -346,6 +346,10 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
     if (result.ok && offering) result = package_resident_record_read(&store, &kept);
     if (result.ok) result = offering ? ntd_offer(request->input, &store, directory, &offer)
         : ntd_change(request->input, &store, directory, &row);
+    /* A successful noninteractive write has committed before close or render.
+     * A window's result does not tell us whether the user changed anything. */
+    bool mutated = result.ok && !offering && action &&
+        !ntd_interactive(action) && strcmp(action, "list") != 0;
     struct zcl_result closed = package_resident_store_close(&store);
     if (result.ok && !closed.ok) result = closed;
     if (result.ok) {
@@ -354,5 +358,5 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
         if (!rendered) result = ZCL_ERR(-1, "tasks: operation completed but confirmation allocation failed; read status before retrying");
     }
     ntd_source_next(reply, directory, &kept, action, result.ok);
-    if (!result.ok) ntd_failure(reply, request->input, directory, offering, result);
+    if (!result.ok) ntd_failure(reply, request->input, directory, offering, mutated, result);
 }
