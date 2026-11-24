@@ -219,6 +219,11 @@ static void profile_probes(void)
             const char *equal = strchr(variables[j], '=');
             argv[n++] = text("%.*s=%s/%s", (int)(equal - variables[j]), variables[j], work, equal + 1);
         }
+        /* These probes exercise synthetic depfiles, not whole-program source graphs. */
+        argv[n++] = "ALL_SRCS=tools/dev/make_depfile_scope_selftest.c";
+        argv[n++] = "TEST_SRCS_NO_MAIN=tools/dev/make_depfile_scope_selftest.c";
+        argv[n++] = "SPEC_SRCS=tools/dev/make_depfile_scope_selftest.c";
+        argv[n++] = "CHAOS_SIM_SRCS=tools/dev/make_depfile_scope_selftest.c";
         if (probes[i].epoch) {
             argv[n++] = "-o";
             argv[n++] = "contexts/explorer/views/include/views/site_css.h";
