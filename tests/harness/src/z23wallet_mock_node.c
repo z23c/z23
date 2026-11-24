@@ -138,22 +138,32 @@ static void reply_hostile(struct zw_mock *m, platform_socket_t c, int status)
     }
 }
 
+/* The first script row for method (or "*") with uses left; one use is taken. */
+static const struct script_row *take_row(struct zw_mock *m, const char *method)
+{
+    for (size_t i = 0; i < m->nrows; i++) {
+        struct script_row *r = &m->rows[i];
+        if ((strcmp(r->method, method) && strcmp(r->method, "*")) || r->times == 0) continue;
+        if (r->times > 0) r->times--;
+        return r;
+    }
+    return NULL;
+}
+
+/* Status 999: accept and never reply; hold delay_ms, then hang up. */
+static void hold_silent(struct zw_mock *m, int delay_ms)
+{
+    for (int k = 0; k < delay_ms / 10 && !m->stop; k++) sleep_ms(10);
+}
+
 static void reply_method(struct zw_mock *m, platform_socket_t c, const char *method)
 {
     char path[700], text[8192], out[9000];
     int status = 200;
-    for (size_t i = 0; i < m->nrows; i++)
-        if ((!strcmp(m->rows[i].method, method) || !strcmp(m->rows[i].method, "*")) &&
-            m->rows[i].times != 0) {
-            if (m->rows[i].times > 0) m->rows[i].times--;
-            if (m->rows[i].status == 999) { /* accept, never reply: hold, then hang up */
-                for (int k = 0; k < m->rows[i].delay_ms / 10 && !m->stop; k++) sleep_ms(10);
-                return;
-            }
-            if (m->rows[i].delay_ms) sleep_ms(m->rows[i].delay_ms);
-            if (m->rows[i].status) status = m->rows[i].status;
-            break;
-        }
+    const struct script_row *row = take_row(m, method);
+    if (row && row->status == 999) { hold_silent(m, row->delay_ms); return; }
+    if (row && row->delay_ms) sleep_ms(row->delay_ms);
+    if (row && row->status) status = row->status;
     if (status < 0) { reply_hostile(m, c, status); return; }
     if (status == 503) { send_reply(c, 503, ""); return; }
     snprintf(path, sizeof(path), "%s/%s.err", m->dir, method);
