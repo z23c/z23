@@ -148,15 +148,21 @@ writers; it is never proof or publication authority.
 **Directive convention.** Answer a directive with a `result` under the same
 ref, addressed to its origin. To close your own directive that will not be
 answered, post a new row; nothing is deleted or rewritten:
-`dev agent mail post --to=<recipient> --kind=note --ref=<ref> --body="closed by sender: superseded by <ref>"`
-(or `recipient gone since <date>`, or `withdrawn`). Only the origin or an
-owner name (`ZCL_FLEET_OWNER_NAMES`, default: the host user `$USER`) can close a directive,
-and a real result from the recipient still wins. `steer_brief` reports
+`dev agent mail post --from=<the name the directive was sent as> --to=<recipient> --kind=note --ref=<ref> --body="closed by sender: superseded by <ref>"`
+(or `recipient gone since <date>`, or `withdrawn`). The brief accepts a closure
+from the directive's `from` name or from a name in `ZCL_FLEET_OWNER_NAMES`
+(default: none; the host user is never an owner, every agent on the host posts
+as it). That is a name check; `--from` is unauthenticated, so it is not proof
+of sender. A directive sent with a grant label carries a sender binding, and
+the brief then accepts the sender's closure only from a row carrying a live
+binding for that label; an owner name closes it regardless. A real result
+from the recipient still wins. `steer_brief` reports
 `open_worker_directives`: among the newest 64 directives, the ones to a
 worker (not `*`, not an owner) that are not answered, closed or
 `recipient_gone`. A directive is `recipient_gone` when no ack or read covers
-it and its recipient posted a `presence-<name>` note here but has written
-nothing, presence or mail, for 24 h. A name that never posted presence
+it and its recipient posted a `presence-<name>` note here but no presence
+note or row whose `from` is that name has appeared for 24 h (a session that
+posts as its Unix user does not refresh this; refresh presence). A name that never posted presence
 does not expire.
 `overdue_worker_directives` counts the open ones sent from this host with no
 receiver evidence after 120 s. Directives carry no deadline.

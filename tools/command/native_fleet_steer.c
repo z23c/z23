@@ -2087,14 +2087,12 @@ static bool fmc_name_listed(const char *list, const char *name)
     return false;
 }
 
-/* The configured human owner names (comma-separated), else the host's
- * own user, the name the owner's local posts carry; else none. */
+/* The configured human owner names (comma-separated), else none. Never the
+ * host user: every box posts as its Unix user, so that name is shared by
+ * every agent on the host and would make each of them an owner. */
 static const char *fmc_owner_names(void)
 {
     const char *env = getenv(FMC_OWNER_ENV);
-    if (env && env[0])
-        return env;
-    env = getenv("USER");
     return env ? env : "";
 }
 
@@ -3201,7 +3199,7 @@ static void fmc_spend_emit(struct json_value *data,
     "later result from the addressee or back to the origin, no later " \
     "'closed by sender:' note or result from the origin or an owner, and not " \
     "recipient_gone (no ack or read covers it, the recipient posted a " \
-    "presence-<name> note here, and its newest presence or mail row is older " \
+    "presence-<name> note here, and its newest presence note or row whose from is that name is older " \
     "than 86400 s). overdue_worker_directives: the open ones this host sent " \
     "with no receiver evidence after 120 s. Directives carry no deadline."
 
@@ -3358,7 +3356,8 @@ static void fmc_stale_summary(struct json_value *blockers, int stale)
  *             (answer_match "reply_to_origin" — every box posts as its Unix
  *             user, so the reply's author need not carry the role name);
  *             an attempt= stated on both sides must agree;
- *   state     answered, ambiguous, else acked, else queued.
+ *   state     answered, closed, ambiguous, recipient_gone, else acked, else
+ *             queued (see fmc_directive_resolve).
  *             Unbound reply-to-origin matches are marked as heuristics.
  * sent_ts/sent_age_s are the directive's own time; answer_ts/answer_age_s
  * the reply's. The lifecycle `state` beside it keeps its closed
@@ -3439,8 +3438,10 @@ static bool fmc_ref_answers(const char *dref, const char *rref)
 static const char *fmc_answer_match(const struct fmc_row *d,
                                     const struct fmc_row *r)
 {
+/* A closure note never answers, even as a result to the origin. */
     if (strcmp(r->kind, "result") != 0 || !fmc_ref_answers(d->ref, r->ref) ||
-        strcmp(r->from, d->from) == 0)
+        strcmp(r->from, d->from) == 0 ||
+        strncmp(r->body, FMC_CLOSE_PREFIX, sizeof(FMC_CLOSE_PREFIX) - 1u) == 0)
         return NULL;
     if (!fmc_reply_compatible(d, r))
         return NULL;
@@ -3566,15 +3567,30 @@ static const char *fmc_close_reason(const char *body)
     return "other";
 }
 
+/* Who may close d: an owner name, or the origin; when the directive carries
+ * a sender binding the origin's row must carry a live binding for the
+ * same label, as a typed read does. */
+static bool fmc_close_author_ok(const struct fmc_row *d, const struct fmc_row *r)
+{
+    if (fmc_owner_name(r->from))
+        return true;
+    if (strcmp(r->from, d->from) != 0)
+        return false;
+    return !d->sender_binding[0] ||
+        (r->sender_binding[0] &&
+         !zcl_fleet_steer_grant_binding_live(r->from, r->sender_binding, "send"));
+}
+
 /* True when r closes d: a later note or result under the same ref, from
  * the origin or an owner, whose body starts with FMC_CLOSE_PREFIX. */
 static bool fmc_close_match(const struct fmc_row *d, const struct fmc_row *r)
 {
     if (strcmp(r->kind, "note") != 0 && strcmp(r->kind, "result") != 0)
         return false;
-    if (!d->ref[0] || r->observed_disposition[0] || strcmp(r->ref, d->ref) != 0)
+    if (!d->ref[0] || r->observed_disposition[0] || strcmp(r->ref, d->ref) != 0 ||
+        strcmp(r->ts, d->ts) <= 0)
         return false;
-    if (strcmp(r->from, d->from) != 0 && !fmc_owner_name(r->from))
+    if (!fmc_close_author_ok(d, r))
         return false;
     return strncmp(r->body, FMC_CLOSE_PREFIX, sizeof(FMC_CLOSE_PREFIX) - 1u) == 0 &&
            fmc_reply_compatible(d, r);
@@ -4080,9 +4096,6 @@ static void fmc_cand_from_outcomes(struct zcl_fmc_cand_reg *cand,
     }
 }
 
-/* One pulled row: roster, tallies, the stale-directive check (bounded to
- * the newest FMC_DIRECTIVE_SCAN directives), and — above `since`, under
- * the cap — one change row. */
 /* One open directive into directive_queue[], grouped by recipient. */
 static void fmc_dq_note(struct fmc_directive_tally *t, const char *to,
                         long long age)
@@ -4146,6 +4159,9 @@ static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
         c->ro->dt.overdue_worker++;
 }
 
+/* One pulled row: roster, tallies, the stale-directive check (bounded to
+ * the newest FMC_DIRECTIVE_SCAN directives), and above `since`, under
+ * the cap, one change row. */
 static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
                          const struct json_value *rows)
 {

@@ -658,10 +658,10 @@ static void fmx_seed_outcome(const char *name, int rc)
  * it carries a peer's row onto this host: the only way a row this host did not
  * write appears in pull. `ts` is the caller's so pull order (ts, from, seq)
  * stays deterministic without a sleep. */
-static void fmx_seed_inbox(const char *peer, const char *ts, long long seq,
-                           const char *from, const char *to,
-                           const char *kind, const char *body,
-                           const char *ref)
+static void fmx_seed_inbox_bound(const char *peer, const char *ts, long long seq,
+                                  const char *from, const char *to,
+                                  const char *kind, const char *body,
+                                  const char *ref, const char *binding)
 {
     char dir[1024], path[1200];
     int n = snprintf(dir, sizeof(dir), "%s/z23/dev/mail", g_fmx_state);
@@ -677,11 +677,21 @@ static void fmx_seed_inbox(const char *peer, const char *ts, long long seq,
         fmx_fixture_fail("cannot seed an inbox row");
     if (fprintf(f,
                 "{\"seq\":%lld,\"ts\":\"%s\",\"from\":\"%s\",\"to\":\"%s\","
-                "\"kind\":\"%s\",\"body\":\"%s\",\"ref\":\"%s\"}\n",
-                seq, ts, from, to, kind, body, ref) < 0)
+                "\"kind\":\"%s\",\"body\":\"%s\",\"ref\":\"%s\"%s%s%s}\n",
+                seq, ts, from, to, kind, body, ref,
+                binding[0] ? ",\"sender_binding\":\"" : "", binding,
+                binding[0] ? "\"" : "") < 0)
         fmx_fixture_fail("cannot write an inbox row");
     if (fclose(f) != 0)
         fmx_fixture_fail("cannot finish an inbox row");
+}
+
+static void fmx_seed_inbox(const char *peer, const char *ts, long long seq,
+                           const char *from, const char *to,
+                           const char *kind, const char *body,
+                           const char *ref)
+{
+    fmx_seed_inbox_bound(peer, ts, seq, from, to, kind, body, ref, "");
 }
 
 static bool fmx_seed_mail_history(size_t rows_per_stream)
@@ -3642,6 +3652,85 @@ static int fmx_t_directive_close_expiry(void)
         ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "w-ref-2"),
                                "close_reason"), "withdrawn");
         ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
+        fmx_end(&b);
+        fmx_owner_names(NULL);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: the host user is no owner; closure rules hold") {
+        struct fmx_call b;
+        const struct json_value *r;
+        const char *old_user = getenv("USER");
+        char saved[128];
+        (void)snprintf(saved, sizeof(saved), "%s", old_user ? old_user : "");
+        fmx_isolate("directive_close_rules");
+        fmx_prime_mail();
+        fmx_owner_names(NULL);
+        ASSERT(setenv("USER", "boxuser", 1) == 0);
+        fmx_sent_directive("2026-01-01T00:00:00Z", 7, "dead-box", "user-ref");
+        fmx_sent_directive("2026-01-01T00:00:00Z", 8, "boxuser", "boxuser-ref");
+        /* A row posted as the host user does not close a directive. */
+        fmx_seed_inbox("agent", "2026-01-01T00:05:00Z", 3, "boxuser",
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "user-ref");
+        /* A closure dated before the directive does not close it. */
+        fmx_sent_directive("2026-01-01T00:00:00Z", 9, "dead-box", "early-ref");
+        fmx_seed_inbox("self", "2025-12-31T23:00:00Z", 4, FMX_SENDER,
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "early-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "user-ref"),
+                               "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "early-ref"),
+                               "state"), "queued");
+        r = fmx_dir_reply(&b, FMX_SENDER, "boxuser-ref");
+        ASSERT_STR_EQ(fmx_wstr(r, "class"), "worker");
+        ASSERT(fmx_blocker_has(&b, "boxuser-ref"));
+        fmx_end(&b);
+        /* An owner's closure result addressed to the origin is a closure,
+         * not an answer, and 'recipient gone' is its own reason. */
+        fmx_owner_names("owner-human");
+        fmx_seed_inbox("owner", "2026-01-01T00:30:00Z", 5, "owner-human",
+                       FMX_SENDER, "result",
+                       "closed by sender: recipient gone since 2026-01-02",
+                       "user-ref");
+        ASSERT(fmx_brief_ok(&b));
+        r = fmx_dir_reply(&b, FMX_SENDER, "user-ref");
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "closed");
+        ASSERT_STR_EQ(fmx_wstr(r, "close_reason"), "recipient_gone");
+        ASSERT_STR_EQ(fmx_wstr(r, "closed_by"), "owner-human");
+        fmx_end(&b);
+        fmx_owner_names(NULL);
+        if (old_user)
+            (void)setenv("USER", saved, 1);
+        else
+            (void)unsetenv("USER");
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a bound directive needs a live binding or an owner") {
+        struct fmx_call b;
+        fmx_isolate("directive_close_bound");
+        fmx_prime_mail();
+        fmx_owner_names("owner-human");
+        fmx_seed_inbox_bound("self", "2026-01-01T00:00:00Z", 7, FMX_SENDER,
+                             "dead-box", "directive", "do it", "bound-ref",
+                             "0123456789abcdef0123456789abcdef");
+        fmx_seed_inbox("self", "2026-01-01T00:10:00Z", 8, FMX_SENDER,
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "bound-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "bound-ref"),
+                               "state"), "queued");
+        fmx_end(&b);
+        fmx_seed_inbox("owner", "2026-01-01T00:20:00Z", 1, "owner-human",
+                       "dead-box", "note", "closed by sender: withdrawn",
+                       "bound-ref");
+        ASSERT(fmx_brief_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "bound-ref"),
+                               "state"), "closed");
         fmx_end(&b);
         fmx_owner_names(NULL);
         fmx_restore();
