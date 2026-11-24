@@ -96,7 +96,7 @@ static enum zw_err connect_loopback(const struct zw_endpoint *ep, struct zw_canc
         int err = 0;
         if (w == 0 || platform_socket_pending_error(s, &err) != 0 || err != 0) {
             bool refused = err != 0 && platform_socket_error_refused(err);
-                platform_socket_close(s);
+            platform_socket_close(s);
             return w == 0 ? ZW_ERR_TIMEOUT : refused ? ZW_ERR_REFUSED : ZW_ERR_IO;
         }
     }
