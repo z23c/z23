@@ -280,9 +280,17 @@ static int dlx_fixture_preparation_test(void)
             "\techo fixture > $@\n"));
         ASSERT(!zcl_dev_land_fixtures_prepare_observed(
             fixtures, NULL, why, sizeof(why), NULL, NULL, NULL));
+        /* A donor can have been rebuilt for another branch. Its presence
+         * must not suppress production from this candidate's Makefile. */
+        ASSERT(dlx_write_dep(donor, "build/hotswap/zcl_rollback_fixture_a.so",
+                             "different candidate\n"));
         ASSERT(zcl_dev_land_fixtures_prepare_observed(
             fixtures, donor, why, sizeof(why), NULL, &calls, dlx_fixture_begin));
         ASSERT(calls.count == 2);
+        (void)snprintf(path, sizeof(path),
+            "%s/build/hotswap/zcl_rollback_fixture_a.so", fixtures);
+        ASSERT(dlx_slurp(path, body, sizeof(body), &len));
+        ASSERT_STR_EQ(body, "fixture\n");
         ASSERT_STR_EQ(calls.names[0], "build/hotswap/zcl_rollback_fixture_a.so");
         ASSERT_STR_EQ(calls.names[1], "build/hotswap/zcl_rollback_fixture_b.so");
         (void)snprintf(log, sizeof(log), "%s/build/fixture.log", fixtures);

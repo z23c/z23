@@ -328,15 +328,15 @@ bool zcl_dev_land_fixtures_prepare_observed(const char *wt, const char *donor,
     if (!wt || !why || !cap) return false;
     why[0] = 0;
     for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); ++i) {
-        bool missing, donor_missing;
+        bool missing;
         if (!dlp_fixture_missing(wt, targets[i], &missing, why, cap)) return false;
         if (!missing) continue;
         if (!donor) {
             (void)snprintf(why, cap, "fixture donor worktree unavailable");
             return false;
         }
-        if (!dlp_fixture_missing(donor, targets[i], &donor_missing, why, cap)) return false;
-        if (!donor_missing) continue;
+        /* A donor may have been rebuilt for a different branch after submit.
+         * Produce a missing fixture from this candidate's own Makefile. */
         if (begin && !begin(context, targets[i])) {
             (void)snprintf(why, cap, "preparation progress persistence refused");
             return false;
