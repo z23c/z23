@@ -773,6 +773,61 @@ static bool dlx_pc_purpose_order(const char *detail, bool fail)
     return ok;
 }
 
+static void dlx_pc_deferred_fault(void)
+{
+    zcl_alloc_fault_fail_next("json_set_str");
+}
+
+static bool dlx_pc_heavy_setup(struct dlx_rig *rig, const char *metadata, bool fail_light)
+{
+    char row[1024], path[1400];
+    if (!dlx_pc_rig(rig, "precheck_heavy", true,
+            "check-core-seal\ncheck-no-new-bash\ncheck-windows-cross-syntax\ncheck-light-fixture\n")) return false;
+    dlx_pc_row(row, sizeof(row), 1, "failed", "lint", 1,
+               "check-windows-cross-syntax check-light-fixture check-core-seal");
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig->clone);
+    return dlx_pc_outcomes(row) &&
+        dlx_write_dep(rig->clone, "build/gen/guest_kernel_data.c", "x") &&
+        dlx_pc_file(rig, "heavy-metadata", metadata) &&
+        dlx_write(path, "#!/bin/sh\n"
+            "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+            "if [ \"$1\" = --list-heavy ]; then cat build/heavy-metadata; exit 0; fi\n"
+            "echo \"$1\" >> build/precheck-ran\n"
+            "[ ! -f build/precheck-fail ] || [ \"$1\" != \"$(cat build/precheck-fail)\" ]\n") &&
+        chmod(path, 0755) == 0 &&
+        (!fail_light || dlx_pc_file(rig, "precheck-fail", "check-light-fixture"));
+}
+
+static bool dlx_pc_heavy_success(const struct dlx_call *c, bool defer)
+{
+    return dlx_ok(c) &&
+        dlx_pc_has(dlx_arr(c, "precheck_ran"), "check-core-seal") &&
+        dlx_pc_has(dlx_arr(c, "precheck_ran"), "check-light-fixture") &&
+        (dlx_pc_has(dlx_arr(c, "precheck_deferred"), "check-windows-cross-syntax") == defer) &&
+        (dlx_pc_has(dlx_arr(c, "precheck_ran"), "check-windows-cross-syntax") != defer) &&
+        (!defer || strstr(dlx_str(c, "precheck_deferred_reason"), "full proof") != NULL);
+}
+
+static bool dlx_pc_heavy_case(const char *metadata, bool defer, bool fail_light,
+                              bool fail_report)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    if (!dlx_pc_heavy_setup(&rig, metadata, fail_light)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    if (fail_report) zcl_land_precheck_test_before_deferred(dlx_pc_deferred_fault);
+    bool ok = dlx_run(&c);
+    if (fail_report) {
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        zcl_land_precheck_test_before_deferred(NULL);
+        ok = ok && consumed && !dlx_ok(&c) && dlx_queue_empty() &&
+            !strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE");
+    } else if (fail_light) ok = ok && !dlx_ok(&c) && !strcmp(dlx_str(&c, "gate"), "check-light-fixture");
+    else ok = ok && dlx_pc_heavy_success(&c, defer);
+    dlx_end(&c); dlx_restore(); return ok;
+}
+
 static bool dlx_pc_bash_order_log(const struct dlx_rig *rig, const char *detail, bool fail)
 {
     char path[1400], log[2048] = "";
@@ -1586,6 +1641,15 @@ int dlx_case_precheck(void)
         ASSERT(dlx_pc_bash_order("check-zcc-cache check-no-new-bash", false));
         ASSERT(dlx_pc_bash_order("check-no-new-bash", false));
         ASSERT(dlx_pc_bash_order("check-windows-cross-syntax", false));
+        PASS();
+    }
+    TEST("land: classified learned heavy gates defer while core and light gates run") {
+        ASSERT(dlx_pc_heavy_case("z23-lint-heavy-v1\ncheck-core-seal\ncheck-windows-cross-syntax\n", true, false, false));
+        ASSERT(dlx_pc_heavy_case("z23-lint-heavy-v1\ncheck-windows-cross-syntax\n", true, true, false));
+        ASSERT(dlx_pc_heavy_case("z23-lint-heavy-v1\ncheck-windows-cross-syntax\n", true, false, true));
+        ASSERT(dlx_pc_heavy_case("", false, false, false));
+        ASSERT(dlx_pc_heavy_case("z23-lint-heavy-v1\ncheck-windows-cross-syntax\nunknown!\n", false, false, false));
+        ASSERT(dlx_pc_heavy_case("z23-lint-heavy-v1\ncheck-not-in-list\n", false, false, false));
         PASS();
     }
     TEST("land: selected inventory refresh precedes the KPI floor") {

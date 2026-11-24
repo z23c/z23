@@ -459,9 +459,10 @@ struct pc_run {
     int64_t deadline, budget_ms;
     const char *skipped[ZCL_LAND_PRECHECK_MAX_GATES];
     const char *ran[ZCL_LAND_PRECHECK_MAX_GATES];
+    const char *deferred[ZCL_LAND_PRECHECK_MAX_GATES];
     int64_t elapsed_ms[ZCL_LAND_PRECHECK_MAX_GATES];
     char unproven[PC_EVIDENCE_CAP];
-    size_t nskipped, nran;
+    size_t nskipped, nran, ndeferred;
     bool gate_output_available;
     struct json_value windows_capture;
     bool windows_capture_seen, windows_capture_ok;
@@ -1245,11 +1246,42 @@ static void pc_prioritize_gate(struct zcl_land_precheck_gates *g,
     memcpy(g->name[later_index], name, sizeof(name));
 }
 
+static bool pc_fixed_gate(const char *gate)
+{
+    if (!strcmp(gate, PC_STRICT_GATE) || !strcmp(gate, PC_MODEL_SQL_GATE)) return true;
+    for (size_t i = 0; i < sizeof(k_pc_core) / sizeof(k_pc_core[0]); i++)
+        if (!strcmp(gate, k_pc_core[i])) return true;
+    for (size_t i = 0; i < sizeof(k_pc_late) / sizeof(k_pc_late[0]); i++)
+        if (!strcmp(gate, k_pc_late[i])) return true;
+    return false;
+}
+
+static bool pc_heavy_load(struct pc_run *r, const char *list, char *heavy, size_t cap)
+{
+    int64_t deadline = pc_monotonic_ms() + 2000;
+    if (deadline > r->deadline) deadline = r->deadline;
+    int rc = pc_run(r->wt, r->bin, "--list-heavy", deadline,
+                    r->out, PC_OUT_CAP, &r->capture);
+    if (rc || !pc_stream_complete(r, false) || r->capture.stdout_truncated ||
+        r->capture.stderr_observed || strlen(r->out) != r->capture.stdout_observed ||
+        strlen(r->out) >= cap || !zcl_land_precheck_heavy_valid(r->out, list)) return false;
+    (void)snprintf(heavy, cap, "%s", r->out);
+    return true;
+}
+
+static bool pc_has_learned_gate(const struct zcl_land_precheck_gates *g,
+                                const char *list)
+{
+    for (size_t i = 0; i < g->count; i++)
+        if (!pc_fixed_gate(g->name[i]) && pc_known(list, g->name[i])) return true;
+    return false;
+}
+
 static bool pc_gates_run(struct pc_run *r,
                          const struct zcl_land_precheck_gates *g,
                          struct zcl_command_reply *reply)
 {
-    char list[PC_OUT_CAP / 4];
+    char list[PC_OUT_CAP / 4], heavy[PC_OUT_CAP / 4];
     int rc = pc_run(r->wt, r->bin, "--list", r->deadline, r->out, PC_OUT_CAP, &r->capture);
     if (rc != 0) {
         r->gate_output_available = true;
@@ -1262,7 +1294,13 @@ static bool pc_gates_run(struct pc_run *r,
         return false;
     }
     (void)snprintf(list, sizeof(list), "%s", r->out);
+    bool have_heavy = pc_has_learned_gate(g, list) &&
+        pc_heavy_load(r, list, heavy, sizeof(heavy));
     for (size_t i = 0; i < g->count; i++) {
+        if (have_heavy && !pc_fixed_gate(g->name[i]) && pc_known(heavy, g->name[i])) {
+            r->deferred[r->ndeferred++] = g->name[i];
+            continue;
+        }
         if (pc_gate_one(r, g->name[i], list, reply) == PC_GATE_REFUSED)
             return false;
     }
@@ -1394,6 +1432,10 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);
         pc_push_names(reply, "precheck_skipped", r->skipped, r->nskipped);
+        if (!zcl_land_precheck_deferred_report(&reply->data, r->deferred, r->ndeferred)) {
+            pc_fail(reply, leaf, "PRECHECK_UNAVAILABLE", "cannot report deferred gates", "allocation failed");
+            ok = false;
+        }
         pc_push_unproven(r, reply);
         if (!pc_push_timings(r, reply))
             (void)json_push_kv_bool(&reply->data, "precheck_timings_unavailable", true);

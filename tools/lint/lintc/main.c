@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: the split C23 lint runtime's gate table and CLI entry point
- * (z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --gate-command <gate>).
+ * (z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --list-heavy | --gate-command <gate>).
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -100,10 +100,22 @@ static int lint_fast_scan_main(int argc, char **argv)
 
 /* Subcommands (premise selection, module-linkgraph); they are tools, not
  * gates, so --list and the gate table never name them. */
+static int list_heavy_main(int argc, char **argv)
+{
+    (void)argv;
+    if (argc != 0) return die("z23-lint: usage: z23-lint --list-heavy\n", "");
+    if (puts("z23-lint-heavy-v1") == EOF) return 1;
+    for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++)
+        if (k_gates[i].precheck_class == LINT_PRECHECK_HEAVY &&
+            puts(k_gates[i].name) == EOF) return 1;
+    return fflush(stdout) == 0 ? 0 : 1;
+}
+
 static const struct {
     const char *name;
     int (*main)(int argc, char **argv);
 } k_tools[] = {
+    { "--list-heavy", list_heavy_main },
     { "build-jobs", build_jobs_main },
     { "select", lint_select_main },
     { "unit-exec", lint_unit_exec_main },
@@ -155,7 +167,7 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--families") == 0)
         return lint_families_ledger();
     if (argc < 2)
-        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --families | --gate-command <gate-name>\n",
+        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --list-heavy | --families | --gate-command <gate-name>\n",
                    "");
     int (*tool)(int, char **) = find_tool(argv[1]);
     if (tool)

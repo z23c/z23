@@ -13,6 +13,9 @@
  * days (and not in the future) establish definitely recent failures. Older
  * request starts cannot date settlement. Uncertain/incomplete history is
  * explicitly unproven; incomplete reads contribute no historical gates.
+ * Learned gates classified heavy by the lane lint binary are reported in
+ * precheck_deferred for the full proof; fixed gates still run. An absent or
+ * invalid classification falls back to the original learned gate execution.
  * The core list also holds the cheap candidate-content ratchets (kpi floor,
  * describe budget, hardening ratchet). check-file-size-ceiling, which is a
  * make target and not a z23-lint gate, runs the lane's build/bin/file_size_policy
@@ -38,9 +41,17 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stddef.h>
 
 struct zcl_command_reply;
 struct json_value;
+/* Validate the complete versioned heavy list against the lane's gate list. */
+bool zcl_land_precheck_heavy_valid(const char *text, const char *list);
+bool zcl_land_precheck_deferred_report(struct json_value *data,
+                                       const char *const *names, size_t count);
+#if defined(ZCL_TESTING)
+void zcl_land_precheck_test_before_deferred(void (*hook)(void));
+#endif
 bool zcl_dev_land_precheck_input_valid(const struct json_value *input,
                                       bool checked_elsewhere, struct zcl_command_reply *reply);
 
@@ -91,7 +102,8 @@ int64_t zcl_land_precheck_budget_floor(int64_t automatic_ms, int64_t floor_ms);
  * NULL resolves the default one. Returns true to go on; false fills `reply`
  * with the refusal and the caller queues or packages nothing. Under the
  * landing proof stub (tests) the gates are not run unless a test forces
- * them. On success reply->data gains precheck_ran / precheck_skipped. */
+ * them. On success reply->data gains precheck_ran / precheck_skipped /
+ * precheck_deferred, with a full-proof reason when gates are deferred. */
 bool zcl_dev_land_precheck(const char *leaf, const char *wt,
                            const char *land_dir, const char *mode,
                            const char *tip, bool checked_elsewhere, char *note,
