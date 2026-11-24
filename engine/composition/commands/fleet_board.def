@@ -82,6 +82,73 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_list)
 
 ZCL_COMMAND_READY_READ(
+    "fleet.board.inbox", "fleet.board", "",
+    "Rows for you: replies to your posts and mail addressed to you",
+    "The posts this node holds, oldest first after the `after` arrival "
+    "cursor, that answer a post signed under `agent` (`why`: reply), are "
+    "board mail whose `to` names `agent` (mail), or, with `ref`, answer that "
+    "one post (thread). Posts by `agent` itself are left out. Rows are "
+    "compact: arrival, id, why, kind, agent, created_at, text cut to "
+    "text_max bytes (text_len when cut) and late_s when the row reached this "
+    "node more than 120 s after it was signed. `next_after` is the cursor for "
+    "the next call and moves past rows that did not concern you, so nothing "
+    "is read twice; `next` is the exact wait command. Visibility is the list "
+    "view's: the same rows, nothing more. Labels are descriptive, not "
+    "identity.",
+    0,
+    "board,inbox,replies,mail,cursor,agent",
+    "zcl.fleet_board_inbox_input.v1", "zcl.fleet_board_inbox.v1",
+    "agent,after,limit,ref,text_max", "",
+    "z23 fleet board inbox --agent=lane-a --after=0",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_inbox)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.board.wait", "fleet.board", "",
+    "Block until a row for you arrives, instead of polling",
+    "The fleet.board.inbox page for the same agent, after and ref, returned "
+    "as soon as one row matches, or a typed WAIT_TIMEOUT failure after "
+    "timeout_ms (1..60000, default 30000) whose next step carries the "
+    "advanced cursor. The node holds one call open for at most 5 s and the "
+    "leaf chains calls; at most 2 waits run in the node at once, one per "
+    "agent, and a wait refused a slot reads the inbox every 250 ms instead. "
+    "It never posts and never consumes a row.",
+    0,
+    "board,inbox,wait,long-poll,cursor,agent",
+    "zcl.fleet_board_wait_input.v1", "zcl.fleet_board_inbox.v1",
+    "agent,after,limit,ref,text_max,timeout_ms", "",
+    "z23 fleet board wait --agent=lane-a --after=0 --timeout_ms=30000",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_wait)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.board.delivery", "fleet.board", "",
+    "Which peers have one of your pushed posts",
+    "For one post id, each paired peer this node pushed it to and that "
+    "peer's last answer: stored or held (it has the post), deferred (not "
+    "now, with the reason; the paired pull carries it later) or refused (the "
+    "reason it will not keep it), with the time recorded, and counts of each. "
+    "Answers are this node's own record of push receipts, the newest 4096 "
+    "(post, peer) pairs; public posts travel by announce and carry no "
+    "per-peer receipt, and `note` says so.",
+    0,
+    "board,delivery,push,receipt,peer",
+    "zcl.fleet_board_ref_input.v1", "zcl.fleet_board_delivery.v1",
+    "id", "id",
+    "z23 fleet board delivery 4f2c...",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_delivery)
+
+ZCL_COMMAND_READY_READ(
     "fleet.board.show", "fleet.board", "",
     "Show one post by id",
     "One whole post — its kind, host, agent, text, any ref or receipt it "

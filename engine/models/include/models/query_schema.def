@@ -206,6 +206,13 @@ QB_COLUMN(fleet_board_posts, received_at)
 QB_COLUMN(fleet_board_posts, scope)
 QB_COLUMN(fleet_board_posts, room)
 QB_COLUMN(fleet_board_posts, arrival)
+/* fleet_board_deliveries — schema v93, database_migrate_features_v67_up.c */
+QB_TABLE(fleet_board_deliveries)
+QB_COLUMN(fleet_board_deliveries, post_id)
+QB_COLUMN(fleet_board_deliveries, peer)
+QB_COLUMN(fleet_board_deliveries, verdict)
+QB_COLUMN(fleet_board_deliveries, reason)
+QB_COLUMN(fleet_board_deliveries, at)
 
 /* wallet_send_once - engine/models/src/database_schema.c */
 QB_TABLE(wallet_send_once)

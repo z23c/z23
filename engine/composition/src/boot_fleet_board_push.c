@@ -1192,6 +1192,7 @@ void board_push_lane_tick(struct boot_svc_ctx *svc, struct node_db *store,
         (void)push_commit_one(store);
     if (atomic_load_explicit(&g_queue_count, memory_order_relaxed) > 0)
         (void)push_send_round(svc, store, now);
+    (void)board_delivery_flush(store);
 }
 
 /* ── the stream callbacks for push states (lane lock held) ────────────── */
@@ -1242,12 +1243,14 @@ void board_push_stream_tick(struct mesh_stream *st, enum board_state_tag tag,
     struct board_push_out_state *s = st->service_state;
     s->self_closed = true;
     board_push_skip(FLEET_BOARD_PUSH_SKIP_NO_RECEIPT, s->n);
+    board_delivery_note_unanswered(st->peer_static, s->ids, s->n, "no_receipt",
+                                   now);
     mesh_stream_close(st, MESH_STREAM_CLOSED_BY_SERVICE, NULL, 0);
 }
 
 /* A receipt the peer sent for this push: counted by code and, when it names
  * exactly the posts sent, by record. */
-void board_push_receipt_seen(const uint8_t ids[][32], uint8_t n,
+bool board_push_receipt_seen(const uint8_t ids[][32], uint8_t n,
                              const struct board_push_receipt *rc)
 {
     bool matches = rc->n == 0 || rc->n == n;
@@ -1260,7 +1263,7 @@ void board_push_receipt_seen(const uint8_t ids[][32], uint8_t n,
             LOG_WARN("fleet.board", "fleet push receipt names other posts "
                      "than were pushed; not counted (%llu more lines since "
                      "the last)", (unsigned long long)skipped);
-        return;
+        return false;
     }
     push_bump(&g_receipt[rc->code], 1);
     bool clean = rc->code == FLEET_BOARD_PUSH_CODE_COMMITTED;
@@ -1274,6 +1277,7 @@ void board_push_receipt_seen(const uint8_t ids[][32], uint8_t n,
                  "carries what it did not store (%llu more lines since the "
                  "last)", k_code_names[rc->code], (long long)rc->commit_ms,
                  (unsigned long long)skipped);
+    return true;
 }
 
 static void push_out_closed(struct mesh_stream *st,
@@ -1286,7 +1290,9 @@ static void push_out_closed(struct mesh_stream *st,
     s->self_closed = true;
     struct board_push_receipt rc;
     if (board_push_receipt_decode(payload, len, &rc)) {
-        board_push_receipt_seen(s->ids, s->n, &rc);
+        if (board_push_receipt_seen(s->ids, s->n, &rc))
+            board_delivery_note_receipt(st->peer_static, s->ids, s->n, &rc,
+                                        board_now());
         return;
     }
     if (reason == MESH_STREAM_REFUSED_MALFORMED && len == 0) {
@@ -1294,9 +1300,13 @@ static void push_out_closed(struct mesh_stream *st,
          * session, so it is not asked again while it lasts. */
         push_session_mark_unsupported(st);
         board_push_skip(FLEET_BOARD_PUSH_SKIP_UNSUPPORTED, s->n);
+        board_delivery_note_unanswered(st->peer_static, s->ids, s->n,
+                                       "peer_unsupported", board_now());
         return;
     }
     push_bump(&g_closed[(unsigned)reason & 15u], 1);
+    board_delivery_note_unanswered(st->peer_static, s->ids, s->n, "no_receipt",
+                                   board_now());
     uint64_t skipped = 0;
     if (push_log_due(PUSH_LOG_RECEIPT, &skipped))
         LOG_INFO("fleet.board", "fleet push ended with no receipt: %s (%llu "
@@ -1387,6 +1397,7 @@ void board_push_forget(void)
     atomic_store_explicit(&g_queue_count, 0, memory_order_relaxed);
     atomic_store_explicit(&g_inbox_filled, 0, memory_order_relaxed);
     push_unlock();
+    board_delivery_forget();
 }
 
 #ifdef ZCL_TESTING

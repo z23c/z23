@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_delivery.c", CAP_FS_READ|CAP_FS_WRITE, "saves, prunes and reads the bounded fleet_board_deliveries table through the ActiveRecord lifecycle")

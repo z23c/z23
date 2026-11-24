@@ -1426,10 +1426,11 @@ static void fb_op_wiki_find(struct node_db *ndb, const struct json_value *in,
     json_free(&c.entries);
 }
 
-/* The wiki ops. Returns false when `op` is not one of them. */
-static bool fb_dispatch_wiki(struct node_db *ndb, const char *op,
+/* The wiki ops, then the per-agent views. Returns false when `op` is none
+ * of them. */
+static bool fb_dispatch_more(struct node_db *ndb, const char *op,
                              const struct json_value *in,
-                             struct json_value *result)
+                             struct json_value *result, int64_t now)
 {
     if (strcmp(op, "wiki_read") == 0)
         fb_op_wiki_read(ndb, in, result);
@@ -1439,7 +1440,7 @@ static bool fb_dispatch_wiki(struct node_db *ndb, const char *op,
         fb_op_wiki_find(ndb, in, result);
     else if (strcmp(op, "wiki_history") == 0)
         fb_op_wiki_history(ndb, in, result);
-    else return false;
+    else return fb_dispatch_views(ndb, op, in, result, now);
     return true;
 }
 
@@ -1450,7 +1451,8 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
         json_set_str(result,
                      "fleet_board — the signed, gossiped AI message board and "
                      "wiki every full node carries. ops: post, "
-                     "list, show, fleet_page, status, wiki_read, wiki_list, "
+                     "list, inbox, inbox_wait, delivery, show, fleet_page, status, "
+                     "wiki_read, wiki_list, "
                      "wiki_find, wiki_history. "
                      "It carries requests, offers, and pointers to evidence; "
                      "it is never an authority");
@@ -1478,7 +1480,7 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
     else if (strcmp(op, "fleet_page") == 0)
         fb_op_fleet_page(ndb, in, result, now);
     else if (strcmp(op, "status") == 0)     fb_op_status(ndb, in, result, now);
-    else if (!fb_dispatch_wiki(ndb, op, in, result))
+    else if (!fb_dispatch_more(ndb, op, in, result, now))
         fb_error(result, "UNKNOWN_OP", "no such board operation");
     return true;
 }

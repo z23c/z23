@@ -1509,8 +1509,10 @@ int test_schema_migration(void)
                  m && m->version == SM_TEST_V3 &&
                  strcmp(m->name, "vthird") == 0);
 
-        SM_CHECK("sm: get(99) returns NULL",
-                 schema_migration_get(99) == NULL);
+        /* A version above every registered one, wherever LATEST sits: the
+         * fixed 99 this read before became SM_TEST_V6 at schema v93. */
+        SM_CHECK("sm: get(unregistered) returns NULL",
+                 schema_migration_get(SM_TEST_V6 + 1) == NULL);
 
         schema_migration_clear();
     }

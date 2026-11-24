@@ -106,4 +106,7 @@ enum fleet_board_result fleet_board_append_record(struct node_db *ndb,
     const struct fleet_board_post *post, int64_t now, size_t body_len);
 bool fleet_board_remove_and_relink(struct node_db *ndb,
     const struct fleet_board_post *post, const uint8_t victim[32]);
+/* Advance the arrival generation a waiter watches (fleet_board_post_inbox.c).
+ * Called after a row is stored, and again once its transaction committed. */
+void fleet_board_arrival_bump(void);
 #endif /* ZCL_DB_MODEL_FLEET_BOARD_POST_INTERNAL_H */

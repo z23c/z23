@@ -18,6 +18,17 @@ bool fb_render_list(struct json_value *result,
                     const struct db_fleet_board_post *rows, int n);
 void fb_op_list(struct node_db *ndb, const struct json_value *in,
                 struct json_value *result, int64_t now);
+/* The per-agent views (boot_fleet_board_inbox_rpc.c). */
+void fb_op_inbox(struct node_db *ndb, const struct json_value *in,
+                 struct json_value *result, int64_t now);
+void fb_op_inbox_wait(struct node_db *ndb, const struct json_value *in,
+                      struct json_value *result, int64_t now);
+void fb_op_delivery(struct node_db *ndb, const struct json_value *in,
+                    struct json_value *result);
+/* Run one of the three ops above when `op` names it; false otherwise. */
+bool fb_dispatch_views(struct node_db *ndb, const char *op,
+                       const struct json_value *in, struct json_value *result,
+                       int64_t now);
 /* Add the fleet carriage lane's counters to a status reply as one bounded
  * "carriage" object (boot_fleet_board_carriage_rpc.c). */
 bool fb_render_carriage(struct json_value *result);

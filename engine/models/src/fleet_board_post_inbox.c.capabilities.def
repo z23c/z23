@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post_inbox.c", CAP_FS_WRITE, "steps a read-only inbox scan of fleet_board_posts through the checked sqlite step")

@@ -770,6 +770,22 @@ static int db_migrate_finish_87(struct node_db *ndb, int *current_ver,
             "WHERE status>=3",
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('092')") < 0)
         return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
+    /* v93: what each paired peer answered when this box pushed it a post,
+     * one row per (post, peer), bounded by the writer to the newest 4096.
+     * Local evidence for the sender; nothing admits or refuses a post by
+     * it, and the table can be dropped and rebuilt empty. */
+    if (db_migrate_additive_sql(ndb, current_ver, floor_ver, applied, 93,
+            "CREATE TABLE IF NOT EXISTS fleet_board_deliveries("
+            "post_id BLOB NOT NULL CHECK(length(post_id)=32),"
+            "peer BLOB NOT NULL CHECK(length(peer)=32),"
+            "verdict INTEGER NOT NULL CHECK(verdict BETWEEN 0 AND 3),"
+            "reason TEXT NOT NULL DEFAULT '' CHECK(length(reason)<=40),"
+            "at INTEGER NOT NULL CHECK(at>=0),"
+            "PRIMARY KEY(post_id,peer)) WITHOUT ROWID;"
+            "CREATE INDEX IF NOT EXISTS idx_fleet_board_deliveries_at "
+            "ON fleet_board_deliveries(at)",
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES('093')") < 0)
+        return DB_MIGRATE_SCHEMA_FAILED_PROPAGATE;
     *version_out = *current_ver;
     *floor_out = *floor_ver;
     return *applied;

@@ -1,0 +1,9 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * The delivery record's columns, once: the QB projection and the row reader
+ * in fleet_board_delivery.c derive their identical order here. */
+#define FLEET_BOARD_DELIVERY_FIELDS \
+    ZCL_MODEL_BLOB(post_id, post_id, 32), \
+    ZCL_MODEL_BLOB(peer,    peer,    32), \
+    ZCL_MODEL_I64 (verdict, verdict), \
+    ZCL_MODEL_TEXT(reason,  reason), \
+    ZCL_MODEL_I64 (at,      at)

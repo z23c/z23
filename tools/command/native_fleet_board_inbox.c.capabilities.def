@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_board_inbox.c", CAP_CLOCK, "monotonic deadline chains bounded wait slices up to FLEET_BOARD_WAIT_MAX_MS")

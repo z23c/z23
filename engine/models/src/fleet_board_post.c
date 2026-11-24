@@ -647,6 +647,7 @@ enum fleet_board_result fleet_board_append_record(
     if (!board_insert_stmt(ndb, &record))
         return board_append_failed(ndb, &record, sqlite3_extended_errcode(ndb->db));
     s_board_arrival_high = record.arrival;
+    fleet_board_arrival_bump();
     return FLEET_BOARD_OK;
 }
 
@@ -670,8 +671,10 @@ static enum fleet_board_result board_append_locked(
     if (!fleet_board_wiki_evict_allowed(now))
         return FLEET_BOARD_ERR_WIKI_QUOTA;
     r = board_append_evicting(ndb, post, now, body_len, victim);
-    if (r == FLEET_BOARD_OK)
+    if (r == FLEET_BOARD_OK) {
         fleet_board_wiki_evict_note(now);
+        fleet_board_arrival_bump(); /* again after the commit */
+    }
     return r;
 }
 

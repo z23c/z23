@@ -758,4 +758,31 @@ const char *boot_fleet_board_deferred_line(enum fleet_board_result r,
 bool boot_fleet_board_observation_stage(
     const struct boot_fleet_board_observation *v,
     enum boot_fleet_board_stage *out);
+
+/* INBOX AND WAIT (boot_fleet_board_inbox_rpc.c). `inbox` reads the rows that
+ * answer an agent's own posts or are mail addressed to it, after an arrival
+ * cursor; `inbox_wait` holds that read open until a row arrives. Rows one
+ * page returns (default, ceiling), the candidate rows one page reads at
+ * most, the text bytes a row shows by default, and the age at which a row
+ * that reached this store after it was signed is marked late. */
+#define FLEET_BOARD_INBOX_ROWS_DEFAULT 20
+#define FLEET_BOARD_INBOX_ROWS_MAX 64
+#define FLEET_BOARD_INBOX_SCAN_MAX 256u
+#define FLEET_BOARD_INBOX_TEXT_DEFAULT 160
+#define FLEET_BOARD_INBOX_LATE_S 120
+/* One node-side wait holds an RPC worker for at most this long; the CLI
+ * chains slices up to FLEET_BOARD_WAIT_MAX_MS. At most FLEET_BOARD_WAIT_SLOTS
+ * waits run at once in the node (one per agent label), so waits can never
+ * hold every RPC worker; a refused wait is told when to retry. A waiter
+ * sleeps FLEET_BOARD_WAIT_TICK_MS between looks at the arrival counter and
+ * reads the store only when the counter moved. */
+#define FLEET_BOARD_WAIT_SLICE_MS 5000
+#define FLEET_BOARD_WAIT_MAX_MS 60000
+#define FLEET_BOARD_WAIT_DEFAULT_MS 30000
+#define FLEET_BOARD_WAIT_SLOTS 2
+#define FLEET_BOARD_WAIT_TICK_MS 20
+#define FLEET_BOARD_WAIT_RETRY_MS 250
+/* DELIVERY (boot_fleet_board_delivery.c): push answers waiting for the lane
+ * tick to write them into fleet_board_deliveries. */
+#define FLEET_BOARD_DELIVERY_RING 64u
 #endif /* ZCL_CONFIG_BOOT_FLEET_BOARD_H */
