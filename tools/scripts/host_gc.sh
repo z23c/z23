@@ -1530,8 +1530,8 @@ scratch_is_live_tree() {
 }
 
 sweep_scratch_root() {
-    local root="$1" min_age="$2" cat="${3:-scratch}" total=0 removed=0 kept=0 d name bytes proof l why live=0 dead_bytes=0
-    [ -n "$root" ] || return 0
+    local root="$1" min_age="$2" cat="${3:-scratch}" total=0 removed=0 kept=0 d name bytes proof l why live=0 dead_bytes=0 keep_s=21600
+    [ -n "$root" ] || return 0; [ "$cat" = ramscratch ] && [ "$(free_pct "$root")" -lt 25 ] 2>/dev/null && keep_s=3600  # keep 6 h, 1 h under tmpfs pressure
     [ -d "$root" ] || { say "$cat: no $root — skipped"; return 0; }
     for d in "$root"/*; do
         [ -d "$d" ] || continue
@@ -1543,7 +1543,7 @@ sweep_scratch_root() {
             kept=$(( kept + 1 )); say "$cat: KEEP (.gc_keep): $d"; continue
         fi
         if [ "$cat" = ramscratch ]; then
-            { [ -f "$d/.z23-keep" ] && [ "$(age_secs "$d/.z23-keep")" -lt 86400 ]; } && why=".z23-keep marker, bounded"
+            { [ -f "$d/.z23-keep" ] && [ "$(age_secs "$d/.z23-keep")" -lt "$keep_s" ]; } && why=".z23-keep marker, bounded"
             [ -f "$l" ] && [ -z "$why" ] && { flock -n "$l" true 2>/dev/null || { why="runner lock held"; live=$(( live + 1 )); }; [ -n "$why" ] || { [ "$(age_secs "$d")" -ge 120 ] && proof=lock || why="inside the 120 s grace"; }; }
             [ -z "$why" ] || { kept=$(( kept + 1 )); say "$cat: KEEP ($why): $d"; continue; }
         fi
@@ -1581,8 +1581,7 @@ sweep_scratch() {
     sweep_scratch_root "$DEVSCRATCH_DIR" "$min_age"
 }
 
-# ramscratch: the runner's tmpfs roots (/dev/shm/z23-scratch/<hash>.<rand>). Same rules as scratch, but on a
-# tmpfs/ramfs mount, measured on the tmpfs, removed in place; a runner's flock'd lock file decides live or dead.
+# ramscratch: runner tmpfs roots (/dev/shm/z23-scratch/<hash>.<rand>): scratch rules on tmpfs, removed in place; the runner's flock decides live or dead.
 ram_scratch_root_ok() {
     local fs
     case "$1" in /*) ;; *) say "ramscratch: REFUSED relative root $1"; return 1 ;; esac

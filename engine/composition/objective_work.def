@@ -165,3 +165,9 @@ Z23_OBJECTIVE_WORK("landing_resubmit_gap_s", 0,
                    "z23-dev fleet objectives",
                    "the lane's owner, not the land driver, decides when to "
                    "resubmit")
+
+Z23_OBJECTIVE_WORK("shm_scratch_dead_bytes", 0,
+                   "tools/command/native_fleet_objectives*.c,engine/composition/objectives.def",
+                   "z23-dev fleet objectives",
+                   "wiring it needs the host janitor run on the host being "
+                   "measured, or a change to the janitor sweep rules")

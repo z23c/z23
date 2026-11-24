@@ -159,7 +159,7 @@ static const char *tmpfs_parent(void)
 static void tmpfs_retain(void)
 {
     bool marked = tsr_keep_mark(g_tmpfs_root);
-    fprintf(stderr, "test_parallel: retained tmpfs root=%s (%s; reaped after %d h)\n",
+    fprintf(stderr, "test_parallel: retained tmpfs root=%s (%s; reaped after at most %d h)\n",
             g_tmpfs_root, marked ? "keep marker written" : "keep marker FAILED",
             TSR_KEEP_SECONDS / 3600);
 }

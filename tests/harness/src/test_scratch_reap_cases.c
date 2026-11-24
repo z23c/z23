@@ -20,7 +20,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/file.h>
+#include <linux/magic.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -312,10 +315,9 @@ static int tsc_run_runner(const char *cwd, const char *parent, char *out, size_t
     return timed_out ? -1 : rc;
 }
 
-static bool tsc_shm_parent(char *parent, size_t cap)
+static int tsc_shm_parent(char *parent, size_t cap, const char *tag)
 {
-    snprintf(parent, cap, "/dev/shm/z23-scratch-selftest.XXXXXX");
-    return mkdtemp(parent) != NULL;
+    return scratch_reap_private_parent(parent, cap, tag);
 }
 
 static bool tsc_empty(const char *dir)
@@ -346,9 +348,10 @@ static int test_tsr_runner(void)
     static char out[256 * 1024];
     char parent[PATH_MAX] = "", base[PATH_MAX] = "", cwd[PATH_MAX];
     TEST("scratch reap: a finishing runner leaves nothing and reaps a killed runner's root") {
-        if (!tsc_shm_parent(parent, sizeof(parent))) {
-            parent[0] = '\0';
-            printf("SKIP (no /dev/shm)\n");
+        int pr = tsc_shm_parent(parent, sizeof(parent), "runner");
+        ASSERT(pr >= 0);
+        if (pr == 0) {
+            printf("SKIP (no tmpfs)\n");
             goto _test_next;
         }
         test_make_tmpdir(base, sizeof(base), "tsr", "runner");
@@ -424,9 +427,10 @@ static int test_tsr_janitor(void)
     static char dry[64 * 1024], applied[64 * 1024];
     char parent[PATH_MAX] = "", base[PATH_MAX] = "";
     TEST("scratch reap: the janitor's dry run and apply agree and honour the lock proof") {
-        if (!tsc_shm_parent(parent, sizeof(parent))) {
-            parent[0] = '\0';
-            printf("SKIP (no /dev/shm)\n");
+        int pr = tsc_shm_parent(parent, sizeof(parent), "janitor");
+        ASSERT(pr >= 0);
+        if (pr == 0) {
+            printf("SKIP (no tmpfs)\n");
             goto _test_next;
         }
         test_make_tmpdir(base, sizeof(base), "tsr", "janitor");
@@ -450,10 +454,186 @@ static int test_tsr_janitor(void)
     return failures;
 }
 
+/* ---- bounded keep, lock wait, private parent --------------------------- */
+
+int scratch_reap_private_parent(char *out, size_t cap, const char *tag)
+{
+    struct stat st;
+    struct statfs fs;
+    test_make_tmpdir(out, cap, "tsr-parent", tag);
+    if (stat(out, &st) != 0 || !S_ISDIR(st.st_mode) || statfs(out, &fs) != 0) {
+        fprintf(stderr, "scratch reap: private parent %s not usable: %s\n", out, strerror(errno));
+        return -1;
+    }
+    return (unsigned long)fs.f_type == (unsigned long)TMPFS_MAGIC ? 1 : 0;
+}
+
+/* A dead root (lock file, unheld) whose keep marker is marker_back seconds old. */
+static bool tsc_kept_root(const char *parent, const char *name, int marker_back)
+{
+    char root[PATH_MAX], marker[PATH_MAX];
+    if (!tsc_make_root(parent, name, true, TSC_AGED) || !tsc_path(root, sizeof(root), parent, name) ||
+        !tsr_keep_mark(root) || !tsc_path(marker, sizeof(marker), root, TSR_KEEP_NAME))
+        return false;
+    return tsc_age(marker, marker_back) && tsc_age(root, TSC_AGED);
+}
+
+static uint64_t tsc_root_bytes(const char *parent, const char *name)
+{
+    uint64_t bytes = 0;
+    int pfd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (pfd < 0) return 0;
+    (void)tsr_remove_tree(pfd, name, false, &bytes);
+    close(pfd);
+    return bytes;
+}
+
+static bool tsc_kept_fixture(const char *parent)
+{
+    return tsc_kept_root(parent, "a0000001.KEEP01", 3600) &&
+           tsc_kept_root(parent, "a0000002.KEEP02", 7200) &&
+           tsc_kept_root(parent, "a0000003.KEEP03", 3 * 3600) &&
+           tsc_kept_root(parent, "a0000004.KEEP04", 4 * 3600);
+}
+
+static int test_tsr_keep_cap(void)
+{
+    int failures = 0, live = -1;
+    TEST("scratch reap: kept evidence is capped by count and bytes, oldest first") {
+        char base[PATH_MAX], parent[PATH_MAX];
+        struct tsr_report dry, applied;
+        test_make_tmpdir(base, sizeof(base), "tsr", "cap");
+        ASSERT(tsc_parent(parent, sizeof(parent), base));
+        ASSERT(tsc_kept_fixture(parent));
+        ASSERT(tsc_kept_root(parent, "a0000005.KEEP05", 5 * 3600));   /* oldest, but live */
+        ASSERT(tsc_hold_lock_file(parent, "a0000005.KEEP05", &live));
+        struct tsr_policy count = {TSR_KEEP_SECONDS, 2, UINT64_MAX};
+        int64_t now = (int64_t)time(NULL);
+        ASSERT(tsr_reap_parent_policy(parent, geteuid(), now, false, &count, &dry) == 0);
+        ASSERT(dry.evicted == 3 && dry.kept == 2 && tsc_exists(parent, "a0000004.KEEP04"));
+        ASSERT(tsr_reap_parent_policy(parent, geteuid(), now, true, &count, &applied) == 0);
+        ASSERT(applied.evicted == 3 && applied.reaped == 3 && applied.failed == 0);
+        ASSERT(!tsc_exists(parent, "a0000002.KEEP02") && !tsc_exists(parent, "a0000003.KEEP03") &&
+               !tsc_exists(parent, "a0000004.KEEP04"));
+        ASSERT(tsc_exists(parent, "a0000001.KEEP01") && tsc_exists(parent, "a0000005.KEEP05"));
+        close(live);
+        live = -1;
+        ASSERT(test_rm_rf_recursive(parent) == 0 && mkdir(parent, 0700) == 0);
+        ASSERT(tsc_kept_fixture(parent));
+        uint64_t one = tsc_root_bytes(parent, "a0000001.KEEP01");
+        ASSERT(one > 0);
+        struct tsr_policy bytes = {TSR_KEEP_SECONDS, 99, 2 * one + 1};   /* room for two */
+        ASSERT(tsr_reap_parent_policy(parent, geteuid(), now, true, &bytes, &applied) == 0);
+        ASSERT(applied.evicted == 2 && tsc_exists(parent, "a0000001.KEEP01") &&
+               tsc_exists(parent, "a0000002.KEEP02") && !tsc_exists(parent, "a0000004.KEEP04"));
+        struct tsr_policy tiny = {TSR_KEEP_SECONDS, 99, 1};   /* the newest is never dropped */
+        ASSERT(tsr_reap_parent_policy(parent, geteuid(), now, true, &tiny, &applied) == 0);
+        ASSERT(applied.evicted == 1 && tsc_exists(parent, "a0000001.KEEP01") &&
+               !tsc_exists(parent, "a0000002.KEEP02"));
+        ASSERT(test_rm_rf_recursive(base) == 0);
+        PASS();
+    } _test_next:;
+    if (live >= 0) close(live);
+    return failures;
+}
+
+static int test_tsr_keep_pressure(void)
+{
+    int failures = 0;
+    TEST("scratch reap: a shorter keep under pressure expires evidence sooner") {
+        char base[PATH_MAX], parent[PATH_MAX];
+        struct tsr_report r;
+        test_make_tmpdir(base, sizeof(base), "tsr", "pressure");
+        ASSERT(tsc_parent(parent, sizeof(parent), base));
+        ASSERT(tsc_kept_root(parent, "b0000001.OLDER0", 7200));
+        ASSERT(tsc_kept_root(parent, "b0000002.NEWER0", 1800));
+        int64_t now = (int64_t)time(NULL);
+        struct tsr_policy normal = {TSR_KEEP_SECONDS, 99, UINT64_MAX};
+        struct tsr_policy tight = {TSR_KEEP_PRESSURE_SECONDS, 99, UINT64_MAX};
+        ASSERT(tsr_reap_parent_policy(parent, geteuid(), now, false, &normal, &r) == 0);
+        ASSERT(r.kept == 2 && r.dead == 0);
+        ASSERT(tsr_reap_parent_policy(parent, geteuid(), now, true, &tight, &r) == 0);
+        ASSERT(r.dead == 1 && r.reaped == 1 && r.kept == 1);
+        ASSERT(!tsc_exists(parent, "b0000001.OLDER0") && tsc_exists(parent, "b0000002.NEWER0"));
+        struct tsr_policy def = tsr_default_policy(parent);
+        ASSERT(def.keep_seconds == (tsr_under_pressure(parent) ? TSR_KEEP_PRESSURE_SECONDS
+                                                                 : TSR_KEEP_SECONDS));
+        ASSERT(def.max_roots == TSR_KEEP_MAX_ROOTS && def.max_bytes == TSR_KEEP_MAX_BYTES);
+        ASSERT(test_rm_rf_recursive(base) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A reaper holds a root's lock for an instant while it classifies it. */
+static pid_t tsc_lock_holder(const char *root, int hold_ms)
+{
+    char path[PATH_MAX];
+    int ready[2];
+    if (!tsc_path(path, sizeof(path), root, TSR_LOCK_NAME) || pipe(ready) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int fd = open(path, O_RDWR | O_CLOEXEC);
+        char byte = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0 ? 'y' : 'n';
+        ssize_t w = write(ready[1], &byte, 1);
+        if (byte == 'y' && w == 1) usleep((useconds_t)hold_ms * 1000u);
+        _exit(byte == 'y' ? 0 : 1);
+    }
+    char got = 'n';
+    bool ok = pid > 0 && read(ready[0], &got, 1) == 1 && got == 'y';
+    close(ready[0]);
+    close(ready[1]);
+    return ok ? pid : -1;
+}
+
+static int test_tsr_lock_wait(void)
+{
+    int failures = 0;
+    TEST("scratch reap: a runner waits out a reaper's momentary hold on its lock") {
+        char base[PATH_MAX], parent[PATH_MAX], root[PATH_MAX];
+        test_make_tmpdir(base, sizeof(base), "tsr", "lockwait");
+        ASSERT(tsc_parent(parent, sizeof(parent), base));
+        ASSERT(tsc_make_root(parent, "c0000001.RACE00", true, 0));
+        ASSERT(tsc_path(root, sizeof(root), parent, "c0000001.RACE00"));
+        pid_t holder = tsc_lock_holder(root, 300);
+        ASSERT(holder > 0);
+        int fd = tsr_lock_root(root);
+        int status = 0;
+        ASSERT(waitpid(holder, &status, 0) == holder);
+        ASSERT(fd >= 0);
+        ASSERT(tsr_lock_root(root) < 0);   /* a lock held for good still fails */
+        close(fd);
+        ASSERT(test_rm_rf_recursive(base) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_tsr_private_parent(void)
+{
+    int failures = 0;
+    TEST("scratch reap: the cases' private parents live inside the runner's own root") {
+        char parent[PATH_MAX];
+        int pr = scratch_reap_private_parent(parent, sizeof(parent), "location");
+        ASSERT(pr >= 0);
+        const char *tmproot = getenv("ZCL_TEST_TMPROOT");
+        if (tmproot && tmproot[0] == '/') {   /* reaped with that root, never a /dev/shm sibling */
+            size_t len = strlen(tmproot);
+            ASSERT(strncmp(parent, tmproot, len) == 0 && parent[len] == '/');
+        }
+        ASSERT(strncmp(parent, "/dev/shm/z23-scratch-", 21) != 0);
+        ASSERT(tsc_remove_parent(parent));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int scratch_reap_run_cases(void)
 {
     return test_tsr_remove_tree() + test_tsr_classify() + test_tsr_foreign_owner() +
-           test_tsr_runner() + test_tsr_janitor();
+           test_tsr_runner() + test_tsr_janitor() +
+           test_tsr_keep_cap() + test_tsr_keep_pressure() + test_tsr_lock_wait() +
+           test_tsr_private_parent();
 }
 
 #else

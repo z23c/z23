@@ -19,9 +19,11 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
-enum { TSR_MAX_DEPTH = 200, TSR_MAX_BUSY = 1 << 20 };
+enum { TSR_MAX_DEPTH = 200, TSR_MAX_BUSY = 1 << 20, TSR_LOCK_TRIES = 100,
+       TSR_LOCK_WAIT_US = 20000 };
 
 /* ---- descriptor-relative removal ------------------------------------ */
 
@@ -154,7 +156,12 @@ int tsr_lock_root(const char *root)
                     O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     close(dirfd);
     if (fd < 0) return -1;
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); return -1; }
+    /* A reaper briefly holds a not-yet-locked root while it classifies it as
+     * young; wait it out (it never holds a live runner's lock for long). */
+    for (int tries = 0; flock(fd, LOCK_EX | LOCK_NB) != 0; tries++) {
+        if (errno != EWOULDBLOCK || tries >= TSR_LOCK_TRIES) { close(fd); return -1; }
+        (void)usleep(TSR_LOCK_WAIT_US);
+    }
     return fd;
 }
 
@@ -249,6 +256,18 @@ static bool tsr_busy_under(const struct tsr_busy *b, const char *root)
 
 /* ---- classification -------------------------------------------------- */
 
+/* A root whose keep marker is still valid: eviction candidate. */
+struct tsr_kept_root {
+    char name[16];
+    int64_t marked;   /* keep marker mtime */
+    uint64_t bytes;
+};
+
+struct tsr_kept_set {
+    struct tsr_kept_root *v;
+    size_t n, cap;
+};
+
 struct tsr_scan {
     int parentfd;
     const char *parent;   /* canonical */
@@ -257,7 +276,23 @@ struct tsr_scan {
     bool apply;
     const struct tsr_busy *busy;
     struct tsr_report *report;
+    const struct tsr_policy *policy;
+    struct tsr_kept_set *kept;
 };
+
+bool tsr_under_pressure(const char *path)
+{
+    struct statfs fs;
+    if (statfs(path, &fs) != 0 || fs.f_blocks == 0) return false;
+    return (uint64_t)fs.f_bavail * 100u < (uint64_t)fs.f_blocks * TSR_PRESSURE_FREE_PCT;
+}
+
+struct tsr_policy tsr_default_policy(const char *path)
+{
+    struct tsr_policy p = {TSR_KEEP_SECONDS, TSR_KEEP_MAX_ROOTS, TSR_KEEP_MAX_BYTES};
+    if (tsr_under_pressure(path)) p.keep_seconds = TSR_KEEP_PRESSURE_SECONDS;
+    return p;
+}
 
 /* The proof: every lock this root can carry must be free. The locks stay
  * held (the caller closes *lockfd) so removal runs under them. */
@@ -270,11 +305,34 @@ static int tsr_prove_dead(int rootfd, int *lockfd, bool *has_lock)
     return 0;
 }
 
-static bool tsr_keep_valid(int rootfd, int64_t now)
+/* The marker's mtime while it protects the root, else 0. */
+static int64_t tsr_keep_valid(int rootfd, int64_t now, int64_t keep_seconds)
 {
     struct stat ks;
-    return fstatat(rootfd, TSR_KEEP_NAME, &ks, AT_SYMLINK_NOFOLLOW) == 0 &&
-           S_ISREG(ks.st_mode) && now < (int64_t)ks.st_mtime + TSR_KEEP_SECONDS;
+    if (fstatat(rootfd, TSR_KEEP_NAME, &ks, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(ks.st_mode) || now >= (int64_t)ks.st_mtime + keep_seconds)
+        return 0;
+    return ks.st_mtime > 0 ? (int64_t)ks.st_mtime : 1;
+}
+
+static void tsr_kept_add(const struct tsr_scan *s, const char *name, int64_t marked)
+{
+    struct tsr_kept_set *k = s->kept;
+    if (k->n == k->cap) {
+        size_t cap = k->cap ? k->cap * 2 : 16;
+        struct tsr_kept_root *grown = realloc(k->v, cap * sizeof(*grown));
+        if (!grown) {
+            fprintf(stderr, "scratch reap: out of memory tracking kept root %s\n", name);
+            return;   /* an untracked keep is never evicted: the safe side */
+        }
+        k->v = grown;
+        k->cap = cap;
+    }
+    struct tsr_kept_root *r = &k->v[k->n++];
+    snprintf(r->name, sizeof(r->name), "%s", name);
+    r->marked = marked;
+    r->bytes = 0;
+    (void)tsr_remove_tree(s->parentfd, name, false, &r->bytes);
 }
 
 static void tsr_reap_dead(const struct tsr_scan *s, const char *name)
@@ -295,7 +353,11 @@ static size_t *tsr_live_bucket(const struct tsr_scan *s, const char *name,
     struct tsr_report *r = s->report;
     bool has_lock = false;
     char full[PATH_MAX];
-    if (tsr_keep_valid(rootfd, s->now)) return &r->kept;
+    int64_t marked = tsr_keep_valid(rootfd, s->now, s->policy->keep_seconds);
+    if (marked) {
+        tsr_kept_add(s, name, marked);
+        return &r->kept;
+    }
     if (tsr_prove_dead(rootfd, lockfd, &has_lock) != 0) return &r->live;
     int64_t age = s->now - (int64_t)st->st_mtime;
     if (age < (has_lock ? TSR_GRACE_SECONDS : TSR_LEGACY_AGE_SECONDS))
@@ -339,9 +401,63 @@ static int tsr_open_parent(const char *parent, char *canonical, size_t cap)
     return fd;
 }
 
+/* Drop one kept root, but only on the same proof as any dead root. */
+static void tsr_evict_one(const struct tsr_scan *s, const struct tsr_kept_root *r)
+{
+    char full[PATH_MAX];
+    int rootfd = openat(s->parentfd, r->name,
+                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (rootfd < 0) return;
+    int lockfd = -1;
+    bool has_lock = false;
+    bool dead = tsr_prove_dead(rootfd, &lockfd, &has_lock) == 0 &&
+                snprintf(full, sizeof(full), "%s/%s", s->parent, r->name) < (int)sizeof(full) &&
+                !tsr_busy_under(s->busy, full);
+    if (dead) {
+        s->report->kept--;
+        s->report->evicted++;
+        tsr_reap_dead(s, r->name);
+    }
+    if (lockfd >= 0) close(lockfd);
+    close(rootfd);
+}
+
+static int tsr_kept_older(const void *a, const void *b)
+{
+    int64_t x = ((const struct tsr_kept_root *)a)->marked;
+    int64_t y = ((const struct tsr_kept_root *)b)->marked;
+    return (x > y) - (x < y);
+}
+
+/* Cap the kept evidence: oldest first, never the newest root. */
+static void tsr_evict_kept(const struct tsr_scan *s)
+{
+    struct tsr_kept_set *k = s->kept;
+    uint64_t total = 0;
+    size_t count = k->n;
+    for (size_t i = 0; i < k->n; i++) total += k->v[i].bytes;
+    qsort(k->v, k->n, sizeof(*k->v), tsr_kept_older);
+    for (size_t i = 0; i + 1 < k->n; i++) {
+        if (count <= s->policy->max_roots && total <= s->policy->max_bytes) break;
+        size_t before = s->report->evicted;
+        tsr_evict_one(s, &k->v[i]);
+        if (s->report->evicted == before) continue;   /* live or busy: still occupies */
+        count--;
+        total -= k->v[i].bytes;
+    }
+}
+
 int tsr_reap_parent(const char *parent, uid_t uid, int64_t now, bool apply,
                     struct tsr_report *report)
 {
+    struct tsr_policy policy = tsr_default_policy(parent);
+    return tsr_reap_parent_policy(parent, uid, now, apply, &policy, report);
+}
+
+int tsr_reap_parent_policy(const char *parent, uid_t uid, int64_t now, bool apply,
+                           const struct tsr_policy *policy, struct tsr_report *report)
+{
+    struct tsr_kept_set kept = {0};
     struct tsr_report none;
     char canonical[PATH_MAX];
     struct tsr_busy busy = {0};
@@ -358,12 +474,14 @@ int tsr_reap_parent(const char *parent, uid_t uid, int64_t now, bool apply,
         close(pfd);
         return -1;
     }
-    struct tsr_scan scan = {pfd, canonical, uid, now, apply, &busy, report};
+    struct tsr_scan scan = {pfd, canonical, uid, now, apply, &busy, report, policy, &kept};
     for (struct dirent *e; (e = readdir(dir)) != NULL;) {
         if (strcmp(e->d_name, ".") && strcmp(e->d_name, ".."))
             tsr_classify(&scan, e->d_name);
     }
     closedir(dir);
+    tsr_evict_kept(&scan);
+    free(kept.v);
     tsr_busy_free(&busy);
     close(pfd);
     return 0;

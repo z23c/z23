@@ -4380,21 +4380,27 @@ static int test_proof_resolver_umbrella_sources(void)
 
 #if defined(__linux__)
 /* Every runner these cases start reaps and creates scratch roots; a private
- * parent keeps them off the real /dev/shm/z23-scratch. */
+ * parent inside this runner's tmpfs root keeps them off the real
+ * /dev/shm/z23-scratch and gets them reaped even if this run is killed. */
 static int tgs_tmpfs_cases(void)
 {
-    char parent[] = "/dev/shm/z23-scratch-selector.XXXXXX";
+    char parent[PATH_MAX];
     int failures = 0;
-    bool private_parent = mkdtemp(parent) != NULL && setenv("ZCL_TEST_TMPFS_PARENT", parent, 1) == 0;
+    /* Inside the runner's own tmpfs root, which is reaped; on failure the cases
+     * must not run at all, never against the real parent. */
+    bool private_parent = scratch_reap_private_parent(parent, sizeof(parent), "selector") >= 0 &&
+                          setenv("ZCL_TEST_TMPFS_PARENT", parent, 1) == 0;
+    if (!private_parent) {
+        fprintf(stderr, "selector: cannot make a private tmpfs parent: %s\n", strerror(errno));
+        return 1;
+    }
     failures += test_tmpfs_fallback();
     failures += test_tmpfs_exhaustion();
     failures += test_tmpfs_inherited_root();
     failures += test_tmpfs_failure_retained();
     failures += test_tmpfs_early_exit_removed();
-    if (private_parent) {
-        (void)unsetenv("ZCL_TEST_TMPFS_PARENT");
-        if (test_rm_rf_recursive(parent) != 0) failures++;
-    }
+    (void)unsetenv("ZCL_TEST_TMPFS_PARENT");
+    if (test_rm_rf_recursive(parent) != 0) failures++;
     return failures + scratch_reap_run_cases();
 }
 #endif

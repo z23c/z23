@@ -236,7 +236,7 @@ The closed catalog is [`engine/composition/objectives.def`](../../engine/composi
 `fresh_node_sync_eta_s`, `tokens_per_landed_commit`, `landed_rows_today`,
 `land_success_rate_7d`, `land_failure_repeats`, `product_commit_share_7d`,
 `generated_churn_10d`, `device_pair_ttl_h`,
-`node_rss_mb`, `node_tip_lag_blocks` and `node_warm_restart_s`.
+`node_rss_mb`, `node_tip_lag_blocks`, `node_warm_restart_s` and `shm_scratch_dead_bytes`.
 `device_pair_ttl_h` (lab, `max`, target 72 h, the renewal window) is the hours until the
 soonest expiry among the newest-epoch pairings in `$HOME/.local/state/z23-tunnel`: it is
 0 when any peer's newest epoch is expired or revoked and `unmeasured(<reason naming the

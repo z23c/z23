@@ -152,3 +152,11 @@ Z23_OBJECTIVE("landing_resubmit_gap_s", "lab", "outcomes.jsonl", "min", 3600,
              "attempt ending (terminal_recorded_at) and its next submit "
              "(ts), summed; a lane that fails and is not resubmitted for "
              "hours is work the fleet owes, not queue latency")
+
+Z23_OBJECTIVE("shm_scratch_dead_bytes", "lab", "unmeasured", "min", 0, "bytes",
+             "bytes of provably dead test-runner tmpfs scratch that a sweep "
+             "would reap: nonzero means the runner reaper and the host "
+             "janitor are not keeping up and RAM is being pinned from the "
+             "build admitter; read today from the janitor dry run "
+             "(host_gc.sh --only ramscratch --dry-run, field "
+             "shm_scratch_dead_bytes), not yet wired as a producer")
