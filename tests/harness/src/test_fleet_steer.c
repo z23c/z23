@@ -6821,6 +6821,8 @@ static bool fmx_forward_page(struct fmx_call *call, const char *token, long long
 }
 
 static bool g_fmx_forward_append;
+static unsigned g_fmx_compact_probe_calls;
+static void fmx_compact_probe(void) { g_fmx_compact_probe_calls++; }
 static void fmx_forward_append(void)
 {
     if (g_fmx_forward_append) return;
@@ -6901,12 +6903,82 @@ static int fmx_compact_equivalence(void)
         ASSERT(fmx_get(&compact, "workers") == NULL && fmx_get(&compact, "sessions") == NULL);
         ASSERT(fmx_get(&compact, "tasks") == NULL && fmx_get(&compact, "candidates") == NULL);
         ASSERT(fmx_get(&compact, "caller") && fmx_get(&compact, "evidence") && fmx_get(&compact, "missing"));
+        ASSERT_EQ(fmx_evidence_int(&full, "mail_count"), 2);
+        ASSERT_EQ(fmx_evidence_int(&compact, "mail_count"), 2);
+        g_fmx_compact_probe_calls = 0;
+        zcl_devagent_mail_test_set_after_brief_probe(fmx_compact_probe);
+        struct fmx_call empty;
+        bool empty_ran = fmx_compact_page(&empty, fmx_str(&compact, "cursor_token"), 65536);
+        zcl_devagent_mail_test_set_after_brief_probe(NULL);
+        ASSERT(empty_ran);
+        ASSERT_EQ(g_fmx_compact_probe_calls, 1u);
+        ASSERT_EQ(fmx_changes_n(&empty), 0);
+        ASSERT(json_is_null(json_get(fmx_get(&empty, "evidence"), "mail_count")));
+        fmx_end(&empty);
         ASSERT(fmx_get(&full, "workers") && fmx_get(&full, "tasks"));
         ASSERT(json_write(&compact.reply.data, NULL, 0) + 100 < json_write(&full.reply.data, NULL, 0));
         fmx_end(&full); fmx_end(&compact);
         fmx_restore(); PASS();
     } _test_next:;
     clock_set_default(saved); fmx_restore();
+    return failures;
+}
+
+static int fmx_compact_lifecycle(void)
+{
+    int failures = 0;
+    TEST("steer: compact nonzero pages preserve historical conflicts") {
+        ASSERT(fmx_forward_setup("compact_historical_conflict"));
+        fmx_seed_inbox("history", "2026-09-20T00:00:00Z", 1, "oauth", "worker-b",
+                       "directive", "attempt=1", "duel");
+        struct fmx_call checkpoint;
+        ASSERT(fmx_forward_page(&checkpoint, "0|", 8, 65536));
+        char token[4096];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&checkpoint, "cursor_token"));
+        fmx_end(&checkpoint);
+        fmx_seed_inbox("fresh", "2026-09-20T00:00:01Z", 2, "oauth", "worker-b",
+                       "directive", "attempt=1", "duel");
+        fmx_seed_inbox("fresh", "2026-09-20T00:00:02Z", 3, "worker-b", "oauth",
+                       "result", "accepted", "duel");
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, token, 8, 65536));
+        ASSERT(fmx_compact_page(&compact, token, 65536));
+        ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "oauth", "duel"), "state"),
+                      "ambiguous");
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact);
+        fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_compact_cross_stream(void)
+{
+    int failures = 0;
+    TEST("steer: compact nonzero pages retain covered cross-stream replies") {
+        ASSERT(fmx_forward_setup("compact_cross_stream_reply"));
+        fmx_seed_inbox("a", "2026-09-20T00:00:02Z", 7, "worker-a", "oauth",
+                       "result", "accepted", "late-cross");
+        struct fmx_call checkpoint;
+        ASSERT(fmx_forward_page(&checkpoint, "0|", 8, 65536));
+        char token[4096];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&checkpoint, "cursor_token"));
+        fmx_end(&checkpoint);
+        fmx_seed_inbox("b", "2026-09-20T00:00:01Z", 8, "oauth", "worker-a",
+                       "directive", "bounded request", "late-cross");
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, token, 8, 65536));
+        ASSERT(fmx_compact_page(&compact, token, 65536));
+        ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "oauth", "late-cross"), "state"),
+                      "answered");
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact);
+        fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore();
     return failures;
 }
 
@@ -7817,6 +7889,8 @@ int test_fleet_steer(void)
 
     node_rpc_client_set_test_hook(fmx_no_node);
     failures += fmx_compact_equivalence();
+    failures += fmx_compact_lifecycle();
+    failures += fmx_compact_cross_stream();
     failures += fmx_compact_input();
     failures += fmx_compact_budget();
     failures += fmx_compact_stale();

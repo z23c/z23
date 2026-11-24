@@ -3860,10 +3860,42 @@ static bool fmc_brief_resume_changes(const struct zcl_command_request *req,
     return true;
 }
 
+static int fmc_brief_compact_empty(const struct zcl_command_request *req,
+                                   struct json_value *missing,
+                                   struct fmc_mail_view *view,
+                                   const char *resume)
+{
+    struct json_value fresh;
+    long long cursor = -1;
+    char token[FMC_MAIL_SINCE_CAP], why[128];
+    int64_t t0 = clock_now_wall_ms(), t1;
+    json_init(&fresh);
+    json_set_array(&fresh);
+    const char *fail = fmc_mail_drain_from(req, &fresh, &cursor, resume,
+        token, sizeof(token), why, sizeof(why), true, NULL);
+    t1 = clock_now_wall_ms();
+    if (fail) {
+        fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);
+        json_free(&fresh);
+        view->cursor_token[0] = 0;
+        return -1;
+    }
+    bool empty = json_size(&fresh) == 0;
+    if (empty) {
+        view->cursor = cursor;
+        view->ok = true;
+        view->forward = true;
+        (void)snprintf(view->cursor_token, sizeof(view->cursor_token), "%s", token);
+        (void)snprintf(view->start_token, sizeof(view->start_token), "%s", resume);
+    }
+    json_free(&fresh);
+    return empty ? 1 : 0;
+}
+
 static long long fmc_brief_mail(const struct zcl_command_request *req,
                                 struct fmc_mail_ctx *c,
                                 struct json_value *missing,
-                                struct fmc_mail_view *view)
+                                struct fmc_mail_view *view, bool compact)
 {
     struct json_value rows;
     char resume[FMC_MAIL_SINCE_CAP];
@@ -3892,6 +3924,14 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     resume_state = fmc_brief_resume(req, resume, sizeof(resume));
     json_init(&rows);
     json_set_array(&rows);
+    if (compact && resume_state > 0) {
+        view->count = -1;
+        int empty = fmc_brief_compact_empty(req, missing, view, resume);
+        if (empty != 0) {
+            json_free(&rows);
+            return view->cursor;
+        }
+    }
     t0 = clock_now_wall_ms();
     fail = fmc_mail_drain_from(req, &rows, &view->cursor, "",
                                view->cursor_token,
@@ -4800,7 +4840,7 @@ static void fmc_brief_evidence(struct fmc_brief_lists *l,
 {
     char ts[32];
     (void)json_push_kv_int(&l->evidence, "mail_cursor", mail_cursor);
-    (void)json_push_kv_int(&l->evidence, "mail_count", mv->count);
+    fmc_put_int(&l->evidence, "mail_count", mv->count);
     fmc_put_int(&l->evidence, "ledger_boxes", ledger->boxes);
     fmc_put_int(&l->evidence, "ledger_rows", ledger->rows);
     fmc_put_int(&l->evidence, "ledger_max_age_s", ledger->max_age);
@@ -5187,7 +5227,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     memset(&lo, 0, sizeof(lo));
     lo.receive_lock = fmc_lock_state("receive", "receive.lock");
     fmc_receiver_down_incident(&l.blockers, lo.receive_lock);
-    mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv);
+    mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv, changes_only);
     fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes, &l.tasks);
     fmc_brief_land(req, &l.tasks, &l.missing);
