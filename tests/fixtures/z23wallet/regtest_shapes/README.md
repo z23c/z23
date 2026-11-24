@@ -44,12 +44,11 @@ review the diff: a changed shape is a changed interface.
 The legacy zclassicd replies for the same matrix are in
 `../regtest_shapes_legacy/`.
 
-Three files are documentation only and are not compared: `legacy.z_validateaddress`,
-`legacy.z_getoperationstatus` and `legacy.z_getoperationresult` record the
-refusal this node gives for a legacy method it does not have. The command
-client prints it either as `error=UNKNOWN_COMMAND detail=...` text (recorded) or
-as a `zcl.result.v1` envelope with `ok:false`, so the test only asserts that the
-call fails and names an `UNKNOWN_` code.
+The three `legacy.z_*` files at the end of that list (`z_validateaddress`,
+`z_getoperationstatus`, `z_getoperationresult`) record the refusal this node
+gives for a legacy method it does not have: the `zcl.result.v1` envelope with
+`ok:false` on stdout (and an `error=UNKNOWN_COMMAND` line on stderr). They are
+compared like the rest.
 
 ## Conventions a front end must know
 
@@ -74,3 +73,17 @@ call fails and names an `UNKNOWN_` code.
   made) before it can be spent.
 - A memo that is valid UTF-8 is read back in the note's `memo` field; one that
   is not is read back as `memo_hex`.
+
+## Known divergences (pinned by the test, so a node change fails it)
+
+Each of these is asserted as the node behaves today; the test's source marks
+them KNOWN GAP or KNOWN DIVERGENCE. When the node changes, the assertion must
+be flipped on purpose.
+
+| Case | Z23 node today | zclassicd |
+|---|---|---|
+| Memo to a transparent recipient | accepted, sent, memo dropped (`refuse.memo_to_transparent.*`) | refused: `Memo cannot be used with a taddr.  It can only be used with a zaddr.` |
+| `z_sendmany` `memo` key | read as UTF-8 text: `"6c6567"` is delivered as the text `6c6567` (`multi.z_sendmany_legacy_memo_key`); hex goes under `memo_hex` | `memo` is hex: `"6c6567"` is the memo `leg` |
+| Same idempotency key committed twice on `core.wallet.transaction.send` | a second payment with a new txid (`t2t.commit_repeat`) | no idempotency key exists; a repeated `z_sendmany` also pays twice |
+| Zero amount | refused at the plan, `INVALID_AMOUNT` | `z_sendmany` accepts it as a fee-only transaction |
+| Unknown legacy methods | `z_validateaddress`, `z_getoperationstatus`, `z_getoperationresult` refused as `UNKNOWN_COMMAND`; `z_sendmany` answers with the txid | operation ids and polling |
