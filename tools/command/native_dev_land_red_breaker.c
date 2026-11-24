@@ -70,12 +70,36 @@ static bool dlrb_name_char(char c)
     return isalnum((unsigned char)c) != 0 || c == '_';
 }
 
-static bool dlrb_group_ok(const char *g)
+/* A cleared marker may name several groups joined by '+'. */
+static bool dlrb_list_char(char c)
+{
+    return dlrb_name_char(c) || c == '+';
+}
+
+static bool dlrb_text_ok(const char *g, bool list)
 {
     size_t n = 0;
-    while (g && dlrb_name_char(g[n]))
+    while (g && (list ? dlrb_list_char(g[n]) : dlrb_name_char(g[n])))
         n++;
     return g && n > 0 && n < DLRB_GROUP_MAX && g[n] == '\0';
+}
+
+static bool dlrb_group_ok(const char *g)
+{
+    return dlrb_text_ok(g, false);
+}
+
+/* Is `group` one of the '+'-joined names of `list`? */
+static bool dlrb_list_has(const char *list, const char *group)
+{
+    size_t len = strlen(group);
+    for (const char *p = list; *p;) {
+        size_t n = strcspn(p, "+");
+        if (n == len && strncmp(p, group, n) == 0)
+            return true;
+        p += n + (p[n] == '+');
+    }
+    return false;
 }
 
 /* A positive decimal of at most 18 digits ending at `stop`; the position
@@ -104,7 +128,7 @@ bool dlrb_mark_parse(const char *field, struct dlrb_mark *m)
     if (!p)
         return false;
     m->cleared = field[0] == 'c';
-    while (dlrb_name_char(p[n]))
+    while (m->cleared ? dlrb_list_char(p[n]) : dlrb_name_char(p[n]))
         n++;
     if (n == 0 || n >= sizeof(m->group) || p[n] != ':')
         return false;
@@ -123,7 +147,7 @@ bool dlrb_field_ok(const char *field)
 
 bool dlrb_mark_format(const struct dlrb_mark *m, char *out, size_t cap)
 {
-    if (!dlrb_group_ok(m->group) || m->since <= 0 || m->since_at <= 0 ||
+    if (!dlrb_text_ok(m->group, m->cleared) || m->since <= 0 || m->since_at <= 0 ||
         m->at <= 0)
         return false;
     int w = snprintf(out, cap, "%s:%s:%lld:%lld:%lld",
@@ -337,7 +361,7 @@ static bool dlrb_clears(const struct dl_row *r, const char *group)
     struct dlrb_mark m;
     return strcmp(r->state, "landed") == 0 &&
            dlrb_mark_parse(r->red_main, &m) && m.cleared &&
-           strcmp(m.group, group) == 0;
+           dlrb_list_has(m.group, group);
 }
 
 static bool dlrb_scan_visit(const struct dl_row *r, void *context)
@@ -557,11 +581,9 @@ bool dlrb_log_only_group(const char *path, const char *group)
 
 /* Is `group` the only failed group of the settled attempt's test log? An
  * unreadable log is not proof of it. */
-static bool dlrb_only_group(const struct dl_row *row, const char *group)
+bool dlrb_failed_only(const struct dl_row *row, const char *group)
 {
     char path[4600];
-    if (dl_stubbed())
-        return true; /* stub failures name exactly one group */
     if (!row->failed_proof.root[0] || !row->failed_proof.attempt[0])
         return false;
     int w = snprintf(path, sizeof(path),
@@ -570,6 +592,12 @@ static bool dlrb_only_group(const struct dl_row *row, const char *group)
                      row->failed_proof.attempt, row->local, row->base);
     return w > 0 && (size_t)w < sizeof(path) &&
            dlrb_log_only_group(path, group);
+}
+
+static bool dlrb_only_group(const struct dl_row *row, const char *group)
+{
+    return dl_stubbed() /* stub failures name exactly one group */ ||
+           dlrb_failed_only(row, group);
 }
 
 bool dlrb_on_failure(const struct dl_dirs *d, struct dl_row *row,
@@ -682,7 +710,7 @@ static bool dlrb_log_has(const char *path, const char *needle)
 }
 
 /* Does a retained attempt of this exact pair show `group` passing? */
-static bool dlrb_attempts_show(const char *wt, const char *local,
+bool dlrb_attempts_show(const char *wt, const char *local,
                                const char *base, const char *group)
 {
     char dir[4200], prefix[168], needle[128], path[4600];
@@ -732,47 +760,97 @@ static bool dlrb_proof_ran(const struct dl_dirs *d, const struct dl_row *row,
     return dlrb_attempts_show(d->wt, row->local, row->base, group);
 }
 
-/* The distinct groups queued rows are parked on or remember. */
-static size_t dlrb_marked_groups(const struct dl_row *rows, size_t n,
-                                 struct dlrb_mark *out, size_t cap)
+/* The distinct groups a pass may have cleared. */
+struct dlrb_groups {
+    char g[DLRB_EPISODES][DLRB_GROUP_MAX];
+    size_t n;
+};
+
+static void dlrb_groups_add(struct dlrb_groups *gs, const char *group)
 {
-    size_t m = 0;
+    for (size_t i = 0; i < gs->n; i++)
+        if (strcmp(gs->g[i], group) == 0)
+            return;
+    if (gs->n < DLRB_EPISODES)
+        (void)snprintf(gs->g[gs->n++], DLRB_GROUP_MAX, "%s", group);
+}
+
+/* Groups queued rows are parked on or remember. */
+static void dlrb_marked_groups(const struct dl_row *rows, size_t n,
+                               struct dlrb_groups *gs)
+{
     for (size_t i = 0; i < n; i++) {
         struct dlrb_mark x;
-        bool seen = false;
-        if (strcmp(rows[i].state, "queued") != 0 ||
-            !dlrb_mark_parse(rows[i].red_main, &x) || x.cleared)
-            continue;
-        for (size_t j = 0; j < m; j++)
-            seen = seen || strcmp(out[j].group, x.group) == 0;
-        if (!seen && m < cap)
-            out[m++] = x;
+        if (strcmp(rows[i].state, "queued") == 0 &&
+            dlrb_mark_parse(rows[i].red_main, &x) && !x.cleared)
+            dlrb_groups_add(gs, x.group);
     }
-    return m;
+}
+
+struct dlrb_recent {
+    long long horizon;
+    struct dlrb_groups *gs;
+};
+
+/* Groups of recent test failures: a landing that passes one of them has
+ * fixed main for the evidence the ledger holds, parked rows or not. */
+static bool dlrb_recent_visit(const struct dl_row *r, void *context)
+{
+    struct dlrb_recent *rc = context;
+    char g[DLRB_GROUP_MAX];
+    if (strcmp(r->state, "failed") == 0 && strcmp(r->dimension, "test") == 0 &&
+        r->terminal_recorded_at >= rc->horizon &&
+        dlmr_group_of("test", r->detail, g, sizeof(g)) && dlrb_group_ok(g))
+        dlrb_groups_add(rc->gs, g);
+    return true;
+}
+
+static void dlrb_recent_groups(const struct dl_dirs *d,
+                               const struct dlrb_policy *p,
+                               struct dlrb_groups *gs)
+{
+    char path[4096 + 32];
+    struct dlrb_recent rc = { dlrb_now() - p->age_s, gs };
+    if (snprintf(path, sizeof(path), "%s/outcomes.jsonl", d->land) <
+        (int)sizeof(path))
+        (void)dl_history_read(path, dlrb_recent_visit, &rc, NULL, 0);
+}
+
+/* Append `group` to the '+'-joined `list` when it fits. */
+static void dlrb_list_add(char *list, size_t cap, const char *group)
+{
+    size_t have = strlen(list);
+    int w = snprintf(list + have, cap - have, "%s%s", have ? "+" : "", group);
+    if (w < 0 || (size_t)w >= cap - have)
+        list[have] = '\0';
 }
 
 void dlrb_on_pass(const struct dl_dirs *d, struct dl_row *row)
 {
     struct dlrb_policy p;
-    struct dlrb_mark marks[DLRB_EPISODES];
+    struct dlrb_groups gs = { .n = 0 };
+    struct dlrb_mark mk = { .cleared = true };
     struct dl_row *rows = NULL;
     size_t n = 0;
     dlrb_policy_read(&p);
     if (!p.enabled || !dlrb_load(d, &rows, &n))
         return;
-    size_t count = dlrb_marked_groups(rows, n, marks, DLRB_EPISODES);
+    dlrb_marked_groups(rows, n, &gs);
     free(rows);
-    for (size_t i = 0; i < count; i++) {
-        if (!dlrb_proof_ran(d, row, marks[i].group))
+    dlrb_recent_groups(d, &p, &gs);
+    for (size_t i = 0; i < gs.n; i++) {
+        if (!dlrb_proof_ran(d, row, gs.g[i]))
             continue;
-        marks[i].cleared = true;
-        marks[i].at = dlrb_now();
-        if (!dlrb_mark_format(&marks[i], row->red_main, sizeof(row->red_main)))
-            row->red_main[0] = '\0';
-        dl_log(row, "main red: this proof passed the red group; every row "
-                    "parked on it is requeued\n");
-        dlrb_release(d, marks[i].group, true, 0);
+        dlrb_list_add(mk.group, sizeof(mk.group), gs.g[i]);
+        dl_log(row, "main red: this proof passed a group with recent "
+                    "failures; its evidence and parked rows are cleared\n");
+        dlrb_release(d, gs.g[i], true, 0);
     }
+    mk.since = row->seq > 0 ? row->seq : 1;
+    mk.since_at = mk.at = dlrb_now();
+    if (mk.group[0] &&
+        !dlrb_mark_format(&mk, row->red_main, sizeof(row->red_main)))
+        row->red_main[0] = '\0';
 }
 
 /* ── status ──────────────────────────────────────────────────────────── */
@@ -842,8 +920,9 @@ int dlrb_stub_read(const char *stub, const char *wt, const char *local,
         return 0;
     if (!g || !dlrb_group_ok(g))
         g = "test_red_fixture";
-    if (dlrb_tree_has(wt, local, "red-fix") ||
-        dlrb_tree_has(wt, local, "red-skip")) {
+    if (!dlrb_tree_has(wt, local, "red-break") &&
+        (dlrb_tree_has(wt, local, "red-fix") ||
+         dlrb_tree_has(wt, local, "red-skip"))) {
         (void)snprintf(detail, cap, "proof stub: red pass");
         return 1;
     }

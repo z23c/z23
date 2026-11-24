@@ -399,7 +399,7 @@ _test_next:;
 static int dlrb_t_no_bisect_then_clear(void)
 {
     int failures = 0;
-    TEST("land red main: no bisection while red; the fix lands, clears and requeues") {
+    TEST("land red main: no halving of a train while red; the fix lands, clears and requeues") {
         struct dlx_rig rig;
         char t4[64], t5[64], t6[64], own[64], fix[64], states[512];
         static char text[262144];
@@ -436,7 +436,7 @@ static int dlrb_t_no_bisect_then_clear(void)
         ASSERT(dlrb_t_ledger(text, sizeof(text)));
         ASSERT_EQ(dlrb_t_count(text, "\"state\":\"landed\""), (size_t)5);
         ASSERT_EQ(dlrb_t_count(text, "\"state\":\"failed\""), (size_t)3);
-        ASSERT(dlx_has(text, "\"red_main\":\"cleared:" DLRB_T_GROUP ":1:"));
+        ASSERT(dlx_has(text, "\"red_main\":\"cleared:" DLRB_T_GROUP ":"));
         ASSERT_EQ(dlrb_t_count(text, "\"red_main\":\"parked:"), (size_t)0);
         PASS();
     }
@@ -499,11 +499,148 @@ _test_next:;
     return failures;
 }
 
+/* A retained attempt in the real layouts: the runner's banner and failed
+ * list, under <root>/.cache/zcl-dev-proof/attempts/<attempt>/logs/. With the
+ * stub out of the decision, this is the path production takes. */
+static int dlrb_t_attempt_logs(void)
+{
+    int failures = 0;
+    TEST("land red main: retained attempt logs decide the only failed group and the clear") {
+        char dir[512], logs[900], path[1100];
+        const char *l = "1111111111111111111111111111111111111111";
+        const char *b = "2222222222222222222222222222222222222222";
+        struct dl_row row;
+        test_make_tmpdir(dir, sizeof(dir), "dev_land", "red_attempt_logs");
+        (void)snprintf(logs, sizeof(logs),
+                       "%s/.cache/zcl-dev-proof/attempts/%.40s-%.40s.7/logs",
+                       dir, l, b);
+        ASSERT(dlx_mkdir_p(logs));
+        (void)snprintf(path, sizeof(path), "%s/%.40s-%.40s.test.log", logs, l, b);
+        ASSERT(dlx_write(path,
+            "\n==================== test_other (PASS, 1.0s) ====================\n"
+            "\n==================== " DLRB_T_GROUP " (FAIL, 2.0s) ====================\n"
+            "SOME TESTS FAILED - 1/9 groups failed\n"
+            "Failed groups:\n"
+            "  - " DLRB_T_GROUP ": exit code=1 log=./test-tmp/a.log\n"
+            "      repro: make t-fast ONLY=" DLRB_T_GROUP "\n"));
+        memset(&row, 0, sizeof(row));
+        (void)snprintf(row.local, sizeof(row.local), "%s", l);
+        (void)snprintf(row.base, sizeof(row.base), "%s", b);
+        (void)snprintf(row.failed_proof.root, sizeof(row.failed_proof.root),
+                       "%s", dir);
+        (void)snprintf(row.failed_proof.attempt, sizeof(row.failed_proof.attempt),
+                       "%.40s-%.40s.7", l, b);
+        ASSERT(dlrb_failed_only(&row, DLRB_T_GROUP));
+        ASSERT(!dlrb_failed_only(&row, "test_other"));
+        /* The failed group did not pass; the other one did. */
+        ASSERT(!dlrb_attempts_show(dir, l, b, DLRB_T_GROUP));
+        ASSERT(dlrb_attempts_show(dir, l, b, "test_other"));
+        ASSERT(!dlrb_attempts_show(dir, b, l, "test_other"));
+        /* The pair's passing attempt: the red group passes. */
+        ASSERT(dlx_write(path,
+            "\n==================== " DLRB_T_GROUP " (PASS, 2.0s) ====================\n"
+            "ALL TESTS PASSED\n"));
+        ASSERT(dlrb_attempts_show(dir, l, b, DLRB_T_GROUP));
+        ASSERT(!dlrb_failed_only(&row, DLRB_T_GROUP));
+        /* A reaped attempt proves nothing. */
+        (void)snprintf(path, sizeof(path), "%s/empty", dir);
+        ASSERT(!dlrb_attempts_show(path, l, b, DLRB_T_GROUP));
+        row.failed_proof.attempt[0] = '\0';
+        ASSERT(!dlrb_failed_only(&row, DLRB_T_GROUP));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int dlrb_t_cleared_list(void)
+{
+    int failures = 0;
+    TEST("land red main: one cleared marker names several groups; a parked one never") {
+        struct dlrb_mark m;
+        char out[160];
+        ASSERT(dlrb_mark_parse("cleared:test_a+test_b:3:100:200", &m));
+        ASSERT(m.cleared && strcmp(m.group, "test_a+test_b") == 0);
+        ASSERT(dlrb_mark_format(&m, out, sizeof(out)));
+        ASSERT(strcmp(out, "cleared:test_a+test_b:3:100:200") == 0);
+        ASSERT(!dlrb_mark_parse("parked:test_a+test_b:3:100:200", &m));
+        m.cleared = false;
+        ASSERT(!dlrb_mark_format(&m, out, sizeof(out)));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* Rows one and two fail the red group, then the fix lands with nothing
+ * parked, then a lane breaks the group by itself: main is green, so that
+ * row fails on its own proof instead of being parked. */
+static int dlrb_t_fix_before_trip(void)
+{
+    int failures = 0;
+    TEST("land red main: a fix landing clears the evidence even with no row parked") {
+        struct dlx_rig rig;
+        char t1[64], t2[64], fix[64], brk[64], states[512];
+        static char text[262144];
+        dlx_isolate("red_fix_first");
+        dlrb_t_env();
+        ASSERT(dlx_rig_make(&rig, "red_fix_first_rig"));
+        ASSERT(dlrb_t_branch(&rig, "p1", "f1.txt", t1));
+        ASSERT(dlrb_t_branch(&rig, "p2", "f2.txt", t2));
+        ASSERT(dlrb_t_branch(&rig, "pf", "red-fix", fix));
+        ASSERT(dlrb_t_submit(&rig, t1, "lane-one", 1));
+        ASSERT(dlrb_t_submit(&rig, t2, "lane-two", 2));
+        ASSERT(dlrb_t_submit(&rig, fix, "lane-fix", 3));
+        ASSERT(dlrb_t_prove("failed", -1) && dlrb_t_prove("failed", -1));
+        ASSERT(dlrb_t_step("started", -1));
+        ASSERT(dlrb_t_drain(32, states, sizeof(states)));
+        ASSERT(dlrb_t_branch(&rig, "pb", "red-break", brk));
+        ASSERT(dlrb_t_submit(&rig, brk, "lane-break", 4));
+        ASSERT(dlrb_t_prove("failed", -1));
+        ASSERT(dlrb_t_status(NULL, 0, 0));
+        ASSERT(dlrb_t_ledger(text, sizeof(text)));
+        ASSERT_EQ(dlrb_t_count(text, "\"state\":\"failed\""), (size_t)3);
+        ASSERT_EQ(dlrb_t_count(text, "\"red_main\":\"parked:"), (size_t)0);
+        ASSERT(dlx_has(text, "\"red_main\":\"cleared:" DLRB_T_GROUP ":"));
+        PASS();
+    }
+_test_next:;
+    dlrb_t_unenv();
+    return failures;
+}
+
+/* A fix that skips the group runs no proof of it: nothing is cleared and
+ * the parked row waits for the age-out. */
+static int dlrb_t_skip_clears_nothing(void)
+{
+    int failures = 0;
+    TEST("land red main: a landing that never ran the group does not clear it") {
+        struct dlx_rig rig;
+        char skip[64], states[512];
+        static char text[262144];
+        ASSERT(dlrb_t_trip(&rig, "red_skip"));
+        ASSERT(dlrb_t_branch(&rig, "sk", "red-skip", skip));
+        ASSERT(dlrb_t_submit(&rig, skip, "lane-skip", 4));
+        ASSERT(dlrb_t_step("started", -1));
+        ASSERT(dlrb_t_drain(32, states, sizeof(states)));
+        ASSERT(dlrb_t_status(DLRB_T_GROUP, 1, 1));
+        ASSERT(dlrb_t_ledger(text, sizeof(text)));
+        ASSERT_EQ(dlrb_t_count(text, "\"state\":\"landed\""), (size_t)1);
+        ASSERT_EQ(dlrb_t_count(text, "\"red_main\":\"cleared:"), (size_t)0);
+        PASS();
+    }
+_test_next:;
+    dlrb_t_unenv();
+    return failures;
+}
+
 int test_dev_land_red_breaker_cases(void)
 {
     return dlrb_t_trip_pure() + dlrb_t_no_trip_pure() + dlrb_t_age_pure() +
            dlrb_t_only_group() + dlrb_t_trip_and_park() + dlrb_t_same_lane() +
-           dlrb_t_no_bisect_then_clear() + dlrb_t_age_out() + dlrb_t_off();
+           dlrb_t_no_bisect_then_clear() + dlrb_t_age_out() + dlrb_t_off() +
+           dlrb_t_attempt_logs() + dlrb_t_cleared_list() +
+           dlrb_t_fix_before_trip() + dlrb_t_skip_clears_nothing();
 }
 
 #else

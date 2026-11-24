@@ -29,9 +29,15 @@
  * the alert and every release are derived from those rows; there is no
  * other flag.
  *
- * CLEAR. A proof that passes and whose test log shows G passing clears G:
- * the passing row carries the cleared marker to its landing, and every row
- * parked on G returns to the queue (phase "rebase") to rebase onto main and
+ * CLEAR. A proof that passes and whose test log shows a group passing clears
+ * it, whether or not rows are parked on it: every group the queue parks or
+ * remembers and every group with a failure in the age window is checked, and
+ * the passing row carries one cleared marker ("cleared:G1+G2:...") to its
+ * landing, so the evidence before that landing never counts toward a new trip
+ * (a lane that breaks G itself after a fix landed fails normally). A fix
+ * that skips or deletes G runs no proof of it and clears nothing: the
+ * episode ages out. Every row parked on or remembering a cleared group
+ * returns to the queue (phase "rebase") to rebase onto main and
  * take a complete fresh proof; a rebase conflict is the normal conflict
  * state. When the newest parked row on G is older than the age bound, or
  * the episode began more than the maximum ago, the parked rows are
@@ -119,6 +125,13 @@ bool dlrb_files_disjoint(const struct dlrb_files *a,
 size_t dlrb_trip_pick(const struct dlrb_fail *cands, size_t n,
                       const struct dlrb_fail *cur, unsigned k,
                       long long *since, long long *since_at);
+/* Is `group` the only failed group of the settled attempt's retained test
+ * log (row->failed_proof root and attempt)? False when unreadable. */
+bool dlrb_failed_only(const struct dl_row *row, const char *group);
+/* Does a retained attempt of the pair (local, base) under worktree `wt`
+ * show `group` passing in its test log? */
+bool dlrb_attempts_show(const char *wt, const char *local, const char *base,
+                        const char *group);
 /* Does the test log at `path` name `group` as its only failed group (the
  * runner's last "Failed groups:" list)? False when unreadable. */
 bool dlrb_log_only_group(const char *path, const char *group);
@@ -150,7 +163,8 @@ bool dlrb_screen(const struct dl_row *rows, size_t n, char *screen,
 #if defined(ZCL_TESTING)
 /* Test stub "red": FAIL on ZCL_LAND_PROOF_STUB_RED_GROUP unless the pair's
  * tree holds red-fix (passes, running the group) or red-skip (passes
- * without running it). 1 pass, 2 fail, 0 not this stub. */
+ * without running it); red-break in the tree fails it even so. 1 pass, 2 fail,
+ * 0 not this stub. */
 int dlrb_stub_read(const char *stub, const char *wt, const char *local,
                    char *dimension, size_t dim_cap, char *detail,
                    size_t cap);
