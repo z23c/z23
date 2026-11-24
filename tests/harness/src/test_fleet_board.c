@@ -7526,13 +7526,13 @@ static int test_fleet_wiki_query_envelopes(void)
 /* The compact view agents read at the CLI: slug, topic, one-line summary,
  * score and matched per hit; the full entry stays the default for MCP and
  * code guide (view normal/full). The byte bound is pinned on this fixture. */
-static bool fb_compact_fetch(struct fb_rpc_env *e, const char *view, size_t *bytes,
-                             struct json_value *envelope)
+static bool fb_compact_fetch(struct fb_rpc_env *e, const char *q, const char *view,
+                             size_t *bytes, struct json_value *envelope)
 {
     struct json_value input;
     enum zcl_command_exit rc;
     json_init(&input); json_set_object(&input);
-    bool ok = json_push_kv_str(&input, "q", "indexed") &&
+    bool ok = json_push_kv_str(&input, "q", q) &&
         fb_query_execute_view(e, false, &input, 8192, view, envelope, &rc, bytes) &&
         rc == ZCL_COMMAND_EXIT_OK;
     json_free(&input);
@@ -7544,7 +7544,7 @@ static int test_fleet_wiki_find_compact_view(void)
     int failures = 0;
     static struct fb_rpc_env e;
     bool opened = false;
-    TEST("fleet wiki: view summary returns slug, topic, one-line summary, score and matched under a byte bound; full keeps everything") {
+    TEST("fleet wiki: view summary returns slug, kind, author_role, topic, one-line summary and matched under a byte bound; full keeps everything") {
         ASSERT(fb_rpc_env_open(&e)); opened = true;
         const int64_t now = INT64_C(5000000);
         char text[1400], lesson[700], rule[201], why[257];
@@ -7556,32 +7556,111 @@ static int test_fleet_wiki_find_compact_view(void)
         fb_entry_json(text, sizeof(text), summary, lesson, "\"kernel\"");
         ASSERT(fb_test_ingest_page(&e.db, "compact-a", text, 1, now));
         ASSERT(fb_test_ingest_page(&e.db, "compact-b", text, 2, now));
+        /* A summary cut at 100 bytes must not split a UTF-8 sequence: 99 bytes of
+         * ASCII then two-byte letters put byte 100 inside one. */
+        char utf8[130] = "indexed";
+        while (strlen(utf8) < 99) strcat(utf8, "a");
+        for (int i = 0; i < 10; i++) strcat(utf8, "\xC3\xA9");
+        fb_entry_json(text, sizeof(text), utf8, lesson, "\"kernel\"");
+        ASSERT(fb_test_ingest_page(&e.db, "compact-c", text, 3, now));
         struct json_value full, compact;
         size_t full_bytes = 0, compact_bytes = 0;
-        ASSERT(fb_compact_fetch(&e, "full", &full_bytes, &full));
-        ASSERT(fb_compact_fetch(&e, "summary", &compact_bytes, &compact));
+        ASSERT(fb_compact_fetch(&e, "indexed", "full", &full_bytes, &full));
+        ASSERT(fb_compact_fetch(&e, "indexed", "summary", &compact_bytes, &compact));
         const struct json_value *fd = json_get(&full, "data");
         const struct json_value *cd = json_get(&compact, "data");
         const struct json_value *fhit = json_at(json_get(fd, "entries"), 0);
         const struct json_value *chit = json_at(json_get(cd, "entries"), 0);
         ASSERT(json_get(fhit, "rules") != NULL && json_get(fhit, "id") != NULL);
-        ASSERT_EQ((int64_t)json_size(json_get(fd, "entries")), 2);
-        ASSERT_EQ((int64_t)json_size(json_get(cd, "entries")), 2);
+        ASSERT_EQ((int64_t)json_size(json_get(fd, "entries")), 3);
+        ASSERT_EQ((int64_t)json_size(json_get(cd, "entries")), 3);
+        const struct json_value *cutc = fb_find_entry_slug(cd, "compact-c");
+        ASSERT(cutc != NULL);
+        ASSERT_EQ((int64_t)strlen(json_get_str(json_get(cutc, "summary"))), 99);
+        ASSERT((unsigned char)json_get_str(json_get(cutc, "summary"))[98] < 0x80); /* no half letter kept */
         ASSERT_STR_EQ(json_get_str(json_get(chit, "slug")), "compact-a");
         ASSERT_STR_EQ(json_get_str(json_get(chit, "topic")), "t");
         ASSERT_EQ((int64_t)strlen(json_get_str(json_get(chit, "summary"))), 100);
-        ASSERT(json_get_int(json_get(chit, "score")) >= 1);
+        ASSERT_STR_EQ(json_get_str(json_get(chit, "kind")), "entry");
+        ASSERT(json_get(chit, "author_role") != NULL);
+        ASSERT(json_get(chit, "score") == NULL);
         ASSERT(json_size(json_get(chit, "matched")) >= 1);
         ASSERT(json_get(chit, "rules") == NULL && json_get(chit, "id") == NULL &&
                json_get(chit, "host") == NULL && json_get(chit, "created_at") == NULL);
         ASSERT(json_get(cd, "identity_schema") == NULL && json_get(cd, "query_schema") == NULL);
-        /* The pinned bound: a two-hit answer stays under 1,200 bytes and well
+        /* The pinned bound: a three-hit answer stays under 1,200 bytes and well
          * under half of the full form, which carries both rule and why texts. */
         ASSERT(compact_bytes < 1200);
         ASSERT(compact_bytes * 2 < full_bytes);
         json_free(&full); json_free(&compact);
         PASS();
     } _test_next:;
+    node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
+    if (opened) fb_rpc_env_close(&e);
+    return failures;
+}
+
+const char *zcl_native_cli_default_view_for_test(const char *path, const char *view,
+                                                 bool presentation_allowed);
+
+/* The compact view keeps the trust signal and the reason a scan stopped: a hit
+ * whose author holds no role says author_role false, and an incomplete scan
+ * (no hits, more pages) says why instead of reading as "nothing found". The
+ * summary default applies to presentation only: --field and --format see the
+ * full data. */
+static int test_fleet_wiki_find_compact_trust(void)
+{
+    int failures = 0;
+    static struct fb_rpc_env e;
+    bool opened = false;
+    TEST("fleet wiki: summary view carries author_role, kind and the incomplete reason; --field keeps the full view") {
+        int scribe = 31;
+        struct json_value r;
+        size_t bytes = 0;
+        const int64_t now = INT64_C(5000000);
+        ASSERT(fb_rpc_env_open(&e)); opened = true;
+        db_fleet_board_test_set_wiki_limits(1000, 1000);
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        ASSERT(fb_test_ingest_page_as(&e.db, 31, "trustnote-ok", "reducer prose", now));
+        ASSERT(fb_test_ingest_page_as(&e.db, 32, "trustnote-bad", "reducer prose", now));
+        struct zcl_fleet_role_checker checker = {
+            .allow = fb_author_role_check, .ctx = &scribe,
+            .name = "fleet-board-compact-author-role" };
+        zcl_fleet_role_checker_install(&checker);
+        ASSERT(fb_compact_fetch(&e, "trustnote", "summary", &bytes, &r));
+        const struct json_value *d = json_get(&r, "data");
+        const struct json_value *ok = fb_find_entry_slug(d, "trustnote-ok");
+        const struct json_value *bad = fb_find_entry_slug(d, "trustnote-bad");
+        ASSERT(ok && bad);
+        ASSERT_STR_EQ(json_get_str(json_get(ok, "kind")), "page");
+        ASSERT(json_get(ok, "author_role") != NULL && json_get_bool(json_get(ok, "author_role")));
+        ASSERT(json_get(bad, "author_role") != NULL && !json_get_bool(json_get(bad, "author_role")));
+        ASSERT(json_get(d, "reason") == NULL); /* complete: nothing to explain */
+        json_free(&r);
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        for (int i = 0; i < FLEET_BOARD_LIST_MAX + 1; i++) {
+            char slug[16], text[256];
+            (void)snprintf(slug, sizeof(slug), "page-%03d", i);
+            fb_entry_json(text, sizeof(text), i == FLEET_BOARD_LIST_MAX
+                ? "last-match" : "earlier entry", FB_ONE_LESSON, "");
+            ASSERT(fb_test_ingest_page(&e.db, slug, text, i, now));
+        }
+        ASSERT(fb_compact_fetch(&e, "last-match", "summary", &bytes, &r));
+        d = json_get(&r, "data");
+        ASSERT_EQ((int64_t)json_size(json_get(d, "entries")), 0);
+        ASSERT(json_get_bool(json_get(d, "incomplete")));
+        ASSERT_STR_EQ(json_get_str(json_get(d, "after_slug")), "page-255");
+        ASSERT(strstr(json_get_str(json_get(d, "reason")), "resume after_slug") != NULL);
+        json_free(&r);
+        /* --field / --format select against the full data. */
+        ASSERT(!strcmp(zcl_native_cli_default_view_for_test("fleet.wiki.find", NULL, true), "summary"));
+        ASSERT(zcl_native_cli_default_view_for_test("fleet.wiki.find", NULL, false) == NULL);
+        ASSERT(!strcmp(zcl_native_cli_default_view_for_test("fleet.wiki.find", "normal", true), "normal"));
+        ASSERT(zcl_native_cli_default_view_for_test("fleet.board.list", NULL, true) == NULL);
+        PASS();
+    } _test_next:;
+    db_fleet_board_test_set_wiki_limits(0, 0);
+    zcl_fleet_role_checker_install_permissive_for_testing();
     node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
     if (opened) fb_rpc_env_close(&e);
     return failures;
@@ -12123,6 +12202,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_wiki_find_page_cap();
     failures += test_fleet_wiki_find_matched_fields();
     failures += test_fleet_wiki_find_compact_view();
+    failures += test_fleet_wiki_find_compact_trust();
     failures += test_fleet_wiki_find_page_author_role();
     failures += test_fleet_wiki_list_is_an_index();
     failures += test_fleet_wiki_list_reaches_every_page();

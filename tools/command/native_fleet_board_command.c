@@ -1767,8 +1767,8 @@ void zcl_native_handle_fleet_wiki_history(
 }
 
 /* ── fleet wiki find ────────────────────────────────────────────────── */
-/* The compact view an agent reads by default: per hit only the slug, topic, a
- * one-line summary, how many fields matched (score) and which. The full entry
+/* The compact view an agent reads by default: per hit the slug, kind, author_role, topic, a
+ * one-line summary and which fields matched. The full entry
  * (rules, ids, hosts, times) stays behind --view=normal or fleet wiki read. */
 #define FB_COMPACT_SUMMARY_MAX 100
 
@@ -1785,21 +1785,39 @@ static size_t fb_compact_line_len(const char *s)
     return n;
 }
 
-static bool fb_compact_hit(struct json_value *hit, const struct json_value *e)
+/* Who signed it and what it is: a reader must not present a page whose
+ * author_role is false as project guidance, so the compact view keeps it. */
+static bool fb_compact_identity(struct json_value *hit, const struct json_value *e)
 {
     const char *topic = json_get_str(json_get(e, "topic"));
+    const char *kind = json_get_str(json_get(e, "kind"));
+    const struct json_value *role = json_get(e, "author_role");
+    return json_push_kv_str(hit, "slug", json_get_str(json_get(e, "slug"))) &&
+        (!kind || !kind[0] || json_push_kv_str(hit, "kind", kind)) &&
+        (!role || json_push_kv_bool(hit, "author_role", json_get_bool(role))) &&
+        (!topic || !topic[0] || json_push_kv_str(hit, "topic", topic));
+}
+
+/* The one-line summary (and the node's own omitted-summary flag) and the
+ * fields that matched. */
+static bool fb_compact_text(struct json_value *hit, const struct json_value *e)
+{
     const char *summary = json_get_str(json_get(e, "summary"));
     const struct json_value *matched = json_get(e, "matched");
     char line[FB_COMPACT_SUMMARY_MAX + 1];
     size_t n = summary ? fb_compact_line_len(summary) : 0;
     memcpy(line, summary ? summary : "", n);
     line[n] = '\0';
-    json_set_object(hit);
-    return json_push_kv_str(hit, "slug", json_get_str(json_get(e, "slug"))) &&
-        (!topic || !topic[0] || json_push_kv_str(hit, "topic", topic)) &&
-        (!n || json_push_kv_str(hit, "summary", line)) &&
-        json_push_kv_int(hit, "score", (int64_t)json_size(matched)) &&
+    return (!n || json_push_kv_str(hit, "summary", line)) &&
+        (!json_get_bool(json_get(e, "summary_omitted")) ||
+            json_push_kv_bool(hit, "summary_omitted", true)) &&
         (!json_size(matched) || json_push_kv(hit, "matched", matched));
+}
+
+static bool fb_compact_hit(struct json_value *hit, const struct json_value *e)
+{
+    json_set_object(hit);
+    return fb_compact_identity(hit, e) && fb_compact_text(hit, e);
 }
 
 static bool fb_compact_entries(struct json_value *out, const struct json_value *full)
@@ -1820,16 +1838,22 @@ static bool fb_compact_entries(struct json_value *out, const struct json_value *
     return ok;
 }
 
+/* Why the scan stopped: a live query can answer {"entries":[],"incomplete":true}
+ * which must never read as "nothing found". */
 static bool fb_compact_flags(struct json_value *out, const struct json_value *full)
 {
     const char *after = json_get_str(json_get(full, "after_slug"));
     const char *blocked = json_get_str(json_get(full, "blocked_slug"));
+    const char *reason = json_get_str(json_get(full, "reason"));
+    bool stopped = json_get_bool(json_get(full, "incomplete")) ||
+                   (blocked && blocked[0]);
     return (!json_get_bool(json_get(full, "truncated")) ||
             json_push_kv_bool(out, "truncated", true)) &&
         (!json_get_bool(json_get(full, "incomplete")) ||
             json_push_kv_bool(out, "incomplete", true)) &&
         (!after || !after[0] || json_push_kv_str(out, "after_slug", after)) &&
-        (!blocked || !blocked[0] || json_push_kv_str(out, "blocked_slug", blocked));
+        (!blocked || !blocked[0] || json_push_kv_str(out, "blocked_slug", blocked)) &&
+        (!stopped || !reason || !reason[0] || json_push_kv_str(out, "reason", reason));
 }
 
 /* Replace reply->data with the compact projection; on any failure the full

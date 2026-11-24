@@ -581,6 +581,7 @@ is read-only, local, never contacts a peer and never waits. It scans the
 newest revision of each page this node holds, **whoever signed it** (the same
 revision `fleet wiki read` returns; the board's existing trust model applies
 to what it finds), up to a cap of 256 pages. It returns at most 8 results, each with a `kind`.
+At the CLI the default is the compact summary view (`--view=summary`: slug, kind, author_role, topic, a one-line summary, matched, and on an early stop incomplete, after_slug, blocked_slug and reason); `--view=normal` returns the full entries described next, which MCP and `code guide` always receive.
 A valid entry (`kind` `entry`) matches when its `topic`, `applies_to`,
 `summary`, `slug` or lesson `rule` or `why` contains `q` (`evidence` is not
 searched) and is returned as `topic`, `summary`, `slug`, `updated` and `rules`

@@ -5209,12 +5209,23 @@ static bool nc_presentation_allowed(const struct nc_main_state *st)
  * command line pays for the answer it reads, and --view=normal or full still
  * returns everything. In-process callers (MCP, code guide, steer) never pass
  * through this CLI path, so their JSON shapes are untouched. */
-static const char *nc_cli_default_view(const char *path, const char *view)
+static const char *nc_cli_default_view(const char *path, const char *view,
+                                        bool presentation_allowed)
 {
-    if (view)
+    if (view || !presentation_allowed)
         return view;
     return path && strcmp(path, "fleet.wiki.find") == 0 ? "summary" : NULL;
 }
+
+#if defined(ZCL_TESTING)
+/* --field and --format select against, or print, the leaf's own data: they
+ * must see the full view, so the summary default is for presentation only. */
+const char *zcl_native_cli_default_view_for_test(const char *path, const char *view,
+                                                 bool presentation_allowed)
+{
+    return nc_cli_default_view(path, view, presentation_allowed);
+}
+#endif
 
 static bool nc_main_execute(struct nc_main_state *st,
                             const struct zcl_command_registry *reg, char *out,
@@ -5278,7 +5289,8 @@ static bool nc_main_execute(struct nc_main_state *st,
 #endif
     size_t n = zcl_command_registry_execute_json(
         reg, st->spec, &ctx, &st->input, st->was_alias, st->invoked,
-        nc_cli_default_view(st->spec->path, st->view),
+        nc_cli_default_view(st->spec->path, st->view,
+                            nc_presentation_allowed(st)),
         st->budget, st->max_items, st->cursor, out, out_cap, &exit_code);
     g_nc_interactive_dispatch = previous_interactive_dispatch;
     g_nc_gio_open_dispatch = previous_gio_open_dispatch;
