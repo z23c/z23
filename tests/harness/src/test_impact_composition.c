@@ -15808,6 +15808,8 @@ static int test_ic_proof_enqueue_requires_commit_objects(void)
         ASSERT_STR_EQ(status.detail, "local_commit_invalid");
         ASSERT(!zcl_dev_proof_ensure(f.root, missing_local, base, &status));
         ASSERT_STR_EQ(status.detail, "local_commit_object_missing");
+        ASSERT(!zcl_dev_proof_ensure(f.root, missing_local, missing_local, &status));
+        ASSERT_STR_EQ(status.detail, "local_commit_object_missing");
         ASSERT(!zcl_dev_proof_ensure(f.root, tree, base, &status));
         ASSERT_STR_EQ(status.detail, "local_commit_object_missing");
         ASSERT(!zcl_dev_proof_ensure(f.root, local, missing_base, &status));
@@ -15815,6 +15817,17 @@ static int test_ic_proof_enqueue_requires_commit_objects(void)
         ASSERT(snprintf(request, sizeof(request),
                         "%s/.cache/zcl-dev-proof/requests/%s-%s.request",
                         f.root, local, missing_base) < (int)sizeof(request));
+        ASSERT(access(request, F_OK) != 0);
+        ASSERT(zcl_dev_proof_ensure(f.root, local, local, &status));
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_RUNNING);
+        char why[256] = {0};
+        ASSERT_EQ(zcl_dev_proof_queue_run_next(f.root, why, sizeof(why)), 1);
+        ASSERT_STR_EQ(why, "changed_set_empty");
+        ASSERT(zcl_dev_proof_status_read(f.root, local, local, &status));
+        ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT_STR_EQ(status.detail, "changed_set_empty");
+        ASSERT(snprintf(request, sizeof(request), "%s/original-plan.log",
+                        status.log_dir) < (int)sizeof(request));
         ASSERT(access(request, F_OK) != 0);
         ASSERT(zcl_dev_proof_ensure(f.root, local, base, &status));
         ASSERT_EQ(status.state, ZCL_DEV_PROOF_STATE_RUNNING);

@@ -15001,6 +15001,12 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_execution_environment_unavailable");
         return false;
     }
+    if (strcmp(local, base) == 0) {
+        if (!dp_pair_commit_objects_present(paths->root, local, base, why, why_len))
+            return false;
+        proof_why(why, why_len, "changed_set_empty");
+        return false;
+    }
     if (!proof_zcc_private_open(paths->state, paths->key)) {
         proof_why(why, why_len, "proof_private_compile_cache_unavailable");
         return false;
