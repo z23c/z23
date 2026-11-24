@@ -14,6 +14,7 @@
 #include "command/native_command.h"
 #include "command/native_dev_fleet.h"
 #include "config/command_catalog.h"
+#include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/spawn.h"
@@ -23,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define FSX_PATH "dev.fleet.start"
@@ -515,6 +517,116 @@ _test_next:;
     return failures;
 }
 
+
+/* ── native board: a fixture node answers fleet_board over the RPC hook ──
+ * Newest first, exactly as the node does. Three posts: a fresh note, an
+ * unanswered need and an older offer. The open call returns only the need. */
+
+static int g_fsx_rpc_calls;
+static bool g_fsx_rpc_down;
+static char g_fsx_rpc_params[4][160];
+static char g_fsx_ids[3][65];
+
+static char *fsx_node_hook(const char *method, const char *params)
+{
+    long long now = (long long)time(NULL);
+    char body[2048];
+    bool open = params && strstr(params, "\"open\":true") != NULL;
+    if (g_fsx_rpc_calls < 4)
+        (void)snprintf(g_fsx_rpc_params[g_fsx_rpc_calls], 160, "%s",
+                       params ? params : "");
+    g_fsx_rpc_calls++;
+    if (g_fsx_rpc_down || !method || strcmp(method, "fleet_board") != 0)
+        return NULL;
+    if (open)
+        (void)snprintf(body, sizeof(body),
+            "{\"ok\":true,\"has_more\":false,\"posts\":[{\"id\":\"%s\","
+            "\"created_at\":%lld,\"host\":\"hostA\",\"agent\":\"a1\","
+            "\"kind\":\"need\",\"text\":\"need the lane\"}]}",
+            g_fsx_ids[1], now - 3600);
+    else
+        (void)snprintf(body, sizeof(body),
+            "{\"ok\":true,\"has_more\":false,\"posts\":["
+            "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostB\","
+            "\"agent\":\"w1\",\"kind\":\"note\",\"text\":\"fresh\"},"
+            "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostA\","
+            "\"agent\":\"a1\",\"kind\":\"need\",\"text\":\"need the lane\"},"
+            "{\"id\":\"%s\",\"created_at\":%lld,\"host\":\"hostA\","
+            "\"agent\":\"a1\",\"kind\":\"offer\",\"text\":\"hostA offers\"}"
+            "]}",
+            g_fsx_ids[0], now - 60, g_fsx_ids[1], now - 3600,
+            g_fsx_ids[2], now - 7200);
+    return strdup(body);
+}
+
+static int fsx_case_native_board(void)
+{
+    int failures = 0;
+    for (int i = 0; i < 3; i++)
+        (void)snprintf(g_fsx_ids[i], sizeof(g_fsx_ids[i]), "%064d", i + 1);
+
+    TEST("start: the default board is the live native board, with freshness") {
+        struct fsx_call c;
+        g_fsx_rpc_calls = 0;
+        g_fsx_rpc_down = false;
+        node_rpc_client_set_test_hook(fsx_node_hook);
+        fsx_begin(&c);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(fsx_ok(&c));
+        /* One bounded call for the newest posts, one for the open ones. */
+        ASSERT_EQ(g_fsx_rpc_calls, 2);
+        ASSERT(strstr(g_fsx_rpc_params[0], "\"limit\":20") != NULL);
+        ASSERT(strstr(g_fsx_rpc_params[1], "\"open\":true") != NULL);
+        ASSERT_STR_EQ(fsx_sec_str(&c, "board", "state"), "observed");
+        ASSERT_STR_EQ(fsx_sec_str(&c, "board", "source"), "native_board");
+        ASSERT_EQ(fsx_sec_int(&c, "board", "unanswered"), 1);
+        const struct json_value *rows = fsx_rows(&c, "board");
+        ASSERT(rows != NULL);
+        ASSERT_EQ((long long)rows->num_children, 1);
+        ASSERT_STR_EQ(fsx_row_str(rows, 0, "id"), g_fsx_ids[1]);
+        ASSERT_STR_EQ(fsx_row_str(rows, 0, "host"), "hostA");
+        /* Freshness is the newest row of ANY kind: the 60 s old note. */
+        ASSERT(fsx_sec_int(&c, "board", "newest_age_s") >= 55);
+        ASSERT(fsx_sec_int(&c, "board", "newest_age_s") < 600);
+        ASSERT(fsx_sec_str(&c, "board", "newest_ts")[0] != '\0');
+        ASSERT_STR_EQ(fsx_sec_str(&c, "hosts", "source"), "native_board");
+        ASSERT_EQ(fsx_sec_int(&c, "hosts", "count"), 2);
+        fsx_end(&c);
+        PASS();
+    }
+    return failures;
+_test_next:;
+    return failures;
+}
+
+static int fsx_case_native_down(void)
+{
+    int failures = 0;
+    TEST("start: with no node the board says source_unavailable, never empty") {
+        struct fsx_call c;
+        g_fsx_rpc_calls = 0;
+        g_fsx_rpc_down = true;
+        node_rpc_client_set_test_hook(fsx_node_hook);
+        fsx_begin(&c);
+        (void)json_push_kv_bool(&c.input, "include_units", false);
+        ASSERT(fsx_run(&c));
+        node_rpc_client_set_test_hook(NULL);
+        g_fsx_rpc_down = false;
+        ASSERT(fsx_ok(&c));
+        ASSERT_STR_EQ(fsx_sec_str(&c, "board", "state"), "unavailable");
+        ASSERT(strstr(fsx_sec_str(&c, "board", "reason"),
+                      "source_unavailable") != NULL);
+        ASSERT_STR_EQ(fsx_sec_str(&c, "hosts", "state"), "unavailable");
+        ASSERT_EQ(fsx_sec_int(&c, "board", "newest_age_s"), -1);
+        fsx_end(&c);
+        PASS();
+    }
+    return failures;
+_test_next:;
+    return failures;
+}
 int test_dev_fleet_start(void);
 int test_dev_fleet_start(void)
 {
@@ -594,6 +706,8 @@ int test_dev_fleet_start(void)
         ASSERT(fsx_ok(&c));
         /* alpha-1 (need) and beta-1 (problem); alpha-2 was answered; automated rows never count. */
         ASSERT_EQ(fsx_sec_int(&c, "board", "unanswered"), 2);
+        ASSERT_STR_EQ(fsx_sec_str(&c, "board", "source"), "legacy_file");
+        ASSERT_STR_EQ(fsx_sec_str(&c, "hosts", "source"), "legacy_file");
         const struct json_value *rows = fsx_rows(&c, "board");
         ASSERT(rows != NULL);
         ASSERT_EQ((long long)rows->num_children, 2);
@@ -681,6 +795,9 @@ int test_dev_fleet_start(void)
         fsx_end(&c);
         PASS();
     }
+
+    failures += fsx_case_native_board();
+    failures += fsx_case_native_down();
 
     /* (d) budget */
     {

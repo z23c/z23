@@ -19,7 +19,9 @@
  *                  Malformed → refusal code `cursor_invalid`.
  *   budget_bytes   INT, default 6144, min 1024, max 15360. Out of range →
  *                  refusal code `budget_out_of_range`.
- *   board_dir      STRING. Default: $HOME/.local/state/zclassic23/board.
+ *   board_dir      STRING. Reads a legacy per-host JSONL directory instead of the
+ *                  live native board, and labels the source `legacy_file`. No
+ *                  default: absent, the board is the node's native board.
  *   cwd            STRING. Directory to run Git in. Default: the process
  *                  working directory. The checkout is whatever
  *                  `git rev-parse --show-toplevel` names there.
@@ -67,11 +69,16 @@
  * says `truncated=true` and reports its `total`. The packet NEVER exceeds
  * the budget and NEVER drops a row silently.
  *
- * SCOPE RULE. No fetch, no network, no RPC, no datadir, nothing written.
- * Git is the only authority for refs and worktrees; the board dir is the
- * only authority for fleet posts and it is read through ONE function
- * (fs_board_read) so the signed, gossiped native board can replace the
- * source without touching a single section.
+ * SCOPE RULE. No fetch, no network, nothing written, no datadir read here.
+ * Git is the only authority for refs and worktrees. The signed native board
+ * is the only authority for fleet posts and it is read through the existing
+ * fleet.board.list call (the same store `fleet board list` reads, default
+ * scope rules, limit FS_NATIVE_LIMIT, one bounded deadline) — two calls: the
+ * newest posts and the open ones. A node that does not answer makes the
+ * board and hosts sections `unavailable` with reason source_unavailable; it
+ * never reads as an empty board. The legacy per-host directory is read only
+ * when `board_dir` is passed, and is labelled `legacy_file`. Both sections
+ * carry `source`, `newest_ts` and `newest_age_s` (freshness).
  *
  * PROCESS RULE. Git runs only through zcl_dev_fleet_git_capture() — the same
  * bounded, shell-free rail dev.fleet.truth uses. `systemctl` runs through
@@ -86,6 +93,10 @@
 #include "command/native_dev_fleet_internal.h"
 
 #include "base/safe_alloc.h"
+#include "base/utc_tm.h"
+#include "command/native_command.h"
+#include "config/command_catalog.h"
+#include "kernel/command_registry.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
 #include "platform/file_metadata.h"
@@ -95,6 +106,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define FS_LEAF "dev.fleet.start"
 #define FS_SCHEMA "zcl.fleet_start.v1"
@@ -128,6 +140,9 @@
 #define FS_CAPTURE_BYTES (1024u * 1024u)
 #define FS_MAX_WORKTREES 1024u
 #define FS_MAX_BOARD_ROWS 8192u
+/* Native board window: one call for the newest posts, one for the open ones. */
+#define FS_NATIVE_LIMIT 20u
+#define FS_NATIVE_ROWS (2u * FS_NATIVE_LIMIT)
 #define FS_MAX_HOSTS 64u
 #define FS_MAX_UNITS 64u
 #define FS_TEXT_CUT 160u
@@ -136,13 +151,6 @@
 #define FS_TAIL_RESERVE 260u
 #define FS_CURSOR_TAG "z23fs1"
 
-/* The board is the fleet's shared append log. This is the same
- * $HOME-relative location every other dev-state reader in this tree uses
- * (dev.train's land queue, the node-verify scratch). It is NOT
- * platform_state_root(): that resolver CREATES its directories, and a leaf
- * whose whole contract is "nothing is written except the result" must not
- * mkdir on a read. */
-#define FS_BOARD_REL "/.local/state/zclassic23/board"
 
 #define FS_UNMEASURED (-1)
 
@@ -410,6 +418,7 @@ struct fs_board_row {
     char kind[16];
     char ref[96];
     char text[512];
+    long long at;   /* created_at seconds; 0 when the source has none */
 };
 
 static bool fs_board_automated(const char *agent)
@@ -430,6 +439,23 @@ static int fs_board_compare(const void *left, const void *right)
 {
     const struct fs_board_row *a = left, *b = right;
     return strcmp(a->id, b->id);
+}
+
+/* Seconds since the epoch for "YYYY-MM-DDTHH:MM:SS..." (UTC); 0 when the
+ * text is not that shape. Civil-day arithmetic, no timegm. */
+static long long fs_iso_epoch(const char *ts)
+{
+    int y, mo, d, h, mi, s;
+    long long era, yoe, doy, doe;
+    if (sscanf(ts, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) != 6 ||
+        y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31)
+        return 0;
+    y -= mo <= 2;
+    era = y / 400;
+    yoe = y - era * 400;
+    doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (era * 146097 + doe - 719468) * 86400 + h * 3600 + mi * 60 + s;
 }
 
 static bool fs_board_read(const char *dir, struct fs_board_row *rows,
@@ -468,6 +494,7 @@ static bool fs_board_read(const char *dir, struct fs_board_row *rows,
             out = &rows[*count];
             memset(out, 0, sizeof(*out));
             fs_board_field(&row, "ts", out->ts, sizeof(out->ts));
+            out->at = fs_iso_epoch(out->ts);
             fs_board_field(&row, "id", out->id, sizeof(out->id));
             fs_board_field(&row, "agent", out->agent, sizeof(out->agent));
             fs_board_field(&row, "kind", out->kind, sizeof(out->kind));
@@ -484,6 +511,94 @@ static bool fs_board_read(const char *dir, struct fs_board_row *rows,
     if (*count > 1)
         qsort(rows, *count, sizeof(*rows), fs_board_compare);
     return true;
+}
+
+/* ── native board: the existing fleet.board.list call ────────────────────
+ * The node answers with the newest posts first; rows land oldest-first so
+ * the walks below read them exactly like the legacy sorted array. Ids are
+ * content hashes here, so ORDER comes from `at` (created_at seconds), never
+ * from comparing ids. */
+
+static void fs_native_row(const struct json_value *post,
+                          struct fs_board_row *out)
+{
+    const struct json_value *at = json_get(post, "created_at");
+    struct tm tm_utc;
+    memset(out, 0, sizeof(*out));
+    fs_board_field(post, "id", out->id, sizeof(out->id));
+    fs_board_field(post, "host", out->fhost, sizeof(out->fhost));
+    fs_board_field(post, "agent", out->agent, sizeof(out->agent));
+    fs_board_field(post, "kind", out->kind, sizeof(out->kind));
+    fs_board_field(post, "ref", out->ref, sizeof(out->ref));
+    fs_board_field(post, "text", out->text, sizeof(out->text));
+    if (at && at->type == JSON_INT && json_get_int(at) > 0) {
+        out->at = (long long)json_get_int(at);
+        if (zcl_utc_tm((time_t)out->at, &tm_utc))
+            (void)strftime(out->ts, sizeof(out->ts), "%Y-%m-%dT%H:%M:%SZ",
+                           &tm_utc);
+    }
+}
+
+static size_t fs_native_rows(const struct json_value *posts,
+                             struct fs_board_row *rows)
+{
+    size_t n = posts && posts->type == JSON_ARR ? json_size(posts) : 0;
+    size_t kept = 0;
+    if (n > FS_NATIVE_LIMIT) n = FS_NATIVE_LIMIT;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *post = json_at(posts, i);
+        struct fs_board_row row;
+        if (!post || post->type != JSON_OBJ) continue;
+        fs_native_row(post, &row);
+        if (row.id[0]) rows[kept++] = row;
+    }
+    for (size_t i = 0; i < kept / 2; i++) {   /* newest-first -> oldest-first */
+        struct fs_board_row tmp = rows[i];
+        rows[i] = rows[kept - 1 - i];
+        rows[kept - 1 - i] = tmp;
+    }
+    return kept;
+}
+
+/* One bounded call. False names why in `why`; never an empty board. */
+static bool fs_native_list(const struct zcl_command_request *parent,
+                           const char *input_text, int64_t deadline_ms,
+                           struct fs_board_row *rows, size_t *count,
+                           bool *more, char *why, size_t whycap)
+{
+    struct json_value input;
+    struct zcl_command_request sub;
+    struct zcl_command_reply reply;
+    const struct json_value *flag;
+    bool ok;
+    *count = 0;
+    *more = false;
+    memset(&sub, 0, sizeof(sub));
+    sub.spec = zcl_command_registry_find(zcl_command_catalog(),
+                                         "fleet.board.list", NULL);
+    json_init(&input);
+    if (!sub.spec || !json_read(&input, input_text, strlen(input_text))) {
+        json_free(&input);
+        (void)snprintf(why, whycap, "source_unavailable: board list leaf");
+        return false;
+    }
+    sub.input = &input;
+    sub.context = parent ? parent->context : NULL;
+    sub.view = "normal";
+    zcl_command_reply_init(&reply, "zcl.fleet_board_list.v1");
+    zcl_native_fleet_board_list_until(&sub, &reply, deadline_ms);
+    ok = reply.status == ZCL_COMMAND_STATUS_PASSED;
+    if (ok) {
+        *count = fs_native_rows(json_get(&reply.data, "posts"), rows);
+        flag = json_get(&reply.data, "has_more");
+        *more = flag && flag->type == JSON_BOOL && json_get_bool(flag);
+    } else {
+        (void)snprintf(why, whycap, "source_unavailable: %s",
+                       reply.error.code[0] ? reply.error.code : "no answer");
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
 }
 
 /* ── worktrees ───────────────────────────────────────────────────────────── */
@@ -867,6 +982,10 @@ struct fs_start {
     long long checkout_dirty;
     size_t wt_count;
     size_t board_count;
+    size_t open_count;   /* native: open posts, in board + FS_NATIVE_LIMIT */
+    bool open_more;      /* native: the node holds more open posts */
+    bool native;         /* source is the node board, not board_dir */
+    size_t board_cap;
     size_t unit_count;
     size_t unanswered_total;
     size_t ahead_worktrees;
@@ -882,6 +1001,7 @@ static void fs_start_init(struct fs_start *st, struct zcl_command_reply *reply)
     st->data = &reply->data;
     st->start_dir = ".";
     st->want_units = true;
+    st->native = true;
     st->checkout_behind = FS_UNMEASURED;
     st->checkout_ahead = FS_UNMEASURED;
     st->checkout_dirty = FS_UNMEASURED;
@@ -931,9 +1051,11 @@ static void fs_input_options(const struct json_value *input,
 {
     const struct json_value *v;
     v = json_get(input, "board_dir");
-    if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+    if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0]) {
+        st->native = false;
         (void)snprintf(st->board_dir, sizeof(st->board_dir), "%s",
                        json_get_str(v));
+    }
     v = json_get(input, "include_units");
     if (v && v->type == JSON_BOOL) st->want_units = json_get_bool(v);
     v = json_get(input, "cwd");
@@ -947,7 +1069,8 @@ static bool fs_alloc_buffers(struct fs_start *st,
     st->ctx.capture = zcl_malloc(FS_CAPTURE_BYTES, "fleet_start_capture");
     st->wts = zcl_calloc(FS_MAX_WORKTREES, sizeof(*st->wts),
                          "fleet_start_worktrees");
-    st->board = zcl_calloc(FS_MAX_BOARD_ROWS, sizeof(*st->board),
+    st->board_cap = st->native ? FS_NATIVE_ROWS : FS_MAX_BOARD_ROWS;
+    st->board = zcl_calloc(st->board_cap, sizeof(*st->board),
                            "fleet_start_board");
     if (!st->ctx.capture || !st->wts || !st->board) {
         free(st->ctx.capture); free(st->wts); free(st->board);
@@ -1007,15 +1130,6 @@ static void fs_resolve_common_dir(struct fs_start *st)
     }
 }
 
-static void fs_default_board_dir(struct fs_start *st)
-{
-    if (!st->board_dir[0]) {
-        const char *home = getenv("HOME");
-        if (home && home[0])
-            (void)snprintf(st->board_dir, sizeof(st->board_dir), "%s%s",
-                           home, FS_BOARD_REL);
-    }
-}
 
 static void fs_checkout_identity(struct fs_start *st)
 {
@@ -1331,18 +1445,61 @@ static void fs_section_units(struct fs_start *st)
     json_free(&sec);
 }
 
-static void fs_board_load(struct fs_start *st)
+/* Newest posts (hosts, freshness) and open posts (the unanswered list)
+ * under one deadline; open posts need ids only when the node says so. */
+static bool fs_native_load(struct fs_start *st,
+                           const struct zcl_command_request *request)
 {
-    st->board_ok = st->board_dir[0] &&
-                   fs_board_read(st->board_dir, st->board, FS_MAX_BOARD_ROWS,
-                                 &st->board_count, st->board_why,
-                                 sizeof(st->board_why));
-    if (!st->board_dir[0])
-        (void)snprintf(st->board_why, sizeof(st->board_why),
-                       "no board directory could be resolved");
+    int64_t deadline = platform_time_monotonic_ms() +
+                       ZCL_COMMAND_LATENCY_BUDGET_FAST_MS;
+    bool more_recent = false;
+    return fs_native_list(request, "{\"limit\":20}", deadline, st->board,
+                          &st->board_count, &more_recent, st->board_why,
+                          sizeof(st->board_why)) &&
+           fs_native_list(request, "{\"open\":true,\"limit\":20}", deadline,
+                          st->board + FS_NATIVE_LIMIT, &st->open_count,
+                          &st->open_more, st->board_why,
+                          sizeof(st->board_why));
+}
+
+static void fs_board_load(struct fs_start *st,
+                          const struct zcl_command_request *request)
+{
+    if (st->native)
+        st->board_ok = fs_native_load(st, request);
+    else
+        st->board_ok = fs_board_read(st->board_dir, st->board, st->board_cap,
+                                     &st->board_count, st->board_why,
+                                     sizeof(st->board_why));
+    if (!st->board_ok) {
+        st->board_count = 0;
+        st->open_count = 0;
+    }
     if (st->board_ok && st->board_count)
         (void)snprintf(st->newest_board_id, sizeof(st->newest_board_id),
                        "%s", st->board[st->board_count - 1].id);
+}
+
+/* Where the rows came from and how fresh they are. Written into the hosts
+ * and board sections so a stale source can never pass for a quiet fleet.
+ * `newest_age_s` is -1 when the source carries no created_at (legacy). */
+static void fs_board_source_fields(const struct fs_start *st,
+                                   struct json_value *sec)
+{
+    const struct fs_board_row *newest =
+        st->board_ok && st->board_count ? &st->board[st->board_count - 1]
+                                        : NULL;
+    long long age = newest && newest->at > 0
+                        ? (long long)st->ctx.now_wall - newest->at : -1;
+    char shown_dir[ZCL_FLEET_PATH_MAX];
+    (void)json_push_kv_str(sec, "source",
+                           st->native ? "native_board" : "legacy_file");
+    if (!st->native) {
+        fs_tilde(st->board_dir, shown_dir, sizeof(shown_dir));
+        (void)json_push_kv_str(sec, "board_dir", shown_dir);
+    }
+    (void)json_push_kv_str(sec, "newest_ts", newest ? newest->ts : "");
+    (void)json_push_kv_int(sec, "newest_age_s", age);
 }
 
 static size_t fs_host_collect(const struct fs_start *st, char hosts[][80])
@@ -1408,16 +1565,14 @@ static void fs_section_hosts(struct fs_start *st)
     struct json_value sec, rows, head_probe;
     char hosts[FS_MAX_HOSTS][80];
     size_t host_count, emitted, head_len;
-    char shown_dir[ZCL_FLEET_PATH_MAX];
 
     st->ctx.reserve = fs_floor_total(st->ctx.budget, FS_FLOOR_BOARD);
     host_count = fs_host_collect(st, hosts);
 
-    fs_tilde(st->board_dir, shown_dir, sizeof(shown_dir));
     json_init(&head_probe);
     fs_head(&head_probe, "observed", (long long)host_count,
             (long long)host_count, false);
-    (void)json_push_kv_str(&head_probe, "board_dir", shown_dir);
+    fs_board_source_fields(st, &head_probe);
     (void)json_push_kv_str(&head_probe, "reason", st->board_why);
     head_len = fs_len(&st->ctx, &head_probe);
     json_free(&head_probe);
@@ -1430,7 +1585,7 @@ static void fs_section_hosts(struct fs_start *st)
     fs_head(&sec, st->board_ok ? "observed" : "unavailable",
             (long long)emitted, (long long)host_count,
             emitted < host_count);
-    (void)json_push_kv_str(&sec, "board_dir", shown_dir);
+    fs_board_source_fields(st, &sec);
     if (!st->board_ok) (void)json_push_kv_str(&sec, "reason", st->board_why);
     (void)json_push_kv(&sec, "rows", &rows);
     (void)fs_commit(&st->ctx, st->data, "hosts", &sec,
@@ -1439,23 +1594,47 @@ static void fs_section_hosts(struct fs_start *st)
     json_free(&sec);
 }
 
+/* The rows the unanswered list walks, oldest first. Native: the node's own
+ * open posts (it already applied the claim/result rule). Legacy: every row. */
+static const struct fs_board_row *fs_board_src(const struct fs_start *st,
+                                               size_t *count)
+{
+    *count = !st->board_ok ? 0 : st->native ? st->open_count : st->board_count;
+    return st->native ? st->board + FS_NATIVE_LIMIT : st->board;
+}
+
+/* Rows already reported in an earlier packet: legacy ids sort by time, native
+ * ids are hashes, so native compares created_at with the cursor's seconds. */
+static bool fs_board_seen(const struct fs_start *st,
+                          const struct fs_board_row *r)
+{
+    if (!st->since.present) return false;
+    if (st->native)
+        return r->at > 0 && r->at <= st->since.unix_seconds;
+    return strcmp(r->id, st->since.board_id) <= 0;
+}
+
+static bool fs_board_wanted(const struct fs_start *st,
+                            const struct fs_board_row *r)
+{
+    if (strcmp(r->kind, "need") != 0 && strcmp(r->kind, "problem") != 0)
+        return false;
+    return !fs_board_automated(r->agent) && !fs_board_seen(st, r);
+}
+
 static void fs_board_tally_unanswered(struct fs_start *st)
 {
-    for (size_t i = 0; st->board_ok && i < st->board_count; i++) {
-        if (strcmp(st->board[i].kind, "need") != 0 &&
-            strcmp(st->board[i].kind, "problem") != 0) continue;
-        if (fs_board_automated(st->board[i].agent)) continue;
-        if (st->since.present &&
-            strcmp(st->board[i].id, st->since.board_id) <= 0)
-            continue;
-        st->unanswered_total++;
-    }
+    size_t n;
+    const struct fs_board_row *src = fs_board_src(st, &n);
+    for (size_t i = 0; i < n; i++)
+        if (fs_board_wanted(st, &src[i])) st->unanswered_total++;
 }
 
 static bool fs_board_answered(const struct fs_start *st,
                               const struct fs_board_row *r)
 {
     bool answered = false;
+    if (st->native) return false;
     for (size_t j = 0; j < st->board_count; j++) {
         if (strcmp(st->board[j].ref, r->id) != 0) continue;
         if (strcmp(st->board[j].kind, "claim") != 0 &&
@@ -1470,22 +1649,17 @@ static bool fs_board_answered(const struct fs_start *st,
 static size_t fs_board_rows(struct fs_start *st, struct json_value *rows,
                             size_t head_len)
 {
-    size_t emitted = 0, rows_len = fs_len(&st->ctx, rows);
+    size_t emitted = 0, rows_len = fs_len(&st->ctx, rows), n;
+    const struct fs_board_row *src = fs_board_src(st, &n);
 
-    /* Newest first: the rows are sorted oldest-first by id, so walk back. */
-    for (size_t k = st->board_ok ? st->board_count : 0; k > 0; k--) {
-        struct fs_board_row *r = &st->board[k - 1];
+    /* Newest first: the rows are sorted oldest-first, so walk back. */
+    for (size_t k = n; k > 0; k--) {
+        const struct fs_board_row *r = &src[k - 1];
         struct json_value row;
         char cut[FS_TEXT_CUT + 8];
-        bool answered = false;
         size_t next_len;
-        if (strcmp(r->kind, "need") != 0 && strcmp(r->kind, "problem") != 0)
-            continue;
-        if (fs_board_automated(r->agent)) continue;
-        if (st->since.present && strcmp(r->id, st->since.board_id) <= 0)
-            continue;
-        answered = fs_board_answered(st, r);
-        if (answered) { st->unanswered_total--; continue; }
+        if (!fs_board_wanted(st, r)) continue;
+        if (fs_board_answered(st, r)) { st->unanswered_total--; continue; }
         fs_cut_utf8(r->text, FS_TEXT_CUT, cut, sizeof(cut));
         json_init(&row);
         json_set_object(&row);
@@ -1521,6 +1695,8 @@ static void fs_section_board(struct fs_start *st)
             (long long)st->board_count, false);
     (void)json_push_kv_int(&head_probe, "unanswered",
                            (long long)st->unanswered_total);
+    fs_board_source_fields(st, &head_probe);
+    (void)json_push_kv_bool(&head_probe, "more_open", st->open_more);
     (void)json_push_kv_str(&head_probe, "reason", st->board_why);
     head_len = fs_len(&st->ctx, &head_probe);
     json_free(&head_probe);
@@ -1532,9 +1708,11 @@ static void fs_section_board(struct fs_start *st)
     json_init(&sec);
     fs_head(&sec, st->board_ok ? "observed" : "unavailable",
             (long long)emitted, (long long)st->board_count,
-            emitted < st->unanswered_total);
+            emitted < st->unanswered_total || st->open_more);
     (void)json_push_kv_int(&sec, "unanswered",
                            (long long)st->unanswered_total);
+    fs_board_source_fields(st, &sec);
+    (void)json_push_kv_bool(&sec, "more_open", st->open_more);
     if (!st->board_ok) (void)json_push_kv_str(&sec, "reason", st->board_why);
     (void)json_push_kv(&sec, "rows", &rows);
     (void)fs_commit(&st->ctx, st->data, "board", &sec,
@@ -1712,7 +1890,6 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
     if (!fs_alloc_buffers(&st, reply)) return;
     if (!fs_resolve_root(&st, reply)) return;
     fs_resolve_common_dir(&st);
-    fs_default_board_dir(&st);
 
     /* `checkout` is the one section that is never negotiable — every other
      * answer is relative to it — so it reserves nothing for anybody. From
@@ -1734,7 +1911,7 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
     fs_section_units(&st);
 
     /* ── the board, read once for sections 5 and 6 ── */
-    fs_board_load(&st);
+    fs_board_load(&st, request);
 
     /* ── 5. hosts ── */
     fs_section_hosts(&st);
