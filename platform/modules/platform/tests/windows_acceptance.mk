@@ -84,6 +84,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	stale_lock_capability \
 	state_root \
 	thread_join \
+	tor_stub_stream \
 	ui_host_transport \
 	utxo_recovery_ldb_copy_refusal \
 	wallet_recovery_directory \
@@ -942,3 +943,10 @@ ZCL_WINDOWS_ACCEPTANCE_plugin_store_FLAGS := \
 	-ffunction-sections -fdata-sections
 ZCL_WINDOWS_ACCEPTANCE_plugin_store_LIBS := \
 	-Wl,--gc-sections -ladvapi32 -lbcrypt
+
+# Link guard for vendor/tor_stub.c: the offline stub must define the raw
+# stream write/close symbols that failed to link with MinGW gcc 16 under LTO,
+# and must leave dynhost_stream_open undefined (see the program header).
+ZCL_WINDOWS_ACCEPTANCE_tor_stub_stream_SOURCES := \
+	tests/harness/src/tor_stub_stream_windows_acceptance.c \
+	vendor/tor_stub.c
