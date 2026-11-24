@@ -26,6 +26,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "command/app_image.h"
 #include "command/native_app_launch.h"
 #include "command/native_app_compose.h"
@@ -1777,6 +1778,71 @@ static bool rlc_offer_command(const char *base, const struct rlc_binding *bindin
     return ok;
 }
 
+static bool rlc_offer_fault_input(struct json_value *input, const char *base,
+                                  const struct rlc_binding *binding, bool offer)
+{
+    json_init(input); json_set_object(input);
+    return json_push_kv_str(input, "datadir", base) &&
+        json_push_kv_str(input, "app", "contract/offer-confirmation-fault") &&
+        json_push_kv_str(input, "action", offer ? "offer" : "offer-status") &&
+        (!offer || (json_push_kv_int(input, "expected_offer_revision", 0) &&
+          json_push_kv_str(input, "preview_root", binding->root_hex) &&
+          json_push_kv_str(input, "preview_receipt", binding->receipt_hex) &&
+          json_push_kv_str(input, "preview_program", RLC_ZTASKS_PROGRAM)));
+}
+
+static bool rlc_offer_fault_call(const struct json_value *input,
+                                 struct zcl_command_reply *reply, bool fault)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(zcl_command_catalog(), "app.tasks", NULL);
+    char why[256];
+    if (!spec || !zcl_command_registry_input_validate(spec, input, why, sizeof(why))) return false;
+    struct zcl_command_request request = {.spec = spec, .input = input};
+    zcl_command_reply_init(reply, "zcl.task_document.v1");
+    if (fault) zcl_alloc_fault_fail_next("json_push_kv_key");
+    spec->handler(&request, reply);
+    zcl_alloc_fault_clear();
+    return true;
+}
+
+static bool rlc_offer_fault_durable(const char *base, const struct rlc_binding *binding)
+{
+    struct package_resident_store store = {0};
+    struct task_update_offer offer = {0};
+    struct package_resident_identity expected = rlc_task_identity(binding);
+    bool ok = package_resident_store_open_task_app(&store, base, "contract/offer-confirmation-fault").ok &&
+        task_update_offer_read(&store, &offer).ok && offer.revision == 1 && !offer.dismissed &&
+        package_resident_identity_equal(&offer.candidate, &expected);
+    if (store.db && !package_resident_store_close(&store).ok) ok = false;
+    return ok;
+}
+
+static int rlc_offer_confirmation_fault(const char *base, const struct rlc_binding *binding)
+{
+    int failures = 0;
+    struct json_value input;
+    bool built = rlc_offer_fault_input(&input, base, binding, true);
+    struct zcl_command_reply reply = {0};
+    bool called = built && rlc_offer_fault_call(&input, &reply, true);
+    RLC_CHECK("offer confirmation fails after successful operation", called &&
+        reply.status == ZCL_COMMAND_STATUS_FAILED && strstr(reply.error.message, "operation completed but confirmation"));
+    RLC_CHECK("offer confirmation fault preserves exact committed offer", rlc_offer_fault_durable(base, binding));
+    RLC_CHECK("offer confirmation fault reports mutation", called && reply.error.mutated);
+    zcl_command_reply_free(&reply);
+    called = built && rlc_offer_fault_call(&input, &reply, false);
+    RLC_CHECK("stale offer refuses without mutation", called && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        !reply.error.mutated && !strcmp(reply.error.code, "TASK_SAVE_FAILED") &&
+        strstr(reply.error.message, "stale revision"));
+    zcl_command_reply_free(&reply); json_free(&input);
+    built = rlc_offer_fault_input(&input, base, binding, false);
+    called = built && rlc_offer_fault_call(&input, &reply, true);
+    RLC_CHECK("offer status confirmation failure is read-only", called && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        !reply.error.mutated && strstr(reply.error.message, "operation completed but confirmation"));
+    RLC_CHECK("stale and status failures retain exact offer", rlc_offer_fault_durable(base, binding));
+    zcl_command_reply_free(&reply); json_free(&input);
+    return failures;
+}
+
 static bool rlc_offer_text(const struct json_value *data, const char *key, const char *expected)
 {
     const char *value = json_get_str(json_get(data, key));
@@ -3493,6 +3559,7 @@ int test_resident_launch_contract(void)
         if (variants) {
             struct rlc_binding n;
             rlc_binding_fill(&n, ztasks_root, ztasks_receipt, ztasks_sha3);
+            failures += rlc_offer_confirmation_fault(base, &n);
             struct rlc_binding broken;
             rlc_binding_fill(&broken, parker_root, parker_receipt, parker_sha3);
             failures += rlc_task_journey(base, &n, &n1, &n2, &broken);

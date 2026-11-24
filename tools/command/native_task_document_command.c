@@ -240,8 +240,10 @@ static bool ntd_render(struct json_value *data, const struct task_document *row,
 }
 
 static struct zcl_result ntd_offer(const struct json_value *input,
-    struct package_resident_store *store, const char *directory, struct task_update_offer *out)
+    struct package_resident_store *store, const char *directory, struct task_update_offer *out,
+    bool *mutated)
 {
+    *mutated = false;
     if (strcmp(ntd_string(input, "action"), "offer-status") == 0)
         return task_update_offer_read(store, out);
     uint64_t revision;
@@ -249,7 +251,9 @@ static struct zcl_result ntd_offer(const struct json_value *input,
         return ZCL_ERR(-1, "tasks: read offer-status and supply expected_offer_revision");
     struct package_resident_identity candidate = {0};
     ZCL_CHECK(ntd_candidate(input, &candidate));
-    return task_update_offer_submit(store, directory, (int64_t)revision, &candidate, out);
+    struct zcl_result result = task_update_offer_submit(store, directory, (int64_t)revision, &candidate, out);
+    if (result.ok) *mutated = true;
+    return result;
 }
 
 /* Offering software does not disclose the user's task contents to the AI. */
@@ -349,7 +353,7 @@ void zcl_native_handle_task_document(const struct zcl_command_request *request,
     bool mutated = false;
     struct zcl_result result = ntd_open(request->input, &store, directory);
     if (result.ok && offering) result = package_resident_record_read(&store, &kept);
-    if (result.ok) result = offering ? ntd_offer(request->input, &store, directory, &offer)
+    if (result.ok) result = offering ? ntd_offer(request->input, &store, directory, &offer, &mutated)
         : ntd_change(request->input, &store, directory, &row, &mutated);
     struct zcl_result closed = package_resident_store_close(&store);
     if (result.ok && !closed.ok) result = closed;
