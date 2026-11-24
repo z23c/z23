@@ -366,16 +366,23 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
         char cwd_diag[700], cwd_target[700];
         char text[4096], newest[32], older[32];
         const char *units[] = {"devbuild-100-1.scope", "devbuild-100-2.scope",
-                               "devbuild-100-3.scope", "devbuild-100-4.scope"};
+                               "devbuild-100-3.scope", "devbuild-100-4.scope",
+                               "devbuild-100-5.scope", "devbuild-100-0.scope",
+                               "devbuild-100-6.scope"};
         const char *suites[] = {"dddddddddddddddddddddddddddddddd",
                                 "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
                                 "ffffffffffffffffffffffffffffffff",
-                                "00000000000000000000000000000000"};
+                                "00000000000000000000000000000000",
+                                "cccccccccccccccccccccccccccccccc",
+                                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                "cccccccccccccccccccccccccccccccc"};
         const char *groups[] = {"[\"test_shared\"]",
                                 "[\"test_shared\",\"test_other\",\"spec_wallet_dashboard\",\"test_test_fdt\"]",
                                 "[\"test_shared\",\"test_missing\"]",
-                                "[\"test_shared\",\"test_overflow\"]"};
-        const int verdict_counts[] = {1, 4, 2, 2};
+                                "[\"test_shared\",\"test_overflow\"]",
+                                "[\"test_shared\"]", "[\"test_shared\"]",
+                                "[\"test_shared\"]"};
+        const int verdict_counts[] = {1, 4, 2, 2, 1, 1, 1};
         (void)snprintf(wt, sizeof(wt), "%s/wt_recency", base);
         (void)snprintf(cwd_diag, sizeof(cwd_diag), "%s/cwd --diagnostic-once", wt);
         (void)snprintf(cwd_target, sizeof(cwd_target), "%s/cwd t-fast-exact", wt);
@@ -384,19 +391,24 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
                        base);
         (void)snprintf(newest, sizeof(newest), "%ld", now - 20);
         (void)snprintf(older, sizeof(older), "%ld", now - 40);
-        const char *ended[] = {newest, older, NULL, "1e100"};
+        const char *ended[] = {newest, older, NULL, "1e100", newest, newest, newest};
         FILE *fp = fopen(jobs_recency, "w");
         ASSERT(fp != NULL);
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 7; i++) {
             (void)snprintf(dir, sizeof(dir), "%s/%s", root, units[i]);
             dfx_mkdirs(dir);
-            (void)snprintf(path, sizeof(path), "%s/%s.json", dir, suites[i]);
-            (void)snprintf(text, sizeof(text),
-                "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"%s\",\"suite\":\"%s\",\"groups_total\":4,\"groups_ran\":%d,\"groups_cached\":0,\"groups_failed\":%d,\"failed_groups_truncated\":false,\"failed_groups\":%s}\n",
-                units[i], suites[i], verdict_counts[i], verdict_counts[i],
-                groups[i]);
-            dfx_write(path, text);
-            ASSERT(chmod(path, 0600) == 0);
+            /* Reverse lexical suite creation and interleaved unit ties
+             * must not make the retained receipt depend on iteration order. */
+            for (int k = 0; k <= (i == 5); k++) {
+                const char *suite = k ? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : suites[i];
+                (void)snprintf(path, sizeof(path), "%s/%s.json", dir, suite);
+                (void)snprintf(text, sizeof(text),
+                    "{\"schema\":\"zcl.test_verdict.v1\",\"unit\":\"%s\",\"suite\":\"%s\",\"groups_total\":4,\"groups_ran\":%d,\"groups_cached\":0,\"groups_failed\":%d,\"failed_groups_truncated\":false,\"failed_groups\":%s}\n",
+                    units[i], suite, verdict_counts[i], verdict_counts[i],
+                    groups[i]);
+                dfx_write(path, text);
+                ASSERT(chmod(path, 0600) == 0);
+            }
             int n = snprintf(text, sizeof(text),
                 "{\"project\":\"z23\",\"cwd\":\"%s\",\"queued\":%ld,\"rc\":2,\"cmd\":\"make t-fast\",\"unit\":\"%s\",\"verdict_root\":\"%s\"%s%s}\n",
                 wt, now - 40 + i, units[i], root,
@@ -438,11 +450,14 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
         const char *names[] = {"test_shared", "spec_wallet_dashboard",
                                "test_missing", "test_other", "test_overflow",
                                "test_test_fdt"};
-        const int64_t counts[] = {4, 1, 1, 1, 1, 1};
+        const int64_t counts[] = {7, 1, 1, 1, 1, 1};
         const int64_t ends[] = {now - 20, now - 40, 0, now - 40, 0, now - 40};
         const int64_t passes[] = {now - 10, now - 10, now - 10, now - 50, 0,
                                   now - 10};
         const bool passed_after[] = {true, true, false, false, false, true};
+        const char *ref_units[] = {units[5], units[1], NULL, units[1], NULL, units[1]};
+        const char *ref_suites[] = {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", suites[1],
+                                    NULL, suites[1], NULL, suites[1]};
         ASSERT_EQ((int)json_size(rows), 6);
         for (size_t i = 0; i < 6; i++) {
             const struct json_value *row = json_at(rows, i);
@@ -450,6 +465,13 @@ static int dfx_case_failed_group_recency(const char *base, const char *jobs,
             ASSERT_EQ(json_get_int(json_get(row, "n")), counts[i]);
             ASSERT(json_get(row, "last_ended_unix") != NULL);
             ASSERT_EQ(json_get_int(json_get(row, "last_ended_unix")), ends[i]);
+            if (ends[i] > 0) {
+                ASSERT_STR_EQ(json_get_str(json_get(row, "last_failure_unit")), ref_units[i]);
+                ASSERT_STR_EQ(json_get_str(json_get(row, "last_failure_suite")), ref_suites[i]);
+            } else {
+                ASSERT(json_get(row, "last_failure_unit") == NULL);
+                ASSERT(json_get(row, "last_failure_suite") == NULL);
+            }
             ASSERT_EQ(json_get_int(json_get(row, "last_passed_unix")), passes[i]);
             ASSERT(json_get(row, "passed_after_failure") != NULL);
             ASSERT(json_get_bool(json_get(row, "passed_after_failure")) ==
@@ -734,6 +756,10 @@ int test_dev_factory(void)
             json_at(dfx_at(&c, "jobs.failed_groups"), 0);
         ASSERT_EQ(json_get_int(json_get(failed_group, "last_ended_unix")),
                   (int64_t)now);
+        ASSERT_STR_EQ(json_get_str(json_get(failed_group, "last_failure_unit")),
+                      "devbuild-123-456.scope");
+        ASSERT_STR_EQ(json_get_str(json_get(failed_group, "last_failure_suite")),
+                      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         dfx_end(&c);
         (void)setenv("ZCL_DEV_FACTORY_VERDICTS", wt, 1);
         dfx_run(&c, 48); ASSERT(dfx_ok(&c)); ASSERT_EQ((int)dfx_num(&c, "jobs.failed_runs_named"), 0); dfx_end(&c);

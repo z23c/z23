@@ -944,6 +944,7 @@ static void fac_cold_section(const struct fac_jobs *j, struct json_value *out)
 
 struct fac_name {
     char key[FAC_NAME];
+    char unit[129], suite[33];
     int64_t n;
     int64_t last_ended;
     int64_t last_passed;
@@ -963,27 +964,42 @@ static int64_t fac_verdict_time(double ended)
     return (int64_t)ended;
 }
 
-static void fac_verdict_note(struct fac_verdict *v, const char *name,
+static struct fac_name *fac_verdict_note(struct fac_verdict *v, const char *name,
                              double ended)
 {
     int64_t ended_unix = fac_verdict_time(ended);
     for (size_t i = 0; i < v->nn; i++) {
         if (strcmp(v->names[i].key, name) == 0) {
             fac_inc(&v->names[i].n);
-            if (ended_unix > v->names[i].last_ended)
+            if (ended_unix > v->names[i].last_ended) {
                 v->names[i].last_ended = ended_unix;
-            return;
+                v->names[i].unit[0] = v->names[i].suite[0] = 0;
+            }
+            return &v->names[i];
         }
     }
     if (v->nn >= FAC_MAX_NAMES) {
         fac_inc(&v->overflow);
-        return;
+        return NULL;
     }
     (void)snprintf(v->names[v->nn].key, sizeof(v->names[v->nn].key), "%s",
                    name);
     v->names[v->nn].n = 1;
     v->names[v->nn].last_ended = ended_unix;
-    v->nn++;
+    return &v->names[v->nn++];
+}
+
+/* Equal normalized times choose the smallest (unit, suite), independent
+ * of ledger and directory order. These identify a receipt, not source. */
+static void fac_verdict_reference(struct fac_name *name, const char *unit,
+                                  const char *suite)
+{
+    if (!name) return;
+    int order = strcmp(unit, name->unit);
+    if (name->unit[0] && (order > 0 ||
+        (order == 0 && strcmp(suite, name->suite) >= 0))) return;
+    (void)snprintf(name->unit, sizeof(name->unit), "%s", unit);
+    (void)snprintf(name->suite, sizeof(name->suite), "%s", suite);
 }
 
 static bool fac_group_selector(const char *group, size_t n,
@@ -1129,7 +1145,8 @@ static bool fac_verdict_names(const struct json_value *doc,
         const struct json_value *s = json_at(arr, i);
         const char *name = s && s->type == JSON_STR ? json_get_str(s) : NULL;
         if (name && name[0]) {
-            fac_verdict_note(v, name, 0);
+            fac_verdict_reference(fac_verdict_note(v, name, 0),
+                                  fac_text(doc, "unit"), fac_text(doc, "suite"));
             any = true;
         }
     }
@@ -1243,8 +1260,12 @@ static void fac_verdict_job(struct fac_jobs *jobs, const struct fac_job *jb, str
     struct fac_unit_slot *slot = fac_unit_slot(jobs, jb->unit);
     struct fac_verdict *found = zcl_calloc(1, sizeof(*found), "dev_factory_unit_verdict");
     if (slot && slot->count == 1 && found && fac_unit_verdicts(jb, jobs->verdict_root, found)) {
-        for (size_t i = 0; i < found->nn; ++i)
-            fac_verdict_note(v, found->names[i].key, jb->ended);
+        for (size_t i = 0; i < found->nn; ++i) {
+            struct fac_name *name = fac_verdict_note(v, found->names[i].key, jb->ended);
+            int64_t ended = fac_verdict_time(jb->ended);
+            if (name && ended > 0 && ended == name->last_ended)
+                fac_verdict_reference(name, jb->unit, found->names[i].suite);
+        }
         if (found->overflow) fac_inc(&v->overflow);
         named = true;
     }
@@ -1311,6 +1332,11 @@ static void fac_failed_section(struct fac_jobs *j, struct json_value *out)
         (void)json_push_kv_int(&row, "n", v->names[i].n);
         (void)json_push_kv_int(&row, "last_ended_unix",
                                v->names[i].last_ended);
+        /* Unknown recency has no claimed latest receipt. */
+        if (v->names[i].unit[0]) {
+            (void)json_push_kv_str(&row, "last_failure_unit", v->names[i].unit);
+            (void)json_push_kv_str(&row, "last_failure_suite", v->names[i].suite);
+        }
         (void)json_push_kv_int(&row, "last_passed_unix",
                                v->names[i].last_passed);
         (void)json_push_kv_bool(&row, "passed_after_failure",
