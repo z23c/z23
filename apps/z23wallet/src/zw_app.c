@@ -190,11 +190,19 @@ static void drain(struct app *a)
     gui_window_timer_set(a->win, T_POLL, poll_delay_ms(a), false);
 }
 
-/* R9: no result within 6 s of an enqueue means a stuck worker or a lost wake. */
+/* R9: the worker made no progress (no node call finished) for 6 s: a stuck worker or a lost
+ * wake. A job of several calls, each with its own 5 s deadline, keeps making progress and
+ * is left alone; the timer is re-armed for what remains of the window. */
 static void watchdog_fired(struct app *a)
 {
     a->watchdog_armed = false;
     if (!zw_worker_busy(a->worker)) return;
+    uint32_t left = zw_watchdog_remaining_ms(zw_worker_stall_ms(a->worker), WATCHDOG_MS);
+    if (left) {
+        gui_window_timer_set(a->win, T_WATCHDOG, left, false);
+        a->watchdog_armed = true;
+        return;
+    }
     char line[160];
     zw_watchdog_line(zw_worker_phase(a->worker), zw_worker_port(a->worker), line, sizeof(line));
     zw_log("%s", line);

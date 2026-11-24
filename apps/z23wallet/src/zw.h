@@ -113,6 +113,7 @@ struct zw_rpc {
     uint32_t next_id;
     uint32_t deadline_ms; /* 0 = 5000 */
     atomic_int phase;
+    atomic_llong progress_ms; /* monotonic ms of the last finished node call (the watchdog measures from it) */
 };
 /* Against zclassicd only the read calls Home needs are sent (R5). */
 bool zw_rpc_legacy_allowed(const char *method);
@@ -120,6 +121,8 @@ bool zw_rpc_legacy_allowed(const char *method);
 bool zw_rpc_ensure(struct zw_rpc *r);
 /* REFUSED, or a TIMEOUT while connecting: nothing listens on the port. */
 bool zw_rpc_unreachable(enum zw_err err, int fail_phase);
+/* Stamp progress: one node call (or locate) finished, whatever its outcome. */
+void zw_rpc_progress(struct zw_rpc *r);
 enum zw_err zw_rpc_call(struct zw_rpc *r, const char *method, const char *params_json,
                         struct json_value *result, struct zw_rpc_error *e);
 
@@ -176,6 +179,10 @@ struct zw_worker *zw_worker_start(struct gui_window *win, const struct zw_option
 bool zw_worker_enqueue(struct zw_worker *w, enum zw_query q, uint32_t generation);
 size_t zw_worker_drain(struct zw_worker *w, struct zw_result *out, size_t cap);
 bool zw_worker_busy(struct zw_worker *w);
+/* ms since the worker last made progress (a finished call or a job start); 0 when idle. */
+uint64_t zw_worker_stall_ms(struct zw_worker *w);
+/* How long the watchdog still waits: 0 = restart now, else the ms left of limit_ms. */
+uint32_t zw_watchdog_remaining_ms(uint64_t stall_ms, uint32_t limit_ms);
 int zw_worker_phase(struct zw_worker *w);
 uint16_t zw_worker_port(struct zw_worker *w);
 void zw_worker_reset_auth(struct zw_worker *w);

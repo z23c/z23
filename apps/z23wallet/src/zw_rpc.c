@@ -24,6 +24,8 @@ bool zw_rpc_legacy_allowed(const char *method)
     return false;
 }
 
+void zw_rpc_progress(struct zw_rpc *r) { atomic_store(&r->progress_ms, (long long)zw_monotonic_ms()); }
+
 static void set_err(struct zw_rpc_error *e, enum zw_err kind, int code, const char *msg)
 {
     e->kind = kind;
@@ -37,12 +39,14 @@ static enum zw_err post_with_auth_retry(struct zw_rpc *r, const char *body, size
                                         struct zw_buf *reply, int *status)
 {
     enum zw_err e = zw_http_post(&r->ep, body, len, reply, r->deadline_ms, status, &r->phase, r->cancel);
+    zw_rpc_progress(r);
     if (e != ZW_OK || *status != 401) return e;
     if (r->ep.cred_src != ZW_CRED_COOKIE) return ZW_ERR_AUTH;
     zw_log("rpc: 401, re-reading the cookie once");
     zw_buf_free(reply);
     if (zw_cookie_load(&r->ep))
         e = zw_http_post(&r->ep, body, len, reply, r->deadline_ms, status, &r->phase, r->cancel);
+    zw_rpc_progress(r);
     return e == ZW_OK && *status == 401 ? ZW_ERR_AUTH : e;
 }
 
@@ -112,7 +116,9 @@ static bool after_failure(struct zw_rpc *r, enum zw_err err, int fail_phase)
 /* SEARCHING, or the client-side refusal of a non-allowlisted zclassicd call. */
 static enum zw_err precheck(struct zw_rpc *r, const char *method, struct zw_rpc_error *e)
 {
-    if (!zw_rpc_ensure(r)) {
+    bool found = zw_rpc_ensure(r);
+    zw_rpc_progress(r);
+    if (!found) {
         atomic_store(&r->phase, ZW_PHASE_IDLE);
         set_err(e, ZW_ERR_SEARCHING, 0, "no node found");
         return ZW_ERR_SEARCHING;

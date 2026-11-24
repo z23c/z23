@@ -62,6 +62,7 @@ static void *worker_main(void *arg)
         enum zw_query q = next_job(w);
         uint32_t gen = w->gens[q];
         w->busy = true;
+        zw_rpc_progress(w->rpc); /* the job starts the watchdog clock afresh */
         zw_cancel_clear_abort(w->cancel); /* an abort ends one request, never the next */
         if (w->reset_auth) { /* applied here, by the only thread that touches rpc */
             w->rpc->ep.valid = false;
@@ -74,6 +75,7 @@ static void *worker_main(void *arg)
         (void)zw_query_run(w->rpc, q, res);
         atomic_store(&w->port, (int)w->rpc->ep.port);
         pthread_mutex_lock(&w->mu);
+        zw_rpc_progress(w->rpc);
         push_result(w, res);
         w->busy = false;
         pthread_mutex_unlock(&w->mu);
@@ -116,6 +118,7 @@ fail:
 bool zw_worker_enqueue(struct zw_worker *w, enum zw_query q, uint32_t generation)
 {
     pthread_mutex_lock(&w->mu);
+    if (!w->busy && !w->pending) zw_rpc_progress(w->rpc); /* work arrives at an idle worker: its clock starts now */
     bool coalesced = (w->pending & (1u << q)) != 0;
     w->pending |= 1u << q;
     w->gens[q] = generation;
@@ -172,6 +175,7 @@ void zw_worker_restart(struct zw_worker *w)
     pthread_mutex_lock(&w->mu);
     w->reset_auth = true;
     if (w->busy) zw_cancel_abort(w->cancel);
+    zw_rpc_progress(w->rpc);
     pthread_mutex_unlock(&w->mu);
 }
 
@@ -201,4 +205,23 @@ void zw_worker_stop(struct zw_worker *w)
     free(w->ring);
     free(w->rpc);
     free(w);
+}
+
+/* The watchdog measures from the worker's last progress, not from the enqueue: a
+ * job of several node calls, each with its own 5 s deadline, is healthy for as
+ * long as every call finishes within the window. */
+uint64_t zw_worker_stall_ms(struct zw_worker *w)
+{
+    pthread_mutex_lock(&w->mu);
+    bool working = w->busy || w->pending;
+    pthread_mutex_unlock(&w->mu);
+    if (!working) return 0;
+    uint64_t now = zw_monotonic_ms();
+    uint64_t last = (uint64_t)atomic_load(&w->rpc->progress_ms);
+    return now > last ? now - last : 0;
+}
+
+uint32_t zw_watchdog_remaining_ms(uint64_t stall_ms, uint32_t limit_ms)
+{
+    return stall_ms >= limit_ms ? 0 : limit_ms - (uint32_t)stall_ms;
 }

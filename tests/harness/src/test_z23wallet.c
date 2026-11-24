@@ -756,6 +756,101 @@ static void test_worker_restart(void)
     node_stop(&n);
 }
 
+/* The watchdog measures from the worker's last progress, not from the enqueue. A
+ * BALANCES job is two node calls of ~4 s each (about 8 s, past the 6 s window): the
+ * stall time must never reach the window, so no restart. A worker that is truly
+ * stuck makes no progress, its stall time grows, and the window ends in a restart. */
+#define WATCHDOG_WINDOW_MS 6000u
+static void test_watchdog_progress(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("two-call slow node starts", node_start(&n, "slow_balances", "slowbal"));
+    struct gui_window_desc d = { .title_utf8 = "w", .width = 100, .height = 100, .surface = GUI_SURFACE_CPU,
+                                 .backend = GUI_BACKEND_HEADLESS };
+    struct gui_window *win = NULL;
+    char err[64];
+    gui_window_open(&d, &win, err, sizeof(err));
+    struct zw_worker *w = zw_worker_start(win, &n.opt);
+    zw_worker_enqueue(w, ZW_Q_BALANCES, 0);
+    uint64_t t0 = real_ms(), max_stall = 0, took = 0;
+    bool restart_due = false;
+    int e = -1;
+    struct zw_result out[4];
+    while (e < 0 && real_ms() - t0 < 15000) {
+        uint64_t st = zw_worker_stall_ms(w);
+        if (st > max_stall) max_stall = st;
+        if (zw_watchdog_remaining_ms(st, WATCHDOG_WINDOW_MS) == 0) restart_due = true;
+        size_t k = zw_worker_drain(w, out, 4);
+        if (k) {
+            e = (int)out[0].err;
+            took = real_ms() - t0;
+            for (size_t i = 0; i < k; i++) zw_result_release(&out[i]);
+        }
+        platform_sleep_ms(20); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
+    }
+    printf("    two 4 s calls: job took %llu ms, longest stall %llu ms\n", (unsigned long long)took,
+           (unsigned long long)max_stall);
+    CHECK("[29] a job of two ~4 s calls completes", e == (int)ZW_OK && took >= 7500);
+    CHECK("[29] it outlasts the watchdog window, yet the watchdog never comes due",
+          took > WATCHDOG_WINDOW_MS && !restart_due && max_stall < WATCHDOG_WINDOW_MS);
+    CHECK("an idle worker has no stall", zw_worker_stall_ms(w) == 0);
+    zw_worker_stop(w);
+    gui_window_close(win);
+    node_stop(&n);
+}
+
+static void test_watchdog_stuck(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("silent node starts", node_start(&n, "peer_silent", "wdstuck"));
+    struct gui_window_desc d = { .title_utf8 = "w", .width = 100, .height = 100, .surface = GUI_SURFACE_CPU,
+                                 .backend = GUI_BACKEND_HEADLESS };
+    struct gui_window *win = NULL;
+    char err[64];
+    gui_window_open(&d, &win, err, sizeof(err));
+    struct zw_worker *w = zw_worker_start(win, &n.opt);
+    zw_worker_enqueue(w, ZW_Q_CHAIN, 0);
+    platform_sleep_ms(1200); /* real-clock: polls a real loopback socket and worker thread, there is no fake-clock seam */
+    uint64_t st = zw_worker_stall_ms(w);
+    CHECK("[29] a stuck worker's stall time keeps growing", zw_worker_busy(w) && st >= 1000 && st < WATCHDOG_WINDOW_MS);
+    CHECK("the window ends exactly at the stall limit",
+          zw_watchdog_remaining_ms(st, WATCHDOG_WINDOW_MS) == WATCHDOG_WINDOW_MS - (uint32_t)st &&
+          zw_watchdog_remaining_ms(WATCHDOG_WINDOW_MS - 1, WATCHDOG_WINDOW_MS) == 1 &&
+          zw_watchdog_remaining_ms(WATCHDOG_WINDOW_MS, WATCHDOG_WINDOW_MS) == 0 &&
+          zw_watchdog_remaining_ms(WATCHDOG_WINDOW_MS * 3, WATCHDOG_WINDOW_MS) == 0);
+    zw_worker_restart(w); /* what watchdog_fired does once remaining is 0 */
+    uint64_t ms = 0;
+    int e1 = wait_result(w, 3000, &ms);
+    CHECK("[29] the restart ends the stuck job at once", e1 == (int)ZW_ERR_IO && ms < 1000);
+    zw_worker_stop(w);
+    gui_window_close(win);
+    node_stop(&n);
+}
+
+/* Nothing listens: the connect ends REFUSED at once, not as a TIMEOUT at the 500 ms
+ * connect cap (Windows: no SYN retransmission after the RST, and the writable wait also
+ * watches the exception set; see platform_socket_connect_fail_fast). */
+static void test_connect_refused_fast(void)
+{
+    struct node n;
+    hermetic_env();
+    CHECK("a node starts to lend its port", node_start(&n, "peer_silent", "refused_fast"));
+    uint16_t closed = n.port;
+    node_stop(&n); /* the port is closed again */
+    struct zw_endpoint ep = { .port = closed };
+    struct zw_buf reply = {0};
+    int status = 0;
+    uint64_t t0 = real_ms();
+    enum zw_err e = zw_http_post(&ep, "{}", 2, &reply, 5000, &status, NULL, NULL);
+    uint64_t ms = real_ms() - t0;
+    printf("    closed loopback port: %d after %llu ms\n", (int)e, (unsigned long long)ms);
+    CHECK("[30] a closed loopback port is REFUSED quickly, not a connect TIMEOUT",
+          e == ZW_ERR_REFUSED && ms < 400);
+    zw_buf_free(&reply);
+}
+
 /* The headless backend runs the UI on a virtual clock that only a script
  * advances. The request deadline and the connect cap must still pass in real
  * time on the worker, or a headless run against a dead port or a silent node
@@ -1389,6 +1484,9 @@ int test_z23wallet(void)
     test_worker_shutdown();
     test_worker_coalescing();
     test_worker_restart();
+    test_watchdog_progress();
+    test_watchdog_stuck();
+    test_connect_refused_fast();
     test_http_deadline_headless();
     test_hostile_numbers();
     test_model();
