@@ -759,6 +759,46 @@ static void test_worker_restart(void)
     node_stop(&n);
 }
 
+/* The headless backend runs the UI on a virtual clock that only a script
+ * advances. The request deadline and the connect cap must still pass in real
+ * time on the worker, or a headless run against a dead port or a silent node
+ * hangs until the script moves the clock. */
+static void test_http_deadline_headless(void)
+{
+    struct node n;
+    hermetic_env();
+    struct gui_window_desc d = { .title_utf8 = "w", .width = 100, .height = 100, .surface = GUI_SURFACE_CPU,
+                                 .backend = GUI_BACKEND_HEADLESS };
+    struct gui_window *win = NULL;
+    char err[64];
+    gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("stalled node starts under a headless window", node_start(&n, "stalled_recv", "stall_headless"));
+    n.rpc->deadline_ms = 400;
+    struct zw_result res;
+    memset(&res, 0, sizeof(res));
+    uint64_t t0 = real_ms();
+    enum zw_err e = zw_query_run(n.rpc, ZW_Q_CHAIN, &res);
+    uint64_t recv_ms = real_ms() - t0;
+    uint16_t dead = 0;
+    struct zw_blackhole *bh = zw_mock_blackhole_start(&dead);
+    struct zw_endpoint ep = { .port = dead };
+    struct zw_buf reply = {0};
+    int status = 0;
+    t0 = real_ms();
+    enum zw_err c = bh ? zw_http_post(&ep, "{}", 2, &reply, 5000, &status, NULL, NULL) : ZW_ERR_IO;
+    uint64_t connect_ms = real_ms() - t0;
+    printf("    headless: receive deadline after %llu ms, connect cap after %llu ms\n",
+           (unsigned long long)recv_ms, (unsigned long long)connect_ms);
+    CHECK("[29] under the virtual clock a silent node still ends at its real deadline",
+          e == ZW_ERR_TIMEOUT && recv_ms >= 300 && recv_ms < 1500);
+    CHECK("[30] under the virtual clock a dead port still ends at the real connect cap",
+          c == ZW_ERR_TIMEOUT && connect_ms >= 400 && connect_ms < 1500);
+    zw_buf_free(&reply);
+    zw_mock_blackhole_stop(bh);
+    node_stop(&n);
+    gui_window_close(win);
+}
+
 /* What watchdog_fired does to the model: unreachable on the worker's port, one
  * more failure, and a new generation so the stuck request's late reply is dropped. */
 static void test_model_watchdog(void)
@@ -1352,6 +1392,7 @@ int test_z23wallet(void)
     test_worker_shutdown();
     test_worker_coalescing();
     test_worker_restart();
+    test_http_deadline_headless();
     test_hostile_numbers();
     test_model();
     test_model_watchdog();

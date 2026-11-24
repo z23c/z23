@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: the --bench line: first_frame_ms, first_data_ms, rss_kb,
- * private_kb, exe_bytes, idle_cpu_ms. Measured from the OS, not estimated. */
+ * private_kb, exe_bytes, idle_cpu_ms. Measured from the OS, not estimated.
+ * Also the real monotonic clock the HTTP deadlines run on. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,8 @@ int64_t zw_process_age_ms(void)
     b.LowPart = now.dwLowDateTime; b.HighPart = now.dwHighDateTime;
     return (int64_t)((b.QuadPart - a.QuadPart) / 10000u);
 }
+
+uint64_t zw_monotonic_ms(void) { return (uint64_t)GetTickCount64(); }
 
 static void memory_kb(long long *rss, long long *priv)
 {
@@ -74,6 +77,13 @@ int64_t zw_process_age_ms(void)
     struct timespec n;
     clock_gettime(CLOCK_MONOTONIC, &n);
     return (int64_t)(n.tv_sec - g_start.tv_sec) * 1000 + (n.tv_nsec - g_start.tv_nsec) / 1000000;
+}
+
+uint64_t zw_monotonic_ms(void)
+{
+    struct timespec n;
+    clock_gettime(CLOCK_MONOTONIC, &n);
+    return (uint64_t)n.tv_sec * 1000u + (uint64_t)n.tv_nsec / 1000000u;
 }
 
 static void memory_kb(long long *rss, long long *priv)

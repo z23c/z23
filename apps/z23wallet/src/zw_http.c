@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: minimal loopback HTTP/1.1 POST client. One total deadline bounds
- * connect, send and every receive together (measured on gui_now_ns), so a
+ * connect, send and every receive together on a real monotonic clock (never
+ * the UI clock, which is virtual under the headless backend), so a
  * node that accepts and never answers costs at most the deadline. Waits run
  * in short slices that look at a cancel flag, so another thread can end the
  * request in flight without a cross-thread socket call. Content-Length
@@ -88,9 +89,11 @@ static bool buf_add(struct zw_buf *b, const char *p, size_t n)
     return true;
 }
 
+static uint64_t now_ns(void) { return zw_monotonic_ms() * 1000000u; }
+
 static int32_t remaining_ms(uint64_t deadline_ns)
 {
-    uint64_t now = gui_now_ns();
+    uint64_t now = now_ns();
     return now >= deadline_ns ? 0 : (int32_t)((deadline_ns - now) / 1000000u);
 }
 
@@ -126,7 +129,7 @@ static enum zw_err connect_loopback(const struct zw_endpoint *ep, uint64_t deadl
         return refused ? ZW_ERR_REFUSED : ZW_ERR_IO;
     }
     if (rc != 0) {
-        uint64_t cap_ns = gui_now_ns() + (uint64_t)ZW_CONNECT_MS * 1000000u;
+        uint64_t cap_ns = now_ns() + (uint64_t)ZW_CONNECT_MS * 1000000u;
         enum zw_err w = wait_ready(s, c, cap_ns < deadline_ns ? cap_ns : deadline_ns, true);
         int err = 0;
         if (w != ZW_OK || platform_socket_pending_error(s, &err) != 0 || err != 0) {
@@ -201,7 +204,7 @@ enum zw_err zw_http_post(const struct zw_endpoint *ep, const char *body, size_t 
                          atomic_int *phase, struct zw_cancel *cancel)
 {
     uint32_t ms = deadline_ms ? deadline_ms : 5000u;
-    uint64_t deadline_ns = gui_now_ns() + (uint64_t)ms * 1000000u;
+    uint64_t deadline_ns = now_ns() + (uint64_t)ms * 1000000u;
     platform_socket_t s;
     set_phase(phase, ZW_PHASE_CONNECT);
     enum zw_err e = connect_loopback(ep, deadline_ns, cancel, &s);

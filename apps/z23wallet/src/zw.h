@@ -275,6 +275,9 @@ void zw_q_activity_poll(struct zw_worker *w, const struct zw_model *m);
 struct zw_bench { int64_t first_frame_ms, first_data_ms; };
 bool zw_bench_write(const char *path, const struct zw_bench *b);
 int64_t zw_process_age_ms(void);
+/* Real monotonic milliseconds for network deadlines: never the UI clock,
+ * which is virtual under the headless backend. */
+uint64_t zw_monotonic_ms(void);
 
 /* ---- app ---- */
 int zw_app_run(const struct zw_options *o);
