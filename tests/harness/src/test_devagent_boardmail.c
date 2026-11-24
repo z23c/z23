@@ -26,6 +26,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "base/log_level.h"
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "command/native_devagent.h"
@@ -2121,6 +2122,128 @@ static long long bmx_ref_probe_cursor(int box, const char *key)
     if (fclose(f) != 0) value = -1;
     return value;
 }
+
+struct bmx_log_capture {
+    int fd, saved;
+    enum zcl_log_level prior;
+    bool redirected;
+    char path[PATH_MAX];
+};
+
+static bool bmx_log_capture_open(struct bmx_log_capture *c)
+{
+    memset(c, 0, sizeof(*c));
+    c->fd = c->saved = -1;
+    c->prior = zcl_log_level_get();
+    if (fflush(stderr) != 0)
+        return false;
+    c->saved = dup(STDERR_FILENO);
+    if (c->saved < 0)
+        return false;
+    c->fd = test_mkstemp(c->path, sizeof(c->path), "boardmail_export_log");
+    if (c->fd < 0 || dup2(c->fd, STDERR_FILENO) != STDERR_FILENO)
+        return false;
+    c->redirected = true;
+    zcl_log_level_set(ZCL_LOG_WARN);
+    return true;
+}
+
+static bool bmx_log_capture_read(struct bmx_log_capture *c, char *out,
+                                 size_t cap)
+{
+    ssize_t n;
+    if (!c->redirected || cap < 2u || fflush(stderr) != 0 ||
+        lseek(c->fd, 0, SEEK_SET) != 0)
+        return false;
+    n = read(c->fd, out, cap - 1u);
+    if (n < 0 || (size_t)n >= cap - 1u)
+        return false;
+    out[n] = '\0';
+    return true;
+}
+
+static bool bmx_log_capture_close(struct bmx_log_capture *c)
+{
+    bool ok = true;
+    zcl_log_level_set(c->prior);
+    if (c->saved >= 0 && dup2(c->saved, STDERR_FILENO) != STDERR_FILENO)
+        ok = false;
+    if (c->saved >= 0 && close(c->saved) != 0)
+        ok = false;
+    if (c->fd >= 0 && close(c->fd) != 0)
+        ok = false;
+    if (c->path[0] && unlink(c->path) != 0)
+        ok = false;
+    return ok;
+}
+
+static bool bmx_capture_drive_log(int box, struct rcv_beat_stats *st,
+                                  char *out, size_t cap)
+{
+    struct bmx_log_capture c;
+    bool opened = bmx_log_capture_open(&c);
+    bool drove = opened && bmx_drive(box, st) == 1;
+    bool captured = opened && bmx_log_capture_read(&c, out, cap);
+    bool closed = bmx_log_capture_close(&c);
+    return opened && drove && captured && closed;
+}
+
+static int bmx_t_export_rpc_down(void)
+{
+    int failures = 0;
+    const char *saved_datadir = node_rpc_client_datadir();
+    int saved_port = node_rpc_client_port();
+    char datadir_copy[PATH_MAX], grant[64], error[128];
+    (void)snprintf(datadir_copy, sizeof(datadir_copy), "%s", saved_datadir);
+    TEST("boardmail: an unanswered export names its held cursor and read-only RPC check") {
+        struct rcv_beat_stats st;
+        char before[4096], after[4096], log[8192];
+        ASSERT(bmx_setup("export-rpc-down"));
+        node_rpc_client_init(g_bmx_base, 19381);
+        ASSERT_EQ(node_rpc_client_port(), 19381);
+        /* Establish a saved zero cursor before adding the row to be held. */
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"), 0);
+        bmx_use(BMX_A);
+        ASSERT(bmx_grant("chatgpt", NULL, grant, sizeof(grant)));
+        ASSERT(bmx_send(grant, "node-b", "job-rpc-down", g_bmx_body,
+                        error, sizeof(error)));
+        ASSERT(bmx_outbox_row("job-rpc-down", before, sizeof(before)));
+        g_bmx_node[BMX_A].down = true;
+        ASSERT(bmx_capture_drive_log(BMX_A, &st, log, sizeof(log)));
+        ASSERT(st.board_deferred >= 1);
+        ASSERT_EQ(st.board_out, 0);
+        ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"), 0);
+        ASSERT(bmx_outbox_row("job-rpc-down", after, sizeof(after)));
+        ASSERT_STR_EQ(before, after);
+        ASSERT(strstr(log, "board response unverified") != NULL);
+        ASSERT(strstr(log, "rpcport=19381") != NULL);
+        ASSERT(strstr(log, "stage=export/post") != NULL);
+        ASSERT(strstr(log, "export_offset=0") != NULL);
+        ASSERT(strstr(log,
+                      "fleet board status on this receiver's selected "
+                      "datadir, rpcport=19381") != NULL);
+        g_bmx_node[BMX_A].down = false;
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 1);
+        ASSERT_EQ(bmx_ref_probe_cursor(BMX_A, "export_offset"),
+                  (long long)strlen(before) + 1);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        ASSERT(bmx_outbox_row("job-rpc-down", after, sizeof(after)));
+        ASSERT_STR_EQ(before, after);
+        ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
+        ASSERT_EQ(st.board_out, 0);
+        ASSERT_EQ((long long)g_bmx_node[BMX_A].n, 1);
+        bmx_teardown();
+        node_rpc_client_init(datadir_copy, saved_port);
+        PASS();
+    }
+_test_next:
+    bmx_teardown();
+    node_rpc_client_init(datadir_copy, saved_port);
+    return failures;
+}
+
 static bool bmx_ref_probe_signature(const struct bmx_post *post)
 {
     struct fleet_board_post wire; uint8_t id[32];
@@ -2446,6 +2569,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_inbox_alloc_diagnostic();
     failures += bmx_t_refs_before_inbox_crash();
     failures += bmx_t_refs_invalid_successor();
+    failures += bmx_t_export_rpc_down();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

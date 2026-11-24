@@ -619,6 +619,24 @@ static enum bm_rpc bm_call(const struct json_value *in, struct json_value *out)
 
 enum bm_post { BM_POST_DONE, BM_POST_SKIP, BM_POST_RETRY };
 
+static void bm_log_post_retry(const struct bm_row *r, enum bm_rpc rc,
+                              enum bm_post verdict, const char *code,
+                              long long export_offset)
+{
+    if (rc == BM_RPC_DOWN) {
+        int port = node_rpc_client_port();
+        LOG_WARN(BM_LOG, "board post ref=%s seq=%lld deferred: board "
+                 "response unverified; stage=export/post export_offset=%lld "
+                 "cursor held rpcport=%d; read-only next: fleet board "
+                 "status on this receiver's selected datadir, rpcport=%d",
+                 r->ref, r->seq, export_offset, port, port);
+    } else {
+        LOG_WARN(BM_LOG, "board post for ref=%s seq=%lld %s: %s", r->ref,
+                 r->seq, verdict == BM_POST_SKIP ? "refused" : "deferred",
+                 code);
+    }
+}
+
 /* Refusals that cannot clear by waiting: the post is malformed or would be
  * expired. Everything else (busy, over quota, store full, clock skew, no
  * node) is retried with the cursor held. */
@@ -641,7 +659,8 @@ static bool bm_refusal_final(const char *code)
  * which eligible peer it pushes the stored post to. It is not part of the
  * signed post, so it changes neither the post id nor who may read it. */
 static enum bm_post bm_post_row(const char *line, const struct bm_row *r,
-                                long long now, const char *push_to)
+                                long long now, const char *push_to,
+                                long long export_offset)
 {
     struct json_value in, out;
     long long created = bm_ts_unix(r->ts);
@@ -677,9 +696,7 @@ static enum bm_post bm_post_row(const char *line, const struct bm_row *r,
                   ? BM_POST_SKIP
                   : BM_POST_RETRY;
     if (verdict != BM_POST_DONE)
-        LOG_WARN(BM_LOG, "board post for ref=%s seq=%lld %s: %s", r->ref,
-                 r->seq, verdict == BM_POST_SKIP ? "refused" : "deferred",
-                 rc == BM_RPC_DOWN ? "no node answered" : bm_str(&out, "code"));
+        bm_log_post_retry(r, rc, verdict, bm_str(&out, "code"), export_offset);
     json_free(&in);
     json_free(&out);
     return verdict;
@@ -900,7 +917,8 @@ static const char *bm_push_to(const struct bm_roster *ro, const char *peer,
 /* One complete outbox line. False when the cursor must stay before it. */
 static bool bm_export_line(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
-                           const char *line, struct rcv_beat_stats *st)
+                           const char *line, struct rcv_beat_stats *st,
+                           long long export_offset)
 {
     struct json_value v;
     struct bm_row r;
@@ -914,7 +932,7 @@ static bool bm_export_line(const struct zcl_boardmail_ctx *c,
         return true;
     }
     switch (bm_post_row(line, &r, (long long)platform_time_wall_time_t(),
-                        bm_push_to(ro, peer, push_to))) {
+                        bm_push_to(ro, peer, push_to), export_offset)) {
     case BM_POST_DONE:
         st->board_out++;
         if (record)
@@ -975,7 +993,7 @@ static void bm_export_walk(const struct zcl_boardmail_ctx *c,
             continue;
         }
         line[len - 1] = '\0';
-        if (!bm_export_line(c, ro, refs, line, st))
+        if (!bm_export_line(c, ro, refs, line, st, s->export_offset))
             break;
         s->export_offset += (long long)len;
     }
