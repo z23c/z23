@@ -6,13 +6,13 @@
   "homepage": "https://github.com/z23c/z23",
   "hooks": {
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=start >/dev/null", "timeout": 15 } ] }
+      { "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=start >/dev/null 2>&1 || true", "timeout": 15 } ] }
     ],
     "PostToolUse": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=beat >/dev/null", "timeout": 15 } ] }
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=beat >/dev/null 2>&1 || true", "timeout": 15 } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=end >/dev/null", "timeout": 15 } ] }
+      { "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=end >/dev/null 2>&1 || true", "timeout": 15 } ] }
     ]
   }
 }

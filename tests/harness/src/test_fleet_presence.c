@@ -14,6 +14,7 @@
 
 #include "command/native_command.h"
 #include "command/native_fleet.h"
+#include "command/native_fleet_presence.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -405,9 +406,9 @@ static int fpt_t_hook_cadence(void)
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-1"), "activity"), "completed");
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 0);
         fpt_call_end(&b);
-        /* A bad mode is refused by name. */
-        ASSERT(!fpt_hook(&c, "dance", "abc123"));
-        ASSERT_STR_EQ(fpt_code(&c), "PRESENCE_BAD_HOOK");
+        /* A bad mode never fails the session: passed, skipped, no row. */
+        ASSERT(fpt_hook(&c, "dance", "abc123"));
+        ASSERT(json_get(&c.reply.data, "skipped") != NULL);
         fpt_call_end(&c);
         fpt_end_case();
         PASS();
@@ -416,6 +417,96 @@ _test_next:
     fpt_end_case();
     return failures;
 }
+
+/* The hook never fails the session: a refused or broken beat is answered as a
+ * passed no-op, logged under the state root, and posts nothing. */
+static bool fpt_hook_never_fails(const char *mode, const char *sid,
+                                 long long pid)
+{
+    struct fpt_call c;
+    bool ok;
+    fpt_call_begin(&c, FPT_PRESENCE, "zcl.fleet_steer_presence.v1");
+    (void)json_push_kv_str(&c.input, "hook", mode);
+    if (sid)
+        (void)json_push_kv_str(&c.input, "session", sid);
+    if (pid > 0)
+        (void)json_push_kv_int(&c.input, "pid", pid);
+    zcl_native_handle_fleet_steer_presence(&c.request, &c.reply);
+    ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+         c.reply.exit_code == ZCL_COMMAND_EXIT_OK &&
+         json_get(&c.reply.data, "skipped") != NULL;
+    fpt_call_end(&c);
+    return ok;
+}
+
+static bool fpt_no_sessions(void)
+{
+    struct fpt_call b;
+    bool none;
+    fpt_brief(&b);
+    none = b.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+           fpt_i(&b.reply.data, "sessions_active_reported") == 0 &&
+           fpt_session(&b, "claude-1") == NULL;
+    fpt_call_end(&b);
+    return none;
+}
+
+static int fpt_t_hook_never_fails(void)
+{
+    int failures = 0;
+    TEST("presence hook: refusals, a bad pid, no session id and an unwritable state dir all exit 0 and post nothing") {
+        char blocker[1100];
+        FILE *f;
+        fpt_begin_case("hooknofail");
+        ASSERT(fpt_hook_never_fails("dance", "abc123", 0));
+        ASSERT(fpt_hook_never_fails("start", NULL, 0)); /* no session id */
+        ASSERT(fpt_hook_never_fails("start", "abc123", 999999999LL));
+        ASSERT(fpt_hook_never_fails("end", "never-started", 0));
+        ASSERT(fpt_no_sessions());
+        /* A state root that is a plain file: nothing can be written. */
+        ASSERT(snprintf(blocker, sizeof(blocker), "%s/notadir", g_fpt_base) > 0);
+        f = fopen(blocker, "w");
+        ASSERT(f != NULL);
+        (void)fclose(f);
+        fpt_isolate_env(blocker);
+        ASSERT(fpt_hook_never_fails("start", "abc123", 0));
+        ASSERT(fpt_hook_never_fails("beat", "abc123", 0));
+        ASSERT(fpt_hook_never_fails("end", "abc123", 0));
+        fpt_isolate_env(g_fpt_state);
+        ASSERT(fpt_no_sessions());
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_stale_role(void)
+{
+    int failures = 0;
+    TEST("presence hook: the role of a crashed session is reused after 900 s") {
+        struct zcl_presence_rec rec;
+        fpt_begin_case("stalerole");
+        ASSERT(fpt_hook_ok("start", "crashed", NULL));
+        g_fpt_offset_s = 100;
+        ASSERT(fpt_hook_ok("start", "second", NULL));
+        ASSERT(zcl_presence_rec_load("claude-1", &rec));
+        ASSERT_STR_EQ(rec.owner, "crashed");
+        ASSERT(zcl_presence_rec_load("claude-2", &rec));
+        ASSERT_STR_EQ(rec.owner, "second");
+        g_fpt_offset_s = 1200;
+        ASSERT(fpt_hook_ok("start", "third", NULL));
+        ASSERT(zcl_presence_rec_load("claude-1", &rec));
+        ASSERT_STR_EQ(rec.owner, "third");
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
 
 static int fpt_t_floor_and_started(void)
 {
@@ -519,6 +610,8 @@ int test_fleet_presence(void)
     failures += fpt_t_refusals();
     failures += fpt_t_pool();
     failures += fpt_t_hook_cadence();
+    failures += fpt_t_hook_never_fails();
+    failures += fpt_t_stale_role();
     failures += fpt_t_floor_and_started();
     failures += fpt_t_dispatch();
     if (failures == 0)

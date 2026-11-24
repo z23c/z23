@@ -47,6 +47,10 @@ const char *zcl_presence_str(const struct zcl_command_request *req,
                              const char *key);
 bool zcl_presence_pid_in(const struct zcl_command_request *req, long long *pid);
 
+/* Hook mode never fails: it silences the refusal log (the hook log file
+ * records it instead). */
+void zcl_presence_quiet(bool on);
+
 /* The --hook=<mode> path. */
 void zcl_presence_hook(const struct zcl_command_request *req,
                        struct zcl_command_reply *reply, const char *mode);

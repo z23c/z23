@@ -49,13 +49,21 @@
 #define FPR_WINDOW_S 900
 #define FPR_SECRET_RUN 24u
 
+static bool fpr_quiet;
+
+void zcl_presence_quiet(bool on)
+{
+    fpr_quiet = on;
+}
+
 static const char *const fpr_phases[] = {"active", "running", "build", "test",
                                          "blocked", "completed"};
 
 void zcl_presence_fail(struct zcl_command_reply *reply, const char *code,
                      const char *message, const char *evidence)
 {
-    LOG_ERROR(FPR_LOG, "%s: %s (%s)", code, message, evidence);
+    if (!fpr_quiet)
+        LOG_ERROR(FPR_LOG, "%s: %s (%s)", code, message, evidence);
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_FAILED, code, "execute", false,
                            false, message, evidence);
@@ -340,7 +348,7 @@ static void fpr_record(const struct zcl_presence_in *in,
     (void)snprintf(rec.started, sizeof(rec.started), "%s", started);
     (void)snprintf(rec.phase, sizeof(rec.phase), "%s", in->phase);
     rec.beat = now;
-    if (!zcl_presence_rec_store(in->role, &rec))
+    if (!zcl_presence_rec_store(in->role, &rec) && !fpr_quiet)
         LOG_WARN(FPR_LOG, "cannot record presence state for role %s", in->role);
 }
 

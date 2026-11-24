@@ -123,7 +123,7 @@ test. A session writes that row itself, on the node host, with
 a second writer). Run it at start and at least every 5 minutes; run it once with
 `--phase=completed` when done. Claude Code sessions with the `z23-fleet`
 plugin do this from hooks (`z23 fleet steer presence --hook=start|beat|end`,
-session id read from the hook JSON); each takes a role from the pool
+session id read from the hook JSON; hook mode always exits 0, logging any failure to presence/hook.log under the state root, so a missing or older z23 never disturbs the session); each takes a role from the pool
 `claude-1`..`claude-8`, reusing the lowest whose last row is completed or
 stale, because the brief tracks a bounded table of roles. Any other agent,
 including one driven over ssh from another machine, runs the one-liner on the

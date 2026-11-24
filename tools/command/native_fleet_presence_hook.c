@@ -214,8 +214,8 @@ static const char *fph_or(const char *v, const char *dflt)
     return v && v[0] ? v : dflt;
 }
 
-void zcl_presence_hook(const struct zcl_command_request *req,
-                       struct zcl_command_reply *reply, const char *mode)
+static void fph_run(const struct zcl_command_request *req,
+                    struct zcl_command_reply *reply, const char *mode)
 {
     struct zcl_presence_in in;
     struct zcl_presence_rec rec;
@@ -273,4 +273,53 @@ void zcl_presence_hook(const struct zcl_command_request *req,
         in.pid = (long long)getppid();
 #endif
     zcl_presence_emit(req, reply, &in);
+}
+
+#define FPH_LOG_MAX 4096L
+
+/* One bounded failure line in <state root>/presence/hook.log. The file is cut
+ * back to this line once it passes FPH_LOG_MAX. A log that cannot be written
+ * is dropped: a presence beat has no other place to complain. */
+static void fph_log_failure(const char *mode, const struct zcl_command_reply *r)
+{
+    char root[900], dir[960], path[1000];
+    FILE *f;
+    long size = 0;
+    if (!platform_state_root(root, sizeof(root)) ||
+        snprintf(dir, sizeof(dir), "%s/presence", root) >= (int)sizeof(dir) ||
+        !platform_private_directory_ensure(dir) ||
+        snprintf(path, sizeof(path), "%s/hook.log", dir) >= (int)sizeof(path))
+        return;
+    f = fopen(path, "r");
+    if (f) {
+        if (fseek(f, 0, SEEK_END) == 0)
+            size = ftell(f);
+        (void)fclose(f);
+    }
+    f = fopen(path, size > FPH_LOG_MAX ? "w" : "a");
+    if (!f)
+        return;
+    (void)fprintf(f, "%lld hook=%.8s %.40s: %.120s\n",
+                  (long long)platform_time_wall_time_t(), mode,
+                  r->error.code, r->error.message);
+    (void)fclose(f);
+}
+
+/* A presence beat must never fail the session that sent it: whatever went
+ * wrong is logged and answered as a passed, skipped reply with exit 0. */
+void zcl_presence_hook(const struct zcl_command_request *req,
+                       struct zcl_command_reply *reply, const char *mode)
+{
+    zcl_presence_quiet(true);
+    fph_run(req, reply, mode);
+    zcl_presence_quiet(false);
+    if (reply->status == ZCL_COMMAND_STATUS_PASSED)
+        return;
+    fph_log_failure(mode, reply);
+    memset(&reply->error, 0, sizeof(reply->error));
+    (void)json_push_kv_bool(&reply->data, "skipped", true);
+    (void)json_push_kv_str(&reply->data, "reason",
+                           "hook failed; logged, session unaffected");
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = 0;
 }

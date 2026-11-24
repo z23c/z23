@@ -808,7 +808,9 @@ ZCL_COMMAND_READY_COMMAND(
     "phase=completed on end. The brief dates the row by its mail ts: a "
     "session is live for 900 s, so run this at start and at least every 300 "
     "s; completed reads as activity completed at once. It posts only when "
-    "run and contacts no peer.", 4096,
+    "run and contacts no peer. Hook mode always exits 0: a failure is logged to "
+    "presence/hook.log and answered as skipped. An end in the same second as "
+    "the last post waits 1.1 s so the brief orders the rows.", 4096,
     "fleet,steer,presence,heartbeat,session,agent,liveness",
     "zcl.fleet_steer_presence.input.v1", "zcl.fleet_steer_presence.v1",
     "role,task,phase,pid,session,started,source,hook", "",
