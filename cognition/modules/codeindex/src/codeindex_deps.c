@@ -406,10 +406,10 @@ static enum epoch_state epoch_current_dir(const char *root, const char *reldir,
 
 static bool dep_child_ignored(const char *reldir, const char *name)
 {
-    /* This directory is the hot-swap/HOT_FORK action cache, whose owner
-     * verifies its own depfiles. Its temporary .resident-* compile inputs
-     * are deleted after use and are not ordinary object-epoch authority. */
+    /* Generated test trees are not compile authority. The hot-swap/HOT_FORK
+     * action cache likewise verifies its own temporary .resident-* inputs. */
     return name[0] == '.' || strcmp(name, "history") == 0 ||
+           strcmp(name, "test-tmp") == 0 ||
            (strcmp(reldir, "build") == 0 &&
             strcmp(name, "hotswap-fast") == 0);
 }

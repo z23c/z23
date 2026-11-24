@@ -73,6 +73,7 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 #undef ci_deps_include_narrow_unsafe
 
 static int test_dep_vanished_child(void);
+static int test_dep_test_tmp_ignored(void);
 static int test_dep_missing_root(void);
 static int test_dep_children_alloc(const char *label, bool regular);
 static int test_dep_candidate_filter(void);
@@ -98,6 +99,7 @@ int test_codeindex_empty_dep_paths(void)
     } _test_next:;
     if (dir[0] && test_rm_rf_recursive(dir) != 0) failures++;
     failures += test_dep_vanished_child();
+    failures += test_dep_test_tmp_ignored();
     failures += test_dep_missing_root();
     failures += test_dep_candidate_filter();
     failures += test_dep_children_alloc("platform_directory_entries", true);
@@ -207,6 +209,42 @@ static int test_dep_vanished_child(void)
         PASS();
     } _test_next:;
     if (race[0] && test_rm_rf_recursive(race) != 0) failures++;
+    return failures;
+}
+
+static int test_dep_test_tmp_ignored(void)
+{
+    int failures = 0;
+    char root[256] = {0}, path[512];
+    TEST("generated test-tmp trees are not depfile authority") {
+        static const char *const dirs[] = {
+            "build", "build/worktrees", "build/worktrees/candidate",
+            "build/worktrees/candidate/test-tmp",
+        };
+        test_make_tmpdir(root, sizeof(root), "dep_paths", "test_tmp");
+        ASSERT(root[0]);
+        for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+            ASSERT(snprintf(path, sizeof(path), "%s/%s", root, dirs[i]) > 0);
+            ASSERT(mkdir(path, 0700) == 0);
+        }
+        ASSERT(snprintf(path, sizeof(path), "%s/build/worktrees/candidate/test-tmp/foreign.d", root) > 0);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("build/foreign.o: foreign/foreign.c\n", f) >= 0);
+        ASSERT(fclose(f) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/build/live.d", root) > 0);
+        f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("build/live.o: core/live.c\n", f) >= 0);
+        ASSERT(fclose(f) == 0);
+        struct dep_paths paths = {0};
+        ASSERT(collect_dep_paths(root, "build", &paths));
+        ASSERT_EQ(paths.count, 1);
+        ASSERT_STR_EQ(paths.items[0], "build/live.d");
+        dep_paths_free(&paths);
+        PASS();
+    } _test_next:;
+    if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
     return failures;
 }
 
