@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: WGL context for a GL-surface window. opengl32.dll is loaded at
- * run time so a CPU-only program never links or loads it. */
+ * run time, from System32 only, so a CPU-only program never links or loads it. */
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -30,9 +30,16 @@ struct w32gl {
     wgl_getproc_fn getproc;
 };
 
+/* System32 only: a bare name would also search the current directory, where a
+ * planted opengl32.dll would run inside the process. */
+static HMODULE load_opengl32(void)
+{
+    return LoadLibraryExW(L"opengl32.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
+
 bool gui_win32_gl_probe(void)
 {
-    HMODULE m = LoadLibraryW(L"opengl32.dll");
+    HMODULE m = load_opengl32();
     if (!m) return false;
     FreeLibrary(m);
     return true;
@@ -44,7 +51,7 @@ bool gui_win32_gl_create(struct gui_window *w, void *hwnd,
     struct w32gl *s = zcl_calloc(1, sizeof(*s), "gui_win32_gl");
     if (!s) return false;
     s->hwnd = (HWND)hwnd;
-    s->lib = LoadLibraryW(L"opengl32.dll");
+    s->lib = load_opengl32();
     if (!s->lib) { gui_win32_err_last(err, cap, "opengl32.dll is not available"); free(s); return false; }
     s->create = GUI_FN_CAST(wgl_create_fn, GetProcAddress(s->lib, "wglCreateContext"));
     s->del = GUI_FN_CAST(wgl_delete_fn, GetProcAddress(s->lib, "wglDeleteContext"));

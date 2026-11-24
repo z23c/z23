@@ -16,6 +16,14 @@
 #include <windows.h>
 #include <shellapi.h>
 
+/* Every DLL this process loads by name comes from System32: never from the
+ * current directory or PATH, where a planted DLL would run inside the wallet.
+ * The imports are OS DLLs only, so nothing legitimate is lost. */
+static void safe_dll_search(void)
+{
+    (void)SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
+
 /* Output of --help/--version goes to the parent console when there is one;
  * the program itself has no console window. */
 static void attach_console(void)
@@ -51,6 +59,7 @@ static char **utf8_argv(int *argc)
 int main(int argc, char **argv)
 {
 #if defined(_WIN32)
+    safe_dll_search();
     attach_console();
     int wargc = 0;
     char **uv = utf8_argv(&wargc);

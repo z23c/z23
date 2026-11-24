@@ -1,0 +1,52 @@
+# z23-wallet size budget, read by `make check-z23-wallet-size`.
+# key = <cc -dumpmachine>[-ucrt]-<gcc|clang><major>: sizes compare only on the
+# toolchain that set them; any other toolchain is reported, not failed.
+# "budget" is the release binary's file-size limit in bytes; every other row is
+# a section's file bytes in the reference build the budget was set from, so a
+# failure can say which sections grew.
+# Reference: the integrated wallet (every page) of 2026-11-24 built with the
+# release profile: 434,707 bytes on Windows (the integrator's tree) and 400,344
+# on Linux (lane/gui-wallet-integration-1124 at 4ebc07f3b1); budgets +3.2%.
+# Milestone 1 alone: 264,211 (Windows) and 223,616 (Linux).
+# key	name	bytes
+x86_64-w64-mingw32-ucrt-gcc16	budget	448512
+x86_64-w64-mingw32-ucrt-gcc16	.text	261632
+x86_64-w64-mingw32-ucrt-gcc16	.data	1024
+x86_64-w64-mingw32-ucrt-gcc16	.rdata	137216
+x86_64-w64-mingw32-ucrt-gcc16	.pdata	9216
+x86_64-w64-mingw32-ucrt-gcc16	.xdata	9728
+x86_64-w64-mingw32-ucrt-gcc16	.idata	9728
+x86_64-w64-mingw32-ucrt-gcc16	.tls	512
+x86_64-w64-mingw32-ucrt-gcc16	.rsrc	3072
+x86_64-w64-mingw32-ucrt-gcc16	.reloc	1024
+x86_64-w64-mingw32-ucrt-gcc16	.gnu_debuglink	512
+x86_64-linux-gnu-gcc14	budget	413696
+x86_64-linux-gnu-gcc14	.interp	28
+x86_64-linux-gnu-gcc14	.note.gnu.property	48
+x86_64-linux-gnu-gcc14	.note.gnu.build-id	36
+x86_64-linux-gnu-gcc14	.note.ABI-tag	32
+x86_64-linux-gnu-gcc14	.gnu.hash	56
+x86_64-linux-gnu-gcc14	.dynsym	2448
+x86_64-linux-gnu-gcc14	.dynstr	1118
+x86_64-linux-gnu-gcc14	.gnu.version	204
+x86_64-linux-gnu-gcc14	.gnu.version_r	208
+x86_64-linux-gnu-gcc14	.rela.dyn	6888
+x86_64-linux-gnu-gcc14	.rela.plt	2208
+x86_64-linux-gnu-gcc14	.init	27
+x86_64-linux-gnu-gcc14	.plt	1488
+x86_64-linux-gnu-gcc14	.plt.got	16
+x86_64-linux-gnu-gcc14	.plt.sec	1472
+x86_64-linux-gnu-gcc14	.text	212936
+x86_64-linux-gnu-gcc14	.fini	13
+x86_64-linux-gnu-gcc14	.rodata	125957
+x86_64-linux-gnu-gcc14	.eh_frame_hdr	3796
+x86_64-linux-gnu-gcc14	.eh_frame	26280
+x86_64-linux-gnu-gcc14	.init_array	16
+x86_64-linux-gnu-gcc14	.fini_array	8
+x86_64-linux-gnu-gcc14	.data.rel.ro	2680
+x86_64-linux-gnu-gcc14	.dynamic	512
+x86_64-linux-gnu-gcc14	.got	800
+x86_64-linux-gnu-gcc14	.data	608
+x86_64-linux-gnu-gcc14	.comment	45
+x86_64-linux-gnu-gcc14	.gnu_debuglink	24
+x86_64-linux-gnu-gcc14	.shstrtab	300
