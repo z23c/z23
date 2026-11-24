@@ -7379,9 +7379,9 @@ static bool fb_query_index_plan(struct node_db *db)
     return ok && index;
 }
 
-static bool fb_query_execute(struct fb_rpc_env *e, bool wrapper,
-    const struct json_value *input, size_t budget, struct json_value *envelope,
-    enum zcl_command_exit *exit_code)
+static bool fb_query_execute_view(struct fb_rpc_env *e, bool wrapper,
+    const struct json_value *input, size_t budget, const char *view,
+    struct json_value *envelope, enum zcl_command_exit *exit_code, size_t *wire_bytes)
 {
     const struct zcl_command_registry *reg = zcl_command_catalog();
     const char *path = wrapper ? "fleet.steer.wiki-find" : "fleet.wiki.find";
@@ -7393,10 +7393,19 @@ static bool fb_query_execute(struct fb_rpc_env *e, bool wrapper,
     node_rpc_client_set_test_hook(fb_native_rpc);
     char wire[8193];
     size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, input,
-        false, path, "full", budget, 0, NULL, wire, sizeof(wire), exit_code);
+        false, path, view, budget, 0, NULL, wire, sizeof(wire), exit_code);
     node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
     json_init(envelope);
+    if (wire_bytes) *wire_bytes = n;
     return n > 0 && n <= budget && json_read(envelope, wire, strlen(wire));
+}
+
+static bool fb_query_execute(struct fb_rpc_env *e, bool wrapper,
+    const struct json_value *input, size_t budget, struct json_value *envelope,
+    enum zcl_command_exit *exit_code)
+{
+    return fb_query_execute_view(e, wrapper, input, budget, "full", envelope,
+                                 exit_code, NULL);
 }
 
 static bool fb_query_filtered_envelope(struct fb_rpc_env *e, bool wrapper, size_t budget)
@@ -7507,6 +7516,70 @@ static int test_fleet_wiki_query_envelopes(void)
         ASSERT(rc != ZCL_COMMAND_EXIT_OK);
         ASSERT_STR_EQ(json_get_str(json_get(json_get(&envelope, "error"), "code")), "QUERY_BUDGET");
         json_free(&envelope); json_free(&input);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
+    if (opened) fb_rpc_env_close(&e);
+    return failures;
+}
+
+/* The compact view agents read at the CLI: slug, topic, one-line summary,
+ * score and matched per hit; the full entry stays the default for MCP and
+ * code guide (view normal/full). The byte bound is pinned on this fixture. */
+static bool fb_compact_fetch(struct fb_rpc_env *e, const char *view, size_t *bytes,
+                             struct json_value *envelope)
+{
+    struct json_value input;
+    enum zcl_command_exit rc;
+    json_init(&input); json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "q", "indexed") &&
+        fb_query_execute_view(e, false, &input, 8192, view, envelope, &rc, bytes) &&
+        rc == ZCL_COMMAND_EXIT_OK;
+    json_free(&input);
+    return ok;
+}
+
+static int test_fleet_wiki_find_compact_view(void)
+{
+    int failures = 0;
+    static struct fb_rpc_env e;
+    bool opened = false;
+    TEST("fleet wiki: view summary returns slug, topic, one-line summary, score and matched under a byte bound; full keeps everything") {
+        ASSERT(fb_rpc_env_open(&e)); opened = true;
+        const int64_t now = INT64_C(5000000);
+        char text[1400], lesson[700], rule[201], why[257];
+        memset(rule, 0x72, 200); rule[200] = 0; memset(why, 0x77, 256); why[256] = 0;
+        (void)snprintf(lesson, sizeof(lesson), "{\"rule\":\"%s\",\"why\":\"%s\","
+                       "\"evidence\":\"e\"}", rule, why);
+        char summary[260] = "indexed first line of a long summary ";
+        while (strlen(summary) < 110) strcat(summary, "padding ");
+        fb_entry_json(text, sizeof(text), summary, lesson, "\"kernel\"");
+        ASSERT(fb_test_ingest_page(&e.db, "compact-a", text, 1, now));
+        ASSERT(fb_test_ingest_page(&e.db, "compact-b", text, 2, now));
+        struct json_value full, compact;
+        size_t full_bytes = 0, compact_bytes = 0;
+        ASSERT(fb_compact_fetch(&e, "full", &full_bytes, &full));
+        ASSERT(fb_compact_fetch(&e, "summary", &compact_bytes, &compact));
+        const struct json_value *fd = json_get(&full, "data");
+        const struct json_value *cd = json_get(&compact, "data");
+        const struct json_value *fhit = json_at(json_get(fd, "entries"), 0);
+        const struct json_value *chit = json_at(json_get(cd, "entries"), 0);
+        ASSERT(json_get(fhit, "rules") != NULL && json_get(fhit, "id") != NULL);
+        ASSERT_EQ((int64_t)json_size(json_get(fd, "entries")), 2);
+        ASSERT_EQ((int64_t)json_size(json_get(cd, "entries")), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(chit, "slug")), "compact-a");
+        ASSERT_STR_EQ(json_get_str(json_get(chit, "topic")), "t");
+        ASSERT_EQ((int64_t)strlen(json_get_str(json_get(chit, "summary"))), 100);
+        ASSERT(json_get_int(json_get(chit, "score")) >= 1);
+        ASSERT(json_size(json_get(chit, "matched")) >= 1);
+        ASSERT(json_get(chit, "rules") == NULL && json_get(chit, "id") == NULL &&
+               json_get(chit, "host") == NULL && json_get(chit, "created_at") == NULL);
+        ASSERT(json_get(cd, "identity_schema") == NULL && json_get(cd, "query_schema") == NULL);
+        /* The pinned bound: a two-hit answer stays under 1,200 bytes and well
+         * under half of the full form, which carries both rule and why texts. */
+        ASSERT(compact_bytes < 1200);
+        ASSERT(compact_bytes * 2 < full_bytes);
+        json_free(&full); json_free(&compact);
         PASS();
     } _test_next:;
     node_rpc_client_set_test_hook(NULL); fb_native_test_table = NULL;
@@ -12049,6 +12122,7 @@ static int test_fleet_board_public_no_grant_needed(void)
     failures += test_fleet_wiki_find_edges();
     failures += test_fleet_wiki_find_page_cap();
     failures += test_fleet_wiki_find_matched_fields();
+    failures += test_fleet_wiki_find_compact_view();
     failures += test_fleet_wiki_find_page_author_role();
     failures += test_fleet_wiki_list_is_an_index();
     failures += test_fleet_wiki_list_reaches_every_page();

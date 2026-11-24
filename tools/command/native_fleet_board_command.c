@@ -1767,6 +1767,91 @@ void zcl_native_handle_fleet_wiki_history(
 }
 
 /* ── fleet wiki find ────────────────────────────────────────────────── */
+/* The compact view an agent reads by default: per hit only the slug, topic, a
+ * one-line summary, how many fields matched (score) and which. The full entry
+ * (rules, ids, hosts, times) stays behind --view=normal or fleet wiki read. */
+#define FB_COMPACT_SUMMARY_MAX 100
+
+static size_t fb_compact_line_len(const char *s)
+{
+    size_t n = 0;
+    while (s[n] && s[n] != '\n' && s[n] != '\r')
+        n++;
+    if (n > FB_COMPACT_SUMMARY_MAX) {
+        n = FB_COMPACT_SUMMARY_MAX;
+        while (n > 0 && ((unsigned char)s[n] & 0xC0u) == 0x80u)
+            n--;
+    }
+    return n;
+}
+
+static bool fb_compact_hit(struct json_value *hit, const struct json_value *e)
+{
+    const char *topic = json_get_str(json_get(e, "topic"));
+    const char *summary = json_get_str(json_get(e, "summary"));
+    const struct json_value *matched = json_get(e, "matched");
+    char line[FB_COMPACT_SUMMARY_MAX + 1];
+    size_t n = summary ? fb_compact_line_len(summary) : 0;
+    memcpy(line, summary ? summary : "", n);
+    line[n] = '\0';
+    json_set_object(hit);
+    return json_push_kv_str(hit, "slug", json_get_str(json_get(e, "slug"))) &&
+        (!topic || !topic[0] || json_push_kv_str(hit, "topic", topic)) &&
+        (!n || json_push_kv_str(hit, "summary", line)) &&
+        json_push_kv_int(hit, "score", (int64_t)json_size(matched)) &&
+        (!json_size(matched) || json_push_kv(hit, "matched", matched));
+}
+
+static bool fb_compact_entries(struct json_value *out, const struct json_value *full)
+{
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+    const struct json_value *entries = json_get(full, "entries");
+    bool ok = true;
+    for (size_t i = 0; ok && i < json_size(entries); i++) {
+        struct json_value hit;
+        json_init(&hit);
+        ok = fb_compact_hit(&hit, json_at(entries, i)) && json_push_back(&arr, &hit);
+        json_free(&hit);
+    }
+    ok = ok && json_push_kv(out, "entries", &arr);
+    json_free(&arr);
+    return ok;
+}
+
+static bool fb_compact_flags(struct json_value *out, const struct json_value *full)
+{
+    const char *after = json_get_str(json_get(full, "after_slug"));
+    const char *blocked = json_get_str(json_get(full, "blocked_slug"));
+    return (!json_get_bool(json_get(full, "truncated")) ||
+            json_push_kv_bool(out, "truncated", true)) &&
+        (!json_get_bool(json_get(full, "incomplete")) ||
+            json_push_kv_bool(out, "incomplete", true)) &&
+        (!after || !after[0] || json_push_kv_str(out, "after_slug", after)) &&
+        (!blocked || !blocked[0] || json_push_kv_str(out, "blocked_slug", blocked));
+}
+
+/* Replace reply->data with the compact projection; on any failure the full
+ * data stays, so a caller never receives a half-built answer. */
+static void fb_wiki_find_compact(struct zcl_command_reply *reply)
+{
+    struct json_value out;
+    if (!json_get(&reply->data, "entries"))
+        return;
+    json_init(&out);
+    json_set_object(&out);
+    if (fb_compact_entries(&out, &reply->data) &&
+        fb_compact_flags(&out, &reply->data) &&
+        json_push_kv_str(&out, "more", "--view=normal adds rules and ids; "
+                                       "fleet wiki read <slug> reads one")) {
+        json_free(&reply->data);
+        reply->data = out;
+        return;
+    }
+    json_free(&out);
+}
+
 static bool fb_wiki_find_request(const struct zcl_command_request *request,
     struct zcl_command_reply *reply, struct json_value *out)
 {
@@ -1785,6 +1870,26 @@ static bool fb_wiki_find_request(const struct zcl_command_request *request,
     fb_forward_str(out, request->input, "scope", NULL);
     (void)json_push_kv_int(out, "response_budget", (int64_t)budget);
     return true;
+}
+
+/* Point at the exact revision of the first hit (the full view only: the compact
+ * view carries no ids). */
+static void fb_wiki_find_read_hint(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    const char *id = json_get_str(json_get(json_at(json_get(&reply->data,
+        "entries"), 0), "id"));
+    bool valid_id = strlen(id) == 64;
+    for (size_t i = 0; valid_id && i < 64; i++)
+        valid_id = (id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f');
+    if (valid_id) {
+        char input[128];
+        bool fleet = !strcmp(json_get_str(json_get(request->input, "scope")), "fleet");
+        (void)snprintf(input, sizeof(input), "{\"id\":\"%s\"%s}", id,
+                       fleet ? ",\"scope\":\"fleet\"" : "");
+        (void)zcl_command_reply_add_next(reply, "fleet.wiki.read", input,
+            "read exact revision body chunks and verify the reconstructed post");
+    }
 }
 
 static void fb_wiki_find(const struct zcl_command_request *request,
@@ -1817,19 +1922,10 @@ static void fb_wiki_find(const struct zcl_command_request *request,
     }
     fb_project_object(reply, &body);
     json_free(&body);
-    const char *id = json_get_str(json_get(json_at(json_get(&reply->data,
-        "entries"), 0), "id"));
-    bool valid_id = strlen(id) == 64;
-    for (size_t i = 0; valid_id && i < 64; i++)
-        valid_id = (id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f');
-    if (valid_id) {
-        char input[128];
-        bool fleet = !strcmp(json_get_str(json_get(request->input, "scope")), "fleet");
-        (void)snprintf(input, sizeof(input), "{\"id\":\"%s\"%s}", id,
-                       fleet ? ",\"scope\":\"fleet\"" : "");
-        (void)zcl_command_reply_add_next(reply, "fleet.wiki.read", input,
-            "read exact revision body chunks and verify the reconstructed post");
-    }
+    if (request->view && !strcmp(request->view, "summary"))
+        fb_wiki_find_compact(reply); /* names fleet wiki read <slug> itself */
+    else
+        fb_wiki_find_read_hint(request, reply);
 }
 
 void zcl_native_handle_fleet_wiki_find(

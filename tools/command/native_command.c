@@ -5205,6 +5205,17 @@ static bool nc_presentation_allowed(const struct nc_main_state *st)
     return !st->seen_format && st->field_csv == NULL;
 }
 
+/* Leaves whose CLI default is the compact `summary` view: an agent at the
+ * command line pays for the answer it reads, and --view=normal or full still
+ * returns everything. In-process callers (MCP, code guide, steer) never pass
+ * through this CLI path, so their JSON shapes are untouched. */
+static const char *nc_cli_default_view(const char *path, const char *view)
+{
+    if (view)
+        return view;
+    return path && strcmp(path, "fleet.wiki.find") == 0 ? "summary" : NULL;
+}
+
 static bool nc_main_execute(struct nc_main_state *st,
                             const struct zcl_command_registry *reg, char *out,
                             size_t out_cap, size_t *n_out,
@@ -5266,7 +5277,8 @@ static bool nc_main_execute(struct nc_main_state *st,
     }
 #endif
     size_t n = zcl_command_registry_execute_json(
-        reg, st->spec, &ctx, &st->input, st->was_alias, st->invoked, st->view,
+        reg, st->spec, &ctx, &st->input, st->was_alias, st->invoked,
+        nc_cli_default_view(st->spec->path, st->view),
         st->budget, st->max_items, st->cursor, out, out_cap, &exit_code);
     g_nc_interactive_dispatch = previous_interactive_dispatch;
     g_nc_gio_open_dispatch = previous_gio_open_dispatch;
