@@ -507,8 +507,9 @@ static int mode_find(struct tgl_ctx *c, int argc, const char *const *argv)
     int rc = mode_match(c, argc, argv);
     if (rc == 1)
         fprintf(tgl_errf(c), "test-group-list: no registered group contains "
-                "%s; try a shorter substring or: make t-list T_LIST=count\n",
-                argv[1]);
+                "%s; try a shorter substring or: make t-list T_LIST=count%s\n",
+                argv[1], strchr(argv[1], ',') ? " (ONLY= takes one substring; "
+                "for a list use make t-fast-exact ONLY=a,b)" : "");
     return rc;
 }
 
