@@ -879,8 +879,11 @@ static int test_code_guide_brief_budget(void)
             json_get(json_at(json_get(&reply.data, "owners"), 0), "rules");
         const char *wide = json_get_str(json_at(rules, 1));
         size_t n = strlen(wide);
-        ASSERT(n > 0 && n % 2 == 0 && n < 200);
-        for (size_t i = 0; i < n; i += 2)
+        ASSERT(n > 3 && n < 200);
+        ASSERT_STR_EQ(wide + n - 3, "...");
+        size_t prefix_len = n - 3;
+        ASSERT(prefix_len % 2 == 0);
+        for (size_t i = 0; i < prefix_len; i += 2)
             ASSERT((unsigned char)wide[i] == 0xC3 && (unsigned char)wide[i + 1] == 0xA9);
         ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
         ASSERT(brief_array_has(json_get(&reply.data, "cut"), "owner_rules"));
