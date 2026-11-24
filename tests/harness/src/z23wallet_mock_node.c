@@ -14,7 +14,7 @@
 
 #define SEEN_CAP 8192
 
-static void shift_times(char *text, size_t cap, int64_t shift);
+static bool shift_times(char *text, size_t cap, int64_t shift);
 
 struct script_row { char method[48]; int status; int delay_ms; int times; char file[96]; };
 
@@ -186,7 +186,10 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
         send_reply(c, 404, "{\"result\":null,\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":1}");
         return;
     }
-    shift_times(text, sizeof(text), atomic_load(&m->clock_shift));
+    if (!shift_times(text, sizeof(text), atomic_load(&m->clock_shift))) {
+        send_reply(c, 500, "{\"result\":null,\"error\":{\"code\":-1,\"message\":\"mock: reply too long to shift times\"},\"id\":1}");
+        return;
+    }
     snprintf(out, sizeof(out), "{\"result\":%s,\"error\":null,\"id\":1}", text);
     send_reply(c, status, out);
 }
@@ -292,8 +295,9 @@ void zw_mock_set_clock_shift(struct zw_mock *m, int64_t seconds)
     atomic_store(&m->clock_shift, seconds);
 }
 
-/* Adds the clock shift to every "tiptime" and "mediantime" integer of a reply. */
-static void shift_times(char *text, size_t cap, int64_t shift)
+/* Adds the clock shift to every "tiptime" and "mediantime" integer of a reply, in place
+ * (memmove, no copy buffer). False, loudly, when a longer number would not fit cap. */
+static bool shift_times(char *text, size_t cap, int64_t shift)
 {
     static const char *const keys[] = { "\"tiptime\":", "\"mediantime\":" };
     for (size_t k = 0; k < 2 && shift; k++) {
@@ -302,13 +306,17 @@ static void shift_times(char *text, size_t cap, int64_t shift)
         char *num = p + strlen(keys[k]), *end = NULL;
         long long v = strtoll(num, &end, 10);
         if (end == num) continue;
-        char tail[8192], digits[24];
-        snprintf(tail, sizeof(tail), "%s", end);
+        char digits[24];
         int n = snprintf(digits, sizeof(digits), "%lld", v + (long long)shift);
-        if ((size_t)(num - text) + (size_t)n + strlen(tail) + 1 > cap) continue;
+        size_t rest = strlen(end);
+        if (n <= 0 || (size_t)(num - text) + (size_t)n + rest + 1 > cap) {
+            fprintf(stderr, "zw_mock: reply too long to shift %s (cap %zu)\n", keys[k], cap);
+            return false;
+        }
+        memmove(num + n, end, rest + 1);
         memcpy(num, digits, (size_t)n);
-        memcpy(num + n, tail, strlen(tail) + 1);
     }
+    return true;
 }
 
 /* A listener whose accept queue is full and never drained: a connect to it
