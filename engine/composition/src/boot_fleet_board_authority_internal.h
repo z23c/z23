@@ -13,10 +13,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct fleet_board_post;
 struct db_mesh_pairing;
 struct node_db;
 struct vcs_zcode_dht_delegation;
 
+/* The last (key, kind) wiki-post authority answer, so one find does not reopen
+ * the role store for every row of one author. */
+struct board_author_memo {
+    uint8_t host[32];
+    uint8_t kind;
+    bool known, allowed;
+};
+/* Whether THIS node's role store lets the post's signer post THIS kind (wiki:
+ * scribe only), the predicate admission uses; a reader must not present a
+ * page from a key that could not have posted it as guidance. */
+bool board_author_may_post(struct board_author_memo *memo,
+                           const struct fleet_board_post *post);
 /* The board store this box serves from and commits into, or NULL
  * (boot_fleet_board_fleet.c). */
 struct node_db *board_db(void);

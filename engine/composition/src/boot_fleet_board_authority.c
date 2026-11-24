@@ -453,3 +453,16 @@ void boot_fleet_board_fleet_test_bind_second_peer(
     zcl_mutex_unlock(&g_test_lock);
 }
 #endif
+
+bool board_author_may_post(struct board_author_memo *m,
+                           const struct fleet_board_post *p)
+{
+    if (!m->known || m->kind != p->kind || memcmp(m->host, p->host_pubkey, 32)) {
+        m->allowed = zcl_fleet_role_allows(p->host_pubkey, ZCL_FLEET_LEAF_BOARD_POST,
+                                           fleet_board_kind_name(p->kind), NULL, 0);
+        memcpy(m->host, p->host_pubkey, 32);
+        m->kind = p->kind;
+        m->known = true;
+    }
+    return m->allowed;
+}
