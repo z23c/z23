@@ -42,6 +42,7 @@ struct app {
 static int64_t wall_s(void) { return (int64_t)time(NULL); }
 static void home_shield(struct app *a, const char *issued);
 static void set_screen(struct app *a, size_t s);
+static bool shield_snapshot(struct app *a);
 
 static bool rebuild(struct app *a)
 {
@@ -177,8 +178,21 @@ static void drain(struct app *a)
             int64_t before = a->model.chain.blocks;
             bool ok = r[i].err == ZW_OK;
             enum zw_query kind = r[i].kind;
+            bool current = r[i].generation == a->model.generation;
+            uint32_t generation = a->model.generation;
+            uint16_t port = a->model.port;
+            enum zw_profile profile = a->model.profile;
+            char datadir[ZW_PATH];
+            snprintf(datadir, sizeof(datadir), "%s", a->model.datadir);
             if (!ok) zw_log("query %d failed: kind=%d code=%d", (int)kind, (int)r[i].err, r[i].rpc.code);
             if (zw_model_apply(&a->model, &r[i])) a->model_dirty = true;
+            if (generation != a->model.generation || port != a->model.port || profile != a->model.profile ||
+                strcmp(datadir, a->model.datadir)) {
+                free(a->model.rcv.list);
+                a->model.rcv.list = NULL;
+            }
+            if (current && generation == a->model.generation && ok && kind == ZW_Q_BALANCES)
+                (void)shield_snapshot(a);
             if (!ok) continue;
             a->model.last_update_s = wall_s();
             if (kind == ZW_Q_CHAIN && a->model.chain.blocks != before) a->need_wallet = true;
@@ -223,6 +237,8 @@ static void watchdog_fired(struct app *a)
     zw_log("%s", line);
     zw_model_watchdog(&a->model, zw_worker_port(a->worker));
     zw_worker_restart(a->worker);
+    free(a->model.rcv.list);
+    a->model.rcv.list = NULL;
     enqueue_all(a);
     a->model_dirty = true;
 }
@@ -273,14 +289,29 @@ static void send_wake(struct app *a)
     send_apply(a, &out);
 }
 
+static bool shield_snapshot(struct app *a)
+{
+    struct zw_balances *list = a->model.bal ? malloc(sizeof(*list)) : NULL;
+    if (a->model.bal && !list) {
+        free(a->model.rcv.list);
+        a->model.rcv.list = NULL;
+        return false;
+    }
+    if (list) *list = *a->model.bal;
+    free(a->model.rcv.list);
+    a->model.rcv.list = list;
+    return list != NULL;
+}
+
 static void home_shield(struct app *a, const char *issued)
 {
-    if (a->model.bal) {
-        if (!a->model.rcv.list) a->model.rcv.list = calloc(1, sizeof(*a->model.rcv.list));
-        if (a->model.rcv.list) *a->model.rcv.list = *a->model.bal;
-    }
+    (void)shield_snapshot(a);
     struct zw_send_env env = send_env(a);
     switch (zw_send_home_shield(a->model.send, &env, issued)) {
+    case ZW_SHIELD_READ:
+        enqueue(a, ZW_Q_BALANCES);
+        show_msg(a, "Loading your shielded addresses. Try shielding again in a moment.");
+        break;
     case ZW_SHIELD_WAIT:
         show_msg(a, "ZClassic is still getting ready. Try shielding again in a moment.");
         break;
@@ -313,6 +344,8 @@ static void set_screen(struct app *a, size_t s)
 static void refresh_now(struct app *a)
 {
     a->model.generation++;
+    free(a->model.rcv.list);
+    a->model.rcv.list = NULL;
     enqueue_all(a);
 }
 

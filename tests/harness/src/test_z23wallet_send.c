@@ -687,7 +687,20 @@ static void home_shield_draft(void)
     struct zw_model *m = &p.n.m;
     free(m->rcv.list);
     m->rcv.list = NULL;
-    CHECK("cold shield waits on Home", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_WAIT);
+    if (!m->bal) { CHECK("Home balances supplied", false); page_down(&p); return; }
+    size_t funded_rows = m->bal->n;
+    m->bal->n = 0;
+    unsigned rpc_before = zw_mock_request_count(p.n.mock);
+    CHECK("fresh empty balances need no address query", !zw_shield_source(m->bal) &&
+          zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_EMPTY &&
+          zw_mock_request_count(p.n.mock) == rpc_before);
+    m->bal->n = funded_rows;
+    CHECK("funded Home asks for a read-only address list", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_READ &&
+          zw_mock_request_count(p.n.mock) == rpc_before);
+    ++m->generation;
+    CHECK("Home discovery after identity reset cannot create or spend",
+          zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_READ && !m->rcv.creating &&
+          zw_mock_request_count(p.n.mock) == rpc_before);
     m->rcv.list = calloc(1, sizeof(*m->rcv.list));
     if (!m->rcv.list || !m->bal) {
         CHECK("shield balances allocated", false);

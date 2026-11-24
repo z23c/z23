@@ -3,9 +3,10 @@
 #include "zw_send.h"
 #include <string.h>
 
-static const char *shield_source(const struct zw_balances *bal)
+const char *zw_shield_source(const struct zw_balances *bal)
 {
     const struct zw_bal_row *confirmed = NULL, *shown = NULL;
+    if (!bal) return NULL;
     for (size_t i = 0; i < bal->n; ++i) {
         const struct zw_bal_row *r = &bal->rows[i];
         if (r->kind != ZW_ADDR_PUBLIC || !zw_addr_is_t(r->addr)) continue;
@@ -40,11 +41,12 @@ static bool payment_occupied(const struct zw_send *s)
 enum zw_shield_choice zw_send_home_shield(struct zw_send *s, const struct zw_send_env *env, const char *issued)
 {
     const struct zw_model *m = env->m;
-    if (!s || m->conn != ZW_CONN_ONLINE || !m->bal || !m->rcv.list || m->rcv.creating)
+    if (!s || m->conn != ZW_CONN_ONLINE || !m->bal || m->rcv.creating)
         return ZW_SHIELD_WAIT;
     if (payment_occupied(s)) return ZW_SHIELD_BUSY;
-    const char *from = shield_source(m->bal);
+    const char *from = zw_shield_source(m->bal);
     if (!from) return ZW_SHIELD_EMPTY;
+    if (!m->rcv.list) return ZW_SHIELD_READ;
     const char *to = shield_target(&m->rcv, issued);
     if (!to[0]) return ZW_SHIELD_CREATE;
     if (zw_addr_check(to) != ZW_AT_SAPLING) return ZW_SHIELD_WAIT;

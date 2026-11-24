@@ -191,7 +191,8 @@ void zw_send_show_failure(struct zw_send *s, struct gui_ui *ui); /* the "Couldn'
 void zw_send_seed(struct gui_ui *ui, const char *id, const char *text, size_t cap);
 /* Home's "Send from <address>": preselect the pay-from address. */
 void zw_send_prefill_from(struct zw_send *s, const char *addr);
-enum zw_shield_choice { ZW_SHIELD_READY, ZW_SHIELD_EMPTY, ZW_SHIELD_WAIT, ZW_SHIELD_CREATE, ZW_SHIELD_BUSY };
+enum zw_shield_choice { ZW_SHIELD_READY, ZW_SHIELD_EMPTY, ZW_SHIELD_WAIT, ZW_SHIELD_READ, ZW_SHIELD_CREATE, ZW_SHIELD_BUSY };
+const char *zw_shield_source(const struct zw_balances *bal);
 enum zw_shield_choice zw_send_home_shield(struct zw_send *s, const struct zw_send_env *env, const char *issued);
 void zw_send_clear_form(struct zw_send *s, struct gui_ui *ui);
 uint32_t zw_send_structure_key(const struct zw_send *s);
