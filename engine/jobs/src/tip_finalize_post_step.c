@@ -421,6 +421,8 @@ static void tip_finalize_wallet_set_height(struct wallet *wallet, int height)
         strcmp(wallet->scan_retry.blocker, WALLET_TIP_GAP) == 0)
         memset(&wallet->scan_retry, 0, sizeof(wallet->scan_retry));
     zcl_mutex_unlock(&wallet->cs);
+    if (before < height)
+        wallet_notify_height_advanced();
 }
 
 /* Idempotent wallet subset of post-finalize publication. A body can become

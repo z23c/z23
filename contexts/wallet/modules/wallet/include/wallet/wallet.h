@@ -139,9 +139,17 @@ struct wallet;
 typedef int (*wallet_chain_tip_source)(void *ctx);
 void wallet_set_chain_tip_source(wallet_chain_tip_source source, void *ctx);
 
+/* A send that finds the wallet exactly one block behind the tip waits up to
+ * this long (default 3000 ms) for the cursor to advance; 0 disables. The
+ * block post-step calls wallet_notify_height_advanced after moving the
+ * cursor, which wakes any waiting send. */
+void wallet_set_send_tip_wait_ms(int ms);
+void wallet_notify_height_advanced(void);
+
 /* The height a send builds against, resolved BEFORE anything is built or a
  * key is drawn. Refuses (error "wallet is N blocks behind chain tip (scanned
- * X, tip Y)") when the wallet height cursor is below the tip (a pending scan
+ * X, tip Y)") when the wallet height cursor is below the tip; one block behind
+ * waits briefly first, then says the wallet is catching up (a pending scan
  * gap marker is not lag); the text is
  * thread-local, valid until the next call on the thread. Otherwise it is the
  * chain tip height (the wallet cursor when no tip is registered); the

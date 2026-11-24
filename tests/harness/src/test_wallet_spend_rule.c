@@ -1489,6 +1489,53 @@ static struct coins_view_vtable g_wsr_view_vtable = {
     .get_anchor = wsr_view_anchor,
 };
 
+/* A wallet behind the chain tip is refused before any witness is loaded or
+ * note reserved: the shielded z->* path takes the same tip guard as every
+ * transparent builder. Three blocks behind refuses at once; one block behind
+ * waits (here 20 ms) and then says the wallet is catching up. */
+static int wsr_e2e_tip_guard(struct wsr_e2e *e, const struct chain_params *cp)
+{
+    int failures = 0;
+    struct wallet_tx prepared;
+    struct tx_destination dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.type = DEST_KEY_ID;
+    memset(dest.id.key.id.data, 0x62, 20);
+    int64_t amount = 1000000;
+    static const int lag[2] = {3, 1};
+    static const char *const want[2] = {"wallet is 3 blocks behind chain tip",
+                                        "wallet is catching up to the chain "
+                                        "tip"};
+    wallet_set_send_tip_wait_ms(20);
+    for (int i = 0; i < 2; i++) {
+        struct json_value result = {0};
+        memset(&prepared, 0, sizeof(prepared));
+        zcl_mutex_lock(&e->w->cs);
+        e->w->best_block_height = WSR_TIP - lag[i];
+        zcl_mutex_unlock(&e->w->cs);
+        json_set_null(&result);
+        bool built = z_sendmany_shielded(
+            wallet_rpc_context_current(), cp, e->key, amount, &dest, &amount,
+            1, NULL, NULL, NULL, NULL, NULL, 0, 0, &prepared, &result,
+            WSR_KEY_H);
+        const char *msg = json_get_str(&result);
+        WSR_CHECK("shielded send from a wallet behind the tip is refused",
+                  !built && prepared.tx.num_shielded_spend == 0);
+        WSR_CHECK("the refusal names the lag, not a witness or proof error",
+                  msg && strstr(msg, want[i]));
+        WSR_CHECK("a refused send leaves note B unreserved",
+                  wsr_e2e_contains(e, e->n[1].txid));
+        if (built)
+            transaction_free(&prepared.tx);
+        json_free(&result);
+    }
+    wallet_set_send_tip_wait_ms(3000);
+    zcl_mutex_lock(&e->w->cs);
+    e->w->best_block_height = WSR_TIP;
+    zcl_mutex_unlock(&e->w->cs);
+    return failures;
+}
+
 /* The direct build of a transaction from note B, outside the RPC layer: the
  * gate passes, the note is proved and the proofs verify. */
 static int wsr_e2e_prove(struct wsr_e2e *e, const struct chain_params *cp)
@@ -1594,6 +1641,7 @@ static int wsr_e2e_scenarios(struct wsr_e2e *e, const struct chain_params *cp,
               !wsr_e2e_contains(e, e->n[2].txid) &&
                   wsr_e2e_contains(e, e->n[1].txid));
 
+    failures += wsr_e2e_tip_guard(e, cp);
     failures += wsr_e2e_prove(e, cp);
 
     msg = wsr_e2e_rpc(&params, &result, &sent);

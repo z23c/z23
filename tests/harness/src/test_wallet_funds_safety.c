@@ -36,12 +36,15 @@
 #include "keys/pubkey.h"
 #include "script/standard.h"
 #include "wallet/wallet.h"
+#include "platform/time_compat.h"
 #include "controllers/wallet_helpers.h"
 #include "services/zslp_command_service.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -1108,8 +1111,12 @@ static int wfs_test_owner_tip_guard(void)
     struct wallet *w = calloc(1, sizeof(*w));
     struct wallet_tx wtx;
     const char *why = NULL;
-    if (!w)
+    if (!w) {
+        wallet_set_chain_tip_source(NULL, NULL);
+        *cp = saved;
         return 1;
+    }
+    wallet_set_send_tip_wait_ms(20);
 
     struct zcl_result r = wfs_owner_build(w, 75, 100, &wtx, &why);
     WFS_CHECK("owner base: 25 blocks behind is refused, nothing built",
@@ -1122,8 +1129,8 @@ static int wfs_test_owner_tip_guard(void)
     r = wfs_owner_build(w, 99, 100, &wtx, &why);
     WFS_CHECK("owner base: a one-block lag is a clear retryable refusal",
               !r.ok && why &&
-                  strcmp(why, "wallet is 1 block behind chain tip "
-                              "(scanned 99, tip 100)") == 0);
+                  strcmp(why, "wallet is catching up to the chain tip "
+                              "(scanned 99, tip 100); retry in a moment") == 0);
     wallet_free(w);
 
     r = wfs_owner_build(w, 100, 100, &wtx, &why);
@@ -1161,8 +1168,94 @@ static int wfs_test_owner_tip_guard(void)
     wallet_free(w);
     free(w);
 
+    wallet_set_send_tip_wait_ms(3000);
     wallet_set_chain_tip_source(NULL, NULL);
     *cp = saved;
+    return failures;
+}
+
+/* The block post-step publishes the tip before it advances the wallet, so a
+ * send landing in that window waits for the advance instead of failing. */
+struct wfs_advance {
+    struct wallet *w;
+    int height;
+};
+
+static void *wfs_advance_thread(void *arg)
+{
+    struct wfs_advance *a = arg;
+    platform_sleep_ms(100);
+    zcl_mutex_lock(&a->w->cs);
+    a->w->best_block_height = a->height;
+    zcl_mutex_unlock(&a->w->cs);
+    wallet_notify_height_advanced();
+    return NULL;
+}
+
+static int64_t wfs_now_ms(void)
+{
+    struct timespec ts;
+    platform_time_monotonic_timespec(&ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int wfs_test_tip_guard_waits_one_block(void)
+{
+    int failures = 0;
+    struct wallet *w = calloc(1, sizeof(*w));
+    int height = 0;
+    const char *why = NULL;
+    wallet_set_chain_tip_source(wfs_tip_source, NULL);
+    if (!w || !wfs_tip_wallet(w, 99)) {
+        wallet_set_chain_tip_source(NULL, NULL);
+        free(w);
+        return 1;
+    }
+    g_wfs_tip = 100;
+    wallet_set_send_tip_wait_ms(5000);
+
+    struct wfs_advance adv = {.w = w, .height = 100};
+    pthread_t th;
+    bool started = pthread_create(&th, NULL, wfs_advance_thread, &adv) == 0;
+    int64_t t0 = wfs_now_ms();
+    bool ok = wallet_send_build_height(w, &height, &why);
+    int64_t took = wfs_now_ms() - t0;
+    if (started)
+        pthread_join(th, NULL);
+    WFS_CHECK("one block behind: the send waits for the advance and proceeds",
+              started && ok && height == 100);
+    WFS_CHECK("the wait ended on the advance, well inside the 5 s budget",
+              took >= 50 && took < 3000);
+
+    zcl_mutex_lock(&w->cs);
+    w->best_block_height = 98;
+    zcl_mutex_unlock(&w->cs);
+    t0 = wfs_now_ms();
+    ok = wallet_send_build_height(w, &height, &why);
+    took = wfs_now_ms() - t0;
+    WFS_CHECK("two blocks behind: refused at once, no wait",
+              !ok && took < 1000 && why &&
+                  strcmp(why, "wallet is 2 blocks behind chain tip "
+                              "(scanned 98, tip 100)") == 0);
+
+    zcl_mutex_lock(&w->cs);
+    w->best_block_height = 99;
+    zcl_mutex_unlock(&w->cs);
+    wallet_set_send_tip_wait_ms(150);
+    t0 = wfs_now_ms();
+    ok = wallet_send_build_height(w, &height, &why);
+    took = wfs_now_ms() - t0;
+    WFS_CHECK("one block behind and no advance: refused after the bounded wait",
+              !ok && took >= 100 && took < 3000);
+    WFS_CHECK("the refusal says the wallet is catching up and to retry",
+              why && strcmp(why, "wallet is catching up to the chain tip "
+                                 "(scanned 99, tip 100); retry in a moment") ==
+                         0);
+
+    wallet_set_send_tip_wait_ms(3000);
+    wallet_set_chain_tip_source(NULL, NULL);
+    wallet_free(w);
+    free(w);
     return failures;
 }
 
@@ -1200,6 +1293,7 @@ int test_wallet_funds_safety(void)
     failures += wfs_test_readiness_projection();
     failures += wfs_test_send_tip_guard();
     failures += wfs_test_owner_tip_guard();
+    failures += wfs_test_tip_guard_waits_one_block();
     failures += wfs_test_tip_guard_gap_marker();
 
     char dbdir[256], dbpath[320];
