@@ -31,7 +31,7 @@
 #   tools/scripts/build_vendor.sh libz.a libsqlite3.a   # build a subset
 #   tools/scripts/build_vendor.sh --check-provenance    # read-only verification
 
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -1319,28 +1319,32 @@ declare -A BUILDER=(
     [libsecp256k1-android.a]=build_secp_native
 )
 
+vendor_report() {   # pid rc: show that worker's log together; remember failures
+    local n="${names[$1]}" log="$WORK/log.${names[$1]}" a
+    if (( $2 == 0 )); then cat "$log" >&2; return; fi
+    for a in "${!BUILDER[@]}"; do [[ "${BUILDER[$a]}" == "$n" ]] && n+=" $a"; done
+    printf '\033[31m[vendor] FAILED %s\033[0m  (full log: %s)\n' "$n" "$log" >&2
+    tail -n 25 "$log" >&2
+    failed_names+=" [$n]"
+}
+
 vendor_reap_first() {
-    local rc=0
-    if ! wait "${pids[0]}"; then
-        rc=1
-    fi
-    if [[ "${pids[0]}" == "$openssl_pid" ]]; then
-        openssl_done=1
-        openssl_failed="$rc"
-    fi
-    if (( rc != 0 )); then
-        failed=1
-    fi
-    pids=("${pids[@]:1}")
-    active=$((active - 1))
+    local pid="${pids[0]}" rc=0
+    wait "$pid" || rc=1
+    vendor_report "$pid" "$rc"
+    if [[ "$pid" == "$openssl_pid" ]]; then openssl_done=1; openssl_failed="$rc"; fi
+    pids=("${pids[@]:1}"); active=$((active - 1))
 }
 
 vendor_launch() {
+    local n="$1" log="$WORK/log.$1"
     if (( active >= max_par )); then
         vendor_reap_first
     fi
-    ( JOBS="$group_jobs" "$1" ) &
+    ( trap "echo '[vendor] ERROR: $n: step failed: '\"\$BASH_COMMAND\"' (line '\$LINENO')'" ERR
+      JOBS="$group_jobs" "$n" ) >"$log" 2>&1 &
     pids+=("$!")
+    names[$!]="$n"
     active=$((active + 1))
 }
 
@@ -1348,11 +1352,10 @@ vendor_wait_openssl() {
     if (( openssl_done )); then
         return
     fi
-    local target="$1" i found=0
-    if ! wait "$target"; then
-        openssl_failed=1
-        failed=1
-    fi
+    local target="$1" i found=0 rc=0
+    wait "$target" || rc=1
+    vendor_report "$target" "$rc"
+    openssl_failed="$rc"
     openssl_done=1
     for i in "${!pids[@]}"; do
         if [[ "${pids[i]}" == "$target" ]]; then
@@ -1383,9 +1386,8 @@ vendor_run_builders() {
     if (( max_par > JOBS )); then max_par="$JOBS"; fi
     if (( max_par > ${#pending[@]} )); then max_par="${#pending[@]}"; fi
     local group_jobs=$((JOBS / max_par))
-    local -a pids=()
-    local active=0 failed=0
-    local openssl_pid="" builder
+    local -a pids=(); local -A names=()
+    local active=0 failed_names="" openssl_pid="" builder
     local openssl_done=0 openssl_failed=0
     local with_openssl=0 with_libevent=0
     for builder in "${pending[@]}"; do
@@ -1406,7 +1408,7 @@ vendor_run_builders() {
         fi
     fi
     vendor_drain
-    (( failed == 0 )) || die "vendor build failed: a builder step exited non-zero (stderr above); no stamp was written for it"
+    [[ -z "$failed_names" ]] || die "vendor build failed for:$failed_names; no stamp was written for them (logs under $WORK)"
 }
 
 BUILD_LIST=()
