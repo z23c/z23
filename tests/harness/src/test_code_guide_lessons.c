@@ -118,6 +118,31 @@ static int cgl_trust_stale_cases(void)
     return failures;
 }
 
+static int cgl_drop_overflow_case(void)
+{
+    int failures = 0;
+    char entries[16384];
+    size_t len = 0;
+    entries[len++] = '[';
+    for (size_t i = 0; i < 66; i++) {
+        size_t slug = i == 65 ? 64 : i;
+        len += (size_t)snprintf(entries + len, sizeof(entries) - len,
+            "%s{\"slug\":\"drop-%02zu\",\"summary\":\"X\",\"test_scope\":\"public\"}",
+            i ? "," : "", slug);
+    }
+    entries[len++] = ']';
+    entries[len] = '\0';
+    struct json_value data;
+    TEST("code.guide marks dropped-page counts incomplete past 64 without double counting") {
+        ASSERT(cgl_collect(entries, CGL_NOW, &data));
+        ASSERT_EQ(json_get_int(json_get(&data, "lessons_untrusted_dropped")), 64);
+        ASSERT(json_get_bool(json_get(&data, "lessons_untrusted_incomplete")));
+        json_free(&data);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cgl_cap_cases(void)
 {
     int failures = 0;
@@ -363,7 +388,7 @@ static int cgl_guide_cases(void)
 
 int cgl_run_cases(void)
 {
-    int failures = cgl_ranking_cases() + cgl_trust_stale_cases() + cgl_cap_cases();
+    int failures = cgl_ranking_cases() + cgl_trust_stale_cases() + cgl_drop_overflow_case() + cgl_cap_cases();
     struct node_db db = {0};
     char dir[256] = {0}, warmup[256];
     bool was_warming = rpc_is_in_warmup(warmup, sizeof(warmup));

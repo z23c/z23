@@ -97,6 +97,7 @@ struct cb_brief {
     unsigned lessons_untrusted; /* pages dropped: author holds no role (capped) */
     uint64_t dropped[CB_MAX_DROPPED]; /* hashes of the pages counted */
     size_t ndropped;
+    bool lessons_untrusted_incomplete; /* more distinct pages than the set holds */
     int64_t now;
     bool lesson_lost; /* a lesson could not be copied: the query fails */
     char revision[41];
@@ -593,8 +594,10 @@ static void cb_count_untrusted(struct cb_brief *b, const char *slug)
     for (size_t i = 0; i < b->ndropped; i++)
         if (b->dropped[i] == h)
             return;
-    if (b->ndropped == CB_MAX_DROPPED)
+    if (b->ndropped == CB_MAX_DROPPED) {
+        b->lessons_untrusted_incomplete = true;
         return; /* a lower bound beyond the set: never count a page twice */
+    }
     b->dropped[b->ndropped++] = h;
     b->lessons_untrusted++;
 }
@@ -1225,16 +1228,24 @@ static bool cb_push_routing(struct json_value *data, const struct cb_brief *b)
            ((b->cut_tests && b->ntests == 0) || cb_push_tests(data, b));
 }
 
+static bool cb_push_lesson_flags(struct json_value *data, const struct cb_brief *b,
+                                 bool omitted)
+{
+    return (omitted || !b->lessons_capped ||
+            json_push_kv_bool(data, "lessons_capped", true)) &&
+           (omitted || !b->lessons_truncated ||
+            json_push_kv_bool(data, "lessons_truncated", true)) &&
+           (omitted || !b->lessons_untrusted_incomplete ||
+            json_push_kv_bool(data, "lessons_untrusted_incomplete", true));
+}
+
 static bool cb_push_lesson_evidence(struct json_value *data, const struct cb_brief *b)
 {
     bool omitted = b->cut_lessons && b->nlessons == 0;
     return (omitted || cb_push_lessons(data, b)) &&
            (omitted || !b->unavailable[0] ||
             json_push_kv_str(data, "lessons_unavailable", b->unavailable)) &&
-           (omitted || !b->lessons_capped ||
-            json_push_kv_bool(data, "lessons_capped", true)) &&
-           (omitted || !b->lessons_truncated ||
-            json_push_kv_bool(data, "lessons_truncated", true)) &&
+           cb_push_lesson_flags(data, b, omitted) &&
            (omitted || !b->lessons_untrusted ||
             json_push_kv_int(data, "lessons_untrusted_dropped", (int64_t)b->lessons_untrusted));
 }
