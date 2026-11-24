@@ -118,6 +118,21 @@ void gui_window_set_text_input(struct gui_window *w, bool on,
 bool gui_clipboard_set_text(struct gui_window *w, const char *utf8, size_t len);
 size_t gui_clipboard_get_text(struct gui_window *w, char *buf, size_t cap);
 
+/* Called by a backend while the OS holds the thread in a modal size or move
+ * loop (a Win32 border drag), where the normal event loop does not run: the
+ * hook drains events and renders so the window never shows stale or garbage
+ * pixels and timers keep firing. NULL clears it. Never called from headless. */
+typedef void (*gui_live_fn)(void *user);
+void gui_window_set_live_hook(struct gui_window *w, gui_live_fn fn, void *user);
+
+/* Present geometry shared by the backends, pure so every platform tests it.
+ * gui_rect_clip_frame clips r to a w x h frame; false when nothing is left.
+ * gui_dib_src_y is the ySrc for SetDIBitsToDevice with a top-down DIB of
+ * fb_h rows: GDI counts source rows from the bottom whatever the sign of
+ * biHeight, so rows r->y .. r->y + r->h - 1 start at fb_h - r->y - r->h. */
+bool gui_rect_clip_frame(struct gui_rect *r, int32_t w, int32_t h);
+int32_t gui_dib_src_y(int32_t fb_h, const struct gui_rect *r);
+
 /* CPU surface. */
 bool gui_cpu_acquire(struct gui_window *w, struct gui_cpu_frame *out);
 bool gui_cpu_present(struct gui_window *w, const struct gui_rect *rects,

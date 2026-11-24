@@ -369,6 +369,30 @@ static bool data_compact(struct gui_data *d)
     return true;
 }
 
+/* Append an empty entry for key; -1 (and no change) when the table or the pool is
+ * full. The pool is checked before the terminator byte is written, so used can
+ * never pass GUI_DATA_BYTES; compaction first reclaims dead slack. */
+static int data_add_key(struct gui_data *d, const char *key)
+{
+    if (d->n >= GUI_DATA_KEYS) {
+        fprintf(stderr, "gui: data table full, dropping key %s\n", key);
+        return -1;
+    }
+    if (d->used + 1u > GUI_DATA_BYTES && !data_compact(d)) return -1;
+    if (d->used + 1u > GUI_DATA_BYTES) {
+        fprintf(stderr, "gui: data pool full, dropping key %s\n", key);
+        return -1;
+    }
+    int at = (int)d->n++;
+    snprintf(d->e[at].key, sizeof(d->e[at].key), "%s", key);
+    d->e[at].len = 0;
+    d->e[at].cap = 0;
+    d->pool[d->used] = 0;
+    d->e[at].off = d->used;
+    d->used += 1;
+    return at;
+}
+
 bool gui_ui_set(struct gui_ui *ui, const char *key, const char *value)
 {
     struct gui_data *d = &ui->data;
@@ -377,18 +401,7 @@ bool gui_ui_set(struct gui_ui *ui, const char *key, const char *value)
     int at = data_find(d, key);
     if (at >= 0 && d->e[at].len == len && !memcmp(d->pool + d->e[at].off, value, len))
         return false;
-    if (at < 0) {
-        if (d->n >= GUI_DATA_KEYS) {
-            fprintf(stderr, "gui: data table full, dropping key %s\n", key);
-            return false;
-        }
-        at = (int)d->n++;
-        snprintf(d->e[at].key, sizeof(d->e[at].key), "%s", key);
-        d->e[at].off = 0; d->e[at].len = 0; d->e[at].cap = 0;
-        d->pool[d->used] = 0;
-        d->e[at].off = d->used;
-        d->used += 1;
-    }
+    if (at < 0 && (at = data_add_key(d, key)) < 0) return false;
     if (len > d->e[at].cap) {
         if (d->used + len + 1 > GUI_DATA_BYTES) {
             d->e[at].len = 0;

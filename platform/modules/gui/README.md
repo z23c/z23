@@ -23,6 +23,14 @@ view. The node never links it (the Makefile filters this module out of
   `SetDIBitsToDevice` blits of dirty rectangles, UTF-16 clipboard, raw-input
   relative mouse, fullscreen. `window_win32_gl.c` creates a WGL context through
   `opengl32.dll` loaded at run time (a CPU-only program never loads it).
+  The file builds with and without `UNICODE` (every API is the W form; cursors are
+  `MAKEINTRESOURCEW`). A top-down DIB is blitted with `ySrc = gui_dib_src_y(...)`
+  because GDI counts source rows from the bottom; `windows_acceptance` reads the
+  window back after a partial present and compares every pixel.
+  While the OS runs its modal size/move loop (border drag), the app loop is
+  starved, so the backend ticks the hook set with `gui_window_set_live_hook`
+  on `WM_SIZE` and every 16 ms (`WM_TIMER`): the hook drains events and renders, so
+  the window never shows stale or garbage pixels and app timers keep firing.
 * **Headless** (`window_headless.c`): a memory framebuffer on a virtual clock,
   event injection and a line script (`size`, `scale`, `move`, `click`, `dclick`,
   `wheel`, `key`, `text`, `paste`, `wait`, `until-idle`, `shot`). Deterministic;

@@ -128,17 +128,25 @@ void gui_headless_set_size(struct gui_window *w, int32_t pw, int32_t ph,
     gui_ring_push(w, &e);
 }
 
+/* w->be is the backend's private state: only a headless window has a struct
+ * headless there. The wallet calls set_hold on whatever window it opened, and on a
+ * Win32 window this used to write its flag over the first byte of the HWND. */
+static bool is_headless(const struct gui_window *w)
+{
+    return w && w->be && w->kind == GUI_BACKEND_HEADLESS;
+}
+
 void gui_headless_set_hold(struct gui_window *w, bool hold)
 {
-    if (w && w->be) hl(w)->hold = hold;
+    if (is_headless(w)) hl(w)->hold = hold;
 }
 uint64_t gui_headless_presented_pixels(const struct gui_window *w)
 {
-    return w && w->be ? hl(w)->presented_px : 0;
+    return is_headless(w) ? hl(w)->presented_px : 0;
 }
 size_t gui_headless_present_count(const struct gui_window *w)
 {
-    return w && w->be ? hl(w)->presents : 0;
+    return is_headless(w) ? hl(w)->presents : 0;
 }
 
 /* ---- script ---------------------------------------------------------- */

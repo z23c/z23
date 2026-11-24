@@ -13,9 +13,19 @@
 #include <string.h>
 
 #include "base/safe_alloc.h"
+#include "gui/ui.h"
 #include "gui_internal.h"
 
 #define WM_GUI_WAKE (WM_APP + 1)
+#define LIVE_TIMER_ID 0x5a23u /* modal size/move loop tick */
+#define LIVE_TIMER_MS 16u
+
+/* The stock cursor ids spelled out so the file builds with and without UNICODE:
+ * the IDC_* macros are char * unless UNICODE is defined. */
+#define CURSOR_ARROW MAKEINTRESOURCEW(32512)
+#define CURSOR_IBEAM MAKEINTRESOURCEW(32513)
+#define CURSOR_WAIT MAKEINTRESOURCEW(32514)
+#define CURSOR_HAND MAKEINTRESOURCEW(32649)
 #define WHEEL_STEP 120.0f
 
 struct w32 {
@@ -31,6 +41,7 @@ struct w32 {
     uint8_t last_button, clicks;
     enum gui_mouse_mode mouse_mode;
     bool raw_registered, cursor_hidden;
+    bool modal; /* inside the OS size/move loop */
     enum gui_cursor cursor;
 };
 
@@ -68,21 +79,16 @@ static void make_dpi_aware(void)
     SetProcessDPIAware();
 }
 
-static int utf8_to_wide(const char *s, size_t len, wchar_t *out, int cap)
-{
-    if (len > 100000) return 0;
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, (int)len, out, cap - 1);
-    if (n < 0) n = 0;
-    out[n] = 0;
-    return n;
-}
-
+/* AltGr reports as Ctrl+Alt; on layouts that have it the right Alt arrives with
+ * a synthetic left Ctrl, and neither is a shortcut modifier then. */
 static uint32_t cur_mods(void)
 {
     uint32_t m = 0;
+    bool altgr = (GetKeyState(VK_RMENU) & 0x8000) && (GetKeyState(VK_LCONTROL) & 0x8000) &&
+                 !(GetKeyState(VK_RCONTROL) & 0x8000);
     if (GetKeyState(VK_SHIFT) & 0x8000) m |= GUI_MOD_SHIFT;
-    if (GetKeyState(VK_CONTROL) & 0x8000) m |= GUI_MOD_CTRL;
-    if (GetKeyState(VK_MENU) & 0x8000) m |= GUI_MOD_ALT;
+    if (!altgr && (GetKeyState(VK_CONTROL) & 0x8000)) m |= GUI_MOD_CTRL;
+    if (!altgr && (GetKeyState(VK_MENU) & 0x8000)) m |= GUI_MOD_ALT;
     if ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) m |= GUI_MOD_SUPER;
     return m;
 }
@@ -212,12 +218,7 @@ static void on_dpi(struct gui_window *w, WPARAM wp, LPARAM lp)
 
 static void blit(struct gui_window *w, HDC dc, struct gui_rect r)
 {
-    if (!w->fb) return;
-    if (r.x < 0) { r.w += r.x; r.x = 0; }
-    if (r.y < 0) { r.h += r.y; r.y = 0; }
-    if (r.x + r.w > w->fb_w) r.w = w->fb_w - r.x;
-    if (r.y + r.h > w->fb_h) r.h = w->fb_h - r.y;
-    if (r.w <= 0 || r.h <= 0) return;
+    if (!w->fb || !gui_rect_clip_frame(&r, w->fb_w, w->fb_h)) return;
     BITMAPINFO bmi;
     memset(&bmi, 0, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -226,27 +227,38 @@ static void blit(struct gui_window *w, HDC dc, struct gui_rect r)
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
-    SetDIBitsToDevice(dc, r.x, r.y, (DWORD)r.w, (DWORD)r.h, r.x, r.y, 0,
+    SetDIBitsToDevice(dc, r.x, r.y, (DWORD)r.w, (DWORD)r.h, r.x, gui_dib_src_y(w->fb_h, &r), 0,
                       (UINT)w->fb_h, w->fb, &bmi, DIB_RGB_COLORS);
 }
 
 static LPCWSTR cursor_id(enum gui_cursor c)
 {
     switch (c) {
-    case GUI_CURSOR_IBEAM: return IDC_IBEAM;
-    case GUI_CURSOR_HAND: return IDC_HAND;
-    case GUI_CURSOR_WAIT: return IDC_WAIT;
-    default: return IDC_ARROW;
+    case GUI_CURSOR_IBEAM: return CURSOR_IBEAM;
+    case GUI_CURSOR_HAND: return CURSOR_HAND;
+    case GUI_CURSOR_WAIT: return CURSOR_WAIT;
+    default: return CURSOR_ARROW;
     }
 }
 
+/* Paint what the framebuffer covers, then fill the rest of the dirty rectangle
+ * (newly exposed area while a drag-resize is ahead of the app) with the screen
+ * background instead of leaving whatever the window held. */
 static void on_paint(struct gui_window *w, HWND h)
 {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(h, &ps);
-    if (w->surface == GUI_SURFACE_CPU)
+    if (w->surface == GUI_SURFACE_CPU) {
         blit(w, dc, (struct gui_rect){ ps.rcPaint.left, ps.rcPaint.top,
             ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top });
+        if (w->fb) ExcludeClipRect(dc, 0, 0, w->fb_w, w->fb_h);
+        uint32_t bg = gui_theme(GS_SCREEN)->bg;
+        HBRUSH br = CreateSolidBrush(RGB((bg >> 16) & 0xFF, (bg >> 8) & 0xFF, bg & 0xFF));
+        if (br) {
+            FillRect(dc, &ps.rcPaint, br);
+            DeleteObject(br);
+        }
+    }
     EndPaint(h, &ps);
     struct gui_event e = { .type = GUI_EV_EXPOSE };
     gui_ring_push(w, &e);
@@ -265,6 +277,43 @@ static void on_minmax(struct gui_window *w, HWND h, LPARAM lp)
 
 static void push_simple(struct gui_window *w, struct gui_event e) { gui_ring_push(w, &e); }
 
+/* The OS runs its own loop while the user drags a border or the title bar:
+ * the app loop is starved, so a timer ticks the live hook (render, drain
+ * events, run the app timers) until WM_EXITSIZEMOVE. */
+static void modal_enter(struct gui_window *w, HWND h)
+{
+    st(w)->modal = true;
+    SetCoalescableTimer(h, LIVE_TIMER_ID, LIVE_TIMER_MS, NULL, TIMERV_NO_COALESCING);
+}
+
+static void modal_exit(struct gui_window *w, HWND h)
+{
+    KillTimer(h, LIVE_TIMER_ID);
+    st(w)->modal = false;
+    gui_live_tick(w); /* settle on the final size */
+}
+
+/* Size and move messages, including the OS modal loop. */
+static LRESULT size_msg(struct gui_window *w, HWND h, UINT m, WPARAM wp, bool *handled)
+{
+    *handled = true;
+    switch (m) {
+    case WM_SIZE:
+        on_size(w, wp);
+        if (st(w)->modal) gui_live_tick(w);
+        return 0;
+    case WM_ENTERSIZEMOVE: modal_enter(w, h); return 0;
+    case WM_EXITSIZEMOVE: modal_exit(w, h); return 0;
+    case WM_TIMER:
+        if (wp != LIVE_TIMER_ID) break;
+        if (st(w)->modal) gui_live_tick(w);
+        return 0;
+    default: break;
+    }
+    *handled = false;
+    return 0;
+}
+
 /* Window-state messages. *handled is false when the default procedure runs. */
 static LRESULT win_msg(struct gui_window *w, HWND h, UINT m, WPARAM wp, LPARAM lp, bool *handled)
 {
@@ -273,7 +322,6 @@ static LRESULT win_msg(struct gui_window *w, HWND h, UINT m, WPARAM wp, LPARAM l
     case WM_CLOSE: push_simple(w, (struct gui_event){ .type = GUI_EV_CLOSE }); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: on_paint(w, h); return 0;
-    case WM_SIZE: on_size(w, wp); return 0;
     case WM_DPICHANGED: on_dpi(w, wp, lp); return 0;
     case WM_GETMINMAXINFO: on_minmax(w, h, lp); return 0;
     case WM_SETFOCUS:
@@ -350,7 +398,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp)
     struct gui_window *w = (struct gui_window *)GetWindowLongPtrW(h, GWLP_USERDATA);
     if (!w || !w->be) return DefWindowProcW(h, m, wp, lp);
     bool handled = false;
-    LRESULT r = win_msg(w, h, m, wp, lp, &handled);
+    LRESULT r = size_msg(w, h, m, wp, &handled);
+    if (!handled) r = win_msg(w, h, m, wp, lp, &handled);
     if (!handled) r = key_msg(w, h, m, wp, lp, &handled);
     if (!handled) r = mouse_msg(w, h, m, wp, lp, &handled);
     return handled ? r : DefWindowProcW(h, m, wp, lp);
@@ -365,7 +414,7 @@ static bool register_class(const wchar_t *name, bool own_dc)
     wc.style = own_dc ? CS_OWNDC : 0;
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleW(NULL);
-    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hCursor = LoadCursorW(NULL, CURSOR_ARROW);
     wc.lpszClassName = name;
     return RegisterClassExW(&wc) != 0;
 }
@@ -401,7 +450,7 @@ static bool w32_open(struct gui_window *w, const struct gui_window_desc *d,
     adjust_rect_dpi_fn adj = GUI_FN_CAST(adjust_rect_dpi_fn, user32_proc("AdjustWindowRectExForDpi"));
     if (adj) adj(&r, style, FALSE, 0, s->dpi); else AdjustWindowRectEx(&r, style, FALSE, 0);
     wchar_t title[256];
-    utf8_to_wide(d->title_utf8 ? d->title_utf8 : "Z23", d->title_utf8 ? strlen(d->title_utf8) : 3, title, 256);
+    gui_win32_utf8_to_wide(d->title_utf8 ? d->title_utf8 : "Z23", d->title_utf8 ? strlen(d->title_utf8) : 3, title, 256);
     s->hwnd = CreateWindowExW(0, cls, title, style, CW_USEDEFAULT, CW_USEDEFAULT,
                               r.right - r.left, r.bottom - r.top, NULL, NULL,
                               GetModuleHandleW(NULL), w);
@@ -436,6 +485,10 @@ static void w32_close(struct gui_window *w)
     if (!s) return;
     if (s->cursor_hidden) ShowCursor(TRUE);
     if (s->mouse_mode == GUI_MOUSE_RELATIVE) ClipCursor(NULL);
+    if (s->raw_registered) {
+        RAWINPUTDEVICE rid = { 1, 2, RIDEV_REMOVE, NULL };
+        RegisterRawInputDevices(&rid, 1, sizeof(rid));
+    }
     if (s->gl) gui_win32_gl_destroy(w);
     if (s->hwnd) DestroyWindow(s->hwnd);
     free(s);
@@ -453,6 +506,7 @@ static void pump(void)
 
 static void w32_wait(struct gui_window *w, int32_t ms)
 {
+    if (st(w)->modal) return; /* the OS loop already pumps; never nest a pump inside it */
     pump();
     if (w->count || atomic_load(&w->wake_pending) || ms == 0) return;
     MsgWaitForMultipleObjectsEx(0, NULL, ms < 0 ? INFINITE : (DWORD)ms,
@@ -479,50 +533,18 @@ static bool w32_present(struct gui_window *w, const struct gui_rect *rects, size
 
 static bool w32_clip_set(struct gui_window *w, const char *utf8, size_t len)
 {
-    wchar_t *wide = zcl_malloc((len + 1) * sizeof(wchar_t), "gui_clip_wide");
-    if (!wide) return false;
-    int n = utf8_to_wide(utf8, len, wide, (int)len + 1);
-    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, ((size_t)n + 1) * sizeof(wchar_t));
-    bool ok = false;
-    if (g) {
-        void *p = GlobalLock(g);
-        if (p) {
-            memcpy(p, wide, ((size_t)n + 1) * sizeof(wchar_t));
-            GlobalUnlock(g);
-            if (OpenClipboard(st(w)->hwnd)) {
-                EmptyClipboard();
-                ok = SetClipboardData(CF_UNICODETEXT, g) != NULL;
-                CloseClipboard();
-            }
-        }
-        if (!ok) GlobalFree(g);
-    }
-    free(wide);
-    return ok;
+    return gui_win32_clip_set(st(w)->hwnd, utf8, len);
 }
 
 static size_t w32_clip_get(struct gui_window *w, char *buf, size_t cap)
 {
-    size_t out = 0;
-    buf[0] = 0;
-    if (!OpenClipboard(st(w)->hwnd)) return 0;
-    HANDLE h = GetClipboardData(CF_UNICODETEXT);
-    const wchar_t *p = h ? (const wchar_t *)GlobalLock(h) : NULL;
-    if (p) {
-        size_t wl = wcsnlen(p, GUI_CLIP_CAP);
-        int n = WideCharToMultiByte(CP_UTF8, 0, p, (int)wl, buf, (int)cap - 1, NULL, NULL);
-        out = n > 0 ? (size_t)n : 0;
-        buf[out] = 0;
-        GlobalUnlock(h);
-    }
-    CloseClipboard();
-    return out;
+    return gui_win32_clip_get(st(w)->hwnd, buf, cap);
 }
 
 static void w32_title(struct gui_window *w, const char *utf8)
 {
     wchar_t t[256];
-    utf8_to_wide(utf8, strlen(utf8), t, 256);
+    gui_win32_utf8_to_wide(utf8, strlen(utf8), t, 256);
     SetWindowTextW(st(w)->hwnd, t);
 }
 

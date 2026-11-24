@@ -6,7 +6,7 @@
 GUI_DIR := platform/modules/gui
 GUI_ALL_SRCS := $(sort $(wildcard $(GUI_DIR)/src/*.c))
 # The Win32 backend exists only where Win32 does; elsewhere only headless links.
-GUI_SRCS := $(if $(ZCL_HOST_WINDOWS),$(GUI_ALL_SRCS),$(filter-out $(GUI_DIR)/src/window_win32.c $(GUI_DIR)/src/window_win32_gl.c,$(GUI_ALL_SRCS)))
+GUI_SRCS := $(if $(ZCL_HOST_WINDOWS),$(GUI_ALL_SRCS),$(filter-out $(GUI_DIR)/src/window_win32.c $(GUI_DIR)/src/window_win32_gl.c $(GUI_DIR)/src/window_win32_clip.c,$(GUI_ALL_SRCS)))
 # Platform modules the gui and the wallet program need: allocation, cleansing,
 # JSON, the PNG encoder and SHA3. No node, core or engine source.
 GUI_DEP_SRCS := platform/modules/base/src/safe_alloc.c platform/modules/base/src/cleanse.c \

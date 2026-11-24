@@ -403,6 +403,34 @@ static void test_script_and_golden(void)
     gui_window_close(w);
 }
 
+/* The checked-in gallery session (tests/fixtures/gui/scripts/gallery.txt) parses and
+ * runs to completion on a headless window, ending in the named shot. */
+static void test_gallery_script(void)
+{
+    FILE *f = fopen("tests/fixtures/gui/scripts/gallery.txt", "rb");
+    static char text[4096];
+    size_t n = f ? fread(text, 1, sizeof(text) - 1, f) : 0;
+    if (f) fclose(f);
+    char err[96] = "";
+    struct gui_script *s = n ? gui_headless_script_load(text, n, err, sizeof(err)) : NULL;
+    CHECK("the gallery script fixture loads", s != NULL);
+    struct gui_window *w = open_headless(300, 200);
+    int steps = 0, shots = 0;
+    char name[32] = "";
+    for (enum gui_script_step st; s && (st = gui_headless_script_step(w, s, name, sizeof(name))) != GUI_SCRIPT_DONE;) {
+        steps++;
+        shots += st == GUI_SCRIPT_SHOT && !strcmp(name, "gallery_session");
+        struct gui_event ev;
+        while (gui_window_wait(w, 0, &ev)) {
+        }
+    }
+    int32_t pw = 0, ph = 0;
+    gui_window_size(w, &pw, &ph, NULL);
+    CHECK("the gallery script runs every step and ends in its shot", steps == 10 && shots == 1 && pw == 560 && ph == 480);
+    gui_headless_script_free(s);
+    gui_window_close(w);
+}
+
 static void test_theme(void)
 {
     bool ok = true;
@@ -545,6 +573,90 @@ static void test_draw_gallery(void)
     gui_window_close(w);
 }
 
+/* Present geometry. The Win32 blit passes gui_dib_src_y as ySrc of a top-down DIB;
+ * GDI counts source rows from the bottom, so a partial present of rows y..y+h-1
+ * must start at fb_h - y - h. The review probe showed rows 467..503 on screen
+ * where 22..58 were asked for when ySrc was y. */
+static void test_present_geometry(void)
+{
+    struct gui_rect full = { 0, 0, 320, 200 }, mid = { 20, 20, 60, 40 }, top = { 0, 0, 10, 10 },
+                    bot = { 0, 190, 10, 10 };
+    CHECK("a full-height rectangle starts at source row 0", gui_dib_src_y(200, &full) == 0);
+    CHECK("a middle rectangle starts at fb_h - y - h", gui_dib_src_y(200, &mid) == 140);
+    CHECK("the top rows are the last source rows", gui_dib_src_y(200, &top) == 190);
+    CHECK("the bottom rows are the first source rows", gui_dib_src_y(200, &bot) == 0);
+    bool mirrored_ok = true;
+    for (int32_t y = 0; y < 200; y += 7) { /* the last row asked for, counted from the bottom */
+        struct gui_rect r = { 0, y, 4, 200 - y };
+        mirrored_ok = mirrored_ok && gui_dib_src_y(200, &r) == 0 &&
+                      gui_dib_src_y(200, &(struct gui_rect){ 0, y, 4, 1 }) == 199 - y;
+    }
+    CHECK("source rows mirror the top-down rows over the whole frame", mirrored_ok);
+
+    struct gui_rect r = { -5, -5, 20, 20 };
+    CHECK("clipping trims a rectangle that starts outside",
+          gui_rect_clip_frame(&r, 100, 100) && r.x == 0 && r.y == 0 && r.w == 15 && r.h == 15);
+    r = (struct gui_rect){ 90, 90, 50, 50 };
+    CHECK("clipping trims a rectangle that ends outside",
+          gui_rect_clip_frame(&r, 100, 100) && r.x == 90 && r.w == 10 && r.h == 10);
+    r = (struct gui_rect){ 100, 0, 10, 10 };
+    CHECK("a rectangle fully outside is empty", !gui_rect_clip_frame(&r, 100, 100));
+    r = (struct gui_rect){ 5, 5, 0, 10 };
+    CHECK("an empty rectangle is refused", !gui_rect_clip_frame(&r, 100, 100));
+    r = (struct gui_rect){ 10, 10, INT32_MAX, INT32_MAX };
+    CHECK("a huge rectangle clips without overflow",
+          gui_rect_clip_frame(&r, 100, 80) && r.w == 90 && r.h == 70);
+    r = (struct gui_rect){ INT32_MIN, INT32_MIN, 10, 10 };
+    CHECK("a far negative rectangle is empty", !gui_rect_clip_frame(&r, 100, 100));
+    gui_window_set_live_hook(NULL, NULL, NULL);
+    CHECK("the live hook tolerates a NULL window", true);
+}
+
+/* Bound data pool: fill it to exactly GUI_DATA_BYTES, then add keys. The old
+ * new-key path wrote pool[used] with used == GUI_DATA_BYTES (one byte past the
+ * allocation) and left used above the bound. */
+static void test_data_pool_exact(void)
+{
+    struct gui_tree *t = gui_tree_new();
+    struct gui_ui *ui = gui_ui_new(t);
+    static char val[4097];
+    bool filled = true;
+    for (int i = 0; i < 8; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "fill.%d", i);
+        size_t len = i < 7 ? 4096 : 4080; /* 7 * (4096 + 2) + 1 + 4080 + 1 = 32768 */
+        memset(val, 'a' + i, len);
+        val[len] = 0;
+        filled = filled && gui_ui_set(ui, key, val);
+    }
+    CHECK("eight keys fill the pool to exactly GUI_DATA_BYTES", filled && ui->data.used == GUI_DATA_BYTES);
+    bool set_empty = gui_ui_set(ui, "extra.empty", "");
+    CHECK("a new key on a full pool never passes the bound", ui->data.used <= GUI_DATA_BYTES);
+    CHECK("the new key is stored after compaction", set_empty && !strcmp(gui_ui_get(ui, "extra.empty"), ""));
+    CHECK("another new key with a value fits", gui_ui_set(ui, "extra.v", "v") && !strcmp(gui_ui_get(ui, "extra.v"), "v") &&
+          ui->data.used <= GUI_DATA_BYTES);
+    bool intact = true;
+    for (int i = 0; i < 8; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "fill.%d", i);
+        const char *g = gui_ui_get(ui, key);
+        intact = intact && g[0] == 'a' + i && strlen(g) == (i < 7 ? 4096u : 4080u);
+    }
+    CHECK("the older values survive compaction", intact);
+    memset(val, 'z', 4096);
+    val[4096] = 0;
+    bool refused = true;
+    for (int i = 0; i < 4; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "more.%d", i);
+        (void)gui_ui_set(ui, key, val); /* some fit, then the pool is full: refused, not overrun */
+        refused = refused && ui->data.used <= GUI_DATA_BYTES;
+    }
+    CHECK("repeated large writes stay inside the pool", refused);
+    gui_ui_free(ui);
+    gui_tree_free(t);
+}
+
 int test_gui(void)
 {
     printf("\n=== gui ===\n");
@@ -557,7 +669,10 @@ int test_gui(void)
     test_focus_and_fields();
     test_table();
     test_window_common();
+    test_present_geometry();
+    test_data_pool_exact();
     test_script_and_golden();
+    test_gallery_script();
     test_theme();
     test_draw_gallery();
     render_gallery("gallery_idle", 1.0f, false, true);

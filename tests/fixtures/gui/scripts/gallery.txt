@@ -1,0 +1,12 @@
+# Widget gallery session for the headless script runner: size, hover, tab
+# traversal in both directions, a wheel notch over the table, then one frame.
+size 560 480
+scale 1
+until-idle
+move 40 40
+key tab
+key tab shift
+wheel 100 300 -1
+wait 20
+until-idle
+shot gallery_session

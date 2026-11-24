@@ -223,6 +223,38 @@ bool gui_window_wait(struct gui_window *w, int32_t timeout_ms,
     }
 }
 
+void gui_window_set_live_hook(struct gui_window *w, gui_live_fn fn, void *user)
+{
+    if (!w) return;
+    w->live_fn = fn;
+    w->live_user = user;
+}
+
+void gui_live_tick(struct gui_window *w)
+{
+    if (!w || !w->live_fn || w->in_live) return;
+    w->in_live = true;
+    w->live_fn(w->live_user);
+    w->in_live = false;
+}
+
+bool gui_rect_clip_frame(struct gui_rect *r, int32_t w, int32_t h)
+{
+    if (!r || w <= 0 || h <= 0 || r->w <= 0 || r->h <= 0) return false;
+    int64_t x0 = r->x < 0 ? 0 : r->x, y0 = r->y < 0 ? 0 : r->y;
+    int64_t x1 = (int64_t)r->x + r->w, y1 = (int64_t)r->y + r->h;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+    if (x1 <= x0 || y1 <= y0) return false;
+    *r = (struct gui_rect){ (int32_t)x0, (int32_t)y0, (int32_t)(x1 - x0), (int32_t)(y1 - y0) };
+    return true;
+}
+
+int32_t gui_dib_src_y(int32_t fb_h, const struct gui_rect *r)
+{
+    return fb_h - r->y - r->h;
+}
+
 void gui_window_wake(struct gui_window *w)
 {
     if (!w) return;

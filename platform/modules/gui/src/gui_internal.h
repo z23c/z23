@@ -74,7 +74,20 @@ struct gui_window {
     atomic_bool wake_pending;
     void *be;     /* backend state */
     void *be_gl;  /* GL state (win32) */
+    gui_live_fn live_fn; /* modal size/move loop hook */
+    void *live_user;
+    bool in_live;
 };
+
+/* Win32 text helpers shared by window_win32.c and window_win32_clip.c. */
+#if defined(_WIN32)
+int gui_win32_utf8_to_wide(const char *s, size_t len, wchar_t *out, int cap);
+bool gui_win32_clip_set(void *hwnd, const char *utf8, size_t len);
+size_t gui_win32_clip_get(void *hwnd, char *buf, size_t cap);
+#endif
+
+/* Run the live hook once (modal loops only); re-entry is ignored. */
+void gui_live_tick(struct gui_window *w);
 
 /* Backends call this from the thread that pumps events. */
 void gui_ring_push(struct gui_window *w, const struct gui_event *ev);
