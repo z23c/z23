@@ -1838,21 +1838,26 @@ static bool fb_compact_entries(struct json_value *out, const struct json_value *
     return ok;
 }
 
+static bool fb_compact_cursor(struct json_value *out, const struct json_value *full)
+{
+    const char *after = json_get_str(json_get(full, "after_slug"));
+    const char *blocked = json_get_str(json_get(full, "blocked_slug"));
+    return (!after || !after[0] || json_push_kv_str(out, "after_slug", after)) &&
+        (!blocked || !blocked[0] || json_push_kv_str(out, "blocked_slug", blocked));
+}
+
 /* Why the scan stopped: a live query can answer {"entries":[],"incomplete":true}
  * which must never read as "nothing found". */
 static bool fb_compact_flags(struct json_value *out, const struct json_value *full)
 {
-    const char *after = json_get_str(json_get(full, "after_slug"));
     const char *blocked = json_get_str(json_get(full, "blocked_slug"));
     const char *reason = json_get_str(json_get(full, "reason"));
-    bool stopped = json_get_bool(json_get(full, "incomplete")) ||
-                   (blocked && blocked[0]);
+    bool incomplete = json_get_bool(json_get(full, "incomplete"));
+    bool stopped = incomplete || (blocked && blocked[0]);
     return (!json_get_bool(json_get(full, "truncated")) ||
             json_push_kv_bool(out, "truncated", true)) &&
-        (!json_get_bool(json_get(full, "incomplete")) ||
-            json_push_kv_bool(out, "incomplete", true)) &&
-        (!after || !after[0] || json_push_kv_str(out, "after_slug", after)) &&
-        (!blocked || !blocked[0] || json_push_kv_str(out, "blocked_slug", blocked)) &&
+        (!incomplete || json_push_kv_bool(out, "incomplete", true)) &&
+        fb_compact_cursor(out, full) &&
         (!stopped || !reason || !reason[0] || json_push_kv_str(out, "reason", reason));
 }
 
