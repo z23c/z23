@@ -471,8 +471,11 @@ static const char *fmc_snapshot_source(const char *relative, bool directory)
 #else
     int result = lstat(path, &st);
 #endif
-    if (result != 0)
-        return errno == ENOENT ? "source_missing" : "source_unavailable";
+    if (result != 0) {
+        if (errno == ENOENT) return "source_missing";
+        if (errno == ENOTDIR) return "source_parent_not_directory";
+        return "source_unavailable";
+    }
     if (directory ? !S_ISDIR(st.st_mode) : !S_ISREG(st.st_mode))
         return "sibling_refused";
     return NULL;

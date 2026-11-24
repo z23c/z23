@@ -6420,6 +6420,32 @@ _test_next:;
     return failures;
 }
 
+static int fmx_t_snapshot_not_directory(void)
+{
+    int failures = 0;
+    TEST("steer: a non-directory source ancestor stays explicit and untouched") {
+        struct fmx_call brief;
+        char grant[64], path[1400];
+        unsigned char before[32], after[32];
+        fmx_isolate("snapshot_not_directory");
+        ASSERT(fmx_mint("brief", grant, sizeof(grant)));
+        fmx_state_file("", "land", "inert receiver fixture\n", false);
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/land", g_fmx_state);
+        ASSERT(chmod(path, 0444) == 0 && fmx_snapshot(before));
+        fmx_brief(&brief, grant, 0);
+        ASSERT(fmx_run(&brief, zcl_native_handle_fleet_steer_brief) && fmx_ok(&brief));
+        ASSERT_STR_EQ(fmx_missing_reason(&brief, "dev.land"),
+                      "source_parent_not_directory");
+        ASSERT(!json_get_bool(fmx_get(&brief, "tasks_sources_complete")));
+        fmx_end(&brief);
+        ASSERT(fmx_snapshot(after) && memcmp(before, after, 32) == 0);
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_snapshot_readonly(void)
 {
     int failures = 0;
@@ -7809,6 +7835,7 @@ int test_fleet_steer(void)
     failures += fmx_task_projection_checks();
 #if !defined(_WIN32)
     failures += fmx_t_ledger_age();
+    failures += fmx_t_snapshot_not_directory();
     failures += fmx_t_snapshot_readonly();
     failures += fmx_t_ledger_contention();
     failures += fmx_t_proof_transitions();
