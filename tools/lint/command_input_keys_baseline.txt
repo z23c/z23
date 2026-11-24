@@ -194,6 +194,7 @@ plugin.reproduce cases # pr_lab_input writes the fixed fetched cases.json path i
 plugin.reproduce manifest # pr_next_install constructs a private install input from the verified fetched manifest path; a caller manifest key never reaches plugin.reproduce.
 plugin.reproduce interface # lab.promote forces interface=2 into its private plugin.pack input; no reproduce request key reaches that nested input.
 plugin.reproduce cap # pr_lab_input derives the private capability array only from the verified signed manifest; a caller cap key never reaches lab.promote.
+dev.fleet.start after # fs_native_list sub-dispatches fixed fleet.board.list objects; after is never built by it and never read from the dev.fleet.start request.
 dev.fleet.start open # fs_native_list sub-dispatches fixed fleet.board.list objects; the open key is built privately and never read from the dev.fleet.start request.
 dev.fleet.start before_created_at # fs_native_list sub-dispatches fixed fleet.board.list objects; the keyset key is read only by that leaf and never comes from the dev.fleet.start request.
 dev.fleet.start before_id # fs_native_list sub-dispatches fixed fleet.board.list objects; the keyset key is read only by that leaf and never comes from the dev.fleet.start request.
