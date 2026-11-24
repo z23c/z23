@@ -4,6 +4,15 @@
 # Directory of this file, captured before any include changes MAKEFILE_LIST.
 Z23_MAKEFILE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
+ifneq ($(filter proof-compile-changed-locked,$(MAKECMDGOALS)),)
+ifneq ($(filter-out proof-compile-changed-locked,$(MAKECMDGOALS)),)
+$(error proof-compile-changed-locked cannot share a Make invocation with other goals)
+endif
+ifneq ($(strip $(foreach v,TEST_FAST_OBJ_ROOT TEST_FAST_CANDIDATE_ROOT TEST_FAST_OBJ_DIR TEST_PARALLEL_FAST_CANDIDATE TEST_FAST_SESSION TEST_FAST_LEASE,$(if $(filter-out undefined default file,$(origin $(v))),$(v)))),)
+$(error proof-compile-changed-locked does not accept test-fast path overrides)
+endif
+endif
+
 # The public fast-test goals recurse under the checkout lock with a fresh
 # epoch lease. A sibling dev/node build in this same Make can already hold an
 # unverified test-fast epoch, so the nested acquire must refuse that live lease.
@@ -3963,6 +3972,11 @@ TEST_SRCS_NO_MAIN = $(filter-out tests/harness/src/test.c tests/harness/src/test
 TEST_HUD_SHA_SRCS := $(if $(filter tests/harness/src/test_skycombat_macho_loader.c,$(TEST_SRCS_NO_MAIN)),,contexts/commons/packages/zsha256/src/zsha256.c)
 TEST_SRCS_NO_MAIN += $(TEST_HUD_SHA_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
+TEST_FAST_CANDIDATE_ROOT = $(BIN_DIR)/test-fast
+ifneq ($(filter proof-compile-changed-locked,$(MAKECMDGOALS)),)
+override TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/.proof-compile-changed/test-obj
+override TEST_FAST_CANDIDATE_ROOT = $(BUILD_DIR)/.proof-compile-changed/test-fast
+endif
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
 TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) tests/harness/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
 # Windows test-lane compat shims (tests/harness/include/test/windows_compat.h):
@@ -4006,7 +4020,7 @@ endif
 TEST_FAST_OBJ_DIR = $(TEST_FAST_OBJ_ROOT)/epochs/$(TEST_FAST_COMPILE_EPOCH)
 TEST_PARALLEL_FAST_OBJS = $(patsubst %.c,$(TEST_FAST_OBJ_DIR)/%.o,$(TEST_PARALLEL_FAST_SRCS))
 TEST_PARALLEL_FAST_LINK_RSP = $(TEST_FAST_OBJ_DIR)/link-inputs.rsp
-TEST_PARALLEL_FAST_CANDIDATE = $(BIN_DIR)/test-fast/epochs/$(TEST_FAST_COMPILE_EPOCH)/test_parallel_fast
+TEST_PARALLEL_FAST_CANDIDATE = $(TEST_FAST_CANDIDATE_ROOT)/epochs/$(TEST_FAST_COMPILE_EPOCH)/test_parallel_fast
 TEST_PARALLEL_FAST_ACTIVE = $(TEST_PARALLEL_FAST_CANDIDATE)
 
 ifneq ($(filter test-fast,$(ZCL_DEPFILE_PROFILES)),)
@@ -4084,7 +4098,7 @@ TEST_REL_LEASE = $(TEST_REL_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 
 $(TEST_FAST_LEASE): $(BUILD_EPOCH_LEASE_FORCE) $(BUILD_EPOCH_LOCK_WAIT_BIN)
 	@$(BUILD_EPOCH_SESSION_TOOL) $(BUILD_EPOCH_ACQUIRE_MODE) "$(TEST_FAST_SESSION)" "$@" \
-	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
+	  "$(TEST_FAST_OBJ_ROOT)" "$(TEST_FAST_CANDIDATE_ROOT)" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(BUILD_COMPILER_ID)" "$(TEST_FAST_COMPILE_EPOCH)" "$(TEST_FAST_PROFILE)" \
 	  "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" "$(TEST_FAST_EPOCH_LINK_FLAGS)" \
@@ -4646,7 +4660,7 @@ ifeq ($(ZCL_TARGET),android-arm64)
 # This exact recovery group has no external tool needs. Keep the complete
 # runner link inputs and epoch verification; omit only whole-suite tools.
 ANDROID_SNAPSHOT_RECOVERY_BIN = $(BIN_DIR)/android_snapshot_recovery
-ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(BIN_DIR)/test-fast/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery
+ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(TEST_FAST_CANDIDATE_ROOT)/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery
 .PHONY: android-snapshot-recovery-build
 android-snapshot-recovery-build: $(ANDROID_SNAPSHOT_RECOVERY_BIN)
 $(ANDROID_SNAPSHOT_RECOVERY_BIN): $(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE) FORCE
@@ -4662,7 +4676,7 @@ $(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STA
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	$(CC) $(TEST_FAST_CFLAGS) $(TEST_FAST_LDFLAGS) -o "$$tmp" "@$(TEST_PARALLEL_FAST_LINK_RSP)" $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS); \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(TEST_FAST_SESSION)" "$(TEST_FAST_LEASE)" \
-	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
+	  "$(TEST_FAST_OBJ_ROOT)" "$(TEST_FAST_CANDIDATE_ROOT)" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(TEST_FAST_PROFILE)" "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" \
 	  "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
@@ -4687,7 +4701,7 @@ $(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(T
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	$(CC) $(TEST_FAST_CFLAGS) $(TEST_FAST_LDFLAGS) -o "$$tmp" "@$(TEST_PARALLEL_FAST_LINK_RSP)" $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS); \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(TEST_FAST_SESSION)" "$(TEST_FAST_LEASE)" \
-	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
+	  "$(TEST_FAST_OBJ_ROOT)" "$(TEST_FAST_CANDIDATE_ROOT)" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(TEST_FAST_PROFILE)" "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" \
 	  "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
@@ -6846,7 +6860,7 @@ $(DEV_RESTART_PLAN): $(DEV_OBJ_COMPLETE) $(DEV_LINK_RSP) \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
 	$(zcl_dev_plan_fields) >"$$tmp"; \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(TEST_FAST_SESSION)" "$(TEST_FAST_LEASE)" \
-	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
+	  "$(TEST_FAST_OBJ_ROOT)" "$(TEST_FAST_CANDIDATE_ROOT)" "$(BUILD_EPOCH_KEEP)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
 	  "$(TEST_FAST_COMPILE_EPOCH)" "$(TEST_FAST_PROFILE)" "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" \
 	  "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
@@ -18342,8 +18356,8 @@ pr-check: $(BIN_DIR)/make-help $(BIN_DIR)/z23-timings
 # the same epoch dev-proof-bundle and agent-verify build), so a diagnostic such
 # as -Werror=unused-result or -Werror=misleading-indentation in a changed test
 # or production TU fails before a land queue slot is spent. It compiles only
-# the changed TUs (a warm lane: seconds); objects are shared with the bundle
-# epoch, so the proof reuses them. `dev land submit` runs it as a precheck gate.
+# the changed TUs in a private epoch; the existing compiler cache may reuse
+# compiled results, while the proof owns its separate bundle epoch. `dev land submit` runs it as a precheck gate.
 #   make proof-compile-changed                       (base: merge-base origin/main HEAD)
 #   make proof-compile-changed PROOF_COMPILE_BASE=<commit>
 .PHONY: proof-compile-changed proof-compile-changed-locked
