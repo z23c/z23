@@ -1815,6 +1815,8 @@ static int t_lint_fast_tor_graph(void)
         "printf '%s\\n' '$(info ROOTS=$(TEST_FAST_OBJ_ROOT)|$(TEST_FAST_CANDIDATE_ROOT)|$(TEST_FAST_SESSION)|$(TEST_FAST_LEASE)|$(TEST_PARALLEL_FAST_CANDIDATE))' >> overlay.mk\n"
         "fixture_make -n fixture-print-gates > roots-normal 2>&1 || exit 1\n"
         "grep -F 'ROOTS=build/test-obj|build/bin/test-fast|build/test-obj/epochs/' roots-normal >/dev/null || { echo 'normal roots changed' >&2; exit 1; }\n"
+        "fixture_make -n fixture-print-gates TEST_FAST_CANDIDATE_ROOT=escape > roots-override 2>&1 || exit 1\n"
+        "grep -F 'ROOTS=build/test-obj|build/bin/test-fast|build/test-obj/epochs/' roots-override >/dev/null || { echo 'normal candidate root overridden' >&2; exit 1; }\n"
         "fixture_make -n proof-compile-changed-locked ZCL_CHECKOUT_LOCK_HELD=1 CHANGED_TU= > roots-private 2>&1 || exit 1\n"
         "grep -F 'ROOTS=build/.proof-compile-changed/test-obj|build/.proof-compile-changed/test-fast|build/.proof-compile-changed/test-obj/epochs/' roots-private >/dev/null || { echo 'private roots missing' >&2; exit 1; }\n"
         "grep -E 'ROOTS=.*\\.build-session\\|build/\\.proof-compile-changed/test-obj/epochs/.*/\\.leases/.*\\|build/\\.proof-compile-changed/test-fast/epochs/.*/test_parallel_fast' roots-private >/dev/null || { echo 'private session or candidate mismatch' >&2; exit 1; }\n"

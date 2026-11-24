@@ -3972,7 +3972,7 @@ TEST_SRCS_NO_MAIN = $(filter-out tests/harness/src/test.c tests/harness/src/test
 TEST_HUD_SHA_SRCS := $(if $(filter tests/harness/src/test_skycombat_macho_loader.c,$(TEST_SRCS_NO_MAIN)),,contexts/commons/packages/zsha256/src/zsha256.c)
 TEST_SRCS_NO_MAIN += $(TEST_HUD_SHA_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
-TEST_FAST_CANDIDATE_ROOT = $(BIN_DIR)/test-fast
+override TEST_FAST_CANDIDATE_ROOT = $(BIN_DIR)/test-fast
 ifneq ($(filter proof-compile-changed-locked,$(MAKECMDGOALS)),)
 override TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/.proof-compile-changed/test-obj
 override TEST_FAST_CANDIDATE_ROOT = $(BUILD_DIR)/.proof-compile-changed/test-fast
@@ -4660,7 +4660,7 @@ ifeq ($(ZCL_TARGET),android-arm64)
 # This exact recovery group has no external tool needs. Keep the complete
 # runner link inputs and epoch verification; omit only whole-suite tools.
 ANDROID_SNAPSHOT_RECOVERY_BIN = $(BIN_DIR)/android_snapshot_recovery
-ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(TEST_FAST_CANDIDATE_ROOT)/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery
+ANDROID_SNAPSHOT_RECOVERY_CANDIDATE = $(BIN_DIR)/test-fast/epochs/$(TEST_FAST_COMPILE_EPOCH)/android_snapshot_recovery
 .PHONY: android-snapshot-recovery-build
 android-snapshot-recovery-build: $(ANDROID_SNAPSHOT_RECOVERY_BIN)
 $(ANDROID_SNAPSHOT_RECOVERY_BIN): $(ANDROID_SNAPSHOT_RECOVERY_CANDIDATE) FORCE
