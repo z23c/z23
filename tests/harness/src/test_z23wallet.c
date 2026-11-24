@@ -888,7 +888,7 @@ static void test_http_deadline_headless(void)
      * so a full accept queue fails the connect at once instead of hanging to the cap: the
      * bound that matters, never later than the cap, is still asserted. */
     CHECK("[30] under the virtual clock a dead port ends no later than the real connect cap",
-          c != ZW_OK && connect_ms < 1500);
+          (c == ZW_ERR_REFUSED || c == ZW_ERR_TIMEOUT) && connect_ms < 1500);
 #else
     CHECK("[30] under the virtual clock a dead port still ends at the real connect cap",
           c == ZW_ERR_TIMEOUT && connect_ms >= 400 && connect_ms < 1500);
@@ -978,6 +978,9 @@ static void test_hostile_numbers(void)
     memset(&res, 0, sizeof(res));
     e = zw_query_run(n.rpc, ZW_Q_NET, &res);
     CHECK("1e300 connection counts fall back too", e == ZW_OK && res.net.connections == 0 && res.net.version == 0);
+    memset(&res, 0, sizeof(res));
+    e = zw_query_run(n.rpc, ZW_Q_INFO, &res);
+    CHECK("a 1e300 network hash rate is not a number: no llround of it", e == ZW_OK && !res.info.has_solps && res.info.solps == 0);
     node_stop(&n);
     char buf[40];
     zw_fmt_int(INT64_MIN, buf, sizeof(buf));

@@ -98,7 +98,8 @@ static int32_t remaining_ms(uint64_t deadline_ns)
 }
 
 /* Wait until s is readable (writable when for_write) or until stop_ns, in
- * WAIT_SLICE_MS slices that look at the cancel flag. ZW_OK means ready. */
+ * WAIT_SLICE_MS slices that look at the cancel flag. ZW_OK means ready. for_write is the
+ * pending connect only (it also watches the failure set); never for send space. */
 static enum zw_err wait_ready(platform_socket_t s, struct zw_cancel *c, uint64_t stop_ns, bool for_write)
 {
     for (;;) {
@@ -106,7 +107,7 @@ static enum zw_err wait_ready(platform_socket_t s, struct zw_cancel *c, uint64_t
         int32_t left = remaining_ms(stop_ns);
         if (left <= 0) return ZW_ERR_TIMEOUT;
         int slice = left < WAIT_SLICE_MS ? left : WAIT_SLICE_MS;
-        int r = for_write ? platform_socket_wait_writable(s, slice) : platform_socket_wait_readable(s, slice);
+        int r = for_write ? platform_socket_wait_connected(s, slice) : platform_socket_wait_readable(s, slice);
         if (r != 0) return r > 0 ? ZW_OK : ZW_ERR_IO;
     }
 }

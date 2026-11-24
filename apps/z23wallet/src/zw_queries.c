@@ -257,8 +257,9 @@ static enum zw_err info_query(struct zw_rpc *r, struct zw_result *out)
     json_init(&v);
     struct zw_rpc_error se;
     if (e == ZW_OK && zw_rpc_call(r, "getnetworksolps", "[]", &v, &se) == ZW_OK) {
-        out->info.solps = v.type == JSON_INT ? v.val.i : v.type == JSON_REAL ? (int64_t)llround(v.val.d) : 0;
-        out->info.has_solps = v.type == JSON_INT || v.type == JSON_REAL;
+        bool real_ok = v.type == JSON_REAL && v.val.d > -9e15 && v.val.d < 9e15; /* untrusted: NaN and huge reals are no number */
+        out->info.solps = v.type == JSON_INT ? v.val.i : real_ok ? (int64_t)llround(v.val.d) : 0;
+        out->info.has_solps = v.type == JSON_INT || real_ok;
     }
     json_free(&v);
     return e;

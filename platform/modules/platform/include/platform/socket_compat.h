@@ -478,7 +478,36 @@ static inline int platform_socket_wait_writable(platform_socket_t sock,
 #if defined(_WIN32)
     if (timeout_ms < 0) return SOCKET_ERROR;
     fd_set writable;
-    fd_set failed; /* Winsock reports a refused non-blocking connect in the exception set */
+    FD_ZERO(&writable);
+    FD_SET(sock, &writable);
+    struct timeval timeout = {
+        .tv_sec = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    return select(0, NULL, &writable, NULL, &timeout);
+#else
+    if (sock < 0 || timeout_ms < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct pollfd descriptor = {.fd = sock, .events = POLLOUT};
+    return poll(&descriptor, 1, timeout_ms);
+#endif
+}
+
+/* Waits for a non-blocking connect to finish, one way or the other. Winsock reports a
+ * refused connect in the exception set, so Windows selects on it too; on POSIX a failed
+ * connect already makes the socket writable. Only for a socket whose connect is pending:
+ * on a connected socket the exception set also flags out-of-band data, which is why
+ * platform_socket_wait_writable does not watch it. Then read SO_ERROR with
+ * platform_socket_pending_error. */
+static inline int platform_socket_wait_connected(platform_socket_t sock,
+                                                  int timeout_ms)
+{
+#if defined(_WIN32)
+    if (timeout_ms < 0) return SOCKET_ERROR;
+    fd_set writable;
+    fd_set failed;
     FD_ZERO(&writable);
     FD_SET(sock, &writable);
     FD_ZERO(&failed);
@@ -489,12 +518,7 @@ static inline int platform_socket_wait_writable(platform_socket_t sock,
     };
     return select(0, NULL, &writable, &failed, &timeout);
 #else
-    if (sock < 0 || timeout_ms < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    struct pollfd descriptor = {.fd = sock, .events = POLLOUT};
-    return poll(&descriptor, 1, timeout_ms);
+    return platform_socket_wait_writable(sock, timeout_ms);
 #endif
 }
 
