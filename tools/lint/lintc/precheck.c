@@ -8,14 +8,15 @@
  * `NEW <gate> rc=<n>`.
  *
  *   z23-lint precheck [--base=DIR] [--jobs=N] [--gates=a,b] [--skip=a,b] [--skip-if-no-base]
- *                     [--json]
+ *                     [--skip-heavy] [--json]
  *
  * A gate that passes in DIR and fails here, but whose output contains
  * "cannot execute a child", "missing executable" or "is not built" needs a
  * build this tree lacks: it is UNBUILT (line `UNBUILT <gate>`), not NEW, and
  * does not fail the run. --skip=a,b leaves those gates out (neither tree runs
  * them; they are not counted in the summary); a name outside the gate table is
- * a usage error. --json replaces the text with one object per gate
+ * a usage error. --skip-heavy also skips gates marked heavy in gates.def;
+ * it combines with --skip. --json replaces the text with one object per gate
  *   {"gate","lane_rc","base_rc","verdict","first_line"}
  * (verdict NEW|PREEXISTING|FIXED|UNBUILT|SKIPPED|PASS; an rc of -1 means the
  * gate did not run) and a final {"summary":{"gates","new","unbuilt",
@@ -64,6 +65,7 @@ struct pc_opts {
     bool soft;                    /* --skip-if-no-base */
     bool have_list;
     bool have_skip;
+    bool skip_heavy;
     char list[PC_LIST];
     char skip_list[PC_LIST];
     const char *changed;          /* --changed-files, current tree only */
@@ -100,7 +102,7 @@ static const char *const k_pc_unbuilt[] = {
 
 static const char k_pc_usage[] =
     "z23-lint: usage: z23-lint precheck [--base=DIR] [--jobs=N] "
-    "[--gates=a,b] [--skip=a,b] [--skip-if-no-base] [--json] "
+    "[--gates=a,b] [--skip=a,b] [--skip-heavy] [--skip-if-no-base] [--json] "
     "[--changed-files=PATH]\n";
 
 static bool pc_parse_jobs(const char *s, int *out)
@@ -137,6 +139,10 @@ static int pc_parse_arg(struct pc_opts *o, const char *arg)
     }
     if (strncmp(arg, "--skip=", 7) == 0 && pc_parse_list(o->skip_list, arg + 7)) {
         o->have_skip = true;
+        return 0;
+    }
+    if (strcmp(arg, "--skip-heavy") == 0) {
+        o->skip_heavy = true;
         return 0;
     }
     if (strcmp(arg, "--skip-if-no-base") == 0) {
@@ -203,6 +209,11 @@ static int pc_mark_skips(struct pc_opts *o, const struct lint_gate *tab,
                          size_t n)
 {
     char *save = NULL;
+    if (o->skip_heavy) {
+        for (size_t k = 0; k < o->n_sel; k++)
+            if (tab[o->sel[k]].precheck_class == LINT_PRECHECK_HEAVY)
+                o->skipped[k] = true;
+    }
     if (!o->have_skip)
         return 0;
     for (char *tok = strtok_r(o->skip_list, ",", &save); tok;

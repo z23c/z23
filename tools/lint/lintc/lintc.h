@@ -17,7 +17,9 @@ struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
     int (*selftest)(void);
+    int precheck_class;
 };
+enum { LINT_PRECHECK_HEAVY = 1 };
 
 enum { RS_MAX = 256, RS_NAME = 64, RS_PATH = 192, RS_AUTH = 32, RS_SHAPE = 16,
        CLK_MATCH = 65536 };
@@ -302,7 +304,7 @@ int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
 
 /* Gate prototypes int NAME_run(int, char **) / int NAME_selftest(void),
  * generated from gates.def. */
-#define LINT_GATE(name, base, cmd)                                             \
+#define LINT_GATE(name, base, cmd, ...)                                        \
     int base##_run(int argc, char **argv);                                     \
     int base##_selftest(void);
 #include "gates.def"

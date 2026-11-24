@@ -1767,7 +1767,7 @@ static int t_lint_fast_tor_graph(void)
         "if git -C \"$2\" merge-base HEAD refs/remotes/origin/main >/dev/null 2>&1; then grep -q '^--changed-files=' \"$HOME/args\"; else ! grep -q '^--changed-files=' \"$HOME/args\"; fi\n"
         "tail -n +6 \"$HOME/args\" | grep -v '^--changed-files=' > actual; cmp expected actual\n"
         "grep -qx check-vendor-provenance actual\n"
-        "grep '^--skip=' \"$HOME/precheck-args\" | tr ',' '\\n' | grep -qx check-windows-acceptance || { echo 'windows acceptance missing from precheck skip' >&2; exit 1; }\n"
+        "grep -qx -- --skip-heavy \"$HOME/precheck-args\" || { echo 'heavy precheck option missing' >&2; exit 1; }\n"
         "fixture_make -n -p ZCL_LINT_SERIAL=1 lint-fast > serial.db 2>&1 || :\n"
         "grep -E '^lint-fast: .*stub-lint' serial.db >/dev/null\n"
         "grep -E '^check-vendor-provenance: .*tor-provenance-ready' serial.db >/dev/null\n"

@@ -1128,9 +1128,13 @@ registry roots, including dependency pins. Both remain full-lint gates.
 
 `lint-fast` also runs `z23-lint precheck` (every gate outside its fixed subset,
 reporting only `NEW <gate>` failures against the merge-base worktree, cached
-under `$ZCL_PRECHECK_CACHE`). The whole-tree compile and sweep gates named in
-`LINT_FAST_PRECHECK_HEAVY` in the Makefile stay in full `make lint` and
-`lint-preflight`; `ZCL_LINT_FAST_PRECHECK=0` skips the precheck leg. When the merge-base tree is unavailable (no `origin/main`, shallow clone, cache failure) it prints `lint-fast: precheck skipped: <why>` and passes; the base tree is cached per clone.
+under `$ZCL_PRECHECK_CACHE`). The whole-tree compile and sweep gates marked
+`LINT_PRECHECK_HEAVY` in `tools/lint/lintc/gates.def` are skipped by the
+fast loop's `precheck --skip-heavy`; full lint and explicit qualification
+targets retain them. `lint-preflight` runs its own selected list.
+`ZCL_LINT_FAST_PRECHECK=0` skips the precheck leg. When the merge-base tree is unavailable (no `origin/main`, shallow clone, cache failure) it prints `lint-fast: precheck skipped: <why>` and passes; the base tree is cached per clone.
+
+<!-- claim: symbol-present LINT_PRECHECK_HEAVY tools/lint/lintc/gates.def # native heavy precheck classification -->
 
 ### Module mode — run a test group without relinking
 

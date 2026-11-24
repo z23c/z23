@@ -294,6 +294,23 @@ static bool tg_name_byte(char c);
 /* Resolve a gate through its registered handler and the source index.  The
  * command name is never converted into a guessed filename. Duplicate or
  * unreadable registry rows leave the gate's native source unknown. */
+static bool tg_registry_binding(const char *row, char name[128], char base[128])
+{
+    char mode[32], class_name[32];
+    int used = 0;
+    if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_]) %n",
+               name, base, mode, &used) != 3 || used == 0 || row[used]) {
+        used = 0;
+        if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_], %31[A-Z_]) %n",
+                   name, base, mode, class_name, &used) != 4 || used == 0 ||
+            row[used] || strcmp(class_name, "LINT_PRECHECK_HEAVY") != 0)
+            return false;
+    }
+    if (strcmp(mode, "LINT_CMD_NONE") && strcmp(mode, "LINT_CMD_PLAIN") &&
+        strcmp(mode, "LINT_CMD_PAIR")) return false;
+    return true;
+}
+
 static bool tg_registry_row(const char *row, bool *comment,
                             char name[128], char base[128], bool *is_row)
 {
@@ -308,11 +325,7 @@ static bool tg_registry_row(const char *row, bool *comment,
         return !*row;
     }
     if (!*row || strncmp(row, "//", 2) == 0) return true;
-    char mode[32];
-    int used = 0;
-    if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_]) %n",
-               name, base, mode, &used) != 3 || used == 0 || row[used])
-        return false;
+    if (!tg_registry_binding(row, name, base)) return false;
     *is_row = true;
     return true;
 }

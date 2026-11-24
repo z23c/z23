@@ -12,7 +12,7 @@
 #include <string.h>
 #include "lintc.h"
 
-#define LINT_GATE(name, base, cmd) { name, cmd },
+#define LINT_GATE(name, base, cmd, ...) { name, cmd },
 static const struct {
     const char *name;
     int cmd;

@@ -7524,28 +7524,18 @@ LINT_FAST_GATES := \
 # failure never blocks the edit loop. This is what keeps the cheap gates that
 # are outside LINT_FAST_GATES (service-result-convergence, live-datadir-
 # isolation, blocker-remedy, consensus-parity, blocker-handoff-declared ...)
-# from first failing in the 5-10 minute full lint. LINT_FAST_PRECHECK_HEAVY
-# are the whole-tree compile/link/sweep gates (about 40 s to 3 min each on a
-# loaded host); they stay in `make lint` and `make lint-preflight` only.
+# from first failing in the 5-10 minute full lint. The heavy precheck class
+# in gates.def is deferred to full lint and explicit qualification targets.
 # Opt out with ZCL_LINT_FAST_PRECHECK=0.
-LINT_FAST_PRECHECK_HEAVY := \
-    check-standalone-tools-link check-vcs-no-sha1 check-codeindex-coverage \
-    check-windows-cross-syntax check-windows-acceptance check-z23-release-install \
-    check-shell-host-assumptions check-zcode-package-registry \
-    check-no-wallclock-assertion check-zcc-cache check-command-input-keys \
-    check-clang-portability check-object-reproducible \
-    check-outparam-init-before-return check-retrieval-historical-evidence \
-    check-host-gc-selftest check-ship-remote-transaction \
-    check-promotion-receipt-chain check-riscv64-universal check-reproducible-build
 lint_fast_empty :=
 lint_fast_comma := ,
 lint_fast_space := $(lint_fast_empty) $(lint_fast_empty)
 LINT_FAST_PRECHECK_NATIVE = $(shell sed -n -e '/^LINT_GATE./{s/^LINT_GATE..//;s/".*//;p;}' tools/lint/lintc/gates.def)
-LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip $(filter $(LINT_FAST_PRECHECK_NATIVE),$(LINT_FAST_GATES) $(LINT_FAST_PRECHECK_HEAVY))))
+LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip $(filter $(LINT_FAST_PRECHECK_NATIVE),$(LINT_FAST_GATES))))
 ZCL_LINT_FAST_PRECHECK ?= 1
 define LINT_FAST_PRECHECK_RUN
 if [ "$(ZCL_LINT_FAST_PRECHECK)" = 1 ]; then \
-	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip-if-no-base --skip=$(LINT_FAST_PRECHECK_SKIP) $$changed_arg || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
+	  $(LINTC_TOOL) precheck --jobs=$(ZCL_LINT_JOBS) --skip-if-no-base --skip-heavy --skip=$(LINT_FAST_PRECHECK_SKIP) $$changed_arg || { echo "lint-fast: precheck found gates outside the fast subset that newly fail"; false; }; \
 	fi
 endef
 
@@ -7691,7 +7681,7 @@ endif
 # gates in their original order.
 LINT_FAST_PREFLIGHT_GATES = $(LINT_FAST_GATES) $(filter-out $(LINT_FAST_GATES),$(LINT_PREFLIGHT_GATES))
 .PHONY: lint-fast-preflight
-lint-fast-preflight: LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip $(filter $(LINT_FAST_PRECHECK_NATIVE),$(LINT_FAST_PREFLIGHT_GATES) $(LINT_FAST_PRECHECK_HEAVY))))
+lint-fast-preflight: LINT_FAST_PRECHECK_SKIP = $(subst $(lint_fast_space),$(lint_fast_comma),$(strip $(filter $(LINT_FAST_PRECHECK_NATIVE),$(LINT_FAST_PREFLIGHT_GATES))))
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast-preflight: $(LINT_FAST_PREFLIGHT_GATES) $(LINTC_TOOL) $(REPRO_NETWORK_POLICY_SELFTEST_BIN) $(BUILD_EPOCH_INTEGRITY_LINT_BIN) $(CHECKOUT_LOCK_SELFTEST_LINT_BIN)
 	@$(LINT_FAST_PRECHECK_RUN)

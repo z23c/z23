@@ -272,7 +272,7 @@ static bool write_fixture_tree(void)
            terr_write(TERR_FIX, "tests/harness/src/test_fixgroup.c", TEST_ENTRY_C) &&
            terr_write(TERR_FIX, "tools/lint/lintc/gate_commands.def", GATE_COMMANDS_DEF) &&
            terr_write(TERR_FIX, "tools/lint/lintc/gates.def",
-                      "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n"
+                      "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, LINT_PRECHECK_HEAVY)\n"
                       "LINT_GATE(\"check-no-handler\", absent_handler, LINT_CMD_NONE)\n") &&
            terr_write(TERR_FIX, "tools/lint/lintc/native_fixture.c",
                       "/* platform/modules/base/src/ tools/lint/base_shape_baseline.txt */\n"
@@ -671,6 +671,22 @@ int test_territory(void)
         ASSERT_EQ(nb->refuses[0].baseline_rows, 1);
         territory_brief_free(nb);
         territory_gates_free(native);
+        const char *bad_rows[] = {
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, UNKNOWN)\n",
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, LINT_PRECHECK_HEAVY) trailing\n",
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, LINT_PRECHECK_HEAVY, EXTRA)\n"
+        };
+        for (size_t i = 0; i < sizeof(bad_rows) / sizeof(bad_rows[0]); i++) {
+            ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gates.def", bad_rows[i]));
+            native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
+            ASSERT(native != NULL);
+            nb = territory_brief_build(ci, TERR_FIX, "platform/modules/base", rs,
+                                       &frouter, native, NULL);
+            ASSERT(nb != NULL);
+            ASSERT_EQ(nb->gates_binding, 0);
+            territory_brief_free(nb);
+            territory_gates_free(native);
+        }
         ASSERT(terr_oversized_registry());
         native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
         ASSERT(native != NULL);

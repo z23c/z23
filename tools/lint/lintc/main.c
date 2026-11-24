@@ -16,7 +16,7 @@
 #include "premise.h"
 #include "gate_lib_module_order_graph.h"
 
-#define LINT_GATE(name, base, cmd) { name, base##_run, base##_selftest },
+#define LINT_GATE(name, base, cmd, ...) { name, base##_run, base##_selftest, 0 __VA_OPT__(+ __VA_ARGS__) },
 static const struct lint_gate k_gates[] = {
 #include "gates.def"
 };

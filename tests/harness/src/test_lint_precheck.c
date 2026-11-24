@@ -12,6 +12,7 @@
 #include "lint/lintc/lintc.h"
 #include "lint/lintc/lintc_commands.h"
 #include "lint/lintc/precheck_base.h"
+#include "util/spawn.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -124,14 +125,14 @@ static int lsel_pc_long_run(int argc, char **argv)
 }
 
 static const struct lint_gate k_lsel_pc_gates[] = {
-    { "check-no-python", lsel_pc_no_python_run, NULL },
-    { "check-clean", lsel_pc_clean_run, NULL },
-    { "check-argv-no-python", lsel_pc_argv_run, NULL },
-    { "check-root-marker", lsel_pc_root_marker_run, NULL },
-    { "check-count", lsel_pc_count_run, NULL },
-    { "check-noisy", lsel_pc_noisy_run, NULL },
-    { "check-unbuilt", lsel_pc_unbuilt_run, NULL },
-    { "check-long", lsel_pc_long_run, NULL },
+    { "check-no-python", lsel_pc_no_python_run, NULL, LINT_PRECHECK_HEAVY },
+    { "check-clean", lsel_pc_clean_run, NULL, 0 },
+    { "check-argv-no-python", lsel_pc_argv_run, NULL, 0 },
+    { "check-root-marker", lsel_pc_root_marker_run, NULL, 0 },
+    { "check-count", lsel_pc_count_run, NULL, 0 },
+    { "check-noisy", lsel_pc_noisy_run, NULL, 0 },
+    { "check-unbuilt", lsel_pc_unbuilt_run, NULL, 0 },
+    { "check-long", lsel_pc_long_run, NULL, 0 },
 };
 
 const struct lint_gate *lint_gate_table(size_t *n)
@@ -488,6 +489,63 @@ static int test_lsel_precheck_skip(void)
         ASSERT(strstr(out, "precheck: 0 new failure(s) of 1 gates\n") != NULL);
         ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-clean",
                                   "--skip=check-nope", out, sizeof(out)), 2);
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-clean",
+                                  "--skip-heavy", out, sizeof(out)), 0);
+        ASSERT(strstr(out, "precheck: 0 new failure(s) of 1 gates\n") != NULL);
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty,
+                                  "--gates=check-no-python,check-argv-no-python",
+                                  "--skip-heavy", out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-argv-no-python") != NULL);
+        ASSERT(strstr(out, "NEW check-no-python") == NULL);
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-no-python",
+                                  NULL, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-no-python") != NULL);
+        char base_arg[PATH_MAX + 16];
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        char *union_args[] = {base_arg, (char *)"--gates=check-no-python,check-argv-no-python,check-clean",
+                              (char *)"--skip-heavy", (char *)"--skip=check-argv-no-python"};
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, union_args, 4, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "precheck: 0 new failure(s) of 1 gates\n") != NULL);
+        union_args[3] = (char *)"--skip=check-nope";
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, union_args, 4, out, sizeof(out)), 2);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_precheck_real_registry(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_precheck: compiled registry skips heavy and runs ordinary gates") {
+        struct lsel_pc_fx fx;
+        char binary[PATH_MAX], base_arg[PATH_MAX + 16], out[4096];
+        ASSERT(realpath("build/bin/z23-lint", binary) != NULL);
+        ASSERT(lsel_pc_plant(&fx));
+        const char *init[] = {"init", "-q", NULL};
+        const char *add[] = {"add", "tool.py", NULL};
+        ASSERT_EQ(precheck_base_git(fx.clean, init, NULL, 0), 0);
+        ASSERT_EQ(precheck_base_git(fx.dirty, init, NULL, 0), 0);
+        ASSERT_EQ(precheck_base_git(fx.dirty, add, NULL, 0), 0);
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        const char *argv[] = {binary, "precheck", base_arg, "--jobs=1",
+            "--gates=check-windows-acceptance,check-no-python", "--skip-heavy",
+            "--json", NULL};
+        struct zcl_spawn_evidence evidence = {0};
+        ASSERT_EQ(chdir(fx.dirty), 0);
+        int rc = zcl_spawn_capture_evidence(argv, out, sizeof(out), 30000, &evidence);
+        ASSERT_EQ(chdir(fx.cwd), 0);
+        ASSERT_EQ(rc, 1);
+        ASSERT(evidence.exit_observed && !evidence.timed_out &&
+               !evidence.stdout_truncated && evidence.stdout_complete);
+        ASSERT(strstr(out, "\"gate\":\"check-windows-acceptance\",\"lane_rc\":-1,\"base_rc\":-1,\"verdict\":\"SKIPPED\"") != NULL);
+        ASSERT(strstr(out, "\"gate\":\"check-no-python\",\"lane_rc\":1,\"base_rc\":0,\"verdict\":\"NEW\"") != NULL);
+        const char *command[] = {binary, "--gate-command", "check-windows-acceptance", NULL};
+        evidence = (struct zcl_spawn_evidence){0};
+        ASSERT_EQ(zcl_spawn_capture_evidence(command, out, sizeof(out), 5000, &evidence), 0);
+        ASSERT(evidence.exit_observed && !evidence.timed_out &&
+               !evidence.stdout_truncated && evidence.stdout_complete);
+        ASSERT(strstr(out, "check-windows-acceptance --selftest && ") != NULL);
+        ASSERT(strstr(out, "&& ./build/bin/z23-lint check-windows-acceptance") != NULL);
         test_rm_rf_recursive(fx.root);
     } TEST_END
     return failures;
@@ -533,6 +591,7 @@ int test_lint_precheck(void)
     failures += test_lsel_precheck_first_line();
     failures += test_lsel_precheck_unbuilt();
     failures += test_lsel_precheck_skip();
+    failures += test_lsel_precheck_real_registry();
     failures += test_lsel_precheck_json();
     return failures;
 }
