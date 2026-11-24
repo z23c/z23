@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "zw.h"
+#include "zw_send.h"
 
 enum { T_POLL = 1, T_BLINK, T_MSG, T_SHOT, T_QA, T_BENCH, T_WATCHDOG };
 
@@ -30,7 +31,7 @@ struct app {
     struct zw_worker *worker;
     struct zw_bench bench;
     size_t screen;
-    uint32_t key;
+    uint32_t key, send_key;
     bool blinking, have_key, running, need_wallet, was_online, bench_data, model_dirty, watchdog_armed;
     int polls;
     int64_t last_wallet_ns;
@@ -43,7 +44,8 @@ static int64_t wall_s(void) { return (int64_t)time(NULL); }
 static bool rebuild(struct app *a)
 {
     uint32_t key = zw_structure_key(&a->model, a->screen);
-    if (a->have_key && key == a->key) return true;
+    uint32_t skey = a->screen == ZW_SCREEN_SEND ? zw_send_structure_key(a->model.send) : 0;
+    if (a->have_key && key == a->key && skey == a->send_key) return true;
     char err[96];
     zw_shell_build(a->tree, &a->model, a->screen);
     if (!gui_tree_end(a->tree, err, sizeof(err))) {
@@ -51,6 +53,7 @@ static bool rebuild(struct app *a)
         return false;
     }
     a->key = key;
+    a->send_key = skey;
     a->have_key = true;
     gui_ui_rebind(a->ui);
     return true;
@@ -67,12 +70,22 @@ static void update_narrow(struct app *a, int32_t w, float sc)
     }
 }
 
+static struct zw_send_env send_env(struct app *a)
+{
+    return (struct zw_send_env){ a->win, a->ui, &a->model, a->o, wall_s() };
+}
+
 static void render(struct app *a)
 {
     int32_t w, h;
     float sc;
     gui_window_size(a->win, &w, &h, &sc);
     update_narrow(a, w, sc);
+    if (a->screen == ZW_SCREEN_SEND && a->model.send) { /* mirror the fields; derive the page */
+        struct zw_send_env env = send_env(a);
+        a->model.now_s = env.now_s;
+        if (zw_send_sync(a->model.send, &env)) a->model_dirty = true;
+    }
     if (a->model_dirty) {
         a->model.now_s = wall_s();
         rebuild(a);
@@ -224,6 +237,40 @@ static void copy_text(struct app *a, const char *s, const char *msg)
     show_msg(a, gui_clipboard_set_text(a->win, s, strlen(s)) ? msg : "Couldn't copy. Try again.");
 }
 
+/* What a Send action or send result asks of the window. */
+static void send_apply(struct app *a, const struct zw_send_out *out)
+{
+    if (out->dirty) a->model_dirty = true;
+    if (out->msg_set) {
+        snprintf(a->model.msg, sizeof(a->model.msg), "%s", out->msg);
+        if (out->msg_ms) gui_window_timer_set(a->win, T_MSG, out->msg_ms, false);
+        else gui_window_timer_cancel(a->win, T_MSG); /* the message stays */
+        a->model_dirty = true;
+    }
+    if (out->refresh) {
+        a->need_wallet = true;
+        enqueue(a, ZW_Q_WALLET);
+        enqueue(a, ZW_Q_BALANCES);
+    }
+}
+
+static void send_action(struct app *a, const char *name)
+{
+    struct zw_send_out out;
+    struct zw_send_env env = send_env(a);
+    a->model.now_s = env.now_s;
+    zw_send_action(a->model.send, &env, name, &out);
+    send_apply(a, &out);
+}
+
+static void send_wake(struct app *a)
+{
+    struct zw_send_out out = { .dirty = false };
+    struct zw_send_env env = send_env(a);
+    zw_send_wake(a->model.send, &env, &out);
+    send_apply(a, &out);
+}
+
 static void set_screen(struct app *a, size_t s)
 {
     if (s >= ZW_SCREEN_COUNT || s == a->screen) return;
@@ -274,8 +321,12 @@ static bool dispatch_row(struct app *a, const struct gui_action *act)
             copy_text(a, addr, "Copied to clipboard");
         a->model.menu = ZW_MENU_NONE;
     } else if (!strcmp(act->name, "row.send") || !strcmp(act->name, "home.balances.open")) {
+        int64_t row = !strcmp(act->name, "row.send") ? a->model.menu_row : act->row;
         a->model.menu = ZW_MENU_NONE;
-        show_msg(a, "Sending opens in a later version");
+        a->model_dirty = true;
+        if (a->model.send && zw_home_row_address(&a->model, row, addr, sizeof(addr)))
+            zw_send_prefill_from(a->model.send, addr); /* "Send from <address>" */
+        set_screen(a, ZW_SCREEN_SEND);
     } else {
         return false;
     }
@@ -299,6 +350,7 @@ static void dispatch(struct app *a, const struct gui_action *act)
 {
     char buf[1200];
     if (!strncmp(act->name, "nav.", 4)) set_screen(a, zw_screen_by_name(act->name + 4));
+    else if (!strncmp(act->name, "send.", 5)) send_action(a, act->name);
     else if (dispatch_menu(a, act->name) || dispatch_row(a, act)) return;
     else if (!strcmp(act->name, "home.send")) set_screen(a, ZW_SCREEN_SEND);
     else if (!strcmp(act->name, "home.receive")) set_screen(a, ZW_SCREEN_RECEIVE);
@@ -369,7 +421,7 @@ static void handle_event(struct app *a, const struct gui_event *ev)
     switch (ev->type) {
     case GUI_EV_CLOSE: a->running = false; return;
     case GUI_EV_TIMER: on_timer(a, ev->timer.id); return;
-    case GUI_EV_WAKE: drain(a); return;
+    case GUI_EV_WAKE: drain(a); send_wake(a); return;
     case GUI_EV_KEY: on_key(a, ev); break;
     default: break;
     }
@@ -491,6 +543,7 @@ int zw_app_run(const struct zw_options *o)
     a->o = o;
     char err[160];
     zw_model_init(&a->model, o->profile);
+    a->model.send = zw_send_new(); /* NULL: the Send page says it is unavailable */
     if (!open_window(a, err, sizeof(err))) {
         zw_log("cannot open a window: %s", err);
         free(a);
@@ -519,6 +572,8 @@ int zw_app_run(const struct zw_options *o)
     log_exit(a);
     gui_window_set_live_hook(a->win, NULL, NULL);
     zw_worker_stop(a->worker); /* joins: nothing touches the window after this line */
+    zw_send_free(a->model.send); /* joins a send runner the same way */
+    a->model.send = NULL;
     gui_ui_free(a->ui);
     gui_tree_free(a->tree);
     gui_window_close(a->win);

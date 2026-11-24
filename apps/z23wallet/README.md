@@ -11,10 +11,12 @@ It mirrors ZclWallet v2.1.2-beta13: the menu bar (File, Edit, Help), the
 navigation rail (Home, Send, Receive, Activity, and Advanced behind the gear),
 the beta13 palette and metrics, and the Home page (sync pill or banner, the
 Summary group with the private-balance hero, Send/Receive, the amber fix-it
-card, and the Address Balances table). Send, Receive and Activity are "Coming
-soon" screens that their own lanes fill. All amounts are integer zatoshi from
-the RPC boundary on. It is read-only: it never sends, never exports keys, never
-starts or stops a node, and it refuses to start when `ZCL_AGENT_SESSION` is set
+card, and the Address Balances table) and the Send page (pay-from, recipients
+with memos, the privacy badge, beta13's validations, the confirm dialog and
+the keyed z_sendmany with status polling; see "Send" below). Receive and
+Activity are "Coming soon" screens that their own lanes fill. All amounts are
+integer zatoshi from the RPC boundary on. It sends only from the Send page's
+confirm dialog, never exports keys, never starts or stops a node, and it refuses to start when `ZCL_AGENT_SESSION` is set
 (owner at the keyboard only).
 
 Screenshots are generated, not committed: the golden tests write them to
@@ -40,7 +42,7 @@ proof tests.
 
 ```text
 z23-wallet                                    # auto: a Z23 node first, then zclassicd
-z23-wallet --node=zclassicd                   # read-only view of a legacy zclassicd
+z23-wallet --node=zclassicd                   # a legacy zclassicd (reads; sends only from Send)
 z23-wallet --datadir=<node folder>            # a Z23 node in that folder
 z23-wallet --backend=headless --datadir=<dir> --shot=home.png --shot-after-ms=2000 --exit-after-shot
 z23-wallet --script=<file> --backend=headless --shot-dir=<dir> --scale=2
@@ -246,7 +248,19 @@ Measured follow-ups, largest first (not in this profile):
   the non-ASCII glyphs beta13 shows are drawn by an interim map in
   `ui_layout.c` (dots and circles as shapes, the rest as ASCII look-alikes);
   the bound strings already carry the exact UTF-8 text.
-* Later lanes: P2 Receive and QR, P3 Activity, P4 Send (custody reviewer), P5
+* Send (lane P4, custody reviewer): the page, its dialogs and the send runner
+  are in `zw_send*.c`, `zw_q_send.c` and `zw_screen_send.c`. Both profiles send
+  the way beta13 does: `z_sendmany [from, [{address, amount, memo}], 1, 0.0001,
+  "zq-<key>"]` with one idempotency key per confirmation, the same key again
+  after an unanswered call, the unkeyed form only for a node that rejects the
+  key, then `z_getoperationstatus` (and `z_listsendjournal`) polling; a Z23
+  node answers the keyed call synchronously. The legacy allowlist gained
+  exactly those three calls, and only the send runner's client may call
+  `z_sendmany`. Developed and tested against the mock node only
+  (`tests/fixtures/z23wallet/rpc/send_*`, group `z23wallet_send`). Not yet:
+  auto-shielding of transparent change, the address book, custom fees, USD,
+  more than three recipients, the status-bar right-click menu.
+* Later lanes: P2 Receive and QR, P3 Activity, P5
   Advanced, menus, settings and backup, A agent dump/diff tools, X X11 and M
   macOS backends, M6a `.zui` markup, M7 GPU surface. See
   `platform/modules/gui/README.md`.

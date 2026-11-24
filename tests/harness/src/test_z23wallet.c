@@ -378,10 +378,12 @@ static void test_rpc_conf(void)
           res.wallet.spendable == 1250000000 && res.wallet.total == 1590000000 && zw_mock_saw(n.mock, "\"getwalletsummary\",\"params\":[0]"));
     json_init(&r);
     unsigned before = zw_mock_request_count(n.mock);
-    enum zw_err refused = zw_rpc_call(n.rpc, "z_sendmany", "[]", &r, &e);
-    CHECK("[28] zclassicd: z_sendmany is refused client-side and no bytes are sent", refused == ZW_ERR_RPC &&
+    /* z_sendmany is on the allowlist for the Send runner (z23wallet_send); a
+     * call off the list, such as sendtoaddress, is refused here. */
+    enum zw_err refused = zw_rpc_call(n.rpc, "sendtoaddress", "[]", &r, &e);
+    CHECK("[28] zclassicd: sendtoaddress is refused client-side and no bytes are sent", refused == ZW_ERR_RPC &&
           strstr(e.message, "is not allowed against zclassicd") && zw_mock_request_count(n.mock) == before &&
-          !zw_mock_saw(n.mock, "z_sendmany"));
+          !zw_mock_saw(n.mock, "sendtoaddress"));
     json_free(&r);
     zw_mock_set_auth(n.mock, "a:other");
     json_init(&r);

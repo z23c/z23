@@ -1,20 +1,23 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: JSON-RPC over the loopback HTTP client: endpoint location, the
- * zclassicd read-only allowlist (refused calls send no bytes), the 401
+ * zclassicd allowlist (refused calls send no bytes), the 401
  * cookie re-read (cookie credentials only), the auto profile's fall back
  * from an unreachable Z23 port to zclassicd, error mapping (-28 warming,
  * -32601 missing method) and strict reply validation. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "zw.h"
 
-/* R5: the only calls ever sent to a legacy zclassicd. All are reads. */
+/* R5: the only calls ever sent to a legacy zclassicd: the reads, plus exactly
+ * the three calls beta13's Send makes (z_sendmany, sent only by the send
+ * runner after the confirm dialog, and its two status reads). */
 static const char *const k_legacy_allow[] = {
     "getinfo", "getblockchaininfo", "getnetworkinfo", "getpeerinfo", "getnetworksolps",
     "getwalletinfo", "getwalletsummary", "z_gettotalbalance", "listunspent", "z_listunspent",
     "z_listaddresses", "getaddressesbyaccount", "listtransactions", "z_listreceivedbyaddress",
-    "gettransaction",
+    "gettransaction", "z_sendmany", "z_getoperationstatus", "z_listsendjournal",
 };
 
 bool zw_rpc_legacy_allowed(const char *method)
@@ -113,9 +116,15 @@ static bool after_failure(struct zw_rpc *r, enum zw_err err, int fail_phase)
     return handover;
 }
 
-/* SEARCHING, or the client-side refusal of a non-allowlisted zclassicd call. */
+/* SEARCHING, a z_sendmany outside the send runner, or the client-side
+ * refusal of a non-allowlisted zclassicd call. */
 static enum zw_err precheck(struct zw_rpc *r, const char *method, struct zw_rpc_error *e)
 {
+    if (!strcmp(method, "z_sendmany") && !r->may_send) { /* only the send runner sends */
+        zw_log("rpc: refused z_sendmany outside the send runner");
+        set_err(e, ZW_ERR_RPC, 0, "z_sendmany is only sent from the confirm dialog");
+        return ZW_ERR_RPC;
+    }
     bool found = zw_rpc_ensure(r);
     zw_rpc_progress(r);
     if (!found) {
@@ -126,7 +135,7 @@ static enum zw_err precheck(struct zw_rpc *r, const char *method, struct zw_rpc_
     if (r->ep.profile == ZW_PROFILE_ZCLASSICD && !zw_rpc_legacy_allowed(method)) {
         char m[160];
         snprintf(m, sizeof(m), "%.64s is not allowed against zclassicd", method);
-        zw_log("rpc: refused %s (zclassicd is read only)", method);
+        zw_log("rpc: refused %s (not on the zclassicd allowlist)", method);
         set_err(e, ZW_ERR_RPC, 0, m);
         return ZW_ERR_RPC;
     }
@@ -139,17 +148,19 @@ static enum zw_err call_once(struct zw_rpc *r, const char *method, const char *p
     set_err(e, ZW_OK, 0, "");
     enum zw_err err = precheck(r, method, e);
     if (err != ZW_OK) return err;
-    char body[512];
-    int n = snprintf(body, sizeof(body),
-                     "{\"jsonrpc\":\"1.0\",\"id\":%u,\"method\":\"%s\",\"params\":%s}",
-                     (unsigned)++r->next_id, method, params_json ? params_json : "[]");
-    if (n <= 0 || (size_t)n >= sizeof(body)) {
+    const char *params = params_json ? params_json : "[]";
+    size_t cap = strlen(params) + strlen(method) + 96; /* a send with memos is a few KiB */
+    char *body = cap <= 65536 ? malloc(cap) : NULL;
+    if (!body) {
         set_err(e, ZW_ERR_IO, 0, "request too large");
         return ZW_ERR_IO;
     }
+    int n = snprintf(body, cap, "{\"jsonrpc\":\"1.0\",\"id\":%u,\"method\":\"%s\",\"params\":%s}",
+                     (unsigned)++r->next_id, method, params);
     struct zw_buf reply = {0};
     int status = 0;
     err = post_with_auth_retry(r, body, (size_t)n, &reply, &status);
+    free(body);
     if (err == ZW_OK) {
         err = parse_envelope(method, &reply, result, e);
         if (err == ZW_ERR_BAD_REPLY && status == 403) err = ZW_ERR_AUTH;

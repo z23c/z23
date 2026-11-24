@@ -35,6 +35,13 @@ static bool json_flag(const struct json_value *r, const char *k)
     return b && b->type == JSON_BOOL && b->val.b;
 }
 
+/* An explicit false (absent means true: z_listunspent has "spendable" too). */
+static bool json_flag_false(const struct json_value *r, const char *k)
+{
+    const struct json_value *b = json_get(r, k);
+    return b && b->type == JSON_BOOL && !b->val.b;
+}
+
 static bool parse_chain(const struct json_value *r, struct zw_chain *c)
 {
     if (r->type != JSON_OBJ || !json_get(r, "blocks")) return false;
@@ -167,6 +174,12 @@ static int row_cmp(const void *a, const void *b)
 
 struct bal_acc { struct zw_bal_row *rows; size_t n, cap; };
 
+/* The confirmed, spendable part of one unspent output (beta13 confirmedSpendableZat). */
+static int64_t confirmed_part(const struct json_value *u, int64_t zat, bool unconfirmed)
+{
+    return unconfirmed || json_flag_false(u, "spendable") ? 0 : zat;
+}
+
 static bool acc_unspent(struct bal_acc *acc, const struct json_value *arr)
 {
     if (arr->type != JSON_ARR) return false;
@@ -191,6 +204,7 @@ static bool acc_unspent(struct bal_acc *acc, const struct json_value *arr)
         snprintf(r->addr, sizeof(r->addr), "%s", s);
         r->zat = zat;
         r->unconfirmed = geti(u, "confirmations", 1) <= 0;
+        r->confirmed_zat = confirmed_part(u, zat, r->unconfirmed);
         r->kind = (uint8_t)zw_addr_kind_of(s);
     }
     return true;
@@ -205,6 +219,7 @@ static void acc_publish(struct bal_acc *acc, struct zw_balances *b)
         size_t j = i + 1;
         for (; j < acc->n && !strcmp(acc->rows[j].addr, sum.addr); j++) {
             if (sum.zat <= ZW_MAX_MONEY) sum.zat += acc->rows[j].zat;
+            if (sum.confirmed_zat <= ZW_MAX_MONEY) sum.confirmed_zat += acc->rows[j].confirmed_zat;
             sum.unconfirmed = sum.unconfirmed || acc->rows[j].unconfirmed;
         }
         i = j;

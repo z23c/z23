@@ -644,6 +644,8 @@ AGENT_IMPACT_RULE("apps/skycombat/*|vendor/raylib/*|tests/harness/src/test_skyco
  * change reaches the wallet because the screens are rendered through it. */
 AGENT_IMPACT_RULE("platform/modules/gui/*|tests/harness/src/test_gui.c|tests/fixtures/gui/*", "gui z23wallet make_lint_gates")
 AGENT_IMPACT_RULE("apps/z23wallet/*|tests/harness/src/test_z23wallet.c|tests/harness/src/z23wallet_mock_node.c|tests/harness/src/z23wallet_mock_node.h|tests/fixtures/z23wallet/*", "z23wallet make_lint_gates")
+AGENT_IMPACT_RULE("apps/z23wallet/src/zw_send.h|apps/z23wallet/src/zw_send_plan.c|apps/z23wallet/src/zw_send_flow.c|apps/z23wallet/src/zw_send_ui.c|apps/z23wallet/src/zw_send_act.c|apps/z23wallet/src/zw_q_send.c|apps/z23wallet/src/zw_screen_send.c|apps/z23wallet/src/zw_rpc.c|platform/modules/gui/src/ui_dialog.c|platform/modules/gui/include/gui/dialog.h|tests/harness/src/test_z23wallet_send.c|tests/fixtures/z23wallet/rpc/send_*", "z23wallet_send z23wallet make_lint_gates")
+AGENT_IMPACT_RULE("apps/skycombat/*|vendor/raylib/*|tests/harness/src/test_skycombat_models.c", "skycombat_models zcode_package_fork make_lint_gates")
 AGENT_IMPACT_RULE("apps/skycombat/include/sky_combat/qa_frames.h|apps/skycombat/src/sky_combat_multiplayer_ultimate.c|tests/harness/src/test_skycombat_qa_frames.c|tests/fixtures/skycombat_qa/*", "skycombat_qa_frames skycombat_models make_lint_gates")
 /* Yardsale wallet glue: typed yardsale.* native leaves -> node RPC ->
  * yardsale_wallet_service plan/commit against the yardsale_plans table. */

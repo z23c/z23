@@ -110,12 +110,14 @@ struct zw_rpc {
     struct zw_cancel *cancel; /* may be NULL */
     struct zw_locate_report report;
     bool missing_walletsummary, missing_getwalletsummary, z23_refused;
+    bool may_send; /* only the Send runner's client may call z_sendmany */
     uint32_t next_id;
     uint32_t deadline_ms; /* 0 = 5000 */
     atomic_int phase;
     atomic_llong progress_ms; /* monotonic ms of the last finished node call (the watchdog measures from it) */
 };
-/* Against zclassicd only the read calls Home needs are sent (R5). */
+/* Against zclassicd only the allowlisted calls are sent (R5): the reads and
+ * the Send page's z_sendmany and its status reads. */
 bool zw_rpc_legacy_allowed(const char *method);
 /* Locate the node now if needed; false when none was found. */
 bool zw_rpc_ensure(struct zw_rpc *r);
@@ -145,7 +147,7 @@ struct zw_wallet {
 
 #define ZW_BAL_MAX 512
 enum zw_addr_kind { ZW_ADDR_SAPLING, ZW_ADDR_SPROUT, ZW_ADDR_PUBLIC };
-struct zw_bal_row { char addr[100]; int64_t zat; bool unconfirmed; uint8_t kind; };
+struct zw_bal_row { char addr[100]; int64_t zat, confirmed_zat; bool unconfirmed; uint8_t kind; };
 struct zw_balances {
     size_t n, more; /* more: addresses beyond ZW_BAL_MAX (footer row) */
     bool any_unconfirmed;
@@ -198,6 +200,8 @@ enum zw_sync { ZW_SYNC_CONNECTING, ZW_SYNC_SYNCED, ZW_SYNC_SYNCING, ZW_SYNC_FIND
                ZW_SYNC_STALE, ZW_SYNC_PEERLESS, ZW_SYNC_SKEW, ZW_SYNC_LOCAL };
 enum zw_menu { ZW_MENU_NONE, ZW_MENU_FILE, ZW_MENU_EDIT, ZW_MENU_HELP, ZW_MENU_ROW };
 
+struct zw_send; /* the Send page state (zw_send.h) */
+
 struct zw_model {
     enum zw_conn conn;
     enum zw_profile requested; /* --node, for wording before anything answers */
@@ -226,6 +230,7 @@ struct zw_model {
     enum zw_menu menu;
     int64_t menu_row;
     char msg[120];            /* transient status-bar message */
+    struct zw_send *send;     /* owned by the app; NULL when it could not be allocated */
 };
 
 void zw_model_init(struct zw_model *m, enum zw_profile requested);

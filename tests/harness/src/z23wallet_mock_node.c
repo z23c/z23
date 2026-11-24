@@ -12,7 +12,7 @@
 
 #include "platform/socket_compat.h"
 
-#define SEEN_CAP 8192
+#define SEEN_CAP 65536 /* a scripted send flow logs every body it saw */
 
 static bool shift_times(char *text, size_t cap, int64_t shift);
 
@@ -156,6 +156,35 @@ static void hold_silent(struct zw_mock *m, int delay_ms)
     for (int k = 0; k < delay_ms / 10 && !m->stop; k++) sleep_ms(10);
 }
 
+static void reply_error_text(platform_socket_t c, const char *text)
+{
+    char out[9000];
+    int code = atoi(text);
+    const char *tab = strchr(text, '\t');
+    snprintf(out, sizeof(out), "{\"result\":null,\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":1}",
+             code, tab ? tab + 1 : "");
+    send_reply(c, 500, out);
+}
+
+/* A script row naming a file answers with it: <name>.err as an error, any
+ * other name as the result (so one method can answer differently in turn). */
+static bool reply_row_file(struct zw_mock *m, platform_socket_t c, int status, const struct script_row *row)
+{
+    char path[700], text[8192], out[9000];
+    if (!row || !row->file[0]) return false;
+    snprintf(path, sizeof(path), "%s/%s", m->dir, row->file);
+    if (!read_file(path, text, sizeof(text))) return false;
+    size_t fl = strlen(row->file);
+    if (fl > 4 && !strcmp(row->file + fl - 4, ".err")) {
+        reply_error_text(c, text);
+        return true;
+    }
+    shift_times(text, sizeof(text), atomic_load(&m->clock_shift));
+    snprintf(out, sizeof(out), "{\"result\":%s,\"error\":null,\"id\":1}", text);
+    send_reply(c, status, out);
+    return true;
+}
+
 static void reply_method(struct zw_mock *m, platform_socket_t c, const char *method)
 {
     char path[700], text[8192], out[9000];
@@ -166,6 +195,7 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
     if (row && row->status) status = row->status;
     if (status < 0) { reply_hostile(m, c, status); return; }
     if (status == 503) { send_reply(c, 503, ""); return; }
+    if (reply_row_file(m, c, status, row)) return;
     snprintf(path, sizeof(path), "%s/%s.err", m->dir, method);
     size_t n = read_file(path, text, sizeof(text));
     if (!n) {
@@ -173,11 +203,7 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
         n = read_file(path, text, sizeof(text));
     }
     if (n) {
-        int code = atoi(text);
-        char *tab = strchr(text, '\t');
-        snprintf(out, sizeof(out), "{\"result\":null,\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":1}",
-                 code, tab ? tab + 1 : "");
-        send_reply(c, 500, out);
+        reply_error_text(c, text);
         return;
     }
     snprintf(path, sizeof(path), "%s/%s.json", m->dir, method);
@@ -196,7 +222,7 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
 
 static void serve_one(struct zw_mock *m, platform_socket_t c)
 {
-    char req[4096];
+    char req[16384]; /* a send with three memos is about 4 KiB */
     size_t have = 0;
     platform_socket_set_receive_timeout(c, 2000);
     while (have < sizeof(req) - 1) {
