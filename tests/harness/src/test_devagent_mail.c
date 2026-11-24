@@ -957,6 +957,52 @@ _test_next:;
     return failures;
 }
 
+static bool dvx_keep_ref(const char *ref, void *ctx)
+{
+    return strcmp(ref, (const char *)ctx) == 0;
+}
+
+static int test_mail_ref_escaped_and_skipped(void)
+{
+    int failures = 0;
+    TEST("mail: filtered pulls decode escaped refs and count malformed rows") {
+        struct dvx_call p;
+        dvx_isolate("escaped_ref_skipped");
+        dvx_import_stream("inbox.peer",
+            "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\","
+            "\"to\":\"reader\",\"kind\":\"note\",\"body\":\"escaped\","
+            "\"ref\":\"fo\\u006f\"}\n"
+            "{\"seq\":\"bad\",\"ref\":\"else\"}\n");
+        for (int brief = 0; brief < 2; ++brief) {
+            dvx_pull_agent(&p, "reader", "foo");
+            ASSERT(dvx_run_mode(&p, brief != 0) && dvx_ok(&p));
+            ASSERT_EQ(dvx_int(&p, "count"), 1);
+            ASSERT_EQ(dvx_int(&p, "skipped"), 1);
+            const struct json_value *rows = dvx_arr(&p, "rows");
+            ASSERT(rows && rows->num_children == 1);
+            ASSERT_STR_EQ(json_get_str(json_get(&rows->children[0], "ref")), "foo");
+            dvx_end(&p);
+        }
+        dvx_pull_token(&p, "0|", NULL);
+        g_dvx_after_probe_calls = 0;
+        zcl_devagent_mail_test_set_after_brief_probe(dvx_append_after_brief_probe);
+        zcl_native_handle_dev_agent_mail_brief_filtered(&p.request, &p.reply,
+                                                        dvx_keep_ref, (void *)"foo");
+        zcl_devagent_mail_test_set_after_brief_probe(NULL);
+        ASSERT(dvx_ok(&p));
+        ASSERT_EQ(g_dvx_after_probe_calls, 1);
+        ASSERT_EQ(dvx_int(&p, "count"), 1);
+        ASSERT_EQ(dvx_int(&p, "skipped"), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&dvx_arr(&p, "rows")->children[0], "ref")), "foo");
+        dvx_end(&p);
+        dvx_restore();
+        PASS();
+    } _test_next:;
+    zcl_devagent_mail_test_set_after_brief_probe(NULL);
+    dvx_restore();
+    return failures;
+}
+
 #if !defined(_WIN32)
 static int test_mail_ack_sync(int mode);
 #endif
@@ -2218,6 +2264,7 @@ static int test_mail_read_side_checks(void)
     failures += test_mail_paging();
     failures += test_mail_brief_drain();
     failures += test_mail_ref_filter_and_agent_resume();
+    failures += test_mail_ref_escaped_and_skipped();
     failures += test_mail_stored_cursor();
     failures += test_mail_board_fields();
 #if !defined(_WIN32)

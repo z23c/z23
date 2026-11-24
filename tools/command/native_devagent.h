@@ -54,6 +54,10 @@ bool zcl_devagent_mail_record_read(const char *agent, const char *token);
 void zcl_native_handle_dev_agent_mail_brief_drain(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+typedef bool (*zcl_devagent_mail_ref_filter)(const char *ref, void *ctx);
+void zcl_native_handle_dev_agent_mail_brief_filtered(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    zcl_devagent_mail_ref_filter keep, void *ctx);
 
 #ifdef ZCL_TESTING
 typedef void (*zcl_devagent_mail_test_hook_fn)(void);

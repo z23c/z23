@@ -1482,6 +1482,8 @@ static void dvm_post(const struct zcl_command_request *req,
 #define DVM_TOKEN_CAP (DVM_STREAMS_MAX * (DVM_STREAM_NAME_MAX + 24u) + 32u)
 
 struct dvm_pull_filter {
+    zcl_devagent_mail_ref_filter keep;
+    void *keep_ctx;
     long long since;      /* seq floor: rows at or below it are not returned */
     const char *from;
     const char *kind;
@@ -1862,6 +1864,17 @@ static enum dvm_line_kind dvm_read_line(FILE *f, char *buf, size_t cap)
 
 /* Parse one complete line into *r when it is a row this pull returns.
  * Malformed lines count as skipped; filtered rows do not. */
+static bool dvm_row_matches(const struct dvm_row *r,
+                            const struct dvm_pull_filter *filter)
+{
+    return r->seq > filter->since &&
+        (!filter->from || strcmp(r->from, filter->from) == 0) &&
+        (!filter->to || strcmp(r->to, filter->to) == 0) &&
+        (!filter->ref || strcmp(r->ref, filter->ref) == 0) &&
+        (!filter->kind || strcmp(r->kind, filter->kind) == 0) &&
+        (!filter->keep || filter->keep(r->ref, filter->keep_ctx));
+}
+
 static bool dvm_row_wanted(char *buf, const struct dvm_pull_filter *filter,
                            struct dvm_row *r, struct dvm_pull_state *ps)
 {
@@ -1874,15 +1887,7 @@ static bool dvm_row_wanted(char *buf, const struct dvm_pull_filter *filter,
         ps->skipped++; /* malformed line: skipped, never fatal */
         return false;
     }
-    if (r->seq <= filter->since)
-        return false;
-    if (filter->from && strcmp(r->from, filter->from) != 0)
-        return false;
-    if (filter->to && strcmp(r->to, filter->to) != 0)
-        return false;
-    if (filter->ref && strcmp(r->ref, filter->ref) != 0)
-        return false;
-    return !filter->kind || strcmp(r->kind, filter->kind) == 0;
+    return dvm_row_matches(r, filter);
 }
 
 /* Load the stream's next returnable row as its head, consuming every line
@@ -2436,7 +2441,8 @@ static bool dvm_pull_resume_agent(const struct zcl_command_request *req,
 
 static void dvm_pull(const struct zcl_command_request *req,
                      struct zcl_command_reply *reply, const char *maildir,
-                     bool brief_drain)
+                     bool brief_drain, zcl_devagent_mail_ref_filter keep,
+                     void *keep_ctx)
 {
     struct dvm_pull_filter filter;
     struct dvm_pull_state *ps;
@@ -2447,6 +2453,8 @@ static void dvm_pull(const struct zcl_command_request *req,
         !dvm_pull_resume_agent(req, reply, maildir, &filter, stored,
                                sizeof(stored)))
         return;
+    filter.keep = keep;
+    filter.keep_ctx = keep_ctx;
     ps = (struct dvm_pull_state *)zcl_calloc(1, sizeof(*ps),
                                              "devagent_mail.pull");
     memset(&pg, 0, sizeof(pg));
@@ -2474,7 +2482,7 @@ static void dvm_pull(const struct zcl_command_request *req,
             dvm_streams_close(ps);
             free(ps);
             free(pg.rows);
-            dvm_pull(req, reply, maildir, false);
+            dvm_pull(req, reply, maildir, false, keep, keep_ctx);
             return;
         }
         /* Keep the merge's per-stream byte order: a later append may have
@@ -2855,7 +2863,8 @@ static void dvm_exact(const struct zcl_command_request *req,
 }
 
 static void dvm_handle(const struct zcl_command_request *request,
-                       struct zcl_command_reply *reply, bool brief_drain)
+                       struct zcl_command_reply *reply, bool brief_drain,
+                       zcl_devagent_mail_ref_filter keep, void *keep_ctx)
 {
     const char *action;
     char maildir[4096];
@@ -2890,7 +2899,7 @@ static void dvm_handle(const struct zcl_command_request *request,
         return;
     }
     if (strcmp(action, "pull") == 0) {
-        dvm_pull(request, reply, maildir, brief_drain);
+        dvm_pull(request, reply, maildir, brief_drain, keep, keep_ctx);
         return;
     }
     if (strcmp(action, "ack") == 0) {
@@ -2967,7 +2976,7 @@ void zcl_devagent_mail_worker_post(const struct zcl_command_request *request,
 void zcl_native_handle_dev_agent_mail(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    dvm_handle(request, reply, false);
+    dvm_handle(request, reply, false, NULL, NULL);
 }
 
 /* Internal fleet-brief path. It keeps normal validation and skips max scans
@@ -2975,5 +2984,12 @@ void zcl_native_handle_dev_agent_mail(
 void zcl_native_handle_dev_agent_mail_brief_drain(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    dvm_handle(request, reply, true);
+    dvm_handle(request, reply, true, NULL, NULL);
+}
+
+void zcl_native_handle_dev_agent_mail_brief_filtered(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    zcl_devagent_mail_ref_filter keep, void *ctx)
+{
+    dvm_handle(request, reply, true, keep, ctx);
 }

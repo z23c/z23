@@ -3424,9 +3424,14 @@ static bool fmc_row_locator(struct json_value *item, const struct fmc_row *row)
 
 #ifdef ZCL_TESTING
 static void (*s_fmc_before_change_projection)(void);
+static void (*s_fmc_before_history_copy)(void);
 void zcl_fleet_steer_test_set_before_change_projection(void (*hook)(void))
 {
     s_fmc_before_change_projection = hook;
+}
+void zcl_fleet_steer_test_set_before_history_copy(void (*hook)(void))
+{
+    s_fmc_before_history_copy = hook;
 }
 #endif
 
@@ -3591,7 +3596,8 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
                                  struct json_value *rows, long long *cursor,
                                  char *since, bool *more,
                                  char *why_buf, size_t why_cap,
-                                 bool brief_drain, const char *ref)
+                                 bool brief_drain, const char *ref,
+                                 zcl_devagent_mail_ref_filter keep, void *ctx)
 {
     struct fmc_sub sub;
     const struct json_value *arr, *tok, *tr;
@@ -3606,7 +3612,10 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
         fmc_sub_end(&sub);
         return "allocation_failed";
     }
-    fmc_mail_invoke(&sub, brief_drain);
+    if (keep)
+        zcl_native_handle_dev_agent_mail_brief_filtered(&sub.request, &sub.reply, keep, ctx);
+    else
+        fmc_mail_invoke(&sub, brief_drain);
     sub.ran = true;
     tok = json_get(&sub.reply.data, "next_since");
     next = (tok && tok->type == JSON_STR) ? json_get_str(tok) : NULL;
@@ -3619,6 +3628,9 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
     }
     *cursor = fmc_sub_int(&sub, "cursor", -1);
     n = json_size(arr);
+#ifdef ZCL_TESTING
+    if (keep && s_fmc_before_history_copy) s_fmc_before_history_copy();
+#endif
     for (i = 0; i < n; i++) {
         if (!json_push_back(rows, json_at(arr, i))) {
             fmc_sub_end(&sub);
@@ -3635,13 +3647,14 @@ static const char *fmc_mail_page(const struct zcl_command_request *req,
  * the leaf resumes past) until a page says it was last. On success the end
  * position lands in end_token (when asked): a composite per-stream watermark
  * the caller passes back as `since` to see exactly what arrived after it. */
-static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
+static const char *fmc_mail_drain_filtered(const struct zcl_command_request *req,
                                        struct json_value *rows,
                                        long long *cursor,
                                        const char *since_init,
                                        char *end_token, size_t end_cap,
                                        char *why_buf, size_t why_cap,
-                                       bool brief_drain, const char *ref)
+                                       bool brief_drain, const char *ref,
+                                       zcl_devagent_mail_ref_filter keep, void *ctx)
 {
     char since[FMC_MAIL_SINCE_CAP] = "";
     bool more = true;
@@ -3650,13 +3663,24 @@ static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
     for (int page = 0; page < FMC_MAIL_PAGES_MAX && more; page++) {
         const char *why =
             fmc_mail_page(req, rows, cursor, since, &more, why_buf,
-                          why_cap, brief_drain, ref);
+                          why_cap, brief_drain, ref, keep, ctx);
         if (why)
             return why;
     }
     if (end_token && end_cap > 0)
         (void)snprintf(end_token, end_cap, "%s", since);
     return more ? "page_limit" : NULL;
+}
+
+static const char *fmc_mail_drain_from(const struct zcl_command_request *req,
+                                       struct json_value *rows, long long *cursor,
+                                       const char *since_init, char *end_token,
+                                       size_t end_cap, char *why_buf, size_t why_cap,
+                                       bool brief_drain, const char *ref)
+{
+    return fmc_mail_drain_filtered(req, rows, cursor, since_init, end_token,
+                                   end_cap, why_buf, why_cap, brief_drain, ref,
+                                   NULL, NULL);
 }
 
 static const char *fmc_mail_drain(const struct zcl_command_request *req,
@@ -3860,36 +3884,96 @@ static bool fmc_brief_resume_changes(const struct zcl_command_request *req,
     return true;
 }
 
-static int fmc_brief_compact_empty(const struct zcl_command_request *req,
+static int fmc_brief_compact_probe(const struct zcl_command_request *req,
                                    struct json_value *missing,
                                    struct fmc_mail_view *view,
-                                   const char *resume)
+                                   const char *resume, struct json_value *fresh_out)
 {
-    struct json_value fresh;
     long long cursor = -1;
     char token[FMC_MAIL_SINCE_CAP], why[128];
     int64_t t0 = clock_now_wall_ms(), t1;
-    json_init(&fresh);
-    json_set_array(&fresh);
-    const char *fail = fmc_mail_drain_from(req, &fresh, &cursor, resume,
+    json_init(fresh_out);
+    json_set_array(fresh_out);
+    const char *fail = fmc_mail_drain_from(req, fresh_out, &cursor, resume,
         token, sizeof(token), why, sizeof(why), true, NULL);
     t1 = clock_now_wall_ms();
     if (fail) {
         fmc_note_missing(missing, "dev.agent.mail", fail, t1 - t0);
-        json_free(&fresh);
         view->cursor_token[0] = 0;
         return -1;
     }
-    bool empty = json_size(&fresh) == 0;
-    if (empty) {
+    bool empty = json_size(fresh_out) == 0;
+    {
         view->cursor = cursor;
         view->ok = true;
         view->forward = true;
         (void)snprintf(view->cursor_token, sizeof(view->cursor_token), "%s", token);
         (void)snprintf(view->start_token, sizeof(view->start_token), "%s", resume);
     }
-    json_free(&fresh);
     return empty ? 1 : 0;
+}
+
+struct fmc_compact_refs {
+    const char *refs[FMC_CHANGES_MAX];
+    size_t count;
+};
+
+static bool fmc_compact_keep_ref(const char *ref, void *ctx)
+{
+    const struct fmc_compact_refs *refs = ctx;
+    for (size_t i = 0; i < refs->count; i++)
+        if (fmc_ref_answers(refs->refs[i], ref)) return true;
+    return false;
+}
+
+static bool fmc_compact_collect_refs(const struct json_value *fresh,
+                                     const struct fmc_mail_ctx *c,
+                                     struct fmc_compact_refs *refs)
+{
+    for (size_t i = 0; i < json_size(fresh) &&
+         (long long)i + c->shown < c->changes_cap; i++) {
+        struct fmc_row row;
+        if (!fmc_row_parse(json_at(fresh, i), &row) ||
+            (strcmp(row.kind, "directive") != 0 &&
+             !fmc_sent_by_us(c->sent_path, row.seq, row.to)))
+            continue;
+        if (refs->count == FMC_CHANGES_MAX) return false;
+        refs->refs[refs->count++] = row.ref;
+    }
+    return true;
+}
+
+static bool fmc_brief_compact_history(const struct zcl_command_request *req,
+                                      struct fmc_mail_ctx *c,
+                                      struct json_value *missing,
+                                      struct fmc_mail_view *view,
+                                      const struct json_value *fresh)
+{
+    struct fmc_compact_refs refs = {0};
+    struct json_value history;
+    long long cursor = -1;
+    char why[128];
+    const char *fail = NULL;
+    json_init(&history);
+    json_set_array(&history);
+    if (!fmc_compact_collect_refs(fresh, c, &refs))
+        fail = "history_ref_cap";
+    else if (refs.count)
+        fail = fmc_mail_drain_filtered(req, &history, &cursor, "", NULL, 0,
+                                       why, sizeof(why), true, NULL,
+                                       fmc_compact_keep_ref, &refs);
+    if (fail) {
+        fmc_note_missing(missing, "dev.agent.mail", fail, 0);
+        view->cursor_token[0] = 0;
+        view->ok = false;
+        view->forward = false;
+    } else {
+        view->ok = true;
+        view->forward = true;
+        fmc_brief_token_changes(c, fresh, &history, view);
+    }
+    json_free(&history);
+    return !fail;
 }
 
 static long long fmc_brief_mail(const struct zcl_command_request *req,
@@ -3926,11 +4010,17 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     json_set_array(&rows);
     if (compact && resume_state > 0) {
         view->count = -1;
-        int empty = fmc_brief_compact_empty(req, missing, view, resume);
+        int empty = fmc_brief_compact_probe(req, missing, view, resume, &rows);
         if (empty != 0) {
             json_free(&rows);
             return view->cursor;
         }
+        if (!fmc_brief_compact_history(req, c, missing, view, &rows)) {
+            json_free(&rows);
+            return view->cursor;
+        }
+        json_free(&rows);
+        return view->cursor;
     }
     t0 = clock_now_wall_ms();
     fail = fmc_mail_drain_from(req, &rows, &view->cursor, "",
@@ -5080,12 +5170,10 @@ static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lis
         (void)json_push_kv(&reply->data, "blockers", &l->blockers);
         (void)json_push_kv(&reply->data, "capacity", &l->capacity);
     }
-    struct json_value compact_summary;
-    json_init(&compact_summary); json_set_object(&compact_summary);
-    zcl_fmc_cand_emit(&l->cand, &l->candidates,
-                       changes_only ? &compact_summary : &reply->data, &l->missing);
-    json_free(&compact_summary);
-    if (!changes_only) (void)json_push_kv(&reply->data, "candidates", &l->candidates);
+    if (!changes_only) {
+        zcl_fmc_cand_emit(&l->cand, &l->candidates, &reply->data, &l->missing);
+        (void)json_push_kv(&reply->data, "candidates", &l->candidates);
+    }
     return true;
 }
 
@@ -5132,10 +5220,6 @@ static void fmc_compact_read_failure(struct zcl_command_reply *reply,
                                      struct fmc_brief_lists *l,
                                      const struct fmc_caller *caller)
 {
-    struct json_value summary;
-    json_init(&summary); json_set_object(&summary);
-    zcl_fmc_cand_emit(&l->cand, &l->candidates, &summary, &l->missing);
-    json_free(&summary);
     bool ok = fmc_caller_emit(&reply->data, caller) &&
         json_push_kv_bool(&reply->data, "snapshot_included", false) &&
         json_push_kv_str(&reply->data, "changes_scope", "mail") &&

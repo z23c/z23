@@ -39,6 +39,10 @@
 #include "../../../tools/dev/dev_proof_receipt.h"
 #include "../../../tools/dev/dev_proof.h"
 
+#ifdef ZCL_TESTING
+void zcl_fleet_steer_test_set_before_history_copy(void (*hook)(void));
+#endif
+
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6869,6 +6873,217 @@ static bool fmx_compact_page(struct fmx_call *call, const char *token, size_t bu
     return fmx_run(call, zcl_native_handle_fleet_steer_brief) && fmx_ok(call);
 }
 
+static bool fmx_json_equal(const struct json_value *a, const struct json_value *b);
+
+static bool fmx_compact_limit(struct fmx_call *call, const char *token, long long limit)
+{
+    fmx_brief_since(call, NULL, token);
+    (void)json_push_kv_bool(&call->input, "changes_only", true);
+    (void)json_push_kv_int(&call->input, "limit", limit);
+    call->request.budget_bytes = 65536;
+    return fmx_run(call, zcl_native_handle_fleet_steer_brief) && fmx_ok(call);
+}
+
+static int fmx_compact_backlog(void)
+{
+    int failures = 0;
+    TEST("steer: compact small pages ignore unreturned history refs") {
+        ASSERT(fmx_forward_setup("compact_many_refs"));
+        for (int i = 1; i <= 70; ++i) {
+            char ref[32];
+            (void)snprintf(ref, sizeof(ref), "backlog-%03d", i);
+            fmx_seed_inbox("many", "2026-09-20T00:00:00Z", i, "a", "b",
+                           "directive", "work", ref);
+        }
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, "0|", 1, 65536));
+        ASSERT(fmx_compact_limit(&compact, "0|", 1));
+        ASSERT_EQ(fmx_changes_n(&compact), 1);
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        char token[4096];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact);
+        ASSERT(fmx_compact_limit(&compact, token, 1));
+        ASSERT_STR_EQ(fmx_wstr(json_at(fmx_arr(&compact, "changes"), 0), "ref"), "backlog-002");
+        fmx_end(&compact); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_long_refs(void)
+{
+    int failures = 0;
+    TEST("steer: compact history distinguishes long imported refs") {
+        ASSERT(fmx_forward_setup("compact_long_refs"));
+        char a[131], b[131];
+        memset(a, 'x', 129); a[128] = 'a'; a[129] = 0;
+        memset(b, 'x', 129); b[128] = 'b'; b[129] = 0;
+        fmx_seed_inbox("long", "2026-09-20T00:00:00Z", 1, "a", "b", "directive", "work", a);
+        fmx_seed_inbox("long", "2026-09-20T00:00:01Z", 2, "a", "b", "directive", "work", b);
+        fmx_seed_inbox("long", "2026-09-20T00:00:02Z", 3, "b", "a", "result", "done", b);
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, "0|", 2, 65536));
+        ASSERT(fmx_compact_limit(&compact, "0|", 2));
+        ASSERT_EQ(fmx_changes_n(&compact), 2);
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_result_variants(void)
+{
+    int failures = 0;
+    TEST("steer: compact pages retain result-ref variants and ignore collisions") {
+        ASSERT(fmx_forward_setup("compact_result_variants"));
+        fmx_seed_inbox("variant", "2026-09-20T00:00:00Z", 1, "a", "b", "directive", "work", "foo");
+        fmx_seed_inbox("variant", "2026-09-20T00:00:01Z", 2, "a", "b", "directive", "work", "a-b");
+        fmx_seed_inbox("variant", "2026-09-20T00:00:02Z", 3, "b", "a", "result", "done", "foo-result");
+        fmx_seed_inbox("variant", "2026-09-20T00:00:03Z", 4, "b", "a", "result", "done", "a-result-b");
+        fmx_seed_inbox("variant", "2026-09-20T00:00:04Z", 5, "b", "a", "result", "unrelated", "foo-resultx");
+        char token[4096] = "0|";
+        for (int i = 0; i < 2; ++i) {
+            struct fmx_call full, compact;
+            ASSERT(fmx_forward_page(&full, token, 1, 4096));
+            ASSERT(fmx_compact_limit(&compact, token, 1));
+            const struct json_value *change = json_at(fmx_arr(&compact, "changes"), 0);
+            ASSERT(change && json_get(json_get(change, "reply"), "state"));
+            ASSERT_STR_EQ(fmx_wstr(json_get(change, "reply"), "state"), "answered");
+            ASSERT_EQ(json_get_int(json_get(json_get(change, "reply"), "answer_seq")), i == 0 ? 3 : 4);
+            ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+            ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+            (void)snprintf(token, sizeof(token), "%s", fmx_str(&compact, "cursor_token"));
+            fmx_end(&full); fmx_end(&compact);
+        }
+        fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_variant_budget(void)
+{
+    int failures = 0;
+    TEST("steer: byte-limited compact pages retain result variants") {
+        ASSERT(fmx_forward_setup("compact_variant_budget"));
+        char body[1300]; memset(body, 'x', sizeof(body) - 1); body[sizeof(body) - 1] = 0;
+        for (int i = 1; i <= 8; ++i) {
+            char ref[32], answer[40];
+            (void)snprintf(ref, sizeof(ref), "budget-%02d", i);
+            (void)snprintf(answer, sizeof(answer), "budget-result-%02d", i);
+            fmx_seed_inbox("variant-budget", "2026-09-20T00:00:00Z", i, "a", "b", "directive", body, ref);
+            fmx_seed_inbox("variant-budget", "2026-09-20T00:00:01Z", i + 8, "b", "a", "result", "done", answer);
+        }
+        struct fmx_call full, compact;
+        /* Compare the compact byte-limited prefix with a full page of the
+         * same length: the full envelope needs a larger byte budget. */
+        ASSERT(fmx_compact_page(&compact, "0|", 4096));
+        ASSERT(fmx_changes_n(&compact) > 0 && fmx_changes_n(&compact) < 8);
+        ASSERT(json_get_int(json_get(fmx_get(&compact, "budget_truncated"), "changes")) > 0);
+        ASSERT(fmx_forward_page(&full, "0|", fmx_changes_n(&compact), 65536));
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        char token[4096];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact);
+        ASSERT(fmx_compact_page(&compact, token, 4096));
+        ASSERT(fmx_changes_n(&compact) > 0);
+        ASSERT(fmx_forward_page(&full, token, fmx_changes_n(&compact), 65536));
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_variant_conflict(void)
+{
+    int failures = 0;
+    TEST("steer: compact variant replies retain historical conflicts") {
+        ASSERT(fmx_forward_setup("compact_variant_conflict"));
+        fmx_seed_inbox("old", "2026-09-20T00:00:00Z", 1, "a", "b", "directive", "attempt=1", "duel");
+        struct fmx_call checkpoint;
+        ASSERT(fmx_forward_page(&checkpoint, "0|", 8, 65536));
+        char token[4096];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&checkpoint, "cursor_token"));
+        fmx_end(&checkpoint);
+        fmx_seed_inbox("new", "2026-09-20T00:00:01Z", 2, "a", "b", "directive", "attempt=1", "duel");
+        fmx_seed_inbox("new", "2026-09-20T00:00:02Z", 3, "b", "a", "result", "done", "duel-result");
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, token, 8, 65536));
+        ASSERT(fmx_compact_page(&compact, token, 65536));
+        ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "a", "duel"), "state"), "ambiguous");
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
+#ifdef ZCL_TESTING
+static unsigned g_fmx_history_copy_calls;
+static void fmx_history_copy_count(void) { g_fmx_history_copy_calls++; }
+static void fmx_history_copy_fault(void)
+{
+    zcl_alloc_fault_fail_nth("json_copy_str", 1);
+}
+#endif
+
+static int fmx_compact_empty_ref(void)
+{
+    int failures = 0;
+#ifdef ZCL_TESTING
+    TEST("steer: compact empty-ref directive hydrates matching history") {
+        ASSERT(fmx_forward_setup("compact_empty_ref"));
+        fmx_seed_inbox("empty", "2026-09-20T00:00:00Z", 1, "a", "b",
+                       "directive", "work", "");
+        fmx_seed_inbox("empty", "2026-09-20T00:00:01Z", 2, "b", "a",
+                       "note", "other", "other-ref");
+        struct fmx_call full, compact;
+        ASSERT(fmx_forward_page(&full, "0|", 1, 65536));
+        g_fmx_history_copy_calls = 0;
+        zcl_fleet_steer_test_set_before_history_copy(fmx_history_copy_count);
+        bool passed = fmx_compact_limit(&compact, "0|", 1);
+        zcl_fleet_steer_test_set_before_history_copy(NULL);
+        ASSERT(passed && g_fmx_history_copy_calls == 1);
+        ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
+        ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
+        fmx_end(&full); fmx_end(&compact); fmx_restore(); PASS();
+    } _test_next:;
+    zcl_fleet_steer_test_set_before_history_copy(NULL);
+#endif
+    fmx_restore(); return failures;
+}
+
+static int fmx_compact_copy_failure(void)
+{
+    int failures = 0;
+#ifdef ZCL_TESTING
+    TEST("steer: history copy allocation failure refuses without cursor") {
+        ASSERT(fmx_forward_setup("compact_copy_failure"));
+        fmx_seed_inbox("fault", "2026-09-20T00:00:00Z", 1, "a", "b",
+                       "directive", "work", "copy-fault");
+        struct fmx_call call;
+        zcl_fleet_steer_test_set_before_history_copy(fmx_history_copy_fault);
+        bool passed = fmx_compact_limit(&call, "0|", 1);
+        bool hit = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        zcl_fleet_steer_test_set_before_history_copy(NULL);
+        ASSERT(!passed && hit);
+        ASSERT(fmx_get(&call, "cursor_token") == NULL || !fmx_str(&call, "cursor_token")[0]);
+        ASSERT_EQ(fmx_changes_n(&call), -1);
+        fmx_end(&call);
+        ASSERT(fmx_compact_limit(&call, "0|", 1));
+        ASSERT_EQ(fmx_changes_n(&call), 1);
+        fmx_end(&call); fmx_restore(); PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    zcl_fleet_steer_test_set_before_history_copy(NULL);
+#endif
+    fmx_restore(); return failures;
+}
+
 static bool fmx_json_equal(const struct json_value *a, const struct json_value *b)
 {
     char left[32768], right[32768];
@@ -6902,9 +7117,11 @@ static int fmx_compact_equivalence(void)
         ASSERT_STR_EQ(fmx_str(&compact, "changes_scope"), "mail");
         ASSERT(fmx_get(&compact, "workers") == NULL && fmx_get(&compact, "sessions") == NULL);
         ASSERT(fmx_get(&compact, "tasks") == NULL && fmx_get(&compact, "candidates") == NULL);
+        ASSERT(fmx_get(&compact, "candidates_total") == NULL && fmx_get(&compact, "candidates_complete") == NULL);
+        ASSERT(!fmx_missing_has(&compact, "candidates.board"));
         ASSERT(fmx_get(&compact, "caller") && fmx_get(&compact, "evidence") && fmx_get(&compact, "missing"));
         ASSERT_EQ(fmx_evidence_int(&full, "mail_count"), 2);
-        ASSERT_EQ(fmx_evidence_int(&compact, "mail_count"), 2);
+        ASSERT(json_is_null(json_get(fmx_get(&compact, "evidence"), "mail_count")));
         g_fmx_compact_probe_calls = 0;
         zcl_devagent_mail_test_set_after_brief_probe(fmx_compact_probe);
         struct fmx_call empty;
@@ -6931,6 +7148,8 @@ static int fmx_compact_lifecycle(void)
         ASSERT(fmx_forward_setup("compact_historical_conflict"));
         fmx_seed_inbox("history", "2026-09-20T00:00:00Z", 1, "oauth", "worker-b",
                        "directive", "attempt=1", "duel");
+        fmx_seed_inbox("history-fail", "2026-09-20T00:00:00Z", 1, "oauth", "worker",
+                       "note", "prime", "prime");
         struct fmx_call checkpoint;
         ASSERT(fmx_forward_page(&checkpoint, "0|", 8, 65536));
         char token[4096];
@@ -7038,6 +7257,62 @@ static int fmx_compact_budget(void)
         fmx_end(&stalled); fmx_restore(); PASS();
     } _test_next:;
     fmx_restore(); return failures;
+}
+
+static unsigned g_fmx_history_fail_calls;
+static void fmx_history_fail_probe(void)
+{
+    if (g_fmx_history_fail_calls++ > 0) {
+        char path[1200];
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/mail/inbox.history-fail.jsonl",
+                       g_fmx_state);
+        (void)chmod(path, 0000);
+    }
+}
+
+static int fmx_compact_history_failure(void)
+{
+    int failures = 0;
+    TEST("steer: lifecycle history failure after fresh rows refuses cursor") {
+        ASSERT(fmx_forward_setup("compact_history_failure"));
+        fmx_seed_inbox("history-fail", "2026-09-20T00:00:00Z", 1, "oauth", "worker",
+                       "note", "prime", "prime");
+        struct fmx_call checkpoint;
+        bool first_ran = fmx_compact_page(&checkpoint, "0|", 65536);
+        if (!first_ran)
+            printf("history checkpoint refusal code=%s missing=%s\n",
+                   checkpoint.reply.error.code,
+                   fmx_missing_reason(&checkpoint, "dev.agent.mail"));
+        ASSERT(first_ran);
+        char token[4096];
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&checkpoint, "cursor_token"));
+        fmx_end(&checkpoint);
+        fmx_seed_inbox("history-fail", "2026-09-20T00:00:01Z", 2, "oauth", "worker",
+                       "directive", "bounded request", "duel");
+        g_fmx_history_fail_calls = 0;
+        zcl_devagent_mail_test_set_after_brief_probe(fmx_history_fail_probe);
+        struct fmx_call failed;
+        bool ran = fmx_compact_page(&failed, token, 65536);
+        printf("history drain probes=%u missing=%s\n", g_fmx_history_fail_calls,
+               fmx_missing_reason(&failed, "dev.agent.mail"));
+        zcl_devagent_mail_test_set_after_brief_probe(NULL);
+        {
+            char path[1200];
+            (void)snprintf(path, sizeof(path), "%s/z23/dev/mail/inbox.history-fail.jsonl",
+                           g_fmx_state);
+            (void)chmod(path, 0600);
+        }
+        ASSERT(!ran);
+        ASSERT(fmx_missing_reason(&failed, "dev.agent.mail")[0]);
+        ASSERT(!fmx_missing_has(&failed, "candidates.board"));
+        ASSERT(fmx_get(&failed, "candidates") == NULL && fmx_get(&failed, "candidates_total") == NULL);
+        ASSERT(fmx_get(&failed, "cursor_token") == NULL || !fmx_str(&failed, "cursor_token")[0]);
+        fmx_end(&failed);
+        fmx_restore(); PASS();
+    } _test_next:;
+    zcl_devagent_mail_test_set_after_brief_probe(NULL);
+    fmx_restore();
+    return failures;
 }
 
 static int fmx_compact_stale(void)
@@ -7413,6 +7688,8 @@ static int fmx_t_board_refusal_reason(void)
     };
     TEST("steer: board pagination refusal preserves unread coverage without leaking posts") {
         ASSERT(fmx_forward_setup("board_refusal_reason"));
+        fmx_seed_inbox("board-refusal", "2026-09-20T00:00:00Z", 1, "a", "b",
+                       "note", "mail stream", "board-refusal");
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             struct fmx_call call;
             g_fmx_board_body = cases[i].body;
@@ -7436,6 +7713,15 @@ static int fmx_t_board_refusal_reason(void)
                 ASSERT(!fmx_missing_has(&call, "fleet.board"));
                 ASSERT(!fmx_missing_has(&call, "candidates.board"));
             }
+            fmx_end(&call);
+            node_rpc_client_set_test_hook(fmx_board_body_rpc);
+            ASSERT(fmx_compact_page(&call, "0|", 65536));
+            node_rpc_client_set_test_hook(fmx_no_node);
+            ASSERT(!fmx_missing_has(&call, "candidates.board"));
+            if (cases[i].reason)
+                ASSERT_STR_EQ(fmx_missing_reason(&call, "fleet.board"), cases[i].reason);
+            else
+                ASSERT(!fmx_missing_has(&call, "fleet.board"));
             fmx_end(&call);
         }
         PASS();
@@ -7892,8 +8178,16 @@ int test_fleet_steer(void)
     failures += fmx_compact_lifecycle();
     failures += fmx_compact_cross_stream();
     failures += fmx_compact_input();
+    failures += fmx_compact_backlog();
+    failures += fmx_compact_long_refs();
+    failures += fmx_compact_result_variants();
+    failures += fmx_compact_variant_budget();
+    failures += fmx_compact_variant_conflict();
+    failures += fmx_compact_copy_failure();
+    failures += fmx_compact_empty_ref();
     failures += fmx_compact_budget();
     failures += fmx_compact_stale();
+    failures += fmx_compact_history_failure();
     failures += fmx_compact_multi();
     failures += fmx_compact_authority();
     failures += fmx_t_forward_prefix();
