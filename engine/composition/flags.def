@@ -2055,6 +2055,8 @@ Z23_FLAG("ZCL_REFLEX_ZCODE_PACKAGE_VIEW_ACCEPTANCE_OUTPUT", "env_build", "-", "-
           "undocumented; first use tools/dev/reflex-hotfork-zcode-package-view-acceptance.sh:auto")
 Z23_FLAG("ZCL_REFLEX_ZCODE_WORK_ACCEPTANCE_OUTPUT", "env_build", "-", "-",
           "undocumented; first use tools/dev/reflex_hotfork_shop.c:auto")
+Z23_FLAG("ZCL_REGTEST_SHAPES_RECORD", "env_test", "-", "-",
+          "first use tests/harness/src/test_wallet_tx_matrix_regtest.c:auto; set to 1 to re-record the regtest reply-shape fixtures under tests/fixtures/z23wallet instead of checking them")
 Z23_FLAG("ZCL_REINDEX_REFUSE_MISSING_BODY", "env_build", "0", "-",
           "reindex_smoke.sh: clean 50-block isolated H25 payload damage must refuse without authority loss, then restored full replay must finish within one 120-second deadline; incompatible with KILL_MID")
 Z23_FLAG("ZCL_REINDEX_REQUIRE_TEETH", "env_build", "0", "-",

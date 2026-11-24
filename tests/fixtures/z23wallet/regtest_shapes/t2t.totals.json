@@ -1,0 +1,1 @@
+{"case":"t2t.totals","request":["z_gettotalbalance"],"exit":0,"reply":{"transparent":"61.49999900","private":"0.00000000","encumbered":"0.00000000","total":"61.49999900","transparent_source":"memory","transparent_sources_agree":true,"wallet_height":108,"chain_height":108,"memory_confirmed_transactions":6,"durable_confirmed_transactions":6}}

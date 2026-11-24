@@ -1,0 +1,1 @@
+{"case":"legacy.z_validateaddress","request":["z_validateaddress","zregtestsapling1c9f068c4lmcj0jft9kjx4q5224pf62eytehf0z3k8q3a7wuzl3zdptr9c8tc7kvft5cwgxqm9ee"],"exit":2,"reply":"error=UNKNOWN_COMMAND detail=no such command 'z_validateaddress' try=z23 discover search z_validateaddress"}

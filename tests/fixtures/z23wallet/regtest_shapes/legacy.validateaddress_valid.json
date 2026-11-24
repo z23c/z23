@@ -1,0 +1,1 @@
+{"case":"legacy.validateaddress_valid","request":["validateaddress","tmLRMgaNqwsNhJcQ725cbgiGr2HJ5FSnqV5"],"exit":0,"reply":{"address":"tmLRMgaNqwsNhJcQ725cbgiGr2HJ5FSnqV5","isvalid":true,"type":"pubkeyhash","isscript":false,"ismine":true,"pubkey":"021194c52503fb12f42cbc72c6233ba60f72e0237b7818e72b29389cef525bf233","iscompressed":true}}

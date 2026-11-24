@@ -1,0 +1,1 @@
+{"case":"legacy.z_getoperationresult","request":["z_getoperationresult"],"exit":2,"reply":"error=UNKNOWN_COMMAND detail=no such command 'z_getoperationresult' try=z23 discover search z_getoperationresult"}

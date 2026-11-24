@@ -1908,6 +1908,7 @@ static bool group_is_params_heavy(const char *name)
     return strcmp(name, "sapling") == 0 ||
            strcmp(name, "simnet_sapling_shielded_send") == 0 ||
            strcmp(name, "wallet_e2e_regtest") == 0 ||
+           strcmp(name, "wallet_tx_matrix_regtest") == 0 ||
            strcmp(name, "simnet_shielded_wallet_e2e") == 0 ||
            strcmp(name, "simnet_zmsg_onchain") == 0 ||
            strcmp(name, "snark_kat") == 0 ||

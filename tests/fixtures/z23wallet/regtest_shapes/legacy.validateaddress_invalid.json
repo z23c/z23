@@ -1,0 +1,1 @@
+{"case":"legacy.validateaddress_invalid","request":["validateaddress","notanaddress"],"exit":0,"reply":{"address":"notanaddress","isvalid":false}}

@@ -1,0 +1,1 @@
+{"case":"legacy.z_getoperationstatus","request":["z_getoperationstatus"],"exit":2,"reply":"error=UNKNOWN_COMMAND detail=no such command 'z_getoperationstatus' try=z23 discover search z_getoperationstatus"}

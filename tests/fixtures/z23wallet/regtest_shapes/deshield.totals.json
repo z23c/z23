@@ -1,0 +1,1 @@
+{"case":"deshield.totals","request":["z_gettotalbalance"],"exit":0,"reply":{"transparent":"56.99999700","private":"3.49999700","encumbered":"0.00000000","total":"60.49999400","transparent_source":"memory","transparent_sources_agree":true,"wallet_height":143,"chain_height":143,"memory_confirmed_transactions":11,"durable_confirmed_transactions":11}}

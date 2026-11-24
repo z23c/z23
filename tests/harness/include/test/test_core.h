@@ -891,6 +891,7 @@ int test_simnet_input_value_range(void);
 int test_simnet_sapling_activation(void);
 int test_simnet_sapling_shielded_send(void);
 int test_wallet_e2e_regtest(void);
+int test_wallet_tx_matrix_regtest(void);
 int test_simnet_wallet_import_backup(void);
 int test_simnet_zmsg_onchain(void);
 int test_coinbase_subsidy_adversarial(void);
