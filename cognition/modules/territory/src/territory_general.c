@@ -301,9 +301,10 @@ static bool tg_registry_binding(const char *row, char name[128], char base[128])
     if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_]) %n",
                name, base, mode, &used) != 3 || used == 0 || row[used]) {
         used = 0;
-        if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_], %31[A-Z_]) %n",
+        if (sscanf(row, "LINT_GATE(\"%127[^\"]\", %127[a-zA-Z0-9_], %31[A-Z_], %31[A-Z_0-9]) %n",
                    name, base, mode, class_name, &used) != 4 || used == 0 ||
-            row[used] || strcmp(class_name, "LINT_PRECHECK_HEAVY") != 0)
+            row[used] || (strcmp(class_name, "0") != 0 &&
+                          strcmp(class_name, "LINT_PRECHECK_HEAVY") != 0))
             return false;
     }
     if (strcmp(mode, "LINT_CMD_NONE") && strcmp(mode, "LINT_CMD_PLAIN") &&

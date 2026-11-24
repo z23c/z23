@@ -671,8 +671,28 @@ int test_territory(void)
         ASSERT_EQ(nb->refuses[0].baseline_rows, 1);
         territory_brief_free(nb);
         territory_gates_free(native);
+        const char *valid_rows[] = {
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE)\n",
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, 0)\n",
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, LINT_PRECHECK_HEAVY)\n"
+        };
+        for (size_t i = 0; i < sizeof(valid_rows) / sizeof(valid_rows[0]); i++) {
+            ASSERT(terr_write(TERR_FIX, "tools/lint/lintc/gates.def", valid_rows[i]));
+            native = territory_gates_open(TERR_FIX, ci, gnames, gcount);
+            ASSERT(native != NULL);
+            nb = territory_brief_build(ci, TERR_FIX, "platform/modules/base", rs,
+                                       &frouter, native, NULL);
+            ASSERT(nb != NULL);
+            ASSERT_EQ(nb->gates_binding, 1);
+            ASSERT_EQ(nb->refusal_count, 1);
+            ASSERT_STR_EQ(nb->refuses[0].gate, "check-base-shape");
+            territory_brief_free(nb);
+            territory_gates_free(native);
+        }
         const char *bad_rows[] = {
             "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, UNKNOWN)\n",
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, 00)\n",
+            "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, 0, EXTRA)\n",
             "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, LINT_PRECHECK_HEAVY) trailing\n",
             "LINT_GATE(\"check-base-shape\", fixture_base, LINT_CMD_NONE, LINT_PRECHECK_HEAVY, EXTRA)\n"
         };
