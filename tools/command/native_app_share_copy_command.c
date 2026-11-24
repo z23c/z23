@@ -24,6 +24,14 @@
  * plan shows the same closure and env roots (app_copy_build_carry), and the
  * copy opens again without a rebuild. Otherwise the reply says to build.
  *
+ * A copy with no regular root Makefile is the recipe form: app open opens
+ * its kept install, not a build record, and nothing carries across roots.
+ * The share then answers opens_now as app open's own read-only checks do
+ * for the tree it just signed (adoption, the package roots, the filed
+ * receipt, one bin/ program and that program verified against the
+ * receipt); when it does not open, build_note names the first refusal and
+ * the build hint names the datadir the share ran in.
+ *
  * The reply tells the owner what the friend will be asked to confirm (the
  * short and full publisher fingerprint and the exact package root of the
  * shared release, the values the friend's `z23 app open FILE.z23share`
@@ -41,6 +49,8 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/file_metadata.h"
+#include "services/package_lifecycle.h"
+#include "services/package_resident.h"
 #include "util/authority_receipt.h"
 #include "plugin/plugin_dist.h"
 #include "plugin/plugin_pack.h"
@@ -336,13 +346,142 @@ static bool zsh_key_make(struct zsh *z)
     return z->have_key;
 }
 
+/* ── the recipe form: what app open's read-only checks answer ───────── */
+
+#if !defined(_WIN32)
+/* The build-form rule app.build and app open route by: a regular root
+ * Makefile is the make form, where the share stays as it was. */
+static bool zsh_recipe_form(const struct zsh *z)
+{
+    char path[APP_COPY_BUILD_PATH];
+    struct stat st;
+    return zcl_path_join(path, sizeof(path), z->dir, "Makefile") &&
+           !(lstat(path, &st) == 0 && S_ISREG(st.st_mode));
+}
+
+/* The adoption app open requires, refused as it refuses it. */
+static bool zsh_adopted(struct zsh *z, const struct zcl_package_copy *copy,
+                        struct zcl_command_reply *why)
+{
+    enum zcl_package_copy_adoption a =
+        zcl_package_copy_adopted(z->datadir, copy, NULL);
+    if (a == ZCL_PACKAGE_COPY_ADOPTED || a == ZCL_PACKAGE_COPY_RECEIVED_TRUSTED)
+        return true;
+    zcl_package_copy_fail(why, "NOT_ADOPTED", false, "only an adopted copy, "
+                          "or a received copy whose publisher and root the "
+                          "owner confirmed, opens",
+                          zcl_package_copy_adoption_name(a));
+    return false;
+}
+
+/* The kept install of this exact package, as app open inspects it: the
+ * filed and revalidated receipt, one bin/ program, and that program
+ * verified against the receipt. 1 when it opens, 0 when nothing is
+ * installed for this root, -1 with the refusal in why. */
+static int zsh_recipe_kept(struct zsh *z, const uint8_t package_root[32],
+                           struct zcl_command_reply *why)
+{
+    struct package_lifecycle_step step;
+    struct package_lifecycle_programs programs;
+    struct package_resident_artifact installed;
+    bool here = false;
+    struct zcl_result r = package_lifecycle_installed_inspect(z->datadir,
+        package_root, &step, &here);
+    if (!r.ok) {
+        zcl_package_copy_fail(why, "RECIPE_OPEN_REFUSED", false,
+                              "the kept install could not be inspected",
+                              r.message);
+        return -1;
+    }
+    if (!here)
+        return 0;
+    if (!step.has_receipt) {
+        zcl_package_copy_fail(why, "RECIPE_OPEN_REFUSED", false,
+                              "the kept install has no build receipt", z->dir);
+        return -1;
+    }
+    r = package_lifecycle_installed_programs(z->datadir, package_root,
+                                             &programs);
+    if (!r.ok || programs.count == 0 ||
+        strncmp(programs.output[0], "bin/", 4) != 0) {
+        zcl_package_copy_fail(why, "RECIPE_OPEN_REFUSED", false,
+                              "the kept install names no bin/ program",
+                              r.ok ? z->dir : r.message);
+        return -1;
+    }
+    r = package_resident_artifact_read(z->datadir, package_root,
+                                       step.receipt_id, programs.output[0],
+                                       &installed);
+    if (!r.ok) {
+        zcl_package_copy_fail(why, "RECIPE_OPEN_REFUSED", false,
+                              "the installed program did not verify against "
+                              "its receipt", r.message);
+        return -1;
+    }
+    return 1;
+}
+
+/* What app open says of a saved tree with no kept install: this version
+ * was never built. The fork is the saved copy's own. The store path names
+ * why when even that is refused. */
+static void zsh_recipe_unbuilt(struct zsh *z, const uint8_t fork[32],
+                               struct zcl_command_reply *why)
+{
+    struct app_copy_build_store store;
+    struct stat st;
+    if (!app_copy_build_store(z->datadir, fork, &store, why))
+        return;
+    if (stat(store.work, &st) == 0)
+        zcl_package_copy_fail(why, "STALE_BUILD", false, "this saved version "
+                              "(or toolchain) is not built yet; run z23 app "
+                              "build first", z->name);
+    else
+        zcl_package_copy_fail(why, "NOT_BUILT", false, "this copy has not "
+                              "been built; run z23 app build first", z->name);
+}
+
+/* Whether the recipe-form copy just signed opens now, read as app open
+ * reads it and never failing the share: the reply names the first check
+ * that says it does not. */
+static void zsh_recipe_ready(struct zsh *z)
+{
+    struct zcl_command_reply why;
+    struct zcl_package_copy copy;
+    uint8_t package_root[32], dependency_root[32];
+    int kept = -1;
+    zcl_command_reply_init(&why, "zcl.app_share.inner.v1");
+    if (zcl_package_copy_open_as(z->dir, ZCL_PACKAGE_COPY_READ, &copy, &why,
+                                 ZSH_COMMAND)) {
+        if (zsh_adopted(z, &copy, &why) &&
+            app_copy_build_roots(z->datadir, z->dir, &copy, package_root,
+                                 dependency_root, &why))
+            kept = zsh_recipe_kept(z, package_root, &why);
+        if (kept == 0)
+            zsh_recipe_unbuilt(z, copy.fork_version, &why);
+        zcl_package_copy_close(&copy);
+    }
+    z->opens_now = kept > 0;
+    if (!z->opens_now && why.error.code[0])
+        (void)snprintf(z->build_why, sizeof(z->build_why), "%s: %s",
+                       why.error.code, why.error.message);
+    zcl_command_reply_free(&why);
+}
+#endif
+
 /* Whether the copy opens now with no rebuild: its build is current, or the
- * build from before the rename is carried to the renamed tree. Never fails
- * the share: a copy that does not open is told to build. */
+ * build from before the rename is carried to the renamed tree. A recipe
+ * form copy has no build record; app open's own checks answer for it.
+ * Never fails the share: a copy that does not open is told to build. */
 static void zsh_keep_build(struct zsh *z)
 {
     struct app_copy_build_keys now;
     struct zcl_command_reply why;
+#if !defined(_WIN32)
+    if (zsh_recipe_form(z)) {
+        zsh_recipe_ready(z);
+        return;
+    }
+#endif
     zcl_command_reply_init(&why, "zcl.app_share.inner.v1");
     bool keys = app_copy_build_keys(z->datadir, z->dir, &now, &why);
     z->opens_now = keys && now.hit;
@@ -384,7 +523,7 @@ static bool zsh_commit_next(const struct zsh *z, char *next, size_t cap)
                      "friend runs: %s", ZSH_FRIEND_NEEDS, friend_cmd);
     if (n <= 0 || (size_t)n >= cap) return false;
     if (z->opens_now) return true;
-    if (!zcl_app_hint(build, sizeof(build), zcl_package_copy_str(z->input, "datadir"),
+    if (!zcl_app_hint(build, sizeof(build), z->datadir,
                       "build %s", z->name)) return false;
     int appended = snprintf(next + n, cap - (size_t)n, "; run %s before opening your copy again", build);
     return appended > 0 && (size_t)appended < cap - (size_t)n;

@@ -8,6 +8,10 @@
  *      then share, which writes NAME.z23share with a short fingerprint.
  *   B: open FILE.z23share with the confirm injected: verify, receive with
  *      trust taken from the file, build the SAME image_sha3 as A, open.
+ * Share readiness: a recipe-form copy's share answers as app open's own
+ *   read-only checks do for the tree it signed (its kept install), and the
+ *   build it asks for names the datadir the share ran in; a built
+ *   make-form copy's reply is pinned key for key.
  * Refusals:
  *   - MCP refuses app.copy, app.share and app.receive (owner authority) and
  *     runs app.save and app.run.copy plan-first;
@@ -32,6 +36,7 @@
 #include "command/cli_confirm.h"
 #include "command/app_copy_build.h"
 #include "command/app_selection.h"
+#include "command/native_app_compose.h"
 #include "command/native_app_launch.h"
 #include "command/native_app_front_door.h"
 #include "command/native_command.h"
@@ -1251,6 +1256,150 @@ static int afd_changed_dependencies(struct afd_world *w)
     return failures;
 }
 
+/* ── share readiness: what the reply says about opening the copy ────── */
+
+/* What the friend needs, as the share's next line says it. */
+static const char k_friend_needs[] =
+    "Z23 (install instructions: https://z23.sh), a C compiler, make and any "
+    "app-specific build dependencies";
+
+/* The object holds exactly these keys, in this order. */
+static bool afd_keys_in_order(const struct json_value *obj,
+                              const char *const *keys, size_t count)
+{
+    if (obj->num_children != count)
+        return false;
+    for (size_t i = 0; i < count; ++i)
+        if (strcmp(obj->keys[i], keys[i]) != 0)
+            return false;
+    return true;
+}
+
+/* One string field against its pin, naming the field when it differs. */
+static bool afd_pinned(const char *got, const char *key, const char *want)
+{
+    if (strcmp(got, want) == 0)
+        return true;
+    printf("  [%s was \"%s\", wanted \"%s\"]\n", key, got, want);
+    return false;
+}
+
+/* The reply's key is a bool and is `want`. An absent key is not false. */
+static bool afd_flag(const struct afd_leaf *l, const char *key, bool want)
+{
+    const struct json_value *v = json_get(&l->out.data, key);
+    if (!v || v->type != JSON_BOOL || json_get_bool(v) != want) {
+        printf("  [%s was %s, wanted %s]\n", key, !v ? "absent" :
+               v->type != JSON_BOOL ? "not a bool" :
+               json_get_bool(v) ? "true" : "false", want ? "true" : "false");
+        return false;
+    }
+    return true;
+}
+
+/* The reply's key is a non-empty string. */
+static bool afd_present(const struct afd_leaf *l, const char *key)
+{
+    if (afd_get(l, key)[0])
+        return true;
+    printf("  [%s was empty or absent]\n", key);
+    return false;
+}
+
+/* The reply passed, or names its refusal. */
+static bool afd_passed(const struct afd_leaf *l)
+{
+    if (l->out.status == ZCL_COMMAND_STATUS_PASSED)
+        return true;
+    printf("  [%s: %s]\n", l->out.error.code, l->out.error.message);
+    return false;
+}
+
+/* One app.share-copy leaf call as the CLI runs it: the plan, then the same
+ * input with that plan_id and confirm:true. A NULL datadir leaves the key
+ * out, as a person running inside their datadir does. HOME, the working
+ * directory and the process datadir binding are the caller's. */
+static bool afd_share_leaf(struct afd_leaf *l, const char *copy,
+                           const char *datadir, const char *output)
+{
+    char plan[65];
+    afd_open_leaf(l);
+    bool ok = json_push_kv_str(&l->in, "copy", copy) &&
+              (!datadir || json_push_kv_str(&l->in, "datadir", datadir)) &&
+              json_push_kv_str(&l->in, "output", output) &&
+              afd_exec("app.share-copy", l);
+    if (ok)
+        ok = afd_passed(l) && strlen(afd_get(l, "plan_id")) == 64;
+    if (ok) {
+        (void)snprintf(plan, sizeof(plan), "%s", afd_get(l, "plan_id"));
+        zcl_command_reply_free(&l->out);
+        zcl_command_reply_init(&l->out, "zcl.test.app_front_door.v1");
+        ok = json_push_kv_str(&l->in, "plan_id", plan) &&
+             json_push_kv_bool(&l->in, "confirm", true) &&
+             afd_exec("app.share-copy", l);
+    }
+    return ok;
+}
+
+/* The make form's reply for a clean copy already renamed and built, as it
+ * is today: the reply passed, it holds exactly these keys in this order
+ * (so no build_note), and the fields the recipe readiness touches are as
+ * they were. The identity fields are this copy's and this run's: each is
+ * present, none is pinned. */
+static bool afd_make_pin_reply(const struct afd_leaf *l, const char *output)
+{
+    static const char *const keys[] = {"stage", "copy", "name", "release_id",
+        "package_root", "version", "share_file", "publisher_fingerprint",
+        "publisher", "renamed", "opens_now", "friend_needs", "share_line",
+        "next", "executed"};
+    static const char *const identity[] = {"name", "release_id", "package_root",
+        "version", "publisher_fingerprint", "publisher", "share_line"};
+    char next[2 * APP_COPY_BUILD_PATH + 512];
+    (void)snprintf(next, sizeof(next), "send the file; your friend needs %s; "
+                    "your friend runs: z23 app open make-pin.z23share",
+                    k_friend_needs);
+    if (!afd_passed(l) ||
+        !afd_keys_in_order(&l->out.data, keys, sizeof(keys) / sizeof(keys[0])))
+        return false;
+    for (size_t i = 0; i < sizeof(identity) / sizeof(identity[0]); ++i)
+        if (!afd_present(l, identity[i]))
+            return false;
+    return afd_pinned(afd_get(l, "stage"), "stage", "commit") &&
+           afd_pinned(afd_get(l, "copy"), "copy", "tinyapp-1") &&
+           afd_pinned(afd_get(l, "share_file"), "share_file", output) &&
+           afd_flag(l, "renamed", false) && afd_flag(l, "opens_now", true) &&
+           afd_pinned(afd_get(l, "friend_needs"), "friend_needs",
+                      k_friend_needs) &&
+           afd_pinned(afd_get(l, "next"), "next", next);
+}
+
+/* The make form is not the recipe form: this share, of a copy that opens
+ * today, must answer exactly as it did before the recipe readiness. */
+static int afd_share_make_pin(struct afd_world *w)
+{
+    int failures = 0;
+    char output[AFD_PATH];
+    char *old_home = NULL;
+    bool captured = false, opened = false;
+    struct afd_leaf l;
+    (void)snprintf(output, sizeof(output), "%s/make-pin.z23share", w->root);
+    captured = afd_route_env_capture("HOME", &old_home);
+    if (!captured) { printf("  [HOME capture failed]\n"); free(old_home); return 1; }
+    TEST("app.share-copy: a built make-form copy opens now, with its reply "
+         "pinned key for key") {
+        ASSERT(setenv("HOME", w->a_home, 1) == 0);
+        /* The leaf is opened first thing inside, so it is closed from here. */
+        opened = true;
+        ASSERT(afd_share_leaf(&l, "tinyapp-1", w->a_datadir, output));
+        ASSERT(afd_make_pin_reply(&l, output));
+        PASS();
+    } _test_next:;
+    if (opened) afd_close_leaf(&l);
+    if (!afd_route_env_restore("HOME", old_home)) ++failures;
+    free(old_home);
+    return failures;
+}
+
 /* The confirm half makes the owner's signing key on first use; the front
  * door tells the person once, with the path, and not on the next copy. */
 /* ── tasks copy carry: a datadir tasks release flows through the front door ──
@@ -1809,6 +1958,207 @@ static int afd_recipe_open(const struct afd_world *w)
     return failures;
 }
 
+/* ── share readiness: the recipe form answers as app open does ──────── */
+
+/* A second person's recipe share: their HOME and datadir, the two share
+ * replies, and the installed tree as their receive filed it and then as
+ * their build left it. */
+struct afd_ready {
+    char home[AFD_PATH], datadir[AFD_PATH], installed[AFD_PATH];
+    char output[2][AFD_PATH], prior[AFD_PATH];
+    struct afd_leaf reply[2];
+    bool open[2];
+    int port;
+    char *pin;
+};
+
+static void afd_ready_release(struct afd_ready *r)
+{
+    for (size_t i = 0; i < 2; ++i)
+        if (r->open[i]) afd_close_leaf(&r->reply[i]);
+    free(r->pin);
+}
+
+/* A second person opens the recipe share in a fresh HOME and datadir,
+ * which receives and installs it, then shares the copy. Their HOME holds
+ * no key, so that share renames the package: a root nothing was built
+ * for. The share's input names no datadir; the process binding stands in
+ * for the datadir a person runs inside. */
+static int afd_ready_renamed(const struct afd_world *w, struct afd_ready *r)
+{
+    int failures = 0;
+    char share[AFD_PATH];
+    struct asf_door run;
+    (void)snprintf(share, sizeof(share), "%s/tinyprog-1.z23share", w->root);
+    TEST("app.share-copy: a renamed recipe copy says its new root is not "
+         "built") {
+        ASSERT(mkdir(r->home, 0700) == 0 && mkdir(r->datadir, 0700) == 0);
+        /* The checkout as the working directory, as for the first person:
+         * the recipe install resolves the verifier beside build/bin. */
+        asf_door_run(r->home, w->saved_cwd, r->datadir, "open", share,
+                     ZCL_CLI_CONFIRM_YES, &run);
+        if (run.rc != 0)
+            printf("  [second person's open rc=%d text=%s]\n", run.rc,
+                   run.text);
+        ASSERT_EQ(run.rc, 0);
+        /* The Keep their receive filed for the release's own root. */
+        r->pin = afd_snapshot(r->installed);
+        ASSERT(r->pin && strstr(r->pin, "/build-report") &&
+               strstr(r->pin, "/bin/tinyprog"));
+        ASSERT(setenv("HOME", r->home, 1) == 0);
+        zcl_native_bridge_bind_rpc(r->datadir, r->port);
+        r->open[0] = true;
+        ASSERT(afd_share_leaf(&r->reply[0], "tinyprog-1", NULL, r->output[0]));
+        ASSERT(afd_passed(&r->reply[0]));
+        ASSERT(afd_flag(&r->reply[0], "renamed", true));
+        ASSERT(afd_flag(&r->reply[0], "opens_now", false));
+        ASSERT_STR_EQ(afd_get(&r->reply[0], "build_note"),
+                      "NOT_BUILT: this copy has not been built; run z23 app "
+                      "build first");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The build the share asks for is one the second person runs where the share
+ * ran: its hint names that datadir, and so does the next line. */
+static int afd_ready_build_hint(const struct afd_ready *r)
+{
+    int failures = 0;
+    char build[APP_COPY_BUILD_PATH + 64];
+    char want[2 * APP_COPY_BUILD_PATH + 512];
+    TEST("app.share-copy: the build it asks for runs in the datadir the "
+         "share ran in") {
+        ASSERT(r->open[0]);
+        ASSERT(zcl_app_hint(build, sizeof(build), r->datadir, "build %s",
+                            "tinyprog-1"));
+        /* The datadir is in it, so a reply that leaves it out differs. */
+        ASSERT(strstr(build, " -datadir=") != NULL &&
+               strstr(build, " app build tinyprog-1") != NULL);
+        (void)snprintf(want, sizeof(want),
+                       "send the file; your friend needs %s; your friend "
+                       "runs: z23 app open ready-1.z23share; run %s before "
+                       "opening your copy again", k_friend_needs, build);
+        ASSERT_STR_EQ(afd_get(&r->reply[0], "next"), want);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int afd_ready_keep_as_filed(const struct afd_ready *r)
+{
+    int failures = 0;
+    TEST("app.share-copy: a share that says not built leaves the Keep "
+         "already filed") {
+        ASSERT(r->pin != NULL && strstr(r->pin, "/bin/tinyprog"));
+        ASSERT(afd_same(r->pin, r->installed));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* They run the build the share asked for. The next share is of the same
+ * root, now installed and kept, which app open opens: the share says so. */
+static int afd_ready_kept(const struct afd_world *w, struct afd_ready *r)
+{
+    int failures = 0;
+    struct asf_door run;
+    TEST("app.share-copy: a recipe copy whose root is installed opens now") {
+        ASSERT(r->open[0]);
+        asf_door_run(r->home, w->saved_cwd, r->datadir, "build", "tinyprog-1",
+                     ZCL_CLI_CONFIRM_YES, &run);
+        if (run.rc != 0)
+            printf("  [second person's build rc=%d text=%s]\n", run.rc,
+                   run.text);
+        ASSERT_EQ(run.rc, 0);
+        ASSERT(setenv("HOME", r->home, 1) == 0);
+        zcl_native_bridge_bind_rpc(r->datadir, r->port);
+        /* What the build installed, so the share's answer can be held to
+         * leaving it exactly as it is. */
+        free(r->pin);
+        r->pin = afd_snapshot(r->installed);
+        ASSERT(r->pin && strstr(r->pin, "/build-report") &&
+               strstr(r->pin, "/bin/tinyprog"));
+        r->open[1] = true;
+        ASSERT(afd_share_leaf(&r->reply[1], "tinyprog-1", NULL, r->output[1]));
+        ASSERT(afd_passed(&r->reply[1]));
+        ASSERT(afd_flag(&r->reply[1], "renamed", false));
+        ASSERT(afd_flag(&r->reply[1], "opens_now", true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int afd_ready_opens(const struct afd_ready *r)
+{
+    int failures = 0;
+    char want[2 * APP_COPY_BUILD_PATH + 512];
+    TEST("app.share-copy: a copy that opens now carries no build note and "
+         "no build hint") {
+        ASSERT(r->open[1]);
+        ASSERT_STR_EQ(afd_get(&r->reply[1], "build_note"), "");
+        (void)snprintf(want, sizeof(want),
+                       "send the file; your friend needs %s; your friend "
+                       "runs: z23 app open ready-2.z23share", k_friend_needs);
+        ASSERT_STR_EQ(afd_get(&r->reply[1], "next"), want);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int afd_ready_keep_untouched(const struct afd_ready *r)
+{
+    int failures = 0;
+    TEST("app.share-copy: answering leaves the kept install as the build "
+         "wrote it") {
+        ASSERT(r->pin != NULL);
+        ASSERT(afd_same(r->pin, r->installed));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The second person's whole journey: receive, share (renamed), build,
+ * share again. HOME, the working directory and the process datadir
+ * binding are theirs while it runs and as they were after. */
+static int afd_recipe_ready(struct afd_world *w)
+{
+    int failures = 0;
+    struct afd_ready r;
+    char cwd[AFD_PATH];
+    char *old_home = NULL;
+    bool captured = false;
+    memset(&r, 0, sizeof(r));
+    (void)snprintf(r.home, sizeof(r.home), "%s/prog-home2", w->root);
+    (void)snprintf(r.datadir, sizeof(r.datadir), "%s/prog-data2", w->root);
+    (void)snprintf(r.installed, sizeof(r.installed), "%s/zcode/installed",
+                   r.datadir);
+    (void)snprintf(r.output[0], sizeof(r.output[0]), "%s/ready-1.z23share",
+                   w->root);
+    (void)snprintf(r.output[1], sizeof(r.output[1]), "%s/ready-2.z23share",
+                   w->root);
+    (void)snprintf(r.prior, sizeof(r.prior), "%s", zcl_native_command_datadir());
+    r.port = zcl_native_command_rpc_port();
+    captured = afd_route_env_capture("HOME", &old_home) &&
+               getcwd(cwd, sizeof(cwd)) != NULL;
+    if (!captured) {
+        printf("  [HOME capture or the working directory read failed]\n");
+        free(old_home); return 1;
+    }
+    failures += afd_ready_renamed(w, &r);
+    failures += afd_ready_build_hint(&r);
+    failures += afd_ready_keep_as_filed(&r);
+    failures += afd_ready_kept(w, &r);
+    failures += afd_ready_opens(&r);
+    failures += afd_ready_keep_untouched(&r);
+    zcl_native_bridge_bind_rpc(r.prior, r.port);
+    afd_ready_release(&r);
+    if (chdir(cwd) != 0) ++failures;
+    if (!afd_route_env_restore("HOME", old_home)) ++failures;
+    free(old_home);
+    return failures;
+}
+
 static bool afd_verify_share_file(const char *path)
 {
     struct afd_leaf l; afd_open_leaf(&l);
@@ -2005,8 +2355,10 @@ int test_app_front_door(void)
         failures += afd_a_stale(&w);
         failures += afd_a_shares(&w);
     }
-    if (!failures)
+    if (!failures) {
         failures += afd_changed_dependencies(&w);
+        failures += afd_share_make_pin(&w);
+    }
 #if defined(ZCL_TESTING)
     if (!failures)
         failures += afd_share_reply_faults(&w);
@@ -2016,6 +2368,7 @@ int test_app_front_door(void)
         failures += afd_b_review_plans(&w);
         failures += afd_b_receives(&w);
         failures += afd_recipe_open(&w);
+        failures += afd_recipe_ready(&w);
     }
     if (!failures)
         failures += afd_key_note_after_confirm(&w);
