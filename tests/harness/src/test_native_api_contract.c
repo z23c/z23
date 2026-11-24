@@ -1519,6 +1519,58 @@ static int test_uniform_help(void)
     return failures;
 }
 
+#if defined(__linux__)
+static bool host_build_plan_capture(const char *const *args, char *wire,
+                                    size_t cap, char *err, size_t errcap, int *rc)
+{
+    FILE *output = tmpfile();
+    int saved = dup(fileno(stderr));
+    bool ok = false;
+    if (!output || saved < 0 || fflush(stderr) != 0 ||
+        dup2(fileno(output), fileno(stderr)) < 0)
+        goto cleanup;
+    ok = uniform_cli("ops", args, 6, wire, cap, rc) &&
+         fflush(stderr) == 0 && fseek(output, 0, SEEK_SET) == 0;
+    if (ok) {
+        size_t n = fread(err, 1, errcap - 1, output);
+        err[n] = '\0';
+        ok = !ferror(output) && n < errcap - 1;
+    }
+cleanup:
+    ok &= security_restore_fd(saved, stderr);
+    if (output) fclose(output);
+    return ok;
+}
+
+static int test_host_build_child_help(void)
+{
+    int failures = 0, rc = 0, control_rc = 0;
+    char wire[32768], control[32768], err[1024], control_err[1024];
+    TEST_CASE("host build plan passes child help through the delimiter") {
+        const char *args[] = {"host", "build", "--plan", "--", "/bin/echo", "ordinary"};
+        ASSERT(host_build_plan_capture(args, control, sizeof(control), control_err,
+                                       sizeof(control_err), &control_rc));
+        ASSERT((control_rc == 0 && strstr(control, "cpu_quota=") != NULL) ||
+               (control_rc == 75 && control[0] == '\0' &&
+                (strcmp(control_err, "devbuild requires at least eight online CPUs\n") == 0 ||
+                 strcmp(control_err, "devbuild: no build CPU set could be planned\n") == 0)));
+        args[5] = "--help";
+        ASSERT(host_build_plan_capture(args, wire, sizeof(wire), err, sizeof(err), &rc));
+        ASSERT_EQ(rc, control_rc);
+        ASSERT(strcmp(wire, control) == 0 && strcmp(err, control_err) == 0);
+        args[5] = "-h";
+        ASSERT(host_build_plan_capture(args, wire, sizeof(wire), err, sizeof(err), &rc));
+        ASSERT_EQ(rc, control_rc);
+        ASSERT(strcmp(wire, control) == 0 && strcmp(err, control_err) == 0);
+        const char *help[] = {"host", "build", "--help"};
+        ASSERT(uniform_cli("ops", help, 3, wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(wire, "zcl.command_schema.v1") != NULL);
+    } TEST_END
+    return failures;
+}
+#endif
+
 /* Leaves whose raw argv readers once bypassed the generic --help handling or
  * printed text instead of the result envelope. Each must answer --help with
  * its JSON spec, and a run against an empty scratch datadir with no node must
@@ -5047,6 +5099,9 @@ int test_native_api_contract(void)
     failures += test_wallet_spend_rule_refusal_code();
     failures += test_wallet_security_refusal_flags();
     failures += test_uniform_help();
+#if defined(__linux__)
+    failures += test_host_build_child_help();
+#endif
     failures += test_guide_positional_paths();
     failures += test_packet_advertised_example();
     failures += test_packet_input_recovery();

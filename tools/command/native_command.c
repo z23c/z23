@@ -4069,11 +4069,14 @@ static const struct zcl_command_spec *nc_main_resolve(
 /* `--help` / `-h` after the resolved path: answered from the catalog, so no
  * leaf-specific argv transport may consume it first. */
 static bool nc_main_words_request_help(const char *const *words, size_t count,
-                                       size_t consumed)
+                                       size_t consumed, bool stop_at_delimiter)
 {
-    for (size_t i = consumed; i < count; i++)
+    for (size_t i = consumed; i < count; i++) {
+        if (stop_at_delimiter && strcmp(words[i], "--") == 0)
+            break;
         if (strcmp(words[i], "--help") == 0 || strcmp(words[i], "-h") == 0)
             return true;
+    }
     return false;
 }
 
@@ -5044,7 +5047,7 @@ static bool nc_main_is_train(const struct zcl_command_spec *spec)
 static void nc_main_train_flags(struct nc_main_state *st)
 {
     nc_main_flags_reset(st);
-    st->help = nc_main_words_request_help(st->words, st->count, st->consumed);
+    st->help = nc_main_words_request_help(st->words, st->count, st->consumed, false);
 }
 
 static bool nc_main_train_input(struct nc_main_state *st, int *rc)
@@ -5434,7 +5437,8 @@ int zcl_native_command_main_standalone(const char *root_word, const char *const 
     if (!st.spec)
         return rc;
 
-    if (!nc_main_words_request_help(st.words, st.count, st.consumed) &&
+    if (!nc_main_words_request_help(st.words, st.count, st.consumed,
+                                    strcmp(st.spec->path, "ops.host.build") == 0) &&
         nc_main_try_intercepts(st.spec, st.words, st.count, st.consumed,
                                datadir, &rc))
         return rc;
