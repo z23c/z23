@@ -3,5 +3,16 @@
   "description": "Opt-in maintainer tooling: steer gateway (needs a grant), card workflow agents and fleet skills.",
   "author": { "name": "Rhett Creighton" },
   "license": "Apache-2.0",
-  "homepage": "https://github.com/z23c/z23"
+  "homepage": "https://github.com/z23c/z23",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=start >/dev/null", "timeout": 15 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=beat >/dev/null", "timeout": 15 } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "z23 fleet steer presence --hook=end >/dev/null", "timeout": 15 } ] }
+    ]
+  }
 }
