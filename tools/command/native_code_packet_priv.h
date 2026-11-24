@@ -186,4 +186,9 @@ void pk_md_document(struct pk_sb *doc, const struct pk_input *in,
 void pk_slug(const char *goal, char *out, size_t cap);
 const char *pk_size_class(int max_dependents);
 
+#if defined(ZCL_TESTING)
+unsigned zcl_packet_test_take_route_batches(void);
+unsigned zcl_packet_test_take_impact_queries(void);
+#endif
+
 #endif /* ZCL_TOOLS_COMMAND_NATIVE_CODE_PACKET_PRIV_H */

@@ -53,6 +53,17 @@ struct pk_choice {
     char definition_at[300];
 };
 
+struct pk_impact_cache {
+    bool valid;
+    bool truncated;
+    int direct;
+    int transitive;
+    int includes;
+    int ntop;
+    enum codeindex_include_dim dim;
+    char top[PK_TOP_NAMES][256];
+};
+
 /* One assembly of the packet; rebuilt (cache kept) when the reply must shrink. */
 struct pk_run {
     struct pk_ctx ctx;
@@ -71,11 +82,17 @@ struct pk_run {
     const char *routes[PK_TOUCH_MAX];
     bool route_risks[PK_TOUCH_MAX];
     struct specialist_focus_evidence failure;
+    struct pk_impact_cache impact_cache[PK_TOUCH_MAX];
     bool failure_unavailable;
     struct json_value excerpts, files, tests, pattern, impact, caps, auth,
         claims;
     struct pk_sb map, exc, pat, keep, authority, notes;
 };
+
+#if defined(ZCL_TESTING)
+static unsigned pk_route_batches;
+static unsigned pk_impact_queries;
+#endif
 
 static void pk_refuse(struct zcl_command_reply *reply, const char *code,
                       const char *message, const char *evidence)
@@ -824,25 +841,48 @@ static int pk_others(char (*list)[256], int n, const char *self,
     return others;
 }
 
-static bool pk_do_impact(struct pk_run *run, const char *path)
+static bool pk_do_impact(struct pk_run *run, const char *path, int index)
 {
-    static char direct[CODE_IMPACT_CAP][256];
-    static char full[CODE_IMPACT_CAP][256];
-    static char incdeps[CODE_IMPACT_CAP][256];
-    bool t1 = false, t2 = false;
-    int n1 = pk_closure(run->ctx.ci, path, 1, direct, &t1);
-    if (n1 < 0) return false;
-    int n2 = pk_closure(run->ctx.ci, path, 0, full, &t2);
-    if (n2 < 0) return false;
-    enum codeindex_include_dim dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
-    int ni = codeindex_reverse_includes(run->ctx.ci, path, incdeps,
-                                        CODE_IMPACT_CAP, &dim);
-    if (ni < 0) return false;
+    struct pk_impact_cache *cache = &run->impact_cache[index];
+    int d1 = cache->direct;
+    int d2 = cache->transitive;
+    int ni = cache->includes;
+    bool t2 = cache->truncated;
+    enum codeindex_include_dim dim = cache->dim;
     struct json_value o, top;
     pk_obj(&o);
     json_init(&top); json_set_array(&top);
-    int d1 = pk_others(direct, n1, path, NULL);
-    int d2 = pk_others(full, n2, path, &top);
+    if (!cache->valid) {
+        static char direct[CODE_IMPACT_CAP][256];
+        static char full[CODE_IMPACT_CAP][256];
+        static char incdeps[CODE_IMPACT_CAP][256];
+        bool t1 = false;
+#if defined(ZCL_TESTING)
+        pk_impact_queries++;
+#endif
+        int n1 = pk_closure(run->ctx.ci, path, 1, direct, &t1);
+        if (n1 < 0) return false;
+        int n2 = pk_closure(run->ctx.ci, path, 0, full, &t2);
+        if (n2 < 0) return false;
+        ni = codeindex_reverse_includes(run->ctx.ci, path, incdeps,
+                                        CODE_IMPACT_CAP, &dim);
+        if (ni < 0) return false;
+        d1 = pk_others(direct, n1, path, NULL);
+        d2 = pk_others(full, n2, path, &top);
+        cache->direct = d1;
+        cache->transitive = d2;
+        cache->includes = ni;
+        cache->truncated = t2;
+        cache->dim = dim;
+        cache->ntop = (int)top.num_children;
+        for (int i = 0; i < cache->ntop; i++)
+            (void)snprintf(cache->top[i], sizeof(cache->top[i]), "%s",
+                           json_get_str(&top.children[i]));
+        cache->valid = true;
+    } else {
+        for (int i = 0; i < cache->ntop; i++)
+            code_push_line(&top, cache->top[i]);
+    }
     (void)json_push_kv_str(&o, "file", path);
     (void)json_push_kv_int(&o, "direct_dependents", d1);
     (void)json_push_kv_int(&o, "transitive_dependents", d2);
@@ -945,7 +985,7 @@ static void pk_do_touched(struct pk_run *run, int i)
         pk_claim(run, indexed, indexed ? "code index" : "not in the code index",
                  "file %s is in the code index", path);
     pk_do_tests(run, path, i);
-    if (indexed && !pk_do_impact(run, path)) {
+    if (indexed && !pk_do_impact(run, path, i)) {
         (void)snprintf(run->impact_error_path, sizeof(run->impact_error_path), "%s", path);
         return;
     }
@@ -1155,12 +1195,15 @@ static void pk_keep_signatures(struct pk_run *run)
 
 static void pk_routes_prepare(struct pk_run *run)
 {
-    if (run->ntouch < 2) return;
+    if (run->ntouch < 2 || run->route_accs) return;
     run->route_accs = zcl_calloc((size_t)run->ntouch, sizeof(*run->route_accs),
                                  "code_packet_routes");
     if (!run->route_accs) return;
     const char *paths[PK_TOUCH_MAX];
     for (int i = 0; i < run->ntouch; i++) paths[i] = run->touch[i];
+#if defined(ZCL_TESTING)
+    pk_route_batches++;
+#endif
     if (!zcl_native_code_routes_many_at(run->ctx.root, paths, (size_t)run->ntouch, run->route_accs,
                                      run->routes, run->route_risks)) {
         free(run->route_accs);
@@ -1181,8 +1224,6 @@ static void pk_assemble(struct pk_run *run, int max_lines)
     pk_routes_prepare(run);
     for (int i = 0; i < run->ntouch && !run->impact_error_path[0]; i++)
         pk_do_touched(run, i);
-    free(run->route_accs);
-    run->route_accs = NULL;
     if (run->impact_error_path[0]) return;
     run->f.ntouch = run->ntouch;
     int missing = 0;
@@ -1300,6 +1341,20 @@ static bool pk_json_tail(struct pk_run *run, struct json_value *out,
 }
 
 #if defined(ZCL_TESTING)
+unsigned zcl_packet_test_take_route_batches(void)
+{
+    unsigned n = pk_route_batches;
+    pk_route_batches = 0;
+    return n;
+}
+
+unsigned zcl_packet_test_take_impact_queries(void)
+{
+    unsigned n = pk_impact_queries;
+    pk_impact_queries = 0;
+    return n;
+}
+
 bool zcl_packet_test_tail(struct json_value *out)
 {
     struct pk_run *run = zcl_calloc(1, sizeof(*run), "packet_tail_test");
@@ -1510,6 +1565,7 @@ static void pk_run_free(struct pk_run *run)
     for (size_t i = 0; i < sizeof(sbs) / sizeof(sbs[0]); i++)
         pk_sb_free(sbs[i]);
     pk_ctx_free(&run->ctx);
+    free(run->route_accs);
     if (run->ctx.ci)
         codeindex_close(run->ctx.ci);
     free(run);

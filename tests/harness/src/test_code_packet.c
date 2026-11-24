@@ -877,10 +877,14 @@ static int test_code_packet_authority_and_pattern(void)
         const char *wide[8] = { "pk_wide_0", "pk_wide_1", "pk_wide_2",
                                 "pk_wide_3", "pk_wide_4", "pk_wide_5",
                                 "pk_wide_6", "pk_wide_7" };
+        (void)zcl_packet_test_take_route_batches();
+        (void)zcl_packet_test_take_impact_queries();
         pkt_call("Wide", wide, 8, NULL, 0, 120, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get_int(json_get(&reply.data, "max_lines_effective")) <
                json_get_int(json_get(&reply.data, "max_lines")));
+        ASSERT_EQ(zcl_packet_test_take_route_batches(), 1);
+        ASSERT_EQ(zcl_packet_test_take_impact_queries(), 8);
         char *buf = malloc(70000);
         ASSERT(buf != NULL);
         size_t n = json_write(&reply.data, buf, 70000);
