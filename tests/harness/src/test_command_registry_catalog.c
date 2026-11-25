@@ -3349,6 +3349,69 @@ static int test_status_brief_overdue_transient_surfaces(void)
     return failures;
 }
 
+/* A node that reports its blocker as a sentence must not make the whole
+ * brief fail: the client folds it into a one-line token. */
+static int test_status_brief_free_text_blocker_folds_to_token(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+    TEST("core.status.brief folds a free-text primary_blocker into a token "
+         "instead of rejecting the node document") {
+        const struct zcl_command_spec *s =
+            find_spec(reg, "core.status.brief");
+        ASSERT(s != NULL);
+
+        static const char fixture[] =
+            "{\"schema\":\"zcl.public_status.v2\","
+            "\"partial_result\":false,"
+            "\"served_height\":100,\"header_height\":100,"
+            "\"served_height_known\":true,"
+            "\"header_height_known\":true,"
+            "\"gap\":0,\"peer_best_height\":100,"
+            "\"peer_best_height_known\":true,"
+            "\"target_height\":100,\"target_height_known\":true,"
+            "\"chain_evidence_consistent\":true,"
+            "\"sync_state\":\"at_tip\",\"serving\":true,"
+            "\"healthy\":true,"
+            "\"primary_blocker\":\"waiting for peers (3 of 8)\","
+            "\"first_call\":{\"schema\":\"zcl.first_call_contract.v1\","
+                "\"budget_ms\":250,\"partial_result\":false,"
+                "\"budget_exceeded\":false},"
+            "\"peers\":{\"total\":1},"
+            "\"conditions\":{"
+                "\"schema\":\"zcl.condition_engine_summary.v2\","
+                "\"active_count\":0},"
+            "\"resources\":{\"schema\":\"zcl.node_resources.v1\","
+                "\"rss_mb\":512},"
+            "\"reducer\":{\"tip_advance_age_seconds\":3},"
+            "\"security_posture\":{"
+                "\"schema\":\"zcl.security_posture.v1\","
+                "\"anchor_backfill_gap\":false,"
+                "\"nullifier_backfill_gap\":false}}";
+        g_status_brief_agent_fixture = fixture;
+
+        node_rpc_client_set_test_hook(status_brief_mock_rpc);
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        bool dispatched = exec_leaf(reg, s, out, sizeof(out), &code);
+        node_rpc_client_set_test_hook(NULL);
+        ASSERT(dispatched);
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+
+        struct json_value root;
+        ASSERT(json_read(&root, out, strlen(out)) && root.type == JSON_OBJ);
+        const struct json_value *data = json_get(&root, "data");
+        ASSERT(data != NULL && data->type == JSON_OBJ);
+        ASSERT_STR_EQ(json_get_str(json_get(data, "primary_blocker")),
+                      "waiting_for_peers_3_of_8");
+        json_free(&root);
+        PASS();
+    } _test_next:;
+    g_status_brief_agent_fixture = NULL;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
 /* Absent/zero case: a node predating the field, or with nothing overdue,
  * must never fabricate overdue_transient_count=0 or an empty note. */
 static int test_status_brief_overdue_transient_absent_when_zero(void)
@@ -8408,6 +8471,7 @@ int test_command_registry_catalog(void)
     failures += test_wallet_tx_list_fails_closed();
     failures += test_wallet_tx_list_budget_and_alloc();
     failures += test_status_brief_overdue_transient_surfaces();
+    failures += test_status_brief_free_text_blocker_folds_to_token();
     failures += test_status_brief_overdue_transient_absent_when_zero();
     failures += test_status_brief_trust_tier_surfaces();
     failures += test_status_brief_trust_tier_absent_when_missing();

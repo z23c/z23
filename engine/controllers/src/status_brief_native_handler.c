@@ -143,6 +143,13 @@ static bool status_read_optional_nonnegative(const struct json_value *obj,
 
 /* Status prose is a one-line machine surface.  Reject runtime-skew strings
  * that could inject whitespace/control text into key=value output. */
+static bool status_token_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+           c == ':';
+}
+
 static bool status_machine_token(const char *value)
 {
     if (!value || !value[0])
@@ -151,11 +158,8 @@ static bool status_machine_token(const char *value)
     if (n > 127)
         return false;
     for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)value[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_' || c == '-' ||
-              c == '.' || c == ':'))
-            return false;
+        if (!status_token_char((unsigned char)value[i]))
+            return false; // raw-return-ok:pure token predicate
     }
     return true;
 }
@@ -544,8 +548,33 @@ struct status_brief_raw {
     bool anchor_gap;
     bool nullifier_gap;
     const char *sync_state;       /* points into the source `agent` document */
-    const char *reported_blocker; /* points into the source `agent` document */
+    const char *reported_blocker; /* points into the source `agent` document,
+                                   * or at blocker_token when sanitized */
+    char blocker_token[128];
 };
+
+/* The node may report free text as its blocker (a health reason sentence).
+ * The brief is a one-line machine surface, so fold such text into a token
+ * instead of rejecting the whole document: a synced node must not read as
+ * blocked because its reason has spaces. Returns NULL when nothing usable
+ * is left. */
+static const char *status_blocker_as_token(const char *text, char *buf,
+                                           size_t cap)
+{
+    if (!text || !text[0] || cap < 2)
+        return NULL;
+    size_t n = 0;
+    for (size_t i = 0; text[i] && n + 1 < cap; i++) {
+        char out = status_token_char((unsigned char)text[i]) ? text[i] : '_';
+        if (out == '_' && (n == 0 || buf[n - 1] == '_'))
+            continue;
+        buf[n++] = out;
+    }
+    while (n > 0 && buf[n - 1] == '_')
+        n--;
+    buf[n] = '\0';
+    return n ? buf : NULL;
+}
 
 /* The `agent` sub-objects every validation group reads. Resolved ONCE, then
  * passed to every group as the same pointers — never re-fetched, so a group
@@ -575,6 +604,12 @@ static void status_brief_read_agent_views(const struct json_value *agent,
     o->first_call = json_get(agent, "first_call");
     r->sync_state = json_get_str(json_get(agent, "sync_state"));
     r->reported_blocker = json_get_str(json_get(agent, "primary_blocker"));
+    if (r->reported_blocker && !status_machine_token(r->reported_blocker)) {
+        const char *t = status_blocker_as_token(
+            r->reported_blocker, r->blocker_token, sizeof(r->blocker_token));
+        if (t)
+            r->reported_blocker = t;
+    }
 }
 
 /* Evaluated BEFORE the SCHECK() chain (it fills rss_mb/rss_known for the
