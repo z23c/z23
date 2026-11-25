@@ -3062,6 +3062,51 @@ int test_devagent_receive(void)
         PASS();
     }
 
+    TEST("survey walks multipage answered and broadcast directives without writes")
+    {
+        struct rcv_beat_stats st;
+        struct rtx_frozen before, after;
+        char body[4096], intake[4096], cursor[4096], readf[4096], current[4096];
+        long long seen = 0;
+        rtx_isolate("survey-pages");
+        ASSERT(rtx_deliver_many("stranger", "box-a", "survey", 130, 0));
+        for (int i = 0; i < 20 && seen < 130; i++) {
+            ASSERT_EQ(rtx_beat_once(&st), 1);
+            ASSERT_EQ(st.intake_failed, 0);
+            seen += st.seen;
+        }
+        ASSERT_EQ(seen, 130);
+        ASSERT_EQ(rtx_count_dir("receive/answered"), 130);
+        rtx_direction(body, sizeof(body), "hex_codec", "Broadcast.");
+        ASSERT(rtx_deliver("stranger", "*", "survey-broadcast", body, 131));
+        ASSERT(rtx_read("receive/intake.state", intake, sizeof(intake)));
+        ASSERT(rtx_read("mail/cursor.box-a", cursor, sizeof(cursor)));
+        ASSERT(rtx_read("mail/read.box-a", readf, sizeof(readf)));
+        rtx_frozen_take(&before, "survey-broadcast");
+        (void)zcl_devagent_mail_test_max_seq_scans(true);
+        int64_t start = platform_time_monotonic_ms();
+        ASSERT(zcl_devagent_receive_survey("box-a", "", &st) >= 0);
+        int64_t elapsed = platform_time_monotonic_ms() - start;
+        size_t scans = zcl_devagent_mail_test_max_seq_scans(false);
+        printf("receiver survey pages: scans=%zu elapsed_ms=%lld\n", scans, (long long)elapsed);
+        ASSERT_EQ(st.seen, 131);
+        ASSERT_EQ(st.already, 130);
+        ASSERT_EQ(st.refused, 1);
+        ASSERT_EQ(st.intake_failed, 0);
+        ASSERT_EQ(scans, 2);
+        rtx_frozen_take(&after, "survey-broadcast");
+        ASSERT(rtx_frozen_same(&before, &after));
+        ASSERT(rtx_read("receive/intake.state", current, sizeof(current)));
+        ASSERT_STR_EQ(current, intake);
+        ASSERT(rtx_read("mail/cursor.box-a", current, sizeof(current)));
+        ASSERT_STR_EQ(current, cursor);
+        ASSERT(rtx_read("mail/read.box-a", current, sizeof(current)));
+        ASSERT_STR_EQ(current, readf);
+        ASSERT_EQ(rtx_answers("survey-broadcast", ""), 0);
+        rtx_restore();
+        PASS();
+    }
+
     TEST("status decides the same facts and writes nothing")
     {
         struct rtx_call c;

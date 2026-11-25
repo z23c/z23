@@ -72,9 +72,10 @@ bool zcl_devagent_mail_brief_window(char *token, size_t cap,
                                     long long window, const char *since,
                                     bool *cut);
 
-/* Internal fleet-brief mail pull. It skips global-max scans while pages
+/* Internal nonpersisting mail drain. It skips global-max scans while pages
  * remain and replays the final page through the normal path; direct mail
- * commands retain per-page cursor behavior. Call only from fleet brief. */
+ * commands retain per-page cursor behavior. Only fleet brief and receiver dry
+ * survey may use it; intermediate tokens must not be persisted. */
 void zcl_native_handle_dev_agent_mail_brief_drain(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

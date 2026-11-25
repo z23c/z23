@@ -2466,7 +2466,7 @@ static void rcv_ack_token(const struct rcv_ctx *c, const char *token)
 
 /* The cursor passed rcv_pos_ok (no quote, no backslash), so it is spliced
  * into the fixed pull object verbatim. The caller ends `sub`. */
-static void rcv_intake_open(struct rcv_sub *sub, const char *since)
+static void rcv_intake_open(struct rcv_sub *sub, const char *since, bool dry)
 {
     char input[RCV_POS_MAX + 96];
     int w = since[0] ? snprintf(input, sizeof(input),
@@ -2480,7 +2480,10 @@ static void rcv_intake_open(struct rcv_sub *sub, const char *since)
         return;
     if (!rcv_sub_input(sub, input))
         return;
-    zcl_native_handle_dev_agent_mail(&sub->request, &sub->reply);
+    if (dry)
+        zcl_native_handle_dev_agent_mail_brief_drain(&sub->request, &sub->reply);
+    else
+        zcl_native_handle_dev_agent_mail(&sub->request, &sub->reply);
     sub->ran = true;
 }
 
@@ -2527,7 +2530,7 @@ static bool rcv_intake_page(struct rcv_ctx *c, const char *since, char *next,
     const struct json_value *rows;
     char raw[RCV_POS_MAX];
     size_t n, i;
-    rcv_intake_open(&sub, since);
+    rcv_intake_open(&sub, since, c->dry);
     if (!rcv_sub_ok(&sub) || !rcv_page_tail(&sub, raw, sizeof(raw), more) ||
         strlen(raw) >= cap) {
         rcv_intake_code(&sub, code, ccap);
