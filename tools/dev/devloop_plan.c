@@ -561,6 +561,16 @@ static bool plan_dims_all_settled(const struct zcl_devloop_plan *plan,
     return true;
 }
 
+static bool plan_selection_ledger_valid(const struct zcl_devloop_plan *plan)
+{
+    if (plan->selections_truncated ||
+        plan->selections_len > ZCL_DEVLOOP_MAX_PLAN_SELECTIONS) return false;
+    for (size_t i = 0; i < plan->selections_len; ++i)
+        if (!zcl_devloop_selection_group(plan, &plan->selections[i]) ||
+            !zcl_devloop_selection_via(plan, &plan->selections[i])) return false;
+    return true;
+}
+
 bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
                                        const char **out_reason)
 {
@@ -582,11 +592,7 @@ bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
         return false;
     /* A group in the plan that the ledger could not explain is itself an
      * unproven claim: the plan cannot say what covers what. */
-    bool bad_selection = plan->selections_len > ZCL_DEVLOOP_MAX_PLAN_SELECTIONS;
-    for (size_t i = 0; !bad_selection && i < plan->selections_len; ++i)
-        bad_selection = !zcl_devloop_selection_group(plan, &plan->selections[i]) ||
-                        !zcl_devloop_selection_via(plan, &plan->selections[i]);
-    if (plan->selections_truncated || bad_selection) {
+    if (!plan_selection_ledger_valid(plan)) {
         if (out_reason) *out_reason = "selection-ledger-truncated";
         return false;
     }
