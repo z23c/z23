@@ -342,17 +342,18 @@ static const char *fm_worker_signer(const struct json_value *worker)
     return fm_hex64(post) && fm_hex64(signer) ? signer : NULL;
 }
 
-static bool fm_roster_box(const struct json_value *roster_rows,
-                          const char *box)
+static size_t fm_roster_box_count(const struct json_value *roster_rows,
+                                  const char *box)
 {
+    size_t matches = 0;
     for (size_t i = 0; roster_rows && i < json_size(roster_rows); i++) {
         const struct json_value *verified = fm_field(json_at(roster_rows, i),
                                                      "verified", JSON_OBJ);
         const char *candidate = fm_text(verified, "box_pubkey");
         if (box && candidate && strcmp(candidate, box) == 0)
-            return true;
+            matches++;
     }
-    return false;
+    return matches;
 }
 
 static bool fm_emit_agent(struct json_value *agents,
@@ -376,9 +377,16 @@ static bool fm_emit_agent(struct json_value *agents,
     return ok;
 }
 
+static bool fm_worker_matches(const struct json_value *worker, const char *box,
+                              bool duplicate_box)
+{
+    const char *candidate = fm_worker_signer(worker);
+    return !duplicate_box && candidate && box && strcmp(candidate, box) == 0;
+}
+
 static bool fm_emit_agents(struct json_value *machine,
                            const struct json_value *workers,
-                           const char *box, bool workers_complete,
+                           const char *box, bool duplicate_box, bool workers_complete,
                            size_t unbound_workers)
 {
     bool ok = true;
@@ -388,15 +396,14 @@ static bool fm_emit_agents(struct json_value *machine,
     for (size_t i = 0; workers && workers->type == JSON_ARR &&
                        i < json_size(workers); i++) {
         const struct json_value *worker = json_at(workers, i);
-        const char *candidate = fm_worker_signer(worker);
-        if (!candidate || !box || strcmp(candidate, box) != 0)
+        if (!fm_worker_matches(worker, box, duplicate_box))
             continue;
         bound++;
         ok = fm_emit_agent(&agents, worker) && ok;
     }
     ok = json_push_kv(machine, "agents", &agents) && ok;
     json_free(&agents);
-    const char *state = workers_complete && unbound_workers == 0
+    const char *state = !duplicate_box && workers_complete && unbound_workers == 0
                             ? "BOUND"
                             : (bound > 0 ? "PARTIAL" : "UNKNOWN");
     ok = json_push_kv_str(machine, "agents_state", state) && ok;
@@ -517,7 +524,7 @@ static bool fm_emit_machine(struct zcl_fmc_machines *view,
     ok = fm_emit_vitals(&machine, &history, now, window, &all_fresh) && ok;
     if (!all_fresh)
         view->complete = false;
-    ok = fm_emit_agents(&machine, workers, box, view->workers_complete,
+    ok = fm_emit_agents(&machine, workers, box, duplicate_box, view->workers_complete,
                         view->unbound_workers) && ok;
     ok = json_push_back(&view->rows, &machine) && ok;
     json_free(&machine);
@@ -590,7 +597,7 @@ static void fm_count_unbound_workers(struct zcl_fmc_machines *view,
     }
     for (size_t i = 0; i < json_size(workers); i++) {
         const char *signer = fm_worker_signer(json_at(workers, i));
-        if (!signer || !fm_roster_box(rows, signer))
+        if (!signer || fm_roster_box_count(rows, signer) != 1)
             view->unbound_workers++;
     }
 }
@@ -627,6 +634,14 @@ bool zcl_fmc_machines_project(struct zcl_fmc_machines *view,
     return ok;
 }
 
+static bool fm_unique_machine_boxes(const struct zcl_fmc_machines *view)
+{
+    for (size_t i = 0; i < json_size(&view->rows); i++)
+        if (json_get_bool(json_get(json_at(&view->rows, i), "duplicate_box")))
+            return false;
+    return true;
+}
+
 bool zcl_fmc_machines_emit(const struct zcl_fmc_machines *view,
     struct json_value *data)
 {
@@ -637,7 +652,8 @@ bool zcl_fmc_machines_emit(const struct zcl_fmc_machines *view,
     ok = json_push_kv_bool(data, "machines_truncated", view->truncated) && ok;
     ok = json_push_kv_bool(data, "machines_complete", view->complete) && ok;
     ok = json_push_kv_bool(data, "machine_agents_complete",
-                           view->roster_ok && view->workers_complete &&
+                           view->roster_ok && !view->truncated &&
+                               fm_unique_machine_boxes(view) && view->workers_complete &&
                                view->unbound_workers == 0) && ok;
     ok = json_push_kv_int(data, "machine_agents_unbound_total",
                           (int64_t)view->unbound_workers) && ok;

@@ -317,6 +317,50 @@ static int fm_agent_binding_cases(void)
     return 0;
 }
 
+static int fm_duplicate_box_binding_case(void)
+{
+    struct json_value roster = fm_roster(true, false);
+    const struct json_value *second = json_at(json_get(&roster, "machines"), 1);
+    json_set_str((struct json_value *)json_get(json_get(second, "verified"),
+                                              "box_pubkey"), FM_BOX_A);
+    struct json_value histories = fm_history_array(FM_BOX_A, 4, false,
+                                                    "signature_chain_only");
+    struct json_value workers = fm_workers(false);
+    struct zcl_fmc_machines view;
+    zcl_fmc_machines_init(&view);
+    FM_CHECK(zcl_fmc_machines_project(&view, &roster, &histories, &workers,
+                                      true, 1000, 900));
+    FM_CHECK(!view.complete && view.unbound_workers == 1);
+    for (size_t i = 0; i < 2; i++) {
+        const struct json_value *machine = json_at(&view.rows, i);
+        FM_CHECK(json_get_bool(json_get(machine, "duplicate_box")));
+        FM_CHECK(fm_is(machine, "agents_state", "UNKNOWN"));
+        FM_CHECK(json_size(json_get(machine, "agents")) == 0);
+    }
+    struct json_value out = {0};
+    json_set_object(&out);
+    FM_CHECK(zcl_fmc_machines_emit(&view, &out));
+    FM_CHECK(!json_get_bool(json_get(&out, "machine_agents_complete")));
+    json_free(&out);
+    json_free(&workers);
+    json_init(&workers);
+    json_set_array(&workers);
+    FM_CHECK(zcl_fmc_machines_project(&view, &roster, &histories, &workers,
+                                      true, 1000, 900));
+    FM_CHECK(view.unbound_workers == 0);
+    FM_CHECK(fm_is(json_at(&view.rows, 0), "agents_state", "UNKNOWN"));
+    json_init(&out);
+    json_set_object(&out);
+    FM_CHECK(zcl_fmc_machines_emit(&view, &out));
+    FM_CHECK(!json_get_bool(json_get(&out, "machine_agents_complete")));
+    json_free(&out);
+    zcl_fmc_machines_free(&view);
+    json_free(&workers);
+    json_free(&histories);
+    json_free(&roster);
+    return 0;
+}
+
 static int fm_bounded_roster_case(void)
 {
     struct json_value roster = {0}, rows = {0}, histories = {0}, workers = {0};
@@ -358,6 +402,7 @@ static int fm_bounded_roster_case(void)
     FM_CHECK(zcl_fmc_machines_emit(&view, &out));
     FM_CHECK(fm_number(&out, "machines_total", ZCL_FMC_MACHINE_CAP + 1u));
     FM_CHECK(json_get_bool(json_get(&out, "machines_truncated")));
+    FM_CHECK(!json_get_bool(json_get(&out, "machine_agents_complete")));
     json_free(&out);
     zcl_fmc_machines_free(&view);
     json_free(&workers);
@@ -480,6 +525,7 @@ int test_fleet_steer_machines(void)
     failures += fm_stale_future_case();
     failures += fm_discrepancy_cases();
     failures += fm_agent_binding_cases();
+    failures += fm_duplicate_box_binding_case();
     failures += fm_bounded_roster_case();
     failures += fm_bad_roster_case();
     for (int kind = 0; kind < 5; kind++)
