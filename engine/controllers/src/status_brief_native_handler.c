@@ -551,14 +551,15 @@ struct status_brief_raw {
     const char *reported_blocker; /* points into the source `agent` document,
                                    * or at blocker_token when sanitized */
     char blocker_token[128];
+    char sync_token[128];
 };
 
-/* The node may report free text as its blocker (a health reason sentence).
+/* The node may report free text for a blocker or sync state (a health reason sentence).
  * The brief is a one-line machine surface, so fold such text into a token
  * instead of rejecting the whole document: a synced node must not read as
  * blocked because its reason has spaces. Returns NULL when nothing usable
  * is left. */
-static const char *status_blocker_as_token(const char *text, char *buf,
+static const char *status_fold_to_token(const char *text, char *buf,
                                            size_t cap)
 {
     if (!text || !text[0] || cap < 2)
@@ -603,9 +604,15 @@ static void status_brief_read_agent_views(const struct json_value *agent,
     o->security = json_get(agent, "security_posture");
     o->first_call = json_get(agent, "first_call");
     r->sync_state = json_get_str(json_get(agent, "sync_state"));
+    if (r->sync_state && !status_machine_token(r->sync_state)) {
+        const char *t = status_fold_to_token(r->sync_state, r->sync_token,
+                                             sizeof(r->sync_token));
+        if (t)
+            r->sync_state = t;
+    }
     r->reported_blocker = json_get_str(json_get(agent, "primary_blocker"));
     if (r->reported_blocker && !status_machine_token(r->reported_blocker)) {
-        const char *t = status_blocker_as_token(
+        const char *t = status_fold_to_token(
             r->reported_blocker, r->blocker_token, sizeof(r->blocker_token));
         if (t)
             r->reported_blocker = t;
