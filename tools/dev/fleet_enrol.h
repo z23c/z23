@@ -474,8 +474,9 @@ bool fleet_roster_append(const char *line, const char **why);
  * after its operator seal verifies against exactly that key, so a line
  * sealed by any other key, or a sealed line with one byte changed, is
  * refused as FLEET_ENROL_WHY_ROSTER_LINE_UNSEALED and the roster is not
- * touched. The same box already on the roster is a no-op (`appended`
- * false); a different box under a name already taken is refused as
+ * touched. Replaying a line already on the roster is a no-op (`appended`
+ * false); a distinct valid row for the same box appends its re-enrolment
+ * facts. A different box under a name already taken is refused as
  * FLEET_ENROL_WHY_NAME_TAKEN. `out` receives the verified row. */
 bool fleet_roster_import(const char *line,
                          const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],

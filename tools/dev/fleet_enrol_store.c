@@ -1083,7 +1083,7 @@ static bool fe_row_validate(const char *line,
         !fe_roster_query(operator_pubkey, out->receipt.invite.name,
                          out->receipt.box_pubkey, NULL, NULL, scan, why, readonly))
         return false;
-    if (scan->name_taken && !scan->same_box) {
+    if (scan->name_taken) {
         fe_why(why, FLEET_ENROL_WHY_NAME_TAKEN);
         return false;
     }
@@ -1099,6 +1099,27 @@ bool fleet_roster_preview(const char *line,
     return fe_row_validate(line, operator_pubkey, false, out, &scan, &pin, why, true);
 }
 
+struct fe_exact_line {
+    const char *wanted;
+    bool held;
+};
+
+static void fe_exact_line_visit(const char *line, void *user)
+{
+    struct fe_exact_line *match = user;
+    if (strcmp(line, match->wanted) == 0)
+        match->held = true;
+}
+
+static bool fe_exact_line_held(const char *line, bool *held, const char **why)
+{
+    struct fe_exact_line match = { line, false };
+    if (!fleet_roster_each_line(fe_exact_line_visit, &match, why))
+        return false;
+    *held = match.held;
+    return true;
+}
+
 static bool fe_row_import_locked(const char *line,
                                 const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                                 bool confirm_operator_change,
@@ -1107,17 +1128,20 @@ static bool fe_row_import_locked(const char *line,
 {
     struct fleet_roster_scan scan = {0};
     bool pin = false;
+    bool held = false;
     *appended = false;
     if (!fe_row_validate(line, operator_pubkey, confirm_operator_change, out,
                          &scan, &pin, why, false))
         return false;
-    if (!scan.same_box) {
+    if (scan.same_box && !fe_exact_line_held(line, &held, why))
+        return false;
+    if (!held) {
         if (!fleet_roster_append(line, why))
             return false;
         *appended = true;
     }
-    /* already held: importing twice adds nothing, but it is still an import
-     * from this operator, so the pin is recorded all the same. */
+    /* An exact replay adds nothing. A distinct sealed row for the same box
+     * carries re-enrolment facts such as a rotated signer or onion. */
     return fe_row_pin_finish(pin, *appended, operator_pubkey, why);
 }
 

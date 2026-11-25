@@ -1044,6 +1044,74 @@ static bool fe_row_at(const char *name, uint8_t op_byte, uint8_t box_byte,
                               op_pub, out, cap, &why);
 }
 
+static int test_fe_roster_import_refresh(void)
+{
+    int failures = 0;
+    TEST("fleet import: a distinct sealed re-enrolment refreshes a member; "
+         "exact old and new line replays stay idempotent") {
+        static const char onion_new[] =
+            "2bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        char before[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char after[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char why_text[192];
+        char depot[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char conflict[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_machine machine;
+        struct fleet_roster_scan scan = {0};
+        struct zcl_command_reply reply;
+        const struct json_value *listed;
+        uint8_t op_seed[32], op_pub[32];
+        const char *why = NULL;
+        bool appended = false;
+        fe_isolate("import-refresh");
+        fe_key(0xa1, op_seed, op_pub);
+        ASSERT(fleet_enrol_operator_write(op_pub, &why));
+        ASSERT(fe_row_at("studio", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST, "",
+                         FE_NOW, before, sizeof(before)));
+        ASSERT(fe_row_at("studio", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST,
+                         onion_new, FE_NOW + 60, after, sizeof(after)));
+
+        ASSERT(fleet_roster_import(before, op_pub, &machine, &appended, &why));
+        ASSERT(appended);
+        ASSERT(fleet_roster_import(before, op_pub, &machine, &appended, &why));
+        ASSERT(!appended);
+        ASSERT(fleet_roster_import(after, op_pub, &machine, &appended, &why));
+        ASSERT(appended);
+        ASSERT(fleet_roster_import(after, op_pub, &machine, &appended, &why));
+        ASSERT(!appended);
+        ASSERT(fleet_roster_import(before, op_pub, &machine, &appended, &why));
+        ASSERT(!appended);
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 2u);
+
+        ASSERT(fe_machines_call("{}", &reply, why_text, sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        listed = json_at(json_get(&reply.data, "machines"), 0);
+        ASSERT_EQ(json_get_int(json_get(listed, "rows")), 2);
+        ASSERT_EQ(json_get_int(json_get(json_get(listed, "verified"),
+                                        "enrolled_at")), FE_NOW + 60);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(listed, "self_reported"),
+                                            "onion")), onion_new);
+        zcl_command_reply_free(&reply);
+
+        ASSERT(fe_row_at("depot", 0xa1, 0x62, FLEET_ENROL_PORT_FIRST + 1,
+                         FE_ONION, FE_NOW, depot, sizeof(depot)));
+        ASSERT(fe_row_at("depot", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST,
+                         onion_new, FE_NOW + 120, conflict, sizeof(conflict)));
+        ASSERT(fleet_roster_import(depot, op_pub, &machine, &appended, &why));
+        ASSERT(appended);
+        why = NULL;
+        ASSERT(!fleet_roster_import(conflict, op_pub, &machine, &appended,
+                                    &why));
+        ASSERT_STR_EQ(why, FLEET_ENROL_WHY_NAME_TAKEN);
+        ASSERT(!appended);
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 3u);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Rows that share a box public key are one machine in `fleet machines`: the
  * latest enrolment is listed, with the number of rows it stands for. Rows
  * with different keys stay apart even when their names match. */
@@ -4529,6 +4597,7 @@ int test_fleet_enrol(void)
     failures += test_fe_join_onion_from_datadir();
     failures += test_fe_phone_state_root();
     failures += test_fe_machines_collapse();
+    failures += test_fe_roster_import_refresh();
     failures += test_fe_machines_page();
     failures += test_fe_render();
     failures += test_fd_empty_datadir();

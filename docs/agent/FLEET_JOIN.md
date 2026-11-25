@@ -156,6 +156,11 @@ the hostname, never in the `verified` object beside the name. A later change
 that actually dials the address and gets the machine's key back is what
 would move it.
 
+Another member imports the refreshed `machine_line` with `fleet import`.
+Exact replay is idempotent; a distinct operator-sealed row for the same box
+appends, so existing members learn the new onion and signer without changing
+their own keys. The same signature, revocation and name-conflict gates apply.
+
 It is a column, not a handle. Two machines that rotate their onions are
 still the same two names, and a refusal still says the name.
 

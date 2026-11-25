@@ -994,8 +994,8 @@ static void fe_import(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "box_pubkey", hex);
     (void)json_push_kv_int(&reply->data, "relay_port", machine.relay_port);
     (void)json_push_kv_int(&reply->data, "enrolled_at", machine.enrolled_at);
-    /* False when this exact box was already on the roster: importing the
-     * same line twice is a no-op, never a second row. */
+    /* False only for an exact replay. A distinct sealed re-enrolment row
+     * appends so members can learn refreshed signer and onion bindings. */
     (void)json_push_kv_bool(&reply->data, "appended", appended);
     fe_anchor_render(reply, &anchor, fe_anchor_required(request));
     (void)zcl_command_reply_add_next(reply, "fleet.machines", "{}",
