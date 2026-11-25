@@ -108,6 +108,7 @@ struct bmx_node {
     unsigned post_calls, page_calls;
     char epoch[33];
     bool down;      /* no node answers at all */
+    bool refuse;    /* fleet_page returns a typed refusal */
     bool show_down; /* the node answers everything but show */
     enum bmx_page_fault page_fault; /* malformed successful fleet_page response */
 };
@@ -449,6 +450,8 @@ static char *bmx_rpc(const char *method, const char *params)
         op = json_get_str(json_get(in, "op"));
         if (n->down || (n->show_down && strcmp(op, "show") == 0))
             op = "";
+        else if (n->refuse && strcmp(op, "fleet_page") == 0)
+            bmx_refuse(&out, "TEST_REFUSED");
         else if (strcmp(op, "post") == 0) {
             n->post_calls++;
             bmx_op_post(in, &out, now);
@@ -2576,6 +2579,49 @@ _test_next:;
     return failures;
 }
 
+static int bmx_t_transport_observation(void)
+{
+    int failures = 0;
+    TEST("boardmail: transport observation distinguishes ready, down and malformed") {
+        struct json_value out;
+        ASSERT(bmx_setup("transport-observation"));
+        json_init(&out);
+        json_set_object(&out);
+        zcl_devagent_boardmail_observe_transport(&out);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_state")), "ready");
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_detail")), "");
+        json_free(&out);
+        g_bmx_node[BMX_A].down = true;
+        json_init(&out);
+        json_set_object(&out);
+        zcl_devagent_boardmail_observe_transport(&out);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_state")), "unavailable");
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_detail")), "node_rpc_client_call");
+        json_free(&out);
+        g_bmx_node[BMX_A].down = false;
+        g_bmx_node[BMX_A].page_fault = BMX_PAGE_MISSING_EPOCH;
+        json_init(&out);
+        json_set_object(&out);
+        zcl_devagent_boardmail_observe_transport(&out);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_state")), "invalid-response");
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_detail")), "epoch");
+        json_free(&out);
+        g_bmx_node[BMX_A].page_fault = BMX_PAGE_OK;
+        g_bmx_node[BMX_A].refuse = true;
+        json_init(&out);
+        json_set_object(&out);
+        zcl_devagent_boardmail_observe_transport(&out);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_state")), "refused");
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_detail")), "TEST_REFUSED");
+        json_free(&out);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_devagent_boardmail(void)
@@ -2609,6 +2655,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_refs_before_inbox_crash();
     failures += bmx_t_refs_invalid_successor();
     failures += bmx_t_export_rpc_down();
+    failures += bmx_t_transport_observation();
 #endif
     if (failures == 0)
         printf("test_devagent_boardmail: all passed\n");

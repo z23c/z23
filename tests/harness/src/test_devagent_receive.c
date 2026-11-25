@@ -3276,7 +3276,8 @@ int test_devagent_receive(void)
         ASSERT_STR_EQ(rtx_reply_str(&c, "lock"), "never-run");
         ASSERT_STR_EQ(rtx_reply_str(&c, "mail"), "absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "counters_basis"), "dry-survey");
-        ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unobserved");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unavailable");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "board_detail"), "node_rpc_client_call");
         ASSERT_STR_EQ(json_get_str(json_get(json_get(&c.reply.data, "export_backlog"), "state")), "mail-absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace_state"), "absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_basis"), "request-argument");
@@ -3525,7 +3526,8 @@ int test_devagent_receive(void)
         ASSERT(rtx_ok(&c));
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "refused")), 1);
         ASSERT_STR_EQ(rtx_reply_str(&c, "counters_basis"), "dry-survey");
-        ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unobserved");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unavailable");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "board_detail"), "node_rpc_client_call");
         ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_basis"), "request-argument");
         rtx_end(&c);
         rtx_frozen_take(&after, "job-nocfg");

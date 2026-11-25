@@ -3545,7 +3545,7 @@ static void rcv_status(const char *receiver, const char *workspace,
     (void)json_push_kv_str(&reply->data, "leaf", RCV_LEAF);
     (void)json_push_kv_str(&reply->data, "state", "surveyed");
     (void)json_push_kv_str(&reply->data, "counters_basis", "dry-survey");
-    (void)json_push_kv_str(&reply->data, "board_state", "unobserved");
+    zcl_devagent_boardmail_observe_transport(&reply->data);
     (void)json_push_kv_str(&reply->data, "workspace_basis", "request-argument");
     (void)json_push_kv_str(&reply->data, "receiver", receiver);
     (void)json_push_kv_str(&reply->data, "workspace",

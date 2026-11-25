@@ -1484,6 +1484,41 @@ static const char *bm_page_problem(const struct json_value *out, const struct bm
     return NULL;
 }
 
+void zcl_devagent_boardmail_observe_transport(struct json_value *out)
+{
+    struct json_value in, page;
+    struct bm_state s;
+    const char *state = "unavailable";
+    const char *detail = "node_rpc_client_call";
+    json_init(&in);
+    json_init(&page);
+    json_set_object(&in);
+    memset(&s, 0, sizeof(s));
+    (void)json_push_kv_str(&in, "op", "fleet_page");
+    (void)json_push_kv_int(&in, "after", 0);
+    (void)json_push_kv_int(&in, "limit", 1);
+    enum bm_rpc rc = bm_call(&in, &page);
+    json_free(&in);
+    if (rc == BM_RPC_OK) {
+        const char *problem = bm_page_problem(&page, &s);
+        if (problem) {
+            state = "invalid-response";
+            detail = problem;
+        } else {
+            state = "ready";
+            detail = "";
+        }
+    } else if (rc == BM_RPC_REFUSED) {
+        const char *code = bm_str(&page, "code");
+        state = "refused";
+        if (code && code[0]) detail = code;
+        else detail = "fleet_page";
+    }
+    (void)json_push_kv_str(out, "board_state", state);
+    (void)json_push_kv_str(out, "board_detail", detail);
+    json_free(&page);
+}
+
 /* One fleet page after the cursor. False when no page could be read. */
 static bool bm_import_page(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
