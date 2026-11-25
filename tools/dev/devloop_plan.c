@@ -460,9 +460,27 @@ static void plan_dim_set(struct zcl_devloop_plan *plan, enum zcl_devloop_dim dim
     plan->dims[dim].reason = reason ? reason : "";
 }
 
-/* Record WHY a group is in the plan (C5). Deduped on (group, dim): the first
- * dimension to name a group owns the explanation, which keeps the ledger
+/* Record WHY a group is in the plan (C5). Deduped by group: the first
+ * dimension to name it owns the explanation, which keeps the ledger
  * bounded and the attribution stable. */
+static bool plan_intern_selection(struct zcl_devloop_plan *plan, const char *text,
+                                  uint32_t *offset)
+{
+    size_t len = strlen(text) + 1;
+    if (plan->selection_arena_len > sizeof plan->selection_arena) return false;
+    for (uint32_t at = 0; at < plan->selection_arena_len;) {
+        const char *p = zcl_devloop_selection_arena(plan, at);
+        if (!p) return false;
+        if (strcmp(p, text) == 0) { *offset = at; return true; }
+        at += (uint32_t)strlen(p) + 1;
+    }
+    if (len > sizeof plan->selection_arena - plan->selection_arena_len) return false;
+    *offset = plan->selection_arena_len;
+    memcpy(plan->selection_arena + *offset, text, len);
+    plan->selection_arena_len += (uint32_t)len;
+    return true;
+}
+
 static void plan_note_selection(struct zcl_devloop_plan *plan,
                                 const char *group, enum zcl_devloop_dim dim,
                                 const char *via)
@@ -470,7 +488,9 @@ static void plan_note_selection(struct zcl_devloop_plan *plan,
     if (!plan || !group || !group[0])
         return;
     for (size_t i = 0; i < plan->selections_len; i++) {
-        if (strcmp(plan->selections[i].group, group) == 0)
+        const char *stored = zcl_devloop_selection_group(plan, &plan->selections[i]);
+        if (!stored) { plan->selections_truncated = true; return; }
+        if (strcmp(stored, group) == 0)
             return;
     }
     if (plan->selections_len >= ZCL_DEVLOOP_MAX_PLAN_SELECTIONS) {
@@ -479,9 +499,15 @@ static void plan_note_selection(struct zcl_devloop_plan *plan,
         plan->selections_truncated = true;
         return;
     }
+    char group_text[ZCL_DEVLOOP_GROUP_MAX], via_text[ZCL_DEVLOOP_VIA_MAX];
+    (void)snprintf(group_text, sizeof group_text, "%s", group);
+    (void)snprintf(via_text, sizeof via_text, "%s", (via && via[0]) ? via : "(unknown)");
     struct zcl_devloop_selection *s = &plan->selections[plan->selections_len];
-    snprintf(s->group, sizeof(s->group), "%s", group);
-    snprintf(s->via, sizeof(s->via), "%s", (via && via[0]) ? via : "(unknown)");
+    if (!plan_intern_selection(plan, group_text, &s->group_offset) ||
+        !plan_intern_selection(plan, via_text, &s->via_offset)) {
+        plan->selections_truncated = true;
+        return;
+    }
     s->dim = dim;
     plan->selections_len++;
 }
@@ -556,7 +582,11 @@ bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
         return false;
     /* A group in the plan that the ledger could not explain is itself an
      * unproven claim: the plan cannot say what covers what. */
-    if (plan->selections_truncated) {
+    bool bad_selection = plan->selections_len > ZCL_DEVLOOP_MAX_PLAN_SELECTIONS;
+    for (size_t i = 0; !bad_selection && i < plan->selections_len; ++i)
+        bad_selection = !zcl_devloop_selection_group(plan, &plan->selections[i]) ||
+                        !zcl_devloop_selection_via(plan, &plan->selections[i]);
+    if (plan->selections_truncated || bad_selection) {
         if (out_reason) *out_reason = "selection-ledger-truncated";
         return false;
     }
@@ -921,10 +951,10 @@ static size_t plan_group_cap(void)
 {
 #if defined(ZCL_TESTING)
     if (zcl_devloop_test_plan_group_cap > 0 &&
-        zcl_devloop_test_plan_group_cap < ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+        zcl_devloop_test_plan_group_cap < ZCL_DEVLOOP_MAX_CLOSURE_GROUPS)
         return zcl_devloop_test_plan_group_cap;
 #endif
-    return ZCL_DEVLOOP_MAX_PLAN_GROUPS;
+    return ZCL_DEVLOOP_MAX_CLOSURE_GROUPS;
 }
 
 static bool plan_group_present(const struct zcl_devloop_plan *plan,
@@ -967,6 +997,13 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
     }
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_devloop_test_fold_reached(struct zcl_devloop_plan *plan, const char *path)
+{
+    return plan_fold_reached_file(plan, path, ZCL_DEVLOOP_DIM_SEMANTIC);
+}
+#endif
 
 /* A CAPACITY bound fired on `dim`: the change reaches more than this plan can
  * enumerate. That is not missing evidence — the index answered, and its answer
@@ -1735,12 +1772,12 @@ static bool plan_json_selections(const struct zcl_devloop_plan *plan,
         if (out_sz - *pos < PLAN_TAIL_RESERVE ||
             (i && !appendf(out, out_sz, pos, ",")) ||
             !appendf(out, out_sz, pos, "{\"group\":") ||
-            !append_json_string(out, out_sz, pos, s->group) ||
+            !append_json_string(out, out_sz, pos, zcl_devloop_selection_group(plan, s)) ||
             !appendf(out, out_sz, pos, ",\"dimension\":") ||
             !append_json_string(out, out_sz, pos,
                                 zcl_devloop_dim_name(s->dim)) ||
             !appendf(out, out_sz, pos, ",\"via\":") ||
-            !append_json_string(out, out_sz, pos, s->via) ||
+            !append_json_string(out, out_sz, pos, zcl_devloop_selection_via(plan, s)) ||
             !appendf(out, out_sz, pos, "}")) {
             *pos = saved;
             out[*pos] = '\0';

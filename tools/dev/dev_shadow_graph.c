@@ -124,10 +124,12 @@ static size_t shadow_hops_collect(const struct zcl_devloop_plan *plan,
     for (size_t i = 0; i < plan->selections_len; i++) {
         const struct zcl_devloop_selection *s = &plan->selections[i];
         if (s->dim != ZCL_DEVLOOP_DIM_SEMANTIC) continue;
+        const char *via = zcl_devloop_selection_via(plan, s);
+        if (!via) return SIZE_MAX;
         bool seen = false;
         for (size_t j = 0; j < count && !seen; j++)
-            seen = strcmp(hops[j].via, s->via) == 0;
-        if (!seen) hops[count++] = (struct shadow_hop){s->via, false};
+            seen = strcmp(hops[j].via, via) == 0;
+        if (!seen) hops[count++] = (struct shadow_hop){via, false};
     }
     return count;
 }
@@ -176,8 +178,10 @@ static void shadow_hops_apply(const struct zcl_devloop_plan *plan,
     for (size_t i = 0; i < plan->selections_len; i++) {
         const struct zcl_devloop_selection *s = &plan->selections[i];
         if (s->dim != ZCL_DEVLOOP_DIM_SEMANTIC) continue;
+        const char *via = zcl_devloop_selection_via(plan, s);
+        if (!via) continue;
         for (size_t j = 0; j < count; j++)
-            if (strcmp(hops[j].via, s->via) == 0) explained[i] = hops[j].legit;
+            if (strcmp(hops[j].via, via) == 0) explained[i] = hops[j].legit;
     }
     for (size_t j = 0; j < count; j++)
         *collisions_out += hops[j].legit ? 0u : 1u;
@@ -197,6 +201,7 @@ bool zcl_shadow_explained_selections(const char *root,
                                          sizeof(*hops), "shadow_hop");
     if (!hops) return false;
     size_t count = shadow_hops_collect(plan, hops);
+    if (count == SIZE_MAX) { free(hops); return false; }
     /* No include graph, or a query that failed: every selection stays
      * explained, because unknown is never reported as waste. */
     if (count > 0 && shadow_hops_answer(root, e, hops, count)) {

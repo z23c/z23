@@ -13499,7 +13499,7 @@ bool zcl_dev_proof_test_failure_priority_report(const char *root, const char *sc
 
 static void dp_worker_failure_priority(struct dp_worker *w)
 {
-    char scratch[PATH_MAX], groups[PROOF_GROUPS_MAX], report[192] = "unavailable";
+    char scratch[PATH_MAX], report[192] = "unavailable";
     w->failure_priority[0] = '\0';
     /* The check seam builds a worker with no attempt directory and no changed
      * set. Without a changed set there is nothing to rank, and an empty
@@ -13511,12 +13511,15 @@ static void dp_worker_failure_priority(struct dp_worker *w)
     }
     if (snprintf(scratch, sizeof(scratch), "%s/priority-diff.%ld", w->paths->attempt,
                  (long)getpid()) >= (int)sizeof(scratch)) return;
+    char *groups = zcl_calloc(PROOF_GROUPS_MAX, 1, "priority groups");
+    if (!groups) return;
     bool ok = dp_failure_priority(w->paths->root, scratch, w->groups,
-                                  w->changed->files, w->changed->count, groups, sizeof(groups),
+                                  w->changed->files, w->changed->count, groups, PROOF_GROUPS_MAX,
                                   report, sizeof(report));
     if (ok && groups[0])
         (void)snprintf(w->failure_priority, sizeof(w->failure_priority),
                        "--failure-priority=%s", groups);
+    free(groups);
     (void)zcl_dev_proof_phase_note(w->paths->phases, "failure_priority", report);
 }
 
@@ -14611,41 +14614,45 @@ static bool proof_worker_body(const struct proof_paths *paths,
                               struct dp_docs_fresh_run *docs,
                               char *why, size_t why_len)
 {
-    struct dp_worker w = {0};
-    w.paths = paths;
-    w.execution = *paths;
-    (void)snprintf(w.execution.root, sizeof(w.execution.root), "%s",
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof worker");
+    if (!w) { proof_why(why, why_len, "proof_worker_allocation_failed"); return false; }
+    bool published = false;
+    w->paths = paths;
+    w->execution = *paths;
+    (void)snprintf(w->execution.root, sizeof(w->execution.root), "%s",
                    generation);
-    w.local = local;
-    w.base = base;
-    w.generation = generation;
-    w.phases = phases;
-    w.warm = warm;
-    w.changed = changed;
-    w.docs = docs;
-    w.warm_compile_mode = "skipped";
-    if (!dp_worker_seal_source(&w, why, why_len)) return false;
+    w->local = local;
+    w->base = base;
+    w->generation = generation;
+    w->phases = phases;
+    w->warm = warm;
+    w->changed = changed;
+    w->docs = docs;
+    w->warm_compile_mode = "skipped";
+    if (!dp_worker_seal_source(w, why, why_len)) goto done;
     /* The loaded producer owns selection and impact policy. Admitting a
      * candidate test runner alone cannot qualify that compiled metadata. */
-    if (!zcl_dev_proof_generation_source_qualified(paths->root, w.source_before.source_id,
-            zcl_build_source_id_sha256(), why, why_len)) return false;
-    if (!dp_worker_plan(&w, changed->files, changed->count, true, why, why_len))
-        return false;
-    if (!dp_worker_receipt_identity(&w, why, why_len)) return false;
-    if (!dp_worker_build_identity(&w, why, why_len)) return false;
-    if (!dp_worker_select(&w, why, why_len)) return false;
+    if (!zcl_dev_proof_generation_source_qualified(paths->root, w->source_before.source_id,
+            zcl_build_source_id_sha256(), why, why_len)) goto done;
+    if (!dp_worker_plan(w, changed->files, changed->count, true, why, why_len))
+        goto done;
+    if (!dp_worker_receipt_identity(w, why, why_len)) goto done;
+    if (!dp_worker_build_identity(w, why, why_len)) goto done;
+    if (!dp_worker_select(w, why, why_len)) goto done;
     /* Index writes above are derived files the docs checkers do not read;
      * the dimensions can change their inputs and must wait for the verdict. */
-    if (!dp_docs_fresh_settle(docs, paths, why, why_len)) return false;
+    if (!dp_docs_fresh_settle(docs, paths, why, why_len)) goto done;
     proof_phase_mark(phases, "docs_fresh_join");
     bool cycle_reused =
-        cycle_proof_reuse(paths, w.source_before.cas_root_sha3,
-                          w.receipt.dimensions);
-    if (!cycle_reused && !dp_worker_dimensions(&w, why, why_len))
-        return false;
-    bool published = dp_worker_publish(&w, started_us, why, why_len);
-    dp_worker_shadow_audit(&w, published);
-    dp_worker_vmmr_record(&w, published);
+        cycle_proof_reuse(paths, w->source_before.cas_root_sha3,
+                          w->receipt.dimensions);
+    if (!cycle_reused && !dp_worker_dimensions(w, why, why_len))
+        goto done;
+    published = dp_worker_publish(w, started_us, why, why_len);
+    dp_worker_shadow_audit(w, published);
+    dp_worker_vmmr_record(w, published);
+done:
+    free(w);
     return published;
 }
 

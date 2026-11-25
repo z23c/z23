@@ -5840,7 +5840,7 @@ static bool dp_expected_proof_groups(
     char full[4096], char immediate[4096], char deferred[4096],
     uint32_t *total, uint32_t *now, uint32_t *later)
 {
-    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t id_count = 0;
     for (size_t i = 0; i < plan->path_groups_len; i++)
         ids[id_count++] = plan->path_groups[i];
@@ -7483,7 +7483,7 @@ static bool dp_rr_revert_build(struct dp_rr_fx *f)
 
 static size_t dp_rr_selected(const struct zcl_devloop_plan *plan)
 {
-    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t n = 0;
     for (size_t i = 0; i < plan->path_groups_len; i++)
         ids[n++] = plan->path_groups[i];

@@ -240,7 +240,7 @@ static const char *early_join(const char exact[][ZCL_TEST_GROUP_FULL_MAX],
 static const char *early_select(const struct zcl_devloop_plan *plan,
                                 struct zcl_devloop_early_receipt *r)
 {
-    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t id_count = 0;
     if (plan->closure_universal)
         return "facts_plan_universal";

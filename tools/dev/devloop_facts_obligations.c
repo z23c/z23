@@ -184,7 +184,7 @@ static bool fxc_merge_group(struct fxc *c, struct zcl_devloop_plan *plan,
 {
     if (fxc_has_group(plan, g))
         return true;
-    if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS) {
+    if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_CLOSURE_GROUPS) {
         zcl_devloop_capacity_note(plan, "facts", "group-cap", "unknown");
         return false;
     }

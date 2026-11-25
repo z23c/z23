@@ -2662,7 +2662,7 @@ static bool rr_collect_groups_expand(const struct zcl_devloop_plan *plan,
         *truncated_out = true;
         return false;
     }
-    const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+    const char *ids[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t id_count = 0;
     for (size_t i = 0; i < plan->path_groups_len; i++)
         ids[id_count++] = plan->path_groups[i];
@@ -2792,7 +2792,7 @@ static uint32_t rr_immediate_selected(const struct zcl_devloop_plan *plan)
             n += zcl_test_group_is_integration_only(
                      zcl_test_group_catalog_at(i)) ? 0u : 1u;
     } else {
-        const char *ids[ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2];
+        const char *ids[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
         size_t id_count = 0;
         for (size_t i = 0; i < plan->path_groups_len; i++)
             ids[id_count++] = plan->path_groups[i];

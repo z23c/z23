@@ -122,11 +122,14 @@ static bool shadow_mark_edges(const struct zcl_devloop_plan *plan,
     for (size_t i = 0; i < plan->selections_len; i++) {
         const struct zcl_devloop_selection *s = &plan->selections[i];
         if (s->dim == ZCL_DEVLOOP_DIM_OPAQUE) continue;
+        const char *via = zcl_devloop_selection_via(plan, s);
+        const char *group = zcl_devloop_selection_group(plan, s);
+        if (!via || !group) return false;
         char via_component[ZCL_SHADOW_PATH_MAX];
-        zcl_shadow_component_of(s->via, via_component, sizeof(via_component));
+        zcl_shadow_component_of(via, via_component, sizeof(via_component));
         if (strcmp(via_component, component) == 0) continue;
         struct shadow_mark_sink sink = {m->edge};
-        if (!zcl_test_group_family_expand(s->group, shadow_mark_visit, &sink))
+        if (!zcl_test_group_family_expand(group, shadow_mark_visit, &sink))
             return false;
     }
     return true;
@@ -149,7 +152,8 @@ static bool shadow_mark_explained(const char *root,
     for (size_t i = 0; ok && i < plan->selections_len; i++) {
         struct shadow_mark_sink sink = {explained[i] ? m->explained
                                                      : m->name_only};
-        ok = zcl_test_group_family_expand(plan->selections[i].group,
+        const char *group = zcl_devloop_selection_group(plan, &plan->selections[i]);
+        ok = group && zcl_test_group_family_expand(group,
                                           shadow_mark_visit, &sink);
     }
     free(explained);

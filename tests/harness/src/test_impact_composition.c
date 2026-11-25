@@ -662,7 +662,8 @@ static const struct zcl_devloop_selection *ic_selection(
     const struct zcl_devloop_plan *p, const char *group)
 {
     for (size_t i = 0; i < p->selections_len; i++)
-        if (strcmp(p->selections[i].group, group) == 0)
+        if (zcl_devloop_selection_group(p, &p->selections[i]) &&
+            strcmp(zcl_devloop_selection_group(p, &p->selections[i]), group) == 0)
             return &p->selections[i];
     return NULL;
 }
@@ -1239,7 +1240,7 @@ static int test_ic_registry_def_has_dependents(void)
                                                                "download");
         ASSERT(sel != NULL);
         ASSERT(sel->dim == ZCL_DEVLOOP_DIM_INCLUDE);
-        ASSERT(strcmp(sel->via, "core/modules/net/src/download.c") == 0);
+        ASSERT(strcmp(zcl_devloop_selection_via(&plan, sel), "core/modules/net/src/download.c") == 0);
 
  TEST_DISCARD(system("rm -rf " IC_FIX_DEF));
         PASS();
@@ -2041,6 +2042,67 @@ static int test_ic_host_need_table_is_closed(void)
 
 /* ── T5: every selected group says why it is there ────────────────────── */
 
+static int test_ic_selection_storage(void)
+{
+    int failures = 0;
+    TEST("impact composition: closure storage and copied attribution remain bounded") {
+        static struct zcl_devloop_plan plan, copy;
+        memset(&plan, 0, sizeof plan);
+        char path[256];
+        for (size_t i = 0; i < zcl_test_group_catalog_count() &&
+             plan.closure_groups_len <= ZCL_DEVLOOP_MAX_PLAN_GROUPS; ++i) {
+            const char *id = zcl_test_group_catalog_at(i);
+            if (strncmp(id, "test_", 5) != 0) continue;
+            int n = snprintf(path, sizeof path, "tests/harness/src/%s.c", id);
+            ASSERT(n > 0 && (size_t)n < sizeof path);
+            ASSERT(zcl_devloop_test_fold_reached(&plan, path));
+        }
+        ASSERT(plan.closure_groups_len > ZCL_DEVLOOP_MAX_PLAN_GROUPS);
+        ASSERT(!plan.selections_truncated);
+        ASSERT(plan.selections_len > 0);
+        copy = plan;
+        const char *group = zcl_devloop_selection_group(&copy, &copy.selections[0]);
+        const char *via = zcl_devloop_selection_via(&copy, &copy.selections[0]);
+        ASSERT(group && via);
+        char group_copy[ZCL_DEVLOOP_GROUP_MAX], via_copy[ZCL_DEVLOOP_VIA_MAX];
+        (void)snprintf(group_copy, sizeof group_copy, "%s", group);
+        (void)snprintf(via_copy, sizeof via_copy, "%s", via);
+        memset(&plan, 0, sizeof plan);
+        ASSERT(strcmp(zcl_devloop_selection_group(&copy, &copy.selections[0]), group_copy) == 0);
+        ASSERT(strcmp(zcl_devloop_selection_via(&copy, &copy.selections[0]), via_copy) == 0);
+        ASSERT(copy.selection_arena_len + ZCL_DEVLOOP_VIA_MAX + 1 < sizeof copy.selection_arena);
+        uint32_t long_offset = copy.selection_arena_len;
+        memset(copy.selection_arena + long_offset, 'x', ZCL_DEVLOOP_VIA_MAX);
+        copy.selection_arena[long_offset + ZCL_DEVLOOP_VIA_MAX] = '\0';
+        copy.selection_arena_len += ZCL_DEVLOOP_VIA_MAX + 1;
+        copy.selections[0].group_offset = long_offset;
+        ASSERT(zcl_devloop_selection_group(&copy, &copy.selections[0]) == NULL);
+        copy.selections[0].via_offset = long_offset;
+        ASSERT(zcl_devloop_selection_via(&copy, &copy.selections[0]) == NULL);
+        copy.selections[0].via_offset = long_offset + 1;
+        ASSERT(zcl_devloop_selection_via(&copy, &copy.selections[0]) == NULL);
+        copy.selections[0].group_offset = copy.selection_arena_len;
+        ASSERT(zcl_devloop_selection_group(&copy, &copy.selections[0]) == NULL);
+        const char *reason = NULL;
+        ASSERT(!zcl_devloop_plan_proof_admissible(&copy, &reason));
+        ASSERT_STR_EQ(reason, "selection-ledger-truncated");
+        memset(&plan, 0, sizeof plan);
+        plan.selection_arena_len = sizeof plan.selection_arena;
+        ASSERT(zcl_devloop_test_fold_reached(&plan, "tests/harness/src/test_sqlite.c"));
+        ASSERT(plan.selections_truncated);
+        memset(&plan, 0, sizeof plan);
+        memset(plan.selection_arena, 'x', sizeof plan.selection_arena);
+        plan.selection_arena[sizeof plan.selection_arena - 1] = '\0';
+        plan.selection_arena_len = sizeof plan.selection_arena;
+        ASSERT(zcl_devloop_test_fold_reached(&plan, "tests/harness/src/test_sqlite.c"));
+        ASSERT(plan.selections_truncated);
+        reason = NULL;
+        ASSERT(!zcl_devloop_plan_proof_admissible(&plan, &reason));
+        ASSERT_STR_EQ(reason, "selection-ledger-truncated");
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_every_selection_has_a_reason(void)
 {
     int failures = 0;
@@ -2077,16 +2139,28 @@ static int test_ic_every_selection_has_a_reason(void)
             const struct zcl_devloop_selection *s =
                 ic_selection(&plan, plan.path_groups[i]);
             ASSERT(s != NULL);
-            ASSERT(s->via[0] != '\0');
+            ASSERT(zcl_devloop_selection_via(&plan, s) != NULL);
             ASSERT(strcmp(zcl_devloop_dim_name(s->dim), "unknown") != 0);
         }
         for (size_t i = 0; i < plan.closure_groups_len; i++) {
             const struct zcl_devloop_selection *s =
                 ic_selection(&plan, plan.closure_groups[i]);
             ASSERT(s != NULL);
-            ASSERT(s->via[0] != '\0');
+            ASSERT(zcl_devloop_selection_via(&plan, s) != NULL);
             ASSERT(strcmp(zcl_devloop_dim_name(s->dim), "unknown") != 0);
         }
+        ASSERT(plan.closure_groups_len > 0);
+        static struct zcl_devloop_plan again;
+        again = plan;
+        char retained_group[ZCL_DEVLOOP_GROUP_MAX], retained_via[ZCL_DEVLOOP_VIA_MAX];
+        (void)snprintf(retained_group, sizeof retained_group, "%s", again.closure_groups[0]);
+        const struct zcl_devloop_selection *prior = ic_selection(&again, retained_group);
+        ASSERT(prior != NULL && zcl_devloop_selection_via(&again, prior) != NULL);
+        (void)snprintf(retained_via, sizeof retained_via, "%s", zcl_devloop_selection_via(&again, prior));
+        ASSERT(zcl_devloop_plan_add_closure(IC_FIX_DEF, files, 3, &again));
+        prior = ic_selection(&again, retained_group);
+        ASSERT(prior != NULL && zcl_devloop_selection_via(&again, prior) != NULL);
+        ASSERT(strcmp(zcl_devloop_selection_via(&again, prior), retained_via) == 0);
 
         /* A doc's groups can only have come from a hand-authored mapping, and
          * the ledger says so. Asked on its own: attribution is deduped on the
@@ -2101,7 +2175,8 @@ static int test_ic_every_selection_has_a_reason(void)
         bool saw_opaque = false;
         for (size_t i = 0; i < dplan.selections_len; i++) {
             if (dplan.selections[i].dim == ZCL_DEVLOOP_DIM_OPAQUE &&
-                strcmp(dplan.selections[i].via, "docs/agent/HANDOFF.md") == 0)
+                zcl_devloop_selection_via(&dplan, &dplan.selections[i]) &&
+                strcmp(zcl_devloop_selection_via(&dplan, &dplan.selections[i]), "docs/agent/HANDOFF.md") == 0)
                 saw_opaque = true;
         }
         ASSERT(saw_opaque);
@@ -18533,6 +18608,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_path_group_cap_runs_everything();
     failures += test_ic_host_need_table_is_closed();
     failures += test_ic_every_selection_has_a_reason();
+    failures += test_ic_selection_storage();
     failures += test_ic_union_never_loses_a_rule_group();
     failures += test_ic_dimension_applicability_and_exact_execution();
     failures += test_ic_render_exact_tiers();

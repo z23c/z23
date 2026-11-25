@@ -177,7 +177,7 @@ struct zcl_devloop_facts_report {
     size_t plain_groups;            /* path + closure groups, file-seeded */
     bool plain_universal;           /* ...which reached the whole catalog */
     const char *obligations_reason; /* "" when narrowed, else the fallback */
-    const char *group_reason[ZCL_DEVLOOP_MAX_PLAN_GROUPS];
+    const char *group_reason[ZCL_DEVLOOP_MAX_CLOSURE_GROUPS];
     const char *path_reason;        /* reason of every path group */
     struct zcl_devloop_facts_guard *guards; /* includes read skipped */
     size_t nguards;

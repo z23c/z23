@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,17 +28,15 @@ extern "C" {
 #define ZCL_DEVLOOP_PATH_MAX 1024
 #define ZCL_DEVLOOP_OUTPUT_MAX 65536
 #define ZCL_DEVLOOP_RESTART_SOURCE_MAX 32
-/* A graph plan can legitimately reach hundreds of registered proof owners
- * through a central header. Retain a measured 512-group envelope while the
- * per-path accumulator remains separate; overflow widens the plan to the
- * whole catalog (closure_universal).
+/* Path and graph unions have separate bounds; overflow widens the plan to
+ * the whole catalog (closure_universal).
  * The rendered command document has an independent byte ceiling. */
 #define ZCL_DEVLOOP_MAX_PLAN_GROUPS 512
+#define ZCL_DEVLOOP_MAX_CLOSURE_GROUPS 1536
 #define ZCL_DEVLOOP_GROUP_MAX 64
-/* Union across every dimension: the path floor plus the closure additions,
- * so a full path set and a full closure set both fit without either evicting
- * the other. Not a raised cap — it is the sum of the two that already exist. */
-#define ZCL_DEVLOOP_MAX_PLAN_SELECTIONS (ZCL_DEVLOOP_MAX_PLAN_GROUPS * 2)
+/* Union across every dimension: the path floor plus the closure additions. */
+#define ZCL_DEVLOOP_MAX_PLAN_SELECTIONS (ZCL_DEVLOOP_MAX_PLAN_GROUPS + ZCL_DEVLOOP_MAX_CLOSURE_GROUPS)
+#define ZCL_DEVLOOP_SELECTION_ARENA_SIZE (128u * 1024u)
 /* The intermediate file a selection came through. Repo-relative; the longest
  * tracked path is well under this. */
 #define ZCL_DEVLOOP_VIA_MAX 160
@@ -122,11 +121,11 @@ struct zcl_devloop_dim_state {
 
 /* One selected proof group and the evidence that selected it. */
 struct zcl_devloop_selection {
-    char group[ZCL_DEVLOOP_GROUP_MAX];
+    uint32_t group_offset;
     /* The file whose rule match named this group: the changed file itself for
      * OPAQUE and for a direct SEMANTIC match, otherwise the intermediate the
      * closure walk reached. Never empty. */
-    char via[ZCL_DEVLOOP_VIA_MAX];
+    uint32_t via_offset;
     enum zcl_devloop_dim dim;
 };
 
@@ -205,7 +204,7 @@ struct zcl_devloop_plan {
      * fail-closed by design, fail-open in effect. */
     char path_groups[ZCL_DEVLOOP_MAX_PLAN_GROUPS][ZCL_DEVLOOP_GROUP_MAX];
     size_t path_groups_len;
-    char closure_groups[ZCL_DEVLOOP_MAX_PLAN_GROUPS][ZCL_DEVLOOP_GROUP_MAX];
+    char closure_groups[ZCL_DEVLOOP_MAX_CLOSURE_GROUPS][ZCL_DEVLOOP_GROUP_MAX];
     size_t closure_groups_len;
     bool closure_attempted;   /* zcl_devloop_plan_add_closure() ran */
     bool closure_snapshot;    /* resident used existing graph + current bytes */
@@ -244,10 +243,38 @@ struct zcl_devloop_plan {
     struct zcl_devloop_selection selections[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t selections_len;
     bool selections_truncated;   /* the selection ledger itself overflowed */
+    uint32_t selection_arena_len;
+    char selection_arena[ZCL_DEVLOOP_SELECTION_ARENA_SIZE];
 
     /* ── C4: per-dimension completeness, indexed by enum zcl_devloop_dim ── */
     struct zcl_devloop_dim_state dims[ZCL_DEVLOOP_DIM__COUNT];
 };
+
+static inline const char *zcl_devloop_selection_arena(const struct zcl_devloop_plan *p,
+                                                       uint32_t offset)
+{
+    if (!p || p->selection_arena_len > sizeof p->selection_arena ||
+        offset >= p->selection_arena_len ||
+        (offset && p->selection_arena[offset - 1] != '\0') ||
+        p->selection_arena[offset] == '\0' ||
+        !memchr(p->selection_arena + offset, '\0', p->selection_arena_len - offset))
+        return NULL;
+    return p->selection_arena + offset;
+}
+
+static inline const char *zcl_devloop_selection_group(const struct zcl_devloop_plan *p,
+                                                       const struct zcl_devloop_selection *s)
+{
+    const char *value = s ? zcl_devloop_selection_arena(p, s->group_offset) : NULL;
+    return value && strlen(value) < ZCL_DEVLOOP_GROUP_MAX ? value : NULL;
+}
+
+static inline const char *zcl_devloop_selection_via(const struct zcl_devloop_plan *p,
+                                                     const struct zcl_devloop_selection *s)
+{
+    const char *value = s ? zcl_devloop_selection_arena(p, s->via_offset) : NULL;
+    return value && strlen(value) < ZCL_DEVLOOP_VIA_MAX ? value : NULL;
+}
 
 void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
                                const char *origin, const char *cause,
@@ -297,8 +324,9 @@ int zcl_devloop_test_closure_file_cap(int indexed, size_t changed_count);
 /* Test-only ceiling on closure_groups, so the group-cap path can be reached
  * from a fixture of a few dozen files instead of one that must out-name the
  * whole catalog. 0 (the default) means the production cap. Values outside
- * (0, ZCL_DEVLOOP_MAX_PLAN_GROUPS) are ignored. */
+ * (0, ZCL_DEVLOOP_MAX_CLOSURE_GROUPS) are ignored. */
 extern size_t zcl_devloop_test_plan_group_cap;
+bool zcl_devloop_test_fold_reached(struct zcl_devloop_plan *plan, const char *path);
 /* Test-only fault: the facts walk resolves no seed to its canonical id, so
  * the "seed-unresolved" fallback is reachable from the fixture. */
 extern bool zcl_devloop_test_facts_unresolved;
