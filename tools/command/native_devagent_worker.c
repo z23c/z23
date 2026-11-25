@@ -2227,6 +2227,16 @@ static void wkr_lock_drop(struct wkr_lock *lk)
 #endif
 }
 
+static bool wkr_lock_open(struct wkr_lock *lk, char *path, size_t cap,
+                          const char *queuedir)
+{
+    if (!platform_private_directory_ensure(queuedir))
+        return false;
+    if (snprintf(path, cap, "%s/%s", queuedir, WKR_LOCK_FILE) >= (int)cap)
+        return false;
+    return wkr_lock_take(lk, path);
+}
+
 #ifdef ZCL_TESTING
 void (*zcl_devagent_worker_test_after_empty_claim)(void) = NULL;
 void (*zcl_devagent_worker_test_after_inbox)(void) = NULL;
@@ -2517,12 +2527,8 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     long long jobs = 0, idle_ms = 0, wait_s;
     if (!opts || !exec)
         return -1;
-    if (!wkr_state_dir(queuedir, sizeof(queuedir), "queue"))
-        return -1;
-    if (snprintf(lockpath, sizeof(lockpath), "%s/%s", queuedir,
-                 WKR_LOCK_FILE) >= (int)sizeof(lockpath))
-        return -1;
-    if (!wkr_lock_take(&lock, lockpath))
+    if (!wkr_state_dir(queuedir, sizeof(queuedir), "queue") ||
+        !wkr_lock_open(&lock, lockpath, sizeof(lockpath), queuedir))
         return -1;
     old_term = signal(SIGTERM, wkr_on_term);
     /* A previous drive in this process may have observed a termination

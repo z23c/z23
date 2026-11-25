@@ -835,6 +835,28 @@ _test_next:;
     return failures;
 }
 
+static int gtx_case_empty_state(void)
+{
+    int failures = 0;
+    TEST("a cold queue directory is created before worker.lock")
+    {
+        struct wkr_drive_opts o;
+        gtx_isolate("empty-state");
+        (void)remove(g_gtx_count);
+        gtx_opts(&o, "gtx", "s-empty-state");
+        o.idle_start_s = 1;
+        o.idle_limit_s = 2;
+        ASSERT(!gtx_exists("queue"));
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, gtx_fixture), 0);
+        ASSERT_EQ(gtx_count_read(), 0);
+        ASSERT(gtx_exists("queue/worker.lock"));
+        gtx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 /* (d) A second concurrent drive refuses on worker.lock: the first
  * drive holds the whole-drive lock while idling, so the second
  * returns -1 without touching the queue. */
@@ -1638,6 +1660,7 @@ int test_devagent_worker_guards(void)
     failures += gtx_case_a();
     failures += gtx_case_b();
     failures += gtx_case_c();
+    failures += gtx_case_empty_state();
     failures += gtx_case_d();
     failures += gtx_case_e1();
     failures += gtx_case_e2();
