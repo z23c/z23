@@ -2955,9 +2955,12 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
     if (!dp_split_is_c(added) || !dp_split_name_safe(added) ||
         strlen(dp_split_leaf(added)) > DP_SPLIT_LEAF_MAX ||
         !dp_fresh_path_allowed(added) ||
-        !dp_fresh_stem(added, stem, sizeof(stem)) ||
-        !dp_fresh_named_only_by_changed(c, stem, refs, count))
+        !dp_fresh_stem(added, stem, sizeof(stem)))
         return false;
+    if (!dp_fresh_named_only_by_changed(c, stem, refs, count)) {
+        *detail = "stem_scope_unproven";
+        return false;
+    }
     char *diff = dp_split_diff(c, added);
     char *side = diff ? dp_split_side(diff, '+') : NULL;
     bool ok = dp_fresh_text_ok(c, side, added, refs, count, detail);

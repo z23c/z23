@@ -7568,6 +7568,12 @@ static bool ic_split_edit_wordlist(void)
 #define IC_FRESH_CATALOG \
     "ZCL_TEST_GROUP(hex_codec)\nZCL_TEST_GROUP(devagent_situation)\n"
 
+static bool ic_split_base_notes(void)
+{
+    return ic_split_w("docs/NOTES.txt", "pending: native_devagent_rules\n") &&
+           ic_split_w("tools/zz/collision.c", "void os_boot(void) {}\n");
+}
+
 static bool ic_split_base_build(void)
 {
     if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
@@ -7583,7 +7589,7 @@ static bool ic_split_base_build(void)
                       "int other(void)\n{\n    return 0;\n}\n") &&
            ic_split_w("Makefile", ic_split_make_base) &&
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") &&
-           ic_split_w("docs/NOTES.txt", "pending: native_devagent_rules\n") &&
+           ic_split_base_notes() &&
            ic_split_w("tools/zz/m1.txt", "one\n") &&
            ic_split_w("tools/command/native_devagent_claim.c", "int consumer(void) { return 0; }\n") &&
            ic_split_w("tools/zz/m2.txt", "two\n") &&
@@ -7755,6 +7761,9 @@ static bool ic_fresh_edit_fresh(void)
     return ic_fresh_add("tools/command/native_devagent_situation.c",
                         IC_FRESH_BODY("situation"));
 }
+
+static bool ic_fresh_stem_collision(void)
+{ return ic_fresh_add("tools/command/os_boot.c", IC_FRESH_BODY("boot")); }
 
 static bool ic_fresh_edit_comment(void)
 {
@@ -8312,6 +8321,7 @@ static bool ic_fresh_fixture_build(void)
         bool (*edit)(void);
     } branches[] = {
         {"fresh", ic_fresh_edit_fresh},
+        {"stemcollision", ic_fresh_stem_collision},
         {"freshcomment", ic_fresh_edit_comment},
         {"freshlinecomment", ic_fresh_edit_line_comment},
         {"freshhookstring", ic_fresh_edit_hook_string},
@@ -8404,6 +8414,7 @@ struct ic_fresh_case {
 
 static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
+    {"stemcollision", 'A', NULL, NULL},
     {"freshcomment", 0, "devagent_situation", NULL},
     {"freshlinecomment", 0, "devagent_situation", NULL},
     {"freshhookstring", 'A', NULL, NULL},
@@ -8485,6 +8496,8 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
 static bool ic_fresh_detail_valid(const struct ic_fresh_case *c,
                                   const struct zcl_dev_proof_changed_set *set)
 {
+    if (!strcmp(c->name, "stemcollision"))
+        return set->structural_detail && !strcmp(set->structural_detail, "stem_scope_unproven");
     if (!strncmp(c->name, "freshspliced", 12))
         return set->structural_detail && !strcmp(set->structural_detail, "source_splicing_unproven");
     if (!strcmp(c->name, "freshhookstring") || !strcmp(c->name, "freshliteralhook") ||
