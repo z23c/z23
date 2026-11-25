@@ -4390,6 +4390,171 @@ static bool fmc_window_past(const struct fmc_window *w, const struct fmc_row *v)
     return t < 0 || t <= w->reach;
 }
 
+/* ── landing observations ────────────────────────────────────────────────
+ *
+ * The host that runs the land queue posts one typed note per landing event
+ * to * under the candidate's tip. A host that runs no queue has no status
+ * to read, and before this list only a result or claim row's `landed=` line
+ * said a landing had happened: a candidate without one read
+ * `landing-unattested`. Each typed note
+ * the mail pass reads is one observation, newest note per tip, carrying the
+ * locator that returns that exact note. A note states what its sender
+ * wrote; none of it is a verified landing. */
+#define FMC_LANDING_CAP 16u
+#define FMC_LANDING_STATE 24u
+/* note= with room for one character past the longest name the candidate
+ * registry admits, so a value cut by the bound cannot pass as a name. */
+#define FMC_LANDING_NOTE (ZCL_FMC_CAND_ID_CAP + 1u)
+
+/* The typed lines of one landing note. */
+struct fmc_landing_note {
+    char event[8];
+    char state[FMC_LANDING_STATE];
+    char note[FMC_LANDING_NOTE];
+    long long attempt;
+};
+
+/* One tip's newest note. The strings are copies: the pull's reply that the
+ * parsed row borrows from does not outlive the pass. */
+struct fmc_landing {
+    char ref[41];
+    char event[8];
+    char state[FMC_LANDING_STATE];
+    char note[FMC_LANDING_NOTE];
+    char ts[32];
+    char stream[129];
+    char row_sha3[65];
+    long long row_offset;
+    long long seq;
+    long long attempt;
+    long long age;   /* seconds; -1 when the stamp does not parse */
+    unsigned notes;  /* typed notes read for this tip */
+};
+
+/* Newest first, in the order the pass read them. */
+struct fmc_landings {
+    struct fmc_landing row[FMC_LANDING_CAP];
+    size_t n;
+    bool more; /* typed notes were read for tips the list does not carry */
+};
+
+static void fmc_landings_init(struct fmc_landings *l)
+{
+    memset(l, 0, sizeof(*l));
+}
+
+/* An exact copy that fits, or "" when it does not: never a cut value. */
+static void fmc_landing_copy(char *dst, size_t cap, const char *src)
+{
+    if (!src || strlen(src) >= cap) {
+        dst[0] = '\0';
+        return;
+    }
+    memcpy(dst, src, strlen(src) + 1);
+}
+
+/* The queue's three landing events. */
+static bool fmc_landing_event(const char *event)
+{
+    return strcmp(event, "queued") == 0 || strcmp(event, "phase") == 0 ||
+           strcmp(event, "outcome") == 0;
+}
+
+/* The sender, the kind and the ref of a landing note: the queue's own
+ * sender, a note, and a tip as the ref. Its free-text notes under other
+ * refs are not landing events. */
+static bool fmc_landing_sender_ok(const struct fmc_row *v)
+{
+    return strcmp(v->from, "dev.land") == 0 && strcmp(v->kind, "note") == 0 &&
+           strlen(v->ref) == 40 && fmc_all_hex(v->ref, 40);
+}
+
+/* The typed lines, each present whole where the queue always writes a
+ * value: one cut by the bound is no value, as with every other field here.
+ * `note=` may be empty. */
+static bool fmc_landing_fields(struct fmc_landing_note *n,
+                               const struct fmc_row *v)
+{
+    char event[sizeof(n->event) + 1] = {0}, state[sizeof(n->state) + 1] = {0};
+    char tip[48] = {0};
+    bool ok = fmc_body_kv(v->body, "land", event, sizeof(event)) &&
+              fmc_body_kv(v->body, "state", state, sizeof(state)) &&
+              fmc_body_kv(v->body, "tip", tip, sizeof(tip));
+    n->attempt = fmc_body_int(v->body, "attempt");
+    (void)fmc_body_kv(v->body, "note", n->note, sizeof(n->note));
+    fmc_landing_copy(n->event, sizeof(n->event), event);
+    fmc_landing_copy(n->state, sizeof(n->state), state);
+    /* The note's tip is its row's ref: the queue writes both from one
+     * value, so another tip is no observation of this ref. */
+    return ok && fmc_landing_event(n->event) && n->state[0] && tip[0] &&
+           strcmp(tip, v->ref) == 0 && n->attempt >= 0;
+}
+
+/* One mail row as a typed landing note, or false when it is none. The
+ * filter is by shape, never by trust in the sender's claim. */
+static bool fmc_landing_typed(const struct fmc_row *v,
+                              struct fmc_landing_note *n)
+{
+    if (!v)
+        return false;
+    memset(n, 0, sizeof(*n));
+    return fmc_landing_sender_ok(v) && fmc_landing_fields(n, v);
+}
+
+static struct fmc_landing *fmc_landing_find(struct fmc_landings *l,
+                                            const char *ref)
+{
+    for (size_t i = 0; i < l->n; i++)
+        if (strcmp(l->row[i].ref, ref) == 0)
+            return &l->row[i];
+    return NULL;
+}
+
+/* One note into its row, with the locator of the mail row that carried
+ * it. A note too long to be a name is no note to show either. */
+static void fmc_landing_fill(struct fmc_landing *r,
+                             const struct fmc_landing_note *n,
+                             const struct fmc_row *v, long long now)
+{
+    memset(r, 0, sizeof(*r));
+    fmc_landing_copy(r->ref, sizeof(r->ref), v->ref);
+    fmc_landing_copy(r->event, sizeof(r->event), n->event);
+    fmc_landing_copy(r->state, sizeof(r->state), n->state);
+    if (strlen(n->note) < ZCL_FMC_CAND_ID_CAP)
+        fmc_landing_copy(r->note, sizeof(r->note), n->note);
+    /* A stamp of another shape is not shown cut: it stays unknown. */
+    fmc_landing_copy(r->ts, sizeof(r->ts),
+                     fmc_ts_shape_ok(v->ts) ? v->ts : NULL);
+    fmc_landing_copy(r->stream, sizeof(r->stream), v->stream);
+    fmc_landing_copy(r->row_sha3, sizeof(r->row_sha3), v->row_sha3);
+    r->row_offset = v->row_offset;
+    r->seq = v->seq;
+    r->attempt = n->attempt;
+    r->age = fmc_age_s(now, v->ts);
+}
+
+/* One typed note. The pass reads newest first, so the first note read for
+ * a tip is its newest: it fills the row, and each later note of that tip
+ * only counts. The list keeps the newest FMC_LANDING_CAP tips; a note for
+ * any other tip only says the list is not all the window holds. */
+static void fmc_landing_note(struct fmc_landings *l,
+                             const struct fmc_landing_note *n,
+                             const struct fmc_row *v, long long now)
+{
+    struct fmc_landing *row = fmc_landing_find(l, v->ref);
+    if (row) {
+        row->notes++;
+        return;
+    }
+    if (l->n >= FMC_LANDING_CAP) {
+        l->more = true;
+        return;
+    }
+    fmc_landing_fill(&l->row[l->n], n, v, now);
+    l->row[l->n].notes = 1;
+    l->n++;
+}
+
 /* Everything the mail walk writes into, so each row is one call. */
 struct fmc_mail_ctx {
     bool projection_failed;
@@ -4399,6 +4564,7 @@ struct fmc_mail_ctx {
     struct json_value *blockers;
     struct fmc_roster *ro;
     struct zcl_fmc_cand_reg *cand;
+    struct fmc_landings *landings;
     long long since;
     long long changes_cap;
     long long now;
@@ -4409,6 +4575,37 @@ struct fmc_mail_ctx {
     struct fmc_window win;
     char sent_path[4096 + 32];
 };
+
+/* An outcome that states `landed` reports publication of the one name its
+ * note carries: the token the submitter wrote there, and no other. A note
+ * that is empty or more than one token names nothing. It is the queue's
+ * sender reporting, as any mail sighting is, so the candidate reads
+ * reported_landed and `landed` itself stays null. */
+static void fmc_landing_report(struct fmc_mail_ctx *c,
+                               const struct fmc_landing_note *n,
+                               const struct fmc_row *v)
+{
+    char name[ZCL_FMC_CAND_ID_CAP];
+    long long age;
+    if (strcmp(n->event, "outcome") != 0 || strcmp(n->state, "landed") != 0 ||
+        !fmc_clean_agent(n->note, name, sizeof(name)))
+        return;
+    age = fmc_age_s(c->now, v->ts);
+    zcl_fmc_cand_note(c->cand, name, ZCL_FMC_CAND_SRC_MAIL, "dev.land", age,
+                      age >= 0);
+    zcl_fmc_cand_note_landed(c->cand, name, "dev.land", age, age >= 0);
+}
+
+/* One mail row as a landing observation when it is a typed landing note.
+ * The sighting is exact wherever the pass read it, cut or whole. */
+static void fmc_landing_row(struct fmc_mail_ctx *c, const struct fmc_row *v)
+{
+    struct fmc_landing_note n;
+    if (!fmc_landing_typed(v, &n))
+        return;
+    fmc_landing_note(c->landings, &n, v, c->now);
+    fmc_landing_report(c, &n, v);
+}
 
 /* Mail counts as a read candidates source only when the pass read it
  * whole: a cut pass leaves the total unknown, never a floor for one. */
@@ -4552,9 +4749,10 @@ static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
         c->ro->dt.overdue_worker++;
 }
 
-/* One pulled row: roster, tallies, the stale-directive check (bounded to
- * the newest FMC_DIRECTIVE_SCAN directives), and above `since`, under
- * the cap, one change row. */
+/* One pulled row: roster, tallies, a landing observation when it is a typed
+ * landing note, the stale-directive check (bounded to the newest
+ * FMC_DIRECTIVE_SCAN directives), and above `since`, under the cap, one
+ * change row. */
 static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
                          const struct json_value *rows)
 {
@@ -4562,6 +4760,7 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
     fmc_roster_note(c->ro, v);
     fmc_sessions_note(c->ro, v);
     fmc_cand_from_mail(c, v);
+    fmc_landing_row(c, v);
     if (strcmp(v->kind, "directive") == 0 &&
         c->scanned < FMC_DIRECTIVE_SCAN) {
         c->scanned++;
@@ -5555,16 +5754,37 @@ static void fmc_apply_completed(struct json_value *changes,
     }
 }
 
+/* Where a host that could not read its land queue status can still see a
+ * landing: the typed notes the mail pass kept. Said only when it kept one;
+ * a page budget can still cut every row afterwards, which landings_dropped
+ * reports. A tip outside the list is one lookup away: a ref alone returns
+ * the newest held row under it. */
+static const char *fmc_landings_next(const struct fmc_landings *l)
+{
+    if (!l || !l->n)
+        return NULL;
+    return "the land queue status was not read here; landings[] in this brief "
+           "lists the typed landing notes the mail pass read, landings_dropped "
+           "the rows a page budget cut: "
+           "fleet steer evidence --type=mail --ref=<ref> --stream=<stream> "
+           "--row_offset=<n> --seq=<n> --row_sha3=<hex> returns a row's "
+           "exact note; --ref=<tip> alone returns the newest held row under "
+           "the tip, of any kind";
+}
+
 /* Read the owning status leaves exactly once. Status only: never step,
- * ensure, wait, retry, reap or take a scheduler lock while rendering. */
+ * ensure, wait, retry, reap or take a scheduler lock while rendering. A
+ * status that could not be read says where a landing is still seen. */
 static bool fmc_land_read(const struct zcl_command_request *req,
-    struct fmc_sub *sub, struct json_value *missing, bool *complete)
+    struct fmc_sub *sub, struct json_value *missing, bool *complete,
+    const struct fmc_landings *landings)
 {
     fmc_sub_begin(sub, "zcl.dev_land.v1", req, "dev.land");
     const char *unavailable = fmc_snapshot_source("land/queue.jsonl", false);
     if (complete) *complete = unavailable == NULL;
     if (unavailable) {
-        fmc_note_missing(missing, "dev.land", unavailable, 0);
+        fmc_note_missing_next(missing, "dev.land", unavailable, 0,
+                              fmc_landings_next(landings), 0);
         if (strcmp(unavailable, "source_missing") != 0) return false;
     }
     if (sub->valid && fmc_sub_input(sub, "{\"action\":\"status\",\"json\":true}")) {
@@ -5572,7 +5792,8 @@ static bool fmc_land_read(const struct zcl_command_request *req,
         sub->ran = true;
     }
     if (fmc_sub_ok(sub)) return true;
-    fmc_note_missing(missing, "dev.land", "status_unavailable", 0);
+    fmc_note_missing_next(missing, "dev.land", "status_unavailable", 0,
+                          fmc_landings_next(landings), 0);
     return false;
 }
 
@@ -5606,12 +5827,15 @@ static void fmc_land_proof(const struct zcl_command_request *req,
 }
 
 static void fmc_brief_land(const struct zcl_command_request *req,
-    struct zcl_fmc_tasks *tasks, struct json_value *missing)
+    struct zcl_fmc_tasks *tasks, struct json_value *missing,
+    bool changes_only, const struct fmc_landings *landings)
 {
     struct fmc_sub sub;
     struct json_value proof = {0};
     bool complete = false;
-    if (fmc_land_read(req, &sub, missing, &complete)) {
+    /* A changes-only page lists no landings, so it names none. */
+    if (fmc_land_read(req, &sub, missing, &complete,
+                      changes_only ? NULL : landings)) {
         fmc_land_proof(req, json_get(&sub.reply.data, "in_flight"), &proof, missing);
         long long now = (long long)platform_time_wall_unix();
         if (!zcl_fmc_tasks_land(tasks, &sub.reply.data, &proof, now, now))
@@ -5718,11 +5942,12 @@ static bool fmc_fit_member(struct json_value *data, struct json_value *trunc,
 static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
 {
     static const char *const order[] = {
-        "changes", "workers", "candidates", "work", "agents", "sessions",
-        "blockers", "tasks",
+        "changes", "workers", "candidates", "landings", "work", "agents",
+        "sessions", "blockers", "tasks",
     };
     static const char *const forward_order[] = {
-        "workers", "candidates", "work", "agents", "sessions", "blockers", "tasks", "changes"};
+        "workers", "candidates", "landings", "work", "agents", "sessions",
+        "blockers", "tasks", "changes"};
     const char *const *keys = forward ? forward_order : order;
     struct json_value empty;
     size_t i;
@@ -5744,8 +5969,10 @@ struct fmc_brief_lists {
     struct json_value agents, work, blockers, candidates, changes, missing;
     struct json_value capacity, evidence, post_ids, outcomes;
     /* candidates[] is emitted FROM this registry; the array above stays
-     * only as the buffer zcl_fmc_cand_emit fills. */
+     * only as the buffer zcl_fmc_cand_emit fills. landings is the same
+     * kind of store for the typed landing notes the mail pass read. */
     struct zcl_fmc_cand_reg cand;
+    struct fmc_landings landings;
     struct zcl_fmc_tasks tasks;
 };
 
@@ -5764,6 +5991,7 @@ static void fmc_lists_init(struct fmc_brief_lists *l)
     json_init(&l->evidence);
     json_set_object(&l->evidence);
     zcl_fmc_cand_init(&l->cand);
+    fmc_landings_init(&l->landings);
     zcl_fmc_tasks_init(&l->tasks);
 }
 
@@ -5925,6 +6153,32 @@ static bool fmc_brief_tasks_update(struct json_value *data, long long base_dropp
     return true;
 }
 
+/* The same for landings[] after a budget cut: shown is what survived and
+ * dropped the rows the cut removed. Nothing else drops a row: a tip past
+ * the list's cap is landings_more, not a dropped row. A page that lists
+ * no landings has no count to rewrite. */
+static bool fmc_brief_landings_update(struct json_value *data)
+{
+    struct json_value *shown = (struct json_value *)json_get(data, "landings_shown");
+    struct json_value *dropped = (struct json_value *)json_get(data, "landings_dropped");
+    if (!json_get(data, "landings"))
+        return true;
+    if (!shown || shown->type != JSON_INT || !dropped || dropped->type != JSON_INT)
+        return false;
+    long long cut = json_get_int(json_get(json_get(data, "budget_truncated"), "landings"));
+    json_set_int(dropped, cut);
+    json_set_int(shown, (long long)json_size(json_get(data, "landings")));
+    return true;
+}
+
+/* The two counts a budget cut rewrites. */
+static bool fmc_brief_counts_update(struct json_value *data,
+                                    long long base_tasks_dropped)
+{
+    return fmc_brief_tasks_update(data, base_tasks_dropped) &&
+           fmc_brief_landings_update(data);
+}
+
 /* 0 closed, 1 cursor projection failed, 2 budget metadata failed, 3 stalled. */
 static int fmc_brief_cursor_finish(struct json_value *data,
     const struct fmc_mail_view *view, size_t budget, long long base_tasks_dropped,
@@ -5937,7 +6191,7 @@ static int fmc_brief_cursor_finish(struct json_value *data,
         char token[FMC_MAIL_SINCE_CAP];
         if (!zcl_devagent_mail_cursor_prefix(view->start_token, view->cursor_token, changes, token, sizeof(token)) ||
             !fmc_brief_cursor_set(data, token) || !fmc_brief_changes_set(data, view) ||
-            (include_tasks && !fmc_brief_tasks_update(data, base_tasks_dropped)))
+            (include_tasks && !fmc_brief_counts_update(data, base_tasks_dropped)))
             return 1;
         if (json_write(data, NULL, 0) <= budget) {
             if (json_size(changes) || json_get_int(json_get(data, "changes_dropped")) == 0) return 0;
@@ -6005,6 +6259,69 @@ static bool fmc_brief_tasks_emit(struct fmc_brief_lists *lists,
     return false;
 }
 
+/* A landing row's fixed keys: the tip, its newest note's typed lines, and
+ * how many notes were read for that tip. */
+static bool fmc_landing_emit_fields(struct json_value *o,
+                                    const struct fmc_landing *r)
+{
+    return json_push_kv_str(o, "ref", r->ref) &&
+           json_push_kv_str(o, "event", r->event) &&
+           json_push_kv_str(o, "state", r->state) &&
+           json_push_kv_int(o, "attempt", r->attempt) &&
+           fmc_put_str(o, "note", r->note) &&
+           fmc_put_int(o, "age_s", r->age) &&
+           json_push_kv_int(o, "seq", r->seq) &&
+           json_push_kv_int(o, "notes", (long long)r->notes);
+}
+
+/* The locator of the note's mail row, when the pull supplied one: with
+ * seq, the keys fleet steer evidence --type=mail reads an exact line by.
+ * None when the pull gave no locator. */
+static bool fmc_landing_emit_locator(struct json_value *o,
+                                     const struct fmc_landing *r)
+{
+    if (!r->stream[0] || !r->row_sha3[0] || r->row_offset < 0)
+        return true;
+    return json_push_kv_str(o, "stream", r->stream) &&
+           json_push_kv_int(o, "row_offset", r->row_offset) &&
+           json_push_kv_str(o, "row_sha3", r->row_sha3);
+}
+
+/* One landing row onto the list. */
+static bool fmc_landing_emit_row(struct json_value *arr,
+                                 const struct fmc_landing *r)
+{
+    struct json_value o;
+    bool ok;
+    json_init(&o);
+    json_set_object(&o);
+    ok = fmc_landing_emit_fields(&o, r);
+    if (ok && r->ts[0])
+        ok = json_push_kv_str(&o, "ts", r->ts);
+    ok = ok && fmc_landing_emit_locator(&o, r) && json_push_back(arr, &o);
+    json_free(&o);
+    return ok;
+}
+
+/* landings[] and its coverage keys. A budget cut rewrites the two counts
+ * afterwards; landings_more is the pass's own and does not change. */
+static bool fmc_landings_emit(struct json_value *data,
+                              const struct fmc_landings *l)
+{
+    struct json_value arr;
+    bool ok = true;
+    json_init(&arr);
+    json_set_array(&arr);
+    for (size_t i = 0; i < l->n; i++)
+        ok = ok && fmc_landing_emit_row(&arr, &l->row[i]);
+    ok = ok && json_push_kv(data, "landings", &arr) &&
+         json_push_kv_int(data, "landings_shown", (long long)l->n) &&
+         json_push_kv_int(data, "landings_dropped", 0) &&
+         json_push_kv_bool(data, "landings_more", l->more);
+    json_free(&arr);
+    return ok;
+}
+
 static void fmc_brief_observe_if_fits(struct json_value *data, size_t budget);
 
 /* Compact ",\"observation_generation\":\"<16 hex>\",\"not_modified\":false"
@@ -6068,8 +6385,9 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
         }
     }
     json_free(&saved);
-    if (include_tasks && !fmc_brief_tasks_update(&reply->data, base_tasks_dropped)) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count projection is incomplete", "json");
+    if (include_tasks && !fmc_brief_counts_update(&reply->data, base_tasks_dropped)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
+                 "task or landing count projection is incomplete", "json");
         return;
     }
     /* Reserved slack carries the observation. A row that needed those bytes
@@ -6082,7 +6400,7 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
 
 static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lists *l,
                            struct fmc_roster *ro, const struct fmc_emit_ctx *ec,
-                           bool changes_only)
+                           bool changes_only, const struct fmc_mail_view *mv)
 {
     if (!changes_only && !fmc_mailbox_directory(&reply->data, ec->caller, ec->now)) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "mailbox directory could not be copied", "json");
@@ -6104,6 +6422,17 @@ static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lis
     if (!changes_only) {
         zcl_fmc_cand_emit(&l->cand, &l->candidates, &reply->data, &l->missing);
         (void)json_push_kv(&reply->data, "candidates", &l->candidates);
+        /* The snapshot always lists landings, so an empty list there reads
+         * as read and empty. A forward page lists them only when its pass
+         * read a typed landing note: its budget is the caller's, and an
+         * empty list with three counts would spend seventy-six bytes of
+         * it. */
+        if ((!mv || !mv->forward || l->landings.n > 0) &&
+            !fmc_landings_emit(&reply->data, &l->landings)) {
+            fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
+                     "landing observations could not be copied", "json");
+            return false;
+        }
     }
     return true;
 }
@@ -6124,7 +6453,7 @@ static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_co
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "caller could not be copied", "json");
         return;
     }
-    if (!fmc_brief_view(reply, l, ro, ec, changes_only)) return;
+    if (!fmc_brief_view(reply, l, ro, ec, changes_only, mv)) return;
     if (!json_push_kv(&reply->data, "evidence", &l->evidence) && changes_only) {
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "evidence could not be copied", "json");
         return;
@@ -6232,6 +6561,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     mc.blockers = &l.blockers;
     mc.ro = &ro;
     mc.cand = &l.cand;
+    mc.landings = &l.landings;
     mc.changes_cap = FMC_CHANGES_DEFAULT;
     mc.now = (long long)platform_time_wall_unix();
     if (fmc_int(req, "since", &tmp) && tmp >= 0)
@@ -6247,7 +6577,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     ro.window_cut = mv.window_cut;
     fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
                     &qv, &l.outcomes, &l.tasks);
-    fmc_brief_land(req, &l.tasks, &l.missing);
+    fmc_brief_land(req, &l.tasks, &l.missing, changes_only, mc.landings);
     fmc_brief_board(&board, &l.agents, &l.blockers, &l.cand, &l.missing,
                     &l.post_ids);
     fmc_brief_ledger(req, &l.missing, &ledger);
@@ -7430,7 +7760,7 @@ static void fmc_evidence_land(const struct zcl_command_request *req,
     struct fmc_sub sub;
     struct json_value missing = {0}, proof = {0};
     json_set_array(&missing);
-    if (!fmc_land_read(req, &sub, &missing, NULL)) {
+    if (!fmc_land_read(req, &sub, &missing, NULL, NULL)) {
         fmc_fail(reply, "EVIDENCE_UNAVAILABLE", "landing status did not answer", "dev.land");
         goto done;
     }

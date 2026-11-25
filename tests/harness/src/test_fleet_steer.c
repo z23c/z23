@@ -9610,6 +9610,402 @@ _test_next:;
     return failures;
 }
 
+/* ── landing observations ─────────────────────────────────────────────── */
+
+/* The typed lines of one landing note, as the queue writes it: one line a
+ * value, ending in a newline. `note` NULL is the reduced outcome, which
+ * carries no note line. `escaped` writes the line breaks as a stream row
+ * holds them; else as the mail leaf returns the body. */
+static void fmx_land_body(char *out, size_t cap, const char *ref,
+                          const char *event, const char *state, int attempt,
+                          const char *note, bool escaped)
+{
+    const char *nl = escaped ? "\\n" : "\n";
+    int n = note
+        ? snprintf(out, cap, "land=%s%sstate=%s%stip=%s%sattempt=%d%s"
+                   "dimension=%snote=%s%slog=land-4121-a1.log%s",
+                   event, nl, state, nl, ref, nl, attempt, nl, nl, note, nl,
+                   nl)
+        : snprintf(out, cap, "land=%s%sstate=%s%stip=%s%sattempt=%d%sreduced=1%s",
+                   event, nl, state, nl, ref, nl, attempt, nl, nl);
+    if (n <= 0 || (size_t)n >= cap)
+        fmx_fixture_fail("landing note exceeds bound");
+}
+
+/* One note in the shape of a landing note, from `from`, stamped `ago`
+ * seconds before now, in the fixture's live stream. */
+static void fmx_land_note(const char *from, long long ago, long long seq,
+                          const char *ref, const char *event,
+                          const char *state, int attempt, const char *note)
+{
+    char ts[32], body[640];
+    fmx_ts_ago(ago, ts, sizeof(ts));
+    fmx_land_body(body, sizeof(body), ref, event, state, attempt, note, true);
+    fmx_seed_inbox("node1-a", ts, seq, from, "*", "note", body, ref);
+}
+
+/* One typed landing note from the queue's own sender. */
+static void fmx_queue_note(long long ago, long long seq, const char *ref,
+                           const char *event, const char *state, int attempt,
+                           const char *note)
+{
+    fmx_land_note("dev.land", ago, seq, ref, event, state, attempt, note);
+}
+
+/* The landings[] row for one tip, or NULL. */
+static const struct json_value *fmx_landing(const struct fmx_call *c,
+                                            const char *ref)
+{
+    const struct json_value *arr = fmx_arr(c, "landings");
+    for (size_t i = 0; arr && i < json_size(arr); i++) {
+        const struct json_value *r = json_at(arr, i);
+        if (r && !strcmp(fmx_cstr(r, "ref"), ref))
+            return r;
+    }
+    return NULL;
+}
+
+/* The next of missing[]'s row for a source: NULL when the source is not
+ * missing, "" when its row carries none. */
+static const char *fmx_missing_source_next(const struct fmx_call *c,
+                                           const char *source)
+{
+    const struct json_value *missing = fmx_arr(c, "missing");
+    for (size_t i = 0; missing && i < json_size(missing); i++) {
+        const struct json_value *e = json_at(missing, i);
+        if (e && !strcmp(fmx_cstr(e, "source"), source))
+            return fmx_cstr(e, "next");
+    }
+    return NULL;
+}
+
+/* The 40-hex tip `n` stands for. */
+static void fmx_tip(char *out, size_t cap, unsigned n)
+{
+    (void)snprintf(out, cap, "%040x", n);
+}
+
+static int fmx_t_brief_landings(void)
+{
+    int failures = 0;
+    static const char tip_a[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char tip_b[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    static const char tip_c[] = "cccccccccccccccccccccccccccccccccccccccc";
+    static const char tip_d[] = "dddddddddddddddddddddddddddddddddddddddd";
+    static const char tip_e[] = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+    TEST("steer: a host that cannot read its land queue lists the typed landing notes") {
+        struct fmx_call b, e, compact;
+        char ts[32], body[640];
+        const struct json_value *landings, *candidates, *row, *next, *entry;
+        const char *const keys[] = {"stream", "row_offset", "seq", "row_sha3"};
+        bool pushed = true;
+        fmx_isolate("brief_landings");
+        fmx_prime_mail();
+        /* `land` is a regular file, as on a host that runs no queue: the
+         * status leaf cannot be read here. */
+        fmx_state_file("", "land", "inert receiver fixture\n", false);
+        /* Oldest first. Tip a is read at its outcome, then twice more. */
+        fmx_queue_note(7200, 1, tip_a, "queued", "queued", 1, "train-alpha-1125");
+        fmx_queue_note(7100, 2, tip_a, "phase", "inflight", 1, "train-alpha-1125");
+        fmx_queue_note(7000, 3, tip_b, "queued", "queued", 1, "train-beta-1125");
+        fmx_queue_note(6900, 4, tip_b, "outcome", "failed", 1, "train-beta-1125");
+        fmx_queue_note(6800, 5, tip_c, "outcome", "landed", 1, "two words");
+        fmx_queue_note(6700, 6, tip_d, "outcome", "landed", 1, NULL);
+        fmx_queue_note(6600, 7, tip_a, "outcome", "landed", 1, "train-alpha-1125");
+        /* No landing note: a ref that is not a tip, and another sender. */
+        fmx_queue_note(6500, 8, "not-a-tip", "outcome", "landed", 1,
+                       "ghost-train-1125");
+        fmx_land_note("other.land", 6400, 9, tip_e, "outcome", "landed", 1,
+                      "ghost-train-two-1125");
+        /* A result row alone: nobody says it landed. */
+        fmx_ts_ago(6000, ts, sizeof(ts));
+        fmx_seed_inbox("node1-a", ts, 10, "worker-x", "*", "result", "done",
+                       "work-ref-plain");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_EQ(fmx_evidence_int(&b, "mail_count"), 10);
+        /* The status is still unread and still named, now with the place
+         * a landing is read instead. */
+        entry = fmx_missing_find(&b, "dev.land", "source_parent_not_directory");
+        ASSERT(entry != NULL);
+        next = json_get(entry, "next");
+        ASSERT(next && next->type == JSON_STR && json_get_str(next));
+        ASSERT(strstr(json_get_str(next), "landings[]") != NULL);
+        ASSERT(strstr(json_get_str(next), "--type=mail") != NULL);
+        ASSERT(!json_get_bool(fmx_get(&b, "tasks_sources_complete")));
+        /* One row a tip, newest first, each at its newest note. */
+        landings = fmx_arr(&b, "landings");
+        ASSERT(landings != NULL);
+        ASSERT_EQ(json_size(landings), 4u);
+        ASSERT_EQ(fmx_int(&b, "landings_shown"), 4);
+        ASSERT_EQ(fmx_int(&b, "landings_dropped"), 0);
+        ASSERT(!json_get_bool(fmx_get(&b, "landings_more")));
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 0), "ref"), tip_a);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 1), "ref"), tip_d);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 2), "ref"), tip_c);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 3), "ref"), tip_b);
+        ASSERT(fmx_landing(&b, tip_e) == NULL);
+        ASSERT(fmx_landing(&b, "not-a-tip") == NULL);
+        row = fmx_landing(&b, tip_a);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "event"), "outcome");
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "landed");
+        ASSERT_STR_EQ(fmx_cstr(row, "note"), "train-alpha-1125");
+        ASSERT_EQ(json_get_int(json_get(row, "attempt")), 1);
+        ASSERT_EQ(json_get_int(json_get(row, "notes")), 3);
+        ASSERT_EQ(json_get_int(json_get(row, "seq")), 7);
+        ASSERT(json_get_int(json_get(row, "age_s")) >= 6600);
+        ASSERT(json_get_int(json_get(row, "age_s")) < 7100);
+        ASSERT_STR_EQ(fmx_cstr(row, "stream"), "inbox.node1-a.jsonl");
+        ASSERT(json_get_int(json_get(row, "row_offset")) >= 0);
+        ASSERT(strlen(fmx_cstr(row, "row_sha3")) == 64);
+        row = fmx_landing(&b, tip_b);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "failed");
+        ASSERT_EQ(json_get_int(json_get(row, "notes")), 2);
+        row = fmx_landing(&b, tip_c);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "note"), "two words");
+        row = fmx_landing(&b, tip_d);
+        ASSERT(row != NULL);
+        ASSERT(json_is_null(json_get(row, "note")));
+        /* The locator returns that exact note. */
+        row = fmx_landing(&b, tip_a);
+        fmx_evidence(&e, NULL, "mail", tip_a);
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+            pushed = json_push_kv(&e.input, keys[i], json_get(row, keys[i])) &&
+                     pushed;
+        ASSERT(pushed);
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&e));
+        fmx_land_body(body, sizeof(body), tip_a, "outcome", "landed", 1,
+                      "train-alpha-1125", false);
+        ASSERT_STR_EQ(fmx_cstr(fmx_get(&e, "object"), "body"), body);
+        ASSERT_STR_EQ(fmx_cstr(fmx_get(&e, "object"), "ts"), fmx_cstr(row, "ts"));
+        fmx_end(&e);
+        /* A landed outcome reports publication of the one token its note
+         * carries: reported, never attested. */
+        candidates = fmx_arr(&b, "candidates");
+        ASSERT(candidates != NULL);
+        row = fmx_cand(candidates, "train-alpha-1125");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "reported_landed");
+        ASSERT_STR_EQ(fmx_cstr(row, "publication_state"), "reported_landed");
+        ASSERT(json_is_null(json_get(row, "landed")));
+        /* Two words name nothing; a failed outcome is no publication;
+         * neither is a note under a ref that is not a tip or from another
+         * sender. */
+        ASSERT(fmx_cand(candidates, "two") == NULL);
+        ASSERT(fmx_cand(candidates, "two words") == NULL);
+        ASSERT(fmx_cand(candidates, "train-beta-1125") == NULL);
+        ASSERT(fmx_cand(candidates, "ghost-train-1125") == NULL);
+        ASSERT(fmx_cand(candidates, "ghost-train-two-1125") == NULL);
+        row = fmx_cand(candidates, "work-ref-plain");
+        ASSERT(row != NULL);
+        ASSERT(json_is_null(json_get(row, "landed")));
+        ASSERT_STR_EQ(fmx_cstr(row, "reason"), "landing-unattested");
+        fmx_end(&b);
+        /* A compact page is mail changes only. */
+        ASSERT(fmx_compact_page(&compact, "0|", 65536));
+        ASSERT(fmx_get(&compact, "landings") == NULL);
+        ASSERT(fmx_get(&compact, "landings_shown") == NULL);
+        ASSERT(fmx_get(&compact, "landings_more") == NULL);
+        fmx_end(&compact);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: an unread land status points at landings only when it holds a row") {
+        struct fmx_call b, p;
+        char grant[64];
+        const char *next;
+        fmx_isolate("brief_landings_none");
+        fmx_prime_mail();
+        ASSERT(fmx_mint("brief", grant, sizeof(grant)));
+        fmx_brief(&b, grant, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        next = fmx_missing_source_next(&b, "dev.land");
+        ASSERT(next != NULL);
+        ASSERT_STR_EQ(next, "");
+        ASSERT_EQ(fmx_int(&b, "landings_shown"), 0);
+        ASSERT_EQ(fmx_int(&b, "landings_dropped"), 0);
+        ASSERT(!json_get_bool(fmx_get(&b, "landings_more")));
+        fmx_end(&b);
+        /* A forward page whose pass read no typed landing note adds no
+         * landing key: its budget is the caller's, and the snapshot above
+         * already said the list was read and empty. */
+        ASSERT(fmx_forward_page(&p, "0|", 8, 65536));
+        ASSERT(fmx_get(&p, "landings") == NULL);
+        ASSERT(fmx_get(&p, "landings_shown") == NULL);
+        ASSERT(fmx_get(&p, "landings_dropped") == NULL);
+        fmx_end(&p);
+        fmx_restore();
+        PASS();
+    } _test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* The list's two bounds: the cap on tips, and the page budget. */
+static int fmx_t_brief_landings_cap(void)
+{
+    int failures = 0;
+
+    TEST("steer: the landing list keeps the newest tips and says the window holds more") {
+        struct fmx_call b, e;
+        char ref[41], note[48], body[640];
+        const struct json_value *landings;
+        fmx_isolate("brief_landings_cap");
+        fmx_prime_mail();
+        /* Twenty tips, oldest first. Each of the four oldest carries two
+         * notes. The list holds sixteen tips; the other four are not rows
+         * and not dropped rows: the pass only says it read their notes. */
+        for (int i = 1; i <= 20; i++) {
+            fmx_tip(ref, sizeof(ref), (unsigned)i);
+            (void)snprintf(note, sizeof(note), "landing-tip-%02d", i);
+            fmx_queue_note(4000 - 100 * i, 2 * i - 1, ref, "queued", "queued",
+                           1, note);
+            if (i <= 4)
+                fmx_queue_note(3950 - 100 * i, 2 * i, ref, "phase", "inflight",
+                               1, note);
+        }
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        landings = fmx_arr(&b, "landings");
+        ASSERT(landings != NULL);
+        ASSERT_EQ(json_size(landings), 16u);
+        ASSERT_EQ(fmx_int(&b, "landings_shown"), 16);
+        ASSERT_EQ(fmx_int(&b, "landings_dropped"), 0);
+        ASSERT(json_get_bool(fmx_get(&b, "landings_more")));
+        fmx_tip(ref, sizeof(ref), 20u);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 0), "ref"), ref);
+        fmx_tip(ref, sizeof(ref), 5u);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 15), "ref"), ref);
+        ASSERT_EQ(json_get_int(json_get(json_at(landings, 15), "notes")), 1);
+        fmx_tip(ref, sizeof(ref), 1u);
+        ASSERT(fmx_landing(&b, ref) == NULL);
+        fmx_end(&b);
+        /* A tip past the cap stays one lookup away: its newest held note,
+         * by ref alone. */
+        fmx_evidence(&e, NULL, "mail", ref);
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence) && fmx_ok(&e));
+        fmx_land_body(body, sizeof(body), ref, "phase", "inflight", 1,
+                      "landing-tip-01", false);
+        ASSERT_STR_EQ(fmx_cstr(fmx_get(&e, "object"), "body"), body);
+        fmx_end(&e);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a tight page budget cuts the landing list oldest first and says how many") {
+        struct fmx_call p;
+        char ref[41], note[96];
+        const struct json_value *landings, *cuts;
+        long long shown = 16;
+        size_t budget, used = 0, bytes;
+        ASSERT(fmx_forward_setup("forward_landings_budget"));
+        /* Sixteen long notes: more landing rows than a small page holds. */
+        for (int i = 1; i <= 16; i++) {
+            fmx_tip(ref, sizeof(ref), (unsigned)i);
+            (void)snprintf(note, sizeof(note),
+                           "landing-tip-%02d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                           i);
+            fmx_queue_note(2000 - 100 * i, i, ref, "phase", "inflight", 1,
+                           note);
+        }
+        /* The whole list, and the size of the page that holds it. */
+        ASSERT(fmx_forward_page(&p, "0|", 1, 65536));
+        ASSERT_EQ(fmx_int(&p, "landings_shown"), 16);
+        ASSERT_EQ(fmx_int(&p, "landings_dropped"), 0);
+        ASSERT(!json_get_bool(fmx_get(&p, "landings_more")));
+        bytes = json_write(&p.reply.data, NULL, 0);
+        fmx_end(&p);
+        /* Narrow the page 64 bytes at a time until the list gives up a
+         * row. One step removes one row, never the list. */
+        for (budget = bytes + 1024; budget > 4096 && shown == 16; budget -= 64) {
+            used = budget;
+            ASSERT(fmx_forward_page(&p, "0|", 1, budget));
+            shown = fmx_int(&p, "landings_shown");
+            if (shown == 16)
+                fmx_end(&p);
+        }
+        ASSERT(shown >= 1 && shown < 16);
+        landings = fmx_arr(&p, "landings");
+        cuts = fmx_get(&p, "budget_truncated");
+        ASSERT(landings != NULL && cuts != NULL);
+        ASSERT_EQ((long long)json_size(landings), shown);
+        ASSERT_EQ(fmx_int(&p, "landings_dropped"), 16 - shown);
+        ASSERT_EQ(json_get_int(json_get(cuts, "landings")), 16 - shown);
+        /* A cut drops rows; it does not make the window hold more. */
+        ASSERT(!json_get_bool(fmx_get(&p, "landings_more")));
+        ASSERT(json_write(&p.reply.data, NULL, 0) + 1024 <= used);
+        fmx_tip(ref, sizeof(ref), 16u);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 0), "ref"), ref);
+        fmx_tip(ref, sizeof(ref), (unsigned)(17 - shown));
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, (size_t)shown - 1), "ref"), ref);
+        fmx_end(&p);
+        fmx_restore();
+        PASS();
+    } _test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* A value cut by its bound is no value. A long event once arrived cut and
+ * passed as `outcome`: such a row is no observation now, and a tip stays
+ * at its newest whole note. */
+static int fmx_t_brief_landings_shape(void)
+{
+    int failures = 0;
+    static const char tip_a[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char tip_f[] = "ffffffffffffffffffffffffffffffffffffffff";
+
+    TEST("steer: a landing note with a cut event or state is no observation") {
+        struct fmx_call b;
+        char ts[32], body[640];
+        const struct json_value *landings, *row;
+        fmx_isolate("brief_landings_shape");
+        fmx_prime_mail();
+        fmx_state_file("", "land", "inert receiver fixture\n", false);
+        fmx_queue_note(7000, 1, tip_a, "queued", "queued", 1, "train-alpha-1125");
+        fmx_queue_note(6900, 2, tip_a, "outcome-retry", "landed", 1, "cut event");
+        fmx_queue_note(6800, 3, tip_a, "outcome",
+                       "landed-but-longer-than-a-state-holds", 1, "cut state");
+        fmx_queue_note(6700, 4, tip_f, "outcome", "landed", 1, "whole values");
+        /* The note's tip is not its row's ref: no observation of tip_f. */
+        fmx_ts_ago(6750, ts, sizeof(ts));
+        fmx_land_body(body, sizeof(body), "not-the-ref", "outcome", "landed", 1,
+                      "other tip", true);
+        fmx_seed_inbox("node1-a", ts, 5, "dev.land", "*", "note", body, tip_f);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        landings = fmx_arr(&b, "landings");
+        ASSERT(landings != NULL);
+        ASSERT_EQ(json_size(landings), 2u);
+        ASSERT_EQ(fmx_int(&b, "landings_shown"), 2);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 0), "ref"), tip_f);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 1), "ref"), tip_a);
+        /* Tip a stays at its whole queued note: two rows are not read. */
+        row = fmx_landing(&b, tip_a);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_cstr(row, "event"), "queued");
+        ASSERT_STR_EQ(fmx_cstr(row, "state"), "queued");
+        ASSERT_EQ(json_get_int(json_get(row, "notes")), 1);
+        ASSERT_EQ(json_get_int(json_get(row, "seq")), 1);
+        /* Tip f stays at seq 4: the note with another tip is not read. */
+        row = fmx_landing(&b, tip_f);
+        ASSERT(row != NULL);
+        ASSERT_EQ(json_get_int(json_get(row, "notes")), 1);
+        ASSERT_EQ(json_get_int(json_get(row, "seq")), 4);
+    } _test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int fsd_deliver_checks(void);
 int test_fleet_steer(void);
 int fmx_task_projection_checks(void);
@@ -9676,6 +10072,9 @@ int test_fleet_steer(void)
     failures += fmx_t_brief_window_unresolved();
     failures += fmx_t_brief_window_roles();
     failures += fmx_t_brief_window_seen();
+    failures += fmx_t_brief_landings();
+    failures += fmx_t_brief_landings_cap();
+    failures += fmx_t_brief_landings_shape();
     failures += fmx_t_evidence();
 #if !defined(_WIN32)
     failures += fmx_t_lost_receipt_retry();
