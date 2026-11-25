@@ -38,6 +38,7 @@ int64_t board_now(void);
 /* The network genesis every pairing and roster proof is bound to. */
 bool board_network_genesis(uint8_t out[32]);
 /* The paired peer's delegation, as the lane resolves it. */
+bool board_peer_delegation_unheld(const struct db_mesh_pairing *row);
 bool board_peer_delegation(const struct db_mesh_pairing *row,
                            struct vcs_zcode_dht_delegation *out);
 /* The disclosure decision judges at most this many pairing rows for one

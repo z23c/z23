@@ -101,6 +101,7 @@ enum boot_mesh_session_observation boot_mesh_observe_session_peer(
  * ambiguous and fail closed. Used by both requester lanes — an open or a
  * status request must pre-flight the same authority the responder will
  * re-verify. Defined in boot_mesh_status.c. */
+bool boot_mesh_peer_delegation_unheld(const struct db_mesh_pairing *row);
 bool boot_mesh_peer_delegation(const struct db_mesh_pairing *row,
                                struct vcs_zcode_dht_delegation *out);
 

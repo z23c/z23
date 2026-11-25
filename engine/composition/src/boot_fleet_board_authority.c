@@ -92,6 +92,18 @@ bool board_peer_delegation(const struct db_mesh_pairing *row,
     return boot_mesh_peer_delegation(row, out);
 }
 
+/* True only when the lane definitively holds no delegation for the peer. */
+bool board_peer_delegation_unheld(const struct db_mesh_pairing *row)
+{
+#ifdef ZCL_TESTING
+    if (g_test_authority) {
+        struct vcs_zcode_dht_delegation unused;
+        return !board_peer_delegation(row, &unused);
+    }
+#endif
+    return boot_mesh_peer_delegation_unheld(row);
+}
+
 bool board_network_genesis(uint8_t out[32])
 {
 #ifdef ZCL_TESTING

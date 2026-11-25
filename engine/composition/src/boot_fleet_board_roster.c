@@ -198,10 +198,11 @@ bool fleet_board_roster_proof_check(enum fleet_board_roster_side side,
 static bool pairing_row_is_inert(const struct db_mesh_pairing *row,
                                  int64_t now)
 {
-    struct vcs_zcode_dht_delegation delegation;
-    return row->revoked_at == 0 &&
-           row->expires_at > now &&
-           !board_peer_delegation(row, &delegation);
+    /* Only a row that would otherwise be fully working (not revoked, not
+     * expired, status-read granted) whose peer is DEFINITIVELY without a
+     * delegation. A failed or ambiguous lookup is not absence. */
+    return now > 0 && mesh_pairing_allows(row, MESH_PAIRING_CAP_STATUS_READ, now) &&
+           board_peer_delegation_unheld(row);
 }
 
 static bool pairing_row_held(struct node_db *pairings,

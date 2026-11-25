@@ -804,29 +804,48 @@ static void mesh_collect_peer_delegation(struct vcs_zcode_dht_service *service,
     }
 }
 
+/* One scan of the held delegations for this row's peer. False when the scan
+ * could not run (no DHT service, or no memory); the caller frees collect->held. */
+static bool mesh_peer_delegation_scan(const struct db_mesh_pairing *row,
+                                      struct mesh_peer_delegation_collect *collect)
+{
+    memset(collect, 0, sizeof(*collect));
+    collect->held = zcl_malloc(
+        VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS * sizeof(*collect->held),
+        "mesh_status.peer_delegations");
+    if (!collect->held) {
+        LOG_ERROR("net.mesh_status", "peer delegation alloc failed");
+        return false;
+    }
+    collect->held_max = VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS;
+    memcpy(collect->genesis, row->network_genesis, 32);
+    memcpy(collect->master, row->peer_master_pubkey, 32);
+    memcpy(collect->noise_static, row->peer_noise_pubkey, 32);
+    return boot_zcode_dht_service_apply(mesh_collect_peer_delegation, collect);
+}
+
 bool boot_mesh_peer_delegation(const struct db_mesh_pairing *row,
                                struct vcs_zcode_dht_delegation *out)
 {
     struct mesh_peer_delegation_collect collect;
-    memset(&collect, 0, sizeof(collect));
-    collect.held = zcl_malloc(
-        VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS * sizeof(*collect.held),
-        "mesh_status.peer_delegations");
-    if (!collect.held) {
-        LOG_ERROR("net.mesh_status", "peer delegation alloc failed");
-        return false;
-    }
-    collect.held_max = VCS_ZCODE_DHT_SERVICE_MAX_CHAIN_DELEGATIONS;
-    memcpy(collect.genesis, row->network_genesis, 32);
-    memcpy(collect.master, row->peer_master_pubkey, 32);
-    memcpy(collect.noise_static, row->peer_noise_pubkey, 32);
-    bool available = boot_zcode_dht_service_apply(
-        mesh_collect_peer_delegation, &collect);
+    bool available = mesh_peer_delegation_scan(row, &collect);
     bool found = available && collect.found && !collect.ambiguous;
     if (found)
         *out = collect.best;
     free(collect.held);
     return found;
+}
+
+/* True only when the scan ran and held NO delegation for this peer. A scan
+ * that could not run, or an ambiguous one, is not "none": callers that grant
+ * something on absence must fail closed. */
+bool boot_mesh_peer_delegation_unheld(const struct db_mesh_pairing *row)
+{
+    struct mesh_peer_delegation_collect collect;
+    bool available = mesh_peer_delegation_scan(row, &collect);
+    bool unheld = available && !collect.found;
+    free(collect.held);
+    return unheld;
 }
 
 /* Render the redacted machine-identity capsule. Oversize output is replaced
