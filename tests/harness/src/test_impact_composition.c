@@ -7916,7 +7916,7 @@ static bool ic_fresh_sidecar(const char *owner, const char *row_owner)
     return snprintf(path, sizeof(path), "%s.capabilities.def", owner) <
                (int)sizeof(path) &&
            snprintf(body, sizeof(body), "/* sidecar */\n"
-                    "ZCL_MODULE_CAPABILITY(\"%s\", CAP_FS_READ, \"reads\")\n",
+                    "ZCL_MODULE_CAPABILITY(\"%s\", CAP_FS_WRITE, \"allocation and JSON-copy failure diagnostics to stderr; index holds memory only\")\n",
                     row_owner) < (int)sizeof(body) &&
            ic_split_w(path, body);
 }
@@ -7927,6 +7927,30 @@ static bool ic_fresh_edit_sidecar(void)
            ic_fresh_sidecar("tools/command/native_devagent_situation.c",
                             "tools/command/native_devagent_situation.c");
 }
+
+static bool ic_fresh_edit_sidecar_multiline(void)
+{
+    return ic_fresh_edit_fresh() &&
+           ic_split_w("tools/command/native_devagent_situation.c.capabilities.def",
+                      "ZCL_MODULE_CAPABILITY(\"tools/command/native_devagent_situation.c\", CAP_FS_WRITE,\n"
+                      "    \"allocation and JSON-copy failure diagnostics to stderr; index holds memory only\")\n");
+}
+
+static bool ic_fresh_bad_multiline(const char *body)
+{
+    return ic_fresh_edit_fresh() &&
+           ic_split_w("tools/command/native_devagent_situation.c.capabilities.def", body);
+}
+
+#define IC_SIDE_HEAD "ZCL_MODULE_CAPABILITY(\"tools/command/native_devagent_situation.c\", CAP_FS_WRITE,\n"
+static bool ic_fresh_sidecar_bad_cont(void) { return ic_fresh_bad_multiline(IC_SIDE_HEAD "    arbitrary\n"); }
+static bool ic_fresh_sidecar_bad_extra(void) { return ic_fresh_bad_multiline(IC_SIDE_HEAD "    \"reads\") extra\n"); }
+static bool ic_fresh_sidecar_bad_end(void) { return ic_fresh_bad_multiline(IC_SIDE_HEAD "    \"reads\"\n"); }
+static bool ic_fresh_sidecar_bad_comment(void) { return ic_fresh_bad_multiline(IC_SIDE_HEAD "    /* x */ \"reads\")\n"); }
+static bool ic_fresh_sidecar_bad_foreign(void) {
+    return ic_fresh_bad_multiline("ZCL_MODULE_CAPABILITY(\"tools/command/native_devagent_start.c\", CAP_FS_WRITE,\n    \"reads\")\n");
+}
+#undef IC_SIDE_HEAD
 
 /* A row that declares a capability for some other file is not its own. */
 static bool ic_fresh_edit_sidecar_row(void)
@@ -8315,6 +8339,12 @@ static bool ic_fresh_fixture_build(void)
         {"freshhook", ic_fresh_edit_hook},
         {"freshcore", ic_fresh_edit_core},
         {"freshsidecar", ic_fresh_edit_sidecar},
+        {"freshsidecarmultiline", ic_fresh_edit_sidecar_multiline},
+        {"sidebadcont", ic_fresh_sidecar_bad_cont},
+        {"sidebadextra", ic_fresh_sidecar_bad_extra},
+        {"sidebadend", ic_fresh_sidecar_bad_end},
+        {"sidebadcomment", ic_fresh_sidecar_bad_comment},
+        {"sidebadforeign", ic_fresh_sidecar_bad_foreign},
         {"freshsidecarrow", ic_fresh_edit_sidecar_row},
         {"freshsidecarorphan", ic_fresh_edit_sidecar_orphan},
         {"freshsidecarcomment", ic_fresh_edit_sidecar_comment},
@@ -8397,6 +8427,12 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshattrtruncated", 'A', NULL, NULL},
     {"freshattrfnptr", 'A', NULL, NULL},
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
+    {"freshsidecarmultiline", 0, "devagent_situation", "package_capability_claim"},
+    {"sidebadcont", 'A', NULL, NULL},
+    {"sidebadextra", 'A', NULL, NULL},
+    {"sidebadend", 'A', NULL, NULL},
+    {"sidebadcomment", 'A', NULL, NULL},
+    {"sidebadforeign", 'A', NULL, NULL},
     {"freshdropcur", 0, "devagent_situation", "package_capability_claim"},
     {"freshstatic", 0, "devagent_situation", NULL}, /* a private helper */
     {"freshproto", 0, "devagent_situation", NULL},  /* its own prototype */

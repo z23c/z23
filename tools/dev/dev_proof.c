@@ -2980,6 +2980,47 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
 #define DP_FRESH_CAPS_PATH "engine/composition/module_capabilities.def"
 #define DP_FRESH_ROW_HEAD "ZCL_MODULE_CAPABILITY(\""
 
+/* Deliberately recognize only a plain identifier and a plain string here.
+ * Other C spellings remain structural until their meaning can be proven. */
+static bool dp_fresh_sidecar_first(const char *line, size_t n, size_t head)
+{
+    size_t i = head;
+    if (i >= n || line[i++] != ',') return false;
+    while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i == n || !dp_split_ident(line[i]) ||
+        (line[i] >= '0' && line[i] <= '9')) return false;
+    while (i < n && dp_split_ident(line[i])) i++;
+    return i + 1 == n && line[i] == ',';
+}
+
+static bool dp_fresh_sidecar_second(const char *next, size_t nn)
+{
+    size_t i = 0;
+    if (i == nn || next[i++] != '"') return false;
+    while (i < nn && next[i] != '"') {
+        unsigned char c = (unsigned char)next[i++];
+        if (c < 32 || c == 127 || c == '\\') return false;
+    }
+    return i + 2 == nn && next[i] == '"' && next[i + 1] == ')';
+}
+
+static bool dp_fresh_sidecar_pair(const char *line, size_t n, size_t head,
+                                  const char *next, size_t nn)
+{
+    return dp_fresh_sidecar_first(line, n, head) &&
+           dp_fresh_sidecar_second(next, nn);
+}
+
+static bool dp_fresh_sidecar_line(const char *line, size_t n, size_t head,
+                                  const char **cur)
+{
+    if (!n || line[n - 1] != ',') return true;
+    const char *next;
+    size_t nn;
+    return dp_split_next(cur, &next, &nn) &&
+           dp_fresh_sidecar_pair(line, n, head, next, nn);
+}
+
 static bool dp_fresh_is_sidecar(const char *path)
 {
     size_t n = strlen(path), s = strlen(DP_FRESH_SIDECAR);
@@ -3004,6 +3045,7 @@ static bool dp_fresh_sidecar_lines(const char *side, const char *owner)
                        !dp_split_contains(l, n, "ZCL_MODULE_CAPABILITY")))
             continue;
         if (n < (size_t)hn || memcmp(l, head, (size_t)hn) != 0) return false;
+        if (!dp_fresh_sidecar_line(l, n, (size_t)hn, &cur)) return false;
     }
     return true;
 }
