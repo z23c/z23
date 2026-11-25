@@ -827,8 +827,9 @@ static void bm_known_names(const struct bm_roster *r, const char *self,
 
 /* Where a row posted to `to` under `ref` will go. The same predicates as
  * bm_export_peer, in the same order, so the answer cannot drift from the
- * exporter. `out.label` is "exported" when the exporter carries the row to
- * a box, else "local". `out.hint` is set only for local mail to a name no
+ * exporter. `out.label` is "export_eligible" when the row is eligible for
+ * export, else "local"; neither label is receiver delivery evidence.
+ * `out.hint` is set only for local mail to a name no
  * roster box holds (not "*", not this box). */
 void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
                                      struct zcl_boardmail_delivery *out)
@@ -849,7 +850,7 @@ void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
         /* This box, or broadcast to this box only: never carried. */
     } else if ((p && strcmp(p->name, v->self) != 0) ||
                bm_ref_peer(&v->refs, ref ? ref : "")) {
-        (void)snprintf(out->label, sizeof(out->label), "exported");
+        (void)snprintf(out->label, sizeof(out->label), "export_eligible");
     } else if (!p) {
         bm_known_names(&v->ro, v->self, known, sizeof(known));
         (void)snprintf(out->hint, sizeof(out->hint),

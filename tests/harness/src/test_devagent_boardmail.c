@@ -1614,7 +1614,7 @@ static int bmx_t_delivery(void)
         /* Another enrolled box, named by its roster name. */
         ASSERT(bmx_post_where("node-b", NULL, label, sizeof(label), hint,
                               sizeof(hint)));
-        ASSERT_STR_EQ(label, "exported");
+        ASSERT_STR_EQ(label, "export_eligible");
         ASSERT_STR_EQ(hint, "");
         /* An agent id no roster box holds: local, with a hint that
          * names the roster boxes cross-host mail can be addressed to. */
@@ -1650,7 +1650,7 @@ static int bmx_t_delivery(void)
                          "wb"));
         ASSERT(bmx_post_where("someagent", "job-9", label, sizeof(label),
                               hint, sizeof(hint)));
-        ASSERT_STR_EQ(label, "exported");
+        ASSERT_STR_EQ(label, "export_eligible");
         ASSERT_STR_EQ(hint, "");
         zcl_devagent_boardmail_observe("someagent", "job-9", &route);
         ASSERT_STR_EQ(route.label, "export_eligible");

@@ -152,9 +152,10 @@
  *
  * OUTPUT (zcl.agent_mail.v1). Every reply names its own `leaf`. Post returns
  * the row fields plus `cursor` (the row's seq), `outbox`, and `delivery`:
- * where the board exporter will carry the row: "exported" (to another
- * enrolled box, or back to the box a directive came from under `ref`) or
- * "local" (this box only). `hint` is added for local mail to a name no
+ * "export_eligible" when the board exporter's route predicate accepts the
+ * row (to another enrolled box, or back to the box a directive came from
+ * under `ref`), else "local" (this box only). This is not receiver delivery
+ * or acknowledgment evidence. `hint` is added for local mail to a name no
  * roster box holds. Pull returns
  * `rows` (array), `cursor`, `count`, `truncated`, `next_since`, `skipped`,
  * `resumed_from` (since|agent|start) and `sources`: per stream,

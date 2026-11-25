@@ -636,8 +636,9 @@ void zcl_devagent_boardmail_observe_export(const char *recvdir,
 bool zcl_devagent_boardmail_remote(const char *to);
 
 /* Where a row posted to `to` under `ref` will be carried, by the exporter's
- * own rules. `label` is "exported" when the exporter carries the row to a
- * box, else "local". `hint` is set only for local mail to a name no roster
+ * own rules. `label` is "export_eligible" when the row is eligible for
+ * export, else "local"; neither label is receiver delivery evidence. `hint`
+ * is set only for local mail to a name no roster
  * box holds (not "*", not this box). Only this box's own state is read;
  * nothing is written. */
 struct zcl_boardmail_delivery {

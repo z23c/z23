@@ -86,9 +86,10 @@
  * carriers (that sample's echo_leg is "mixed"), "none" with no valid sample.
  * "board" means "carries well-formed board fields on an inbox stream"; it is
  * NOT verified against the node, because no existing read-only call confirms
- * a post without touching the held mail files. The delivery the first probe post reported (exported or
- * local) is recorded as first_post_delivery but is not a gate: the mail_carry
- * baseline is measurable with the same leaf.
+ * a post without touching the held mail files. The route the first probe post
+ * reported (export_eligible or local) is recorded as first_post_delivery but
+ * is not delivery evidence or a gate: the mail_carry baseline is measurable
+ * with the same leaf.
  *
  * PROCESS RULE. No spawn, no network, no direct file access: mail is read and
  * written only through dev.agent.mail and dev.agent.mail.wait, in process. */
@@ -888,9 +889,9 @@ static const char *pm_collect(struct pm_send *st, int64_t until_ms,
     }
 }
 
-/* The first post names the delivery the exporter promised and the cursor
- * every later wait starts from (parked past every stream, so an echo cannot
- * predate it). Delivery is evidence, not a gate: another carrier (the
+/* The first post names export eligibility and the cursor every later wait
+ * starts from (parked past every stream, so an echo cannot predate it).
+ * Eligibility is not delivery evidence or a gate: another carrier (the
  * mail_carry baseline) is measurable too, and the report names which one the
  * rows actually used. */
 static bool pm_first_post_note(struct pm_send *st,
