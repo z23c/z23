@@ -92,6 +92,12 @@ the post when a wake is lost or the peer's build has no wake service.
 Carriage status counts those roster-only peers per post in
 `push_out.fanout_roster_unpushed`, so a fleet that relies on the roster
 can see what the push does not cover.
+`carriage.wake` counts the wake itself since the process started: `news`
+(rounds with a newly stored fleet post), `no_target` (rounds that found no
+roster session to wake: the post waits for the sweep), `sent` and
+`send_failed` (wakes opened or refused), `received` and `refused` (wakes
+admitted or refused here) and `pulls` (early roster pulls a wake started). A
+climbing `no_target` with a roster in force means no roster peer is connected.
 
 A pull resumes from the answering box's own arrival number for the last row
 it consumed. Each stored row gets that number once, at ingest, strictly above

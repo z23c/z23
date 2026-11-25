@@ -16874,6 +16874,8 @@ static int test_fleet_board_roster_wake(void)
         ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
         fbc_boxes(FBR_PEER, FBR_MEMBER);
 
+        struct boot_fleet_board_wake_counts wc0, wc1;
+        boot_fleet_board_wake_counts(&wc0);
         memset(short_frame, 0, sizeof short_frame);
         ASSERT_EQ(fbc_wake_raw(&w, short_frame, sizeof short_frame, &answer_len),
                   MESH_STREAM_REFUSED_MALFORMED);
@@ -16903,6 +16905,11 @@ static int test_fleet_board_roster_wake(void)
                   MESH_STREAM_CLOSED_BY_SERVICE);
         ASSERT_EQ(answer_len, FBC_WAKE_CLOSE_BYTES);
         ASSERT_EQ(boot_fleet_board_wake_test_due(), 1);
+        /* Four refused wakes (short, zero proof, stranger, a pull proof) and
+         * one admitted. */
+        boot_fleet_board_wake_counts(&wc1);
+        ASSERT_EQ(wc1.refused, wc0.refused + 4);
+        ASSERT_EQ(wc1.received, wc0.received + 1);
         PASS();
     }
     TEST("fleet roster wake: news pulls a roster peer inside the 15 s "
@@ -16921,6 +16928,8 @@ static int test_fleet_board_roster_wake(void)
         fbc_ask_begin(&w);
         boot_fleet_board_fleet_test_tick_runs(&seconds, &pulls);
         wake_pulls = boot_fleet_board_wake_test_pulls();
+        struct boot_fleet_board_wake_counts wc0, wc1;
+        boot_fleet_board_wake_counts(&wc0);
         boot_fleet_board_fleet_counts(&before);
 
         /* The storing pull noted the news. The next second sends one wake. */
@@ -16956,6 +16965,8 @@ static int test_fleet_board_roster_wake(void)
         boot_fleet_board_fleet_test_tick_runs(&seconds, &pulls_now);
         ASSERT_EQ(pulls_now, pulls);
         ASSERT_EQ(boot_fleet_board_wake_test_pulls(), wake_pulls + 1);
+        boot_fleet_board_wake_counts(&wc1);
+        ASSERT_EQ(wc1.pulls, wc0.pulls + 1);
         ASSERT_EQ(fbc_finish(&w, &w.b, &frames), (size_t)1);
         ASSERT(db_fleet_board_have(&w.b, post.id));
         boot_fleet_board_fleet_counts(&after);

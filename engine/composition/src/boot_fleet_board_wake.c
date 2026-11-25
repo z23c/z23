@@ -33,6 +33,30 @@ static zcl_mutex_t g_due_lock;
 static zcl_once_t g_due_once = ZCL_ONCE_INIT;
 static _Atomic uint64_t g_news;
 static uint64_t g_sent;
+enum wake_counter {
+    WC_NEWS, WC_NO_TARGET, WC_SENT, WC_SEND_FAILED, WC_RECEIVED, WC_REFUSED,
+    WC_PULLS, WC_COUNT
+};
+static _Atomic uint64_t g_wc[WC_COUNT];
+
+static void wake_count(enum wake_counter which)
+{
+    atomic_fetch_add_explicit(&g_wc[which], 1, memory_order_relaxed);
+}
+
+void boot_fleet_board_wake_counts(struct boot_fleet_board_wake_counts *out)
+{
+    if (!out)
+        return;
+    uint64_t *const dst[WC_COUNT] = {
+        [WC_NEWS] = &out->news, [WC_NO_TARGET] = &out->no_target,
+        [WC_SENT] = &out->sent, [WC_SEND_FAILED] = &out->send_failed,
+        [WC_RECEIVED] = &out->received, [WC_REFUSED] = &out->refused,
+        [WC_PULLS] = &out->pulls,
+    };
+    for (int i = 0; i < WC_COUNT; i++)
+        *dst[i] = atomic_load_explicit(&g_wc[i], memory_order_relaxed);
+}
 
 #ifdef ZCL_TESTING
 static _Atomic uint64_t g_test_wake_pulls;
@@ -160,13 +184,16 @@ static void wake_send_news(struct boot_svc_ctx *svc, struct node_db *store,
         return;
     }
     g_sent = news;
+    wake_count(WC_NEWS);
     wake_unlock();
     if (!pairings || !app_runtime_node_db_handle_open(pairings))
         return;
     n = fleet_board_roster_targets(svc, pairings, store, now, keys,
                                    FLEET_BOARD_FLEET_PEERS_MAX);
+    if (n == 0)
+        wake_count(WC_NO_TARGET);
     for (size_t i = 0; i < n; i++)
-        (void)wake_send(svc, keys[i]);
+        wake_count(wake_send(svc, keys[i]) ? WC_SENT : WC_SEND_FAILED);
 }
 
 static void wake_pull_due(struct boot_svc_ctx *svc)
@@ -182,6 +209,7 @@ static void wake_pull_due(struct boot_svc_ctx *svc)
             continue;
         }
         if (board_open_roster_pull(svc, keys[i])) {
+            wake_count(WC_PULLS);
 #ifdef ZCL_TESTING
             atomic_fetch_add_explicit(&g_test_wake_pulls, 1,
                                      memory_order_relaxed);
@@ -214,21 +242,28 @@ static enum mesh_stream_refusal wake_on_open(struct mesh_stream *st,
     (void)ctx;
     if (reply_len)
         *reply_len = 0;
-    if (!payload || len != FLEET_BOARD_ROSTER_PROOF_BYTES)
+    if (!payload || len != FLEET_BOARD_ROSTER_PROOF_BYTES) {
+        wake_count(WC_REFUSED);
         return MESH_STREAM_REFUSED_MALFORMED;
+    }
     pairings = app_runtime_node_db();
     store = board_db();
     memset(&bind, 0, sizeof bind);
     if (!pairings || !app_runtime_node_db_handle_open(pairings) || !store ||
-        !board_network_genesis(bind.network_genesis))
+        !board_network_genesis(bind.network_genesis)) {
+        wake_count(WC_REFUSED);
         return MESH_STREAM_REFUSED_UNAVAILABLE;
+    }
     memcpy(bind.transcript_hash, st->transcript_hash, 32);
     bind.connection_generation = st->connection_generation;
     bind.after = FLEET_BOARD_WAKE_AFTER;
     if (!fleet_board_roster_admit(pairings, store, &bind, st->peer_static,
                                   payload, board_now()) ||
-        !board_peer_may_read(payload))
+        !board_peer_may_read(payload)) {
+        wake_count(WC_REFUSED);
         return MESH_STREAM_REFUSED_PEER_UNPAIRED;
+    }
+    wake_count(WC_RECEIVED);
     wake_due_add(st->peer_static);
     /* The slot must not linger open: a wake is one OPEN and a CLOSE. */
     mesh_stream_close(st, MESH_STREAM_CLOSED_BY_SERVICE, NULL, 0);

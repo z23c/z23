@@ -127,6 +127,28 @@ static bool carriage_push_out(struct json_value *into,
     return ok;
 }
 
+/* The roster wake: how often a fleet post found someone to wake, what became
+ * of each wake sent, and the wakes this box received. `no_target` counts
+ * posts that found no roster session at all. */
+static bool carriage_wake(struct json_value *into)
+{
+    struct boot_fleet_board_wake_counts w;
+    boot_fleet_board_wake_counts(&w);
+    struct json_value o;
+    json_init(&o);
+    json_set_object(&o);
+    bool ok = json_push_kv_int(&o, "news", (int64_t)w.news) &&
+              json_push_kv_int(&o, "no_target", (int64_t)w.no_target) &&
+              json_push_kv_int(&o, "sent", (int64_t)w.sent) &&
+              json_push_kv_int(&o, "send_failed", (int64_t)w.send_failed) &&
+              json_push_kv_int(&o, "received", (int64_t)w.received) &&
+              json_push_kv_int(&o, "refused", (int64_t)w.refused) &&
+              json_push_kv_int(&o, "pulls", (int64_t)w.pulls) &&
+              json_push_kv(into, "wake", &o);
+    json_free(&o);
+    return ok;
+}
+
 /* The receiving half: how each push was answered, each record's verdict,
  * and the pushers refused at their commit. */
 static bool carriage_push_in(struct json_value *into,
@@ -222,6 +244,7 @@ bool fb_render_carriage(struct json_value *result)
     json_set_object(&o);
     bool ok = carriage_peers(&o) && carriage_pull(&o, &c) &&
               carriage_push_out(&o, &c) && carriage_push_in(&o, &c) &&
+              carriage_wake(&o) &&
               json_push_kv(result, "carriage", &o);
     json_free(&o);
     return ok;

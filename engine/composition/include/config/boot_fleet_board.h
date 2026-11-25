@@ -548,6 +548,18 @@ void boot_fleet_board_fleet_shutdown(void);
 /* A fleet post was newly stored here. The next lane tick wakes each
  * roster peer once so it pulls; further stores before that tick coalesce. */
 void boot_fleet_board_wake_note(void);
+/* What the wake has done since this process started. A news event with no
+ * target is a fleet post that found no roster session to wake. */
+struct boot_fleet_board_wake_counts {
+    uint64_t news;        /* rounds that had a newly stored fleet post */
+    uint64_t no_target;   /* of those, rounds with no roster session to wake */
+    uint64_t sent;        /* wakes opened toward a peer */
+    uint64_t send_failed; /* wakes the session or stream refused */
+    uint64_t received;    /* wakes admitted here */
+    uint64_t refused;     /* wakes refused here (malformed, unproven, unavailable) */
+    uint64_t pulls;       /* early roster pulls a wake started */
+};
+void boot_fleet_board_wake_counts(struct boot_fleet_board_wake_counts *out);
 /* Registered once; serves both halves of every board stream. */
 bool boot_fleet_board_fleet_register_service(void);
 
