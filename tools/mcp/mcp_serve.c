@@ -30,6 +30,8 @@ bool zcl_mcp_serve_selected(int argc, char **argv)
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "command/native_command.h"
+#include "command/native_code_priv.h"
+#include "command/native_dev_land_remote_shared.h"
 #include "config/cli_lane_defaults.h"
 #include "config/command_catalog.h"
 #include "platform/private_file.h"
@@ -39,6 +41,7 @@ bool zcl_mcp_serve_selected(int argc, char **argv)
 #include <limits.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MCP_VERSION "0.1.0"
@@ -105,6 +108,8 @@ static const struct mcp_tool mcp_tools[] = {
      "brief of AGENTS.md rules, test groups, wiki lessons and first commands. "
      "sub is guide, capsule, tests, "
      "impact or packet (when available); input is that leaf's input. Packet "
+     "success is reused only while the exact input and source, dependency and "
+     "last-test evidence match. Packet "
      "defaults to structured data without the duplicate Markdown field; use "
      "select [data.markdown] for prose or select [data] for the full packet. "
      "select "
@@ -222,7 +227,165 @@ struct mcp_serve {
     char path_refusal[PATH_MAX + 512]; /* mcp_policy_fleet_write_path text */
     char *out;
     size_t out_cap;
+    struct mcp_packet_cache_entry {
+        bool valid, last_run_present;
+        char *input, *reply;
+        size_t reply_len;
+        char head[65], source_hex[65], dep_hex[65], last_run_hex[65];
+    } packet_cache;
 };
+
+struct mcp_packet_key {
+    bool cacheable, last_run_present;
+    char *input;
+    char head[65], source_hex[65], dep_hex[65], last_run_hex[65];
+};
+
+static unsigned g_packet_cache_hits;
+unsigned zcl_mcp_packet_cache_hits(void) { return g_packet_cache_hits; }
+
+static void packet_key_free(struct mcp_packet_key *key)
+{
+    free(key->input);
+    key->input = NULL;
+}
+
+static void packet_cache_free(struct mcp_serve *s)
+{
+    free(s->packet_cache.input);
+    free(s->packet_cache.reply);
+    memset(&s->packet_cache, 0, sizeof(s->packet_cache));
+}
+
+static struct mcp_packet_key packet_evidence(const struct mcp_serve *s,
+                                             const struct json_value *input)
+{
+    struct mcp_packet_key key = { .cacheable = true };
+    size_t need = json_write(input, NULL, 0);
+    key.input = zcl_malloc(need + 1, "mcp-packet/input");
+    if (!key.input) {
+        key.cacheable = false;
+        return key;
+    }
+    (void)json_write(input, key.input, need + 1);
+    const char *root = s->cmd.source_root;
+    if (!root || !zcl_native_workspace_head(root, key.head, sizeof(key.head))) {
+        key.cacheable = false;
+        return key;
+    }
+    bool stale = false;
+    struct codeindex *ci = codeindex_open_readonly(root, &stale);
+    if (!ci || stale || !code_generation_hex(ci, key.source_hex, key.dep_hex))
+        key.cacheable = false;
+    if (ci)
+        codeindex_close(ci);
+    if (!key.cacheable)
+        return key;
+    char path[PATH_MAX + 64];
+    if (snprintf(path, sizeof(path), "%s/.cache/test-timing/last-run.json", root) >=
+        (int)sizeof(path)) {
+        key.cacheable = false;
+        return key;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        if (errno != ENOENT)
+            key.cacheable = false;
+        return key;
+    }
+    key.last_run_present = true;
+    if (!zcl_dlr_file_sha256(path, key.last_run_hex))
+        key.cacheable = false;
+    return key;
+}
+
+static bool packet_cache_matches(const struct mcp_serve *s,
+                                 const struct mcp_packet_key *key)
+{
+    const struct mcp_packet_cache_entry *c = &s->packet_cache;
+    return c->valid && c->last_run_present == key->last_run_present &&
+           !strcmp(c->input, key->input) && !strcmp(c->head, key->head) &&
+           !strcmp(c->source_hex, key->source_hex) && !strcmp(c->dep_hex, key->dep_hex) &&
+           !strcmp(c->last_run_hex, key->last_run_hex);
+}
+
+static size_t packet_cache_lookup(struct mcp_serve *s,
+                                  const struct mcp_packet_key *key, bool *hit)
+{
+    *hit = false;
+    if (!key->cacheable || !packet_cache_matches(s, key) ||
+        s->packet_cache.reply_len > s->out_cap)
+        return 0;
+    memcpy(s->out, s->packet_cache.reply, s->packet_cache.reply_len);
+    if (s->packet_cache.reply_len < s->out_cap)
+        s->out[s->packet_cache.reply_len] = '\0';
+    *hit = true;
+    if (getenv("ZCL_CLI_TEST_NO_SERVICE_LOOKUP"))
+        g_packet_cache_hits++;
+    return s->packet_cache.reply_len;
+}
+
+static void packet_cache_store(struct mcp_serve *s, struct mcp_packet_key *key,
+                               const char *reply, size_t n)
+{
+    char *copy = zcl_malloc(n + 1, "mcp-packet/reply");
+    if (!copy)
+        return;
+    memcpy(copy, reply, n);
+    copy[n] = '\0';
+    free(s->packet_cache.input);
+    free(s->packet_cache.reply);
+    s->packet_cache.input = key->input;
+    key->input = NULL;
+    s->packet_cache.reply = copy;
+    s->packet_cache.reply_len = n;
+    s->packet_cache.last_run_present = key->last_run_present;
+    snprintf(s->packet_cache.head, sizeof(s->packet_cache.head), "%s", key->head);
+    snprintf(s->packet_cache.source_hex, sizeof(s->packet_cache.source_hex), "%s", key->source_hex);
+    snprintf(s->packet_cache.dep_hex, sizeof(s->packet_cache.dep_hex), "%s", key->dep_hex);
+    snprintf(s->packet_cache.last_run_hex, sizeof(s->packet_cache.last_run_hex), "%s", key->last_run_hex);
+    s->packet_cache.valid = true;
+}
+
+static void packet_log(bool hit, uint64_t started);
+
+static size_t packet_execute(struct mcp_serve *s,
+                             const struct zcl_command_spec *spec,
+                             const struct json_value *input, bool alias,
+                             enum zcl_command_exit *code)
+{
+    uint64_t started = platform_time_monotonic_ms();
+    struct mcp_packet_key key = packet_evidence(s, input);
+    bool hit = false;
+    size_t n = packet_cache_lookup(s, &key, &hit);
+    if (n) {
+        *code = ZCL_COMMAND_EXIT_OK;
+    } else {
+        n = zcl_command_registry_execute_json(s->cmd.registry, spec, &s->cmd, input,
+                                              alias, alias ? spec->path : NULL,
+                                              NULL, 0, 0, NULL, s->out, s->out_cap,
+                                              code);
+        if (n && *code == ZCL_COMMAND_EXIT_OK && key.cacheable)
+            packet_cache_store(s, &key, s->out, n);
+    }
+    if (n)
+        packet_log(hit, started);
+    packet_key_free(&key);
+    return n;
+}
+
+static void packet_log(bool hit, uint64_t started)
+{
+    if (!getenv("ZCL_CLI_TEST_NO_SERVICE_LOOKUP"))
+        return;
+    if (hit)
+        fprintf(stderr, "mcp_packet_cache: hit count=%u handler_ms=%lld\n",
+                zcl_mcp_packet_cache_hits(),
+                (long long)(platform_time_monotonic_ms() - started));
+    else
+        fprintf(stderr, "mcp_packet_cache: miss handler_ms=%lld\n",
+                (long long)(platform_time_monotonic_ms() - started));
+}
 
 /* ── argument parsing ─────────────────────────────────────────────────── */
 
@@ -1501,12 +1664,14 @@ static bool tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
     }
     compact_packet = !select && tool == &mcp_tools[T_CODE] &&
                      strcmp(spec->path, "code.packet") == 0;
+    bool code_packet = tool == &mcp_tools[T_CODE] && !strcmp(spec->path, "code.packet");
     /* budget 0: take the leaf's whole reply, then cap it here so truncation
      * is flagged in the text instead of the registry dropping the reply. */
-    n = zcl_command_registry_execute_json(s->cmd.registry, spec, &s->cmd, input,
-                                          alias, alias ? spec->path : NULL,
-                                          NULL, 0, 0, NULL, s->out, s->out_cap,
-                                          &code);
+    n = code_packet ? packet_execute(s, spec, input, alias, &code) :
+        zcl_command_registry_execute_json(s->cmd.registry, spec, &s->cmd, input,
+                                         alias, alias ? spec->path : NULL,
+                                         NULL, 0, 0, NULL, s->out, s->out_cap,
+                                         &code);
     if (n == 0) {
         text_error(text, "EXECUTE_FAILED", "the command produced no bounded reply");
         *is_error = true;
@@ -1684,6 +1849,7 @@ static int serve_posix(int argc, char **argv)
     ep.on_initialize = on_initialize;
     rc = serve_loop(&ep);
     json_free(&s.empty_input);
+    packet_cache_free(&s);
     free(s.out);
     return rc;
 }

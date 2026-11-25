@@ -29,6 +29,9 @@ extern "C" {
  * 2 for a refused start (a typed JSON error is printed on stderr). */
 int zcl_mcp_serve_main(int argc, char **argv);
 
+/* Test instrumentation, logged only with ZCL_CLI_TEST_NO_SERVICE_LOOKUP=1. */
+unsigned zcl_mcp_packet_cache_hits(void);
+
 /* True when argv selects `mcp serve` (argv[1] == "mcp"). */
 bool zcl_mcp_serve_selected(int argc, char **argv);
 

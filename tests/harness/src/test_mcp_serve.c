@@ -804,8 +804,17 @@ static int case_code(struct ms *m, const char *checkout)
         ASSERT(!has(m, "data.markdown"));
         ASSERT(!has(m, "\\\"markdown\\\":"));
         ASSERT(has(m, "\\\"excerpts\\\":"));
+        char first[MS_LINE];
+        snprintf(first, sizeof(first), "%s", m->line);
         size_t compact = strlen(m->line);
-        ASSERT(ms_tool(m, 20, "z23_code",
+        ASSERT(ms_tool(m, 19, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(strcmp(first, m->line) == 0);
+        ASSERT(ms_tool(m, 21, "z23_code",
                        "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
                        "\"symbols\":[\"mcp_rpc_answer\"],"
                        "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
@@ -816,7 +825,7 @@ static int case_code(struct ms *m, const char *checkout)
         size_t full = strlen(m->line);
         printf("compact=%zu full=%zu\n", compact, full);
         ASSERT(compact * 2 < full);
-        ASSERT(ms_tool(m, 21, "z23_code",
+        ASSERT(ms_tool(m, 22, "z23_code",
                        "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
                        "\"symbols\":[\"mcp_rpc_answer\"],"
                        "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
@@ -824,6 +833,87 @@ static int case_code(struct ms *m, const char *checkout)
         ASSERT(has(m, "\"isError\":false"));
         ASSERT(has(m, "data.markdown"));
         ASSERT(!has(m, "\\\"excerpts\\\":"));
+        char cache_dir[PATH_MAX + 32], timing_dir[PATH_MAX + 48];
+        snprintf(cache_dir, sizeof(cache_dir), "%s/.cache", checkout);
+        snprintf(timing_dir, sizeof(timing_dir), "%s/.cache/test-timing", checkout);
+        ASSERT(mkdir(cache_dir, 0700) == 0);
+        ASSERT(mkdir(timing_dir, 0700) == 0);
+        ASSERT(ms_write_page(timing_dir, "last-run.json",
+                            "{\"schema\":\"zcl.test_timing.v1\",\"groups\":[]}\n"));
+        ASSERT(ms_tool(m, 19, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        snprintf(first, sizeof(first), "%s", m->line);
+        ASSERT(ms_tool(m, 19, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(strcmp(first, m->line) == 0);
+        ASSERT(ms_write_page(timing_dir, "last-run.json",
+                            "{\"schema\":\"zcl.test_timing.v1\",\"groups\":[]}\n\n"));
+        ASSERT(ms_tool(m, 19, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        snprintf(first, sizeof(first), "%s", m->line);
+        ASSERT(ms_tool(m, 19, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(strcmp(first, m->line) == 0);
+        off += (size_t)snprintf(source + off, sizeof(source) - off,
+                                "/* changed source invalidates packet evidence */\n");
+        ASSERT(off < sizeof(source));
+        ASSERT(ms_write_page(mcp, "mcp_rpc.c", source));
+        ASSERT(ms_tool(m, 23, "z23_run", "{\"path\":\"code.map\"}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(ms_tool(m, 24, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        snprintf(first, sizeof(first), "%s", m->line);
+        ASSERT(ms_tool(m, 24, "z23_code",
+                       "{\"sub\":\"packet\",\"input\":{\"goal\":\"Compact MCP packet\","
+                       "\"symbols\":[\"mcp_rpc_answer\"],"
+                       "\"files\":[\"tools/mcp/mcp_rpc.c\"]},"
+                       "\"budget_bytes\":65536}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(strcmp(first, m->line) == 0);
+    } TEST_END
+    return failures;
+}
+
+static void cache_log_line(const char *line)
+{
+    if (line)
+        printf("cache log: %.*s\n", (int)strcspn(line, "\r\n"), line);
+}
+
+static int case_cache_log(const char *err)
+{
+    int failures = 0;
+    TEST_CASE("code.packet cache misses once per generation then hits exact evidence") {
+        char *log = malloc(1048576);
+        ASSERT(log && read_file(err, log, 1048576));
+        const char *first = strstr(log, "mcp_packet_cache: miss");
+        const char *second = first ? strstr(first, "mcp_packet_cache: hit count=1") : NULL;
+        const char *changed = second ? strstr(second, "mcp_packet_cache: miss") : NULL;
+        const char *third = changed ? strstr(changed, "mcp_packet_cache: hit count=6") : NULL;
+        ASSERT(first && second && changed && third);
+        cache_log_line(first);
+        cache_log_line(second);
+        free(log);
     } TEST_END
     return failures;
 }
@@ -1408,6 +1498,7 @@ static int case_session(const char *home, const char *checkout)
         printf("FAIL at %s:%d (server exit)\n", __FILE__, __LINE__);
         failures++;
     }
+    failures += case_cache_log(err);
     return failures;
 }
 
