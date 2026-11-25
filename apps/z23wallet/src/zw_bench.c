@@ -67,6 +67,10 @@ static long long exe_bytes(void)
     return (long long)(((unsigned long long)d.nFileSizeHigh << 32) | d.nFileSizeLow);
 }
 #else
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach-o/dyld.h>
+#endif
 #include <sys/stat.h>
 
 static struct timespec g_start;
@@ -86,9 +90,23 @@ uint64_t zw_monotonic_ms(void)
     return (uint64_t)n.tv_sec * 1000u + (uint64_t)n.tv_nsec / 1000000u;
 }
 
+/* Linux reads /proc. macOS has no /proc, so the kernel reports the resident
+ * size and the physical footprint of this task. */
 static void memory_kb(long long *rss, long long *priv)
 {
     *rss = *priv = -1;
+#if defined(__APPLE__)
+    struct mach_task_basic_info basic;
+    mach_msg_type_number_t n = MACH_TASK_BASIC_INFO_COUNT;
+    struct task_vm_info vm;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&basic, &n) != KERN_SUCCESS)
+        return;
+    if (basic.resident_size > 0) *rss = (long long)(basic.resident_size / 1024u);
+    n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &n) == KERN_SUCCESS &&
+        vm.phys_footprint > 0)
+        *priv = (long long)(vm.phys_footprint / 1024u);
+#else
     FILE *f = fopen("/proc/self/status", "r");
     char line[128];
     while (f && fgets(line, sizeof(line), f)) {
@@ -96,6 +114,7 @@ static void memory_kb(long long *rss, long long *priv)
         if (!strncmp(line, "RssAnon:", 8)) *priv = strtoll(line + 8, NULL, 10);
     }
     if (f) fclose(f);
+#endif
 }
 
 static long long cpu_ms(void)
@@ -108,7 +127,14 @@ static long long cpu_ms(void)
 static long long exe_bytes(void)
 {
     struct stat st;
+#if defined(__APPLE__)
+    char p[1024];
+    uint32_t cap = (uint32_t)sizeof p;
+    if (_NSGetExecutablePath(p, &cap) != 0) return -1;
+    return stat(p, &st) == 0 ? (long long)st.st_size : -1;
+#else
     return stat("/proc/self/exe", &st) == 0 ? (long long)st.st_size : -1;
+#endif
 }
 #endif
 

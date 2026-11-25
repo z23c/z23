@@ -1678,6 +1678,41 @@ static void test_app_home_handover(void)
     app_case_down(&a, &n);
 }
 
+#if defined(__APPLE__)
+static long long bench_field(const char *line, const char *key)
+{
+    char pat[40];
+    const char *p;
+    snprintf(pat, sizeof pat, "%s=", key);
+    p = strstr(line, pat);
+    return p ? strtoll(p + strlen(pat), NULL, 10) : -2;
+}
+#endif
+
+/* --bench must name this process's memory and its own file. Linux reads
+ * /proc; macOS has no /proc, so a missing number is a failure there. */
+static void test_bench_host_memory(void)
+{
+    struct zw_bench b = { .first_frame_ms = 1, .first_data_ms = 2 };
+    const char *path = TMP "/bench-host.txt";
+    mkdirs(TMP);
+    CHECK("bench line is written", zw_bench_write(path, &b));
+#if defined(__APPLE__)
+    char line[240] = "";
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        if (!fgets(line, sizeof line, f)) line[0] = 0;
+        fclose(f);
+    }
+    printf("  bench line: %s", line[0] ? line : "(empty)\n");
+    CHECK("macOS bench reports resident memory", bench_field(line, "rss_kb") > 0);
+    CHECK("macOS bench reports private memory", bench_field(line, "private_kb") > 0);
+    CHECK("macOS bench reports the executable size", bench_field(line, "exe_bytes") > 0);
+#else
+    printf("  macOS bench reports resident memory... SKIP\n");
+#endif
+}
+
 static void test_node_line_send_wording(void)
 {
     struct zw_model m = { .conn = ZW_CONN_ONLINE, .profile = ZW_PROFILE_ZCLASSICD, .port = 8023,
@@ -1698,6 +1733,7 @@ int test_z23wallet(void)
 {
     printf("\n=== z23wallet ===\n");
     g_fail = 0;
+    test_bench_host_memory();
     test_amount();
     test_age_and_version();
     test_args();
