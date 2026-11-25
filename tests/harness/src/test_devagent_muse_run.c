@@ -51,12 +51,15 @@ struct mr_dirs {
 };
 
 /* Exercise the production glue with an inert adapter; never launch a host. */
+#include "dev/test_group_catalog.h"
 static int mr_glue_calls;
 static char mr_glue_model[160];
+static char mr_glue_gate[ZCL_TEST_GROUP_FULL_MAX];
 static int mr_glue_run(const struct muse_run_task *task,
     struct muse_run_result *result, char err[MUSE_RUN_ERROR_MAX])
 {
     (void)snprintf(mr_glue_model, sizeof(mr_glue_model), "%s", task->model);
+    (void)snprintf(mr_glue_gate, sizeof(mr_glue_gate), "%s", task->gate);
     (void)result;
     (void)err;
     mr_glue_calls++;
@@ -3686,7 +3689,7 @@ static int mr_failures_glue(void)
         mr_glue_job(&job, &d,
             "name=u1\nkind=leaf\nattempt=1\nmodel=\n"
             "muse-workspace: /nonexistent-wt\nmuse-scope: src/\n"
-            "muse-gate: g\n\nDo it.\n") == 0);
+            "muse-gate: test_devagent_mail\n\nDo it.\n") == 0);
     memset(&res, 0, sizeof(res));
     MR_CHECK("glue workspace refused",
         zcl_devagent_worker_muse_executor(&job, &res) == true);
@@ -3697,7 +3700,7 @@ static int mr_failures_glue(void)
         mr_glue_job(&job, &d,
             "name=u1\nkind=leaf\nattempt=1\nmodel=\n"
             "muse-workspace: /tmp\nmuse-scope: src/\n"
-            "muse-gate: g\n\nDo it.\n") == 0);
+            "muse-gate: test_devagent_mail\n\nDo it.\n") == 0);
     if (snprintf(job.rundir, sizeof(job.rundir), "/nonexistent-run")
         >= (int)sizeof(job.rundir)) {
         MR_CHECK("glue rundir fit", false);
@@ -3713,7 +3716,7 @@ static int mr_failures_glue(void)
         mr_glue_job(&job, &d,
             "name=u1\nkind=leaf\nattempt=1\nmodel=\n"
             "muse-workspace: /tmp\nmuse-scope: src/\n"
-            "muse-gate: g\n\nDo it.\n") == 0);
+            "muse-gate: test_devagent_mail\n\nDo it.\n") == 0);
     job.token_cap = 0;
     memset(&res, 0, sizeof(res));
     MR_CHECK("glue cap refused",
@@ -3723,7 +3726,7 @@ static int mr_failures_glue(void)
     memset(model, 'x', sizeof(model) - 1);
     model[sizeof(model) - 1] = '\0';
     (void)snprintf(task, sizeof(task),
-        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: test_devagent_mail\n"
         "muse-model: %s\n\nDo it.\n", model);
     MR_CHECK("glue oversized model task", mr_glue_job(&job, &d, task) == 0);
     (void)snprintf(job.model, sizeof(job.model), "fallback-model");
@@ -3733,7 +3736,7 @@ static int mr_failures_glue(void)
         strstr(res.evidence, "model does not fit") != NULL);
     MR_CHECK("glue oversized model never runs", mr_glue_calls == 0);
     (void)snprintf(task, sizeof(task),
-        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: test_devagent_mail\n"
         "muse-model: chosen-model\n\nDo it.\n");
     MR_CHECK("glue chosen model task", mr_glue_job(&job, &d, task) == 0);
     (void)snprintf(job.model, sizeof(job.model), "fallback-model");
@@ -3746,7 +3749,7 @@ static int mr_failures_glue(void)
         memset(maximum, 'm', sizeof(maximum) - 1);
         maximum[sizeof(maximum) - 1] = '\0';
         (void)snprintf(task, sizeof(task),
-            "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+            "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: test_devagent_mail\n"
             "muse-model: %s\n\nDo it.\n", maximum);
         MR_CHECK("glue maximum model task", mr_glue_job(&job, &d, task) == 0);
         (void)snprintf(job.model, sizeof(job.model), "fallback-model");
@@ -3756,7 +3759,7 @@ static int mr_failures_glue(void)
             strcmp(mr_glue_model, maximum) == 0);
     }
     (void)snprintf(task, sizeof(task),
-        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n"
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: test_devagent_mail\n"
         "muse-model: \n\nDo it.\n");
     MR_CHECK("glue empty model task", mr_glue_job(&job, &d, task) == 0);
     (void)snprintf(job.model, sizeof(job.model), "fallback-model");
@@ -3765,13 +3768,30 @@ static int mr_failures_glue(void)
     MR_CHECK("glue empty model falls back", mr_glue_calls == 1 &&
         strcmp(mr_glue_model, "fallback-model") == 0);
     (void)snprintf(task, sizeof(task),
-        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: g\n\nDo it.\n");
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: test_devagent_mail\n\nDo it.\n");
     MR_CHECK("glue absent model task", mr_glue_job(&job, &d, task) == 0);
     (void)snprintf(job.model, sizeof(job.model), "fallback-model");
     mr_glue_calls = 0;
     (void)mr_glue_executor(&job, &res);
     MR_CHECK("glue absent model falls back", mr_glue_calls == 1 &&
         strcmp(mr_glue_model, "fallback-model") == 0);
+    (void)snprintf(task, sizeof(task),
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: devagent_mail\n"
+        "muse-model: \n\nDo it.\n");
+    MR_CHECK("glue legacy gate task", mr_glue_job(&job, &d, task) == 0);
+    mr_glue_calls = 0;
+    (void)mr_glue_executor(&job, &res);
+    MR_CHECK("glue legacy gate resolves to full id", mr_glue_calls == 1 &&
+        strcmp(mr_glue_gate, "test_devagent_mail") == 0);
+    (void)snprintf(task, sizeof(task),
+        "muse-workspace: /tmp\nmuse-scope: src/\n"
+        "muse-gate: definitely-not-a-test-group\nmuse-model: \n\nDo it.\n");
+    MR_CHECK("glue unknown gate task", mr_glue_job(&job, &d, task) == 0);
+    mr_glue_calls = 0;
+    MR_CHECK("glue unknown gate refused before submission",
+        mr_glue_executor(&job, &res) && mr_glue_calls == 0 &&
+        strcmp(res.terminal, "refused") == 0 && res.rc == 1 &&
+        strstr(res.evidence, "unregistered test gate") != NULL);
     return failures;
 }
 

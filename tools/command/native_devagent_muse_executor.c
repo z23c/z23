@@ -39,6 +39,7 @@
 
 #include "command/native_devagent.h"
 #include "services/muse_run.h"
+#include "dev/test_group_catalog.h"
 #include "base/safe_alloc.h"
 
 #include <fcntl.h>
@@ -229,6 +230,11 @@ static const char *mx_direction(const struct wkr_job *job, char *workspace,
         return "refused: brief carries no muse-scope line";
     if (!mx_header_line(job->task, "muse-gate", gate, gcap))
         return "refused: brief carries no muse-gate line";
+    char canonical[ZCL_TEST_GROUP_FULL_MAX];
+    if (!zcl_test_group_resolve_exact(gate, canonical))
+        return "refused: unregistered test gate";
+    if (snprintf(gate, gcap, "%s", canonical) >= (int)gcap)
+        return "refused: test gate does not fit";
     *prompt = mx_prompt(job->task);
     if (!*prompt)
         return "refused: brief carries no prompt body";
