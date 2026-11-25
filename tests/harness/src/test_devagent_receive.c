@@ -2060,6 +2060,19 @@ static int test_receive_preflight(void)
         rtx_end(&c);
         rtx_frozen_take(&after, "job-gate");
         ASSERT(rtx_frozen_same(&before, &after));
+        (void)snprintf(body, sizeof(body),
+                       "muse-workspace: receiver\nmuse-scope: src/x.c\n"
+                       "muse-gate: not_a_real_gate\n\nDo it.\n");
+        rtx_frozen_take(&before, "job-unregistered");
+        rtx_preflight(&c, g_rtx_ws, "job-unregistered", "chatgpt",
+                      rtx_ident_binding("chatgpt"), body, NULL);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "state"), "refused");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "code"), "RECEIVE_GATE_UNKNOWN");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "detail"), "muse-gate");
+        rtx_end(&c);
+        rtx_frozen_take(&after, "job-unregistered");
+        ASSERT(rtx_frozen_same(&before, &after));
         rtx_restore();
         PASS();
     }

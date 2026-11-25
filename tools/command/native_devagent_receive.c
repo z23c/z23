@@ -244,6 +244,7 @@
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
+#include "dev/test_group_catalog.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -1349,6 +1350,12 @@ static bool rcv_dir_fields_ok(struct rcv_direction *d)
         return false;
     }
     if (!rcv_group_ok(d->gate)) {
+        (void)snprintf(d->why, sizeof(d->why), "muse-gate");
+        return false;
+    }
+    char canonical[ZCL_TEST_GROUP_FULL_MAX];
+    if (!zcl_test_group_resolve_exact(d->gate, canonical)) {
+        (void)snprintf(d->code, sizeof(d->code), "RECEIVE_GATE_UNKNOWN");
         (void)snprintf(d->why, sizeof(d->why), "muse-gate");
         return false;
     }
