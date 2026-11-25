@@ -1899,6 +1899,27 @@ static bool rcv_source_render(const struct rcv_row *row, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
+static bool rcv_evidence_identity(const char *sender, const char *binding,
+                                  const char *expiry, const char *signer,
+                                  char sigline[128])
+{
+    if (!rcv_label_token(sender, 64))
+        return false;
+    if (strcmp(expiry, "peer") == 0) {
+        if ((binding[0] && !rcv_hex_token(binding, ZCL_FLEET_STEER_BINDING_HEX)) ||
+            !rcv_label_token(signer, 64))
+            return false;
+        return snprintf(sigline, 128, "board_signer=%s\n", signer) < 128;
+    }
+    char *end = NULL;
+    (void)strtoll(expiry, &end, 10);
+    if (!rcv_hex_token(binding, ZCL_FLEET_STEER_BINDING_HEX) ||
+        !expiry[0] || !end || *end != '\0')
+        return false;
+    sigline[0] = '\0';
+    return true;
+}
+
 static bool rcv_evidence_render(const struct rcv_direction *d,
                                 const struct rcv_workspace *w,
                                 const char *brief, const char *sender,
@@ -1910,22 +1931,8 @@ static bool rcv_evidence_render(const struct rcv_direction *d,
     char sigline[128];
     char source[512] = "";
     int n;
-    if (!rcv_label_token(sender, 64) ||
-        !rcv_hex_token(binding, ZCL_FLEET_STEER_BINDING_HEX))
+    if (!rcv_evidence_identity(sender, binding, expiry, signer, sigline))
         return false;
-    if (strcmp(expiry, "peer") == 0) {
-        if (!rcv_label_token(signer, 64))
-            return false;
-        if (snprintf(sigline, sizeof(sigline), "board_signer=%s\n", signer) >=
-            (int)sizeof(sigline))
-            return false;
-    } else {
-        char *end = NULL;
-        (void)strtoll(expiry, &end, 10);
-        if (!expiry[0] || !end || *end != '\0')
-            return false;
-        sigline[0] = '\0';
-    }
     if (!rcv_source_render(row, source, sizeof(source))) return false;
     rcv_brief_digest(w->root, wsd);
     rcv_brief_digest(brief, bd);

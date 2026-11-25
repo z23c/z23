@@ -160,6 +160,22 @@ static bool gtx_mint(const char *label, const char *scopes, long long ttl,
     return ok;
 }
 
+static bool gtx_mint_peer(const char *label, const char *peer)
+{
+    struct gtx_call c;
+    bool ok;
+    gtx_begin(&c, "fleet.steer.grant", "zcl.fleet_steer_grant.v1");
+    (void)json_push_kv_str(&c.input, "action", "mint");
+    (void)json_push_kv_str(&c.input, "scopes", "send");
+    (void)json_push_kv_str(&c.input, "label", label);
+    (void)json_push_kv_str(&c.input, "peer", peer);
+    (void)json_push_kv_int(&c.input, "ttl_seconds", 3600);
+    zcl_native_handle_fleet_steer_grant(&c.request, &c.reply);
+    ok = gtx_ok(&c);
+    gtx_end(&c);
+    return ok;
+}
+
 static bool gtx_revoke(const char *id)
 {
     struct gtx_call c;
@@ -603,6 +619,35 @@ static bool gtx_stage_evidence(const char *ref, const char *sender,
     return true;
 }
 
+static bool gtx_stage_peer_evidence(const char *ref, const char *sender,
+                                    const char *signer)
+{
+    char dir[1200], path[1400], text[256];
+    char *p;
+    (void)gtx_queue_verb("reap");
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/receive/brief", g_gtx_state);
+    p = dir;
+    if (*p == '/') p++;
+    for (; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            (void)mkdir(dir, 0700);
+            *p = '/';
+        }
+    }
+    (void)mkdir(dir, 0700);
+    if (snprintf(path, sizeof(path), "%s/%s.evidence", dir, ref) >= (int)sizeof(path))
+        return false;
+    int w = snprintf(text, sizeof(text),
+                     "sender=%s\nsender_binding=\ngrant_expiry=peer\nboard_signer=%s\n",
+                     sender, signer);
+    if (w <= 0 || (size_t)w >= sizeof(text)) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    (void)fwrite(text, 1, (size_t)w, f);
+    return fclose(f) == 0;
+}
+
 /* True when a queue-status outcome row is the named ref's row. */
 static bool gtx_row_is_named(const struct json_value *r, const char *name)
 {
@@ -950,6 +995,28 @@ static int gtx_case_f0(void)
         PASS();
     }
 
+_test_next:;
+    return failures;
+}
+
+static int gtx_case_peer_unbound(void)
+{
+    int failures = 0;
+    TEST("peer evidence with no binding executes under the live peer grant")
+    {
+        struct wkr_drive_opts o;
+        gtx_isolate("peer-unbound");
+        ASSERT(gtx_mint_peer("chatgpt", "node-a"));
+        ASSERT(gtx_queue_post_leaf("peer-unbound"));
+        ASSERT(gtx_stage_peer_evidence("peer-unbound", "chatgpt", "node-a"));
+        (void)remove(g_gtx_count);
+        gtx_opts(&o, "gtx", "s-peer-unbound");
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, gtx_fixture), 1);
+        ASSERT_EQ(gtx_count_read(), 1);
+        ASSERT(gtx_exists("engine/peer-unbound/a1/receipt.json"));
+        gtx_restore();
+        PASS();
+    }
 _test_next:;
     return failures;
 }
@@ -1540,6 +1607,7 @@ int test_devagent_worker_guards(void)
     failures += gtx_case_e1();
     failures += gtx_case_e2();
     failures += gtx_case_f0();
+    failures += gtx_case_peer_unbound();
     failures += gtx_case_f1();
     failures += gtx_case_f2();
     failures += gtx_case_f3();

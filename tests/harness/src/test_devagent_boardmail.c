@@ -873,6 +873,18 @@ static bool bmx_sent(const char *ref)
     return bmx_drive(BMX_A, &st) == 1 && st.board_out == 1;
 }
 
+static bool bmx_sent_unbound(const char *ref)
+{
+    struct rcv_beat_stats st;
+    bmx_use(BMX_A);
+    if (!bmx_mail("chatgpt", "node-b", "directive", ref, g_bmx_body))
+        return false;
+    bmx_use(BMX_B);
+    if (!bmx_grant("chatgpt", "node-a", NULL, 0))
+        return false;
+    return bmx_drive(BMX_A, &st) == 1 && st.board_out == 1;
+}
+
 /* One row line as A's outbox wrote it for `ref` (the carried text). */
 static bool bmx_outbox_row(const char *ref, char *out, size_t cap)
 {
@@ -1023,6 +1035,32 @@ static int bmx_t_round_trip(void)
                             "state=done"), 1);
         ASSERT_EQ(bmx_lines(BMX_A, "mail/inbox.node-b.jsonl", "\"job-1\"",
                             NULL), 2);
+        bmx_teardown();
+        PASS();
+    }
+_test_next:;
+    bmx_teardown();
+    return failures;
+}
+
+static int bmx_t_unbound_operator(void)
+{
+    int failures = 0;
+    TEST("boardmail: an operator row needs no binding when a peer grant admits it") {
+        struct rcv_beat_stats st;
+        ASSERT(bmx_setup("unbound-operator"));
+        ASSERT(bmx_sent_unbound("job-unbound"));
+        bmx_carry(BMX_A, BMX_B);
+        ASSERT_EQ(bmx_drive(BMX_B, &st), 1);
+        ASSERT_EQ(st.board_in, 1);
+        ASSERT_EQ(st.admitted, 1);
+        ASSERT_EQ(st.refused, 0);
+        ASSERT_EQ(bmx_queued("job-unbound"), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/brief/job-unbound.evidence",
+                            "sender_binding=\n", NULL), 1);
+        ASSERT_EQ(bmx_lines(BMX_B, "receive/brief/job-unbound.evidence",
+                            "board_signer=", NULL), 1);
+        ASSERT_EQ(st.board_out, 1);
         bmx_teardown();
         PASS();
     }
@@ -2545,6 +2583,7 @@ int test_devagent_boardmail(void)
     int failures = 0;
 #if !defined(_WIN32)
     failures += bmx_t_round_trip();
+    failures += bmx_t_unbound_operator();
     failures += bmx_t_regossip();
     failures += bmx_t_incomplete_page();
     failures += bmx_t_crash_between();

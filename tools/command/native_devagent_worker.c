@@ -1534,6 +1534,26 @@ static bool wkr_ev_line(const char *text, const char *key, char *out,
     }
 }
 
+static bool wkr_ev_binding_line(const char *text, char *out, size_t cap)
+{
+    static const char key[] = "sender_binding=";
+    const char *p = text;
+    if (!p) return false;
+    for (;;) {
+        if (strncmp(p, key, sizeof(key) - 1) == 0) {
+            if (p[sizeof(key) - 1] == '\n' || p[sizeof(key) - 1] == '\0') {
+                if (cap == 0) return false;
+                out[0] = '\0';
+                return true;
+            }
+            return wkr_ev_line(text, "sender_binding", out, cap);
+        }
+        p = strchr(p, '\n');
+        if (!p) return false;
+        p++;
+    }
+}
+
 static bool wkr_ev_token(const char *s, size_t max)
 {
     size_t i, n;
@@ -1585,10 +1605,15 @@ static bool wkr_evidence_sender(const char *text, struct wkr_evidence *ev)
         return false;
     if (!wkr_ev_token(ev->sender, sizeof(ev->sender) - 1))
         return false;
-    if (!wkr_ev_line(text, "sender_binding", ev->binding,
-                     sizeof(ev->binding)))
+    if (ev->peer) {
+        if (!wkr_ev_binding_line(text, ev->binding, sizeof(ev->binding)))
+            return false;
+    } else if (!wkr_ev_line(text, "sender_binding", ev->binding,
+                            sizeof(ev->binding))) {
         return false;
-    return wkr_ev_hex(ev->binding, ZCL_FLEET_STEER_BINDING_HEX);
+    }
+    return (ev->peer && !ev->binding[0]) ||
+           wkr_ev_hex(ev->binding, ZCL_FLEET_STEER_BINDING_HEX);
 }
 
 /* The expiry line: an integer install-time expiry for a local grant, or
@@ -1640,7 +1665,7 @@ static bool wkr_evidence_read(const struct wkr_job *job,
         return false;
     if (!zcl_devagent_worker_read_file(path, text, sizeof(text)))
         return false;
-    return wkr_evidence_sender(text, ev) && wkr_evidence_expiry(text, ev) &&
+    return wkr_evidence_expiry(text, ev) && wkr_evidence_sender(text, ev) &&
            wkr_evidence_head(text, ev);
 }
 
