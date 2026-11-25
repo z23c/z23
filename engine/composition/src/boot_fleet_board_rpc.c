@@ -1481,7 +1481,7 @@ static bool rpc_fleet_board(const struct json_value *params, bool help,
         fb_op_fleet_page(ndb, in, result, now);
     else if (strcmp(op, "status") == 0)     fb_op_status(ndb, in, result, now);
     else if (!fb_dispatch_more(ndb, op, in, result, now))
-        fb_error(result, "UNKNOWN_OP", "no such board operation");
+        fb_unknown_op(result, op);
     return true;
 }
 

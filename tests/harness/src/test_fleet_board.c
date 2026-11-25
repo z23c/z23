@@ -1839,6 +1839,7 @@ static int test_fleet_board_rpc_concurrency(void)
         ASSERT(!json_get_bool(json_get(&offer_result, "ok")));
         ASSERT(strcmp(json_get_str(json_get(&offer_result, "code")),
                       "UNKNOWN_OP") == 0);
+        ASSERT(strstr(json_get_str(json_get(&offer_result, "message")), "offer_cpu") != NULL);
         ASSERT(db_fleet_board_status(&db, now, &after));
         ASSERT_EQ(after.posts, before.posts);
         json_free(&offer_params);

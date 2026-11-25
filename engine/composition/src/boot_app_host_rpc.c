@@ -6,6 +6,7 @@
 #include "base/hex.h"
 #include "json/json.h"
 #include "models/app_host_intent.h"
+#include "util/clientversion.h"
 #include "vcs/package_store.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -18,6 +19,19 @@ void fb_error(struct json_value *result, const char *code, const char *message)
     json_push_kv_str(result, "code", code);
     json_push_kv_str(result, "message", message);
 }
+/* A client built after this node offers operations the node does not have.
+ * Say which op and which build, and what to do, rather than a bare refusal. */
+void fb_unknown_op(struct json_value *result, const char *op)
+{
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "this node (build %s) has no board operation '%.48s'; the "
+             "client is probably newer than the running node: restart the "
+             "node on the current build",
+             zcl_build_commit(), op);
+    fb_error(result, "UNKNOWN_OP", msg);
+}
+
 const char *fb_str(const struct json_value *in, const char *key, const char *fallback)
 {
     const char *value = json_get_str(json_get(in, key));
