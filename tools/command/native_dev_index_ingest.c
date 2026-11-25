@@ -31,6 +31,7 @@
 
 #include "base/safe_alloc.h"
 #include "command/native_dev_index_identity.h"
+#include "command/native_dev_mail_projection.h"
 #include "command/native_dev_index_parse.h"
 #include "platform/directory_compat.h"
 #include "services/evidence_ledger_row.h"
@@ -601,4 +602,18 @@ bool dev_index_source_status(sqlite3 *db, const struct dev_index_source *src,
     }
     free(files);
     return true;
+}
+
+/* Derived mail locator cache. Kept in this index-store owner, never authority. */
+bool dev_mail_projection_index_prepare(sqlite3 *db, bool newly_created)
+{
+    if (!db) return false;
+    char err[128];
+    if (newly_created) {
+        if (!dev_index_migrate_schema(db,err,sizeof(err))) return false;
+    } else if (dev_index_read_user_version(db)!=DEV_INDEX_SCHEMA_VERSION) return false;
+    /* Reapply the index owner's connection-local policy after every reopen.
+     * These derived rows are recoverable from authoritative source files.
+     * Keep normal checkpoint/close behavior for these one-shot processes. */
+    return dev_index_exec(db,"PRAGMA synchronous=NORMAL",err,sizeof(err));
 }

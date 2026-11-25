@@ -14,6 +14,9 @@
 
 #include "command/native_command.h"
 #include "command/native_devagent.h"
+#include "command/native_devagent_mail_projection.h"
+#include <sqlite3.h>
+#include "base/safe_alloc.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "sha3/sha3.h"
@@ -22,6 +25,7 @@
 #include "kernel/command_registry.h"
 #include "platform/private_directory.h"
 #include "platform/state_root.h"
+#include "platform/file_watch_compat.h"
 
 #include <limits.h>
 #include <errno.h>
@@ -30,6 +34,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#endif
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -50,6 +57,47 @@ static char g_dvx_state[1024];
 static bool g_dvx_had_root;
 static bool g_dvx_isolated;
 static unsigned g_dvx_after_probe_calls;
+
+static int test_mail_watch_held_inode(void)
+{
+    int failures = 0;
+#if defined(__linux__)
+    TEST("mail: descriptor watch follows held inode across rename") {
+        char dir[512], original[600], moved[600], events[4096];
+        test_make_tmpdir(dir, sizeof(dir), "dev_index", "watch_fd");
+        ASSERT(snprintf(original, sizeof(original), "%s/original", dir) > 0);
+        ASSERT(snprintf(moved, sizeof(moved), "%s/moved", dir) > 0);
+        int fd = open(original, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        ASSERT(fd >= 0);
+        int watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        ASSERT(watch >= 0);
+        ASSERT(platform_file_watch_fd(watch, -1, IN_MODIFY) < 0);
+        int wd = platform_file_watch_fd(watch, fd, IN_MODIFY);
+        ASSERT(wd >= 0);
+        ASSERT_EQ(rename(original, moved), 0);
+        int replacement = open(original, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        ASSERT(replacement >= 0);
+        ASSERT_EQ(write(replacement, "x", 1), 1);
+        ASSERT_EQ(close(replacement), 0);
+        ASSERT(read(watch, events, sizeof(events)) < 0 && errno == EAGAIN);
+        ASSERT_EQ(write(fd, "y", 1), 1);
+        ssize_t n = read(watch, events, sizeof(events));
+        ASSERT(n >= (ssize_t)sizeof(struct inotify_event));
+        struct inotify_event event;
+        memcpy(&event, events, sizeof(event));
+        ASSERT_EQ(event.wd, wd); ASSERT(event.mask & IN_MODIFY);
+        ASSERT_EQ(close(watch), 0); ASSERT_EQ(close(fd), 0);
+        test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+#else
+    TEST("mail: descriptor watch is unavailable on this platform") {
+        ASSERT(platform_file_watch_fd(-1, -1, 0) < 0 && errno == ENOTSUP);
+        PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
 #if defined(_WIN32)
 static wchar_t g_dvx_saved_root[32768];
 #else
@@ -993,6 +1041,120 @@ static int test_mail_filtered_crlf_hash(void)
         PASS();
     } _test_next:;
     dvx_restore();
+    return failures;
+}
+
+static int test_mail_projection_row_parity(void)
+{
+    int failures=0;
+    TEST("mail: projection bridge preserves pull row bytes and JSON") {
+        static const char raw[]="{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"reader\",\"kind\":\"note\",\"body\":\"escaped\",\"ref\":\"fo\\u006f\",\"steer_disposition\":{\"state\":\"BLOCKED\"}}\r\n";
+        struct dvx_call p; struct dev_mail_locator loc; struct json_value projected;
+        char a[16384],b[16384];
+        dvx_isolate("projection_row_parity"); dvx_import_stream("inbox.peer",raw);
+        dvx_pull_agent(&p,"reader","foo"); ASSERT(dvx_run_mode(&p,false) && dvx_ok(&p));
+        const struct json_value *rows=dvx_arr(&p,"rows"); ASSERT(rows && rows->num_children==1);
+        ASSERT(dvm_projection_parse(raw,strlen(raw),"inbox.peer.jsonl",0,&loc,&projected));
+        size_t x=json_write(&rows->children[0],a,sizeof(a)), y=json_write(&projected,b,sizeof(b));
+        ASSERT(x>0 && x<sizeof(a) && x==y && !strcmp(a,b));
+        ASSERT_STR_EQ(loc.ref,"foo"); ASSERT_EQ(loc.end,(int64_t)strlen(raw));
+        json_free(&projected); dvx_end(&p); dvx_restore(); PASS();
+    } _test_next:;
+    dvx_restore(); return failures;
+}
+
+#if defined(ZCL_TESTING) && defined(__linux__)
+static void dvx_projection_fail_parse(void) { zcl_alloc_fault_fail_next("json_string"); }
+#endif
+
+#if defined(ZCL_TESTING) && defined(__linux__)
+static bool dvx_projection_maintenance(const char *root,bool conflict,
+                                        struct zcl_command_reply *reply)
+{
+    struct json_value input; json_init(&input); json_set_object(&input);
+    bool ok=json_push_kv_bool(&input,"mail-history",true) &&
+        json_push_kv_str(&input,"state-root",root) &&
+        (!conflict || json_push_kv_str(&input,"index","must-not-be-used"));
+    const struct zcl_command_spec *spec=
+        zcl_command_registry_find(zcl_command_catalog(),"dev.index.ingest",NULL);
+    struct zcl_command_input_descriptor descriptor;
+    ok=ok && zcl_command_registry_input_descriptor(spec,"mail-history",&descriptor) &&
+        descriptor.type==JSON_BOOL;
+    char why[192];
+    ok=ok && zcl_command_registry_input_validate(spec,&input,why,sizeof(why));
+    zcl_command_reply_init(reply,"");
+    struct zcl_command_request request={.spec=spec,.input=&input,.view="normal"};
+    if (ok) zcl_native_handle_dev_index_ingest(&request,reply);
+    json_free(&input); return ok;
+}
+#endif
+
+static int test_mail_projection_read_bounds(void)
+{
+    int failures=0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    TEST("mail: cold reads do not populate and large append rolls back") {
+        static const char raw[]="{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"reader\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"foo\"}\n";
+        dvx_isolate("projection_bounds"); dvx_import_stream("inbox.peer",raw);
+        char root[1024],path[1200],index[1200]; ASSERT(platform_state_root_existing(root,sizeof(root)));
+        ASSERT(snprintf(path,sizeof(path),"%s/mail/inbox.peer.jsonl",root)>0);
+        ASSERT(snprintf(index,sizeof(index),"%s/index/index.db",root)>0);
+        ASSERT_EQ(chmod(path,0600),0);
+        const char *refs[]={"foo"}; struct json_value rows; json_init(&rows); json_set_array(&rows);
+        ASSERT(!dvm_projection_refs(refs,1,&rows));
+        struct stat st; ASSERT(stat(index,&st)!=0 && errno==ENOENT);
+        struct zcl_command_reply reply;
+        ASSERT(dvx_projection_maintenance(root,true,&reply));
+        ASSERT_STR_EQ(reply.error.code,"BAD_INPUT"); zcl_command_reply_free(&reply);
+        ASSERT(stat(index,&st)!=0 && errno==ENOENT);
+        ASSERT(dvx_projection_maintenance(root,false,&reply));
+        ASSERT(!reply.error.code[0]);
+        ASSERT_EQ(json_get_int(json_get(&reply.data,"streams")),1);
+        ASSERT_EQ(json_get_int(json_get(&reply.data,"bytes")),(int64_t)strlen(raw));
+        zcl_command_reply_free(&reply);
+        ASSERT(dvm_projection_refs(refs,1,&rows)); ASSERT_EQ(json_size(&rows),1);
+        for (int i=0;i<65;i++) dvx_import_append("inbox.peer",raw);
+        (void)dvm_projection_test_tail_updates(true);
+        ASSERT(!dvm_projection_refs(refs,1,&rows));
+        ASSERT_EQ(dvm_projection_test_tail_updates(false),0);
+        sqlite3 *db=NULL; ASSERT_EQ(sqlite3_open_v2(index,&db,SQLITE_OPEN_READONLY,NULL),SQLITE_OK);
+        struct dev_mail_tuple saved;
+        ASSERT(dev_mail_projection_get(db,"inbox.peer.jsonl",&saved));
+        ASSERT_EQ(saved.frontier,(int64_t)strlen(raw));
+        ASSERT_EQ(sqlite3_close(db),SQLITE_OK);
+        ASSERT(dvx_projection_maintenance(root,false,&reply));
+        ASSERT(!reply.error.code[0]); zcl_command_reply_free(&reply);
+        ASSERT(dvm_projection_refs(refs,1,&rows)); ASSERT_EQ(json_size(&rows),66);
+        json_free(&rows); dvx_restore(); PASS();
+    } _test_next:;
+    dvx_restore();
+#endif
+    return failures;
+}
+
+static int test_mail_projection_parse_failure(void)
+{
+    int failures=0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    TEST("mail: failed parse cannot publish incomplete cache") {
+        static const char raw[]="{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"reader\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"foo\",\"steer_disposition\":{\"state\":\"BLOCKED\"}}\n";
+        dvx_isolate("projection_parse_failure"); dvx_import_stream("inbox.peer",raw);
+        char root[1024],path[1200]; ASSERT(platform_state_root_existing(root,sizeof(root)));
+        ASSERT(snprintf(path,sizeof(path),"%s/mail/inbox.peer.jsonl",root)>0); ASSERT_EQ(chmod(path,0600),0);
+        const char *refs[]={"foo"}; struct json_value rows; json_init(&rows); json_set_array(&rows);
+        size_t streams; int64_t bytes;
+        dvm_projection_test_before_parse(dvx_projection_fail_parse);
+        ASSERT(!dvm_projection_rebuild_history(NULL,&streams,&bytes));
+        ASSERT(!dvm_projection_refs(refs,1,&rows)); ASSERT_EQ(json_size(&rows),0);
+        dvm_projection_test_before_parse(NULL); zcl_alloc_fault_clear();
+        ASSERT(dvm_projection_rebuild_history(NULL,&streams,&bytes));
+        ASSERT(dvm_projection_refs(refs,1,&rows)); ASSERT_EQ(json_size(&rows),1);
+        (void)dvm_projection_test_warm_hits(true);
+        ASSERT(dvm_projection_refs(refs,1,&rows)); ASSERT(dvm_projection_test_warm_hits(false)>0);
+        json_free(&rows); dvx_restore(); PASS();
+    } _test_next:;
+    dvm_projection_test_before_parse(NULL); zcl_alloc_fault_clear(); dvx_restore();
+#endif
     return failures;
 }
 
@@ -2702,6 +2864,9 @@ static int test_mail_read_side_checks(void)
     failures += test_mail_ref_filter_and_agent_resume();
     failures += test_mail_ref_escaped_and_skipped();
     failures += test_mail_filtered_crlf_hash();
+    failures += test_mail_projection_row_parity();
+    failures += test_mail_projection_parse_failure();
+    failures += test_mail_projection_read_bounds();
     failures += test_mail_stored_cursor();
     failures += test_mail_board_fields();
 #if !defined(_WIN32)
@@ -2815,6 +2980,7 @@ int test_devagent_mail(void);
 int test_devagent_mail(void)
 {
     int failures = 0;
+    failures += test_mail_watch_held_inode();
 
     failures += test_mail_read_side_checks();
     failures += test_mail_post_ack_checks();

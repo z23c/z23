@@ -14,6 +14,8 @@
 #include "command/native_command.h"
 #include "command/native_dev_index_catalog.h"
 #include "command/native_dev_index_ingest.h"
+#include "command/native_dev_mail_projection.h"
+#include <sqlite3.h>
 #include "command/native_dev_index_parse.h"
 #include "command/native_dev_index_search.h"
 #include "config/command_catalog.h"
@@ -26,6 +28,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* ── fixture plumbing ────────────────────────────────────────────────── */
 
@@ -155,10 +161,308 @@ static bool dvi_refuses_underscored_root(const char *leaf, const char *root)
     return !accepted && strcmp(why, "unknown input key 'state_root'") == 0;
 }
 
+static int dvi_mail_projection_checks(void)
+{
+    int failures = 0;
+    TEST("derived mail projection preserves offsets and refuses incomplete state") {
+        sqlite3 *db = NULL;
+        ASSERT_EQ(sqlite3_open(":memory:", &db), SQLITE_OK);
+        struct dev_mail_tuple t = {.boot="12345678-1234-1234-1234-123456789abc", .dev=1, .inode=2,
+            .size=20, .mtime_ns=3, .ctime_ns=4, .frontier=20};
+        struct dev_mail_locator rows[2] = {
+            {.offset=0,.end=10,.seq=1,.sha3="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.ref="same"},
+            {.offset=10,.end=20,.seq=1,.sha3="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.ref="same"}};
+        struct dev_mail_locator got[2]; size_t n = 99;
+        ASSERT(dev_mail_projection_rebuild(db,"outbox.jsonl",&t,rows,2));
+        char boundary[DEV_MAIL_STREAM_MAX+1]; memset(boundary,'s',DEV_MAIL_STREAM_MAX); boundary[DEV_MAIL_STREAM_MAX]=0;
+        ASSERT(dev_mail_projection_rebuild(db,boundary,&t,rows,2));
+        struct dev_mail_tuple stored;
+        ASSERT(dev_mail_projection_get(db,"outbox.jsonl",&stored));
+        ASSERT_EQ(stored.frontier,20);
+        struct dev_mail_rebuild *tx=dev_mail_projection_begin(db,"outbox.jsonl",&t);
+        ASSERT(tx != NULL);
+        ASSERT(dev_mail_projection_add(tx,&rows[0]));
+        ASSERT(!dev_mail_projection_add(tx,&rows[0]));
+        ASSERT(!dev_mail_projection_commit(tx));
+        ASSERT(sqlite3_next_stmt(db,NULL)==NULL);
+        tx=dev_mail_projection_begin(db,"outbox.jsonl",&t); ASSERT(tx != NULL);
+        ASSERT(dev_mail_projection_add(tx,&rows[0])); ASSERT(dev_mail_projection_add(tx,&rows[1]));
+        struct dev_mail_tuple changed=t; changed.ctime_ns++;
+        ASSERT(!dev_mail_projection_commit_scanned(tx,&changed));
+        ASSERT(sqlite3_next_stmt(db,NULL)==NULL);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,2,&n)); ASSERT_EQ(n,2);
+        tx=dev_mail_projection_begin(db,"outbox.jsonl",&t); ASSERT(tx != NULL);
+        ASSERT(dev_mail_projection_add(tx,&rows[0])); ASSERT(dev_mail_projection_add(tx,&rows[1]));
+        changed=t; changed.skipped=7;
+        ASSERT(dev_mail_projection_commit_scanned(tx,&changed)); t=changed;
+        ASSERT(sqlite3_next_stmt(db,NULL)==NULL);
+        ASSERT(dev_mail_projection_get(db,"outbox.jsonl",&stored)); ASSERT_EQ(stored.skipped,7);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,2,&n));
+        ASSERT_EQ(n,2); ASSERT_EQ(got[0].offset,0); ASSERT_EQ(got[1].offset,10);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"absent",got,2,&n)); ASSERT_EQ(n,0);
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,1,&n)); ASSERT_EQ(n,0);
+        ASSERT_EQ(dev_mail_projection_probe(db,"outbox.jsonl",&t,"same",1),DEV_MAIL_PROBE_UNKNOWN);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,2,&n)); ASSERT_EQ(n,2);
+        struct dev_mail_tuple wrong = t; wrong.boot[0] = 'f';
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&wrong,"same",got,2,&n));
+        wrong=t; wrong.source_sha3[0]=1;
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&wrong,"same",got,2,&n));
+        wrong = t; wrong.partial = true;
+        ASSERT(!dev_mail_projection_rebuild(db,"outbox.jsonl",&wrong,rows,2));
+        struct dev_mail_tuple post = t; post.size = post.frontier = 30;
+        struct dev_mail_locator bad = rows[0]; bad.offset=10; bad.end=15;
+        ASSERT(!dev_mail_projection_append(db,"outbox.jsonl",&t,&post,&bad,1));
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,2,&n)); ASSERT_EQ(n,2);
+        bad.offset=20; bad.end=30;
+        ASSERT(!dev_mail_projection_append(db,"outbox.jsonl",&wrong,&post,&bad,1));
+        tx=dev_mail_projection_begin_append(db,"outbox.jsonl",&t,&post); ASSERT(tx!=NULL);
+        ASSERT(dev_mail_projection_add(tx,&bad)); ASSERT(!dev_mail_projection_add(tx,&bad));
+        ASSERT(!dev_mail_projection_commit(tx));
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,2,&n)); ASSERT_EQ(n,2);
+        tx=dev_mail_projection_begin_append(db,"outbox.jsonl",&t,&post); ASSERT(tx!=NULL);
+        ASSERT(dev_mail_projection_add(tx,&bad)); ASSERT(dev_mail_projection_commit_scanned(tx,&post));
+        struct dev_mail_tuple boundary_tuple=t; boundary_tuple.skipped=0;
+        ASSERT(dev_mail_projection_find(db,boundary,&boundary_tuple,"same",got,2,&n)); ASSERT_EQ(n,2);
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&t,"same",got,2,&n));
+        ASSERT_EQ(sqlite3_exec(db,"DELETE FROM mail_projection_nodes",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&post,"same",got,2,&n)); ASSERT_EQ(n,0);
+        ASSERT_EQ(dev_mail_projection_probe(db,"outbox.jsonl",&post,"same",2),DEV_MAIL_PROBE_CORRUPT);
+        ASSERT_EQ(sqlite3_exec(db,"UPDATE mail_projection_streams SET partial=4294967296",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT(!dev_mail_projection_get(db,"outbox.jsonl",&stored));
+        ASSERT_EQ(sqlite3_exec(db,"UPDATE mail_projection_streams SET ino='invalid'",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT(!dev_mail_projection_get(db,"outbox.jsonl",&stored));
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvi_mail_busy_checks(void)
+{
+    int failures = 0;
+    TEST("mail projection refuses busy and unsupported cache version") {
+        char dir[512], path[600];
+        test_make_tmpdir(dir, sizeof(dir), "dev_index", "mail_busy");
+        (void)snprintf(path,sizeof(path),"%s/cache.db",dir);
+        sqlite3 *a = NULL, *b = NULL;
+        ASSERT_EQ(sqlite3_open(path,&a),SQLITE_OK);
+        ASSERT_EQ(sqlite3_open(path,&b),SQLITE_OK);
+        struct dev_mail_tuple t = {.boot="12345678-1234-1234-1234-123456789abc",.dev=1,.inode=2};
+        ASSERT(dev_mail_projection_rebuild(a,"outbox.jsonl",&t,NULL,0));
+        ASSERT_EQ(sqlite3_exec(a,"BEGIN IMMEDIATE",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT(!dev_mail_projection_rebuild(b,"outbox.jsonl",&t,NULL,0));
+        ASSERT_EQ(sqlite3_exec(a,"ROLLBACK",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(a,"BEGIN EXCLUSIVE",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT_EQ(dev_mail_projection_probe(b,"outbox.jsonl",&t,"x",1),DEV_MAIL_PROBE_UNKNOWN);
+        ASSERT_EQ(sqlite3_exec(a,"ROLLBACK",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(a,"UPDATE mail_projection_meta SET version=5",NULL,NULL,NULL),SQLITE_OK);
+        size_t n=9;
+        ASSERT(!dev_mail_projection_find(b,"outbox.jsonl",&t,"x",NULL,0,&n)); ASSERT_EQ(n,0);
+        ASSERT(!dev_mail_projection_rebuild(b,"outbox.jsonl",&t,NULL,0));
+        struct dev_mail_tuple stored;
+        ASSERT(!dev_mail_projection_get(b,"outbox.jsonl",&stored));
+        ASSERT_EQ(sqlite3_exec(a,"UPDATE mail_projection_meta SET version=1",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT(!dev_mail_projection_get(b,"outbox.jsonl",&stored));
+        sqlite3_close(a); sqlite3_close(b);
+        test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvi_mail_crash_checks(void)
+{
+    int failures=0;
+#if !defined(_WIN32)
+    TEST("mail projection rolls back an interrupted process transaction") {
+        char dir[512],path[600]; test_make_tmpdir(dir,sizeof(dir),"dev_index","mail_crash");
+        (void)snprintf(path,sizeof(path),"%s/cache.db",dir);
+        sqlite3 *db=NULL; ASSERT_EQ(sqlite3_open(path,&db),SQLITE_OK);
+        ASSERT(dev_mail_projection_index_prepare(db,true));
+        sqlite3_stmt *policy=NULL;
+        ASSERT_EQ(sqlite3_prepare_v2(db,"PRAGMA synchronous",-1,&policy,NULL),SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(policy),SQLITE_ROW); ASSERT_EQ(sqlite3_column_int(policy,0),1);
+        ASSERT_EQ(sqlite3_finalize(policy),SQLITE_OK);
+        struct dev_mail_tuple t={.boot="12345678-1234-1234-1234-123456789abc",.dev=1,.inode=2,.size=10,.frontier=10};
+        struct dev_mail_locator row={.offset=0,.end=10,.seq=1,.sha3="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.ref="old"};
+        ASSERT(dev_mail_projection_rebuild(db,"outbox.jsonl",&t,&row,1)); ASSERT_EQ(sqlite3_close(db),SQLITE_OK);
+        pid_t child=fork(); ASSERT(child>=0);
+        if (child==0) {
+            sqlite3 *c=NULL; if (sqlite3_open(path,&c)!=SQLITE_OK) _exit(2);
+            if (!dev_mail_projection_index_prepare(c,false)) _exit(4);
+            struct dev_mail_tuple proposed=t; proposed.size=proposed.frontier=20;
+            struct dev_mail_locator uncommitted=row; uncommitted.seq=9;
+            (void)snprintf(uncommitted.ref,sizeof(uncommitted.ref),"uncommitted");
+            struct dev_mail_rebuild *tx=dev_mail_projection_begin(c,"outbox.jsonl",&proposed);
+            if (!tx || !dev_mail_projection_add(tx,&uncommitted)) _exit(3);
+            _exit(0);
+        }
+        int status=0; ASSERT_EQ(waitpid(child,&status,0),child); ASSERT(WIFEXITED(status)); ASSERT_EQ(WEXITSTATUS(status),0);
+        ASSERT_EQ(sqlite3_open(path,&db),SQLITE_OK);
+        ASSERT(dev_mail_projection_index_prepare(db,false));
+        ASSERT_EQ(sqlite3_prepare_v2(db,"PRAGMA synchronous",-1,&policy,NULL),SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(policy),SQLITE_ROW); ASSERT_EQ(sqlite3_column_int(policy,0),1);
+        ASSERT_EQ(sqlite3_finalize(policy),SQLITE_OK);
+        struct dev_mail_tuple saved; struct dev_mail_locator got[2]; size_t count=0;
+        ASSERT(dev_mail_projection_get(db,"outbox.jsonl",&saved)); ASSERT_EQ(saved.frontier,10);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"old",got,2,&count)); ASSERT_EQ(count,1);
+        ASSERT_EQ(got[0].offset,0); ASSERT_EQ(got[0].end,10); ASSERT_EQ(got[0].seq,1);
+        ASSERT(!strcmp(got[0].sha3,row.sha3)); ASSERT(!strcmp(got[0].ref,row.ref));
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"uncommitted",got,2,&count)); ASSERT_EQ(count,0);
+        struct dev_mail_tuple after=t; after.size=after.frontier=20;
+        struct dev_mail_locator next=row; next.offset=10; next.end=20; next.seq=2;
+        ASSERT(dev_mail_projection_append(db,"outbox.jsonl",&t,&after,&next,1));
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&after,"old",got,2,&count)); ASSERT_EQ(count,2);
+        ASSERT_EQ(sqlite3_close(db),SQLITE_OK); test_rm_rf_recursive(dir); PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
+
+static int dvi_mail_radix_checks(void)
+{
+    int failures=0;
+    TEST("mail radix verifies mixed keys, postings and node corruption") {
+        sqlite3 *db=NULL;
+        ASSERT_EQ(sqlite3_open(":memory:",&db),SQLITE_OK);
+        struct dev_mail_tuple t={.boot="12345678-1234-1234-1234-123456789abc",.dev=1,.inode=2,.size=40,.frontier=40};
+        struct dev_mail_locator r[4]={
+            {.offset=0,.end=10,.seq=1,.sha3="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.ref="alpha"},
+            {.offset=10,.end=20,.seq=2,.sha3="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",.ref="beta"},
+            {.offset=20,.end=30,.seq=3,.sha3="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.ref="alpha"},
+            {.offset=30,.end=40,.seq=4,.sha3="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",.ref="gamma"}};
+        struct dev_mail_rebuild *tx=dev_mail_projection_begin(db,"outbox.jsonl",&t);
+        ASSERT(tx != NULL);
+        for (size_t i=0;i<4;i++) ASSERT(dev_mail_projection_add(tx,&r[i]));
+        ASSERT(dev_mail_projection_commit(tx));
+        struct dev_mail_locator got[4]; size_t n=0;
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"alpha",got,4,&n));
+        ASSERT_EQ(n,2); ASSERT_EQ(got[0].offset,0); ASSERT_EQ(got[1].offset,20);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"beta",got,4,&n)); ASSERT_EQ(n,1); ASSERT_EQ(got[0].offset,10);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&t,"missing",got,4,&n)); ASSERT_EQ(n,0);
+        struct dev_mail_tuple post=t; post.size=post.frontier=50;
+        struct dev_mail_locator delta={.offset=40,.end=50,.seq=5,.sha3="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",.ref="delta"};
+        ASSERT(dev_mail_projection_append(db,"outbox.jsonl",&t,&post,&delta,1));
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&post,"delta",got,4,&n)); ASSERT_EQ(n,1); ASSERT_EQ(got[0].offset,40);
+        ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&post,"alpha",got,4,&n)); ASSERT_EQ(n,2);
+        ASSERT_EQ(sqlite3_exec(db,"UPDATE mail_projection_nodes SET body=x'00'",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&post,"alpha",got,4,&n)); ASSERT_EQ(n,0);
+        sqlite3_close(db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool dvi_mail_node_metrics(sqlite3 *db, const char *phase)
+{
+    sqlite3_stmt *st=NULL;
+    if (sqlite3_prepare_v2(db,"SELECT count(*),coalesce(sum(length(body)),0) FROM mail_projection_nodes",-1,&st,NULL)!=SQLITE_OK) return false;
+    bool ok=sqlite3_step(st)==SQLITE_ROW;
+    if (ok) printf("mail radix %s: nodes=%lld bytes=%lld\n",phase,
+        (long long)sqlite3_column_int64(st,0),(long long)sqlite3_column_int64(st,1));
+    sqlite3_finalize(st); return ok;
+}
+
+static int64_t dvi_mail_node_count(sqlite3 *db)
+{
+    sqlite3_stmt *st=NULL; int64_t count=-1;
+    if (sqlite3_prepare_v2(db,"SELECT count(*) FROM mail_projection_nodes",-1,&st,NULL)==SQLITE_OK &&
+        sqlite3_step(st)==SQLITE_ROW) count=sqlite3_column_int64(st,0);
+    sqlite3_finalize(st); return count;
+}
+
+static int dvi_mail_radix_oracle(void)
+{
+    int failures=0;
+    TEST("mail radix matches an interleaved locator oracle") {
+        sqlite3 *db=NULL;
+        ASSERT_EQ(sqlite3_open(":memory:",&db),SQLITE_OK);
+        struct dev_mail_tuple before={.boot="12345678-1234-1234-1234-123456789abc",.dev=1,.inode=2,.size=320,.frontier=320};
+        struct dev_mail_tuple after=before; after.size=after.frontier=640;
+        struct dev_mail_locator rows[64]; memset(rows,0,sizeof(rows));
+        for (size_t i=0;i<64;i++) {
+            rows[i].offset=(int64_t)i*10; rows[i].end=rows[i].offset+10; rows[i].seq=(int64_t)i+1;
+            memset(rows[i].sha3,'a'+(int)(i%6),64); rows[i].sha3[64]=0;
+            (void)snprintf(rows[i].ref,sizeof(rows[i].ref),"ref-%zu",i%9);
+        }
+        struct dev_mail_rebuild *tx=dev_mail_projection_begin(db,"outbox.jsonl",&before);
+        ASSERT(tx!=NULL);
+        for (size_t i=0;i<32;i++) ASSERT(dev_mail_projection_add(tx,&rows[i]));
+        ASSERT(dev_mail_projection_commit(tx));
+        ASSERT(dvi_mail_node_metrics(db,"rebuild32"));
+        ASSERT(dev_mail_projection_append(db,"outbox.jsonl",&before,&after,rows+32,32));
+        ASSERT(dvi_mail_node_metrics(db,"append32"));
+        int64_t node_count=dvi_mail_node_count(db);
+        ASSERT(node_count>0);
+        for (int i=0;i<3;i++) {
+            ASSERT(dev_mail_projection_rebuild(db,"outbox.jsonl",&after,rows,64));
+            ASSERT_EQ(dvi_mail_node_count(db),node_count);
+        }
+        for (size_t key=0;key<10;key++) {
+            char ref[32]; (void)snprintf(ref,sizeof(ref),"ref-%zu",key);
+            struct dev_mail_locator got[64]; size_t count=0, expected=0;
+            ASSERT(dev_mail_projection_find(db,"outbox.jsonl",&after,ref,got,64,&count));
+            for (size_t i=0;i<64;i++) if (!strcmp(rows[i].ref,ref)) {
+                ASSERT(expected<count); ASSERT_EQ(got[expected].offset,rows[i].offset);
+                ASSERT_EQ(got[expected].end,rows[i].end); ASSERT_EQ(got[expected].seq,rows[i].seq);
+                ASSERT_STR_EQ(got[expected].sha3,rows[i].sha3); expected++;
+            }
+            ASSERT_EQ(count,expected);
+        }
+        ASSERT_EQ(sqlite3_exec(db,"DELETE FROM mail_projection_nodes WHERE substr(body,1,1)=x'50'",NULL,NULL,NULL),SQLITE_OK);
+        struct dev_mail_locator got[64]; size_t count=99;
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&after,"ref-0",got,64,&count)); ASSERT_EQ(count,0);
+        sqlite3_close(db); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvi_mail_refcount_checks(void)
+{
+    int failures=0;
+    TEST("mail radix refuses corrupt node ownership") {
+        sqlite3 *db=NULL; ASSERT_EQ(sqlite3_open(":memory:",&db),SQLITE_OK);
+        struct dev_mail_tuple t={.boot="12345678-1234-1234-1234-123456789abc",.dev=1,.inode=2,.size=10,.frontier=10};
+        struct dev_mail_locator r={.offset=0,.end=10,.seq=1,.sha3="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",.ref="x"};
+        ASSERT(dev_mail_projection_rebuild(db,"outbox.jsonl",&t,&r,1));
+        ASSERT_EQ(sqlite3_exec(db,"UPDATE mail_projection_nodes SET refs=0",NULL,NULL,NULL),SQLITE_OK);
+        struct dev_mail_locator got; size_t n=99;
+        ASSERT(!dev_mail_projection_find(db,"outbox.jsonl",&t,"x",&got,1,&n)); ASSERT_EQ(n,0);
+        ASSERT(!dev_mail_projection_rebuild(db,"outbox.jsonl",&t,&r,1));
+        sqlite3_close(db); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dvi_mail_reset_checks(void)
+{
+    int failures=0;
+    TEST("mail cache reset preserves generic index tables") {
+        sqlite3 *db=NULL; ASSERT_EQ(sqlite3_open(":memory:",&db),SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(db,"CREATE TABLE rows(x); INSERT INTO rows VALUES(42); CREATE TABLE cursors(x); INSERT INTO cursors VALUES(9)",NULL,NULL,NULL),SQLITE_OK);
+        struct dev_mail_tuple t={.boot="12345678-1234-1234-1234-123456789abc",.dev=1,.inode=2};
+        ASSERT(dev_mail_projection_rebuild(db,"outbox.jsonl",&t,NULL,0));
+        ASSERT(dev_mail_projection_reset(db));
+        struct dev_mail_tuple stored; ASSERT(!dev_mail_projection_get(db,"outbox.jsonl",&stored));
+        sqlite3_stmt *st=NULL;
+        ASSERT_EQ(sqlite3_prepare_v2(db,"SELECT (SELECT x FROM rows),(SELECT x FROM cursors)",-1,&st,NULL),SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(st),SQLITE_ROW); ASSERT_EQ(sqlite3_column_int(st,0),42); ASSERT_EQ(sqlite3_column_int(st,1),9);
+        sqlite3_finalize(st); sqlite3_close(db); PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_index(void);
 int test_dev_index(void)
 {
     int failures = 0;
+    failures += dvi_mail_projection_checks();
+    failures += dvi_mail_busy_checks();
+    failures += dvi_mail_crash_checks();
+    failures += dvi_mail_radix_checks();
+    failures += dvi_mail_radix_oracle();
+    failures += dvi_mail_refcount_checks();
+    failures += dvi_mail_reset_checks();
     sqlite3 *db = NULL;
     char parent[512];
     test_make_tmpdir(parent, sizeof(parent), "dev_index", "fixture");

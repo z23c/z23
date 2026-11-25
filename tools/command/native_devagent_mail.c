@@ -178,6 +178,7 @@
 #include "command/native_devagent.h"
 
 #include "base/hex.h"
+#include "command/native_devagent_mail_projection.h"
 #include "sha3/sha3.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -1743,6 +1744,12 @@ static bool dvm_streams_list(const char *maildir,
     return true;
 }
 
+bool dvm_projection_stream_name(const char *name)
+{
+    return name && dvm_is_stream_name(name) && dvm_cursor_name_ok(name) &&
+           strlen(name)<=DVM_STREAM_NAME_MAX;
+}
+
 /* ── resume token ── */
 
 /* One "<name>:<offset>" entry at p. Sets *next past the entry and its
@@ -1911,6 +1918,16 @@ static enum dvm_line_kind dvm_read_line(FILE *f, char *buf, size_t cap)
             return DVM_LINE_LONG;
         if (c == EOF)
             return DVM_LINE_PARTIAL;
+    }
+}
+
+enum dvm_projection_line dvm_projection_read_line(FILE *f, char *buf, size_t cap)
+{
+    switch (dvm_read_line(f,buf,cap)) {
+    case DVM_LINE_OK: return DVM_PROJECTION_OK;
+    case DVM_LINE_LONG: return DVM_PROJECTION_LONG;
+    case DVM_LINE_PARTIAL: return DVM_PROJECTION_PARTIAL;
+    default: return DVM_PROJECTION_EOF;
     }
 }
 
@@ -2955,6 +2972,51 @@ static bool dvm_pull_sources(struct zcl_command_reply *reply,
     return ok;
 }
 
+static bool dvm_projection_row_json(const struct dvm_row *r, struct json_value *item)
+{
+    bool ok = true;
+    json_init(item); json_set_object(item);
+    ok &= json_push_kv_int(item, "seq", r->seq);
+    ok &= json_push_kv_str(item, "stream", r->stream);
+    ok &= json_push_kv_int(item, "row_offset", r->row_offset);
+    ok &= json_push_kv_int(item, "row_end", r->row_end);
+    ok &= json_push_kv_str(item, "row_sha3", r->row_sha3);
+    ok &= json_push_kv_str(item, "ts", r->ts);
+    ok &= json_push_kv_str(item, "from", r->from);
+    ok &= json_push_kv_str(item, "to", r->to);
+    ok &= json_push_kv_str(item, "kind", r->kind);
+    ok &= json_push_kv_str(item, "body", r->body);
+    ok &= json_push_kv_str(item, "ref", r->ref);
+    ok &= json_push_kv_str(item, "sender_binding", r->sender_binding);
+    ok &= json_push_kv_str(item, "board_post", r->board_post);
+    ok &= json_push_kv_str(item, "board_signer", r->board_signer);
+    if (r->observed_disposition[0]) ok &= json_push_kv_str(item, "observed_disposition", r->observed_disposition);
+    if (r->observed_stream[0]) {
+        ok &= json_push_kv_str(item, "observed_stream", r->observed_stream);
+        ok &= json_push_kv_str(item, "observed_sha3", r->observed_sha3);
+        ok &= json_push_kv_int(item, "observed_offset", r->observed_offset);
+        ok &= json_push_kv_int(item, "observed_seq", r->observed_seq);
+    }
+    return ok;
+}
+
+bool dvm_projection_parse(const char *raw, size_t len, const char *stream,
+                          int64_t offset, struct dev_mail_locator *loc, struct json_value *json)
+{
+    if (!raw || !stream || !loc || offset<0 || len==0 || len>=DVM_LINE_CAP ||
+        strlen(raw)!=len || raw[len-1]!='\n' || (uint64_t)offset+len>INT64_MAX) return false;
+    struct dvm_row row;
+    if (!dvm_parse_row(raw,&row)) return false;
+    size_t sn=strnlen(stream,sizeof(row.stream));
+    if (!sn || sn>=sizeof(row.stream)) return false;
+    memcpy(row.stream,stream,sn+1); row.row_offset=offset; row.row_end=offset+(int64_t)len;
+    dvm_row_hash(raw,len,row.row_sha3);
+    memset(loc,0,sizeof(*loc)); loc->offset=row.row_offset; loc->end=row.row_end; loc->seq=row.seq;
+    memcpy(loc->sha3,row.row_sha3,sizeof(loc->sha3));
+    memcpy(loc->ref,row.ref,sizeof(loc->ref));
+    return !json || dvm_projection_row_json(&row,json);
+}
+
 static void dvm_pull_build_reply(struct zcl_command_reply *reply,
                                  const struct dvm_page *pg,
                                  const struct dvm_pull_state *ps,
@@ -2969,31 +3031,7 @@ static void dvm_pull_build_reply(struct zcl_command_reply *reply,
     json_set_array(&arr);
     bool ok = true;
     for (size_t i = 0; i < pg->n; i++) {
-        const struct dvm_row *r = &pg->rows[i];
-        json_init(&item);
-        json_set_object(&item);
-        ok &= json_push_kv_int(&item, "seq", r->seq);
-        ok &= json_push_kv_str(&item, "stream", r->stream);
-        ok &= json_push_kv_int(&item, "row_offset", r->row_offset);
-        ok &= json_push_kv_int(&item, "row_end", r->row_end);
-        ok &= json_push_kv_str(&item, "row_sha3", r->row_sha3);
-        ok &= json_push_kv_str(&item, "ts", r->ts);
-        ok &= json_push_kv_str(&item, "from", r->from);
-        ok &= json_push_kv_str(&item, "to", r->to);
-        ok &= json_push_kv_str(&item, "kind", r->kind);
-        ok &= json_push_kv_str(&item, "body", r->body);
-        ok &= json_push_kv_str(&item, "ref", r->ref);
-        ok &= json_push_kv_str(&item, "sender_binding", r->sender_binding);
-        ok &= json_push_kv_str(&item, "board_post", r->board_post);
-        ok &= json_push_kv_str(&item, "board_signer", r->board_signer);
-        if (r->observed_disposition[0])
-            ok &= json_push_kv_str(&item, "observed_disposition", r->observed_disposition);
-        if (r->observed_stream[0]) {
-            ok &= json_push_kv_str(&item, "observed_stream", r->observed_stream);
-            ok &= json_push_kv_str(&item, "observed_sha3", r->observed_sha3);
-            ok &= json_push_kv_int(&item, "observed_offset", r->observed_offset);
-            ok &= json_push_kv_int(&item, "observed_seq", r->observed_seq);
-        }
+        ok &= dvm_projection_row_json(&pg->rows[i], &item);
         ok &= json_push_back(&arr, &item);
         json_free(&item);
     }
@@ -3527,6 +3565,25 @@ static const char *dvm_exact_problem(const char *raw, const char *actual,
     return NULL;
 }
 #endif
+
+bool dvm_projection_exact(const char *dir, const char *stream,
+                          const struct dev_mail_locator *loc, struct json_value *json)
+{
+#if !defined(_WIN32)
+    if (!dir || !stream || !loc || !json || !dvm_is_stream_name(stream) || !dvm_cursor_name_ok(stream)) return false;
+    char raw[DVM_LINE_CAP], actual[65]; struct dvm_row row = {0};
+    if (!dvm_exact_line(dir,stream,loc->offset,raw)) return false;
+    size_t n=strlen(raw); dvm_row_hash(raw,n,actual);
+    if (loc->offset<0 || (uint64_t)loc->offset+(uint64_t)n>INT64_MAX ||
+        dvm_exact_problem(raw,actual,loc->sha3,loc->seq,loc->ref,&row) ||
+        loc->end != loc->offset+(int64_t)n) return false;
+    struct dev_mail_locator checked;
+    return dvm_projection_parse(raw,n,stream,loc->offset,&checked,json);
+#else
+    (void)dir; (void)stream; (void)loc; (void)json;
+    return false;
+#endif
+}
 
 static void dvm_exact(const struct zcl_command_request *req,
     struct zcl_command_reply *reply, const char *dir)

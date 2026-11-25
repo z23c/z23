@@ -1363,8 +1363,9 @@ static bool cr_leaf_special_descriptor(const struct zcl_command_spec *spec,
         (!strcmp(spec->path, "ops.host.gc") && !strcmp(key, "epoch"))) {
         out->type = JSON_STR; out->max_bytes = zcl_command_registry_input_str_max(key); return true;
     }
-    /* app.discover's owner hand-off flag accepts bare --yes on this leaf. */
-    if (!strcmp(spec->path, "app.discover") && !strcmp(key, "yes")) {
+    /* Leaf-scoped boolean modes share validation and schema discovery. */
+    if ((!strcmp(spec->path, "app.discover") && !strcmp(key, "yes")) ||
+        (!strcmp(spec->path, "dev.index.ingest") && !strcmp(key, "mail-history"))) {
         out->type = JSON_BOOL; return true;
     }
     return false;

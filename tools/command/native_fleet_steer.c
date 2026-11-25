@@ -276,6 +276,7 @@
 #include "session/fleet_wiki_entry.h"
 #include "command/native_fleet_steer_tasks.h"
 #include "command/native_fleet_typed_index.h"
+#include "command/native_devagent_mail_projection.h"
 #include "command/native_dev_proof_command.h"
 #include "config/command_catalog.h"
 #include "crypto/random_secret.h"
@@ -4949,6 +4950,73 @@ struct fmc_compact_refs {
     size_t count;
 };
 
+#define FMC_PROJECTION_REFS_MAX 4096u
+struct fmc_projection_refs {
+    char values[FMC_PROJECTION_REFS_MAX][DEV_MAIL_REF_MAX + 1];
+    const char *ptrs[FMC_PROJECTION_REFS_MAX];
+    size_t count;
+};
+
+static bool fmc_projection_add_ref(struct fmc_projection_refs *v, const char *ref)
+{
+    for (size_t i=0;i<v->count;i++) if (!strcmp(v->values[i],ref)) return true;
+    if (v->count==FMC_PROJECTION_REFS_MAX) return false;
+    int n=snprintf(v->values[v->count],sizeof(v->values[0]),"%s",ref);
+    if (n<0 || (size_t)n>=sizeof(v->values[0])) return false;
+    v->ptrs[v->count]=v->values[v->count]; v->count++;
+    return true;
+}
+
+static bool fmc_projection_expand(struct fmc_projection_refs *out, const struct fmc_compact_refs *refs)
+{
+    for (size_t i=0;i<refs->count;i++) {
+        const char *ref=refs->refs[i]; size_t len=strlen(ref);
+        if (len+7>DEV_MAIL_REF_MAX || !fmc_projection_add_ref(out,ref)) return false;
+        for (size_t p=0;p<=len;p++) {
+            if (p<len && ref[p]!='-') continue;
+            char variant[DEV_MAIL_REF_MAX+1];
+            memcpy(variant,ref,p); memcpy(variant+p,"-result",7);
+            memcpy(variant+p+7,ref+p,len-p+1);
+            if (!fmc_projection_add_ref(out,variant)) return false;
+        }
+    }
+    return true;
+}
+
+#ifdef ZCL_TESTING
+bool zcl_fleet_steer_test_projection_ref(const char *directive, const char *candidate,
+                                         bool *matches_original, bool *matches_expansion)
+{
+    if (!directive || !candidate || !matches_original || !matches_expansion) return false;
+    struct fmc_projection_refs *v=zcl_calloc(1,sizeof(*v),"fleet_steer.test_projection_refs");
+    if (!v) return false;
+    struct fmc_compact_refs refs={.refs={directive},.count=1};
+    bool ok=fmc_projection_expand(v,&refs);
+    *matches_original=fmc_ref_answers(directive,candidate); *matches_expansion=false;
+    for (size_t i=0;ok && i<v->count;i++) if (!strcmp(v->values[i],candidate)) *matches_expansion=true;
+    free(v); return ok;
+}
+#endif
+
+/* 0 unavailable (fallback), 1 copied, -1 copy failed (refuse). */
+static int fmc_compact_projection(const struct fmc_compact_refs *refs, struct json_value *history)
+{
+    struct fmc_projection_refs *variants=zcl_calloc(1,sizeof(*variants),"fleet_steer.projection_refs");
+    if (!variants) return 0;
+    struct json_value result; json_init(&result); json_set_array(&result);
+    bool ok=fmc_projection_expand(variants,refs) && dvm_projection_refs(variants->ptrs,variants->count,&result);
+    free(variants);
+    if (!ok) { json_free(&result); return 0; }
+#ifdef ZCL_TESTING
+    if (s_fmc_before_history_copy) s_fmc_before_history_copy();
+#endif
+    for (size_t i=0;i<json_size(&result);i++) {
+        if (!json_push_back(history,json_at(&result,i))) { json_free(&result); return -1; }
+    }
+    json_free(&result);
+    return 1;
+}
+
 static bool fmc_compact_keep_ref(const char *ref, void *ctx)
 {
     const struct fmc_compact_refs *refs = ctx;
@@ -4989,10 +5057,14 @@ static bool fmc_brief_compact_history(const struct zcl_command_request *req,
     json_set_array(&history);
     if (!fmc_compact_collect_refs(fresh, c, &refs))
         fail = "history_ref_cap";
-    else if (refs.count)
-        fail = fmc_mail_drain_filtered(req, &history, &cursor, "", NULL, 0,
-                                       why, sizeof(why), true, NULL,
-                                       fmc_compact_keep_ref, &refs);
+    else if (refs.count) {
+        int projected=fmc_compact_projection(&refs,&history);
+        if (projected<0) fail="allocation_failed";
+        else if (!projected)
+            fail = fmc_mail_drain_filtered(req, &history, &cursor, "", NULL, 0,
+                                           why, sizeof(why), true, NULL,
+                                           fmc_compact_keep_ref, &refs);
+    }
     if (fail) {
         fmc_note_missing(missing, "dev.agent.mail", fail, 0);
         view->cursor_token[0] = 0;

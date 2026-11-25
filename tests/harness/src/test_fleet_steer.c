@@ -29,6 +29,15 @@
 #include "config/command_catalog.h"
 #include "controllers/rpc_client.h"
 #include "json/json.h"
+#include "command/native_devagent_mail_projection.h"
+#include <sqlite3.h>
+#if defined(ZCL_TESTING) && defined(__linux__)
+static bool fmx_projection_prepare(void)
+{
+    size_t streams; int64_t bytes;
+    return dvm_projection_rebuild_history(NULL,&streams,&bytes);
+}
+#endif
 #include "zutf8/zutf8.h"
 #include "kernel/command_registry.h"
 #include "platform/clock.h"
@@ -7179,6 +7188,24 @@ static bool fmx_disposition_projected(const char *grant, bool expected_verified)
     return ok;
 }
 
+#if defined(ZCL_TESTING) && defined(__linux__)
+static bool fmx_disposition_compact(const char *grant, bool expected_verified)
+{
+    struct fmx_call brief={0};
+    fmx_brief_since(&brief,grant,"0|");
+    (void)json_push_kv_bool(&brief.input,"changes_only",true);
+    (void)json_push_kv_int(&brief.input,"limit",8);
+    brief.request.budget_bytes=65536;
+    bool ok=fmx_run(&brief,zcl_native_handle_fleet_steer_brief) && fmx_ok(&brief);
+    const struct json_value *change=ok ? fmx_change_row(&brief,"bob","work-1") : NULL;
+    const struct json_value *reply=change ? json_get(change,"reply") : NULL;
+    const struct json_value *verified=reply ? json_get(reply,"disposition_verified") : NULL;
+    ok=reply && (expected_verified ? (verified && verified->type==JSON_BOOL && json_get_bool(verified)) :
+                                    (!verified || (verified->type==JSON_BOOL && !json_get_bool(verified))));
+    fmx_end(&brief); return ok;
+}
+#endif
+
 static int fmx_t_disposition_verified(void)
 {
     int failures = 0;
@@ -7244,12 +7271,27 @@ static int fmx_t_disposition_verified(void)
         ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "ref"));
         ASSERT_EQ(fmx_mail_count(), before + 2);
         ASSERT(fmx_disposition_projected(limited, true));
+#if defined(ZCL_TESTING) && defined(__linux__)
+        char inbox_path[1200];
+        ASSERT(snprintf(inbox_path,sizeof(inbox_path),"%s/z23/dev/mail/inbox.peer.jsonl",g_fmx_state)>0);
+        ASSERT_EQ(chmod(inbox_path,0600),0);
+        ASSERT(fmx_projection_prepare());
+        ASSERT(fmx_disposition_compact(limited,true));
+        (void)dvm_projection_test_warm_hits(true);
+        ASSERT(fmx_disposition_compact(limited,true));
+        ASSERT(dvm_projection_test_warm_hits(false)>0);
+#endif
         fmx_begin(&sent, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
         ASSERT(json_push_kv_str(&sent.input, "action", "revoke"));
         ASSERT(json_push_kv_str(&sent.input, "id", grant));
         ASSERT(fmx_run(&sent, zcl_native_handle_fleet_steer_grant) && fmx_ok(&sent));
         fmx_end(&sent);
         ASSERT(fmx_disposition_projected(limited, false));
+#if defined(ZCL_TESTING) && defined(__linux__)
+        (void)dvm_projection_test_warm_hits(true);
+        ASSERT(fmx_disposition_compact(limited,false));
+        ASSERT(dvm_projection_test_warm_hits(false)>0);
+#endif
         PASS();
     }
 _test_next:;
@@ -8341,6 +8383,28 @@ static int fmx_compact_empty_ref(void)
     fmx_restore(); return failures;
 }
 
+static int fmx_projection_ref_parity(void)
+{
+    int failures=0;
+#ifdef ZCL_TESTING
+    TEST("steer: finite projection refs match original reply semantics") {
+        static const struct { const char *directive,*candidate; bool expected; } cases[]={
+            {"alpha-beta","alpha-beta",true}, {"alpha-beta","alpha-result-beta",true},
+            {"alpha-beta","alpha-beta-result",true}, {"alpha-beta","alpha-resultbeta",false},
+            {"alpha-beta","alpha-result-beta-result",false}, {"","-result",true},
+            {"a--b","a-result--b",true}, {"a--b","a--result-b",true},
+            {"a-result","a-result-result",true}, {"x","y",false}};
+        for (size_t i=0;i<sizeof(cases)/sizeof(cases[0]);i++) {
+            bool original=false, expanded=false;
+            ASSERT(zcl_fleet_steer_test_projection_ref(cases[i].directive,cases[i].candidate,&original,&expanded));
+            ASSERT_EQ(original,cases[i].expected); ASSERT_EQ(expanded,original);
+        }
+        PASS();
+    } _test_next:;
+#endif
+    return failures;
+}
+
 static int fmx_compact_copy_failure(void)
 {
     int failures = 0;
@@ -8375,6 +8439,143 @@ static bool fmx_json_equal(const struct json_value *a, const struct json_value *
     if (!a || !b) return false;
     size_t x = json_write(a, left, sizeof(left)), y = json_write(b, right, sizeof(right));
     return x && x < sizeof(left) && x == y && y < sizeof(right) && !strcmp(left, right);
+}
+
+static int fmx_compact_projection_warm(void)
+{
+    int failures=0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    TEST("steer: warm mail projection matches the native forward result") {
+        ASSERT(fmx_forward_setup("projection_warm"));
+        fmx_seed_inbox("warm","2026-09-20T00:00:00Z",1,"sender","agent","directive","one","warm-ref");
+        fmx_seed_inbox("warm","2026-09-20T00:00:01Z",2,"agent","sender","result","done","warm-ref");
+        char path[1200];
+        ASSERT(snprintf(path,sizeof(path),"%s/z23/dev/mail/inbox.warm.jsonl",g_fmx_state)>0);
+        ASSERT_EQ(chmod(path,0600),0);
+        struct fmx_call full,first,warm;
+        (void)dvm_projection_test_warm_hits(true);
+        ASSERT(fmx_forward_page(&full,"0|",8,65536));
+        ASSERT(fmx_compact_page(&first,"0|",65536));
+        ASSERT_EQ(dvm_projection_test_warm_hits(false),0);
+        ASSERT(fmx_projection_prepare());
+        ASSERT(fmx_compact_page(&warm,"0|",65536));
+        ASSERT(dvm_projection_test_warm_hits(false)>0);
+        ASSERT(fmx_json_equal(fmx_get(&full,"changes"),fmx_get(&warm,"changes")));
+        ASSERT_STR_EQ(fmx_str(&full,"cursor_token"),fmx_str(&warm,"cursor_token"));
+        ASSERT(fmx_json_equal(fmx_get(&first,"changes"),fmx_get(&warm,"changes")));
+        struct fmx_call failed;
+        zcl_fleet_steer_test_set_before_history_copy(fmx_history_copy_fault);
+        bool copied=fmx_compact_page(&failed,"0|",65536);
+        bool hit=zcl_alloc_fault_armed_label()==NULL;
+        zcl_alloc_fault_clear(); zcl_fleet_steer_test_set_before_history_copy(NULL);
+        ASSERT(!copied && hit);
+        ASSERT(fmx_get(&failed,"cursor_token")==NULL || !fmx_str(&failed,"cursor_token")[0]);
+        fmx_end(&failed);
+        fmx_end(&full); fmx_end(&first); fmx_end(&warm); fmx_restore(); PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear(); zcl_fleet_steer_test_set_before_history_copy(NULL);
+    fmx_restore();
+#endif
+    return failures;
+}
+
+#if defined(ZCL_TESTING) && defined(__linux__)
+static const char *s_projection_corrupt_path;
+static const char *s_projection_lock_path;
+static bool s_projection_corrupt_ok;
+static bool s_projection_writer_ready;
+static void fmx_projection_corrupt_after_rebuild(void)
+{
+    int lockfd=open(s_projection_lock_path,O_RDONLY | O_CLOEXEC);
+    s_projection_writer_ready=lockfd>=0 && flock(lockfd,LOCK_EX | LOCK_NB)==0;
+    if (lockfd>=0) { (void)flock(lockfd,LOCK_UN); (void)close(lockfd); }
+    sqlite3 *db=NULL;
+    s_projection_corrupt_ok=sqlite3_open(s_projection_corrupt_path,&db)==SQLITE_OK &&
+        sqlite3_exec(db,"UPDATE mail_projection_nodes SET body=x'00'",NULL,NULL,NULL)==SQLITE_OK;
+    if (db && sqlite3_close(db)!=SQLITE_OK) s_projection_corrupt_ok=false;
+    dvm_projection_test_after_rebuild(NULL);
+}
+
+static bool fmx_projection_compare_current(bool expect_hit)
+{
+    struct fmx_call full,compact;
+    (void)dvm_projection_test_warm_hits(true);
+    bool a=fmx_forward_page(&full,"0|",8,65536);
+    bool b=fmx_compact_page(&compact,"0|",65536);
+    bool hit=dvm_projection_test_warm_hits(false)>0;
+    bool ok=a && b && hit==expect_hit &&
+        fmx_json_equal(fmx_get(&full,"changes"),fmx_get(&compact,"changes")) &&
+        !strcmp(fmx_str(&full,"cursor_token"),fmx_str(&compact,"cursor_token"));
+    fmx_end(&full); fmx_end(&compact); return ok;
+}
+
+static bool fmx_projection_rewrite(const char *path)
+{
+    char buf[8192]; FILE *f=fopen(path,"r+b");
+    if (!f) return false;
+    size_t n=fread(buf,1,sizeof(buf)-1,f); buf[n]=0;
+    char *p=strstr(buf,"\"body\":\"one\"");
+    bool ok=p && !ferror(f);
+    if (ok) { memcpy(p+8,"two",3); ok=fseeko(f,0,SEEK_SET)==0 && fwrite(buf,1,n,f)==n; }
+    if (fclose(f)!=0) ok=false;
+    return ok;
+}
+#endif
+
+static int fmx_compact_projection_mutation(void)
+{
+    int failures=0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    const clock_iface_t *saved=clock_default();
+    clock_iface_t fixed={fmx_activity_monotonic_ns,fmx_activity_wall_ms,(void *)saved};
+    TEST("steer: projection invalidates changed sources and falls back on corruption") {
+        ASSERT(fmx_forward_setup("projection_mutation")); clock_set_default(&fixed);
+        fmx_seed_inbox("warm","2026-09-20T00:00:00Z",1,"sender","agent","directive","one","warm-ref");
+        fmx_seed_inbox("warm","2026-09-20T00:00:01Z",2,"agent","sender","result","done","warm-ref");
+        char path[1200],other[1200],index[1200];
+        ASSERT(snprintf(path,sizeof(path),"%s/z23/dev/mail/inbox.warm.jsonl",g_fmx_state)>0);
+        ASSERT(snprintf(other,sizeof(other),"%s/z23/dev/mail/inbox.other.jsonl",g_fmx_state)>0);
+        ASSERT(snprintf(index,sizeof(index),"%s/z23/dev/index/index.db",g_fmx_state)>0);
+        ASSERT_EQ(chmod(path,0600),0);
+        ASSERT(fmx_projection_compare_current(false)); ASSERT(fmx_projection_prepare());
+        ASSERT(fmx_projection_compare_current(true));
+        (void)dvm_projection_test_tail_updates(true);
+        fmx_seed_inbox("warm","2026-09-20T00:00:02Z",3,"third","agent","note","tail","warm-ref");
+        ASSERT(fmx_projection_compare_current(false)); ASSERT(dvm_projection_test_tail_updates(false)>0);
+        ASSERT(fmx_projection_compare_current(true));
+        (void)dvm_projection_test_tail_updates(true);
+        ASSERT(fmx_projection_rewrite(path)); ASSERT(fmx_projection_compare_current(false));
+        ASSERT_EQ(dvm_projection_test_tail_updates(false),0);
+        ASSERT(fmx_projection_prepare()); ASSERT(fmx_projection_compare_current(true));
+        long long end=fmx_forward_first_end("warm"); ASSERT(end>0);
+        ASSERT_EQ(truncate(path,(off_t)end),0); ASSERT(fmx_projection_compare_current(false));
+        ASSERT(fmx_projection_prepare()); ASSERT(fmx_projection_compare_current(true));
+        ASSERT_EQ(rename(path,other),0); ASSERT(fmx_projection_compare_current(false));
+        ASSERT(fmx_projection_prepare()); ASSERT(fmx_projection_compare_current(true));
+        sqlite3 *db=NULL; ASSERT_EQ(sqlite3_open(index,&db),SQLITE_OK);
+        ASSERT_EQ(sqlite3_exec(db,"UPDATE mail_projection_nodes SET body=x'00'",NULL,NULL,NULL),SQLITE_OK);
+        ASSERT_EQ(sqlite3_close(db),SQLITE_OK);
+        ASSERT(fmx_projection_compare_current(false));
+        ASSERT(fmx_projection_compare_current(false)); /* Reads do not rebuild corruption. */
+        ASSERT(fmx_projection_prepare()); ASSERT(fmx_projection_compare_current(true));
+        /* Force a bounded append under shared locks, then corrupt the cache. */
+        fmx_seed_inbox("warm","2026-09-20T00:00:03Z",4,"third","agent","note","new","warm-ref");
+        ASSERT_EQ(chmod(path,0600),0);
+        ASSERT(fmx_projection_prepare());
+        fmx_seed_inbox("warm","2026-09-20T00:00:04Z",5,"third","agent","note","tail","warm-ref");
+        s_projection_corrupt_path=index; s_projection_corrupt_ok=false;
+        s_projection_lock_path=other; s_projection_writer_ready=false;
+        dvm_projection_test_after_rebuild(fmx_projection_corrupt_after_rebuild);
+        ASSERT(fmx_projection_compare_current(false)); ASSERT(s_projection_corrupt_ok);
+        ASSERT(s_projection_writer_ready);
+        int lockfd=open(other,O_RDONLY | O_CLOEXEC);
+        ASSERT(lockfd>=0); ASSERT_EQ(flock(lockfd,LOCK_EX | LOCK_NB),0);
+        ASSERT_EQ(flock(lockfd,LOCK_UN),0); ASSERT_EQ(close(lockfd),0);
+        fmx_restore(); PASS();
+    } _test_next:;
+    dvm_projection_test_after_rebuild(NULL); clock_set_default(saved); fmx_restore();
+#endif
+    return failures;
 }
 
 static int fmx_compact_equivalence(void)
@@ -10080,6 +10281,9 @@ int test_fleet_steer(void)
     failures += fmx_compact_variant_budget();
     failures += fmx_compact_variant_conflict();
     failures += fmx_compact_copy_failure();
+    failures += fmx_projection_ref_parity();
+    failures += fmx_compact_projection_warm();
+    failures += fmx_compact_projection_mutation();
     failures += fmx_compact_empty_ref();
     failures += fmx_compact_budget();
     failures += fmx_compact_stale();

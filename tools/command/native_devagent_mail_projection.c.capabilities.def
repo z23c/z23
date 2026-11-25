@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_devagent_mail_projection.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "rebuilds and validates a disposable compact-mail locator projection; configures a zero-wait SQLite busy timeout")

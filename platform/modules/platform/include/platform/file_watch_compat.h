@@ -4,11 +4,12 @@
 #ifndef ZCLASSIC_PLATFORM_FILE_WATCH_COMPAT_H
 #define ZCLASSIC_PLATFORM_FILE_WATCH_COMPAT_H
 
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
 #if defined(__linux__)
 #include <sys/inotify.h>
 #else
-#include <errno.h>
-#include <stdint.h>
 
 struct inotify_event {
     int wd;
@@ -48,5 +49,22 @@ static inline int inotify_add_watch(int fd, const char *path, uint32_t mask)
     return -1;
 }
 #endif
+
+/* The caller must keep target_fd open through this call.  The watch is
+ * attached to that held inode even if its original name changes. */
+static inline int platform_file_watch_fd(int watch_fd, int target_fd, uint32_t mask)
+{
+#if defined(__linux__)
+    if (watch_fd < 0 || target_fd < 0) { errno = EBADF; return -1; }
+    char path[64];
+    int n = snprintf(path, sizeof(path), "/proc/self/fd/%d", target_fd);
+    if (n <= 0 || (size_t)n >= sizeof(path)) { errno = EOVERFLOW; return -1; }
+    return inotify_add_watch(watch_fd, path, mask);
+#else
+    (void)watch_fd; (void)target_fd; (void)mask;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
 
 #endif

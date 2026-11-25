@@ -10,6 +10,7 @@
 #include "command/native_dev_index_catalog.h"
 #include "command/native_dev_index_ingest.h"
 #include "command/native_dev_index_search.h"
+#include "command/native_devagent_mail_projection.h"
 
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -65,9 +66,64 @@ static int dvi_select_sources(const char *only_id,
     return (int)written;
 }
 
+static bool dvi_mail_history_options(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply,const char **root)
+{
+    const char *keys[]={"source","index","state-root"};
+    for (size_t i=0;i<3;i++) {
+        const struct json_value *v=json_get(request->input,keys[i]);
+        if (v && v->type!=JSON_STR) {
+            zcl_command_reply_fail(reply,ZCL_COMMAND_STATUS_FAILED,ZCL_COMMAND_EXIT_INVALID,
+                "BAD_INPUT","dev.index.ingest",false,false,"mail history options must be strings",keys[i]);
+            return false;
+        }
+        const char *value=json_get_str(v);
+        if (i<2 && value && value[0]) {
+            zcl_command_reply_fail(reply,ZCL_COMMAND_STATUS_FAILED,ZCL_COMMAND_EXIT_INVALID,
+                "BAD_INPUT","dev.index.ingest",false,false,
+                "mail-history cannot be combined with source or index",keys[i]);
+            return false;
+        }
+    }
+    *root=json_get_str(json_get(request->input,"state-root"));
+    if (*root && !(*root)[0]) *root=NULL;
+    return true;
+}
+
+/* True means this optional maintenance mode handled the request or refused it. */
+static bool dvi_mail_history(const struct zcl_command_request *request,
+                              struct zcl_command_reply *reply)
+{
+    const struct json_value *mail=json_get(request->input,"mail-history");
+    if (!mail) return false;
+    if (mail->type!=JSON_BOOL) {
+        zcl_command_reply_fail(reply,ZCL_COMMAND_STATUS_FAILED,ZCL_COMMAND_EXIT_INVALID,
+            "BAD_INPUT","dev.index.ingest",false,false,"mail-history must be a boolean","mail-history");
+        return true;
+    }
+    if (!json_get_bool(mail)) return false;
+    const char *root=NULL;
+    if (!dvi_mail_history_options(request,reply,&root)) return true;
+    size_t streams=0; int64_t bytes=0;
+    if (!dvm_projection_rebuild_history(root,&streams,&bytes)) {
+        zcl_command_reply_fail(reply,ZCL_COMMAND_STATUS_FAILED,ZCL_COMMAND_EXIT_INTERNAL,
+            "MAIL_HISTORY_UNAVAILABLE","dev.index.ingest",true,true,
+            "mail history projection could not be completely rebuilt","mail-history");
+        return true;
+    }
+    if (streams>INT64_MAX || !json_push_kv_str(&reply->data,"projection","mail-history") ||
+        !json_push_kv_int(&reply->data,"streams",(int64_t)streams) ||
+        !json_push_kv_int(&reply->data,"bytes",bytes))
+        zcl_command_reply_fail(reply,ZCL_COMMAND_STATUS_FAILED,ZCL_COMMAND_EXIT_INTERNAL,
+            "INDEX_RESULT_ERROR","dev.index.ingest",false,true,
+            "mail history projection was rebuilt but its result could not be encoded","mail-history");
+    return true;
+}
+
 void zcl_native_handle_dev_index_ingest(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
+    if (dvi_mail_history(request,reply)) return;
     const char *only = json_get_str(json_get(request->input, "source"));
     const struct dev_index_source *sources[16];
     int n = dvi_select_sources(only, sources, 16);

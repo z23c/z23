@@ -475,7 +475,9 @@ ZCL_CAPABILITY_SYMBOL("fseeko", CAP_FS_READ,
     "Positions an existing stream; classified consistently with fseek.")
 ZCL_CAPABILITY_SYMBOL("fstat", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("fstatat", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("fstatfs", CAP_FS_READ, "reads filesystem metadata through a descriptor")
 ZCL_CAPABILITY_SYMBOL("ftell", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("ftello", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("getcwd", CAP_FS_READ,
     "Discloses where in the operator filesystem this process is "
     "standing.")

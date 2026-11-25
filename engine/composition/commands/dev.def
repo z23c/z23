@@ -1779,10 +1779,12 @@ ZCL_COMMAND_DEV_COMMAND(
     "not already-loaded state, so it is budgeted slower than a read leaf "
     "(measured ~3.1s over ~48k real rows). --index=<path> and "
     "--state-root=<dir> override the database location and the sources "
-    "root independently; neither is an environment variable.",
+    "root independently; neither is an environment variable. "
+    "--mail-history rebuilds the verified mail history projection for "
+    "the state root; it cannot be combined with --source or --index.",
     65536, "index,ingest,sources,board,experiments,landing,logs,fts5",
     "zcl.dev_index_ingest_input.v1", "zcl.dev_index_ingest.v1",
-    "source,index,state-root", "",
+    "source,index,state-root,mail-history", "",
     "z23 dev index ingest",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
