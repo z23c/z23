@@ -31,6 +31,7 @@ struct zw_mock {
     char stop_method[48];
     char seen[SEEN_CAP];
     pthread_mutex_t mu;
+    pthread_cond_t hold_cv;
 };
 
 static bool b64(const unsigned char *in, size_t n, char *out)
@@ -151,10 +152,24 @@ static const struct script_row *take_row(struct zw_mock *m, const char *method)
     return NULL;
 }
 
-/* Status 999: accept and never reply; hold delay_ms, then hang up. */
+/* Status 999: accept and never reply, hold delay_ms, then hang up.
+ * One wait, not a 10 ms slice: those slices run long on macOS and a 3 s
+ * hold then outlasts the next poll. Stop wakes the wait. */
 static void hold_silent(struct zw_mock *m, int delay_ms)
 {
-    for (int k = 0; k < delay_ms / 10 && !m->stop; k++) sleep_ms(10);
+    struct timespec ts;
+    if (delay_ms <= 0) return;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return;
+    ts.tv_sec += delay_ms / 1000;
+    ts.tv_nsec += (long)(delay_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&m->mu);
+    while (!m->stop && pthread_cond_timedwait(&m->hold_cv, &m->mu, &ts) == 0) {
+    }
+    pthread_mutex_unlock(&m->mu);
 }
 
 static void reply_error_text(platform_socket_t c, const char *text)
@@ -282,6 +297,7 @@ struct zw_mock *zw_mock_start(const char *scenario_dir, const char *datadir, uin
     snprintf(m->dir, sizeof(m->dir), "%s", scenario_dir);
     snprintf(m->datadir, sizeof(m->datadir), "%s", datadir);
     pthread_mutex_init(&m->mu, NULL);
+    pthread_cond_init(&m->hold_cv, NULL);
     load_script(m);
     m->listener = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     struct sockaddr_in a;
@@ -292,13 +308,20 @@ struct zw_mock *zw_mock_start(const char *scenario_dir, const char *datadir, uin
     if (m->listener == PLATFORM_SOCKET_INVALID ||
         platform_socket_bind(m->listener, (const struct sockaddr *)&a, sizeof(a)) != 0 ||
         platform_socket_listen(m->listener, 8) != 0) {
+        pthread_cond_destroy(&m->hold_cv);
+        pthread_mutex_destroy(&m->mu);
         free(m);
         return NULL;
     }
     struct sockaddr_in got;
     memset(&got, 0, sizeof(got));
     socklen_t gl = sizeof(got);
-    if (getsockname(m->listener, (struct sockaddr *)&got, &gl) != 0) { free(m); return NULL; }
+    if (getsockname(m->listener, (struct sockaddr *)&got, &gl) != 0) {
+        pthread_cond_destroy(&m->hold_cv);
+        pthread_mutex_destroy(&m->mu);
+        free(m);
+        return NULL;
+    }
     *port_out = ntohs(got.sin_port);
     pthread_create(&m->thread, NULL, accept_main, m);
     return m;
@@ -307,9 +330,13 @@ struct zw_mock *zw_mock_start(const char *scenario_dir, const char *datadir, uin
 void zw_mock_stop(struct zw_mock *m)
 {
     if (!m) return;
+    pthread_mutex_lock(&m->mu);
     m->stop = true;
+    pthread_cond_signal(&m->hold_cv);
+    pthread_mutex_unlock(&m->mu);
     pthread_join(m->thread, NULL);
     if (m->listener != PLATFORM_SOCKET_INVALID) platform_socket_close(m->listener);
+    pthread_cond_destroy(&m->hold_cv);
     pthread_mutex_destroy(&m->mu);
     free(m);
 }

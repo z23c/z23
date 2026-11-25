@@ -494,9 +494,31 @@ static void test_rpc_stalled(void)
           strstr(t, "isn't answering") && strstr(t, "127.0.0.1:"));
     n.rpc->deadline_ms = 5000;
     memset(&res, 0, sizeof(res));
-    CHECK("[29] the next poll succeeds once the node answers", zw_query_run(n.rpc, ZW_Q_CHAIN, &res) == ZW_OK);
+    t0 = gui_now_ns();
+    e = zw_query_run(n.rpc, ZW_Q_CHAIN, &res);
+    ms = (gui_now_ns() - t0) / 1000000u;
+    printf("    next poll after %llu ms\n", (unsigned long long)ms);
+    CHECK("[29] the next poll succeeds once the node answers", e == ZW_OK);
     zw_model_free(&m);
     node_stop(&n);
+}
+
+/* Stop must return while the silent hold is still in progress. */
+static void test_silent_hold_stops(void)
+{
+    struct node n;
+    struct zw_result res;
+    CHECK("silent hold node starts", node_start(&n, "stalled_recv", "stall_stop"));
+    if (!n.rpc) return;
+    n.rpc->deadline_ms = 400;
+    memset(&res, 0, sizeof(res));
+    enum zw_err e = zw_query_run(n.rpc, ZW_Q_CHAIN, &res);
+    CHECK("a silent hold still times out", e == ZW_ERR_TIMEOUT);
+    uint64_t t0 = gui_now_ns();
+    node_stop(&n);
+    uint64_t ms = (gui_now_ns() - t0) / 1000000u;
+    printf("    silent hold stops after %llu ms\n", (unsigned long long)ms);
+    CHECK("stopping during a silent hold returns promptly", ms < 500);
 }
 
 static void test_rpc_auto_prefers_z23(void)
@@ -699,6 +721,7 @@ static void test_rpc(void)
     test_rpc_balances_sum();
     test_rpc_balances_partial();
     test_rpc_stalled();
+    test_silent_hold_stops();
     test_rpc_auto_prefers_z23();
     test_rpc_auto_fallback_dead_port();
     test_rpc_balance_fallback();
