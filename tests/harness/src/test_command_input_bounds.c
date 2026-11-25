@@ -903,11 +903,38 @@ static int t_host_gc_epoch_keep(void)
 {
     int failures = 0;
     TEST("host GC epoch retention accepts only bounded integers") {
+        const struct zcl_command_spec *gc = zcl_command_registry_find(zcl_command_catalog(), "ops.host.gc", NULL);
+        struct zcl_command_input_descriptor descriptor;
+        ASSERT(gc && zcl_command_registry_input_descriptor(gc, "epoch", &descriptor) && descriptor.type == JSON_STR);
         ASSERT(!cib_accepts_int("ops.host.gc", "epoch_keep", 0));
         ASSERT(cib_accepts_int("ops.host.gc", "epoch_keep", 1));
         ASSERT(cib_accepts_int("ops.host.gc", "epoch_keep", 32));
         ASSERT(!cib_accepts_int("ops.host.gc", "epoch_keep", 33));
         ASSERT(!cib_accepts("ops.host.gc", "epoch_keep", 1, NULL, 0));
+        ASSERT(cib_accepts("ops.host.gc", "epoch", 73, NULL, 0));
+        ASSERT(!cib_accepts_int("ops.host.gc", "epoch", 1));
+        ASSERT(cib_accepts_int("zcode.commons.shadow.plan", "epoch", 1));
+        ASSERT(!cib_accepts("zcode.commons.shadow.plan", "epoch", 1, NULL, 0));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_host_gc_epoch_dispatch(void)
+{
+    int failures = 0;
+    TEST("host GC selector reaches the handler through registry dispatch") {
+        const struct zcl_command_registry *reg = zcl_command_catalog();
+        const struct zcl_command_spec *spec = zcl_command_registry_find(reg, "ops.host.gc", NULL);
+        struct zcl_command_context ctx = {.registry = reg, .granted_capabilities = ~(uint64_t)0,
+                                          .authority_ceiling = ZCL_COMMAND_AUTH_OWNER};
+        struct json_value input; json_init(&input); json_set_object(&input);
+        ASSERT(spec && json_push_kv_str(&input, "epoch", "node-obj:7020ba14db817abf182f3746fa10c293d5328645906df7d505c8a0166d57a3f9"));
+        char out[65536]; enum zcl_command_exit code = ZCL_COMMAND_EXIT_OK;
+        size_t n = zcl_command_registry_execute_json(reg, spec, &ctx, &input, false,
+            spec->path, "normal", 0, 0, NULL, out, sizeof(out), &code);
+        json_free(&input);
+        ASSERT(n > 0 && strstr(out, "host_gc.epochs_refused") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -2300,6 +2327,7 @@ int test_command_input_bounds(void)
     failures += t_package_fetch_maximum_bytes();
     failures += t_fleet_usage_days();
     failures += t_host_gc_epoch_keep();
+    failures += t_host_gc_epoch_dispatch();
     failures += t_moved_dual_shape_since();
     failures += t_moved_ttl_bounds();
     failures += t_regtest_mine_blocks();

@@ -1359,12 +1359,11 @@ static bool cr_leaf_special_descriptor(const struct zcl_command_spec *spec,
                                        const char *key,
                                        struct zcl_command_input_descriptor *out)
 {
-    if (!strcmp(spec->path, "app.library") && !strcmp(key, "datadir")) {
+    if ((!strcmp(spec->path, "app.library") && !strcmp(key, "datadir")) ||
+        (!strcmp(spec->path, "ops.host.gc") && !strcmp(key, "epoch"))) {
         out->type = JSON_STR; out->max_bytes = zcl_command_registry_input_str_max(key); return true;
     }
-    /* app.discover's owner hand-off flag: bare `--yes` types as a bool so the
-     * documented `app discover <link> --offer=<id> --yes` shape reaches the
-     * leaf. Scoped to this path: no other leaf declares a `yes` input key. */
+    /* app.discover's owner hand-off flag accepts bare --yes on this leaf. */
     if (!strcmp(spec->path, "app.discover") && !strcmp(key, "yes")) {
         out->type = JSON_BOOL; return true;
     }
