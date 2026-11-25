@@ -248,14 +248,67 @@ void zcl_native_handle_fleet_ledger_add(
 
 /* ── fleet ledger status ─────────────────────────────────────────────── */
 
+static bool fleet_latest_row(struct json_value *rows, const struct zcl_fleet_vital_latest *v)
+{
+    if (v->seq > INT64_MAX) return false;
+    char box[65]; zcl_hex_encode(v->box_id,32,box);
+    struct json_value row, absent;
+    json_init(&row); json_set_object(&row); json_init(&absent); json_set_null(&absent);
+    bool ok=json_push_kv_str(&row,"box",box) &&
+        json_push_kv_str(&row,"metric",zcl_fleet_vital_id(v->subject)) &&
+        json_push_kv_int(&row,"seq",(int64_t)v->seq) &&
+        json_push_kv_int(&row,"timestamp",v->ts_unix) &&
+        json_push_kv_bool(&row,"present",v->present) &&
+        (v->present ? json_push_kv_int(&row,"value",v->value) : json_push_kv(&row,"value",&absent)) &&
+        json_push_kv_str(&row,"unit",zcl_fleet_vital_unit(v->subject)) &&
+        json_push_kv_int(&row,"cadence_s",zcl_fleet_vital_cadence_s(v->subject)) &&
+        json_push_back(rows,&row);
+    json_free(&absent); json_free(&row); return ok;
+}
+
+static bool fleet_latest_emit(struct json_value *data, const struct zcl_fleet_ledger *ledger,
+                              uint64_t overflow)
+{
+    struct zcl_fleet_vital_latest latest[ZCL_FLEET_BATCH_MAX]; size_t count=0;
+    enum zcl_fleet_status status=zcl_fleet_ledger_vitals_latest(ledger,NULL,-1,latest,ZCL_FLEET_BATCH_MAX,&count);
+    if (status!=ZCL_FLEET_OK && status!=ZCL_FLEET_FULL) return false;
+    struct json_value rows; json_init(&rows); json_set_array(&rows);
+    struct json_value unknown; json_init(&unknown); json_set_null(&unknown);
+    bool ok=true;
+    for (size_t i=0;ok && i<count;i++) ok=fleet_latest_row(&rows,&latest[i]);
+    ok=ok && json_push_kv(data,"vitals",&rows) &&
+        json_push_kv_int(data,"vitals_returned",(int64_t)count) &&
+        (status==ZCL_FLEET_FULL ? json_push_kv(data,"vitals_total",&unknown) :
+                                  json_push_kv_int(data,"vitals_total",(int64_t)count)) &&
+        json_push_kv_bool(data,"vitals_truncated",status==ZCL_FLEET_FULL) &&
+        json_push_kv_bool(data,"vitals_complete",status==ZCL_FLEET_OK && overflow==0) &&
+        json_push_kv_str(data,"vitals_source","verified_ledger_latest") &&
+        json_push_kv_str(data,"vitals_verification","signature_chain_only") &&
+        json_push_kv_str(data,"vitals_delegation","not_evaluated");
+    json_free(&unknown); json_free(&rows); return ok;
+}
+
+static bool fleet_status_vitals_input(const struct zcl_command_request *request,
+                                      struct zcl_command_reply *reply, bool *enabled)
+{
+    const struct json_value *v=request && request->input ? json_get(request->input,"vitals") : NULL;
+    if (v && v->type!=JSON_BOOL) {
+        fleet_refuse(reply,"BAD_INPUT","vitals must be a boolean","vitals",false);
+        return false;
+    }
+    *enabled=v && json_get_bool(v);
+    return true;
+}
+
 void zcl_native_handle_fleet_ledger_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    (void)request;
     if (!reply)
         return;
     zcl_command_reply_init(reply, "zcl.fleet_ledger_status.v1");
+    bool vitals=false;
+    if (!fleet_status_vitals_input(request,reply,&vitals)) return;
     char dir[512];
     if (!fleet_dir(dir, sizeof dir)) {
         fleet_refuse(reply, "DATADIR_UNAVAILABLE",
@@ -304,6 +357,12 @@ void zcl_native_handle_fleet_ledger_status(
             (void)json_push_kv_int(&row, "age_s", 0);
         (void)json_push_back(&rows, &row);
         json_free(&row);
+    }
+    if (vitals && !fleet_latest_emit(&reply->data,ledger,overflow)) {
+        json_free(&rows); zcl_fleet_ledger_close(ledger);
+        json_free(&reply->data); json_set_object(&reply->data);
+        fleet_refuse(reply,"VITALS_UNAVAILABLE","latest vitals could not be rendered completely","vitals",false);
+        return;
     }
     zcl_fleet_ledger_close(ledger);
 

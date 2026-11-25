@@ -1021,6 +1021,89 @@ _test_next:
     return failures;
 }
 
+static int fl_status_latest_full_case(void)
+{
+    int failures=0; struct fl_box target={0},a={0},b={0};
+    TEST("fleet ledger status reports capped latest vitals as incomplete") {
+        char dir[512]; test_make_tmpdir(dir,sizeof(dir),"fleet_ledger","status_full");
+        ASSERT(fl_box_open(&target,dir,"fleet_ledger",0x64));
+        ASSERT(fl_box_open(&a,dir,"peer_a",0x65)); ASSERT(fl_box_open(&b,dir,"peer_b",0x66));
+        ASSERT(zcl_fleet_vital_count()>=33);
+        for (size_t i=0;i<33;i++) {
+            const char *id=zcl_fleet_vital_id((uint16_t)i); ASSERT(id!=NULL);
+            ASSERT_EQ(fl_add_vital(&a,id,(int64_t)i),ZCL_FLEET_OK);
+            ASSERT_EQ(fl_add_vital(&b,id,(int64_t)i),ZCL_FLEET_OK);
+        }
+        uint8_t wire[32768]; size_t len=fl_rows_of(&a,wire,sizeof(wire)),accepted=0;
+        ASSERT(len>0); ASSERT_EQ(zcl_fleet_ledger_replicate(target.ledger,a.box_id,a.signer,wire,len,&accepted),ZCL_FLEET_OK);
+        ASSERT_EQ(accepted,33);
+        len=fl_rows_of(&b,wire,sizeof(wire)); ASSERT(len>0);
+        ASSERT_EQ(zcl_fleet_ledger_replicate(target.ledger,b.box_id,b.signer,wire,len,&accepted),ZCL_FLEET_OK);
+        ASSERT_EQ(accepted,33);
+        fl_box_close(&target); fl_box_close(&a); fl_box_close(&b); zcl_native_bridge_bind_rpc(dir,0);
+        struct json_value input; json_init(&input); json_set_object(&input); ASSERT(json_push_kv_bool(&input,"vitals",true));
+        struct zcl_command_request request={.input=&input}; struct zcl_command_reply reply;
+        zcl_native_handle_fleet_ledger_status(&request,&reply); ASSERT_EQ(reply.status,ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_size(json_get(&reply.data,"vitals")),64);
+        ASSERT_EQ(json_get_int(json_get(&reply.data,"vitals_returned")),64);
+        ASSERT(json_get_bool(json_get(&reply.data,"vitals_truncated")));
+        ASSERT(!json_get_bool(json_get(&reply.data,"vitals_complete")));
+        ASSERT(json_get(&reply.data,"vitals_total") && json_get(&reply.data,"vitals_total")->type==JSON_NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data,"vitals_source")),"verified_ledger_latest");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data,"vitals_verification")),"signature_chain_only");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data,"vitals_delegation")),"not_evaluated");
+        zcl_command_reply_free(&reply); json_free(&input); zcl_native_bridge_bind_rpc("",0);
+        test_rm_rf_recursive(dir); PASS();
+    } _test_next:;
+    fl_box_close(&target); fl_box_close(&a); fl_box_close(&b); zcl_native_bridge_bind_rpc("",0);
+    return failures;
+}
+
+static int fl_status_latest_case(const char *root)
+{
+    int failures=0; struct fl_box target={0},a={0},b={0};
+    TEST("fleet ledger status optionally reports verified latest vitals") {
+        char dir[512]; test_make_tmpdir(dir,sizeof(dir),"fleet_ledger","status_latest");
+        ASSERT(fl_box_open(&target,dir,"fleet_ledger",0x61));
+        ASSERT(fl_box_open(&a,dir,"peer_a",0x62)); ASSERT(fl_box_open(&b,dir,"peer_b",0x63));
+        uint16_t load=0; ASSERT(zcl_fleet_subject_from_name(ZCL_FLEET_KIND_VITALS,"box.load1",&load));
+        ASSERT_EQ(fl_add_vital(&a,"box.load1",9),ZCL_FLEET_OK);
+        ASSERT_EQ(zcl_fleet_ledger_append(a.ledger,ZCL_FLEET_KIND_VITALS,load,NULL,0,NULL,NULL,a.seed,NULL),ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_vital(&b,"box.load1",7),ZCL_FLEET_OK);
+        uint8_t wire[8192]; size_t len=fl_rows_of(&a,wire,sizeof(wire)),accepted=0;
+        ASSERT(len>0); ASSERT_EQ(zcl_fleet_ledger_replicate(target.ledger,a.box_id,a.signer,wire,len,&accepted),ZCL_FLEET_OK);
+        len=fl_rows_of(&b,wire,sizeof(wire)); ASSERT(len>0);
+        ASSERT_EQ(zcl_fleet_ledger_replicate(target.ledger,b.box_id,b.signer,wire,len,&accepted),ZCL_FLEET_OK);
+        fl_box_close(&target); fl_box_close(&a); fl_box_close(&b);
+        zcl_native_bridge_bind_rpc(dir,0);
+        struct zcl_command_request request={0}; struct zcl_command_reply reply;
+        struct json_value input; json_init(&input); json_set_object(&input); request.input=&input;
+        zcl_native_handle_fleet_ledger_status(&request,&reply);
+        ASSERT_EQ(reply.status,ZCL_COMMAND_STATUS_PASSED); ASSERT(json_get(&reply.data,"vitals")==NULL);
+        zcl_command_reply_free(&reply);
+        ASSERT(json_push_kv_bool(&input,"vitals",true));
+        zcl_native_handle_fleet_ledger_status(&request,&reply); ASSERT_EQ(reply.status,ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *rows=json_get(&reply.data,"vitals"); ASSERT_EQ(json_size(rows),2);
+        ASSERT_EQ(json_get_int(json_get(&reply.data,"vitals_returned")),2);
+        ASSERT(json_get_bool(json_get(&reply.data,"vitals_complete")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data,"vitals_source")),"verified_ledger_latest");
+        unsigned absent=0,present=0;
+        for (size_t i=0;i<json_size(rows);i++) {
+            const struct json_value *r=json_at(rows,i);
+            ASSERT_STR_EQ(json_get_str(json_get(r,"metric")),"box.load1");
+            if (json_get_bool(json_get(r,"present"))) { ASSERT_EQ(json_get_int(json_get(r,"value")),7); present++; }
+            else { ASSERT(json_get(r,"value")->type==JSON_NULL); ASSERT_EQ(json_get_int(json_get(r,"seq")),2); absent++; }
+        }
+        ASSERT_EQ(absent,1); ASSERT_EQ(present,1); zcl_command_reply_free(&reply);
+        json_free(&input); json_init(&input); json_set_object(&input); ASSERT(json_push_kv_str(&input,"vitals","true"));
+        zcl_native_handle_fleet_ledger_status(&request,&reply); ASSERT_STR_EQ(reply.error.code,"BAD_INPUT");
+        zcl_command_reply_free(&reply); json_free(&input); zcl_native_bridge_bind_rpc("",0);
+        test_rm_rf_recursive(dir); PASS();
+    } _test_next:;
+    fl_box_close(&target); fl_box_close(&a); fl_box_close(&b); zcl_native_bridge_bind_rpc("",0); (void)root;
+    return failures;
+}
+
 static int fl_vitals_sample_cases(char sample_dd[], uint8_t sample_box[],
                                   uint8_t sample_signer[])
 {
@@ -1622,6 +1705,8 @@ int test_fleet_ledger(void)
     }
 
     failures += fl_latest_cases(root);
+    failures += fl_status_latest_case(root);
+    failures += fl_status_latest_full_case();
     failures += fl_history_cases(root);
     failures += fl_history_late_failure(root);
 

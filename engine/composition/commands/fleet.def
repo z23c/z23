@@ -50,9 +50,12 @@ ZCL_COMMAND_READY_READ(
     "had to fold any row out of its per-day window, how many peers the "
     "replication lane refused because their delegation was no longer "
     "current, and how many arriving batches found no free commit slot. It "
-    "contacts no peer and prints no row contents.", 8192,
+    "contacts no peer. Optional vitals=true returns at most 64 latest recorded "
+    "vital values with source and completeness for held chains, not admitted-roster "
+    "coverage; signature-chain verification "
+    "does not establish delegation or current pairing.", 32768,
     "fleet,ledger,status,replica,freshness,boxes",
-    "zcl.command.empty_input.v1", "zcl.fleet_ledger_status.v1", "", "",
+    "zcl.fleet_ledger_status.input.v1", "zcl.fleet_ledger_status.v1", "vitals", "",
     "z23 fleet ledger status",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

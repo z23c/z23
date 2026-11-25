@@ -102,7 +102,7 @@ static bool cr_bool_key(const char *key)
         "dry_run",           "require_existing_watcher", "allow_external",
         "runner_ok_only",    "dedupe",            "route_only",
         "route-only",        "explain",
-        "shielded_only", "observations_only",
+        "shielded_only", "observations_only", "vitals",
         "birthday_at_local_tip", "prepare",
     };
     return command_registry_key_in_set(key, keys, sizeof(keys) / sizeof(keys[0])) ||
