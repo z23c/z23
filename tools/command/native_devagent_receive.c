@@ -3505,6 +3505,7 @@ static void rcv_status(const char *receiver, const char *workspace,
     (void)json_push_kv_str(&reply->data, "scope", RCV_SCOPE);
     rcv_push_stats(reply, &st);
     rcv_push_intake(reply, &p);
+    zcl_devagent_boardmail_observe_export(p.dir, p.maildir, &reply->data);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }

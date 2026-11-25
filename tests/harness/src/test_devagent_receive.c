@@ -2352,6 +2352,56 @@ static int test_receive_install_failure(bool short_close)
     }
     return failures;
 }
+
+static int test_receive_export_observation(void)
+{
+    int failures = 0;
+    TEST("status exposes the first row after the export cursor without writes")
+    {
+        static const char first[] = "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"a\",\"to\":\"r2\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"first\"}\n";
+        static const char second[] = "{\"seq\":2,\"ts\":\"2020-01-02T00:00:00Z\",\"from\":\"a\",\"to\":\"mac\",\"kind\":\"result\",\"body\":\"y\",\"ref\":\"second\"}\n";
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        char rows[sizeof(first) + sizeof(second)], cursor[128], dir[1400];
+        static const char *parents[] = {"", "/z23", "/z23/dev", "/z23/dev/mail", "/z23/dev/receive"};
+        rtx_isolate("export-observation");
+        for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+            (void)snprintf(dir, sizeof(dir), "%s%s", g_rtx_state, parents[i]);
+            ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        }
+        (void)snprintf(rows, sizeof(rows), "%s%s", first, second);
+        ASSERT(rtx_write("mail/outbox.jsonl", rows));
+        for (int step = 0; step < 3; ++step) {
+            long long offset = step == 0 ? 0 : step == 1 ? (long long)(sizeof(first) - 1) : (long long)strlen(rows);
+            (void)snprintf(cursor, sizeof(cursor), "export_offset=%lld\nimport_epoch=\nimport_after=0\n", offset);
+            ASSERT(rtx_write("receive/boardmail.state", cursor));
+            rtx_frozen_take(&before, "export-observation");
+            rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+            (void)json_push_kv_str(&c.input, "action", "status");
+            (void)json_push_kv_str(&c.input, "receiver", "box-a");
+            zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+            ASSERT(rtx_ok(&c));
+            const struct json_value *backlog = json_get(&c.reply.data, "export_backlog");
+            ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), step == 2 ? "clear" : "pending");
+            ASSERT_EQ(json_get_int(json_get(backlog, "pending_bytes")), (long long)strlen(rows) - offset);
+            ASSERT_STR_EQ(json_get_str(json_get(backlog, "route_eligibility")), "unevaluated");
+            if (step < 2) {
+                const struct json_value *row = json_get(backlog, "first_row");
+                ASSERT_EQ(json_get_int(json_get(row, "seq")), step + 1);
+                ASSERT_STR_EQ(json_get_str(json_get(row, "to")), step == 0 ? "r2" : "mac");
+                ASSERT(json_get_int(json_get(backlog, "oldest_age_s")) > 0);
+            }
+            rtx_end(&c);
+            rtx_frozen_take(&after, "export-observation");
+            ASSERT(rtx_frozen_same(&before, &after));
+        }
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
 #endif
 int test_devagent_receive(void);
 int test_devagent_receive(void)
@@ -2359,6 +2409,7 @@ int test_devagent_receive(void)
     int failures = 0;
 
 #if !defined(_WIN32)
+    failures += test_receive_export_observation();
     failures += test_receive_note_replay();
     failures += test_receive_answer_retry();
     failures += test_receive_marker_retry(0);
@@ -3123,6 +3174,7 @@ int test_devagent_receive(void)
         ASSERT_STR_EQ(rtx_reply_str(&c, "mail"), "absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "counters_basis"), "dry-survey");
         ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unobserved");
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&c.reply.data, "export_backlog"), "state")), "mail-absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_basis"), "request-argument");
         ASSERT_STR_EQ(rtx_reply_str(&c, "intake_record_state"), "absent");
         rtx_end(&c);

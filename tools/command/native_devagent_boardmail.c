@@ -972,6 +972,104 @@ static FILE *bm_outbox_open(const char *maildir, long long *off)
     return f;
 }
 
+static const char *bm_export_row_observation(struct json_value *backlog,
+                                              const char *line, size_t len)
+{
+    struct bm_row r;
+    struct json_value row, value;
+    long long stamp;
+    json_init(&value);
+    bool parsed = json_read(&value, line, len) && bm_row_from(&value, &r);
+    if (!parsed) {
+        json_free(&value);
+        return "malformed-row";
+    }
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_int(&row, "seq", r.seq);
+    (void)json_push_kv_str(&row, "ts", r.ts);
+    (void)json_push_kv_str(&row, "to", r.to);
+    (void)json_push_kv_str(&row, "kind", r.kind);
+    (void)json_push_kv_str(&row, "ref", r.ref);
+    (void)json_push_kv(backlog, "first_row", &row);
+    json_free(&row);
+    stamp = bm_ts_unix(r.ts);
+    if (stamp >= 0) {
+        long long age = (long long)platform_time_wall_time_t() - stamp;
+        (void)json_push_kv_int(backlog, "oldest_age_s", age > 0 ? age : 0);
+    }
+    json_free(&value);
+    return "pending";
+}
+
+void zcl_devagent_boardmail_observe_export(const char *recvdir,
+                                           const char *maildir,
+                                           struct json_value *out)
+{
+    struct bm_state s;
+    struct json_value backlog;
+    struct stat sb;
+    const char *state = "pending";
+    char *line = NULL;
+    FILE *f = NULL;
+    size_t len = 0;
+    long long pending = 0;
+    json_init(&backlog);
+    json_set_object(&backlog);
+    if (!bm_state_load(recvdir, &s)) {
+        state = "cursor-unreadable";
+        goto done;
+    }
+    f = bm_outbox_open(maildir, &s.export_offset);
+    if (!f) {
+        state = errno == ENOENT ? "mail-absent" : "mail-unreadable";
+        goto done;
+    }
+    if (fstat(fileno(f), &sb) != 0) {
+        state = "mail-unreadable";
+        goto done;
+    }
+    pending = (long long)sb.st_size - s.export_offset;
+    if (pending < 0) {
+        s.export_offset = 0;
+        pending = (long long)sb.st_size;
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            state = "mail-unreadable";
+            goto done;
+        }
+    }
+    if (pending == 0) {
+        state = "clear";
+        goto done;
+    }
+    line = zcl_malloc(BM_LINE_CAP, "boardmail.export_observation");
+    if (!line) {
+        state = "unobserved";
+        goto done;
+    }
+    if (!fgets(line, BM_LINE_CAP, f)) {
+        state = "mail-unreadable";
+        goto done;
+    }
+    len = strlen(line);
+    if (len == 0 || line[len - 1] != '\n') {
+        state = feof(f) ? "incomplete-row" : "overlong-row";
+        goto done;
+    }
+    line[len - 1] = '\0';
+    state = bm_export_row_observation(&backlog, line, len - 1);
+
+done:
+    if (f) (void)fclose(f);
+    free(line);
+    (void)json_push_kv_str(&backlog, "state", state);
+    (void)json_push_kv_str(&backlog, "route_eligibility", "unevaluated");
+    (void)json_push_kv_int(&backlog, "export_offset", s.export_offset);
+    (void)json_push_kv_int(&backlog, "pending_bytes", pending);
+    (void)json_push_kv(out, "export_backlog", &backlog);
+    json_free(&backlog);
+}
+
 static void bm_export_walk(const struct zcl_boardmail_ctx *c,
                            const struct bm_roster *ro, struct bm_refs *refs,
                            struct bm_state *s, struct rcv_beat_stats *st)

@@ -625,6 +625,13 @@ bool zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
 void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
                                    struct rcv_beat_stats *st);
 
+/* Read-only first-row and byte backlog after the durable export cursor.
+ * Route eligibility is deliberately unevaluated: this observation works
+ * even when the node needed for roster and board verification is down. */
+void zcl_devagent_boardmail_observe_export(const char *recvdir,
+                                           const char *maildir,
+                                           struct json_value *out);
+
 /* True when `to` is a verified roster box other than this one. */
 bool zcl_devagent_boardmail_remote(const char *to);
 
