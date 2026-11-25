@@ -483,7 +483,7 @@ static char *bmx_rpc(const char *method, const char *params)
 #define BMX_NOW 1790000000LL
 
 /* One operator-sealed roster line for `name`: box key from `box_byte`,
- * signing (node) key from `signer_byte`. */
+ * signing (node) key from `signer_byte`, or no signing key when zero. */
 static bool bmx_roster_line(const char *name, uint8_t box_byte,
                             uint8_t signer_byte, uint16_t port, char *out,
                             size_t cap)
@@ -503,13 +503,13 @@ static bool bmx_roster_line(const char *name, uint8_t box_byte,
     (void)snprintf(facts.os, sizeof(facts.os), "Linux");
     bmx_key(BMX_OP_BYTE, op_seed, op_pub);
     bmx_key(box_byte, box_seed, box_pub);
-    bmx_key(signer_byte, signer.seed, signer.pubkey);
+    if (signer_byte) bmx_key(signer_byte, signer.seed, signer.pubkey);
     return fleet_invite_mint(name, 24, "", op_seed, op_pub, BMX_NOW, token,
                              sizeof(token), &invite, &why) &&
            fleet_invite_parse(token, &invite, invite_wire,
                               sizeof(invite_wire), &invite_len, &why) &&
            fleet_receipt_mint(invite_wire, invite_len, "", &facts, "",
-                              box_seed, box_pub, &signer, receipt,
+                              box_seed, box_pub, signer_byte ? &signer : NULL, receipt,
                               sizeof(receipt), &why) &&
            fleet_receipt_parse(receipt, &parsed, receipt_wire,
                                sizeof(receipt_wire), &receipt_len, &why) &&
@@ -1644,9 +1644,14 @@ static int bmx_t_delivery(void)
     int failures = 0;
     TEST("boardmail: a posted row says where the exporter will carry it") {
         char label[160], hint[1024], path[1600];
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+        const char *why = NULL;
         ASSERT(bmx_setup("delivery"));
         bmx_use(BMX_A);
         ASSERT(bmx_own_key());
+        ASSERT(bmx_roster_line("node-d", 0x44, 0,
+                               FLEET_ENROL_PORT_FIRST + 3, line, sizeof(line)));
+        ASSERT(fleet_roster_append(line, &why));
         /* Broadcast: this box only, nothing carried. */
         ASSERT(bmx_post_where("*", NULL, label, sizeof(label), hint,
                               sizeof(hint)));
@@ -1664,6 +1669,11 @@ static int bmx_t_delivery(void)
         ASSERT_STR_EQ(label, "local");
         ASSERT(strstr(hint, "no roster box named someagent") != NULL);
         ASSERT(strstr(hint, "node-b") != NULL);
+        ASSERT(bmx_post_where("node-d", NULL, label, sizeof(label), hint,
+                              sizeof(hint)));
+        ASSERT_STR_EQ(label, "local");
+        ASSERT(strstr(hint, "roster box node-d has no node signing key") != NULL);
+        ASSERT(strstr(hint, "fleet join") != NULL);
         struct zcl_boardmail_delivery route;
         zcl_devagent_boardmail_observe(NULL, NULL, &route);
         ASSERT_STR_EQ(route.label, "unknown");
@@ -1672,8 +1682,15 @@ static int bmx_t_delivery(void)
         zcl_devagent_boardmail_observe("someagent", NULL, &route);
         ASSERT_STR_EQ(route.label, "local");
         ASSERT(strstr(route.hint, "node-b") != NULL);
+        zcl_devagent_boardmail_observe("node-d", NULL, &route);
+        ASSERT_STR_EQ(route.label, "local");
+        ASSERT(strstr(route.hint, "node-d has no node signing key") != NULL);
         char grant[64], error[64];
         ASSERT(bmx_grant("chatgpt", NULL, grant, sizeof(grant)));
+        ASSERT(bmx_send(grant, "node-d", "route-signerless", g_bmx_body,
+                        error, sizeof(error)));
+        ASSERT_STR_EQ(g_bmx_route, "local");
+        ASSERT(strstr(g_bmx_route_hint, "fleet join") != NULL);
         ASSERT(bmx_send(grant, "someagent", "route-test", g_bmx_body, error, sizeof(error)));
         ASSERT_STR_EQ(g_bmx_route, "local");
         ASSERT(strstr(g_bmx_route_hint, "node-b") && !g_bmx_duplicate);

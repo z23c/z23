@@ -257,6 +257,8 @@ struct bm_peer {
 struct bm_roster {
     struct bm_peer p[FLEET_ENROL_ROSTER_MAX];
     size_t n;
+    char signerless[FLEET_ENROL_ROSTER_MAX][FLEET_ENROL_NAME_MAX + 1];
+    size_t signerless_n;
     bool overflow;
 };
 
@@ -266,7 +268,15 @@ static void bm_roster_visit(const struct fleet_machine *m, void *user)
     struct bm_roster *r = user;
     struct bm_peer *p;
     /* A box that named no signing key cannot have signed a post. */
-    if (memcmp(m->receipt.signer_pubkey, zero, sizeof(zero)) == 0) return;
+    if (memcmp(m->receipt.signer_pubkey, zero, sizeof(zero)) == 0) {
+        if (r->signerless_n >= FLEET_ENROL_ROSTER_MAX) {
+            r->overflow = true;
+            return;
+        }
+        (void)snprintf(r->signerless[r->signerless_n++],
+                       FLEET_ENROL_NAME_MAX + 1, "%s", m->receipt.invite.name);
+        return;
+    }
     if (r->n >= FLEET_ENROL_ROSTER_MAX) { r->overflow = true; return; }
     p = &r->p[r->n++];
     (void)snprintf(p->name, sizeof(p->name), "%s", m->receipt.invite.name);
@@ -326,6 +336,13 @@ static const struct bm_peer *bm_by_name(const struct bm_roster *r,
             return &r->p[i];
     }
     return NULL;
+}
+
+static bool bm_is_signerless(const struct bm_roster *r, const char *name)
+{
+    for (size_t i = 0; name && i < r->signerless_n; i++)
+        if (strcmp(r->signerless[i], name) == 0) return true;
+    return false;
 }
 
 static const struct bm_peer *bm_by_signer_hex(const struct bm_roster *r,
@@ -849,18 +866,34 @@ static void bm_known_names(const struct bm_roster *r, const char *self,
         (void)snprintf(out, cap, "none");
 }
 
+static void bm_no_route_hint(const struct bm_roster *r, const char *self,
+                             const char *to, char *out, size_t cap)
+{
+    if (bm_is_signerless(r, to)) {
+        (void)snprintf(out, cap,
+                       "roster box %s has no node signing key; start its node "
+                       "and run fleet join there again before sending cross-host mail",
+                       to);
+        return;
+    }
+    char known[BM_KNOWN_CAP];
+    bm_known_names(r, self, known, sizeof(known));
+    (void)snprintf(out, cap,
+                   "no roster box named %s; cross-host mail is addressed "
+                   "by roster box name (known: %s)", to, known);
+}
+
 /* Where a row posted to `to` under `ref` will go. The same predicates as
  * bm_export_peer, in the same order, so the answer cannot drift from the
  * exporter. `out.label` is "export_eligible" when the row is eligible for
  * export, else "local"; neither label is receiver delivery evidence.
- * `out.hint` is set only for local mail to a name no
- * roster box holds (not "*", not this box). */
+ * `out.hint` explains local mail with no usable named route (not "*", not
+ * this box). */
 void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
                                      struct zcl_boardmail_delivery *out)
 {
     struct bm_route *v;
     const struct bm_peer *p;
-    char known[BM_KNOWN_CAP];
     memset(out, 0, sizeof(*out));
     (void)snprintf(out->label, sizeof(out->label), "local");
     if (!to || !to[0])
@@ -876,11 +909,7 @@ void zcl_devagent_boardmail_delivery(const char *to, const char *ref,
                bm_ref_peer(&v->refs, ref ? ref : "")) {
         (void)snprintf(out->label, sizeof(out->label), "export_eligible");
     } else if (!p) {
-        bm_known_names(&v->ro, v->self, known, sizeof(known));
-        (void)snprintf(out->hint, sizeof(out->hint),
-                       "no roster box named %s; cross-host mail is addressed "
-                       "by roster box name (known: %s)",
-                       to, known);
+        bm_no_route_hint(&v->ro, v->self, to, out->hint, sizeof(out->hint));
     }
     free(v);
 }
@@ -901,9 +930,7 @@ static void bm_observe_hint(const struct bm_route *v, const char *to,
                             const char *peer, struct zcl_boardmail_delivery *out)
 {
     if (peer || !strcmp(to, "*") || !strcmp(to, v->self) || bm_by_name(&v->ro, to)) return;
-    char known[BM_KNOWN_CAP]; bm_known_names(&v->ro, v->self, known, sizeof(known));
-    (void)snprintf(out->hint, sizeof(out->hint),
-        "no roster box named %s; cross-host mail is addressed by roster box name (known: %s)", to, known);
+    bm_no_route_hint(&v->ro, v->self, to, out->hint, sizeof(out->hint));
 }
 /* Snapshot the export predicate without changing mail or the receiver. */
 void zcl_devagent_boardmail_observe(const char *to, const char *ref,
