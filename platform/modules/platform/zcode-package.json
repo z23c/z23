@@ -18,8 +18,10 @@
   "files": [
     "LICENSE",
     "include/platform/os_binary_slots.h",
+    "include/platform/os_boot.h",
     "include/platform/os_proc.h",
     "src/os_binary_slots.c",
+    "src/os_boot.c",
     "src/os_proc.c",
     "src/os_proc_fdclose_internal.h",
     "src/os_proc_foreign_writer.c",

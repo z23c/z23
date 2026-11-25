@@ -10,6 +10,7 @@
 
 #if !defined(_WIN32)
 #include "platform/os_proc.h"
+#include "platform/os_boot.h"
 #include "platform/private_directory.h"
 #include "platform/time_compat.h"
 
@@ -132,24 +133,6 @@ static bool session_running(int64_t pid)
 }
 
 #if defined(__linux__)
-static bool boot_id_read(char out[SESSION_BOOT_MAX])
-{
-    int fd = open("/proc/sys/kernel/random/boot_id", O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return false;
-    ssize_t got = read(fd, out, SESSION_BOOT_MAX - 1);
-    (void)close(fd);
-    if (got <= 0)
-        return false;
-    out[got] = 0;
-    size_t len = strcspn(out, "\n");
-    out[len] = 0;
-    for (size_t i = 0; i < len; i++)
-        if (!isxdigit((unsigned char)out[i]) && out[i] != '-')
-            return false;
-    return len >= 8;
-}
-
 static bool proc_link_stat(int64_t pid, const char *what, struct stat *st)
 {
     char path[64];
@@ -257,7 +240,7 @@ static bool session_record(const char *root, int64_t pid)
     struct stat exe;
     if (!session_path(root, pid, path) || !session_prepare_dir(root, dir) ||
         !os_proc_pid_start_token((uint64_t)pid, &born) ||
-        !boot_id_read(boot) || !proc_link_stat(pid, "exe", &exe))
+        !os_proc_boot_id(boot) || !proc_link_stat(pid, "exe", &exe))
         return false;
     int t = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     int len = snprintf(body, sizeof(body), SESSION_SCHEMA " %lld %llu %s %llu %llu\n",
@@ -405,7 +388,7 @@ static enum zcl_devloop_watch_session_state session_probe(
         ZCL_DEVLOOP_WATCH_SESSION_ABSENT;
     if (session_read(root, pid, &rec)) {
         file = rec.file;
-        if (!boot_id_read(boot))
+        if (!os_proc_boot_id(boot))
             state = ZCL_DEVLOOP_WATCH_SESSION_UNPROVEN;
         else if (strcmp(boot, rec.boot) == 0)
             state = session_probe_proven(pid, &rec, &root_st);

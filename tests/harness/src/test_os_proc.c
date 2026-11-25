@@ -30,6 +30,7 @@
 #include "platform/allocator_compat.h"
 #include "platform/disk_space.h"
 #include "platform/os_proc.h"
+#include "platform/os_boot.h"
 #include "platform/ram_scratch.h"
 #include "platform/temp_directory.h"
 
@@ -38,6 +39,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
@@ -1107,6 +1111,58 @@ static int os_proc_scratch_live_lease_checks(void)
 static int os_proc_scratch_live_lease_checks(void) { return 0; }
 #endif
 
+static bool os_proc_boot_source_available(void)
+{
+#if defined(__linux__)
+    FILE *f = fopen("/proc/sys/kernel/random/boot_id", "rb");
+    if (!f) return false;
+    int c = fgetc(f);
+    (void)fclose(f);
+    return c != EOF;
+#elif defined(__APPLE__)
+    char buf[64];
+    size_t n = sizeof(buf);
+    return sysctlbyname("kern.bootsessionuuid", buf, &n, NULL, 0) == 0;
+#else
+    return false;
+#endif
+}
+
+static int os_proc_boot_id_checks(void)
+{
+    int failures = 0;
+    TEST("boot UUID validates exact bytes and clears failures") {
+        char out[37];
+        const char *valid = "ABCDEF01-2345-6789-ABCD-EF0123456789";
+        ASSERT(os_proc_boot_id_normalize(valid, 36, out));
+        ASSERT_STR_EQ(out, "abcdef01-2345-6789-abcd-ef0123456789");
+        memcpy(out, valid, 37);
+        ASSERT(os_proc_boot_id_normalize(out, 36, out));
+        ASSERT_STR_EQ(out, "abcdef01-2345-6789-abcd-ef0123456789");
+        ASSERT(!os_proc_boot_id_normalize(valid, 35, out) && out[0] == 0);
+        ASSERT(!os_proc_boot_id_normalize(valid, 37, out) && out[0] == 0);
+        ASSERT(!os_proc_boot_id_normalize("00000000-0000-0000-0000-000000000000", 36, out) && out[0] == 0);
+        ASSERT(!os_proc_boot_id_normalize("abcdef01-2345-6789-abcd-ef012345678x", 36, out) && out[0] == 0);
+        char embedded[36];
+        memcpy(embedded, valid, sizeof(embedded));
+        embedded[10] = 0;
+        ASSERT(!os_proc_boot_id_normalize(embedded, sizeof(embedded), out) && out[0] == 0);
+#if defined(__linux__) || defined(__APPLE__)
+        if (os_proc_boot_source_available()) {
+            ASSERT(os_proc_boot_id(out));
+            char again[37];
+            ASSERT(os_proc_boot_id(again));
+            ASSERT_STR_EQ(out, again);
+        } else printf("boot identity live source UNOBSERVED (unavailable)\n");
+#else
+        ASSERT(!os_proc_boot_source_available());
+        ASSERT(!os_proc_boot_id(out) && out[0] == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_os_proc(void);
 int test_os_proc(void)
 {
@@ -1128,6 +1184,7 @@ int test_os_proc(void)
     failures += os_proc_environment_classify_checks();
     failures += os_proc_live_mem_read_checks();
     failures += os_proc_uptime_checks();
+    failures += os_proc_boot_id_checks();
     failures += os_proc_pid_start_token_checks();
     failures += os_proc_exe_path_checks();
     failures += os_proc_exe_path_fit_checks();
