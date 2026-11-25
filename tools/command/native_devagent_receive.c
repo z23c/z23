@@ -1331,6 +1331,21 @@ static bool rcv_dir_engine_ok(struct rcv_direction *d)
     return false;
 }
 
+static bool rcv_dir_gate_ok(struct rcv_direction *d)
+{
+    if (!rcv_group_ok(d->gate)) {
+        (void)snprintf(d->why, sizeof(d->why), "muse-gate");
+        return false;
+    }
+    char canonical[ZCL_TEST_GROUP_FULL_MAX];
+    if (!zcl_test_group_resolve_exact(d->gate, canonical)) {
+        (void)snprintf(d->code, sizeof(d->code), "RECEIVE_GATE_UNKNOWN");
+        (void)snprintf(d->why, sizeof(d->why), "muse-gate");
+        return false;
+    }
+    return true;
+}
+
 /* The three required fields plus the optional ones. */
 static bool rcv_dir_fields_ok(struct rcv_direction *d)
 {
@@ -1349,16 +1364,8 @@ static bool rcv_dir_fields_ok(struct rcv_direction *d)
         (void)snprintf(d->why, sizeof(d->why), "muse-scope");
         return false;
     }
-    if (!rcv_group_ok(d->gate)) {
-        (void)snprintf(d->why, sizeof(d->why), "muse-gate");
+    if (!rcv_dir_gate_ok(d))
         return false;
-    }
-    char canonical[ZCL_TEST_GROUP_FULL_MAX];
-    if (!zcl_test_group_resolve_exact(d->gate, canonical)) {
-        (void)snprintf(d->code, sizeof(d->code), "RECEIVE_GATE_UNKNOWN");
-        (void)snprintf(d->why, sizeof(d->why), "muse-gate");
-        return false;
-    }
     if (d->model[0] && strlen(d->model) > 128) {
         (void)snprintf(d->why, sizeof(d->why), "muse-model");
         return false;
