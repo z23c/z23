@@ -52,10 +52,10 @@ static char g_datadir[ROLE_GATE_DATADIR_MAX];
 static uint8_t g_self_pub[32];
 static bool g_have_self;
 
-/* This node's own operator identity: the online key its filed delegation
- * delegates. Mirrors native_fleet_roles_command.c's roles_operator_identity
- * as its own small copy, the way each fleet leaf file already does rather
- * than reaching across for one. */
+/* An explicit grant needs the online key its filed delegation delegates.
+ * Mirrors native_fleet_roles_command.c's roles_operator_identity as its own
+ * small copy, the way each fleet leaf file already does rather than reaching
+ * across for one. */
 static bool gate_operator_identity(const char *datadir, uint8_t pub[32],
                                    uint8_t seed[32], const char **why)
 {
@@ -85,6 +85,24 @@ static bool gate_operator_identity(const char *datadir, uint8_t pub[32],
     memcpy(pub, online_pub, 32);
     return true;
 }
+/* Enrollment and grandfather grants already stand on an operator-sealed
+ * roster row or a post this node stored. The node's own online key signs
+ * only those automatic grants; an explicit grant still uses the stricter
+ * delegated identity above. */
+static bool gate_automatic_identity(const char *datadir, uint8_t pub[32],
+                                    uint8_t seed[32], const char **why)
+{
+    char error[160];
+    if (!datadir ||
+        !vcs_zcode_dht_online_key_load(datadir, seed, pub, error,
+                                       sizeof error)) {
+        if (why)
+            *why = "this machine has no online key to sign an automatic grant";
+        return false;
+    }
+    return true;
+}
+
 
 /* ── the checker ─────────────────────────────────────────────────────── */
 
@@ -162,7 +180,7 @@ size_t zcl_fleet_roles_bootstrap_keys(const char *datadir,
     uint8_t op_pub[32], op_seed[32];
     if (!datadir || (!keys && count))
         return 0;
-    if (!gate_operator_identity(datadir, op_pub, op_seed, why))
+    if (!gate_automatic_identity(datadir, op_pub, op_seed, why))
         return 0;
     struct zcl_role_report report;
     struct zcl_role_store *store = zcl_role_store_open(datadir, &report);
@@ -193,7 +211,10 @@ static bool gate_grant_named(const char *datadir, const char *origin,
     uint8_t op_pub[32], op_seed[32];
     if (!datadir || !pubkey)
         return false;
-    if (!gate_operator_identity(datadir, op_pub, op_seed, why))
+    bool identified = automatic
+        ? gate_automatic_identity(datadir, op_pub, op_seed, why)
+        : gate_operator_identity(datadir, op_pub, op_seed, why);
+    if (!identified)
         return false;
     struct zcl_role_report report;
     struct zcl_role_store *store = zcl_role_store_open(datadir, &report);

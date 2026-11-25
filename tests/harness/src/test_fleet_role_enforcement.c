@@ -506,6 +506,55 @@ int test_fleet_role_enforcement(void)
         PASS();
     }
 
+    TEST("fleet roles: automatic grants use the node key without ZID; "
+         "explicit grants still require it and revocations still win") {
+        char online_dir[256];
+        char err[160];
+        const char *why = NULL;
+        uint8_t online_seed[32], online_pub[32];
+        uint8_t keys[1][32];
+        test_make_tmpdir(online_dir, sizeof online_dir,
+                         "fleet_role_enforcement", "online-only");
+        ASSERT(vcs_zcode_dht_online_key_load_or_create(
+            online_dir, online_seed, online_pub, err, sizeof err));
+        memcpy(keys[0], stranger_pub, 32);
+
+        ASSERT_EQ(zcl_fleet_roles_bootstrap_keys(online_dir, keys, 1,
+                                                 RE_ROW_NOW, &why),
+                  (size_t)1);
+        ASSERT_EQ(zcl_fleet_roles_bootstrap_keys(online_dir, keys, 1,
+                                                 RE_ROW_NOW + 1, &why),
+                  (size_t)0);
+
+        /* The automatic path never widens into an explicit grant. */
+        why = NULL;
+        ASSERT(!zcl_fleet_roles_grant_worker(online_dir, op_pub, RE_ROW_NOW,
+                                             &why));
+        ASSERT(why != NULL);
+
+        /* A revocation recorded by the same node key is not undone at boot. */
+        struct zcl_role_report report;
+        struct zcl_role_store *store = zcl_role_store_open(online_dir, &report);
+        ASSERT(store != NULL);
+        uint8_t fp[ZCL_ROLE_FP_BYTES];
+        zcl_role_fingerprint(stranger_pub, fp);
+        ASSERT_EQ((int)zcl_role_store_revoke(store, fp, ZCL_ROLE_worker,
+                                             online_pub, online_seed,
+                                             RE_ROW_NOW + 2, NULL),
+                  (int)ZCL_ROLE_OK);
+        zcl_role_store_close(store);
+        ASSERT_EQ(zcl_fleet_roles_bootstrap_keys(online_dir, keys, 1,
+                                                 RE_ROW_NOW + 3, &why),
+                  (size_t)0);
+        store = zcl_role_store_open(online_dir, &report);
+        ASSERT(store != NULL);
+        ASSERT(!zcl_role_store_has_role(store, fp, ZCL_ROLE_worker));
+        zcl_role_store_close(store);
+        memset(online_seed, 0, sizeof online_seed);
+        test_rm_rf_recursive(online_dir);
+        PASS();
+    }
+
     TEST("fleet roles: admitting a machine grants it worker, and admitting "
          "it again writes no second row") {
         const char *why = NULL;

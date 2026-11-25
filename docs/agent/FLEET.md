@@ -357,7 +357,10 @@ Ledger replication (`fleet.ledger.replicate`) and fleet board ingress
 (`fleet.board.post`) refuse foreign keys without an active grant; public posts
 need none, and a missing checker refuses. `fleet admit` grants `worker` to the
 admitted box key and signing key, and node start grants it to every roster key
-and every signer already stored. Refusals are counted as `role_refused` in
+and every signer already stored. Those automatic grants are signed by the
+node's online key and need no ZID delegation; explicit `fleet roles grant`
+still requires one, and no automatic path re-admits a revoked key. Refusals
+are counted as `role_refused` in
 `fleet ledger status` and `fleet board status`; `grandfather_truncated` above
 zero means the boot walk hit its 64-key bound and `roles grant` must name the
 rest. A grant is local policy, not consensus.

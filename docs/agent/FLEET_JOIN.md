@@ -273,6 +273,9 @@ with the member count, when the roster arms.
    (`fleet import`), so the role bootstrap grants the manager's key the
    worker role there: roster rows arrive as fleet notes and the board role
    check still applies to the key that posts them.
+   The node signs this automatic grant for already-enrolled keys with its
+   own online key; no ZID delegation is needed. An explicit `fleet roles
+   grant` still requires a filed ZID delegation, and revocation still wins.
 4. Before you start the manager with the flag, check `fleet machines`: once
    the roster arms, a machine that is not on it (one enrolled without a
    signing key, or the manager if it was never admitted) stops exchanging

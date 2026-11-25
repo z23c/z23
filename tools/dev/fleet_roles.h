@@ -181,10 +181,11 @@ bool zcl_role_check(const struct zcl_role_store *store,
  * foreign-signed byte, which is the correct state for a process that has
  * not yet been told where its grant store is.
  *
- * A box with no filed delegation gets the checker anyway — enforcement is
- * never conditional — but no bootstrap, because minting a grant needs a
- * key to sign it with. On such a box every foreign key is refused until an
- * operator identity exists and `z23 fleet roles grant` can run. */
+ * A box with no online key gets the checker anyway — enforcement is never
+ * conditional — but no automatic bootstrap. With an online key, the node
+ * signs grants only for enrolled or previously stored keys. Explicit
+ * grants still require a filed delegation; a revocation always wins over
+ * every automatic path. */
 void zcl_fleet_roles_enforcement_start(const char *datadir);
 
 /* Mint a signed `worker` grant for `pubkey` unless it already holds one.
