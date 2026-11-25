@@ -10,11 +10,47 @@
 #endif
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
+
+static int log_special_files(void)
+{
+    char sha[ZC_SHA];
+    const char *link = zcw("log-link"), *target = zcw("log-target"), *fifo = zcw("log-fifo");
+    if (zc_put("log-target", "sentinel\n") || symlink(target, link) != 0 || mkfifo(fifo, 0600) != 0)
+        return 1;
+    if (zc_build("log-symlink", ZC_ENV(zcf("ZCC_LOG=%s", link)), sha) ||
+        zc_build("log-fifo", ZC_ENV(zcf("ZCC_LOG=%s", fifo)), sha)) return 1;
+    char contents[32] = {0};
+    FILE *f = fopen(target, "rb");
+    size_t got = f ? fread(contents, 1, sizeof contents, f) : 0;
+    bool closed = f && fclose(f) == 0;
+    zc_want(closed && got == 9 && memcmp(contents, "sentinel\n", 9) == 0, "log symlink changed target");
+    return 0;
+}
+static int log_size_and_escape(void)
+{
+    char sha[ZC_SHA];
+    const char *large = zcw("log-large");
+    int fd = open(large, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) return 1;
+    bool sized = ftruncate(fd, 8 * 1024 * 1024) == 0;
+    if (close(fd) != 0 || !sized) return 1;
+    if (zc_build("log-large", ZC_ENV(zcf("ZCC_LOG=%s", large)), sha)) return 1;
+    struct stat st;
+    zc_want(stat(large, &st) == 0 && st.st_size == 8 * 1024 * 1024, "full log grew");
+    const char *escaped = zcw("log-escaped"), *output = zcw("output\nforged");
+    struct zc_cmd c = {.argv = ZC_ARGV(zc.zcc, "cc", "-c", zcw("main.c"), "-o", output),
+                       .env = ZC_ENV(zcf("ZCC_LOG=%s", escaped), "ZCC_VERIFIED=1"), .errf = "/dev/null"};
+    if (zc_run(&c) != 0) return 1;
+    zc_want(lct_file_has(escaped, "output\\x0aforged") && !lct_file_has(escaped, "output\nforged"),
+            "output path was not escaped");
+    return 0;
+}
 
 int zc_sec_basic(void)
 {
@@ -39,7 +75,7 @@ int zc_sec_basic(void)
         return 1;
     zc_disp("HIT", "a touched-but-unchanged source was not a HIT");
     zc_want(strcmp(zc.sha_a, c) == 0, "a content hit produced different bytes");
-    return 0;
+    return log_special_files() || log_size_and_escape();
 }
 
 static int header_symlinks(const char *dep)

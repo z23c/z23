@@ -15214,7 +15214,7 @@ static bool ic_union_fixture(const char *generation, bool selected, unsigned mod
         "build/bin/z23-lint: lint-source\n\t@echo bootstrap >> invocations\n"
         "\t@if [ -e bootstrap-fail ]; then exit 1; fi; if [ ! -e bootstrap-no-output ]; then cp lint-source $@; chmod +x $@; fi\n"
         "build/bin/lint-union-fixture:\n\t@echo lint-tool >> invocations\n\t@printf tool > $@\n"
-        "dev-proof-bundle-prefork:\n\t@%s\n\t@echo bundle >> invocations\n\t@test -n \"$$ZCC_DISPATCH_TIMING\" && echo fixture-sample >> \"$$ZCC_DISPATCH_TIMING\"\n\t@%s\n"
+        "dev-proof-bundle-prefork:\n\t@%s\n\t@echo bundle >> invocations\n\t@test -n \"$$ZCC_DISPATCH_TIMING\" && echo fixture-sample >> \"$$ZCC_DISPATCH_TIMING\"\n\t@test -n \"$$ZCC_LOG\" && echo fixture-disposition >> \"$$ZCC_LOG\"\n\t@%s\n"
         "z23:\n\t@test ! -e build/bin/z23\n\t@echo node >> invocations\n\t%s\n"
         "z23-acme:\n\t@test ! -e build/bin/z23-acme\n\t@echo acme >> invocations\n\t@cp acme-input build/bin/z23-acme\n"
         "zcl-rpc:\n\t@test ! -e build/bin/zcl-rpc\n\t@echo rpc >> invocations\n\t@cp rpc-input build/bin/zcl-rpc\n",
@@ -15282,10 +15282,12 @@ static bool ic_union_acme_untouched(const char *generation)
 }
 static bool ic_union_timing_retained(const char *generation)
 {
-    char timing[512] = {0};
-    return !getenv("ZCC_DISPATCH_TIMING") &&
+    char timing[512] = {0}, disposition[512] = {0};
+    return !getenv("ZCC_DISPATCH_TIMING") && !getenv("ZCC_LOG") &&
         ic_union_read(generation, "dispatch-timing.log", timing, sizeof timing) &&
-        strstr(timing, "may be incomplete") && strstr(timing, "fixture-sample");
+        strstr(timing, "may be incomplete") && strstr(timing, "fixture-sample") &&
+        ic_union_read(generation, "zcc-disposition.log", disposition, sizeof disposition) &&
+        strstr(disposition, "records may be dropped") && strstr(disposition, "fixture-disposition");
 }
 static bool ic_union_complete(bool result, bool logs, bool other_ok, bool untouched)
 {

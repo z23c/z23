@@ -11996,6 +11996,7 @@ static bool dp_receiver_end(const struct dp_worker *w,
                             char *why, size_t why_len)
 {
     (void)unsetenv("ZCC_DISPATCH_TIMING");
+    (void)unsetenv("ZCC_LOG");
     bool env_ok = zcl_verify_receiver_env_clear();
     zcl_verify_receiver_finish(rx);
     (void)zcl_verify_receiver_phases_write(rx, w->paths->phases);
@@ -12009,17 +12010,18 @@ static bool dp_receiver_end(const struct dp_worker *w,
 }
 
 /* Attempt-local attribution only; failure never changes proof admission. */
-static void dp_dispatch_timing_begin(const struct dp_worker *w)
+static void dp_attempt_log_begin(const struct dp_worker *w, const char *name,
+                                 const char *variable, const char *header)
 {
     char path[PATH_MAX];
-    if (snprintf(path, sizeof path, "%s/dispatch-timing.log", w->paths->logs) >= (int)sizeof path)
+    if (snprintf(path, sizeof path, "%s/%s", w->paths->logs, name) >= (int)sizeof path)
         return;
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return;
-    static const char header[] = "# bundle dispatch wall samples; best effort, may be incomplete; not proof authority\n";
-    bool ok = write(fd, header, sizeof(header) - 1) == (ssize_t)(sizeof(header) - 1);
+    size_t len = strlen(header);
+    bool ok = write(fd, header, len) == (ssize_t)len;
     if (close(fd) != 0) ok = false;
-    if (!ok || setenv("ZCC_DISPATCH_TIMING", path, 1) != 0)
+    if (!ok || setenv(variable, path, 1) != 0)
         (void)unlink(path);
 }
 
@@ -12214,7 +12216,10 @@ static bool dp_worker_bundle_build(struct dp_worker *w, uint64_t *bundle_ms,
         (void)dp_receiver_end(w, &rx, NULL, 0);
         return false;
     }
-    dp_dispatch_timing_begin(w);
+    dp_attempt_log_begin(w, "dispatch-timing.log", "ZCC_DISPATCH_TIMING",
+        "# bundle dispatch wall samples; best effort, may be incomplete; not proof authority\n");
+    dp_attempt_log_begin(w, "zcc-disposition.log", "ZCC_LOG",
+        "# best effort; records may be dropped; not proof authority\n");
     int bundle_rc = 0;
     bool made = dp_worker_bundle_make(w, &bundle_rc, bundle_ms, z23, why, why_len);
     if (z23)

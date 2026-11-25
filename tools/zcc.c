@@ -4319,6 +4319,19 @@ static int cmd_stats(struct cache *c)
     return 0;
 }
 
+#define ZCC_LOG_MAX_BYTES (8u * 1024u * 1024u)
+
+static int log_open_safe(const char *path, struct stat *st)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    if (fstat(fd, st) != 0 || !S_ISREG(st->st_mode) || st->st_uid != getuid() ||
+        (st->st_mode & 077) != 0 || st->st_size < 0 || st->st_size >= ZCC_LOG_MAX_BYTES) {
+        close(fd); return -1;
+    }
+    return fd;
+}
+
 /* ZCC_LOG=<path>: one line per invocation, appended with a single write() so
  * concurrent makes interleave whole lines. This is how you find out WHY a
  * build is not being cached — a bypass that nobody can see is a silent
@@ -4330,13 +4343,11 @@ static void logline(const char *disposition, const char *detail,
     if (!path || !path[0])
         return;
     char escaped[4u * PATH_MAX + 1u];
-    const char *output = pl->out_path ? pl->out_path : "<none>";
-    if (pl->diagnostic_out_path) {
-        if (!log_escape_path(pl->diagnostic_out_path, escaped, sizeof escaped))
-            return;
-        output = escaped;
-    }
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    const char *output = pl->diagnostic_out_path ? pl->diagnostic_out_path :
+                         (pl->out_path ? pl->out_path : "<none>");
+    if (!log_escape_path(output, escaped, sizeof escaped)) return;
+    struct stat st;
+    int fd = log_open_safe(path, &st);
     if (fd < 0)
         return;
     char line[4u * PATH_MAX + 256u];
@@ -4344,8 +4355,10 @@ static void logline(const char *disposition, const char *detail,
                      detail ? detail : "-",
                      strcmp(disposition, "HIT") == 0
                          ? "NON-AUTHORITATIVE DEV " : "",
-                     output);
-    if (n > 0 && (size_t)n < sizeof line)
+                     escaped);
+    /* Concurrent appenders may each pass the size check: overshoot is at
+     * most one bounded record per concurrent writer. Drops are not counted. */
+    if (n > 0 && (size_t)n < sizeof line && (uint64_t)st.st_size + (size_t)n <= ZCC_LOG_MAX_BYTES)
         (void)!write(fd, line, (size_t)n);
     close(fd);
 }
