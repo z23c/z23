@@ -359,16 +359,27 @@ static bool shift_times(char *text, size_t cap, int64_t shift)
     return true;
 }
 
-/* A listener whose accept queue is full and never drained: a connect to it
- * neither completes nor is refused before the client's connect cap. This is
- * the shape of a dead loopback port on Windows (the stack retries the SYN
- * after a reset for about 2 s), reproduced on every platform. */
+/* A connect to this port neither completes nor is refused before the client's
+ * connect cap. Linux and Windows fill a listen backlog of 0. macOS completes
+ * every connect to a listening socket, so the port is only bound there. */
 #define BLACKHOLE_FILL 64
 struct zw_blackhole {
     platform_socket_t listener;
     platform_socket_t fill[BLACKHOLE_FILL];
     size_t nfill;
 };
+
+/* macOS queues a connect as soon as the socket listens, so the fill cannot
+ * stall it. Leaving the socket bound keeps the handshake unfinished. */
+static bool blackhole_arm(platform_socket_t listener)
+{
+#if defined(__APPLE__)
+    (void)listener;
+    return true;
+#else
+    return platform_socket_listen(listener, 0) == 0;
+#endif
+}
 
 static bool blackhole_bind(struct zw_blackhole *b, uint16_t *port_out)
 {
@@ -379,7 +390,7 @@ static bool blackhole_bind(struct zw_blackhole *b, uint16_t *port_out)
     b->listener = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (b->listener == PLATFORM_SOCKET_INVALID ||
         platform_socket_bind(b->listener, (const struct sockaddr *)&a, sizeof(a)) != 0 ||
-        platform_socket_listen(b->listener, 0) != 0) return false;
+        !blackhole_arm(b->listener)) return false;
     struct sockaddr_in got;
     memset(&got, 0, sizeof(got));
     socklen_t gl = sizeof(got);

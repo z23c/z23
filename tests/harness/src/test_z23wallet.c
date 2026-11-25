@@ -531,6 +531,8 @@ static void test_rpc_auto_prefers_z23(void)
 
 #if defined(_WIN32)
 #define LEGACY_HOME TMP "/fbprofile/roaming/ZClassic"
+#elif defined(__APPLE__)
+#define LEGACY_HOME TMP "/fbprofile/Library/Application Support/ZClassic"
 #else
 #define LEGACY_HOME TMP "/fbprofile/.zclassic"
 #endif
