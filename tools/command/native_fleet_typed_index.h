@@ -6,6 +6,7 @@
 #include "json/json.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 struct zcl_fleet_typed_entry;
 struct zcl_fleet_typed_index {
@@ -35,6 +36,17 @@ void zcl_fleet_typed_index_free(struct zcl_fleet_typed_index *index);
  * the next append or free. Non-directives yield no candidates; a directive
  * without an integer seq is invalid. False means no trustworthy result. */
 typedef bool (*zcl_fleet_typed_visit)(const struct json_value *row, void *ctx);
+/* Fields are borrowed only for the call. A NULL kind refuses; non-directives
+ * have no candidates. For directives, empty strings are valid and NULL fields
+ * refuse rather than inventing a locator. */
+struct zcl_fleet_typed_locator {
+    const char *from, *to, *ref, *stream, *row_sha3;
+    int64_t row_offset, seq;
+    const char *kind;
+};
+bool zcl_fleet_typed_index_visit_key(struct zcl_fleet_typed_index *index,
+                                     const struct zcl_fleet_typed_locator *directive,
+                                     zcl_fleet_typed_visit visit, void *ctx);
 bool zcl_fleet_typed_index_visit(struct zcl_fleet_typed_index *index,
                                  const struct json_value *directive,
                                  zcl_fleet_typed_visit visit, void *ctx);

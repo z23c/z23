@@ -149,15 +149,23 @@ bool zcl_fleet_typed_index_build(struct zcl_fleet_typed_index *ix, const struct 
         if (!zcl_fleet_typed_index_append(ix, json_at(rows, i))) return false;
     return true;
 }
-bool zcl_fleet_typed_index_visit(struct zcl_fleet_typed_index *ix,
-                                  const struct json_value *d, zcl_fleet_typed_visit visit, void *ctx)
+static bool typed_key_from_locator(const struct zcl_fleet_typed_locator *d,
+                                   struct typed_key *key)
 {
-    if (!ix || ix->poisoned || !d || d->type != JSON_OBJ || !visit) return false;
-    if (strcmp(typed_str(d, "kind"), "directive")) return true;
-    const struct json_value *seq = json_get(d, "seq");
-    if (!seq || seq->type != JSON_INT) return false;
-    struct typed_key key = {typed_str(d, "to"), typed_str(d, "from"), typed_str(d, "ref"),
-        typed_str(d, "stream"), typed_str(d, "row_sha3"), typed_int(d, "row_offset"), json_get_int(seq)};
+    if (!d->from || !d->to || !d->ref || !d->stream || !d->row_sha3)
+        return false;
+    *key = (struct typed_key){d->to, d->from, d->ref, d->stream, d->row_sha3,
+                              d->row_offset, d->seq};
+    return true;
+}
+bool zcl_fleet_typed_index_visit_key(struct zcl_fleet_typed_index *ix,
+                                     const struct zcl_fleet_typed_locator *d,
+                                     zcl_fleet_typed_visit visit, void *ctx)
+{
+    if (!ix || ix->poisoned || !d || !visit || !d->kind) return false;
+    if (strcmp(d->kind, "directive")) return true;
+    struct typed_key key;
+    if (!typed_key_from_locator(d, &key)) return false;
     size_t lo = 0, hi = ix->count;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
@@ -168,4 +176,16 @@ bool zcl_fleet_typed_index_visit(struct zcl_fleet_typed_index *ix,
         ++lo;
     }
     return true;
+}
+bool zcl_fleet_typed_index_visit(struct zcl_fleet_typed_index *ix,
+                                  const struct json_value *d, zcl_fleet_typed_visit visit, void *ctx)
+{
+    if (!ix || ix->poisoned || !d || d->type != JSON_OBJ || !visit) return false;
+    if (strcmp(typed_str(d, "kind"), "directive")) return true;
+    const struct json_value *seq = json_get(d, "seq");
+    if (!seq || seq->type != JSON_INT) return false;
+    struct zcl_fleet_typed_locator key = {typed_str(d, "from"), typed_str(d, "to"),
+        typed_str(d, "ref"), typed_str(d, "stream"), typed_str(d, "row_sha3"),
+        typed_int(d, "row_offset"), json_get_int(seq), "directive"};
+    return zcl_fleet_typed_index_visit_key(ix, &key, visit, ctx);
 }

@@ -39,6 +39,11 @@ static int typed_case_owned(void)
         ASSERT(zcl_fleet_typed_index_visit(&incremental, &d, typed_visit, &initial));
         ASSERT_EQ(initial.count, 2);
         ASSERT_EQ(initial.offset[0], 8); ASSERT_EQ(initial.offset[1], 5);
+        struct zcl_fleet_typed_locator key = {"a", "b", "r", "inbox.b.jsonl", "hash", 4, 9, "directive"};
+        struct typed_seen direct = {.accept_good = true};
+        ASSERT(zcl_fleet_typed_index_visit_key(&incremental, &key, typed_visit, &direct));
+        ASSERT_EQ(direct.count, initial.count);
+        ASSERT_EQ(direct.offset[0], initial.offset[0]); ASSERT_EQ(direct.offset[1], initial.offset[1]);
         struct json_value tie;
         ASSERT(typed_read(&tie, "{\"seq\":3,\"kind\":\"result\",\"stream\":\"outbox.jsonl\",\"from\":\"b\",\"to\":\"a\",\"ref\":\"r\",\"observed_stream\":\"inbox.b.jsonl\",\"observed_sha3\":\"hash\",\"observed_offset\":4,\"observed_seq\":9,\"observed_disposition\":\"READ\",\"sender_binding\":\"good\",\"row_offset\":8}"));
         ASSERT(zcl_fleet_typed_index_append(&full, &tie));
@@ -50,6 +55,10 @@ static int typed_case_owned(void)
         ASSERT(zcl_fleet_typed_index_visit(&incremental, &d, typed_visit, &b));
         ASSERT_EQ(a.count, 2); ASSERT_EQ(a.offset[0], 8); ASSERT_EQ(a.offset[1], 8);
         ASSERT_EQ(b.count, a.count); ASSERT_EQ(b.offset[0], a.offset[0]); ASSERT_EQ(b.offset[1], a.offset[1]);
+        direct = (struct typed_seen){.accept_good = true};
+        ASSERT(zcl_fleet_typed_index_visit_key(&full, &key, typed_visit, &direct));
+        ASSERT_EQ(direct.count, a.count); ASSERT_EQ(direct.offset[0], a.offset[0]);
+        ASSERT_EQ(direct.offset[1], a.offset[1]);
         json_free(&d);
         ASSERT(typed_read(&d, "{\"kind\":\"directive\"}"));
         ASSERT(!zcl_fleet_typed_index_visit(&full, &d, typed_visit, &a));
@@ -84,6 +93,8 @@ static int typed_case_capacity(void)
         zcl_fleet_typed_index_init(&ix, 4, 8192);
         ASSERT(!zcl_fleet_typed_index_append(&ix, NULL));
         ASSERT(!zcl_fleet_typed_index_visit(&ix, &d, typed_visit, &s));
+        struct zcl_fleet_typed_locator key = {"", "", "", "", "", -1, 1, "directive"};
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &key, typed_visit, &s));
         zcl_fleet_typed_index_free(&ix); json_free(&row); json_free(&d);
         PASS();
     } _test_next:;
@@ -109,8 +120,29 @@ static int typed_case_mismatch(void)
             (void)snprintf(buf, sizeof buf, "{\"seq\":%d,\"kind\":\"directive\",\"from\":\"%s\",\"to\":\"%s\",\"ref\":\"%s\",\"stream\":\"%s\",\"row_sha3\":\"%s\",\"row_offset\":%d}", i == 7 ? 10 : 9, from[i], to[i], ref[i], stream[i], hash[i], i == 6 ? 7 : 4);
             ASSERT(typed_read(&d, buf)); struct typed_seen s = {0};
             ASSERT(zcl_fleet_typed_index_visit(&ix, &d, typed_visit, &s));
-            ASSERT_EQ(s.count, i == 0 ? 1 : 0); json_free(&d);
+            ASSERT_EQ(s.count, i == 0 ? 1 : 0);
+            struct zcl_fleet_typed_locator key = {from[i], to[i], ref[i], stream[i], hash[i],
+                                                  i == 6 ? 7 : 4, i == 7 ? 10 : 9, "directive"};
+            struct typed_seen direct = {0};
+            ASSERT(zcl_fleet_typed_index_visit_key(&ix, &key, typed_visit, &direct));
+            ASSERT_EQ(direct.count, s.count); json_free(&d);
         }
+        struct zcl_fleet_typed_locator bad = {NULL, "b", "", "s", "h", 4, 9, "directive"};
+        struct typed_seen unused = {0};
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
+        bad = (struct zcl_fleet_typed_locator){"a", NULL, "", "s", "h", 4, 9, "directive"};
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
+        bad = (struct zcl_fleet_typed_locator){"a", "b", NULL, "s", "h", 4, 9, "directive"};
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
+        bad = (struct zcl_fleet_typed_locator){"a", "b", "", NULL, "h", 4, 9, "directive"};
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
+        bad = (struct zcl_fleet_typed_locator){"a", "b", "", "s", NULL, 4, 9, "directive"};
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
+        bad = (struct zcl_fleet_typed_locator){NULL, NULL, NULL, NULL, NULL, -1, -1, "result"};
+        ASSERT(zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
+        ASSERT_EQ(unused.count, 0);
+        bad.kind = NULL;
+        ASSERT(!zcl_fleet_typed_index_visit_key(&ix, &bad, typed_visit, &unused));
         zcl_fleet_typed_index_free(&ix); json_free(&rows); PASS();
     } _test_next:;
     return failures;
