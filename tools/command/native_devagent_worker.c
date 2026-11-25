@@ -2570,6 +2570,7 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
         if (wkr_after_idle(opts, &idle, &idle_ms, &wait_s))
             break;
     }
+    wkr_reap();
     wkr_idle_close(&idle);
     (void)signal(SIGTERM, old_term);
     wkr_lock_drop(&lock);

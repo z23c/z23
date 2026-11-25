@@ -2903,7 +2903,7 @@ int test_devagent_worker(void)
     failures += wtx_missing_result_receipt();
     failures += wtx_tampered_pending_body();
 
-    TEST("lifecycle: post claim fixture gate receipt reap completed")
+    TEST("lifecycle: drive reaps the completed job before exit")
     {
         struct wkr_drive_opts o;
         char verdict[64];
@@ -2932,7 +2932,6 @@ int test_devagent_worker(void)
         jobs = zcl_devagent_worker_drive(&o, wtx_fixture);
         ASSERT_EQ(jobs, 1);
         ASSERT_EQ(wtx_count_read(), 1);
-        ASSERT(wtx_queue_verb("reap", NULL, NULL));
         ASSERT(wtx_outcome("wtx-life", verdict, sizeof(verdict), &rc));
         ASSERT_STR_EQ(verdict, "pass");
         ASSERT_EQ(rc, 0);
@@ -3549,7 +3548,7 @@ int test_devagent_worker(void)
         PASS();
     }
 
-    TEST("an unwritable receipt fails the run and sends no pass mail")
+    TEST("an unwritable receipt records unknown and sends no pass mail")
     {
         struct wkr_drive_opts o;
         char verdict[64];
@@ -3570,12 +3569,8 @@ int test_devagent_worker(void)
         ASSERT(!wtx_runout_has("wtx-noreceipt", 1, "rc=0\n"));
         ASSERT(!wtx_mail_has("wtx-noreceipt", "gate=pass"));
         ASSERT(wtx_mail_has("wtx-noreceipt", "terminal=receipt-unwritable"));
-        char blocked[4096];
-        (void)snprintf(blocked, sizeof(blocked), "%s/z23/dev/engine/wtx-noreceipt/a1/receipt.json", g_wtx_state);
-        ASSERT(rmdir(blocked) == 0);
-        ASSERT(wtx_queue_verb("reap", NULL, NULL));
         ASSERT(wtx_outcome("wtx-noreceipt", verdict, sizeof(verdict), &rc));
-        ASSERT_STR_EQ(verdict, "no-receipt");
+        ASSERT_STR_EQ(verdict, "unknown");
         ASSERT(!zcl_devagent_closed_pass(verdict, rc));
         wtx_restore();
         PASS();
