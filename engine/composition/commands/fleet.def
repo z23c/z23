@@ -832,7 +832,7 @@ ZCL_COMMAND_READY_READ(
     "Returns one object by exact reference (type mail|queue|board|land, ref "
     "exact): queue accepts optional positive seq and attempt together to "
     "bind one attempt; land requires both with the exact tip as ref. "
-    "Mail accepts stream,row_offset,seq,row_sha3 together for one exact retained JSONL line; ref-only mail remains latest-held. Ref-only queue behavior is unchanged. Otherwise returns the mail row "
+    "Mail accepts optional kind for an exact row-kind match, and accepts stream,row_offset,seq,row_sha3 together for one exact retained JSONL line; ref-only mail remains latest-held when kind is absent. Ref-only queue behavior is unchanged. Otherwise returns the mail row "
     "carrying the ref, the queue row or outcome "
     "named by it, or the one board post with the id — never a log or a "
     "repository. Unknown refs are typed refusals; a board without a "
@@ -840,7 +840,7 @@ ZCL_COMMAND_READY_READ(
     "never waits.", 32768,
     "fleet,steer,evidence,steering,chatgpt,reference",
     "zcl.fleet_steer_evidence.input.v1", "zcl.fleet_steer_evidence.v1",
-    "grant,type,ref,seq,attempt,stream,row_offset,row_sha3", "type,ref",
+    "grant,type,ref,kind,seq,attempt,stream,row_offset,row_sha3", "type,ref",
     "z23 fleet steer evidence --type=mail --ref=<ref>",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

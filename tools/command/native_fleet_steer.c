@@ -7692,6 +7692,17 @@ static int fmc_disposition_project(const struct zcl_command_request *req,
     return authority < 0 ? -1 : written ? 1 : 0;
 }
 
+static bool fmc_evidence_kind_match(const struct zcl_command_request *req,
+                                    const struct json_value *row)
+{
+    const char *kind = fmc_str(req, "kind");
+    const struct json_value *value;
+    if (!kind || !kind[0]) return true;
+    value = json_get(row, "kind");
+    return value && value->type == JSON_STR &&
+           strcmp(json_get_str(value), kind) == 0;
+}
+
 static void fmc_evidence_mail_exact(const struct zcl_command_request *req,
     struct zcl_command_reply *reply)
 {
@@ -7704,6 +7715,8 @@ static void fmc_evidence_mail_exact(const struct zcl_command_request *req,
     if (ready) fmc_mail_invoke(&sub, false);
     if (!ready || sub.reply.status != ZCL_COMMAND_STATUS_PASSED)
         fmc_fail(reply, "EVIDENCE_UNAVAILABLE", "exact retained mail did not match or answer", "dev.agent.mail");
+    else if (!fmc_evidence_kind_match(req, &sub.reply.data))
+        fmc_fail(reply, "EVIDENCE_NOT_FOUND", "exact retained mail kind did not match", "dev.agent.mail");
     else {
         int projected = fmc_disposition_project(req, &sub.reply.data, reply);
         if (projected < 0)
@@ -7752,7 +7765,8 @@ static void fmc_evidence_mail(const struct zcl_command_request *req,
             continue;
         v = json_get(r, "ref");
         rref = (v && v->type == JSON_STR) ? json_get_str(v) : "";
-        if (rref && strcmp(rref, ref) == 0)
+        if (rref && strcmp(rref, ref) == 0 &&
+            fmc_evidence_kind_match(req, r))
             hit = r;
     }
     if (hit) {
@@ -7993,6 +8007,15 @@ static void fmc_do_evidence(const struct zcl_command_request *req,
     if (!type || !ref || !ref[0] || strlen(ref) > FMC_REF_MAX) {
         fmc_fail(reply, "BAD_INPUT", "evidence needs type and ref",
                  "type in {mail,queue,board,land}, ref exact");
+        return;
+    }
+    const struct json_value *kind_value = json_get(req->input, "kind");
+    if (kind_value &&
+        (kind_value->type != JSON_STR || !json_get_str(kind_value)[0] ||
+         strcmp(type, "mail") != 0 ||
+         !zcl_devagent_name_ok(json_get_str(kind_value)))) {
+        fmc_fail(reply, "BAD_INPUT", "evidence kind must be a mail row kind",
+                 "mail: kind is optional and uses the row's exact kind");
         return;
     }
     if (!fmc_evidence_selectors(req, type)) {

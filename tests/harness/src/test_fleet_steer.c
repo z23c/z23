@@ -502,6 +502,9 @@ static const char *fmx_changes_from(const struct fmx_call *c, size_t idx)
                                                         : "";
 }
 
+static bool fmx_mail_result(const char *ref, const char *from);
+static bool fmx_mail_kind(const char *ref, const char *from, const char *kind);
+
 static void fmx_evidence(struct fmx_call *c, const char *grant,
                          const char *type, const char *ref)
 {
@@ -1290,6 +1293,28 @@ _test_next:;
     return failures;
 }
 
+static bool fmx_kind_invalid(const char *gid)
+{
+    struct fmx_call e;
+    bool ok = true;
+    fmx_evidence(&e, gid, "mail", "kind-filter");
+    (void)json_push_kv_str(&e.input, "kind", "");
+    ok &= !fmx_run(&e, zcl_native_handle_fleet_steer_evidence) ||
+          (!fmx_ok(&e) && strcmp(e.reply.error.code, "BAD_INPUT") == 0);
+    fmx_end(&e);
+    fmx_evidence(&e, gid, "mail", "kind-filter");
+    (void)json_push_kv_int(&e.input, "kind", 7);
+    ok &= !fmx_run(&e, zcl_native_handle_fleet_steer_evidence) ||
+          (!fmx_ok(&e) && strcmp(e.reply.error.code, "BAD_INPUT") == 0);
+    fmx_end(&e);
+    fmx_evidence(&e, gid, "queue", "kind-filter");
+    (void)json_push_kv_str(&e.input, "kind", "");
+    ok &= !fmx_run(&e, zcl_native_handle_fleet_steer_evidence) ||
+          (!fmx_ok(&e) && strcmp(e.reply.error.code, "BAD_INPUT") == 0);
+    fmx_end(&e);
+    return ok;
+}
+
 static int fmx_t_evidence(void)
 {
     int failures = 0;
@@ -1311,6 +1336,52 @@ static int fmx_t_evidence(void)
         ASSERT(!fmx_ok(&e));
         ASSERT_STR_EQ(e.reply.error.code, "EVIDENCE_NOT_FOUND");
         fmx_end(&e);
+        ASSERT(fmx_mail_result("kind-filter", "worker"));
+        ASSERT(fmx_mail_kind("kind-filter", "receiver", "claim"));
+        fmx_evidence(&e, a.gid, "mail", "kind-filter");
+        (void)json_push_kv_str(&e.input, "kind", "result");
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
+        ASSERT(fmx_ok(&e));
+        const struct json_value *object = fmx_get(&e, "object");
+        ASSERT_STR_EQ(json_get_str(json_get(object, "kind")), "result");
+        char stream[64], row_sha3[65];
+        (void)snprintf(stream, sizeof(stream), "%s",
+                       json_get_str(json_get(object, "stream")));
+        (void)snprintf(row_sha3, sizeof(row_sha3), "%s",
+                       json_get_str(json_get(object, "row_sha3")));
+        long long row_offset = json_get_int(json_get(object, "row_offset"));
+        long long seq = json_get_int(json_get(object, "seq"));
+        fmx_evidence(&e, a.gid, "mail", "kind-filter");
+        (void)json_push_kv_str(&e.input, "kind", "problem");
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
+        ASSERT(!fmx_ok(&e));
+        ASSERT_STR_EQ(e.reply.error.code, "EVIDENCE_NOT_FOUND");
+        fmx_end(&e);
+        fmx_evidence(&e, a.gid, "mail", "kind-filter");
+        (void)json_push_kv_str(&e.input, "kind", "result");
+        (void)json_push_kv_str(&e.input, "stream", stream);
+        (void)json_push_kv_int(&e.input, "row_offset", row_offset);
+        (void)json_push_kv_int(&e.input, "seq", seq);
+        (void)json_push_kv_str(&e.input, "row_sha3", row_sha3);
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
+        ASSERT(fmx_ok(&e));
+        fmx_evidence(&e, a.gid, "mail", "kind-filter");
+        (void)json_push_kv_str(&e.input, "kind", "problem");
+        (void)json_push_kv_str(&e.input, "stream", stream);
+        (void)json_push_kv_int(&e.input, "row_offset", row_offset);
+        (void)json_push_kv_int(&e.input, "seq", seq);
+        (void)json_push_kv_str(&e.input, "row_sha3", row_sha3);
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
+        ASSERT(!fmx_ok(&e));
+        ASSERT_STR_EQ(e.reply.error.code, "EVIDENCE_NOT_FOUND");
+        fmx_end(&e);
+        fmx_evidence(&e, a.gid, "queue", "kind-filter");
+        (void)json_push_kv_str(&e.input, "kind", "result");
+        ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
+        ASSERT(!fmx_ok(&e));
+        ASSERT_STR_EQ(e.reply.error.code, "BAD_INPUT");
+        fmx_end(&e);
+        ASSERT(fmx_kind_invalid(a.gid));
         fmx_restore();
         PASS();
     }
@@ -6674,7 +6745,7 @@ _test_next:;
 
 /* Post one mail row naming a ref, so the brief has a real handover to
  * find. Mirrors fmx_mail_count's shape: drive the leaf, never the file. */
-static bool fmx_mail_result(const char *ref, const char *from)
+static bool fmx_mail_kind(const char *ref, const char *from, const char *kind)
 {
     struct fmx_call p;
     bool ok;
@@ -6689,7 +6760,7 @@ static bool fmx_mail_result(const char *ref, const char *from)
     (void)json_push_kv_str(&p.input, "action", "post");
     (void)json_push_kv_str(&p.input, "to", "node1-a");
     (void)json_push_kv_str(&p.input, "from", from);
-    (void)json_push_kv_str(&p.input, "kind", "result");
+    (void)json_push_kv_str(&p.input, "kind", kind);
     (void)json_push_kv_str(&p.input, "ref", ref);
     (void)json_push_kv_str(&p.input, "body", "candidate handover");
     zcl_native_handle_dev_agent_mail(&p.request, &p.reply);
@@ -6697,6 +6768,11 @@ static bool fmx_mail_result(const char *ref, const char *from)
     zcl_command_reply_free(&p.reply);
     json_free(&p.input);
     return ok;
+}
+
+static bool fmx_mail_result(const char *ref, const char *from)
+{
+    return fmx_mail_kind(ref, from, "result");
 }
 
 /* The row for `id`, or NULL. */
