@@ -1220,6 +1220,10 @@ static void board_tick_at(struct boot_svc_ctx *svc, int64_t now)
     }
     board_push_lane_tick(svc, ndb, now);
     if (now == second) {
+        /* The once-a-second drain already ran. A note or a wake that
+         * arrived after it rides this 100 ms tick, and the pull clock
+         * stays where it is. */
+        boot_fleet_board_wake_tick(svc, ndb, now);
         supervisor_progress_idle(g_child);
         return;
     }

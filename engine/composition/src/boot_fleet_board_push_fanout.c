@@ -14,8 +14,9 @@
  * A peer on the fleet roster with no pairing row is NOT pushed to: the push
  * rides the paired "board" service, whose stream primitive refuses a peer
  * with no pairing row, and its receiving half proves a pusher only through
- * pairing rows. Such a peer still pulls every 15 s over "board.roster". So
- * the gap shows, each fan-out post counts, in push_fanout_roster_unpushed,
+ * pairing rows. Such a peer still pulls over "board.roster" on the roster
+ * pull interval, so the gap shows. Each fan-out post counts, in
+ * push_fanout_roster_unpushed,
  * the connected roster-only peers the roster answer would serve it to now:
  * the key the peer proved with a verified asking proof on THIS session, that
  * key's standing (no pairing row, a member of the roster in force) and the

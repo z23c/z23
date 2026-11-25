@@ -16963,6 +16963,28 @@ static int test_fleet_board_roster_wake(void)
         ASSERT_EQ(after.push_fanout, before.push_fanout);
         PASS();
     }
+    TEST("fleet roster wake: a note and its pull ride the next tick of the same second") {
+        uint64_t pulls_same = 0, seconds_same = 0;
+        fbc_ask_begin(&w);
+        boot_fleet_board_fleet_test_tick_runs(&seconds, &pulls);
+        wake_pulls = boot_fleet_board_wake_test_pulls();
+        boot_fleet_board_wake_note();
+        boot_fleet_board_fleet_test_tick(&w.svc, now + 4);
+        n = mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini, frame,
+                           sizeof frame, &more);
+        ASSERT(more);
+        ASSERT(fbc_wake_open_is_proof(frame, n));
+        ASSERT(mesh_stream_frame(&w.mp, w.asker, frame, n, NULL));
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 1);
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 1);
+        boot_fleet_board_fleet_test_tick(&w.svc, now + 4);
+        boot_fleet_board_fleet_test_tick_runs(&seconds_same, &pulls_same);
+        ASSERT_EQ(seconds_same, seconds);
+        ASSERT_EQ(pulls_same, pulls);
+        ASSERT_EQ(boot_fleet_board_wake_test_pulls(), wake_pulls + 1);
+        PASS();
+    }
     _test_next:;
     g_fbw_deny_read = false;
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);

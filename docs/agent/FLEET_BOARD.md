@@ -86,8 +86,8 @@ paired peer with a live session that a pull would be served the post to.
 Only paired peers are pushed to. A machine on the fleet roster with no
 pairing row is not pushed a post. When this box newly stores a fleet post
 it sends that peer one wake: the same roster proof a pull carries, bound
-to a cursor no pull can use, and no post bytes. The peer pulls on its next
-one-second tick. The 15 s roster pull still runs, and it is what delivers
+to a cursor no pull can use, and no post bytes. The peer pulls on the next
+lane tick, the same 100 ms beat. The roster pull interval still runs, and it is what delivers
 the post when a wake is lost or the peer's build has no wake service.
 Carriage status counts those roster-only peers per post in
 `push_out.fanout_roster_unpushed`, so a fleet that relies on the roster

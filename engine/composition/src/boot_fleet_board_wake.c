@@ -1,8 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: The "board.wake" mesh stream. A box that newly stored a fleet
  * post tells each roster peer to pull, with the roster proof and no post
- * bytes. The peer pulls on its next one-second tick. The 15 s sweep stays
- * the repair for a lost wake. See config/boot_fleet_board.h.
+ * bytes. The peer pulls on the next lane tick, including a later tick of
+ * the same second. The roster pull interval stays the repair for a lost
+ * wake. See config/boot_fleet_board.h.
  */
 
 #include "boot_fleet_board_roster_internal.h"

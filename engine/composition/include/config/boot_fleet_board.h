@@ -347,8 +347,8 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * A newly stored fleet post also sends each such session one wake on
  * "board.wake": the same asking proof, bound to FLEET_BOARD_WAKE_AFTER, and
  * nothing else. The peer records that session and pulls on its next
- * one-second tick, inside the 15 s interval. A lost wake, or an older node
- * that answers stream_service_unknown, still converges on the 15 s pull.
+ * lane tick, inside the roster pull interval. A lost wake, or an older node
+ * that answers stream_service_unknown, still converges on that pull.
  * The wake is not a push: an unpaired peer is never handed post bytes.
  *
  * Revocation rides the same lane as a sealed head row (config/boot_fleet_roster.h).
@@ -432,11 +432,12 @@ void boot_fleet_board_observe_query(const uint8_t peer[32], const uint8_t post[3
  * tick, and share one cursor table. It holds both, or least-recently-used
  * eviction would drop the very cursor each pull is about to use. */
 #define FLEET_BOARD_FLEET_CURSOR_SLOTS (2u * FLEET_BOARD_FLEET_PEERS_MAX)
-/* The lane tick. A tick with no push work takes the board lane's own lock
- * twice, reads the clock and two counters, and returns; the pull, the answer
- * drain and everything else the lane did once a second still run once a
- * second. A wake is sent and collected on that same one-second beat, inside
- * the 15 s pull interval, and it does not move the pull clock. While posts
+/* The lane tick. A tick in a second that already ran takes the board lane's
+ * own lock twice, reads the clock and two counters, runs the wake, and
+ * returns. The pull, the answer drain and everything else the lane did once
+ * a second still run once a second. A wake is sent and collected on that
+ * 100 ms tick, including a later tick of the same second, and it does not
+ * move the pull clock. While posts
  * wait in the push queue and nothing changed (no post
  * queued and no push ended since the last round) a tick adds one counter
  * read and one push lock pair: the sending round, with its pairing walk,
@@ -544,8 +545,8 @@ enum fleet_board_push_refusal {
 
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc);
 void boot_fleet_board_fleet_shutdown(void);
-/* A fleet post was newly stored here. The next one-second tick wakes each
- * roster peer once so it pulls; further stores in that second coalesce. */
+/* A fleet post was newly stored here. The next lane tick wakes each
+ * roster peer once so it pulls; further stores before that tick coalesce. */
 void boot_fleet_board_wake_note(void);
 /* Registered once; serves both halves of every board stream. */
 bool boot_fleet_board_fleet_register_service(void);
