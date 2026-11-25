@@ -1621,8 +1621,8 @@ static void rcv_answer_refuse(struct rcv_ctx *c, const struct rcv_row *v,
 {
     char body[1024];
     c->st->refused++;
-    LOG_WARN(RCV_LOG, "refused directive src=%s: %s (%s)", src, reason,
-             detail);
+    LOG_WARN(RCV_LOG, "%s directive src=%s: %s (%s)",
+             c->dry ? "survey would refuse" : "refused", src, reason, detail);
     if (snprintf(body, sizeof(body),
                  "disposition=BLOCKED\n"
                  "receiver=%s\nstate=refused\nsrc=%s\nreason=%s\n"
@@ -3437,6 +3437,9 @@ static void rcv_status(const char *receiver, const char *workspace,
     }
     (void)json_push_kv_str(&reply->data, "leaf", RCV_LEAF);
     (void)json_push_kv_str(&reply->data, "state", "surveyed");
+    (void)json_push_kv_str(&reply->data, "counters_basis", "dry-survey");
+    (void)json_push_kv_str(&reply->data, "board_state", "unobserved");
+    (void)json_push_kv_str(&reply->data, "workspace_basis", "request-argument");
     (void)json_push_kv_str(&reply->data, "receiver", receiver);
     (void)json_push_kv_str(&reply->data, "workspace",
                            workspace && workspace[0] ? workspace : "");
