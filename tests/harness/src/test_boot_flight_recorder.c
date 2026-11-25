@@ -20,6 +20,7 @@
 
 #include "config/boot_flight_recorder.h"
 #include "config/boot_loop_guard.h"
+#include "services/chain_tip_watchdog.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "json/json.h"
@@ -31,7 +32,9 @@
 #include "../../../engine/composition/src/boot_timing_marks_internal.h"
 
 #include <sqlite3.h>
+#include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -630,6 +633,40 @@ static int bfr_test_existing_history_index(struct node_db *ndb)
 }
 
 
+
+/* A self-respawn exit says so on stderr: run in a foreground terminal it
+ * would otherwise look like a crash. */
+static int bfr_test_respawn_exit_line(void)
+{
+    int failures = 0;
+    char dir[256], path[600], buf[512];
+    test_make_tmpdir(dir, sizeof(dir), "boot_flight_recorder", "respawn");
+    snprintf(path, sizeof(path), "%s/respawn-stderr.txt", dir);
+    chain_tip_watchdog_test_reset_runtime();
+    chain_tip_watchdog_request_respawn();
+    shutdown_stagewatch_begin(dir);
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    BFR_CHECK("respawn line: capture file and saved stderr open",
+              saved >= 0 && fd >= 0);
+    if (saved >= 0 && fd >= 0) {
+        dup2(fd, STDERR_FILENO);
+        boot_loop_guard_note_shutdown_intent();
+        fflush(stderr);
+        dup2(saved, STDERR_FILENO);
+    }
+    if (fd >= 0) close(fd);
+    if (saved >= 0) close(saved);
+    shutdown_stagewatch_reset_for_test();
+    chain_tip_watchdog_test_reset_runtime();
+    int r = bfr_read_file(path, buf, sizeof(buf));
+    BFR_CHECK("a self-respawn exit prints that it exits on purpose and why",
+              r > 0 && strstr(buf, "exiting on purpose") != NULL &&
+              strstr(buf, SHUTDOWN_EXIT_REASON_SELF_RESPAWN_TIP_WATCHDOG) != NULL);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
 int test_boot_flight_recorder(void);
 int test_boot_flight_recorder(void)
 {
@@ -676,6 +713,7 @@ int test_boot_flight_recorder(void)
     failures += bfr_test_loop_guard_spaced_boots(&ndb);
     failures += bfr_test_loop_guard_quick_boots(&ndb);
     failures += bfr_test_exit_reason_streak_wiring(&ndb, dir);
+    failures += bfr_test_respawn_exit_line();
     failures += bfr_test_forced_exit_marker_readback(dir);
     failures += bfr_test_read_exit_reason_missing_breadcrumb(dir);
     failures += bfr_test_boot_clock_monotonic(&ndb);
