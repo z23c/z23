@@ -59,6 +59,13 @@ static int typed_case_owned(void)
         ASSERT(zcl_fleet_typed_index_visit_key(&full, &key, typed_visit, &direct));
         ASSERT_EQ(direct.count, a.count); ASSERT_EQ(direct.offset[0], a.offset[0]);
         ASSERT_EQ(direct.offset[1], a.offset[1]);
+        /* A caller's authorization decision is re-evaluated on every visit. */
+        struct typed_seen revoked = {.accept_good = false};
+        ASSERT(zcl_fleet_typed_index_visit_key(&full, &key, typed_visit, &revoked));
+        ASSERT_EQ(revoked.count, 3);
+        struct typed_seen restored = {.accept_good = true};
+        ASSERT(zcl_fleet_typed_index_visit_key(&full, &key, typed_visit, &restored));
+        ASSERT_EQ(restored.count, 2);
         json_free(&d);
         ASSERT(typed_read(&d, "{\"kind\":\"directive\"}"));
         ASSERT(!zcl_fleet_typed_index_visit(&full, &d, typed_visit, &a));

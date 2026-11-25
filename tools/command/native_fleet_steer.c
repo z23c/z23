@@ -275,6 +275,7 @@
 #include "command/native_fleet.h"
 #include "session/fleet_wiki_entry.h"
 #include "command/native_fleet_steer_tasks.h"
+#include "command/native_fleet_typed_index.h"
 #include "command/native_dev_proof_command.h"
 #include "config/command_catalog.h"
 #include "crypto/random_secret.h"
@@ -1641,6 +1642,36 @@ static const char *fmc_typed_read(const struct json_value *rows, const struct fm
         }
     }
     return latest;
+}
+
+struct fmc_typed_match {
+    const struct fmc_row *directive;
+    const char *disposition;
+};
+
+static bool fmc_typed_candidate(const struct json_value *row, void *opaque)
+{
+    struct fmc_typed_match *match = opaque;
+    struct fmc_row candidate;
+    if (!fmc_row_parse(row, &candidate) ||
+        !fmc_typed_read_matches(match->directive, &candidate)) return false;
+    match->disposition = candidate.observed_disposition;
+    return true;
+}
+
+/* The index is scoped to this exact rows array and never caches grant checks. */
+static const char *fmc_typed_read_indexed(const struct json_value *rows,
+    const struct fmc_row *d, struct zcl_fleet_typed_index *index)
+{
+    if (!index) return fmc_typed_read(rows, d);
+    struct zcl_fleet_typed_locator key = {
+        d->from, d->to, d->ref, d->stream, d->row_sha3,
+        d->row_offset, d->seq, d->kind
+    };
+    struct fmc_typed_match match = {.directive = d};
+    if (!zcl_fleet_typed_index_visit_key(index, &key, fmc_typed_candidate, &match))
+        return fmc_typed_read(rows, d);
+    return match.disposition;
 }
 
 /* Roster plus directives-as-work. */
@@ -3736,26 +3767,28 @@ static void fmc_close_find(const struct json_value *rows,
 /* Receiver evidence with no time on it: an ack, a typed read or a read
  * file covering d. Evaluated only when expiry is otherwise due. */
 static bool fmc_dir_covered(const struct json_value *rows,
-                            const struct fmc_row *d, bool acked)
+                            const struct fmc_row *d, bool acked,
+                            struct zcl_fleet_typed_index *index)
 {
-    return acked || fmc_read_covers(d) || fmc_typed_read(rows, d) != NULL;
+    return acked || fmc_read_covers(d) || fmc_typed_read_indexed(rows, d, index) != NULL;
 }
 
 static bool fmc_recipient_gone(const struct json_value *rows,
                                const struct fmc_row *d,
                                const struct fmc_dstatus *st, long long now,
-                               bool acked)
+                               bool acked, struct zcl_fleet_typed_index *index)
 {
     return strcmp(st->cls, "worker") == 0 && st->c.last_presence >= 0 &&
            now - st->c.last_seen > FMC_RECIPIENT_GONE_S &&
-           !fmc_dir_covered(rows, d, acked);
+           !fmc_dir_covered(rows, d, acked, index);
 }
 
 /* answered, closed, ambiguous, recipient_gone, acked, queued, unresolved:
  * a real answer wins over a closure, a closure over everything else. */
 static void fmc_directive_resolve(const struct json_value *rows,
                                   const struct fmc_row *d, long long now,
-                                  bool acked, struct fmc_dstatus *st)
+                                  bool acked, struct fmc_dstatus *st,
+                                  struct zcl_fleet_typed_index *index)
 {
     st->cls = fmc_directive_class(d);
     st->c.found = false;
@@ -3770,7 +3803,7 @@ static void fmc_directive_resolve(const struct json_value *rows,
         st->state = "closed";
     else if (st->a.ambiguous)
         st->state = "ambiguous";
-    else if (fmc_recipient_gone(rows, d, st, now, acked))
+    else if (fmc_recipient_gone(rows, d, st, now, acked, index))
         st->state = "recipient_gone";
     else
         st->state = acked ? "acked" : "queued";
@@ -3836,13 +3869,14 @@ static const char *fmc_unresolved_action(const struct fmc_row *v, char *buf,
  * object and names the read that settles it. */
 static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
                            const struct json_value *rows, long long now,
-                           const char *typed, bool past)
+                           const char *typed, bool past,
+                           struct zcl_fleet_typed_index *index)
 {
     struct json_value o;
     struct fmc_dstatus st;
     char action[FMC_REF_MAX + 64];
     bool acked = fmc_row_acked(v) || typed || fmc_alias_ack(v);
-    fmc_directive_resolve(rows, v, now, acked, &st);
+    fmc_directive_resolve(rows, v, now, acked, &st, index);
     fmc_directive_window(&st, past);
     const struct fmc_answer *a = &st.a;
     bool answered = strcmp(st.state, "answered") == 0;
@@ -3930,11 +3964,12 @@ static bool fmc_change_shape(const struct json_value *item, const struct fmc_row
  * "unresolved": what would show it received may be in the rows not read. */
 static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
                            const struct json_value *rows,
-                           const char *sent_path, long long now, bool past)
+                           const char *sent_path, long long now, bool past,
+                           struct zcl_fleet_typed_index *index)
 {
     struct json_value item;
     char lead[FMC_LEAD_MAX + 1];
-    const char *typed = fmc_typed_read(rows, v);
+    const char *typed = fmc_typed_read_indexed(rows, v, index);
     const char *state = fmc_row_state_with_read(v, rows, sent_path, typed);
     bool queued = strcmp(state, "queued") == 0;
     if (past && queued) {
@@ -3966,7 +4001,7 @@ static bool fmc_row_change(struct json_value *changes, const struct fmc_row *v,
     }
     ok &= fmc_put_int(&item, "queued_age_s", queued ? fmc_age_s(now, v->ts) : -1);
     if (!strcmp(v->kind, "directive"))
-        ok &= fmc_reply_emit(&item, v, rows, now, typed, past);
+        ok &= fmc_reply_emit(&item, v, rows, now, typed, past, index);
     ok = ok && fmc_change_shape(&item, v);
     size_t before = json_size(changes);
     if (ok) ok = json_push_back(changes, &item);
@@ -4558,6 +4593,7 @@ static void fmc_landing_note(struct fmc_landings *l,
 /* Everything the mail walk writes into, so each row is one call. */
 struct fmc_mail_ctx {
     bool projection_failed;
+    struct zcl_fleet_typed_index *typed_index;
     struct json_value *agents;
     struct json_value *work;
     struct json_value *changes;
@@ -4605,6 +4641,22 @@ static void fmc_landing_row(struct fmc_mail_ctx *c, const struct fmc_row *v)
         return;
     fmc_landing_note(c->landings, &n, v, c->now);
     fmc_landing_report(c, &n, v);
+}
+
+/* This is disposable request-local acceleration, never evidence authority. */
+static void fmc_typed_index_begin(struct fmc_mail_ctx *c,
+                                  struct zcl_fleet_typed_index *index,
+                                  const struct json_value *rows)
+{
+    zcl_fleet_typed_index_init(index, 4096u, 16u * 1024u * 1024u);
+    c->typed_index = zcl_fleet_typed_index_build(index, rows) ? index : NULL;
+}
+
+static void fmc_typed_index_end(struct fmc_mail_ctx *c,
+                                struct zcl_fleet_typed_index *index)
+{
+    c->typed_index = NULL;
+    zcl_fleet_typed_index_free(index);
 }
 
 /* Mail counts as a read candidates source only when the pass read it
@@ -4735,13 +4787,15 @@ static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
     /* At or before a cut pass's reach, a directive nothing read resolves
      * is unresolved: tallied apart, never open, never a blocker. */
     bool past = fmc_window_past(&c->win, v);
-    fmc_directive_resolve(rows, v, c->now, fmc_row_acked(v) || fmc_alias_ack(v), &st);
+    fmc_directive_resolve(rows, v, c->now, fmc_row_acked(v) || fmc_alias_ack(v), &st,
+                          c->typed_index);
     fmc_directive_window(&st, past);
     bool open = fmc_dstate_open(st.state);
     if (c->ro)
         fmc_tally_note(&c->ro->dt, &st, v, age, open);
     if (!open || strcmp(st.cls, "worker") != 0 ||
-        strcmp(fmc_row_state(v, rows, c->sent_path), "queued") != 0 ||
+        strcmp(fmc_row_state_with_read(v, rows, c->sent_path,
+               fmc_typed_read_indexed(rows, v, c->typed_index)), "queued") != 0 ||
         !fmc_stale_blocker(c->blockers, v, age, c->stale < FMC_STALE_BLOCKER_CAP))
         return;
     c->stale++;
@@ -4769,7 +4823,7 @@ static void fmc_mail_row(struct fmc_mail_ctx *c, const struct fmc_row *v,
     if (c->projection_failed || v->seq <= c->since || c->shown >= c->changes_cap)
         return;
     if (fmc_row_change(c->changes, v, rows, c->sent_path, c->now,
-                       fmc_window_past(&c->win, v))) c->shown++;
+                       fmc_window_past(&c->win, v), c->typed_index)) c->shown++;
     else c->projection_failed = true;
 }
 
@@ -4812,7 +4866,7 @@ static void fmc_brief_token_changes(struct fmc_mail_ctx *c,
         struct fmc_row v;
         if (!fmc_row_parse(json_at(rows_new, i), &v) ||
             !fmc_row_change(c->changes, &v, rows_full, c->sent_path, c->now,
-                            fmc_window_past(&c->win, &v))) {
+                            fmc_window_past(&c->win, &v), c->typed_index)) {
             c->projection_failed = true;
             break;
         }
@@ -4947,7 +5001,10 @@ static bool fmc_brief_compact_history(const struct zcl_command_request *req,
     } else {
         view->ok = true;
         view->forward = true;
+        struct zcl_fleet_typed_index index;
+        fmc_typed_index_begin(c, &index, &history);
         fmc_brief_token_changes(c, fresh, &history, view);
+        fmc_typed_index_end(c, &index);
     }
     json_free(&history);
     return !fail;
@@ -5093,6 +5150,8 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     n = json_size(&rows);
     view->count = (long long)n;
     fmc_window_keep_presence(&rows, &c->win);
+    struct zcl_fleet_typed_index index;
+    fmc_typed_index_begin(c, &index, &rows);
     /* The pass feeds roster, tallies, candidates and the
      * stale-directive scan on every path. The changes feed differs: the
      * legacy integer path filters it by the global floor here, while the
@@ -5117,6 +5176,7 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     else if (resume_state > 0)
         fmc_brief_resume_changes(req, c, missing, view, &rows, resume);
     fmc_stale_summary(c->blockers, c->stale);
+    fmc_typed_index_end(c, &index);
     json_free(&rows);
     return view->cursor;
 }
