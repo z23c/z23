@@ -89,13 +89,15 @@ Match `git log origin/main` by subject first. The larger catalog is
 3. **List every flag in `-help`.** `-fileservice` was missing from `-help`
    until today. Diff the known-flag table in `engine/composition/src/args.c`
    against `print_usage_all` and add the missing lines; then add a lint that
-   fails when a parsed flag has no help line. The reported gap was 88 of 143
-   flags (unchecked: count first).
-4. **Reproduce the `code impact` slowness.** On a wallet file it took about
-   5 s here against a 250 ms budget (`git grep -l` took 0.06 s); a report saw
-   28 s. Time it on a current build, find the slow stage in
-   `engine/composition/commands/code.def`'s handler, and cut it or fix the
-   budget. Record before and after.
+   fails when a parsed flag has no help line. A rough grep on 2026-11-25 found
+   about 74 of 127 parsed flags absent from the help text (Mark reported 88 of
+   143). Many are likely hidden on purpose: decide which are public first, and
+   write each line from the code, never from a guess.
+4. **`code impact` speed: not reproduced on main.** On a current dev build it
+   took 0.14 s on a wallet file and on `args.c` (budget 250 ms). The 5 s and
+   28 s reports came from an older binary or a cold index. If it is slow for
+   you, check the build age and run `code index` status before touching the
+   handler; record the time on a current build.
 5. **Build the board menu from the node's ops.** The client menu says ready
    for ops the running node lacks; the refusal now names the op. Ask the node
    for its op list once and filter the menu. Files: `tools/command/
