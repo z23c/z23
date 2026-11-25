@@ -2424,6 +2424,402 @@ bool zcl_devagent_mail_brief_window(char *token, size_t cap, long long window,
     return ok;
 }
 
+_Static_assert(ZCL_DEVAGENT_MAIL_LINE_CAP == DVM_LINE_CAP,
+               "presence line cap matches the pull");
+
+/* A role suffix: 1..32 of letters, digits, '.', '_' or '-'. The same
+ * alphabet the steer leaf accepts, so a longer or marked ref cannot
+ * take a real role's slot. */
+static bool dvm_role_token(const char *s)
+{
+    size_t i, n;
+    if (!s || !s[0])
+        return false;
+    n = strlen(s);
+    if (n > 32u)
+        return false;
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (isalnum(c) || c == '.' || c == '_' || c == '-')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+/* The role of a presence note, or false when this line is not one the
+ * steer leaf would accept. The prefix is nine bytes. */
+static bool dvm_presence_role_of(const char *line, char *role, size_t cap)
+{
+    char kind[32];
+    char ref[256];
+    const char *suffix;
+    size_t n;
+    if (!dvm_line_str(line, "kind", kind, sizeof(kind)) ||
+        strcmp(kind, "note") != 0)
+        return false;
+    if (!dvm_line_str(line, "ref", ref, sizeof(ref)))
+        return false;
+    if (strncmp(ref, "presence-", sizeof("presence-") - 1) != 0)
+        return false;
+    suffix = ref + (sizeof("presence-") - 1);
+    n = strlen(suffix);
+    if (!dvm_role_token(suffix) || n + 1 > cap)
+        return false;
+    memcpy(role, suffix, n + 1);
+    return true;
+}
+
+/* A kept line. `key` is the role or the sender. `ts_ok` is the
+ * "YYYY-MM-DDTHH:MM:SSZ" shape the steer leaf orders on. */
+struct dvm_kept {
+    char key[160];
+    char ts[32];
+    const char *p;
+    size_t len;
+    bool ts_ok;
+    /* The role table refused this presence line. Emit it without the
+     * presence ref so last_seen can move and last_presence cannot. */
+    bool blank_ref;
+};
+
+static int dvm_kept_slot(const struct dvm_kept *hit, size_t n, const char *key)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (strcmp(hit[i].key, key) == 0)
+            return (int)i;
+    return -1;
+}
+
+static int dvm_ts_pair(const char *ts, size_t at)
+{
+    return (ts[at] - '0') * 10 + (ts[at + 1] - '0');
+}
+
+/* The ranges fmc_ts_unix rejects after the shape check. A stamp it
+ * ignores must not sort ahead of one it would use. */
+static bool dvm_ts_ranges(const char *ts)
+{
+    int mo = dvm_ts_pair(ts, 5);
+    int d = dvm_ts_pair(ts, 8);
+    int h = dvm_ts_pair(ts, 11);
+    int mi = dvm_ts_pair(ts, 14);
+    int s = dvm_ts_pair(ts, 17);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31)
+        return false;
+    return h <= 23 && mi <= 59 && s <= 59;
+}
+
+/* True when fmc_ts_unix would accept the stamp. Well-formed stamps sort
+ * in clock order. */
+static bool dvm_ts_ok(const char *ts)
+{
+    static const char pat[] = "dddd-dd-ddTdd:dd:ddZ";
+    size_t i;
+    if (!ts || strlen(ts) != sizeof(pat) - 1)
+        return false;
+    for (i = 0; pat[i]; i++) {
+        unsigned char c = (unsigned char)ts[i];
+        if (pat[i] == 'd') {
+            if (c < '0' || c > '9')
+                return false;
+        } else if (c != (unsigned char)pat[i]) {
+            return false;
+        }
+    }
+    return dvm_ts_ranges(ts);
+}
+
+/* A later line replaces the kept one only when its stamp parses and is
+ * strictly greater. A tie, or a stamp that does not parse, keeps the
+ * earlier line. */
+static bool dvm_ts_replaces(const char *old_ts, bool old_ok,
+                            const char *new_ts, bool new_ok)
+{
+    if (!new_ok)
+        return false;
+    if (!old_ok)
+        return true;
+    return strcmp(new_ts, old_ts) > 0;
+}
+
+/* 1 when `key` is stored, 0 when it is empty or the table is full and
+ * `fail_full` is clear, -1 when the key does not fit or a full table
+ * must drop the stream. */
+static int dvm_kept_note(struct dvm_kept *hit, size_t *n, size_t ncap,
+                         bool fail_full, const char *key, const char *ts,
+                         bool ts_ok, const char *p, size_t len)
+{
+    int slot;
+    size_t kn, tn;
+    if (!key || !key[0])
+        return 0;
+    kn = strlen(key);
+    if (kn >= sizeof(hit->key))
+        return -1;
+    slot = dvm_kept_slot(hit, *n, key);
+    if (slot >= 0) {
+        if (!dvm_ts_replaces(hit[slot].ts, hit[slot].ts_ok, ts, ts_ok))
+            return 1;
+    } else if (*n >= ncap) {
+        return fail_full ? -1 : 0;
+    } else {
+        slot = (int)*n;
+        *n += 1u;
+        memcpy(hit[slot].key, key, kn + 1u);
+    }
+    hit[slot].p = p;
+    hit[slot].len = len;
+    hit[slot].ts_ok = ts_ok;
+    hit[slot].blank_ref = false;
+    tn = ts && ts_ok ? strlen(ts) : 0u;
+    if (tn >= sizeof(hit[slot].ts))
+        tn = sizeof(hit[slot].ts) - 1u;
+    if (tn)
+        memcpy(hit[slot].ts, ts, tn);
+    hit[slot].ts[tn] = '\0';
+    return 1;
+}
+
+/* 1 when the field fits, 0 when it is absent, -1 when it is present and
+ * does not fit. An absent sender cannot match a recipient. */
+static int dvm_field(const char *line, const char *key, char *out, size_t cap)
+{
+    char pat[64];
+    if (dvm_line_str(line, key, out, cap))
+        return 1;
+    if (snprintf(pat, sizeof(pat), "\"%s\":\"", key) >= (int)sizeof(pat))
+        return -1;
+    return strstr(line, pat) ? -1 : 0;
+}
+
+/* 1 when the line is recorded, 0 when it is empty, -1 when it cannot be
+ * classified or a sender does not fit. A full role table leaves that role
+ * unseen. A full sender table fails the scan. */
+static int dvm_line_keep(struct dvm_kept *roles, size_t *nrole,
+                         struct dvm_kept *froms, size_t *nfrom,
+                         const char *p, size_t len, size_t cap)
+{
+    char one[DVM_LINE_CAP];
+    char role[33];
+    char from[160];
+    char ts[32];
+    int field, rc, slot;
+    bool ts_ok, refused;
+    if (len == 0)
+        return 0;
+    if (len >= sizeof(one) || len + 1 > cap)
+        return -1;
+    memcpy(one, p, len);
+    one[len] = '\0';
+    field = dvm_field(one, "ts", ts, sizeof(ts));
+    ts_ok = field > 0 && dvm_ts_ok(ts);
+    refused = false;
+    if (dvm_presence_role_of(one, role, sizeof(role))) {
+        rc = dvm_kept_note(roles, nrole, ZCL_DEVAGENT_MAIL_PRESENCE_ROLES,
+                           false, role, ts, ts_ok, p, len);
+        if (rc < 0)
+            return -1;
+        refused = rc == 0;
+    }
+    field = dvm_field(one, "from", from, sizeof(from));
+    if (field < 0)
+        return -1;
+    if (field > 0) {
+        rc = dvm_kept_note(froms, nfrom, ZCL_DEVAGENT_MAIL_PRESENCE_FROMS,
+                           true, from, ts, ts_ok, p, len);
+        if (rc < 0)
+            return -1;
+        slot = dvm_kept_slot(froms, *nfrom, from);
+        if (rc > 0 && slot >= 0 && froms[slot].p == p)
+            froms[slot].blank_ref = refused;
+    }
+    return 1;
+}
+
+/* When `skip_partial` is set the first line may start mid-row and is
+ * ignored. A line that does not fit fails the scan. */
+static bool dvm_presence_scan(const char *buf, size_t n, bool skip_partial,
+                              size_t cap, struct dvm_kept *roles, size_t *nrole,
+                              struct dvm_kept *froms, size_t *nfrom)
+{
+    const char *p = buf;
+    const char *end = buf + n;
+    *nrole = 0;
+    *nfrom = 0;
+    if (skip_partial) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl)
+            return false;
+        p = nl + 1;
+    }
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        int took;
+        if (!nl)
+            break;
+        took = dvm_line_keep(roles, nrole, froms, nfrom, p,
+                             (size_t)(nl - p), cap);
+        if (took < 0)
+            return false;
+        p = nl + 1;
+    }
+    return true;
+}
+
+static bool dvm_presence_path(const char *stream, char *path, size_t cap)
+{
+    char maildir[DVM_PATH_CAP];
+    int w;
+    if (!dvm_is_stream_name(stream) || !dvm_cursor_name_ok(stream))
+        return false;
+    if (!dvm_mail_dir(maildir, sizeof(maildir), false))
+        return false;
+    w = snprintf(path, cap, "%s/%s", maildir, stream);
+    return w > 0 && (size_t)w < cap;
+}
+
+/* Bytes [start, start+span) of `f`, or NULL. The caller frees. */
+static char *dvm_presence_read(FILE *f, long long start, long long span,
+                               size_t *nread)
+{
+    char *buf = zcl_malloc((size_t)span + 1u, "devagent_mail.presence");
+    if (!buf)
+        return NULL;
+    if (fseek(f, (long)start, SEEK_SET) != 0) {
+        free(buf);
+        return NULL;
+    }
+    *nread = fread(buf, 1, (size_t)span, f);
+    buf[*nread] = '\0';
+    return buf;
+}
+
+static bool dvm_kept_same(const struct dvm_kept *hit, size_t n,
+                          const char *p, size_t len)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (hit[i].p == p && hit[i].len == len)
+            return true;
+    return false;
+}
+
+/* A refused presence line is emitted without its ref. The steer leaf
+ * then counts the sender's stamp and does not set last_presence. */
+static void dvm_emit_one(const struct dvm_kept *hit, char *line,
+                         void (*keep)(const char *line, void *ctx), void *ctx)
+{
+    int n;
+    if (!hit->blank_ref) {
+        memcpy(line, hit->p, hit->len);
+        line[hit->len] = '\0';
+        keep(line, ctx);
+        return;
+    }
+    if (!hit->ts_ok || !dvm_role_token(hit->key))
+        return;
+    n = snprintf(line, DVM_LINE_CAP,
+                 "{\"seq\":0,\"ts\":\"%s\",\"from\":\"%s\",\"to\":\"*\","
+                 "\"kind\":\"note\",\"body\":\"\",\"ref\":\"\"}",
+                 hit->ts, hit->key);
+    if (n > 0 && (size_t)n < DVM_LINE_CAP)
+        keep(line, ctx);
+}
+
+static void dvm_kept_emit(const struct dvm_kept *skip, size_t nskip,
+                          const struct dvm_kept *hit, size_t n, char *line,
+                          void (*keep)(const char *line, void *ctx), void *ctx)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        if (skip && dvm_kept_same(skip, nskip, hit[i].p, hit[i].len))
+            continue;
+        dvm_emit_one(&hit[i], line, keep, ctx);
+    }
+}
+
+/* True when the lookbehind begins mid-row. `start` is one window before
+ * a line-aligned cut, so the byte before it is a newline when `start`
+ * itself is a line start. The caller skips a partial row only then. */
+static bool dvm_presence_midline(FILE *f, long long start, bool *skip)
+{
+    int c;
+    *skip = false;
+    if (start <= 0)
+        return true;
+    if (fseek(f, (long)(start - 1), SEEK_SET) != 0)
+        return false;
+    c = fgetc(f);
+    if (c < 0)
+        return false;
+    *skip = c != '\n';
+    return true;
+}
+
+bool zcl_devagent_mail_brief_presence(const char *stream, long long before,
+                                     void (*keep)(const char *line, void *ctx),
+                                     void *ctx)
+{
+    char path[DVM_PATH_CAP];
+    char line[DVM_LINE_CAP];
+    struct dvm_kept *roles;
+    struct dvm_kept *froms;
+    long long start;
+    long long span;
+    char *buf;
+    FILE *f;
+    size_t nread = 0;
+    size_t nrole = 0;
+    size_t nfrom = 0;
+    bool skip = false;
+    if (!keep)
+        return false;
+    if (!stream || before <= 0 || !dvm_presence_path(stream, path, sizeof(path)))
+        return false;
+    roles = zcl_malloc(sizeof(*roles) * ZCL_DEVAGENT_MAIL_PRESENCE_ROLES,
+                       "devagent_mail.presence.roles");
+    froms = zcl_malloc(sizeof(*froms) * ZCL_DEVAGENT_MAIL_PRESENCE_FROMS,
+                       "devagent_mail.presence.froms");
+    if (!roles || !froms) {
+        free(roles);
+        free(froms);
+        return false;
+    }
+    start = before > ZCL_DEVAGENT_MAIL_WINDOW_BYTES
+                ? before - ZCL_DEVAGENT_MAIL_WINDOW_BYTES
+                : 0;
+    span = before - start;
+    f = fopen(path, "rb");
+    if (!f) {
+        free(roles);
+        free(froms);
+        return false;
+    }
+    if (!dvm_presence_midline(f, start, &skip)) {
+        (void)fclose(f);
+        free(roles);
+        free(froms);
+        return false;
+    }
+    buf = dvm_presence_read(f, start, span, &nread);
+    (void)fclose(f);
+    if (!buf || !dvm_presence_scan(buf, nread, skip, sizeof(line), roles,
+                                   &nrole, froms, &nfrom)) {
+        free(buf);
+        free(roles);
+        free(froms);
+        return false;
+    }
+    dvm_kept_emit(NULL, 0, roles, nrole, line, keep, ctx);
+    dvm_kept_emit(roles, nrole, froms, nfrom, line, keep, ctx);
+    free(buf);
+    free(roles);
+    free(froms);
+    return true;
+}
+
 static bool dvm_prefix_streams(struct dvm_pull_state *ps, const char *token)
 {
     struct dvm_pull_filter filter = {0};

@@ -112,7 +112,8 @@
  * words after it name superseded, recipient gone, withdrawn or other),
  * else ambiguous, else recipient_gone (a worker directive with no ack,
  * typed read or read file covering it, whose recipient has posted a
- * presence-<name> session note here and whose newest row, presence or
+ * presence-<name> session note here, including one within a window of
+ * bytes before a cut stream's start, and whose newest row, presence or
  * mail, is older than FMC_RECIPIENT_GONE_S, 24 h; a name with no presence
  * row is never gone, it stays open), else acked (the
  * receiver's ack cursor covers the row, including a string next_since
@@ -236,11 +237,12 @@
  * reply.state too, is counted in directive_counts.unresolved (present
  * only when nonzero), is in neither open number, is never a stale
  * blocker, and carries a next_action naming the exact read by ref. An
- * unknown reach reads every such row that way. Two things a cut pass
- * still gets wrong both err towards alarm and are written at the reach
- * (fmc_window_finish): a directive stamped after the reach to a recipient
- * whose presence note is outside the window, and a stream appended out
- * of stamp order.
+ * unknown reach reads every such row that way. A presence note within
+ * one window before a cut stream's start is kept for that verdict only,
+ * so a directive stamped after the reach can still read recipient_gone.
+ * The note is not a row the pass counts, and a worker who never posted
+ * one stays open. A stream appended out of stamp order can still read
+ * queued where the truth is answered. That errs towards alarm.
  * changes stay exact for a token-resumed brief: they are the rows after
  * its token, in order and under the changes cap as before, each resolved
  * against the rows this pass read. A brief without a token shows the
@@ -4214,14 +4216,17 @@ static const char *fmc_mail_pass(const struct zcl_command_request *req,
  * while a directive stamped between the two reads past the reach:
  * "queued" where the truth is answered. It errs towards alarm.
  *
- * The reach cannot settle a recipient's absence either. recipient_gone
- * needs a presence row the pass read: a recipient silent for over a day
- * whose own stream holds more than a window after its note reads as a
- * name with no presence row, so a directive to it stamped after the
- * reach stays open, overdue and a stale blocker where a whole read says
- * recipient_gone and raises nothing. That too errs towards alarm; reading
- * an unseen recipient as unresolved would silence real alarms to new
- * workers. */
+ * The reach cannot settle a recipient's absence by itself.
+ * recipient_gone needs a presence row and a last-seen stamp. Each cut
+ * stream keeps every role's newest presence note, and each sender's
+ * newest row, in the one window of bytes before its start
+ * (fmc_window_keep_presence). One outbox carries every role. The
+ * directive scan resolves against those lines without counting them or
+ * moving the reach. A row older than that bound is still unread. A
+ * worker who never posted a presence note stays open: reading every
+ * unseen recipient as unresolved would silence a real alarm to a new
+ * worker. A stream appended out of stamp order can still read queued
+ * where the truth is answered. */
 #define FMC_WINDOW_STREAMS 16u /* the leaf refuses more */
 #define FMC_WINDOW_NAME 160u  /* longer than any name the leaf admits */
 
@@ -4749,6 +4754,74 @@ static bool fmc_brief_compact_history(const struct zcl_command_request *req,
     return !fail;
 }
 
+/* A presence note keeps its ref. Any other lookbehind row is only
+ * evidence of who was seen: a copied ref would answer or close a
+ * directive the pass did not read. */
+static bool fmc_lookbehind_is_presence(const struct json_value *v)
+{
+    const char *kind = fmc_row_field(v, "kind");
+    const char *ref = fmc_row_field(v, "ref");
+    size_t plen = sizeof(FMC_PRESENCE_REF) - 1;
+    return strcmp(kind, "note") == 0 &&
+           strncmp(ref, FMC_PRESENCE_REF, plen) == 0 &&
+           fmc_is_token(ref + plen, FMC_ROLE_MAX, false);
+}
+
+static bool fmc_blank_ref(struct json_value *v)
+{
+    size_t i;
+    if (!v || v->type != JSON_OBJ)
+        return false;
+    for (i = 0; i < v->num_children; i++) {
+        if (!v->keys[i] || strcmp(v->keys[i], "ref") != 0)
+            continue;
+        json_set_str(&v->children[i], "");
+        return v->children[i].type == JSON_STR;
+    }
+    return json_push_kv_str(v, "ref", "");
+}
+
+/* One lookbehind line onto the rows the directive scan resolves against.
+ * The caller has already stored the pass's own count. */
+static bool fmc_keep_presence_line(struct json_value *rows, const char *line)
+{
+    struct json_value v;
+    bool ok;
+    json_init(&v);
+    ok = line && line[0] && json_read(&v, line, strlen(line)) &&
+         v.type == JSON_OBJ &&
+         (fmc_lookbehind_is_presence(&v) || fmc_blank_ref(&v)) &&
+         json_push_back(rows, &v);
+    json_free(&v);
+    return ok;
+}
+
+static void fmc_window_keep_cb(const char *line, void *ctx)
+{
+    (void)fmc_keep_presence_line(ctx, line);
+}
+
+static void fmc_window_keep_one(struct json_value *rows, const char *name,
+                                long long off)
+{
+    if (off <= 0 || !name || !name[0])
+        return;
+    (void)zcl_devagent_mail_brief_presence(name, off, fmc_window_keep_cb, rows);
+}
+
+/* Presence notes and each sender's newest row before a cut, appended
+ * after the pass's own rows. The walk that follows uses the count taken
+ * before this call, so those lines are not mail_count and not changes. */
+static void fmc_window_keep_presence(struct json_value *rows,
+                                    const struct fmc_window *w)
+{
+    size_t i;
+    if (!rows || !w || !w->cut)
+        return;
+    for (i = 0; i < w->n; i++)
+        fmc_window_keep_one(rows, w->e[i].name, w->e[i].off);
+}
+
 static long long fmc_brief_mail(const struct zcl_command_request *req,
                                 struct fmc_mail_ctx *c,
                                 struct json_value *missing,
@@ -4820,6 +4893,7 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
     fmc_mail_source_note(c, view);
     n = json_size(&rows);
     view->count = (long long)n;
+    fmc_window_keep_presence(&rows, &c->win);
     /* The pass feeds roster, tallies, candidates and the
      * stale-directive scan on every path. The changes feed differs: the
      * legacy integer path filters it by the global floor here, while the

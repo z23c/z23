@@ -5456,6 +5456,22 @@ static void fmx_seed_window_gone(size_t rows)
     fmx_sent_directive("2026-09-20T00:20:00Z", 9000, "silent-box", "gone-new");
 }
 
+/* Presence first, then `rows` of newer mail, then one directive after
+ * that mail. The note is the oldest row of the recipient's stream, so a
+ * cut pass does not read it while it still sits inside one window of the
+ * cut. 700 rows cut the stream; 100 do not. The note is not a row the
+ * pass counts. One directive, in inbox.self, so that stream is never cut. */
+static void fmx_seed_window_gone_before(size_t rows)
+{
+    fmx_prime_mail();
+    fmx_seed_inbox("silent-box", "2026-09-19T00:00:00Z", 1, "silent-box", "*",
+                   "note", "presence.v1; role=silent-box; phase=active",
+                   "presence-silent-box");
+    fmx_seed_pad("silent-box", "silent-box", rows, true);
+    fmx_sent_directive("2026-09-20T00:20:00Z", 9000, "silent-box",
+                       "gone-after");
+}
+
 /* directive_counts holds `key`: unresolved is emitted only when some
  * directive is. */
 static bool fmx_dcount_has(const struct fmx_call *b, const char *key)
@@ -5755,6 +5771,285 @@ static int fmx_t_brief_window_unresolved(void)
          * as before. */
         ASSERT(fmx_blocker_has(&r, "new-ref"));
         fmx_end(&r);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: presence before a short pad is gone on a whole read") {
+        struct fmx_call o;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_gone_before_whole");
+        fmx_seed_window_gone_before(100);
+        /* Nothing is cut: the presence note is read with the pad, and
+         * the one directive is gone. This is the control for the cut
+         * pass below. 100 pad rows, the note and the directive. */
+        fmx_brief(&o, NULL, 6000);
+        ASSERT(fmx_run(&o, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&o));
+        ASSERT_STR_EQ(fmx_missing_reason(&o, "dev.agent.mail"), "");
+        ASSERT(!fmx_evidence_has(&o, "mail_window_cut"));
+        ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), 102);
+        reply = fmx_dir_reply(&o, FMX_SENDER, "gone-after");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "recipient_gone");
+        ASSERT(fmx_wint(reply, "recipient_silent_s") > 86400);
+        ASSERT_EQ(fmx_dcount(&o, "scanned"), 1);
+        ASSERT_EQ(fmx_dcount(&o, "recipient_gone"), 1);
+        ASSERT(!fmx_blocker_has(&o, "gone-after"));
+        fmx_end(&o);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a directive after the reach is gone when presence sits just before the cut") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        const char *reach;
+        long long count;
+        fmx_isolate("brief_window_gone_before");
+        fmx_seed_window_gone_before(700);
+        /* The note is older than every row the pass reads, and the
+         * directive is newer than the reach, so a whole read says the
+         * recipient is gone. A cut pass that never looks behind its
+         * start leaves the directive queued, open and a stale blocker. */
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reach = fmx_evidence_str(&b, "mail_window_reach_ts");
+        ASSERT(strcmp(reach, "2026-09-19T00:00:00Z") > 0);
+        ASSERT(strcmp(reach, "2026-09-20T00:20:00Z") < 0);
+        /* The note stands before the cut. This seed's cut pass reads
+         * 646 pad rows plus the directive, never the note. */
+        count = fmx_evidence_int(&b, "mail_count");
+        ASSERT(!fmx_brief_has_mail_ref(&b, "presence-silent-box"));
+        reply = fmx_dir_reply(&b, FMX_SENDER, "gone-after");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "recipient_gone");
+        ASSERT_EQ(count, 647);
+        ASSERT(fmx_wint(reply, "recipient_silent_s") > 86400);
+        ASSERT_EQ(fmx_dcount(&b, "scanned"), 1);
+        ASSERT_EQ(fmx_dcount(&b, "recipient_gone"), 1);
+        ASSERT(!fmx_dcount_has(&b, "unresolved"));
+        ASSERT(fmx_get(&b, "open_worker_directives") &&
+               json_get_int(fmx_get(&b, "open_worker_directives")) == 0);
+        ASSERT(fmx_get(&b, "overdue_worker_directives") &&
+               json_get_int(fmx_get(&b, "overdue_worker_directives")) == 0);
+        ASSERT(!fmx_blocker_has(&b, "gone-after"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* Two roles share one stream, then a presence- ref the leaf would
+ * reject. Both real roles stay gone. A third role that never posted
+ * stays queued. */
+static int fmx_t_brief_window_roles(void)
+{
+    int failures = 0;
+
+    TEST("steer: each role before the cut stays gone when a later ref is not a role") {
+        struct fmx_call b;
+        const struct json_value *a, *b_reply, *c;
+        char ref[64];
+        fmx_isolate("brief_window_roles");
+        fmx_prime_mail();
+        fmx_seed_inbox("shared", "2026-09-19T00:00:00Z", 1, "role-a", "*",
+                       "note", "presence.v1; role=role-a; phase=active",
+                       "presence-role-a");
+        fmx_seed_inbox("shared", "2026-09-19T00:00:01Z", 2, "role-b", "*",
+                       "note", "presence.v1; role=role-b; phase=active",
+                       "presence-role-b");
+        memcpy(ref, "presence-", 9);
+        memset(ref + 9, 'q', 33);
+        ref[42] = '\0';
+        fmx_seed_inbox("shared", "2026-09-19T00:00:02Z", 3, "role-a", "*",
+                       "note", "not-a-role", ref);
+        fmx_seed_pad("shared", "shared", 700, true);
+        fmx_sent_directive("2026-09-20T00:20:00Z", 9001, "role-a", "role-a-ref");
+        fmx_sent_directive("2026-09-20T00:20:01Z", 9002, "role-b", "role-b-ref");
+        fmx_sent_directive("2026-09-20T00:20:02Z", 9003, "role-c", "role-c-ref");
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        ASSERT(!fmx_brief_has_mail_ref(&b, "presence-role-a"));
+        ASSERT(!fmx_brief_has_mail_ref(&b, "presence-role-b"));
+        a = fmx_dir_reply(&b, FMX_SENDER, "role-a-ref");
+        b_reply = fmx_dir_reply(&b, FMX_SENDER, "role-b-ref");
+        c = fmx_dir_reply(&b, FMX_SENDER, "role-c-ref");
+        ASSERT(a != NULL && b_reply != NULL && c != NULL);
+        ASSERT_STR_EQ(fmx_wstr(a, "state"), "recipient_gone");
+        ASSERT_STR_EQ(fmx_wstr(b_reply, "state"), "recipient_gone");
+        ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
+        ASSERT(!fmx_blocker_has(&b, "role-a-ref"));
+        ASSERT(!fmx_blocker_has(&b, "role-b-ref"));
+        ASSERT(fmx_blocker_has(&b, "role-c-ref"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* A fresher stamp, a newer own row, and a sender table that cannot grow
+ * all leave the worker open. File order and a presence line alone would
+ * clear the blocker. */
+static int fmx_t_brief_window_seen(void)
+{
+    int failures = 0;
+
+    TEST("steer: an older presence appended later does not clear a fresher note") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_fresher");
+        fmx_prime_mail();
+        fmx_seed_inbox("shared", "2099-01-01T00:00:00Z", 1, "role-a", "*",
+                       "note", "presence.v1; role=role-a; phase=active",
+                       "presence-role-a");
+        fmx_seed_inbox("shared", "2026-09-19T00:00:00Z", 2, "role-a", "*",
+                       "note", "presence.v1; role=role-a; phase=active",
+                       "presence-role-a");
+        fmx_seed_pad("shared", "padder", 700, true);
+        fmx_sent_directive("2026-09-20T00:20:00Z", 9001, "role-a", "fresh-ref");
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reply = fmx_dir_reply(&b, FMX_SENDER, "fresh-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(fmx_blocker_has(&b, "fresh-ref"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a newer own row before the cut keeps the worker open") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_own_row");
+        fmx_prime_mail();
+        fmx_seed_inbox("shared", "2026-09-19T00:00:00Z", 1, "role-a", "*",
+                       "note", "presence.v1; role=role-a; phase=active",
+                       "presence-role-a");
+        fmx_seed_inbox("shared", "2099-01-01T00:00:00Z", 2, "role-a", "*",
+                       "note", "still here", "chatter");
+        fmx_seed_pad("shared", "padder", 700, true);
+        fmx_sent_directive("2026-09-20T00:20:00Z", 9002, "role-a", "own-ref");
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        ASSERT(!fmx_brief_has_mail_ref(&b, "presence-role-a"));
+        ASSERT(!fmx_brief_has_mail_ref(&b, "chatter"));
+        reply = fmx_dir_reply(&b, FMX_SENDER, "own-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(fmx_blocker_has(&b, "own-ref"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a sender past the lookbehind cap stays open") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        unsigned i;
+        fmx_isolate("brief_window_from_cap");
+        fmx_prime_mail();
+        for (i = 0; i < ZCL_DEVAGENT_MAIL_PRESENCE_FROMS; i++) {
+            char from[16], ref[16];
+            (void)snprintf(from, sizeof(from), "x-%02u", i);
+            (void)snprintf(ref, sizeof(ref), "x-%02u", i);
+            fmx_seed_inbox("shared", "2026-09-19T00:00:00Z", (long long)i + 1,
+                           from, "*", "note", "other", ref);
+        }
+        fmx_seed_inbox("shared", "2026-09-19T00:00:01Z", 8000, "role-a", "*",
+                       "note", "presence.v1; role=role-a; phase=active",
+                       "presence-role-a");
+        fmx_seed_inbox("shared", "2099-01-01T00:00:00Z", 8001, "role-a", "*",
+                       "note", "still here", "chatter");
+        fmx_seed_pad("shared", "padder", 700, true);
+        fmx_sent_directive("2026-09-20T00:20:00Z", 9003, "role-a", "cap-ref");
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reply = fmx_dir_reply(&b, FMX_SENDER, "cap-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(fmx_blocker_has(&b, "cap-ref"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a role past the presence cap stays open") {
+        struct fmx_call b;
+        const struct json_value *kept, *overflow;
+        unsigned i;
+        fmx_isolate("brief_window_role_cap");
+        fmx_prime_mail();
+        for (i = 0; i < ZCL_DEVAGENT_MAIL_PRESENCE_ROLES + 1u; i++) {
+            char role[16], ref[32], body[64];
+            (void)snprintf(role, sizeof(role), "r-%02u", i);
+            (void)snprintf(ref, sizeof(ref), "presence-%s", role);
+            (void)snprintf(body, sizeof(body),
+                           "presence.v1; role=%s; phase=active", role);
+            fmx_seed_inbox("shared", "2026-09-19T00:00:00Z", (long long)i + 1,
+                           role, "*", "note", body, ref);
+        }
+        fmx_seed_pad("shared", "padder", 700, true);
+        fmx_sent_directive("2026-09-20T00:20:00Z", 9100, "r-00", "kept-role");
+        fmx_sent_directive("2026-09-20T00:20:01Z", 9101, "r-16", "overflow-role");
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        kept = fmx_dir_reply(&b, FMX_SENDER, "kept-role");
+        overflow = fmx_dir_reply(&b, FMX_SENDER, "overflow-role");
+        ASSERT(kept != NULL && overflow != NULL);
+        ASSERT_STR_EQ(fmx_wstr(kept, "state"), "recipient_gone");
+        ASSERT_STR_EQ(fmx_wstr(overflow, "state"), "queued");
+        ASSERT(!fmx_blocker_has(&b, "kept-role"));
+        ASSERT(fmx_blocker_has(&b, "overflow-role"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: an impossible hour does not erase a fresher own row") {
+        struct fmx_call b;
+        const struct json_value *reply;
+        fmx_isolate("brief_window_bad_hour");
+        fmx_prime_mail();
+        fmx_seed_inbox("shared", "2026-09-19T00:00:00Z", 1, "role-a", "*",
+                       "note", "presence.v1; role=role-a; phase=active",
+                       "presence-role-a");
+        fmx_seed_inbox("shared", "2099-01-01T00:00:00Z", 2, "role-a", "*",
+                       "note", "still here", "chatter");
+        fmx_seed_inbox("shared", "2099-01-01T24:00:00Z", 3, "role-a", "*",
+                       "note", "not a clock", "bad-hour");
+        fmx_seed_pad("shared", "padder", 700, true);
+        fmx_sent_directive("2026-09-20T00:20:00Z", 9102, "role-a", "hour-ref");
+        fmx_brief(&b, NULL, 6000);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_evidence_bool(&b, "mail_window_cut"));
+        reply = fmx_dir_reply(&b, FMX_SENDER, "hour-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(fmx_blocker_has(&b, "hour-ref"));
+        fmx_end(&b);
         fmx_restore();
         PASS();
     }
@@ -7844,6 +8139,12 @@ static bool fmx_compact_limit(struct fmx_call *call, const char *token, long lon
 static int fmx_compact_backlog(void)
 {
     int failures = 0;
+    /* queued_age_s and sent_age_s are wall-clock seconds. Two briefs that
+     * straddle a second are not the same projection. */
+    const clock_iface_t *saved = clock_default();
+    clock_iface_t fixed = {fmx_activity_monotonic_ns, fmx_activity_wall_ms,
+                           (void *)saved};
+    clock_set_default(&fixed);
     TEST("steer: compact small pages ignore unreturned history refs") {
         ASSERT(fmx_forward_setup("compact_many_refs"));
         for (int i = 1; i <= 70; ++i) {
@@ -7865,7 +8166,9 @@ static int fmx_compact_backlog(void)
         ASSERT_STR_EQ(fmx_wstr(json_at(fmx_arr(&compact, "changes"), 0), "ref"), "backlog-002");
         fmx_end(&compact); fmx_restore(); PASS();
     } _test_next:;
-    fmx_restore(); return failures;
+    clock_set_default(saved);
+    fmx_restore();
+    return failures;
 }
 
 static int fmx_compact_long_refs(void)
@@ -9371,6 +9674,8 @@ int test_fleet_steer(void)
     failures += fmx_t_brief_deferred_cursor();
     failures += fmx_t_brief_window();
     failures += fmx_t_brief_window_unresolved();
+    failures += fmx_t_brief_window_roles();
+    failures += fmx_t_brief_window_seen();
     failures += fmx_t_evidence();
 #if !defined(_WIN32)
     failures += fmx_t_lost_receipt_retry();

@@ -72,6 +72,25 @@ bool zcl_devagent_mail_brief_window(char *token, size_t cap,
                                     long long window, const char *since,
                                     bool *cut);
 
+/* One mail line, the pull's own cap. A presence line that does not fit
+ * is not returned. */
+#define ZCL_DEVAGENT_MAIL_LINE_CAP 8192u
+
+/* Before `before`, within one window: each role's newest presence note
+ * and each sender's newest row. `keep` receives the raw line without the
+ * newline. Newest is the greater well-formed stamp; a stamp that does
+ * not parse does not replace one that does. One shared outbox carries
+ * every role. A role past ZCL_DEVAGENT_MAIL_PRESENCE_ROLES stays unseen.
+ * A sender past ZCL_DEVAGENT_MAIL_PRESENCE_FROMS drops the stream, so
+ * nobody is marked gone from it. False when the stream cannot be named
+ * or read, a kept line does not fit, or a sender cannot be retained.
+ * A worker who never posted stays unseen. Reads only; grants no authority. */
+#define ZCL_DEVAGENT_MAIL_PRESENCE_ROLES 16u
+#define ZCL_DEVAGENT_MAIL_PRESENCE_FROMS 64u
+bool zcl_devagent_mail_brief_presence(const char *stream, long long before,
+                                     void (*keep)(const char *line, void *ctx),
+                                     void *ctx);
+
 /* Internal nonpersisting mail drain. It skips global-max scans while pages
  * remain and replays the final page through the normal path; direct mail
  * commands retain per-page cursor behavior. Only fleet brief and receiver dry
