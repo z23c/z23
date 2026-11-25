@@ -2341,6 +2341,7 @@ static void rcv_intake_line(const char *line, struct rcv_intake *in)
 }
 
 /* Read the intake file. Absent or unreadable is the empty record. */
+#if !defined(_WIN32)
 static void rcv_intake_load(const struct rcv_paths *p, struct rcv_intake *in)
 {
     char text[RCV_POS_MAX + 256];
@@ -2357,6 +2358,7 @@ static void rcv_intake_load(const struct rcv_paths *p, struct rcv_intake *in)
     if (in->failures < 0)
         in->failures = 0;
 }
+#endif
 
 static void rcv_intake_save(const struct rcv_ctx *c)
 {
