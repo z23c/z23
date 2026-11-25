@@ -47,6 +47,8 @@ struct cocoa_win {
     cocoa_id delegate;
     uint8_t *rgba;
     int32_t rgba_w, rgba_h;
+    cocoa_id image;
+    cocoa_id rep;
     struct cocoa_rect saved_frame;
     unsigned long saved_style;
     bool fullscreen;
@@ -693,6 +695,8 @@ static void cocoa_close(struct gui_window *w)
         (void)cocoa_fullscreen(w, false);
     cocoa_forget(w);
     if (c->view) cocoa_void_id(c->view, "setImage:", NULL);
+    cocoa_release(c->image);
+    cocoa_release(c->rep);
     if (c->window) {
         cocoa_void_id(c->window, "setDelegate:", NULL);
         cocoa_void0(c->window, "close");
@@ -927,10 +931,16 @@ static bool cocoa_dims_ok(const struct gui_window *w)
 }
 
 static uint64_t g_cocoa_copied_px;
+static uint64_t g_cocoa_images;
 
 uint64_t gui_cocoa_copied_pixels(void)
 {
     return g_cocoa_copied_px;
+}
+
+uint64_t gui_cocoa_images_built(void)
+{
+    return g_cocoa_images;
 }
 
 /* Packed 0x00RRGGBB from the cache the last present wrote. */
@@ -942,6 +952,74 @@ uint32_t gui_cocoa_cached_pixel(const struct gui_window *w, int32_t x, int32_t y
         return 0;
     p = c->rgba + ((size_t)y * (size_t)c->rgba_w + (size_t)x) * 4u;
     return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+}
+
+static cocoa_id cocoa_cache_rep(cocoa_id view, struct cocoa_rect bounds)
+{
+    cocoa_id (*fn)(cocoa_id, cocoa_SEL, struct cocoa_rect);
+    memcpy(&fn, &g_api.msg, sizeof fn);
+    return fn(view, cocoa_sel("bitmapImageRepForCachingDisplayInRect:"), bounds);
+}
+
+static void cocoa_cache_draw(cocoa_id view, struct cocoa_rect bounds, cocoa_id rep)
+{
+    void (*fn)(cocoa_id, cocoa_SEL, struct cocoa_rect, cocoa_id);
+    memcpy(&fn, &g_api.msg, sizeof fn);
+    fn(view, cocoa_sel("cacheDisplayInRect:toBitmapImageRep:"), bounds, rep);
+}
+
+static int32_t cocoa_map_axis(int32_t v, int32_t src, long dst)
+{
+    if (src <= 0 || dst <= 0 || (long)src == dst) return v;
+    return (int32_t)(((int64_t)v * dst) / src);
+}
+
+static bool cocoa_view_span(long wide, long high, long bpr, long spp,
+                            int32_t x, int32_t y)
+{
+    if (spp < 3 || bpr <= 0 || wide <= 0 || high <= 0) return false;
+    if (x < 0 || y < 0 || x >= wide || y >= high) return false;
+    if ((size_t)bpr < ((size_t)x + 1u) * (size_t)spp) return false;
+    return true;
+}
+
+/* Packed 0x00RRGGBB from what the view last drew. */
+uint32_t gui_cocoa_view_pixel(const struct gui_window *w, int32_t x, int32_t y)
+{
+    struct cocoa_win *c = cocoa_state(w);
+    struct cocoa_rect bounds;
+    cocoa_id rep, pool;
+    const uint8_t *bytes;
+    uint8_t sample[3];
+    long wide, high, bpr, spp;
+    int32_t vx, vy;
+    if (!c || !c->view || x < 0 || y < 0) return 0;
+    pool = cocoa_pool_push();
+    bounds = cocoa_bounds(c->view);
+    rep = cocoa_cache_rep(c->view, bounds);
+    if (!rep) {
+        cocoa_release(pool);
+        return 0;
+    }
+    cocoa_cache_draw(c->view, bounds, rep);
+    bytes = (const uint8_t *)cocoa_msg(rep, "bitmapData");
+    wide = cocoa_long(rep, "pixelsWide");
+    high = cocoa_long(rep, "pixelsHigh");
+    bpr = cocoa_long(rep, "bytesPerRow");
+    spp = cocoa_long(rep, "samplesPerPixel");
+    vx = cocoa_map_axis(x, w->fb_w, wide);
+    vy = cocoa_map_axis(y, w->fb_h, high);
+    if (!bytes || !cocoa_view_span(wide, high, bpr, spp, vx, vy)) {
+        cocoa_release(pool);
+        return 0;
+    }
+    bytes += (size_t)vy * (size_t)bpr + (size_t)vx * (size_t)spp;
+    sample[0] = bytes[0];
+    sample[1] = bytes[1];
+    sample[2] = bytes[2];
+    cocoa_release(pool);
+    return ((uint32_t)sample[0] << 16) | ((uint32_t)sample[1] << 8) |
+           (uint32_t)sample[2];
 }
 
 static void cocoa_write_px(uint8_t *dst, uint32_t px)
@@ -1035,6 +1113,7 @@ static cocoa_id cocoa_image(struct gui_window *w, cocoa_id rep)
     image = init_image(image, cocoa_sel("initWithSize:"), size);
     if (!image) return NULL;
     cocoa_void_id(image, "addRepresentation:", rep);
+    g_cocoa_images++;
     return image;
 }
 
@@ -1048,31 +1127,82 @@ static void cocoa_adopt_pixels(struct cocoa_win *c, struct gui_window *w,
     c->rgba_h = w->fb_h;
 }
 
+/* The bitmap may own a copy. Copy only the dirty rows into that copy. */
+static void cocoa_sync_rep(const struct gui_window *w, const uint8_t *src,
+                           uint8_t *dst, const struct gui_rect *rects, size_t n)
+{
+    size_t i;
+    if (!dst || dst == src) return;
+    if (n == 0 || !rects) {
+        memcpy(dst, src, (size_t)w->fb_w * (size_t)w->fb_h * 4u);
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        struct gui_rect r = rects[i];
+        int32_t y;
+        if (!gui_rect_clip_frame(&r, w->fb_w, w->fb_h)) continue;
+        for (y = r.y; y < r.y + r.h; y++) {
+            size_t off = ((size_t)y * (size_t)w->fb_w + (size_t)r.x) * 4u;
+            memcpy(dst + off, src + off, (size_t)r.w * 4u);
+        }
+    }
+}
+
+static bool cocoa_reuse_image(struct gui_window *w, struct cocoa_win *c,
+                              const struct gui_rect *rects, size_t n)
+{
+    uint8_t *bytes;
+    if (!c->image || !c->rep || !c->rgba) return false;
+    bytes = (uint8_t *)cocoa_msg(c->rep, "bitmapData");
+    if (!bytes) return false;
+    cocoa_sync_rep(w, c->rgba, bytes, rects, n);
+    cocoa_void0(c->image, "recache");
+    return true;
+}
+
+static bool cocoa_install_image(struct gui_window *w, struct cocoa_win *c,
+                                uint8_t *pix, bool fresh)
+{
+    cocoa_id rep, image;
+    cocoa_release(c->image);
+    cocoa_release(c->rep);
+    c->image = NULL;
+    c->rep = NULL;
+    rep = cocoa_bitmap(w, pix);
+    image = rep ? cocoa_image(w, rep) : NULL;
+    if (!image) {
+        cocoa_release(rep);
+        if (fresh) free(pix);
+        return false;
+    }
+    c->rep = rep;
+    c->image = image;
+    cocoa_void_id(c->view, "setImage:", image);
+    cocoa_adopt_pixels(c, w, pix, fresh);
+    return true;
+}
+
 static bool cocoa_present(struct gui_window *w, const struct gui_rect *rects, size_t n)
 {
     struct cocoa_win *c = cocoa_state(w);
-    cocoa_id rep, image, pool;
+    cocoa_id pool;
     uint8_t *pix;
     bool fresh = false;
+    bool ok;
     if (!c) return false;
     pix = cocoa_fill(w, c, &fresh, rects, n);
     if (!pix) return false;
     pool = cocoa_pool_push();
-    rep = cocoa_bitmap(w, pix);
-    image = rep ? cocoa_image(w, rep) : NULL;
-    cocoa_release(rep);
-    if (!image) {
-        if (fresh) free(pix);
-        cocoa_release(pool);
-        return false;
+    if (!fresh && cocoa_reuse_image(w, c, rects, n))
+        ok = true;
+    else
+        ok = cocoa_install_image(w, c, pix, fresh);
+    if (ok) {
+        cocoa_void_bool(c->view, "setNeedsDisplay:", 1);
+        cocoa_msg(c->window, "displayIfNeeded");
     }
-    cocoa_void_id(c->view, "setImage:", image);
-    cocoa_release(image);
-    cocoa_adopt_pixels(c, w, pix, fresh);
-    cocoa_void_bool(c->view, "setNeedsDisplay:", 1);
-    cocoa_msg(c->window, "displayIfNeeded");
     cocoa_release(pool);
-    return true;
+    return ok;
 }
 
 static cocoa_id cocoa_string_n(const char *utf8, size_t len)

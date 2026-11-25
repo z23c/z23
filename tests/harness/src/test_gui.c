@@ -840,7 +840,9 @@ void gui_cocoa_set_presentation(unsigned long options);
 int gui_cocoa_cursor(void);
 bool gui_cocoa_aim_frame(struct gui_window *w, int contain);
 uint64_t gui_cocoa_copied_pixels(void);
+uint64_t gui_cocoa_images_built(void);
 uint32_t gui_cocoa_cached_pixel(const struct gui_window *w, int32_t x, int32_t y);
+uint32_t gui_cocoa_view_pixel(const struct gui_window *w, int32_t x, int32_t y);
 
 static void paint_frame(struct gui_cpu_frame *f, uint32_t px)
 {
@@ -862,6 +864,12 @@ static int cocoa_dirty_pixels_ok(struct gui_window *win)
 {
     return gui_cocoa_cached_pixel(win, 0, 0) == 0x00FF0000u &&
            gui_cocoa_cached_pixel(win, 4, 6) == 0x0000FF00u;
+}
+
+static int cocoa_view_matches(struct gui_window *win)
+{
+    return gui_cocoa_view_pixel(win, 0, 0) == 0x00FF0000u &&
+           gui_cocoa_view_pixel(win, 4, 6) == 0x0000FF00u;
 }
 
 static uint64_t cocoa_time_dirty(struct gui_window *win, struct gui_rect dirty)
@@ -951,6 +959,60 @@ static void test_cocoa_fresh_cache(void)
     gui_window_close(win);
 #else
     printf("  a first dirty present keeps the rest of the frame... SKIP\n");
+#endif
+}
+
+/* Later dirty presents must reuse the image the first present installed. */
+static void test_cocoa_image_reuse(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 image", .width = 320, .height = 200,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    struct gui_cpu_frame frame;
+    struct gui_rect dirty = { 4, 6, 8, 8 };
+    uint64_t base, before, images, timed;
+    uint32_t view00, view46;
+    bool opened = gui_window_open(&d, &win, err, sizeof err);
+    CHECK("image-reuse window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    if (!gui_cpu_acquire(win, &frame) || frame.pixels == NULL) {
+        printf("  image-reuse window provides a frame... FAIL\n");
+        g_fail++;
+        gui_window_close(win);
+        return;
+    }
+    base = gui_cocoa_images_built();
+    paint_frame(&frame, 0x00FF0000u);
+    if (!gui_cpu_present(win, NULL, 0)) {
+        printf("  full present installs an image... FAIL\n");
+        g_fail++;
+        gui_window_close(win);
+        return;
+    }
+    frame.pixels[0] = 0x000000FFu;
+    paint_rect(&frame, dirty, 0x0000FF00u);
+    before = gui_cocoa_copied_pixels();
+    CHECK("dirty present copies only that rect",
+          gui_cpu_present(win, &dirty, 1) &&
+          gui_cocoa_copied_pixels() - before == 64u);
+    view00 = gui_cocoa_view_pixel(win, 0, 0);
+    view46 = gui_cocoa_view_pixel(win, 4, 6);
+    timed = cocoa_time_dirty(win, dirty);
+    images = gui_cocoa_images_built() - base;
+    printf("present_image: images=%llu view00=%08x view46=%08x repeat20_us=%llu\n",
+           (unsigned long long)images, (unsigned int)view00,
+           (unsigned int)view46, (unsigned long long)timed);
+    CHECK("one image serves later dirty presents", images == 1u);
+    CHECK("the view shows the dirty update", cocoa_view_matches(win));
+    gui_window_close(win);
+#else
+    printf("  one image serves later dirty presents... SKIP\n");
 #endif
 }
 
@@ -1311,6 +1373,7 @@ int test_gui(void)
     test_cocoa_live_resize();
     test_cocoa_dirty_present();
     test_cocoa_fresh_cache();
+    test_cocoa_image_reuse();
     test_utf8();
     test_draw();
     test_text();
