@@ -9021,6 +9021,59 @@ static int fmx_t_forward_budget(void)
     return failures;
 }
 
+static int fmx_t_snapshot_budget(void)
+{
+    int failures=0;
+    TEST("steer: full snapshot honors budget and refuses oversized required metadata") {
+        ASSERT(fmx_forward_setup("snapshot_budget"));
+        char escaped[4097];
+        for (size_t i=0;i<4096;i+=2) { escaped[i]='\\'; escaped[i+1]='"'; }
+        escaped[4096]=0;
+        for (unsigned i=1;i<=8;i++) {
+            char ref[32]; (void)snprintf(ref,sizeof(ref),"snapshot-%02u",i);
+            fmx_seed_inbox("snapshot","2026-09-20T00:00:00Z",i,"m","b","note",escaped,ref);
+        }
+        struct fmx_call normal;
+        fmx_brief(&normal,NULL,0); (void)json_push_kv_bool(&normal.input,"json",true);
+        ASSERT(fmx_run(&normal,zcl_native_handle_fleet_steer_brief) && fmx_ok(&normal));
+        size_t normal_changes=json_size(fmx_get(&normal,"changes"));
+        ASSERT(normal_changes>0);
+        fmx_end(&normal);
+        struct fmx_call screen_sample;
+        fmx_brief(&screen_sample,NULL,0);
+        ASSERT(fmx_run(&screen_sample,zcl_native_handle_fleet_steer_brief) && fmx_ok(&screen_sample));
+        const struct json_value *screen=fmx_get(&screen_sample,"screen");
+        ASSERT(screen && screen->type==JSON_STR);
+        size_t screen_bytes=json_write(screen,NULL,0)+sizeof(",\"screen\":")-1;
+        size_t marker_bytes=sizeof(",\"screen_omitted\":true")-1;
+        ASSERT(marker_bytes<32 && 32<screen_bytes);
+        fmx_end(&screen_sample);
+        struct fmx_call bounded;
+        fmx_brief(&bounded,NULL,0); (void)json_push_kv_bool(&bounded.input,"json",true);
+        bounded.request.budget_bytes=12000;
+        ASSERT(fmx_run(&bounded,zcl_native_handle_fleet_steer_brief) && fmx_ok(&bounded));
+        ASSERT(json_write(&bounded.reply.data,NULL,0)<=12000-1024);
+        ASSERT(json_size(fmx_get(&bounded,"changes"))<normal_changes);
+        ASSERT(json_get_int(json_get(fmx_get(&bounded,"budget_truncated"),"changes"))>0);
+        size_t screen_budget=json_write(&bounded.reply.data,NULL,0)+1024+32;
+        fmx_end(&bounded);
+        struct fmx_call screened;
+        fmx_brief(&screened,NULL,0); screened.request.budget_bytes=screen_budget;
+        ASSERT(fmx_run(&screened,zcl_native_handle_fleet_steer_brief) && fmx_ok(&screened));
+        ASSERT(json_write(&screened.reply.data,NULL,0)<=screen_budget-1024);
+        ASSERT(fmx_bool(&screened,"screen_omitted")); ASSERT(fmx_get(&screened,"screen")==NULL);
+        fmx_end(&screened);
+        struct fmx_call too_small;
+        fmx_brief(&too_small,NULL,0); (void)json_push_kv_bool(&too_small.input,"json",true);
+        too_small.request.budget_bytes=512;
+        ASSERT(fmx_run(&too_small,zcl_native_handle_fleet_steer_brief)); ASSERT(!fmx_ok(&too_small));
+        ASSERT_STR_EQ(too_small.reply.error.code,"BRIEF_BUDGET_EXCEEDED");
+        ASSERT(fmx_get(&too_small,"cursor_token")==NULL);
+        fmx_end(&too_small); fmx_restore(); PASS();
+    } _test_next:;
+    fmx_restore(); return failures;
+}
+
 #ifdef ZCL_TESTING
 static bool g_fmx_forward_fault_armed;
 static void fmx_forward_fault(void)
@@ -10276,6 +10329,7 @@ int test_fleet_steer(void)
     failures += fmx_compact_cross_stream();
     failures += fmx_compact_input();
     failures += fmx_compact_backlog();
+    failures += fmx_t_snapshot_budget();
     failures += fmx_compact_long_refs();
     failures += fmx_compact_result_variants();
     failures += fmx_compact_variant_budget();

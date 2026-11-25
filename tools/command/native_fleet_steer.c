@@ -6489,7 +6489,7 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
                                const struct fmc_mail_view *mv, bool include_tasks)
 {
     long long base_tasks_dropped = json_get_int(json_get(&reply->data, "tasks_dropped"));
-    size_t budget = mv && mv->forward ? fmc_brief_data_budget(req) : FMC_REPLY_SOFT_BUDGET - 512u;
+    size_t budget = fmc_brief_data_budget(req);
     size_t fit = budget > FMC_BRIEF_OBS_BYTES ? budget - FMC_BRIEF_OBS_BYTES : budget;
     struct json_value saved;
     bool held = false;
@@ -6526,6 +6526,13 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
      * keeps the page and omits the fields. */
     if (stamped)
         fmc_brief_observe_if_fits(&reply->data, budget);
+    if (json_write(&reply->data, NULL, 0) > budget) {
+        json_free(&reply->data);
+        json_set_object(&reply->data);
+        fmc_fail(reply, "BRIEF_BUDGET_EXCEEDED",
+                 "required brief metadata exceeds the response budget", "budget_bytes");
+        return;
+    }
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
 }
@@ -6660,6 +6667,30 @@ invalid:
     return false;
 }
 
+static void fmc_brief_screen(const struct zcl_command_request *req,
+                             struct zcl_command_reply *reply)
+{
+    char screen[4096]; struct json_value trial;
+    size_t budget=fmc_brief_data_budget(req);
+    zcl_fmc_tasks_screen(&reply->data,screen,sizeof(screen));
+    json_init(&trial);
+    bool ok=json_copy_checked(&trial,&reply->data) && json_push_kv_str(&trial,"screen",screen);
+    if (!ok) {
+        json_free(&trial);
+        json_free(&reply->data); json_set_object(&reply->data);
+        fmc_fail(reply,"BRIEF_PROJECTION_FAILED","brief screen could not be copied","json");
+        return;
+    }
+    if (json_write(&trial,NULL,0)<=budget) {
+        json_free(&reply->data); reply->data=trial; return;
+    }
+    json_free(&trial);
+    if (json_push_kv_bool(&reply->data,"screen_omitted",true) &&
+        json_write(&reply->data,NULL,0)<=budget) return;
+    json_free(&reply->data); json_set_object(&reply->data);
+    fmc_fail(reply,"BRIEF_BUDGET_EXCEEDED","required brief metadata exceeds the response budget","budget_bytes");
+}
+
 static void fmc_do_brief(const struct zcl_command_request *req,
                          struct zcl_command_reply *reply,
                          const struct fmc_caller *who)
@@ -6733,9 +6764,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
         fmc_brief_reply(req, reply, &l, &ro, &ec, &mv, mail_cursor, changes_only);
     if (reply->status == ZCL_COMMAND_STATUS_PASSED && !mv.forward &&
         !json_get_bool(json_get(req->input, "json"))) {
-        char screen[4096];
-        zcl_fmc_tasks_screen(&reply->data, screen, sizeof(screen));
-        (void)json_push_kv_str(&reply->data, "screen", screen);
+        fmc_brief_screen(req,reply);
     }
     fmc_lists_free(&l);
     fmc_roster_free(&ro);
