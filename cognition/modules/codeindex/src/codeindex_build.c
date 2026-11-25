@@ -885,9 +885,11 @@ static bool ci_rebuild_note_changes(struct ci_rebuild_job *job)
         return false;
     if (job->patchable && job->current_leaves) {
         bool inventory_same = false;
+        int inventory_overlap = 0;
         job->changed_count = ci_store_diff_merkle_leaves(
             job->ci->store, job->current_leaves, job->current_count,
-            job->changed, job->current_count, &inventory_same);
+            job->changed, job->current_count, &inventory_same,
+            &inventory_overlap);
         job->incremental = inventory_same;
     }
     job->seedable = job->seedable && job->current_leaves != NULL;

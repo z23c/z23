@@ -19,9 +19,9 @@
  *   - its image passes the owner-controlled private-inode checks a canonical
  *     open applies (a group-writable or shared-link image is declined);
  *   - its store_format and ci_schema_version equal THIS binary's constants;
- *   - its sealed file inventory matches this checkout's live inventory path for
- *     path, which is what makes a donor from a different repository — or the
- *     same repository with a file added or removed — decline itself;
+ *   - its sealed file inventory has at least one path in common with this
+ *     checkout's live inventory; added and removed paths are refreshed just
+ *     like changed paths, while a wholly foreign donor declines itself;
  *   - the checks are re-run against the STAGED COPY, so what is refreshed and
  *     published is the bytes that were verified, not the bytes that were
  *     inspected — and the staged pass is always the row-by-row comparison,
@@ -343,48 +343,58 @@ static bool seed_generation_matches_binary(struct ci_store *store)
                             sizeof(CI_SCHEMA_VERSION) - 1);
 }
 
+static int seed_changed_limit(int current_count)
+{
+    int share = current_count / CI_SEED_CHANGED_SHARE;
+    return share > CI_SEED_CHANGED_FLOOR ? share : CI_SEED_CHANGED_FLOOR;
+}
+
+/* Deltas above the acceptance limit are rejected anyway; their diff may stop
+ * at this capacity. The current_count minimum is a diff API requirement. */
+static int seed_scratch_capacity(int current_count)
+{
+    int limit = seed_changed_limit(current_count);
+    return limit > current_count ? limit : current_count;
+}
+
 /* Compare a candidate generation against this checkout's live Merkle leaves.
- * Returns the number of files whose sealed content digest differs, or -1 when
- * the candidate cannot describe this checkout at all: a different inventory
- * (a foreign repository, or one with a file added or removed) is declined
- * here, because replacing rows cannot add or remove them. */
+ * Returns the number of added, removed, or changed source paths, or -1 when
+ * the candidate is incompatible or shares no path with this checkout. */
 static int seed_distance(struct ci_store *store,
                          const struct ci_merkle_leaf *current,
                          int current_count, struct ci_merkle_leaf *scratch)
 {
     if (!seed_generation_matches_binary(store)) return -1;
     bool inventory_same = false;
+    int overlap = 0;
     int changed = ci_store_diff_merkle_leaves(store, current, current_count,
-                                              scratch, current_count,
-                                              &inventory_same);
-    return inventory_same ? changed : -1;
+                                              scratch, seed_scratch_capacity(current_count),
+                                              &inventory_same, &overlap);
+    return overlap > 0 ? changed : -1;
 }
 
 /* How far is this donor from describing THIS checkout? Zero when its sealed
  * source Merkle root equals the one codeindex_merkle.c just computed here —
  * one 32-byte comparison that settles inventory and content together, and the
  * ordinary case on a build host where every lane worktree starts at the same
- * base. Otherwise the number of files whose sealed content digest differs, or
- * -1 when the donor cannot describe this checkout at all: a different
- * inventory (a foreign repository, or one with a file added or removed) is
- * declined here, because replacing rows cannot add or remove them. */
+ * base. Otherwise count added, removed, and changed source paths, rejecting
+ * incompatible stores and donors with no overlapping path. */
 static int seed_donor_distance(struct ci_store *donor,
                                const struct ci_merkle_leaf *current,
                                int current_count,
                                struct ci_merkle_leaf *scratch,
                                const uint8_t merkle_root[32])
 {
-    if (!seed_generation_matches_binary(donor) ||
-        ci_store_file_count(donor) != current_count)
-        return -1;
+    if (!seed_generation_matches_binary(donor)) return -1;
     if (seed_meta_equals(donor, "source_merkle_root_sha3",
                          (const char *)merkle_root, 32))
         return 0;
     bool inventory_same = false;
+    int overlap = 0;
     int changed = ci_store_diff_merkle_leaves(donor, current, current_count,
-                                              scratch, current_count,
-                                              &inventory_same);
-    return inventory_same ? changed : -1;
+                                              scratch, seed_scratch_capacity(current_count),
+                                              &inventory_same, &overlap);
+    return overlap > 0 ? changed : -1;
 }
 
 /* An absent or unusable image is not a candidate that was compared: it costs
@@ -408,15 +418,9 @@ static int seed_candidate_distance(const char *donor_root,
     return distance;
 }
 
-static int seed_changed_limit(int current_count)
-{
-    int share = current_count / CI_SEED_CHANGED_SHARE;
-    return share > CI_SEED_CHANGED_FLOOR ? share : CI_SEED_CHANGED_FLOOR;
-}
-
-/* The nearest reconcilable donor, or -1. Nearest is fewest differing files —
- * that is exactly the count of files the refresh has to rescan, so it is the
- * cost being minimized and not a proxy for it. A donor that seals this exact
+/* The nearest reconcilable donor, or -1. Nearest is fewest differing paths —
+ * the number of row removals and rescans the refresh has to perform. A donor
+ * that seals this exact
  * tree ends the search. Eligible images are first ranked by mtime; only the
  * first CI_SEED_MAX_COMPARISONS readable ones are compared at all, because
  * that comparison is the part of the search whose cost grows with the
@@ -476,12 +480,11 @@ static bool seed_refresh_staged(const char *root, int stagefd,
      * shortcut donor RANKING is allowed to take: what gets published is
      * verified against the rows it actually holds. */
     int changed = seed_distance(staged, current, current_count, scratch);
-    bool ok = changed >= 0 &&
-              ci_reconcile_includes(root, staged, dep_stat) &&
-              ci_pages_discard(staged) &&
-              ci_build_store_incremental_scanned(root, staged, scratch, changed,
-                                         dep_stat, merkle_root) &&
-              seed_write_receipt(staged, kind, changed);
+    bool ok = changed >= 0;
+    if (ok) ok = ci_pages_discard(staged);
+    if (ok) ok = ci_build_store_incremental(root, staged, scratch, changed,
+                                            dep_stat, merkle_root);
+    if (ok) ok = seed_write_receipt(staged, kind, changed);
     ci_store_close(staged);
     if (ok) *refreshed = changed;
     return ok;
@@ -505,7 +508,8 @@ static bool seed_stage_posix(const char *root, int stagefd,
     struct ci_seed_candidates *cands =
         zcl_calloc(1, sizeof(*cands), "ci_seed_donors");
     struct ci_merkle_leaf *scratch =
-        zcl_calloc((size_t)current_count, sizeof(*scratch), "ci_seed_changed");
+        zcl_calloc((size_t)seed_scratch_capacity(current_count),
+                   sizeof(*scratch), "ci_seed_changed");
     int best = -1, refreshed = 0;
     bool ok = cands != NULL && scratch != NULL;
     if (ok) {

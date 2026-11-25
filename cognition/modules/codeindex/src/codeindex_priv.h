@@ -361,7 +361,7 @@ int ci_store_diff_merkle_leaves(struct ci_store *store,
                                 const struct ci_merkle_leaf *current,
                                 int current_count,
                                 struct ci_merkle_leaf *changed, int cap,
-                                bool *inventory_same);
+                                bool *inventory_same, int *inventory_overlap);
 
 /* ── seeding a cold index from a sibling checkout (codeindex_seed.c) ───
  * What a seeding attempt did, for the one diagnostic line the cold open

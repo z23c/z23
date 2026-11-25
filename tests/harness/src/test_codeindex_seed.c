@@ -25,6 +25,7 @@
 #include "platform/temp_directory.h"
 
 #include <sqlite3.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -137,6 +138,14 @@ static bool cis_write_tree(const char *root, const char *const *units,
     return true;
 }
 
+static bool cis_remove_if_present(const char *root, const char *relpath)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", root, relpath);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    return remove(path) == 0 || errno == ENOENT;
+}
+
 /* ── git's worktree registry, written by hand ─────────────────────────── */
 
 static bool cis_write_text(const char *path, const char *text)
@@ -206,6 +215,22 @@ static bool cis_drop_store(const char *root)
         if (remove(path) != 0 && stat(path, &st) == 0) return false;
     }
     return true;
+}
+
+static bool cis_reset_tree(const char *root, int revision)
+{
+    bool ok = true;
+    for (size_t i = 0; i < CIS_UNIT_COUNT; i++)
+        if (!cis_remove_if_present(root, cis_units[i])) ok = false;
+    for (size_t i = 0; i < CIS_FOREIGN_COUNT; i++)
+        if (!cis_remove_if_present(root, cis_foreign_units[i])) ok = false;
+    static const char *const extras[] = {
+        "lib/wallet/src/zeta.c", "build/obj/alpha.d", "build/obj/zeta.d",
+    };
+    for (size_t i = 0; i < sizeof(extras) / sizeof(extras[0]); i++)
+        if (!cis_remove_if_present(root, extras[i])) ok = false;
+    return ok && cis_write_tree(root, cis_units, CIS_UNIT_COUNT, revision) &&
+           cis_drop_store(root);
 }
 
 /* Leave a donor image that is present, the right name, and unusable. */
@@ -368,8 +393,9 @@ static int cis_corrupt_donor(const struct cis_repo *repo)
 {
     int failures = 0;
     struct cis_observation built;
-    bool broken = cis_truncate_store(repo->main_root) &&
-                  cis_drop_store(repo->target_root);
+    bool broken = cis_reset_tree(repo->target_root, 1) &&
+                  cis_write_unit(repo->target_root, cis_units[0], 7) &&
+                  cis_truncate_store(repo->main_root);
     cis_observe(repo->target_root, &built);
     CIS_CHECK("a truncated donor image is refused, not adopted",
               broken && built.opened && !built.seeded);
@@ -477,6 +503,78 @@ static int cis_altered_donor_includes(const struct cis_repo *repo)
               count == 1 &&
               strcmp(includes[0], "lib/net/src/beta.c") == 0);
     if (index) codeindex_close(index);
+    return failures;
+}
+
+static int cis_inventory_removal(const struct cis_repo *repo)
+{
+    int failures = 0;
+    bool prepared = cis_reset_tree(repo->target_root, 1) &&
+                    cis_remove_if_present(repo->target_root, cis_units[2]);
+    struct cis_observation seeded;
+    cis_observe(repo->target_root, &seeded);
+    CIS_CHECK("a donor holding one removed path still seeds",
+              prepared && seeded.opened && seeded.fresh && seeded.seeded &&
+              seeded.files_refreshed == 1);
+    CIS_CHECK("a removed path leaves no stale file or symbols",
+              seeded.file_count == (int)CIS_UNIT_COUNT - 1 &&
+              !cis_unit_is_revision(repo->target_root, cis_units[2], 1));
+    return failures;
+}
+
+static int cis_inventory_addition(const struct cis_repo *repo)
+{
+    int failures = 0;
+    bool prepared = cis_reset_tree(repo->target_root, 1) &&
+                    cis_write_unit(repo->target_root, "lib/wallet/src/zeta.c", 9) &&
+                    cis_write_file(repo->target_root, "build/obj/zeta.d",
+                                   "build/obj/zeta.o: lib/wallet/src/zeta.c "
+                                   "lib/net/src/beta.c\n");
+    struct cis_observation seeded;
+    cis_observe(repo->target_root, &seeded);
+    CIS_CHECK("a donor needing one added file still seeds",
+              prepared && seeded.opened && seeded.fresh && seeded.seeded &&
+              seeded.files_refreshed == 1);
+    CIS_CHECK("an added path has its own row and symbols",
+              seeded.file_count == (int)CIS_UNIT_COUNT + 1 &&
+              cis_unit_is_revision(repo->target_root, cis_units[2], 1) &&
+              cis_unit_is_revision(repo->target_root, "lib/wallet/src/zeta.c", 9));
+    struct codeindex *index = codeindex_open(repo->target_root);
+    char includes[4][256] = {{0}};
+    int count = index ? codeindex_includes_of_file(
+        index, "lib/wallet/src/zeta.c", includes, 4) : -1;
+    CIS_CHECK("an added path keeps its depfile edge",
+              count == 1 && strcmp(includes[0], "lib/net/src/beta.c") == 0);
+    if (index) codeindex_close(index);
+    return failures;
+}
+
+static int cis_inventory_replacement(const struct cis_repo *repo)
+{
+    int failures = 0;
+    static const char *const replacements[] = {
+        "lib/net/src/alpha.c", "lib/net/src/zulu.c", "lib/net/src/yankee.c",
+        "lib/wallet/src/xray.c", "lib/wallet/src/zeta.c",
+    };
+    static const char *const removed[] = {
+        "lib/net/src/beta.c", "lib/net/src/gamma.c",
+        "lib/wallet/src/delta.c", "lib/wallet/src/epsilon.c",
+    };
+    bool prepared = cis_reset_tree(repo->target_root, 1);
+    for (size_t i = 0; i < sizeof(removed) / sizeof(removed[0]); i++)
+        if (!cis_remove_if_present(repo->target_root, removed[i])) prepared = false;
+    prepared = prepared &&
+               cis_write_tree(repo->target_root, replacements, 5, 1);
+    struct cis_observation seeded;
+    cis_observe(repo->target_root, &seeded);
+    CIS_CHECK("an overlapping replacement larger than current_count seeds",
+              prepared && seeded.opened && seeded.fresh && seeded.seeded &&
+              seeded.files_refreshed == 8);
+    CIS_CHECK("the replacement preserves overlap and adds new paths",
+              seeded.file_count == 5 &&
+              cis_unit_is_revision(repo->target_root, cis_units[0], 1) &&
+              cis_unit_is_revision(repo->target_root, cis_foreign_units[2], 1) &&
+              cis_unit_is_revision(repo->target_root, "lib/wallet/src/zeta.c", 1));
     return failures;
 }
 
@@ -786,6 +884,9 @@ int test_codeindex_seed(void)
     failures += cis_absolute_depfile_paths(&repo);
     failures += cis_altered_donor_includes(&repo);
     failures += cis_equal_edges_different_bytes(&repo);
+    failures += cis_inventory_removal(&repo);
+    failures += cis_inventory_addition(&repo);
+    failures += cis_inventory_replacement(&repo);
     failures += cis_corrupt_donor(&repo);
     failures += cis_foreign_donor(&foreign);
     failures += cis_owner_refusal(&repo);

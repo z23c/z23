@@ -10,6 +10,7 @@
 
 #include <sqlite3.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -63,23 +64,27 @@ static bool incremental_delete_path(sqlite3 *db, const char *sql,
     return ok;
 }
 
-static bool incremental_regular_mtime_ns(const char *path, int64_t *out)
+static int incremental_regular_mtime_ns(const char *path, int64_t *out)
 {
-    if (!path || !out) return false;
+    if (!path || !out) return -1;
 #if defined(_WIN32)
     struct platform_file_metadata metadata;
-    if (platform_file_metadata_read(path, &metadata) !=
-        PLATFORM_FILE_METADATA_OK)
-        return false;
+    enum platform_file_metadata_result result =
+        platform_file_metadata_read(path, &metadata);
+    if (result == PLATFORM_FILE_METADATA_MISSING) return 0;
+    if (result != PLATFORM_FILE_METADATA_OK) return -1;
     *out = metadata.modified_seconds * INT64_C(1000000000);
 #else
     struct stat metadata;
-    if (lstat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode))
-        return false;
+    if (lstat(path, &metadata) != 0) {
+        if (errno == ENOENT) return 0;
+        return -1;
+    }
+    if (!S_ISREG(metadata.st_mode)) return -1;
     *out = (int64_t)metadata.st_mtim.tv_sec * INT64_C(1000000000) +
            (int64_t)metadata.st_mtim.tv_nsec;
 #endif
-    return true;
+    return 1;
 }
 
 static bool incremental_delete_file_rows(sqlite3 *db, const char *path)
@@ -106,15 +111,14 @@ static bool incremental_scan_file_into_store(const char *root,
            !scan.failed;
 }
 
-static bool incremental_file_mtime_ns(const char *root, const char *path,
-                                      int64_t *out)
+static int incremental_file_mtime_ns(const char *root, const char *path,
+                                     int64_t *out)
 {
     char absolute[CI_PATH_MAX];
     int length = snprintf(absolute, sizeof(absolute), "%s/%s", root, path);
-    if (length <= 0 || (size_t)length >= sizeof(absolute) ||
-        !incremental_regular_mtime_ns(absolute, out))
-        return false;
-    return true;
+    if (length <= 0 || (size_t)length >= sizeof(absolute))
+        return -1;
+    return incremental_regular_mtime_ns(absolute, out);
 }
 
 static bool incremental_update_file_row(sqlite3 *db, const char *path,
@@ -124,28 +128,48 @@ static bool incremental_update_file_row(sqlite3 *db, const char *path,
 {
     sqlite3_stmt *statement = NULL;
     static const char update_sql[] =
-        "UPDATE files SET \"group\"=?,purpose=?,content_sha3=?,mtime=?,line_count=?"
-        " WHERE path=?";
+        "INSERT INTO files(path,\"group\",purpose,content_sha3,mtime,line_count)"
+        " VALUES(?1,?2,?3,?4,?5,?6)"
+        " ON CONFLICT(path) DO UPDATE SET \"group\"=excluded.\"group\","
+        " purpose=excluded.purpose,content_sha3=excluded.content_sha3,"
+        " mtime=excluded.mtime,line_count=excluded.line_count";
     if (sqlite3_prepare_v2(db, update_sql, -1, &statement, NULL) != SQLITE_OK)
         return false;
-    bool ok = sqlite3_bind_text(statement, 1, file->group, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
-              sqlite3_bind_text(statement, 2, file->purpose, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
-              sqlite3_bind_blob(statement, 3, content_sha3, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
-              sqlite3_bind_int64(statement, 4, mtime_ns) == SQLITE_OK &&
-              sqlite3_bind_int(statement, 5, file->line_count) == SQLITE_OK &&
-              sqlite3_bind_text(statement, 6, path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+    bool ok = sqlite3_bind_text(statement, 1, path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_text(statement, 2, file->group, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_text(statement, 3, file->purpose, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_blob(statement, 4, content_sha3, 32, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_int64(statement, 5, mtime_ns) == SQLITE_OK &&
+              sqlite3_bind_int(statement, 6, file->line_count) == SQLITE_OK &&
               sqlite3_step(statement) == SQLITE_DONE && // raw-sql-ok:codeindex-derived
               sqlite3_changes(db) == 1;
     sqlite3_finalize(statement);
     return ok;
 }
 
+static bool incremental_delete_file(sqlite3 *db, const char *path)
+{
+    return incremental_delete_path(db,
+                                   "DELETE FROM includes WHERE file_id IN "
+                                   "(SELECT id FROM files WHERE path=?1)",
+                                   path) &&
+           incremental_delete_path(db,
+                                   "DELETE FROM scan_shards WHERE path=?1",
+                                   path) &&
+           incremental_delete_path(db, "DELETE FROM files WHERE path=?1",
+                                   path);
+}
+
 static bool incremental_replace_file(const char *root, struct ci_store *store,
                                      const char *path)
 {
     sqlite3 *db = ci_store_db(store);
-    if (!incremental_delete_file_rows(db, path))
+    int64_t mtime_ns = 0;
+    int present = incremental_file_mtime_ns(root, path, &mtime_ns);
+    if (present < 0 || !incremental_delete_file_rows(db, path))
         LOG_FAIL("codeindex", "incremental stage=delete_rows path=%s", path);
+    if (present == 0)
+        return incremental_delete_file(db, path);
 
     uint8_t content_sha3[32];
     char purpose[CI_FILE_PURPOSE_MAX] = "";
@@ -153,10 +177,6 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
     if (!incremental_scan_file_into_store(root, store, path, content_sha3,
                                           purpose, &lines))
         LOG_FAIL("codeindex", "incremental stage=scan path=%s", path);
-
-    int64_t mtime_ns = 0;
-    if (!incremental_file_mtime_ns(root, path, &mtime_ns))
-        LOG_FAIL("codeindex", "incremental stage=file_metadata path=%s", path);
 
     struct ci_file file;
     memset(&file, 0, sizeof(file));
@@ -442,22 +462,65 @@ static bool diff_merkle_inputs_valid(const struct ci_store *store,
            cap >= current_count && inventory_same;
 }
 
-static bool diff_merkle_scan_rows(sqlite3_stmt *statement,
+static bool diff_merkle_append(struct ci_merkle_leaf *changed, int cap,
+                               int *nchanged, const struct ci_merkle_leaf *leaf)
+{
+    if (*nchanged >= cap) return false;
+    changed[(*nchanged)++] = *leaf;
+    return true;
+}
+
+static bool diff_merkle_donor_row(sqlite3_stmt *statement, bool *donor_row,
+                                  const char **path, const void **digest)
+{
+    if (!*donor_row) {
+        int rc = sqlite3_step(statement); // raw-sql-ok:codeindex-derived
+        if (rc != SQLITE_ROW) return false;
+        *donor_row = true;
+    }
+    *path = (const char *)sqlite3_column_text(statement, 0);
+    *digest = sqlite3_column_blob(statement, 1);
+    return *path && *digest && sqlite3_column_bytes(statement, 1) == 32;
+}
+
+static bool diff_merkle_scan_rows(sqlite3_stmt *statement, int donor_count,
                                   const struct ci_merkle_leaf *current,
                                   int current_count,
-                                  struct ci_merkle_leaf *changed, int *nchanged)
+                                  struct ci_merkle_leaf *changed, int cap,
+                                  int *nchanged, int *overlap)
 {
-    for (int i = 0; i < current_count; i++) {
-        int rc = sqlite3_step(statement); // raw-sql-ok:codeindex-derived
-        const char *path = rc == SQLITE_ROW
-            ? (const char *)sqlite3_column_text(statement, 0) : NULL;
-        const void *digest = rc == SQLITE_ROW
-            ? sqlite3_column_blob(statement, 1) : NULL;
-        if (rc != SQLITE_ROW || !path || strcmp(path, current[i].path) != 0 ||
-            !digest || sqlite3_column_bytes(statement, 1) != 32)
+    int di = 0, ci = 0;
+    bool donor_row = false;
+    while (di < donor_count || ci < current_count) {
+        const char *path = NULL;
+        const void *digest = NULL;
+        if (di < donor_count &&
+            !diff_merkle_donor_row(statement, &donor_row, &path, &digest))
             return false;
-        if (memcmp(digest, current[i].content_digest.bytes, 32) != 0)
-            changed[(*nchanged)++] = current[i];
+        int cmp = di >= donor_count ? 1 : ci >= current_count ? -1 :
+            strcmp(path, current[ci].path);
+        if (cmp == 0) {
+            (*overlap)++;
+            if (memcmp(digest, current[ci].content_digest.bytes, 32) != 0 &&
+                !diff_merkle_append(changed, cap, nchanged, &current[ci]))
+                return false;
+            di++;
+            ci++;
+            donor_row = false;
+        } else if (cmp < 0) {
+            struct ci_merkle_leaf removed;
+            memset(&removed, 0, sizeof(removed));
+            ci_cpy(removed.path, sizeof(removed.path), path);
+            memcpy(removed.content_digest.bytes, digest, 32);
+            if (!diff_merkle_append(changed, cap, nchanged, &removed))
+                return false;
+            di++;
+            donor_row = false;
+        } else {
+            if (!diff_merkle_append(changed, cap, nchanged, &current[ci]))
+                return false;
+            ci++;
+        }
     }
     return true;
 }
@@ -466,25 +529,29 @@ int ci_store_diff_merkle_leaves(struct ci_store *store,
                                 const struct ci_merkle_leaf *current,
                                 int current_count,
                                 struct ci_merkle_leaf *changed, int cap,
-                                bool *inventory_same)
+                                bool *inventory_same, int *inventory_overlap)
 {
     if (inventory_same) *inventory_same = false;
+    if (inventory_overlap) *inventory_overlap = 0;
     if (!diff_merkle_inputs_valid(store, current, current_count, changed, cap,
-                                  inventory_same))
+                                  inventory_same) || !inventory_overlap)
         LOG_ERR("codeindex", "invalid Merkle/store diff");
+    int donor_count = ci_store_file_count(store);
     ci_store_lock(store);
     sqlite3_stmt *statement = NULL;
     sqlite3 *db = ci_store_db(store);
-    bool ok = sqlite3_prepare_v2(db,
+    bool ok = donor_count >= 0 && sqlite3_prepare_v2(db,
         "SELECT path,content_sha3 FROM files ORDER BY path", -1,
         &statement, NULL) == SQLITE_OK;
     int nchanged = 0;
     if (ok)
-        ok = diff_merkle_scan_rows(statement, current, current_count, changed,
-                                   &nchanged);
-    if (ok && sqlite3_step(statement) != SQLITE_DONE) ok = false; // raw-sql-ok:codeindex-derived
+        ok = diff_merkle_scan_rows(statement, donor_count, current,
+                                   current_count, changed, cap, &nchanged,
+                                   inventory_overlap);
     sqlite3_finalize(statement);
     ci_store_unlock(store);
-    *inventory_same = ok;
-    return ok ? nchanged : 0;
+    if (!ok) return -1;
+    *inventory_same = donor_count == current_count &&
+                      *inventory_overlap == current_count;
+    return nchanged;
 }
