@@ -71,7 +71,7 @@ bool dlsc_push_notes(struct json_value *data, size_t nrows)
     return json_push_kv_int(data, "outcomes_omitted",
                             (int64_t)dlsc_first(nrows)) &&
            json_push_kv_str(data, "outcomes_full",
-                            "z23-dev dev land status --json returns every "
+                            "z23-dev dev land status --input='{\"json\":true}' returns every "
                             "outcome row with signatures and full tips");
 }
 

@@ -510,7 +510,7 @@ static int dlr_case_compact(void)
         ASSERT(strstr(buf, "remote_signature") == NULL);
         ASSERT(dlr_compact_rows_ok(dlx_arr(&c, "outcomes")));
         ASSERT_EQ(json_get_int(json_get(&c.reply.data, "outcomes_omitted")), 7);
-        ASSERT(strstr(dlx_str(&c, "outcomes_full"), "--json") != NULL);
+        ASSERT(strstr(dlx_str(&c, "outcomes_full"), "--input='{\"json\":true}'") != NULL);
         /* The screen is untouched: it still lists the whole ten-row tail. */
         const char *screen = dlx_str(&c, "screen");
         ASSERT(strstr(screen, "land: 0 queued, nothing in flight\n  #2 ") == screen);
