@@ -676,10 +676,10 @@ int wcs_finish_src_list(const char *srclist)
     return failed ? 2 : 0;
 }
 
-static int get_src_list(void)
+static int get_src_list(int ignore_supplied)
 {
     char raw[WCS_PATH], errp[WCS_PATH], srclist[WCS_PATH];
-    const char *supplied = getenv("ZCL_WCS_NODE_C23_SRCS_FILE");
+    const char *supplied = ignore_supplied ? NULL : getenv("ZCL_WCS_NODE_C23_SRCS_FILE");
     if (ovf(snprintf(srclist, sizeof srclist, "%s/srcs.txt", g_wcs_work),
             sizeof srclist))
         return 2;
@@ -772,9 +772,9 @@ static int wcs_setup_floor(char api[WCS_FLAGLEN], char block[WCS_LINE],
 }
 
 /* The source list and the sweep-size floor. 0 ok; nonzero is the exit code. */
-static int wcs_setup_sources(void)
+static int wcs_setup_sources(int ignore_supplied)
 {
-    if (get_src_list() != 0) return 2;
+    if (get_src_list(ignore_supplied) != 0) return 2;
     int r = gate_require_scanned(g_wcs_nsrc, 150, k_wcs_gate,
         "the source list named no translation units — NODE_C23_SRCS moved, "
         "the supplied file is empty, or the Make target broke");
@@ -820,7 +820,7 @@ static int wcs_add_base_flags(const char *api)
            wcs_flag_add(api) || wcs_add_gcc14_errors();
 }
 
-static int wcs_setup(void)
+static int wcs_setup(int ignore_supplied)
 {
     static char api[WCS_FLAGLEN], block[WCS_LINE];
     static char plat[64][WCS_FLAGLEN];
@@ -837,7 +837,7 @@ static int wcs_setup(void)
     int r = gate_require_scanned(g_wcs_nflag, 50, k_wcs_gate,
         "no include/ roots found — the layout moved or find was pruned too hard");
     if (r) return r;
-    r = wcs_setup_sources();
+    r = wcs_setup_sources(ignore_supplied);
     if (r) return r;
     char flagsnul[WCS_PATH];
     if (ovf(snprintf(flagsnul, sizeof flagsnul, "%s/flags.nul", g_wcs_work),
@@ -862,8 +862,19 @@ static int inc_selftests(void)
 }
 
 int wcs_selftest_phase(void); /* gate_windows_cross_syntax_selftest.c */
+int wcs_screen_selftest(void);
 
-int wcs_begin(int selftest_only)
+static int screen_or_sweep(int selftest_only, const char *screen, int rc)
+{
+    if (screen && rc == 0) rc = wcs_screen_file(screen);
+    else if (rc == 0) rc = wcs_selftest_phase();
+    if (selftest_only && rc == 0) rc = wcs_screen_selftest();
+    if (!selftest_only && !screen && rc == 0) rc = wcs_sweep();
+    rap_rm_rf(g_wcs_work);
+    return rc;
+}
+
+static int wcs_begin_mode(int selftest_only, const char *screen)
 {
     const char *cc = env_or("ZCL_MINGW_CC", "x86_64-w64-mingw32-gcc");
     if (wcs_copy(g_wcs_cc, sizeof g_wcs_cc, cc)) {
@@ -871,10 +882,15 @@ int wcs_begin(int selftest_only)
                 WCS_PATH);
         return 2;
     }
-    printf("══ LINT: Windows cross-syntax (mingw -fsyntax-only over every "
-           "_WIN32 TU) ══\n");
+    if (screen) printf("Windows cross-syntax: partial, non-authoritative local screen; membership uses current Make configuration\n");
+    else printf("══ LINT: Windows cross-syntax (mingw -fsyntax-only over every "
+                "_WIN32 TU) ══\n");
     if (!selftest_only && wcs_have_cmd(g_wcs_cc) < 0) return 2;
     if (!selftest_only && wcs_have_cmd(g_wcs_cc) == 0) {
+        if (screen) {
+            fprintf(stderr, "%s: screen refused: compiler unavailable\n", k_wcs_gate);
+            return 2;
+        }
         if (env_or("ZCL_REQUIRE_MINGW", "0")[0] == '1') {
             fprintf(stderr, "  %s: FAIL — required compiler '%s' is "
                     "unavailable;\n  acceptance cannot succeed after "
@@ -900,20 +916,24 @@ int wcs_begin(int selftest_only)
     }
     int rc = inc_selftests();
     if (rc == 0) rc = wcs_plan_order_test(g_wcs_work);
-    if (rc == 0) rc = wcs_setup();
-    if (rc == 0) rc = wcs_selftest_phase();
-    if (selftest_only || rc != 0) {
-        rap_rm_rf(g_wcs_work);
-        return rc;
-    }
-    rc = wcs_sweep();
-    rap_rm_rf(g_wcs_work);
-    return rc;
+    if (rc == 0) rc = wcs_setup(screen != NULL);
+    return screen_or_sweep(selftest_only, screen, rc);
+}
+
+int wcs_begin(int selftest_only)
+{
+    return wcs_begin_mode(selftest_only, NULL);
 }
 
 int check_windows_cross_syntax_run(int argc, char **argv)
 {
-    if (argc >= 1 && argv[0] && strcmp(argv[0], "--self-test") == 0)
+    if (argc == 1 && argv[0] && strcmp(argv[0], "--self-test") == 0)
         return wcs_begin(1);
+    if (argc == 1 && argv[0] && strncmp(argv[0], "--screen-file=", 14) == 0 && argv[0][14])
+        return wcs_begin_mode(0, argv[0] + 14);
+    if (argc != 0) {
+        fprintf(stderr, "%s: usage: check-windows-cross-syntax [--screen-file=FILE]\n", k_wcs_gate);
+        return 2;
+    }
     return wcs_begin(0);
 }

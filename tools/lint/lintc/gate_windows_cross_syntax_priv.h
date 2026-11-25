@@ -55,6 +55,8 @@ int wcs_compile_kind(const char *log, const char *rc, char *kind,
 
 /* compile sweep (gate_windows_cross_syntax_sweep.c) */
 int wcs_sweep(void);
+int wcs_screen_file(const char *src);
+int wcs_screen_argv_selftest(void);
 int wcs_log_shape(const char *path);
 int wcs_reap_workers(const pid_t *pids, int count);
 int wcs_worker_list_selftest(void);

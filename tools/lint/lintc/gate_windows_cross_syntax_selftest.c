@@ -18,6 +18,7 @@
 #endif
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -1127,6 +1128,51 @@ static int diagnostic_probes(void)
     if (!rc) rc = located_classifier_probes();
     if (!rc) rc = gcc14_error_probes();
     return rc;
+}
+
+static int screen_fixture_write(const char *body)
+{
+    FILE *f = fopen("screen.c", "w");
+    if (!f) return 1;
+    int rc = fputs(body, f) < 0;
+    if (fclose(f) != 0) rc = 1;
+    return rc;
+}
+
+static int screen_fixture(void)
+{
+    int cwd = open(".", O_RDONLY);
+    if (cwd < 0 || chdir(g_wcs_work) != 0) {
+        if (cwd >= 0) close(cwd);
+        return 1;
+    }
+    char saved[WCS_PATH];
+    memcpy(saved, g_wcs_src[0], sizeof saved);
+    int n = g_wcs_nsrc;
+    strcpy(g_wcs_src[0], "screen.c");
+    g_wcs_nsrc = 1;
+    int bad = screen_fixture_write("static int unused(void) { return 1; }\n") ||
+              wcs_screen_file("screen.c") != 1 ||
+              screen_fixture_write("int screen(void) { return 1; }\n") ||
+              wcs_screen_file("screen.c") != 0 ||
+              wcs_screen_file("other.c") != 2 ||
+              wcs_screen_file("../screen.c") != 2;
+    if (symlink("screen.c", "link.c") != 0) bad = 1;
+    else {
+        strcpy(g_wcs_src[0], "link.c");
+        if (wcs_screen_file("link.c") != 2) bad = 1;
+    }
+    memcpy(g_wcs_src[0], saved, sizeof saved);
+    g_wcs_nsrc = n;
+    if (fchdir(cwd) != 0) bad = 1;
+    close(cwd);
+    return bad;
+}
+
+int wcs_screen_selftest(void)
+{
+    if (wcs_have_cmd(g_wcs_cc) != 1) return 0;
+    return wcs_screen_argv_selftest() || screen_fixture();
 }
 
 int wcs_selftest_phase(void)

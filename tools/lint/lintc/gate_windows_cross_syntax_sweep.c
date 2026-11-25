@@ -329,6 +329,69 @@ static void build_compile_argv(char *src, size_t l, char **cargv)
     cargv[na] = NULL;
 }
 
+int wcs_screen_argv_selftest(void)
+{
+    char *args[WCS_ARGS];
+    char *cases[] = { "tools/command/native_command.c",
+                      "tests/harness/include/test/example.c",
+                      "core/modules/net/src/rom_fetch.c" };
+    for (int i = 0; i < 3; i++) {
+        build_compile_argv(cases[i], strlen(cases[i]), args);
+        int testing = 0, include = 0, exempt = 0, n = 0;
+        for (; args[n]; n++) {
+            testing += strcmp(args[n], "-DZCL_TESTING") == 0;
+            include += strcmp(args[n], "test/windows_compat.h") == 0;
+            exempt += strcmp(args[n], "-Wno-unused-function") == 0;
+        }
+        if (n < 1 || strcmp(args[n - 1], cases[i]) != 0 ||
+            testing != (i == 1) || include != (i == 1) || exempt != (i == 2))
+            return 1;
+        for (int j = 0; j < g_wcs_nflag; j++)
+            if (strcmp(args[j + 1], g_wcs_flag[j]) != 0) return 1;
+    }
+    return 0;
+}
+
+static int screen_source_valid(const char *src)
+{
+    size_t len = strlen(src);
+    struct stat st;
+    int found = 0;
+    for (int i = 0; i < g_wcs_nsrc; i++)
+        if (strcmp(src, g_wcs_src[i]) == 0) { found = 1; break; }
+    if (!found || len < 3 || strcmp(src + len - 2, ".c") != 0 ||
+        src[0] == '/' || src[0] == '.' || strstr(src, "/../") ||
+        strstr(src, "/./") || strstr(src, "//") ||
+        lstat(src, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return 0;
+    }
+    return 1;
+}
+
+/* This is a local partial screen, never a full gate verdict or cache entry. */
+int wcs_screen_file(const char *src)
+{
+    if (!screen_source_valid(src)) {
+        fprintf(stderr, "%s: screen refused: source is not a regular member of the Make-configured source list: %s\n", k_wcs_gate, src);
+        return 2;
+    }
+    char log[WCS_PATH];
+    if (snprintf(log, sizeof log, "%s/screen.log", g_wcs_work) >= (int)sizeof log)
+        return 2;
+    char *args[WCS_ARGS];
+    build_compile_argv((char *)src, strlen(src), args);
+    int rc = wcs_run_capture(log, log, args);
+    FILE *f = fopen(log, "r");
+    if (!f) return 2;
+    int ch;
+    while ((ch = fgetc(f)) != EOF) fputc(ch, stderr);
+    int failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    if (failed) return 2;
+    fprintf(stderr, "%s: partial screen: %s (compiler exit %d); full gate still required\n", k_wcs_gate, src, rc);
+    return rc == 0 ? 0 : 1;
+}
+
 static void compile_one(char *src, size_t l)
 {
     char log[WCS_PATH * 2], rcf[WCS_PATH * 2];
