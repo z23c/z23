@@ -105,6 +105,8 @@ void gui_window_close(struct gui_window *w);
 bool gui_window_wait(struct gui_window *w, int32_t timeout_ms,
                      struct gui_event *ev);
 void gui_window_wake(struct gui_window *w); /* thread-safe */
+/* Precise devices report pixels. Ten pixels are one notch (dy +1). */
+float gui_wheel_notch(float delta, bool precise);
 bool gui_window_timer_set(struct gui_window *w, uint32_t id, uint32_t ms,
                           bool repeat); /* up to 8 timers */
 void gui_window_timer_cancel(struct gui_window *w, uint32_t id);

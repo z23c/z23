@@ -306,6 +306,64 @@ static bool src_cell(void *c, size_t r, size_t col, char *b, size_t cap, enum gu
 static size_t g_sorted_col = 99;
 static void src_sort(void *c, size_t col, bool desc) { (void)c; (void)desc; g_sorted_col = col; }
 
+static void test_wheel_notch(void)
+{
+    struct gui_tree *t = gui_tree_new();
+    struct gui_ui *ui = gui_ui_new(t);
+    static const struct gui_table_source src = { "tx", src_rows, src_cell, src_sort, NULL };
+    struct gui_column cols[2] = { { "A", 0, false, true }, { "B", 120, true, false } };
+    struct gui_event w = { .type = GUI_EV_MOUSE_WHEEL, .wheel = { 100, 100, 0, 0 } };
+    struct gui_action act;
+    int64_t moved;
+    CHECK("a mouse line stays one notch", gui_wheel_notch(1.0f, false) == 1.0f);
+    CHECK("ten precise pixels are one notch", gui_wheel_notch(10.0f, true) == 1.0f);
+    CHECK("precise direction stays signed", gui_wheel_notch(-10.0f, true) == -1.0f);
+    gui_ui_table_source(ui, &src);
+    gui_tree_begin(t);
+    gui_box(t, "root", GUI_COL, GS_SCREEN);
+    gui_table(t, "tbl", "tx", cols, 2);
+    gui_attr(t, GUI_A_H, 200);
+    gui_end(t);
+    gui_tree_end(t, NULL, 0);
+    gui_ui_layout(ui, 500, 400);
+    w.wheel.dy = -gui_wheel_notch(30.0f, true);
+    gui_ui_event(ui, &w, &act);
+    moved = gui_ui_table_find(ui, "tbl")->scroll;
+    if (moved != 9) printf("  precise flick moved %lld rows\n", (long long)moved);
+    CHECK("one precise flick scrolls nine rows", moved == 9);
+    gui_ui_free(ui);
+    gui_tree_free(t);
+}
+
+static void test_wheel_small(void)
+{
+    struct gui_tree *t = gui_tree_new();
+    struct gui_ui *ui = gui_ui_new(t);
+    static const struct gui_table_source src = { "tx", src_rows, src_cell, src_sort, NULL };
+    struct gui_column cols[2] = { { "A", 0, false, true }, { "B", 120, true, false } };
+    struct gui_event w = { .type = GUI_EV_MOUSE_WHEEL, .wheel = { 100, 100, 0, 0 } };
+    struct gui_action act;
+    int64_t moved;
+    int i;
+    gui_ui_table_source(ui, &src);
+    gui_tree_begin(t);
+    gui_box(t, "root", GUI_COL, GS_SCREEN);
+    gui_table(t, "tbl", "tx", cols, 2);
+    gui_attr(t, GUI_A_H, 200);
+    gui_end(t);
+    gui_tree_end(t, NULL, 0);
+    gui_ui_layout(ui, 500, 400);
+    w.wheel.dy = -gui_wheel_notch(2.5f, true);
+    gui_ui_event(ui, &w, &act);
+    CHECK("one small precise step stays put", gui_ui_table_find(ui, "tbl")->scroll == 0);
+    for (i = 0; i < 3; i++) gui_ui_event(ui, &w, &act);
+    moved = gui_ui_table_find(ui, "tbl")->scroll;
+    if (moved != 3) printf("  small precise steps moved %lld rows\n", (long long)moved);
+    CHECK("small precise steps add up to rows", moved == 3);
+    gui_ui_free(ui);
+    gui_tree_free(t);
+}
+
 static void test_table(void)
 {
     struct gui_tree *t = gui_tree_new();
@@ -728,6 +786,8 @@ int test_gui(void)
 {
     printf("\n=== gui ===\n");
     g_fail = 0;
+    test_wheel_notch();
+    test_wheel_small();
     test_cocoa_auto();
     test_utf8();
     test_draw();

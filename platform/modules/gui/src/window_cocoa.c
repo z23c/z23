@@ -647,7 +647,8 @@ static void cocoa_wheel(struct gui_window *w, cocoa_id ev)
     cocoa_point_px(w, ev, &x, &y);
     out.wheel.x = x;
     out.wheel.y = y;
-    out.wheel.dy = (float)fn(ev, cocoa_sel("scrollingDeltaY"));
+    out.wheel.dy = gui_wheel_notch((float)fn(ev, cocoa_sel("scrollingDeltaY")),
+                                   cocoa_bool(ev, "hasPreciseScrollingDeltas") != 0);
     out.mods = cocoa_mods(cocoa_ulong(ev, "modifierFlags"));
     gui_ring_push(w, &out);
 }

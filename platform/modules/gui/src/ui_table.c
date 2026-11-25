@@ -150,8 +150,14 @@ void gui_ui_table_wheel(struct gui_ui *ui, struct gui_node *n, float dy)
     const struct gui_table_source *src = gui_ui_source(ui, n->bind);
     struct gui_table_state *st = gui_ui_table_find(ui, n->id);
     if (!src || !st) return;
-    int64_t to = st->scroll - (int64_t)(dy * 3.0f);
-    int64_t mx = max_scroll(ui, n, src);
+    int64_t step = 0;
+    int64_t to, mx;
+    st->wheel_milli += (int64_t)((double)dy * 3000.0);
+    step = st->wheel_milli / 1000;
+    if (step == 0) return;
+    st->wheel_milli -= step * 1000;
+    to = st->scroll - step;
+    mx = max_scroll(ui, n, src);
     to = to < 0 ? 0 : to > mx ? mx : to;
     if (to != st->scroll) {
         st->scroll = to;

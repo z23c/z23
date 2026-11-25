@@ -180,6 +180,7 @@ struct gui_table_state {
     int64_t scroll, selected;
     int32_t sort_col;
     bool sort_desc;
+    int64_t wheel_milli; /* leftover thousandths of a row */
 };
 
 struct gui_ui {

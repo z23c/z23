@@ -23,6 +23,12 @@ static atomic_bool g_virtual;
 static _Atomic uint64_t g_virtual_ns;
 
 void gui_virtual_clock_set(bool on) { atomic_store(&g_virtual, on); }
+
+float gui_wheel_notch(float delta, bool precise)
+{
+    if (precise) return delta / 10.0f;
+    return delta;
+}
 void gui_virtual_clock_advance(uint64_t ns)
 {
     atomic_fetch_add(&g_virtual_ns, ns);
