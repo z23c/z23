@@ -1493,6 +1493,94 @@ static bool hgt_epoch_exists(const char *repo, char digit, bool candidate)
         candidate ? "bin/dev" : "dev-obj", name);
     return hgt_exists(path);
 }
+static bool hgt_epoch_select_keep(const char *repo, char digit, int keep, bool apply, size_t expected)
+{
+    char selector[80];
+    memcpy(selector, "dev-obj:", 8); memset(selector + 8, digit, 64); selector[72] = 0;
+    struct json_value out; json_init(&out); json_set_object(&out);
+    bool ok = host_gc_epochs_selected(repo, keep, apply, selector, &out);
+    const struct json_value *rows = json_get(&out, "epochs");
+    ok = ok && rows && rows->type == JSON_ARR && json_size(rows) == expected &&
+         json_get_int(json_get(&out, "profiles_refused")) == 0;
+    json_free(&out); return ok;
+}
+static bool hgt_epoch_select(const char *repo, char digit, bool apply, size_t expected)
+{ return hgt_epoch_select_keep(repo, digit, 1, apply, expected); }
+static bool hgt_epoch_bad_input(struct json_value *in, const char *repo, int mode)
+{
+    char selector[80];
+    memcpy(selector, "dev-obj:", 8); memset(selector + 8, '1', 64); selector[72] = 0;
+    bool ok = json_push_kv_bool(in, "apply", true);
+    if (mode != 0) ok = ok && json_push_kv_str(in, "checkout", repo);
+    if (mode == 2) ok = ok && json_push_kv_int(in, "epoch", 1);
+    else ok = ok && json_push_kv_str(in, "epoch", mode == 0 || mode == 4 ? selector : mode == 3 ? "" : "dev-obj:bad");
+    if (mode == 0 || mode == 4) {
+        struct json_value roots; json_init(&roots); json_set_array(&roots);
+        struct json_value root; json_init(&root); json_set_str(&root, repo);
+        ok = ok && json_push_back(&roots, &root) && json_push_kv(in, "roots", &roots);
+        json_free(&root); json_free(&roots);
+    }
+    return ok;
+}
+static bool hgt_epoch_bad_request(const char *repo, int mode)
+{
+    struct json_value in; json_init(&in); json_set_object(&in);
+    struct zcl_command_reply reply; zcl_command_reply_init(&reply, "zcl.host_gc.v1");
+    bool ok = hgt_epoch_bad_input(&in, repo, mode);
+    if (ok) {
+        struct zcl_command_request req = {.input = &in};
+        zcl_native_handle_ops_host_gc(&req, &reply);
+        ok = reply.status == ZCL_COMMAND_STATUS_FAILED &&
+             !strcmp(reply.error.code, "host_gc.epochs_refused");
+    }
+    zcl_command_reply_free(&reply); json_free(&in);
+    return ok && hgt_epoch_exists(repo, '1', false) && hgt_epoch_exists(repo, '4', false);
+}
+static int hgt_epoch_selected_tests(const char *tmp)
+{
+    int failures = 0;
+    TEST("epoch GC exact selection narrows apply and recovery") {
+        char repo[2048], name[65], object[2200], stage[2200], marker[2200], session[2300];
+        (void)snprintf(repo, sizeof(repo), "%s/epoch-selected", tmp);
+        ASSERT(hgt_epoch_setup(repo));
+        for (int i = 0; i < 5; ++i) ASSERT(hgt_epoch_bad_request(repo, i));
+        ASSERT(!host_gc_epoch_selector_valid("unknown:0000000000000000000000000000000000000000000000000000000000000000"));
+        ASSERT(hgt_epoch_select(repo, '5', true, 0)); /* current */
+        ASSERT(hgt_epoch_select(repo, '2', true, 0)); /* leased */
+        ASSERT(hgt_epoch_exists(repo, '5', false) && hgt_epoch_exists(repo, '2', false));
+        memset(name, '4', 64); name[64] = 0;
+        (void)snprintf(object, sizeof(object), "%s/build/dev-obj/epochs/%s", repo, name);
+        struct timespec newest[2] = {{.tv_sec = 2000000000}, {.tv_sec = 2000000000}};
+        ASSERT(utimensat(AT_FDCWD, object, newest, 0) == 0);
+        ASSERT(hgt_epoch_select_keep(repo, '4', 2, true, 0));
+        ASSERT(hgt_epoch_exists(repo, '4', false) && hgt_epoch_exists(repo, '4', true));
+        memset(name, '6', 64); name[64] = 0;
+        ASSERT(hgt_epoch_dir(repo, '6', false));
+        (void)snprintf(object, sizeof(object), "%s/build/dev-obj/epochs/%s", repo, name);
+        (void)snprintf(stage, sizeof(stage), "%s/build/dev-obj/epochs/.gc-%s", repo, name);
+        (void)snprintf(marker, sizeof(marker), "%s/build/dev-obj/epochs/.gc-%s.session", repo, name);
+        (void)snprintf(session, sizeof(session), "%s/.build-session", object);
+        ASSERT(link(session, marker) == 0); ASSERT(rename(object, stage) == 0);
+        ASSERT(hgt_epoch_dir(repo, '7', false));
+        memset(name, '7', 64);
+        (void)snprintf(object, sizeof(object), "%s/build/dev-obj/epochs/%s", repo, name);
+        char other_stage[2200], other_marker[2200];
+        (void)snprintf(other_stage, sizeof(other_stage), "%s/build/dev-obj/epochs/.gc-%s", repo, name);
+        (void)snprintf(other_marker, sizeof(other_marker), "%s/build/dev-obj/epochs/.gc-%s.session", repo, name);
+        (void)snprintf(session, sizeof(session), "%s/.build-session", object);
+        ASSERT(link(session, other_marker) == 0); ASSERT(rename(object, other_stage) == 0);
+        ASSERT(hgt_epoch_select(repo, '1', true, 1));
+        ASSERT(!hgt_epoch_exists(repo, '1', false) && !hgt_epoch_exists(repo, '1', true));
+        ASSERT(hgt_epoch_exists(repo, '4', false) && hgt_epoch_exists(repo, '4', true));
+        ASSERT(hgt_exists(stage) && hgt_exists(marker));
+        ASSERT(hgt_epoch_select(repo, '1', true, 0)); /* absent is not removal */
+        ASSERT(hgt_epoch_select(repo, '6', true, 0));
+        ASSERT(!hgt_exists(stage) && !hgt_exists(marker));
+        ASSERT(hgt_exists(other_stage) && hgt_exists(other_marker));
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static bool hgt_epoch_downgrade(const char *repo)
 {
     if (!hgt_epoch_producer(repo, false)) return false;
@@ -1916,6 +2004,9 @@ int test_host_gc(void)
     }
 
     failures += hgt_epoch_tests(tmp);
+#if defined(__linux__)
+    failures += hgt_epoch_selected_tests(tmp);
+#endif
     failures += hgt_archive_tests(tmp);
     failures += hgt_disposable_tests(tmp);
     failures += hgt_route_tests();

@@ -40,6 +40,19 @@ static bool he_epoch_name(const char *s)
         if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return false;
     return true;
 }
+static const struct he_profile *he_selector(const char *s, const char **hash)
+{
+    if (!s) return NULL;
+    const char *colon = strchr(s, ':');
+    if (!colon || !he_epoch_name(colon + 1)) return NULL;
+    size_t len = (size_t)(colon - s);
+    for (size_t i = 0; i < sizeof(he_profiles) / sizeof(he_profiles[0]); ++i)
+        if (strlen(he_profiles[i].objects) == len && !memcmp(s, he_profiles[i].objects, len)) {
+            *hash = colon + 1;
+            return &he_profiles[i];
+        }
+    return NULL;
+}
 static bool he_same_mount(int parent, int fd);
 static int he_dir(int parent, const char *name)
 {
@@ -288,8 +301,18 @@ static bool he_orphan_stage(int epochs, const char *name)
     memcpy(marker, name, 68); memcpy(marker + 68, ".session", 9);
     return !he_absent(epochs, name) && he_absent(epochs, marker);
 }
+static bool he_recovery_name(const char *entry, const char *selected, char name[65], bool *stage)
+{
+    size_t len = strlen(entry);
+    if (strncmp(entry, ".gc-", 4) || (len != 68 && len != 76)) return false;
+    if (len == 76 && strcmp(entry + 68, ".session")) return false;
+    memcpy(name, entry + 4, 64); name[64] = 0;
+    if (selected && strcmp(name, selected)) return false;
+    *stage = len == 68;
+    return true;
+}
 static bool he_recover(int epochs, int candidates, const char *current,
-    const char *profile, bool apply, unsigned *refused, unsigned *pending, unsigned *partial)
+    const char *profile, const char *selected, bool apply, unsigned *refused, unsigned *pending, unsigned *partial)
 {
     int fd = openat(epochs, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return false;
@@ -297,14 +320,13 @@ static bool he_recover(int epochs, int candidates, const char *current,
     if (!dir) { close(fd); return false; }
     bool ok = true; errno = 0;
     for (struct dirent *ent; (ent = readdir(dir)); ) {
-        if (strlen(ent->d_name) == 68 && !strncmp(ent->d_name, ".gc-", 4)) {
+        char name[65]; bool stage;
+        if (!he_recovery_name(ent->d_name, selected, name, &stage)) continue;
+        if (stage) {
             if (he_orphan_stage(epochs, ent->d_name)) ++*refused;
             errno = 0;
             continue;
         }
-        if (strlen(ent->d_name) != 76 || strncmp(ent->d_name, ".gc-", 4) ||
-            strcmp(ent->d_name + 68, ".session")) continue;
-        char name[65]; memcpy(name, ent->d_name + 4, 64); name[64] = 0;
         ++*pending;
         if (!he_epoch_name(name) || !he_recover_one(epochs, candidates, name, current, profile, apply)) {
             ++*refused;
@@ -320,6 +342,7 @@ static bool he_recover(int epochs, int candidates, const char *current,
 struct he_run {
     const char *checkout;
     const struct he_profile *profile;
+    const char *selected;
     int object, candidate, epochs, candidates, lock, keep;
     bool apply;
     char current[65];
@@ -360,7 +383,7 @@ static bool he_run_open(struct he_run *run, int bins)
             (run->candidates = he_dir(run->candidate, "epochs")) < 0) return false;
     }
     if (!he_current_dirs(run)) return false;
-    return he_recover(run->epochs, run->candidates, run->current, run->profile->session,
+    return he_recover(run->epochs, run->candidates, run->current, run->profile->session, run->selected,
         run->apply, run->refused, run->pending, run->partial);
 }
 static bool he_measure_one(int parent, const char *name, bool optional, uint64_t *size)
@@ -387,6 +410,17 @@ static bool he_remove_pair(struct he_run *run, const char *name)
     if (run->candidates >= 0 && fsync(run->candidates) != 0) return false;
     return he_start_retire(run->epochs, name);
 }
+static bool he_retire_entry(struct he_run *run, const char *name)
+{
+    uint64_t size;
+    if (!he_measure(run, name, &size) || size > (uint64_t)INT64_MAX - *run->bytes) return false;
+    if (run->apply && !he_remove_pair(run, name)) { ++*run->partial; return false; }
+    if (!he_append(run->rows, run->profile->objects, name, size, run->apply)) {
+        if (run->apply) ++*run->partial;
+        return false;
+    }
+    *run->bytes += size; return true;
+}
 static bool he_entry(struct he_run *run, const struct he_epoch *entry, int *retained)
 {
     if (!strcmp(entry->name, run->current)) return true;
@@ -396,22 +430,17 @@ static bool he_entry(struct he_run *run, const struct he_epoch *entry, int *reta
     if (close(fd) != 0) return false;
     if (!idle || !he_is_pair(run->candidates, entry->name)) return true;
     if (*retained < run->keep) { ++*retained; return true; }
-    uint64_t size;
-    if (!he_measure(run, entry->name, &size) || size > (uint64_t)INT64_MAX - *run->bytes) return false;
-    if (run->apply && !he_remove_pair(run, entry->name)) { ++*run->partial; return false; }
-    if (!he_append(run->rows, run->profile->objects, entry->name, size, run->apply)) {
-        if (run->apply) ++*run->partial;
-        return false;
-    }
-    *run->bytes += size; return true;
+    if (run->selected && strcmp(entry->name, run->selected)) return true;
+    return he_retire_entry(run, entry->name);
 }
 static bool he_process(const char *checkout, int build, int bins, const struct he_profile *profile,
     int keep, bool apply, struct json_value *rows, uint64_t *bytes, unsigned *refused,
-    unsigned *pending, unsigned *partial)
+    unsigned *pending, unsigned *partial, const char *selected)
 {
     struct he_run run = { .checkout = checkout, .profile = profile, .object = -1,
         .candidate = -1, .epochs = -1, .candidates = -1, .lock = -1, .keep = keep,
-        .apply = apply, .rows = rows, .bytes = bytes, .refused = refused, .pending = pending, .partial = partial };
+        .apply = apply, .rows = rows, .bytes = bytes, .refused = refused, .pending = pending, .partial = partial,
+        .selected = selected };
     run.object = he_dir(build, profile->objects);
     if (run.object < 0) { if (errno != ENOENT) ++*refused; return true; }
     bool ok = he_run_open(&run, bins);
@@ -494,8 +523,21 @@ static bool he_report(struct json_value *out, const char *checkout, int keep, bo
         json_push_kv_int(out, "pending_recovery", totals->pending) &&
         json_push_kv_int(out, "partial_possible", totals->partial) && json_push_kv(out, "epochs", rows);
 }
-static bool he_epochs_impl(const char *checkout, int keep, bool apply, struct json_value *out)
+static void he_process_profiles(const char *checkout, int build, int bins, int keep, bool apply,
+    const struct he_profile *profile, const char *selected, struct json_value *rows, struct he_totals *totals)
 {
+    for (size_t i = 0; i < sizeof(he_profiles)/sizeof(he_profiles[0]); ++i) {
+        if (profile && profile != &he_profiles[i]) continue;
+        (void)he_process(checkout, build, bins, &he_profiles[i], keep, apply, rows,
+            &totals->bytes, &totals->refused, &totals->pending, &totals->partial, selected);
+    }
+}
+static bool he_epochs_impl(const char *checkout, int keep, bool apply,
+                           const char *selector, struct json_value *out)
+{
+    const char *selected = NULL;
+    const struct he_profile *profile = selector ? he_selector(selector, &selected) : NULL;
+    if (selector && !profile) return false;
     bool compatible = false;
     int bins = -1, build = he_checkout_open(checkout, &bins, &compatible);
     if (build < 0) return false;
@@ -506,16 +548,27 @@ static bool he_epochs_impl(const char *checkout, int keep, bool apply, struct js
     if (apply && !compatible) { if (bins >= 0) close(bins); close(build); return false; }
     struct json_value rows; json_init(&rows); json_set_array(&rows);
     struct he_totals totals = {0};
-    for (size_t i = 0; i < sizeof(he_profiles)/sizeof(he_profiles[0]); ++i)
-        (void)he_process(checkout, build, bins, &he_profiles[i], keep, apply, &rows,
-            &totals.bytes, &totals.refused, &totals.pending, &totals.partial);
+    he_process_profiles(checkout, build, bins, keep, apply, profile, selected, &rows, &totals);
     bool ok = he_report(out, checkout, keep, apply, &totals, &rows);
+    if (ok && selector) ok = json_push_kv_str(out, "epoch_selector", selector);
     json_free(&rows); if (bins >= 0) close(bins); close(build); return ok;
 }
 #else
-static bool he_epochs_impl(const char *checkout, int keep, bool apply, struct json_value *out)
-{ (void)checkout; (void)keep; (void)apply; (void)out; return false; }
+static bool he_epochs_impl(const char *checkout, int keep, bool apply, const char *selector, struct json_value *out)
+{ (void)checkout; (void)keep; (void)apply; (void)selector; (void)out; return false; }
 #endif
 
 bool host_gc_epochs(const char *checkout, int keep, bool apply, struct json_value *out)
-{ return he_epochs_impl(checkout, keep, apply, out); }
+{ return he_epochs_impl(checkout, keep, apply, NULL, out); }
+bool host_gc_epoch_selector_valid(const char *selector)
+{
+#if defined(__linux__)
+    const char *hash = NULL;
+    return he_selector(selector, &hash) != NULL;
+#else
+    (void)selector; return false;
+#endif
+}
+bool host_gc_epochs_selected(const char *checkout, int keep, bool apply,
+                             const char *selector, struct json_value *out)
+{ return selector && he_epochs_impl(checkout, keep, apply, selector, out); }

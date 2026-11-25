@@ -211,5 +211,9 @@ const char *host_gc_protected_leaf(size_t i);
 
 struct json_value;
 bool host_gc_epochs(const char *checkout, int keep, bool apply, struct json_value *out);
+/* selector is an exact object profile and lowercase epoch hash, profile:hash. */
+bool host_gc_epoch_selector_valid(const char *selector);
+bool host_gc_epochs_selected(const char *checkout, int keep, bool apply,
+                             const char *selector, struct json_value *out);
 
 #endif /* ZCL_TOOLS_HOST_GC_SWEEP_H */

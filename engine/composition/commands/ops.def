@@ -935,35 +935,27 @@ ZCL_COMMAND_READY_COMMAND(
     "Classify and reclaim dev-proof worktrees or inactive build epochs",
     "On Linux, checkout selects inactive build epochs in that explicit checkout; "
     "epoch_keep defaults to 3, or use 1 to retain only the current and protected "
-    "generations. Dry run unless apply=true; an older producer is preview-only. Byte counts estimate logical path sizes, "
-    "not physical blocks. Without checkout, one report per sweep class over the "
-    "dev-proof worktree pools (the disk "
-    "pool and its tmpfs twin by default, or --roots): registered, and the "
-    "partition of it into reapable / too_young / in_use / locked / "
-    "need_review, plus bytes_reclaimable and bytes_reclaimed. Only a clean "
-    "worktree is removed. A clean worktree on a branch idle age_days (index "
-    "and build output) is removed and its branch kept (branch_kept); a "
-    "younger one is too_young; ignored non-build content, a nested worktree "
-    "or a half-done git operation keeps it. "
-    "A clean detached worktree whose HEAD no origin or "
-    "archive ref holds is removed after age_days (default 7; 0 keeps it) and "
-    "only once refs/archive/wt/<name> holds that HEAD (unique_archived, "
-    "kept_on_failure). A dirty worktree is never removed; it is listed in "
-    "needs_review with idle_days and dirty_count. Counts are "
-    "measured at call time from git's own worktree listing and a single "
-    "/proc pass, never cached. Dry run unless apply=true, and even then git's "
-    "own worktree removal goes first; a directory git unregistered but left "
-    "behind is finished off, and never left unnamed. Every protected path is "
-    "named in refusals[] rather than silently skipped. A roots entry "
-    "{class,path,disposable:true} marks a pool of remote-gate lane copies: "
-    "an idle dirty copy there is reaped like a clean one (dirty_count still "
-    "reported), a copy whose sibling <path>.lock flock another process holds "
-    "is kept as locked, an unregistered directory with the gate-copy shape is "
-    "reaped as orphaned, and the siblings <path>.bundle, .prime.log and .lock "
-    "go with the copy.", 65536,
+    "generations. Optional epoch=profile:64-lowercase-hex narrows that checkout sweep to one epoch; "
+    "it narrows retirement and recovery without overriding current, keep or lease protection. "
+    "Inspect epochs and recovery counters; success alone does not mean an epoch was removed. "
+    "Dry run unless apply=true; an older producer is preview-only. Bytes are logical path sizes, not blocks. "
+    "Without checkout, report each sweep class over dev-proof worktree pools "
+    "(disk and tmpfs by default, or --roots), with registered, reapable, too_young, "
+    "in_use, locked, need_review, bytes_reclaimable and bytes_reclaimed. Clean branch worktrees idle "
+    "age_days (index and build output) may be removed with their branches kept (branch_kept); "
+    "younger worktrees, ignored non-build content, nested worktrees and unfinished "
+    "git operations are kept. Clean detached HEADs without origin or archive refs "
+    "are removed only after age_days (default 7; 0 keeps them) and archival at "
+    "refs/archive/wt/<name> (unique_archived); archive failures are kept (kept_on_failure). Dirty worktrees are reported "
+    "with idle_days and dirty_count, not removed. Counts use git's worktree listing "
+    "and one /proc pass at call time. Git removal precedes cleanup of any directory "
+    "it leaves behind; protected paths appear in refusals[]. A roots entry "
+    "{class,path,disposable:true} marks remote-gate copies: idle dirty copies and "
+    "unregistered gate-shaped orphans are reaped; held sibling <path>.lock flocks "
+    "protect copies. Sibling .bundle, .prime.log and .lock files go with the copy.", 65536,
     "host,gc,garbage,worktree,generation,disk,reclaim,janitor",
     "zcl.host_gc.input.v1", "zcl.host_gc.v1",
-    "apply,floor_hours,roots,age_days,checkout,epoch_keep", "",
+    "apply,floor_hours,roots,age_days,checkout,epoch_keep,epoch", "",
     "z23 ops host gc --apply=false",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_DESTRUCTIVE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,

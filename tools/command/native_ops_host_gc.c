@@ -216,19 +216,26 @@ static bool ohg_epoch_input_valid(const struct json_value *input, const char *ch
 {
     const struct json_value *keep_value = json_get(input, "epoch_keep");
     const struct json_value *apply_value = json_get(input, "apply");
+    const struct json_value *epoch_value = json_get(input, "epoch");
     return checkout && (!keep_value || keep_value->type == JSON_INT) &&
         (!apply_value || apply_value->type == JSON_BOOL) && keep >= 1 && keep <= 32 &&
+        (!epoch_value || (epoch_value->type == JSON_STR && host_gc_epoch_selector_valid(json_get_str(epoch_value)))) &&
         !json_get(input, "roots") && !json_get(input, "age_days") && !json_get(input, "floor_hours");
 }
 static bool ohg_epochs(const struct json_value *input, struct zcl_command_reply *reply)
 {
     const struct json_value *checkout_value = json_get(input, "checkout");
     const struct json_value *keep_value = json_get(input, "epoch_keep");
-    if (!checkout_value && !keep_value) return false;
+    const struct json_value *epoch_value = json_get(input, "epoch");
+    if (!checkout_value && !keep_value && !epoch_value) return false;
     const char *checkout = json_get_str(checkout_value);
     int64_t keep = json_get_int_or(input, "epoch_keep", 3);
     bool valid = ohg_epoch_input_valid(input, checkout, keep);
-    if (!valid || !host_gc_epochs(checkout, (int)keep, json_get_bool_or(input, "apply", false), &reply->data)) {
+    bool ok = valid && (epoch_value ?
+        host_gc_epochs_selected(checkout, (int)keep, json_get_bool_or(input, "apply", false),
+                                json_get_str(epoch_value), &reply->data) :
+        host_gc_epochs(checkout, (int)keep, json_get_bool_or(input, "apply", false), &reply->data));
+    if (!ok) {
         const struct json_value *compatible = json_get(&reply->data, "producer_compatible");
         if (compatible && !json_get_bool(compatible))
             ohg_fail(reply, "host_gc.producer_incompatible", "validate",
