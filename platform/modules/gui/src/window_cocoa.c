@@ -252,6 +252,8 @@ static struct gui_window *cocoa_for_delegate(cocoa_id delegate)
     return NULL;
 }
 
+static void cocoa_sync_size(struct gui_window *w);
+
 static signed char cocoa_should_close(cocoa_id self, cocoa_SEL cmd, cocoa_id sender)
 {
     struct gui_window *w = cocoa_for_delegate(self);
@@ -262,19 +264,34 @@ static signed char cocoa_should_close(cocoa_id self, cocoa_SEL cmd, cocoa_id sen
     return 0;
 }
 
+/* AppKit calls this inside setFrame and inside a live drag, before the
+ * event wait returns. */
+static void cocoa_did_resize(cocoa_id self, cocoa_SEL cmd, cocoa_id note)
+{
+    struct gui_window *w = cocoa_for_delegate(self);
+    (void)cmd;
+    (void)note;
+    if (w) cocoa_sync_size(w);
+}
+
 static bool cocoa_delegate_class(void)
 {
     static cocoa_Class klass;
     cocoa_Class made;
     void *imp = NULL;
+    void *resize_imp = NULL;
     signed char (*method)(cocoa_id, cocoa_SEL, cocoa_id) = cocoa_should_close;
+    void (*resize)(cocoa_id, cocoa_SEL, cocoa_id) = cocoa_did_resize;
     if (klass) return true;
-    if (sizeof imp != sizeof method) return false;
+    if (sizeof imp != sizeof method || sizeof resize_imp != sizeof resize) return false;
     memcpy(&imp, &method, sizeof imp);
+    memcpy(&resize_imp, &resize, sizeof resize_imp);
     made = g_api.alloc_class((cocoa_Class)g_api.get_class("NSObject"),
                              "Z23GuiCocoaDelegate", 0);
     if (!made || !g_api.add_method(made, cocoa_sel("windowShouldClose:"),
                                    imp, "c@:@"))
+        return false;
+    if (!g_api.add_method(made, cocoa_sel("windowDidResize:"), resize_imp, "v@:@"))
         return false;
     g_api.register_class(made);
     klass = made;
@@ -468,6 +485,20 @@ static void cocoa_set_window_frame(cocoa_id win, struct cocoa_rect frame)
     void (*fn)(cocoa_id, cocoa_SEL, struct cocoa_rect, signed char);
     memcpy(&fn, &g_api.msg, sizeof fn);
     fn(win, cocoa_sel("setFrame:display:"), frame, 1);
+}
+
+/* Move the window frame and return. The delegate records the new content
+ * size, so this does not read the view back itself. */
+bool gui_cocoa_move_frame(struct gui_window *w, double width, double height)
+{
+    struct cocoa_win *c = cocoa_state(w);
+    struct cocoa_rect frame;
+    if (!c || !c->window || width < 1.0 || height < 1.0) return false;
+    frame = cocoa_rect(c->window, "frame");
+    frame.w = width;
+    frame.h = height;
+    cocoa_set_window_frame(c->window, frame);
+    return true;
 }
 
 static bool cocoa_near(double got, double want)

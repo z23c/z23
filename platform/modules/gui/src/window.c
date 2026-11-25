@@ -143,11 +143,12 @@ void gui_ring_push(struct gui_window *w, const struct gui_event *ev)
     struct gui_event e = *ev;
     if (!e.time_ns) e.time_ns = gui_now_ns();
     if (w->count == GUI_RING_CAP) {
-        /* Full: coalesce into the newest same-kind move, else drop; a close
-         * request always replaces the newest entry. */
+        /* Full: coalesce into the newest same-kind move or resize, else
+         * drop; a close request always replaces the newest entry. */
         size_t last = (w->head + w->count - 1) % GUI_RING_CAP;
         if (e.type == GUI_EV_CLOSE ||
-            ((e.type == GUI_EV_MOUSE_MOVE || e.type == GUI_EV_MOUSE_RELATIVE) &&
+            ((e.type == GUI_EV_MOUSE_MOVE || e.type == GUI_EV_MOUSE_RELATIVE ||
+              e.type == GUI_EV_RESIZE) &&
              w->ring[last].type == e.type))
             w->ring[last] = e;
         return;

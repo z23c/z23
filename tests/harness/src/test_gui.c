@@ -405,6 +405,26 @@ static void *waker(void *p)
     return NULL;
 }
 
+static void test_resize_coalesce(void)
+{
+    struct gui_window *w = open_headless(200, 100);
+    struct gui_event ev = { .type = GUI_EV_RESIZE };
+    int i;
+    int n = 0;
+    int32_t last_w = 0;
+    for (i = 0; i < 300; i++) {
+        ev.size.w = 100 + i;
+        ev.size.h = 80;
+        gui_headless_inject(w, &ev);
+    }
+    while (gui_window_wait(w, 0, &ev) && ev.type == GUI_EV_RESIZE) {
+        n++;
+        last_w = ev.size.w;
+    }
+    CHECK("a full ring keeps the latest resize", n == 256 && last_w == 399);
+    gui_window_close(w);
+}
+
 static void test_window_common(void)
 {
     struct gui_window *w = open_headless(200, 100);
@@ -813,6 +833,41 @@ static void test_cocoa_fullscreen(void)
 #endif
 }
 
+#if defined(__APPLE__)
+bool gui_cocoa_move_frame(struct gui_window *w, double width, double height);
+#endif
+
+/* A Cocoa frame change must reach the shared window without a later wait.
+ * AppKit tells the delegate during setFrame and during a live drag. */
+static void test_cocoa_live_resize(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 resize", .width = 640, .height = 420,
+        .flags = GUI_WINDOW_RESIZABLE, .surface = GUI_SURFACE_CPU,
+        .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    int32_t before_w = 0, before_h = 0, after_w = 0, after_h = 0;
+    float scale = 0.0f;
+    bool opened = gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("resizable cocoa window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    gui_window_size(win, &before_w, &before_h, &scale);
+    CHECK("a frame change reaches the shared window",
+          before_w > 0 && before_h > 0 && scale > 0.0f &&
+          gui_cocoa_move_frame(win, 960.0, 720.0));
+    gui_window_size(win, &after_w, &after_h, &scale);
+    CHECK("shared size follows the new frame", after_w > before_w && after_h > before_h);
+    gui_window_close(win);
+#else
+    printf("  a frame change reaches the shared window... SKIP\n");
+#endif
+}
+
 /* A frame that is already wider than the screen must still enter fullscreen. */
 static void test_cocoa_fullscreen_wide(void)
 {
@@ -845,6 +900,7 @@ int test_gui(void)
     test_cocoa_auto();
     test_cocoa_fullscreen();
     test_cocoa_fullscreen_wide();
+    test_cocoa_live_resize();
     test_utf8();
     test_draw();
     test_text();
@@ -852,6 +908,7 @@ int test_gui(void)
     test_layout();
     test_focus_and_fields();
     test_table();
+    test_resize_coalesce();
     test_window_common();
     test_present_geometry();
     test_data_pool_exact();
