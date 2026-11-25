@@ -7166,6 +7166,24 @@ static bool fmx_wrong_disposition(const char *grant, const struct json_value *ro
     return ok;
 }
 
+/* Exercise the brief's real grant check after native exact-read publication. */
+static bool fmx_disposition_projected(const char *grant, bool expected_verified)
+{
+    struct fmx_call brief = {0};
+    fmx_brief(&brief, grant, 0);
+    bool ok = fmx_run(&brief, zcl_native_handle_fleet_steer_brief) && fmx_ok(&brief);
+    const struct json_value *change = ok ? fmx_change_row(&brief, "bob", "work-1") : NULL;
+    const struct json_value *reply = change ? json_get(change, "reply") : NULL;
+    const struct json_value *verified = reply ? json_get(reply, "disposition_verified") : NULL;
+    if (expected_verified)
+        ok = reply && verified && verified->type == JSON_BOOL && json_get_bool(verified) &&
+             !strcmp(fmx_wstr(reply, "observed_disposition"), "BLOCKED");
+    else
+        ok = reply && (!verified || (verified->type == JSON_BOOL && !json_get_bool(verified)));
+    fmx_end(&brief);
+    return ok;
+}
+
 static int fmx_t_disposition_verified(void)
 {
     int failures = 0;
@@ -7230,6 +7248,13 @@ static int fmx_t_disposition_verified(void)
         ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "to"));
         ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "ref"));
         ASSERT_EQ(fmx_mail_count(), before + 2);
+        ASSERT(fmx_disposition_projected(limited, true));
+        fmx_begin(&sent, FMX_GRANT_PATH, "zcl.fleet_steer_grant.v1");
+        ASSERT(json_push_kv_str(&sent.input, "action", "revoke"));
+        ASSERT(json_push_kv_str(&sent.input, "id", grant));
+        ASSERT(fmx_run(&sent, zcl_native_handle_fleet_steer_grant) && fmx_ok(&sent));
+        fmx_end(&sent);
+        ASSERT(fmx_disposition_projected(limited, false));
         PASS();
     }
 _test_next:;
