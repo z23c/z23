@@ -2,10 +2,10 @@
  *
  * `z23 mcp serve`: local stdio MCP adapter for Claude Code and Codex.
  * Newline-delimited JSON-RPC on stdin/stdout, one request at a time, no
- * threads, sleeps or polling; stderr carries logs only. Six tools: search,
- * describe, run (gated by exact registry policy), code (read leaves), and
- * apps_list / apps_open, thin wrappers that dispatch app.list and app.open
- * through the same path as run. */
+ * threads, sleeps or polling; stderr carries logs only. Eleven tools, the
+ * same set tools/list returns: z23_search, z23_describe, z23_run (gated by
+ * exact registry policy), z23_code (read leaves), apps_list, apps_open,
+ * apps_keep, apps_adopt, apps_receive, apps_share and apps_personalize. */
 
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE /* realpath */

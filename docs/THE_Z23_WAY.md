@@ -103,7 +103,9 @@ macOS keep the refusal.
 
 A push is a checkpoint, not completion: fetch `origin/main`, integrate,
 continue. Fleet work coordinates through native tasks, claims and receipts,
-never GitHub issues. Volunteers follow `.github/CONTRIBUTING.md`.
+never GitHub issues. Volunteers send one commit on `origin/main` with
+`dev land send` and `fleet bundle offer`, and do not push a branch
+([CONTRIBUTING.md](../.github/CONTRIBUTING.md)).
 
 ## Boundaries
 

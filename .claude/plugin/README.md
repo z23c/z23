@@ -37,11 +37,18 @@ call about 100 ms.
 The plugin registers `z23-local`, a stdio MCP server that Claude Code
 starts itself: `z23 mcp serve --checkout=${CLAUDE_PROJECT_DIR}`. It runs the
 node binary's command registry in process for the checkout you opened, with
-no network and no grant. It exposes four tools, kept small so the MCP tool listing
-stays cheap:
+no network and no grant. It exposes the eleven tools `z23 mcp serve`
+lists:
 
 | Tool | Does |
 | --- | --- |
+| `apps_list` | Lists the games and desktop apps `apps_open` can start. Same reply as `z23_run` `app.list`. |
+| `apps_open` | Opens a game or desktop app by name or alias in this host's desktop session, or finds the running copy. |
+| `apps_keep` | Asks the local owner to Keep the exact previewed version. Caller flags are not approval. |
+| `apps_adopt` | Asks the local owner to adopt one exact release, or the installed `skycombat` app. |
+| `apps_receive` | Asks the local owner to receive one verified local share file. |
+| `apps_share` | Asks the local owner to review and share one exact kept app version as a `.z23share` file. |
+| `apps_personalize` | Asks the local owner to personalize an exact kept revision. No build, run or sharing happens here. |
 | `z23_search` | Finds commands by intent (at most 5). `scope` is `commands` (default) or `wiki`; `wiki` searches the fleet wiki through `fleet.wiki.find` and needs a running node. |
 | `z23_describe` | Returns one command's schemas and policy. |
 | `z23_run` | Runs one command. Reads run directly, except wallet-data reads, which are refused with `READ_REFUSED_WALLET_DATA` unless the owner started the server with `--wallet-reads`. Wallet-risk, owner-authority and core-layer mutations are refused with a typed code (`MUTATION_REFUSED_*`); any other mutation runs only through a confirmation flow its own spec declares (a commit needs every declared `plan_id` / `plan_token` and, when declared, `confirm: true` in `input`); a mutation whose spec declares no such flow is refused (`MUTATION_NO_CONFIRMATION_FLOW`). The reply is capped at `budget_bytes` (default 16384, maximum 131072) and a truncated reply says so in its own text. |

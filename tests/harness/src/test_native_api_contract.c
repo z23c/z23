@@ -4368,7 +4368,8 @@ static int test_board_unavailable_guides_instance_selection(void)
 
 /* A node whose image lacks the fleet_board RPC answers JSON-RPC -32601
  * "Method not found", bare or enveloped; distinct from a NULL (no answer)
- * reply. */
+ * reply. fleet.board.status is a ready menu leaf, so that answer is the
+ * peer-lacks sentence, not UNKNOWN_OP and not BOARD_RPC_UNSUPPORTED. */
 static char *board_method_not_found_bare_rpc(const char *method,
                                              const char *params)
 {
@@ -4391,10 +4392,12 @@ static char *board_method_not_found_enveloped_rpc(const char *method,
 static int test_board_method_not_found_case(node_rpc_test_fn hook)
 {
     int failures = 0;
-    TEST("board method-not-found names generation skew, not NODE_UNAVAILABLE") {
+    TEST("board method-not-found on ready status says the peer lacks it") {
         const struct zcl_command_spec *spec =
             find_spec(zcl_command_catalog(), "fleet.board.status");
         ASSERT(spec != NULL);
+        ASSERT(spec->availability == ZCL_COMMAND_READY);
+        ASSERT(spec->handler != NULL);
         struct zcl_command_request req = {.spec = spec, .view = "normal"};
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, spec->output_schema);
@@ -4402,12 +4405,14 @@ static int test_board_method_not_found_case(node_rpc_test_fn hook)
         zcl_native_handle_fleet_board_status(&req, &reply);
         node_rpc_client_set_test_hook(NULL);
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
-        ASSERT_STR_EQ(reply.error.code, "BOARD_RPC_UNSUPPORTED");
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op status, restart node");
         ASSERT(strcmp(reply.error.code, "NODE_UNAVAILABLE") != 0);
+        ASSERT(strcmp(reply.error.code, "BOARD_RPC_UNSUPPORTED") != 0);
+        ASSERT(strstr(reply.error.code, "UNKNOWN_OP") == NULL);
+        ASSERT(strstr(reply.error.message, "UNKNOWN_OP") == NULL);
         ASSERT(!reply.error.mutated);
-        ASSERT(strstr(reply.error.message, "Method not found") != NULL);
-        ASSERT(strstr(reply.error.message, "-32601") != NULL);
-        ASSERT(strstr(reply.error.message, "generation skew") != NULL);
         ASSERT(strstr(reply.error.message, "did not answer") == NULL);
         zcl_command_reply_free(&reply);
         PASS();

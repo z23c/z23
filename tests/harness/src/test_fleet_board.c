@@ -2505,6 +2505,136 @@ static int test_fleet_board_native_status_light(void)
     return failures;
 }
 
+/* A canned node body. The hook is the transport; the assertion is on the
+ * shipped client dispatch (zcl_native_handle_fleet_board_post /
+ * zcl_native_fleet_board_call), which must name a ready menu op and leave
+ * an unlisted op on today's refusal. */
+static const char *fb_skew_body;
+static int fb_skew_calls;
+static char fb_skew_seen_op[80];
+
+static char *fb_skew_rpc(const char *method, const char *params)
+{
+    struct json_value input;
+    const struct json_value *item;
+    const char *op;
+    json_init(&input);
+    fb_skew_calls++;
+    fb_skew_seen_op[0] = '\0';
+    if (method && strcmp(method, "fleet_board") == 0 && params &&
+        json_read(&input, params, strlen(params))) {
+        item = json_at(&input, 0);
+        op = json_get_str(json_get(item, "op"));
+        if (op)
+            snprintf(fb_skew_seen_op, sizeof fb_skew_seen_op, "%s", op);
+    }
+    json_free(&input);
+    return fb_skew_body ? strdup(fb_skew_body) : NULL;
+}
+
+static int test_fleet_board_peer_lacks_ready_op(void)
+{
+    int failures = 0;
+    struct json_value input, call, body;
+    struct zcl_command_request request;
+    struct zcl_command_reply reply;
+    json_init(&input);
+    json_init(&call);
+    json_init(&body);
+    node_rpc_client_set_test_hook(fb_skew_rpc);
+    TEST("fleet board: a ready menu op says the peer lacks it") {
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "kind", "note"));
+        ASSERT(json_push_kv_str(&input, "text", "skew witness"));
+        request = (struct zcl_command_request){ .input = &input };
+
+        fb_skew_calls = 0;
+        fb_skew_body =
+            "{\"ok\":false,\"code\":\"UNKNOWN_OP\",\"message\":\"no such board operation\"}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_post.v1");
+        zcl_native_handle_fleet_board_post(&request, &reply);
+        ASSERT_EQ(fb_skew_calls, 1);
+        ASSERT_STR_EQ(fb_skew_seen_op, "post");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op post, restart node");
+        ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
+        ASSERT(strstr(reply.error.message, "UNKNOWN_OP") == NULL);
+        ASSERT(strstr(reply.error.code, "UNKNOWN_OP") == NULL);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        zcl_command_reply_free(&reply);
+
+        fb_skew_body =
+            "{\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_post.v1");
+        zcl_native_handle_fleet_board_post(&request, &reply);
+        ASSERT_STR_EQ(fb_skew_seen_op, "post");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op post, restart node");
+        ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
+        ASSERT(strstr(reply.error.message, "UNKNOWN_OP") == NULL);
+        ASSERT(strstr(reply.error.code, "BOARD_RPC_UNSUPPORTED") == NULL);
+        zcl_command_reply_free(&reply);
+
+        json_set_object(&call);
+        ASSERT(json_push_kv_str(&call, "op", "list"));
+        fb_skew_body =
+            "{\"ok\":false,\"code\":\"UNKNOWN_OP\",\"message\":\"no such board operation\"}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_call.v1");
+        json_init(&body);
+        ASSERT(!zcl_native_fleet_board_call(&call, &body, &reply));
+        ASSERT_STR_EQ(fb_skew_seen_op, "list");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op list, restart node");
+        ASSERT(strstr(reply.error.code, "UNKNOWN_OP") == NULL);
+        zcl_command_reply_free(&reply);
+
+        json_free(&call);
+        json_init(&call);
+        json_set_object(&call);
+        ASSERT(json_push_kv_str(&call, "op", "wiki_read"));
+        fb_skew_body =
+            "{\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_call.v1");
+        json_init(&body);
+        ASSERT(!zcl_native_fleet_board_call(&call, &body, &reply));
+        ASSERT_STR_EQ(fb_skew_seen_op, "wiki_read");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op wiki_read, restart node");
+        ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
+        zcl_command_reply_free(&reply);
+
+        /* offer_cpu is not a ready menu leaf, so the node refusal stands. */
+        json_free(&call);
+        json_init(&call);
+        json_set_object(&call);
+        ASSERT(json_push_kv_str(&call, "op", "offer_cpu"));
+        fb_skew_body =
+            "{\"ok\":false,\"code\":\"UNKNOWN_OP\",\"message\":\"no such board operation: offer_cpu\"}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_call.v1");
+        json_init(&body);
+        ASSERT(!zcl_native_fleet_board_call(&call, &body, &reply));
+        ASSERT_STR_EQ(fb_skew_seen_op, "offer_cpu");
+        ASSERT_STR_EQ(reply.error.code, "UNKNOWN_OP");
+        ASSERT(strstr(reply.error.message, "offer_cpu") != NULL);
+        ASSERT(strstr(reply.error.message, "peer lacks op") == NULL);
+        zcl_command_reply_free(&reply);
+
+        fb_skew_body =
+            "{\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_call.v1");
+        json_init(&body);
+        ASSERT(!zcl_native_fleet_board_call(&call, &body, &reply));
+        ASSERT_STR_EQ(reply.error.code, "BOARD_RPC_UNSUPPORTED");
+        ASSERT(strstr(reply.error.message, "peer lacks op") == NULL);
+        ASSERT(strstr(reply.error.code, "PEER_LACKS_OP") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    fb_skew_body = NULL;
+    json_free(&input);
+    json_free(&call);
+    json_free(&body);
+    return failures;
+}
+
 static int test_fleet_board_native_busy(void)
 {
     int failures = 0;
@@ -17882,6 +18012,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_list_exact_room();
     failures += test_fleet_board_rpc_created_at();
     failures += test_fleet_board_rpc_fleet_page();
+    failures += test_fleet_board_peer_lacks_ready_op();
     failures += test_fleet_board_native_busy();
     failures += test_fleet_board_native_status_filters();
     failures += test_fleet_board_native_status_light();

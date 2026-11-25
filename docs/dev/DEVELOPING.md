@@ -259,9 +259,10 @@ qualification and production acceptance.
 
 - Fleet agents coordinate through native tasks, candidates, actions and
   receipts, never GitHub Issues or pull requests; committed `origin/main` is
-  the integration blackboard. Public volunteers submit work cards as `card:`
-  pull requests (see [CONTRIBUTING.md](../../.github/CONTRIBUTING.md)), and issues
-  are for user-visible defects only.
+  the integration blackboard. Public volunteers send one commit on
+  `origin/main` with `dev land send` and `fleet bundle offer`, and do not
+  push a branch (see [CONTRIBUTING.md](../../.github/CONTRIBUTING.md)).
+  Issues are for user-visible defects only.
 - Claim disjoint scopes through native tools. Keep one primary writer per
   component and respect live leases; silence alone does not establish an
   orphan. Obtain required independent review and persist handoffs so

@@ -12,18 +12,21 @@
 #include "base/bytes.h"
 #include "chain/checkpoints.h"
 #include "config/state_offer_service.h"
+#include "config/state_offer_store.h"
 #include "crypto/ed25519.h"
-#include "net/state_offer.h"
+#include "crypto/sha3.h"
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"
-#include "crypto/sha3.h"
+#include "net/state_offer.h"
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Wire offsets the tamper cases below poke directly. Named here so a layout
  * change breaks the static assertion instead of silently making a tamper test
@@ -664,6 +667,105 @@ static void *toggle_fetch_running(void *arg)
     return NULL;
 }
 
+static int g_bundle_transfers;
+
+static enum sol_receive_result bundle_transfer_hook(void)
+{
+    g_bundle_transfers++;
+    return SOL_RECEIVE_UNAVAILABLE;
+}
+
+static bool write_bundle_file(const char *path, const uint8_t *bytes, size_t n)
+{
+    int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    size_t off = 0;
+    while (off < n) {
+        ssize_t wrote = write(fd, bytes + off, n - off);
+        if (wrote <= 0) {
+            close(fd);
+            return false;
+        }
+        off += (size_t)wrote;
+    }
+    return close(fd) == 0;
+}
+
+static void fill_reuse_offer(struct state_offer_v1 *offer, const uint8_t *bytes,
+                             size_t n)
+{
+    uint8_t chunk[32];
+    const char *name = "reuse-bundle.sqlite";
+    memset(offer, 0, sizeof(*offer));
+    offer->chunk_size = ROM_SEED_CHUNK_SIZE;
+    offer->num_chunks = 1;
+    offer->content_bytes = n;
+    offer->filename_len = (uint16_t)strlen(name);
+    memcpy(offer->filename, name, offer->filename_len);
+    sha3_256(bytes, n, chunk);
+    sha3_256(chunk, 32, offer->chunk_tree_root);
+    sha3_256(bytes, n, offer->content_digest);
+}
+
+static int bundle_reuse_skips_verified_file(void)
+{
+    int failures = 0;
+    char dir[256];
+    char path[512];
+    uint8_t bytes[4096];
+    bool started = false;
+    dir[0] = '\0';
+    for (size_t i = 0; i < sizeof(bytes); i++)
+        bytes[i] = (uint8_t)(i * 17u);
+    state_offer_service_test_set_transfer_hooks(bundle_transfer_hook,
+                                                bundle_transfer_hook);
+    TEST_CASE("state offer fetch reuses a verified bundle and downloads a mismatch") {
+        struct state_offer_record target;
+        char landed[1200];
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "bundle_reuse") != NULL);
+        state_offer_service_start(dir, NULL);
+        started = true;
+        ASSERT(snprintf(path, sizeof(path), "%s/bundles", dir) < (int)sizeof(path));
+        ASSERT(mkdir(path, 0700) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/bundles/reuse-bundle.sqlite", dir) <
+               (int)sizeof(path));
+        ASSERT(write_bundle_file(path, bytes, sizeof(bytes)));
+        memset(&target, 0, sizeof(target));
+        target.peer_id = -1;
+        fill_reuse_offer(&target.offer, bytes, sizeof(bytes));
+        g_bundle_transfers = 0;
+        ASSERT_EQ(state_offer_service_test_fetch_bundle(&target, landed, sizeof(landed)),
+                  SOL_RECEIVE_OK);
+        ASSERT_EQ(g_bundle_transfers, 0);
+        ASSERT(strcmp(landed, path) == 0);
+
+        target.peer_link = true;
+        g_bundle_transfers = 0;
+        ASSERT_EQ(state_offer_service_test_fetch_bundle(&target, landed, sizeof(landed)),
+                  SOL_RECEIVE_OK);
+        ASSERT_EQ(g_bundle_transfers, 0);
+
+        bytes[0] ^= 1u;
+        ASSERT(write_bundle_file(path, bytes, sizeof(bytes)));
+        target.peer_link = false;
+        g_bundle_transfers = 0;
+        ASSERT_EQ(state_offer_service_test_fetch_bundle(&target, landed, sizeof(landed)),
+                  SOL_RECEIVE_UNAVAILABLE);
+        ASSERT_EQ(g_bundle_transfers, 1);
+
+        ASSERT(unlink(path) == 0);
+        g_bundle_transfers = 0;
+        ASSERT_EQ(state_offer_service_test_fetch_bundle(&target, landed, sizeof(landed)),
+                  SOL_RECEIVE_UNAVAILABLE);
+        ASSERT_EQ(g_bundle_transfers, 1);
+    } TEST_END
+    state_offer_service_test_set_transfer_hooks(NULL, NULL);
+    if (started)
+        state_offer_service_shutdown();
+    return failures;
+}
+
 static int fetch_completion_handoff(void)
 {
     int failures = 0;
@@ -739,5 +841,6 @@ int test_state_offer(void)
     failures += null_and_empty_inputs();
     failures += fetch_completion_handoff();
     failures += reuse_landed_bundle();
+    failures += bundle_reuse_skips_verified_file();
     return failures;
 }

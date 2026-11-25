@@ -780,9 +780,26 @@ static bool sosvc_bundles(char *out, size_t cap)
     return !lstat(out, &st) && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 0022);
 #endif
 }
+#ifdef ZCL_TESTING
+static enum sol_receive_result (*g_sosvc_ip_hook)(void);
+static enum sol_receive_result (*g_sosvc_link_hook)(void);
+
+void state_offer_service_test_set_transfer_hooks(
+    state_offer_service_test_transfer_fn ip,
+    state_offer_service_test_transfer_fn link)
+{
+    g_sosvc_ip_hook = ip;
+    g_sosvc_link_hook = link;
+}
+#endif
+
 static enum sol_receive_result sosvc_fetch_ip(const struct state_offer_record *target,
     const struct rom_fetch_manifest *m, const char *out_dir, char *landed, size_t cap)
 {
+#ifdef ZCL_TESTING
+    if (g_sosvc_ip_hook)
+        return g_sosvc_ip_hook();
+#endif
     char host[NET_ADDR_STR_MAX + 1]; struct net_addr a;
     net_addr_init(&a); memcpy(a.ip, target->peer_ip, sizeof(a.ip));
     if (net_addr_to_string(&a, host, sizeof(host)) <= 0 || !host[0]) return SOL_RECEIVE_UNAVAILABLE;
@@ -798,6 +815,10 @@ static enum sol_receive_result sosvc_fetch_ip(const struct state_offer_record *t
 static enum sol_receive_result sosvc_fetch_link(const struct state_offer_record *target,
     const struct rom_fetch_manifest *m, const char *out_dir, char *landed, size_t cap)
 {
+#ifdef ZCL_TESTING
+    if (g_sosvc_link_hook)
+        return g_sosvc_link_hook();
+#endif
     if (target->peer_id < 0 || target->peer_id == INT64_MAX) return SOL_RECEIVE_UNAVAILABLE;
     uint64_t peer = (uint64_t)target->peer_id + 1;
     pthread_mutex_lock(&g_lock);
@@ -809,6 +830,39 @@ static enum sol_receive_result sosvc_fetch_link(const struct state_offer_record 
     state_offer_peer_end(peer);
     return r;
 }
+
+static bool sosvc_reuse_landed(const char *out_dir, const struct rom_fetch_manifest *m,
+                               char *landed, size_t cap);
+
+/* The worker's bundle step. sosvc_reuse_landed accepts a file already on
+ * disk; a miss is the IP or link transfer, which the test hooks can see. */
+static enum sol_receive_result sosvc_fetch_bundle(const struct state_offer_record *target,
+    const struct rom_fetch_manifest *m, const char *out_dir, char *landed, size_t cap)
+{
+    if (sosvc_reuse_landed(out_dir, m, landed, cap))
+        return SOL_RECEIVE_OK;
+    landed[0] = '\0';
+    return target->peer_link ? sosvc_fetch_link(target, m, out_dir, landed, cap)
+                             : sosvc_fetch_ip(target, m, out_dir, landed, cap);
+}
+
+#ifdef ZCL_TESTING
+enum sol_receive_result state_offer_service_test_fetch_bundle(
+    const struct state_offer_record *target, char *landed, size_t cap)
+{
+    struct rom_fetch_manifest m;
+    char out_dir[1024];
+    if (!target || !landed || cap == 0)
+        return SOL_RECEIVE_LOCAL_IO;
+    landed[0] = '\0';
+    if (!sosvc_manifest(&target->offer, &m))
+        return SOL_RECEIVE_BAD_DATA;
+    if (!sosvc_bundles(out_dir, sizeof(out_dir)))
+        return SOL_RECEIVE_LOCAL_IO;
+    return sosvc_fetch_bundle(target, &m, out_dir, landed, cap);
+}
+#endif
+
 static void sosvc_restart_clear(void)
 {
     pthread_mutex_lock(&g_restart_lock);
@@ -1044,12 +1098,8 @@ static void *sosvc_fetch_main(void *arg)
     enum sol_receive_result r = SOL_RECEIVE_BAD_DATA;
     if (sosvc_manifest(&target.offer, &m)) {
         r = SOL_RECEIVE_LOCAL_IO;
-        if (sosvc_bundles(out_dir, sizeof(out_dir)) &&
-            sosvc_reuse_landed(out_dir, &m, landed, sizeof(landed)))
-            r = SOL_RECEIVE_OK;
-        else if (sosvc_bundles(out_dir, sizeof(out_dir)))
-            r = target.peer_link ? sosvc_fetch_link(&target, &m, out_dir, landed, sizeof(landed)) :
-                sosvc_fetch_ip(&target, &m, out_dir, landed, sizeof(landed));
+        if (sosvc_bundles(out_dir, sizeof(out_dir)))
+            r = sosvc_fetch_bundle(&target, &m, out_dir, landed, sizeof(landed));
     }
     if (r == SOL_RECEIVE_OK && !atomic_load(&g_fetch_stopping)) {
         char parent[1024];

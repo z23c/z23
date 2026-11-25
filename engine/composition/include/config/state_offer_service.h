@@ -26,7 +26,10 @@
  * UNCHANGED ROM-manifest path: the per-chunk SHA3 manifest is fetched and bound
  * to the offer's own chunk root, every chunk is content-verified BEFORE its
  * journal bit is set, the whole file is SHA3-checked before the atomic rename,
- * and the landed file is read-only exactly as an operator-seeded one is. An
+ * and the landed file is read-only exactly as an operator-seeded one is. A
+ * file already under `<datadir>/bundles` that `rom_fetch_verify_file` accepts
+ * for that offer manifest is reused and not downloaded again. A missing file
+ * or a failed verify is still fetched. An
  * untrusted history manifest probe is then pinned by the receiver, which
  * verifies every resumed and downloaded chunk before publication. The bound
  * install request is armed through boot_install_bound_bundle_request(), so
@@ -49,6 +52,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef ZCL_TESTING
+#include "config/state_offer_link_receive.h"
+#endif
 
 struct state_offer_batch_v1;
 
@@ -173,6 +180,14 @@ void state_offer_service_test_set_staged(bool staged);
 struct state_offer_need;
 void state_offer_service_test_local_need(struct state_offer_need *need);
 bool state_offer_service_test_fetch_running_is_atomic(void);
+/* The bundle step the fetch worker runs before history. A transfer hook
+ * stands in for the IP or link download; NULL keeps the real network. */
+typedef enum sol_receive_result (*state_offer_service_test_transfer_fn)(void);
+void state_offer_service_test_set_transfer_hooks(
+    state_offer_service_test_transfer_fn ip,
+    state_offer_service_test_transfer_fn link);
+enum sol_receive_result state_offer_service_test_fetch_bundle(
+    const struct state_offer_record *target, char *landed, size_t cap);
 #endif
 
 #endif /* ZCL_CONFIG_STATE_OFFER_SERVICE_H */

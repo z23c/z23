@@ -17,6 +17,7 @@
 #include "command/native_command.h"
 #include "command/native_fleet.h"
 #include "config/boot_fleet_board.h"
+#include "config/command_catalog.h"
 
 #include "controllers/rpc_client.h"
 #include "base/safe_alloc.h"
@@ -130,6 +131,38 @@ static void fb_rpc_unsupported(struct zcl_command_reply *reply,
  * transport-shaped error. Split out of fb_call so that call stays under the
  * complexity cap — this one decision (which of the two distinct refusals
  * applies) lives in exactly one place. */
+/* A ready menu leaf whose node has no such op. The catalog is the menu:
+ * fleet.board.<op>, or fleet.wiki.<leaf> when the op is wiki_<leaf>. */
+static bool fb_menu_ready_op(const char *op)
+{
+    char path[96];
+    const char *root = "fleet.board.";
+    const char *leaf = op;
+    size_t n;
+    if (!op || !op[0])
+        return false;
+    n = strlen(op);
+    if (n > 64 || strchr(op, '.') || strchr(op, '/'))
+        return false;
+    if (n > 5 && strncmp(op, "wiki_", 5) == 0) {
+        root = "fleet.wiki.";
+        leaf = op + 5;
+    }
+    if (!leaf[0] || snprintf(path, sizeof(path), "%s%s", root, leaf) >= (int)sizeof(path))
+        return false;
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), path, NULL);
+    return spec && spec->availability == ZCL_COMMAND_READY && spec->handler;
+}
+
+static void fb_peer_lacks_op(struct zcl_command_reply *reply, const char *op)
+{
+    char message[128];
+    (void)snprintf(message, sizeof(message), "peer lacks op %.64s, restart node", op);
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "PEER_LACKS_OP", "execute", false, message, "fleet.board");
+}
+
 static void fb_budget_exhausted(struct zcl_command_reply *reply)
 {
     fb_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_TRANSIENT,
@@ -151,17 +184,21 @@ static bool fb_deadline_expired(const struct json_value *body)
 }
 
 static void fb_handle_no_answer(struct zcl_command_reply *reply,
-                                const struct json_value *body)
+                                const struct json_value *body, const char *op)
 {
     char node_message[320];
     if (fb_deadline_expired(body)) {
         fb_budget_exhausted(reply);
         return;
     }
-    if (fb_method_not_found(body, node_message, sizeof(node_message)))
-        fb_rpc_unsupported(reply, node_message);
-    else
+    if (fb_method_not_found(body, node_message, sizeof(node_message))) {
+        if (fb_menu_ready_op(op))
+            fb_peer_lacks_op(reply, op);
+        else
+            fb_rpc_unsupported(reply, node_message);
+    } else {
         fb_no_node(reply);
+    }
 }
 
 /* Serialize one JSON object as the single RPC parameter. The array brackets
@@ -182,10 +219,14 @@ static bool fb_params(const struct json_value *obj, char *out, size_t cap)
 }
 
 static void fb_board_refusal(struct zcl_command_reply *reply,
-                             const struct json_value *body)
+                             const struct json_value *body, const char *op)
 {
     const char *code = json_get_str(json_get(body, "code"));
     const char *msg = json_get_str(json_get(body, "message"));
+    if (code && strcmp(code, "UNKNOWN_OP") == 0 && fb_menu_ready_op(op)) {
+        fb_peer_lacks_op(reply, op);
+        return;
+    }
     bool unavailable = code && strcmp(code, "OBSERVATION_UNAVAILABLE") == 0;
     bool retryable = unavailable || (code && strcmp(code, "BOARD_BUSY") == 0);
     fb_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -280,13 +321,14 @@ static bool fb_body_transport_error(const struct json_value *body)
         (code && code->type == JSON_INT && msg && msg->type == JSON_STR);
 }
 
-static bool fb_body_accepted(struct zcl_command_reply *reply, struct json_value *body)
+static bool fb_body_accepted(struct zcl_command_reply *reply, struct json_value *body,
+                             const char *op)
 {
     const struct json_value *ok = json_get(body, "ok");
     bool board_answered = ok && ok->type == JSON_BOOL;
     bool transport_error = fb_body_transport_error(body);
     if (!board_answered && transport_error) {
-        fb_handle_no_answer(reply, body);
+        fb_handle_no_answer(reply, body, op);
         json_free(body);
         return false;
     }
@@ -300,7 +342,7 @@ static bool fb_body_accepted(struct zcl_command_reply *reply, struct json_value 
         return false;
     }
     if (ok && ok->type == JSON_BOOL && !json_get_bool(ok)) {
-        fb_board_refusal(reply, body);
+        fb_board_refusal(reply, body, op);
         json_free(body);
         return false;
     }
@@ -344,7 +386,8 @@ static bool fb_call_bounded(struct zcl_command_reply *reply, struct json_value *
      * answers with an `ok` field, so an error body WITHOUT one never reached
      * the board — no node, wrong datadir, or no auth cookie — and the caller
      * needs endpoint and authentication diagnosis before any startup. */
-    return fb_body_accepted(reply, body);
+    const char *op = json_get_str(json_get(in, "op"));
+    return fb_body_accepted(reply, body, op ? op : "");
 }
 
 static bool fb_call(struct zcl_command_reply *reply, struct json_value *in,

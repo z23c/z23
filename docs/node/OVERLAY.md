@@ -39,6 +39,10 @@ anyone touching `core/modules/net/src/tor_integration.c`, `onion_service.c`, or
   `-onion-rotate` deliberately archives the old identity. Hermetic onion
   tests (`test_onion_stream`, `test_onion_persistence`,
   `test_onion_directory`, …) pass on a host with zero network egress.
+  Mapping that ephemeral service's P2P port and file port, and pushing
+  with the board receipts that already exist, is specified in
+  [`ONION_PUSH_DESIGN.md`](ONION_PUSH_DESIGN.md). That note is a design;
+  it does not install the mapping.
 - **No SOCKS exists anywhere in this architecture** (owner decision).
   Outbound onion dials open raw dynhost streams that a
   socketpair bridge presents to connman as ordinary connected fds
