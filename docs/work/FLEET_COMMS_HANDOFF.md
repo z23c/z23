@@ -134,7 +134,7 @@ Why nothing left, from `boot_fleet_board_push_fanout.c` (header comment):
 
 So the fastest path needs a pairing, which needs a held delegation, and the
 free path is capped at one pull interval. **This is the design item for fast
-swarm communication:** push over a roster stream (a `board.roster.push`
+swarm communication** (specified in [`../node/ROSTER_PUSH_DESIGN.md`](../node/ROSTER_PUSH_DESIGN.md)): push over a roster stream (a `board.roster.push`
 service with the same OPEN-carried payload and receipt), judged by
 `fleet_board_roster_standing` and the session proof, so a roster member is
 pushed to without a pairing. It touches admission and the receiving half's
