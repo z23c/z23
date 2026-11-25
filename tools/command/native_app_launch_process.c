@@ -12,6 +12,7 @@
 
 #include "command/native_app_launch.h"
 
+#include "base/safe_alloc.h"
 #include "platform/time_compat.h"
 #include "platform/resident_launch.h"
 #include "util/log_macros.h"
@@ -188,10 +189,65 @@ static bool app_os_identity(long pid, char exe[APP_LAUNCH_PATH_MAX],
     return true;
 }
 
+/* This user's live process, same absolute executable proc_pidpath reports.
+ * Identity is read here without waitpid: app_os_identity reaps a child, and
+ * a scan of every pid must not consume some other child's exit status. */
+static bool app_os_scan_match(pid_t pid, const char *exe)
+{
+    struct proc_bsdinfo info;
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    int n;
+    if (pid <= 1)
+        return false;
+    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) !=
+        (int)sizeof(info))
+        return false;
+    if (info.pbi_uid != getuid() || info.pbi_status == SZOMB)
+        return false;
+    n = proc_pidpath(pid, path, sizeof(path));
+    if (n <= 0)
+        return false;
+    path[sizeof(path) - 1] = '\0';
+    if (strlen(path) >= APP_LAUNCH_PATH_MAX)
+        return false;
+    return strcmp(path, exe) == 0;
+}
+
+/* Lowest pid, matching the Linux scan, so two copies resolve to one. */
+static long app_os_scan_best(const pid_t *pids, int count, const char *exe)
+{
+    long best = 0;
+    for (int i = 0; i < count; i++) {
+        pid_t pid = pids[i];
+        if (app_os_scan_match(pid, exe) && (best == 0 || (long)pid < best))
+            best = (long)pid;
+    }
+    return best;
+}
+
+/* A hand-started copy has no pid record. Only an absolute path can match
+ * proc_pidpath. A pid buffer that comes back full is a short snapshot, so
+ * the scan reports nobody instead of guessing from a partial list. */
 static long app_os_scan(const char *exe)
 {
-    (void)exe; /* only the pid record identifies an instance on macOS */
-    return 0;
+    int count;
+    size_t capacity;
+    pid_t *pids;
+    long best = 0;
+    if (!exe || exe[0] != '/')
+        return 0;
+    count = proc_listallpids(NULL, 0);
+    if (count <= 0 || count > 65536)
+        return 0;
+    capacity = (size_t)count + 64u;
+    pids = zcl_calloc(capacity, sizeof(*pids), "app-launch/pids");
+    if (!pids)
+        return 0;
+    count = proc_listallpids(pids, (int)(capacity * sizeof(*pids)));
+    if (count > 0 && (size_t)count < capacity)
+        best = app_os_scan_best(pids, count, exe);
+    free(pids);
+    return best;
 }
 
 #else

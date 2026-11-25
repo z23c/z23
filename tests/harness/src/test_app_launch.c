@@ -55,10 +55,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#if defined(__APPLE__)
-#include <libproc.h>
-#include <sys/proc_info.h>
-#endif
 
 #define AL_FIXTURE "build/bin/z23-app-launch-fixture"
 #define AL_MARKER "FIXTURE: Device initialized successfully"
@@ -597,6 +593,26 @@ static int case_stale_record(struct al_fx *f)
         snprintf(rec.id, sizeof(rec.id), "Bad Id");
         snprintf(rec.executable, sizeof(rec.executable), "relative");
         ASSERT(!app_launch_record_save(f->env.state_dir, &rec));
+    PASS(); }
+    TEST("a hand-started copy is found by scanning processes") {
+        char exe[APP_LAUNCH_PATH_MAX];
+        char seen[APP_LAUNCH_PATH_MAX];
+        uint64_t start = 0;
+        uint64_t seen_start = 0;
+        const char *found = NULL;
+        struct app_launch_entry self = {.installed = true};
+        long pid;
+        ASSERT(app_proc_identity((long)getpid(), exe, &start));
+        pid = app_proc_scan(exe);
+        ASSERT(pid > 1);
+        ASSERT(app_proc_identity(pid, seen, &seen_start));
+        ASSERT_STR_EQ(seen, exe);
+        ASSERT(pid <= (long)getpid());
+        ASSERT_EQ(app_proc_scan("relative/not-an-app"), 0);
+        snprintf(self.id, sizeof(self.id), "scanapp");
+        snprintf(self.executable, sizeof(self.executable), "%s", exe);
+        ASSERT_EQ(app_launch_running_pid(&f->env, &self, &found), pid);
+        ASSERT_STR_EQ(found, "scan");
     PASS(); }
 _test_next:;
     return failures;
@@ -4287,38 +4303,20 @@ static bool al_keep_notice(void *context, const struct zcl_present_model_v1 *mod
     return false;
 }
 
-#if defined(__APPLE__)
-static bool al_keep_owned_image(pid_t pid, const char *resolved)
-{
-    char exe[APP_LAUNCH_PATH_MAX]; uint64_t start = 0;
-    struct proc_bsdinfo info;
-    return pid > 1 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) == sizeof(info) &&
-        info.pbi_uid == getuid() && app_proc_identity(pid, exe, &start) && !strcmp(exe, resolved);
-}
+/* The preview image is found by the same scan `app open` uses. */
 static bool al_keep_stop_image(const char *resolved)
 {
-    int count = proc_listallpids(NULL, 0);
-    if (count <= 0 || count > 65536) return false;
-    size_t capacity = (size_t)count + 64u;
-    pid_t *pids = calloc(capacity, sizeof(*pids));
-    if (!pids) return false;
-    count = proc_listallpids(pids, (int)(capacity * sizeof(*pids)));
     bool stopped = false;
-    if (count > 0 && (size_t)count < capacity) {
-        for (int i = 0; i < count && !stopped; ++i) {
-            if (al_keep_owned_image(pids[i], resolved)) stopped = asf_alive_then_stop(pids[i]);
-        }
+    for (int i = 0; i < 8; i++) {
+        long pid = app_proc_scan(resolved);
+        if (pid <= 1)
+            return stopped;
+        if (!asf_alive_then_stop(pid))
+            return false;
+        stopped = true;
     }
-    free(pids);
     return stopped;
 }
-#else
-static bool al_keep_stop_image(const char *resolved)
-{
-    long pid = app_proc_scan(resolved);
-    return pid > 1 && asf_alive_then_stop(pid);
-}
-#endif
 /* Stop the app the draft preview opened, identified by its kept image. */
 static bool al_keep_stop_app(const struct json_value *kept, const char *datadir)
 {
