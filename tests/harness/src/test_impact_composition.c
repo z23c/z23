@@ -3974,6 +3974,8 @@ static int test_ic_proof_status_execution_projection(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "queued");
         ASSERT(json_get_int(json_get(&reply.data, "request_age_s")) >= 7199);
         ASSERT(json_get_int(json_get(&reply.data, "eta_ms")) == status.eta_ms);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "eta_basis")),
+                      "timeout-budget-remaining");
         ASSERT(json_get(&reply.data, "worker_id") == NULL);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "local_commit")), local);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_base")), base);
@@ -3983,6 +3985,8 @@ static int test_ic_proof_status_execution_projection(void)
         zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
         ASSERT(ic_live_proof_status_reply(root, local, base, time(NULL), &reply));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "executing");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "eta_basis")),
+                      "timeout-budget-remaining");
         ASSERT(json_get_int(json_get(&reply.data, "worker_id")) > 1);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "local_commit")), local);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_base")), base);

@@ -163,6 +163,8 @@ static void proof_emit_status(struct zcl_command_reply *reply,
                                    status->request_age_s);
         /* Remaining timeout budget, not a predicted completion time. */
         (void)json_push_kv_int(&reply->data, "eta_ms", status->eta_ms);
+        (void)json_push_kv_str(&reply->data, "eta_basis",
+                               "timeout-budget-remaining");
     }
     (void)json_push_kv_bool(&reply->data, "receipt_reused",
                             status->receipt_reused);
