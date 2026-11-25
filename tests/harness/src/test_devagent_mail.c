@@ -1132,6 +1132,48 @@ static int test_mail_projection_read_bounds(void)
     return failures;
 }
 
+static int test_mail_projection_prefix_reuse(void)
+{
+    int failures=0;
+#if defined(ZCL_TESTING) && defined(__linux__)
+    TEST("mail: append reuses first hash prefix at SHA3 and read boundaries") {
+        static const size_t sizes[]={0,135,136,137,65535,65536,65537};
+        static const char tail[]="{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"reader\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"foo\"}\r\n";
+        char prefix[65538];
+        for (size_t i=0;i<sizeof(sizes)/sizeof(sizes[0]);i++) {
+            size_t old=sizes[i];
+            dvx_isolate("projection_prefix_reuse");
+            memset(prefix,old>8192 ? 'x' : '\n',old);
+            if (old>8192) prefix[old-1]='\n';
+            prefix[old]=0;
+            dvx_import_stream("inbox.peer",prefix);
+            char root[1024],path[1200]; ASSERT(platform_state_root_existing(root,sizeof(root)));
+            ASSERT(snprintf(path,sizeof(path),"%s/mail/inbox.peer.jsonl",root)>0);
+            ASSERT_EQ(chmod(path,0600),0);
+            size_t streams=0; int64_t bytes=0;
+            ASSERT(dvm_projection_rebuild_history(NULL,&streams,&bytes));
+            ASSERT_EQ(streams,1); ASSERT_EQ(bytes,(int64_t)old);
+            dvx_import_append("inbox.peer",tail);
+            const char *refs[]={"foo"}; struct json_value rows; json_init(&rows); json_set_array(&rows);
+            (void)dvm_projection_test_hash_bytes(true);
+            (void)dvm_projection_test_tail_updates(true);
+            ASSERT(dvm_projection_refs(refs,1,&rows)); ASSERT_EQ(json_size(&rows),1);
+            ASSERT_EQ(dvm_projection_test_tail_updates(false),1);
+            /* First full hash + suffix scan + final full verification. */
+            ASSERT_EQ(dvm_projection_test_hash_bytes(false),2*(old+strlen(tail))+strlen(tail));
+            const struct json_value *row=json_at(&rows,0);
+            ASSERT_EQ(json_get_int(json_get(row,"row_offset")),(int64_t)old);
+            ASSERT_STR_EQ(json_get_str(json_get(row,"row_sha3")),
+                "7864c01604820e3ee5112c2c1f2d48183c7fe48cca65752f47109158855a1033");
+            json_free(&rows); dvx_restore();
+        }
+        PASS();
+    } _test_next:;
+    dvx_restore();
+#endif
+    return failures;
+}
+
 static int test_mail_projection_parse_failure(void)
 {
     int failures=0;
@@ -2867,6 +2909,7 @@ static int test_mail_read_side_checks(void)
     failures += test_mail_projection_row_parity();
     failures += test_mail_projection_parse_failure();
     failures += test_mail_projection_read_bounds();
+    failures += test_mail_projection_prefix_reuse();
     failures += test_mail_stored_cursor();
     failures += test_mail_board_fields();
 #if !defined(_WIN32)

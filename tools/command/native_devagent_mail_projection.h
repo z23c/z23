@@ -25,6 +25,7 @@ bool dvm_projection_rebuild_history(const char *state_root,size_t *streams,int64
 #ifdef ZCL_TESTING
 size_t dvm_projection_test_warm_hits(bool reset);
 size_t dvm_projection_test_tail_updates(bool reset);
+size_t dvm_projection_test_hash_bytes(bool reset);
 void dvm_projection_test_before_parse(void (*hook)(void));
 void dvm_projection_test_after_rebuild(void (*hook)(void));
 bool zcl_fleet_steer_test_projection_ref(const char *directive, const char *candidate,

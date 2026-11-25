@@ -17,6 +17,7 @@
 #ifdef ZCL_TESTING
 static size_t s_warm_hits;
 static size_t s_tail_updates;
+static size_t s_hash_bytes;
 static void (*s_before_parse)(void);
 static void (*s_after_rebuild)(void);
 #endif
@@ -87,14 +88,20 @@ static bool mp_hash_range(int fd,int64_t start,int64_t length,struct sha3_256_ct
         ssize_t n;
         do { n=pread(fd,buf,want,(off_t)start); } while (n<0 && errno==EINTR);
         if (n<=0 || (size_t)n>want) return false;
+#ifdef ZCL_TESTING
+        s_hash_bytes += (size_t)n;
+#endif
         sha3_256_write(hash,buf,(size_t)n); start+=n; length-=n;
     }
     return true;
 }
-static bool mp_hash_stream(struct mp_stream *s)
+static bool mp_hash_stream(struct mp_stream *s, bool capture_prefix)
 {
     struct sha3_256_ctx hash; sha3_256_init(&hash);
-    if (!mp_hash_range(s->fd,0,s->tuple.size,&hash)) return false;
+    int64_t split=capture_prefix ? s->prior.frontier : 0;
+    if (split<0 || split>s->tuple.size || !mp_hash_range(s->fd,0,split,&hash)) return false;
+    if (capture_prefix) s->prefix=hash;
+    if (!mp_hash_range(s->fd,split,s->tuple.size-split,&hash)) return false;
     unsigned char extra; ssize_t n;
     do { n=pread(s->fd,&extra,1,(off_t)s->tuple.size); } while (n<0 && errno==EINTR);
     if (n!=0) return false;
@@ -105,7 +112,7 @@ static bool mp_recheck_hashes(struct mp_context *c)
     for (size_t i=0;i<c->nstream;i++) {
         unsigned char expected[32];
         memcpy(expected,c->stream[i].tuple.source_sha3,32);
-        if (!mp_hash_stream(&c->stream[i]) || memcmp(expected,c->stream[i].tuple.source_sha3,32)) return false;
+        if (!mp_hash_stream(&c->stream[i],false) || memcmp(expected,c->stream[i].tuple.source_sha3,32)) return false;
     }
     return true;
 }
@@ -332,14 +339,9 @@ static bool mp_scan_one(struct mp_context *c,struct mp_stream *s,
     return mp_scan_finish(c,s,tx,&hash,skipped,ok);
 }
 
-static bool mp_prepare_append(struct mp_context *c,struct mp_stream *s)
+static bool mp_prepare_append(struct mp_stream *s)
 {
-    struct dev_mail_tuple *before=&s->prior;
-    if (!dev_mail_projection_get(c->db,s->name,before) || strcmp(before->boot,s->tuple.boot) ||
-        before->dev!=s->tuple.dev || before->inode!=s->tuple.inode || before->frontier>s->tuple.size ||
-        s->tuple.size-before->frontier>32768) return false;
-    sha3_256_init(&s->prefix);
-    if (!mp_hash_range(s->fd,0,before->frontier,&s->prefix)) return false;
+    const struct dev_mail_tuple *before=&s->prior;
     struct sha3_256_ctx copy=s->prefix; unsigned char digest[32];
     sha3_256_finalize(&copy,digest);
     s->append_ready=memcmp(digest,before->source_sha3,32)==0;
@@ -361,7 +363,7 @@ static bool mp_advance(struct mp_context *c)
     /* Verify old bytes before taking writer-facing locks. The watch and
      * descriptor snapshot must still match after those locks are acquired. */
     for (size_t i=0;i<c->nstream;i++)
-        if (!mp_cached_tuple(c,&c->stream[i]) && !mp_prepare_append(c,&c->stream[i])) return false;
+        if (!mp_cached_tuple(c,&c->stream[i]) && !mp_prepare_append(&c->stream[i])) return false;
     if (!mp_lock_streams(c)) return false;
     bool ok=true;
     for (size_t i=0;ok && i<c->nstream;i++) {
@@ -463,12 +465,12 @@ static bool mp_open_mail(struct mp_context *c,const char *root)
 static bool mp_can_advance(struct mp_context *c)
 {
     for (size_t i=0;i<c->nstream;i++) {
-        struct dev_mail_tuple stored;
         struct mp_stream *stream=&c->stream[i];
-        if (!dev_mail_projection_get(c->db,stream->name,&stored) ||
-            strcmp(stored.boot,stream->tuple.boot) || stored.dev!=stream->tuple.dev ||
-            stored.inode!=stream->tuple.inode || stored.frontier>stream->tuple.size ||
-            stream->tuple.size-stored.frontier>32768) return false;
+        struct dev_mail_tuple *stored=&stream->prior;
+        if (!dev_mail_projection_get(c->db,stream->name,stored) ||
+            strcmp(stored->boot,stream->tuple.boot) || stored->dev!=stream->tuple.dev ||
+            stored->inode!=stream->tuple.inode || stored->frontier>stream->tuple.size ||
+            stream->tuple.size-stored->frontier>32768) return false;
     }
     return true;
 }
@@ -477,7 +479,7 @@ static bool mp_prepare_context(struct mp_context *c,const char *root,bool mainte
     /* No cold scan, schema creation or unbounded catch-up on a feed read. */
     bool ok=mp_open_mail(c,root) && mp_index_open(c,maintenance) &&
         (maintenance || mp_can_advance(c));
-    for (size_t i=0;ok && i<c->nstream;i++) ok=mp_hash_stream(&c->stream[i]);
+    for (size_t i=0;ok && i<c->nstream;i++) ok=mp_hash_stream(&c->stream[i],!maintenance);
     if (ok) ok=mp_snapshot(c);
     return ok;
 }
@@ -562,6 +564,10 @@ size_t dvm_projection_test_warm_hits(bool reset)
 size_t dvm_projection_test_tail_updates(bool reset)
 {
     size_t n=s_tail_updates; if (reset) s_tail_updates=0; return n;
+}
+size_t dvm_projection_test_hash_bytes(bool reset)
+{
+    size_t n=s_hash_bytes; if (reset) s_hash_bytes=0; return n;
 }
 void dvm_projection_test_before_parse(void (*hook)(void)) { s_before_parse=hook; }
 void dvm_projection_test_after_rebuild(void (*hook)(void)) { s_after_rebuild=hook; }
