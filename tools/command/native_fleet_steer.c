@@ -8693,20 +8693,9 @@ static void fmc_gen_hex_out(uint64_t h, char out[17])
     snprintf(out, 17, "%016llx", (unsigned long long)h);
 }
 
-static bool fmc_gen_hex(const char *s)
-{
-    size_t i;
-    if (!s)
-        return false;
-    for (i = 0; i < 16; i++) {
-        char c = s[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-            return false;
-    }
-    return s[16] == '\0';
-}
-
-/* Names and sizes of every mail stream and ack file. A later file's size
+/* Informational mail generation cannot bind nonmail state or time and must
+ * never authorize skipping a fresh brief.
+ * Names and sizes of every mail stream and ack file. A later file's size
  * is part of the generation: skipping a tail would hide a new message.
  * Missing mail is a stable empty generation. Bodies and mtimes are not read. */
 static void fmc_observation_mix(uint64_t *h,
@@ -8753,70 +8742,6 @@ static void fmc_observation_generation(char out[17])
     fmc_gen_hex_out(h, out);
 }
 
-/* Token echoed when the mail directory is unchanged. A string is the
- * caller's resume token. Integer 0 is the legacy start, whose brief cursor
- * is empty. Any other shape, including a positive floor, is not echoed:
- * the caller builds the real brief so the floor is not wiped to "". */
-static bool fmc_brief_obs_since(const struct zcl_command_request *req,
-                                char *out, size_t cap)
-{
-    const struct json_value *v;
-    const char *s;
-    long long iv;
-    if (!req || !req->input || !out || cap == 0)
-        return false;
-    v = json_get(req->input, "since");
-    if (!v) {
-        out[0] = '\0';
-        return true;
-    }
-    if (v->type == JSON_STR) {
-        s = json_get_str(v);
-        if (!s)
-            s = "";
-        if (strlen(s) >= cap)
-            return false;
-        memcpy(out, s, strlen(s) + 1);
-        return true;
-    }
-    if (v->type != JSON_INT)
-        return false;
-    iv = (long long)json_get_int(v);
-    if (iv != 0)
-        return false;
-    out[0] = '\0';
-    return true;
-}
-
-/* True when this call already answered. A matching generation skips the
- * roster, board and ledger. A mismatch falls through to the full brief. */
-static bool fmc_brief_not_modified(const struct zcl_command_request *req,
-                                   struct zcl_command_reply *reply)
-{
-    const char *held = fmc_str(req, "generation");
-    char since[FMC_MAIL_SINCE_CAP];
-    char live[17];
-    bool ok;
-    if (!fmc_gen_hex(held))
-        return false;
-    fmc_observation_generation(live);
-    if (strcmp(held, live) != 0)
-        return false;
-    if (!fmc_brief_obs_since(req, since, sizeof(since)))
-        return false;
-    ok = json_push_kv_bool(&reply->data, "not_modified", true);
-    ok = ok && json_push_kv_str(&reply->data, "observation_generation", live);
-    ok = ok && json_push_kv_str(&reply->data, "cursor_token", since);
-    if (!ok) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
-                 "observation could not be recorded", "json");
-        return true;
-    }
-    reply->status = ZCL_COMMAND_STATUS_PASSED;
-    reply->exit_code = 0;
-    return true;
-}
-
 static void fmc_brief_put_observation(struct json_value *data)
 {
     char live[17];
@@ -8839,21 +8764,12 @@ static void fmc_brief_observe_if_fits(struct json_value *data, size_t budget)
     fmc_brief_put_observation(data);
 }
 
-static void fmc_do_brief_observed(const struct zcl_command_request *req,
-                                  struct zcl_command_reply *reply,
-                                  const struct fmc_caller *who)
-{
-    if (fmc_brief_not_modified(req, reply))
-        return;
-    fmc_do_brief(req, reply, who);
-}
-
 void zcl_native_handle_fleet_steer_brief(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     fmc_enter_who(request, reply, "brief",
                   "fleet.steer.brief takes grant,since,limit,json,changes_only,generation",
-                  fmc_do_brief_observed);
+                  fmc_do_brief);
 }
 
 void zcl_native_handle_fleet_steer_send(

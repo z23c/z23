@@ -407,11 +407,6 @@ static void fmx_brief_gen(struct fmx_call *c, const char *token,
         (void)json_push_kv_str(&c->input, "generation", generation);
 }
 
-static size_t fmx_payload(const struct fmx_call *c)
-{
-    return json_write(&c->reply.data, NULL, 0);
-}
-
 static bool fmx_bool_is(const struct fmx_call *c, const char *key, bool want)
 {
     const struct json_value *v = fmx_get(c, key);
@@ -9444,14 +9439,43 @@ _test_next:;
     return failures;
 }
 
+static int fmx_t_observation_queue(void)
+{
+    int failures = 0;
+    TEST("steer: unchanged mail generation cannot hide queue changes") {
+        struct fmx_call b;
+        char gen[32], token[4096];
+        fmx_isolate("observe_queue");
+        fmx_state_file("queue", "queue.jsonl", "", false);
+        fmx_brief_gen(&b, NULL, NULL);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(fmx_wint(fmx_get(&b, "capacity"), "queued") == 0);
+        snprintf(gen, sizeof(gen), "%s", fmx_str(&b, "observation_generation"));
+        snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
+        fmx_end(&b);
+        fmx_state_file("queue", "queue.jsonl",
+            "{\"seq\":1,\"ts\":\"2026-09-15T00:00:00Z\",\"kind\":\"file\",\"name\":\"domain-job\",\"group\":\"g\",\"path\":\"p\",\"attempt\":1,\"state\":\"queued\",\"worktree\":\"\",\"pid_or_unit\":\"\",\"started\":0}\n", false);
+        fmx_brief_gen(&b, token[0] ? token : NULL, gen);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(fmx_wint(fmx_get(&b, "capacity"), "queued") == 1);
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
+        ASSERT_STR_EQ(fmx_str(&b, "observation_generation"), gen);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_observation(void)
 {
     int failures = 0;
 
-    TEST("steer: an unchanged brief is not-modified and a new row is visible") {
+    TEST("steer: a generation never substitutes for a fresh brief") {
         struct fmx_call b;
         char gid[64], gen[32], token[4096], next[32];
-        size_t full, small;
         fmx_isolate("observe");
         ASSERT(fmx_mint("brief,send,evidence", gid, sizeof(gid)));
         fmx_brief_gen(&b, NULL, NULL);
@@ -9461,14 +9485,11 @@ static int fmx_t_observation(void)
         ASSERT(strlen(fmx_str(&b, "observation_generation")) == 16);
         snprintf(gen, sizeof(gen), "%s", fmx_str(&b, "observation_generation"));
         snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
-        full = fmx_payload(&b);
         fmx_end(&b);
         fmx_brief_gen(&b, token[0] ? token : NULL, gen);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
-        ASSERT(fmx_bool_is(&b, "not_modified", true));
-        small = fmx_payload(&b);
-        ASSERT(small < full);
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
         ASSERT_STR_EQ(fmx_str(&b, "observation_generation"), gen);
         ASSERT_STR_EQ(fmx_str(&b, "cursor_token"), token);
         fmx_end(&b);
@@ -9484,13 +9505,11 @@ static int fmx_t_observation(void)
         snprintf(next, sizeof(next), "%s",
                  fmx_str(&b, "observation_generation"));
         snprintf(token, sizeof(token), "%s", fmx_str(&b, "cursor_token"));
-        full = fmx_payload(&b);
         fmx_end(&b);
         fmx_brief_gen(&b, token[0] ? token : NULL, next);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
-        ASSERT(fmx_bool_is(&b, "not_modified", true));
-        ASSERT(fmx_payload(&b) < full);
+        ASSERT(fmx_bool_is(&b, "not_modified", false));
         ASSERT(fmx_change_row(&b, FMX_SENDER, "obs-row") == NULL);
         fmx_end(&b);
         fmx_restore();
@@ -10082,6 +10101,7 @@ int test_fleet_steer(void)
 #endif
     failures += fmx_t_register();
     failures += fmx_t_brief_empty();
+    failures += fmx_t_observation_queue();
     failures += fmx_t_observation();
     failures += fmx_t_observation_floor();
     failures += fmx_t_observation_tail();
