@@ -160,6 +160,39 @@ static bool gtx_mint(const char *label, const char *scopes, long long ttl,
     return ok;
 }
 
+static bool gtx_stage_operator(void)
+{
+    static const char hex[] = "356e44269c0c304dc5de458925726755e5be9397f1f0ded480ca3dfd3bc0d128";
+    char dir[1200], path[1400];
+    (void)snprintf(dir, sizeof(dir), "%s/z23/dev/fleet", g_gtx_state);
+    char *p = dir;
+    if (*p == '/') p++;
+    for (; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            (void)mkdir(dir, 0700);
+            *p = '/';
+        }
+    }
+    (void)mkdir(dir, 0700);
+    (void)snprintf(path, sizeof(path), "%s/operator.pub", dir);
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    return fwrite(hex, 1, sizeof(hex) - 1, f) == sizeof(hex) - 1 && fclose(f) == 0;
+}
+
+static bool gtx_import_r1(void)
+{
+    static const char line[] = "AQHPAgB9AQJyMQAAAABrBn1-K6wR2ktdsGTnDEhBTDGvSAA1bkQmnAwwTcXeRYklcmdV5b6Tl_Hw3tSAyj39O8DRKBDDTzL2bRXD3IyaAVO396Et0D6yG8cs86epd_-oARCr5KAavfEXbN2wy1CDzxMd20bjsodES9pIHa9j3nZRxAU-a2ZzNG9ncTNkdHdzZWFoZ3p6MmdyaXp1ZzJ3aXdleTJqaHhtbW5qZXVxaDY0cnM3ZmtsNjY2cWQub25pb24JcmhldHQuZGV2BUxpbnV4ElVidW50dSAyNC4wNC4zIExUUwZ4ODZfNjQGMTQuMi4wCGV4dGVybmFsAAAAIAAAAAAAAXWmAAAAAAAFNDYAADVuRCacDDBNxd5FiSVyZ1XlvpOX8fDe1IDKPf07wNEoMxFF9Kubu8SlcbacLpq8vljzQjunOJUl29luB7JcxZjWpej-_rnChsS4McHbuNUBrwQiBZU01bj7LmXakmOhesTOtwPgdnkL_nx5zcbwlOE_Kp6VjNv-DQuq0hmbMogLqoDEJW887siTE932g5_tbCqTc_T6qB5CLA1YYgs88rLJEGtXMLS8usd6O4xmSzOp3_Xv4dKGGZkGptapxnDmCwAAAABrBmGDVrlWwqSIV18Yti9Lw3RKeyKASPQOIAPQLufyZafYgjBdFTLec8Iwa7UNQMFz0ezncFhflGV6VkfcjrazDq6ZtigF";
+    struct gtx_call c;
+    gtx_begin(&c, "fleet.import", "zcl.fleet.import.v1");
+    (void)json_push_kv_str(&c.input, "line", line);
+    zcl_native_fleet_enrol_dispatch(&c.request, &c.reply);
+    bool ok = gtx_ok(&c);
+    gtx_end(&c);
+    return ok;
+}
+
 static bool gtx_mint_peer(const char *label, const char *peer)
 {
     struct gtx_call c;
@@ -1006,9 +1039,11 @@ static int gtx_case_peer_unbound(void)
     {
         struct wkr_drive_opts o;
         gtx_isolate("peer-unbound");
-        ASSERT(gtx_mint_peer("chatgpt", "node-a"));
+        ASSERT(gtx_stage_operator());
+        ASSERT(gtx_import_r1());
+        ASSERT(gtx_mint_peer("chatgpt", "r1"));
         ASSERT(gtx_queue_post_leaf("peer-unbound"));
-        ASSERT(gtx_stage_peer_evidence("peer-unbound", "chatgpt", "node-a"));
+        ASSERT(gtx_stage_peer_evidence("peer-unbound", "chatgpt", "331145f4ab9bbbc4a571b69c2e9abcbe58f3423ba7389525dbd96e07b25cc598"));
         (void)remove(g_gtx_count);
         gtx_opts(&o, "gtx", "s-peer-unbound");
         ASSERT_EQ(zcl_devagent_worker_drive(&o, gtx_fixture), 1);

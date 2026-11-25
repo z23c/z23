@@ -342,6 +342,30 @@ static const struct bm_peer *bm_by_signer_hex(const struct bm_roster *r,
     return NULL;
 }
 
+bool zcl_devagent_boardmail_peer_name(const char *signer, char *out, size_t cap)
+{
+    struct bm_roster ro;
+    uint8_t key[FLEET_ENROL_PUBKEY_BYTES];
+    const char *name = NULL;
+    if (!out || cap == 0 || !bm_hex64(signer) ||
+        !zcl_hex_decode(signer, key, sizeof(key)))
+        return false;
+    out[0] = '\0';
+    if (!bm_roster_load_checked(&ro, true))
+        return false;
+    for (size_t i = 0; i < ro.n; i++) {
+        if (memcmp(ro.p[i].signer, key, sizeof(key)) != 0)
+            continue;
+        if (name && strcmp(name, ro.p[i].name) != 0)
+            return false;
+        name = ro.p[i].name;
+    }
+    if (!name || strlen(name) >= cap)
+        return false;
+    (void)snprintf(out, cap, "%s", name);
+    return true;
+}
+
 /* This box's own box key. False on a box with no enrolled key. */
 static bool bm_own_box(uint8_t own[FLEET_ENROL_PUBKEY_BYTES], bool readonly)
 {

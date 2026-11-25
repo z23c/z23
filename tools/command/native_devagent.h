@@ -706,6 +706,9 @@ void zcl_devagent_boardmail_admit(const struct zcl_boardmail_row *row,
                                   const char *receiver,
                                   struct zcl_boardmail_decision *d);
 
+/* Resolve a 64-hex board signer to its unique verified roster name. */
+bool zcl_devagent_boardmail_peer_name(const char *signer, char *out, size_t cap);
+
 #ifdef ZCL_TESTING
 /* Isolated receiver fixtures only. Nonzero refuses the named file's barrier:
  * 0 = file sync, 1 = close (stream consumed), 2 = parent sync (after rename).

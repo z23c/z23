@@ -86,6 +86,7 @@
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
+#include "fleet_enrol.h"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -1500,7 +1501,7 @@ struct wkr_evidence {
     char binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
     bool peer;
     long long expiry;
-    char signer[64];
+    char signer[65];
     char head[41];
     bool has_head;
 };
@@ -1629,7 +1630,7 @@ static bool wkr_evidence_expiry(const char *text, struct wkr_evidence *ev)
         if (!wkr_ev_line(text, "board_signer", ev->signer,
                          sizeof(ev->signer)))
             return false;
-        return wkr_ev_token(ev->signer, sizeof(ev->signer) - 1);
+        return wkr_ev_token(ev->signer, sizeof(ev->signer));
     }
     ev->expiry = strtoll(expiry, &end, 10);
     return end != NULL && *end == '\0';
@@ -1676,7 +1677,10 @@ static const char *wkr_guard_authority(const struct wkr_evidence *ev)
     long long exp = 0;
     const char *why;
     if (ev->peer) {
-        why = zcl_fleet_steer_grant_peer_live(ev->sender, ev->signer,
+        char peer[FLEET_ENROL_NAME_MAX + 1];
+        if (!zcl_devagent_boardmail_peer_name(ev->signer, peer, sizeof(peer)))
+            return WKR_REFUSE_AUTHORITY;
+        why = zcl_fleet_steer_grant_peer_live(ev->sender, peer,
                                               WKR_SEND_SCOPE);
         return why ? WKR_REFUSE_AUTHORITY : NULL;
     }
