@@ -944,6 +944,9 @@ struct gr_trains {
     int64_t until;
     int64_t failed;
     int64_t unreadable;
+    int64_t second_unreadable;
+    int64_t bad_time, bad_identity, conflict, capacity, other;
+    bool scan_changed;
     struct sha3_256_ctx first_hash, second_hash;
     size_t count;
     struct gr_train_identity *keys;
@@ -951,6 +954,21 @@ struct gr_trains {
     bool second_pass;
     struct gr_ledger led;
 };
+
+enum gr_train_issue { GR_BAD_TIME, GR_BAD_IDENTITY, GR_CONFLICT, GR_CAPACITY, GR_OTHER };
+
+static void gr_train_issue(struct gr_trains *t, enum gr_train_issue issue)
+{
+    if (t->second_pass) { t->second_unreadable++; return; }
+    t->unreadable++;
+    switch (issue) {
+    case GR_BAD_TIME: t->bad_time++; break;
+    case GR_BAD_IDENTITY: t->bad_identity++; break;
+    case GR_CONFLICT: t->conflict++; break;
+    case GR_CAPACITY: t->capacity++; break;
+    case GR_OTHER: t->other++; break;
+    }
+}
 
 struct gr_train_identity {
     char target[65], local[41], base[41], tree[41];
@@ -1029,21 +1047,21 @@ static void gr_train_landed(struct gr_trains *t, const struct json_value *row, i
 {
     struct gr_train_identity id = {0};
     if (!gr_train_proof(row, &id) || !gr_train_publication(row, &id)) {
-        t->unreadable++;
+        gr_train_issue(t, GR_BAD_IDENTITY);
         return;
     }
     for (size_t i = 0; i < t->count; i++) {
         struct gr_train_identity *prior = &t->keys[i];
         if (!strcmp(prior->target, id.target) && !strcmp(prior->local, id.local) &&
-            strcmp(prior->base, id.base)) { t->unreadable++; return; }
+            strcmp(prior->base, id.base)) { gr_train_issue(t, GR_CONFLICT); return; }
         if (!gr_train_same(prior, &id)) continue;
-        if (!gr_train_consistent(prior, &id)) t->unreadable++;
+        if (!gr_train_consistent(prior, &id)) gr_train_issue(t, GR_CONFLICT);
         if (at < prior->landed_at) prior->landed_at = at;
         if (t->second_pass) prior->seen_again = true;
         return;
     }
     if (at < t->since) return;
-    if (t->second_pass || t->count == t->cap) { t->unreadable++; return; }
+    if (t->second_pass || t->count == t->cap) { gr_train_issue(t, GR_CAPACITY); return; }
     id.landed_at = at;
     t->keys[t->count++] = id;
 }
@@ -1068,16 +1086,16 @@ static void gr_train_row(const struct json_value *row, void *user)
     struct gr_trains *t = user;
     char canonical[8192];
     size_t len = json_write(row, canonical, sizeof(canonical));
-    if (len >= sizeof(canonical)) { t->unreadable++; return; }
+    if (len >= sizeof(canonical)) { gr_train_issue(t, GR_OTHER); return; }
     struct sha3_256_ctx *hash = t->second_pass ? &t->second_hash : &t->first_hash;
     sha3_256_write(hash, (const unsigned char *)canonical, len);
     sha3_256_write(hash, (const unsigned char *)"\0", 1);
     const struct json_value *sv = gr_unique(row, "state");
     const char *state = json_get_str(sv);
     int64_t at;
-    if (!sv || sv->type != JSON_STR) { t->unreadable++; return; }
+    if (!sv || sv->type != JSON_STR) { gr_train_issue(t, GR_OTHER); return; }
     if (strcmp(state, "landed") != 0 && strcmp(state, "failed") != 0) return;
-    if (!gr_train_time(row, state, t->until, &at)) { t->unreadable++; return; }
+    if (!gr_train_time(row, state, t->until, &at)) { gr_train_issue(t, GR_BAD_TIME); return; }
     if (!t->second_pass && at > t->led.newest) {
         t->led.newest = at;
         (void)snprintf(t->led.newest_ts, sizeof(t->led.newest_ts), "%lld", (long long)at);
@@ -1099,9 +1117,9 @@ static bool gr_train_scan(const char *path, struct gr_trains *t,
     unsigned char first[32], second[32];
     sha3_256_finalize(&t->first_hash, first);
     sha3_256_finalize(&t->second_hash, second);
-    if (memcmp(first, second, sizeof(first)) != 0) t->unreadable++;
+    if (memcmp(first, second, sizeof(first)) != 0) t->scan_changed = true;
     for (size_t i = 0; i < t->count; i++)
-        if (!t->keys[i].seen_again) t->unreadable++;
+        if (!t->keys[i].seen_again) t->scan_changed = true;
     return true;
 }
 
@@ -1142,10 +1160,14 @@ static struct zcl_goal_result gr_g9(const struct zcl_goals_options *o)
     memset(keys, 0, sizeof(keys));
     if (!gr_train_scan(use, &t, reason, sizeof(reason)))
         return gr_unmeasured(next, "%s", reason);
-    if (t.unreadable > 0)
-        return gr_unmeasured(next, "%lld landing observation(s) in %s have "
-                             "missing, conflicting, or unreadable evidence", (long long)t.unreadable,
-                             use);
+    if (t.unreadable > 0 || t.second_unreadable > 0 || t.scan_changed)
+        return gr_unmeasured("reconcile historical terminal times, identity and receipt evidence in the outcomes ledger",
+                             "first pass: %lld invalid rows (invalid terminal time=%lld, identity=%lld, conflict=%lld, capacity=%lld, other=%lld); second pass: %lld invalid observations%s (%s)",
+                             (long long)t.unreadable, (long long)t.bad_time,
+                             (long long)t.bad_identity, (long long)t.conflict,
+                             (long long)t.capacity, (long long)t.other,
+                             (long long)t.second_unreadable,
+                             t.scan_changed ? "; ledger changed or rows missing" : "", use);
     if (gr_ledger_stale(o, repo, &t.led, reason, sizeof(reason)))
         return gr_unmeasured(next, "%s (%s)", reason, use);
     if (t.failed > 0)

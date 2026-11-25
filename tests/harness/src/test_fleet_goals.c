@@ -336,6 +336,28 @@ static int fgl_case_train_failure_time(const char *root)
     return failures;
 }
 
+static int fgl_case_historical_evidence(const char *root)
+{
+    int failures = 0;
+    char path[600];
+    struct zcl_goals_options o;
+    fgl_options(&o); o.repo = root;
+    (void)snprintf(path, sizeof(path), "%s/historical-evidence.jsonl", root);
+    o.outcomes = path;
+    TEST("G9: old rows with unknown terminal times stay unmeasured and count once") {
+        ASSERT(fgl_write(path,
+            "{\"state\":\"landed\",\"ts\":\"2020-01-01T00:00:00Z\"}\n"
+            "{\"state\":\"failed\",\"ts\":\"2020-01-02T00:00:00Z\"}\n"));
+        struct zcl_goal_result r = zcl_goals_measure(&o, "G9");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "first pass: 2 invalid rows"));
+        ASSERT(fgl_has(r.evidence, "invalid terminal time=2"));
+        ASSERT(fgl_has(r.next, "reconcile"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int fgl_case_train_timing(const char *root)
 {
     int failures = 0;
@@ -1839,6 +1861,7 @@ int test_fleet_goals(void)
     failures += fgl_case_trains(root);
     failures += fgl_case_train_unknown_failure(root);
     failures += fgl_case_train_failure_time(root);
+    failures += fgl_case_historical_evidence(root);
     failures += fgl_case_train_identity_refusal(root);
     failures += fgl_case_train_timing(root);
     failures += fgl_case_train_capacity(root);
