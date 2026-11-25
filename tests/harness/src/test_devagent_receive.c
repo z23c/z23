@@ -2402,6 +2402,106 @@ _test_next:;
     rtx_restore();
     return failures;
 }
+static int test_receive_resident_status(void)
+{
+    int failures = 0;
+    TEST("status reports the resident configuration recorded by the drive")
+    {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        struct rtx_call c;
+        char ws[1200], record[512];
+        rtx_isolate("resident-status");
+        (void)snprintf(ws, sizeof(ws), "%s/wt", g_rtx_base);
+        ASSERT(rtx_checkout(ws, "1111111111111111111111111111111111111111"));
+        rtx_opts_ws(&o, ws);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        ASSERT(rtx_read("receive/resident.state", record, sizeof(record)));
+        ASSERT(strstr(record, "receiver=box-a\n") != NULL);
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace_state"), "configured");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_receiver"), "box-a");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace"), ws);
+        ASSERT_STR_EQ(rtx_reply_str(&c, "workspace"), "");
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+static int test_receive_resident_status_long(void)
+{
+    int failures = 0;
+    TEST("resident status preserves a long configured workspace")
+    {
+        struct rcv_drive_opts o;
+        struct rcv_beat_stats st;
+        struct rtx_call c;
+        char ws[ZCL_DEVAGENT_WS_PATH_MAX], name[49];
+        rtx_isolate("resident-long");
+        memset(ws, 'x', ZCL_DEVAGENT_WS_PATH_MAX - 1);
+        ws[0] = '/';
+        ws[ZCL_DEVAGENT_WS_PATH_MAX - 1] = '\0';
+        memset(name, 'r', 48);
+        name[48] = '\0';
+        rtx_opts_ws(&o, ws);
+        (void)snprintf(o.receiver, sizeof(o.receiver), "%s", name);
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 1);
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace_state"), "configured");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_receiver"), name);
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace"), ws);
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
+static int test_receive_resident_status_invalid(void)
+{
+    int failures = 0;
+    TEST("malformed resident state never becomes configuration")
+    {
+        struct rtx_call c;
+        char dir[1400];
+        static const char *parents[] = {"", "/z23", "/z23/dev", "/z23/dev/receive"};
+        rtx_isolate("resident-invalid");
+        for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+            (void)snprintf(dir, sizeof(dir), "%s%s", g_rtx_state, parents[i]);
+            ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        }
+        ASSERT(rtx_write("receive/resident.state", "workspace=relative\n"));
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace_state"), "malformed");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace"), "");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_receiver"), "");
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
 #endif
 int test_devagent_receive(void);
 int test_devagent_receive(void)
@@ -2410,6 +2510,9 @@ int test_devagent_receive(void)
 
 #if !defined(_WIN32)
     failures += test_receive_export_observation();
+    failures += test_receive_resident_status();
+    failures += test_receive_resident_status_long();
+    failures += test_receive_resident_status_invalid();
     failures += test_receive_note_replay();
     failures += test_receive_answer_retry();
     failures += test_receive_marker_retry(0);
@@ -3175,6 +3278,7 @@ int test_devagent_receive(void)
         ASSERT_STR_EQ(rtx_reply_str(&c, "counters_basis"), "dry-survey");
         ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unobserved");
         ASSERT_STR_EQ(json_get_str(json_get(json_get(&c.reply.data, "export_backlog"), "state")), "mail-absent");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace_state"), "absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_basis"), "request-argument");
         ASSERT_STR_EQ(rtx_reply_str(&c, "intake_record_state"), "absent");
         rtx_end(&c);

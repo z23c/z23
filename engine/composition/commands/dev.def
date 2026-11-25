@@ -3186,7 +3186,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "took the row, carrying its seq, the brief digest and the workspace "
     "record (selector, path digest, HEAD, tree id — never the path). run "
     "holds one flock singleton, wakes on the mail watcher, stops on "
-    "SIGTERM; status surveys from the start and writes nothing; preflight "
+    "SIGTERM; status reports resident config without writes; preflight "
     "reports one directive's admission, writing nothing.", 16384,
     "agent,receive,resident,mail,directive,admission,queue,ref,workspace",
     "zcl.agent_receive_input.v1", "zcl.agent_receive.v1",

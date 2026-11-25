@@ -300,6 +300,7 @@
 #define RCV_SURVEY_PAGES 4096u
 #define RCV_POS_MAX 4096u
 #define RCV_INTAKE_FILE "intake.state"
+#define RCV_RESIDENT_FILE "resident.state"
 #define RCV_BODY_MAX 4097u
 /* The resolved brief is the received body with the workspace selector
  * replaced by an absolute path, so it is bounded by the mail body cap plus
@@ -503,6 +504,7 @@ struct rcv_paths {
     char enginedir[3200]; /* <state>/engine */
     char outcomes[3264];  /* <state>/queue/outcomes.jsonl */
     char intake[3264];    /* <state>/receive/intake.state */
+    char resident[3264];  /* <state>/receive/resident.state */
 };
 
 /* Resolve every path this leaf reads or writes. Creates nothing: the
@@ -530,7 +532,9 @@ static bool rcv_paths_resolve(struct rcv_paths *p)
                  p->root) <= 0)
         return false;
     if (snprintf(p->intake, sizeof(p->intake), "%s/%s", p->dir,
-                 RCV_INTAKE_FILE) <= 0)
+                 RCV_INTAKE_FILE) <= 0 ||
+        snprintf(p->resident, sizeof(p->resident), "%s/%s", p->dir,
+                 RCV_RESIDENT_FILE) <= 0)
         return false;
     return true;
 }
@@ -2779,6 +2783,16 @@ static bool rcv_wait(struct platform_directory_watcher *w,
     return !g_rcv_term;
 }
 
+static bool rcv_resident_record(const struct rcv_paths *p,
+                                const char *receiver, const char *workspace)
+{
+    char text[RCV_NAME_MAX + ZCL_DEVAGENT_WS_PATH_MAX + 32];
+    int n = snprintf(text, sizeof(text), "receiver=%s\nworkspace=%s\n",
+                     receiver, workspace);
+    return n > 0 && (size_t)n < sizeof(text) &&
+           rcv_write_atomic(p->resident, text, (size_t)n);
+}
+
 static long long rcv_drive_posix(const struct rcv_drive_opts *opts,
                                  struct rcv_beat_stats *st)
 {
@@ -2802,6 +2816,11 @@ static long long rcv_drive_posix(const struct rcv_drive_opts *opts,
         return -1;
     (void)snprintf(c.receiver, sizeof(c.receiver), "%s", opts->receiver);
     (void)snprintf(c.workspace, sizeof(c.workspace), "%s", opts->workspace);
+    if (!rcv_resident_record(&c.p, c.receiver, c.workspace)) {
+        (void)flock(lockfd, LOCK_UN);
+        (void)close(lockfd);
+        return -1;
+    }
     c.st = st;
     /* Resume where the last drive stopped: the cursor file is the only
      * intake memory that survives a restart. */
@@ -2897,6 +2916,34 @@ static const char *rcv_lock_state(const struct rcv_paths *p)
 
 #endif /* _WIN32 */
 
+static const char *rcv_resident_observe(const char *path, char *receiver,
+                                        size_t receiver_cap, char *workspace,
+                                        size_t workspace_cap)
+{
+    char text[RCV_NAME_MAX + ZCL_DEVAGENT_WS_PATH_MAX + 32], *save = NULL;
+    unsigned mask = 0;
+    if (!rcv_read_file(path, text, sizeof(text)))
+        return platform_file_shape_read(path) == PLATFORM_FILE_SHAPE_MISSING ?
+            "absent" : "malformed";
+    receiver[0] = '\0';
+    workspace[0] = '\0';
+    for (char *line = strtok_r(text, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (!strncmp(line, "receiver=", 9) && !(mask & 1)) {
+            (void)snprintf(receiver, receiver_cap, "%s", line + 9);
+            mask |= 1;
+        } else if (!strncmp(line, "workspace=", 10) && !(mask & 2)) {
+            (void)snprintf(workspace, workspace_cap, "%s", line + 10);
+            mask |= 2;
+        } else {
+            return "malformed";
+        }
+    }
+    if (mask != 3 || !zcl_devagent_name_ok(receiver) ||
+        (workspace[0] && workspace[0] != '/'))
+        return "malformed";
+    return workspace[0] ? "configured" : "unconfigured";
+}
 
 /* ONE definition of the public entry point, above the platform split: the
  * arms differ only in how the singleton and the watch are held, and two
@@ -3512,6 +3559,20 @@ static void rcv_status(const char *receiver, const char *workspace,
     (void)json_push_kv_str(&reply->data, "scope", RCV_SCOPE);
     rcv_push_stats(reply, &st);
     rcv_push_intake(reply, &p);
+    char resident_receiver[64], resident_workspace[4096];
+    const char *resident_state = rcv_resident_observe(
+        p.resident, resident_receiver, sizeof(resident_receiver),
+        resident_workspace, sizeof(resident_workspace));
+    (void)json_push_kv_str(&reply->data, "resident_receiver",
+                           strcmp(resident_state, "malformed") == 0 ||
+                           strcmp(resident_state, "absent") == 0 ?
+                           "" : resident_receiver);
+    (void)json_push_kv_str(&reply->data, "resident_workspace",
+                           strcmp(resident_state, "malformed") == 0 ||
+                           strcmp(resident_state, "absent") == 0 ?
+                           "" : resident_workspace);
+    (void)json_push_kv_str(&reply->data, "resident_workspace_state",
+                           resident_state);
     zcl_devagent_boardmail_observe_export(p.dir, p.maildir, &reply->data);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
