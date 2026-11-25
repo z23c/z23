@@ -542,16 +542,22 @@ static bool cocoa_commit_view(struct gui_window *w, struct cocoa_win *c)
 static unsigned long g_present_saved;
 static int g_present_count;
 
-/* HideDock | HideMenuBar. The window stays at the normal level, so another
- * app can cover it. The options are process-wide, so the first entry saves
- * them and the last exit restores them. */
+/* HideDock | HideMenuBar, added to options the process already set. Replacing
+ * the set would clear an unrelated bit for the whole time the window covers
+ * the screen. Auto-hide is the other value of each pair, and AppKit throws
+ * if both are set, so those two bits are cleared only while the window is
+ * up. The window stays at the normal level, so another app can cover it.
+ * The options are process-wide, so the first entry saves them and the last
+ * exit restores them. */
 static void cocoa_present_enter(void)
 {
     cocoa_id app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
+    unsigned long now = cocoa_ulong(app, "presentationOptions");
     if (g_present_count == 0)
-        g_present_saved = cocoa_ulong(app, "presentationOptions");
+        g_present_saved = now;
     g_present_count++;
-    cocoa_void_ulong(app, "setPresentationOptions:", 2ul | 8ul);
+    now &= ~(1ul | 4ul);
+    cocoa_void_ulong(app, "setPresentationOptions:", now | 2ul | 8ul);
 }
 
 static void cocoa_present_leave(void)
@@ -569,6 +575,13 @@ unsigned long gui_cocoa_presentation(void)
     cocoa_id app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
     if (!app) return 0;
     return cocoa_ulong(app, "presentationOptions");
+}
+
+void gui_cocoa_set_presentation(unsigned long options)
+{
+    cocoa_id app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
+    if (!app) return;
+    cocoa_void_ulong(app, "setPresentationOptions:", options);
 }
 
 static bool cocoa_cover(struct cocoa_win *c)

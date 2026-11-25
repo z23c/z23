@@ -836,6 +836,7 @@ static void test_cocoa_fullscreen(void)
 #if defined(__APPLE__)
 bool gui_cocoa_move_frame(struct gui_window *w, double width, double height);
 unsigned long gui_cocoa_presentation(void);
+void gui_cocoa_set_presentation(unsigned long options);
 #endif
 
 /* A window that is never shown must not hide the Dock or the menu bar. */
@@ -932,6 +933,99 @@ static void test_cocoa_hidden_close_keeps_presentation(void)
 #endif
 }
 
+/* HideDock | HideMenuBar must be added to options the process already set.
+ * DisableProcessSwitching cannot be set unless the Dock is already hidden,
+ * and AutoHideDock is the alternative to HideDock. The bit under test is
+ * DisableAppleMenu (1<<4), which fullscreen does not itself mean. */
+static void test_cocoa_presentation_keeps_bits(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc warm = {
+        .title_utf8 = "z23 warm", .width = 200, .height = 100,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window_desc full = {
+        .title_utf8 = "z23 fullscreen bits", .width = 640, .height = 420,
+        .flags = GUI_WINDOW_FULLSCREEN,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *warm_win = NULL;
+    struct gui_window *full_win = NULL;
+    char err[120] = "";
+    unsigned long keep = 1ul << 4;
+    unsigned long during = 0;
+    bool opened = gui_window_open(&warm, &warm_win, err, sizeof(err));
+    CHECK("a window opens before the presentation bit check", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    gui_cocoa_set_presentation(keep);
+    opened = gui_window_open(&full, &full_win, err, sizeof(err));
+    CHECK("fullscreen opens over an existing presentation bit", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        gui_cocoa_set_presentation(0ul);
+        gui_window_close(warm_win);
+        return;
+    }
+    during = gui_cocoa_presentation();
+    printf("    presentation during fullscreen %lu\n", during);
+    CHECK("fullscreen keeps the existing presentation bit",
+          (during & (keep | 2ul | 8ul)) == (keep | 2ul | 8ul));
+    gui_window_close(full_win);
+    CHECK("leaving fullscreen restores the earlier presentation bit",
+          gui_cocoa_presentation() == keep);
+    gui_cocoa_set_presentation(0ul);
+    gui_window_close(warm_win);
+#else
+    printf("  fullscreen keeps the existing presentation bit... SKIP\n");
+#endif
+}
+
+/* AutoHideDock and HideDock cannot both be set. Fullscreen must still hide
+ * the Dock, then restore the auto-hide bit when the window leaves. */
+static void test_cocoa_presentation_hides_over_autohide(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc warm = {
+        .title_utf8 = "z23 warm", .width = 200, .height = 100,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window_desc full = {
+        .title_utf8 = "z23 fullscreen autohide", .width = 640, .height = 420,
+        .flags = GUI_WINDOW_FULLSCREEN,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *warm_win = NULL;
+    struct gui_window *full_win = NULL;
+    char err[120] = "";
+    unsigned long during = 0;
+    bool opened = gui_window_open(&warm, &warm_win, err, sizeof(err));
+    CHECK("a window opens before the auto-hide check", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    gui_cocoa_set_presentation(1ul);
+    opened = gui_window_open(&full, &full_win, err, sizeof(err));
+    CHECK("fullscreen opens over auto-hide", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        gui_cocoa_set_presentation(0ul);
+        gui_window_close(warm_win);
+        return;
+    }
+    during = gui_cocoa_presentation();
+    printf("    presentation over auto-hide %lu\n", during);
+    CHECK("fullscreen hides the Dock without the auto-hide bit",
+          (during & (1ul | 2ul | 8ul)) == (2ul | 8ul));
+    gui_window_close(full_win);
+    CHECK("leaving fullscreen restores auto-hide",
+          gui_cocoa_presentation() == 1ul);
+    gui_cocoa_set_presentation(0ul);
+    gui_window_close(warm_win);
+#else
+    printf("  fullscreen hides the Dock without the auto-hide bit... SKIP\n");
+#endif
+}
+
 /* A Cocoa frame change must reach the shared window without a later wait.
  * AppKit tells the delegate during setFrame and during a live drag. */
 static void test_cocoa_live_resize(void)
@@ -997,6 +1091,8 @@ int test_gui(void)
     test_cocoa_fullscreen_wide();
     test_cocoa_hidden_fullscreen();
     test_cocoa_hidden_close_keeps_presentation();
+    test_cocoa_presentation_keeps_bits();
+    test_cocoa_presentation_hides_over_autohide();
     test_cocoa_live_resize();
     test_utf8();
     test_draw();
