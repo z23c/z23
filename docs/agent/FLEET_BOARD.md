@@ -84,9 +84,14 @@ without a receipt, the periodic pull still carries eligible posts.
 A new fleet post from the local post path is also fanned out, once, to every
 paired peer with a live session that a pull would be served the post to.
 Only paired peers are pushed to. A machine on the fleet roster with no
-pairing row gets fleet posts only from its 15 s roster pull. Carriage status
-counts those roster-only peers per post in `push_out.fanout_roster_unpushed`,
-so a fleet that relies on the roster can see what the push does not cover.
+pairing row is not pushed a post. When this box newly stores a fleet post
+it sends that peer one wake: the same roster proof a pull carries, bound
+to a cursor no pull can use, and no post bytes. The peer pulls on its next
+one-second tick. The 15 s roster pull still runs, and it is what delivers
+the post when a wake is lost or the peer's build has no wake service.
+Carriage status counts those roster-only peers per post in
+`push_out.fanout_roster_unpushed`, so a fleet that relies on the roster
+can see what the push does not cover.
 
 A pull resumes from the answering box's own arrival number for the last row
 it consumed. Each stored row gets that number once, at ingest, strictly above

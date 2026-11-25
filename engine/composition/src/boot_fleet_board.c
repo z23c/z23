@@ -980,6 +980,8 @@ static enum fleet_board_push_hint fleet_board_after_store(
                              post, have_own ? own : NULL, push_to)
                        : FLEET_BOARD_PUSH_HINT_NONE;
     }
+    if (stored)
+        boot_fleet_board_wake_note();
     if (stored && (have_own || push_to))
         return boot_fleet_board_fleet_push_enqueue_all(
             post, have_own ? own : NULL, push_to);
@@ -1053,7 +1055,9 @@ enum fleet_board_wiki_write_status boot_fleet_board_wiki_write(
     if (*refusal != FLEET_BOARD_OK) return FLEET_WIKI_WRITE_REFUSED;
     enum fleet_board_wiki_write_status status =
         db_fleet_board_wiki_write(ndb, post, expected, now, out, refusal);
-    if (status == FLEET_WIKI_WRITE_OK && post->scope != FLEET_BOARD_SCOPE_FLEET)
+    if (status == FLEET_WIKI_WRITE_OK && post->scope == FLEET_BOARD_SCOPE_FLEET)
+        boot_fleet_board_wake_note();
+    else if (status == FLEET_WIKI_WRITE_OK)
         boot_fleet_board_announce(out->post.id);
     return status;
 }

@@ -344,6 +344,12 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * sealed roster and head rows from an answer until those rows arm it. This lane
  * asks only a session whose address a sealed line claims as its onion, or a
  * session that already proved a member key here. It spends nothing.
+ * A newly stored fleet post also sends each such session one wake on
+ * "board.wake": the same asking proof, bound to FLEET_BOARD_WAKE_AFTER, and
+ * nothing else. The peer records that session and pulls on its next
+ * one-second tick, inside the 15 s interval. A lost wake, or an older node
+ * that answers stream_service_unknown, still converges on the 15 s pull.
+ * The wake is not a push: an unpaired peer is never handed post bytes.
  *
  * Revocation rides the same lane as a sealed head row (config/boot_fleet_roster.h).
  * Every answer's head rows are offered before anything else in it. A roster
@@ -358,6 +364,10 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 
 #define FLEET_BOARD_FLEET_SERVICE_NAME "board"
 #define FLEET_BOARD_ROSTER_SERVICE_NAME "board.roster"
+#define FLEET_BOARD_WAKE_SERVICE_NAME "board.wake"
+/* No pull frame can carry this cursor: the pull decoder rejects it. A wake
+ * proof and a pull proof therefore cannot be replayed as each other. */
+#define FLEET_BOARD_WAKE_AFTER ((int64_t)-1)
 /* No real arrival number is 0, so this can only be the pinned head row. */
 #define FLEET_BOARD_ROSTER_PINNED_ARRIVAL 0
 /* The board signing key, then its signature. */
@@ -425,7 +435,9 @@ void boot_fleet_board_observe_query(const uint8_t peer[32], const uint8_t post[3
 /* The lane tick. A tick with no push work takes the board lane's own lock
  * twice, reads the clock and two counters, and returns; the pull, the answer
  * drain and everything else the lane did once a second still run once a
- * second. While posts wait in the push queue and nothing changed (no post
+ * second. A wake is sent and collected on that same one-second beat, inside
+ * the 15 s pull interval, and it does not move the pull clock. While posts
+ * wait in the push queue and nothing changed (no post
  * queued and no push ended since the last round) a tick adds one counter
  * read and one push lock pair: the sending round, with its pairing walk,
  * runs at most once a second otherwise. The supervisor already ticks every
@@ -532,6 +544,9 @@ enum fleet_board_push_refusal {
 
 void boot_fleet_board_fleet_wire(struct boot_svc_ctx *svc);
 void boot_fleet_board_fleet_shutdown(void);
+/* A fleet post was newly stored here. The next one-second tick wakes each
+ * roster peer once so it pulls; further stores in that second coalesce. */
+void boot_fleet_board_wake_note(void);
 /* Registered once; serves both halves of every board stream. */
 bool boot_fleet_board_fleet_register_service(void);
 
@@ -672,6 +687,10 @@ size_t boot_fleet_board_fleet_test_pull_roster_lane(struct boot_svc_ctx *svc,
                                                     int64_t now);
 void boot_fleet_board_fleet_test_roster_identity(int side, const uint8_t *seed,
                                                  const uint8_t *pub);
+/* due: roster peers a wake has marked for an early pull. pulls: early roster
+ * pulls the wake tick has opened. Neither counts the 15 s sweep. */
+uint64_t boot_fleet_board_wake_test_due(void);
+uint64_t boot_fleet_board_wake_test_pulls(void);
 /* The state-tag guard. retag swaps the state of every live "board" stream on
  * one side for a fresh one carrying `tag` (any value, known or not), freeing
  * the old one, and returns how many it swapped; states_freed counts every

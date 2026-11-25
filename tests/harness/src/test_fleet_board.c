@@ -20,6 +20,7 @@
 #include "config/boot_internal.h"
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
+#include "services/p2p_node_noise.h"
 #include "controllers/fleet_status_controller.h"
 #include "controllers/fleet_tip.h"
 #include "platform/clock.h"
@@ -16768,6 +16769,210 @@ static int test_fleet_board_roster_push_gap(void)
     return failures;
 }
 
+/* An empty CLOSE: prefix, kind, id, reason, and a zero length. */
+#define FBC_WAKE_CLOSE_BYTES (MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u + 1u + 2u)
+
+static bool fbc_wake_proof(struct fbw *w, int64_t after,
+                           uint8_t out[FLEET_BOARD_ROSTER_PROOF_BYTES])
+{
+    struct noise_transport_snapshot snap;
+    struct fleet_board_roster_bind bind;
+    if (!p2p_node_noise_snapshot(w->answerer, &snap))
+        return false;
+    memset(&bind, 0, sizeof bind);
+    memcpy(bind.network_genesis, w->f.genesis, 32);
+    memcpy(bind.transcript_hash, snap.transcript_hash, 32);
+    bind.connection_generation = snap.connection_generation;
+    bind.after = after;
+    return fleet_board_roster_proof_make(FLEET_BOARD_ROSTER_SIDE_ASK, &bind,
+                                         out);
+}
+
+/* The verdict of one wake OPEN, and how long the CLOSE frame was. */
+static uint8_t fbc_wake_raw(struct fbw *w, const uint8_t *payload, size_t len,
+                            size_t *answer_len)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX], answer[MESH_LOOP_WIRE_MAX];
+    uint8_t kind = 0;
+    bool more = false;
+    fbc_ask_begin(w);
+    size_t frame_len = mesh_stream_test_open_frame(
+        1, 4096u, FLEET_BOARD_WAKE_SERVICE_NAME, payload, len, frame,
+        sizeof frame);
+    if (answer_len)
+        *answer_len = 0;
+    if (frame_len == 0 ||
+        !mesh_stream_frame(&w->mp, w->answerer, frame, frame_len, NULL))
+        return 0xFFu;
+    size_t n = mesh_loop_take(w->answerer, w->answer_q, w->f.term_peer.ini,
+                              answer, sizeof answer, &more);
+    if (answer_len)
+        *answer_len = n;
+    if (!mesh_stream_test_read_header(answer, n, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_CLOSE)
+        return 0xFEu;
+    return answer[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u];
+}
+
+static bool fbc_wake_open_is_proof(const uint8_t *frame, size_t len)
+{
+    size_t n = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u;
+    size_t name_len;
+    size_t plen;
+    if (!frame || len < n + 4u + 1u + 2u ||
+        frame[MESH_STREAM_FRAME_PREFIX_LEN] != MESH_STREAM_KIND_OPEN)
+        return false;
+    n += 4u;
+    name_len = frame[n++];
+    if (name_len != sizeof FLEET_BOARD_WAKE_SERVICE_NAME - 1u ||
+        len < n + name_len + 2u ||
+        memcmp(frame + n, FLEET_BOARD_WAKE_SERVICE_NAME, name_len) != 0)
+        return false;
+    n += name_len;
+    plen = (size_t)frame[n] | ((size_t)frame[n + 1] << 8);
+    n += 2u;
+    return plen == FLEET_BOARD_ROSTER_PROOF_BYTES && len == n + plen;
+}
+
+static bool fbc_contains(const uint8_t *hay, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    if (m == 0 || n < m)
+        return false;
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(hay + i, needle, m) == 0)
+            return true;
+    return false;
+}
+
+static int test_fleet_board_roster_wake(void)
+{
+    int failures = 0;
+    static struct fbw w;
+    struct fleet_board_post post;
+    struct zcl_fleet_role_checker checker = {
+        .allow = fbw_role_check, .name = "fleet-board-wake-test" };
+    struct boot_fleet_board_fleet_counts before, after;
+    uint8_t proof[FLEET_BOARD_ROSTER_PROOF_BYTES];
+    uint8_t frame[MESH_LOOP_WIRE_MAX];
+    uint8_t short_frame[4];
+    size_t answer_len = 0, n = 0, frames = 0;
+    uint64_t seconds = 0, pulls = 0, pulls_now = 0, wake_pulls = 0;
+    bool more = false;
+    const int64_t now = FBW_NOW;
+    g_fbw_deny_read = false;
+    zcl_fleet_role_checker_install(&checker);
+    bool opened = fbw_open(&w);
+    TEST("fleet roster wake: a bad wake is refused with no body and marks "
+         "nobody, and a good one is only the roster proof") {
+        ASSERT(opened);
+        boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
+                                                   w.f.genesis, now);
+        boot_fleet_board_fleet_test_bind(&w.a);
+        fbr_install(FBR_ROOT, false);
+        ASSERT(fbc_plant(&w.a, &w.b, "answerbox", FBR_MEMBER, now));
+        ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+
+        memset(short_frame, 0, sizeof short_frame);
+        ASSERT_EQ(fbc_wake_raw(&w, short_frame, sizeof short_frame, &answer_len),
+                  MESH_STREAM_REFUSED_MALFORMED);
+        ASSERT_EQ(answer_len, FBC_WAKE_CLOSE_BYTES);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 0);
+
+        memset(proof, 0, sizeof proof);
+        ASSERT_EQ(fbc_wake_raw(&w, proof, sizeof proof, &answer_len),
+                  MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        ASSERT_EQ(answer_len, FBC_WAKE_CLOSE_BYTES);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 0);
+
+        fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ASK, FBR_STRANGER);
+        ASSERT(fbc_wake_proof(&w, FLEET_BOARD_WAKE_AFTER, proof));
+        ASSERT_EQ(fbc_wake_raw(&w, proof, sizeof proof, &answer_len),
+                  MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 0);
+
+        /* A real pull proof is not a wake, and a wake is not a pull. */
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT(fbc_wake_proof(&w, 0, proof));
+        ASSERT_EQ(fbc_wake_raw(&w, proof, sizeof proof, &answer_len),
+                  MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 0);
+        ASSERT(fbc_wake_proof(&w, FLEET_BOARD_WAKE_AFTER, proof));
+        ASSERT_EQ(fbc_wake_raw(&w, proof, sizeof proof, &answer_len),
+                  MESH_STREAM_CLOSED_BY_SERVICE);
+        ASSERT_EQ(answer_len, FBC_WAKE_CLOSE_BYTES);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 1);
+        PASS();
+    }
+    TEST("fleet roster wake: news pulls a roster peer inside the 15 s "
+         "interval, the sweep clock does not move, and no post is pushed") {
+        boot_fleet_board_fleet_test_bind(&w.a); /* drops the due mark above */
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, "already here",
+                        2000, FBC_TTL, 2000, &post));
+        ASSERT(fbc_pull(&w, &w.b, &frames) != SIZE_MAX);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        fbc_ask_begin(&w);
+
+        /* Arm the 15 s clock. The learned peer is asked by the sweep, then
+         * dropped before it is pumped. */
+        boot_fleet_board_fleet_test_tick(&w.svc, now);
+        fbc_ask_begin(&w);
+        boot_fleet_board_fleet_test_tick_runs(&seconds, &pulls);
+        wake_pulls = boot_fleet_board_wake_test_pulls();
+        boot_fleet_board_fleet_counts(&before);
+
+        /* The storing pull noted the news. The next second sends one wake. */
+        boot_fleet_board_fleet_test_tick(&w.svc, now + 1);
+        n = mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini, frame,
+                           sizeof frame, &more);
+        ASSERT(more);
+        ASSERT(fbc_wake_open_is_proof(frame, n));
+        ASSERT(!fbc_contains(frame, n, "already here"));
+        fbc_ask_begin(&w);
+
+        /* A post that did not go through a store hook does not wake. */
+        ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, "pull this now",
+                        2100, FBC_TTL, 2100, &post));
+        boot_fleet_board_fleet_test_tick(&w.svc, now + 2);
+        (void)mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini, frame,
+                             sizeof frame, &more);
+        ASSERT(!more);
+
+        boot_fleet_board_wake_note();
+        boot_fleet_board_fleet_test_tick(&w.svc, now + 3);
+        n = mesh_loop_take(w.answerer, w.answer_q, w.f.term_peer.ini, frame,
+                           sizeof frame, &more);
+        ASSERT(more);
+        ASSERT(fbc_wake_open_is_proof(frame, n));
+        ASSERT(!fbc_contains(frame, n, "pull this now"));
+        ASSERT(mesh_stream_frame(&w.mp, w.asker, frame, n, NULL));
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 1);
+        fbc_ask_begin(&w);
+        ASSERT_EQ(boot_fleet_board_wake_test_due(), 1);
+
+        boot_fleet_board_fleet_test_tick(&w.svc, now + 4);
+        boot_fleet_board_fleet_test_tick_runs(&seconds, &pulls_now);
+        ASSERT_EQ(pulls_now, pulls);
+        ASSERT_EQ(boot_fleet_board_wake_test_pulls(), wake_pulls + 1);
+        ASSERT_EQ(fbc_finish(&w, &w.b, &frames), (size_t)1);
+        ASSERT(db_fleet_board_have(&w.b, post.id));
+        boot_fleet_board_fleet_counts(&after);
+        ASSERT_EQ(after.push_opened, before.push_opened);
+        ASSERT_EQ(after.push_fanout, before.push_fanout);
+        PASS();
+    }
+    _test_next:;
+    g_fbw_deny_read = false;
+    boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    fbr_uninstall();
+    fbw_close(&w);
+    zcl_fleet_role_checker_install_permissive_for_testing();
+    return failures;
+}
+
 /* The onion every stub line claims. A box is never its own peer here. */
 static bool fbc_endpoint_cb(const char *line, const uint8_t root[32],
                             char *onion, size_t cap, bool *self, void *ctx)
@@ -18142,6 +18347,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_carriage_proof();
     failures += test_fleet_board_roster_carriage();
     failures += test_fleet_board_roster_push_gap();
+    failures += test_fleet_board_roster_wake();
     failures += test_fleet_board_roster_carriage_lane();
     failures += test_fleet_board_head_row_carriage();
     failures += test_fleet_board_head_row_bootstrap();

@@ -1,14 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: The "board" mesh stream service — FLEET-scope board posts pulled
- * between PAIRED peers (see config/boot_fleet_board.h). It is the fleet
- * ledger's pull lane (boot_fleet_ledger.c) applied to the board: one
- * registration serves both halves and the stream lane only ever copies
- * bytes. The answering half reads one page when a stream opens, through
- * the arrival index and capped at FLEET_BOARD_FLEET_ANSWER_POSTS_MAX row
- * reads and signature checks, so a pull cannot hold the frame loop for
- * longer than that however large the store is. Every pulled post is
- * verified and stored on this lane's own tick with no lock held. The push
- * (boot_fleet_board_push.c) rides the same service and the same tick.
+ * purpose: The "board" mesh stream service for FLEET-scope posts between
+ * PAIRED peers (config/boot_fleet_board.h). One registration serves both
+ * halves; the tick verifies and stores. The push rides the same tick.
  */
 
 // one-result-type-ok:closed-security-verdict — the callbacks return the
@@ -594,7 +587,8 @@ bool boot_fleet_board_fleet_register_service(void)
     service.name = FLEET_BOARD_ROSTER_SERVICE_NAME;
     service.required_pairing_capability = 0;
     service.on_open = board_roster_open;
-    return mesh_stream_service_register(&service);
+    return mesh_stream_service_register(&service) &&
+           boot_fleet_board_wake_register();
 }
 
 /* ── per-peer cursors ────────────────────────────────────────────────── */
@@ -996,6 +990,8 @@ static size_t board_drain_inbox(struct node_db *ndb, int64_t now)
     }
     free(post);
     atomic_fetch_add_explicit(&g_stored, stored, memory_order_relaxed);
+    if (stored > 0)
+        boot_fleet_board_wake_note();
     return stored;
 }
 
@@ -1068,8 +1064,8 @@ static bool board_open_pull(const uint8_t peer_noise[32],
 /* The roster pull: the same page question, plus this box's board key proving
  * itself on the session it is asked over. The peer's Noise static is its
  * cursor key, because its board key is not known until it answers. */
-static bool board_open_roster_pull(struct boot_svc_ctx *svc,
-                                   const uint8_t peer_noise[32])
+bool board_open_roster_pull(struct boot_svc_ctx *svc,
+                            const uint8_t peer_noise[32])
 {
     struct noise_transport_snapshot snap;
     memset(&snap, 0, sizeof snap);
@@ -1238,6 +1234,7 @@ static void board_tick_at(struct boot_svc_ctx *svc, int64_t now)
         (void)board_drain_inbox(ndb, now);
     if (now <= 0 ||
         (last != 0 && now - last < FLEET_BOARD_FLEET_PULL_INTERVAL_S)) {
+        boot_fleet_board_wake_tick(svc, ndb, now);
         board_carriage_not_due(now);
         supervisor_progress_idle(g_child);
         return;
@@ -1295,6 +1292,7 @@ static void board_forget_locked(void)
     g_last_second = 0;
     g_last_roster_publish = 0;
     fleet_board_roster_forget();
+    boot_fleet_board_wake_forget();
     board_push_forget();
 }
 
@@ -1339,6 +1337,7 @@ void boot_fleet_board_fleet_shutdown(void)
 {
     mesh_stream_service_unregister(FLEET_BOARD_FLEET_SERVICE_NAME);
     mesh_stream_service_unregister(FLEET_BOARD_ROSTER_SERVICE_NAME);
+    mesh_stream_service_unregister(FLEET_BOARD_WAKE_SERVICE_NAME);
     board_lock();
     supervisor_child_id child = g_child;
     g_child = SUPERVISOR_INVALID_ID;

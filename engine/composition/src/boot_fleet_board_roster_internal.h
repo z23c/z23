@@ -113,4 +113,16 @@ size_t fleet_board_roster_targets(struct boot_svc_ctx *svc,
 
 uint64_t fleet_board_roster_refused_count(void);
 
+/* The roster pull the lane and the wake both open. */
+bool board_open_roster_pull(struct boot_svc_ctx *svc,
+                            const uint8_t peer_noise[32]);
+
+/* Roster wake (boot_fleet_board_wake.c). register runs from the fleet
+ * service registration. tick is the quiet one-second branch: it does not
+ * move the 15 s pull clock. forget drops due peers and the news mark. */
+bool boot_fleet_board_wake_register(void);
+void boot_fleet_board_wake_tick(struct boot_svc_ctx *svc, struct node_db *store,
+                                int64_t now);
+void boot_fleet_board_wake_forget(void);
+
 #endif /* ZCL_BOOT_FLEET_BOARD_ROSTER_INTERNAL_H */

@@ -134,6 +134,7 @@ void fbw_close(struct fbw *w)
     boot_fleet_board_fleet_test_bind(NULL);
     mesh_stream_service_unregister(FLEET_BOARD_FLEET_SERVICE_NAME);
     mesh_stream_service_unregister(FLEET_BOARD_ROSTER_SERVICE_NAME);
+    mesh_stream_service_unregister(FLEET_BOARD_WAKE_SERVICE_NAME);
     mesh_stream_test_bind(NULL);
     app_runtime_set_current(NULL);
     mesh_loop_free_queue(w->asker, w->ask_q);
