@@ -11,6 +11,7 @@
 #ifndef ZCL_TOOLS_NATIVE_COMMAND_HANDLERS_H
 #define ZCL_TOOLS_NATIVE_COMMAND_HANDLERS_H
 
+#if defined(ZCL_GENERATE_NATIVE_HANDLERS)
 #define ZCL_NATIVE_DECLARE_HANDLER(handler_)                                   \
     void handler_(const struct zcl_command_request *,                          \
                   struct zcl_command_reply *);
@@ -91,4 +92,7 @@
 #undef ZCL_COMMAND_DEV_COMMAND
 #undef ZCL_NATIVE_DECLARE_HANDLER
 
+#else
+#include "../../engine/composition/include/config/native_command_handlers_gen.h"
+#endif
 #endif /* ZCL_TOOLS_NATIVE_COMMAND_HANDLERS_H */

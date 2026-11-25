@@ -405,10 +405,12 @@ static const char *const tor_header_goals[] = {
     "contexts/explorer/views/include/views/site_css.h",
     "contexts/commons/views/include/views/install_script_gen.h",
     "tools/dev/native_tunnel_export_binding.h",
+    "engine/composition/include/config/native_command_handlers_gen.h",
     "build/identity/gen-stamps/wallet_templates.stamp",
     "build/identity/gen-stamps/site_css.stamp",
     "build/identity/gen-stamps/install_script.stamp",
     "build/identity/gen-stamps/native_tunnel_export_binding.stamp",
+    "build/identity/gen-stamps/native_command_handlers.stamp",
 };
 
 static size_t tor_probe_start(size_t i, const char *first, const char *second,
@@ -439,25 +441,25 @@ static size_t tor_probe_start(size_t i, const char *first, const char *second,
 
 static void tor_guard_probes(void)
 {
-    struct { const char *first, *second; bool sentinel, invalid; } cases[15] = {0};
-    for (size_t i = 0; i < 8; i++) cases[i].first = tor_header_goals[i];
-    cases[8].first = tor_header_goals[1]; cases[8].second = "help";
-    cases[9].first = "help"; cases[9].second = tor_header_goals[1];
-    cases[10].first = tor_header_goals[1]; cases[10].second = "z23"; cases[10].sentinel = true;
-    cases[11].first = "z23"; cases[11].second = tor_header_goals[1]; cases[11].sentinel = true;
-    cases[12].first = "zcl-depfile-unknown"; cases[12].sentinel = true;
-    cases[13].sentinel = true;
-    cases[14].first = tor_header_goals[1]; cases[14].invalid = true;
-    size_t children[15];
-    const char *logs[15];
+    struct { const char *first, *second; bool sentinel, invalid; } cases[17] = {0};
+    for (size_t i = 0; i < 10; i++) cases[i].first = tor_header_goals[i];
+    cases[10].first = tor_header_goals[1]; cases[10].second = "help";
+    cases[11].first = "help"; cases[11].second = tor_header_goals[1];
+    cases[12].first = tor_header_goals[1]; cases[12].second = "z23"; cases[12].sentinel = true;
+    cases[13].first = "z23"; cases[13].second = tor_header_goals[1]; cases[13].sentinel = true;
+    cases[14].first = "zcl-depfile-unknown"; cases[14].sentinel = true;
+    cases[15].sentinel = true;
+    cases[16].first = tor_header_goals[1]; cases[16].invalid = true;
+    size_t children[17];
+    const char *logs[17];
     probe_count = 0; /* prior probes have all been reaped */
-    for (size_t i = 0; i < 15; i++) {
+    for (size_t i = 0; i < 17; i++) {
         logs[i] = text("%s/tor-guard-%zu.out", work, i);
         children[i] = tor_probe_start(i, cases[i].first, cases[i].second,
                                       cases[i].invalid, logs[i]);
     }
     bool failed = false;
-    for (size_t i = 0; i < 15; i++) {
+    for (size_t i = 0; i < 17; i++) {
         int rc = probe_wait(children[i]);
         char *data = output(logs[i]);
         bool sentinel = strstr(data, "TOR_SENTINEL") != NULL;
@@ -842,6 +844,115 @@ static void registry_scope_probes(void)
     probe_count = 0;
 }
 
+/* Exercise the actual generated-handler rule against an isolated catalog. */
+static int handler_make(const char *input, const char *catalog, const char *header,
+                        const char *stamp, const char *compiler, bool force, const char *cc)
+{
+    const char *log = text("%s/handlers.log", work);
+    const char *argv[] = {"make", "--no-print-directory", "-f", text("%s/Makefile", root),
+        "ZCL_STANDALONE_CLEAN=1", "ZCL_GENERATED_HEADER_ONLY=1",
+        "BUILD_COMPILER_ID=1111111111111111111111111111111111111111111111111111111111111111",
+        text("NATIVE_HANDLERS_INPUT=%s", input), text("NATIVE_HANDLERS_DEFS=%s", catalog),
+        text("NATIVE_HANDLERS=%s", header), text("NATIVE_HANDLERS_STAMP=%s", stamp),
+        text("NATIVE_HANDLERS_COMPILER=%s", compiler),
+        text("CC=%s", cc), header, force ? "-W" : NULL,
+        force ? catalog : NULL, NULL};
+    size_t child = probe_start(argv, log, false);
+    int rc = probe_wait(child);
+    probe_count = 0;
+    return rc;
+}
+
+static void handler_row(const char *catalog, const char *description, bool extra)
+{
+    put(catalog, 0,
+        "ZCL_COMMAND_READY_READ(a,b,c,\"%s\",e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,fixture_one)\n%s",
+        description, extra ?
+        "ZCL_COMMAND_READY_READ(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,fixture_two)\n" : "");
+}
+
+static bool handler_stat_same(const struct stat *a, const struct stat *b)
+{
+    if (a->st_dev != b->st_dev || a->st_ino != b->st_ino || a->st_size != b->st_size ||
+        a->st_mtime != b->st_mtime || a->st_ctime != b->st_ctime) return false;
+#if defined(__APPLE__)
+    return a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+           a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#elif defined(_WIN32)
+    return true; /* CRT stat exposes only whole seconds. */
+#else
+    return a->st_mtim.tv_nsec == b->st_mtim.tv_nsec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+}
+
+static void handler_metadata_probes(const char *input, const char *catalog, const char *header,
+                                    const char *stamp, const char *compiler, const char *first,
+                                    const struct stat *original)
+{
+    struct stat next;
+    if (handler_make(input, catalog, header, stamp, compiler, false, "cc") || stat(header, &next) ||
+        !handler_stat_same(original, &next)) fail("handler no-op changed header");
+    handler_row(catalog, "changed metadata", false);
+    if (handler_make(input, catalog, header, stamp, compiler, true, "cc") || stat(header, &next))
+        fail("handler metadata generation");
+    char *metadata = output(header);
+    if (strcmp(first, metadata) || !handler_stat_same(original, &next))
+        fail("handler metadata changed declarations");
+    free(metadata);
+}
+
+static void handler_failure_probes(const char *input, const char *catalog, const char *header,
+                                   const char *stamp, const char *compiler, const char *added)
+{
+    struct stat before_stamp, after_stamp;
+    if (stat(stamp, &before_stamp)) fail("handler stamp missing");
+    handler_row(catalog, "failure metadata", false);
+    const char *commands[] = {"false", "true"};
+    for (size_t i = 0; i < 2; i++) {
+        if (!handler_make(input, catalog, header, stamp, compiler, true, commands[i]))
+            fail("handler failed or empty compiler output accepted");
+        char *after_failure = output(header);
+        if (strcmp(added, after_failure) || stat(stamp, &after_stamp) ||
+            !handler_stat_same(&before_stamp, &after_stamp))
+            fail("handler failed or empty output replaced header or stamp");
+        free(after_failure);
+    }
+}
+
+static void handler_generator_probes(void)
+{
+    const char *dir = text("%s/handler-fixture", work);
+    const char *tools = text("%s/tools", dir), *command = text("%s/command", tools);
+    const char *engine = text("%s/engine", dir), *composition = text("%s/composition", engine);
+    const char *commands = text("%s/commands", composition);
+    directory(dir); directory(tools); directory(command); directory(engine);
+    directory(composition); directory(commands);
+    const char *input = text("%s/native_command_handlers.h", command);
+    const char *catalog = text("%s/catalog.def", commands);
+    const char *header = text("%s/native_command_handlers_gen.h", command);
+    const char *stamp = text("%s/generated.stamp", dir);
+    const char *compiler = text("%s/compiler.stamp", dir);
+    char *source = output(text("%s/tools/command/native_command_handlers.h", root));
+    put(input, 0, "%s", source); free(source);
+    handler_row(catalog, "first metadata", false);
+    if (handler_make(input, catalog, header, stamp, compiler, false, "cc")) fail("handler initial generation");
+    char *first = output(header); struct stat original;
+    if (!strstr(first, "fixture_one") || stat(header, &original)) fail("handler initial content");
+    handler_metadata_probes(input, catalog, header, stamp, compiler, first, &original);
+    handler_row(catalog, "changed metadata", true);
+    if (handler_make(input, catalog, header, stamp, compiler, true, "cc")) fail("handler addition generation");
+    char *added = output(header);
+    if (!strcmp(first, added) || !strstr(added, "fixture_two")) fail("handler addition not reflected");
+    free(first);
+    if (unlink(header) || handler_make(input, catalog, header, stamp, compiler, false, "cc"))
+        fail("handler missing output recovery");
+    char *restored = output(header);
+    if (strcmp(added, restored)) fail("handler recovery changed content");
+    free(restored);
+    handler_failure_probes(input, catalog, header, stamp, compiler, added);
+    free(added);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) fail("usage: make-depfile-scope-selftest ROOT WORK");
@@ -851,6 +962,8 @@ int main(int argc, char **argv)
     size_t persistent = text_used; /* Windows environment strings stay alive. */
     probe_install_cleanup();
     setup();
+    handler_generator_probes();
+    text_rewind(persistent);
     profile_probes();
     text_rewind(persistent);
     engine_scope_probes();
