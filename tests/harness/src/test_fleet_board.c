@@ -2600,6 +2600,49 @@ static int test_fleet_board_peer_lacks_ready_op(void)
         ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
         zcl_command_reply_free(&reply);
 
+        /* fleet.board.wait is ready, and the shipped handler sends inbox_wait. */
+        json_free(&input);
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "agent", "lane-a"));
+        ASSERT(json_push_kv_int(&input, "timeout_ms", 1));
+        request = (struct zcl_command_request){ .input = &input };
+        fb_skew_body =
+            "{\"ok\":false,\"code\":\"UNKNOWN_OP\",\"message\":\"no such board operation\"}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_inbox.v1");
+        zcl_native_handle_fleet_board_wait(&request, &reply);
+        ASSERT_STR_EQ(fb_skew_seen_op, "inbox_wait");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op wait, restart node");
+        ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
+        ASSERT(strstr(reply.error.message, "UNKNOWN_OP") == NULL);
+        ASSERT(strstr(reply.error.code, "UNKNOWN_OP") == NULL);
+        ASSERT(strstr(reply.error.message, "inbox_wait") == NULL);
+        zcl_command_reply_free(&reply);
+
+        fb_skew_body =
+            "{\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_inbox.v1");
+        zcl_native_handle_fleet_board_wait(&request, &reply);
+        ASSERT_STR_EQ(fb_skew_seen_op, "inbox_wait");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op wait, restart node");
+        ASSERT_STR_EQ(reply.error.code, "PEER_LACKS_OP");
+        ASSERT(strstr(reply.error.code, "BOARD_RPC_UNSUPPORTED") == NULL);
+        zcl_command_reply_free(&reply);
+
+        json_free(&call);
+        json_init(&call);
+        json_set_object(&call);
+        ASSERT(json_push_kv_str(&call, "op", "inbox_wait"));
+        fb_skew_body =
+            "{\"ok\":false,\"code\":\"UNKNOWN_OP\",\"message\":\"no such board operation\"}";
+        zcl_command_reply_init(&reply, "zcl.fleet_board_call.v1");
+        json_init(&body);
+        ASSERT(!zcl_native_fleet_board_call(&call, &body, &reply));
+        ASSERT_STR_EQ(fb_skew_seen_op, "inbox_wait");
+        ASSERT_STR_EQ(reply.error.message, "peer lacks op wait, restart node");
+        ASSERT(strstr(reply.error.message, "UNKNOWN_OP") == NULL);
+        zcl_command_reply_free(&reply);
+
         /* offer_cpu is not a ready menu leaf, so the node refusal stands. */
         json_free(&call);
         json_init(&call);

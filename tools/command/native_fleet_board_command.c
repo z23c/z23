@@ -131,19 +131,29 @@ static void fb_rpc_unsupported(struct zcl_command_reply *reply,
  * transport-shaped error. Split out of fb_call so that call stays under the
  * complexity cap — this one decision (which of the two distinct refusals
  * applies) lives in exactly one place. */
+/* The menu leaf for a board RPC op. fleet.board.wait sends inbox_wait. */
+static const char *fb_menu_leaf(const char *op)
+{
+    if (op && strcmp(op, "inbox_wait") == 0)
+        return "wait";
+    return op;
+}
+
 /* A ready menu leaf whose node has no such op. The catalog is the menu:
- * fleet.board.<op>, or fleet.wiki.<leaf> when the op is wiki_<leaf>. */
+ * fleet.board.<leaf>, or fleet.wiki.<leaf> when the op is wiki_<leaf>.
+ * The sentence names that leaf, so inbox_wait says wait. */
 static bool fb_menu_ready_op(const char *op)
 {
     char path[96];
     const char *root = "fleet.board.";
-    const char *leaf = op;
+    const char *leaf;
     size_t n;
     if (!op || !op[0])
         return false;
     n = strlen(op);
     if (n > 64 || strchr(op, '.') || strchr(op, '/'))
         return false;
+    leaf = fb_menu_leaf(op);
     if (n > 5 && strncmp(op, "wiki_", 5) == 0) {
         root = "fleet.wiki.";
         leaf = op + 5;
@@ -193,7 +203,7 @@ static void fb_handle_no_answer(struct zcl_command_reply *reply,
     }
     if (fb_method_not_found(body, node_message, sizeof(node_message))) {
         if (fb_menu_ready_op(op))
-            fb_peer_lacks_op(reply, op);
+            fb_peer_lacks_op(reply, fb_menu_leaf(op));
         else
             fb_rpc_unsupported(reply, node_message);
     } else {
@@ -224,7 +234,7 @@ static void fb_board_refusal(struct zcl_command_reply *reply,
     const char *code = json_get_str(json_get(body, "code"));
     const char *msg = json_get_str(json_get(body, "message"));
     if (code && strcmp(code, "UNKNOWN_OP") == 0 && fb_menu_ready_op(op)) {
-        fb_peer_lacks_op(reply, op);
+        fb_peer_lacks_op(reply, fb_menu_leaf(op));
         return;
     }
     bool unavailable = code && strcmp(code, "OBSERVATION_UNAVAILABLE") == 0;
