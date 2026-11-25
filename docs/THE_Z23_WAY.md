@@ -103,7 +103,7 @@ macOS keep the refusal.
 
 A push is a checkpoint, not completion: fetch `origin/main`, integrate,
 continue. Fleet work coordinates through native tasks, claims and receipts,
-never GitHub issues. Volunteers use `card:` pull requests.
+never GitHub issues. Volunteers follow `.github/CONTRIBUTING.md`.
 
 ## Boundaries
 
