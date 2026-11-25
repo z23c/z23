@@ -17,6 +17,7 @@
 #include "json/json.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
@@ -147,6 +148,17 @@ void boot_loop_guard_note_shutdown_intent(void)
     else if (respawn_backstop)
         exit_reason = SHUTDOWN_EXIT_REASON_SELF_RESPAWN_SUPERVISOR_BACKSTOP;
     shutdown_stagewatch_write_exit_reason(exit_reason);
+    if (respawn_tip_wd || respawn_backstop) {
+        /* Run in a foreground terminal this exit looks like a crash. */
+        LOG_INFO("boot_loop_guard",
+                 "exiting on purpose (%s) to restart itself: start "
+                 "z23 again with the same options unless a service "
+                 "manager does it", exit_reason);
+        fprintf(stderr,
+                "z23: exiting on purpose (%s) to restart itself; "
+                "start z23 again with the same options unless a service "
+                "manager does it\n", exit_reason);
+    }
 }
 
 bool boot_loop_guard_dump_state_json(struct json_value *out)
