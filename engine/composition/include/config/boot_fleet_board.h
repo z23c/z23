@@ -205,17 +205,14 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * that could not have pulled it. The addressed push described next runs
  * first for the same post and its addressee is not pushed to twice.
  *
- * LIMIT: only PAIRED peers are pushed to. A machine on the fleet roster with
- * no pairing row (the "board.roster" lane below) is not: the push rides the
- * paired "board" service, whose stream primitive refuses a peer with no
- * pairing row, and the receiving half proves a pusher only through pairing
- * rows. Such a peer keeps getting fleet posts by its 15 s roster pull. Each
- * fan-out post counts, in push_fanout_roster_unpushed (carriage status
- * push_out.fanout_roster_unpushed), the connected roster-only peers the
- * roster answer would serve it to now (the key proved on that session, its
- * standing, the read role, asked with nothing recorded), so a fleet that
- * relies on the roster sees how much of its carriage the push does not
- * cover.
+ * Roster-only peers (a fleet roster member with no working pairing row) are
+ * pushed on "board.rpush", not on this paired service. The OPEN is the paired
+ * push head, then the 96-byte roster proof (side PUSH, cursor
+ * FLEET_BOARD_ROSTER_PUSH_AFTER), then the records. The paired push_opened
+ * counter does not move for that open. A peer the roster open did not take
+ * is still counted in push_fanout_roster_unpushed (carriage status
+ * push_out.fanout_roster_unpushed). The roster pull remains the repair. A
+ * peer with a working pairing row stays on the paired push.
  *
  * The addressed push offers a post to ONE box, once, in a stream whose whole
  * payload rides the OPEN (FLEET_BOARD_FLEET_MSG_PUSH). Which box: the board key the local
@@ -365,9 +362,16 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 #define FLEET_BOARD_FLEET_SERVICE_NAME "board"
 #define FLEET_BOARD_ROSTER_SERVICE_NAME "board.roster"
 #define FLEET_BOARD_WAKE_SERVICE_NAME "board.wake"
+/* The design name "board.roster.push" is 17 bytes. An OPEN name longer than
+ * MESH_STREAM_SERVICE_NAME_MAX (16) is rejected as malformed before the
+ * unknown-service check, so the wire name stops at 16. */
+#define FLEET_BOARD_ROSTER_PUSH_SERVICE_NAME "board.rpush"
 /* No pull frame can carry this cursor: the pull decoder rejects it. A wake
  * proof and a pull proof therefore cannot be replayed as each other. */
 #define FLEET_BOARD_WAKE_AFTER ((int64_t)-1)
+/* Not a wake and not a pull cursor. A roster push proof binds this, and the
+ * PUSH side byte is what an ask proof cannot satisfy. */
+#define FLEET_BOARD_ROSTER_PUSH_AFTER ((int64_t)-2)
 /* No real arrival number is 0, so this can only be the pinned head row. */
 #define FLEET_BOARD_ROSTER_PINNED_ARRIVAL 0
 /* The board signing key, then its signature. */

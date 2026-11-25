@@ -62,7 +62,9 @@ struct p2p_node;
 /* Service names are short, printable, and fixed-bound so an OPEN frame
  * can never make the node read an unbounded name. */
 #define MESH_STREAM_SERVICE_NAME_MAX 16u
-#define MESH_STREAM_SERVICES_MAX 8u
+/* Local registry only: not a wire field. board.rpush is the ninth service
+ * when the guest channel is also registered. */
+#define MESH_STREAM_SERVICES_MAX 9u
 
 /* One frame stays well under the 64 KiB ceiling so a single stream can
  * never monopolise the peer's send queue; the header is the difference. */

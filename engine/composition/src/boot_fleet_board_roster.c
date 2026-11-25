@@ -84,9 +84,10 @@ static _Atomic uint64_t g_refused;
 #ifdef ZCL_TESTING
 /* Both halves share one process in the loopback test, so each side signs as
  * the box it stands in for. */
-static bool g_test_identity_set[3];
-static uint8_t g_test_seed[3][32];
-static uint8_t g_test_pub[3][32];
+/* Index is the side enum. 0 is unused. PUSH is 3. */
+static bool g_test_identity_set[4];
+static uint8_t g_test_seed[4][32];
+static uint8_t g_test_pub[4][32];
 #endif
 
 static void roster_lock_init(void)
@@ -149,7 +150,7 @@ static bool proof_identity(enum fleet_board_roster_side side, uint8_t seed[32],
     char why[160];
     (void)side; /* only the test seam tells the two sides apart */
 #ifdef ZCL_TESTING
-    if (g_test_identity_set[side]) {
+    if ((size_t)side < 4 && g_test_identity_set[side]) {
         memcpy(seed, g_test_seed[side], 32);
         memcpy(pub, g_test_pub[side], 32);
         return true;
@@ -528,7 +529,8 @@ void boot_fleet_board_fleet_test_roster_identity(int side, const uint8_t *seed,
                                                  const uint8_t *pub)
 {
     if (side != (int)FLEET_BOARD_ROSTER_SIDE_ASK &&
-        side != (int)FLEET_BOARD_ROSTER_SIDE_ANSWER)
+        side != (int)FLEET_BOARD_ROSTER_SIDE_ANSWER &&
+        side != (int)FLEET_BOARD_ROSTER_SIDE_PUSH)
         return;
     g_test_identity_set[side] = seed && pub;
     if (seed && pub) {

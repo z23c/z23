@@ -83,15 +83,19 @@ without a receipt, the periodic pull still carries eligible posts.
 
 A new fleet post from the local post path is also fanned out, once, to every
 paired peer with a live session that a pull would be served the post to.
-Only paired peers are pushed to. A machine on the fleet roster with no
-pairing row is not pushed a post. When this box newly stores a fleet post
-it sends that peer one wake: the same roster proof a pull carries, bound
-to a cursor no pull can use, and no post bytes. The peer pulls on the next
-lane tick, the same 100 ms beat. The roster pull interval still runs, and it is what delivers
-the post when a wake is lost or the peer's build has no wake service.
-Carriage status counts those roster-only peers per post in
-`push_out.fanout_roster_unpushed`, so a fleet that relies on the roster
-can see what the push does not cover.
+A machine on the fleet roster with no working pairing row is pushed one post
+on `board.rpush`: the paired push head, then a 96-byte roster proof (side
+PUSH, bound to `FLEET_BOARD_ROSTER_PUSH_AFTER`), then the records. That open
+does not move the paired `push_opened` counter. The receiver answers with the
+same push receipt a paired peer does, so `fleet board delivery` shows stored,
+held, deferred or refused. A peer with a working pairing row stays on the
+paired `board` push. The wake still fires when this box newly stores a fleet
+post: the same roster proof a pull carries, bound to a cursor no pull can
+use, and no post bytes. The peer pulls on the next lane tick, the same 100 ms
+beat. That pull is what delivers the post when the roster push is not taken
+(the switch is off, the peer's build has no `board.rpush`, or the OPEN did
+not go out). Carriage status counts those missed roster peers per post in
+`push_out.fanout_roster_unpushed`.
 `carriage.wake` counts the wake itself since the process started: `news`
 (rounds with a newly stored fleet post), `no_target` (rounds that found no
 roster session to wake: the post waits for the sweep), `sent` and

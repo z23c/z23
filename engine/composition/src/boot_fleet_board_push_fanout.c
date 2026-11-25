@@ -11,17 +11,12 @@
  * post does, within FLEET_BOARD_PUSH_WAIT_S, and is counted as fanned out
  * when it rides. Nothing here is retried.
  *
- * A peer on the fleet roster with no pairing row is NOT pushed to: the push
- * rides the paired "board" service, whose stream primitive refuses a peer
- * with no pairing row, and its receiving half proves a pusher only through
- * pairing rows. Such a peer still pulls over "board.roster" on the roster
- * pull interval, so the gap shows. Each fan-out post counts, in
- * push_fanout_roster_unpushed,
- * the connected roster-only peers the roster answer would serve it to now:
- * the key the peer proved with a verified asking proof on THIS session, that
- * key's standing (no pairing row, a member of the roster in force) and the
- * read role, asked exactly as board_roster_open and board_serve_authorized
- * ask them, with nothing recorded.
+ * A peer on the fleet roster with no pairing row is pushed on "board.rpush"
+ * (boot_fleet_board_roster_push.c), one OPEN per fan-out post. The paired
+ * service is not used and push_opened does not move. A peer that OPEN did
+ * not take is counted in push_fanout_roster_unpushed. Eligibility is the
+ * same question the roster answer asks: the key proved on THIS session, its
+ * standing, and the read role. The roster pull remains the repair.
  */
 
 #include "boot_fleet_board_push_round_internal.h"
@@ -144,9 +139,9 @@ static bool fanout_roster_serves(struct net_manager *nm,
            memcmp(key, host, 32) != 0 && board_push_may_read(key);
 }
 
-/* The connected roster-only peers the roster answer would serve. */
-static size_t fanout_roster_count(const struct push_round *r,
-                                  const uint8_t host[32])
+/* Roster peers this post's OPEN did not take. A session already known
+ * unsupported is left to the pull and is not counted again. */
+static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32])
 {
     struct node_db *pairings = app_runtime_node_db();
     struct net_manager *nm =
@@ -157,28 +152,33 @@ static size_t fanout_roster_count(const struct push_round *r,
     uint8_t noise[FLEET_BOARD_FLEET_PEERS_MAX][32];
     size_t n = fleet_board_roster_learned_peers(noise,
                                                 FLEET_BOARD_FLEET_PEERS_MAX);
-    size_t count = 0;
-    for (size_t i = 0; i < n; i++)
-        count += fanout_roster_serves(nm, pairings, noise[i], host);
-    return count;
+    size_t missed = 0;
+    for (size_t i = 0; i < n; i++) {
+        int opened;
+        if (!fanout_roster_serves(nm, pairings, noise[i], host))
+            continue;
+        opened = r->row ? boot_fleet_board_roster_push_offer(
+                              r->svc, noise[i], &r->row->post)
+                        : 0;
+        if (opened == 0)
+            missed++;
+    }
+    return missed;
 }
 
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
                        const struct push_peer *done)
 {
+    size_t missed;
     for (size_t i = 0; i < r->n_peers; i++) {
         struct push_peer *p = &r->peers[i];
         if (p->lead == p && p != done)
             fanout_offer(r, q, p);
     }
-    if (!r->roster_counted || memcmp(r->roster_host, q->host, 32) != 0) {
-        r->roster_unpushed = fanout_roster_count(r, q->host);
-        memcpy(r->roster_host, q->host, 32);
-        r->roster_counted = true;
-    }
-    if (r->roster_unpushed > 0)
-        atomic_fetch_add_explicit(&g_fanout_roster_unpushed,
-                                  r->roster_unpushed, memory_order_relaxed);
+    missed = fanout_roster_missed(r, q->host);
+    if (missed > 0)
+        atomic_fetch_add_explicit(&g_fanout_roster_unpushed, missed,
+                                  memory_order_relaxed);
 }
 
 void board_push_fanout_sent(void)

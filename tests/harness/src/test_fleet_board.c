@@ -32,6 +32,7 @@
 #include "crypto/ed25519.h"
 #include "models/database.h"
 #include "models/fleet_board_post.h"
+#include "models/fleet_board_delivery.h"
 #include "models/fleet_board_post_internal.h"
 #include "command/native_command.h"
 #include "command/native_fleet.h"
@@ -16276,6 +16277,8 @@ static void fbc_boxes(uint8_t asking, uint8_t answering)
 {
     fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ASK, asking);
     fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ANSWER, answering);
+    /* The answering box is the one that pushes its own posts. */
+    fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_PUSH, answering);
 }
 
 /* A key that claims one identity and signs with another's seed. */
@@ -16642,6 +16645,8 @@ static int test_fleet_board_roster_carriage(void)
     g_fbw_deny_read = false;
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
     boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(
+        (int)FLEET_BOARD_ROSTER_SIDE_PUSH, NULL, NULL);
     fbr_uninstall();
     fbw_close(&w);
     if (dest.open)
@@ -16665,6 +16670,103 @@ static size_t fbc_answer_frames(struct fbw *w)
         (void)mesh_loop_take(w->answerer, w->answer_q, w->f.term_peer.ini,
                              frame, sizeof frame, &more);
     return n;
+}
+
+static size_t fbc_to_asker(struct fbw *w)
+{
+    return mesh_loop_pump(w->answerer, w->answer_q, w->f.term_peer.ini, &w->mp,
+                          w->asker);
+}
+
+static size_t fbc_to_answerer(struct fbw *w)
+{
+    return mesh_loop_pump(w->asker, w->ask_q, w->f.res_term, &w->mp, w->answerer);
+}
+
+/* The next CLOSE the asking box queued, and the receipt on it when it has one. */
+static unsigned fbc_asker_close(struct fbw *w, struct board_push_receipt *rc)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX];
+    uint8_t kind = 0;
+    bool more = false;
+    const size_t head = MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u;
+    size_t len;
+    memset(rc, 0, sizeof *rc);
+    rc->code = 0xFF;
+    len = mesh_loop_take(w->asker, w->ask_q, w->f.res_term, frame, sizeof frame,
+                         &more);
+    if (len == 0)
+        return 0xFFu;
+    if (!mesh_stream_test_read_header(frame, len, &kind, NULL) ||
+        kind != MESH_STREAM_KIND_CLOSE || len < head + 1u)
+        return 0xFEu;
+    if (len > head + 3u)
+        (void)board_push_receipt_decode(frame + head + 3u, len - head - 3u, rc);
+    return frame[head];
+}
+
+static bool fbc_rpush_proof(struct fbw *w, enum fleet_board_roster_side side,
+                            int64_t after,
+                            uint8_t out[FLEET_BOARD_ROSTER_PROOF_BYTES])
+{
+    struct noise_transport_snapshot snap;
+    struct fleet_board_roster_bind bind;
+    if (!p2p_node_noise_snapshot(w->asker, &snap))
+        return false;
+    memset(&bind, 0, sizeof bind);
+    memcpy(bind.network_genesis, w->f.genesis, 32);
+    memcpy(bind.transcript_hash, snap.transcript_hash, 32);
+    bind.connection_generation = snap.connection_generation;
+    bind.after = after;
+    return fleet_board_roster_proof_make(side, &bind, out);
+}
+
+static uint8_t g_fbc_rpush[FLEET_BOARD_PUSH_MAX + FLEET_BOARD_ROSTER_PROOF_BYTES];
+
+static size_t fbc_rpush_wire(const uint8_t proof[FLEET_BOARD_ROSTER_PROOF_BYTES],
+                             const struct fleet_board_post *post)
+{
+    uint8_t *body = malloc(FLEET_BOARD_PUSH_MAX);
+    size_t blen = FLEET_BOARD_PUSH_HEAD;
+    size_t wlen;
+    if (!body)
+        return 0;
+    board_push_begin(body);
+    if (!board_push_append_post(body, &blen, post)) {
+        free(body);
+        return 0;
+    }
+    wlen = blen + FLEET_BOARD_ROSTER_PROOF_BYTES;
+    if (wlen > sizeof g_fbc_rpush) {
+        free(body);
+        return 0;
+    }
+    memcpy(g_fbc_rpush, body, FLEET_BOARD_PUSH_HEAD);
+    memcpy(g_fbc_rpush + FLEET_BOARD_PUSH_HEAD, proof,
+           FLEET_BOARD_ROSTER_PROOF_BYTES);
+    memcpy(g_fbc_rpush + FLEET_BOARD_PUSH_HEAD + FLEET_BOARD_ROSTER_PROOF_BYTES,
+           body + FLEET_BOARD_PUSH_HEAD, blen - FLEET_BOARD_PUSH_HEAD);
+    free(body);
+    return wlen;
+}
+
+/* One raw roster-push OPEN into the asking box. 0xFF means it stayed open. */
+static unsigned fbc_rpush_inject(struct fbw *w, const uint8_t *payload,
+                                 size_t len, struct board_push_receipt *rc)
+{
+    uint8_t frame[MESH_LOOP_WIRE_MAX];
+    size_t n;
+    fbc_ask_begin(w);
+    /* The asking box accepted the connection, so an OPEN from the answering
+     * box carries an even id. Id 1 is the asking box's own parity. */
+    n = mesh_stream_test_open_frame(2, FLEET_BOARD_PUSH_WINDOW,
+                                    FLEET_BOARD_ROSTER_PUSH_SERVICE_NAME,
+                                    payload, len, frame, sizeof frame);
+    memset(rc, 0, sizeof *rc);
+    rc->code = 0xFF;
+    if (n == 0 || !mesh_stream_frame(&w->mp, w->asker, frame, n, NULL))
+        return 0xFFu;
+    return fbc_asker_close(w, rc);
 }
 
 /* A fleet note by the answering box, offered as the local post path offers
@@ -16695,8 +16797,10 @@ static int test_fleet_board_roster_push_gap(void)
     g_fbw_deny_read = false;
     zcl_fleet_role_checker_install(&checker);
     bool opened = fbw_open(&w);
-    TEST("fleet board fan-out: a connected roster-only peer the roster answer "
-         "serves is not pushed to, and is counted as not pushed") {
+    TEST("fleet board fan-out: a connected roster-only peer is pushed one post "
+         "on board.rpush, the paired push counters stay put, and the sender "
+         "records a stored receipt") {
+        struct db_fleet_board_delivery delivered;
         ASSERT(opened);
         boot_fleet_board_fleet_test_bind_authority(&w.f.term_peer.delegation,
                                                    w.f.genesis, now);
@@ -16719,17 +16823,19 @@ static int test_fleet_board_roster_push_gap(void)
         ASSERT_EQ(fbc_offer(&w, "for the roster", 2002, &post), (size_t)0);
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
-                  cb.push_fanout_roster_unpushed + 1);
+                  cb.push_fanout_roster_unpushed);
         ASSERT_EQ(ca.push_opened, cb.push_opened);
         ASSERT_EQ(ca.push_fanout, cb.push_fanout);
-        /* Asked with nothing recorded as a pull's refusal. */
         ASSERT_EQ(ca.roster_refused, cb.roster_refused);
         ASSERT_EQ(ca.role_refused, cb.role_refused);
-        ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
-        ASSERT(!db_fleet_board_have(&w.b, post.id));
-        /* Its roster pull still carries the post. */
-        ASSERT_EQ(fbc_pull(&w, &w.b, &frames), (size_t)1);
+        ASSERT_EQ(fbc_to_asker(&w), (size_t)1);
+        ASSERT_EQ(boot_fleet_board_roster_push_test_commit(&w.b), (size_t)1);
         ASSERT(db_fleet_board_have(&w.b, post.id));
+        ASSERT(fbc_to_answerer(&w) >= 1);
+        ASSERT(board_delivery_flush(&w.a) >= 1);
+        ASSERT_EQ(db_fleet_board_delivery_for_post(&w.a, post.id, &delivered, 1),
+                  1);
+        ASSERT_EQ(delivered.verdict, (int64_t)FLEET_BOARD_DELIVERY_STORED);
         PASS();
     }
     TEST("fleet board fan-out: a roster-only peer without the read role is "
@@ -16759,11 +16865,107 @@ static int test_fleet_board_roster_push_gap(void)
         fbc_unrevoke();
         PASS();
     }
+    TEST("fleet board fan-out: the roster push switch off leaves the peer to "
+         "the pull and counts it once") {
+        struct fleet_board_post held;
+        boot_fleet_board_roster_push_test_enable(false);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_offer(&w, "switch off", 2005, &held), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.push_fanout_roster_unpushed,
+                  cb.push_fanout_roster_unpushed + 1);
+        ASSERT_EQ(ca.push_opened, cb.push_opened);
+        ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, held.id));
+        boot_fleet_board_roster_push_test_enable(true);
+        PASS();
+    }
+    TEST("fleet board roster push: an ask proof in the push frame is refused") {
+        struct board_push_receipt rc;
+        uint8_t proof[FLEET_BOARD_ROSTER_PROOF_BYTES];
+        size_t n;
+        fbc_sign_as(FLEET_BOARD_ROSTER_SIDE_ASK, FBR_MEMBER);
+        ASSERT(fbc_rpush_proof(&w, FLEET_BOARD_ROSTER_SIDE_ASK,
+                               FLEET_BOARD_ROSTER_PUSH_AFTER, proof));
+        n = fbc_rpush_wire(proof, &post);
+        ASSERT(n > 0);
+        ASSERT_EQ(fbc_rpush_inject(&w, g_fbc_rpush, n, &rc),
+                  MESH_STREAM_REFUSED_MALFORMED);
+        ASSERT_EQ(rc.code, FLEET_BOARD_PUSH_CODE_MALFORMED);
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        PASS();
+    }
+    TEST("fleet board roster push: a record signed by another key is "
+         "push_author_mismatch and is not stored") {
+        struct fleet_board_post other;
+        struct board_push_receipt rc;
+        uint8_t proof[FLEET_BOARD_ROSTER_PROOF_BYTES];
+        size_t n;
+        ASSERT(fbw_post(&w.a, FBR_PEER, FLEET_BOARD_SCOPE_FLEET, "not the prover",
+                        2006, FBC_TTL, 2006, &other));
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT(fbc_rpush_proof(&w, FLEET_BOARD_ROSTER_SIDE_PUSH,
+                               FLEET_BOARD_ROSTER_PUSH_AFTER, proof));
+        n = fbc_rpush_wire(proof, &other);
+        ASSERT(n > 0);
+        ASSERT_EQ(fbc_rpush_inject(&w, g_fbc_rpush, n, &rc), 0xFFu);
+        ASSERT_EQ(boot_fleet_board_roster_push_test_commit(&w.b), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, other.id));
+        ASSERT_EQ(fbc_asker_close(&w, &rc), MESH_STREAM_CLOSED_BY_SERVICE);
+        ASSERT_EQ(rc.code, FLEET_BOARD_PUSH_CODE_AUTHOR);
+        PASS();
+    }
+    TEST("fleet board roster push: revocation between OPEN and commit is "
+         "push_revoked") {
+        struct db_fleet_board_delivery delivered;
+        fbc_boxes(FBR_PEER, FBR_MEMBER);
+        ASSERT_EQ(fbc_offer(&w, "revoke between", 2007, &post), (size_t)0);
+        ASSERT_EQ(fbc_to_asker(&w), (size_t)1);
+        fbc_revoke(FBR_MEMBER);
+        ASSERT_EQ(boot_fleet_board_roster_push_test_commit(&w.b), (size_t)0);
+        ASSERT(!db_fleet_board_have(&w.b, post.id));
+        ASSERT(fbc_to_answerer(&w) >= 1);
+        ASSERT(board_delivery_flush(&w.a) >= 1);
+        ASSERT_EQ(db_fleet_board_delivery_for_post(&w.a, post.id, &delivered, 1),
+                  1);
+        ASSERT_EQ(delivered.verdict, (int64_t)FLEET_BOARD_DELIVERY_REFUSED);
+        ASSERT_EQ(strcmp(delivered.reason, "push_revoked"), 0);
+        fbc_unrevoke();
+        PASS();
+    }
+    TEST("fleet board roster push: an old receiver is one unsupported skip, "
+         "and the pull still carries the post") {
+        struct fleet_board_post again;
+        uint64_t skips = boot_fleet_board_roster_push_test_unsupported();
+        boot_fleet_board_roster_push_test_unknown(true);
+        ASSERT_EQ(fbc_offer(&w, "old receiver", 2008, &again), (size_t)0);
+        ASSERT_EQ(fbc_to_asker(&w), (size_t)1);
+        ASSERT(fbc_to_answerer(&w) >= 1);
+        ASSERT_EQ(boot_fleet_board_roster_push_test_unsupported(), skips + 1);
+        boot_fleet_board_fleet_counts(&cb);
+        ASSERT_EQ(fbc_offer(&w, "old receiver again", 2009, &denied), (size_t)0);
+        boot_fleet_board_fleet_counts(&ca);
+        ASSERT_EQ(ca.push_fanout_roster_unpushed,
+                  cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_opened, cb.push_opened);
+        ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
+        ASSERT_EQ(boot_fleet_board_roster_push_test_unsupported(), skips + 1);
+        boot_fleet_board_roster_push_test_unknown(false);
+        ASSERT(fbc_pull(&w, &w.b, &frames) != SIZE_MAX);
+        ASSERT(db_fleet_board_have(&w.b, denied.id));
+        PASS();
+    }
     _test_next:;
     g_fbw_deny_read = false;
+    boot_fleet_board_roster_push_test_enable(true);
+    boot_fleet_board_roster_push_test_unknown(false);
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
     boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(
+        (int)FLEET_BOARD_ROSTER_SIDE_PUSH, NULL, NULL);
     fbr_uninstall();
+    if (w.a.open)
+        (void)board_delivery_flush(&w.a);
     fbw_close(&w);
     zcl_fleet_role_checker_install_permissive_for_testing();
     return failures;
@@ -17000,6 +17202,8 @@ static int test_fleet_board_roster_wake(void)
     g_fbw_deny_read = false;
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
     boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(
+        (int)FLEET_BOARD_ROSTER_SIDE_PUSH, NULL, NULL);
     fbr_uninstall();
     fbw_close(&w);
     zcl_fleet_role_checker_install_permissive_for_testing();
@@ -17172,6 +17376,8 @@ static int test_fleet_board_roster_carriage_lane(void)
     _test_next:;
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
     boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(
+        (int)FLEET_BOARD_ROSTER_SIDE_PUSH, NULL, NULL);
     fbr_uninstall();
     fbw_close(&w);
     if (dest.open)
@@ -17526,6 +17732,8 @@ static int test_fleet_board_head_row_carriage(void)
     boot_fleet_board_shutdown();
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
     boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(
+        (int)FLEET_BOARD_ROSTER_SIDE_PUSH, NULL, NULL);
     fbr_uninstall();
     fbw_close(&w);
     if (dest.open)
@@ -17699,6 +17907,8 @@ static int test_fleet_board_head_row_bootstrap(void)
     g_fbw_deny_read = false;
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
     boot_fleet_board_fleet_test_roster_identity(2, NULL, NULL);
+    boot_fleet_board_fleet_test_roster_identity(
+        (int)FLEET_BOARD_ROSTER_SIDE_PUSH, NULL, NULL);
     fbr_uninstall();
     fbw_close(&w);
     struct node_db *dbs[] = { &joined, &withheld, &thin, &longb, &paged, &late,

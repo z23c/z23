@@ -102,8 +102,8 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
 /* Offer the round's resolved post `q` to every lead peer but `done` (the
  * addressed push's peer, or NULL): connected, served by the pull's own
  * disclosure decision, and not proving the post's author key. Connected
- * roster-only peers the roster answer would serve are counted as not
- * pushed (push_fanout_roster_unpushed). */
+ * roster-only peers are offered one "board.rpush" OPEN of this post. A peer
+ * that OPEN did not take is counted in push_fanout_roster_unpushed. */
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
                        const struct push_peer *done);
 /* A post the fan-out held for one peer rode a push after its wait. */

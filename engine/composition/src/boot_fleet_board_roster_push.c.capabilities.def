@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capabilities for a roster push into the fleet board store. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_roster_push.c", CAP_FS_WRITE, "writes one roster push into the fleet board store; a failed allocation reports on stderr")

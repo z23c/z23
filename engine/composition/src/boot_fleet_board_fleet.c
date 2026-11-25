@@ -1342,6 +1342,7 @@ void boot_fleet_board_fleet_shutdown(void)
     mesh_stream_service_unregister(FLEET_BOARD_FLEET_SERVICE_NAME);
     mesh_stream_service_unregister(FLEET_BOARD_ROSTER_SERVICE_NAME);
     mesh_stream_service_unregister(FLEET_BOARD_WAKE_SERVICE_NAME);
+    mesh_stream_service_unregister(FLEET_BOARD_ROSTER_PUSH_SERVICE_NAME);
     board_lock();
     supervisor_child_id child = g_child;
     g_child = SUPERVISOR_INVALID_ID;

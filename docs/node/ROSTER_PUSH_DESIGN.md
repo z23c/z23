@@ -2,34 +2,31 @@
 
 # Roster push: fast fleet delivery without a pairing
 
-Design only. This note installs nothing, changes no consensus, custody or
-datadir rule, and edits no sealed `core/` file. The implementation is a later
-change and needs one non-author review, because it touches who may deliver a
-post to whom.
+The receipt path below is implemented. It changes no consensus, custody or
+datadir rule, and edits no sealed `core/` file.
 
-## Status (updated 2026-11-25, after the wake landed)
+## Status (updated 2026-11-25, roster push)
 
-Part of this note is superseded. Commit 19a371e617 ("fleet board: wake a roster
-peer when a fleet post lands") sends each unpaired roster session one
-`board.wake` frame, the asking roster proof bound to a cursor no pull can
-carry and no post bytes, and that peer pulls on its next one-second tick.
-Commit efbd046c20 shortened the sweep interval to 5 s
-(`FLEET_BOARD_FLEET_PULL_INTERVAL_S`). Roster-only peers therefore see a fleet
-post in about a second or two, without a pairing, and the "15 s" figures
-below describe the state before those commits.
+`board.rpush` pushes one fleet post to a connected roster peer that has no
+working pairing row, and the receiver answers with the same push receipt the
+paired `board` service uses. The wire name is `board.rpush` because
+`board.roster.push` is 17 bytes and an OPEN name longer than 16 is malformed
+before the unknown-service check. The proof side is `PUSH` and the cursor is
+`FLEET_BOARD_ROSTER_PUSH_AFTER` (`(int64_t)-2`), so an ask proof does not
+verify as a push. The paired inbox and `push_opened` are not used; this
+service has its own inbox of four. A session that answers unknown-service, or
+malformed with an empty close, is marked unsupported once and left to the
+pull. `push_fanout_roster_unpushed` counts a roster peer whose OPEN was not
+taken, and does not count a session already known unsupported.
 
-What the wake does not give, and what remains open:
-- **No receipt.** A wake carries no post and the pull that follows is the
-  peer's own, so the sender learns nothing about delivery. A push over a
-  roster stream (this note's proposal) would give the per-post receipt that
-  `fleet board delivery <id>` shows for paired peers.
-- **No sender-side visibility** when a post found no live session at all.
-- **Paired push is unchanged**: still needs a held delegation.
+The wake (19a371e617) and the 5 s sweep (efbd046c20) stay. The wake still
+carries no post bytes. The pull remains the repair. A peer with a working
+pairing row stays on the paired push. The "15 s" and "never pushed" sentences
+below describe the state before the wake and this push.
 
-Decide with a measurement first: time post to arrival with the wake against a
-roster peer, then decide whether the missing receipt is worth a second
-service. If it is, this note is the starting point; read the wake's code in
-`boot_fleet_board_wake.c` before changing it.
+Still open, and not part of this change:
+- a counter for a fleet post that found no live session at all;
+- a measured post-to-arrival time. This note does not claim one.
 
 ## Problem
 
@@ -54,8 +51,8 @@ message and nothing in the board said a roster peer was waiting.
 ## Proposal
 
 A second push service, `board.roster.push`, for connected roster-only peers.
-It reuses the push frame, the inbox, the commit tick and the receipt; it
-changes only how the pusher is proved and who may be pushed to.
+It reuses the push frame, the commit tick and the receipt, and keeps its own
+inbox of four. It changes only how the pusher is proved and who may be pushed to.
 
 ### Sender
 
@@ -92,9 +89,9 @@ changes only how the pusher is proved and who may be pushed to.
   `board_serve_authorized` does). A revoked or removed member answers
   `push_revoked`. Revocation travels as a sealed head row and wins on the next
   commit.
-- Same bounded inbox (`FLEET_BOARD_PUSH_INBOX_MAX`), one slot per pushing peer,
-  `push_busy` and `push_inbox_full` as today. The inbox is shared with paired
-  pushes; a roster pusher cannot take more than one slot.
+- Its own inbox of four, one slot per pushing peer, `push_busy` and
+  `push_inbox_full` as today. The paired inbox is not used; a roster pusher
+  cannot take more than one slot.
 - Receipt: the existing `FLEET_BOARD_FLEET_MSG_PUSH_RECEIPT`, so a sender learns
   `stored`, `held`, `deferred` or `refused` per post. Record it in
   `fleet_board_deliveries` keyed by the receiving box (verify the table's key

@@ -125,6 +125,7 @@ void boot_fleet_board_wake_forget(void)
     g_sent = 0;
     wake_unlock();
     atomic_store_explicit(&g_news, 0, memory_order_relaxed);
+    boot_fleet_board_roster_push_forget();
 }
 
 /* A roster pull this box already has open toward `peer`. */
@@ -297,7 +298,8 @@ bool boot_fleet_board_wake_register(void)
     service.on_open = wake_on_open;
     service.on_data = wake_on_data;
     service.on_tick = wake_on_tick;
-    return mesh_stream_service_register(&service);
+    return mesh_stream_service_register(&service) &&
+           boot_fleet_board_roster_push_register();
 }
 
 #ifdef ZCL_TESTING

@@ -16,12 +16,12 @@
 // one-result-type-ok:closed-security-verdict — board_push_accept returns the
 // stream primitive's bounded refusal enum; the service's own name for each
 // refusal rides the receipt, and failure logging happens here, named.
-
 #include "boot_fleet_board_push_internal.h"
 #include "boot_fleet_board_push_round_internal.h"
 
 #include "boot_fleet_board_authority_internal.h"
 #include "boot_fleet_board_frame_internal.h"
+#include "boot_fleet_board_roster_internal.h"
 #include "boot_mesh_status_internal.h"
 #include "config/boot_fleet_roster.h"
 #include "config/boot_internal.h"
@@ -50,7 +50,6 @@ static_assert(FLEET_BOARD_PUSH_MAX <= MESH_STREAM_PAYLOAD_MAX,
               "a push rides one OPEN");
 static_assert(FLEET_BOARD_PUSH_RECEIPT_MAX <= MESH_STREAM_SERVICE_REPLY_MAX,
               "a refusal receipt fits the reply an OPEN may carry");
-
 /* The sending half's per-stream state: which posts rode the OPEN. */
 struct board_push_out_state {
     enum board_state_tag tag; /* BOARD_STATE_PUSH_OUT; first, always */
@@ -1193,6 +1192,7 @@ void board_push_lane_tick(struct boot_svc_ctx *svc, struct node_db *store,
     if (atomic_load_explicit(&g_queue_count, memory_order_relaxed) > 0)
         (void)push_send_round(svc, store, now);
     (void)board_delivery_flush(store);
+    boot_fleet_board_roster_push_tick(store);
 }
 
 /* ── the stream callbacks for push states (lane lock held) ────────────── */

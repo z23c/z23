@@ -20,6 +20,9 @@ struct node_db;
 enum fleet_board_roster_side {
     FLEET_BOARD_ROSTER_SIDE_ASK = 1,
     FLEET_BOARD_ROSTER_SIDE_ANSWER = 2,
+    /* A push proof. Mixed into the signed message so an ask proof never
+     * verifies as a push proof. */
+    FLEET_BOARD_ROSTER_SIDE_PUSH = 3,
 };
 
 /* Everything one proof is bound to. The transcript and the connection
@@ -124,5 +127,27 @@ bool boot_fleet_board_wake_register(void);
 void boot_fleet_board_wake_tick(struct boot_svc_ctx *svc, struct node_db *store,
                                 int64_t now);
 void boot_fleet_board_wake_forget(void);
+
+struct fleet_board_post;
+
+/* Roster push (boot_fleet_board_roster_push.c). register runs from the wake
+ * registration, so the fleet file does not grow a second call. offer is one
+ * post to one roster peer: 1 when the OPEN is queued, 0 when it was not and
+ * the fan-out should count the peer, -1 when the session is already known
+ * unsupported and the pull carries the post. tick commits one received push
+ * into `store` and closes that stream with the push receipt. */
+bool boot_fleet_board_roster_push_register(void);
+void boot_fleet_board_roster_push_forget(void);
+int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
+                                       const uint8_t peer[32],
+                                       const struct fleet_board_post *post);
+void boot_fleet_board_roster_push_tick(struct node_db *store);
+
+#ifdef ZCL_TESTING
+void boot_fleet_board_roster_push_test_enable(bool on);
+void boot_fleet_board_roster_push_test_unknown(bool on);
+uint64_t boot_fleet_board_roster_push_test_unsupported(void);
+size_t boot_fleet_board_roster_push_test_commit(struct node_db *store);
+#endif
 
 #endif /* ZCL_BOOT_FLEET_BOARD_ROSTER_INTERNAL_H */
