@@ -66,3 +66,47 @@ helper, not the fetch thread. The onion change has a pure-function test only.
 - One writer per worktree; another agent works on r2. Match `git log
   origin/main` by subject before starting.
 - Never write the node database while the node runs.
+
+## Starter tasks (small, checked in the tree on 2026-11-25)
+
+Each is one lane, one writer, one focused test group. Start with
+`build/bin/z23-dev code guide <path>`, edit, run `make t-fast-exact
+ONLY=<group>` and `make lint-fast` through `devbuild --wait`, then submit.
+Match `git log origin/main` by subject first. The larger catalog is
+[`C23_TASK_CATALOG.md`](C23_TASK_CATALOG.md).
+
+1. **Test the respawn exit line.** `boot_loop_guard_note_shutdown_intent`
+   (`engine/composition/src/boot_loop_guard.c`) now prints a line for a
+   self-respawn; nothing asserts it. Add a case to `test_boot_flight_recorder`
+   that sets the tip-watchdog respawn flag and checks the stderr text.
+2. **Test the bundle reuse in the fetch thread.** `sosvc_reuse_landed`
+   (`engine/composition/src/state_offer_service.c`) has a helper test only.
+   Add a group case where `sosvc_fetch_main` finds a verified landed file and
+   makes no network call. Group: `test_state_offer`.
+3. **List every flag in `-help`.** `-fileservice` was missing from `-help`
+   until today. Diff the known-flag table in `engine/composition/src/args.c`
+   against `print_usage_all` and add the missing lines; then add a lint that
+   fails when a parsed flag has no help line. The reported gap was 88 of 143
+   flags (unchecked: count first).
+4. **Reproduce the `code impact` slowness.** On a wallet file it took about
+   5 s here against a 250 ms budget (`git grep -l` took 0.06 s); a report saw
+   28 s. Time it on a current build, find the slow stage in
+   `engine/composition/commands/code.def`'s handler, and cut it or fix the
+   budget. Record before and after.
+5. **Build the board menu from the node's ops.** The client menu says ready
+   for ops the running node lacks; the refusal now names the op. Ask the node
+   for its op list once and filter the menu. Files: `tools/command/
+   native_fleet_board_command.c`, `engine/composition/src/
+   boot_fleet_board_rpc.c`. Group: `test_fleet_board`.
+6. **Status for an unknown blocker.** `status_brief_native_handler.c` now
+   folds free text to a token. Add the same fold for `sync_state` (it still
+   rejects the whole document on a non-token) with a test beside
+   `test_status_brief_free_text_blocker_folds_to_token`.
+7. **One contract.** `AGENTS.md`, `CONTRIBUTING.md`, `THE_Z23_WAY.md` and
+   `DEVELOPING.md` repeat rules and sometimes disagree. Write a list of every
+   rule that appears twice and where; do not delete anything in the same
+   change.
+
+Out of scope for a first change: anything under `core/`, custody, a
+datadir, the delegation grant for the lab pairing, and the onion file route
+(needs the unseal ritual).
