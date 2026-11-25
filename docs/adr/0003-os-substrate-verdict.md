@@ -212,3 +212,13 @@ Detail, file inventories, and the ordered checklist are in
   path-grant sandbox can be enabled by default.
 - Network confinement (outbound connection filtering) is out of scope for
   Rung 2 — it targets local resource/exec confinement only.
+
+## Addendum 2026-11-25
+
+The evidence above still stands: measured sync slowness comes from data
+structures, algorithms and serial verification, not scheduling. Owner
+direction now makes booting on its own a goal, not a deferred horizon (see
+[the Ambition section](../THE_Z23_WAY.md#ambition)). First step: a minimal
+reproducible boot image (an existing kernel, Z23 as the only program) that
+boots in a VM, syncs, and hashes the same on two builds. The owner may
+supersede this ADR formally; until then the record above stands as written.

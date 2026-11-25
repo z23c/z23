@@ -8,6 +8,12 @@ citations below were verified by reading the cited file at the time this
 plan was written — re-verify before acting, per the repo-wide rule that
 prose rots and code is authoritative.
 
+Note (2026-11-25): this is a work plan under a stated goal: Z23 boots on
+its own, a reproducible boot image with Z23 as the only program, later
+needing less and less from the OS (see [the Ambition section](../THE_Z23_WAY.md#ambition)).
+First step: a minimal image that boots in a VM, syncs, and hashes the same
+on two builds. The inventory and rungs below are unchanged.
+
 ---
 
 ## §1 Rung 0 — "no shell-outs"
@@ -276,5 +282,6 @@ listed for continuity with the rest of this plan's dependency graph):
 ### Deferred (restated from the ADR, for the lane owner who only reads this file)
 
 epoll/kqueue reactor, custom allocator, thread priorities/QoS, a FreeBSD
-port, a unikernel — none scheduled; reasons are in `docs/adr/0003-os-substrate-verdict.md`'s
+port, a unikernel — not yet scheduled (the boot-image goal above is the
+first step toward the unikernel); reasons are in `docs/adr/0003-os-substrate-verdict.md`'s
 "Explicitly deferred" section.

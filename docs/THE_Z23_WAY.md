@@ -34,6 +34,22 @@ builds and reproduces content-addressed packages with no central registry.
 North Star: software made for you, not imposed on you, with exact source
 identity and independent reproduction.
 
+## Ambition
+
+Z23 is built to be the best it can be. State the big target, name the first
+experiment that can be measured, and report the real number plainly: a good
+number is good news, a bad number is the next target.
+
+- Say "not yet" instead of "can't". A measured limit stays written down,
+  followed by the next step and the number to beat.
+- A horizon is a work item with a first step, not a reason to stop.
+- Goal: Z23 boots on its own, a reproducible boot image with Z23 as the only
+  program, later needing less and less from the OS. First step: a minimal
+  image that boots in a VM, syncs, and hashes the same on two builds
+  ([ADR-0003 addendum](adr/0003-os-substrate-verdict.md#addendum-2026-11-25)).
+- The [Boundaries](#boundaries) do not change. Consensus, custody, datadir,
+  spend, review and landing rules are what let us move fast.
+
 ## What good looks like
 
 Z23 is beautiful, optimized, low cost, fast, secure and permissive open source.
