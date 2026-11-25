@@ -377,7 +377,7 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
 /* The command leaf whose grant lets a peer read this box's fleet posts:
  * the worker and observer roles already carry it (roles.def). */
 #define FLEET_BOARD_FLEET_READ_LEAF "fleet.board.list"
-#define FLEET_BOARD_FLEET_PULL_INTERVAL_S 15
+#define FLEET_BOARD_FLEET_PULL_INTERVAL_S 5
 #define FLEET_BOARD_FLEET_VERSION 2u
 #define FLEET_BOARD_FLEET_MSG_PULL 1u
 #define FLEET_BOARD_FLEET_MSG_ANSWER 2u
