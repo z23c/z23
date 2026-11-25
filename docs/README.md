@@ -159,6 +159,7 @@ from a hash, signature, test, or reproduction receipt.
 - [`node/README.md`](node/README.md) — node references: boot, sync, custody, recovery, security.
 - [`commons/README.md`](commons/README.md) — commons, metaverse, ZCODE, framework and architecture references.
 - [`quality/README.md`](quality/README.md) — simulators, chaos, benchmarks, acceptance gates and transaction labs.
+- [`work/FLEET_COMMS_HANDOFF.md`](work/FLEET_COMMS_HANDOFF.md) (maintainers) — fleet communication: what landed, what blocks two-way use, next steps.
 - [`work/AGENT_FLEET.md`](work/AGENT_FLEET.md) (maintainers) — consolidated fleet operating
   contract: storage admission, task ownership, native and guest execution,
   transport choices, timestamped JSON observations, and measured agent cost.

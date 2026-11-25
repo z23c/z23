@@ -36,7 +36,11 @@ anyone touching `core/modules/net/src/tor_integration.c`, `onion_service.c`, or
   ephemeral onion service every boot; `-onion-persist` keeps one address
   across restarts (its second port mapping forwards `<onion>:<p2p_port>`
   to the local P2P listener, which is how peers dial us inbound);
-  `-onion-rotate` deliberately archives the old identity. Hermetic onion
+  `-onion-rotate` deliberately archives the old identity. A node started
+  with `-packagehost=1` defaults `-onion-persist` on (not under private
+  wallet broadcast; `-onion-persist=0` opts out), so it has the P2P route;
+  the file-service route still waits for the sealed-`core/` change below.
+  Hermetic onion
   tests (`test_onion_stream`, `test_onion_persistence`,
   `test_onion_directory`, …) pass on a host with zero network egress.
   Mapping that ephemeral service's P2P port and file port, and pushing
