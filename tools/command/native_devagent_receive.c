@@ -256,6 +256,7 @@
 #include "platform/file_metadata.h"
 #include "platform/file_sync.h"
 #include "platform/private_file.h"
+#include "platform/positioned_file.h"
 #include "platform/rng.h"
 #include "platform/os_proc.h"
 #include "platform/path_compat.h"
@@ -3409,11 +3410,58 @@ static void rcv_push_stats(struct zcl_command_reply *reply,
 /* The resident's durable intake record, read-only: where its cursor
  * stands, how many pulls have failed across its drives, and the last
  * failure code. A survey cannot see these, because it pulls on its own. */
+static bool rcv_intake_observation_parse(char *text, struct rcv_intake *in)
+{
+    unsigned mask = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strncmp(line, "position=", 9) && !(mask & 1) &&
+            (!line[9] || zcl_devagent_mail_cursor_valid(line + 9))) mask |= 1;
+        else if (!strncmp(line, "failures=", 9) && !(mask & 2)) {
+            char *end = NULL;
+            errno = 0;
+            long long value = strtoll(line + 9, &end, 10);
+            if (errno || end == line + 9 || *end || value < 0) return false;
+            mask |= 2;
+        } else if (!strncmp(line, "last_error=", 11) && !(mask & 4) &&
+                   strlen(line + 11) < sizeof in->error) mask |= 4;
+        else return false;
+        rcv_intake_line(line, in);
+    }
+    return mask == 7;
+}
+
+static const char *rcv_intake_observe(const char *path, struct rcv_intake *in)
+{
+    struct platform_positioned_file f;
+    struct platform_positioned_file_snapshot a, b;
+    char text[RCV_POS_MAX + 256];
+    memset(in, 0, sizeof(*in));
+    platform_positioned_file_init(&f);
+    if (!platform_positioned_file_open(&f, path))
+        return platform_file_shape_read(path) == PLATFORM_FILE_SHAPE_MISSING ?
+            "absent" : "unreadable";
+    bool ok = platform_positioned_file_snapshot(&f, &a) && a.size < sizeof(text) &&
+        platform_positioned_file_read(&f, text, (size_t)a.size, 0) == (int64_t)a.size &&
+        platform_positioned_file_snapshot(&f, &b) && platform_positioned_file_snapshot_equal(&a, &b);
+    platform_positioned_file_close(&f);
+    if (!ok) return "unreadable";
+    text[a.size] = '\0';
+    if (memchr(text, '\0', (size_t)a.size) || !rcv_intake_observation_parse(text, in))
+        return "malformed";
+    return "valid";
+}
+
 static void rcv_push_intake(struct zcl_command_reply *reply,
                             const struct rcv_paths *p)
 {
     struct rcv_intake in;
-    rcv_intake_load(p, &in);
+    const char *state = rcv_intake_observe(p->intake, &in);
+    (void)json_push_kv_str(&reply->data, "intake_record_state", state);
+    if (strcmp(state, "unreadable") == 0 || strcmp(state, "malformed") == 0) {
+        (void)json_push_kv_str(&reply->data, "intake_cursor_state", "unknown");
+        return;
+    }
     (void)json_push_kv_str(&reply->data, "intake_cursor",
                            in.pos[0] ? in.pos : "");
     (void)json_push_kv_str(&reply->data, "intake_cursor_state",

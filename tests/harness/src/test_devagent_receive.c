@@ -3124,10 +3124,56 @@ int test_devagent_receive(void)
         ASSERT_STR_EQ(rtx_reply_str(&c, "counters_basis"), "dry-survey");
         ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unobserved");
         ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_basis"), "request-argument");
+        ASSERT_STR_EQ(rtx_reply_str(&c, "intake_record_state"), "absent");
         rtx_end(&c);
         ASSERT(!rtx_exists("receive"));
         ASSERT(!rtx_exists("mail"));
         ASSERT(!rtx_exists("queue"));
+        char receive_dir[1400];
+        rtx_path(receive_dir, sizeof(receive_dir), "receive");
+        ASSERT(mkdir(receive_dir, 0700) == 0);
+        const char *records[] = {"position=\nfailures=0\nlast_error=\n",
+                                 "position=0|\nfailures=2\nlast_error=MAIL_CURSOR_STALE\n",
+                                 "position=0|bogus\nfailures=0\nlast_error=\n"};
+        const char *states[] = {"valid", "valid", "malformed"};
+        for (size_t i = 0; i < 3; ++i) {
+            ASSERT(rtx_write("receive/intake.state", records[i]));
+            rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+            (void)json_push_kv_str(&c.input, "action", "status");
+            (void)json_push_kv_str(&c.input, "receiver", "box-a");
+            zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+            ASSERT(rtx_ok(&c));
+            ASSERT_STR_EQ(rtx_reply_str(&c, "intake_record_state"), states[i]);
+            if (i == 2) {
+                ASSERT_STR_EQ(rtx_reply_str(&c, "intake_cursor_state"), "unknown");
+                ASSERT(json_get(&c.reply.data, "intake_failures") == NULL);
+            }
+            rtx_end(&c);
+        }
+        char intake_path[1400];
+        rtx_path(intake_path, sizeof(intake_path), "receive/intake.state");
+        ASSERT(unlink(intake_path) == 0);
+        char oversized[5000];
+        memset(oversized, 'x', sizeof(oversized) - 1);
+        oversized[sizeof(oversized) - 1] = '\0';
+        ASSERT(rtx_write("receive/intake.state", oversized));
+        for (int shape = 0; shape < 2; ++shape) {
+            if (shape == 1) {
+                ASSERT(unlink(intake_path) == 0);
+                ASSERT(mkdir(intake_path, 0700) == 0);
+            }
+            rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+            (void)json_push_kv_str(&c.input, "action", "status");
+            (void)json_push_kv_str(&c.input, "receiver", "box-a");
+            zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+            ASSERT(rtx_ok(&c));
+            ASSERT_STR_EQ(rtx_reply_str(&c, "intake_record_state"), "unreadable");
+            ASSERT_STR_EQ(rtx_reply_str(&c, "intake_cursor_state"), "unknown");
+            ASSERT(json_get(&c.reply.data, "intake_failures") == NULL);
+            rtx_end(&c);
+        }
+        ASSERT(rmdir(intake_path) == 0);
+        ASSERT(rmdir(receive_dir) == 0);
         /* A bad receiver name is refused, and still writes nothing. */
         rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
         (void)json_push_kv_str(&c.input, "action", "status");
