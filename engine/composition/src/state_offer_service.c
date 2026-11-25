@@ -1009,6 +1009,33 @@ bool state_offer_service_test_arm_bound(const char *landed, const struct state_o
 }
 #endif
 
+/* A bundle already landed and verified under bundles/ is not fetched again:
+ * when the history probe failed, every retry used to re-download the whole
+ * bundle (124 verified copies, about 64 GB, in one report). */
+static bool sosvc_reuse_landed(const char *out_dir, const struct rom_fetch_manifest *m,
+                               char *landed, size_t cap)
+{
+#if defined(_WIN32)
+    (void)out_dir; (void)m; (void)landed; (void)cap;
+    return false;
+#else
+    struct stat st;
+    if (snprintf(landed, cap, "%s/%s", out_dir, m->filename) >= (int)cap) return false;
+    if (lstat(landed, &st) || !S_ISREG(st.st_mode) || (uint64_t)st.st_size != m->size_bytes ||
+        st.st_uid != geteuid() || !rom_fetch_verify_file(landed, m)) return false;
+    LOG_INFO(SOSVC_SUBSYS, "verified bundle %s is already on disk; not downloading it again",
+             m->filename);
+    return true;
+#endif
+}
+#ifdef ZCL_TESTING
+bool state_offer_service_test_reuse_landed(const char *out_dir, const struct rom_fetch_manifest *m,
+    char *landed, size_t cap)
+{
+    return sosvc_reuse_landed(out_dir, m, landed, cap);
+}
+#endif
+
 static void *sosvc_fetch_main(void *arg)
 {
     (void)arg;
@@ -1017,7 +1044,10 @@ static void *sosvc_fetch_main(void *arg)
     enum sol_receive_result r = SOL_RECEIVE_BAD_DATA;
     if (sosvc_manifest(&target.offer, &m)) {
         r = SOL_RECEIVE_LOCAL_IO;
-        if (sosvc_bundles(out_dir, sizeof(out_dir)))
+        if (sosvc_bundles(out_dir, sizeof(out_dir)) &&
+            sosvc_reuse_landed(out_dir, &m, landed, sizeof(landed)))
+            r = SOL_RECEIVE_OK;
+        else if (sosvc_bundles(out_dir, sizeof(out_dir)))
             r = target.peer_link ? sosvc_fetch_link(&target, &m, out_dir, landed, sizeof(landed)) :
                 sosvc_fetch_ip(&target, &m, out_dir, landed, sizeof(landed));
     }

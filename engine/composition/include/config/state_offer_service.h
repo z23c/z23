@@ -111,6 +111,9 @@ bool state_offer_service_test_history_fetch(const struct state_offer_record *tar
 bool state_offer_service_test_arm_bound(const char *landed, const struct state_offer_v1 *offer,
     const char *parent, const struct wallet_history_receive_result *history);
 void state_offer_service_test_clear_restart_hint(void);
+struct rom_fetch_manifest;
+bool state_offer_service_test_reuse_landed(const char *out_dir, const struct rom_fetch_manifest *m,
+    char *landed, size_t cap);
 /* Replace the bundle-manifest reader (default NULL: the real
  * consensus_state_artifact_evidence_open path) so a test can drive the
  * manifest cache with cheap fixture files. Same contract as the real reader:

@@ -14,10 +14,15 @@
 #include "config/state_offer_service.h"
 #include "crypto/ed25519.h"
 #include "net/state_offer.h"
+#include "net/rom_fetch.h"
+#include "net/rom_seed.h"
+#include "crypto/sha3.h"
 
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 
 /* Wire offsets the tamper cases below poke directly. Named here so a layout
@@ -678,6 +683,47 @@ static int fetch_completion_handoff(void)
     return failures;
 }
 
+/* A verified bundle already under bundles/ is reused, not fetched again; a
+ * missing or altered file is not reused. */
+static int reuse_landed_bundle(void)
+{
+    int failures = 0;
+    TEST("a verified landed bundle is reused; a missing or altered one is not") {
+        char root[PATH_MAX];
+        ASSERT(test_mkdtemp(root, sizeof(root), "zcl_reuse") != NULL);
+        static const uint8_t body[200] = {7};
+        struct rom_fetch_manifest m;
+        memset(&m, 0, sizeof(m));
+        snprintf(m.filename, sizeof(m.filename), "reuse.zvsb");
+        m.used = true; m.kind = ROM_ARTIFACT_SOURCE_BUNDLE;
+        m.size_bytes = sizeof(body); m.chunk_size = ROM_SEED_CHUNK_SIZE;
+        m.num_chunks = 1;
+        uint8_t chunk_h[32];
+        sha3_256(body, sizeof(body), chunk_h);
+        sha3_256(chunk_h, 32, m.chunk_root);
+        sha3_256(body, sizeof(body), m.whole_sha3);
+        char landed[1200];
+        ASSERT(!state_offer_service_test_reuse_landed(root, &m, landed, sizeof(landed)));
+        char path[PATH_MAX + 32];
+        snprintf(path, sizeof(path), "%s/reuse.zvsb", root);
+        FILE *fp = fopen(path, "wb");
+        ASSERT(fp != NULL);
+        ASSERT_EQ(fwrite(body, 1, sizeof(body), fp), sizeof(body));
+        fclose(fp);
+        ASSERT(state_offer_service_test_reuse_landed(root, &m, landed, sizeof(landed)));
+        ASSERT_STR_EQ(landed, path);
+        fp = fopen(path, "r+b");
+        ASSERT(fp != NULL);
+        fputc(9, fp);
+        fclose(fp);
+        ASSERT(!state_offer_service_test_reuse_landed(root, &m, landed, sizeof(landed)));
+        remove(path);
+        rmdir(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_state_offer(void)
 {
     int failures = 0;
@@ -692,5 +738,6 @@ int test_state_offer(void)
     failures += batch_bounds();
     failures += null_and_empty_inputs();
     failures += fetch_completion_handoff();
+    failures += reuse_landed_bundle();
     return failures;
 }
