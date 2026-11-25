@@ -147,3 +147,14 @@ decision above is deliberate; the missing piece is visibility).
 The lab MCP server answered `fleet.board.delivery` as `UNKNOWN_COMMAND`, so the
 build behind it may predate the receipt reader; confirm which build the lab
 node runs before judging receipts.
+
+## Update: the wake landed (2026-11-25 evening)
+
+While this handoff was written, another agent landed `board.wake`
+(19a371e617) and shortened the pull interval to 5 s (efbd046c20). Roster-only
+peers now learn of a fleet post in about a second or two with no pairing, so
+the "capped at one 15 s pull" statements above describe the earlier state.
+What is still missing for a swarm: a delivery receipt for roster peers, a
+no-live-session counter, and a measured round trip. Check
+`git log origin/main --oneline -- engine/composition/src/boot_fleet_board*`
+before starting any fleet-board work: several agents write here.

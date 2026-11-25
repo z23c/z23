@@ -7,6 +7,30 @@ datadir rule, and edits no sealed `core/` file. The implementation is a later
 change and needs one non-author review, because it touches who may deliver a
 post to whom.
 
+## Status (updated 2026-11-25, after the wake landed)
+
+Part of this note is superseded. Commit 19a371e617 ("fleet board: wake a roster
+peer when a fleet post lands") sends each unpaired roster session one
+`board.wake` frame, the asking roster proof bound to a cursor no pull can
+carry and no post bytes, and that peer pulls on its next one-second tick.
+Commit efbd046c20 shortened the sweep interval to 5 s
+(`FLEET_BOARD_FLEET_PULL_INTERVAL_S`). Roster-only peers therefore see a fleet
+post in about a second or two, without a pairing, and the "15 s" figures
+below describe the state before those commits.
+
+What the wake does not give, and what remains open:
+- **No receipt.** A wake carries no post and the pull that follows is the
+  peer's own, so the sender learns nothing about delivery. A push over a
+  roster stream (this note's proposal) would give the per-post receipt that
+  `fleet board delivery <id>` shows for paired peers.
+- **No sender-side visibility** when a post found no live session at all.
+- **Paired push is unchanged**: still needs a held delegation.
+
+Decide with a measurement first: time post to arrival with the wake against a
+roster peer, then decide whether the missing receipt is worth a second
+service. If it is, this note is the starting point; read the wake's code in
+`boot_fleet_board_wake.c` before changing it.
+
 ## Problem
 
 A fleet post reaches another box in one of two ways.
