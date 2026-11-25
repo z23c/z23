@@ -835,7 +835,102 @@ static void test_cocoa_fullscreen(void)
 
 #if defined(__APPLE__)
 bool gui_cocoa_move_frame(struct gui_window *w, double width, double height);
+unsigned long gui_cocoa_presentation(void);
 #endif
+
+/* A window that is never shown must not hide the Dock or the menu bar. */
+static void test_cocoa_hidden_fullscreen(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc warm = {
+        .title_utf8 = "z23 warm", .width = 200, .height = 100,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 hidden fullscreen", .width = 640, .height = 420,
+        .flags = GUI_WINDOW_HIDDEN | GUI_WINDOW_FULLSCREEN,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *warm_win = NULL;
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    unsigned long before = 0;
+    unsigned long after = 0;
+    bool opened = gui_window_open(&warm, &warm_win, err, sizeof(err));
+    CHECK("a visible window opens before the hidden fullscreen check", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    before = gui_cocoa_presentation();
+    opened = gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("a hidden fullscreen window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        gui_window_close(warm_win);
+        return;
+    }
+    after = gui_cocoa_presentation();
+    CHECK("a hidden fullscreen window stays fullscreen", gui_window_is_fullscreen(win));
+    CHECK("a hidden fullscreen window leaves the Dock and menu bar alone", before == after);
+    gui_window_close(win);
+    gui_window_close(warm_win);
+#else
+    printf("  a hidden fullscreen window leaves the Dock and menu bar alone... SKIP\n");
+#endif
+}
+
+/* Closing a window that never hid the Dock must not uncover one that did. */
+static void test_cocoa_hidden_close_keeps_presentation(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc warm = {
+        .title_utf8 = "z23 warm", .width = 200, .height = 100,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window_desc shown = {
+        .title_utf8 = "z23 shown fullscreen", .width = 640, .height = 420,
+        .flags = GUI_WINDOW_FULLSCREEN,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window_desc hidden = {
+        .title_utf8 = "z23 hidden fullscreen", .width = 320, .height = 200,
+        .flags = GUI_WINDOW_HIDDEN | GUI_WINDOW_FULLSCREEN,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *warm_win = NULL;
+    struct gui_window *shown_win = NULL;
+    struct gui_window *hidden_win = NULL;
+    char err[120] = "";
+    unsigned long base = 0;
+    unsigned long covered = 0;
+    bool opened = gui_window_open(&warm, &warm_win, err, sizeof(err));
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        CHECK("a normal window opens before the shared presentation check", false);
+        return;
+    }
+    base = gui_cocoa_presentation();
+    opened = gui_window_open(&shown, &shown_win, err, sizeof(err));
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        CHECK("a visible fullscreen window opens", false);
+        gui_window_close(warm_win);
+        return;
+    }
+    covered = gui_cocoa_presentation();
+    opened = gui_window_open(&hidden, &hidden_win, err, sizeof(err));
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        CHECK("a hidden fullscreen window opens beside it", false);
+        gui_window_close(shown_win);
+        gui_window_close(warm_win);
+        return;
+    }
+    gui_window_close(hidden_win);
+    CHECK("closing the hidden window keeps the visible presentation",
+          covered != base && gui_cocoa_presentation() == covered);
+    gui_window_close(shown_win);
+    gui_window_close(warm_win);
+#else
+    printf("  closing the hidden window keeps the visible presentation... SKIP\n");
+#endif
+}
 
 /* A Cocoa frame change must reach the shared window without a later wait.
  * AppKit tells the delegate during setFrame and during a live drag. */
@@ -900,6 +995,8 @@ int test_gui(void)
     test_cocoa_auto();
     test_cocoa_fullscreen();
     test_cocoa_fullscreen_wide();
+    test_cocoa_hidden_fullscreen();
+    test_cocoa_hidden_close_keeps_presentation();
     test_cocoa_live_resize();
     test_utf8();
     test_draw();

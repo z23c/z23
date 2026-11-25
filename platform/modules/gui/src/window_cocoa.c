@@ -50,6 +50,7 @@ struct cocoa_win {
     struct cocoa_rect saved_frame;
     unsigned long saved_style;
     bool fullscreen;
+    bool presented;
 };
 
 static struct cocoa_api g_api;
@@ -563,6 +564,13 @@ static void cocoa_present_leave(void)
     cocoa_void_ulong(app, "setPresentationOptions:", g_present_saved);
 }
 
+unsigned long gui_cocoa_presentation(void)
+{
+    cocoa_id app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
+    if (!app) return 0;
+    return cocoa_ulong(app, "presentationOptions");
+}
+
 static bool cocoa_cover(struct cocoa_win *c)
 {
     cocoa_id screen = cocoa_msg(c->window, "screen");
@@ -602,11 +610,17 @@ static bool cocoa_fullscreen(struct gui_window *w, bool on)
             return false;
         }
     } else {
-        cocoa_present_leave();
+        if (c->presented) cocoa_present_leave();
+        c->presented = false;
         cocoa_uncover(c);
     }
     if (!cocoa_commit_view(w, c)) return false;
-    if (on) cocoa_present_enter();
+    /* A hidden window is not on screen, so it must not hide the Dock.
+     * Only that window may restore the Dock when it leaves fullscreen. */
+    if (on && cocoa_bool(c->window, "isVisible")) {
+        cocoa_present_enter();
+        c->presented = true;
+    }
     c->fullscreen = on;
     return true;
 }
