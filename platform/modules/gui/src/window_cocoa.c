@@ -47,6 +47,9 @@ struct cocoa_win {
     cocoa_id delegate;
     uint8_t *rgba;
     int32_t rgba_w, rgba_h;
+    struct cocoa_rect saved_frame;
+    unsigned long saved_style;
+    bool fullscreen;
 };
 
 static struct cocoa_api g_api;
@@ -444,6 +447,139 @@ static void cocoa_show(struct cocoa_win *c, const struct gui_window_desc *d)
     cocoa_void_bool(app, "activateIgnoringOtherApps:", 1);
 }
 
+/* Win32 covers the monitor immediately. A Cocoa Space transition does not
+ * finish before open returns, so fullscreen is a borderless screen frame. */
+static struct cocoa_rect cocoa_rect(cocoa_id obj, const char *name)
+{
+    struct cocoa_rect (*fn)(cocoa_id, cocoa_SEL);
+    memcpy(&fn, &g_api.msg_stret, sizeof fn);
+    return fn(obj, cocoa_sel(name));
+}
+
+static void cocoa_set_frame(cocoa_id obj, const char *name, struct cocoa_rect frame)
+{
+    void (*fn)(cocoa_id, cocoa_SEL, struct cocoa_rect);
+    memcpy(&fn, &g_api.msg, sizeof fn);
+    fn(obj, cocoa_sel(name), frame);
+}
+
+static void cocoa_set_window_frame(cocoa_id win, struct cocoa_rect frame)
+{
+    void (*fn)(cocoa_id, cocoa_SEL, struct cocoa_rect, signed char);
+    memcpy(&fn, &g_api.msg, sizeof fn);
+    fn(win, cocoa_sel("setFrame:display:"), frame, 1);
+}
+
+static bool cocoa_near(double got, double want)
+{
+    return got + 1.0 >= want;
+}
+
+/* Borderless content should fill the window, even when the old frame was
+ * already as large as the screen. */
+static bool cocoa_view_matches(struct cocoa_win *c)
+{
+    struct cocoa_rect bounds = cocoa_bounds(c->view);
+    struct cocoa_rect frame = cocoa_rect(c->window, "frame");
+    return cocoa_near(bounds.w, frame.w) && cocoa_near(bounds.h, frame.h);
+}
+
+/* Record a view size even when it jumps by more than the ordinary resize
+ * guard. Fullscreen is that jump. */
+static bool cocoa_commit_view(struct gui_window *w, struct cocoa_win *c)
+{
+    struct cocoa_rect bounds = cocoa_bounds(c->view);
+    double scale = cocoa_double(c->window, "backingScaleFactor");
+    int32_t pw, ph;
+    struct gui_event ev = { .type = GUI_EV_RESIZE };
+    if (!(scale > 0.0) || scale > 4.0) scale = 1.0;
+    pw = cocoa_round_px(bounds.w * scale);
+    ph = cocoa_round_px(bounds.h * scale);
+    if (pw < 1 || ph < 1) return false;
+    if (pw == w->w && ph == w->h && w->scale == (float)scale) return true;
+    w->w = pw;
+    w->h = ph;
+    w->scale = (float)scale;
+    ev.size.w = pw;
+    ev.size.h = ph;
+    ev.size.scale = (float)scale;
+    gui_ring_push(w, &ev);
+    return true;
+}
+
+static unsigned long g_present_saved;
+static int g_present_count;
+
+/* HideDock | HideMenuBar. The window stays at the normal level, so another
+ * app can cover it. The options are process-wide, so the first entry saves
+ * them and the last exit restores them. */
+static void cocoa_present_enter(void)
+{
+    cocoa_id app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
+    if (g_present_count == 0)
+        g_present_saved = cocoa_ulong(app, "presentationOptions");
+    g_present_count++;
+    cocoa_void_ulong(app, "setPresentationOptions:", 2ul | 8ul);
+}
+
+static void cocoa_present_leave(void)
+{
+    cocoa_id app;
+    if (g_present_count <= 0) return;
+    g_present_count--;
+    if (g_present_count > 0) return;
+    app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
+    cocoa_void_ulong(app, "setPresentationOptions:", g_present_saved);
+}
+
+static bool cocoa_cover(struct cocoa_win *c)
+{
+    cocoa_id screen = cocoa_msg(c->window, "screen");
+    struct cocoa_rect frame, view, now;
+    if (!screen) screen = cocoa_msg(g_api.get_class("NSScreen"), "mainScreen");
+    if (!screen) return false;
+    frame = cocoa_rect(screen, "frame");
+    if (frame.w < 1.0 || frame.h < 1.0) return false;
+    c->saved_frame = cocoa_rect(c->window, "frame");
+    c->saved_style = cocoa_ulong(c->window, "styleMask");
+    cocoa_void_ulong(c->window, "setStyleMask:", 0ul);
+    cocoa_set_window_frame(c->window, frame);
+    view.x = 0.0;
+    view.y = 0.0;
+    view.w = frame.w;
+    view.h = frame.h;
+    cocoa_set_frame(c->view, "setFrame:", view);
+    now = cocoa_rect(c->window, "frame");
+    if (!cocoa_near(now.w, frame.w) || !cocoa_near(now.h, frame.h)) return false;
+    return true;
+}
+
+static void cocoa_uncover(struct cocoa_win *c)
+{
+    cocoa_void_ulong(c->window, "setStyleMask:", c->saved_style);
+    cocoa_set_window_frame(c->window, c->saved_frame);
+}
+
+static bool cocoa_fullscreen(struct gui_window *w, bool on)
+{
+    struct cocoa_win *c = cocoa_state(w);
+    if (!c || !c->window || !c->view) return false;
+    if (on == c->fullscreen) return true;
+    if (on) {
+        if (!cocoa_cover(c) || !cocoa_view_matches(c)) {
+            if (c->saved_style) cocoa_uncover(c);
+            return false;
+        }
+    } else {
+        cocoa_present_leave();
+        cocoa_uncover(c);
+    }
+    if (!cocoa_commit_view(w, c)) return false;
+    if (on) cocoa_present_enter();
+    c->fullscreen = on;
+    return true;
+}
+
 static bool cocoa_open(struct gui_window *w, const struct gui_window_desc *d,
                        char *err, size_t cap)
 {
@@ -483,6 +619,8 @@ static bool cocoa_open(struct gui_window *w, const struct gui_window_desc *d,
     cocoa_void_id(win, "setContentView:", view);
     cocoa_sync_size(w);
     cocoa_show(c, d);
+    if ((d->flags & GUI_WINDOW_FULLSCREEN) != 0)
+        (void)gui_window_set_fullscreen(w, true);
     cocoa_release(pool);
     return true;
 }
@@ -493,6 +631,8 @@ static void cocoa_close(struct gui_window *w)
     cocoa_id pool;
     if (!c) return;
     pool = cocoa_pool_push();
+    if (c->fullscreen)
+        (void)cocoa_fullscreen(w, false);
     cocoa_forget(w);
     if (c->view) cocoa_void_id(c->view, "setImage:", NULL);
     if (c->window) {
@@ -936,5 +1076,6 @@ const struct gui_backend_ops gui_backend_cocoa = {
     .clip_set = cocoa_clip_set,
     .clip_get = cocoa_clip_get,
     .set_title = cocoa_title,
+    .set_fullscreen = cocoa_fullscreen,
 };
 #endif

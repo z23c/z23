@@ -318,7 +318,15 @@ bool gui_window_set_mouse_mode(struct gui_window *w, enum gui_mouse_mode m)
 }
 bool gui_window_set_fullscreen(struct gui_window *w, bool on)
 {
-    return w && w->ops->set_fullscreen && w->ops->set_fullscreen(w, on);
+    bool ok;
+    if (!w || !w->ops->set_fullscreen) return false;
+    ok = w->ops->set_fullscreen(w, on);
+    if (ok) w->fullscreen = on;
+    return ok;
+}
+bool gui_window_is_fullscreen(const struct gui_window *w)
+{
+    return w && w->fullscreen;
 }
 void gui_window_set_text_input(struct gui_window *w, bool on,
                                struct gui_rect caret)

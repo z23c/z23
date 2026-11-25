@@ -80,6 +80,7 @@ struct gui_window {
     gui_live_fn live_fn; /* modal size/move loop hook */
     void *live_user;
     bool in_live;
+    bool fullscreen; /* set only after a backend applies the request */
 };
 
 /* Win32 text helpers shared by window_win32.c and window_win32_clip.c. */

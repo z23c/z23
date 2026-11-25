@@ -116,6 +116,7 @@ void gui_window_set_title(struct gui_window *w, const char *utf8);
 void gui_window_set_cursor(struct gui_window *w, enum gui_cursor c);
 bool gui_window_set_mouse_mode(struct gui_window *w, enum gui_mouse_mode m);
 bool gui_window_set_fullscreen(struct gui_window *w, bool on);
+bool gui_window_is_fullscreen(const struct gui_window *w);
 void gui_window_set_text_input(struct gui_window *w, bool on,
                                struct gui_rect caret);
 bool gui_clipboard_set_text(struct gui_window *w, const char *utf8, size_t len);

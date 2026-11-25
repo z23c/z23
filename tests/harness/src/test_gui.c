@@ -782,6 +782,60 @@ static void test_cocoa_auto(void)
 #endif
 }
 
+/* The shared open path must apply GUI_WINDOW_FULLSCREEN on Cocoa. */
+static void test_cocoa_fullscreen(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 fullscreen", .width = 640, .height = 420,
+        .flags = GUI_WINDOW_FULLSCREEN, .surface = GUI_SURFACE_CPU,
+        .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    int32_t pw = 0, ph = 0;
+    float scale = 0.0f;
+    bool opened = gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("fullscreen cocoa window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    gui_window_size(win, &pw, &ph, &scale);
+    CHECK("open applies the fullscreen flag", gui_window_is_fullscreen(win));
+    CHECK("fullscreen frame is larger than requested",
+          scale > 0.0f && pw > (int32_t)(640.0f * scale) &&
+          ph > (int32_t)(420.0f * scale));
+    CHECK("leaving fullscreen clears the flag",
+          gui_window_set_fullscreen(win, false) && !gui_window_is_fullscreen(win));
+    gui_window_close(win);
+#else
+    printf("  open applies the fullscreen flag... SKIP\n");
+#endif
+}
+
+/* A frame that is already wider than the screen must still enter fullscreen. */
+static void test_cocoa_fullscreen_wide(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 fullscreen wide", .width = 4000, .height = 400,
+        .flags = GUI_WINDOW_FULLSCREEN, .surface = GUI_SURFACE_CPU,
+        .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    bool opened = gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("wide fullscreen window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    CHECK("wide window still applies fullscreen", gui_window_is_fullscreen(win));
+    gui_window_close(win);
+#else
+    printf("  wide window still applies fullscreen... SKIP\n");
+#endif
+}
+
 int test_gui(void)
 {
     printf("\n=== gui ===\n");
@@ -789,6 +843,8 @@ int test_gui(void)
     test_wheel_notch();
     test_wheel_small();
     test_cocoa_auto();
+    test_cocoa_fullscreen();
+    test_cocoa_fullscreen_wide();
     test_utf8();
     test_draw();
     test_text();
