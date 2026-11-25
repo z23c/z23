@@ -1270,6 +1270,64 @@ _test_next:;
     return failures;
 }
 
+/* The complement of gw_t_node_input_bound: a deliver chunk inside the
+ * bound its key keeps reaches the handler through the path the gateway
+ * and the CLI share. */
+static int gw_t_deliver_bound(void)
+{
+    int failures = 0;
+
+    TEST("gateway: steer_deliver carries a file past the registry's default string bound") {
+        /* 2049 bytes is 4098 hex characters: two over the 4096 that every
+         * input key without a rule of its own keeps. The registry stopped
+         * such a call in front of the handler (INVALID_INPUT, phase
+         * normalize) on the path the gateway and the CLI share, so no file
+         * from 2049 bytes to one whole 16384-byte chunk could be delivered
+         * while the handler's own tests, which call it directly, passed.
+         * The name ends in .c because the handler takes C source and header
+         * names only. */
+        enum { GW_DELIVER_FILE = 2049, GW_DELIVER_ARGS = 1024 };
+        const char *node = gw_bin("Z23_TEST_NODE_BIN", GW_TEST_NODE_DEFAULT);
+        unsigned char sum[SHA3_512_OUTPUT_SIZE];
+        char gid[64], sha[2 * SHA3_512_OUTPUT_SIZE + 1];
+        unsigned char *src = malloc(GW_DELIVER_FILE);
+        char *hex = malloc(2 * GW_DELIVER_FILE + 1);
+        char *args = malloc(2 * GW_DELIVER_FILE + GW_DELIVER_ARGS);
+        char *b;
+        int st = 0, sn;
+        ASSERT(src != NULL && hex != NULL && args != NULL);
+        for (size_t i = 0; i < GW_DELIVER_FILE; i++)
+            src[i] = (unsigned char)(i * 7u);
+        zcl_sha3_512(src, GW_DELIVER_FILE, sum);
+        zcl_hex_encode(sum, sizeof(sum), sha);
+        zcl_hex_encode(src, GW_DELIVER_FILE, hex);
+        ASSERT(gw_mint(node, "deliver", gid));
+        sn = snprintf(args, 2 * GW_DELIVER_FILE + GW_DELIVER_ARGS,
+                      "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/"
+                      "call\",\"params\":{\"name\":\"steer_deliver\","
+                      "\"arguments\":{\"from\":\"" GW_SENDER "\",\"ref\":"
+                      "\"job-2\",\"upload_id\":\"fedcba9876543210fedcba9876543210\","
+                      "\"name\":\"b.c\",\"size\":%d,\"sha3_512\":"
+                      "\"%s\",\"offset\":0,\"data_hex\":\"%s\"}}}",
+                      GW_DELIVER_FILE, sha, hex);
+        ASSERT(sn > 0 && (size_t)sn < 2 * GW_DELIVER_FILE + GW_DELIVER_ARGS);
+        b = gw_post_auth("/steer", args, gid, &st);
+        ASSERT(b != NULL);
+        ASSERT(gw_body_has(b, "\"isError\":false"));
+        ASSERT(gw_body_has(b, "quarantined"));
+        ASSERT(gw_body_has(b, sha));
+        ASSERT(!gw_body_has(b, "INVALID_INPUT"));
+        ASSERT(!gw_token_leaks(gid));
+        free(b);
+        free(args);
+        free(hex);
+        free(src);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int gw_t_auth(void);
 /* RFC 7636 Appendix B vector: the gateway's S256 must reproduce it. */
 static const char *const GW_OAUTH_VERIFIER =
@@ -4674,6 +4732,7 @@ static const struct gw_case g_gw_cases[] = {
     GW_CASE(gw_t_routes, 0),
     GW_CASE(gw_t_handshake, 0),
     GW_CASE(gw_t_calls, 1),
+    GW_CASE(gw_t_deliver_bound, 1),
     GW_CASE(gw_t_node_input_bound, 0),
 #if defined(__linux__)
     GW_CASE(gw_t_bound_pressure, 0),
@@ -4714,7 +4773,8 @@ static const struct gw_case g_gw_cases[] = {
  * sub-suite that never joins it fails the base group instead of silently
  * going unrun. */
 static const char *const g_gw_original[] = {
-    "gw_t_routes", "gw_t_handshake", "gw_t_calls", "gw_t_node_input_bound",
+    "gw_t_routes", "gw_t_handshake", "gw_t_calls", "gw_t_deliver_bound",
+    "gw_t_node_input_bound",
 #if defined(__linux__)
     "gw_t_bound_pressure",
 #endif

@@ -60,6 +60,13 @@ size_t zcl_command_registry_input_str_max(const char *key)
     /* Hex of a declarative build recipe (zcode.package.recipe wire). */
     if (strcmp(key, "recipe_hex") == 0)
         return 2u * (size_t)VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES;
+    /* Hex of one fleet steer deliver chunk (fleet.steer.deliver): the
+     * quarantine inbox's FSI_CHUNK, 16384 bytes. A number, not that header:
+     * this file includes none under tools/. test_command_input_bounds.c
+     * holds the two equal, and under the default bound the registry refused
+     * every file over 2048 bytes before the handler that decodes them. */
+    if (strcmp(key, "data_hex") == 0)
+        return 2u * 16384u;
     /* Canonical hex of the bounded inline c23_corpus_checkpoint.v1 read.
      * The static verifier derives its wire and shard ceilings by querying
      * this same rule, so the transport can neither truncate an admitted

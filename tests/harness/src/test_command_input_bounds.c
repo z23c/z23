@@ -10,6 +10,7 @@
  *   manifest_hex  2 * VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES  (2 MiB chars)
  *   recipe_hex    2 * VCS_PACKAGE_RECIPE_MAX_WIRE_BYTES    (512 KiB chars)
  *   release_hex   2 * VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES
+ *   data_hex      2 * FSI_CHUNK (32768 chars), one fleet steer deliver chunk
  *   everything else                     4096 chars
  *
  * and the read frame each leaf gets, since a validator accepting 2 MiB in
@@ -24,6 +25,7 @@
 #include "command/native_evidence_judge.h"
 #include "command/native_app_receive_flow.h"
 #include "command/native_app_receive_job.h"
+#include "command/native_fleet_steer_inbox.h"
 #include "session/fleet_board_proto.h"
 
 #include "fleetledger/fleet_ledger.h"
@@ -405,6 +407,82 @@ static int t_wiki_text_bounds(void)
         cib_accepts("code.have", "text", 4096, why, sizeof(why)));
     CIB_CHECK("unrelated text retains the default bound",
         !cib_accepts("code.have", "text", 4097, why, sizeof(why)));
+    return failures;
+}
+
+/* ── 2b. One fleet steer deliver chunk reaches its handler ────────────── */
+
+/* Leaves of the live catalog that declare `key`, and whether each one is
+ * `only`. The bound is chosen by key name alone, so a key raised past the
+ * default has to stay one leaf's key. */
+static size_t cib_key_leaves(const char *key, const char *only, bool *alone)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    size_t leaves = 0;
+    *alone = true;
+    for (size_t i = 0; i < reg->count; i++) {
+        const struct zcl_command_spec *spec = &reg->commands[i];
+        if (!spec->input_keys || !spec->input_keys[0])
+            continue;
+        const char *at = spec->input_keys;
+        char token[128];
+        while (*at) {
+            const char *end = strchr(at, ',');
+            size_t len = end ? (size_t)(end - at) : strlen(at);
+            if (len > 0 && len < sizeof(token)) {
+                memcpy(token, at, len);
+                token[len] = 0;
+                if (strcmp(token, key) == 0) {
+                    leaves++;
+                    if (!only || strcmp(spec->path, only) != 0)
+                        *alone = false;
+                }
+            }
+            if (!end)
+                break;
+            at = end + 1;
+        }
+    }
+    return leaves;
+}
+
+/* The deliver handler asks for whole FSI_CHUNK chunks and refuses any other
+ * length. Under the default string bound the registry stopped every file
+ * over 2048 bytes in front of it, so the catalog's "one 16 KiB chunk" was
+ * a promise no call could keep (measured: INVALID_INPUT, phase normalize). */
+static int t_deliver_data_hex_bounds(void)
+{
+    int failures = 0;
+    const char *path = "fleet.steer.deliver", *key = "data_hex";
+    const size_t chunk = 2u * (size_t)FSI_CHUNK;
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), path, NULL);
+    char why[256];
+    bool alone = false;
+    size_t leaves = cib_key_leaves(key, path, &alone);
+    CIB_CHECK("fleet steer deliver resolves", spec != NULL);
+    if (!spec)
+        return failures;
+    CIB_CHECK("a 2049-byte file is one chunk the registry admits",
+        cib_accepts(path, key, 4098, why, sizeof(why)));
+    CIB_CHECK("a whole 16384-byte chunk is admitted",
+        cib_accepts(path, key, chunk, why, sizeof(why)));
+    CIB_CHECK("more than a chunk is refused",
+        !cib_accepts(path, key, chunk + 2u, why, sizeof(why)));
+    CIB_CHECK("the refusal names the chunk bound",
+        strstr(why, "32768") != NULL);
+    CIB_CHECK("an odd hex length inside the bound is the handler's to refuse",
+        cib_accepts(path, key, 4097, why, sizeof(why)));
+    CIB_CHECK("an empty chunk is refused",
+        !cib_accepts(path, key, 0, why, sizeof(why)));
+    CIB_CHECK("only fleet.steer.deliver declares the key",
+        leaves == 1 && alone);
+    CIB_CHECK("the bound is the inbox chunk's own",
+        zcl_command_registry_input_str_max(key) == chunk);
+    CIB_CHECK("the read frame holds the chunk",
+        zcl_command_registry_input_budget_bytes(spec) > chunk);
+    CIB_CHECK("the upload name beside it keeps the default bound",
+        !cib_accepts(path, "name", 4097, why, sizeof(why)));
     return failures;
 }
 
@@ -2212,6 +2290,7 @@ int test_command_input_bounds(void)
     failures += t_machine_protected_wrong_types();
     failures += t_frame_budget();
     failures += t_wiki_text_bounds();
+    failures += t_deliver_data_hex_bounds();
     failures += t_no_collateral_loosening();
     failures += t_vault_effects_array();
     failures += t_liquidity_numeric_input();
