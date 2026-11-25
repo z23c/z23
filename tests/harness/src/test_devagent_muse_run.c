@@ -3658,6 +3658,30 @@ static int mr_glue_job(struct wkr_job *job, const struct mr_dirs *d,
     return 0;
 }
 
+static int mr_glue_gate_cases(struct wkr_job *job, const struct mr_dirs *d,
+    struct wkr_result *res, char task[1024])
+{
+    int failures = 0;
+    (void)snprintf(task, 1024,
+        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: devagent_mail\n"
+        "muse-model: \n\nDo it.\n");
+    MR_CHECK("glue legacy gate task", mr_glue_job(job, d, task) == 0);
+    mr_glue_calls = 0;
+    (void)mr_glue_executor(job, res);
+    MR_CHECK("glue legacy gate resolves to full id", mr_glue_calls == 1 &&
+        strcmp(mr_glue_gate, "test_devagent_mail") == 0);
+    (void)snprintf(task, 1024,
+        "muse-workspace: /tmp\nmuse-scope: src/\n"
+        "muse-gate: definitely-not-a-test-group\nmuse-model: \n\nDo it.\n");
+    MR_CHECK("glue unknown gate task", mr_glue_job(job, d, task) == 0);
+    mr_glue_calls = 0;
+    MR_CHECK("glue unknown gate refused before submission",
+        mr_glue_executor(job, res) && mr_glue_calls == 0 &&
+        strcmp(res->terminal, "refused") == 0 && res->rc == 1 &&
+        strstr(res->evidence, "unregistered test gate") != NULL);
+    return failures;
+}
+
 static int mr_failures_glue(void)
 {
     int failures = 0;
@@ -3775,23 +3799,7 @@ static int mr_failures_glue(void)
     (void)mr_glue_executor(&job, &res);
     MR_CHECK("glue absent model falls back", mr_glue_calls == 1 &&
         strcmp(mr_glue_model, "fallback-model") == 0);
-    (void)snprintf(task, sizeof(task),
-        "muse-workspace: /tmp\nmuse-scope: src/\nmuse-gate: devagent_mail\n"
-        "muse-model: \n\nDo it.\n");
-    MR_CHECK("glue legacy gate task", mr_glue_job(&job, &d, task) == 0);
-    mr_glue_calls = 0;
-    (void)mr_glue_executor(&job, &res);
-    MR_CHECK("glue legacy gate resolves to full id", mr_glue_calls == 1 &&
-        strcmp(mr_glue_gate, "test_devagent_mail") == 0);
-    (void)snprintf(task, sizeof(task),
-        "muse-workspace: /tmp\nmuse-scope: src/\n"
-        "muse-gate: definitely-not-a-test-group\nmuse-model: \n\nDo it.\n");
-    MR_CHECK("glue unknown gate task", mr_glue_job(&job, &d, task) == 0);
-    mr_glue_calls = 0;
-    MR_CHECK("glue unknown gate refused before submission",
-        mr_glue_executor(&job, &res) && mr_glue_calls == 0 &&
-        strcmp(res.terminal, "refused") == 0 && res.rc == 1 &&
-        strstr(res.evidence, "unregistered test gate") != NULL);
+    failures += mr_glue_gate_cases(&job, &d, &res, task);
     return failures;
 }
 
