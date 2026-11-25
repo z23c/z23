@@ -416,6 +416,9 @@ static int test_onion_persist_fleet_default(void)
     bool pure_off_no_onion_peer =
         !args_onion_persist_default(true, clearnet_peer, 1);
     bool pure_off_no_peers = !args_onion_persist_default(true, NULL, 0);
+    bool host_on = args_onion_persist_for_hosting(true, 0);
+    bool host_off_plain = !args_onion_persist_for_hosting(false, 0);
+    bool host_off_private = !args_onion_persist_for_hosting(true, 1);
 
     /* -tor + a pinned .onion addnode, no explicit -onion-persist: defaults
      * ON. Order-independent — the addnode arrives before -tor here. */
@@ -449,15 +452,18 @@ static int test_onion_persist_fleet_default(void)
 
     if (pure_off_no_tor && pure_on && pure_off_no_onion_peer &&
         pure_off_no_peers && fleet_defaults_on && plain_stays_ephemeral &&
-        forced_off && explicit_on) {
+        forced_off && explicit_on && host_on && host_off_plain &&
+        host_off_private) {
         printf("OK\n");
     } else {
         printf("FAIL (pure_off_no_tor=%d pure_on=%d pure_off_no_onion_peer=%d "
                "pure_off_no_peers=%d fleet_defaults_on=%d "
-               "plain_stays_ephemeral=%d forced_off=%d explicit_on=%d)\n",
+               "plain_stays_ephemeral=%d forced_off=%d explicit_on=%d host_on=%d "
+               "host_off_plain=%d host_off_private=%d)\n",
                pure_off_no_tor, pure_on, pure_off_no_onion_peer,
                pure_off_no_peers, fleet_defaults_on, plain_stays_ephemeral,
-               forced_off, explicit_on);
+               forced_off, explicit_on, host_on, host_off_plain,
+               host_off_private);
         failures++;
     }
 

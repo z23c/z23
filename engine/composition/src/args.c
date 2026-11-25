@@ -150,7 +150,9 @@ void print_usage_all(const char *prog)
     printf("  -flysync            New empty datadir: install a rung bundle, sync only above it\n");
     printf("  -flysync-auto       Use FlySync on an empty datadir, otherwise normal sync\n");
     printf("  -packagehost=0|1    Host ZCODE package content from <datadir>/zcode\n");
-    printf("                      (default 0, hosting off; local store only)\n");
+    printf("                      (default 0, hosting off; local store only). With 1 the\n");
+    printf("                      onion identity is stable (like -onion-persist) so peers\n");
+    printf("                      can fetch from it; -onion-persist=0 opts out.\n");
     printf("  -noisetransport        Enable authenticated Noise XX peer transport\n");
     printf("                      (required for the ZCODE DHT; default off)\n");
     printf("  -v2transport        Deprecated alias for -noisetransport\n");
@@ -461,6 +463,16 @@ bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
         if (addnode_peers[i] && strstr(addnode_peers[i], ".onion"))
             return true;
     return false;
+}
+
+/* A node that hosts packages (-packagehost=1) is reached by other nodes,
+ * and a throwaway onion maps only a virtual port: peers cannot fetch its
+ * bundles by hash, which left new nodes on a days-long genesis sync. Give
+ * such a node a stable onion that maps the P2P and file-service ports.
+ * Private wallet broadcast serves no onion, so it keeps the default off. */
+bool args_onion_persist_for_hosting(bool packagehost, int wallet_broadcast)
+{
+    return packagehost && wallet_broadcast != 1;
 }
 
 /* ── Tor admission: the words for a refusal the pure policy decided ────
@@ -1404,6 +1416,9 @@ static int args_admit_options(struct app_context *ctx)
     if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
         ctx->onion_persist = args_onion_persist_default(
             ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
+    if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
+        ctx->onion_persist = args_onion_persist_for_hosting(
+            GetBoolArg("-packagehost", false), ctx->wallet_broadcast);
     if (args_resolve_private_listeners(ctx) != 0)
         return 1;
     {

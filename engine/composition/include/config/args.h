@@ -100,6 +100,7 @@ int args_resolve_wallet_broadcast(struct app_context *ctx, const char *value);
  * refusal when -onion-persist or -onion-rotate is set; otherwise keeps the
  * persistent-identity default off. */
 int args_private_mode_onion_policy(struct app_context *ctx);
+bool args_onion_persist_for_hosting(bool packagehost, int wallet_broadcast);
 bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
                                 int n_addnode_peers);
 
