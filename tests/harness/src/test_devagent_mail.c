@@ -963,6 +963,39 @@ static bool dvx_keep_ref(const char *ref, void *ctx)
     return strcmp(ref, (const char *)ctx) == 0;
 }
 
+static int test_mail_filtered_crlf_hash(void)
+{
+    int failures = 0;
+    TEST("mail: filtered CRLF row preserves raw hash and cursor") {
+        struct dvx_call p;
+        char cursor[4096] = "";
+        dvx_isolate("filtered_crlf_hash");
+        dvx_import_stream("inbox.peer",
+            "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"reader\",\"kind\":\"note\",\"body\":\"escaped\",\"ref\":\"fo\\u006f\",\"steer_disposition\":{\"state\":\"BLOCKED\"}}\r\n"
+            "{\"seq\":2,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"C\",\"to\":\"reader\",\"kind\":\"note\",\"body\":\"filtered\",\"ref\":\"other\"}\n"
+            "{\"seq\":\"bad\",\"ref\":\"else\"}\n");
+        for (int brief = 0; brief < 2; ++brief) {
+            dvx_pull_agent(&p, "reader", "foo");
+            ASSERT(dvx_run_mode(&p, brief != 0) && dvx_ok(&p));
+            ASSERT_EQ(dvx_int(&p, "count"), 1);
+            ASSERT_EQ(dvx_int(&p, "skipped"), 1);
+            const struct json_value *rows = dvx_arr(&p, "rows");
+            ASSERT(rows && rows->num_children == 1);
+            const struct json_value *row = &rows->children[0];
+            ASSERT_STR_EQ(json_get_str(json_get(row, "row_sha3")),
+                "7ca99a6e8377db62bb815dd5107057f3647eff920d9db6dd7b71fc48cb26eaff");
+            ASSERT_STR_EQ(json_get_str(json_get(row, "observed_disposition")), "BLOCKED");
+            if (!brief) (void)snprintf(cursor, sizeof(cursor), "%s", dvx_str(&p, "next_since"));
+            else ASSERT_STR_EQ(dvx_str(&p, "next_since"), cursor);
+            dvx_end(&p);
+        }
+        dvx_restore();
+        PASS();
+    } _test_next:;
+    dvx_restore();
+    return failures;
+}
+
 static int test_mail_ref_escaped_and_skipped(void)
 {
     int failures = 0;
@@ -2668,6 +2701,7 @@ static int test_mail_read_side_checks(void)
     failures += test_mail_brief_window();
     failures += test_mail_ref_filter_and_agent_resume();
     failures += test_mail_ref_escaped_and_skipped();
+    failures += test_mail_filtered_crlf_hash();
     failures += test_mail_stored_cursor();
     failures += test_mail_board_fields();
 #if !defined(_WIN32)

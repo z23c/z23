@@ -1927,12 +1927,12 @@ static bool dvm_row_matches(const struct dvm_row *r,
         (!filter->keep || filter->keep(r->ref, filter->keep_ctx));
 }
 
-static bool dvm_row_wanted(char *buf, const struct dvm_pull_filter *filter,
+static bool dvm_row_wanted(const char *buf, const struct dvm_pull_filter *filter,
                            struct dvm_row *r, struct dvm_pull_state *ps)
 {
     size_t len = strlen(buf);
     while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
-        buf[--len] = '\0';
+        --len;
     if (len == 0)
         return false;
     if (!dvm_parse_row(buf, r)) {
@@ -1972,11 +1972,11 @@ static void dvm_stream_next(struct dvm_stream *s,
             s->off = end;
             continue;
         }
-        dvm_row_hash(ps->line, raw_len, hash);
         if (!dvm_row_wanted(ps->line, filter, &s->head, ps)) {
             s->off = end;
             continue;
         }
+        dvm_row_hash(ps->line, raw_len, hash);
         (void)snprintf(s->head.stream, sizeof(s->head.stream), "%s", s->name);
         s->head.row_offset = start;
         s->head.row_end = end;

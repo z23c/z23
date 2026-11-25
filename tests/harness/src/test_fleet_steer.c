@@ -8245,6 +8245,11 @@ static int fmx_compact_result_variants(void)
 static int fmx_compact_variant_budget(void)
 {
     int failures = 0;
+    const clock_iface_t *saved_clock = clock_default();
+    clock_iface_t fixed_clock = {fmx_activity_monotonic_ns,
+                                 fmx_activity_wall_ms, (void *)saved_clock};
+    /* Both projections must observe the same ages across a second boundary. */
+    clock_set_default(&fixed_clock);
     TEST("steer: byte-limited compact pages retain result variants") {
         ASSERT(fmx_forward_setup("compact_variant_budget"));
         char body[1300]; memset(body, 'x', sizeof(body) - 1); body[sizeof(body) - 1] = 0;
@@ -8274,7 +8279,7 @@ static int fmx_compact_variant_budget(void)
         ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
         fmx_end(&full); fmx_end(&compact); fmx_restore(); PASS();
     } _test_next:;
-    fmx_restore(); return failures;
+    fmx_restore(); clock_set_default(saved_clock); return failures;
 }
 
 static int fmx_compact_variant_conflict(void)
