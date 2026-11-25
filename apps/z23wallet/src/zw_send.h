@@ -149,12 +149,17 @@ struct zw_send {
     size_t shown;               /* recipient boxes on the page */
     bool from_user, from_open, max_on, reveal_open, reply_warned, details_open, fail_pending;
     enum zw_send_dlg dlg;
-    bool shield_draft, clear_shield;
+    bool shield_draft;
     size_t memo_for;
     char dlg_title[96], dlg_body[1200], dlg_detail[700];
     struct zw_send_plan pending; /* the plan the confirm dialog shows and commits */
     enum zw_send_cat pending_cat;
     char pending_look[400];
+    bool review_bound;
+    uint32_t review_generation;
+    enum zw_profile review_profile;
+    uint16_t review_port;
+    char review_datadir[ZW_PATH];
     struct zw_sender *runner;
     struct zw_send_status st;
     struct { bool active; } pend; /* mirrors the current runner for Home's occupancy check */
@@ -166,7 +171,8 @@ struct zw_send {
     uint32_t key;
 };
 struct zw_send *zw_send_new(void);
-void zw_send_cancel_review(struct zw_send *s);
+void zw_send_cancel_review(struct zw_send *s, struct gui_ui *ui);
+bool zw_send_review_current(const struct zw_send *s, const struct zw_model *m);
 void zw_send_free(struct zw_send *s);
 struct zw_send_env {
     struct gui_window *win;

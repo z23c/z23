@@ -262,7 +262,7 @@ void zw_shell_publish(const struct zw_model *m, struct gui_ui *ui, int64_t now_s
         snprintf(t, sizeof(t), "Node: not connected yet");
     } else if (!strcmp(zw_node_kind(m), "zclassicd")) {
         zw_version_decode(m->have_info && m->info.version ? m->info.version : m->net.version, ver, sizeof(ver));
-        snprintf(t, sizeof(t), "Node (zclassicd): %s at 127.0.0.1:%u (read only)", ver, (unsigned)m->port);
+        snprintf(t, sizeof(t), "Node (zclassicd): %s at 127.0.0.1:%u", ver, (unsigned)m->port);
     } else {
         snprintf(t, sizeof(t), "Node (Z23): %s at 127.0.0.1:%u", m->net.subversion[0] ? m->net.subversion : "Z23",
                  (unsigned)m->port);

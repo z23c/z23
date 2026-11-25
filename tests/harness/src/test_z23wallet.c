@@ -13,6 +13,9 @@
 #include <time.h>
 
 #include "../../../apps/z23wallet/src/zw.h"
+#define zw_app_run zw_app_run_for_test
+#include "../../../apps/z23wallet/src/zw_app.c"
+#undef zw_app_run
 #include "z23wallet_mock_node.h"
 #include "platform/time_compat.h"
 
@@ -35,6 +38,10 @@ static int g_fail;
 #define NOW_S INT64_C(1700000016) /* fixture tiptime + 16 s */
 #define ZA "zs1fixtureaddressa000000000000000000000000000000000000000000000000000000000000"
 #define TA "t1fixtureaddressa000000000000000000"
+#define SEND_T1 "t1KRqwQhktLV4BjbNLiuH6pb3AMoszZKcQB"
+#define SEND_T2 "t1Lz5sUzNoMBWmq8qk1zS4q5A54RgF5e4Ua"
+#define SEND_Z0 "zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpq6d8g"
+#define SEND_Z1 "zs1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zx3shhc"
 
 static void mkdirs(const char *path)
 {
@@ -576,6 +583,73 @@ static void test_rpc_auto_fallback_dead_port(void)
     node_stop(&l);
 }
 
+static void check_balance_fallback_app(struct zw_result *res, struct zw_options *o,
+                                       struct zw_mock *old, struct zw_mock *replacement)
+{
+    struct app a = {0};
+    a.o = o;
+    zw_model_init(&a.model, ZW_PROFILE_AUTO);
+    a.model.send = zw_send_new();
+    a.screen = ZW_SCREEN_HOME;
+    drain_result(&a, res);
+    CHECK("cross-endpoint balances are not published or fresh", !a.model.bal && !a.model.rcv.fresh && !a.model.rcv.list);
+    home_shield(&a, NULL);
+    send_action(&a, "send.confirm.go");
+    CHECK("mixed balances cannot prepare a draft or runner", a.screen == ZW_SCREEN_HOME &&
+          !a.model.send->form.to[0].addr[0] && !a.model.send->pending.n && !a.model.send->runner);
+    CHECK("mixed fallback sends nothing", !zw_mock_saw(old, "\"method\":\"z_sendmany\"") &&
+          !zw_mock_saw(replacement, "\"method\":\"z_sendmany\""));
+    zw_send_free(a.model.send);
+    free(a.model.rcv.list);
+    zw_model_free(&a.model);
+}
+
+static void test_rpc_balance_fallback(void)
+{
+    struct node z, l;
+    hermetic_env();
+    set_env("HOME", TMP "/fbprofile");
+    set_env("APPDATA", TMP "/fbprofile/roaming");
+    CHECK("balance fallback nodes start", node_start(&z, "send_success", "balance_fb_z23") &&
+          legacy_start(&l, "home_legacy", "balance_fb_legacy", "rpcuser=u\nrpcpassword=p\n", "u:p"));
+    zw_mock_stop_after(z.mock, "listunspent");
+    char conf[128];
+    mkdirs(LEGACY_HOME);
+    snprintf(conf, sizeof(conf), "rpcuser=u\nrpcpassword=p\nrpcport=%u\n", (unsigned)l.port);
+    write_file(LEGACY_HOME, "zclassic.conf", conf);
+    char port[16];
+    snprintf(port, sizeof(port), "%u", (unsigned)z.port);
+    write_file(z.dir, ".rpcport", port);
+    struct zw_options o = { .profile = ZW_PROFILE_AUTO };
+    snprintf(o.datadir, sizeof(o.datadir), "%s", z.dir);
+    struct zw_rpc *r = calloc(1, sizeof(*r));
+    if (r) r->opt = &o;
+    struct zw_result res;
+    memset(&res, 0, sizeof(res));
+    enum zw_err e = r ? zw_query_run(r, ZW_Q_BALANCES, &res) : ZW_ERR_NOMEM;
+    CHECK("the shielded balance call falls back to the replacement", e == ZW_ERR_REFUSED &&
+          res.profile == ZW_PROFILE_ZCLASSICD && res.port == l.port);
+    CHECK("old transparent and new shielded calls both happen without publishing a mix", !res.bal &&
+          zw_mock_saw(z.mock, "\"method\":\"listunspent\"") && zw_mock_saw(l.mock, "\"method\":\"z_listunspent\""));
+    if (e == ZW_OK) {
+        zw_result_release(&res);
+        if (r) zw_endpoint_wipe(&r->ep);
+        free(r);
+        remove_file(LEGACY_HOME, "zclassic.conf");
+        hermetic_env();
+        node_stop(&z);
+        node_stop(&l);
+        return;
+    }
+    check_balance_fallback_app(&res, &o, z.mock, l.mock);
+    if (r) zw_endpoint_wipe(&r->ep);
+    free(r);
+    remove_file(LEGACY_HOME, "zclassic.conf");
+    hermetic_env();
+    node_stop(&z);
+    node_stop(&l);
+}
+
 /* listunspent leaves "address" out for multisig and nonstandard scripts. */
 static void test_rpc_unspent_without_address(void)
 {
@@ -625,6 +699,7 @@ static void test_rpc(void)
     test_rpc_stalled();
     test_rpc_auto_prefers_z23();
     test_rpc_auto_fallback_dead_port();
+    test_rpc_balance_fallback();
     test_rpc_unspent_without_address();
     test_mock_clock_shift();
 }
@@ -1482,6 +1557,143 @@ static void test_goldens(void)
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) run_golden(&cases[i]);
 }
 
+static bool app_case_up(struct app *a, struct node *n, const char *tag)
+{
+    memset(a, 0, sizeof(*a));
+    if (!legacy_start(n, "send_success", tag, "rpcuser=u\nrpcpassword=p\n", "u:p")) return false;
+    a->o = &n->opt;
+    zw_model_init(&a->model, n->opt.profile);
+    for (enum zw_query q = 0; q < ZW_Q_COUNT; q++) {
+        struct zw_result r;
+        memset(&r, 0, sizeof(r));
+        zw_query_run(n->rpc, q, &r);
+        zw_model_apply(&a->model, &r);
+    }
+    a->model.last_update_s = a->model.now_s = wall_s();
+    struct gui_window_desc d = { .title_utf8 = "app test", .width = 1100, .height = 720,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_HEADLESS };
+    char err[64];
+    gui_window_open(&d, &a->win, err, sizeof(err));
+    a->tree = gui_tree_new();
+    a->ui = a->tree ? gui_ui_new(a->tree) : NULL;
+    if (a->ui) gui_ui_set_window(a->ui, a->win);
+    a->model.send = zw_send_new();
+    a->worker = zw_worker_start(a->win, &n->opt);
+    a->screen = ZW_SCREEN_HOME;
+    return a->win && a->tree && a->ui && a->model.send && a->worker && a->model.bal;
+}
+
+static void app_case_down(struct app *a, struct node *n)
+{
+    if (a->worker) zw_worker_stop(a->worker);
+    zw_send_free(a->model.send);
+    free(a->model.rcv.list);
+    a->model.rcv.list = NULL;
+    gui_ui_free(a->ui);
+    gui_tree_free(a->tree);
+    gui_window_close(a->win);
+    zw_model_free(&a->model);
+    node_stop(n);
+}
+
+static bool app_balance_reply(struct app *a)
+{
+    if (!a->model.bal) return false;
+    struct zw_result r = { .kind = ZW_Q_BALANCES, .generation = a->model.generation, .err = ZW_OK,
+                           .profile = a->model.profile, .port = a->model.port };
+    snprintf(r.datadir, sizeof(r.datadir), "%s", a->model.datadir);
+    r.bal = calloc(1, sizeof(*r.bal));
+    if (!r.bal) return false;
+    *r.bal = *a->model.bal;
+    drain_result(a, &r);
+    return true;
+}
+
+static bool app_replacement_reply(struct app *a)
+{
+    struct zw_result r = { .kind = ZW_Q_BALANCES, .generation = a->model.generation, .err = ZW_OK,
+                           .profile = a->model.profile, .port = a->model.port };
+    snprintf(r.datadir, sizeof(r.datadir), "%s", a->model.datadir);
+    r.bal = calloc(1, sizeof(*r.bal));
+    if (!r.bal) return false;
+    r.bal->n = 2;
+    r.bal->rows[0] = (struct zw_bal_row){ .addr = SEND_T2, .kind = ZW_ADDR_PUBLIC,
+                                          .zat = 900000000, .confirmed_zat = 900000000 };
+    r.bal->rows[1] = (struct zw_bal_row){ .addr = SEND_Z1, .kind = ZW_ADDR_SAPLING,
+                                          .zat = 1250000000, .confirmed_zat = 1250000000 };
+    drain_result(a, &r);
+    return true;
+}
+
+static void app_open_confirm(struct app *a)
+{
+    zw_send_prefill_from(a->model.send, SEND_T1);
+    snprintf(a->model.send->form.to[0].addr, sizeof(a->model.send->form.to[0].addr), "%s", SEND_T1);
+    snprintf(a->model.send->form.to[0].amount, sizeof(a->model.send->form.to[0].amount), "1");
+    a->model.chain.tiptime = wall_s();
+    a->model.last_update_s = wall_s();
+    send_action(a, "send.review");
+}
+
+static void test_app_review_handover(void)
+{
+    struct app a;
+    struct node n;
+    if (!app_case_up(&a, &n, "app_review_handover")) { CHECK("app review fixture", false); app_case_down(&a, &n); return; }
+    CHECK("app accepts its initial balance snapshot", app_balance_reply(&a));
+    app_open_confirm(&a);
+    CHECK("app opens a bound confirmation", a.model.send->dlg == ZW_DLG_CONFIRM && a.model.send->review_bound);
+    refresh_now(&a);
+    CHECK("F5 closes and invalidates the confirmation",
+          a.model.send->dlg == ZW_DLG_NONE && !a.model.send->review_bound && !a.model.send->pending.n);
+    send_action(&a, "send.confirm.go");
+    CHECK("F5 cannot commit through the refreshed wallet",
+          !a.model.send->runner && !zw_mock_saw(n.mock, "\"method\":\"z_sendmany\""));
+    app_case_down(&a, &n);
+}
+
+static void test_app_home_handover(void)
+{
+    struct app a;
+    struct node n;
+    if (!app_case_up(&a, &n, "app_home_handover")) { CHECK("app Home fixture", false); app_case_down(&a, &n); return; }
+    CHECK("app Home accepts its initial snapshot", app_balance_reply(&a));
+    app_open_confirm(&a);
+    struct zw_result change = { .kind = ZW_Q_CHAIN, .generation = a.model.generation, .err = ZW_OK,
+                                .profile = ZW_PROFILE_Z23, .port = (uint16_t)(a.model.port + 1) };
+    snprintf(change.datadir, sizeof(change.datadir), "%s", TMP "/replacement_wallet");
+    drain_result(&a, &change);
+    CHECK("automatic handover invalidates confirmation", a.model.send->dlg == ZW_DLG_NONE && !a.model.send->review_bound);
+    zw_send_clear_form(a.model.send, a.ui);
+    home_shield(&a, NULL);
+    CHECK("stale balances cannot recreate a Home snapshot", !a.model.rcv.list && !a.model.rcv.fresh);
+    CHECK("stale Home stays out of Send", a.screen == ZW_SCREEN_HOME && !a.model.send->form.to[0].addr[0]);
+    CHECK("replacement balances arrive", app_replacement_reply(&a));
+    home_shield(&a, NULL);
+    CHECK("fresh balances restore Home shielding", a.model.rcv.list && a.screen == ZW_SCREEN_SEND);
+    CHECK("replacement source and target supersede the old wallet",
+          !strcmp(a.model.send->form.from, SEND_T2) && !strcmp(a.model.send->form.to[0].addr, SEND_Z1));
+    CHECK("old addresses do not survive replacement", strcmp(a.model.send->form.from, SEND_T1) &&
+          strcmp(a.model.send->form.to[0].addr, SEND_Z0));
+    app_case_down(&a, &n);
+}
+
+static void test_node_line_send_wording(void)
+{
+    struct zw_model m = { .conn = ZW_CONN_ONLINE, .profile = ZW_PROFILE_ZCLASSICD, .port = 8023,
+                          .have_info = true, .info = { .version = 2010212 } };
+    char line[160];
+    zw_node_line(&m, line, sizeof(line));
+    CHECK("zclassicd node line no longer claims read only",
+          !strcmp(line, "Node: zclassicd v2.1.2-beta13 at 127.0.0.1:8023") && !strstr(line, "read only"));
+    struct scene s = { .m = m };
+    scene_render(&s, ZW_SCREEN_HOME, 1100, 720, 1.0f);
+    const char *about = gui_ui_get(s.ui, "about.node");
+    CHECK("About no longer claims zclassicd is read only",
+          !strcmp(about, "Node (zclassicd): v2.1.2-beta13 at 127.0.0.1:8023") && !strstr(about, "read only"));
+    scene_free(&s);
+}
+
 int test_z23wallet(void)
 {
     printf("\n=== z23wallet ===\n");
@@ -1513,5 +1725,8 @@ int test_z23wallet(void)
     test_home_layout();
     test_home_row_menu();
     test_goldens();
+    test_app_review_handover();
+    test_app_home_handover();
+    test_node_line_send_wording();
     return g_fail;
 }

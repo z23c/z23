@@ -202,6 +202,7 @@ enum zw_menu { ZW_MENU_NONE, ZW_MENU_FILE, ZW_MENU_EDIT, ZW_MENU_HELP, ZW_MENU_R
 
 struct zw_receive {
     struct zw_balances *list; /* Home's shield-target snapshot; owned by its caller */
+    bool fresh;               /* model.bal was accepted for the current node generation */
     bool creating;
     char fresh_z[100];
 };

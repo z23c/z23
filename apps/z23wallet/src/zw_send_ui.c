@@ -237,8 +237,9 @@ bool zw_send_sync(struct zw_send *s, const struct zw_send_env *env)
 {
     if (!s) return false;
     uint32_t old = s->key;
+    if (!zw_send_review_current(s, env->m)) zw_send_cancel_review(s, env->ui);
     s->pend.active = zw_send_busy(s);
-    if (s->clear_shield || (s->shield_draft && env->m->bal && !row_of(env->m, s->form.from))) {
+    if (s->shield_draft && env->m->bal && !row_of(env->m, s->form.from)) {
         zw_send_clear_form(s, env->ui);
         s->from_user = false;
     }

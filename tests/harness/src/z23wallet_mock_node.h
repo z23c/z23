@@ -18,6 +18,8 @@ struct zw_mock;
 struct zw_mock *zw_mock_start(const char *scenario_dir, const char *datadir,
                               uint16_t *port_out);
 void zw_mock_stop(struct zw_mock *m);
+/* Complete the next reply for method, then refuse later connections. */
+void zw_mock_stop_after(struct zw_mock *m, const char *method);
 unsigned zw_mock_request_count(const struct zw_mock *m);
 /* Request bodies seen so far contain this text? */
 bool zw_mock_saw(const struct zw_mock *m, const char *needle);

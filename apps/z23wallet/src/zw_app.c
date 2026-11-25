@@ -168,39 +168,51 @@ static void poll_tick(struct app *a)
     gui_window_timer_set(a->win, T_POLL, poll_delay_ms(a), false);
 }
 
+static void wallet_handover(struct app *a)
+{
+    free(a->model.rcv.list);
+    a->model.rcv.list = NULL;
+    a->model.rcv.fresh = false;
+    zw_send_cancel_review(a->model.send, a->ui);
+}
+
+static void drain_result(struct app *a, struct zw_result *r)
+{
+    int64_t before = a->model.chain.blocks;
+    bool ok = r->err == ZW_OK;
+    enum zw_query kind = r->kind;
+    bool current = r->generation == a->model.generation;
+    uint32_t generation = a->model.generation;
+    uint16_t port = a->model.port;
+    enum zw_profile profile = a->model.profile;
+    char datadir[ZW_PATH];
+    snprintf(datadir, sizeof(datadir), "%s", a->model.datadir);
+    if (!ok) zw_log("query %d failed: kind=%d code=%d", (int)kind, (int)r->err, r->rpc.code);
+    if (zw_model_apply(&a->model, r)) a->model_dirty = true;
+    if (generation != a->model.generation || port != a->model.port || profile != a->model.profile ||
+        strcmp(datadir, a->model.datadir)) {
+        wallet_handover(a);
+    }
+    if (current && generation == a->model.generation && ok && kind == ZW_Q_BALANCES) {
+        a->model.rcv.fresh = true;
+        (void)shield_snapshot(a);
+    }
+    if (!ok) return;
+    a->model.last_update_s = wall_s();
+    if (kind == ZW_Q_CHAIN && a->model.chain.blocks != before) a->need_wallet = true;
+    if (!a->bench_data) {
+        a->bench_data = true;
+        a->bench.first_data_ms = zw_process_age_ms() - a->bench.first_frame_ms;
+    }
+}
+
 static void drain(struct app *a)
 {
     struct zw_result *r = malloc(16 * sizeof(*r));
     if (!r) { zw_log("drain: out of memory"); return; }
     size_t n, total = 0;
     while ((n = zw_worker_drain(a->worker, r, 16)) > 0)
-        for (size_t i = 0; i < n; i++, total++) {
-            int64_t before = a->model.chain.blocks;
-            bool ok = r[i].err == ZW_OK;
-            enum zw_query kind = r[i].kind;
-            bool current = r[i].generation == a->model.generation;
-            uint32_t generation = a->model.generation;
-            uint16_t port = a->model.port;
-            enum zw_profile profile = a->model.profile;
-            char datadir[ZW_PATH];
-            snprintf(datadir, sizeof(datadir), "%s", a->model.datadir);
-            if (!ok) zw_log("query %d failed: kind=%d code=%d", (int)kind, (int)r[i].err, r[i].rpc.code);
-            if (zw_model_apply(&a->model, &r[i])) a->model_dirty = true;
-            if (generation != a->model.generation || port != a->model.port || profile != a->model.profile ||
-                strcmp(datadir, a->model.datadir)) {
-                free(a->model.rcv.list);
-                a->model.rcv.list = NULL;
-            }
-            if (current && generation == a->model.generation && ok && kind == ZW_Q_BALANCES)
-                (void)shield_snapshot(a);
-            if (!ok) continue;
-            a->model.last_update_s = wall_s();
-            if (kind == ZW_Q_CHAIN && a->model.chain.blocks != before) a->need_wallet = true;
-            if (!a->bench_data) {
-                a->bench_data = true;
-                a->bench.first_data_ms = zw_process_age_ms() - a->bench.first_frame_ms;
-            }
-        }
+        for (size_t i = 0; i < n; i++, total++) drain_result(a, &r[i]);
     free(r);
     if (total) { /* a result arrived: the watchdog restarts only if work is still queued */
         gui_window_timer_cancel(a->win, T_WATCHDOG);
@@ -237,8 +249,7 @@ static void watchdog_fired(struct app *a)
     zw_log("%s", line);
     zw_model_watchdog(&a->model, zw_worker_port(a->worker));
     zw_worker_restart(a->worker);
-    free(a->model.rcv.list);
-    a->model.rcv.list = NULL;
+    wallet_handover(a);
     enqueue_all(a);
     a->model_dirty = true;
 }
@@ -291,6 +302,11 @@ static void send_wake(struct app *a)
 
 static bool shield_snapshot(struct app *a)
 {
+    if (!a->model.rcv.fresh) {
+        free(a->model.rcv.list);
+        a->model.rcv.list = NULL;
+        return false;
+    }
     struct zw_balances *list = a->model.bal ? malloc(sizeof(*list)) : NULL;
     if (a->model.bal && !list) {
         free(a->model.rcv.list);
@@ -334,7 +350,7 @@ static void set_screen(struct app *a, size_t s)
         show_msg(a, "Advanced (node stats) opens once you're connected to a node.");
         return;
     }
-    if (a->screen == ZW_SCREEN_SEND) zw_send_cancel_review(a->model.send);
+    if (a->screen == ZW_SCREEN_SEND) zw_send_cancel_review(a->model.send, a->ui);
     a->screen = s;
     a->model.menu = ZW_MENU_NONE;
     a->model_dirty = true;
@@ -344,8 +360,7 @@ static void set_screen(struct app *a, size_t s)
 static void refresh_now(struct app *a)
 {
     a->model.generation++;
-    free(a->model.rcv.list);
-    a->model.rcv.list = NULL;
+    wallet_handover(a);
     enqueue_all(a);
 }
 

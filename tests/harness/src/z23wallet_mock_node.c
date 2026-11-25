@@ -28,6 +28,7 @@ struct zw_mock {
     size_t nrows;
     volatile bool stop;
     unsigned count;
+    char stop_method[48];
     char seen[SEEN_CAP];
     pthread_mutex_t mu;
 };
@@ -185,6 +186,13 @@ static bool reply_row_file(struct zw_mock *m, platform_socket_t c, int status, c
     return true;
 }
 
+static void stop_listening(struct zw_mock *m)
+{
+    m->stop = true;
+    platform_socket_close(m->listener);
+    m->listener = PLATFORM_SOCKET_INVALID;
+}
+
 static void reply_method(struct zw_mock *m, platform_socket_t c, const char *method)
 {
     char path[700], text[8192], out[9000];
@@ -218,6 +226,7 @@ static void reply_method(struct zw_mock *m, platform_socket_t c, const char *met
     }
     snprintf(out, sizeof(out), "{\"result\":%s,\"error\":null,\"id\":1}", text);
     send_reply(c, status, out);
+    if (!strcmp(method, m->stop_method)) stop_listening(m);
 }
 
 static void serve_one(struct zw_mock *m, platform_socket_t c)
@@ -300,9 +309,14 @@ void zw_mock_stop(struct zw_mock *m)
     if (!m) return;
     m->stop = true;
     pthread_join(m->thread, NULL);
-    platform_socket_close(m->listener);
+    if (m->listener != PLATFORM_SOCKET_INVALID) platform_socket_close(m->listener);
     pthread_mutex_destroy(&m->mu);
     free(m);
+}
+
+void zw_mock_stop_after(struct zw_mock *m, const char *method)
+{
+    if (m) snprintf(m->stop_method, sizeof(m->stop_method), "%s", method);
 }
 
 unsigned zw_mock_request_count(const struct zw_mock *m) { return m->count; }

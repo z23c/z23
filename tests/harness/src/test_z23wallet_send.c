@@ -621,6 +621,36 @@ static void sv_page_flow(void)
     page_down(&p);
 }
 
+static void page_review_handover(void)
+{
+    struct page p;
+    if (!page_up(&p, "send_success", true, 1.0f)) { CHECK("handover page fixture", false); return; }
+    type(&p, "s_addr1", T1);
+    type(&p, "s_amt1", "1.5");
+    act(&p, "send.review", NULL);
+    CHECK("review is bound before a node handover", p.s->dlg == ZW_DLG_CONFIRM && p.s->review_bound);
+    struct node replacement;
+    if (!node_up(&replacement, "send_z23", "send_replacement", false)) {
+        CHECK("replacement node starts", false);
+        page_down(&p);
+        return;
+    }
+    unsigned old_calls = zw_mock_request_count(p.n.mock);
+    unsigned replacement_calls = zw_mock_request_count(replacement.mock);
+    p.n.m.profile = replacement.m.profile;
+    p.n.m.port = replacement.port;
+    snprintf(p.n.m.datadir, sizeof(p.n.m.datadir), "%s", replacement.m.datadir);
+    ++p.n.m.generation;
+    p.env.o = &replacement.opt;
+    act(&p, "send.confirm.go", NULL);
+    CHECK("handover closes and invalidates the old confirmation", p.s->dlg == ZW_DLG_NONE && !p.s->review_bound);
+    CHECK("handover clears the pending plan without starting a runner", !p.s->pending.n && !p.s->runner);
+    CHECK("no commit reaches either the old or replacement node",
+          zw_mock_request_count(p.n.mock) == old_calls && zw_mock_request_count(replacement.mock) == replacement_calls);
+    node_down(&replacement);
+    page_down(&p);
+}
+
 /* Syncing: the gate, a memo, a second recipient, Discard, a look-alike. */
 static void page_syncing(struct page *p)
 {
@@ -680,63 +710,81 @@ static void sv_page_states(void)
     page_down(&p);
 }
 
-static void home_shield_draft(void)
+static bool home_shield_discovery(struct page *p)
 {
-    struct page p;
-    if (!page_up(&p, "send_success", true, 1.0f)) { CHECK("shield preview fixture", false); return; }
-    struct zw_model *m = &p.n.m;
+    struct zw_model *m = &p->n.m;
     free(m->rcv.list);
     m->rcv.list = NULL;
-    if (!m->bal) { CHECK("Home balances supplied", false); page_down(&p); return; }
+    if (!m->bal) { CHECK("Home balances supplied", false); return false; }
     size_t funded_rows = m->bal->n;
     m->bal->n = 0;
-    unsigned rpc_before = zw_mock_request_count(p.n.mock);
+    unsigned rpc_before = zw_mock_request_count(p->n.mock);
     CHECK("fresh empty balances need no address query", !zw_shield_source(m->bal) &&
-          zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_EMPTY &&
-          zw_mock_request_count(p.n.mock) == rpc_before);
+          zw_send_home_shield(p->s, &p->env, NULL) == ZW_SHIELD_EMPTY &&
+          zw_mock_request_count(p->n.mock) == rpc_before);
     m->bal->n = funded_rows;
-    CHECK("funded Home asks for a read-only address list", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_READ &&
-          zw_mock_request_count(p.n.mock) == rpc_before);
+    CHECK("funded Home asks for a read-only address list", zw_send_home_shield(p->s, &p->env, NULL) == ZW_SHIELD_READ &&
+          zw_mock_request_count(p->n.mock) == rpc_before);
     ++m->generation;
     CHECK("Home discovery after identity reset cannot create or spend",
-          zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_READ && !m->rcv.creating &&
-          zw_mock_request_count(p.n.mock) == rpc_before);
+          zw_send_home_shield(p->s, &p->env, NULL) == ZW_SHIELD_READ && !m->rcv.creating &&
+          zw_mock_request_count(p->n.mock) == rpc_before);
     m->rcv.list = calloc(1, sizeof(*m->rcv.list));
     if (!m->rcv.list || !m->bal) {
         CHECK("shield balances allocated", false);
         free(m->rcv.list);
         m->rcv.list = NULL;
-        page_down(&p);
-        return;
+        return false;
     }
+    return true;
+}
+
+static void home_shield_form(struct page *p)
+{
+    struct zw_model *m = &p->n.m;
     m->bal->n = 2;
     m->bal->rows[0] = (struct zw_bal_row){.addr = T1, .kind = ZW_ADDR_PUBLIC, .zat = 900000000};
     m->bal->rows[1] = (struct zw_bal_row){.addr = T2, .kind = ZW_ADDR_PUBLIC, .zat = 200000000,
                                            .confirmed_zat = 200000000};
     m->rcv.list->rows[0] = (struct zw_bal_row){.addr = ZC, .kind = ZW_ADDR_SPROUT};
     m->rcv.list->n = 1;
-    CHECK("Sprout-only wallet requests Sapling provisioning", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_CREATE);
+    CHECK("Sprout-only wallet requests Sapling provisioning", zw_send_home_shield(p->s, &p->env, NULL) == ZW_SHIELD_CREATE);
     m->rcv.list->rows[1] = (struct zw_bal_row){.addr = Z0, .kind = ZW_ADDR_SAPLING};
     m->rcv.list->n = 2;
-    CHECK("shield selects largest confirmed and first Sapling", zw_send_home_shield(p.s, &p.env, NULL) == ZW_SHIELD_READY &&
-          !strcmp(p.s->form.from,T2) && !strcmp(p.s->form.to[0].addr,Z0) && p.s->max_on);
-    page_frame(&p, NULL);
+    CHECK("shield selects largest confirmed and first Sapling", zw_send_home_shield(p->s, &p->env, NULL) == ZW_SHIELD_READY &&
+          !strcmp(p->s->form.from,T2) && !strcmp(p->s->form.to[0].addr,Z0) && p->s->max_on);
+    page_frame(p, NULL);
     char expected[40];
     zw_decimal(200000000 - ZW_DEFAULT_FEE, expected, sizeof(expected));
-    CHECK("shield Max deducts ordinary fee and waits for user review", !strcmp(p.s->form.to[0].amount,expected) &&
-          p.s->dlg == ZW_DLG_NONE && !p.s->pend.active && !p.s->runner);
-    zw_send_cancel_review(p.s);
-    page_frame(&p, NULL);
-    CHECK("handover removes prior shield recipient and Max", !p.s->form.to[0].addr[0] && !p.s->max_on);
+    CHECK("shield Max deducts ordinary fee and waits for user review", !strcmp(p->s->form.to[0].amount,expected) &&
+          p->s->dlg == ZW_DLG_NONE && !p->s->pend.active && !p->s->runner);
+    zw_send_cancel_review(p->s, p->ui);
+    CHECK("leaving Send immediately clears shield recipient and Max", !p->s->form.to[0].addr[0] && !p->s->max_on);
+    page_frame(p, NULL);
+    CHECK("handover removes prior shield recipient and Max", !p->s->form.to[0].addr[0] && !p->s->max_on);
+    CHECK("immediate repeated Shield is not busy", zw_send_home_shield(p->s,&p->env,Z0) == ZW_SHIELD_READY);
+    zw_send_cancel_review(p->s, p->ui);
+    zw_send_prefill_from(p->s, T1);
+    page_frame(p, NULL);
+    CHECK("explicit Home source survives the next sync", !strcmp(p->s->form.from,T1));
     m->bal->rows[1].confirmed_zat = 0;
-    CHECK("with only unconfirmed public funds choose largest displayed", zw_send_home_shield(p.s,&p.env,Z1) == ZW_SHIELD_READY &&
-          !strcmp(p.s->form.from,T1) && !strcmp(p.s->form.to[0].addr,Z1));
-    zw_send_clear_form(p.s,p.ui);
+    CHECK("with only unconfirmed public funds choose largest displayed", zw_send_home_shield(p->s,&p->env,Z1) == ZW_SHIELD_READY &&
+          !strcmp(p->s->form.from,T1) && !strcmp(p->s->form.to[0].addr,Z1));
+    zw_send_clear_form(p->s,p->ui);
     m->bal->rows[0].zat = m->bal->rows[1].zat = 10;
-    CHECK("dust opens Send without preparing a doomed payment", zw_send_home_shield(p.s,&p.env,NULL) == ZW_SHIELD_EMPTY);
-    p.s->pend.active = true;
-    CHECK("shield never replaces an unresolved payment", zw_send_home_shield(p.s,&p.env,NULL) == ZW_SHIELD_BUSY && !p.s->runner);
-    p.s->pend.active = false;
+    CHECK("dust opens Send without preparing a doomed payment", zw_send_home_shield(p->s,&p->env,NULL) == ZW_SHIELD_EMPTY);
+    p->s->pend.active = true;
+    CHECK("shield never replaces an unresolved payment", zw_send_home_shield(p->s,&p->env,NULL) == ZW_SHIELD_BUSY && !p->s->runner);
+    p->s->pend.active = false;
+}
+
+static void home_shield_draft(void)
+{
+    struct page p;
+    if (!page_up(&p, "send_success", true, 1.0f)) { CHECK("shield preview fixture", false); return; }
+    if (!home_shield_discovery(&p)) { page_down(&p); return; }
+    home_shield_form(&p);
+    struct zw_model *m = &p.n.m;
     free(m->rcv.list);
     m->rcv.list = NULL;
     page_down(&p);
@@ -761,6 +809,7 @@ int test_z23wallet_send(void)
     sv_runner_failed();
     sv_runner_executing();
     sv_page_flow();
+    page_review_handover();
     sv_page_states();
     home_shield_draft();
     return g_fail;

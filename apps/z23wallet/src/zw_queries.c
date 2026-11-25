@@ -243,12 +243,26 @@ static enum zw_err list_into(struct zw_rpc *r, const char *method, struct bal_ac
     return e;
 }
 
-/* Both lists must answer or nothing is published (no partial table). */
+static bool endpoint_same(const struct zw_rpc *r, enum zw_profile profile, uint16_t port, const char *datadir)
+{
+    return r->ep.profile == profile && r->ep.port == port && !strcmp(r->ep.datadir, datadir);
+}
+
+/* Both lists must answer from one endpoint or nothing is published (no partial or mixed table). */
 static enum zw_err balances_query(struct zw_rpc *r, struct zw_result *out)
 {
     struct bal_acc acc = {0};
     enum zw_err e = list_into(r, "listunspent", &acc, out);
+    enum zw_profile profile = r->ep.profile;
+    uint16_t port = r->ep.port;
+    char datadir[ZW_PATH];
+    snprintf(datadir, sizeof(datadir), "%s", r->ep.datadir);
     if (e == ZW_OK) e = list_into(r, "z_listunspent", &acc, out);
+    if (e == ZW_OK && !endpoint_same(r, profile, port, datadir)) {
+        e = ZW_ERR_REFUSED;
+        out->rpc.kind = e;
+        snprintf(out->rpc.message, sizeof(out->rpc.message), "wallet changed during balance query");
+    }
     if (e == ZW_OK) {
         out->bal = zcl_calloc(1, sizeof(*out->bal), "zw_balances");
         if (out->bal) acc_publish(&acc, out->bal);

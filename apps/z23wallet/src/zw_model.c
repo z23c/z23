@@ -199,7 +199,7 @@ void zw_node_line(const struct zw_model *m, char *buf, size_t cap)
     if (!strcmp(zw_node_kind(m), "zclassicd")) {
         char ver[40];
         zw_version_decode(m->have_info && m->info.version ? m->info.version : m->net.version, ver, sizeof(ver));
-        snprintf(buf, cap, "Node: zclassicd %s at 127.0.0.1:%u (read only)", ver, (unsigned)m->port);
+        snprintf(buf, cap, "Node: zclassicd %s at 127.0.0.1:%u", ver, (unsigned)m->port);
     } else {
         snprintf(buf, cap, "Node: Z23 at 127.0.0.1:%u", (unsigned)m->port);
     }

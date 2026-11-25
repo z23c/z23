@@ -44,10 +44,26 @@ static void close_dlg(struct zw_send *s)
     s->dlg_title[0] = s->dlg_body[0] = s->dlg_detail[0] = 0;
 }
 
-void zw_send_cancel_review(struct zw_send *s)
+static void bind_review(struct zw_send *s, const struct zw_model *m)
+{
+    s->review_bound = true;
+    s->review_generation = m->generation;
+    s->review_profile = m->profile;
+    s->review_port = m->port;
+    snprintf(s->review_datadir, sizeof(s->review_datadir), "%s", m->datadir);
+}
+
+bool zw_send_review_current(const struct zw_send *s, const struct zw_model *m)
+{
+    return !s->review_bound || (s->review_generation == m->generation && s->review_profile == m->profile &&
+           s->review_port == m->port && !strcmp(s->review_datadir, m->datadir));
+}
+
+void zw_send_cancel_review(struct zw_send *s, struct gui_ui *ui)
 {
     if (!s) return;
-    if (s->shield_draft) s->clear_shield = true;
+    s->review_bound = false;
+    if (s->shield_draft) zw_send_clear_form(s, ui);
     if (s->dlg != ZW_DLG_SYNC_GATE && s->dlg != ZW_DLG_CONFIRM && s->dlg != ZW_DLG_DESHIELD) return;
     close_dlg(s);
     memset(&s->pending, 0, sizeof(s->pending));
@@ -93,7 +109,7 @@ void zw_send_clear_form(struct zw_send *s, struct gui_ui *ui)
         gui_ui_input_clear(ui, id);
         memset(&s->form.to[i], 0, sizeof(s->form.to[i]));
     }
-    s->shield_draft = s->clear_shield = false;
+    s->shield_draft = false;
     s->shown = s->form.n = 1;
     s->form.fee = ZW_DEFAULT_FEE;
     s->max_on = false;
@@ -131,6 +147,7 @@ static void pending_lookalike(struct zw_send *s, const struct zw_model *m)
 
 static void open_confirm(struct zw_send *s, const struct zw_send_env *env)
 {
+    if (!s->review_bound) bind_review(s, env->m);
     s->pending = s->form;
     s->pending_cat = zw_send_category(&s->pending);
     pending_lookalike(s, env->m);
@@ -153,6 +170,7 @@ static bool validate_form(struct zw_send *s, const struct zw_send_env *env)
 static void review(struct zw_send *s, const struct zw_send_env *env)
 {
     char body[600];
+    bind_review(s, env->m);
     s->from_open = false;
     if (env->m->conn != ZW_CONN_ONLINE) {
         open_dlg(s, ZW_DLG_INFO, "Not connected yet", k_not_connected);
@@ -180,7 +198,9 @@ static void review(struct zw_send *s, const struct zw_send_env *env)
 
 static void commit(struct zw_send *s, const struct zw_send_env *env, struct zw_send_out *out)
 {
+    if (!zw_send_review_current(s, env->m)) { zw_send_cancel_review(s, env->ui); return; }
     close_dlg(s); /* first: a repeated activation finds no confirm dialog */
+    s->review_bound = false;
     char key[ZW_SEND_KEY_MAX];
     char *keyed = malloc(PARAMS_CAP), *plain = malloc(PARAMS_CAP);
     bool ok = keyed && plain && zw_flow_new_key(key) && zw_send_params(&s->pending, key, keyed, PARAMS_CAP) &&
@@ -346,12 +366,14 @@ static size_t index_of(const char *name, const char *prefix, size_t limit)
 static bool act_steps(struct zw_send *s, const struct zw_send_env *env, const char *a, struct zw_send_out *out)
 {
     if (!strcmp(a, "send.confirm.go") && s->dlg == ZW_DLG_CONFIRM) {
+        if (!zw_send_review_current(s, env->m)) { zw_send_cancel_review(s, env->ui); return true; }
         if (s->pending_cat != ZW_CAT_DESHIELD) { commit(s, env, out); return true; }
         s->dlg = ZW_DLG_DESHIELD;
         gui_ui_focus(env->ui, "sd_no");
     } else if (!strcmp(a, "send.deshield.yes") && s->dlg == ZW_DLG_DESHIELD) {
         commit(s, env, out);
     } else if (!strcmp(a, "send.gate.yes") && s->dlg == ZW_DLG_SYNC_GATE) {
+        if (!zw_send_review_current(s, env->m)) { zw_send_cancel_review(s, env->ui); return true; }
         close_dlg(s);
         if (validate_form(s, env)) open_confirm(s, env);
     } else if (!strcmp(a, "send.discard.yes") && s->dlg == ZW_DLG_DISCARD) {
@@ -390,6 +412,7 @@ static bool act_close(struct zw_send *s, const struct zw_send_env *env, const ch
         return true;
     }
     if (strcmp(a, "send.close") && strncmp(a, "send.close.", 11)) return false;
+    s->review_bound = false;
     if (s->dlg == ZW_DLG_MEMO) gui_ui_input_clear(env->ui, "s_memo_edit");
     if (s->dlg == ZW_DLG_DESHIELD || s->dlg == ZW_DLG_CONFIRM) memset(&s->pending, 0, sizeof(s->pending));
     close_dlg(s);
