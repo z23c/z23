@@ -42,8 +42,8 @@ bool fleet_board_roster_proof_check(enum fleet_board_roster_side side,
                                     const uint8_t *proof);
 
 /* The answering half: does this session's peer still stand on the roster?
- * False for a peer with any pairing row (the pairing path decides for it, a
- * revoked row included), an unreadable pairing list, or anything but a MEMBER
+ * False for a peer with a working pairing row (the pairing path decides for it, a
+ * revoked row included; an active row with no resolvable delegation is not working), an unreadable pairing list, or anything but a MEMBER
  * verdict for `key`. Never verifies a signature. Refusals are counted. */
 bool fleet_board_roster_standing(struct node_db *pairings,
                                  struct node_db *store,

@@ -16899,6 +16899,27 @@ static int test_fleet_board_roster_carriage_lane(void)
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.roster_refused, cb.roster_refused + 1);
 
+        /* An active row whose peer has no resolvable delegation can carry no
+         * pull, and anchoring one costs coins: it must not hold the free
+         * roster path. With the delegation resolving it still does. */
+        {
+            uint8_t peer_noise[32], member[32];
+            memcpy(peer_noise, w.f.term_peer.delegation.noise_static_pubkey,
+                   32);
+            fbr_key(FBR_PEER, member);
+            ASSERT(!fleet_board_roster_standing(app_runtime_node_db(), &w.a,
+                                                peer_noise, member, now));
+            struct vcs_zcode_dht_delegation unresolved =
+                w.f.term_peer.delegation;
+            unresolved.noise_static_pubkey[0] ^= 0x01;
+            boot_fleet_board_fleet_test_bind_authority(&unresolved,
+                                                       w.f.genesis, now);
+            ASSERT(fleet_board_roster_standing(app_runtime_node_db(), &w.a,
+                                               peer_noise, member, now));
+            boot_fleet_board_fleet_test_bind_authority(
+                &w.f.term_peer.delegation, w.f.genesis, now);
+        }
+
         /* The same peer over the plain service, roster gate unarmed. */
         ASSERT(fbw_post(&w.a, FBR_MEMBER, FLEET_BOARD_SCOPE_FLEET, "as paired",
                         2100, FBC_TTL, 2100, &paired));

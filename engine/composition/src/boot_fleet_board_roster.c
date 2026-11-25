@@ -21,6 +21,7 @@
 #include "config/boot_fleet_board.h"
 #include "config/boot_fleet_roster.h"
 #include "config/boot_internal.h"
+#include "boot_fleet_board_authority_internal.h"
 #include "config/boot_zcode_dht.h"
 #include "crypto/ed25519.h"
 #include "models/fleet_board_post.h"
@@ -187,10 +188,24 @@ bool fleet_board_roster_proof_check(enum fleet_board_roster_side side,
 
 /* ── the two halves' decisions ───────────────────────────────────────── */
 
-/* Fail closed: an unreadable list reads as a row, so the roster path stands
+/* A pairing row holds its peer on the pairing path, a revoked row included,
+ * so revocation always wins. One kind of row holds nothing: an active,
+ * unexpired row whose peer has no resolvable delegation can never carry a
+ * pull or an answer (the lane skips it as `no_delegation`), and anchoring a
+ * delegation costs coins. It must not also shut the free roster path.
+ * Fail closed: an unreadable list reads as a row, so the roster path stands
  * aside and the peer gets what it gets today. */
+static bool pairing_row_is_inert(const struct db_mesh_pairing *row,
+                                 int64_t now)
+{
+    struct vcs_zcode_dht_delegation delegation;
+    return row->revoked_at == 0 &&
+           row->expires_at > now &&
+           !board_peer_delegation(row, &delegation);
+}
+
 static bool pairing_row_held(struct node_db *pairings,
-                             const uint8_t peer_noise[32])
+                             const uint8_t peer_noise[32], int64_t now)
 {
     struct db_mesh_pairing *rows = zcl_calloc(
         FLEET_BOARD_FLEET_PEERS_MAX, sizeof *rows, "fleet_board_roster_rows");
@@ -200,7 +215,8 @@ static bool pairing_row_held(struct node_db *pairings,
         pairings, rows, FLEET_BOARD_FLEET_PEERS_MAX, 0);
     bool held = count < 0;
     for (int i = 0; i < count && !held; i++)
-        held = memcmp(rows[i].peer_noise_pubkey, peer_noise, 32) == 0;
+        held = memcmp(rows[i].peer_noise_pubkey, peer_noise, 32) == 0 &&
+               !pairing_row_is_inert(&rows[i], now);
     free(rows);
     return held;
 }
@@ -212,7 +228,7 @@ static bool roster_standing(struct node_db *pairings, struct node_db *store,
 {
     if (!pairings || !store || !peer_noise || !key)
         return false;
-    if (pairing_row_held(pairings, peer_noise)) {
+    if (pairing_row_held(pairings, peer_noise, now)) {
         if (record)
             roster_refuse("peer_has_pairing_row", now);
         return false;
@@ -468,7 +484,7 @@ static bool target_judge(struct p2p_node *node, struct node_db *pairings,
         return false;
     memcpy(noise, snap.remote_static, 32);
     return (onion_claimed(node) || learned_member(store, noise, now)) &&
-           !pairing_row_held(pairings, noise);
+           !pairing_row_held(pairings, noise, now);
 }
 
 size_t fleet_board_roster_targets(struct boot_svc_ctx *svc,

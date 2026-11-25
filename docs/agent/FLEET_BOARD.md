@@ -255,7 +255,7 @@ from the answering box. A proof from another network or another session proves
 nothing. Only a member of an armed roster is answered: no root, no sealed row,
 `-fleetrostergate=0`, notes past their 30 days, a revoked box and an
 unverifiable roster admit nobody, and the read role still applies. A peer with
-any pairing row, revoked or not, stays on the pairing path, which is unchanged.
+any pairing row that can work, or that is revoked, stays on the pairing path, which is unchanged; an active row with no resolvable delegation (it cannot carry a pull and costs coins to fix) no longer shuts the roster path.
 A box asks only the session at the onion a sealed line claims, or a session
 that already proved a member key to it, so no public peer is ever sent a proof.
 A joined box with no armed roster takes only sealed roster rows from an answer;
