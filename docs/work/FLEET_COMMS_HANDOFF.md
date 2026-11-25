@@ -113,3 +113,22 @@ Match `git log origin/main` by subject first. The larger catalog is
 Out of scope for a first change: anything under `core/`, custody, a
 datadir, the delegation grant for the lab pairing, and the onion file route
 (needs the unseal ritual).
+
+## Live probe, 2026-11-25 (lab node)
+
+One `fleet board post note --scope=fleet --ttl=600` from the lab node, then
+`fleet board status` after the post and again about 40 s later:
+`carriage.push_out` stayed `queued: 2`, `opened: 0`, every `skipped` reason 0,
+`receipt.committed: 0`; the one paired peer stayed `no_delegation` with 0
+pulls. `relayed` rose from 2081 to 2648 over the session, so inbound public
+gossip works; outbound fleet pushes did not leave. This is one sample, not a
+latency measurement.
+
+Gap found: when no peer is eligible the push queue holds the post and counts
+nothing, so an operator cannot tell "waiting for a peer" from "stuck". Add a
+`skipped` reason for it (for example `no_eligible_peer`) in
+`boot_fleet_board_push.c`. That file is at the 1500-line ceiling: move code
+out before adding any. Also note the lab MCP server answered `fleet.board.
+delivery` as `UNKNOWN_COMMAND` ("no such command in this build"), so the build
+behind it predates the receipt reader; confirm which build the lab node runs
+before judging receipts.
