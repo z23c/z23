@@ -25,6 +25,11 @@
 #include <unistd.h>
 #endif
 
+#if defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#include "base/hex.h"
+#endif
+
 #if defined(_WIN32)
 #include <io.h>
 /* <unistd.h> supplies this on POSIX. */
@@ -272,6 +277,42 @@ static int pba_lock(const struct zcl_publish_alias *req)
     return fd;
 }
 
+#if defined(__APPLE__)
+static int pba_sha256_file(const char *path, char hex[65])
+{
+    CC_SHA256_CTX ctx;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    unsigned char buf[65536];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    if (CC_SHA256_Init(&ctx) != 1) {
+        (void)close(fd);
+        return -1;
+    }
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            (void)close(fd);
+            return -1;
+        }
+        if (n == 0)
+            break;
+        if (CC_SHA256_Update(&ctx, buf, (CC_LONG)n) != 1) {
+            (void)close(fd);
+            return -1;
+        }
+    }
+    if (close(fd) != 0)
+        return -1;
+    if (CC_SHA256_Final(digest, &ctx) != 1)
+        return -1;
+    zcl_hex_encode(digest, CC_SHA256_DIGEST_LENGTH, hex);
+    return 0;
+}
+#else
 static void pba_sha256_child(const char *path, int pipefd[2])
 {
     int in = open(path, O_RDONLY);
@@ -342,6 +383,7 @@ static int pba_sha256_file(const char *path, char hex[65])
         return -1;
     return rc;
 }
+#endif
 
 static int pba_copy(const char *src, const char *dst)
 {
@@ -432,7 +474,13 @@ static int pba_stage(const struct zcl_publish_alias *req, char *tmp,
         pba_sha256_file(tmp, hex) != 0) {
         (void)unlink(tmp);
         if (pba_sha256_file(req->candidate, src_hex) != 0)
-            pba_msg(req->err_fd, "sha256sum is required for alias publication");
+            pba_msg(req->err_fd,
+#if defined(__APPLE__)
+                    "could not hash the alias candidate"
+#else
+                    "sha256sum is required for alias publication"
+#endif
+                    );
         else
             pba_msg(req->err_fd, "could not create alias publication temporary");
         return -1;

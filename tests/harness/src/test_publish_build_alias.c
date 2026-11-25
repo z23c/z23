@@ -105,6 +105,54 @@ static void pba_fill(struct zcl_publish_alias *req, const char *root)
     req->err_fd = STDERR_FILENO;
 }
 
+#if defined(__APPLE__)
+/* The publisher must hash the candidate without launching sha256sum.
+ * A sha256sum placed first on PATH records a launch and fails. */
+static int pba_publish_without_sha256sum(const char *root)
+{
+    struct zcl_publish_alias req;
+    char err[1024];
+    char out[1024];
+    char dir[512];
+    char body[1024];
+    char saved[8192];
+    char tool[512];
+    const char *old;
+    const char *digest =
+        "sha256=305b2ffdc3a6097beb7469e1c7a9ce7f1c06b15b8c500b4b5914e7f0de50ee92";
+    int status;
+    int spawn;
+    int digest_ok;
+    old = getenv("PATH");
+    if (!old || strlen(old) >= sizeof saved)
+        return 1;
+    memcpy(saved, old, strlen(old) + 1);
+    (void)snprintf(dir, sizeof dir, "%s/fakebin", root);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST)
+        return 1;
+    (void)snprintf(tool, sizeof tool, "%s/fakebin/sha256sum", root);
+    (void)snprintf(body, sizeof body,
+                   "#!/bin/sh\ntouch '%s/sha256sum-ran'\nexit 127\n", root);
+    if (pba_write_exec(tool, body) != 0)
+        return 1;
+    (void)snprintf(dir, sizeof dir, "%s/fakebin:/bin:/usr/bin", root);
+    if (setenv("PATH", dir, 1) != 0)
+        return 1;
+    pba_fill(&req, root);
+    status = pba_capture(&req, err, sizeof err, out, sizeof out);
+    if (setenv("PATH", saved, 1) != 0)
+        return 1;
+    (void)snprintf(dir, sizeof dir, "%s/sha256sum-ran", root);
+    spawn = access(dir, F_OK) == 0;
+    digest_ok = strstr(out, digest) != NULL;
+    printf("alias_hash: status=%d spawn=%d digest_ok=%d\n",
+           status, spawn, digest_ok);
+    if (status != 0 || spawn || !digest_ok)
+        return 1;
+    return 0;
+}
+#endif
+
 static int test_publish_build_alias_cases(const char *root)
 {
     int failures = 0;
@@ -191,6 +239,9 @@ static int test_publish_build_alias_cases(const char *root)
         ASSERT(strstr(err, "candidate path is outside compile epoch ") != NULL);
         PASS();
     } _test_next:;
+#if defined(__APPLE__)
+    failures += pba_publish_without_sha256sum(root);
+#endif
     return failures;
 }
 
