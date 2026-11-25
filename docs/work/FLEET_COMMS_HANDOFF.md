@@ -78,7 +78,7 @@ ONLY=<group>` and `make lint-fast` through `devbuild --wait`, then submit.
 Match `git log origin/main` by subject first. The larger catalog is
 [`C23_TASK_CATALOG.md`](C23_TASK_CATALOG.md).
 
-1. **Test the respawn exit line.** `boot_loop_guard_note_shutdown_intent`
+1. ~~Test the respawn exit line.~~ Done (seq 4203). `boot_loop_guard_note_shutdown_intent`
    (`engine/composition/src/boot_loop_guard.c`) now prints a line for a
    self-respawn; nothing asserts it. Add a case to `test_boot_flight_recorder`
    that sets the tip-watchdog respawn flag and checks the stderr text.
@@ -101,7 +101,7 @@ Match `git log origin/main` by subject first. The larger catalog is
    for its op list once and filter the menu. Files: `tools/command/
    native_fleet_board_command.c`, `engine/composition/src/
    boot_fleet_board_rpc.c`. Group: `test_fleet_board`.
-6. **Status for an unknown blocker.** `status_brief_native_handler.c` now
+6. ~~Status for an unknown blocker.~~ Done (seq 4201, sync_state folded too). `status_brief_native_handler.c` now
    folds free text to a token. Add the same fold for `sync_state` (it still
    rejects the whole document on a non-token) with a test beside
    `test_status_brief_free_text_blocker_folds_to_token`.
@@ -114,21 +114,36 @@ Out of scope for a first change: anything under `core/`, custody, a
 datadir, the delegation grant for the lab pairing, and the onion file route
 (needs the unseal ritual).
 
-## Live probe, 2026-11-25 (lab node)
+
+## Live probe and the structural limit (2026-11-25)
 
 One `fleet board post note --scope=fleet --ttl=600` from the lab node, then
-`fleet board status` after the post and again about 40 s later:
-`carriage.push_out` stayed `queued: 2`, `opened: 0`, every `skipped` reason 0,
-`receipt.committed: 0`; the one paired peer stayed `no_delegation` with 0
-pulls. `relayed` rose from 2081 to 2648 over the session, so inbound public
-gossip works; outbound fleet pushes did not leave. This is one sample, not a
-latency measurement.
+`fleet board status` twice about 40 s apart: `push_out.queued` was 2 and
+every other push counter 0. `queued` is a cumulative counter, not queue
+depth: the posts were taken and drained, and the fan-out found nothing to
+push to. One sample on one node; not a latency measurement.
 
-Gap found: when no peer is eligible the push queue holds the post and counts
-nothing, so an operator cannot tell "waiting for a peer" from "stuck". Add a
-`skipped` reason for it (for example `no_eligible_peer`) in
-`boot_fleet_board_push.c`. That file is at the 1500-line ceiling: move code
-out before adding any. Also note the lab MCP server answered `fleet.board.
-delivery` as `UNKNOWN_COMMAND` ("no such command in this build"), so the build
-behind it predates the receipt reader; confirm which build the lab node runs
-before judging receipts.
+Why nothing left, from `boot_fleet_board_push_fanout.c` (header comment):
+- Push rides only the paired `board` service. A fan-out post goes to a paired
+  peer with a live session that the answering half would serve; a peer with no
+  session is "left to the pull" and counted nowhere.
+- A peer on the fleet roster with no pairing row (the free path) is **never
+  pushed to**. It pulls every 15 s over `board.roster`
+  (`FLEET_BOARD_FLEET_PULL_INTERVAL_S`). Such cases only show as
+  `push_fanout_roster_unpushed`.
+
+So the fastest path needs a pairing, which needs a held delegation, and the
+free path is capped at one pull interval. **This is the design item for fast
+swarm communication:** push over a roster stream (a `board.roster.push`
+service with the same OPEN-carried payload and receipt), judged by
+`fleet_board_roster_standing` and the session proof, so a roster member is
+pushed to without a pairing. It touches admission and the receiving half's
+proof of the pusher (`push_inbox_*` proves a pusher only through pairing
+rows today), so it needs its own design note and a non-author review first.
+Cheaper steps before it: lower the roster pull interval for peers that just
+answered, and add a counter for "no live session" in the fan-out (the file
+decision above is deliberate; the missing piece is visibility).
+
+The lab MCP server answered `fleet.board.delivery` as `UNKNOWN_COMMAND`, so the
+build behind it may predate the receipt reader; confirm which build the lab
+node runs before judging receipts.
