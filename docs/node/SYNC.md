@@ -204,7 +204,11 @@ and file-service serving.
 
 ---
 
-## Method 2 (native): Full P2P Sync (hours)
+## Method 2 (native): Full P2P Sync (hours to days)
+
+One field report (WSL2, 2026-11-25) validated from genesis at about 10 blocks/s,
+which is days to tip, not hours. Treat "hours" as unproven for a cold node;
+use Method 1 with `-fileservice=<peer>` when a peer is known.
 
 Verifying sync from genesis over the standard P2P protocol. No snapshot.
 
@@ -590,7 +594,7 @@ Method 1 or 2 from its configured peers.
 ┌──────────────────────┬──────────────────┐  ┌────────────────────┐
 │  Method 1: fastsync  │ Method 2: full   │  │ Method 3: from     │
 │  z23 peer     │ P2P from genesis │  │ zclassicd          │
-│  ~60 s design target │ hours            │  │ chainstate → SQLite│
+│  ~60 s design target │ hours to days    │  │ chainstate → SQLite│
 │  (unproven — status  │                  │  │ ~60-74 s headers   │
 │  in MVP.md C3)       │                  │  │ then a slow tail   │
 │  NODE_ZCL23 + chunks │ headers + blocks │  │                    │

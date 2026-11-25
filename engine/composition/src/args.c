@@ -67,6 +67,8 @@ void print_usage_all(const char *prog)
     printf("                      and the RPC TLS listener; the RPC plain-text listener stays on 127.0.0.1\n");
     printf("  -rpcport=<port>     RPC port (default: 18232; 8232 is legacy zclassicd)\n");
     printf("  -addnode=<ip>       Add peer\n");
+    printf("  -fileservice=<host> Fetch the header seed and state bundle from this peer's\n");
+    printf("                      file service (port 18034), install, then fold to tip\n");
     printf("  -externalip=<ip[:port]>  Advertise this public P2P endpoint\n");
     printf("  -gen                Enable mining\n");
     printf("  -txindex            Transaction index\n");
