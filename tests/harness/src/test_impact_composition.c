@@ -18669,8 +18669,6 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_proof_observation_first();
     failures += test_ic_proof_observation_aged();
     failures += test_ic_proof_observation_refusals();
-    failures += test_ic_proof_retry();
-    failures += test_ic_proof_status_execution_projection();
     failures += test_ic_proof_live_log_dir();
     failures += test_ic_proof_ensure_passed_writes_no_request();
     failures += test_ic_proof_leftover_request_never_hides_passed();
@@ -18828,9 +18826,25 @@ static int ic_run_remainder(bool include_bundle)
     return failures;
 }
 
+static int ic_run_status(void)
+{
+    ic_isolate_state_root();
+#if !defined(_WIN32)
+    int failures = 0;
+    failures += test_ic_proof_retry();
+    failures += test_ic_proof_status_execution_projection();
+    return failures;
+#else
+    printf("SKIP (proof status fixtures require POSIX processes)\n");
+    return 0;
+#endif
+}
+
 int test_impact_composition(void)
 {
-    return ic_run_remainder(true);
+    int failures = ic_run_remainder(true);
+    failures += ic_run_status();
+    return failures;
 }
 
 int test_impact_composition_shard_01(void) { return ic_run_remainder(false); }
@@ -18839,3 +18853,4 @@ int test_impact_composition_shard_02(void)
     ic_isolate_state_root();
     return ic_run_bundle();
 }
+int test_impact_composition_shard_03(void) { return ic_run_status(); }
