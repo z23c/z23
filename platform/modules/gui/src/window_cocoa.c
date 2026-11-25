@@ -926,34 +926,80 @@ static bool cocoa_dims_ok(const struct gui_window *w)
     return true;
 }
 
-static void cocoa_copy(const struct gui_window *w, uint8_t *dst)
+static uint64_t g_cocoa_copied_px;
+
+uint64_t gui_cocoa_copied_pixels(void)
 {
-    const uint32_t *src = w->fb;
-    for (int32_t y = 0; y < w->fb_h; y++) {
-        const uint32_t *row = src + (size_t)y * (size_t)w->fb_w;
-        for (int32_t x = 0; x < w->fb_w; x++) {
-            uint32_t px = row[x];
-            dst[0] = (uint8_t)((px >> 16) & 255u);
-            dst[1] = (uint8_t)((px >> 8) & 255u);
-            dst[2] = (uint8_t)(px & 255u);
-            dst[3] = 255u;
-            dst += 4;
+    return g_cocoa_copied_px;
+}
+
+/* Packed 0x00RRGGBB from the cache the last present wrote. */
+uint32_t gui_cocoa_cached_pixel(const struct gui_window *w, int32_t x, int32_t y)
+{
+    struct cocoa_win *c = cocoa_state(w);
+    const uint8_t *p;
+    if (!c || !c->rgba || x < 0 || y < 0 || x >= c->rgba_w || y >= c->rgba_h)
+        return 0;
+    p = c->rgba + ((size_t)y * (size_t)c->rgba_w + (size_t)x) * 4u;
+    return ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+}
+
+static void cocoa_write_px(uint8_t *dst, uint32_t px)
+{
+    dst[0] = (uint8_t)((px >> 16) & 255u);
+    dst[1] = (uint8_t)((px >> 8) & 255u);
+    dst[2] = (uint8_t)(px & 255u);
+    dst[3] = 255u;
+    g_cocoa_copied_px++;
+}
+
+static void cocoa_copy_rect(const struct gui_window *w, uint8_t *dst, struct gui_rect r)
+{
+    int32_t y, x;
+    if (!gui_rect_clip_frame(&r, w->fb_w, w->fb_h))
+        return;
+    for (y = r.y; y < r.y + r.h; y++) {
+        const uint32_t *row = w->fb + (size_t)y * (size_t)w->fb_w + (size_t)r.x;
+        uint8_t *out = dst + ((size_t)y * (size_t)w->fb_w + (size_t)r.x) * 4u;
+        for (x = 0; x < r.w; x++) {
+            cocoa_write_px(out, row[x]);
+            out += 4;
         }
     }
 }
 
-static uint8_t *cocoa_fill(struct gui_window *w, struct cocoa_win *c, bool *fresh)
+static void cocoa_copy(const struct gui_window *w, uint8_t *dst)
+{
+    struct gui_rect all = { 0, 0, w->fb_w, w->fb_h };
+    cocoa_copy_rect(w, dst, all);
+}
+
+static void cocoa_copy_list(const struct gui_window *w, uint8_t *dst,
+                            const struct gui_rect *rects, size_t n)
+{
+    size_t i;
+    if (n == 0 || !rects) {
+        cocoa_copy(w, dst);
+        return;
+    }
+    for (i = 0; i < n; i++)
+        cocoa_copy_rect(w, dst, rects[i]);
+}
+
+static uint8_t *cocoa_fill(struct gui_window *w, struct cocoa_win *c, bool *fresh,
+                           const struct gui_rect *rects, size_t n)
 {
     uint8_t *dst;
     *fresh = false;
     if (!cocoa_dims_ok(w)) return NULL;
     if (c->rgba && c->rgba_w == w->fb_w && c->rgba_h == w->fb_h) {
-        cocoa_copy(w, c->rgba);
+        cocoa_copy_list(w, c->rgba, rects, n);
         return c->rgba;
     }
     dst = zcl_calloc((size_t)w->fb_w * (size_t)w->fb_h, 4u, "gui cocoa pixels");
     if (!dst) return NULL;
     *fresh = true;
+    /* A new cache becomes the whole image. Dirty rects update one that exists. */
     cocoa_copy(w, dst);
     return dst;
 }
@@ -1008,10 +1054,8 @@ static bool cocoa_present(struct gui_window *w, const struct gui_rect *rects, si
     cocoa_id rep, image, pool;
     uint8_t *pix;
     bool fresh = false;
-    (void)rects;
-    (void)n;
     if (!c) return false;
-    pix = cocoa_fill(w, c, &fresh);
+    pix = cocoa_fill(w, c, &fresh, rects, n);
     if (!pix) return false;
     pool = cocoa_pool_push();
     rep = cocoa_bitmap(w, pix);

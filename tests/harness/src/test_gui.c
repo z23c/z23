@@ -839,7 +839,120 @@ unsigned long gui_cocoa_presentation(void);
 void gui_cocoa_set_presentation(unsigned long options);
 int gui_cocoa_cursor(void);
 bool gui_cocoa_aim_frame(struct gui_window *w, int contain);
+uint64_t gui_cocoa_copied_pixels(void);
+uint32_t gui_cocoa_cached_pixel(const struct gui_window *w, int32_t x, int32_t y);
+
+static void paint_frame(struct gui_cpu_frame *f, uint32_t px)
+{
+    size_t n = (size_t)f->width * (size_t)f->height;
+    size_t i;
+    for (i = 0; i < n; i++)
+        f->pixels[i] = px;
+}
+
+static void paint_rect(struct gui_cpu_frame *f, struct gui_rect r, uint32_t px)
+{
+    int32_t y, x;
+    for (y = r.y; y < r.y + r.h; y++)
+        for (x = r.x; x < r.x + r.w; x++)
+            f->pixels[(size_t)y * (size_t)f->stride_px + (size_t)x] = px;
+}
+
+static int cocoa_dirty_pixels_ok(struct gui_window *win)
+{
+    return gui_cocoa_cached_pixel(win, 0, 0) == 0x00FF0000u &&
+           gui_cocoa_cached_pixel(win, 4, 6) == 0x0000FF00u;
+}
+
+static uint64_t cocoa_time_dirty(struct gui_window *win, struct gui_rect dirty)
+{
+    uint64_t t0 = gui_now_ns();
+    int i;
+    for (i = 0; i < 20; i++)
+        (void)gui_cpu_present(win, &dirty, 1);
+    return (gui_now_ns() - t0) / 1000u;
+}
 #endif
+
+/* A dirty rect must not swizzle the rest of the framebuffer. */
+static void test_cocoa_dirty_present(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 dirty", .width = 320, .height = 200,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    struct gui_cpu_frame frame;
+    struct gui_rect dirty = { 4, 6, 8, 8 };
+    uint64_t before, copied, timed;
+    bool opened = gui_window_open(&d, &win, err, sizeof err);
+    CHECK("dirty-rect window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    opened = gui_cpu_acquire(win, &frame) && frame.pixels != NULL;
+    CHECK("dirty-rect window provides a frame", opened);
+    if (!opened) {
+        gui_window_close(win);
+        return;
+    }
+    paint_frame(&frame, 0x00FF0000u);
+    CHECK("full present fills the cache", gui_cpu_present(win, NULL, 0));
+    frame.pixels[0] = 0x000000FFu;
+    paint_rect(&frame, dirty, 0x0000FF00u);
+    before = gui_cocoa_copied_pixels();
+    CHECK("dirty present copies only that rect",
+          gui_cpu_present(win, &dirty, 1) &&
+          gui_cocoa_copied_pixels() - before == 64u);
+    CHECK("dirty present keeps pixels outside the rect",
+          cocoa_dirty_pixels_ok(win));
+    copied = gui_cocoa_copied_pixels() - before;
+    timed = cocoa_time_dirty(win, dirty);
+    printf("present_dirty: copied=%llu full=%llu repeat20_us=%llu\n",
+           (unsigned long long)copied,
+           (unsigned long long)frame.width * (unsigned long long)frame.height,
+           (unsigned long long)timed);
+    gui_window_close(win);
+#else
+    printf("  dirty present copies only that rect... SKIP\n");
+#endif
+}
+
+/* The first image replaces the whole view, so a fresh cache must keep the frame. */
+static void test_cocoa_fresh_cache(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 fresh", .width = 320, .height = 200,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    struct gui_cpu_frame frame;
+    struct gui_rect dirty = { 4, 6, 8, 8 };
+    bool opened = gui_window_open(&d, &win, err, sizeof err);
+    CHECK("fresh-cache window opens", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    opened = gui_cpu_acquire(win, &frame) && frame.pixels != NULL;
+    CHECK("fresh-cache window provides a frame", opened);
+    if (!opened) {
+        gui_window_close(win);
+        return;
+    }
+    paint_frame(&frame, 0x00FF0000u);
+    paint_rect(&frame, dirty, 0x0000FF00u);
+    CHECK("a first dirty present keeps the rest of the frame",
+          gui_cpu_present(win, &dirty, 1) &&
+          gui_cocoa_cached_pixel(win, 0, 0) == 0x00FF0000u);
+    gui_window_close(win);
+#else
+    printf("  a first dirty present keeps the rest of the frame... SKIP\n");
+#endif
+}
 
 /* A window that is never shown must not hide the Dock or the menu bar. */
 static void test_cocoa_hidden_fullscreen(void)
@@ -1196,6 +1309,8 @@ int test_gui(void)
     test_cocoa_presentation_hides_over_autohide();
     test_cocoa_cursor();
     test_cocoa_live_resize();
+    test_cocoa_dirty_present();
+    test_cocoa_fresh_cache();
     test_utf8();
     test_draw();
     test_text();
