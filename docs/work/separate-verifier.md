@@ -5,8 +5,13 @@
 A push proof may reuse a compiled object only on the word of a verifier that
 runs under its own account. Same-account reuse is refused, and stays refused:
 anything the proving account can write, a candidate can plant. This is a
-design and an uninstalled trust boundary, not a working speed path. The
-current wrapper compiles cold in proof mode with `verified:no_verifier_key`.
+design and an uninstalled trust boundary, not a working speed path.
+The wrapper reports `verified:cache_bypassed` when proof mode compiles without
+an admitted object. That disposition does not identify why admission failed;
+the receiver's separate admission evidence supplies the reason, including a
+missing verifier key. Ordinary account-cache hits are not proof-safe reuse.
+
+<!-- claim: symbol-present verified:cache_bypassed tools/zcc.c # Proof cache bypass has a reason-neutral disposition. -->
 
 ## Byte contract v2
 

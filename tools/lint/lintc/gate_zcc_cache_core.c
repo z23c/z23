@@ -256,18 +256,24 @@ int zc_sec_racing(void)
 int zc_sec_verified(void)
 {
     char v1[ZC_SHA], v2[ZC_SHA];
-    const char *const env[] = { "ZCC_VERIFIED=1", NULL };
+    const char *const env[] = { "ZCC_VERIFIED=1",
+        zcf("ZCC_LOG=%s", zcw("verified-disposition.log")), NULL };
     if (zc_copy(zcw("dep.h"), zcw("dep.saved"), 1) ||
         zc_put("dep.h", "#define ZCL_GATE_VALUE 200\n") ||
         zc_touch_ref(zcw("dep.saved"), zcw("dep.h")) ||
         zc_build("verified_first", env, v1))
         return 1;
-    zc_disp("MISS", "verified compile used the same-account cache");
+    zc_disp_in(zcw("verified-disposition.log"), "MISS",
+               "verified compile used the same-account cache");
+    zc_want(lct_file_has(zcw("verified-disposition.log"), "verified:cache_bypassed") &&
+            !lct_file_has(zcw("verified-disposition.log"), "verified:no_verifier_key"),
+            "verified disposition misidentified the reason for cache bypass");
     zc_want(zc_prog_is(zcw("prog"), "200"),
             "verified compile executed stale cached behavior");
     if (zc_build("verified_second", env, v2))
         return 1;
-    zc_disp("MISS", "verified rebuild reused a same-account object");
+    zc_disp_in(zcw("verified-disposition.log"), "MISS",
+               "verified rebuild reused a same-account object");
     zc_want(strcmp(v1, v2) == 0,
             "verified rebuild changed identical output bytes");
     return 0;

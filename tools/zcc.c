@@ -5949,7 +5949,7 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
      * This branch precedes cache_open and both cache-hit paths. The epoch
      * publisher reaches it through its nested zcc_dispatch call. */
     if (getenv("ZCC_VERIFIED") != NULL) {
-        logline("MISS", "verified:no_verifier_key", &pl);
+        logline("MISS", "verified:cache_bypassed", &pl);
         return zcc_run_uncached(&pl, cc_argv, replace_on_bypass);
     }
 
