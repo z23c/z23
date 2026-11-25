@@ -1125,6 +1125,160 @@ static void cocoa_title(struct gui_window *w, const char *utf8)
     cocoa_release(pool);
 }
 
+/* AppKit publishes arrow, I-beam and pointing-hand cursors. It has no wait
+ * cursor, so that request stays on the arrow. The singletons are comparable
+ * by identity with currentCursor. */
+static const char *cocoa_cursor_name(enum gui_cursor c)
+{
+    if (c == GUI_CURSOR_IBEAM) return "IBeamCursor";
+    if (c == GUI_CURSOR_HAND) return "pointingHandCursor";
+    return "arrowCursor";
+}
+
+/* mouseLocation and the window frame share screen coordinates. */
+static struct cocoa_point cocoa_mouse_point(void)
+{
+    struct cocoa_point (*fn)(cocoa_id, cocoa_SEL);
+    memcpy(&fn, &g_api.msg, sizeof fn);
+    return fn(g_api.get_class("NSEvent"), cocoa_sel("mouseLocation"));
+}
+
+static bool cocoa_contains(struct cocoa_rect frame, struct cocoa_point p)
+{
+    return p.x >= frame.x && p.y >= frame.y
+        && p.x < frame.x + frame.w && p.y < frame.y + frame.h;
+}
+
+/* contentView.frame sits at the bottom of the window frame. The title bar is
+ * the strip above it, in the same screen coordinates as mouseLocation. */
+static struct cocoa_rect cocoa_content_screen(cocoa_id window)
+{
+    struct cocoa_rect frame = cocoa_rect(window, "frame");
+    cocoa_id view = cocoa_msg(window, "contentView");
+    struct cocoa_rect local = view ? cocoa_rect(view, "frame") : frame;
+    local.x += frame.x;
+    local.y += frame.y;
+    return local;
+}
+
+static long cocoa_front_window(struct cocoa_point p)
+{
+    long (*fn)(cocoa_id, cocoa_SEL, struct cocoa_point, long);
+    memcpy(&fn, &g_api.msg, sizeof fn);
+    return fn(g_api.get_class("NSWindow"),
+              cocoa_sel("windowNumberAtPoint:belowWindowWithWindowNumber:"),
+              p, 0);
+}
+
+/* windowNumberAtPoint ignores a window until AppKit has displayed it.
+ * NSStatusWindowLevel (25) puts the test window above the panels already
+ * covering this screen. The wallet window stays at its normal level. */
+static void cocoa_show_for_hit(cocoa_id window)
+{
+    cocoa_id app = cocoa_msg(g_api.get_class("NSApplication"), "sharedApplication");
+    cocoa_id (*dated)(cocoa_id, cocoa_SEL, double);
+    cocoa_id until;
+    cocoa_void_long(window, "setLevel:", 25);
+    cocoa_void0(window, "orderFrontRegardless");
+    cocoa_void_id(window, "makeKeyAndOrderFront:", NULL);
+    cocoa_void_bool(app, "activateIgnoringOtherApps:", 1);
+    cocoa_void0(window, "display");
+    memcpy(&dated, &g_api.msg, sizeof dated);
+    until = dated(g_api.get_class("NSDate"),
+                  cocoa_sel("dateWithTimeIntervalSinceNow:"), 0.1);
+    cocoa_void_id(cocoa_msg(g_api.get_class("NSRunLoop"), "currentRunLoop"),
+                  "runUntilDate:", until);
+}
+
+static bool cocoa_pointer_in_window(struct cocoa_win *c)
+{
+    struct cocoa_point p;
+    struct cocoa_rect content;
+    if (!c || !c->window) return false;
+    p = cocoa_mouse_point();
+    content = cocoa_content_screen(c->window);
+    if (!cocoa_contains(content, p)) return false;
+    return cocoa_front_window(p) == cocoa_long(c->window, "windowNumber");
+}
+
+static struct cocoa_rect cocoa_screen_frame(cocoa_id window)
+{
+    cocoa_id screen = cocoa_msg(window, "screen");
+    struct cocoa_rect none = { 0, 0, 0, 0 };
+    if (!screen) screen = cocoa_msg(g_api.get_class("NSScreen"), "mainScreen");
+    if (!screen) return none;
+    return cocoa_rect(screen, "frame");
+}
+
+/* Place a small frame around the screen pointer. contain 1 puts the pointer
+ * in the content, 2 puts it in the title bar, and 0 parks the window on the
+ * opposite side of the screen. The setter reads the content rect itself. */
+bool gui_cocoa_aim_frame(struct gui_window *w, int contain)
+{
+    struct cocoa_win *c = cocoa_state(w);
+    struct cocoa_rect screen, frame;
+    struct cocoa_point p;
+    bool held;
+    if (!c || !c->window || !cocoa_load(NULL, 0)) return false;
+    p = cocoa_mouse_point();
+    screen = cocoa_screen_frame(c->window);
+    frame.w = 160.0;
+    frame.h = 120.0;
+    if (contain == 1) {
+        frame.x = p.x - 50.0;
+        frame.y = p.y - 24.0;
+    } else if (contain == 2) {
+        frame.x = p.x - 50.0;
+        frame.y = p.y - 112.0;
+    } else if (p.x < screen.x + screen.w * 0.5) {
+        frame.x = screen.x + screen.w - 180.0;
+        frame.y = screen.y + 20.0;
+    } else {
+        frame.x = screen.x + 20.0;
+        frame.y = screen.y + 20.0;
+    }
+    cocoa_set_window_frame(c->window, frame);
+    if (contain) cocoa_show_for_hit(c->window);
+    frame = cocoa_rect(c->window, "frame");
+    p = cocoa_mouse_point();
+    held = cocoa_contains(frame, p);
+    if (held != (contain != 0))
+        printf("    cursor frame %.1f,%.1f %.1f x %.1f pointer %.1f,%.1f contain %d\n",
+               frame.x, frame.y, frame.w, frame.h, p.x, p.y, contain);
+    return held == (contain != 0);
+}
+
+/* A key or focus event still asks for a cursor. Set it only while this
+ * window's content is the frontmost view under the pointer. The title bar
+ * and any window in front keep the cursor AppKit already chose. */
+static void cocoa_set_cursor(struct gui_window *w, enum gui_cursor c)
+{
+    struct cocoa_win *st;
+    cocoa_id cur, pool;
+    if (!cocoa_load(NULL, 0)) return;
+    st = cocoa_state(w);
+    if (!cocoa_pointer_in_window(st)) return;
+    pool = cocoa_pool_push();
+    cur = cocoa_msg(g_api.get_class("NSCursor"), cocoa_cursor_name(c));
+    if (cur) cocoa_void0(cur, "set");
+    cocoa_release(pool);
+}
+
+int gui_cocoa_cursor(void)
+{
+    cocoa_id cur, ibeam, hand, pool;
+    int kind = (int)GUI_CURSOR_ARROW;
+    if (!cocoa_load(NULL, 0)) return kind;
+    pool = cocoa_pool_push();
+    cur = cocoa_msg(g_api.get_class("NSCursor"), "currentCursor");
+    ibeam = cocoa_msg(g_api.get_class("NSCursor"), "IBeamCursor");
+    hand = cocoa_msg(g_api.get_class("NSCursor"), "pointingHandCursor");
+    if (cur && cur == ibeam) kind = (int)GUI_CURSOR_IBEAM;
+    else if (cur && cur == hand) kind = (int)GUI_CURSOR_HAND;
+    cocoa_release(pool);
+    return kind;
+}
+
 const struct gui_backend_ops gui_backend_cocoa = {
     .open = cocoa_open,
     .close = cocoa_close,
@@ -1134,6 +1288,7 @@ const struct gui_backend_ops gui_backend_cocoa = {
     .clip_set = cocoa_clip_set,
     .clip_get = cocoa_clip_get,
     .set_title = cocoa_title,
+    .set_cursor = cocoa_set_cursor,
     .set_fullscreen = cocoa_fullscreen,
 };
 #endif

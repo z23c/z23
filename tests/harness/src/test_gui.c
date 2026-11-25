@@ -837,6 +837,8 @@ static void test_cocoa_fullscreen(void)
 bool gui_cocoa_move_frame(struct gui_window *w, double width, double height);
 unsigned long gui_cocoa_presentation(void);
 void gui_cocoa_set_presentation(unsigned long options);
+int gui_cocoa_cursor(void);
+bool gui_cocoa_aim_frame(struct gui_window *w, int contain);
 #endif
 
 /* A window that is never shown must not hide the Dock or the menu bar. */
@@ -1026,6 +1028,105 @@ static void test_cocoa_presentation_hides_over_autohide(void)
 #endif
 }
 
+/* The wallet asks for an I-beam over a text field and a hand over a button.
+ * Win32 changes the pointer. Cocoa must do the same through the shared call,
+ * and only while the pointer is inside that window. */
+#if defined(__APPLE__)
+static void test_cocoa_cursor_outside(struct gui_window *win, const char *placed)
+{
+    int before = gui_cocoa_cursor();
+    enum gui_cursor ask = before == (int)GUI_CURSOR_IBEAM
+        ? GUI_CURSOR_HAND : GUI_CURSOR_IBEAM;
+    int after = 0;
+    CHECK(placed, gui_cocoa_aim_frame(win, 0));
+    gui_window_set_cursor(win, ask);
+    after = gui_cocoa_cursor();
+    printf("    cursor outside before %d after %d\n", before, after);
+    CHECK("a pointer outside the window keeps its cursor", after == before);
+}
+
+static void test_cocoa_cursor_over(struct gui_window *win)
+{
+    int kind = 0;
+    CHECK("the window can cover the pointer", gui_cocoa_aim_frame(win, 1));
+    gui_window_set_cursor(win, GUI_CURSOR_IBEAM);
+    kind = gui_cocoa_cursor();
+    printf("    cursor after ibeam %d\n", kind);
+    CHECK("a text field asks for the I-beam cursor", kind == (int)GUI_CURSOR_IBEAM);
+    gui_window_set_cursor(win, GUI_CURSOR_HAND);
+    kind = gui_cocoa_cursor();
+    printf("    cursor after hand %d\n", kind);
+    CHECK("a button asks for the hand cursor", kind == (int)GUI_CURSOR_HAND);
+    gui_window_set_cursor(win, GUI_CURSOR_ARROW);
+    kind = gui_cocoa_cursor();
+    printf("    cursor after arrow %d\n", kind);
+    CHECK("the arrow cursor comes back", kind == (int)GUI_CURSOR_ARROW);
+}
+
+static void test_cocoa_cursor_title(struct gui_window *win)
+{
+    int before = gui_cocoa_cursor();
+    enum gui_cursor ask = before == (int)GUI_CURSOR_IBEAM
+        ? GUI_CURSOR_HAND : GUI_CURSOR_IBEAM;
+    int after = 0;
+    CHECK("the title bar can cover the pointer", gui_cocoa_aim_frame(win, 2));
+    gui_window_set_cursor(win, ask);
+    after = gui_cocoa_cursor();
+    printf("    cursor on title before %d after %d\n", before, after);
+    CHECK("the title bar keeps its cursor", after == before);
+}
+
+static void test_cocoa_cursor_covered(struct gui_window *back)
+{
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 cursor cover", .width = 200, .height = 100,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *cover = NULL;
+    char err[120] = "";
+    int before = gui_cocoa_cursor();
+    enum gui_cursor ask = before == (int)GUI_CURSOR_IBEAM
+        ? GUI_CURSOR_HAND : GUI_CURSOR_IBEAM;
+    int after = 0;
+    bool opened = gui_window_open(&d, &cover, err, sizeof(err));
+    CHECK("a second window opens over the pointer", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    CHECK("the cover can take the pointer", gui_cocoa_aim_frame(cover, 1));
+    gui_window_set_cursor(back, ask);
+    after = gui_cocoa_cursor();
+    printf("    cursor covered before %d after %d\n", before, after);
+    CHECK("a covered window does not take the cursor", after == before);
+    gui_window_close(cover);
+}
+#endif
+
+static void test_cocoa_cursor(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = {
+        .title_utf8 = "z23 cursor", .width = 200, .height = 100,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_COCOA };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    bool opened = gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("a window opens before the cursor check", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    test_cocoa_cursor_outside(win, "the window can leave the pointer");
+    test_cocoa_cursor_title(win);
+    test_cocoa_cursor_over(win);
+    test_cocoa_cursor_covered(win);
+    test_cocoa_cursor_outside(win, "the window can leave the pointer again");
+    gui_window_close(win);
+#else
+    printf("  a text field asks for the I-beam cursor... SKIP\n");
+#endif
+}
+
 /* A Cocoa frame change must reach the shared window without a later wait.
  * AppKit tells the delegate during setFrame and during a live drag. */
 static void test_cocoa_live_resize(void)
@@ -1093,6 +1194,7 @@ int test_gui(void)
     test_cocoa_hidden_close_keeps_presentation();
     test_cocoa_presentation_keeps_bits();
     test_cocoa_presentation_hides_over_autohide();
+    test_cocoa_cursor();
     test_cocoa_live_resize();
     test_utf8();
     test_draw();
