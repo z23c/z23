@@ -34,6 +34,9 @@ struct gui_backend_ops {
 };
 
 extern const struct gui_backend_ops gui_backend_headless;
+#if defined(__APPLE__)
+extern const struct gui_backend_ops gui_backend_cocoa;
+#endif
 #if defined(_WIN32)
 extern const struct gui_backend_ops gui_backend_win32;
 bool gui_win32_gl_probe(void);

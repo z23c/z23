@@ -20,7 +20,12 @@
 # needs macOS build coverage this lane does not have; shrink-only until
 # then.
 #
+# 2026-11-25: the Darwin wallet window loads AppKit, libobjc and
+# CoreFoundation at runtime. A link-line framework would be a new build
+# dependency, so this one adapter is pinned beside the sandbox stub.
+#
 # Format: "<path>:dlcall", one row per file with an unguarded dl* call
 # outside engine/modules/hotswap/. Shrink-only: a NEW row or a STALE row
 # (baselined but no longer found) both FAIL the gate.
+platform/modules/gui/src/window_cocoa.c:dlcall
 platform/modules/platform/src/os_sandbox_stub.c:dlcall

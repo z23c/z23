@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "gui/draw.h"
 #include "gui/ui.h"
@@ -651,10 +652,83 @@ static void test_data_pool_exact(void)
     gui_tree_free(t);
 }
 
+#if defined(__APPLE__)
+struct cocoa_wake_arg { struct gui_window *win; };
+
+static void *cocoa_wake_later(void *p)
+{
+    struct cocoa_wake_arg *a = p;
+    struct timespec ts = { .tv_nsec = 80000000L };
+    nanosleep(&ts, NULL);
+    gui_window_wake(a->win);
+    return NULL;
+}
+
+static void test_cocoa_wake(struct gui_window *win)
+{
+    pthread_t th;
+    struct cocoa_wake_arg arg = { .win = win };
+    struct gui_event ev;
+    bool saw = false;
+    int spins = 0;
+    bool started = pthread_create(&th, NULL, cocoa_wake_later, &arg) == 0;
+    while (started && !saw && spins < 32) {
+        spins++;
+        if (!gui_window_wait(win, 2000, &ev)) break;
+        saw = ev.type == GUI_EV_WAKE;
+    }
+    if (started) pthread_join(th, NULL);
+    CHECK("cocoa wake unblocks a native wait", started && saw);
+}
+#endif
+
+/* Darwin AUTO must open the shared CPU window, not refuse the platform. */
+static void test_cocoa_auto(void)
+{
+#if defined(__APPLE__)
+    struct gui_window_desc d = { .title_utf8 = "z23 cocoa", .width = 640, .height = 420,
+        .surface = GUI_SURFACE_CPU, .backend = GUI_BACKEND_AUTO };
+    struct gui_window *win = NULL;
+    char err[120] = "";
+    bool opened = gui_window_open(&d, &win, err, sizeof(err));
+    CHECK("auto backend opens a cocoa window", opened);
+    if (!opened) {
+        printf("  open error: %s\n", err);
+        return;
+    }
+    struct gui_cpu_frame frame;
+    bool acquired = gui_cpu_acquire(win, &frame);
+    CHECK("cocoa window provides a cpu frame",
+          acquired && frame.pixels && frame.width >= 640 && frame.height >= 420);
+    if (acquired && frame.pixels)
+        frame.pixels[0] = 0x00FF0000u;
+    CHECK("cocoa window presents the cpu frame", acquired && gui_cpu_present(win, NULL, 0));
+    test_cocoa_wake(win);
+    {
+        char saved[65537];
+        char back[32];
+        size_t saved_n = gui_clipboard_get_text(win, saved, sizeof(saved));
+        bool full = saved_n + 1u < sizeof(saved);
+        bool set = gui_clipboard_set_text(win, "z23-paste", 9);
+        size_t n = gui_clipboard_get_text(win, back, sizeof(back));
+        CHECK("cocoa window round-trips pasteboard text",
+              set && n == 9 && strcmp(back, "z23-paste") == 0);
+        if (full) {
+            const char *restore = saved_n ? saved : "";
+            (void)gui_clipboard_set_text(win, restore, saved_n);
+        }
+    }
+    gui_window_close(win);
+#else
+    printf("  auto backend opens a cocoa window... SKIP\n");
+#endif
+}
+
 int test_gui(void)
 {
     printf("\n=== gui ===\n");
     g_fail = 0;
+    test_cocoa_auto();
     test_utf8();
     test_draw();
     test_text();

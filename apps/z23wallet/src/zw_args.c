@@ -13,7 +13,7 @@ const char *zw_args_help(void)
            "  --datadir=<dir>     node data folder (holds .cookie)\n"
            "  --rpcport=<n>       node RPC port (default: .rpcport, then 18232)\n"
            "  --node=auto|z23|zclassicd\n"
-           "  --backend=auto|win32|x11|headless\n"
+           "  --backend=auto|win32|x11|cocoa|headless\n"
            "  --size=WxH          window size in logical px (default 1100x720)\n"
            "  --scale=F           headless scale factor\n"
            "  --script=<file>     headless input script\n"
@@ -60,6 +60,7 @@ static bool parse_enum(const char *name, const char *v, struct zw_options *o, ch
         if (!strcmp(v, "auto")) o->backend = GUI_BACKEND_AUTO;
         else if (!strcmp(v, "win32")) o->backend = GUI_BACKEND_WIN32;
         else if (!strcmp(v, "x11")) o->backend = GUI_BACKEND_X11;
+        else if (!strcmp(v, "cocoa")) o->backend = GUI_BACKEND_COCOA;
         else if (!strcmp(v, "headless")) o->backend = GUI_BACKEND_HEADLESS;
         else ok = false;
     }

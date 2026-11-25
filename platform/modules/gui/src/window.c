@@ -48,6 +48,51 @@ static void set_err(char *err, size_t cap, const char *msg)
     if (err && cap) snprintf(err, cap, "%s", msg);
 }
 
+/* AUTO becomes the host window. Cocoa and Win32 stay explicit requests, and
+ * each one fails closed where it was not built. */
+static bool gui_backend_resolve(enum gui_backend_kind *kind,
+                                enum gui_surface_kind surface,
+                                const struct gui_backend_ops **ops,
+                                char *err, size_t cap)
+{
+#if defined(_WIN32)
+    if (*kind == GUI_BACKEND_AUTO) *kind = GUI_BACKEND_WIN32;
+#elif defined(__APPLE__)
+    if (*kind == GUI_BACKEND_AUTO) *kind = GUI_BACKEND_COCOA;
+#endif
+    if (*kind == GUI_BACKEND_AUTO || *kind == GUI_BACKEND_X11) {
+        set_err(err, cap,
+                "no window backend on this platform; use --backend=headless");
+        return false;
+    }
+    if (*kind == GUI_BACKEND_HEADLESS && surface == GUI_SURFACE_GL) {
+        set_err(err, cap, "GL surfaces are not available on the headless backend");
+        return false;
+    }
+    if (*kind == GUI_BACKEND_COCOA && surface == GUI_SURFACE_GL) {
+        set_err(err, cap, "GL surfaces are not available on the cocoa backend");
+        return false;
+    }
+    *ops = &gui_backend_headless;
+#if defined(_WIN32)
+    if (*kind == GUI_BACKEND_WIN32) *ops = &gui_backend_win32;
+#else
+    if (*kind == GUI_BACKEND_WIN32) {
+        set_err(err, cap, "the win32 backend is not built on this platform");
+        return false;
+    }
+#endif
+#if defined(__APPLE__)
+    if (*kind == GUI_BACKEND_COCOA) *ops = &gui_backend_cocoa;
+#else
+    if (*kind == GUI_BACKEND_COCOA) {
+        set_err(err, cap, "the cocoa backend is not built on this platform");
+        return false;
+    }
+#endif
+    return true;
+}
+
 bool gui_window_open(const struct gui_window_desc *d, struct gui_window **out,
                      char *err, size_t err_cap)
 {
@@ -56,28 +101,9 @@ bool gui_window_open(const struct gui_window_desc *d, struct gui_window **out,
         return false;
     }
     enum gui_backend_kind kind = d->backend;
-#if defined(_WIN32)
-    if (kind == GUI_BACKEND_AUTO) kind = GUI_BACKEND_WIN32;
-#endif
-    if (kind == GUI_BACKEND_AUTO || kind == GUI_BACKEND_X11) {
-        set_err(err, err_cap,
-                "no window backend on this platform; use --backend=headless");
+    const struct gui_backend_ops *ops = NULL;
+    if (!gui_backend_resolve(&kind, d->surface, &ops, err, err_cap))
         return false;
-    }
-    if (kind == GUI_BACKEND_HEADLESS && d->surface == GUI_SURFACE_GL) {
-        set_err(err, err_cap,
-                "GL surfaces are not available on the headless backend");
-        return false;
-    }
-    const struct gui_backend_ops *ops = &gui_backend_headless;
-#if defined(_WIN32)
-    if (kind == GUI_BACKEND_WIN32) ops = &gui_backend_win32;
-#else
-    if (kind == GUI_BACKEND_WIN32) {
-        set_err(err, err_cap, "the win32 backend is not built on this platform");
-        return false;
-    }
-#endif
     struct gui_window *w = zcl_calloc(1, sizeof(*w), "gui_window");
     if (!w) {
         set_err(err, err_cap, "out of memory opening a window");
