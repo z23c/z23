@@ -399,11 +399,15 @@ HOTSWAP_MODULE_IMPORT("platform_positioned_file_open_beneath", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("platform_positioned_file_read", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("platform_positioned_file_snapshot", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sapling_decode_payment_address", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sha256_finalize", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sha256_init", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("sha256_write", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sha3_256_finalize", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sha3_256_init", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("sha3_256_write", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("thread_registry_spawn", "NODE_UTIL")
 HOTSWAP_MODULE_IMPORT("zcl_ed25519_keypair", "NODE_UTIL")
+HOTSWAP_MODULE_IMPORT("zutf8_validate_n", "NODE_UTIL")
 
 /* ── NODE_HOTSWAP ──────────────────────────────────────────────────────────
  * The module's own scaffolding: the service-handle acquire/release/generation
