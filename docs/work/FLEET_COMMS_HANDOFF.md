@@ -22,13 +22,16 @@ helper, not the fetch thread. The onion change has a pure-function test only.
 ## What blocks two-way agent communication
 
 1. **No live channel.** `fleet board status` on the lab node on 2026-11-25:
-   one paired peer, `last_skip_reason: no_delegation`, zero pulls, answers,
+   one paired peer, `last_skip_reason: no_delegation` (the peer's delegation is not in the DHT table the lane reads; this does not prove none was anchored), zero pulls, answers,
    pushes and receipts ever, 13 open questions. Push and receipts already
-   exist (`boot_fleet_board_push.c`, `fleet board delivery <id>`); the pairing
-   has no delegation, so nothing flows. Fix: an operator grants the
-   delegation and role for that peer (`docs/agent/FLEET.md`, "Pairing a peer
-   is not a role grant"). That is owner identity authority: do not do it for
-   them.
+   exist (`boot_fleet_board_push.c`, `fleet board delivery <id>`); with no
+   delegation in view, nothing flows. First find out why: the lane reads
+   delegations from the DHT routing table, so a peer that is not currently a
+   contact reads as `no_delegation` even if one was anchored. Check whether
+   the peer is connected and in the table. If none was ever anchored, an
+   operator grants the delegation and role (`docs/agent/FLEET.md`, "Pairing a
+   peer is not a role grant"); anchoring costs coins and is owner identity
+   authority: do not do it for them. A roster (`fleet admit`) avoids both.
 2. **Onion reachability.** A default node's onion is a throwaway that maps
    only virtual port 80. The P2P route exists only with `-onion-persist`.
    The file-service route does not exist in either mode.

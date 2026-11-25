@@ -189,10 +189,12 @@ bool fleet_board_roster_proof_check(enum fleet_board_roster_side side,
 /* ── the two halves' decisions ───────────────────────────────────────── */
 
 /* A pairing row holds its peer on the pairing path, a revoked row included,
- * so revocation always wins. One kind of row holds nothing: an active,
- * unexpired row whose peer has no resolvable delegation can never carry a
- * pull or an answer (the lane skips it as `no_delegation`), and anchoring a
- * delegation costs coins. It must not also shut the free roster path.
+ * so a revoked pairing row always wins. One kind of row holds nothing: an active,
+ * unexpired row whose peer has no delegation in the DHT routing table (the only
+ * view the lane has: a cache of current contacts, not a record of what was ever
+ * anchored) cannot carry a
+ * pull or an answer right now (the lane skips it as `no_delegation`). It
+ * must not also shut the roster path, which has its own sealed authority.
  * Fail closed: an unreadable list reads as a row, so the roster path stands
  * aside and the peer gets what it gets today. */
 static bool pairing_row_is_inert(const struct db_mesh_pairing *row,
