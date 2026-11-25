@@ -59,5 +59,10 @@ enum dlsc_where dlsc_hit_where(const struct dlsc_hit *hit);
 bool dlsc_hit_is_listed(const struct dlsc_hit *hit, const struct dl_row *r);
 /* Append the `mine` object {seq, where, state, hint}; no-op when inactive. */
 bool dlsc_push_mine(struct json_value *data, const struct dlsc_hit *hit);
+/* The brief reply for a poller that only wants the answer: replaces `data`
+ * with {leaf, queued_count, in_flight {seq, phase, elapsed_s}, mine}. The
+ * outcome tail, screen, steer and notes are dropped; ask without brief for
+ * them. Leaves `data` untouched and returns false when it cannot encode. */
+bool dlsc_brief_replace(struct json_value *data);
 
 #endif

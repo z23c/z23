@@ -228,3 +228,46 @@ bool dlsc_push_mine(struct json_value *data, const struct dlsc_hit *hit)
     json_free(&obj);
     return ok;
 }
+
+/* Copy one scalar member of `from` into `to` when it is present. */
+static bool dlsc_brief_copy(struct json_value *to, const struct json_value *from,
+                            const char *key)
+{
+    const struct json_value *v = json_get(from, key);
+    return !v || json_push_kv(to, key, v);
+}
+
+static bool dlsc_brief_flight(struct json_value *out, const struct json_value *data)
+{
+    const struct json_value *fl = json_get(data, "in_flight");
+    struct json_value o;
+    bool ok;
+    if (!fl || json_get(fl, "seq") == NULL)
+        return true;
+    json_init(&o);
+    json_set_object(&o);
+    ok = dlsc_brief_copy(&o, fl, "seq") && dlsc_brief_copy(&o, fl, "phase") &&
+         dlsc_brief_copy(&o, fl, "elapsed_s") && json_push_kv(out, "in_flight", &o);
+    json_free(&o);
+    return ok;
+}
+
+bool dlsc_brief_replace(struct json_value *data)
+{
+    struct json_value out;
+    const struct json_value *queued = json_get(data, "queued");
+    bool ok;
+    json_init(&out);
+    json_set_object(&out);
+    ok = json_push_kv_str(&out, "leaf", "dev.land") &&
+         json_push_kv_int(&out, "queued_count", (int64_t)(queued ? json_size(queued) : 0)) &&
+         dlsc_brief_flight(&out, data) && dlsc_brief_copy(&out, data, "mine") &&
+         dlsc_brief_copy(&out, data, "incident");
+    if (ok) {
+        json_free(data);
+        json_init(data);
+        ok = json_copy_checked(data, &out);
+    }
+    json_free(&out);
+    return ok;
+}

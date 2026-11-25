@@ -634,6 +634,27 @@ static bool dlr_mine_queue_ok(struct dlx_call *c)
            dlr_mine(c, "queued", 20);
 }
 
+/* poll=true: only the poller's fields, a few hundred bytes. */
+static bool dlr_brief_ok(struct dlx_call *c)
+{
+    char buf[65536];
+    bool ok;
+    dlx_begin(c, "status");
+    (void)json_push_kv_int(&c->input, "seq", 21);
+    (void)json_push_kv_bool(&c->input, "poll", true);
+    ok = dlr_seed_queue() && dlx_run(c) && dlx_ok(c);
+    ok = ok && dlr_mine(c, "in_flight", 21) &&
+         json_write(&c->reply.data, buf, sizeof(buf)) < 700 &&
+         !json_get(&c->reply.data, "outcomes") &&
+         !json_get(&c->reply.data, "screen") &&
+         !json_get(&c->reply.data, "steer") &&
+         json_get_int(json_get(&c->reply.data, "queued_count")) == 1 &&
+         json_get_int(json_get(json_get(&c->reply.data, "in_flight"), "seq")) == 21 &&
+         strcmp(json_get_str(json_get(json_get(&c->reply.data, "in_flight"), "phase")),
+                "prove") == 0;
+    return ok;
+}
+
 static bool dlr_mine_unknown_ok(struct dlx_call *c)
 {
     bool ok = dlr_ask(c, "seq", 99, NULL) && dlr_mine(c, "unknown", 99) &&
@@ -672,6 +693,8 @@ static int dlr_case_mine(void)
                dlx_arr(&c, "outcomes")->num_children == 3);
         dlx_end(&c);
         ASSERT(dlr_mine_queue_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlr_brief_ok(&c));
         dlx_end(&c);
         ASSERT(dlr_mine_unknown_ok(&c));
         dlx_end(&c);

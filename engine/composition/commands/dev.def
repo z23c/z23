@@ -2420,9 +2420,11 @@ ZCL_COMMAND_READY_READ(
     "screen. With seq (what submit returned), else tip (the submitted commit, "
     "at least 12 hex), else note, the reply adds mine {seq, where: "
     "queued|in_flight|outcome|unknown, state, hint} and lists that outcome "
-    "row first, however many rows landed since.", 65536,
+    "row first, however many rows landed since. With poll=true the reply is "
+    "only {leaf, queued_count, in_flight {seq, phase, elapsed_s}, mine, "
+    "incident}, a few hundred bytes for a poller.", 65536,
     "land,status,queue,proof,hold",
-    "zcl.land_status_input.v1", "zcl.land.v1", "json,seq,tip,note", "",
+    "zcl.land_status_input.v1", "zcl.land.v1", "json,seq,tip,note,poll", "",
     "z23-dev dev land status",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_PERSISTENT,

@@ -5066,7 +5066,8 @@ static bool dl_status_push_result(struct zcl_command_reply *reply,
                                   const struct dlmr_suspect *main_red,
                                   size_t n_red, size_t nlast,
                                   const char *screen, const struct dlsc_hit *hit,
-                                  const struct dl_row *rows, size_t nrows)
+                                  const struct dl_row *rows, size_t nrows,
+                                  bool poll)
 {
     return json_push_kv_str(&reply->data, "leaf", DL_LEAF) &&
            json_push_kv(&reply->data, "queued", queued) &&
@@ -5076,7 +5077,8 @@ static bool dl_status_push_result(struct zcl_command_reply *reply,
            (want_json || dlsc_push_notes(&reply->data, nlast)) &&
            dlmr_push_status(&reply->data, main_red, n_red) &&
            dlrb_push_status(&reply->data, rows, nrows) &&
-           (want_json || json_push_kv_str(&reply->data, "screen", screen));
+           (want_json || json_push_kv_str(&reply->data, "screen", screen)) &&
+           (!poll || dlsc_brief_replace(&reply->data));
 }
 
 /* ── status ────────────────────────────────────────────────────────────── */
@@ -5304,6 +5306,13 @@ static bool dl_status_wants_json(const struct zcl_command_request *req)
     return want_json;
 }
 
+/* poll=true: reply with the few fields a poller needs (see dlsc_brief_replace). */
+static bool dl_status_wants_brief(const struct zcl_command_request *req)
+{
+    const struct json_value *jv = req && req->input ? json_get(req->input, "poll") : NULL;
+    return jv && jv->type == JSON_BOOL && json_get_bool(jv);
+}
+
 static bool dl_status_paths_fit(const struct dl_dirs *d, char *qpath,
                                 size_t qcap, char *opath, size_t ocap,
                                 struct zcl_command_reply *reply)
@@ -5509,6 +5518,7 @@ static void dl_status(const struct zcl_command_request *req,
     struct json_value queued, inflight, outcomes;
     long long now = (long long)platform_time_wall_unix();
     bool want_json = dl_status_wants_json(req);
+    bool want_brief = dl_status_wants_brief(req);
     bool have_inflight = false;
     size_t used = 0;
     struct dlsc_hit hit;
@@ -5562,7 +5572,7 @@ render_done:
                                 &used, want_json) ||
         !dl_status_push_result(reply, &queued, &inflight, &outcomes,
                                have_inflight, want_json, main_red, n_red, nlast, screen, &hit,
-                               rows, nrows))
+                               rows, nrows, want_brief))
         goto fail;
     free(rows);
     json_free(&queued);
