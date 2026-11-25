@@ -374,7 +374,9 @@ static int seed_donor_distance(struct ci_store *donor,
                                struct ci_merkle_leaf *scratch,
                                const uint8_t merkle_root[32])
 {
-    if (!seed_generation_matches_binary(donor)) return -1;
+    if (!seed_generation_matches_binary(donor) ||
+        ci_store_file_count(donor) != current_count)
+        return -1;
     if (seed_meta_equals(donor, "source_merkle_root_sha3",
                          (const char *)merkle_root, 32))
         return 0;
