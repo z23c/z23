@@ -2590,6 +2590,9 @@ static int bmx_t_transport_observation(void)
         zcl_devagent_boardmail_observe_transport(&out);
         ASSERT_STR_EQ(json_get_str(json_get(&out, "board_state")), "ready");
         ASSERT_STR_EQ(json_get_str(json_get(&out, "board_detail")), "");
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "board_epoch")), "00000000000000000000000000000001");
+        ASSERT_EQ(json_get_int(json_get(&out, "board_scanned")), 0);
+        ASSERT_EQ(json_get_int(json_get(&out, "board_returned")), 0);
         json_free(&out);
         g_bmx_node[BMX_A].down = true;
         json_init(&out);

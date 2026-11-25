@@ -1507,6 +1507,11 @@ void zcl_devagent_boardmail_observe_transport(struct json_value *out)
         } else {
             state = "ready";
             detail = "";
+            (void)json_push_kv_str(out, "board_epoch", bm_str(&page, "epoch"));
+            (void)json_push_kv_int(out, "board_scanned",
+                                   bm_int(&page, "scanned", 0));
+            (void)json_push_kv_int(out, "board_returned",
+                                   (long long)json_size(json_get(&page, "posts")));
         }
     } else if (rc == BM_RPC_REFUSED) {
         const char *code = bm_str(&page, "code");

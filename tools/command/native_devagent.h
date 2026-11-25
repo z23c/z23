@@ -651,7 +651,7 @@ void zcl_devagent_boardmail_observe_export(const char *recvdir,
                                            const char *maildir,
                                            struct json_value *out);
 
-/* Read-only node transport probe; writes board_state and board_detail only. */
+/* Read-only transport and sync-position probe; writes only board_* fields. */
 void zcl_devagent_boardmail_observe_transport(struct json_value *out);
 
 /* True when `to` is a verified roster box other than this one. */
