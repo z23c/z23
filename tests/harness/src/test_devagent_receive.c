@@ -475,8 +475,6 @@ static bool rtx_typed_accept(const char *grant, const char *body,
     unsigned char digest[32]; char hash[65];
     sha3_256((const unsigned char *)body, strlen(body), digest);
     zcl_hex_encode(digest, sizeof(digest), hash);
-    if (!rtx_route_ready())
-        return false;
     json_init(&items); json_set_array(&items);
     json_init(&item); json_set_object(&item);
     json_init(&d); json_set_object(&d);
@@ -2676,6 +2674,7 @@ int test_devagent_receive(void)
         FILE *sentfile = fopen(sentpath, "wb"); ASSERT(sentfile);
         ASSERT_EQ(fclose(sentfile), 0);
         ASSERT_EQ(chmod(sentpath, 0400), 0);
+        ASSERT(rtx_route_ready());
         ASSERT(rtx_typed_accept(recipient_grant, body, source, resolved, "deferred-key", "DEFERRED", &sent_seq, &duplicate));
         ASSERT(!duplicate);
         ASSERT(rtx_typed_accept(recipient_grant, body, source, resolved, "accepted-key", "ACCEPTED", &sent_seq, &duplicate));
