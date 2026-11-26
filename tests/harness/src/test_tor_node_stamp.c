@@ -172,6 +172,122 @@ static int test_tor_stamp_cases(const char *dir)
     return failures;
 }
 
+#if defined(__APPLE__)
+static long tn_spawn_count(const char *marker)
+{
+    FILE *fp = fopen(marker, "r");
+    long n;
+    if (fp == NULL)
+        return 0;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return 0;
+    }
+    n = ftell(fp);
+    fclose(fp);
+    return n < 0 ? 0 : n;
+}
+
+static int tn_arm_sha_trap(const char *dir, char *saved, size_t saved_cap)
+{
+    char shim[1024];
+    char marker[1024];
+    char path_env[1024];
+    const char *cur = getenv("PATH");
+    FILE *fp;
+    int n;
+    if (cur == NULL || strlen(cur) + 1 > saved_cap)
+        return -1;
+    memcpy(saved, cur, strlen(cur) + 1);
+    n = snprintf(shim, sizeof shim, "%s/sha256sum", dir);
+    if (!tn_fit(n, sizeof shim))
+        return -1;
+    n = snprintf(marker, sizeof marker, "%s/spawn", dir);
+    if (!tn_fit(n, sizeof marker))
+        return -1;
+    fp = fopen(shim, "w");
+    if (fp == NULL)
+        return -1;
+    if (fputs("#!/bin/sh\nprintf x >> \"$ZCL_TOR_SPAWN\"\n"
+              "PATH=${PATH#*:}\nexport PATH\nexec sha256sum \"$@\"\n",
+              fp) < 0) {
+        fclose(fp);
+        return -1;
+    }
+    if (fclose(fp) != 0 || chmod(shim, 0755) != 0)
+        return -1;
+    n = snprintf(path_env, sizeof path_env, "%s:%s", dir, saved);
+    if (!tn_fit(n, sizeof path_env))
+        return -1;
+    if (setenv("ZCL_TOR_SPAWN", marker, 1) != 0 || setenv("PATH", path_env, 1) != 0)
+        return -1;
+    return 0;
+}
+
+static int tn_sidecar_matches(const char *node, const char *hex)
+{
+    char side[1100];
+    char body[256];
+    char want[256];
+    FILE *fp;
+    int n;
+    int ok = 0;
+    n = snprintf(side, sizeof side, "%s.tor-stamp", node);
+    if (!tn_fit(n, sizeof side))
+        return 0;
+    fp = fopen(side, "r");
+    if (fp == NULL)
+        return 0;
+    if (fgets(body, (int)sizeof body, fp) != NULL &&
+        fgets(body, (int)sizeof body, fp) != NULL) {
+        n = snprintf(want, sizeof want, "binary_sha256: %s\n", hex);
+        ok = tn_fit(n, sizeof want) && strcmp(body, want) == 0;
+    }
+    fclose(fp);
+    return ok;
+}
+
+/* The sidecar digest must be SHA-256 of the node with no sha256sum launch. */
+static int test_tor_no_sha256sum(const char *dir)
+{
+    char node[1024];
+    char saved[1024];
+    char marker[1024];
+    char hex[80];
+    long spawn;
+    int n;
+    int rc;
+    int digest_ok;
+    n = snprintf(node, sizeof node, "%s/hashnode.sh", dir);
+    if (!tn_fit(n, sizeof node))
+        return 1;
+    if (tn_write(node, "#!/bin/sh\nprintf 'tor: full\\n'\n", 0755) != 0)
+        return 1;
+    if (tn_arm_sha_trap(dir, saved, sizeof saved) != 0)
+        return 1;
+    rc = zcl_tor_write_stamp_sidecar(node);
+    if (setenv("PATH", saved, 1) != 0)
+        return 1;
+    unsetenv("ZCL_TOR_SPAWN");
+    n = snprintf(marker, sizeof marker, "%s/spawn", dir);
+    if (!tn_fit(n, sizeof marker))
+        return 1;
+    spawn = tn_spawn_count(marker);
+    digest_ok = tn_hash(node, hex, sizeof hex) == 0 && tn_sidecar_matches(node, hex);
+    printf("tor_hash: status=%d spawn=%ld digest_ok=%d\n", rc, spawn, digest_ok);
+    if (rc != 0 || !digest_ok || spawn != 0)
+        return 1;
+    return 0;
+}
+#else
+static int test_tor_no_sha256sum(const char *dir)
+{
+    (void)dir;
+    printf("tor_hash: skip\n");
+    return 0;
+}
+#endif
+
 int test_tor_node_stamp(void);
 int test_tor_node_stamp(void)
 {
@@ -190,6 +306,7 @@ int test_tor_node_stamp(void)
         failures = 1;
     } else {
         failures = test_tor_stamp_cases(dir);
+        failures += test_tor_no_sha256sum(dir);
     }
     if (had == 0)
         unsetenv("ZCL_TOR_STUB_REFUSAL");

@@ -31,6 +31,10 @@ static void ts_say(const char *context, const char *tail)
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#include "../../platform/modules/base/include/base/hex.h"
+#endif
 
 static int ts_fit(int n, size_t cap)
 {
@@ -178,6 +182,47 @@ static int ts_hex64(const char *s)
     return s[64] == '\0';
 }
 
+#if defined(__APPLE__)
+/* SHA-256 of the file bytes, matching sha256sum, with no process launch.
+ * The state machine is deliberately not the build-epoch or alias hash shape. */
+static int ts_digest(const char *node, char *hex, size_t cap)
+{
+    CC_SHA256_CTX ctx;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    unsigned char buf[4096];
+    int fd;
+    int step;
+    ssize_t n;
+    if (cap < 65)
+        return -1;
+    fd = open(node, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    step = CC_SHA256_Init(&ctx) == 1 ? 1 : 0;
+    do {
+        switch (step) {
+        case 1:
+            n = read(fd, buf, sizeof buf);
+            if (n < 0)
+                step = errno == EINTR ? 1 : 0;
+            else if (n == 0)
+                step = 3;
+            else
+                step = CC_SHA256_Update(&ctx, buf, (CC_LONG)n) == 1 ? 1 : 0;
+            break;
+        default:
+            step = 0;
+            break;
+        }
+    } while (step == 1);
+    if (close(fd) != 0)
+        step = 0;
+    if (step != 3 || CC_SHA256_Final(digest, &ctx) != 1)
+        return -1;
+    zcl_hex_encode(digest, CC_SHA256_DIGEST_LENGTH, hex);
+    return ts_hex64(hex) ? 0 : -1;
+}
+#else
 static int ts_digest(const char *node, char *hex, size_t cap)
 {
     char *argv[2];
@@ -196,6 +241,7 @@ static int ts_digest(const char *node, char *hex, size_t cap)
     hex[i] = '\0';
     return ts_hex64(hex) ? 0 : -1;
 }
+#endif
 
 static int ts_sidecar(const char *node)
 {
