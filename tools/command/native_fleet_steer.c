@@ -58,11 +58,23 @@
  * duplicate:true and appends nothing. Retries reconcile; they never
  * duplicate work. A different payload under an already-recorded key is
  * refused per-item as IDEMPOTENCY_CONFLICT: the key names one exact
- * delivery, never two. The recorded ref+grant let revoke cancel exactly
+ * delivery, never two. A new key that reuses a ref already recorded for
+ * any key is refused as STEER_REF_REUSED and appends nothing: the ref
+ * names one delivery. The recorded ref+grant let revoke cancel exactly
  * the queued work its grant sent. The reply's top-level `accepted` counts
  * only items whose result state is not "refused" (a reconciled duplicate
- * counts, a fresh IDEMPOTENCY_CONFLICT/BAD_INPUT/mail refusal does not) —
- * it is never just the item-result count.
+ * counts, a fresh IDEMPOTENCY_CONFLICT/STEER_REF_REUSED/STEER_NO_ROUTE/
+ * BAD_INPUT/mail refusal does not) — it is never just the item-result
+ * count. `refused` is its own item state, distinct from queued, read,
+ * acknowledged and completed, and it is not an accept.
+ *
+ * ROUTE. A fresh send whose board-mail observation names no usable route
+ * (the hint is set: not this box, not broadcast, not an enrolled box)
+ * is refused as STEER_NO_ROUTE before any mail or receipt append. An
+ * observation that could not be loaded stays a local accept, as before;
+ * a missing observation is not invented into a route. A same-key retry
+ * still reconciles to duplicate:true and does not consult the route
+ * again.
  *
  * STATES. queued, read, acknowledged, completed — four different facts.
  * Absence of evidence stays at the earlier state. On a mail pass that was
@@ -105,8 +117,14 @@
  *
  * REPLIES. Each directive change row also carries `reply`, correlating
  * the rows already pulled by ref (+ attempt when both state one):
- * answered (a later `result` under the ref, from the addressee or
- * addressed back to the origin by anyone but the origin), else closed (a
+ * answered only when a later `result` under the ref is held in
+ * inbox.<recipient>.jsonl (recipient is the directive's `to`) AND
+ * board_signer is that recipient's roster signing key. A result that is
+ * only correlated by ref, missing from that inbox, unsigned, or signed
+ * by another key does not answer and does not clear the directive
+ * (it is not receiver evidence). The structural addressee /
+ * reply_to_origin split still names answer_match, and reply_to_origin
+ * stays a heuristic, but neither is sufficient alone. Else closed (a
  * later `note` or `result` under the same ref from the origin itself, or
  * from an owner name, whose body starts with "closed by sender:"; the
  * words after it name superseded, recipient gone, withdrawn or other),
@@ -120,6 +138,12 @@
  * token; a reply is never an ack and a read file is never an ack), else
  * queued; with
  * the directive's own sent_ts/sent_age_s apart from answer_ts/answer_age_s.
+ * hops.send_to_import_ms, hops.import_to_accept_ms and
+ * hops.accept_to_result_ms are each a measured duration or the string
+ * UNKNOWN. This adapter does not observe those hop boundaries, so each
+ * is UNKNOWN; a missing hop is never 0 and never a copy of another
+ * figure. A send item's local_post_ms is the monotonic duration of the
+ * mail post this call performed, or UNKNOWN when that post did not run.
  * A closure is a new row and rewrites nothing; a real answer still wins
  * over it. `class` sorts every directive: broadcast (to `*`), owner (to a
  * name in ZCL_FLEET_OWNER_NAMES, comma-separated, default the host $USER), else
@@ -1561,6 +1585,7 @@ struct fmc_row {
     const char *body;
     const char *ref;
     const char *observed_disposition, *observed_stream, *observed_sha3, *sender_binding;
+    const char *board_signer;
     long long observed_offset, observed_seq;
 };
 
@@ -1606,6 +1631,7 @@ static bool fmc_row_parse(const struct json_value *r, struct fmc_row *v)
     v->observed_stream = fmc_row_field(r, "observed_stream");
     v->observed_sha3 = fmc_row_field(r, "observed_sha3");
     v->sender_binding = fmc_row_field(r, "sender_binding");
+    v->board_signer = fmc_row_field(r, "board_signer");
     const struct json_value *oo = json_get(r, "observed_offset");
     const struct json_value *os = json_get(r, "observed_seq");
     v->observed_offset = oo && oo->type == JSON_INT ? json_get_int(oo) : -1;
@@ -1973,20 +1999,59 @@ struct fmc_reply_conflicts { bool any, target, attempt_any, attempt_target; };
 static struct fmc_reply_conflicts fmc_reply_conflicts(const struct json_value *, const struct fmc_row *);
 static bool fmc_reply_conflicting(const struct fmc_reply_conflicts *, const struct fmc_row *, const struct fmc_row *, bool);
 
+/* A result answers or clears directive d only when that result is the
+ * row held in inbox.<recipient>.jsonl and board_signer is the recipient's
+ * roster signing key. Ref correlation alone, another inbox, a missing
+ * signer, or another key does not. Broadcast has no single recipient
+ * inbox, so a result never clears it. */
+static bool fmc_result_authority(const struct fmc_row *d, const struct fmc_row *r)
+{
+    char want[FMC_NAME_MAX + 16];
+    char name[FMC_NAME_MAX + 1];
+    int n;
+    if (!d || !r || !fleet_enrol_name_valid(d->to))
+        return false;
+    n = snprintf(want, sizeof(want), "inbox.%s.jsonl", d->to);
+    if (n <= 0 || (size_t)n >= sizeof(want) || strcmp(r->stream, want) != 0)
+        return false;
+    if (!zcl_devagent_boardmail_peer_name(r->board_signer, name, sizeof(name)))
+        return false;
+    return strcmp(name, d->to) == 0;
+}
+
 /* True when the pulled rows carry a reply from this row's recipient under
  * the same ref: the row a transport brings back into inbox.<peer>.jsonl,
  * and the only proof available here that the directive left this host. A
  * row whose `from` is our own sender name is our side of the thread, never
  * receiver evidence — so a directive addressed to its own sender cannot
- * promote itself. Bounded by the pull the brief already holds; nothing is
+ * promote itself. A result still has to pass fmc_result_authority; a note
+ * does not. Bounded by the pull the brief already holds; nothing is
  * accumulated. Only strictly later valid timestamps establish ordering;
  * equal seconds are ambiguous, and stream sequence numbers are not comparable. */
 static bool fmc_direct_reply(const struct fmc_row *v, const struct fmc_row *r,
                              const struct fmc_reply_conflicts *conflicts)
 {
+    if (!strcmp(r->kind, "result") && !fmc_result_authority(v, r))
+        return false;
     return !strcmp(r->from, v->to) && !strcmp(r->ref, v->ref) &&
         fmc_reply_addressed(v, r) && fmc_reply_compatible(v, r) &&
         !fmc_reply_conflicting(conflicts, v, r, true);
+}
+
+/* `to` of `*` names no cursor file. A note from anyone but the sender is
+ * that broadcast's receiver evidence. A result is not: broadcast has no
+ * inbox.<recipient>. A named recipient still has to be later, addressed
+ * back, and attempt-compatible, and a result also signed in that inbox. */
+static bool fmc_row_receiver_evidence(const struct fmc_row *v,
+                                      const struct fmc_row *r,
+                                      const struct fmc_reply_conflicts *conflicts)
+{
+    if (r->observed_disposition[0] || strcmp(r->from, v->from) == 0)
+        return false;
+    if (strcmp(v->to, "*") != 0)
+        return fmc_direct_reply(v, r, conflicts);
+    return strcmp(r->kind, "result") != 0 &&
+        strcmp(r->ref, v->ref) == 0 && r->from[0];
 }
 
 static bool fmc_rows_reply_from(const struct json_value *rows,
@@ -2003,18 +2068,7 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
         struct fmc_row r;
         if (!fmc_rows_at(rows, i, &r))
             continue;
-        if (r.observed_disposition[0]) continue;
-        if (strcmp(r.from, v->from) == 0)
-            continue;
-        /* `to` of `*` names no cursor file. A note from anyone but the
-         * sender is that broadcast's receiver evidence. A named recipient
-         * still has to be later, addressed back, and attempt-compatible. */
-        if (strcmp(v->to, "*") == 0) {
-            if (strcmp(r.ref, v->ref) == 0 && r.from[0])
-                return true;
-            continue;
-        }
-        if (fmc_direct_reply(v, &r, &conflicts))
+        if (fmc_row_receiver_evidence(v, &r, &conflicts))
             return true;
     }
     return false;
@@ -3635,8 +3689,9 @@ static bool fmc_ref_answers(const char *dref, const char *rref)
     return false;
 }
 
-/* How r answers directive d, or NULL when it does not. */
-static const char *fmc_answer_match(const struct fmc_row *d,
+/* Structural correlation only. A disposition hint may use this. It is not
+ * an answer: fmc_answer_match also requires the recipient inbox and key. */
+static const char *fmc_answer_shape(const struct fmc_row *d,
                                     const struct fmc_row *r)
 {
     /* A closure note never answers, even as a result to the origin. */
@@ -3649,6 +3704,16 @@ static const char *fmc_answer_match(const struct fmc_row *d,
     if (strcmp(r->from, d->to) == 0)
         return fmc_reply_addressed(d, r) ? "addressee" : NULL;
     return strcmp(r->to, d->from) == 0 ? "reply_to_origin" : NULL;
+}
+
+/* How r answers directive d, or NULL when it does not. */
+static const char *fmc_answer_match(const struct fmc_row *d,
+                                    const struct fmc_row *r)
+{
+    const char *shape = fmc_answer_shape(d, r);
+    if (!shape || !fmc_result_authority(d, r))
+        return NULL;
+    return shape;
 }
 
 /* Distinct source rows remain distinct even when their directive text agrees. */
@@ -3712,10 +3777,16 @@ static bool fmc_answer_find(const struct json_value *rows,
         if (!fmc_rows_at(rows, i, &r))
             continue;
         m = fmc_answer_match(d, &r);
-        if (m && r.observed_disposition[0]) {
-            if (!fmc_reply_conflicting(&conflicts, d, &r, !strcmp(m, "addressee")))
-                a->observed_disposition = r.observed_disposition;
-            continue;
+        /* A typed disposition is a hint on a structurally related result.
+         * It is not an answer and does not require the roster signature. */
+        {
+            const char *shape = fmc_answer_shape(d, &r);
+            if (shape && r.observed_disposition[0]) {
+                if (!fmc_reply_conflicting(&conflicts, d, &r,
+                                           !strcmp(shape, "addressee")))
+                    a->observed_disposition = r.observed_disposition;
+                continue;
+            }
         }
         if (m && fmc_reply_conflicting(&conflicts, d, &r, !strcmp(m, "addressee"))) {
             a->ambiguous = true;
@@ -3977,6 +4048,19 @@ static bool fmc_reply_emit(struct json_value *item, const struct fmc_row *v,
     if (answered)
         ok &= json_push_kv_bool(&o, "answer_heuristic",
                                 !strcmp(a->match, "reply_to_origin"));
+    /* Hop boundaries are not observed here. UNKNOWN is the reading;
+     * never 0, and never a copy of sent_age_s or answer_age_s. */
+    {
+        struct json_value hops;
+        json_init(&hops);
+        json_set_object(&hops);
+        ok &= json_push_kv_str(&hops, "send_to_import_ms", "UNKNOWN");
+        ok &= json_push_kv_str(&hops, "import_to_accept_ms", "UNKNOWN");
+        ok &= json_push_kv_str(&hops, "accept_to_result_ms", "UNKNOWN");
+        if (ok)
+            ok = json_push_kv(&o, "hops", &hops);
+        json_free(&hops);
+    }
     if (strcmp(st.state, "unresolved") == 0)
         ok &= json_push_kv_str(&o, "next_action",
                                fmc_unresolved_action(v, action, sizeof(action)));
@@ -6785,12 +6869,32 @@ invalid:
     return false;
 }
 
+static void fmc_screen_append_blockers(const struct json_value *data,
+                                       char *screen, size_t cap)
+{
+    const struct json_value *blockers = json_get(data, "blockers");
+    size_t used = strlen(screen);
+    size_t n = blockers && blockers->type == JSON_ARR ? json_size(blockers) : 0;
+    for (size_t i = 0; i < n && used + 1 < cap; i++) {
+        const struct json_value *item = json_at(blockers, i);
+        const char *line = item && item->type == JSON_STR ? json_get_str(item) : "";
+        int w;
+        if (!line || !line[0])
+            continue;
+        w = snprintf(screen + used, cap - used, "blocker: %s\n", line);
+        if (w < 0 || (size_t)w >= cap - used)
+            break;
+        used += (size_t)w;
+    }
+}
+
 static void fmc_brief_screen(const struct zcl_command_request *req,
                              struct zcl_command_reply *reply)
 {
     char screen[4096]; struct json_value trial;
     size_t budget=fmc_brief_data_budget(req);
     zcl_fmc_tasks_screen(&reply->data,screen,sizeof(screen));
+    fmc_screen_append_blockers(&reply->data, screen, sizeof(screen));
     json_init(&trial);
     bool ok=json_copy_checked(&trial,&reply->data) && json_push_kv_str(&trial,"screen",screen);
     if (!ok) {
@@ -7208,7 +7312,8 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
                                  const struct fmc_item_fields *f,
                                  long long seq, bool duplicate, bool record,
                                  const char *sent_path, const char *from,
-                                 const char *grant, const struct json_value *disposition)
+                                 const char *grant, const struct json_value *disposition,
+                                 long long post_ms)
 {
     /* `from` here is the resolved sender, never the caller's claim. */
     struct json_value item;
@@ -7243,6 +7348,10 @@ static void fmc_send_item_accept(struct json_value *items, size_t index,
         (void)json_push_kv_int(&item, "seq", seq);
         (void)json_push_kv_bool(&item, "duplicate", duplicate);
     }
+    if (post_ms >= 0)
+        (void)json_push_kv_int(&item, "local_post_ms", post_ms);
+    else
+        (void)json_push_kv_str(&item, "local_post_ms", "UNKNOWN");
     if (disposition) {
         (void)json_push_kv_bool(&item, "verified_read", true);
         (void)json_push_kv_str(&item, "disposition", fmc_item_str(disposition, "state"));
@@ -7460,6 +7569,58 @@ struct fmc_send_reconcile {
     bool keyed;
 };
 
+/* 1 when `ref` is already recorded under a different key, 0 when it is
+ * free or this key already owns it, -1 when the receipt store cannot be
+ * read. A missing file is free. A malformed line fails closed. */
+/* 1 when this receipt line records `ref` under a different key, 0 when
+ * it does not, -1 when the line is not one JSON object. */
+static int fmc_sent_line_clashes(const char *line, const char *ref, const char *key)
+{
+    struct json_value obj;
+    const struct json_value *rv, *kv;
+    const char *rref, *rkey;
+    int clash;
+    json_init(&obj);
+    if (!json_read(&obj, line, strlen(line)) || obj.type != JSON_OBJ) {
+        json_free(&obj);
+        return -1;
+    }
+    rv = json_get(&obj, "ref");
+    kv = json_get(&obj, "key");
+    rref = rv && rv->type == JSON_STR ? json_get_str(rv) : "";
+    rkey = kv && kv->type == JSON_STR ? json_get_str(kv) : "";
+    clash = rref[0] && strcmp(rref, ref) == 0 && strcmp(rkey, key) != 0;
+    json_free(&obj);
+    return clash;
+}
+
+static int fmc_sent_ref_clash(const char *path, const char *ref, const char *key)
+{
+    FILE *f;
+    char line[FMC_LINE_CAP];
+    int read_rc;
+    bool clash = false;
+    if (!path || !ref || !ref[0] || !key)
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return errno == ENOENT ? 0 : -1;
+    while ((read_rc = fmc_revoke_read_line(f, line)) > 0) {
+        int one = fmc_sent_line_clashes(line, ref, key);
+        if (one < 0) {
+            read_rc = -1;
+            break;
+        }
+        if (one > 0)
+            clash = true;
+    }
+    bool failed = read_rc < 0 || ferror(f) != 0;
+    failed |= fclose(f) != 0;
+    if (failed)
+        return -1;
+    return clash ? 1 : 0;
+}
+
 /* 0 refuses, 1 is an old unkeyed replay, 2 continues to source lookup. */
 static int fmc_send_reconcile_receipt(struct fmc_send_reconcile *c)
 {
@@ -7478,7 +7639,7 @@ static int fmc_send_reconcile_receipt(struct fmc_send_reconcile *c)
     }
     if (c->keyed) return 2;
     fmc_send_item_accept(c->items, c->index, c->f, c->seq, true, false,
-                         c->sent_path, c->from, c->grant, NULL);
+                         c->sent_path, c->from, c->grant, NULL, -1);
     return 1;
 }
 
@@ -7487,16 +7648,19 @@ static int fmc_send_reconcile_disposition(struct fmc_send_reconcile *c)
 {
     char why[64], message[sizeof(((struct zcl_command_reply *)0)->error.message)];
     bool duplicate = false;
+    int64_t t0 = platform_time_monotonic_ms();
     long long seq = fmc_post_directive(c->req, c->f->to, c->f->kind, c->f->body,
         c->f->ref, c->sender, c->f->key, true, &duplicate, c->wire, true,
         why, sizeof(why), message, sizeof(message));
+    int64_t t1 = platform_time_monotonic_ms();
+    long long post_ms = (t0 >= 0 && t1 >= t0) ? (long long)(t1 - t0) : -1;
     if (seq >= 0) {
         if (c->keyed && seq != c->seq) {
             fmc_send_item_refused(c->items, c->index, c->f->to, "SENT_SOURCE_MISMATCH");
             return 0;
         }
         fmc_send_item_accept(c->items, c->index, c->f, seq, true, c->receipt == 0,
-                             c->sent_path, c->from, c->grant, c->disposition);
+                             c->sent_path, c->from, c->grant, c->disposition, post_ms);
         return 1;
     }
     if (c->receipt > 0 || strcmp(why, "MAIL_SOURCE_NOT_FOUND")) {
@@ -7534,6 +7698,32 @@ static bool fmc_send_preflight(const struct json_value *it,
     return true;
 }
 
+/* A recorded key has already reconciled. A fresh append must not reuse a
+ * ref, and must not queue mail that has no route. False after a refusal. */
+static bool fmc_send_fresh_ok(struct json_value *items, size_t index,
+                              const char *sent_path, const struct fmc_item_fields *f,
+                              int receipt)
+{
+    struct zcl_boardmail_delivery route;
+    int clash;
+    if (receipt != 0)
+        return true;
+    clash = fmc_sent_ref_clash(sent_path, f->ref, f->key);
+    if (clash < 0) {
+        fmc_send_item_refused(items, index, f->to, "SENT_UNAVAILABLE");
+        return false;
+    }
+    if (clash > 0) {
+        fmc_send_item_refused(items, index, f->to, "STEER_REF_REUSED");
+        return false;
+    }
+    zcl_devagent_boardmail_observe(f->to, f->ref, &route);
+    if (!route.hint[0])
+        return true;
+    fmc_send_item_refused_message(items, index, f->to, "STEER_NO_ROUTE", route.hint);
+    return false;
+}
+
 /* One send item: validate, reconcile idempotency, post, record. Emits its
  * result object onto items[]. Returns true iff the item's state is an
  * accept (fresh or duplicate), false for every refused state — the
@@ -7564,12 +7754,18 @@ static bool fmc_send_item(const struct zcl_command_request *req,
         verdict = fmc_send_reconcile_disposition(&c);
         if (verdict != 2) return verdict == 1;
     }
+    if (!fmc_send_fresh_ok(items, index, sent_path, &f, c.receipt))
+        return false;
     seq = c.seq; keyed = c.keyed; receipt = c.receipt;
     why[0] = 0;
     long long recorded_seq = seq;
+    int64_t post_t0 = platform_time_monotonic_ms();
      seq = fmc_post_directive(req, f.to, f.kind, f.body, f.ref, s, f.key,
                              keyed, &duplicate, disposition ? disposition_wire : NULL, false, why,
                              sizeof(why), message, sizeof(message));
+    int64_t post_t1 = platform_time_monotonic_ms();
+    long long post_ms = (post_t0 >= 0 && post_t1 >= post_t0)
+                            ? (long long)(post_t1 - post_t0) : -1;
     if (seq < 0) {
         fmc_send_item_refused_message(items, index, f.to,
                               why[0] ? why : "POST_FAILED", message);
@@ -7580,7 +7776,7 @@ static bool fmc_send_item(const struct zcl_command_request *req,
         return false;
     }
     fmc_send_item_accept(items, index, &f, seq, duplicate, receipt == 0, sent_path, from,
-                         grant, disposition);
+                         grant, disposition, post_ms);
     return true;
 }
 

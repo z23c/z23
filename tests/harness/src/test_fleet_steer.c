@@ -23,6 +23,7 @@
 #include "base/safe_alloc.h"
 #include "chainlog/chainlog.h"
 #include "crypto/ed25519.h"
+#include "fleet_enrol.h"
 #include "fleetledger/fleet_ledger.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
@@ -1878,8 +1879,7 @@ static int fmx_t_sent_needs_receiver(void)
                                        "steer-caller", "fence-sweep"),
                       "queued");
         fmx_end(&b);
-        /* A later recipient reply under the same ref supplies correlation
-         * evidence: the sent row promotes to acknowledged. */
+        /* An unsigned result under the same ref is not receiver evidence. */
         fmx_seed_inbox("fence-crew", "2030-01-01T00:00:01Z", 9001,
                        "fence-crew", "steer-caller", "result",
                        "north fence swept", "fence-sweep");
@@ -1888,7 +1888,7 @@ static int fmx_t_sent_needs_receiver(void)
         ASSERT(fmx_ok(&b));
         ASSERT_STR_EQ(fmx_change_state(fmx_arr(&b, "changes"),
                                        "steer-caller", "fence-sweep"),
-                      "acknowledged");
+                      "queued");
         /* The reply row itself was not sent from here, so it reads
          * delivered. */
         ASSERT_STR_EQ(fmx_change_state(fmx_arr(&b, "changes"), "fence-crew",
@@ -3667,15 +3667,16 @@ static int fmx_t_directive_close_expiry(void)
         ASSERT(json_get_int(fmx_get(&b, "overdue_worker_directives")) == 0);
         ASSERT(fmx_dcount(&b, "closed") == 1);
         fmx_end(&b);
-        /* The recipient's real result still wins over the closure. */
+        /* An unsigned result in the recipient inbox does not answer and
+         * does not beat the closure. */
         fmx_seed_inbox("dead-box", "2026-01-01T00:20:00Z", 1, "dead-box",
                        FMX_SENDER, "result", "receiver=dead-box\\ndone\\n",
                        "close-ref");
         ASSERT(fmx_brief_ok(&b));
         ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "close-ref"),
-                               "state"), "answered");
-        ASSERT(fmx_dcount(&b, "closed") == 0);
-        ASSERT(fmx_dcount(&b, "answered") == 1);
+                               "state"), "closed");
+        ASSERT(fmx_dcount(&b, "closed") == 1);
+        ASSERT(fmx_dcount(&b, "answered") == 0);
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -3878,12 +3879,12 @@ static int fmx_t_directive_close_expiry(void)
         ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "same-sec-ref"),
                                "state"), "closed");
         fmx_end(&b);
-        /* A recipient's real result still wins over a closure. */
+        /* An unsigned result does not win over a closure. */
         fmx_seed_inbox("dead", "2026-01-01T00:40:00Z", 1, "dead-box",
                        FMX_SENDER, "result", "done", "bound-ref");
         ASSERT(fmx_brief_ok(&b));
         ASSERT_STR_EQ(fmx_wstr(fmx_dir_reply(&b, FMX_SENDER, "bound-ref"),
-                               "state"), "answered");
+                               "state"), "closed");
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -5204,11 +5205,12 @@ static int fmx_t_brief_watermark(void)
         ASSERT(fmx_ok(&b));
         ASSERT(strcmp(fmx_change_state(fmx_arr(&b, "changes"), "oauth",
                                        "vis-e2e"),
-                      "acknowledged") == 0);
+                      "queued") == 0);
         r = fmx_reply(&b, "oauth", "vis-e2e");
         ASSERT(r != NULL);
-        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "addressee");
-        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "worker-b");
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "UNKNOWN");
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -5691,18 +5693,20 @@ static int fmx_t_brief_window_unresolved(void)
         ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), 103);
         reply = fmx_dir_reply(&o, FMX_SENDER, "old-ref");
         ASSERT(reply != NULL);
-        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "answered");
-        ASSERT(!fmx_blocker_has(&o, "old-ref"));
+        /* The result row is inside the window and is still not an answer:
+         * it is unsigned. The directive stays open and overdue. */
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(fmx_blocker_has(&o, "old-ref"));
         reply = fmx_dir_reply(&o, FMX_SENDER, "new-ref");
         ASSERT(reply != NULL);
         ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
         ASSERT(fmx_blocker_has(&o, "new-ref"));
         ASSERT(fmx_get(&o, "open_worker_directives") &&
-               json_get_int(fmx_get(&o, "open_worker_directives")) == 1);
+               json_get_int(fmx_get(&o, "open_worker_directives")) == 2);
         ASSERT(fmx_get(&o, "overdue_worker_directives") &&
-               json_get_int(fmx_get(&o, "overdue_worker_directives")) == 1);
+               json_get_int(fmx_get(&o, "overdue_worker_directives")) == 2);
         ASSERT_EQ(fmx_dcount(&o, "scanned"), 2);
-        ASSERT_EQ(fmx_dcount(&o, "answered"), 1);
+        ASSERT_EQ(fmx_dcount(&o, "answered"), 0);
         ASSERT(!fmx_dcount_has(&o, "unresolved"));
         fmx_end(&o);
         fmx_restore();
@@ -5727,11 +5731,11 @@ static int fmx_t_brief_window_unresolved(void)
         ASSERT_EQ(fmx_evidence_int(&o, "mail_count"), 703);
         reply = fmx_dir_reply(&o, FMX_SENDER, "old-ref");
         ASSERT(reply != NULL);
-        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "answered");
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
         row = fmx_change_row(&o, FMX_SENDER, "old-ref");
         ASSERT(row != NULL);
-        ASSERT_STR_EQ(fmx_wstr(row, "state"), "acknowledged");
-        ASSERT(!fmx_blocker_has(&o, "old-ref"));
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT(fmx_blocker_has(&o, "old-ref"));
         /* new-ref is the newest row, behind the forward page's first rows;
          * the pass still scanned it. */
         ASSERT(fmx_blocker_has(&o, "new-ref"));
@@ -6306,8 +6310,8 @@ static int fmx_t_ambiguous_correlation(void)
         const struct json_value *a = fmx_change_seq(&b, 7);
         const struct json_value *c = fmx_change_seq(&b, 9);
         ASSERT(a && c);
-        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "ambiguous");
-        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(a, "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
         fmx_end(&b);
@@ -6328,9 +6332,9 @@ static int fmx_t_ambiguous_correlation(void)
         const struct json_value *a = fmx_change_seq(&b, 7);
         const struct json_value *c = fmx_change_seq(&b, 9);
         ASSERT(a && c);
-        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "answered");
+        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "queued");
-        ASSERT_STR_EQ(fmx_wstr(a, "state"), "acknowledged");
+        ASSERT_STR_EQ(fmx_wstr(a, "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
         fmx_end(&b); fmx_restore(); PASS();
     }
@@ -6348,8 +6352,8 @@ static int fmx_t_ambiguous_correlation(void)
         const struct json_value *a = fmx_change_seq(&b, 7);
         const struct json_value *c = fmx_change_seq(&b, 9);
         ASSERT(a && c);
-        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "ambiguous");
-        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(json_get(a, "reply"), "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(json_get(c, "reply"), "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(a, "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(c, "state"), "queued");
         fmx_end(&b); fmx_restore(); PASS();
@@ -6380,8 +6384,8 @@ static int fmx_t_ambiguous_correlation(void)
         const struct json_value *first = fmx_change_to(&b, "receiver", "reused-ref");
         const struct json_value *second = fmx_change_to(&b, "other-recipient", "reused-ref");
         ASSERT(first && second);
-        ASSERT_STR_EQ(fmx_wstr(json_get(first, "reply"), "state"), "answered");
-        ASSERT_STR_EQ(fmx_wstr(json_get(second, "reply"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(json_get(first, "reply"), "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(json_get(second, "reply"), "state"), "queued");
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -6519,14 +6523,9 @@ static int fmx_t_reply_correlation(void)
         ASSERT(fmx_ok(&b));
         r = fmx_reply(&b, "oauth", "fd-link-a");
         ASSERT(r != NULL);
-        ASSERT_STR_EQ(fmx_wstr(r, "state"), "answered");
-        ASSERT(fmx_wint(r, "answer_seq") == 727);
-        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "box-user");
-        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "reply_to_origin");
-        ASSERT(json_get_bool(json_get(r, "answer_heuristic")));
-        ASSERT(fmx_wint(r, "answer_age_s") >= 0);
-        ASSERT(fmx_wint(r, "sent_age_s") >= 0);
-        /* Never an ack synthesized from the reply. */
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(r, "answered_by"), "UNKNOWN");
         ASSERT(!json_get_bool(json_get(r, "acked")));
         ASSERT_STR_EQ(fmx_wstr(fmx_change_row(&b, "oauth", "fd-link-a"),
                                "state"),
@@ -6540,7 +6539,7 @@ static int fmx_t_reply_correlation(void)
         r = fmx_reply(&b, "oauth", "fd-link-a");
         ASSERT(r != NULL);
         ASSERT(json_get_bool(json_get(r, "acked")));
-        ASSERT_STR_EQ(fmx_wstr(r, "state"), "answered");
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "acked");
         fmx_end(&b);
         fmx_restore();
         PASS();
@@ -6576,9 +6575,8 @@ static int fmx_t_reply_correlation(void)
         ASSERT(fmx_ok(&b));
         r = fmx_reply(&b, "oauth", "go-A-20260918-v1");
         ASSERT(r != NULL);
-        ASSERT_STR_EQ(fmx_wstr(r, "state"), "answered");
-        ASSERT(fmx_wint(r, "answer_seq") == 742);
-        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "reply_to_origin");
+        ASSERT_STR_EQ(fmx_wstr(r, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(r, "answer_match"), "UNKNOWN");
         ASSERT(!json_get_bool(json_get(r, "acked")));
         fmx_end(&b);
         fmx_restore();
@@ -6693,30 +6691,25 @@ static int fmx_t_remote_round_trip(void)
         ASSERT(fmx_run(&e, zcl_native_handle_fleet_steer_evidence));
         ASSERT(fmx_ok(&e));
         fmx_end(&e);
-        /* Wrong recipient: a result that is neither to the origin nor from
-         * the name the origin addressed does not answer. Neither does a
-         * kind outside the closed set. */
+        /* A new key on the directive's ref appends nothing. A kind outside
+         * the closed set is refused before that check. Neither answers. */
+        rows = fmx_mail_count();
         r = fmx_d_send(cgid, "C", "A", "result", "key-c-wrong");
-        ASSERT_STR_EQ(r.state, "queued");
+        ASSERT_STR_EQ(r.state, "refused");
+        ASSERT_STR_EQ(r.error, "STEER_REF_REUSED");
         r = fmx_d_send(dgid, "D", "oauth", "ack", "key-d-badkind");
         ASSERT_STR_EQ(r.state, "refused");
-        ASSERT(fmx_d_state_is(ogid, "queued", NULL));
-        c.wall += 1000;
         r = fmx_d_send(dgid, "D", "oauth", "result", "key-d-reply");
-        ASSERT_STR_EQ(r.state, "queued");
-        ASSERT(!r.duplicate);
-        ASSERT(fmx_d_state_is(ogid, "answered", "D"));
-        /* A retry reconciles and appends nothing; the same key under the
-         * other kind names a different delivery and is refused. */
-        rows = fmx_mail_count();
-        r = fmx_d_send(dgid, "D", "oauth", "result", "key-d-reply");
-        ASSERT(r.duplicate);
-        r = fmx_d_send(dgid, "D", "oauth", "directive", "key-d-reply");
+        ASSERT_STR_EQ(r.state, "refused");
+        ASSERT_STR_EQ(r.error, "STEER_REF_REUSED");
+        ASSERT_EQ(fmx_mail_count(), rows);
+        /* The original key with a different payload conflicts and appends
+         * nothing. The directive stays queued. */
+        r = fmx_d_send(ogid, "oauth", "D", "directive", "key-d-1");
+        ASSERT_STR_EQ(r.state, "refused");
         ASSERT_STR_EQ(r.error, "IDEMPOTENCY_CONFLICT");
         ASSERT_EQ(fmx_mail_count(), rows);
-        /* Every reading comes from the stores, so a fresh brief with no
-         * in-process state still sees the answer. */
-        ASSERT(fmx_d_state_is(ogid, "answered", "D"));
+        ASSERT(fmx_d_state_is(ogid, "queued", NULL));
         fmx_restore();
         PASS();
     }
@@ -7341,32 +7334,39 @@ static int fmx_t_disposition_verified(void)
         const struct json_value *row = json_at(rows, 0);
         ASSERT(json_get_bool(json_get(row, "body_truncated")));
         ASSERT_EQ(fmx_mail_count(), before);
-        const char *const states[] = {"DEFERRED", "BLOCKED"};
-        for (size_t i = 0; i < 2; i++) {
-            char key[32]; snprintf(key, sizeof(key), "decision-%zu", i);
-            json_set_array(&items);
-            ASSERT(fmx_disposition_item(&item, row, states[i], key, hash, (long long)strlen(body)));
-            ASSERT(json_push_back(&items, &item));
-            ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
-            ASSERT_EQ(fmx_int(&sent, "accepted"), 1);
-            const struct json_value *first = json_at(fmx_arr(&sent, "items"), 0);
-            ASSERT(first && json_get_bool(json_get(first, "verified_read")));
-            ASSERT_STR_EQ(fmx_wstr(first, "disposition"), states[i]);
-            fmx_end(&sent);
-            struct json_value *d = (struct json_value *)json_get(&items.children[0], "disposition");
-            ASSERT(d && d->num_children == 8);
-            for (size_t j = 0; j < 4; j++) {
-                char *k = d->keys[j]; d->keys[j] = d->keys[7-j]; d->keys[7-j] = k;
-                struct json_value v = d->children[j];
-                d->children[j] = d->children[7-j]; d->children[7-j] = v;
-            }
-            ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
-            ASSERT_EQ(fmx_int(&sent, "accepted"), 1);
-            const struct json_value *reply = json_at(fmx_arr(&sent, "items"), 0);
-            ASSERT(json_get_bool(json_get(reply, "duplicate")));
-            fmx_end(&sent); json_free(&item); json_free(&items);
+        json_set_array(&items);
+        ASSERT(fmx_disposition_item(&item, row, "BLOCKED", "decision-0", hash, (long long)strlen(body)));
+        ASSERT(json_push_back(&items, &item));
+        ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
+        ASSERT_EQ(fmx_int(&sent, "accepted"), 1);
+        const struct json_value *first = json_at(fmx_arr(&sent, "items"), 0);
+        ASSERT(first && json_get_bool(json_get(first, "verified_read")));
+        ASSERT_STR_EQ(fmx_wstr(first, "disposition"), "BLOCKED");
+        fmx_end(&sent);
+        struct json_value *d = (struct json_value *)json_get(&items.children[0], "disposition");
+        ASSERT(d && d->num_children == 8);
+        for (size_t j = 0; j < 4; j++) {
+            char *k = d->keys[j]; d->keys[j] = d->keys[7-j]; d->keys[7-j] = k;
+            struct json_value v = d->children[j];
+            d->children[j] = d->children[7-j]; d->children[7-j] = v;
         }
-        ASSERT_EQ(fmx_mail_count(), before + 2);
+        ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
+        ASSERT_EQ(fmx_int(&sent, "accepted"), 1);
+        const struct json_value *reply = json_at(fmx_arr(&sent, "items"), 0);
+        ASSERT(json_get_bool(json_get(reply, "duplicate")));
+        fmx_end(&sent); json_free(&item); json_free(&items);
+        ASSERT_EQ(fmx_mail_count(), before + 1);
+        json_init(&item); json_init(&items);
+        json_set_array(&items);
+        ASSERT(fmx_disposition_item(&item, row, "DEFERRED", "decision-1", hash, (long long)strlen(body)));
+        ASSERT(json_push_back(&items, &item));
+        ASSERT(fmx_send_from(&sent, grant, "alice", &items) && fmx_ok(&sent));
+        ASSERT_EQ(fmx_int(&sent, "accepted"), 0);
+        ASSERT_STR_EQ(fmx_wstr(json_at(fmx_arr(&sent, "items"), 0), "error"), "STEER_REF_REUSED");
+        fmx_end(&sent);
+        json_free(&item); json_free(&items);
+        ASSERT_EQ(fmx_mail_count(), before + 1);
+        json_init(&item); json_init(&items);
         json_set_array(&items);
         ASSERT(fmx_disposition_item(&item, row, "DEFERRED", "bad-length", hash, 480));
         ASSERT(json_push_back(&items, &item));
@@ -7375,10 +7375,10 @@ static int fmx_t_disposition_verified(void)
         fmx_end(&sent);
         ASSERT(fmx_send_from(&sent, limited, "alice", &items) && fmx_ok(&sent));
         ASSERT_EQ(fmx_int(&sent, "accepted"), 0);
-        ASSERT_EQ(fmx_mail_count(), before + 2);
+        ASSERT_EQ(fmx_mail_count(), before + 1);
         ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "to"));
         ASSERT(fmx_wrong_disposition(grant, row, hash, (long long)strlen(body), "ref"));
-        ASSERT_EQ(fmx_mail_count(), before + 2);
+        ASSERT_EQ(fmx_mail_count(), before + 1);
         ASSERT(fmx_disposition_projected(limited, true));
 #if defined(ZCL_TESTING) && defined(__linux__)
         char inbox_path[1200];
@@ -8382,8 +8382,7 @@ static int fmx_compact_result_variants(void)
             ASSERT(fmx_compact_limit(&compact, token, 1));
             const struct json_value *change = json_at(fmx_arr(&compact, "changes"), 0);
             ASSERT(change && json_get(json_get(change, "reply"), "state"));
-            ASSERT_STR_EQ(fmx_wstr(json_get(change, "reply"), "state"), "answered");
-            ASSERT_EQ(json_get_int(json_get(json_get(change, "reply"), "answer_seq")), i == 0 ? 3 : 4);
+            ASSERT_STR_EQ(fmx_wstr(json_get(change, "reply"), "state"), "queued");
             ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
             ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
             (void)snprintf(token, sizeof(token), "%s", fmx_str(&compact, "cursor_token"));
@@ -8450,7 +8449,7 @@ static int fmx_compact_variant_conflict(void)
         struct fmx_call full, compact;
         ASSERT(fmx_forward_page(&full, token, 8, 65536));
         ASSERT(fmx_compact_page(&compact, token, 65536));
-        ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "a", "duel"), "state"), "ambiguous");
+        ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "a", "duel"), "state"), "queued");
         ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
         ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
         fmx_end(&full); fmx_end(&compact); fmx_restore(); PASS();
@@ -8759,7 +8758,7 @@ static int fmx_compact_lifecycle(void)
         ASSERT(fmx_forward_page(&full, token, 8, 65536));
         ASSERT(fmx_compact_page(&compact, token, 65536));
         ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "oauth", "duel"), "state"),
-                      "ambiguous");
+                      "queued");
         ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
         ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
         fmx_end(&full); fmx_end(&compact);
@@ -8787,7 +8786,7 @@ static int fmx_compact_cross_stream(void)
         ASSERT(fmx_forward_page(&full, token, 8, 65536));
         ASSERT(fmx_compact_page(&compact, token, 65536));
         ASSERT_STR_EQ(fmx_wstr(fmx_reply(&full, "oauth", "late-cross"), "state"),
-                      "answered");
+                      "queued");
         ASSERT(fmx_json_equal(fmx_get(&full, "changes"), fmx_get(&compact, "changes")));
         ASSERT_STR_EQ(fmx_str(&full, "cursor_token"), fmx_str(&compact, "cursor_token"));
         fmx_end(&full); fmx_end(&compact);
@@ -8981,7 +8980,7 @@ static int fmx_compact_authority(void)
             fmx_brief_since(&c, brief, "0|");
             if (compact) (void)json_push_kv_bool(&c.input, "changes_only", true);
             ASSERT(fmx_run(&c, zcl_native_handle_fleet_steer_brief) && fmx_ok(&c));
-            ASSERT_STR_EQ(fmx_change_state(fmx_arr(&c, "changes"), "oauth", "compact-complete"), "acknowledged");
+            ASSERT_STR_EQ(fmx_change_state(fmx_arr(&c, "changes"), "oauth", "compact-complete"), "queued");
             fmx_end(&c);
         }
         fmx_seed_outcome("compact-complete", 0);
@@ -10718,8 +10717,10 @@ static int fmx_t_brief_compact_open_work(void)
         ASSERT(fmx_run(&d, zcl_native_handle_fleet_steer_brief) && fmx_ok(&d));
         ASSERT(fmx_blocker_has(&d, "old-open-ref"));
         ASSERT(fmx_arr_has(fmx_arr(&d, "work"), line));
-        ASSERT_EQ(json_size(fmx_arr(&d, "work")), 9u);
-        ASSERT(fmx_int(&d, "work_omitted") == 2);
+        /* Unsigned results do not clear those directives, so the compact
+         * list keeps every open line. */
+        ASSERT_EQ(json_size(fmx_arr(&d, "work")), 11u);
+        ASSERT(fmx_int(&d, "work_omitted") == 0);
         fmx_end(&d);
         fmx_end(&f);
         fmx_restore();
@@ -10768,6 +10769,334 @@ static int fmx_t_brief_compact_session_cap(void)
     }
 
 _test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* One inbox row that names a board signer, as import writes it. */
+static void fmx_seed_inbox_signed(const char *peer, const char *ts, long long seq,
+                                  const char *from, const char *to,
+                                  const char *kind, const char *body,
+                                  const char *ref, const char *signer)
+{
+    char dir[1024], path[1200];
+    int n = snprintf(dir, sizeof(dir), "%s/z23/dev/mail", g_fmx_state);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || !platform_private_directory_ensure(dir))
+        fmx_fixture_fail("cannot create isolated mail dir");
+    n = snprintf(path, sizeof(path), "%s/inbox.%s.jsonl", dir, peer);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        fmx_fixture_fail("inbox path exceeds bound");
+    FILE *f = fopen(path, "a");
+    if (!f)
+        fmx_fixture_fail("cannot seed a signed inbox row");
+    if (fprintf(f,
+                "{\"seq\":%lld,\"ts\":\"%s\",\"from\":\"%s\",\"to\":\"%s\","
+                "\"kind\":\"%s\",\"body\":\"%s\",\"ref\":\"%s\","
+                "\"board_post\":\"%s\",\"board_signer\":\"%s\"}\n",
+                seq, ts, from, to, kind, body, ref,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                signer) < 0)
+        fmx_fixture_fail("cannot write a signed inbox row");
+    if (fclose(f) != 0)
+        fmx_fixture_fail("cannot finish a signed inbox row");
+}
+
+static void fmx_key_byte(uint8_t byte, uint8_t seed[32], uint8_t pub[32])
+{
+    uint8_t secret[32];
+    memset(seed, byte, 32);
+    ed25519_keypair(pub, secret, seed);
+    memset(secret, 0, sizeof(secret));
+}
+
+static bool fmx_roster_line(const char *name, uint8_t box_byte, uint8_t signer_byte,
+                            uint16_t port, const uint8_t op_seed[32],
+                            const uint8_t op_pub[32], char *out, size_t cap)
+{
+    uint8_t box_seed[32], box_pub[32];
+    uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+    uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+    struct fleet_invite invite;
+    struct fleet_receipt parsed;
+    struct fleet_signing_key signer;
+    struct fleet_box_facts facts;
+    size_t invite_len = 0, receipt_len = 0;
+    const char *why = NULL;
+    memset(&facts, 0, sizeof(facts));
+    (void)snprintf(facts.os, sizeof(facts.os), "Linux");
+    fmx_key_byte(box_byte, box_seed, box_pub);
+    fmx_key_byte(signer_byte, signer.seed, signer.pubkey);
+    return fleet_invite_mint(name, 24, "", op_seed, op_pub, 1790000000LL, token,
+                             sizeof(token), &invite, &why) &&
+           fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
+                              &invite_len, &why) &&
+           fleet_receipt_mint(invite_wire, invite_len, "", &facts, "", box_seed,
+                              box_pub, &signer, receipt, sizeof(receipt), &why) &&
+           fleet_receipt_parse(receipt, &parsed, receipt_wire, sizeof(receipt_wire),
+                               &receipt_len, &why) &&
+           fleet_machine_mint(receipt_wire, receipt_len, 1790000000LL, port,
+                              op_seed, op_pub, out, cap, &why);
+}
+
+/* This box is home-box. node-b is the other enrolled box. `signer_hex` is
+ * node-b's roster signing key. */
+static bool fmx_plant_roster(char signer_hex[65])
+{
+    uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32], sig_seed[32], sig_pub[32];
+    char line[FLEET_ENROL_MACHINE_TEXT_MAX], path[FLEET_ENROL_PATH_MAX];
+    const char *why = NULL;
+    struct platform_private_file file;
+    fmx_key_byte(0x51, op_seed, op_pub);
+    fmx_key_byte(0x11, box_seed, box_pub);
+    fmx_key_byte(0x62, sig_seed, sig_pub);
+    zcl_hex_encode(sig_pub, sizeof(sig_pub), signer_hex);
+    if (!fleet_enrol_operator_write(op_pub, &why))
+        return false;
+    if (!fleet_enrol_state_path("box.ed25519", path, sizeof(path)))
+        return false;
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(path, &file))
+        return false;
+    bool wrote = platform_private_file_write_at(&file, box_seed, 32, 0) &&
+                 platform_private_file_authority_flush(&file);
+    platform_private_file_close(&file);
+    if (!wrote)
+        return false;
+    if (!fmx_roster_line("home-box", 0x11, 0x21, FLEET_ENROL_PORT_FIRST,
+                         op_seed, op_pub, line, sizeof(line)) ||
+        !fleet_roster_append(line, &why))
+        return false;
+    return fmx_roster_line("node-b", 0x42, 0x62,
+                           (uint16_t)(FLEET_ENROL_PORT_FIRST + 1),
+                           op_seed, op_pub, line, sizeof(line)) &&
+           fleet_roster_append(line, &why);
+}
+
+static bool fmx_write_read(const char *agent, long long seq)
+{
+    char path[1200];
+    int n = snprintf(path, sizeof(path), "%s/z23/dev/mail/read.%s", g_fmx_state, agent);
+    FILE *f;
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    f = fopen(path, "w");
+    if (!f)
+        return false;
+    if (fprintf(f, "%lld\n", seq) < 0) {
+        fclose(f);
+        return false;
+    }
+    return fclose(f) == 0;
+}
+
+static int fmx_t_series2(void)
+{
+    int failures = 0;
+    const clock_iface_t *saved_clock = clock_default();
+
+    TEST("steer: same-key retry is a duplicate; a new key cannot reuse a ref") {
+        struct fmx_call s, b;
+        struct json_value items, item;
+        const struct json_value *row, *hops;
+        char gid[64];
+        long long rows, seq;
+        fmx_isolate("series2_ref");
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "worker-b", "link the fd table", "reuse-ref", "key-reuse-1");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "oauth", &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT(!json_get_bool(json_get(row, "duplicate")));
+        ASSERT(json_get(row, "local_post_ms") &&
+               json_get(row, "local_post_ms")->type == JSON_INT);
+        ASSERT(fmx_int(&s, "accepted") == 1);
+        seq = fmx_wint(row, "seq");
+        ASSERT(seq >= 1);
+        rows = fmx_mail_count();
+        fmx_end(&s);
+        json_free(&items);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        row = fmx_reply(&b, "oauth", "reuse-ref");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        hops = json_get(row, "hops");
+        ASSERT_STR_EQ(fmx_wstr(hops, "send_to_import_ms"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(hops, "import_to_accept_ms"), "UNKNOWN");
+        ASSERT_STR_EQ(fmx_wstr(hops, "accept_to_result_ms"), "UNKNOWN");
+        ASSERT(json_get(hops, "send_to_import_ms")->type == JSON_STR);
+        fmx_end(&b);
+        /* Read is not an ack, an ack is not completion. */
+        ASSERT(fmx_write_read("worker-b", seq));
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_change_row(&b, "oauth", "reuse-ref"), "state"), "read");
+        fmx_end(&b);
+        ASSERT(fmx_ack("worker-b", seq));
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_change_row(&b, "oauth", "reuse-ref"), "state"),
+                      "acknowledged");
+        fmx_end(&b);
+        fmx_seed_outcome("reuse-ref", 0);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT_STR_EQ(fmx_wstr(fmx_change_row(&b, "oauth", "reuse-ref"), "state"),
+                      "completed");
+        fmx_end(&b);
+        /* Same key, same payload: duplicate, no second append. */
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "worker-b", "link the fd table", "reuse-ref", "key-reuse-1");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "oauth", &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT(json_get_bool(json_get(row, "duplicate")));
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT(fmx_int(&s, "accepted") == 1);
+        ASSERT_EQ(fmx_mail_count(), rows);
+        fmx_end(&s);
+        json_free(&items);
+        /* New key, same ref: refused, nothing appended, not accepted. */
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "worker-b", "different body", "reuse-ref", "key-reuse-2");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "oauth", &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "refused");
+        ASSERT_STR_EQ(fmx_wstr(row, "error"), "STEER_REF_REUSED");
+        ASSERT(strcmp(fmx_wstr(row, "state"), "queued") != 0);
+        ASSERT(strcmp(fmx_wstr(row, "state"), "read") != 0);
+        ASSERT(strcmp(fmx_wstr(row, "state"), "acknowledged") != 0);
+        ASSERT(strcmp(fmx_wstr(row, "state"), "completed") != 0);
+        ASSERT(fmx_int(&s, "accepted") == 0);
+        ASSERT_EQ(fmx_mail_count(), rows);
+        fmx_end(&s);
+        json_free(&items);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: no route is refused and not queued") {
+        struct fmx_call s;
+        struct json_value items, item;
+        const struct json_value *row;
+        char gid[64], signer[65];
+        long long rows;
+        fmx_isolate("series2_route");
+        ASSERT(fmx_plant_roster(signer));
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        rows = fmx_mail_count();
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "missing-box", "link the fd table", "noroute-ref", "key-noroute");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "oauth", &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "refused");
+        ASSERT_STR_EQ(fmx_wstr(row, "error"), "STEER_NO_ROUTE");
+        ASSERT(fmx_int(&s, "accepted") == 0);
+        ASSERT_EQ(fmx_mail_count(), rows);
+        fmx_end(&s);
+        json_free(&items);
+        /* An enrolled box still accepts. */
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "node-b", "link the fd table", "routed-ref", "key-routed");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "oauth", &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT(fmx_int(&s, "accepted") == 1);
+        fmx_end(&s);
+        json_free(&items);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a result answers only from the recipient inbox under that roster key") {
+        struct fmx_reply_clock ck = {clock_default(), INT64_C(1789905600000)};
+        clock_iface_t clock = {fmx_reply_mono, fmx_reply_wall, &ck};
+        struct fmx_call b;
+        const struct json_value *reply;
+        char gid[64], signer[65], other[65], now[32];
+        uint8_t seed[32], pub[32];
+        clock_set_default(&clock);
+        fmx_isolate("series2_answer");
+        ASSERT(fmx_plant_roster(signer));
+        fmx_key_byte(0x21, seed, pub);
+        zcl_hex_encode(pub, sizeof(pub), other);
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        ASSERT(fmx_send_one(gid, "oauth", "node-b", "signed-ref", "key-signed") >= 1);
+        ck.wall += 2000;
+        fmx_now_ts(now, sizeof(now));
+        /* Same ref, wrong inbox. */
+        fmx_seed_inbox_signed("other", now, 9, "node-b", "oauth", "result",
+                              "done", "signed-ref", signer);
+        /* Right inbox, no signer. */
+        fmx_seed_inbox("node-b", now, 10, "node-b", "oauth", "result", "done",
+                       "signed-ref");
+        /* Right inbox, another roster key. */
+        fmx_seed_inbox_signed("node-b", now, 11, "node-b", "oauth", "result",
+                              "done", "signed-ref", other);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        reply = fmx_reply(&b, "oauth", "signed-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "queued");
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
+        fmx_end(&b);
+        ck.wall += 2000;
+        fmx_now_ts(now, sizeof(now));
+        fmx_seed_inbox_signed("node-b", now, 12, "node-b", "oauth", "result",
+                              "done", "signed-ref", signer);
+        fmx_brief(&b, gid, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        reply = fmx_reply(&b, "oauth", "signed-ref");
+        ASSERT(reply != NULL);
+        ASSERT_STR_EQ(fmx_wstr(reply, "state"), "answered");
+        ASSERT_STR_EQ(fmx_wstr(reply, "answer_match"), "addressee");
+        ASSERT_STR_EQ(fmx_wstr(reply, "answered_by"), "node-b");
+        ASSERT(fmx_wint(reply, "answer_seq") == 12);
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 0);
+        fmx_end(&b);
+        fmx_restore();
+        clock_set_default(ck.saved);
+        PASS();
+    }
+
+    TEST("steer: the summary screen keeps a blocked directive's blocker line") {
+        struct fmx_call b;
+        fmx_isolate("series2_blocker");
+        fmx_prime_mail();
+        fmx_sent_directive("2026-01-01T00:00:00Z", 7, "dead-box", "close-screen");
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "close-screen"));
+        ASSERT(strstr(fmx_str(&b, "screen"), "blocker: directive close-screen") != NULL);
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    clock_set_default(saved_clock);
     fmx_restore();
     return failures;
 }
@@ -10905,6 +11234,7 @@ int test_fleet_steer(void)
     failures += fmx_t_candidate_reports();
     failures += fmx_t_floor_offset();
     failures += fmx_t_delivery_gap();
+    failures += fmx_t_series2();
 
     /* No ASSERT lives in this function, so no goto needs the label: the
      * hook is always cleared on the single fall-through path. */
