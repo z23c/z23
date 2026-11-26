@@ -1654,6 +1654,19 @@ void zcl_native_fleet_board_list_until(
 void zcl_native_fleet_wiki_find_until(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply, int64_t deadline_ms);
+/* A fleet.board or fleet.wiki menu with children the node did not list
+ * removed. 0 means keep the caller's menu: nothing was dropped, or `ops`
+ * is not an array. */
+size_t zcl_native_fleet_board_menu_filter(const char *menu, size_t menu_n,
+                                         const struct json_value *ops,
+                                         char *out, size_t out_cap);
+/* Ask the node for op=ops once and filter. 0 means the menu stands: no
+ * node, no ops answer, or every child is one the node listed. */
+size_t zcl_native_fleet_board_menu_for_node(const char *menu, size_t menu_n,
+                                           char *out, size_t out_cap);
+#ifdef ZCL_TESTING
+void zcl_native_fleet_board_menu_test_reset(void);
+#endif
 
 /* ── the per-node mind (tools/command/native_mind_command.c). `ask` reads the
  * published index generation and NEVER rebuilds: a stale generation is

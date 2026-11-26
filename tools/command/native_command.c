@@ -3186,6 +3186,24 @@ void zcl_native_print_unknown_command(const char *const *words, size_t count)
                          words, count);
 }
 
+/* A fleet menu lists the ops this node answered. Any other path, or a
+ * node with no ops list, keeps the catalog menu. */
+static size_t nc_fleet_menu(const char *path, char *out, size_t n, size_t cap)
+{
+    char filtered[ZCL_COMMAND_LIST_BUDGET + 1];
+    size_t m;
+    if (!path || n == 0 || n >= cap)
+        return n;
+    if (strcmp(path, "fleet.board") != 0 && strcmp(path, "fleet.wiki") != 0)
+        return n;
+    m = zcl_native_fleet_board_menu_for_node(out, n, filtered, sizeof filtered);
+    if (m == 0 || m >= cap)
+        return n;
+    memcpy(out, filtered, m);
+    out[m] = '\0';
+    return m;
+}
+
 /* Print a branch menu. Returns a contract exit code. */
 static int nc_emit_menu(const char *path)
 {
@@ -3199,6 +3217,7 @@ static int nc_emit_menu(const char *path)
             "path", path, "inspect this branch contract");
         return ZCL_COMMAND_EXIT_INTERNAL;
     }
+    n = nc_fleet_menu(path, out, n, sizeof out);
     nc_print_doc(out, path);
     return ZCL_COMMAND_EXIT_OK;
 }
@@ -3282,6 +3301,7 @@ static int nc_run_discover(const struct zcl_command_spec *spec,
     if (strcmp(spec->path, "discover.help") == 0) {
         n = zcl_command_registry_menu_json(catalog(), arg ? arg : "", out,
                                            sizeof(out));
+        n = nc_fleet_menu(arg, out, n, sizeof out);
     } else if (strcmp(spec->path, "discover.describe") == 0) {
         if (!arg || !arg[0]) {
             nc_print_error(spec->path, "MISSING_PATH", "normalize",

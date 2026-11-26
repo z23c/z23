@@ -173,6 +173,192 @@ static void fb_peer_lacks_op(struct zcl_command_reply *reply, const char *op)
             "PEER_LACKS_OP", "execute", false, message, "fleet.board");
 }
 
+/* The RPC op a catalog leaf sends. Unmapped paths stay on the menu. */
+static bool fb_menu_op_of(const char *path, char *op, size_t cap)
+{
+    const char *leaf;
+    int n;
+    if (!path)
+        return false;
+    if (strncmp(path, "fleet.board.", 12) == 0) {
+        leaf = path + 12;
+        if (strchr(leaf, '.') != NULL)
+            return false;
+        if (strcmp(leaf, "wait") == 0)
+            leaf = "inbox_wait";
+        n = snprintf(op, cap, "%s", leaf);
+        return n > 0 && (size_t)n < cap;
+    }
+    if (strncmp(path, "fleet.wiki.", 11) != 0)
+        return false;
+    leaf = path + 11;
+    if (leaf[0] == '\0' || strchr(leaf, '.') != NULL)
+        return false;
+    n = snprintf(op, cap, "wiki_%s", leaf);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool fb_menu_ops_has(const struct json_value *ops, const char *op)
+{
+    if (!ops || ops->type != JSON_ARR)
+        return false;
+    for (size_t i = 0; i < ops->num_children; i++) {
+        const char *s = json_get_str(json_at(ops, i));
+        if (s && strcmp(s, op) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool fb_menu_drop(const struct json_value *child,
+                         const struct json_value *ops)
+{
+    char op[64];
+    const char *path = json_get_str(json_get(child, "path"));
+    if (!fb_menu_op_of(path, op, sizeof op))
+        return false;
+    return !fb_menu_ops_has(ops, op);
+}
+
+static bool fb_menu_copy_str(struct json_value *dst, const char *key,
+                             const struct json_value *src)
+{
+    const char *s = json_get_str(json_get(src, key));
+    return s && json_push_kv_str(dst, key, s);
+}
+
+static bool fb_menu_next(struct json_value *dst, const struct json_value *child)
+{
+    struct json_value next, input;
+    const char *path = json_get_str(json_get(child, "path"));
+    json_init(&next);
+    json_init(&input);
+    json_set_object(&next);
+    json_set_object(&input);
+    bool ok = path &&
+              json_push_kv_str(&next, "command", "discover.describe") &&
+              json_push_kv_str(&input, "path", path) &&
+              json_push_kv(&next, "input", &input) &&
+              json_push_kv(dst, "next", &next);
+    json_free(&input);
+    json_free(&next);
+    return ok;
+}
+
+static bool fb_menu_collect(const struct json_value *children,
+                            const struct json_value *ops,
+                            struct json_value *kept, size_t *dropped)
+{
+    bool ok = true;
+    *dropped = 0;
+    json_set_array(kept);
+    for (size_t i = 0; ok && i < children->num_children; i++) {
+        const struct json_value *child = json_at(children, i);
+        if (fb_menu_drop(child, ops)) {
+            (*dropped)++;
+            continue;
+        }
+        ok = json_push_back(kept, child);
+    }
+    return ok;
+}
+
+static size_t fb_menu_write(const struct json_value *doc,
+                            const struct json_value *kept, char *out,
+                            size_t cap)
+{
+    struct json_value fresh;
+    json_init(&fresh);
+    json_set_object(&fresh);
+    bool ok = fb_menu_copy_str(&fresh, "schema", doc) &&
+              fb_menu_copy_str(&fresh, "path", doc) &&
+              fb_menu_copy_str(&fresh, "summary", doc) &&
+              fb_menu_copy_str(&fresh, "registry_digest", doc) &&
+              json_push_kv(&fresh, "children", kept);
+    if (ok && kept->num_children > 0)
+        ok = fb_menu_next(&fresh, json_at(kept, 0));
+    size_t n = ok ? json_write(&fresh, out, cap) : 0;
+    json_free(&fresh);
+    if (n == 0 || n >= cap)
+        return 0;
+    return n;
+}
+
+size_t zcl_native_fleet_board_menu_filter(const char *menu, size_t menu_n,
+                                         const struct json_value *ops,
+                                         char *out, size_t out_cap)
+{
+    struct json_value doc, kept;
+    const struct json_value *children;
+    size_t dropped = 0;
+    size_t n = 0;
+    if (!menu || !ops || ops->type != JSON_ARR || !out || out_cap == 0)
+        return 0;
+    json_init(&doc);
+    json_init(&kept);
+    if (json_read(&doc, menu, menu_n) && doc.type == JSON_OBJ) {
+        children = json_get(&doc, "children");
+        if (children && children->type == JSON_ARR &&
+            fb_menu_collect(children, ops, &kept, &dropped) && dropped > 0)
+            n = fb_menu_write(&doc, &kept, out, out_cap);
+    }
+    json_free(&kept);
+    json_free(&doc);
+    return n;
+}
+
+/* One ops answer per process. A miss is cached too: the menu must not
+ * wait on a node that already said it has no list. */
+static struct json_value g_menu_ops;
+static int g_menu_ops_state;
+
+static const struct json_value *fb_menu_ops_cached(void)
+{
+    char *raw;
+    const struct json_value *ok;
+    const struct json_value *ops;
+    if (g_menu_ops_state != 0)
+        return g_menu_ops_state == 1 ? json_get(&g_menu_ops, "ops") : NULL;
+    g_menu_ops_state = -1;
+    raw = node_rpc_call_deadline("fleet_board", "[{\"op\":\"ops\"}]", 200, 400);
+    if (!raw)
+        return NULL;
+    json_init(&g_menu_ops);
+    if (!json_read(&g_menu_ops, raw, strlen(raw))) {
+        free(raw);
+        json_free(&g_menu_ops);
+        return NULL;
+    }
+    free(raw);
+    ok = json_get(&g_menu_ops, "ok");
+    ops = json_get(&g_menu_ops, "ops");
+    if (!ok || ok->type != JSON_BOOL || !ok->val.b || !ops ||
+        ops->type != JSON_ARR) {
+        json_free(&g_menu_ops);
+        return NULL;
+    }
+    g_menu_ops_state = 1;
+    return ops;
+}
+
+size_t zcl_native_fleet_board_menu_for_node(const char *menu, size_t menu_n,
+                                           char *out, size_t out_cap)
+{
+    const struct json_value *ops = fb_menu_ops_cached();
+    if (!ops)
+        return 0;
+    return zcl_native_fleet_board_menu_filter(menu, menu_n, ops, out, out_cap);
+}
+
+#ifdef ZCL_TESTING
+void zcl_native_fleet_board_menu_test_reset(void)
+{
+    if (g_menu_ops_state == 1)
+        json_free(&g_menu_ops);
+    g_menu_ops_state = 0;
+}
+#endif
+
 static void fb_budget_exhausted(struct zcl_command_reply *reply)
 {
     fb_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_TRANSIENT,

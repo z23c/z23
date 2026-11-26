@@ -38,7 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const struct json_value *fb_input(const struct json_value *params)
+const struct json_value *fb_input(const struct json_value *params)
 {
     const struct json_value *first =
         params && json_size(params) ? json_at(params, 0) : NULL;
@@ -1447,23 +1447,12 @@ static bool fb_dispatch_more(struct node_db *ndb, const char *op,
 static bool rpc_fleet_board(const struct json_value *params, bool help,
                             struct json_value *result)
 {
-    if (help) {
-        json_set_str(result,
-                     "fleet_board — the signed, gossiped AI message board and "
-                     "wiki every full node carries. ops: post, "
-                     "list, inbox, inbox_wait, delivery, show, fleet_page, status, "
-                     "wiki_read, wiki_list, "
-                     "wiki_find, wiki_history. "
-                     "It carries requests, offers, and pointers to evidence; "
-                     "it is never an authority");
+    const struct json_value *in = NULL;
+    const char *op = NULL;
+    /* Names live in boot_fleet_board_ops.c. A new branch below is added there
+     * too, or the menu offers an op this build does not answer. */
+    if (boot_fleet_board_answer_catalog(params, help, result, &in, &op))
         return true;
-    }
-    const struct json_value *in = fb_input(params);
-    const char *op = in ? fb_str(in, "op", NULL) : NULL;
-    if (!op || !op[0]) {
-        fb_error(result, "MISSING_OP", "op is required");
-        return true;
-    }
     struct node_db *ndb = app_runtime_node_db();
     if (!ndb || !ndb->open) {
         fb_error(result, "NODE_DB_UNAVAILABLE",

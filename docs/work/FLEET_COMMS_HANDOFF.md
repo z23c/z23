@@ -38,8 +38,11 @@ helper, not the fetch thread. The onion change has a pure-function test only.
    [`../node/ONION_PUSH_DESIGN.md`](../node/ONION_PUSH_DESIGN.md) specifies
    the fix; it edits sealed `core/modules/net/src/tor_integration.c`, so it
    needs the unseal ritual in `core/UNSEAL.md` and its own review.
-3. **Version skew.** The menu can list an op the node lacks. The refusal now
-   names it. The menu is still not built from the node's own op list.
+3. **Version skew.** `fleet board` and `discover help fleet.board` (and the
+   wiki branch) ask the node for `op=ops` once and keep a child only when
+   that list names its op. A node that does not answer `ops` keeps the full
+   catalog. A direct call the node lacks still says `peer lacks op <leaf>,
+   restart node`.
 4. **No onion dial in the board client** (`fleet board list --onion=` is an
    unknown input key), so an onion round trip cannot be measured yet.
 
@@ -98,11 +101,10 @@ Match `git log origin/main` by subject first. The larger catalog is
    28 s reports came from an older binary or a cold index. If it is slow for
    you, check the build age and run `code index` status before touching the
    handler; record the time on a current build.
-5. **Build the board menu from the node's ops.** The client menu says ready
-   for ops the running node lacks; the refusal now names the op. Ask the node
-   for its op list once and filter the menu. Files: `tools/command/
-   native_fleet_board_command.c`, `engine/composition/src/
-   boot_fleet_board_rpc.c`. Group: `test_fleet_board`.
+5. ~~Build the board menu from the node's ops.~~ `op=ops` is the node's
+   list. `fleet board` and `discover help` for `fleet.board` and `fleet.wiki`
+   ask once and drop a child the list does not name. A node with no `ops`
+   answer keeps the full catalog. The refusal still names a missing leaf.
 6. ~~Status for an unknown blocker.~~ Done (seq 4201, sync_state folded too). `status_brief_native_handler.c` now
    folds free text to a token. Add the same fold for `sync_state` (it still
    rejects the whole document on a non-token) with a test beside

@@ -57,6 +57,7 @@
 #include "net/noise_transport.h"
 #include "net/onion_v3_address.h"
 #include "../../../engine/composition/src/boot_fleet_board_roster_internal.h"
+#include "../../../engine/composition/src/boot_fleet_board_rpc_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_frame_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_push_internal.h"
 #include "../../../engine/composition/src/boot_fleet_board_authority_internal.h"
@@ -18487,12 +18488,163 @@ static int test_fleet_board_list_budget(void)
     return failures;
 }
 
+static bool fb_menu_has(const struct json_value *children, const char *path)
+{
+    for (size_t i = 0; children && i < children->num_children; i++) {
+        const char *p = json_get_str(json_get(json_at(children, i), "path"));
+        if (p && strcmp(p, path) == 0)
+            return true;
+    }
+    return false;
+}
+
+static const char *fb_menu_doc =
+    "{\"schema\":\"zcl.command_menu.v1\",\"path\":\"fleet.board\","
+    "\"summary\":\"Signed, gossiped posts every node carries\","
+    "\"registry_digest\":\"abc\","
+    "\"children\":["
+    "{\"path\":\"fleet.board.post\",\"summary\":\"p\",\"risk\":\"low\","
+    "\"latency\":\"fast\",\"availability\":\"ready\"},"
+    "{\"path\":\"fleet.board.delivery\",\"summary\":\"d\",\"risk\":\"low\","
+    "\"latency\":\"fast\",\"availability\":\"ready\"},"
+    "{\"path\":\"fleet.board.wait\",\"summary\":\"w\",\"risk\":\"low\","
+    "\"latency\":\"fast\",\"availability\":\"ready\"}]}";
+
+static int fb_ops_calls;
+static const char *fb_ops_body;
+
+static char *fb_ops_hook(const char *method, const char *params)
+{
+    (void)method;
+    (void)params;
+    fb_ops_calls++;
+    return fb_ops_body ? strdup(fb_ops_body) : NULL;
+}
+
+static int test_fleet_board_ops_published(void)
+{
+    int failures = 0;
+    struct json_value listed, help;
+    json_init(&listed);
+    json_init(&help);
+    TEST("the node publishes the ops it dispatches") {
+        const struct json_value *names;
+        const char *text;
+        ASSERT(boot_fleet_board_ops_write(&listed));
+        ASSERT(json_get(&listed, "ok") &&
+               json_get(&listed, "ok")->type == JSON_BOOL &&
+               json_get(&listed, "ok")->val.b);
+        names = json_get(&listed, "ops");
+        ASSERT(names && names->type == JSON_ARR);
+        ASSERT(boot_fleet_board_op_known("post"));
+        ASSERT(boot_fleet_board_op_known("inbox_wait"));
+        ASSERT(boot_fleet_board_op_known("wiki_write"));
+        ASSERT(boot_fleet_board_op_known("delivery"));
+        ASSERT(!boot_fleet_board_op_known("nope"));
+        boot_fleet_board_ops_help(&help);
+        text = json_get_str(&help);
+        ASSERT(strstr(text, "ops:") != NULL);
+        ASSERT(strstr(text, "wiki_write") != NULL);
+        PASS();
+    } _test_next:;
+    json_free(&help);
+    json_free(&listed);
+    return failures;
+}
+
+static int test_fleet_board_menu_filter_keeps_listed(void)
+{
+    int failures = 0;
+    struct json_value arr, item, doc;
+    char out[2048];
+    json_init(&arr);
+    json_init(&item);
+    json_init(&doc);
+    TEST("a menu keeps a child only when the node lists its op") {
+        size_t n;
+        const struct json_value *children;
+        const char *next;
+        json_set_array(&arr);
+        json_set_str(&item, "post");
+        ASSERT(json_push_back(&arr, &item));
+        json_set_str(&item, "inbox_wait");
+        ASSERT(json_push_back(&arr, &item));
+        n = zcl_native_fleet_board_menu_filter(fb_menu_doc, strlen(fb_menu_doc),
+                                               &arr, out, sizeof out);
+        ASSERT(n > 0);
+        ASSERT(json_read(&doc, out, n));
+        children = json_get(&doc, "children");
+        ASSERT(children && children->num_children == 2);
+        ASSERT(fb_menu_has(children, "fleet.board.post"));
+        ASSERT(fb_menu_has(children, "fleet.board.wait"));
+        ASSERT(!fb_menu_has(children, "fleet.board.delivery"));
+        next = json_get_str(json_get(json_get(json_get(&doc, "next"), "input"),
+                                     "path"));
+        ASSERT_STR_EQ(next, "fleet.board.post");
+        json_set_str(&item, "delivery");
+        ASSERT(json_push_back(&arr, &item));
+        ASSERT_EQ(zcl_native_fleet_board_menu_filter(
+                      fb_menu_doc, strlen(fb_menu_doc), &arr, out, sizeof out),
+                  (size_t)0);
+        PASS();
+    } _test_next:;
+    json_free(&item);
+    json_free(&arr);
+    json_free(&doc);
+    return failures;
+}
+
+static int test_fleet_board_menu_asks_once(void)
+{
+    int failures = 0;
+    struct json_value doc;
+    char out[2048];
+    json_init(&doc);
+    zcl_native_fleet_board_menu_test_reset();
+    fb_ops_calls = 0;
+    fb_ops_body = "{\"ok\":true,\"ops\":[\"post\",\"inbox_wait\"]}";
+    node_rpc_client_set_test_hook(fb_ops_hook);
+    TEST("the menu asks the node for ops once") {
+        size_t n;
+        n = zcl_native_fleet_board_menu_for_node(fb_menu_doc, strlen(fb_menu_doc),
+                                                 out, sizeof out);
+        ASSERT(n > 0);
+        ASSERT_EQ(fb_ops_calls, 1);
+        ASSERT(json_read(&doc, out, n));
+        ASSERT(!fb_menu_has(json_get(&doc, "children"), "fleet.board.delivery"));
+        n = zcl_native_fleet_board_menu_for_node(fb_menu_doc, strlen(fb_menu_doc),
+                                                 out, sizeof out);
+        ASSERT(n > 0);
+        ASSERT_EQ(fb_ops_calls, 1);
+        zcl_native_fleet_board_menu_test_reset();
+        fb_ops_body = "{\"ok\":false,\"code\":\"UNKNOWN_OP\"}";
+        ASSERT_EQ(zcl_native_fleet_board_menu_for_node(
+                      fb_menu_doc, strlen(fb_menu_doc), out, sizeof out),
+                  (size_t)0);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_fleet_board_menu_test_reset();
+    json_free(&doc);
+    return failures;
+}
+
+static int test_fleet_board_menu_from_ops(void)
+{
+    int failures = 0;
+    failures += test_fleet_board_ops_published();
+    failures += test_fleet_board_menu_filter_keeps_listed();
+    failures += test_fleet_board_menu_asks_once();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
     /* The role gate is held open here; the gate itself is proven in
      * test_fleet_board_public_no_grant_needed() and fleet_roles. */
     zcl_fleet_role_checker_install_permissive_for_testing();
+    failures += test_fleet_board_menu_from_ops();
     failures += test_fleet_board_codec();
     failures += test_fleet_board_bounds();
     failures += test_fleet_board_frames();

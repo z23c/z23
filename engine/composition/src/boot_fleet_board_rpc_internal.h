@@ -10,6 +10,17 @@ struct db_fleet_board_post;
 struct boot_fleet_board_observation;
 void fb_error(struct json_value *result, const char *code, const char *message);
 void fb_unknown_op(struct json_value *result, const char *op);
+/* The op names rpc_fleet_board dispatches (boot_fleet_board_ops.c). */
+bool boot_fleet_board_op_known(const char *op);
+bool boot_fleet_board_ops_write(struct json_value *result);
+void boot_fleet_board_ops_help(struct json_value *result);
+const struct json_value *fb_input(const struct json_value *params);
+/* Help, a missing op, and op=ops. False leaves *in_out and *op_out set
+ * for a request that still needs the node database. */
+bool boot_fleet_board_answer_catalog(const struct json_value *params, bool help,
+                                    struct json_value *result,
+                                    const struct json_value **in_out,
+                                    const char **op_out);
 const char *fb_str(const struct json_value *in, const char *key, const char *fallback);
 int64_t fb_int(const struct json_value *in, const char *key, int64_t fallback);
 bool fb_bool(const struct json_value *in, const char *key);
