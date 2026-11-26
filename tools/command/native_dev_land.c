@@ -6690,7 +6690,7 @@ static bool dl_lint_attributed_fail(const char *line, const char *gate)
  * once it has finished, the gate's own verdict follows. */
 static bool dl_lint_selftest_done(const char *line)
 {
-    return strstr(line, "selftest ok") ||
+    return strstr(line, "selftest ok") || strstr(line, "SELFTEST PASS") ||
         ((strstr(line, "selftest") || strstr(line, "self-test")) &&
          (strstr(line, ": PASS") || strstr(line, ": OK")));
 }

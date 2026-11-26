@@ -596,13 +596,19 @@ static bool dlx_lint_selftest_verdict(void)
         "check-outparam-init-before-return: 2 NEW out-parameter(s) whose\n"
         "  initialization sits BELOW a failure return:\n"
         "    ls_invoke(): struct zcl_command_reply *reply\n";
+    static const char codeindex[] =
+        "check-codeindex-coverage: SELFTEST PASS — clean and restored manifests are GREEN; tracked symlinks are excluded; one tracked missing regular file is RED\n"
+        "check-codeindex-coverage: FAIL — 3 tracked file(s) have no row in the code index\n"
+        "  docs/work/BOOT_IMAGE_SPIKE.md\n";
     static const char input_keys[] =
         "z23-lint: cannot open /h/cik-selftest/baseline.txt: Permission denied\n"
         "z23-lint: read failed: /h/cik-selftest/baseline.txt: Is a directory\n"
         "check-command-input-keys self-test: PASS (14 cases)\n\n"
         "check_command_input_keys: 2 input key(s) READ by a handler but NOT declared in the leaf's input_keys:\n"
         "  engine/composition/commands/fleet_board.def:176: fleet.wiki.list reads after\n";
-    return dlx_lint_selftest_verdict_of("check-capability-closure", capclosure,
+    return dlx_lint_selftest_verdict_of("check-codeindex-coverage", codeindex,
+               "3 tracked file(s)", "BOOT_IMAGE_SPIKE") &&
+        dlx_lint_selftest_verdict_of("check-capability-closure", capclosure,
                "VIOLATION", "land_preflight.c") &&
         dlx_lint_selftest_verdict_of("check-no-bare-tmp-fixture", baretmp,
                "NEW/GROWN", "test_app_launch.c") &&
