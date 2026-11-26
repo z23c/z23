@@ -39,6 +39,17 @@
 #include <windows.h>
 #include <aclapi.h>
 
+void zcl_devagent_worker_presence(const struct wkr_drive_opts *opts,
+                                  const struct wkr_job *job, const char *phase,
+                                  const char *progress, const char *blockers)
+{
+    (void)opts;
+    (void)job;
+    (void)phase;
+    (void)progress;
+    (void)blockers;
+}
+
 #define ACC_SLEEPER "--acc-sleeper"
 #define ACC_SECRET "Z23_ACC_SECRET"
 #define ACC_MEM_MB 128

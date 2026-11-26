@@ -887,13 +887,16 @@ static bool wkr_confined_prepare(const struct wkr_job *job,
 
 /* Parent wait in slices: wall cap, shutdown, and exit capture. The same
  * shape as the POSIX wait, with the whole job as the kill target. */
-static struct wkr_spawn_out wkr_confined_wait(struct platform_process *proc,
+static struct wkr_spawn_out wkr_confined_wait(const struct wkr_drive_opts *opts,
+                                              const struct wkr_job *job,
+                                              struct platform_process *proc,
                                               long long cap_s, long long t0_s,
                                               const volatile int *terminating)
 {
     struct wkr_spawn_out out;
     memset(&out, 0, sizeof(out));
     out.status = -1;
+    long long last_beat = t0_s;
     for (;;) {
         enum platform_process_wait_result w;
         if (terminating && *terminating) {
@@ -907,6 +910,11 @@ static struct wkr_spawn_out wkr_confined_wait(struct platform_process *proc,
             (void)platform_process_wait(proc, 5000u, NULL);
             out.status = 0;
             break;
+        }
+        long long now_s = platform_time_wall_unix();
+        if (now_s - last_beat >= 30) {
+            zcl_devagent_worker_presence(opts, job, "busy", "executor running", "none");
+            last_beat = now_s;
         }
         w = platform_process_wait(proc, 25u, NULL);
         if (w == PLATFORM_PROCESS_WAIT_EXITED) {
@@ -960,7 +968,7 @@ static struct wkr_spawn_out wkr_spawn_windows(const struct wkr_drive_opts *opts,
         free(run);
         return out;
     }
-    out = wkr_confined_wait(&proc, caps.wall_s, t0_s, terminating);
+    out = wkr_confined_wait(opts, job, &proc, caps.wall_s, t0_s, terminating);
     if (!platform_confined_report(&proc, &report))
         out.signaled = true; /* stragglers survived the kill: not a clean exit */
     else {

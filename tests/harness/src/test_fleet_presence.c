@@ -14,6 +14,7 @@
 
 #include "command/native_command.h"
 #include "command/native_fleet.h"
+#include "command/native_devagent.h"
 #include "command/native_fleet_presence.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
@@ -334,6 +335,116 @@ static int fpt_t_fields_and_states(void)
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "Z"), "blockers"), "UNKNOWN");
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 1);
         fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_native_worker(void)
+{
+    int failures = 0;
+    TEST("presence: a native worker publishes its existing job identity and state") {
+        struct fpt_call b;
+        struct wkr_drive_opts opts = {0};
+        struct wkr_job job = {0};
+        (void)snprintf(opts.worker, sizeof(opts.worker), "native-test");
+        (void)snprintf(opts.session, sizeof(opts.session), "s-native");
+        (void)snprintf(job.name, sizeof(job.name), "job-17");
+        fpt_begin_case("native_worker");
+        zcl_devagent_worker_presence(&opts, &job, "blocked", "gate-17", "proof failed");
+        fpt_brief(&b);
+        const struct json_value *s = fpt_session(&b, "native-test");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fpt_s(s, "activity"), "blocked");
+        ASSERT_STR_EQ(fpt_s(s, "task"), "job-17");
+        ASSERT_STR_EQ(fpt_s(s, "progress"), "gate-17");
+        ASSERT_STR_EQ(fpt_s(s, "blockers"), "proof failed");
+        ASSERT_STR_EQ(fpt_s(s, "source"), "native-worker");
+        ASSERT(fpt_i(s, "age_s") >= 0 && fpt_i(s, "age_s") <= 60);
+        fpt_call_end(&b);
+        (void)snprintf(opts.worker, sizeof(opts.worker),
+                       "secret-nativeworker123456789012345678901234567890");
+        (void)snprintf(opts.session, sizeof(opts.session),
+                       "password-sessionworker123456789012345678901234567890");
+        (void)snprintf(job.name, sizeof(job.name),
+                       "secret-jobworker123456789012345678901234567890");
+        zcl_devagent_worker_presence(&opts, &job, "idle", "waiting", "none");
+        fpt_brief(&b);
+        const struct json_value *arr = json_get(&b.reply.data, "sessions");
+        size_t n = arr && arr->type == JSON_ARR ? json_size(arr) : 0u;
+        bool found = false;
+        for (size_t i = 0; i < n; i++) {
+            const struct json_value *row = json_at(arr, i);
+            if (strncmp(fpt_s(row, "role"), "n-", 2) == 0) {
+                found = true;
+                ASSERT_STR_EQ(fpt_s(row, "activity"), "idle");
+                ASSERT_STR_EQ(fpt_s(row, "head"), "UNKNOWN");
+                ASSERT(strncmp(fpt_s(row, "task"), "n-", 2) == 0);
+            }
+        }
+        ASSERT(found);
+        fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_completion_owner(void)
+{
+    int failures = 0;
+    TEST("presence: an old owner cannot complete its live replacement") {
+        struct fpt_call b, c;
+        fpt_begin_case("completion_owner");
+        ASSERT(fpt_presence(&c, "owned", "old-job", "active", "session", "old-owner"));
+        fpt_call_end(&c);
+        g_fpt_offset_s = 31;
+        ASSERT(fpt_presence(&c, "owned", "new-job", "idle", "session", "new-owner"));
+        fpt_call_end(&c);
+        g_fpt_offset_s = 32;
+        ASSERT(fpt_presence(&c, "owned", "old-job", "completed", "session", "old-owner"));
+        ASSERT(json_get(&c.reply.data, "skipped") != NULL);
+        fpt_call_end(&c);
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "owned"), "activity"), "idle");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "owned"), "task"), "new-job");
+        fpt_call_end(&b);
+        ASSERT(fpt_presence(&c, "owned", "new-job", "completed", "session", "new-owner"));
+        ASSERT(json_get(&c.reply.data, "skipped") == NULL);
+        fpt_call_end(&c);
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "owned"), "activity"), "completed");
+        fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_owner_width(void)
+{
+    int failures = 0;
+    TEST("presence: a 64-character session can complete itself") {
+        struct fpt_call c;
+        char owner[65];
+        memset(owner, 97, 64);
+        owner[64] = 0;
+        for (size_t i = 8; i < 64; i += 9)
+            owner[i] = 45;
+        fpt_begin_case("owner_width");
+        ASSERT(fpt_presence(&c, "wide-owner", "job", "active", "session", owner));
+        fpt_call_end(&c);
+        g_fpt_offset_s = 1;
+        ASSERT(fpt_presence(&c, "wide-owner", "job", "completed", "session", owner));
+        ASSERT(json_get(&c.reply.data, "skipped") == NULL);
+        fpt_call_end(&c);
         fpt_end_case();
         PASS();
     }
@@ -677,6 +788,9 @@ int test_fleet_presence(void)
     failures += fpt_t_round_trip();
     failures += fpt_t_expiry();
     failures += fpt_t_fields_and_states();
+    failures += fpt_t_native_worker();
+    failures += fpt_t_completion_owner();
+    failures += fpt_t_owner_width();
     failures += fpt_t_refusals();
     failures += fpt_t_pool();
     failures += fpt_t_hook_cadence();

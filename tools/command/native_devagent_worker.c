@@ -24,7 +24,8 @@
  * fleet.steer.presence leaf. Phase idle is posted at start, on each
  * idle-wait slice, and after a job, so a long backoff stays inside the
  * leaf's live window. A POSIX child wait posts phase busy on each
- * slice. Phase completed is posted before the lock drops. The leaf owns
+ * slice. Phase completed is posted after the lock drops; a newer live owner
+ * rejects an older drive's completion. The leaf owns
  * the repeat floor and the window; a refused or skipped post does not
  * stop the drive. A beat that writes mail is resnapped, and mail that
  * is already changed is left for the inbox instead of being snapped
@@ -97,6 +98,7 @@
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
+#include "command/native_fleet_presence.h"
 #include "fleet_enrol.h"
 
 #include "base/hex.h"
@@ -171,6 +173,13 @@
 /* SIGTERM asks for shutdown between jobs; the wait slices also honor it
  * so an in-flight job is crash-recorded instead of orphaned. */
 static volatile sig_atomic_t g_wkr_term = 0;
+
+#if !defined(_WIN32)
+static struct wkr_spawn_out wkr_wait_child(const struct wkr_drive_opts *opts,
+                                           const struct wkr_job *job,
+                                           pid_t pid, long long cap_s,
+                                           long long t0_s);
+#endif
 
 static void wkr_on_term(int sig)
 {
@@ -737,8 +746,6 @@ static int wkr_adopt_job(const struct wkr_drive_opts *opts,
  * receipt, reap records it incomplete. SIGTERM in flight kills the child
  * and crash-records. */
 
-static void wkr_presence(const struct wkr_drive_opts *opts, const char *phase);
-
 #if defined(_WIN32)
 /* The executor that runs is the one this image's child entry wires (the
  * production entry passes the Muse executor, as the leaf does). */
@@ -764,6 +771,7 @@ static void wkr_child_run(const struct wkr_drive_opts *opts,
 /* Parent wait in slices: wall cap, SIGTERM, crash, and exit capture.
  * Seconds through the unclassified platform seam, never a raw syscall. */
 static struct wkr_spawn_out wkr_wait_child(const struct wkr_drive_opts *opts,
+                                           const struct wkr_job *job,
                                            pid_t pid, long long cap_s,
                                            long long t0_s)
 {
@@ -775,7 +783,7 @@ static struct wkr_spawn_out wkr_wait_child(const struct wkr_drive_opts *opts,
         pid_t got;
         struct timespec slice;
         long long now_s = platform_time_wall_unix();
-        wkr_presence(opts, "busy");
+        zcl_devagent_worker_presence(opts, job, "busy", "executor running", "none");
         if (g_wkr_term) {
             /* The child ran and was reaped here, so this is status 1 (a
              * wait that was observed), not the -1 of a wait that never
@@ -832,7 +840,7 @@ static struct wkr_spawn_out wkr_spawn(const struct wkr_drive_opts *opts,
         return out;
     if (pid == 0)
         wkr_child_run(opts, job, exec);
-    out = wkr_wait_child(opts, pid, opts->time_cap_s, t0_s);
+    out = wkr_wait_child(opts, job, pid, opts->time_cap_s, t0_s);
     return out;
 }
 #endif
@@ -1685,6 +1693,59 @@ static bool wkr_evidence_read(const struct wkr_job *job,
            wkr_evidence_head(text, ev);
 }
 
+static void wkr_presence_name(const char *name, char out[33])
+{
+    size_t n = strlen(name);
+    if (zcl_presence_name_ok(name)) {
+        (void)snprintf(out, 33, "%s", name);
+        return;
+    }
+    unsigned char digest[32], hex[29];
+    zcl_sha3_256((const unsigned char *)name, n, digest);
+    zcl_hex_encode(digest, 14, (char *)hex);
+    (void)snprintf(out, 33, "n-%.14s-%.14s", hex, hex + 14);
+}
+
+void zcl_devagent_worker_presence(const struct wkr_drive_opts *opts,
+                                  const struct wkr_job *job, const char *phase,
+                                  const char *progress, const char *blockers)
+{
+    struct zcl_presence_in in;
+    struct zcl_command_request req;
+    struct zcl_command_reply reply;
+    struct json_value input;
+    struct wkr_evidence ev;
+    memset(&in, 0, sizeof(in));
+    memset(&req, 0, sizeof(req));
+    char role[33], owner[33], task[33];
+    wkr_presence_name(opts->worker, role);
+    wkr_presence_name(opts->session, owner);
+    wkr_presence_name(job ? job->name : opts->worker, task);
+    in.role = role;
+    in.owner = owner;
+    in.session = owner;
+    in.task = task;
+    in.phase = phase;
+    in.progress = progress;
+    in.blockers = blockers;
+    in.source = "native-worker";
+    in.pid = (long long)getpid();
+    if (job && wkr_evidence_read(job, &ev) && ev.has_head) {
+        in.head = ev.head;
+    } else if (job) {
+        in.head = "UNKNOWN";
+    }
+    json_init(&input);
+    json_set_object(&input);
+    req.input = &input;
+    zcl_command_reply_init(&reply, "zcl.fleet_steer_presence.v1");
+    zcl_presence_emit(&req, &reply, &in);
+    if (reply.status != ZCL_COMMAND_STATUS_PASSED)
+        LOG_WARN("devagent_worker", "presence post refused: %s", reply.error.code);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+}
+
 /* The sender authority, re-verified against the live store. NULL passes;
  * otherwise the named refusal. */
 static const char *wkr_guard_authority(const struct wkr_evidence *ev)
@@ -1850,8 +1911,10 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
         wkr_mail_result(opts, job, "claim-identity-unwritable", "",
                         "no-receipt", 101, 0, 0,
                         "claim-identity-unwritable", NULL);
+        zcl_devagent_worker_presence(opts, job, "idle", "result recorded", "none");
         return 1;
     }
+    zcl_devagent_worker_presence(opts, job, "busy", "executor started", "none");
     out = wkr_spawn(opts, job, exec);
     zcl_devagent_worker_outcome(&out, g_wkr_term != 0, &oc);
     if (oc.gate && !zcl_devagent_worker_parse_result(job->rundir, &res)) {
@@ -1862,10 +1925,13 @@ static long long wkr_run_fresh(const struct wkr_drive_opts *opts,
     }
     if (!oc.gate) {
         wkr_finish_ungated(opts, job, &oc, out.wall_ms);
+        zcl_devagent_worker_presence(opts, job, "idle", "result recorded", "none");
         return 1;
     }
     res.wall_ms = out.wall_ms;
-    return wkr_finish_gated(opts, job, &res);
+    long long rc = wkr_finish_gated(opts, job, &res);
+    zcl_devagent_worker_presence(opts, job, "idle", "result recorded", "none");
+    return rc;
 
 }
 
@@ -1884,13 +1950,16 @@ static long long wkr_run_job(const struct wkr_drive_opts *opts,
         wkr_mail_result(opts, job, "worker-lost-after-submit", "",
                         "no-receipt", 99, 0, 0,
                         "worker-lost-after-submit", NULL);
+        zcl_devagent_worker_presence(opts, job, "idle", "result recorded", "none");
         return 1;
     }
     /* Fresh claims arrive submitted:false; adoptions with submitted==0
      * are proven un-submitted. The production stub refuses here so no
      * job runs without C's adapter wired. */
-    if (exec == zcl_devagent_worker_no_executor)
+    if (exec == zcl_devagent_worker_no_executor) {
+        zcl_devagent_worker_presence(opts, job, "idle", "no executor wired", "none");
         return 0;
+    }
     return wkr_run_fresh(opts, job, exec);
 }
 
@@ -1903,6 +1972,7 @@ static long long wkr_refuse_job(const struct wkr_drive_opts *opts,
     wkr_write_runout(job, WKR_RC_REFUSED, why);
     wkr_mail_result(opts, job, why, "", "no-receipt", WKR_RC_REFUSED, 0, 0,
                     why, NULL);
+    zcl_devagent_worker_presence(opts, job, "blocked", "refused", why);
     return 1;
 }
 
@@ -2044,7 +2114,7 @@ static bool wkr_presence_idle(struct wkr_idle *idle)
         idle->mail_woke = true;
         return true;
     }
-    wkr_presence(idle->opts, "idle");
+    zcl_devagent_worker_presence(idle->opts, NULL, "idle", "waiting for work", "none");
     wkr_mail_resnap(idle);
     return false;
 }
@@ -2533,31 +2603,6 @@ static bool wkr_drive_spent(const struct wkr_drive_opts *opts,
     return opts->max_jobs > 0 && jobs >= opts->max_jobs;
 }
 
-/* One presence.v1 note for this drive, through the shipped leaf. A
- * refusal is ignored so mail trouble cannot stall a job. */
-static void wkr_presence(const struct wkr_drive_opts *opts, const char *phase)
-{
-    struct json_value input;
-    struct zcl_command_request request;
-    struct zcl_command_reply reply;
-    if (!opts || !opts->worker[0] || !phase || !phase[0])
-        return;
-    json_init(&input);
-    json_set_object(&input);
-    memset(&request, 0, sizeof(request));
-    request.input = &input;
-    zcl_command_reply_init(&reply, "zcl.fleet_steer_presence.v1");
-    (void)json_push_kv_str(&input, "role", opts->worker);
-    (void)json_push_kv_str(&input, "task", "dev-agent-worker");
-    (void)json_push_kv_str(&input, "phase", phase);
-    (void)json_push_kv_str(&input, "source", "dev-agent-worker");
-    if (opts->session[0])
-        (void)json_push_kv_str(&input, "session", opts->session);
-    zcl_native_handle_fleet_steer_presence(&request, &reply);
-    zcl_command_reply_free(&reply);
-    json_free(&input);
-}
-
 /* True when the idle streak says the drive should stop. The inbox check
  * runs on the mail wake and on the ordinary end of the wait. */
 static bool wkr_after_idle(const struct wkr_drive_opts *opts,
@@ -2566,7 +2611,7 @@ static bool wkr_after_idle(const struct wkr_drive_opts *opts,
 {
     bool stop = wkr_drive_idle(opts, idle, idle_ms, wait_s);
     wkr_inbox_checkpoint(opts);
-    wkr_presence(opts, "idle");
+
     wkr_mail_resnap(idle);
 #ifdef ZCL_TESTING
     if (zcl_devagent_worker_test_after_inbox)
@@ -2598,8 +2643,9 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     wkr_idle_open(&idle, queuedir, opts);
     t0_s = platform_time_wall_unix();
     wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
+    zcl_devagent_worker_presence(opts, NULL, "idle", "waiting for work", "none");
     wkr_inbox_checkpoint(opts);
-    wkr_presence(opts, "idle");
+    zcl_devagent_worker_presence(opts, NULL, "idle", "waiting for work", "none");
     wkr_mail_resnap(&idle);
     while (!g_wkr_term) {
         long long done;
@@ -2618,7 +2664,6 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
         jobs += done;
         if (done > 0) {
             wkr_inbox_checkpoint(opts);
-            wkr_presence(opts, "idle");
             wkr_mail_resnap(&idle);
             idle_ms = 0;
             wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
@@ -2634,8 +2679,8 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     wkr_reap();
     wkr_idle_close(&idle);
     (void)signal(SIGTERM, old_term);
-    wkr_presence(opts, "completed");
     wkr_lock_drop(&lock);
+    zcl_devagent_worker_presence(opts, NULL, "completed", "drive stopped", "none");
     return jobs;
 }
 

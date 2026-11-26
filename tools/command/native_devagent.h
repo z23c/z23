@@ -284,6 +284,10 @@ typedef bool (*wkr_executor_fn)(const struct wkr_job *job,
 long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
                                     wkr_executor_fn exec);
 
+void zcl_devagent_worker_presence(const struct wkr_drive_opts *opts,
+                                  const struct wkr_job *job, const char *phase,
+                                  const char *progress, const char *blockers);
+
 /* dev.agent.worker action=status — a STRICTLY READ-ONLY answer about the
  * resident: whether some drive holds worker.lock, what the existing queue
  * ledger says, and the active job only when claim.json already proves one.

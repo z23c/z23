@@ -129,9 +129,16 @@ static bool fpr_value_ok(const char *v, size_t max, bool text)
     return !fpr_has_word(v) && !fpr_has_run(v);
 }
 
+bool zcl_presence_name_ok(const char *name)
+{
+    return fpr_value_ok(name, FPR_ROLE_MAX, false);
+}
+
 static bool fpr_head_ok(const char *head)
 {
-    if (!head || strlen(head) != 40) return false;
+    if (!head) return false;
+    if (strcmp(head, "UNKNOWN") == 0) return true;
+    if (strlen(head) != 40) return false;
     for (size_t i = 0; i < 40; i++)
         if (!isxdigit((unsigned char)head[i]) || isupper((unsigned char)head[i]))
             return false;
@@ -347,6 +354,15 @@ static bool fpr_validate(struct zcl_command_reply *reply,
 }
 
 /* A repeat of the same role and phase inside the floor adds no ledger row. */
+static bool fpr_other_live_owner(const struct zcl_presence_rec *rec, bool have,
+                                  const struct zcl_presence_in *in, long long now)
+{
+    return have && strcmp(in->phase, "completed") == 0 && in->owner &&
+           rec->owner[0] && strcmp(rec->owner, in->owner) != 0 &&
+           strcmp(rec->phase, "completed") != 0 && rec->beat <= now &&
+           now - rec->beat < FPR_WINDOW_S;
+}
+
 static bool fpr_floor_hit(const struct zcl_presence_rec *rec, bool have,
                           const char *phase, long long now)
 {
@@ -408,12 +424,23 @@ void zcl_presence_emit(const struct zcl_command_request *req,
     if (!fpr_validate(reply, in))
         return;
     have = in->role && zcl_presence_rec_load(in->role, &rec);
+    if (fpr_other_live_owner(&rec, have, in, now)) {
+        zcl_presence_reply_skipped(reply, in->role,
+                                   "a different live session owns this role");
+        return;
+    }
     if (fpr_floor_hit(&rec, have, in->phase, now)) {
         zcl_presence_reply_skipped(reply, in->role,
                                    "the same role and phase was posted less than 30 s ago");
         return;
     }
     now = fpr_settle(&rec, have, in->phase, now);
+    have = in->role && zcl_presence_rec_load(in->role, &rec);
+    if (fpr_other_live_owner(&rec, have, in, now)) {
+        zcl_presence_reply_skipped(reply, in->role,
+                                   "a different live session owns this role");
+        return;
+    }
     fpr_now_ts(now_ts, sizeof(now_ts));
     if (!w.session) {
         (void)snprintf(sess, sizeof(sess), "r-%s", in->role);
@@ -459,6 +486,7 @@ void zcl_native_handle_fleet_steer_presence(
     in.task = zcl_presence_str(request, "task");
     in.phase = zcl_presence_str(request, "phase");
     in.session = zcl_presence_str(request, "session");
+    in.owner = in.session;
     in.started = zcl_presence_str(request, "started");
     in.source = zcl_presence_str(request, "source");
     in.head = zcl_presence_str(request, "head");

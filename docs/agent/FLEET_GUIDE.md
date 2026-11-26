@@ -130,6 +130,10 @@ stale, because the brief tracks a bounded table of roles. Any other agent,
 including one driven over ssh from another machine, runs the one-liner on the
 node:
 `ssh <node> 'z23 fleet steer presence --role=<ROLE> --task=<ref> --phase=active --source=ssh-from-<machine>'`.
+Native workers publish from their existing drive and executor-wait loops:
+idle on entry, busy at executor start and during long runs, result recorded,
+blocked on refusal and completed at drive exit. Current job refs and evidence
+HEAD feed the same writer; no additional scheduler is created.
 HEAD defaults to the current checkout read through the existing workspace
 reader; progress and blockers are optional explicit self-reports and read
 UNKNOWN when not supplied. All fields are unauthenticated self-reports: a

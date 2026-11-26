@@ -24,12 +24,13 @@ struct zcl_presence_in {
 
 /* What the last post for one role left behind (state root, presence/). */
 struct zcl_presence_rec {
-    char owner[48];
+    char owner[65];
     char started[24];
     char phase[16];
     long long beat; /* epoch seconds of the last accepted post, 0 = none */
 };
 
+bool zcl_presence_name_ok(const char *name);
 bool zcl_presence_rec_load(const char *role, struct zcl_presence_rec *rec);
 bool zcl_presence_rec_store(const char *role,
                             const struct zcl_presence_rec *rec);
