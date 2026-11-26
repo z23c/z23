@@ -87,6 +87,9 @@ static char g_fmx_state[1024];
 static char g_fmx_base[512];
 static bool g_fmx_had_root;
 static bool g_fmx_isolated;
+static bool g_fmx_route_ready;
+static bool g_fmx_leave_route_unknown;
+static bool fmx_plant_roster(char signer_hex[65]);
 #if defined(_WIN32)
 static wchar_t g_fmx_saved_root[32768];
 #else
@@ -146,6 +149,8 @@ static void fmx_isolate(const char *tag)
         fmx_fixture_fail("could not create isolated state parent");
     fmx_isolate_env(g_fmx_state);
     g_fmx_isolated = true;
+    g_fmx_route_ready = false;
+    g_fmx_leave_route_unknown = false;
 }
 
 static void fmx_restore(void)
@@ -310,6 +315,13 @@ static void fmx_item(struct json_value *item, const char *to,
 static bool fmx_send_from(struct fmx_call *c, const char *grant,
                           const char *from, struct json_value *items)
 {
+    /* A send the suite expects to queue needs a decided route. Tests that
+     * leave the observation unknown set g_fmx_leave_route_unknown. */
+    if (g_fmx_isolated && !g_fmx_leave_route_unknown && !g_fmx_route_ready) {
+        char signer[65];
+        if (!fmx_plant_roster(signer))
+            return false;
+    }
     fmx_begin(c, FMX_SEND_PATH, "zcl.fleet_steer_send.v1");
     if (grant)
         (void)json_push_kv_str(&c->input, "grant", grant);
@@ -1593,6 +1605,10 @@ static int fmx_t_keyed_race(void)
         struct fmx_race_result a, b;
         fmx_isolate("keyed-race");
         ASSERT(fmx_mint("send", gid, sizeof(gid)));
+        {
+            char signer[65];
+            ASSERT(fmx_plant_roster(signer));
+        }
         ASSERT(fmx_race_pair(gid, &a, &b));
         ASSERT(a.ok && b.ok && a.seq > 0 && a.seq == b.seq && a.duplicate + b.duplicate == 1);
         ASSERT_EQ(fmx_mail_count(), 1);
@@ -1633,7 +1649,7 @@ static int fmx_t_duplicate(void)
         out = fmx_arr(&s, "items");
         ASSERT(out != NULL);
         row = json_at(out, 0);
-        ASSERT_STR_EQ(json_get_str(json_get(row, "route_snapshot")), "unknown");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "route_snapshot")), "local");
         v = json_get(row, "seq");
         ASSERT(v && v->type == JSON_INT);
         seq1 = json_get_int(v);
@@ -1652,7 +1668,7 @@ static int fmx_t_duplicate(void)
         ASSERT(fmx_ok(&s));
         out = fmx_arr(&s, "items");
         row = json_at(out, 0);
-        ASSERT_STR_EQ(json_get_str(json_get(row, "route_snapshot")), "unknown");
+        ASSERT_STR_EQ(json_get_str(json_get(row, "route_snapshot")), "local");
         v = json_get(row, "seq");
         ASSERT(v && v->type == JSON_INT);
         seq2 = json_get_int(v);
@@ -11310,10 +11326,13 @@ static bool fmx_plant_roster(char signer_hex[65])
                          op_seed, op_pub, line, sizeof(line)) ||
         !fleet_roster_append(line, &why))
         return false;
-    return fmx_roster_line("node-b", 0x42, 0x62,
-                           (uint16_t)(FLEET_ENROL_PORT_FIRST + 1),
-                           op_seed, op_pub, line, sizeof(line)) &&
-           fleet_roster_append(line, &why);
+    if (!fmx_roster_line("node-b", 0x42, 0x62,
+                         (uint16_t)(FLEET_ENROL_PORT_FIRST + 1),
+                         op_seed, op_pub, line, sizeof(line)) ||
+        !fleet_roster_append(line, &why))
+        return false;
+    g_fmx_route_ready = true;
+    return true;
 }
 
 static bool fmx_write_read(const char *agent, long long seq)
@@ -11471,6 +11490,38 @@ static int fmx_t_series2(void)
         ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
         ASSERT_STR_EQ(fmx_wstr(row, "route_snapshot"), "export_eligible");
         ASSERT(fmx_int(&s, "accepted") == 1);
+        fmx_end(&s);
+        json_free(&items);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a failed route observation is refused and appends nothing") {
+        struct fmx_call s;
+        struct json_value items, item;
+        const struct json_value *row;
+        char gid[64];
+        long long rows;
+        fmx_isolate("series2_noroute");
+        g_fmx_leave_route_unknown = true;
+        ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
+        rows = fmx_mail_count();
+        json_init(&items);
+        json_set_array(&items);
+        fmx_item(&item, "worker-b", "link the fd table", "observe-fail-ref", "key-observe-fail");
+        (void)json_push_back(&items, &item);
+        json_free(&item);
+        ASSERT(fmx_send_from(&s, gid, "oauth", &items));
+        ASSERT(fmx_ok(&s));
+        row = json_at(fmx_arr(&s, "items"), 0);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "refused");
+        ASSERT_STR_EQ(fmx_wstr(row, "error"), "STEER_NO_ROUTE");
+        ASSERT(strcmp(fmx_wstr(row, "state"), "queued") != 0);
+        ASSERT(strcmp(fmx_wstr(row, "state"), "read") != 0);
+        ASSERT(strcmp(fmx_wstr(row, "state"), "acknowledged") != 0);
+        ASSERT(strcmp(fmx_wstr(row, "state"), "completed") != 0);
+        ASSERT(fmx_int(&s, "accepted") == 0);
+        ASSERT_EQ(fmx_mail_count(), rows);
         fmx_end(&s);
         json_free(&items);
         fmx_restore();

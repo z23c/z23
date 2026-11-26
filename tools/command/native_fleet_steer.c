@@ -63,19 +63,21 @@
  * names one delivery. The recorded ref+grant let revoke cancel exactly
  * the queued work its grant sent. The reply's top-level `accepted` counts
  * only items whose result state is not "refused" (a reconciled duplicate
- * counts, a fresh IDEMPOTENCY_CONFLICT/STEER_REF_REUSED/BAD_INPUT/mail
- * refusal does not) — it is never just the item-result count. `refused`
- * is its own item state, distinct from queued, read, acknowledged and
- * completed, and it is not an accept.
+ * counts, a fresh IDEMPOTENCY_CONFLICT/STEER_REF_REUSED/STEER_NO_ROUTE/
+ * BAD_INPUT/mail refusal does not) — it is never just the item-result
+ * count. `refused` is its own item state, distinct from queued, read,
+ * acknowledged and completed, and it is not an accept.
  *
- * ROUTE. A fresh send records the board-mail observation on the queued
- * item (`route_snapshot`, and `route_hint` when the observation set one).
- * A hint means the row stays on this box: the name is not an exportable
- * roster box, or that box has no signing key. That is a local accept.
- * The mail row is still appended. An observation that could not be
- * loaded stays a local accept too; a missing observation is not invented
- * into a refusal. A same-key retry still reconciles to duplicate:true
- * and does not consult the route again.
+ * ROUTE. A fresh send observes the board-mail route before it posts.
+ * `local` and `export_eligible` are decisions: the item is queued, the
+ * mail row is appended, and the item records `route_snapshot` plus
+ * `route_hint` when the observation set one. A hint on `local` means the
+ * row stays on this box (the name is not an exportable roster box, or
+ * that box has no signing key). That hint is not a refusal. Any other
+ * observation, including `unknown` when the roster could not be loaded,
+ * is refused as STEER_NO_ROUTE before any mail or receipt append.
+ * A same-key retry still reconciles to duplicate:true and does not
+ * consult the route again.
  *
  * STATES. queued, read, acknowledged, completed — four different facts.
  * Absence of evidence stays at the earlier state. On a mail pass that was
@@ -7839,13 +7841,21 @@ static bool fmc_send_preflight(const struct json_value *it,
     return true;
 }
 
+/* A loaded observation decided where the row goes. `unknown` did not. */
+static bool fmc_send_route_decided(const struct zcl_boardmail_delivery *route)
+{
+    return route && (!strcmp(route->label, "local") ||
+                     !strcmp(route->label, "export_eligible"));
+}
+
 /* A recorded key has already reconciled. A fresh append must not reuse a
- * ref. A route hint is recorded on the accept; it is not a refusal.
- * False after a refusal. */
+ * ref, and must not post when the route observation did not decide.
+ * A local hint is still a decision. False after a refusal. */
 static bool fmc_send_fresh_ok(struct json_value *items, size_t index,
                               const char *sent_path, const struct fmc_item_fields *f,
                               int receipt)
 {
+    struct zcl_boardmail_delivery route;
     int clash;
     if (receipt != 0)
         return true;
@@ -7858,7 +7868,13 @@ static bool fmc_send_fresh_ok(struct json_value *items, size_t index,
         fmc_send_item_refused(items, index, f->to, "STEER_REF_REUSED");
         return false;
     }
-    return true;
+    zcl_devagent_boardmail_observe(f->to, f->ref, &route);
+    if (fmc_send_route_decided(&route))
+        return true;
+    fmc_send_item_refused_message(items, index, f->to, "STEER_NO_ROUTE",
+                                  route.hint[0] ? route.hint
+                                                : "route observation did not decide");
+    return false;
 }
 
 /* One send item: validate, reconcile idempotency, post, record. Emits its

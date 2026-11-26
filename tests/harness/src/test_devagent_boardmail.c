@@ -818,6 +818,8 @@ static const char g_bmx_body[] =
     "muse-workspace: receiver\nmuse-scope: src/x.c\nmuse-gate: hex_codec\n"
     "\nMake zx return one.\n";
 
+static bool bmx_own_key(void);
+
 static bool bmx_setup(const char *tag)
 {
     char real[PATH_MAX];
@@ -845,7 +847,9 @@ static bool bmx_setup(const char *tag)
     }
     node_rpc_client_set_test_hook(bmx_rpc);
     zcl_devagent_boardmail_test_io(bmx_io_fault);
-    return bmx_checkout(g_bmx_ws) && bmx_roster(BMX_A) && bmx_roster(BMX_B);
+    bool ok = bmx_checkout(g_bmx_ws) && bmx_roster(BMX_A) && bmx_roster(BMX_B);
+    bmx_use(BMX_A);
+    return ok && bmx_own_key();
 }
 
 static void bmx_teardown(void)
@@ -1412,6 +1416,7 @@ static bool bmx_own_key(void)
     char path[1600]; uint8_t seed[32];
     memset(seed, 0x41, sizeof(seed));
     if (!fleet_enrol_state_path("box.ed25519", path, sizeof(path))) return false;
+    if (access(path, R_OK) == 0) return true;
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) return false;
     bool ok = write(fd, seed, sizeof(seed)) == (ssize_t)sizeof(seed);
@@ -1720,9 +1725,9 @@ static int bmx_t_delivery(void)
         ASSERT(bmx_oversize_refs());
         zcl_devagent_boardmail_observe("someagent", "job-9", &route);
         ASSERT_STR_EQ(route.label, "unknown");
-        ASSERT(bmx_send(grant, "someagent", "route-overflow", g_bmx_body, error, sizeof(error)));
-        ASSERT_STR_EQ(g_bmx_route, "unknown");
-        ASSERT_EQ(bmx_lines(BMX_A, "mail/outbox.jsonl", "route-overflow", NULL), 1);
+        ASSERT(!bmx_send(grant, "someagent", "route-overflow", g_bmx_body, error, sizeof(error)));
+        ASSERT_STR_EQ(error, "STEER_NO_ROUTE");
+        ASSERT_EQ(bmx_lines(BMX_A, "mail/outbox.jsonl", "route-overflow", NULL), 0);
         ASSERT(bmx_write(BMX_A, "receive/boardmail.refs", "", "wb"));
         ASSERT(fleet_enrol_state_path("machines.roster", path, sizeof(path)));
         FILE *roster = fopen(path, "ab");
