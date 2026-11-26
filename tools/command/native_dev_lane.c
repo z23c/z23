@@ -37,6 +37,7 @@
 
 #include "command/native_command.h"
 
+#include "command/native_dev_lane_lease.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/file_clone.h"
@@ -974,6 +975,23 @@ static bool dln_lane_check_libtor(struct zcl_command_reply *reply,
     return true;
 }
 
+/* Run `make -s install-hooks` in the lane; refuses by name when it fails. */
+static bool dln_lane_install_hooks(struct zcl_command_reply *reply,
+                                   const char *path)
+{
+    const char *make_argv[] = { "make", "-C", path, "-s", "install-hooks",
+                                NULL };
+    char make_out[DLN_OUT_CAP];
+    if (zcl_spawn_capture(make_argv, make_out, sizeof(make_out),
+                          DLN_MAKE_TIMEOUT_MS) == 0)
+        return true;
+    dln_log("install_hooks", make_out);
+    dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+             "lane.hooks_failed", "hooks", "make -s install-hooks failed",
+             path);
+    return false;
+}
+
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_lane_new(
@@ -997,7 +1015,6 @@ void zcl_native_handle_dev_lane_new(
     char head[80];
     int copied = 0;
     struct stat libtor_st;
-    const char *make_argv[8];
 
     if (!dln_lane_find_root(reply, cwd, root))
         return;
@@ -1034,29 +1051,20 @@ void zcl_native_handle_dev_lane_new(
     if (!dln_lane_materialize_deps(reply, root, path, &copied))
         return;
 
-    make_argv[0] = "make";
-    make_argv[1] = "-C";
-    make_argv[2] = path;
-    make_argv[3] = "-s";
-    make_argv[4] = "install-hooks";
-    make_argv[5] = NULL;
-    {
-        char make_out[DLN_OUT_CAP];
-        if (zcl_spawn_capture(make_argv, make_out, sizeof(make_out),
-                              DLN_MAKE_TIMEOUT_MS) != 0) {
-            dln_log("install_hooks", make_out);
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INTERNAL, "lane.hooks_failed",
-                     "hooks", "make -s install-hooks failed", path);
-            return;
-        }
-    }
+    if (!dln_lane_install_hooks(reply, path))
+        return;
 
     if (!dln_lane_read_head(reply, path, head, sizeof(head)))
         return;
     if (!dln_lane_check_libtor(reply, path, &libtor_st))
         return;
 
+    if (!zcl_dev_lane_lease_setup(root, path, &reply->data)) {
+        dln_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                 "lane.lease_failed", "lease",
+                 "could not write .lane-lease.json", path);
+        return;
+    }
     (void)json_push_kv_bool(&reply->data, "ok", true);
     (void)json_push_kv_str(&reply->data, "path", path);
     (void)json_push_kv_str(&reply->data, "head", head);

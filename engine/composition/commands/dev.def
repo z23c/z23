@@ -2981,7 +2981,14 @@ ZCL_COMMAND_DEV_COMMAND(
     "fixtures from this checkout using file_clone (never link/linkat). "
     "Runs make -s install-hooks in the worktree. Returns path, HEAD, the "
     "count of newly materialised files, libtor_links (must be 1), and "
-    "hooks_installed.", 65536,
+    "hooks_installed. Also writes <path>/.lane-lease.json (owner, created, "
+    "touched, ttl_seconds 21600; written once, atomically) and copies "
+    "sets per-worktree gpg.format=ssh, user.signingkey=<~/.ssh/id_ed25519.pub> "
+    "and commit.gpgsign=true when gpg.ssh.allowedsignersfile lists that "
+    "public key (a private key is never read). Reports "
+    "lease_path, signing_configured (false, with signing_reason, when any "
+    "condition fails and nothing is set) and precheck_lint_present (build/bin/z23-lint exists in the "
+    "lane; nothing is built).", 65536,
     "lane,worktree,vendor,tor,proof,clone,inode",
     "zcl.lane_new_input.v1", "zcl.lane_new.v1", "path,base", "",
     "z23-dev dev lane new --path=$HOME/.z23/lanes/example --base=HEAD",

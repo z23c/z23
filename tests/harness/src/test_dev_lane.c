@@ -61,6 +61,23 @@ static bool dln_write(const char *path, const char *text)
     return fclose(f) == 0 && wrote;
 }
 
+static char dln_saved_home[PATH_MAX];
+
+/* Point HOME at a fixture home with an .ssh folder; dln_restore_home undoes
+ * it. The real ~/.ssh is never read. */
+static bool dln_use_home(const char *home)
+{
+    const char *old = getenv("HOME");
+    (void)snprintf(dln_saved_home, sizeof(dln_saved_home), "%s",
+                   old ? old : "");
+    return setenv("HOME", home, 1) == 0;
+}
+
+static void dln_restore_home(void)
+{
+    (void)setenv("HOME", dln_saved_home, 1);
+}
+
 static bool dln_mkdir_p(const char *path)
 {
     char buf[1400];
@@ -568,6 +585,133 @@ int test_dev_lane(void)
         ASSERT(stat(victim, &st) != 0);
         (void)snprintf(victim, sizeof(victim), "%s/vendor", lane);
         ASSERT(stat(victim, &st) != 0);
+
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        {
+            const char *rm[] = { "worktree", "remove", "--force", lane,
+                                 NULL };
+            (void)dln_git(root, rm);
+        }
+        PASS();
+    }
+
+    TEST("lane new: lease, signing from allowed signers, lint report") {
+        char parent[512], root[600], lane[600], lease[800], body[512];
+        char home[600], pubp[700], allowed[700], pubtxt[256];
+        struct json_value input;
+        struct zcl_command_reply reply;
+        FILE *f;
+        size_t got;
+        const char *blob = "AAAAC3NzaC1lZDI1NTE5AAAAIleaseTestKeyBlob0123456789";
+        const char *g1[] = { "config", "--worktree", "--get", "--fixed-value",
+                             "gpg.format", "ssh", NULL };
+        const char *g3[] = { "config", "--worktree", "--get", "--fixed-value",
+                             "commit.gpgsign", "true", NULL };
+        const char *g2[] = { "config", "--worktree", "--get", "--fixed-value",
+                             "user.signingkey", pubp, NULL };
+
+        test_make_tmpdir(parent, sizeof(parent), "dev_lane", "lease");
+        (void)snprintf(root, sizeof(root), "%s/root", parent);
+        (void)snprintf(lane, sizeof(lane), "%s/lane", parent);
+        (void)snprintf(home, sizeof(home), "%s/home", parent);
+        (void)snprintf(lease, sizeof(lease), "%s/.lane-lease.json", lane);
+        (void)snprintf(pubp, sizeof(pubp), "%s/.ssh/id_ed25519.pub", home);
+        (void)snprintf(allowed, sizeof(allowed), "%s/.ssh/allowed", home);
+        (void)snprintf(pubtxt, sizeof(pubtxt), "ssh-ed25519 %s fixture\n", blob);
+        ASSERT(dln_mkdir_p(root));
+        ASSERT(dln_fixture(root));
+        { char sd[800]; (void)snprintf(sd, sizeof(sd), "%s/.ssh", home); ASSERT(dln_mkdir_p(sd)); }
+        ASSERT(dln_write(pubp, pubtxt));
+        {
+            char row[400];
+            (void)snprintf(row, sizeof(row), "fixture ssh-ed25519 %s\n", blob);
+            ASSERT(dln_write(allowed, row));
+        }
+        {
+            const char *cfg[] = { "config", "gpg.ssh.allowedsignersfile",
+                                  allowed, NULL };
+            ASSERT(dln_git(root, cfg));
+        }
+        ASSERT(setenv("BOARD_AGENT", "lease-test", 1) == 0);
+        ASSERT(dln_use_home(home));
+
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "path", lane);
+        (void)json_push_kv_str(&input, "base", "HEAD");
+        dln_call(root, &input, &reply);
+        (void)unsetenv("BOARD_AGENT");
+        dln_restore_home();
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(dln_str(&reply, "lease_path"), lease);
+        ASSERT(dln_bool(&reply, "signing_configured"));
+        ASSERT(dln_bool(&reply, "precheck_lint_present"));
+        f = fopen(lease, "r");
+        ASSERT(f != NULL);
+        got = fread(body, 1, sizeof(body) - 1, f);
+        (void)fclose(f);
+        body[got] = '\0';
+        ASSERT(strstr(body, "\"owner\":\"lease-test\"") != NULL);
+        ASSERT(strstr(body, "\"created\":") != NULL);
+        ASSERT(strstr(body, "\"touched\":") != NULL);
+        ASSERT(strstr(body, "\"ttl_seconds\":21600") != NULL);
+        ASSERT(dln_git(lane, g1) && dln_git(lane, g2) && dln_git(lane, g3));
+        {
+            char out[256];
+            const char *argv[] = { "git", "-C", lane, "status", "--porcelain",
+                                   "--", ".lane-lease.json", NULL };
+            ASSERT(zcl_spawn_capture(argv, out, sizeof(out), 30000) == 0);
+            ASSERT(out[0] == '\0');
+        }
+
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        {
+            const char *rm[] = { "worktree", "remove", "--force", lane,
+                                 NULL };
+            (void)dln_git(root, rm);
+        }
+        PASS();
+    }
+
+    TEST("lane new: key not in allowed signers sets nothing") {
+        char parent[512], root[600], lane[600], home[600], pubp[700];
+        char allowed[700];
+        struct json_value input;
+        struct zcl_command_reply reply;
+        const char *g1[] = { "config", "--worktree", "--get",
+                             "user.signingkey", NULL };
+
+        test_make_tmpdir(parent, sizeof(parent), "dev_lane", "nosign");
+        (void)snprintf(root, sizeof(root), "%s/root", parent);
+        (void)snprintf(lane, sizeof(lane), "%s/lane", parent);
+        (void)snprintf(home, sizeof(home), "%s/home", parent);
+        (void)snprintf(pubp, sizeof(pubp), "%s/.ssh/id_ed25519.pub", home);
+        (void)snprintf(allowed, sizeof(allowed), "%s/.ssh/allowed", home);
+        ASSERT(dln_mkdir_p(root));
+        ASSERT(dln_fixture(root));
+        { char sd[800]; (void)snprintf(sd, sizeof(sd), "%s/.ssh", home); ASSERT(dln_mkdir_p(sd)); }
+        ASSERT(dln_write(pubp, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIotherKeyBlob0123456789 x\n"));
+        ASSERT(dln_write(allowed, "fixture ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIsomebodyElse9876543210\n"));
+        {
+            const char *cfg[] = { "config", "gpg.ssh.allowedsignersfile",
+                                  allowed, NULL };
+            ASSERT(dln_git(root, cfg));
+        }
+        ASSERT(dln_use_home(home));
+
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "path", lane);
+        (void)json_push_kv_str(&input, "base", "HEAD");
+        dln_call(root, &input, &reply);
+        dln_restore_home();
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(!dln_bool(&reply, "signing_configured"));
+        ASSERT(strstr(dln_str(&reply, "signing_reason"), "allowed signers") != NULL);
+        ASSERT(strlen(dln_str(&reply, "lease_path")) > 0);
+        ASSERT(!dln_git(lane, g1));
 
         zcl_command_reply_free(&reply);
         json_free(&input);
