@@ -20,8 +20,8 @@ The plan behind tasks 1 to 3 is [LANDING_FLOW_PLAN.md](./LANDING_FLOW_PLAN.md).
 - Report what you measured, with numbers. If a gate fails, say which and why;
   never loosen a check to pass.
 - Before you start, read the log for the files you will touch:
-- At your first edit, claim the files: `build/bin/z23-dev dev agent claim --story=NAME --files=a,b`. The fleet probe G13 counts claims; no claim means nobody sees the lane. Release when done.
   `git log origin/main --oneline -8 -- <path>`. Other agents write here.
+- At your first edit, claim the files: `build/bin/z23-dev dev agent claim --story=NAME --files=a,b`. The fleet probe G13 counts claims; no claim means nobody sees the lane. Release when done.
 
 ## Tasks, smallest first
 
