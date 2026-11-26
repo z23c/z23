@@ -410,6 +410,13 @@ static int test_lsel_precheck_auto_base(void)
         ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 1);
         ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
         ASSERT_EQ(lsel_pc_file_size(cnt), 6U);
+        /* The cached base tree outliving its git metadata (a worktree prune)
+         * must heal, not turn every later precheck into a skip. */
+        (void)snprintf(res, sizeof(res), "%s/.git/worktrees", repo);
+        test_rm_rf_recursive(res);
+        ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
+        ASSERT(strstr(out, "cannot check out the base tree") == NULL);
         (void)unsetenv("LSEL_PC_COUNT");
         (void)unsetenv("ZCL_PRECHECK_CACHE");
         test_rm_rf_recursive(fx.root);

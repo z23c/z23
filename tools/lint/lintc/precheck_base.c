@@ -10,6 +10,7 @@
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
 #endif
+#include "lintc.h"
 #include "precheck_base.h"
 
 #include <ctype.h>
@@ -191,18 +192,32 @@ static int pb_lock(const char *cache)
     return fd;
 }
 
-/* Reuse the shared worktree when it exists, else add it from this tree. */
+/* The cached base worktree can outlive its git metadata: a `git worktree
+ * prune` or a cleanup of the owning repo's worktrees folder leaves the tree's
+ * `.git` file pointing at a missing gitdir, and `checkout` there fails for
+ * ever. Every lane of the clone then skipped the precheck ("cannot check out
+ * the base tree") and met its lint failures in the 8-minute land proof.
+ * Heal it: prune, drop the stale tree, add it again. */
+static int pb_add_tree(const struct precheck_base *b)
+{
+    const char *add[] = { "worktree", "add", "-q", "--detach", b->tree, b->sha,
+                          NULL };
+    return precheck_base_git(NULL, add, NULL, 0) == 0 ? 0 : -1;
+}
+
 static int pb_ensure_tree(const struct precheck_base *b)
 {
     char gitpath[PATH_MAX + 8];
     snprintf(gitpath, sizeof gitpath, "%s/.git", b->tree);
-    if (access(gitpath, F_OK) == 0) {
-        const char *co[] = { "checkout", "-q", "-f", "--detach", b->sha, NULL };
-        return precheck_base_git(b->tree, co, NULL, 0) == 0 ? 0 : -1;
-    }
-    const char *add[] = { "worktree", "add", "-q", "--detach", b->tree, b->sha,
-                          NULL };
-    return precheck_base_git(NULL, add, NULL, 0) == 0 ? 0 : -1;
+    if (access(gitpath, F_OK) != 0)
+        return pb_add_tree(b);
+    const char *co[] = { "checkout", "-q", "-f", "--detach", b->sha, NULL };
+    if (precheck_base_git(b->tree, co, NULL, 0) == 0)
+        return 0;
+    const char *prune[] = { "worktree", "prune", NULL };
+    if (precheck_base_git(NULL, prune, NULL, 0) != 0 || rap_rm_rf(b->tree) != 0)
+        return -1;
+    return pb_add_tree(b);
 }
 
 /* The running binary's stat, taken before main(). AT_EXECFN may be relative
