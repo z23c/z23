@@ -468,13 +468,18 @@ static int cib_contexts_run(void)
 /* Stage 2, RATCHET: the core/ barrier over every core/ file
  * (gate_core_barrier.c). Both stages run; the worse verdict wins (2 UNPROVEN
  * over 1 FAIL over 0). --write-baseline and --print-include-path are
- * barrier-only modes. */
+ * barrier-only modes. A --changed-files=PATH narrowing hint is ignored: the
+ * gate always grades the whole tree, as it did before the barrier pass. */
 int check_core_include_boundary_run(int argc, char **argv)
 {
     int rc, brc;
     if (argc >= 1 && (strcmp(argv[0], "--write-baseline") == 0
                       || strcmp(argv[0], "--print-include-path") == 0))
         return core_barrier_main(argc, argv);
+    if (argc >= 1 && strncmp(argv[0], "--changed-files=", 16) == 0) {
+        argc = 0;
+        argv = NULL;
+    }
     if (argc >= 1) {
         fprintf(stderr, "check_core_include_boundary: unknown argument '%s'\n",
                 argv[0]);

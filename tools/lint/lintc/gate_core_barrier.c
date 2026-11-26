@@ -269,23 +269,49 @@ static const char *cb_ws(const char *p)
     return p;
 }
 
-/* Parse `#include "tok"` / `#include <tok>`; 1 quoted, 2 angle, 0 none. */
-static int cb_parse(const char *line, char *tok, size_t cap)
+/* The operand of an `#include` / `#include_next` directive, or NULL when the
+ * line is not one (`#includes` in prose is not). */
+static const char *cb_directive(const char *line)
 {
-    const char *p = cb_ws(line), *e;
-    char close;
+    const char *p = cb_ws(line);
     if (*p++ != '#')
-        return 0;
+        return NULL;
     p = cb_ws(p);
     if (strncmp(p, "include", 7) != 0)
+        return NULL;
+    p += 7;
+    if (strncmp(p, "_next", 5) == 0)
+        p += 5;
+    if (*p != ' ' && *p != '\t' && *p != '"' && *p != '<')
+        return NULL;
+    return cb_ws(p);
+}
+
+/* A computed (`#include MACRO`) or malformed operand: its first word, so it
+ * is reported as unresolved instead of skipped. 3, or 0 when empty. */
+static int cb_computed(const char *p, char *tok, size_t cap)
+{
+    size_t n = strcspn(p, " \t/");
+    if (n == 0 || n >= cap)
         return 0;
-    p = cb_ws(p + 7);
+    memcpy(tok, p, n);
+    tok[n] = '\0';
+    return 3;
+}
+
+/* Parse an include line; 1 quoted, 2 angle, 3 computed, 0 none. */
+static int cb_parse(const char *line, char *tok, size_t cap)
+{
+    const char *p = cb_directive(line), *e;
+    char close;
+    if (!p)
+        return 0;
     if (*p != '"' && *p != '<')
-        return 0;
+        return cb_computed(p, tok, cap);
     close = *p == '"' ? '"' : '>';
     e = strchr(p + 1, close);
     if (!e || (size_t)(e - p - 1) >= cap || e == p + 1)
-        return 0;
+        return cb_computed(p, tok, cap);
     memcpy(tok, p + 1, (size_t)(e - p - 1));
     tok[e - p - 1] = '\0';
     return close == '"' ? 1 : 2;
@@ -307,7 +333,10 @@ static int cb_line(struct cb_scan *s, const char *line)
     int ambig, form = cb_parse(line, tok, sizeof tok), kind;
     if (!form)
         return 0;
-    kind = cb_resolve(s->env, s->file, tok, form == 1, res, &ambig);
+    ambig = 0;
+    snprintf(res, sizeof res, "?");
+    kind = form == 3 ? CB_UNRES
+                     : cb_resolve(s->env, s->file, tok, form == 1, res, &ambig);
     if (kind < 0)
         return 2;
     s->st.ambig += ambig;
@@ -741,6 +770,12 @@ static const struct cb_st_case k_cb_st_cases[] = {
       "#include \"nowhere/gone.h\"\n", NULL, 1, 1, 0, 1, 0 },
     { "dot-dot resolves by location", "core/consensus/src/a.c",
       "#include \"../include/consensus/x.h\"\n", NULL, 0, 0, 0, 0, 0 },
+    { "computed include is unresolved, never skipped",
+      "core/consensus/src/a.c", "#include DB_HEADER\n", NULL, 1, 1, 0, 1, 0 },
+    { "include_next resolves like include", "core/consensus/src/a.c",
+      "#include_next <util/foo.h>\n", NULL, 1, 1, 0, 0, 0 },
+    { "prose #includes line is not a directive", "core/consensus/src/a.c",
+      "#includes are counted\n", NULL, 0, 0, 0, 0, 0 },
     { "make-vendor header is outside, installed or not",
       "core/modules/net/src/n.c", "#include <openssl/ssl.h>\n", NULL,
       1, 1, 0, 0, 0 },
@@ -758,6 +793,6 @@ int core_barrier_selftests(void)
     return st_ok(bad, "check_core_include_boundary barrier selftest: PASS — "
                       "clean tree passes, a new outside include fails, an "
                       "allowlisted include passes, a baselined edge passes, "
-                      "a vanished baseline edge is STALE, an unresolved "
-                      "include is reported\n");
+                      "a vanished baseline edge is STALE, unresolved and "
+                      "computed includes are reported\n");
 }
