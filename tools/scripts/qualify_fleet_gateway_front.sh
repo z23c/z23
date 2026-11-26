@@ -370,7 +370,10 @@ if [ "$SKIP_NODE" -eq 0 ]; then
     if [ "${#GID}" -ge 16 ]; then ok "node grant mint"; else bad "node grant mint (got [$(printf '%s' "$MINT" | head -c 200)])"; fi
     have "steer_brief via grant" '"isError":false' -X POST "$F/steer" \
         --data "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"steer_brief\",\"arguments\":{\"grant\":\"$GID\"}}}"
-    have "steer_send via grant" '"isError":false' -X POST "$F/steer" \
+    XDG_STATE_HOME="$ST" "$NODE_BIN" fleet invite --name=qual-box --ttl_hours=1 2>/dev/null | grep -o '"token":"[^"]*"' | head -n 1 | cut -d'"' -f4 >"$ST/route.tok"
+    XDG_STATE_HOME="$ST" "$NODE_BIN" fleet join --token="$(cat "$ST/route.tok")" 2>/dev/null | grep -o '"receipt":"[^"]*"' | head -n 1 | cut -d'"' -f4 >"$ST/route.rcp"
+    grep -q '"schema":"zcl.fleet.admit.v1"' <<<"$(XDG_STATE_HOME="$ST" "$NODE_BIN" fleet admit --receipt="$(cat "$ST/route.rcp")" --bridge=no 2>/dev/null || true)" && ok "local route planted" || bad "local route planted"
+    have "steer_send via grant" 'queued' -X POST "$F/steer" \
         --data "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\",\"params\":{\"name\":\"steer_send\",\"arguments\":{\"grant\":\"$GID\",\"from\":\"qual-caller\",\"items\":[{\"to\":\"qual-agent\",\"body\":\"probe\",\"ref\":\"q-1\",\"idempotency_key\":\"qk-1\"}]}}}"
     have "steer_evidence via grant" '"isError":false' -X POST "$F/steer" \
         --data "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\",\"params\":{\"name\":\"steer_evidence\",\"arguments\":{\"grant\":\"$GID\",\"type\":\"mail\",\"ref\":\"q-1\"}}}"
