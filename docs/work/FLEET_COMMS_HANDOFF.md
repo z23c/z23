@@ -56,7 +56,11 @@ helper, not the fetch thread. The onion change has a pure-function test only.
    until it is.
 3. Unseal and implement the file-service route on the ephemeral onion
    (ONION_PUSH_DESIGN.md), then add an onion dial to the board client.
-4. Build the client menu from the connected node's op list.
+4. ~~Build the client menu from the connected node's op list.~~ Done
+   (seq 4236, `636456928b22`). A land replay signs its new commits. A host
+   that cannot sign refuses that replay before the proof and does not push
+   an unsigned commit. A tip that is already a child of current main is
+   not rewritten.
 5. Docs: `-fileservice` is missing from `-help` and `--help-all`; SYNC.md says
    "hours" for a genesis sync that measured about 10 blocks/s (days); the
    MCP README tool count was reported as 4 against 11 served (unchecked).

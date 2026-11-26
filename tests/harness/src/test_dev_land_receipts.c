@@ -796,6 +796,8 @@ int test_dev_land_signed_lost_ack(void)
         const char *restore[] = { "config", "--unset",
                                   "remote.origin.receivepack", NULL };
         ASSERT(dlx_git(wt, restore) == 0);
+        /* The successor is replayed onto the moved main. That replay signs. */
+        ASSERT(dlx_sign_arm(rig.clone, "lost_ack_replay"));
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         dlx_end(&c);

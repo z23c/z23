@@ -104,6 +104,10 @@ int test_dev_land_two_candidates_same_base(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, remote));
         ASSERT_STR_EQ(remote, first);
+        /* The successor replay mints a commit. The lander signs it, so this
+         * clone needs a key; the publication intent below stays a separate
+         * signature. */
+        ASSERT(dlx_sign_arm(rig.clone, "two_candidates_replay"));
         for (unsigned i = 0; i < 3; i++) {
             dlx_begin(&c, "step");
             ASSERT(dlx_run(&c));

@@ -214,6 +214,7 @@ bool dlx_generated_conflict(struct dlx_rig *rig, const char *extra,
 bool dlx_rerere_autoupdate_prime(struct dlx_rig *rig);
 void dlx_land_wt(char *out, size_t cap);
 int test_dev_land_integrated_merge(bool signing_failure);
+int test_dev_land_rebase_signs(void);
 int test_dev_land_proof_tools_preparation(void);
 int test_dev_land_final_plan_preparation(void);
 int dlx_prepare_budget(void);

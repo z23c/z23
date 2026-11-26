@@ -6379,6 +6379,51 @@ static int dl_rebase_refused(const struct dl_dirs *d, const char *paths,
     return sealed < 0 ? -1 : 0;
 }
 
+/* A replay mints commits. Sign them, matching dlq_rebase(), unless this
+ * thread is the unsigned advisory scratch or the unsigned fixture seam.
+ * Ambient commit.gpgsign is off on the land host, so a plain rebase
+ * publishes signature N and the remote rejects the whole update. */
+static bool dl_rebase_signs(void)
+{
+    return !dl_commit_unsigned() && !dl_fixture_unsigned();
+}
+
+static int dl_rebase_replay(const struct dl_dirs *d, const char *onto,
+                            char *buf, size_t cap)
+{
+    const char *args[8];
+    size_t n = 0;
+    args[n++] = "--no-replace-objects";
+    args[n++] = "-c";
+    args[n++] = "rerere.autoupdate=false";
+    args[n++] = "rebase";
+    if (dl_rebase_signs())
+        args[n++] = "--gpg-sign";
+    args[n++] = onto;
+    args[n] = NULL;
+    return dl_git(d->wt, args, buf, cap, DL_GIT_TIMEOUT_MS);
+}
+
+/* The replay asked for a signature and git stopped with no unmerged path.
+ * Abort so the next row does not inherit the sequencer. 0 is the conflict
+ * outcome (the author resubmits a signed child); -1 leaves the sequencer
+ * and is a setup failure. */
+static int dl_rebase_sign_refused(const struct dl_dirs *d, char *why,
+                                  size_t why_cap)
+{
+    const char *abort_args[] = { "rebase", "--abort", NULL };
+    char buf[DL_GIT_CAP];
+    if (dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0) {
+        (void)snprintf(why, why_cap, "%s",
+                       "rebase could not sign the replay and could not be aborted");
+        return -1;
+    }
+    (void)snprintf(why, why_cap, "%s",
+                   "rebase could not sign the replay; fetch origin main, "
+                   "run git rebase --gpg-sign origin/main, and submit the new commit");
+    return 0;
+}
+
 /* Rebase the row's tip onto origin/main inside the private landing
  * worktree. Returns 1 prepared, 0 conflict, -1 setup failure.
  *
@@ -6386,14 +6431,15 @@ static int dl_rebase_refused(const struct dl_dirs *d, const char *paths,
  * rebase aborted, whatever paths it touches. The one exception is a stop on
  * the core seal files alone, which dl_reseal_rebase() settles for a row
  * that ran the unseal ritual itself (native_dev_land_reseal.c); any other
- * path still conflicts as before, and a declined reseal says why. */
+ * path still conflicts as before, and a declined reseal says why. A replay
+ * that cannot be signed is refused the same way, before a proof, and the
+ * submitted tip is left in place. A tip already descended from observed
+ * main is not rewritten. */
 int dl_rebase_pair(const struct dl_dirs *d, struct dl_row *row,
                    const char *observed_main, char *why, size_t why_cap)
 {
     char buf[DL_GIT_CAP];
     bool integrated = false;
-    const char *rebase_args[] = { "--no-replace-objects", "-c",
-                                  "rerere.autoupdate=false", "rebase", observed_main, NULL };
     const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U", NULL };
     struct dl_seal_gate gate = { DL_SEAL_NO, "" };
     if (!dl_rebase_clear_leftover(d)) {
@@ -6412,12 +6458,13 @@ int dl_rebase_pair(const struct dl_dirs *d, struct dl_row *row,
      * can reintroduce conflicts from previously published work. Skip only
      * that replay; preparation and exact proof below remain mandatory. */
     if (!integrated &&
-        dl_git(d->wt, rebase_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
-        0) {
+        dl_rebase_replay(d, observed_main, buf, sizeof(buf)) != 0) {
         char paths[DL_GIT_CAP], seal_why[400];
         (void)dl_git(d->wt, unmerged_args, paths, sizeof(paths),
                      DL_GIT_TIMEOUT_MS);
         dl_trim(paths);
+        if (!paths[0] && dl_rebase_signs())
+            return dl_rebase_sign_refused(d, why, why_cap);
         int sealed = dl_reseal_rebase(d->wt, row, &gate, paths, sizeof(paths),
                                       seal_why, sizeof(seal_why));
         if (sealed != 1)
@@ -6429,6 +6476,28 @@ int dl_rebase_pair(const struct dl_dirs *d, struct dl_row *row,
     }
     return 1;
 }
+
+#if defined(ZCL_TESTING)
+/* Drive the production replay against one checkout. The caller owns the
+ * git objects and the signing config. */
+int zcl_dev_land_rebase_pair_test(const char *wt, const char *tip,
+                                  const char *onto, char *why, size_t why_cap)
+{
+    struct dl_dirs d;
+    struct dl_row row;
+    if (!wt || !tip || !onto || !why || why_cap == 0)
+        return -1;
+    memset(&d, 0, sizeof(d));
+    memset(&row, 0, sizeof(row));
+    if (snprintf(d.wt, sizeof(d.wt), "%s", wt) >= (int)sizeof(d.wt) ||
+        snprintf(row.tip, sizeof(row.tip), "%s", tip) >= (int)sizeof(row.tip) ||
+        snprintf(row.worktree, sizeof(row.worktree), "%s", wt) >=
+            (int)sizeof(row.worktree))
+        return -1;
+    why[0] = '\0';
+    return dl_rebase_pair(&d, &row, onto, why, why_cap);
+}
+#endif
 
 /* dl_rebase_pair() plus the landing worktree's submodule seed. The pair
  * (local, base) is complete without the seed, so the advisory speculative

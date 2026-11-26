@@ -9,6 +9,7 @@
 #endif
 
 #include "test/test_dev_land_common.h"
+#include <sys/stat.h>
 #include "command/native_dev_land_internal.h"
 #include "zutf8/zutf8.h"
 #include "util/spawn.h"
@@ -147,6 +148,117 @@ _test_next:;
     dlx_restore(); return failures;
 }
 
+
+#if !defined(_WIN32)
+extern int zcl_dev_land_rebase_pair_test(const char *wt, const char *tip,
+                                         const char *onto, char *why,
+                                         size_t why_cap);
+extern void dl_unsigned_scratch_set(bool on);
+
+static bool dlx_rebase_identity(const char *dir)
+{
+    const char *name[] = { "config", "user.name", "land", NULL };
+    const char *mail[] = { "config", "user.email", "land@z23.invalid", NULL };
+    return dlx_git(dir, name) == 0 && dlx_git(dir, mail) == 0;
+}
+
+static bool dlx_rebase_commit(const char *dir, const char *file, char out[64])
+{
+    char path[1200];
+    const char *add[] = { "add", "-A", NULL };
+    const char *commit[] = { "commit", "--quiet", "--no-verify",
+                             "--no-gpg-sign", "-m", file, NULL };
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, file) >= sizeof(path))
+        return false;
+    if (!dlx_write(path, file))
+        return false;
+    if (dlx_git(dir, add) != 0 || dlx_git(dir, commit) != 0)
+        return false;
+    return dlx_git_out(dir, head, out, 64) == 0 && strlen(out) == 40;
+}
+
+/* First commit, a child of it (onto), then a sibling tip. */
+static bool dlx_rebase_siblings(const char *tag, char *dir, size_t cap,
+                                char base[64], char onto[64], char tip[64])
+{
+    const char *init[] = { "init", "-q", NULL };
+    const char *detach[] = { "checkout", "--quiet", "--detach", base, NULL };
+    test_make_tmpdir(dir, cap, "dev_land_rebase_sign", tag);
+    if (dlx_git(dir, init) != 0 || !dlx_rebase_identity(dir))
+        return false;
+    if (!dlx_rebase_commit(dir, "base", base))
+        return false;
+    if (!dlx_rebase_commit(dir, "onto", onto))
+        return false;
+    if (dlx_git(dir, detach) != 0)
+        return false;
+    return dlx_rebase_commit(dir, "tip", tip);
+}
+
+static bool dlx_gpg_fail(const char *dir)
+{
+    char path[1200];
+    const char *fmt[] = { "config", "gpg.format", "openpgp", NULL };
+    const char *prog[] = { "config", "gpg.program", path, NULL };
+    const char *sign[] = { "config", "commit.gpgsign", "false", NULL };
+    if ((size_t)snprintf(path, sizeof(path), "%s/gpg-fail", dir) >= sizeof(path))
+        return false;
+    if (!dlx_write(path, "#!/bin/sh\nexit 1\n") || chmod(path, 0755) != 0)
+        return false;
+    return dlx_git(dir, fmt) == 0 && dlx_git(dir, prog) == 0 &&
+           dlx_git(dir, sign) == 0;
+}
+
+static bool dlx_head_is(const char *dir, const char *want)
+{
+    char head[64];
+    const char *args[] = { "rev-parse", "HEAD", NULL };
+    return dlx_git_out(dir, args, head, sizeof(head)) == 0 &&
+           strcmp(head, want) == 0;
+}
+
+static bool dlx_mark_is(const char *dir, const char *fmt, const char *want)
+{
+    char out[80];
+    const char *args[] = { "log", "-1", fmt, NULL };
+    return dlx_git_out(dir, args, out, sizeof(out)) == 0 &&
+           strcmp(out, want) == 0;
+}
+
+int test_dev_land_rebase_signs(void)
+{
+    int failures = 0;
+    char dir[1200], base[64], onto[64], tip[64], why[512];
+    unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+    unsetenv("ZCL_LAND_PROOF_STUB");
+    dl_unsigned_scratch_set(false);
+    TEST("land: a replay signs, and a host that cannot sign leaves the tip") {
+        ASSERT(dlx_rebase_siblings("keep", dir, sizeof(dir), base, onto, tip));
+        ASSERT_EQ(zcl_dev_land_rebase_pair_test(dir, tip, base, why, sizeof(why)), 1);
+        ASSERT(dlx_head_is(dir, tip));
+        ASSERT(dlx_gpg_fail(dir));
+        ASSERT_EQ(zcl_dev_land_rebase_pair_test(dir, tip, onto, why, sizeof(why)), 0);
+        ASSERT(strstr(why, "could not sign the replay") != NULL);
+        ASSERT(dlx_head_is(dir, tip));
+        ASSERT(dlx_sign_arm(dir, "rebase_sign_key"));
+        ASSERT_EQ(zcl_dev_land_rebase_pair_test(dir, tip, onto, why, sizeof(why)), 1);
+        ASSERT(!dlx_head_is(dir, tip));
+        ASSERT(dlx_mark_is(dir, "--format=%G?", "G"));
+        ASSERT(dlx_mark_is(dir, "--format=%P", onto));
+        ASSERT(dlx_rebase_siblings("unsigned", dir, sizeof(dir), base, onto, tip));
+        dl_unsigned_scratch_set(true);
+        ASSERT_EQ(zcl_dev_land_rebase_pair_test(dir, tip, onto, why, sizeof(why)), 1);
+        ASSERT(!dlx_head_is(dir, tip));
+        ASSERT(dlx_mark_is(dir, "--format=%G?", "N"));
+        ASSERT(dlx_mark_is(dir, "--format=%P", onto));
+        PASS();
+    }
+_test_next:;
+    dl_unsigned_scratch_set(false);
+    return failures;
+}
+#endif
 
 int test_dev_land_integrated_merge(bool signing_failure)
 {
