@@ -23,25 +23,27 @@ what current main can do, not a measurement of it.
 | NIC | the kernel has virtio-net built in; DHCP lease from QEMU in under a second |
 | Same image built twice, a second apart | byte-identical (same sha256) with sorted names, fixed mtimes, owner 0, `gzip -n` |
 | Node start as the only program, `-connect` to our own public node | RPC up after about 45 to 60 s; learned network tip 3332290 from the peer |
-| Sync | **no progress**: H* stayed 0 for the 390 s watched (the stopwatch harness passed in 333 to 354 s on 11-16 with a lane build) |
+| Sync, first try (2 GB in-memory data disk, older binary) | stopped: the disk filled at height 1302; that was the test setup, not the node |
+| Sync, second try (30 GB disk file, development build of 11-26, source f247c0c8af25, 2 vCPUs, 4 GB RAM) | **reached the network tip about 435 s after kernel start** (H* 3315897 at 375 s, 3332314 at 435 s against tip 3332311), then followed it; one boot, no outside restarts |
 
 The identical-hash result is the same inputs on one host. It does not yet pin
 the inputs (the binary and the libraries came from this host).
 
 ## Not known yet
 
-- Why H* stayed 0. Candidates, none tested: the old binary lacks the fast
-  path; one peer only; no node restarts (the harness restarts the node between
-  phases and passes after four boots); tmpfs datadir; VM overhead. Run the
-  stopwatch recipe in `docs/node/coldstart-remote-peer-proof.md` inside the
-  image with a current release binary and compare.
+- How repeatable the 435 s is. It is one run, on a busy host (load average
+  about 20), with one peer that is our own node, a development build and a
+  sparse disk file. Run it three times on a quiet host before quoting it.
+- Why the first try showed H* at 0 for 390 s: that run's 2 GB in-memory data
+  disk filled (the node logged "database or disk is full"), so it says nothing
+  about the node.
 - Real hardware (Wi-Fi, USB, graphics): untested. The VM has one virtual NIC.
 - A kernel and libc that we pin and build ourselves.
 
 ## Next steps, smallest first
 
-1. Rebuild with a current release binary and repeat the sync with the same
-   four-boot sequence the stopwatch uses; record the number.
+1. Repeat the sync three times on a quiet host with a release binary and
+   record the spread.
 2. Pin the inputs: the Z23 release binary by hash, a static libc build, the
    kernel by hash; show two hosts get the same image hash.
 3. Boot the same initramfs on a spare physical machine from a USB stick.
@@ -52,10 +54,12 @@ the inputs (the binary and the libraries came from this host).
 ```
 root/{bin,dev,proc,sys,lib64,lib/x86_64-linux-gnu,tmp,data}
 cp busybox z23 -> root/bin ; libc libm -> root/lib/x86_64-linux-gnu
-loader -> root/lib64 ; init: mount proc sys dev, dhcp, mount tmpfs /data,
+loader -> root/lib64 ; a development build also needs libstdc++ and libgcc_s
+init: mount proc sys dev, dhcp, mount the data disk (ext4, 30 GB sparse) on /data,
   z23 -datadir=/data -listen=0 -nolegacyimport -connect=PEER &
 find . | LC_ALL=C sort | cpio -o -H newc --reproducible --owner=0:0 | gzip -9n
 qemu-system-x86_64 -enable-kvm -cpu host -m 4G -nographic \
   -kernel vmlinuz -initrd initramfs.gz -append "console=ttyS0 panic=-1" \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -drive file=data.img,format=raw,if=virtio,cache=unsafe
 ```
