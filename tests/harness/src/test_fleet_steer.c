@@ -10989,12 +10989,13 @@ static int fmx_t_series2(void)
         PASS();
     }
 
-    TEST("steer: no route is refused and not queued") {
+    TEST("steer: an unenrolled name stays a local accept and records the hint") {
         struct fmx_call s;
         struct json_value items, item;
         const struct json_value *row;
         char gid[64], signer[65];
         long long rows;
+        const char *hint;
         fmx_isolate("series2_route");
         ASSERT(fmx_plant_roster(signer));
         ASSERT(fmx_mint_as("brief,send,evidence", "oauth", gid, sizeof(gid)));
@@ -11007,10 +11008,13 @@ static int fmx_t_series2(void)
         ASSERT(fmx_send_from(&s, gid, "oauth", &items));
         ASSERT(fmx_ok(&s));
         row = json_at(fmx_arr(&s, "items"), 0);
-        ASSERT_STR_EQ(fmx_wstr(row, "state"), "refused");
-        ASSERT_STR_EQ(fmx_wstr(row, "error"), "STEER_NO_ROUTE");
-        ASSERT(fmx_int(&s, "accepted") == 0);
-        ASSERT_EQ(fmx_mail_count(), rows);
+        ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT(strcmp(fmx_wstr(row, "state"), "refused") != 0);
+        ASSERT_STR_EQ(fmx_wstr(row, "route_snapshot"), "local");
+        hint = fmx_wstr(row, "route_hint");
+        ASSERT(hint && strstr(hint, "no roster box named missing-box") != NULL);
+        ASSERT(fmx_int(&s, "accepted") == 1);
+        ASSERT_EQ(fmx_mail_count(), rows + 1);
         fmx_end(&s);
         json_free(&items);
         /* An enrolled box still accepts. */
@@ -11023,6 +11027,7 @@ static int fmx_t_series2(void)
         ASSERT(fmx_ok(&s));
         row = json_at(fmx_arr(&s, "items"), 0);
         ASSERT_STR_EQ(fmx_wstr(row, "state"), "queued");
+        ASSERT_STR_EQ(fmx_wstr(row, "route_snapshot"), "export_eligible");
         ASSERT(fmx_int(&s, "accepted") == 1);
         fmx_end(&s);
         json_free(&items);

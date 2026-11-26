@@ -63,18 +63,19 @@
  * names one delivery. The recorded ref+grant let revoke cancel exactly
  * the queued work its grant sent. The reply's top-level `accepted` counts
  * only items whose result state is not "refused" (a reconciled duplicate
- * counts, a fresh IDEMPOTENCY_CONFLICT/STEER_REF_REUSED/STEER_NO_ROUTE/
- * BAD_INPUT/mail refusal does not) — it is never just the item-result
- * count. `refused` is its own item state, distinct from queued, read,
- * acknowledged and completed, and it is not an accept.
+ * counts, a fresh IDEMPOTENCY_CONFLICT/STEER_REF_REUSED/BAD_INPUT/mail
+ * refusal does not) — it is never just the item-result count. `refused`
+ * is its own item state, distinct from queued, read, acknowledged and
+ * completed, and it is not an accept.
  *
- * ROUTE. A fresh send whose board-mail observation names no usable route
- * (the hint is set: not this box, not broadcast, not an enrolled box)
- * is refused as STEER_NO_ROUTE before any mail or receipt append. An
- * observation that could not be loaded stays a local accept, as before;
- * a missing observation is not invented into a route. A same-key retry
- * still reconciles to duplicate:true and does not consult the route
- * again.
+ * ROUTE. A fresh send records the board-mail observation on the queued
+ * item (`route_snapshot`, and `route_hint` when the observation set one).
+ * A hint means the row stays on this box: the name is not an exportable
+ * roster box, or that box has no signing key. That is a local accept.
+ * The mail row is still appended. An observation that could not be
+ * loaded stays a local accept too; a missing observation is not invented
+ * into a refusal. A same-key retry still reconciles to duplicate:true
+ * and does not consult the route again.
  *
  * STATES. queued, read, acknowledged, completed — four different facts.
  * Absence of evidence stays at the earlier state. On a mail pass that was
@@ -7716,12 +7717,12 @@ static bool fmc_send_preflight(const struct json_value *it,
 }
 
 /* A recorded key has already reconciled. A fresh append must not reuse a
- * ref, and must not queue mail that has no route. False after a refusal. */
+ * ref. A route hint is recorded on the accept; it is not a refusal.
+ * False after a refusal. */
 static bool fmc_send_fresh_ok(struct json_value *items, size_t index,
                               const char *sent_path, const struct fmc_item_fields *f,
                               int receipt)
 {
-    struct zcl_boardmail_delivery route;
     int clash;
     if (receipt != 0)
         return true;
@@ -7734,11 +7735,7 @@ static bool fmc_send_fresh_ok(struct json_value *items, size_t index,
         fmc_send_item_refused(items, index, f->to, "STEER_REF_REUSED");
         return false;
     }
-    zcl_devagent_boardmail_observe(f->to, f->ref, &route);
-    if (!route.hint[0])
-        return true;
-    fmc_send_item_refused_message(items, index, f->to, "STEER_NO_ROUTE", route.hint);
-    return false;
+    return true;
 }
 
 /* One send item: validate, reconcile idempotency, post, record. Emits its

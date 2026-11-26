@@ -3745,7 +3745,8 @@ static int gw_t_brief_token(void)
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "\"isError\":false"));
         free(b);
-        sn = snprintf(args, sizeof(args), "{\"grant\":\"%s\",\"since\":0}", gid);
+        sn = snprintf(args, sizeof(args),
+                      "{\"grant\":\"%s\",\"since\":0,\"all\":true}", gid);
         ASSERT(sn > 0 && (size_t)sn < sizeof(args));
         b = gw_tool("steer_brief", args, 570, &st);
         ASSERT(b != NULL);
@@ -3759,7 +3760,7 @@ static int gw_t_brief_token(void)
                              GW_SENDER, "gw-w2", "result", "Forged reply",
                              "gw-wrong-ref"));
         sn = snprintf(args, sizeof(args),
-                      "{\"grant\":\"%s\",\"since\":0}", gid);
+                      "{\"grant\":\"%s\",\"since\":0,\"all\":true}", gid);
         ASSERT(sn > 0 && (size_t)sn < sizeof(args));
         b = gw_tool("steer_brief", args, 58, &st);
         ASSERT(b != NULL);
@@ -3770,7 +3771,8 @@ static int gw_t_brief_token(void)
         ASSERT(!gw_body_has(b, "\"lead\\\":\\\"Wrong-sender probe\\\","
                                "\\\"state\\\":\\\"acknowledged\\\""));
         free(b);
-        /* The recipient's own row under the same ref acknowledges it. */
+        /* An unsigned result, even from the named recipient and even
+         * outside inbox.<recipient>, is not receiver evidence. */
         ASSERT(gw_seed_inbox("stream-w", reply_ts, 1401,
                              "gw-w2", GW_SENDER, "result", "Genuine reply",
                              "gw-wrong-ref"));
@@ -3778,7 +3780,9 @@ static int gw_t_brief_token(void)
         ASSERT(b != NULL);
         ASSERT(gw_body_has(b, "\"isError\":false"));
         ASSERT(gw_body_has(b, "\"lead\\\":\\\"Wrong-sender probe\\\","
-                            "\\\"state\\\":\\\"acknowledged\\\""));
+                            "\\\"state\\\":\\\"queued\\\""));
+        ASSERT(!gw_body_has(b, "\"lead\\\":\\\"Wrong-sender probe\\\","
+                               "\\\"state\\\":\\\"acknowledged\\\""));
         free(b);
         PASS();
     }
