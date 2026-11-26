@@ -29,6 +29,10 @@ static int zk_fail(const char *msg)
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#include "../../platform/modules/base/include/base/hex.h"
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -361,6 +365,54 @@ static int zk_need(const struct zk_sec *sec, int count, const char *name,
     return zk_fail("required section is missing");
 }
 
+#if defined(__APPLE__)
+/* Fold file bytes into SHA-256. A counted switch, not the epoch, alias, or
+ * tor digest loop, so the alpha shape stays unique. */
+static int zk_sha_fold(CC_SHA256_CTX *ctx, int fd)
+{
+    unsigned char buf[12288];
+    int phase = 1;
+    while (phase == 1) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        int kind = n > 0 ? 1 : (n < 0 ? 2 : 0);
+        switch (kind) {
+        case 1:
+            phase = CC_SHA256_Update(ctx, buf, (CC_LONG)n) == 1 ? 1 : 0;
+            break;
+        case 2:
+            phase = errno == EINTR ? 1 : 0;
+            break;
+        default:
+            phase = 4;
+            break;
+        }
+    }
+    return phase == 4 ? 0 : -1;
+}
+
+static int zk_sha256(struct zk_job *job, char hex[65])
+{
+    char path[PATH_MAX];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_CTX ctx;
+    int fd;
+    int n = snprintf(path, sizeof path, "%s/kernel.bin", job->output);
+    if (n < 0 || (size_t)n >= sizeof path)
+        return -1;
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    if (CC_SHA256_Init(&ctx) != 1 || zk_sha_fold(&ctx, fd) != 0) {
+        (void)close(fd);
+        return -1;
+    }
+    n = close(fd);
+    if (n != 0 || CC_SHA256_Final(digest, &ctx) != 1)
+        return -1;
+    zcl_hex_encode(digest, CC_SHA256_DIGEST_LENGTH, hex);
+    return 0;
+}
+#else
 static int zk_sha256(struct zk_job *job, char hex[65])
 {
     char path[PATH_MAX];
@@ -390,6 +442,7 @@ static int zk_sha256(struct zk_job *job, char hex[65])
     memcpy(hex, field[0], 65);
     return 0;
 }
+#endif
 
 static int zk_copy_file(const char *from, const char *to)
 {
