@@ -6659,8 +6659,9 @@ static bool fmc_brief_snapshot_tail(const struct zcl_command_request *req,
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count could not be copied", "json");
         return false;
     }
+    /* A caller's own limit keeps its changes count. */
     if ((mv && mv->forward) || json_get_bool(json_get(req->input, "all")) ||
-        zcl_fmc_brief_compact(&reply->data))
+        zcl_fmc_brief_compact(&reply->data, !json_get(req->input, "limit")))
         return true;
     fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "compact brief could not be copied", "all");
     return false;

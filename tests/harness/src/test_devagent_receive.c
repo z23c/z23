@@ -595,6 +595,8 @@ static bool rtx_typed_brief(const char *grant)
     rtx_begin(&b, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
     (void)json_push_kv_str(&b.input, "grant", grant);
     (void)json_push_kv_int(&b.input, "since", 0);
+    /* A stated limit keeps the change feed whole in the compact reply. */
+    (void)json_push_kv_int(&b.input, "limit", 25);
     zcl_native_handle_fleet_steer_brief(&b.request, &b.reply);
     const struct json_value *rows = rtx_ok(&b) ? json_get(&b.reply.data, "changes") : NULL;
     bool first = false, second = false;
@@ -836,6 +838,8 @@ static void rtx_brief_state(const char *grant, const char *ref,
     rtx_begin(&b, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
     (void)json_push_kv_str(&b.input, "grant", grant);
     (void)json_push_kv_int(&b.input, "since", 0);
+    /* A stated limit keeps the change feed whole in the compact reply. */
+    (void)json_push_kv_int(&b.input, "limit", 25);
     zcl_native_handle_fleet_steer_brief(&b.request, &b.reply);
     changes = rtx_ok(&b) ? json_get(&b.reply.data, "changes") : NULL;
     n = (changes && changes->type == JSON_ARR) ? json_size(changes) : 0u;
