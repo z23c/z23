@@ -4622,15 +4622,26 @@ static void dvq_claim_worker(const char *engine, const struct dvq_row *r,
         out[0] = '\0';
 }
 
+/* started <= 0 is the never-started sentinel, not the Unix epoch.
+ * Negative asks the status row to emit null instead of a duration. */
+static long long dvq_run_age(long long now, long long started)
+{
+    long long age;
+    if (started <= 0)
+        return -1;
+    age = now - started;
+    if (age < 0)
+        return 0;
+    return age;
+}
+
 static bool dvq_push_running(struct json_value *arr, const struct dvq_row *r,
                              long long now, const char *engine)
 {
     struct json_value item, nv;
     char worker[64];
-    long long age = now - r->started;
+    long long age = dvq_run_age(now, r->started);
     bool ok;
-    if (age < 0)
-        age = 0;
     dvq_claim_worker(engine, r, worker, sizeof(worker));
     json_init(&nv);
     if (worker[0])
@@ -4646,7 +4657,7 @@ static bool dvq_push_running(struct json_value *arr, const struct dvq_row *r,
          dvq_push_row_metadata(&item, r, true) &&
          json_push_kv_str(&item, "worktree", r->worktree) &&
          json_push_kv_str(&item, "pid_or_unit", r->pid_or_unit) &&
-         json_push_kv_int(&item, "age_s", age) &&
+         dvq_push_usage_field(&item, "age_s", age) &&
          json_push_kv_str(&item, "owner_liveness", dvq_owner_liveness(r)) &&
          json_push_kv(&item, "worker", &nv) &&
          json_push_back(arr, &item) &&
@@ -4666,9 +4677,12 @@ static int dvq_screen_row(char *out, size_t cap, const struct dvq_row *rows,
     const struct dvq_row *r = &rows[i];
     long long age;
     if (strcmp(r->state, "running") == 0) {
-        age = now - r->started;
+        age = dvq_run_age(now, r->started);
         if (age < 0)
-            age = 0;
+            return snprintf(out, cap,
+                            "  #%lld %-7s %-12s %-13s a%-3lld %s age unknown\n",
+                            r->seq, "running", r->name, dvq_engine_label(r),
+                            r->attempt, r->worktree);
         return snprintf(out, cap, "  #%lld %-7s %-12s %-13s a%-3lld %s age %llds\n",
                         r->seq, "running", r->name, dvq_engine_label(r), r->attempt, r->worktree,
                         age);

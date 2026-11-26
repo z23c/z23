@@ -1395,6 +1395,21 @@ static long long fmc_sub_int(const struct fmc_sub *s, const char *key,
     return (long long)json_get_int(v);
 }
 
+/* An unmeasured age is not a duration. Zero and negative are the call
+ * sites that never timed a source, so they are JSON null, not 0. */
+static bool fmc_push_age_ms(struct json_value *item, long long age_ms)
+{
+    struct json_value nv;
+    bool ok;
+    if (age_ms > 0)
+        return json_push_kv_int(item, "age_ms", age_ms);
+    json_init(&nv);
+    json_set_null(&nv);
+    ok = json_push_kv(item, "age_ms", &nv);
+    json_free(&nv);
+    return ok;
+}
+
 /* Push one {source, reason} row onto missing[] and note the observation age
  * of the attempt in ms. Small and single-purpose for the complexity gate. */
 static void fmc_note_missing_next(struct json_value *missing,
@@ -1407,7 +1422,7 @@ static void fmc_note_missing_next(struct json_value *missing,
     json_set_object(&item);
     bool ok = json_push_kv_str(&item, "source", source) &&
               json_push_kv_str(&item, "reason", reason) &&
-              json_push_kv_int(&item, "age_ms", age_ms);
+              fmc_push_age_ms(&item, age_ms);
     if (ok && next && next[0])
         ok = json_push_kv_str(&item, "next", next);
     if (ok && dropped > 0)
@@ -6334,8 +6349,12 @@ static void fmc_brief_evidence(struct fmc_brief_lists *l,
     fmc_put_int(&l->evidence, "ledger_max_age_s", ledger->max_age);
     fmc_put_int(&l->evidence, "ledger_age_unknown_boxes", ledger->unknown_ages);
     fmc_put_int(&l->evidence, "ledger_index_overflow_rows", ledger->overflow);
+    /* Unknown ages are JSON null, wider than the old 0 and -1. This basis
+     * line stays on every page and pays for that width, so a 4096-byte
+     * forward page still holds one mail row and a trimmed snapshot still
+     * has room for its screen marker. */
     (void)json_push_kv_str(&l->evidence, "ledger_age_basis",
-        "last signed statement; snapshot observed_at is not replica freshness");
+        "signed statement, not replica age");
     (void)json_push_kv(&l->evidence, "post_ids", &l->post_ids);
     (void)json_push_kv_int(&l->evidence, "queued_stale_after_s",
                            FMC_QUEUED_STALE_S);

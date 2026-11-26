@@ -450,6 +450,54 @@ static bool fmx_hist_bool(const struct json_value *row, bool want)
     return h && h->type == JSON_BOOL && json_get_bool(h) == want;
 }
 
+/* A missing age is null or a positive measured duration. Zero is not known. */
+static bool fmx_age_ms_ok(const struct json_value *age)
+{
+    if (!age)
+        return false;
+    if (age->type == JSON_NULL)
+        return true;
+    return age->type == JSON_INT && json_get_int(age) > 0;
+}
+
+static void fmx_note_unanswered(const char *src, const struct json_value *age,
+                               bool *proof, bool *board, bool *cand)
+{
+    bool unknown = age && age->type == JSON_NULL;
+    if (!src || !unknown)
+        return;
+    if (strcmp(src, "dev.proof.status") == 0)
+        *proof = true;
+    else if (strcmp(src, "fleet.board") == 0)
+        *board = true;
+    else if (strcmp(src, "candidates.board") == 0)
+        *cand = true;
+}
+
+static bool fmx_missing_ages_honest(const struct json_value *missing)
+{
+    size_t i, n;
+    bool proof = false, board = false, cand = false;
+    if (!missing || missing->type != JSON_ARR)
+        return false;
+    n = json_size(missing);
+    for (i = 0; i < n; i++) {
+        const struct json_value *e = json_at(missing, i);
+        const struct json_value *srcv, *age;
+        const char *src = NULL;
+        if (!e || e->type != JSON_OBJ)
+            return false;
+        age = json_get(e, "age_ms");
+        if (!fmx_age_ms_ok(age))
+            return false;
+        srcv = json_get(e, "source");
+        if (srcv && srcv->type == JSON_STR)
+            src = json_get_str(srcv);
+        fmx_note_unanswered(src, age, &proof, &board, &cand);
+    }
+    return proof && board && cand;
+}
+
 /* Missing reason for a source, or "" when the source is not missing. */
 static const char *fmx_arr_missing_reason(const struct json_value *missing,
                                          const char *source)
@@ -10574,6 +10622,8 @@ static int fmx_reconcile_rows(struct fmx_call *b, const char *hist, const char *
     ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
     ASSERT_STR_EQ(fmx_wstr(task, "reason"), "exact_attempt_owner_dead");
     ASSERT(fmx_hist_bool(task, false));
+    ASSERT(fmx_wnull(task, "attempt_age_s"));
+    ASSERT(fmx_missing_ages_honest(fmx_arr(b, "missing")));
     ASSERT_STR_EQ(fmx_wstr(task, "next_safe_command"), "fleet.steer.evidence");
     task = fmx_task_ref(b, "gated");
     ASSERT(task != NULL);
@@ -10686,7 +10736,11 @@ static int fmx_reconcile_facts(struct fmx_call *b)
     ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
     ASSERT_STR_EQ(fmx_wstr(task, "reason"), "exact_attempt_owner_dead");
     ASSERT(fmx_hist_bool(task, false));
+    ASSERT(fmx_wnull(task, "attempt_age_s"));
+    ASSERT(fmx_wnull(fmx_task_ref(b, "orphan"), "attempt_age_s"));
     ASSERT(fmx_hist_bool(fmx_task_ref(b, "orphan"), false));
+    ASSERT(fmx_missing_ages_honest(json_get(data, "missing")));
+    ASSERT(fmx_missing_ages_honest(fmx_arr(b, "missing")));
     {
         const char *mcp_ledger = fmx_arr_missing_reason(
             json_get(data, "missing"), "fleet.ledger");

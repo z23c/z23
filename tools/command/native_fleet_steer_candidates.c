@@ -292,8 +292,8 @@ static void fcd_emit_row(struct json_value *out,
 }
 
 /* A source the registry never got to read. Same {source, reason, age_ms}
- * shape the rest of missing[] uses, so one consumer parses them all; the
- * age is -1 because no attempt was timed here, and -1 is not a duration. */
+ * shape the rest of missing[] uses, so one consumer parses them all.
+ * No attempt was timed, so the age is null rather than a fake duration. */
 static void fcd_missing(struct json_value *missing, const char *source)
 {
     struct json_value item;
@@ -301,7 +301,7 @@ static void fcd_missing(struct json_value *missing, const char *source)
     json_set_object(&item);
     if (json_push_kv_str(&item, "source", source) &&
         json_push_kv_str(&item, "reason", "source-unread") &&
-        json_push_kv_int(&item, "age_ms", -1))
+        fcd_push_null(&item, "age_ms"))
         (void)json_push_back(missing, &item);
     json_free(&item);
 }
