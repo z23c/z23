@@ -25,6 +25,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
 #define DLL_PATH_CAP 4096
 #define DLL_VAL_CAP 1024
 #define DLL_BODY_CAP 512
@@ -79,7 +83,10 @@ static bool dll_write_temp(const char *temp, const char *body)
     bool ok;
     if (fd < 0)
         return false;
-    ok = write(fd, body, len) == (ssize_t)len && fsync(fd) == 0;
+    ok = write(fd, body, len) == (ssize_t)len;
+#ifndef _WIN32
+    ok = ok && fsync(fd) == 0;
+#endif
     return close(fd) == 0 && ok;
 }
 
@@ -90,7 +97,7 @@ static bool dll_lease_write(const char *lane, char *lease, size_t lease_cap)
     if (!zcl_path_join(lease, lease_cap, lane, ZCL_LANE_LEASE_FILE) ||
         snprintf(temp, sizeof(temp), "%s.tmp", lease) >= (int)sizeof(temp))
         return false;
-    if (lstat(lease, &st) == 0)
+    if (stat(lease, &st) == 0)
         return true;
     if (!zcl_dev_lane_lease_body(dll_owner(), platform_time_wall_unix(), body,
                                  sizeof(body)) ||
@@ -244,7 +251,7 @@ bool zcl_dev_lane_lease_setup(const char *root, const char *lane,
     bool fresh;
     if (!zcl_path_join(lease, sizeof(lease), lane, ZCL_LANE_LEASE_FILE))
         return false;
-    fresh = lstat(lease, &st) != 0;
+    fresh = stat(lease, &st) != 0;
     if (!dll_lease_write(lane, lease, sizeof(lease)))
         return false;
     if (fresh)
