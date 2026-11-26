@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals_release.c", CAP_FS_READ, "reads the release conveyor's tick.log and one release-<sha8>.log under the caller-named state directory with fopen and fgets, read-only")

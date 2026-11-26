@@ -2083,3 +2083,6 @@ ZCL_TEST_GROUP(app_receive_ui)
 ZCL_TEST_GROUP(app_host_worker)
 ZCL_TEST_GROUP(bn254_phgr13_parity)
 ZCL_TEST_GROUP(bn254_engine_parity)
+/* G6 grades the release conveyor ledger. Appended so earlier group
+ * indexes stay stable evidence. */
+ZCL_TEST_GROUP(fleet_goals_release)

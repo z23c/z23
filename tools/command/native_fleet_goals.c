@@ -13,6 +13,7 @@
 #include "native_fleet_goals_delivery.h"
 #include "native_fleet_goals_feedback.h"
 #include "native_fleet_goals_node.h"
+#include "native_fleet_goals_release.h"
 #include "native_fleet_goals_slots.h"
 #include "native_fleet_goals_spend.h"
 #include "native_fleet_objectives.h"
@@ -483,25 +484,24 @@ static struct zcl_goal_result gr_g3(const struct zcl_goals_options *o)
 
 /* ── G6: release slot ─────────────────────────────────────────────────── */
 
+/* G6 grades the release conveyor's own ledger (native_fleet_goals_release.c):
+ * a conveyor that fails or falls behind is what leaves every host's CLI and
+ * z23-dev on old bytes. */
 static struct zcl_goal_result gr_g6(const struct zcl_goals_options *o)
 {
     struct gr_roster roster;
-    const struct zcl_command_spec *spec = zcl_command_registry_find(
-        zcl_command_catalog(), "zcode.node.update.status", NULL);
+    struct zcl_goals_release_in in;
+    char buf[512];
     gr_roster_load(o, &roster);
     if (!roster.ok)
         return gr_no_roster(&roster);
-    if (spec && spec->availability == ZCL_COMMAND_PLANNED)
-        return gr_unmeasured("land the node release feed so `zcode node "
-                             "update status` answers",
-                             "%zu admitted host(s); the release slot reader "
-                             "is planned: %s",
-                             roster.count, spec->availability_reason);
-    return gr_unmeasured("card: read each host's running release against "
-                         "origin/main",
-                         "%zu admitted host(s); the update status leaf is "
-                         "ready but reports one node, not each host",
-                         roster.count);
+    memset(&in, 0, sizeof(in));
+    in.state_dir = zcl_goals_state_path(
+        o ? o->release_state : NULL, "ZCL_RELEASE_STATE_DIR",
+        ".local/state/z23-release", o && o->skip_probes, buf, sizeof(buf));
+    in.admitted_hosts = roster.count;
+    in.now_unix = gr_now(o);
+    return zcl_goals_release_measure(&in);
 }
 
 /* ── G4: wiki read path ───────────────────────────────────────────────── */

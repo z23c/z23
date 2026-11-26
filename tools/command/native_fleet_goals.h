@@ -81,6 +81,8 @@ struct zcl_goals_options {
                                  * default $XDG_STATE_HOME path */
     const char *receipts_dir;   /* C1 C2 C4 C5 C7: directory of <item>.jsonl
                                  * receipts; NULL = the default state dir */
+    const char *release_state;  /* G6: release conveyor state dir (tick.log,
+                                 * release-<sha8>.log); NULL = the default */
 };
 
 const char *zcl_goal_grade_name(enum zcl_goal_grade grade);
