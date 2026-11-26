@@ -262,7 +262,6 @@ static int cb_resolve(const struct cb_env *env, const char *file,
 
 /* ── scanning ─────────────────────────────────────────────────────────── */
 
-/* Parse `#include "tok"` / `#include <tok>`; 1 quoted, 2 angle, 0 none. */
 static const char *cb_ws(const char *p)
 {
     while (*p == ' ' || *p == '\t')
@@ -270,6 +269,7 @@ static const char *cb_ws(const char *p)
     return p;
 }
 
+/* Parse `#include "tok"` / `#include <tok>`; 1 quoted, 2 angle, 0 none. */
 static int cb_parse(const char *line, char *tok, size_t cap)
 {
     const char *p = cb_ws(line), *e;
