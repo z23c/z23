@@ -15,7 +15,6 @@
 #include <glob.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include "lintc.h"
 
 static const char *const k_cbp_rows[] = {
@@ -51,12 +50,6 @@ static const char *const k_cbp_app_dirs[] = {
 
 typedef int (*cbp_add_fn)(const char *dir, void *ctx);
 
-static int cbp_is_dir(const char *p)
-{
-    struct stat st;
-    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
 static int cbp_glob(const char *pat, cbp_add_fn add, void *ctx)
 {
     glob_t g;
@@ -66,7 +59,7 @@ static int cbp_glob(const char *pat, cbp_add_fn add, void *ctx)
     if (rc != 0)
         return die("z23-lint: core barrier: glob failed: %s\n", pat);
     for (size_t i = 0; rc == 0 && i < g.gl_pathc; i++)
-        if (cbp_is_dir(g.gl_pathv[i]))
+        if (lintc_is_dir(g.gl_pathv[i]))
             rc = add(g.gl_pathv[i], ctx);
     globfree(&g);
     return rc;
@@ -83,7 +76,7 @@ static int cbp_app(const char *auth, cbp_add_fn add, void *ctx)
             if (ovf(snprintf(p, sizeof p, "%s/%s/%s", auth, k_cbp_app_dirs[d],
                              kind[k]), sizeof p))
                 return 2;
-            if (cbp_is_dir(p))
+            if (lintc_is_dir(p))
                 rc = add(p, ctx);
         }
     return rc;
@@ -110,7 +103,7 @@ int core_barrier_include_path(int (*add)(const char *dir, void *ctx),
             rc = cbp_app(row + 1, add, ctx);
         else if (strchr(row, '*'))
             rc = cbp_glob(row, add, ctx);
-        else if (cbp_is_dir(row))
+        else if (lintc_is_dir(row))
             rc = add(row, ctx);
     }
     return rc;

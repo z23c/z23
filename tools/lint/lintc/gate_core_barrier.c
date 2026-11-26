@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "base/safe_alloc.h"
 #include "lintc.h"
 
 enum { CB_KEY = RS_PATH * 2, CB_LINE = 8192, CB_FLOOR = 100, CB_CACHE = 8192 };
@@ -73,7 +74,7 @@ static int cb_rows_add(struct cb_rows *s, const char *row)
         return die("z23-lint: core barrier row too long: %s\n", row);
     if (s->n == s->cap) {
         int cap = s->cap ? s->cap * 2 : 256;
-        void *p = realloc(s->r, (size_t)cap * sizeof s->r[0]);
+        void *p = zcl_realloc(s->r, (size_t)cap * sizeof s->r[0], "cb_rows");
         if (!p)
             return die("z23-lint: core barrier: out of memory%s\n", "");
         s->r = p;
@@ -111,7 +112,7 @@ static int cb_edge_add(struct cb_edges *e, const char *key, const char *res,
 {
     if (e->n == e->cap) {
         int cap = e->cap ? e->cap * 2 : 512;
-        void *p = realloc(e->v, (size_t)cap * sizeof e->v[0]);
+        void *p = zcl_realloc(e->v, (size_t)cap * sizeof e->v[0], "cb_edges");
         if (!p)
             return die("z23-lint: core barrier: out of memory%s\n", "");
         e->v = p;
@@ -125,12 +126,6 @@ static int cb_edge_add(struct cb_edges *e, const char *key, const char *res,
 }
 
 /* ── include path ─────────────────────────────────────────────────────── */
-
-static int cb_is_dir(const char *p)
-{
-    struct stat st;
-    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
-}
 
 static int cb_path_add(const char *dir, void *ctx)
 {
@@ -268,21 +263,23 @@ static int cb_resolve(const struct cb_env *env, const char *file,
 /* ── scanning ─────────────────────────────────────────────────────────── */
 
 /* Parse `#include "tok"` / `#include <tok>`; 1 quoted, 2 angle, 0 none. */
+static const char *cb_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return p;
+}
+
 static int cb_parse(const char *line, char *tok, size_t cap)
 {
-    const char *p = line, *e;
+    const char *p = cb_ws(line), *e;
     char close;
-    while (*p == ' ' || *p == '\t')
-        p++;
     if (*p++ != '#')
         return 0;
-    while (*p == ' ' || *p == '\t')
-        p++;
+    p = cb_ws(p);
     if (strncmp(p, "include", 7) != 0)
         return 0;
-    p += 7;
-    while (*p == ' ' || *p == '\t')
-        p++;
+    p = cb_ws(p + 7);
     if (*p != '"' && *p != '<')
         return 0;
     close = *p == '"' ? '"' : '>';
@@ -548,7 +545,7 @@ static void cb_state_free(struct cb_state *s)
 static int cb_state_init(struct cb_state *s, cb_exists_fn fn, void *fsctx)
 {
     memset(s, 0, sizeof *s);
-    s->env.memo = calloc(CB_CACHE, sizeof s->env.memo[0]);
+    s->env.memo = zcl_calloc(CB_CACHE, sizeof s->env.memo[0], "cb_memo");
     if (!s->env.memo)
         return die("z23-lint: core barrier: out of memory%s\n", "");
     s->env.dirs = &s->dirs;
@@ -645,7 +642,7 @@ int core_barrier_main(int argc, char **argv)
     int rc;
     if (argc >= 1 && strcmp(argv[0], "--print-include-path") == 0)
         return cb_print_path();
-    if (!cb_is_dir("core")) {
+    if (!lintc_is_dir("core")) {
         printf("%s: barrier — no core/ tree present (W0 posture)\n",
                k_cb_gate);
         return 0;
