@@ -20,6 +20,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <CommonCrypto/CommonDigest.h>
+#include "base/hex.h"
+#endif
+
 #define BEI_PATH 4096
 
 static const char *const k_rels[] = {
@@ -140,6 +145,38 @@ static int bei_take_hex(const char *line, char hex[65])
     return bei_hex64(hex) ? 0 : -1;
 }
 
+#if defined(__APPLE__)
+/* SHA-256 of the file bytes, matching sha256sum, with no process launch.
+ * The read loop is deliberately not the alias publisher's hash shape. */
+static int bei_sha_file(const char *path, char hex[65])
+{
+    CC_SHA256_CTX ctx;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    unsigned char buf[8192];
+    int fd = open(path, O_RDONLY);
+    int failed;
+    if (fd < 0)
+        return -1;
+    failed = CC_SHA256_Init(&ctx) != 1;
+    while (failed == 0) {
+        ssize_t n = read(fd, buf, sizeof buf);
+        if (n < 0 && errno != EINTR)
+            failed = 1;
+        else if (n > 0)
+            failed = CC_SHA256_Update(&ctx, buf, (CC_LONG)n) != 1;
+        else if (n == 0)
+            break;
+    }
+    if (close(fd) != 0)
+        failed = 1;
+    if (failed != 0)
+        return -1;
+    if (CC_SHA256_Final(digest, &ctx) != 1)
+        return -1;
+    zcl_hex_encode(digest, CC_SHA256_DIGEST_LENGTH, hex);
+    return 0;
+}
+#else
 /* sha256sum reads the file on stdin so the digest line stays `hex  -`. */
 static int bei_sha_file(const char *path, char hex[65])
 {
@@ -180,6 +217,7 @@ static int bei_sha_file(const char *path, char hex[65])
         return -1;
     return bei_take_hex(line, hex);
 }
+#endif
 
 static int bei_inherit(char *const argv[])
 {

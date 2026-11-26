@@ -340,6 +340,89 @@ static int test_bei_input_hash_failure(const char *root)
     return failures;
 }
 
+#if defined(__APPLE__)
+static long bei_spawn_count(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    long n;
+    if (fp == NULL)
+        return 0;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return 0;
+    }
+    n = ftell(fp);
+    fclose(fp);
+    return n < 0 ? 0 : n;
+}
+
+static int bei_arm_sha_trap(const char *root, char *repo, size_t repo_cap,
+                            char *saved, size_t saved_cap)
+{
+    char marker[PATH_MAX];
+    char shim[PATH_MAX];
+    char path_env[PATH_MAX];
+    const char *path = getenv("PATH");
+    if (path == NULL || strlen(path) + 1 > saved_cap)
+        return -1;
+    memcpy(saved, path, strlen(path) + 1);
+    if (snprintf(repo, repo_cap, "%s/nosha", root) >= (int)repo_cap)
+        return -1;
+    if (mkdir(repo, 0700) != 0 || bei_layout(repo) != 0 || bei_files(repo) != 0)
+        return -1;
+    if (snprintf(marker, sizeof marker, "%s/spawn", repo) >= (int)sizeof marker)
+        return -1;
+    if (bei_stubs(repo, marker, 0) != 0)
+        return -1;
+    if (snprintf(shim, sizeof shim, "%s/sha256sum", repo) >= (int)sizeof shim)
+        return -1;
+    if (bei_put(shim,
+                "#!/bin/sh\nprintf x >> \"$ZCL_BEI_SPAWN\"\n"
+                "PATH=${PATH#*:}\nexport PATH\nexec sha256sum \"$@\"\n",
+                1) != 0)
+        return -1;
+    if (snprintf(path_env, sizeof path_env, "%s:%s", repo, saved) >= (int)sizeof path_env)
+        return -1;
+    if (setenv("ZCL_BEI_SPAWN", marker, 1) != 0 || setenv("PATH", path_env, 1) != 0)
+        return -1;
+    return 0;
+}
+
+/* The cache key must be hashed without launching sha256sum. */
+static int test_bei_no_sha256sum(const char *root)
+{
+    char repo[PATH_MAX];
+    char saved[PATH_MAX];
+    char marker[PATH_MAX];
+    char out[1024];
+    char err[1024];
+    long spawn;
+    int rc;
+    int miss;
+    if (bei_arm_sha_trap(root, repo, sizeof repo, saved, sizeof saved) != 0)
+        return 1;
+    rc = bei_capture(root, repo, out, sizeof out, err, sizeof err);
+    if (setenv("PATH", saved, 1) != 0)
+        return 1;
+    unsetenv("ZCL_BEI_SPAWN");
+    if (snprintf(marker, sizeof marker, "%s/spawn", repo) >= (int)sizeof marker)
+        return 1;
+    spawn = bei_spawn_count(marker);
+    miss = strstr(err, "cache MISS") != NULL;
+    printf("epoch_hash: status=%d miss=%d spawn=%ld\n", rc, miss, spawn);
+    if (rc != 0 || !miss || spawn != 0)
+        return 1;
+    return 0;
+}
+#else
+static int test_bei_no_sha256sum(const char *root)
+{
+    (void)root;
+    printf("epoch_hash: skip\n");
+    return 0;
+}
+#endif
+
 static int test_bei_key_stream(const char *root)
 {
     static const char digest[] = "7d8ad353438cfe346217501b5f605281724d1b51746608e8f1f10ec5668427f5";
@@ -395,6 +478,7 @@ int test_build_epoch_integrity(void)
     failures += test_bei_change(root);
     failures += test_bei_open(root);
     failures += test_bei_input_hash_failure(root);
+    failures += test_bei_no_sha256sum(root);
     failures += test_bei_key_stream(root);
     if (failures == 0)
         printf("test_build_epoch_integrity: all passed\n");
