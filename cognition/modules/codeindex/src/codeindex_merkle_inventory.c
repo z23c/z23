@@ -10,6 +10,7 @@
 struct merkle_inventory_match {
     const struct merkle_snapshot *snap;
     uint32_t seen;
+    uint32_t cursor;
     bool mismatch;
 };
 
@@ -21,12 +22,16 @@ static bool merkle_inventory_key_cb(const char *relpath,
     if (m->mismatch)
         return false;
     m->seen++;
-    const struct merkle_leaf_rec *prev =
-        merkle_find_leaf(m->snap->leaves, m->snap->nleaves, relpath);
-    if (!prev || memcmp(&prev->key, live, sizeof(*live)) != 0) {
+    while (m->cursor < m->snap->nleaves &&
+           strcmp(m->snap->leaves[m->cursor].path, relpath) < 0)
+        m->cursor++;
+    if (m->cursor == m->snap->nleaves ||
+        strcmp(m->snap->leaves[m->cursor].path, relpath) != 0 ||
+        memcmp(&m->snap->leaves[m->cursor].key, live, sizeof(*live)) != 0) {
         m->mismatch = true;
         return false;
     }
+    m->cursor++;
     return true;
 }
 
