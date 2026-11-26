@@ -23,6 +23,5 @@ platform/modules/util/include/util/log_macros.h
 platform/modules/util/include/util/result.h
 platform/modules/util/include/util/safe_alloc.h
 platform/modules/util/include/util/sync.h
-platform/modules/util/include/util/timedata.h
 platform/modules/util/include/util/workpool.h
 vendor/include/secp256k1.h
