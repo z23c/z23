@@ -1015,6 +1015,8 @@ static bool fe_machines_call(const char *body, struct zcl_command_reply *reply,
     return true;
 }
 
+static const struct fleet_signing_key *g_fe_signer;
+
 static bool fe_row_at(const char *name, uint8_t op_byte, uint8_t box_byte,
                       uint16_t port, const char *onion, int64_t now,
                       char *out, size_t cap)
@@ -1036,7 +1038,7 @@ static bool fe_row_at(const char *name, uint8_t op_byte, uint8_t box_byte,
            fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
                               &invite_len, &why) &&
            fleet_receipt_mint(invite_wire, invite_len, onion, &facts, "",
-                              box_seed, box_pub, NULL, receipt,
+                              box_seed, box_pub, g_fe_signer, receipt,
                               sizeof(receipt), &why) &&
            fleet_receipt_parse(receipt, &parsed, receipt_wire,
                                sizeof(receipt_wire), &receipt_len, &why) &&
@@ -1115,6 +1117,7 @@ static int test_fe_roster_import_refresh(void)
 /* Rows that share a box public key are one machine in `fleet machines`: the
  * latest enrolment is listed, with the number of rows it stands for. Rows
  * with different keys stay apart even when their names match. */
+
 static int test_fe_machines_collapse(void)
 {
     int failures = 0;
@@ -1129,9 +1132,12 @@ static int test_fe_machines_collapse(void)
         struct zcl_command_reply reply;
         const struct json_value *machines = NULL;
         const struct json_value *studio = NULL;
+        static struct fleet_signing_key signer;
         fe_isolate("machines-collapse");
         fe_key(0xa1, op_seed, op_pub);
         ASSERT(fleet_enrol_operator_write(op_pub, &why));
+        fe_key(0x73, signer.seed, signer.pubkey);
+        g_fe_signer = &signer;
 
         /* Re-admission appends a second row for the same box key. */
         ASSERT(fe_row_at("studio", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST,
@@ -1140,6 +1146,15 @@ static int test_fe_machines_collapse(void)
         ASSERT(fe_row_at("studio", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST,
                          onion_new, FE_NOW + 60, row, sizeof(row)));
         ASSERT(fleet_roster_append(row, &why));
+        struct fleet_machine check;
+        ASSERT(fleet_machine_parse(row, op_pub, &check, &why));
+        ASSERT(memcmp(check.receipt.signer_pubkey, signer.pubkey, 32) == 0);
+        struct json_value rendered;
+        json_init(&rendered);
+        fleet_machine_render(&check, &rendered);
+        ASSERT(json_get_bool(json_get(json_get(&rendered, "verified"), "signing_key_present")));
+        json_free(&rendered);
+        g_fe_signer = NULL;
         /* Two boxes that share a name are two machines. */
         ASSERT(fe_row_at("twin", 0xa1, 0x62, FLEET_ENROL_PORT_FIRST + 1,
                          FE_ONION, FE_NOW, row, sizeof(row)));
@@ -1156,6 +1171,9 @@ static int test_fe_machines_collapse(void)
         ASSERT(machines != NULL && machines->num_children == 3u);
         studio = json_at(machines, 0);
         ASSERT_EQ(json_get_int(json_get(studio, "rows")), 2);
+        ASSERT(json_get_bool(json_get(json_get(studio, "verified"), "signing_key_present")));
+        ASSERT(!json_get_bool(json_get(json_get(json_at(machines, 1), "verified"),
+                                      "signing_key_present")));
         ASSERT_EQ(json_get_int(json_get(json_get(studio, "verified"),
                                         "enrolled_at")),
                   FE_NOW + 60);
@@ -1170,6 +1188,7 @@ static int test_fe_machines_collapse(void)
         zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
+    g_fe_signer = NULL;
     return failures;
 }
 
@@ -1872,7 +1891,6 @@ static bool fe_manager_key(uint8_t seed[32], uint8_t pub[32])
 /* A receipt `box_byte`'s box signs against an invite the key (seed, pub)
  * minted at `now`: the join half of the ceremony. */
 /* When set, the next receipts name this board signing key. */
-static const struct fleet_signing_key *g_fe_signer;
 
 static bool fe_receipt_for(const char *name, uint8_t box_byte,
                            const uint8_t seed[32], const uint8_t pub[32],
@@ -4123,7 +4141,7 @@ static int test_fe_head_drop_keeps_shared_signer(void)
          "lets S go") {
         char row_a[FLEET_ENROL_MACHINE_TEXT_MAX], row_c[FLEET_ENROL_MACHINE_TEXT_MAX];
         static struct fleet_head head;
-        struct fleet_signing_key signer;
+        static struct fleet_signing_key signer;
         struct fleet_machine machine;
         struct zcl_command_reply reply;
         uint8_t seed[32], pub[32], a_seed[32], a_pub[32], c_seed[32], c_pub[32];
@@ -4396,7 +4414,7 @@ static int test_fe_revoke_admit(void)
          "signer key, is refused by name and adds no row; an untrusted head "
          "refuses every admit") {
         char dd[PATH_MAX];
-        struct fleet_signing_key signer;
+        static struct fleet_signing_key signer;
         struct fe_lines lines = {0};
         struct zcl_command_reply reply;
         uint8_t seed[32], pub[32], box_seed[32], box_pub[32];

@@ -1295,6 +1295,10 @@ void fleet_machine_render(const struct fleet_machine *machine,
     (void)json_push_kv_str(&verified, "box_pubkey", fingerprint);
     (void)json_push_kv_int(&verified, "enrolled_at", machine->enrolled_at);
     (void)json_push_kv_int(&verified, "relay_port", machine->relay_port);
+    static const uint8_t no_signer[FLEET_ENROL_PUBKEY_BYTES] = {0};
+    (void)json_push_kv_bool(&verified, "signing_key_present",
+                            memcmp(machine->receipt.signer_pubkey, no_signer,
+                                   FLEET_ENROL_PUBKEY_BYTES) != 0);
     (void)json_push_kv_bool(&verified, "bridge_key_present",
                             machine->receipt.ssh_pubkey[0] != '\0');
 

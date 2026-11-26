@@ -121,6 +121,11 @@ rows into one entry that shows the most recently enrolled row (the largest
 not roster lines. Rows with different public keys are never merged, even when
 they carry the same name. `offset` and `limit` page over entries.
 
+The verified.signing_key_present field says whether that receipt names a
+node signing key. It is false when a box enrolled before starting its node;
+the native rejoin flow below appends a row where it is true.
+
+
 ## The onion column
 
 A machine may also carry an **onion** — the persistent v3 onion hostname it
