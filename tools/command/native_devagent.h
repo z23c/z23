@@ -648,7 +648,22 @@ bool zcl_devagent_boardmail_import(const struct zcl_boardmail_ctx *c,
 void zcl_devagent_boardmail_export(const struct zcl_boardmail_ctx *c,
                                    struct rcv_beat_stats *st);
 
-/* Read-only first-row and byte backlog after the durable export cursor.
+/* Read-only first-row, row-count and byte backlog after the durable export
+ * cursor. `cursor` is "absent" when no cursor file exists on this state
+ * root (which loads as offset 0), "unreadable" when one exists and cannot
+ * be read, else "present". `pending_rows` is omitted whenever the count is
+ * not known whole (a row still being written, an overlong row, a read
+ * error). The count is bounded: it stops 8 MiB past the first row, and
+ * `pending_rows_capped` is then true, making `pending_rows` the least the
+ * count can be. `pending_bytes` is every byte after the cursor when the
+ * outbox was opened, so unlike `pending_rows` it includes a row still
+ * being written; a row posted while the rows were counted is in the one
+ * number and not the other.
+ * `export_offset` is where the next export walk reads. It equals
+ * `cursor_offset`, the cursor exactly as stored (given only for a present
+ * cursor), unless the stored cursor is past the end of the outbox or does
+ * not follow a row end: then the walk starts over from the first row, the
+ * two differ, and no row's position relative to the cursor is known.
  * Route eligibility is deliberately unevaluated: this observation works
  * even when the node needed for roster and board verification is down. */
 void zcl_devagent_boardmail_observe_export(const char *recvdir,

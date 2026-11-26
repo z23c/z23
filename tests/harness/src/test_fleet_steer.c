@@ -7788,6 +7788,400 @@ _test_next:;
     return failures;
 }
 
+/* Index of the first blocker line holding `needle`, or 999 when none. */
+static size_t fmx_blocker_index(const struct fmx_call *c, const char *needle)
+{
+    const struct json_value *arr = fmx_arr(c, "blockers");
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *b = json_at(arr, i);
+        if (b && b->type == JSON_STR && strstr(json_get_str(b), needle))
+            return i;
+    }
+    return 999;
+}
+
+/* Blocker lines holding `needle`. */
+static size_t fmx_blocker_count(const struct fmx_call *c, const char *needle)
+{
+    const struct json_value *arr = fmx_arr(c, "blockers");
+    size_t n = arr ? json_size(arr) : 0u, i, found = 0;
+    for (i = 0; i < n; i++) {
+        const struct json_value *b = json_at(arr, i);
+        if (b && b->type == JSON_STR && strstr(json_get_str(b), needle))
+            found++;
+    }
+    return found;
+}
+
+/* One blocker line holding both `a` and `b`. */
+static bool fmx_blocker_line_has(const struct fmx_call *c, const char *a,
+                                 const char *b)
+{
+    const struct json_value *arr = fmx_arr(c, "blockers");
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *line = json_at(arr, i);
+        const char *s = line && line->type == JSON_STR ? json_get_str(line) : "";
+        if (strstr(s, a) && strstr(s, b))
+            return true;
+    }
+    return false;
+}
+
+#if !defined(_WIN32)
+/* Defined below, with the other snapshot readers. */
+static bool fmx_snapshot(unsigned char out[32]);
+#endif
+
+#ifdef ZCL_TESTING
+/* Test-only window for the export observer's row count
+ * (native_devagent_boardmail.c); 0 restores the shipped bound. */
+void zcl_devagent_boardmail_test_rows_bytes(long long bytes);
+#endif
+
+/* What fmx_stall_fixture leaves for its caller. */
+struct fmx_stall {
+    /* Where the first waiting row starts in the outbox. */
+    long long head;
+    /* The bytes from there to the end of the outbox. */
+    long long behind;
+    /* The bytes of the second row, a directive to a local name. */
+    long long local;
+    /* The bytes of the last row, a note posted this second. */
+    long long note;
+};
+
+/* An outbox of four rows. The first has been resolved; the next two are
+ * stale directives, one to the roster box node-b and one to a name no
+ * roster box holds; the last is a note posted this second. The three
+ * directives are also recorded in steer/sent.jsonl, as the sender wrote
+ * them. The caller isolates the state root and primes the mail directory. */
+static bool fmx_stall_fixture(struct fmx_stall *st)
+{
+    const char *passed =
+        "{\"seq\":5,\"ts\":\"2026-01-01T00:00:00Z\",\"from\":\"" FMX_SENDER "\","
+        "\"to\":\"node-b\",\"kind\":\"note\",\"body\":\"already resolved\","
+        "\"ref\":\"passed-ref\"}\n";
+    const char *roster_row =
+        "{\"seq\":7,\"ts\":\"2026-01-01T00:00:02Z\",\"from\":\"" FMX_SENDER "\","
+        "\"to\":\"node-b\",\"kind\":\"directive\",\"body\":\"do the thing\","
+        "\"ref\":\"stall-ref\"}\n";
+    const char *local_row =
+        "{\"seq\":8,\"ts\":\"2026-01-01T00:00:04Z\",\"from\":\"" FMX_SENDER "\","
+        "\"to\":\"local-crew\",\"kind\":\"directive\",\"body\":\"the rest\","
+        "\"ref\":\"local-ref\"}\n";
+    const char *sent =
+        "{\"key\":\"k-a\",\"seq\":7,\"to\":\"node-b\",\"ref\":\"stall-ref\"}\n"
+        "{\"key\":\"k-b\",\"seq\":8,\"to\":\"local-crew\",\"ref\":\"local-ref\"}\n"
+        "{\"key\":\"k-c\",\"seq\":9,\"to\":\"node-b\",\"ref\":\"fresh-ref\"}\n";
+    char now[40], fresh[320], signer[65];
+    if (!fmx_plant_roster(signer))
+        return false;
+    fmx_now_ts(now, sizeof(now));
+    (void)snprintf(fresh, sizeof(fresh),
+                   "{\"seq\":9,\"ts\":\"%s\",\"from\":\"" FMX_SENDER "\","
+                   "\"to\":\"node-b\",\"kind\":\"note\","
+                   "\"body\":\"just posted\",\"ref\":\"fresh-ref\"}\n",
+                   now);
+    fmx_state_file("mail", "outbox.jsonl", passed, false);
+    fmx_state_file("mail", "outbox.jsonl", roster_row, true);
+    fmx_state_file("mail", "outbox.jsonl", local_row, true);
+    fmx_state_file("mail", "outbox.jsonl", fresh, true);
+    fmx_state_file("steer", "sent.jsonl", sent, true);
+    st->head = (long long)strlen(passed);
+    st->local = (long long)strlen(local_row);
+    st->note = (long long)strlen(fresh);
+    st->behind = (long long)strlen(roster_row) + st->local + st->note;
+    return true;
+}
+
+/* The receive beat's cursor file, as it saves it, at `offset`. */
+static void fmx_cursor(long long offset)
+{
+    char cursor[160];
+    (void)snprintf(cursor, sizeof(cursor),
+                   "export_offset=%lld\nimport_epoch=\nimport_after=0\n",
+                   offset);
+    fmx_state_file("receive", "boardmail.state", cursor, false);
+}
+
+/* The sender's own board mail export is local fact. The receive beat
+ * advances receive/boardmail.state past each outbox row it resolves, so a
+ * row at or after that cursor has not been passed by this box's export,
+ * whatever the receivers did or did not do. The brief says that once,
+ * ahead of the stale rows it explains, and on each stale row addressed to
+ * a roster box. It reads the cursor only when the next walk will use it as
+ * stored. With no cursor file no board mail receiver has ever run on this
+ * state root; with one that cannot be read, or that the next walk will
+ * start over from, no row's place is known. Then the brief says nothing
+ * about an export. */
+static int fmx_t_export_stall(void)
+{
+    int failures = 0;
+
+    TEST("steer: a board mail export behind its outbox is named once, and each stale roster row behind it says so") {
+        struct fmx_call b, g;
+        struct fmx_stall st;
+        char gid[64], expect[192];
+        fmx_isolate("export_stall");
+        fmx_prime_mail();
+        ASSERT(fmx_stall_fixture(&st));
+        /* No cursor file: nothing has ever exported from this state root,
+         * so the two directives read exactly as they did before. */
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(!fmx_blocker_has(&b, "board mail export"));
+        ASSERT(fmx_blocker_has(&b, "directive stall-ref to node-b: no receiver "
+                                   "evidence after"));
+        ASSERT(!fmx_blocker_has(&b, "behind this box's board mail export"));
+        fmx_end(&b);
+        /* The cursor sits before both directives: every row after it waits. */
+        fmx_cursor(st.head);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        (void)snprintf(expect, sizeof(expect),
+                       "board mail export stalled: 3 outbox rows (%lld bytes) "
+                       "behind this box's export cursor; oldest",
+                       st.behind);
+        ASSERT(fmx_blocker_has(&b, expect));
+        /* A cursor before a row says this box's export has not passed it.
+         * Whether the board holds a post is the receiver's to say. */
+        ASSERT(fmx_blocker_has(&b, " s old (threshold 120 s); see "
+                                   "dev.agent.receive status; "
+                                   "next=fleet.steer.evidence"));
+        ASSERT(!fmx_blocker_has(&b, "none carried"));
+        /* Said once, ahead of the stale rows it explains. */
+        ASSERT(fmx_blocker_count(&b, "board mail export stalled") == 1);
+        ASSERT(fmx_blocker_index(&b, "board mail export stalled") <
+               fmx_blocker_index(&b, "stall-ref"));
+        /* The roster row waits behind the cursor. */
+        ASSERT(fmx_blocker_line_has(&b, "directive stall-ref to node-b",
+                                    "row sits behind this box's board mail "
+                                    "export; next=fleet.steer.evidence"));
+        /* A name no roster box holds is not one the brief explains: the
+         * export may still carry that row, by the ref it answers, which
+         * the brief does not evaluate. */
+        ASSERT(fmx_blocker_line_has(&b, "directive local-ref to local-crew",
+                                    "no receiver evidence after"));
+        ASSERT(!fmx_blocker_line_has(&b, "local-crew", "behind this box"));
+        fmx_end(&b);
+        /* A brief-only grant learns the incident, which names no route,
+         * and not which recipient is a roster box. */
+        ASSERT(fmx_mint_as("brief", "oauth", gid, sizeof(gid)));
+        fmx_brief(&g, gid, 0);
+        ASSERT(fmx_run(&g, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&g));
+        ASSERT(fmx_blocker_has(&g, expect));
+        ASSERT(fmx_blocker_has(&g, "directive stall-ref to node-b: no receiver "
+                                   "evidence after"));
+        ASSERT(!fmx_blocker_has(&g, "behind this box's board mail export"));
+        fmx_end(&g);
+        /* The cursor past every row: nothing waits and nothing is said. */
+        fmx_cursor(st.head + st.behind);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(!fmx_blocker_has(&b, "board mail export"));
+        ASSERT(fmx_blocker_has(&b, "directive stall-ref to node-b: no receiver "
+                                   "evidence after"));
+        ASSERT(!fmx_blocker_has(&b, "behind this box's board mail export"));
+        fmx_end(&b);
+        /* Only the row just posted waits: a cursor that has only just
+         * fallen behind is not an incident. */
+        fmx_cursor(st.head + st.behind - st.note);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(!fmx_blocker_has(&b, "board mail export"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: the stale summary counts the rows that wait behind the export") {
+        struct fmx_call b;
+        char signer[65], ref[32], line[320];
+        size_t i;
+        fmx_isolate("export_stall_many");
+        fmx_prime_mail();
+        ASSERT(fmx_plant_roster(signer));
+        fmx_state_file("mail", "outbox.jsonl", "", false);
+        for (i = 0; i < 10; i++) {
+            const char *to = i < 9 ? "node-b" : "local-crew";
+            (void)snprintf(ref, sizeof(ref), "wait-%02zu", i);
+            (void)snprintf(line, sizeof(line),
+                           "{\"seq\":%zu,\"ts\":\"2026-01-01T00:00:00Z\","
+                           "\"from\":\"" FMX_SENDER "\",\"to\":\"%s\","
+                           "\"kind\":\"directive\",\"body\":\"work\","
+                           "\"ref\":\"%s\"}\n",
+                           20 + i, to, ref);
+            fmx_state_file("mail", "outbox.jsonl", line, true);
+            (void)snprintf(line, sizeof(line),
+                           "{\"key\":\"k-%02zu\",\"seq\":%zu,\"to\":\"%s\","
+                           "\"ref\":\"%s\"}\n",
+                           i, 20 + i, to, ref);
+            fmx_state_file("steer", "sent.jsonl", line, true);
+        }
+        fmx_state_file("receive", "boardmail.state",
+                       "export_offset=0\nimport_epoch=\nimport_after=0\n",
+                       false);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "board mail export stalled: 10 outbox rows"));
+        /* Eight are spelled out, the newest first, so the local one is
+         * among them without the cause; seven carry it. */
+        ASSERT(fmx_blocker_count(&b, "row sits behind this box's board mail "
+                                     "export") == 7);
+        ASSERT(fmx_blocker_line_has(&b, "directive wait-08 to node-b",
+                                    "row sits behind this box's board mail "
+                                    "export"));
+        ASSERT(fmx_blocker_line_has(&b, "directive wait-09 to local-crew",
+                                    "no receiver evidence after"));
+        ASSERT(!fmx_blocker_line_has(&b, "local-crew", "behind this box"));
+        ASSERT(fmx_blocker_has(&b, "2 more directives sent from here have no "
+                                   "receiver evidence after 120 s (among the "
+                                   "newest 64 directives); 9 of the 10 stale "
+                                   "ones sit behind this box's board mail "
+                                   "export; next=fleet.steer.evidence"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: a cursor the next walk will not use as stored explains no row") {
+        struct fmx_call b;
+        struct fmx_stall st;
+        int step;
+        fmx_isolate("export_cursor_moved");
+        fmx_prime_mail();
+        ASSERT(fmx_stall_fixture(&st));
+        /* A cursor ten bytes into the first waiting row is not at a row
+         * end; one past the end of the outbox is not in it. The next walk
+         * starts over from the first row for either, so where any row
+         * stands is not known, and the stale rows read exactly as they do
+         * with no cursor at all. */
+        for (step = 0; step < 2; step++) {
+            fmx_cursor(step == 0 ? st.head + 10 : st.head + st.behind + 50);
+            fmx_brief(&b, NULL, 0);
+            ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+            ASSERT(fmx_ok(&b));
+            ASSERT(!fmx_blocker_has(&b, "board mail export"));
+            ASSERT(fmx_blocker_has(&b, "directive stall-ref to node-b: no receiver "
+                                       "evidence after"));
+            ASSERT(!fmx_blocker_has(&b, "behind this box's board mail export"));
+            fmx_end(&b);
+        }
+        fmx_restore();
+        PASS();
+    }
+
+#if !defined(_WIN32)
+    TEST("steer: a cursor file that cannot be read explains no row") {
+        struct fmx_call b;
+        struct fmx_stall st;
+        char path[1400];
+        fmx_isolate("export_cursor_unreadable");
+        fmx_prime_mail();
+        ASSERT(fmx_stall_fixture(&st));
+        /* A directory where the cursor file was: it is there, and not a
+         * byte of it can be read. That is neither no cursor nor a place. */
+        fmx_cursor(st.head);
+        (void)snprintf(path, sizeof(path),
+                       "%s/z23/dev/receive/boardmail.state", g_fmx_state);
+        ASSERT(unlink(path) == 0 && mkdir(path, 0700) == 0);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(!fmx_blocker_has(&b, "board mail export"));
+        ASSERT(fmx_blocker_has(&b, "directive stall-ref to node-b: no receiver "
+                                   "evidence after"));
+        ASSERT(!fmx_blocker_has(&b, "behind this box's board mail export"));
+        fmx_end(&b);
+        ASSERT(rmdir(path) == 0);
+        fmx_restore();
+        PASS();
+    }
+
+    TEST("steer: reading the cursor and the outbox for the export moves neither") {
+        struct fmx_call b;
+        struct fmx_stall st;
+        unsigned char before[32], after[32];
+        fmx_isolate("export_readonly");
+        fmx_prime_mail();
+        ASSERT(fmx_stall_fixture(&st));
+        fmx_cursor(st.head);
+        ASSERT(fmx_snapshot(before));
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        /* Both were read: the incident is said and the roster row carries
+         * its cause. */
+        ASSERT(fmx_blocker_has(&b, "board mail export stalled: 3 outbox rows"));
+        ASSERT(fmx_blocker_has(&b, "row sits behind this box's board mail export"));
+        fmx_end(&b);
+        /* Nothing under the state root moved: not the cursor, not the
+         * outbox, by name, byte, mode, size or time. */
+        ASSERT(fmx_snapshot(after) && memcmp(before, after, 32) == 0);
+        fmx_restore();
+        PASS();
+    }
+#endif
+
+#ifdef ZCL_TESTING
+    TEST("steer: a row count that stopped at its bound is said as a least count") {
+        struct fmx_call b;
+        struct fmx_stall st;
+        fmx_isolate("export_count_bound");
+        fmx_prime_mail();
+        ASSERT(fmx_stall_fixture(&st));
+        fmx_cursor(st.head);
+        /* The first waiting row is read whole before any bound applies,
+         * and the bound is on the bytes after it. Given exactly the second
+         * row, the count ends on that row and has not reached the note. */
+        zcl_devagent_boardmail_test_rows_bytes(st.local);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "board mail export stalled: at least 2 "
+                                   "outbox rows ("));
+        ASSERT(!fmx_blocker_has(&b, "stalled: 3 outbox rows"));
+        /* Which rows wait does not depend on the count. */
+        ASSERT(fmx_blocker_has(&b, "row sits behind this box's board mail export"));
+        fmx_end(&b);
+        /* A bound that ends with the outbox has reached every row: the
+         * count is exact and is not said as a least one. */
+        zcl_devagent_boardmail_test_rows_bytes(st.local + st.note);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "board mail export stalled: 3 outbox rows"));
+        ASSERT(!fmx_blocker_has(&b, "stalled: at least"));
+        fmx_end(&b);
+        /* The shipped bound, restored. */
+        zcl_devagent_boardmail_test_rows_bytes(0);
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_blocker_has(&b, "board mail export stalled: 3 outbox rows"));
+        ASSERT(!fmx_blocker_has(&b, "stalled: at least"));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+#endif
+
+_test_next:;
+#ifdef ZCL_TESTING
+    zcl_devagent_boardmail_test_rows_bytes(0);
+#endif
+    fmx_restore();
+    return failures;
+}
+
 #if !defined(_WIN32)
 static bool fmx_snapshot_file(const char *path, struct sha3_256_ctx *hash)
 {
@@ -11785,6 +12179,7 @@ int test_fleet_steer(void)
     failures += fmx_t_queued_stale();
     failures += fmx_t_directive_close_expiry();
     failures += fmx_t_receiver_down();
+    failures += fmx_t_export_stall();
     failures += fmx_t_receipt_tokens();
     failures += fmx_t_process_not_work();
     failures += fmx_t_large_history();

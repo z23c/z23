@@ -118,6 +118,36 @@
  * newest FMC_STALE_BLOCKER_CAP (8) are spelled out and one more line
  * counts the rest, so they never crowd every other blocker out.
  *
+ * BOARD MAIL EXPORT. The receiver's board mail export is this box's own
+ * act: its durable cursor (receive/boardmail.state) advances past each
+ * local outbox row it resolves, carried or skipped, and is held on a row
+ * it must retry. A spelled stale row of mail/outbox.jsonl that starts at
+ * or after that cursor, and is addressed to another box of the verified
+ * roster, sits behind this box's own export, whatever its receiver did:
+ * the line gains "; row sits behind this box's board mail export", and the
+ * counting line says how many of the stale ones do. The export also
+ * carries a row to any other name whose ref answers a directive imported
+ * from a peer; the brief does not evaluate that, so it can name less of
+ * what the export explains, never more. When whole rows have sat behind
+ * the cursor longer than FMC_QUEUED_STALE_S, the brief says so once,
+ * ahead of the stale lines, as the blocker "board mail export stalled: N
+ * outbox rows (M bytes) behind this box's export cursor; oldest X s old
+ * (threshold 120 s); see dev.agent.receive status" ("at least N" when the
+ * count stopped at its bound; M is every byte after the cursor when the
+ * outbox was opened, so it holds a row still being written that N does
+ * not). A cursor before a row proves that this
+ * box's export has not passed it; whether the board holds a post is for
+ * the receiver's status, which the line points at. This is read only when
+ * the stored cursor sits at a row end of the outbox. No cursor file means
+ * no board mail receiver has ever exported from this state root; an
+ * unreadable one, or one past the end or not at a row end (the next walk
+ * starts over from the first row), says nothing about where any row
+ * stands. None of those is a stall: nothing is claimed and no row is
+ * explained. The incident names no route and is reported to every caller;
+ * which recipients are roster boxes is the send scope's disclosure (see
+ * mailbox_directory), so a brief-only grant gets the incident without the
+ * per-row cause.
+ *
  * REPLIES. Each directive change row also carries `reply`, correlating
  * the rows already pulled by ref (+ attempt when both state one):
  * answered only when a later `result` under the ref is held in
@@ -3610,41 +3640,112 @@ static void fmc_push_blocker(struct json_value *blockers, const char *b)
     json_free(&item);
 }
 
+/* What this box's own board mail export explains about the stale lines.
+ * The receive beat advances receive/boardmail.state past each outbox row
+ * it resolves, carried or skipped, and holds it on a row it must retry.
+ * A row of the local outbox at or after that cursor has not been passed
+ * by this box's export, whatever the receivers did or did not do. */
+struct fmc_export {
+    /* False until a cursor file has been read on this state root and
+     * found to sit at a row end of the outbox. With no cursor file, no
+     * board mail receiver has ever exported here; with one the next walk
+     * will start over from, no row's position is known. Either way no row
+     * is explained. */
+    bool known;
+    long long offset;
+    /* The other boxes of this fleet's verified roster, each name
+     * NUL-terminated and packed into one field, so nothing here needs
+     * freeing, and always ending in a spare NUL. Empty when withheld from
+     * the caller or unknown. The export carries a row to a roster box by
+     * its name. It also carries a row to any other name whose ref answers
+     * a directive imported from a peer, which this brief does not
+     * evaluate: such a row gets no cause here, so the brief can name less
+     * of what the export explains and never more. */
+    char boxes[2048];
+    /* Stale directives that sit behind the cursor. */
+    int stale_behind;
+};
+
+/* True when `name` is one of the roster boxes the export carries to. */
+static bool fmc_export_box(const struct fmc_export *ex, const char *name)
+{
+    const char *p;
+    if (!name || !name[0])
+        return false;
+    for (p = ex->boxes; *p; p += strlen(p) + 1)
+        if (strcmp(p, name) == 0)
+            return true;
+    return false;
+}
+
+/* True when a row is local outbox mail the cursor has not passed, bound
+ * for a roster box: it sits behind this box's own export, which is local
+ * fact, whatever its receiver did or did not do. */
+static bool fmc_row_behind_export(const struct fmc_export *ex,
+                                  const struct fmc_row *v)
+{
+    if (!ex->known || !v->stream || strcmp(v->stream, "outbox.jsonl") != 0 ||
+        v->row_offset < ex->offset)
+        return false;
+    return fmc_export_box(ex, v->to);
+}
+
 /* A directive this host sent that is still "queued" (no receiver evidence
  * at all) past FMC_QUEUED_STALE_S: exactly "steer send said QUEUED but
  * the target never read it". True when the row is stale; only the first
  * FMC_STALE_BLOCKER_CAP are spelled out, so they cannot crowd every other
- * blocker out, and fmc_stale_summary counts the rest. */
+ * blocker out, and fmc_stale_summary counts the rest. A spelled row that
+ * waits behind this box's export cursor says so. */
 static bool fmc_stale_blocker(struct json_value *blockers,
                               const struct fmc_row *v, long long age,
-                              bool spell)
+                              bool spell, struct fmc_export *ex)
 {
+    static const char why[] = "; row sits behind this box's board mail export";
     char b[256];
     int wlen;
     if (age <= FMC_QUEUED_STALE_S)
         return false;
+    bool behind = fmc_row_behind_export(ex, v);
+    if (behind)
+        ex->stale_behind++;
     if (!spell)
         return true;
     wlen = snprintf(b, sizeof(b),
                     "directive %.64s to %.48s: no receiver evidence after "
                     "%lld s (threshold %lld s)",
                     v->ref, v->to, age, FMC_QUEUED_STALE_S);
+    /* The cause joins the line only when it fits whole. */
+    if (behind && wlen > 0 && (size_t)wlen + sizeof(why) <= sizeof(b))
+        memcpy(b + wlen, why, sizeof(why));
     if (wlen > 0 && (size_t)wlen < sizeof(b))
         fmc_push_blocker(blockers, b);
     return true;
 }
 
-/* One line for the stale directives not spelled out. */
-static void fmc_stale_summary(struct json_value *blockers, int stale)
+/* One line for the stale directives not spelled out, and how many of all
+ * the stale ones wait behind this box's own export cursor. */
+static void fmc_stale_summary(struct json_value *blockers, int stale,
+                              const struct fmc_export *ex)
 {
-    char b[192];
+    char b[256], why[96];
+    int n, w = 0;
     if (stale <= FMC_STALE_BLOCKER_CAP)
         return;
-    (void)snprintf(b, sizeof(b),
-                   "%d more directives sent from here have no receiver "
-                   "evidence after %lld s (among the newest %d directives)",
-                   stale - FMC_STALE_BLOCKER_CAP, FMC_QUEUED_STALE_S,
-                   FMC_DIRECTIVE_SCAN);
+    n = snprintf(b, sizeof(b),
+                 "%d more directives sent from here have no receiver "
+                 "evidence after %lld s (among the newest %d directives)",
+                 stale - FMC_STALE_BLOCKER_CAP, FMC_QUEUED_STALE_S,
+                 FMC_DIRECTIVE_SCAN);
+    if (n <= 0 || (size_t)n >= sizeof(b))
+        return;
+    if (ex->stale_behind > 0)
+        w = snprintf(why, sizeof(why),
+                     "; %d of the %d stale ones sit behind this box's "
+                     "board mail export", ex->stale_behind, stale);
+    /* The count joins the line only when it fits whole. */
+    if (w > 0 && (size_t)w < sizeof(why) &&
+        (size_t)n + (size_t)w < sizeof(b))
+        memcpy(b + n, why, (size_t)w + 1);
     fmc_push_blocker(blockers, b);
 }
 
@@ -4825,6 +4926,8 @@ struct fmc_mail_ctx {
     long long shown;
     int scanned;
     int stale;
+    /* This box's own board mail export cursor: what explains a stale row. */
+    struct fmc_export ex;
     /* Where the pass began when it was cut: what makes an absence unknowable. */
     struct fmc_window win;
     char sent_path[4096 + 32];
@@ -5026,7 +5129,8 @@ static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
     if (!open || strcmp(st.cls, "worker") != 0 ||
         strcmp(fmc_row_state_with_read(v, rows, c->sent_path,
                fmc_typed_read_indexed(rows, v, c->typed_index)), "queued") != 0 ||
-        !fmc_stale_blocker(c->blockers, v, age, c->stale < FMC_STALE_BLOCKER_CAP))
+        !fmc_stale_blocker(c->blockers, v, age, c->stale < FMC_STALE_BLOCKER_CAP,
+                           &c->ex))
         return;
     c->stale++;
     if (c->ro)
@@ -5476,7 +5580,7 @@ static long long fmc_brief_mail(const struct zcl_command_request *req,
                          "brief_since_token_too_long", 0);
     else if (resume_state > 0)
         fmc_brief_resume_changes(req, c, missing, view, &rows, resume);
-    fmc_stale_summary(c->blockers, c->stale);
+    fmc_stale_summary(c->blockers, c->stale, &c->ex);
     fmc_typed_index_end(c, &index);
     json_free(&rows);
     return view->cursor;
@@ -6413,6 +6517,13 @@ static bool fmc_caller_emit(struct json_value *data, const struct fmc_caller *c)
     return ok;
 }
 
+/* Route names are the send scope's disclosure: the local operator and a
+ * grant with that scope may learn them, a brief-only grant may not. */
+static bool fmc_routes_allowed(const struct fmc_caller *caller)
+{
+    return !caller->grant || fmc_scope_has(caller->scopes, "send");
+}
+
 /* A verified local roster snapshot is not a receiver-liveness observation.
  * A brief-only grant does not gain the send scope's route-name disclosure. */
 static bool fmc_mailbox_directory(struct json_value *data, const struct fmc_caller *caller,
@@ -6420,7 +6531,7 @@ static bool fmc_mailbox_directory(struct json_value *data, const struct fmc_call
 {
     struct json_value names, directory; json_init(&names); json_init(&directory);
     json_set_array(&names); json_set_object(&directory);
-    bool allowed = !caller->grant || fmc_scope_has(caller->scopes, "send");
+    bool allowed = fmc_routes_allowed(caller);
     bool truncated = false;
     bool known = allowed && zcl_devagent_boardmail_directory(&names, &truncated);
     const char *state = !allowed ? "withheld" : !known ? "unknown" : truncated ? "truncated" : "complete";
@@ -6970,6 +7081,122 @@ static void fmc_receiver_down_incident(struct json_value *blockers,
                      "local receiver down: receive.lock free");
 }
 
+/* This box's own board mail export, observed without creating anything:
+ * the read the receiver's status gives. */
+static void fmc_export_observe(struct json_value *obs)
+{
+    char root[4096], recvdir[4096 + 16], maildir[4096 + 16];
+    int n;
+    if (!platform_state_root_existing(root, sizeof(root)))
+        return;
+    n = snprintf(recvdir, sizeof(recvdir), "%s/receive", root);
+    if (n <= 0 || (size_t)n >= sizeof(recvdir))
+        return;
+    n = snprintf(maildir, sizeof(maildir), "%s/mail", root);
+    if (n <= 0 || (size_t)n >= sizeof(maildir))
+        return;
+    zcl_devagent_boardmail_observe_export(recvdir, maildir, obs);
+}
+
+/* The roster boxes the export carries to, when the caller may learn route
+ * names (fmc_routes_allowed). */
+static void fmc_export_boxes(struct fmc_export *ex, bool routes_allowed)
+{
+    struct json_value names;
+    bool truncated = false, ok = routes_allowed;
+    size_t used = 0, i, n, len;
+    json_init(&names);
+    json_set_array(&names);
+    if (ok)
+        ok = zcl_devagent_boardmail_directory(&names, &truncated);
+    n = ok ? json_size(&names) : 0;
+    for (i = 0; i < n; i++) {
+        const struct json_value *v = json_at(&names, i);
+        const char *name = v && v->type == JSON_STR ? json_get_str(v) : NULL;
+        len = name ? strlen(name) : 0;
+        /* A name that does not fit whole, with a NUL left to end the list
+         * after it, ends the list: the boxes after it are unknown, which
+         * explains no row. */
+        if (len == 0 || len + 1 >= sizeof(ex->boxes) - used)
+            break;
+        memcpy(ex->boxes + used, name, len + 1);
+        used += len + 1;
+    }
+    json_free(&names);
+}
+
+/* A positive integer member, or false: an unknown number is never 0. */
+static bool fmc_json_pos(const struct json_value *v)
+{
+    return v && v->type == JSON_INT && json_get_int(v) > 0;
+}
+
+/* The export cursor file exists, was read, and sits at a row end of the
+ * current outbox: the observer's `export_offset` (where the next walk
+ * reads) then equals `cursor_offset` (what the receiver stored). False
+ * when no cursor file exists (no board mail receiver has ever exported
+ * from this state root), when one is unreadable, when the stored cursor
+ * is past the end or not at a row end (the next walk starts over from the
+ * first row, so where any row stands is not known), and when there is no
+ * observation at all. */
+static bool fmc_export_cursor_intact(const struct json_value *backlog,
+                                     long long *offset)
+{
+    const struct json_value *cursor = json_get(backlog, "cursor");
+    const struct json_value *used = json_get(backlog, "export_offset");
+    const struct json_value *stored = json_get(backlog, "cursor_offset");
+    if (!cursor || cursor->type != JSON_STR ||
+        strcmp(json_get_str(cursor), "present") != 0 || !used ||
+        used->type != JSON_INT || !stored || stored->type != JSON_INT ||
+        json_get_int(used) != json_get_int(stored))
+        return false;
+    *offset = json_get_int(used);
+    return true;
+}
+
+/* Whole outbox rows have sat behind this box's export cursor for longer
+ * than FMC_QUEUED_STALE_S: this box's export has passed none of them.
+ * Said once, ahead of the stale lines it explains, so a full blocker list
+ * cannot hide it. A cursor before a row proves only that; whether the
+ * board holds a post is for the receiver's status, which the line points
+ * at. An absent or unreadable cursor, or one the next walk will not use
+ * as stored, is not a stall: nothing is claimed about any row. */
+static void fmc_export_incident(struct json_value *blockers,
+                                struct fmc_export *ex, bool routes_allowed)
+{
+    struct json_value obs;
+    const struct json_value *backlog, *rows, *bytes, *oldest, *capped;
+    char b[256];
+    int n;
+    memset(ex, 0, sizeof(*ex));
+    json_init(&obs);
+    json_set_object(&obs);
+    fmc_export_observe(&obs);
+    backlog = json_get(&obs, "export_backlog");
+    if (!fmc_export_cursor_intact(backlog, &ex->offset))
+        goto done;
+    ex->known = true;
+    fmc_export_boxes(ex, routes_allowed);
+    rows = json_get(backlog, "pending_rows");
+    bytes = json_get(backlog, "pending_bytes");
+    oldest = json_get(backlog, "oldest_age_s");
+    capped = json_get(backlog, "pending_rows_capped");
+    if (!fmc_json_pos(rows) || !fmc_json_pos(bytes) || !oldest ||
+        oldest->type != JSON_INT || json_get_int(oldest) <= FMC_QUEUED_STALE_S)
+        goto done;
+    n = snprintf(b, sizeof(b),
+                 "board mail export stalled: %s%lld outbox rows (%lld bytes) "
+                 "behind this box's export cursor; oldest %lld s old "
+                 "(threshold %lld s); see dev.agent.receive status",
+                 json_get_bool(capped) ? "at least " : "",
+                 (long long)json_get_int(rows), (long long)json_get_int(bytes),
+                 (long long)json_get_int(oldest), FMC_QUEUED_STALE_S);
+    if (n > 0 && (size_t)n < sizeof(b))
+        fmc_push_blocker(blockers, b);
+done:
+    json_free(&obs);
+}
+
 /* A compact view is a mail feed, and must never silently become a snapshot. */
 static bool fmc_brief_compact(const struct zcl_command_request *req,
                               bool *compact, struct zcl_command_reply *reply)
@@ -7118,6 +7345,9 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     memset(&lo, 0, sizeof(lo));
     lo.receive_lock = fmc_lock_state("receive", "receive.lock");
     fmc_receiver_down_incident(&l.blockers, lo.receive_lock);
+    /* Then this box's own stalled export, which explains some stale rows:
+     * read before the walk, so each row is held against that cursor. */
+    fmc_export_incident(&l.blockers, &mc.ex, fmc_routes_allowed(who));
     mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv, changes_only);
     ro.dt.forward_page = mv.forward;
     ro.window_cut = mv.window_cut;

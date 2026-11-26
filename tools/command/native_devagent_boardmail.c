@@ -569,15 +569,23 @@ static void bm_state_line(const char *line, struct bm_state *st)
                        line + 13);
 }
 
-static bool bm_state_load(const char *recvdir, struct bm_state *st)
+/* `absent`, when not NULL, reports that no cursor file exists on this state
+ * root. That loads as offset 0, which is also a cursor nobody has advanced:
+ * an observer that must tell the two apart asks. */
+static bool bm_state_load(const char *recvdir, struct bm_state *st, bool *absent)
 {
     char path[BM_PATH_CAP], line[128];
     FILE *f;
     memset(st, 0, sizeof(*st));
+    if (absent)
+        *absent = false;
     bm_state_path(recvdir, path, sizeof(path));
     f = fopen(path, "rb");
-    if (!f)
+    if (!f) {
+        if (errno == ENOENT && absent)
+            *absent = true;
         return errno == ENOENT;
+    }
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';
         bm_state_line(line, st);
@@ -1054,6 +1062,86 @@ static const char *bm_export_row_observation(struct json_value *backlog,
     return "pending";
 }
 
+/* How far past the first row an observation counts. A backlog is what
+ * grows while an export is stalled, and both callers have a budget: the
+ * brief reads this on every run. A mail row is about a kilobyte, so this
+ * is some thousands of rows, read in milliseconds while cached and in
+ * under a tenth of a second even from cold slow storage. Past it the count
+ * is a lower bound, and the observation says so rather than guessing. */
+#define BM_OBSERVE_ROWS_BYTES (8LL << 20)
+
+static long long g_bm_rows_bytes = BM_OBSERVE_ROWS_BYTES;
+
+#ifdef ZCL_TESTING
+void zcl_devagent_boardmail_test_rows_bytes(long long bytes)
+{
+    g_bm_rows_bytes = bytes > 0 ? bytes : BM_OBSERVE_ROWS_BYTES;
+}
+#endif
+
+/* Whole rows behind the cursor: `base` rows already read whole, and one
+ * for every newline byte from here on. A row still being written has none
+ * yet and is not a row. A read error leaves the count unknown (-1), never
+ * a number. The count stops at BM_OBSERVE_ROWS_BYTES: `*capped` is then
+ * true and the answer is the least the count can be. */
+static long long bm_export_rows_rest(FILE *f, char *buf, size_t cap,
+                                     long long base, bool *capped)
+{
+    long long rows = 0, left = g_bm_rows_bytes;
+    const char *p, *end;
+    size_t n;
+    int c;
+    *capped = false;
+    if (!f || !buf || cap == 0)
+        return -1;
+    while (left > 0 && (n = fread(buf, 1, left < (long long)cap ?
+                                  (size_t)left : cap, f)) > 0) {
+        left -= (long long)n;
+        for (p = buf, end = buf + n;
+             (p = memchr(p, '\n', (size_t)(end - p))) != NULL; p++)
+            rows++;
+    }
+    /* Past the window one byte is read to tell whether more follow. A
+     * read error there, as in the window, leaves the count unknown. */
+    c = left > 0 ? EOF : fgetc(f);
+    if (ferror(f))
+        return -1;
+    *capped = c != EOF;
+    return base + rows;
+}
+
+/* `f` sits at the cursor and bytes follow: the backlog is classified by
+ * its first row. Returns the state; `*rows` is the whole rows behind the
+ * cursor, or -1 when that is not known; `*capped` says the count stopped
+ * at BM_OBSERVE_ROWS_BYTES and is the least it can be. */
+static const char *bm_export_classify(FILE *f, struct json_value *backlog,
+                                      long long *rows, bool *capped)
+{
+    const char *state;
+    char *line = zcl_malloc(BM_LINE_CAP, "boardmail.export_observation");
+    size_t len;
+    *rows = -1;
+    *capped = false;
+    if (!line)
+        return "unobserved";
+    if (!fgets(line, BM_LINE_CAP, f)) {
+        free(line);
+        return "mail-unreadable";
+    }
+    len = strlen(line);
+    if (len == 0 || line[len - 1] != '\n') {
+        state = feof(f) ? "incomplete-row" : "overlong-row";
+    } else {
+        line[len - 1] = '\0';
+        state = bm_export_row_observation(backlog, line, len - 1);
+        /* The first row is whole, so the rows after it are counted by
+         * their ends, whether or not the first one parsed. */
+        *rows = bm_export_rows_rest(f, line, BM_LINE_CAP, 1, capped);
+    }
+    free(line);
+    return state;
+}
+
 void zcl_devagent_boardmail_observe_export(const char *recvdir,
                                            const char *maildir,
                                            struct json_value *out)
@@ -1061,17 +1149,23 @@ void zcl_devagent_boardmail_observe_export(const char *recvdir,
     struct bm_state s;
     struct json_value backlog;
     struct stat sb;
-    const char *state = "pending";
-    char *line = NULL;
+    const char *state = "pending", *cursor = "present";
     FILE *f = NULL;
-    size_t len = 0;
-    long long pending = 0;
+    long long pending = 0, rows = -1, stored = 0;
+    bool absent = false, capped = false;
     json_init(&backlog);
     json_set_object(&backlog);
-    if (!bm_state_load(recvdir, &s)) {
+    if (!bm_state_load(recvdir, &s, &absent)) {
         state = "cursor-unreadable";
+        cursor = "unreadable";
         goto done;
     }
+    if (absent)
+        cursor = "absent";
+    /* The cursor as the receiver last saved it. bm_outbox_open may move
+     * export_offset below (a cursor past the end or not at a row end
+     * starts the walk over); what was stored is still what was stored. */
+    stored = s.export_offset;
     f = bm_outbox_open(maildir, &s.export_offset);
     if (!f) {
         state = errno == ENOENT ? "mail-absent" : "mail-unreadable";
@@ -1092,32 +1186,24 @@ void zcl_devagent_boardmail_observe_export(const char *recvdir,
     }
     if (pending == 0) {
         state = "clear";
+        rows = 0;
         goto done;
     }
-    line = zcl_malloc(BM_LINE_CAP, "boardmail.export_observation");
-    if (!line) {
-        state = "unobserved";
-        goto done;
-    }
-    if (!fgets(line, BM_LINE_CAP, f)) {
-        state = "mail-unreadable";
-        goto done;
-    }
-    len = strlen(line);
-    if (len == 0 || line[len - 1] != '\n') {
-        state = feof(f) ? "incomplete-row" : "overlong-row";
-        goto done;
-    }
-    line[len - 1] = '\0';
-    state = bm_export_row_observation(&backlog, line, len - 1);
+    state = bm_export_classify(f, &backlog, &rows, &capped);
 
 done:
     if (f) (void)fclose(f);
-    free(line);
     (void)json_push_kv_str(&backlog, "state", state);
     (void)json_push_kv_str(&backlog, "route_eligibility", "unevaluated");
+    (void)json_push_kv_str(&backlog, "cursor", cursor);
     (void)json_push_kv_int(&backlog, "export_offset", s.export_offset);
+    if (strcmp(cursor, "present") == 0)
+        (void)json_push_kv_int(&backlog, "cursor_offset", stored);
     (void)json_push_kv_int(&backlog, "pending_bytes", pending);
+    if (rows >= 0) {
+        (void)json_push_kv_int(&backlog, "pending_rows", rows);
+        (void)json_push_kv_bool(&backlog, "pending_rows_capped", capped);
+    }
     (void)json_push_kv(out, "export_backlog", &backlog);
     json_free(&backlog);
 }
@@ -1633,7 +1719,7 @@ static struct bm_beat *bm_beat_open(const struct zcl_boardmail_ctx *c, bool *sta
         free(b);
         return NULL;
     }
-    if (!bm_state_load(c->recvdir, &b->s)) {
+    if (!bm_state_load(c->recvdir, &b->s, NULL)) {
         LOG_WARN(BM_LOG, "boardmail checkpoint unreadable; carriage held; inspect receive/boardmail.state read-only");
         *state_failed = true;
         free(b);

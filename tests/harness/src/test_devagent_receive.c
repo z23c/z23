@@ -2468,6 +2468,11 @@ static int test_receive_export_observation(void)
             ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), step == 2 ? "clear" : "pending");
             ASSERT_EQ(json_get_int(json_get(backlog, "pending_bytes")), (long long)strlen(rows) - offset);
             ASSERT_STR_EQ(json_get_str(json_get(backlog, "route_eligibility")), "unevaluated");
+            ASSERT_STR_EQ(json_get_str(json_get(backlog, "cursor")), "present");
+            ASSERT_EQ(json_get_int(json_get(backlog, "cursor_offset")), offset);
+            ASSERT(!json_get_bool(json_get(backlog, "pending_rows_capped")));
+            ASSERT_EQ(json_get_int(json_get(backlog, "pending_rows")),
+                      step == 0 ? 2 : step == 1 ? 1 : 0);
             if (step < 2) {
                 const struct json_value *row = json_get(backlog, "first_row");
                 ASSERT_EQ(json_get_int(json_get(row, "seq")), step + 1);
@@ -2481,7 +2486,258 @@ static int test_receive_export_observation(void)
         rtx_restore();
         PASS();
     }
+
+    TEST("status counts the whole rows behind the export cursor and says when no cursor exists")
+    {
+        static const char first[] = "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"a\",\"to\":\"r2\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"first\"}\n";
+        static const char second[] = "{\"seq\":2,\"ts\":\"2020-01-02T00:00:00Z\",\"from\":\"a\",\"to\":\"mac\",\"kind\":\"result\",\"body\":\"y\",\"ref\":\"second\"}\n";
+        struct rtx_call c;
+        const struct json_value *backlog;
+        char rows[sizeof(first) + sizeof(second) + 40], cursor[128], dir[1400];
+        static const char *parents[] = {"", "/z23", "/z23/dev", "/z23/dev/mail", "/z23/dev/receive"};
+        rtx_isolate("export-rows");
+        for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+            (void)snprintf(dir, sizeof(dir), "%s%s", g_rtx_state, parents[i]);
+            ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        }
+        /* A row still being written ends the file without its newline: it
+         * is no receiver's row yet and is not counted. */
+        (void)snprintf(rows, sizeof(rows), "%s%s{\"seq\":3,\"ts\":\"2020-01-0",
+                       first, second);
+        ASSERT(rtx_write("mail/outbox.jsonl", rows));
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), "pending");
+        /* No cursor file: nothing has ever exported from this state root,
+         * which is not a cursor that fell behind. */
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "cursor")), "absent");
+        /* No cursor file, so no cursor offset: 0 here would be a position. */
+        ASSERT(json_get(backlog, "cursor_offset") == NULL);
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_bytes")), (long long)strlen(rows));
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_rows")), 2);
+        rtx_end(&c);
+        /* The cursor on the partial row: the backlog is not a whole row and
+         * its count is unknown, never a number. */
+        (void)snprintf(cursor, sizeof(cursor), "export_offset=%lld\nimport_epoch=\nimport_after=0\n",
+                       (long long)(strlen(first) + strlen(second)));
+        ASSERT(rtx_write("receive/boardmail.state", cursor));
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), "incomplete-row");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "cursor")), "present");
+        ASSERT(json_get(backlog, "pending_rows") == NULL);
+        ASSERT(json_get(backlog, "pending_rows_capped") == NULL);
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_bytes")),
+                  (long long)strlen(rows) - (long long)(strlen(first) + strlen(second)));
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+
 _test_next:;
+    rtx_restore();
+    return failures;
+}
+
+#ifdef ZCL_TESTING
+/* Test-only window for the export observer's row count
+ * (native_devagent_boardmail.c); 0 restores the shipped bound. */
+void zcl_devagent_boardmail_test_rows_bytes(long long bytes);
+#endif
+
+/* A cursor that the export will not use as stored, that cannot be read, or
+ * that leads to a row no observation can count: the status claims no
+ * position and no row, and moves nothing. A row count that stopped at its
+ * bound is said as a least one. */
+static int test_receive_export_cursor_edges(void)
+{
+    int failures = 0;
+
+    TEST("status keeps the cursor as stored apart from the one the export will use, and moves neither")
+    {
+        static const char first[] = "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"a\",\"to\":\"r2\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"first\"}\n";
+        static const char second[] = "{\"seq\":2,\"ts\":\"2020-01-02T00:00:00Z\",\"from\":\"a\",\"to\":\"mac\",\"kind\":\"result\",\"body\":\"y\",\"ref\":\"second\"}\n";
+        struct rtx_call c;
+        struct rtx_frozen before, after;
+        const struct json_value *backlog;
+        char rows[sizeof(first) + sizeof(second)], seen[sizeof(first) + sizeof(second)];
+        char cursor[128], again[128], dir[1400];
+        static const char *parents[] = {"", "/z23", "/z23/dev", "/z23/dev/mail", "/z23/dev/receive"};
+        rtx_isolate("export-stored-cursor");
+        for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+            (void)snprintf(dir, sizeof(dir), "%s%s", g_rtx_state, parents[i]);
+            ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        }
+        (void)snprintf(rows, sizeof(rows), "%s%s", first, second);
+        ASSERT(rtx_write("mail/outbox.jsonl", rows));
+        /* A stored cursor that is not at a row end of this outbox, then one
+         * past its end: the export starts over from the first row. The
+         * status shows both, so nobody reads the backlog as one the export
+         * walked up to. */
+        for (int step = 0; step < 2; ++step) {
+            long long stored = step == 0 ? (long long)strlen(first) + 10
+                                        : (long long)strlen(rows) + 50;
+            (void)snprintf(cursor, sizeof(cursor),
+                           "export_offset=%lld\nimport_epoch=\nimport_after=0\n", stored);
+            ASSERT(rtx_write("receive/boardmail.state", cursor));
+            rtx_frozen_take(&before, "export-stored-cursor");
+            rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+            (void)json_push_kv_str(&c.input, "action", "status");
+            (void)json_push_kv_str(&c.input, "receiver", "box-a");
+            zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+            ASSERT(rtx_ok(&c));
+            backlog = json_get(&c.reply.data, "export_backlog");
+            ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), "pending");
+            ASSERT_STR_EQ(json_get_str(json_get(backlog, "cursor")), "present");
+            ASSERT_EQ(json_get_int(json_get(backlog, "export_offset")), 0);
+            ASSERT_EQ(json_get_int(json_get(backlog, "cursor_offset")), stored);
+            ASSERT_EQ(json_get_int(json_get(backlog, "pending_bytes")), (long long)strlen(rows));
+            ASSERT_EQ(json_get_int(json_get(backlog, "pending_rows")), 2);
+            ASSERT(!json_get_bool(json_get(backlog, "pending_rows_capped")));
+            rtx_end(&c);
+            rtx_frozen_take(&after, "export-stored-cursor");
+            ASSERT(rtx_frozen_same(&before, &after));
+            /* The read left the stored cursor and the outbox as they were:
+             * a status read is not a walk, and starts no export over. */
+            ASSERT(rtx_read("receive/boardmail.state", again, sizeof(again)));
+            ASSERT(strcmp(again, cursor) == 0);
+            ASSERT(rtx_read("mail/outbox.jsonl", seen, sizeof(seen)));
+            ASSERT(strcmp(seen, rows) == 0);
+        }
+#if !defined(_WIN32)
+        /* A cursor that is there and cannot be read is neither absent nor
+         * a position: the status says so and claims no row. */
+        char path[1400];
+        rtx_path(path, sizeof(path), "receive/boardmail.state");
+        ASSERT(unlink(path) == 0 && mkdir(path, 0700) == 0);
+        rtx_frozen_take(&before, "export-stored-cursor");
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), "cursor-unreadable");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "cursor")), "unreadable");
+        ASSERT(json_get(backlog, "cursor_offset") == NULL);
+        ASSERT(json_get(backlog, "pending_rows") == NULL);
+        rtx_end(&c);
+        rtx_frozen_take(&after, "export-stored-cursor");
+        ASSERT(rtx_frozen_same(&before, &after));
+        ASSERT(rmdir(path) == 0);
+#endif
+        rtx_restore();
+        PASS();
+    }
+
+    TEST("status does not count a backlog whose first row is longer than any row")
+    {
+        /* One line far past the 16384 bytes the observer reads per row,
+         * with its newline only at the very end. */
+        static char longrow[20000];
+        struct rtx_call c;
+        const struct json_value *backlog;
+        char dir[1400];
+        static const char *parents[] = {"", "/z23", "/z23/dev", "/z23/dev/mail", "/z23/dev/receive"};
+        rtx_isolate("export-overlong-row");
+        for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+            (void)snprintf(dir, sizeof(dir), "%s%s", g_rtx_state, parents[i]);
+            ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        }
+        memset(longrow, 'x', sizeof(longrow));
+        longrow[0] = '{';
+        longrow[sizeof(longrow) - 2] = '\n';
+        longrow[sizeof(longrow) - 1] = '\0';
+        ASSERT(rtx_write("mail/outbox.jsonl", longrow));
+        ASSERT(rtx_write("receive/boardmail.state",
+                         "export_offset=0\nimport_epoch=\nimport_after=0\n"));
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "state")), "overlong-row");
+        ASSERT_STR_EQ(json_get_str(json_get(backlog, "cursor")), "present");
+        ASSERT_EQ(json_get_int(json_get(backlog, "export_offset")), 0);
+        ASSERT_EQ(json_get_int(json_get(backlog, "cursor_offset")), 0);
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_bytes")), (long long)strlen(longrow));
+        ASSERT(json_get(backlog, "pending_rows") == NULL);
+        ASSERT(json_get(backlog, "pending_rows_capped") == NULL);
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+
+#ifdef ZCL_TESTING
+    TEST("status bounds its row count and says when the count stopped there")
+    {
+        static const char first[] = "{\"seq\":1,\"ts\":\"2020-01-01T00:00:00Z\",\"from\":\"a\",\"to\":\"r2\",\"kind\":\"note\",\"body\":\"x\",\"ref\":\"first\"}\n";
+        static const char second[] = "{\"seq\":2,\"ts\":\"2020-01-02T00:00:00Z\",\"from\":\"a\",\"to\":\"mac\",\"kind\":\"result\",\"body\":\"y\",\"ref\":\"second\"}\n";
+        struct rtx_call c;
+        const struct json_value *backlog;
+        char rows[sizeof(first) + sizeof(second)], dir[1400];
+        static const char *parents[] = {"", "/z23", "/z23/dev", "/z23/dev/mail", "/z23/dev/receive"};
+        rtx_isolate("export-rows-bound");
+        for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); ++i) {
+            (void)snprintf(dir, sizeof(dir), "%s%s", g_rtx_state, parents[i]);
+            ASSERT(mkdir(dir, 0700) == 0 || errno == EEXIST);
+        }
+        (void)snprintf(rows, sizeof(rows), "%s%s", first, second);
+        ASSERT(rtx_write("mail/outbox.jsonl", rows));
+        ASSERT(rtx_write("receive/boardmail.state",
+                         "export_offset=0\nimport_epoch=\nimport_after=0\n"));
+        /* The count may look no further than half of the second row: it
+         * finds one row, and says that is the least there can be. */
+        zcl_devagent_boardmail_test_rows_bytes((long long)strlen(second) / 2);
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_rows")), 1);
+        ASSERT(json_get_bool(json_get(backlog, "pending_rows_capped")));
+        rtx_end(&c);
+        /* Exactly as far as the file ends: the count is whole and says so. */
+        zcl_devagent_boardmail_test_rows_bytes((long long)strlen(second));
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_rows")), 2);
+        ASSERT(!json_get_bool(json_get(backlog, "pending_rows_capped")));
+        rtx_end(&c);
+        /* The shipped bound: the same whole count. */
+        zcl_devagent_boardmail_test_rows_bytes(0);
+        rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+        (void)json_push_kv_str(&c.input, "action", "status");
+        (void)json_push_kv_str(&c.input, "receiver", "box-a");
+        zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+        ASSERT(rtx_ok(&c));
+        backlog = json_get(&c.reply.data, "export_backlog");
+        ASSERT_EQ(json_get_int(json_get(backlog, "pending_rows")), 2);
+        ASSERT(!json_get_bool(json_get(backlog, "pending_rows_capped")));
+        rtx_end(&c);
+        rtx_restore();
+        PASS();
+    }
+#endif
+
+_test_next:;
+#ifdef ZCL_TESTING
+    zcl_devagent_boardmail_test_rows_bytes(0);
+#endif
     rtx_restore();
     return failures;
 }
@@ -2593,6 +2849,7 @@ int test_devagent_receive(void)
 
 #if !defined(_WIN32)
     failures += test_receive_export_observation();
+    failures += test_receive_export_cursor_edges();
     failures += test_receive_resident_status();
     failures += test_receive_resident_status_long();
     failures += test_receive_resident_status_invalid();
@@ -3363,6 +3620,7 @@ int test_devagent_receive(void)
         ASSERT_STR_EQ(rtx_reply_str(&c, "board_state"), "unavailable");
         ASSERT_STR_EQ(rtx_reply_str(&c, "board_detail"), "node_rpc_client_call");
         ASSERT_STR_EQ(json_get_str(json_get(json_get(&c.reply.data, "export_backlog"), "state")), "mail-absent");
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(&c.reply.data, "export_backlog"), "cursor")), "absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "resident_workspace_state"), "absent");
         ASSERT_STR_EQ(rtx_reply_str(&c, "workspace_basis"), "request-argument");
         ASSERT_STR_EQ(rtx_reply_str(&c, "intake_record_state"), "absent");
