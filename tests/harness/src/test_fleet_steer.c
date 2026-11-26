@@ -808,7 +808,8 @@ static bool fmx_brief_full_projection(struct fmx_call *b,
                                       size_t *scan_count)
 {
     (void)zcl_devagent_mail_test_max_seq_scans(true);
-    fmx_brief(b, NULL, 0);
+    /* all=true: the newest rows whole, and the end-of-pass cursor. */
+    fmx_brief_all(b, NULL, 0);
     if (!fmx_run(b, zcl_native_handle_fleet_steer_brief) || !fmx_ok(b) ||
         fmx_missing_has(b, "dev.agent.mail"))
         return false;
@@ -878,7 +879,8 @@ static bool fmx_state_agrees(const char *gid, const char *ref,
 {
     struct fmx_call b, e;
     bool ok = false;
-    fmx_brief(&b, gid, 0);
+    /* all=true: the ref's change row may sit past the compact head. */
+    fmx_brief_all(&b, gid, 0);
     if (!fmx_run(&b, zcl_native_handle_fleet_steer_brief) || !fmx_ok(&b)) {
         fmx_end(&b);
         return false;
@@ -5363,7 +5365,8 @@ static int fmx_t_brief_window(void)
         fmx_prime_mail();
         ASSERT(fmx_seed_long_history(rows, "window-old-name", "window-new-name",
                                      20));
-        fmx_brief(&b, NULL, 0);
+        /* all=true: the newest rows whole, and the end-of-pass cursor. */
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         ASSERT_STR_EQ(fmx_missing_reason(&b, "dev.agent.mail"), "");
@@ -9647,7 +9650,8 @@ static bool fmx_gap_view(const char *gid, const char *from, const char *ref,
     bool ok = false;
     state[0] = '\0';
     *acked = false;
-    fmx_brief(&b, gid, 0);
+    /* all=true: the ref's change row may sit past the compact head. */
+    fmx_brief_all(&b, gid, 0);
     if (fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b)) {
         r = fmx_reply(&b, from, ref);
         if (r) {
@@ -10587,12 +10591,16 @@ static int fmx_t_brief_compact_default(void)
         ASSERT(fmx_int(&d, "candidates_shown") == 3);
         ASSERT(fmx_int(&d, "candidates_dropped") ==
                fmx_int(&f, "candidates_dropped") + 19);
-        /* Changes: the newest three, the cut said. */
+        /* Changes: the oldest three of the window, the cut said; the
+         * cursor resumes after them (fmx_t_brief_compact_cursor). */
         ASSERT(json_size(fmx_arr(&f, "changes")) > 3);
         ASSERT_EQ(json_size(fmx_arr(&d, "changes")), 3u);
         ASSERT(fmx_bool(&d, "changes_truncated"));
-        ASSERT(fmx_wint(json_at(fmx_arr(&d, "changes"), 0), "seq") ==
-               fmx_wint(json_at(fmx_arr(&f, "changes"), 0), "seq"));
+        for (i = 0; i < 3; i++)
+            ASSERT(fmx_wint(json_at(fmx_arr(&d, "changes"), i), "seq") ==
+                   fmx_wint(json_at(fmx_arr(&f, "changes"),
+                                    json_size(fmx_arr(&f, "changes")) - 3 + i),
+                            "seq"));
         cand_total = fmx_int(&f, "candidates_total");
         ASSERT(fmx_int(&d, "candidates_total") == cand_total);
         ASSERT(!fmx_bool(&d, "candidates_complete"));
@@ -10604,6 +10612,155 @@ static int fmx_t_brief_compact_default(void)
         }
         ASSERT(json_write(&d.reply.data, NULL, 0) < 8000u);
         ASSERT(json_write(&f.reply.data, NULL, 0) > 8000u);
+        fmx_end(&d);
+        fmx_end(&f);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* True when arr holds a change row at the same stream position as row. */
+static bool fmx_change_at(const struct json_value *arr,
+                          const struct json_value *row)
+{
+    for (size_t i = 0; arr && i < json_size(arr); i++) {
+        const struct json_value *r = json_at(arr, i);
+        if (strcmp(fmx_wstr(r, "stream"), fmx_wstr(row, "stream")) == 0 &&
+            fmx_wint(r, "row_offset") == fmx_wint(row, "row_offset"))
+            return true;
+    }
+    return false;
+}
+
+static int fmx_t_brief_compact_cursor(void)
+{
+    int failures = 0;
+
+    TEST("steer: the compact snapshot's cursor resumes at the changes it "
+         "left out, each once") {
+        struct fmx_call d, f, p;
+        const struct json_value *dc, *fc, *pc;
+        char ts[32], ref[32], token[4096];
+        size_t i;
+        fmx_isolate("compact_cursor");
+        fmx_prime_mail();
+        fmx_ts_ago(60, ts, sizeof(ts));
+        for (long long k = 0; k < 9; k++) {
+            (void)snprintf(ref, sizeof(ref), "note-%02lld", k);
+            fmx_seed_inbox(k % 2 ? "peer" : "other", ts, 100 + k, "worker-y",
+                           FMX_SENDER, "note", "progress", ref);
+        }
+        fmx_brief_all(&f, NULL, 0);
+        (void)json_push_kv_bool(&f.input, "json", true);
+        ASSERT(fmx_run(&f, zcl_native_handle_fleet_steer_brief) && fmx_ok(&f));
+        fmx_brief(&d, NULL, 0);
+        (void)json_push_kv_bool(&d.input, "json", true);
+        ASSERT(fmx_run(&d, zcl_native_handle_fleet_steer_brief) && fmx_ok(&d));
+        fc = fmx_arr(&f, "changes");
+        dc = fmx_arr(&d, "changes");
+        ASSERT(json_size(fc) > 3u);
+        ASSERT_EQ(json_size(dc), 3u);
+        ASSERT(fmx_bool(&d, "changes_truncated"));
+        ASSERT(strcmp(fmx_str(&d, "cursor_token"), fmx_str(&f, "cursor_token")) != 0);
+        (void)snprintf(token, sizeof(token), "%s", fmx_str(&d, "cursor_token"));
+        ASSERT(fmx_forward_page(&p, token, 25, 65536));
+        pc = fmx_arr(&p, "changes");
+        /* The resumed page holds exactly the rows the snapshot left out. */
+        ASSERT_EQ(json_size(dc) + json_size(pc), json_size(fc));
+        for (i = 0; i < json_size(fc); i++)
+            ASSERT(fmx_change_at(dc, json_at(fc, i)) !=
+                   fmx_change_at(pc, json_at(fc, i)));
+        fmx_end(&p);
+        fmx_end(&d);
+        fmx_end(&f);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_t_brief_compact_open_work(void)
+{
+    int failures = 0;
+
+    TEST("steer: the compact work list keeps an old open directive past "
+         "the cap") {
+        struct fmx_call d, f;
+        char ts[32], ref[32], line[128];
+        fmx_isolate("compact_open_work");
+        fmx_prime_mail();
+        fmx_ts_ago(3 * 3600, ts, sizeof(ts));
+        fmx_sent_directive(ts, 7, "dead-box", "old-open-ref");
+        for (long long k = 0; k < 10; k++) {
+            (void)snprintf(ref, sizeof(ref), "done-%02lld", k);
+            fmx_ts_ago(600, ts, sizeof(ts));
+            fmx_seed_inbox("self", ts, 20 + k, FMX_SENDER, "box-k", "directive",
+                           "do it", ref);
+            /* The recipient's later result answers it. */
+            fmx_ts_ago(60, ts, sizeof(ts));
+            fmx_seed_inbox("box-k", ts, 40 + k, "box-k", FMX_SENDER, "result",
+                           "done", ref);
+        }
+        (void)snprintf(line, sizeof(line), "directive %s->dead-box old-open-ref",
+                       FMX_SENDER);
+        fmx_brief_all(&f, NULL, 0);
+        ASSERT(fmx_run(&f, zcl_native_handle_fleet_steer_brief) && fmx_ok(&f));
+        ASSERT_EQ(json_size(fmx_arr(&f, "work")), 11u);
+        ASSERT(fmx_arr_has(fmx_arr(&f, "work"), line));
+        fmx_brief(&d, NULL, 0);
+        ASSERT(fmx_run(&d, zcl_native_handle_fleet_steer_brief) && fmx_ok(&d));
+        ASSERT(fmx_blocker_has(&d, "old-open-ref"));
+        ASSERT(fmx_arr_has(fmx_arr(&d, "work"), line));
+        ASSERT_EQ(json_size(fmx_arr(&d, "work")), 9u);
+        ASSERT(fmx_int(&d, "work_omitted") == 2);
+        fmx_end(&d);
+        fmx_end(&f);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_t_brief_compact_session_cap(void)
+{
+    int failures = 0;
+
+    TEST("steer: the compact session cap counts only rows the stale filter "
+         "keeps") {
+        struct fmx_call d, f;
+        const char *stale[] = {"A", "B", "C", "D"};
+        char role[16], host[32];
+        fmx_isolate("compact_session_cap");
+        fmx_prime_mail();
+        for (long long k = 0; k < 4; k++)
+            fmx_seed_presence(stale[k], "box-old.lan", 7200, k + 1);
+        for (long long k = 0; k < 11; k++) {
+            (void)snprintf(role, sizeof(role), "r%02lld", k);
+            (void)snprintf(host, sizeof(host), "box-%02lld.lan", k);
+            fmx_seed_presence(role, host, 30, k + 10);
+        }
+        /* all=true: the old reply, twelve rows with the four stale roles
+         * first, so the oldest live role r00 is cut. */
+        fmx_brief_all(&f, NULL, 0);
+        ASSERT(fmx_run(&f, zcl_native_handle_fleet_steer_brief) && fmx_ok(&f));
+        ASSERT_EQ(json_size(fmx_arr(&f, "sessions")), 12u);
+        ASSERT(fmx_session(&f, "r00") == NULL);
+        fmx_brief(&d, NULL, 0);
+        ASSERT(fmx_run(&d, zcl_native_handle_fleet_steer_brief) && fmx_ok(&d));
+        ASSERT(fmx_int(&d, "stale_omitted") == 4);
+        ASSERT_EQ(json_size(fmx_arr(&d, "sessions")), 11u);
+        ASSERT(fmx_session(&d, "r00") != NULL);
+        ASSERT(!fmx_bool(&d, "sessions_truncated"));
         fmx_end(&d);
         fmx_end(&f);
         fmx_restore();
@@ -10730,6 +10887,9 @@ int test_fleet_steer(void)
     failures += fmx_t_large_history();
     failures += fmx_t_brief_parse_once();
     failures += fmx_t_brief_compact_default();
+    failures += fmx_t_brief_compact_cursor();
+    failures += fmx_t_brief_compact_open_work();
+    failures += fmx_t_brief_compact_session_cap();
     failures += fmx_t_brief_task_budget();
     failures += fmx_t_brief_caller();
     failures += fmx_t_sessions();

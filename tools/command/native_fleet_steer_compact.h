@@ -17,18 +17,27 @@
 #define ZCL_FMC_COMPACT_CHANGES 3u
 #define ZCL_FMC_COMPACT_WORKERS 4u
 #define ZCL_FMC_COMPACT_WORK 8u
+#define ZCL_FMC_COMPACT_SESSIONS 12u
 
 /* Rewrite a finished snapshot `data` in place:
  *   sessions: rows whose state is "stale" are counted in stale_omitted;
  *     roles never observed (every field UNKNOWN) are named in
- *     sessions_unseen; sessions_total keeps the whole count.
+ *     sessions_unseen; then at most ZCL_FMC_COMPACT_SESSIONS rows stay, and
+ *     sessions_truncated says when more exist; sessions_total keeps the
+ *     whole count.
+ *   changes (when cap_changes): the oldest rows of the newest-first list
+ *     stay, and cursor_token is rebuilt to resume right after them, so a
+ *     brief that passes it as since returns every change left out, once.
+ *     Rows without an exact stream position keep every change.
+ *   work: a line in open_work (its directive is still open) always stays;
+ *     the cap applies to the other lines.
  *   tasks: historical rows are left out; the live rows keep the fields the
  *     next step turns on (no nulls, no fixed reasons); tasks_dropped counts
  *     every row left out.
  *   workers: a worker whose state is unknown because its newest evidence
  *     is older than alive_window_s is counted in workers_stale_omitted.
- *   candidates, landings, workers, work and (when cap_changes) changes:
- *     the first rows above; candidates_dropped and changes_dropped grow by
+ *   candidates, landings, workers and work: the first rows above;
+ *     candidates_dropped and changes_dropped grow by
  *     the rows left out, candidates_shown and landings_shown are the rows
  *     kept, landings_more, workers_truncated and changes_truncated say more
  *     exist, work_omitted counts the work lines left out.
@@ -36,6 +45,7 @@
  *     tasks_coverage_reason) is left out.
  * compact:true marks the reply. Returns false, leaving `data` unchanged,
  * when the copy cannot be built. */
-bool zcl_fmc_brief_compact(struct json_value *data, bool cap_changes);
+bool zcl_fmc_brief_compact(struct json_value *data, bool cap_changes,
+                           const struct json_value *open_work);
 
 #endif

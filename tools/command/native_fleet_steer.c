@@ -1739,6 +1739,16 @@ static const char *fmc_typed_read_indexed(const struct json_value *rows,
 }
 
 /* Roster plus directives-as-work. */
+/* The work[] line a directive row lists; false for any other row or one
+ * that does not fit. The compact brief matches open directives by it. */
+static bool fmc_work_line(const struct fmc_row *v, char *w, size_t cap)
+{
+    if (strcmp(v->kind, "directive") != 0 || !v->body[0])
+        return false;
+    int wlen = snprintf(w, cap, "directive %s->%s %.64s", v->from, v->to, v->ref);
+    return wlen > 0 && (size_t)wlen < cap;
+}
+
 static void fmc_row_tally(struct json_value *agents, struct json_value *work,
                           const struct fmc_row *v)
 {
@@ -1746,13 +1756,9 @@ static void fmc_row_tally(struct json_value *agents, struct json_value *work,
         (void)fmc_push_distinct(agents, v->from, FMC_LIST_CAP);
     if (v->to[0] && strcmp(v->to, "*") != 0)
         (void)fmc_push_distinct(agents, v->to, FMC_LIST_CAP);
-    if (strcmp(v->kind, "directive") == 0 && v->body[0]) {
-        char w[128];
-        int wlen = snprintf(w, sizeof(w), "directive %s->%s %.64s", v->from,
-                            v->to, v->ref);
-        if (wlen > 0 && (size_t)wlen < sizeof(w))
-            (void)fmc_push_distinct(work, w, FMC_LIST_CAP);
-    }
+    char w[128];
+    if (fmc_work_line(v, w, sizeof(w)))
+        (void)fmc_push_distinct(work, w, FMC_LIST_CAP);
 }
 
 /* One "<stream>:<offset>" entry of a next_since token. The integer floor
@@ -2737,6 +2743,9 @@ struct fmc_emit_ctx {
     const struct json_value *outcomes;
     const struct fmc_queue_view *qv;
     const struct fmc_local *lo;
+    /* The reply becomes the compact snapshot: every tracked session is
+     * emitted, and the compact step caps them after its stale filter. */
+    bool compact;
 };
 
 /* True when a retained queue outcome or a result row names ref. */
@@ -3454,13 +3463,14 @@ static void fmc_directives_emit(struct json_value *data,
 /* sessions[] plus its bound, after workers[] so the local worker's
  * receipt tokens are filled before they are summed. */
 static void fmc_sessions_emit(struct json_value *data,
-                              const struct fmc_roster *ro, long long now)
+                              const struct fmc_roster *ro, long long now,
+                              size_t cap)
 {
     struct json_value arr;
     size_t i, active = 0;
     json_init(&arr);
     json_set_array(&arr);
-    for (i = 0; ro->ss && i < ro->nss && i < FMC_SESSION_CAP; i++) {
+    for (i = 0; ro->ss && i < ro->nss && i < cap; i++) {
         fmc_session_emit(&arr, &ro->ss[i], ro, now);
         if (strcmp(fmc_session_activity(&ro->ss[i],
                        fmc_age_s(now, ro->ss[i].ts)), "busy") == 0)
@@ -4666,6 +4676,8 @@ struct fmc_mail_ctx {
     struct zcl_fleet_typed_index *typed_index;
     struct json_value *agents;
     struct json_value *work;
+    /* work[] lines whose scanned directive is still open. */
+    struct json_value *open_work;
     struct json_value *changes;
     struct json_value *blockers;
     struct fmc_roster *ro;
@@ -4848,6 +4860,15 @@ static void fmc_tally_note(struct fmc_directive_tally *t,
     }
 }
 
+/* An open directive's work[] line, which the compact brief never cuts. */
+static void fmc_open_work_note(struct fmc_mail_ctx *c, const struct fmc_row *v,
+                               bool open)
+{
+    char w[128];
+    if (open && c->open_work && fmc_work_line(v, w, sizeof(w)))
+        (void)fmc_push_distinct(c->open_work, w, FMC_LIST_CAP);
+}
+
 /* One scanned directive: its class and state into the tally, and — open,
  * a worker's, sent from here with no receiver evidence past
  * FMC_QUEUED_STALE_S — one stale blocker (overdue_worker_directives). */
@@ -4865,6 +4886,7 @@ static void fmc_directive_scan(struct fmc_mail_ctx *c, const struct fmc_row *v,
     bool open = fmc_dstate_open(st.state);
     if (c->ro)
         fmc_tally_note(&c->ro->dt, &st, v, age, open);
+    fmc_open_work_note(c, v, open);
     if (!open || strcmp(st.cls, "worker") != 0 ||
         strcmp(fmc_row_state_with_read(v, rows, c->sent_path,
                fmc_typed_read_indexed(rows, v, c->typed_index)), "queued") != 0 ||
@@ -6170,7 +6192,7 @@ static bool fmc_fit_budget(struct json_value *data, size_t budget, bool forward)
 
 struct fmc_brief_lists {
     struct json_value agents, work, blockers, candidates, changes, missing;
-    struct json_value capacity, evidence, post_ids, outcomes;
+    struct json_value capacity, evidence, post_ids, outcomes, open_work;
     /* candidates[] is emitted FROM this registry; the array above stays
      * only as the buffer zcl_fmc_cand_emit fills. landings is the same
      * kind of store for the typed landing notes the mail pass read. */
@@ -6183,7 +6205,7 @@ static void fmc_lists_init(struct fmc_brief_lists *l)
 {
     struct json_value *arrs[] = {&l->agents,   &l->work,    &l->blockers,
                                  &l->candidates, &l->changes, &l->missing,
-                                 &l->post_ids, &l->outcomes};
+                                 &l->post_ids, &l->outcomes, &l->open_work};
     size_t i;
     for (i = 0; i < sizeof(arrs) / sizeof(arrs[0]); i++) {
         json_init(arrs[i]);
@@ -6204,7 +6226,7 @@ static void fmc_lists_free(struct fmc_brief_lists *l)
     struct json_value *all[] = {&l->agents,   &l->work,     &l->blockers,
                                 &l->candidates, &l->changes, &l->missing,
                                 &l->capacity, &l->evidence, &l->post_ids,
-                                &l->outcomes};
+                                &l->outcomes, &l->open_work};
     size_t i;
     for (i = 0; i < sizeof(all) / sizeof(all[0]); i++)
         json_free(all[i]);
@@ -6624,7 +6646,8 @@ static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lis
     if (!changes_only) {
         (void)json_push_kv(&reply->data, "agents", &l->agents);
         fmc_workers_emit(&reply->data, ro, ec);
-        fmc_sessions_emit(&reply->data, ro, ec->now);
+        fmc_sessions_emit(&reply->data, ro, ec->now,
+                          ec->compact ? FMC_SESSION_TRACK : FMC_SESSION_CAP);
         (void)json_push_kv(&reply->data, "work", &l->work);
         (void)json_push_kv(&reply->data, "blockers", &l->blockers);
         (void)json_push_kv(&reply->data, "capacity", &l->capacity);
@@ -6647,8 +6670,15 @@ static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lis
     return true;
 }
 
-/* A snapshot's tasks, then its compact form unless all=true; a forward
- * page is the caller's own budgeted feed and stays whole. */
+/* A snapshot is compact unless all=true; a forward page is the caller's
+ * own budgeted feed and stays whole. */
+static bool fmc_brief_compacts(const struct zcl_command_request *req,
+                               const struct fmc_mail_view *mv)
+{
+    return !(mv && mv->forward) && !json_get_bool(json_get(req->input, "all"));
+}
+
+/* A snapshot's tasks, then its compact form. */
 static bool fmc_brief_snapshot_tail(const struct zcl_command_request *req,
                                     struct zcl_command_reply *reply,
                                     struct fmc_brief_lists *l,
@@ -6660,8 +6690,9 @@ static bool fmc_brief_snapshot_tail(const struct zcl_command_request *req,
         return false;
     }
     /* A caller's own limit keeps its changes count. */
-    if ((mv && mv->forward) || json_get_bool(json_get(req->input, "all")) ||
-        zcl_fmc_brief_compact(&reply->data, !json_get(req->input, "limit")))
+    if (!fmc_brief_compacts(req, mv) ||
+        zcl_fmc_brief_compact(&reply->data, !json_get(req->input, "limit"),
+                              &l->open_work))
         return true;
     fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "compact brief could not be copied", "all");
     return false;
@@ -6807,6 +6838,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     memset(&mc, 0, sizeof(mc));
     mc.agents = &l.agents;
     mc.work = &l.work;
+    mc.open_work = &l.open_work;
     mc.changes = &l.changes;
     mc.blockers = &l.blockers;
     mc.ro = &ro;
@@ -6845,6 +6877,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     ec.outcomes = &l.outcomes;
     ec.qv = &qv;
     ec.lo = &lo;
+    ec.compact = !changes_only && fmc_brief_compacts(req, &mv);
     if (changes_only && (!mv.ok || !mv.forward))
         fmc_compact_read_failure(reply, &l, who);
     else
@@ -8979,7 +9012,7 @@ void zcl_native_handle_fleet_steer_brief(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     fmc_enter_who(request, reply, "brief",
-                  "fleet.steer.brief takes grant,since,limit,json,changes_only,generation",
+                  "fleet.steer.brief takes grant,since,limit,json,changes_only,generation,all",
                   fmc_do_brief);
 }
 
