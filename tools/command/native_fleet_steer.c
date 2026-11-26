@@ -6869,23 +6869,34 @@ invalid:
     return false;
 }
 
-static void fmc_screen_append_blockers(const struct json_value *data,
+/* Append every blocker line whole, or return false and leave `screen`
+ * unchanged. A short buffer must not keep a truncated blocker: prefix. */
+static bool fmc_screen_append_blockers(const struct json_value *data,
                                        char *screen, size_t cap)
 {
     const struct json_value *blockers = json_get(data, "blockers");
     size_t used = strlen(screen);
     size_t n = blockers && blockers->type == JSON_ARR ? json_size(blockers) : 0;
-    for (size_t i = 0; i < n && used + 1 < cap; i++) {
+    char saved[4096];
+    if (cap > sizeof(saved) || used >= cap)
+        return false;
+    memcpy(saved, screen, used + 1);
+    for (size_t i = 0; i < n; i++) {
         const struct json_value *item = json_at(blockers, i);
         const char *line = item && item->type == JSON_STR ? json_get_str(item) : "";
+        char row[512];
         int w;
         if (!line || !line[0])
             continue;
-        w = snprintf(screen + used, cap - used, "blocker: %s\n", line);
-        if (w < 0 || (size_t)w >= cap - used)
-            break;
+        w = snprintf(row, sizeof(row), "blocker: %s\n", line);
+        if (w < 0 || (size_t)w >= sizeof(row) || used + (size_t)w >= cap) {
+            memcpy(screen, saved, strlen(saved) + 1);
+            return false;
+        }
+        memcpy(screen + used, row, (size_t)w + 1);
         used += (size_t)w;
     }
+    return true;
 }
 
 static void fmc_brief_screen(const struct zcl_command_request *req,
@@ -6894,7 +6905,13 @@ static void fmc_brief_screen(const struct zcl_command_request *req,
     char screen[4096]; struct json_value trial;
     size_t budget=fmc_brief_data_budget(req);
     zcl_fmc_tasks_screen(&reply->data,screen,sizeof(screen));
-    fmc_screen_append_blockers(&reply->data, screen, sizeof(screen));
+    if (!fmc_screen_append_blockers(&reply->data, screen, sizeof(screen))) {
+        if (json_push_kv_bool(&reply->data,"screen_omitted",true) &&
+            json_write(&reply->data,NULL,0)<=budget) return;
+        json_free(&reply->data); json_set_object(&reply->data);
+        fmc_fail(reply,"BRIEF_BUDGET_EXCEEDED","required brief metadata exceeds the response budget","budget_bytes");
+        return;
+    }
     json_init(&trial);
     bool ok=json_copy_checked(&trial,&reply->data) && json_push_kv_str(&trial,"screen",screen);
     if (!ok) {
