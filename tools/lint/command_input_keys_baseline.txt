@@ -44,6 +44,14 @@ dev.agent.worker engine     # worker sub-dispatches fixed claim inputs to dev.ag
 dev.agent.worker body       # worker injects its own fixed result body into a private dev.agent.mail post; request->input never reaches that nested object.
 dev.agent.worker since      # dev.agent.mail reads since only on the pull branch; the worker only posts, so the read is dead here.
 dev.agent.worker cursor     # dev.agent.mail reads cursor only on pull; worker posts a fresh fixed mail object without cursor.
+dev.agent.worker role      # worker injects its own role into a private fleet.steer.presence request; request->input never reaches that nested object.
+dev.agent.worker task      # worker injects fixed task into a private fleet.steer.presence request; request->input never reaches that nested object.
+dev.agent.worker phase     # worker injects the drive phase into a private fleet.steer.presence request; request->input never reaches that nested object.
+dev.agent.worker source    # worker injects fixed source into a private fleet.steer.presence request; request->input never reaches that nested object.
+dev.agent.worker pid       # fleet.steer.presence reads pid only on that private request and defaults to this process; request->input never reaches it.
+dev.agent.worker to        # fleet.steer.presence injects to=* into a private dev.agent.mail post; request->input never reaches that nested key.
+dev.agent.worker kind      # fleet.steer.presence injects kind=note into a private dev.agent.mail post; request->input never reaches that nested key.
+dev.agent.worker ref       # fleet.steer.presence injects ref presence-<role> into a private dev.agent.mail post; request->input never reaches that nested key.
 fleet.wiki.history after # The shared list projector reads this key only on the oldest_first branch, which only fleet.board.list requests by forwarding after; never wiki history.
 fleet.wiki.history before_created_at # The shared list projector reads this key only for the fleet.board.list keyset branch, never wiki history.
 fleet.wiki.history before_id # The shared list projector reads this key only for the fleet.board.list keyset branch, never wiki history.

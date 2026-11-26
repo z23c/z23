@@ -453,6 +453,39 @@ static bool wtx_mail_has(const char *ref, const char *needle)
     return found;
 }
 
+/* Rows under ref whose body contains needle. One page holds this test. */
+static int wtx_mail_count(const char *ref, const char *needle)
+{
+    struct wtx_call c;
+    const struct json_value *arr;
+    size_t n, i;
+    int found = 0;
+    wtx_begin(&c, "dev.agent.mail", "zcl.agent_mail.v1");
+    (void)json_push_kv_str(&c.input, "action", "pull");
+    zcl_native_handle_dev_agent_mail(&c.request, &c.reply);
+    if (wtx_ok(&c)) {
+        arr = json_get(&c.reply.data, "rows");
+        if (arr && arr->type == JSON_ARR) {
+            n = json_size(arr);
+            for (i = 0; i < n; i++) {
+                const struct json_value *r = json_at(arr, i);
+                const struct json_value *v;
+                const char *rr, *body;
+                if (!r || r->type != JSON_OBJ)
+                    continue;
+                v = json_get(r, "ref");
+                rr = (v && v->type == JSON_STR) ? json_get_str(v) : "";
+                v = json_get(r, "body");
+                body = (v && v->type == JSON_STR) ? json_get_str(v) : "";
+                if (strcmp(rr, ref) == 0 && strstr(body, needle))
+                    found++;
+            }
+        }
+    }
+    wtx_end(&c);
+    return found;
+}
+
 #if !defined(_WIN32)
 static long long wtx_terminal_mail_count(const char *ref)
 {
@@ -2721,6 +2754,100 @@ _test_next:;
 }
 #endif
 
+/* The drive's own presence note, read back through fleet.steer.brief.
+ * sessions_active_reported counts busy work only. A waiting drive is a
+ * live session whose activity is idle. */
+static int g_wtx_presence_active = -1;
+static char g_wtx_presence_activity[32];
+static char g_wtx_presence_state[32];
+
+static void wtx_read_presence(int *active, char *activity, size_t acap,
+                              char *state, size_t scap)
+{
+    struct wtx_call c;
+    const struct json_value *v;
+    const struct json_value *arr;
+    size_t i, n;
+    *active = -1;
+    if (acap)
+        activity[0] = '\0';
+    if (scap)
+        state[0] = '\0';
+    wtx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_int(&c.input, "since", 0);
+    zcl_native_handle_fleet_steer_brief(&c.request, &c.reply);
+    if (!wtx_ok(&c)) {
+        wtx_end(&c);
+        return;
+    }
+    v = json_get(&c.reply.data, "sessions_active_reported");
+    if (v && v->type == JSON_INT)
+        *active = (int)json_get_int(v);
+    arr = json_get(&c.reply.data, "sessions");
+    n = arr && arr->type == JSON_ARR ? json_size(arr) : 0;
+    for (i = 0; i < n; i++) {
+        const struct json_value *s = json_at(arr, i);
+        if (strcmp(wtx_field(s, "role"), "wtx-live") != 0)
+            continue;
+        (void)snprintf(activity, acap, "%s", wtx_field(s, "activity"));
+        (void)snprintf(state, scap, "%s", wtx_field(s, "state"));
+    }
+    wtx_end(&c);
+}
+
+static void wtx_observe_presence(void)
+{
+    wtx_read_presence(&g_wtx_presence_active, g_wtx_presence_activity,
+                      sizeof(g_wtx_presence_activity), g_wtx_presence_state,
+                      sizeof(g_wtx_presence_state));
+}
+
+static int wtx_presence_case(void)
+{
+    int failures = 0;
+    TEST("worker: a drive posts presence and brief counts that worker live") {
+        struct wkr_drive_opts o;
+        int after = -1;
+        char activity[32];
+        char state[32];
+        g_wtx_presence_active = -1;
+        g_wtx_presence_activity[0] = '\0';
+        g_wtx_presence_state[0] = '\0';
+        wtx_isolate("presence-live");
+        ASSERT(wtx_queue_verb("reap", NULL, NULL));
+        wtx_opts(&o, "wtx-live", "s-presence");
+        /* One wait past the 60s live window. The 30s floor can write a
+         * fresh idle row only from the wait slices; start plus the
+         * return post are two rows, and a third is the slice beat. */
+        o.deadline_s = 120;
+        o.max_jobs = 0;
+        o.idle_start_s = 65;
+        o.idle_limit_s = 65;
+        o.timed_idle_only = true;
+        zcl_devagent_worker_test_after_inbox = wtx_observe_presence;
+        ASSERT_EQ(zcl_devagent_worker_drive(&o, wtx_fixture), 0);
+        zcl_devagent_worker_test_after_inbox = NULL;
+        ASSERT_EQ(g_wtx_presence_active, 0);
+        ASSERT_STR_EQ(g_wtx_presence_activity, "idle");
+        ASSERT_STR_EQ(g_wtx_presence_state, "live");
+        ASSERT(wtx_mail_has("presence-wtx-live", "presence.v1"));
+        ASSERT(wtx_mail_has("presence-wtx-live", "phase=idle"));
+        ASSERT(wtx_mail_has("presence-wtx-live", "role=wtx-live"));
+        ASSERT(wtx_mail_count("presence-wtx-live", "phase=idle") >= 3);
+        wtx_read_presence(&after, activity, sizeof(activity), state,
+                          sizeof(state));
+        ASSERT_EQ(after, 0);
+        ASSERT_STR_EQ(activity, "completed");
+        ASSERT(wtx_mail_has("presence-wtx-live", "phase=completed"));
+        wtx_restore();
+        PASS();
+    }
+_test_next:;
+    zcl_devagent_worker_test_after_inbox = NULL;
+    wtx_restore();
+    return failures;
+}
+
 static void wtx_report(int failures)
 {
     if (failures == 0)
@@ -2877,6 +3004,7 @@ int test_devagent_worker(void)
     failures += wtx_inbox_job_case();
     failures += wtx_inbox_checkpoint_case();
     failures += wtx_inbox_idle_case();
+    failures += wtx_presence_case();
 #if !defined(_WIN32)
     failures += wtx_inbox_wake_case();
     failures += wtx_inbox_wide_case();

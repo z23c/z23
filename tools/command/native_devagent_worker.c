@@ -20,6 +20,17 @@
  * claimed within about a second, never faster than one claim attempt per
  * second. Without a watch it sleeps the backoff exactly as before.
  *
+ * PRESENCE. Each drive reports itself through the existing
+ * fleet.steer.presence leaf. Phase idle is posted at start, on each
+ * idle-wait slice, and after a job, so a long backoff stays inside the
+ * leaf's live window. A POSIX child wait posts phase busy on each
+ * slice. Phase completed is posted before the lock drops. The leaf owns
+ * the repeat floor and the window; a refused or skipped post does not
+ * stop the drive. A beat that writes mail is resnapped, and mail that
+ * is already changed is left for the inbox instead of being snapped
+ * over. This is a session note, not a model poll and not a second
+ * mailbox.
+ *
  * ONE ACTIVE JOB PER WORKER. worker.lock (flock on POSIX, the platform's
  * owner-private lock file on Windows; non-blocking, held for the whole
  * drive) refuses a second concurrent drive on the same queue. On POSIX the
@@ -726,6 +737,8 @@ static int wkr_adopt_job(const struct wkr_drive_opts *opts,
  * receipt, reap records it incomplete. SIGTERM in flight kills the child
  * and crash-records. */
 
+static void wkr_presence(const struct wkr_drive_opts *opts, const char *phase);
+
 #if defined(_WIN32)
 /* The executor that runs is the one this image's child entry wires (the
  * production entry passes the Muse executor, as the leaf does). */
@@ -750,7 +763,8 @@ static void wkr_child_run(const struct wkr_drive_opts *opts,
 
 /* Parent wait in slices: wall cap, SIGTERM, crash, and exit capture.
  * Seconds through the unclassified platform seam, never a raw syscall. */
-static struct wkr_spawn_out wkr_wait_child(pid_t pid, long long cap_s,
+static struct wkr_spawn_out wkr_wait_child(const struct wkr_drive_opts *opts,
+                                           pid_t pid, long long cap_s,
                                            long long t0_s)
 {
     struct wkr_spawn_out out;
@@ -761,6 +775,7 @@ static struct wkr_spawn_out wkr_wait_child(pid_t pid, long long cap_s,
         pid_t got;
         struct timespec slice;
         long long now_s = platform_time_wall_unix();
+        wkr_presence(opts, "busy");
         if (g_wkr_term) {
             /* The child ran and was reaped here, so this is status 1 (a
              * wait that was observed), not the -1 of a wait that never
@@ -817,7 +832,7 @@ static struct wkr_spawn_out wkr_spawn(const struct wkr_drive_opts *opts,
         return out;
     if (pid == 0)
         wkr_child_run(opts, job, exec);
-    out = wkr_wait_child(pid, opts->time_cap_s, t0_s);
+    out = wkr_wait_child(opts, pid, opts->time_cap_s, t0_s);
     return out;
 }
 #endif
@@ -1930,6 +1945,7 @@ struct wkr_mail_sig {
 struct wkr_idle {
     struct platform_directory_watcher watcher;
     struct platform_directory_watcher mail;
+    const struct wkr_drive_opts *opts;
     bool watching;
     bool mail_watching;
     bool mail_woke;
@@ -2014,31 +2030,43 @@ static void wkr_mail_resnap(struct wkr_idle *idle)
         idle->mail_sig = now;
 }
 
-/* Sampled from the queue wait. A mail-directory event wakes the inbox
- * check only when a *.jsonl stream actually changed. */
+/* True when mail already differs from the baseline. That wake must win:
+ * posting and then resnapping would hide the directive until the backoff
+ * ended. Otherwise post idle and resnap the worker's own note. */
+static bool wkr_presence_idle(struct wkr_idle *idle)
+{
+    struct wkr_mail_sig now;
+    if (!idle)
+        return false;
+    if (idle->mail_watching &&
+        wkr_mail_sig_take(idle->maildir, &now) &&
+        !wkr_mail_sig_same(&idle->mail_sig, &now)) {
+        idle->mail_woke = true;
+        return true;
+    }
+    wkr_presence(idle->opts, "idle");
+    wkr_mail_resnap(idle);
+    return false;
+}
+
+/* Sampled from the queue wait. A mail-directory change wakes the inbox
+ * check. Each slice also beats presence so a long wait stays live. */
 static bool wkr_wake_stop(void *opaque)
 {
     struct wkr_idle *idle = opaque;
     enum platform_directory_watch_result r;
-    struct wkr_mail_sig now;
     if (g_wkr_term != 0)
         return true;
-    if (!idle || !idle->mail_watching)
+    if (!idle)
         return false;
-    r = platform_directory_watcher_wait(&idle->mail, 0, NULL, NULL);
-    if (r == PLATFORM_DIRECTORY_WATCH_ERROR) {
-        platform_directory_watcher_close(&idle->mail);
-        idle->mail_watching = false;
-        return false;
+    if (idle->mail_watching) {
+        r = platform_directory_watcher_wait(&idle->mail, 0, NULL, NULL);
+        if (r == PLATFORM_DIRECTORY_WATCH_ERROR) {
+            platform_directory_watcher_close(&idle->mail);
+            idle->mail_watching = false;
+        }
     }
-    if (r != PLATFORM_DIRECTORY_WATCH_CHANGED &&
-        r != PLATFORM_DIRECTORY_WATCH_OVERFLOW)
-        return false;
-    if (!wkr_mail_sig_take(idle->maildir, &now) ||
-        wkr_mail_sig_same(&idle->mail_sig, &now))
-        return false;
-    idle->mail_woke = true;
-    return true;
+    return wkr_presence_idle(idle);
 }
 
 /* Milliseconds from now until `until_ms` on the monotonic clock, >= 0. */
@@ -2048,13 +2076,16 @@ static long long wkr_ms_left(long long until_ms)
     return left > 0 ? left : 0;
 }
 
-/* Sleep until `until_ms` on the monotonic clock, in term-aware slices. */
-static void wkr_idle_sleep_until(long long until_ms)
+/* Sleep until `until_ms` on the monotonic clock, in term-aware slices.
+ * Each slice beats presence. An already-changed mailbox ends the sleep. */
+static void wkr_idle_sleep_until(struct wkr_idle *idle, long long until_ms)
 {
     long long left = wkr_ms_left(until_ms);
     while (!g_wkr_term && left > 0) {
         platform_sleep_ms(
             (int)(left < WKR_IDLE_SLICE_MS ? left : WKR_IDLE_SLICE_MS));
+        if (wkr_presence_idle(idle))
+            return;
         left = wkr_ms_left(until_ms);
     }
 }
@@ -2082,14 +2113,16 @@ static void wkr_mail_watch_open(struct wkr_idle *idle, bool timed_only)
 }
 
 static void wkr_idle_open(struct wkr_idle *idle, const char *queuedir,
-                          bool timed_only)
+                          const struct wkr_drive_opts *opts)
 {
     platform_directory_watcher_init(&idle->watcher);
+    idle->opts = opts;
     (void)snprintf(idle->queuedir, sizeof(idle->queuedir), "%s", queuedir);
     memset(&idle->base, 0, sizeof(idle->base));
-    idle->watching = !timed_only && platform_directory_watcher_open(
-                                        &idle->watcher, idle->queuedir);
-    wkr_mail_watch_open(idle, timed_only);
+    idle->watching = !opts->timed_idle_only &&
+                     platform_directory_watcher_open(&idle->watcher,
+                                                     idle->queuedir);
+    wkr_mail_watch_open(idle, opts->timed_idle_only);
 }
 
 static void wkr_idle_close(struct wkr_idle *idle)
@@ -2112,7 +2145,7 @@ static bool wkr_idle_wait(struct wkr_idle *idle, long long wait_ms)
     while (!g_wkr_term && left > 0) {
         enum platform_directory_watch_result r;
         if (!idle->watching) {
-            wkr_idle_sleep_until(t0 + wait_ms);
+            wkr_idle_sleep_until(idle, t0 + wait_ms);
             return false;
         }
         r = platform_directory_watcher_wait(&idle->watcher, (uint32_t)left,
@@ -2129,7 +2162,7 @@ static bool wkr_idle_wait(struct wkr_idle *idle, long long wait_ms)
                  r != PLATFORM_DIRECTORY_WATCH_OVERFLOW)
             return false;
         else if (wkr_qsig_moved(idle)) {
-            wkr_idle_sleep_until(t0 + WKR_CLAIM_FLOOR_MS);
+            wkr_idle_sleep_until(idle, t0 + WKR_CLAIM_FLOOR_MS);
             return !g_wkr_term;
         }
         left = wkr_ms_left(t0 + wait_ms);
@@ -2500,6 +2533,31 @@ static bool wkr_drive_spent(const struct wkr_drive_opts *opts,
     return opts->max_jobs > 0 && jobs >= opts->max_jobs;
 }
 
+/* One presence.v1 note for this drive, through the shipped leaf. A
+ * refusal is ignored so mail trouble cannot stall a job. */
+static void wkr_presence(const struct wkr_drive_opts *opts, const char *phase)
+{
+    struct json_value input;
+    struct zcl_command_request request;
+    struct zcl_command_reply reply;
+    if (!opts || !opts->worker[0] || !phase || !phase[0])
+        return;
+    json_init(&input);
+    json_set_object(&input);
+    memset(&request, 0, sizeof(request));
+    request.input = &input;
+    zcl_command_reply_init(&reply, "zcl.fleet_steer_presence.v1");
+    (void)json_push_kv_str(&input, "role", opts->worker);
+    (void)json_push_kv_str(&input, "task", "dev-agent-worker");
+    (void)json_push_kv_str(&input, "phase", phase);
+    (void)json_push_kv_str(&input, "source", "dev-agent-worker");
+    if (opts->session[0])
+        (void)json_push_kv_str(&input, "session", opts->session);
+    zcl_native_handle_fleet_steer_presence(&request, &reply);
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+}
+
 /* True when the idle streak says the drive should stop. The inbox check
  * runs on the mail wake and on the ordinary end of the wait. */
 static bool wkr_after_idle(const struct wkr_drive_opts *opts,
@@ -2508,6 +2566,7 @@ static bool wkr_after_idle(const struct wkr_drive_opts *opts,
 {
     bool stop = wkr_drive_idle(opts, idle, idle_ms, wait_s);
     wkr_inbox_checkpoint(opts);
+    wkr_presence(opts, "idle");
     wkr_mail_resnap(idle);
 #ifdef ZCL_TESTING
     if (zcl_devagent_worker_test_after_inbox)
@@ -2536,10 +2595,11 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
      * before the install above kept the old disposition, so clearing
      * here cannot swallow one this handler recorded. */
     g_wkr_term = 0;
-    wkr_idle_open(&idle, queuedir, opts->timed_idle_only);
+    wkr_idle_open(&idle, queuedir, opts);
     t0_s = platform_time_wall_unix();
     wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
     wkr_inbox_checkpoint(opts);
+    wkr_presence(opts, "idle");
     wkr_mail_resnap(&idle);
     while (!g_wkr_term) {
         long long done;
@@ -2558,6 +2618,7 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
         jobs += done;
         if (done > 0) {
             wkr_inbox_checkpoint(opts);
+            wkr_presence(opts, "idle");
             wkr_mail_resnap(&idle);
             idle_ms = 0;
             wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
@@ -2573,6 +2634,7 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
     wkr_reap();
     wkr_idle_close(&idle);
     (void)signal(SIGTERM, old_term);
+    wkr_presence(opts, "completed");
     wkr_lock_drop(&lock);
     return jobs;
 }
