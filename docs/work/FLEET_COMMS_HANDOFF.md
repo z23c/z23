@@ -164,7 +164,8 @@ roster proof, and the receiver answers with the paired push receipt. The
 paired `push_opened` counter does not move. The pull remains the repair. A
 peer the OPEN did not take is still `push_fanout_roster_unpushed`.
 
-What is still missing for a swarm: a counter for a fleet post that found no
-live session, and a measured round trip. This note does not claim a latency.
+A fan-out post that found no live paired or roster session is
+`push_out.fanout_no_session`, once. What is still missing for a swarm is a
+measured round trip. This note does not claim a latency.
 Check `git log origin/main --oneline -- engine/composition/src/boot_fleet_board*`
 before starting any fleet-board work: several agents write here.

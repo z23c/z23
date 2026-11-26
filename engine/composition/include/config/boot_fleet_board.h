@@ -211,8 +211,11 @@ bool boot_app_host_rpc_dispatch(struct node_db *db, const char *op,
  * FLEET_BOARD_ROSTER_PUSH_AFTER), then the records. The paired push_opened
  * counter does not move for that open. A peer the roster open did not take
  * is still counted in push_fanout_roster_unpushed (carriage status
- * push_out.fanout_roster_unpushed). The roster pull remains the repair. A
- * peer with a working pairing row stays on the paired push.
+ * push_out.fanout_roster_unpushed). A fan-out post that finds no live
+ * session among its paired rows and its learned roster peers is counted
+ * once in push_fanout_no_session (push_out.fanout_no_session). The roster
+ * pull remains the repair. A peer with a working pairing row stays on the
+ * paired push.
  *
  * The addressed push offers a post to ONE box, once, in a stream whose whole
  * payload rides the OPEN (FLEET_BOARD_FLEET_MSG_PUSH). Which box: the board key the local
@@ -620,10 +623,12 @@ struct boot_fleet_board_fleet_counts {
      * not push to because a pull from them would not be served, by the check
      * that failed. roster_unpushed: per fan-out post, the connected peers on
      * the roster with no pairing row that the roster answer would serve and
-     * the push cannot reach (see PUSH); they get the post by pull. */
+     * the push cannot reach (see PUSH); they get the post by pull.
+     * no_session: fan-out posts that found no live session in either walk. */
     uint64_t push_fanout;
     uint64_t push_fanout_refused[FLEET_BOARD_PUSH_REFUSALS];
     uint64_t push_fanout_roster_unpushed;
+    uint64_t push_fanout_no_session;
 };
 void boot_fleet_board_fleet_counts(struct boot_fleet_board_fleet_counts *out);
 

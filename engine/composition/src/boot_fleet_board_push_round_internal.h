@@ -103,7 +103,8 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
  * addressed push's peer, or NULL): connected, served by the pull's own
  * disclosure decision, and not proving the post's author key. Connected
  * roster-only peers are offered one "board.rpush" OPEN of this post. A peer
- * that OPEN did not take is counted in push_fanout_roster_unpushed. */
+ * that OPEN did not take is counted in push_fanout_roster_unpushed. A post
+ * that finds no live session in either walk is push_fanout_no_session. */
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
                        const struct push_peer *done);
 /* A post the fan-out held for one peer rode a push after its wait. */

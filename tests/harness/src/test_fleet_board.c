@@ -16808,13 +16808,16 @@ static int test_fleet_board_roster_push_gap(void)
         fbr_install(FBR_ROOT, false);
         ASSERT(fbc_plant(&w.a, &w.b, "answerbox", FBR_MEMBER, now));
         ASSERT(fbc_plant(&w.a, &w.b, "askbox", FBR_PEER, now));
-        /* Before any roster pull on this session nothing is counted: the
-         * peer has proved no key here. */
+        /* Before any roster pull on this session the peer has proved no
+         * key, so the fan-out has no one to try and counts one no-session. */
+        fleet_board_roster_forget();
         boot_fleet_board_fleet_counts(&cb);
         ASSERT_EQ(fbc_offer(&w, "before the pull", 2001, &post), (size_t)0);
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
                   cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_fanout_no_session,
+                  cb.push_fanout_no_session + 1);
         /* The roster pull proves the asking box's key on this session. */
         fbc_boxes(FBR_PEER, FBR_MEMBER);
         ASSERT(fbc_pull(&w, &w.b, &frames) != SIZE_MAX);
@@ -16824,6 +16827,7 @@ static int test_fleet_board_roster_push_gap(void)
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
                   cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_fanout_no_session, cb.push_fanout_no_session);
         ASSERT_EQ(ca.push_opened, cb.push_opened);
         ASSERT_EQ(ca.push_fanout, cb.push_fanout);
         ASSERT_EQ(ca.roster_refused, cb.roster_refused);
@@ -16846,6 +16850,7 @@ static int test_fleet_board_roster_push_gap(void)
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
                   cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_fanout_no_session, cb.push_fanout_no_session);
         ASSERT_EQ(ca.push_opened, cb.push_opened);
         ASSERT_EQ(ca.role_refused, cb.role_refused);
         ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
@@ -16861,6 +16866,7 @@ static int test_fleet_board_roster_push_gap(void)
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
                   cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_fanout_no_session, cb.push_fanout_no_session);
         ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
         fbc_unrevoke();
         PASS();
@@ -16874,6 +16880,7 @@ static int test_fleet_board_roster_push_gap(void)
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
                   cb.push_fanout_roster_unpushed + 1);
+        ASSERT_EQ(ca.push_fanout_no_session, cb.push_fanout_no_session);
         ASSERT_EQ(ca.push_opened, cb.push_opened);
         ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
         ASSERT(!db_fleet_board_have(&w.b, held.id));
@@ -16947,6 +16954,7 @@ static int test_fleet_board_roster_push_gap(void)
         boot_fleet_board_fleet_counts(&ca);
         ASSERT_EQ(ca.push_fanout_roster_unpushed,
                   cb.push_fanout_roster_unpushed);
+        ASSERT_EQ(ca.push_fanout_no_session, cb.push_fanout_no_session);
         ASSERT_EQ(ca.push_opened, cb.push_opened);
         ASSERT_EQ(fbc_answer_frames(&w), (size_t)0);
         ASSERT_EQ(boot_fleet_board_roster_push_test_unsupported(), skips + 1);

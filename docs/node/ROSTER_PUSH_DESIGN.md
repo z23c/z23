@@ -5,7 +5,7 @@
 The receipt path below is implemented. It changes no consensus, custody or
 datadir rule, and edits no sealed `core/` file.
 
-## Status (updated 2026-11-25, roster push)
+## Status (updated 2026-11-26, no-session count)
 
 `board.rpush` pushes one fleet post to a connected roster peer that has no
 working pairing row, and the receiver answers with the same push receipt the
@@ -24,8 +24,11 @@ carries no post bytes. The pull remains the repair. A peer with a working
 pairing row stays on the paired push. The "15 s" and "never pushed" sentences
 below describe the state before the wake and this push.
 
-Still open, and not part of this change:
-- a counter for a fleet post that found no live session at all;
+A fan-out post that finds no live session among its paired rows and its
+learned roster peers is `push_out.fanout_no_session`, once. That is how an
+operator tells "waiting for a peer" from a fan-out that did push.
+
+Still open:
 - a measured post-to-arrival time. This note does not claim one.
 
 ## Problem
@@ -142,5 +145,5 @@ pull baseline. Until that run exists, no latency claim stands.
 
 - After a roster peer answers a pull, pull again in about 3 s while it keeps
   answering, falling back to 15 s when idle.
-- Count a fleet post that found no live session at all, so an operator can tell
-  "waiting for a peer" from "stuck".
+- A fleet post that found no live session is `push_out.fanout_no_session`,
+  so an operator can tell "waiting for a peer" from "stuck".

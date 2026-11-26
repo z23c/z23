@@ -16,7 +16,9 @@
  * service is not used and push_opened does not move. A peer that OPEN did
  * not take is counted in push_fanout_roster_unpushed. Eligibility is the
  * same question the roster answer asks: the key proved on THIS session, its
- * standing, and the read role. The roster pull remains the repair.
+ * standing, and the read role. The roster pull remains the repair. A fan-out
+ * post that finds no live session among its paired rows and its learned
+ * roster peers is counted once in push_fanout_no_session.
  */
 
 #include "boot_fleet_board_push_round_internal.h"
@@ -38,6 +40,7 @@
 static _Atomic uint64_t g_fanout;
 static _Atomic uint64_t g_fanout_refused[FLEET_BOARD_PUSH_REFUSALS];
 static _Atomic uint64_t g_fanout_roster_unpushed;
+static _Atomic uint64_t g_fanout_no_session;
 
 /* The live session to `noise`, under its send budget: PUSH_OK, or why not.
  * `snap` receives the session. */
@@ -140,8 +143,10 @@ static bool fanout_roster_serves(struct net_manager *nm,
 }
 
 /* Roster peers this post's OPEN did not take. A session already known
- * unsupported is left to the pull and is not counted again. */
-static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32])
+ * unsupported is left to the pull and is not counted again. A learned peer
+ * with a live session sets *live even when this post is not offered to it. */
+static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32],
+                                  bool *live)
 {
     struct node_db *pairings = app_runtime_node_db();
     struct net_manager *nm =
@@ -154,7 +159,12 @@ static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32])
                                                 FLEET_BOARD_FLEET_PEERS_MAX);
     size_t missed = 0;
     for (size_t i = 0; i < n; i++) {
+        struct noise_transport_snapshot snap;
         int opened;
+        if (fanout_link(r, noise[i], &snap) ==
+            FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED)
+            continue;
+        *live = true;
         if (!fanout_roster_serves(nm, pairings, noise[i], host))
             continue;
         opened = r->row ? boot_fleet_board_roster_push_offer(
@@ -169,15 +179,24 @@ static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32])
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
                        const struct push_peer *done)
 {
+    bool live = false;
     size_t missed;
     for (size_t i = 0; i < r->n_peers; i++) {
         struct push_peer *p = &r->peers[i];
+        struct noise_transport_snapshot snap;
         if (p->lead == p && p != done)
             fanout_offer(r, q, p);
+        if (p->lead == p &&
+            fanout_link(r, p->row.peer_noise_pubkey, &snap) !=
+                FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED)
+            live = true;
     }
-    missed = fanout_roster_missed(r, q->host);
+    missed = fanout_roster_missed(r, q->host, &live);
     if (missed > 0)
         atomic_fetch_add_explicit(&g_fanout_roster_unpushed, missed,
+                                  memory_order_relaxed);
+    if (!live)
+        atomic_fetch_add_explicit(&g_fanout_no_session, 1,
                                   memory_order_relaxed);
 }
 
@@ -191,6 +210,8 @@ void board_push_fanout_counts(struct boot_fleet_board_fleet_counts *out)
     out->push_fanout = atomic_load_explicit(&g_fanout, memory_order_relaxed);
     out->push_fanout_roster_unpushed = atomic_load_explicit(
         &g_fanout_roster_unpushed, memory_order_relaxed);
+    out->push_fanout_no_session = atomic_load_explicit(
+        &g_fanout_no_session, memory_order_relaxed);
     for (size_t i = 0; i < FLEET_BOARD_PUSH_REFUSALS; i++)
         out->push_fanout_refused[i] =
             atomic_load_explicit(&g_fanout_refused[i], memory_order_relaxed);

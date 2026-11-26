@@ -95,7 +95,12 @@ use, and no post bytes. The peer pulls on the next lane tick, the same 100 ms
 beat. That pull is what delivers the post when the roster push is not taken
 (the switch is off, the peer's build has no `board.rpush`, or the OPEN did
 not go out). Carriage status counts those missed roster peers per post in
-`push_out.fanout_roster_unpushed`.
+`push_out.fanout_roster_unpushed`. A fan-out post that found no live session
+among its paired rows and its learned roster peers is
+`push_out.fanout_no_session`, once. A connection the board has not learned
+yet is that count: the fan-out had no one to try. A live session the pull
+would not serve is not.
+
 `carriage.wake` counts the wake itself since the process started: `news`
 (rounds with a newly stored fleet post), `no_target` (rounds that found no
 roster session to wake: the post waits for the sweep), `sent` and
