@@ -714,8 +714,7 @@ ZCL_COMMAND_BRANCH("fleet.steer", "fleet",
 ZCL_COMMAND_READY_READ(
     "fleet.steer.brief", "fleet.steer", "",
     "One-call fleet brief: tasks, workers, blockers, capacity, candidates",
-    "Local tasks/workers/blockers/capacity/candidates/evidence/changes; "
-    "Local only; missing[]/ages identify unavailable sources. "
+    "missing[]/ages name unavailable sources. "
     "agents: observed names, not liveness. mailbox_directory: "
     "verified roster labels; complete/truncated/unknown/withheld. Local snapshot, "
     "not delivery; local, broadcast and ref routes omitted. workers: newest16 "
@@ -735,12 +734,8 @@ ZCL_COMMAND_READY_READ(
     "with identity/owner/dependency/proof/detail; no canonical joins. "
     "review/publication unknown; tasks_inventory_complete=false. "
     "tasks_sources_complete/tasks_shown/tasks_dropped report coverage. "
-    "json=true omits screen. Snapshot is compact:true unless all=true: stale "
-    "sessions in stale_omitted, stale workers in workers_stale_omitted, "
-    "unseen roles in sessions_unseen, 5 slim live tasks, first 3 candidates/"
-    "4 landings/4 workers/8 work/3 changes (without limit), counts kept, no "
-    "fixed prose (directive_definition, sessions_active_basis, "
-    "tasks_coverage_reason). "
+    "json=true omits screen. all=false: compact, stale rows counted "
+    "(stale_omitted), list heads, no prose. "
     "changes_only=true needs token since; mail changes, "
     "no snapshots. Token since: "
     "stream-order prefixes: start 0|, resume returned cursor_token even when "
