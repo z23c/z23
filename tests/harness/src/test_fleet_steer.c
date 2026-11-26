@@ -443,11 +443,17 @@ static bool fmx_bool_is(const struct fmx_call *c, const char *key, bool want)
     return v && v->type == JSON_BOOL && json_get_bool(v) == want;
 }
 
-/* Missing reason for a source, or "" when the source is not missing. */
-static const char *fmx_missing_reason(const struct fmx_call *c,
-                                      const char *source)
+/* Every task row carries historical as a bool. A missing key is not false. */
+static bool fmx_hist_bool(const struct json_value *row, bool want)
 {
-    const struct json_value *missing = fmx_arr(c, "missing");
+    const struct json_value *h = row ? json_get(row, "historical") : NULL;
+    return h && h->type == JSON_BOOL && json_get_bool(h) == want;
+}
+
+/* Missing reason for a source, or "" when the source is not missing. */
+static const char *fmx_arr_missing_reason(const struct json_value *missing,
+                                         const char *source)
+{
     size_t n, i;
     if (!missing)
         return "";
@@ -468,6 +474,12 @@ static const char *fmx_missing_reason(const struct fmx_call *c,
                    : "";
     }
     return "";
+}
+
+static const char *fmx_missing_reason(const struct fmx_call *c,
+                                      const char *source)
+{
+    return fmx_arr_missing_reason(fmx_arr(c, "missing"), source);
 }
 
 /* Rewrite one inbox file with exact content (a shorter file makes a
@@ -10561,20 +10573,22 @@ static int fmx_reconcile_rows(struct fmx_call *b, const char *hist, const char *
     ASSERT(task != NULL);
     ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
     ASSERT_STR_EQ(fmx_wstr(task, "reason"), "exact_attempt_owner_dead");
+    ASSERT(fmx_hist_bool(task, false));
     ASSERT_STR_EQ(fmx_wstr(task, "next_safe_command"), "fleet.steer.evidence");
     task = fmx_task_ref(b, "gated");
     ASSERT(task != NULL);
     ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
+    ASSERT(fmx_hist_bool(task, false));
     ASSERT_STR_EQ(fmx_wstr(task, "reason"), "scheduler_dependency_gate");
     ASSERT(fmx_wstr(task, "next_safe_command")[0] != '\0');
     task = fmx_task_ref(b, hist);
     ASSERT(task != NULL);
-    ASSERT(json_get_bool(json_get(task, "historical")));
+    ASSERT(fmx_hist_bool(task, true));
     ASSERT_STR_EQ(fmx_wstr(task, "column"), "history");
     ASSERT(fmx_wstr(task, "next_safe_command")[0] != '\0');
     task = fmx_task_ref(b, live);
     ASSERT(task != NULL);
-    ASSERT(!json_get_bool(json_get(task, "historical")));
+    ASSERT(fmx_hist_bool(task, false));
     ASSERT(strcmp(fmx_wstr(task, "column"), "history") != 0);
     ASSERT(fmx_wstr(task, "next_safe_command")[0] != '\0');
     ASSERT(!fmx_bool(b, "tasks_inventory_complete"));
@@ -10671,6 +10685,14 @@ static int fmx_reconcile_facts(struct fmx_call *b)
     ASSERT(task != NULL);
     ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
     ASSERT_STR_EQ(fmx_wstr(task, "reason"), "exact_attempt_owner_dead");
+    ASSERT(fmx_hist_bool(task, false));
+    ASSERT(fmx_hist_bool(fmx_task_ref(b, "orphan"), false));
+    {
+        const char *mcp_ledger = fmx_arr_missing_reason(
+            json_get(data, "missing"), "fleet.ledger");
+        const char *native_ledger = fmx_missing_reason(b, "fleet.ledger");
+        ASSERT_STR_EQ(mcp_ledger, native_ledger);
+    }
     ASSERT(fmx_blocker_has(b, "local receiver down: receive.lock free"));
     ASSERT(fmx_mcp_blocker_has(data, "local receiver down: receive.lock free"));
     json_free(&mcp_in);

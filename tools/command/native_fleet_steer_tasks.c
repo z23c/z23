@@ -221,6 +221,16 @@ static bool ft_queue_fields(struct json_value *out, const struct json_value *row
         json_push_kv_str(out, "proof", "unknown");
 }
 
+static bool ft_queue_class(struct json_value *out, const char *state,
+    const char *reason, bool running)
+{
+    return json_push_kv_str(out, "state", state) &&
+        json_push_kv_str(out, "column", state) &&
+        json_push_kv_bool(out, "historical", false) &&
+        json_push_kv_str(out, "reason", reason) &&
+        json_push_kv_str(out, "source_state", running ? "running" : "queued");
+}
+
 static void ft_queue_row(struct zcl_fmc_tasks *v, const struct json_value *row,
     bool running, long long observed, long long now)
 {
@@ -232,10 +242,7 @@ static void ft_queue_row(struct zcl_fmc_tasks *v, const struct json_value *row,
         state = "unknown"; reason = "source_observation_not_fresh";
     }
     bool ok = ft_common(&out, row, "dev.agent.queue", "name", observed, now) &&
-        json_push_kv_str(&out, "state", state) &&
-        json_push_kv_str(&out, "column", state) &&
-        json_push_kv_str(&out, "reason", reason) &&
-        json_push_kv_str(&out, "source_state", running ? "running" : "queued") &&
+        ft_queue_class(&out, state, reason, running) &&
         ft_queue_fields(&out, row) &&
         json_push_kv_str(&out, "next_safe_command", identity
             ? "fleet.steer.evidence" : "dev.agent.queue status") &&

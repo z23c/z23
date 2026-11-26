@@ -317,6 +317,12 @@ static int ft_screen_incomplete_cases(void)
     return 0;
 }
 
+static bool ft_hist_false(const struct json_value *row)
+{
+    const struct json_value *h = row ? json_get(row, "historical") : NULL;
+    return h && h->type == JSON_BOOL && !json_get_bool(h);
+}
+
 static int ft_metadata_cases(void)
 {
     struct zcl_fmc_tasks v;
@@ -347,6 +353,9 @@ static int ft_metadata_cases(void)
     FT_CHECK(ft_is(q, "observed_model", "unknown"));
     FT_CHECK(json_get_int(json_get(q, "priority")) == 1);
     FT_CHECK(ft_is(q, "column", "queued"));
+    FT_CHECK(ft_hist_false(q));
+    FT_CHECK(ft_hist_false(r));
+    FT_CHECK(ft_hist_false(bare));
     /* Queued-to-running: the same persisted metadata on the running row. */
     FT_CHECK(ft_is(r, "state", "executing"));
     FT_CHECK(ft_is(r, "column", "executing"));
