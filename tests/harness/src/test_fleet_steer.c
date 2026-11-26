@@ -9163,6 +9163,8 @@ static int fmx_t_snapshot_budget(void)
         bounded.request.budget_bytes=12000;
         ASSERT(fmx_run(&bounded,zcl_native_handle_fleet_steer_brief) && fmx_ok(&bounded));
         ASSERT(json_write(&bounded.reply.data,NULL,0)<=12000-1024);
+        ASSERT(fmx_get(&bounded, "cost") != NULL);
+        ASSERT(fmx_get(&bounded, "resources") != NULL);
         ASSERT(json_size(fmx_get(&bounded,"changes"))<normal_changes);
         ASSERT(json_get_int(json_get(fmx_get(&bounded,"budget_truncated"),"changes"))>0);
         size_t screen_budget=json_write(&bounded.reply.data,NULL,0)+1024+32;
@@ -10435,6 +10437,446 @@ static int fmx_t_brief_landings_shape(void)
     return failures;
 }
 
+static const struct json_value *fmx_task_ref(const struct fmx_call *c,
+                                             const char *ref)
+{
+    const struct json_value *arr = fmx_arr(c, "tasks");
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        if (strcmp(fmx_wstr(json_at(arr, i), "ref"), ref) == 0)
+            return json_at(arr, i);
+    }
+    return NULL;
+}
+
+static const struct json_value *fmx_arr_ref(const struct json_value *arr,
+                                            const char *ref)
+{
+    size_t n = arr && arr->type == JSON_ARR ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        if (strcmp(fmx_wstr(json_at(arr, i), "ref"), ref) == 0)
+            return json_at(arr, i);
+    }
+    return NULL;
+}
+
+static bool fmx_work_has(const struct fmx_call *c, const char *name)
+{
+    const struct json_value *arr = fmx_arr(c, "work");
+    size_t n = arr ? json_size(arr) : 0u, i;
+    for (i = 0; i < n; i++) {
+        const struct json_value *v = json_at(arr, i);
+        if (v && v->type == JSON_STR && json_get_str(v) &&
+            strcmp(json_get_str(v), name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool fmx_num_or_null(const struct json_value *o, const char *key)
+{
+    const struct json_value *v = o ? json_get(o, key) : NULL;
+    if (!v)
+        return false;
+    if (v->type == JSON_NULL)
+        return true;
+    return v->type == JSON_INT && json_get_int(v) >= 0;
+}
+
+/* The z23_run dispatch: registry execute_json, budget 0, no alias. */
+static bool fmx_brief_mcp(const struct json_value *input, struct json_value *out)
+{
+    static char wire[262144];
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), FMX_BRIEF_PATH, NULL);
+    struct zcl_command_spec copy;
+    enum zcl_command_exit rc = ZCL_COMMAND_EXIT_INTERNAL;
+    size_t n;
+    json_init(out);
+    if (!spec)
+        return false;
+    copy = *spec;
+    copy.handler = zcl_native_handle_fleet_steer_brief;
+    n = zcl_command_registry_execute_json(zcl_command_catalog(), &copy, NULL,
+        input, false, NULL, NULL, 0, 0, NULL, wire, sizeof(wire), &rc);
+    if (n == 0 || n >= sizeof(wire) || !json_read(out, wire, n))
+        return false;
+    return rc == ZCL_COMMAND_EXIT_OK;
+}
+
+static void fmx_queue_line(const char *name, const char *state, const char *dep,
+                           long long pid, long long start, long long seq,
+                           bool append)
+{
+    char line[768];
+    (void)snprintf(line, sizeof(line),
+                   "{\"seq\":%lld,\"ts\":\"2026-11-26T00:00:00Z\","
+                   "\"kind\":\"file\",\"name\":\"%s\",\"group\":\"g\","
+                   "\"path\":\"p\",\"brief\":\"\",\"model\":\"\",\"engine\":\"\","
+                   "\"attempt\":1,\"state\":\"%s\",\"worktree\":\"\","
+                   "\"pid_or_unit\":\"\",\"started\":0,\"priority\":1,"
+                   "\"depends_on\":\"%s\",\"owner_pid\":%lld,"
+                   "\"owner_start\":%lld}\n",
+                   seq, name, state, dep, pid, start);
+    fmx_state_file("queue", "queue.jsonl", line, append);
+}
+
+static bool fmx_mcp_blocker_has(const struct json_value *data, const char *needle)
+{
+    const struct json_value *bl = json_get(data, "blockers");
+    size_t n = bl && bl->type == JSON_ARR ? json_size(bl) : 0u;
+    size_t k;
+    for (k = 0; k < n; k++) {
+        const struct json_value *item = json_at(bl, k);
+        const char *s = item && item->type == JSON_STR ? json_get_str(item) : "";
+        if (s && strstr(s, needle))
+            return true;
+    }
+    return false;
+}
+
+static int fmx_reconcile_rows(struct fmx_call *b, const char *hist, const char *live)
+{
+    int failures = 0;
+    const struct json_value *task, *w, *sess;
+    ASSERT(fmx_cand(fmx_arr(b, "candidates"), "orphan") != NULL);
+    ASSERT(fmx_cand(fmx_arr(b, "candidates"), "gated") != NULL);
+    task = fmx_task_ref(b, "orphan");
+    ASSERT(task != NULL);
+    ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
+    ASSERT_STR_EQ(fmx_wstr(task, "reason"), "exact_attempt_owner_dead");
+    ASSERT_STR_EQ(fmx_wstr(task, "next_safe_command"), "fleet.steer.evidence");
+    task = fmx_task_ref(b, "gated");
+    ASSERT(task != NULL);
+    ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
+    ASSERT_STR_EQ(fmx_wstr(task, "reason"), "scheduler_dependency_gate");
+    ASSERT(fmx_wstr(task, "next_safe_command")[0] != '\0');
+    task = fmx_task_ref(b, hist);
+    ASSERT(task != NULL);
+    ASSERT(json_get_bool(json_get(task, "historical")));
+    ASSERT_STR_EQ(fmx_wstr(task, "column"), "history");
+    ASSERT(fmx_wstr(task, "next_safe_command")[0] != '\0');
+    task = fmx_task_ref(b, live);
+    ASSERT(task != NULL);
+    ASSERT(!json_get_bool(json_get(task, "historical")));
+    ASSERT(strcmp(fmx_wstr(task, "column"), "history") != 0);
+    ASSERT(fmx_wstr(task, "next_safe_command")[0] != '\0');
+    ASSERT(!fmx_bool(b, "tasks_inventory_complete"));
+    ASSERT(strstr(fmx_str(b, "tasks_coverage_reason"),
+                  "canonical_links_unavailable") != NULL);
+    ASSERT(strstr(fmx_str(b, "tasks_coverage_reason"),
+                  "remote_tasks_not_enumerated") != NULL);
+    ASSERT(strstr(fmx_str(b, "tasks_coverage_reason"),
+                  "landing_outcomes_last_10") != NULL);
+    ASSERT(fmx_get(b, "tasks_dropped") != NULL &&
+           fmx_get(b, "tasks_dropped")->type == JSON_INT);
+    ASSERT(fmx_get(b, "tasks_malformed") != NULL &&
+           fmx_get(b, "tasks_malformed")->type == JSON_INT);
+    ASSERT(fmx_int(b, "tasks_dropped") >= 0);
+    ASSERT(fmx_int(b, "tasks_malformed") >= 0);
+    ASSERT(fmx_blocker_has(b, "local receiver down: receive.lock free; "
+                              "next=fleet.steer.evidence"));
+    ASSERT(fmx_blocker_has(b, "stale-ref"));
+    ASSERT(fmx_blocker_has(b, "no receiver evidence after"));
+    ASSERT(fmx_blocker_has(b, "next=fleet.steer.evidence"));
+    ASSERT(!fmx_blocker_has(b, "outcome "));
+    ASSERT(!fmx_blocker_has(b, hist));
+    ASSERT(!fmx_blocker_has(b, "MAIL_READ_FAILED"));
+    ASSERT(!fmx_blocker_has(b, "past intake"));
+    w = fmx_worker(b, "local");
+    ASSERT(w != NULL);
+    ASSERT(strstr(fmx_wstr(w, "reason"), "history:") != NULL);
+    ASSERT(strstr(fmx_wstr(w, "reason"), "2 past intake failure") != NULL);
+    ASSERT(strstr(fmx_wstr(w, "reason"), "MAIL_READ_FAILED") != NULL);
+    ASSERT_STR_EQ(fmx_wstr(w, "next"), "dev.agent.queue status");
+    ASSERT(fmx_wint(w, "tokens_last_run") == 1234);
+    sess = fmx_session(b, "A");
+    ASSERT(sess != NULL);
+    ASSERT_STR_EQ(fmx_wstr(sess, "next"), "fleet.steer.evidence");
+_test_next:
+    return failures;
+}
+
+static int fmx_reconcile_facts(struct fmx_call *b)
+{
+    int failures = 0;
+    struct json_value mcp_in, mcp_out;
+    const struct json_value *res, *cost, *data, *task;
+    json_init(&mcp_in);
+    json_init(&mcp_out);
+    res = fmx_get(b, "resources");
+    ASSERT(res != NULL && res->type == JSON_OBJ);
+    ASSERT(json_get(res, "known") != NULL &&
+           json_get(res, "known")->type == JSON_BOOL);
+    ASSERT(fmx_num_or_null(res, "load1_centi"));
+    ASSERT(fmx_num_or_null(res, "mem_avail_kib"));
+    ASSERT(fmx_num_or_null(res, "disk_free_kib"));
+    ASSERT(fmx_wstr(res, "reason")[0] != '\0');
+    ASSERT_STR_EQ(fmx_wstr(res, "next"), "fleet.steer.evidence");
+    if (!json_get_bool(json_get(res, "known"))) {
+        ASSERT(json_get(res, "load1_centi")->type == JSON_NULL ||
+               json_get(res, "mem_avail_kib")->type == JSON_NULL ||
+               json_get(res, "disk_free_kib")->type == JSON_NULL);
+    }
+    cost = fmx_get(b, "cost");
+    ASSERT(cost != NULL && cost->type == JSON_OBJ);
+    ASSERT(json_get(cost, "latency_known")->type == JSON_BOOL);
+    ASSERT(json_get(cost, "cpu_known")->type == JSON_BOOL);
+    ASSERT(json_get(cost, "tokens_known")->type == JSON_BOOL);
+    ASSERT(json_get_bool(json_get(cost, "tokens_known")));
+    ASSERT(fmx_wint(cost, "tokens") == 1234);
+    ASSERT(fmx_wint(cost, "reply_bytes") ==
+           (long long)json_write(&b->reply.data, NULL, 0));
+    ASSERT(fmx_wint(cost, "reply_bytes") > 0);
+    if (json_get_bool(json_get(cost, "latency_known")))
+        ASSERT(fmx_wint(cost, "latency_us") >= 0);
+    else
+        ASSERT(fmx_wnull(cost, "latency_us"));
+    if (json_get_bool(json_get(cost, "cpu_known")))
+        ASSERT(fmx_wint(cost, "cpu_us") >= 0);
+    else
+        ASSERT(fmx_wnull(cost, "cpu_us"));
+    ASSERT_STR_EQ(fmx_wstr(cost, "next"), "fleet.steer.evidence");
+    json_set_object(&mcp_in);
+    (void)json_push_kv_int(&mcp_in, "since", 0);
+    (void)json_push_kv_bool(&mcp_in, "all", true);
+    (void)json_push_kv_bool(&mcp_in, "json", true);
+    ASSERT(fmx_brief_mcp(&mcp_in, &mcp_out));
+    data = json_get(&mcp_out, "data");
+    ASSERT(data != NULL && data->type == JSON_OBJ);
+    ASSERT(json_get_bool(json_get(data, "tasks_inventory_complete")) ==
+           fmx_bool(b, "tasks_inventory_complete"));
+    ASSERT_STR_EQ(fmx_wstr(data, "tasks_coverage_reason"),
+                  fmx_str(b, "tasks_coverage_reason"));
+    ASSERT_STR_EQ(fmx_wstr(data, "cursor_token"), fmx_str(b, "cursor_token"));
+    ASSERT(fmx_wint(data, "tasks_dropped") == fmx_int(b, "tasks_dropped"));
+    ASSERT(fmx_wint(data, "tasks_malformed") == fmx_int(b, "tasks_malformed"));
+    task = fmx_arr_ref(json_get(data, "tasks"), "orphan");
+    ASSERT(task != NULL);
+    ASSERT_STR_EQ(fmx_wstr(task, "state"), "blocked");
+    ASSERT_STR_EQ(fmx_wstr(task, "reason"), "exact_attempt_owner_dead");
+    ASSERT(fmx_blocker_has(b, "local receiver down: receive.lock free"));
+    ASSERT(fmx_mcp_blocker_has(data, "local receiver down: receive.lock free"));
+    json_free(&mcp_in);
+    json_free(&mcp_out);
+    return failures;
+_test_next:
+    json_free(&mcp_in);
+    json_free(&mcp_out);
+    return failures;
+}
+
+static int fmx_reconcile_once(const char *hist, const char *live)
+{
+    int failures = 0;
+    struct fmx_call b;
+    fmx_brief_all(&b, NULL, 0);
+    (void)json_push_kv_bool(&b.input, "json", true);
+    ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+    ASSERT(fmx_ok(&b));
+    ASSERT(fmx_missing_has(&b, "fleet.board"));
+    ASSERT(fmx_work_has(&b, "orphan"));
+    ASSERT(fmx_work_has(&b, "gated"));
+    failures += fmx_reconcile_rows(&b, hist, live);
+    if (failures)
+        goto _test_next;
+    failures += fmx_reconcile_facts(&b);
+    if (failures)
+        goto _test_next;
+    fmx_end(&b);
+    return 0;
+_test_next:
+    fmx_end(&b);
+    return failures ? failures : 1;
+}
+
+static int fmx_t_brief_reconcile(void)
+{
+    int failures = 0;
+    static const char hist[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    static const char live[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    TEST("steer: brief reconciles live rows and keeps history out of blockers") {
+        struct fmx_call q, b, page, stalled;
+        const char *token, *ref1, *ref2;
+        int pass;
+        long long i;
+        fmx_isolate("brief_reconcile");
+        fmx_prime_mail();
+        fmx_state_file("queue", "queue.jsonl",
+                       "{\"seq\":1,\"ts\":\"2026-11-26T00:00:00Z\","
+                       "\"kind\":\"file\",\"name\":\"tokjob\",\"group\":\"g\","
+                       "\"path\":\"p\",\"brief\":\"\",\"model\":\"\","
+                       "\"attempt\":1,\"state\":\"running\",\"worktree\":\"\","
+                       "\"pid_or_unit\":\"\",\"started\":0}\n"
+                       "{\"seq\":2,\"ts\":\"2026-11-26T00:00:00Z\","
+                       "\"kind\":\"file\",\"name\":\"nojob\",\"group\":\"g\","
+                       "\"path\":\"p\",\"brief\":\"\",\"model\":\"\","
+                       "\"attempt\":1,\"state\":\"running\",\"worktree\":\"\","
+                       "\"pid_or_unit\":\"\",\"started\":0}\n",
+                       false);
+        fmx_state_file("engine/tokjob/a1", "receipt.json",
+                       "{\"verdict\":\"pass\",\"worker\":\"wk\","
+                       "\"tokens\":1234,\"wall_ms\":99,\"ts\":1}\n",
+                       false);
+        fmx_state_file("engine/tokjob/a1", "run.out", "rc=0\n", false);
+        fmx_state_file("engine/nojob/a1", "run.out", "rc=1\n", false);
+        fmx_begin(&q, "dev.agent.queue", "zcl.agent_queue.v1");
+        (void)json_push_kv_str(&q.input, "action", "reap");
+        ASSERT(fmx_run(&q, zcl_native_handle_dev_agent_queue));
+        ASSERT(fmx_ok(&q));
+        ASSERT(fmx_wint(fmx_outcome_named(&q, "tokjob"), "tokens_used") == 1234);
+        fmx_end(&q);
+        fmx_queue_line("orphan", "running", "", 2147483646, 1, 3, false);
+        fmx_queue_line("gated", "queued", "not-done", 0, 0, 4, true);
+        fmx_state_file("land", "queue.jsonl",
+                       "{\"seq\":8,\"tip\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+                       "\"worktree\":\"/w/live\",\"state\":\"inflight\","
+                       "\"phase\":\"rebase\",\"attempt\":1}\n",
+                       false);
+        fmx_state_file("land", "outcomes.jsonl",
+                       "{\"seq\":9,\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+                       "\"worktree\":\"/w/hist\",\"state\":\"landed\",\"attempt\":1}\n",
+                       false);
+        fmx_state_file("receive", "intake.state",
+                       "position=\nfailures=2\nlast_error=MAIL_READ_FAILED\n",
+                       false);
+        fmx_state_file("receive", "receive.lock", "", false);
+        fmx_seed_inbox("self", "2026-01-01T00:00:00Z", 7, FMX_SENDER,
+                       "silent-box", "directive", "do the thing", "stale-ref");
+        fmx_state_file("steer", "sent.jsonl",
+                       "{\"key\":\"k-stale\",\"seq\":7,\"to\":\"silent-box\","
+                       "\"ref\":\"stale-ref\"}\n",
+                       true);
+        fmx_seed_inbox("peer", "2026-11-26T00:00:01Z", 11, "peer", "*",
+                       "note", "cursor one", "cursor-one");
+        fmx_seed_inbox("peer", "2026-11-26T00:00:02Z", 12, "peer", "*",
+                       "note", "cursor two", "cursor-two");
+        fmx_seed_presence("A", "box-a.lan", 30, 13);
+        for (pass = 0; pass < 2; pass++) {
+            failures += fmx_reconcile_once(hist, live);
+            if (failures)
+                goto _test_next;
+            printf("reconcile pass %d ok\n", pass);
+        }
+        ASSERT(fmx_forward_page(&page, "0|", 1, 65536));
+        token = fmx_str(&page, "cursor_token");
+        ref1 = fmx_wstr(json_at(fmx_arr(&page, "changes"), 0), "ref");
+        ASSERT(token[0] != '\0' && strchr(token, '|') != NULL);
+        ASSERT(strcmp(token, "0|") != 0);
+        ASSERT(ref1[0] != '\0');
+        ASSERT(fmx_changes_n(&page) == 1);
+        ASSERT(fmx_int(&page, "changes_dropped") > 0 ||
+               fmx_bool(&page, "changes_truncated"));
+        {
+            struct fmx_call next;
+            ASSERT(fmx_forward_page(&next, token, 1, 65536));
+            ref2 = fmx_wstr(json_at(fmx_arr(&next, "changes"), 0), "ref");
+            ASSERT(ref2[0] != '\0');
+            ASSERT(strcmp(ref1, ref2) != 0);
+            ASSERT(strcmp(fmx_str(&next, "cursor_token"), token) != 0);
+            fmx_end(&next);
+        }
+        fmx_end(&page);
+        fmx_brief_since(&stalled, NULL, "0|");
+        (void)json_push_kv_int(&stalled.input, "limit", 1);
+        (void)json_push_kv_bool(&stalled.input, "json", true);
+        stalled.request.budget_bytes = 1024;
+        ASSERT(fmx_run(&stalled, zcl_native_handle_fleet_steer_brief));
+        ASSERT(!fmx_ok(&stalled));
+        ASSERT_STR_EQ(stalled.reply.error.code, "BRIEF_PAGE_STALLED");
+        ASSERT(stalled.reply.error.next_action[0] != '\0');
+        fmx_end(&stalled);
+        for (i = 0; i < 40; i++) {
+            char name[32];
+            (void)snprintf(name, sizeof(name), "pad-%02lld", i);
+            fmx_queue_line(name, "queued", "", 0, 0, 20 + i, true);
+        }
+        fmx_brief_all(&b, NULL, 0);
+        (void)json_push_kv_bool(&b.input, "json", true);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        ASSERT(fmx_int(&b, "tasks_dropped") > 0);
+        ASSERT(!fmx_bool(&b, "tasks_inventory_complete"));
+        ASSERT(strstr(fmx_str(&b, "tasks_coverage_reason"),
+                      "remote_tasks_not_enumerated") != NULL);
+        ASSERT(!fmx_blocker_has(&b, hist));
+        ASSERT(!fmx_blocker_has(&b, "outcome "));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+static int fmx_t_brief_cost(void)
+{
+    int failures = 0;
+
+    TEST("steer: a warm local brief records cost and stays under 100 ms") {
+        struct fmx_call warm, b;
+        int i;
+        fmx_isolate("brief_cost");
+        fmx_brief_all(&warm, NULL, 0);
+        (void)json_push_kv_bool(&warm.input, "json", true);
+        ASSERT(fmx_run(&warm, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&warm));
+        fmx_end(&warm);
+        for (i = 0; i < 2; i++) {
+            const struct json_value *cost;
+            int64_t t0, t1, wall_us;
+            fmx_brief_all(&b, NULL, 0);
+            (void)json_push_kv_bool(&b.input, "json", true);
+            t0 = clock_now_monotonic_ns();
+            ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+            t1 = clock_now_monotonic_ns();
+            ASSERT(fmx_ok(&b));
+            ASSERT(t1 >= t0);
+            wall_us = (t1 - t0) / 1000;
+            cost = fmx_get(&b, "cost");
+            ASSERT(cost != NULL && cost->type == JSON_OBJ);
+            ASSERT(json_get(cost, "latency_known") != NULL &&
+                   json_get(cost, "latency_known")->type == JSON_BOOL);
+            ASSERT(json_get(cost, "cpu_known") != NULL &&
+                   json_get(cost, "cpu_known")->type == JSON_BOOL);
+            ASSERT(json_get(cost, "tokens_known") != NULL &&
+                   json_get(cost, "tokens_known")->type == JSON_BOOL);
+            if (json_get_bool(json_get(cost, "latency_known")))
+                ASSERT(fmx_wint(cost, "latency_us") >= 0 &&
+                       fmx_wint(cost, "latency_us") < 100000);
+            else
+                ASSERT(fmx_wnull(cost, "latency_us"));
+            if (json_get_bool(json_get(cost, "cpu_known")))
+                ASSERT(fmx_wint(cost, "cpu_us") >= 0);
+            else
+                ASSERT(fmx_wnull(cost, "cpu_us"));
+            if (json_get_bool(json_get(cost, "tokens_known")))
+                ASSERT(fmx_wint(cost, "tokens") >= 0);
+            else
+                ASSERT(fmx_wnull(cost, "tokens"));
+            ASSERT(fmx_wint(cost, "reply_bytes") > 0);
+            ASSERT(fmx_wint(cost, "reply_bytes") ==
+                   (long long)json_write(&b.reply.data, NULL, 0));
+            ASSERT(wall_us < 100000);
+            printf("cost pass %d wall_us=%lld latency_us=%lld reply_bytes=%lld "
+                   "cpu_us=%lld tokens_known=%d\n",
+                   i, (long long)wall_us, fmx_wint(cost, "latency_us"),
+                   fmx_wint(cost, "reply_bytes"), fmx_wint(cost, "cpu_us"),
+                   json_get_bool(json_get(cost, "tokens_known")) ? 1 : 0);
+            fmx_end(&b);
+        }
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 /* ── cost: the pass parses each row once, not once per directive scan ──── */
 
 unsigned long long zcl_fleet_steer_test_row_parses(void);
@@ -11240,6 +11682,10 @@ int test_fleet_steer(void)
     failures += fmx_t_floor_offset();
     failures += fmx_t_delivery_gap();
     failures += fmx_t_series2();
+    failures += fmx_t_brief_reconcile();
+    failures += fmx_t_brief_reconcile();
+    failures += fmx_t_brief_cost();
+    failures += fmx_t_brief_cost();
 
     /* No ASSERT lives in this function, so no goto needs the label: the
      * hook is always cleared on the single fall-through path. */

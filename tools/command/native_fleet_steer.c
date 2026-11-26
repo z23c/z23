@@ -173,8 +173,10 @@
  *   blocked  the newest answer is a refusal, queued local work has no
  *            resident worker to claim it, or the local receiver's intake
  *            (the same mail pull) failed in this brief; the cumulative
- *            count in receive/intake.state is named in the reason as
- *            history, never taken as a current block;
+ *            count in receive/intake.state is prefixed "history:" in the
+ *            reason and is never a current blocker. A non-pass queue
+ *            outcome stays in the retained outcomes for completed-by-ref
+ *            and receipt tokens; it is history, not a blocker.
  *   idle     evidence newer than FMC_WORKER_ALIVE_WINDOW_S and nothing open;
  *   unknown  everything else,
  * always with a reason. A lock held or a name seen is liveness at most,
@@ -2771,6 +2773,28 @@ static void fmc_local_resources(struct fmc_worker *e, char *why, size_t cap)
                          "could not read it");
 }
 
+/* Host resources even when no resident worker is listed. Unknown reads
+ * stay JSON null; known is true only when all three reads answered.
+ * A full snapshot attaches this before the fit. A forward page and the
+ * compact default omit it, so their byte cuts stay put. */
+static bool fmc_host_resources_obj(struct json_value *o)
+{
+    struct fmc_worker e;
+    char why[96];
+    memset(&e, 0, sizeof(e));
+    fmc_local_resources(&e, why, sizeof(why));
+    json_init(o);
+    json_set_object(o);
+    return fmc_put_int(o, "load1_centi", e.load1) &&
+           fmc_put_int(o, "mem_avail_kib", e.mem_kib) &&
+           fmc_put_int(o, "disk_free_kib", e.disk_kib) &&
+           json_push_kv_bool(o, "known",
+                             e.load1 >= 0 && e.mem_kib >= 0 &&
+                                 e.disk_kib >= 0) &&
+           json_push_kv_str(o, "reason", why) &&
+           json_push_kv_str(o, "next", "fleet.steer.evidence");
+}
+
 static void fmc_remote_resources(const struct fmc_worker *e, char *why,
                                  size_t cap)
 {
@@ -2853,8 +2877,8 @@ static const char *fmc_local_fill(struct fmc_worker *e,
     if (c->lo->intake_failures > 0) {
         size_t used = strlen(why);
         (void)snprintf(why + used, cap - used,
-                       "; receiver intake.state records %lld past intake "
-                       "failure(s), last_error=%.48s",
+                       "; history: receiver intake.state records %lld past "
+                       "intake failure(s), last_error=%.48s",
                        c->lo->intake_failures,
                        c->lo->intake_error[0] ? c->lo->intake_error
                                               : "unstated");
@@ -2910,6 +2934,9 @@ static void fmc_worker_emit(struct json_value *arr, struct fmc_worker *e,
     (void)json_push_kv_str(&o, "resources_reason", res_why);
     (void)json_push_kv_str(&o, "state", state);
     (void)json_push_kv_str(&o, "reason", why);
+    (void)json_push_kv_str(&o, "next",
+                           e->local ? "dev.agent.queue status"
+                                    : "fleet.steer.evidence");
     (void)json_push_back(arr, &o);
     json_free(&o);
 }
@@ -3393,6 +3420,7 @@ static void fmc_session_emit(struct json_value *arr,
     }
     fmc_put_known_int(&o, "mail_seq", s->seq);
     fmc_session_links(&o, s, ro);
+    (void)json_push_kv_str(&o, "next", "fleet.steer.evidence");
     (void)json_push_back(arr, &o);
     json_free(&o);
 }
@@ -3547,14 +3575,20 @@ static void fmc_sessions_emit(struct json_value *data,
     fmc_directives_emit(data, &ro->dt);
 }
 
-/* Push one bounded blocker string. */
+/* Push one bounded blocker string. Every live blocker names one next
+ * command. The suffix is applied here so callers keep their own text. */
 static void fmc_push_blocker(struct json_value *blockers, const char *b)
 {
+    char line[320];
     struct json_value item;
-    if (json_size(blockers) >= FMC_BLOCKER_CAP)
+    int n;
+    if (!blockers || !b || json_size(blockers) >= FMC_BLOCKER_CAP)
+        return;
+    n = snprintf(line, sizeof(line), "%s; next=fleet.steer.evidence", b);
+    if (n <= 0 || (size_t)n >= sizeof(line))
         return;
     json_init(&item);
-    json_set_str(&item, b);
+    json_set_str(&item, line);
     (void)json_push_back(blockers, &item);
     json_free(&item);
 }
@@ -5448,39 +5482,6 @@ static void fmc_queue_row_name(const struct json_value *r,
         (void)fmc_push_distinct(list, name, FMC_LIST_CAP);
 }
 
-/* One non-pass outcome row as a bounded blocker string. Pass-like rows
- * are not blockers and stay silent here. */
-static void fmc_queue_outcome_row(const struct json_value *r,
-                                  struct json_value *blockers)
-{
-    const struct json_value *v;
-    const char *verdict, *name;
-    long long rc;
-    char b[160];
-    int wlen;
-    struct json_value item;
-    if (!r || r->type != JSON_OBJ || !blockers)
-        return;
-    v = json_get(r, "verdict");
-    verdict = (v && v->type == JSON_STR) ? json_get_str(v) : "";
-    v = json_get(r, "rc");
-    rc = (v && v->type == JSON_INT) ? (long long)json_get_int(v) : -1;
-    if (!verdict[0] || fmc_verdict_pass(verdict, rc))
-        return;
-    v = json_get(r, "name");
-    name = (v && v->type == JSON_STR) ? json_get_str(v) : "?";
-    wlen = snprintf(b, sizeof(b), "outcome %s %s rc=%lld", name, verdict,
-                    rc);
-    if (wlen <= 0 || (size_t)wlen >= sizeof(b))
-        return;
-    if (json_size(blockers) >= FMC_BLOCKER_CAP)
-        return;
-    json_init(&item);
-    json_set_str(&item, b);
-    (void)json_push_back(blockers, &item);
-    json_free(&item);
-}
-
 /* One outcome's receipt-stated token cost into the local usage totals.
  * The status projection is oldest first, so the last known one is the
  * last run. A null (no receipt) is skipped, never summed as zero. */
@@ -5499,16 +5500,15 @@ static void fmc_queue_outcome_usage(const struct json_value *r,
         (view->tok_total < 0 ? 0 : view->tok_total) + view->tok_last;
 }
 
-/* Non-pass outcomes become blockers; the whole array is retained for
- * completed-by-ref matching after the sub reply is freed. */
+/* The whole outcome array is retained for completed-by-ref matching and
+ * receipt token sums. A non-pass verdict is history, not a current blocker. */
 static void fmc_queue_outcomes(struct fmc_sub *sub,
-                               struct json_value *blockers,
                                struct json_value *outcomes_keep,
                                struct fmc_queue_view *view)
 {
     const struct json_value *arr;
     size_t n, i;
-    if (!sub || !blockers || !outcomes_keep)
+    if (!sub || !outcomes_keep)
         return;
     arr = json_get(&sub->reply.data, "outcomes");
     if (!arr || arr->type != JSON_ARR)
@@ -5516,10 +5516,8 @@ static void fmc_queue_outcomes(struct fmc_sub *sub,
     /* Bounded by the sibling's own cap. */
     json_copy(outcomes_keep, arr);
     n = json_size(arr);
-    for (i = 0; i < n && i < FMC_BLOCKER_CAP * 4; i++) {
-        fmc_queue_outcome_row(json_at(arr, i), blockers);
+    for (i = 0; i < n && i < FMC_BLOCKER_CAP * 4; i++)
         fmc_queue_outcome_usage(json_at(arr, i), view);
-    }
 }
 
 /* Pool numbers become capacity, but only when the pool is measured: a
@@ -5612,16 +5610,15 @@ static void fmc_queue_rows(struct fmc_sub *sub, struct json_value *work,
 
 /* ── brief: queue section ────────────────────────────────────────────────
  *
- * Running/queued names become work + candidates; non-pass outcomes become
- * blockers; pool numbers become capacity. Completed-by-ref matching reads
- * the outcomes array for name==ref with an explicit pass verdict. A
- * sibling that did not answer leaves view->known false with the reason,
- * so capacity reports unknown instead of an idle zero. */
+ * Running/queued names become work + candidates; pool numbers become
+ * capacity. Outcomes stay for completed-by-ref matching and receipt
+ * tokens. A non-pass outcome is not a current blocker. A sibling that
+ * did not answer leaves view->known false with the reason, so capacity
+ * reports unknown instead of an idle zero. */
 
 static void fmc_brief_queue(const struct zcl_command_request *req,
                             struct json_value *work,
                             struct zcl_fmc_cand_reg *cand,
-                            struct json_value *blockers,
                             struct json_value *missing,
                             struct fmc_queue_view *view,
                             struct json_value *outcomes_keep,
@@ -5675,7 +5672,7 @@ static void fmc_brief_queue(const struct zcl_command_request *req,
     if (!zcl_fmc_tasks_queue(tasks, &sub.reply.data, now, now))
         fmc_note_missing(missing, "dev.agent.queue", "task_source_malformed", 0);
     if (unavailable) tasks->queue_ok = false;
-    fmc_queue_outcomes(&sub, blockers, outcomes_keep, view);
+    fmc_queue_outcomes(&sub, outcomes_keep, view);
     fmc_cand_from_outcomes(cand, outcomes_keep);
     fmc_queue_pool(&sub, view);
     fmc_sub_end(&sub);
@@ -5726,7 +5723,6 @@ static void fmc_board_blocker(struct json_value *blockers, size_t *dropped,
     char b[192];
     char lead[FMC_LEAD_MAX + 1];
     int wlen;
-    struct json_value item;
     if (!blockers || !kind)
         return;
     fmc_lead(text ? text : "", lead, sizeof(lead));
@@ -5739,10 +5735,7 @@ static void fmc_board_blocker(struct json_value *blockers, size_t *dropped,
             (*dropped)++;
         return;
     }
-    json_init(&item);
-    json_set_str(&item, b);
-    (void)json_push_back(blockers, &item);
-    json_free(&item);
+    fmc_push_blocker(blockers, b);
 }
 
 /* One board post's agent/kind/text/ref into the brief lists. Open problems
@@ -6639,6 +6632,105 @@ static void fmc_brief_observe_if_fits(struct json_value *data, size_t budget);
  * the budget the page already closed. */
 #define FMC_BRIEF_OBS_BYTES 65u
 
+/* Seven digits: the fitted page is under the soft budget, and a warm brief
+ * is far under ten seconds. Converging the real counts only shrinks. */
+#define FMC_COST_PLACEHOLDER 1000000LL
+
+static bool fmc_cost_obj(struct json_value *cost, long long tokens)
+{
+    json_init(cost);
+    json_set_object(cost);
+    return json_push_kv_int(cost, "latency_us", FMC_COST_PLACEHOLDER) &&
+           json_push_kv_bool(cost, "latency_known", true) &&
+           json_push_kv_int(cost, "cpu_us", FMC_COST_PLACEHOLDER) &&
+           json_push_kv_bool(cost, "cpu_known", true) &&
+           json_push_kv_int(cost, "reply_bytes", FMC_COST_PLACEHOLDER) &&
+           fmc_put_int(cost, "tokens", tokens) &&
+           json_push_kv_bool(cost, "tokens_known", tokens >= 0) &&
+           json_push_kv_str(cost, "next", "fleet.steer.evidence");
+}
+
+/* Put cost and resources on the unfitted full snapshot. Fit trims arrays
+ * only, so a page cut to its ceiling still carries both. A forward page
+ * and the compact default omit them and report success. */
+static bool fmc_brief_attach_facts(struct json_value *data, bool include_tasks,
+                                   const struct fmc_mail_view *mv,
+                                   long long tokens)
+{
+    struct json_value obj;
+    bool ok = true;
+    if ((mv && mv->forward) || json_get_bool(json_get(data, "compact")))
+        return true;
+    if (include_tasks) {
+        ok = fmc_host_resources_obj(&obj) &&
+             json_push_kv(data, "resources", &obj);
+        json_free(&obj);
+    }
+    if (!ok)
+        return false;
+    ok = fmc_cost_obj(&obj, tokens) && json_push_kv(data, "cost", &obj);
+    json_free(&obj);
+    return ok;
+}
+
+static void fmc_cost_stamp_us(struct json_value *cost, const char *num,
+                              const char *known_key,
+                              int64_t (*clock_now)(void), int64_t start)
+{
+    struct json_value *n = (struct json_value *)json_get(cost, num);
+    struct json_value *k = (struct json_value *)json_get(cost, known_key);
+    int64_t end;
+    if (!n || !k)
+        return;
+    end = start < 0 ? (int64_t)-1 : clock_now();
+    if (start < 0 || end < start) {
+        json_set_null(n);
+        json_set_bool(k, false);
+        return;
+    }
+    json_set_int(n, (end - start) / 1000);
+}
+
+static void fmc_cost_reply_bytes(struct json_value *data)
+{
+    struct json_value *cost = (struct json_value *)json_get(data, "cost");
+    struct json_value *bytes =
+        cost ? (struct json_value *)json_get(cost, "reply_bytes") : NULL;
+    int i;
+    if (!bytes || bytes->type != JSON_INT)
+        return;
+    for (i = 0; i < 4; i++) {
+        size_t n = json_write(data, NULL, 0);
+        if ((int64_t)n == json_get_int(bytes))
+            return;
+        json_set_int(bytes, (int64_t)n);
+    }
+}
+
+/* Clocks shrink before the screen decision. reply_bytes stays the wide
+ * placeholder until the screen marker is in the body, then converges. */
+static void fmc_brief_cost_clocks(struct zcl_command_reply *reply,
+                                  int64_t wall0, int64_t cpu0)
+{
+    struct json_value *cost;
+    if (!reply || reply->status != ZCL_COMMAND_STATUS_PASSED)
+        return;
+    cost = (struct json_value *)json_get(&reply->data, "cost");
+    if (!cost)
+        return;
+    fmc_cost_stamp_us(cost, "latency_us", "latency_known",
+                      clock_now_monotonic_ns, wall0);
+    fmc_cost_stamp_us(cost, "cpu_us", "cpu_known",
+                      clock_thread_cpu_ns, cpu0);
+}
+
+static void fmc_brief_cost_bytes(struct zcl_command_reply *reply)
+{
+    if (!reply || reply->status != ZCL_COMMAND_STATUS_PASSED)
+        return;
+    fmc_cost_reply_bytes(&reply->data);
+}
+
 static bool fmc_brief_close_budget(struct zcl_command_reply *reply,
                                    const struct fmc_mail_view *mv, size_t budget,
                                    long long base_tasks_dropped, bool include_tasks,
@@ -6664,7 +6756,8 @@ static bool fmc_brief_close_budget(struct zcl_command_reply *reply,
 
 static void fmc_brief_finalize(const struct zcl_command_request *req,
                                struct zcl_command_reply *reply,
-                               const struct fmc_mail_view *mv, bool include_tasks)
+                               const struct fmc_mail_view *mv, bool include_tasks,
+                               long long tokens)
 {
     long long base_tasks_dropped = json_get_int(json_get(&reply->data, "tasks_dropped"));
     size_t budget = fmc_brief_data_budget(req);
@@ -6672,6 +6765,11 @@ static void fmc_brief_finalize(const struct zcl_command_request *req,
     struct json_value saved;
     bool held = false;
     bool stamped = false;
+    if (!fmc_brief_attach_facts(&reply->data, include_tasks, mv, tokens)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED",
+                 "brief cost metadata could not be copied", "json");
+        return;
+    }
     json_init(&saved);
     if (fit < budget && json_copy_checked(&saved, &reply->data))
         held = true;
@@ -6814,7 +6912,7 @@ static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_co
         return;
     }
     if (!changes_only && !fmc_brief_snapshot_tail(req, reply, l, mv)) return;
-    fmc_brief_finalize(req, reply, mv, !changes_only);
+    fmc_brief_finalize(req, reply, mv, !changes_only, ec->qv->tok_last);
 }
 
 /* Keep source diagnostics on a failed compact read, never a usable cursor. */
@@ -6900,35 +6998,56 @@ static bool fmc_screen_append_blockers(const struct json_value *data,
     return true;
 }
 
+static bool fmc_brief_screen_place(struct json_value *data, const char *screen,
+                                   size_t budget)
+{
+    struct json_value trial;
+    json_init(&trial);
+    if (!json_copy_checked(&trial, data)) {
+        json_free(&trial);
+        return false;
+    }
+    if (json_push_kv_str(&trial, "screen", screen) &&
+        json_write(&trial, NULL, 0) <= budget) {
+        json_free(data);
+        *data = trial;
+        return true;
+    }
+    json_free(&trial);
+    json_init(&trial);
+    if (!json_copy_checked(&trial, data) ||
+        !json_push_kv_bool(&trial, "screen_omitted", true) ||
+        json_write(&trial, NULL, 0) > budget) {
+        json_free(&trial);
+        return false;
+    }
+    json_free(data);
+    *data = trial;
+    return true;
+}
+
 static void fmc_brief_screen(const struct zcl_command_request *req,
                              struct zcl_command_reply *reply)
 {
-    char screen[4096]; struct json_value trial;
-    size_t budget=fmc_brief_data_budget(req);
-    zcl_fmc_tasks_screen(&reply->data,screen,sizeof(screen));
+    char screen[4096];
+    size_t budget = fmc_brief_data_budget(req);
+    zcl_fmc_tasks_screen(&reply->data, screen, sizeof(screen));
     if (!fmc_screen_append_blockers(&reply->data, screen, sizeof(screen))) {
-        if (json_push_kv_bool(&reply->data,"screen_omitted",true) &&
-            json_write(&reply->data,NULL,0)<=budget) return;
-        json_free(&reply->data); json_set_object(&reply->data);
-        fmc_fail(reply,"BRIEF_BUDGET_EXCEEDED","required brief metadata exceeds the response budget","budget_bytes");
+        if (json_push_kv_bool(&reply->data, "screen_omitted", true) &&
+            json_write(&reply->data, NULL, 0) <= budget)
+            return;
+        json_free(&reply->data);
+        json_set_object(&reply->data);
+        fmc_fail(reply, "BRIEF_BUDGET_EXCEEDED",
+                 "required brief metadata exceeds the response budget", "budget_bytes");
         return;
     }
-    json_init(&trial);
-    bool ok=json_copy_checked(&trial,&reply->data) && json_push_kv_str(&trial,"screen",screen);
-    if (!ok) {
-        json_free(&trial);
-        json_free(&reply->data); json_set_object(&reply->data);
-        fmc_fail(reply,"BRIEF_PROJECTION_FAILED","brief screen could not be copied","json");
+    if (fmc_brief_screen_place(&reply->data, screen, budget))
         return;
-    }
-    if (json_write(&trial,NULL,0)<=budget) {
-        json_free(&reply->data); reply->data=trial; return;
-    }
-    json_free(&trial);
-    if (json_push_kv_bool(&reply->data,"screen_omitted",true) &&
-        json_write(&reply->data,NULL,0)<=budget) return;
-    json_free(&reply->data); json_set_object(&reply->data);
-    fmc_fail(reply,"BRIEF_BUDGET_EXCEEDED","required brief metadata exceeds the response budget","budget_bytes");
+    json_free(&reply->data);
+    json_set_object(&reply->data);
+    fmc_fail(reply, "BRIEF_BUDGET_EXCEEDED",
+             "required brief metadata exceeds the response budget", "budget_bytes");
 }
 
 static void fmc_do_brief(const struct zcl_command_request *req,
@@ -6937,6 +7056,8 @@ static void fmc_do_brief(const struct zcl_command_request *req,
 {
     const int64_t observation_deadline_ms = platform_time_monotonic_ms() +
         ZCL_COMMAND_LATENCY_BUDGET_FAST_MS - FMC_BRIEF_FINISH_RESERVE_MS;
+    const int64_t wall0 = clock_now_monotonic_ns();
+    const int64_t cpu0 = clock_thread_cpu_ns();
     struct fmc_brief_lists l;
     struct fmc_mail_ctx mc;
     struct fmc_mail_view mv;
@@ -6979,7 +7100,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     mail_cursor = fmc_brief_mail(req, &mc, &l.missing, &mv, changes_only);
     ro.dt.forward_page = mv.forward;
     ro.window_cut = mv.window_cut;
-    fmc_brief_queue(req, &l.work, &l.cand, &l.blockers, &l.missing,
+    fmc_brief_queue(req, &l.work, &l.cand, &l.missing,
                     &qv, &l.outcomes, &l.tasks);
     fmc_brief_land(req, &l.tasks, &l.missing, changes_only, mc.landings);
     fmc_brief_board(&board, &l.agents, &l.blockers, &l.cand, &l.missing,
@@ -7004,10 +7125,12 @@ static void fmc_do_brief(const struct zcl_command_request *req,
         fmc_compact_read_failure(reply, &l, who);
     else
         fmc_brief_reply(req, reply, &l, &ro, &ec, &mv, mail_cursor, changes_only);
+    fmc_brief_cost_clocks(reply, wall0, cpu0);
     if (reply->status == ZCL_COMMAND_STATUS_PASSED && !mv.forward &&
         !json_get_bool(json_get(req->input, "json"))) {
         fmc_brief_screen(req,reply);
     }
+    fmc_brief_cost_bytes(reply);
     fmc_lists_free(&l);
     fmc_roster_free(&ro);
 }
