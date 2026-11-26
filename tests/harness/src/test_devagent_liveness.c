@@ -16,9 +16,12 @@
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
 #include "config/command_catalog.h"
+#include "crypto/ed25519.h"
+#include "fleet_enrol.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +38,7 @@ static char g_liv_seen[1024];
 static char g_liv_binding[ZCL_FLEET_STEER_BINDING_HEX + 1];
 static long long g_liv_expiry;
 static bool g_liv_grant_ok;
+static bool g_liv_route;
 
 static void liv_isolate(const char *tag)
 {
@@ -50,6 +54,7 @@ static void liv_isolate(const char *tag)
                        getenv("XDG_STATE_HOME"));
     setenv("XDG_STATE_HOME", g_liv_state, 1);
     g_liv_grant_ok = false;
+    g_liv_route = false;
     g_liv_binding[0] = '\0';
 }
 
@@ -282,6 +287,64 @@ static bool liv_mint(char *id, size_t cap)
     return ok;
 }
 
+/* A decided local route, so a retry can queue instead of STEER_NO_ROUTE. */
+static bool liv_route_ready(void)
+{
+    uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32], sec[32];
+    uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+    uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char line[FLEET_ENROL_MACHINE_TEXT_MAX], path[FLEET_ENROL_PATH_MAX];
+    struct fleet_invite invite;
+    struct fleet_receipt parsed;
+    struct fleet_signing_key signer;
+    struct fleet_box_facts facts;
+    struct platform_private_file file;
+    size_t invite_len = 0, receipt_len = 0;
+    const char *why = NULL;
+    if (g_liv_route)
+        return true;
+    memset(&facts, 0, sizeof(facts));
+    (void)snprintf(facts.os, sizeof(facts.os), "Linux");
+    memset(op_seed, 0x51, 32);
+    ed25519_keypair(op_pub, sec, op_seed);
+    memset(sec, 0, sizeof(sec));
+    memset(box_seed, 0x11, 32);
+    ed25519_keypair(box_pub, sec, box_seed);
+    memset(sec, 0, sizeof(sec));
+    memset(signer.seed, 0x21, 32);
+    ed25519_keypair(signer.pubkey, sec, signer.seed);
+    memset(sec, 0, sizeof(sec));
+    if (!fleet_enrol_operator_write(op_pub, &why))
+        return false;
+    if (!fleet_enrol_state_path("box.ed25519", path, sizeof(path)))
+        return false;
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(path, &file))
+        return false;
+    bool wrote = platform_private_file_write_at(&file, box_seed, 32, 0) &&
+                 platform_private_file_authority_flush(&file);
+    platform_private_file_close(&file);
+    if (!wrote)
+        return false;
+    if (!fleet_invite_mint("home-box", 24, "", op_seed, op_pub, 1790000000LL,
+                           token, sizeof(token), &invite, &why) ||
+        !fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
+                            &invite_len, &why) ||
+        !fleet_receipt_mint(invite_wire, invite_len, "", &facts, "", box_seed,
+                            box_pub, &signer, receipt, sizeof(receipt), &why) ||
+        !fleet_receipt_parse(receipt, &parsed, receipt_wire, sizeof(receipt_wire),
+                             &receipt_len, &why) ||
+        !fleet_machine_mint(receipt_wire, receipt_len, 1790000000LL,
+                            FLEET_ENROL_PORT_FIRST, op_seed, op_pub, line,
+                            sizeof(line), &why) ||
+        !fleet_roster_append(line, &why))
+        return false;
+    g_liv_route = true;
+    return true;
+}
+
 static bool liv_send(const char *grant, const char *body, const char *ref,
                      const char *key, bool *duplicate, long long *seq)
 {
@@ -291,6 +354,8 @@ static bool liv_send(const char *grant, const char *body, const char *ref,
     bool ok;
     *duplicate = false;
     *seq = -1;
+    if (!liv_route_ready())
+        return false;
     json_init(&items);
     json_set_array(&items);
     json_init(&item);
