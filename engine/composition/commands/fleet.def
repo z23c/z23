@@ -725,7 +725,7 @@ ZCL_COMMAND_READY_READ(
     "ref; blocked: refusal, unclaimable queue or failed intake; idle: "
     "evidence within alive_window_s=900 and no open work. Bare "
     "names/processes prove no work. Session freshness live|stale|UNKNOWN "
-    "differs from activity active|completed|blocked|stale|UNKNOWN. "
+    "differs from activity busy|idle|completed|blocked|stale|UNKNOWN. "
     "sessions_active_reported: self-reports, not model turns. Unknown "
     "numbers null; capacity known/reason; tokens require receipts. "
     "Delivery/answer states; reply_to_origin is heuristic. "
@@ -791,32 +791,32 @@ ZCL_COMMAND_READY_COMMAND(
     "fleet.steer.presence", "fleet.steer", "",
     "A live session posts its own presence row so the fleet brief counts it",
     "Builds the strict presence.v1 line (host, pid, started, observed, role, "
-    "task, phase, source; never binary_sha256) and posts it as a note to * "
+    "task, phase, source, head, progress, blockers; never binary_sha256) and posts it as a note to * "
     "under ref presence-<role> through the dev.agent.mail post path in "
     "process, so it works from the release z23 without the developer build. "
     "role is 1..32 of letters, digits, . _ - ; phase is active, running, "
-    "build, test, blocked or completed; task is short text. Optional: pid "
+    "build, test, busy, idle, blocked or completed; task is short text. Optional: pid "
     "(the session's own process, must be alive on this host; default this "
     "process), session, started (session start, YYYY-MM-DDTHH:MM:SSZ; default "
     "the recorded start of this role's live session, else now) and source "
-    "(default claude). Every field is an unauthenticated self-report: the pid "
+    "(default claude), head (default the current checkout), progress and blockers. Every field is an unauthenticated self-report: the pid "
     "check only proves some process exists, and any local caller can post any "
     "role. A bad role, phase, pid or a credential-shaped value is refused "
     "with an explanatory body and posts nothing. A repeat of the same role "
-    "and phase within 60 s is answered as skipped and adds no row. hook=start"
+    "and phase within 30 s is answered as skipped and adds no row. hook=start"
     "|beat|end is the Claude Code session hook: it reads session_id from the "
     "hook JSON on stdin (or session), takes a role from a fixed pool "
     "<source>-1..8 per host (reusing the lowest whose last row is completed "
-    "or older than 900 s), posts at most once per 300 s on beat and "
+    "or older than 60 s), posts at most once per 30 s on beat and "
     "phase=completed on end. The brief dates the row by its mail ts: a "
-    "session is live for 900 s, so run this at start and at least every 300 "
+    "session is live for 60 s, so run this at start and at least every 30 "
     "s; completed reads as activity completed at once. It posts only when "
     "run and contacts no peer. Hook mode always exits 0: a failure is logged to "
     "presence/hook.log and answered as skipped. An end in the same second as "
     "the last post waits 1.1 s so the brief orders the rows.", 4096,
     "fleet,steer,presence,heartbeat,session,agent,liveness",
     "zcl.fleet_steer_presence.input.v1", "zcl.fleet_steer_presence.v1",
-    "role,task,phase,pid,session,started,source,hook", "",
+    "role,task,phase,pid,session,started,source,head,progress,blockers,hook", "",
     "z23 fleet steer presence --role=A --task=card-1 --phase=active",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,

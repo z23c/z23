@@ -4408,13 +4408,13 @@ static int fmx_t_session_edges(void)
                                  fmx_activity_wall_ms, (void *)saved_clock};
     clock_set_default(&fixed_clock);
 
-    TEST("steer: activity uses the inclusive 900-second freshness boundary") {
+    TEST("steer: activity uses the inclusive 60-second freshness boundary") {
         struct fmx_call b;
         const struct json_value *s;
         fmx_isolate("activity_boundary");
         fmx_prime_mail();
-        fmx_seed_presence("A", "box-a", 900, 1);
-        fmx_seed_presence("B", "box-b", 901, 2);
+        fmx_seed_presence("A", "box-a", 60, 1);
+        fmx_seed_presence("B", "box-b", 61, 2);
         /* Pin inherited clock-skew semantics without strengthening the claim:
          * a future row has age zero and remains only a reported activity. */
         fmx_seed_presence("C", "box-c", -3600, 3);
@@ -4422,16 +4422,17 @@ static int fmx_t_session_edges(void)
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         s = fmx_session(&b, "A");
-        ASSERT(fmx_wint(s, "age_s") == 900);
+        ASSERT(fmx_wint(s, "age_s") == 60);
         ASSERT_STR_EQ(fmx_wstr(s, "state"), "live");
-        ASSERT_STR_EQ(fmx_wstr(s, "activity"), "active");
+        ASSERT_STR_EQ(fmx_wstr(s, "activity"), "busy");
+        ASSERT(fmx_int(&b, "alive_window_s") == 900);
         s = fmx_session(&b, "B");
-        ASSERT(fmx_wint(s, "age_s") == 901);
+        ASSERT(fmx_wint(s, "age_s") == 61);
         ASSERT_STR_EQ(fmx_wstr(s, "state"), "stale");
         ASSERT_STR_EQ(fmx_wstr(s, "activity"), "stale");
         s = fmx_session(&b, "C");
         ASSERT(fmx_wint(s, "age_s") == 0);
-        ASSERT_STR_EQ(fmx_wstr(s, "activity"), "active");
+        ASSERT_STR_EQ(fmx_wstr(s, "activity"), "busy");
         ASSERT(fmx_int(&b, "sessions_active_reported") == 2);
         ASSERT(strstr(fmx_str(&b, "sessions_active_basis"),
                       "not model-turn proof") != NULL);
@@ -4541,7 +4542,7 @@ static int fmx_t_session_edges(void)
         ASSERT(fmx_int(&b, "sessions_active_reported") == 12);
         for (i = 0; i < json_size(fmx_arr(&b, "sessions")); i++)
             ASSERT_STR_EQ(fmx_wstr(json_at(fmx_arr(&b, "sessions"), i),
-                                   "activity"), "active");
+                                   "activity"), "busy");
         cut = fmx_get(&b, "budget_truncated");
         ASSERT(fmx_wint(cut, "changes") > 0);
         ASSERT(strstr(fmx_str(&b, "sessions_active_basis"),
@@ -4572,14 +4573,16 @@ static int fmx_t_sessions(void)
             const char *activity;
             long long active;
         } cases[] = {
-            {"active", 30, "live", "active", 1},
-            {"running", 30, "live", "active", 1},
-            {"build", 30, "live", "active", 1},
-            {"test", 30, "live", "active", 1},
+            {"active", 30, "live", "busy", 1},
+            {"running", 30, "live", "busy", 1},
+            {"build", 30, "live", "busy", 1},
+            {"test", 30, "live", "busy", 1},
+            {"busy", 30, "live", "busy", 1},
+            {"idle", 30, "live", "idle", 0},
             {"completed", 30, "live", "completed", 0},
             {"blocked", 30, "live", "blocked", 0},
             {"active", 7200, "stale", "stale", 0},
-            {"completed", 7200, "stale", "stale", 0},
+            {"completed", 7200, "stale", "completed", 0},
             {"unrecognized", 30, "live", "UNKNOWN", 0},
             {"", 30, "live", "UNKNOWN", 0}
         };
@@ -4624,7 +4627,7 @@ static int fmx_t_sessions(void)
         s = fmx_session(&b, "A");
         ASSERT(s != NULL);
         ASSERT_STR_EQ(fmx_wstr(s, "state"), "live");
-        ASSERT_STR_EQ(fmx_wstr(s, "activity"), "active");
+        ASSERT_STR_EQ(fmx_wstr(s, "activity"), "busy");
         ASSERT_STR_EQ(fmx_wstr(s, "format"), "presence.v1");
         ASSERT_STR_EQ(fmx_wstr(s, "host"), "box-a.lan");
         ASSERT_STR_EQ(fmx_wstr(s, "session"), "sess-A-1");

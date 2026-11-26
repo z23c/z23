@@ -4,14 +4,14 @@
  *
  * The brief (native_fleet_steer.c, "brief: agent sessions") knows a session
  * only from a `note` row under ref presence-<ROLE> whose body is the strict
- * presence.v1 line, live while that row's mail ts is within 900 s. Nothing
+ * presence.v1 line, live while that row's mail ts is within 60 s. Nothing
  * wrote those rows. This leaf is the writer: it states only facts this
  * process can observe (host, pid, clock) plus what the caller passes, builds
  * the exact line, and hands it to the existing dev.agent.mail post leaf in
  * process. It owns no ledger and no second mail writer. Truthfulness:
  *   - it posts only when a session runs it, never on a timer of its own;
  *   - the row is dated by the mail leaf at post time and so expires by
- *     itself 900 s later; a session that ends simply stops refreshing, and
+ *     itself 60 s later; a session that ends simply stops refreshing, and
  *     `--phase=completed` ends it at once;
  *   - a stated pid must be a live process on this host, else the post is
  *     refused rather than faked;
@@ -21,6 +21,7 @@
 #include "command/native_command.h"
 
 #include "command/native_dev_agents.h"
+#include "command/native_code_priv.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
 #include "command/native_fleet_presence.h"
@@ -45,8 +46,8 @@
 
 #define FPR_LOG "fleet.steer.presence"
 #define FPR_ROLE_MAX 32u
-#define FPR_REPEAT_S 300
-#define FPR_WINDOW_S 900
+#define FPR_REPEAT_S 30
+#define FPR_WINDOW_S 60
 #define FPR_SECRET_RUN 24u
 
 static bool fpr_quiet;
@@ -57,7 +58,8 @@ void zcl_presence_quiet(bool on)
 }
 
 static const char *const fpr_phases[] = {"active", "running", "build", "test",
-                                         "blocked", "completed"};
+                                         "busy", "idle", "blocked",
+                                         "completed"};
 
 void zcl_presence_fail(struct zcl_command_reply *reply, const char *code,
                      const char *message, const char *evidence)
@@ -127,6 +129,15 @@ static bool fpr_value_ok(const char *v, size_t max, bool text)
     return !fpr_has_word(v) && !fpr_has_run(v);
 }
 
+static bool fpr_head_ok(const char *head)
+{
+    if (!head || strlen(head) != 40) return false;
+    for (size_t i = 0; i < 40; i++)
+        if (!isxdigit((unsigned char)head[i]) || isupper((unsigned char)head[i]))
+            return false;
+    return true;
+}
+
 static bool fpr_ts_ok(const char *ts)
 {
     static const char pat[] = "dddd-dd-ddTdd:dd:ddZ";
@@ -157,6 +168,17 @@ static bool fpr_phase_ok(const char *p)
             return true;
     }
     return false;
+}
+
+static const char *fpr_optional_bad(const struct zcl_presence_in *in)
+{
+    if (in->head && !fpr_head_ok(in->head))
+        return "head";
+    if (in->progress && !fpr_value_ok(in->progress, 96, true))
+        return "progress";
+    if (in->blockers && !fpr_value_ok(in->blockers, 96, true))
+        return "blockers";
+    return NULL;
 }
 
 /* A stated pid names a live process here, or the post is a false claim. */
@@ -216,6 +238,8 @@ static bool fpr_check(struct zcl_command_reply *reply, const struct zcl_presence
         bad = "started";
     else if (in->source && !fpr_value_ok(in->source, 96, true))
         bad = "source";
+    else
+        bad = fpr_optional_bad(in);
     if (!bad)
         return true;
     zcl_presence_fail(reply, "PRESENCE_BAD_FIELD",
@@ -235,10 +259,14 @@ static bool fpr_body(char *out, size_t cap, const struct zcl_presence_in *in,
         (void)snprintf(sess, sizeof(sess), "s%lld", in->pid);
     n = snprintf(out, cap,
                  "presence.v1; host=%s; session=%s; pid=%lld; started=%s; "
-                 "role=%s; observed=%s; task=%s; phase=%s; source=%s",
+                 "role=%s; observed=%s; task=%s; phase=%s; source=%s; "
+                 "head=%s; progress=%s; blockers=%s",
                  host, sess, in->pid, in->started ? in->started : now,
                  in->role, now, in->task, in->phase,
-                 in->source ? in->source : "claude");
+                 in->source ? in->source : "claude",
+                 in->head ? in->head : "UNKNOWN",
+                 in->progress ? in->progress : "UNKNOWN",
+                 in->blockers ? in->blockers : "UNKNOWN");
     return n > 0 && (size_t)n < cap;
 }
 
@@ -305,7 +333,7 @@ static bool fpr_validate(struct zcl_command_reply *reply,
     }
     if (!fpr_phase_ok(in->phase)) {
         zcl_presence_fail(reply, "PRESENCE_BAD_PHASE",
-                 "phase must be one of active, running, build, test, blocked or completed; the first four count as active work, completed ends the session",
+                 "phase must be one of active, running, build, test, busy, idle, blocked or completed; the first five count as busy work, idle has no open work, completed ends the session",
                  "phase");
         return false;
     }
@@ -373,7 +401,7 @@ void zcl_presence_emit(const struct zcl_command_request *req,
 {
     struct zcl_presence_in w = *in;
     struct zcl_presence_rec rec;
-    char host[96], now_ts[32], ref[64], body[512], sess[72];
+    char host[96], now_ts[32], ref[64], body[1024], sess[72], head[65];
     long long seq = -1, now = (long long)platform_time_wall_time_t();
     bool have;
     zcl_agents_host_name(host, sizeof(host));
@@ -382,7 +410,7 @@ void zcl_presence_emit(const struct zcl_command_request *req,
     have = in->role && zcl_presence_rec_load(in->role, &rec);
     if (fpr_floor_hit(&rec, have, in->phase, now)) {
         zcl_presence_reply_skipped(reply, in->role,
-                                   "the same role and phase was posted less than 60 s ago");
+                                   "the same role and phase was posted less than 30 s ago");
         return;
     }
     now = fpr_settle(&rec, have, in->phase, now);
@@ -391,6 +419,9 @@ void zcl_presence_emit(const struct zcl_command_request *req,
         (void)snprintf(sess, sizeof(sess), "r-%s", in->role);
         w.session = sess;
     }
+    if (!w.head &&
+        zcl_native_workspace_head(zcl_native_source_root(req), head, sizeof(head)))
+        w.head = head;
     w.started = fpr_started(in, &rec, have, now, now_ts);
     if (!fpr_check(reply, &w, host))
         return;
@@ -430,6 +461,9 @@ void zcl_native_handle_fleet_steer_presence(
     in.session = zcl_presence_str(request, "session");
     in.started = zcl_presence_str(request, "started");
     in.source = zcl_presence_str(request, "source");
+    in.head = zcl_presence_str(request, "head");
+    in.progress = zcl_presence_str(request, "progress");
+    in.blockers = zcl_presence_str(request, "blockers");
     if (!zcl_presence_pid_in(request, &in.pid)) {
         zcl_presence_fail(reply, "PRESENCE_PID_NOT_LIVE",
                  "pid must be a whole number naming a running process on this host",

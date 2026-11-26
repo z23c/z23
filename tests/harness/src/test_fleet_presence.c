@@ -210,8 +210,8 @@ static int fpt_t_round_trip(void)
         ASSERT_STR_EQ(fpt_s(&c.reply.data, "ref"), "presence-A");
         ASSERT(strncmp(fpt_s(&c.reply.data, "body"), "presence.v1; host=", 18) == 0);
         ASSERT(strstr(fpt_s(&c.reply.data, "body"), "binary_sha256") == NULL);
-        ASSERT(fpt_i(&c.reply.data, "live_window_s") == 900);
-        ASSERT(fpt_i(&c.reply.data, "repeat_every_s") == 300);
+        ASSERT(fpt_i(&c.reply.data, "live_window_s") == 60);
+        ASSERT(fpt_i(&c.reply.data, "repeat_every_s") == 30);
         fpt_call_end(&c);
         for (size_t i = 1; i < sizeof(roles) / sizeof(roles[0]); i++)
             ASSERT(fpt_post_ok(roles[i], "running"));
@@ -220,7 +220,7 @@ static int fpt_t_round_trip(void)
         s = fpt_session(&b, "A");
         ASSERT(s != NULL);
         ASSERT_STR_EQ(fpt_s(s, "state"), "live");
-        ASSERT_STR_EQ(fpt_s(s, "activity"), "active");
+        ASSERT_STR_EQ(fpt_s(s, "activity"), "busy");
         ASSERT_STR_EQ(fpt_s(s, "task"), "card-presence-1");
         ASSERT_STR_EQ(fpt_s(s, "phase"), "active");
         ASSERT_STR_EQ(fpt_s(s, "source"), "codex");
@@ -242,16 +242,16 @@ _test_next:
 static int fpt_t_expiry(void)
 {
     int failures = 0;
-    TEST("presence: a row expires by itself after 900 s and completed ends it") {
+    TEST("presence: a row expires by itself after 60 s and completed ends it") {
         struct fpt_call b;
         fpt_begin_case("expiry");
         ASSERT(fpt_post_ok("A", "active"));
-        g_fpt_offset_s = 899;
+        g_fpt_offset_s = 59;
         fpt_brief(&b);
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "state"), "live");
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 1);
         fpt_call_end(&b);
-        g_fpt_offset_s = 901;
+        g_fpt_offset_s = 61;
         fpt_brief(&b);
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "state"), "stale");
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "activity"), "stale");
@@ -259,11 +259,65 @@ static int fpt_t_expiry(void)
         fpt_call_end(&b);
         /* A refresh makes it live again; completed retires it at once. */
         ASSERT(fpt_post_ok("A", "active"));
-        g_fpt_offset_s = 910;
+        g_fpt_offset_s = 70;
         ASSERT(fpt_post_ok("A", "completed"));
         fpt_brief(&b);
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "activity"), "completed");
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 0);
+        fpt_call_end(&b);
+        fpt_end_case();
+        PASS();
+    }
+_test_next:
+    fpt_end_case();
+    return failures;
+}
+
+static int fpt_t_fields_and_states(void)
+{
+    int failures = 0;
+    TEST("presence: HEAD, progress and blockers round trip with busy and idle states") {
+        struct fpt_call b, c;
+        fpt_begin_case("fields_states");
+        fpt_call_begin(&c, FPT_PRESENCE, "zcl.fleet_steer_presence.v1");
+        (void)json_push_kv_str(&c.input, "role", "Z");
+        (void)json_push_kv_str(&c.input, "task", "gate-17");
+        (void)json_push_kv_str(&c.input, "phase", "blocked");
+        (void)json_push_kv_str(&c.input, "head",
+            "0123456789abcdef0123456789abcdef01234567");
+        (void)json_push_kv_str(&c.input, "progress", "proof running");
+        (void)json_push_kv_str(&c.input, "blockers", "lint failed");
+        zcl_native_handle_fleet_steer_presence(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(fpt_s(&c.reply.data, "body"),
+                      "head=0123456789abcdef0123456789abcdef01234567") != NULL);
+        ASSERT(strstr(fpt_s(&c.reply.data, "body"), "progress=proof running") != NULL);
+        ASSERT(strstr(fpt_s(&c.reply.data, "body"), "blockers=lint failed") != NULL);
+        fpt_call_end(&c);
+        fpt_brief(&b);
+        const struct json_value *s = fpt_session(&b, "Z");
+        ASSERT(s != NULL);
+        ASSERT_STR_EQ(fpt_s(s, "state"), "live");
+        ASSERT_STR_EQ(fpt_s(s, "activity"), "blocked");
+        ASSERT_STR_EQ(fpt_s(s, "head"),
+                      "0123456789abcdef0123456789abcdef01234567");
+        ASSERT_STR_EQ(fpt_s(s, "progress"), "proof running");
+        ASSERT_STR_EQ(fpt_s(s, "blockers"), "lint failed");
+        ASSERT(fpt_i(s, "age_s") >= 0 && fpt_i(s, "age_s") <= 60);
+        fpt_call_end(&b);
+        ASSERT(fpt_presence(&c, "Z", "gate-17", "idle", NULL, NULL));
+        fpt_call_end(&c);
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "Z"), "activity"), "idle");
+        ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 0);
+        fpt_call_end(&b);
+        ASSERT(fpt_presence(&c, "Z", "gate-17", "busy", NULL, NULL));
+        fpt_call_end(&c);
+        fpt_brief(&b);
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "Z"), "activity"), "busy");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "Z"), "progress"), "UNKNOWN");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "Z"), "blockers"), "UNKNOWN");
+        ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 1);
         fpt_call_end(&b);
         fpt_end_case();
         PASS();
@@ -372,8 +426,8 @@ static int fpt_t_pool(void)
         fpt_brief(&b);
         ASSERT(b.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 5);
-        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-1"), "activity"), "active");
-        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-5"), "activity"), "active");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-1"), "activity"), "busy");
+        ASSERT_STR_EQ(fpt_s(fpt_session(&b, "claude-5"), "activity"), "busy");
         ASSERT(fpt_session(&b, "claude-9") == NULL);
         ASSERT(fpt_i(&b.reply.data, "sessions_total") <= 12);
         fpt_call_end(&b);
@@ -393,12 +447,12 @@ static int fpt_t_hook_cadence(void)
         bool skipped = false;
         fpt_begin_case("cadence");
         ASSERT(fpt_hook_ok("start", "abc123", &skipped) && !skipped);
-        g_fpt_offset_s = 100;
+        g_fpt_offset_s = 10;
         ASSERT(fpt_hook_ok("beat", "abc123", &skipped) && skipped);
-        g_fpt_offset_s = 301;
+        g_fpt_offset_s = 31;
         ASSERT(fpt_hook_ok("beat", "abc123", &skipped) && !skipped);
         ASSERT(fpt_hook_ok("beat", "abc123", &skipped) && skipped);
-        g_fpt_offset_s = 330;
+        g_fpt_offset_s = 60;
         ASSERT(fpt_hook_ok("end", "abc123", &skipped) && !skipped);
         ASSERT(fpt_hook_ok("end", "abc123", &skipped) && skipped);
         ASSERT(fpt_hook_ok("end", "never-started", &skipped) && skipped);
@@ -485,11 +539,11 @@ _test_next:
 static int fpt_t_stale_role(void)
 {
     int failures = 0;
-    TEST("presence hook: the role of a crashed session is reused after 900 s") {
+    TEST("presence hook: the role of a crashed session is reused after 60 s") {
         struct zcl_presence_rec rec;
         fpt_begin_case("stalerole");
         ASSERT(fpt_hook_ok("start", "crashed", NULL));
-        g_fpt_offset_s = 100;
+        g_fpt_offset_s = 10;
         ASSERT(fpt_hook_ok("start", "second", NULL));
         ASSERT(zcl_presence_rec_load("claude-1", &rec));
         ASSERT_STR_EQ(rec.owner, "crashed");
@@ -511,7 +565,7 @@ _test_next:
 static int fpt_t_floor_and_started(void)
 {
     int failures = 0;
-    TEST("presence: a same-role same-phase repeat inside 60 s adds no row; started and end hold") {
+    TEST("presence: a same-role same-phase repeat inside 30 s adds no row; started and end hold") {
         struct fpt_call c, b;
         char first[32];
         fpt_begin_case("floor");
@@ -521,7 +575,7 @@ static int fpt_t_floor_and_started(void)
         ASSERT(json_get(&c.reply.data, "skipped") != NULL);
         ASSERT(json_get(&c.reply.data, "seq") == NULL);
         fpt_call_end(&c);
-        g_fpt_offset_s = 61;
+        g_fpt_offset_s = 31;
         ASSERT(fpt_presence(&c, "A", "t", "active", NULL, NULL));
         ASSERT(json_get(&c.reply.data, "skipped") == NULL);
         fpt_call_end(&c);
@@ -531,7 +585,7 @@ static int fpt_t_floor_and_started(void)
         ASSERT(strlen(first) == 20);
         fpt_call_end(&b);
         /* The same live role keeps its start time across later posts. */
-        g_fpt_offset_s = 200;
+        g_fpt_offset_s = 40;
         ASSERT(fpt_post_ok("A", "running"));
         fpt_brief(&b);
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "started"), first);
@@ -607,6 +661,7 @@ int test_fleet_presence(void)
     int failures = 0;
     failures += fpt_t_round_trip();
     failures += fpt_t_expiry();
+    failures += fpt_t_fields_and_states();
     failures += fpt_t_refusals();
     failures += fpt_t_pool();
     failures += fpt_t_hook_cadence();

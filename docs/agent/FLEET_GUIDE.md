@@ -115,12 +115,13 @@ build/bin/z23-dev dev agent mail wait   # bounded wait for the next row
   `type=mail` and the four locator fields.
 
 **Presence.** The fleet brief reports a session as live only from its own
-`presence.v1` note under ref `presence-<ROLE>`, newer than 900 s, and
-`sessions_active_reported` counts those in phase active, running, build or
-test. A session writes that row itself, on the node host, with
+`presence.v1` note under ref `presence-<ROLE>`, newer than 60 s, and
+`sessions_active_reported` counts those in phase active, running, build,
+test or busy. A fresh phase idle reports no open work; blocked, completed,
+stale and UNKNOWN remain distinct. A session writes that row itself, on the node host, with
 `z23 fleet steer presence --role=<ROLE> --task=<card-or-ref> --phase=active`
 (release `z23` or `z23-dev`; it posts through the `dev.agent.mail` leaf, never
-a second writer). Run it at start and at least every 5 minutes; run it once with
+a second writer). Run it at start and at least every 30 seconds; run it once with
 `--phase=completed` when done. Claude Code sessions with the `z23-fleet`
 plugin do this from hooks (`z23 fleet steer presence --hook=start|beat|end`,
 session id read from the hook JSON; hook mode always exits 0, logging any failure to presence/hook.log under the state root, so a missing or older z23 never disturbs the session); each takes a role from the pool
@@ -129,12 +130,15 @@ stale, because the brief tracks a bounded table of roles. Any other agent,
 including one driven over ssh from another machine, runs the one-liner on the
 node:
 `ssh <node> 'z23 fleet steer presence --role=<ROLE> --task=<ref> --phase=active --source=ssh-from-<machine>'`.
-All fields are unauthenticated self-reports: a stated `--pid` must be a running
+HEAD defaults to the current checkout read through the existing workspace
+reader; progress and blockers are optional explicit self-reports and read
+UNKNOWN when not supplied. All fields are unauthenticated self-reports: a
+stated `--pid` must be a running
 process on the node, but that proves only that a process exists, and any local
 caller can post any role, so post only while your session is alive and only
 for yourself. Credential-shaped text is refused, the same role and phase
-within 60 s adds no row, and a session that stops posting reads stale within
-900 s. A `z23` older than the build that added this command refuses it as an
+within 30 s adds no row, and a session that stops posting reads stale within
+60 s. A `z23` older than the build that added this command refuses it as an
 unknown command.
 
 **Claim convention.** Before you edit, take the file claim:

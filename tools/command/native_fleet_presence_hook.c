@@ -6,7 +6,7 @@
  * kind defaults to claude), never one per session: the fleet brief tracks
  * a bounded, never-evicted table of roles, so a role per session would fill
  * it for good. A session claims the role it already owns, else the
- * lowest-numbered role whose last post is completed or older than the 900 s
+ * lowest-numbered role whose last post is completed or older than the 60 s
  * live window, else (pool full) shares the role with the oldest post. Claims
  * live in <state root>/presence/role-<role>; a lost claim race heals at the
  * next beat. The hook JSON on stdin supplies session_id; --session skips it. */
@@ -250,7 +250,7 @@ static void fph_run(const struct zcl_command_request *req,
         return;
     }
     if (fph_throttled(mode, owned, &rec, now)) {
-        zcl_presence_reply_skipped(reply, role, "beat posted less than 300 s ago");
+        zcl_presence_reply_skipped(reply, role, "beat posted less than 30 s ago");
         return;
     }
     memset(&in, 0, sizeof(in));
@@ -262,6 +262,9 @@ static void fph_run(const struct zcl_command_request *req,
     in.phase = is_end ? "completed" : fph_or(zcl_presence_str(req, "phase"), "active");
     in.source = kind;
     in.started = zcl_presence_str(req, "started");
+    in.head = zcl_presence_str(req, "head");
+    in.progress = zcl_presence_str(req, "progress");
+    in.blockers = zcl_presence_str(req, "blockers");
     if (!zcl_presence_pid_in(req, &in.pid)) {
         zcl_presence_fail(reply, "PRESENCE_PID_NOT_LIVE",
                           "pid must be a whole number naming a running process",

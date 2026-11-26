@@ -12,12 +12,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ZCL_PRESENCE_FLOOR_S 60
-#define ZCL_PRESENCE_BEAT_S 300
-#define ZCL_PRESENCE_WINDOW_S 900
+#define ZCL_PRESENCE_FLOOR_S 30
+#define ZCL_PRESENCE_BEAT_S 30
+#define ZCL_PRESENCE_WINDOW_S 60
 
 struct zcl_presence_in {
     const char *role, *task, *phase, *session, *started, *source, *owner;
+    const char *head, *progress, *blockers;
     long long pid;
 };
 

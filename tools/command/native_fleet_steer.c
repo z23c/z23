@@ -150,7 +150,7 @@
  *            (the same mail pull) failed in this brief; the cumulative
  *            count in receive/intake.state is named in the reason as
  *            history, never taken as a current block;
- *   idle     evidence newer than FMC_ALIVE_WINDOW_S and nothing open;
+ *   idle     evidence newer than FMC_WORKER_ALIVE_WINDOW_S and nothing open;
  *   unknown  everything else,
  * always with a reason. A lock held or a name seen is liveness at most,
  * never work. A receive.lock file that exists and is not held means the
@@ -169,7 +169,7 @@
  * Muse `workers`. Mail `from` is the box's Unix user, so a session is
  * known only from its own `note` row under ref presence-<ROLE> carrying
  * the strict presence.v1 line documented at the sessions section below.
- * state is presence freshness: live within FMC_ALIVE_WINDOW_S of that row's ts, stale past it
+ * state is presence freshness: live within FMC_SESSION_ALIVE_WINDOW_S of that row's ts, stale past it
  * (with age_s), and UNKNOWN when no row exists; a missing or refused
  * field is the string "UNKNOWN". Linked workers are named, never copied;
  * `muse_spend` sums the workers' receipt tokens, and reservations stay
@@ -338,7 +338,7 @@
 
 /* Worker roster: at most FMC_WORKER_TRACK distinct identities are tracked
  * per brief and FMC_WORKER_CAP are emitted, newest first; the rest are
- * counted in workers_total. Evidence newer than FMC_ALIVE_WINDOW_S counts
+ * counted in workers_total. Evidence newer than FMC_WORKER_ALIVE_WINDOW_S counts
  * as alive; a directive this host sent that is still queued with no
  * receiver evidence after FMC_QUEUED_STALE_S becomes a blocker. The reply
  * data is held under FMC_REPLY_SOFT_BUDGET so the leaf's 64 KiB response
@@ -348,7 +348,8 @@
 #define FMC_DONE_TRACK 256u
 #define FMC_DIRECTIVE_SCAN 64
 #define FMC_STALE_BLOCKER_CAP 8
-#define FMC_ALIVE_WINDOW_S 900LL
+#define FMC_WORKER_ALIVE_WINDOW_S 900LL
+#define FMC_SESSION_ALIVE_WINDOW_S 60LL
 #define FMC_QUEUED_STALE_S 120LL
 /* Directive backlog: a seen recipient silent this long is gone; at most
  * FMC_DQ_CAP recipients are grouped in directive_queue[]. */
@@ -2588,11 +2589,11 @@ static const char *fmc_remote_state(const struct fmc_worker *e,
                        e->ref, e->stage[0] ? e->stage : "unstated");
         return "unknown";
     }
-    if (alive >= 0 && alive <= FMC_ALIVE_WINDOW_S) {
+    if (alive >= 0 && alive <= FMC_WORKER_ALIVE_WINDOW_S) {
         (void)snprintf(why, cap,
                        "last evidence %llds ago, within the %llds window; "
                        "no open claim",
-                       alive, FMC_ALIVE_WINDOW_S);
+                       alive, FMC_WORKER_ALIVE_WINDOW_S);
         return "idle";
     }
     if (alive < 0) {
@@ -2601,7 +2602,7 @@ static const char *fmc_remote_state(const struct fmc_worker *e,
         return "unknown";
     }
     (void)snprintf(why, cap, "last evidence %llds ago, older than the %llds "
-                   "window", alive, FMC_ALIVE_WINDOW_S);
+                   "window", alive, FMC_WORKER_ALIVE_WINDOW_S);
     return "unknown";
 }
 
@@ -2816,7 +2817,7 @@ static void fmc_workers_emit(struct json_value *data, struct fmc_roster *ro,
                             ro->untracked == 0 && !ro->window_cut);
     (void)json_push_kv_bool(data, "workers_truncated",
                             total > json_size(&arr) || ro->untracked > 0);
-    (void)json_push_kv_int(data, "alive_window_s", FMC_ALIVE_WINDOW_S);
+    (void)json_push_kv_int(data, "alive_window_s", FMC_WORKER_ALIVE_WINDOW_S);
     json_free(&arr);
 }
 
@@ -2839,7 +2840,7 @@ static void fmc_workers_emit(struct json_value *data, struct fmc_roster *ro,
  * refused_fields, never echoed. The change lead of a presence row is
  * replaced for the same reason: the body leaves this leaf only through
  * the parsed whitelist. The newest row per role decides; state is live
- * within FMC_ALIVE_WINDOW_S of that row's own ts, stale past it (with the
+ * within FMC_SESSION_ALIVE_WINDOW_S of that row's own ts, stale past it (with the
  * age), and UNKNOWN with no row at all. Every missing field is the string
  * "UNKNOWN", never empty and never 0. Linked workers are the workers[]
  * names whose self-reported host equals the session's host, referenced by
@@ -2873,6 +2874,9 @@ static const struct fmc_pkey fmc_pkeys[] = {
     {"task", "task", FMC_PV_TEXT, 96},
     {"phase", "phase", FMC_PV_WORD, 32},
     {"source", "source", FMC_PV_TEXT, 96},
+    {"head", "head", FMC_PV_WORD, 40},
+    {"progress", "progress", FMC_PV_TEXT, 96},
+    {"blockers", "blockers", FMC_PV_TEXT, 96},
     {"binary_sha256", "binary_sha256", FMC_PV_SHA256, 64},
     {"workers", "workers_reported", FMC_PV_LIST, 96},
     {"spend", "spend_tokens", FMC_PV_INT, 18},
@@ -3024,7 +3028,7 @@ static bool fmc_pv_ok(const struct fmc_pkey *k, const char *val, size_t n)
             return false;
     }
     return !fmc_has_secret_word(val) &&
-           !fmc_has_secret_run(val, strcmp(k->key, "source") == 0);
+           !fmc_has_secret_run(val, (strcmp(k->key, "source") == 0 || strcmp(k->key, "head") == 0));
 }
 
 /* One `key=value` segment. Unknown keys are ignored; the first stated
@@ -3137,14 +3141,14 @@ static const char *fmc_session_state(const struct fmc_session *s,
     else if (age < 0)
         (void)snprintf(why, cap, "%s",
                        "presence row carries no parseable ts");
-    else if (age <= FMC_ALIVE_WINDOW_S)
+    else if (age <= FMC_SESSION_ALIVE_WINDOW_S)
         (void)snprintf(why, cap, "presence row %llds old, within the "
-                       "%llds window", age, FMC_ALIVE_WINDOW_S);
+                       "%llds window", age, FMC_SESSION_ALIVE_WINDOW_S);
     else
         (void)snprintf(why, cap, "presence row %llds old, older than the "
-                       "%llds window", age, FMC_ALIVE_WINDOW_S);
+                       "%llds window", age, FMC_SESSION_ALIVE_WINDOW_S);
     if (s->seen && age >= 0)
-        state = age <= FMC_ALIVE_WINDOW_S ? "live" : "stale";
+        state = age <= FMC_SESSION_ALIVE_WINDOW_S ? "live" : "stale";
     if (s->seen && !s->parsed) {
         size_t used = strlen(why);
         (void)snprintf(why + used, cap - used, "%s",
@@ -3163,18 +3167,21 @@ static const char *fmc_session_activity(const struct fmc_session *s,
     size_t i;
     if (!s->seen || !s->parsed || age < 0)
         return "UNKNOWN";
-    if (age > FMC_ALIVE_WINDOW_S)
-        return "stale";
     for (i = 0; i < FMC_PKEYS; i++)
         if (strcmp(fmc_pkeys[i].key, "phase") == 0)
             phase = s->val[i];
     if (strcmp(phase, "completed") == 0)
         return "completed";
+    if (age > FMC_SESSION_ALIVE_WINDOW_S)
+        return "stale";
     if (strcmp(phase, "blocked") == 0)
         return "blocked";
+    if (strcmp(phase, "idle") == 0)
+        return "idle";
     if (strcmp(phase, "active") == 0 || strcmp(phase, "running") == 0 ||
-        strcmp(phase, "build") == 0 || strcmp(phase, "test") == 0)
-        return "active";
+        strcmp(phase, "build") == 0 || strcmp(phase, "test") == 0 ||
+        strcmp(phase, "busy") == 0)
+        return "busy";
     return "UNKNOWN";
 }
 
@@ -3394,7 +3401,7 @@ static void fmc_sessions_emit(struct json_value *data,
     for (i = 0; ro->ss && i < ro->nss && i < FMC_SESSION_CAP; i++) {
         fmc_session_emit(&arr, &ro->ss[i], ro, now);
         if (strcmp(fmc_session_activity(&ro->ss[i],
-                       fmc_age_s(now, ro->ss[i].ts)), "active") == 0)
+                       fmc_age_s(now, ro->ss[i].ts)), "busy") == 0)
             active++;
     }
     (void)json_push_kv(data, "sessions", &arr);
