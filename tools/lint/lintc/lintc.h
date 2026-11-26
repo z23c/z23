@@ -312,4 +312,13 @@ int lint_cmdrow_parse(const char *line, char *name, size_t ncap, char *cmd,
 
 int check_hotswap_denied_leaves_run_io(FILE *out, FILE *err);
 
+/* The core/ barrier pass of check-core-include-boundary (gate_core_barrier.c)
+ * and the Makefile include path it resolves against, in -I order
+ * (gate_core_barrier_path.c). */
+int core_barrier_main(int argc, char **argv);
+int core_barrier_selftests(void);
+int core_barrier_include_path(int (*add)(const char *dir, void *ctx),
+                              void *ctx);
+int core_barrier_vendor_installed(const char *tok);
+
 #endif

@@ -15366,11 +15366,15 @@ check-core-seal: tools/core_seal
 	    git ls-files -z $(CORE_SEAL_PATHS) | $(BIN_DIR)/core_seal check $(CORE_MANIFEST); \
 	fi
 
-# Pure-consensus-context include boundary. This governs only CORE_CONTEXTS
-# (core/{consensus,params,math,chainparams}), not core/modules. The byte seal's
-# scope is reported separately by check-core-seal.
+# Core include boundary, two passes. HARD: CORE_CONTEXTS
+# (core/{consensus,params,math,chainparams}) include only allowed token
+# prefixes. RATCHET: every include in all of core/, resolved by file location
+# on ZCL_ALL_INCLUDES, may reach outside core/ only through
+# tools/lint/core_barrier_allow.txt or a row of
+# tools/lint/core_barrier_baseline.txt (shrink-only). The byte seal's scope is
+# reported separately by check-core-seal.
 check-core-include-boundary: $(LINTC_TOOL)
-	@echo "══ LINT: pure consensus-context include boundary ══"
+	@echo "══ LINT: core include boundary and barrier ratchet ══"
 	@./build/bin/z23-lint check-core-include-boundary --selftest
 	@./build/bin/z23-lint check-core-include-boundary
 

@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — include-direction fences of the C23 lint runtime
- * (check-core-include-boundary, check-shape-include-direction). Production
+ * (check-core-include-boundary, check-shape-include-direction; the former's
+ * all-of-core/ barrier pass lives in gate_core_barrier.c). Production
  * scan walks git-tracked files via lint_git_index_foreach (unread or
  * refused index = UNPROVEN 2); full/dev scan walks the filesystem directly.
  */
@@ -411,7 +412,9 @@ static int cib_report(const struct cib_acc *a)
     return 1;
 }
 
-int check_core_include_boundary_run(int argc, char **argv)
+/* Stage 1, HARD: the four pure consensus contexts include only allowed
+ * token prefixes (unchanged). */
+static int cib_contexts_run(void)
 {
     char roots[4][RS_PATH];
     int nr = 0, any, rc, i;
@@ -419,8 +422,6 @@ int check_core_include_boundary_run(int argc, char **argv)
     struct idf_collect c;
     regex_t inc, ok;
     struct cib_acc a = {0};
-    (void)argc;
-    (void)argv;
     any = cib_any_root();
     if (any < 0)
         return 2;
@@ -457,11 +458,31 @@ int check_core_include_boundary_run(int argc, char **argv)
         return rc;
     if (a.n == 0) {
         fputs("check_core_include_boundary: clean — four pure consensus "
-              "contexts have no forbidden includes; core/modules "
-              "UNMEASURED\n", stdout);
+              "contexts have no forbidden includes; all of core/ is "
+              "measured by the barrier pass\n", stdout);
         return 0;
     }
     return cib_report(&a);
+}
+
+/* Stage 2, RATCHET: the core/ barrier over every core/ file
+ * (gate_core_barrier.c). Both stages run; the worse verdict wins (2 UNPROVEN
+ * over 1 FAIL over 0). --write-baseline and --print-include-path are
+ * barrier-only modes. */
+int check_core_include_boundary_run(int argc, char **argv)
+{
+    int rc, brc;
+    if (argc >= 1 && (strcmp(argv[0], "--write-baseline") == 0
+                      || strcmp(argv[0], "--print-include-path") == 0))
+        return core_barrier_main(argc, argv);
+    if (argc >= 1) {
+        fprintf(stderr, "check_core_include_boundary: unknown argument '%s'\n",
+                argv[0]);
+        return 2;
+    }
+    rc = cib_contexts_run();
+    brc = core_barrier_main(argc, argv);
+    return rc > brc ? rc : brc;
 }
 
 static int cib_st_text(const char *text, int want)
@@ -496,10 +517,12 @@ static int cib_st_clean(void)
 
 int check_core_include_boundary_selftest(void)
 {
-    return st_ok(cib_st_planted() | cib_st_clean(),
-                 "check_core_include_boundary selftest: PASS — a planted "
-                 "validation include is named, a leaf crypto include is "
-                 "clean\n");
+    int rc = st_ok(cib_st_planted() | cib_st_clean(),
+                   "check_core_include_boundary selftest: PASS — a planted "
+                   "validation include is named, a leaf crypto include is "
+                   "clean\n");
+    int brc = core_barrier_selftests();
+    return rc ? rc : brc;
 }
 
 struct sid_acc {

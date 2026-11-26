@@ -608,8 +608,12 @@ assert green).
   `check_block.c` calls the core sigops predicate instead of
   `"validation/sigops.h"`, and `chainparams.h` gets `MESSAGE_START_SIZE` from
   `chain/chainparamsbase.h` instead of `"net/protocol.h"`. Any forbidden
-  include fails HARD. Override `// core-boundary-ok:<tag>`. Impl:
-  `./build/bin/z23-lint check-core-include-boundary`.
+  include fails HARD. Override `// core-boundary-ok:<tag>`. A second pass
+  (RATCHET, no override) resolves every include in all of `core/` by file
+  location on the Makefile include path: a target outside `core/` must be in
+  `tools/lint/core_barrier_allow.txt` or carry a row of
+  `tools/lint/core_barrier_baseline.txt`, and a row whose include is gone fails
+  as STALE. Impl: `./build/bin/z23-lint check-core-include-boundary`.
 
 - **Gate #47: `check-core-seal`** (HARD — frozen at split wave W5) — pins
   the byte-integrity of `core/` to the SHA3-256 manifest `core/MANIFEST.sha3`

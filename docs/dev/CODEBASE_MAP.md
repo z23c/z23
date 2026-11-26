@@ -153,9 +153,11 @@ Read [`core/UNSEAL.md`](../../core/UNSEAL.md) and
 before touching anything under `core/`. Include paths were preserved across the
 move, so `#include "domain/consensus/…"` inside `core/` is correct and is *not*
 a stale path (`-Icore/consensus/include`); a `domain/consensus/…` path in a
-**doc** is stale. `check-core-include-boundary` governs only the four pure
-contexts `core/{consensus,params,math,chainparams}`; it does not scan
-`core/modules`. The byte seal is broader and currently covers every tracked
+**doc** is stale. `check-core-include-boundary` holds the four pure
+contexts `core/{consensus,params,math,chainparams}` to a HARD prefix rule, and
+holds all of `core/` to a barrier RATCHET: an include that resolves outside
+`core/` needs `tools/lint/core_barrier_allow.txt` or a row of
+`tools/lint/core_barrier_baseline.txt`. The byte seal is broader and currently covers every tracked
 path below `core/` except `core/MANIFEST.sha3` itself. The ordering-layer
 pathspecs repeated in `CORE_SEAL_PATHS` are already inside that tree and do not
 enlarge the set.

@@ -1,0 +1,28 @@
+# check-core-include-boundary barrier allowlist: headers OUTSIDE core/ that
+# consensus code may keep including. One repository path per row: an include
+# in core/ that resolves (by file location on the Makefile include path) to a
+# path listed here is allowed and needs no baseline row.
+#
+# Sealed-style: every row is a reviewed decision that this header is a pure
+# leaf (logging, allocation, results, cleansing, byte order, time, entropy,
+# locks, hashing) whose behaviour cannot change what is valid. Adding a row
+# widens what consensus code may depend on, so it needs a non-author review;
+# removing a row is always welcome. W5 of docs/work/CORE_BARRIER_PLAN.md moves
+# this list into the core seal. Seeded 2026-11-26 from the headers consensus
+# (C) and shared-primitive (S) files in core/ include today; storage, events,
+# JSON, file I/O, wallet keys, metrics and sqlite3.h are deliberately absent:
+# those edges are the blockers the barrier exists to show.
+platform/modules/base/include/base/safe_alloc.h
+platform/modules/base/include/base/serialize_le.h
+platform/modules/encoding/include/encoding/utilstrencodings.h
+platform/modules/platform/include/platform/rng.h
+platform/modules/platform/include/platform/time_compat.h
+platform/modules/sha3/include/sha3/sha3.h
+platform/modules/support/include/support/cleanse.h
+platform/modules/util/include/util/log_macros.h
+platform/modules/util/include/util/result.h
+platform/modules/util/include/util/safe_alloc.h
+platform/modules/util/include/util/sync.h
+platform/modules/util/include/util/timedata.h
+platform/modules/util/include/util/workpool.h
+vendor/include/secp256k1.h
