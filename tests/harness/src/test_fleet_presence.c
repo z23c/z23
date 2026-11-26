@@ -163,6 +163,15 @@ static void fpt_brief(struct fpt_call *b)
     zcl_native_handle_fleet_steer_brief(&b->request, &b->reply);
 }
 
+/* The full reply (all=true), which keeps stale session rows. */
+static void fpt_brief_all(struct fpt_call *b)
+{
+    fpt_call_begin(b, FPT_BRIEF, "zcl.fleet_steer_brief.v1");
+    (void)json_push_kv_int(&b->input, "since", 0);
+    (void)json_push_kv_bool(&b->input, "all", true);
+    zcl_native_handle_fleet_steer_brief(&b->request, &b->reply);
+}
+
 static const struct json_value *fpt_session(const struct fpt_call *b,
                                             const char *role)
 {
@@ -252,7 +261,13 @@ static int fpt_t_expiry(void)
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 1);
         fpt_call_end(&b);
         g_fpt_offset_s = 61;
+        /* The default reply counts the expired row; all=true shows it. */
         fpt_brief(&b);
+        ASSERT(fpt_session(&b, "A") == NULL);
+        ASSERT(fpt_i(&b.reply.data, "stale_omitted") == 1);
+        ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 0);
+        fpt_call_end(&b);
+        fpt_brief_all(&b);
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "state"), "stale");
         ASSERT_STR_EQ(fpt_s(fpt_session(&b, "A"), "activity"), "stale");
         ASSERT(fpt_i(&b.reply.data, "sessions_active_reported") == 0);

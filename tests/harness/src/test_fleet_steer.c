@@ -334,6 +334,14 @@ static void fmx_brief(struct fmx_call *c, const char *grant, long long since)
     (void)json_push_kv_int(&c->input, "since", since);
 }
 
+/* The full snapshot (all=true): every session, task, candidate and landing
+ * row and the fixed prose, as the brief replied before the compact default. */
+static void fmx_brief_all(struct fmx_call *c, const char *grant, long long since)
+{
+    fmx_brief(c, grant, since);
+    (void)json_push_kv_bool(&c->input, "all", true);
+}
+
 /* Brief resuming from a composite watermark: the cursor_token string a
  * previous brief returned. */
 static void fmx_brief_since(struct fmx_call *c, const char *grant,
@@ -3614,6 +3622,12 @@ static int fmx_t_directive_close_expiry(void)
         ASSERT(fmx_get(&b, "open_worker_directives") != NULL);
         ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
         ASSERT(json_get_int(fmx_get(&b, "overdue_worker_directives")) == 1);
+        /* The fixed prose rides only the full reply. */
+        ASSERT(fmx_get(&b, "directive_definition") == NULL);
+        fmx_end(&b);
+        fmx_brief_all(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
+        ASSERT(json_get_int(fmx_get(&b, "open_worker_directives")) == 1);
         ASSERT(fmx_get(&b, "directive_definition") != NULL);
         ASSERT(strstr(json_get_str(fmx_get(&b, "directive_definition")),
                       "newest 64 directives") != NULL);
@@ -4141,7 +4155,8 @@ static int fmx_t_brief_task_budget(void)
             fmx_state_file("queue", "queue.jsonl", text, i != 0);
             json_free(&seed);
         }
-        fmx_brief(&b, NULL, 0);
+        /* The full reply: the compact default keeps only the task head. */
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         tasks = json_get(&b.reply.data, "tasks");
@@ -4418,7 +4433,7 @@ static int fmx_t_session_edges(void)
         /* Pin inherited clock-skew semantics without strengthening the claim:
          * a future row has age zero and remains only a reported activity. */
         fmx_seed_presence("C", "box-c", -3600, 3);
-        fmx_brief(&b, NULL, 0);
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         s = fmx_session(&b, "A");
@@ -4464,7 +4479,7 @@ static int fmx_t_session_edges(void)
             fmx_prime_mail();
             fmx_seed_inbox("peer", cases[i].ts, 1, "box-user", "*", "note",
                            cases[i].body, "presence-A");
-            fmx_brief(&b, NULL, 0);
+            fmx_brief_all(&b, NULL, 0);
             ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
             ASSERT(fmx_ok(&b));
             s = fmx_session(&b, "A");
@@ -4599,7 +4614,7 @@ static int fmx_t_sessions(void)
                            cases[i].phase);
             fmx_seed_inbox("peer", ts, 1, "box-user", "*", "note",
                            body, "presence-A");
-            fmx_brief(&b, NULL, 0);
+            fmx_brief_all(&b, NULL, 0);
             ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
             ASSERT(fmx_ok(&b));
             s = fmx_session(&b, "A");
@@ -4653,7 +4668,7 @@ static int fmx_t_sessions(void)
         fmx_isolate("session_stale");
         fmx_prime_mail();
         fmx_seed_presence("B", "box-b.lan", 7200, 2);
-        fmx_brief(&b, NULL, 0);
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         s = fmx_session(&b, "B");
@@ -4675,7 +4690,7 @@ static int fmx_t_sessions(void)
         fmx_prime_mail();
         fmx_seed_presence("A", "box-a.lan", 30, 1);
         fmx_seed_presence("E2", "box-e.lan", 30, 2);
-        fmx_brief(&b, NULL, 0);
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         ASSERT(fmx_session(&b, "B") != NULL);
@@ -4794,7 +4809,8 @@ static int fmx_t_sessions(void)
         fmx_seed_inbox("box-f", now, 10, "box-f", FMX_SENDER, "claim",
                        "receiver=muse-f\\nstate=accepted\\nhost=box-f.lan\\n",
                        "job-f");
-        fmx_brief(&b, NULL, 0);
+        /* all=true: role B is never observed, so only the full reply lists it. */
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         s = fmx_session(&b, "A");
@@ -9113,13 +9129,14 @@ static int fmx_t_snapshot_budget(void)
             fmx_seed_inbox("snapshot","2026-09-20T00:00:00Z",i,"m","b","note",escaped,ref);
         }
         struct fmx_call normal;
-        fmx_brief(&normal,NULL,0); (void)json_push_kv_bool(&normal.input,"json",true);
+        /* all=true: the full snapshot is the one large enough to need a cut. */
+        fmx_brief_all(&normal,NULL,0); (void)json_push_kv_bool(&normal.input,"json",true);
         ASSERT(fmx_run(&normal,zcl_native_handle_fleet_steer_brief) && fmx_ok(&normal));
         size_t normal_changes=json_size(fmx_get(&normal,"changes"));
         ASSERT(normal_changes>0);
         fmx_end(&normal);
         struct fmx_call screen_sample;
-        fmx_brief(&screen_sample,NULL,0);
+        fmx_brief_all(&screen_sample,NULL,0);
         ASSERT(fmx_run(&screen_sample,zcl_native_handle_fleet_steer_brief) && fmx_ok(&screen_sample));
         const struct json_value *screen=fmx_get(&screen_sample,"screen");
         ASSERT(screen && screen->type==JSON_STR);
@@ -9128,7 +9145,7 @@ static int fmx_t_snapshot_budget(void)
         ASSERT(marker_bytes<32 && 32<screen_bytes);
         fmx_end(&screen_sample);
         struct fmx_call bounded;
-        fmx_brief(&bounded,NULL,0); (void)json_push_kv_bool(&bounded.input,"json",true);
+        fmx_brief_all(&bounded,NULL,0); (void)json_push_kv_bool(&bounded.input,"json",true);
         bounded.request.budget_bytes=12000;
         ASSERT(fmx_run(&bounded,zcl_native_handle_fleet_steer_brief) && fmx_ok(&bounded));
         ASSERT(json_write(&bounded.reply.data,NULL,0)<=12000-1024);
@@ -9137,13 +9154,13 @@ static int fmx_t_snapshot_budget(void)
         size_t screen_budget=json_write(&bounded.reply.data,NULL,0)+1024+32;
         fmx_end(&bounded);
         struct fmx_call screened;
-        fmx_brief(&screened,NULL,0); screened.request.budget_bytes=screen_budget;
+        fmx_brief_all(&screened,NULL,0); screened.request.budget_bytes=screen_budget;
         ASSERT(fmx_run(&screened,zcl_native_handle_fleet_steer_brief) && fmx_ok(&screened));
         ASSERT(json_write(&screened.reply.data,NULL,0)<=screen_budget-1024);
         ASSERT(fmx_bool(&screened,"screen_omitted")); ASSERT(fmx_get(&screened,"screen")==NULL);
         fmx_end(&screened);
         struct fmx_call too_small;
-        fmx_brief(&too_small,NULL,0); (void)json_push_kv_bool(&too_small.input,"json",true);
+        fmx_brief_all(&too_small,NULL,0); (void)json_push_kv_bool(&too_small.input,"json",true);
         too_small.request.budget_bytes=512;
         ASSERT(fmx_run(&too_small,zcl_native_handle_fleet_steer_brief)); ASSERT(!fmx_ok(&too_small));
         ASSERT_STR_EQ(too_small.reply.error.code,"BRIEF_BUDGET_EXCEEDED");
@@ -10253,7 +10270,22 @@ static int fmx_t_brief_landings_cap(void)
                 fmx_queue_note(3950 - 100 * i, 2 * i, ref, "phase", "inflight",
                                1, note);
         }
+        /* The default reply keeps the newest four and says more exist. */
         fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        landings = fmx_arr(&b, "landings");
+        ASSERT(landings != NULL);
+        ASSERT_EQ(json_size(landings), 4u);
+        ASSERT_EQ(fmx_int(&b, "landings_shown"), 4);
+        ASSERT_EQ(fmx_int(&b, "landings_dropped"), 0);
+        ASSERT(json_get_bool(fmx_get(&b, "landings_more")));
+        fmx_tip(ref, sizeof(ref), 20u);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 0), "ref"), ref);
+        fmx_tip(ref, sizeof(ref), 17u);
+        ASSERT_STR_EQ(fmx_cstr(json_at(landings, 3), "ref"), ref);
+        fmx_end(&b);
+        fmx_brief_all(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
         ASSERT(fmx_ok(&b));
         landings = fmx_arr(&b, "landings");
@@ -10388,6 +10420,167 @@ static int fmx_t_brief_landings_shape(void)
     return failures;
 }
 
+/* ── cost: the pass parses each row once, not once per directive scan ──── */
+
+unsigned long long zcl_fleet_steer_test_row_parses(void);
+
+static int fmx_t_brief_parse_once(void)
+{
+    int failures = 0;
+
+    TEST("steer: a brief parses each mail row a bounded number of times") {
+        struct fmx_call b;
+        char ref[32], body[64], ts[32];
+        unsigned long long before, parses;
+        long long i, rows = 0;
+        fmx_isolate("parse_once");
+        fmx_prime_mail();
+        fmx_ts_ago(60, ts, sizeof(ts));
+        /* Sixty-four open directives, each resolved against every row by
+         * its answer, conflict and closure scans, among plain notes. */
+        for (i = 0; i < 64; i++, rows++) {
+            (void)snprintf(ref, sizeof(ref), "card-%03lld", i);
+            (void)snprintf(body, sizeof(body), "do card %lld", i);
+            fmx_seed_inbox("peer", ts, i + 1, "lead", "worker-x", "directive",
+                           body, ref);
+        }
+        for (i = 0; i < 400; i++, rows++) {
+            (void)snprintf(ref, sizeof(ref), "note-%03lld", i);
+            fmx_seed_inbox("peer", ts, i + 100, "chatter", "*", "note",
+                           "status", ref);
+        }
+        before = zcl_fleet_steer_test_row_parses();
+        fmx_brief(&b, NULL, 0);
+        ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&b));
+        parses = zcl_fleet_steer_test_row_parses() - before;
+        ASSERT(fmx_int(&b, "open_worker_directives") == 64);
+        /* One table build and one walk per row, plus the bounded change
+         * and evidence rows; 64 scans each re-parsing every row would be
+         * well above 100 000. */
+        ASSERT(parses <= (unsigned long long)(4 * rows));
+        fmx_end(&b);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
+/* ── default snapshot: live rows and list heads; all=true is the full reply ─ */
+
+static void fmx_seed_compact_rows(void)
+{
+    char text[1024], name[32], ref[32], ts[32];
+    fmx_seed_presence("A", "box-a.lan", 30, 1);
+    fmx_seed_presence("B", "box-b.lan", 7200, 2);
+    fmx_seed_presence("old-x", "box-x.lan", 5775089, 3);
+    fmx_ts_ago(60, ts, sizeof(ts));
+    for (long long i = 0; i < 12; i++) {
+        (void)snprintf(ref, sizeof(ref), "cand-%02lld", i);
+        fmx_seed_inbox("peer", ts, i + 10, "worker-y", FMX_SENDER, "claim",
+                       "state=accepted", ref);
+    }
+    for (int i = 0; i < 8; i++) {
+        struct json_value seed = {0};
+        size_t w;
+        (void)snprintf(name, sizeof(name), "compact-%02d", i);
+        json_set_object(&seed);
+        json_push_kv_int(&seed, "seq", i + 1);
+        json_push_kv_str(&seed, "ts", "2026-10-14T00:00:00Z");
+        json_push_kv_str(&seed, "kind", "file");
+        json_push_kv_str(&seed, "name", name);
+        json_push_kv_str(&seed, "group", "fleet_steer");
+        json_push_kv_str(&seed, "path", "tools/command/native_fleet_steer.c");
+        json_push_kv_str(&seed, "brief", "brief");
+        json_push_kv_int(&seed, "attempt", 1);
+        json_push_kv_str(&seed, "state", "queued");
+        w = json_write(&seed, text, sizeof(text) - 2);
+        text[w] = '\n';
+        text[w + 1] = '\0';
+        fmx_state_file("queue", "queue.jsonl", text, i != 0);
+        json_free(&seed);
+    }
+}
+
+static int fmx_t_brief_compact_default(void)
+{
+    int failures = 0;
+
+    TEST("steer: the default snapshot omits stale sessions and keeps list "
+         "heads; all=true restores the full reply") {
+        struct fmx_call d, f;
+        const struct json_value *unseen;
+        long long cand_total;
+        size_t i;
+        fmx_isolate("compact_default");
+        fmx_prime_mail();
+        fmx_seed_compact_rows();
+        fmx_brief(&f, NULL, 0);
+        (void)json_push_kv_bool(&f.input, "all", true);
+        ASSERT(fmx_run(&f, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&f));
+        fmx_brief(&d, NULL, 0);
+        ASSERT(fmx_run(&d, zcl_native_handle_fleet_steer_brief));
+        ASSERT(fmx_ok(&d));
+        /* all=true: the old reply, stale rows and every list row. */
+        ASSERT(fmx_get(&f, "compact") == NULL);
+        ASSERT(fmx_get(&f, "directive_definition") != NULL);
+        ASSERT_STR_EQ(fmx_wstr(fmx_session(&f, "B"), "state"), "stale");
+        ASSERT_STR_EQ(fmx_wstr(fmx_session(&f, "old-x"), "state"), "stale");
+        ASSERT(fmx_session(&f, "C") != NULL);
+        ASSERT(json_size(fmx_arr(&f, "tasks")) == 8);
+        /* Twelve claims plus the eight queue names. */
+        ASSERT_EQ(json_size(fmx_arr(&f, "candidates")), 20u);
+        /* Default: live rows only, the rest counted or named. */
+        ASSERT(fmx_bool(&d, "compact"));
+        ASSERT(fmx_get(&d, "directive_definition") == NULL);
+        ASSERT_STR_EQ(fmx_wstr(fmx_session(&d, "A"), "state"), "live");
+        ASSERT(fmx_session(&d, "B") == NULL);
+        ASSERT(fmx_session(&d, "old-x") == NULL);
+        ASSERT(fmx_session(&d, "C") == NULL);
+        ASSERT(fmx_int(&d, "stale_omitted") == 2);
+        unseen = fmx_arr(&d, "sessions_unseen");
+        ASSERT(fmx_arr_has(unseen, "C") && fmx_arr_has(unseen, "D"));
+        ASSERT(!fmx_arr_has(unseen, "A") && !fmx_arr_has(unseen, "B"));
+        ASSERT(fmx_int(&d, "sessions_total") == fmx_int(&f, "sessions_total"));
+        ASSERT(fmx_int(&d, "sessions_active_reported") ==
+               fmx_int(&f, "sessions_active_reported"));
+        for (i = 0; i < json_size(fmx_arr(&d, "sessions")); i++)
+            ASSERT(strcmp(fmx_wstr(json_at(fmx_arr(&d, "sessions"), i),
+                                   "state"), "stale") != 0);
+        /* Tasks: the head in priority order, the rest in tasks_dropped. */
+        ASSERT(json_size(fmx_arr(&d, "tasks")) == 3);
+        ASSERT(fmx_int(&d, "tasks_shown") == 3);
+        ASSERT(fmx_int(&d, "tasks_observed") == 8);
+        ASSERT(fmx_int(&d, "tasks_dropped") == fmx_int(&f, "tasks_dropped") + 5);
+        ASSERT(!fmx_bool(&d, "tasks_sources_complete"));
+        ASSERT_STR_EQ(fmx_wstr(json_at(fmx_arr(&d, "tasks"), 0), "ref"),
+                      fmx_wstr(json_at(fmx_arr(&f, "tasks"), 0), "ref"));
+        /* Candidates: five shown, the rest dropped, the total unchanged. */
+        ASSERT(json_size(fmx_arr(&d, "candidates")) == 5);
+        ASSERT(fmx_int(&d, "candidates_shown") == 5);
+        ASSERT(fmx_int(&d, "candidates_dropped") ==
+               fmx_int(&f, "candidates_dropped") + 15);
+        cand_total = fmx_int(&f, "candidates_total");
+        ASSERT(fmx_int(&d, "candidates_total") == cand_total);
+        ASSERT(!fmx_bool(&d, "candidates_complete"));
+        /* The default reply is small; the full one is not. */
+        ASSERT(json_write(&d.reply.data, NULL, 0) < 8000u);
+        ASSERT(json_write(&f.reply.data, NULL, 0) > 8000u);
+        fmx_end(&d);
+        fmx_end(&f);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 int fsd_deliver_checks(void);
 int test_fleet_steer(void);
 int fmx_task_projection_checks(void);
@@ -10501,6 +10694,8 @@ int test_fleet_steer(void)
     failures += fmx_t_receipt_tokens();
     failures += fmx_t_process_not_work();
     failures += fmx_t_large_history();
+    failures += fmx_t_brief_parse_once();
+    failures += fmx_t_brief_compact_default();
     failures += fmx_t_brief_task_budget();
     failures += fmx_t_brief_caller();
     failures += fmx_t_sessions();

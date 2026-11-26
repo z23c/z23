@@ -735,7 +735,10 @@ ZCL_COMMAND_READY_READ(
     "with identity/owner/dependency/proof/detail; no canonical joins. "
     "review/publication unknown; tasks_inventory_complete=false. "
     "tasks_sources_complete/tasks_shown/tasks_dropped report coverage. "
-    "json=true omits screen. changes_only=true needs token since; mail changes, "
+    "json=true omits screen. Snapshot is compact:true unless all=true: stale "
+    "sessions counted in stale_omitted, unseen roles in sessions_unseen, "
+    "first 3 tasks/5 candidates/4 landings with counts, no "
+    "directive_definition. changes_only=true needs token since; mail changes, "
     "no snapshots. Token since: "
     "stream-order prefixes: start 0|, resume returned cursor_token even when "
     "changes_truncated. Credit displayed changes after row/byte limits; "
@@ -746,7 +749,7 @@ ZCL_COMMAND_READY_READ(
     "expiry, never grant id; local operator: mode only. Read-only.", 65536,
     "fleet,steer,brief,steering,chatgpt,cursor,agents,blockers,capacity",
     "zcl.fleet_steer_brief.input.v1", "zcl.fleet_steer_brief.v1",
-    "grant,since,limit,json,changes_only,generation", "",
+    "grant,since,limit,json,changes_only,generation,all", "",
     "z23 fleet steer brief",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

@@ -274,6 +274,7 @@
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
 #include "session/fleet_wiki_entry.h"
+#include "command/native_fleet_steer_compact.h"
 #include "command/native_fleet_steer_tasks.h"
 #include "command/native_fleet_typed_index.h"
 #include "command/native_devagent_mail_projection.h"
@@ -1571,9 +1572,18 @@ static const char *fmc_row_field(const struct json_value *r, const char *key)
     return json_get_str(v) ? json_get_str(v) : "";
 }
 
+#ifdef ZCL_TESTING
+static unsigned long long s_fmc_row_parses;
+unsigned long long zcl_fleet_steer_test_row_parses(void);
+unsigned long long zcl_fleet_steer_test_row_parses(void) { return s_fmc_row_parses; }
+#endif
+
 static bool fmc_row_parse(const struct json_value *r, struct fmc_row *v)
 {
     const struct json_value *s;
+#ifdef ZCL_TESTING
+    s_fmc_row_parses++;
+#endif
     if (!r || r->type != JSON_OBJ || !v)
         return false;
     s = json_get(r, "seq");
@@ -1601,6 +1611,58 @@ static bool fmc_row_parse(const struct json_value *r, struct fmc_row *v)
     v->observed_offset = oo && oo->type == JSON_INT ? json_get_int(oo) : -1;
     v->observed_seq = os && os->type == JSON_INT ? json_get_int(os) : -1;
     return true;
+}
+
+/* The pass's rows parsed once. Each directive's answer, conflict, closure
+ * and reply scans walk every row, and parsing a row is seventeen linear
+ * key lookups, so re-parsing per scan made a brief O(directives * rows *
+ * keys). The table is bound to one exact rows array (its address, child
+ * storage and length); any other array, or a failed allocation, parses
+ * as before. The borrowed strings live as long as that array. */
+static thread_local struct fmc_parsed {
+    const struct json_value *rows, *children;
+    size_t n;
+    struct fmc_row *v;
+    bool *ok;
+} s_fmc_parsed;
+
+static void fmc_parsed_end(void)
+{
+    free(s_fmc_parsed.v);
+    free(s_fmc_parsed.ok);
+    memset(&s_fmc_parsed, 0, sizeof(s_fmc_parsed));
+}
+
+static void fmc_parsed_begin(const struct json_value *rows)
+{
+    size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u;
+    fmc_parsed_end();
+    if (n == 0)
+        return;
+    s_fmc_parsed.v = zcl_calloc(n, sizeof(*s_fmc_parsed.v), "fleet_steer.parsed_rows");
+    s_fmc_parsed.ok = zcl_calloc(n, sizeof(*s_fmc_parsed.ok), "fleet_steer.parsed_ok");
+    if (!s_fmc_parsed.v || !s_fmc_parsed.ok) {
+        fmc_parsed_end();
+        return;
+    }
+    for (size_t i = 0; i < n; i++)
+        s_fmc_parsed.ok[i] = fmc_row_parse(json_at(rows, i), &s_fmc_parsed.v[i]);
+    s_fmc_parsed.rows = rows;
+    s_fmc_parsed.children = rows->children;
+    s_fmc_parsed.n = n;
+}
+
+/* Row i of rows, from the table when it is bound to this exact array. */
+static bool fmc_rows_at(const struct json_value *rows, size_t i, struct fmc_row *v)
+{
+    const struct fmc_parsed *p = &s_fmc_parsed;
+    if (p->v && p->rows == rows && p->children == rows->children &&
+        p->n == json_size(rows) && i < p->n) {
+        if (p->ok[i])
+            *v = p->v[i];
+        return p->ok[i];
+    }
+    return fmc_row_parse(json_at(rows, i), v);
 }
 
 static bool fmc_row_acked(const struct fmc_row *v)
@@ -1637,7 +1699,7 @@ static const char *fmc_typed_read(const struct json_value *rows, const struct fm
     long long latest_offset = -1;
     for (size_t i = 0; i < json_size(rows); i++) {
         struct fmc_row r;
-        if (fmc_row_parse(json_at(rows, i), &r) && r.observed_disposition[0] &&
+        if (fmc_rows_at(rows, i, &r) && r.observed_disposition[0] &&
             r.row_offset > latest_offset && fmc_typed_read_matches(d, &r)) {
             latest = r.observed_disposition;
             latest_offset = r.row_offset;
@@ -1933,7 +1995,7 @@ static bool fmc_rows_reply_from(const struct json_value *rows,
     n = json_size(rows);
     for (i = 0; i < n; i++) {
         struct fmc_row r;
-        if (!fmc_row_parse(json_at(rows, i), &r))
+        if (!fmc_rows_at(rows, i, &r))
             continue;
         if (r.observed_disposition[0]) continue;
         if (strcmp(r.from, v->from) == 0)
@@ -3597,7 +3659,7 @@ static struct fmc_reply_conflicts fmc_reply_conflicts(const struct json_value *r
     size_t n = rows && rows->type == JSON_ARR ? json_size(rows) : 0u;
     for (size_t i = 0; i < n; i++) {
         struct fmc_row other;
-        if (!fmc_row_parse(json_at(rows, i), &other) ||
+        if (!fmc_rows_at(rows, i, &other) ||
             strcmp(other.kind, "directive") != 0 ||
             strcmp(other.from, d->from) != 0 || strcmp(other.ref, d->ref) != 0 ||
             fmc_same_source_row(d, &other)) continue;
@@ -3637,7 +3699,7 @@ static bool fmc_answer_find(const struct json_value *rows,
     for (i = 0; d->ref[0] && i < n; i++) {
         struct fmc_row r;
         const char *m;
-        if (!fmc_row_parse(json_at(rows, i), &r))
+        if (!fmc_rows_at(rows, i, &r))
             continue;
         m = fmc_answer_match(d, &r);
         if (m && r.observed_disposition[0]) {
@@ -3762,7 +3824,7 @@ static void fmc_close_find(const struct json_value *rows,
     c->last_presence = -1;
     for (size_t i = 0; i < n; i++) {
         struct fmc_row r;
-        if (!fmc_row_parse(json_at(rows, i), &r))
+        if (!fmc_rows_at(rows, i, &r))
             continue;
         fmc_recipient_seen(d, &r, c);
         if (fmc_close_match(d, &r) && (!c->found || strcmp(r.ts, c->keep.ts) > 0)) {
@@ -4658,6 +4720,7 @@ static void fmc_typed_index_begin(struct fmc_mail_ctx *c,
 {
     zcl_fleet_typed_index_init(index, 4096u, 16u * 1024u * 1024u);
     c->typed_index = zcl_fleet_typed_index_build(index, rows) ? index : NULL;
+    fmc_parsed_begin(rows);
 }
 
 static void fmc_typed_index_end(struct fmc_mail_ctx *c,
@@ -4665,6 +4728,7 @@ static void fmc_typed_index_end(struct fmc_mail_ctx *c,
 {
     c->typed_index = NULL;
     zcl_fleet_typed_index_free(index);
+    fmc_parsed_end();
 }
 
 /* Mail counts as a read candidates source only when the pass read it
@@ -6583,6 +6647,25 @@ static bool fmc_brief_view(struct zcl_command_reply *reply, struct fmc_brief_lis
     return true;
 }
 
+/* A snapshot's tasks, then its compact form unless all=true; a forward
+ * page is the caller's own budgeted feed and stays whole. */
+static bool fmc_brief_snapshot_tail(const struct zcl_command_request *req,
+                                    struct zcl_command_reply *reply,
+                                    struct fmc_brief_lists *l,
+                                    const struct fmc_mail_view *mv)
+{
+    if (!fmc_brief_tasks_emit(l, reply)) return false;
+    if (!json_push_kv_int(&reply->data, "tasks_shown", 0)) {
+        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count could not be copied", "json");
+        return false;
+    }
+    if ((mv && mv->forward) || json_get_bool(json_get(req->input, "all")) ||
+        zcl_fmc_brief_compact(&reply->data))
+        return true;
+    fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "compact brief could not be copied", "all");
+    return false;
+}
+
 static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_command_reply *reply,
                             struct fmc_brief_lists *l,
                             struct fmc_roster *ro,
@@ -6613,11 +6696,7 @@ static void fmc_brief_reply(const struct zcl_command_request *req, struct zcl_co
         fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "missing metadata could not be copied", "json");
         return;
     }
-    if (!changes_only && !fmc_brief_tasks_emit(l, reply)) return;
-    if (!changes_only && !json_push_kv_int(&reply->data, "tasks_shown", 0)) {
-        fmc_fail(reply, "BRIEF_PROJECTION_FAILED", "task count could not be copied", "json");
-        return;
-    }
+    if (!changes_only && !fmc_brief_snapshot_tail(req, reply, l, mv)) return;
     fmc_brief_finalize(req, reply, mv, !changes_only);
 }
 
