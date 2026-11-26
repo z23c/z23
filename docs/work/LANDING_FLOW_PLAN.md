@@ -12,10 +12,14 @@ measured on r1 on 2026-11-26 unless a line says "to measure".
   test 11, proof producer mismatch 4, bundle 3, rebase conflict 2, worktree 1,
   push 1, empty change set 1, cancelled 1. Each failure costs one proof (about
   8 minutes) plus a resubmit.
-- Lint and test failures are 26 of the 39. The lane runs `lint-fast`; the land
-  proof runs the full set. Whatever the full set catches that `lint-fast`
-  misses is the avoidable retry. To measure: which gates failed in those 15,
-  and whether any fast subset would have caught them.
+- Lint and test failures are 26 of the 39. Of the 15 lint failures, 10 were
+  gates that `lint-fast` does not list but whose `precheck` is meant to run
+  locally (capability closure, command input keys, windows cross syntax, code
+  index coverage and others). The precheck was skipping in every lane of this
+  clone ("cannot check out the base tree"): its cached base worktree had lost
+  its git metadata. Fixed in this change; a lane now runs 155 gates in about
+  85 s before submit. To measure after it lands: lint failures per 100 lands
+  (15 of 300 before).
 - Scratch under the Z23 development-scratch folder on r1: about 307 GB in 2381
   entries. Daily and host cleanup timers exist, yet it grows, because lanes are
   created by hand with no owner or expiry on record.
