@@ -57,62 +57,98 @@ static bool ballot_numbers_in_range(const int64_t n[5])
         n[3] >= 1 && n[3] <= 256 && n[4] >= 0 && n[4] < n[3];
 }
 
+static bool ballot_hex(const struct json_value *v, uint8_t out[32]);
+
 static bool ballot_parse(const struct json_value *params,
                          struct miner_signal_schedule *s)
 {
     int64_t n[5];
     if (!ballot_parse_numbers(params, n) || !ballot_numbers_in_range(n)) return false;
     const struct json_value *catalog = json_at(params, 5);
-    if (!catalog || catalog->type != JSON_STR ||
-        !zcl_hex_decode(json_get_str(catalog), s->catalog, sizeof(s->catalog))) return false;
+    if (!ballot_hex(catalog, s->catalog)) return false; // raw-return-ok:invalid catalog becomes an RPC parameter error
     s->start = (int32_t)n[0]; s->window = (int32_t)n[1];
     s->activation = (int32_t)n[2]; s->slots = (uint16_t)n[3];
     s->slot = (uint16_t)n[4];
     return miner_signal_schedule_valid(s).ok;
 }
 
-/* Caller-supplied fork identity is distinct from the selected chain's genesis.
- * The helper validates every entry, including ordering and activation grace. */
+/* These parsers propagate bad input to the RPC's explanatory error body. */
+static bool ballot_hex(const struct json_value *v, uint8_t out[32])
+{
+    if (!v || v->type != JSON_STR) return false;
+    if (!zcl_hex_decode(json_get_str(v), out, 32))
+        return false; // raw-return-ok:invalid hex becomes an RPC parameter error
+    return true;
+}
+
+static bool ballot_integer(const struct json_value *v, int64_t *out)
+{
+    if (!v || v->type != JSON_INT) return false;
+    *out = json_get_int(v);
+    return true;
+}
+
+static bool ballot_catalog_range(int64_t start, int64_t window, int64_t slot, size_t count)
+{
+    return start >= 1 && start <= INT32_MAX && window >= 1 &&
+           window <= BALLOT_MAX_WINDOW && count >= 1 && count <= 256 &&
+           slot >= 0 && (uint64_t)slot < count;
+}
+
+static bool ballot_catalog_shape(const struct json_value *params,
+                                 struct miner_signal_catalog *catalog,
+                                 const struct json_value **rules_out, size_t *slot_out)
+{
+    if (!params || params->type != JSON_ARR || json_size(params) != 5) return false;
+    int64_t start, window, slot;
+    if (!ballot_integer(json_at(params, 1), &start) ||
+        !ballot_integer(json_at(params, 2), &window) ||
+        !ballot_integer(json_at(params, 4), &slot))
+        return false; // raw-return-ok:invalid types become an RPC parameter error
+    const struct json_value *rules = json_at(params, 3);
+    if (!rules || rules->type != JSON_ARR) return false;
+    size_t count = json_size(rules);
+    if (!ballot_catalog_range(start, window, slot, count))
+        return false; // raw-return-ok:invalid ranges become an RPC parameter error
+    catalog->start = (int32_t)start;
+    catalog->window = (int32_t)window;
+    catalog->count = count;
+    *rules_out = rules;
+    *slot_out = (size_t)slot;
+    return true;
+}
+
+static bool ballot_catalog_entry(const struct json_value *entry,
+                                 struct miner_signal_catalog_entry *out)
+{
+    if (!entry || entry->type != JSON_ARR || json_size(entry) != 2) return false;
+    int64_t height;
+    if (!ballot_hex(json_at(entry, 0), out->rule_revision) ||
+        !ballot_integer(json_at(entry, 1), &height))
+        return false; // raw-return-ok:invalid entry becomes an RPC parameter error
+    if (height < 1 || height > INT32_MAX) return false;
+    out->activation = (int32_t)height;
+    return true;
+}
+
+/* The catalog service checks ordering, selected slot and activation grace. */
 static bool ballot_parse_catalog(const struct json_value *params,
                                  const struct chain_params *cp,
                                  struct miner_signal_schedule *out)
 {
-    if (!params || params->type != JSON_ARR || json_size(params) != 5 || !cp)
-        return false;
-    const struct json_value *fork = json_at(params, 0);
-    const struct json_value *start = json_at(params, 1);
-    const struct json_value *window = json_at(params, 2);
-    const struct json_value *rules = json_at(params, 3);
-    const struct json_value *slot = json_at(params, 4);
-    if (!fork || fork->type != JSON_STR || !start || start->type != JSON_INT ||
-        !window || window->type != JSON_INT || !rules || rules->type != JSON_ARR ||
-        !slot || slot->type != JSON_INT) return false;
-    int64_t st = json_get_int(start), win = json_get_int(window), selected = json_get_int(slot);
-    size_t count = json_size(rules);
-    if (st < 1 || st > INT32_MAX || win < 1 || win > BALLOT_MAX_WINDOW ||
-        count < 1 || count > 256 || selected < 0 || (uint64_t)selected >= count)
-        return false;
+    if (!cp) return false;
     struct miner_signal_catalog_entry entries[256] = {0};
-    struct miner_signal_catalog catalog = {
-        .start = (int32_t)st, .window = (int32_t)win,
-        .count = count, .entries = entries,
-    };
-    if (!zcl_hex_decode(json_get_str(fork), catalog.network_id, sizeof(catalog.network_id)))
-        return false;
+    struct miner_signal_catalog catalog = { .entries = entries };
+    const struct json_value *rules;
+    size_t slot;
+    if (!ballot_catalog_shape(params, &catalog, &rules, &slot) ||
+        !ballot_hex(json_at(params, 0), catalog.network_id))
+        return false; // raw-return-ok:invalid catalog becomes an RPC parameter error
     memcpy(catalog.genesis, cp->consensus.hashGenesisBlock.data, sizeof(catalog.genesis));
-    for (size_t i = 0; i < count; ++i) {
-        const struct json_value *entry = json_at(rules, i);
-        if (!entry || entry->type != JSON_ARR || json_size(entry) != 2) return false;
-        const struct json_value *revision = json_at(entry, 0);
-        const struct json_value *activation = json_at(entry, 1);
-        if (!revision || revision->type != JSON_STR || !activation ||
-            activation->type != JSON_INT ||
-            !zcl_hex_decode(json_get_str(revision), entries[i].rule_revision, 32)) return false;
-        int64_t height = json_get_int(activation);
-        if (height < 1 || height > INT32_MAX) return false;
-        entries[i].activation = (int32_t)height;
-    }
-    return miner_signal_catalog_select(&catalog, (size_t)selected, out).ok;
+    for (size_t i = 0; i < catalog.count; ++i)
+        if (!ballot_catalog_entry(json_at(rules, i), &entries[i]))
+            return false; // raw-return-ok:invalid entry becomes an RPC parameter error
+    return miner_signal_catalog_select(&catalog, slot, out).ok;
 }
 
 static bool ballot_test_network(const struct chain_params *cp)
@@ -335,6 +371,30 @@ static bool ballot_reply(struct json_value *result, const struct miner_signal_sc
     return ballot_fail(result, "Out of memory building ballot result");
 }
 
+static bool ballot_status_snapshot(const struct miner_signal_schedule *s,
+                                   const struct chain_params *cp,
+                                   const struct blockchain_context *ctx,
+                                   const char *source, struct json_value *result)
+{
+    struct ballot_snapshot snap = {0};
+    snap.blocks = zcl_calloc((size_t)s->window, sizeof(*snap.blocks), "ballot status ancestry");
+    if (!snap.blocks) return ballot_fail(result, "Out of memory");
+    bool ok = ballot_snapshot_evidence(s, &snap);
+    if (ok) ok = ballot_snapshot_positions(ctx->main_state, &snap);
+    if (ok) ok = ballot_snapshot_current(ctx->main_state, &snap);
+    struct miner_signal_tally tally = {0};
+    const char *phase = NULL;
+    if (ok) ok = ballot_tally(ctx->datadir, s, &snap, &tally, &phase);
+    if (ok) ok = ballot_snapshot_current(ctx->main_state, &snap);
+    if (ok) ok = ballot_authority_current(&snap);
+    if (ok) ok = ballot_reply(result, s, &snap, cp->strNetworkID,
+                              source, phase, tally.votes);
+    else ballot_fail(result, "Validated ballot history unavailable or chain changed; retry");
+    free(snap.blocks);
+    return ok;
+}
+
+
 bool rpc_getballotstatus(const struct json_value *params, bool help,
                          struct json_value *result)
 {
@@ -351,20 +411,6 @@ bool rpc_getballotstatus(const struct json_value *params, bool help,
     struct blockchain_context *ctx = blockchain_ctx();
     if (!ctx->main_state || !ctx->datadir)
         return ballot_fail(result, "Chain state or block storage unavailable");
-    struct ballot_snapshot snap = {0};
-    snap.blocks = zcl_calloc((size_t)s.window, sizeof(*snap.blocks), "ballot status ancestry");
-    if (!snap.blocks) return ballot_fail(result, "Out of memory");
-    bool ok = ballot_snapshot_evidence(&s, &snap);
-    if (ok) ok = ballot_snapshot_positions(ctx->main_state, &snap);
-    if (ok) ok = ballot_snapshot_current(ctx->main_state, &snap);
-    struct miner_signal_tally tally = {0};
-    const char *phase = NULL;
-    if (ok) ok = ballot_tally(ctx->datadir, &s, &snap, &tally, &phase);
-    if (ok) ok = ballot_snapshot_current(ctx->main_state, &snap);
-    if (ok) ok = ballot_authority_current(&snap);
-    if (ok) ok = ballot_reply(result, &s, &snap, cp->strNetworkID,
-                              supplied ? "supplied_catalog" : "raw_parameters", phase, tally.votes);
-    else ballot_fail(result, "Validated ballot history unavailable or chain changed; retry");
-    free(snap.blocks);
-    return ok;
+    return ballot_status_snapshot(&s, cp, ctx, supplied ? "supplied_catalog" : "raw_parameters",
+                                  result);
 }
