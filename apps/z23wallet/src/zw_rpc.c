@@ -142,7 +142,7 @@ static enum zw_err precheck(struct zw_rpc *r, const char *method, struct zw_rpc_
     return ZW_OK;
 }
 
-static enum zw_err call_once(struct zw_rpc *r, const char *method, const char *params_json,
+static enum zw_err rpc_call_once(struct zw_rpc *r, const char *method, const char *params_json,
                              struct json_value *result, struct zw_rpc_error *e, bool *handover)
 {
     set_err(e, ZW_OK, 0, "");
@@ -179,8 +179,8 @@ enum zw_err zw_rpc_call(struct zw_rpc *r, const char *method, const char *params
                         struct json_value *result, struct zw_rpc_error *e)
 {
     bool handover = false;
-    enum zw_err err = call_once(r, method, params_json, result, e, &handover);
+    enum zw_err err = rpc_call_once(r, method, params_json, result, e, &handover);
     if (!handover) return err;
     zw_log("rpc: Z23 port did not answer; trying zclassicd");
-    return call_once(r, method, params_json, result, e, &handover);
+    return rpc_call_once(r, method, params_json, result, e, &handover);
 }

@@ -1532,7 +1532,7 @@ static int test_receive_page_hole(void)
         char gid[80], body[4200], prompt[2100], state[32], ws[1200];
         char ref[64], key[64], aside_stream[64], past_stream[64];
         char intake[4096], cursor[4096], readf[4096];
-        const char *ipos, *cpos, *rpos;
+        char *ipos, *cpos, *rpos;
         size_t overhead;
         int i;
         rtx_isolate("page-hole");
