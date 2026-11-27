@@ -404,8 +404,11 @@ static bool projection_restore_genesis(struct main_state *ms, const struct chain
     GetDataDir(true, datadir, sizeof datadir);
     struct block_index *genesis = block_map_find(&ms->map_block_index,
                                                  &params->consensus.hashGenesisBlock);
-    return datadir[0] && block_index_ensure_genesis_body(genesis, params, research->genesis_wire,
-                                                        research->genesis_wire_len, datadir);
+    if (!datadir[0]) LOG_FAIL("block_index", "research genesis: datadir unavailable");
+    struct zcl_result result = block_index_ensure_genesis_body(
+        genesis, params, research->genesis_wire, research->genesis_wire_len, datadir);
+    if (!result.ok) LOG_FAIL("block_index", "research genesis: %s", result.message);
+    return true;
 }
 
 struct zcl_result load_block_index_from_projection(struct main_state *ms,

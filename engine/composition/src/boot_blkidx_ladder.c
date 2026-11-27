@@ -343,8 +343,11 @@ static bool research_genesis_ready(struct boot_blkidx_load_ctx *c, bool required
     if (!genesis) return !required;
     char datadir[2048] = {0};
     GetDataDir(true, datadir, sizeof datadir);
-    return datadir[0] && block_index_ensure_genesis_body(
+    if (!datadir[0]) LOG_FAIL("boot", "research genesis: datadir unavailable");
+    struct zcl_result result = block_index_ensure_genesis_body(
         genesis, c->params, research->genesis_wire, research->genesis_wire_len, datadir);
+    if (!result.ok) LOG_FAIL("boot", "research genesis: %s", result.message);
+    return true;
 }
 
 void boot_blkidx_run_ladder(struct boot_blkidx_load_ctx *c)

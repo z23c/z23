@@ -464,6 +464,30 @@ static void bil_flat_rollback(struct block_map *bm,
     }
 }
 
+static bool bil_genesis_metadata_valid(const struct block_index *genesis, uint32_t bits)
+{
+    struct arith_uint256 work = GetBlockProof(genesis);
+    return genesis->nBits == bits && genesis->nTx == 1 && genesis->nChainTx == 1 &&
+        (genesis->nStatus & BLOCK_FAILED_ANY_MASK) == 0 &&
+        (genesis->nStatus & BLOCK_HAVE_DATA) != 0 &&
+        (genesis->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS &&
+        !arith_uint256_is_zero(&work) && arith_uint256_compare(&genesis->nChainWork, &work) == 0;
+}
+
+bool block_index_initialize_genesis(struct block_index *genesis, const struct chain_params *params)
+{
+    if (!genesis || !params || !genesis->phashBlock || genesis->nHeight != 0 || genesis->pprev ||
+        !uint256_eq(genesis->phashBlock, &params->consensus.hashGenesisBlock)) return false;
+    uint32_t bits = block_index_genesis_bits(params);
+    if (!genesis->nStatus && !genesis->nBits && !genesis->nTx && !genesis->nChainTx &&
+        arith_uint256_is_zero(&genesis->nChainWork)) {
+        genesis->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        genesis->nTx = 1; genesis->nChainTx = 1; genesis->nBits = bits;
+        genesis->nChainWork = GetBlockProof(genesis);
+    }
+    return bil_genesis_metadata_valid(genesis, bits);
+}
+
 /* Legacy fresh loaders persisted mainnet bits on every network. Correct only
  * the compiled genesis identity; the ordinary PoW admission still runs. */
 static uint32_t bil_effective_bits(int32_t height, const uint8_t hash[32],
@@ -1230,9 +1254,11 @@ struct zcl_result load_block_index_with_genesis(struct main_state *ms,
             &params->consensus.hashGenesisBlock);
         if (genesis) {
             genesis->nHeight = 0;
-            if (wire ? !block_index_store_genesis_body(genesis, params, wire, wire_len, datadir)
-                     : !block_index_initialize_genesis(genesis, params))
+            if (wire) {
+                ZCL_CHECK(block_index_store_genesis_body(genesis, params, wire, wire_len, datadir));
+            } else if (!block_index_initialize_genesis(genesis, params)) {
                 return ZCL_ERR(-1, "load_block_index: genesis initialization failed");
+            }
             struct chain_state_rollback_authorization rollback_auth = {
                 .source = CSR_ROLLBACK_SOURCE_RESTORE,
                 .decision = POLICY_ALLOW,

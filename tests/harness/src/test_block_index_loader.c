@@ -459,10 +459,10 @@ static int bil_research_bad(const struct chain_params *cp, struct block_index *g
     int failures = 0;
     uint8_t bad[276]; memcpy(bad, wire, 276); bad[100] ^= 1;
     BIL_CHECK("bil: altered genesis rejected before publication",
-              !block_index_store_genesis_body(g, cp, bad, 276, dir) && !g->nStatus);
+              !block_index_store_genesis_body(g, cp, bad, 276, dir).ok && !g->nStatus);
     memcpy(bad, wire, 276); bad[276 - 10] ^= 1;
     BIL_CHECK("bil: altered genesis body rejected by merkle check",
-              !block_index_store_genesis_body(g, cp, bad, 276, dir) && !g->nStatus);
+              !block_index_store_genesis_body(g, cp, bad, 276, dir).ok && !g->nStatus);
     memcpy(bad, wire, 276); bad[104] ^= 1;
     struct byte_stream bad_stream; stream_init_from_data(&bad_stream, bad, 276);
     struct block bad_block; block_init(&bad_block);
@@ -472,11 +472,11 @@ static int bil_research_bad(const struct chain_params *cp, struct block_index *g
     block_free(&bad_block);
     struct block_index bad_g = {0}; bad_g.phashBlock = &bad_cp.consensus.hashGenesisBlock;
     BIL_CHECK("bil: wrong nBits rejected even with matching hash",
-              bad_parsed && !block_index_store_genesis_body(&bad_g, &bad_cp, bad, 276, dir) && !bad_g.nStatus);
+              bad_parsed && !block_index_store_genesis_body(&bad_g, &bad_cp, bad, 276, dir).ok && !bad_g.nStatus);
     BIL_CHECK("bil: truncated genesis rejected before publication",
-              !block_index_store_genesis_body(g, cp, wire, 276 - 1, dir) && !g->nStatus);
+              !block_index_store_genesis_body(g, cp, wire, 276 - 1, dir).ok && !g->nStatus);
     BIL_CHECK("bil: genesis write failure leaves no data flag",
-              !block_index_store_genesis_body(g, cp, wire, 276, "/nonexistent/genesis") && !g->nStatus);
+              !block_index_store_genesis_body(g, cp, wire, 276, "/nonexistent/genesis").ok && !g->nStatus);
     return failures;
 }
 
@@ -484,7 +484,7 @@ static int bil_research_persist(const struct chain_params *cp, struct block_inde
 {
     int failures = 0;
     uint8_t bad[276]; memcpy(bad, wire, 276); bad[104] ^= 1;
-    bool ok = block_index_store_genesis_body(g, cp, wire, 276, dir);
+    bool ok = block_index_store_genesis_body(g, cp, wire, 276, dir).ok;
     BIL_CHECK("bil: real genesis is persisted", ok && (g->nStatus & BLOCK_HAVE_DATA));
     if (ok) {
         struct block b; block_init(&b);
@@ -494,17 +494,17 @@ static int bil_research_persist(const struct chain_params *cp, struct block_inde
         block_free(&b);
     }
     BIL_CHECK("bil: existing genesis bytes are verified",
-              block_index_ensure_genesis_body(g, cp, wire, 276, dir));
+              block_index_ensure_genesis_body(g, cp, wire, 276, dir).ok);
     BIL_CHECK("bil: mismatched expected bytes fail closed",
-              !block_index_ensure_genesis_body(g, cp, bad, 276, dir) && !(g->nStatus & BLOCK_HAVE_DATA));
+              !block_index_ensure_genesis_body(g, cp, bad, 276, dir).ok && !(g->nStatus & BLOCK_HAVE_DATA));
     int saved_file = g->nFile; unsigned saved_pos = g->nDataPos;
     block_index_status_clear_bits(g, BLOCK_HAVE_DATA);
     BIL_CHECK("bil: header-only genesis body restored without another append",
-              block_index_ensure_genesis_body(g, cp, wire, 276, dir) &&
+              block_index_ensure_genesis_body(g, cp, wire, 276, dir).ok &&
               (g->nStatus & BLOCK_HAVE_DATA) && g->nFile == saved_file && g->nDataPos == saved_pos);
     block_index_disk_pos_store(g, 999999, 8);
     BIL_CHECK("bil: stale HAVE_DATA repaired from missing file",
-              block_index_ensure_genesis_body(g, cp, wire, 276, dir) &&
+              block_index_ensure_genesis_body(g, cp, wire, 276, dir).ok &&
               (g->nStatus & BLOCK_HAVE_DATA));
     return failures;
 }
@@ -626,7 +626,7 @@ static int bil_research_restore(const struct chain_research_descriptor *profile,
               child && rc && (rc->nStatus & BLOCK_REVALIDATE_PENDING));
     BIL_CHECK("bil: research cache restores verified genesis data",
               r && block_index_ensure_genesis_body(r, profile->chain, profile->genesis_wire,
-                                                  profile->genesis_wire_len, dir) &&
+                                                  profile->genesis_wire_len, dir).ok &&
               (r->nStatus & BLOCK_HAVE_DATA));
     failures += bil_research_sql(profile, first, pg, &child_hash);
     return failures;

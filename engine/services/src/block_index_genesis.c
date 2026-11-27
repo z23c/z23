@@ -17,30 +17,6 @@ uint32_t block_index_genesis_bits(const struct chain_params *cp)
     return arith_uint256_get_compact(&limit, false);
 }
 
-static bool bil_genesis_metadata_valid(const struct block_index *genesis, uint32_t bits)
-{
-    struct arith_uint256 work = GetBlockProof(genesis);
-    return genesis->nBits == bits && genesis->nTx == 1 && genesis->nChainTx == 1 &&
-        (genesis->nStatus & BLOCK_FAILED_ANY_MASK) == 0 &&
-        (genesis->nStatus & BLOCK_HAVE_DATA) != 0 &&
-        (genesis->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS &&
-        !arith_uint256_is_zero(&work) && arith_uint256_compare(&genesis->nChainWork, &work) == 0;
-}
-
-bool block_index_initialize_genesis(struct block_index *genesis, const struct chain_params *params)
-{
-    if (!genesis || !params || !genesis->phashBlock || genesis->nHeight != 0 || genesis->pprev ||
-        !uint256_eq(genesis->phashBlock, &params->consensus.hashGenesisBlock)) return false;
-    uint32_t bits = block_index_genesis_bits(params);
-    if (!genesis->nStatus && !genesis->nBits && !genesis->nTx && !genesis->nChainTx &&
-        arith_uint256_is_zero(&genesis->nChainWork)) {
-        genesis->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
-        genesis->nTx = 1; genesis->nChainTx = 1; genesis->nBits = bits;
-        genesis->nChainWork = GetBlockProof(genesis);
-    }
-    return bil_genesis_metadata_valid(genesis, bits);
-}
-
 static bool genesis_identity(const struct block_index *genesis, const struct chain_params *params)
 {
     return genesis && params && genesis->phashBlock && !genesis->nHeight && !genesis->pprev &&
@@ -111,11 +87,11 @@ static bool genesis_check_disk(const struct disk_block_pos *pos, const char *dat
     return ok;
 }
 
-bool block_index_store_genesis_body(struct block_index *genesis, const struct chain_params *params,
+struct zcl_result block_index_store_genesis_body(struct block_index *genesis, const struct chain_params *params,
                                    const uint8_t *wire, size_t len, const char *datadir)
 {
     if (!genesis_identity(genesis, params) || !genesis_uninitialized(genesis) ||
-        !wire || !len || !datadir) return false;
+        !wire || !len || !datadir) return ZCL_ERR(-1, "genesis store: invalid identity or input");
     struct byte_stream stream;
     stream_init_from_data(&stream, wire, len);
     struct disk_block_pos pos;
@@ -130,7 +106,7 @@ bool block_index_store_genesis_body(struct block_index *genesis, const struct ch
               block_index_set_have_data_verified(genesis, &pos, datadir);
     if (!ok) genesis_clear(genesis);
     block_free(&block);
-    return ok;
+    return ok ? ZCL_OK : ZCL_ERR(-1, "genesis store: verification or persistence failed");
 }
 
 enum genesis_restore { GENESIS_REBUILD, GENESIS_VERIFIED, GENESIS_CONFLICT };
@@ -156,13 +132,15 @@ static enum genesis_restore genesis_restore_position(struct block_index *genesis
     return had_data ? GENESIS_CONFLICT : GENESIS_REBUILD;
 }
 
-bool block_index_ensure_genesis_body(struct block_index *genesis, const struct chain_params *params,
+struct zcl_result block_index_ensure_genesis_body(struct block_index *genesis, const struct chain_params *params,
                                     const uint8_t *wire, size_t len, const char *datadir)
 {
     if (!genesis_identity(genesis, params) || !wire || !len || !datadir ||
-        (block_index_status_load(genesis) & BLOCK_FAILED_ANY_MASK)) return false;
+        (block_index_status_load(genesis) & BLOCK_FAILED_ANY_MASK))
+        return ZCL_ERR(-1, "genesis restore: invalid identity or input");
     enum genesis_restore restored = genesis_restore_position(genesis, params, wire, len, datadir);
-    if (restored != GENESIS_REBUILD) return restored == GENESIS_VERIFIED;
+    if (restored == GENESIS_VERIFIED) return ZCL_OK;
+    if (restored == GENESIS_CONFLICT) return ZCL_ERR(-1, "genesis restore: conflicting body");
     genesis_clear(genesis);
     return block_index_store_genesis_body(genesis, params, wire, len, datadir);
 }

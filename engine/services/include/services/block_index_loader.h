@@ -48,13 +48,13 @@ uint32_t block_index_genesis_bits(const struct chain_params *params);
 bool block_index_initialize_genesis(struct block_index *genesis, const struct chain_params *params);
 
 /* Verify and persist a supplied genesis body before publishing HAVE_DATA. */
-bool block_index_store_genesis_body(struct block_index *genesis,
+struct zcl_result block_index_store_genesis_body(struct block_index *genesis,
                                     const struct chain_params *params,
                                     const uint8_t *wire, size_t len,
                                     const char *datadir);
 
 /* Restore missing genesis body or verify the existing body byte for byte. */
-bool block_index_ensure_genesis_body(struct block_index *genesis,
+struct zcl_result block_index_ensure_genesis_body(struct block_index *genesis,
                                      const struct chain_params *params,
                                      const uint8_t *wire, size_t len,
                                      const char *datadir);
