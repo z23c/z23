@@ -290,6 +290,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
     (void)ms;
     if (!out) return;
     memset(out, 0, sizeof(*out));
+    if (ctx && ctx->testnet_profile) return;
     if (ctx && boot_install_bundle_request_refused(ctx->datadir)) { out->refused = true; return; }
     /* Explicit operator from-anchor selection is independent of bundle
      * installation and remains available in the native refusal lane. */
@@ -1056,6 +1057,7 @@ void boot_select_state_source(struct node_db *ndb, struct main_state *ms,
     memset(out, 0, sizeof(*out));
     if (!ctx)
         return;
+    if (ctx->testnet_profile) return;
     if (boot_install_bundle_request_refused(ctx->datadir)) { out->refused = true; return; }
 
     /* Capture the compiled checkpoint header's Equihash solution as IBD

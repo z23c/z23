@@ -32,6 +32,7 @@
 #include "config/bundle_fetch_seeds.h"          /* ZCL_BUNDLE_FETCH_CLEARNET_SEEDS */
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
+#include "chain/chainparams.h"
 #include "chain/checkpoints.h"
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"
@@ -324,6 +325,16 @@ static int case_network_gate(void)
          * below are proving the network gate and not an unrelated skip. */
         memset(&ctx, 0, sizeof(ctx));
         ASSERT(boot_bundle_fetch_should_run(dir, &ctx));
+
+        ctx.testnet_profile = app_testnet_profile_by_name("ironwood");
+        ASSERT(ctx.testnet_profile != NULL);
+        ASSERT(!boot_bundle_fetch_should_run(dir, &ctx));
+        ctx.testnet_profile = NULL;
+        bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+        bool fetch = boot_bundle_fetch_should_run(dir, NULL);
+        int seed = bbf_seed_gate(dir, &ctx, BBF_IDX_STUB);
+        chain_params_select(CHAIN_MAIN);
+        ASSERT(selected && !fetch && seed == 0);
 
         /* -regtest → never. */
         ctx.regtest = true;

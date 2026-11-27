@@ -46,6 +46,7 @@ struct app_context {
     const char *datadir;
     const char *params_dir;
     bool testnet;
+    const struct chain_research_descriptor *testnet_profile;
     bool regtest;
     bool ballot_catalog_pin_present;
     struct miner_signal_catalog_pin ballot_catalog_pin;
@@ -504,6 +505,7 @@ struct app_context {
                                  * replay comparison against the inline sweep. */
 };
 
+const struct chain_research_descriptor *app_testnet_profile_by_name(const char *name);
 void app_context_defaults(struct app_context *ctx);
 const char *app_runtime_profile_name(enum zcl_runtime_profile profile);
 bool app_runtime_profile_parse(const char *name,

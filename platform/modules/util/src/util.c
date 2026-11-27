@@ -7,6 +7,7 @@
 #include "util/util.h"
 #include "util/parse_num.h"
 #include "chain/chainparamsbase.h"
+#include "chain/chainparams.h"
 #include "platform/private_directory.h"
 #include <ctype.h>
 #include <errno.h>
@@ -410,7 +411,8 @@ void GetDefaultDataDirUnder(const char *home, char *out, size_t out_size)
 static void AppendNetworkDataDir(char *path, size_t path_size)
 {
     const struct base_chain_params *bp = BaseParams();
-    if (!bp || !bp->strDataDir[0])
+    /* Research startup passes the final profile directory to every subsystem. */
+    if (chain_research_profile_current() || !bp || !bp->strDataDir[0])
         return;
 
     size_t len = strlen(path);

@@ -409,7 +409,12 @@ static bool boot_step_init_observability(void)
 }
 static bool boot_step_select_chain_and_datadir(struct app_context *ctx)
 {
-    if (ctx->regtest)
+    if (ctx->testnet_profile) {
+        if (!chain_research_profile_select(ctx->testnet_profile->id)) {
+            fprintf(stderr, "FATAL: unable to select the requested test network\n");
+            return false;
+        }
+    } else if (ctx->regtest)
         chain_params_select(CHAIN_REGTEST);
     else if (ctx->testnet)
         chain_params_select(CHAIN_TESTNET);
@@ -1985,6 +1990,8 @@ static bool boot_step_load_block_index_ladder(struct app_context *ctx,
      * (E1 seam); the loader functions are unchanged. Per-rung fire
      * counters: `ops state --subsystem=block_index_load_rungs`. */
     boot_blkidx_run_ladder(&blkidx);
+    if (blkidx.genesis_failed)
+        return false;
     int64_t t_rest = boot_submark("blkidx.load_ladder", t_load);
     rebuilt_from_log = blkidx.rebuilt_from_log;
     /* If block index is much smaller than the chain, try loading

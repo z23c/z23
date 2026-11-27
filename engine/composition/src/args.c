@@ -13,6 +13,8 @@
  */
 
 #include "config/args.h"
+#include "chain/chainparams.h"
+#include "chain/chainparamsbase.h"
 #include "config/boot.h"
 #include "config/boot_error.h"
 #include "config/flysync_island.h"
@@ -61,6 +63,7 @@ void print_usage_all(const char *prog)
     printf("Node options:\n");
     printf("  -datadir=<dir>      Data directory\n");
     printf("  -paramsdir=<dir>    Params directory\n");
+    printf("  -testnet-profile=ironwood  Start the isolated proposal network\n");
     printf("  -port=<port>        P2P port (default: 8033)\n");
     printf("  -bind=<address>     Listen only on one literal IPv4/IPv6 address\n");
     printf("                      No hostname, port, zone or mapped IPv6; bind failure aborts\n");
@@ -1414,11 +1417,28 @@ static int args_admit_options(struct app_context *ctx)
     return 0;
 }
 
+const struct chain_research_descriptor *app_testnet_profile_by_name(const char *name)
+{
+    if (name && strcmp(name, "ironwood") == 0)
+        return chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    return NULL;
+}
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
     struct args_arm_state st = { ctx, show_metrics, argv };
     if (args_network_begin(ctx)) return 1;
+    if (ctx->testnet_profile) {
+        ctx->p2p_port = ctx->testnet_profile->chain->nDefaultPort;
+        ctx->rpc_port = ctx->testnet_profile->base->nRPCPort;
+        ctx->no_file_sync = true;
+        ctx->no_legacy_auto_import = true;
+        ctx->connect_only = true;
+        ctx->checkpoints_enabled = false;
+        ctx->private_listeners = true;
+        ctx->no_tor = true;
+    }
     args_apply_buildworker_config(argc, argv, ctx);
     bool positional_seen = false;
     for (int i = 1; i < argc; i++) {

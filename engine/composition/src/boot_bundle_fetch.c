@@ -17,6 +17,7 @@
 #include "config/consensus_state_install_runtime.h" /* boot_autodetect_consensus_bundle */
 #include "validation/chainstate.h"             /* block_map_count */
 #include "validation/main_state.h"             /* struct main_state */
+#include "chain/chainparams.h"
 #include "chain/checkpoints.h"                 /* get_sha3_utxo_checkpoint */
 #include "net/rom_fetch.h"
 #include "net/rom_seed.h"                       /* ROM_SEED_* bounds */
@@ -125,16 +126,11 @@ static bool bbf_download_progress(uint32_t chunks_done, uint32_t num_chunks,
  * The gate is "is mainnet", not "is not regtest": a testnet node must not pull
  * a mainnet bundle either.
  *
- * ctx is THE authority, deliberately, and chain_params_get() is not consulted:
- * boot_step_select_chain_and_datadir (engine/composition/src/boot.c) derives the selected
- * chain from exactly these two ctx fields, so ctx is the same answer one step
- * earlier — and chain_params_get() asserts when no chain has been selected yet,
- * which a unit-test caller has every right not to have done. A NULL ctx means
- * "no argv context", which is mainnet, matching every other gate in this
- * function. */
+ * Research profiles also select their own genesis before state acquisition. */
 static bool bbf_network_is_mainnet(const struct app_context *ctx)
 {
-    return !(ctx && (ctx->regtest || ctx->testnet));
+    return !chain_research_profile_current() &&
+           !(ctx && (ctx->regtest || ctx->testnet || ctx->testnet_profile));
 }
 /* Name the skip once per process. Never silent: a fetch that does not happen
  * has to say so, or the next fixture leak reads as "the gate worked". */
@@ -149,7 +145,8 @@ static void bbf_log_network_skip(const char *what,
              "%s SKIPPED: network=%s is not mainnet, and the checkpoint bundle "
              "(plus the CHECKPOINT_ROM authority that installs it) is "
              "mainnet-only. No file-service peer was contacted.",
-             what, (ctx && ctx->regtest) ? "regtest" : "testnet");
+             what, chain_research_profile_current() ? chain_params_get()->strNetworkID :
+                   (ctx && ctx->regtest) ? "regtest" : "testnet");
 }
 bool boot_bundle_fetch_should_run(const char *datadir,
                                   const struct app_context *ctx)
