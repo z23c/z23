@@ -5,7 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 
-static bool export_catalog(const struct profile *p)
+static int finish_output(const char *label)
+{
+    if (fflush(stdout) == 0 && !ferror(stdout)) return 0;
+    fprintf(stderr, "%s output write failed\n", label);
+    return 1;
+}
+
+static void export_catalog(const struct profile *p)
 {
     fputs("[\"", stdout);
     profile_print_hex(p->catalog.network_id, 32);
@@ -17,7 +24,6 @@ static bool export_catalog(const struct profile *p)
         printf("\",%d]", p->entries[i].activation);
     }
     puts("]]");
-    return fflush(stdout) == 0 && !ferror(stdout);
 }
 
 static bool load_profile(const char *manifest_path, const char *genesis_path,
@@ -48,7 +54,7 @@ static int check_options(int argc, char **argv, bool *export)
               "Export requires a previously agreed lowercase pin; save output as\n"
               "DATADIR/ballots/EXPECTED_CATALOG_HEX.json for the node loader.\n",
               stdout);
-        return 0;
+        return finish_output("profile");
     }
     if (*export && argc != 5) {
         fputs("Usage: profile-inspector --export-catalog MANIFEST GENESIS EXPECTED_CATALOG_HEX\n", stderr);
@@ -82,11 +88,8 @@ int main(int argc, char **argv)
         return 1;
     }
     if (export) {
-        if (!export_catalog(&p)) {
-            fputs("catalog output write failed\n", stderr);
-            return 1;
-        }
-        return 0;
+        export_catalog(&p);
+        return finish_output("catalog");
     }
     char display[65];
     uint256_get_hex(&hash, display);
@@ -104,5 +107,5 @@ int main(int argc, char **argv)
         printf("\",\"activation\":%d}", p.entries[i].activation);
     }
     puts("]}");
-    return 0;
+    return finish_output("profile");
 }

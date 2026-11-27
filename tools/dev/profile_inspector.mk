@@ -48,6 +48,9 @@ check: all
 	  2aafc4959fe4da89be30020ba5ff5b2b77638cf6d3af169d35d053e610741c6a > "$$tmp/wrong.out" 2> "$$tmp/wrong.err"; then \
 	  echo 'wrong catalog unexpectedly accepted' >&2; exit 1; fi; \
 	 test ! -s "$$tmp/wrong.out"; \
+	 if $(OUT) "$$tmp/profile/result/manifest.bin" "$$tmp/profile/result/genesis.bin" \
+	  >&- 2> "$$tmp/write.err"; then echo "closed stdout unexpectedly accepted" >&2; exit 1; fi; \
+	 grep -q "output write failed" "$$tmp/write.err"; \
 	 set -- 1795737600 1 20; i=1; \
 	 while test $$i -le 64; do set -- "$$@" "$$(printf '%064x' "$$i")" 25; i=$$((i+1)); done; \
 	 rc=0; (ulimit -c 0 && ulimit -f 1 && exec $(CREATE_OUT) "$$tmp/retry" "$$@") > "$$tmp/crash.out" 2>&1 || rc=$$?; \
