@@ -19,6 +19,9 @@
 #include "config/command_catalog.h"
 #include "consensus/upgrades.h"
 #include "controllers/rpc_client.h"
+#include "controllers/misc_controller.h"
+#include "controllers/wallet_shielded_controller.h"
+#include "rpc/server.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shield_address.h"
 #include "controllers/wallet_shielded_internal.h"
@@ -54,6 +57,7 @@
 #include "wallet/wallet_lock.h"
 #include "wallet/wallet_sqlite.h"
 
+#include <ctype.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1273,11 +1277,112 @@ static bool wsa_load_prover(void)
            zclassic_sapling_prover_is_ready();
 }
 
+static bool wsa_validate_rpc(struct rpc_table *table, const char *address,
+                             bool expected)
+{
+    struct json_value params = {0}, value = {0}, result = {0};
+    json_set_array(&params);
+    json_set_str(&value, address);
+    bool called = json_push_back(&params, &value) &&
+                  rpc_table_execute(table, "validateaddress", &params, &result);
+    const struct json_value *valid = json_get(&result, "isvalid");
+    bool ok = called && valid && valid->type == JSON_BOOL &&
+              json_get_bool(valid) == expected;
+    json_free(&result);
+    json_free(&value);
+    json_free(&params);
+    return ok;
+}
+
+static int wsa_test_address_rpc(const struct db_sapling_note *note,
+                                const char *main_addr, const char *reg_addr,
+                                const char *upper_addr, bool encoded)
+{
+    int failures = 0;
+    char tricky_addr[128] = {0};
+    struct rpc_table table;
+    rpc_table_init(&table);
+    register_misc_rpc_commands(&table);
+    char status[32];
+    if (rpc_is_in_warmup(status, sizeof(status))) set_rpc_warmup_finished();
+    WSA_CHECK("regtest validateaddress accepts selected prefix", encoded &&
+              wsa_validate_rpc(&table, reg_addr, true));
+    WSA_CHECK("regtest validateaddress accepts uppercase selected prefix", encoded &&
+              wsa_validate_rpc(&table, upper_addr, true));
+    WSA_CHECK("regtest validateaddress rejects foreign prefix", encoded &&
+              wsa_validate_rpc(&table, main_addr, false));
+    chain_params_select(CHAIN_MAIN);
+    bool tricky = sapling_encode_payment_address(note->diversifier, note->pk_d,
+                                                "zs1demo", tricky_addr, sizeof(tricky_addr));
+    WSA_CHECK("main rejects a longer HRP containing separator", tricky &&
+              wsa_validate_rpc(&table, tricky_addr, false));
+    WSA_CHECK("main validateaddress accepts selected prefix", encoded &&
+              wsa_validate_rpc(&table, main_addr, true));
+    WSA_CHECK("main validateaddress rejects foreign prefix", encoded &&
+              wsa_validate_rpc(&table, reg_addr, false));
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
+static int wsa_test_public_network(void)
+{
+    int failures = 0;
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    enum chain_research_profile research_id = research ? research->id : 0;
+    const char *id = chain_params_get()->strNetworkID;
+    enum chain_network original = strcmp(id, "main") == 0 ? CHAIN_MAIN :
+        (strcmp(id, "test") == 0 ? CHAIN_TESTNET : CHAIN_REGTEST);
+    struct db_sapling_note note = {0};
+    memset(note.txid, 0x33, 32); memset(note.ivk, 0x44, 32);
+    memset(note.nullifier, 0x55, 32); memset(note.cm, 0x66, 32);
+    memset(note.pk_d, 0x77, 32); memset(note.diversifier, 0x88, 11);
+    memset(note.rcm, 0x99, 32); note.value = 50000;
+    char main_addr[128] = {0}, reg_addr[128] = {0};
+    chain_params_select(CHAIN_MAIN);
+    bool encoded = sapling_encode_payment_address(note.diversifier, note.pk_d,
+        chain_params_get()->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
+        main_addr, sizeof(main_addr));
+    chain_params_select(CHAIN_REGTEST);
+    encoded = encoded && sapling_encode_payment_address(note.diversifier,
+        note.pk_d, chain_params_get()->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
+        reg_addr, sizeof(reg_addr));
+    char upper_addr[128];
+    size_t i = 0;
+    do {
+        upper_addr[i] = (char)toupper((unsigned char)reg_addr[i]);
+    } while (reg_addr[i++] != 0);
+    failures += wsa_test_address_rpc(&note, main_addr, reg_addr, upper_addr, encoded);
+    struct wsa_fix fx;
+    bool opened = wsa_open(&fx, "public_network", false);
+    WSA_CHECK("public note fixture opens", opened);
+    if (opened) {
+        struct json_value params = {0}, result = {0};
+        json_set_array(&params);
+        bool ready = wallet_readiness_initialize(fx.w, WALLET_READINESS_READY, false, 0);
+        bool saved = db_sapling_note_save(&fx.ndb, &note);
+        WSA_CHECK("synthetic note saved", saved);
+        WSA_CHECK("synthetic wallet ready", ready);
+        bool called = saved && ready && rpc_z_listallnotes(&params, false, &result);
+        WSA_CHECK("listallnotes RPC succeeds", called);
+        const char *address = called ? json_get_str(json_get(json_at(&result, 0), "address")) : NULL;
+        WSA_CHECK("listallnotes uses selected prefix", address &&
+                  strcmp(address, reg_addr) == 0);
+        json_free(&result); json_free(&params);
+        wsa_close(&fx);
+    }
+    if (research)
+        (void)chain_research_profile_select(research_id);
+    else
+        chain_params_select(original);
+    return failures;
+}
+
 int test_wallet_shield_address(void);
 int test_wallet_shield_address(void)
 {
     printf("\n=== wallet shield address (z_shieldaddress) tests ===\n");
     int failures = 0;
+    failures += wsa_test_public_network();
     failures += wsa_test_refusals();
     bool prover = wsa_load_prover();
     WSA_CHECK("sapling proving parameters load (a missing set is a failure, "

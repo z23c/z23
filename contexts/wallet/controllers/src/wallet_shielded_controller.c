@@ -642,9 +642,16 @@ bool rpc_z_listallnotes(const struct json_value *params, bool help,
     if (ctx->main_state)
         chain_h = active_chain_height(&ctx->main_state->chain_active);
 
+    const char *hrp = chain_params_get()->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS];
     json_set_array(result);
     for (int i = 0; i < count; i++) {
         struct db_sapling_note *n = &notes[i];
+        char z_addr[128];
+        if (!sapling_encode_payment_address(n->diversifier, n->pk_d, hrp,
+                                            z_addr, sizeof(z_addr))) {
+            json_set_str(result, "Cannot encode Sapling address");
+            return false;
+        }
 
         struct json_value entry = {0};
         json_init(&entry);
@@ -655,9 +662,6 @@ bool rpc_z_listallnotes(const struct json_value *params, bool help,
         json_push_kv_str(&entry, "txid", txid_hex);
         json_push_kv_int(&entry, "outindex", n->output_index);
 
-        char z_addr[128];
-        sapling_encode_payment_address(n->diversifier, n->pk_d,
-                                        "zs", z_addr, sizeof(z_addr));
         json_push_kv_str(&entry, "address", z_addr);
 
         char amount_buf[32];

@@ -25,6 +25,7 @@
 #include "wallet/keystore.h"
 #include "wallet/wallet.h"
 #include "wallet/sapling_keys.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -162,6 +163,16 @@ static void validateaddress_push_scripthash(struct wallet *wallet,
     }
 }
 
+static bool validateaddress_sapling_hrp(const char *addr, const char *hrp)
+{
+    while (*hrp && *addr &&
+           tolower((unsigned char)*addr) == tolower((unsigned char)*hrp)) {
+        addr++;
+        hrp++;
+    }
+    return !*hrp && *addr == '1' && strrchr(addr, '1') == addr;
+}
+
 static bool rpc_validateaddress(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
@@ -187,7 +198,9 @@ static bool rpc_validateaddress(const struct json_value *params, bool help,
     /* Try Sapling z-address (zs1...) */
     uint8_t diversifier[11];
     uint8_t pk_d[32];
-    if (sapling_decode_payment_address(addr, diversifier, pk_d)) {
+    if (validateaddress_sapling_hrp(
+            addr, cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS]) &&
+        sapling_decode_payment_address(addr, diversifier, pk_d)) {
         json_push_kv_bool(result, "isvalid", true);
         json_push_kv_str(result, "type", "sapling");
         validateaddress_push_sapling_ismine(ctx->wallet, result,
