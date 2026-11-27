@@ -1227,13 +1227,13 @@ fi
 # or misreads it. Refuse the mismatch rather than discover it at link time.
 # Compare machines, not vendor spellings: Clang, Debian's GCC and Red Hat's
 # compilers name one Linux machine x86_64-unknown-linux-gnu,
-# x86_64-linux-gnu and x86_64-redhat-linux. The vendor is whatever stands
-# between the architecture and the system, and a trailing `gnu` is optional.
+# x86_64-linux-gnu and x86_64-redhat-linux. A name of three or more parts
+# carries a vendor between architecture and system (riscv64-elf carries none); a trailing gnu is optional.
 vendor_machine_key()
 {
     local -a p
     IFS=- read -r -a p <<<"$1"
-    case "${p[1]:-}" in linux|darwin*|*bsd*|windows|wasi|mingw*) ;; ?*) p=("${p[0]}" "${p[@]:2}") ;; esac
+    case "${p[1]:-}" in linux|darwin*|*bsd*|windows|wasi|mingw*) ;; *) if (( ${#p[@]} >= 3 )); then p=("${p[0]}" "${p[@]:2}"); fi ;; esac
     local IFS=-
     if [[ "${p[${#p[@]}-1]:-}" == gnu && ${#p[@]} -ge 3 ]]; then unset "p[${#p[@]}-1]"; fi
     printf '%s' "${p[*]}"

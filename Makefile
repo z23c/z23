@@ -1699,16 +1699,19 @@ ZCL_CC_DIR := $(if $(findstring /,$(ZCL_CC_PLAIN)),$(dir $(ZCL_CC_PLAIN)))
 ZCL_CC_SIBLING = $(firstword $(if $(ZCL_CC_DIR),$(wildcard $(ZCL_CC_DIR)$(1)),$(shell command -v $(1) 2>/dev/null)))
 ifeq ($(ZCL_CC_IS_CLANG),1)
 # The C++ driver takes the compiler's name with clang++ for clang (clang-23
-# has clang++-23 beside it), then the unversioned clang++. Without one, a GNU
-# c++ would stay in place and vendor/lib would refuse that pair only after
-# building the first archives: stop here instead.
-ZCL_CXX_BESIDE_CC := $(firstword $(foreach n,$(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN))) clang++,$(call ZCL_CC_SIBLING,$n)))
+# has clang++-23 beside it), then the unversioned clang++, each beside a
+# compiler that has a directory and then on PATH (a lone symlink to clang-18
+# pairs with clang++-18 from PATH). Without one, a GNU c++ would stay in
+# place and vendor/lib would refuse that pair only after building the first
+# archives: stop here instead.
+ZCL_CXX_VERSIONED := $(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN)))
+ZCL_CXX_BESIDE_CC := $(firstword $(foreach n,$(ZCL_CXX_VERSIONED) clang++,$(call ZCL_CC_SIBLING,$n)) $(if $(ZCL_CC_DIR),$(shell command -v $(ZCL_CXX_VERSIONED) 2>/dev/null) $(shell command -v clang++ 2>/dev/null)))
 ifeq ($(filter command% environment% override,$(origin CXX)),)
 ifeq ($(findstring clang++,$(notdir $(lastword $(CXX)))),)
 ifneq ($(ZCL_CXX_BESIDE_CC),)
 CXX := $(ZCL_CXX_BESIDE_CC)
 else
-$(error no C++ driver for CC=$(ZCL_CC_PLAIN): neither $(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN))) nor clang++ beside it; name one with CXX=)
+$(error no C++ driver for CC=$(ZCL_CC_PLAIN): neither $(ZCL_CXX_VERSIONED) nor clang++ beside it or on PATH; name one with CXX=)
 endif
 endif
 endif

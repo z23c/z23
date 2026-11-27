@@ -241,8 +241,7 @@ fi
     fail "a cross Clang was accepted as native beside a host cc that says x86_64-redhat-linux: $output"
 rm "$SANDBOX/tools/cc" "$SANDBOX/tools/native-clang"
 
-# The key compares machines, not vendor spellings: a system name is kept and
-# a trailing gnu is dropped. Each row lists spellings, then their one key.
+# Each row lists machine spellings, then their one key (see vendor_machine_key).
 eval "$(sed -n '/^vendor_machine_key()/,/^}/p' "$ROOT/tools/scripts/build_vendor.sh")"
 while read -r row; do
     want="${row##* }"
@@ -251,13 +250,14 @@ while read -r row; do
             fail "machine key of $spelling is '$(vendor_machine_key "$spelling")', not '$want'"
     done
 done <<'MACHINES'
-x86_64-unknown-linux-gnu x86_64-pc-linux-gnu x86_64-linux-gnu x86_64-redhat-linux x86_64-linux
+x86_64-unknown-linux-gnu x86_64-pc-linux-gnu x86_64-linux-gnu x86_64-redhat-linux x86_64-suse-linux x86_64-linux
 aarch64-unknown-linux-android24 aarch64-linux-android24
 aarch64-linux-android aarch64-linux-android
 arm-none-eabi arm-eabi
 aarch64-apple-darwin aarch64-darwin
 x86_64-w64-mingw32 x86_64-mingw32
 x86_64-linux-gnux32 x86_64-linux-gnux32
+riscv64-elf riscv64-unknown-elf riscv64-elf
 MACHINES
 
 # A C driver with no C++ front end installed is an ordinary host shape (cc is
