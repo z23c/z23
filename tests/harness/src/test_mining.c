@@ -36,7 +36,6 @@ static bool mining_ballot_call(struct rpc_table *table, const char *catalog,
     json_set_array(&params);
     json_set_str(&item, catalog);
     bool built = json_push_back(&params, &item);
-    json_free(&item);
     json_set_str(&item, bitmap);
     built = built && json_push_back(&params, &item);
     json_free(&item);
@@ -61,12 +60,12 @@ static int mining_ballot_cases(void)
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
         "0100000000000000000000000000000000000000000000000000000000000080") == 0 &&
         json_get(&out, "value") && json_get_int(json_get(&out, "value")) == 0);
-    json_free(&out);
+    json_set_null(&out);
     MT_CHECK("ballot rejects short digest", !mining_ballot_call(&table, "00", bitmap, &out));
-    json_free(&out);
+    json_set_null(&out);
     MT_CHECK("ballot rejects nonhex bitmap", !mining_ballot_call(&table, catalog,
         "z100000000000000000000000000000000000000000000000000000000000080", &out));
-    json_free(&out);
+    json_set_null(&out);
     return failures;
 }
 
