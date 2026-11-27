@@ -1422,7 +1422,6 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
         msg_version_set_external_ip(ctx->external_ip, (uint16_t)ctx->p2p_port);
     char body_datadir[4096];
     GetDataDir(true, body_datadir, sizeof(body_datadir));
-    /* Initialize RPC */
     rpc_table_init(svc->rpc_table);
     rpc_blockchain_set_state(svc->state, svc->mempool, body_datadir);
     rpc_blockchain_set_coins_db(NULL, svc->coins_tip);
