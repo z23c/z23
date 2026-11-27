@@ -39,6 +39,9 @@ struct miner_signal_tally {
     struct uint256 parent_hash;
 };
 
+/* Ceiling of 95 percent for a positive int32 window. */
+int32_t miner_signal_required_votes(int32_t window);
+
 struct zcl_result miner_signal_schedule_valid(const struct miner_signal_schedule *schedule);
 /* Once all window blocks are tallied, the caller may query any subsequent
  * candidate height on a verified descendant branch. */

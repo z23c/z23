@@ -80,10 +80,15 @@ struct zcl_result miner_signal_connect(const struct miner_signal_tally *parent, 
     return ZCL_OK;
 }
 
+int32_t miner_signal_required_votes(int32_t window)
+{
+    return (int32_t)(((int64_t)window * 95 + 99) / 100);
+}
+
 static enum miner_signal_phase phase(const struct miner_signal_tally *t, int64_t next)
 {
     if (next < (int64_t)t->schedule.start + t->schedule.window) return MINER_SIGNAL_VOTING;
-    if ((int64_t)t->votes * 100 < (int64_t)t->schedule.window * 95) return MINER_SIGNAL_EXPIRED;
+    if (t->votes < miner_signal_required_votes(t->schedule.window)) return MINER_SIGNAL_EXPIRED;
     return next < t->schedule.activation ? MINER_SIGNAL_LOCKED_IN : MINER_SIGNAL_ACTIVE;
 }
 

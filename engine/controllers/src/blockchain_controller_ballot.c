@@ -310,6 +310,16 @@ static bool ballot_tally(const char *datadir, const struct miner_signal_schedule
     return *phase != NULL;
 }
 
+static bool ballot_reply_schedule(struct json_value *result, const struct miner_signal_schedule *s)
+{
+    return json_push_kv_int(result, "start", s->start) &&
+        json_push_kv_int(result, "window", s->window) &&
+        json_push_kv_int(result, "required_votes", miner_signal_required_votes(s->window)) &&
+        json_push_kv_int(result, "activation", s->activation) &&
+        json_push_kv_int(result, "slots", s->slots) &&
+        json_push_kv_int(result, "slot", s->slot);
+}
+
 static bool ballot_reply(struct json_value *result, const struct miner_signal_schedule *s,
                          const struct ballot_snapshot *snap, const char *network,
                          const char *source, const char *phase, int32_t votes)
@@ -326,11 +336,7 @@ static bool ballot_reply(struct json_value *result, const struct miner_signal_sc
         json_push_kv_int(result, "next_height", (int64_t)snap->parent_height + 1) &&
         json_push_kv_str(result, "phase_of_next_block", phase) &&
         json_push_kv_int(result, "votes", votes) &&
-        json_push_kv_int(result, "start", s->start) &&
-        json_push_kv_int(result, "window", s->window) &&
-        json_push_kv_int(result, "activation", s->activation) &&
-        json_push_kv_int(result, "slots", s->slots) &&
-        json_push_kv_int(result, "slot", s->slot) &&
+        ballot_reply_schedule(result, s) &&
         json_push_kv_str(result, "catalog", catalog)) return true;
     return ballot_fail(result, "Out of memory building ballot result");
 }
@@ -427,6 +433,7 @@ static bool ballot_catalog_reply(struct json_value *result,
         json_push_kv_int(result, "next_height", (int64_t)snap->parent_height + 1) &&
         json_push_kv_int(result, "start", pin->start) &&
         json_push_kv_int(result, "window", pin->window) &&
+        json_push_kv_int(result, "required_votes", miner_signal_required_votes(pin->window)) &&
         json_push_kv(result, "proposals", &rows);
     json_free(&rows);
     return ok;

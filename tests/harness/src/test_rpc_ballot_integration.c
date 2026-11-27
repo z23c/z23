@@ -67,6 +67,12 @@ static bool bf_hash_row(sqlite3 *db, const char *sql, int h, const struct uint25
     return ok;
 }
 
+static bool bf_required_matches(const struct json_value *result, const char *phase)
+{
+    int expected = !strcmp(phase, "scheduled") ? 19 : 1;
+    return json_get_int(json_get(result, "required_votes")) == expected;
+}
+
 static bool bf_status(struct ballot_fixture *f, const char *raw, const char *source,
                       const char *phase, int votes)
 {
@@ -79,7 +85,8 @@ static bool bf_status(struct ballot_fixture *f, const char *raw, const char *sou
     bool pass = parsed && (phase ? ok && actual && strcmp(actual, phase) == 0 &&
                                        basis && !strcmp(basis, source) &&
                                        digest && !strcmp(digest, f->catalog_hex) &&
-                                       json_get_int(json_get(&result, "votes")) == votes
+                                       json_get_int(json_get(&result, "votes")) == votes &&
+                                       bf_required_matches(&result, phase)
                                  : !ok);
     if (!pass)
         fprintf(stderr, "ballot RPC expected %s, got %s (ok=%d)\n", phase ? phase : "refusal",
@@ -239,7 +246,9 @@ static bool bf_advance(struct ballot_fixture *f, int height)
 
 static bool bf_positive_cases(struct ballot_fixture *f)
 {
-    if (!bf_advance(f, 0) || !bf_call(f, "voting", 0) || !bf_advance(f, 1) ||
+    char scheduled[96];
+    snprintf(scheduled, sizeof(scheduled), "[8,20,30,3,0,\"%s\"]", f->catalog_hex);
+    if (!bf_advance(f, 0) || !bf_status(f, scheduled, "raw_parameters", "scheduled", 0) || !bf_call(f, "voting", 0) || !bf_advance(f, 1) ||
         !bf_call(f, "locked_in", 1))
         return false;
     /* A finalized row at h0 witnesses h1, not genesis. */
@@ -278,6 +287,8 @@ static bool bf_catalog_status(struct ballot_fixture *f, bool expected)
         pass = rows && json_size(rows) == 3 &&
             json_get_int(json_get(&result, "parent_height")) == 3 &&
             json_get_int(json_get(&result, "next_height")) == 4 &&
+            json_get(&result, "required_votes") &&
+            json_get_int(json_get(&result, "required_votes")) == 1 &&
             !strcmp(json_get_str(json_get(&result, "catalog")), f->catalog_hex);
         for (size_t i = 0; pass && i < 3; i++)
             pass = bf_catalog_row_check(rows, i);
@@ -308,7 +319,8 @@ static bool bf_catalog_limit(struct ballot_fixture *f)
     json_set_array(&params);
     bool ok = rpc_table_execute(&f->table, "getballotstatus", &params, &result);
     const struct json_value *rows = json_get(&result, "proposals");
-    ok = ok && rows && json_size(rows) == 256 &&
+    ok = ok && json_get(&result, "required_votes") &&
+        json_get_int(json_get(&result, "required_votes")) == 1 && rows && json_size(rows) == 256 &&
         json_get_int(json_get(json_at(rows, 255), "slot")) == 255;
     json_free(&result);
     pin.digest[0] ^= 1;

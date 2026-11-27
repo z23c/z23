@@ -39,6 +39,22 @@ static int uneven_window(void)
 
 int test_miner_signal_round(void)
 {
+    static const struct { int32_t window, required; } thresholds[] = {
+        {1, 1}, {19, 19}, {20, 19}, {21, 20}, {INT32_MAX, 2040109465}
+    };
+    for (size_t i = 0; i < sizeof(thresholds) / sizeof(thresholds[0]); ++i) {
+        int32_t required = miner_signal_required_votes(thresholds[i].window);
+        ROUND_CHECK(required == thresholds[i].required);
+        if (thresholds[i].window == INT32_MAX) continue;
+        struct miner_signal_tally t = { .schedule = { .start = 1,
+            .window = thresholds[i].window, .activation = thresholds[i].window + 2 },
+            .parent_height = thresholds[i].window, .votes = required - 1 };
+        ROUND_CHECK(miner_signal_next_phase(&t) == MINER_SIGNAL_EXPIRED);
+        t.votes = required;
+        ROUND_CHECK(miner_signal_next_phase(&t) == MINER_SIGNAL_LOCKED_IN);
+        t.parent_height++;
+        ROUND_CHECK(miner_signal_next_phase(&t) == MINER_SIGNAL_ACTIVE);
+    }
     ROUND_CHECK(uneven_window() == 0);
     struct tx_in input = {0};
     outpoint_set_null(&input.prevout);
