@@ -18,6 +18,7 @@
 #include "sapling/params_init.h"
 #include "sapling/params_vk_embedded.h"
 #include "sapling/sprout.h"
+#include "sapling/note.h"
 #include "validation/check_transaction.h"
 #include "validation/contextual_check_tx.h"
 
@@ -486,6 +487,66 @@ static int kat_check_joinsplit_proof(struct transaction *tx)
     return failures;
 }
 
+static const char exit_anchor[] = "1e0ee883621a0811c81fe9c8df578a80ca724aa05388a5a0535a68377a8a1af3";
+static const char exit_hsig[] = "5b3cb8b30514890913832489da1886a1352148a43736523bfb2deebbc1ad65ed";
+static const char exit_mac0[] = "a30ecfa8f59b3b0985927036f7d59d2d21ca2e0a88793e28063f69e7c7a021fd";
+static const char exit_mac1[] = "c723c80f6729efa6002593e35eae1536acf00b844935370259d129e1d24cd83a";
+static const char exit_nf0[] = "351139ee038cb92a88c9c4a15cb4f93041fddaf57451e051ed722a58b80c12ea";
+static const char exit_nf1[] = "83d9182468eb7b2f8383d86cd59c41710d4fc48b199057b882c1a0ddc3f78e3a";
+static const char exit_cm0[] = "9812826e283fcd561d21980eb4a9a28331dcd69e73b90b5fa7b29ff1e7a93a86";
+static const char exit_cm1[] = "b00ff11081eba34a2779f1b23ea0c1b039f55d1b9f287c7b92219346b7f55989";
+static const char exit_proof[] = "b375d201aec0cf085841c3e98239362070a8bb37e63c9e353e7c9f300192fc6875ec658931f6022e4a64d1dd2047c2c68789d48fd73e687666d313850ad559cec201b9318c1e095d93fa1064a8f5fe534f5f0d1698d30ece23ad59e6137327b81634a6688484e41fdb0ff3be8324c8bc0b35cb4d357d9dfb8074fd77a1652b645c5ece29c7bc605158c32a4f963abf08a8ce61750dcdd71cf1452763bb5b95d5213e69ad5e059a52f8e5bf77c91814d9da4016eda2df9d99153e0d11b3c101cd";
+static const char exit_pk0[] = "7390bb73c1a251a780b4febabef82f78e5b5abf65e35b65193920a74bc809737";
+static const char exit_rho0[] = "caf574e7dc65873d5cee905dc5a5caf1945d82b15a43c788748747f140bc737e";
+static const char exit_r0[] = "08c9c4d532897275684ee7791a2da611360e529bac9a9ad4b058593ea77adebc";
+static const char exit_pk1[] = "52917e3c10724b15a5c0358d3456dac9edbd3aef6d8c5d1e61bbaf9067bec023";
+static const char exit_rho1[] = "05f32289f0aa963661f1ea66ed959ef7770642e76e56e72b26e4596f6a8b678c";
+static const char exit_r1[] = "29c8019ae35968c74d3a2c4e908353a03e06c3829f23719b4271fcda7c4489a8";
+
+/* Synthetic proof and public dummy openings; no input witness or signature. */
+static int kat_synthetic_exit(void)
+{
+    int failures = 0;
+    uint8_t anchor[32], hs[32], mac[2][32], nf[2][32], cm[2][32], proof[192];
+    struct sprout_note note[2] = {0};
+    bool decoded = decode_hex_exact(exit_anchor, anchor, 32) &&
+        decode_hex_exact(exit_hsig, hs, 32) &&
+        decode_hex_exact(exit_mac0, mac[0], 32) && decode_hex_exact(exit_mac1, mac[1], 32) &&
+        decode_hex_exact(exit_nf0, nf[0], 32) && decode_hex_exact(exit_nf1, nf[1], 32) &&
+        decode_hex_exact(exit_cm0, cm[0], 32) && decode_hex_exact(exit_cm1, cm[1], 32) &&
+        decode_hex_exact(exit_proof, proof, sizeof(proof)) &&
+        decode_hex_exact(exit_pk0, note[0].a_pk.data, 32) &&
+        decode_hex_exact(exit_pk1, note[1].a_pk.data, 32) &&
+        decode_hex_exact(exit_rho0, note[0].rho.data, 32) &&
+        decode_hex_exact(exit_rho1, note[1].rho.data, 32) &&
+        decode_hex_exact(exit_r0, note[0].r.data, 32) &&
+        decode_hex_exact(exit_r1, note[1].r.data, 32);
+    KAT_CHECK("synthetic exit public fields decode", decoded);
+    if (!decoded) return failures;
+    KAT_CHECK("synthetic exit Groth16 proof verifies",
+        sprout_verify_groth16(proof, anchor, hs, mac[0], mac[1], nf[0], nf[1],
+                              cm[0], cm[1], 0, 251234567));
+    struct uint256 computed[2];
+    for (size_t i = 0; i < 2; i++) {
+        sprout_note_cm(&note[i], &computed[i]);
+        KAT_CHECK("zero dummy opening matches commitment",
+                  memcmp(computed[i].data, cm[i], 32) == 0);
+        note[i].value = 1;
+        sprout_note_cm(&note[i], &computed[i]);
+        KAT_CHECK("one-zatoshi dummy opening rejects",
+                  memcmp(computed[i].data, cm[i], 32) != 0);
+        note[i].value = 0;
+        sprout_note_cm(&note[i], &computed[i]);
+    }
+    KAT_CHECK("swapped dummy openings reject",
+              memcmp(computed[0].data, cm[1], 32) != 0 &&
+              memcmp(computed[1].data, cm[0], 32) != 0);
+    KAT_CHECK("swapped commitments invalidate proof",
+        !sprout_verify_groth16(proof, anchor, hs, mac[0], mac[1], nf[0], nf[1],
+                               cm[1], cm[0], 0, 251234567));
+    return failures;
+}
+
 int test_sprout_groth16_kat(void)
 {
     printf("\n=== Sprout Groth16 real-proof KAT ===\n");
@@ -520,6 +581,7 @@ int test_sprout_groth16_kat(void)
     failures += kat_check_contextual(&tx);
     failures += kat_check_joinsplit_proof(&tx);
     failures += kat_check_withdrawal();
+    failures += kat_synthetic_exit();
 
     transaction_free(&tx);
     printf("Sprout Groth16 real-proof KAT: %s (%d failures)\n",
