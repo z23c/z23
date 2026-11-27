@@ -20,6 +20,7 @@
 #include "consensus/upgrades.h"
 #include "core/core_io.h"
 #include "core/serialize.h"
+#include "core/hash.h"
 #include "encoding/utilstrencodings.h"
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
@@ -550,7 +551,8 @@ static struct zcl_result mining_template_ballot(const struct json_value *params,
                                        DEFAULT_BLOCK_MAX_SIZE, &reserved_size);
 }
 
-static bool mining_template_data(const struct transaction *tx, struct json_value *entry)
+static bool mining_template_data(const struct transaction *tx, struct json_value *entry,
+                                 struct uint256 *hash)
 {
     struct byte_stream bytes;
     stream_init(&bytes, 256);
@@ -563,6 +565,7 @@ static bool mining_template_data(const struct transaction *tx, struct json_value
     } else {
         ok = false;
     }
+    if (ok && hash) hash256(bytes.data, bytes.size, hash->data);
     stream_free(&bytes);
     return ok;
 }
@@ -574,8 +577,7 @@ static bool mining_template_entry(const struct block_template *tmpl, size_t i,
     struct uint256 hash;
     char txid[65];
     json_set_object(&entry);
-    bool ok = mining_template_data(&tmpl->block.vtx[i], &entry) &&
-              transaction_hash_serialized(&tmpl->block.vtx[i], &hash);
+    bool ok = mining_template_data(&tmpl->block.vtx[i], &entry, &hash);
     if (ok) {
         uint256_get_hex(&hash, txid);
         ok = json_push_kv_str(&entry, "hash", txid);
@@ -592,7 +594,7 @@ static bool mining_template_transactions(const struct block_template *tmpl, stru
     struct json_value txs = {0}, coinbase = {0};
     json_set_array(&txs);
     json_set_object(&coinbase);
-    bool ok = tmpl->block.num_vtx && mining_template_data(&tmpl->block.vtx[0], &coinbase);
+    bool ok = tmpl->block.num_vtx && mining_template_data(&tmpl->block.vtx[0], &coinbase, NULL);
     for (size_t i = 1; ok && i < tmpl->block.num_vtx; ++i)
         ok = mining_template_entry(tmpl, i, &txs);
     if (ok) ok = json_push_kv(result, "transactions", &txs) &&
