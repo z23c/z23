@@ -39,8 +39,8 @@
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
-/* ZClassic mainnet block file magic (little-endian 0x6427e924) */
-#define ZCL_BLOCK_MAGIC 0x6427e924
+/* Compatibility for callers that do not supply chain parameters. */
+static const uint8_t scan_default_magic[4] = {0x24, 0xe9, 0x27, 0x64};
 /* Max bytes to read from a block for header parsing + tx count.
  * ZClassic header = 140 fixed + ~1347 equihash solution = ~1487 bytes.
  * 1600 gives margin for the compact_size tx count after the header. */
@@ -59,16 +59,11 @@ static uint32_t scan_read_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-static long scan_find_next_magic(const uint8_t *data, long start, long size)
+static long scan_find_next_magic(const uint8_t *data, long start, long size,
+                                 const uint8_t magic[4])
 {
-    const uint8_t m0 = (uint8_t)(ZCL_BLOCK_MAGIC & 0xFF);
-    const uint8_t m1 = (uint8_t)((ZCL_BLOCK_MAGIC >> 8) & 0xFF);
-    const uint8_t m2 = (uint8_t)((ZCL_BLOCK_MAGIC >> 16) & 0xFF);
-    const uint8_t m3 = (uint8_t)((ZCL_BLOCK_MAGIC >> 24) & 0xFF);
     for (long pos = start; pos + 8 + 140 <= size; pos++) {
-        if (data[pos] == m0 && data[pos + 1] == m1 &&
-            data[pos + 2] == m2 && data[pos + 3] == m3)
-            return pos;
+        if (!memcmp(data + pos, magic, 4)) return pos;
     }
     return -1;
 }
@@ -146,16 +141,15 @@ static bool scan_decode_block_meta(const struct boot_scan_file_result *r,
  * per well-formed block. Returns false only when an append allocation
  * failed (an incomplete parse), matching the old `complete` flag. */
 static bool scan_walk_file_blocks(struct boot_scan_file_result *r,
-                                  const uint8_t *data)
+                                  const uint8_t *data, const uint8_t magic[4])
 {
     bool complete = true;
     int consec_errors = 0;
     long pos = 0;
     while (pos + 8 + 140 <= r->file_size) {
-        uint32_t magic = scan_read_u32_le(data + pos);
         uint32_t blk_size = scan_read_u32_le(data + pos + 4);
-        if (magic != ZCL_BLOCK_MAGIC) {
-            long next = scan_find_next_magic(data, pos + 1, r->file_size);
+        if (memcmp(data + pos, magic, 4)) {
+            long next = scan_find_next_magic(data, pos + 1, r->file_size, magic);
             if (next < 0)
                 break;
             pos = next;
@@ -191,7 +185,7 @@ static bool scan_walk_file_blocks(struct boot_scan_file_result *r,
     }
     return complete;
 }
-static void scan_parse_one_file(struct boot_scan_file_result *r)
+static void scan_parse_one_file(struct boot_scan_file_result *r, const uint8_t magic[4])
 {
     r->ok = false;
     struct platform_positioned_file file;
@@ -230,7 +224,7 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
         return;
     }
     platform_read_mapping_advise_sequential(&mapping);
-    bool complete = scan_walk_file_blocks(r, mapping.data);
+    bool complete = scan_walk_file_blocks(r, mapping.data, magic);
     bool stable = platform_positioned_file_snapshot(&file, &after) &&
                   scan_snapshot_stable(&before, &after);
     platform_read_mapping_close(&mapping);
@@ -242,6 +236,7 @@ static void scan_parse_one_file(struct boot_scan_file_result *r)
 struct boot_scan_parallel_ctx {
     struct boot_scan_file_result *files;
     int nfiles;
+    const uint8_t *magic;
     _Atomic int next;
 };
 static void *scan_parse_worker(void *arg)
@@ -251,7 +246,7 @@ static void *scan_parse_worker(void *arg)
         int i = atomic_fetch_add(&ctx->next, 1);
         if (i >= ctx->nfiles)
             break;
-        scan_parse_one_file(&ctx->files[i]);
+        scan_parse_one_file(&ctx->files[i], ctx->magic);
     }
     return NULL;
 }
@@ -290,7 +285,7 @@ int boot_block_scan_test_worker_count(int nfiles, uint32_t cpus)
 }
 #endif
 static int scan_parse_files_parallel(struct boot_scan_file_result *files,
-                                     int nfiles)
+                                     int nfiles, const uint8_t magic[4])
 {
     if (nfiles <= 0)
         return 0;
@@ -299,19 +294,20 @@ static int scan_parse_files_parallel(struct boot_scan_file_result *files,
            nfiles, workers);
     if (workers == 1) {
         for (int i = 0; i < nfiles; i++)
-            scan_parse_one_file(&files[i]);
+            scan_parse_one_file(&files[i], magic);
         return workers;
     }
     pthread_t *threads = zcl_calloc((size_t)workers, sizeof(*threads),
                                     "boot.index.scan_threads");
     if (!threads) {
         for (int i = 0; i < nfiles; i++)
-            scan_parse_one_file(&files[i]);
+            scan_parse_one_file(&files[i], magic);
         return 1;
     }
     struct boot_scan_parallel_ctx ctx = {
         .files = files,
         .nfiles = nfiles,
+        .magic = magic,
         .next = 0,
     };
     int started = 0;
@@ -323,7 +319,7 @@ static int scan_parse_files_parallel(struct boot_scan_file_result *files,
     if (started == 0) {
         free(threads);
         for (int i = 0; i < nfiles; i++)
-            scan_parse_one_file(&files[i]);
+            scan_parse_one_file(&files[i], magic);
         return 1;
     }
     for (int i = 0; i < started; i++)
@@ -844,7 +840,8 @@ int scan_block_files_mark_data(struct main_state *ms, const char *datadir,
     /* Pass 1: parse all block files in parallel. */
     int nfiles = scan_enumerate_block_files(datadir, files);
     int64_t parse_t0 = (int64_t)platform_time_wall_time_t();
-    int scan_workers = scan_parse_files_parallel(files, nfiles);
+    int scan_workers = scan_parse_files_parallel(files, nfiles,
+        params ? params->pchMessageStart : scan_default_magic);
     int64_t parse_elapsed = (int64_t)platform_time_wall_time_t() - parse_t0;
     int64_t apply_t0 = (int64_t)platform_time_wall_time_t();
     scan_apply_first_pass(ms, files, nfiles, params, &marked, &created);

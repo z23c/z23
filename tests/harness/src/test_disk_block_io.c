@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 #include "storage/disk_block_io.h"
+#include "chain/chainparams.h"
 #include "primitives/block.h"
 #include "core/serialize.h"
 #include "config/boot_internal.h"
@@ -1484,6 +1485,8 @@ static int test_restore_padded_frames(void)
     return ok ? 0 : 1;
 }
 
+#include "disk_block_io_scan_network_test.h"
+
 int test_disk_block_io(void)
 {
     printf("\n=== disk_block_io (pread thread safety) ===\n");
@@ -1509,6 +1512,12 @@ int test_disk_block_io(void)
     failures += test_explicit_write_refuses_hardlinked_file();
     failures += test_deferred_sync_byte_identical();
     failures += test_scoped_read_fd_cache();
+    const unsigned char test_magic[4] = {0xfa, 0x1a, 0xf9, 0xbf};
+    const unsigned char regtest_magic[4] = {0xaa, 0xe8, 0x3f, 0x5f};
+    failures += test_scan_network_magic(test_magic, "testnet");
+    failures += test_scan_network_magic(regtest_magic, "regtest");
+    const unsigned char profile_magic[4] = {0x4b, 0x8e, 0x93, 0xf7};
+    failures += test_scan_network_magic(profile_magic, "research profile");
     failures += test_scan_duplicate_keeps_earliest_copy();
     failures += test_position_repair_from_local_copy();
     failures += test_restore_padded_frames();
