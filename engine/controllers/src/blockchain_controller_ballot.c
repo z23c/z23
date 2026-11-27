@@ -345,22 +345,47 @@ static bool ballot_status_snapshot(const struct miner_signal_schedule *s,
 }
 
 
+static bool ballot_status_schedule(const struct json_value *params, const struct chain_params *cp,
+                                   const struct blockchain_context *ctx,
+                                   struct miner_signal_schedule *s, const char **source,
+                                   struct json_value *result)
+{
+    size_t count = params && params->type == JSON_ARR ? json_size(params) : 0;
+    if (count == 1) {
+        if (!ballot_test_network(cp))
+            return ballot_fail(result, "Pinned ballot status is available only on testnet and regtest");
+        if (!ctx->ballot_catalog_pin)
+            return ballot_fail(result, "No ballot catalog pinned at startup");
+        const struct json_value *v = json_at(params, 0);
+        if (!v || v->type != JSON_INT || json_get_int(v) < 0 || json_get_int(v) > 255)
+            return ballot_fail(result, "Invalid pinned catalog slot");
+        *source = "pinned_catalog";
+        if (!miner_signal_catalog_pin_select(ctx->ballot_catalog_pin,
+                                             (size_t)json_get_int(v), s).ok)
+            return ballot_fail(result, "Slot unavailable in the pinned catalog");
+        return true;
+    }
+    *source = count == 5 ? "supplied_catalog" : "raw_parameters";
+    if (count == 5 ? ballot_parse_catalog(params, cp, s) : ballot_parse(params, s))
+        return true;
+    return ballot_fail(result, "Invalid integer schedule, slot, 32-byte catalog, or window exceeds 256");
+}
+
 bool rpc_getballotstatus(const struct json_value *params, bool help,
                          struct json_value *result)
 {
     RPC_HELP(help, result,
-        "getballotstatus fork_id_hex start window rules slot | start window activation slots slot catalog_hex\n"
+        "getballotstatus slot | fork_id_hex start window rules slot | start window activation slots slot catalog_hex\n"
         "Read testnet ballot history at the durable provable tip. Each counted block requires full validation evidence. Maximum window 256 blocks.");
     const struct chain_params *cp = chain_params_get();
     struct miner_signal_schedule s = {0};
-    bool supplied = params && params->type == JSON_ARR && json_size(params) == 5;
-    if (!(supplied ? ballot_parse_catalog(params, cp, &s) : ballot_parse(params, &s)))
-        return ballot_fail(result, "Invalid integer schedule, slot, 32-byte catalog, or window exceeds 256");
+    const char *source;
+    struct blockchain_context *ctx = blockchain_ctx();
+    if (!ballot_status_schedule(params, cp, ctx, &s, &source, result))
+        return false; // raw-return-ok:parameter helper populated the RPC error
     if (!ballot_test_network(cp))
         return ballot_fail(result, "Ballot status is available only on testnet and regtest");
-    struct blockchain_context *ctx = blockchain_ctx();
     if (!ctx->main_state || !ctx->datadir)
         return ballot_fail(result, "Chain state or block storage unavailable");
-    return ballot_status_snapshot(&s, cp, ctx, supplied ? "supplied_catalog" : "raw_parameters",
-                                  result);
+    return ballot_status_snapshot(&s, cp, ctx, source, result);
 }

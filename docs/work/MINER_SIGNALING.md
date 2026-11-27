@@ -41,3 +41,13 @@ Call `getballotstatus` with the same five parameters used for `getballotcatalog`
 <!-- claim: symbol-present rpc_getballotstatus engine/controllers/src/blockchain_controller_ballot.c # next-block status -->
 
 These RPCs report readiness for a supplied schedule. Enforcing a migration at its activation height requires a network profile with an agreed catalog and a reviewed consensus implementation for that rule. A block-size limit, a Sapling deposit restriction and a proof-of-work change can each use a separate proposal.
+
+## Pin a catalog at startup
+
+<!-- claim: symbol-present boot_ballot_catalog_load engine/composition/src/boot_ballot_catalog.c # selected-network catalog pin -->
+
+To reuse the same catalog across restarts, store its four manifest fields as a JSON array in a file. Use the first four parameters from the regtest example above, omitting the final slot selector. Under the selected node datadir, put the file in the `ballots` directory and name it with the lowercase catalog digest followed by `.json`.
+
+Set `testballotcatalog=0daa0498aef76847abdfd5771aed663a241a0853aec641845f588325f5168100` in that datadir's node configuration or pass `-testballotcatalog=0daa0498aef76847abdfd5771aed663a241a0853aec641845f588325f5168100` on the command line. The node derives the digest from the manifest and selected network genesis at startup. A mismatch fails startup. Once running, the node holds the verified catalog in memory.
+
+Call `getballotstatus` with a single slot number, for example the JSON parameters `[0]`. A successful query reports `schedule_source` equal to `pinned_catalog`. The pin selects the local catalog used by this status query. It grants no authority to install a consensus rule.

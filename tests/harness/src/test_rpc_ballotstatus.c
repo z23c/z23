@@ -132,6 +132,7 @@ int test_rpc_ballotstatus(void)
     chain_params_select(CHAIN_REGTEST);
     rpc_blockchain_set_state(NULL, NULL, NULL);
     if (!ballot_status_refuses(&table, valid, "unavailable")) failures++;
+    if (!ballot_status_refuses(&table, "[0]", "No ballot catalog pinned")) failures++;
     failures += ballot_catalog_cases(&table);
     chain_params_select(CHAIN_MAIN);
     return failures;
