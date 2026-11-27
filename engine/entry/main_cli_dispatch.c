@@ -118,6 +118,15 @@ static int cli_take_positional(const char *arg, struct cli_target_args *t)
 int cli_parse_target_args(int argc, char **argv, struct cli_target_args *t)
 {
     for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        const char *name = a[0] == '-' && a[1] == '-' ? a + 1 : a;
+        const char *selector = "-testnet-profile";
+        size_t length = strlen(selector);
+        if (!t->method && strncmp(name, selector, length) == 0 &&
+            (name[length] == 0 || name[length] == '=')) {
+            fprintf(stderr, "error=UNSUPPORTED_PROFILE detail=generic testnet profile cannot be used by this client\n");
+            return ZCL_COMMAND_EXIT_INVALID;
+        }
         int rc = cli_take_flag(argv[i], t);
         if (rc == CLI_FLAG_NOT_MINE)
             rc = cli_take_positional(argv[i], t);

@@ -59,6 +59,10 @@ bool GetBoolArg(const char *arg, bool default_val);
  * ParseParameters, which resets the table. */
 int ReadConfigFile(const char *path);
 
+/* Read one key, normalizing a double dash, without changing the argument table.
+ * Returns 1 if present, 0 if absent or missing, and -1 on I/O error. */
+int ConfigFileHasKey(const char *path, const char *key);
+
 /* Write <datadir>/z23.conf into `out`. `datadir` wins when non-empty; NULL or
  * "" falls back to the -datadir argument, then the platform default. Creates
  * no directory and does not touch the datadir cache — resolving a config-file

@@ -2429,6 +2429,22 @@ static int cli_run_static_agent_method(const char *method,
 /* Forward decl: defined below alongside is_cli_mode (the pair is easiest to
  * read together); cli_main is defined above that point in the file. */
 static int cli_validate_client_argv(int argc, char **argv);
+
+static int cli_profile_config_check(const char *datadir)
+{
+    char path[4600];
+    GetConfigFilePath(datadir, path, sizeof(path));
+    int single = ConfigFileHasKey(path, "-testnet-profile");
+    if (single < 0) {
+        fprintf(stderr, "error=CONFIG_READ_FAILED detail=cannot inspect selected config\n");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    if (single > 0) {
+        fprintf(stderr, "error=UNSUPPORTED_PROFILE detail=generic testnet profile cannot be used by this client\n");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    return -1;
+}
 /* Keep serialization's would-have-written length, so partial parameters
  * never reach the outer body composer or the loopback socket. */
 #endif /* Composer-only inclusion for isolated ownership tests. */
@@ -2650,6 +2666,8 @@ int cli_main(int argc, char **argv)
         return discover_rc;
 
     cli_apply_service_datadir(&service, &t);
+    int profile_rc = cli_profile_config_check(datadir);
+    if (profile_rc >= 0) return profile_rc;
     cli_apply_service_ports(&service, &t);
 
     const char *method = cli_canonical_method(t.method);

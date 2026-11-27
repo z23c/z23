@@ -1496,6 +1496,56 @@ static int cas_test_daemon_natural_exit(void)
 }
 #endif
 
+static int cas_test_unsupported_profile(void)
+{
+    int failures = 0;
+    TEST("CLI rejects profile selector before method and preserves late RPC data") {
+        char home[PATH_MAX], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_profile") != NULL);
+        char dirarg[PATH_MAX + 16];
+        snprintf(dirarg, sizeof(dirarg), "-datadir=%s", home);
+        char *early[] = {CAS_BIN, dirarg, "--testnet-profile=fixture", "sentinel", NULL};
+        ASSERT(cas_run(early, home, out, sizeof(out)) != 0);
+        ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
+        char *late[] = {CAS_BIN, dirarg, "sentinel", "-testnet-profile=fixture", NULL};
+        ASSERT(cas_run(late, home, out, sizeof(out)) != 0);
+        ASSERT(!cas_contains(out, "error=UNSUPPORTED_PROFILE"));
+        ASSERT(cas_contains(out, "no RPC cookie"));
+        test_cleanup_tmpdir(home);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_profile_config(void)
+{
+    int failures = 0;
+    TEST("CLI refuses profile in selected config before cookie read") {
+        char home[PATH_MAX], path[PATH_MAX + 32], dirarg[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_profile_config") != NULL);
+        snprintf(path, sizeof(path), "%s/z23.conf", home);
+        FILE *f = fopen(path, "w");
+        ASSERT(f != NULL);
+        ASSERT(fputs("--testnet-profile=fixture\n", f) >= 0);
+        ASSERT(fclose(f) == 0);
+        snprintf(dirarg, sizeof(dirarg), "-datadir=%s", home);
+        char *args[] = {CAS_BIN, "sentinel", dirarg, NULL};
+        ASSERT(cas_run(args, home, out, sizeof(out)) != 0);
+        ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
+        ASSERT(!cas_contains(out, "no RPC cookie"));
+        snprintf(cas_extra_env, sizeof(cas_extra_env), "ZCL_DATADIR=%s", home);
+        char *env_args[] = {CAS_BIN, "sentinel", NULL};
+        int env_rc = cas_run(env_args, home, out, sizeof(out));
+        cas_extra_env[0] = 0;
+        ASSERT(env_rc != 0);
+        ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
+        test_cleanup_tmpdir(home);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 int test_cli_argv_strict(void)
 {
     int failures = 0;
@@ -1530,6 +1580,8 @@ int test_cli_argv_strict(void)
         return failures;
     }
 
+    failures += cas_test_unsupported_profile();
+    failures += cas_test_profile_config();
     failures += cas_test_observed_incident_refuses();
     failures += cas_test_double_dash_datadir_refuses();
 #if !defined(_WIN32)

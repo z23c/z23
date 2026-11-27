@@ -598,6 +598,30 @@ static int test_bool_argument_values(void)
     return failures;
 }
 
+static int test_profile_lookup(void)
+{
+    int failures = 0;
+    TEST("config lookup matches both profile aliases without modifying argv") {
+        char dir[512], path[1024];
+        test_make_tmpdir(dir, sizeof(dir), "node_conf", "profile_lookup");
+        snprintf(path, sizeof(path), "%s/%s", dir, ZCL_NODE_CONFIG_FILENAME);
+        const char *argv[] = { "z23", "-testnet=1" };
+        ncf_set_argv(argv, 2);
+        ASSERT(ncf_write_conf(dir, "# testnet-profile=ignored\n--testnet-profile = profile\n"));
+        ASSERT_EQ(ConfigFileHasKey(path, "-testnet-profile"), 1);
+        ASSERT_EQ(ConfigFileHasKey(path, "-regtest"), 0);
+        ASSERT_STR_EQ(GetArg("-testnet", ""), "1");
+        ASSERT(GetArg("-testnet-profile", NULL) == NULL);
+        ASSERT(ncf_write_conf(dir, "testnet-profile-other=ignored\n-testnet-profile=value\n"));
+        ASSERT_EQ(ConfigFileHasKey(path, "-testnet-profile"), 1);
+        test_cleanup_tmpdir(dir);
+        ASSERT_EQ(ConfigFileHasKey(path, "-testnet-profile"), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 int test_node_config_file(void)
 {
     int failures = 0;
@@ -605,6 +629,7 @@ int test_node_config_file(void)
     printf("\n=== node config file (<datadir>/%s) ===\n",
            ZCL_NODE_CONFIG_FILENAME);
 
+    failures += test_profile_lookup();
     failures += test_command_line_always_wins();
     failures += test_file_cannot_move_the_datadir();
     failures += test_line_shapes();

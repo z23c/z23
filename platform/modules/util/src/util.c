@@ -9,6 +9,7 @@
 #include "chain/chainparamsbase.h"
 #include "platform/private_directory.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -202,6 +203,28 @@ static bool config_read_line(FILE *f, char line[MAX_ARG_LEN * 2])
     }
     line[invalid ? 0 : n] = '\0';
     return true;
+}
+
+int ConfigFileHasKey(const char *path, const char *wanted)
+{
+    if (!path || !wanted) return -1;
+    FILE *f = fopen(path, "re");
+    if (!f) return errno == ENOENT ? 0 : -1;
+    int found = 0;
+    char line[MAX_ARG_LEN * 2];
+    while (config_read_line(f, line)) {
+        char key[MAX_ARG_LEN], value[MAX_ARG_LEN];
+        char *s = config_line_text(line);
+        if (!s || !config_split(s, key, value)) continue;
+        const char *normalized = key[0] == '-' && key[1] == '-' ? key + 1 : key;
+        if (strcmp(normalized, wanted) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    return ok ? found : -1;
 }
 
 int ReadConfigFile(const char *path)
