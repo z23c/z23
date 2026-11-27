@@ -91,6 +91,33 @@ static bool check_v6_rpc_projection_limit(void)
     return ok;
 }
 
+static bool check_balance_case(uint64_t raw, int64_t expected)
+{
+    uint8_t wire[sizeof ironwood_anchor_a];
+    memcpy(wire, ironwood_anchor_a, sizeof wire);
+    struct v6_wire_view view;
+    if (v6_wire_parse(wire, sizeof wire, &view) != V6_WIRE_OK || !view.ironwood.count)
+        return false;
+    uint8_t *amount = wire + (view.ironwood.actions.data - wire) + view.ironwood.actions.size + 1;
+    for (size_t i = 0; i < 8; i++) amount[i] = (uint8_t)(raw >> (8 * i));
+    char hex[2 * sizeof wire + 1];
+    HexStr(wire, sizeof wire, false, hex, sizeof hex);
+    struct json_value result;
+    json_init(&result);
+    bool ok = transaction_v6_rpc_decode(hex, &result) == V6_RPC_OK;
+    const struct json_value *balance = json_get(&result, "ironwood_value_balance_zat");
+    ok = ok && balance && balance->type == JSON_INT && json_get_int(balance) == expected;
+    json_free(&result);
+    return ok;
+}
+
+static bool check_balance_cases(void)
+{
+    return check_balance_case(0, 0) && check_balance_case(123456789, 123456789) &&
+        check_balance_case(UINT64_MAX, -1) && check_balance_case(UINT64_C(0x8000000000000000), INT64_MIN);
+}
+
+
 static bool check_empty_rpc(void)
 {
     char hex[sizeof(empty) * 2 + 1];
@@ -98,7 +125,7 @@ static bool check_empty_rpc(void)
     struct json_value result;
     json_init(&result);
     bool ok = transaction_v6_rpc_decode(hex, &result) == V6_RPC_OK &&
-        !json_get(&result, "ironwood_anchor");
+        !json_get(&result, "ironwood_anchor") && !json_get(&result, "ironwood_value_balance_zat");
     json_free(&result);
     return ok;
 }
@@ -237,6 +264,7 @@ int test_transaction_v6_inspect(void)
     if (!check_v6_rpc_budget()) ++failures;
     if (!check_v6_rpc_projection_limit()) ++failures;
     if (!check_empty_rpc()) ++failures;
+    if (!check_balance_cases()) ++failures;
     if (!check_action_views()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
