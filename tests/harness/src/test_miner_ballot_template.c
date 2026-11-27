@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/miner_ballot_template.h"
 #include "services/miner_signal_round.h"
+#include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "core/serialize.h"
 #include "crypto/equihash.h"
@@ -95,8 +96,20 @@ int test_miner_ballot_template(void)
     BT_CHECK(miner_ballot_template_apply(&block, catalog, bitmap, params, 1,
                                          DEFAULT_BLOCK_MAX_SIZE, &reserved).ok);
     BT_CHECK(block.vtx[0].num_vout == 253 && transaction_serialize_size(&block.vtx[0]) == before + 82);
+    for (size_t i = 0; i < 252; ++i) {
+        const struct tx_out *payout = &block.vtx[0].vout[i];
+        BT_CHECK(payout->value == (int64_t)i + 42);
+        BT_CHECK(payout->script_pub_key.size == 1 && payout->script_pub_key.data[0] == 0x51);
+    }
     block_free(&block);
     BT_CHECK(bt_make(&block, 1));
+    struct tx_out *original_outputs = block.vtx[0].vout;
+    zcl_alloc_fault_fail_next("miner ballot outputs");
+    struct zcl_result failed = miner_ballot_template_apply(&block, catalog, bitmap, params, 1,
+                                                           DEFAULT_BLOCK_MAX_SIZE, &reserved);
+    zcl_alloc_fault_clear();
+    BT_CHECK(!failed.ok && block.vtx[0].num_vout == 1);
+    BT_CHECK(block.vtx[0].vout == original_outputs && original_outputs[0].value == 42);
     block.header.nSolutionSize = 1;
     BT_CHECK(!miner_ballot_template_apply(&block, catalog, bitmap, params, 1,
                                           DEFAULT_BLOCK_MAX_SIZE, &reserved).ok);
