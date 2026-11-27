@@ -8899,7 +8899,7 @@ static bool fbp_pairings(struct fbp *p)
                               MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
                               FBW_PAIRING_EXPIRES) &&
            mesh_term_pair_row(&w->f, &p->addr_peer,
-                              MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT,
+                              MESH_PAIRING_CAP_STATUS_READ, FBW_PAIRED_AT + 1,
                               FBW_PAIRING_EXPIRES);
 }
 
@@ -10706,29 +10706,24 @@ static bool fbp_case_receipt_log_limited(struct fbp *p)
     return true;
 }
 
-/* An older LIVE pairing row for `noise` under another master: the list
- * returns it before the row `live_id` names (the same paired_at, a pairing
- * id that sorts first), and no delegation the lane resolves matches it. */
+/* Order an unrelated live row first by timestamp, independent of ID order. */
 static bool fbh_older_row(struct fbw *w, const uint8_t noise[32],
-                          const char *live_id)
+                          const uint8_t live_master[32])
 {
-    for (unsigned fill = 1; fill < 256; fill++) {
-        struct db_mesh_pairing row;
-        memset(&row, 0, sizeof row);
-        memcpy(row.network_genesis, w->f.genesis, 32);
-        memset(row.peer_master_pubkey, (int)fill, 32);
-        memcpy(row.peer_noise_pubkey, noise, 32);
-        row.capability_mask = MESH_PAIRING_CAP_STATUS_READ;
-        row.delegation_sequence = 7;
-        row.paired_at = FBW_PAIRED_AT;
-        row.expires_at = FBW_PAIRING_EXPIRES;
-        if (!mesh_pairing_id_derive(row.network_genesis, row.peer_master_pubkey,
-                                    row.peer_noise_pubkey, row.pairing_id))
-            return false;
-        if (strcmp(row.pairing_id, live_id) < 0)
-            return db_mesh_pairing_insert(&w->f.ndb, &row);
-    }
-    return false;
+    struct db_mesh_pairing row;
+    memset(&row, 0, sizeof row);
+    memcpy(row.network_genesis, w->f.genesis, 32);
+    memset(row.peer_master_pubkey, 1, 32);
+    if (!memcmp(row.peer_master_pubkey, live_master, 32))
+        memset(row.peer_master_pubkey, 2, 32);
+    memcpy(row.peer_noise_pubkey, noise, 32);
+    row.capability_mask = MESH_PAIRING_CAP_STATUS_READ;
+    row.delegation_sequence = 7;
+    row.paired_at = FBW_PAIRED_AT;
+    row.expires_at = FBW_PAIRING_EXPIRES;
+    return mesh_pairing_id_derive(row.network_genesis, row.peer_master_pubkey,
+                                  row.peer_noise_pubkey, row.pairing_id) &&
+           db_mesh_pairing_insert(&w->f.ndb, &row);
 }
 
 /* Case 41 (security re-review). An older live row under another master for
@@ -10746,11 +10741,12 @@ static bool fbp_case_pull_row_refuses(struct fbp *p)
     zcl_hex_encode(p->addressee.online_pubkey, 32, to);
     FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
     FBP_REQUIRE(fbh_older_row(&p->w, p->w.f.resp_noise_pub,
-                              p->addr_peer.pairing.pairing_id));
+                              p->addr_peer.pairing.peer_master_pubkey));
     FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
                 mesh_pairing_allows(&first, MESH_PAIRING_CAP_STATUS_READ,
                                     FBW_NOW) &&
-                strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0);
+                strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0 &&
+                memcmp(first.peer_master_pubkey, p->addr_peer.pairing.peer_master_pubkey, 32) != 0);
     FBP_REQUIRE(board_accept_authorized(p->w.f.resp_noise_pub));
     FBP_REQUIRE(fbh_mail_post(&p->w.b, FBP_PUSHER, FBH_MAIL_ROW, 3600, &mail));
     /* By hint, and by ref. */
@@ -10872,9 +10868,10 @@ static bool fbp_case_revoked_older_pairing(struct fbp *p)
 {
     struct db_mesh_pairing first;
     FBP_REQUIRE(fbh_older_row(&p->w, p->w.f.resp_noise_pub,
-                              p->addr_peer.pairing.pairing_id));
+                              p->addr_peer.pairing.peer_master_pubkey));
     FBP_REQUIRE(fbp_first_row(&p->w, p->w.f.resp_noise_pub, &first) &&
-                strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0);
+                strcmp(first.pairing_id, p->addr_peer.pairing.pairing_id) != 0 &&
+                memcmp(first.peer_master_pubkey, p->addr_peer.pairing.peer_master_pubkey, 32) != 0);
     FBP_REQUIRE(db_mesh_pairing_revoke(&p->w.f.ndb, first.pairing_id, FBW_NOW));
     return fbh_pull_push_agree(p, true, 45);
 }
