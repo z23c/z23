@@ -94,8 +94,8 @@ static bool add_pool_counts(struct json_value *result, const struct v6_wire_view
 static bool add_ironwood_balance(struct json_value *result, const struct v6_wire_view *view)
 {
     if (!view->ironwood.count) return true;
-    const uint8_t *amount = view->ironwood.actions.data + view->ironwood.actions.size + 1;
-    uint64_t raw = zcl_read_u64_le(amount);
+    if (view->ironwood.value_balance.size != 8) return false;
+    uint64_t raw = zcl_read_u64_le(view->ironwood.value_balance.data);
     int64_t balance = raw <= INT64_MAX ? (int64_t)raw : -1 - (int64_t)~raw;
     return json_push_kv_int(result, "ironwood_value_balance_zat", balance);
 }

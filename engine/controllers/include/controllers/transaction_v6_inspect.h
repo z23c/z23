@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 struct v6_span { const uint8_t *data; size_t size; };
-struct v6_bundle { struct v6_span wire, anchor, actions; uint64_t count; };
+struct v6_bundle { struct v6_span wire, anchor, actions, value_balance; uint64_t count; };
 struct v6_action_view { struct v6_span nullifier, cmx; };
 /* Borrow checked public fields from a successfully parsed nonempty bundle;
  * output remains unchanged on failure and bytes live with the input wire. */

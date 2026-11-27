@@ -27,6 +27,7 @@ static bool check_rpc_fields(const struct json_value *result)
         strcmp(json_get_str(json_get(result, "consensusbranchid")), "37a5165b") == 0 &&
         json_get_int(json_get(result, "expiryheight")) == 342222801 &&
         json_get_int(json_get(result, "ironwood_actions")) == 1 &&
+        json_get_int(json_get(result, "ironwood_value_balance_zat")) == 1000 &&
         json_get_str(json_get(result, "ironwood_anchor")) &&
         !strcmp(json_get_str(json_get(result, "ironwood_anchor")),
                 "892d5610b098e88ee17a516ad45c307ff93b9fda61ad8738e2b4fafa75d5cf24") &&
@@ -95,10 +96,7 @@ static bool check_balance_case(uint64_t raw, int64_t expected)
 {
     uint8_t wire[sizeof ironwood_anchor_a];
     memcpy(wire, ironwood_anchor_a, sizeof wire);
-    struct v6_wire_view view;
-    if (v6_wire_parse(wire, sizeof wire, &view) != V6_WIRE_OK || !view.ironwood.count)
-        return false;
-    uint8_t *amount = wire + (view.ironwood.actions.data - wire) + view.ironwood.actions.size + 1;
+    uint8_t *amount = wire + 847;
     for (size_t i = 0; i < 8; i++) amount[i] = (uint8_t)(raw >> (8 * i));
     char hex[2 * sizeof wire + 1];
     HexStr(wire, sizeof wire, false, hex, sizeof hex);
