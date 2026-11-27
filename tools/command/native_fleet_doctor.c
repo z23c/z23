@@ -82,6 +82,7 @@ struct fd_ctx {
     int64_t wiki_pages;
     bool wiki_ok;
     bool carriage_ok;
+    int64_t roster_wakes_without_target;
     char carriage[FD_TEXT]; /* the board pull lane, one line */
     int worst;
     char next[FD_TEXT];
@@ -243,6 +244,7 @@ static void fd_gather_carriage(struct fd_ctx *ctx)
     const struct json_value *t = c ? json_get(c, "totals") : NULL;
     if (fd_bool(&body, "ok") && t && t->type == JSON_OBJ) {
         ctx->carriage_ok = true;
+        ctx->roster_wakes_without_target = fd_int(json_get(c, "wake"), "no_target", 0);
         (void)snprintf(ctx->carriage, sizeof(ctx->carriage),
                        "Board pulls %lld, answers %lld, stored %lld, "
                        "refused %lld.",
@@ -606,8 +608,14 @@ static void fd_check_board_carriage(struct fd_ctx *ctx,
                  "z23 fleet board status", NULL);
         return;
     }
+    char warning[FD_TEXT] = "";
+    if (ctx->roster_wakes_without_target > 0)
+        (void)snprintf(warning, sizeof(warning),
+                       "Since startup, %lld board wake rounds found no eligible roster session. "
+                       "Check the enrolled peer's onion route and Noise connection.",
+                       (long long)ctx->roster_wakes_without_target);
     fd_check(ctx, checks, "board_carriage", "ok", ctx->carriage,
-             "z23 fleet board status", NULL);
+             "z23 fleet board status", warning);
 }
 
 /* ── bounded row lists ───────────────────────────────────────────────── */

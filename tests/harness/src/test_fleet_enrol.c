@@ -1593,6 +1593,7 @@ static int test_fe_render(void)
 #define FD_DECOY "deadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0dedeadc0de"
 
 static bool g_fd_node_up;
+static const char *g_fd_carriage;
 static const char *g_fd_gate; /* the fleetstatus answer; NULL: an older node */
 
 /* A stand-in node: a stub error when "down", else the reads the doctor
@@ -1603,6 +1604,8 @@ static char *fd_rpc_hook(const char *method, const char *params)
     (void)params;
     if (!g_fd_node_up)
         return strdup("{\"code\":-32603,\"message\":\"connect failed\"}");
+    if (strcmp(method, "fleet_board") == 0 && g_fd_carriage && strstr(params, "\"status\""))
+        return strdup(g_fd_carriage);
     if (strcmp(method, "fleetstatus") == 0 && g_fd_gate)
         return strdup(g_fd_gate);
     if (strcmp(method, "getpeerinfo") == 0)
@@ -1814,7 +1817,12 @@ static int test_fd_transport_and_warning(void)
                                       "informational")));
         zcl_command_reply_free(&reply);
 
+        g_fd_carriage = "{\"ok\":true,\"carriage\":{\"totals\":{},\"wake\":{\"no_target\":3}}}";
         ASSERT(fd_run(far, &reply));
+        g_fd_carriage = NULL;
+        ASSERT(strstr(fd_cstr(fd_check_row(&reply, "board_carriage"), "warning"),
+                      "3 board wake rounds found no eligible roster session") != NULL);
+        ASSERT_STR_EQ(fd_cstr(&reply.data, "state"), "ok");
         ASSERT(json_get(fd_check_row(&reply, "delegation"), "warning") == NULL);
         zcl_command_reply_free(&reply);
         PASS();

@@ -384,6 +384,10 @@ peer when a reason that needs attention changes (at most one per minute per
 peer), and `z23 fleet doctor --datadir=<node-datadir>` shows the same totals in its informational
 `board_carriage` row. State is volatile: it restarts empty with the node.
 
+When new fleet posts find no eligible roster session, the doctor's board
+carriage row reports how many wake rounds missed a target since startup.
+A later successful connection leaves that historical count intact.
+
 Pairing a peer (`ops mesh pair plan`, then `commit`) is not a role grant.
 Fleet-scope board posts need both, and they are checked on two different keys.
 A pull is answered only when the asker's **online** key holds a role for
