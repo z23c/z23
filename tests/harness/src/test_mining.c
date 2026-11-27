@@ -4,7 +4,12 @@
 #include "test/test_core.h"
 #include "test/test_block_map.h"
 #include "controllers/mining_controller.h"
+#include "controllers/blockchain_controller.h"
 #include "controllers/sovereignty_controller.h"
+#include "services/miner_signal_catalog_pin.h"
+#include "base/hex.h"
+#include "core/serialize.h"
+#include "primitives/transaction.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "core/arith_uint256.h"
@@ -111,6 +116,147 @@ static bool mining_test_authority(sqlite3 *db, int height)
         coins_kv_mark_migration_complete(db) && coins_kv_mark_self_folded(db);
 }
 
+static bool mining_slots_call(struct rpc_table *table, const char *raw,
+                              struct json_value *out)
+{
+    struct json_value params = {0};
+    bool ok = json_read(&params, raw, strlen(raw)) &&
+              rpc_table_execute(table, "getblocktemplate", &params, out);
+    json_free(&params);
+    return ok;
+}
+
+static bool mining_slots_refused(struct rpc_table *table, const char *raw,
+                                 const char *message)
+{
+    struct json_value out = {0};
+    bool ok = mining_slots_call(table, raw, &out);
+    bool refused = !ok && out.type == JSON_STR && strstr(json_get_str(&out), message);
+    json_free(&out);
+    return refused;
+}
+
+static bool mining_slots_pin(struct miner_signal_catalog_pin *pin)
+{
+    static const char manifest[] =
+        "[\"1111111111111111111111111111111111111111111111111111111111111111\",12,5,"
+        "[[\"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\",18],"
+        "[\"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f\",19]]]";
+    struct json_value doc = {0};
+    bool ok = json_read(&doc, manifest, sizeof(manifest) - 1) &&
+        miner_signal_catalog_pin_parse(json_at(&doc, 0), json_at(&doc, 1),
+            json_at(&doc, 2), json_at(&doc, 3),
+            chain_params_get()->consensus.hashGenesisBlock.data, pin).ok;
+    json_free(&doc);
+    return ok;
+}
+
+static bool mining_coinbase_decode(const struct json_value *result,
+                                   struct transaction *tx)
+{
+    const struct json_value *cb = json_get(result, "coinbasetxn");
+    const char *hex = cb ? json_get_str(json_get(cb, "data")) : NULL;
+    uint8_t raw[8192];
+    transaction_init(tx);
+    if (!hex || strlen(hex) % 2 || strlen(hex) / 2 > sizeof(raw) ||
+        !zcl_hex_decode(hex, raw, strlen(hex) / 2)) return false;
+    struct byte_stream s;
+    stream_init_from_data(&s, raw, strlen(hex) / 2);
+    bool ok = transaction_deserialize(tx, &s) && !stream_remaining(&s);
+    if (!ok) transaction_free(tx);
+    return ok;
+}
+
+static bool mining_ballot_output(const struct transaction *legacy,
+                                 const struct transaction *vote,
+                                 const struct miner_signal_catalog_pin *pin)
+{
+    static const uint8_t prefix[] = {0x6a, 0x45, 'Z', '2', '3', 'V', 1};
+    if (!legacy->num_vout || vote->num_vout != legacy->num_vout + 1) return false;
+    for (size_t i = 0; i < legacy->num_vout; i++) {
+        const struct tx_out *a = &legacy->vout[i], *b = &vote->vout[i];
+        if (a->value != b->value || a->script_pub_key.size != b->script_pub_key.size ||
+            memcmp(a->script_pub_key.data, b->script_pub_key.data, a->script_pub_key.size))
+            return false;
+    }
+    const struct tx_out *out = &vote->vout[vote->num_vout - 1];
+    const uint8_t *p = out->script_pub_key.data;
+    uint8_t bitmap[32] = {3};
+    return out->value == 0 && out->script_pub_key.size == 71 &&
+           !memcmp(p, prefix, sizeof(prefix)) && !memcmp(p + 7, pin->digest, 32) &&
+           !memcmp(p + 39, bitmap, sizeof(bitmap));
+}
+
+static int mining_slots_inside(struct rpc_table *table,
+                               const struct miner_signal_catalog_pin *pin)
+{
+    int failures = 0;
+    struct json_value legacy = {0}, voted = {0};
+    struct transaction a, b;
+    bool a_ok = mining_test_gbt(table, &legacy) && mining_coinbase_decode(&legacy, &a);
+    bool b_ok = mining_slots_call(table, "[{\"ballotslots\":[0,1]}]", &voted) &&
+                mining_coinbase_decode(&voted, &b);
+    MT_CHECK("legacy template coinbase decodes", a_ok);
+    MT_CHECK("ballot template coinbase preserves payouts and appends bound zero vote",
+             a_ok && b_ok && mining_ballot_output(&a, &b, pin));
+    if (a_ok) transaction_free(&a);
+    if (b_ok) transaction_free(&b);
+    json_free(&legacy); json_free(&voted);
+    MT_CHECK("duplicate slots rejected", mining_slots_refused(table,
+             "[{\"ballotslots\":[0,0]}]", "Repeated ballot slot"));
+    MT_CHECK("invalid slot rejected", mining_slots_refused(table,
+             "[{\"ballotslots\":[2]}]", "Slot outside pinned catalog"));
+    struct json_value invalid = {0};
+    MT_CHECK("negative slot rejected", !mining_slots_call(table,
+             "[{\"ballotslots\":[-1]}]", &invalid));
+    json_free(&invalid);
+    MT_CHECK("fractional slot rejected", !mining_slots_call(table,
+             "[{\"ballotslots\":[1.5]}]", &invalid));
+    json_free(&invalid);
+    return failures;
+}
+
+static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
+                              struct block_index *ancestors)
+{
+    int failures = 0;
+    const char *request = "[{\"ballotslots\":[0,1]}]";
+    struct miner_signal_catalog_pin pin = {0};
+    struct json_value no_pin = {0}, pinned = {0};
+    rpc_blockchain_set_ballot_catalog_pin(NULL);
+    bool legacy_ok = mining_test_gbt(table, &no_pin);
+    MT_CHECK("ballot request requires a pin", mining_slots_refused(table, request,
+             "No ballot catalog pinned for the selected network"));
+    bool parsed = mining_slots_pin(&pin);
+    MT_CHECK("real parsed catalog pin", parsed);
+    if (!parsed) { json_free(&no_pin); return failures; }
+    rpc_blockchain_set_ballot_catalog_pin(&pin);
+    bool pinned_ok = mining_test_gbt(table, &pinned);
+    const struct json_value *a = json_get(&no_pin, "coinbasetxn");
+    const struct json_value *b = json_get(&pinned, "coinbasetxn");
+    const char *acb = a ? json_get_str(json_get(a, "data")) : NULL;
+    const char *bcb = b ? json_get_str(json_get(b, "data")) : NULL;
+    MT_CHECK("absent option preserves legacy coinbase with pinned catalog",
+             legacy_ok && pinned_ok && acb && bcb && !strcmp(acb, bcb));
+    json_free(&no_pin); json_free(&pinned);
+    MT_CHECK("ballot before window refused", mining_slots_refused(table, request,
+             "Template height outside the pinned voting window"));
+    active_chain_move_window_tip(&ms->chain_active, &ancestors[11]);
+    reducer_frontier_provable_tip_set(11);
+    MT_CHECK("ballot mint authority", mining_test_authority(progress_store_db(), 11));
+    failures += mining_slots_inside(table, &pin);
+    active_chain_move_window_tip(&ms->chain_active, &ancestors[17]);
+    reducer_frontier_provable_tip_set(17);
+    MT_CHECK("post-window mint authority", mining_test_authority(progress_store_db(), 17));
+    MT_CHECK("ballot after window refused", mining_slots_refused(table, request,
+             "Template height outside the pinned voting window"));
+    rpc_blockchain_set_ballot_catalog_pin(NULL);
+    active_chain_move_window_tip(&ms->chain_active, &ancestors[10]);
+    reducer_frontier_provable_tip_set(10);
+    MT_CHECK("restore mint authority", mining_test_authority(progress_store_db(), 10));
+    return failures;
+}
+
 static int mining_template_time_cases(void)
 {
     int failures = 0;
@@ -152,6 +298,7 @@ static int mining_template_time_cases(void)
     rpc_table_init(&table);
     register_mining_rpc_commands(&table);
     set_rpc_warmup_finished();
+    failures += mining_slots_cases(&table, &ms, ancestors);
     failures += mining_check_gbt(&table, &ancestors[10], true);
     for (int h = 0; h < 11; h++) ancestors[h].nTime = (uint32_t)(GetAdjustedTime() - 3600);
     failures += mining_check_gbt(&table, &ancestors[10], false);
