@@ -998,6 +998,17 @@ static int bp_mutation_gap_tests(void)
     return failures;
 }
 
+static bool bp_no_outputs_at(sqlite3 *db, int height)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM created_outputs WHERE height = ?",
+                           -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int(st, 1, height);
+    bool empty = sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0;
+    sqlite3_finalize(st);
+    return empty;
+}
+
 static int bp_research_retained_oversize(void)
 {
     int failures = 0;
@@ -1023,6 +1034,18 @@ static int bp_research_retained_oversize(void)
             BP_CHECK("research size: unavailable check stops", body_persist_stage_step_once() == JOB_FATAL);
             zcl_alloc_fault_clear();
             BP_CHECK("research size: unavailable cursor held", body_persist_stage_cursor() == 1);
+            int ok = -1; char source[32];
+            BP_CHECK("research size: no success row",
+                     !log_row_at(progress_store_db(), 1, &ok, source, sizeof(source)));
+            BP_CHECK("research size: no output publication", bp_no_outputs_at(progress_store_db(), 1));
+            block_free(&sc.bodies[1]);
+            bool rebuilt = make_body(&sc.bodies[1], 1);
+            BP_CHECK("research size: valid body rebuilt", rebuilt);
+            if (rebuilt) {
+                BP_CHECK("research size: valid retry advances", body_persist_stage_step_once() == JOB_ADVANCED);
+                BP_CHECK("research size: retry publishes success",
+                         log_row_at(progress_store_db(), 1, &ok, source, sizeof(source)) && ok == 1);
+            }
         }
         chain_params_select(CHAIN_MAIN);
     }
