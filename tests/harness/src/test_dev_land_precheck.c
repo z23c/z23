@@ -1433,8 +1433,8 @@ static bool dlx_pc_strict_rig(struct dlx_rig *rig, int mode)
     static const char *const rule[] = {
         "proof-compile-changed:\n\t@echo unused\n",
         "proof-compile-changed:\n\t@echo proof-compile-changed: OK\n",
-        "proof-compile-changed:\n\t@echo \"tests/harness/src/t.c:7:5: error: ignoring "
-        "return value of fread [-Werror=unused-result]\"; exit 1\n",
+        ("proof-compile-changed:\n\t@echo \"tests/harness/src/t.c:7:5: error: ignoring "
+         "return value of fread [-Werror=unused-result]\"; exit 1\n"),
         "other-target:\n\t@echo older lane Makefile\n"};
     char path[1400];
     if (!dlx_pc_rig(rig, tag[mode], true, "check-core-seal\n"))

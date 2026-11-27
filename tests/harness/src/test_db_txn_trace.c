@@ -23,6 +23,8 @@ static int dtt_fprintf(FILE *, const char *, ...);
 #define sqlite3_stmt_busy dtt_busy
 #define sqlite3_sql dtt_sql
 #define nanosleep dtt_sleep
+/* glibc's <stdio2.h> defines fprintf for compilers without __va_arg_pack. */
+#undef fprintf
 #define fprintf dtt_fprintf
 #ifndef DB_TXN_TRACE_SOURCE
 #define DB_TXN_TRACE_SOURCE "../../../platform/modules/util/src/db_txn_trace.c"

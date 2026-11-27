@@ -8,6 +8,7 @@ static int use_diagnostic(FILE *stream,const char *format,...)
  if(stream==stderr){++use_diag_events;}va_list args;va_start(args,format);
  int result=vfprintf(stream,format,args);va_end(args);return result;
 }
+#undef fprintf
 #define fprintf use_diagnostic
 #include "../../../apps/skycombat/part/expr_validate.c"
 #include "../../../apps/skycombat/part/expr_eval.c"
@@ -687,6 +688,7 @@ static void reload_pin_close(struct platform_positioned_file *f)
 #define platform_positioned_file_close reload_pin_close
 #define platform_positioned_file_read admit_probe_read
 #define platform_positioned_file_snapshot(...) admit_probe_snapshot(__VA_ARGS__)
+#undef fprintf
 #define fprintf use_diagnostic
 #include "../../../apps/skycombat/part/expr_use.h"
 #undef fprintf

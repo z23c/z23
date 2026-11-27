@@ -294,8 +294,8 @@ static void test_focus_and_fields(void)
     gui_window_close(cw);
 }
 
-static size_t g_rows_calls, g_cells_calls;
-static size_t src_rows(void *c) { (void)c; g_rows_calls++; return 10000; }
+static size_t g_cells_calls;
+static size_t src_rows(void *c) { (void)c; return 10000; }
 static bool src_cell(void *c, size_t r, size_t col, char *b, size_t cap, enum gui_style *st)
 {
     (void)c; (void)st;

@@ -45,7 +45,6 @@ static void capture_observer(enum event_type type, uint32_t peer_id,
 
 static int g_tip_updated_count;
 static int g_tip_commit_count;
-static int g_last_tip_height;
 
 static void observer(enum event_type type, uint32_t peer_id,
                      const void *payload, uint32_t payload_len, void *ctx)
@@ -370,7 +369,6 @@ int test_chain_tip(void)
     event_observe(EV_CHAIN_TIP_COMMIT, observer, NULL);
     g_tip_updated_count = 0;
     g_tip_commit_count = 0;
-    g_last_tip_height = -1;
 
     printf("tip_source_name: known sources... ");
     {

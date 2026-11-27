@@ -847,7 +847,7 @@ int test_node_character_wire(void)
     /* ── (d) rendered, which is where a person meets the boundary ───────── */
     {
         struct node_character_sheet s;
-        struct node_character_receipt r;
+        struct node_character_receipt r = {0};
         uint8_t frame[NODE_CHARACTER_WIRE_BYTES];
         char text[NODE_CHARACTER_SHEET_TEXT_MAX];
         char small[16];

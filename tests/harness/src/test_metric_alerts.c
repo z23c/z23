@@ -72,7 +72,10 @@ static int ma_worker_printf(const char *fmt, ...) {
 #define metrics_print_art ma_print_art
 #define metrics_start ma_metrics_start
 #define metrics_stop ma_metrics_stop
+/* glibc's <stdio2.h> defines both for compilers without __va_arg_pack. */
+#undef printf
 #define printf ma_worker_printf
+#undef fprintf
 #define fprintf ma_worker_fprintf
 #define os_proc_mem_read ma_mem_read
 #define platform_sleep_ms(ms) ma_worker_sleep(ms)

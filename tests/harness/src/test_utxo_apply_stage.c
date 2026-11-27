@@ -1464,11 +1464,9 @@ static void mld_snap(sqlite3 *db, char *out, size_t cap)
              (int)fr, (int)fnd);
 }
 
-static int mld_noop_calls;
 static job_result_t mld_noop_step(struct stage_step_ctx *c)
 {
     (void)c;
-    mld_noop_calls++;
     return JOB_IDLE;
 }
 

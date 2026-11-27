@@ -24,6 +24,8 @@ static int wf_main(int argc, char **argv);
 #define stdin wf_in
 #define stdout wf_out
 #define stderr wf_err
+/* glibc's <stdio2.h> defines printf for compilers without __va_arg_pack. */
+#undef printf
 #define printf(...) fprintf(wf_out, __VA_ARGS__)
 #define qsort wf_sort
 #define main wf_main
