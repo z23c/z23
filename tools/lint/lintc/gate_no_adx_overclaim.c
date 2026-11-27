@@ -33,6 +33,7 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lint_compiler_argv.h"
 
 static const char k_ao_gate[] = "check_no_adx_overclaim";
 
@@ -45,6 +46,10 @@ enum { AO_PATH = 1024, AO_TEXT = 65536,
 struct ao_incset { char flag[AO_IFLAGS][AO_IWORD]; int n; };
 struct ao_fset { char name[AO_FILES][AO_PATH]; int n; };
 struct ao_claims { char row[AO_CLAIMS][AO_CLAIM]; int n; };
+struct ao_command {
+    char *argv[LINT_CC_MAX_ARGS];
+    size_t argc;
+};
 
 extern char **environ;
 
@@ -131,12 +136,12 @@ static void ao_report_spawn(const char *tool, int code)
 }
 
 /* 0 = tool present, 1 = missing (exec failed), 2 = internal error. */
-static int ao_tool_ok(const char *tool)
+static int ao_tool_ok(const struct ao_command *tool)
 {
-    static char av0[AO_PATH];
-    if (ovf(snprintf(av0, sizeof av0, "%s", tool), sizeof av0))
-        return 2;
-    char *av[3] = { av0, (char *)"--version", NULL };
+    char *av[LINT_CC_MAX_ARGS + 2];
+    memcpy(av, tool->argv, tool->argc * sizeof *av);
+    av[tool->argc] = (char *)"--version";
+    av[tool->argc + 1] = NULL;
     int code = 0;
     if (ao_spawn(av, NULL, NULL, 0, NULL, "/dev/null", &code))
         return 2;
@@ -413,16 +418,14 @@ static void ao_cat_indented(const char *path)
     fclose(f);
 }
 
-static int ao_compile(const char *cc, const char *file, const char *obj,
+static int ao_compile(const struct ao_command *cc, const char *file, const char *obj,
                       const struct ao_incset *incs, int x86,
                       const char *logpath)
 {
     static char *av[AO_ARGS];
-    static char ccbuf[AO_PATH];
-    if (ovf(snprintf(ccbuf, sizeof ccbuf, "%s", cc), sizeof ccbuf))
-        return 2;
-    int n = 0;
-    av[n++] = ccbuf;
+    static_assert(LINT_CC_MAX_ARGS + 8 < AO_ARGS);
+    size_t n = cc->argc;
+    memcpy(av, cc->argv, n * sizeof *av);
     av[n++] = (char *)"-std=c23";
     av[n++] = (char *)"-O3";
     if (x86)
@@ -450,6 +453,21 @@ static int ao_compile(const char *cc, const char *file, const char *obj,
         return 2;
     }
     return 0;
+}
+
+/* Exercise both child launch paths without depending on a compiler in the
+ * selftest. Losing the second argv word would run env with the C flags. */
+int ao_wrapper_selftest(void);
+int ao_wrapper_selftest(void)
+{
+    struct ao_command cc;
+    char command[] = "env true";
+    const struct ao_incset incs = {0};
+    if (lint_parse_compiler_argv(command, cc.argv, &cc.argc) || ao_tool_ok(&cc) ||
+        ao_compile(&cc, "fixture.c", "fixture.o", &incs, 0, "/dev/null"))
+        return 1;
+    cc.argv[1] = (char *)"/z23-no-such-adx-compiler";
+    return ao_tool_ok(&cc) != 1;
 }
 
 /* Counts disassembly lines of the form ADDR: adcx|adox. */
@@ -515,7 +533,7 @@ static void ao_report(const char *file, const struct ao_claims *c)
 
 /* Grades one file: claims, compile, disassemble, verdict. *viol increments
  * on an overclaim. Returns 0 ok, 2 fail-closed. */
-static int ao_grade_file(const char *cc, const char *file, const char *tmpdir,
+static int ao_grade_file(const struct ao_command *cc, const char *file, const char *tmpdir,
                          const char *logpath, const struct ao_incset *incs,
                          int x86, int *viol)
 {
@@ -545,18 +563,19 @@ static int ao_grade_file(const char *cc, const char *file, const char *tmpdir,
 }
 
 /* Both measuring tools must exist: no compiler or no objdump is fail-closed. */
-static int ao_tools_present(const char *cc)
+static int ao_tools_present(const struct ao_command *cc)
 {
     int rc = ao_tool_ok(cc);
     if (rc == 1) {
         fprintf(stderr,
                 "%s: FATAL — no C compiler ('%s') to measure with.\n",
-                k_ao_gate, cc);
+                k_ao_gate, cc->argv[0]);
         return 2;
     }
     if (rc)
         return 2;
-    rc = ao_tool_ok("objdump");
+    const struct ao_command objdump = {.argv = {(char *)"objdump"}, .argc = 1};
+    rc = ao_tool_ok(&objdump);
     if (rc == 1) {
         fprintf(stderr,
                 "%s: FATAL — objdump not found; cannot read emitted code.\n",
@@ -582,7 +601,7 @@ static int ao_scan_inputs(struct ao_fset *fs, struct ao_incset *incs)
 }
 
 /* Grades every population file in order; stops at the first fail-closed. */
-static int ao_grade_all(const char *cc, const struct ao_fset *fs,
+static int ao_grade_all(const struct ao_command *cc, const struct ao_fset *fs,
                         const struct ao_incset *incs, int *viol)
 {
     char tmpdir[AO_PATH], logpath[AO_PATH + 16];
@@ -609,13 +628,17 @@ int check_no_adx_overclaim_run(int argc, char **argv)
         return 2;
     }
     const char *mode = env_or("ZCL_LINT_MODE", "FAIL");
-    const char *cc = env_or("CC", "cc");
+    struct ao_command cc;
+    char command[4096];
+    if (ovf(snprintf(command, sizeof command, "%s", env_or("CC", "cc")), sizeof command) ||
+        lint_parse_compiler_argv(command, cc.argv, &cc.argc))
+        return die("%s: FATAL — unsupported compiler command\n", k_ao_gate);
     struct ao_fset fs;
     struct ao_incset incs;
     int viol = 0;
-    if (ao_tools_present(cc) || ao_scan_inputs(&fs, &incs))
+    if (ao_tools_present(&cc) || ao_scan_inputs(&fs, &incs))
         return 2;
-    if (ao_grade_all(cc, &fs, &incs, &viol))
+    if (ao_grade_all(&cc, &fs, &incs, &viol))
         return 2;
     printf("[%s] scanned %d ADX-claiming file(s), %d violation(s) (mode: %s)\n",
            k_ao_gate, fs.n, viol, mode);

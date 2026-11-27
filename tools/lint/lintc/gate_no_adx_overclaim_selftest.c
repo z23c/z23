@@ -23,6 +23,7 @@ enum { AOST_PATH = 1024, AOST_TEXT = 4096,
 struct aost_incset { char flag[AOST_IFLAGS][AOST_IWORD]; int n; };
 
 extern int ao_extract_includes(const char *text, struct aost_incset *set);
+extern int ao_wrapper_selftest(void);
 
 static int aost_root(char *out, size_t cap)
 {
@@ -106,7 +107,7 @@ int check_no_adx_overclaim_selftest(void)
     int rc = aost_root(root, sizeof root);
     if (rc)
         return rc;
-    int bad = 0;
+    int bad = ao_wrapper_selftest();
     bad |= aost_case(root, "chatter-one",
                      "gen_templates: 49 inputs -> generated.h (unchanged)\n"
                      "-Icore/a/include -Iengine/b/include -Iplatform/c/include",
