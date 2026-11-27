@@ -286,6 +286,24 @@ size_t fleet_board_roster_learned_peers(uint8_t (*out)[32], size_t cap)
     return n;
 }
 
+bool fleet_board_roster_learned_session(const uint8_t noise[32],
+                                        uint8_t transcript[32],
+                                        uint64_t *generation)
+{
+    bool found = false;
+    roster_lock();
+    for (size_t i = 0; i < FLEET_BOARD_FLEET_PEERS_MAX && !found; i++) {
+        const struct learned_peer *l = &g_learned[i];
+        if (l->used && memcmp(l->noise, noise, 32) == 0) {
+            memcpy(transcript, l->transcript, 32);
+            *generation = l->generation;
+            found = true;
+        }
+    }
+    roster_unlock();
+    return found;
+}
+
 bool fleet_board_roster_admit(struct node_db *pairings, struct node_db *store,
                               const struct fleet_board_roster_bind *bind,
                               const uint8_t peer_noise[32],

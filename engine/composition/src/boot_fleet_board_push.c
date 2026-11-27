@@ -680,14 +680,17 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
  * judge once a round per peer and board key, batch. A post the fan-out held
  * for one peer is counted fanned out when it rides. */
 static int push_addressed(struct push_round *r, const struct push_queued *q,
-                          struct push_peer **out)
+                          struct push_peer **out, uint8_t roster[32], bool *matched)
 {
     uint8_t to[32];
     int step = push_resolve(r, q, to);
-    if (step == PUSH_OK)
-        step = push_match(r, to, out);
-    if (step != PUSH_OK)
-        return step;
+    if (step != PUSH_OK) return step;
+    step = push_match(r, to, out);
+    if (step == FLEET_BOARD_PUSH_SKIP_AMBIGUOUS) return step;
+    const uint8_t *paired = step == PUSH_OK ? (*out)->row.peer_noise_pubkey : NULL;
+    int roster_step = board_push_roster_addressed(r, to, paired, roster, matched);
+    if (roster_step != PUSH_UNASKED) return roster_step;
+    if (step != PUSH_OK) return step;
     struct push_peer *p = *out;
     if (p->ready == PUSH_UNASKED || memcmp(p->ready_to, to, 32) != 0) {
         p->ready = push_peer_judge(r, p, to);
@@ -714,7 +717,9 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
         return;
     }
     struct push_peer *p = NULL;
-    int step = push_addressed(r, q, &p);
+    uint8_t roster[32];
+    bool roster_matched = false;
+    int step = push_addressed(r, q, &p, roster, &roster_matched);
     if (step == PUSH_HOLD)
         board_push_hold(r, q, p);
     else if (step != PUSH_OK && step != PUSH_UNASKED)
@@ -722,7 +727,7 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
     /* The fan-out needs the post a pull would still serve, in r->row. */
     if (q->fanout && step != FLEET_BOARD_PUSH_SKIP_GONE &&
         step != FLEET_BOARD_PUSH_SKIP_EXPIRED)
-        board_push_fanout(r, q, p);
+        board_push_fanout(r, q, p, roster_matched ? roster : NULL);
 }
 
 /* Open one push. The stream owns the state once it opens. */

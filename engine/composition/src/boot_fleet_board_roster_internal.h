@@ -94,6 +94,9 @@ bool fleet_board_roster_session_standing(struct node_db *pairings,
                                          uint64_t generation, int64_t now,
                                          uint8_t key_out[32]);
 size_t fleet_board_roster_learned_peers(uint8_t (*out)[32], size_t cap);
+bool fleet_board_roster_learned_session(const uint8_t noise[32],
+                                        uint8_t transcript[32],
+                                        uint64_t *generation);
 
 /* The head row a roster answer leads with. The lane tick finds it, at most once
  * per ONIONS_REUSE_S from fleet_board_roster_targets; _pinned_head then costs an
@@ -141,6 +144,13 @@ void boot_fleet_board_roster_push_forget(void);
 int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
                                        const uint8_t peer[32],
                                        const struct fleet_board_post *post);
+/* An addressed offer binds the checked session and target key. Return 2
+ * while that peer has a live push, so its caller may hold within the queue bound. */
+struct noise_transport_snapshot;
+int boot_fleet_board_roster_push_offer_bound(
+    struct boot_svc_ctx *svc, const uint8_t peer[32],
+    const struct fleet_board_post *post, const struct noise_transport_snapshot *session,
+    const uint8_t target[32]);
 void boot_fleet_board_roster_push_tick(struct node_db *store);
 
 #ifdef ZCL_TESTING

@@ -146,7 +146,7 @@ static bool fanout_roster_serves(struct net_manager *nm,
  * unsupported is left to the pull and is not counted again. A learned peer
  * with a live session sets *live even when this post is not offered to it. */
 static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32],
-                                  bool *live)
+                                  const uint8_t *done, bool *live)
 {
     struct node_db *pairings = app_runtime_node_db();
     struct net_manager *nm =
@@ -161,6 +161,7 @@ static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32],
     for (size_t i = 0; i < n; i++) {
         struct noise_transport_snapshot snap;
         int opened;
+        if (done && memcmp(done, noise[i], 32) == 0) continue;
         if (fanout_link(r, noise[i], &snap) ==
             FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED)
             continue;
@@ -177,9 +178,9 @@ static size_t fanout_roster_missed(struct push_round *r, const uint8_t host[32],
 }
 
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
-                       const struct push_peer *done)
+                       const struct push_peer *done, const uint8_t *roster_done)
 {
-    bool live = false;
+    bool live = roster_done != NULL;
     size_t missed;
     for (size_t i = 0; i < r->n_peers; i++) {
         struct push_peer *p = &r->peers[i];
@@ -191,13 +192,65 @@ void board_push_fanout(struct push_round *r, const struct push_queued *q,
                 FLEET_BOARD_PUSH_SKIP_NOT_CONNECTED)
             live = true;
     }
-    missed = fanout_roster_missed(r, q->host, &live);
+    missed = fanout_roster_missed(r, q->host, roster_done, &live);
     if (missed > 0)
         atomic_fetch_add_explicit(&g_fanout_roster_unpushed, missed,
                                   memory_order_relaxed);
     if (!live)
         atomic_fetch_add_explicit(&g_fanout_no_session, 1,
                                   memory_order_relaxed);
+}
+
+/* Match only a live session that proved this exact board key and still has
+ * roster standing and the read role. More than one Noise identity refuses. */
+int board_push_roster_addressed(struct push_round *r, const uint8_t to[32],
+                                const uint8_t *paired, uint8_t selected[32],
+                                bool *matched)
+{
+    struct node_db *pairings = app_runtime_node_db();
+    struct net_manager *nm = r->svc && r->svc->msg_processor
+        ? r->svc->msg_processor->net_mgr : NULL;
+    *matched = false;
+    if (!nm || !pairings || !app_runtime_node_db_handle_open(pairings))
+        return PUSH_UNASKED;
+    uint8_t peers[FLEET_BOARD_FLEET_PEERS_MAX][32], key[32];
+    size_t n = fleet_board_roster_learned_peers(peers, FLEET_BOARD_FLEET_PEERS_MAX);
+    struct noise_transport_snapshot chosen = {0};
+    int link = PUSH_OK;
+    for (size_t i = 0; i < n; i++) {
+        struct noise_transport_snapshot snap;
+        uint8_t transcript[32];
+        uint64_t generation;
+        if (!fleet_board_roster_learned_session(peers[i], transcript, &generation))
+            continue;
+        struct p2p_node *node = boot_mesh_find_session_bound(
+            nm, peers[i], transcript, generation, &snap);
+        if (!node) continue;
+        int ready = net_send_over_budget(node)
+            ? FLEET_BOARD_PUSH_SKIP_OVER_BUDGET : PUSH_OK;
+        p2p_node_release(node);
+        if (
+            !fleet_board_roster_session_standing(pairings, board_db(), peers[i],
+                snap.transcript_hash, snap.connection_generation, r->now, key) ||
+            memcmp(key, to, 32) != 0 || !board_push_may_read(key)) continue;
+        if ((paired && memcmp(paired, peers[i], 32) != 0) ||
+            (*matched && (memcmp(selected, peers[i], 32) != 0 ||
+             memcmp(chosen.transcript_hash, snap.transcript_hash, 32) != 0 ||
+             chosen.connection_generation != snap.connection_generation)))
+            return FLEET_BOARD_PUSH_SKIP_AMBIGUOUS;
+        memcpy(selected, peers[i], 32);
+        chosen = snap;
+        *matched = true;
+        link = ready;
+    }
+    if (!*matched) return PUSH_UNASKED;
+    if (paired) { *matched = false; return PUSH_UNASKED; }
+    if (link != PUSH_OK) return link;
+    int opened = boot_fleet_board_roster_push_offer_bound(r->svc, selected,
+                                                         &r->row->post, &chosen, to);
+    if (opened == 1) return PUSH_OK;
+    if (opened == 2) return PUSH_HOLD;
+    return opened < 0 ? FLEET_BOARD_PUSH_SKIP_UNSUPPORTED : FLEET_BOARD_PUSH_SKIP_OPEN_FAILED;
 }
 
 void board_push_fanout_sent(void)

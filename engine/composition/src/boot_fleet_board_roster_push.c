@@ -585,12 +585,16 @@ void boot_fleet_board_roster_push_forget(void)
 /* False when this peer has no live session, or the send budget is spent.
  * The node is released before return; `snap` is the session this OPEN binds. */
 static bool rp_peer_ready(struct boot_svc_ctx *svc, const uint8_t peer[32],
+                          const struct noise_transport_snapshot *expected,
                           struct noise_transport_snapshot *snap)
 {
     struct p2p_node *node;
     if (!svc || !svc->msg_processor || !svc->msg_processor->net_mgr)
         return false;
-    node = boot_mesh_find_session_peer(svc->msg_processor->net_mgr, peer, snap);
+    node = expected
+        ? boot_mesh_find_session_bound(svc->msg_processor->net_mgr, peer,
+                                       expected->transcript_hash, expected->connection_generation, snap)
+        : boot_mesh_find_session_peer(svc->msg_processor->net_mgr, peer, snap);
     if (!node)
         return false;
     if (net_send_over_budget(node)) {
@@ -601,9 +605,20 @@ static bool rp_peer_ready(struct boot_svc_ctx *svc, const uint8_t peer[32],
     return true;
 }
 
-int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
-                                       const uint8_t peer[32],
-                                       const struct fleet_board_post *post)
+static bool rp_target_allowed(const uint8_t peer[32],
+                              const struct noise_transport_snapshot *snap,
+                              const uint8_t target[32])
+{
+    uint8_t proved[32];
+    return fleet_board_roster_session_standing(app_runtime_node_db(), board_db(), peer,
+               snap->transcript_hash, snap->connection_generation, board_now(), proved) &&
+           (!target || memcmp(proved, target, 32) == 0) && board_push_may_read(proved);
+}
+
+static int rp_offer(struct boot_svc_ctx *svc, const uint8_t peer[32],
+                    const struct fleet_board_post *post,
+                    const struct noise_transport_snapshot *expected,
+                    const uint8_t target[32])
 {
     struct noise_transport_snapshot snap;
     struct fleet_board_roster_bind bind;
@@ -616,13 +631,14 @@ int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
     enum mesh_stream_refusal opened;
     memset(&snap, 0, sizeof snap);
     memset(&bind, 0, sizeof bind);
-    if (!g_enabled || !post || !rp_peer_ready(svc, peer, &snap))
+    if (!g_enabled || !post || !rp_peer_ready(svc, peer, expected, &snap))
         return 0;
     if (rp_unsupported(peer, snap.transcript_hash, snap.connection_generation))
         return -1;
     mesh_stream_visit(FLEET_BOARD_ROSTER_PUSH_SERVICE_NAME, rp_live_visit, &live);
     if (live.found)
-        return 0;
+        return target ? 2 : 0;
+    if (!rp_target_allowed(peer, &snap, target)) return 0;
     memcpy(bind.transcript_hash, snap.transcript_hash, 32);
     bind.connection_generation = snap.connection_generation;
     bind.after = FLEET_BOARD_ROSTER_PUSH_AFTER;
@@ -638,8 +654,9 @@ int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
     }
     out->n = 1;
     memcpy(out->ids[0], post->id, 32);
-    opened = mesh_stream_open(FLEET_BOARD_ROSTER_PUSH_SERVICE_NAME, peer,
-                              FLEET_BOARD_PUSH_WINDOW, wire, wlen, out, &id);
+    if (!rp_target_allowed(peer, &snap, target)) { free(wire); free(out); return 0; }
+    opened = mesh_stream_open_bound(FLEET_BOARD_ROSTER_PUSH_SERVICE_NAME, peer, &snap,
+                                    FLEET_BOARD_PUSH_WINDOW, wire, wlen, out, &id);
     free(wire);
     if (opened == MESH_STREAM_OK)
         return 1;
@@ -650,6 +667,22 @@ int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
         return -1;
     }
     return 0;
+}
+
+int boot_fleet_board_roster_push_offer(struct boot_svc_ctx *svc,
+                                       const uint8_t peer[32],
+                                       const struct fleet_board_post *post)
+{
+    return rp_offer(svc, peer, post, NULL, NULL);
+}
+
+int boot_fleet_board_roster_push_offer_bound(
+    struct boot_svc_ctx *svc, const uint8_t peer[32],
+    const struct fleet_board_post *post, const struct noise_transport_snapshot *session,
+    const uint8_t target[32])
+{
+    if (!session || !target) return 0;
+    return rp_offer(svc, peer, post, session, target);
 }
 
 #ifdef ZCL_TESTING

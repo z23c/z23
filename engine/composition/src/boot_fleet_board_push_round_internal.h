@@ -106,7 +106,11 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
  * that OPEN did not take is counted in push_fanout_roster_unpushed. A post
  * that finds no live session in either walk is push_fanout_no_session. */
 void board_push_fanout(struct push_round *r, const struct push_queued *q,
-                       const struct push_peer *done);
+                       const struct push_peer *done, const uint8_t *roster_done);
+/* Resolve a roster-only addressee; PUSH_UNASKED means no roster match. */
+int board_push_roster_addressed(struct push_round *r, const uint8_t to[32],
+                                const uint8_t *paired, uint8_t selected[32],
+                                bool *matched);
 /* A post the fan-out held for one peer rode a push after its wait. */
 void board_push_fanout_sent(void);
 /* Fill the fan-out fields of the lane's counters. */

@@ -55,6 +55,7 @@
 struct boot_svc_ctx;
 struct msg_processor;
 struct p2p_node;
+struct noise_transport_snapshot;
 
 #define MESH_STREAM_FRAME_PREFIX "ZSTRM"
 #define MESH_STREAM_FRAME_PREFIX_LEN 5u
@@ -234,6 +235,14 @@ enum mesh_stream_refusal mesh_stream_open(
     const char *service_name, const uint8_t peer_noise_static[32],
     uint32_t initial_window, const uint8_t *payload, size_t payload_len,
     void *service_state, uint64_t *stream_id_out);
+
+/* Open only on the specified established Noise session; a stale session
+ * refuses before the OPEN bytes are queued. */
+enum mesh_stream_refusal mesh_stream_open_bound(
+    const char *service_name, const uint8_t peer_noise_static[32],
+    const struct noise_transport_snapshot *session, uint32_t initial_window,
+    const uint8_t *payload, size_t payload_len, void *service_state,
+    uint64_t *stream_id_out);
 
 /* Send one DATA payload. Refused when the payload is larger than one
  * frame or than the credit this node holds — the frame never reaches the

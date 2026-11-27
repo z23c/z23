@@ -587,7 +587,7 @@ static size_t stream_put_prefix(uint8_t *out, uint8_t kind, uint64_t id)
 static bool stream_send_open(struct msg_processor *mp, struct p2p_node *node,
                              uint64_t id, const char *name,
                              uint32_t initial_window, const uint8_t *payload,
-                             size_t payload_len)
+                             size_t payload_len, const struct noise_transport_snapshot *expected)
 {
     uint8_t header[STREAM_HDR_MAX];
     size_t n = stream_put_prefix(header, MESH_STREAM_KIND_OPEN, id);
@@ -599,8 +599,21 @@ static bool stream_send_open(struct msg_processor *mp, struct p2p_node *node,
     n += name_len;
     zcl_write_u16_le(header + n, (uint16_t)payload_len);
     n += 2u;
-    return stream_write_frame(mp, node, header, n, payload, payload_len);
+    if (!expected)
+        return stream_write_frame(mp, node, header, n, payload, payload_len);
+    struct noise_transport_snapshot now;
+    zcl_mutex_lock(&node->cs_recv);
+    bool same = node->transport && noise_transport_snapshot(node->transport, &now) &&
+                now.established && !atomic_load(&node->disconnect) &&
+                now.connection_generation == expected->connection_generation &&
+                now.connection_serial == expected->connection_serial &&
+                memcmp(now.remote_static, expected->remote_static, 32) == 0 &&
+                memcmp(now.transcript_hash, expected->transcript_hash, 32) == 0;
+    bool sent = same && stream_write_frame(mp, node, header, n, payload, payload_len);
+    zcl_mutex_unlock(&node->cs_recv);
+    return sent;
 }
+
 
 static bool stream_send_data(struct msg_processor *mp, struct p2p_node *node,
                              uint64_t id, const uint8_t *payload,
@@ -824,10 +837,11 @@ static bool stream_pick_local_id_locked(
     return false;
 }
 
-enum mesh_stream_refusal mesh_stream_open(
+static enum mesh_stream_refusal stream_open_impl(
     const char *service_name, const uint8_t peer_noise_static[32],
-    uint32_t initial_window, const uint8_t *payload, size_t payload_len,
-    void *service_state, uint64_t *stream_id_out)
+    const struct noise_transport_snapshot *expected, uint32_t initial_window,
+    const uint8_t *payload, size_t payload_len, void *service_state,
+    uint64_t *stream_id_out)
 {
     enum mesh_stream_refusal args = stream_open_args_refusal(
         service_name, peer_noise_static, initial_window, payload, payload_len);
@@ -853,8 +867,10 @@ enum mesh_stream_refusal mesh_stream_open(
     }
     struct noise_transport_snapshot snap;
     memset(&snap, 0, sizeof(snap));
-    struct p2p_node *peer = boot_mesh_find_session_peer(
-        svc->msg_processor->net_mgr, peer_noise_static, &snap);
+    struct p2p_node *peer = expected
+        ? boot_mesh_find_session_bound(svc->msg_processor->net_mgr, peer_noise_static,
+                                       expected->transcript_hash, expected->connection_generation, &snap)
+        : boot_mesh_find_session_peer(svc->msg_processor->net_mgr, peer_noise_static, &snap);
     if (!peer) {
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_PEER_NOT_CONNECTED;
@@ -889,7 +905,7 @@ enum mesh_stream_refusal mesh_stream_open(
      * ended stream its verdict. */
     bool sent = stream_send_open(svc->msg_processor, peer, id,
                                  g_service_names[index], initial_window,
-                                 payload, payload_len);
+                                 payload, payload_len, expected);
     p2p_node_release(peer);
     if (!sent) {
         zcl_mutex_unlock(&g_stream_lock);
@@ -914,6 +930,28 @@ enum mesh_stream_refusal mesh_stream_open(
         *stream_id_out = id;
     zcl_mutex_unlock(&g_stream_lock);
     return MESH_STREAM_OK;
+}
+
+enum mesh_stream_refusal mesh_stream_open(
+    const char *service_name, const uint8_t peer_noise_static[32],
+    uint32_t initial_window, const uint8_t *payload, size_t payload_len,
+    void *service_state, uint64_t *stream_id_out)
+{
+    return stream_open_impl(service_name, peer_noise_static, NULL, initial_window,
+                            payload, payload_len, service_state, stream_id_out);
+}
+
+enum mesh_stream_refusal mesh_stream_open_bound(
+    const char *service_name, const uint8_t peer_noise_static[32],
+    const struct noise_transport_snapshot *session, uint32_t initial_window,
+    const uint8_t *payload, size_t payload_len, void *service_state,
+    uint64_t *stream_id_out)
+{
+    if (!session || !session->established || !peer_noise_static ||
+        memcmp(session->remote_static, peer_noise_static, 32) != 0)
+        return MESH_STREAM_REFUSED_MALFORMED;
+    return stream_open_impl(service_name, peer_noise_static, session, initial_window,
+                            payload, payload_len, service_state, stream_id_out);
 }
 
 void mesh_stream_visit(const char *service_name, mesh_stream_visitor visit,

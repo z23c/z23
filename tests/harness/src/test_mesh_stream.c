@@ -914,6 +914,41 @@ _test_next:
     return failures;
 }
 
+static int stream_test_case_bound_open(struct stream_multi *m,
+                                       struct net_manager *nm,
+                                       struct msg_processor *mp)
+{
+    int failures = 0;
+    const size_t k = STREAM_MULTI_BOUND;
+    TEST("mesh stream: stale bound OPEN emits no bytes and exact session progresses") {
+        struct p2p_node *table[6] = {m->ia[0], m->rb[0], m->ia[2],
+                                     m->rb[2], m->ia[k], m->rb[k]};
+        stream_multi_order(nm, m, table, 6);
+        mesh_stream_test_reset();
+        stream_test_counters_reset();
+        struct noise_transport_snapshot exact, stale;
+        ASSERT(p2p_node_noise_snapshot(m->ia[k], &exact));
+        stale = exact;
+        stale.connection_generation ^= 1u;
+        uint64_t id = UINT64_MAX;
+        ASSERT(mesh_stream_open_bound(STREAM_TEST_ECHO, m->res_pub, &stale,
+                                     STREAM_TEST_WINDOW, (const uint8_t *)"hi", 2,
+                                     NULL, &id) != MESH_STREAM_OK);
+        ASSERT_EQ(mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]), (size_t)0);
+        ASSERT_EQ(stream_multi_decoy_frames(m, mp), (size_t)0);
+        ASSERT_EQ(mesh_stream_open_bound(STREAM_TEST_ECHO, m->res_pub, &exact,
+                                        STREAM_TEST_WINDOW, (const uint8_t *)"hi", 2,
+                                        NULL, &id), MESH_STREAM_OK);
+        ASSERT_EQ(mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]), (size_t)1);
+        ASSERT_EQ(stream_multi_decoy_frames(m, mp), (size_t)0);
+        PASS();
+    }
+_test_next:
+    mesh_loop_discard(m->rb[k], m->rq[k], m->ini[k]);
+    mesh_stream_test_reset();
+    return failures;
+}
+
 static int stream_test_case_multi_session(const char *dir,
                                           struct net_manager *nm,
                                           struct msg_processor *mp)
@@ -927,6 +962,7 @@ static int stream_test_case_multi_session(const char *dir,
         PASS();
     }
     if (failures == 0) {
+        failures += stream_test_case_bound_open(&m, nm, mp);
         failures += stream_test_case_bound_session_found(&m, nm, mp);
         failures += stream_test_case_bound_session_lost(&m, nm, mp);
         failures += stream_test_case_verdicts_other_session(&m, nm, mp);
