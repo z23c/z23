@@ -1088,6 +1088,8 @@ static void boot_mmr_mmb_catchup(struct boot_svc_ctx *svc, const struct app_cont
 static void boot_register_chain_rpcs(struct boot_svc_ctx *svc,
     const struct app_context *ctx, const struct chain_params *params, const char *body_datadir)
 {
+    rpc_blockchain_set_ballot_catalog_pin(
+        ctx->ballot_catalog_pin_present ? &ctx->ballot_catalog_pin : NULL);
     register_blockchain_rpc_commands(svc->rpc_table);
     rpc_hodl_set_state(svc->state, svc->coins_tip, boot_node_db(svc), ctx->datadir);
     register_hodl_rpc_commands(svc->rpc_table);
@@ -1446,7 +1448,6 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
      * tracked thread joined at shutdown (boot_frontend_async.c): neither P2P
      * nor the reducer depends on it. RPC answers -28 until it binds; a
      * failure serves DEGRADED and arms the bind retry, as before. */
-    rpc_blockchain_set_ballot_catalog_pin(ctx->ballot_catalog_pin_present ? &ctx->ballot_catalog_pin : NULL);
     boot_frontend_async_start(svc);
     t_svc = boot_mark_step(t_svc, "svc.frontend_tor_start", "svc.peer_discover_self");
     boot_start_nat_probe(svc, ctx);
