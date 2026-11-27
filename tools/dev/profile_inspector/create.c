@@ -7,6 +7,8 @@
 #include "core/serialize.h"
 #include "crypto/equihash.h"
 #include "primitives/block.h"
+#include "platform/rename_compat.h"
+#include <fcntl.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -112,24 +114,37 @@ static bool write_new(const char *path, const uint8_t *bytes, size_t size)
     return ok;
 }
 
+/* Create private staging in the destination's parent so publication cannot
+ * cross filesystems. Ignore trailing slashes when locating the parent. */
+static bool make_staging_dir(const char *dir, char *temp, size_t capacity)
+{
+    const char suffix[] = ".z23-profile.XXXXXX";
+    size_t parent = strlen(dir);
+    while (parent && dir[parent - 1] == '/') parent--;
+    while (parent && dir[parent - 1] != '/') parent--;
+    if (parent >= capacity || capacity - parent < sizeof(suffix)) return false;
+    memcpy(temp, dir, parent);
+    memcpy(temp + parent, suffix, sizeof(suffix));
+    return mkdtemp(temp) != NULL;
+}
+
 static bool save_pair(const char *dir, const uint8_t *manifest, size_t mlen,
                       const uint8_t *genesis, size_t glen)
 {
     char temp[4096], result[4096], mpath[4096], gpath[4096];
-    int a = snprintf(temp, sizeof(temp), "%s/.pending", dir);
-    int b = snprintf(result, sizeof(result), "%s/result", dir);
-    int c = snprintf(mpath, sizeof(mpath), "%s/.pending/manifest.bin", dir);
-    int d = snprintf(gpath, sizeof(gpath), "%s/.pending/genesis.bin", dir);
-    if (a < 0 || b < 0 || c < 0 || d < 0 || (size_t)a >= sizeof(temp) ||
-        (size_t)b >= sizeof(result) || (size_t)c >= sizeof(mpath) || (size_t)d >= sizeof(gpath))
-        return false;
-    if (mkdir(dir, 0700)) return false;
-    bool made = mkdir(temp, 0700) == 0;
+    if (!make_staging_dir(dir, temp, sizeof(temp))) return false;
+    int a = snprintf(result, sizeof(result), "%s/result", temp);
+    int b = snprintf(mpath, sizeof(mpath), "%s/result/manifest.bin", temp);
+    int c = snprintf(gpath, sizeof(gpath), "%s/result/genesis.bin", temp);
+    bool paths_ok = a >= 0 && (size_t)a < sizeof(result) &&
+                    b >= 0 && (size_t)b < sizeof(mpath) &&
+                    c >= 0 && (size_t)c < sizeof(gpath);
+    bool made = paths_ok && mkdir(result, 0700) == 0;
     bool ok = made && write_new(mpath, manifest, mlen) && write_new(gpath, genesis, glen) &&
-              rename(temp, result) == 0;
+              platform_renameat_noreplace(AT_FDCWD, temp, AT_FDCWD, dir) == 0;
     if (!ok) {
-        if (made) { (void)unlink(mpath); (void)unlink(gpath); (void)rmdir(temp); }
-        (void)rmdir(dir);
+        if (made) { (void)unlink(mpath); (void)unlink(gpath); (void)rmdir(result); }
+        (void)rmdir(temp);
     }
     return ok;
 }
@@ -140,6 +155,13 @@ int main(int argc, char **argv)
     struct profile p = {0};
     if (!manifest_from_args(argc, argv, manifest, &mlen, &p)) {
         fputs("usage: profile-create OUTPUT_DIR TIMESTAMP START WINDOW REVISION_HEX ACTIVATION [REVISION_HEX ACTIVATION ...]; revisions must be strictly sorted\n", stderr);
+        return 1;
+    }
+    /* Avoid a solve for an occupied path. Publication repeats the exclusion
+     * atomically, so concurrent creators can never replace each other. */
+    struct stat st;
+    if (!*argv[1] || lstat(argv[1], &st) == 0 || errno != ENOENT) {
+        fputs("output path unavailable\n", stderr);
         return 1;
     }
     struct byte_stream genesis;

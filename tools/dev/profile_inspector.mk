@@ -4,7 +4,9 @@
 # Run: build/bin/profile-inspector MANIFEST GENESIS [EXPECTED_CATALOG_HEX]
 # Create: build/bin/profile-create OUTPUT_DIR TIMESTAMP START WINDOW REVISION_HEX ACTIVATION [REVISION_HEX ACTIVATION ...]
 # Revisions must be strictly ascending raw bytes; the output directory must not exist.
-# Successful output appears atomically in OUTPUT_DIR/result/{manifest.bin,genesis.bin}.
+# On Linux and Darwin, publish the complete directory with an exclusive rename.
+# A process crash before publication may leave a private .z23-profile.* sibling.
+# The same OUTPUT_DIR is available for retry. Read result/{manifest.bin,genesis.bin} there.
 # Record the printed catalog as this new profile's pin. When checking someone
 # else's network, use a previously agreed pin: an artifact's own catalog does
 # not independently authenticate which chain was intended.
@@ -46,7 +48,14 @@ check: all
 	  2aafc4959fe4da89be30020ba5ff5b2b77638cf6d3af169d35d053e610741c6a > "$$tmp/wrong.out" 2> "$$tmp/wrong.err"; then \
 	  echo 'wrong catalog unexpectedly accepted' >&2; exit 1; fi; \
 	 test ! -s "$$tmp/wrong.out"; \
-	 echo 'profile-create: golden round-trip and wrong-pin refusal passed'
+	 set -- 1795737600 1 20; i=1; \
+	 while test $$i -le 64; do set -- "$$@" "$$(printf '%064x' "$$i")" 25; i=$$((i+1)); done; \
+	 rc=0; (ulimit -c 0 && ulimit -f 1 && exec $(CREATE_OUT) "$$tmp/retry" "$$@") > "$$tmp/crash.out" 2>&1 || rc=$$?; \
+	 case "$$(kill -l "$$rc")" in XFSZ|SIGXFSZ) ;; *) echo "unexpected exit $$rc from interrupted creator" >&2; exit 1;; esac; \
+	 test ! -e "$$tmp/retry"; \
+	 $(CREATE_OUT) "$$tmp/retry" "$$@" > "$$tmp/retry.out"; \
+	 $(OUT) "$$tmp/retry/result/manifest.bin" "$$tmp/retry/result/genesis.bin" a32b54de083b29329e38d399f047ed032e1e8d02fd56797be980638177961187 > "$$tmp/retry-check.out"; \
+	 echo 'profile-create: golden round-trip, wrong-pin refusal and interrupted retry passed'
 $(OUT): TOOL_SOURCES := tools/dev/profile_inspector/main.c $(COMMON_SOURCES)
 $(CREATE_OUT): TOOL_SOURCES := tools/dev/profile_inspector/create.c $(COMMON_SOURCES)
 $(OUT): tools/dev/profile_inspector/main.c $(COMMON_SOURCES) tools/dev/profile_inspector.mk
