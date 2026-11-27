@@ -39,11 +39,13 @@ static bool ballot_catalog_call(struct rpc_table *table, const char *raw,
     if (want_ok) {
         const struct json_value *v = json_get(&result, "catalog");
         const char *s = v ? json_get_str(v) : NULL;
+        const struct json_value *rules = json_at(&params, 3);
+        const struct json_value *first = json_at(rules, 0);
         pass = pass && s && strlen(s) == 64 &&
             json_get_int(json_get(&result, "start")) == 100 &&
             json_get_int(json_get(&result, "window")) == 20 &&
-            json_get_int(json_get(&result, "activation")) == 122 &&
-            json_get_int(json_get(&result, "slots")) == 2 &&
+            json_get_int(json_get(&result, "activation")) == json_get_int(json_at(first, 1)) &&
+            json_get_int(json_get(&result, "slots")) == (int64_t)json_size(rules) &&
             json_get_int(json_get(&result, "slot")) == 0;
         if (pass && digest) memcpy(digest, s, 65);
     } else {
@@ -61,6 +63,9 @@ static int ballot_catalog_cases(struct rpc_table *table)
     char regtest_digest[65] = {0}, testnet_digest[65] = {0}, expected[65];
     chain_params_select(CHAIN_REGTEST);
     if (!ballot_catalog_call(table, CATALOG_ARGS, true, NULL, regtest_digest)) failures++;
+    /* Window 100..119 leaves block 120 under old rules. */
+    if (!ballot_catalog_call(table, "[\"" FORK_ID "\",100,20,[[\"" REV_A "\",121]],0]",
+                             true, NULL, NULL)) failures++;
     struct miner_signal_catalog_entry entries[2] = {0};
     struct miner_signal_catalog c = { .start = 100, .window = 20, .count = 2, .entries = entries };
     if (!zcl_hex_decode(FORK_ID, c.network_id, 32) ||
@@ -80,7 +85,7 @@ static int ballot_catalog_cases(struct rpc_table *table)
         "[\"00\",100,20,[[\"" REV_A "\",122]],0]",
         "[\"" FORK_ID "\",100,257,[[\"" REV_A "\",400]],0]",
         "[\"" FORK_ID "\",100,20,[],0]",
-        "[\"" FORK_ID "\",100,20,[[\"" REV_A "\",121]],0]",
+        "[\"" FORK_ID "\",100,20,[[\"" REV_A "\",120]],0]",
         "[\"" FORK_ID "\",100,20,[[\"" REV_A "\",122]],1]",
         "[\"" FORK_ID "\",100,20,[[\"" REV_A "\",122],[\"" REV_A "\",150]],0]",
         "[\"" FORK_ID "\",100,20,[[\"" REV_B "\",150],[\"" REV_A "\",122]],0]",
