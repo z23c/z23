@@ -33,6 +33,7 @@
 #include "command/native_app_network_worker.h"
 #include "command/native_app_host_worker.h"
 #include "config/boot.h"
+#include "chain/chainparams.h"
 #include "config/boot_cold_start.h"     /* -cold-start staged driver */
 #include "config/boot_error.h"          /* pre-registry typed failure surface */
 #include "config/boot_fleet_roster.h"
@@ -946,17 +947,146 @@ static void main_log_malloc_arena_cap(int cap)
         printf("[boot] malloc arenas: not capped (not glibc, or mallopt refused)\n");
 }
 
+/* Resolve research storage before config lookup or dispatch. */
+struct main_research_selection {
+    const struct chain_research_descriptor *profile;
+    int selector_index;
+    int datadir_index;
+};
+
+static bool main_research_scan(int argc, char **argv,
+                               struct main_research_selection *selection)
+{
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        const char *one = arg[0] == '-' && arg[1] == '-' ? arg + 1 : arg;
+        if (strncmp(one, "-testnet-profile", 16) == 0) {
+            if (one[16] != '=' || !one[17] || selection->selector_index)
+                return false;
+            selection->profile = app_testnet_profile_by_name(one + 17);
+            if (!selection->profile)
+                return false;
+            selection->selector_index = i;
+        } else if (strcmp(one, "-datadir") == 0) {
+            selection->datadir_index = -1;
+        } else if (strncmp(one, "-datadir=", 9) == 0) {
+            if (!one[9] || selection->datadir_index)
+                selection->datadir_index = -1;
+            else
+                selection->datadir_index = i;
+        }
+    }
+    return selection->selector_index == 0 || selection->datadir_index >= 0;
+}
+
+static bool main_research_node_only(int argc, char **argv)
+{
+    if (is_cli_mode(argc, argv))
+        return false;
+    for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strncmp(a, "--", 2) &&
+            strncmp(a, "--testnet-profile=", 18) &&
+            strncmp(a, "--datadir=", 10))
+            return false;
+        const char *one = a[0] == '-' && a[1] == '-' ? a + 1 : a;
+        if (!strncmp(one, "-testnet", 8) &&
+            strncmp(one, "-testnet-profile=", 17))
+            return false;
+        if (!strncmp(one, "-regtest", 8) || !strcmp(one, "-gui") ||
+            !strncmp(one, "-bench", 6) || !strcmp(one, "-cold-start") ||
+            !strncmp(one, "-import-complete-shielded=", 26))
+            return false;
+    }
+    return true;
+}
+
+static bool main_research_path(int argc, char **argv,
+                               const struct main_research_selection *selection,
+                               char *arg, size_t capacity)
+{
+    (void)argc;
+    const char *parent = NULL;
+    if (selection->datadir_index) {
+        parent = argv[selection->datadir_index];
+        if (parent[1] == '-') parent++;
+        parent += 9;
+    } else {
+        parent = getenv("HOME");
+    }
+    if (!parent || !*parent || !selection->profile->base ||
+        strcmp(selection->profile->base->strDataDir, "ironwood-research"))
+        return false;
+    int n = snprintf(arg, capacity, selection->datadir_index
+                     ? "-datadir=%s/%s" : "-datadir=%s/.zclassic-c23-%s",
+                     parent, selection->profile->base->strDataDir);
+    if (n < 0 || (size_t)n >= capacity)
+        return false;
+#if defined(_WIN32)
+    return false;
+#else
+    struct stat st;
+    if (lstat(arg + 9, &st) == 0)
+        return S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode);
+    return errno == ENOENT;
+#endif
+}
+
+static bool main_research_prepare(int argc, char ***args,
+                                  struct main_research_selection *research,
+                                  char *path, size_t capacity)
+{
+    char **argv = *args;
+    if (!main_research_scan(argc, argv, research) ||
+        (research->profile && (!main_research_node_only(argc, argv) ||
+         !main_research_path(argc, argv, research, path, capacity)))) {
+        fprintf(stderr, "Invalid or unsafe testnet profile invocation.\n");
+        return false;
+    }
+    if (!research->profile) return true;
+    char **copy = calloc((size_t)argc + 1, sizeof(*copy));
+    if (!copy) return false;
+    memcpy(copy, argv, ((size_t)argc + 1) * sizeof(*copy));
+    copy[research->selector_index] = path;
+    if (research->datadir_index) copy[research->datadir_index] = path;
+    *args = copy;
+    return true;
+}
+
+static bool main_research_config_ok(bool active)
+{
+    if (GetArg("-testnet-profile", NULL)) return false;
+    return !active || (!GetArg("-testnet", NULL) &&
+        !GetArg("-regtest", NULL) && !GetArg("-regtestshielded", NULL));
+}
+
+static bool main_dispatch_reserved(int argc, char **argv, int *rc)
+{
+    if (argc <= 1) return false;
+    if (!strcmp(argv[1], "--app-host-worker")) {
+        *rc = app_host_worker_main(argc, argv);
+        return true;
+    }
+    if (!strcmp(argv[1], "--app-network-worker")) {
+        *rc = app_network_worker_main(argc, argv);
+        return true;
+    }
+    return false;
+}
+
 int main(int argc, char **argv)
 {
+    char **original_argv = argv;
+    struct main_research_selection research = {0};
+    char research_arg[4106];
+    if (!main_research_prepare(argc, &argv, &research, research_arg, sizeof(research_arg)))
+        return 1;
     /* Reserved workers never fall through to device, node or config startup. */
-    if (argc > 1 && !strcmp(argv[1], "--app-host-worker"))
-        return app_host_worker_main(argc, argv);
-    if (argc > 1 && !strcmp(argv[1], "--app-network-worker"))
-        return app_network_worker_main(argc, argv);
+    int rc = 0;
+    if (main_dispatch_reserved(argc, argv, &rc)) return rc;
     /* Before any thread exists: glibc arenas are created per contending thread. */
     const int malloc_arena_cap = platform_allocator_cap_arenas();
     zcl_native_device_host_runtime_exit_if_requested(argc, argv);
-    int rc = 0;
     if (main_dispatch_multicall(argc, argv, &rc))
         return rc;
     if (main_dispatch_dev_ui_modes(argc, argv, &rc))
@@ -981,6 +1111,10 @@ int main(int argc, char **argv)
                           sizeof(conf_datadir));
         GetConfigFilePath(conf_datadir, conf_path, sizeof(conf_path));
         (void)ReadConfigFile(conf_path);
+        if (!main_research_config_ok(research.profile != NULL)) {
+            fprintf(stderr, "Research profile config contains a conflicting network selector.\n");
+            return 1;
+        }
     }
 
     apply_argv_loglevel();
@@ -998,6 +1132,7 @@ int main(int argc, char **argv)
     main_init_node_context(&ctx, default_datadir, sizeof(default_datadir),
                            default_paramsdir, sizeof(default_paramsdir));
 
+    ctx.testnet_profile = research.profile;
     bool show_metrics = true;
 
     /* Node-mode flag ladder lives in engine/composition/src/args.c. It fills ctx +
@@ -1066,7 +1201,7 @@ int main(int argc, char **argv)
      * The decision + re-exec live in engine/composition/src/boot_self_respawn.c so every
      * shutdown exit point that calls it honors an armed request identically.
      * This must receive the REAL process argv — never a synthetic array. */
-    boot_self_respawn_set_argv(argv);
+    boot_self_respawn_set_argv(original_argv);
 
     int bootrc = main_check_boot_guards(&ctx);
     if (bootrc >= 0)

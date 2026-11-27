@@ -1546,6 +1546,63 @@ static int cas_test_profile_config(void)
 }
 
 
+#if !defined(_WIN32)
+static int cas_test_research_refusals(void)
+{
+    int failures = 0;
+    TEST("research selector refuses ambiguous and non-node invocations") {
+        char home[PATH_MAX], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research") != NULL);
+        char *bad[][5] = {
+            {(char *)CAS_BIN, (char *)"-testnet-profile=unknown", NULL},
+            {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood", (char *)"-testnet", NULL},
+            {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood", (char *)"-gui", NULL},
+            {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood", (char *)"status", NULL},
+            {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+             (char *)"--testnet-profile=ironwood", NULL},
+            {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+             (char *)"-datadir=a", (char *)"-datadir=b", NULL},
+        };
+        bool refused = true;
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            int rc = cas_run(bad[i], home, out, sizeof(out));
+            refused = refused && rc != 0 && strstr(out, "Invalid or unsafe testnet profile");
+        }
+        (void)test_rm_rf_recursive(home);
+        ASSERT(refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_research_datadir(void)
+{
+    int failures = 0;
+    TEST("research node uses a dedicated directory before startup") {
+        char home[PATH_MAX], expected[PATH_MAX + 80], out[16384];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research") != NULL);
+        int n = snprintf(expected, sizeof(expected), "datadir=%s/.zclassic-c23-ironwood-research", home);
+        ASSERT(n > 0 && (size_t)n < sizeof(expected));
+        char *argv[] = {(char *)CAS_BIN, (char *)"--testnet-profile=ironwood",
+                        (char *)"-nolegacyimport", (char *)"-nobgvalidation", NULL};
+        const char *needles[] = {expected, NULL};
+        bool found = cas_run_daemon_wait_for(argv, home, needles, 20000, out, sizeof(out));
+        char parent_flag[PATH_MAX + 16];
+        int p = snprintf(parent_flag, sizeof(parent_flag), "-datadir=%s", home);
+        int e = snprintf(expected, sizeof(expected), "datadir=%s/ironwood-research", home);
+        char *explicit_argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                                 parent_flag, (char *)"-nolegacyimport", NULL};
+        bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) &&
+            e > 0 && (size_t)e < sizeof(expected) &&
+            cas_run_daemon_wait_for(explicit_argv, home, needles, 20000, out, sizeof(out));
+        (void)test_rm_rf_recursive(home);
+        ASSERT(found && explicit_found);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_cli_argv_strict(void)
 {
     int failures = 0;
@@ -1582,6 +1639,10 @@ int test_cli_argv_strict(void)
 
     failures += cas_test_unsupported_profile();
     failures += cas_test_profile_config();
+#if !defined(_WIN32)
+    failures += cas_test_research_refusals();
+    failures += cas_test_research_datadir();
+#endif
     failures += cas_test_observed_incident_refuses();
     failures += cas_test_double_dash_datadir_refuses();
 #if !defined(_WIN32)
