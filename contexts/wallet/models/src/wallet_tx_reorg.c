@@ -26,8 +26,8 @@ bool db_wallet_tx_mark_unconfirmed(struct node_db *ndb,
     if (!ndb || !ndb->open || !txid)
         LOG_FAIL("wallet_tx", "mark unconfirmed: invalid argument");
     memset(&tx, 0, sizeof(tx));
-    if (!db_wallet_tx_find(ndb, txid, &tx))
-        return true;
+    enum db_wallet_tx_presence state = wallet_tx_find_checked(ndb, txid, &tx);
+    if (state != DB_WALLET_TX_PRESENT) return state == DB_WALLET_TX_ABSENT;
     if (found_out) *found_out = true;
     tx.has_block = false;
     tx.block_height = 0;

@@ -183,7 +183,7 @@ bool db_wallet_utxo_validate(const struct db_wallet_utxo *u,
 
 /* ── Row Deserialization ──────────────────────────────────────── */
 
-static void db_wallet_tx_read_row(sqlite3_stmt *s, int col,
+bool db_wallet_tx_read_row(sqlite3_stmt *s, int col,
                                   struct db_wallet_tx *out)
 {
     memset(out, 0, sizeof(*out));
@@ -192,9 +192,12 @@ static void db_wallet_tx_read_row(sqlite3_stmt *s, int col,
     /* raw_tx: variable-length blob, needs malloc */
     out->raw_tx_len = (size_t)AR_COL_BYTES(s, col);
     const void *rt = sqlite3_column_blob(s, col++);
-    if (rt && out->raw_tx_len > 0) {
+    if (!rt && sqlite3_errcode(sqlite3_db_handle(s)) == SQLITE_NOMEM)
+        return false; /* raw-return-ok:SQLite could not materialize the payload */
+    if (out->raw_tx_len > 0) {
+        if (!rt) return false; /* raw-return-ok:caller rejects incomplete row */
         out->raw_tx = zcl_malloc(out->raw_tx_len, "wallet_tx raw_tx");
-        if (!out->raw_tx) { out->raw_tx_len = 0; return; }
+        if (!out->raw_tx) { out->raw_tx_len = 0; return false; }
         memcpy(out->raw_tx, rt, out->raw_tx_len);
     }
 
@@ -216,6 +219,7 @@ static void db_wallet_tx_read_row(sqlite3_stmt *s, int col,
     out->time_received = AR_COL_INT(s, col++);
     out->from_me = AR_COL_INT(s, col++) != 0;
     out->fee = AR_COL_INT(s, col++);
+    return true;
 }
 
 static void db_wallet_tx_raw_view_read_row(sqlite3_stmt *s, int col,
@@ -325,18 +329,6 @@ enum db_wallet_tx_presence db_wallet_tx_presence_checked(struct node_db *ndb,
     if (result == DB_WALLET_TX_ERROR)
         LOG_WARN("wallet_tx", "transaction presence query failed: %s", sqlite3_errmsg(ndb->db));
     return result;
-}
-
-bool db_wallet_tx_find(struct node_db *ndb, const uint8_t txid[32],
-                       struct db_wallet_tx *out)
-{
-    if (!ndb->open) return false;
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT txid,raw_tx,block_hash,block_height,time_received,from_me,fee"
-        " FROM wallet_transactions WHERE txid=?",
-        AR_BIND_BLOB(s, 1, txid, 32),
-        db_wallet_tx_read_row(s, 0, out));
 }
 
 bool db_wallet_tx_delete(struct node_db *ndb, const uint8_t txid[32])

@@ -3112,6 +3112,16 @@ static int nt_check_unreadable_body(void)
     return failures;
 }
 
+/* Deny just the transaction read after the disconnection cleared witnesses. */
+static int nt_deny_wallet_tx_payload(void *ctx, int op, const char *table,
+    const char *column, const char *db, const char *source)
+{
+    (void)ctx; (void)db; (void)source;
+    return op == SQLITE_READ && table && column &&
+           !strcmp(table, "wallet_transactions") && !strcmp(column, "raw_tx")
+        ? SQLITE_DENY : SQLITE_OK;
+}
+
 /* Block A6 is replaced by B6: the wallet drops its witnesses at the
  * disconnected height and the tip path rebuilds them on chain B. */
 static int nt_check_reorg_disconnect(void)
@@ -3121,7 +3131,16 @@ static int nt_check_reorg_disconnect(void)
         NDC_CHECK("chain A witnessed", nt_tip(&r, id) && nt_current(&r, NT_NOTE, id));
     bool keep[2] = { false, false };
     struct block lost = f.n[NT_A6].blk;
+    NDC_CHECK("transaction payload read denial installed", up &&
+        sqlite3_set_authorizer(ndb.db, nt_deny_wallet_tx_payload, NULL) == SQLITE_OK);
+    NDC_CHECK("failed transaction read refuses block disconnect", up &&
+        !node_db_sync_wallet_disconnect_block(&ndb, &lost, keep, 6));
+    NDC_CHECK("transaction payload read denial removed", up &&
+        sqlite3_set_authorizer(ndb.db, NULL, NULL) == SQLITE_OK);
+    NDC_CHECK("failed block disconnect preserves Sapling witness", up &&
+        nt_current(&r, NT_NOTE, NT_A6));
     NDC_CHECK("disconnect succeeds",
+
               up && node_db_sync_wallet_disconnect_block(&ndb, &lost, keep, 6));
     NDC_CHECK("the witness at the disconnected height is gone",
               up && nt_summary(&r, NT_A6, 0, 1, 0));

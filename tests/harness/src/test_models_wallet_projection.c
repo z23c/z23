@@ -715,6 +715,50 @@ static bool wallet_projection_tx_presence_case(void)
     return fixture_rm_ok(dir) && ok;
 }
 
+/* The absent and unreadable cases take different paths through disconnect. */
+static bool wallet_unconfirm_deny_read(struct node_db *db, struct db_wallet_tx *tx)
+{
+    bool found = true;
+    if (!db_wallet_tx_mark_unconfirmed(db, tx->txid, &found) || found ||
+        !db_wallet_tx_save(db, tx) ||
+        sqlite3_set_authorizer(db->db, wallet_presence_deny_select, NULL) != SQLITE_OK)
+        return false;
+    bool refused = !db_wallet_tx_mark_unconfirmed(db, tx->txid, &found) && !found;
+    return sqlite3_set_authorizer(db->db, NULL, NULL) == SQLITE_OK && refused;
+}
+
+static bool wallet_unconfirm_retry(struct node_db *db, const struct db_wallet_tx *tx)
+{
+    struct db_wallet_tx row = {0};
+    bool found = false;
+    bool confirmed = db_wallet_tx_find(db, tx->txid, &row) && row.has_block &&
+        row.block_height == tx->block_height && !memcmp(row.block_hash, tx->block_hash, 32);
+    db_wallet_tx_free(&row);
+    bool ok = confirmed && db_wallet_tx_mark_unconfirmed(db, tx->txid, &found) && found &&
+        db_wallet_tx_find(db, tx->txid, &row) && !row.has_block && row.block_height == 0 &&
+        row.fee == tx->fee && row.time_received == tx->time_received &&
+        row.raw_tx_len == tx->raw_tx_len && !memcmp(row.raw_tx, tx->raw_tx, tx->raw_tx_len);
+    db_wallet_tx_free(&row);
+    return ok;
+}
+
+static bool wallet_unconfirm_read_error_case(void)
+{
+    char dir[256], path[320];
+    struct node_db db = {0};
+    test_make_tmpdir(dir, sizeof(dir), "wallet", "unconfirm");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    uint8_t bytes[] = {1, 2, 3};
+    struct db_wallet_tx tx = {.txid = {1}, .block_hash = {2}, .block_height = 18,
+        .has_block = true, .fee = 37, .time_received = 1234,
+        .raw_tx = bytes, .raw_tx_len = sizeof(bytes)};
+    bool ok = node_db_open(&db, path) && wallet_unconfirm_deny_read(&db, &tx);
+    if (db.open) node_db_close(&db);
+    ok = ok && node_db_open(&db, path) && wallet_unconfirm_retry(&db, &tx);
+    if (db.open) node_db_close(&db);
+    return fixture_rm_ok(dir) && ok;
+}
+
 static bool wallet_cutover_utxo_preserved(struct node_db *db, const struct db_wallet_utxo *u,
                                          const uint8_t spender[32], int height)
 {
@@ -935,6 +979,8 @@ int test_model_wallet_projection(void)
     printf("Wallet transaction presence distinguishes missing and I/O failure... ");
     if (wallet_projection_tx_presence_case()) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
+    printf("Wallet disconnect refuses unreadable transactions and can retry after reopen... ");
+    if (wallet_unconfirm_read_error_case()) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     printf("Replay note merge preserves confirmed state... ");
     if (wallet_projection_replay_merge_case()) printf("OK\n");
     else { printf("FAIL\n"); failures++; }

@@ -20,6 +20,34 @@
 
 #include <string.h>
 
+enum db_wallet_tx_presence wallet_tx_find_checked(struct node_db *ndb,
+    const uint8_t txid[32], struct db_wallet_tx *out)
+{
+    if (!ndb || !ndb->open || !txid || !out) return DB_WALLET_TX_ERROR;
+    sqlite3_stmt *s = NULL;
+    const char *sql = "SELECT txid,raw_tx,block_hash,block_height,time_received,from_me,fee"
+                      " FROM wallet_transactions WHERE txid=?";
+    struct db_wallet_tx row = {0};
+    enum db_wallet_tx_presence result = DB_WALLET_TX_ERROR;
+    if (sqlite3_prepare_v2(ndb->db, sql, -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_bind_blob(s, 1, txid, 32, SQLITE_STATIC) == SQLITE_OK) {
+        int rc = AR_STEP_ROW_READONLY(s);
+        if (rc == SQLITE_DONE) result = DB_WALLET_TX_ABSENT;
+        else if (rc == SQLITE_ROW && db_wallet_tx_read_row(s, 0, &row))
+            result = DB_WALLET_TX_PRESENT;
+    }
+    if (sqlite3_finalize(s) != SQLITE_OK) result = DB_WALLET_TX_ERROR;
+    if (result == DB_WALLET_TX_PRESENT) *out = row;
+    else db_wallet_tx_free(&row);
+    return result;
+}
+
+bool db_wallet_tx_find(struct node_db *ndb, const uint8_t txid[32],
+                       struct db_wallet_tx *out)
+{
+    return wallet_tx_find_checked(ndb, txid, out) == DB_WALLET_TX_PRESENT;
+}
+
 static bool wallet_tx_read_balance(sqlite3_stmt *stmt, int64_t *total, int *count)
 {
     if (ar_step_checked(stmt, "wallet balance", NULL) != ZCL_STEP_ROW ||

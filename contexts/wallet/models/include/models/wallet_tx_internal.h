@@ -24,6 +24,10 @@ static inline bool wallet_checked_output_valid(const void *out, size_t max, size
     return out && max && max <= INT_MAX && max <= SIZE_MAX / size;
 }
 
+bool db_wallet_tx_read_row(sqlite3_stmt *s, int col, struct db_wallet_tx *out);
+enum db_wallet_tx_presence wallet_tx_find_checked(struct node_db *ndb,
+    const uint8_t txid[32], struct db_wallet_tx *out);
+
 /* Finalizes the statement and sets amounts and optional count to -1 on failure. */
 bool wallet_tx_finish_balance(sqlite3_stmt *stmt, bool bound, int64_t *total_out, int *count_out);
 
