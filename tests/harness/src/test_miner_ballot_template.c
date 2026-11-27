@@ -55,6 +55,21 @@ static size_t bt_serialized_block_bound(struct block *block, size_t width)
     return result;
 }
 
+static bool bt_alias_inputs(struct block *block, const struct chain_params *params)
+{
+    struct script *payout = &block->vtx[0].vout[0].script_pub_key;
+    uint8_t expected[MINER_SIGNAL_SCRIPT_BYTES];
+    payout->size = 64;
+    memset(payout->data, 0x42, 32);
+    memset(payout->data + 32, 0, 32);
+    payout->data[32] = 1;
+    miner_signal_ballot_script(payout->data, payout->data + 32, expected);
+    size_t reserved;
+    if (!miner_ballot_template_apply(block, payout->data, payout->data + 32, params, 1,
+                                     DEFAULT_BLOCK_MAX_SIZE, &reserved).ok) return false;
+    return memcmp(block->vtx[0].vout[1].script_pub_key.data, expected, sizeof(expected)) == 0;
+}
+
 int test_miner_ballot_template(void)
 {
     int failures = 0;
@@ -110,6 +125,11 @@ int test_miner_ballot_template(void)
     zcl_alloc_fault_clear();
     BT_CHECK(!failed.ok && block.vtx[0].num_vout == 1);
     BT_CHECK(block.vtx[0].vout == original_outputs && original_outputs[0].value == 42);
+    block_free(&block);
+    BT_CHECK(bt_make(&block, 1));
+    BT_CHECK(bt_alias_inputs(&block, params));
+    block_free(&block);
+    BT_CHECK(bt_make(&block, 1));
     block.header.nSolutionSize = 1;
     BT_CHECK(!miner_ballot_template_apply(&block, catalog, bitmap, params, 1,
                                           DEFAULT_BLOCK_MAX_SIZE, &reserved).ok);

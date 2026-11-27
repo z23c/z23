@@ -21,6 +21,9 @@ static struct zcl_result ballot_append(struct transaction *cb,
         cb->num_vout >= MAX_TX_OUTPUTS || cb->vin[0].script_sig.size > 100)
         return ZCL_ERR(-1, "Invalid coinbase output or script size");
     size_t n = cb->num_vout;
+    /* The caller may supply ballot bytes from one of the existing payouts. */
+    uint8_t ballot[MINER_SIGNAL_SCRIPT_BYTES];
+    miner_signal_ballot_script(catalog, bitmap, ballot);
     struct tx_out *outputs = zcl_realloc(cb->vout, (n + 1) * sizeof(*outputs),
                                          "miner ballot outputs");
     if (!outputs) return ZCL_ERR(-2, "Cannot allocate ballot outputs");
@@ -28,7 +31,7 @@ static struct zcl_result ballot_append(struct transaction *cb,
     tx_out_set_null(&outputs[n]);
     outputs[n].value = 0;
     outputs[n].script_pub_key.size = MINER_SIGNAL_SCRIPT_BYTES;
-    miner_signal_ballot_script(catalog, bitmap, outputs[n].script_pub_key.data);
+    memcpy(outputs[n].script_pub_key.data, ballot, sizeof(ballot));
     cb->num_vout = n + 1;
     return ZCL_OK;
 }
