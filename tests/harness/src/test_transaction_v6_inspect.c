@@ -27,6 +27,9 @@ static bool check_rpc_fields(const struct json_value *result)
         strcmp(json_get_str(json_get(result, "consensusbranchid")), "37a5165b") == 0 &&
         json_get_int(json_get(result, "expiryheight")) == 342222801 &&
         json_get_int(json_get(result, "ironwood_actions")) == 1 &&
+        json_get_str(json_get(result, "ironwood_anchor")) &&
+        !strcmp(json_get_str(json_get(result, "ironwood_anchor")),
+                "892d5610b098e88ee17a516ad45c307ff93b9fda61ad8738e2b4fafa75d5cf24") &&
         json_get(result, "vin") && json_get(result, "vout") &&
         strcmp(json_get_str(json_get(result, "txid")), expected_txid) == 0 &&
         strcmp(json_get_str(json_get(result, "authdigest")), expected_auth) == 0;
@@ -85,6 +88,18 @@ static bool check_v6_rpc_projection_limit(void)
     bool ok = transaction_v6_rpc_decode(hex, &result) == V6_RPC_RESOURCE;
     json_free(&result);
     free(hex); free(wire);
+    return ok;
+}
+
+static bool check_empty_rpc(void)
+{
+    char hex[sizeof(empty) * 2 + 1];
+    HexStr(empty, sizeof empty, false, hex, sizeof hex);
+    struct json_value result;
+    json_init(&result);
+    bool ok = transaction_v6_rpc_decode(hex, &result) == V6_RPC_OK &&
+        !json_get(&result, "ironwood_anchor");
+    json_free(&result);
     return ok;
 }
 
@@ -171,6 +186,7 @@ int test_transaction_v6_inspect(void)
     if (!check_v6_rpc_view()) ++failures;
     if (!check_v6_rpc_budget()) ++failures;
     if (!check_v6_rpc_projection_limit()) ++failures;
+    if (!check_empty_rpc()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
     if (!check_single_cursor()) ++failures;

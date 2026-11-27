@@ -74,7 +74,8 @@ static void actions(struct reader *r, struct v6_bundle *bundle, uint8_t mask)
     if (bundle->count && !r->error) {
         struct v6_span flags = take(r, 1, 1);
         if (!r->error && (flags.data[0] & (uint8_t)~mask)) r->error = V6_WIRE_FLAGS;
-        (void)take(r, AMOUNT + ANCHOR, 1);
+        (void)take(r, AMOUNT, 1);
+        bundle->anchor = take(r, ANCHOR, 1);
         uint64_t proof = compact(r);
         (void)take(r, proof, 1);
         (void)take(r, bundle->count, SIGNATURE);

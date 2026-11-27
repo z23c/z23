@@ -91,6 +91,14 @@ static bool add_pool_counts(struct json_value *result, const struct v6_wire_view
         json_push_kv_int(result, "ironwood_actions", (int64_t)view->ironwood.count);
 }
 
+static bool add_ironwood_anchor(struct json_value *result, const struct v6_wire_view *view)
+{
+    if (!view->ironwood.count) return true;
+    char anchor[65];
+    HexStr(view->ironwood.anchor.data, view->ironwood.anchor.size, false, anchor, sizeof anchor);
+    return json_push_kv_str(result, "ironwood_anchor", anchor);
+}
+
 static bool add_fields(const char *hex, const struct v6_wire_view *view,
                        const struct v6_digests *digests, struct json_value *transparent,
                        struct json_value *result)
@@ -116,7 +124,8 @@ static bool add_fields(const char *hex, const struct v6_wire_view *view,
         json_push_kv_int(result, "expiryheight", zcl_read_u32_le(view->header.data + 16)) &&
         json_push_kv(result, "locktime", locktime) &&
         json_push_kv(result, "vin", vin) && json_push_kv(result, "vout", vout) &&
-        json_push_kv_str(result, "hex", hex) && add_pool_counts(result, view);
+        json_push_kv_str(result, "hex", hex) && add_pool_counts(result, view) &&
+        add_ironwood_anchor(result, view);
 }
 enum v6_rpc_status transaction_v6_rpc_decode(const char *hex, struct json_value *result)
 {

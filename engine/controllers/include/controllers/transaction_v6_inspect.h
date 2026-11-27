@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 struct v6_span { const uint8_t *data; size_t size; };
-struct v6_bundle { struct v6_span wire; uint64_t count; };
+struct v6_bundle { struct v6_span wire, anchor; uint64_t count; };
 struct v6_wire_view {
     struct v6_span header, transparent, sapling_tail;
     uint64_t inputs, outputs;
