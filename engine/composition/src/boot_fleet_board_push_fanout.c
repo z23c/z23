@@ -201,6 +201,42 @@ void board_push_fanout(struct push_round *r, const struct push_queued *q,
                                   memory_order_relaxed);
 }
 
+static int roster_addressed_candidate(struct push_round *r,
+                                      struct net_manager *nm,
+                                      struct node_db *pairings,
+                                      const uint8_t peer[32],
+                                      const uint8_t to[32],
+                                      struct noise_transport_snapshot *snap)
+{
+    uint8_t transcript[32], key[32];
+    uint64_t generation;
+    if (!fleet_board_roster_learned_session(peer, transcript, &generation))
+        return PUSH_UNASKED;
+    struct p2p_node *node = boot_mesh_find_session_bound(
+        nm, peer, transcript, generation, snap);
+    if (!node) return PUSH_UNASKED;
+    int ready = net_send_over_budget(node)
+        ? FLEET_BOARD_PUSH_SKIP_OVER_BUDGET : PUSH_OK;
+    p2p_node_release(node);
+    if (!fleet_board_roster_session_standing(pairings, board_db(), peer,
+            snap->transcript_hash, snap->connection_generation, r->now, key) ||
+        memcmp(key, to, 32) != 0 || !board_push_may_read(key))
+        return PUSH_UNASKED;
+    return ready;
+}
+
+static bool roster_addressed_conflict(const uint8_t *paired,
+                                      const uint8_t peer[32], bool matched,
+                                      const uint8_t selected[32],
+                                      const struct noise_transport_snapshot *chosen,
+                                      const struct noise_transport_snapshot *snap)
+{
+    return (paired && memcmp(paired, peer, 32) != 0) ||
+           (matched && (memcmp(selected, peer, 32) != 0 ||
+            memcmp(chosen->transcript_hash, snap->transcript_hash, 32) != 0 ||
+            chosen->connection_generation != snap->connection_generation));
+}
+
 /* Match only a live session that proved this exact board key and still has
  * roster standing and the read role. More than one Noise identity refuses. */
 int board_push_roster_addressed(struct push_round *r, const uint8_t to[32],
@@ -213,30 +249,16 @@ int board_push_roster_addressed(struct push_round *r, const uint8_t to[32],
     *matched = false;
     if (!nm || !pairings || !app_runtime_node_db_handle_open(pairings))
         return PUSH_UNASKED;
-    uint8_t peers[FLEET_BOARD_FLEET_PEERS_MAX][32], key[32];
+    uint8_t peers[FLEET_BOARD_FLEET_PEERS_MAX][32];
     size_t n = fleet_board_roster_learned_peers(peers, FLEET_BOARD_FLEET_PEERS_MAX);
     struct noise_transport_snapshot chosen = {0};
     int link = PUSH_OK;
     for (size_t i = 0; i < n; i++) {
         struct noise_transport_snapshot snap;
-        uint8_t transcript[32];
-        uint64_t generation;
-        if (!fleet_board_roster_learned_session(peers[i], transcript, &generation))
-            continue;
-        struct p2p_node *node = boot_mesh_find_session_bound(
-            nm, peers[i], transcript, generation, &snap);
-        if (!node) continue;
-        int ready = net_send_over_budget(node)
-            ? FLEET_BOARD_PUSH_SKIP_OVER_BUDGET : PUSH_OK;
-        p2p_node_release(node);
-        if (
-            !fleet_board_roster_session_standing(pairings, board_db(), peers[i],
-                snap.transcript_hash, snap.connection_generation, r->now, key) ||
-            memcmp(key, to, 32) != 0 || !board_push_may_read(key)) continue;
-        if ((paired && memcmp(paired, peers[i], 32) != 0) ||
-            (*matched && (memcmp(selected, peers[i], 32) != 0 ||
-             memcmp(chosen.transcript_hash, snap.transcript_hash, 32) != 0 ||
-             chosen.connection_generation != snap.connection_generation)))
+        int ready = roster_addressed_candidate(r, nm, pairings, peers[i], to, &snap);
+        if (ready == PUSH_UNASKED) continue;
+        if (roster_addressed_conflict(paired, peers[i], *matched, selected,
+                                      &chosen, &snap))
             return FLEET_BOARD_PUSH_SKIP_AMBIGUOUS;
         memcpy(selected, peers[i], 32);
         chosen = snap;

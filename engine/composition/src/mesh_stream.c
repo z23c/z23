@@ -837,6 +837,17 @@ static bool stream_pick_local_id_locked(
     return false;
 }
 
+static struct p2p_node *stream_find_open_peer(
+    struct net_manager *nm, const uint8_t peer[32],
+    const struct noise_transport_snapshot *expected,
+    struct noise_transport_snapshot *snap)
+{
+    if (expected)
+        return boot_mesh_find_session_bound(nm, peer, expected->transcript_hash,
+                                            expected->connection_generation, snap);
+    return boot_mesh_find_session_peer(nm, peer, snap);
+}
+
 static enum mesh_stream_refusal stream_open_impl(
     const char *service_name, const uint8_t peer_noise_static[32],
     const struct noise_transport_snapshot *expected, uint32_t initial_window,
@@ -867,10 +878,8 @@ static enum mesh_stream_refusal stream_open_impl(
     }
     struct noise_transport_snapshot snap;
     memset(&snap, 0, sizeof(snap));
-    struct p2p_node *peer = expected
-        ? boot_mesh_find_session_bound(svc->msg_processor->net_mgr, peer_noise_static,
-                                       expected->transcript_hash, expected->connection_generation, &snap)
-        : boot_mesh_find_session_peer(svc->msg_processor->net_mgr, peer_noise_static, &snap);
+    struct p2p_node *peer = stream_find_open_peer(
+        svc->msg_processor->net_mgr, peer_noise_static, expected, &snap);
     if (!peer) {
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_PEER_NOT_CONNECTED;
