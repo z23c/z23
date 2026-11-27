@@ -1634,6 +1634,49 @@ static int cas_test_research_marker_guards(void)
     return failures;
 }
 
+static int cas_test_research_concurrent_creation(void)
+{
+    int failures = 0;
+    TEST("concurrent research directory initialization is exclusive") {
+        char home[PATH_MAX], flag[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_concurrent") != NULL);
+        int n = snprintf(flag, sizeof(flag), "-datadir=%s", home);
+        ASSERT(n > 0 && (size_t)n < sizeof(flag));
+        int gate[2];
+        ASSERT(pipe(gate) == 0);
+        pid_t children[2] = {-1, -1};
+        for (size_t i = 0; i < 2; i++) {
+            children[i] = fork();
+            if (children[i] == 0) {
+                close(gate[1]);
+                char token;
+                if (read(gate[0], &token, 1) != 1) _exit(2);
+                char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                                flag, (char *)"-help", NULL};
+                _exit(cas_run(argv, home, out, sizeof(out)) == 0 ? 0 : 1);
+            }
+        }
+        close(gate[0]);
+        bool launched = children[0] > 0 && children[1] > 0;
+        bool released = write(gate[1], "xx", 2) == 2;
+        close(gate[1]);
+        int successes = 0;
+        for (size_t i = 0; i < 2; i++) {
+            int status = 0;
+            if (children[i] > 0 && waitpid(children[i], &status, 0) == children[i] &&
+                WIFEXITED(status) && WEXITSTATUS(status) == 0)
+                successes++;
+        }
+        char *restart[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                           flag, (char *)"-help", NULL};
+        int restart_rc = cas_run(restart, home, out, sizeof(out));
+        (void)test_rm_rf_recursive(home);
+        ASSERT(launched && released && successes >= 1 && restart_rc == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
@@ -1704,6 +1747,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_refusals();
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_marker_guards();
+    failures += cas_test_research_concurrent_creation();
     failures += cas_test_research_datadir();
 #endif
     failures += cas_test_observed_incident_refuses();
