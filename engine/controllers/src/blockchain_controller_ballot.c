@@ -432,15 +432,23 @@ static bool ballot_catalog_reply(struct json_value *result,
     return ok;
 }
 
+/* A startup pin belongs only to the network whose genesis it commits to. */
+static bool ballot_pinned_schedule(const struct miner_signal_catalog_pin *pin,
+                                   const struct chain_params *cp, size_t slot,
+                                   struct miner_signal_schedule *out)
+{
+    return pin && cp && pin->count > 0 && pin->count <= 256 &&
+        !memcmp(pin->genesis, cp->consensus.hashGenesisBlock.data, 32) &&
+        miner_signal_catalog_pin_select(pin, slot, out).ok;
+}
+
 static bool ballot_catalog_status(const struct blockchain_context *ctx,
                                   const struct chain_params *cp, struct json_value *result)
 {
     const struct miner_signal_catalog_pin *pin = ctx->ballot_catalog_pin;
     if (!pin) return ballot_fail(result, "No ballot catalog pinned at startup");
     struct miner_signal_schedule first = {0};
-    if (pin->count == 0 || pin->count > 256 ||
-        memcmp(pin->genesis, cp->consensus.hashGenesisBlock.data, 32) ||
-        !miner_signal_catalog_pin_select(pin, 0, &first).ok)
+    if (!ballot_pinned_schedule(pin, cp, 0, &first))
         return ballot_fail(result, "Invalid pinned ballot catalog");
     struct ballot_snapshot snap = {0};
     snap.blocks = zcl_calloc((size_t)first.window, sizeof(*snap.blocks), "ballot status ancestry");
@@ -476,8 +484,8 @@ static bool ballot_status_schedule(const struct json_value *params, const struct
         if (!v || v->type != JSON_INT || json_get_int(v) < 0 || json_get_int(v) > 255)
             return ballot_fail(result, "Invalid pinned catalog slot");
         *source = "pinned_catalog";
-        if (!miner_signal_catalog_pin_select(ctx->ballot_catalog_pin,
-                                             (size_t)json_get_int(v), s).ok)
+        if (!ballot_pinned_schedule(ctx->ballot_catalog_pin, cp,
+                                    (size_t)json_get_int(v), s))
             return ballot_fail(result, "Slot unavailable in the pinned catalog");
         return true;
     }

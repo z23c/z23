@@ -320,6 +320,29 @@ static bool bf_catalog_limit(struct ballot_fixture *f)
     return ok;
 }
 
+/* A self-consistent pin from a different chain must never select a slot. */
+static bool bf_foreign_pin(struct ballot_fixture *f)
+{
+    struct json_value params = {0};
+    struct miner_signal_catalog_pin foreign = {0};
+    chain_params_select(CHAIN_TESTNET);
+    bool ok = json_read(&params, fixture_catalog, sizeof(fixture_catalog) - 1) &&
+        miner_signal_catalog_pin_parse(json_at(&params, 0), json_at(&params, 1),
+            json_at(&params, 2), json_at(&params, 3),
+            chain_params_get()->consensus.hashGenesisBlock.data, &foreign).ok;
+    chain_params_select(CHAIN_REGTEST);
+    struct miner_signal_schedule selected;
+    ok = ok && miner_signal_catalog_pin_select(&foreign, 0, &selected).ok &&
+        memcmp(foreign.genesis, chain_params_get()->consensus.hashGenesisBlock.data, 32);
+    rpc_blockchain_set_ballot_catalog_pin(&foreign);
+    ok = ok && bf_catalog_status(f, false) && bf_status(f, "[0]", NULL, NULL, 0) &&
+        bf_status(f, fixture_catalog, "supplied_catalog", "active", 1) &&
+        bf_status(f, f->raw_schedule, "raw_parameters", "active", 1);
+    rpc_blockchain_set_ballot_catalog_pin(&f->pin);
+    json_free(&params);
+    return ok;
+}
+
 static bool bf_negative_cases(struct ballot_fixture *f)
 {
     sqlite3 *db = f->db;
@@ -467,7 +490,7 @@ static int ballot_integration_child(void)
     struct ballot_fixture f = {0};
     bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_membership_cases(&f) &&
               bf_window_branch(&f) && bf_catalog_status(&f, true) &&
-              bf_catalog_limit(&f) && bf_negative_cases(&f);
+              bf_catalog_limit(&f) && bf_foreign_pin(&f) && bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
     return ok ? 0 : 1;
