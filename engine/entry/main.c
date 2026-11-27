@@ -85,6 +85,7 @@
 #if !defined(_WIN32)
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #endif
 #if defined(_WIN32)
 #include <windows.h>
@@ -1038,9 +1039,10 @@ static bool main_research_path(int argc, char **argv,
 
 #if !defined(_WIN32)
 static const char main_research_marker[] = ".z23-research-profile";
+static const char main_research_pending[] = ".z23-research-profile.pending";
 static const char main_research_identity_value[] = "z23-research-profile:ironwood:v1\n";
 
-static bool main_research_dir_empty(int dirfd)
+static bool main_research_dir_recoverable(int dirfd)
 {
     int copy = dup(dirfd);
     if (copy < 0) return false;
@@ -1050,7 +1052,8 @@ static bool main_research_dir_empty(int dirfd)
     errno = 0;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..") &&
+            strcmp(entry->d_name, main_research_pending)) {
             empty = false;
             break;
         }
@@ -1073,22 +1076,41 @@ static bool main_research_marker_valid(int dirfd)
         memcmp(value, main_research_identity_value, (size_t)n) == 0;
 }
 
+static bool main_research_recover(int dirfd)
+{
+    if (!main_research_dir_recoverable(dirfd)) return false;
+    struct stat pending;
+    if (fstatat(dirfd, main_research_pending, &pending, AT_SYMLINK_NOFOLLOW) != 0)
+        return errno == ENOENT;
+    return S_ISREG(pending.st_mode) &&
+        unlinkat(dirfd, main_research_pending, 0) == 0 && fsync(dirfd) == 0;
+}
+
+static bool main_research_publish(int dirfd)
+{
+    int fd = openat(dirfd, main_research_pending,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) return false;
+    size_t len = sizeof(main_research_identity_value) - 1;
+    bool ok = write(fd, main_research_identity_value, len) == (ssize_t)len &&
+              fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    if (ok && linkat(dirfd, main_research_pending, dirfd, main_research_marker, 0) != 0)
+        ok = false;
+    if (ok && unlinkat(dirfd, main_research_pending, 0) != 0) ok = false;
+    return ok && fsync(dirfd) == 0;
+}
+
 static bool main_research_identity(const char *path)
 {
     if (mkdir(path, 0700) != 0 && errno != EEXIST)
         return false;
     int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (dirfd < 0) return false;
+    if (flock(dirfd, LOCK_EX | LOCK_NB) != 0) { close(dirfd); return false; }
     if (main_research_marker_valid(dirfd)) { close(dirfd); return true; }
-    if (!main_research_dir_empty(dirfd)) { close(dirfd); return false; }
-    int fd = openat(dirfd, main_research_marker,
-                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-    if (fd < 0) { close(dirfd); return false; }
-    size_t len = sizeof(main_research_identity_value) - 1;
-    bool ok = write(fd, main_research_identity_value, len) == (ssize_t)len &&
-              fsync(fd) == 0;
-    if (close(fd) != 0) ok = false;
-    if (ok && fsync(dirfd) != 0) ok = false;
+    if (!main_research_recover(dirfd)) { close(dirfd); return false; }
+    bool ok = main_research_publish(dirfd);
     close(dirfd);
     return ok;
 }
@@ -1106,6 +1128,9 @@ static bool main_research_unselected_ok(int argc, char **argv)
     int n = snprintf(marker, sizeof(marker), "%s/%s", dir, main_research_marker);
     if (n < 0 || (size_t)n >= sizeof(marker)) return false;
     struct stat st;
+    if (lstat(marker, &st) == 0 || errno != ENOENT) return false;
+    n = snprintf(marker, sizeof(marker), "%s/%s", dir, main_research_pending);
+    if (n < 0 || (size_t)n >= sizeof(marker)) return false;
     if (lstat(marker, &st) == 0) return false;
     return errno == ENOENT;
 #endif

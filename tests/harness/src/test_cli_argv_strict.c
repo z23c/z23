@@ -1607,29 +1607,29 @@ static int cas_test_research_unmarked_refuses(void)
 static int cas_test_research_marker_guards(void)
 {
     int failures = 0;
-    TEST("research marker blocks missing selector and incomplete creation") {
-        char home[PATH_MAX], dir[PATH_MAX + 64], marker[PATH_MAX + 100];
+    TEST("research marker recovers interruption and blocks missing selector") {
+        char home[PATH_MAX], dir[PATH_MAX + 64], marker[PATH_MAX + 100], pending[PATH_MAX + 110];
         char parent[PATH_MAX + 16], final[PATH_MAX + 80], out[8192];
         ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_marker") != NULL);
         ASSERT(snprintf(dir, sizeof(dir), "%s/ironwood-research", home) > 0);
         ASSERT(snprintf(marker, sizeof(marker), "%s/.z23-research-profile", dir) > 0);
+        ASSERT(snprintf(pending, sizeof(pending), "%s.pending", marker) > 0);
         ASSERT(snprintf(parent, sizeof(parent), "-datadir=%s", home) > 0);
         ASSERT(snprintf(final, sizeof(final), "-datadir=%s", dir) > 0);
         ASSERT(mkdir(dir, 0700) == 0);
-        FILE *fp = fopen(marker, "w");
+        FILE *fp = fopen(pending, "w");
         ASSERT(fp != NULL && fclose(fp) == 0);
+        char *unselected[] = {(char *)CAS_BIN, final, (char *)"-help", NULL};
+        int pending_rc = cas_run(unselected, home, out, sizeof(out));
+        bool pending_refused = pending_rc != 0 && strstr(out, "requires its selector");
         char *selected[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                             parent, (char *)"-help", NULL};
         int partial_rc = cas_run(selected, home, out, sizeof(out));
-        bool partial_refused = partial_rc != 0 && strstr(out, "directory identity");
-        fp = fopen(marker, "w");
-        ASSERT(fp != NULL);
-        ASSERT(fputs("z23-research-profile:ironwood:v1\n", fp) >= 0 && fclose(fp) == 0);
-        char *unselected[] = {(char *)CAS_BIN, final, (char *)"-help", NULL};
+        bool partial_recovered = partial_rc == 0;
         int missing_rc = cas_run(unselected, home, out, sizeof(out));
         bool missing_refused = missing_rc != 0 && strstr(out, "requires its selector");
         (void)test_rm_rf_recursive(home);
-        ASSERT(partial_refused && missing_refused);
+        ASSERT(pending_refused && partial_recovered && missing_refused);
         PASS();
     } _test_next:;
     return failures;
