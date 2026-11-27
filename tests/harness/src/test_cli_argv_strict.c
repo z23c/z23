@@ -1623,8 +1623,10 @@ static int cas_test_research_datadir(void)
         bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) &&
             e > 0 && (size_t)e < sizeof(expected) &&
             cas_run_daemon_wait_for(explicit_argv, home, needles, 20000, out, sizeof(out));
+        bool restart_found = explicit_found &&
+            cas_run_daemon_wait_for(explicit_argv, home, needles, 20000, out, sizeof(out));
         (void)test_rm_rf_recursive(home);
-        ASSERT(found && explicit_found);
+        ASSERT(found && explicit_found && restart_found);
         PASS();
     } _test_next:;
     return failures;
