@@ -1430,6 +1430,21 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     struct args_arm_state st = { ctx, show_metrics, argv };
     if (args_network_begin(ctx)) return 1;
     if (ctx->testnet_profile) {
+        static const char *const foreign_state_options[] = {
+            "-filesync", "-fileservice", "-snapshot", "-load-snapshot-at-own-height",
+            "-install-consensus-bundle", "-verify-consensus-bundle", "-export-consensus-bundle",
+            "-promote-shielded-history", "-load-verify-boot", "-reimport-utxos",
+            "-flysync", "-flysync-auto", "-mint-anchor", "-mint-anchor-fast",
+            "-full-fold", "-refold-from-anchor", "-ratify-mint-anchor", "-verify-rom"
+        };
+        for (size_t i = 0; i < sizeof foreign_state_options / sizeof foreign_state_options[0]; i++) {
+            if (GetArg(foreign_state_options[i], NULL)) {
+                fprintf(stderr, "%s requires chain state unavailable on the Ironwood testnet\n",
+                        foreign_state_options[i]);
+                return 1;
+            }
+        }
+        ctx->no_legacy_utxo_import = true;
         ctx->p2p_port = ctx->testnet_profile->chain->nDefaultPort;
         ctx->rpc_port = ctx->testnet_profile->base->nRPCPort;
         ctx->no_file_sync = true;

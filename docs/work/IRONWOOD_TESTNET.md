@@ -43,6 +43,12 @@ a5675987b7634bba54c037fe261cbddfc2010100000001000000000000000000
 37ffffffff010000000000000000016a00000000
 ```
 
+## Version 6 transaction fixtures
+
+A proposed upstream fixture pins 18 serialized transactions and their expected digests. The file SHA-256 is `b28c107083c3639b8fb6827867e0d08742eecf2c054652cea1d29140cf3e6919`. It uses upstream branch ID `0x37a5165b` and version group ID `0xd884b698`. Use those identifiers when reproducing the upstream results. A ZClassic replay domain needs its own decision and corresponding test cases. [Pinned transaction vectors](https://github.com/valargroup/zcash-test-vectors/blob/5eb4b7eba44485b18bfffd6bf6928343b485540f/test-vectors/json/ironwood_v6_tx_hash.json) · [Upstream review](https://github.com/zcash/zcash-test-vectors/pull/130)
+
+Acceptance for the C23 transaction codec requires byte-exact decode and reserialization, then agreement on each applicable transaction ID, authorization digest, pool digest and signature hash. The paired Ironwood anchor cases share a transaction ID. The paired nullifier cases have different transaction IDs, as do the paired flag cases. Shielded proof verification, note scanning and spending require separate fixtures.
+
 ## Transport and storage
 
 The descriptor uses the message-start bytes `d4 14 83 fa`, in that order. Take the first four raw bytes of SHA3-256 of ASCII `Z23/Ironwood/testnet/transport/v1`, excluding the terminator. An example ping frame is `d41483fa70696e670000000000000000080000002502fa940102030405060708`. Its eight payload bytes have the four-byte double-SHA-256 checksum `2502fa94`.
