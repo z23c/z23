@@ -6,6 +6,9 @@
 #include "views/format_helpers.h"
 #include "base/hex.h"
 #include "services/miner_signal_round.h"
+#include "services/miner_ballot_template.h"
+#include "services/miner_signal_catalog_pin.h"
+#include "controllers/blockchain_controller.h"
 #include "controllers/mining_controller.h"
 #include "controllers/network_controller.h"  /* rpc_net_get_connman */
 #include "controllers/sovereignty_controller.h"
@@ -526,13 +529,104 @@ static bool rpc_submitblock(const struct json_value *params, bool help,
     return true;
 }
 
+static struct zcl_result mining_slot_bitmap(const struct json_value *list, size_t slots,
+                                            uint8_t bits[32])
+{
+    if (list->type != JSON_ARR || json_size(list) > slots)
+        return ZCL_ERR(-1, "ballotslots must be a list of distinct pinned slots");
+    for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *v = json_at(list, i);
+        if (!v || v->type != JSON_INT) return ZCL_ERR(-1, "Expected an integer ballot slot");
+        int64_t n = json_get_int(v);
+        if (n < 0 || (uint64_t)n >= slots) return ZCL_ERR(-1, "Slot outside pinned catalog");
+        size_t byte = (size_t)n / 8;
+        uint8_t mask = (uint8_t)(1u << ((unsigned)n % 8));
+        if (bits[byte] & mask) return ZCL_ERR(-1, "Repeated ballot slot");
+        bits[byte] |= mask;
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result mining_template_ballot(const struct json_value *params,
+    struct block *block, const struct chain_params *cp, int height)
+{
+    const struct json_value *list = json_get(json_at(params, 0), "ballotslots");
+    if (!list) return ZCL_OK;
+    if (strcmp(cp->strNetworkID, "regtest") && strcmp(cp->strNetworkID, "test"))
+        return ZCL_ERR(-1, "Template ballots require testnet or regtest");
+    const struct miner_signal_catalog_pin *pin = rpc_blockchain_ballot_catalog_pin();
+    if (!pin || memcmp(pin->genesis, cp->consensus.hashGenesisBlock.data, 32))
+        return ZCL_ERR(-1, "No ballot catalog pinned for the selected network");
+    if (height < pin->start || (int64_t)height >= (int64_t)pin->start + pin->window)
+        return ZCL_ERR(-1, "Template height outside the pinned voting window");
+    uint8_t bits[32] = {0};
+    struct zcl_result r = mining_slot_bitmap(list, pin->count, bits);
+    if (!r.ok) return r;
+    size_t reserved_size;
+    return miner_ballot_template_apply(block, pin->digest, bits, cp, height,
+                                       DEFAULT_BLOCK_MAX_SIZE, &reserved_size);
+}
+
+static bool mining_template_data(const struct transaction *tx, struct json_value *entry)
+{
+    struct byte_stream bytes;
+    stream_init(&bytes, 256);
+    bool ok = transaction_serialize(tx, &bytes) && !bytes.error && bytes.size <= (SIZE_MAX - 1) / 2;
+    char *hex = ok ? zcl_malloc(2 * bytes.size + 1, "mining template transaction hex") : NULL;
+    if (hex) {
+        zcl_hex_encode(bytes.data, bytes.size, hex);
+        ok = json_push_kv_str(entry, "data", hex);
+        free(hex);
+    } else {
+        ok = false;
+    }
+    stream_free(&bytes);
+    return ok;
+}
+
+static bool mining_template_entry(const struct block_template *tmpl, size_t i,
+                                  struct json_value *txs)
+{
+    struct json_value entry = {0};
+    struct uint256 hash;
+    char txid[65];
+    json_set_object(&entry);
+    bool ok = mining_template_data(&tmpl->block.vtx[i], &entry) &&
+              transaction_hash_serialized(&tmpl->block.vtx[i], &hash);
+    if (ok) {
+        uint256_get_hex(&hash, txid);
+        ok = json_push_kv_str(&entry, "hash", txid);
+    }
+    if (ok && tmpl->tx_fees) ok = json_push_kv_int(&entry, "fee", tmpl->tx_fees[i]);
+    if (ok && tmpl->tx_sig_ops) ok = json_push_kv_int(&entry, "sigops", tmpl->tx_sig_ops[i]);
+    if (ok) ok = json_push_back(txs, &entry);
+    json_free(&entry);
+    return ok;
+}
+
+static bool mining_template_transactions(const struct block_template *tmpl, struct json_value *result)
+{
+    struct json_value txs = {0}, coinbase = {0};
+    json_set_array(&txs);
+    json_set_object(&coinbase);
+    bool ok = tmpl->block.num_vtx && mining_template_data(&tmpl->block.vtx[0], &coinbase);
+    for (size_t i = 1; ok && i < tmpl->block.num_vtx; ++i)
+        ok = mining_template_entry(tmpl, i, &txs);
+    if (ok) ok = json_push_kv(result, "transactions", &txs) &&
+                 json_push_kv(result, "coinbasetxn", &coinbase);
+    json_free(&txs);
+    json_free(&coinbase);
+    return ok;
+}
+
 static bool rpc_getblocktemplate(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
-    (void)params;
     RPC_HELP(help, result,
         "getblocktemplate ( \"jsonrequestobject\" )\n"
-        "Returns data needed to construct a block to work on.");
+        "Returns data needed to construct a block. On testnet or regtest the optional "
+        "request field ballotslots adds a final coinbase output signaling the listed "
+        "slots in the operator's pinned catalog for this voting window.");
 
     /* Sovereign guard — same rationale as rpc_generate above: refuse to hand
      * out mining work while the tip is release_assisted (borrowed shielded
@@ -561,60 +655,26 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
         return false;
     }
 
+    struct zcl_result ballot = mining_template_ballot(params, &tmpl->block, cp, parent.height);
+    if (!ballot.ok) {
+        block_template_free(tmpl);
+        free(tmpl);
+        json_set_str(result, ballot.message);
+        return false;
+    }
     json_set_object(result);
-
     json_push_kv_int(result, "version", tmpl->block.header.nVersion);
 
     char prev_hex[65];
     uint256_get_hex(&tmpl->block.header.hashPrevBlock, prev_hex);
     json_push_kv_str(result, "previousblockhash", prev_hex);
 
-    /* Transactions (skip coinbase at index 0) */
-    struct json_value txs = {0};
-    json_set_array(&txs);
-    for (size_t i = 1; i < tmpl->block.num_vtx; i++) {
-        struct json_value txobj = {0};
-        json_set_object(&txobj);
-
-        char *hex = zcl_malloc(2 * 1024 * 1024, "template_tx_hex");
-        if (hex) {
-            size_t hlen = encode_hex_tx(&tmpl->block.vtx[i], hex,
-                                        2 * 1024 * 1024);
-            hex[hlen] = '\0';
-            json_push_kv_str(&txobj, "data", hex);
-            free(hex);
-        }
-
-        transaction_compute_hash(&tmpl->block.vtx[i]);
-        char txid[65];
-        uint256_get_hex(&tmpl->block.vtx[i].hash, txid);
-        json_push_kv_str(&txobj, "hash", txid);
-
-        if (tmpl->tx_fees)
-            json_push_kv_int(&txobj, "fee", tmpl->tx_fees[i]);
-        if (tmpl->tx_sig_ops)
-            json_push_kv_int(&txobj, "sigops",
-                             (int64_t)tmpl->tx_sig_ops[i]);
-
-        json_push_back(&txs, &txobj);
-        json_free(&txobj);
+    if (!mining_template_transactions(tmpl, result)) {
+        json_set_str(result, "Cannot serialize mining template transactions");
+        block_template_free(tmpl);
+        free(tmpl);
+        return false;
     }
-    json_push_kv(result, "transactions", &txs);
-    json_free(&txs);
-
-    /* Coinbase */
-    struct json_value coinbase_obj = {0};
-    json_set_object(&coinbase_obj);
-    char *cb_hex = zcl_malloc(2 * 1024 * 1024, "template_cb_hex");
-    if (cb_hex && tmpl->block.num_vtx > 0) {
-        size_t hlen = encode_hex_tx(&tmpl->block.vtx[0], cb_hex,
-                                    2 * 1024 * 1024);
-        cb_hex[hlen] = '\0';
-        json_push_kv_str(&coinbase_obj, "data", cb_hex);
-    }
-    free(cb_hex);
-    json_push_kv(result, "coinbasetxn", &coinbase_obj);
-    json_free(&coinbase_obj);
 
     /* Target and bits */
     char bits_str[16];

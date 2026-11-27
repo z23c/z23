@@ -51,3 +51,11 @@ To reuse the same catalog across restarts, store its four manifest fields as a J
 Set `testballotcatalog=0daa0498aef76847abdfd5771aed663a241a0853aec641845f588325f5168100` in that datadir's node configuration or pass `-testballotcatalog=0daa0498aef76847abdfd5771aed663a241a0853aec641845f588325f5168100` on the command line. The node derives the digest from the manifest and selected network genesis at startup. A mismatch fails startup. Once running, the node holds the verified catalog in memory.
 
 Call `getballotstatus` with a single slot number, for example the JSON parameters `[0]`. A successful query reports `schedule_source` equal to `pinned_catalog`. The pin selects the local catalog used by this status query. It grants no authority to install a consensus rule.
+
+## Request a voting block template
+
+On a node with the catalog pinned, pass `[{"ballotslots":[0,1]}]` as the JSON parameters to `getblocktemplate` to signal for slots 0 and 1. The returned `coinbasetxn.data` already contains the final ballot output. Omitting the field preserves ordinary template behavior. Each requested slot must be distinct and the template height must fall inside the voting window.
+
+The node checks that the complete template fits mining policy with the height-selected Equihash solution and a 100-byte coinbase scriptSig. A pool that makes further edits must preserve the intended vote, recompute the Merkle root, and check the final serialized size before solving the block.
+
+<!-- claim: symbol-present miner_ballot_template_apply engine/services/src/miner_ballot_template.c # coinbase mutation and serialized size check -->

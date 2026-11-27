@@ -48,6 +48,11 @@ void rpc_blockchain_set_ballot_catalog_pin(const struct miner_signal_catalog_pin
     g_blockchain_ctx.ballot_catalog_pin = pin;
 }
 
+const struct miner_signal_catalog_pin *rpc_blockchain_ballot_catalog_pin(void)
+{
+    return g_blockchain_ctx.ballot_catalog_pin;
+}
+
 void rpc_blockchain_set_state(struct main_state *ms, struct tx_mempool *mp,
                                const char *datadir)
 {
