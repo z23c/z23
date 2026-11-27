@@ -33,7 +33,7 @@
  * private-relay lanes extend a step instead of rewriting it. e2e_notes()
  * is the one note reader a whole-account step reuses.
  *
- * Guarantees. The node runs on 127.0.0.1 only: -private-listeners starts no
+ * The fixture disables Tor and file sync. Private listeners start no
  * file-service, HTTPS or RPC-TLS listener (they ignore -bind), and the p2p and
  * RPC listeners are checked against the kernel socket tables. The node never
  * outlives the test process: the child sets PR_SET_PDEATHSIG(SIGKILL) before
@@ -91,7 +91,7 @@
 enum e2e_cmd_id {
     E2E_TIP, E2E_CHAININFO, E2E_BALANCE, E2E_ADDR_NEW, E2E_Z_ADDR, E2E_MINE,
     E2E_SEND, E2E_NOTES, E2E_BLOCK_GET, E2E_TX_GET, E2E_SUMMARY,
-    E2E_SHIELD, E2E_UNSPENT, E2E_RAWTX, E2E_LOCK,
+    E2E_SHIELD, E2E_UNSPENT, E2E_RAWTX, E2E_LOCK, E2E_ONION_STATUS,
     E2E_CMD_COUNT
 };
 static const struct { const char *w[5]; } e2e_cmds[E2E_CMD_COUNT] = {
@@ -109,6 +109,7 @@ static const struct { const char *w[5]; } e2e_cmds[E2E_CMD_COUNT] = {
     [E2E_SHIELD] = { { "core", "wallet", "shielded", "shield" } },
     [E2E_UNSPENT] = { { "listunspent" } },
     [E2E_RAWTX] = { { "getrawtransaction" } },
+    [E2E_ONION_STATUS] = { { "onionstatus" } },
     [E2E_LOCK] = { { "core", "wallet", "security", "lock" } },
 };
 
@@ -277,7 +278,8 @@ static bool e2e_node_start(struct e2e *e)
         setenv("CREDENTIALS_DIRECTORY", e->cred, 1);
         execl(E2E_BIN, E2E_BIN, e->dd_flag, e->rpc_flag, "-regtest",
               "-regtestshielded", "-operator-lane=dev",
-              "-private-listeners", "-bind=127.0.0.1", p2p,
+              "-private-listeners", "-no-tor", "-nofilesync", "-observation=0",
+              "-bind=127.0.0.1", p2p,
               "-connect=127.0.0.1:1", "-packagehost=0",
               "-wallet-no-phrase-backup", "-nobgvalidation",
               "-nolegacyimport", "-showmetrics=0", (char *)NULL);
@@ -707,6 +709,9 @@ static int e2e_step_boot(struct e2e *e)
         json_free(&r);
         ASSERT_EQ(e->tip, 0);
         ASSERT(e2e_loopback_only(e));
+        ASSERT(e2e_json(e, E2E_ONION_STATUS, NULL, &r));
+        ASSERT_STR_EQ(e2e_str(&r, "bootstrap_state"), "disabled");
+        json_free(&r);
         PASS();
     } _test_next:;
     return failures;
