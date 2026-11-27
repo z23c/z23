@@ -29,6 +29,47 @@ static bool mining_test_gbt(struct rpc_table *table, struct json_value *out)
     return ok;
 }
 
+static bool mining_ballot_call(struct rpc_table *table, const char *catalog,
+                               const char *bitmap, struct json_value *out)
+{
+    struct json_value params = {0}, item = {0};
+    json_set_array(&params);
+    json_set_str(&item, catalog);
+    bool built = json_push_back(&params, &item);
+    json_free(&item);
+    json_set_str(&item, bitmap);
+    built = built && json_push_back(&params, &item);
+    json_free(&item);
+    bool ok = built && rpc_table_execute(table, "createballotoutput", &params, out);
+    json_free(&params);
+    return ok;
+}
+
+static int mining_ballot_cases(void)
+{
+    int failures = 0;
+    struct rpc_table table;
+    rpc_table_init(&table);
+    register_mining_rpc_commands(&table);
+    struct json_value out = {0};
+    const char *catalog = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const char *bitmap = "0100000000000000000000000000000000000000000000000000000000000080";
+    bool ok = mining_ballot_call(&table, catalog, bitmap, &out);
+    const char *script = json_get_str(json_get(&out, "scriptPubKey"));
+    MT_CHECK("ballot exact script and zero value", ok && script &&
+        strcmp(script, "6a455a32335601"
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        "0100000000000000000000000000000000000000000000000000000000000080") == 0 &&
+        json_get(&out, "value") && json_get_int(json_get(&out, "value")) == 0);
+    json_free(&out);
+    MT_CHECK("ballot rejects short digest", !mining_ballot_call(&table, "00", bitmap, &out));
+    json_free(&out);
+    MT_CHECK("ballot rejects nonhex bitmap", !mining_ballot_call(&table, catalog,
+        "z100000000000000000000000000000000000000000000000000000000000080", &out));
+    json_free(&out);
+    return failures;
+}
+
 static int mining_check_gbt(struct rpc_table *table, struct block_index *parent,
                             bool future)
 {
@@ -201,5 +242,5 @@ int test_mining(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    return failures + mining_template_time_cases();
+    return failures + mining_template_time_cases() + mining_ballot_cases();
 }

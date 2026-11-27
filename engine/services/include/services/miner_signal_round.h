@@ -10,6 +10,12 @@
 
 struct transaction;
 
+enum { MINER_SIGNAL_SCRIPT_BYTES = 71 };
+/* Encode a zero-value final coinbase output script for the indicated slots. */
+void miner_signal_ballot_script(const uint8_t catalog[static 32],
+                               const uint8_t bitmap[static 32],
+                               uint8_t script[static MINER_SIGNAL_SCRIPT_BYTES]);
+
 /* One independently scheduled proposal in a catalog of 1..256 slots. */
 struct miner_signal_schedule {
     int32_t start, window, activation;

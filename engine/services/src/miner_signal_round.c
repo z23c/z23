@@ -29,16 +29,27 @@ struct zcl_result miner_signal_begin(const struct miner_signal_schedule *s, int3
     return ZCL_OK;
 }
 
+static const uint8_t ballot_prefix[] = { OP_RETURN, 69, 'Z', '2', '3', 'V', 1 };
+static_assert(sizeof(ballot_prefix) + 32 + 32 == MINER_SIGNAL_SCRIPT_BYTES);
+
+void miner_signal_ballot_script(const uint8_t catalog[static 32],
+                               const uint8_t bitmap[static 32],
+                               uint8_t script[static MINER_SIGNAL_SCRIPT_BYTES])
+{
+    memcpy(script, ballot_prefix, sizeof(ballot_prefix));
+    memcpy(script + sizeof(ballot_prefix), catalog, 32);
+    memcpy(script + sizeof(ballot_prefix) + 32, bitmap, 32);
+}
+
 static bool signals_slot(const struct miner_signal_schedule *s, const struct transaction *cb)
 {
     const struct tx_out *last = &cb->vout[cb->num_vout - 1];
     const struct script *script = &last->script_pub_key;
-    static const unsigned char prefix[] = { OP_RETURN, 69, 'Z', '2', '3', 'V', 1 };
-    if (last->value != 0 || script->size != 71 ||
-        memcmp(script->data, prefix, sizeof(prefix)) ||
-        memcmp(script->data + sizeof(prefix), s->catalog, sizeof(s->catalog)))
+    if (last->value != 0 || script->size != MINER_SIGNAL_SCRIPT_BYTES ||
+        memcmp(script->data, ballot_prefix, sizeof(ballot_prefix)) ||
+        memcmp(script->data + sizeof(ballot_prefix), s->catalog, sizeof(s->catalog)))
         return false;
-    const uint8_t *bits = script->data + sizeof(prefix) + sizeof(s->catalog);
+    const uint8_t *bits = script->data + sizeof(ballot_prefix) + sizeof(s->catalog);
     /* Any bit outside the agreed catalog invalidates this entire ballot. */
     unsigned used = (s->slots + 7u) / 8u;
     if (s->slots % 8u && (bits[used - 1] >> (s->slots % 8u))) return false;

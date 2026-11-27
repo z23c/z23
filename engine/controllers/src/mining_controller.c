@@ -4,6 +4,8 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "views/format_helpers.h"
+#include "base/hex.h"
+#include "services/miner_signal_round.h"
 #include "controllers/mining_controller.h"
 #include "controllers/network_controller.h"  /* rpc_net_get_connman */
 #include "controllers/sovereignty_controller.h"
@@ -665,6 +667,36 @@ static bool rpc_getblocksubsidy(const struct json_value *params, bool help,
     return true;
 }
 
+/* Construct only an optional miner ballot output; this does not count votes
+ * or alter block validity. The catalog digest is encoded in supplied byte order. */
+static bool rpc_createballotoutput(const struct json_value *params, bool help,
+                                   struct json_value *result)
+{
+    RPC_HELP(help, result,
+        "createballotoutput \"catalog_digest\" \"bitmap\"\n"
+        "Construct a zero-value Z23V v1 ballot output for a pool coinbase. "
+        "Both arguments are exactly 32 bytes in hex; slot zero is bit 0 of "
+        "bitmap byte 0. Callers must zero unused slots and append this as the "
+        "final coinbase output before computing its transaction ID and Merkle root.");
+    struct rpc_params p;
+    rpc_params_init(&p, params);
+    rpc_params_expect(&p, 2, 2);
+    const char *catalog = rpc_require_str(&p, 0, "catalog_digest");
+    const char *bitmap = rpc_require_str(&p, 1, "bitmap");
+    if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
+    uint8_t digest[32], votes[32], script[MINER_SIGNAL_SCRIPT_BYTES];
+    if (!zcl_hex_decode(catalog, digest, sizeof(digest)) ||
+        !zcl_hex_decode(bitmap, votes, sizeof(votes))) {
+        json_set_str(result, "catalog_digest and bitmap must each be 32 bytes of hex");
+        return false;
+    }
+    miner_signal_ballot_script(digest, votes, script);
+    char hex[2 * sizeof(script) + 1];
+    zcl_hex_encode(script, sizeof(script), hex);
+    json_set_object(result);
+    return json_push_kv_int(result, "value", 0) && json_push_kv_str(result, "scriptPubKey", hex);
+}
+
 void register_mining_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {
@@ -674,6 +706,7 @@ void register_mining_rpc_commands(struct rpc_table *t)
         { "mining", "submitblock",       rpc_submitblock,      true },
         { "mining", "getblocktemplate",  rpc_getblocktemplate, true },
         { "mining", "getblocksubsidy",   rpc_getblocksubsidy,  true },
+        { "mining", "createballotoutput", rpc_createballotoutput, true },
     };
 
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
