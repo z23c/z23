@@ -1656,10 +1656,10 @@ static int cas_test_research_concurrent_creation(void)
                 _exit(cas_run(argv, home, out, sizeof(out)) == 0 ? 0 : 1);
             }
         }
-        close(gate[0]);
         bool launched = children[0] > 0 && children[1] > 0;
         bool released = write(gate[1], "xx", 2) == 2;
         close(gate[1]);
+        close(gate[0]);
         int successes = 0;
         for (size_t i = 0; i < 2; i++) {
             int status = 0;
