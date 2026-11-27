@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 /* purpose: Bind mining templates to their parent's Sapling frontier. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "controllers/mining_controller.h"
 #include "chain/chainparams.h"
 #include "consensus/upgrades.h"
@@ -9,6 +9,7 @@
 #include "sapling/incremental_merkle_tree.h"
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
+#include "util/log_macros.h"
 #include <sqlite3.h>
 #include <string.h>
 
@@ -34,15 +35,20 @@ static bool mining_sapling_load_tree(struct incremental_merkle_tree *tree,
     return found;
 }
 
-static bool mining_sapling_append(struct incremental_merkle_tree *tree,
-                                   const struct block *block)
+static bool mining_sapling_extend(struct block *block, const struct uint256 *parent_root,
+                                  bool empty_parent)
 {
+    struct incremental_merkle_tree tree;
+    if (!mining_sapling_load_tree(&tree, parent_root, empty_parent))
+        LOG_FAIL("mining", "cannot load the template parent Sapling frontier");
     for (size_t i = 0; i < block->num_vtx; i++)
         for (size_t j = 0; j < block->vtx[i].num_shielded_output; j++) {
-            if (!block->vtx[i].v_shielded_output || incremental_tree_is_complete(tree)) return false;
-            incremental_tree_append(tree,
+            if (!block->vtx[i].v_shielded_output || incremental_tree_is_complete(&tree))
+                LOG_FAIL("mining", "cannot append Sapling output %zu of template transaction %zu", j, i);
+            incremental_tree_append(&tree,
                                     &block->vtx[i].v_shielded_output[j].cm);
         }
+    incremental_tree_root(&tree, &block->header.hashFinalSaplingRoot);
     return true;
 }
 
@@ -84,9 +90,5 @@ bool mining_stamp_sapling_final_root(struct block *block, int height,
         block->header.hashFinalSaplingRoot = *parent_root;
         return true;
     }
-    struct incremental_merkle_tree tree;
-    if (!mining_sapling_load_tree(&tree, parent_root, empty_parent) ||
-        !mining_sapling_append(&tree, block)) return false;
-    incremental_tree_root(&tree, &block->header.hashFinalSaplingRoot);
-    return true;
+    return mining_sapling_extend(block, parent_root, empty_parent);
 }
