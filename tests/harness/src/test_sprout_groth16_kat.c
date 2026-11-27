@@ -151,6 +151,48 @@ static const char k_vk_hex[] =
     "021b630819808298f2d82910dce519ebf1db6fbd6f9f965d8e075d65b5025dc13a7d92f73e15a6bbbaa1134c494ac8de"
     "335110bb";
 
+/* Mainnet height 476977, tx 263fa0c5...6c5ecf13; public chain data. */
+static const char k_withdrawal_hex[] =
+    "0400008085202f8900014072c249000000001976a914e7efbcc45aa425227cea61cc05831893cde16e7288ac00000000"
+    "45470700000000000000000000000100000000000000005099c2490000000069465389da32b8935d88e29a8dc11c474d"
+    "eefdb966d0a7a78e0484a65dfdbb26e72be916769467c3a27b034750ab803e9d049701b7606ca5f56ef87aabb40c648d"
+    "2ca758c28514620de723177336638b50cf2ac8093bb4eedc447f16d9600e4fec1450bfb22655fd00b82fe743bc98d21e"
+    "6d706a13aca39c75f061e22bba906ef6b60cb3ca69fd3ee62a1784a765c8a71d65dd67f4a052fae6c08608e6fa43d20c"
+    "02039525ae464a051736b60108cf4380760c7c07651e48fe8e6792529571402e5ad0872036bcd9453cb11dcb3b85c017"
+    "6b07521ba2c5e65f2f6fc54ed4786a1a3abaec215f68bfb57f33a8683cc13e894800b921d79f45f970c7a163dba42a82"
+    "7fcd433fadc8e8fc678b4b04a1ea0bc9c6e7f5368db65ad25e4440e362e40fa0b6ff00810fa806d18d9a78eebfe07c09"
+    "06f06d2c69e5c07881d608ef340ec1076314b6339200f02607c091495fd7f8978ce2ce7cdece29a1fd3ebf4300f0d290"
+    "f2366d9329c289f9491fc561e4df2e92a3b04605d354b4f8f86974e594a6f500795476bf1e967db11a6f72fbe3bee5d1"
+    "4c89947ff8cb324a9351d49da1ea94681b631eaf8124d73225db60e77614b2a7b978c0bd83d6a29a1244c321cbeed05d"
+    "2fdc6257cbdf0079aeb16c6211ec9c1a80ce22fa13e43f547d31feae2baef7bf31d0f824b3af283a53940bf6d6175615"
+    "656c5d794bdc133e1960d2324fae8edf02256bc0f82b7e7c5be80ee07b8820f7599fea2b1b6d7a1a58eb3b63b5968c80"
+    "d6f08e37ae05231c5991f23c929b026af7772391f778a7df1bc379e3ba75a5d94ee3af4fda912464261789a798c8984f"
+    "9a1246e9b1dc7f3a368ac9e75979b5d73d891da447f23759b88f6814258c039a53cd02586a08aa95c486fa11678e5af3"
+    "da1e21b441c1f8fc24feb6309d56772fbfcdc7a35ff5d771e6e0394d8fc718cd65a851889bfef19b00e3dc65a86aef10"
+    "ed40af1f152903b181bb829e6d34864475c4b03bc14ac7f61810194b24541edb79b976721deddcc3683a75b30a5c99af"
+    "5970a6410566ff102acd3c165463ef9ce1ca1b87cb67735e79e1698134ae276fb55feccb5e2237ea987cfea57c01e184"
+    "29cd554d0036344589d4c5baaeee5d1322662f4ee509f84ea57d4773e560082d289bb1a149e070cfb4d4d6523366e53c"
+    "ca598890fb0a46cda2335fe276f795025930b7820fb8b5525e9e76968a3428abc21c7a4cae907ca65a238e33c20b29bb"
+    "f1a9142fdaaa2436faa7052623a718112dbd298302fd7c271278ec55ea91628a06ccc7d9fe9c47e95ff2d076010bcdc9"
+    "5e1defb96be66f4e5414744927d072c35278079df1139480aea794f117783b1ec33e74aa132f50f777f8cdfc62605199"
+    "f83e05e92b1555ec479e1fb08beebbe0e61d54a32846d2cbc590f692d1b079e5714beb3dea93e7ec06a1923d6a7ec0ce"
+    "c7dccd9ee5656db5511bc7e2aff963c241f4b3c9376b3b607b95af3b95560bbd5ec3dc206b95a12121bb363085ce7406"
+    "f2c760f1823144235fdfed31955435de279b079838795faba351a5ce2dddcbb8f4d47fa583414f0c5e4a35e6c9d46ef1"
+    "3acafdfe402fc4649ee95edd5c322e82ee370de52831bd6c12198688e6908337036905b7326635cb49a9f4bb129ebed1"
+    "b986349430a1825a800bed53651b4c003aabe95cb42f23dc2e8acad960acf43405f2097d7a4efb638c419d7f8b8b6fa3"
+    "85ff014e900fafe4166039aee5963341a2ca28c542ce507357ec0ba07f3824f3067f6fae052f684534aece00f1212230"
+    "de5334a54024b8d14b24b206607f1c1146cb78480809f69e83f4a02f96859e77caefd2a5ad9dcf87a685cc4066205f6b"
+    "6ceccc68b74160406f9432749d41a83d6793fb15948269b01b137a7b520441d75a72a4993cec94fbe3bba7494f4298de"
+    "b57e754744770e40ee0a5932d57f59b63dfe6afe19455324edf2d5151e8060fc557c9de6fb36e7f20c90ecf76318fc39"
+    "befc96f70662ec91eecd2a6a2090c7f85bfbde55f4f7e4fb690b615cbbf93badafe1f5498cbd688933518d00d83501ab"
+    "39a2256ef34c974f1a0ca6ba2a85e6ae57101bca1c91ac8c6bc28b0504b07e9d55137bb2c13623e29dacf4633b9fba8a"
+    "34a7e144ec8f500439e7aa270fb3e83b6b91779930a6b5b21de74b3a389d867498be12e04fba0667697b9afdea36217a"
+    "d5e22691e7edd781db754116fe1ed4924ce3c1e3d01882cd1bea3440647cb7ecbae8542729e51992eca5a5bea4da197d"
+    "0c30f50f7bbe9e70d74265af89d967e4b0fcd6c46b2078462d6869854cb6c7143f1c842b399dd176d61066ada96963f3"
+    "74a981c256f6833c97cc47008c4b4633849ec89c14a0a74ea6a6e79d70c3e6849f236ff0eb6401655724a1bd0d015edc"
+    "d72435786cffac7302afb030a30ac5a48352ce5006ff17e04bfa4e38936d1b95582f14f996a86d0bcabf761709a514ad"
+    "4397e6a55271bfbf2255634ec86a0bc1fb533c3f4624e751a83a146174422d0a0f";
+
 static int hex_nibble(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -346,6 +388,82 @@ static int kat_check_tampered_inputs(struct js_description *js, uint8_t *h_sig)
     return failures;
 }
 
+static int kat_withdrawal_identity(const struct transaction *tx,
+                                   const struct byte_stream *stream)
+{
+    int failures = 0;
+    static const uint8_t recipient[] = {
+        0x76, 0xa9, 0x14, 0xe7, 0xef, 0xbc, 0xc4, 0x5a, 0xa4, 0x25,
+        0x22, 0x7c, 0xea, 0x61, 0xcc, 0x05, 0x83, 0x18, 0x93, 0xcd,
+        0xe1, 0x6e, 0x72, 0x88, 0xac,
+    };
+    char txid[65];
+    uint256_get_hex(&tx->hash, txid);
+    bool shape = stream_remaining(stream) == 0 && tx->overwintered &&
+        tx->version == SAPLING_TX_VERSION && tx->version_group_id == SAPLING_VERSION_GROUP_ID &&
+        tx->expiry_height == 476997 && tx->num_vin == 0 && tx->num_vout == 1 &&
+        tx->num_joinsplit == 1 && tx->v_joinsplit && tx->v_joinsplit[0].use_groth &&
+        tx->num_shielded_spend == 0 && tx->num_shielded_output == 0 && !tx->value_balance;
+    KAT_CHECK("withdrawal pins v4 transaction identity and shape", shape &&
+              strcmp(txid, "263fa0c5022f0cde555a7463193cadae62617b318935e6dec54091526c5ecf13") == 0);
+    KAT_CHECK("withdrawal pins transparent recipient, value and fee", shape &&
+              tx->v_joinsplit[0].vpub_old == 0 && tx->v_joinsplit[0].vpub_new == 1237490000 &&
+              tx->vout[0].value == 1237480000 &&
+              tx->v_joinsplit[0].vpub_new - tx->vout[0].value == 10000 &&
+              tx->vout[0].script_pub_key.size == sizeof(recipient) &&
+              memcmp(tx->vout[0].script_pub_key.data, recipient, sizeof(recipient)) == 0);
+    return failures;
+}
+
+static int kat_withdrawal_verify(struct transaction *tx)
+{
+    int failures = 0;
+    struct validation_state structural, contextual;
+    validation_state_init(&structural);
+    validation_state_init(&contextual);
+    KAT_CHECK("withdrawal passes structural consensus", check_transaction(tx, &structural));
+    int saved_defer = atomic_exchange(&g_deferred_proof_validation_below_height, -1);
+    bool valid = contextual_check_transaction(tx, &contextual,
+                   &chain_params_get()->consensus, 476977, 100);
+    atomic_store(&g_deferred_proof_validation_below_height, saved_defer);
+    KAT_CHECK("withdrawal signature and proof verify at mainnet height", valid);
+    if (tx->num_joinsplit == 1 && tx->v_joinsplit) {
+        const struct js_description *js = &tx->v_joinsplit[0];
+        uint8_t h_sig[32];
+        sprout_h_sig(js->random_seed.data, js->nullifiers[0].data,
+                     js->nullifiers[1].data, tx->joinsplit_pubkey.data, h_sig);
+        KAT_CHECK("withdrawal proof rejects one-zat mutation",
+                  !sprout_verify_groth16(js->proof, js->anchor.data, h_sig,
+                      js->macs[0].data, js->macs[1].data, js->nullifiers[0].data,
+                      js->nullifiers[1].data, js->commitments[0].data,
+                      js->commitments[1].data, js->vpub_old, js->vpub_new + 1));
+    } else {
+        KAT_CHECK("withdrawal has one proof to mutate", false);
+    }
+    return failures;
+}
+
+static int kat_check_withdrawal(void)
+{
+    int failures = 0;
+    uint8_t bytes[1857];
+    bool decoded = decode_hex_exact(k_withdrawal_hex, bytes, sizeof(bytes));
+    KAT_CHECK("withdrawal transaction decodes", decoded);
+    if (!decoded) return failures;
+    struct byte_stream stream;
+    stream_init_from_data(&stream, bytes, sizeof(bytes));
+    struct transaction tx;
+    transaction_init(&tx);
+    bool parsed = transaction_deserialize(&tx, &stream);
+    KAT_CHECK("withdrawal transaction parses", parsed);
+    if (parsed) {
+        failures += kat_withdrawal_identity(&tx, &stream);
+        failures += kat_withdrawal_verify(&tx);
+    }
+    transaction_free(&tx);
+    return failures;
+}
+
 static int kat_check_joinsplit_proof(struct transaction *tx)
 {
     int failures = 0;
@@ -396,6 +514,7 @@ int test_sprout_groth16_kat(void)
     failures += kat_check_structural(&tx);
     failures += kat_check_contextual(&tx);
     failures += kat_check_joinsplit_proof(&tx);
+    failures += kat_check_withdrawal();
 
     transaction_free(&tx);
     printf("Sprout Groth16 real-proof KAT: %s (%d failures)\n",
