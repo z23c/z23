@@ -248,6 +248,32 @@ static bool check_rpc_convert_values_agentsession(void)
     return ok;
 }
 
+static bool ballot_cli_params_match(const char *method, const char **args, size_t count,
+                                    const char *expected)
+{
+    struct json_value result;
+    char encoded[512];
+    bool ok = rpc_convert_values(method, args, count, &result) &&
+              json_write(&result, encoded, sizeof(encoded)) == strlen(expected) &&
+              strcmp(encoded, expected) == 0;
+    json_free(&result);
+    return ok;
+}
+
+static bool check_ballot_cli_params(void)
+{
+    /* Both identifiers are hexadecimal strings that look numeric. */
+    const char *bound[] = {"01", "1", "20", "[[\"02\",23]]", "0"};
+    const char *raw[] = {"1", "20", "23", "1", "0", "03"};
+    const char *slot[] = {"0"};
+    const char *expected = "[\"01\",1,20,[[\"02\",23]],0]";
+    return ballot_cli_params_match("getballotcatalog", bound, 5, expected) &&
+           ballot_cli_params_match("getballotstatus", bound, 5, expected) &&
+           ballot_cli_params_match("getballotstatus", raw, 6, "[1,20,23,1,0,\"03\"]") &&
+           ballot_cli_params_match("getballotstatus", slot, 1, "[0]") &&
+           ballot_cli_params_match("getballotstatus", NULL, 0, "[]");
+}
+
 int check_rpc_convert_values(void)
 {
     int failures = 0;
@@ -270,6 +296,7 @@ int check_rpc_convert_values(void)
         ok = ok && !rpc_should_convert_param("agentsession", 0);
 
         ok = ok && check_rpc_convert_values_agentsession();
+        ok = ok && check_ballot_cli_params();
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 

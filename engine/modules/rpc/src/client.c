@@ -48,6 +48,14 @@ static const struct convert_param convert_table[] = {
     { "listtransactions", 3 },
     { "walletpassphrase", 1 },
     { "getblocktemplate", 0 },
+    { "getballotcatalog", 1 },
+    { "getballotcatalog", 2 },
+    { "getballotcatalog", 3 },
+    { "getballotcatalog", 4 },
+    { "getballotstatus", 1 },
+    { "getballotstatus", 2 },
+    { "getballotstatus", 3 },
+    { "getballotstatus", 4 },
     { "listsinceblock", 1 },
     { "listsinceblock", 2 },
     { "sendmany", 1 },
@@ -189,6 +197,13 @@ static bool rpc_push_string_param(struct json_value *result, const char *arg,
     return true;
 }
 
+/* The slot-only and raw schedules start with integers. The five-argument
+ * form starts with a fork ID, even when every digit is decimal. */
+static bool rpc_ballot_starts_with_integer(const char *method, size_t count)
+{
+    return strcmp(method, "getballotstatus") == 0 && (count == 1 || count == 6);
+}
+
 bool rpc_convert_values(const char *method, const char **str_params,
                         size_t num_params, struct json_value *result)
 {
@@ -199,8 +214,10 @@ bool rpc_convert_values(const char *method, const char **str_params,
         rpc_msg_send_recipient_is_onchain_string(method, str_params,
                                                  num_params);
 
+    bool ballot_starts_with_integer = rpc_ballot_starts_with_integer(method, num_params);
     for (size_t i = 0; i < num_params; i++) {
-        bool convert = rpc_should_convert_param(method, (int)i);
+        bool convert = rpc_should_convert_param(method, (int)i) ||
+                       (i == 0 && ballot_starts_with_integer);
         if (convert && i == 0 && msg_send_onchain)
             convert = false;
         if (!convert) {
