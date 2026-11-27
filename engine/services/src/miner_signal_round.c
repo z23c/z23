@@ -1,27 +1,32 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Evaluate one miner-signalled migration on a selected chain branch. */
 #include "services/miner_signal_round.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include <stdint.h>
 #include <string.h>
 
-bool miner_signal_schedule_valid(const struct miner_signal_schedule *s)
+struct zcl_result miner_signal_schedule_valid(const struct miner_signal_schedule *s)
 {
     /* The window ends at start + window - 1. Leave at least one complete
      * old-rule block between its end and activation. */
-    return s && s->start >= 1 && s->window >= 1 &&
-           s->activation > (int64_t)s->start + s->window &&
-           s->slots >= 1 && s->slots <= 256 && s->slot < s->slots;
+    if (!s || s->start < 1 || s->window < 1 ||
+        s->activation <= (int64_t)s->start + s->window ||
+        s->slots < 1 || s->slots > 256 || s->slot >= s->slots)
+        return ZCL_ERR(-1, "Invalid window, activation height or catalog slot");
+    return ZCL_OK;
 }
 
-bool miner_signal_begin(const struct miner_signal_schedule *s, int32_t height,
+struct zcl_result miner_signal_begin(const struct miner_signal_schedule *s, int32_t height,
                         const struct uint256 *hash, struct miner_signal_tally *out)
 {
-    if (!miner_signal_schedule_valid(s) || !hash || !out || height != s->start - 1)
-        return false;
+    struct zcl_result valid = miner_signal_schedule_valid(s);
+    if (!valid.ok) return valid;
+    if (!hash || !out || height != s->start - 1)
+        return ZCL_ERR(-2, "Missing window parent or wrong initial height");
     *out = (struct miner_signal_tally){ .schedule = *s, .parent_height = height,
                                         .parent_hash = *hash };
-    return true;
+    return ZCL_OK;
 }
 
 static bool signals_slot(const struct miner_signal_schedule *s, const struct transaction *cb)
@@ -42,16 +47,18 @@ static bool signals_slot(const struct miner_signal_schedule *s, const struct tra
     return (bits[s->slot / 8] & (1u << (s->slot % 8))) != 0;
 }
 
-bool miner_signal_connect(const struct miner_signal_tally *parent, int32_t height,
+struct zcl_result miner_signal_connect(const struct miner_signal_tally *parent, int32_t height,
                           const struct uint256 *prev_hash, const struct uint256 *hash,
                           const struct transaction *cb, struct miner_signal_tally *out)
 {
     if (!parent || !prev_hash || !hash || !out ||
         (int64_t)height != (int64_t)parent->parent_height + 1 ||
-        !uint256_eq(prev_hash, &parent->parent_hash)) return false;
+        !uint256_eq(prev_hash, &parent->parent_hash))
+        return ZCL_ERR(-3, "Block does not extend the supplied tally");
     bool vote = false;
     if ((int64_t)height < (int64_t)parent->schedule.start + parent->schedule.window) {
-        if (!cb || !cb->vin || !transaction_is_coinbase(cb) || !cb->num_vout || !cb->vout) return false;
+        if (!cb || !cb->vin || !transaction_is_coinbase(cb) || !cb->num_vout || !cb->vout)
+            return ZCL_ERR(-4, "Missing validated coinbase in signaling window");
         vote = signals_slot(&parent->schedule, cb);
     }
     int32_t votes = parent->votes + (vote ? 1 : 0);
@@ -59,7 +66,7 @@ bool miner_signal_connect(const struct miner_signal_tally *parent, int32_t heigh
     out->votes = votes;
     out->parent_height = height;
     out->parent_hash = *hash;
-    return true;
+    return ZCL_OK;
 }
 
 static enum miner_signal_phase phase(const struct miner_signal_tally *t, int64_t next)
@@ -74,13 +81,14 @@ enum miner_signal_phase miner_signal_next_phase(const struct miner_signal_tally 
     return phase(t, (int64_t)t->parent_height + 1);
 }
 
-bool miner_signal_phase_at(const struct miner_signal_tally *t, int32_t height,
+struct zcl_result miner_signal_phase_at(const struct miner_signal_tally *t, int32_t height,
                            enum miner_signal_phase *out)
 {
-    if (!t || !out) return false;
+    if (!t || !out) return ZCL_ERR(-5, "Missing tally or phase output");
     int64_t next = (int64_t)t->parent_height + 1;
     int64_t end = (int64_t)t->schedule.start + t->schedule.window;
-    if (height < next || (height > next && next < end)) return false;
+    if (height < next || (height > next && next < end))
+        return ZCL_ERR(-6, "Tally does not establish phase at requested height");
     *out = phase(t, height);
-    return true;
+    return ZCL_OK;
 }
