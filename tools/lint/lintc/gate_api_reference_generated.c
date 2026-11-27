@@ -162,13 +162,46 @@ int arg_open_scratch(struct arg_scratch *s)
     return 0;
 }
 
+int arg_parse_cc(char *command, char **argv, size_t *count)
+{
+    size_t n = 0;
+    if (!strpbrk(command, " \t\r\n") || access(command, X_OK) == 0) {
+        if (*command) argv[n++] = command;
+    } else {
+        char *save = NULL;
+        for (char *word = strtok_r(command, " \t\r\n", &save); word;
+             word = strtok_r(NULL, " \t\r\n", &save)) {
+            if (n >= 32 || strspn(word, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:+,=%-") != strlen(word))
+                return 2;
+            argv[n++] = word;
+        }
+    }
+    *count = n;
+    return n ? 0 : 2;
+}
+
 static int arg_build(const struct arg_io *io, const struct arg_scratch *s)
 {
-    char *const argv[] = { (char *)env_or("CC", "cc"), (char *)"-std=c23", (char *)"-O0",
+    char command[4096];
+    const char *cc = env_or("CC", "cc");
+    if (strlen(cc) >= sizeof command) {
+        fprintf(io->err, "%s: FATAL — compiler command too long\n", arg_name);
+        return 2;
+    }
+    memcpy(command, cc, strlen(cc) + 1);
+    char *argv[48];
+    size_t n = 0;
+    if (arg_parse_cc(command, argv, &n)) {
+        fprintf(io->err, "%s: FATAL — unsupported compiler command\n", arg_name);
+        return 2;
+    }
+    char *const args[] = { (char *)"-std=c23", (char *)"-O0",
         (char *)"-Wall", (char *)"-Wextra", (char *)"-Werror",
         (char *)"-Iengine/modules/kernel/include", (char *)"-Iplatform/modules/json/include",
         (char *)"-Iplatform/modules/base/include", (char *)"-o", (char *)s->bin,
         (char *)arg_gen_src, NULL };
+    for (size_t i = 0; args[i]; i++) argv[n++] = args[i];
+    argv[n] = NULL;
     struct lcp_buf log = { 0 };
     int code = 0, rc = arg_exec(argv, LCP_ERR, &log, &code);
     if (rc == 0 && code != 0)

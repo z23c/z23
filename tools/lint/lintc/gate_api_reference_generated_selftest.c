@@ -266,13 +266,68 @@ static int ars_denied(const char *priv, const char *root, const char *home)
     return bad;
 }
 
+/* Check a space-bearing executable without choosing another compiler. */
+static int ars_space_cc(const char *priv)
+{
+    char path[PATH_MAX + 64], parsed[PATH_MAX + 64], *words[48];
+    size_t count = 0;
+    if (snprintf(path, sizeof path, "%s/compiler with space", priv) >= (int)sizeof path)
+        return 1;
+    FILE *f = fopen(path, "w");
+    if (!f) return 1;
+    if (fclose(f) != 0 || chmod(path, 0700) != 0) return 1;
+    memcpy(parsed, path, strlen(path) + 1);
+    return arg_parse_cc(parsed, words, &count) || count != 1 || strcmp(words[0], path);
+}
+
+static bool ars_wrapper(const char *priv, char *wrapper, size_t size)
+{
+    if (snprintf(wrapper, size, "%s/compiler-wrapper", priv) >= (int)size) return false;
+    FILE *f = fopen(wrapper, "w");
+    if (!f) return false;
+    bool ok = fputs("#!/bin/sh\nexec \"$@\"\n", f) >= 0;
+    if (fclose(f) != 0 || chmod(wrapper, 0700) != 0) ok = false;
+    return ok;
+}
+
+static bool ars_compound_command(const char *priv, const char *selected,
+                                 char *command, size_t size)
+{
+    char wrapper[PATH_MAX + 64], alias[PATH_MAX + 64], resolved[PATH_MAX];
+    if (!ars_wrapper(priv, wrapper, sizeof wrapper)) return false;
+    if (strpbrk(selected, " \t\r\n") && access(selected, X_OK) == 0) {
+        if (!realpath(selected, resolved) ||
+            snprintf(alias, sizeof alias, "%s/compiler-alias", priv) >= (int)sizeof alias ||
+            symlink(resolved, alias) != 0) return false;
+        selected = alias;
+    }
+    return snprintf(command, size, "%s %s", wrapper, selected) < (int)size;
+}
+
+/* Exercise a real wrapper followed by the selected compiler argv. */
+static int ars_compound_cc(const char *priv, const char *root, const char *home)
+{
+    char command[8192];
+    const char *old = getenv("CC");
+    char *saved = old ? strdup(old) : NULL;
+    if (old && !saved) return 1;
+    bool ok = ars_compound_command(priv, old && *old ? old : "cc", command, sizeof command);
+    if (ok && setenv("CC", command, 1) != 0) ok = false;
+    int rc = ok ? ars_expect_clean(root, home) : 1;
+    if (ars_space_cc(priv)) rc = 1;
+    if (saved) { if (setenv("CC", saved, 1) != 0) rc = 1; }
+    else if (unsetenv("CC") != 0) rc = 1;
+    free(saved);
+    return rc;
+}
+
 static int ars_cases(const char *priv, const char *root, const char *home)
 {
     if (ars_populate(root) != 0)
         return 1;
     if (ars_expect_clean(root, home) || lsc_pending())
         return 1;
-    if (ars_tampers(root, home) != 0)
+    if (ars_compound_cc(priv, root, home) || ars_tampers(root, home) != 0)
         return 1;
     return ars_truncation(priv, root, home)
         || ars_denied(priv, root, home) || ars_read_error(root, home);

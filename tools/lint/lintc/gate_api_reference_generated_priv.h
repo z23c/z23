@@ -48,4 +48,6 @@ int arg_verify(const struct arg_io *io, const struct arg_defs *d, char *entries,
 /* Writes up to limit lines of data (0: all), each indented four spaces. */
 void arg_indent(FILE *out, const char *data, size_t limit);
 
+int arg_parse_cc(char *command, char **argv, size_t *count);
+
 #endif
