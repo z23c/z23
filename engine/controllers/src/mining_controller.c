@@ -32,9 +32,6 @@
 #include "validation/process_block.h"
 #include "services/chain_activation_service.h"
 #include "chain/subsidy.h"
-#include "storage/anchor_kv.h"
-#include "storage/progress_store.h"
-#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,6 +82,8 @@ static struct block_template *mining_create_template(const struct script *script
     struct block_index *parent = block_map_find(&ctx->main_state->map_block_index,
         &tmpl->block.header.hashPrevBlock);
     bool ok = false;
+    bool genesis = false;
+    struct uint256 parent_root;
     *reason = "Block template parent unavailable";
     if (parent && parent->phashBlock &&
         uint256_eq(parent->phashBlock, &tmpl->block.header.hashPrevBlock)) {
@@ -97,10 +96,18 @@ static struct block_template *mining_create_template(const struct script *script
             tmpl->block.header.nBits = GetNextWorkRequired(parent,
                 &tmpl->block.header, &cp->consensus);
             *bound = (struct mining_template_parent){parent, parent->nHeight + 1, minimum};
+            parent_root = parent->hashFinalSaplingRoot;
+            genesis = parent->nHeight == 0 && uint256_eq(parent->phashBlock,
+                &cp->consensus.hashGenesisBlock);
             ok = true;
         }
     }
     zcl_mutex_unlock(&ctx->main_state->cs_main);
+    if (ok && !mining_stamp_sapling_final_root(&tmpl->block, bound->height,
+                                                cp, &parent_root, genesis)) {
+        *reason = "Sapling parent frontier unavailable or invalid";
+        ok = false;
+    }
     if (ok) return tmpl;
     LOG_WARN("mining", "template refused: %s", *reason);
     block_template_free(tmpl);
@@ -244,46 +251,6 @@ static bool mining_on_demand_allowed(const char *rpc_name,
     return true;
 }
 
-/* Stamp hashFinalSaplingRoot on a to-be-mined block. The field sits in the
- * PoW preimage, so this MUST run before mine_block_pow. A header commits to the
- * Sapling frontier root after its block: a block with shielded outputs moves
- * the root, and a block without them carries the previous root unchanged. A
- * zero root on a commitment-free block therefore misstates the chain, and the
- * wallet refuses to spend against it (z_sendmany_shielded_anchor_refusal).
- * utxo_apply's Sapling fold recomputes the frontier root for any block with
- * shielded outputs and fails closed on mismatch (sapling_frontier_mismatch,
- * engine/jobs/src/utxo_apply_anchors.c), so a miner that leaves zeros wedges
- * its own chain at the first shielded block — the default for a from-genesis
- * chain with Sapling active (e.g. -regtestshielded). The computation follows
- * the simnet pattern (engine/modules/sim/src/simnet.c): root(latest persisted
- * Sapling frontier + this block's shielded-output commitments, in tx/output
- * order) — exactly what the fold will recompute, and the unchanged frontier
- * root when there are none. No-op unless Sapling is active at the new height
- * and the anchor store can positively supply the fold's starting tree; on
- * anything but ANCHOR_KV_FOUND the fold raises its own named gap blocker,
- * which is the accurate failure and must not be masked here. */
-void mining_stamp_sapling_final_root(struct block *block, int height,
-                                     const struct chain_params *cp)
-{
-    if (!cp || !consensus_network_upgrade_active(&cp->consensus, height,
-                                                 UPGRADE_SAPLING))
-        return;
-    sqlite3 *db = progress_store_db();
-    if (!db) {
-        LOG_WARN("mining", "sapling final-root stamp: no progress db");
-        return;
-    }
-    struct incremental_merkle_tree tree;
-    if (anchor_kv_latest_tree(db, ANCHOR_POOL_SAPLING, &tree, NULL, NULL) !=
-        ANCHOR_KV_FOUND)
-        return;
-    for (size_t i = 0; i < block->num_vtx; i++)
-        for (size_t j = 0; j < block->vtx[i].num_shielded_output; j++)
-            incremental_tree_append(&tree,
-                                    &block->vtx[i].v_shielded_output[j].cm);
-    incremental_tree_root(&tree, &block->header.hashFinalSaplingRoot);
-}
-
 /* Mine `num_blocks` blocks on demand, paying every coinbase to
  * `coinbase_script`, and push each accepted block hash into `result` (which
  * this sets to an array). Shared by `generate` and `generatetoaddress` — the
@@ -314,7 +281,6 @@ static bool mining_generate_to_script(const struct script *coinbase_script,
          * block carries an empty solution and is rejected at intake, so
          * the tip never advances. Fast for regtest/testnet (small N,K). */
         int new_height = parent.height;
-        mining_stamp_sapling_final_root(&tmpl->block, new_height, cp);
         if (!mine_block_pow(&tmpl->block, new_height, cp, 0)) {
             block_template_free(tmpl);
             free(tmpl);

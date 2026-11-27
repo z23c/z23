@@ -19,9 +19,11 @@ void register_mining_rpc_commands(struct rpc_table *t);
 struct block;
 struct chain_params;
 
-/* Stamp the Sapling frontier root a mined block must commit to (the previous
- * root when it holds no shielded outputs). No-op while Sapling is inactive. */
-void mining_stamp_sapling_final_root(struct block *block, int height,
-                                     const struct chain_params *cp);
+/* Bind a candidate to its captured parent's Sapling root. Genesis is the
+ * selected network's actual genesis, not merely an arbitrary height-zero tip.
+ * Returns false when the necessary parent frontier cannot be established. */
+bool mining_stamp_sapling_final_root(struct block *block, int height,
+    const struct chain_params *cp, const struct uint256 *parent_root,
+    bool parent_is_genesis);
 
 #endif

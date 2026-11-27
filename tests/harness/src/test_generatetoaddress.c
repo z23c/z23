@@ -32,6 +32,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/reducer_prebinding_fixture.h"
 
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
@@ -51,6 +52,7 @@
 #include "script/script.h"
 #include "script/standard.h"
 #include "storage/anchor_kv.h"
+#include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "validation/check_block.h"
 
@@ -298,39 +300,122 @@ static int gta_check_mainnet_address_rejected(bool main_encoded,
  * block was mined with a zero root and the wallet refused to spend against
  * such a tip ("the chain has no Sapling root at the tip"). Stamp a
  * commitment-free block against a persisted one-note frontier. */
+static bool gta_legacy_evidence(sqlite3 *db, const uint8_t hash[32])
+{
+    static const uint8_t applied[8] = {7}, one = 1;
+    return rf_fixture_build_schema(db) &&
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS coins(k BLOB PRIMARY KEY,v BLOB);"
+            "INSERT INTO coins VALUES(x'01',x'01')", NULL, NULL, NULL) == SQLITE_OK &&
+        progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY, applied, sizeof(applied)) &&
+        progress_meta_set(db, COINS_KV_MIGRATION_COMPLETE_KEY, &one, 1) &&
+        rf_fixture_insert(db, "INSERT INTO header_admit_log(height,hash,admitted_at) VALUES(?1,?2,0)", 6, hash) &&
+        rf_fixture_insert(db, "INSERT INTO validate_headers_log(height,hash,ok) VALUES(?1,?2,1)", 6, hash) &&
+        rf_fixture_insert(db, "INSERT INTO script_validate_log(height,block_hash,status,ok) VALUES(?1,?2,'verified',1)", 6, hash) &&
+        rf_fixture_insert(db, "INSERT INTO proof_validate_log(height,block_hash,status,ok) VALUES(?1,?2,'verified',1)", 6, hash) &&
+        rf_fixture_insert(db, "INSERT INTO utxo_apply_log(height,status,ok) VALUES(?1,'verified',1)", 6, NULL) &&
+        rf_fixture_put_utxo_delta(db, 6, hash);
+}
+
+static int gta_check_legacy_sapling(const struct chain_params *cp, const struct uint256 *root)
+{
+    struct block block;
+    block_init(&block);
+    memset(block.header.hashPrevBlock.data, 0x44, 32);
+    struct uint256 zero;
+    uint256_set_null(&zero);
+    bool ok = gta_legacy_evidence(progress_store_db(), block.header.hashPrevBlock.data) &&
+        mining_stamp_sapling_final_root(&block, 7, cp, &zero, false) &&
+        uint256_eq(&block.header.hashFinalSaplingRoot, root);
+    block.header.hashPrevBlock.data[0] ^= 1;
+    ok = ok && !mining_stamp_sapling_final_root(&block, 7, cp, &zero, false);
+    printf("generatetoaddress: zero legacy root needs exact validated coins parent... ");
+    if (ok) { puts("OK"); return 0; }
+    puts("FAIL"); return 1;
+}
+
+static int gta_check_sapling_outputs(const struct chain_params *cp,
+    struct incremental_merkle_tree *parent_tree, const struct uint256 *parent_root)
+{
+    struct transaction txs[2] = {0};
+    struct output_description outs[2] = {0};
+    for (size_t i = 0; i < 2; i++) {
+        memset(&outs[i].cm, (int)(0x11 + 0x11 * i), sizeof(outs[i].cm));
+        txs[i].num_shielded_output = 1;
+        txs[i].v_shielded_output = &outs[i];
+        incremental_tree_append(parent_tree, &outs[i].cm);
+    }
+    struct uint256 expected, missing, zero;
+    incremental_tree_root(parent_tree, &expected);
+    memset(&missing, 0x77, sizeof(missing));
+    uint256_set_null(&zero);
+    struct block block;
+    block_init(&block);
+    block.num_vtx = 2;
+    block.vtx = txs;
+    bool ok = mining_stamp_sapling_final_root(&block, 7, cp, parent_root, false) &&
+        uint256_eq(&block.header.hashFinalSaplingRoot, &expected) &&
+        !mining_stamp_sapling_final_root(&block, 7, cp, &missing, false) &&
+        !mining_stamp_sapling_final_root(&block, 7, cp, &zero, false);
+    printf("generatetoaddress: ordered outputs use the named parent and gaps fail closed... ");
+    if (ok) { puts("OK"); return 0; }
+    puts("FAIL"); return 1;
+}
+
+static int gta_check_sapling_transition(const struct chain_params *cp,
+    const struct chain_params *shielded, const struct uint256 *parent_root)
+{
+    struct incremental_merkle_tree empty;
+    struct uint256 empty_root, zero;
+    sapling_tree_init(&empty);
+    incremental_tree_root(&empty, &empty_root);
+    uint256_set_null(&zero);
+    struct block genesis, activation, before;
+    block_init(&genesis); block_init(&activation); block_init(&before);
+    struct chain_params activation_params = *cp;
+    activation_params.consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 6;
+    bool ok = mining_stamp_sapling_final_root(&genesis, 1, shielded, &zero, true) &&
+        uint256_eq(&genesis.header.hashFinalSaplingRoot, &empty_root) &&
+        mining_stamp_sapling_final_root(&activation, 6, &activation_params, &zero, false) &&
+        uint256_eq(&activation.header.hashFinalSaplingRoot, &empty_root) &&
+        mining_stamp_sapling_final_root(&before, 6, cp, parent_root, false) &&
+        uint256_eq(&before.header.hashFinalSaplingRoot, &zero);
+    printf("generatetoaddress: genesis, activation and pre-activation roots... ");
+    if (ok) { puts("OK"); return 0; }
+    puts("FAIL"); return 1;
+}
+
 static int gta_check_sapling_root_stamp(const struct chain_params *cp)
 {
     int failures = 0;
-    char dir[512];
-    bool ready = test_mkdtemp(dir, sizeof(dir), "gta_root") &&
-                 progress_store_open(dir) && progress_store_db() &&
-                 anchor_kv_ensure_schema(progress_store_db());
+    char dir[512] = {0};
+    bool opened = test_mkdtemp(dir, sizeof(dir), "gta_root") && progress_store_open(dir);
+    bool ready = opened && progress_store_db() && anchor_kv_ensure_schema(progress_store_db());
     struct incremental_merkle_tree tree;
-    struct uint256 cm, expect, zero;
+    struct uint256 cm, parent_root, later_root;
     sapling_tree_init(&tree);
     memset(&cm, 0x5a, sizeof(cm));
     incremental_tree_append(&tree, &cm);
-    incremental_tree_root(&tree, &expect);
-    uint256_set_null(&zero);
-    ready = ready && anchor_kv_add_tree(progress_store_db(),
-                                        ANCHOR_POOL_SAPLING, &tree, 5);
-
+    incremental_tree_root(&tree, &parent_root);
+    ready = ready && anchor_kv_add_tree(progress_store_db(), ANCHOR_POOL_SAPLING, &tree, 5);
+    struct incremental_merkle_tree parent_tree = tree;
+    memset(&cm, 0x33, sizeof(cm));
+    incremental_tree_append(&tree, &cm);
+    incremental_tree_root(&tree, &later_root);
+    ready = ready && anchor_kv_add_tree(progress_store_db(), ANCHOR_POOL_SAPLING, &tree, 6);
     struct chain_params shielded = *cp;
     shielded.consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = 0;
-    struct block blk;
-    block_init(&blk);
-    if (ready) mining_stamp_sapling_final_root(&blk, 6, &shielded);
-    printf("generatetoaddress: a commitment-free block carries the frontier root... ");
-    if (ready && uint256_eq(&blk.header.hashFinalSaplingRoot, &expect) &&
-        !uint256_eq(&blk.header.hashFinalSaplingRoot, &zero)) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-
-    struct block before;
-    block_init(&before);
-    if (ready) mining_stamp_sapling_final_root(&before, 6, cp);
-    printf("generatetoaddress: no root is stamped while Sapling is inactive... ");
-    if (ready && uint256_eq(&before.header.hashFinalSaplingRoot, &zero)) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-
-    if (ready) progress_store_close();
+    struct block block;
+    block_init(&block);
+    bool carries = ready && mining_stamp_sapling_final_root(&block, 7, &shielded, &parent_root, false) &&
+        uint256_eq(&block.header.hashFinalSaplingRoot, &parent_root);
+    printf("generatetoaddress: commitment-free block carries captured parent root... ");
+    if (carries) puts("OK"); else { puts("FAIL"); failures++; }
+    if (ready) {
+        failures += gta_check_sapling_outputs(&shielded, &parent_tree, &parent_root);
+        failures += gta_check_sapling_transition(cp, &shielded, &parent_root);
+        failures += gta_check_legacy_sapling(&shielded, &later_root);
+    }
+    if (opened) progress_store_close();
     if (dir[0]) test_rm_rf(dir);
     return failures;
 }
