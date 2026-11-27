@@ -945,18 +945,36 @@ The figures first quoted for this lane (about 200 ms p50, 652 B against
 7.4 KB) were recorded with no method. Use the numbers above, and measure
 with two isolated nodes before quoting a cross-host latency.
 
-#### Hand-over: cross-host mail backlog (for the board-mail owner)
+#### Trace a cross-host handoff
 
-`late_s` shows the receiver that a row arrived long after it was signed. The
-sender still cannot see a backlog that never left it: a boardmail row
-written to the local inbox but not yet exported as a board post (the audit
-saw 1.3-4.5 days) is invisible on the sending box, because export runs in
-`tools/command/native_devagent_boardmail.c` (`export_offset` in
-`<state>/receive/boardmail.state`), outside the board. The fix belongs to
-that file's owner. Its status should report, per destination box, the rows
-appended after `export_offset` and the age of the oldest, and `fleet board
-delivery <id>` then covers each exported post. Nothing in this lane changes
-the export path.
+When a directive stays queued, start at the sender. Run the read-only
+`z23-dev dev agent receive status --receiver=<label>` with the resident
+receiver's state root and node endpoint. On a host with multiple receivers,
+match the gateway's outbox to the receiver that exports it. Another receiver
+can show an empty backlog while the gateway's outbox is stalled.
+
+1. Read the `state`, `export_offset` and `pending_bytes` fields in
+   `export_backlog`. Sample again after a receiver beat. If the offset is
+   stationary and `first_row` is present, record its sequence and ref. When
+   `pending_rows_capped` is true, the count is a lower bound.
+2. Read `board_state` and `board_detail`. For an unavailable board, run
+   `z23-dev fleet board status` with the same endpoint selection. The
+   `board_epoch` from receiver status identifies a process lifetime and
+   changes on restart. Use it to check cursor continuity. Confirm the
+   intended endpoint from the deployment configuration or its owner before
+   changing routing or replaying pending mail.
+3. After export, use `z23 fleet board delivery <id>` for the board post.
+   Match the embedded mail row to the destination's ref and sequence, and
+   verify the carrier post and signer. Board import adds those carrier
+   fields to the inbox row. For a relay that copies rows byte for byte,
+   compare the digest of the complete source and destination lines,
+   including the newline. Record each direction separately. To establish
+   that an agent took the work, look for its acceptance or result tied
+   to the original directive.
+
+<!-- claim: symbol-present zcl_devagent_boardmail_observe_export tools/command/native_devagent_receive.c # sender export backlog in receiver status -->
+<!-- claim: symbol-present zcl_devagent_boardmail_observe_transport tools/command/native_devagent_receive.c # selected board health in receiver status -->
+<!-- claim: symbol-present fleet.board.delivery engine/composition/commands/fleet_board.def # board delivery inspection -->
 
 ## The agent protocol
 
