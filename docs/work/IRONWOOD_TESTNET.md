@@ -4,6 +4,20 @@
 
 These public vectors describe an isolated test network starting at height zero. This fresh genesis contains no existing user balances. A migration preserving ZClassic notes needs an agreed source chain and transition. A deployable Ironwood profile, activation rules and peer discovery remain pending.
 
+## Network identity
+
+The sealed research descriptor selects Ironwood by its 276-byte genesis below. Its P2P port is 28033, its RPC port is 28023, and its data directory is named `ironwood-research`. It specifies no discovery seeds. Its inherited Overwinter and Sapling activation heights are both disabled. Testing a Sapling withdrawal on this chain requires an agreed activation schedule and spendable notes before the deposit freeze takes effect. A fresh-chain rehearsal must also allow 100 blocks for coinbase maturity before funding those notes.
+
+<!-- claim: symbol-present CHAIN_RESEARCH_IRONWOOD core/chainparams/include/chain/chainparams.h # explicit research chain identity -->
+<!-- claim: symbol-present init_research_params core/chainparams/src/chainparams.c # network parameters and inherited upgrade schedule -->
+<!-- claim: symbol-present ResearchBaseParams core/chainparams/src/chainparamsbase.c # RPC port and data directory -->
+<!-- claim: symbol-present COINBASE_MATURITY core/params/include/consensus/consensus.h # funding a fresh-chain rehearsal -->
+
+The offline `profile-create` tool builds a different kind of fixture. Its 272-byte genesis commits to a supplied manifest. Use `profile-inspector` with a separately agreed catalog digest to verify that fixture. For the Ironwood ballot example below, use the 276-byte genesis and the catalog digest printed in this guide. Both the network identity and the genesis enter the catalog hash. [Offline build and check recipe](../../tools/dev/profile_inspector.mk).
+
+<!-- claim: symbol-present GENESIS_SIZE tools/dev/profile_inspector/common.h # offline fixture wire size -->
+<!-- claim: symbol-present catalog_digest engine/services/src/miner_signal_catalog.c # network-bound catalog identity -->
+
 ## Genesis
 
 | Field | Candidate value |
@@ -31,7 +45,7 @@ a5675987b7634bba54c037fe261cbddfc2010100000001000000000000000000
 
 ## Transport and storage
 
-The proposed message-start bytes are `d4 14 83 fa`, in that order. Take the first four raw bytes of SHA3-256 of ASCII `Z23/Ironwood/testnet/transport/v1`, excluding the terminator. An example ping frame is `d41483fa70696e670000000000000000080000002502fa940102030405060708`. Its eight payload bytes have the four-byte double-SHA-256 checksum `2502fa94`.
+The descriptor uses the message-start bytes `d4 14 83 fa`, in that order. Take the first four raw bytes of SHA3-256 of ASCII `Z23/Ironwood/testnet/transport/v1`, excluding the terminator. An example ping frame is `d41483fa70696e670000000000000000080000002502fa940102030405060708`. Its eight payload bytes have the four-byte double-SHA-256 checksum `2502fa94`.
 
 A node profile needs an explicit startup selector, a separate base datadir and wallet address namespace, and discovery settings for this network. Boot opens wallet and chain stores under the base datadir. The profile must gate each use of compiled mainnet checkpoints and ROM artifacts on positive mainnet identification. Before public use, two fresh full nodes should sync from the candidate genesis, agree on block hashes, survive restart and reject foreign network frames through normal startup.
 
