@@ -797,17 +797,20 @@ static void reducer_publish_on_demand_tip(
      * (monotonic guard: cannot lower the finalize cursor) and writes the own-hash
      * anchor row reducer_read_back_verdict reads. Gated on fMineBlocksOnDemand
      * (true ONLY for regtest; false on main/testnet, core/modules/chain/src/chainparams.c
-     * — so byte-identical on a real network) AND on the same consensus witness
-     * reducer_pending_body_is_accepted trusts (HAVE_DATA && !FAILED && utxo_apply
-     * succeeded). Inlined, not the helper, so it never validation_state_init's
-     * the caller's `out`. Under the held mutex. */
-    if (ctl->params && ctl->params->fMineBlocksOnDemand && ingested &&
-        (ingested->nStatus & BLOCK_HAVE_DATA) &&
-        !(ingested->nStatus & BLOCK_FAILED_MASK) &&
-        utxo_apply_stage_succeeded_at(ingested->nHeight)) {
+     * — so byte-identical on a real network) AND on hash-bound full validation
+     * and UTXO evidence for the ingested block. This does not change the
+     * caller's `out`. The controller mutex is already held. */
+    if (!ctl->params || !ctl->params->fMineBlocksOnDemand || !ingested ||
+        !(ingested->nStatus & BLOCK_HAVE_DATA) ||
+        (ingested->nStatus & BLOCK_FAILED_MASK))
+        return;
+    /* The setter nests this recursive lock; bind its write to the evidence. */
+    progress_store_tx_lock();
+    if (tip_finalize_full_evidence_at(progress_store_db(), ingested->nHeight,
+                                      block_hash) == 1)
         tip_finalize_stage_set_authoritative_tip(ingested->nHeight,
                                                  block_hash->data);
-    }
+    progress_store_tx_unlock();
 }
 
 static void reducer_format_on_demand_reject_line(int target_h, char *line,
