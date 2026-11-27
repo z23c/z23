@@ -21,6 +21,7 @@
 #include "services/chain_activation_service.h"
 #include "services/reducer_ingest_service.h"
 #include "services/reducer_drain.h"
+#include "services/research_block_size.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "event/event.h"
@@ -469,6 +470,12 @@ static bool reducer_block_preflight(struct chain_activation_controller *ctl,
 {
     if (!ctl->ms || !ctl->params)
         return validation_state_error(out, "reducer-main-state-unwired");
+    enum research_block_size_verdict size = research_block_size_check(ctl->params, block);
+    if (size == RESEARCH_BLOCK_SIZE_UNAVAILABLE)
+        return validation_state_error(out, "research-block-size-unavailable");
+    if (size == RESEARCH_BLOCK_SIZE_EXCEEDED)
+        return validation_state_dos(out, 100, false, REJECT_INVALID,
+                                    "bad-blk-length", false, "research block size limit");
     if (!check_block(block, out, ctl->params, full, full, true)) {
         LOG_WARN("reducer", "%s: %s", full ? "check_block failed" : "catchup body preflight failed",
                  out->reject_reason[0] ? out->reject_reason : "unknown");

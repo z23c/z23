@@ -507,6 +507,7 @@ ZCL_MODULE_CAPABILITY("engine/services/src/property_catalog_service.c", CAP_FS_W
 ZCL_MODULE_CAPABILITY("engine/services/src/recovery_policy.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/reducer/services/src/reducer_ingest_service.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "Waits between lock acquisition retries.")
 ZCL_MODULE_CAPABILITY("engine/services/src/reindex_epilogue.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/replay_verify_service.c", CAP_FS_WRITE, "Checked allocation reports failures to stderr.")
 ZCL_MODULE_CAPABILITY("engine/services/src/rolling_anchor_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/seal_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/seed_integrity_gate.c", CAP_FS_READ|CAP_FS_WRITE, "")

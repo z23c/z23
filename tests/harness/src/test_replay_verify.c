@@ -17,6 +17,10 @@
 
 #include "test/test_core.h"
 #include "services/replay_verify_service.h"
+#include "services/research_block_size.h"
+#include "services/chain_activation_service.h"
+#include "validation/main_state.h"
+#include "consensus/validation.h"
 
 #include "adapters/outbound/persistence/block_log_file.h"
 #include "ports/block_log_port.h"
@@ -389,9 +393,142 @@ cleanup_dir:
     return failures;
 }
 
+static int rv_research_oversize_sweep(const struct block *b)
+{
+    int failures = 0;
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof tmpl, "zcl_rv_size");
+    RV_CHECK("research sweep fixture directory", dir != NULL);
+    if (!dir) return failures;
+    struct block_log_file *log = NULL;
+    struct block_log_port port = {0};
+    struct zcl_result opened = block_log_file_open(dir, &log, &port);
+    RV_CHECK("research sweep opens", opened.ok);
+    if (!opened.ok) return failures;
+    bool appended = rv_append_block(&port, 0, b, NULL);
+    RV_CHECK("research sweep appends oversized block", appended);
+    if (appended) {
+        struct replay_verify_report rep;
+        bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+        struct zcl_result swept = replay_verify_run_port(&port, 0, 0, &rep);
+        chain_params_select(CHAIN_MAIN);
+        RV_CHECK("research sweep records size violation", selected && swept.ok &&
+                 rep.size_failures == 1 && rep.first_fail_reason &&
+                 strcmp(rep.first_fail_reason, "block-size") == 0);
+    }
+    block_log_file_close(log);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int rv_research_oversize_intake(struct block *b, const struct chain_params *params)
+{
+    int failures = 0;
+    struct main_state *ms = calloc(1, sizeof(*ms));
+    RV_CHECK("research intake fixture state", ms != NULL);
+    if (!ms) return failures;
+    struct chain_activation_controller ctl = { .ms = ms, .params = params };
+    struct validation_state state;
+    bool ok = reducer_stage_p2p_block_for_catchup(&ctl, b, &state);
+    RV_CHECK("catchup refuses oversized block", !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-blk-length") == 0);
+    ok = reducer_ingest_block(&ctl, b, REDUCER_SRC_P2P, false, &state);
+    RV_CHECK("normal intake refuses oversized block", !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-blk-length") == 0);
+    ok = reducer_ingest_block(&ctl, b, REDUCER_SRC_SUBMIT, true, &state);
+    RV_CHECK("forced submit intake refuses oversized block", !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-blk-length") == 0);
+    zcl_alloc_fault_fail_next("research block size");
+    ok = reducer_stage_p2p_block_for_catchup(&ctl, b, &state);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    RV_CHECK("catchup allocation failure is local", fired && !ok && state.mode == MODE_ERROR);
+    free(ms);
+    return failures;
+}
+
+static int rv_research_genesis(const struct chain_research_descriptor *d,
+                               const struct chain_params *main)
+{
+    int failures = 0;
+    struct block genesis;
+    block_init(&genesis);
+    struct byte_stream input;
+    stream_init_from_data(&input, d->genesis_wire, d->genesis_wire_len);
+    bool parsed = block_deserialize(&genesis, &input);
+    RV_CHECK("canonical genesis remains below cap", parsed &&
+             research_block_size_check(d->chain, &genesis) == RESEARCH_BLOCK_SIZE_OK);
+    stream_free(&input);
+    block_free(&genesis);
+    RV_CHECK("limits classify both chains", research_block_size_limit(d->chain) == 200000 &&
+             research_block_size_limit(main) == MAX_BLOCK_SIZE);
+    return failures;
+}
+
+static int rv_research_size_no_memory(const struct chain_params *params,
+                                      const struct block *b)
+{
+    int failures = 0;
+    zcl_alloc_fault_fail_next("research block size");
+    enum research_block_size_verdict no_memory = research_block_size_check(params, b);
+    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    RV_CHECK("allocation failure is unavailable", fired && no_memory == RESEARCH_BLOCK_SIZE_UNAVAILABLE);
+    RV_CHECK("null input is unavailable", research_block_size_check(params, NULL) == RESEARCH_BLOCK_SIZE_UNAVAILABLE);
+    return failures;
+}
+
+static int rv_research_size_boundaries(void)
+{
+    int failures = 0;
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    const struct chain_params *main = chain_params_get();
+    struct block b;
+    block_init(&b);
+    b.header.nVersion = 4;
+    b.num_vtx = 253;
+    b.vtx = calloc(b.num_vtx, sizeof(*b.vtx));
+    if (!d || !b.vtx) { block_free(&b); return 1; }
+    failures += rv_research_genesis(d, main);
+    for (size_t i = 0; i < b.num_vtx; i++) transaction_init(&b.vtx[i]);
+    if (!transaction_alloc(&b.vtx[0], 0, 25)) { block_free(&b); return 1; }
+    for (size_t i = 0; i < 24; i++) {
+        memset(b.vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
+        b.vtx[0].vout[i].script_pub_key.size = 8000;
+    }
+    struct byte_stream s;
+    stream_init(&s, 0);
+    bool ok = block_serialize(&b, &s);
+    size_t base = s.size;
+    stream_free(&s);
+    RV_CHECK("research fixture fits size tuning", ok && base < 199999 && 200001 - base < 10000);
+    if (!ok || base >= 199999 || 200001 - base >= 10000) { block_free(&b); return failures + 1; }
+    for (size_t size = 199999; size <= 200001; size++) {
+        struct script *script = &b.vtx[0].vout[24].script_pub_key;
+        script->size = size - base - 2; /* CompactSize grows from one to three bytes. */
+        memset(script->data, 0x51, script->size);
+        stream_init(&s, 0);
+        ok = block_serialize(&b, &s) && s.size == size;
+        stream_free(&s);
+        enum research_block_size_verdict v = research_block_size_check(d->chain, &b);
+        RV_CHECK("complete block boundary and CompactSize", ok &&
+                 v == (size <= 200000 ? RESEARCH_BLOCK_SIZE_OK : RESEARCH_BLOCK_SIZE_EXCEEDED));
+        RV_CHECK("ordinary chain unchanged", research_block_size_check(main, &b) == RESEARCH_BLOCK_SIZE_OK);
+    }
+    failures += rv_research_oversize_sweep(&b);
+    failures += rv_research_oversize_intake(&b, d->chain);
+    failures += rv_research_size_no_memory(d->chain, &b);
+    b.header.nSolutionSize = MAX_SOLUTION_SIZE + 1;
+    RV_CHECK("malformed header cannot be serialized",
+             research_block_size_check(d->chain, &b) == RESEARCH_BLOCK_SIZE_UNAVAILABLE);
+    block_free(&b);
+    return failures;
+}
+
 int test_replay_verify(void)
 {
     int failures = 0;
+    failures += rv_research_size_boundaries();
 
     /* ── 1. NULL / empty arg guards. */
     {

@@ -48,6 +48,7 @@ struct replay_verify_report {
     uint64_t    pow_failures;       /* equihash or difficulty-target misses  */
     uint64_t    linkage_failures;   /* non-contiguous hashPrevBlock          */
     uint64_t    merkle_failures;    /* header merkle root != tx merkle root  */
+    uint64_t    size_failures;      /* research complete-block cap violations */
     uint64_t    hash_failures;      /* index hash != hash of block bytes    */
     int64_t     first_fail_height;  /* -1 if no failure observed             */
     const char *first_fail_reason;  /* static string; NULL if no failure     */

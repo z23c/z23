@@ -20,6 +20,7 @@
  */
 
 #include "services/replay_verify_service.h"
+#include "services/research_block_size.h"
 
 #include "adapters/outbound/persistence/block_log_legacy.h"
 #include "ports/block_log_port.h"
@@ -95,6 +96,18 @@ static bool sweep_cb(uint32_t height,
         st->deser_failed = true;
         st->deser_height = height;
         return false; /* stop iteration */
+    }
+
+    enum research_block_size_verdict size = research_block_size_check(st->params, &blk);
+    if (size == RESEARCH_BLOCK_SIZE_UNAVAILABLE) {
+        block_free(&blk);
+        st->local_failed = true;
+        st->local_height = height;
+        return false;
+    }
+    if (size == RESEARCH_BLOCK_SIZE_EXCEEDED) {
+        r->size_failures++;
+        note_first_fail(r, height, "block-size");
     }
 
     /* The height index is evidence to verify, not an authority for the
@@ -317,6 +330,7 @@ struct zcl_result replay_verify_run(const char *datadir,
               "\"pow_failures\":%llu,"
               "\"linkage_failures\":%llu,"
               "\"merkle_failures\":%llu,"
+              "\"size_failures\":%llu,"
               "\"hash_failures\":%llu,"
               "\"first_fail_height\":%lld,"
               "\"first_fail_reason\":\"%s\"",
@@ -328,6 +342,7 @@ struct zcl_result replay_verify_run(const char *datadir,
               (unsigned long long)out->pow_failures,
               (unsigned long long)out->linkage_failures,
               (unsigned long long)out->merkle_failures,
+              (unsigned long long)out->size_failures,
               (unsigned long long)out->hash_failures,
               (long long)out->first_fail_height,
               out->first_fail_reason ? out->first_fail_reason : "none");
