@@ -80,7 +80,8 @@ SKYCOMBAT_HOST_LIBS := -framework Cocoa -framework IOKit -framework OpenGL \
 	-framework CoreVideo -framework CoreFoundation -lm
 else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
 SKYCOMBAT_PLATFORM_HEADERS :=
-SKYCOMBAT_HOST_LIBS := -lgdi32 -lopengl32 -lwinmm -lshell32 -lm
+# Carry the MinGW runtime in the game image when sharing it with another PC.
+SKYCOMBAT_HOST_LIBS := -static -lgdi32 -lopengl32 -lwinmm -lshell32 -lm
 else
 # Linux needs no system -dev package. RGFW_USE_XDL makes RGFW load X11, GLX
 # and Xrandr at run time through XDL (dlopen); RGFW itself dlopens Xcursor,
