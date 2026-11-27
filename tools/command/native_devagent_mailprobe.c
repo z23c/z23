@@ -1059,8 +1059,23 @@ static bool pm_percentile_json(struct json_value *obj, const char *name,
     return ok;
 }
 
+static bool pm_rtt_p95_json(struct json_value *obj, const int64_t *sorted,
+                            unsigned nvalid, unsigned sent)
+{
+    struct json_value o;
+    unsigned rank = (95u * sent + 99u) / 100u;
+    json_init(&o);
+    json_set_object(&o);
+    bool ok = rank > nvalid ? json_push_kv_str(&o, "status", "missing") :
+        json_push_kv_str(&o, "status", "ok") &&
+        json_push_kv_int(&o, "round_trip_ms", sorted[rank - 1]);
+    ok = ok && json_push_kv(obj, "p95_round_trip", &o);
+    json_free(&o);
+    return ok;
+}
+
 static bool pm_percentiles_json(struct json_value *data, const int64_t *sorted,
-                                unsigned nvalid, unsigned sent)
+                                const int64_t *rtt, unsigned nvalid, unsigned sent)
 {
     struct json_value p;
     bool ok;
@@ -1077,6 +1092,7 @@ static bool pm_percentiles_json(struct json_value *data, const int64_t *sorted,
              pm_percentile_json(&p, "p50", 50, sorted, nvalid, sent) &&
              pm_percentile_json(&p, "p90", 90, sorted, nvalid, sent) &&
              pm_percentile_json(&p, "p95", 95, sorted, nvalid, sent) &&
+             pm_rtt_p95_json(&p, rtt, nvalid, sent) &&
              pm_percentile_json(&p, "p99", 99, sorted, nvalid, sent) &&
              pm_percentile_json(&p, "max", 100, sorted, nvalid, sent);
     }
@@ -1149,7 +1165,7 @@ static bool pm_report_notes(struct json_value *data)
 
 /* Judge every sample; the valid network times, sorted, and the counts. */
 static unsigned pm_judge_all(struct pm_send *st, int64_t *sorted,
-                             unsigned *over_1s)
+                             int64_t *rtt, unsigned *over_1s)
 {
     unsigned nvalid = 0;
     st->wrong_stream = st->name_mismatch = 0;
@@ -1159,23 +1175,25 @@ static unsigned pm_judge_all(struct pm_send *st, int64_t *sorted,
         st->wrong_stream += s->wrong_stream;
         st->name_mismatch += s->wrong_from;
         if (s->state == PM_VALID) {
-            sorted[nvalid++] = s->network_ms;
+            sorted[nvalid] = s->network_ms;
+            rtt[nvalid++] = s->t4 - s->t1;
             *over_1s += s->network_ms > 2000;
         }
     }
     qsort(sorted, nvalid, sizeof(sorted[0]), pm_cmp_ll);
+    qsort(rtt, nvalid, sizeof(rtt[0]), pm_cmp_ll);
     return nvalid;
 }
 
 static bool pm_send_report(struct pm_send *st, struct zcl_command_reply *reply)
 {
     struct json_value arr;
-    int64_t sorted[PM_COUNT_MAX];
+    int64_t sorted[PM_COUNT_MAX], rtt[PM_COUNT_MAX];
     unsigned nvalid, over_1s = 0;
     bool ok, samples_ok = true;
     json_init(&arr);
     json_set_array(&arr);
-    nvalid = pm_judge_all(st, sorted, &over_1s);
+    nvalid = pm_judge_all(st, sorted, rtt, &over_1s);
     /* A sample that cannot be encoded fails the report; it is never left
      * out while the counts still include it. */
     for (unsigned i = 0; i < st->posted; i++)
@@ -1189,7 +1207,7 @@ static bool pm_send_report(struct pm_send *st, struct zcl_command_reply *reply)
          json_push_kv_str(&reply->data, "first_post_delivery", st->delivery) &&
          pm_report_notes(&reply->data) &&
          pm_counts_json(&reply->data, st, nvalid, over_1s) &&
-         pm_percentiles_json(&reply->data, sorted, nvalid, st->posted) &&
+         pm_percentiles_json(&reply->data, sorted, rtt, nvalid, st->posted) &&
          json_push_kv(&reply->data, "samples", &arr);
     json_free(&arr);
     return ok;

@@ -55,6 +55,7 @@ struct pmt_world {
     char mail[2][1400];
     int64_t true_ms;
     int64_t offset[2];
+    int64_t peer_clock_step;
     int side;
     bool with_board;
     int board_shape;        /* 0 well-formed, 1 short post, 2 upper-case post,
@@ -78,7 +79,7 @@ static int64_t pmt_clock(void *ctx)
 {
     struct pmt_world *w = ctx;
     int64_t v = w->true_ms + w->offset[w->side];
-    w->true_ms += 1;
+    w->true_ms += w->side == PMT_SIDE_B && w->peer_clock_step ? w->peer_clock_step : 1;
     return v;
 }
 
@@ -623,6 +624,26 @@ int test_agent_mail_latency_probe(void)
         ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)18);
         ASSERT_STR_EQ(pmt_pct_status(&a, "p90"), "ok");
         ASSERT_STR_EQ(pmt_pct_status(&a, "p95"), "missing");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p95_round_trip"), "missing");
+        pmt_end(&a);
+        PASS();
+    }
+
+    TEST("probe: p95 full round trip includes peer processing") {
+        pmt_world("p95-rtt", 0, true, true, -1);
+        pmt_prime_echo();
+        g_w.peer_clock_step = 6000;
+        pmt_send(&a, 20, 0, 2000);
+        ASSERT(pmt_ok(&a));
+        ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)20);
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p95"), "ok");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p95_round_trip"), "ok");
+        const struct json_value *p = json_get(pmt_field(&a, "percentiles"),
+                                              "p95_round_trip");
+        const struct json_value *v = json_get(p, "round_trip_ms");
+        ASSERT(v && v->type == JSON_INT);
+        ASSERT(json_get_int(v) > 5000);
+        ASSERT(pmt_pct_network(&a, "p95") < 10000);
         pmt_end(&a);
         PASS();
     }
