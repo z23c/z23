@@ -29,6 +29,17 @@ static bool ballot_status_refuses(struct rpc_table *table, const char *raw,
 #define REV_B "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
 #define CATALOG_ARGS "[\"" FORK_ID "\",100,20,[[\"" REV_A "\",122],[\"" REV_B "\",150]],0]"
 
+static bool catalog_selected_first(const struct json_value *result, const struct json_value *params)
+{
+    const struct json_value *rules = json_at(params, 3);
+    const struct json_value *first = json_at(rules, 0);
+    return json_get_int(json_get(result, "start")) == 100 &&
+           json_get_int(json_get(result, "window")) == 20 &&
+           json_get_int(json_get(result, "activation")) == json_get_int(json_at(first, 1)) &&
+           json_get_int(json_get(result, "slots")) == (int64_t)json_size(rules) &&
+           json_get_int(json_get(result, "slot")) == 0;
+}
+
 static bool ballot_catalog_call(struct rpc_table *table, const char *raw,
                                 bool want_ok, const char *message, char digest[65])
 {
@@ -39,14 +50,7 @@ static bool ballot_catalog_call(struct rpc_table *table, const char *raw,
     if (want_ok) {
         const struct json_value *v = json_get(&result, "catalog");
         const char *s = v ? json_get_str(v) : NULL;
-        const struct json_value *rules = json_at(&params, 3);
-        const struct json_value *first = json_at(rules, 0);
-        pass = pass && s && strlen(s) == 64 &&
-            json_get_int(json_get(&result, "start")) == 100 &&
-            json_get_int(json_get(&result, "window")) == 20 &&
-            json_get_int(json_get(&result, "activation")) == json_get_int(json_at(first, 1)) &&
-            json_get_int(json_get(&result, "slots")) == (int64_t)json_size(rules) &&
-            json_get_int(json_get(&result, "slot")) == 0;
+        pass = pass && s && strlen(s) == 64 && catalog_selected_first(&result, &params);
         if (pass && digest) memcpy(digest, s, 65);
     } else {
         pass = pass && result.type == JSON_STR && strstr(json_get_str(&result), message);

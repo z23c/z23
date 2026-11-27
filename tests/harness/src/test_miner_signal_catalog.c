@@ -10,6 +10,13 @@
     fprintf(stderr, "miner_signal_catalog line %d: %s\n", __LINE__, #x); return 1; \
 } } while (0)
 
+static bool catalog_digest_changed(const struct miner_signal_catalog *catalog, const uint8_t original[32])
+{
+    struct miner_signal_schedule selected;
+    return miner_signal_catalog_select(catalog, 0, &selected).ok &&
+           memcmp(original, selected.catalog, 32) != 0;
+}
+
 int test_miner_signal_catalog(void)
 {
     static const char *expected = "be8027db90c73984db54173ba98edd05ec137fad214ee500ae3b9e117b2894fe";
@@ -31,22 +38,22 @@ int test_miner_signal_catalog(void)
     CAT_CHECK(miner_signal_catalog_select(&c, 1, &b).ok);
     CAT_CHECK(memcmp(a.catalog, b.catalog, 32) == 0 && b.slot == 1 && b.activation == 150);
     c.network_id[0] ^= 1;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     c.network_id[0] ^= 1; c.genesis[0] ^= 1;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     c.genesis[0] ^= 1; entries[1].activation++;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     entries[1].activation--; entries[1].rule_revision[0]++;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     entries[1].rule_revision[0]--;
     c.window--;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     c.window++;
     c.start--;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     c.start++;
     c.count = 1;
-    CAT_CHECK(miner_signal_catalog_select(&c, 0, &b).ok && memcmp(a.catalog, b.catalog, 32));
+    CAT_CHECK(catalog_digest_changed(&c, a.catalog));
     c.count = 2;
     struct miner_signal_schedule before = a;
     CAT_CHECK(!miner_signal_catalog_select(&c, 2, &a).ok && memcmp(&a, &before, sizeof(a)) == 0);
@@ -79,6 +86,3 @@ int test_miner_signal_catalog(void)
     puts("miner_signal_catalog: vector, slot binding, mutations and rejection passed");
     return 0;
 }
-#ifdef CATALOG_STANDALONE
-int main(void) { return test_miner_signal_catalog(); }
-#endif
