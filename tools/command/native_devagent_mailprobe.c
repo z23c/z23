@@ -69,7 +69,7 @@
  * no valid sample.
  *
  * REPORT. Every sample (ref, t1..t4, state, reason, legs), counts sent,
- * echoed, valid, missing, invalid, and p50, p90, p99 and max of one_way_ms.
+ * echoed, valid, missing, invalid, and p50, p90, p95, p99 and max of one_way_ms.
  * The percentile rule is nearest-rank over the SENT population with missing
  * and invalid samples sorted last: a percentile whose rank falls past the
  * valid samples is the string "missing", never dropped from the population
@@ -1076,6 +1076,7 @@ static bool pm_percentiles_json(struct json_value *data, const int64_t *sorted,
         ok = json_push_kv_str(&p, "status", "ok") &&
              pm_percentile_json(&p, "p50", 50, sorted, nvalid, sent) &&
              pm_percentile_json(&p, "p90", 90, sorted, nvalid, sent) &&
+             pm_percentile_json(&p, "p95", 95, sorted, nvalid, sent) &&
              pm_percentile_json(&p, "p99", 99, sorted, nvalid, sent) &&
              pm_percentile_json(&p, "max", 100, sorted, nvalid, sent);
     }
@@ -1129,7 +1130,8 @@ static bool pm_counts_json(struct json_value *data, const struct pm_send *st,
 static bool pm_report_notes(struct json_value *data)
 {
     return json_push_kv_str(data, "method",
-                            "one_way = ((t4 - t1) - (t3 - t2)) / 2; t1 and t4 "
+                            "one_way is an estimate: network_ms = round_trip_ms - (t3 - t2); "
+                            "one_way = network_ms / 2; t1 and t4 "
                             "on the sender clock, t2 and t3 on the peer "
                             "clock") &&
            json_push_kv_str(data, "percentile_rule",

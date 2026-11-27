@@ -64,6 +64,7 @@ struct pmt_world {
     bool back_to_outbox;    /* land the echo row in the sender's own outbox */
     bool use_since;
     int drop_index;
+    int invalid_index;
     int delivered;
     long carried_a, carried_b;
     char since[PMT_TOKEN];
@@ -154,6 +155,7 @@ static void pmt_world(const char *tag, int64_t offset_b, bool with_board,
     g_w.with_board = with_board;
     g_w.use_since = use_since;
     g_w.drop_index = drop_index;
+    g_w.invalid_index = -1;
     zcl_devagent_mailprobe_test_set_clock(pmt_clock, &g_w);
     pmt_use(PMT_SIDE_A);
 }
@@ -286,9 +288,12 @@ static void pmt_pump(void *ctx)
         pmt_keep_cursor(&c);
     pmt_end(&c);
     g_w.true_ms += 20; /* B -> A */
+    const char *saved_alias = g_w.alias_from;
+    if (idx == g_w.invalid_index) g_w.alias_from = "wrongx";
     pmt_carry(PMT_SIDE_B, PMT_SIDE_A, "node-a",
               g_w.back_to_outbox ? "outbox.jsonl" : "inbox.node-b.jsonl",
               &g_w.carried_b, g_w.drop_index);
+    g_w.alias_from = saved_alias;
 }
 
 /* One box playing both roles: the "echo" runs on the sending root, under the
@@ -571,6 +576,14 @@ int test_agent_mail_latency_probe(void)
                   pmt_sample_int(&a, 9, "network_ms"));
         ASSERT_EQ(pmt_pct_network(&a, "p90"),
                   pmt_sample_int(&a, 17, "network_ms"));
+        ASSERT_EQ(pmt_pct_network(&a, "p95"),
+                  pmt_sample_int(&a, 18, "network_ms"));
+        const struct json_value *p95 = json_get(pmt_field(&a, "percentiles"), "p95");
+        const struct json_value *estimate = json_get(p95, "one_way_ms");
+        ASSERT(estimate && estimate->type == JSON_REAL);
+        ASSERT(json_get_real(estimate) == (double)pmt_pct_network(&a, "p95") / 2.0);
+        ASSERT(pmt_sample_int(&a, 18, "round_trip_ms") >
+               pmt_sample_int(&a, 18, "network_ms"));
         ASSERT_EQ(pmt_pct_network(&a, "p99"),
                   pmt_sample_int(&a, 19, "network_ms"));
         ASSERT_EQ(pmt_pct_network(&a, "max"),
@@ -591,8 +604,25 @@ int test_agent_mail_latency_probe(void)
         /* One of 20 missing is 5%: p50 and p90 hold, p99 and max do not. */
         ASSERT_STR_EQ(pmt_pct_status(&a, "p50"), "ok");
         ASSERT_STR_EQ(pmt_pct_status(&a, "p90"), "ok");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p95"), "ok");
         ASSERT_STR_EQ(pmt_pct_status(&a, "p99"), "missing");
         ASSERT_STR_EQ(pmt_pct_status(&a, "max"), "missing");
+        pmt_end(&a);
+        PASS();
+    }
+
+    TEST("probe: p95 counts both invalid and missing samples") {
+        pmt_world("p95-invalid", 5000, true, true, 3);
+        pmt_prime_echo();
+        g_w.invalid_index = 7;
+        pmt_send(&a, 20, 0, 300);
+        ASSERT(pmt_ok(&a));
+        ASSERT_EQ(pmt_int(&a, "sent"), (int64_t)20);
+        ASSERT_EQ(pmt_int(&a, "missing"), (int64_t)1);
+        ASSERT_EQ(pmt_int(&a, "invalid"), (int64_t)1);
+        ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)18);
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p90"), "ok");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p95"), "missing");
         pmt_end(&a);
         PASS();
     }
@@ -604,6 +634,7 @@ int test_agent_mail_latency_probe(void)
         ASSERT_EQ(pmt_int(&a, "valid"), (int64_t)5);
         ASSERT_STR_EQ(pmt_pct_overall(&a), "refused");
         ASSERT_STR_EQ(pmt_pct_status(&a, "p50"), "");
+        ASSERT_STR_EQ(pmt_pct_status(&a, "p95"), "");
         ASSERT(json_size(pmt_field(&a, "samples")) == 5);
         ASSERT(strstr(pmt_pct_reason(&a), "fewer than 10 probes") != NULL);
         pmt_end(&a);
