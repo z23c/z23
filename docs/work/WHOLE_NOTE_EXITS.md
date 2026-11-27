@@ -42,3 +42,18 @@ A C23 driver compiled with Clang 20 called `sprout_note_cm` at source revision `
 | 11 | 22 | 33 | 1 | `210bc07845a0f18d5e7fe0b688a5c5ad12d2b56f4cde85e684e071066cb18b59` |
 | 44 | 55 | 66 | 0 | `d9f4ec0f762ecb4e042a93853f2c1da7f019536343759e3048cc664927642a9d` |
 | 44 | 55 | 66 | 1 | `dccb57b84880d221e9f362d8f76a387b867a81881f323469fbbbfee6aef45ce9` |
+
+## Isolated transaction evidence
+
+Two experimental C23 nodes exercised separate Sapling and Sprout exits on disposable research chains. Both trials used transparent destinations. Their transaction IDs are reproducible from the public transaction bytes using double SHA-256 in display order.
+
+| Pool | Funding and withdrawal | Confirmed result |
+| --- | --- | --- |
+| Sapling | One 400,000-zatoshi note funded at height 124 reached ten confirmations. A v4 transaction used one Sapling spend, zero Sapling outputs and zero transparent inputs. | At height 134, output 0 paid 399,900 zatoshis and the fee was 100. After restarting and rescanning heights 124 through 134, the recipient wallet listed the same outpoint as confirmed and spendable. |
+| Sprout | A JoinSplit funded two notes of 60,000 and 40,000 zatoshis at height 124. A second JoinSplit withdrew 100,000 at height 126. | The durable Sprout balance went from 0 to 100,000 to 0. The exit recorded two nullifiers and a transparent output of 99,000 zatoshis with a 1,000-zatoshi fee. The restarted node reopened the same tip containing the exit. The output used a fixture script. |
+
+The Sapling exit transaction ID was `6e01dcf2f2463783e8860d4bb6b649053268a513d03da345de394d67babaa261`. Its experimental node binary had SHA-256 `2f3ddc9f0d8174636dac6bcb099a624b02fc9429e2369c8ee2b3491f5182deea`. The Sprout exit transaction ID was `2a8f7ca2616fad793759f1e6635260de1660280eeb4e1cd1f4dec97b158b4a2d`. Its experimental node binary had SHA-256 `eac353ab91cb325b280eb312db51bcb23036150298c32524e029aa2a74f9c418`.
+
+A separate single-JoinSplit experiment carried both zero-value output openings in a 232-byte, zero-value data-carrier script. The payload identified the experiment version and research genesis before the two ordered openings. Both commitments recomputed from the output openings. Altering either opening invalidated the JoinSplit signature, and the opening checker rejected a changed genesis marker. The research miner included this signed transaction at height 126 with ID `09f6ea92a4660c5df7b86ad979251de280eb349eb88bba80791051fa3a0551d0`.
+
+The experimental nodes ran the net Sapling deposit rule. Strict whole-note enforcement, a replay-protected activation domain, multi-JoinSplit encoding and an Ironwood recipient remain open. The data-carrier experiment measures one possible encoding and signature binding. Any activation still requires the admission, replay and reorganization tests above.
