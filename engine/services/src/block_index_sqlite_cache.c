@@ -8,6 +8,7 @@
  * Integrity envelope: see services/block_index_cache_envelope.h. */
 
 #include "services/block_index_loader.h"
+#include "chain/chainparams.h"
 #include "services/block_index_cache_envelope.h"
 
 #include "chain/chain.h"
@@ -227,7 +228,11 @@ static void populate_block_index_from_cache_row(sqlite3_stmt *sel,
     pindex->nBits           = (uint32_t)sqlite3_column_int(sel, 3);
     pindex->nTime           = (uint32_t)sqlite3_column_int(sel, 4);
     pindex->nVersion        = sqlite3_column_int(sel, 5);
-    pindex->nStatus         = (uint32_t)sqlite3_column_int(sel, 6);
+    uint32_t stored_status = (uint32_t)sqlite3_column_int(sel, 6);
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    bool research_genesis = research && pindex->nHeight == 0 && pindex->phashBlock &&
+        uint256_eq(pindex->phashBlock, &research->chain->consensus.hashGenesisBlock);
+    pindex->nStatus = research_genesis ? stored_status & ~BLOCK_HAVE_DATA : stored_status;
     pindex->nFile           = sqlite3_column_int(sel, 7);
     pindex->nDataPos        = (uint32_t)sqlite3_column_int(sel, 8);
     pindex->nUndoPos        = (uint32_t)sqlite3_column_int(sel, 9);
@@ -240,7 +245,9 @@ static void populate_block_index_from_cache_row(sqlite3_stmt *sel,
     pindex->nCachedBranchId = (uint32_t)sqlite3_column_int(sel, 12);
     pindex->nChainTx        = (uint32_t)sqlite3_column_int(sel, 13);
     const void *pvb = sqlite3_column_blob(sel, 1);  /* fold, same O(rows) pass */
-    bic_row_digest_xor(computed_acc, pindex, (pvb && sqlite3_column_bytes(sel, 1) >= 32)
+    struct block_index digest_row = *pindex;
+    digest_row.nStatus = stored_status;
+    bic_row_digest_xor(computed_acc, &digest_row, (pvb && sqlite3_column_bytes(sel, 1) >= 32)
                        ? (const unsigned char *)pvb : zero32);
 }
 
@@ -334,7 +341,7 @@ struct zcl_result load_block_index_sqlite(struct node_db *ndb, struct main_state
         return ZCL_ERR(-3, "load_block_index_sqlite: failed to prepare SQLite SELECT for block_index_cache");
 
     /* Persisted-FAILED trust boundary: the baked ROM checkpoint height. */
-    int32_t ckpt_h = get_rom_state_checkpoint()->height;
+    int32_t ckpt_h = chain_research_profile_current() ? -1 : get_rom_state_checkpoint()->height;
     int64_t stripped_failed = 0, demoted_failed = 0;
     uint8_t computed_acc[32] = {0};
     size_t loaded = 0;

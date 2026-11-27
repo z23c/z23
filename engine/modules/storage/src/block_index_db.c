@@ -7,6 +7,7 @@
 #include "storage/block_index_db.h"
 #include "core/hash.h"
 #include "primitives/block.h"
+#include "chain/chainparams.h"
 #include "util/boot_phase.h"
 #include "util/log_macros.h"
 #include <stdio.h>
@@ -511,7 +512,12 @@ bool block_tree_db_load_block_index_guts(struct block_tree_db *btdb,
                                           &dbi.nNonce))
             fprintf(stderr, "block_index_db: header extension alloc failed; merkle root and nonce left zero\n"); // obs-ok:block-index-db-deserialize
         (void)block_index_set_solution(pindex, NULL, 0);
-        pindex->nStatus = dbi.nStatus;
+        unsigned status = dbi.nStatus;
+        const struct chain_research_descriptor *research = chain_research_profile_current();
+        if (research && dbi.nHeight == 0 && pindex->phashBlock &&
+            uint256_eq(pindex->phashBlock, &research->chain->consensus.hashGenesisBlock))
+            status &= ~BLOCK_HAVE_DATA;
+        pindex->nStatus = status;
         pindex->nCachedBranchId = dbi.nCachedBranchId;
         pindex->nTx = dbi.nTx;
         if (dbi.has_sprout_value) {

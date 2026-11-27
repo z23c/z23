@@ -43,6 +43,7 @@ struct boot_blkidx_load_ctx {
     bool rebuilt_from_log;
     bool loaded;
     bool flat_union_tainted;
+    bool genesis_failed;
 };
 
 /* Run the block-index load ladder: iterate the const rung table in order,

@@ -45,6 +45,18 @@ struct sqlite3;
 /* Initialize or validate the compiled genesis block index in memory. */
 bool block_index_initialize_genesis(struct block_index *genesis, const struct chain_params *params);
 
+/* Verify and persist a supplied genesis body before publishing HAVE_DATA. */
+bool block_index_store_genesis_body(struct block_index *genesis,
+                                    const struct chain_params *params,
+                                    const uint8_t *wire, size_t len,
+                                    const char *datadir);
+
+/* Restore missing genesis body or verify the existing body byte for byte. */
+bool block_index_ensure_genesis_body(struct block_index *genesis,
+                                     const struct chain_params *params,
+                                     const uint8_t *wire, size_t len,
+                                     const char *datadir);
+
 /* Height comparator for forward-pass pointer arrays (qsort order), and
  * the linear already-sorted predicate the flat loader uses to skip the
  * qsort on writer-ordered files. Both are pure views over nHeight. */
@@ -386,6 +398,12 @@ bool block_index_row_admit(int32_t height, const uint8_t hash[32],
 struct zcl_result load_block_index(struct main_state *ms,
                        const struct chain_params *params,
                        struct block_tree_db *btdb, bool btdb_open);
+
+/* Supplied wire is validated and persisted before the fresh tip is published. */
+struct zcl_result load_block_index_with_genesis(struct main_state *ms,
+                       const struct chain_params *params,
+                       struct block_tree_db *btdb, bool btdb_open,
+                       const uint8_t *wire, size_t wire_len, const char *datadir);
 
 /* ── Shared internal helpers ─────────────────────────────────────── */
 

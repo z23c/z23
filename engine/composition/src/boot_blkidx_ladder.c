@@ -18,6 +18,8 @@
 #include "controllers/sync_controller.h"      /* node_db_sync_get_tip_height / _hash */
 #include "validation/main_state.h"            /* struct main_state, map_block_index */
 #include "validation/chainstate.h"            /* block_index, block_map_find */
+#include "chain/chainparams.h"
+#include "util/util.h"
 #include "chain/chain.h"                       /* struct uint256, block_index fields */
 #include "event/event.h"                       /* event_emitf, EV_BOOT_BLOCK_INDEX */
 #include "platform/time_compat.h"              /* platform_time_wall_time_t */
@@ -259,9 +261,22 @@ static bool rung_leveldb_load(struct boot_blkidx_load_ctx *c)
 {
     int64_t t_idx_start = (int64_t)platform_time_wall_time_t();
     printf("Loading block index from LevelDB...\n");
-    if (!load_block_index(c->st, c->params, c->block_tree,
-                          c->block_tree_open).ok) {
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    struct zcl_result loaded;
+    if (research) {
+        char datadir[2048] = {0};
+        GetDataDir(true, datadir, sizeof datadir);
+        loaded = research->chain == c->params && datadir[0]
+            ? load_block_index_with_genesis(c->st, c->params, c->block_tree,
+                                            c->block_tree_open, research->genesis_wire,
+                                            research->genesis_wire_len, datadir)
+            : ZCL_ERR(-1, "research genesis context invalid");
+    } else {
+        loaded = load_block_index(c->st, c->params, c->block_tree, c->block_tree_open);
+    }
+    if (!loaded.ok) {
         fprintf(stderr, "Warning: Failed to load block index\n");
+        if (research) c->genesis_failed = true;
     }
     int64_t t_idx_elapsed = (int64_t)platform_time_wall_time_t() - t_idx_start;
     printf("Block index loaded: %zu entries in %llds\n",
@@ -317,6 +332,21 @@ static _Atomic bool g_last_rebuilt_from_log;
 static _Atomic bool g_last_loaded;
 static _Atomic bool g_last_flat_union_tainted;
 
+/* Check the selected profile before a loaded rung can be persisted. */
+static bool research_genesis_ready(struct boot_blkidx_load_ctx *c, bool required)
+{
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (!research) return true;
+    if (!c->params || research->chain != c->params) return false;
+    struct block_index *genesis = block_map_find(&c->st->map_block_index,
+                                                 &c->params->consensus.hashGenesisBlock);
+    if (!genesis) return !required;
+    char datadir[2048] = {0};
+    GetDataDir(true, datadir, sizeof datadir);
+    return datadir[0] && block_index_ensure_genesis_body(
+        genesis, c->params, research->genesis_wire, research->genesis_wire_len, datadir);
+}
+
 void boot_blkidx_run_ladder(struct boot_blkidx_load_ctx *c)
 {
     if (!c)
@@ -328,8 +358,16 @@ void boot_blkidx_run_ladder(struct boot_blkidx_load_ctx *c)
         atomic_fetch_add_explicit(&g_rung_fires[i], 1, memory_order_relaxed);
         if (r->load)
             (void)r->load(c);
+        if (c->genesis_failed || !research_genesis_ready(c, false)) {
+            c->genesis_failed = true;
+            return;
+        }
         if (r->post)
             r->post(c);
+    }
+    if (!research_genesis_ready(c, true)) {
+        c->genesis_failed = true;
+        return;
     }
     atomic_store_explicit(&g_last_rebuilt_from_log, c->rebuilt_from_log,
                           memory_order_relaxed);

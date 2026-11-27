@@ -36,6 +36,8 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "storage/block_index_db.h"
+#include "storage/disk_block_io.h"
+#include "domain/consensus/check_block.h"
 #include "storage/sha3_sidecar_io.h"
 #include "crypto/sha3.h"
 #include "models/database.h"
@@ -324,7 +326,12 @@ static void bil_flat_fill_pindex(struct block_index *pindex,
     pindex->nBits = row->n_bits;
     pindex->nTime = row->n_time;
     pindex->nVersion = row->n_version;
-    pindex->nStatus = row->n_status;
+    unsigned status = row->n_status;
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (research && row->height == 0 &&
+        uint256_eq(&pindex->hashBlock, &research->chain->consensus.hashGenesisBlock))
+        status &= ~BLOCK_HAVE_DATA;
+    pindex->nStatus = status;
     pindex->nFile = row->n_file;
     pindex->nDataPos = row->n_data_pos;
     pindex->nUndoPos = row->n_undo_pos;
@@ -489,6 +496,131 @@ bool block_index_initialize_genesis(struct block_index *genesis, const struct ch
     return bil_genesis_metadata_valid(genesis, bits);
 }
 
+static bool bil_genesis_readback_matches(const struct disk_block_pos *pos,
+                                          const char *datadir,
+                                          const uint8_t *wire, size_t len)
+{
+    struct block readback; block_init(&readback);
+    bool ok = read_block_from_disk(&readback, pos, datadir);
+    struct byte_stream out; stream_init(&out, len);
+    if (ok) ok = block_serialize(&readback, &out) && out.size == len &&
+                 memcmp(out.data, wire, len) == 0;
+    stream_free(&out); block_free(&readback);
+    return ok;
+}
+
+/* Persist an explicitly supplied genesis only after checking its identity. */
+bool block_index_store_genesis_body(struct block_index *genesis,
+                                    const struct chain_params *params,
+                                    const uint8_t *wire, size_t len,
+                                    const char *datadir)
+{
+    if (!genesis || !params || !wire || !len || !datadir ||
+        !genesis->phashBlock || genesis->nHeight != 0 || genesis->pprev ||
+        !uint256_eq(genesis->phashBlock, &params->consensus.hashGenesisBlock) ||
+        genesis->nStatus || genesis->nBits || genesis->nTx || genesis->nChainTx ||
+        !arith_uint256_is_zero(&genesis->nChainWork)) return false;
+    struct byte_stream stream;
+    stream_init_from_data(&stream, wire, len);
+    struct block block;
+    block_init(&block);
+    bool ok = block_deserialize(&block, &stream) && !stream_remaining(&stream);
+    struct uint256 hash;
+    if (ok) {
+        block_get_hash(&block, &hash);
+        ok = uint256_eq(&hash, &params->consensus.hashGenesisBlock) &&
+             uint256_is_null(&block.header.hashPrevBlock) && block.num_vtx == 1 &&
+             block.header.nBits == bil_selected_genesis_bits(params) &&
+             domain_consensus_check_block_merkle_root(&block, NULL, 0, NULL).ok;
+    }
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    if (ok) ok = write_block_to_disk(&block, &pos, datadir, params->pchMessageStart);
+    if (ok) ok = bil_genesis_readback_matches(&pos, datadir, wire, len);
+    if (ok) {
+        genesis->nVersion = block.header.nVersion;
+        genesis->nTime = block.header.nTime;
+        genesis->nBits = block.header.nBits;
+        genesis->hashFinalSaplingRoot = block.header.hashFinalSaplingRoot;
+        ok = block_index_set_merkle_nonce(genesis, &block.header.hashMerkleRoot,
+                                          &block.header.nNonce) &&
+             block_index_set_solution(genesis, block.header.nSolution,
+                                      block.header.nSolutionSize);
+    }
+    if (ok) {
+        genesis->nTx = 1; genesis->nChainTx = 1;
+        genesis->nChainWork = GetBlockProof(genesis);
+        genesis->nStatus = BLOCK_VALID_SCRIPTS;
+        ok = block_index_set_have_data_verified(genesis, &pos, datadir);
+    }
+    if (!ok) {
+        block_index_hdrext_free(genesis);
+        genesis->nVersion = 0; genesis->nTime = 0; genesis->nBits = 0;
+        genesis->nTx = 0; genesis->nChainTx = 0; genesis->nStatus = 0;
+        arith_uint256_set_zero(&genesis->nChainWork);
+        uint256_set_null(&genesis->hashFinalSaplingRoot);
+    }
+    block_free(&block);
+    return ok;
+}
+
+bool block_index_ensure_genesis_body(struct block_index *genesis,
+                                     const struct chain_params *params,
+                                     const uint8_t *wire, size_t len,
+                                     const char *datadir)
+{
+    if (!genesis || !params || !wire || !len || !datadir ||
+        !genesis->phashBlock || genesis->nHeight != 0 || genesis->pprev ||
+        !uint256_eq(genesis->phashBlock, &params->consensus.hashGenesisBlock) ||
+        (block_index_status_load(genesis) & BLOCK_FAILED_ANY_MASK)) return false;
+    bool had_data = (block_index_status_load(genesis) & BLOCK_HAVE_DATA) != 0;
+    if (genesis->nFile >= 0 && genesis->nDataPos >= 8) {
+        struct disk_block_pos pos = { .nFile = genesis->nFile, .nPos = genesis->nDataPos };
+        struct block block; block_init(&block);
+        bool read = read_block_from_disk(&block, &pos, datadir);
+        if (read) {
+            struct byte_stream out; stream_init(&out, len);
+            struct uint256 hash; block_get_hash(&block, &hash);
+            bool same = block_serialize(&block, &out) && out.size == len &&
+                        memcmp(out.data, wire, len) == 0 &&
+                        uint256_eq(&hash, &params->consensus.hashGenesisBlock) &&
+                        uint256_is_null(&block.header.hashPrevBlock) &&
+                        block.num_vtx == 1 &&
+                        block.header.nBits == bil_selected_genesis_bits(params) &&
+                        domain_consensus_check_block_merkle_root(&block, NULL, 0, NULL).ok;
+            if (same) {
+                same = block_index_set_merkle_nonce(genesis, &block.header.hashMerkleRoot,
+                                                    &block.header.nNonce) &&
+                       block_index_set_solution(genesis, block.header.nSolution,
+                                                block.header.nSolutionSize);
+                if (same) {
+                    genesis->nVersion = block.header.nVersion;
+                    genesis->nTime = block.header.nTime;
+                    genesis->nBits = block.header.nBits;
+                    genesis->hashFinalSaplingRoot = block.header.hashFinalSaplingRoot;
+                    genesis->nTx = 1; genesis->nChainTx = 1;
+                    genesis->nChainWork = GetBlockProof(genesis);
+                    genesis->nStatus = (genesis->nStatus & ~BLOCK_VALID_MASK) | BLOCK_VALID_SCRIPTS;
+                }
+            }
+            stream_free(&out); block_free(&block);
+            if (same && !had_data)
+                same = block_index_set_have_data_verified(genesis, &pos, datadir);
+            if (!same) block_index_status_clear_bits(genesis, BLOCK_HAVE_DATA);
+            if (same || had_data) return same;
+        } else {
+            block_free(&block);
+        }
+    }
+    block_index_status_clear_bits(genesis, BLOCK_HAVE_DATA);
+    block_index_hdrext_free(genesis);
+    genesis->nVersion = 0; genesis->nTime = 0; genesis->nBits = 0;
+    genesis->nTx = 0; genesis->nChainTx = 0; genesis->nStatus = 0;
+    arith_uint256_set_zero(&genesis->nChainWork);
+    uint256_set_null(&genesis->hashFinalSaplingRoot);
+    return block_index_store_genesis_body(genesis, params, wire, len, datadir);
+}
+
 /* Legacy fresh loaders persisted mainnet bits on every network. Correct only
  * the compiled genesis identity; the ordinary PoW admission still runs. */
 static uint32_t bil_effective_bits(int32_t height, const uint8_t hash[32],
@@ -571,7 +703,7 @@ static struct zcl_result bil_flat_insert_rows(
     struct block_map *bm = &ms->map_block_index;
     /* Persisted-FAILED trust boundary: the baked ROM checkpoint height. Fetched
      * once; the per-entry reconcile below is O(1) and adds no extra scan. */
-    int32_t ckpt_h = get_rom_state_checkpoint()->height;
+    int32_t ckpt_h = chain_research_profile_current() ? -1 : get_rom_state_checkpoint()->height;
     /* Chain params for the per-row PoW-target admission gate (header==NULL:
      * the flat cache stores no solution to hash-bind or re-check Equihash).
      * NULL is not expected this late in boot; if it is, the gate is skipped so
@@ -1221,9 +1353,10 @@ static struct block_index *insert_block_index_cb(void *ctx_ptr,
         (struct chainstate *)ms, hash);
 }
 
-struct zcl_result load_block_index(struct main_state *ms,
+struct zcl_result load_block_index_with_genesis(struct main_state *ms,
                        const struct chain_params *params,
-                       struct block_tree_db *btdb, bool btdb_open)
+                       struct block_tree_db *btdb, bool btdb_open,
+                       const uint8_t *wire, size_t wire_len, const char *datadir)
 {
     if (btdb_open) {
         if (!block_tree_db_load_block_index_guts(btdb,
@@ -1254,8 +1387,9 @@ struct zcl_result load_block_index(struct main_state *ms,
             &params->consensus.hashGenesisBlock);
         if (genesis) {
             genesis->nHeight = 0;
-            if (!block_index_initialize_genesis(genesis, params))
-                return ZCL_ERR(-1, "load_block_index: compiled genesis initialization failed");
+            if (wire ? !block_index_store_genesis_body(genesis, params, wire, wire_len, datadir)
+                     : !block_index_initialize_genesis(genesis, params))
+                return ZCL_ERR(-1, "load_block_index: genesis initialization failed");
             struct chain_state_rollback_authorization rollback_auth = {
                 .source = CSR_ROLLBACK_SOURCE_RESTORE,
                 .decision = POLICY_ALLOW,
@@ -1467,3 +1601,11 @@ struct zcl_result block_index_history_archive_test_open(struct main_state *state
     return bha_open(state, archive_dir, max_entries, endpoint_height, endpoint_hash, genesis, top_window, arena);
 }
 #endif
+
+struct zcl_result load_block_index(struct main_state *ms,
+                       const struct chain_params *params,
+                       struct block_tree_db *btdb, bool btdb_open)
+{
+    return load_block_index_with_genesis(ms, params, btdb, btdb_open,
+                                         NULL, 0, NULL);
+}

@@ -11,6 +11,7 @@
  * declared in services/block_index_loader.h. */
 #include "platform/time_compat.h"
 #include "services/block_index_loader.h"
+#include "util/util.h"
 #include "services/chain_tip.h"
 #include "services/chain_restore_repair.h"
 #include "services/utxo_recovery_service.h"
@@ -101,7 +102,12 @@ static bool projection_fold_cb(const uint8_t hash[32],
         return false;  /* stop iteration on OOM */
     }
     (void)block_index_set_solution(pindex, NULL, 0);  /* not retained in RAM */
-    pindex->nStatus              = dbi->nStatus;
+    unsigned status = dbi->nStatus;
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (research && dbi->nHeight == 0 &&
+        uint256_eq(&h, &research->chain->consensus.hashGenesisBlock))
+        status &= ~BLOCK_HAVE_DATA;
+    pindex->nStatus = status;
     pindex->nCachedBranchId      = dbi->nCachedBranchId;
     pindex->nTx                  = dbi->nTx;
     if (dbi->has_sprout_value) {
@@ -463,6 +469,16 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
     printf("Block index projection: folded %zu entries in %llds\n",
            ctx.folded, (long long)elapsed);
 
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (research) {
+        char datadir[2048] = {0}; GetDataDir(true, datadir, sizeof datadir);
+        struct block_index *genesis = params ? block_map_find(&ms->map_block_index,
+                                            &params->consensus.hashGenesisBlock) : NULL;
+        if (research->chain != params || !datadir[0] ||
+            !block_index_ensure_genesis_body(genesis, params, research->genesis_wire,
+                                             research->genesis_wire_len, datadir))
+            return ZCL_ERR(-6, "projection research genesis persistence failed");
+    }
     /* (5) Seed the tip from the durable tip_finalize cursor. */
     rebuild_seed_tip(ms, progress_db);
 
