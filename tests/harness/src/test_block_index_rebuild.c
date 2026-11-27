@@ -32,6 +32,9 @@
 #include "validation/main_state.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
+#include "chain/chainparamsbase.h"
+#include "chain/pow.h"
+#include "util/util.h"
 #include "core/uint256.h"
 #include "core/arith_uint256.h"
 
@@ -444,6 +447,50 @@ done:
     return *failures - start_failures;
 }
 
+static void run_research_genesis_projection(int *failures)
+{
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    char dir[256]; snprintf(dir, sizeof dir, "./test-tmp/bir_%d_research", (int)getpid());
+    mkdir("./test-tmp", 0755); mkdir(dir, 0700);
+    BIR_CHECK("research: profile selects", profile && chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    if (!profile) return;
+    BIR_CHECK("research: isolated datadir", SetDataDir(dir));
+    char logpath[320], dbpath[320];
+    snprintf(logpath, sizeof logpath, "%s/event.dat", dir);
+    snprintf(dbpath, sizeof dbpath, "%s/projection.db", dir);
+    event_log_t *log = event_log_open(logpath);
+    BIR_CHECK("research: event log opens", log != NULL);
+    if (!log) goto done;
+    struct ev_block_header h = {0};
+    struct uint256 child = bir_hash_at(1);
+    memcpy(h.hash, child.data, 32);
+    memcpy(h.hashPrev, profile->chain->consensus.hashGenesisBlock.data, 32);
+    h.height = 1; h.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    h.nBits = 0x200f0f0f; h.nVersion = 4; h.nTx = 1;
+    uint8_t buf[256]; size_t written = 0;
+    bool emitted = ev_block_header_serialize(&h, NULL, buf, sizeof buf, &written) &&
+                   event_log_append(log, EV_BLOCK_HEADER, buf, written) != UINT64_MAX;
+    BIR_CHECK("research: child header emitted", emitted);
+    block_index_projection_t *bip = block_index_projection_open(dbpath, log);
+    BIR_CHECK("research: projection opens", bip != NULL);
+    if (bip) {
+        struct main_state ms; main_state_init(&ms);
+        bool ok = load_block_index_from_projection(&ms, profile->chain, bip, NULL).ok;
+        struct block_index *g = block_map_find(&ms.map_block_index, &profile->chain->consensus.hashGenesisBlock);
+        struct block_index *c = block_map_find(&ms.map_block_index, &child);
+        struct arith_uint256 expected = {0};
+        if (g && c) { struct arith_uint256 proof = GetBlockProof(c); arith_uint256_add(&expected, &g->nChainWork, &proof); }
+        BIR_CHECK("research: genesis body verified before forward pass",
+                  ok && g && c && (g->nStatus & BLOCK_HAVE_DATA) && c->pprev == g &&
+                  arith_uint256_compare(&c->nChainWork, &expected) == 0);
+        main_state_free(&ms); block_index_projection_close(bip);
+    }
+    event_log_close(log);
+done:
+    SetDataDir(NULL); chain_params_select(CHAIN_MAIN); SelectBaseParams(CHAIN_MAIN);
+    test_cleanup_tmpdir(dir);
+}
+
 int test_block_index_rebuild(void)
 {
     test_reset_shared_globals();   /* monolith isolation: see test_helpers.c */
@@ -454,6 +501,7 @@ int test_block_index_rebuild(void)
     run_rebuild_empty(&failures);
     run_rebuild_null_bip(&failures);
     run_rebuild_competing_fork(&failures);
+    run_research_genesis_projection(&failures);
 
     printf("block_index_rebuild: %d failures\n", failures);
     return failures;

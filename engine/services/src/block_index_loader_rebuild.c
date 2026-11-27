@@ -446,6 +446,17 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
         return ZCL_ERR(-4, "load_block_index_from_projection: pprev link "
                        "iterate failed");
 
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (research) {
+        char datadir[2048] = {0}; GetDataDir(true, datadir, sizeof datadir);
+        struct block_index *genesis = params ? block_map_find(&ms->map_block_index,
+                                            &params->consensus.hashGenesisBlock) : NULL;
+        if (research->chain != params || !datadir[0] ||
+            !block_index_ensure_genesis_body(genesis, params, research->genesis_wire,
+                                             research->genesis_wire_len, datadir))
+            return ZCL_ERR(-6, "projection research genesis persistence failed");
+    }
+
     /* (4) Forward pass: nChainWork, nChainTx, skip links, branch id,
      * failed-child propagation — identical to load_block_index post-load. */
     size_t count = ms->map_block_index.size;
@@ -469,16 +480,6 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
     printf("Block index projection: folded %zu entries in %llds\n",
            ctx.folded, (long long)elapsed);
 
-    const struct chain_research_descriptor *research = chain_research_profile_current();
-    if (research) {
-        char datadir[2048] = {0}; GetDataDir(true, datadir, sizeof datadir);
-        struct block_index *genesis = params ? block_map_find(&ms->map_block_index,
-                                            &params->consensus.hashGenesisBlock) : NULL;
-        if (research->chain != params || !datadir[0] ||
-            !block_index_ensure_genesis_body(genesis, params, research->genesis_wire,
-                                             research->genesis_wire_len, datadir))
-            return ZCL_ERR(-6, "projection research genesis persistence failed");
-    }
     /* (5) Seed the tip from the durable tip_finalize cursor. */
     rebuild_seed_tip(ms, progress_db);
 
