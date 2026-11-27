@@ -187,6 +187,30 @@ static bool mining_ballot_output(const struct transaction *legacy,
            !memcmp(p + 39, bitmap, sizeof(bitmap));
 }
 
+static int mining_guarded_slots(struct rpc_table *table,
+                                const struct miner_signal_catalog_pin *pin)
+{
+    int failures = 0;
+    const char *form = "[{\"ballotslots\":{\"catalog\":\"%s\",\"slots\":[0,1]}}]";
+    char digest[65], request[160];
+    zcl_hex_encode(pin->digest, sizeof(pin->digest), digest);
+    snprintf(request, sizeof(request), form, digest);
+    struct json_value plain = {0}, guarded = {0};
+    bool ok = mining_slots_call(table, "[{\"ballotslots\":[0,1]}]", &plain) &&
+              mining_slots_call(table, request, &guarded);
+    const char *a = json_get_str(json_get(json_get(&plain, "coinbasetxn"), "data"));
+    const char *b = json_get_str(json_get(json_get(&guarded, "coinbasetxn"), "data"));
+    MT_CHECK("miner-pinned request produces identical voting coinbase", ok && *a && !strcmp(a, b));
+    json_free(&plain); json_free(&guarded);
+    digest[0] = digest[0] == '0' ? '1' : '0';
+    snprintf(request, sizeof(request), form, digest);
+    MT_CHECK("different miner pin refuses a voting template",
+             mining_slots_refused(table, request, "differs from node pin"));
+    MT_CHECK("missing miner pin refuses the object form", mining_slots_refused(table,
+             "[{\"ballotslots\":{\"slots\":[0,1]}}]", "Expected ballotslots object"));
+    return failures;
+}
+
 static int mining_slots_inside(struct rpc_table *table,
                                const struct miner_signal_catalog_pin *pin)
 {
@@ -242,6 +266,7 @@ static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
     reducer_frontier_provable_tip_set(11);
     MT_CHECK("ballot mint authority", mining_test_authority(progress_store_db(), 11));
     failures += mining_slots_inside(table, &pin);
+    failures += mining_guarded_slots(table, &pin);
     active_chain_move_window_tip(&ms->chain_active, &ancestors[17]);
     reducer_frontier_provable_tip_set(17);
     MT_CHECK("post-window mint authority", mining_test_authority(progress_store_db(), 17));

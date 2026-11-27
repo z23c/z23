@@ -547,6 +547,23 @@ static struct zcl_result mining_slot_bitmap(const struct json_value *list, size_
     return ZCL_OK;
 }
 
+static struct zcl_result mining_requested_bitmap(const struct json_value *request,
+    const struct miner_signal_catalog_pin *pin, uint8_t bits[32])
+{
+    if (request->type != JSON_OBJ)
+        return mining_slot_bitmap(request, pin->count, bits);
+
+    const struct json_value *slots = json_get(request, "slots");
+    const char *catalog = json_get_str(json_get(request, "catalog"));
+    uint8_t expected[32];
+    if (json_size(request) != 2 || !slots ||
+        !zcl_hex_decode_lower(catalog, expected, sizeof(expected)))
+        return ZCL_ERR(-1, "Expected ballotslots object with lowercase catalog digest and slots list");
+    if (memcmp(expected, pin->digest, sizeof(expected)))
+        return ZCL_ERR(-1, "Requested ballot catalog differs from node pin");
+    return mining_slot_bitmap(slots, pin->count, bits);
+}
+
 static struct zcl_result mining_template_ballot(const struct json_value *params,
     struct block *block, const struct chain_params *cp, int height)
 {
@@ -560,7 +577,7 @@ static struct zcl_result mining_template_ballot(const struct json_value *params,
     if (height < pin->start || (int64_t)height >= (int64_t)pin->start + pin->window)
         return ZCL_ERR(-1, "Template height outside the pinned voting window");
     uint8_t bits[32] = {0};
-    struct zcl_result r = mining_slot_bitmap(list, pin->count, bits);
+    struct zcl_result r = mining_requested_bitmap(list, pin, bits);
     if (!r.ok) return r;
     size_t reserved_size;
     return miner_ballot_template_apply(block, pin->digest, bits, cp, height,
@@ -626,7 +643,9 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
         "getblocktemplate ( \"jsonrequestobject\" )\n"
         "Returns data needed to construct a block. On testnet or regtest the optional "
         "request field ballotslots adds a final coinbase output signaling the listed "
-        "slots in the operator's pinned catalog for this voting window.");
+        "slots in the operator's pinned catalog for this voting window. "
+        "Pass ballotslots as {\"catalog\":\"<lowercase digest>\",\"slots\":[0]} "
+        "to require the miner's expected catalog before producing a voting template.");
 
     /* Sovereign guard — same rationale as rpc_generate above: refuse to hand
      * out mining work while the tip is release_assisted (borrowed shielded
