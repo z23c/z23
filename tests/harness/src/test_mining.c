@@ -369,6 +369,32 @@ static bool mining_rate_call(struct rpc_table *t, const char *name, const char *
     return ok;
 }
 
+static int mining_rate_extra(struct rpc_table *t, struct block_index *blocks)
+{
+    int failures = 0;
+    const struct rpc_command *alias = rpc_table_find(t, "getnetworkhashps");
+    struct json_value args = {0}, out = {0};
+    json_set_array(&args);
+    bool ok = alias && alias->actor(&args, true, &out);
+    const char *help = json_get_str(&out);
+    MT_CHECK("network hash alias help names deprecation and defaults", ok && help &&
+        strstr(help, "getnetworkhashps") && strstr(help, "DEPRECATED") &&
+        strstr(help, "120") && strstr(help, "-1"));
+    json_free(&args);
+    json_free(&out);
+    args = (struct json_value){0};
+    out = (struct json_value){0};
+    json_read(&args, "[2147483648]", 12);
+    MT_CHECK("network rate rejects out of range", !rpc_table_execute(t, "getnetworksolps", &args, &out));
+    json_free(&args);
+    json_free(&out);
+    blocks[0].nTime = 100; blocks[1].nTime = 140;
+    blocks[2].nTime = 110; blocks[3].nTime = 120;
+    MT_CHECK("network rate uses min and max timestamps", mining_rate_call(t, "getnetworksolps", "[3,3]", 38));
+    return failures;
+}
+
+
 static int mining_rate_cases(void)
 {
     int failures = 0;
@@ -402,6 +428,7 @@ static int mining_rate_cases(void)
     ms.chain_active.chain[1] = &blocks[1];
     json_free(&args);
     json_free(&out);
+    failures += mining_rate_extra(&t, blocks);
     blocks[0].nTime = blocks[1].nTime = blocks[2].nTime = blocks[3].nTime;
     MT_CHECK("equal times rate zero", mining_rate_call(&t, "getnetworksolps", "[]", 0));
     rpc_mining_set_state(NULL, NULL, NULL);
