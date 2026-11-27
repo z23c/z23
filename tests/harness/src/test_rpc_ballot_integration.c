@@ -28,6 +28,7 @@ struct ballot_fixture {
     struct main_state ms;
     struct block block;
     struct block_index index[4];
+    struct block_index side_index;
     struct uint256 hash[4];
     struct disk_block_pos pos;
     struct rpc_table table;
@@ -339,6 +340,76 @@ static bool bf_negative_cases(struct ballot_fixture *f)
     return bf_call(f, NULL, 0);
 }
 
+/* Query the registered RPCs, not the formatter in isolation. */
+static bool bf_membership_rpc(struct ballot_fixture *f, const char *method,
+                              const struct uint256 *hash, int confirmations,
+                              const struct uint256 *successor)
+{
+    char hex[65], next_hex[65];
+    uint256_get_hex(hash, hex);
+    struct json_value params = {0}, arg = {0}, result = {0};
+    json_set_array(&params);
+    json_set_str(&arg, hex);
+    bool ok = json_push_back(&params, &arg) &&
+              rpc_table_execute(&f->table, method, &params, &result);
+    const struct json_value *count = json_get(&result, "confirmations");
+    const struct json_value *next_value = json_get(&result, "nextblockhash");
+    ok = ok && count && count->type == JSON_INT && json_get_int(count) == confirmations;
+    if (successor) {
+        uint256_get_hex(successor, next_hex);
+        ok = ok && next_value && next_value->type == JSON_STR &&
+             !strcmp(json_get_str(next_value), next_hex);
+    } else {
+        ok = ok && !next_value;
+    }
+    json_free(&result); json_free(&arg); json_free(&params);
+    return ok;
+}
+
+static bool bf_membership_pair(struct ballot_fixture *f, const struct uint256 *hash,
+                               int confirmations, const struct uint256 *successor)
+{
+    return bf_membership_rpc(f, "getblockheader", hash, confirmations, NULL) &&
+           bf_membership_rpc(f, "getblock", hash, confirmations, successor);
+}
+
+static bool bf_membership_cases(struct ballot_fixture *f)
+{
+    /* Two distinct height-1 bodies share genesis; the finalized tip extends
+     * f->index[1], not the side block. Both bodies are locally readable. */
+    struct block side = f->block;
+    side.header.nTime++;
+    struct uint256 side_hash;
+    block_header_get_hash(&side.header, &side_hash);
+    struct disk_block_pos pos;
+    struct disk_block_pos original = f->pos;
+    disk_block_pos_init(&pos);
+    if (!write_block_to_disk(&side, &pos, f->dir, chain_params_get()->pchMessageStart)) return false;
+    if (f->pos.nFile != original.nFile || f->pos.nPos != original.nPos ||
+        (pos.nFile == original.nFile && pos.nPos == original.nPos)) return false;
+    block_index_init(&f->side_index);
+    f->side_index.nHeight = 1;
+    f->side_index.hashBlock = side_hash;
+    f->side_index.phashBlock = &f->side_index.hashBlock;
+    f->side_index.pprev = &f->index[0];
+    block_index_disk_pos_store(&f->side_index, pos.nFile, pos.nPos);
+    block_index_status_fetch_or(&f->side_index, BLOCK_HAVE_DATA);
+    if (!block_map_insert(&f->ms.map_block_index, &side_hash, &f->side_index) ||
+        !bf_advance(f, 3)) return false;
+    if (!bf_membership_pair(f, &f->hash[1], 3, &f->hash[2]) ||
+        !bf_membership_pair(f, &side_hash, -1, NULL)) return false;
+    /* No finalized witness means unknown, not a side-chain assertion. */
+    if (!bf_sql(f->db, "DELETE FROM tip_finalize_log WHERE height=3") ||
+        !bf_membership_pair(f, &f->hash[1], 0, NULL) ||
+        !bf_hash_row(f->db, "INSERT INTO tip_finalize_log(height,status,ok,tip_hash) "
+                    "VALUES(?,'anchor',1,?)", 3, &f->hash[3])) return false;
+    /* A sparse ancestor chain also stays unknown, with no guessed successor. */
+    f->index[2].pprev = NULL;
+    bool sparse_ok = bf_membership_pair(f, &f->hash[1], 0, NULL);
+    f->index[2].pprev = &f->index[1];
+    return sparse_ok;
+}
+
 static bool bf_cleanup(struct ballot_fixture *f)
 {
     rpc_blockchain_set_ballot_catalog_pin(NULL);
@@ -365,8 +436,8 @@ static bool bf_cleanup(struct ballot_fixture *f)
 static int ballot_integration_child(void)
 {
     struct ballot_fixture f = {0};
-    bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_catalog_status(&f, true) &&
-              bf_catalog_limit(&f) && bf_negative_cases(&f);
+    bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_membership_cases(&f) &&
+              bf_catalog_status(&f, true) && bf_catalog_limit(&f) && bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
     return ok ? 0 : 1;

@@ -5,7 +5,7 @@
 
 /* Block accessor RPCs: getblockcount, getbestblockhash, getdifficulty,
  * getblockhash, getblockheader, getblock. Also defines the shared
- * block_header_to_json helper used by the chain controller siblings.
+ * block_header_to_json helper for verbose block and header results.
  * (Block difficulty now comes from difficulty_from_index() in chain/pow.h.)
  * See blockchain_controller_internal.h. */
 
@@ -20,6 +20,8 @@
 #include "core/uint256.h"
 #include "encoding/utilstrencodings.h"
 #include "jobs/reducer_frontier.h"
+#include "jobs/tip_finalize_stage.h"
+#include "storage/progress_store.h"
 #include "json/json.h"
 #include "models/block.h"
 #include "primitives/block.h"
@@ -265,8 +267,45 @@ bool rpc_getblockhash(const struct json_value *params, bool help,
     return true;
 }
 
-void block_header_to_json(const struct block_index *bi,
-                                  struct json_value *result)
+/* Resolve one finalized height/hash pair under the reducer writer's lock.
+ * A sparse view or an unavailable witness cannot establish membership. */
+static struct block_index *rpc_finalized_tip(struct blockchain_context *ctx)
+{
+    if (!ctx->main_state || !progress_store_tx_trylock())
+        return NULL;
+    int height = reducer_frontier_provable_tip_cached();
+    struct uint256 hash;
+    bool found = reducer_frontier_provable_tip_is_published() &&
+        tip_finalize_stage_block_hash_at(progress_store_db(), height, hash.data);
+    progress_store_tx_unlock();
+    if (!found) return NULL;
+    struct block_index *tip = block_map_find(&ctx->main_state->map_block_index, &hash);
+    return tip && tip->nHeight == height ? tip : NULL;
+}
+
+static void rpc_block_membership_to_json(const struct block_index *bi, struct json_value *result,
+                                         bool include_next)
+{
+    char hex[65];
+    struct block_index *tip = rpc_finalized_tip(blockchain_ctx());
+    const struct block_index *member = tip ? block_index_get_ancestor(tip, bi->nHeight) : NULL;
+    int64_t confirmations = 0;
+    if (member && member->nHeight == bi->nHeight && member->phashBlock) {
+        confirmations = uint256_eq(member->phashBlock, bi->phashBlock)
+            ? 1 + (int64_t)tip->nHeight - bi->nHeight : -1;
+    }
+    if (include_next && confirmations > 1) {
+        const struct block_index *next = block_index_get_ancestor(tip, bi->nHeight + 1);
+        if (next && next->pprev == member && next->phashBlock) {
+            uint256_get_hex(next->phashBlock, hex);
+            json_push_kv_str(result, "nextblockhash", hex);
+        }
+    }
+    json_push_kv_int(result, "confirmations", confirmations);
+}
+
+static void block_header_to_json(const struct block_index *bi, struct json_value *result,
+                                 bool include_next)
 {
     json_set_object(result);
     if (!bi || !bi->phashBlock)
@@ -275,20 +314,7 @@ void block_header_to_json(const struct block_index *bi,
     char hex[65];
     uint256_get_hex(bi->phashBlock, hex);
     json_push_kv_str(result, "hash", hex);
-
-    /* confirmations = 1 + (tip height - this block's height), floored at 0.
-     * Default to 1 when main_state isn't available (pre-init). */
-    struct blockchain_context *ctx = blockchain_ctx();
-    int64_t confirmations = 1;
-    if (ctx->main_state) {
-        /* Confirmations is an EXTERNAL count relative to the provable tip (H*),
-         * matching getblockcount above; a block at/above H* shows 1 (or 0 only
-         * if H* hasn't reached it). Cached atomic — never the window tip. */
-        int tip_height = reducer_frontier_provable_tip_cached();
-        int64_t c = 1 + (int64_t)tip_height - (int64_t)bi->nHeight;
-        confirmations = c > 0 ? c : 0;
-    }
-    json_push_kv_int(result, "confirmations", confirmations);
+    rpc_block_membership_to_json(bi, result, include_next);
     json_push_kv_int(result, "height", bi->nHeight);
     json_push_kv_int(result, "version", bi->nVersion);
 
@@ -417,7 +443,7 @@ bool rpc_getblockheader(const struct json_value *params, bool help,
 
     if (!verbose)
         return rpc_raw_header(ctx, bi, result);
-    block_header_to_json(bi, result);
+    block_header_to_json(bi, result, false);
     return true;
 }
 
@@ -459,20 +485,6 @@ static void rpc_getblock_push_txids(const struct block *block,
     }
     (void)json_push_kv(result, "tx", &txids);
     json_free(&txids);
-}
-
-static void rpc_getblock_push_nextblockhash(struct blockchain_context *ctx,
-                                            const struct block_index *bi,
-                                            int32_t hstar,
-                                            struct json_value *result)
-{
-    struct block_index *next = active_chain_at(
-        &ctx->main_state->chain_active, bi->nHeight + 1);
-    if (next && next->phashBlock && next->nHeight <= hstar) {
-        char next_hex[65];
-        uint256_get_hex(next->phashBlock, next_hex);
-        json_push_kv_str(result, "nextblockhash", next_hex);
-    }
 }
 
 static bool rpc_getblock_height(const char *s, int *height)
@@ -595,12 +607,11 @@ bool rpc_getblock(const struct json_value *params, bool help,
         return true;
     }
 
-    block_header_to_json(bi, result);
+    block_header_to_json(bi, result, true);
 
     json_push_kv_int(result, "size", (int64_t)serialized.size);
     json_push_kv_int(result, "tx_count", (int64_t)block.num_vtx);
     rpc_getblock_push_txids(&block, result);
-    rpc_getblock_push_nextblockhash(ctx, bi, hstar, result);
 
     stream_free(&serialized);
     block_free(&block);

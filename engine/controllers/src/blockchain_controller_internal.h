@@ -41,12 +41,6 @@ struct blockchain_context {
 /* Returns the singleton context. Definition lives in blockchain_controller.c. */
 struct blockchain_context *blockchain_ctx(void);
 
-/* ── Shared helpers (definitions in blockchain_controller.c) ──
- * Block difficulty: use difficulty_from_index() from chain/pow.h. */
-
-void block_header_to_json(const struct block_index *bi,
-                          struct json_value *result);
-
 /* ── RPC handler declarations (defined in sibling files) ── */
 
 /* blockchain_controller_blocks.c */
