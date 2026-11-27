@@ -33,10 +33,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* main_state for the pos resolver, captured at start. Read-only from the worker
- * thread; active_chain_at is a lock-free window read. */
-static struct main_state *g_bp_ms = NULL;
-
 /* Leading fold height = the height body_fetch is about to read from disk. */
 static bool boot_bp_cursor(void *user, int32_t *out_height)
 {
@@ -74,7 +70,6 @@ void boot_block_prefetch_start(const struct app_context *ctx,
         return;
     }
 
-    g_bp_ms = ms;
     struct block_prefetch_config cfg;
     block_prefetch_config_default(&cfg);
     cfg.enabled = true; /* the flag is the master switch here */
@@ -84,7 +79,6 @@ void boot_block_prefetch_start(const struct app_context *ctx,
                               boot_bp_pos, ms)) {
         LOG_WARN("block_prefetch",
                  "[block_prefetch] start failed — fold reads cold (fail-safe)");
-        g_bp_ms = NULL;
         return;
     }
     LOG_INFO("block_prefetch",
@@ -94,5 +88,4 @@ void boot_block_prefetch_start(const struct app_context *ctx,
 void boot_block_prefetch_stop(void)
 {
     block_prefetch_stop(); /* idempotent + safe without a prior start */
-    g_bp_ms = NULL;
 }

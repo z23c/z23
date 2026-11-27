@@ -88,7 +88,9 @@ static char g_datadir[1024];
 static struct node_db *g_ndb;
 static bool g_have_identity;
 static uint8_t g_online_seed[32];
+#ifdef ZCL_TESTING
 static uint32_t g_identity_gap_warn_count;
+#endif
 static bool g_identity_gap_logged;
 
 static struct sosvc_artifact g_artifacts[STATE_OFFER_MAX_PER_PEER];
@@ -453,8 +455,10 @@ static bool sosvc_identity_gap_open(void)
     pthread_mutex_lock(&g_lock);
     bool first = !g_identity_gap_logged;
     g_identity_gap_logged = true;
+#ifdef ZCL_TESTING
     if (first)
         g_identity_gap_warn_count++;
+#endif
     pthread_mutex_unlock(&g_lock);
     return first;
 }

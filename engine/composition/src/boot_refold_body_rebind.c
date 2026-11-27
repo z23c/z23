@@ -90,7 +90,9 @@
 static char g_refold_rebind_datadir[PATH_MAX];
 static bool g_refold_rebind_datadir_set = false;
 static bool g_refold_rebind_scanned = false;
+#ifdef ZCL_TESTING
 static int  g_refold_rebind_scan_attempts = 0; /* boot-thread single writer */
+#endif
 
 void boot_refold_body_rebind_set_datadir(const char *datadir)
 {
@@ -226,7 +228,9 @@ bool boot_refold_body_span_contiguous(struct main_state *ms,
         !g_refold_rebind_scanned &&
         refold_have_local_block_files(g_refold_rebind_datadir)) {
         g_refold_rebind_scanned = true;
+#ifdef ZCL_TESTING
         g_refold_rebind_scan_attempts++;
+#endif
         LOG_INFO("boot",
                  "[boot] fold-span body gap at h=%d in (%d..%d] — rebinding "
                  "HAVE_DATA from local block files (blk*.dat) before naming a "

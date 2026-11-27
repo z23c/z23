@@ -20,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static struct node_db *g_mesh_status_ndb;
 static struct db_service *g_mesh_status_dbsvc;
 
 static const struct json_value *rpc_input(const struct json_value *params)
@@ -253,7 +252,6 @@ void boot_mesh_status_register_rpc(struct rpc_table *table,
                   "RPC registration requires node_db and db_service");
         return;
     }
-    g_mesh_status_ndb = ndb;
     g_mesh_status_dbsvc = dbsvc;
     const struct rpc_command commands[] = {
         {"mesh", "mesh_status_request", rpc_mesh_status_request, true},
