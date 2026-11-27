@@ -1407,6 +1407,7 @@ static bool bii_boot_init(struct bii_boot_fx *fx)
     main_state_init(&fx->ms);
     bcs_build_chain(&fx->ms, fx->blocks, fx->hashes, BII_BOOT_N);
     fx->ctx.datadir = "/nonexistent-pprev-repair";
+    bii_make_tmpdir(fx->repair_dir, sizeof(fx->repair_dir));
     if (!node_db_open(&fx->ndb, ":memory:"))
         return false;
     for (int i = 0; i < BII_BOOT_N; i++)
@@ -1447,7 +1448,7 @@ static bool bii_boot_oom_case(struct bii_boot_fx *fx)
     int out = -999;
     zcl_alloc_fault_fail_nth("pprev_repair_all", 1);
     bool refused = !boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
-                                                   &fx->ndb, &out);
+                                                   &fx->ndb, fx->repair_dir, &out);
     zcl_alloc_fault_clear();
     return refused && out == -999 && !fx->ndb.tx_open &&
            bii_boot_cursors_are(fx, -2, -2, -2);
@@ -1457,10 +1458,8 @@ static bool bii_boot_read_error_case(struct bii_boot_fx *fx)
 {
     char blocks[300], path[320];
 
-    bii_make_tmpdir(fx->repair_dir, sizeof(fx->repair_dir));
-    fx->ctx.datadir = fx->repair_dir;
-    snprintf(blocks, sizeof(blocks), "%s/blocks", fx->ctx.datadir);
-    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", fx->ctx.datadir);
+    snprintf(blocks, sizeof(blocks), "%s/blocks", fx->repair_dir);
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", fx->repair_dir);
     if ((mkdir(blocks, 0755) != 0 && errno != EEXIST))
         return false;
     FILE *file = fopen(path, "w+b");
@@ -1482,7 +1481,7 @@ static bool bii_boot_read_error_case(struct bii_boot_fx *fx)
     fx->blocks[BII_BOOT_N - 1].nHeight = BII_BOOT_N - 1;
     int out = -999;
     bool refused = wrote && !boot_blkidx_repair_block_index(
-        &fx->ctx, &fx->ms, &fx->ndb, &out);
+        &fx->ctx, &fx->ms, &fx->ndb, fx->repair_dir, &out);
     return refused && out == -999 && !fx->ndb.tx_open &&
            bii_boot_cursors_are(fx, -2, -2, -2);
 }
@@ -1492,7 +1491,7 @@ static bool bii_boot_height_oom_case(struct bii_boot_fx *fx)
     int out = -999;
     zcl_alloc_fault_fail_nth("height_repair_mark", 1);
     bool refused = !boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
-                                                   &fx->ndb, &out);
+                                                   &fx->ndb, fx->repair_dir, &out);
     zcl_alloc_fault_clear();
     return refused && out == -999 && !fx->ndb.tx_open &&
            bii_boot_cursors_are(fx, -2, -2, -2);
@@ -1501,7 +1500,7 @@ static bool bii_boot_height_oom_case(struct bii_boot_fx *fx)
 static bool bii_boot_repair_short_record(struct bii_boot_fx *fx)
 {
     char path[320];
-    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", fx->ctx.datadir);
+    snprintf(path, sizeof(path), "%s/blocks/blk00000.dat", fx->repair_dir);
     FILE *file = fopen(path, "r+b");
     if (file) {
         uint8_t record[36] = {0};
@@ -1527,7 +1526,7 @@ static bool bii_boot_retry_case(struct bii_boot_fx *fx)
     fx->blocks[BII_BOOT_N - 1].nHeight = 1000;
     int out = -999;
     bool retried = boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
-                                                  &fx->ndb, &out);
+                                                  &fx->ndb, fx->repair_dir, &out);
     bool work = work_is_chain(fx->blocks, BII_BOOT_N);
     bool cursors = bii_boot_cursors_are(fx, BII_BOOT_N - 1, BII_BOOT_N,
                                         BII_BOOT_N - 1);
@@ -1542,7 +1541,7 @@ static bool bii_boot_read_retry_case(struct bii_boot_fx *fx)
         return false;
     int out = -999;
     bool retried = boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
-                                                  &fx->ndb, &out);
+                                                  &fx->ndb, fx->repair_dir, &out);
     return retried && out == 0 && work_is_chain(fx->blocks, BII_BOOT_N) &&
            bii_boot_cursors_are(fx, BII_BOOT_N - 1, BII_BOOT_N,
                                 BII_BOOT_N - 1);
@@ -1554,7 +1553,7 @@ static bool bii_boot_foreign_tx_case(struct bii_boot_fx *fx)
         return false;
     int out = -999;
     bool refused = !boot_blkidx_repair_block_index(&fx->ctx, &fx->ms,
-                                                   &fx->ndb, &out);
+                                                   &fx->ndb, fx->repair_dir, &out);
     bool kept = refused && fx->ndb.tx_open && out == -999;
     if (fx->ndb.tx_open)
         node_db_rollback(&fx->ndb);
@@ -1570,6 +1569,11 @@ static int t_mg_boot_pprev_read_error(void)
         bii_boot_free(&fx);
         return failures;
     }
+    int out = -999;
+    BII_RUN("bii: absent block-body directory refuses repair before cursor mutation",
+            !boot_blkidx_repair_block_index(&fx.ctx, &fx.ms, &fx.ndb, NULL, &out) &&
+            !boot_blkidx_repair_block_index(&fx.ctx, &fx.ms, &fx.ndb, "", &out) &&
+            out == -999 && !fx.ndb.tx_open && bii_boot_cursors_are(&fx, -2, -2, -2));
     BII_RUN("bii: boot pprev read error rolls back repair cursors",
             bii_boot_read_error_case(&fx));
     BII_RUN("bii: boot no-op retry after record repair preserves valid work",

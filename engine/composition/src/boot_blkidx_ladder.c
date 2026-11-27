@@ -455,8 +455,13 @@ static int boot_repair_height_cursor(struct main_state *ms, struct node_db *ndb)
 
 /* Bulk height + pprev repair after a legacy import. */
 bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *ms,
-                                    struct node_db *ndb, int *index_repaired_out)
+                                    struct node_db *ndb, const char *body_datadir,
+                                    int *index_repaired_out)
 {
+    if (!body_datadir || !body_datadir[0]) {
+        LOG_ERROR("boot", "block index repair: network block directory unavailable");
+        return false;
+    }
     int index_repaired = 0;
     bool repair_tx = false;
     if (!boot_repair_cursor_tx_begin(ndb, &repair_tx))
@@ -487,7 +492,7 @@ bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *
             node_db_state_get_int(ndb, "pprev_repaired_height",
                                   &pprev_done);
         int pprev_max = -1;
-        int pprev_fixed = block_index_repair_pprev(ms, ctx->datadir,
+        int pprev_fixed = block_index_repair_pprev(ms, body_datadir,
                                                    (int)pprev_done, &pprev_max);
         if (pprev_fixed < 0) {
             LOG_ERROR("boot", "block index pprev repair failed; "

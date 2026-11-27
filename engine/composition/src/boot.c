@@ -2128,7 +2128,10 @@ static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *
         return false;
     }
     boot_topmark("block_index_load", t_phase);
-    if (!boot_blkidx_repair_block_index(ctx, &g_state, &g_node_db, &s->index_repaired))
+    char body_datadir[4096];
+    GetDataDir(true, body_datadir, sizeof(body_datadir));
+    if (!boot_blkidx_repair_block_index(ctx, &g_state, &g_node_db,
+                                        body_datadir, &s->index_repaired))
         return false;
     if (!boot_step_gate_block_index_integrity(ctx, s->replay_pending))
         return false;

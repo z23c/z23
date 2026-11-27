@@ -59,7 +59,8 @@ bool boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
 
 /* Repair loaded heights and parent links, committing durable cursors only on success. */
 bool boot_blkidx_repair_block_index(struct app_context *ctx, struct main_state *ms,
-                                    struct node_db *ndb, int *index_repaired_out);
+                                    struct node_db *ndb, const char *body_datadir,
+                                    int *index_repaired_out);
 
 /* dump_state entry: per-rung fire counters + last-run outcome flags. */
 bool boot_blkidx_rungs_dump_state_json(struct json_value *out, const char *key);
