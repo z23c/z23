@@ -384,6 +384,7 @@ static bool rpc_decoderawtransaction(const struct json_value *params, bool help,
             "decoderawtransaction \"hexstring\"\n"
             "Return a JSON object representing the serialized transaction.\n"
             "Ironwood research v6 decoding inspects wire data without validating proofs.\n"
+            "ironwood_value_balance_zat is signed zatoshis (positive exits, negative deposits); absent without an Ironwood bundle.\n"
             "Arguments:\n"
             "1. \"hexstring\" (string, required) The transaction hex string");
         return true;
