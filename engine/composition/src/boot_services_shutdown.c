@@ -71,6 +71,8 @@ static void shutdown_stop_frontend_services(struct boot_svc_ctx *svc)
     boot_frontend_async_stop(); /* join the start thread before the kernel stops */
     boot_rpc_retry_disarm(&svc->frontend_kernel);
     zcl_service_kernel_stop_all(&svc->frontend_kernel);
+    /* No frontend RPC can retain this boot-owned pointer after shutdown. */
+    rpc_blockchain_set_ballot_catalog_pin(NULL);
     printf("[shutdown] frontend services stopped\n");
 }
 

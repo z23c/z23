@@ -15,6 +15,7 @@
  * boot-site wallet decision folds node context into. Leaf header (only
  * stdint/stddef/stdbool), no config dependency, so no include cycle. */
 #include "wallet/wallet_keystore.h"
+#include "services/miner_signal_catalog_pin.h"
 
 enum zcl_runtime_profile {
     ZCL_RUNTIME_FULL = 0,
@@ -46,6 +47,8 @@ struct app_context {
     const char *params_dir;
     bool testnet;
     bool regtest;
+    bool ballot_catalog_pin_present;
+    struct miner_signal_catalog_pin ballot_catalog_pin;
     bool regtest_shielded;  /* -regtestshielded : with -regtest, activate
                              * Overwinter+Sapling from genesis on this node's
                              * runtime params (zcashd's -nuparams equivalent;

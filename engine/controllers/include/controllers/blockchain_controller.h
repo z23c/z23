@@ -15,6 +15,9 @@
 struct coins_view_db;
 struct coins_view_cache;
 struct node_db;
+struct miner_signal_catalog_pin;
+/* Pin storage is owned by the boot context and outlives the RPC frontend. */
+void rpc_blockchain_set_ballot_catalog_pin(const struct miner_signal_catalog_pin *pin);
 void rpc_blockchain_set_state(struct main_state *ms, struct tx_mempool *mp,
                                const char *datadir);
 void rpc_blockchain_set_coins_db(struct coins_view_db *cvdb,

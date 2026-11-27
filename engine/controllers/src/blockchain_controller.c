@@ -43,6 +43,11 @@ struct blockchain_context *blockchain_ctx(void)
     return &g_blockchain_ctx;
 }
 
+void rpc_blockchain_set_ballot_catalog_pin(const struct miner_signal_catalog_pin *pin)
+{
+    g_blockchain_ctx.ballot_catalog_pin = pin;
+}
+
 void rpc_blockchain_set_state(struct main_state *ms, struct tx_mempool *mp,
                                const char *datadir)
 {

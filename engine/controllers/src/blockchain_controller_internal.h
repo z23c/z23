@@ -28,6 +28,7 @@
 /* ── Shared controller context ──────────────────────────── */
 
 struct blockchain_context {
+    const struct miner_signal_catalog_pin *ballot_catalog_pin;
     struct main_state *main_state;
     struct tx_mempool *mempool;
     const char *datadir;

@@ -209,7 +209,6 @@ bool boot_profile_has_explorer(const struct app_context *ctx)
     return !ctx || (!ctx->private_listeners &&
                     app_runtime_profile_has_explorer(ctx->runtime_profile));
 }
-
 bool boot_profile_has_store(const struct app_context *ctx)
 {
     if (!ctx)
@@ -1447,6 +1446,7 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
      * tracked thread joined at shutdown (boot_frontend_async.c): neither P2P
      * nor the reducer depends on it. RPC answers -28 until it binds; a
      * failure serves DEGRADED and arms the bind retry, as before. */
+    rpc_blockchain_set_ballot_catalog_pin(ctx->ballot_catalog_pin_present ? &ctx->ballot_catalog_pin : NULL);
     boot_frontend_async_start(svc);
     t_svc = boot_mark_step(t_svc, "svc.frontend_tor_start", "svc.peer_discover_self");
     boot_start_nat_probe(svc, ctx);

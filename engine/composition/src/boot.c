@@ -8,6 +8,7 @@
 #include "platform/time_compat.h"
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_block_tree_cache.h"
+#include "config/boot_ballot_catalog.h"
 #include "config/boot_blocktree_cleanup.h"
 #include "config/boot_flight_recorder.h"
 #include "config/flysync_island.h"
@@ -208,7 +209,6 @@ static struct gen_context g_gen;
 static struct wallet_sqlite g_wallet_sqlite;
 static bool g_wallet_sapling_load_ok;
 static struct node_db g_node_db;
-
 bool boot_wallet_cutover_startup_node_db_matches(const struct node_db *ndb)
 {
     return ndb == &g_node_db && boot_stage_is(BOOT_STAGE_BLOCK_INDEX_LOADED);
@@ -1149,7 +1149,7 @@ static bool boot_seq_prologue(struct app_context *ctx, struct boot_seq *s)
      * sysinit_run_stage() call below advances the stage machine. */
     boot_sysinit_register_all();
     t_sub = boot_submark("prologue.observability", t_sub);
-    if (!boot_step_select_chain_and_datadir(ctx))
+    if (!boot_step_select_chain_and_datadir(ctx) || !boot_ballot_catalog_load(ctx))
         return false;
     t_sub = boot_submark("prologue.select_chain", t_sub);
     if (!ctx->mint_anchor && !ctx->ratify_mint_anchor &&
