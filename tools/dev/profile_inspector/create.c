@@ -181,5 +181,9 @@ int main(int argc, char **argv)
     fputs("profile=", stdout); profile_print_hex(p.digest, 32);
     printf(" genesis=%s catalog=", hash_hex); profile_print_hex(selected.catalog, 32);
     printf(" files=%s/result/{manifest.bin,genesis.bin}\n", argv[1]);
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "Profile files published at %s/result. Identity output write failed.\n", argv[1]);
+        return 1;
+    }
     return 0;
 }
