@@ -113,8 +113,9 @@ int test_rpc_ballotstatus(void)
     rpc_table_init(&table);
     register_blockchain_rpc_commands(&table);
     set_rpc_warmup_finished();
+    rpc_blockchain_set_ballot_catalog_pin(NULL);
     static const char *bad[] = {
-        "{}", "[]", "[1,2,3,1,0]", "[1,2,3,1,0,\"" ZERO_CATALOG "\",0]",
+        "{}", "[1,2,3,1,0]", "[1,2,3,1,0,\"" ZERO_CATALOG "\",0]",
         "[\"1\",1,3,1,0,\"" ZERO_CATALOG "\"]",
         "[1.5,1,3,1,0,\"" ZERO_CATALOG "\"]",
         "[true,1,3,1,0,\"" ZERO_CATALOG "\"]",
@@ -127,10 +128,12 @@ int test_rpc_ballotstatus(void)
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
         if (!ballot_status_refuses(&table, bad[i], "Invalid")) failures++;
     chain_params_select(CHAIN_MAIN);
+    if (!ballot_status_refuses(&table, "[]", "testnet and regtest")) failures++;
     const char *valid = "[1,20,23,1,0,\"" ZERO_CATALOG "\"]";
     if (!ballot_status_refuses(&table, valid, "testnet and regtest")) failures++;
     chain_params_select(CHAIN_REGTEST);
     rpc_blockchain_set_state(NULL, NULL, NULL);
+    if (!ballot_status_refuses(&table, "[]", "No ballot catalog pinned")) failures++;
     if (!ballot_status_refuses(&table, valid, "unavailable")) failures++;
     if (!ballot_status_refuses(&table, "[0]", "No ballot catalog pinned")) failures++;
     failures += ballot_catalog_cases(&table);

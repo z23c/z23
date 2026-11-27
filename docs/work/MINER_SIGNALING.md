@@ -52,6 +52,8 @@ Set `testballotcatalog=0daa0498aef76847abdfd5771aed663a241a0853aec641845f588325f
 
 Call `getballotstatus` with a single slot number, for example the JSON parameters `[0]`. A successful query reports `schedule_source` equal to `pinned_catalog`. The pin selects the local catalog used by this status query. It grants no authority to install a consensus rule.
 
+With the same pin, call `getballotstatus` with no parameters (`[]`) to inspect every proposal together. The response gives one catalog, parent hash and height, next height, start and window, followed by a `proposals` array. Each entry has its rule revision, slot, activation height, votes and next-block phase. The query reads and validates each window block body once for the whole catalog, and fails as a whole if evidence is missing or the chain changes.
+
 ## Request a voting block template
 
 On a node with the catalog pinned, pass `[{"ballotslots":[0,1]}]` as the JSON parameters to `getblocktemplate` to signal for slots 0 and 1. The returned `coinbasetxn.data` already contains the final ballot output. Omitting the field preserves ordinary template behavior. Each requested slot must be distinct and the template height must fall inside the voting window.

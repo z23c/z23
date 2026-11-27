@@ -245,7 +245,7 @@ static bool ballot_authority_current(const struct ballot_snapshot *snap)
 }
 
 static bool ballot_read_one(const char *datadir, const struct ballot_block *entry,
-                            struct miner_signal_tally *tally)
+                            struct miner_signal_tally *tallies, size_t count)
 {
     struct block block;
     block_init(&block);
@@ -260,11 +260,11 @@ static bool ballot_read_one(const char *datadir, const struct ballot_block *entr
             ok = transaction_hash_serialized(&block.vtx[i], &block.vtx[i].hash);
         if (ok) ok = domain_consensus_check_block_merkle_root(&block, NULL, 0, NULL).ok;
     }
-    if (ok) {
+    for (size_t i = 0; ok && i < count; i++) {
         struct miner_signal_tally next;
-        ok = miner_signal_connect(tally, entry->height, &block.header.hashPrevBlock,
+        ok = miner_signal_connect(&tallies[i], entry->height, &block.header.hashPrevBlock,
                                   &hash, &block.vtx[0], &next).ok;
-        if (ok) *tally = next;
+        if (ok) tallies[i] = next;
     }
     block_free(&block);
     return ok;
@@ -289,7 +289,7 @@ static bool ballot_tally(const char *datadir, const struct miner_signal_schedule
     if ((int64_t)snap->parent_height + 1 < s->start) return true;
     if (!miner_signal_begin(s, s->start - 1, &snap->anchor_hash, tally).ok) return false;
     for (size_t i = 0; i < snap->count; i++)
-        if (!ballot_read_one(datadir, &snap->blocks[i], tally)) return false;
+        if (!ballot_read_one(datadir, &snap->blocks[i], tally, 1)) return false;
     enum miner_signal_phase p;
     if (!miner_signal_phase_at(tally, snap->parent_height + 1, &p).ok) return false;
     *phase = ballot_phase_name(p);
@@ -344,6 +344,108 @@ static bool ballot_status_snapshot(const struct miner_signal_schedule *s,
     return ok;
 }
 
+/* One verified pin, one body read per height, and one authority recheck for
+ * the entire catalog. The pin owns its entries and is immutable after boot. */
+static bool ballot_catalog_tallies(const struct miner_signal_catalog_pin *pin,
+                                   const struct miner_signal_schedule *first,
+                                   const struct ballot_snapshot *snap, const char *datadir,
+                                   struct miner_signal_tally *tallies)
+{
+    if ((int64_t)snap->parent_height + 1 < first->start) return true;
+    for (size_t i = 0; i < pin->count; i++) {
+        struct miner_signal_schedule s = *first;
+        s.slot = (uint16_t)i;
+        s.activation = pin->entries[i].activation;
+        if (!miner_signal_begin(&s, s.start - 1, &snap->anchor_hash, &tallies[i]).ok)
+            return false; // raw-return-ok:caller reports unavailable ballot history
+    }
+    for (size_t i = 0; i < snap->count; i++)
+        if (!ballot_read_one(datadir, &snap->blocks[i], tallies, pin->count)) return false;
+    return true;
+}
+
+static bool ballot_catalog_row(struct json_value *array,
+                               const struct miner_signal_catalog_pin *pin, size_t i,
+                               const struct ballot_snapshot *snap,
+                               const struct miner_signal_tally *tally)
+{
+    const char *phase = "scheduled";
+    if ((int64_t)snap->parent_height + 1 >= pin->start) {
+        enum miner_signal_phase p;
+        if (!miner_signal_phase_at(tally, snap->parent_height + 1, &p).ok ||
+            !(phase = ballot_phase_name(p))) return false; // raw-return-ok:caller reports unavailable ballot history
+    }
+    char revision[65];
+    zcl_hex_encode(pin->entries[i].rule_revision, 32, revision);
+    struct json_value row = {0};
+    json_set_object(&row);
+    bool ok = json_push_kv_str(&row, "rule_revision", revision) &&
+        json_push_kv_int(&row, "slot", (int64_t)i) &&
+        json_push_kv_int(&row, "activation", pin->entries[i].activation) &&
+        json_push_kv_int(&row, "votes", tally->votes) &&
+        json_push_kv_str(&row, "phase_of_next_block", phase) &&
+        json_push_back(array, &row);
+    json_free(&row);
+    return ok;
+}
+
+static bool ballot_catalog_reply(struct json_value *result,
+                                 const struct miner_signal_catalog_pin *pin,
+                                 const struct ballot_snapshot *snap,
+                                 const struct miner_signal_tally *tallies,
+                                 const char *network)
+{
+    char hash[65], digest[65];
+    uint256_get_hex(&snap->parent_hash, hash);
+    zcl_hex_encode(pin->digest, 32, digest);
+    struct json_value rows = {0};
+    json_set_array(&rows);
+    bool ok = true;
+    for (size_t i = 0; ok && i < pin->count; i++)
+        ok = ballot_catalog_row(&rows, pin, i, snap, &tallies[i]);
+    json_set_object(result);
+    ok = ok && json_push_kv_str(result, "network", network) &&
+        json_push_kv_str(result, "parent_basis", "durable_provable_tip") &&
+        json_push_kv_str(result, "schedule_source", "pinned_catalog") &&
+        json_push_kv_str(result, "catalog", digest) &&
+        json_push_kv_int(result, "parent_height", snap->parent_height) &&
+        json_push_kv_str(result, "parent_hash", hash) &&
+        json_push_kv_int(result, "next_height", (int64_t)snap->parent_height + 1) &&
+        json_push_kv_int(result, "start", pin->start) &&
+        json_push_kv_int(result, "window", pin->window) &&
+        json_push_kv(result, "proposals", &rows);
+    json_free(&rows);
+    return ok;
+}
+
+static bool ballot_catalog_status(const struct blockchain_context *ctx,
+                                  const struct chain_params *cp, struct json_value *result)
+{
+    const struct miner_signal_catalog_pin *pin = ctx->ballot_catalog_pin;
+    if (!pin) return ballot_fail(result, "No ballot catalog pinned at startup");
+    struct miner_signal_schedule first = {0};
+    if (pin->count == 0 || pin->count > 256 ||
+        memcmp(pin->genesis, cp->consensus.hashGenesisBlock.data, 32) ||
+        !miner_signal_catalog_pin_select(pin, 0, &first).ok)
+        return ballot_fail(result, "Invalid pinned ballot catalog");
+    struct ballot_snapshot snap = {0};
+    snap.blocks = zcl_calloc((size_t)first.window, sizeof(*snap.blocks), "ballot status ancestry");
+    struct miner_signal_tally *tallies = zcl_calloc(pin->count, sizeof(*tallies), "ballot tallies");
+    if (!snap.blocks || !tallies) {
+        free(snap.blocks); free(tallies);
+        return ballot_fail(result, "Out of memory");
+    }
+    bool ok = ballot_snapshot_evidence(&first, &snap) &&
+        ballot_snapshot_positions(ctx->main_state, &snap) &&
+        ballot_snapshot_current(ctx->main_state, &snap) &&
+        ballot_catalog_tallies(pin, &first, &snap, ctx->datadir, tallies) &&
+        ballot_snapshot_current(ctx->main_state, &snap) && ballot_authority_current(&snap);
+    if (ok) ok = ballot_catalog_reply(result, pin, &snap, tallies, cp->strNetworkID);
+    if (!ok) ballot_fail(result, "Validated ballot history unavailable or chain changed; retry");
+    free(tallies); free(snap.blocks);
+    return ok;
+}
+
 
 static bool ballot_status_schedule(const struct json_value *params, const struct chain_params *cp,
                                    const struct blockchain_context *ctx,
@@ -375,12 +477,21 @@ bool rpc_getballotstatus(const struct json_value *params, bool help,
                          struct json_value *result)
 {
     RPC_HELP(help, result,
-        "getballotstatus slot | fork_id_hex start window rules slot | start window activation slots slot catalog_hex\n"
+        "getballotstatus [slot | fork_id_hex start window rules slot | start window activation slots slot catalog_hex]\n"
         "Read testnet ballot history at the durable provable tip. Each counted block requires full validation evidence. Maximum window 256 blocks.");
     const struct chain_params *cp = chain_params_get();
     struct miner_signal_schedule s = {0};
     const char *source;
     struct blockchain_context *ctx = blockchain_ctx();
+    if (params && params->type == JSON_ARR && json_size(params) == 0) {
+        if (!ballot_test_network(cp))
+            return ballot_fail(result, "Pinned ballot status is available only on testnet and regtest");
+        if (!ctx->ballot_catalog_pin)
+            return ballot_fail(result, "No ballot catalog pinned at startup");
+        if (!ctx->main_state || !ctx->datadir)
+            return ballot_fail(result, "Chain state or block storage unavailable");
+        return ballot_catalog_status(ctx, cp, result);
+    }
     if (!ballot_status_schedule(params, cp, ctx, &s, &source, result))
         return false; // raw-return-ok:parameter helper populated the RPC error
     if (!ballot_test_network(cp))

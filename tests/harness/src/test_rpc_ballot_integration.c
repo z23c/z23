@@ -6,6 +6,7 @@
 #include "chain/chainparams.h"
 #include "controllers/blockchain_controller.h"
 #include "jobs/reducer_frontier.h"
+#include "services/miner_signal_catalog_pin.h"
 #include "primitives/block.h"
 #include "script/script.h"
 #include "storage/disk_block_io.h"
@@ -30,13 +31,16 @@ struct ballot_fixture {
     struct uint256 hash[4];
     struct disk_block_pos pos;
     struct rpc_table table;
+    struct miner_signal_catalog_pin pin;
     sqlite3 *db;
     bool ms_ready, store_open;
 };
 
 static const char fixture_catalog[] =
     "[\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",1,1,"
-    "[[\"1111111111111111111111111111111111111111111111111111111111111111\",4]],0]";
+    "[[\"1111111111111111111111111111111111111111111111111111111111111111\",4],"
+    "[\"2222222222222222222222222222222222222222222222222222222222222222\",5],"
+    "[\"3333333333333333333333333333333333333333333333333333333333333333\",6]],0]";
 
 static bool bf_sql(sqlite3 *db, const char *s)
 {
@@ -86,7 +90,8 @@ static bool bf_status(struct ballot_fixture *f, const char *raw, const char *sou
 static bool bf_call(struct ballot_fixture *f, const char *phase, int votes)
 {
     return bf_status(f, fixture_catalog, "supplied_catalog", phase, votes) &&
-           bf_status(f, f->raw_schedule, "raw_parameters", phase, votes);
+           bf_status(f, f->raw_schedule, "raw_parameters", phase, votes) &&
+           bf_status(f, "[0]", "pinned_catalog", phase, votes);
 }
 
 static bool bf_catalog(struct ballot_fixture *f, uint8_t digest[32])
@@ -98,7 +103,11 @@ static bool bf_catalog(struct ballot_fixture *f, uint8_t digest[32])
     ok = ok && hex && zcl_hex_decode(hex, digest, 32);
     if (ok) {
         zcl_hex_encode(digest, 32, f->catalog_hex);
-        snprintf(f->raw_schedule, sizeof(f->raw_schedule), "[1,1,4,1,0,\"%s\"]", f->catalog_hex);
+        snprintf(f->raw_schedule, sizeof(f->raw_schedule), "[1,1,4,3,0,\"%s\"]", f->catalog_hex);
+        ok = miner_signal_catalog_pin_parse(json_at(&params, 0), json_at(&params, 1),
+              json_at(&params, 2), json_at(&params, 3),
+              chain_params_get()->consensus.hashGenesisBlock.data, &f->pin).ok;
+        if (ok) rpc_blockchain_set_ballot_catalog_pin(&f->pin);
     }
     json_free(&params);
     json_free(&result);
@@ -141,7 +150,7 @@ static bool bf_body(struct ballot_fixture *f)
     unsigned char payload[69] = {'Z', '2', '3', 'V', 1};
     if (!bf_catalog(f, payload + 5))
         return false;
-    payload[37] = 1;
+    payload[37] = 5;
     struct script *sp = &b->vtx[0].vout[0].script_pub_key;
     if (!script_push_op(sp, OP_RETURN) || !script_push_data(sp, payload, sizeof(payload)))
         return false;
@@ -241,11 +250,79 @@ static bool bf_positive_cases(struct ballot_fixture *f)
            bf_call(f, "active", 1);
 }
 
+static bool bf_catalog_row_check(const struct json_value *rows, size_t i)
+{
+    const struct json_value *row = json_at(rows, i);
+    const char *phase = json_get_str(json_get(row, "phase_of_next_block"));
+    const char *revision = json_get_str(json_get(row, "rule_revision"));
+    char expected_revision[65];
+    memset(expected_revision, (int)('1' + i), 64);
+    expected_revision[64] = '\0';
+    return revision && !strcmp(revision, expected_revision) &&
+        json_get_int(json_get(row, "slot")) == (int64_t)i &&
+        json_get_int(json_get(row, "activation")) == (int64_t)(4 + i) &&
+        json_get_int(json_get(row, "votes")) == (i == 1 ? 0 : 1) && phase &&
+        !strcmp(phase, i == 0 ? "active" : i == 1 ? "expired" : "locked_in");
+}
+
+static bool bf_catalog_status(struct ballot_fixture *f, bool expected)
+{
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    bool pass = ok == expected;
+    if (expected && ok) {
+        const struct json_value *rows = json_get(&result, "proposals");
+        pass = rows && json_size(rows) == 3 &&
+            json_get_int(json_get(&result, "parent_height")) == 3 &&
+            json_get_int(json_get(&result, "next_height")) == 4 &&
+            !strcmp(json_get_str(json_get(&result, "catalog")), f->catalog_hex);
+        for (size_t i = 0; pass && i < 3; i++)
+            pass = bf_catalog_row_check(rows, i);
+    }
+    json_free(&params); json_free(&result);
+    return pass;
+}
+
+static bool bf_catalog_limit(struct ballot_fixture *f)
+{
+    struct miner_signal_catalog_pin pin = f->pin;
+    pin.count = 256;
+    for (size_t i = 0; i < pin.count; i++) {
+        memset(pin.entries[i].rule_revision, 0, 32);
+        pin.entries[i].rule_revision[0] = (uint8_t)i;
+        pin.entries[i].activation = 4;
+    }
+    struct miner_signal_catalog catalog = {
+        .start = pin.start, .window = pin.window, .count = pin.count, .entries = pin.entries
+    };
+    memcpy(catalog.network_id, pin.network_id, 32);
+    memcpy(catalog.genesis, pin.genesis, 32);
+    struct miner_signal_schedule schedule;
+    if (!miner_signal_catalog_select(&catalog, 0, &schedule).ok) return false;
+    memcpy(pin.digest, schedule.catalog, 32);
+    rpc_blockchain_set_ballot_catalog_pin(&pin);
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    const struct json_value *rows = json_get(&result, "proposals");
+    ok = ok && rows && json_size(rows) == 256 &&
+        json_get_int(json_get(json_at(rows, 255), "slot")) == 255;
+    json_free(&result);
+    pin.digest[0] ^= 1;
+    ok = ok && !rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    pin.count = 257;
+    ok = ok && !rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    json_free(&params); json_free(&result);
+    rpc_blockchain_set_ballot_catalog_pin(&f->pin);
+    return ok;
+}
+
 static bool bf_negative_cases(struct ballot_fixture *f)
 {
     sqlite3 *db = f->db;
     if (!bf_sql(db, "UPDATE proof_validate_log SET block_hash=zeroblob(32) WHERE height=1") ||
-        !bf_call(f, NULL, 0) ||
+        !bf_call(f, NULL, 0) || !bf_catalog_status(f, false) ||
         !bf_hash_row(db, "UPDATE proof_validate_log SET block_hash=?2 WHERE height=?1", 1,
                      &f->hash[1]) ||
         !bf_sql(db, "DELETE FROM script_validate_log WHERE height=1") ||
@@ -256,7 +333,7 @@ static bool bf_negative_cases(struct ballot_fixture *f)
             1, &f->hash[1]))
         return false;
     block_index_disk_pos_store(&f->index[1], 999999, 8);
-    if (!bf_call(f, NULL, 0))
+    if (!bf_call(f, NULL, 0) || !bf_catalog_status(f, false))
         return false;
     block_index_disk_pos_store(&f->index[1], f->pos.nFile, f->pos.nPos + 1);
     return bf_call(f, NULL, 0);
@@ -264,6 +341,7 @@ static bool bf_negative_cases(struct ballot_fixture *f)
 
 static bool bf_cleanup(struct ballot_fixture *f)
 {
+    rpc_blockchain_set_ballot_catalog_pin(NULL);
     rpc_blockchain_set_state(NULL, NULL, NULL);
     if (f->ms_ready)
         main_state_free(&f->ms);
@@ -287,7 +365,8 @@ static bool bf_cleanup(struct ballot_fixture *f)
 static int ballot_integration_child(void)
 {
     struct ballot_fixture f = {0};
-    bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_negative_cases(&f);
+    bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_catalog_status(&f, true) &&
+              bf_catalog_limit(&f) && bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
     return ok ? 0 : 1;
