@@ -22,6 +22,7 @@
 #define BALLOT_MAX_WINDOW 256
 
 struct ballot_block {
+    const struct block_index *index;
     struct uint256 hash;
     struct disk_block_pos pos;
     int32_t height;
@@ -191,9 +192,22 @@ static bool ballot_snapshot_positions(struct main_state *ms, struct ballot_snaps
         if (!entry || !entry->phashBlock || entry->nHeight != b->height ||
             !uint256_eq(entry->phashBlock, &b->hash) || block_has_any_failure(entry) ||
             !block_index_disk_pos_snapshot(entry, &b->pos, NULL)) { ok = false; break; }
+        b->index = entry;
     }
     zcl_mutex_unlock(&ms->cs_main);
     return ok;
+}
+
+/* Compare the durable vote endpoint with the selected window under its writer's
+ * lock. Sparse repair can preserve lower slots, so agreement here witnesses
+ * the visible selection only. A disagreement always invalidates the tally. */
+static bool ballot_endpoint_current(const struct active_chain *chain,
+                                    const struct ballot_snapshot *snap)
+{
+    if (!snap->count)
+        return !snap->has_anchor || uint256_eq(&snap->anchor_hash, &snap->parent_hash);
+    const struct ballot_block *end = &snap->blocks[snap->count - 1];
+    return active_chain_at(chain, end->height) == end->index;
 }
 
 static bool ballot_snapshot_current(struct main_state *ms,
@@ -205,7 +219,7 @@ static bool ballot_snapshot_current(struct main_state *ms,
     struct block_index *tip = height >= 0 ? active_chain_at(&ms->chain_active, height) : NULL;
     same = height == snap->parent_height && tip && tip->phashBlock &&
            tip->nHeight == height && uint256_eq(tip->phashBlock, &snap->parent_hash) &&
-           !block_has_any_failure(tip);
+           !block_has_any_failure(tip) && ballot_endpoint_current(&ms->chain_active, snap);
     zcl_mutex_unlock(&ms->chain_active.write_lock);
     return same;
 }

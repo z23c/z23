@@ -29,6 +29,7 @@ struct ballot_fixture {
     struct block block;
     struct block_index index[4];
     struct block_index side_index;
+    struct block_index side_tail[2];
     struct uint256 hash[4];
     struct disk_block_pos pos;
     struct rpc_table table;
@@ -410,6 +411,34 @@ static bool bf_membership_cases(struct ballot_fixture *f)
     return sparse_ok;
 }
 
+/* A different parent branch has been published after the voting window.
+ * The old window's receipts and body still agree with each other. */
+static bool bf_window_branch(struct ballot_fixture *f)
+{
+    const char *update = "UPDATE tip_finalize_log SET tip_hash=?2 WHERE height=?1";
+    struct block_index *prev = &f->side_index;
+    for (int h = 2; h <= 3; h++) {
+        struct block_index *entry = &f->side_tail[h - 2];
+        block_index_init(entry);
+        entry->nHeight = h;
+        entry->hashBlock.data[0] = (uint8_t)(40 + h);
+        entry->phashBlock = &entry->hashBlock;
+        entry->pprev = prev;
+        if (!block_map_insert(&f->ms.map_block_index, entry->phashBlock, entry) ||
+            !bf_hash_row(f->db, update, h, entry->phashBlock)) return false;
+        prev = entry;
+    }
+    if (!active_chain_move_window_tip(&f->ms.chain_active, prev)) return false;
+    bool single_refused = bf_call(f, NULL, 0);
+    bool batch_refused = bf_catalog_status(f, false);
+    if (!single_refused || !batch_refused)
+        fprintf(stderr, "wrong branch window: single refused=%d, catalog refused=%d\n",
+                single_refused, batch_refused);
+    for (int h = 2; h <= 3; h++)
+        if (!bf_hash_row(f->db, update, h, &f->hash[h])) return false;
+    return bf_advance(f, 3) && single_refused && batch_refused;
+}
+
 static bool bf_cleanup(struct ballot_fixture *f)
 {
     rpc_blockchain_set_ballot_catalog_pin(NULL);
@@ -437,7 +466,8 @@ static int ballot_integration_child(void)
 {
     struct ballot_fixture f = {0};
     bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_membership_cases(&f) &&
-              bf_catalog_status(&f, true) && bf_catalog_limit(&f) && bf_negative_cases(&f);
+              bf_window_branch(&f) && bf_catalog_status(&f, true) &&
+              bf_catalog_limit(&f) && bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
     return ok ? 0 : 1;
