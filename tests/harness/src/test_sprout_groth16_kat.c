@@ -388,6 +388,15 @@ static int kat_check_tampered_inputs(struct js_description *js, uint8_t *h_sig)
     return failures;
 }
 
+static bool kat_has_withdrawal_shape(const struct transaction *tx)
+{
+    return tx->overwintered && tx->version == SAPLING_TX_VERSION &&
+        tx->version_group_id == SAPLING_VERSION_GROUP_ID && tx->expiry_height == 476997 &&
+        tx->num_vin == 0 && tx->num_vout == 1 && tx->vout &&
+        tx->num_joinsplit == 1 && tx->v_joinsplit && tx->v_joinsplit[0].use_groth &&
+        tx->num_shielded_spend == 0 && tx->num_shielded_output == 0 && !tx->value_balance;
+}
+
 static int kat_withdrawal_identity(const struct transaction *tx,
                                    const struct byte_stream *stream)
 {
@@ -399,11 +408,7 @@ static int kat_withdrawal_identity(const struct transaction *tx,
     };
     char txid[65];
     uint256_get_hex(&tx->hash, txid);
-    bool shape = stream_remaining(stream) == 0 && tx->overwintered &&
-        tx->version == SAPLING_TX_VERSION && tx->version_group_id == SAPLING_VERSION_GROUP_ID &&
-        tx->expiry_height == 476997 && tx->num_vin == 0 && tx->num_vout == 1 &&
-        tx->num_joinsplit == 1 && tx->v_joinsplit && tx->v_joinsplit[0].use_groth &&
-        tx->num_shielded_spend == 0 && tx->num_shielded_output == 0 && !tx->value_balance;
+    bool shape = stream_remaining(stream) == 0 && kat_has_withdrawal_shape(tx);
     KAT_CHECK("withdrawal pins v4 transaction identity and shape", shape &&
               strcmp(txid, "263fa0c5022f0cde555a7463193cadae62617b318935e6dec54091526c5ecf13") == 0);
     KAT_CHECK("withdrawal pins transparent recipient, value and fee", shape &&
