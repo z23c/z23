@@ -319,7 +319,7 @@ void app_log_bootstrap_sources(const struct chain_params *params,
 
     const char *home = getenv("HOME");
     bool operator_onion_seed_file = false;
-    if (home) {
+    if (home && !chain_research_profile_current()) {
         char p[512];
         snprintf(p, sizeof(p), "%s/.config/zclassic23/onion-seeds", home);
         struct platform_file_metadata metadata;
