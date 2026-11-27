@@ -25,6 +25,8 @@ enum experimental_profile_status {
 };
 void experimental_profile_digest(const void *data, size_t size, uint8_t out[32]);
 struct zcl_result experimental_profile_read_file(const char *path, uint8_t *buf, size_t cap, size_t *len);
+/* Replace *out with manifest fields only. A successful parse clears prior
+ * genesis and catalog authentication data; failure preserves *out. */
 struct zcl_result experimental_profile_parse(const uint8_t *buf, size_t len, struct experimental_profile *out);
 struct zcl_result experimental_profile_genesis(const uint8_t *bytes, size_t len, const struct experimental_profile *p, struct uint256 *hash);
 enum experimental_profile_status experimental_profile_inspect(const uint8_t *manifest, size_t mlen,

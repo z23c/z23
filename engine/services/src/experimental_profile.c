@@ -162,7 +162,11 @@ struct zcl_result experimental_profile_read_file(const char *path, uint8_t *buf,
 struct zcl_result experimental_profile_parse(const uint8_t *buf, size_t len,
                                              struct experimental_profile *out)
 {
-    return parse_profile(buf, len, out) ? ZCL_OK : ZCL_ERR(-2, "Invalid profile manifest");
+    struct experimental_profile next = {0};
+    if (!out || !parse_profile(buf, len, &next))
+        return ZCL_ERR(-2, "Invalid profile manifest");
+    *out = next;
+    return ZCL_OK;
 }
 
 struct zcl_result experimental_profile_genesis(const uint8_t *bytes, size_t len,
@@ -190,7 +194,7 @@ enum experimental_profile_status experimental_profile_inspect(
 {
     if (!manifest || !genesis || !out) return EXPERIMENTAL_PROFILE_INVALID;
     struct experimental_profile next = {0};
-    if (!experimental_profile_parse(manifest, mlen, &next).ok ||
+    if (!parse_profile(manifest, mlen, &next) ||
         !experimental_profile_genesis(genesis, glen, &next, &next.genesis_hash).ok)
         return EXPERIMENTAL_PROFILE_INVALID;
     memcpy(next.catalog.genesis, next.genesis_hash.data, 32);

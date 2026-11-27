@@ -141,6 +141,23 @@ static int profile_owned_cases(void)
         profile_fixture_genesis, sizeof(profile_fixture_genesis), NULL, &copy) ==
         EXPERIMENTAL_PROFILE_INVALID);
     CAT_CHECK(memcmp(&copy, before, sizeof(copy)) == 0);
+    /* Reuse an authenticated object for a different manifest. */
+    memcpy(manifest, profile_fixture_manifest, sizeof(manifest));
+    manifest[sizeof(manifest) - 36] ^= 1; /* Different revision. */
+    manifest[56] ^= 1; /* Different genesis timestamp. */
+    manifest[sizeof(manifest) - 4]++; /* Next activation height. */
+    manifest[sizeof(manifest) - 1] = 0x80;
+    CAT_CHECK(!experimental_profile_parse(manifest, sizeof(manifest), &copy).ok);
+    CAT_CHECK(!memcmp(before, &copy, sizeof(copy)));
+    manifest[sizeof(manifest) - 1] = 0;
+    CAT_CHECK(experimental_profile_parse(manifest, sizeof(manifest), &copy).ok);
+    CAT_CHECK(copy.catalog.entries[0].activation == 24);
+    CAT_CHECK(memcmp(copy.digest, identity, sizeof(identity)) != 0);
+    CAT_CHECK(copy.genesis_size == 0 && uint256_is_null(&copy.genesis_hash));
+    static const uint8_t zeros[EXPERIMENTAL_GENESIS_SIZE] = {0};
+    CAT_CHECK(!memcmp(copy.genesis_wire, zeros, sizeof(copy.genesis_wire)));
+    CAT_CHECK(!memcmp(copy.catalog.digest, zeros, sizeof(copy.catalog.digest)));
+    CAT_CHECK(!experimental_profile_select(&copy, 0, &schedule).ok);
     return 0;
 }
 
