@@ -1478,7 +1478,7 @@ static int case_preview(void)
          "filled from the copy directory") {
         ASSERT(app_launch_preview("skycombat", "/copies/sky-1", &p));
         ASSERT(p.arg_count == 2);
-        ASSERT(strcmp(p.args[0], "--qa-frames=120") == 0);
+        ASSERT(strcmp(p.args[0], "--qa-frames=12") == 0);
         ASSERT(strcmp(p.args[1], "--capture=/copies/sky-1/preview.png") == 0);
         ASSERT(strcmp(p.capture_path, "/copies/sky-1/preview.png") == 0);
         /* no preview row, no directory, no name: no preview */

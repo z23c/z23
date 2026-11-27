@@ -37,7 +37,7 @@
 ZCL_APP_LAUNCH("skycombat", "sky,sky-combat,airplane", "z23-skycombat",
                ZCL_APP_ARGV(), "DISPLAY: Device initialized successfully",
                ZCL_APP_RAISE_SIGUSR1, "make game",
-               ZCL_APP_ARGV("--qa-frames=120", "--capture=%s"), "preview.png")
+               ZCL_APP_ARGV("--qa-frames=12", "--capture=%s"), "preview.png")
 
 ZCL_APP_LAUNCH("tasks", "task,ztasks", "z23", ZCL_APP_ARGV("app", "tasks", "open"), "",
                ZCL_APP_RAISE_UNSUPPORTED, "z23 app copy tasks",

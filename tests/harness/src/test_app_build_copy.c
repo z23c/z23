@@ -1437,7 +1437,7 @@ static int abc_explicit_saved_version(void)
 }
 
 /* A successful build of a skycombat copy offers ONE preview run: the built
- * image, --qa-frames=120 and a --capture in the build store, outside the copy. */
+ * image, --qa-frames=12 and a --capture in the build store, outside the copy. */
 static int abc_preview_skycombat(void)
 {
     int failures = 0;
@@ -1456,7 +1456,7 @@ static int abc_preview_skycombat(void)
         ASSERT(strcmp(json_get_str(&argv->children[0]),
                       abc_get(&l, "image_path")) == 0);
         ASSERT(strcmp(json_get_str(&argv->children[1]),
-                      "--qa-frames=120") == 0);
+                      "--qa-frames=12") == 0);
         char cap[ABC_PATH * 2];
         const char *img = strrchr(abc_get(&l, "image_path"), '/');
         ASSERT(img != NULL);
@@ -1465,7 +1465,7 @@ static int abc_preview_skycombat(void)
         (void)snprintf(want, sizeof(want), "--capture=%s", cap);
         ASSERT(strcmp(json_get_str(&argv->children[2]), want) == 0);
         (void)snprintf(line, sizeof(line),
-                       "Preview: run %s --qa-frames=120 --capture=%s "
+                       "Preview: run %s --qa-frames=12 --capture=%s "
                        "to save %s", abc_get(&l, "image_path"), cap, cap);
         ASSERT(strcmp(abc_get(&l, "preview"), line) == 0);
         abc_close(&l);
