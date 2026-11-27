@@ -133,25 +133,28 @@ static void prune_dependencies(const struct migration_activation_rule *rules, si
     }
 }
 
-static enum migration_activation_result select_qualified(
+static struct zcl_result select_qualified(
     const struct migration_activation_proposal *proposals, size_t np,
     const struct migration_activation_qualified *qualified, size_t nq,
     int32_t height, bool selected[256])
 {
     for (size_t i = 0; i < nq; ++i) {
-        if (qualified[i].height < 1) return MIGRATION_ACTIVATION_INVALID;
+        if (qualified[i].height < 1)
+            return ZCL_ERR(MIGRATION_ACTIVATION_INVALID, "qualified revision has invalid height");
         for (size_t j = 0; j < i; ++j)
-            if (!memcmp(qualified[i].revision, qualified[j].revision, 32)) return MIGRATION_ACTIVATION_INVALID;
+            if (!memcmp(qualified[i].revision, qualified[j].revision, 32))
+                return ZCL_ERR(MIGRATION_ACTIVATION_INVALID, "duplicate qualified revision");
         if (qualified[i].height != height) continue;
         size_t j = 0;
         while (j < np && memcmp(qualified[i].revision, proposals[j].revision, 32)) ++j;
-        if (j == np) return MIGRATION_ACTIVATION_UNKNOWN_REVISION;
+        if (j == np)
+            return ZCL_ERR(MIGRATION_ACTIVATION_UNKNOWN_REVISION, "qualified revision has no local migration mapping");
         selected[j] = true;
     }
-    return MIGRATION_ACTIVATION_OK;
+    return ZCL_OK;
 }
 
-enum migration_activation_result migration_activation_resolve(
+struct zcl_result migration_activation_resolve(
     const struct migration_activation_rule *rules, size_t nr,
     const struct migration_activation_proposal *proposals, size_t np,
     uint64_t prior, uint64_t consented_migrations,
@@ -161,16 +164,18 @@ enum migration_activation_result migration_activation_resolve(
     uint64_t all;
     if (!out || height < 1 || nq > 256 || (nq && !qualified) ||
         !validate_rules(rules, nr, prior, &all) ||
-        !validate_proposals(proposals, np, rules, nr, all)) return MIGRATION_ACTIVATION_INVALID;
+        !validate_proposals(proposals, np, rules, nr, all))
+        return ZCL_ERR(MIGRATION_ACTIVATION_INVALID, "invalid migration rules, proposals, or request");
     bool selected[256] = {0};
-    enum migration_activation_result choice = select_qualified(proposals, np, qualified, nq, height, selected);
-    if (choice != MIGRATION_ACTIVATION_OK) return choice;
+    struct zcl_result choice = select_qualified(proposals, np, qualified, nq, height, selected);
+    if (!choice.ok) return choice;
     prune_conflicts(rules, nr, proposals, np, prior, selected);
     prune_dependencies(rules, nr, proposals, np, prior, selected);
     uint64_t result = selected_members(proposals, np, selected, prior);
-    if ((result & ~prior) & ~consented_migrations) return MIGRATION_ACTIVATION_NO_CONSENT;
+    if ((result & ~prior) & ~consented_migrations)
+        return ZCL_ERR(MIGRATION_ACTIVATION_NO_CONSENT, "local consent missing for resolved migrations");
     *out = result;
-    return MIGRATION_ACTIVATION_OK;
+    return ZCL_OK;
 }
 
 static bool tally_matches(const struct miner_signal_tally *tally,
@@ -209,7 +214,7 @@ static bool collect_qualified(const struct miner_signal_catalog *catalog,
     return true;
 }
 
-enum migration_activation_result migration_activation_next_from_parent(
+struct zcl_result migration_activation_next_from_parent(
     const struct miner_signal_catalog *catalog,
     const struct miner_signal_tally *tallies, size_t tally_count,
     int32_t parent_height, const struct uint256 *parent_hash,
@@ -219,15 +224,16 @@ enum migration_activation_result migration_activation_next_from_parent(
 {
     if (!catalog || !tallies || !parent_hash || !active ||
         parent_height == INT32_MAX || tally_count != catalog->count)
-        return MIGRATION_ACTIVATION_INVALID;
+        return ZCL_ERR(MIGRATION_ACTIVATION_INVALID, "invalid migration activation input or parent tally");
     struct miner_signal_schedule expected;
     if (!miner_signal_catalog_select(catalog, 0, &expected).ok ||
         parent_height < expected.start - 1)
-        return MIGRATION_ACTIVATION_INVALID;
+        return ZCL_ERR(MIGRATION_ACTIVATION_INVALID, "invalid migration activation input or parent tally");
     struct migration_activation_qualified qualified[256];
     size_t qualified_count;
     if (!collect_qualified(catalog, tallies, &expected, parent_height, parent_hash,
-                           qualified, &qualified_count)) return MIGRATION_ACTIVATION_INVALID;
+                           qualified, &qualified_count))
+        return ZCL_ERR(MIGRATION_ACTIVATION_INVALID, "invalid or mismatched parent tally");
     return migration_activation_resolve(rules, rule_count, proposals, proposal_count,
                                         prior, consented_migrations, qualified,
                                         qualified_count, parent_height + 1, active);

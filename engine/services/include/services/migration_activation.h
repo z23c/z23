@@ -5,21 +5,24 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "base/result.h"
 #include "services/miner_signal_catalog.h"
 
 /* Migration IDs index bits, not array positions. Revision IDs are raw bytes. */
 struct migration_activation_rule { uint8_t id; uint64_t requires, conflicts; };
 struct migration_activation_proposal { uint8_t revision[32]; uint64_t members; };
 struct migration_activation_qualified { uint8_t revision[32]; int32_t height; };
-enum migration_activation_result {
+enum migration_activation_error {
     MIGRATION_ACTIVATION_OK, MIGRATION_ACTIVATION_INVALID,
     MIGRATION_ACTIVATION_UNKNOWN_REVISION, MIGRATION_ACTIVATION_NO_CONSENT
 };
-/* Pure resolution for one candidate height, using catalog-qualified entries
+/* Return ZCL_OK on success; failure code distinguishes invalid input, unknown
+ * due revision, and missing local consent, with an explanatory message.
+ * Pure resolution for one candidate height, using catalog-qualified entries
  * and a separate local revision-to-bundle registry. Unknown future revisions
  * do not block this height. Failure leaves *active unchanged. This neither
  * validates a chain nor activates rules. */
-enum migration_activation_result migration_activation_resolve(
+struct zcl_result migration_activation_resolve(
     const struct migration_activation_rule *rules, size_t rule_count,
     const struct migration_activation_proposal *proposals, size_t proposal_count,
     uint64_t prior, uint64_t consented_migrations, const struct migration_activation_qualified *qualified,
@@ -30,7 +33,7 @@ enum migration_activation_result migration_activation_resolve(
  * data. Catalog pin authentication is also the caller's responsibility. The
  * parent must be at or after the window's parent. Failure leaves *active
  * unchanged; this function neither validates blocks nor applies rules. */
-enum migration_activation_result migration_activation_next_from_parent(
+struct zcl_result migration_activation_next_from_parent(
     const struct miner_signal_catalog *catalog,
     const struct miner_signal_tally *tallies, size_t tally_count,
     int32_t parent_height, const struct uint256 *parent_hash,
