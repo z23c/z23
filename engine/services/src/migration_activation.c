@@ -204,7 +204,7 @@ static bool collect_qualified(const struct miner_signal_catalog *catalog,
     for (size_t i = 0; i < catalog->count; ++i) {
         const struct miner_signal_tally *tally = &tallies[i];
         if (!tally_matches(tally, catalog, i, expected, parent_height, parent_hash, observed)) return false;
-        enum miner_signal_phase phase;
+        enum miner_signal_phase phase = MINER_SIGNAL_VOTING;
         if (!miner_signal_phase_at(tally, candidate, &phase).ok) return false;
         if (phase == MINER_SIGNAL_ACTIVE && tally->schedule.activation == candidate) {
             memcpy(qualified[*count].revision, catalog->entries[i].rule_revision, 32);
