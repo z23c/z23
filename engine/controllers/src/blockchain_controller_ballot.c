@@ -70,6 +70,17 @@ static bool ballot_parse(const struct json_value *params,
     return miner_signal_schedule_valid(s).ok;
 }
 
+/* Genesis is fixed by the selected network. A finalized row zero can witness
+ * block one, so it cannot always supply the pre-window parent for start=1. */
+static bool ballot_anchor_hash(sqlite3 *db, int32_t height, struct uint256 *out)
+{
+    if (height == 0) {
+        *out = chain_params_get()->consensus.hashGenesisBlock;
+        return true;
+    }
+    return tip_finalize_stage_block_hash_at(db, height, out->data);
+}
+
 /* The progress lock binds the selected hashes and all validation evidence to
  * one reducer-store observation. An anchor witness alone is never a vote. */
 static bool ballot_snapshot_evidence(const struct miner_signal_schedule *s,
@@ -91,7 +102,7 @@ static bool ballot_snapshot_evidence(const struct miner_signal_schedule *s,
     int32_t end = height;
     int64_t last = (int64_t)s->start + s->window - 1;
     if (end > last) end = (int32_t)last;
-    if (!tip_finalize_stage_block_hash_at(db, s->start - 1, snap->anchor_hash.data)) goto done;
+    if (!ballot_anchor_hash(db, s->start - 1, &snap->anchor_hash)) goto done;
     snap->anchor_height = s->start - 1;
     snap->has_anchor = true;
     snap->count = (size_t)(end - s->start + 1);
@@ -148,9 +159,9 @@ static bool ballot_authority_parent(sqlite3 *db, const struct ballot_snapshot *s
         !memcmp(parent_hash, snap->parent_hash.data, 32) &&
         (height != snap->parent_height || !memcmp(tip_hash, parent_hash, 32));
     if (same && snap->has_anchor) {
-        uint8_t anchor_hash[32];
-        if (!tip_finalize_stage_block_hash_at(db, snap->anchor_height, anchor_hash) ||
-            memcmp(anchor_hash, snap->anchor_hash.data, 32)) same = false;
+        struct uint256 anchor_hash;
+        if (!ballot_anchor_hash(db, snap->anchor_height, &anchor_hash) ||
+            !uint256_eq(&anchor_hash, &snap->anchor_hash)) same = false;
     }
     return same;
 }
@@ -231,6 +242,7 @@ static bool ballot_reply(struct json_value *result, const struct miner_signal_sc
     uint256_get_hex(&snap->parent_hash, hash_hex);
     json_set_object(result);
     if (json_push_kv_str(result, "network", network) &&
+        json_push_kv_str(result, "parent_basis", "durable_provable_tip") &&
         json_push_kv_int(result, "parent_height", snap->parent_height) &&
         json_push_kv_str(result, "parent_hash", hash_hex) &&
         json_push_kv_int(result, "next_height", (int64_t)snap->parent_height + 1) &&
@@ -250,7 +262,7 @@ bool rpc_getballotstatus(const struct json_value *params, bool help,
 {
     RPC_HELP(help, result,
         "getballotstatus start window activation slots slot catalog_hex\n"
-        "Read-only testnet/regtest diagnostic; maximum window 256 blocks.");
+        "Read testnet ballot history at the durable provable tip. Each counted block requires full validation evidence. Maximum window 256 blocks.");
     struct miner_signal_schedule s = {0};
     if (!ballot_parse(params, &s))
         return ballot_fail(result, "Invalid integer schedule, slot, 32-byte catalog, or window exceeds 256");
