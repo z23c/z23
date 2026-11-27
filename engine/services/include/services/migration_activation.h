@@ -1,9 +1,11 @@
+/* purpose: Resolve migration sets from qualified branch-local signals. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_MIGRATION_ACTIVATION_H
 #define ZCL_MIGRATION_ACTIVATION_H
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "services/miner_signal_catalog.h"
 
 /* Migration IDs index bits, not array positions. Revision IDs are raw bytes. */
 struct migration_activation_rule { uint8_t id; uint64_t requires, conflicts; };
@@ -22,4 +24,17 @@ enum migration_activation_result migration_activation_resolve(
     const struct migration_activation_proposal *proposals, size_t proposal_count,
     uint64_t prior, uint64_t consented_migrations, const struct migration_activation_qualified *qualified,
     size_t qualified_count, int32_t height, uint64_t *active);
+
+/* Evaluate the next candidate from one authenticated tally per catalog slot.
+ * Tallies must be obtained by the caller from fully validated parent-chain
+ * data. Catalog pin authentication is also the caller's responsibility. The
+ * parent must be at or after the window's parent. Failure leaves *active
+ * unchanged; this function neither validates blocks nor applies rules. */
+enum migration_activation_result migration_activation_next_from_parent(
+    const struct miner_signal_catalog *catalog,
+    const struct miner_signal_tally *tallies, size_t tally_count,
+    int32_t parent_height, const struct uint256 *parent_hash,
+    const struct migration_activation_rule *rules, size_t rule_count,
+    const struct migration_activation_proposal *proposals, size_t proposal_count,
+    uint64_t prior, uint64_t consented_migrations, uint64_t *active);
 #endif

@@ -1,19 +1,12 @@
+/* purpose: Resolve migration sets from qualified branch-local signals. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/migration_activation.h"
+#include <limits.h>
 #include <string.h>
 
-static bool validate_rules(const struct migration_activation_rule *rules, size_t count,
-                           uint64_t prior, uint64_t *all_out)
+static bool valid_rule_edges(const struct migration_activation_rule *const by_id[64],
+                             uint64_t all, uint64_t prior)
 {
-    if (!rules || !count || count > 64) return false;
-    const struct migration_activation_rule *by_id[64] = {0};
-    uint64_t all = 0;
-    for (size_t i = 0; i < count; ++i) {
-        unsigned id = rules[i].id;
-        if (id >= 64 || by_id[id]) return false;
-        by_id[id] = &rules[i];
-        all |= UINT64_C(1) << id;
-    }
     if (prior & ~all) return false;
     for (unsigned i = 0; i < 64; ++i) {
         const struct migration_activation_rule *rule = by_id[i];
@@ -28,6 +21,11 @@ static bool validate_rules(const struct migration_activation_rule *rules, size_t
             if (forward != reverse) return false;
         }
     }
+    return true;
+}
+
+static bool rules_acyclic(const struct migration_activation_rule *const by_id[64], uint64_t all)
+{
     uint64_t remaining = all;
     for (;;) {
         uint64_t remove = 0;
@@ -39,8 +37,24 @@ static bool validate_rules(const struct migration_activation_rule *rules, size_t
         if (!remove) break;
         remaining &= ~remove;
     }
-    *all_out = all;
     return remaining == 0;
+}
+
+static bool validate_rules(const struct migration_activation_rule *rules, size_t count,
+                           uint64_t prior, uint64_t *all_out)
+{
+    if (count > 64 || (count && !rules)) return false;
+    const struct migration_activation_rule *by_id[64] = {0};
+    uint64_t all = 0;
+    for (size_t i = 0; i < count; ++i) {
+        unsigned id = rules[i].id;
+        if (id >= 64 || by_id[id]) return false;
+        by_id[id] = &rules[i];
+        all |= UINT64_C(1) << id;
+    }
+    if (!valid_rule_edges(by_id, all, prior) || !rules_acyclic(by_id, all)) return false;
+    *all_out = all;
+    return true;
 }
 
 static bool bundle_conflicts(uint64_t members, uint64_t against,
@@ -119,6 +133,24 @@ static void prune_dependencies(const struct migration_activation_rule *rules, si
     }
 }
 
+static enum migration_activation_result select_qualified(
+    const struct migration_activation_proposal *proposals, size_t np,
+    const struct migration_activation_qualified *qualified, size_t nq,
+    int32_t height, bool selected[256])
+{
+    for (size_t i = 0; i < nq; ++i) {
+        if (qualified[i].height < 1) return MIGRATION_ACTIVATION_INVALID;
+        for (size_t j = 0; j < i; ++j)
+            if (!memcmp(qualified[i].revision, qualified[j].revision, 32)) return MIGRATION_ACTIVATION_INVALID;
+        if (qualified[i].height != height) continue;
+        size_t j = 0;
+        while (j < np && memcmp(qualified[i].revision, proposals[j].revision, 32)) ++j;
+        if (j == np) return MIGRATION_ACTIVATION_UNKNOWN_REVISION;
+        selected[j] = true;
+    }
+    return MIGRATION_ACTIVATION_OK;
+}
+
 enum migration_activation_result migration_activation_resolve(
     const struct migration_activation_rule *rules, size_t nr,
     const struct migration_activation_proposal *proposals, size_t np,
@@ -131,20 +163,72 @@ enum migration_activation_result migration_activation_resolve(
         !validate_rules(rules, nr, prior, &all) ||
         !validate_proposals(proposals, np, rules, nr, all)) return MIGRATION_ACTIVATION_INVALID;
     bool selected[256] = {0};
-    for (size_t i = 0; i < nq; ++i) {
-        if (qualified[i].height < 1) return MIGRATION_ACTIVATION_INVALID;
-        for (size_t j = 0; j < i; ++j)
-            if (!memcmp(qualified[i].revision, qualified[j].revision, 32)) return MIGRATION_ACTIVATION_INVALID;
-        if (qualified[i].height != height) continue;
-        size_t j = 0;
-        while (j < np && memcmp(qualified[i].revision, proposals[j].revision, 32)) ++j;
-        if (j == np) return MIGRATION_ACTIVATION_UNKNOWN_REVISION;
-        selected[j] = true;
-    }
+    enum migration_activation_result choice = select_qualified(proposals, np, qualified, nq, height, selected);
+    if (choice != MIGRATION_ACTIVATION_OK) return choice;
     prune_conflicts(rules, nr, proposals, np, prior, selected);
     prune_dependencies(rules, nr, proposals, np, prior, selected);
     uint64_t result = selected_members(proposals, np, selected, prior);
     if ((result & ~prior) & ~consented_migrations) return MIGRATION_ACTIVATION_NO_CONSENT;
     *out = result;
     return MIGRATION_ACTIVATION_OK;
+}
+
+static bool tally_matches(const struct miner_signal_tally *tally,
+                          const struct miner_signal_catalog *catalog, size_t slot,
+                          const struct miner_signal_schedule *expected,
+                          int32_t parent_height, const struct uint256 *parent_hash,
+                          int64_t observed)
+{
+    const struct miner_signal_schedule *s = &tally->schedule;
+    return s->start == expected->start && s->window == expected->window &&
+        s->activation == catalog->entries[slot].activation && s->slots == catalog->count &&
+        s->slot == slot && !memcmp(s->catalog, expected->catalog, 32) &&
+        tally->parent_height == parent_height && uint256_eq(&tally->parent_hash, parent_hash) &&
+        tally->votes >= 0 && tally->votes <= observed;
+}
+
+static bool collect_qualified(const struct miner_signal_catalog *catalog,
+    const struct miner_signal_tally *tallies, const struct miner_signal_schedule *expected,
+    int32_t parent_height, const struct uint256 *parent_hash,
+    struct migration_activation_qualified qualified[256], size_t *count)
+{
+    int64_t observed = (int64_t)parent_height - expected->start + 1;
+    if (observed > expected->window) observed = expected->window;
+    int32_t candidate = parent_height + 1;
+    *count = 0;
+    for (size_t i = 0; i < catalog->count; ++i) {
+        const struct miner_signal_tally *tally = &tallies[i];
+        if (!tally_matches(tally, catalog, i, expected, parent_height, parent_hash, observed)) return false;
+        enum miner_signal_phase phase;
+        if (!miner_signal_phase_at(tally, candidate, &phase).ok) return false;
+        if (phase == MINER_SIGNAL_ACTIVE && tally->schedule.activation == candidate) {
+            memcpy(qualified[*count].revision, catalog->entries[i].rule_revision, 32);
+            qualified[(*count)++].height = candidate;
+        }
+    }
+    return true;
+}
+
+enum migration_activation_result migration_activation_next_from_parent(
+    const struct miner_signal_catalog *catalog,
+    const struct miner_signal_tally *tallies, size_t tally_count,
+    int32_t parent_height, const struct uint256 *parent_hash,
+    const struct migration_activation_rule *rules, size_t rule_count,
+    const struct migration_activation_proposal *proposals, size_t proposal_count,
+    uint64_t prior, uint64_t consented_migrations, uint64_t *active)
+{
+    if (!catalog || !tallies || !parent_hash || !active ||
+        parent_height == INT32_MAX || tally_count != catalog->count)
+        return MIGRATION_ACTIVATION_INVALID;
+    struct miner_signal_schedule expected;
+    if (!miner_signal_catalog_select(catalog, 0, &expected).ok ||
+        parent_height < expected.start - 1)
+        return MIGRATION_ACTIVATION_INVALID;
+    struct migration_activation_qualified qualified[256];
+    size_t qualified_count;
+    if (!collect_qualified(catalog, tallies, &expected, parent_height, parent_hash,
+                           qualified, &qualified_count)) return MIGRATION_ACTIVATION_INVALID;
+    return migration_activation_resolve(rules, rule_count, proposals, proposal_count,
+                                        prior, consented_migrations, qualified,
+                                        qualified_count, parent_height + 1, active);
 }
