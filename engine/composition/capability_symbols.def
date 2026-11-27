@@ -2007,3 +2007,20 @@ ZCL_CAPABILITY_SYMBOL("mktime", CAP_HARMLESS,
     "CAP_CLOCK.")
 ZCL_CAPABILITY_SYMBOL("strptime", CAP_HARMLESS,
     "Parses a time string the caller supplied into a struct tm.")
+
+/* Darwin hashing and descriptor-bound metadata operations. */
+ZCL_CAPABILITY_SYMBOL("CC_SHA256_Init", CAP_HARMLESS, "Initializes caller-owned SHA-256 state.")
+ZCL_CAPABILITY_SYMBOL("CC_SHA256_Update", CAP_HARMLESS, "Hashes caller-supplied bytes.")
+ZCL_CAPABILITY_SYMBOL("CC_SHA256_Final", CAP_HARMLESS, "Finalizes caller-owned SHA-256 state.")
+ZCL_CAPABILITY_SYMBOL("acl_free", CAP_HARMLESS, "Releases an in-memory ACL object.")
+ZCL_CAPABILITY_SYMBOL("acl_init", CAP_HARMLESS, "Allocates an in-memory ACL object.")
+ZCL_CAPABILITY_SYMBOL("acl_get_fd_np", CAP_FS_READ, "Reads a Darwin file ACL through a descriptor.")
+ZCL_CAPABILITY_SYMBOL("acl_set_fd_np", CAP_PRIVILEGE, "Changes a Darwin file access-control list.")
+ZCL_CAPABILITY_SYMBOL("fchflags", CAP_PRIVILEGE, "Changes Darwin file flags, including access restrictions.")
+ZCL_CAPABILITY_SYMBOL("fchown", CAP_PRIVILEGE, "Changes file ownership through a descriptor.")
+ZCL_CAPABILITY_SYMBOL("fgetxattr", CAP_FS_READ, "Reads a Darwin file extended attribute.")
+ZCL_CAPABILITY_SYMBOL("flistxattr", CAP_FS_READ, "Lists Darwin file extended attributes.")
+ZCL_CAPABILITY_SYMBOL("fremovexattr", CAP_FS_WRITE, "Removes a Darwin file extended attribute.")
+ZCL_CAPABILITY_SYMBOL("fsetxattr", CAP_FS_WRITE, "Writes a Darwin file extended attribute.")
+ZCL_CAPABILITY_SYMBOL("mkdtempat_np", CAP_FS_WRITE, "Creates a Darwin temporary directory relative to a descriptor.")
+ZCL_CAPABILITY_SYMBOL("proc_listallpids", CAP_FS_READ, "Enumerates Darwin process IDs.")

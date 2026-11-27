@@ -967,6 +967,8 @@ ZCL_MODULE_CAPABILITY("platform/modules/platform/src/disk_space.c", CAP_FS_READ,
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/dlopen_pin.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/exec_tier.c", CAP_FS_READ|CAP_PRIVILEGE,"host facts fork a short-lived probe child that tries a user-namespace unshare (os_sandbox_probe_caps), read the Landlock ABI, check the KVM device node with access(2), read /proc/sys/kernel/yama/ptrace_scope and read PR_GET_NO_NEW_PRIVS; the calling process is unchanged and no app runs")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_clone.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "descriptor-bound independent file cloning reaches the Linux kernel through the FICLONE ioctl")
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_boot.c", CAP_FS_READ|CAP_PRIVILEGE, "reads the boot identity through Linux procfs or the Darwin sysctl interface")
+ZCL_MODULE_CAPABILITY("tools/command/native_app_launch_process.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "spawns a listed desktop app, writes an owner-private log, verifies process identity and polls readiness on a bounded clock")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_metadata.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_stream.c", CAP_FS_READ, "opens read-only streams with atomic descriptor and handle inheritance refusal")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_binary_slots.c", CAP_FS_WRITE|CAP_FS_READ, "")
