@@ -82,6 +82,10 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <fcntl.h>
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #include <direct.h>
@@ -1032,6 +1036,64 @@ static bool main_research_path(int argc, char **argv,
 #endif
 }
 
+#if !defined(_WIN32)
+static const char main_research_marker[] = ".z23-research-profile";
+static const char main_research_identity_value[] = "z23-research-profile:ironwood:v1\n";
+
+static bool main_research_dir_empty(int dirfd)
+{
+    int copy = dup(dirfd);
+    if (copy < 0) return false;
+    DIR *dir = fdopendir(copy);
+    if (!dir) { close(copy); return false; }
+    bool empty = true;
+    errno = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) {
+            empty = false;
+            break;
+        }
+    }
+    if (errno) empty = false;
+    closedir(dir);
+    return empty;
+}
+
+static bool main_research_marker_valid(int dirfd)
+{
+    int fd = openat(dirfd, main_research_marker, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return false; }
+    char value[sizeof(main_research_identity_value)];
+    ssize_t n = read(fd, value, sizeof(value));
+    close(fd);
+    return n == (ssize_t)(sizeof(main_research_identity_value) - 1) &&
+        memcmp(value, main_research_identity_value, (size_t)n) == 0;
+}
+
+static bool main_research_identity(const char *path)
+{
+    if (mkdir(path, 0700) != 0 && errno != EEXIST)
+        return false;
+    int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (dirfd < 0) return false;
+    if (main_research_marker_valid(dirfd)) { close(dirfd); return true; }
+    if (!main_research_dir_empty(dirfd)) { close(dirfd); return false; }
+    int fd = openat(dirfd, main_research_marker,
+                    O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) { close(dirfd); return false; }
+    size_t len = sizeof(main_research_identity_value) - 1;
+    bool ok = write(fd, main_research_identity_value, len) == (ssize_t)len &&
+              fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    if (ok && fsync(dirfd) != 0) ok = false;
+    close(dirfd);
+    return ok;
+}
+#endif
+
 static bool main_research_prepare(int argc, char ***args,
                                   struct main_research_selection *research,
                                   char *path, size_t capacity)
@@ -1044,6 +1106,12 @@ static bool main_research_prepare(int argc, char ***args,
         return false;
     }
     if (!research->profile) return true;
+#if !defined(_WIN32)
+    if (!main_research_identity(path + 9)) {
+        fprintf(stderr, "Research profile directory identity is missing or invalid.\n");
+        return false;
+    }
+#endif
     char **copy = calloc((size_t)argc + 1, sizeof(*copy));
     if (!copy) return false;
     memcpy(copy, argv, ((size_t)argc + 1) * sizeof(*copy));

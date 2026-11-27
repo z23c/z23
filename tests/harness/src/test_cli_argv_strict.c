@@ -1575,6 +1575,34 @@ static int cas_test_research_refusals(void)
     return failures;
 }
 
+static int cas_test_research_unmarked_refuses(void)
+{
+    int failures = 0;
+    TEST("research profile refuses a populated unmarked directory") {
+        char home[PATH_MAX], dir[PATH_MAX + 64], file[PATH_MAX + 96];
+        char flag[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_old") != NULL);
+        int d = snprintf(dir, sizeof(dir), "%s/ironwood-research", home);
+        int f = snprintf(file, sizeof(file), "%s/node.db", dir);
+        int a = snprintf(flag, sizeof(flag), "-datadir=%s", home);
+        ASSERT(d > 0 && (size_t)d < sizeof(dir) && f > 0 &&
+               (size_t)f < sizeof(file) && a > 0 && (size_t)a < sizeof(flag));
+        ASSERT(mkdir(dir, 0700) == 0);
+        FILE *fp = fopen(file, "w");
+        ASSERT(fp != NULL);
+        ASSERT(fputs("old-state", fp) >= 0 && fclose(fp) == 0);
+        char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                        flag, (char *)"-help", NULL};
+        int rc = cas_run(argv, home, out, sizeof(out));
+        struct stat st;
+        bool intact = stat(file, &st) == 0 && st.st_size == 9;
+        (void)test_rm_rf_recursive(home);
+        ASSERT(rc != 0 && strstr(out, "directory identity") && intact);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
@@ -1641,6 +1669,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_profile_config();
 #if !defined(_WIN32)
     failures += cas_test_research_refusals();
+    failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_datadir();
 #endif
     failures += cas_test_observed_incident_refuses();
