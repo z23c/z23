@@ -38,6 +38,7 @@
 #include "test/test_core.h"
 #include "kernel/command_registry.h"
 #include "platform/socket_compat.h"
+#include "net/file_service.h"
 #include "config/cli_lane_defaults.h"
 #include "util/spawn.h"
 
@@ -1677,6 +1678,40 @@ static int cas_test_research_concurrent_creation(void)
     return failures;
 }
 
+static int cas_test_research_import_refusals(void)
+{
+    int failures = 0;
+    TEST("research profile refuses file sync and snapshot import before contact") {
+        char home[PATH_MAX], flag[PATH_MAX + 16], blocks[PATH_MAX + 96], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_import") != NULL);
+        ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
+        ASSERT(snprintf(blocks, sizeof(blocks), "%s/ironwood-research/blocks", home) > 0);
+        int listener = socket(AF_INET, SOCK_STREAM, 0);
+        ASSERT(listener >= 0);
+        struct sockaddr_in address = { .sin_family = AF_INET };
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(FS_PORT);
+        ASSERT(bind(listener, (const struct sockaddr *)&address, sizeof(address)) == 0);
+        ASSERT(listen(listener, 2) == 0);
+        char *sync[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                        flag, (char *)"-filesync=127.0.0.1", NULL};
+        int sync_rc = cas_run(sync, home, out, sizeof(out));
+        bool sync_refused = sync_rc != 0 && !strstr(out, "SHA3 File Sync");
+        struct pollfd event = { .fd = listener, .events = POLLIN };
+        bool no_contact = poll(&event, 1, 100) == 0;
+        close(listener);
+        char *snapshot[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                            flag, (char *)"-load-snapshot-at-own-height=/no-snapshot", NULL};
+        int snapshot_rc = cas_run(snapshot, home, out, sizeof(out));
+        struct stat st;
+        bool no_blocks = stat(blocks, &st) != 0 && errno == ENOENT;
+        (void)test_rm_rf_recursive(home);
+        ASSERT(sync_refused && no_contact && snapshot_rc != 0 && no_blocks);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
@@ -1748,6 +1783,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_marker_guards();
     failures += cas_test_research_concurrent_creation();
+    failures += cas_test_research_import_refusals();
     failures += cas_test_research_datadir();
 #endif
     failures += cas_test_observed_incident_refuses();
