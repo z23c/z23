@@ -46,9 +46,8 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 #define CENSUS_SLOTS 4
 static struct census g_census[CENSUS_SLOTS];
 static unsigned g_next_slot;
-static unsigned long g_scans;
-
 #ifdef ZCL_TESTING
+static unsigned long g_scans;
 static int64_t (*g_test_clock)(void);
 static _Thread_local int g_test_fail_batch_after = -1;
 #endif
@@ -174,7 +173,9 @@ static void census_fill(struct census *c, struct main_state *ms, int height,
     c->born = mono_secs();
     c->n = 0;
     c->overflow = false;
+#ifdef ZCL_TESTING
     g_scans++;
+#endif
 
     struct census_walk walk = {0};
     int step;
