@@ -1696,17 +1696,21 @@ static int cas_test_research_import_refusals(void)
         char *sync[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                         flag, (char *)"-filesync=127.0.0.2", NULL};
         int sync_rc = cas_run(sync, home, out, sizeof(out));
-        bool sync_refused = sync_rc != 0 && !strstr(out, "SHA3 File Sync");
+        bool sync_refused = sync_rc != 0 &&
+            strstr(out, "-filesync requires chain state unavailable on the Ironwood testnet") &&
+            !strstr(out, "SHA3 File Sync");
         struct pollfd event = { .fd = listener, .events = POLLIN };
         bool no_contact = poll(&event, 1, 100) == 0;
         close(listener);
         char *snapshot[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                             flag, (char *)"-load-snapshot-at-own-height=/no-snapshot", NULL};
         int snapshot_rc = cas_run(snapshot, home, out, sizeof(out));
+        bool snapshot_refused = snapshot_rc != 0 &&
+            strstr(out, "-load-snapshot-at-own-height requires chain state unavailable on the Ironwood testnet");
         struct stat st;
         bool no_blocks = stat(blocks, &st) != 0 && errno == ENOENT;
         (void)test_rm_rf_recursive(home);
-        ASSERT(sync_refused && no_contact && snapshot_rc != 0 && no_blocks);
+        ASSERT(sync_refused && no_contact && snapshot_refused && no_blocks);
         PASS();
     } _test_next:;
     return failures;
