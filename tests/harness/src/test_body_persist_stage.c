@@ -7,6 +7,7 @@
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/serialize.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
@@ -997,6 +998,38 @@ static int bp_mutation_gap_tests(void)
     return failures;
 }
 
+static int bp_research_retained_oversize(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_bp sc;
+    int setup = bp_setup("research_size", 2, -1, -1, dir, sizeof(dir), &ms, &sc);
+    BP_CHECK("research size: setup", setup == 0);
+    if (setup != 0) return failures;
+    struct transaction *tx = &sc.bodies[1].vtx[0];
+    bool allocated = transaction_alloc(tx, 0, 26);
+    BP_CHECK("research size: outputs allocated", allocated);
+    if (allocated) {
+        for (size_t i = 0; i < 26; i++) {
+            memset(tx->vout[i].script_pub_key.data, 0x51, 8000);
+            tx->vout[i].script_pub_key.size = 8000;
+        }
+        bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+        BP_CHECK("research size: selected profile", selected);
+        if (selected) {
+            BP_CHECK("research size: first body advances", body_persist_stage_step_once() == JOB_ADVANCED);
+            BP_CHECK("research size: retained oversized body stops", body_persist_stage_step_once() == JOB_FATAL);
+            BP_CHECK("research size: cursor held", body_persist_stage_cursor() == 1);
+            zcl_alloc_fault_fail_next("research block size");
+            BP_CHECK("research size: unavailable check stops", body_persist_stage_step_once() == JOB_FATAL);
+            zcl_alloc_fault_reset();
+            BP_CHECK("research size: unavailable cursor held", body_persist_stage_cursor() == 1);
+        }
+        chain_params_select(CHAIN_MAIN);
+    }
+    bp_teardown(dir, &ms, &sc);
+    return failures;
+}
+
 int test_body_persist_stage(void);
 int test_body_persist_stage(void)
 {
@@ -1252,6 +1285,7 @@ int test_body_persist_stage(void)
     }
 
     failures += bp_mutation_gap_tests();
+    failures += bp_research_retained_oversize();
 
     printf("body_persist_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");

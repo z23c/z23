@@ -20,9 +20,11 @@
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "json/json.h"
 #include "primitives/block.h"
+#include "services/research_block_size.h"
 #include "storage/block_parse_cache.h"
 #include "storage/disk_block_io.h"
 #include "jobs/block_header_emit.h"
@@ -552,6 +554,15 @@ static job_result_t step_persist(struct stage_step_ctx *c)
                                         &g_merkle_mismatch_total, false);
     }
 
+    enum research_block_size_verdict size =
+        research_block_size_check(chain_params_get(), blk);
+    if (size != RESEARCH_BLOCK_SIZE_OK) {
+        release_stage_block(&handle, &owned, borrowed);
+        LOG_RETURN(JOB_FATAL, STAGE_NAME,
+                   "[body_persist] research block size %s height=%d",
+                   size == RESEARCH_BLOCK_SIZE_EXCEEDED ? "exceeded" : "unavailable",
+                   next_h);
+    }
     return step_commit_verified(db, bi, blk, next_h, c, &handle, &owned,
                                 borrowed);
 }
