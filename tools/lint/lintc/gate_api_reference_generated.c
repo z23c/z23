@@ -31,6 +31,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "gate_api_reference_generated_priv.h"
+#include "lint_compiler_argv.h"
 #include "lintc.h"
 #include "lintc_proc.h"
 #include "lintc_sig.h"
@@ -162,24 +163,6 @@ int arg_open_scratch(struct arg_scratch *s)
     return 0;
 }
 
-int arg_parse_cc(char *command, char **argv, size_t *count)
-{
-    size_t n = 0;
-    if (!strpbrk(command, " \t\r\n") || access(command, X_OK) == 0) {
-        if (*command) argv[n++] = command;
-    } else {
-        char *save = NULL;
-        for (char *word = strtok_r(command, " \t\r\n", &save); word;
-             word = strtok_r(NULL, " \t\r\n", &save)) {
-            if (n >= 32 || strspn(word, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:+,=%-") != strlen(word))
-                return 2;
-            argv[n++] = word;
-        }
-    }
-    *count = n;
-    return n ? 0 : 2;
-}
-
 static int arg_build(const struct arg_io *io, const struct arg_scratch *s)
 {
     char command[4096];
@@ -191,7 +174,7 @@ static int arg_build(const struct arg_io *io, const struct arg_scratch *s)
     memcpy(command, cc, strlen(cc) + 1);
     char *argv[48];
     size_t n = 0;
-    if (arg_parse_cc(command, argv, &n)) {
+    if (lint_parse_compiler_argv(command, argv, &n)) {
         fprintf(io->err, "%s: FATAL — unsupported compiler command\n", arg_name);
         return 2;
     }

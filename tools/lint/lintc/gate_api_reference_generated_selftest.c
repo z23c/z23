@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "gate_api_reference_generated_priv.h"
+#include "lint_compiler_argv.h"
 #include "lintc.h"
 #include "lintc_sig.h"
 
@@ -277,7 +278,7 @@ static int ars_space_cc(const char *priv)
     if (!f) return 1;
     if (fclose(f) != 0 || chmod(path, 0700) != 0) return 1;
     memcpy(parsed, path, strlen(path) + 1);
-    return arg_parse_cc(parsed, words, &count) || count != 1 || strcmp(words[0], path);
+    return lint_parse_compiler_argv(parsed, words, &count) || count != 1 || strcmp(words[0], path);
 }
 
 static bool ars_wrapper(const char *priv, char *wrapper, size_t size)
