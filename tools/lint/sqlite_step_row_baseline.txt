@@ -39,9 +39,8 @@ contexts/market/models/src/zswap_ad.c 2
 contexts/naming/models/src/znam.c 3
 contexts/wallet/models/src/vault_intent.c 3
 contexts/wallet/models/src/wallet_key.c 4
-contexts/wallet/models/src/wallet_tx.c 8
+contexts/wallet/models/src/wallet_tx.c 7
 contexts/wallet/models/src/wallet_tx_reads.c 1
-contexts/wallet/models/src/wallet_tx_reorg.c 1
 contexts/wallet/modules/wallet/src/wallet_sqlite.c 5
 contexts/wallet/modules/wallet/src/wallet_sqlite_keypool.c 2
 contexts/wallet/modules/wallet/src/wallet_sqlite_sapling.c 1
@@ -100,7 +99,7 @@ engine/models/src/mempool_entry.c 2
 engine/models/src/mesh_capability_grant.c 4
 engine/models/src/mesh_machine_observation.c 1
 engine/models/src/mesh_pairing.c 2
-engine/models/src/sapling_note.c 4
+engine/models/src/sapling_note.c 3
 engine/models/src/store.c 4
 engine/models/src/store_blob.c 1
 engine/models/src/store_purchase.c 3

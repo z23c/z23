@@ -1264,6 +1264,42 @@ static bool ar_test_wallet_disconnect_witness(struct node_db *ndb,
     return ok;
 }
 
+struct ar_disconnect_interrupt {
+    sqlite3 *db;
+    int traced;
+};
+
+static int ar_interrupt_disconnect_read(unsigned event, void *opaque, void *stmt, void *sql)
+{
+    (void)event; (void)stmt; (void)sql;
+    struct ar_disconnect_interrupt *fault = opaque;
+    fault->traced++;
+    sqlite3_interrupt(fault->db);
+    return 0;
+}
+
+static bool ar_disconnect_read_refused(struct node_db *ndb, const uint8_t txid[32],
+                                        bool (*operation)(struct node_db *, const uint8_t *))
+{
+    struct ar_disconnect_interrupt fault = {.db = ndb->db};
+    if (sqlite3_trace_v2(ndb->db, SQLITE_TRACE_STMT, ar_interrupt_disconnect_read,
+                         &fault) != SQLITE_OK) return false;
+    bool reported = operation(ndb, txid);
+    bool removed = sqlite3_trace_v2(ndb->db, 0, NULL, NULL) == SQLITE_OK;
+    return removed && fault.traced == 1 && !reported;
+}
+
+static bool ar_disconnect_reads_refused(struct node_db *ndb, const uint8_t txid[32])
+{
+    bool outputs = ar_disconnect_read_refused(ndb, txid, db_wallet_utxo_delete_for_tx);
+    bool notes = ar_disconnect_read_refused(ndb, txid, db_sapling_note_delete_for_tx);
+    bool spent = ar_disconnect_read_refused(ndb, txid, db_wallet_utxo_release_spent_by);
+    if (!outputs || !notes || !spent)
+        fprintf(stderr, "interrupted disconnect reads refused: outputs=%d notes=%d spends=%d\n",
+                outputs, notes, spent);
+    return outputs && notes && spent;
+}
+
 static bool ar_test_wallet_disconnect_source_note(struct node_db *ndb,
                                                   uint8_t *losing_txid,
                                                   uint8_t *source_txid,
@@ -1378,6 +1414,7 @@ static int ar_test_wallet_disconnect_projection(void)
     ok = ok && db_sapling_note_save(&ndb, &note);
     ok = ar_test_wallet_disconnect_witness(&ndb, losing_txid, ok);
 
+    ok = ok && ar_disconnect_reads_refused(&ndb, losing_txid);
     ok = ar_test_wallet_disconnect_source_note(&ndb, losing_txid,
                                                source_txid, note, ok);
 

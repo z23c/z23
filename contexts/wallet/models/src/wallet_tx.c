@@ -1251,10 +1251,11 @@ bool db_wallet_utxo_release_spent_by(struct node_db *ndb,
             "SELECT txid,vout,value,address_hash,script,height,is_coinbase,"
             "spent_txid,spent_vin FROM wallet_utxos"
             " WHERE spent_txid=? LIMIT 1");
-        AR_BIND_BLOB(s, 1, spent_by, 32);
-        if (!AR_STEP_ROW(s)) {
+        int rc = AR_BIND_BLOB(s, 1, spent_by, 32);
+        if (rc == SQLITE_OK) rc = AR_STEP_ROW_READONLY(s);
+        if (rc != SQLITE_ROW) {
             AR_FINALIZE(s);
-            return true;
+            return rc == SQLITE_DONE;
         }
         db_wallet_utxo_read_row(s, 0, &row);
         read_utxo_spent(s, 7, &row);

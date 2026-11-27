@@ -6,6 +6,7 @@
 #include "models/wallet_tx.h"
 #include "models/wallet_tx_internal.h"
 #include "util/log_macros.h"
+#include "util/ar_step_readonly.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -68,10 +69,11 @@ bool db_wallet_utxo_delete_for_tx(struct node_db *ndb,
         sqlite3_stmt *s = NULL;
         AR_PREPARE_BOOL(ndb, s,
             "SELECT vout FROM wallet_utxos WHERE txid=? LIMIT 1");
-        AR_BIND_BLOB(s, 1, txid, 32);
-        if (!AR_STEP_ROW(s)) {
+        int rc = AR_BIND_BLOB(s, 1, txid, 32);
+        if (rc == SQLITE_OK) rc = AR_STEP_ROW_READONLY(s);
+        if (rc != SQLITE_ROW) {
             AR_FINALIZE(s);
-            return true;
+            return rc == SQLITE_DONE;
         }
         uint32_t vout = (uint32_t)AR_COL_INT(s, 0);
         AR_FINALIZE(s);

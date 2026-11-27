@@ -987,10 +987,11 @@ bool db_sapling_note_delete_for_tx(struct node_db *ndb,
         AR_PREPARE_BOOL(ndb, s,
             "SELECT output_index FROM wallet_sapling_notes"
             " WHERE txid=? LIMIT 1");
-        AR_BIND_BLOB(s, 1, txid, 32);
-        if (!AR_STEP_ROW(s)) {
+        int rc = AR_BIND_BLOB(s, 1, txid, 32);
+        if (rc == SQLITE_OK) rc = AR_STEP_ROW_READONLY(s);
+        if (rc != SQLITE_ROW) {
             AR_FINALIZE(s);
-            return true;
+            return rc == SQLITE_DONE;
         }
         uint32_t output_index = (uint32_t)AR_COL_INT(s, 0);
         AR_FINALIZE(s);
