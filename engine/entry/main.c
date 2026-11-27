@@ -1107,6 +1107,14 @@ static bool main_research_identity(const char *path)
         return false;
     int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (dirfd < 0) return false;
+    struct stat private_dir;
+    if (fstat(dirfd, &private_dir) != 0 || !S_ISDIR(private_dir.st_mode) ||
+        private_dir.st_uid != geteuid() ||
+        ((private_dir.st_mode & 0777) != 0700 && fchmod(dirfd, 0700) != 0) ||
+        fstat(dirfd, &private_dir) != 0 || (private_dir.st_mode & 0777) != 0700) {
+        close(dirfd);
+        return false;
+    }
     if (flock(dirfd, LOCK_EX | LOCK_NB) != 0) { close(dirfd); return false; }
     if (main_research_marker_valid(dirfd)) { close(dirfd); return true; }
     if (!main_research_recover(dirfd)) { close(dirfd); return false; }

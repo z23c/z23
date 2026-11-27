@@ -1716,6 +1716,30 @@ static int cas_test_research_import_refusals(void)
     return failures;
 }
 
+static int cas_test_research_private_directory(void)
+{
+    int failures = 0;
+    TEST("research profile refuses linked directory before marker creation") {
+        char home[PATH_MAX], target[PATH_MAX + 32], dir[PATH_MAX + 64];
+        char marker[PATH_MAX + 96], flag[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_private") != NULL);
+        ASSERT(snprintf(target, sizeof(target), "%s/target", home) > 0);
+        ASSERT(snprintf(dir, sizeof(dir), "%s/ironwood-research", home) > 0);
+        ASSERT(snprintf(marker, sizeof(marker), "%s/.z23-research-profile", target) > 0);
+        ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
+        ASSERT(mkdir(target, 0700) == 0 && symlink(target, dir) == 0);
+        char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                        flag, (char *)"-help", NULL};
+        int rc = cas_run(argv, home, out, sizeof(out));
+        struct stat st;
+        bool no_marker = lstat(marker, &st) != 0 && errno == ENOENT;
+        (void)test_rm_rf_recursive(home);
+        ASSERT(rc != 0 && no_marker);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cas_test_research_datadir(void)
 {
     int failures = 0;
@@ -1786,6 +1810,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_refusals();
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_marker_guards();
+    failures += cas_test_research_private_directory();
     failures += cas_test_research_concurrent_creation();
     failures += cas_test_research_import_refusals();
     failures += cas_test_research_datadir();
