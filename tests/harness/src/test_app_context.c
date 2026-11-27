@@ -16,6 +16,7 @@
 #include "net/onion_v3_address.h"
 #include "rpc/legacy_rpc_client.h"
 #include "services/mesh_observation.h"
+#include "util/util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -281,6 +282,99 @@ static int test_nonmainnet_legacy_import_default(void)
 
     APPCTX_CHECK("non-mainnet modes refuse automatic mainnet legacy import",
                  mainnet && regtest && testnet);
+    return failures;
+}
+
+static bool selector_case(char **argv, int argc, int expected_rc, bool testnet, bool regtest)
+{
+    struct app_context ctx;
+    bool metrics = false;
+    ParseParameters(argc, (const char *const *)argv);
+    app_context_defaults(&ctx);
+    int rc = args_parse_node_options(argc, argv, &ctx, &metrics);
+    return rc == expected_rc && (rc != -1 || (ctx.testnet == testnet && ctx.regtest == regtest &&
+        GetBoolArg("-testnet", false) == testnet && GetBoolArg("-regtest", false) == regtest));
+}
+
+static bool selector_config_case(char **argv, int argc, const char *content,
+                                 int expected_rc, bool testnet, bool regtest)
+{
+    char dir[256], path[320];
+    test_make_tmpdir(dir, sizeof(dir), "app_context", "network_config");
+    snprintf(path, sizeof(path), "%s/z23.conf", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) { test_cleanup_tmpdir(dir); return false; }
+    bool wrote = fputs(content, f) >= 0;
+    if (fclose(f)) wrote = false;
+    ParseParameters(argc, (const char *const *)argv);
+    bool read_ok = wrote && ReadConfigFile(path) >= 0;
+    struct app_context ctx;
+    bool metrics = false;
+    app_context_defaults(&ctx);
+    int rc = args_parse_node_options(argc, argv, &ctx, &metrics);
+    (void)unlink(path);
+    test_cleanup_tmpdir(dir);
+    return read_ok && rc == expected_rc &&
+        (rc != -1 || (ctx.testnet == testnet && ctx.regtest == regtest &&
+         GetBoolArg("-testnet", false) == testnet && GetBoolArg("-regtest", false) == regtest));
+}
+
+static bool selector_full_table(void)
+{
+    char flags[MAX_ARGS][24];
+    char *argv[MAX_ARGS + 2];
+    argv[0] = "z23";
+    for (int i = 0; i < MAX_ARGS; i++) {
+        snprintf(flags[i], sizeof(flags[i]), "-fixture-%d", i);
+        argv[i + 1] = flags[i];
+    }
+    argv[MAX_ARGS + 1] = "-testnet=1";
+    return selector_case(argv, MAX_ARGS + 2, 1, false, false);
+}
+
+static bool selector_truncated_value(void)
+{
+    char value[MAX_ARG_LEN + 20];
+    memcpy(value, "-regtest=", 9);
+    memset(value + 9, '0', sizeof(value) - 11);
+    value[sizeof(value) - 2] = '1';
+    value[sizeof(value) - 1] = '\0';
+    char *argv[] = { "z23", value };
+    return selector_case(argv, 2, 1, false, false);
+}
+
+static int test_network_selectors(void)
+{
+    int failures = 0;
+    char *test[] = { "z23", "-testnet=1" };
+    char *reg[] = { "z23", "-regtest=1" };
+    char *off[] = { "z23", "-testnet=0" };
+    char *both[] = { "z23", "-testnet", "-regtest" };
+    char *bad[] = { "z23", "-regtest=banana" };
+    char *long_flag[] = { "z23", "--testnet=1" };
+    char *mixed[] = { "z23", "-testnet=1", "-regtest=0" };
+    char *last[] = { "z23", "-testnet", "-testnet=0" };
+    char *negative[] = { "z23", "-notestnet", "-regtest=1" };
+    char *late[] = { "z23", "unexpected", "-regtest=1" };
+    char *clear[] = { "z23" };
+    APPCTX_CHECK("network: explicit testnet", selector_case(test, 2, -1, true, false));
+    APPCTX_CHECK("network: explicit regtest", selector_case(reg, 2, -1, false, true));
+    APPCTX_CHECK("network: explicit false", selector_case(off, 2, -1, false, false));
+    APPCTX_CHECK("network: both active refused", selector_case(both, 3, 1, false, false));
+    APPCTX_CHECK("network: invalid value refused", selector_case(bad, 2, 1, false, false));
+    APPCTX_CHECK("network: double dash", selector_case(long_flag, 2, -1, true, false));
+    APPCTX_CHECK("network: false second network", selector_case(mixed, 3, -1, true, false));
+    APPCTX_CHECK("network: repeated same key uses last", selector_case(last, 3, -1, false, false));
+    APPCTX_CHECK("network: negated alias", selector_case(negative, 3, -1, false, true));
+    APPCTX_CHECK("network: late selector refused", selector_case(late, 3, 1, false, false));
+    APPCTX_CHECK("network: config selector", selector_config_case(clear, 1, "testnet=1\n", -1, true, false));
+    APPCTX_CHECK("network: argv overrides config", selector_config_case(off, 2, "testnet=1\n", -1, false, false));
+    APPCTX_CHECK("network: conflicting config refused", selector_config_case(reg, 2, "testnet=1\n", 1, false, false));
+    APPCTX_CHECK("network: invalid config refused", selector_config_case(clear, 1, "regtest=bad\n", 1, false, false));
+    APPCTX_CHECK("network: unnormalized negative config refused", selector_config_case(clear, 1, "notestnet=0\n", 1, false, false));
+    APPCTX_CHECK("network: exhausted argument table refused", selector_full_table());
+    APPCTX_CHECK("network: truncated selector value refused", selector_truncated_value());
+    ParseParameters(1, (const char *const *)clear);
     return failures;
 }
 
@@ -1353,6 +1447,7 @@ int test_app_context(void)
     failures += app_context_check_profile_surfaces();
     failures += test_app_context_tor_policy();
     failures += test_nonmainnet_legacy_import_default();
+    failures += test_network_selectors();
     failures += test_help_start_here_block();
     failures += test_onlynet_onion_args();
     failures += test_onlynet_onion_dial_and_seed_walk();

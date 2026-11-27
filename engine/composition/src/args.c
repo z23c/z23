@@ -26,6 +26,7 @@
 #include "util/hw_profile.h"
 #include "util/log_level.h"
 #include "util/log_macros.h"
+#include "args_network_internal.h"
 #include "util/util.h"
 #include "util/clientversion.h"
 #include <stdatomic.h>
@@ -604,8 +605,6 @@ static int args_arm_core_identity(const char *arg,
     struct app_context *ctx = st->ctx;
     if (strncmp(arg, "-datadir=", 9) == 0) ctx->datadir = arg + 9;
     else if (strncmp(arg, "-paramsdir=", 11) == 0) ctx->params_dir = arg + 11;
-    else if (strcmp(arg, "-testnet") == 0) ctx->testnet = true;
-    else if (strcmp(arg, "-regtest") == 0) ctx->regtest = true;
     else if (strcmp(arg, "-regtestshielded") == 0) ctx->regtest_shielded = true;
     else if (strcmp(arg, "-txindex") == 0) ctx->tx_index = true;
     else if (strcmp(arg, "-gen") == 0) ctx->gen = true;
@@ -1260,51 +1259,6 @@ static int args_arm_gui_help_version(const char *arg,
     return ARGS_ARM_TAKEN;
 }
 
-/* Loud unknown-flag WARNING, LAST in the ladder: reached only when no arm
- * above claimed this word. The guard is the negation of the original
- * `argv[i][0] == '-' && !main_flag_is_known_extra(argv[i])` arm condition,
- * evaluated in the same order, so a non-flag word still never reaches
- * main_flag_is_known_extra(). */
-static void args_warn_unknown_flag(const char *arg)
-{
-    if (arg[0] != '-' || main_flag_is_known_extra(arg))
-        return;
-    /* Loud unknown-flag WARNING: this loop must never accept ANY
-     * unrecognized "-flag" silently (a documented footgun — see
-     * docs/node/SYNC.md and CLAUDE.md "Skipping step 1 is a footgun"). A
-     * typo'd or removed flag (e.g. the old -cold-import/-fastimport) must not
-     * silently no-op; it must say so, every boot, at WARN. This is
-     * advisory only — it does not FATAL, since some recognized
-     * flags are intentionally consumed by an earlier or later pass
-     * in this loop (e.g. -gui/--self-test above,
-     * -addnode=/-connect=/-filesync= below) or read independently
-     * via GetArg()/GetBoolArg() (main_flag_is_known_extra() above)
-     * rather than this loop's own strncmp branches.
-     *
-     * Daemon mode stays tolerant (CLAUDE.md)
-     * — it does not FATAL here even for a double-dash
-     * typo of one of the seven operator-target flags (that hard
-     * refusal is CLI-client-only, engine/entry/main_cli_modes.c). But when
-     * cli_flag_classify() recognizes the shape, name the exact
-     * single-dash correction instead of a generic "check spelling"
-     * — the same suggestion the CLI-client path would give for the
-     * identical typo. */
-    char suggest[24] = {0};
-    if (cli_flag_classify(arg, suggest, sizeof(suggest)) !=
-        CLI_FLAG_OK) {
-        fprintf(stderr,
-                "Warning: unrecognized flag '%s' (ignored) — "
-                "z23 flags use a single dash with '=' "
-                "joining the value; did you mean %s?\n",
-                arg, suggest);
-    } else {
-        fprintf(stderr,
-                "Warning: unrecognized flag '%s' (ignored) — check "
-                "spelling or docs/RUNBOOK.md; this is not a supported "
-                "z23 flag.\n", arg);
-    }
-}
-
 typedef int (*args_arm_fn)(const char *arg, struct args_arm_state *st);
 
 /* Arm order is the original else-if order, top to bottom. */
@@ -1332,6 +1286,17 @@ static const args_arm_fn k_args_arms[] = {
     args_arm_gui_help_version,
 };
 #define ARGS_ARM_COUNT (sizeof(k_args_arms) / sizeof(k_args_arms[0]))
+
+static int args_parse_word(const char *arg, struct args_arm_state *st, bool positional)
+{
+    int rc = args_network_arg(arg, st->ctx, positional);
+    if (rc != ARGS_ARM_NOMATCH) return rc;
+    for (size_t i = 0; i < ARGS_ARM_COUNT && rc == ARGS_ARM_NOMATCH; i++)
+        rc = k_args_arms[i](arg, st);
+    if (rc == ARGS_ARM_NOMATCH && arg[0] == '-' && !main_flag_is_known_extra(arg))
+        args_warn_unrecognized(arg);
+    return rc;
+}
 
 int args_resolve_wallet_broadcast(struct app_context *ctx, const char *value)
 {
@@ -1453,16 +1418,15 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
     struct args_arm_state st = { ctx, show_metrics, argv };
+    if (args_network_begin(ctx)) return 1;
     args_apply_buildworker_config(argc, argv, ctx);
+    bool positional_seen = false;
     for (int i = 1; i < argc; i++) {
-        int rc = ARGS_ARM_NOMATCH;
-        for (size_t a = 0; a < ARGS_ARM_COUNT && rc == ARGS_ARM_NOMATCH; a++)
-            rc = k_args_arms[a](argv[i], &st);
-        if (rc >= 0)
-            return rc; /* help / version / a refused flag: exit now */
-        if (rc == ARGS_ARM_NOMATCH)
-            args_warn_unknown_flag(argv[i]);
+        if (argv[i][0] != '-') positional_seen = true;
+        int rc = args_parse_word(argv[i], &st, positional_seen);
+        if (rc >= 0) return rc;
     }
+    if (args_network_finish(ctx)) return 1;
     /* Automatic legacy sources under ~/.zclassic belong to mainnet. */
     if (ctx->regtest || ctx->testnet)
         ctx->no_legacy_auto_import = true;

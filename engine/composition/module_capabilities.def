@@ -610,6 +610,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/views/src/wallet_gui_bot.c", CAP_PROCESS,
 ZCL_MODULE_CAPABILITY("engine/composition/src/wallet_history_provider.c", CAP_FS_WRITE|CAP_CLOCK, "Export and retain an admitted immutable wallet history generation.")
 ZCL_MODULE_CAPABILITY("engine/composition/src/app_context.c", CAP_FS_WRITE|CAP_NETWORK, "names the dynhost network client's weak reference to read which Tor this binary linked (app_tor_real_build_linked); it compares the address against NULL and never dials, but the reach a capability declares is the VISIBILITY of the widening, not the intent — the same declaration engine/services/src/network_telemetry_fill.c and core/modules/net/src/tor_fetch.c carry for naming that symbol")
 ZCL_MODULE_CAPABILITY("engine/composition/src/args.c", CAP_FS_WRITE|CAP_PROCESS, "node-mode flag/argv parsing: sets the environment variables that downstream libc calls (locale, TZ) read")
+ZCL_MODULE_CAPABILITY("engine/composition/src/args_network.c", CAP_FS_WRITE, "network selector refusals and unknown-flag diagnostics write to stderr")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "the block-index arena re-age worker reads the monotonic clock to pace its cold-prefix passes")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_address_backfill.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_anchor_snapshot_reachability.c", CAP_FS_READ, "")
