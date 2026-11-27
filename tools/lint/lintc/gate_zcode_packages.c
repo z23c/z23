@@ -18,6 +18,7 @@
 #include "base/safe_alloc.h"
 #include "platform/toolchain.h"
 #include "util/spawn.h"
+#include "lint_compiler_argv.h"
 #include "lintc.h"
 #include "lint_narrow_hook.h"
 
@@ -801,9 +802,13 @@ static int zps_cc(const char *cc, const struct zps_compile_flags *flags,
                   const char *src, const char *obj, const char *errp, int *code)
 {
     if (ni < 0 || ni > ZINC_MAX || flags->count > ZPS_FLAGS_MAX) return 2;
-    const char *argv[ZPS_FLAGS_MAX + ZINC_MAX + 5];
+    char command[4096], *compiler[LINT_CC_MAX_ARGS];
     size_t n = 0;
-    argv[n++] = cc;
+    if (ovf(snprintf(command, sizeof command, "%s", cc), sizeof command) ||
+        lint_parse_compiler_argv(command, compiler, &n))
+        return die("z23-lint: unsupported package compiler command\n", "");
+    const char *argv[LINT_CC_MAX_ARGS + ZPS_FLAGS_MAX + ZINC_MAX + 4];
+    for (size_t i = 0; i < n; i++) argv[i] = compiler[i];
     for (size_t i = 0; i < flags->count; i++) argv[n++] = flags->argv[i];
     for (int i = 0; i < ni; i++) argv[n++] = incs[i];
     argv[n++] = src;
