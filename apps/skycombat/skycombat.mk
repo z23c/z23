@@ -122,8 +122,15 @@ Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(REPRO_CFLAGS) $(Z23RAY
 
 # RAYMATH_USE_SIMD_INTRINSICS is the one raymath.h knob the game's own -Wundef
 # would trip over, so it is spelled out rather than left undefined.
+SKYCOMBAT_WARNINGS := $(filter-out -Wdouble-promotion,$(ZCL_WARN_EXTRA_GATES))
+# MinGW GCC 13 implements the c2x dialect but predates this GCC 14 warning.
+ifneq ($(and $(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),$(filter -Wflex-array-member-not-at-end,$(SKYCOMBAT_WARNINGS))),)
+ifeq ($(shell printf 'int x;' | $(CC) -Werror -Wflex-array-member-not-at-end -fsyntax-only -x c - >/dev/null 2>&1 && printf yes),)
+SKYCOMBAT_WARNINGS := $(filter-out -Wflex-array-member-not-at-end,$(SKYCOMBAT_WARNINGS))
+endif
+endif
 SKYCOMBAT_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic $(REPRO_CFLAGS) \
-	$(filter-out -Wdouble-promotion,$(ZCL_WARN_EXTRA_GATES)) \
+	$(SKYCOMBAT_WARNINGS) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L \
 	$(ZCL_PLATFORM_CPPFLAGS) \
 	-DRAYMATH_USE_SIMD_INTRINSICS=0 $(Z23RAYLIB_CPPFLAGS) \
