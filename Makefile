@@ -253,13 +253,29 @@ ZCL_CXX_RUNTIME_LIB = -lc++
 ZCL_WARN_MAYBE_UNINITIALIZED =
 ZCL_TEST_STACK_SETUP = :
 else
+# Linux names its compiler once, and everything else follows it: see "One
+# toolchain" under ZCL_CC_IS_CLANG and the linker under
+# ZCL_LINUX_CLANG_LINKER. A caller's compiler is never overridden here. The
+# command line wins by make's own rule; the environment is honoured here,
+# because a makefile assignment would otherwise silently replace the compiler
+# a scheduler exported (CC = cc kept the C compiler while CXX and AR from the
+# same export went through, and vendor/lib refused the two toolchains). With
+# no compiler named, or an empty one, this is cc, as before.
+ZCL_CC_GIVEN := $(if $(strip $(CC)),$(filter command line environment override,$(origin CC)))
+ifeq ($(ZCL_CC_GIVEN),)
 CC = cc
+endif
 CXX ?= c++
 ZCL_PLATFORM_CPPFLAGS =
 ZCL_LTO_FLAG = -flto=auto
 ZCL_PLATFORM_NODE_LIBS =
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
+# Tools that run on the build host compile with the selected compiler too.
+# Deferred (?=), so the compile-cache wrapper word added to CC below is never
+# part of it. Not exported: build_vendor.sh reads a HOST_CC from the
+# environment as a bootstrap selector (tools/scripts/build_vendor_offline_selftest.sh).
+HOST_CC ?= $(lastword $(CC))
 # Under an outer recipe that already capped the hard stack limit (t-tsan and
 # t-asan set 1 GiB, then a gate self-test runs make t-hotswap), `unlimited`
 # is refused; take the hard limit instead of failing the nested run.
@@ -1665,6 +1681,54 @@ else
 ZCL_WARN_FORMAT_TRUNCATION = -Wno-format-truncation
 endif
 
+# One toolchain (Linux, Clang). A Clang C compiler brings the rest of its
+# toolchain from its own directory -- its C++ driver and its archiver --
+# unless the caller already named a matching one or passed it on the command
+# line. Half a toolchain is not a toolchain: an `ar` without the LLVM plugin
+# cannot index LTO objects, and every vendor/lib archive records the identity
+# of the compiler, the archiver and the LevelDB C++ compiler that built it, so
+# a GNU c++ beside a Clang cc is refused downstream ("vendor/lib cannot hold
+# two targets at once"). Read from the real compiler word, never from the
+# compile-cache wrapper that may precede it. The GNU toolchain needs none of
+# this: its defaults already agree, so a GCC build sees no change.
+ifeq ($(filter Linux,$(ZCL_HOST_OS))$(ZCL_CC_IS_CLANG),Linux1)
+ZCL_CC_PLAIN := $(lastword $(CC))
+ZCL_CC_DIR := $(if $(findstring /,$(ZCL_CC_PLAIN)),$(dir $(ZCL_CC_PLAIN)))
+# Sibling tool beside a compiler that has a directory; else the same name
+# looked up on PATH; else nothing (the caller's value stands).
+ZCL_CC_SIBLING = $(firstword $(if $(ZCL_CC_DIR),$(wildcard $(ZCL_CC_DIR)$(1)),$(shell command -v $(1) 2>/dev/null)))
+ifeq ($(ZCL_CC_IS_CLANG),1)
+ifeq ($(filter command% environment% override,$(origin CXX)),)
+ifeq ($(findstring clang++,$(notdir $(lastword $(CXX)))),)
+CXX := $(or $(call ZCL_CC_SIBLING,$(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN)))),$(CXX))
+endif
+endif
+ifeq ($(filter command% environment% override,$(origin AR)),)
+ifeq ($(findstring llvm-ar,$(notdir $(AR))),)
+AR := $(or $(call ZCL_CC_SIBLING,llvm-ar),$(AR))
+endif
+endif
+ifeq ($(filter command% environment% override,$(origin RANLIB)),)
+ifeq ($(findstring llvm-ranlib,$(notdir $(RANLIB))),)
+RANLIB := $(or $(call ZCL_CC_SIBLING,llvm-ranlib),$(RANLIB))
+endif
+endif
+# vendor/lib is built, audited and rebuilt by that one toolchain. dep_audit
+# re-derives every archive's provenance by running build_vendor.sh
+# --check-provenance with the recipe's environment, so the compiler is
+# exported once here rather than repeated at each of the script's call sites
+# (the one dep_audit spawns included). A cross build names none of them: the
+# script selects <triple>-clang itself. An explicit VENDOR_CC still wins.
+ifneq ($(ZCL_CROSS_TRIPLE),)
+else
+export VENDOR_CC ?= $(ZCL_CC_PLAIN)
+export VENDOR_AR ?= $(AR)
+export VENDOR_RANLIB ?= $(RANLIB)
+export CXX := $(CXX)
+endif
+endif
+endif
+
 # ── Warning gates BEYOND -Wall -Wextra -pedantic ────────────────────────────
 #
 # Every flag below was measured at ZERO warnings over BOTH -Werror-bearing
@@ -1758,6 +1822,24 @@ CFLAGS = -std=$(ZCL_C_STD) -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wext
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
 ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
 ZCL_WINDOWS_CLANG_LINKER = $(if $(and $(ZCL_HOST_WINDOWS),$(ZCL_CC_IS_CLANG)),-fuse-ld=lld,)
+# Linux Clang links LTO with Clang's own linker: the LLVM release archive
+# ships no LLVMgold.so, so an LTO link through GNU ld fails loading the
+# plugin. -fuse-ld=lld finds ld.lld beside the compiler. Taken only when one
+# is there (a pure file test, no link at parse time), so a packaged Clang
+# that links through GNU ld's plugin today goes on doing so. Every LTO link
+# goes through $(LDFLAGS); the dev and test links filter $(ZCL_LTO_FLAG) out
+# and take ZCL_DEV_LINKER instead.
+ZCL_CLANG_LLD := $(if $(ZCL_CC_DIR),$(wildcard $(ZCL_CC_DIR)/ld.lld),$(firstword $(shell command -v ld.lld 2>/dev/null)))
+ZCL_LINUX_CLANG_LINKER = $(if $(and $(filter Linux,$(ZCL_HOST_OS)),$(ZCL_CC_IS_CLANG),$(ZCL_CLANG_LLD)),-fuse-ld=lld,)
+# Clang on Linux leaves GCC's runtime support (libgcc_s.so.1) a dynamic
+# dependency where gcc builds it into a plain C executable, and the c23-node
+# contract admits the glibc runtime alone (tools/scripts/check_c23_node_binary.sh
+# refuses the link). So a Clang link takes that runtime statically, as the
+# Windows cross link below already does. Empty for gcc: its line is unchanged.
+ZCL_LINUX_CLANG_LIBGCC = $(if $(and $(filter Linux,$(ZCL_HOST_OS)),$(ZCL_CC_IS_CLANG)),-static-libgcc,)
+# Both Linux Clang flags, or nothing as a whole: under gcc this is empty
+# without a stray space, so the gcc link line is byte for byte what it was.
+ZCL_LINUX_CLANG_LINK = $(if $(ZCL_LINUX_CLANG_LIBGCC),$(ZCL_LINUX_CLANG_LINKER) $(ZCL_LINUX_CLANG_LIBGCC),)
 # -static on the Windows cross link, not merely -static-libgcc. clang's MinGW
 # driver appends -lssp for -fstack-protector-strong, and -lssp resolves to the
 # IMPORT library libssp.dll.a before the static libssp.a beside it: the node
@@ -1767,7 +1849,7 @@ ZCL_WINDOWS_CLANG_LINKER = $(if $(and $(ZCL_HOST_WINDOWS),$(ZCL_CC_IS_CLANG)),-f
 # linker prefer every real archive over its import stub, which is what a
 # self-contained node wants anyway; the Windows API import libraries
 # (ws2_32 &c.) are import stubs with no static alternative and are unaffected.
-LDFLAGS = $(if $(ZCL_HOST_WINDOWS),$(if $(ZCL_CROSS_TRIPLE),-static,-static-libgcc),-pthread) $(ZCL_LTO_FLAG) $(ZCL_WINDOWS_CLANG_LINKER) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
+LDFLAGS = $(if $(ZCL_HOST_WINDOWS),$(if $(ZCL_CROSS_TRIPLE),-static,-static-libgcc),-pthread) $(ZCL_LTO_FLAG) $(if $(ZCL_HOST_WINDOWS),$(ZCL_WINDOWS_CLANG_LINKER),$(ZCL_LINUX_CLANG_LINK)) $(ZCL_EXPORT_DYNAMIC_FLAG) $(HARDEN_LDFLAGS)
 CACHED_CFLAGS = $(filter-out -DZCL_BUILD_SOURCE_ID=% -DZCL_BUILD_CLEAN=%,$(CFLAGS))
 BUILD_ONLY_CFLAGS = $(CACHED_CFLAGS) -Wno-deprecated-declarations
 ZCL_DEV_OPT ?= -Og
@@ -1777,7 +1859,7 @@ ifeq ($(origin ZCL_DEV_LINKER),undefined)
 ZCL_DEV_LINKER :=
 endif
 else
-ZCL_DEV_LINKER ?= $(eval ZCL_DEV_LINKER := $(shell tools/dev/dev-linker-select.sh))$(ZCL_DEV_LINKER)
+ZCL_DEV_LINKER ?= $(eval ZCL_DEV_LINKER := $(shell CC='$(or $(ZCL_CC_PLAIN),cc)' tools/dev/dev-linker-select.sh))$(ZCL_DEV_LINKER)
 endif
 # Frozen restart bases are `-r` prelinks and always use the platform linker
 # (no -fuse-ld): mold writes the 1.3 GB .bss of the test graph as real zero
@@ -12851,6 +12933,16 @@ $(NODE_C23_OBJ_DIR)/core/modules/net/src/https_server_install.o: NODE_C23_OBJECT
 # rom_fetch_download_parallel; same sealed-file reasoning as above.
 $(NODE_C23_OBJ_DIR)/core/modules/net/src/rom_fetch.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-function
 endif
+# Clang 23 alone also diagnoses a global that is only ever assigned
+# (-Wunused-but-set-global; GCC has no such diagnostic). The two counters
+# below live in byte-sealed files, so they stay in their translation units
+# until the owner's unseal ritual (core/UNSEAL.md) removes them; this flag
+# keeps those two sealed objects from failing -Werror under Clang alone. The
+# diagnostic stays on for every other translation unit.
+ifeq ($(ZCL_CC_IS_CLANG),1)
+$(NODE_C23_OBJ_DIR)/core/modules/net/src/msgprocessor.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(NODE_C23_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-but-set-global
+endif
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 $(NODE_C23_OBJ_DIR)/%.o: %.c $$(ZCL_UNTRACKED_VIEW_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(OBJECT_GEN_HEADERS) $(NODE_C23_LEASE)
@@ -15958,7 +16050,8 @@ check-toolchain:
 # must never carry it.
 check-dev-linker-threads:
 	@echo "══ LINT: dev/test linker keeps gold multi-threaded, release stays plain ══"
-	@sel="$$(tools/dev/dev-linker-select.sh)"; \
+	@tools/dev/dev-linker-select.sh --selftest
+	@sel="$$(CC='$(or $(ZCL_CC_PLAIN),cc)' tools/dev/dev-linker-select.sh)"; \
 	case "$$sel" in \
 	  *fuse-ld=gold*) \
 	    case "$$sel" in \

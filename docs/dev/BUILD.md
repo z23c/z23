@@ -628,6 +628,23 @@ Notes:
   node links still use `cc`; the Makefile asks `c++` for libstdc++'s directory
   and adds it to the linker search path so mixed distro compiler packages do
   not break cold remote builds.
+- **One toolchain follows the named compiler (Linux).** Name the C compiler
+  once, as `CC` on the command line or in the environment, and the rest
+  follows it: with Clang, the C++ driver and the archiver are taken from
+  beside that compiler (from `PATH` for a bare name such as `CC=clang`), and
+  `vendor/lib` is built by that same toolchain. GCC stays the default when no
+  compiler is named. A value the caller gives explicitly for `CXX`, `AR`,
+  `RANLIB`, `VENDOR_CC`, `VENDOR_AR` or `VENDOR_RANLIB` always wins. The
+  vendor sub-makes are started with the parent make's command line cleared,
+  so `make CC=/path/clang vendor` records in `libcrypto.a` the compiler this
+  build selected, not the path it was named by. A tree that already holds
+  archives from another compiler refuses them with the mismatch named:
+  `make vendor` rebuilds the nine, and after switching compilers run
+  `make tor-full` too, because Tor's archives are refused rather than
+  rebuilt. A Clang link on Linux adds `-fuse-ld=lld` when `ld.lld` is found
+  beside the compiler or on `PATH` (the LLVM release ships no `LLVMgold.so`
+  for GNU ld), and `-static-libgcc`, so the node still depends on the C
+  runtime alone.
 - **SQLite 3.51.3** amalgamation; `make vendor` also refreshes
   `vendor/include/sqlite3.h` and `vendor/sqlite3.c` so the rest of the build
   (e.g. `tools/sqlq.c`) stays in sync.

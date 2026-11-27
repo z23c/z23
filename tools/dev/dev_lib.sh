@@ -167,3 +167,54 @@ decode_base64() {
         base64 -D
     fi
 }
+
+field() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" get "$2") ||
+        fail "missing or malformed field: $2"
+    printf '%s' "$value"
+}
+
+raw_field() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" raw "$2") ||
+        fail "missing or malformed value: $2"
+    printf '%s' "$value"
+}
+
+field_type() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" type "$2") ||
+        fail "missing type: $2"
+    printf '%s' "$value"
+}
+
+array_count() {
+    local value
+    value=$(printf '%s\n' "$1" | "$jsonq" count "$2") ||
+        fail "missing array: $2"
+    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "invalid array count: $2"
+    printf '%s' "$value"
+}
+
+keys_exact() {
+    local observed
+    observed=$(printf '%s\n' "$1" | "$jsonq" keys "$2" | paste -sd, -) ||
+        fail "cannot enumerate keys: $2"
+    [[ $observed = "$3" ]] || fail "unexpected object shape: $2"
+}
+
+bool_field() {
+    local value
+    [[ $(field_type "$1" "$2") = bool ]] || fail "not a boolean: $2"
+    value=$(field "$1" "$2")
+    [[ $value = true || $value = false ]] || fail "invalid boolean: $2"
+    printf '%s' "$value"
+}
+
+expect_semantic_refusal() {
+    local name=$1 candidate=$2
+    if "$0" --semantic-fixture "$candidate" >/dev/null 2>&1; then
+        fail "mutation was accepted: $name"
+    fi
+}

@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-vendor-offline-selftest.XXXXXX")"
 lock_pid=
+beside=
 wait_lock_selftest()
 {
     [ -n "$lock_pid" ] || return 0
@@ -22,6 +23,7 @@ cleanup()
     status=$?
     trap - EXIT HUP INT TERM
     wait_lock_selftest || :
+    [ -z "$beside" ] || rm -rf "$beside"
     rm -rf "$SANDBOX"
     exit "$status"
 }
@@ -171,6 +173,58 @@ if output="$(cd "$SANDBOX/elsewhere" && HOSTCC=tools/native-cc \
 fi
 [[ "$output" == *'offline cache miss or checksum failure: zlib-1.3.1.tar.gz'* ]] ||
     fail 'bootstrap compiled with a different executable than its compiler identity'
+
+# A compiler named by a path under the checkout, the build scratch or HOME is
+# used by its plain name, its directory first on PATH: OpenSSL records the
+# literal compiler command in libcrypto.a, and the provenance identity hashes
+# the command as written, so one spelling must survive every host. Any other
+# path stays as given. The wrapper records how it was invoked and its PATH.
+# HOME is a temporary directory in every case, so the build user's own home
+# is never a root.
+beside="$(mktemp -d "$(dirname "$SANDBOX")/zcl-vendor-beside.XXXXXX")"
+mkdir -p "$beside/bin"
+printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' \"\$VENDOR_CC\" \"\$PATH\" > '$SANDBOX/tools/path.log'" \
+    "exec '$SANDBOX/tools/native-cc' \"\$@\"" > "$SANDBOX/tools/path-cc"
+cp "$SANDBOX/tools/path-cc" "$beside/bin/path-cc"
+chmod +x "$SANDBOX/tools/path-cc" "$beside/bin/path-cc"
+expect_path_cc()      # HOME  VENDOR_CC  expected invocation  expected PATH head
+{
+    local home="$1" cc="$2" name="$3" head="$4" invoked path
+    : > "$SANDBOX/tools/path.log"
+    (cd "$SANDBOX" && HOME="$home" PATH="$SANDBOX/bin:/usr/bin:/bin" VENDOR_CC="$cc" \
+        VENDOR_AR="$fixture_machine-ar" ZCL_VENDOR_OFFLINE=1 \
+        tools/scripts/build_vendor.sh --check-provenance libz.a >/dev/null 2>&1) || true
+    [ -s "$SANDBOX/tools/path.log" ] || fail "compiler fixture $cc was not invoked"
+    { read -r invoked; read -r path; } < "$SANDBOX/tools/path.log"
+    [[ "$invoked" == "$name" && "${path%%:*}" == "$head" ]] ||
+        fail "compiler $cc under HOME $home: invoked as '$invoked' with PATH head '${path%%:*}', expected '$name' and '$head'"
+}
+expect_path_cc "$beside" "$SANDBOX/tools/path-cc" path-cc "$SANDBOX/tools"
+expect_path_cc "$beside" "$beside/bin/path-cc" path-cc "$beside/bin"
+expect_path_cc "$SANDBOX" "$beside/bin/path-cc" "$beside/bin/path-cc" "$SANDBOX/bin"
+rm "$SANDBOX/tools/path-cc"
+
+# One machine can be spelled two ways by one host: GCC says
+# x86_64-linux-gnu, Clang says x86_64-unknown-linux-gnu. Compare the machine,
+# not the vendor spelling, or a native Clang beside llvm-ar is refused as a
+# cross compiler.
+printf '%s\n' '#!/usr/bin/env bash' \
+    'case "${1:-}" in -dumpmachine) printf "%s\n" x86_64-linux-gnu; exit 0;; esac' \
+    "exec '$SANDBOX/tools/native-cc' \"\$@\"" > "$SANDBOX/tools/cc"
+printf '%s\n' '#!/usr/bin/env bash' \
+    'case "${1:-}" in -dumpmachine) printf "%s\n" x86_64-unknown-linux-gnu; exit 0;; esac' \
+    "exec '$SANDBOX/tools/native-cc' \"\$@\"" > "$SANDBOX/tools/native-clang"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$SANDBOX/bin/llvm-ar"
+chmod +x "$SANDBOX/tools/cc" "$SANDBOX/tools/native-clang" "$SANDBOX/bin/llvm-ar"
+if output="$(cd "$SANDBOX" && PATH="$SANDBOX/tools:$SANDBOX/bin:/usr/bin:/bin" \
+    VENDOR_CC="$SANDBOX/tools/native-clang" VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 \
+    tools/scripts/build_vendor.sh libtor_stub.a 2>&1)"; then
+    fail 'native Clang fixture unexpectedly built missing archive'
+fi
+[[ "$output" == *'vendor/tor_stub.c missing (tracked source expected)'* ]] ||
+    fail "a native Clang machine spelling was treated as a cross compiler: $output"
+rm "$SANDBOX/tools/cc" "$SANDBOX/tools/native-clang"
 
 # A C driver with no C++ front end installed is an ordinary host shape (cc is
 # one GCC major, g++ another). The lock helper is C only, so its identity

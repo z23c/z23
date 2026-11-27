@@ -8,7 +8,7 @@ export LC_ALL=C
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
 . "$repo_root/tools/scripts/source_identity_lib.sh" # zcl_is_sha256
-. "$repo_root/tools/dev/dev_lib.sh" # uint_field, validate_metric, validate_eval_arm_scope, validate_batch_scope, decode_base64
+. "$repo_root/tools/dev/dev_lib.sh" # uint_field, validate_metric, validate_eval_arm_scope, validate_batch_scope, decode_base64, field, raw_field, field_type, array_count, keys_exact, bool_field, expect_semantic_refusal
 readonly driver=25fe3e353288d2f52e7f5fc07b7b722b27e71f1a
 readonly receipt_name=retrieval-gold-benchmark-25fe3e353288.jsonl
 readonly receipt="$repo_root/docs/work/retrieval-gold-evidence/$receipt_name"
@@ -36,50 +36,6 @@ readonly eval_keys="$eval_base_keys,identifier_graph"
 readonly aggregate_keys="record,schema,metrics,files_read_observed,observed_token_count_available,wrong_scope_basis,wrong_scope_interpretation,wrong_scope_classifier_epoch,wrong_scope_aggregation_kind,wrong_scope_denominator_kind,reuse_success_available,duplicate_avoidance_available,new_unique_loc_avoided_available"
 
 fail() { printf 'retrieval-gold-identifier-graph-receipt-check: FAIL — %s\n' "$*" >&2; exit 1; }
-
-field() {
-    local value
-    value=$(printf '%s\n' "$1" | "$jsonq" get "$2") ||
-        fail "missing or malformed field: $2"
-    printf '%s' "$value"
-}
-
-raw_field() {
-    local value
-    value=$(printf '%s\n' "$1" | "$jsonq" raw "$2") ||
-        fail "missing or malformed value: $2"
-    printf '%s' "$value"
-}
-
-field_type() {
-    local value
-    value=$(printf '%s\n' "$1" | "$jsonq" type "$2") ||
-        fail "missing type: $2"
-    printf '%s' "$value"
-}
-
-array_count() {
-    local value
-    value=$(printf '%s\n' "$1" | "$jsonq" count "$2") ||
-        fail "missing array: $2"
-    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || fail "invalid array count: $2"
-    printf '%s' "$value"
-}
-
-keys_exact() {
-    local observed
-    observed=$(printf '%s\n' "$1" | "$jsonq" keys "$2" | paste -sd, -) ||
-        fail "cannot enumerate keys: $2"
-    [[ $observed = "$3" ]] || fail "unexpected object shape: $2"
-}
-
-bool_field() {
-    local value
-    [[ $(field_type "$1" "$2") = bool ]] || fail "not a boolean: $2"
-    value=$(field "$1" "$2")
-    [[ $value = true || $value = false ]] || fail "invalid boolean: $2"
-    printf '%s' "$value"
-}
 
 root_field() {
     local value
@@ -681,13 +637,6 @@ validate_canonical() {
     [[ ${receipt##*/} = *"${driver:0:12}"* ]] || fail "receipt filename omits driver prefix"
     check_hash "$receipt" "$receipt_sha3"
     validate_semantics "$receipt"
-}
-
-expect_semantic_refusal() {
-    local name=$1 candidate=$2
-    if "$0" --semantic-fixture "$candidate" >/dev/null 2>&1; then
-        fail "mutation was accepted: $name"
-    fi
 }
 
 mutate_first_literal() {

@@ -127,6 +127,11 @@ if [[ -z "${JOBS:-}" ]]; then
         JOBS="$CPU_COUNT"
     fi
 fi
+# A parent make's command line (`make CC=/path/clang vendor`) reaches every
+# sub-make through MAKEFLAGS, where it outranks the environment: OpenSSL would
+# record the absolute compiler the audits refuse. Each sub-make starts with
+# that inheritance cleared; the job count is passed here.
+VENDOR_SUBMAKE=(env MAKEFLAGS= MAKEOVERRIDES= make -j"$JOBS")
 FORCE="${VENDOR_FORCE:-0}"
 OFFLINE="${ZCL_VENDOR_OFFLINE:-0}"
 VENDOR_LOCK_DIR="${VENDOR_LOCK_DIR:-$VENDOR/.build.lock}"
@@ -170,6 +175,23 @@ export TZ=UTC LC_ALL=C
 ARFLAGS_DET="Dcr"   # D = deterministic (zero mtime/uid/gid) when supported
 VENDOR_CC="${VENDOR_CC:-cc}"
 VENDOR_AR="${VENDOR_AR:-ar}"
+
+# A compiler named by a path under the checkout, the build scratch or HOME is
+# used by its plain name, with its own directory first on PATH: configure
+# scripts record the literal compiler command in what they build (OpenSSL
+# writes `compiler: <CC> <flags>` into libcrypto.a) and build_openssl refuses
+# an archive holding any of these roots. Every other spelling is left as is.
+for vendor_root in "$REPO_ROOT" "$WORK" "${HOME:-}"; do
+    [[ -n "$vendor_root" && "$VENDOR_CC" == "$vendor_root"/* ]] || continue
+    vendor_cc_dir="$(cd "$(dirname -- "$VENDOR_CC")" 2>/dev/null && pwd -P)" || vendor_cc_dir=""
+    if [[ -n "$vendor_cc_dir" && -x "$vendor_cc_dir/$(basename -- "$VENDOR_CC")" ]]; then
+        PATH="$vendor_cc_dir:$PATH"
+        export PATH
+        VENDOR_CC="$(basename -- "$VENDOR_CC")"
+    fi
+    break
+done
+unset vendor_root vendor_cc_dir
 
 # Every archive in vendor/lib must be built by ONE toolchain targeting ONE
 # machine. Nothing downstream can tell otherwise: vendor/lib holds a single
@@ -829,7 +851,7 @@ build_zlib() {         # FETCHED: zlib
     ( cd "$d" && CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
         CFLAGS="-O2 -fPIC" \
         ./configure --static >/dev/null \
-        && make -j"$JOBS" AR="$VENDOR_AR" ARFLAGS=rc RANLIB="$VENDOR_RANLIB" libz.a >/dev/null )
+        && "${VENDOR_SUBMAKE[@]}" AR="$VENDOR_AR" ARFLAGS=rc RANLIB="$VENDOR_RANLIB" libz.a >/dev/null )
     install_archive "$d/libz.a" libz.a
     cp -f "$d/zlib.h" "$d/zconf.h" "$INC/"
     stamp_archives libz.a
@@ -870,7 +892,7 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
         && export CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
         && ./Configure $OPENSSL_CONFIG_TARGET ${VENDOR_ANDROID_API:+-D__ANDROID_API__=$VENDOR_ANDROID_API} no-shared no-tests \
              --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib >/dev/null \
-        && make -j"$JOBS" build_libs >/dev/null 2>&1 )
+        && "${VENDOR_SUBMAKE[@]}" build_libs >/dev/null 2>&1 )
     # OpenSSL also records the literal compiler command in its version data.
     # Reject an absolute checkout/home compiler here, before the archive can
     # reach the node; test_no_hardcoded_home remains the final backstop.
@@ -945,7 +967,7 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
                ./configure --disable-shared --enable-static \
                  --disable-samples --disable-libevent-regress \
                  ${VENDOR_CROSS_HOST_ARGS[@]+"${VENDOR_CROSS_HOST_ARGS[@]}"} \
-            && make -j"$JOBS" \
+            && "${VENDOR_SUBMAKE[@]}" \
         ) >"$build_log" 2>&1; then
         tail -200 "$build_log" >&2 || true
         die "libevent build failed (log: $build_log)"
@@ -1203,7 +1225,16 @@ fi
 # A cross VENDOR_CC left beside the host's plain `ar` is silent today: ar
 # writes an archive index in the host's format and the cross linker rejects
 # or misreads it. Refuse the mismatch rather than discover it at link time.
-if [ -n "$VENDOR_CC_MACHINE" ] && [ "$VENDOR_CC_MACHINE" != "$(vendor_cc_machine cc)" ]; then
+# Compare machines, not vendor spellings: Clang and GCC name one Linux machine
+# x86_64-unknown-linux-gnu and x86_64-linux-gnu.
+vendor_machine_key()
+{
+    local rest="${1#*-}"
+    case "$rest" in unknown-*|pc-*|none-*) rest="${rest#*-}" ;; esac
+    printf '%s-%s' "${1%%-*}" "$rest"
+}
+if [ -n "$VENDOR_CC_MACHINE" ] &&
+   [ "$(vendor_machine_key "$VENDOR_CC_MACHINE")" != "$(vendor_machine_key "$(vendor_cc_machine cc)")" ]; then
     case "$(basename "$VENDOR_AR")" in
         "$VENDOR_CC_MACHINE"-*) ;;
         llvm-ar) [[ "$VENDOR_TARGET_OS" == android ]] || die "llvm-ar cross exception requires Android" ;;
