@@ -4,6 +4,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "controllers/wallet_private_broadcast.h"
+#include "controllers/transaction_v6_rpc.h"
 #include "controllers/transaction_controller_internal.h"
 #include "models/tx_index.h"
 #include "services/txindex_projection_service.h"
@@ -374,6 +375,19 @@ static bool rpc_getrawtransaction(const struct json_value *params, bool help,
 static bool rpc_decoderawtransaction(const struct json_value *params, bool help,
                                       struct json_value *result)
 {
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
+    bool ironwood = profile &&
+        profile == chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD) &&
+        chain_params_get() == profile->chain;
+    if (help && ironwood) {
+        json_set_str(result,
+            "decoderawtransaction \"hexstring\"\n"
+            "Return a JSON object representing the serialized transaction.\n"
+            "Ironwood research v6 decoding inspects wire data without validating proofs.\n"
+            "Arguments:\n"
+            "1. \"hexstring\" (string, required) The transaction hex string");
+        return true;
+    }
     RPC_HELP(help, result,
         "decoderawtransaction \"hexstring\"\n"
         "Return a JSON object representing the serialized transaction.\n"
@@ -385,7 +399,13 @@ static bool rpc_decoderawtransaction(const struct json_value *params, bool help,
     rpc_params_expect(&p, 1, 1);
     const char *hex_str = rpc_require_str(&p, 0, "hexstring");
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
-
+    if (ironwood && strncmp(hex_str, "06000080", 8) == 0) {
+        enum v6_rpc_status status = transaction_v6_rpc_decode(hex_str, result);
+        if (status == V6_RPC_OK) return true;
+        json_set_str(result, status == V6_RPC_RESOURCE ?
+            "TX inspection exceeds local resource limits" : "TX decode failed");
+        return false;
+    }
     struct transaction tx;
     transaction_init(&tx);
     if (!decode_hex_tx(&tx, hex_str)) {
@@ -393,7 +413,6 @@ static bool rpc_decoderawtransaction(const struct json_value *params, bool help,
         json_set_str(result, "TX decode failed");
         return false;
     }
-
     struct uint256 null_hash;
     uint256_set_null(&null_hash);
     tx_to_json(&tx, &null_hash, result);

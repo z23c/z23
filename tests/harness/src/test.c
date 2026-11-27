@@ -1777,6 +1777,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_sprout_phgr13_kat();
     *failures += test_sprout_groth16_kat();
     *failures += test_transaction_wire_evidence();
+    { extern int test_transaction_v6_inspect(void); *failures += test_transaction_v6_inspect(); }
     *failures += test_rescanwitnesses_diverge_guard();
     *failures += test_gap_fill_frontier_window();
     *failures += test_snark_kat();
