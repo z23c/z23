@@ -8,6 +8,8 @@ An opt-in network deployment may select this rule independently of proof of work
 <!-- claim: symbol-present MAX_BLOCK_SIZE core/modules/validation/include/validation/main_constants.h # historical ceiling -->
 <!-- claim: symbol-present DEFAULT_BLOCK_MAX_SIZE core/modules/validation/include/validation/main_constants.h # default production policy -->
 
+The [miner signaling guide](MINER_SIGNALING.md) describes the testnet ballot format and how to check lock-in.
+
 ## Rule
 
 A deployment must publish its network identity, exact rule revision and activation trigger. For a fixed-height deployment it must specify H. For a signalled deployment it must bind the agreed signal resolver and its parameters. Resolve activation for the candidate block from its parent on the selected network. Starting with the first active block, count the canonical serialized header (including CompactSize solution length and solution), followed by the CompactSize transaction count and all canonical transaction bytes including shielded data. Accept equality. Exclude P2P framing and storage envelopes. Apply the existing historical rules at all earlier heights and on profiles that omit the proposal. Enforcing this restriction alone tightens the set of valid blocks and is a soft fork. A distinct fork network can adopt it as one of its rules.
