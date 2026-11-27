@@ -18,6 +18,10 @@
 #include "coins/utxo_commitment.h"   /* C8: pin the UTXO commitment byte-layout */
 #include "crypto/sha3.h"
 #include "primitives/block.h"
+#include "core/serialize.h"
+#include "storage/blocks_mmap_reader.h"
+#include "storage/disk_block_io.h"
+#include <sys/stat.h>
 #include "validation/connect_block.h" /* ZIP-209 per-block shielded deltas */
 
 /* The generated empirical oversize-grandfather table (see
@@ -362,11 +366,81 @@ static int check_research_values(const struct chain_research_descriptor *d, cons
     return failures;
 }
 
+/* Identical payload hashes under two different framings exercise repair's
+ * choice of record as well as the normal read entry points. */
+static bool profile_position_is_selected(const struct chain_research_descriptor *d,
+                                        const struct disk_block_pos *wrong,
+                                        const struct disk_block_pos *right, const char *dir)
+{
+    struct block_index bi;
+    block_index_init(&bi);
+    bi.hashBlock = d->chain->consensus.hashGenesisBlock;
+    bi.phashBlock = &bi.hashBlock;
+    block_index_disk_pos_store(&bi, wrong->nFile, wrong->nPos);
+    block_index_status_fetch_or(&bi, BLOCK_HAVE_DATA);
+    struct disk_block_pos found;
+    return block_index_repair_pos_from_disk(&bi, dir, false) &&
+        block_index_disk_pos_snapshot(&bi, &found, NULL) &&
+        found.nFile == right->nFile && found.nPos == right->nPos;
+}
+
+static int check_profile_frame_reads(const struct chain_research_descriptor *d,
+                                     const char *dir, const char *blocks,
+                                     struct disk_block_pos wrong, struct disk_block_pos right)
+{
+    int failures = 0;
+    struct block b;
+    bool ok = read_block_from_disk_pread(&b, &right, dir);
+    struct uint256 hash;
+    if (ok) block_get_hash(&b, &hash);
+    CHECK("selected profile frame reads its genesis", ok && uint256_eq(&hash, &d->chain->consensus.hashGenesisBlock));
+    block_free(&b);
+    CHECK("selected profile refuses foreign frame", !read_block_from_disk_pread(&b, &wrong, dir));
+    block_free(&b);
+    struct blocks_mmap *map = NULL;
+    size_t len = 0;
+    const uint8_t *bytes = bmr_open(blocks, &map) ?
+        bmr_get_payload(map, right.nFile, right.nPos, &len) : NULL;
+    CHECK("mapped profile genesis has exact bytes", bytes && len == d->genesis_wire_len &&
+          !memcmp(bytes, d->genesis_wire, len));
+    CHECK("mapped reader refuses foreign frame", map && !bmr_get_payload(map, wrong.nFile, wrong.nPos, &len));
+    if (map) bmr_close(map);
+    CHECK("position repair skips foreign same-hash copy", profile_position_is_selected(d, &wrong, &right, dir));
+    return failures;
+}
+
+static int check_profile_disk_frames(const struct chain_research_descriptor *d,
+                                     const struct chain_params *main)
+{
+    int failures = 0;
+    char dir[256], blocks[320];
+    test_make_tmpdir(dir, sizeof(dir), "profile", "frames");
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    struct byte_stream in;
+    stream_init_from_data(&in, d->genesis_wire, d->genesis_wire_len);
+    struct block b;
+    block_init(&b);
+    struct disk_block_pos wrong, right;
+    disk_block_pos_init(&wrong);
+    disk_block_pos_init(&right);
+    bool ok = mkdir(blocks, 0700) == 0 && block_deserialize(&b, &in) &&
+        write_block_to_disk(&b, &wrong, dir, main->pchMessageStart) &&
+        write_block_to_disk(&b, &right, dir, d->chain->pchMessageStart);
+    CHECK("stored both differently framed genesis records", ok);
+    if (ok) failures += check_profile_frame_reads(d, dir, blocks, wrong, right);
+    block_free(&b);
+    stream_free(&in);
+    disk_block_io_close_cache();
+    if (test_rm_rf_recursive(dir)) failures++;
+    return failures;
+}
+
 static int check_research_selection(const struct chain_research_descriptor *d, const struct chain_params *main, const struct base_chain_params *base)
 {
     int failures = 0;
     CHECK("research selects chain and base", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD) &&
           chain_research_profile_current() == d && chain_params_get() == d->chain && BaseParams() == d->base);
+    if (chain_research_profile_current() == d) failures += check_profile_disk_frames(d, main);
     CHECK("unknown selection preserves research", !chain_research_profile_select((enum chain_research_profile)99) &&
           chain_research_profile_current() == d && chain_params_get() == d->chain && BaseParams() == d->base);
     chain_params_select(CHAIN_MAIN);

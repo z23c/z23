@@ -15,6 +15,7 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 #include "disk_block_io_internal.h"
+#include "block_file_magic.h"
 
 #include "storage/disk_block_io.h"
 #include "core/serialize.h"
@@ -35,28 +36,10 @@
 #include <sys/mman.h>
 #endif
 
-/* The accepted frame magic bytes, in the order the header check tests
- * them. */
-static const uint8_t disk_block_frame_magics[3][4] = {
-    {0x24, 0xe9, 0x27, 0x64},
-    {0xfa, 0x1a, 0xf9, 0xbf},
-    {0xaa, 0xe8, 0x3f, 0x5f},
-};
-
-/* True when hdr[0..3] holds one of the accepted frame magics. */
-static bool disk_block_frame_magic_matches(const uint8_t hdr[4])
-{
-    for (size_t i = 0; i < 3; i++) {
-        if (memcmp(hdr, disk_block_frame_magics[i], 4) == 0)
-            return true;
-    }
-    return false;
-}
-
-static bool disk_block_frame_header_valid(const uint8_t hdr[8],
+static bool disk_block_frame_header_valid(const uint8_t hdr[8], const uint8_t *required,
                                           uint32_t *out_size)
 {
-    bool magic_ok = disk_block_frame_magic_matches(hdr);
+    bool magic_ok = block_file_magic_matches(hdr, required);
     uint32_t block_size = 0;
     memcpy(&block_size, hdr + 4, 4);
     if (!magic_ok || block_size == 0 || block_size > 2000000u)
@@ -67,12 +50,12 @@ static bool disk_block_frame_header_valid(const uint8_t hdr[8],
 }
 
 /* True when an 8-byte magic+size frame header sits at `off`. */
-static bool disk_block_frame_at(int fd, uint64_t off, uint32_t *out_size)
+static bool disk_block_frame_at(int fd, uint64_t off, const uint8_t *required, uint32_t *out_size)
 {
     uint8_t hdr[8];
     return platform_positioned_read(fd, hdr, sizeof(hdr), off) ==
                (int64_t)sizeof(hdr) &&
-           disk_block_frame_header_valid(hdr, out_size);
+           disk_block_frame_header_valid(hdr, required, out_size);
 }
 
 /* Resolve (payload offset, size), or REFUSE an unframed position — see the
@@ -84,17 +67,18 @@ bool disk_block_locate_payload(int fd,
 {
     if (!pos || !out_payload_pos || !out_size)
         return false;
+    const uint8_t *required = block_file_profile_magic();
     uint32_t block_size = 0;
     /* Canonical block indexes store the PAYLOAD offset: frame sits at pos-8. */
     if (pos->nPos >= 8 &&
-        disk_block_frame_at(fd, (uint64_t)pos->nPos - 8, &block_size)) {
+        disk_block_frame_at(fd, (uint64_t)pos->nPos - 8, required, &block_size)) {
         *out_payload_pos = pos->nPos;
         *out_size = block_size;
         return true;
     }
     /* Some recovery/import paths hand the FRAME offset instead. Accept it. */
     if (pos->nPos <= UINT32_MAX - 8u &&
-        disk_block_frame_at(fd, pos->nPos, &block_size)) {
+        disk_block_frame_at(fd, pos->nPos, required, &block_size)) {
         *out_payload_pos = pos->nPos + 8u;
         *out_size = block_size;
         return true;
@@ -148,11 +132,11 @@ static int repair_scan_open_mapped(const char *path,
 /* First offset at or after `from` where a valid frame header sits, or -1
  * when none is left before the 140-byte floor. */
 static long repair_scan_next_frame_offset(const uint8_t *data, long from,
-                                          long fsize)
+                                          long fsize, const uint8_t *required)
 {
     for (long p = from; p + 8 + 140 <= fsize; p++) {
         uint32_t sz = 0;
-        if (disk_block_frame_header_valid(data + p, &sz))
+        if (disk_block_frame_header_valid(data + p, required, &sz))
             return p;
     }
     return -1;
@@ -195,14 +179,15 @@ static bool repair_scan_one_file(const char *path,
         return false;
     long fsize = (long)file_size;
     const uint8_t *data = mapping.data;
+    const uint8_t *required = block_file_profile_magic();
 
     bool found = false;
     long pos = 0;
     while (!found && pos + 8 + 140 <= fsize) {
         uint32_t blk_size = 0;
-        if (!disk_block_frame_header_valid(data + pos, &blk_size) ||
+        if (!disk_block_frame_header_valid(data + pos, required, &blk_size) ||
             blk_size < 140 || pos + 8 + (long)blk_size > fsize) {
-            long next = repair_scan_next_frame_offset(data, pos + 1, fsize);
+            long next = repair_scan_next_frame_offset(data, pos + 1, fsize, required);
             if (next < 0)
                 break;
             pos = next;

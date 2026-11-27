@@ -20,6 +20,7 @@
 #define _GNU_SOURCE
 #endif
 #include "storage/block_prefetch.h"
+#include "block_file_magic.h"
 
 #include "json/json.h"
 #include "platform/positioned_file.h"
@@ -176,18 +177,10 @@ ssize_t block_prefetch_lru_get(const struct disk_block_pos *pos,
  * store the PAYLOAD offset; some import paths store the FRAME offset. Mirror
  * disk_block_io's locate logic so warming reads exactly the payload span. */
 
-/* True when the frame's first four bytes are the b0..b3 magic. */
-static bool bp_frame_magic_is(const uint8_t hdr[4],
-                              uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3)
+/* Decode the payload size of a frame admitted by the selected store. */
+static bool bp_frame_size(const uint8_t hdr[8], const uint8_t *required, uint32_t *out_size)
 {
-    return hdr[0] == b0 && hdr[1] == b1 && hdr[2] == b2 && hdr[3] == b3;
-}
-
-static bool bp_frame_size(const uint8_t hdr[8], uint32_t *out_size)
-{
-    bool magic_ok = bp_frame_magic_is(hdr, 0x24, 0xe9, 0x27, 0x64) ||
-                    bp_frame_magic_is(hdr, 0xfa, 0x1a, 0xf9, 0xbf) ||
-                    bp_frame_magic_is(hdr, 0xaa, 0xe8, 0x3f, 0x5f);
+    bool magic_ok = block_file_magic_matches(hdr, required);
     uint32_t sz = 0;
     memcpy(&sz, hdr + 4, 4);
     if (!magic_ok || sz == 0 || sz > BP_MAX_BLOCK_BYTES)
@@ -197,30 +190,33 @@ static bool bp_frame_size(const uint8_t hdr[8], uint32_t *out_size)
     return true;
 }
 
-static void bp_locate(const struct platform_positioned_file *file,
+static bool bp_locate(const struct platform_positioned_file *file,
                       const struct disk_block_pos *pos,
                       uint64_t *payload_off, size_t *payload_len)
 {
+    const uint8_t *required = block_file_profile_magic();
     uint8_t hdr[8];
     uint32_t sz = 0;
     if (pos->nPos >= 8) {
         if (platform_positioned_file_read(file, hdr, 8,
                                           (uint64_t)pos->nPos - 8) == 8 &&
-            bp_frame_size(hdr, &sz)) {
+            bp_frame_size(hdr, required, &sz)) {
             *payload_off = pos->nPos;
             *payload_len = sz;
-            return;
+            return true;
         }
     }
     if (platform_positioned_file_read(file, hdr, 8, pos->nPos) == 8 &&
-        bp_frame_size(hdr, &sz) &&
+        bp_frame_size(hdr, required, &sz) &&
         pos->nPos <= UINT32_MAX - 8u) {
         *payload_off = (uint64_t)pos->nPos + 8;
         *payload_len = sz;
-        return;
+        return true;
     }
+    if (required) return false;
     *payload_off = pos->nPos;
     *payload_len = BP_MAX_BLOCK_BYTES;
+    return true;
 }
 
 /* Warm one block frame into the page cache. Best-effort: every failure is a
@@ -251,9 +247,10 @@ static void bp_warm_one(const struct disk_block_pos *pos, uint8_t *scratch,
     }
     uint64_t off = pos->nPos;
     size_t len = BP_MAX_BLOCK_BYTES;
-    bp_locate(file_cache, pos, &off, &len);
-    if (len == 0 || len > BP_MAX_BLOCK_BYTES)
-        len = BP_MAX_BLOCK_BYTES;
+    if (!bp_locate(file_cache, pos, &off, &len)) {
+        atomic_fetch_add(&g_read_fails, 1);
+        return;
+    }
 
 #if BP_HAVE_NOWAIT_PROBE
     if (!g_cfg.force_warm) {

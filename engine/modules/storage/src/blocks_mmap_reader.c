@@ -9,7 +9,8 @@
  * `nDataPos` (stored in the block-index record) points to the start of
  * the payload, NOT the magic. To validate, we peek 8 bytes back.
  *
- * Accepted magic values:
+ * When a research profile is selected its exact framing magic is required.
+ * Ordinary archive magic values:
  *   0x24e92764 — zcash / zclassic mainnet
  *   0xfa1af9bf — testnet
  *   0xaae83f5f — regtest
@@ -19,6 +20,7 @@
  */
 
 #include "storage/blocks_mmap_reader.h"
+#include "block_file_magic.h"
 
 #include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
@@ -171,16 +173,6 @@ static struct bmr_slot *bmr_ensure_slot(struct blocks_mmap *m, int32_t nFile)
     return &m->lru[victim];
 }
 
-static bool bmr_payload_magic_ok(const uint8_t *hdr)
-{
-    return (hdr[0] == 0x24 && hdr[1] == 0xe9 &&
-            hdr[2] == 0x27 && hdr[3] == 0x64) ||
-           (hdr[0] == 0xfa && hdr[1] == 0x1a &&
-            hdr[2] == 0xf9 && hdr[3] == 0xbf) ||
-           (hdr[0] == 0xaa && hdr[1] == 0xe8 &&
-            hdr[2] == 0x3f && hdr[3] == 0x5f);
-}
-
 const uint8_t *bmr_get_payload(struct blocks_mmap *m,
                                int32_t nFile, uint32_t nDataPos,
                                size_t *out_len)
@@ -203,7 +195,7 @@ const uint8_t *bmr_get_payload(struct blocks_mmap *m,
         (void)platform_read_mapping_advise_reverse(&s->mapping, hint_offset,
             BMR_REVERSE_WINDOW, &s->hint_start, &s->hint_end);
     const uint8_t *hdr = s->base + offset;
-    bool magic_ok = bmr_payload_magic_ok(hdr);
+    bool magic_ok = block_file_magic_matches(hdr, block_file_profile_magic());
     if (!magic_ok) {
         fprintf(stderr, "[bmr] bad magic at nFile=%d nDataPos=%u: %02x%02x%02x%02x\n",
                 nFile, nDataPos, hdr[0], hdr[1], hdr[2], hdr[3]);
