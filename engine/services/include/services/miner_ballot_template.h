@@ -3,10 +3,12 @@
 #ifndef ZCL_SERVICES_MINER_BALLOT_TEMPLATE_H
 #define ZCL_SERVICES_MINER_BALLOT_TEMPLATE_H
 #include "base/result.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 struct block;
 struct chain_params;
+struct block_template;
 
 /* Append a final zero-value ballot output to an UNSOLVED, caller-owned block.
  * Mining limit is 1..DEFAULT_BLOCK_MAX_SIZE inclusive. The entire block is
@@ -25,4 +27,9 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
     const uint8_t catalog[32], const uint8_t bitmap[32],
     const struct chain_params *params, int height, size_t mining_limit,
     size_t *reserved_size_out);
+
+/* Fit a research template by dropping only a trailing transaction suffix.
+ * The caller discards the template on any error. */
+struct zcl_result miner_research_template_fit(struct block_template *tmpl,
+    const struct chain_params *params, int height, bool reserve_ballot);
 #endif

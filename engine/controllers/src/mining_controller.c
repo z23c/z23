@@ -7,9 +7,11 @@
 #include "base/hex.h"
 #include "services/miner_signal_round.h"
 #include "services/miner_ballot_template.h"
+#include "services/research_block_size.h"
 #include "services/miner_signal_catalog_pin.h"
 #include "controllers/blockchain_controller.h"
 #include "controllers/mining_controller.h"
+#include "controllers/ballot_network.h"
 #include "controllers/network_controller.h"  /* rpc_net_get_connman */
 #include "controllers/sovereignty_controller.h"
 #include "controllers/strong_params.h"
@@ -60,11 +62,26 @@ struct mining_template_parent {
     int64_t minimum_time;
 };
 
+static bool mining_finish_template(struct block_template *tmpl,
+    const struct chain_params *cp, int height, const struct uint256 *parent_root,
+    bool genesis, bool reserve_ballot, const char **reason)
+{
+    if (research_block_size_limit(cp) == RESEARCH_BLOCK_SIZE_LIMIT) {
+        struct zcl_result fit = miner_research_template_fit(tmpl, cp, height, reserve_ballot);
+        if (!fit.ok) { *reason = "Could not fit research block template"; return false; }
+    }
+    if (!mining_stamp_sapling_final_root(&tmpl->block, height, cp, parent_root, genesis)) {
+        *reason = "Sapling parent frontier unavailable or invalid";
+        return false;
+    }
+    return true;
+}
+
 /* The tip can advance after core assembles a template. Refresh against the
  * parent named by that template, never against a newly sampled active tip. */
 static struct block_template *mining_create_template(const struct script *script,
     const struct chain_params *cp, struct mining_template_parent *bound,
-    const char **reason)
+    const char **reason, bool reserve_ballot)
 {
     struct mining_context *ctx = mining_ctx();
     *reason = "Mining state unavailable";
@@ -104,11 +121,8 @@ static struct block_template *mining_create_template(const struct script *script
         }
     }
     zcl_mutex_unlock(&ctx->main_state->cs_main);
-    if (ok && !mining_stamp_sapling_final_root(&tmpl->block, bound->height,
-                                                cp, &parent_root, genesis)) {
-        *reason = "Sapling parent frontier unavailable or invalid";
-        ok = false;
-    }
+    if (ok) ok = mining_finish_template(tmpl, cp, bound->height, &parent_root,
+                                        genesis, reserve_ballot, reason);
     if (ok) return tmpl;
     LOG_WARN("mining", "template refused: %s", *reason);
     block_template_free(tmpl);
@@ -356,7 +370,7 @@ static bool mining_generate_to_script(const struct script *coinbase_script,
     for (int64_t i = 0; i < num_blocks; i++) {
         struct mining_template_parent parent;
         const char *reason;
-        struct block_template *tmpl = mining_create_template(coinbase_script, cp, &parent, &reason);
+        struct block_template *tmpl = mining_create_template(coinbase_script, cp, &parent, &reason, false);
         if (!tmpl) {
             json_set_str(result, reason);
             return false;
@@ -623,8 +637,8 @@ static struct zcl_result mining_template_ballot(const struct json_value *params,
 {
     const struct json_value *list = json_get(json_at(params, 0), "ballotslots");
     if (!list) return ZCL_OK;
-    if (strcmp(cp->strNetworkID, "regtest") && strcmp(cp->strNetworkID, "test"))
-        return ZCL_ERR(-1, "Template ballots require testnet or regtest");
+    if (!ballot_network_eligible(cp))
+        return ZCL_ERR(-1, "Template ballots require testnet, regtest or the selected research profile");
     const struct miner_signal_catalog_pin *pin = rpc_blockchain_ballot_catalog_pin();
     if (!pin || memcmp(pin->genesis, cp->consensus.hashGenesisBlock.data, 32))
         return ZCL_ERR(-1, "No ballot catalog pinned for the selected network");
@@ -723,7 +737,8 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
 
     struct mining_template_parent parent;
     const char *reason;
-    struct block_template *tmpl = mining_create_template(&coinbase_script, cp, &parent, &reason);
+    struct block_template *tmpl = mining_create_template(&coinbase_script, cp, &parent, &reason,
+        json_get(json_at(params, 0), "ballotslots") != NULL);
     if (!tmpl) {
         json_set_str(result, reason);
         return false;
@@ -759,7 +774,7 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
     json_push_kv_int(result, "curtime", (int64_t)tmpl->block.header.nTime);
     json_push_kv_int(result, "mintime",
                      parent.minimum_time);
-    json_push_kv_int(result, "sizelimit", MAX_BLOCK_SIZE);
+    json_push_kv_int(result, "sizelimit", (int64_t)research_block_size_limit(cp));
     json_push_kv_int(result, "sigoplimit", 20000);
 
     char finalsapling[65];

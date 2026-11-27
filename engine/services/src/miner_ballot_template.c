@@ -7,6 +7,9 @@
 #include "core/serialize.h"
 #include "crypto/equihash.h"
 #include "primitives/block.h"
+#include "mining/miner.h"
+#include "services/research_block_size.h"
+#include "core/amount.h"
 #include "primitives/transaction.h"
 #include "util/safe_alloc.h"
 #include "validation/main_constants.h"
@@ -108,4 +111,150 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
     if (!r.ok) return r;
     *reserved_size_out = reserved;
     return ZCL_OK;
+}
+
+/* Reserve a maximum coinbase script and the selected Equihash solution;
+ * optional ballot output growth includes the output-count CompactSize. */
+static struct zcl_result research_reserved_size(struct block *block,
+    size_t solution_size, bool reserve_ballot, size_t *out)
+{
+    size_t limit = RESEARCH_BLOCK_SIZE_LIMIT;
+    struct transaction *cb = &block->vtx[0];
+    size_t extra = reserve_ballot ? 8 + compact_size_sizeof(MINER_SIGNAL_SCRIPT_BYTES) +
+        MINER_SIGNAL_SCRIPT_BYTES + compact_size_sizeof(cb->num_vout + 1) -
+        compact_size_sizeof(cb->num_vout) : 0;
+    unsigned char *bytes = zcl_malloc(limit + 1, "research template bound");
+    if (!bytes) return ZCL_ERR(-20, "Cannot allocate research template bound");
+    struct byte_stream s = { .data = bytes, .capacity = limit + 1, .owns_data = false };
+    struct script *script = &cb->vin[0].script_sig;
+    size_t old_len = script->size;
+    memset(script->data + old_len, 0, 100 - old_len);
+    script->size = 100;
+    memset(block->header.nSolution, 0, solution_size);
+    block->header.nSolutionSize = solution_size;
+    bool ok = block_serialize(block, &s);
+    bool overflow = s.error || s.size > limit || extra > limit - s.size;
+    size_t size = s.size + (overflow ? 0 : extra);
+    block->header.nSolutionSize = 0;
+    script->size = old_len;
+    free(bytes);
+    if (overflow) return ZCL_ERR(-21, "Research template exceeds block limit");
+    if (!ok) return ZCL_ERR(-22, "Cannot serialize research template");
+    *out = size;
+    return ZCL_OK;
+}
+
+static bool research_coinbase_valid(const struct transaction *cb, bool reserve_ballot)
+{
+    return cb->vin && transaction_is_coinbase(cb) && cb->vout && cb->num_vout &&
+        cb->vin[0].script_sig.size <= 100 &&
+        (!reserve_ballot || cb->num_vout < MAX_TX_OUTPUTS);
+}
+
+/* Determine the longest fitting prefix with one bounded buffer and a single
+ * serialization per candidate transaction. A final full-block check follows. */
+static struct zcl_result research_fitting_prefix(struct block *block,
+    size_t solution_size, bool reserve_ballot, size_t *count_out)
+{
+    size_t limit = RESEARCH_BLOCK_SIZE_LIMIT;
+    struct transaction *cb = &block->vtx[0];
+    size_t extra = reserve_ballot ? 8 + compact_size_sizeof(MINER_SIGNAL_SCRIPT_BYTES) +
+        MINER_SIGNAL_SCRIPT_BYTES + compact_size_sizeof(cb->num_vout + 1) -
+        compact_size_sizeof(cb->num_vout) : 0;
+    unsigned char *bytes = zcl_malloc(limit + 1, "research template prefix");
+    if (!bytes) return ZCL_ERR(-20, "Cannot allocate research template bound");
+    struct byte_stream s = { .data = bytes, .capacity = limit + 1, .owns_data = false };
+    struct script *script = &cb->vin[0].script_sig;
+    size_t old_len = script->size;
+    memset(script->data + old_len, 0, 100 - old_len);
+    script->size = 100;
+    memset(block->header.nSolution, 0, solution_size);
+    block->header.nSolutionSize = solution_size;
+    bool ok = block_header_serialize(&block->header, &s) && transaction_serialize(cb, &s);
+    block->header.nSolutionSize = 0;
+    script->size = old_len;
+    if (!ok) {
+        bool exceeded = s.error;
+        free(bytes);
+        return exceeded ? ZCL_ERR(-21, "Research coinbase exceeds block limit")
+                        : ZCL_ERR(-22, "Cannot serialize research coinbase");
+    }
+    size_t total = s.size;
+    size_t count = 1;
+    if (extra > limit || total > limit - extra ||
+        compact_size_sizeof(count) > limit - extra - total) {
+        free(bytes);
+        return ZCL_ERR(-21, "Research coinbase exceeds block limit");
+    }
+    for (size_t i = 1; i < block->num_vtx; i++) {
+        s.size = 0;
+        s.error = false;
+        ok = transaction_serialize(&block->vtx[i], &s);
+        if (!ok && !s.error) { free(bytes); return ZCL_ERR(-22, "Cannot serialize research transaction"); }
+        if (!ok || s.size > limit - extra - total ||
+            compact_size_sizeof(count + 1) > limit - extra - total - s.size)
+            break;
+        total += s.size;
+        count++;
+    }
+    free(bytes);
+    *count_out = count;
+    return ZCL_OK;
+}
+
+static struct zcl_result research_template_validate(const struct block_template *tmpl,
+    const struct chain_params *params, int height, bool reserve_ballot)
+{
+    if (!tmpl || !params || height < 0 ||
+        research_block_size_limit(params) != RESEARCH_BLOCK_SIZE_LIMIT ||
+        !ballot_unsolved_template(&tmpl->block) || !tmpl->tx_fees ||
+        !tmpl->tx_sig_ops || tmpl->num_entries != tmpl->block.num_vtx)
+        return ZCL_ERR(-23, "Invalid research mining template");
+    const struct transaction *cb = &tmpl->block.vtx[0];
+    if (!research_coinbase_valid(cb, reserve_ballot))
+        return ZCL_ERR(-24, "Invalid research coinbase");
+    return ZCL_OK;
+}
+
+static struct zcl_result research_template_drop_last(struct block_template *tmpl)
+{
+    struct block *block = &tmpl->block;
+    struct transaction *cb = &block->vtx[0];
+    size_t last = block->num_vtx - 1;
+    int64_t fee = tmpl->tx_fees[last];
+    if (!MoneyRange(fee) || !MoneyRange(cb->vout[0].value) ||
+        cb->vout[0].value < fee || tmpl->tx_fees[0] > 0 ||
+        tmpl->tx_fees[0] < -MAX_MONEY || fee > -tmpl->tx_fees[0])
+        return ZCL_ERR(-27, "Invalid research template fees");
+    cb->vout[0].value -= fee;
+    tmpl->tx_fees[0] += fee;
+    transaction_free(&block->vtx[last]);
+    block->num_vtx--;
+    tmpl->num_entries--;
+    return ZCL_OK;
+}
+
+struct zcl_result miner_research_template_fit(struct block_template *tmpl,
+    const struct chain_params *params, int height, bool reserve_ballot)
+{
+    struct zcl_result valid = research_template_validate(tmpl, params, height, reserve_ballot);
+    if (!valid.ok) return valid;
+    unsigned n = chain_params_equihash_n(params, height);
+    unsigned k = chain_params_equihash_k(params, height);
+    if (!equihash_params_supported(n, k)) return ZCL_ERR(-25, "Unsupported Equihash parameters");
+    struct equihash_params ep;
+    equihash_params_init(&ep, n, k);
+    if (!ep.solution_width || ep.solution_width > MAX_SOLUTION_SIZE)
+        return ZCL_ERR(-26, "Invalid Equihash solution width");
+    struct block *block = &tmpl->block;
+    size_t keep = 0;
+    struct zcl_result r = research_fitting_prefix(block, ep.solution_width, reserve_ballot, &keep);
+    if (!r.ok) return r;
+    while (block->num_vtx > keep) {
+        r = research_template_drop_last(tmpl);
+        if (!r.ok) return r;
+    }
+    size_t reserved;
+    r = research_reserved_size(block, ep.solution_width, reserve_ballot, &reserved);
+    return r.ok ? ballot_update_merkle(block) : r;
 }
