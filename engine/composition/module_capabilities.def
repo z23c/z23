@@ -89,6 +89,7 @@ ZCL_MODULE_CAPABILITY("engine/controllers/src/app_native_handlers.c", CAP_FS_WRI
 ZCL_MODULE_CAPABILITY("engine/controllers/src/blockchain_controller_admin.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_ballot_catalog.c", CAP_FS_WRITE, "Reports an invalid startup catalog on stderr.")
 ZCL_MODULE_CAPABILITY("engine/services/src/miner_signal_catalog_pin.c", CAP_FS_READ|CAP_FS_WRITE, "Reads the operator-selected catalog file. The checked allocator reports failures on stderr.")
+ZCL_MODULE_CAPABILITY("engine/services/src/experimental_profile.c", CAP_FS_READ, "Reads explicitly supplied experimental profile and genesis files.")
 ZCL_MODULE_CAPABILITY("engine/services/src/miner_ballot_template.c", CAP_FS_WRITE, "Checked template allocation reports failures to stderr.")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/blockchain_controller_ballot.c", CAP_FS_WRITE, "Checked allocation reports ballot snapshot allocation failure on stderr.")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/blockchain_controller_blocks.c", CAP_FS_WRITE|CAP_CLOCK, "")

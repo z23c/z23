@@ -19,7 +19,7 @@ INCLUDES := -Icore/modules/net/include -Iplatform/modules/platform/include \
  -Icore/modules/core/include -Icore/modules/sapling/include -Icore/modules/crypto/include \
  -Icore/math/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
  -Iplatform/modules/sha3/include -Iplatform/modules/encoding/include
-COMMON_SOURCES := tools/dev/profile_inspector/common.c engine/services/src/miner_signal_catalog.c \
+COMMON_SOURCES := tools/dev/profile_inspector/common.c engine/services/src/experimental_profile.c engine/services/src/miner_signal_catalog.c \
  platform/modules/sha3/src/sha3.c platform/modules/base/src/result.c \
  platform/modules/base/src/log_level.c platform/modules/base/src/safe_alloc.c \
  platform/modules/encoding/src/utilstrencodings.c core/modules/primitives/src/transaction.c \

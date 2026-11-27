@@ -31,7 +31,7 @@ static bool number(const char *s, uint32_t max, uint32_t *out)
 }
 
 static bool manifest_from_args(int argc, char **argv, uint8_t *buf, size_t *len,
-                               struct profile *p)
+                               struct experimental_profile *p)
 {
     static const char domain[] = "Z23-PROFILE-EXPERIMENT-1";
     static const char baseline[] = "regtest-shielded-baseline-fixture-1";
@@ -41,7 +41,7 @@ static bool manifest_from_args(int argc, char **argv, uint8_t *buf, size_t *len,
         !number(argv[3], INT32_MAX, &start) || !number(argv[4], 256, &window)) return false;
     size_t off = sizeof(domain) - 1;
     memcpy(buf, domain, off);
-    profile_digest(baseline, sizeof(baseline) - 1, buf + off); off += 32;
+    experimental_profile_digest(baseline, sizeof(baseline) - 1, buf + off); off += 32;
     uint32_t fields[8] = { timestamp, 0x200f0f0f, 48, 5, start, window, 95,
                            (uint32_t)((argc - 5) / 2) };
     for (size_t i = 0; i < 8; i++, off += 4) zcl_write_u32_le(buf + off, fields[i]);
@@ -52,11 +52,11 @@ static bool manifest_from_args(int argc, char **argv, uint8_t *buf, size_t *len,
         zcl_write_u32_le(buf + off + 32, activation);
     }
     *len = off;
-    if (!profile_parse(buf, off, p)) return false;
+    if (!experimental_profile_parse(buf, off, p).ok) return false;
     /* Validate ordering and schedule before doing the expensive solve. */
     p->catalog.genesis[0] = 1;
     struct miner_signal_schedule schedule;
-    return miner_signal_catalog_select(&p->catalog, 0, &schedule).ok;
+    return experimental_profile_select(p, 0, &schedule).ok;
 }
 
 static bool try_nonce(struct block *b, uint32_t nonce, const struct equihash_params *ep)
@@ -83,7 +83,7 @@ static bool try_nonce(struct block *b, uint32_t nonce, const struct equihash_par
            arith_uint256_compare(&value, &target) <= 0;
 }
 
-static bool generate_genesis(const struct profile *p, struct byte_stream *wire)
+static bool generate_genesis(const struct experimental_profile *p, struct byte_stream *wire)
 {
     struct tx_in input = {0};
     tx_in_init(&input);
@@ -152,7 +152,7 @@ static bool save_pair(const char *dir, const uint8_t *manifest, size_t mlen,
 int main(int argc, char **argv)
 {
     uint8_t manifest[PROFILE_MAX]; size_t mlen = 0;
-    struct profile p = {0};
+    struct experimental_profile p = {0};
     if (!manifest_from_args(argc, argv, manifest, &mlen, &p)) {
         fputs("usage: profile-create OUTPUT_DIR TIMESTAMP START WINDOW REVISION_HEX ACTIVATION [REVISION_HEX ACTIVATION ...]; revisions must be strictly sorted\n", stderr);
         return 1;
@@ -168,11 +168,11 @@ int main(int argc, char **argv)
     stream_init(&genesis, 0);
     struct uint256 hash;
     bool ok = generate_genesis(&p, &genesis) &&
-              profile_inspect_genesis(genesis.data, genesis.size, &p, &hash);
+              experimental_profile_genesis(genesis.data, genesis.size, &p, &hash).ok;
     struct miner_signal_schedule selected;
     if (ok) {
         memcpy(p.catalog.genesis, hash.data, 32);
-        ok = miner_signal_catalog_select(&p.catalog, 0, &selected).ok;
+        ok = experimental_profile_select(&p, 0, &selected).ok;
     }
     if (ok) ok = save_pair(argv[1], manifest, mlen, genesis.data, genesis.size);
     stream_free(&genesis);

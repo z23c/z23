@@ -1,6 +1,8 @@
 /* purpose: Verify canonical ballot catalog vectors and rejection behavior. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/miner_signal_catalog.h"
+#include "services/experimental_profile.h"
+#include "experimental_profile_fixture.h"
 #include "services/miner_signal_catalog_pin.h"
 #include "json/json.h"
 #include "test/test_core.h"
@@ -90,8 +92,61 @@ static int catalog_pin_cases(void)
 
 #endif
 
+static int profile_owned_cases(void)
+{
+    static const char pin_text[] =
+        "d39f32009d8f47cadc323c2026dc515b46083619a4d8e675d5146c33b80d1604";
+    uint8_t pin[32];
+    CAT_CHECK(zcl_hex_decode(pin_text, pin, sizeof(pin)));
+    uint8_t manifest[sizeof(profile_fixture_manifest)];
+    uint8_t genesis[sizeof(profile_fixture_genesis)];
+    memcpy(manifest, profile_fixture_manifest, sizeof(manifest));
+    memcpy(genesis, profile_fixture_genesis, sizeof(genesis));
+    struct experimental_profile value = {0};
+    CAT_CHECK(experimental_profile_load(manifest, sizeof(manifest), genesis, sizeof(genesis),
+                                        pin, &value) == EXPERIMENTAL_PROFILE_OK);
+    CAT_CHECK(value.catalog.count == 1 && !memcmp(value.catalog.digest, pin, 32));
+    uint8_t identity[32];
+    CAT_CHECK(zcl_hex_decode("183dabcbb9c42160e69ad1e0518280a848fabd04bd8eab8637ee4a262365c133", identity, 32));
+    CAT_CHECK(!memcmp(value.digest, identity, 32));
+    CAT_CHECK(!memcmp(value.magic, "\xae\x49\x7c\x94", 4));
+    char genesis_hex[65];
+    uint256_get_hex(&value.genesis_hash, genesis_hex);
+    CAT_CHECK(!strcmp(genesis_hex, "04b53334156424e5d5f630c5b282cac874e8ec73a8b0af99673c389bb18ae7ea"));
+    struct experimental_profile copy = value;
+    memset(&value, 0, sizeof(value));
+    memset(manifest, 0, sizeof(manifest)); memset(genesis, 0, sizeof(genesis));
+    CAT_CHECK(copy.genesis_size == sizeof(profile_fixture_genesis));
+    CAT_CHECK(!memcmp(copy.genesis_wire, profile_fixture_genesis, sizeof(profile_fixture_genesis)));
+    struct miner_signal_schedule schedule = {0};
+    CAT_CHECK(miner_signal_catalog_pin_select(&copy.catalog, 0, &schedule).ok);
+    CAT_CHECK(!memcmp(schedule.catalog, pin, 32));
+    uint8_t before[sizeof(copy)];
+    memcpy(before, &copy, sizeof(copy));
+    pin[0] ^= 1;
+    CAT_CHECK(experimental_profile_load(profile_fixture_manifest, sizeof(profile_fixture_manifest),
+        profile_fixture_genesis, sizeof(profile_fixture_genesis), pin, &copy) ==
+        EXPERIMENTAL_PROFILE_PIN_MISMATCH);
+    CAT_CHECK(memcmp(&copy, before, sizeof(copy)) == 0);
+    memcpy(genesis, profile_fixture_genesis, sizeof(genesis));
+    genesis[100] ^= 1;
+    CAT_CHECK(experimental_profile_load(profile_fixture_manifest, sizeof(profile_fixture_manifest),
+        genesis, sizeof(genesis), pin, &copy) == EXPERIMENTAL_PROFILE_INVALID);
+    CAT_CHECK(memcmp(&copy, before, sizeof(copy)) == 0);
+    CAT_CHECK(experimental_profile_load(profile_fixture_manifest, sizeof(profile_fixture_manifest) - 1,
+        profile_fixture_genesis, sizeof(profile_fixture_genesis), pin, &copy) ==
+        EXPERIMENTAL_PROFILE_INVALID);
+    CAT_CHECK(memcmp(&copy, before, sizeof(copy)) == 0);
+    CAT_CHECK(experimental_profile_load(profile_fixture_manifest, sizeof(profile_fixture_manifest),
+        profile_fixture_genesis, sizeof(profile_fixture_genesis), NULL, &copy) ==
+        EXPERIMENTAL_PROFILE_INVALID);
+    CAT_CHECK(memcmp(&copy, before, sizeof(copy)) == 0);
+    return 0;
+}
+
 int test_miner_signal_catalog(void)
 {
+    CAT_CHECK(profile_owned_cases() == 0);
     static const char *expected = "be8027db90c73984db54173ba98edd05ec137fad214ee500ae3b9e117b2894fe";
     struct miner_signal_catalog_entry entries[2] = {0};
     struct miner_signal_catalog c = { .start = 100, .window = 20, .count = 2, .entries = entries };

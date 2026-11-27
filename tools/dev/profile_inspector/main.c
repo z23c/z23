@@ -12,7 +12,7 @@ static int finish_output(const char *label)
     return 1;
 }
 
-static void export_catalog(const struct profile *p)
+static void export_catalog(const struct experimental_profile *p)
 {
     fputs("[\"", stdout);
     profile_print_hex(p->catalog.network_id, 32);
@@ -20,29 +20,28 @@ static void export_catalog(const struct profile *p)
     for (size_t i = 0; i < p->catalog.count; ++i) {
         if (i) putchar(',');
         fputs("[\"", stdout);
-        profile_print_hex(p->entries[i].rule_revision, 32);
-        printf("\",%d]", p->entries[i].activation);
+        profile_print_hex(p->catalog.entries[i].rule_revision, 32);
+        printf("\",%d]", p->catalog.entries[i].activation);
     }
     puts("]]");
 }
 
-static bool load_profile(const char *manifest_path, const char *genesis_path,
-                         struct profile *p, struct uint256 *hash)
+static enum experimental_profile_status load_profile(
+    const char *manifest_path, const char *genesis_path, const char *pin,
+    bool export, struct experimental_profile *p)
 {
-    uint8_t manifest[PROFILE_MAX + 1], genesis[GENESIS_SIZE + 1];
+    uint8_t manifest[PROFILE_MAX + 1], genesis[GENESIS_SIZE + 1], expected[32];
     size_t mlen = 0, glen = 0;
-    return profile_read_file(manifest_path, manifest, sizeof(manifest), &mlen) &&
-           profile_read_file(genesis_path, genesis, sizeof(genesis), &glen) &&
-           profile_parse(manifest, mlen, p) &&
-           profile_inspect_genesis(genesis, glen, p, hash);
-}
-
-static bool pin_matches(const char *text, bool export, const uint8_t digest[32])
-{
-    uint8_t expected[32];
-    bool decoded = export ? zcl_hex_decode_lower(text, expected, sizeof(expected))
-                          : zcl_hex_decode(text, expected, sizeof(expected));
-    return decoded && memcmp(expected, digest, sizeof(expected)) == 0;
+    if (!experimental_profile_read_file(manifest_path, manifest, sizeof(manifest), &mlen).ok ||
+        !experimental_profile_read_file(genesis_path, genesis, sizeof(genesis), &glen).ok)
+        return EXPERIMENTAL_PROFILE_INVALID;
+    if (!pin) return experimental_profile_inspect(manifest, mlen, genesis, glen, p);
+    bool decoded = export ? zcl_hex_decode_lower(pin, expected, sizeof(expected))
+                          : zcl_hex_decode(pin, expected, sizeof(expected));
+    if (decoded) return experimental_profile_load(manifest, mlen, genesis, glen, expected, p);
+    enum experimental_profile_status status =
+        experimental_profile_inspect(manifest, mlen, genesis, glen, p);
+    return status == EXPERIMENTAL_PROFILE_OK ? EXPERIMENTAL_PROFILE_PIN_MISMATCH : status;
 }
 
 static int check_options(int argc, char **argv, bool *export)
@@ -69,22 +68,18 @@ int main(int argc, char **argv)
     int option_result = check_options(argc, argv, &export);
     if (option_result >= 0) return option_result;
     int offset = export ? 1 : 0;
-    struct profile p = {0};
-    struct uint256 hash;
-    struct miner_signal_schedule schedule;
-    if ((!export && argc != 3 && argc != 4) ||
-        !load_profile(argv[1 + offset], argv[2 + offset], &p, &hash)) {
+    struct experimental_profile p = {0};
+    if (!export && argc != 3 && argc != 4) {
         fputs("invalid experimental profile or genesis\n", stderr);
         return 1;
     }
-    memcpy(p.catalog.genesis, hash.data, 32);
-    if (!miner_signal_catalog_select(&p.catalog, 0, &schedule).ok) {
-        fputs("invalid experimental catalog\n", stderr);
-        return 1;
-    }
-    if ((export || argc == 4) &&
-        !pin_matches(argv[3 + offset], export, schedule.catalog)) {
-        fputs("expected catalog mismatch or invalid digest\n", stderr);
+    const char *pin = (export || argc == 4) ? argv[3 + offset] : NULL;
+    enum experimental_profile_status status =
+        load_profile(argv[1 + offset], argv[2 + offset], pin, export, &p);
+    if (status != EXPERIMENTAL_PROFILE_OK) {
+        fputs(status == EXPERIMENTAL_PROFILE_CATALOG_INVALID ? "invalid experimental catalog\n" :
+              status == EXPERIMENTAL_PROFILE_PIN_MISMATCH ? "expected catalog mismatch or invalid digest\n" :
+              "invalid experimental profile or genesis\n", stderr);
         return 1;
     }
     if (export) {
@@ -92,19 +87,19 @@ int main(int argc, char **argv)
         return finish_output("catalog");
     }
     char display[65];
-    uint256_get_hex(&hash, display);
+    uint256_get_hex(&p.genesis_hash, display);
     fputs("{\"format\":\"Z23-PROFILE-EXPERIMENT-1\",\"profile\":\"", stdout);
     profile_print_hex(p.digest, 32);
     fputs("\",\"magic\":\"", stdout); profile_print_hex(p.magic, 4);
     printf("\",\"genesis\":\"%s\",\"catalog\":\"", display);
-    profile_print_hex(schedule.catalog, 32);
+    profile_print_hex(p.catalog.digest, 32);
     printf("\",\"start\":%d,\"window\":%d,\"proposals\":%zu,\"rules\":[",
            p.catalog.start, p.catalog.window, p.catalog.count);
     for (size_t i = 0; i < p.catalog.count; i++) {
         if (i) putchar(',');
         fputs("{\"revision\":\"", stdout);
-        profile_print_hex(p.entries[i].rule_revision, 32);
-        printf("\",\"activation\":%d}", p.entries[i].activation);
+        profile_print_hex(p.catalog.entries[i].rule_revision, 32);
+        printf("\",\"activation\":%d}", p.catalog.entries[i].activation);
     }
     puts("]}");
     return finish_output("profile");
