@@ -275,7 +275,7 @@ AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_response.c", "rpc_error_env
 AGENT_IMPACT_RULE("engine/modules/rpc/src/server.c|engine/modules/rpc/include/rpc/server.h|engine/composition/src/boot_frontend_services.c|tests/harness/src/test_rpc_service_restart.c", "rpc_service_restart rpc service_kernel make_lint_gates")
 AGENT_IMPACT_RULE("core/modules/mining/src/gen.c|core/modules/mining/include/mining/gen.h|tests/harness/src/test_mining.c", "mining make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/include/services/miner_signal_round.h|engine/services/src/miner_signal_round.c|tests/harness/src/test_miner_signal_round.c", "miner_signal_round mining make_lint_gates")
-AGENT_IMPACT_RULE("engine/controllers/src/blockchain_controller_ballot.c|tests/harness/src/test_rpc_ballotstatus.c", "rpc_ballotstatus make_lint_gates")
+AGENT_IMPACT_RULE("engine/controllers/src/blockchain_controller_ballot.c|tests/harness/src/test_rpc_ballotstatus.c|tests/harness/src/test_rpc_ballot_integration.c", "rpc_ballot_integration rpc_ballotstatus make_lint_gates")
 /* On-demand regtest minting: the two `generate*` RPCs, the block template +
  * Equihash solver they share, and the coinbase payee script that decides
  * whether the mined subsidy is spendable by a wallet at all. */
