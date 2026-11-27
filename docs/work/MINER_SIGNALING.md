@@ -2,9 +2,9 @@
 
 # Miner signaling on testnet and regtest
 
-A pool can signal readiness for any subset of proposals in one voting round. Each proposal has its own rule revision, bit position and activation height. Nodes count accepted blocks on the branch under examination. Block share estimates hashpower over the voting window. The threshold is 95% of **all** blocks in that window, including silent blocks, rounded up to a whole block.
+A pool can signal readiness for any subset of proposals in one voting round. Each proposal has its own rule revision, bit position and activation height. The status RPC counts accepted blocks on the branch selected by the node at its durable provable tip. Block share estimates hashpower over the voting window. The threshold is 95% of **all** blocks in that window, including silent blocks, rounded up to a whole block.
 
-For example, a 20-block window requires 19 signals. With heights 1 through 20 reserved for voting and height 23 selected for activation, the tally becomes final for that branch after block 20. Blocks 21 and 22 provide lead time. A qualifying proposal first reports active **for block 23**, when its parent is block 22. A proposal with 18 signals expires independently. A competing branch can have a different tally.
+For example, a 20-block window requires 19 signals. With heights 1 through 20 reserved for voting and height 23 selected for activation, the tally becomes final for that branch after block 20. Blocks 21 and 22 provide lead time. A qualifying proposal first reports active **for block 23**, when its parent is block 22. A proposal with 18 signals expires independently. To compare competing branches, query nodes that have selected different tips.
 
 <!-- claim: symbol-present miner_signal_phase_at engine/services/src/miner_signal_round.c # candidate height and tally -->
 <!-- claim: symbol-present miner_signal_schedule_valid engine/services/src/miner_signal_round.c # minimum old-rule interval -->
