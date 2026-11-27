@@ -544,6 +544,7 @@ static int frc_addressed_cases(void)
     static struct fbw w;
     struct fleet_board_post post, second;
     struct p2p_node *competing = NULL;
+    struct send_segment *competing_q = NULL;
     struct p2p_node *nodes[3];
     struct zcl_fleet_role_checker checker = {
         .allow = fbw_role_check, .name = "fleet-board-addressed-test" };
@@ -607,22 +608,34 @@ static int frc_addressed_cases(void)
     TEST("addressed roster push refuses competing learned Noise identities") {
         struct net_address addr = {0};
         struct noise_transport_snapshot snap;
-        uint8_t target[32];
+        uint8_t target[32], frame[MESH_LOOP_WIRE_MAX];
+        bool more = false;
         addr.svc.port = 18035;
         competing = p2p_node_create(&w.nm, ZCL_INVALID_SOCKET, &addr,
                                     "competing", false);
         ASSERT(competing);
         competing->transport = w.f.res_status;
         competing->state = PEER_HANDSHAKE_COMPLETE;
+        competing_q = mesh_loop_sentinel(competing);
+        ASSERT(competing_q);
         ASSERT(noise_transport_snapshot(competing->transport, &snap));
         fbr_key(FBR_PEER, target);
         fleet_board_roster_learn(snap.remote_static, target, snap.transcript_hash,
                                  snap.connection_generation);
         nodes[0] = w.asker; nodes[1] = w.answerer; nodes[2] = competing;
         w.nm.nodes = nodes; w.nm.num_nodes = 3;
+        boot_fleet_board_fleet_counts(&before);
         ASSERT_EQ(frc_offer(&w, "ambiguous", 2505, &post, false), (size_t)0);
+        boot_fleet_board_fleet_counts(&after);
+        ASSERT_EQ(after.push_skipped[FLEET_BOARD_PUSH_SKIP_AMBIGUOUS],
+                  before.push_skipped[FLEET_BOARD_PUSH_SKIP_AMBIGUOUS] + 1);
         ASSERT_EQ(frc_to_asker(&w), (size_t)0);
+        (void)mesh_loop_take(competing, competing_q, w.f.status_peer.ini,
+                             frame, sizeof frame, &more);
+        ASSERT(!more);
         w.nm.nodes = w.nodes; w.nm.num_nodes = 2;
+        mesh_loop_free_queue(competing, competing_q);
+        free(competing_q); competing_q = NULL;
         competing->transport = NULL; p2p_node_free(competing); competing = NULL;
         fleet_board_roster_forget();
         ASSERT(frc_pull(&w, &w.b, &frames) != SIZE_MAX);
@@ -647,7 +660,11 @@ static int frc_addressed_cases(void)
     }
     _test_next:;
     w.nm.nodes = w.nodes; w.nm.num_nodes = 2;
-    if (competing) { competing->transport = NULL; p2p_node_free(competing); }
+    if (competing) {
+        if (competing_q) mesh_loop_free_queue(competing, competing_q);
+        free(competing_q);
+        competing->transport = NULL; p2p_node_free(competing);
+    }
     g_fbw_deny_read = false;
     boot_fleet_board_roster_push_test_unknown(false);
     boot_fleet_board_fleet_test_roster_identity(1, NULL, NULL);
