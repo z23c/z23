@@ -76,15 +76,19 @@ static struct zcl_result ballot_update_merkle(struct block *block)
     return ZCL_OK;
 }
 
+static bool ballot_unsolved_template(const struct block *block)
+{
+    return block && block->vtx && block->num_vtx &&
+           block->num_vtx <= MAX_BLOCK_TRANSACTIONS && !block->header.nSolutionSize;
+}
+
 struct zcl_result miner_ballot_template_apply(struct block *block,
     const uint8_t catalog[32], const uint8_t bitmap[32],
     const struct chain_params *params, int height, size_t mining_limit,
     size_t *reserved_size_out)
 {
-    if (!block || !catalog || !bitmap || !params || !reserved_size_out || height < 0 ||
-        !mining_limit || mining_limit > DEFAULT_BLOCK_MAX_SIZE ||
-        !block->vtx || !block->num_vtx || block->num_vtx > MAX_BLOCK_TRANSACTIONS ||
-        block->header.nSolutionSize != 0)
+    if (!ballot_unsolved_template(block) || !catalog || !bitmap || !params ||
+        !reserved_size_out || height < 0 || !mining_limit || mining_limit > DEFAULT_BLOCK_MAX_SIZE)
         return ZCL_ERR(-8, "Invalid unsolved mining template or policy limit");
     unsigned n = chain_params_equihash_n(params, height);
     unsigned k = chain_params_equihash_k(params, height);
