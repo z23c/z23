@@ -1184,8 +1184,9 @@ static bool main_research_prepare(int argc, char ***args,
     return true;
 }
 
-static bool main_research_config_ok(bool active)
+static bool main_research_config_ok(bool active, int argc, char **argv)
 {
+    if (is_cli_mode(argc, argv)) return true;
     if (GetArg("-testnet-profile", NULL)) return false;
     return !active || (!GetArg("-testnet", NULL) &&
         !GetArg("-regtest", NULL) && !GetArg("-regtestshielded", NULL));
@@ -1242,7 +1243,7 @@ int main(int argc, char **argv)
                           sizeof(conf_datadir));
         GetConfigFilePath(conf_datadir, conf_path, sizeof(conf_path));
         (void)ReadConfigFile(conf_path);
-        if (!main_research_config_ok(research.profile != NULL)) {
+        if (!main_research_config_ok(research.profile != NULL, argc, argv)) {
             fprintf(stderr, "Research profile config contains a conflicting network selector.\n");
             return 1;
         }
