@@ -1644,6 +1644,56 @@ static int bmx_t_directory(void)
     bmx_teardown(); return failures;
 }
 
+static int bmx_t_peer_name_memo(void)
+{
+    int failures = 0;
+    TEST("boardmail: naming a board row's signer reuses the verdict over "
+         "unchanged roster bytes, and seals again once the roster changes") {
+        char name[FLEET_ENROL_NAME_MAX + 1];
+        char line[FLEET_ENROL_MACHINE_TEXT_MAX], hex[65];
+        uint8_t seed[32], pub[32];
+        uint64_t before = 0;
+        const char *why = NULL;
+        ASSERT(bmx_setup("peer-name-memo"));
+        bmx_use(BMX_A);
+        ASSERT(bmx_own_key());
+        /* A brief asks this once per board mail row. Three roster lines, so
+         * two hundred asks may seal at most those three lines once. */
+        before = fleet_roster_line_verifies();
+        for (int i = 0; i < 200; i++) {
+            ASSERT(zcl_devagent_boardmail_peer_name(g_bmx_host[1], name,
+                                                    sizeof(name)));
+            ASSERT_STR_EQ(name, "node-b");
+        }
+        ASSERT(fleet_roster_line_verifies() - before <= (uint64_t)3);
+        /* A signer no roster row names stays unnamed, and settles nothing. */
+        bmx_key(0x64, seed, pub);
+        bmx_hex(pub, 32, hex);
+        before = fleet_roster_line_verifies();
+        ASSERT(!zcl_devagent_boardmail_peer_name(hex, name, sizeof(name)));
+        ASSERT_STR_EQ(name, "");
+        ASSERT_EQ(fleet_roster_line_verifies(), before);
+        /* A machine admitted meanwhile is on the next answer: new bytes,
+         * sealed once, then reused. */
+        ASSERT(bmx_roster_line("node-d", 0x44, 0x64,
+                               (uint16_t)(FLEET_ENROL_PORT_FIRST + 3), line,
+                               sizeof(line)));
+        ASSERT(fleet_roster_append(line, &why));
+        before = fleet_roster_line_verifies();
+        ASSERT(zcl_devagent_boardmail_peer_name(hex, name, sizeof(name)));
+        ASSERT_STR_EQ(name, "node-d");
+        ASSERT(fleet_roster_line_verifies() - before == (uint64_t)4);
+        for (int i = 0; i < 100; i++) {
+            ASSERT(zcl_devagent_boardmail_peer_name(g_bmx_host[2], name,
+                                                    sizeof(name)));
+            ASSERT_STR_EQ(name, "node-c");
+        }
+        ASSERT_EQ(fleet_roster_line_verifies(), before + 4);
+        bmx_teardown(); PASS();
+    } _test_next:;
+    bmx_teardown(); return failures;
+}
+
 static int bmx_t_delivery(void)
 {
     int failures = 0;
@@ -2670,6 +2720,7 @@ int test_devagent_boardmail(void)
     failures += bmx_t_push_hint();
     failures += bmx_t_refs_wrap();
     failures += bmx_t_directory();
+    failures += bmx_t_peer_name_memo();
     failures += bmx_t_directory_crowded();
     failures += bmx_t_append_retry();
     failures += bmx_t_partial_row();

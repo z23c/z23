@@ -445,6 +445,233 @@ static int test_fe_roster_admission(void)
     return failures;
 }
 
+/* ── the roster verdict settles once per set of bytes ──────────────────── */
+
+struct fe_rows_seen {
+    char name[8][FLEET_ENROL_NAME_MAX + 1];
+    uint16_t port[8];
+    size_t n;
+};
+
+static void fe_see_row(const struct fleet_machine *m, void *user)
+{
+    struct fe_rows_seen *s = user;
+    if (s->n < 8) {
+        (void)snprintf(s->name[s->n], FLEET_ENROL_NAME_MAX + 1, "%s",
+                       m->receipt.invite.name);
+        s->port[s->n] = m->relay_port;
+    }
+    s->n++;
+}
+
+/* A visitor that walks again from inside the walk it is visiting. At the
+ * first row it first replaces the roster with other bytes: a row put in
+ * front of the ones the outer walk is reading, so the nested walk reads
+ * bytes the outer walk is not. */
+static char fe_nested_text[3 * (FLEET_ENROL_MACHINE_TEXT_MAX + 2)];
+static size_t fe_nested_len;
+static struct fe_rows_seen fe_nested_seen[2];
+static uint8_t fe_nested_op[FLEET_ENROL_PUBKEY_BYTES];
+static bool fe_nested_ok;
+
+static void fe_rewalk_row(const struct fleet_machine *m, void *user)
+{
+    struct fe_rows_seen *outer = user;
+    struct fleet_roster_scan inner = {0};
+    const char *why = NULL;
+    char path[FLEET_ENROL_PATH_MAX];
+    FILE *file;
+    size_t wrote;
+    fe_see_row(m, outer);
+    if (outer->n == 1) {
+        if (!fleet_enrol_state_path("machines.roster", path, sizeof(path))) {
+            fe_nested_ok = false;
+            return;
+        }
+        file = fopen(path, "wb");
+        if (!file) {
+            fe_nested_ok = false;
+            return;
+        }
+        wrote = fwrite(fe_nested_text, 1, fe_nested_len, file);
+        if (wrote != fe_nested_len)
+            fe_nested_ok = false;
+        if (fclose(file) != 0)
+            fe_nested_ok = false;
+    }
+    if (outer->n >= 1 && outer->n <= 2) {
+        memset(&fe_nested_seen[outer->n - 1], 0, sizeof(fe_nested_seen[0]));
+        if (!fleet_roster_each(fe_nested_op, fe_see_row,
+                               &fe_nested_seen[outer->n - 1], &inner, &why))
+            fe_nested_ok = false;
+    }
+}
+
+static int test_fe_roster_memo(void)
+{
+    int failures = 0;
+    TEST("fleet enrol: a roster's seals settle at most once per set of bytes "
+         "and operator key — the same bytes answer every later read from "
+         "that verdict, and other bytes (a new line, a forged line, a hand "
+         "edit, another operator key) settle again") {
+        static char row[FLEET_ENROL_MACHINE_TEXT_MAX];
+        static char first[FLEET_ENROL_MACHINE_TEXT_MAX + 2];
+        char path[FLEET_ENROL_PATH_MAX];
+        uint8_t op_seed[32], op_pub[32], other_seed[32], other_pub[32];
+        uint8_t seed[32], box_a[32], box_c[32];
+        struct fleet_roster_scan scan = {0};
+        struct fe_rows_seen seen;
+        uint64_t before = 0;
+        size_t first_len = 0;
+        size_t row_len = 0;
+        FILE *file = NULL;
+        const char *why = NULL;
+        fe_isolate("roster-memo");
+        fe_key(0x81, op_seed, op_pub);
+        fe_key(0x82, other_seed, other_pub);
+        fe_key(0x83, seed, box_a);   /* the studio row's box */
+        fe_key(0x87, seed, box_c);   /* a box that never enrolled */
+        ASSERT(fe_row("studio", 0x81, 0x83, FLEET_ENROL_PORT_FIRST, "", row,
+                      sizeof(row)));
+        first_len = (size_t)snprintf(first, sizeof(first), "%s\n", row);
+        ASSERT(fleet_roster_append(row, &why));
+        ASSERT(fe_row("annex", 0x81, 0x84, FLEET_ENROL_PORT_FIRST + 1, "",
+                      row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        /* Cold: at most one seal check per line. */
+        before = fleet_roster_line_verifies();
+        memset(&seen, 0, sizeof(seen));
+        ASSERT(fleet_roster_each(op_pub, fe_see_row, &seen, &scan, &why));
+        ASSERT_EQ(seen.n, 2u);
+        ASSERT_STR_EQ(seen.name[0], "studio");
+        ASSERT_STR_EQ(seen.name[1], "annex");
+        ASSERT_EQ(seen.port[1], (uint16_t)(FLEET_ENROL_PORT_FIRST + 1));
+        ASSERT(fleet_roster_line_verifies() - before <= (uint64_t)2);
+        /* The same bytes under either read mode and any question: nothing
+         * settles again, and every answer is the one the seals gave. */
+        before = fleet_roster_line_verifies();
+        memset(&seen, 0, sizeof(seen));
+        ASSERT(fleet_roster_each_existing(op_pub, fe_see_row, &seen, &scan,
+                                          &why));
+        ASSERT_EQ(seen.n, 2u);
+        ASSERT_STR_EQ(seen.name[0], "studio");
+        ASSERT_STR_EQ(seen.name[1], "annex");
+        ASSERT_EQ(seen.port[0], (uint16_t)FLEET_ENROL_PORT_FIRST);
+        ASSERT(fleet_roster_scan(op_pub, "studio", box_c, &scan, &why));
+        ASSERT_EQ(scan.rows, 2u);
+        ASSERT(scan.name_taken && !scan.same_box);
+        ASSERT(fleet_roster_scan(op_pub, "studio", box_a, &scan, &why));
+        ASSERT_EQ(scan.rows, 2u);
+        ASSERT(scan.same_box && !scan.name_taken);
+        ASSERT_EQ(scan.existing_port, (uint16_t)FLEET_ENROL_PORT_FIRST);
+        ASSERT_EQ(scan.next_port, (uint16_t)(FLEET_ENROL_PORT_FIRST + 2));
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 2u);
+        ASSERT_EQ(scan.unverifiable, 0u);
+        ASSERT_EQ(fleet_roster_line_verifies(), before);
+        /* Another operator key is another question over the same bytes. */
+        before = fleet_roster_line_verifies();
+        ASSERT(fleet_roster_scan(other_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 0u);
+        ASSERT_EQ(scan.unverifiable, 2u);
+        ASSERT(fleet_roster_line_verifies() - before <= (uint64_t)2);
+        ASSERT(fleet_roster_scan(other_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 0u);
+        ASSERT_EQ(scan.unverifiable, 2u);
+        ASSERT_EQ(fleet_roster_line_verifies() - before, (uint64_t)2);
+        /* An appended line is new bytes: the whole roster settles again. */
+        ASSERT(fe_row("loft", 0x81, 0x85, FLEET_ENROL_PORT_FIRST + 2, "",
+                      row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        before = fleet_roster_line_verifies();
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 3u);
+        ASSERT_EQ(fleet_roster_line_verifies() - before, (uint64_t)3);
+        /* A line this key did not seal stays counted on every read of the
+         * bytes that carry it, and never becomes a row. */
+        ASSERT(fe_row("intruder", 0x82, 0x86, FLEET_ENROL_PORT_FIRST + 3, "",
+                      row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        before = fleet_roster_line_verifies();
+        ASSERT(fleet_roster_scan(op_pub, "intruder", NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 3u);
+        ASSERT_EQ(scan.unverifiable, 1u);
+        ASSERT(!scan.name_taken);
+        ASSERT(fleet_roster_line_verifies() - before <= (uint64_t)4);
+        ASSERT(fleet_roster_scan(op_pub, "intruder", NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 3u);
+        ASSERT_EQ(scan.unverifiable, 1u);
+        ASSERT(!scan.name_taken);
+        ASSERT_EQ(fleet_roster_line_verifies() - before, (uint64_t)4);
+        /* A hand edit is new bytes too: the rows it deleted stay deleted. */
+        ASSERT(fleet_enrol_state_path("machines.roster", path, sizeof(path)));
+        file = fopen(path, "wb");
+        ASSERT(file != NULL);
+        ASSERT(fwrite(first, 1, first_len, file) == first_len);
+        ASSERT(fclose(file) == 0);
+        before = fleet_roster_line_verifies();
+        ASSERT(fleet_roster_scan(op_pub, "loft", NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 1u);
+        ASSERT_EQ(scan.unverifiable, 0u);
+        ASSERT(!scan.name_taken);
+        ASSERT_EQ(fleet_roster_line_verifies() - before, (uint64_t)1);
+        /* A visitor may walk again. Nested while a verdict is being built,
+         * over a file it has just changed, it is answered from the bytes it
+         * read (three rows, the new one first), each time at the cost of
+         * its own seal checks; the build it interrupted stays the verdict
+         * over the bytes that walk read. */
+        ASSERT(fe_row("annex-2", 0x81, 0x89, FLEET_ENROL_PORT_FIRST + 1, "",
+                      row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        ASSERT(fleet_enrol_state_path("machines.roster", path, sizeof(path)));
+        file = fopen(path, "rb");
+        ASSERT(file != NULL);
+        fe_nested_len =
+            fread(fe_nested_text, 1, FLEET_ENROL_MACHINE_TEXT_MAX + 2, file);
+        /* The whole file: a read cut at the bound fails here, not later
+         * on a row that never reached the buffer. */
+        ASSERT(feof(file) != 0);
+        ASSERT(fclose(file) == 0);
+        ASSERT(fe_nested_len > 0);
+        ASSERT(fe_row("zeta", 0x81, 0x88, FLEET_ENROL_PORT_FIRST + 3, "", row,
+                      sizeof(row)));
+        row_len = strlen(row);
+        memmove(fe_nested_text + row_len + 1, fe_nested_text, fe_nested_len);
+        memcpy(fe_nested_text, row, row_len);
+        fe_nested_text[row_len] = '\n';
+        fe_nested_len += row_len + 1;
+        memcpy(fe_nested_op, op_pub, sizeof(fe_nested_op));
+        fe_nested_ok = true;
+        before = fleet_roster_line_verifies();
+        memset(&seen, 0, sizeof(seen));
+        ASSERT(fleet_roster_each(op_pub, fe_rewalk_row, &seen, &scan, &why));
+        ASSERT(fe_nested_ok);
+        ASSERT_EQ(seen.n, 2u);
+        ASSERT_STR_EQ(seen.name[0], "studio");
+        ASSERT_STR_EQ(seen.name[1], "annex-2");
+        ASSERT_EQ(fe_nested_seen[0].n, 3u);
+        ASSERT_EQ(fe_nested_seen[1].n, 3u);
+        ASSERT_STR_EQ(fe_nested_seen[0].name[0], "zeta");
+        ASSERT_STR_EQ(fe_nested_seen[0].name[1], "studio");
+        ASSERT_STR_EQ(fe_nested_seen[0].name[2], "annex-2");
+        ASSERT_STR_EQ(fe_nested_seen[1].name[0], "zeta");
+        ASSERT_STR_EQ(fe_nested_seen[1].name[1], "studio");
+        ASSERT_STR_EQ(fe_nested_seen[1].name[2], "annex-2");
+        ASSERT_EQ(fleet_roster_line_verifies() - before, (uint64_t)8);
+        /* The file now holds the nested walk's bytes. They settle, once. */
+        before = fleet_roster_line_verifies();
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 3u);
+        ASSERT_EQ(fleet_roster_line_verifies() - before, (uint64_t)3);
+        before = fleet_roster_line_verifies();
+        ASSERT(fleet_roster_scan(op_pub, NULL, NULL, &scan, &why));
+        ASSERT_EQ(scan.rows, 3u);
+        ASSERT_EQ(fleet_roster_line_verifies(), before);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── importing a roster line on a box that is not the manager ──────────── */
 
 static int test_fe_roster_import(void)
@@ -4602,6 +4829,7 @@ int test_fleet_enrol(void)
     failures += test_fe_receipt();
     failures += test_fe_roster_seal();
     failures += test_fe_roster_admission();
+    failures += test_fe_roster_memo();
     failures += test_fe_roster_import();
     failures += test_fe_replay();
     failures += test_fe_invite_nonce_fresh();

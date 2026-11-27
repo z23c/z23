@@ -7,10 +7,11 @@
  * platform_state_root()/fleet/. Append-only because a roster that can be
  * rewritten in place is a roster whose history nobody can check, and
  * text-of-signed-records because then the file itself carries no authority:
- * every line is re-verified against the operator public key on every read,
- * and a line this key did not seal is counted as unverifiable and never
- * rendered. Editing the file by hand can therefore delete rows, but cannot
- * invent one.
+ * every line is verified against the operator public key for the bytes
+ * being read (a verdict over identical bytes under the same key is kept for
+ * the life of the process: the roster verdict memo below), and a line this
+ * key did not seal is counted as unverifiable and never rendered. Editing
+ * the file by hand can therefore delete rows, but cannot invent one.
  *
  * The nonce list is the replay refusal. One spent invite nonce per line, in
  * hex. A nonce is spent only AFTER the roster line is durable, so a refusal
@@ -28,6 +29,7 @@
 #include "platform/directory_transaction.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
+#include "util/sync.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -154,34 +156,142 @@ struct fe_walk {
     bool used[FLEET_ENROL_ROSTER_MAX];
     void (*visit)(const struct fleet_machine *, void *);
     void *user;
+    struct fe_roster_memo *memo;     /* set while a verdict is being built */
     struct fleet_machine machine;    /* one row at a time; never an array */
 };
 
-static void fe_walk_line(char *line, void *user)
+/* Whether a line is this operator's row is a function of the line, the
+ * operator key and nothing else, and costs three Ed25519 verifications per
+ * row to answer, four when the box named a signing key. Callers ask it far
+ * more often than the roster changes: a fleet steer brief asks once per
+ * board mail row, hundreds of times, to name each row's signer. So the last
+ * verdict is kept, keyed by a digest of exactly what it was computed over:
+ * the operator key and the roster bytes that were read. The same bytes
+ * answer from the memo; any other bytes (an admitted machine, a hand edit,
+ * another operator key) are verified again. Nothing here makes the file
+ * authoritative: a row reaches a caller only after its seal verified for
+ * the bytes being read, in this call or in an earlier one over the
+ * identical bytes.
+ *
+ * One slot (some 225 KiB of zero-initialized storage), because a box has one
+ * roster. A roster with more verified rows than the slot holds is verified
+ * on every read and never kept. A visitor is shown the walk's own copy of a
+ * row, never the memo's, and a walk holds the lock across its visitors:
+ * collectors that copy and never wait on another lock. The lock is
+ * recursive, so a visitor may walk again; such a nested walk verifies its
+ * own bytes plainly and neither reads nor writes the memo, because the
+ * walk it interrupted may be halfway through rebuilding the one slot. */
+struct fe_roster_memo {
+    bool held;                       /* a verdict over `key` is complete */
+    bool overflow;                   /* while building: more rows than fit */
+    uint8_t key[SHA256_OUTPUT_SIZE];
+    uint32_t unverifiable;
+    size_t n;
+    struct fleet_machine rows[FLEET_ENROL_ROSTER_MAX];
+};
+
+static struct fe_roster_memo fe_memo;
+static zcl_mutex_t fe_memo_lock;
+static zcl_once_t fe_memo_once = ZCL_ONCE_INIT;
+static bool fe_busy;                 /* a walk holds the lock; the next is nested */
+static uint64_t fe_line_verifies;    /* roster lines put through the seal check */
+
+static void fe_memo_init(void)
 {
-    struct fe_walk *w = user;
-    const char *why = NULL;
-    uint16_t port = 0;
-    if (!fleet_machine_parse(line, w->operator_pubkey, &w->machine, &why)) {
-        w->scan->unverifiable++;
-        return;
-    }
+    zcl_mutex_init(&fe_memo_lock);
+}
+
+static void fe_memo_key(const uint8_t *operator_pubkey, const char *text,
+                        size_t len, uint8_t key[SHA256_OUTPUT_SIZE])
+{
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    sha256_write(&ctx, operator_pubkey, FLEET_ENROL_PUBKEY_BYTES);
+    sha256_write(&ctx, (const unsigned char *)text, len);
+    sha256_finalize(&ctx, key);
+}
+
+/* Account one VERIFIED row: the relay port it holds, the taken? and
+ * same-box? answers, and the visitor. */
+static void fe_row_account(struct fe_walk *w, const struct fleet_machine *m)
+{
+    uint16_t port = m->relay_port;
     w->scan->rows++;
-    port = w->machine.relay_port;
     if (port >= FLEET_ENROL_PORT_FIRST && port <= FLEET_ENROL_PORT_LAST)
         w->used[port - FLEET_ENROL_PORT_FIRST] = true;
     if (w->box_pubkey &&
-        memcmp(w->machine.receipt.box_pubkey, w->box_pubkey,
+        memcmp(m->receipt.box_pubkey, w->box_pubkey,
                FLEET_ENROL_PUBKEY_BYTES) == 0) {
         /* A box re-enrolling keeps its identity and its port. That is what
          * makes re-running `fleet admit` after a lost reply idempotent
          * rather than a second grant under a second port. */
         w->scan->same_box = true;
         w->scan->existing_port = port;
-    } else if (w->name && strcmp(w->machine.receipt.invite.name, w->name) == 0) {
+    } else if (w->name && strcmp(m->receipt.invite.name, w->name) == 0) {
         w->scan->name_taken = true;
     }
-    if (w->visit) w->visit(&w->machine, w->user);
+    if (w->visit) w->visit(m, w->user);
+}
+
+static void fe_walk_line(char *line, void *user)
+{
+    struct fe_walk *w = user;
+    const char *why = NULL;
+    fe_line_verifies++;
+    if (!fleet_machine_parse(line, w->operator_pubkey, &w->machine, &why)) {
+        w->scan->unverifiable++;
+        return;
+    }
+    if (w->memo) {
+        if (w->scan->rows < FLEET_ENROL_ROSTER_MAX)
+            w->memo->rows[w->scan->rows] = w->machine;
+        else
+            w->memo->overflow = true;
+    }
+    fe_row_account(w, &w->machine);
+}
+
+/* Answer `w` from the memo. A walk keyed by an operator key whose bytes the
+ * memo already settled replays that verdict; any other walk verifies its
+ * lines. The outermost keyed walk keeps what it verified. */
+static void fe_memo_answer(struct fe_walk *w, char *text, size_t len,
+                           bool keyed)
+{
+    uint8_t key[SHA256_OUTPUT_SIZE];
+    bool nested, keep;
+    if (keyed)
+        fe_memo_key(w->operator_pubkey, text, len, key);
+    (void)zcl_once_call(&fe_memo_once, fe_memo_init);
+    zcl_mutex_lock(&fe_memo_lock);
+    nested = fe_busy;
+    fe_busy = true;
+    keep = keyed && !nested;
+    if (keep && fe_memo.held &&
+        memcmp(fe_memo.key, key, sizeof(fe_memo.key)) == 0) {
+        size_t n = fe_memo.n;
+        for (size_t i = 0; i < n; i++) {
+            w->machine = fe_memo.rows[i];
+            fe_row_account(w, &w->machine);
+        }
+        w->scan->unverifiable = fe_memo.unverifiable;
+    } else {
+        if (keep) {
+            fe_memo.held = false;
+            fe_memo.overflow = false;
+        }
+        w->memo = keep ? &fe_memo : NULL;
+        fe_each_line(text, fe_walk_line, w);
+        w->memo = NULL;
+        if (keep) {
+            memcpy(fe_memo.key, key, sizeof(fe_memo.key));
+            fe_memo.n = w->scan->rows < FLEET_ENROL_ROSTER_MAX
+                            ? w->scan->rows : FLEET_ENROL_ROSTER_MAX;
+            fe_memo.unverifiable = w->scan->unverifiable;
+            fe_memo.held = !fe_memo.overflow;
+        }
+    }
+    fe_busy = nested;
+    zcl_mutex_unlock(&fe_memo_lock);
 }
 
 static bool fe_roster_walk(struct fe_walk *w, const char **why, bool readonly)
@@ -199,7 +309,7 @@ static bool fe_roster_walk(struct fe_walk *w, const char **why, bool readonly)
         free(text);
         return false;
     }
-    fe_each_line(text, fe_walk_line, w);
+    fe_memo_answer(w, text, len, w->operator_pubkey != NULL);
     free(text);
     for (int i = 0; i < FLEET_ENROL_ROSTER_MAX; ++i) {
         if (!w->used[i]) {
@@ -257,6 +367,16 @@ bool fleet_roster_each_existing(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY
 {
     return fe_roster_query(operator_pubkey, NULL, NULL, visit, user,
                            out, why, true);
+}
+
+uint64_t fleet_roster_line_verifies(void)
+{
+    uint64_t n;
+    (void)zcl_once_call(&fe_memo_once, fe_memo_init);
+    zcl_mutex_lock(&fe_memo_lock);
+    n = fe_line_verifies;
+    zcl_mutex_unlock(&fe_memo_lock);
+    return n;
 }
 
 struct fe_raw_walk {

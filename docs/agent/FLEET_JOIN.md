@@ -633,9 +633,11 @@ Under the owner-private state root, never inside a checkout:
 | `fleet/machines.roster` | One operator-sealed line per admitted machine |
 | `fleet/invites.spent` | One line per invite nonce already used |
 
-Every roster line is re-verified against the operator key on every read. A
-line that key did not seal is counted and never listed, so editing the file
-by hand can remove a machine but cannot invent one.
+Every roster line is verified against the operator key for the bytes read; a
+verdict this process already settled over the identical bytes under the same
+key is reused, so any change to the file is verified again. A line that key
+did not seal is counted and never listed, so editing the file by hand can
+remove a machine but cannot invent one.
 
 ## Typed refusals
 

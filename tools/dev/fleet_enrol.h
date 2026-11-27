@@ -576,7 +576,9 @@ void fleet_machine_render(const struct fleet_machine *machine,
                           struct json_value *out);
 
 /* Walk verified roster rows oldest first, calling `visit` for each. Returns
- * false only when the roster cannot be read at all. */
+ * false only when the roster cannot be read at all. Each line's seal is
+ * verified for the bytes read; a verdict this process already settled over
+ * the identical roster bytes under the same operator key is reused. */
 bool fleet_roster_each(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY_BYTES],
                        void (*visit)(const struct fleet_machine *, void *),
                        void *user, struct fleet_roster_scan *out,
@@ -587,6 +589,11 @@ bool fleet_roster_each_existing(const uint8_t operator_pubkey[FLEET_ENROL_PUBKEY
                                 void (*visit)(const struct fleet_machine *, void *),
                                 void *user, struct fleet_roster_scan *out,
                                 const char **why);
+
+/* Roster lines a roster walk has put through the seal check since this
+ * process started, refused ones included. A counter for tests and logs;
+ * nothing resets it. */
+uint64_t fleet_roster_line_verifies(void);
 
 /* Every signer key the operator's own roster rows bind to `box_pubkey` (at
  * most `cap`; more refuses as fleet_head_too_large): `found` is false when no
