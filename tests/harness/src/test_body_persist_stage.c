@@ -1021,7 +1021,7 @@ static int bp_research_retained_oversize(void)
             BP_CHECK("research size: cursor held", body_persist_stage_cursor() == 1);
             zcl_alloc_fault_fail_next("research block size");
             BP_CHECK("research size: unavailable check stops", body_persist_stage_step_once() == JOB_FATAL);
-            zcl_alloc_fault_reset();
+            zcl_alloc_fault_clear();
             BP_CHECK("research size: unavailable cursor held", body_persist_stage_cursor() == 1);
         }
         chain_params_select(CHAIN_MAIN);
