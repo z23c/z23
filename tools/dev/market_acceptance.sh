@@ -20,6 +20,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# shellcheck source=tools/scripts/lib/market_acceptance_helpers.sh
+. "$REPO_ROOT/tools/scripts/lib/market_acceptance_helpers.sh"
 # shellcheck source=tools/scripts/port_probe.sh
 . "$REPO_ROOT/tools/scripts/port_probe.sh"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
@@ -97,17 +99,6 @@ mkt_assert_sink_free() {
     mkt_die "dead -connect sink $DEAD_SINK availability is UNOBSERVED — refusing"
 }
 
-mkt_kill_group() {
-    local pgid="$1" sig="${2:-TERM}" i
-    [ -n "$pgid" ] || return 0
-    kill -"$sig" "-$pgid" 2>/dev/null || true
-    for i in $(seq 1 50); do
-        kill -0 "-$pgid" 2>/dev/null || return 0
-        sleep 0.2
-    done
-    kill -KILL "-$pgid" 2>/dev/null || true
-}
-
 mkt_cleanup() {
     [ "$MKT_CLEANED" = 1 ] && return 0
     MKT_CLEANED=1
@@ -124,10 +115,6 @@ mkt_cleanup() {
 }
 trap mkt_cleanup EXIT INT TERM
 
-mkt_rpc() {
-    local dd="$1" port="$2"; shift 2
-    ZCL_DATADIR="$dd" ZCL_RPCPORT="$port" "$RPC_BIN" "$@" 2>/dev/null
-}
 a_rpc() { mkt_rpc "$MKT_DD_A" "$A_RPC" "$@"; }
 b_rpc() { mkt_rpc "$MKT_DD_B" "$B_RPC" "$@"; }
 mkt_result() {
@@ -135,10 +122,6 @@ mkt_result() {
 }
 mkt_jget() {
     "$MKT_HELPER" get "$1"
-}
-mkt_native() {
-    local dd="$1" rpc="$2"; shift 2
-    "$NODE_BIN" -datadir="$dd" -rpcport="$rpc" "$@" 2>/dev/null | tail -1
 }
 
 mkt_spawn() {
@@ -163,55 +146,6 @@ mkt_spawn() {
     echo "$!"
 }
 
-mkt_height() {
-    mkt_rpc "$1" "$2" getblockcount | mkt_result
-}
-mkt_wait_rpc() {
-    local dd="$1" rpc="$2" pid="$3" deadline
-    deadline=$(( $(date +%s) + MKT_WAIT ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        kill -0 "$pid" 2>/dev/null || return 1
-        [ -f "$dd/.cookie" ] && mkt_height "$dd" "$rpc" >/dev/null 2>&1 && return 0
-        sleep 0.5
-    done
-    return 1
-}
-mkt_wait_height() {
-    local dd="$1" rpc="$2" target="$3" deadline h
-    deadline=$(( $(date +%s) + MKT_WAIT ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        h="$(mkt_height "$dd" "$rpc" 2>/dev/null || true)"
-        [ "$h" = "$target" ] && return 0
-        sleep 0.5
-    done
-    return 1
-}
-
-# The regtest miner stamps blocks from whole-second wall time.  More than six
-# consecutive blocks with one timestamp becomes <= the peer's 11-block MTP
-# even though the local submission path accepted the batch.  Mine in groups
-# of five with a wall-clock step so the second node validates the same chain.
-mkt_mine_to_address() {
-    local rpc_fn="$1" count="$2" address="$3" chunk
-    while [ "$count" -gt 0 ]; do
-        chunk=5
-        [ "$count" -lt "$chunk" ] && chunk="$count"
-        "$rpc_fn" generatetoaddress "$chunk" "\"$address\"" | mkt_result >/dev/null
-        count=$((count - chunk))
-        [ "$count" -eq 0 ] || sleep 1
-    done
-}
-
-mkt_wait_connected() {
-    local dd="$1" rpc="$2" deadline n
-    deadline=$(( $(date +%s) + MKT_WAIT ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        n="$(mkt_rpc "$dd" "$rpc" getconnectioncount 2>/dev/null | mkt_result 2>/dev/null || true)"
-        [ "${n:-0}" -ge 1 ] 2>/dev/null && return 0
-        sleep 0.5
-    done
-    return 1
-}
 # The money freshness classifier fails closed on finding_peers; the sync
 # FSM only leaves it behind a peer it can sync FROM (outbound).
 mkt_wait_sync_live() {

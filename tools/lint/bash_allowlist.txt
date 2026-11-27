@@ -173,6 +173,7 @@ tools/scripts/isolated_node_env_selftest.sh
 tools/scripts/lane_health.sh
 tools/scripts/lane_recover.sh
 tools/scripts/lib/evidence_sources.sh
+tools/scripts/lib/market_acceptance_helpers.sh
 tools/scripts/lib/service_args.sh
 tools/scripts/macos_acceptance.sh
 tools/scripts/macos_launchd_acceptance.sh
