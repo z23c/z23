@@ -206,13 +206,10 @@ static int mining_slots_inside(struct rpc_table *table,
              "[{\"ballotslots\":[0,0]}]", "Repeated ballot slot"));
     MT_CHECK("invalid slot rejected", mining_slots_refused(table,
              "[{\"ballotslots\":[2]}]", "Slot outside pinned catalog"));
-    struct json_value invalid = {0};
-    MT_CHECK("negative slot rejected", !mining_slots_call(table,
-             "[{\"ballotslots\":[-1]}]", &invalid));
-    json_free(&invalid);
-    MT_CHECK("fractional slot rejected", !mining_slots_call(table,
-             "[{\"ballotslots\":[1.5]}]", &invalid));
-    json_free(&invalid);
+    MT_CHECK("negative slot rejected", mining_slots_refused(table,
+             "[{\"ballotslots\":[-1]}]", "Slot outside pinned catalog"));
+    MT_CHECK("fractional slot rejected", mining_slots_refused(table,
+             "[{\"ballotslots\":[1.5]}]", "Expected an integer ballot slot"));
     return failures;
 }
 
