@@ -503,7 +503,17 @@ static const char exit_pk1[] = "52917e3c10724b15a5c0358d3456dac9edbd3aef6d8c5d1e
 static const char exit_rho1[] = "05f32289f0aa963661f1ea66ed959ef7770642e76e56e72b26e4596f6a8b678c";
 static const char exit_r1[] = "29c8019ae35968c74d3a2c4e908353a03e06c3829f23719b4271fcda7c4489a8";
 
-/* Synthetic proof and public dummy openings; no input witness or signature. */
+/* Synthetic beta15 proof, read back with Z23 at 0acb1facc34caf34a58f2726f91afbbb4a1de028.
+ * Public dummy openings only; no input witness or transaction signature. */
+static bool kat_exit_notes(struct sprout_note note[2])
+{
+    return decode_hex_exact(exit_pk0, note[0].a_pk.data, 32) &&
+        decode_hex_exact(exit_pk1, note[1].a_pk.data, 32) &&
+        decode_hex_exact(exit_rho0, note[0].rho.data, 32) &&
+        decode_hex_exact(exit_rho1, note[1].rho.data, 32) &&
+        decode_hex_exact(exit_r0, note[0].r.data, 32) &&
+        decode_hex_exact(exit_r1, note[1].r.data, 32);
+}
 static int kat_synthetic_exit(void)
 {
     int failures = 0;
@@ -514,13 +524,7 @@ static int kat_synthetic_exit(void)
         decode_hex_exact(exit_mac0, mac[0], 32) && decode_hex_exact(exit_mac1, mac[1], 32) &&
         decode_hex_exact(exit_nf0, nf[0], 32) && decode_hex_exact(exit_nf1, nf[1], 32) &&
         decode_hex_exact(exit_cm0, cm[0], 32) && decode_hex_exact(exit_cm1, cm[1], 32) &&
-        decode_hex_exact(exit_proof, proof, sizeof(proof)) &&
-        decode_hex_exact(exit_pk0, note[0].a_pk.data, 32) &&
-        decode_hex_exact(exit_pk1, note[1].a_pk.data, 32) &&
-        decode_hex_exact(exit_rho0, note[0].rho.data, 32) &&
-        decode_hex_exact(exit_rho1, note[1].rho.data, 32) &&
-        decode_hex_exact(exit_r0, note[0].r.data, 32) &&
-        decode_hex_exact(exit_r1, note[1].r.data, 32);
+        decode_hex_exact(exit_proof, proof, sizeof(proof)) && kat_exit_notes(note);
     KAT_CHECK("synthetic exit public fields decode", decoded);
     if (!decoded) return failures;
     KAT_CHECK("synthetic exit Groth16 proof verifies",
