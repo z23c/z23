@@ -111,13 +111,25 @@ static void stl_helper_selftest(struct stl_bs *bs, int build_only)
         return;
     }
     if (capture_cmd("build/bin/gate_receipt \"$(pwd)\" --selftest-helper 2>&1", out,
-                    sizeof out, &code) == 0 && code == 0) {
-        printf("[check_standalone_tools_link] %s\n", out);
+                    sizeof out, &code) != 0 || code != 0) {
+        fputs("[check_standalone_tools_link] gate-receipt helper selftest failed:\n", stderr);
+        fprintf(stderr, "    %s\n", out);
+        stl_fail_add(bs, "gate-receipt fresh agent_sha3 helper");
         return;
     }
-    fputs("[check_standalone_tools_link] gate-receipt helper selftest failed:\n", stderr);
-    fprintf(stderr, "    %s\n", out);
-    stl_fail_add(bs, "gate-receipt fresh agent_sha3 helper");
+    printf("[check_standalone_tools_link] %s\n", out);
+    char path[STL_PATH], quoted[STL_PATH * 2], cmd[STL_TEXT];
+    if (ovf(snprintf(path, sizeof path, "%s/compiler with spaces", bs->dir), sizeof path) ||
+        sh_single_quote(path, quoted, sizeof quoted) != 0 ||
+        ovf(snprintf(cmd, sizeof cmd, "printf '#!/bin/sh\\nif [ -x \"$Z23_RECEIPT_TEST_CC\" ]; then "
+                     "exec \"$Z23_RECEIPT_TEST_CC\" \"$@\"; fi\\nexec $Z23_RECEIPT_TEST_CC \"$@\"\\n' >%s && "
+                     "chmod +x %s && Z23_RECEIPT_TEST_CC=\"${CC:-cc}\" "
+                     "CC=%s build/bin/gate_receipt \"$(pwd)\" --selftest-helper 2>&1",
+                     quoted, quoted, quoted), sizeof cmd) ||
+        capture_cmd(cmd, out, sizeof out, &code) != 0 || code != 0) {
+        fprintf(stderr, "[check_standalone_tools_link] spaced compiler path failed: %s\n", out);
+        stl_fail_add(bs, "gate-receipt compiler path with spaces");
+    }
 }
 
 /* Hash of every input the X11 selftest reads; empty (always run) on any

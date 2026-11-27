@@ -249,12 +249,34 @@ static int gtr_compile_helper(const char *repo, const char *out, bool to_stderr)
     };
     char *src1 = gtr_fmt("%s/tools/agent/agent_sha3.c", repo);
     char *src2 = gtr_fmt("%s/platform/modules/sha3/src/sha3.c", repo);
-    char *const argv[] = {(char *)(cc != nullptr && *cc != '\0' ? cc : "cc"), "-std=c23", "-O2", "-Wall",
-                          "-Wextra", "-Werror", inc[0], inc[1], inc[2], inc[3], "-o", (char *)out,
+    /* CC follows the repository's simple whitespace-separated driver/flags
+     * convention. Do not invoke a shell or silently truncate its words. */
+    char *driver = gtr_fmt("%s", cc != nullptr && *cc != '\0' ? cc : "cc");
+    char *argv[80];
+    size_t n = 0;
+    char *save = nullptr;
+    if (access(driver, X_OK) == 0) {
+        argv[n++] = driver;
+    } else {
+        for (char *word = strtok_r(driver, " \t\r\n", &save); word != nullptr;
+             word = strtok_r(nullptr, " \t\r\n", &save)) {
+            if (n == 64)
+                gtr_die("CC has too many words (maximum 64)");
+            argv[n++] = word;
+        }
+    }
+    if (n == 0)
+        gtr_die("CC contains no compiler command");
+    char *const args[] = {"-std=c23", "-O2", "-Wall", "-Wextra", "-Werror",
+                          inc[0], inc[1], inc[2], inc[3], "-o", (char *)out,
                           src1, src2, nullptr};
+    for (size_t i = 0; i < sizeof args / sizeof args[0]; i++)
+        argv[n++] = args[i];
     struct gtr_job job = {.argv = argv, .in_fd = -1, .out_to_err = to_stderr};
 
-    return gtr_run(&job);
+    int rc = gtr_run(&job);
+    free(driver);
+    return rc;
 }
 
 /* Tools that hash receipts with build/bin/agent_sha3 expect it; a receipt run builds it
