@@ -70,7 +70,7 @@ static void actions(struct reader *r, struct v6_bundle *bundle, uint8_t mask)
 {
     const uint8_t *start = r->p;
     bundle->count = compact(r);
-    (void)take(r, bundle->count, ACTION);
+    bundle->actions = take(r, bundle->count, ACTION);
     if (bundle->count && !r->error) {
         struct v6_span flags = take(r, 1, 1);
         if (!r->error && (flags.data[0] & (uint8_t)~mask)) r->error = V6_WIRE_FLAGS;
@@ -83,6 +83,17 @@ static void actions(struct reader *r, struct v6_bundle *bundle, uint8_t mask)
     }
     bundle->wire = (struct v6_span){start, (size_t)(r->p - start)};
 }
+bool v6_bundle_action(const struct v6_bundle *bundle, uint64_t index,
+                      struct v6_action_view *out)
+{
+    if (!bundle || !out || !bundle->actions.data || index >= bundle->count ||
+        index >= bundle->actions.size / ACTION) return false;
+    const uint8_t *action = bundle->actions.data + (size_t)index * ACTION;
+    *out = (struct v6_action_view){ .nullifier = {action + 32, 32},
+                                    .cmx = {action + 96, 32} };
+    return true;
+}
+
 enum v6_wire_error v6_wire_parse(const uint8_t *bytes, size_t size, struct v6_wire_view *destination)
 {
     if (!destination) return V6_WIRE_TRUNCATED;

@@ -103,6 +103,56 @@ static bool check_empty_rpc(void)
     return ok;
 }
 
+static bool check_action_values(const struct v6_bundle *bundle, const struct v6_wire_view *original)
+{
+    struct v6_action_view first, second;
+    if (!v6_bundle_action(bundle, 0, &first) ||
+        !v6_bundle_action(bundle, 1, &second)) return false;
+    if (first.nullifier.size != 32 || first.cmx.size != 32 ||
+        second.nullifier.size != 32 || second.cmx.size != 32 ||
+        memcmp(first.nullifier.data, original->ironwood.actions.data + 32, 32) ||
+        memcmp(first.cmx.data, original->ironwood.actions.data + 96, 32)) return false;
+    for (size_t i = 0; i < 32; ++i)
+        if (second.nullifier.data[i] != 0x27 || second.cmx.data[i] != 0x64) return false;
+    return true;
+}
+static bool check_action_failures(const struct v6_wire_view *v, const struct v6_wire_view *absent)
+{
+    struct v6_action_view out = { .nullifier = {empty, 1} };
+    return !v6_bundle_action(&v->ironwood, 2, &out) &&
+        !v6_bundle_action(&absent->ironwood, 0, &out) &&
+        !v6_bundle_action(NULL, 0, &out) && !v6_bundle_action(&v->ironwood, 0, NULL) &&
+        out.nullifier.data == empty && out.nullifier.size == 1;
+}
+static bool check_action_views(void)
+{
+    struct v6_wire_view original, parsed, absent;
+    if (v6_wire_parse(ironwood_anchor_a, sizeof ironwood_anchor_a, &original) != V6_WIRE_OK ||
+        v6_wire_parse(empty, sizeof empty, &absent) != V6_WIRE_OK ||
+        original.ironwood.count != 1 || original.ironwood.actions.size != 820) return false;
+    size_t prefix = (size_t)(original.ironwood.actions.data - ironwood_anchor_a);
+    size_t n = sizeof ironwood_anchor_a;
+    uint8_t *wire = malloc(n + 884);
+    if (!wire) return false;
+    memcpy(wire, ironwood_anchor_a, prefix + 820);
+    memcpy(wire + prefix + 820, wire + prefix, 820);
+    memset(wire + prefix + 820 + 32, 0x27, 32);
+    memset(wire + prefix + 820 + 96, 0x64, 32);
+    memcpy(wire + prefix + 1640, ironwood_anchor_a + prefix + 820, n - prefix - 820 - 64);
+    memset(wire + n + 820 - 64, 0x39, 64);
+    memcpy(wire + n + 820, ironwood_anchor_a + n - 64, 64);
+    wire[prefix - 1] = 2;
+    bool ok = v6_wire_parse(wire, n + 884, &parsed) == V6_WIRE_OK &&
+        check_action_values(&parsed.ironwood, &original) && check_action_failures(&parsed, &absent);
+    memmove(wire + prefix - 2, wire + prefix - 1, n + 884 - prefix + 1);
+    wire[n + 884 - 1] = 0; /* empty Ironwood follows the Orchard bundle */
+    wire[prefix - 1 + 1640] &= 3; /* Orchard supports only its two defined flag bits */
+    ok = ok && v6_wire_parse(wire, n + 884, &parsed) == V6_WIRE_OK &&
+        !parsed.ironwood.count && check_action_values(&parsed.orchard, &original);
+    free(wire);
+    return ok;
+}
+
 static bool check_empty_view(void)
 {
     struct v6_wire_view v;
@@ -187,6 +237,7 @@ int test_transaction_v6_inspect(void)
     if (!check_v6_rpc_budget()) ++failures;
     if (!check_v6_rpc_projection_limit()) ++failures;
     if (!check_empty_rpc()) ++failures;
+    if (!check_action_views()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
     if (!check_single_cursor()) ++failures;
