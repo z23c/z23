@@ -833,7 +833,7 @@ static bool rpc_createballotoutput(const struct json_value *params, bool help,
 
 void register_mining_rpc_commands(struct rpc_table *t)
 {
-    struct rpc_command cmds[] = {
+    static const struct rpc_command cmds[] = {
         { "mining", "getnetworksolps", rpc_getnetworksolps, true },
         { "mining", "getnetworkhashps", rpc_getnetworkhashps, true },
         { "mining", "getmininginfo",     rpc_getmininginfo,    true },
