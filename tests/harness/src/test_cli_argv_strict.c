@@ -1689,12 +1689,12 @@ static int cas_test_research_import_refusals(void)
         int listener = socket(AF_INET, SOCK_STREAM, 0);
         ASSERT(listener >= 0);
         struct sockaddr_in address = { .sin_family = AF_INET };
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_addr.s_addr = htonl(0x7f000002u);
         address.sin_port = htons(FS_PORT);
         ASSERT(bind(listener, (const struct sockaddr *)&address, sizeof(address)) == 0);
         ASSERT(listen(listener, 2) == 0);
         char *sync[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                        flag, (char *)"-filesync=127.0.0.1", NULL};
+                        flag, (char *)"-filesync=127.0.0.2", NULL};
         int sync_rc = cas_run(sync, home, out, sizeof(out));
         bool sync_refused = sync_rc != 0 && !strstr(out, "SHA3 File Sync");
         struct pollfd event = { .fd = listener, .events = POLLIN };
