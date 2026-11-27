@@ -957,7 +957,9 @@ selftest() {
     local host_compiler="${HOST_CC:-${CC:-cc}}"
     local -a host_argv=("$host_compiler")
     if ! command -v -- "$host_compiler" >/dev/null 2>&1; then
+        [[ "$host_compiler" != *$'\n'* ]] || die "selftest: multiline host compiler command"
         read -r -a host_argv <<<"$host_compiler"
+        [[ -n "${host_argv[0]:-}" ]] || die "selftest: empty host compiler command"
     fi
     "${host_argv[@]}" -o "$tmp/native-fixture" "$tmp/native-fixture.c" \
         || die "selftest: could not compile native object-format fixture"
@@ -973,14 +975,7 @@ selftest() {
     grep -q 'no z23/zclassic23' "$tmp/missing.err" \
         || die "selftest: missing-bin must name the refusal"
 
-    # A daemon without its confined reproduction worker is not a complete
-    # runtime artifact set. This refusal occurs before strip/audit work.
-    #
-    # The stand-in node is a REAL executable of this platform, copied from
-    # PATH, not a shell script: which members a release must carry is decided
-    # per platform now, so the fixture has to be something platform_of_binary
-    # can actually classify. A script would be refused for its format and this
-    # case would stop grading what it says it grades.
+    # The compiled host fixture reaches the missing-verifier check after format detection.
     mkdir -p "$tmp/no-verifier"
     cp -f -- "$host_fixture" "$tmp/no-verifier/z23"
     chmod 755 "$tmp/no-verifier/z23"
