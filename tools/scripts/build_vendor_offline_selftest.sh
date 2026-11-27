@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-vendor-offline-selftest.XXXXXX")"
+real_make="$(command -v make)"
 lock_pid=
 beside=
 wait_lock_selftest()
@@ -205,26 +206,59 @@ expect_path_cc "$beside" "$beside/bin/path-cc" path-cc "$beside/bin"
 expect_path_cc "$SANDBOX" "$beside/bin/path-cc" "$beside/bin/path-cc" "$SANDBOX/bin"
 rm "$SANDBOX/tools/path-cc"
 
-# One machine can be spelled two ways by one host: GCC says
-# x86_64-linux-gnu, Clang says x86_64-unknown-linux-gnu. Compare the machine,
-# not the vendor spelling, or a native Clang beside llvm-ar is refused as a
-# cross compiler.
-printf '%s\n' '#!/usr/bin/env bash' \
-    'case "${1:-}" in -dumpmachine) printf "%s\n" x86_64-linux-gnu; exit 0;; esac' \
-    "exec '$SANDBOX/tools/native-cc' \"\$@\"" > "$SANDBOX/tools/cc"
-printf '%s\n' '#!/usr/bin/env bash' \
-    'case "${1:-}" in -dumpmachine) printf "%s\n" x86_64-unknown-linux-gnu; exit 0;; esac' \
-    "exec '$SANDBOX/tools/native-cc' \"\$@\"" > "$SANDBOX/tools/native-clang"
+# One machine can be spelled three ways by one host: Debian's GCC says
+# x86_64-linux-gnu, Clang says x86_64-unknown-linux-gnu and Red Hat's
+# compilers say x86_64-redhat-linux. Compare the machine, not the vendor
+# spelling, or a native Clang beside llvm-ar is refused as a cross compiler.
+# A cross compiler stays one.
+machine_cc()      # name  -dumpmachine answer
+{
+    printf '%s\n' '#!/usr/bin/env bash' \
+        "case \"\${1:-}\" in -dumpmachine) printf '%s\\n' '$2'; exit 0;; esac" \
+        "exec '$SANDBOX/tools/native-cc' \"\$@\"" > "$SANDBOX/tools/$1"
+    chmod +x "$SANDBOX/tools/$1"
+}
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$SANDBOX/bin/llvm-ar"
-chmod +x "$SANDBOX/tools/cc" "$SANDBOX/tools/native-clang" "$SANDBOX/bin/llvm-ar"
+chmod +x "$SANDBOX/bin/llvm-ar"
+for host_machine in x86_64-linux-gnu x86_64-redhat-linux; do
+    machine_cc cc "$host_machine"
+    machine_cc native-clang x86_64-unknown-linux-gnu
+    if output="$(cd "$SANDBOX" && PATH="$SANDBOX/tools:$SANDBOX/bin:/usr/bin:/bin" \
+        VENDOR_CC="$SANDBOX/tools/native-clang" VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 \
+        tools/scripts/build_vendor.sh libtor_stub.a 2>&1)"; then
+        fail 'native Clang fixture unexpectedly built missing archive'
+    fi
+    [[ "$output" == *'vendor/tor_stub.c missing (tracked source expected)'* ]] ||
+        fail "a native Clang machine was treated as a cross compiler beside a host cc that says $host_machine: $output"
+done
+machine_cc native-clang aarch64-unknown-linux-gnu
 if output="$(cd "$SANDBOX" && PATH="$SANDBOX/tools:$SANDBOX/bin:/usr/bin:/bin" \
     VENDOR_CC="$SANDBOX/tools/native-clang" VENDOR_AR=llvm-ar ZCL_VENDOR_OFFLINE=1 \
     tools/scripts/build_vendor.sh libtor_stub.a 2>&1)"; then
-    fail 'native Clang fixture unexpectedly built missing archive'
+    fail 'cross Clang fixture unexpectedly built missing archive'
 fi
-[[ "$output" == *'vendor/tor_stub.c missing (tracked source expected)'* ]] ||
-    fail "a native Clang machine spelling was treated as a cross compiler: $output"
+[[ "$output" == *'llvm-ar cross exception requires Android'* ]] ||
+    fail "a cross Clang was accepted as native beside a host cc that says x86_64-redhat-linux: $output"
 rm "$SANDBOX/tools/cc" "$SANDBOX/tools/native-clang"
+
+# The key compares machines, not vendor spellings: a system name is kept and
+# a trailing gnu is dropped. Each row lists spellings, then their one key.
+eval "$(sed -n '/^vendor_machine_key()/,/^}/p' "$ROOT/tools/scripts/build_vendor.sh")"
+while read -r row; do
+    want="${row##* }"
+    for spelling in ${row% *}; do
+        [ "$(vendor_machine_key "$spelling")" = "$want" ] ||
+            fail "machine key of $spelling is '$(vendor_machine_key "$spelling")', not '$want'"
+    done
+done <<'MACHINES'
+x86_64-unknown-linux-gnu x86_64-pc-linux-gnu x86_64-linux-gnu x86_64-redhat-linux x86_64-linux
+aarch64-unknown-linux-android24 aarch64-linux-android24
+aarch64-linux-android aarch64-linux-android
+arm-none-eabi arm-eabi
+aarch64-apple-darwin aarch64-darwin
+x86_64-w64-mingw32 x86_64-mingw32
+x86_64-linux-gnux32 x86_64-linux-gnux32
+MACHINES
 
 # A C driver with no C++ front end installed is an ordinary host shape (cc is
 # one GCC major, g++ another). The lock helper is C only, so its identity
@@ -443,6 +477,34 @@ if [ -f "$zlib_tarball" ]; then
         tools/scripts/build_vendor.sh libz.a >/dev/null 2>&1); then
         fail 'corrupt cache bundle was accepted'
     fi
+    # A parent make's command line reaches every sub-make through MAKEFLAGS,
+    # where it outranks the environment, and a builder launched in a parallel
+    # group runs with a share of the job count. From a parent make that names
+    # another compiler and four jobs on its command line, the vendor compiler
+    # alone builds zlib and its sub-make inherits no flag and takes two jobs.
+    leak="$SANDBOX/leak"
+    mkdir -p "$leak"
+    rm -rf "$VENDOR_ARCHIVE_CACHE"
+    cp "$zlib_tarball" "$SANDBOX/vendor/.cache/"
+    cp "$ROOT"/vendor/.cache/sqlite-amalgamation-*.zip "$SANDBOX/vendor/.cache/" 2>/dev/null || :
+    printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$leak/vendor-cc.log'" \
+        "exec '$(command -v cc)' \"\$@\"" > "$leak/vendor-cc"
+    printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' \"\$*\" >> '$leak/foreign-cc.log'" \
+        'exit 97' > "$leak/foreign-cc"
+    printf '%s\n' '#!/usr/bin/env bash' \
+        "printf 'MAKEFLAGS=[%s] args=[%s]\\n' \"\${MAKEFLAGS-<unset>}\" \"\$*\" >> '$leak/make.log'" \
+        "exec '$real_make' \"\$@\"" > "$SANDBOX/bin/make"
+    chmod +x "$leak/vendor-cc" "$leak/foreign-cc" "$SANDBOX/bin/make"
+    printf '%s\n' 'probe:' '	VENDOR_MAX_PARALLEL=2 tools/scripts/build_vendor.sh libz.a libsqlite3.a' \
+        > "$SANDBOX/parent.mk"
+    (cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" make --no-print-directory -f parent.mk -j4 JOBS=4 \
+        CC="$leak/foreign-cc" VENDOR_CC="$leak/vendor-cc" ZCL_VENDOR_OFFLINE=1 probe > "$leak/vendor.log" 2>&1) || :
+    rm "$SANDBOX/bin/make"
+    submake="$(awk '/ libz\.a\]$/ { print; exit }' "$leak/make.log" 2>/dev/null || true)"
+    [ ! -s "$leak/foreign-cc.log" ] ||
+        fail "a parent make's command-line compiler reached a vendor sub-make: $(head -n 1 "$leak/foreign-cc.log")"
+    [ -s "$leak/vendor-cc.log" ] && [[ "$submake" == 'MAKEFLAGS=[] args=[-j2 '* ]] ||
+        fail "the vendor compiler did not build zlib alone with its share of the jobs: sub-make '${submake:-not run}'; build_vendor.sh said: $(tail -n 3 "$leak/vendor.log" | tr '\n' ' ')"
 fi
 
 # Run each fixture in its own job-control process group so orphaned workers

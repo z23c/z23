@@ -21,14 +21,15 @@ set -euo pipefail
 # they accept. A copy of this exact file runs under the temporary root, so the
 # probes write there and no host linker or compiler is consulted. Each row is
 # label | CC | expected output; each fake compiler accepts the -fuse-ld
-# values named after it, so the first Clang would also link through mold.
+# values named after it, so the first Clang would also link through mold: a
+# driver the Clang branch missed shows up as mold, its first accepted value.
 if [[ "${1:-}" == --selftest ]]; then
     work="$(mktemp -d "${TMPDIR:-/tmp}/zcl-dev-linker-select.XXXXXX")"
     trap 'rm -rf -- "$work"' EXIT
     mkdir -p "$work/tools/dev" "$work/bin"
     cp "$0" "$work/tools/dev/dev-linker-select.sh"
     chmod +x "$work/tools/dev/dev-linker-select.sh"
-    for spec in clang:mold,lld clang-none:none gcc-both:mold,lld gcc-lld:lld gcc-gold:gold cc:lld; do
+    for spec in clang:mold,lld clang-23:mold,lld aarch64-linux-gnu-clang:mold,lld clang-none:none gcc-both:mold,lld gcc-lld:lld gcc-gold:gold cc:lld; do
         pats="-fuse-ld=${spec#*:}"
         printf '%s\n' '#!/usr/bin/env bash' 'for argument in "$@"; do' \
             "    case \"\$argument\" in ${pats//,/|-fuse-ld=}) exit 0;; esac" 'done' 'exit 1' \
@@ -46,6 +47,8 @@ if [[ "${1:-}" == --selftest ]]; then
     done <<CASES
 Clang takes lld|$work/bin/clang|-fuse-ld=lld
 a compile-cache wrapper is not the compiler|$work/bin/zcc $work/bin/clang|-fuse-ld=lld
+a versioned Clang driver takes lld|$work/bin/clang-23|-fuse-ld=lld
+a triple-prefixed Clang driver takes lld|$work/bin/aarch64-linux-gnu-clang|-fuse-ld=lld
 Clang with no lld selects nothing|$work/bin/clang-none|
 gcc takes mold first|$work/bin/gcc-both|-fuse-ld=mold
 gcc falls back to lld|$work/bin/gcc-lld|-fuse-ld=lld

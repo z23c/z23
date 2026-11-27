@@ -130,8 +130,8 @@ fi
 # A parent make's command line (`make CC=/path/clang vendor`) reaches every
 # sub-make through MAKEFLAGS, where it outranks the environment: OpenSSL would
 # record the absolute compiler the audits refuse. Each sub-make starts with
-# that inheritance cleared; the job count is passed here.
-VENDOR_SUBMAKE=(env MAKEFLAGS= MAKEOVERRIDES= make -j"$JOBS")
+# that inheritance cleared and takes the job count its builder was given.
+VENDOR_SUBMAKE=(env MAKEFLAGS= MAKEOVERRIDES= make)
 FORCE="${VENDOR_FORCE:-0}"
 OFFLINE="${ZCL_VENDOR_OFFLINE:-0}"
 VENDOR_LOCK_DIR="${VENDOR_LOCK_DIR:-$VENDOR/.build.lock}"
@@ -851,7 +851,7 @@ build_zlib() {         # FETCHED: zlib
     ( cd "$d" && CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
         CFLAGS="-O2 -fPIC" \
         ./configure --static >/dev/null \
-        && "${VENDOR_SUBMAKE[@]}" AR="$VENDOR_AR" ARFLAGS=rc RANLIB="$VENDOR_RANLIB" libz.a >/dev/null )
+        && "${VENDOR_SUBMAKE[@]}" -j"$JOBS" AR="$VENDOR_AR" ARFLAGS=rc RANLIB="$VENDOR_RANLIB" libz.a >/dev/null )
     install_archive "$d/libz.a" libz.a
     cp -f "$d/zlib.h" "$d/zconf.h" "$INC/"
     stamp_archives libz.a
@@ -892,7 +892,7 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
         && export CC="$VENDOR_CC" AR="$VENDOR_AR" RANLIB="$VENDOR_RANLIB" \
         && ./Configure $OPENSSL_CONFIG_TARGET ${VENDOR_ANDROID_API:+-D__ANDROID_API__=$VENDOR_ANDROID_API} no-shared no-tests \
              --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib >/dev/null \
-        && "${VENDOR_SUBMAKE[@]}" build_libs >/dev/null 2>&1 )
+        && "${VENDOR_SUBMAKE[@]}" -j"$JOBS" build_libs >/dev/null 2>&1 )
     # OpenSSL also records the literal compiler command in its version data.
     # Reject an absolute checkout/home compiler here, before the archive can
     # reach the node; test_no_hardcoded_home remains the final backstop.
@@ -967,7 +967,7 @@ build_libevent() {     # FETCHED: libevent -> libevent.a + libevent_openssl.a + 
                ./configure --disable-shared --enable-static \
                  --disable-samples --disable-libevent-regress \
                  ${VENDOR_CROSS_HOST_ARGS[@]+"${VENDOR_CROSS_HOST_ARGS[@]}"} \
-            && "${VENDOR_SUBMAKE[@]}" \
+            && "${VENDOR_SUBMAKE[@]}" -j"$JOBS" \
         ) >"$build_log" 2>&1; then
         tail -200 "$build_log" >&2 || true
         die "libevent build failed (log: $build_log)"
@@ -1225,13 +1225,18 @@ fi
 # A cross VENDOR_CC left beside the host's plain `ar` is silent today: ar
 # writes an archive index in the host's format and the cross linker rejects
 # or misreads it. Refuse the mismatch rather than discover it at link time.
-# Compare machines, not vendor spellings: Clang and GCC name one Linux machine
-# x86_64-unknown-linux-gnu and x86_64-linux-gnu.
+# Compare machines, not vendor spellings: Clang, Debian's GCC and Red Hat's
+# compilers name one Linux machine x86_64-unknown-linux-gnu,
+# x86_64-linux-gnu and x86_64-redhat-linux. The vendor is whatever stands
+# between the architecture and the system, and a trailing `gnu` is optional.
 vendor_machine_key()
 {
-    local rest="${1#*-}"
-    case "$rest" in unknown-*|pc-*|none-*) rest="${rest#*-}" ;; esac
-    printf '%s-%s' "${1%%-*}" "$rest"
+    local -a p
+    IFS=- read -r -a p <<<"$1"
+    case "${p[1]:-}" in linux|darwin*|*bsd*|windows|wasi|mingw*) ;; ?*) p=("${p[0]}" "${p[@]:2}") ;; esac
+    local IFS=-
+    if [[ "${p[${#p[@]}-1]:-}" == gnu && ${#p[@]} -ge 3 ]]; then unset "p[${#p[@]}-1]"; fi
+    printf '%s' "${p[*]}"
 }
 if [ -n "$VENDOR_CC_MACHINE" ] &&
    [ "$(vendor_machine_key "$VENDOR_CC_MACHINE")" != "$(vendor_machine_key "$(vendor_cc_machine cc)")" ]; then

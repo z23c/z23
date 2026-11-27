@@ -1672,6 +1672,7 @@ ZCL_WARN_STRINGOP_OVERFLOW = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-Wno-stringop
 # warning support from the final driver token so `make CC=clang` selects a
 # genuinely Clang-clean profile instead of feeding it GCC-only diagnostics.
 ZCL_CC_DRIVER := $(notdir $(lastword $(CC)))
+ZCL_CC_PLAIN := $(lastword $(CC))
 ZCL_CC_IS_CLANG := $(if $(findstring clang,$(ZCL_CC_DRIVER)),1,)
 ifneq ($(ZCL_CC_IS_CLANG),)
 ZCL_WARN_MAYBE_UNINITIALIZED =
@@ -1692,15 +1693,23 @@ endif
 # compile-cache wrapper that may precede it. The GNU toolchain needs none of
 # this: its defaults already agree, so a GCC build sees no change.
 ifeq ($(filter Linux,$(ZCL_HOST_OS))$(ZCL_CC_IS_CLANG),Linux1)
-ZCL_CC_PLAIN := $(lastword $(CC))
 ZCL_CC_DIR := $(if $(findstring /,$(ZCL_CC_PLAIN)),$(dir $(ZCL_CC_PLAIN)))
 # Sibling tool beside a compiler that has a directory; else the same name
 # looked up on PATH; else nothing (the caller's value stands).
 ZCL_CC_SIBLING = $(firstword $(if $(ZCL_CC_DIR),$(wildcard $(ZCL_CC_DIR)$(1)),$(shell command -v $(1) 2>/dev/null)))
 ifeq ($(ZCL_CC_IS_CLANG),1)
+# The C++ driver takes the compiler's name with clang++ for clang (clang-23
+# has clang++-23 beside it), then the unversioned clang++. Without one, a GNU
+# c++ would stay in place and vendor/lib would refuse that pair only after
+# building the first archives: stop here instead.
+ZCL_CXX_BESIDE_CC := $(firstword $(foreach n,$(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN))) clang++,$(call ZCL_CC_SIBLING,$n)))
 ifeq ($(filter command% environment% override,$(origin CXX)),)
 ifeq ($(findstring clang++,$(notdir $(lastword $(CXX)))),)
-CXX := $(or $(call ZCL_CC_SIBLING,$(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN)))),$(CXX))
+ifneq ($(ZCL_CXX_BESIDE_CC),)
+CXX := $(ZCL_CXX_BESIDE_CC)
+else
+$(error no C++ driver for CC=$(ZCL_CC_PLAIN): neither $(subst clang,clang++,$(notdir $(ZCL_CC_PLAIN))) nor clang++ beside it; name one with CXX=)
+endif
 endif
 endif
 ifeq ($(filter command% environment% override,$(origin AR)),)
