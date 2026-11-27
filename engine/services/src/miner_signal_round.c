@@ -1,5 +1,5 @@
+/* purpose: Evaluate one miner-signalled migration on a selected chain branch. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* Evaluate one miner-signalled migration on a selected chain branch. */
 #include "services/miner_signal_round.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
