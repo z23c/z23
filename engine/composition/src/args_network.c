@@ -30,8 +30,16 @@ static bool network_config_one(const char *key, const char *negative, bool *out)
     return negated == NULL;
 }
 
+static int unsupported_testnet_profile(void)
+{
+    fputs("Cannot start node: -testnet-profile requires a build with generic profile startup support\n", stderr);
+    return 1;
+}
+
 int args_network_begin(struct app_context *ctx)
 {
+    if (GetArg("-testnet-profile", NULL) || GetArg("--testnet-profile", NULL))
+        return unsupported_testnet_profile();
     /* At capacity later argv or config keys may have been silently omitted. */
     if (g_nargs >= MAX_ARGS) {
         fprintf(stderr, "Argument table is full; network identity is ambiguous\n");
@@ -48,10 +56,11 @@ int args_network_begin(struct app_context *ctx)
 int args_network_arg(const char *arg, struct app_context *ctx, bool positional)
 {
     const char *a = arg[0] == '-' && arg[1] == '-' ? arg + 1 : arg;
-    const char *names[] = { "-testnet", "-regtest", "-notestnet", "-noregtest" };
-    for (size_t i = 0; i < 4; i++) {
+    const char *names[] = { "-testnet", "-regtest", "-notestnet", "-noregtest", "-testnet-profile" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         size_t n = strlen(names[i]);
         if (strncmp(a, names[i], n) || (a[n] != '\0' && a[n] != '=')) continue;
+        if (i == 4) return unsupported_testnet_profile();
         if (positional) {
             fprintf(stderr, "Network selector after a positional argument is not supported\n");
             return 1;

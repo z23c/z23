@@ -356,6 +356,8 @@ static int test_network_selectors(void)
     char *last[] = { "z23", "-testnet", "-testnet=0" };
     char *negative[] = { "z23", "-notestnet", "-regtest=1" };
     char *late[] = { "z23", "unexpected", "-regtest=1" };
+    char *profile[] = { "z23", "--testnet-profile=fixture" };
+    char *late_profile[] = { "z23", "unexpected", "-testnet-profile=fixture" };
     char *clear[] = { "z23" };
     APPCTX_CHECK("network: explicit testnet", selector_case(test, 2, -1, true, false));
     APPCTX_CHECK("network: explicit regtest", selector_case(reg, 2, -1, false, true));
@@ -372,6 +374,14 @@ static int test_network_selectors(void)
     APPCTX_CHECK("network: conflicting config refused", selector_config_case(reg, 2, "testnet=1\n", 1, false, false));
     APPCTX_CHECK("network: invalid config refused", selector_config_case(clear, 1, "regtest=bad\n", 1, false, false));
     APPCTX_CHECK("network: unnormalized negative config refused", selector_config_case(clear, 1, "notestnet=0\n", 1, false, false));
+    APPCTX_CHECK("network: unsupported profile cannot fall back to mainnet",
+                 selector_case(profile, 2, 1, false, false));
+    APPCTX_CHECK("network: late unsupported profile refused",
+                 selector_case(late_profile, 3, 1, false, false));
+    APPCTX_CHECK("network: configured profile cannot fall back to regtest",
+                 selector_config_case(reg, 2, "testnet-profile=fixture\n", 1, false, false));
+    APPCTX_CHECK("network: double-dash configured profile refused",
+                 selector_config_case(clear, 1, "--testnet-profile=fixture\n", 1, false, false));
     APPCTX_CHECK("network: exhausted argument table refused", selector_full_table());
     APPCTX_CHECK("network: truncated selector value refused", selector_truncated_value());
     ParseParameters(1, (const char *const *)clear);
