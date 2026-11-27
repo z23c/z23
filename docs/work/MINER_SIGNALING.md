@@ -2,7 +2,7 @@
 
 # Miner signaling on testnet and regtest
 
-A pool can signal readiness for any subset of proposals in one voting round. Each proposal has its own rule revision, bit position and activation height. The status RPC counts accepted blocks on the branch selected by the node at its durable provable tip. Block share estimates hashpower over the voting window. The threshold is 95% of **all** blocks in that window, including silent blocks, rounded up to a whole block.
+A pool can signal readiness for any subset of proposals in one voting round. Each proposal has its own rule revision, bit position and activation height. The status RPC verifies the voting-window bodies and compares the window endpoint with the node's visible active chain at the reported durable provable tip. After voting closes, sparse index repair can leave a lower slot visible without proving its ancestry to that later tip. Consensus activation requires an independently established parent-chain relationship. Block share estimates hashpower over the voting window. The threshold is 95% of **all** blocks in that window, including silent blocks, rounded up to a whole block.
 
 For example, a 20-block window requires 19 signals. With heights 1 through 20 reserved for voting and height 23 selected for activation, the tally becomes final for that branch after block 20. Blocks 21 and 22 provide lead time. A qualifying proposal first reports active **for block 23**, when its parent is block 22. A proposal with 18 signals expires independently. To compare competing branches, query nodes that have selected different tips.
 
@@ -53,6 +53,31 @@ Set `testballotcatalog=0daa0498aef76847abdfd5771aed663a241a0853aec641845f588325f
 Call `getballotstatus` with a single slot number, for example the JSON parameters `[0]`. A successful query reports `schedule_source` equal to `pinned_catalog`. The pin selects the local catalog used by this status query. It grants no authority to install a consensus rule.
 
 With the same pin, call `getballotstatus` with no parameters (`[]`) to inspect every proposal together. The response gives one catalog, parent hash and height, next height, start and window, followed by a `proposals` array. Each entry has its rule revision, slot, activation height, votes and next-block phase. The query reads and validates each window block body once for the whole catalog, and fails as a whole if evidence is missing or the chain changes.
+
+## Prepare a catalog for a generated test profile
+
+The offline tools create a manifest and genesis for an experimental regtest-shielded baseline. A profile can schedule 1 to 256 revision digests. Each revision has its own activation height; multiple revisions can share a height. The example builds a three-revision profile and exports the catalog in the exact format the node's ballot loader consumes.
+
+From the repository root, run the following commands in a shell. They write to a fresh directory. The lowercase pin in the example comes from an independently reproduced fixture. For a different deployment, obtain the intended pin from the operators who agreed on its genesis and revisions.
+
+```sh
+set -eu
+devbuild --wait make -f tools/dev/profile_inspector.mk
+example=$(mktemp -d)
+build/bin/profile-create "$example/profile" 1795737600 1 20 \
+  36240f5b89f9b4f8f28a892e6aaedda851e7efff4dcb4393df34745bc2508865 23 \
+  c23e01cb45bb89ee8e32fa44c34aee8fd90d2aac0d057e2d447261b089e74a4e 25 \
+  c3dc589eb53d98e843c9f84b2cbd877bf0976245a7a86ffc342fe7ecf9488862 27
+pin=41c02b67a70acd33e73cc9b9f9526568df5018eb32024c3ece92a3e017f7e44e
+pair="$example/profile/result"
+mkdir "$example/ballots"
+build/bin/profile-inspector --export-catalog "$pair/manifest.bin" "$pair/genesis.bin" "$pin" > "$example/ballots/$pin.json"
+printf 'Profile files and miner catalog are in %s\n' "$example"
+```
+
+The loader accepts this JSON when given the generated genesis hash `08c82ec385f0070813c43a878ab4afb0f8a5c173d71f6655e14256733d664aec`. A stock regtest node has a different genesis and will refuse the pin. Booting an operator-generated profile and enforcing the scheduled revisions require support in the validating node.
+
+<!-- claim: symbol-present export_catalog tools/dev/profile_inspector/main.c # pinned profile to miner catalog export -->
 
 ## Request a voting block template
 
