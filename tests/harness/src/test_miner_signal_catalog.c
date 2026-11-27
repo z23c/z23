@@ -1,6 +1,13 @@
 /* purpose: Verify canonical ballot catalog vectors and rejection behavior. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/miner_signal_catalog.h"
+#include "services/miner_signal_catalog_pin.h"
+#include "json/json.h"
+#include "test/test_core.h"
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "base/hex.h"
 #include <limits.h>
 #include <stdio.h>
@@ -16,6 +23,72 @@ static bool catalog_digest_changed(const struct miner_signal_catalog *catalog, c
     return miner_signal_catalog_select(catalog, 0, &selected).ok &&
            memcmp(original, selected.catalog, 32) != 0;
 }
+
+#if !defined(_WIN32)
+static bool pin_write(const char *path, const char *bytes, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(bytes, 1, n, f) == n;
+    if (fclose(f)) ok = false;
+    return ok;
+}
+
+static int catalog_pin_cases(void)
+{
+    static const char manifest[] =
+        "[\"1111111111111111111111111111111111111111111111111111111111111111\",100,20,"
+        "[[\"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\",122],"
+        "[\"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f\",150]]]";
+    static const char digest[] = "be8027db90c73984db54173ba98edd05ec137fad214ee500ae3b9e117b2894fe";
+    uint8_t genesis[32]; memset(genesis, 0x22, sizeof(genesis));
+    struct json_value doc = {0};
+    CAT_CHECK(json_read(&doc, manifest, sizeof(manifest) - 1));
+    struct miner_signal_catalog_pin pin = {0};
+    CAT_CHECK(miner_signal_catalog_pin_parse(json_at(&doc, 0), json_at(&doc, 1),
+        json_at(&doc, 2), json_at(&doc, 3), genesis, &pin).ok);
+    json_free(&doc); /* pin owns every byte after the JSON is freed */
+    struct miner_signal_schedule schedule = {0};
+    CAT_CHECK(miner_signal_catalog_pin_select(&pin, 1, &schedule).ok);
+    CAT_CHECK(schedule.slot == 1 && schedule.slots == 2 && schedule.activation == 150);
+    char actual[65]; zcl_hex_encode(schedule.catalog, 32, actual);
+    CAT_CHECK(!strcmp(actual, digest));
+    struct miner_signal_catalog_pin before = pin;
+    CAT_CHECK(!miner_signal_catalog_pin_select(&pin, 2, &schedule).ok);
+    pin.entries[1].activation++;
+    CAT_CHECK(!miner_signal_catalog_pin_select(&pin, 0, &schedule).ok);
+    pin = before;
+
+    char dir[512], ballots[600], path[720];
+    CAT_CHECK(test_mkdtemp(dir, sizeof(dir), "ballot_pin"));
+    CAT_CHECK(snprintf(ballots, sizeof(ballots), "%s/ballots", dir) > 0);
+    CAT_CHECK(mkdir(ballots, 0700) == 0);
+    CAT_CHECK(snprintf(path, sizeof(path), "%s/%s.json", ballots, digest) > 0);
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, digest, genesis, &pin).ok);
+    CAT_CHECK(pin_write(path, manifest, sizeof(manifest) - 1));
+    memset(&pin, 0, sizeof(pin));
+    CAT_CHECK(miner_signal_catalog_pin_load(dir, digest, genesis, &pin).ok);
+    CAT_CHECK(!memcmp(&pin, &before, sizeof(pin)));
+    uint8_t wrong[32]; memcpy(wrong, genesis, 32); wrong[0] ^= 1;
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, digest, wrong, &pin).ok);
+    CAT_CHECK(!memcmp(&pin, &before, sizeof(pin)));
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, "BE8027DB90C73984DB54173BA98EDD05EC137FAD214EE500AE3B9E117B2894FE", genesis, &pin).ok);
+    CAT_CHECK(pin_write(path, "[] trailing", sizeof("[] trailing") - 1));
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, digest, genesis, &pin).ok);
+    CAT_CHECK(pin_write(path, "[1,2,3,4]", sizeof("[1,2,3,4]") - 1));
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, digest, genesis, &pin).ok);
+    FILE *f = fopen(path, "wb"); CAT_CHECK(f);
+    for (size_t i = 0; i < 32769; ++i) CAT_CHECK(fputc(' ', f) != EOF);
+    CAT_CHECK(fclose(f) == 0);
+    CAT_CHECK(!miner_signal_catalog_pin_load(dir, digest, genesis, &pin).ok);
+    CAT_CHECK(!memcmp(&pin, &before, sizeof(pin)));
+    CAT_CHECK(unlink(path) == 0 && rmdir(ballots) == 0);
+    test_cleanup_tmpdir(dir);
+    return 0;
+}
+
+
+#endif
 
 int test_miner_signal_catalog(void)
 {
@@ -83,6 +156,9 @@ int test_miner_signal_catalog(void)
     c.entries = all; c.count = 256;
     CAT_CHECK(miner_signal_catalog_select(&c, 255, &b).ok);
     CAT_CHECK(b.slots == 256 && b.slot == 255 && b.activation == 122);
+#if !defined(_WIN32)
+    CAT_CHECK(catalog_pin_cases() == 0);
+#endif
     puts("miner_signal_catalog: vector, slot binding, mutations and rejection passed");
     return 0;
 }

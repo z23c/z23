@@ -10,6 +10,7 @@
 #include "jobs/tip_finalize_stage.h"
 #include "services/miner_signal_round.h"
 #include "services/miner_signal_catalog.h"
+#include "services/miner_signal_catalog_pin.h"
 #include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "util/safe_alloc.h"
@@ -81,74 +82,23 @@ static bool ballot_hex(const struct json_value *v, uint8_t out[32])
     return true;
 }
 
-static bool ballot_integer(const struct json_value *v, int64_t *out)
-{
-    if (!v || v->type != JSON_INT) return false;
-    *out = json_get_int(v);
-    return true;
-}
-
-static bool ballot_catalog_range(int64_t start, int64_t window, int64_t slot, size_t count)
-{
-    return start >= 1 && start <= INT32_MAX && window >= 1 &&
-           window <= BALLOT_MAX_WINDOW && count >= 1 && count <= 256 &&
-           slot >= 0 && (uint64_t)slot < count;
-}
-
-static bool ballot_catalog_shape(const struct json_value *params,
-                                 struct miner_signal_catalog *catalog,
-                                 const struct json_value **rules_out, size_t *slot_out)
-{
-    if (!params || params->type != JSON_ARR || json_size(params) != 5) return false;
-    int64_t start, window, slot;
-    if (!ballot_integer(json_at(params, 1), &start) ||
-        !ballot_integer(json_at(params, 2), &window) ||
-        !ballot_integer(json_at(params, 4), &slot))
-        return false; // raw-return-ok:invalid types become an RPC parameter error
-    const struct json_value *rules = json_at(params, 3);
-    if (!rules || rules->type != JSON_ARR) return false;
-    size_t count = json_size(rules);
-    if (!ballot_catalog_range(start, window, slot, count))
-        return false; // raw-return-ok:invalid ranges become an RPC parameter error
-    catalog->start = (int32_t)start;
-    catalog->window = (int32_t)window;
-    catalog->count = count;
-    *rules_out = rules;
-    *slot_out = (size_t)slot;
-    return true;
-}
-
-static bool ballot_catalog_entry(const struct json_value *entry,
-                                 struct miner_signal_catalog_entry *out)
-{
-    if (!entry || entry->type != JSON_ARR || json_size(entry) != 2) return false;
-    int64_t height;
-    if (!ballot_hex(json_at(entry, 0), out->rule_revision) ||
-        !ballot_integer(json_at(entry, 1), &height))
-        return false; // raw-return-ok:invalid entry becomes an RPC parameter error
-    if (height < 1 || height > INT32_MAX) return false;
-    out->activation = (int32_t)height;
-    return true;
-}
-
-/* The catalog service checks ordering, selected slot and activation grace. */
+/* Parse both the RPC and pinned-file catalog through one typed service. */
 static bool ballot_parse_catalog(const struct json_value *params,
                                  const struct chain_params *cp,
                                  struct miner_signal_schedule *out)
 {
-    if (!cp) return false;
-    struct miner_signal_catalog_entry entries[256] = {0};
-    struct miner_signal_catalog catalog = { .entries = entries };
-    const struct json_value *rules;
-    size_t slot;
-    if (!ballot_catalog_shape(params, &catalog, &rules, &slot) ||
-        !ballot_hex(json_at(params, 0), catalog.network_id))
-        return false; // raw-return-ok:invalid catalog becomes an RPC parameter error
-    memcpy(catalog.genesis, cp->consensus.hashGenesisBlock.data, sizeof(catalog.genesis));
-    for (size_t i = 0; i < catalog.count; ++i)
-        if (!ballot_catalog_entry(json_at(rules, i), &entries[i]))
-            return false; // raw-return-ok:invalid entry becomes an RPC parameter error
-    return miner_signal_catalog_select(&catalog, slot, out).ok;
+    if (!params || params->type != JSON_ARR || json_size(params) != 5 || !cp)
+        return false;
+    const struct json_value *slot_value = json_at(params, 4);
+    if (!slot_value || slot_value->type != JSON_INT) return false;
+    int64_t slot = json_get_int(slot_value);
+    if (slot < 0 || slot >= 256) return false;
+    struct miner_signal_catalog_pin pin = {0};
+    struct zcl_result r = miner_signal_catalog_pin_parse(
+        json_at(params, 0), json_at(params, 1), json_at(params, 2), json_at(params, 3),
+        cp->consensus.hashGenesisBlock.data, &pin);
+    if (!r.ok) return false; /* invalid catalog becomes the RPC parameter error */
+    return miner_signal_catalog_pin_select(&pin, (size_t)slot, out).ok;
 }
 
 static bool ballot_test_network(const struct chain_params *cp)
