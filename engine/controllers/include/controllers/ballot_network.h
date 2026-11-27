@@ -1,3 +1,4 @@
+/* purpose: Identify networks eligible for ballot RPCs. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_CONTROLLERS_BALLOT_NETWORK_H
 #define ZCL_CONTROLLERS_BALLOT_NETWORK_H
