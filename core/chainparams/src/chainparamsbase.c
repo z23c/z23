@@ -13,6 +13,8 @@ static struct base_chain_params mainParams = { 8023, "" };
 static struct base_chain_params testNetParams = { 18023, "testnet3" };
 static struct base_chain_params regTestParams = { 18023, "regtest" };
 
+static struct base_chain_params researchParams = { 28023, "ironwood-research" };
+
 static const struct base_chain_params *pCurrentBaseParams = NULL;
 
 const struct base_chain_params *BaseParams(void)
@@ -37,6 +39,16 @@ void SelectBaseParams(enum chain_network network)
         assert(0 && "Unimplemented network");
         return;
     }
+}
+
+const struct base_chain_params *ResearchBaseParams(void)
+{
+    return &researchParams;
+}
+
+void SelectResearchBaseParams(void)
+{
+    pCurrentBaseParams = &researchParams;
 }
 
 bool AreBaseParamsConfigured(void)

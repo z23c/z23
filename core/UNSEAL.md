@@ -1314,3 +1314,7 @@ later lane flips it HARD.
 - 2026-11-21T04:32:47Z — REASON: Owner-authorized ACME certificate validity conversion anchored to Unix epoch; no consensus predicate change
   old ROOT: 14b4031eadd0e340dc09b6886d4b9df0023a66126d7f91b1df48b5b98e73b766
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-27T08:12:01Z — REASON: Owner-authorized isolated Ironwood research profile without changing existing chain predicates
+  old ROOT: f31d8e1f23e1bddcdc77d717c16bf5fba1457b137974ce8d39f0e7bdc265c52b
+  by: owner unseal ritual (make core-unseal)

@@ -34,5 +34,7 @@ struct base_chain_params {
 const struct base_chain_params *BaseParams(void);
 void SelectBaseParams(enum chain_network network);
 bool AreBaseParamsConfigured(void);
+const struct base_chain_params *ResearchBaseParams(void);
+void SelectResearchBaseParams(void);
 
 #endif

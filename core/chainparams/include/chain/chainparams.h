@@ -93,6 +93,20 @@ struct chain_params {
     size_t nFoundersRewardAddresses;
 };
 
+enum chain_research_profile { CHAIN_RESEARCH_IRONWOOD = 1 };
+
+struct chain_research_descriptor {
+    enum chain_research_profile id;
+    const struct chain_params *chain;
+    const struct base_chain_params *base;
+    const uint8_t *genesis_wire;
+    size_t genesis_wire_len;
+};
+
+const struct chain_research_descriptor *chain_research_profile_get(enum chain_research_profile id);
+const struct chain_research_descriptor *chain_research_profile_current(void);
+bool chain_research_profile_select(enum chain_research_profile id);
+
 const struct chain_params *chain_params_get(void);
 void chain_params_select(enum chain_network network);
 

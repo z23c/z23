@@ -38,15 +38,15 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-0ee58bb60feef0a761c7a73f8bfd37145e9c113f989205fd444f82cacf2d71fa  core/UNSEAL.md
-0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
-76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
+6c890216c8ed45172eadfb6800ec2032db06e378a3d6b2bdc3e11f2a45c23d57  core/UNSEAL.md
+da7380ba8e8860bffe05d10c0f97ef2b2559ddb3d77810bb5d68a8c53083dc01  core/chainparams/include/chain/chainparams.h
+d3db5f8a9dfc8d0218eb2a24c1fb0d330cb39b8996340fcf772bfff9543a45f2  core/chainparams/include/chain/chainparamsbase.h
 584409e892797a057fd32df1d30ab041852ac243254494b215c81504daeda944  core/chainparams/include/chain/checkpoints.h
 70a619096c7c98fb5bbb315b44916b4641ab50e4938b99e5be0e8a1e0b1306d7  core/chainparams/include/chain/equihash.h
 231e550a1dda11aaeca9778910a9960c1c76a98d602fbb0cee5f9a598f028b4c  core/chainparams/include/chain/pow.h
 3235d5e1c2e14b9533c7016628e5ff89ee6e45456e7ff9b569afb0feb2f15fcc  core/chainparams/include/chain/subsidy.h
-c5806efca079067886a98d960f57b8f5bfdd8c707581bc1171248f7538a4e2b0  core/chainparams/src/chainparams.c
-3a5d6b4243f758fdd4024614000e2d5ca30695abfc60f62db13c9a90791fa2da  core/chainparams/src/chainparamsbase.c
+0769579628372e78d71bedf3c841206e8c87c4f59cedfc8ae068a3b224dbcc48  core/chainparams/src/chainparams.c
+4fcb436e98ed165608866c91902851fca915f1f9d7b4b20720cea1fc62153b70  core/chainparams/src/chainparamsbase.c
 aa3f682b2f84e9f7373cf6789567fa972d25deba38c6b87ec88011e3976d97b2  core/chainparams/src/checkpoints.c
 5edbb212e7fb9a1a559508766bae03d060e79d9b6411c553db108253d440f08c  core/chainparams/src/equihash.c
 2b19cae14188f15fee2e54785a697a205606cce99955e3667c7b5f837fe8e611  core/chainparams/src/pow.c
@@ -619,11 +619,11 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  581  4  848e59095c57938f6f046d04067f07f38d08c7e45f098a6c958b962ac8046336  core
-SECTION  12  16  f2ed2cd6b1e118a99e10fdb475c82ca210600e833e18e74fe2fb4d40f400dfc8  core/chainparams
-SECTION  6  24  ee438cebd750a28721317b04b02f995ee0c5d77ad4c7eff325b907f9cba5a8df  core/chainparams/include
-SECTION  6  30  5f30ae304baf9cde57d339c568d34b8f9836a9e209419ec82bec45a48125b5df  core/chainparams/include/chain
-SECTION  6  20  4f17eca567e4eb0f85c3bd5dcb4cc14a1e1002f092b4b1627a48921e4b25ba87  core/chainparams/src
+SECTION  581  4  cb81e80f9c552ffcd422e24b0efe80f7af9bc9d338693bec307a33de0c1f318f  core
+SECTION  12  16  ab1d35a842f07c9eb8cf49193a10ada2094fa6ecabc92468c6673ed4d5498071  core/chainparams
+SECTION  6  24  731488ba3a42cd082ea40a65c4c083f63ed0fdfbcdac39fe392e96e8e0897c33  core/chainparams/include
+SECTION  6  30  9b8708de9d4e643dd7a52423d0479709f1b12df76f30d3f5409b33eda4bc0098  core/chainparams/include/chain
+SECTION  6  20  f5beaf20165e4646178336c24f925cb9fd1d86270e480f9ff644c51b86e9d5ed  core/chainparams/src
 SECTION  36  14  6167bffd6832fc5dcfe0db99175d47f38770d373ea3edc9444e23ebaf6db4a65  core/consensus
 SECTION  17  22  9559692f7fa69fb22ef84266cbf87183f16208aa1a9e6ed3ee9178545d0cc295  core/consensus/include
 SECTION  17  29  6072e26bba85c0a24adbd98da9749c7e6b8ac10872726a2c7272df8cc7322fc0  core/consensus/include/domain
@@ -699,5 +699,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  4c84662bf6a1c9ad9f4f2ed08b113249ba0a6d20b013832583977cde5a25ca48
-ROOT  f31d8e1f23e1bddcdc77d717c16bf5fba1457b137974ce8d39f0e7bdc265c52b
+TREE  b20adfcbacdffe412e4075aba64472b79fc40aced685d0d88f3d75eb6e3b5cb0
+ROOT  a21f5318d314a02fa2651eeb3b8dc23cf4ebd7eaf654992d83e404747371ce82

@@ -326,6 +326,54 @@ static int check_utxo_sha3_golden_vectors(void)
     return failures;
 }
 
+static int check_research_values(const struct chain_research_descriptor *d, const struct chain_params *main);
+static int check_research_selection(const struct chain_research_descriptor *d, const struct chain_params *main, const struct base_chain_params *base);
+
+static int check_research_profile(void)
+{
+    int failures = 0;
+    const struct chain_params *main = chain_params_get();
+    const struct base_chain_params *base = BaseParams();
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    CHECK("research lookup does not select", d && chain_params_get() == main && BaseParams() == base);
+    CHECK("unknown research profile fails closed", !chain_research_profile_get((enum chain_research_profile)99) &&
+          !chain_research_profile_select((enum chain_research_profile)99) && chain_params_get() == main && BaseParams() == base);
+    if (!d) return failures + 1;
+    failures += check_research_values(d, main);
+    failures += check_research_selection(d, main, base);
+    return failures;
+}
+
+static int check_research_values(const struct chain_research_descriptor *d, const struct chain_params *main)
+{
+    int failures = 0;
+    const uint8_t magic[] = {0xd4, 0x14, 0x83, 0xfa};
+    struct uint256 expected;
+    uint256_set_hex(&expected, "0eadaa0b42b377b8d05d1a9b313f1795b8ac4553217a5d06b0f66cddff8c78e7");
+    CHECK("research parameters isolated", d->genesis_wire_len == 276 &&
+          !memcmp(d->chain->pchMessageStart, magic, sizeof magic) &&
+          uint256_eq(&d->chain->consensus.hashGenesisBlock, &expected) &&
+          d->chain->nEquihashN == 48 && d->chain->nEquihashK == 5 &&
+          !d->chain->nSeeds && !d->chain->nFixedSeeds && !d->chain->nOnionSeeds &&
+          !d->chain->checkpointData.nEntries && strcmp(d->base->strDataDir, "ironwood-research") == 0);
+    for (size_t i = 0; i < B58_MAX_TYPES; i++)
+        CHECK("research base58 prefix differs from main", d->chain->base58PrefixLengths[i] != main->base58PrefixLengths[i] ||
+              memcmp(d->chain->base58Prefixes[i], main->base58Prefixes[i], main->base58PrefixLengths[i]));
+    return failures;
+}
+
+static int check_research_selection(const struct chain_research_descriptor *d, const struct chain_params *main, const struct base_chain_params *base)
+{
+    int failures = 0;
+    CHECK("research selects chain and base", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD) &&
+          chain_research_profile_current() == d && chain_params_get() == d->chain && BaseParams() == d->base);
+    CHECK("unknown selection preserves research", !chain_research_profile_select((enum chain_research_profile)99) &&
+          chain_research_profile_current() == d && chain_params_get() == d->chain && BaseParams() == d->base);
+    chain_params_select(CHAIN_MAIN);
+    CHECK("legacy selection restores main", chain_research_profile_current() == NULL && chain_params_get() == main && BaseParams() == base);
+    return failures;
+}
+
 int test_consensus_parity(void)
 {
     int failures = 0;
@@ -335,6 +383,7 @@ int test_consensus_parity(void)
     const struct chain_params *p = chain_params_get();
     const struct consensus_params *c = &p->consensus;
 
+    failures += check_research_profile();
     failures += check_equihash_parameters(p);
     failures += check_network_upgrade_schedule(c);
     failures += check_pow_retarget_constants(c);

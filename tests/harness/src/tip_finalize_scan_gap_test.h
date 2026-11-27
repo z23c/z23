@@ -12,6 +12,8 @@
 #ifndef TIP_FINALIZE_SCAN_GAP_TEST_H
 #define TIP_FINALIZE_SCAN_GAP_TEST_H
 
+#include "storage/block_parse_cache.h"
+
 static struct app_runtime_context *g_gap_rt;
 
 static struct wallet *tp_gap_wallet_new(const struct wallet *like, bool pending)
@@ -35,13 +37,19 @@ static struct block_index tp_gap_index(const struct block_index *src,
                                        int height, bool readable)
 {
     struct block_index at = *src;
-    at.phashBlock = &at.hashBlock;
+    at.phashBlock = src->phashBlock;
     at.nHeight = height;
     if (!readable) {
         at.nFile = 9999; /* no such blk file */
         at.nDataPos = 0;
     }
     return at;
+}
+
+static void tp_gap_evict_unreadable(const struct block_index *bi, bool unreadable)
+{
+    if (unreadable)
+        block_parse_cache_evict(bi->nHeight, bi->phashBlock->data);
 }
 
 static bool tp_gap_unmarked(const struct wallet *w)
@@ -82,6 +90,7 @@ static int tp_gap_skip_case(const struct block_index *src, const char *name,
     TP_CHECK("scan gap: block 1 advances the wallet",
              (unreadable ? tip_finalize_run_wallet_reconcile(&b1) : true) &&
              w->best_block_height == 1 && tp_gap_unmarked(w));
+    tp_gap_evict_unreadable(&b2, unreadable);
     TP_CHECK("scan gap: the skipped block 2 reports not reconciled",
              !tip_finalize_run_wallet_reconcile(&b2));
     TP_CHECK("scan gap: the skip is recorded from block 2",
@@ -134,6 +143,7 @@ static int tp_gap_late_case(const struct block_index *src, const char *name,
         snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
                  foreign);
     }
+    tp_gap_evict_unreadable(&b2, unreadable);
     TP_CHECK("late body: the skip leaves block 2 unread",
              !tip_finalize_run_wallet_reconcile(&b2) &&
              w->best_block_height == 1 && w->scan_retry.pending &&
