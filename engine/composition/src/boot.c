@@ -1983,15 +1983,9 @@ static bool boot_step_load_block_index_ladder(struct app_context *ctx,
         .ctx = ctx, .st = &g_state, .ndb = &g_node_db, .params = params,
         .block_tree = &g_block_tree, .block_tree_open = g_block_tree_open,
     };
-    /* Ordered block-index load ladder (projection rebuild -> flat ->
-     * sqlite -> kill-9 projection rebuild -> flat-union taint check ->
-     * blocks-table hydrate -> LevelDB). The rung table + the
-     * flat_union_tainted guard live in engine/composition/src/boot_blkidx_ladder.c
-     * (E1 seam); the loader functions are unchanged. Per-rung fire
-     * counters: `ops state --subsystem=block_index_load_rungs`. */
+    /* Ordered ladder and per-rung counters live in boot_blkidx_ladder.c. */
     boot_blkidx_run_ladder(&blkidx);
-    if (blkidx.genesis_failed)
-        return false;
+    if (blkidx.genesis_failed) return false;
     int64_t t_rest = boot_submark("blkidx.load_ladder", t_load);
     rebuilt_from_log = blkidx.rebuilt_from_log;
     /* If block index is much smaller than the chain, try loading

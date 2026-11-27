@@ -28,6 +28,9 @@
 
 #include "platform/socket_compat.h"
 #include "config/boot_internal.h"
+#include "config/args.h"
+#include "chain/chainparamsbase.h"
+#include "util/util.h"
 #include "config/boot_seniority.h"
 #include "services/configured_sync_peers.h"
 #include "services/node_health_service.h"
@@ -396,4 +399,40 @@ void boot_sync_state_logger(enum event_type type, uint32_t peer_id,
         break;
     }
     fflush(stdout);
+}
+
+const struct chain_research_descriptor *app_testnet_profile_by_name(const char *name)
+{
+    if (name && strcmp(name, "ironwood") == 0)
+        return chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    return NULL;
+}
+
+int args_apply_research_defaults(struct app_context *ctx)
+{
+    if (!ctx->testnet_profile) return 0;
+    static const char *const foreign_state_options[] = {
+        "-filesync", "-fileservice", "-snapshot", "-load-snapshot-at-own-height",
+        "-install-consensus-bundle", "-verify-consensus-bundle", "-export-consensus-bundle",
+        "-promote-shielded-history", "-load-verify-boot", "-reimport-utxos",
+        "-flysync", "-flysync-auto", "-mint-anchor", "-mint-anchor-fast",
+        "-full-fold", "-refold-from-anchor", "-ratify-mint-anchor", "-verify-rom"
+    };
+    for (size_t i = 0; i < sizeof foreign_state_options / sizeof foreign_state_options[0]; i++) {
+        if (GetArg(foreign_state_options[i], NULL)) {
+            fprintf(stderr, "%s requires chain state unavailable on the Ironwood testnet\n",
+                    foreign_state_options[i]);
+            return 1;
+        }
+    }
+    ctx->no_legacy_utxo_import = true;
+    ctx->p2p_port = ctx->testnet_profile->chain->nDefaultPort;
+    ctx->rpc_port = ctx->testnet_profile->base->nRPCPort;
+    ctx->no_file_sync = true;
+    ctx->no_legacy_auto_import = true;
+    ctx->connect_only = true;
+    ctx->checkpoints_enabled = false;
+    ctx->private_listeners = true;
+    ctx->no_tor = true;
+    return 0;
 }

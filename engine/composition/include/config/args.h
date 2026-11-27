@@ -117,6 +117,9 @@ void apply_argv_loglevel(void);
  * must return from main() (e.g. --help / --version -> 0, a bad -profile= or
  * -operator-lane= or the removed -assumevalid -> 1). The silent-ignore of
  * unrecognized flags (with a loud one-line WARNING) is preserved exactly. */
+/* Apply isolated research defaults before parsing node options. */
+int args_apply_research_defaults(struct app_context *ctx);
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics);
 

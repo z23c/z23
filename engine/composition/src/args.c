@@ -13,8 +13,6 @@
  */
 
 #include "config/args.h"
-#include "chain/chainparams.h"
-#include "chain/chainparamsbase.h"
 #include "config/boot.h"
 #include "config/boot_error.h"
 #include "config/flysync_island.h"
@@ -1417,43 +1415,13 @@ static int args_admit_options(struct app_context *ctx)
     return 0;
 }
 
-const struct chain_research_descriptor *app_testnet_profile_by_name(const char *name)
-{
-    if (name && strcmp(name, "ironwood") == 0)
-        return chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
-    return NULL;
-}
 
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
     struct args_arm_state st = { ctx, show_metrics, argv };
     if (args_network_begin(ctx)) return 1;
-    if (ctx->testnet_profile) {
-        static const char *const foreign_state_options[] = {
-            "-filesync", "-fileservice", "-snapshot", "-load-snapshot-at-own-height",
-            "-install-consensus-bundle", "-verify-consensus-bundle", "-export-consensus-bundle",
-            "-promote-shielded-history", "-load-verify-boot", "-reimport-utxos",
-            "-flysync", "-flysync-auto", "-mint-anchor", "-mint-anchor-fast",
-            "-full-fold", "-refold-from-anchor", "-ratify-mint-anchor", "-verify-rom"
-        };
-        for (size_t i = 0; i < sizeof foreign_state_options / sizeof foreign_state_options[0]; i++) {
-            if (GetArg(foreign_state_options[i], NULL)) {
-                fprintf(stderr, "%s requires chain state unavailable on the Ironwood testnet\n",
-                        foreign_state_options[i]);
-                return 1;
-            }
-        }
-        ctx->no_legacy_utxo_import = true;
-        ctx->p2p_port = ctx->testnet_profile->chain->nDefaultPort;
-        ctx->rpc_port = ctx->testnet_profile->base->nRPCPort;
-        ctx->no_file_sync = true;
-        ctx->no_legacy_auto_import = true;
-        ctx->connect_only = true;
-        ctx->checkpoints_enabled = false;
-        ctx->private_listeners = true;
-        ctx->no_tor = true;
-    }
+    if (args_apply_research_defaults(ctx)) return 1;
     args_apply_buildworker_config(argc, argv, ctx);
     bool positional_seen = false;
     for (int i = 1; i < argc; i++) {
@@ -1465,14 +1433,7 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     /* Automatic legacy sources under ~/.zclassic belong to mainnet. */
     if (ctx->regtest || ctx->testnet)
         ctx->no_legacy_auto_import = true;
-    /* The -v2transport spelling is a deprecated alias for
-     * -noisetransport (kept so existing Noise operators keep booting;
-     * connman_init() honors it and repeats this notice where the flag
-     * takes effect). Say so HERE, at parse time, instead of ~30 s deep
-     * in P2P init: an operator typo or stale runbook deserves its
-     * answer in milliseconds, and waiting for connman couples the
-     * diagnostic to full boot latency. GetArg-based: every spelling
-     * (-v2transport, -v2transport=0/1) is one check, printed once. */
+    /* Warn at parse time for the deprecated Noise transport alias. */
     if (GetArg("-v2transport", NULL) != NULL) {
         const bool noise_new_set = GetArg("-noisetransport", NULL) != NULL;
         fprintf(stderr,

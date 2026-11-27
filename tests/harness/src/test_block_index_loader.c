@@ -454,6 +454,204 @@ static int bil_genesis_cache_case(int variant)
     return failures;
 }
 
+static int bil_research_bad(const struct chain_params *cp, struct block_index *g, const uint8_t *wire, const char *dir)
+{
+    int failures = 0;
+    uint8_t bad[276]; memcpy(bad, wire, 276); bad[100] ^= 1;
+    BIL_CHECK("bil: altered genesis rejected before publication",
+              !block_index_store_genesis_body(g, cp, bad, 276, dir) && !g->nStatus);
+    memcpy(bad, wire, 276); bad[276 - 10] ^= 1;
+    BIL_CHECK("bil: altered genesis body rejected by merkle check",
+              !block_index_store_genesis_body(g, cp, bad, 276, dir) && !g->nStatus);
+    memcpy(bad, wire, 276); bad[104] ^= 1;
+    struct byte_stream bad_stream; stream_init_from_data(&bad_stream, bad, 276);
+    struct block bad_block; block_init(&bad_block);
+    bool bad_parsed = block_deserialize(&bad_block, &bad_stream);
+    struct chain_params bad_cp = *cp;
+    if (bad_parsed) block_get_hash(&bad_block, &bad_cp.consensus.hashGenesisBlock);
+    block_free(&bad_block);
+    struct block_index bad_g = {0}; bad_g.phashBlock = &bad_cp.consensus.hashGenesisBlock;
+    BIL_CHECK("bil: wrong nBits rejected even with matching hash",
+              bad_parsed && !block_index_store_genesis_body(&bad_g, &bad_cp, bad, 276, dir) && !bad_g.nStatus);
+    BIL_CHECK("bil: truncated genesis rejected before publication",
+              !block_index_store_genesis_body(g, cp, wire, 276 - 1, dir) && !g->nStatus);
+    BIL_CHECK("bil: genesis write failure leaves no data flag",
+              !block_index_store_genesis_body(g, cp, wire, 276, "/nonexistent/genesis") && !g->nStatus);
+    return failures;
+}
+
+static int bil_research_persist(const struct chain_params *cp, struct block_index *g, const uint8_t *wire, const char *dir)
+{
+    int failures = 0;
+    uint8_t bad[276]; memcpy(bad, wire, 276); bad[104] ^= 1;
+    bool ok = block_index_store_genesis_body(g, cp, wire, 276, dir);
+    BIL_CHECK("bil: real genesis is persisted", ok && (g->nStatus & BLOCK_HAVE_DATA));
+    if (ok) {
+        struct block b; block_init(&b);
+        BIL_CHECK("bil: real genesis reads back", read_block_from_disk_index(&b, g, dir));
+        struct uint256 hash; block_get_hash(&b, &hash);
+        BIL_CHECK("bil: persisted genesis retains identity", uint256_eq(&hash, g->phashBlock));
+        block_free(&b);
+    }
+    BIL_CHECK("bil: existing genesis bytes are verified",
+              block_index_ensure_genesis_body(g, cp, wire, 276, dir));
+    BIL_CHECK("bil: mismatched expected bytes fail closed",
+              !block_index_ensure_genesis_body(g, cp, bad, 276, dir) && !(g->nStatus & BLOCK_HAVE_DATA));
+    int saved_file = g->nFile; unsigned saved_pos = g->nDataPos;
+    block_index_status_clear_bits(g, BLOCK_HAVE_DATA);
+    BIL_CHECK("bil: header-only genesis body restored without another append",
+              block_index_ensure_genesis_body(g, cp, wire, 276, dir) &&
+              (g->nStatus & BLOCK_HAVE_DATA) && g->nFile == saved_file && g->nDataPos == saved_pos);
+    block_index_disk_pos_store(g, 999999, 8);
+    BIL_CHECK("bil: stale HAVE_DATA repaired from missing file",
+              block_index_ensure_genesis_body(g, cp, wire, 276, dir) &&
+              (g->nStatus & BLOCK_HAVE_DATA));
+    return failures;
+}
+
+static int bil_research_boot(const struct chain_params *cp, const uint8_t *wire)
+{
+    int failures = 0;
+    char boot_dir[256];
+    if (test_mkdtemp(boot_dir, sizeof boot_dir, "bil_genesis_boot")) {
+        struct main_state first, restart;
+        main_state_init(&first); main_state_init(&restart);
+        bool loaded = load_block_index_with_genesis(&first, cp, NULL, false,
+                                                    wire, 276, boot_dir).ok;
+        struct block_index *p = block_map_find(&first.map_block_index, &cp->consensus.hashGenesisBlock);
+        BIL_CHECK("bil: normal loader persists before genesis tip", loaded && p && (p->nStatus & BLOCK_HAVE_DATA));
+        if (loaded && p) {
+            save_block_index_flat(boot_dir, &first);
+            bool restored = load_block_index_flat(boot_dir, &restart).ok;
+            struct block_index *r = block_map_find(&restart.map_block_index, &cp->consensus.hashGenesisBlock);
+            struct block b; block_init(&b);
+            bool read = restored && r && read_block_from_disk_index(&b, r, boot_dir);
+            struct uint256 got; if (read) block_get_hash(&b, &got);
+            BIL_CHECK("bil: genesis survives index reload", read && uint256_eq(&got, &cp->consensus.hashGenesisBlock));
+            block_free(&b);
+        }
+        main_state_free(&first); main_state_free(&restart);
+    } else BIL_CHECK("bil: genesis boot directory", false);
+    return failures;
+}
+
+static int bil_research_frames(const struct chain_research_descriptor *profile, struct main_state *first, const char *dir)
+{
+    int failures = 0;
+    struct block_index *pg = block_map_find(&first->map_block_index,
+                                           &profile->chain->consensus.hashGenesisBlock);
+    struct block block; block_init(&block);
+    chain_params_select(CHAIN_REGTEST);
+    BIL_CHECK("bil: ordinary mode rejects research frame magic",
+              pg && !read_block_from_disk_index(&block, pg, dir));
+    block_free(&block);
+    BIL_CHECK("bil: research profile selected again",
+              chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    struct disk_block_pos pos; disk_block_pos_init(&pos);
+    bool got_pos = pg && block_index_disk_pos_snapshot(pg, &pos, NULL);
+    char path[512];
+    if (got_pos) get_block_pos_filename(path, sizeof path, dir, &pos, "blk");
+    int fd = got_pos ? open(path, O_RDWR) : -1;
+    static const uint8_t main_magic[4] = {0x24, 0xe9, 0x27, 0x64};
+    bool patched = fd >= 0 && pos.nPos >= 8 &&
+        pwrite(fd, main_magic, sizeof main_magic, pos.nPos - 8) == sizeof main_magic;
+    block_init(&block);
+    BIL_CHECK("bil: research mode rejects ordinary frame magic",
+              patched && !read_block_from_disk_index(&block, pg, dir));
+    block_free(&block);
+    bool repaired = fd >= 0 && pwrite(fd, profile->chain->pchMessageStart, 4,
+                                      pos.nPos - 8) == 4;
+    if (fd >= 0) close(fd);
+    block_init(&block);
+    BIL_CHECK("bil: research mode accepts its frame magic",
+              repaired && read_block_from_disk_index(&block, pg, dir));
+    block_free(&block);
+
+    return failures;
+}
+
+static int bil_research_sql(const struct chain_research_descriptor *profile, struct main_state *first, struct block_index *pg, const struct uint256 *child_hash)
+{
+    int failures = 0;
+    struct node_db ndb = {0};
+    if (sqlite3_open(":memory:", &ndb.db) == SQLITE_OK) {
+        ndb.open = true;
+        const char *schema = "CREATE TABLE block_index_cache (hash BLOB PRIMARY KEY,prev_hash BLOB,"
+            "height INTEGER,n_bits INTEGER,n_time INTEGER,n_version INTEGER,n_status INTEGER,"
+            "n_file INTEGER,n_data_pos INTEGER,n_undo_pos INTEGER,n_tx INTEGER,"
+            "chain_work BLOB,n_cached_branch_id INTEGER,n_chain_tx INTEGER)";
+        bool schema_ok = sqlite3_exec(ndb.db, schema, NULL, NULL, NULL) == SQLITE_OK;
+        for (unsigned i = 2; i < 1000; i++) {
+            struct uint256 h = {0}; h.data[0] = (uint8_t)i; h.data[1] = (uint8_t)(i >> 8);
+            struct block_index *entry = chainstate_insert_block_index((struct chainstate *)first, &h);
+            if (!entry) { schema_ok = false; break; }
+            entry->nHeight = (int)i; entry->nBits = pg->nBits;
+            entry->nStatus = BLOCK_VALID_SCRIPTS; entry->nTx = 1;
+        }
+        if (schema_ok) save_block_index_recent(&ndb, first);
+        struct main_state sql; main_state_init(&sql);
+        bool sql_ok = schema_ok && load_block_index_sqlite(&ndb, &sql).ok;
+        struct block_index *sg = block_map_find(&sql.map_block_index,
+                                          &profile->chain->consensus.hashGenesisBlock);
+        struct block_index *sc = block_map_find(&sql.map_block_index, child_hash);
+        BIL_CHECK("bil: research SQLite cache withholds genesis and distrusts mainnet ROM",
+                  sql_ok && sg && !(sg->nStatus & BLOCK_HAVE_DATA) && sc &&
+                  (sc->nStatus & BLOCK_REVALIDATE_PENDING));
+        main_state_free(&sql); sqlite3_close(ndb.db);
+    } else BIL_CHECK("bil: research SQLite opens", false);
+
+    return failures;
+}
+
+static int bil_research_restore(const struct chain_research_descriptor *profile, struct main_state *first, struct main_state *restored, const char *dir, bool loaded)
+{
+    int failures = 0;
+    struct uint256 child_hash = {0}; child_hash.data[0] = 1;
+    struct block_index *pg = block_map_find(&first->map_block_index,
+                                           &profile->chain->consensus.hashGenesisBlock);
+    struct block_index *child = chainstate_insert_block_index((struct chainstate *)first, &child_hash);
+    if (child && pg) {
+        child->nHeight = 1; child->pprev = pg; child->nBits = pg->nBits;
+        child->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_FAILED_VALID;
+        child->nTx = 1; child->nChainTx = 2;
+    }
+    if (loaded) save_block_index_flat(dir, first);
+    bool reloaded = loaded && load_block_index_flat(dir, restored).ok;
+    struct block_index *r = block_map_find(&restored->map_block_index,
+                                           &profile->chain->consensus.hashGenesisBlock);
+    BIL_CHECK("bil: research cache withholds genesis data until verified",
+              reloaded && r && !(r->nStatus & BLOCK_HAVE_DATA));
+    struct block_index *rc = block_map_find(&restored->map_block_index, &child_hash);
+    BIL_CHECK("bil: research cache does not trust mainnet ROM boundary",
+              child && rc && (rc->nStatus & BLOCK_REVALIDATE_PENDING));
+    BIL_CHECK("bil: research cache restores verified genesis data",
+              r && block_index_ensure_genesis_body(r, profile->chain, profile->genesis_wire,
+                                                  profile->genesis_wire_len, dir) &&
+              (r->nStatus & BLOCK_HAVE_DATA));
+    failures += bil_research_sql(profile, first, pg, &child_hash);
+    return failures;
+}
+
+
+static int bil_research_profile(void)
+{
+    int failures = 0;
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (profile && chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) {
+        char profile_dir[256];
+        if (test_mkdtemp(profile_dir, sizeof profile_dir, "bil_profile_restore")) {
+            struct main_state first, restored; main_state_init(&first); main_state_init(&restored);
+            bool loaded = load_block_index_with_genesis(&first, profile->chain, NULL, false,
+                            profile->genesis_wire, profile->genesis_wire_len, profile_dir).ok;
+            if (loaded) failures += bil_research_frames(profile, &first, profile_dir);
+            failures += bil_research_restore(profile, &first, &restored, profile_dir, loaded);
+            main_state_free(&first); main_state_free(&restored);
+        } else BIL_CHECK("bil: profile restore directory", false);
+        chain_params_select(CHAIN_REGTEST);
+    } else BIL_CHECK("bil: research profile select", false);
+    return failures;
+}
+
 static int bil_research_genesis_body(void)
 {
     static const char hex[] =
@@ -479,157 +677,10 @@ static int bil_research_genesis_body(void)
     char dir[256];
     if (!test_mkdtemp(dir, sizeof dir, "bil_real_genesis")) return 1;
     struct block_index g = {0}; g.phashBlock = &cp.consensus.hashGenesisBlock;
-    uint8_t bad[sizeof wire]; memcpy(bad, wire, sizeof bad); bad[100] ^= 1;
-    BIL_CHECK("bil: altered genesis rejected before publication",
-              !block_index_store_genesis_body(&g, &cp, bad, sizeof bad, dir) && !g.nStatus);
-    memcpy(bad, wire, sizeof bad); bad[sizeof bad - 10] ^= 1;
-    BIL_CHECK("bil: altered genesis body rejected by merkle check",
-              !block_index_store_genesis_body(&g, &cp, bad, sizeof bad, dir) && !g.nStatus);
-    memcpy(bad, wire, sizeof bad); bad[104] ^= 1;
-    struct byte_stream bad_stream; stream_init_from_data(&bad_stream, bad, sizeof bad);
-    struct block bad_block; block_init(&bad_block);
-    bool bad_parsed = block_deserialize(&bad_block, &bad_stream);
-    struct chain_params bad_cp = cp;
-    if (bad_parsed) block_get_hash(&bad_block, &bad_cp.consensus.hashGenesisBlock);
-    block_free(&bad_block);
-    struct block_index bad_g = {0}; bad_g.phashBlock = &bad_cp.consensus.hashGenesisBlock;
-    BIL_CHECK("bil: wrong nBits rejected even with matching hash",
-              bad_parsed && !block_index_store_genesis_body(&bad_g, &bad_cp, bad, sizeof bad, dir) && !bad_g.nStatus);
-    BIL_CHECK("bil: truncated genesis rejected before publication",
-              !block_index_store_genesis_body(&g, &cp, wire, sizeof wire - 1, dir) && !g.nStatus);
-    BIL_CHECK("bil: genesis write failure leaves no data flag",
-              !block_index_store_genesis_body(&g, &cp, wire, sizeof wire, "/nonexistent/genesis") && !g.nStatus);
-    bool ok = block_index_store_genesis_body(&g, &cp, wire, sizeof wire, dir);
-    BIL_CHECK("bil: real genesis is persisted", ok && (g.nStatus & BLOCK_HAVE_DATA));
-    if (ok) {
-        struct block b; block_init(&b);
-        BIL_CHECK("bil: real genesis reads back", read_block_from_disk_index(&b, &g, dir));
-        struct uint256 hash; block_get_hash(&b, &hash);
-        BIL_CHECK("bil: persisted genesis retains identity", uint256_eq(&hash, g.phashBlock));
-        block_free(&b);
-    }
-    BIL_CHECK("bil: existing genesis bytes are verified",
-              block_index_ensure_genesis_body(&g, &cp, wire, sizeof wire, dir));
-    BIL_CHECK("bil: mismatched expected bytes fail closed",
-              !block_index_ensure_genesis_body(&g, &cp, bad, sizeof bad, dir) && !(g.nStatus & BLOCK_HAVE_DATA));
-    int saved_file = g.nFile; unsigned saved_pos = g.nDataPos;
-    block_index_status_clear_bits(&g, BLOCK_HAVE_DATA);
-    BIL_CHECK("bil: header-only genesis body restored without another append",
-              block_index_ensure_genesis_body(&g, &cp, wire, sizeof wire, dir) &&
-              (g.nStatus & BLOCK_HAVE_DATA) && g.nFile == saved_file && g.nDataPos == saved_pos);
-    block_index_disk_pos_store(&g, 999999, 8);
-    BIL_CHECK("bil: stale HAVE_DATA repaired from missing file",
-              block_index_ensure_genesis_body(&g, &cp, wire, sizeof wire, dir) &&
-              (g.nStatus & BLOCK_HAVE_DATA));
-    char boot_dir[256];
-    if (test_mkdtemp(boot_dir, sizeof boot_dir, "bil_genesis_boot")) {
-        struct main_state first, restart;
-        main_state_init(&first); main_state_init(&restart);
-        bool loaded = load_block_index_with_genesis(&first, &cp, NULL, false,
-                                                    wire, sizeof wire, boot_dir).ok;
-        struct block_index *p = block_map_find(&first.map_block_index, &cp.consensus.hashGenesisBlock);
-        BIL_CHECK("bil: normal loader persists before genesis tip", loaded && p && (p->nStatus & BLOCK_HAVE_DATA));
-        if (loaded && p) {
-            save_block_index_flat(boot_dir, &first);
-            bool restored = load_block_index_flat(boot_dir, &restart).ok;
-            struct block_index *r = block_map_find(&restart.map_block_index, &cp.consensus.hashGenesisBlock);
-            struct block b; block_init(&b);
-            bool read = restored && r && read_block_from_disk_index(&b, r, boot_dir);
-            struct uint256 got; if (read) block_get_hash(&b, &got);
-            BIL_CHECK("bil: genesis survives index reload", read && uint256_eq(&got, &cp.consensus.hashGenesisBlock));
-            block_free(&b);
-        }
-        main_state_free(&first); main_state_free(&restart);
-    } else BIL_CHECK("bil: genesis boot directory", false);
-    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
-    if (profile && chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) {
-        char profile_dir[256];
-        if (test_mkdtemp(profile_dir, sizeof profile_dir, "bil_profile_restore")) {
-            struct main_state first, restored; main_state_init(&first); main_state_init(&restored);
-            bool loaded = load_block_index_with_genesis(&first, profile->chain, NULL, false,
-                            profile->genesis_wire, profile->genesis_wire_len, profile_dir).ok;
-            if (loaded) {
-                struct block_index *pg = block_map_find(&first.map_block_index,
-                                                       &profile->chain->consensus.hashGenesisBlock);
-                struct block block; block_init(&block);
-                chain_params_select(CHAIN_REGTEST);
-                BIL_CHECK("bil: ordinary mode rejects research frame magic",
-                          pg && !read_block_from_disk_index(&block, pg, profile_dir));
-                block_free(&block);
-                BIL_CHECK("bil: research profile selected again",
-                          chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
-                struct disk_block_pos pos; disk_block_pos_init(&pos);
-                bool got_pos = pg && block_index_disk_pos_snapshot(pg, &pos, NULL);
-                char path[512];
-                if (got_pos) get_block_pos_filename(path, sizeof path, profile_dir, &pos, "blk");
-                int fd = got_pos ? open(path, O_RDWR) : -1;
-                static const uint8_t main_magic[4] = {0x24, 0xe9, 0x27, 0x64};
-                bool patched = fd >= 0 && pos.nPos >= 8 &&
-                    pwrite(fd, main_magic, sizeof main_magic, pos.nPos - 8) == sizeof main_magic;
-                block_init(&block);
-                BIL_CHECK("bil: research mode rejects ordinary frame magic",
-                          patched && !read_block_from_disk_index(&block, pg, profile_dir));
-                block_free(&block);
-                bool repaired = fd >= 0 && pwrite(fd, profile->chain->pchMessageStart, 4,
-                                                  pos.nPos - 8) == 4;
-                if (fd >= 0) close(fd);
-                block_init(&block);
-                BIL_CHECK("bil: research mode accepts its frame magic",
-                          repaired && read_block_from_disk_index(&block, pg, profile_dir));
-                block_free(&block);
-            }
-            struct uint256 child_hash = {0}; child_hash.data[0] = 1;
-            struct block_index *pg = block_map_find(&first.map_block_index,
-                                                   &profile->chain->consensus.hashGenesisBlock);
-            struct block_index *child = chainstate_insert_block_index((struct chainstate *)&first, &child_hash);
-            if (child && pg) {
-                child->nHeight = 1; child->pprev = pg; child->nBits = pg->nBits;
-                child->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_FAILED_VALID;
-                child->nTx = 1; child->nChainTx = 2;
-            }
-            if (loaded) save_block_index_flat(profile_dir, &first);
-            bool reloaded = loaded && load_block_index_flat(profile_dir, &restored).ok;
-            struct block_index *r = block_map_find(&restored.map_block_index,
-                                                   &profile->chain->consensus.hashGenesisBlock);
-            BIL_CHECK("bil: research cache withholds genesis data until verified",
-                      reloaded && r && !(r->nStatus & BLOCK_HAVE_DATA));
-            struct block_index *rc = block_map_find(&restored.map_block_index, &child_hash);
-            BIL_CHECK("bil: research cache does not trust mainnet ROM boundary",
-                      child && rc && (rc->nStatus & BLOCK_REVALIDATE_PENDING));
-            BIL_CHECK("bil: research cache restores verified genesis data",
-                      r && block_index_ensure_genesis_body(r, profile->chain, profile->genesis_wire,
-                                                          profile->genesis_wire_len, profile_dir) &&
-                      (r->nStatus & BLOCK_HAVE_DATA));
-            struct node_db ndb = {0};
-            if (sqlite3_open(":memory:", &ndb.db) == SQLITE_OK) {
-                ndb.open = true;
-                const char *schema = "CREATE TABLE block_index_cache (hash BLOB PRIMARY KEY,prev_hash BLOB,"
-                    "height INTEGER,n_bits INTEGER,n_time INTEGER,n_version INTEGER,n_status INTEGER,"
-                    "n_file INTEGER,n_data_pos INTEGER,n_undo_pos INTEGER,n_tx INTEGER,"
-                    "chain_work BLOB,n_cached_branch_id INTEGER,n_chain_tx INTEGER)";
-                bool schema_ok = sqlite3_exec(ndb.db, schema, NULL, NULL, NULL) == SQLITE_OK;
-                for (unsigned i = 2; i < 1000; i++) {
-                    struct uint256 h = {0}; h.data[0] = (uint8_t)i; h.data[1] = (uint8_t)(i >> 8);
-                    struct block_index *entry = chainstate_insert_block_index((struct chainstate *)&first, &h);
-                    if (!entry) { schema_ok = false; break; }
-                    entry->nHeight = (int)i; entry->nBits = pg->nBits;
-                    entry->nStatus = BLOCK_VALID_SCRIPTS; entry->nTx = 1;
-                }
-                if (schema_ok) save_block_index_recent(&ndb, &first);
-                struct main_state sql; main_state_init(&sql);
-                bool sql_ok = schema_ok && load_block_index_sqlite(&ndb, &sql).ok;
-                struct block_index *sg = block_map_find(&sql.map_block_index,
-                                                  &profile->chain->consensus.hashGenesisBlock);
-                struct block_index *sc = block_map_find(&sql.map_block_index, &child_hash);
-                BIL_CHECK("bil: research SQLite cache withholds genesis and distrusts mainnet ROM",
-                          sql_ok && sg && !(sg->nStatus & BLOCK_HAVE_DATA) && sc &&
-                          (sc->nStatus & BLOCK_REVALIDATE_PENDING));
-                main_state_free(&sql); sqlite3_close(ndb.db);
-            } else BIL_CHECK("bil: research SQLite opens", false);
-            main_state_free(&first); main_state_free(&restored);
-        } else BIL_CHECK("bil: profile restore directory", false);
-        chain_params_select(CHAIN_REGTEST);
-    } else BIL_CHECK("bil: research profile select", false);
+    failures += bil_research_bad(&cp, &g, wire, dir);
+    failures += bil_research_persist(&cp, &g, wire, dir);
+    failures += bil_research_boot(&cp, wire);
+    failures += bil_research_profile();
     block_index_hdrext_free(&g);
     return failures;
 }

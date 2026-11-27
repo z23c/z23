@@ -57,6 +57,7 @@
 #include "util/util.h"                  /* ParseParameters */
 #include "util/sd_notify.h"             /* -sandbox=steady NOTIFY_SOCKET check */
 #include "util/clientversion.h"         /* exact executable source admission */
+#include "base/safe_alloc.h"
 #include "platform/allocator_compat.h"
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
@@ -1166,7 +1167,7 @@ static bool main_research_prepare(int argc, char ***args,
         return false;
     }
 #endif
-    char **copy = calloc((size_t)argc + 1, sizeof(*copy));
+    char **copy = zcl_calloc((size_t)argc + 1, sizeof(*copy), "research_argv");
     if (!copy) return false;
     memcpy(copy, argv, ((size_t)argc + 1) * sizeof(*copy));
     copy[research->selector_index] = path;

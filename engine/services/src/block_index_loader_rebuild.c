@@ -385,6 +385,29 @@ static void projection_reseed_phash(struct main_state *ms)
     }
 }
 
+/* Seed the parent for height one before linking the projected rows. */
+static void projection_seed_genesis_index(struct main_state *ms, const struct chain_params *params)
+{
+    if (!params || block_map_find(&ms->map_block_index, &params->consensus.hashGenesisBlock))
+        return;
+    struct block_index *genesis = chainstate_insert_block_index(
+        (struct chainstate *)ms, &params->consensus.hashGenesisBlock);
+    if (genesis) genesis->nHeight = 0;
+}
+
+static bool projection_restore_genesis(struct main_state *ms, const struct chain_params *params)
+{
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (!research) return true;
+    if (!params || research->chain != params) return false;
+    char datadir[2048] = {0};
+    GetDataDir(true, datadir, sizeof datadir);
+    struct block_index *genesis = block_map_find(&ms->map_block_index,
+                                                 &params->consensus.hashGenesisBlock);
+    return datadir[0] && block_index_ensure_genesis_body(genesis, params, research->genesis_wire,
+                                                        research->genesis_wire_len, datadir);
+}
+
 struct zcl_result load_block_index_from_projection(struct main_state *ms,
                                       const struct chain_params *params,
                                       struct block_index_projection *bip,
@@ -424,19 +447,7 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
      * which already does this; this pass re-asserts it idempotently. */
     projection_reseed_phash(ms);
 
-    /* (2b) Ensure genesis exists in the map so block 1's pprev links; the
-     * projection holds blocks 1..tip only. Insert a BARE genesis node
-     * (height 0, no BLOCK_HAVE_DATA) that only carries the pprev link;
-     * boot.c's genesis-ensure block does the full canonical init because it
-     * runs only when BLOCK_HAVE_DATA is not set. No-op when genesis is
-     * already present. */
-    if (params && !block_map_find(&ms->map_block_index,
-                                  &params->consensus.hashGenesisBlock)) {
-        struct block_index *g = chainstate_insert_block_index(
-            (struct chainstate *)ms, &params->consensus.hashGenesisBlock);
-        if (g)
-            g->nHeight = 0;
-    }
+    projection_seed_genesis_index(ms, params);
 
     /* (3) Link pprev via the carried hashPrev. Re-iterate the projection
      * (one ORDER BY scan) — hashPrev is not retained on the in-memory
@@ -446,16 +457,8 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
         return ZCL_ERR(-4, "load_block_index_from_projection: pprev link "
                        "iterate failed");
 
-    const struct chain_research_descriptor *research = chain_research_profile_current();
-    if (research) {
-        char datadir[2048] = {0}; GetDataDir(true, datadir, sizeof datadir);
-        struct block_index *genesis = params ? block_map_find(&ms->map_block_index,
-                                            &params->consensus.hashGenesisBlock) : NULL;
-        if (research->chain != params || !datadir[0] ||
-            !block_index_ensure_genesis_body(genesis, params, research->genesis_wire,
-                                             research->genesis_wire_len, datadir))
-            return ZCL_ERR(-6, "projection research genesis persistence failed");
-    }
+    if (!projection_restore_genesis(ms, params))
+        return ZCL_ERR(-6, "projection research genesis persistence failed");
 
     /* (4) Forward pass: nChainWork, nChainTx, skip links, branch id,
      * failed-child propagation — identical to load_block_index post-load. */

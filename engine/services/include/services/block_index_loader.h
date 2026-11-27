@@ -42,6 +42,8 @@ struct block_index_projection;
 struct block_index;
 struct sqlite3;
 
+uint32_t block_index_genesis_bits(const struct chain_params *params);
+
 /* Initialize or validate the compiled genesis block index in memory. */
 bool block_index_initialize_genesis(struct block_index *genesis, const struct chain_params *params);
 

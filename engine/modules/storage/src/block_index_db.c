@@ -421,6 +421,15 @@ bool block_tree_db_read_block_index(struct block_tree_db *btdb,
     return ok;
 }
 
+static unsigned restored_block_status(const struct disk_block_index *row, const struct uint256 *hash)
+{
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (research && row->nHeight == 0 && hash &&
+        uint256_eq(hash, &research->chain->consensus.hashGenesisBlock))
+        return row->nStatus & ~BLOCK_HAVE_DATA;
+    return row->nStatus;
+}
+
 bool block_tree_db_load_block_index_guts(struct block_tree_db *btdb,
                                          insert_block_index_fn insert_fn,
                                          void *ctx)
@@ -512,12 +521,7 @@ bool block_tree_db_load_block_index_guts(struct block_tree_db *btdb,
                                           &dbi.nNonce))
             fprintf(stderr, "block_index_db: header extension alloc failed; merkle root and nonce left zero\n"); // obs-ok:block-index-db-deserialize
         (void)block_index_set_solution(pindex, NULL, 0);
-        unsigned status = dbi.nStatus;
-        const struct chain_research_descriptor *research = chain_research_profile_current();
-        if (research && dbi.nHeight == 0 && pindex->phashBlock &&
-            uint256_eq(pindex->phashBlock, &research->chain->consensus.hashGenesisBlock))
-            status &= ~BLOCK_HAVE_DATA;
-        pindex->nStatus = status;
+        pindex->nStatus = restored_block_status(&dbi, pindex->phashBlock);
         pindex->nCachedBranchId = dbi.nCachedBranchId;
         pindex->nTx = dbi.nTx;
         if (dbi.has_sprout_value) {
