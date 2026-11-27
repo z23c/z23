@@ -55,7 +55,7 @@ struct library {
     char recovered_root[APP_SELECTION_PATH_MAX];
     size_t count, index;
     size_t data_cap;
-    unsigned page, recovered_from;
+    unsigned page, recovered_from, discover_from;
     char setup[ZCL_PRESENT_COPY_TEXT_MAX + 1];
     char source_version[65];
     char shared_path[ZCL_PRESENT_COPY_TEXT_MAX + 1];
@@ -166,6 +166,7 @@ static void al_model(struct library *w)
         app_library_choice(m, "create", "Create from Sky Combat", "Make your own copy of the installed template.");
         app_library_choice(m, "home", "More options", "Discovery and hosting.");
         app_library_choice(m, "recover-copies", "Received copies", "Review copies received in this profile.");
+        app_library_choice(m, "discover", "Discover apps", "Browse offers or open an app link.");
         return;
     }
     const struct library_row *r = &w->rows[w->index];
@@ -1928,9 +1929,9 @@ static bool al_external(struct library *w, const struct app_launch_env *env, con
     if (strcmp(id, "draft")) w->draft_result = false;
     if (!strcmp(id, "create")) return al_create(w, env, datadir, presenter, context, reply);
     w->create_result = false;
-    if (!strcmp(id, "discover")) { w->page = 8; return true; }
+    if (!strcmp(id, "discover")) { w->discover_from = w->page; w->page = 8; return true; }
     if (!strcmp(id, "catalog") || !strcmp(id, "open-link")) return al_discover(w, env, datadir, presenter, context, reply, !strcmp(id, "open-link"));
-    if (!strcmp(id, "discover-back")) { w->page = 3; return true; }
+    if (!strcmp(id, "discover-back")) { w->page = w->discover_from; return true; }
     if (!strcmp(id, "hosting")) {
         w->draft_current = false;
         bool ok = app_host_browser_run(presenter, w->notice, context, reply);

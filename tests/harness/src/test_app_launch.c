@@ -3701,8 +3701,9 @@ struct al_nav_step { const char *page, *action; };
 static bool al_received_nav_model(const struct zcl_present_model_v1 *m, unsigned step, unsigned last, bool discover)
 {
     if (step == 0)
-        return m->action_count == 3 && !strcmp(m->actions[0].id, "create") &&
-            !strcmp(m->actions[1].id, "home") && !strcmp(m->actions[2].id, "recover-copies");
+        return m->action_count == 4 && !strcmp(m->actions[0].id, "create") &&
+            !strcmp(m->actions[1].id, "home") && !strcmp(m->actions[2].id, "recover-copies") &&
+            !strcmp(m->actions[3].id, "discover");
     if (step == last - 1)
         return strstr(m->summary, "No profile copies") && m->item_count == 1 &&
             strstr(m->items[0].value, discover ? "Discover apps" : "My Apps");
@@ -3747,6 +3748,15 @@ static int case_library_empty(void)
         ASSERT(s.valid && s.calls == 1 && s.home_calls == 1 && !s.errors && strstr(s.last_summary, "browse received copies"));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "canceled");
     PASS(); }
+    TEST("An empty library opens Discover directly and Back returns to the library") {
+        struct al_library_script s = {.action_ids = {"discover", "discover-back", "home"},
+                                      .count = 3, .valid = true};
+        zcl_command_reply_free(&reply); zcl_command_reply_init(&reply, "zcl.app_open.v1");
+        zcl_test_app_library_run(&f.env, &reply, al_library_present, &s);
+        ASSERT(s.valid && s.calls == 3 && s.home_calls == 1 && !s.errors);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED && !reply.error.mutated);
+        PASS();
+    }
     TEST("Received copies returns to its originating screen without changing the profile") {
         for (unsigned route = 0; route < 2; ++route) {
             struct al_received_nav nav = {.via_discover = route != 0, .valid = true};
