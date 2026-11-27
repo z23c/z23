@@ -47,6 +47,7 @@ struct cli_rpc_params {
     bool saw_format_json;
 };
 
+int cli_profile_config_check(const char *datadir);
 int cli_parse_target_args(int argc, char **argv, struct cli_target_args *t);
 void cli_apply_env_operator_lane(enum zcl_operator_lane *lane);
 void cli_apply_env_rpcport(bool *rpcport_set, int *port);

@@ -2430,21 +2430,6 @@ static int cli_run_static_agent_method(const char *method,
  * read together); cli_main is defined above that point in the file. */
 static int cli_validate_client_argv(int argc, char **argv);
 
-static int cli_profile_config_check(const char *datadir)
-{
-    char path[4600];
-    GetConfigFilePath(datadir, path, sizeof(path));
-    int single = ConfigFileHasKey(path, "-testnet-profile");
-    if (single < 0) {
-        fprintf(stderr, "error=CONFIG_READ_FAILED detail=cannot inspect selected config\n");
-        return ZCL_COMMAND_EXIT_INVALID;
-    }
-    if (single > 0) {
-        fprintf(stderr, "error=UNSUPPORTED_PROFILE detail=generic testnet profile cannot be used by this client\n");
-        return ZCL_COMMAND_EXIT_INVALID;
-    }
-    return -1;
-}
 /* Keep serialization's would-have-written length, so partial parameters
  * never reach the outer body composer or the loopback socket. */
 #endif /* Composer-only inclusion for isolated ownership tests. */
@@ -2554,6 +2539,18 @@ static int cli_rpc_failure_exit(enum cli_rpc_outcome rpc_outcome)
     }
 }
 
+static int cli_settle_target(struct cli_service_snapshot *service,
+                             struct cli_target_args *t)
+{
+    int rc = cli_resolve_rpcport_datadir(t);
+    if (rc >= 0) return rc;
+    cli_apply_service_datadir(service, t);
+    rc = cli_profile_config_check(t->datadir);
+    if (rc >= 0) return rc;
+    cli_apply_service_ports(service, t);
+    return -1;
+}
+
 /* -1 when resp is not a method-not-found reply, otherwise the exit code. */
 static int cli_method_not_found_exit(const char *resp, const char *method,
                                      const struct cli_target_args *t)
@@ -2661,14 +2658,9 @@ int cli_main(int argc, char **argv)
     int target_rc = cli_check_target(argv[0], &t);
     if (target_rc >= 0)
         return target_rc;
-    int discover_rc = cli_resolve_rpcport_datadir(&t);
+    int discover_rc = cli_settle_target(&service, &t);
     if (discover_rc >= 0)
         return discover_rc;
-
-    cli_apply_service_datadir(&service, &t);
-    int profile_rc = cli_profile_config_check(datadir);
-    if (profile_rc >= 0) return profile_rc;
-    cli_apply_service_ports(&service, &t);
 
     const char *method = cli_canonical_method(t.method);
 

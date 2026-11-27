@@ -8,6 +8,7 @@
 #include "main_cli_dispatch.h"
 #include "command/native_command.h"
 #include "config/args.h"
+#include "util/util.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include <stdio.h>
@@ -15,6 +16,22 @@
 #include <string.h>
 
 enum { CLI_FLAG_NOT_MINE = -2 };
+
+int cli_profile_config_check(const char *datadir)
+{
+    char path[4600];
+    GetConfigFilePath(datadir, path, sizeof(path));
+    int result = ConfigFileHasKey(path, "-testnet-profile");
+    if (result < 0) {
+        fprintf(stderr, "error=CONFIG_READ_FAILED detail=cannot inspect selected config\n");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    if (result > 0) {
+        fprintf(stderr, "error=UNSUPPORTED_PROFILE detail=generic testnet profile cannot be used by this client\n");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    return -1;
+}
 
 struct cli_port_slot {
     const char *prefix;
