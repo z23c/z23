@@ -9,6 +9,7 @@
 #include "jobs/reducer_frontier.h"
 #include "jobs/tip_finalize_stage.h"
 #include "services/miner_signal_round.h"
+#include "services/miner_signal_catalog.h"
 #include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "util/safe_alloc.h"
@@ -68,6 +69,81 @@ static bool ballot_parse(const struct json_value *params,
     s->activation = (int32_t)n[2]; s->slots = (uint16_t)n[3];
     s->slot = (uint16_t)n[4];
     return miner_signal_schedule_valid(s).ok;
+}
+
+/* Caller-supplied fork identity is distinct from the selected chain's genesis.
+ * The helper validates every entry, including ordering and activation grace. */
+static bool ballot_parse_catalog(const struct json_value *params,
+                                 const struct chain_params *cp,
+                                 struct miner_signal_schedule *out)
+{
+    if (!params || params->type != JSON_ARR || json_size(params) != 5 || !cp)
+        return false;
+    const struct json_value *fork = json_at(params, 0);
+    const struct json_value *start = json_at(params, 1);
+    const struct json_value *window = json_at(params, 2);
+    const struct json_value *rules = json_at(params, 3);
+    const struct json_value *slot = json_at(params, 4);
+    if (!fork || fork->type != JSON_STR || !start || start->type != JSON_INT ||
+        !window || window->type != JSON_INT || !rules || rules->type != JSON_ARR ||
+        !slot || slot->type != JSON_INT) return false;
+    int64_t st = json_get_int(start), win = json_get_int(window), selected = json_get_int(slot);
+    size_t count = json_size(rules);
+    if (st < 1 || st > INT32_MAX || win < 1 || win > BALLOT_MAX_WINDOW ||
+        count < 1 || count > 256 || selected < 0 || (uint64_t)selected >= count)
+        return false;
+    struct miner_signal_catalog_entry entries[256] = {0};
+    struct miner_signal_catalog catalog = {
+        .start = (int32_t)st, .window = (int32_t)win,
+        .count = count, .entries = entries,
+    };
+    if (!zcl_hex_decode(json_get_str(fork), catalog.network_id, sizeof(catalog.network_id)))
+        return false;
+    memcpy(catalog.genesis, cp->consensus.hashGenesisBlock.data, sizeof(catalog.genesis));
+    for (size_t i = 0; i < count; ++i) {
+        const struct json_value *entry = json_at(rules, i);
+        if (!entry || entry->type != JSON_ARR || json_size(entry) != 2) return false;
+        const struct json_value *revision = json_at(entry, 0);
+        const struct json_value *activation = json_at(entry, 1);
+        if (!revision || revision->type != JSON_STR || !activation ||
+            activation->type != JSON_INT ||
+            !zcl_hex_decode(json_get_str(revision), entries[i].rule_revision, 32)) return false;
+        int64_t height = json_get_int(activation);
+        if (height < 1 || height > INT32_MAX) return false;
+        entries[i].activation = (int32_t)height;
+    }
+    return miner_signal_catalog_select(&catalog, (size_t)selected, out).ok;
+}
+
+static bool ballot_test_network(const struct chain_params *cp)
+{
+    return cp && (!strcmp(cp->strNetworkID, "test") || !strcmp(cp->strNetworkID, "regtest"));
+}
+
+bool rpc_getballotcatalog(const struct json_value *params, bool help,
+                          struct json_value *result)
+{
+    RPC_HELP(help, result,
+        "getballotcatalog fork_id_hex start window [[rule_revision_hex,activation],...] slot\n"
+        "Derive a network-bound ballot catalog and selected schedule on testnet or regtest.");
+    const struct chain_params *cp = chain_params_get();
+    if (!ballot_test_network(cp))
+        return ballot_fail(result, "Ballot catalog is available only on testnet and regtest");
+    struct miner_signal_schedule s = {0};
+    if (!ballot_parse_catalog(params, cp, &s))
+        return ballot_fail(result, "Invalid catalog, schedule, fork identity, rules, or selected slot");
+    char digest[65];
+    zcl_hex_encode(s.catalog, sizeof(s.catalog), digest);
+    json_set_object(result);
+    if (json_push_kv_str(result, "network", cp->strNetworkID) &&
+        json_push_kv_str(result, "schedule_source", "supplied_catalog") &&
+        json_push_kv_str(result, "catalog", digest) &&
+        json_push_kv_int(result, "start", s.start) &&
+        json_push_kv_int(result, "window", s.window) &&
+        json_push_kv_int(result, "activation", s.activation) &&
+        json_push_kv_int(result, "slots", s.slots) &&
+        json_push_kv_int(result, "slot", s.slot)) return true;
+    return ballot_fail(result, "Out of memory building catalog result");
 }
 
 /* Genesis is fixed by the selected network. A finalized row zero can witness
@@ -236,13 +312,15 @@ static bool ballot_tally(const char *datadir, const struct miner_signal_schedule
 
 static bool ballot_reply(struct json_value *result, const struct miner_signal_schedule *s,
                          const struct ballot_snapshot *snap, const char *network,
-                         const char *catalog, const char *phase, int32_t votes)
+                         const char *source, const char *phase, int32_t votes)
 {
-    char hash_hex[65];
+    char hash_hex[65], catalog[65];
+    zcl_hex_encode(s->catalog, sizeof(s->catalog), catalog);
     uint256_get_hex(&snap->parent_hash, hash_hex);
     json_set_object(result);
     if (json_push_kv_str(result, "network", network) &&
         json_push_kv_str(result, "parent_basis", "durable_provable_tip") &&
+        json_push_kv_str(result, "schedule_source", source) &&
         json_push_kv_int(result, "parent_height", snap->parent_height) &&
         json_push_kv_str(result, "parent_hash", hash_hex) &&
         json_push_kv_int(result, "next_height", (int64_t)snap->parent_height + 1) &&
@@ -261,13 +339,14 @@ bool rpc_getballotstatus(const struct json_value *params, bool help,
                          struct json_value *result)
 {
     RPC_HELP(help, result,
-        "getballotstatus start window activation slots slot catalog_hex\n"
+        "getballotstatus fork_id_hex start window rules slot | start window activation slots slot catalog_hex\n"
         "Read testnet ballot history at the durable provable tip. Each counted block requires full validation evidence. Maximum window 256 blocks.");
-    struct miner_signal_schedule s = {0};
-    if (!ballot_parse(params, &s))
-        return ballot_fail(result, "Invalid integer schedule, slot, 32-byte catalog, or window exceeds 256");
     const struct chain_params *cp = chain_params_get();
-    if (!cp || (strcmp(cp->strNetworkID, "test") && strcmp(cp->strNetworkID, "regtest")))
+    struct miner_signal_schedule s = {0};
+    bool supplied = params && params->type == JSON_ARR && json_size(params) == 5;
+    if (!(supplied ? ballot_parse_catalog(params, cp, &s) : ballot_parse(params, &s)))
+        return ballot_fail(result, "Invalid integer schedule, slot, 32-byte catalog, or window exceeds 256");
+    if (!ballot_test_network(cp))
         return ballot_fail(result, "Ballot status is available only on testnet and regtest");
     struct blockchain_context *ctx = blockchain_ctx();
     if (!ctx->main_state || !ctx->datadir)
@@ -284,7 +363,7 @@ bool rpc_getballotstatus(const struct json_value *params, bool help,
     if (ok) ok = ballot_snapshot_current(ctx->main_state, &snap);
     if (ok) ok = ballot_authority_current(&snap);
     if (ok) ok = ballot_reply(result, &s, &snap, cp->strNetworkID,
-                              json_get_str(json_at(params, 5)), phase, tally.votes);
+                              supplied ? "supplied_catalog" : "raw_parameters", phase, tally.votes);
     else ballot_fail(result, "Validated ballot history unavailable or chain changed; retry");
     free(snap.blocks);
     return ok;

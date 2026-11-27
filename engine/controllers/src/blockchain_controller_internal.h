@@ -49,6 +49,8 @@ void block_header_to_json(const struct block_index *bi,
 /* ── RPC handler declarations (defined in sibling files) ── */
 
 /* blockchain_controller_blocks.c */
+bool rpc_getballotcatalog(const struct json_value *params, bool help,
+                          struct json_value *result);
 bool rpc_getballotstatus(const struct json_value *params, bool help,
                          struct json_value *result);
 bool rpc_getblockcount(const struct json_value *params, bool help,
