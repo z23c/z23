@@ -676,9 +676,6 @@ void board_push_hold(struct push_round *r, const struct push_queued *q,
     }
 }
 
-/* The addressed push's step for `q`: resolve, match (the peer in `*out`),
- * judge once a round per peer and board key, batch. A post the fan-out held
- * for one peer is counted fanned out when it rides. */
 static int push_addressed(struct push_round *r, const struct push_queued *q,
                           struct push_peer **out, uint8_t roster[32], bool *matched)
 {
@@ -706,8 +703,6 @@ static int push_addressed(struct push_round *r, const struct push_queued *q,
 
 static void push_offer(struct push_round *r, const struct push_queued *q)
 {
-    /* A post held for a peer whose push is still open waits again without
-     * a store read. */
     if (q->waiting && board_push_out_live(q->waiting_peer)) {
         board_push_hold(r, q, NULL);
         return;
@@ -724,7 +719,6 @@ static void push_offer(struct push_round *r, const struct push_queued *q)
         board_push_hold(r, q, p);
     else if (step != PUSH_OK && step != PUSH_UNASKED)
         board_push_skip((enum fleet_board_push_skip)step, 1);
-    /* The fan-out needs the post a pull would still serve, in r->row. */
     if (q->fanout && step != FLEET_BOARD_PUSH_SKIP_GONE &&
         step != FLEET_BOARD_PUSH_SKIP_EXPIRED)
         board_push_fanout(r, q, p, roster_matched ? roster : NULL);
