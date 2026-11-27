@@ -42,7 +42,7 @@ static const char fixture_catalog[] =
     "[\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",1,1,"
     "[[\"1111111111111111111111111111111111111111111111111111111111111111\",4],"
     "[\"2222222222222222222222222222222222222222222222222222222222222222\",5],"
-    "[\"3333333333333333333333333333333333333333333333333333333333333333\",6]],0]";
+    "[\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",6]],0]";
 
 static bool bf_sql(sqlite3 *db, const char *s)
 {
@@ -73,24 +73,38 @@ static bool bf_required_matches(const struct json_value *result, const char *pha
     return json_get_int(json_get(result, "required_votes")) == expected;
 }
 
+static bool bf_revision_matches(const struct json_value *result, const char *source)
+{
+    const struct json_value *revision = json_get(result, "rule_revision");
+    if (!strcmp(source, "raw_parameters")) return revision == NULL;
+    return revision && revision->type == JSON_STR && !strcmp(json_get_str(revision),
+        "1111111111111111111111111111111111111111111111111111111111111111");
+}
+
+static bool bf_status_matches(struct ballot_fixture *f, const struct json_value *result,
+                              const char *source, const char *phase, int votes)
+{
+    const char *actual = json_get_str(json_get(result, "phase_of_next_block"));
+    const char *basis = json_get_str(json_get(result, "schedule_source"));
+    const char *digest = json_get_str(json_get(result, "catalog"));
+    return actual && !strcmp(actual, phase) && basis && !strcmp(basis, source) &&
+        digest && !strcmp(digest, f->catalog_hex) &&
+        json_get_int(json_get(result, "votes")) == votes &&
+        bf_required_matches(result, phase) && bf_revision_matches(result, source);
+}
+
 static bool bf_status(struct ballot_fixture *f, const char *raw, const char *source,
                       const char *phase, int votes)
 {
     struct json_value params = {0}, result = {0};
     bool parsed = json_read(&params, raw, strlen(raw));
     bool ok = parsed && rpc_table_execute(&f->table, "getballotstatus", &params, &result);
-    const char *actual = json_get_str(json_get(&result, "phase_of_next_block"));
-    const char *basis = json_get_str(json_get(&result, "schedule_source"));
-    const char *digest = json_get_str(json_get(&result, "catalog"));
-    bool pass = parsed && (phase ? ok && actual && strcmp(actual, phase) == 0 &&
-                                       basis && !strcmp(basis, source) &&
-                                       digest && !strcmp(digest, f->catalog_hex) &&
-                                       json_get_int(json_get(&result, "votes")) == votes &&
-                                       bf_required_matches(&result, phase)
-                                 : !ok);
-    if (!pass)
+    bool pass = parsed && (phase ? ok && bf_status_matches(f, &result, source, phase, votes) : !ok);
+    if (!pass) {
+        const char *actual = json_get_str(json_get(&result, "phase_of_next_block"));
         fprintf(stderr, "ballot RPC expected %s, got %s (ok=%d)\n", phase ? phase : "refusal",
                 actual ? actual : "none", ok);
+    }
     json_free(&params);
     json_free(&result);
     return pass;
@@ -261,13 +275,37 @@ static bool bf_positive_cases(struct ballot_fixture *f)
            bf_call(f, "active", 1);
 }
 
+/* Both catalog forms must identify the selected sorted slot, in lowercase. */
+static bool bf_selected_revision(struct ballot_fixture *f, const char *raw)
+{
+    struct json_value params = {0}, result = {0};
+    bool ok = json_read(&params, raw, strlen(raw)) &&
+        rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    const struct json_value *v = json_get(&result, "rule_revision");
+    ok = ok && v && v->type == JSON_STR && !strcmp(json_get_str(v),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") &&
+        json_get_int(json_get(&result, "slot")) == 2;
+    json_free(&params); json_free(&result);
+    return ok;
+}
+
+static bool bf_selected_revisions(struct ballot_fixture *f)
+{
+    char supplied[sizeof fixture_catalog];
+    memcpy(supplied, fixture_catalog, sizeof supplied);
+    char *last = strrchr(supplied, ',');
+    if (!last || strcmp(last, ",0]")) return false;
+    last[1] = '2';
+    return bf_selected_revision(f, supplied) && bf_selected_revision(f, "[2]");
+}
+
 static bool bf_catalog_row_check(const struct json_value *rows, size_t i)
 {
     const struct json_value *row = json_at(rows, i);
     const char *phase = json_get_str(json_get(row, "phase_of_next_block"));
     const char *revision = json_get_str(json_get(row, "rule_revision"));
     char expected_revision[65];
-    memset(expected_revision, (int)('1' + i), 64);
+    memset(expected_revision, i == 2 ? 'a' : (int)('1' + i), 64);
     expected_revision[64] = '\0';
     return revision && !strcmp(revision, expected_revision) &&
         json_get_int(json_get(row, "slot")) == (int64_t)i &&
@@ -501,7 +539,7 @@ static int ballot_integration_child(void)
 {
     struct ballot_fixture f = {0};
     bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_membership_cases(&f) &&
-              bf_window_branch(&f) && bf_catalog_status(&f, true) &&
+              bf_window_branch(&f) && bf_selected_revisions(&f) && bf_catalog_status(&f, true) &&
               bf_catalog_limit(&f) && bf_foreign_pin(&f) && bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
