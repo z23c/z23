@@ -447,7 +447,7 @@ static int srt_legacy_select(struct srt_ctx *c, const char *restarts)
     if (rc)
         return rc;
     int st;
-    rc = srt_invoke_activate(c, NULL, "/dev/null", 0, &st);
+    rc = srt_invoke_activate(c, NULL, !strcmp(c->node_unit, "z23-devfleet-node.service") ? NULL : "/dev/null", 0, &st);
     if (rc)
         return rc;
     if (st != 0)
@@ -587,6 +587,84 @@ static int srt_phase_binding_order(void)
     return srt_phase_order(&b, &s);
 }
 
+#if defined(__linux__)
+static int srt_client_sentinel(const struct srt_ctx *c, const char *unit,
+                               char *file, char hash[SRT_SHA])
+{
+    char dir[SRT_PATH];
+    if (ovf(snprintf(dir, sizeof dir, "%s/.config/systemd/user/%s.d", c->home, unit), sizeof dir) ||
+        srt_mkdirp(dir) || ovf(snprintf(file, SRT_PATH, "%s/owner.conf", dir), SRT_PATH) ||
+        srt_write_file(file, "client sentinel\n") || srt_sha256_file(file, hash)) return 2;
+    return 0;
+}
+
+static int srt_devfleet_setup(struct srt_ctx *c, char restarts[SRT_PATH])
+{
+    char text[SRT_TEXT];
+    if (ovf(snprintf(c->node_unit, sizeof c->node_unit, "z23-devfleet-node.service"), sizeof c->node_unit) ||
+        ovf(snprintf(c->dropin_dir, sizeof c->dropin_dir, "%s/.config/systemd/user/%s.d", c->home, c->node_unit), sizeof c->dropin_dir) ||
+        ovf(snprintf(c->dropin, sizeof c->dropin, "%s/zzzzz-z23-ship-release.conf", c->dropin_dir), sizeof c->dropin) ||
+        srt_mkdirp(c->dropin_dir)) return 2;
+    if (ovf(snprintf(text, sizeof text,
+        "%s  z23\n%s  z23-package-verify\n%s  z23-package-verify-dev\n"
+        "%s  zclassic23-package-verify\n%s  zclassic23-package-verify-dev\n"
+        "%s  z23-ship-lane-guard\n", c->new_sha, c->new_sha, c->new_sha,
+        c->new_sha, c->new_sha, c->new_sha), sizeof text) ||
+        srt_write_file(c->manifest, text) || srt_sha256_file(c->manifest, c->manifest_sha) ||
+        ovf(snprintf(c->release, sizeof c->release, "%s/.local/lib/z23/releases/%s", c->home, c->manifest_sha), sizeof c->release) ||
+        ovf(snprintf(c->incoming, sizeof c->incoming, "%s.incoming.test-run", c->release), sizeof c->incoming) ||
+        ovf(snprintf(restarts, SRT_PATH, "%s/service.pid.restarts", c->tmp), SRT_PATH) ||
+        srt_write_file(restarts, "")) return 2;
+    return 0;
+}
+
+static int srt_devfleet_exercise(struct srt_ctx *c, const char *restarts)
+{
+    int rc = srt_reset(c);
+    int st = 0;
+    if (!rc) rc = srt_invoke_activate(c, "guard-sha", "/dev/null", 1, &st);
+    if (!rc && !st) { fprintf(stderr, "%s: changed selected executable accepted\n", k_srt_gate); rc = 1; }
+    if (!rc) rc = srt_assert_old_selected(c);
+    if (!rc) rc = srt_phase_faults(c, "devfleet survived %s fault");
+    if (rc) fprintf(stderr, "%s: devfleet fault fixture rc=%d\n", k_srt_gate, rc);
+    if (!rc) { rc = srt_legacy_select(c, restarts); if (rc) fprintf(stderr, "%s: devfleet activation fixture rc=%d\n", k_srt_gate, rc); }
+    if (!rc) { rc = srt_phase_rollback(c); if (rc) fprintf(stderr, "%s: devfleet rollback fixture rc=%d\n", k_srt_gate, rc); }
+    return rc;
+}
+
+static int srt_phase_devfleet(struct srt_ctx *c)
+{
+    char canonical[SRT_PATH], canonical_sha[SRT_SHA], after[SRT_SHA];
+    char restarts[SRT_PATH], receiver[SRT_PATH], worker[SRT_PATH];
+    char receiver_sha[SRT_SHA], worker_sha[SRT_SHA];
+    if (srt_client_sentinel(c, "z23-devfleet-receiver.service", receiver, receiver_sha) ||
+        srt_client_sentinel(c, "z23-devfleet-worker.service", worker, worker_sha) ||
+        ovf(snprintf(canonical, sizeof canonical, "%s", c->dropin), sizeof canonical) ||
+        srt_sha256_file(canonical, canonical_sha) || srt_devfleet_setup(c, restarts)) return 2;
+    int rc = srt_devfleet_exercise(c, restarts);
+    if (!rc && (srt_sha256_file(canonical, after) || strcmp(after, canonical_sha))) {
+        fprintf(stderr, "%s: canonical drop-in changed\n", k_srt_gate); rc = 1;
+    }
+    if (!rc && (srt_sha256_file(receiver, after) || strcmp(after, receiver_sha) ||
+                srt_sha256_file(worker, after) || strcmp(after, worker_sha))) {
+        fprintf(stderr, "%s: fleet client drop-in changed\n", k_srt_gate); rc = 1;
+    }
+    return rc;
+}
+#endif
+
+static int srt_final_phases(struct srt_ctx *c)
+{
+    int rc = srt_phase_binding_order();
+#if defined(__linux__)
+    if (!rc) rc = srt_phase_devfleet(c);
+#else
+    (void)c;
+#endif
+    return rc;
+}
+
+
 int srt_check_all(struct srt_ctx *c)
 {
     int rc = srt_phase_immutable(c);
@@ -617,6 +695,6 @@ int srt_check_all(struct srt_ctx *c)
     if (!rc)
         rc = srt_phase_binding(c);
     if (!rc)
-        rc = srt_phase_binding_order();
+        rc = srt_final_phases(c);
     return rc;
 }

@@ -262,17 +262,45 @@ int srt_fixture_state_pub(struct srt_ctx *c, const char *f1, const char *f2,
     return srt_write_file(c->state_file, text) == 0 ? 0 : 2;
 }
 
+static int srt_pid_start(long pid, char *out, size_t cap)
+{
+    char path[64], statbuf[8192], *p;
+    size_t len;
+    if (ovf(snprintf(path, sizeof path, "/proc/%ld/stat", pid), sizeof path) ||
+        srt_read_file(path, statbuf, sizeof statbuf, &len)) return 2;
+    p = strrchr(statbuf, 41);
+    if (!p || p[1] != 32) return 2;
+    p += 2;
+    for (unsigned field = 3; field < 22; field++) {
+        p = strchr(p, 32);
+        if (!p) return 2;
+        while (*p == 32) p++;
+    }
+    char *end = p;
+    while (*end >= 48 && *end <= 57) end++;
+    if (end == p || (size_t)(end - p) >= cap) return 2;
+    memcpy(out, p, (size_t)(end - p)); out[end - p] = 0;
+    return 0;
+}
+
 int srt_invoke_activate(struct srt_ctx *c, const char *fault,
                                const char *out, int merge, int *rc)
 {
     int r0 = srt_fixture_state_pub(c, fault ? fault : "", "", "");
     if (r0)
         return r0;
+    char pid_text[32] = "0", start[32] = "0";
+    if (!strcmp(c->node_unit, "z23-devfleet-node.service")) {
+        long pid;
+        if (srt_read_pid(c->pidfile, &pid) || srt_pid_start(pid, start, sizeof start) ||
+            ovf(snprintf(pid_text, sizeof pid_text, "%ld", pid), sizeof pid_text)) return 2;
+    }
+    char *guard_sha = fault && !strcmp(fault, "guard-sha") ? c->new_sha : c->old_sha;
     char *const av[24] = { (char *)"bash", c->activate, c->old, c->release,
         c->manifest_sha, c->new_sha, c->source_id, (char *)"candidate-commit",
         c->new_sha, c->new_sha, (char *)"test-run", (char *)"20", (char *)"6",
         (char *)"20", (char *)"6", (char *)"2", (char *)"2", (char *)"2 4 6",
-        (char *)"0", c->node_unit, NULL };
+        (char *)"0", c->node_unit, pid_text, start, guard_sha, NULL };
     return srt_run(av, c->home, c->mockbin, out, merge, rc) == 0 ? 0 : 2;
 }
 

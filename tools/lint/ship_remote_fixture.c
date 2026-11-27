@@ -124,7 +124,8 @@ static void load_fixture(const char *name, struct fixture *s)
     read_line(f, s->manifest, sizeof(s->manifest));
     if (fgetc(f) != EOF || fclose(f) != 0) fail("extra state fields");
     owned_root(s->root);
-    if (strcmp(s->unit, "z23-node.service") && strcmp(s->unit, "zclassic23.service")) {
+    if (strcmp(s->unit, "z23-node.service") && strcmp(s->unit, "zclassic23.service") &&
+        strcmp(s->unit, "z23-devfleet-node.service")) {
         errno = EINVAL; fail("fixture unit");
     }
     if (strlen(s->manifest) != 64 ||
@@ -292,6 +293,10 @@ static void stage(struct fixture *s)
         path(to, sizeof(to), s->incoming, files[i]);
         copy_file(s->newer, to, 0755);
     }
+    if (!strcmp(s->unit, "z23-devfleet-node.service")) {
+        path(to, sizeof(to), s->incoming, "z23-ship-lane-guard");
+        copy_file(s->newer, to, 0755);
+    }
     path(from, sizeof(from), s->root, "MANIFEST.sha256");
     path(to, sizeof(to), s->incoming, "MANIFEST.sha256");
     copy_file(from, to, 0644);
@@ -321,6 +326,11 @@ static void child_exec(struct fixture *s, const char *target, bool identity,
     if (identity && (setenv("ZCL_AGENT_EXPECT_SOURCE_ID", s->source, 1) ||
         setenv("ZCL_AGENT_EXPECT_BUILD_COMMIT", "candidate-commit", 1) ||
         setenv("ZCL_AGENT_EXPECT_BUILD_SOURCE", "ship", 1))) _exit(2);
+    if (!strcmp(s->unit, "z23-devfleet-node.service")) {
+        char datadir[PATH_MAX + 16];
+        if (snprintf(datadir, sizeof datadir, "-datadir=%s/.zclassic-c23-devfleet", s->home) >= (int)sizeof datadir) _exit(2);
+        execl(target, target, "-fixture-node", datadir, "-port=8053", "-rpcport=18260", "-operator-lane=dev", (char *)NULL);
+    }
     execl(target, target, "-fixture-node", (char *)NULL);
     _exit(2);
 }
@@ -511,6 +521,7 @@ static int systemctl(struct fixture *s, int argc, char **argv)
         if (!strcmp(argv[i], "z23-node") || !strcmp(argv[i], "z23-node.service"))
             unit = "z23-node.service";
         if (!strcmp(argv[i], "zclassic23.service")) unit = "zclassic23.service";
+        if (!strcmp(argv[i], "z23-devfleet-node.service")) unit = "z23-devfleet-node.service";
         if (!strcmp(argv[i], "LoadState") || !strcmp(argv[i], "ActiveState") ||
             !strcmp(argv[i], "ExecStart") || !strcmp(argv[i], "DropInPaths"))
             property = argv[i];
@@ -577,8 +588,12 @@ int main(int argc, char **argv)
 {
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR || signal(SIGCHLD, SIG_DFL) == SIG_ERR)
         fail("fixture signal policy");
+    const char *base = strrchr(argv[0], 47);
+    if (base && !strcmp(base + 1, "z23-ship-lane-guard")) return 0;
+    if (argc == 4 && !strncmp(argv[1], "-datadir=", 9) &&
+        !strcmp(argv[2], "-rpcport=18260") && !strcmp(argv[3], "status")) return 0;
     if (argc == 2 && !strcmp(argv[1], "status")) return 0;
-    if (argc == 2 && !strcmp(argv[1], "-fixture-node"))
+    if (argc >= 2 && !strcmp(argv[1], "-fixture-node"))
         node_control();
     return controller(argc, argv);
 }

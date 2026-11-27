@@ -126,3 +126,30 @@ metadata without changing the executable body. The runtime observations above
 remain scoped to their recorded source blobs. The enforced file-purpose
 gate passed in RATCHET mode with zero new violations. Full native candidate
 proof remains pending.
+
+## Isolated development service
+
+The isolated service is selected with `ZCL_SHIP_NODE_UNIT` and requires an
+explicit remote-only target. The owner-managed service must declare the `dev`
+operator lane and the isolated datadir, P2P port 8053 and RPC port 18260.
+The running process must also carry the existing exact rollback commit
+identity; ship compares persistent-schema code before activation. A missing
+identity refuses activation rather than inferring a commit from binary bytes.
+<!-- claim: symbol-present ship_lane_devfleet_allowed tools/dev/ship_lane_guard.c # isolated subject contract -->
+
+The selected process must own both advertised listeners. Competing subjects
+are checked before activation.
+The guard accepts the two exact fleet client roles and a manager-bound tunnel
+receiver when their identities and listener evidence match. It refuses an
+unresolved or overlapping node. Health and rollback probe the selected
+service's datadir and RPC port. Process and socket observations are repeated
+at the activation boundary; independent processes can still start after the
+last observation.
+<!-- claim: symbol-present ship_lane_listeners_disjoint tools/dev/ship_lane_guard.c # listener evidence -->
+
+The isolated transaction fixture checks the selected service's activation,
+rollback, wrong-binary refusal and preservation of the canonical and fleet
+client drop-ins. It uses a guard stub; the guard's process, client, socket and
+manager behavior are checked separately. These fixtures do not establish a
+live deployment or authorize replacing an unverified rollback identity.
+<!-- claim: symbol-present srt_phase_devfleet tools/lint/lintc/gate_ship_remote_transaction_phases.c # isolated transaction fixture -->

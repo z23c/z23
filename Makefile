@@ -1235,7 +1235,13 @@ DEVLOOP_INCLUDES = -Itools/dev
 # binary, or the test harness. They must leave the wildcard BEFORE the
 # DEV_ONLY_SRCS split, because DEV_ONLY_SRCS is still linked (into the dev
 # binary) — filtering there would only move the duplicate-`main` link error.
-DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
+DEV_STANDALONE_SRCS = tools/dev/ship_lane_guard.c \
+	tools/dev/ship_lane_guard_main.c \
+	tools/dev/ship_lane_guard_selftest.c \
+	tools/dev/ship_lane_guard_scan_selftest.c \
+	tools/dev/ship_lane_guard_socket_selftest.c \
+	tools/dev/ship_lane_guard_client_selftest.c \
+	tools/dev/hotswap_verify_so.c \
 	tools/dev/dev_loop_timer.c \
 	tools/dev/make_depfile_scope_selftest.c \
 	tools/dev/checkout_lock_main.c \
@@ -18967,3 +18973,23 @@ else
 z23-app-macos:
 	@echo 'z23-app-macos requires a native macOS SDK' >&2; exit 1
 endif
+
+# Exact-process guard for the isolated development fleet unit.
+.PHONY: z23-ship-lane-guard
+z23-ship-lane-guard: $(BIN_DIR)/z23-ship-lane-guard
+$(BIN_DIR)/z23-ship-lane-guard: tools/dev/ship_lane_guard.c tools/dev/ship_lane_guard_main.c tools/dev/ship_lane_guard.h
+	@mkdir -p $(BIN_DIR)
+	$(CC) -std=c2x -Wall -Wextra -Werror -pedantic -O2 -o $@.tmp tools/dev/ship_lane_guard.c tools/dev/ship_lane_guard_main.c
+	@mv $@.tmp $@
+
+.PHONY: check-ship-lane-guard
+check-ship-lane-guard: z23-ship-lane-guard
+	$(CC) -std=c2x -Wall -Wextra -Werror -pedantic -O2 -o $(BIN_DIR)/ship-lane-selftest tools/dev/ship_lane_guard.c tools/dev/ship_lane_guard_selftest.c
+	$(CC) -std=c2x -Wall -Wextra -Werror -pedantic -O2 -o $(BIN_DIR)/ship-lane-scan-selftest tools/dev/ship_lane_guard.c tools/dev/ship_lane_guard_scan_selftest.c
+	@$(BIN_DIR)/ship-lane-selftest
+	@$(BIN_DIR)/ship-lane-scan-selftest
+	$(CC) -std=c2x -Wall -Wextra -Werror -pedantic -O2 -o $(BIN_DIR)/ship-lane-socket-selftest tools/dev/ship_lane_guard.c tools/dev/ship_lane_guard_socket_selftest.c
+	@$(BIN_DIR)/ship-lane-socket-selftest
+	$(CC) -std=c2x -Wall -Wextra -Werror -pedantic -O2 -o $(BIN_DIR)/ship-lane-client-selftest tools/dev/ship_lane_guard_client_selftest.c
+	@$(BIN_DIR)/ship-lane-client-selftest
+check-ship-remote-transaction: check-ship-lane-guard

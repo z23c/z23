@@ -572,13 +572,7 @@ ship_observe() {
     return 0
 }
 
-# ship_observe_proc — the Linux reader. Same files, same parsers, same probe,
-# same line as before the split; it moved into its own function so the darwin
-# reader could sit beside it instead of inside it. kill -0 is deliberately NOT
-# added here: /proc/<pid>/stat already is the liveness evidence, and the two
-# primitives disagree in exactly one state — an EPERM from a reader in a
-# different session, which the user-manager observer cannot reach and which
-# this library has no business changing the answer for.
+# Linux process evidence comes from procfs.
 ship_observe_proc() {
     _ship_pid="$1"; _ship_want_sha="$2"; _ship_want_src="$3"
     _ship_want_commit="$4"; _ship_budget="$5"
@@ -609,12 +603,17 @@ ship_observe_proc() {
         [ -n "$_ship_ident" ] || _ship_ident=no
     fi
 
-    # A non-answer here is NEVER a fault on its own. Patience is expressed by
-    # asking again on the next poll with a bigger budget (ship_rpc_budget),
-    # not by one large timeout: a node replaying a cold index answers no RPC
-    # at all for as long as that takes, and it is working the whole time.
+    # A non-answer is not a fault; the next poll uses a bigger budget.
     _ship_rpc=no
-    if timeout "$_ship_budget" "/proc/$_ship_pid/exe" status >/dev/null 2>&1; then
+    if [ "$_ship_unit" = z23-devfleet-node.service ]; then
+        _ship_bound="$(tr '\000' '\n' < "/proc/$_ship_pid/cmdline" |
+            awk -v dir="-datadir=$HOME/.zclassic-c23-devfleet" '
+                /^-+datadir(=|$)/ {d++; if ($0 != dir) bad=1}
+                /^-+rpcport(=|$)/ {p++; if ($0 != "-rpcport=18260") bad=1}
+                END {if (d == 1 && p == 1 && !bad) print "yes"}')"
+        if [ "$_ship_bound" = yes ] && timeout "$_ship_budget" "/proc/$_ship_pid/exe" \
+            "-datadir=$HOME/.zclassic-c23-devfleet" -rpcport=18260 status >/dev/null 2>&1; then _ship_rpc=ok; fi
+    elif timeout "$_ship_budget" "/proc/$_ship_pid/exe" status >/dev/null 2>&1; then
         _ship_rpc=ok
     fi
 

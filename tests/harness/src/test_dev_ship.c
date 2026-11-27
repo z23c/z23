@@ -533,6 +533,9 @@ static void dsx_sh_env(const struct dsx *fx, const char *hosts,
                    proof ? proof : "");
     (void)snprintf(vars[n++], DSX_PATH, "ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=%s",
                    accept ? "1" : "0");
+    if (getenv("SHIP_TEST_NODE_UNIT"))
+        (void)snprintf(vars[n++], DSX_PATH, "ZCL_SHIP_NODE_UNIT=%s",
+                       getenv("SHIP_TEST_NODE_UNIT"));
     for (size_t i = 0; i < n; i++)
         envp[i] = vars[i];
     envp[n] = NULL;
@@ -544,8 +547,8 @@ static void dsx_ship_sh_run(struct dsx_sh *r, const struct dsx *fx,
                         const char *hosts, const char *proof, bool accept,
                         const char *arg1, const char *arg2, bool dry_run)
 {
-    char vars[12][DSX_PATH];
-    const char *envp[13];
+    char vars[13][DSX_PATH];
+    const char *envp[14];
     const char *argv[32];
     size_t n = 0;
     bool timed_out = false;
@@ -1112,6 +1115,15 @@ static int dsx_case_remote_schema_preflight(struct dsx_sh *sh)
     TEST("ship: missing remote identity refuses before the heavy gate") {
         dsx_write(path, "", 0600);
         dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, false, "--targets=remote", NULL, false);
+        ASSERT_EQ(sh->rc, 1);
+        ASSERT(strstr(sh->text, "has no exact rollback build commit") != NULL);
+        ASSERT(strstr(sh->text, "make lint failed") == NULL);
+        PASS();
+    }
+    TEST("ship: devfleet missing rollback identity refuses before the gate") {
+        (void)setenv("SHIP_TEST_NODE_UNIT", "z23-devfleet-node.service", 1);
+        dsx_ship_sh_run(sh, &fx, "shipfix-a", NULL, false, "--targets=remote", NULL, false);
+        (void)unsetenv("SHIP_TEST_NODE_UNIT");
         ASSERT_EQ(sh->rc, 1);
         ASSERT(strstr(sh->text, "has no exact rollback build commit") != NULL);
         ASSERT(strstr(sh->text, "make lint failed") == NULL);

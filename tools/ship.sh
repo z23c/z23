@@ -246,16 +246,13 @@ read -r -a SSH_OPTS <<< "$SHIP_SSH_OPTS"
 #   4  UNKNOWN — host unobservable (ssh down, /proc unreadable). A human
 #      decides. NOTHING was rolled back.
 #
-# The SAME file is sourced here and shipped over the wire ahead of the remote
-# scripts, because the target box has no checkout: one implementation reaches
-# the same verdict on both machines.
+# One observer implementation runs locally and remotely.
 SHIP_LIB_PATH="$REPO_ROOT/tools/scripts/ship_progress_lib.sh"
 # shellcheck source=tools/scripts/ship_progress_lib.sh
 . "$SHIP_LIB_PATH"  # ship_await, ship_verdict, ship_remote_sh, ship_observe
 SHIP_LIB_TEXT="$(cat "$SHIP_LIB_PATH")"
 
-# Resolved once so the local leg and both remote scripts are configured
-# identically. Raising one never changes what a verdict MEANS.
+# The local and remote observers share these verdict settings.
 SHIP_REMOTE_WINDOW="${ZCL_SHIP_REMOTE_HEALTH_SECONDS:-900}"
 SHIP_REMOTE_SILENCE="${ZCL_SHIP_REMOTE_SILENCE_SECONDS:-300}"
 SHIP_ROLLBACK_WINDOW="${ZCL_SHIP_ROLLBACK_HEALTH_SECONDS:-600}"
@@ -271,6 +268,7 @@ SHIP_RPC_BUDGETS="${ZCL_SHIP_RPC_BUDGETS:-5 20 60}"
 # resolves (same two-names precedent as z23 / zclassic23 in a release).
 WORKER_NAMES=(z23-package-verify z23-package-verify-dev
               zclassic23-package-verify zclassic23-package-verify-dev)
+[ "$REMOTE_NODE_UNIT" != z23-devfleet-node.service ] || WORKER_NAMES+=(z23-ship-lane-guard)
 TARGETS="local remote"
 TARGETS_EXPLICIT=0
 DRY_RUN=0
@@ -1423,32 +1421,10 @@ for arg in "$@"; do
     esac
 done
 
-# ── 0. The proof server is not a deploy target ──────────────────────────────
-# ZCL_SHIP_PROOF_SERVER may identify one immutable tagged candidate and record
-# evidence that the candidate stayed up. Restarting it destroys the very thing
-# it exists to measure: an uptime and zero-intervention record is only worth
-# something if nothing quietly resets it.
-#
-# Until 2026-07-29 a bare invocation could restart the host whose uninterrupted
-# uptime was the evidence being measured. The proof identity is now explicit;
-# ordinary remote nodes remain normal sequential rollout targets.
-#
-# Two different refusals on purpose, because the two mistakes are different:
-#   - Bare `ship.sh`: skip only the explicitly identified proof host while
-#     continuing through ordinary serving peers.
-#   - Explicit `--targets=...remote`: the operator DID name it. Silently
-#     dropping it there would be worse than failing — they would believe the
-#     proof server had been updated. Refuse outright, non-zero.
-#
-# Promotion is a deliberate act: ZCL_SHIP_ALLOW_PROOF_SERVER=1. A successful
-# promotion records itself twice in step 4 below, right after the running
-# daemon proves it took the candidate: a signed, hash-chained line in the
-# TRACKED ledger platform/deploy/promotion-receipts.jsonl (the authority — it replicates
-# to origin and cannot be rewritten undetected), plus a local
-# proof-server/<timestamp> tag as a convenience index.
-# `tools/scripts/promotion_receipt.sh verify` checks the chain offline;
-# `tools/scripts/proof_server_pin.sh check` dials the box to see whether it
-# still runs what was pinned.
+[ "$REMOTE_NODE_UNIT" != z23-devfleet-node.service ] || [[ " $TARGETS " != *" local "* ]] || die "isolated devfleet requires --targets=remote"
+
+# The explicit proof server remains excluded unless promotion is authorized.
+# Explicit targeting refuses rather than silently skipping that host.
 for target in $TARGETS; do
     case "$target" in local|remote) ;; *) die "unknown target '$target' (want: local, remote)" ;; esac
 done
@@ -1573,7 +1549,7 @@ done
 # The deploy leg repeats this check against the then-running process.
 if [ "$DRY_RUN" -eq 0 ] && [[ " $TARGETS " == *" remote "* ]]; then
     case "$REMOTE_NODE_UNIT" in
-        z23-node.service|zclassic23.service) ;;
+        z23-node.service|zclassic23.service|z23-devfleet-node.service) ;;
         *) die "unsupported ZCL_SHIP_NODE_UNIT" ;;
     esac
     for host in "${DEPLOY_HOSTS[@]}"; do ship_remote_schema_check "$host"; done
@@ -1654,8 +1630,8 @@ else
     rm -f build/bin/z23 build/bin/zclassic23 \
         build/bin/z23-package-verify build/bin/z23-package-verify-dev \
         build/bin/zclassic23-package-verify \
-        build/bin/zclassic23-package-verify-dev
-    ship_run_make zclassic23 z23-package-verify dev-package-verifier tor-stamp >/dev/null || \
+        build/bin/zclassic23-package-verify-dev build/bin/z23-ship-lane-guard
+    ship_run_make zclassic23 z23-package-verify dev-package-verifier tor-stamp ${WORKER_NAMES[4]:+z23-ship-lane-guard} >/dev/null || \
         die "production build failed"
     CANDIDATE="$(mktemp "$(ship_scratch_root)/zclassic23.ship.XXXXXX")"
     WORKER_FILES=(); WORKER_SHAS=()
@@ -1749,7 +1725,7 @@ else
     install -m 644 "$RELEASE_MANIFEST" "$STAGE_BUNDLE_DIR/MANIFEST.sha256"
     trap 'rm -f "$CANDIDATE" "$CANDIDATE.tor-stamp" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"; [ -z "${STAGE_BUNDLE_DIR:-}" ] || find "$STAGE_BUNDLE_DIR" -depth -delete' EXIT HUP INT TERM
 
-    CAND_MAX_GLIBC="$(objdump -T "$CANDIDATE" 2>/dev/null |
+    CAND_MAX_GLIBC="$(objdump -T "$CANDIDATE" "${WORKER_FILES[@]}" 2>/dev/null |
         grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -V | tail -1 || true)"
     case "$CAND_MAX_GLIBC" in GLIBC_[0-9]*.[0-9]*) ;; *) die "candidate has no parseable GLIBC requirement" ;; esac
     cand_glibc="${CAND_MAX_GLIBC#GLIBC_}"
@@ -1923,12 +1899,14 @@ node_unit="$1"
 case "$node_unit" in
     z23-node.service) other_unit=zclassic23.service ;;
     zclassic23.service) other_unit=z23-node.service ;;
+    z23-devfleet-node.service) other_unit= ;;
     *) echo "remote: unsupported node service" >&2; exit 2 ;;
 esac
 [ "$(systemctl --user show "$node_unit" -p LoadState --value)" = loaded ] &&
 [ "$(systemctl --user show "$node_unit" -p ActiveState --value)" = active ] || {
     echo "remote: selected node service is not loaded and active" >&2; exit 1;
 }
+if [ -n "$other_unit" ]; then
 other_load="$(systemctl --user show "$other_unit" -p LoadState --value)" || exit 1
 case "$other_load" in
     not-found) other_state=inactive ;;
@@ -1943,6 +1921,7 @@ case "$other_state" in
     inactive|failed) ;;
     *) echo "remote: other node service is active or unresolved" >&2; exit 1 ;;
 esac
+fi
 pid="$(systemctl --user show "$node_unit" -p MainPID --value)"
 case "$pid" in ''|*[!0-9]*|0) echo "remote: invalid selected node PID" >&2; exit 1 ;; esac
 if [ -e "/proc/$pid/exe" ]; then
@@ -1995,6 +1974,7 @@ if [ -e "$root" ]; then
     [ ! -L "$root" ] &&
     chmod 555 "$root" &&
     [ "$(sha256sum < "$root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+( cd "$root" && sha256sum -c MANIFEST.sha256 >/dev/null ) &&
     [ "$(sha256sum < "$root/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
     [ "$(sha256sum < "$root/z23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
     [ "$(sha256sum < "$root/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
@@ -2044,6 +2024,7 @@ trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
     echo "remote: immutable stage ownership changed" >&2; exit 1;
 }
 [ "$(sha256sum < "$incoming/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+( cd "$incoming" && sha256sum -c MANIFEST.sha256 >/dev/null ) &&
 [ "$(sha256sum < "$incoming/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
 [ "$(sha256sum < "$incoming/z23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
 [ "$(sha256sum < "$incoming/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
@@ -2054,6 +2035,7 @@ trap 'rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
 chmod 555 "$incoming/z23" "$incoming/z23-package-verify" \
     "$incoming/z23-package-verify-dev" "$incoming/zclassic23-package-verify" \
     "$incoming/zclassic23-package-verify-dev"
+[ ! -e "$incoming/z23-ship-lane-guard" ] || chmod 555 "$incoming/z23-ship-lane-guard"
 chmod 444 "$incoming/MANIFEST.sha256"
 # Rename while the directory is still writable — macOS refuses to move a
 # write-protected directory (Linux checks only the parents) — then publish
@@ -2148,6 +2130,7 @@ root="$1"; manifest_sha="$2"; daemon_sha="$3"; worker_v_sha="$4"; worker_d_sha="
 [ -e "$root" ] || { echo missing; exit 0; }
 [ -d "$root" ] || { echo "remote: immutable release root is not a directory: $root" >&2; exit 1; }
 [ "$(sha256sum < "$root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+( cd "$root" && sha256sum -c MANIFEST.sha256 >/dev/null ) &&
 [ "$(sha256sum < "$root/z23" | awk '{print $1}')" = "$daemon_sha" ] &&
 [ "$(sha256sum < "$root/z23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
 [ "$(sha256sum < "$root/zclassic23-package-verify" | awk '{print $1}')" = "$worker_v_sha" ] &&
@@ -2163,6 +2146,15 @@ REMOTE_RELEASE_CHECK
     [ "$release_state" = exact ] ||
         die "$host lost its verified staged release before activation; no bytes were installed"
     say "remote     immutable staged release remains exact"
+
+    local guard_pid=0 guard_start=0 guard_binding
+    if [ "$node_unit" = z23-devfleet-node.service ]; then
+        guard_binding="$(ssh "${SSH_OPTS[@]}" "$host" "$release_root/z23-ship-lane-guard" 0 0)" || die "$host isolated service binding refused"
+        read -r guard_pid guard_start <<< "$guard_binding"
+        case "$guard_pid:$guard_start" in *[!0-9:]*|0:*|*:0|:*) die "$host invalid isolated service binding" ;; esac
+        ship_remote_schema_check "$host"
+        one_way_schema="$SHIP_REMOTE_ONE_WAY"
+    fi
 
     # A rerun is an observation, not another deployment, when this exact
     # immutable release is already the live executable. This is essential on
@@ -2225,8 +2217,8 @@ crash_samples="${14}"; unknown_samples="${15}"; rpc_budgets="${16}"
 # binary cannot read the migrated database, so restoring it is the unsafe act
 # -- this run must fail loudly rather than "recover" into that state.
 one_way_schema="${17:-0}"
-node_unit="${18:-z23-node.service}"
-case "$node_unit" in z23-node.service|zclassic23.service) ;; *) exit 2 ;; esac
+node_unit="${18:-z23-node.service}"; guard_pid="${19:-0}"; guard_start="${20:-0}"; guard_sha="${21:-}"
+case "$node_unit" in z23-node.service|zclassic23.service|z23-devfleet-node.service) ;; *) exit 2 ;; esac
 # The two subjects this script judges, each wrapped to ship_await's
 # one-argument observer seam. Same observables, same classifier, same words as
 # the local side uses.
@@ -2315,6 +2307,7 @@ lock_held=1
 # installed release byte is ever overwritten, including during rollback.
 if [ -d "$node_incoming" ]; then
     [ "$(sha256sum < "$node_incoming/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+( cd "$node_incoming" && sha256sum -c MANIFEST.sha256 >/dev/null ) &&
     [ "$(sha256sum < "$node_incoming/z23" | awk '{print $1}')" = "$want_sha" ] &&
     [ "$(sha256sum < "$node_incoming/z23-package-verify" | awk '{print $1}')" = "$want_worker_v" ] &&
     [ "$(sha256sum < "$node_incoming/zclassic23-package-verify" | awk '{print $1}')" = "$want_worker_v" ] &&
@@ -2325,6 +2318,7 @@ if [ -d "$node_incoming" ]; then
     chmod 555 "$node_incoming/z23" "$node_incoming/z23-package-verify" \
         "$node_incoming/z23-package-verify-dev" "$node_incoming/zclassic23-package-verify" \
         "$node_incoming/zclassic23-package-verify-dev"
+    [ ! -e "$node_incoming/z23-ship-lane-guard" ] || chmod 555 "$node_incoming/z23-ship-lane-guard"
     chmod 444 "$node_incoming/MANIFEST.sha256"
     # Rename while writable, then publish the read-only mode (same macOS
     # directory-rename constraint as the primary publish above).
@@ -2336,6 +2330,7 @@ fi
 }
 chmod 555 "$release_root"
 [ "$(sha256sum < "$release_root/MANIFEST.sha256" | awk '{print $1}')" = "$manifest_sha" ] &&
+( cd "$release_root" && sha256sum -c MANIFEST.sha256 >/dev/null ) &&
 [ "$(sha256sum < "$release_root/z23" | awk '{print $1}')" = "$want_sha" ] &&
 [ "$(sha256sum < "$worker_v" | awk '{print $1}')" = "$want_worker_v" ] &&
 [ "$(sha256sum < "$worker_v_legacy" | awk '{print $1}')" = "$want_worker_v" ] &&
@@ -2346,6 +2341,8 @@ chmod 555 "$release_root"
 
 pid="$(systemctl --user show "$node_unit" -p MainPID --value)"
 case "$pid" in ""|*[!0-9]*|0) echo "remote: no running MainPID" >&2; exit 1 ;; esac
+[ "$node_unit" != z23-devfleet-node.service ] || "$release_root/z23-ship-lane-guard" "$guard_pid" "$guard_start" >/dev/null
+[ "$node_unit" != z23-devfleet-node.service ] || [ "$(ship_sha256_stream < "/proc/$guard_pid/exe")" = "$guard_sha" ]
 prior_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$pid")")"
 # Linux keeps exact argv boundaries (/proc cmdline is NUL-separated); hosts
 # without procfs fall back to ps args=, which space-joins — the fixture and
@@ -2417,6 +2414,10 @@ if ! guard_text="$(ship_exec_guard_check "$release_root/z23" "$guard_exec" \
     exit 1
 fi
 
+if [ "$node_unit" = z23-devfleet-node.service ] && { ! "$release_root/z23-ship-lane-guard" "$guard_pid" "$guard_start" >/dev/null || [ "$(ship_sha256_stream < "/proc/$guard_pid/exe")" != "$guard_sha" ]; }; then
+    rollback_armed=0; restore_dropin_file || echo "remote: CRITICAL — could not restore prior drop-in" >&2; exit 1
+fi
+
 # Queue the restart and immediately enter the progress-aware observer below.
 # Waiting synchronously defeats the slow-box verdict because Type=notify does
 # not return until the whole cold datadir startup has completed.
@@ -2466,7 +2467,7 @@ REMOTE_SCRIPT
         "$SHIP_REMOTE_WINDOW" "$SHIP_REMOTE_SILENCE" \
         "$SHIP_ROLLBACK_WINDOW" "$SHIP_ROLLBACK_SILENCE" \
         "$SHIP_CRASH_SAMPLES" "$SHIP_UNKNOWN_SAMPLES" "$SHIP_RPC_BUDGETS" \
-        "$one_way_schema" "$REMOTE_NODE_UNIT" \
+        "$one_way_schema" "$REMOTE_NODE_UNIT" "$guard_pid" "$guard_start" "$prev_sha" \
         || activate_rc=$?
 
     # The remote reached a verdict with the same classifier the local side is
@@ -2557,7 +2558,7 @@ prior_sha="$3"
 # target box has no checkout, so the code that reaches the verdict has to
 # travel with the question.
 node_unit="${9:-z23-node.service}"
-case "$node_unit" in z23-node.service|zclassic23.service) ;; *) exit 2 ;; esac
+case "$node_unit" in z23-node.service|zclassic23.service|z23-devfleet-node.service) ;; *) exit 2 ;; esac
 rollback_window="$4"; rollback_silence="$5"
 crash_samples="$6"; unknown_samples="$7"; rpc_budgets="$8"
 # Wrapped to ship_await's one-argument observer seam. prior_sha is assigned
@@ -2644,7 +2645,7 @@ ROLLBACK_SCRIPT
 set -eu
 run_id="$1"
 node_unit="$2"
-case "$node_unit" in z23-node.service|zclassic23.service) ;; *) exit 2 ;; esac
+case "$node_unit" in z23-node.service|zclassic23.service|z23-devfleet-node.service) ;; *) exit 2 ;; esac
 case "$run_id" in ''|*[!A-Za-z0-9.-]*) exit 2 ;; esac
 dropin="$HOME/.config/systemd/user/${node_unit}.d/zzzzz-z23-ship-release.conf"
 rm -f \
@@ -2673,7 +2674,7 @@ for target in $TARGETS; do
             ;;
         remote)
             case "$REMOTE_NODE_UNIT" in
-                z23-node.service|zclassic23.service) ;;
+                z23-node.service|zclassic23.service|z23-devfleet-node.service) ;;
                 *) die "unsupported ZCL_SHIP_NODE_UNIT" ;;
             esac
             if [ "$DRY_RUN" -eq 0 ]; then
