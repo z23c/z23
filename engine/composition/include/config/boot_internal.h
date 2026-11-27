@@ -132,6 +132,8 @@ bool reindex_chainstate(struct main_state *ms,
  * by the pre-integrity-gate path in app_init (a torn anchor would otherwise
  * FATAL boot before -reindex-chainstate can run). Idempotent. */
 bool boot_index_clear_coins_state(struct node_db *ndb);
+bool boot_index_research_reindex_valid(bool reindex, const struct block_index *tip, const struct chain_params *params);
+bool boot_index_research_startup_valid(const struct block_index *tip, const struct chain_params *params);
 
 /* True iff a from-genesis replay has its initial inputs in the body datadir.
  * The loaded active chain accepts only the compiled canonical genesis at h=0,

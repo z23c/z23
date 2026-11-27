@@ -41,6 +41,7 @@
 #include "primitives/block.h"
 #include "storage/boot_auto_reindex.h"
 #include "services/research_block_size.h"
+#include "util/util.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
@@ -59,6 +60,44 @@
 #include <malloc.h>
 #endif
 #include <sqlite3.h>
+static bool boot_index_research_chain_size_valid(const struct block_index *tip,
+                                           const struct chain_params *params)
+{
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (!research) return true;
+    if (!tip || params != research->chain || tip->nHeight < 0) return false;
+    char datadir[2048] = {0};
+    GetDataDir(true, datadir, sizeof datadir);
+    if (!datadir[0]) return false;
+    for (const struct block_index *bi = tip; bi; bi = bi->pprev) {
+        struct block block;
+        block_init(&block);
+        bool ok = read_block_from_disk_index(&block, bi, datadir) &&
+                  research_block_size_check(params, &block) == RESEARCH_BLOCK_SIZE_OK;
+        block_free(&block);
+        if (!ok) {
+            fprintf(stderr, "research block size or read failed at height %d\n", bi->nHeight);
+            return false;
+        }
+        if (!bi->nHeight)
+            return bi->phashBlock && uint256_eq(bi->phashBlock, &params->consensus.hashGenesisBlock);
+        if (!bi->pprev || bi->pprev->nHeight != bi->nHeight - 1) return false;
+    }
+    return false;
+}
+
+bool boot_index_research_reindex_valid(bool reindex, const struct block_index *tip,
+                                       const struct chain_params *params)
+{
+    return !reindex || boot_index_research_chain_size_valid(tip, params);
+}
+
+bool boot_index_research_startup_valid(const struct block_index *tip,
+                                       const struct chain_params *params)
+{
+    return !tip || boot_index_research_chain_size_valid(tip, params);
+}
+
 static bool boot_index_shielded_replay_step(sqlite3 *db,
                                            const struct block *blk,
                                            int height, int target_height)
