@@ -25,7 +25,9 @@ COMMON_SOURCES := tools/dev/profile_inspector/common.c engine/services/src/miner
  core/math/src/arith_uint256.c core/math/src/uint256.c core/modules/crypto/src/sha256.c \
  core/modules/crypto/src/blake2b.c core/modules/crypto/src/blake2b_avx2.c \
  core/modules/crypto/src/simd_dispatch.c core/modules/crypto/src/equihash.c
+CPPFLAGS_PROFILE := -D_POSIX_C_SOURCE=200809L
 ifeq ($(shell uname -s),Darwin)
+CPPFLAGS_PROFILE += -D_DARWIN_C_SOURCE
 LDFLAGS_PROFILE := -Wl,-dead_strip
 else
 LDFLAGS_PROFILE := -Wl,--gc-sections
@@ -53,8 +55,8 @@ $(OUT) $(CREATE_OUT):
 	@mkdir -p $(dir $@)
 	@set -eu; tmp=$$(mktemp -d "$(dir $@).profile-inspector.XXXXXX"); \
 	 trap 'rm -rf "$$tmp"' 0 HUP INT TERM; \
-	 $(CC) -std=c23 -D_POSIX_C_SOURCE=200809L $(INCLUDES) -MM -MP -MT $@ $(TOOL_SOURCES) > "$$tmp/deps"; \
-	 $(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	 $(CC) -std=c23 $(CPPFLAGS_PROFILE) $(INCLUDES) -MM -MP -MT $@ $(TOOL_SOURCES) > "$$tmp/deps"; \
+	 $(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(CPPFLAGS_PROFILE) \
 	  -ffunction-sections -fdata-sections $(INCLUDES) $(TOOL_SOURCES) $(LDFLAGS_PROFILE) -o "$$tmp/binary"; \
 	 mv "$$tmp/deps" $@.d; mv "$$tmp/binary" $@
 -include $(OUT).d $(CREATE_OUT).d
