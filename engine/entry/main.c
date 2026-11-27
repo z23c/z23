@@ -44,6 +44,7 @@
 #include "command/native_command.h"
 #include "command/cli_render.h"        /* bare-z23 first-steps line */
 #include "mcp/mcp_serve.h"              /* z23 mcp serve (local stdio MCP) */
+#include "net/netbase.h"
 #include "net/file_service.h"           /* -filesync fast path (fs_client_sync) */
 #include "controllers/agent_controller.h" /* rpc_agent_set_boot_context */
 #include "controllers/fleet_tip.h"
@@ -651,15 +652,22 @@ static void main_run_filesync_if_requested(int argc, char **argv,
 {
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "-filesync=", 10) == 0) {
-            const char *host = argv[i] + 10;
-            printf("=== SHA3 File Sync from %s:%d ===\n", host, FS_PORT);
+            const char *endpoint = argv[i] + 10;
+            char host[1024] = {0};
+            int port = FS_PORT;
+            if (strlen(endpoint) >= sizeof(host)) {
+                fprintf(stderr, "File sync endpoint is too long\n");
+                break;
+            }
+            split_host_port(endpoint, host, sizeof(host), &port);
+            printf("=== SHA3 File Sync from %s:%d ===\n", host, port);
             uint8_t utxo_root[32];
             memset(utxo_root, 0, 32);
             char blocks_dir[512];
             snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", ctx->datadir);
             platform_directory_create(blocks_dir, 0755);
             int64_t t0 = (int64_t)time(NULL);
-            bool ok = fs_client_sync(host, FS_PORT, ctx->datadir, utxo_root);
+            bool ok = fs_client_sync(host, (uint16_t)port, ctx->datadir, utxo_root);
             int64_t elapsed = (int64_t)time(NULL) - t0;
             if (elapsed < 1) elapsed = 1;
             if (ok) {
@@ -687,7 +695,7 @@ static void main_run_filesync_if_requested(int argc, char **argv,
                                   NULL, 0,
                                   "host=%s port=%d datadir=%s elapsed_s=%lld "
                                   "cause=see the [filesvc] lines above",
-                                  host, FS_PORT, ctx->datadir,
+                                  host, port, ctx->datadir,
                                   (long long)elapsed);
             }
             break;

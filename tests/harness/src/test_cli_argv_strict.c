@@ -38,7 +38,6 @@
 #include "test/test_core.h"
 #include "kernel/command_registry.h"
 #include "platform/socket_compat.h"
-#include "net/file_service.h"
 #include "config/cli_lane_defaults.h"
 #include "util/spawn.h"
 
@@ -1548,6 +1547,47 @@ static int cas_test_profile_config(void)
 
 
 #if !defined(_WIN32)
+static int cas_test_filesync_endpoint(void)
+{
+    int failures = 0;
+    TEST("filesync connects to the explicitly selected local port") {
+        char home[PATH_MAX], flag[PATH_MAX + 16], endpoint[64], out[16384];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_filesync_endpoint") != NULL);
+        ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
+        int listener = socket(AF_INET, SOCK_STREAM, 0);
+        ASSERT(listener >= 0);
+        struct sockaddr_in address = { .sin_family = AF_INET };
+        address.sin_addr.s_addr = htonl(0x7f000001u);
+        ASSERT(bind(listener, (const struct sockaddr *)&address, sizeof(address)) == 0);
+        socklen_t len = sizeof(address);
+        ASSERT(getsockname(listener, (struct sockaddr *)&address, &len) == 0);
+        ASSERT(listen(listener, 1) == 0);
+        ASSERT(snprintf(endpoint, sizeof(endpoint), "-filesync=127.0.0.1:%u",
+                        (unsigned)ntohs(address.sin_port)) > 0);
+        pid_t receiver = fork();
+        ASSERT(receiver >= 0);
+        if (receiver == 0) {
+            struct pollfd p = { .fd = listener, .events = POLLIN };
+            int ready = poll(&p, 1, 20000);
+            int client = ready > 0 ? accept(listener, NULL, NULL) : -1;
+            if (client >= 0) close(client);
+            close(listener);
+            _exit(client >= 0 ? 0 : 1);
+        }
+        char *argv[] = {(char *)CAS_BIN, flag, endpoint, (char *)"-nolegacyimport", NULL};
+        const char *needles[] = {"BOOT_FILESYNC_FAILED", NULL};
+        bool reported = cas_run_daemon_wait_for(argv, home, needles, 20000, out, sizeof(out));
+        int status = 0;
+        bool accepted = waitpid(receiver, &status, 0) == receiver && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        close(listener);
+        (void)test_rm_rf_recursive(home);
+        ASSERT(reported && accepted);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+
 static int cas_test_research_refusals(void)
 {
     int failures = 0;
@@ -1690,11 +1730,16 @@ static int cas_test_research_import_refusals(void)
         ASSERT(listener >= 0);
         struct sockaddr_in address = { .sin_family = AF_INET };
         address.sin_addr.s_addr = htonl(0x7f000002u);
-        address.sin_port = htons(FS_PORT);
+        address.sin_port = 0;
         ASSERT(bind(listener, (const struct sockaddr *)&address, sizeof(address)) == 0);
+        socklen_t address_len = sizeof(address);
+        ASSERT(getsockname(listener, (struct sockaddr *)&address, &address_len) == 0);
         ASSERT(listen(listener, 2) == 0);
+        char endpoint[64];
+        ASSERT(snprintf(endpoint, sizeof(endpoint), "-filesync=127.0.0.2:%u",
+                        (unsigned)ntohs(address.sin_port)) > 0);
         char *sync[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                        flag, (char *)"-filesync=127.0.0.2", NULL};
+                        flag, endpoint, NULL};
         int sync_rc = cas_run(sync, home, out, sizeof(out));
         bool sync_refused = sync_rc != 0 &&
             strstr(out, "-filesync requires chain state unavailable on the Ironwood testnet") &&
@@ -1807,6 +1852,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_unsupported_profile();
     failures += cas_test_profile_config();
 #if !defined(_WIN32)
+    failures += cas_test_filesync_endpoint();
     failures += cas_test_research_refusals();
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_marker_guards();
