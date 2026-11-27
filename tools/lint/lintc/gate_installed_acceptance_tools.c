@@ -38,10 +38,10 @@ static const char k_atl_harness[] = "tools/dev/zcode_dht_acceptance.sh";
 static const char k_atl_lifecycle[] = "tools/dev/node_lifecycle.sh";
 static const char k_atl_installer[] = "tools/dev/c23_commons_beta.c";
 
-static FILE *atl_out, *atl_err;
+static FILE *atl_out;
 static const char *atl_harness_ov, *atl_lifecycle_ov, *atl_installer_ov;
 
-static void atl_io_prod(void) { atl_out = stdout; atl_err = stderr; }
+static void atl_io_prod(void) { atl_out = stdout; }
 static void atl_clear_ov(void)
 {
     atl_harness_ov = NULL; atl_lifecycle_ov = NULL; atl_installer_ov = NULL;
@@ -483,7 +483,7 @@ static int atl_cap(int (*eval)(void), char *ob, size_t oc, char *eb, size_t ec,
         if (err) fclose(err);
         return die("z23-lint: tmpfile failed\n", "");
     }
-    atl_out = out; atl_err = err; *rc = eval();
+    atl_out = out; *rc = eval();
     int bad = csr_slurp(out, ob, oc) || csr_slurp(err, eb, ec);
     fclose(out); fclose(err); atl_io_prod();
     return bad ? 2 : 0;
