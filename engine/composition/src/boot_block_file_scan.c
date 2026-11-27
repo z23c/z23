@@ -15,6 +15,7 @@
  * Consensus-adjacent: touches the block-index load surface. Moved
  * byte-identically from boot_index.c — no logic change. */
 #include "platform/socket_compat.h"
+#include "services/research_block_size.h"
 #include "config/boot_internal.h"
 #include "boot_block_file_scan_internal.h"
 #include "platform/time_compat.h"
@@ -137,6 +138,28 @@ static bool scan_decode_block_meta(const struct boot_scan_file_result *r,
     meta->nDataPos = (unsigned int)(pos + 8);
     return true;
 }
+static enum research_block_size_verdict scan_research_body_size(
+    const uint8_t *data, size_t len)
+{
+    struct byte_stream body;
+    stream_init_from_data(&body, data, len);
+    struct block block;
+    block_init(&block);
+    bool parsed = block_deserialize(&block, &body) && !stream_remaining(&body);
+    enum research_block_size_verdict verdict = parsed
+        ? research_block_size_check(chain_params_get(), &block)
+        : RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    block_free(&block);
+    return verdict;
+}
+
+#ifdef ZCL_TESTING
+int boot_block_scan_test_research_size(const uint8_t *data, size_t len)
+{
+    return (int)scan_research_body_size(data, len);
+}
+#endif
+
 /* Walk the mapped block file front-to-back, appending one metadata record
  * per well-formed block. Returns false only when an append allocation
  * failed (an incomplete parse), matching the old `complete` flag. */
@@ -160,6 +183,16 @@ static bool scan_walk_file_blocks(struct boot_scan_file_result *r,
             pos + 8 + (long)blk_size > r->file_size) {
             pos += 8;
             continue;
+        }
+        if (chain_research_profile_current()) {
+            enum research_block_size_verdict verdict =
+                scan_research_body_size(data + pos + 8, blk_size);
+            if (verdict == RESEARCH_BLOCK_SIZE_UNAVAILABLE) return false;
+            if (verdict == RESEARCH_BLOCK_SIZE_EXCEEDED) {
+                pos += 8 + (long)blk_size;
+                r->skipped++;
+                continue;
+            }
         }
         struct boot_scan_block_meta meta;
         if (!scan_decode_block_meta(r, data, pos, blk_size, &meta)) {

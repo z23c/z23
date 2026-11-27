@@ -40,6 +40,7 @@
 #include "event/event.h"
 #include "primitives/block.h"
 #include "storage/boot_auto_reindex.h"
+#include "services/research_block_size.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "util/log_macros.h"
@@ -565,6 +566,14 @@ static bool boot_index_reindex_replay_height(struct main_state *ms,
         fprintf(stderr, "reindex-chainstate: failed to read block at "
                 "height %d — stopping to prevent UTXO corruption\n", h);
         return false; /* Can't skip blocks during UTXO replay */
+    }
+
+    enum research_block_size_verdict size = research_block_size_check(cparams, &blk);
+    if (size != RESEARCH_BLOCK_SIZE_OK) {
+        fprintf(stderr, "reindex-chainstate: research block size %s at height %d\n",
+                size == RESEARCH_BLOCK_SIZE_EXCEEDED ? "exceeded" : "unavailable", h);
+        block_free(&blk);
+        return false;
     }
 
     struct validation_state state;

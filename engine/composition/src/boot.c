@@ -124,6 +124,7 @@
 #include "storage/block_index_db.h"
 #include "storage/block_index_projection.h"
 #include "storage/disk_block_io.h"
+#include "services/research_block_size.h"
 #include "services/block_index_loader.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
@@ -1679,6 +1680,8 @@ static void boot_coins_consume_reindex_request(struct app_context *ctx)
                 "unreadable (cold-import window) — NOT clearing coins state "
                 "before the verb check; preserving the seed to fold "
                 "forward\n");
+        else if (chain_research_profile_current())
+            fprintf(stderr, "[boot] research reindex defers coins clear until body validation\n");
         else if (boot_index_clear_coins_state(&g_node_db))
             fprintf(stderr,
                 "[boot] -reindex-chainstate: cleared coins state before the "
@@ -2696,6 +2699,32 @@ static void boot_step_scan_block_files(struct app_context *ctx,
                                  g_datadir, params);
 }
 
+static bool boot_research_chain_size_valid(const struct block_index *tip,
+                                           const struct chain_params *params)
+{
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (!research) return true;
+    if (!tip || params != research->chain || tip->nHeight < 0) return false;
+    char datadir[2048] = {0};
+    GetDataDir(true, datadir, sizeof datadir);
+    if (!datadir[0]) return false;
+    for (const struct block_index *bi = tip; bi; bi = bi->pprev) {
+        struct block block;
+        block_init(&block);
+        bool ok = read_block_from_disk_index(&block, bi, datadir) &&
+                  research_block_size_check(params, &block) == RESEARCH_BLOCK_SIZE_OK;
+        block_free(&block);
+        if (!ok) {
+            fprintf(stderr, "research block size or read failed at height %d\n", bi->nHeight);
+            return false;
+        }
+        if (!bi->nHeight)
+            return bi->phashBlock && uint256_eq(bi->phashBlock, &params->consensus.hashGenesisBlock);
+        if (!bi->pprev || bi->pprev->nHeight != bi->nHeight - 1) return false;
+    }
+    return false;
+}
+
 /* Legacy UTXO import, the single-pass index scan, tip resolution,
  * genesis, the near-tip repairs and the on-disk block-file scan. */
 static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
@@ -2736,6 +2765,8 @@ static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
                                         scan.max_have_data_h,
                                         scan.have_data_count);
     }
+    if (ctx->reindex_chainstate &&
+        !boot_research_chain_size_valid(scan.reindex_best, s->params)) return false;
     boot_step_resolve_chain_tip(ctx, s, s->params, s->index_repaired,
                                 fast_restart, &scan);
     struct shielded_replay_session remaining;
@@ -2763,6 +2794,9 @@ static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
     boot_step_scan_block_files(ctx, s->params, &scan, stale_cleared,
                                fast_restart);
     (void)boot_submark("blkidx.scan_block_files", t_part);
+    if (active_chain_tip(&g_state.chain_active) &&
+        !boot_research_chain_size_valid(active_chain_tip(&g_state.chain_active), s->params))
+        return false;
     (void)boot_submark("blkidx.validate_recover", t_reconcile_sub);
     boot_topmark("block_index_reconcile", t_reconcile_blockindex);
     return true;

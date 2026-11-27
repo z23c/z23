@@ -14,6 +14,7 @@
 #include "core/serialize.h"
 #include "controllers/wallet_scan.h"
 #include "services/wallet_scan_service.h"
+#include "services/research_block_size.h"
 #include "services/legacy_import_service.h"
 #include "models/database.h"
 #include "models/wallet_tx.h"
@@ -1224,12 +1225,53 @@ static int test_contiguous_data_height(void)
     return 1;
 }
 
+int boot_block_scan_test_research_size(const uint8_t *data, size_t len);
+
+static int test_research_scan_size(void)
+{
+    int failures = 0;
+    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return 1;
+    struct block b;
+    block_init(&b);
+    b.header.nVersion = 4;
+    b.num_vtx = 253;
+    b.vtx = calloc(b.num_vtx, sizeof(*b.vtx));
+    if (!b.vtx) { chain_params_select(CHAIN_MAIN); return 1; }
+    for (size_t i = 0; i < b.num_vtx; i++) transaction_init(&b.vtx[i]);
+    if (!transaction_alloc(&b.vtx[0], 0, 25)) { block_free(&b); chain_params_select(CHAIN_MAIN); return 1; }
+    for (size_t i = 0; i < 24; i++) {
+        memset(b.vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
+        b.vtx[0].vout[i].script_pub_key.size = 8000;
+    }
+    struct byte_stream s;
+    stream_init(&s, 0);
+    bool ok = block_serialize(&b, &s);
+    size_t base = s.size;
+    stream_free(&s);
+    if (!ok || base >= 199999 || 200001 - base >= 10000) failures++;
+    else for (size_t size = 200000; size <= 200001; size++) {
+        struct script *script = &b.vtx[0].vout[24].script_pub_key;
+        script->size = size - base - 2;
+        memset(script->data, 0x51, script->size);
+        stream_init(&s, 0);
+        ok = block_serialize(&b, &s) && s.size == size;
+        int result = ok ? boot_block_scan_test_research_size(s.data, s.size) : -1;
+        if (result != (size == 200000 ? RESEARCH_BLOCK_SIZE_OK : RESEARCH_BLOCK_SIZE_EXCEEDED)) failures++;
+        stream_free(&s);
+    }
+    block_free(&b);
+    chain_params_select(CHAIN_MAIN);
+    printf("research scan size boundaries: %s\n", failures ? "FAIL" : "OK");
+    return failures;
+}
+
 int test_block_scan(void)
 {
     int failures = 0;
 
     printf("\n=== Block Scan & Chain Propagation Tests ===\n");
 
+    failures += test_research_scan_size();
     failures += test_scan_block_descriptor_cloexec();
     { extern int legacy_import_key_retirement_cases(void);
       failures += legacy_import_key_retirement_cases(); }
