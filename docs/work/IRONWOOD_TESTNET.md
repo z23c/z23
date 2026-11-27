@@ -33,7 +33,7 @@ a5675987b7634bba54c037fe261cbddfc2010100000001000000000000000000
 
 The proposed message-start bytes are `d4 14 83 fa`, in that order. Take the first four raw bytes of SHA3-256 of ASCII `Z23/Ironwood/testnet/transport/v1`, excluding the terminator. An example ping frame is `d41483fa70696e670000000000000000080000002502fa940102030405060708`. Its eight payload bytes have the four-byte double-SHA-256 checksum `2502fa94`.
 
-A node profile needs an explicit startup selector, a separate base datadir and wallet address namespace, and discovery settings for this network. Boot opens wallet and chain stores under the base datadir. Access to the compiled mainnet checkpoint requires positive mainnet selection. Before public use, two fresh full nodes should sync from the candidate genesis, agree on block hashes, survive restart and reject foreign network frames through normal startup.
+A node profile needs an explicit startup selector, a separate base datadir and wallet address namespace, and discovery settings for this network. Boot opens wallet and chain stores under the base datadir. The profile must gate each use of compiled mainnet checkpoints and ROM artifacts on positive mainnet identification. Before public use, two fresh full nodes should sync from the candidate genesis, agree on block hashes, survive restart and reject foreign network frames through normal startup.
 
 <!-- claim: symbol-present boot_step_select_chain_and_datadir engine/composition/src/boot.c # compiled startup network selection -->
 <!-- claim: symbol-present get_sha3_utxo_checkpoint core/chainparams/src/checkpoints.c # compiled checkpoint provider -->
