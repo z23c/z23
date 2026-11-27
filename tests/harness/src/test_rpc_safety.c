@@ -1698,6 +1698,35 @@ static void rs_rawtx_block_txids(struct rs_rawtx_fx *fx)
     json_free(&verbose_arg);
 }
 
+static void rs_rawtx_height_cases(struct rs_rawtx_fx *fx)
+{
+    static const struct { const char *arg; bool ok; const char *error; } cases[] = {
+        {"0", true, NULL}, {"000", true, NULL},
+        {"1", false, "Block height out of range"}, {"", false, "Invalid block height parameter"},
+        {"-1", false, "Invalid block height parameter"}, {"+1", false, "Invalid block height parameter"},
+        {" 0", false, "Invalid block height parameter"}, {"0x0", false, "Invalid block height parameter"},
+        {"2147483648", false, "Invalid block height parameter"},
+    };
+    reducer_frontier_provable_tip_set(0);
+    for (size_t i = 0; fx->ok && i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct json_value params, arg, result;
+        json_init(&params); json_set_array(&params);
+        json_init(&arg); json_set_str(&arg, cases[i].arg);
+        json_init(&result); (void)json_push_back(&params, &arg);
+        bool called = rpc_table_execute(&fx->tbl, "getblock", &params, &result);
+        fx->ok = called == cases[i].ok;
+        if (cases[i].ok) {
+            const char *hash = json_get_str(json_get(&result, "hash"));
+            fx->ok = fx->ok && hash && strcmp(hash, fx->block_hex) == 0;
+        } else {
+            const char *error = json_get_str(&result);
+            fx->ok = fx->ok && error && strcmp(error, cases[i].error) == 0;
+        }
+        json_free(&result); json_free(&arg); json_free(&params);
+    }
+    reducer_frontier_provable_tip_reset();
+}
+
 static void rs_rawtx_verbose_cases(struct rs_rawtx_fx *fx)
 {
     struct json_value params, result, txid_arg, verbose_arg;
@@ -1865,6 +1894,7 @@ static int rs_case_rawtx_locator(void)
     rs_rawtx_owned_wallet(&fx);
     rs_rawtx_no_indexes(&fx);
     rs_rawtx_block_txids(&fx);
+    rs_rawtx_height_cases(&fx);
     rs_rawtx_verbose_cases(&fx);
     rs_rawtx_header_cases(&fx);
     rs_rawtx_cleanup(&fx);
@@ -2045,6 +2075,18 @@ static void rs_tip_not_found(struct rs_tip_fx *fx)
     json_free(&params);
 }
 
+static void rs_tip_height_lookup(struct rs_tip_fx *fx)
+{
+    struct json_value params = {0}, result = {0};
+    init_single_str_param(&params, "1");
+    json_init(&result);
+    fx->ok = fx->ok && !rpc_table_execute(&fx->tbl, "getblock", &params, &result) &&
+        result.type == JSON_STR &&
+        strcmp(json_get_str(&result), "Block body unavailable") == 0;
+    json_free(&result);
+    json_free(&params);
+}
+
 static void rs_tip_sync(struct rs_tip_fx *fx)
 {
     struct json_value params = {0};
@@ -2111,6 +2153,7 @@ static int rs_case_getbestblockhash(void)
     rs_tip_slim_flat_prepare(&fx);
     rs_tip_slim_flat_check(&fx);
     rs_tip_not_found(&fx);
+    rs_tip_height_lookup(&fx);
     rs_tip_sync(&fx);
     rs_tip_getblock_missing(&fx);
     reducer_frontier_provable_tip_reset();

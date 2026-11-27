@@ -29,6 +29,7 @@
 #include "util/safe_alloc.h"
 #include "validation/main_state.h"
 
+#include <limits.h>
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -474,12 +475,25 @@ static void rpc_getblock_push_nextblockhash(struct blockchain_context *ctx,
     }
 }
 
+static bool rpc_getblock_height(const char *s, int *height)
+{
+    if (!*s) return false;
+    int n = 0;
+    for (; *s; s++) {
+        if (*s < 0x30 || *s > 0x39 || n > (INT_MAX - (*s - 0x30)) / 10)
+            return false;
+        n = n * 10 + (*s - 0x30);
+    }
+    *height = n;
+    return true;
+}
+
 bool rpc_getblock(const struct json_value *params, bool help,
                           struct json_value *result)
 {
     struct blockchain_context *ctx = blockchain_ctx();
     RPC_HELP(help, result,
-             "getblock \"hash\" ( verbose )\nReturns block data.");
+             "getblock \"hash_or_height\" ( verbose )\nReturns block data.");
 
     struct rpc_params p;
     rpc_params_init(&p, params);
@@ -494,10 +508,23 @@ bool rpc_getblock(const struct json_value *params, bool help,
         json_set_str(result, "Not initialized");
         LOG_FAIL("blockchain", "getblock: main_state not initialized");
     }
-    struct uint256 hash;
-    uint256_set_hex(&hash, hash_str);
-
-    struct block_index *bi = block_map_find(&ctx->main_state->map_block_index, &hash);
+    struct block_index *bi;
+    if (strlen(hash_str) < 64) {
+        int height;
+        if (!rpc_getblock_height(hash_str, &height)) {
+            json_set_str(result, "Invalid block height parameter");
+            LOG_FAIL("blockchain", "getblock: invalid block height %s", hash_str);
+        }
+        bi = active_chain_at(&ctx->main_state->chain_active, height);
+        if (!bi) {
+            json_set_str(result, "Block height out of range");
+            LOG_FAIL("blockchain", "getblock: height %d out of range", height);
+        }
+    } else {
+        struct uint256 hash;
+        uint256_set_hex(&hash, hash_str);
+        bi = block_map_find(&ctx->main_state->map_block_index, &hash);
+    }
     if (!bi) {
         json_set_str(result, "Block not found");
         LOG_FAIL("blockchain", "getblock: block %s not found", hash_str);
