@@ -151,10 +151,11 @@ static int mining_template_time_cases(void)
 }
 
 int test_miner_signal_round(void);
+int test_rpc_ballotstatus(void);
 
 int test_mining(void)
 {
-    int failures = test_miner_signal_round();
+    int failures = test_miner_signal_round() + test_rpc_ballotstatus();
 
     printf("mining: register_mining_rpc_commands accepts table... ");
     {

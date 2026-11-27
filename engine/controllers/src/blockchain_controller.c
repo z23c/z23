@@ -424,6 +424,7 @@ void rpc_blockchain_maybe_commit(int32_t height,
 void register_blockchain_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {
+        { "blockchain", "getballotstatus",  rpc_getballotstatus,  true },
         { "blockchain", "getblockcount",     rpc_getblockcount,     true },
         { "blockchain", "getbestblockhash",  rpc_getbestblockhash,  true },
         { "blockchain", "getchaintip",       rpc_getchaintip,       true },

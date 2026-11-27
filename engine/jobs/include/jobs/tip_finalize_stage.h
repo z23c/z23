@@ -39,6 +39,11 @@ void tip_finalize_stage_set_authoritative_tip(int height,
  * the active tip from the durable cursor without re-running the stage.
  * `db` must be the progress store handle (progress_store_db()). */
 struct sqlite3;
+struct uint256;
+/* Under the progress-store transaction lock, return 1 for hash-bound full
+ * validation evidence, 0 for missing or mismatched evidence, -1 for error. */
+int tip_finalize_full_evidence_at(struct sqlite3 *db, int height,
+                                  const struct uint256 *block_hash);
 bool tip_finalize_stage_finalized_tip_at(struct sqlite3 *db, int height,
                                          uint8_t out_hash[32]);
 

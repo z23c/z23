@@ -5,14 +5,11 @@
 
 #include "core/uint256.h"
 #include "jobs/mint_skip_crypto.h"
+#include "jobs/tip_finalize_stage.h"
 #include "util/stage.h"
 
 struct sqlite3;
 
-/* 1 = exact verified script+proof receipts for this block, 0 = mismatch or
- * absence, -1 = store error. Checkpoint-fold evidence is never finalizable. */
-int tip_finalize_full_evidence_at(struct sqlite3 *db, int height,
-                                  const struct uint256 *block_hash);
 int tip_finalize_script_evidence_at(struct sqlite3 *db, int height,
                                     const struct uint256 *block_hash);
 int tip_finalize_trusted_anchor_at(struct sqlite3 *db, int height,
