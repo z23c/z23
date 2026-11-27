@@ -1371,6 +1371,8 @@ static void run_full_suite_foundation(int *failures)
     { extern int test_format_helpers_codec(void);
       *failures += test_format_helpers_codec(); }
     *failures += test_mining();
+    { extern int test_migration_activation(void);
+      *failures += test_migration_activation(); }
     *failures += test_regtest_generate();
     *failures += test_utxo_commitment();
     *failures += test_mmr();
