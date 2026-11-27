@@ -12936,12 +12936,23 @@ endif
 # Clang 23 alone also diagnoses a global that is only ever assigned
 # (-Wunused-but-set-global; GCC has no such diagnostic). The two counters
 # below live in byte-sealed files, so they stay in their translation units
-# until the owner's unseal ritual (core/UNSEAL.md) removes them; this flag
-# keeps those two sealed objects from failing -Werror under Clang alone. The
-# diagnostic stays on for every other translation unit.
+# until the owner's unseal ritual (core/UNSEAL.md) removes them. Every tree
+# that compiles them under -Werror takes the same relief for these two
+# objects alone: the node, the development binary, build-only, and the test
+# trees in their strict profiles (the proof builds test-fast with
+# ZCL_TEST_WERROR=1; the sanitizer trees drop -Werror and need nothing).
+# The diagnostic stays on for every other translation unit.
 ifeq ($(ZCL_CC_IS_CLANG),1)
 $(NODE_C23_OBJ_DIR)/core/modules/net/src/msgprocessor.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-but-set-global
 $(NODE_C23_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(OBJ_DIR)/core/modules/net/src/msgprocessor.o: BUILD_ONLY_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: BUILD_ONLY_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(DEV_OBJ_DIR)/core/modules/net/src/msgprocessor.o: DEV_COMPILE_CFLAGS += -Wno-unused-but-set-global
+$(DEV_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: DEV_COMPILE_CFLAGS += -Wno-unused-but-set-global
+$(TEST_FAST_OBJ_DIR)/core/modules/net/src/msgprocessor.o: TEST_FAST_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(TEST_FAST_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: TEST_FAST_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(TEST_REL_OBJ_DIR)/core/modules/net/src/msgprocessor.o: TEST_REL_OBJECT_CFLAGS += -Wno-unused-but-set-global
+$(TEST_REL_OBJ_DIR)/core/modules/validation/src/process_block_flush_policy.o: TEST_REL_OBJECT_CFLAGS += -Wno-unused-but-set-global
 endif
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
