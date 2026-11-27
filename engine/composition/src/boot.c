@@ -2115,8 +2115,6 @@ static bool boot_step_gate_block_index_integrity(struct app_context *ctx, bool r
 /* Load, repair and integrity-gate the block index. */
 static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *s)
 {
-    /* Block index load: flat file first (mmap, <2s), then SQLite, then LevelDB.
-     * Jeff Dean rule: use the fastest data structure available. */
     int64_t t_phase = boot_clock_ms();
     if (!flysync_island_boot_loader_allowed(ctx->boot_from_log)) {
         LOG_ERROR("boot", "projection tip publication is unavailable during island recovery");
@@ -2135,9 +2133,7 @@ static bool boot_seq_load_block_index(struct app_context *ctx, struct boot_seq *
         return false;
     if (!boot_step_gate_block_index_integrity(ctx, s->replay_pending))
         return false;
-    /* BLOCK_INDEX_LOADED boundary: the block index is loaded, repaired, and
-     * the sidecar integrity gate accepted the map. The tip is not yet
-     * resolved (UTXO import + chain-tip restore run below). */
+    /* The verified index is ready. UTXO import and tip restoration follow. */
     struct zcl_result br = sysinit_run_stage(BOOT_STAGE_BLOCK_INDEX_LOADED, ctx);
     return br.ok;
 }
