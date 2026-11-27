@@ -954,7 +954,12 @@ selftest() {
     tmp="$(mktemp -d /tmp/zcl-build-release-selftest.XXXXXX)" || die "mktemp failed"
     trap 'rm -rf "$tmp"' EXIT
     printf 'int main(void) { return 0; }\n' >"$tmp/native-fixture.c"
-    "${CC:-cc}" -o "$tmp/native-fixture" "$tmp/native-fixture.c" \
+    local host_compiler="${HOST_CC:-${CC:-cc}}"
+    local -a host_argv=("$host_compiler")
+    if ! command -v -- "$host_compiler" >/dev/null 2>&1; then
+        read -r -a host_argv <<<"$host_compiler"
+    fi
+    "${host_argv[@]}" -o "$tmp/native-fixture" "$tmp/native-fixture.c" \
         || die "selftest: could not compile native object-format fixture"
     host_fixture="$tmp/native-fixture"
     host_platform="$(platform_of_binary "$host_fixture")" \
