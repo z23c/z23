@@ -37,7 +37,9 @@ static struct log_throttle g_gate_suppress = LOG_THROTTLE_INIT;
  * throttle-passed emissions, not every suppressed tick). Serial condition-
  * engine tick thread only, same as the throttle above. Test-visible via the
  * src-private hook at the bottom of this file. */
+#ifdef ZCL_TESTING
 static int g_gate_suppress_warn_total;
+#endif
 
 /* Shared de-storm gate for the remedy-path refusal/repaired WARNs below: each
  * one persists identically across retries on a wedged node, so each gets its
@@ -188,7 +190,9 @@ static void note_gate_suppressed(
     if (!log_throttle_should_emit(&g_gate_suppress, GATE_SUPPRESS_ACTIVE_KEY,
                                   now, 300, &reps))
         return;
+#ifdef ZCL_TESTING
     g_gate_suppress_warn_total++;
+#endif
     LOG_WARN("condition",
              "[condition:reducer_frontier_reconcile_light] peer gate "
              "suppressed an actionable detect (repaired=%d "
