@@ -332,7 +332,7 @@ static bool mb_protected_image_grant(struct mb_state *st,const uint8_t root[32],
  * reachable and denies another admission until this process exits; no charge,
  * descriptor or callback context is freed by pretending destruction worked. */
 static _Atomic bool mb_public_owner_busy;
-static struct mb_state *mb_public_owner_retained;
+[[maybe_unused]] static struct mb_state *mb_public_owner_retained;
 
 /* Each revision fixes its image independently of unsigned CAS observations. */
 struct mb_owner_profile {

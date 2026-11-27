@@ -1702,7 +1702,9 @@ struct shape_image {
 
 static pthread_mutex_t g_shape_image_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct shape_image g_shape_images[SHAPE_IMAGE_KINDS];
+#ifdef ZCL_TESTING
 static unsigned long g_shape_image_parses;
+#endif
 
 static uint64_t shape_fold(uint64_t h, const void *bytes, size_t len)
 {
@@ -1830,7 +1832,9 @@ static enum shape_read shape_image_load(struct shape_image *im, unsigned kind,
     if (snprintf(im->path, sizeof(im->path), "%s", path) >=
         (int)sizeof(im->path))
         return SHAPE_READ_UNREADABLE;
+#ifdef ZCL_TESTING
     g_shape_image_parses++;
+#endif
     enum shape_read got = shape_image_parse(im, kind);
     im->id = *st;
     im->valid = got == SHAPE_READ_OK;

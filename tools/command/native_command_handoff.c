@@ -173,8 +173,6 @@ static void nc_handoff_run(const struct zcl_command_spec *spec)
 
 #include "command/native_command_handoff.h"
 
-static int g_handoff_argc;
-static char *const *g_handoff_argv;
 #ifdef ZCL_TESTING
 static const char *g_handoff_dir;
 #endif
@@ -188,8 +186,13 @@ static void nc_handoff_run(const struct zcl_command_spec *spec)
 
 void zcl_native_handoff_arm(int argc, char *const *argv)
 {
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(ZCL_DEV_BUILD)
     g_handoff_argc = argc;
     g_handoff_argv = argv;
+#else
+    (void)argc;
+    (void)argv;
+#endif
 }
 
 #ifdef ZCL_TESTING
