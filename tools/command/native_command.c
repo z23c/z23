@@ -27,6 +27,7 @@
 #include "command/refold_rate_verdict.h"
 #include "base/hex.h"
 
+#include "config/cli_lane_defaults.h"
 #include "config/command_catalog.h"
 #include "framework/app_definition.h"
 #include "kernel/command_registry.h"
@@ -383,6 +384,49 @@ static void bridge_ensure_rpc_client(void)
 void zcl_native_bridge_ensure_rpc(void)
 {
     bridge_ensure_rpc_client();
+}
+
+/* See native_command.h. Nothing is bound until the whole predicate has
+ * been read, so a target that is kept leaves the client as it was. */
+bool zcl_native_rpc_target_enter(struct zcl_native_rpc_target *t,
+                                 enum zcl_native_rpc_purpose purpose)
+{
+    char lane[512], release[512];
+    const char *home = getenv("HOME");
+    const char *bound = zcl_native_command_datadir();
+    int port = zcl_native_command_rpc_port();
+
+    t->rebound = false;
+    t->saved_port = port;
+    (void)snprintf(t->saved, sizeof(t->saved), "%s", bound);
+    if (!home || !home[0] || zcl_native_command_datadir_is_explicit())
+        return false;
+    /* A port other than the lane default was named: a target of its own. */
+    if (port != 0 && port != ZCL_CLI_DEFAULT_RPC_PORT)
+        return false;
+    if (bound[0]) {
+        if (!zcl_cli_lane_default_datadir(lane, sizeof(lane), home) ||
+            strcmp(bound, lane) != 0)
+            return false;
+    } else if (purpose != ZCL_NATIVE_RPC_PROBE) {
+        /* Nothing bound names no node, and a handler that carries rows to
+         * or from the board does not guess one. */
+        return false;
+    }
+    if (!zcl_cli_release_default_datadir(release, sizeof(release), home))
+        return false;
+    /* Initialize first so chain params are selected; a bind alone marks the
+     * bridge ready and would skip that. */
+    zcl_native_bridge_ensure_rpc();
+    zcl_native_bridge_bind_rpc(release, ZCL_CLI_RELEASE_RPC_PORT);
+    t->rebound = true;
+    return true;
+}
+
+void zcl_native_rpc_target_leave(const struct zcl_native_rpc_target *t)
+{
+    if (t->rebound)
+        zcl_native_bridge_bind_rpc(t->saved, t->saved_port);
 }
 
 void zcl_native_bridge_command(const struct zcl_command_request *request,

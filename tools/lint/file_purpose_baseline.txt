@@ -242,7 +242,6 @@ core/modules/validation/include/validation/sync_evidence_policy.h
 core/modules/validation/src/checkpoint.c
 core/modules/validation/src/mirror_consensus.c
 core/modules/validation/src/sync_evidence_policy.c
-tools/command/native_command.h
 tools/dev/dev_activation.h
 tools/dev/dev_activation_internal.h
 tools/dev/devloop_cli.c

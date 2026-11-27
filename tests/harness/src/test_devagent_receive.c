@@ -23,7 +23,9 @@
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 #include "command/native_fleet.h"
+#include "config/cli_lane_defaults.h"
 #include "config/command_catalog.h"
+#include "controllers/rpc_client.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_watcher.h"
@@ -185,6 +187,107 @@ static const char *rtx_reply_str(const struct rtx_call *c, const char *key)
     const struct json_value *v = json_get(&c->reply.data, key);
     return (v && v->type == JSON_STR && json_get_str(v)) ? json_get_str(v)
                                                          : "";
+}
+
+/* ── which node a board call is aimed at ─────────────────────────────────
+ * The RPC test hook answers nothing, so no node is sought: it counts the
+ * board calls, and those aimed anywhere but the target a case named. The
+ * target is read from the RPC client itself, which is what a call uses. */
+
+static char g_rtx_want_datadir[512];
+static int g_rtx_want_port;
+static size_t g_rtx_seen_calls, g_rtx_seen_off_target;
+
+static char *rtx_board_target_hook(const char *method, const char *params)
+{
+    (void)params;
+    if (strcmp(method, "fleet_board") == 0) {
+        g_rtx_seen_calls++;
+        if (strcmp(node_rpc_client_datadir(), g_rtx_want_datadir) != 0 ||
+            node_rpc_client_port() != g_rtx_want_port)
+            g_rtx_seen_off_target++;
+    }
+    return NULL;
+}
+
+/* What one status call showed about the node it reached for. */
+struct rtx_seen {
+    bool ok;
+    char board_state[40];
+    char board_detail[64];
+    bool has_port;
+    long long port;
+    char after_datadir[512];
+    int after_port;
+    size_t calls, off_target;
+};
+
+/* Stand the process on `datadir`:`port`, ask the leaf for one status and
+ * give the harness its binding and its hook back before returning,
+ * whatever the leaf did: a failed ASSERT in the case must not leave a
+ * binding behind for the cases after it. Every board call the leaf makes
+ * reaches the hook, which expects `want_datadir`:`want_port`. `s` holds
+ * what the call showed, down to the client's binding as the leaf left
+ * it. */
+static void rtx_status_from(const char *datadir, int port,
+                            const char *want_datadir, int want_port,
+                            struct rtx_seen *s)
+{
+    struct rtx_call c;
+    const struct json_value *v;
+    char saved[512];
+    int saved_port = zcl_native_command_rpc_port();
+    (void)snprintf(saved, sizeof(saved), "%s", zcl_native_command_datadir());
+    (void)snprintf(g_rtx_want_datadir, sizeof(g_rtx_want_datadir), "%s",
+                   want_datadir);
+    g_rtx_want_port = want_port;
+    g_rtx_seen_calls = 0;
+    g_rtx_seen_off_target = 0;
+    /* As a process boot leaves it: the client initialized on the binding
+     * and the chain params selected. */
+    zcl_native_bridge_ensure_rpc();
+    zcl_native_bridge_bind_rpc(datadir, port);
+    node_rpc_client_set_test_hook(rtx_board_target_hook);
+    rtx_begin(&c, "dev.agent.receive", "zcl.agent_receive.v1");
+    (void)json_push_kv_str(&c.input, "action", "status");
+    (void)json_push_kv_str(&c.input, "receiver", "box-a");
+    zcl_native_handle_dev_agent_receive(&c.request, &c.reply);
+    memset(s, 0, sizeof(*s));
+    s->ok = rtx_ok(&c);
+    (void)snprintf(s->board_state, sizeof(s->board_state), "%s",
+                   rtx_reply_str(&c, "board_state"));
+    (void)snprintf(s->board_detail, sizeof(s->board_detail), "%s",
+                   rtx_reply_str(&c, "board_detail"));
+    v = json_get(&c.reply.data, "board_rpc_port");
+    s->has_port = v && v->type == JSON_INT;
+    s->port = s->has_port ? json_get_int(v) : -1;
+    (void)snprintf(s->after_datadir, sizeof(s->after_datadir), "%s",
+                   node_rpc_client_datadir());
+    s->after_port = node_rpc_client_port();
+    rtx_end(&c);
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_bridge_bind_rpc(saved, saved_port);
+    s->calls = g_rtx_seen_calls;
+    s->off_target = g_rtx_seen_off_target;
+}
+
+/* rtx_status_from under a HOME of the case's own, the caller's HOME given
+ * back before returning: the lane and release defaults resolve under that
+ * HOME, so no path under the real one is reachable. */
+static void rtx_status_under_home(const char *home, const char *datadir,
+                                  int port, const char *want_datadir,
+                                  int want_port, struct rtx_seen *s)
+{
+    char saved[512];
+    const char *old = getenv("HOME");
+    if (old)
+        (void)snprintf(saved, sizeof(saved), "%s", old);
+    (void)setenv("HOME", home, 1);
+    rtx_status_from(datadir, port, want_datadir, want_port, s);
+    if (old)
+        (void)setenv("HOME", saved, 1);
+    else
+        (void)unsetenv("HOME");
 }
 
 /* ── rig helpers ───────────────────────────────────────────────────────── */
@@ -2841,6 +2944,135 @@ _test_next:;
     rtx_restore();
     return failures;
 }
+
+/* ── which node the leaf reaches ────────────────────────────────────────
+ * A flagless `z23-dev dev agent receive` stands on the dev lane's own
+ * datadir and port, where no node runs, while the board is carried by the
+ * release node. The harness is not a dev-lane build, so here the two
+ * defaults are one path and the port tells them apart: the lane default
+ * bound with no port comes out of the leaf on the release port. */
+
+/* Any port but the two lanes' defaults, which are one number here. */
+#define RTX_NAMED_PORT 18999
+
+/* A HOME of the case's own, under the fixture rtx_isolate made. */
+static bool rtx_fixture_home(char *home, size_t cap)
+{
+    (void)snprintf(home, cap, "%s/home", g_rtx_base);
+    return mkdir(home, 0700) == 0;
+}
+
+static int test_receive_target_lane_default(void)
+{
+    int failures = 0;
+    TEST("receive: a process standing on the lane default aims its board "
+         "call at the release node, and has its own binding back after")
+    {
+        char home[1200], lane[512], release[512];
+        struct rtx_seen s;
+        rtx_isolate("target-lane-default");
+        ASSERT(rtx_fixture_home(home, sizeof(home)));
+        ASSERT(zcl_cli_lane_default_datadir(lane, sizeof(lane), home));
+        ASSERT(zcl_cli_release_default_datadir(release, sizeof(release),
+                                               home));
+        ASSERT(!zcl_native_command_datadir_is_explicit());
+        /* No port named: the shape a harness binds. */
+        rtx_status_under_home(home, lane, 0, release,
+                              ZCL_CLI_RELEASE_RPC_PORT, &s);
+        ASSERT(s.ok);
+        ASSERT(s.calls >= 1);
+        ASSERT_EQ((long long)s.off_target, 0);
+        /* The hook answers nothing, so the node is down; the leaf names
+         * the port it tried. */
+        ASSERT_STR_EQ(s.board_state, "unavailable");
+        ASSERT_STR_EQ(s.board_detail, "node_rpc_client_call");
+        ASSERT(s.has_port);
+        ASSERT_EQ(s.port, (long long)ZCL_CLI_RELEASE_RPC_PORT);
+        ASSERT_STR_EQ(s.after_datadir, lane);
+        ASSERT_EQ(s.after_port, 0);
+        /* On the lane default port as well: a flagless dev process. */
+        rtx_status_under_home(home, lane, ZCL_CLI_DEFAULT_RPC_PORT, release,
+                              ZCL_CLI_RELEASE_RPC_PORT, &s);
+        ASSERT(s.ok);
+        ASSERT(s.calls >= 1);
+        ASSERT_EQ((long long)s.off_target, 0);
+        ASSERT(s.has_port);
+        ASSERT_EQ(s.port, (long long)ZCL_CLI_RELEASE_RPC_PORT);
+        ASSERT_STR_EQ(s.after_datadir, lane);
+        ASSERT_EQ(s.after_port, ZCL_CLI_DEFAULT_RPC_PORT);
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
+static int test_receive_target_unbound(void)
+{
+    int failures = 0;
+    TEST("receive: a process with nothing bound names no node: the leaf "
+         "leaves it alone rather than guess the release node")
+    {
+        char home[1200];
+        struct rtx_seen s;
+        rtx_isolate("target-unbound");
+        ASSERT(rtx_fixture_home(home, sizeof(home)));
+        rtx_status_under_home(home, "", 0, "", 0, &s);
+        ASSERT(s.ok);
+        ASSERT(s.calls >= 1);
+        ASSERT_EQ((long long)s.off_target, 0);
+        ASSERT_STR_EQ(s.board_state, "unavailable");
+        ASSERT_STR_EQ(s.board_detail, "node_rpc_client_call");
+        ASSERT(s.has_port);
+        ASSERT_EQ(s.port, 0);
+        ASSERT_STR_EQ(s.after_datadir, "");
+        ASSERT_EQ(s.after_port, 0);
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
+
+static int test_receive_target_named(void)
+{
+    int failures = 0;
+    TEST("receive: a datadir or a port the operator named is kept")
+    {
+        char home[1200], lane[512], elsewhere[1200];
+        struct rtx_seen s;
+        rtx_isolate("target-named");
+        ASSERT(rtx_fixture_home(home, sizeof(home)));
+        ASSERT(zcl_cli_lane_default_datadir(lane, sizeof(lane), home));
+        /* A datadir that is no lane default, on the lane default port. */
+        (void)snprintf(elsewhere, sizeof(elsewhere), "%s/elsewhere", home);
+        rtx_status_under_home(home, elsewhere, ZCL_CLI_DEFAULT_RPC_PORT,
+                              elsewhere, ZCL_CLI_DEFAULT_RPC_PORT, &s);
+        ASSERT(s.ok);
+        ASSERT(s.calls >= 1);
+        ASSERT_EQ((long long)s.off_target, 0);
+        ASSERT_STR_EQ(s.board_state, "unavailable");
+        ASSERT(s.has_port);
+        ASSERT_EQ(s.port, (long long)ZCL_CLI_DEFAULT_RPC_PORT);
+        /* The lane default datadir on a port the operator named. */
+        rtx_status_under_home(home, lane, RTX_NAMED_PORT, lane,
+                              RTX_NAMED_PORT, &s);
+        ASSERT(s.ok);
+        ASSERT(s.calls >= 1);
+        ASSERT_EQ((long long)s.off_target, 0);
+        ASSERT(s.has_port);
+        ASSERT_EQ(s.port, (long long)RTX_NAMED_PORT);
+        ASSERT_STR_EQ(s.after_datadir, lane);
+        ASSERT_EQ(s.after_port, RTX_NAMED_PORT);
+        rtx_restore();
+        PASS();
+    }
+_test_next:;
+    rtx_restore();
+    return failures;
+}
 #endif
 int test_devagent_receive(void);
 int test_devagent_receive(void)
@@ -2866,6 +3098,9 @@ int test_devagent_receive(void)
     failures += test_receive_preflight();
     failures += test_receive_install_failure(false);
     failures += test_receive_install_failure(true);
+    failures += test_receive_target_lane_default();
+    failures += test_receive_target_unbound();
+    failures += test_receive_target_named();
 
     TEST("a granted directive becomes one queue row and one accept")
     {

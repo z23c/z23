@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: The native command handlers' shared contract: the catalog-bound
+ *          handler declarations, the one-shot process's binding to a
+ *          resident node's RPC, and the bridge that forwards a command to
+ *          that node. */
 
 #ifndef ZCL_TOOLS_NATIVE_COMMAND_H
 #define ZCL_TOOLS_NATIVE_COMMAND_H
@@ -908,6 +912,35 @@ bool zcl_native_forward_live_command(
  * accidentally replace the live context with the empty one-shot CLI
  * defaults on its first probe. */
 void zcl_native_bridge_bind_rpc(const char *datadir, int rpc_port);
+
+/* Which node a dev-lane process reaches. The dev binary binds the dev
+ * lane's own datadir, which does not carry the fleet's board; that board
+ * is carried by the release node (the one `z23 status` reads). A handler
+ * whose work lives there enters the release target and leaves it when
+ * done. Enter rebinds the RPC client to the release datadir and port, and
+ * returns true, when the process settled on the lane default alone: no
+ * datadir named by the operator, the lane default bound, and the lane
+ * default port or none. Any other target was named or resolved some other
+ * way: it is kept, nothing is bound, and enter returns false. Leave gives
+ * the process its own binding back.
+ *
+ * `purpose` settles a process with nothing bound, which names no node: a
+ * read-only probe is taken to stand on the lane default, and a handler
+ * that carries rows to or from the node is left alone. */
+enum zcl_native_rpc_purpose {
+    ZCL_NATIVE_RPC_PROBE,
+    ZCL_NATIVE_RPC_CARRY,
+};
+
+struct zcl_native_rpc_target {
+    bool rebound;
+    char saved[512];
+    int saved_port;
+};
+
+bool zcl_native_rpc_target_enter(struct zcl_native_rpc_target *t,
+                                 enum zcl_native_rpc_purpose purpose);
+void zcl_native_rpc_target_leave(const struct zcl_native_rpc_target *t);
 
 /* ── the one read-only <datadir>/node.db open (native_node_db_ro.c) ───
  *

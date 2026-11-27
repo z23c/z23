@@ -136,11 +136,17 @@ historical fixture passes, then deploy/restart intentionally.
   definition win for intra-module calls; `-Bsymbolic` binds internal calls
   inside the module. Both module link lines in the Makefile carry it — never
   drop it from a new link path.
-- **A flagless CLI invocation targets the CANONICAL datadir.** For dev-lane
-  work pass `-datadir=$HOME/.zclassic-c23-dev -rpcport=18252`
-  (`make hotswap-try` / `make hotswap-apply` do this for you). A bare
-  `build/bin/z23-dev <cmd>` falls back to the canonical default
-  datadir/ports and talks to the live node, not the dev lane.
+- **A flagless dev binary binds the DEV lane's default; the fleet's board is
+  read from the release node.** A bare `build/bin/z23-dev <cmd>` stands on
+  the dev lane's own datadir and port. The board is carried by the release
+  node, so a command that reaches it (`dev agent receive`, `fleet board`,
+  the wiki probe in `fleet goals`) aims those calls there — the live node —
+  and gives the process its own binding back, unless you named a target with
+  `-datadir=` or a different `-rpcport=`. Other commands keep the dev lane's
+  binding. For dev-lane work pass
+  `-datadir=$HOME/.zclassic-c23-dev -rpcport=18252`
+  (`make hotswap-try` / `make hotswap-apply` do this for you).
+  <!-- claim: symbol-present zcl_native_rpc_target_enter tools/command/native_command.c # a flagless dev process reads the board from the release node -->
 - **`--importblockindex` ignores even an explicit `-datadir=`: it writes the
   DEFAULT datadir's `node.db` unless given the target as a positional.** The
   safe form for a side datadir is

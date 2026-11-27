@@ -484,15 +484,20 @@ static char *fb_rpc_call(struct zcl_command_reply *reply, const char *params,
                          int64_t deadline_ms)
 {
     int64_t until_ms;
+    struct zcl_native_rpc_target target;
+    char *raw;
     /* Expired observations must not initialize or contact the endpoint. */
     if (!fb_observation_deadline(reply, deadline_ms, &until_ms))
         return NULL;
+    /* The board is carried by the release node (native_command.h). This
+     * leaf carries rows, so a process with nothing bound is left alone. */
+    zcl_native_rpc_target_enter(&target, ZCL_NATIVE_RPC_CARRY);
     fb_bootstrap();
-    char *raw;
     if (deadline_ms == 0) {
         raw = node_rpc_call("fleet_board", params);
     } else if (until_ms <= platform_time_monotonic_ms()) {
         /* Bootstrap consumed the whole allowance: no request at all. */
+        zcl_native_rpc_target_leave(&target);
         fb_budget_exhausted(reply);
         return NULL;
     } else {
@@ -501,6 +506,7 @@ static char *fb_rpc_call(struct zcl_command_reply *reply, const char *params,
         raw = node_rpc_call_until("fleet_board", params,
                                   ZCL_COMMAND_LATENCY_BUDGET_FAST_MS, until_ms);
     }
+    zcl_native_rpc_target_leave(&target);
     if (!raw)
         fb_no_node(reply);
     return raw;

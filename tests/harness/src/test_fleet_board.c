@@ -11,6 +11,7 @@
 
 #include "config/boot_fleet_board.h"
 #include "config/args.h"
+#include "config/cli_lane_defaults.h"
 #include "config/boot.h"
 #include "config/boot_fleet_roster.h"
 #include "fleet_enrol.h"
@@ -2341,15 +2342,17 @@ static char *fb_status_cli_rpc(const char *method, const char *params)
     return fb_status_cli_response();
 }
 
-static bool fb_status_cli_run(const char *const *args, int n,
-                              struct json_value *out, int *rc)
+static bool fb_cli_run_from(const char *datadir, int port,
+                            const char *const *args, int n,
+                            struct json_value *out, int *rc)
 {
     FILE *capture = tmpfile();
     int saved = dup(fileno(stdout));
     bool ok = false;
     if (!capture || saved < 0 || fflush(stdout) != 0 ||
         dup2(fileno(capture), fileno(stdout)) < 0) goto done;
-    *rc = zcl_native_command_main("fleet", args, n, "", 0, CHAIN_MAIN, false);
+    *rc = zcl_native_command_main("fleet", args, n, datadir, port, CHAIN_MAIN,
+                                  false);
     if (fflush(stdout) != 0 || fseek(capture, 0, SEEK_SET) != 0) goto done;
     char wire[8193];
     size_t len = fread(wire, 1, sizeof wire - 1, capture);
@@ -2359,6 +2362,13 @@ done:
     if (saved >= 0) { if (dup2(saved, fileno(stdout)) < 0) ok = false; close(saved); }
     if (capture) fclose(capture);
     return ok;
+}
+
+/* Nothing bound: the shape an in-process caller has. */
+static bool fb_status_cli_run(const char *const *args, int n,
+                              struct json_value *out, int *rc)
+{
+    return fb_cli_run_from("", 0, args, n, out, rc);
 }
 
 static int test_fleet_board_native_status_filters(void)
@@ -2446,6 +2456,147 @@ static int test_fleet_board_native_status_filters(void)
     } _test_next:;
     node_rpc_client_set_test_hook(NULL);
     json_free(&out);
+    return failures;
+}
+
+/* ── which node `fleet board` reaches ──────────────────────────────────
+ * Through the real command entry, as a flagless process stands: the lane
+ * default datadir bound and not named, no port. A dev-lane binary binds the
+ * dev lane there, where no node runs, while the board is carried by the
+ * release node. The harness is not a dev-lane build, so both defaults are
+ * one path here and the port tells them apart. */
+
+static char g_fb_lane_want_datadir[512];
+static int g_fb_lane_want_port, g_fb_lane_off_target;
+static unsigned g_fb_lane_calls;
+
+/* Answer like a capable node, and record where each call was aimed: the
+ * RPC client's own binding, and those aimed anywhere but the target this
+ * case named. */
+static char *fb_lane_cli_rpc(const char *method, const char *params)
+{
+    struct json_value input;
+    char seen[512];
+    int port;
+    json_init(&input);
+    if (!method || strcmp(method, "fleet_board") != 0 || !params ||
+        !json_read(&input, params, strlen(params)) ||
+        json_size(&input) != 1) {
+        json_free(&input);
+        return NULL;
+    }
+    json_free(&input);
+    g_fb_lane_calls++;
+    (void)snprintf(seen, sizeof seen, "%s", node_rpc_client_datadir());
+    port = node_rpc_client_port();
+    if (strcmp(seen, g_fb_lane_want_datadir) != 0 ||
+        port != g_fb_lane_want_port) {
+        g_fb_lane_off_target++;
+        /* stderr: stdout is the command's captured output here. */
+        fprintf(stderr, "\n  aimed at %s:%d, wanted %s:%d", seen, port,
+                g_fb_lane_want_datadir, g_fb_lane_want_port);
+    }
+    return fb_status_cli_response();
+}
+
+/* One case's ground: a HOME of the case's own, so both lane defaults
+ * resolve under it and no path under the real one is reachable, and the
+ * harness binding to give back when the case ends. */
+struct fb_lane_case {
+    char home[1024], saved_home[1024], datadir_copy[PATH_MAX];
+    bool had_home;
+    int saved_port;
+    struct json_value out;
+};
+
+static void fb_lane_open(struct fb_lane_case *c, const char *tag)
+{
+    const char *old_home = getenv("HOME");
+    memset(c, 0, sizeof(*c));
+    c->had_home = old_home && old_home[0];
+    if (c->had_home)
+        (void)snprintf(c->saved_home, sizeof c->saved_home, "%s", old_home);
+    (void)snprintf(c->datadir_copy, sizeof c->datadir_copy, "%s",
+                   node_rpc_client_datadir());
+    c->saved_port = node_rpc_client_port();
+    json_init(&c->out);
+    test_make_tmpdir(c->home, sizeof c->home, "fleet_board", tag);
+    (void)setenv("HOME", c->home, 1);
+}
+
+static void fb_lane_close(struct fb_lane_case *c)
+{
+    node_rpc_client_set_test_hook(NULL);
+    if (c->had_home) (void)setenv("HOME", c->saved_home, 1);
+    else (void)unsetenv("HOME");
+    node_rpc_client_init(c->datadir_copy, c->saved_port);
+    json_free(&c->out);
+}
+
+/* One `fleet board status` through the real entry from `datadir`:`port`.
+ * False unless the node answered it and every call was aimed at the
+ * target the case named. */
+static bool fb_lane_status(struct fb_lane_case *c, const char *datadir,
+                           int port)
+{
+    int rc = -1;
+    const char *args[] = {"board", "status", "--format=json"};
+    g_fb_lane_calls = 0; g_fb_lane_off_target = 0;
+    fb_status_cli_mode = FB_STATUS_CAPABLE;
+    node_rpc_client_set_test_hook(fb_lane_cli_rpc);
+    json_free(&c->out); json_init(&c->out);
+    return fb_cli_run_from(datadir, port, args, 3, &c->out, &rc) &&
+           rc == ZCL_COMMAND_EXIT_OK && g_fb_lane_calls >= 1 &&
+           g_fb_lane_off_target == 0;
+}
+
+static int test_fleet_board_native_lane_default(void)
+{
+    int failures = 0;
+    struct fb_lane_case c;
+    char lane[512];
+    fb_lane_open(&c, "lane-default");
+    TEST("fleet board status: a process standing on the lane default asks the release node, and has its own binding back after") {
+        ASSERT(zcl_cli_lane_default_datadir(lane, sizeof lane, c.home));
+        ASSERT(zcl_cli_release_default_datadir(g_fb_lane_want_datadir,
+                                               sizeof g_fb_lane_want_datadir,
+                                               c.home));
+        g_fb_lane_want_port = ZCL_CLI_RELEASE_RPC_PORT;
+        ASSERT(fb_lane_status(&c, lane, 0));
+        /* The process has its own binding back, as the leaf left it. */
+        ASSERT_STR_EQ(node_rpc_client_datadir(), lane);
+        ASSERT_EQ(node_rpc_client_port(), 0);
+        PASS();
+    } _test_next:;
+    fb_lane_close(&c);
+    return failures;
+}
+
+static int test_fleet_board_native_keeps_target(void)
+{
+    int failures = 0;
+    struct fb_lane_case c;
+    char named[1200];
+    fb_lane_open(&c, "keeps-target");
+    (void)snprintf(named, sizeof named, "%s/elsewhere", c.home);
+    TEST("fleet board status: a process with nothing bound, or on a datadir the operator named, keeps its target") {
+        /* Nothing bound names no node. This leaf carries rows, so it is
+         * left alone rather than pointed at a node the caller never chose:
+         * every in-process rig that binds nothing stays where it stood. */
+        g_fb_lane_want_datadir[0] = '\0';
+        g_fb_lane_want_port = 0;
+        ASSERT(fb_lane_status(&c, "", 0));
+        ASSERT_STR_EQ(node_rpc_client_datadir(), "");
+        ASSERT_EQ(node_rpc_client_port(), 0);
+        /* A datadir that is no lane default, with no port. */
+        (void)snprintf(g_fb_lane_want_datadir, sizeof g_fb_lane_want_datadir,
+                       "%s", named);
+        ASSERT(fb_lane_status(&c, named, 0));
+        ASSERT_STR_EQ(node_rpc_client_datadir(), named);
+        ASSERT_EQ(node_rpc_client_port(), 0);
+        PASS();
+    } _test_next:;
+    fb_lane_close(&c);
     return failures;
 }
 
@@ -18687,6 +18838,8 @@ int test_fleet_board(void)
     failures += test_fleet_board_peer_lacks_ready_op();
     failures += test_fleet_board_native_busy();
     failures += test_fleet_board_native_status_filters();
+    failures += test_fleet_board_native_lane_default();
+    failures += test_fleet_board_native_keeps_target();
     failures += test_fleet_board_native_status_light();
     failures += test_fleet_board_ingest_wait_bounded();
     failures += test_fleet_board_durable_wiki();

@@ -2651,6 +2651,32 @@ _test_next:;
     return failures;
 }
 
+/* A port no lane defaults to and no rig node answers on. */
+enum { BMX_TRIED_PORT = 18999 };
+
+/* One transport observation with the node down and the process standing
+ * on `port`, the harness binding given back before returning: the port the
+ * observation named, or -1 when it named none. */
+static long long bmx_down_port_reported(int port)
+{
+    struct json_value out;
+    const struct json_value *v;
+    char saved[PATH_MAX];
+    int saved_port = node_rpc_client_port();
+    long long seen = -1;
+    (void)snprintf(saved, sizeof(saved), "%s", node_rpc_client_datadir());
+    zcl_native_bridge_bind_rpc(saved, port);
+    json_init(&out);
+    json_set_object(&out);
+    zcl_devagent_boardmail_observe_transport(&out);
+    v = json_get(&out, "board_rpc_port");
+    if (v && v->type == JSON_INT)
+        seen = json_get_int(v);
+    json_free(&out);
+    zcl_native_bridge_bind_rpc(saved, saved_port);
+    return seen;
+}
+
 static int bmx_t_transport_observation(void)
 {
     int failures = 0;
@@ -2673,6 +2699,8 @@ static int bmx_t_transport_observation(void)
         ASSERT_STR_EQ(json_get_str(json_get(&out, "board_state")), "unavailable");
         ASSERT_STR_EQ(json_get_str(json_get(&out, "board_detail")), "node_rpc_client_call");
         json_free(&out);
+        /* DOWN names the port it tried. */
+        ASSERT_EQ(bmx_down_port_reported(BMX_TRIED_PORT), BMX_TRIED_PORT);
         g_bmx_node[BMX_A].down = false;
         g_bmx_node[BMX_A].page_fault = BMX_PAGE_MISSING_EPOCH;
         json_init(&out);

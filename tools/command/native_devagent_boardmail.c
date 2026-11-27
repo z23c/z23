@@ -1634,6 +1634,9 @@ void zcl_devagent_boardmail_observe_transport(struct json_value *out)
     }
     (void)json_push_kv_str(out, "board_state", state);
     (void)json_push_kv_str(out, "board_detail", detail);
+    /* The port the call was aimed at, so a DOWN names its own target: in a
+     * dev build the lane default's port and the release port differ. */
+    (void)json_push_kv_int(out, "board_rpc_port", node_rpc_client_port());
     json_free(&page);
 }
 

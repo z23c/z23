@@ -3642,6 +3642,7 @@ void zcl_native_handle_dev_agent_receive(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     const char *action, *receiver, *workspace;
+    struct zcl_native_rpc_target target;
     if (!reply)
         return;
     if (!request || !request->input) {
@@ -3668,25 +3669,25 @@ void zcl_native_handle_dev_agent_receive(
                  "input.workspace is not an absolute canonical-shaped path");
         return;
     }
+    /* The board is carried by the release node (native_command.h). This
+     * leaf carries rows, so a process with nothing bound is left alone. */
+    zcl_native_rpc_target_enter(&target, ZCL_NATIVE_RPC_CARRY);
     if (strcmp(action, "status") == 0) {
         rcv_status(receiver, workspace, reply);
-        return;
-    }
-    if (strcmp(action, "preflight") == 0) {
+    } else if (strcmp(action, "preflight") == 0) {
         rcv_preflight(request, receiver, workspace, reply);
-        return;
-    }
-    if (strcmp(action, "run") != 0) {
+    } else if (strcmp(action, "run") != 0) {
         rcv_fail(reply, "BAD_INPUT", "run",
                  "action is one of run|status|preflight",
                  "input.action missing or unknown");
-        return;
-    }
+    } else {
 #if defined(_WIN32)
-    rcv_fail(reply, "RECEIVE_WINDOWS_UNAVAILABLE", "run",
-             "the resident receiver needs POSIX flock and signals",
-             "run the receiver on a POSIX host");
+        rcv_fail(reply, "RECEIVE_WINDOWS_UNAVAILABLE", "run",
+                 "the resident receiver needs POSIX flock and signals",
+                 "run the receiver on a POSIX host");
 #else
-    rcv_run(request, receiver, workspace, reply);
+        rcv_run(request, receiver, workspace, reply);
 #endif
+    }
+    zcl_native_rpc_target_leave(&target);
 }
