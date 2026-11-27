@@ -359,6 +359,58 @@ static int mining_template_time_cases(void)
     return failures;
 }
 
+static bool mining_rate_call(struct rpc_table *t, const char *name, const char *args, int64_t expected)
+{
+    struct json_value p = {0}, out = {0};
+    bool ok = json_read(&p, args, strlen(args)) && rpc_table_execute(t, name, &p, &out) &&
+        out.type == JSON_INT && json_get_int(&out) == expected;
+    json_free(&p);
+    json_free(&out);
+    return ok;
+}
+
+static int mining_rate_cases(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct block_index blocks[4];
+    for (int i = 0; i < 4; i++) {
+        block_index_init(&blocks[i]);
+        blocks[i].nHeight = i;
+        blocks[i].nTime = (uint32_t)(100 + i * 10);
+        blocks[i].pprev = i ? &blocks[i - 1] : NULL;
+        arith_uint256_set_u64(&blocks[i].nChainWork, (uint64_t)(i * i * 170));
+    }
+    active_chain_move_window_tip(&ms.chain_active, &blocks[3]);
+    rpc_mining_set_state(&ms, NULL, NULL);
+    reducer_frontier_provable_tip_set(3);
+    struct rpc_table t;
+    rpc_table_init(&t);
+    register_mining_rpc_commands(&t);
+    MT_CHECK("network solutions default", mining_rate_call(&t, "getnetworksolps", "[]", 51));
+    MT_CHECK("network hash alias and height", mining_rate_call(&t, "getnetworkhashps", "[1,2]", 51));
+    MT_CHECK("network averaging window", mining_rate_call(&t, "getnetworksolps", "[-1,1]", 17));
+    MT_CHECK("genesis rate zero", mining_rate_call(&t, "getnetworksolps", "[32,0]", 0));
+    reducer_frontier_provable_tip_set(2);
+    MT_CHECK("network rate uses provable tip", mining_rate_call(&t, "getnetworksolps", "[]", 34));
+    reducer_frontier_provable_tip_set(3);
+    struct json_value args = {0}, out = {0};
+    json_read(&args, "[1,1]", 5);
+    ms.chain_active.chain[1] = NULL;
+    MT_CHECK("missing historical slot unavailable", !rpc_table_execute(&t, "getnetworksolps", &args, &out));
+    ms.chain_active.chain[1] = &blocks[1];
+    json_free(&args);
+    json_free(&out);
+    blocks[0].nTime = blocks[1].nTime = blocks[2].nTime = blocks[3].nTime;
+    MT_CHECK("equal times rate zero", mining_rate_call(&t, "getnetworksolps", "[]", 0));
+    rpc_mining_set_state(NULL, NULL, NULL);
+    reducer_frontier_provable_tip_set(-1);
+    main_state_free(&ms);
+    return failures;
+}
+
+
 int test_mining(void)
 {
     int failures = 0;
@@ -407,5 +459,5 @@ int test_mining(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    return failures + mining_template_time_cases() + mining_ballot_cases();
+    return failures + mining_template_time_cases() + mining_ballot_cases() + mining_rate_cases();
 }

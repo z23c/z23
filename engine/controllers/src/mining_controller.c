@@ -169,6 +169,69 @@ void rpc_mining_set_state(struct main_state *ms, struct tx_mempool *mp,
     ctx->coins_tip = coins_tip;
 }
 
+static bool mining_network_rate(struct main_state *ms, int64_t lookup, int64_t height, int64_t *rate)
+{
+    *rate = 0;
+    zcl_mutex_lock(&ms->cs_main);
+    int32_t public_height = reducer_frontier_provable_tip_cached();
+    if (public_height < 0) { zcl_mutex_unlock(&ms->cs_main); return false; }
+    int selected = height >= 0 && height < public_height ? (int)height : public_height;
+    struct block_index *tip = active_chain_at(&ms->chain_active, selected);
+    if (!tip || tip->nHeight != selected) { zcl_mutex_unlock(&ms->cs_main); return false; }
+    if (tip->nHeight == 0) goto done;
+    if (lookup <= 0) lookup = chain_params_get()->consensus.nPowAveragingWindow;
+    if (lookup > tip->nHeight) lookup = tip->nHeight;
+    struct block_index *start = tip;
+    int64_t low = tip->nTime, high = low;
+    for (int64_t i = 0; i < lookup; i++) {
+        start = start->pprev;
+        if (!start) { zcl_mutex_unlock(&ms->cs_main); return false; }
+        if (start->nTime < low) low = start->nTime;
+        if (start->nTime > high) high = start->nTime;
+    }
+    if (high != low) {
+        struct arith_uint256 work;
+        arith_uint256_sub(&work, &tip->nChainWork, &start->nChainWork);
+        double value = 0;
+        for (int i = ARITH_UINT256_WIDTH - 1; i >= 0; i--)
+            value = value * 4294967296.0 + work.pn[i];
+        value /= (double)(high - low);
+        if (value >= 9223372036854775808.0) { zcl_mutex_unlock(&ms->cs_main); return false; }
+        *rate = (int64_t)value;
+    }
+done:
+    zcl_mutex_unlock(&ms->cs_main);
+    return true;
+}
+
+static bool rpc_getnetworksolps(const struct json_value *params, bool help,
+                                struct json_value *result)
+{
+    RPC_HELP(help, result, "getnetworksolps ( blocks height )\nEstimated network solutions per second.");
+    struct rpc_params p;
+    rpc_params_init(&p, params);
+    rpc_params_expect(&p, 0, 2);
+    if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
+    int64_t values[2] = {120, -1};
+    for (size_t i = 0; i < json_size(params); i++) {
+        const struct json_value *v = json_at(params, i);
+        if (!v || v->type != JSON_INT || json_get_int(v) < INT32_MIN ||
+            json_get_int(v) > INT32_MAX) {
+            json_set_str(result, "blocks and height must be 32-bit integers");
+            return false;
+        }
+        values[i] = json_get_int(v);
+    }
+    int64_t blocks = values[0], height = values[1];
+    int64_t rate;
+    if (!mining_ctx()->main_state || !mining_network_rate(mining_ctx()->main_state, blocks, height, &rate)) {
+        json_set_str(result, "Network rate unavailable for the selected chain");
+        return false;
+    }
+    json_set_int(result, rate);
+    return true;
+}
+
 static bool rpc_getmininginfo(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -747,6 +810,8 @@ static bool rpc_createballotoutput(const struct json_value *params, bool help,
 void register_mining_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {
+        { "mining", "getnetworksolps", rpc_getnetworksolps, true },
+        { "mining", "getnetworkhashps", rpc_getnetworksolps, true },
         { "mining", "getmininginfo",     rpc_getmininginfo,    true },
         { "mining", "generate",          rpc_generate,         true },
         { "mining", "generatetoaddress", rpc_generatetoaddress, true },
