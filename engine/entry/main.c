@@ -1094,6 +1094,23 @@ static bool main_research_identity(const char *path)
 }
 #endif
 
+static bool main_research_unselected_ok(int argc, char **argv)
+{
+    if (is_cli_mode(argc, argv)) return true;
+#if defined(_WIN32)
+    return true;
+#else
+    char dir[4096], marker[4200];
+    if (!ArgvDataDir(argc, (const char *const *)argv, dir, sizeof(dir)))
+        GetDefaultDataDir(dir, sizeof(dir));
+    int n = snprintf(marker, sizeof(marker), "%s/%s", dir, main_research_marker);
+    if (n < 0 || (size_t)n >= sizeof(marker)) return false;
+    struct stat st;
+    if (lstat(marker, &st) == 0) return false;
+    return errno == ENOENT;
+#endif
+}
+
 static bool main_research_prepare(int argc, char ***args,
                                   struct main_research_selection *research,
                                   char *path, size_t capacity)
@@ -1105,7 +1122,11 @@ static bool main_research_prepare(int argc, char ***args,
         fprintf(stderr, "Invalid or unsafe testnet profile invocation.\n");
         return false;
     }
-    if (!research->profile) return true;
+    if (!research->profile) {
+        if (main_research_unselected_ok(argc, argv)) return true;
+        fprintf(stderr, "Research profile directory requires its selector.\n");
+        return false;
+    }
 #if !defined(_WIN32)
     if (!main_research_identity(path + 9)) {
         fprintf(stderr, "Research profile directory identity is missing or invalid.\n");
