@@ -604,7 +604,9 @@ struct ws_cache_slot {
 
 static pthread_mutex_t g_ws_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct ws_cache_slot g_ws_cache[WS_CACHE_SLOTS];
+#ifdef ZCL_TESTING
 static unsigned g_ws_cache_builds;
+#endif
 
 /* Two slots bound memory; use an empty slot or evict the oldest index. */
 static struct ws_cache_slot *ws_cache_slot(const struct ws_request *rq)
@@ -678,7 +680,9 @@ static bool ws_cache_build(struct node_db *ndb, const struct ws_request *rq,
         .json = json, .json_len = json_len,
     };
     (void)snprintf(slot->base, sizeof(slot->base), "%s", rq->base);
+#ifdef ZCL_TESTING
     g_ws_cache_builds++;
+#endif
     return true;
 }
 
