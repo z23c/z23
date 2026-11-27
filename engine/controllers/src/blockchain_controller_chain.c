@@ -64,11 +64,6 @@ static int gbci_push_unresolved_tip(struct json_value *result,
     json_push_kv_int(result, "blocks", hstar > 0 ? hstar : 0);
     json_push_kv_int(result, "headers", hdr_h);
     json_push_kv_int(result, "best_header_height", hdr_h);
-    if (bh && bh->phashBlock) {
-        char hbhex[65];
-        uint256_get_hex(bh->phashBlock, hbhex);
-        json_push_kv_str(result, "bestblockhash", hbhex);
-    }
     json_push_kv_bool(result, "initialblockdownload", true);
     return hdr_h;
 }
@@ -255,8 +250,8 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
          * IBD-shaped object instead of overwriting the result with a bare
          * "No provable tip" string — an external getblockchaininfo must always
          * be parseable JSON. blocks = the honest provable height (>=0), headers
-         * = the best header height we know, initialblockdownload = true, and
-         * bestblockhash when the header tip is available. */
+         * = the best header height we know, initialblockdownload = true.
+         * Omit bestblockhash until the provable tip identity is resolved. */
         int hdr_h = gbci_push_unresolved_tip(
             result, ctx->main_state->pindex_best_header, hstar);
         LOG_WARN("blockchain",

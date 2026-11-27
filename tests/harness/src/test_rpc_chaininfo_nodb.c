@@ -314,6 +314,36 @@ static int rcn_phase_cs_main_held(struct rcn_fixture *f)
     return failures;
 }
 
+/* Header height is not proof of the unresolved provable tip identity. */
+static bool rcn_unresolved_reply(int header_height)
+{
+    struct json_value res;
+    bool ok;
+    rcn_call(rpc_getblockchaininfo, &res, &ok);
+    bool valid = ok && json_get_int(json_get(&res, "blocks")) == 3 &&
+        json_get_int(json_get(&res, "headers")) == header_height &&
+        json_get_int(json_get(&res, "best_header_height")) == header_height &&
+        json_get_bool(json_get(&res, "initialblockdownload")) &&
+        json_get(&res, "bestblockhash") == NULL;
+    json_free(&res);
+    return valid;
+}
+
+static int rcn_phase_unresolved_tip(struct rcn_fixture *f)
+{
+    int failures = 0;
+    reducer_frontier_provable_tip_set(3);
+    RCN_CHECK("unresolved H3, header H2: omit bestblockhash", rcn_unresolved_reply(2));
+    struct block_index same_height = f->b[2];
+    same_height.nHeight = 3;
+    f->ms.pindex_best_header = &same_height;
+    RCN_CHECK("unresolved H3, header H3: omit bestblockhash", rcn_unresolved_reply(3));
+    f->ms.pindex_best_header = &f->b[2];
+    reducer_frontier_provable_tip_set(2);
+    failures += rcn_check_in_memory("resolved after unresolved", 2, f->hex[2]);
+    return failures;
+}
+
 int test_rpc_chaininfo_nodb(void);
 int test_rpc_chaininfo_nodb(void)
 {
@@ -334,6 +364,7 @@ int test_rpc_chaininfo_nodb(void)
     failures += rcn_phase_db_held(&f);
     failures += rcn_phase_db_only_hash(&f);
     failures += rcn_phase_cs_main_held(&f);
+    failures += rcn_phase_unresolved_tip(&f);
 
     rpc_blockchain_set_node_db(NULL);
     node_db_close(&f.ndb);
