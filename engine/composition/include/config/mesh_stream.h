@@ -25,7 +25,11 @@
  * told apart by `local_initiator` and by the parity of the stream id —
  * the peer that dialed the connection mints even ids, the peer that
  * accepted it mints odd ids, so two sides can open streams at once and
- * never collide.
+ * never collide. An id names a stream on one session: the same peer may
+ * hold several sessions to this node, and the id of a stream that has
+ * ended on another of them is free for a new one here. A live stream
+ * keeps its id on every session to its peer, so a frame sent on the
+ * wrong session finds no stream to reach.
  *
  * Flow control is credit, not hope. Each direction starts with the
  * initial credit named in the OPEN (never above
@@ -101,7 +105,9 @@ struct p2p_node;
 /* An ended stream keeps its slot this long so the side that asked for it
  * can still read the verdict, then the pump reaps it. An ended stream
  * carries no credit and never counts toward the per-peer cap, so a
- * lingering verdict can never keep a peer from opening a new stream. */
+ * lingering verdict can never keep a peer from opening a new stream —
+ * nor keep this node from opening one: the id an open takes is searched
+ * to one candidate per slot the table holds. */
 #define MESH_STREAM_LINGER_SECONDS INT64_C(60)
 
 /* Every named end of a stream. Values below MESH_STREAM_CLOSED_BY_SERVICE

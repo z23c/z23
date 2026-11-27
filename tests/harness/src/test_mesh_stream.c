@@ -33,6 +33,7 @@
 #include "net/v2_identity.h"
 #include "platform/clock.h"
 #include "platform/private_directory.h"
+#include "services/p2p_node_noise.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -402,6 +403,30 @@ _test_next:
     return failures;
 }
 
+/* `held` local opens toward the responder on the session `a` holds, ids
+ * 0, 2, 4, ..., all ended: verdicts inside their linger, each still
+ * holding its id on that session. The frames their ending wrote are
+ * dropped, so the queue keeps nothing of theirs. */
+static bool stream_test_hold_verdicts(struct mesh_term_fixture *f,
+                                      struct p2p_node *a,
+                                      struct send_segment *a_queue,
+                                      size_t held)
+{
+    struct noise_transport_snapshot session;
+    if (!p2p_node_noise_snapshot(a, &session))
+        return false;
+    for (size_t n = 0; n < held; n++) {
+        if (!mesh_stream_test_inject(STREAM_TEST_ECHO, f->resp_noise_pub,
+                                     session.transcript_hash,
+                                     session.connection_generation, true,
+                                     2u * (uint64_t)n, 4096u, NULL))
+            return false;
+    }
+    mesh_stream_visit(STREAM_TEST_ECHO, stream_test_end_all_visit, NULL);
+    mesh_loop_discard(a, a_queue, f->res_term);
+    return true;
+}
+
 static int stream_test_case_failed_open_keeps_ended(
     struct mesh_term_fixture *f, struct p2p_node *a,
     struct send_segment *a_queue, struct p2p_node *b,
@@ -413,24 +438,11 @@ static int stream_test_case_failed_open_keeps_ended(
         mesh_loop_discard(a, a_queue, f->res_term);
         mesh_loop_discard(b, b_queue, f->term_peer.ini);
         mesh_stream_test_reset();
-        stream_test_counters_reset();
-        uint8_t transcript[32];
-        memset(transcript, 9, sizeof(transcript));
-        /* Eighteen ids toward the responder, so every id candidate the
-         * local open can pick is taken, and the rest of the table from
-         * other peers. */
-        for (uint8_t n = 0; n < MESH_STREAM_TABLE_MAX; n++) {
-            uint8_t other[32];
-            stream_test_peer_key(other, (uint8_t)(100u + n));
-            bool toward_responder = n < 2u * (MESH_STREAM_PER_PEER_MAX + 1u);
-            ASSERT(mesh_stream_test_inject(
-                STREAM_TEST_ECHO,
-                toward_responder ? f->resp_noise_pub : other, transcript, 1,
-                false, (uint64_t)n, 4096u, NULL));
-        }
-        mesh_stream_visit(STREAM_TEST_ECHO, stream_test_end_all_visit, NULL);
-        mesh_loop_discard(a, a_queue, f->res_term);
-        mesh_loop_discard(b, b_queue, f->term_peer.ini);
+        /* Every id the local open can name is held toward the responder on
+         * the session it will use, so the table is all verdicts and the
+         * open has nothing left to pick. */
+        ASSERT(stream_test_hold_verdicts(f, a, a_queue,
+                                         MESH_STREAM_TABLE_MAX));
         stream_test_counters_reset();
 
         uint64_t local_id = UINT64_MAX;
@@ -443,6 +455,105 @@ static int stream_test_case_failed_open_keeps_ended(
         mesh_stream_visit(STREAM_TEST_ECHO, stream_test_count_ended_visit,
                           &ended);
         ASSERT_EQ(ended, (size_t)MESH_STREAM_TABLE_MAX);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
+/* An id is named per session: a frame arrives on one session, and a verdict
+ * keeps its id through the linger so a late frame can never reach a new
+ * stream under an old name. That hold is the session's own. */
+static int stream_test_case_ended_id_kept(struct mesh_term_fixture *f,
+                                          struct p2p_node *a,
+                                          struct send_segment *a_queue,
+                                          struct msg_processor *mp,
+                                          struct p2p_node *b,
+                                          struct send_segment *b_queue)
+{
+    int failures = 0;
+    TEST("mesh stream: an id an ended verdict still holds on the session an "
+         "open uses is not reused while it lingers") {
+        mesh_loop_discard(a, a_queue, f->res_term);
+        mesh_loop_discard(b, b_queue, f->term_peer.ini);
+        mesh_stream_test_reset();
+        ASSERT(stream_test_hold_verdicts(f, a, a_queue, 1));
+        stream_test_counters_reset();
+
+        /* The open takes a free slot and the next id, and leaves the
+         * verdict in place. */
+        uint64_t id = UINT64_MAX;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f->resp_noise_pub,
+                                   STREAM_TEST_WINDOW,
+                                   (const uint8_t *)"hi", 2, NULL, &id),
+                  MESH_STREAM_OK);
+        ASSERT_EQ(id, (uint64_t)2);
+        ASSERT_EQ(g_releases, (size_t)0);
+        size_t ended = 0;
+        mesh_stream_visit(STREAM_TEST_ECHO, stream_test_count_ended_visit,
+                          &ended);
+        ASSERT_EQ(ended, (size_t)1);
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f->res_term, mp, b), (size_t)1);
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f->term_peer.ini, mp, a),
+                  (size_t)1);
+        ASSERT_EQ(g_opens, (size_t)1);
+        ASSERT(memcmp(g_last_data, "re:hi", 5) == 0);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
+/* The board lane asks a peer for a page every five seconds, and each
+ * answer keeps its id through a linger of sixty: about thirteen ids held
+ * at once on one session, by a lane doing exactly what it was told. */
+static int stream_test_case_verdicts_leave_room(struct mesh_term_fixture *f,
+                                                struct p2p_node *a,
+                                                struct send_segment *a_queue,
+                                                struct msg_processor *mp,
+                                                struct p2p_node *b,
+                                                struct send_segment *b_queue)
+{
+    int failures = 0;
+    TEST("mesh stream: ended verdicts of a session leave an open an id "
+         "until they fill the table") {
+        mesh_loop_discard(a, a_queue, f->res_term);
+        mesh_loop_discard(b, b_queue, f->term_peer.ini);
+        mesh_stream_test_reset();
+        ASSERT(stream_test_hold_verdicts(f, a, a_queue, 13));
+        stream_test_counters_reset();
+
+        /* Thirteen ids taken, so the open takes the fourteenth and the
+         * verdicts keep theirs. */
+        uint64_t id = UINT64_MAX;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f->resp_noise_pub,
+                                   STREAM_TEST_WINDOW,
+                                   (const uint8_t *)"hi", 2, NULL, &id),
+                  MESH_STREAM_OK);
+        ASSERT_EQ(id, (uint64_t)26);
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f->res_term, mp, b), (size_t)1);
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f->term_peer.ini, mp, a),
+                  (size_t)1);
+        ASSERT_EQ(g_opens, (size_t)1);
+        ASSERT(memcmp(g_last_data, "re:hi", 5) == 0);
+        size_t ended = 0;
+        mesh_stream_visit(STREAM_TEST_ECHO, stream_test_count_ended_visit,
+                          &ended);
+        ASSERT_EQ(ended, (size_t)13);
+        ASSERT_EQ(g_releases, (size_t)0);
+
+        /* One candidate per slot the table holds: while a slot is free
+         * the last candidate is there to take. */
+        mesh_loop_discard(a, a_queue, f->res_term);
+        mesh_loop_discard(b, b_queue, f->term_peer.ini);
+        mesh_stream_test_reset();
+        ASSERT(stream_test_hold_verdicts(f, a, a_queue,
+                                         MESH_STREAM_TABLE_MAX - 1u));
+        id = UINT64_MAX;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f->resp_noise_pub,
+                                   STREAM_TEST_WINDOW, NULL, 0, NULL, &id),
+                  MESH_STREAM_OK);
+        ASSERT_EQ(id, (uint64_t)(2u * (MESH_STREAM_TABLE_MAX - 1u)));
         PASS();
     }
 _test_next:
@@ -683,6 +794,126 @@ _test_next:
     return failures;
 }
 
+/* The open finds the bound session first; the two other sessions to the
+ * same static stay in the table behind it. */
+static void stream_multi_bound_first(struct stream_multi *m,
+                                     struct net_manager *nm)
+{
+    const size_t k = STREAM_MULTI_BOUND;
+    struct p2p_node *table[6] = {m->ia[k], m->rb[k], m->ia[0],
+                                 m->rb[0], m->ia[2], m->rb[2]};
+    stream_multi_order(nm, m, table, 6);
+}
+
+/* Holds every even id up to the sixteenth toward the peer on the two
+ * sessions an open on the bound session does not use: the first `live` by
+ * live streams, the rest by verdicts still inside their linger. Nothing
+ * frees one before the case has read the id its open took: a live stream
+ * ends only when its case closes it, and a verdict stays for its linger. */
+static bool stream_multi_hold_elsewhere(struct stream_multi *m, size_t live)
+{
+    struct noise_transport_snapshot decoy[2];
+    if (!p2p_node_noise_snapshot(m->ia[0], &decoy[0]) ||
+        !p2p_node_noise_snapshot(m->ia[2], &decoy[1]))
+        return false;
+    for (size_t n = 0; n <= MESH_STREAM_PER_PEER_MAX; n++) {
+        if (!mesh_stream_test_inject(
+                STREAM_TEST_ECHO, m->res_pub,
+                decoy[n % 2u].transcript_hash,
+                decoy[n % 2u].connection_generation, true, 2u * n, 4096u,
+                NULL))
+            return false;
+    }
+    for (size_t n = live; n <= MESH_STREAM_PER_PEER_MAX; n++) {
+        struct stream_test_visit v;
+        memset(&v, 0, sizeof(v));
+        v.id = 2u * n;
+        v.local_initiator = true;
+        mesh_stream_visit(STREAM_TEST_ECHO, stream_test_close_visit, &v);
+        if (!v.found)
+            return false;
+    }
+    mesh_loop_discard(m->ia[0], m->iq[0], m->res[0]);
+    mesh_loop_discard(m->ia[2], m->iq[2], m->res[2]);
+    return true;
+}
+
+/* The open and the service's answer both ride the bound session, and no
+ * other session to the peer carries a frame for them. */
+static bool stream_multi_answered(struct stream_multi *m,
+                                  struct msg_processor *mp)
+{
+    const size_t k = STREAM_MULTI_BOUND;
+    return mesh_loop_pump(m->ia[k], m->iq[k], m->res[k], mp, m->rb[k]) ==
+               1u &&
+           mesh_loop_pump(m->rb[k], m->rq[k], m->ini[k], mp, m->ia[k]) ==
+               1u &&
+           g_opens == 1u && g_last_data_len == 5u &&
+           memcmp(g_last_data, "re:hi", 5) == 0 &&
+           stream_multi_decoy_frames(m, mp) == 0u;
+}
+
+/* A verdict holds its id on its own session only: toward the same peer on
+ * another session it is not the name of anything a frame can reach. */
+static int stream_test_case_verdicts_other_session(
+    struct stream_multi *m, struct net_manager *nm, struct msg_processor *mp)
+{
+    int failures = 0;
+    TEST("mesh stream: ids held toward the same static by verdicts on OTHER "
+         "sessions do not spend the ids of the session an open uses") {
+        stream_multi_bound_first(m, nm);
+        mesh_stream_test_reset();
+        stream_test_counters_reset();
+        ASSERT(stream_multi_hold_elsewhere(m, 0));
+
+        uint64_t id = UINT64_MAX;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, m->res_pub,
+                                   STREAM_TEST_WINDOW,
+                                   (const uint8_t *)"hi", 2, NULL, &id),
+                  MESH_STREAM_OK);
+        ASSERT_EQ(id, (uint64_t)0);
+        ASSERT(stream_multi_answered(m, mp));
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)2);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
+/* A live stream keeps its id toward its peer on every session: a peer that
+ * puts a stream's frames on another of its sessions here must find no
+ * other stream under that id to hand them to. */
+static int stream_test_case_live_other_session(
+    struct stream_multi *m, struct net_manager *nm, struct msg_processor *mp)
+{
+    int failures = 0;
+    TEST("mesh stream: an id live toward the same static on ANOTHER session "
+         "is not reused, and the open takes the next one that is free") {
+        stream_multi_bound_first(m, nm);
+        mesh_stream_test_reset();
+        stream_test_counters_reset();
+        /* Seven live stay under the per-peer cap, leaving room for exactly
+         * one more stream toward the peer. */
+        ASSERT(stream_multi_hold_elsewhere(m, MESH_STREAM_PER_PEER_MAX - 1u));
+
+        uint64_t id = UINT64_MAX;
+        ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, m->res_pub,
+                                   STREAM_TEST_WINDOW,
+                                   (const uint8_t *)"hi", 2, NULL, &id),
+                  MESH_STREAM_OK);
+        /* Ids 0 to 12 are live toward the peer on the other sessions. The
+         * two past them are verdicts there, so the first of those is the
+         * first id nothing live holds. */
+        ASSERT_EQ(id, (uint64_t)2u * (MESH_STREAM_PER_PEER_MAX - 1u));
+        ASSERT(stream_multi_answered(m, mp));
+        ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO),
+                  (size_t)MESH_STREAM_PER_PEER_MAX + 1u);
+        PASS();
+    }
+_test_next:
+    return failures;
+}
+
 static int stream_test_case_multi_session(const char *dir,
                                           struct net_manager *nm,
                                           struct msg_processor *mp)
@@ -698,6 +929,8 @@ static int stream_test_case_multi_session(const char *dir,
     if (failures == 0) {
         failures += stream_test_case_bound_session_found(&m, nm, mp);
         failures += stream_test_case_bound_session_lost(&m, nm, mp);
+        failures += stream_test_case_verdicts_other_session(&m, nm, mp);
+        failures += stream_test_case_live_other_session(&m, nm, mp);
     }
 _test_next:
     nm->nodes = saved_nodes;
@@ -1332,6 +1565,10 @@ int test_mesh_stream(void)
                                               b_queue);
     failures += stream_test_case_failed_open_keeps_ended(&f, a, a_queue, b,
                                                          b_queue);
+    failures += stream_test_case_ended_id_kept(&f, a, a_queue, &mp, b,
+                                               b_queue);
+    failures += stream_test_case_verdicts_leave_room(&f, a, a_queue, &mp, b,
+                                                     b_queue);
     failures += stream_test_case_multi_session(dir, &nm, &mp);
 
 _test_next:

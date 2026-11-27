@@ -785,20 +785,37 @@ static enum mesh_stream_refusal stream_open_args_refusal(
     return MESH_STREAM_OK;
 }
 
-/* The lowest free id of our own parity toward this peer. The per-peer cap
- * bounds the search. Returns false when every candidate is live, so the
- * caller refuses by name rather than reuse a live id. Lane lock held. */
-static bool stream_pick_local_id_locked(uint64_t parity,
-                                        const uint8_t peer_static[32],
-                                        uint64_t *id_out)
+/* The lowest id of our own parity that is free for an open on this
+ * session. An id names a stream on ONE session — a frame is routed by
+ * session and id together — so a verdict lingering on another session to
+ * the same peer holds nothing here. A live stream keeps its id toward
+ * that peer on every session: a peer that puts a stream's frames on
+ * another of its sessions here must find no other stream under that id
+ * to hand them to. On this session a live stream and an ended verdict
+ * both hold their id: the verdict so a late frame can never reach a new
+ * stream under an old name.
+ *
+ * The search runs to one candidate per slot the table holds. Every held
+ * id occupies a slot, so it can come up empty only when the whole table
+ * is ids of this parity, each held on this session or live toward this
+ * peer. Returns false then, so the caller refuses by name rather than
+ * take the id of a verdict it would have to evict to make room. Lane
+ * lock held. */
+static bool stream_pick_local_id_locked(
+    uint64_t parity, const struct noise_transport_snapshot *snap,
+    uint64_t *id_out)
 {
     *id_out = 0;
-    for (size_t step = 0; step <= MESH_STREAM_PER_PEER_MAX; step++) {
+    for (size_t step = 0; step < MESH_STREAM_TABLE_MAX; step++) {
         uint64_t candidate = parity + 2u * (uint64_t)step;
         bool taken = false;
-        for (size_t i = 0; i < MESH_STREAM_TABLE_MAX && !taken; i++)
-            taken = g_streams[i].used && g_streams[i].id == candidate &&
-                    memcmp(g_streams[i].peer_static, peer_static, 32) == 0;
+        for (size_t i = 0; i < MESH_STREAM_TABLE_MAX && !taken; i++) {
+            const struct mesh_stream *st = &g_streams[i];
+            taken = st->used && st->id == candidate &&
+                    (stream_binds_session(st, snap) ||
+                     (!st->ended && snap &&
+                      memcmp(st->peer_static, snap->remote_static, 32) == 0));
+        }
         if (!taken) {
             *id_out = candidate;
             return true;
@@ -860,8 +877,7 @@ enum mesh_stream_refusal mesh_stream_open(
     }
 
     uint64_t id = 0;
-    if (!stream_pick_local_id_locked(stream_local_parity(peer),
-                                     snap.remote_static, &id)) {
+    if (!stream_pick_local_id_locked(stream_local_parity(peer), &snap, &id)) {
         p2p_node_release(peer);
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_ID_IN_USE;
