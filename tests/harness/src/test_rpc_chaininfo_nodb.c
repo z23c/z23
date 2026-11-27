@@ -156,7 +156,10 @@ static int rcn_check_in_memory(const char *tag, int height, const char *hex)
     snprintf(name, sizeof(name), "%s: getblockchaininfo fast + correct", tag);
     RCN_CHECK(name, ok && dt < RCN_BOUND_MS &&
               json_get_int(json_get(&res, "blocks")) == height &&
-              rcn_str_is(json_get(&res, "bestblockhash"), hex));
+              rcn_str_is(json_get(&res, "bestblockhash"), hex) &&
+              json_get(&res, "tiptime") != NULL &&
+              json_get_int(json_get(&res, "tiptime")) == 1700000000 + height * 150 &&
+              json_get_int(json_get(&res, "mediantime")) == 1700000150);
     json_free(&res);
     return failures;
 }
@@ -205,6 +208,27 @@ static int rcn_fixture_build(struct rcn_fixture *f)
     row.solution_len = sizeof(sol);
     RCN_CHECK("fixture: node.db block row saved",
               db_block_save(&f->ndb, &row));
+    return failures;
+}
+
+static int rcn_phase_provable_tip(struct rcn_fixture *f)
+{
+    int failures = 0;
+    struct json_value res;
+    bool ok;
+    reducer_frontier_provable_tip_set(1);
+    rcn_call(rpc_getblockchaininfo, &res, &ok);
+    RCN_CHECK("lower provable tip: identity and time match",
+              ok && json_get_int(json_get(&res, "blocks")) == 1 &&
+              rcn_str_is(json_get(&res, "bestblockhash"), f->hex[1]) &&
+              json_get(&res, "tiptime") != NULL &&
+              json_get_int(json_get(&res, "tiptime")) == f->b[1].nTime);
+    json_free(&res);
+    reducer_frontier_provable_tip_set(3);
+    rcn_call(rpc_getblockchaininfo, &res, &ok);
+    RCN_CHECK("unresolved tip: no tiptime", ok && !json_get(&res, "tiptime"));
+    json_free(&res);
+    reducer_frontier_provable_tip_set(2);
     return failures;
 }
 
@@ -306,6 +330,7 @@ int test_rpc_chaininfo_nodb(void)
     main_state_init(&f.ms);
 
     failures += rcn_fixture_build(&f);
+    failures += rcn_phase_provable_tip(&f);
     failures += rcn_phase_db_held(&f);
     failures += rcn_phase_db_only_hash(&f);
     failures += rcn_phase_cs_main_held(&f);

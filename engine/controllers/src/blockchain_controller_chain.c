@@ -73,7 +73,7 @@ static int gbci_push_unresolved_tip(struct json_value *result,
     return hdr_h;
 }
 
-/* Push bestblockhash, mediantime, difficulty and chainwork for the tip. */
+/* Push bestblockhash, tiptime, mediantime, difficulty and chainwork for the tip. */
 static void gbci_push_tip_identity(struct json_value *result,
                                    struct block_index *tip)
 {
@@ -85,9 +85,11 @@ static void gbci_push_tip_identity(struct json_value *result,
 
     /* Median-time-past at tip — zclassicd parity for BIP113 / mempool
      * timestamp checks. */
-    if (tip)
+    if (tip) {
+        json_push_kv_int(result, "tiptime", tip->nTime);
         json_push_kv_int(result, "mediantime",
                          block_index_get_median_time_past(tip));
+    }
 
     json_push_kv_real(result, "difficulty", difficulty_from_index(tip));
 
@@ -236,7 +238,7 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
      * that rewinds under a reorg. Mirror getblockcount (which already serves
      * reducer_frontier_provable_tip_cached) — and resolve the WHOLE reported
      * best block AT H* so every tip-derived field below (bestblockhash,
-     * mediantime, difficulty, chainwork, valuePools, upgrade status) stays
+     * tiptime, mediantime, difficulty, chainwork, valuePools, upgrade status) stays
      * internally consistent with the reported "blocks" rather than a higher
      * active tip leaking through mid-fold / post-reorg.
      *
