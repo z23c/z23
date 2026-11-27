@@ -38,8 +38,6 @@
 
 /* ── Module state ──────────────────────────────────────────────────── */
 
-static struct main_state       *g_ms      = NULL;
-static const char              *g_datadir = NULL;
 static struct liveness_contract g_contract;
 static _Atomic supervisor_child_id g_id = SUPERVISOR_INVALID_ID;
 
@@ -236,14 +234,13 @@ static void recovery_coordinator_tick(struct liveness_contract *c)
 
 void recovery_coordinator_set_datadir(const char *datadir)
 {
-    g_datadir = datadir; /* process-lifetime string from boot ctx */
+    (void)datadir;
 }
 
 void recovery_coordinator_register(struct main_state *ms)
 {
     if (!ms) return;
     if (atomic_load(&g_id) != SUPERVISOR_INVALID_ID) return; /* idempotent */
-    g_ms = ms;
     liveness_contract_init(&g_contract, "chain.recovery_coordinator");
     atomic_store(&g_contract.period_secs, (int64_t)30);
     atomic_store(&g_contract.deadline_secs, (int64_t)0);
