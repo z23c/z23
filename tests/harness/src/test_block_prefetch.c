@@ -19,6 +19,8 @@
 #define _GNU_SOURCE
 #include "test/test_core.h"
 
+#include "chain/chainparams.h"
+#include "core/serialize.h"
 #include "storage/block_prefetch.h"
 #include "storage/disk_block_io.h"
 #include "primitives/block.h"
@@ -406,6 +408,51 @@ static int t_warm_microbench(void)
     return failures;
 }
 
+/* Heights two and three refer to the selected frame by payload and header
+ * position. Processing height three guarantees the height-two LRU write has
+ * completed, even when the worker and assertion run on different CPUs. */
+static bool bpt_profile_frames(const struct chain_research_descriptor *d, const char *dir)
+{
+    struct bpt_ctx ctx = { .n = 3, .gap_at = -1, .bad_file_at = -1 };
+    struct byte_stream in;
+    stream_init_from_data(&in, d->genesis_wire, d->genesis_wire_len);
+    struct block b;
+    block_init(&b);
+    const uint8_t foreign[4] = {0x24, 0xe9, 0x27, 0x64};
+    for (int i = 0; i < 2; i++) disk_block_pos_init(&ctx.pos[i]);
+    bool ok = block_deserialize(&b, &in) &&
+        write_block_to_disk(&b, &ctx.pos[0], dir, foreign) &&
+        write_block_to_disk(&b, &ctx.pos[1], dir, d->chain->pchMessageStart);
+    block_free(&b);
+    stream_free(&in);
+    if (!ok || ctx.pos[1].nPos < 8) return false;
+    ctx.pos[2] = ctx.pos[1];
+    ctx.pos[2].nPos -= 8;
+    struct block_prefetch_config cfg = bpt_cfg(64 * 1024);
+    cfg.force_warm = true;
+    if (!block_prefetch_start(dir, &cfg, bpt_cursor, &ctx, bpt_pos, &ctx)) return false;
+    uint8_t bytes[4096];
+    ok = bpt_wait_processed(2, 30000) &&
+        block_prefetch_lru_get(&ctx.pos[0], bytes, sizeof(bytes)) == -1 &&
+        block_prefetch_lru_get(&ctx.pos[1], bytes, sizeof(bytes)) == (ssize_t)d->genesis_wire_len &&
+        !memcmp(bytes, d->genesis_wire, d->genesis_wire_len);
+    block_prefetch_stop();
+    return ok;
+}
+
+static int t_profile_frames(void)
+{
+    char dir[256];
+    bpt_make_dir(dir, sizeof(dir));
+    bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+    bool ok = selected && bpt_profile_frames(chain_research_profile_current(), dir);
+    chain_params_select(CHAIN_MAIN);
+    disk_block_io_close_cache();
+    bpt_cleanup(dir);
+    printf("profile prefetch retains selected genesis and skips foreign frame... %s\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_block_prefetch(void);
 int test_block_prefetch(void)
 {
@@ -416,6 +463,7 @@ int test_block_prefetch(void)
     failures += t_bounded_memory();
     failures += t_misspath_failsafe();
     failures += t_warm_microbench();
+    failures += t_profile_frames();
     block_prefetch_stop();        /* leave no worker running for sibling groups */
     return failures;
 }
