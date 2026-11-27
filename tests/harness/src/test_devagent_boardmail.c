@@ -50,6 +50,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -1452,6 +1453,13 @@ static bool bmx_directory_result(bool known, size_t count, bool truncated)
     json_free(&names); return ok;
 }
 
+static bool bmx_receiver_unknown(const struct json_value *dir)
+{
+    const char *record = json_get_str(json_get(dir, "receiver_record"));
+    const char *lock = json_get_str(json_get(dir, "receiver_lock"));
+    return record && lock && !strcmp(record, "absent") && !strcmp(lock, "held");
+}
+
 static bool bmx_brief_directory(void)
 {
     struct bmx_call c; bmx_begin(&c, "fleet.steer.brief", "zcl.fleet_steer_brief.v1");
@@ -1466,7 +1474,8 @@ static bool bmx_brief_directory(void)
         if (name) { b |= !strcmp(name, "node-b"); d |= !strcmp(name, "node-c"); }
     }
     bool ok = bmx_ok(&c) && state && !strcmp(state, "complete") &&
-        labels && json_size(labels) == 2u && b && d && json_size(dir) == 5u &&
+        labels && json_size(labels) == 2u && b && d && json_size(dir) == 7u &&
+        bmx_receiver_unknown(dir) &&
         json_get(&c.reply.data, "agents") != NULL;
     bmx_end(&c); return ok;
 }
@@ -1633,7 +1642,19 @@ static int bmx_t_directory(void)
     TEST("boardmail: verified directory names and bounded truncation") {
         ASSERT(bmx_setup("directory")); bmx_use(BMX_A); ASSERT(bmx_own_key());
         ASSERT(bmx_directory_result(true, 2u, false));
-        ASSERT(bmx_brief_directory());
+        char path[1600];
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/receive", g_bmx_state[BMX_A]);
+        ASSERT(mkdir(path, 0700) == 0 || errno == EEXIST);
+        ASSERT(bmx_write(BMX_A, "receive/receive.lock", "", "wb"));
+        ASSERT(bmx_write(BMX_A, "mail/outbox.jsonl",
+            "{\"seq\":1,\"ts\":\"2026-11-27T00:00:00Z\",\"from\":\"node-a\",\"to\":\"node-b\",\"kind\":\"result\",\"body\":\"pending\",\"ref\":\"pending\"}\n", "wb"));
+        (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/receive.lock", g_bmx_state[BMX_A]);
+        int fd = open(path, O_RDWR);
+        ASSERT(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+        bool observed = bmx_brief_directory();
+        (void)flock(fd, LOCK_UN);
+        close(fd);
+        ASSERT(observed);
         ASSERT(bmx_grant_directory("brief", "withheld", 0u));
         ASSERT(bmx_grant_directory("brief,send", "complete", 2u));
         ASSERT(bmx_directory_expand());

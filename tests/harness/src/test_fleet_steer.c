@@ -1036,13 +1036,17 @@ _test_next:;
     return failures;
 }
 
+static const char *fmx_cstr(const struct json_value *o, const char *k);
+
 static bool fmx_directory_state(const struct fmx_call *c, const char *state)
 {
     const struct json_value *dir = json_get(&c->reply.data, "mailbox_directory");
     const char *actual = json_get_str(json_get(dir, "state"));
     const struct json_value *labels = json_get(dir, "labels");
     return actual && !strcmp(actual, state) && labels && labels->type == JSON_ARR &&
-           json_size(labels) == 0 && fmx_arr(c, "agents") != NULL;
+           json_size(labels) == 0 && fmx_arr(c, "agents") != NULL &&
+           (strcmp(state, "withheld") ||
+            (!json_get(dir, "receiver_record") && !json_get(dir, "receiver_label")));
 }
 
 static int fmx_t_mailbox_access(void)
@@ -1057,7 +1061,8 @@ static int fmx_t_mailbox_access(void)
         ASSERT(fmx_directory_state(&b, "withheld")); fmx_end(&b);
         fmx_brief(&b, sender, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
-        ASSERT(fmx_directory_state(&b, "unknown")); fmx_end(&b);
+        ASSERT(fmx_directory_state(&b, "unknown"));
+        fmx_end(&b);
         fmx_brief(&b, NULL, 0);
         ASSERT(fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b));
         ASSERT(fmx_directory_state(&b, "unknown")); fmx_end(&b);
@@ -7704,6 +7709,61 @@ _test_next:;
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool fmx_receiver_held_seen(void)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof(path), "%s/z23/dev/receive/receive.lock", g_fmx_state);
+    int held = open(path, O_RDWR);
+    bool locked = held >= 0 && flock(held, LOCK_EX | LOCK_NB) == 0;
+    struct fmx_call b;
+    fmx_brief(&b, NULL, 0);
+    bool seen = fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b);
+    const struct json_value *dir = json_get(&b.reply.data, "mailbox_directory");
+    seen = seen && dir && !strcmp(fmx_cstr(dir, "receiver_lock"), "held");
+    fmx_end(&b);
+    if (held >= 0) { (void)flock(held, LOCK_UN); close(held); }
+    return locked && seen;
+}
+#endif
+
+static int fmx_t_receiver_identity(void)
+{
+    int failures = 0;
+
+    TEST("steer: receiver record and lock stay distinct from host sender") {
+        struct fmx_call b;
+        fmx_isolate("receiver_identity");
+        fmx_state_file("receive", "resident.state",
+                       "receiver=r2-devfleet\nworkspace=\n", false);
+        fmx_state_file("receive", "receive.lock", "", false);
+        const char *prior = getenv("BOARD_AGENT");
+        char saved[128] = "";
+        if (prior) (void)snprintf(saved, sizeof(saved), "%s", prior);
+        bool had = prior != NULL;
+        ASSERT(setenv("BOARD_AGENT", "r2", 1) == 0);
+        fmx_brief(&b, NULL, 0);
+        bool ran = fmx_run(&b, zcl_native_handle_fleet_steer_brief) && fmx_ok(&b);
+        const struct json_value *dir = json_get(&b.reply.data, "mailbox_directory");
+        bool correct = dir && !strcmp(fmx_cstr(dir, "receiver_label"), "r2-devfleet") &&
+            !strcmp(fmx_cstr(dir, "receiver_record"), "present") &&
+            !strcmp(fmx_cstr(dir, "receiver_lock"), "free") &&
+            !strcmp(fmx_cstr(dir, "state_scope"), "process_state_root");
+        fmx_end(&b);
+#if !defined(_WIN32)
+        correct = correct && fmx_receiver_held_seen();
+#endif
+        if (had) (void)setenv("BOARD_AGENT", saved, 1); else (void)unsetenv("BOARD_AGENT");
+        ASSERT(ran && correct);
+        fmx_restore();
+        PASS();
+    }
+
+_test_next:;
+    fmx_restore();
+    return failures;
+}
+
 static int fmx_t_receiver_down(void)
 {
     int failures = 0;
@@ -12178,6 +12238,7 @@ int test_fleet_steer(void)
     failures += fmx_t_worker_answers();
     failures += fmx_t_queued_stale();
     failures += fmx_t_directive_close_expiry();
+    failures += fmx_t_receiver_identity();
     failures += fmx_t_receiver_down();
     failures += fmx_t_export_stall();
     failures += fmx_t_receipt_tokens();

@@ -813,4 +813,6 @@ int zcl_devagent_run_group(const char *root, const char *selector,
                            int timeout_ms, struct zcl_devagent_verdict *out,
                            bool *truncated);
 
+const char *zcl_devagent_state_lock_observe(const char *sub, const char *file);
+const char *zcl_devagent_receive_resident_observe(const char *path, char *receiver, size_t receiver_cap, char *workspace, size_t workspace_cap);
 #endif /* ZCL_NATIVE_DEVAGENT_H */

@@ -2930,7 +2930,7 @@ static const char *rcv_lock_state(const struct rcv_paths *p)
 
 #endif /* _WIN32 */
 
-static const char *rcv_resident_observe(const char *path, char *receiver,
+const char *zcl_devagent_receive_resident_observe(const char *path, char *receiver,
                                         size_t receiver_cap, char *workspace,
                                         size_t workspace_cap)
 {
@@ -3574,7 +3574,7 @@ static void rcv_status(const char *receiver, const char *workspace,
     rcv_push_stats(reply, &st);
     rcv_push_intake(reply, &p);
     char resident_receiver[64], resident_workspace[4096];
-    const char *resident_state = rcv_resident_observe(
+    const char *resident_state = zcl_devagent_receive_resident_observe(
         p.resident, resident_receiver, sizeof(resident_receiver),
         resident_workspace, sizeof(resident_workspace));
     (void)json_push_kv_str(&reply->data, "resident_receiver",

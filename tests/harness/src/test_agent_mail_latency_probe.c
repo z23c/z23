@@ -27,6 +27,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 int test_agent_mail_latency_probe(void);
@@ -503,6 +508,46 @@ static bool pmt_registry(const struct json_value *input, struct json_value *out,
 
 /* ── scenarios (return the sender's reply) ─────────────────────────────── */
 
+static int pmt_test_sender_observation(void)
+{
+    int failures = 0;
+    struct pmt_call a;
+    TEST("probe: inferred sender warns only for a held receiver mismatch") {
+        pmt_world("sender-source", 0, true, true, -1);
+        char root[1300], dir[1400], path[1500];
+        ASSERT(platform_state_root(root, sizeof(root)));
+        ASSERT(snprintf(dir, sizeof(dir), "%s/receive", root) > 0);
+        ASSERT(platform_private_directory_ensure(dir));
+        ASSERT(snprintf(path, sizeof(path), "%s/resident.state", dir) > 0);
+        FILE *f = fopen(path, "w");
+        ASSERT(f && fputs("receiver=r2-devfleet\nworkspace=\n", f) >= 0 && fclose(f) == 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/receive.lock", dir) > 0);
+        int fd = open(path, O_CREAT | O_RDWR, 0600);
+        ASSERT(fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0);
+        const char *old = getenv("BOARD_AGENT");
+        char saved[128] = "";
+        if (old) (void)snprintf(saved, sizeof(saved), "%s", old);
+        bool had = old != NULL;
+        ASSERT(setenv("BOARD_AGENT", "r2", 1) == 0);
+        pmt_begin(&a, PMT_PATH, "zcl.agent_mail_probe.v1");
+        ASSERT(json_push_kv_str(&a.input, "action", "echo"));
+        ASSERT(json_push_kv_int(&a.input, "timeout_ms", 1));
+        zcl_native_handle_dev_agent_mail_probe(&a.request, &a.reply);
+        bool warned = pmt_ok(&a) && !strcmp(pmt_str(&a, "from"), "r2") &&
+            !strcmp(pmt_str(&a, "from_source"), "BOARD_AGENT") &&
+            strstr(pmt_str(&a, "sender_warning"), "recorded receiver") != NULL;
+        pmt_end(&a);
+        (void)flock(fd, LOCK_UN);
+        close(fd);
+        if (had) (void)setenv("BOARD_AGENT", saved, 1); else (void)unsetenv("BOARD_AGENT");
+        ASSERT(warned);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
 static void pmt_run_full(struct pmt_call *c, const char *tag, int64_t offset_b,
                          bool with_board, bool use_since, int drop,
                          int64_t probes, int64_t timeout_ms)
@@ -522,6 +567,7 @@ int test_agent_mail_latency_probe(void)
     enum zcl_command_exit exit_code;
 
     pmt_isolate_begin();
+    failures += pmt_test_sender_observation();
 
     TEST("probe: registered with its typed keys and a distinct group") {
         const struct zcl_command_spec *spec = zcl_command_registry_find(

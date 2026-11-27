@@ -96,11 +96,13 @@
 
 #include "command/native_command.h"
 #include "command/native_devagent_mailprobe.h"
+#include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/rng.h"
+#include "platform/state_root.h"
 #include "platform/time_compat.h"
 
 #include <ctype.h>
@@ -492,6 +494,7 @@ static const char *pm_walk(const struct zcl_command_request *request,
 struct pm_input {
     bool send;
     char from[PM_NAME_MAX];
+    const char *from_source;
     char to[PM_NAME_MAX];
     char since[PM_TOKEN_CAP];
     int64_t probes, interval_ms, timeout_ms;
@@ -519,16 +522,23 @@ static bool pm_forbidden_key(const struct json_value *input,
 
 /* The sending name: input `from`, else $BOARD_AGENT, else $USER, else local
  * (the order dev.agent.mail post uses, so a probe row and a plain post agree). */
-static bool pm_identity(const struct json_value *input, char *out)
+static bool pm_identity(const struct json_value *input, char *out, const char **source)
 {
     const struct json_value *v = json_get(input, "from");
     const char *name = v && v->type == JSON_STR ? json_get_str(v) : NULL;
-    if (!name || !name[0])
+    *source = "input";
+    if (!name || !name[0]) {
         name = getenv("BOARD_AGENT");
-    if (!name || !name[0])
+        *source = "BOARD_AGENT";
+    }
+    if (!name || !name[0]) {
         name = getenv("USER");
-    if (!name || !name[0])
+        *source = "USER";
+    }
+    if (!name || !name[0]) {
         name = "local";
+        *source = "local";
+    }
     if (!pm_name_ok(name))
         return false;
     (void)snprintf(out, PM_NAME_MAX, "%s", name);
@@ -556,7 +566,7 @@ static bool pm_parse_names(const struct json_value *input, struct pm_input *in,
 {
     const struct json_value *to = json_get(input, "to");
     const struct json_value *since = json_get(input, "since");
-    if (!pm_identity(input, in->from)) {
+    if (!pm_identity(input, in->from, &in->from_source)) {
         pm_refuse(reply, "BAD_INPUT", "from names this box", "input.from");
         return false;
     }
@@ -1185,6 +1195,27 @@ static unsigned pm_judge_all(struct pm_send *st, int64_t *sorted,
     return nvalid;
 }
 
+/* Inferred sender and receiver record are separate local observations. */
+static bool pm_sender_observation(struct json_value *data, const struct pm_input *in)
+{
+    char root[4096], path[4160], receiver[64] = "", workspace[4096] = "";
+    bool mismatch = false;
+    if (strcmp(in->from_source, "input") &&
+        platform_state_root_existing(root, sizeof(root))) {
+        int n = snprintf(path, sizeof(path), "%s/receive/resident.state", root);
+        if (n > 0 && (size_t)n < sizeof(path)) {
+            const char *record = zcl_devagent_receive_resident_observe(
+                path, receiver, sizeof(receiver), workspace, sizeof(workspace));
+            mismatch = (!strcmp(record, "configured") || !strcmp(record, "unconfigured")) &&
+                !strcmp(zcl_devagent_state_lock_observe("receive", "receive.lock"), "held") &&
+                strcmp(receiver, in->from) != 0;
+        }
+    }
+    return json_push_kv_str(data, "from_source", in->from_source) &&
+        (!mismatch || json_push_kv_str(data, "sender_warning",
+            "inferred sender differs from the recorded receiver while receive.lock is held; verify the intended state root and sender"));
+}
+
 static bool pm_send_report(struct pm_send *st, struct zcl_command_reply *reply)
 {
     struct json_value arr;
@@ -1201,6 +1232,7 @@ static bool pm_send_report(struct pm_send *st, struct zcl_command_reply *reply)
     ok = samples_ok && json_push_kv_str(&reply->data, "leaf", "dev.agent.mail.probe") &&
          json_push_kv_str(&reply->data, "role", "send") &&
          json_push_kv_str(&reply->data, "from", st->in.from) &&
+         pm_sender_observation(&reply->data, &st->in) &&
          json_push_kv_str(&reply->data, "peer", st->in.to) &&
          json_push_kv_str(&reply->data, "nonce", st->nonce) &&
          json_push_kv_str(&reply->data, "transport", pm_transport(st)) &&
@@ -1439,6 +1471,7 @@ static bool pm_echo_report(struct pm_echo *e, struct zcl_command_reply *reply)
     bool ok = json_push_kv_str(&reply->data, "leaf", "dev.agent.mail.probe") &&
               json_push_kv_str(&reply->data, "role", "echo") &&
               json_push_kv_str(&reply->data, "from", e->in.from) &&
+              pm_sender_observation(&reply->data, &e->in) &&
               json_push_kv_int(&reply->data, "answered", e->posted) &&
               json_push_kv_int(&reply->data, "skipped_oversize",
                                e->skipped_oversize) &&

@@ -2572,7 +2572,7 @@ struct fmc_queue_view {
 
 /* This host's resident locks, probed without creating anything. "held"
  * means some process holds it — liveness, never work. */
-static const char *fmc_lock_state(const char *sub, const char *file)
+const char *zcl_devagent_state_lock_observe(const char *sub, const char *file)
 {
     char root[4096], path[4096 + 64];
     const char *state = "unavailable";
@@ -6524,6 +6524,33 @@ static bool fmc_routes_allowed(const struct fmc_caller *caller)
     return !caller->grant || fmc_scope_has(caller->scopes, "send");
 }
 
+/* The resident record is historical; the lock is a separate observation. */
+static bool fmc_receiver_identity(struct json_value *directory, bool allowed, bool known)
+{
+    char label[64] = "", workspace[4096] = "", root[4096], path[4160];
+    const char *record = "unknown", *lock = "unknown";
+    if (allowed && platform_state_root_existing(root, sizeof(root))) {
+        int n = snprintf(path, sizeof(path), "%s/receive/resident.state", root);
+        if (n > 0 && (size_t)n < sizeof(path)) {
+            record = zcl_devagent_receive_resident_observe(
+                path, label, sizeof(label), workspace, sizeof(workspace));
+            lock = zcl_devagent_state_lock_observe("receive", "receive.lock");
+        }
+    }
+    if (!allowed || !strcmp(record, "unknown")) return true;
+    if (!strcmp(record, "absent") || !strcmp(record, "malformed")) {
+        if (!known) return true;
+        return json_push_kv_str(directory, "receiver_record", record) &&
+            json_push_kv_str(directory, "receiver_lock", lock);
+    }
+    record = "present";
+    return json_push_kv_str(directory, "receiver_label", label) &&
+        json_push_kv_str(directory, "receiver_record", record) &&
+        json_push_kv_str(directory, "receiver_lock", lock) &&
+        json_push_kv_str(directory, "receiver_source", "receive_resident_record") &&
+        json_push_kv_str(directory, "state_scope", "process_state_root");
+}
+
 /* A verified local roster snapshot is not a receiver-liveness observation.
  * A brief-only grant does not gain the send scope's route-name disclosure. */
 static bool fmc_mailbox_directory(struct json_value *data, const struct fmc_caller *caller,
@@ -6541,6 +6568,7 @@ static bool fmc_mailbox_directory(struct json_value *data, const struct fmc_call
         json_push_kv_str(&directory, "source", "verified_roster") &&
         json_push_kv_str(&directory, "freshness", known ? "local_snapshot" : "unknown") &&
         json_push_kv_str(&directory, "observed_at", iso) &&
+        fmc_receiver_identity(&directory, allowed, known) &&
         json_push_kv(&directory, "labels", &names) && json_push_kv(data, "mailbox_directory", &directory);
     json_free(&names); json_free(&directory); return ok;
 }
@@ -7343,7 +7371,7 @@ static void fmc_do_brief(const struct zcl_command_request *req,
         mc.changes_cap = tmp > FMC_CHANGES_MAX ? FMC_CHANGES_MAX : tmp;
     /* Name a stopped receiver before the mail scan fills blockers. */
     memset(&lo, 0, sizeof(lo));
-    lo.receive_lock = fmc_lock_state("receive", "receive.lock");
+    lo.receive_lock = zcl_devagent_state_lock_observe("receive", "receive.lock");
     fmc_receiver_down_incident(&l.blockers, lo.receive_lock);
     /* Then this box's own stalled export, which explains some stale rows:
      * read before the walk, so each row is held against that cursor. */
@@ -7360,8 +7388,8 @@ static void fmc_do_brief(const struct zcl_command_request *req,
     fmc_apply_completed(&l.changes, &l.outcomes);
     fmc_capacity_emit(&l.capacity, &qv);
     fmc_brief_evidence(&l, &mv, mail_cursor, &ledger, mc.now);
-    lo.worker_lock = fmc_lock_state("queue", "worker.lock");
-    lo.receive_lock = fmc_lock_state("receive", "receive.lock");
+    lo.worker_lock = zcl_devagent_state_lock_observe("queue", "worker.lock");
+    lo.receive_lock = zcl_devagent_state_lock_observe("receive", "receive.lock");
     lo.mail_ok = mv.ok;
     fmc_intake_read(&lo);
     fmc_roster_local(&ro, &qv, &lo);
