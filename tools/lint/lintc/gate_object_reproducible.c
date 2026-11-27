@@ -771,14 +771,17 @@ bool or_run_compiler(const struct or_cmd *c, char *diag, int *timeout_ms)
     return ok;
 }
 
-/* out.o in the working directory: a regular, non-empty, well-formed ELF. */
-static unsigned char *or_take_object(size_t *len)
+/* The shipped Clang LTO intermediate is LLVM bitcode. Preserve its original
+ * bytes for hashing; parsing to text only verifies the module. */
+static unsigned char *or_take_object(struct or_cmd *cmd, bool shipped, size_t *len,
+                                     char *diag, int *timeout_ms)
 {
     struct stat st;
     if (stat("out.o", &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
         return NULL;
     unsigned char *b = or_read_file("out.o", len);
-    if (b && !or_elf_valid(b, *len)) {
+    if (b && !or_elf_valid(b, *len)
+        && !(shipped && or_validate_lto(cmd, b, *len, diag, timeout_ms))) {
         free(b);
         return NULL;
     }
@@ -787,7 +790,7 @@ static unsigned char *or_take_object(size_t *len)
 
 /* The previous object is deleted first, so a compiler that fails leaves
  * nothing to read. */
-unsigned char *or_compile_run(const struct or_cmd *c, char *diag,
+unsigned char *or_compile_run(struct or_cmd *c, bool shipped, char *diag,
                               size_t *len, const char **why, int *timeout_ms)
 {
     if (unlink("out.o") != 0 && errno != ENOENT) {
@@ -800,9 +803,10 @@ unsigned char *or_compile_run(const struct or_cmd *c, char *diag,
                                  : "compiler did not exit with status 0";
         return NULL;
     }
-    unsigned char *o = or_take_object(len);
+    unsigned char *o = or_take_object(c, shipped, len, diag, timeout_ms);
     if (!o)
-        *why = "no non-empty well-formed ELF object was produced";
+        *why = shipped ? "no well-formed ELF or validated LTO bitcode object was produced"
+                       : "no non-empty well-formed ELF object was produced";
     return o;
 }
 
@@ -853,7 +857,7 @@ static unsigned char *or_compile_in(const struct or_ctx *x, const char *root,
         diag[0] = '\0';
     if (c && diag && or_build_cmd(x, x->cc, root, unit, prefix_map, c)
         && getcwd(saved, sizeof saved) && chdir(root) == 0) {
-        obj = or_compile_run(c, diag, len, &why, &tmo_ms);
+        obj = or_compile_run(c, x->cs->shipped, diag, len, &why, &tmo_ms);
         if (chdir(saved) != 0) {
             free(obj);
             obj = NULL;

@@ -380,15 +380,26 @@ bool or_elf_linked(const unsigned char *b, size_t len)
     return or_elf_typed(b, len, 2, 3);
 }
 
-/* First section (by header order) whose name or contents differ. Writes the
- * name into out; always writes a non-empty description. */
+static bool or_bitcode_signature(const unsigned char *b, size_t len)
+{
+    return len >= 4 && len % 4 == 0 && memcmp(b, "BC\xc0\xde", 4) == 0;
+}
+
+static const char *or_non_elf_format(const unsigned char *a, size_t la,
+                                     const unsigned char *b, size_t lb)
+{
+    return or_bitcode_signature(a, la) && or_bitcode_signature(b, lb)
+               ? "<llvm-bitcode>" : "<not-elf64-le>";
+}
+
+/* Name the first differing ELF section, or the format for LLVM modules. */
 void or_elf_first_diff(const unsigned char *a, size_t la,
                               const unsigned char *b, size_t lb, char *out,
                               size_t cap)
 {
     struct or_elf ea, eb;
     if (!or_elf_open(&ea, a, la) || !or_elf_open(&eb, b, lb)) {
-        (void)snprintf(out, cap, "<not-elf64-le>");
+        (void)snprintf(out, cap, "%s", or_non_elf_format(a, la, b, lb));
         return;
     }
     uint64_t n = ea.shnum < eb.shnum ? ea.shnum : eb.shnum;
@@ -776,6 +787,37 @@ static int or_selftest_excuse(void)
     return 0;
 }
 
+static bool or_lto_enabled(const char *const *argv, int n)
+{
+    bool enabled = false;
+    for (int i = 1; i < n; i++) {
+        if (strcmp(argv[i], "-fno-lto") == 0) enabled = false;
+        if (strcmp(argv[i], "-flto") == 0 || strncmp(argv[i], "-flto=", 6) == 0)
+            enabled = true;
+    }
+    return enabled;
+}
+
+/* Require both the LTO recipe and raw bitcode signature, then let the same
+ * compiler read and disassemble the entire module. A quiet exit without an
+ * actual fresh disassembly is insufficient. The caller owns the input bytes. */
+bool or_validate_lto(struct or_cmd *c, const unsigned char *b, size_t len,
+                     char *diag, int *timeout_ms)
+{
+    if (!or_bitcode_signature(b, len) || !or_lto_enabled(c->argv, c->n))
+        return false;
+    if (unlink("verified.ll") != 0 && errno != ENOENT)
+        return false;
+    c->n = 1; /* keep the resolved, hashed compiler as argv[0] */
+    const char *args[] = { "-S", "-emit-llvm", "-x", "ir", "out.o", "-o", "verified.ll" };
+    for (size_t i = 0; i < sizeof args / sizeof args[0]; i++)
+        if (!or_add(c, args[i])) return false;
+    struct stat st;
+    bool ok = or_seal(c, true) && or_run_compiler(c, diag, timeout_ms)
+              && stat("verified.ll", &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+    return (unlink("verified.ll") == 0 || errno == ENOENT) && ok;
+}
+
 /* Build a one-compiler command and run it through the real compile runner in
  * the current directory; 1 object accepted, 0 refused, -1 setup failure. */
 static int or_rt_run(const char *const *words, int nw, bool stale)
@@ -794,7 +836,7 @@ static int or_rt_run(const char *const *words, int nw, bool stale)
         size_t len = 0;
         const char *why = "";
         int tmo = 0;
-        unsigned char *o = or_compile_run(c, diag, &len, &why, &tmo);
+        unsigned char *o = or_compile_run(c, false, diag, &len, &why, &tmo);
         res = o ? 1 : 0;
         free(o);
     }
@@ -961,6 +1003,20 @@ static int or_selftest_summary(void)
     return 0;
 }
 
+static int or_selftest_lto(void)
+{
+    const char *args[] = { "cc", "-flto=thin", "-fno-lto", "-flto" };
+    if (or_lto_enabled(args, 1) || !or_lto_enabled(args, 2) ||
+        or_lto_enabled(args, 3) || !or_lto_enabled(args, 4))
+        return or_fail("the last LTO option must control bitcode admission");
+    const unsigned char raw[] = { 'B', 'C', 0xc0, 0xde, 1, 0, 0, 0 };
+    char sec[OR_NAME];
+    or_elf_first_diff(raw, sizeof raw, raw, sizeof raw, sec, sizeof sec);
+    if (strcmp(sec, "<llvm-bitcode>") != 0 || or_bitcode_signature(raw, 7))
+        return or_fail("bitcode must have a whole-word length and its own mismatch diagnostic");
+    return 0;
+}
+
 int check_object_reproducible_selftest(void)
 {
     char hex[65];
@@ -973,7 +1029,7 @@ int check_object_reproducible_selftest(void)
     if (strcmp(hex, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd4"
                     "19db06c1") != 0)
         return or_fail("SHA-256 known answer for the two-block message");
-    if (or_selftest_elf() != 0 || or_selftest_elf_bounds() != 0
+    if (or_selftest_lto() != 0 || or_selftest_elf() != 0 || or_selftest_elf_bounds() != 0
         || or_selftest_xlink_elf() != 0
         || or_selftest_args() != 0 || or_selftest_contains() != 0
         || or_selftest_excuse() != 0 || or_selftest_runner() != 0

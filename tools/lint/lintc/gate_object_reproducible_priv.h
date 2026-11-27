@@ -155,7 +155,9 @@ unsigned char *or_xlink_build(const struct or_ctx *x, const char *root,
                               size_t *len);
 bool or_xlink_elf_ok(const unsigned char *b, size_t len);
 int or_xlink_tool(struct or_ctx *x);
-unsigned char *or_compile_run(const struct or_cmd *c, char *diag, size_t *len,
+bool or_validate_lto(struct or_cmd *c, const unsigned char *b, size_t len,
+                     char *diag, int *timeout_ms);
+unsigned char *or_compile_run(struct or_cmd *c, bool shipped, char *diag, size_t *len,
                               const char **why, int *timeout_ms);
 
 #endif
