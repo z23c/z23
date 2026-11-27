@@ -70,8 +70,7 @@ probe_fuse_ld()
     local ld="$1"
     local out="$ROOT/build/.ld-probe-$ld"
     mkdir -p "$ROOT/build" || return 1
-    if printf 'int main(void){return 0;}\n' |
-        "$CC" -fuse-ld="$ld" -x c - -o "$out" >/dev/null 2>&1; then
+    if "$CC" -fuse-ld="$ld" -x c - -o "$out" <<< 'int main(void){return 0;}' >/dev/null 2>&1; then
         rm -f "$out"
         return 0
     fi
