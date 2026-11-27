@@ -23,8 +23,8 @@
  * transparent branch and z_sendmany died on "Invalid transparent address" —
  * i.e. no shielded payment could be made on any isolated fixture.
  *
- * The trailing '1' is bech32's separator, so "zs" cannot swallow a
- * hypothetical "zsfoo1..." address. Refusing (returning false) is always the
+ * The final '1' is bech32's separator, so an HRP containing '1'
+ * cannot be mistaken for the selected HRP. Refusing (returning false) is always the
  * safe direction: the address then has to decode as transparent or the send
  * is refused outright. */
 bool wallet_addr_is_sapling(const char *addr)
@@ -36,7 +36,8 @@ bool wallet_addr_is_sapling(const char *addr)
     size_t hrp_len = hrp ? strlen(hrp) : 0;
     if (hrp_len == 0)
         return false;
-    return strncmp(addr, hrp, hrp_len) == 0 && addr[hrp_len] == '1';
+    return strncmp(addr, hrp, hrp_len) == 0 && addr[hrp_len] == '1' &&
+           strrchr(addr, '1') == addr + hrp_len;
 }
 
 enum z_sendmany_memo_status {

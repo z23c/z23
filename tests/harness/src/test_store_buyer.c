@@ -849,6 +849,7 @@ static int tsb_zaddr_prefix_follows_chain(void)
     bool ok = true;
     chain_params_select(CHAIN_MAIN);
     ok = ok && wallet_addr_is_sapling("zs1abcdefghijklmnop");
+    ok = ok && !wallet_addr_is_sapling("zs1demo1abcdef");
     ok = ok && !wallet_addr_is_sapling("zregtestsapling1abcdef");
     ok = ok && !wallet_addr_is_sapling(TSB_CUSTOMER);
     chain_params_select(CHAIN_REGTEST);
@@ -860,8 +861,6 @@ static int tsb_zaddr_prefix_follows_chain(void)
     chain_params_select(CHAIN_TESTNET);
     ok = ok && wallet_addr_is_sapling("ztestsapling1abcdef");
     ok = ok && !wallet_addr_is_sapling("zs1abcdefghijklmnop");
-    /* The bech32 separator is required, so an HRP that is a prefix of a
-     * longer word cannot be mistaken for one of ours. */
     ok = ok && !wallet_addr_is_sapling("ztestsaplingfoo");
     ok = ok && !wallet_addr_is_sapling(NULL);
     chain_params_select(CHAIN_MAIN);
