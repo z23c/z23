@@ -79,7 +79,8 @@ static bool check_binding(void)
     if (!ironwood_binding_auth_verify(cv, 1, 0, sig, msg).ok) return false;
     memset(key, 0xa5, 32); memcpy(before, key, 32); memset(cv[0], 0xff, 32);
     return !ironwood_binding_key(cv, 2, -200000, key).ok && !memcmp(key, before, 32) &&
-        !ironwood_binding_key(cv, 0, -200000, key).ok;
+        !ironwood_binding_key(cv, 0, -200000, key).ok &&
+        !ironwood_binding_key(cv, SIZE_MAX / 32 + 1, -200000, key).ok && !memcmp(key, before, 32);
 }
 
 int test_ironwood_spend_auth(void)

@@ -3,6 +3,7 @@
 #include "services/ironwood_spend_auth.h"
 #include "ironwood_pasta_internal.h"
 #include "crypto/blake2b.h"
+#include "base/serialize_le.h"
 #include <openssl/bn.h>
 #include <openssl/ec.h>
 #include <string.h>
@@ -49,7 +50,7 @@ static struct zcl_result verify_signature(const uint8_t rk[32], const uint8_t si
                                           const uint8_t sighash[32], const uint8_t base[32],
                                           bool allow_identity)
 {
-    if (!rk || !signature || !sighash) return ZCL_ERR(-1, "Missing spend authorization input");
+    if (!rk || !signature || !sighash) return ZCL_ERR(-1, "Missing signature verification input");
     BN_CTX *ctx = BN_CTX_new();
     EC_GROUP *pallas = NULL, *vesta = NULL;
     BIGNUM *order = BN_new(), *s = BN_lebin2bn(signature + 32, 32, NULL), *c = BN_new();
@@ -59,7 +60,7 @@ static struct zcl_result verify_signature(const uint8_t rk[32], const uint8_t si
     if (ok) ok = challenge(c, order, ctx, rk, signature, sighash) &&
         equation(pallas, ctx, rk, signature, s, c, base, allow_identity);
     BN_free(c); BN_free(s); BN_free(order); EC_GROUP_free(vesta); EC_GROUP_free(pallas); BN_CTX_free(ctx);
-    return ok ? ZCL_OK : ZCL_ERR(-1, "Invalid spend authorization or arithmetic failure");
+    return ok ? ZCL_OK : ZCL_ERR(-1, "Invalid signature or arithmetic failure");
 }
 
 struct zcl_result ironwood_spend_auth_verify(const uint8_t rk[32],
@@ -85,7 +86,7 @@ static bool binding_sum(const EC_GROUP *group, BN_CTX *ctx, EC_POINT *sum,
     uint64_t magnitude = (uint64_t)balance;
     if (balance < 0) magnitude = 0 - magnitude;
     uint8_t raw[8];
-    for (size_t i = 0; i < sizeof raw; ++i) raw[i] = (uint8_t)(magnitude >> (8 * i));
+    zcl_write_u64_le(raw, magnitude);
     BIGNUM *scalar = BN_lebin2bn(raw, sizeof raw, NULL);
     bool ok = value && point && scalar &&
         ironwood_pasta_decode(value_base, IRONWOOD_PALLAS, false, group, value, ctx).ok &&
@@ -115,7 +116,7 @@ static bool encode_binding(const EC_GROUP *group, const EC_POINT *point, BN_CTX 
 struct zcl_result ironwood_binding_key(const uint8_t (*commitments)[32], size_t count,
                                         int64_t balance, uint8_t out[32])
 {
-    if (!commitments || !count || !out) return ZCL_ERR(-1, "Missing binding key input");
+    if (!commitments || !count || count > SIZE_MAX / sizeof *commitments || !out) return ZCL_ERR(-1, "Missing binding key input");
     BN_CTX *ctx = BN_CTX_new();
     EC_GROUP *group = NULL;
     bool ok = ctx && ironwood_pasta_group(IRONWOOD_PALLAS, ctx, &group).ok;
