@@ -313,21 +313,26 @@ static bool reducer_probe_call(struct gate_fixture *f, struct main_state *ms,
 }
 /* Every invocation owns a new map and ancestry. The held intake must leave
  * that state unchanged; both measured intakes therefore have no prior intake. */
+static void reducer_clone_fixture(struct gate_fixture *dst, struct gate_fixture *src)
+{
+    *dst = *src;
+    for (int h = 0; h < 126; ++h) {
+        dst->index[h].pprev = h ? &dst->index[h - 1] : NULL;
+        dst->index[h].phashBlock = &dst->index[h].hashBlock;
+    }
+}
 static bool reducer_probe(struct gate_fixture *f, struct block *candidate, const char *dir,
-                          enum probe_path path, bool hold, struct hold_message_context *result)
+                          enum probe_path path, bool hold, struct hold_message_context *first,
+                          struct hold_message_context *result)
 {
     static struct gate_fixture local;
-    local = *f;
-    for (int h = 0; h < 126; ++h) {
-        local.index[h].pprev = h ? &local.index[h - 1] : NULL;
-        local.index[h].phashBlock = &local.index[h].hashBlock;
-    }
+    reducer_clone_fixture(&local, f);
+    *first = (struct hold_message_context){0};
     struct main_state ms; struct chain_activation_controller ctl;
     bool ok = reducer_fixture_setup(&local, &ms, &ctl, dir, !hold);
     unsigned before = block_index_status_load(&local.index[125]);
     size_t entries = ms.map_block_index.size;
-    struct hold_message_context first = {0};
-    if (ok && hold) ok = reducer_probe_call(&local, &ms, &ctl, candidate, path, true, &first);
+    if (ok && hold) ok = reducer_probe_call(&local, &ms, &ctl, candidate, path, true, first);
     if (ok && hold) ok = before == block_index_status_load(&local.index[125]);
     if (ok && hold) ok = entries == ms.map_block_index.size;
     if (ok && hold) ok = reducer_write_window(&local, dir);
@@ -338,13 +343,68 @@ static bool reducer_probe(struct gate_fixture *f, struct block *candidate, const
 static bool reducer_compare_paths(struct gate_fixture *f, struct block *candidate, const char *dir)
 {
     for (enum probe_path path = PROBE_CATCHUP; path < PROBE_COUNT; ++path) {
-        struct hold_message_context retry = {0}, control = {0};
-        if (!reducer_probe(f, candidate, dir, path, true, &retry)) return false;
-        if (!reducer_probe(f, candidate, dir, path, false, &control)) return false;
+        struct hold_message_context first = {0}, unused = {0}, retry = {0}, control = {0};
+        if (!reducer_probe(f, candidate, dir, path, true, &first, &retry)) return false;
+        if (!reducer_probe(f, candidate, dir, path, false, &unused, &control)) return false;
+        if (!reducer_hold_result(first.admitted, &first.verdict)) {
+            fprintf(stderr, "research gate %s: first probe was not held\n", probe_names[path]);
+            return false;
+        }
+        if (reducer_hold_result(unused.admitted, &unused.verdict)) {
+            fprintf(stderr, "research gate %s: control was held before measurement\n", probe_names[path]);
+            return false;
+        }
+        if (reducer_hold_result(control.admitted, &control.verdict)) {
+            fprintf(stderr, "research gate %s: control was held\n", probe_names[path]);
+            return false;
+        }
         if (!compare_verdict(probe_names[path], retry.admitted, &retry.verdict,
                              control.admitted, &control.verdict)) return false;
     }
     return true;
+}
+static bool reducer_cumulative_holds(struct gate_fixture *f, struct main_state *ms,
+                                     struct chain_activation_controller *ctl,
+                                     struct block *candidate)
+{
+    unsigned before = block_index_status_load(&f->index[125]);
+    size_t entries = ms->map_block_index.size;
+    for (enum probe_path path = PROBE_CATCHUP; path < PROBE_COUNT; ++path) {
+        struct hold_message_context first = {0};
+        if (!reducer_probe_call(f, ms, ctl, candidate, path, true, &first)) return false;
+        if (!reducer_hold_result(first.admitted, &first.verdict)) return false;
+        if (before != block_index_status_load(&f->index[125])) return false;
+        if (entries != ms->map_block_index.size) return false;
+    }
+    return true;
+}
+static bool reducer_cumulative_retries(struct gate_fixture *f, struct main_state *ms,
+                                       struct chain_activation_controller *ctl,
+                                       struct block *candidate, const char *dir)
+{
+    for (enum probe_path path = PROBE_CATCHUP; path < PROBE_COUNT; ++path) {
+        struct hold_message_context retry = {0}, control = {0}, unused = {0};
+        if (!reducer_probe_call(f, ms, ctl, candidate, path, false, &retry)) return false;
+        if (!reducer_probe(f, candidate, dir, path, false, &unused, &control)) return false;
+        if (reducer_hold_result(unused.admitted, &unused.verdict)) return false;
+        if (reducer_hold_result(control.admitted, &control.verdict)) return false;
+        if (!compare_verdict(probe_names[path], retry.admitted, &retry.verdict,
+                             control.admitted, &control.verdict)) return false;
+    }
+    return true;
+}
+static bool reducer_cumulative_sequence(struct gate_fixture *f, struct block *candidate,
+                                        const char *dir)
+{
+    static struct gate_fixture local;
+    reducer_clone_fixture(&local, f);
+    struct main_state ms; struct chain_activation_controller ctl;
+    bool ok = reducer_fixture_setup(&local, &ms, &ctl, dir, false);
+    if (ok) ok = reducer_cumulative_holds(&local, &ms, &ctl, candidate);
+    if (ok) ok = reducer_write_window(&local, dir);
+    if (ok) ok = reducer_cumulative_retries(&local, &ms, &ctl, candidate, dir);
+    main_state_free(&ms);
+    return ok;
 }
 static int reducer_results(bool held, bool message_held, bool restored, bool compared)
 {
@@ -365,6 +425,7 @@ static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, co
     bool restored = reducer_restore_window(f, &ctl, candidate, dir);
     bool compared = restored && reducer_compare_paths(f, candidate, dir);
     compared = compared && reducer_compare_paths(f, &message_candidate, dir);
+    compared = compared && reducer_cumulative_sequence(f, candidate, dir);
     main_state_free(&ms);
     SetDataDir(""); ClearDataDirCache();
     return reducer_results(held, message_held, restored, compared);
