@@ -3231,21 +3231,46 @@ static bool observation_chain_retarget(const char *intermediate,
            unlink(intermediate) == 0 && symlink(compiler, intermediate) == 0;
 }
 
+static bool observation_chain_dirs(const char *root, char links[PATH_MAX],
+                                   char outputs[PATH_MAX])
+{
+    int a = snprintf(links, PATH_MAX, "%s/compiler-links", root);
+    int b = snprintf(outputs, PATH_MAX, "%s/compiler-outputs", root);
+    if (a <= 0 || a >= PATH_MAX || b <= 0 || b >= PATH_MAX)
+        return false;
+    if (mkdir(links, 0700) != 0)
+        return false;
+    if (mkdir(outputs, 0700) == 0)
+        return true;
+    (void)rmdir(links);
+    return false;
+}
+
+static void observation_chain_cleanup(const char *outputs)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/unit.o", outputs);
+    if (n > 0 && n < (int)sizeof(path)) (void)unlink(path);
+    n = snprintf(path, sizeof(path), "%s/unit.d", outputs);
+    if (n > 0 && n < (int)sizeof(path)) (void)unlink(path);
+    (void)rmdir(outputs);
+}
+
 static void observation_driver_chain(struct observation_fixture *fixture)
 {
     struct zcl_compile_observation *observation = NULL;
     struct zcl_action_root_result result = {0};
-    char driver[PATH_MAX], tmp[PATH_MAX], linkdir[PATH_MAX];
-    test_make_tmpdir(tmp, sizeof(tmp), "action_root", "compiler_links");
-    bool canonical = platform_directory_canonical_real(tmp, linkdir, sizeof(linkdir));
-    AR_CHECK("observation compiler link fixture is canonical", canonical);
-    if (!canonical)
+    char driver[PATH_MAX], linkdir[PATH_MAX], outputdir[PATH_MAX];
+    bool prepared = observation_chain_dirs(fixture->root, linkdir, outputdir);
+    AR_CHECK("observation compiler link fixture directories created", prepared);
+    if (!prepared)
         return;
     const char *original = fixture->argv[0];
     char intermediate[PATH_MAX];
     bool paths_ok = observation_chain_paths(linkdir, driver, intermediate);
     AR_CHECK("observation compiler link paths fit", paths_ok);
     if (!paths_ok) {
+        (void)rmdir(outputdir);
         (void)rmdir(linkdir);
         return;
     }
@@ -3253,6 +3278,9 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     bool driver_created = inner_created && symlink("cc-link", driver) == 0;
     bool linked = inner_created && driver_created;
     fixture->argv[0] = driver;
+    const char *saved_object = fixture->argv[22], *saved_dep = fixture->argv[24];
+    fixture->argv[22] = "compiler-outputs/unit.o";
+    fixture->argv[24] = "compiler-outputs/unit.d";
     observation = NULL;
     bool began = linked && observation_begin(fixture, &observation);
     bool compiled = began && observation_compile(observation);
@@ -3277,8 +3305,11 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     zcl_action_root_result_free(&result);
     zcl_compile_observation_close(observation);
     fixture->argv[0] = original;
+    fixture->argv[22] = saved_object;
+    fixture->argv[24] = saved_dep;
     if (driver_created) (void)unlink(driver);
     if (inner_created) (void)unlink(intermediate);
+    observation_chain_cleanup(outputdir);
     (void)rmdir(linkdir);
 }
 
