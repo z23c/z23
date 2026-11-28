@@ -594,19 +594,12 @@ static bool stage_wire(const struct v6_wire_view *source, const uint8_t *input,
     return v6_wire_parse(wire, total, out) == V6_WIRE_OK;
 }
 
-/* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
-static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
+static bool stage_fixture(const struct v6_wire_view *view, const char *path,
+                          uint8_t input[7590], size_t size)
 {
-    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], vk[32], expected[32];
-    uint8_t input[7590], wire[9400], statement[V6_IRONWOOD_STATEMENT_SIZE];
-    struct v6_wire_view full, short_view;
-    struct ironwood_postnu63_stage stage, before;
-    size_t size = 0;
-    if (!load_instance_basis(basis, w) || !zcl_hex_decode(theta, expected, 32) ||
-        !zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32) ||
-        !ironwood_postnu63_proof_size(view->ironwood.count, &size).ok) return false;
+    uint8_t statement[V6_IRONWOOD_STATEMENT_SIZE];
     size_t statements = (size_t)view->ironwood.count * sizeof statement;
-    if (statements > sizeof input || size > sizeof input - statements) return false;
+    if (statements > 7590 || size > 7590 - statements) return false;
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     bool loaded = fread(input, 1, statements + size, f) == statements + size && fgetc(f) == EOF;
@@ -614,19 +607,41 @@ static bool check_stage(const struct v6_wire_view *view, const char *path, const
     for (uint64_t i = 0; i < view->ironwood.count; ++i)
         if (!v6_core_ironwood_statement(view, i, statement, sizeof statement) ||
             memcmp(statement, input + i * sizeof statement, sizeof statement)) return false;
-    if (!stage_wire(view, input, size, wire, sizeof wire, &full) ||
-        !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
-        stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
-    memcpy(&before, &stage, sizeof before);
-    short_view = full; --short_view.ironwood.proof.size;
-    if (ironwood_postnu63_first_challenge(&short_view, vk, basis, w, &stage).ok ||
-        memcmp(&stage, &before, sizeof stage)) return false;
-    size_t proof_offset = (size_t)(full.ironwood.proof.data - wire);
+    return true;
+}
+
+static bool stage_refusals(struct v6_wire_view *full, uint8_t *wire, size_t size,
+                           const uint8_t vk[32], const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
+                           const uint8_t w[32], struct ironwood_postnu63_stage *stage)
+{
+    struct v6_wire_view short_view = *full;
+    struct ironwood_postnu63_stage before;
+    memcpy(&before, stage, sizeof before);
+    --short_view.ironwood.proof.size;
+    if (ironwood_postnu63_first_challenge(&short_view, vk, basis, w, stage).ok ||
+        memcmp(stage, &before, sizeof before)) return false;
+    size_t proof_offset = (size_t)(full->ironwood.proof.data - wire);
     memset(wire + proof_offset, 0, 32);
-    if (ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
-        memcmp(&stage, &before, sizeof stage)) return false;
+    if (ironwood_postnu63_first_challenge(full, vk, basis, w, stage).ok ||
+        memcmp(stage, &before, sizeof before)) return false;
     size_t saved = size;
     return !ironwood_postnu63_proof_size(UINT64_MAX, &size).ok && size == saved;
+}
+
+/* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
+static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
+{
+    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], vk[32], expected[32], input[7590], wire[9400];
+    struct v6_wire_view full;
+    struct ironwood_postnu63_stage stage;
+    size_t size = 0;
+    if (!load_instance_basis(basis, w) || !zcl_hex_decode(theta, expected, 32) ||
+        !zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32) ||
+        !ironwood_postnu63_proof_size(view->ironwood.count, &size).ok ||
+        !stage_fixture(view, path, input, size) || !stage_wire(view, input, size, wire, sizeof wire, &full) ||
+        !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
+        stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
+    return stage_refusals(&full, wire, size, vk, basis, w, &stage);
 }
 
 /* Public coinbase fixture: Orchard 0.16.0 PostNu6_3, R1 evidence
@@ -683,7 +698,7 @@ static bool check_two_action_instance(void)
             !ironwood_instance_project(&v, i, &actual).ok || memcmp(&actual, &expected, sizeof actual))
             return false;
     }
-    return check_first_theta(&v) &&
+    return check_single_action_stage() && check_first_theta(&v) &&
         check_stage(&v, "tests/fixtures/ironwood/postnu63-funded.bin",
                     "9b4c4db54b5587629516968e6cba32a1c9239bee4c8e5d22dd534b79ed27bc34");
 }
@@ -935,7 +950,6 @@ int test_transaction_v6_inspect(void)
     if (!check_funded_instance()) ++failures;
     if (!check_funded_second_instance()) ++failures;
     if (!check_two_action_instance()) ++failures;
-    if (!check_single_action_stage()) ++failures;
     if (!check_instance_refusals()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
