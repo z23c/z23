@@ -15,7 +15,8 @@ struct block;
 
 /* Rules this build can enforce. A pinned catalog entry activates a rule only
  * when its revision bytes equal the rule's published revision, byte for byte.
- * Every other entry is tallied by nobody here and enforces nothing. */
+ * Unknown entries are tallied but enforce nothing. A locked-in or active
+ * unknown entry makes resolution unavailable, naming its catalog slot. */
 #define RESEARCH_RULE_BLOCK_CAP 0u
 #define RESEARCH_RULE_DEPOSIT_FREEZE 1u
 #define RESEARCH_RULE_COUNT 2u
@@ -56,7 +57,8 @@ enum research_rules_code {
     /* Null arguments, a binding that is not the Ironwood chain, or an index
      * ancestry that does not form one height per block. Nothing was decided. */
     RESEARCH_RULES_INVALID = -1,
-    /* A window block body could not be read or authenticated. The caller
+    /* A window block body could not be read or authenticated, or an unknown
+     * catalog rule is locked in or active. The caller
      * must hold the candidate and retry; it must neither reject the block as
      * invalid nor validate it under the inactive rules. */
     RESEARCH_RULES_UNAVAILABLE = -2
@@ -84,8 +86,10 @@ typedef bool (*research_rules_read_fn)(void *ctx, const struct block_index *bi,
  * a branch that qualified. The decision is a pure function of the parent
  * ancestry, so replay, reorganization and restart agree.
  *
- * Window bodies are read only when the candidate height reaches some rule's
- * activation height; below that the call succeeds without reading. On success
+ * Unknown entries are tallied but enforce nothing; locked-in or active unknown
+ * entries return RESEARCH_RULES_UNAVAILABLE naming the slot. Voting or expired
+ * unknown entries change nothing. Window bodies are read only when a known
+ * entry reaches activation or an unknown entry can first lock in. On success
  * `*out` is written; on failure it is untouched. */
 struct zcl_result research_rules_for_parent(const struct research_rules_binding *binding,
     const struct block_index *parent, research_rules_read_fn read, void *read_ctx,
@@ -97,9 +101,11 @@ struct research_rules_tracker;
 struct research_rules_tracker *research_rules_tracker_create(
     const struct research_rules_binding *binding);
 void research_rules_tracker_destroy(struct research_rules_tracker *tracker);
-/* Connect one authenticated block. `blk` must pass the body authentication
- * above against `bi` and extend the block connected before it. A failed
- * authentication is `RESEARCH_RULES_UNAVAILABLE`. The first connected block must lie at
+/* Connect one block extending the block connected before it. A bound tracker
+ * authenticates bodies only at heights [start - 1, start + window); outside
+ * that range, or with no binding, it hashes nothing and checks ordering only.
+ * A failed required authentication is `RESEARCH_RULES_UNAVAILABLE`.
+ * The first connected block must lie at
  * or below the window parent; a sweep that starts higher cannot use the
  * tracker and resolves through research_rules_for_parent instead. A failure
  * leaves the tracker unchanged. */

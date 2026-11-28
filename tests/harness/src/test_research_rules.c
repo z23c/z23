@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Test-only instrumentation, not part of the service API. */
+size_t research_rules_test_hashes(bool reset);
+
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "research rules line %d: %s\n", __LINE__, #x); return 1; \
 } } while (0)
@@ -145,6 +148,37 @@ static int tracker_check(struct fixture *f)
     return 0;
 }
 
+static int tracker_cost_check(struct fixture *f)
+{
+    struct research_rules_tracker *t = research_rules_tracker_create(NULL);
+    CHECK(t);
+    (void)research_rules_test_hashes(true);
+    for (int h = 0; h <= 30; ++h) {
+        struct research_rules_state a, b;
+        CHECK(research_rules_tracker_connect(t, &f->index[h], &f->blocks[h]).ok);
+        CHECK(research_rules_test_hashes(true) == 0);
+        CHECK(research_rules_tracker_state(t, &a).ok);
+        CHECK(research_rules_for_parent(NULL, &f->index[h], read_block, f, &b).ok);
+        CHECK(a.active[0] == b.active[0] && a.active[1] == b.active[1]);
+    }
+    research_rules_tracker_destroy(t);
+    t = research_rules_tracker_create(&f->binding);
+    CHECK(t);
+    for (int h = 0; h <= 30; ++h) {
+        struct research_rules_state a, b;
+        (void)research_rules_test_hashes(true);
+        CHECK(research_rules_tracker_connect(t, &f->index[h], &f->blocks[h]).ok);
+        size_t hashes = research_rules_test_hashes(true);
+        CHECK((h >= f->pin.start - 1 && h < f->pin.start + f->pin.window) ?
+              hashes > 0 : hashes == 0);
+        CHECK(research_rules_tracker_state(t, &a).ok);
+        CHECK(research_rules_for_parent(&f->binding, &f->index[h], read_block, f, &b).ok);
+        CHECK(a.active[0] == b.active[0] && a.active[1] == b.active[1]);
+    }
+    research_rules_tracker_destroy(t);
+    return 0;
+}
+
 static int failure_checks(struct fixture *f)
 {
     struct research_rules_state state = { .active = {true, true} };
@@ -230,6 +264,31 @@ static int reorg_check(struct fixture *original, struct fixture *sibling)
     return 0;
 }
 
+static int unknown_tracker_check(struct fixture *f, int slot, bool locked)
+{
+    struct research_rules_tracker *t = research_rules_tracker_create(&f->binding);
+    CHECK(t);
+    for (int h = 0; h <= 30; ++h) {
+        struct research_rules_state a = { .active = {true, true} }, b = a;
+        CHECK(research_rules_tracker_connect(t, &f->index[h], &f->blocks[h]).ok);
+        struct zcl_result x = research_rules_tracker_state(t, &a);
+        struct zcl_result y = research_rules_for_parent(&f->binding, &f->index[h], read_block, f, &b);
+        CHECK(x.code == y.code);
+        if (locked && h >= f->pin.start + f->pin.window - 1) {
+            char name[32];
+            snprintf(name, sizeof(name), "slot %d", slot);
+            CHECK(x.code == RESEARCH_RULES_UNAVAILABLE && strstr(x.message, name));
+            CHECK(strstr(y.message, name));
+            CHECK(a.active[0] && a.active[1] && b.active[0] && b.active[1]);
+        } else {
+            CHECK(x.ok && y.ok);
+            CHECK(a.active[0] == b.active[0] && a.active[1] == b.active[1]);
+        }
+    }
+    research_rules_tracker_destroy(t);
+    return 0;
+}
+
 static int other_rounds(void)
 {
     struct fixture f = {0};
@@ -242,6 +301,7 @@ static int other_rounds(void)
     f = (struct fixture){0};
     CHECK(pin_init(&f, 10, 4, 16, 17, 2));
     CHECK(fixture_blocks(&f, 4, 3));
+    CHECK(tracker_cost_check(&f) == 0);
     CHECK(expect_state(&f, 15, true, false) == 0);
     CHECK(expect_state(&f, 399, true, false) == 0);
     /* Votes outside the window cannot make the three-vote rule qualify. */
@@ -278,8 +338,27 @@ static int other_rounds(void)
     struct miner_signal_schedule schedule;
     CHECK(miner_signal_catalog_select(&c, 0, &schedule).ok);
     memcpy(f.pin.digest, schedule.catalog, 32);
-    CHECK(fixture_blocks(&f, 4, 0));
-    CHECK(expect_state(&f, 399, false, false) == 0 && f.calls == 0);
+    CHECK(fixture_blocks(&f, 3, 0));
+    CHECK(expect_state(&f, 399, false, false) == 0 && f.calls > 0);
+    CHECK(unknown_tracker_check(&f, 0, false) == 0);
+    f.blocks[13].vtx[0].vout[0].script_pub_key.data[39] |= 1;
+    rehash_from(&f, 13);
+    CHECK(unknown_tracker_check(&f, 0, true) == 0);
+    fixture_free(&f);
+    f = (struct fixture){0};
+    CHECK(pin_init(&f, 10, 4, 16, 17, 2));
+    memset(f.pin.entries[1].rule_revision, 0xee, 32);
+    c = (struct miner_signal_catalog){ .start = 10, .window = 4, .count = 2, .entries = f.pin.entries };
+    memcpy(c.network_id, f.pin.network_id, 32);
+    memcpy(c.genesis, f.pin.genesis, 32);
+    CHECK(miner_signal_catalog_select(&c, 0, &schedule).ok);
+    memcpy(f.pin.digest, schedule.catalog, 32);
+    CHECK(fixture_blocks(&f, 4, 3));
+    CHECK(expect_state(&f, 399, true, false) == 0);
+    CHECK(unknown_tracker_check(&f, 1, false) == 0);
+    f.blocks[13].vtx[0].vout[0].script_pub_key.data[39] |= 2;
+    rehash_from(&f, 13);
+    CHECK(unknown_tracker_check(&f, 1, true) == 0);
     fixture_free(&f);
     return 0;
 }

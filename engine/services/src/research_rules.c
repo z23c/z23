@@ -53,29 +53,47 @@ size_t research_rules_deposit_violation(const struct block *block)
 }
 
 struct rule_round {
-    bool present[RESEARCH_RULE_COUNT];
-    struct miner_signal_schedule schedule[RESEARCH_RULE_COUNT];
-    struct miner_signal_tally tally[RESEARCH_RULE_COUNT];
+    size_t count;
+    int rule[256];
+    struct miner_signal_schedule schedule[256];
+    struct miner_signal_tally tally[256];
 };
+
+static int revision_rule(const uint8_t revision[32])
+{
+    for (size_t i = 0; i < RESEARCH_RULE_COUNT; ++i)
+        if (!memcmp(revision, research_rule_revision[i], 32)) return (int)i;
+    return -1; // raw-return-ok:unknown-rule-sentinel
+}
 
 static struct zcl_result round_prepare(const struct research_rules_binding *b, struct rule_round *r)
 {
     if (!binding_valid(b)) return ZCL_ERR(RESEARCH_RULES_INVALID, "Invalid research binding");
     if (b->pin->count == 0 || b->pin->count > 256)
         return ZCL_ERR(RESEARCH_RULES_INVALID, "Invalid research catalog count");
-    struct miner_signal_schedule s;
-    if (!miner_signal_catalog_pin_select(b->pin, 0, &s).ok)
-        return ZCL_ERR(RESEARCH_RULES_INVALID, "Invalid research catalog pin");
     for (size_t i = 0; i < b->pin->count; ++i) {
-        for (size_t j = 0; j < RESEARCH_RULE_COUNT; ++j) {
-            if (memcmp(b->pin->entries[i].rule_revision, research_rule_revision[j], 32)) continue;
-            if (!miner_signal_catalog_pin_select(b->pin, i, &r->schedule[j]).ok)
-                return ZCL_ERR(RESEARCH_RULES_INVALID, "Invalid research rule schedule");
-            r->present[j] = true;
-        }
+        if (!miner_signal_catalog_pin_select(b->pin, i, &r->schedule[i]).ok)
+            return ZCL_ERR(RESEARCH_RULES_INVALID, "Invalid research catalog pin or schedule");
+        r->rule[i] = revision_rule(b->pin->entries[i].rule_revision);
+        /* catalog_validate already requires activation > start + window. */
+        if (r->rule[i] >= 0 && r->schedule[i].activation <
+            (int64_t)r->schedule[i].start + r->schedule[i].window)
+            return ZCL_ERR(RESEARCH_RULES_INVALID, "Known rule activates before its window ends");
     }
+    r->count = b->pin->count;
     return ZCL_OK;
 }
+
+#ifdef ZCL_TESTING
+static size_t test_hashes;
+size_t research_rules_test_hashes(bool reset);
+size_t research_rules_test_hashes(bool reset)
+{
+    size_t n = test_hashes;
+    if (reset) test_hashes = 0;
+    return n;
+}
+#endif
 
 static bool body_authenticated(const struct block_index *bi, const struct block *blk)
 {
@@ -87,8 +105,13 @@ static bool body_authenticated(const struct block_index *bi, const struct block 
     if (!uint256_eq(&hash, bi->phashBlock)) return false;
     /* The consensus Merkle helper consumes cached txids; bind them to bytes. */
     for (size_t i = 0; i < blk->num_vtx; ++i) {
-        if (!transaction_hash_serialized(&blk->vtx[i], &hash))
-            LOG_FAIL("research_rules", "Cannot hash transaction %zu", i);
+#ifdef ZCL_TESTING
+        ++test_hashes;
+#endif
+        if (!transaction_hash_serialized(&blk->vtx[i], &hash)) {
+            LOG_ERROR("research_rules", "Cannot hash transaction %zu", i);
+            return false;
+        }
         if (!uint256_eq(&hash, &blk->vtx[i].hash)) return false;
     }
     return domain_consensus_check_block_merkle_root(blk, NULL, 0, NULL).ok;
@@ -96,8 +119,8 @@ static bool body_authenticated(const struct block_index *bi, const struct block 
 
 static struct zcl_result round_begin(struct rule_round *r, int32_t height, const struct uint256 *hash)
 {
-    for (size_t i = 0; i < RESEARCH_RULE_COUNT; ++i)
-        if (r->present[i] && !miner_signal_begin(&r->schedule[i], height, hash, &r->tally[i]).ok)
+    for (size_t i = 0; i < r->count; ++i)
+        if (!miner_signal_begin(&r->schedule[i], height, hash, &r->tally[i]).ok)
             return ZCL_ERR(RESEARCH_RULES_INVALID, "Cannot initialize research tally");
     return ZCL_OK;
 }
@@ -108,9 +131,8 @@ static struct zcl_result round_connect(struct rule_round *r, const struct block_
     if (!blk->num_vtx || !blk->vtx || !blk->vtx[0].vin ||
         !transaction_is_coinbase(&blk->vtx[0]))
         return ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "Missing window coinbase");
-    for (size_t i = 0; i < RESEARCH_RULE_COUNT; ++i)
-        if (r->present[i] &&
-            !miner_signal_connect(&r->tally[i], bi->nHeight, &blk->header.hashPrevBlock,
+    for (size_t i = 0; i < r->count; ++i)
+        if (!miner_signal_connect(&r->tally[i], bi->nHeight, &blk->header.hashPrevBlock,
                                   bi->phashBlock, &blk->vtx[0], &r->tally[i]).ok)
             return ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "Cannot tally window coinbase");
     return ZCL_OK;
@@ -120,12 +142,19 @@ static struct zcl_result round_state(const struct rule_round *r, int32_t height,
                                      struct research_rules_state *out)
 {
     struct research_rules_state next = {0};
-    for (size_t i = 0; i < RESEARCH_RULE_COUNT; ++i) {
-        if (!r->present[i] || height < r->schedule[i].activation) continue;
+    for (size_t i = 0; i < r->count; ++i) {
+        int64_t check_height = r->rule[i] >= 0 ? r->schedule[i].activation :
+            (int64_t)r->schedule[i].start + r->schedule[i].window;
+        if (height < check_height) continue;
         enum miner_signal_phase phase;
         if (!miner_signal_phase_at(&r->tally[i], height, &phase).ok)
             return ZCL_ERR(RESEARCH_RULES_INVALID, "Incomplete research tally");
-        next.active[i] = phase == MINER_SIGNAL_ACTIVE;
+        if (r->rule[i] < 0) {
+            if (phase == MINER_SIGNAL_LOCKED_IN || phase == MINER_SIGNAL_ACTIVE)
+                return ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "Unknown research catalog slot %zu locked in", i);
+        } else {
+            next.active[r->rule[i]] = phase == MINER_SIGNAL_ACTIVE;
+        }
     }
     *out = next;
     return ZCL_OK;
@@ -153,6 +182,7 @@ static struct zcl_result tally_window(struct rule_round *round, const struct blo
 {
     for (int32_t i = 0; i < window; ++i) {
         const struct block_index *p = entries[i];
+        if (!p) return ZCL_ERR(RESEARCH_RULES_INVALID, "Research window incomplete");
         struct block blk;
         block_init(&blk);
         bool ok = read(ctx, p, &blk) && body_authenticated(p, &blk) && p->pprev &&
@@ -168,8 +198,11 @@ static struct zcl_result tally_window(struct rule_round *round, const struct blo
 
 static bool round_needed(const struct rule_round *round, int32_t height)
 {
-    for (size_t i = 0; i < RESEARCH_RULE_COUNT; ++i)
-        if (round->present[i] && height >= round->schedule[i].activation) return true;
+    for (size_t i = 0; i < round->count; ++i) {
+        int64_t threshold = round->rule[i] >= 0 ? round->schedule[i].activation :
+            (int64_t)round->schedule[i].start + round->schedule[i].window;
+        if (height >= threshold) return true;
+    }
     return false;
 }
 
@@ -193,6 +226,7 @@ struct zcl_result research_rules_for_parent(const struct research_rules_binding 
         return ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "Research window exceeds address space");
     const struct block_index **entries = zcl_malloc((size_t)window * sizeof(*entries), "research window");
     if (!entries) return ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "Cannot allocate research window");
+    memset(entries, 0, (size_t)window * sizeof(*entries));
     const struct block_index *base = NULL;
     result = collect_window(parent, binding->pin->start, window, entries, &base);
     if (result.ok) result = round_begin(&round, base->nHeight, base->phashBlock);
@@ -251,7 +285,9 @@ struct zcl_result research_rules_tracker_connect(struct research_rules_tracker *
         return ZCL_ERR(RESEARCH_RULES_INVALID, "Invalid tracker input");
     if (!tracker_ordered(t, bi, blk))
         return ZCL_ERR(RESEARCH_RULES_INVALID, "Tracker block is out of order");
-    if (!body_authenticated(bi, blk))
+    if (t->bound && bi->nHeight >= t->start - 1 &&
+        (int64_t)bi->nHeight < (int64_t)t->start + t->window &&
+        !body_authenticated(bi, blk))
         return ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "Tracker body unavailable or unauthenticated");
     struct research_rules_tracker next = *t;
     if (next.bound && bi->nHeight == next.start - 1) {
