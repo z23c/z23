@@ -4,6 +4,7 @@
 // whether a boot-time binding is accepted; fallible resolution returns zcl_result.
 #include "services/research_rules.h"
 #include "domain/consensus/check_block.h"
+#include "storage/disk_block_io.h"
 #include "primitives/block.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -314,4 +315,24 @@ struct zcl_result research_rules_tracker_state(const struct research_rules_track
     if (!t || !out || !t->connected)
         return ZCL_ERR(RESEARCH_RULES_INVALID, "Tracker has no connected parent");
     return round_state(&t->round, t->height + 1, out);
+}
+
+struct disk_dir {
+    const char *path;
+};
+
+static bool read_from_disk(void *ctx, const struct block_index *bi, struct block *out)
+{
+    return read_block_from_disk_index_pread(out, bi, ((const struct disk_dir *)ctx)->path);
+}
+
+struct zcl_result research_rules_for_index(const struct research_rules_binding *binding,
+                                           const struct block_index *parent,
+                                           const char *datadir,
+                                           struct research_rules_state *out)
+{
+    if (!datadir || !datadir[0])
+        return ZCL_ERR(RESEARCH_RULES_INVALID, "Missing research block directory");
+    struct disk_dir dir = { datadir };
+    return research_rules_for_parent(binding, parent, read_from_disk, &dir, out);
 }

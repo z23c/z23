@@ -1,7 +1,12 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/research_rules.h"
 #include "base/hex.h"
+#include "platform/directory_compat.h"
 #include "primitives/block.h"
+#include "storage/disk_block_io.h"
+#include "test/test_core.h"
+#include <limits.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -370,6 +375,53 @@ static int other_rounds(void)
     return 0;
 }
 
+/* The node's own block files: research_rules_for_index resolves the window
+ * from disk exactly as the in-memory reader does, and a window body that is
+ * not on disk holds instead of deciding. */
+static int disk_check(struct fixture *f)
+{
+    char raw[PATH_MAX], dir[PATH_MAX], missing[PATH_MAX];
+    struct disk_block_pos first;
+    disk_block_pos_init(&first);
+    test_make_tmpdir(raw, sizeof(raw), "research_rules", "blocks");
+    bool ok = platform_directory_canonical_real(raw, dir, sizeof(dir));
+    for (int h = f->pin.start - 1; ok && h < f->pin.start + f->pin.window; ++h) {
+        struct disk_block_pos pos;
+        disk_block_pos_init(&pos);
+        ok = write_block_to_disk(&f->blocks[h], &pos, dir,
+                                 f->binding.params->pchMessageStart);
+        if (!ok) break;
+        block_index_disk_pos_store(&f->index[h], pos.nFile, pos.nPos);
+        (void)block_index_status_fetch_or(&f->index[h], BLOCK_HAVE_DATA);
+        if (h == f->pin.start - 1) first = pos;
+    }
+    struct research_rules_state state = {0};
+    struct zcl_result r = {0};
+    if (ok) r = research_rules_for_index(&f->binding, &f->index[124], dir, &state);
+    if (!ok || !r.ok || !state.active[0] || state.active[1]) {
+        (void)test_rm_rf_recursive(raw);
+        CHECK(ok && r.ok && state.active[0] && !state.active[1]);
+    }
+    /* Bodies above the window are never opened: the index links them. */
+    CHECK(research_rules_for_index(&f->binding, &f->index[399], dir, &state).ok &&
+          state.active[0]);
+    CHECK(research_rules_for_index(NULL, &f->index[124], dir, &state).ok &&
+          !state.active[0] && !state.active[1]);
+    get_block_pos_filename(missing, sizeof(missing), dir, &first, "blk");
+    CHECK(unlink(missing) == 0);
+    state.active[0] = false;
+    CHECK(research_rules_for_index(&f->binding, &f->index[124], dir, &state).code ==
+          RESEARCH_RULES_UNAVAILABLE);
+    /* A failure leaves the output untouched. */
+    CHECK(!state.active[0]);
+    CHECK(research_rules_for_index(&f->binding, &f->index[124], NULL, &state).code ==
+          RESEARCH_RULES_INVALID);
+    CHECK(research_rules_for_index(&f->binding, &f->index[124], "", &state).code ==
+          RESEARCH_RULES_INVALID);
+    CHECK(test_rm_rf_recursive(raw) == 0);
+    return 0;
+}
+
 int test_research_rules(void)
 {
     struct fixture f = {0};
@@ -391,6 +443,7 @@ int test_research_rules(void)
     CHECK(tracker_check(&f) == 0);
     CHECK(failure_checks(&f) == 0);
     CHECK(deposit_checks() == 0);
+    CHECK(disk_check(&f) == 0);
     CHECK(other_rounds() == 0);
     struct chain_params wrong = *f.binding.params;
     wrong.consensus.hashGenesisBlock.data[0] ^= 1;

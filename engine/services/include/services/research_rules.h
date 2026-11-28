@@ -55,8 +55,10 @@ size_t research_rules_deposit_violation(const struct block *block);
 
 /* Result codes of the resolvers below. The message explains the cause. */
 enum research_rules_code {
-    /* Null arguments, a binding that is not the Ironwood chain, or an index
-     * ancestry that does not form one height per block. Nothing was decided. */
+    /* A missing output or reader, a binding that is not the Ironwood chain,
+     * an out-of-range parent height, or an index ancestry that does not form
+     * one height per block. Nothing was decided. A NULL binding or a NULL
+     * parent is not invalid: both succeed with every rule inactive. */
     RESEARCH_RULES_INVALID = -1,
     /* A window block body could not be read or authenticated, or an unknown
      * catalog rule is locked in or active. The caller
@@ -100,6 +102,14 @@ typedef bool (*research_rules_read_fn)(void *ctx, const struct block_index *bi,
  * `*out` is written; on failure it is untouched. */
 struct zcl_result research_rules_for_parent(const struct research_rules_binding *binding,
     const struct block_index *parent, research_rules_read_fn read, void *read_ctx,
+    struct research_rules_state *out);
+
+/* research_rules_for_parent reading the node's own block files: `datadir`
+ * is the net-specific block directory that holds blk*.dat (GetDataDir(true)).
+ * A NULL or empty directory is INVALID. A window body that is not on disk is
+ * UNAVAILABLE, as is any body the reader cannot authenticate. */
+struct zcl_result research_rules_for_index(const struct research_rules_binding *binding,
+    const struct block_index *parent, const char *datadir,
     struct research_rules_state *out);
 
 /* Forward-only twin for sweeps that already hold each block in order. It
