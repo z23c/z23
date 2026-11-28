@@ -528,9 +528,10 @@ static void test_derive_builtin_dirs(struct fx *x,
 #if !defined(_WIN32)
 static void test_toolchain_directory_binding(struct fx *x)
 {
-    char kit[PATH_MAX], include[PATH_MAX], bin[PATH_MAX], raw[PATH_MAX];
-    test_make_tmpdir(kit, sizeof(kit), "action_root", "toolchain_path");
-    bool ok = snprintf(include, sizeof(include), "%s/include", kit) < (int)sizeof(include) &&
+    char tmp[PATH_MAX], kit[PATH_MAX], include[PATH_MAX], bin[PATH_MAX], raw[PATH_MAX];
+    test_make_tmpdir(tmp, sizeof(tmp), "action_root", "toolchain_path");
+    bool ok = platform_directory_canonical_real(tmp, kit, sizeof(kit)) &&
+              snprintf(include, sizeof(include), "%s/include", kit) < (int)sizeof(include) &&
               snprintf(bin, sizeof(bin), "%s/bin", kit) < (int)sizeof(bin) &&
               snprintf(raw, sizeof(raw), "%s/bin/../include", kit) < (int)sizeof(raw) &&
               mkdir(include, 0700) == 0 && mkdir(bin, 0700) == 0;
