@@ -4,6 +4,8 @@
 #define ZCL_CONFIG_BOOT_BALLOT_CATALOG_H
 #include <stdbool.h>
 struct app_context;
+/* Check operator consent before any datadir or network side effects. */
+bool boot_ballot_catalog_consent(const struct app_context *ctx);
 /* Called after chain selection and datadir locking, before network services. */
 bool boot_ballot_catalog_load(struct app_context *ctx);
 /* Select the profile named by ctx->testnet_profile; Windows supports none. */

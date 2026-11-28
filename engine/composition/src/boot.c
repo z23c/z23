@@ -1154,7 +1154,8 @@ static bool boot_seq_prologue(struct app_context *ctx, struct boot_seq *s)
      * sysinit_run_stage() call below advances the stage machine. */
     boot_sysinit_register_all();
     t_sub = boot_submark("prologue.observability", t_sub);
-    if (!boot_step_select_chain_and_datadir(ctx) || !boot_ballot_catalog_load(ctx))
+    if (!boot_ballot_catalog_consent(ctx) ||
+        !boot_step_select_chain_and_datadir(ctx) || !boot_ballot_catalog_load(ctx))
         return false;
     t_sub = boot_submark("prologue.select_chain", t_sub);
     if (!ctx->mint_anchor && !ctx->ratify_mint_anchor &&

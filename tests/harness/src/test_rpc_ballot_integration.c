@@ -228,7 +228,7 @@ static bool bf_receipts(struct ballot_fixture *f)
                       "stage_cursor(name,cursor,updated_at) VALUES('tip_finalize',1,1);");
 }
 
-static bool bf_setup(struct ballot_fixture *f)
+static bool bf_setup(struct ballot_fixture *f, bool research)
 {
     block_init(&f->block);
     if (progress_store_db())
@@ -239,7 +239,11 @@ static bool bf_setup(struct ballot_fixture *f)
         return false;
     f->store_open = true;
     f->db = progress_store_db();
-    chain_params_select(CHAIN_REGTEST);
+    if (research) {
+        if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return false;
+    } else {
+        chain_params_select(CHAIN_REGTEST);
+    }
     main_state_init(&f->ms);
     f->ms_ready = true;
     rpc_table_init(&f->table);
@@ -515,20 +519,24 @@ static bool bf_window_branch(struct ballot_fixture *f)
     return bf_advance(f, 3) && single_refused && batch_refused;
 }
 
-static bool bf_bound_status(struct ballot_fixture *f)
+static bool bf_rules_bound(struct ballot_fixture *f, const char *raw, bool expected)
 {
-    const struct chain_params *research = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD)->chain;
-    static struct miner_signal_catalog_pin pin;
-    memcpy(pin.genesis, research->consensus.hashGenesisBlock.data, 32);
-    if (!research_rules_install(research, &pin)) return false;
     struct json_value params = {0}, result = {0};
-    json_set_array(&params);
-    bool ok = rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    bool ok = json_read(&params, raw, strlen(raw)) &&
+        rpc_table_execute(&f->table, "getballotstatus", &params, &result);
     const struct json_value *bound = json_get(&result, "rules_bound");
-    ok = ok && bound && bound->type == JSON_BOOL && json_get_bool(bound);
+    ok = ok && bound && bound->type == JSON_BOOL && json_get_bool(bound) == expected;
     json_free(&result);
     json_free(&params);
     return ok;
+}
+
+static bool bf_bound_status(struct ballot_fixture *f)
+{
+    return bf_advance(f, 3) &&
+        bf_rules_bound(f, "[]", false) && bf_rules_bound(f, "[0]", false) &&
+        research_rules_install(chain_params_get(), &f->pin) &&
+        bf_rules_bound(f, "[]", true) && bf_rules_bound(f, "[0]", true);
 }
 
 static bool bf_cleanup(struct ballot_fixture *f)
@@ -554,12 +562,16 @@ static bool bf_cleanup(struct ballot_fixture *f)
     return ok;
 }
 
-static int ballot_integration_child(void)
+static int ballot_integration_child(bool research)
 {
-    struct ballot_fixture f = {0};
-    bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_membership_cases(&f) &&
+    static struct ballot_fixture f;
+    bool ok = bf_setup(&f, research);
+    if (research)
+        ok = ok && bf_bound_status(&f);
+    else
+        ok = ok && bf_positive_cases(&f) && bf_membership_cases(&f) &&
               bf_window_branch(&f) && bf_selected_revisions(&f) && bf_catalog_status(&f, true) &&
-              bf_catalog_limit(&f) && bf_foreign_pin(&f) && bf_bound_status(&f) &&
+              bf_catalog_limit(&f) && bf_foreign_pin(&f) &&
               bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
@@ -568,17 +580,20 @@ static int ballot_integration_child(void)
 
 int test_rpc_ballot_integration(void)
 {
+    for (int research = 0; research < 2; ++research) {
     pid_t child = fork();
     if (child < 0) {
         perror("ballot integration fork");
         return 1;
     }
     if (child == 0)
-        _exit(ballot_integration_child() == 0 ? 0 : 1);
+        _exit(ballot_integration_child(research != 0) == 0 ? 0 : 1);
     int status = 0;
     if (waitpid(child, &status, 0) != child)
         return 1;
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return 1;
+    }
+    return 0;
 }
 #else
 #include <stdio.h>

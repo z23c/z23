@@ -29,6 +29,20 @@ static bool boot_ballot_network_allowed(const struct app_context *ctx, bool rese
              (GetBoolArg("-testnet", false) && GetBoolArg("-regtest", false)));
 }
 
+bool boot_ballot_catalog_consent(const struct app_context *ctx)
+{
+    if (!ctx) {
+        fprintf(stderr, "FATAL: cannot configure ballot catalog without boot context\n");
+        return false;
+    }
+    if (ctx->testnet_profile && !GetArg("-testballotcatalog", NULL)) {
+        fprintf(stderr, "FATAL: the research profile requires an explicitly pinned catalog "
+                        "(-testballotcatalog <digest>)\n");
+        return false;
+    }
+    return true;
+}
+
 /* GetArg uses argv-over-config precedence and distinguishes absent from empty. */
 bool boot_ballot_catalog_load(struct app_context *ctx)
 {
@@ -46,7 +60,10 @@ bool boot_ballot_catalog_load(struct app_context *ctx)
         return false;
     }
     if (!boot_ballot_network_allowed(ctx, research)) {
-        fprintf(stderr, "FATAL: -testballotcatalog requires one unambiguous testnet or regtest\n");
+        if (research)
+            fprintf(stderr, "FATAL: research profile cannot be combined with testnet or regtest\n");
+        else
+            fprintf(stderr, "FATAL: -testballotcatalog requires one unambiguous testnet or regtest\n");
         return false;
     }
     uint8_t parsed[32];

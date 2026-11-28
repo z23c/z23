@@ -5,6 +5,7 @@
 #include "config/boot.h"
 #include "config/boot_ballot_catalog.h"
 #include "consensus/params.h"
+#include "crypto/sha3.h"
 #include "json/json.h"
 #include "services/research_rules.h"
 #include "test/test_core.h"
@@ -13,6 +14,8 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <dirent.h>
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { \
@@ -23,6 +26,110 @@ static struct app_context ctx;
 static const char manifest[] =
     "[\"1111111111111111111111111111111111111111111111111111111111111111\",100,20,"
     "[[\"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\",122]]]";
+
+struct snapshot_item {
+    char path[1024];
+    off_t size;
+    unsigned char hash[32];
+};
+struct snapshot { struct snapshot_item items[32]; size_t count; };
+
+static bool snapshot_file(const char *path, struct snapshot_item *item)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    struct sha3_256_ctx hash;
+    sha3_256_init(&hash);
+    unsigned char buf[1024]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f))) sha3_256_write(&hash, buf, n);
+    bool ok = !ferror(f);
+    if (fclose(f)) ok = false;
+    sha3_256_finalize(&hash, item->hash);
+    return ok;
+}
+
+static bool snapshot_tree(const char *root, const char *rel, struct snapshot *out)
+{
+    char path[1024];
+    if (snprintf(path, sizeof(path), "%s%s", root, rel) >= (int)sizeof(path)) return false;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true;
+    struct dirent *entry;
+    while (ok && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char child[1024], full[2048];
+        if (snprintf(child, sizeof(child), "%s/%s", rel, entry->d_name) >= (int)sizeof(child) ||
+            snprintf(full, sizeof(full), "%s%s", root, child) >= (int)sizeof(full)) { ok = false; break; }
+        struct stat st;
+        if (lstat(full, &st) || out->count == 32) { ok = false; break; }
+        struct snapshot_item *item = &out->items[out->count++];
+        memcpy(item->path, child, strlen(child) + 1);
+        item->size = st.st_size;
+        if (S_ISDIR(st.st_mode)) {
+            ok = snapshot_tree(root, child, out);
+        } else if (S_ISREG(st.st_mode)) {
+            ok = snapshot_file(full, item);
+        } else ok = false;
+    }
+    if (closedir(dir)) ok = false;
+    return ok;
+}
+
+static bool snapshot_equal(const struct snapshot *a, const struct snapshot *b)
+{
+    if (a->count != b->count) return false;
+    for (size_t i = 0; i < a->count; ++i) {
+        bool found = false;
+        for (size_t j = 0; j < b->count; ++j)
+            if (!strcmp(a->items[i].path, b->items[j].path) &&
+                a->items[i].size == b->items[j].size &&
+                !memcmp(a->items[i].hash, b->items[j].hash, 32)) found = true;
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool refusal_case(const char *dir, const char *arg, const char *cause)
+{
+    struct snapshot before = {0}, after = {0};
+    if (!snapshot_tree(dir, "", &before)) return false;
+    FILE *capture = tmpfile();
+    if (!capture) return false;
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    if (saved < 0 || dup2(fileno(capture), STDERR_FILENO) < 0) return false;
+    const char *args[] = {"z23", arg};
+    ParseParameters(2, args);
+    const struct research_rules_binding *binding = research_rules_binding();
+    bool refused = !boot_ballot_catalog_load(&ctx);
+    fflush(stderr);
+    bool ok = dup2(saved, STDERR_FILENO) >= 0 && close(saved) == 0;
+    rewind(capture);
+    char message[1024] = {0};
+    (void)fread(message, 1, sizeof(message) - 1, capture);
+    if (fclose(capture)) ok = false;
+    return ok && refused && strstr(message, cause) && research_rules_binding() == binding &&
+        !ctx.ballot_catalog_pin_present && snapshot_tree(dir, "", &after) &&
+        snapshot_equal(&before, &after);
+}
+
+static bool prologue_refusal(const char *dir)
+{
+    pid_t child = fork();
+    if (child == 0) {
+        const char *args[] = {"z23"};
+        ParseParameters(1, args);
+        struct app_context boot = {0};
+        boot.datadir = dir;
+        boot.testnet_profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+        _exit(app_init(&boot) ? 1 : 0);
+    }
+    int status;
+    struct snapshot after = {0};
+    return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0 && snapshot_tree(dir, "", &after) && after.count == 0;
+}
 
 int test_boot_ballot_catalog(void)
 {
@@ -48,18 +155,42 @@ int test_boot_ballot_catalog(void)
     json_free(&doc);
     char dir[512], ballots[600], path[720], digest[65], arg[96];
     CHECK(test_mkdtemp(dir, sizeof(dir), "boot_ballot"));
+    CHECK(prologue_refusal(dir));
     CHECK(snprintf(ballots, sizeof(ballots), "%s/ballots", dir) > 0);
     CHECK(mkdir(ballots, 0700) == 0);
-    zcl_hex_encode(pin.digest, 32, digest);
+    ctx.datadir = dir;
+    struct miner_signal_catalog_pin foreign = {0};
+    chain_params_select(CHAIN_REGTEST);
+    CHECK(json_read(&doc, manifest, sizeof(manifest) - 1));
+    CHECK(miner_signal_catalog_pin_parse(json_at(&doc, 0), json_at(&doc, 1),
+        json_at(&doc, 2), json_at(&doc, 3),
+        chain_params_get()->consensus.hashGenesisBlock.data, &foreign).ok);
+    json_free(&doc);
+    CHECK(chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    zcl_hex_encode(foreign.digest, 32, digest);
     CHECK(snprintf(path, sizeof(path), "%s/%s.json", ballots, digest) > 0);
     FILE *file = fopen(path, "wb");
+    CHECK(file && fwrite(manifest, 1, sizeof(manifest) - 1, file) == sizeof(manifest) - 1);
+    CHECK(fclose(file) == 0);
+    CHECK(snprintf(arg, sizeof(arg), "-testballotcatalog=%s", digest) > 0);
+    CHECK(refusal_case(dir, arg, "digest mismatch"));
+    ctx.testnet = true;
+    CHECK(refusal_case(dir, arg, "research profile cannot be combined"));
+    ctx.testnet = false;
+    CHECK(unlink(path) == 0);
+    zcl_hex_encode(pin.digest, 32, digest);
+    CHECK(snprintf(path, sizeof(path), "%s/%s.json", ballots, digest) > 0);
+    file = fopen(path, "wb");
+    CHECK(file && fwrite("{", 1, 1, file) == 1 && fclose(file) == 0);
+    CHECK(snprintf(arg, sizeof(arg), "-testballotcatalog=%s", digest) > 0);
+    CHECK(refusal_case(dir, arg, "Invalid ballot catalog manifest JSON"));
+    file = fopen(path, "wb");
     CHECK(file);
     CHECK(fwrite(manifest, 1, sizeof(manifest) - 1, file) == sizeof(manifest) - 1);
     CHECK(fclose(file) == 0);
     CHECK(snprintf(arg, sizeof(arg), "-testballotcatalog=%s", digest) > 0);
     const char *args[] = {"z23", arg};
     ParseParameters(2, args);
-    ctx.datadir = dir;
     CHECK(boot_ballot_catalog_load(&ctx));
     const struct research_rules_binding *binding = research_rules_binding();
     CHECK(binding && binding->params == chain_params_get() &&

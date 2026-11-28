@@ -1365,6 +1365,10 @@ int main(int argc, char **argv)
     if (flagrc >= 0)
         return flagrc;
 
+    {
+        extern bool boot_ballot_catalog_consent(const struct app_context *);
+        if (!boot_ballot_catalog_consent(&ctx)) return 1;
+    }
     main_run_filesync_if_requested(argc, argv, &ctx);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
