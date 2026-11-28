@@ -1981,6 +1981,57 @@ static const char *ars_driver_miss_why(const char *code)
 
 /* The plan's driver facts under the child environment, then the bytes of
  * every program a compile runs. */
+#if !defined(_WIN32)
+static bool ars_exec_path_stable(const char *word,
+                                 const struct zcl_action_root_t0 *t0)
+{
+    if (!t0 || !t0->set)
+        return true;
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s", word) >= (int)sizeof(path) ||
+        !ars_resolve_program(path))
+        return false;
+    size_t n = strlen(path);
+    for (size_t i = 1; i <= n; i++) {
+        if (path[i] != '/' && path[i] != '\0')
+            continue;
+        char saved = path[i];
+        path[i] = '\0';
+        struct stat st;
+        bool ok = lstat(path, &st) == 0;
+        path[i] = saved;
+        if (!ok)
+            return false;
+#if defined(__APPLE__)
+        int64_t sec = st.st_ctimespec.tv_sec, nsec = st.st_ctimespec.tv_nsec;
+#else
+        int64_t sec = st.st_ctim.tv_sec, nsec = st.st_ctim.tv_nsec;
+#endif
+        if (sec > t0->sec ||
+            (sec == t0->sec && (nsec >= t0->nsec || nsec == 0)))
+            return false;
+    }
+    return true;
+}
+
+static bool ars_exec_paths_stable(const struct ars_compile *k,
+                                  const struct ars_driver *d)
+{
+    char text[512];
+    const char *words[ARS_ARG_MAX];
+    if (snprintf(text, sizeof(text), "%s", k->cc) >= (int)sizeof(text))
+        return false;
+    size_t n = zcl_argv_split(text, words, ARS_ARG_MAX);
+    for (size_t i = 0; i < n && words[i][0] != '-'; i++)
+        if (!ars_exec_path_stable(words[i], k->t0))
+            return false;
+    for (size_t i = 0; i < d->backend_n; i++)
+        if (!ars_exec_path_stable(d->backend[i], k->t0))
+            return false;
+    return true;
+}
+#endif
+
 static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
                             uint8_t implicit[32], uint8_t backend[32],
                             struct ars_miss *m)
@@ -2012,6 +2063,11 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
     (void)backend;
     return false;
 #else
+    if (!ars_exec_paths_stable(k, &h->driver)) {
+        ars_miss_set(m, "input_changed_during_compile",
+                     "compiler path changed during the compile", k->cc);
+        return false;
+    }
     const char *bad = NULL;
     if (!ars_backend_sha3(&h->driver, backend, &bad)) {
         ars_miss_set(m, "backend_unresolved",
@@ -2965,6 +3021,13 @@ bool zcl_compile_observation_finish(struct zcl_compile_observation *o,
         ars_driver_fresh(&o->hook.driver) &&
         aco_facts(o, current, identity, &miss) &&
         memcmp(identity, o->identity, 32) == 0;
+#if !defined(_WIN32)
+    if (same)
+        same = ars_exec_path_stable(o->argv[0], &o->hook.req.compile_t0);
+    for (size_t i = 0; same && i < o->hook.driver.backend_n; i++)
+        same = ars_exec_path_stable(o->hook.driver.backend[i],
+                                    &o->hook.req.compile_t0);
+#endif
     free(current);
     if (!same)
         return aco_miss(result, "toolchain_changed", "driver/capsule changed during compile");

@@ -3151,6 +3151,19 @@ static void observation_window_refusals(struct observation_fixture *fixture)
              strcmp(result.miss, "toolchain_changed") == 0);
     zcl_action_root_result_free(&result);
     zcl_compile_observation_close(observation);
+    (void)unlink(driver);
+    linked = symlink(fixture->compiler, driver) == 0;
+    observation = NULL;
+    ready = linked && observation_begin(fixture, &observation) &&
+            observation_compile(observation);
+    replaced = ready && unlink(driver) == 0 &&
+               symlink("/usr/bin/false", driver) == 0 &&
+               unlink(driver) == 0 && symlink(fixture->compiler, driver) == 0;
+    AR_CHECK("observation refuses compiler replacement restored during window",
+             replaced && !zcl_compile_observation_finish(observation, true, &result) &&
+             strcmp(result.miss, "toolchain_changed") == 0);
+    zcl_action_root_result_free(&result);
+    zcl_compile_observation_close(observation);
     fixture->argv[0] = original;
     (void)unlink(driver);
 }
