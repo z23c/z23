@@ -330,6 +330,7 @@ struct ars_driver {
     char implicit[ARS_IMPLICIT_N][PATH_MAX]; /* "" when not found */
     char sysroot[PATH_MAX];
     char cc1_sysroot[PATH_MAX]; /* exact -### fallback when -print-sysroot is absent */
+    bool cc1_sysroot_known;
     char ld_word[PATH_MAX]; /* `-print-prog-name=ld` exactly as answered */
     char ld[PATH_MAX];      /* ld_word resolved as the driver would run it */
     char collect2[PATH_MAX];
@@ -663,13 +664,20 @@ static bool ars_cc1_line_sysroot(const char *line, const char *end,
                                 char path[PATH_MAX], bool *cc1)
 {
     const char *p = line;
-    bool pending = false, found = false;
+    bool pending = false, found = false, triple_pending = false;
+    bool triple_found = false, linux_target = false;
     *cc1 = false;
     path[0] = '\0';
     char word[PATH_MAX];
     int step;
     while ((step = ars_cc1_next_word(&p, end, word)) > 0) {
-        if (pending) {
+        if (triple_pending) {
+            if (triple_found)
+                return false;
+            triple_found = true;
+            linux_target = strstr(word, "-linux-") != NULL;
+            triple_pending = false;
+        } else if (pending) {
             if (found || word[0] != '/')
                 return false;
             (void)snprintf(path, PATH_MAX, "%s", word);
@@ -679,14 +687,25 @@ static bool ars_cc1_line_sysroot(const char *line, const char *end,
             if (found)
                 return false;
             pending = true;
+        } else if (strncmp(word, "-isysroot", 9) == 0 ||
+                   strncmp(word, "--sysroot", 9) == 0) {
+            return false;
         } else if (strcmp(word, "-cc1") == 0) {
+            if (*cc1)
+                return false;
             *cc1 = true;
+        } else if (strcmp(word, "-triple") == 0) {
+            if (triple_found)
+                return false;
+            triple_pending = true;
         }
     }
-    return step == 0 && !pending && (!*cc1 || found);
+    return step == 0 && !pending && !triple_pending &&
+           (!*cc1 || found || (triple_found && linux_target));
 }
 
-/* Parse only driver command lines. Every cc1 must name exactly one SDK. */
+/* Parse only driver command lines. Linux cc1 without -isysroot uses the
+ * host root; other targets must name exactly one SDK explicitly. */
 bool zcl_action_root_parse_cc1_sysroot(const char *out,
                                       char sysroot[PATH_MAX])
 {
@@ -929,7 +948,7 @@ static bool ars_driver_line(const struct ars_driver *d, const char *arg,
  * its already-bound -### cc1 line supplies the effective SDK instead. */
 static bool ars_sysroot_capture(struct ars_driver *d, char miss[40])
 {
-    if (d->cc1_sysroot[0]) {
+    if (d->cc1_sysroot_known) {
         (void)snprintf(d->sysroot, sizeof(d->sysroot), "%s",
                        d->cc1_sysroot);
         return true;
@@ -1124,6 +1143,7 @@ static bool ars_lines_capture(const struct ars_driver *d, const char *out,
 struct ars_programs {
     uint8_t lines_sha3[32];
     char cc1_sysroot[PATH_MAX];
+    bool cc1_sysroot_known;
     char backend[ARS_BACKEND_MAX][PATH_MAX];
     size_t backend_n;
     char prefixes[ARS_PREFIX_MAX][PATH_MAX];
@@ -1145,7 +1165,10 @@ static bool ars_programs_ask(const struct ars_driver *d,
               zcl_action_root_parse_driver_programs(
                   capture, p->backend, ARS_BACKEND_MAX, &p->backend_n,
                   p->prefixes, ARS_PREFIX_MAX, &p->prefix_n);
-    if (ok && !zcl_action_root_parse_cc1_sysroot(capture, p->cc1_sysroot)) {
+    if (ok)
+        p->cc1_sysroot_known = zcl_action_root_parse_cc1_sysroot(
+            capture, p->cc1_sysroot);
+    if (ok && !p->cc1_sysroot_known) {
         p->cc1_sysroot[0] = '\0';
         if (strstr(capture, "-cc1") != NULL) {
             if (miss)
@@ -1166,6 +1189,7 @@ static bool ars_programs_capture(struct ars_driver *d, char miss[40])
     bool ok = p && ars_programs_ask(d, p, miss);
     if (ok) {
         memcpy(d->lines_sha3, p->lines_sha3, sizeof(d->lines_sha3));
+        d->cc1_sysroot_known = p->cc1_sysroot_known;
         (void)snprintf(d->cc1_sysroot, sizeof(d->cc1_sysroot), "%s",
                        p->cc1_sysroot);
         memcpy(d->backend, p->backend, sizeof(d->backend));

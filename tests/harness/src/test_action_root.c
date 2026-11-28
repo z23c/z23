@@ -2857,6 +2857,13 @@ static void test_cc1_sysroot_parse(void)
         "\"-isysroot\" \"/SDK/MacOSX.sdk\"\n";
     const char *missing =
         " \"/tool/clang\" \"-cc1\" \"-x\" \"c\"\n";
+    const char *linux_default =
+        " \"/tool/clang\" \"-cc1\" \"-triple\" "
+        "\"x86_64-unknown-linux-gnu\" \"-x\" \"c\"\n";
+    const char *linux_ambiguous =
+        " \"/tool/clang\" \"-cc1\" \"-triple\" "
+        "\"x86_64-unknown-linux-gnu\" \"-triple\" "
+        "\"arm64-apple-macos\"\n";
     const char *duplicate =
         " \"/tool/clang\" \"-cc1\" \"-isysroot\" \"/SDK/A\" "
         "\"-isysroot\" \"/SDK/B\"\n";
@@ -2877,14 +2884,17 @@ static void test_cc1_sysroot_parse(void)
               strcmp(sysroot, "/SDK/MacOSX.sdk") == 0 &&
               !zcl_action_root_parse_cc1_sysroot(bad_escape, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(missing, sysroot) &&
+              zcl_action_root_parse_cc1_sysroot(linux_default, sysroot) &&
+              sysroot[0] == '\0' &&
+              !zcl_action_root_parse_cc1_sysroot(linux_ambiguous, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(duplicate, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(relative, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(two_commands, sysroot) &&
               !zcl_action_root_parse_cc1_sysroot(unquoted_bad, sysroot) &&
               zcl_action_root_parse_cc1_sysroot(other_command, sysroot) &&
               strcmp(sysroot, "/SDK/A") == 0;
-    AR_CHECK("driver facts: only one absolute cc1 -isysroot may supply a "
-             "driver that cannot answer -print-sysroot", ok);
+    AR_CHECK("driver facts: cc1 names one SDK or an unambiguous Linux "
+             "default root", ok);
 }
 
 #if !defined(_WIN32)
