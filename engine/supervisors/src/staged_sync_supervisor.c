@@ -20,6 +20,8 @@
 #include "services/chain_activation_service.h"
 #include "services/reducer_drain.h"
 #include "services/reducer_ingest_service.h"
+#include "services/private_applied_relay.h"
+#include "services/sync_monitor.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
 #include "util/reducer_drive_guard.h"
@@ -625,6 +627,9 @@ static void staged_stage_tick(struct liveness_contract *c)
     if (batch_catchup_sync)
         reducer_enter_batched_body_sync();
     (void)d->drain(batch);
+    if (d->drain == utxo_apply_stage_drain)
+        (void)private_applied_relay_check(boot_activation_controller(),
+                                          sync_monitor_connman());
     if (batch_catchup_sync)
         reducer_exit_batched_body_sync();
 
@@ -778,6 +783,7 @@ bool staged_sync_supervisor_init_stages_offline(struct main_state *ms)
 
 void staged_sync_supervisor_shutdown_stages(void)
 {
+    private_applied_relay_reset();
     if (g_stages[7].init_ok) tip_finalize_stage_shutdown();
     if (g_stages[6].init_ok) utxo_apply_stage_shutdown();
     if (g_stages[5].init_ok) proof_validate_stage_shutdown();

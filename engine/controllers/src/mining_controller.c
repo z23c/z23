@@ -8,6 +8,7 @@
 #include "services/miner_signal_round.h"
 #include "services/miner_ballot_template.h"
 #include "services/research_block_size.h"
+#include "services/private_applied_relay.h"
 #include "services/research_rules_tip.h"
 #include "services/miner_signal_catalog_pin.h"
 #include "controllers/blockchain_controller.h"
@@ -153,8 +154,13 @@ static struct block_template *mining_create_template(const struct script *script
 static void mining_announce_accepted_block(const struct uint256 *hash)
 {
     struct connman *cm = rpc_net_get_connman();
-    if (cm)
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
+    if (profile && profile->id == CHAIN_RESEARCH_IRONWOOD &&
+        chain_params_get() == profile->chain) {
+        (void)private_applied_relay_check(boot_activation_controller(), cm);
+    } else if (cm) {
         connman_relay_block(cm, hash);
+    }
 }
 
 static bool mining_submit_mined_block(struct block *block, struct validation_state *state)

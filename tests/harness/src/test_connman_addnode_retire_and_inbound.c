@@ -12,11 +12,18 @@
 #include "test/test_core.h"
 #include "coins/undo.h"
 #include "net/connman.h"
+#include "services/private_applied_relay.h"
+#include "services/chain_activation_service.h"
+#include "validation/main_state.h"
+#include "base/safe_alloc.h"
 #include "net/tor_integration.h"
 #include "net/onion_v3_address.h"
 #include "storage/census_read.h"
 #include "util/blocker.h"
 #include <stdatomic.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 #include <unistd.h>
 #include "test/test_connman_addnode_fallback_priv.h"
 
@@ -482,9 +489,156 @@ int check_connman_onion_seed_pass_early_returns(void)
     return failures;
 }
 
-int check_connman_addnode_relay_block_handshaked_only(void)
+static bool check_private_relay_new_peer(struct connman *cm,
+                                         struct p2p_node *peer,
+                                         const struct uint256 *hash)
+{
+    /* The real send tick drains the pending queue without adding known. */
+    zcl_mutex_lock(&peer->cs_inventory);
+    peer->inventory_to_send_count = 0;
+    zcl_mutex_unlock(&peer->cs_inventory);
+    struct p2p_node *new_peer = add_test_peer(cm, 203, 0, 113, 8,
+                                              PEER_HANDSHAKE_COMPLETE,
+                                              false, false);
+    if (!new_peer) return false;
+    bool ok = private_applied_relay_now(cm, hash) &&
+              peer->inventory_to_send_count == 0 &&
+              new_peer->inventory_to_send_count == 1;
+    ok = ok && private_applied_relay_now(cm, hash) &&
+         peer->inventory_to_send_count == 0 && new_peer->inventory_to_send_count == 1;
+    struct uint256 replacement = *hash;
+    replacement.data[1] = 1;
+    return ok && private_applied_relay_now(cm, &replacement) &&
+           peer->inventory_to_send_count == 1 &&
+           new_peer->inventory_to_send_count == 2 &&
+           uint256_eq(&peer->inventory_to_send[0].hash, &replacement);
+}
+
+static bool check_private_relay_retry(void)
+{
+    struct connman cm;
+    struct node_signals sigs = {0};
+    struct chain_activation_controller ctl = {0};
+    struct uint256 hash = {0};
+    hash.data[0] = 0x57;
+    private_applied_relay_reset();
+    chain_params_select(CHAIN_MAIN);
+    if (!connman_init(&cm, chain_params_get(), &sigs)) return false;
+    bool ok = private_applied_relay_check(NULL, &cm) &&
+              !private_applied_relay_now(&cm, &hash);
+    struct p2p_node *peer = add_test_peer(&cm, 203, 0, 113, 7,
+                                         PEER_HANDSHAKE_COMPLETE, false, false);
+    if (peer) {
+        ok = ok && private_applied_relay_check(&ctl, &cm) &&
+             peer->inventory_to_send_count == 0;
+        zcl_alloc_fault_fail_next("inv_to_send");
+        ok = ok && !private_applied_relay_now(&cm, &hash);
+        ok = ok && peer->inventory_to_send_count == 0;
+        ok = ok && private_applied_relay_now(&cm, &hash);
+        ok = ok && peer->inventory_to_send_count == 1;
+        ok = ok && check_private_relay_new_peer(&cm, peer, &hash);
+    } else {
+        ok = false;
+    }
+    zcl_alloc_fault_clear();
+    private_applied_relay_reset();
+    connman_free(&cm);
+    return ok;
+}
+
+#ifndef _WIN32
+struct relay_reorg_fixture {
+    struct main_state *ms;
+    struct block_index *replacement;
+    bool moved;
+};
+
+static int64_t relay_test_authority_height(void) { return 1; }
+static bool relay_test_authoritative(void) { return true; }
+
+static void relay_reorg_before_recheck(void *ctx)
+{
+    struct relay_reorg_fixture *f = ctx;
+    zcl_mutex_lock(&f->ms->cs_main);
+    f->moved = active_chain_move_window_tip(&f->ms->chain_active, f->replacement);
+    zcl_mutex_unlock(&f->ms->cs_main);
+}
+
+static bool check_private_relay_reorg_child(void)
+{
+    const struct active_chain_authority authority = {
+        .get_height = relay_test_authority_height,
+        .is_authoritative = relay_test_authoritative,
+    };
+    active_chain_register_authority(&authority);
+    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return false;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct chain_activation_controller ctl = { .ms = &ms, .params = chain_params_get() };
+    zcl_mutex_init(&ctl.mutex);
+    struct block_index genesis, first, replacement;
+    block_index_init(&genesis);
+    block_index_init(&first);
+    block_index_init(&replacement);
+    genesis.phashBlock = &genesis.hashBlock;
+    first.phashBlock = &first.hashBlock;
+    replacement.phashBlock = &replacement.hashBlock;
+    first.nHeight = replacement.nHeight = 1;
+    first.pprev = replacement.pprev = &genesis;
+    first.hashBlock.data[0] = 1;
+    replacement.hashBlock.data[0] = 2;
+    struct connman cm;
+    struct node_signals sigs = {0};
+    bool ready = active_chain_move_window_tip(&ms.chain_active, &first) &&
+                 connman_init(&cm, chain_params_get(), &sigs);
+    bool ok = false;
+    if (ready) {
+        struct p2p_node *peer = add_test_peer(&cm, 203, 0, 113, 9,
+                                               PEER_HANDSHAKE_COMPLETE,
+                                               false, false);
+        bool withheld = peer && !private_applied_relay_check(&ctl, &cm) &&
+                        peer->inventory_to_send_count == 0;
+        struct relay_reorg_fixture f = { &ms, &replacement, false };
+        private_applied_relay_test_evidence(true);
+        private_applied_relay_test_before_recheck(relay_reorg_before_recheck, &f);
+        ok = withheld && !private_applied_relay_check(&ctl, &cm) && f.moved &&
+             peer->inventory_to_send_count == 0;
+        private_applied_relay_reset();
+        connman_free(&cm);
+    }
+    zcl_mutex_destroy(&ctl.mutex);
+    main_state_free(&ms);
+    return ok;
+}
+
+static bool check_private_relay_reorg(void)
+{
+    pid_t child = fork();
+    if (child < 0) return false;
+    if (child == 0) _exit(check_private_relay_reorg_child() ? 0 : 1);
+    int status = 0;
+    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+           WEXITSTATUS(status) == 0;
+}
+#endif
+
+static int check_private_relay_controls(void)
 {
     int failures = 0;
+    printf("connman_addnode_fallback: private relay retries and deduplicates... ");
+    if (check_private_relay_retry()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+#ifndef _WIN32
+    printf("connman_addnode_fallback: reorg before private relay selection... ");
+    if (check_private_relay_reorg()) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+#endif
+    return failures;
+}
+
+int check_connman_addnode_relay_block_handshaked_only(void)
+{
+    int failures = check_private_relay_controls();
     /* connman_relay_block announces a new tip to handshaked peers only, and
      * is idempotent per peer. This is the miner/submitblock announce seam:
      * a locally-accepted tip never travels the P2P receive-relay path, so
