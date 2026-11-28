@@ -1,4 +1,4 @@
-/* purpose: Frame public PostNu6_3 Ironwood proof inputs through opening challenge x1. */
+/* purpose: Frame public PostNu6_3 Ironwood proof inputs through the IPA opening. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_IRONWOOD_POSTNU63_H
 #define ZCL_IRONWOOD_POSTNU63_H
@@ -6,6 +6,7 @@
 #include "codec/cursor.h"
 #include "services/ironwood_halo2_transcript.h"
 #include "services/ironwood_instance.h"
+#include "services/ironwood_ipa.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -45,4 +46,21 @@ struct zcl_result ironwood_postnu63_yx_challenges(struct ironwood_postnu63_stage
  * refer to the original proof. The stage is unchanged on failure. This does
  * not evaluate constraints, opening equations or proof validity. */
 struct zcl_result ironwood_postnu63_evaluations(struct ironwood_postnu63_stage *stage);
+
+/* The canonical-size PostNu6_3 wire layout carries five set evaluations.
+ * Checking the query graph belongs to opening verification. Offsets index
+ * compressed points in the proof retained by the input stage. */
+enum { IRONWOOD_POSTNU63_OPENING_SETS = 5 };
+struct ironwood_postnu63_opening {
+    size_t quotient_commitment_offset, s_commitment_offset, round_points_offset;
+    uint8_t x2[32], x3[32], x4[32], xi[32], z[32];
+    uint8_t set_evaluations[IRONWOOD_POSTNU63_OPENING_SETS][32];
+    uint8_t round_challenges[IRONWOOD_IPA_ROUNDS][32], c[32], f[32];
+};
+/* Decode the complete opening transcript starting at EVAL_X1. The input
+ * snapshot is retained for constraint evaluation. The output must not overlap
+ * the stage or its backing proof and is unchanged on failure. This function
+ * does not evaluate the opening equation. */
+struct zcl_result ironwood_postnu63_opening_transcript(
+    const struct ironwood_postnu63_stage *stage, struct ironwood_postnu63_opening *out);
 #endif

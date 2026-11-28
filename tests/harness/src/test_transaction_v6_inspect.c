@@ -773,6 +773,75 @@ static bool eval_offsets_match(const struct ironwood_postnu63_stage *stage, cons
         stage->lookup_eval_offset == o[6] && stage->proof.position == end;
 }
 
+/* SHA-256 of the independently reduced Halo2 0.4.0 upstream trace in this
+ * order: x2/x3/x4, xi/z, eleven round challenges, five set evaluations, c/f. */
+static bool opening_trace_matches(const struct ironwood_postnu63_opening *opening, size_t actions)
+{
+    static const char *const trace_digest[] = {
+        "38ea692a459cbdadecfcfcdd2a77b1cbb3c6dbeb3b91cf4d4300a4d5bbbbdddc",
+        "607cbf801a6a2cd948577317a521f1c90430afd28eed1f0fe0ce7acd1cc90b01"
+    };
+    uint8_t expected[32], got[32];
+    if (actions < 1 || actions > 2 || !zcl_hex_decode(trace_digest[actions - 1], expected, 32)) return false;
+    struct sha256_ctx hash;
+    sha256_init(&hash);
+    sha256_write(&hash, opening->x2, 32);
+    sha256_write(&hash, opening->x3, 32);
+    sha256_write(&hash, opening->x4, 32);
+    sha256_write(&hash, opening->xi, 32);
+    sha256_write(&hash, opening->z, 32);
+    sha256_write(&hash, opening->round_challenges[0], sizeof opening->round_challenges);
+    sha256_write(&hash, opening->set_evaluations[0], sizeof opening->set_evaluations);
+    sha256_write(&hash, opening->c, 32);
+    sha256_write(&hash, opening->f, 32);
+    sha256_finalize(&hash, got);
+    return !memcmp(got, expected, 32);
+}
+
+static bool opening_refuses(const struct ironwood_postnu63_stage *stage)
+{
+    struct ironwood_postnu63_opening out, before;
+    struct ironwood_postnu63_stage snapshot;
+    memcpy(&snapshot, stage, sizeof snapshot);
+    memset(&out, 0xa5, sizeof out);
+    memcpy(&before, &out, sizeof before);
+    return !ironwood_postnu63_opening_transcript(stage, &out).ok &&
+        !memcmp(stage, &snapshot, sizeof snapshot) && !memcmp(&out, &before, sizeof out);
+}
+
+static bool check_opening_stage(const struct ironwood_postnu63_stage *stage, uint8_t *wire)
+{
+    struct ironwood_postnu63_opening opening;
+    struct ironwood_postnu63_stage snapshot;
+    memcpy(&snapshot, stage, sizeof snapshot);
+    if (!ironwood_postnu63_opening_transcript(stage, &opening).ok ||
+        memcmp(stage, &snapshot, sizeof snapshot) || !opening_trace_matches(&opening, (size_t)stage->actions)) return false;
+    size_t start = stage->proof.position;
+    if (opening.quotient_commitment_offset != start || opening.s_commitment_offset != start + 192 ||
+        opening.round_points_offset != start + 224) return false;
+    struct ironwood_postnu63_stage trial = *stage;
+    trial.proof.buffer = NULL;
+    if (!opening_refuses(&trial)) return false;
+    trial = *stage;
+    --trial.proof.length;
+    if (!opening_refuses(&trial)) return false;
+    trial = *stage;
+    trial.phase = IRONWOOD_POSTNU63_Y_X;
+    if (!opening_refuses(&trial)) return false;
+    size_t offsets[] = { start, start + 32, opening.round_points_offset + 32,
+                         stage->proof.length - 32 };
+    size_t base = (size_t)(stage->proof.buffer - wire);
+    for (size_t i = 0; i < sizeof offsets / sizeof offsets[0]; ++i) {
+        uint8_t *word = wire + base + offsets[i], saved[32];
+        memcpy(saved, word, 32);
+        memset(word, 0xff, 32);
+        bool refused = opening_refuses(stage);
+        memcpy(word, saved, 32);
+        if (!refused) return false;
+    }
+    return true;
+}
+
 /* Upstream 0.4.0 PostNu6_3 one/two-action opening aggregation x1. */
 static bool check_eval_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
 {
@@ -788,7 +857,7 @@ static bool check_eval_stage(struct ironwood_postnu63_stage *stage, uint8_t *wir
     uint8_t expected[32];
     if (!zcl_hex_decode(x1[n - 1], expected, 32) || !eval_refusals(stage, wire, o, end, expected) ||
         !ironwood_postnu63_evaluations(stage).ok) return false;
-    if (!eval_offsets_match(stage, o, end) || memcmp(stage->x1, expected, 32))
+    if (!eval_offsets_match(stage, o, end) || memcmp(stage->x1, expected, 32) || !check_opening_stage(stage, wire))
         return false;
     struct ironwood_postnu63_stage before;
     memcpy(&before, stage, sizeof before);

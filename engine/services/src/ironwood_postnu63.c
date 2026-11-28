@@ -1,4 +1,4 @@
-/* purpose: Frame public PostNu6_3 Ironwood proof inputs through opening challenge x1. */
+/* purpose: Frame public PostNu6_3 Ironwood proof inputs through the IPA opening. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_postnu63.h"
 #include "primitives/transaction_v6_wire.h"
@@ -155,4 +155,56 @@ struct zcl_result ironwood_postnu63_evaluations(struct ironwood_postnu63_stage *
     if (result.ok) result = squeeze_scalar(&next, next.x1);
     if (result.ok) { next.phase = IRONWOOD_POSTNU63_EVAL_X1; *stage = next; }
     return result;
+}
+
+static struct zcl_result opening_commitments(struct ironwood_postnu63_stage *next,
+                                            struct ironwood_postnu63_opening *opening)
+{
+    struct zcl_result r = squeeze_scalar(next, opening->x2);
+    if (r.ok) r = absorb_points(next, 1, &opening->quotient_commitment_offset);
+    if (r.ok) r = squeeze_scalar(next, opening->x3);
+    for (size_t i = 0; r.ok && i < IRONWOOD_POSTNU63_OPENING_SETS; ++i)
+        r = ironwood_halo2_read_scalar(&next->transcript, &next->proof,
+                                       opening->set_evaluations[i], 32);
+    if (r.ok) r = squeeze_scalar(next, opening->x4);
+    if (r.ok) r = absorb_points(next, 1, &opening->s_commitment_offset);
+    if (r.ok) r = squeeze_scalar(next, opening->xi);
+    if (r.ok) r = squeeze_scalar(next, opening->z);
+    return r;
+}
+
+static struct zcl_result opening_rounds(struct ironwood_postnu63_stage *next,
+                                       struct ironwood_postnu63_opening *opening)
+{
+    opening->round_points_offset = next->proof.position;
+    for (size_t i = 0; i < IRONWOOD_IPA_ROUNDS; ++i) {
+        size_t offset;
+        struct zcl_result r = absorb_points(next, 2, &offset);
+        if (r.ok) r = squeeze_scalar(next, opening->round_challenges[i]);
+        if (!r.ok) return r;
+    }
+    struct zcl_result r = ironwood_halo2_read_scalar(&next->transcript, &next->proof, opening->c, 32);
+    if (r.ok) r = ironwood_halo2_read_scalar(&next->transcript, &next->proof, opening->f, 32);
+    return r;
+}
+
+struct zcl_result ironwood_postnu63_opening_transcript(
+    const struct ironwood_postnu63_stage *stage, struct ironwood_postnu63_opening *out)
+{
+    size_t expected = 0;
+    const size_t tail = 32 * (2 + IRONWOOD_POSTNU63_OPENING_SETS + 2 * IRONWOOD_IPA_ROUNDS + 2);
+    if (!stage || !out || !stage->proof.buffer || stage->proof.error != ZCL_CODEC_OK ||
+        stage->phase != IRONWOOD_POSTNU63_EVAL_X1 ||
+        !ironwood_postnu63_proof_size(stage->actions, &expected).ok ||
+        stage->proof.length != expected || zcl_codec_reader_remaining(&stage->proof) != tail)
+        return ZCL_ERR(-1, "Invalid PostNu6_3 opening stage");
+    struct ironwood_postnu63_stage next = *stage;
+    struct ironwood_postnu63_opening opening = {0};
+    struct zcl_result r = opening_commitments(&next, &opening);
+    if (r.ok) r = opening_rounds(&next, &opening);
+    if (!r.ok) return r;
+    if (!zcl_codec_reader_finish(&next.proof))
+        return ZCL_ERR(-1, "PostNu6_3 opening did not consume the full proof");
+    *out = opening;
+    return ZCL_OK;
 }
