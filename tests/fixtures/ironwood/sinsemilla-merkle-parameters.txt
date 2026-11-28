@@ -1,7 +1,7 @@
 Public Sinsemilla MerkleCRH research parameters; this file does not authorize
 an anchor, release identity, or proof acceptance.
 
-sinsemilla-merkle-parameters.bin: 32800 bytes, SHA256
+engine/services/resources/ironwood/sinsemilla-merkle-parameters.bin: 32800 bytes, SHA256
 c742f4c76e3727de7bc93bf446a50e9a84efa77a8987d96f409d6c464ed8262b
 Encoding is 1025 canonical compressed Pallas points: Q followed by S[0..1023].
 Q is Pallas hash_to_curve with personalization z.cash:SinsemillaQ and message

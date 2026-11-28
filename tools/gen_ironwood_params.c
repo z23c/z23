@@ -38,8 +38,8 @@ static bool emit_blinding(FILE *out, const char *path)
 }
 int main(int argc, char **argv)
 {
-    if (argc != 7) return 2;
-    FILE *out = fopen(argv[6], "wb");
+    if (argc != 8) return 2;
+    FILE *out = fopen(argv[7], "wb");
     if (!out) return 1;
     fputs("/* Generated from public Ironwood resources; do not edit. */\n"
           "#include \"services/ironwood_resident_params.h\"\n"
@@ -54,7 +54,12 @@ int main(int argc, char **argv)
     fputs("};\nconst uint8_t ironwood_resident_lookup[1159] = {\n", out);
     ok = emit(out, argv[5], 1159, 0) && ok;
     fputs("};\n", out);
+    fputs("static const uint8_t ironwood_merkle_parameters[32800] = {\n", out);
+    ok = emit(out, argv[6], 32800, 0) && ok;
+    fputs("};\nconst uint8_t *ironwood_resident_merkle_parameters(size_t *size)\n"
+          "{ if (size) *size = sizeof ironwood_merkle_parameters; "
+          "return ironwood_merkle_parameters; }\n", out);
     if (fclose(out) != 0) ok = false;
-    if (!ok) (void)remove(argv[6]);
+    if (!ok) (void)remove(argv[7]);
     return ok ? 0 : 1;
 }

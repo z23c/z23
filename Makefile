@@ -1416,7 +1416,7 @@ GUEST_KERNEL_TOOL_SRCS = tools/gen_guest_kernel.c tools/command/native_builtin_k
 	platform/modules/base/src/log_level.c platform/modules/base/src/safe_alloc.c
 COMMAND_SRCS += $(GUEST_KERNEL_GEN)
 IRONWOOD_PARAMS_DIR = engine/services/resources/ironwood
-IRONWOOD_PARAMS_INPUTS = $(addprefix $(IRONWOOD_PARAMS_DIR)/,ipa-generators.bin ipa-u-w.bin postnu63-custom-gates.bin postnu63-permutation-gates.bin postnu63-lookup-gates.bin)
+IRONWOOD_PARAMS_INPUTS = $(addprefix $(IRONWOOD_PARAMS_DIR)/,ipa-generators.bin ipa-u-w.bin postnu63-custom-gates.bin postnu63-permutation-gates.bin postnu63-lookup-gates.bin sinsemilla-merkle-parameters.bin)
 IRONWOOD_PARAMS_GEN = build/gen/ironwood_resident_params_$(BUILD_SOURCE_ID)_$(BUILD_MUTATION).c
 IRONWOOD_PARAMS_TOOL = build/bin/gen_ironwood_params_$(BUILD_SOURCE_ID)_$(BUILD_MUTATION)
 COMMAND_SRCS += $(IRONWOOD_PARAMS_GEN)
