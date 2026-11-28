@@ -14039,7 +14039,17 @@ static int test_ic_proof_failure_screen(void)
         "printf '==================== test_hex_codec (FAIL, 0.01s) ====================\\n'\n"
         "printf 'SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=0 groups_gated=1 groups_failed=1 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t\\n'\n"
         "exit 1\n";
-    static const char green_script[] = "#!/bin/sh\nexit 0\n";
+    static const char green_script[] =
+        "#!/bin/sh\n"
+        "echo SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=0 groups_gated=1 groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t\n"
+        "exit 0\n";
+    static const char flaky_script[] =
+        "#!/bin/sh\n"
+        "if [ -f prior ]; then echo SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=0 groups_gated=1 groups_failed=0 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t; exit 0; fi\n"
+        ": > prior\n"
+        "echo \"==================== test_hex_codec (FAIL, 0.01s) ====================\"\n"
+        "echo SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=0 groups_gated=1 groups_failed=1 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t\n"
+        "exit 1\n";
     int failures = 0;
     TEST("proof failure screen: two current cold failures stop, inconclusive never supplies a pass") {
         char dir[4096], log[4096], runner[4096], testlog[4096];
@@ -14072,6 +14082,12 @@ static int test_ic_proof_failure_screen(void)
         children = 0;
         ASSERT(!zcl_dev_proof_test_failure_screen(dir,dir,runner,"test_hex_codec",&children));
         ASSERT(children == 1 && access(testlog,F_OK) != 0);
+        ASSERT(ic_write(dir,"runner",flaky_script) && chmod(runner,0700) == 0);
+        children = 0;
+        ASSERT(!zcl_dev_proof_test_failure_screen(dir,dir,runner,"test_hex_codec",&children));
+        ASSERT(children == 2 && access(testlog,F_OK) != 0);
+        children = 0;
+        ASSERT(!zcl_dev_proof_test_failure_screen(dir,dir,runner,"",&children) && children == 0);
         ASSERT(test_rm_rf_recursive(dir) == 0);
         PASS();
     } _test_next:;
