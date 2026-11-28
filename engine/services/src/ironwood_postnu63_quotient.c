@@ -13,7 +13,7 @@ static struct zcl_result fold_terms(const uint8_t *terms, size_t count, const BI
 {
     BIGNUM *term = BN_CTX_get(ctx);
     if (!term) return ZCL_ERR(-1, "Cannot allocate quotient term");
-    BN_zero(sum);
+    if (!BN_set_word(sum, 0)) return ZCL_ERR(-1, "Cannot initialize quotient sum");
     for (size_t i = 0; i < count; ++i) {
         const uint8_t *bytes = terms + i * FIELD_BYTES;
         struct zcl_result canonical = ironwood_pasta_fp_canonical(bytes);
@@ -30,7 +30,9 @@ static struct zcl_result divide_domain(BIGNUM *x, BIGNUM *sum, const BIGNUM *pri
 {
     for (size_t i = 0; i < DOMAIN_LOG; ++i)
         if (!BN_mod_sqr(x, x, prime, ctx)) return ZCL_ERR(-1, "Cannot compute quotient domain");
-    if (!BN_mod_sub(den, x, one, prime, ctx) || BN_is_zero(den))
+    if (!BN_mod_sub(den, x, one, prime, ctx))
+        return ZCL_ERR(-1, "Cannot compute quotient denominator");
+    if (BN_is_zero(den))
         return ZCL_ERR(-1, "PostNu6_3 quotient domain denominator is zero");
     if (!BN_mod_inverse(inv, den, prime, ctx) || !BN_mod_mul(sum, sum, inv, prime, ctx))
         return ZCL_ERR(-1, "Cannot divide expected quotient");
