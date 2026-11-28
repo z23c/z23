@@ -22,6 +22,13 @@ static void boot_research_shielded(void)
     printf("research: Overwinter+Sapling active from genesis\n");
 }
 
+static bool boot_ballot_network_allowed(const struct app_context *ctx, bool research)
+{
+    return !((!research && ctx->testnet == ctx->regtest) ||
+             (research && (ctx->testnet || ctx->regtest)) ||
+             (GetBoolArg("-testnet", false) && GetBoolArg("-regtest", false)));
+}
+
 /* GetArg uses argv-over-config precedence and distinguishes absent from empty. */
 bool boot_ballot_catalog_load(struct app_context *ctx)
 {
@@ -38,9 +45,7 @@ bool boot_ballot_catalog_load(struct app_context *ctx)
                         "(-testballotcatalog <digest>)\n");
         return false;
     }
-    if ((!research && ctx->testnet == ctx->regtest) ||
-        (research && (ctx->testnet || ctx->regtest)) ||
-        (GetBoolArg("-testnet", false) && GetBoolArg("-regtest", false))) {
+    if (!boot_ballot_network_allowed(ctx, research)) {
         fprintf(stderr, "FATAL: -testballotcatalog requires one unambiguous testnet or regtest\n");
         return false;
     }
