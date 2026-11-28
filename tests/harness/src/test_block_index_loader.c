@@ -961,15 +961,22 @@ struct bil_reage_pass {
     size_t tip_present;
 };
 
+/* Sample each mapped height before observing page residency. */
+static unsigned bil_reage_walk(const struct block_index *tip)
+{
+    unsigned sum = 0;
+    for (const volatile struct block_index *cur = tip; cur; cur = cur->pprev)
+        sum += (unsigned)cur->nHeight;
+    return sum;
+}
+
 static struct bil_reage_pass bil_reage_run_pass(
     struct main_state *ms2, struct block_index *first,
     struct block_index *tip, size_t arena_bytes, size_t window,
     uintptr_t last_page, size_t page_size, int fake_height,
     int64_t fake_clock_ms, unsigned *sum_out)
 {
-    unsigned sum = 0;
-    for (struct block_index *cur = tip; cur; cur = cur->pprev)
-        sum += (unsigned)cur->nHeight;
+    unsigned sum = bil_reage_walk(tip);
     if (tip)
         sum += (unsigned)tip->nHeight; /* keep the tip window hot */
     struct bil_reage_pass p;
@@ -1004,14 +1011,11 @@ static bool bil_reage_reregister_case(struct main_state *source,
     struct block_index *tip = loaded ? block_map_find(&next.map_block_index, &tip_hash) : NULL;
     size_t bytes = 0;
     bool mapped = bil_reage_arena_ok(loaded, first, tip, dir, (size_t)chain_n, &bytes);
-    unsigned sum = 0;
-    for (struct block_index *cur = tip; cur; cur = cur->pprev)
-        sum += (unsigned)cur->nHeight;
+    unsigned sum = bil_reage_walk(tip);
     size_t before = bil_reage_present_or_fail(first, bytes);
     size_t aged = bil_test_paced_reage(&next, height, now_ms, page_size);
     size_t after = bil_reage_present_or_fail(first, bytes);
-    for (struct block_index *cur = tip; cur; cur = cur->pprev)
-        sum += (unsigned)cur->nHeight;
+    sum += bil_reage_walk(tip);
     size_t refaulted = bil_reage_present_or_fail(first, bytes);
     int64_t due_ms = now_ms + 300001;
     size_t foreign = bil_test_paced_reage(old_owner, height + 1, due_ms, page_size);
@@ -1098,9 +1102,7 @@ static int bil_flat_arena_reage_case(void)
             window_bytes);
 
         /* A later pprev/pskip walk re-faults the cold prefix. */
-        unsigned refault_sum = 0;
-        for (struct block_index *cur = tip; cur; cur = cur->pprev)
-            refault_sum += (unsigned)cur->nHeight;
+        unsigned refault_sum = bil_reage_walk(tip);
         size_t present_refaulted =
             bil_reage_present_or_fail(first, arena_bytes);
         size_t tip_refaulted =
