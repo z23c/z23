@@ -3767,5 +3767,6 @@ AGENT_IMPACT_RULE("engine/services/include/services/ironwood_auth_data_root.h|en
 AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_field.c|engine/services/src/ironwood_pallas_field.h|tests/harness/src/test_ironwood_pallas_field.c|tests/fixtures/ironwood/pallas-fp-differential.txt|tests/fixtures/ironwood/pallas-fp-inversion.txt", "ironwood_pallas_field ironwood_pallas_point ironwood_pallas_agreement")
 
 AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_point.c|engine/services/src/ironwood_pallas_point.h|tests/harness/src/test_ironwood_pallas_point.c|tests/fixtures/ironwood/pallas-point-add.txt", "ironwood_pallas_point ironwood_pallas_agreement")
+AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_point.c|engine/services/src/ironwood_pallas_point.h|engine/services/src/ironwood_pallas_agreement.c|engine/services/src/ironwood_pallas_agreement.h|engine/services/src/ironwood_pallas_field.c|engine/services/src/ironwood_pallas_field.h|tests/harness/src/test_pallas_constant_time.c", "pallas_constant_time")
 
 AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_agreement.c|engine/services/src/ironwood_pallas_agreement.h|tests/harness/src/test_ironwood_pallas_agreement.c|tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "ironwood_pallas_agreement")
