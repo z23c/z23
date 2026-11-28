@@ -9,6 +9,9 @@
 #endif
 #include "test/test_core.h"
 #include "services/block_index_loader.h"
+#include "config/boot_blkidx_ladder.h"
+#include "config/boot_internal.h"
+#include "config/boot.h"
 #include "../../../engine/services/src/block_index_flat_internal.h"
 #include "crypto/sha3.h"
 #include "services/block_index_flat_anchor.h"
@@ -43,6 +46,7 @@
 #include "support/log_throttle.h"
 #include <sqlite3.h>
 #include <errno.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -50,6 +54,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "util/util.h"
 #if defined(__linux__)
 #include <time.h>
 #endif
@@ -710,6 +715,165 @@ static int bil_research_profile(void)
     return failures;
 }
 
+struct bil_file_record {
+    char path[512];
+    off_t size;
+    uint8_t digest[32];
+};
+struct bil_file_snapshot { struct bil_file_record records[64]; size_t count; };
+
+static bool bil_snapshot_file(const char *path, const char *relative,
+                              struct bil_file_snapshot *snapshot)
+{
+    if (snapshot->count == 64 || strlen(relative) >= sizeof(snapshot->records[0].path))
+        return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    struct bil_file_record *r = &snapshot->records[snapshot->count];
+    memset(r, 0, sizeof(*r));
+    strcpy(r->path, relative);
+    struct sha3_256_ctx hash; sha3_256_init(&hash);
+    unsigned char buf[4096]; size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) != 0) {
+        sha3_256_write(&hash, buf, n);
+        r->size += (off_t)n;
+    }
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    if (!ok) return false;
+    sha3_256_finalize(&hash, r->digest);
+    snapshot->count++;
+    return true;
+}
+
+static bool bil_snapshot_walk(const char *root, const char *relative,
+                              struct bil_file_snapshot *snapshot)
+{
+    char dirpath[1024];
+    if (snprintf(dirpath, sizeof dirpath, "%s/%s", root, relative) >= (int)sizeof dirpath)
+        return false;
+    DIR *dir = opendir(dirpath);
+    if (!dir) return false;
+    bool ok = true;
+    struct dirent *entry;
+    while (ok && (entry = readdir(dir)) != NULL) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char child[512], path[1024];
+        int n = snprintf(child, sizeof child, "%s%s%s", relative,
+                         *relative ? "/" : "", entry->d_name);
+        int p = snprintf(path, sizeof path, "%s/%s", root, child);
+        struct stat st;
+        if (n < 0 || (size_t)n >= sizeof child || p < 0 || (size_t)p >= sizeof path ||
+            lstat(path, &st) != 0) { ok = false; break; }
+        if (S_ISDIR(st.st_mode)) ok = bil_snapshot_walk(root, child, snapshot);
+        else if (S_ISREG(st.st_mode)) ok = bil_snapshot_file(path, child, snapshot);
+        else ok = false;
+    }
+    if (closedir(dir) != 0) ok = false;
+    return ok;
+}
+
+static int bil_snapshot_compare(const void *a, const void *b)
+{
+    return strcmp(((const struct bil_file_record *)a)->path,
+                  ((const struct bil_file_record *)b)->path);
+}
+
+static bool bil_snapshot_take(const char *dir, struct bil_file_snapshot *snapshot)
+{
+    memset(snapshot, 0, sizeof *snapshot);
+    if (!bil_snapshot_walk(dir, "", snapshot)) return false;
+    qsort(snapshot->records, snapshot->count, sizeof snapshot->records[0], bil_snapshot_compare);
+    return true;
+}
+
+static bool bil_snapshot_equal(const struct bil_file_snapshot *a, const struct bil_file_snapshot *b)
+{
+    if (a->count != b->count) return false;
+    for (size_t i = 0; i < a->count; i++)
+        if (strcmp(a->records[i].path, b->records[i].path) ||
+            a->records[i].size != b->records[i].size ||
+            memcmp(a->records[i].digest, b->records[i].digest, 32)) return false;
+    return true;
+}
+
+static bool bil_ladder_refuses_unchanged(const char *dir, struct main_state *state,
+                                         const struct chain_params *params)
+{
+    struct bil_file_snapshot before, after;
+    struct app_context ctx = {0}; ctx.datadir = dir;
+    struct node_db db = {0};
+    struct boot_blkidx_load_ctx load = {
+        .ctx = &ctx, .st = state, .ndb = &db, .params = params
+    };
+    if (!SetDataDir(dir) || !bil_snapshot_take(dir, &before)) return false;
+    boot_blkidx_run_ladder(&load);
+    bool unchanged = bil_snapshot_take(dir, &after) && bil_snapshot_equal(&before, &after);
+    ClearDataDirCache();
+    return load.genesis_failed && unchanged;
+}
+
+static int bil_foreign_flat_refusal(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    char dir[256];
+    if (!test_mkdtemp(dir, sizeof dir, "bil_foreign_flat")) return 1;
+    struct main_state src, dst; main_state_init(&src); main_state_init(&dst);
+    struct uint256 hash = {0}; hash.data[0] = 42;
+    struct block_index *foreign = chainstate_insert_block_index((struct chainstate *)&src, &hash);
+    if (foreign) {
+        foreign->nHeight = 0; foreign->nBits = block_index_genesis_bits(profile->chain);
+    }
+    struct block_index_flat_identity identity = {0};
+    bool saved = foreign && save_block_index_flat_identity(dir, &src, &identity).ok;
+    BIL_CHECK("bil: foreign flat genesis refuses without changing any file",
+              saved && bil_ladder_refuses_unchanged(dir, &dst, profile->chain));
+    main_state_free(&dst); main_state_free(&src);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int bil_hydrate_genesis_gate(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    struct main_state state; main_state_init(&state);
+    struct boot_blkidx_load_ctx load = { .st = &state, .params = profile->chain };
+    BIL_CHECK("bil: blocks hydration is held before research genesis verification",
+              !boot_test_blocks_hydrate_applicable(&load));
+    struct block_index *g = chainstate_insert_block_index((struct chainstate *)&state,
+        &profile->chain->consensus.hashGenesisBlock);
+    if (g) g->nStatus = BLOCK_HAVE_DATA;
+    BIL_CHECK("bil: verified research genesis allows blocks hydration",
+              g && boot_test_blocks_hydrate_applicable(&load));
+    main_state_free(&state);
+    return failures;
+}
+
+static int bil_conflicting_body_refusal(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    char dir[256], path[512];
+    if (!test_mkdtemp(dir, sizeof dir, "bil_conflict_ladder")) return 1;
+    struct main_state state; main_state_init(&state);
+    bool loaded = load_block_index_with_genesis(&state, profile->chain, NULL, false,
+        profile->genesis_wire, profile->genesis_wire_len, dir).ok;
+    struct block_index *genesis = block_map_find(&state.map_block_index,
+                                                 &profile->chain->consensus.hashGenesisBlock);
+    struct disk_block_pos pos; disk_block_pos_init(&pos);
+    bool positioned = genesis && block_index_disk_pos_snapshot(genesis, &pos, NULL);
+    if (positioned) get_block_pos_filename(path, sizeof path, dir, &pos, "blk");
+    int fd = positioned ? open(path, O_RDWR) : -1;
+    uint8_t altered = profile->genesis_wire[profile->genesis_wire_len - 1] ^ 1;
+    bool patched = fd >= 0 && pwrite(fd, &altered, 1,
+                                     pos.nPos + profile->genesis_wire_len - 1) == 1;
+    if (fd >= 0 && close(fd) != 0) patched = false;
+    BIL_CHECK("bil: conflicting indexed genesis refuses without changing any file",
+              loaded && patched && bil_ladder_refuses_unchanged(dir, &state, profile->chain));
+    main_state_free(&state);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int bil_research_foreign_index(const struct chain_research_descriptor *profile)
 {
     int failures = 0;
@@ -760,6 +924,13 @@ static int bil_research_genesis_body(void)
     failures += bil_research_boot(&cp, wire);
     failures += bil_research_profile();
     failures += bil_research_foreign_index(chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD));
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (profile && chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) {
+        failures += bil_foreign_flat_refusal(profile);
+        failures += bil_conflicting_body_refusal(profile);
+        failures += bil_hydrate_genesis_gate(profile);
+        chain_params_select(CHAIN_REGTEST);
+    } else BIL_CHECK("bil: select research for ladder refusals", false);
     block_index_hdrext_free(&g);
     return failures;
 }

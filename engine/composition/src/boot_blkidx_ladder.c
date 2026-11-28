@@ -10,6 +10,7 @@
  * engine/composition/src/boot_legacy_import.c). */
 
 #include "config/boot_blkidx_ladder.h"
+#include "config/boot_internal.h"
 
 #include "config/boot.h"                     /* app_context, boot_dispatch_blocks_table_hydrate */
 #include "services/block_index_loader.h"     /* load_block_index* / rebuild / save_block_index_flat */
@@ -240,8 +241,21 @@ static bool rung_taint_load(struct boot_blkidx_load_ctx *c)
  * (engine/composition/src/boot_legacy_import.c). */
 static bool rung_blocks_hydrate_applicable(const struct boot_blkidx_load_ctx *c)
 {
-    return !c->rebuilt_from_log;
+    if (c->rebuilt_from_log) return false;
+    const struct chain_research_descriptor *research = chain_research_profile_current();
+    if (!research) return true;
+    if (!c->params || research->chain != c->params) return false;
+    /* Earlier rungs passed research_genesis_ready before this rung runs. */
+    struct block_index *genesis = block_map_find(&c->st->map_block_index,
+                                                &c->params->consensus.hashGenesisBlock);
+    return genesis && (block_index_status_load(genesis) & BLOCK_HAVE_DATA);
 }
+#ifdef ZCL_TESTING
+bool boot_test_blocks_hydrate_applicable(const struct boot_blkidx_load_ctx *c)
+{
+    return rung_blocks_hydrate_applicable(c);
+}
+#endif
 static bool rung_blocks_hydrate_load(struct boot_blkidx_load_ctx *c)
 {
     if (boot_dispatch_blocks_table_hydrate(c->ndb, c->st)) {
@@ -333,11 +347,23 @@ static _Atomic bool g_last_loaded;
 static _Atomic bool g_last_flat_union_tainted;
 
 /* Check the selected profile before a loaded rung can be persisted. */
+static bool research_foreign_genesis(const struct boot_blkidx_load_ctx *c)
+{
+    size_t iter = 0;
+    struct block_index *row;
+    while (block_map_next(&c->st->map_block_index, &iter, NULL, &row))
+        if (row && row->nHeight == 0 && row->phashBlock &&
+            !uint256_eq(row->phashBlock, &c->params->consensus.hashGenesisBlock))
+            return true;
+    return false;
+}
+
 static bool research_genesis_ready(struct boot_blkidx_load_ctx *c, bool required)
 {
     const struct chain_research_descriptor *research = chain_research_profile_current();
     if (!research) return true;
     if (!c->params || research->chain != c->params) return false;
+    if (research_foreign_genesis(c)) LOG_FAIL("boot", "research genesis: foreign height-zero index");
     struct block_index *genesis = block_map_find(&c->st->map_block_index,
                                                  &c->params->consensus.hashGenesisBlock);
     if (!genesis) return !required;

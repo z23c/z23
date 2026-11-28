@@ -1197,6 +1197,8 @@ bool boot_wallet_identity_ensure(struct node_db *ndb,
 void boot_wallet_credential_register_or_die(void);
 
 #ifdef ZCL_TESTING
+struct boot_blkidx_load_ctx;
+bool boot_test_blocks_hydrate_applicable(const struct boot_blkidx_load_ctx *ctx);
 /* Exercise the same checked pending runtime-store opener as startup. */
 bool boot_pending_mode_supported_test(const struct app_context *ctx);
 bool boot_test_pending_runtime_stores_open(const char *datadir, struct node_db *ndb,
