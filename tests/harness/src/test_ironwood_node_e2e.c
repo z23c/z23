@@ -427,6 +427,7 @@ static bool iw_stop(struct rnf *node, volatile sig_atomic_t *slot)
     long remaining = iw_remaining("stop", 60000L);
     long deadline = rnf_now_ms() + remaining;
     int rc = iw_wait_child(pid, deadline);
+    if (rc != 0) (void)iw_remaining("stop", 1);
     (void)kill(-pid, SIGKILL);
     if (!iw_cleanup_failed) {
         node->node = 0;
@@ -699,6 +700,41 @@ static int iw_test_signal_flag_only(void)
     return failures;
 }
 
+static int iw_test_stop_deadline(void)
+{
+    int failures = 0;
+    TEST("stop deadline escalates and reaps") {
+        int ready[2];
+        ASSERT(pipe(ready) == 0);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            close(ready[0]);
+            (void)setpgid(0, 0);
+            (void)signal(SIGTERM, SIG_IGN);
+            (void)write(ready[1], "R", 1);
+            for (;;) pause();
+        }
+        (void)setpgid(pid, pid);
+        close(ready[1]);
+        char byte;
+        bool started = read(ready[0], &byte, 1) == 1;
+        close(ready[0]);
+        struct rnf node = {0};
+        volatile sig_atomic_t slot = pid;
+        node.node = pid;
+        iw_title_begin("stop test", 250);
+        bool stopped_cleanly = iw_stop(&node, &slot);
+        int status;
+        bool reaped = waitpid(pid, &status, WNOHANG) < 0 && errno == ECHILD;
+        printf("STOP_TEST started=%d clean=%d reaped=%d\n",
+               started, stopped_cleanly, reaped);
+        ASSERT(started && !stopped_cleanly && reaped);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_ironwood_node_e2e(void);
 int test_ironwood_node_e2e(void)
 {
@@ -711,6 +747,7 @@ int test_ironwood_node_e2e(void)
     failures += iw_test_quoted_cleanup();
     failures += iw_test_rpc_deadline();
     failures += iw_test_signal_flag_only();
+    failures += iw_test_stop_deadline();
     if (failures) return failures;
     atexit(iw_cleanup);
     iw_arm();
