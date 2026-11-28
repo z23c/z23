@@ -55,6 +55,7 @@
 __attribute__((used)) static volatile const char prc_variant[] =
     "PRC-VARIANT:normal          ;";
 #define PRC_MARKER_LEN 12
+static char prc_mode[sizeof(prc_variant) - PRC_MARKER_LEN];
 
 #define PRC_FRAME 81
 
@@ -75,7 +76,7 @@ static bool prc_io(int fd, void *buffer, size_t size, bool sending)
 
 static bool prc_mode_is(const char *mode)
 {
-    return strncmp((const char *)prc_variant + PRC_MARKER_LEN, mode, strlen(mode)) == 0;
+    return strncmp(prc_mode, mode, strlen(mode)) == 0;
 }
 
 /* The descriptor number announced for name in Z23_PLUGIN_FDS, or -1. */
@@ -344,6 +345,9 @@ static int prc_special(int data_fd)
 
 int main(int argc, char **argv)
 {
+    /* Keep volatile loads when reading the test-selected image variant. */
+    for (size_t i = 0; i < sizeof(prc_mode); ++i)
+        prc_mode[i] = prc_variant[PRC_MARKER_LEN + i];
     if (argc < 3 || strcmp(argv[1], "--resident") != 0)
         return 2;
     int data_fd = prc_fd_of("data.dir"), log_fd = prc_fd_of("log");

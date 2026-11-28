@@ -50,6 +50,7 @@
 __attribute__((used)) static volatile const char hcc_variant[] =
     "HCC-VARIANT:tip             ;";
 #define HCC_MARKER_LEN 12
+static char hcc_mode[sizeof(hcc_variant) - HCC_MARKER_LEN];
 #define HCC_SUP_FRAME 81
 
 static bool hcc_io(int fd, void *buffer, size_t size, bool sending)
@@ -69,7 +70,7 @@ static bool hcc_io(int fd, void *buffer, size_t size, bool sending)
 
 static bool hcc_mode_is(const char *mode)
 {
-    return strncmp((const char *)hcc_variant + HCC_MARKER_LEN, mode, strlen(mode)) == 0;
+    return strncmp(hcc_mode, mode, strlen(mode)) == 0;
 }
 
 static int hcc_fd_of(const char *name)
@@ -238,13 +239,16 @@ static int hcc_flood(int log_fd, unsigned want, bool slow)
 
 int main(int argc, char **argv)
 {
+    /* Keep volatile loads when reading the test-selected image variant. */
+    for (size_t i = 0; i < sizeof(hcc_mode); ++i)
+        hcc_mode[i] = hcc_variant[HCC_MARKER_LEN + i];
     if (argc < 3 || strcmp(argv[1], "--resident") != 0)
         return 2;
     int log_fd = hcc_fd_of("log");
     if (hcc_mode_is("slow:"))
-        return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 5), true);
+        return hcc_flood(log_fd, (unsigned)atoi(hcc_mode + 5), true);
     if (hcc_mode_is("flood"))
-        return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 6), false);
+        return hcc_flood(log_fd, (unsigned)atoi(hcc_mode + 6), false);
     if (hcc_mode_is("badframe"))
         return hcc_badframe(log_fd);
     struct timespec t0, t1;
