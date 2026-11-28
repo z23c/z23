@@ -1631,7 +1631,7 @@ static int cas_test_research_unmarked_refuses(void)
         int a = snprintf(flag, sizeof(flag), "-datadir=%s", home);
         ASSERT(d > 0 && (size_t)d < sizeof(dir) && f > 0 &&
                (size_t)f < sizeof(file) && a > 0 && (size_t)a < sizeof(flag));
-        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(mkdir(dir, 0755) == 0 && chmod(dir, 0755) == 0);
         FILE *fp = fopen(file, "w");
         ASSERT(fp != NULL);
         ASSERT(fputs("old-state", fp) >= 0 && fclose(fp) == 0);
@@ -1640,8 +1640,9 @@ static int cas_test_research_unmarked_refuses(void)
         int rc = cas_run(argv, home, out, sizeof(out));
         struct stat st;
         bool intact = stat(file, &st) == 0 && st.st_size == 9;
+        bool mode_unchanged = stat(dir, &st) == 0 && (st.st_mode & 0777) == 0755;
         (void)test_rm_rf_recursive(home);
-        ASSERT(rc != 0 && strstr(out, "directory identity") && intact);
+        ASSERT(rc != 0 && strstr(out, "directory identity") && intact && mode_unchanged);
         PASS();
     } _test_next:;
     return failures;
@@ -1693,12 +1694,40 @@ static int cas_test_research_marker_guards(void)
         bool pending_refused = pending_rc != 0 && strstr(out, "requires its selector");
         char *selected[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                             parent, (char *)"-help", NULL};
+        int invalid_rc = cas_run(selected, home, out, sizeof(out));
+        struct stat st;
+        bool invalid_intact = stat(pending, &st) == 0 && st.st_size == 0;
+        fp = fopen(pending, "w");
+        ASSERT(fp != NULL && fputs("z23-research-profile:ironwood:v1\n", fp) >= 0 &&
+               fclose(fp) == 0);
         int partial_rc = cas_run(selected, home, out, sizeof(out));
         bool partial_recovered = partial_rc == 0;
         int missing_rc = cas_run(unselected, home, out, sizeof(out));
         bool missing_refused = missing_rc != 0 && strstr(out, "requires its selector");
         (void)test_rm_rf_recursive(home);
-        ASSERT(pending_refused && partial_recovered && missing_refused);
+        ASSERT(pending_refused && invalid_rc != 0 && invalid_intact &&
+               partial_recovered && missing_refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_research_empty_mode(void)
+{
+    int failures = 0;
+    TEST("empty research directory becomes private") {
+        char home[PATH_MAX], dir[PATH_MAX + 64], flag[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_empty") != NULL);
+        ASSERT(snprintf(dir, sizeof(dir), "%s/ironwood-research", home) > 0);
+        ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s", home) > 0);
+        ASSERT(mkdir(dir, 0755) == 0 && chmod(dir, 0755) == 0);
+        char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                        flag, (char *)"-help", NULL};
+        int rc = cas_run(argv, home, out, sizeof(out));
+        struct stat st;
+        bool private = stat(dir, &st) == 0 && (st.st_mode & 0777) == 0700;
+        (void)test_rm_rf_recursive(home);
+        ASSERT(rc == 0 && private);
         PASS();
     } _test_next:;
     return failures;
@@ -1886,6 +1915,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_direct_refuses();
     failures += cas_test_research_marker_guards();
+    failures += cas_test_research_empty_mode();
     failures += cas_test_research_private_directory();
     failures += cas_test_research_concurrent_creation();
     failures += cas_test_research_import_refusals();

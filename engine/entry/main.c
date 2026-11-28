@@ -1072,9 +1072,9 @@ static bool main_research_dir_recoverable(int dirfd)
     return empty;
 }
 
-static bool main_research_marker_valid(int dirfd)
+static bool main_research_value_valid(int dirfd, const char *name)
 {
-    int fd = openat(dirfd, main_research_marker, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    int fd = openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) return false;
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { close(fd); return false; }
@@ -1092,7 +1092,7 @@ static bool main_research_recover(int dirfd)
     if (fstatat(dirfd, main_research_pending, &pending, AT_SYMLINK_NOFOLLOW) != 0)
         return errno == ENOENT;
     return S_ISREG(pending.st_mode) &&
-        unlinkat(dirfd, main_research_pending, 0) == 0 && fsync(dirfd) == 0;
+        main_research_value_valid(dirfd, main_research_pending);
 }
 
 static bool main_research_publish(int dirfd)
@@ -1110,6 +1110,13 @@ static bool main_research_publish(int dirfd)
     return ok && fsync(dirfd) == 0;
 }
 
+static bool main_research_private(int dirfd, struct stat *st)
+{
+    if ((st->st_mode & 0777) != 0700 && fchmod(dirfd, 0700) != 0)
+        return false;
+    return fstat(dirfd, st) == 0 && (st->st_mode & 0777) == 0700;
+}
+
 static bool main_research_identity(const char *path)
 {
     if (mkdir(path, 0700) != 0 && errno != EEXIST)
@@ -1118,15 +1125,23 @@ static bool main_research_identity(const char *path)
     if (dirfd < 0) return false;
     struct stat private_dir;
     if (fstat(dirfd, &private_dir) != 0 || !S_ISDIR(private_dir.st_mode) ||
-        private_dir.st_uid != geteuid() ||
-        ((private_dir.st_mode & 0777) != 0700 && fchmod(dirfd, 0700) != 0) ||
-        fstat(dirfd, &private_dir) != 0 || (private_dir.st_mode & 0777) != 0700) {
+        private_dir.st_uid != geteuid()) {
         close(dirfd);
         return false;
     }
     if (flock(dirfd, LOCK_EX | LOCK_NB) != 0) { close(dirfd); return false; }
-    if (main_research_marker_valid(dirfd)) { close(dirfd); return true; }
-    if (!main_research_recover(dirfd)) { close(dirfd); return false; }
+    bool marked = main_research_value_valid(dirfd, main_research_marker);
+    if (!marked && !main_research_recover(dirfd)) { close(dirfd); return false; }
+    if (!main_research_private(dirfd, &private_dir)) {
+        close(dirfd);
+        return false;
+    }
+    if (marked) { close(dirfd); return true; }
+    if (unlinkat(dirfd, main_research_pending, 0) != 0 && errno != ENOENT) {
+        close(dirfd);
+        return false;
+    }
+    if (fsync(dirfd) != 0) { close(dirfd); return false; }
     bool ok = main_research_publish(dirfd);
     close(dirfd);
     return ok;
