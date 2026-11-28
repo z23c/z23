@@ -400,7 +400,7 @@ ZCL_DEP_AUDIT_BUILD_GOALS += build/bin/dep_audit
 endif
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap c3-mutex-probe c3-speed-bench c3-tip-seam build/bin/c3-mutex-probe.so \
 	$(ZCL_ANDROID_ACCEPTANCE_GOALS) \
-	$(ZCL_WINDOWS_STANDALONE_GOALS) \
+	$(filter-out print-node-c23-srcs,$(ZCL_WINDOWS_STANDALONE_GOALS)) \
 	$(ZCL_TOR_PROVENANCE_GOALS) $(ZCL_DEP_AUDIT_BUILD_GOALS) \
 	presentation-lib presentation-demo presentation-relaunch \
 	presentation-desktop-install presentation-portability \
@@ -1415,6 +1415,11 @@ GUEST_KERNEL_TOOL_SRCS = tools/gen_guest_kernel.c tools/command/native_builtin_k
 	core/modules/crypto/src/sha256.c core/modules/crypto/src/simd_dispatch.c \
 	platform/modules/base/src/log_level.c platform/modules/base/src/safe_alloc.c
 COMMAND_SRCS += $(GUEST_KERNEL_GEN)
+IRONWOOD_PARAMS_DIR = engine/services/resources/ironwood
+IRONWOOD_PARAMS_INPUTS = $(addprefix $(IRONWOOD_PARAMS_DIR)/,ipa-generators.bin ipa-u-w.bin postnu63-custom-gates.bin postnu63-permutation-gates.bin postnu63-lookup-gates.bin)
+IRONWOOD_PARAMS_GEN = build/gen/ironwood_resident_params_$(BUILD_SOURCE_ID)_$(BUILD_MUTATION).c
+IRONWOOD_PARAMS_TOOL = build/bin/gen_ironwood_params_$(BUILD_SOURCE_ID)_$(BUILD_MUTATION)
+COMMAND_SRCS += $(IRONWOOD_PARAMS_GEN)
 # Declarative rows and the boot owner's private header are C include inputs; the whole-program release
 # rules below do not emit depfiles.  Keep them as explicit prerequisites so a
 # command-contract-only edit cannot leave build/bin/zclassic23 stale.
@@ -2434,9 +2439,9 @@ WCS_NODE_C23_SRCS_FILE = $(abspath $(BUILD_DIR)/gen/node-c23-srcs.txt)
 .PHONY: print-node-c23-srcs node-c23-srcs-file
 print-node-c23-srcs:
 	@printf '%s\n' $(NODE_C23_SRCS)
-node-c23-srcs-file:
+node-c23-srcs-file: $(IRONWOOD_PARAMS_GEN)
 	@mkdir -p "$(dir $(WCS_NODE_C23_SRCS_FILE))"
-	@$(if $(ZCL_MAKE_NO_EXEC),:,set -e; tmp=$$(mktemp "$(WCS_NODE_C23_SRCS_FILE).XXXXXX"); trap 'rm -f "$$tmp"' EXIT HUP INT TERM; $(MAKE) -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs > "$$tmp"; test -s "$$tmp"; mv -f "$$tmp" "$(WCS_NODE_C23_SRCS_FILE)")
+	@$(if $(ZCL_MAKE_NO_EXEC),:,set -e; tmp=$$(mktemp "$(WCS_NODE_C23_SRCS_FILE).XXXXXX"); trap 'rm -f "$$tmp"' EXIT HUP INT TERM; $(MAKE) -s ZCL_TARGET=windows-x86_64 BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' print-node-c23-srcs > "$$tmp"; test -s "$$tmp"; mv -f "$$tmp" "$(WCS_NODE_C23_SRCS_FILE)")
 check-windows-cross-syntax lint lint-fast lint-changed lint-land lint-preflight lint-fast-preflight: node-c23-srcs-file
 check-windows-cross-syntax lint lint-fast lint-changed lint-land lint-preflight lint-fast-preflight: export ZCL_WCS_NODE_C23_SRCS_FILE := $(WCS_NODE_C23_SRCS_FILE)
 NODE_C23_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(NODE_C23_SRCS))
@@ -4392,6 +4397,16 @@ $(GUEST_KERNEL_TOOL): $(GUEST_KERNEL_TOOL_SRCS) tools/command/native_builtin_ker
 	$(ZCL_BUILD_CC) -std=c23 -O2 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -Itools -Iplatform/modules/base/include \
 	    -Iplatform/modules/util/include -Icore/modules/crypto/include -Ivendor/include \
 	    -o $@ $(GUEST_KERNEL_TOOL_SRCS) $(if $(filter Android,$(ZCL_HOST_OS)),,-Lvendor/lib) -lz
+
+$(IRONWOOD_PARAMS_TOOL): tools/gen_ironwood_params.c
+	@mkdir -p $(dir $@)
+	@tmp=$@.tmp.$$$$; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	    $(ZCL_BUILD_CC) -std=c23 -O2 -Wall -Wextra -o "$$tmp" $< && mv -f "$$tmp" $@
+
+$(IRONWOOD_PARAMS_GEN): $(IRONWOOD_PARAMS_INPUTS) $(IRONWOOD_PARAMS_TOOL)
+	@mkdir -p $(dir $@)
+	@tmp=$@.tmp.$$$$; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	    $(IRONWOOD_PARAMS_TOOL) $(IRONWOOD_PARAMS_INPUTS) "$$tmp" && mv -f "$$tmp" $@
 
 # The linked source is always this generated file, so a change of the stamp
 # changes the one source every object and link depends on: the packed kernel,
@@ -7583,7 +7598,7 @@ t-hotswap:
 	  $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY) --no-cache
 
 # Full no-link syntax check across every TU in one shot (no incremental state).
-syntax-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN)
+syntax-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN) $(IRONWOOD_PARAMS_GEN)
 	@$(CC) $(CFLAGS) -Wno-deprecated-declarations -fsyntax-only $(ALL_SRCS) $(NODE_ENTRY_SRCS) && echo "syntax-check: OK"
 
 # The highest-signal lint gates for the inner loop — a measured 32-gate set
@@ -16254,7 +16269,7 @@ check-windows-acceptance-guard: $(LINTC_TOOL)
 # -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
 # mingw is absent. The sweep and its result-cache proof compile the
 # generated guest-kernel TU too, so a fresh tree builds it first.
-check-windows-cross-syntax: $(LINTC_TOOL) $(GUEST_KERNEL_GEN)
+check-windows-cross-syntax: $(LINTC_TOOL) $(GUEST_KERNEL_GEN) $(IRONWOOD_PARAMS_GEN)
 	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 	@./build/bin/z23-lint check-windows-cross-syntax
 
@@ -19081,7 +19096,7 @@ $(BIN_DIR)/z23-wiki-runtime: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 # Cheap declaration/syntax screen only; registered tests and tool link remain mandatory.
 # Syntax-only does not exercise middle-end warnings (see the doctrine near line 1336).
 .PHONY: wiki-runtime-compile-check
-wiki-runtime-compile-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN)
+wiki-runtime-compile-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN) $(IRONWOOD_PARAMS_GEN)
 	@$(CC) $(CFLAGS) -Wno-deprecated-declarations -fsyntax-only \
 	  tools/dev/wiki_runtime.c tools/dev/wiki_runtime_main.c
 	@$(CC) $(TEST_FAST_CFLAGS) -Wno-deprecated-declarations -fsyntax-only \

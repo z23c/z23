@@ -7,6 +7,10 @@
 #include "base/hex.h"
 #include <stdio.h>
 #include <stdlib.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#include <fcntl.h>
+#endif
 
 struct fixture {
     struct ironwood_opening_basis basis;
@@ -21,12 +25,12 @@ static bool load_exact(const char *path, void *out, size_t bytes)
 }
 static bool load_fixture(struct fixture *f)
 {
-    return load_exact("tests/fixtures/ironwood/ipa-generators.bin", f->basis.generators, sizeof f->basis.generators) &&
+    return load_exact("engine/services/resources/ironwood/ipa-generators.bin", f->basis.generators, sizeof f->basis.generators) &&
         zcl_hex_decode("379dc4dcfdbf61ccc7d5a0bb9759acf611694f24d0c040f249bad30a83b1a897", f->basis.u, 32) &&
         zcl_hex_decode("7520d96f3e5cd41760367151608b54821883c10c4b9a4ff2beae227bef94bcab", f->basis.w, 32) &&
-        load_exact("tests/fixtures/ironwood/postnu63-custom-gates.bin", f->custom, sizeof f->custom) &&
-        load_exact("tests/fixtures/ironwood/postnu63-permutation-gates.bin", f->permutation, sizeof f->permutation) &&
-        load_exact("tests/fixtures/ironwood/postnu63-lookup-gates.bin", f->lookup, sizeof f->lookup) &&
+        load_exact("engine/services/resources/ironwood/postnu63-custom-gates.bin", f->custom, sizeof f->custom) &&
+        load_exact("engine/services/resources/ironwood/postnu63-permutation-gates.bin", f->permutation, sizeof f->permutation) &&
+        load_exact("engine/services/resources/ironwood/postnu63-lookup-gates.bin", f->lookup, sizeof f->lookup) &&
         load_exact("tests/fixtures/ironwood/postnu63-ballot-v6.bin", f->wire, sizeof f->wire);
 }
 
@@ -55,6 +59,17 @@ static bool check_proof(struct fixture *f)
     r = ironwood_postnu63_verify_proof(f->wire, sizeof f->wire, &programs, &f->basis);
     f->custom[0] ^= 1;
     if (r.ok) return false;
+#if !defined(_WIN32)
+    int saved = open(".", O_RDONLY);
+    if (saved < 0) return false;
+    bool changed = chdir("/") == 0;
+    r = changed ? ironwood_postnu63_verify_proof_resident(f->wire, sizeof f->wire) : ZCL_ERR(-1, "chdir failed");
+    bool restored = fchdir(saved) == 0;
+    bool closed = close(saved) == 0;
+    if (!r.ok || !restored || !closed) return false;
+#else
+    if (!ironwood_postnu63_verify_proof_resident(f->wire, sizeof f->wire).ok) return false;
+#endif
     size_t last_scalar = (size_t)(view.ironwood.proof.data - f->wire) + view.ironwood.proof.size - 32;
     f->wire[last_scalar] ^= 1;
     r = ironwood_postnu63_verify_proof(f->wire, sizeof f->wire, &programs, &f->basis);

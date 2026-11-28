@@ -243,9 +243,9 @@ static int gate_cases(void)
      * seven-expression program SHA-256 a7017dc7181affb167d21faf2f6dd2c9464d299f46a667114297a235380fd010.
      * R1 ironwood-permutation-provenance-1128/reproduce.sh records construction. */
     uint8_t program[48484], lookup[1159], permutation[997];
-    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-custom-gates.bin", program, sizeof program));
-    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-lookup-gates.bin", lookup, sizeof lookup));
-    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-permutation-gates.bin", permutation, sizeof permutation));
+    Q_CHECK(fixture_read("engine/services/resources/ironwood/postnu63-custom-gates.bin", program, sizeof program));
+    Q_CHECK(fixture_read("engine/services/resources/ironwood/postnu63-lookup-gates.bin", lookup, sizeof lookup));
+    Q_CHECK(fixture_read("engine/services/resources/ironwood/postnu63-permutation-gates.bin", permutation, sizeof permutation));
     Q_CHECK(!gate_case("tests/fixtures/ironwood/postnu63-coinbase.bin", "tests/fixtures/ironwood/postnu63-quotient-one.bin",
         1, program, sizeof program, lookup, sizeof lookup, permutation, sizeof permutation,
         "4b60b489fba78511e7852cdfb8cd499053d50db264e2e389bee82f12d23f9415"));
@@ -317,9 +317,9 @@ static int pinned_case(const char *proof_path, size_t actions, const char *expec
     uint8_t input[7590], wire[9400], custom[48484], permutation[997], lookup[1159], expected[32], h[32];
     size_t proof_size = 2720 + actions * 2272;
     Q_CHECK(fixture_read(proof_path, input, actions * 163 + proof_size));
-    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-custom-gates.bin", custom, sizeof custom));
-    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-permutation-gates.bin", permutation, sizeof permutation));
-    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-lookup-gates.bin", lookup, sizeof lookup));
+    Q_CHECK(fixture_read("engine/services/resources/ironwood/postnu63-custom-gates.bin", custom, sizeof custom));
+    Q_CHECK(fixture_read("engine/services/resources/ironwood/postnu63-permutation-gates.bin", permutation, sizeof permutation));
+    Q_CHECK(fixture_read("engine/services/resources/ironwood/postnu63-lookup-gates.bin", lookup, sizeof lookup));
     Q_CHECK(zcl_hex_decode(expected_hex, expected, sizeof expected));
     struct v6_wire_view view;
     Q_CHECK(pinned_view(input, actions, proof_size, wire, &view));

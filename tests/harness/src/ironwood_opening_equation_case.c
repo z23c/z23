@@ -15,7 +15,7 @@ bool ironwood_opening_query_case(size_t actions);
  * SHA256(generators) = b3470ff54d467bdfb236f094f7a9355d963d7fbc1e27393452427867a8bcd0db. */
 static bool read_basis(struct ironwood_opening_basis *basis)
 {
-    FILE *f = fopen("tests/fixtures/ironwood/ipa-generators.bin", "rb");
+    FILE *f = fopen("engine/services/resources/ironwood/ipa-generators.bin", "rb");
     if (!f) return false;
     size_t size = sizeof basis->generators;
     bool ok = fread(basis->generators, 1, size, f) == size && fgetc(f) == EOF && !ferror(f);

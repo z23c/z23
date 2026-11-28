@@ -15,4 +15,6 @@ struct ironwood_postnu63_constraint_programs;
  * before a node can admit the transaction. */
 struct zcl_result ironwood_postnu63_verify_proof(const uint8_t *wire, size_t length,
     const struct ironwood_postnu63_constraint_programs *programs, const struct ironwood_opening_basis *basis);
+/* Same proof check using the resident, digest-checked public parameters. */
+struct zcl_result ironwood_postnu63_verify_proof_resident(const uint8_t *wire, size_t length);
 #endif
