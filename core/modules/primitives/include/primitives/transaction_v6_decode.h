@@ -15,10 +15,10 @@ struct transaction;
 bool transaction_v6_decode_is_prefix(const struct byte_stream *s);
 
 /* Parse and store exactly one checked v6 frame, advancing only on success.
- * The retained bytes are opaque: no txid, authorizing-data commitment, proof,
- * signature, or contextual validity is established. The caller supplies its
- * network frame limit. On failure the stream cursor is unchanged and tx is
- * safe to transaction_free. */
+ * The txid is the ZIP 229 digest of the retained bytes; no proof, signature,
+ * or contextual validity is established. The caller supplies its network
+ * frame limit. On failure the stream cursor is unchanged and tx is safe to
+ * transaction_free. */
 bool transaction_v6_decode_prefix(struct transaction *tx, struct byte_stream *s,
                                   size_t max_size);
 

@@ -5,6 +5,7 @@
 
 #include "core/serialize.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_digest.h"
 #include "primitives/transaction_v6_wire.h"
 #include "util/log_macros.h"
 
@@ -43,6 +44,11 @@ bool transaction_v6_decode_prefix(struct transaction *tx, struct byte_stream *s,
     if (!transaction_v6_store_wire(tx, data, consumed, max_size))
         LOG_FAIL("tx", "failed to store checked v6 wire frame of %zu bytes",
                  consumed);
+    struct v6_digests digests;
+    if (!v6_wire_digests(&view, &digests))
+        LOG_FAIL("tx", "failed to digest checked v6 wire frame of %zu bytes",
+                 consumed);
+    memcpy(tx->hash.data, digests.txid, sizeof tx->hash.data);
 
     s->read_pos += consumed;
     return true;

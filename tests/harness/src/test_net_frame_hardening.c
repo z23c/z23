@@ -35,6 +35,7 @@
 #include "base/hex.h"
 #include "core/serialize.h"
 #include "crypto/sha256.h"
+#include "bloom/merkle.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "net/p2p_message.h"
@@ -405,6 +406,8 @@ static int neth_v6_valid_frames(void)
     struct byte_stream r;
     struct block b;
 
+    struct uint256 expected_txid;
+    uint256_set_hex(&expected_txid, "6657f1febe7ff9a032381517ce4720db94b18a3dea11a17ce075ec3f9928bfc3");
     neth_v6_block_start(&w, 2);
     stream_write_bytes(&w, ironwood_anchor_a, sizeof(ironwood_anchor_a));
     stream_write_bytes(&w, ironwood_anchor_a, sizeof(ironwood_anchor_a));
@@ -412,7 +415,7 @@ static int neth_v6_valid_frames(void)
     block_init(&b);
     NETH_CHECK("block v6: consecutive checked frames deserialize",
                block_deserialize(&b, &r) && r.read_pos == r.size);
-    NETH_CHECK("block v6: opaque bytes retained and txids left null",
+    NETH_CHECK("block v6: opaque bytes retained and digest txids assigned",
                b.num_vtx == 2 &&
                b.vtx[0].v6_wire.size == sizeof(ironwood_anchor_a) &&
                b.vtx[1].v6_wire.size == sizeof(ironwood_anchor_a) &&
@@ -423,7 +426,8 @@ static int neth_v6_valid_frames(void)
                b.vtx[0].v6_wire.data != b.vtx[1].v6_wire.data &&
                b.vtx[0].overwintered && b.vtx[0].version == IRONWOOD_TX_VERSION &&
                b.vtx[0].version_group_id == IRONWOOD_VERSION_GROUP_ID &&
-               uint256_is_null(&b.vtx[0].hash) && uint256_is_null(&b.vtx[1].hash));
+               uint256_eq(&b.vtx[0].hash, &expected_txid) &&
+               uint256_eq(&b.vtx[1].hash, &expected_txid));
     block_free(&b);
     stream_free(&r);
 
@@ -624,6 +628,8 @@ static int neth_v6_candidate_transaction_identity(const struct block *b,
 {
     int failures = 0;
     struct byte_stream coinbase;
+    struct uint256 v6_txid;
+    uint256_set_hex(&v6_txid, "35458f2ec6ae7de6e1b8b5b106d60b61fbafe8141e6c411c4541591892694790");
     stream_init(&coinbase, 128);
     bool coinbase_encoded = transaction_serialize(&b->vtx[0], &coinbase);
     NETH_CHECK("block v6: independent H127 transaction identities and bytes",
@@ -637,7 +643,7 @@ static int neth_v6_candidate_transaction_identity(const struct block *b,
                memcmp(b->vtx[1].v6_wire.data, data + 260, 9622) == 0 &&
                neth_sha256_is(b->vtx[1].v6_wire.data, b->vtx[1].v6_wire.size,
                    "684900bd4595fa07474506a5b6d04b524ff2954877b259a6de6c7da5f4ee2111") &&
-               uint256_is_null(&b->vtx[1].hash));
+               uint256_eq(&b->vtx[1].hash, &v6_txid));
     stream_free(&coinbase);
     return failures;
 }
@@ -662,6 +668,14 @@ static int neth_v6_candidate_decode(const unsigned char *data, size_t size)
 
     failures += neth_v6_candidate_header_identity(&b);
     failures += neth_v6_candidate_transaction_identity(&b, data);
+    struct uint256 txids[2] = {b.vtx[0].hash, b.vtx[1].hash};
+    struct uint256 root = compute_merkle_root(txids, 2);
+    NETH_CHECK("block v6: coinbase and v6 txids reproduce H127 merkle root",
+               uint256_eq(&root, &b.header.hashMerkleRoot));
+    txids[1].data[0] ^= 1;
+    root = compute_merkle_root(txids, 2);
+    NETH_CHECK("block v6: merkle root uses the decoded v6 txid",
+               !uint256_eq(&root, &b.header.hashMerkleRoot));
     block_free(&b);
     stream_free(&r);
     return failures;

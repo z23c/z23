@@ -24,6 +24,7 @@ COMMON_SOURCES := tools/dev/profile_inspector/common.c engine/services/src/exper
  platform/modules/base/src/log_level.c platform/modules/base/src/safe_alloc.c \
  platform/modules/encoding/src/utilstrencodings.c core/modules/primitives/src/transaction.c \
  core/modules/primitives/src/transaction_v6_decode.c \
+ core/modules/primitives/src/transaction_v6_digest.c \
  core/modules/primitives/src/transaction_v6_wire.c \
  core/modules/primitives/src/block.c core/math/src/serialize.c core/math/src/hash.c \
  core/math/src/arith_uint256.c core/math/src/uint256.c core/modules/crypto/src/sha256.c \

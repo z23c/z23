@@ -2,13 +2,14 @@
  * purpose: Render research v6 transaction inspection for the decoder RPC.
  */
 #include "controllers/transaction_v6_rpc.h"
-#include "controllers/transaction_v6_digest.h"
+#include "controllers/transaction_v6_inspect.h"
 #include "core/core_io.h"
 #include "base/serialize_le.h"
 #include "util/safe_alloc.h"
 #include "core/serialize.h"
 #include "encoding/utilstrencodings.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_digest.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>

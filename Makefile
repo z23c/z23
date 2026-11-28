@@ -12789,8 +12789,10 @@ bench-simd: $(BIN_DIR)/simd_bench
 SERIAL_BENCH_SRCS = tools/serial_bench.c \
 	core/modules/primitives/src/transaction.c \
 	core/modules/primitives/src/transaction_v6_decode.c \
+	core/modules/primitives/src/transaction_v6_digest.c \
 	core/modules/primitives/src/transaction_v6_wire.c \
 	core/modules/primitives/src/block.c core/modules/bloom/src/merkle.c \
+	core/modules/crypto/src/blake2b.c \
 	core/math/src/serialize.c core/math/src/uint256.c core/math/src/hash.c \
 	core/modules/crypto/src/sha256.c core/modules/crypto/src/sha512.c core/modules/crypto/src/ripemd160.c \
 	core/modules/crypto/src/hmac_sha512.c platform/modules/encoding/src/utilstrencodings.c \

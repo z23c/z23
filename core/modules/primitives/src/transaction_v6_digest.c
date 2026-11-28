@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Compute ZIP 229 digests from checked v6 transaction views.
  */
-#include "controllers/transaction_v6_digest.h"
+#include "primitives/transaction_v6_digest.h"
 #include "crypto/blake2b.h"
 #include "base/serialize_le.h"
 #include <string.h>
@@ -56,18 +56,18 @@ static bool transparent(const struct v6_wire_view *v, struct digest_pair *out)
     CHECK(start(&prev, "ZTxIdPrevoutHash")); CHECK(start(&seq, "ZTxIdSequencHash"));
     CHECK(start(&outputs, "ZTxIdOutputsHash"));
     struct v6_wire_cursor cursor; struct v6_span item;
-    CHECK(v6_wire_cursor_init(v, true, &cursor));
+    CHECK(v6_core_cursor_init(v, true, &cursor));
     while (cursor.count) {
-        CHECK(v6_wire_cursor_next(&cursor, &item));
+        CHECK(v6_core_cursor_next(&cursor, &item));
         struct reader r = {item.data, item.size}; const uint8_t *p;
         CHECK(take(&r, PREVOUT, 1, &p)); CHECK(add(&prev, p, PREVOUT));
         p = r.p; CHECK(script(&r)); CHECK(add(&auth, p, (size_t)(r.p - p)));
         CHECK(take(&r, SEQUENCE, 1, &p)); CHECK(add(&seq, p, SEQUENCE));
         if (r.n) return false;
     }
-    CHECK(v6_wire_cursor_init(v, false, &cursor));
+    CHECK(v6_core_cursor_init(v, false, &cursor));
     while (cursor.count) {
-        CHECK(v6_wire_cursor_next(&cursor, &item));
+        CHECK(v6_core_cursor_next(&cursor, &item));
         CHECK(add(&outputs, item.data, item.size));
     }
     if (v->inputs || v->outputs) {
