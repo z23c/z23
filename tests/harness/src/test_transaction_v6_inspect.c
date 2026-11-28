@@ -3,6 +3,8 @@
 #include "controllers/transaction_v6_digest.h"
 #include "controllers/transaction_v6_rpc.h"
 #include "services/ironwood_instance.h"
+#include "services/ironwood_halo2_transcript.h"
+#include "codec/cursor.h"
 #include "base/hex.h"
 #include "encoding/utilstrencodings.h"
 #include <stdio.h>
@@ -323,9 +325,7 @@ static bool check_commitment_cancellation(uint8_t basis[IRONWOOD_INSTANCE_ROWS][
 
 /* Pinned upstream Halo2 0.4.0 k=11 basis and funded two-action transcript;
  * R1 ironwood-instance-commit.kRFCL9qn/{basis-11-and-w.hex,commitments.txt}. */
-static bool check_instance_commitment(const struct ironwood_instance_rows *rows, const char *want)
-{
-    static const char *points[] = {
+static const char *instance_basis_hex[] = {
         "d8e88412dad928ab63cf8d2532aea6f5b118e3af01091721172c81a568757882",
         "5d1232a1a28cd09dffeec96ea2113ed77971720c6fe715b4f7ec35d98967eb9e",
         "fdd970bc80e05e71fe3c91ddd7d5150dd5acffb8c5a22ba0f8abb661215e9f8a",
@@ -338,10 +338,17 @@ static bool check_instance_commitment(const struct ironwood_instance_rows *rows,
         "8e9fda732d7be75897c1cff1631f05da6fbc405bdb1e5eb4aae62bad9737a490",
         "7520d96f3e5cd41760367151608b54821883c10c4b9a4ff2beae227bef94bcab"
     };
-    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], out[32], expected[32];
+static bool load_instance_basis(uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], uint8_t w[32])
+{
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
-        if (!zcl_hex_decode(points[i], basis[i], 32)) return false;
-    if (!zcl_hex_decode(points[10], w, 32) || !zcl_hex_decode(want, expected, 32) ||
+        if (!zcl_hex_decode(instance_basis_hex[i], basis[i], 32)) return false;
+    return zcl_hex_decode(instance_basis_hex[IRONWOOD_INSTANCE_ROWS], w, 32);
+}
+
+static bool check_instance_commitment(const struct ironwood_instance_rows *rows, const char *want)
+{
+    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], out[32], expected[32];
+    if (!load_instance_basis(basis, w) || !zcl_hex_decode(want, expected, 32) ||
         !ironwood_instance_commitment(rows, basis, w, out).ok || memcmp(out, expected, 32)) return false;
     struct ironwood_instance_rows zero = {0};
     uint8_t zero_result[32];
@@ -424,6 +431,53 @@ static bool check_funded_second_instance(void)
         check_instance_commitment(&got, "273cf53ff47191c5a7a25ba8e3a8df751b1b4933500b3653ff54ccd8b94f95a0");
 }
 
+/* Frames public inputs and advice points only; this is not proof verification. */
+static bool first_theta(const struct v6_wire_view *view, size_t count, size_t advice_columns,
+                        const uint8_t *proof, size_t proof_size, bool reverse, uint8_t out[32])
+{
+    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], vk[32], affine[64], wide[64], value[32];
+    struct ironwood_halo2_transcript t;
+    struct zcl_codec_reader reader;
+    if (!load_instance_basis(basis, w) ||
+        !zcl_hex_decode("99b4fa5429bf1f72bbba9c1620e201206287d2cc6373012d5bb99fedb7f72205", vk, 32) ||
+        !ironwood_halo2_transcript_init(&t).ok || !ironwood_halo2_transcript_scalar(&t, vk, 32).ok)
+        return false;
+    for (size_t i = 0; i < count; ++i) {
+        struct ironwood_instance_rows rows;
+        uint8_t commitment[32];
+        struct zcl_codec_reader input;
+        size_t action = reverse ? count - 1 - i : i;
+        if (!ironwood_instance_project(view, action, &rows).ok ||
+            !ironwood_instance_commitment(&rows, basis, w, commitment).ok) return false;
+        zcl_codec_reader_init(&input, commitment, sizeof commitment);
+        if (!ironwood_halo2_read_point(&t, &input, affine, sizeof affine).ok || input.position != 32)
+            return false;
+    }
+    zcl_codec_reader_init(&reader, proof, proof_size);
+    for (size_t i = 0; i < count; ++i)
+        for (size_t j = 0; j < advice_columns; ++j)
+            if (!ironwood_halo2_read_point(&t, &reader, affine, sizeof affine).ok) return false;
+    if (reader.position != proof_size || !ironwood_halo2_transcript_challenge(&t, wide, sizeof wide).ok ||
+        !ironwood_halo2_vesta_scalar(wide, sizeof wide, value, sizeof value).ok) return false;
+    memcpy(out, value, sizeof value);
+    return true;
+}
+
+static bool check_first_theta(const struct v6_wire_view *view)
+{
+    uint8_t expected[32], out[32], before[32], bad[sizeof ironwood_funded_proof_prefix];
+    if (!zcl_hex_decode("9b4c4db54b5587629516968e6cba32a1c9239bee4c8e5d22dd534b79ed27bc34", expected, 32) ||
+        !first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix, false, out) ||
+        memcmp(out, expected, 32)) return false;
+    if (!first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix, true, out) ||
+        !memcmp(out, expected, 32)) return false;
+    memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof out);
+    if (first_theta(view, 2, 10, ironwood_funded_proof_prefix, sizeof ironwood_funded_proof_prefix - 1, false, out) ||
+        memcmp(out, before, 32)) return false;
+    memcpy(bad, ironwood_funded_proof_prefix, sizeof bad); memset(bad, 0, 32);
+    return !first_theta(view, 2, 10, bad, sizeof bad, false, out) && !memcmp(out, before, 32);
+}
+
 /* Structurally serialized v6 frame using the public funded action slices;
  * ciphertexts, proof and signatures are synthetic and are not validated. */
 static bool check_two_action_instance(void)
@@ -456,7 +510,7 @@ static bool check_two_action_instance(void)
             !ironwood_instance_project(&v, i, &actual).ok || memcmp(&actual, &expected, sizeof actual))
             return false;
     }
-    return true;
+    return check_first_theta(&v);
 }
 
 static bool check_statement_views(void)
