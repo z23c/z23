@@ -8,11 +8,9 @@
 # ONLY against this fixture tree; a bare `host_gc.sh --dry-run` against the
 # live host (no overrides) is the caller's job, not this selftest's.
 set -euo pipefail
-
 # All Git operations, including host_gc's children, must use the fixture repo.
 unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
-
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOSTGC="$SELF_DIR/host_gc.sh"
 mkdir -p -- "${TMPDIR:-./test-tmp}"
@@ -23,14 +21,11 @@ mkdir -p -- "${TMPDIR:-./test-tmp}"
 WORK="$(cd "${TMPDIR:-./test-tmp}" && pwd -P)/host_gc_selftest.$$"
 mkdir -p -- "$WORK"
 FAIL=0
-
 cleanup() { chmod -R u+w -- "$WORK" 2>/dev/null || true; rm -rf -- "$WORK"; }
 trap cleanup EXIT
 trap 'exit 2' HUP INT TERM
-
 fail() { printf 'host_gc_selftest: FAIL: %s\n' "$*" >&2; FAIL=1; }
 pass() { printf 'host_gc_selftest: ok: %s\n' "$*"; }
-
 # ------------------------------------------------------------- fixture root
 HOME_FX="$WORK/home"
 REPO_FX="$HOME_FX/github/zclassic23"
@@ -54,7 +49,6 @@ Z23_STUB="$WORK/z23-stub"
 Z23_STUB_CALLS="$WORK/z23-stub-calls.log"
 WORKTREE_STUB="$WORK/worktree-gc-stub"
 WORKTREE_CALLS="$WORK/worktree-gc-calls.log"
-
 # host_gc reads this metadata for its protected-lane classifier. Copy the
 # authoritative assignment as data; do not execute the real delegate.
 protected_line="$(sed -n '/^PROTECTED_NAMES="[^"]*"$/p' "$SELF_DIR/worktree_gc.sh")"
@@ -70,11 +64,9 @@ STUBEOF
 } > "$WORKTREE_STUB"
 chmod +x "$WORKTREE_STUB"
 : > "$WORKTREE_CALLS"
-
 mkdir -p -- "$TMP_FX" "$PROC_FX" "$STATE_FX" "$UNITS_FX" "$LANES_FX" \
     "$TRAINS_FX" "$SCRATCH_FX" "$DEVSCRATCH_FX" "$ZCCDIR_FX" "$Z23P_FX" "$RAM_FX" "$RAMSCR_FX"
 printf 'tmpfs %s tmpfs rw 0 0\n' "$WORK/shm" > "$PROC_FX/mounts"
-
 # FREE SPACE IS INJECTED, NEVER READ LIVE. host_gc.sh measures free space
 # with `df -P` on its home; this stub answers for the fixture instead, so a
 # verdict here never depends on how full the box running the selftest is.
@@ -92,7 +84,6 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
 printf 'fixture %s %s %s 50%% /\n' "$total" "$(( total - avail ))" "$avail"
 STUBEOF
 chmod +x "$DF_STUB_DIR/df"
-
 # systemctl, stubbed so no category ever reads this box's real user units.
 # One unit, whose ExecStart is whatever $UNITS_EXEC_FILE names (empty = no
 # unit points anywhere).
@@ -109,7 +100,6 @@ esac
 exit 0
 STUBEOF
 chmod +x "$SYSTEMCTL_STUB"
-
 # The dev binary the low-disk warning posts through. It sits next to the
 # z23 stub (host_gc.sh looks beside its z23 binary before PATH), so a
 # selftest run can never reach a real z23-dev and post real mail.
@@ -122,7 +112,6 @@ printf '{"schema":"zcl.result.v1","ok":true,"status":"passed"}\n'
 STUBEOF
 chmod +x "$DEV_STUB"
 : > "$DEV_STUB_CALLS"
-
 cat > "$Z23_STUB" <<'STUBEOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -135,7 +124,6 @@ printf '"totals":{"registered":2,"bytes_reclaimed":40960},"refusals":[]}}\n'
 STUBEOF
 chmod +x "$Z23_STUB"
 : > "$Z23_STUB_CALLS"
-
 # A real git repo stands in for GC_REPO so `git cherry`, `worktree add` and
 # `worktree remove` behave exactly as they do on the live host.
 git -C "$WORK" init -q -b main "$REPO_FX"
@@ -150,7 +138,6 @@ echo base > "$REPO_FX/base.txt"
 printf '*.pid\n*.lock\nbuild/\ntest-tmp/\n' > "$REPO_FX/.gitignore"
 git -C "$REPO_FX" add base.txt .gitignore
 git -C "$REPO_FX" commit -q -m base
-
 # run_hostgc CAT MODE [EXTRA_ENV...] — invokes host_gc.sh --only CAT in the
 # given MODE (dry-run|apply) against the fixture tree, capturing output.
 run_hostgc() {
@@ -186,7 +173,6 @@ run_hostgc() {
         "$@" \
         "$HOSTGC" "${selection[@]}" "--$mode" ${HGT_EXTRA_ARGS:-}
 }
-
 assert_contains() {
     local haystack="$1" needle="$2" label="$3"
     case "$haystack" in
@@ -203,9 +189,7 @@ assert_not_contains() {
 }
 # assert_gone PATH FAIL_LABEL PASS_LABEL
 assert_gone() { if [ -e "$1" ]; then fail "$2"; else pass "$3"; fi; }
-
 [ -x "$HOSTGC" ] || { echo "host_gc_selftest: $HOSTGC is not executable" >&2; exit 2; }
-
 # ---------------------------------------------------------------- tmplitter
 # A fixed 2000-01-01 stamp, not `touch -d '3 days ago'`: GNU touch's -d does
 # not exist on macOS, and every age floor this selftest exercises is set to 0
@@ -218,7 +202,6 @@ touch_old "$TMP_FX/claude-keepme"
 mkdir -p -- "$TMP_FX/codex-daemon-keepme" "$TMP_FX/cc-daemon-keepme"
 touch_old "$TMP_FX/codex-daemon-keepme"
 touch_old "$TMP_FX/cc-daemon-keepme"
-
 out="$(run_hostgc tmplitter dry-run)"
 log="$(cat -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
 assert_contains "$log" "orphan-fixture" "tmplitter dry-run logs the unregistered entry as reapable"
