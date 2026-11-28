@@ -17,7 +17,7 @@ enum {
     HMI_GRP = 48,
     HMI_LINE = 1024,
     HMI_ROWS = 512,        /* allowlist rows (real: 294, floor 100) */
-    HMI_CAP_LINES = 2048,  /* physical lines of capability_symbols.def */
+    HMI_CAP_LINES = 3072,  /* physical lines of capability_symbols.def */
     HMI_CAPROWS = 2048,    /* ZCL_CAPABILITY_SYMBOL rows (real: 547) */
     HMI_SEEN = 4096,       /* distinct imports seen across modules */
     HMI_SOS = 256,         /* module .so files in one directory */

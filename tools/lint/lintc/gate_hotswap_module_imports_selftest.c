@@ -228,6 +228,12 @@ static int hms_write_cont_scenario(const char *cont_def, const char *cont_cap)
         if (hms_append(cont_def, row))
             return -1;
     }
+    /* The continuation declaration must be scanned beyond the old 2048-line limit. */
+    FILE *pad = fopen(cont_cap, "a");
+    if (!pad) return -1;
+    int failed = 0;
+    for (size_t i = 0; i < 2049; ++i) if (fputs("/* selftest padding */\n", pad) == EOF) failed = 1;
+    if (fclose(pad) != 0 || failed) return -1;
     if (hms_append(cont_cap,
                    "ZCL_CAPABILITY_SYMBOL(\"zcl_selftest_continuation_symbol\",\n"
                    "    CAP_RANDOM, \"selftest continuation-line row\")\n"))
