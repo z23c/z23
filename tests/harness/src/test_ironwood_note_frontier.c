@@ -40,7 +40,8 @@ static bool rollback(const uint8_t *params, const uint8_t leaves[4][32])
     uint8_t root[32], before[32], bad[2][32];
     if (!ironwood_note_frontier_extend(&tree, leaves, 1, params,
                                       IRONWOOD_MERKLE_PARAMETERS_SIZE, root).ok) return false;
-    struct ironwood_note_frontier saved = tree;
+    struct ironwood_note_frontier saved;
+    memcpy(&saved, &tree, sizeof saved);
     memcpy(before, root, 32);
     memcpy(bad[0], leaves[1], 32);
     memset(bad[1], 0xff, 32);
@@ -62,7 +63,8 @@ static bool capacity(const uint8_t *params)
     if (!ironwood_note_frontier_extend(&tree, leaf, 1, params,
             IRONWOOD_MERKLE_PARAMETERS_SIZE, root).ok || !correct_anchor(0, root) ||
         tree.count != (UINT64_C(1) << 32)) return false;
-    struct ironwood_note_frontier full = tree;
+    struct ironwood_note_frontier full;
+    memcpy(&full, &tree, sizeof full);
     return !ironwood_note_frontier_extend(&tree, leaf, 1, params,
                 IRONWOOD_MERKLE_PARAMETERS_SIZE, root).ok &&
            memcmp(&full, &tree, sizeof full) == 0 && correct_anchor(0, root);

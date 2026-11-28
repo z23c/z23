@@ -28,6 +28,13 @@ static struct zcl_result append_commitment(struct ironwood_note_frontier *tree,
 static struct zcl_result frontier_root(const struct ironwood_note_frontier *tree,
     const uint8_t *params, size_t size, uint8_t root[32])
 {
+    if (tree->count == NOTE_CAPACITY) {
+        if (!ironwood_merkle_parameters_valid(params, size))
+            return ZCL_ERR(-1, "Invalid Ironwood Merkle parameters");
+        struct zcl_result r = ironwood_pasta_fp_canonical(tree->slots[IRONWOOD_NOTE_TREE_DEPTH]);
+        if (r.ok) memcpy(root, tree->slots[IRONWOOD_NOTE_TREE_DEPTH], 32);
+        return r;
+    }
     uint8_t empty[32] = {2};
     memcpy(root, empty, sizeof empty);
     for (unsigned level = 0; level < IRONWOOD_NOTE_TREE_DEPTH; ++level) {
@@ -37,15 +44,12 @@ static struct zcl_result frontier_root(const struct ironwood_note_frontier *tree
         else
             r = ironwood_merkle_crh(level, root, empty, params, size, root);
         if (!r.ok) return r;
-        if (level + 1 < IRONWOOD_NOTE_TREE_DEPTH) {
+        if (!tree->count) {
+            memcpy(empty, root, sizeof empty);
+        } else if (level + 1 < IRONWOOD_NOTE_TREE_DEPTH) {
             r = ironwood_merkle_crh(level, empty, empty, params, size, empty);
             if (!r.ok) return r;
         }
-    }
-    if (tree->count == NOTE_CAPACITY) {
-        struct zcl_result r = ironwood_pasta_fp_canonical(tree->slots[IRONWOOD_NOTE_TREE_DEPTH]);
-        if (!r.ok) return r;
-        memcpy(root, tree->slots[IRONWOOD_NOTE_TREE_DEPTH], sizeof empty);
     }
     return ZCL_OK;
 }
