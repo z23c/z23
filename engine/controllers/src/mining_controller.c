@@ -299,7 +299,6 @@ static bool rpc_getmininginfo(const struct json_value *params, bool help,
         json_set_str(result, "Mining state not initialized");
         LOG_FAIL("mining", "getmininginfo: ctx->main_state is NULL");
     }
-
     const struct chain_params *cp = chain_params_get();
     struct block_index *tip = active_chain_tip(&ctx->main_state->chain_active);
 
@@ -365,7 +364,6 @@ static bool mining_on_demand_allowed(const char *rpc_name,
         LOG_FAIL("mining", "%s: refused — chain %s is not "
                  "mine-blocks-on-demand", rpc_name, cp->strNetworkID);
     }
-
     return true;
 }
 
@@ -377,13 +375,42 @@ static bool mining_on_demand_allowed(const char *rpc_name,
  * Caller must have passed mining_on_demand_allowed() first. */
 static struct zcl_result mining_template_ballot(const struct json_value *list,
     struct block *block, const struct chain_params *cp, int height, size_t limit);
+static bool mining_ballot_range_allowed(int64_t count, struct json_value *result)
+{
+    struct mining_context *ctx = mining_ctx();
+    const struct chain_params *cp = chain_params_get();
+    const struct miner_signal_catalog_pin *pin = rpc_blockchain_ballot_catalog_pin();
+    if (!ballot_network_eligible(cp)) {
+        json_set_str(result, "Template ballots require testnet, regtest or the selected research profile");
+        return false;
+    }
+    if (!pin || memcmp(pin->genesis, cp->consensus.hashGenesisBlock.data, 32)) {
+        json_set_str(result, "No ballot catalog pinned for the selected network");
+        return false;
+    }
+    if (!ctx->main_state) { json_set_str(result, "Mining state unavailable"); return false; }
+    zcl_mutex_lock(&ctx->main_state->cs_main);
+    struct block_index *tip = active_chain_tip(&ctx->main_state->chain_active);
+    int64_t first = tip ? (int64_t)tip->nHeight + 1 : -1;
+    zcl_mutex_unlock(&ctx->main_state->cs_main);
+    int64_t last = (int64_t)pin->start + pin->window - 1;
+    if (first < pin->start || first > last || count > last - first + 1) {
+        char message[160];
+        snprintf(message, sizeof(message),
+                 "Template height outside the pinned voting window (last ballot height %lld)",
+                 (long long)last);
+        json_set_str(result, message);
+        return false;
+    }
+    return true;
+}
 static bool mining_generate_to_script(const struct script *coinbase_script,
                                       int64_t num_blocks,
                                       const struct json_value *ballot_request,
                                       struct json_value *result)
 {
     const struct chain_params *cp = chain_params_get();
-
+    if (ballot_request && !mining_ballot_range_allowed(num_blocks, result)) return false;
     json_set_array(result);
 
     for (int64_t i = 0; i < num_blocks; i++) {
@@ -468,8 +495,6 @@ static bool rpc_generate(const struct json_value *params, bool help,
 
     if (!mining_on_demand_allowed("generate", result))
         return false;  // raw-return-ok:callee set the error body and logged the refusal
-
-
     struct rpc_params p;
     int64_t num_blocks = mining_require_numblocks(params, &p, result);
     if (num_blocks < 0)
@@ -502,8 +527,6 @@ static bool rpc_generatetoaddress(const struct json_value *params, bool help,
 
     if (!mining_on_demand_allowed("generatetoaddress", result))
         return false;  // raw-return-ok:callee set the error body and logged the refusal
-
-
     struct rpc_params p;
     int64_t num_blocks = mining_require_numblocks(params, &p, result);
     if (num_blocks < 0)

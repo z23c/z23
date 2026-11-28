@@ -239,6 +239,39 @@ static int mining_slots_inside(struct rpc_table *table,
     return failures;
 }
 
+static int mining_crossing_window(struct rpc_table *table, struct main_state *ms,
+                                  struct block_index *ancestors)
+{
+    int failures = 0;
+    struct json_value params = {0}, out = {0};
+    const char *raw = "[3,\"tmQMh5UwwJGfi53XvgjVZjTGo6SzZGVz6Q6\",[0]]";
+    active_chain_move_window_tip(&ms->chain_active, &ancestors[14]);
+    reducer_frontier_provable_tip_set(14);
+    bool ready = mining_test_authority(progress_store_db(), 14) &&
+                 json_read(&params, raw, strlen(raw));
+    bool refused = ready && !rpc_table_execute(table, "generatetoaddress", &params, &out);
+    MT_CHECK("crossing ballot window refuses before mining and names last height",
+        refused && out.type == JSON_STR && strstr(json_get_str(&out), "window") &&
+        strstr(json_get_str(&out), "16") &&
+        active_chain_height(&ms->chain_active) == 14 &&
+        reducer_frontier_provable_tip_cached() == 14);
+    json_free(&params);
+    json_free(&out);
+    params = (struct json_value){0};
+    out = (struct json_value){0};
+    active_chain_move_window_tip(&ms->chain_active, &ancestors[10]);
+    reducer_frontier_provable_tip_set(10);
+    ready = mining_test_authority(progress_store_db(), 10) &&
+            json_read(&params, raw, strlen(raw));
+    refused = ready && !rpc_table_execute(table, "generatetoaddress", &params, &out);
+    MT_CHECK("ballot before window refuses and names last height",
+        refused && out.type == JSON_STR && strstr(json_get_str(&out), "window") &&
+        strstr(json_get_str(&out), "16") && active_chain_height(&ms->chain_active) == 10);
+    json_free(&params);
+    json_free(&out);
+    return failures;
+}
+
 static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
                               struct block_index *ancestors)
 {
@@ -269,6 +302,7 @@ static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
     MT_CHECK("ballot mint authority", mining_test_authority(progress_store_db(), 11));
     failures += mining_slots_inside(table, &pin);
     failures += mining_guarded_slots(table, &pin);
+    failures += mining_crossing_window(table, ms, ancestors);
     active_chain_move_window_tip(&ms->chain_active, &ancestors[17]);
     reducer_frontier_provable_tip_set(17);
     MT_CHECK("post-window mint authority", mining_test_authority(progress_store_db(), 17));
