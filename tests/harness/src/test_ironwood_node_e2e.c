@@ -544,6 +544,44 @@ static bool iw_recovered(struct rnf *node)
     return height == 101 && strcmp(hash, iw.tip) == 0;
 }
 
+static bool iw_peer(struct rnf *node, const char *address, bool prefix)
+{
+    const char *const peers[] = { "getpeerinfo", NULL };
+    if (!iw_clean_reply(iw_call(node, peers))) return false;
+    struct json_value doc;
+    if (!rnf_parse(iw.raw, &doc)) return false;
+    bool ok = doc.type == JSON_ARR && doc.num_children == 1;
+    if (ok) {
+        const char *seen = rnf_str(&doc.children[0], "addr");
+        ok = prefix ? strncmp(seen, address, strlen(address)) == 0
+                    : strcmp(seen, address) == 0;
+    }
+    json_free(&doc);
+    return ok;
+}
+
+static bool iw_reconnected(const char *peer)
+{
+    while (iw_remaining("reconnect peers", 1) > 0) {
+        bool follower = iw_peer(&iw.follower, peer, false);
+        bool miner = iw_peer(&iw.miner, "127.0.0.1:", true);
+        if (follower && miner) return true;
+        if (iw_remaining("reconnect peers", 1) > 0) rnf_sleep_ms(100);
+    }
+    return false;
+}
+
+static bool iw_miner_tip(int expected)
+{
+    while (iw_remaining("mined tip", 1) > 0) {
+        int height = -1;
+        if (iw_chain(&iw.miner, &height, iw.tip, sizeof(iw.tip)) &&
+            height == expected) return true;
+        if (iw_remaining("mined tip", 1) > 0) rnf_sleep_ms(100);
+    }
+    return false;
+}
+
 static int iw_restart(void)
 {
     int failures = 0;
@@ -561,8 +599,11 @@ static int iw_restart(void)
         ASSERT(iw_wait_up(&iw.follower));
         ASSERT(iw_recovered(&iw.follower));
         ASSERT(iw_clean_reply(iw_call(&iw.follower, connect)));
-        ASSERT(iw_agree(101, iw.tip));
-        printf("RESTART height=101 hash=%s\n", iw.tip);
+        ASSERT(iw_reconnected(peer));
+        ASSERT(iw_mine_batch("1", 1));
+        ASSERT(iw_miner_tip(102));
+        ASSERT(iw_agree(102, iw.tip));
+        printf("RESTART height=102 hash=%s peers=1/1\n", iw.tip);
         ASSERT(iw_remaining("restart complete", 1) > 0);
         PASS();
     } _test_next:;
@@ -585,26 +626,31 @@ static int iw_run_profile(bool research)
 static int iw_test_failed_setup_cleanup(void)
 {
     int failures = 0;
+    iw_title_begin("failed setup cleanup", IW_BOOT_MS);
     TEST("fixture failed setup preserves unowned template") {
-        char root[PATH_MAX], template[PATH_MAX + 64], old[PATH_MAX];
+        char root[PATH_MAX] = "", template[PATH_MAX + 64], old[PATH_MAX];
         const char *env = getenv("ZCL_TEST_TMPROOT");
         bool had_root = env && *env;
         snprintf(old, sizeof(old), "%s", had_root ? env : "");
-        ASSERT(test_mkdtemp(root, sizeof(root), "iw_cleanup_probe"));
+        bool made_root = test_mkdtemp(root, sizeof(root), "iw_cleanup_probe");
         snprintf(template, sizeof(template), "%s/ironwood_miner_XXXXXX", root);
-        ASSERT(mkdir(template, 0700) == 0);
-        ASSERT(chmod(root, 0755) == 0);
-        ASSERT(setenv("ZCL_TEST_TMPROOT", root, 1) == 0);
+        bool made_template = made_root && mkdir(template, 0700) == 0;
+        bool restricted = made_template && chmod(root, 0755) == 0;
+        bool configured = restricted && setenv("ZCL_TEST_TMPROOT", root, 1) == 0;
         memset(&iw, 0, sizeof(iw));
-        bool failed = !iw_prepare(&iw.miner, "ironwood_miner");
+        bool failed = configured && !iw_prepare(&iw.miner, "ironwood_miner");
         iw_cleanup();
         bool survived = access(template, F_OK) == 0;
         if (had_root) (void)setenv("ZCL_TEST_TMPROOT", old, 1);
         else (void)unsetenv("ZCL_TEST_TMPROOT");
-        (void)chmod(root, 0700);
-        (void)test_rm_rf_recursive(root);
+        if (made_root) {
+            (void)chmod(root, 0700);
+            (void)test_rm_rf_recursive(root);
+        }
+        ASSERT(made_root && made_template && restricted && configured);
         ASSERT(failed);
         ASSERT(survived);
+        ASSERT(iw_remaining("failed setup cleanup complete", 1) > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -613,15 +659,16 @@ static int iw_test_failed_setup_cleanup(void)
 static int iw_test_quoted_cleanup(void)
 {
     int failures = 0;
+    iw_title_begin("quoted cleanup", IW_BOOT_MS);
     TEST("fixture cleanup handles apostrophe and is idempotent") {
-        char root[PATH_MAX], quoted[PATH_MAX + 32], owned[PATH_MAX];
+        char root[PATH_MAX] = "", quoted[PATH_MAX + 32], owned[PATH_MAX];
         char old[PATH_MAX];
         const char *env = getenv("ZCL_TEST_TMPROOT");
         bool had_root = env && *env;
         snprintf(old, sizeof(old), "%s", had_root ? env : "");
-        ASSERT(test_mkdtemp(root, sizeof(root), "iw_quote_probe"));
+        bool made_root = test_mkdtemp(root, sizeof(root), "iw_quote_probe");
         snprintf(quoted, sizeof(quoted), "%s/quote'root", root);
-        bool ready = mkdir(quoted, 0700) == 0 &&
+        bool ready = made_root && mkdir(quoted, 0700) == 0 &&
                      setenv("ZCL_TEST_TMPROOT", quoted, 1) == 0;
         memset(&iw, 0, sizeof(iw));
         bool created = ready && iw_setup(&iw.miner, "quoted");
@@ -631,9 +678,11 @@ static int iw_test_quoted_cleanup(void)
         bool removed = created && access(owned, F_OK) != 0 && errno == ENOENT;
         if (had_root) (void)setenv("ZCL_TEST_TMPROOT", old, 1);
         else (void)unsetenv("ZCL_TEST_TMPROOT");
-        (void)test_rm_rf_recursive(root);
+        if (made_root) (void)test_rm_rf_recursive(root);
+        ASSERT(made_root && ready);
         ASSERT(removed);
         ASSERT(!iw_cleanup_failed);
+        ASSERT(iw_remaining("quoted cleanup complete", 1) > 0);
         PASS();
     } _test_next:;
     return failures;
@@ -660,6 +709,14 @@ static int iw_test_rpc_deadline(void)
     return failures;
 }
 
+static bool iw_ready_byte(int fd, long ms)
+{
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    char byte;
+    return poll(&p, 1, (int)ms) > 0 && (p.revents & POLLIN) &&
+           read(fd, &byte, 1) == 1;
+}
+
 static int iw_test_signal_flag_only(void)
 {
     int failures = 0;
@@ -677,8 +734,7 @@ static int iw_test_signal_flag_only(void)
         }
         (void)setpgid(pid, pid);
         close(ready[1]);
-        char byte;
-        bool started = read(ready[0], &byte, 1) == 1;
+        bool started = iw_ready_byte(ready[0], IW_BOOT_MS);
         close(ready[0]);
         iw_miner_pid = pid;
         iw_signal(SIGTERM);
@@ -717,8 +773,7 @@ static int iw_test_stop_deadline(void)
         }
         (void)setpgid(pid, pid);
         close(ready[1]);
-        char byte;
-        bool started = read(ready[0], &byte, 1) == 1;
+        bool started = iw_ready_byte(ready[0], IW_BOOT_MS);
         close(ready[0]);
         struct rnf node = {0};
         volatile sig_atomic_t slot = pid;
