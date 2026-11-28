@@ -699,6 +699,17 @@ static bool yx_order_sensitive(const struct ironwood_postnu63_stage *stage, uint
     return ok;
 }
 
+static bool yx_refusals(const struct ironwood_postnu63_stage *stage, uint8_t *wire,
+                        size_t perm, size_t prod, size_t random, size_t quotient,
+                        size_t end, const uint8_t expected[32])
+{
+    size_t base = (size_t)(stage->proof.buffer - wire);
+    return yx_reject_short(stage, quotient) && yx_reject_short(stage, end) &&
+        yx_reject_bad(stage, wire, base + perm) && yx_reject_bad(stage, wire, base + prod) &&
+        yx_reject_bad(stage, wire, base + random) && yx_reject_bad(stage, wire, base + quotient) &&
+        yx_order_sensitive(stage, wire, base + perm, base + prod, expected);
+}
+
 /* PostNu6_3 retained upstream traces, Vesta Fp challenge representations. */
 static bool check_yx_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
 {
@@ -712,13 +723,9 @@ static bool check_yx_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
     if (!count || count > 2) return false;
     size_t perm = (size_t)count * 512, prod = perm + (size_t)count * 96;
     size_t random = prod + (size_t)count * 96, quotient = random + 32, end = quotient + 256;
-    size_t base = (size_t)(stage->proof.buffer - wire);
     uint8_t y[32], x[32];
     if (!zcl_hex_decode(ys[count - 1], y, 32) || !zcl_hex_decode(xs[count - 1], x, 32) ||
-        !yx_reject_short(stage, quotient) || !yx_reject_short(stage, end) ||
-        !yx_reject_bad(stage, wire, base + perm) || !yx_reject_bad(stage, wire, base + prod) ||
-        !yx_reject_bad(stage, wire, base + random) || !yx_reject_bad(stage, wire, base + quotient) ||
-        !yx_order_sensitive(stage, wire, base + perm, base + prod, y)) return false;
+        !yx_refusals(stage, wire, perm, prod, random, quotient, end, y)) return false;
     if (!ironwood_postnu63_yx_challenges(stage).ok || stage->permutation_offset != perm ||
         stage->product_offset != prod || stage->random_offset != random || stage->quotient_offset != quotient ||
         stage->proof.position != end || memcmp(stage->y, y, 32) || memcmp(stage->x, x, 32)) return false;
