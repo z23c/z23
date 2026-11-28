@@ -30,6 +30,22 @@ static int run_worker(const char *path, char *output, size_t cap)
     if (!output || cap < 2) return -1;
     output[0] = '\0';
     const char *const argv[] = {"build/bin/z23_ironwood_template_worker", path, NULL};
+#if defined(_WIN32)
+    int status = test_spawn_capture_env_public(argv, NULL, output, cap);
+    if (status == 0) {
+        char *end = strchr(output, '\n');
+        if (!end) return -1;
+        if (end > output && end[-1] == '\r') --end;
+        *end = '\0';
+        return 0;
+    }
+    if (status == 1 && (!strcmp(output, "Ironwood template worker: invalid template or solve failed\n") ||
+                        !strcmp(output, "Ironwood template worker: invalid template or solve failed\r\n"))) {
+        output[0] = '\0';
+        return 1;
+    }
+    return -1;
+#else
     struct zcl_spawn_binary_observation obs = {0};
     struct zcl_result result = zcl_spawn_capture_binary(argv, output, cap - 1, 120000, &obs);
     if (!obs.exit_observed || obs.timed_out || obs.overflow || !obs.eof || obs.output_len >= cap) return -1;
@@ -38,6 +54,7 @@ static int run_worker(const char *path, char *output, size_t cap)
     output[n] = '\0';
     if (result.ok && obs.exit_code == 0) return 0;
     return obs.exit_code == 1 ? 1 : -1;
+#endif
 }
 
 static bool check_block(const char *hex, const char *fixture)
