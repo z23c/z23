@@ -208,6 +208,7 @@ AGENT_IMPACT_RULE("engine/controllers/src/dbquery_controller.c|engine/controller
 AGENT_IMPACT_RULE("engine/controllers/src/shielded_gap_remedy_controller.c|engine/controllers/include/controllers/shielded_gap_remedy_controller.h|cognition/controllers/src/agent_runtime_controller.c|tests/harness/src/test_shielded_gap_remedy.c", "shielded_gap_remedy syncdiag_rpc rpc make_lint_gates")
 
 AGENT_IMPACT_RULE("core/modules/crypto/src/hkdf_sha256.c|core/modules/crypto/include/crypto/hkdf_sha256.h|tests/harness/src/test_hkdf.c", "hkdf_sha256_rfc5869 crypto make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/research_spacing.c|engine/services/include/services/research_spacing.h|tests/harness/src/test_research_spacing.c", "research_spacing")
 /* Registry tests own both exact scheme behavior and observational timing.
  * Changing their verdict logic must run the group itself plus shared crypto. */
 AGENT_IMPACT_RULE("tests/harness/src/test_crypto_registry.c", "test_crypto_registry crypto make_lint_gates")
