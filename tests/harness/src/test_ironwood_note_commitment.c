@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_note_commitment.h"
 #include "base/hex.h"
+#include "primitives/transaction_v6_wire.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -44,12 +45,49 @@ static bool invalid_rejected(struct ironwood_note_commitment_public *in)
     memset(in->rcm, 0xff, 32);
     return !ironwood_note_commitment_compute_public(in, out).ok && !memcmp(out, before, 32);
 }
+/* Orchard 0.16 decrypts the public synthetic H144 reward and derives these
+ * prepared values; native compares the result to the actual action cmx.
+ * Oracle source SHA256 c5367e48058298eae33910fccea9a3be562c5d4963920149aebac3bd11b8601d,
+ * lock aa7a18398626c85fdb8cf35c15e876b6c8a1a84ccdd885c7cd7339c975b66e26;
+ * reward wire SHA256 e5595701e68f6de986cae48161aa05042bf4b1c78b31b8206606934181c44143.
+ * The prepared values are public fixture data, not a wallet derivation. */
+static bool direct_prepared(struct ironwood_note_commitment_public *in)
+{
+    memset(in, 0, sizeof *in);
+    in->value = 1250000000;
+    return zcl_hex_decode("b95dc703ea442cae0d299cdb3a4766c663a255b6058d01217257492833901e82", in->gd, 32) &&
+        zcl_hex_decode("a75c17c3a668a97f0d6a8c5ce164a518ea9ba9a50ea75191fd861b0ff10e62b0", in->pkd, 32) &&
+        zcl_hex_decode("d786245b3ebf8c0664562a12274c524fca17555847dccd9c808430dfb0d4a905", in->rho, 32) &&
+        zcl_hex_decode("7be4b6a6be76326fcf077f01e2870c44b0861ee5748fee4a217af878c84d2f2f", in->psi, 32) &&
+        zcl_hex_decode("bfe702aabd01887ce663057982b2d95942d4e7f61701dc8c70ea92cd2c7b3a1c", in->rcm, 32);
+}
+static bool direct_reward_commitment(void)
+{
+    uint8_t wire[7000], computed[32], changed[32];
+    FILE *f = fopen("tests/fixtures/ironwood/direct-reward-note.v6", "rb");
+    if (!f) return false;
+    size_t n = fread(wire, 1, sizeof wire, f);
+    bool ok = !ferror(f) && feof(f) && n == 6054;
+    if (fclose(f)) ok = false;
+    struct v6_wire_view view;
+    struct v6_action_view action;
+    struct ironwood_note_commitment_public in;
+    if (!ok || v6_core_parse(wire,n,&view)!=V6_WIRE_OK || view.ironwood.count!=1 ||
+        !v6_core_bundle_action(&view.ironwood,0,&action) || !direct_prepared(&in) ||
+        memcmp(in.rho,action.nullifier.data,32)) return false;
+    if (!ironwood_note_commitment_compute_public(&in,computed).ok || memcmp(computed,action.cmx.data,32)) return false;
+    ++in.value;
+    if (!ironwood_note_commitment_compute_public(&in,changed).ok || !memcmp(changed,action.cmx.data,32)) return false;
+    memcpy(changed,action.cmx.data,32); changed[0] ^= 1;
+    return memcmp(computed,changed,32) != 0;
+}
 int test_ironwood_note_commitment(void)
 {
     struct ironwood_note_commitment_public in;
     uint8_t expected[32], out[32];
     bool ok = fixture(&in, expected) && ironwood_note_commitment_compute_public(&in, out).ok &&
-        !memcmp(out, expected, 32) && changed_rejected(&in, expected) && invalid_rejected(&in);
+        !memcmp(out, expected, 32) && changed_rejected(&in, expected) && invalid_rejected(&in) &&
+        direct_reward_commitment();
     if (!ok) fprintf(stderr, "Ironwood prepared note commitment fixture failed\n");
     return ok ? 0 : 1;
 }
