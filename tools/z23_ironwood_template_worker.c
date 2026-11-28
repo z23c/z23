@@ -71,7 +71,7 @@ static bool template_header(const struct json_value *obj, struct block *block, i
     int64_t h, version, time;
     const char *bits = json_get_str(json_get(obj, "bits"));
     if (!integer(obj, "height", 1, INT_MAX, &h) ||
-        !integer(obj, "version", INT32_MIN, INT32_MAX, &version) ||
+        !integer(obj, "version", 4, 4, &version) ||
         !integer(obj, "curtime", 0, UINT32_MAX, &time) || !bits || strlen(bits) != 8 ||
         !hex_hash(json_get_str(json_get(obj, "previousblockhash")), &block->header.hashPrevBlock) ||
         !hex_hash(json_get_str(json_get(obj, "finalsaplingroothash")), &block->header.hashFinalSaplingRoot)) return false;

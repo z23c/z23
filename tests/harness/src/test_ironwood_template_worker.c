@@ -99,6 +99,7 @@ int test_ironwood_template_worker(void)
     if (ok) {
         snprintf(path, sizeof path, "%s/invalid.json", dir);
         ok = reject_mutation(fixture, "\"transactions\":[]", "\"transactions\":[{}]", path) &&
+             reject_mutation(fixture, "\"version\":4", "\"version\":5", path) &&
              reject_mutation(fixture, "200f0f0f", "200f0f0g", path) &&
              reject_mutation(fixture, "\"height\":216", "\"height\":0", path);
         remove(path);
