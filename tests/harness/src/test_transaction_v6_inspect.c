@@ -1167,10 +1167,11 @@ static int check_recipient_auth_cases(void)
     return failures;
 }
 
+static int check_ipa_cases(void) { return !check_ipa_coefficient(); }
+
 int test_transaction_v6_inspect(void)
 {
-    int failures = check_v6_rpc_cases() + check_recipient_auth_cases();
-    if (!check_ipa_coefficient()) ++failures;
+    int failures = check_v6_rpc_cases() + check_recipient_auth_cases() + check_ipa_cases();
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
     if (!check_funded_instance()) ++failures;
