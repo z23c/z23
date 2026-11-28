@@ -18,12 +18,24 @@ static volatile sig_atomic_t iw_miner_pid, iw_follower_pid;
 static struct sigaction iw_old_int, iw_old_term;
 static bool iw_armed;
 static volatile sig_atomic_t iw_interrupted;
+static bool iw_cleanup_failed;
 
 static void iw_signal(int sig)
 {
     if (iw_miner_pid > 0) kill(-(pid_t)iw_miner_pid, SIGKILL);
     if (iw_follower_pid > 0) kill(-(pid_t)iw_follower_pid, SIGKILL);
     iw_interrupted = sig;
+}
+
+static void iw_remove_fixture(struct rnf *node)
+{
+    if (!node->work[0]) return;
+    if (test_rm_rf_recursive(node->work) != 0) {
+        fprintf(stderr, "fixture cleanup failed: %s\n", node->work);
+        iw_cleanup_failed = true;
+        return;
+    }
+    node->work[0] = '\0';
 }
 
 static void iw_cleanup(void)
@@ -37,9 +49,8 @@ static void iw_cleanup(void)
         sigaction(SIGTERM, &iw_old_term, NULL);
         iw_armed = false;
     }
-    if (iw.miner.work[0]) test_rm_rf(iw.miner.work);
-    if (iw.follower.work[0]) test_rm_rf(iw.follower.work);
-    iw.miner.work[0] = iw.follower.work[0] = '\0';
+    iw_remove_fixture(&iw.miner);
+    iw_remove_fixture(&iw.follower);
 }
 
 static void iw_arm(void)
@@ -77,9 +88,25 @@ static bool iw_copy_ballot(const char *path)
     return ok;
 }
 
+static bool iw_setup(struct rnf *e, const char *tag)
+{
+    memset(e, 0, sizeof(*e));
+    if (!test_mkdtemp(e->work, sizeof(e->work), tag)) {
+        e->work[0] = '\0';
+        return false;
+    }
+    char datadir[PATH_MAX + 16];
+    snprintf(datadir, sizeof(datadir), "%s/datadir", e->work);
+    snprintf(e->cred, sizeof(e->cred), "%s/cred", e->work);
+    if (mkdir(datadir, 0700) != 0 || mkdir(e->cred, 0700) != 0)
+        return false;
+    int n = snprintf(e->dd_flag, sizeof(e->dd_flag), "-datadir=%s", datadir);
+    return n > 0 && (size_t)n < sizeof(e->dd_flag);
+}
+
 static bool iw_prepare(struct rnf *e, const char *tag)
 {
-    if (!rnf_setup(e, tag)) return false;
+    if (!iw_setup(e, tag)) return false;
     if (!iw.research) return true;
     char dir[PATH_MAX + 64], path[PATH_MAX + 160];
     snprintf(dir, sizeof(dir), "%s/datadir/ironwood-research", e->work);
@@ -446,6 +473,63 @@ static int iw_run_profile(bool research)
     return failures;
 }
 
+static int iw_test_failed_setup_cleanup(void)
+{
+    int failures = 0;
+    TEST("fixture failed setup preserves unowned template") {
+        char root[PATH_MAX], template[PATH_MAX + 64], old[PATH_MAX];
+        const char *env = getenv("ZCL_TEST_TMPROOT");
+        bool had_root = env && *env;
+        snprintf(old, sizeof(old), "%s", had_root ? env : "");
+        ASSERT(test_mkdtemp(root, sizeof(root), "iw_cleanup_probe"));
+        snprintf(template, sizeof(template), "%s/ironwood_miner_XXXXXX", root);
+        ASSERT(mkdir(template, 0700) == 0);
+        ASSERT(chmod(root, 0755) == 0);
+        ASSERT(setenv("ZCL_TEST_TMPROOT", root, 1) == 0);
+        memset(&iw, 0, sizeof(iw));
+        bool failed = !iw_prepare(&iw.miner, "ironwood_miner");
+        iw_cleanup();
+        bool survived = access(template, F_OK) == 0;
+        if (had_root) (void)setenv("ZCL_TEST_TMPROOT", old, 1);
+        else (void)unsetenv("ZCL_TEST_TMPROOT");
+        (void)chmod(root, 0700);
+        (void)test_rm_rf_recursive(root);
+        ASSERT(failed);
+        ASSERT(survived);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int iw_test_quoted_cleanup(void)
+{
+    int failures = 0;
+    TEST("fixture cleanup handles apostrophe and is idempotent") {
+        char root[PATH_MAX], quoted[PATH_MAX + 32], owned[PATH_MAX];
+        char old[PATH_MAX];
+        const char *env = getenv("ZCL_TEST_TMPROOT");
+        bool had_root = env && *env;
+        snprintf(old, sizeof(old), "%s", had_root ? env : "");
+        ASSERT(test_mkdtemp(root, sizeof(root), "iw_quote_probe"));
+        snprintf(quoted, sizeof(quoted), "%s/quote'root", root);
+        bool ready = mkdir(quoted, 0700) == 0 &&
+                     setenv("ZCL_TEST_TMPROOT", quoted, 1) == 0;
+        memset(&iw, 0, sizeof(iw));
+        bool created = ready && iw_setup(&iw.miner, "quoted");
+        snprintf(owned, sizeof(owned), "%s", iw.miner.work);
+        iw_cleanup();
+        iw_cleanup();
+        bool removed = created && access(owned, F_OK) != 0 && errno == ENOENT;
+        if (had_root) (void)setenv("ZCL_TEST_TMPROOT", old, 1);
+        else (void)unsetenv("ZCL_TEST_TMPROOT");
+        (void)test_rm_rf_recursive(root);
+        ASSERT(removed);
+        ASSERT(!iw_cleanup_failed);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_ironwood_node_e2e(void);
 int test_ironwood_node_e2e(void)
 {
@@ -454,12 +538,16 @@ int test_ironwood_node_e2e(void)
         printf("  UNOBSERVED (%s absent - build it with make z23)\n", RNF_BIN);
         return 0;
     }
+    int failures = iw_test_failed_setup_cleanup();
+    failures += iw_test_quoted_cleanup();
+    if (failures) return failures;
     atexit(iw_cleanup);
     iw_arm();
-    int failures = iw_run_profile(false);
+    failures = iw_run_profile(false);
     if (!iw_interrupted) {
         iw_arm();
         failures += iw_run_profile(true);
     }
+    if (iw_cleanup_failed) failures++;
     return failures;
 }
