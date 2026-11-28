@@ -49,22 +49,29 @@ static int changed_object(const char *source, char *object,
     return bad;
 }
 
+static bool changed_load_tables(const char *root, const struct ccg_cfg *cfg,
+                                struct ccd_map *symbols, struct ccd_mods *modules)
+{
+    char sym[CCD_PATH], mod[CCD_PATH], platform[CCD_PATH];
+    size_t count = 0;
+    const char *os = cfg->os == CCD_LINUX ? "linux" : cfg->os == CCD_WINDOWS ? "windows" : "";
+    if (snprintf(sym, sizeof sym, "%s/engine/composition/capability_symbols.def", root) >= (int)sizeof sym ||
+        snprintf(mod, sizeof mod, "%s/engine/composition/module_capabilities.def", root) >= (int)sizeof mod ||
+        snprintf(platform, sizeof platform, "%s/engine/composition/module_capabilities_%s.def", root, os) >= (int)sizeof platform)
+        return false;
+    return ccd_symbols_load(sym, cfg->os == CCD_WINDOWS, symbols, &count) == 0 && count &&
+        ccd_modules_load(mod, platform, root, modules) == 0;
+}
+
 int check_capability_changed_run(int argc, char **argv)
 {
     if (argc % 2) return 2;
     if (!argc) { puts("changed capability: UNPROVEN no compiled engine objects"); return 0; }
-    char root[CCD_PATH], sym[CCD_PATH], mod[CCD_PATH], platform[CCD_PATH];
-    struct ccg_cfg cfg;
-    struct ccd_map symbols = {0}; struct ccd_mods modules = {0}; size_t count = 0;
+    char root[CCD_PATH]; struct ccg_cfg cfg;
+    struct ccd_map symbols = {0}; struct ccd_mods modules = {0};
     if (cic_repo_root(root, sizeof root) || lsc_install()) return 2;
     ccg_host_cfg(&cfg);
-    const char *os = cfg.os == CCD_LINUX ? "linux" : cfg.os == CCD_WINDOWS ? "windows" : "";
-    if (snprintf(sym, sizeof sym, "%s/engine/composition/capability_symbols.def", root) >= (int)sizeof sym ||
-        snprintf(mod, sizeof mod, "%s/engine/composition/module_capabilities.def", root) >= (int)sizeof mod ||
-        snprintf(platform, sizeof platform, "%s/engine/composition/module_capabilities_%s.def", root, os) >= (int)sizeof platform)
-        return 2;
-    if (ccd_symbols_load(sym, cfg.os == CCD_WINDOWS, &symbols, &count) || !count ||
-        ccd_modules_load(mod, platform, root, &modules)) {
+    if (!changed_load_tables(root, &cfg, &symbols, &modules)) {
         fputs("changed capability: UNPROVEN cannot load capability tables\n", stderr);
         ccd_map_free(&symbols); ccd_mods_free(&modules); return 0;
     }

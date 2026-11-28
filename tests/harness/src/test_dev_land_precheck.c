@@ -1453,6 +1453,14 @@ static bool dlx_pc_strict_refused(const struct dlx_call *c)
            strstr(dlx_str(c, "hint"), "make proof-compile-changed") != NULL;
 }
 
+static bool dlx_pc_strict_success(const struct dlx_call *c, int mode)
+{
+    return dlx_ok(c) && dlx_pc_has(dlx_arr(c, "precheck_ran"), "proof-compile-changed") &&
+        (mode != 4 || (strstr(dlx_str(c, "precheck_advisory"),
+         "engine/example.c uses CAP_FS_READ via fopen") != NULL &&
+         strlen(dlx_str(c, "precheck_advisory")) < 512));
+}
+
 static bool dlx_pc_strict_case(int mode)
 {
     struct dlx_rig rig;
@@ -1465,9 +1473,7 @@ static bool dlx_pc_strict_case(int mode)
     if (mode == 2)
         ok = ok && dlx_pc_strict_refused(&c);
     else if (mode == 1 || mode == 4)
-        ok = ok && dlx_ok(&c) &&
-             dlx_pc_has(dlx_arr(&c, "precheck_ran"), "proof-compile-changed") &&
-             (mode != 4 || (strstr(dlx_str(&c, "precheck_advisory"), "engine/example.c uses CAP_FS_READ via fopen") != NULL && strlen(dlx_str(&c, "precheck_advisory")) < 512));
+        ok = ok && dlx_pc_strict_success(&c, mode);
     else
         ok = ok && dlx_ok(&c) &&
              dlx_pc_has(dlx_arr(&c, "precheck_skipped"), "proof-compile-changed") &&

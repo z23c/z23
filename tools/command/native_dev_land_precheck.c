@@ -1188,8 +1188,9 @@ static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
 }
 
 /* One gate: skipped (unknown or unproven), refused, or ran clean. */
-static void pc_capability_advisory(struct pc_run *r, struct zcl_command_reply *reply)
+static void pc_capability_advisory(struct pc_run *r, const char *gate, struct zcl_command_reply *reply)
 {
+    if (strcmp(gate, PC_STRICT_GATE)) return;
     const char *line = strstr(r->out, "changed capability: WARNING");
     if (!line) line = strstr(r->out, "changed capability: UNPROVEN");
     if (!line) return;
@@ -1238,7 +1239,7 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         return PC_GATE_REFUSED;
     }
     pc_capture_windows_success(r, gate);
-    if (!strcmp(gate, PC_STRICT_GATE)) pc_capability_advisory(r, reply);
+    pc_capability_advisory(r, gate, reply);
     r->ran[r->nran++] = gate;
     return PC_GATE_RAN;
 }
