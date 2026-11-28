@@ -7,6 +7,11 @@
 
 #include "gui/draw.h"
 
+/* Match the wallet's pixel-exact glyph coverage when other builds enable FMA. */
+#if defined(__clang__)
+#pragma STDC FP_CONTRACT OFF
+#endif
+
 /* GCC can fold stb_truetype's `(float)sqrt(double)` into sqrtf and pull a
  * newer libm ABI than the pinned release sysroot; route it through a double
  * sqrt the way the presentation canvas does. */
