@@ -25,6 +25,18 @@ static struct zcl_result fold_terms(const uint8_t *terms, size_t count, const BI
     return ZCL_OK;
 }
 
+static struct zcl_result divide_domain(BIGNUM *x, BIGNUM *sum, const BIGNUM *prime,
+                                       BIGNUM *one, BIGNUM *den, BIGNUM *inv, BN_CTX *ctx)
+{
+    for (size_t i = 0; i < DOMAIN_LOG; ++i)
+        if (!BN_mod_sqr(x, x, prime, ctx)) return ZCL_ERR(-1, "Cannot compute quotient domain");
+    if (!BN_mod_sub(den, x, one, prime, ctx) || BN_is_zero(den))
+        return ZCL_ERR(-1, "PostNu6_3 quotient domain denominator is zero");
+    if (!BN_mod_inverse(inv, den, prime, ctx) || !BN_mod_mul(sum, sum, inv, prime, ctx))
+        return ZCL_ERR(-1, "Cannot divide expected quotient");
+    return ZCL_OK;
+}
+
 static struct zcl_result quotient_value(const struct ironwood_postnu63_stage *stage,
                                          const uint8_t *terms, size_t count, uint8_t out[32])
 {
@@ -37,12 +49,8 @@ static struct zcl_result quotient_value(const struct ironwood_postnu63_stage *st
     if (result.ok && (!BN_lebin2bn(stage->x, 32, x) || !BN_lebin2bn(stage->y, 32, y) || !BN_one(one)))
         result = ZCL_ERR(-1, "Cannot initialize quotient scalars");
     if (result.ok) result = fold_terms(terms, count, y, prime, sum, ctx);
-    for (size_t i = 0; result.ok && i < DOMAIN_LOG; ++i)
-        if (!BN_mod_sqr(x, x, prime, ctx)) result = ZCL_ERR(-1, "Cannot compute quotient domain");
-    if (result.ok && (!BN_mod_sub(den, x, one, prime, ctx) || BN_is_zero(den)))
-        result = ZCL_ERR(-1, "PostNu6_3 quotient domain denominator is zero");
-    if (result.ok && (!BN_mod_inverse(inv, den, prime, ctx) || !BN_mod_mul(sum, sum, inv, prime, ctx) ||
-                      BN_bn2lebinpad(sum, out, 32) != 32))
+    if (result.ok) result = divide_domain(x, sum, prime, one, den, inv, ctx);
+    if (result.ok && BN_bn2lebinpad(sum, out, 32) != 32)
         result = ZCL_ERR(-1, "Cannot compute expected quotient");
     BN_CTX_end(ctx); BN_CTX_free(ctx); BN_free(prime);
     return result;
