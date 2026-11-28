@@ -7,6 +7,7 @@
 #include "controllers/blockchain_controller.h"
 #include "jobs/reducer_frontier.h"
 #include "services/miner_signal_catalog_pin.h"
+#include "services/research_rules.h"
 #include "primitives/block.h"
 #include "script/script.h"
 #include "storage/disk_block_io.h"
@@ -88,6 +89,7 @@ static bool bf_status_matches(struct ballot_fixture *f, const struct json_value 
     const char *basis = json_get_str(json_get(result, "schedule_source"));
     const char *digest = json_get_str(json_get(result, "catalog"));
     return actual && !strcmp(actual, phase) && basis && !strcmp(basis, source) &&
+        json_get(result, "rules_bound") && !json_get_bool(json_get(result, "rules_bound")) &&
         digest && !strcmp(digest, f->catalog_hex) &&
         json_get_int(json_get(result, "votes")) == votes &&
         bf_required_matches(result, phase) && bf_revision_matches(result, source);
@@ -323,6 +325,7 @@ static bool bf_catalog_status(struct ballot_fixture *f, bool expected)
     if (expected && ok) {
         const struct json_value *rows = json_get(&result, "proposals");
         pass = rows && json_size(rows) == 3 &&
+            json_get(&result, "rules_bound") && !json_get_bool(json_get(&result, "rules_bound")) &&
             json_get_int(json_get(&result, "parent_height")) == 3 &&
             json_get_int(json_get(&result, "next_height")) == 4 &&
             json_get(&result, "required_votes") &&
@@ -512,6 +515,22 @@ static bool bf_window_branch(struct ballot_fixture *f)
     return bf_advance(f, 3) && single_refused && batch_refused;
 }
 
+static bool bf_bound_status(struct ballot_fixture *f)
+{
+    const struct chain_params *research = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD)->chain;
+    static struct miner_signal_catalog_pin pin;
+    memcpy(pin.genesis, research->consensus.hashGenesisBlock.data, 32);
+    if (!research_rules_install(research, &pin)) return false;
+    struct json_value params = {0}, result = {0};
+    json_set_array(&params);
+    bool ok = rpc_table_execute(&f->table, "getballotstatus", &params, &result);
+    const struct json_value *bound = json_get(&result, "rules_bound");
+    ok = ok && bound && bound->type == JSON_BOOL && json_get_bool(bound);
+    json_free(&result);
+    json_free(&params);
+    return ok;
+}
+
 static bool bf_cleanup(struct ballot_fixture *f)
 {
     rpc_blockchain_set_ballot_catalog_pin(NULL);
@@ -540,7 +559,8 @@ static int ballot_integration_child(void)
     struct ballot_fixture f = {0};
     bool ok = bf_setup(&f) && bf_positive_cases(&f) && bf_membership_cases(&f) &&
               bf_window_branch(&f) && bf_selected_revisions(&f) && bf_catalog_status(&f, true) &&
-              bf_catalog_limit(&f) && bf_foreign_pin(&f) && bf_negative_cases(&f);
+              bf_catalog_limit(&f) && bf_foreign_pin(&f) && bf_bound_status(&f) &&
+              bf_negative_cases(&f);
     if (!bf_cleanup(&f))
         ok = false;
     return ok ? 0 : 1;

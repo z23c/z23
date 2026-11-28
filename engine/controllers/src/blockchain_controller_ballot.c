@@ -11,6 +11,7 @@
 #include "services/miner_signal_round.h"
 #include "services/miner_signal_catalog.h"
 #include "services/miner_signal_catalog_pin.h"
+#include "services/research_rules.h"
 #include "storage/disk_block_io.h"
 #include "storage/progress_store.h"
 #include "util/safe_alloc.h"
@@ -107,7 +108,8 @@ static bool ballot_parse_catalog(const struct json_value *params,
 
 static bool ballot_test_network(const struct chain_params *cp)
 {
-    return cp && (!strcmp(cp->strNetworkID, "test") || !strcmp(cp->strNetworkID, "regtest"));
+    return cp && (!strcmp(cp->strNetworkID, "test") || !strcmp(cp->strNetworkID, "regtest") ||
+                  (chain_research_profile_current() && cp == chain_params_get()));
 }
 
 bool rpc_getballotcatalog(const struct json_value *params, bool help,
@@ -336,6 +338,7 @@ static bool ballot_reply(struct json_value *result, const struct miner_signal_sc
     if (json_push_kv_str(result, "network", network) &&
         json_push_kv_str(result, "parent_basis", "durable_provable_tip") &&
         json_push_kv_str(result, "schedule_source", source) &&
+        json_push_kv_bool(result, "rules_bound", research_rules_binding() != NULL) &&
         json_push_kv_int(result, "parent_height", snap->parent_height) &&
         json_push_kv_str(result, "parent_hash", hash_hex) &&
         json_push_kv_int(result, "next_height", (int64_t)snap->parent_height + 1) &&
@@ -434,6 +437,7 @@ static bool ballot_catalog_reply(struct json_value *result,
     ok = ok && json_push_kv_str(result, "network", network) &&
         json_push_kv_str(result, "parent_basis", "durable_provable_tip") &&
         json_push_kv_str(result, "schedule_source", "pinned_catalog") &&
+        json_push_kv_bool(result, "rules_bound", research_rules_binding() != NULL) &&
         json_push_kv_str(result, "catalog", digest) &&
         json_push_kv_int(result, "parent_height", snap->parent_height) &&
         json_push_kv_str(result, "parent_hash", hash) &&
