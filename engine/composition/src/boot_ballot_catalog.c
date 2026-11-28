@@ -29,6 +29,8 @@ static bool boot_ballot_network_allowed(const struct app_context *ctx, bool rese
              (GetBoolArg("-testnet", false) && GetBoolArg("-regtest", false)));
 }
 
+/* No earlier filesync check is needed: args_apply_research_defaults in
+ * boot_node_utilities.c:411-427 refuses research foreign-state options. */
 bool boot_ballot_catalog_consent(const struct app_context *ctx)
 {
     if (!ctx) {
