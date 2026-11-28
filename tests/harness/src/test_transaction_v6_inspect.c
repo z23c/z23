@@ -7,10 +7,14 @@
 #include "codec/cursor.h"
 #include "base/hex.h"
 #include "encoding/utilstrencodings.h"
+#include "base/hex.h"
+#include "crypto/blake2b.h"
+#include "crypto/chacha20poly1305.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "transaction_v6_ironwood_fixture.h"
+#include "transaction_v6_recipient_fixture.h"
 
 /* ZIP 229 empty_orchard_and_ironwood upstream conformance vector. */
 static const uint8_t empty[] = {6,0,0,128,0x98,0xb6,0x84,0xd8,0x5b,0x16,0xa5,0x37,
@@ -217,6 +221,89 @@ static bool check_action_views(void)
         !parsed.ironwood.count && check_action_values(&parsed.orchard, &original);
     free(wire);
     return ok;
+}
+
+/* Two actions follow the 20-byte header, empty transparent and Sapling
+ * sections, and the Orchard/Ironwood count bytes (parser lines 69-84). */
+enum {
+    AUTH_ORCHARD_ACTIONS = 25, /* Orchard action records */
+    AUTH_ORCHARD_PROOF = 1707, /* Orchard proof after flags, balance, anchor and length */
+    AUTH_ORCHARD_SIG0 = 1723, /* Orchard first action signature */
+    AUTH_ORCHARD_SIG1 = 1787, /* Orchard second action signature */
+    AUTH_ORCHARD_BINDING = 1851, /* Orchard binding signature */
+    AUTH_IRONWOOD_ACTIONS = 26, /* Ironwood action records */
+    AUTH_IRONWOOD_PROOF = 1708, /* Ironwood proof after flags, balance, anchor and length */
+    AUTH_IRONWOOD_SIG0 = 1724, /* Ironwood first action signature */
+    AUTH_IRONWOOD_SIG1 = 1788, /* Ironwood second action signature */
+    AUTH_IRONWOOD_BINDING = 1852, /* Ironwood binding signature */
+    AUTH_PROOF_SIZE = 16, /* CompactSize proof payload length */
+    AUTH_SIGNATURE_SIZE = 64, /* Each action and binding signature */
+    AUTH_WIRE_SIZE = 1916 /* Complete transaction including the empty other bundle */
+};
+
+static void make_auth_wire(uint8_t wire[AUTH_WIRE_SIZE], bool orchard)
+{
+    memset(wire, 0, AUTH_WIRE_SIZE);
+    memcpy(wire, empty, 20);
+    size_t actions = orchard ? AUTH_ORCHARD_ACTIONS : AUTH_IRONWOOD_ACTIONS;
+    size_t proof = orchard ? AUTH_ORCHARD_PROOF : AUTH_IRONWOOD_PROOF;
+    wire[actions - 1] = 2;
+    memcpy(wire + actions, ironwood_anchor_a + 26, 820);
+    memcpy(wire + actions + 820, ironwood_anchor_a + 26, 820);
+    wire[proof - 1] = AUTH_PROOF_SIZE;
+    for (size_t i = 0; i < AUTH_PROOF_SIZE; ++i) wire[proof + i] = (uint8_t)(0x10 + i);
+    for (size_t i = 0; i < 3 * AUTH_SIGNATURE_SIZE; ++i)
+        wire[proof + AUTH_PROOF_SIZE + i] = (uint8_t)(0x40 + i);
+}
+
+static bool check_auth_span(const char *name, struct v6_span span, const uint8_t *wire,
+                            size_t offset, size_t length)
+{
+    if (span.data == wire + offset && span.size == length && !memcmp(span.data, wire + offset, length))
+        return true;
+    fprintf(stderr, "v6 auth span failed: %s\n", name);
+    return false;
+}
+
+static bool check_auth_bundle(const uint8_t *wire, bool orchard)
+{
+    struct v6_wire_view v;
+    struct v6_action_view first, second;
+    if (v6_wire_parse(wire, AUTH_WIRE_SIZE, &v) != V6_WIRE_OK) return false;
+    const struct v6_bundle *b = orchard ? &v.orchard : &v.ironwood;
+    if (!v6_bundle_action(b, 0, &first) || !v6_bundle_action(b, 1, &second)) return false;
+    size_t proof = orchard ? AUTH_ORCHARD_PROOF : AUTH_IRONWOOD_PROOF;
+    size_t sig0 = orchard ? AUTH_ORCHARD_SIG0 : AUTH_IRONWOOD_SIG0;
+    size_t sig1 = orchard ? AUTH_ORCHARD_SIG1 : AUTH_IRONWOOD_SIG1;
+    size_t binding = orchard ? AUTH_ORCHARD_BINDING : AUTH_IRONWOOD_BINDING;
+    return check_auth_span("proof", b->proof, wire, proof, AUTH_PROOF_SIZE) &&
+        check_auth_span("signatures", b->signatures, wire, sig0, 128) &&
+        check_auth_span("action 0 signature", first.signature, wire, sig0, AUTH_SIGNATURE_SIZE) &&
+        check_auth_span("action 1 signature", second.signature, wire, sig1, AUTH_SIGNATURE_SIZE) &&
+        check_auth_span("binding signature", b->binding_signature, wire, binding, AUTH_SIGNATURE_SIZE);
+}
+
+static bool check_auth_truncation(const uint8_t *wire, size_t cut)
+{
+    struct v6_wire_view v;
+    memset(&v, 0xa5, sizeof v);
+    if (v6_wire_parse(wire, cut, &v) != V6_WIRE_TRUNCATED) return false;
+    const uint8_t *bytes = (const uint8_t *)&v;
+    for (size_t i = 0; i < sizeof v; ++i) if (bytes[i]) return false;
+    return true;
+}
+
+static bool check_auth_views(void)
+{
+    uint8_t wire[AUTH_WIRE_SIZE];
+    make_auth_wire(wire, false);
+    if (!check_auth_bundle(wire, false) ||
+        !check_auth_truncation(wire, AUTH_IRONWOOD_PROOF + 8) ||
+        !check_auth_truncation(wire, AUTH_IRONWOOD_BINDING + 32)) return false;
+    make_auth_wire(wire, true);
+    return check_auth_bundle(wire, true) &&
+        check_auth_truncation(wire, AUTH_ORCHARD_PROOF + 8) &&
+        check_auth_truncation(wire, AUTH_ORCHARD_BINDING + 32);
 }
 
 static bool check_statement_flag(const struct v6_wire_view *v, unsigned f,
@@ -661,6 +748,88 @@ static bool check_prefix_frames(void)
     return check_prefix_frames_invalid(frames, &v, &consumed);
 }
 
+/* The fixed shared point was checked with pasta_curves 0.5.1; the oracle
+ * source SHA-256 is befa8af956c39f72fb78bfaa723462607995a02317173b8404f6078c3e7d0499.
+ * It is independently derived from public test IVK and
+ * EPK; this fixture checks the native KDF and AEAD, not Pallas multiplication
+ * or note commitment validity. No keys or ciphertext here protect funds. */
+static bool recipient_kdf_open(const uint8_t shared[32], const uint8_t *action,
+                               uint8_t plain[564])
+{
+    /* Zcash_OrchardKDF as its 16 bytes: a string literal is 17 long with its
+     * terminator and does not fit (Clang warns under -Wextra). */
+    static const uint8_t personal[16] = {
+        'Z', 'c', 'a', 's', 'h', '_', 'O', 'r', 'c', 'h', 'a', 'r', 'd', 'K', 'D', 'F'};
+    static const uint8_t nonce[12] = {0};
+    struct blake2b_ctx ctx;
+    uint8_t key[32];
+    if (blake2b_init_salt_personal(&ctx, 32, NULL, 0, NULL, personal) ||
+        blake2b_update(&ctx, shared, 32) ||
+        blake2b_update(&ctx, action + 128, 32) ||
+        blake2b_final(&ctx, key, sizeof key)) return false;
+    return chacha20poly1305_decrypt(action + 160, 580, NULL, 0, nonce, key, plain);
+}
+
+static bool check_recipient_wire(struct v6_wire_view *v, struct v6_action_view *checked)
+{
+    if (v6_wire_parse(recipient_v6_wire, sizeof recipient_v6_wire, v) != V6_WIRE_OK ||
+        v->ironwood.count != 2 || v->ironwood.actions.size != 1640 ||
+        !v6_bundle_action(&v->ironwood, 1, checked)) return false;
+    return true;
+}
+static bool check_recipient_action(const uint8_t *action, const uint8_t *epk, const uint8_t *cmx,
+                                   const struct v6_action_view *checked)
+{
+    if (memcmp(action + 128, epk, 32) || memcmp(checked->cmx.data, cmx, 32)) return false;
+    return true;
+}
+static bool check_recipient_note(const uint8_t shared[32], const uint8_t *action, const uint8_t d[11],
+                                 const uint8_t rseed[32], uint8_t plain[564])
+{
+    if (!recipient_kdf_open(shared, action, plain) || plain[0] != 3 ||
+        memcmp(plain + 1, d, 11) || memcmp(plain + 20, rseed, 32)) return false;
+    return true;
+}
+static bool check_recipient_value(const uint8_t plain[564])
+{
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value |= (uint64_t)plain[12 + i] << (8 * i);
+    if (value != 599985000 || plain[52] != 0xf6) return false;
+    for (size_t i = 53; i < 564; ++i) if (plain[i]) return false;
+    return true;
+}
+static bool check_recipient_tamper(uint8_t shared[32], const uint8_t *action, uint8_t plain[564])
+{
+    uint8_t changed[820];
+    memcpy(changed, action, sizeof changed); changed[160] ^= 1;
+    if (recipient_kdf_open(shared, changed, plain)) return false;
+    memcpy(changed, action, sizeof changed); changed[739] ^= 1;
+    if (recipient_kdf_open(shared, changed, plain)) return false;
+    memcpy(changed, action, sizeof changed); changed[128] ^= 1;
+    if (recipient_kdf_open(shared, changed, plain)) return false;
+    shared[0] ^= 1;
+    return !recipient_kdf_open(shared, action, plain);
+}
+static bool check_recipient_fixture(void)
+{
+    static const char shared_hex[] = "734a260f5d6989c881b5eafaa3f0ca6c631905bf5e25faf6380d9aa27604de38";
+    static const char epk_hex[] = "08d042bcd0b2b148401e9d2e0fa3bc095239b36d2703497e9504de9d47544e03";
+    static const char cmx_hex[] = "3342f7096c4135e66385c795a1c4f2bccabdb17443fec137804b3f5c3ebc9e37";
+    static const char diversifier_hex[] = "e50b58450e72a7f2f43775";
+    static const char rseed_hex[] = "0120601c3ea2c965205422fec1396d2d6b8d27a145f32b6378908e5d45b663b0";
+    struct v6_wire_view v;
+    struct v6_action_view checked;
+    uint8_t shared[32], epk[32], cmx[32], d[11], rseed[32], plain[564];
+    if (!zcl_hex_decode(shared_hex, shared, sizeof shared) ||
+        !zcl_hex_decode(epk_hex, epk, sizeof epk) || !zcl_hex_decode(cmx_hex, cmx, sizeof cmx) ||
+        !zcl_hex_decode(diversifier_hex, d, sizeof d) || !zcl_hex_decode(rseed_hex, rseed, sizeof rseed) ||
+        !check_recipient_wire(&v, &checked)) return false;
+    const uint8_t *action = v.ironwood.actions.data + 820;
+    return check_recipient_action(action, epk, cmx, &checked) &&
+        check_recipient_note(shared, action, d, rseed, plain) && check_recipient_value(plain) &&
+        check_recipient_tamper(shared, action, plain);
+}
+
 static int check_v6_rpc_cases(void)
 {
     int failures = 0;
@@ -675,6 +844,8 @@ static int check_v6_rpc_cases(void)
 int test_transaction_v6_inspect(void)
 {
     int failures = check_v6_rpc_cases();
+    if (!check_recipient_fixture()) ++failures;
+    if (!check_auth_views()) ++failures;
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
     if (!check_funded_instance()) ++failures;
