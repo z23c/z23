@@ -486,9 +486,11 @@ static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
 
     /* RPC policy samples the current tip. Relayed transactions are admitted
      * by sealed code; the rule is enforced where validity is decided. */
-    if (research_tip_deposit_frozen(research_rules_tip(), &tx)) {
+    struct research_tip_rules rules = research_rules_tip();
+    const char *refusal = research_tip_deposit_refusal(rules, &tx);
+    if (refusal) {
         transaction_free(&tx);
-        json_set_str(result, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain");
+        json_set_str(result, refusal);
         return false;
     }
 

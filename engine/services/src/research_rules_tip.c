@@ -14,9 +14,9 @@ static struct research_tip_rules tip_failed(const char *reason)
     static struct log_throttle throttle = LOG_THROTTLE_INIT;
     uint64_t reps = 0;
     if (log_throttle_should_emit(&throttle, 1, platform_time_wall_unix(), 60, &reps))
-        LOG_WARN("research_policy", "tip rules unavailable: %s; both rules active (%llu suppressed)",
+        LOG_WARN("research_policy", "tip rules unavailable: %s; enforcing both rules conservatively (%llu suppressed)",
                  reason, (unsigned long long)reps);
-    return (struct research_tip_rules){ .freeze = true, .capped = true };
+    return (struct research_tip_rules){ .freeze = true, .capped = true, .unavailable = true };
 }
 
 struct research_tip_rules research_rules_tip_for_parent(const struct block_index *parent)
@@ -31,7 +31,8 @@ struct research_tip_rules research_rules_tip_for_parent(const struct block_index
     if (!r.ok) return tip_failed(r.message);
     return (struct research_tip_rules){
         .freeze = state.active[RESEARCH_RULE_DEPOSIT_FREEZE],
-        .capped = state.active[RESEARCH_RULE_BLOCK_CAP]
+        .capped = state.active[RESEARCH_RULE_BLOCK_CAP],
+        .unavailable = false
     };
 }
 

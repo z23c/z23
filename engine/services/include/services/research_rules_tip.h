@@ -6,7 +6,7 @@
 #include "primitives/transaction.h"
 
 struct block_index;
-struct research_tip_rules { bool freeze, capped; };
+struct research_tip_rules { bool freeze, capped; bool unavailable; };
 
 /* Current active tip; unavailable state fails closed. */
 struct research_tip_rules research_rules_tip(void);
@@ -19,5 +19,15 @@ static inline bool research_tip_deposit_frozen(struct research_tip_rules rules,
                                                const struct transaction *tx)
 {
     return rules.freeze && tx && tx->value_balance < 0;
+}
+
+/* The reason a Sapling deposit is refused at ingress, or NULL when it is admitted. */
+static inline const char *research_tip_deposit_refusal(struct research_tip_rules rules,
+                                                       const struct transaction *tx)
+{
+    if (!research_tip_deposit_frozen(rules, tx)) return NULL;
+    return rules.unavailable
+        ? "research-rules-unavailable: the research rules active on this chain cannot be determined, so new net deposits into Sapling are refused until they can be"
+        : "research-deposit-freeze: new net deposits into Sapling are frozen on this chain";
 }
 #endif

@@ -4,6 +4,7 @@
 #include "mining/miner.h"
 #include "services/miner_signal_round.h"
 #include "services/research_rules_tip.h"
+#include "services/research_rules.h"
 #include "services/research_block_size.h"
 #include "base/safe_alloc.h"
 #include "bloom/merkle.h"
@@ -19,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define BT_CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "miner_ballot_template line %d: %s\n", __LINE__, #x); \
@@ -127,6 +130,57 @@ static bool bt_fit_count_matches(size_t limit, size_t actual, size_t count)
 static bool bt_fit_size_matches(size_t limit, size_t bound)
 {
     return limit <= 200000 || bound > 200000;
+}
+
+static int bt_tip_binding_child(void)
+{
+    int failures = 0;
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    struct miner_signal_catalog_pin pin = { .start = 103, .window = 20, .count = 1 };
+    BT_CHECK(d && d->chain);
+    pin.network_id[0] = 1;
+    memcpy(pin.genesis, d->chain->consensus.hashGenesisBlock.data, 32);
+    memcpy(pin.entries[0].rule_revision, research_rule_revision[0], 32);
+    pin.entries[0].activation = 125;
+    struct miner_signal_catalog catalog = { .start = pin.start, .window = pin.window,
+                                            .count = pin.count, .entries = pin.entries };
+    memcpy(catalog.network_id, pin.network_id, 32);
+    memcpy(catalog.genesis, pin.genesis, 32);
+    struct miner_signal_schedule schedule;
+    BT_CHECK(miner_signal_catalog_select(&catalog, 0, &schedule).ok);
+    memcpy(pin.digest, schedule.catalog, 32);
+    BT_CHECK(research_rules_install(d->chain, &pin));
+    struct research_tip_rules rules = research_rules_tip_for_parent(NULL);
+    BT_CHECK(rules.unavailable && rules.freeze && rules.capped);
+    struct block_index parent = { .nHeight = 0 };
+    rules = research_rules_tip_for_parent(&parent);
+    BT_CHECK(!rules.unavailable && !rules.freeze && !rules.capped);
+done:
+    return failures;
+}
+
+static int bt_tip_refusal(void)
+{
+    int failures = 0;
+    struct transaction deposit = { .value_balance = -1 }, other = {0};
+    struct research_tip_rules unavailable = { .freeze = true, .unavailable = true };
+    const char *refusal = research_tip_deposit_refusal(unavailable, &deposit);
+    BT_CHECK(refusal && strcmp(refusal, "research-rules-unavailable: the research rules active on this chain cannot be determined, so new net deposits into Sapling are refused until they can be") == 0);
+    BT_CHECK(!strstr(refusal, "deposit-freeze"));
+    refusal = research_tip_deposit_refusal((struct research_tip_rules){ .freeze = true }, &deposit);
+    BT_CHECK(refusal && strcmp(refusal, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain") == 0);
+    BT_CHECK(!research_tip_deposit_refusal(unavailable, &other));
+    BT_CHECK(!research_tip_deposit_refusal(unavailable, NULL));
+    BT_CHECK(research_tip_deposit_frozen(unavailable, &deposit));
+    /* Installation is once per process; a child leaves the parent's binding intact. */
+    pid_t child = fork();
+    BT_CHECK(child >= 0);
+    if (child == 0) _exit(bt_tip_binding_child() ? 1 : 0);
+    int status = 0;
+    BT_CHECK(waitpid(child, &status, 0) == child);
+    BT_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+done:
+    return failures;
 }
 
 static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, bool zero_fee, bool sapling,
@@ -279,6 +333,7 @@ done:
 int test_miner_ballot_template(void)
 {
     int failures = 0;
+    failures += bt_tip_refusal();
     failures += bt_size_boundaries();
     failures += bt_freeze_case(false);
     failures += bt_freeze_case(true);

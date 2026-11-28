@@ -370,10 +370,12 @@ bool wallet_shield_build(struct wallet_rpc_context *ctx,
         !wallet_shield_assemble(p, wtx, result))
         return false; // raw-return-ok:callee-logged
     /* Wallet preflight samples the current tip; validation decides validity. */
-    if (research_tip_deposit_frozen(research_rules_tip(), &wtx->tx)) {
+    struct research_tip_rules rules = research_rules_tip();
+    const char *refusal = research_tip_deposit_refusal(rules, &wtx->tx);
+    if (refusal) {
         transaction_free(&wtx->tx);
-        json_set_str(result, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain");
-        LOG_FAIL(SHIELD_TAG, "research deposit freeze active");
+        json_set_str(result, refusal);
+        LOG_FAIL(SHIELD_TAG, "%s", refusal);
     }
     if (!shield_prove(ctx, p, wtx, result)) {
         transaction_free(&wtx->tx);

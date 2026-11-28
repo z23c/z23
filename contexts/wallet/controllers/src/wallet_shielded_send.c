@@ -994,12 +994,14 @@ static bool z_sendmany_build_transparent(struct wallet_rpc_context *ctx,
         shielded_total += o->z_amounts[i];
     wtx.tx.value_balance = -shielded_total;
     /* Wallet preflight samples the current tip; validation decides validity. */
-    if (research_tip_deposit_frozen(research_rules_tip(), &wtx.tx)) {
+    struct research_tip_rules rules = research_rules_tip();
+    const char *refusal = research_tip_deposit_refusal(rules, &wtx.tx);
+    if (refusal) {
         for (size_t i = 0; i < sel->num_selected; i++)
             db_wallet_utxo_free(&sel->db_selected[i]);
         transaction_free(&wtx.tx);
-        json_set_str(result, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain");
-        LOG_FAIL("wallet_shielded", "z_sendmany: research deposit freeze active");
+        json_set_str(result, refusal);
+        LOG_FAIL("wallet_shielded", "z_sendmany: %s", refusal);
     }
 
     /* Build Sapling output descriptions */
