@@ -883,7 +883,7 @@ static int hooks_boot_scripts(const char *dir)
 static int hooks_boot_fixture(const char *dir)
 {
     static const char *const marks[][2] = {
-        {"\noverride ZCL_AGENT_VERIFY_WRAPPER_ONLY :=", "\n\nZCL_USE_CCACHE"},
+        {"\noverride ZCL_AGENT_VERIFY_WRAPPER_ONLY :=", "\n\n"},
         {"\nZCL_WINDOWS_LAUNCHER_GOALS :=", "\n# Generated view headers"},
         {"\nZCL_TOR_SKIP_GOALS :=", "\n# The stub is reachable"},
         {"\n# Link/release/deploy front door:", "\n# Build the real embedded onion service"}};
