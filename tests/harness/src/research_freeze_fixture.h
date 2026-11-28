@@ -13,6 +13,7 @@ struct rf_fixture {
     char parent[PATH_MAX + 32], network[PATH_MAX + 64];
     char address[128], shielded[256], restart_shielded[256];
     char deposit_hex[16384];
+    char mine_error[4096];
 };
 
 static bool rf_file(const char *path, const char *data, size_t len)
@@ -192,27 +193,39 @@ static bool rf_mine_batch(struct rf_fixture *f, int *height, int target, bool vo
     if (rc) snprintf(last_error, error_cap, "%s", raw);
     if (rc && (strstr(raw, "RESPONSE_TIMEOUT") || rc < 0))
         return rf_mine_reconcile(f, height, batch_end, last_error);
+    if (rc) return false;
     int current;
     if (!rf_get_height(f, &current))
         return rf_mine_reconcile(f, height, batch_end, rc ? last_error : raw);
-    if (current > batch_end || current < *height || (!rc && current != batch_end))
+    if (current > batch_end || current < *height || current != batch_end)
         return false;
     *height = current;
     return true;
 }
 
+static bool rf_mine_progress(int previous, int height, const char *reply)
+{
+    if (height > previous) return true;
+    fprintf(stderr, "mine: %s\n", reply);
+    return false;
+}
+
 static bool rf_mine(struct rf_fixture *f, int count, bool vote)
 {
-    char last_error[4096] = "";
+    char *last_error = f->mine_error;
+    last_error[0] = '\0';
     int height;
     if (count <= 0 || !rf_get_height(f, &height) || height > INT_MAX - count) return false;
     int target = height + count;
     long deadline = rnf_now_ms() + RNF_RECONCILE_MS;
     while (height < target && rnf_now_ms() < deadline) {
         int previous = height;
-        if (!rf_mine_batch(f, &height, target, vote, last_error, sizeof(last_error))) return false;
-        if (height > previous) deadline = rnf_now_ms() + RNF_RECONCILE_MS;
-        else rnf_sleep_ms(200);
+        if (!rf_mine_batch(f, &height, target, vote, last_error, sizeof(f->mine_error))) {
+            fprintf(stderr, "mine: %s\n", last_error);
+            return false;
+        }
+        if (!rf_mine_progress(previous, height, last_error)) return false;
+        deadline = rnf_now_ms() + RNF_RECONCILE_MS;
     }
     int actual;
     if (height == target && rf_get_height(f, &actual) && actual == target) return true;

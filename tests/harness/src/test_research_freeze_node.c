@@ -6,11 +6,27 @@
     fprintf(stderr, "research_freeze_node:%d: %s\n", __LINE__, #x); return 1; \
 } } while (0)
 
+static int rf_refused_ballot_is_prompt(struct rf_fixture *f)
+{
+    RF_CHECK(rf_height(f, 119));
+    long start = rnf_now_ms();
+    bool ok = rf_mine(f, 1, true);
+    long elapsed = rnf_now_ms() - start;
+    printf("refused ballot helper elapsed_ms=%ld reply=%s\n", elapsed, f->mine_error);
+    RF_CHECK(!ok);
+    RF_CHECK(strstr(f->mine_error, "Template height outside the pinned voting window"));
+    RF_CHECK(elapsed >= 0 && elapsed < RNF_RECONCILE_MS / 20);
+    RF_CHECK(rf_height(f, 119));
+    RF_CHECK(!rf_mine_progress(119, 119, f->mine_error));
+    return 0;
+}
+
 static int rf_schedule(struct rf_fixture *f)
 {
     RF_CHECK(rf_height(f, 0));
     RF_CHECK(rf_mine(f, 119, false));
     RF_CHECK(rf_height(f, 119));
+    RF_CHECK(rf_refused_ballot_is_prompt(f) == 0);
     char raw[RNF_RAW], ballot[160];
     snprintf(ballot, sizeof(ballot), "{\"catalog\":\"%s\",\"slots\":[0,1]}", rf_digest);
     const char *const early[] = {"generatetoaddress", "1", f->address, ballot, NULL};
