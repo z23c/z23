@@ -238,6 +238,16 @@ static void copy_row_payload_out(const void *blob, int n, void *payload_out,
     }
 }
 
+static bool repair_marker_read_payload(sqlite3 *db, sqlite3_stmt *st,
+                                       void *out, size_t cap, size_t *len)
+{
+    int n = sqlite3_column_bytes(st, 0);
+    const void *blob = sqlite3_column_blob(st, 0);
+    if (sqlite3_errcode(db) == SQLITE_NOMEM || (n > 0 && !blob)) return false;
+    copy_row_payload_out(blob, n, out, cap, len);
+    return true;
+}
+
 bool repair_marker_have(sqlite3 *db, const char *kind, int64_t height,
                         const uint8_t hash32[32], bool *out_have,
                         void *payload_out, size_t payload_cap,
@@ -263,14 +273,8 @@ bool repair_marker_have(sqlite3 *db, const char *kind, int64_t height,
     int rc = bound ? sqlite3_step(st) : SQLITE_ERROR;  // raw-sql-ok:kernel-primitive
     bool ok = true;
     if (rc == SQLITE_ROW) {
-        int n = sqlite3_column_bytes(st, 0);
-        const void *blob = sqlite3_column_blob(st, 0);
-        if (sqlite3_errcode(db) == SQLITE_NOMEM || (n > 0 && !blob)) {
-            ok = false;
-        } else {
-            *out_have = true;
-            copy_row_payload_out(blob, n, payload_out, payload_cap, payload_len);
-        }
+        ok = repair_marker_read_payload(db, st, payload_out, payload_cap, payload_len);
+        if (ok) *out_have = true;
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }
