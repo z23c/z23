@@ -1209,14 +1209,7 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
     return load_block_index_flat_bounded(datadir, ms, SIZE_MAX);
 }
 
-/* save_block_index_recent() / load_block_index_sqlite() — the SQLite
- * block_index_cache save/load, including its integrity envelope
- * (services/block_index_cache_envelope.h) AND the persisted-FAILED trust
- * reconcile (block_index_apply_persisted_failure_trust) — live in
- * block_index_sqlite_cache.c (E1 file-size split); both are declared in
- * services/block_index_loader.h. */
-
-/* ── load_block_index (LevelDB + post-process) ──────────── */
+/* SQLite cache save/load lives in block_index_sqlite_cache.c. */
 
 static struct block_index *insert_block_index_cb(void *ctx_ptr,
                                                   const struct uint256 *hash)

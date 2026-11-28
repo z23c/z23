@@ -880,10 +880,21 @@ static int bil_conflicting_body_refusal(const struct chain_research_descriptor *
     return failures;
 }
 
+static bool bil_mixed_genesis_untouched(const char *dir,
+                                        const struct bil_file_snapshot *before)
+{
+    char blocks[320];
+    snprintf(blocks, sizeof blocks, "%s/blocks", dir);
+    struct stat st;
+    struct bil_file_snapshot after;
+    return stat(blocks, &st) != 0 && errno == ENOENT &&
+           bil_snapshot_take(dir, &after) && bil_snapshot_equal(before, &after);
+}
+
 static int bil_mixed_genesis_refusal(const struct chain_research_descriptor *profile)
 {
     int failures = 0;
-    char dir[256], sentinel[320], blocks[320];
+    char dir[256], sentinel[320];
     if (!test_mkdtemp(dir, sizeof dir, "bil_mixed_genesis")) return 1;
     snprintf(sentinel, sizeof sentinel, "%s/sentinel", dir);
     FILE *f = fopen(sentinel, "wb");
@@ -896,17 +907,14 @@ static int bil_mixed_genesis_refusal(const struct chain_research_descriptor *pro
     struct block_index *bad = chainstate_insert_block_index((struct chainstate *)&ms, &foreign);
     if (good) good->nHeight = 0;
     if (bad) bad->nHeight = 0;
-    struct bil_file_snapshot before, after;
+    struct bil_file_snapshot before;
     bool captured = seeded && bil_snapshot_take(dir, &before);
     struct zcl_result result = load_block_index_with_genesis(&ms, profile->chain, NULL, false,
         profile->genesis_wire, profile->genesis_wire_len, dir);
-    snprintf(blocks, sizeof blocks, "%s/blocks", dir);
-    struct stat st;
     BIL_CHECK("bil: mixed genesis indexes refuse before any body write",
               good && bad && captured && !result.ok &&
               strstr(result.message, "foreign research genesis") &&
-              stat(blocks, &st) != 0 && errno == ENOENT &&
-              bil_snapshot_take(dir, &after) && bil_snapshot_equal(&before, &after));
+              bil_mixed_genesis_untouched(dir, &before));
     main_state_free(&ms);
     test_cleanup_tmpdir(dir);
     return failures;
