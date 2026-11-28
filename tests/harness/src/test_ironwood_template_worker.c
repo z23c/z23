@@ -1,4 +1,5 @@
 /* purpose: Check exact private template solving and unsupported input refusal. */
+/* H216 public template, SHA256 2a25d673b08163dd4f2cba77e4afb7f4aaff9b00c23ae76415154ce6bd93b734. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "test/test_core.h"
 #include "base/hex.h"
