@@ -34,6 +34,43 @@ static bool refuse_noncanonical(void)
     return !pallas_fp_read(&out, p).ok && !memcmp(&out, &before, sizeof out) &&
         !pallas_fp_read(NULL, p).ok && !pallas_fp_read(&out, NULL).ok;
 }
+/* Upstream pasta_curves 0.6.0 inverse oracle SHA256
+ * 8cb2de652a77740d6c161b8b9019e8b0a13ee0d76bff5e3e533d4fd8c3d2be7e. */
+static bool inverse_vectors(void)
+{
+    FILE *f = fopen("tests/fixtures/ironwood/pallas-fp-inversion.txt", "r");
+    if (!f) return false;
+    char input[65], expected[65]; size_t count = 0; bool ok = true;
+    while (fscanf(f, "%64s%64s", input, expected) == 2) {
+        uint8_t bytes[32], want[32], actual[32]; struct pallas_fp a;
+        if (!zcl_hex_decode(input, bytes, 32) || !pallas_fp_read(&a, bytes).ok) { ok = false; break; }
+        bool zero = strcmp(expected, "zero") == 0;
+        if (zero) memset(want, 0, sizeof want);
+        else if (!zcl_hex_decode(expected, want, 32)) { ok = false; break; }
+        struct pallas_fp before = a;
+        struct zcl_result result = pallas_fp_invert(&a, &a);
+        if (zero) { if (result.ok || memcmp(&a, &before, sizeof a)) { ok = false; break; } }
+        else if (!result.ok) { ok = false; break; }
+        pallas_fp_write(actual, &a);
+        if (memcmp(actual, want, 32)) { ok = false; break; }
+        ++count;
+    }
+    if (ferror(f)) ok = false;
+    if (fclose(f) != 0) ok = false;
+    return ok && count == 35;
+}
+
+static bool inverse_refusals(void)
+{
+    const struct pallas_fp zero = {{0}};
+    struct pallas_fp out = {{1, 2, 3, 4}}, before = out;
+    return !pallas_fp_invert(&out, &zero).ok &&
+        !memcmp(&out, &before, sizeof out) &&
+        !pallas_fp_invert(NULL, &zero).ok &&
+        !pallas_fp_invert(&out, NULL).ok &&
+        !memcmp(&out, &before, sizeof out);
+}
+
 int test_ironwood_pallas_field(void)
 {
     FILE *f = fopen("tests/fixtures/ironwood/pallas-fp-differential.txt", "r");
@@ -45,5 +82,5 @@ int test_ironwood_pallas_field(void)
     }
     if (ferror(f)) ok = false;
     if (fclose(f) != 0) ok = false;
-    return ok && count == 260 && refuse_noncanonical() ? 0 : 1;
+    return ok && count == 260 && refuse_noncanonical() && inverse_vectors() && inverse_refusals() ? 0 : 1;
 }

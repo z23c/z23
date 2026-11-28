@@ -14,4 +14,6 @@ void pallas_fp_write(uint8_t out[32], const struct pallas_fp *a);
 void pallas_fp_add(struct pallas_fp *out, const struct pallas_fp *a, const struct pallas_fp *b);
 void pallas_fp_sub(struct pallas_fp *out, const struct pallas_fp *a, const struct pallas_fp *b);
 void pallas_fp_mul(struct pallas_fp *out, const struct pallas_fp *a, const struct pallas_fp *b);
+/* Reject zero after fixed work; leave the output unchanged on refusal. */
+struct zcl_result pallas_fp_invert(struct pallas_fp *out, const struct pallas_fp *a);
 #endif

@@ -70,3 +70,24 @@ void pallas_fp_mul(struct pallas_fp *out, const struct pallas_fp *a, const struc
     }
     *out = acc;
 }
+struct zcl_result pallas_fp_invert(struct pallas_fp *out, const struct pallas_fp *a)
+{
+    /* Fermat: a^(p-2). The exponent is a public constant;
+     * every input takes the same 256 squares and public-exponent multiplies. */
+    static const uint64_t exp[4] = {
+        UINT64_C(0x992d30ecffffffff), UINT64_C(0x224698fc094cf91b),
+        UINT64_C(0), UINT64_C(0x4000000000000000)
+    };
+    if (!out || !a) return ZCL_ERR(-1, "Invalid Pallas inversion input");
+    struct pallas_fp acc = {{1, 0, 0, 0}}, base = *a;
+    for (size_t i = 256; i-- > 0;) {
+        struct pallas_fp squared;
+        pallas_fp_mul(&squared, &acc, &acc);
+        acc = squared;
+        if ((exp[i / 64] >> (i % 64)) & 1) pallas_fp_mul(&acc, &acc, &base);
+    }
+    if ((base.limb[0] | base.limb[1] | base.limb[2] | base.limb[3]) == 0)
+        return ZCL_ERR(-1, "Pallas zero has no inverse");
+    *out = acc;
+    return ZCL_OK;
+}
