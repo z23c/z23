@@ -805,6 +805,11 @@ static bool ar_dep_add(struct ar_state *s, const char *raw)
     }
     if (!ar_t0_settled(s, d->fs, d->token))
         return false;
+    if (!ar_kit_path_settled(s, raw, false)) {
+        ar_fail(&s->c, "input_changed_during_compile",
+                "toolchain dependency path changed while hashing", raw);
+        return false;
+    }
     s->dep_n++;
     return true;
 }
@@ -1682,8 +1687,12 @@ static bool ar_probe(struct ar_state *s, uint32_t slot, const char *dir,
         return false;
     }
     enum platform_file_shape shape = platform_file_shape_read(path);
-    if (shape == PLATFORM_FILE_SHAPE_MISSING)
-        return true;
+    if (shape == PLATFORM_FILE_SHAPE_MISSING) {
+        if (ar_kit_path_settled(s, path, true))
+            return true;
+        ar_fail(&s->c, "probe_unreadable", "toolchain probe changed", path);
+        return false;
+    }
     if (shape == PLATFORM_FILE_SHAPE_UNREADABLE) {
         ar_fail(&s->c, "probe_unreadable", "probe location is unreadable",
                 name);
@@ -1691,7 +1700,13 @@ static bool ar_probe(struct ar_state *s, uint32_t slot, const char *dir,
     }
     struct stat st;
     bool regular = stat(path, &st) == 0 && S_ISREG(st.st_mode);
-    return ar_present_add(s, slot, dir, path, regular);
+    if (!ar_present_add(s, slot, dir, path, regular))
+        return false;
+    if (!ar_kit_path_settled(s, path, true)) {
+        ar_fail(&s->c, "probe_unreadable", "toolchain probe changed", path);
+        return false;
+    }
+    return true;
 }
 
 /* Run one lookup's probe sequence in slot order: every includer dir but
