@@ -935,6 +935,7 @@ ZCL_CAPABILITY_SYMBOL("BN_CTX_new", CAP_HARMLESS, "Allocates a context for in-me
 ZCL_CAPABILITY_SYMBOL("BN_CTX_start", CAP_HARMLESS, "Starts a temporary integer frame in a caller-owned context.")
 ZCL_CAPABILITY_SYMBOL("BN_bn2lebinpad", CAP_HARMLESS, "Serializes an integer into the caller's little-endian buffer.")
 ZCL_CAPABILITY_SYMBOL("BN_free", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("BN_is_zero", CAP_HARMLESS, "Tests whether a caller-owned integer is zero.")
 ZCL_CAPABILITY_SYMBOL("BN_is_odd", CAP_HARMLESS, "Tests the low bit of an in-memory integer.")
 ZCL_CAPABILITY_SYMBOL("BN_lebin2bn", CAP_HARMLESS, "Decodes the caller's little-endian integer.")
 ZCL_CAPABILITY_SYMBOL("BN_mod_add", CAP_HARMLESS, "Adds caller-supplied integers modulo a supplied modulus.")
