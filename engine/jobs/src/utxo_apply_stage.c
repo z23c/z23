@@ -8,6 +8,7 @@
 #include "jobs/created_outputs_index.h"
 #include "jobs/utxo_apply_history_hold.h"
 #include "jobs/utxo_apply_stage.h"
+#include "jobs/utxo_apply_ironwood_session.h"
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/replay_count_only.h"
 #include "jobs/utxo_apply_nullifiers.h"
@@ -415,6 +416,8 @@ struct ua_apply_work {
     bool borrowed;
     struct delta_summary summary;
     struct utxo_apply_turnstile_pending pool_pending;
+    bool ironwood_active;
+    struct utxo_ironwood_pending ironwood_pending;
 };
 
 /* CONTINUE: step_apply still has work. DONE: *result is the step verdict. */
@@ -587,6 +590,54 @@ static enum ua_apply_flow ua_accept_script_upstream(struct ua_apply_work *w,
     return UA_APPLY_CONTINUE;
 }
 
+/* Until the proof and script stages can attest the full v6 wire and its
+ * ordered prevouts, a generic hash-bound verdict cannot authorize its fold. */
+static bool ua_ironwood_requires_auth(const struct block *block)
+{
+    for (size_t i = 0; i < block->num_vtx; ++i) {
+        const struct transaction *tx = &block->vtx[i];
+        if (tx->version == IRONWOOD_TX_VERSION || tx->v6_wire.size || tx->v6_wire.data)
+            return true;
+    }
+    return false;
+}
+
+static job_result_t ua_ironwood_wait(int height, const char *detail)
+{
+    struct blocker_record rec;
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof reason, "Ironwood at height %d awaits %s", height, detail);
+    if (blocker_init(&rec, "utxo_apply.ironwood", STAGE_NAME, BLOCKER_TRANSIENT, reason))
+        (void)blocker_set(&rec);
+    return JOB_IDLE;
+}
+
+static enum ua_apply_flow ua_prepare_ironwood(struct ua_apply_work *w, job_result_t *result)
+{
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
+    w->ironwood_active = profile && profile->id == CHAIN_RESEARCH_IRONWOOD &&
+        !w->skip_crypto && !replay_count_only_active();
+    if (!w->ironwood_active) return UA_APPLY_CONTINUE;
+    if (ua_ironwood_requires_auth(w->blk)) {
+        *result = ua_ironwood_wait(w->next_h, "full v6 authorization evidence");
+    } else {
+        enum utxo_ironwood_result r = utxo_ironwood_session_prepare(w->db, w->bi,
+            w->blk, g_reader, g_datadir, g_reader_user, &w->ironwood_pending);
+        if (r == UTXO_IRONWOOD_OK) {
+            blocker_clear("utxo_apply.ironwood");
+            return UA_APPLY_CONTINUE;
+        }
+        if (r == UTXO_IRONWOOD_HISTORY_INCOMPLETE) {
+            *result = ua_ironwood_wait(w->next_h, "authenticated checkpoint history");
+        } else {
+            ua_fatal_permanent_blocker(w->next_h, "Ironwood checkpoint verification failed");
+            *result = JOB_FATAL;
+        }
+    }
+    stage_release_block_view(&w->owned, &w->handle, w->borrowed);
+    return UA_APPLY_DONE;
+}
+
 /* Load the body, compute the delta, and advance a count-only replay skip. */
 static enum ua_apply_flow ua_compute_delta_or_count(struct ua_apply_work *w,
                                                    job_result_t *result)
@@ -604,6 +655,7 @@ static enum ua_apply_flow ua_compute_delta_or_count(struct ua_apply_work *w,
                                       &g_ua_last_blocked_unix);
         return UA_APPLY_DONE;
     }
+    if (ua_prepare_ironwood(w, result) != UA_APPLY_CONTINUE) return UA_APPLY_DONE;
     stage_body_read_hold_clear(STAGE_NAME);
     w->pool_pending = (struct utxo_apply_turnstile_pending){ .write = false };
     /* Prevout-resolution phase: compute_block_delta walks each input's prevout
@@ -731,7 +783,8 @@ static enum ua_apply_flow ua_author_apply_coins(struct ua_apply_work *w,
      * have nothing to invert). */
     if (w->summary.ok) {
         if (!ua_persist_delta_and_pool(w->db, w->next_h, w->bi->phashBlock,
-                                       &w->summary, &w->pool_pending)) {
+                                       &w->summary, &w->pool_pending) ||
+            (w->ironwood_active && !utxo_ironwood_session_publish(&w->ironwood_pending))) {
             free_delta(&w->summary);
             stage_release_block_view(&w->owned, &w->handle, w->borrowed);
             *result = JOB_FATAL;
@@ -991,6 +1044,7 @@ static bool utxo_apply_stage_reconcile_locked(sqlite3 *db,
 /* Caller holds progress_store_tx_lock, then g_lock. */
 static bool utxo_apply_stage_init_locked(sqlite3 *db, struct main_state *ms)
 {
+    utxo_ironwood_session_reset();
     g_self_derived_settled = false;  /* this datadir answers for itself */
     if (g_stage != NULL) {
         if (g_ms != ms)
@@ -1117,6 +1171,7 @@ void utxo_apply_stage_shutdown(void)
     coins_ram_shutdown();
 
     pthread_mutex_lock(&g_lock);
+    utxo_ironwood_session_reset();
     g_self_derived_settled = false;  /* the next datadir answers for itself */
     /* Registry hygiene: init re-registers the gap blocker from the durable marker, so clearing here loses nothing. */
     blocker_clear(UTXO_APPLY_NF_GAP_BLOCKER_ID);
