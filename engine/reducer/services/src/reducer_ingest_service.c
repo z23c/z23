@@ -504,7 +504,7 @@ static bool reducer_research_preflight(struct chain_activation_controller *ctl,
         return validation_state_error(out, "p2p-block-intake-unavailable");
     }
     LOG_WARN("reducer", "research rule rejected: %s transaction=%zu", gate.rule, gate.offender);
-    const char *reason = gate.offender ? "research-deposit-freeze" : "bad-blk-length";
+    const char *reason = strcmp(gate.rule, "research-block-size-limit") == 0 ? "bad-blk-length" : gate.rule;
     return validation_state_dos(out, 100, false, REJECT_INVALID, reason, false, gate.detail);
 }
 
