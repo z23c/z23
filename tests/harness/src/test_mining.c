@@ -236,6 +236,8 @@ static bool mining_slots_pin(struct miner_signal_catalog_pin *pin)
     return ok;
 }
 
+#include "mining_batch_fixture.h"
+
 static bool mining_coinbase_decode(const struct json_value *result,
                                    struct transaction *tx)
 {
@@ -708,5 +710,9 @@ int test_mining(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    return failures + mining_h1_wire_cases() + mining_template_time_cases() + mining_ballot_cases() + mining_rate_cases();
+    failures += mining_h1_wire_cases() + mining_template_time_cases() + mining_ballot_cases() + mining_rate_cases();
+#if !defined(_WIN32)
+    MT_CHECK("three accepted ballot blocks each carry their vote", mining_batch_real_node());
+#endif
+    return failures;
 }
