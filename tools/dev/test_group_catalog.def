@@ -82,6 +82,7 @@ ZCL_TEST_GROUP(net)
 ZCL_TEST_GROUP(research_frame)
 ZCL_TEST_GROUP(research_digest)
 ZCL_TEST_GROUP(netbase_split_host_port)
+ZCL_TEST_GROUP(research_policy)
 ZCL_TEST_GROUP(portfwd)
 /* The install front door's release-pin judgement (platform/modules/install), which used to
  * live twice in shell and PowerShell and so was proved by neither runner. */
