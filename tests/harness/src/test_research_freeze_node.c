@@ -196,6 +196,34 @@ static int rf_restart(struct rf_fixture *f)
     return 0;
 }
 
+static int rf_control(struct rf_fixture *f)
+{
+    char raw[RNF_RAW], shielded[256], recipients[400];
+    RF_CHECK(rf_height(f, 0));
+    RF_CHECK(rf_mine(f, 120, false));
+    for (int h = 121; h <= 140; h++)
+        RF_CHECK(rf_mine(f, 1, h != 130 && h != 131));
+    RF_CHECK(rf_mine(f, 6, false));
+    RF_CHECK(rf_height(f, 146));
+    RF_CHECK(rf_status(f, 146, 18, "expired"));
+    const char *const address[] = {"z_getnewaddress", NULL};
+    RF_CHECK(rf_rpc(f, address, raw, sizeof(raw)) == 0);
+    raw[strcspn(raw, "\r\n")] = 0;
+    RF_CHECK(raw[0] && strlen(raw) < sizeof(shielded));
+    strcpy(shielded, raw);
+    snprintf(recipients, sizeof(recipients), "[{\"address\":\"%s\",\"amount\":1}]", shielded);
+    const char *const send[] = {"z_sendmany", f->address, recipients, NULL};
+    int rc = rf_rpc(f, send, raw, sizeof(raw));
+    printf("below-threshold deposit reply (rc=%d): %s\n", rc, raw);
+    RF_CHECK(rc == 0);
+    RF_CHECK(rf_mine(f, 1, false));
+    RF_CHECK(rf_height(f, 147));
+    const char *const balance[] = {"z_getbalance", shielded, NULL};
+    RF_CHECK(rf_rpc(f, balance, raw, sizeof(raw)) == 0);
+    RF_CHECK(rnf_zats(raw) == 100000000);
+    return 0;
+}
+
 int test_research_freeze_node(void)
 {
     struct rf_fixture f = {0};
@@ -218,6 +246,13 @@ int test_research_freeze_node(void)
         if (!failures) failures = rf_refuse_shield(&f);
         if (!failures) failures = rf_withdraw(&f, 146, f.shielded);
         if (!failures) failures = rf_restart(&f);
+        if (failures && f.node.work[0]) rnf_log_tail(&f.node);
+        rnf_cleanup(&f.node);
+    }
+    if (!failures) {
+        f = (struct rf_fixture){0};
+        if (!rf_setup(&f)) failures = 1;
+        else failures = rf_control(&f);
         if (failures && f.node.work[0]) rnf_log_tail(&f.node);
         rnf_cleanup(&f.node);
     }
