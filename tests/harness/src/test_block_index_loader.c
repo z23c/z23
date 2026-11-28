@@ -746,6 +746,11 @@ static bool bil_snapshot_file(const char *path, const char *relative,
     return true;
 }
 
+static bool bil_snapshot_dot(const char *name)
+{
+    return !strcmp(name, ".") || !strcmp(name, "..");
+}
+
 static bool bil_snapshot_walk(const char *root, const char *relative,
                               struct bil_file_snapshot *snapshot)
 {
@@ -757,7 +762,7 @@ static bool bil_snapshot_walk(const char *root, const char *relative,
     bool ok = true;
     struct dirent *entry;
     while (ok && (entry = readdir(dir)) != NULL) {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (bil_snapshot_dot(entry->d_name)) continue;
         char child[512], path[1024];
         int n = snprintf(child, sizeof child, "%s%s%s", relative,
                          *relative ? "/" : "", entry->d_name);
@@ -806,7 +811,7 @@ static bool bil_ladder_refuses_unchanged(const char *dir, struct main_state *sta
     struct boot_blkidx_load_ctx load = {
         .ctx = &ctx, .st = state, .ndb = &db, .params = params
     };
-    if (!SetDataDir(dir) || !bil_snapshot_take(dir, &before)) return false;
+    if (!SetDataDir(dir) || !bil_snapshot_take(dir, &before) || !before.count) return false;
     boot_blkidx_run_ladder(&load);
     bool unchanged = bil_snapshot_take(dir, &after) && bil_snapshot_equal(&before, &after);
     ClearDataDirCache();
@@ -826,8 +831,9 @@ static int bil_foreign_flat_refusal(const struct chain_research_descriptor *prof
     }
     struct block_index_flat_identity identity = {0};
     bool saved = foreign && save_block_index_flat_identity(dir, &src, &identity).ok;
+    bool refused = saved && bil_ladder_refuses_unchanged(dir, &dst, profile->chain);
     BIL_CHECK("bil: foreign flat genesis refuses without changing any file",
-              saved && bil_ladder_refuses_unchanged(dir, &dst, profile->chain));
+              refused && block_map_find(&dst.map_block_index, &hash));
     main_state_free(&dst); main_state_free(&src);
     test_cleanup_tmpdir(dir);
     return failures;
