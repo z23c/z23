@@ -49,7 +49,8 @@ const struct research_rules_binding *research_rules_binding(void);
 /* The frozen deposit rule: every non-coinbase transaction keeps
  * value_balance >= 0. Withdrawals, migrations and miner rewards stay allowed.
  * Returns 0 when `block` obeys it, otherwise the 1-based position of its
- * first offending transaction. A NULL block reports SIZE_MAX: fail closed. */
+ * first offending transaction. A NULL block, or one whose transaction array
+ * is missing, reports SIZE_MAX: fail closed. */
 size_t research_rules_deposit_violation(const struct block *block);
 
 /* Result codes of the resolvers below. The message explains the cause. */

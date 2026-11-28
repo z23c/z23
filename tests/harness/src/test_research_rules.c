@@ -212,6 +212,9 @@ static int deposit_checks(void)
     tx[0].vin = &in; tx[0].num_vin = 1; tx[0].value_balance = -1;
     b.vtx = tx; b.num_vtx = 3;
     CHECK(research_rules_deposit_violation(NULL) == SIZE_MAX);
+    b.vtx = NULL;
+    CHECK(research_rules_deposit_violation(&b) == SIZE_MAX);
+    b.vtx = tx;
     CHECK(research_rules_deposit_violation(&b) == 0);
     tx[1].value_balance = -1;
     CHECK(research_rules_deposit_violation(&b) == 2);
