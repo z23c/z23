@@ -3166,6 +3166,19 @@ static void observation_window_refusals(struct observation_fixture *fixture)
     zcl_compile_observation_close(observation);
     fixture->argv[0] = original;
     (void)unlink(driver);
+
+    char intermediate[PATH_MAX];
+    (void)snprintf(intermediate, sizeof(intermediate), "%s/cc-link", fixture->root);
+    linked = symlink(fixture->compiler, intermediate) == 0 &&
+             symlink("cc-link", driver) == 0;
+    fixture->argv[0] = driver;
+    observation = NULL;
+    AR_CHECK("observation refuses an intermediate compiler symlink",
+             linked && !observation_begin(fixture, &observation));
+    zcl_compile_observation_close(observation);
+    fixture->argv[0] = original;
+    (void)unlink(driver);
+    (void)unlink(intermediate);
 }
 
 static void observation_output_refusals(struct observation_fixture *fixture)

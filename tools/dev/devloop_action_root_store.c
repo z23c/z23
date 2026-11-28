@@ -1985,8 +1985,6 @@ static const char *ars_driver_miss_why(const char *code)
 static bool ars_exec_path_stable(const char *word,
                                  const struct zcl_action_root_t0 *t0)
 {
-    if (!t0 || !t0->set)
-        return true;
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s", word) >= (int)sizeof(path) ||
         !ars_resolve_program(path))
@@ -2002,6 +2000,31 @@ static bool ars_exec_path_stable(const char *word,
         path[i] = saved;
         if (!ok)
             return false;
+        if (S_ISLNK(st.st_mode)) {
+            /* Only one final link with a direct, canonical target is
+             * modeled. Intermediate link chains are cache misses. */
+            if (i != n)
+                return false;
+            char target[PATH_MAX], joined[PATH_MAX], norm[PATH_MAX], real[PATH_MAX];
+            ssize_t used = readlink(path, target, sizeof(target) - 1);
+            if (used <= 0 || (size_t)used >= sizeof(target) - 1)
+                return false;
+            target[used] = '\0';
+            const char *slash = strrchr(path, '/');
+            int written = target[0] == '/'
+                ? snprintf(joined, sizeof(joined), "%s", target)
+                : snprintf(joined, sizeof(joined), "%.*s/%s",
+                           (int)(slash - path), path, target);
+            if (written < 0 || written >= (int)sizeof(joined) ||
+                !zcl_action_root_lex_normalize(joined, norm, sizeof(norm)) ||
+                !realpath(joined, real) || strcmp(norm, real) != 0 ||
+                lstat(joined, &st) != 0 || S_ISLNK(st.st_mode))
+                return false;
+            if (lstat(path, &st) != 0 || !S_ISLNK(st.st_mode))
+                return false;
+        }
+        if (!t0 || !t0->set)
+            continue;
 #if defined(__APPLE__)
         int64_t sec = st.st_ctimespec.tv_sec, nsec = st.st_ctimespec.tv_nsec;
 #else
@@ -2074,6 +2097,11 @@ static bool ars_hook_driver(struct ars_hook *h, const struct ars_compile *k,
                      "a program the driver runs does not resolve to one "
                      "file, or its own prefix holds a same-name program",
                      bad ? bad : k->cc);
+        return false;
+    }
+    if (!ars_exec_paths_stable(k, &h->driver)) {
+        ars_miss_set(m, "input_changed_during_compile",
+                     "compiler path changed while reading it", k->cc);
         return false;
     }
     return true;
