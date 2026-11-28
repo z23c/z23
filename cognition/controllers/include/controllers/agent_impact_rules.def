@@ -289,6 +289,7 @@ AGENT_IMPACT_RULE("engine/services/include/services/miner_ballot_template.h|engi
 AGENT_IMPACT_RULE("engine/services/include/services/miner_signal_catalog_pin.h|engine/services/src/miner_signal_catalog_pin.c|engine/composition/include/config/boot_ballot_catalog.h|engine/composition/src/boot_ballot_catalog.c", "miner_signal_catalog rpc_ballotstatus rpc_ballot_integration node_config_file make_lint_gates")
 AGENT_IMPACT_RULE("engine/controllers/src/blockchain_controller_ballot.c|tests/harness/src/test_rpc_ballotstatus.c|tests/harness/src/test_rpc_ballot_integration.c", "rpc_ballot_integration rpc_ballotstatus make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/migration_activation.c|engine/services/include/services/migration_activation.h|tests/harness/src/test_migration_activation.c", "migration_activation make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/research_namespace.c|engine/services/include/services/research_namespace.h|tests/harness/src/test_research_namespace.c", "research_namespace")
 /* On-demand regtest minting: the two `generate*` RPCs, the block template +
  * Equihash solver they share, and the coinbase payee script that decides
  * whether the mined subsidy is spendable by a wallet at all. */
