@@ -5,6 +5,7 @@
 #include "services/ironwood_instance.h"
 #include "services/ironwood_halo2_transcript.h"
 #include "services/ironwood_postnu63.h"
+#include "services/ironwood_ipa.h"
 #include "codec/cursor.h"
 #include "base/hex.h"
 #include "encoding/utilstrencodings.h"
@@ -1088,6 +1089,65 @@ static bool check_recipient_fixture(void)
         check_recipient_tamper(shared, action, plain);
 }
 
+/* x3 followed by eleven u challenges from upstream 0.4.0 public proof traces. */
+static const char *const ipa_wide[2][12] = {
+    {
+        "76b308fe7aab7dbfb9df37301505818e75646faca5bb270764f7eead7419fd84f7e0a69ce71d24da4f088332efd278b8e1309d1729b3ac8fafe93d4198ad022a",
+        "7d475ec17da6dce1f9175bb112f7e59b605845d08e9b530289be6dfea63f3f5f53d8c5f767f0feaa94a23f4f7babf893b620002342beba5db43f205167c598ad",
+        "e7d1de8163b7b37955b9cabeb460bc5fe38716d15da3f4a232c807f579ec8f9ee93a2d57d82948e261b78338d77db3960cacb1933e38655373c4ebac27670b86",
+        "1255e69d04e3c2eca5096fd9bf496ba3b36aab62efc8a42b599599c4d77e833e624a15390e1acdee7bed752d4209d7bbf945764284382a5de3a804c56a0e5d00",
+        "8e403e7428bd6c559ffc004e0a44bab3972d235c6f4ec7200c658e4725a26fec4bce1a3526e5b7b64e48fba3f1d608b5199e8733fe7f5496d52fe125a029ad38",
+        "352b1c21532515eb0d35fd7a58e91700d17df540db0c1870586723059eb533cc9e9095fafc2af99f44e6493f50e3f4d68f771f3b3f21e199fd611b8083548b37",
+        "79373e29bf4178ea91b3fc0f2fa54da645aec4c817a7b70674d075f9ffde5079d182f6bded7a38c976817fe048d624bcf543f832318d68759d7101946ff4ee33",
+        "8571f789f2210addd58a547e3195aa44d687c0c28eb787356f9545d3bf53da9ecb040635cf87304e093f12c8a3aeb9414243e3ac0d2a1dcb647e8841c0390c3c",
+        "d0e2190795cfda0369c5a9b65088acc456b6ca81c34a61c3a8b7c73b9f67356781b7a475cfea5b13b8ff1e50bd663399051b09fa66b9754fb42c7bbc5fd48398",
+        "58a74cea2a23ac12382ba2dd06c065e297da30ff3f315630d67ef52cab0b364fc1c27df17e3628caf4c8aa88647e4bf97a754d3886d55c37d5636e6922487c2b",
+        "03fbe2f29f350fef30dd09df8b1f2fbc30e476c4b77d5c59b8f239f6efd5a7b3f7edbcd4cd53402fc15ae28450352c37d3d4344f180c34eeb12bb16de3d67cd5",
+        "30579c16d158b0ed1cc355e92573b00d0bb37e55c90920eacec323bb9c8ad89714e09cdebdd32cc7625fc357db66774e058024fd8f93577b00a1363a88767b3b",
+    },
+    {
+        "de3737f8da1db82493a68c791a0e40bdcb8657fef6625256c231e20856c6b16c988d2e837695a9cd67dcfd6cf80f8626e203e410f1df14e5090e6c0da5d8eadb",
+        "7628a8ed92d6988a8b0e481b7228c5f7c4929eb18e73fa7ab594535a01a94a0732703420508351d54a720b123a8d1abf1c10c194543cdab41253d177105b342a",
+        "435533288987bde85f6aa4566c4ed53bd0cf8ff6d22aa8a65d8710310a25bbb8507b4785e33a7c1a39286c0273a25f29fdf72cc5cc39c39406808febc8525d64",
+        "01a9c12a325676c931e21858ffb665ce48202ff7d490cb48be662d94ec6383e838f330c78a37750e2279c6bb1bfcbaafb24846be447a5a0dd96d92d2f5ac3ab5",
+        "a08604d832dbe51bd5359445b504c5ee09defccc5f53574acdb5bf95dd4d4afeab5ef8a2eac8a91ef4550137c93bdce9c2f9db65e44c61eb1954652dfaa6b763",
+        "c24dc5ef7e935b030caff7a0ef6d4647d3ca1de25af7d00e319a311945dc9c775a810249e1779da26406979fcf9a218ff237708d27f56225e04ee4f9c0bb0a25",
+        "9e0f08fb50af4f9cf33b0612b0f3ed41acb8695e6d86d0036373289fc494c6a78936cb31beb3d852e21a10a41b980a4022eadf645a1ac0e04d6c6e82c867df7b",
+        "4db7bb1ceb6a797f3aad583a2ae00250d87ffe8063246f8c964cfcb197abb3b28bb64718223bcdb05cbf903c6ec6d88a0273766fb5b5bd49d6215d079709f7a2",
+        "91d6783408fa9fbb13f62285cc5721abf49c3582b22825c0af5cf7136bb0a426d5497c90d07011ccafb93b1a8b7c474c6c3c3443d81fa8a6a51c9326d0b52a6d",
+        "f2afecb1eb73fc39af6432af9bcb4df29e6a0a287e056ac8a99604dbe6f84633b30b0c14adf18e75df70d215cb42917e76ba24514182189c8539b9c53a09ff8e",
+        "9fb3a30ebfe65aaa23a2584fc0f9a6a6937bb923395b614ddeb4da56f2878b6f5697dbba569832d073904b590f927bb2e5a4bc1b23a12235e2800970fb0de8de",
+        "a63ea397cc4825c0499e5b4ca186d0835f527912281d8bdf1e33706c36387bb1f29b35151345b73b3853c60fdc1d8a30f105e8149633a2fb7567c56fe3337ae3",
+    },
+};
+
+/* Halo2 0.4.0 x3 and round challenges in proof transcript order. Expected b
+ * was independently calculated by expanding the 2048 generator coefficients
+ * and evaluating the resulting polynomial over Vesta Fp. */
+static bool check_ipa_coefficient_case(size_t which, const char *want)
+{
+    uint8_t wide[64], x[32], u[IRONWOOD_IPA_ROUNDS][32], expected[32], out[32], before[32];
+    if (!zcl_hex_decode(ipa_wide[which][0], wide, 64) ||
+        !ironwood_halo2_vesta_scalar(wide, sizeof wide, x, sizeof x).ok ||
+        !zcl_hex_decode(want, expected, 32)) return false;
+    for (size_t i = 0; i < IRONWOOD_IPA_ROUNDS; ++i)
+        if (!zcl_hex_decode(ipa_wide[which][i + 1], wide, 64) ||
+            !ironwood_halo2_vesta_scalar(wide, sizeof wide, u[i], sizeof u[i]).ok) return false;
+    if (!ironwood_ipa_compute_b(x, u, out).ok || memcmp(out, expected, 32)) return false;
+    u[0][0] ^= 1;
+    if (!ironwood_ipa_compute_b(x, u, out).ok || !memcmp(out, expected, 32)) return false;
+    memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof before);
+    memset(u[0], 0xff, sizeof u[0]);
+    return !ironwood_ipa_compute_b(x, u, out).ok && !memcmp(out, before, sizeof out);
+}
+
+static bool check_ipa_coefficient(void)
+{
+    return check_ipa_coefficient_case(0, "24a508c3f75cac2041f193ac07a2747bc6a05f5a9cae1aa3cf8f68633b30ca26") &&
+        check_ipa_coefficient_case(1, "fad499d170eb991f2726ac0498f6d4e8006f60b209373a8409a468d95ed8721f");
+}
+
+
 static int check_v6_rpc_cases(void)
 {
     int failures = 0;
@@ -1110,6 +1170,7 @@ static int check_recipient_auth_cases(void)
 int test_transaction_v6_inspect(void)
 {
     int failures = check_v6_rpc_cases() + check_recipient_auth_cases();
+    if (!check_ipa_coefficient()) ++failures;
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
     if (!check_funded_instance()) ++failures;
