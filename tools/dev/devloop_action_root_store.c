@@ -57,6 +57,7 @@
 #define ARS_SYSTEM_DIR_MAX 32
 #define ARS_BACKEND_MAX 8
 #define ARS_PREFIX_MAX 16
+#define ARS_TOOLCHAIN_MAX 4
 #define ARS_HASH_OUT_MAX 65536
 
 static void ars_why(char *why, size_t len, const char *what, const char *arg)
@@ -322,6 +323,7 @@ struct ars_driver {
     uint8_t lines_sha3[32];
     uint8_t bytes[32]; /* ars_driver_bytes of `driver` when captured */
     char dirs[ARS_SYSTEM_DIR_MAX][PATH_MAX];
+    char raw_dirs[ARS_SYSTEM_DIR_MAX][PATH_MAX];
     size_t count;
     /* Built-in dirs the driver skipped as nonexistent: one appearing moves
      * the search list, so it forces a re-capture. */
@@ -341,6 +343,11 @@ struct ars_driver {
     size_t backend_n;
     char prefixes[ARS_PREFIX_MAX][PATH_MAX];
     size_t prefix_n;
+    /* Install prefixes of the plan's driver programs (ars_toolchain_capture):
+     * the roots the derived request binds by spelling outside the system
+     * prefixes. */
+    char toolchain[ARS_TOOLCHAIN_MAX][PATH_MAX];
+    size_t toolchain_n;
     /* Which same-name executables the prefixes held at capture: one
      * appearing or going forces a re-capture. */
     uint8_t shadow[32];
@@ -364,6 +371,71 @@ struct ars_ask {
 #if !defined(_WIN32)
 static pthread_mutex_t g_driver_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct ars_driver g_driver;
+
+static bool ars_resolve_program(char path[PATH_MAX]);
+
+/* One admission the hook's capture makes and the replayed parser never
+ * does: a dot-dot spelling of a directory that exists, lies inside the
+ * install prefix of a program the plan's driver command names, and is
+ * the very directory its collapsed spelling names on this host (same
+ * device and inode, so no symlinked segment was bypassed) is recorded
+ * by the collapsed name. Everything else that is not already canonical
+ * is still refused. */
+static bool ars_builtin_resolved(char dir[PATH_MAX], char norm[PATH_MAX],
+                                 const struct ars_driver *admit)
+{
+    struct stat spelled, collapsed;
+    if (!admit || !strstr(dir, "/../") ||
+        !zcl_action_root_lex_normalize(dir, norm, PATH_MAX) ||
+        strcmp(norm, dir) == 0 ||
+        !zcl_action_root_builtin_dir_canonical(norm) ||
+        stat(dir, &spelled) != 0 || !S_ISDIR(spelled.st_mode) ||
+        stat(norm, &collapsed) != 0 || !S_ISDIR(collapsed.st_mode) ||
+        spelled.st_dev != collapsed.st_dev ||
+        spelled.st_ino != collapsed.st_ino)
+        return false;
+    for (size_t i = 0; i < admit->toolchain_n; i++) {
+        size_t n = strlen(admit->toolchain[i]);
+        if (strncmp(norm, admit->toolchain[i], n) == 0 && norm[n] == '/') {
+            (void)snprintf(dir, PATH_MAX, "%s", norm);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The install prefix of one program word of the plan's driver command:
+ * the word resolved as the driver would run it, spelled by its real
+ * path. A program in a "bin" directory binds that directory's parent
+ * (the prefix holding lib/ and include/); one anywhere else binds its
+ * own directory. False for a word relative to the checkout (already
+ * bound as "@root"), for one naming no executable, and for a program
+ * directly in "/". */
+static bool ars_toolchain_root(const char *word, char root[PATH_MAX])
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s", word) >= (int)sizeof(path) ||
+        (strchr(path, '/') && path[0] != '/') ||
+        !ars_resolve_program(path) || !realpath(path, root))
+        return false;
+    char *slash = strrchr(root, '/');
+    if (!slash || slash == root)
+        return false;
+    *slash = '\0';
+    size_t n = strlen(root);
+    if (n > 4 && strcmp(root + n - 4, "/bin") == 0)
+        root[n - 4] = '\0';
+    return root[1] != '\0';
+}
+
+/* Bind only the first program the driver actually names for the compile.
+ * A wrapper's own directory is not a compiler installation root. */
+static void ars_toolchain_capture(struct ars_driver *d)
+{
+    d->toolchain_n = 0;
+    if (d->backend_n && ars_toolchain_root(d->backend[0], d->toolchain[0]))
+        d->toolchain_n = 1;
+}
 #endif
 
 /* Admit one built-in search entry of `n` bytes at `p`, or name why not:
@@ -373,15 +445,28 @@ static struct ars_driver g_driver;
  * derived from a partial or rewritten search list is not the real one. */
 static const char *ars_builtin_entry(const char *p, size_t n,
                                      char dirs[][PATH_MAX], size_t dirs_cap,
-                                     size_t *count)
+                                     size_t *count,
+                                     const struct ars_driver *admit,
+                                     char raw_dirs[][PATH_MAX])
 {
     char dir[PATH_MAX];
+#if !defined(_WIN32)
+    char norm[PATH_MAX];
+#else
+    (void)admit;
+#endif
     if (n >= PATH_MAX || *count >= dirs_cap)
         return "builtin_dir_overflow";
     (void)snprintf(dir, sizeof(dir), "%.*s", (int)n, p);
-    if (!zcl_action_root_builtin_dir_canonical(dir))
+    if (!zcl_action_root_builtin_dir_canonical(dir)
+#if !defined(_WIN32)
+        && !ars_builtin_resolved(dir, norm, admit)
+#endif
+       )
         return "builtin_dir_noncanonical";
-    memcpy(dirs[(*count)++], dir, n + 1);
+    if (raw_dirs)
+        (void)snprintf(raw_dirs[*count], PATH_MAX, "%.*s", (int)n, p);
+    (void)snprintf(dirs[(*count)++], PATH_MAX, "%s", dir);
     return NULL;
 }
 
@@ -413,10 +498,13 @@ static bool ars_builtin_next(const char **cursor, const char *end,
     return false;
 }
 
-bool zcl_action_root_parse_builtin_dirs(const char *out,
-                                        char dirs[][PATH_MAX],
-                                        size_t dirs_cap, size_t *count_out,
-                                        char *miss)
+/* zcl_action_root_parse_builtin_dirs with the hook's one admission:
+ * `admit` is the driver being captured, NULL for the replayed parse. */
+static bool ars_builtin_dirs_scan(const char *out,
+                                  const struct ars_driver *admit,
+                                  char dirs[][PATH_MAX], size_t dirs_cap,
+                                  size_t *count_out, char *miss,
+                                  char raw_dirs[][PATH_MAX])
 {
     size_t count = 0;
     const char *refused = NULL;
@@ -432,7 +520,8 @@ bool zcl_action_root_parse_builtin_dirs(const char *out,
     const char *line = NULL;
     size_t n = 0;
     while (!refused && ars_builtin_next(&p, end, &line, &n))
-        refused = ars_builtin_entry(line, n, dirs, dirs_cap, &count);
+        refused = ars_builtin_entry(line, n, dirs, dirs_cap, &count, admit,
+                                    raw_dirs);
     if (refused) {
         if (miss)
             (void)snprintf(miss, 40, "%s", refused);
@@ -441,6 +530,15 @@ bool zcl_action_root_parse_builtin_dirs(const char *out,
     if (count_out)
         *count_out = count;
     return count > 0;
+}
+
+bool zcl_action_root_parse_builtin_dirs(const char *out,
+                                        char dirs[][PATH_MAX],
+                                        size_t dirs_cap, size_t *count_out,
+                                        char *miss)
+{
+    return ars_builtin_dirs_scan(out, NULL, dirs, dirs_cap, count_out, miss,
+                                 NULL);
 }
 
 #if !defined(_WIN32)
@@ -488,7 +586,8 @@ static bool ars_system_parse(const char *out, struct ars_driver *sd,
              * do not mislabel them as compiler built-ins. */
             if (explicit) continue;
             const char *error = ars_builtin_entry(line, length, sd->dirs,
-                                                  ARS_SYSTEM_DIR_MAX, &sd->count);
+                                                  ARS_SYSTEM_DIR_MAX, &sd->count,
+                                                  sd, sd->raw_dirs);
             if (error) {
                 if (miss) (void)snprintf(miss, 40, "%s", error);
                 return false;
@@ -496,9 +595,8 @@ static bool ars_system_parse(const char *out, struct ars_driver *sd,
         }
         return sd->count > 0;
     }
-    return zcl_action_root_parse_builtin_dirs(out, sd->dirs,
-                                              ARS_SYSTEM_DIR_MAX, &sd->count,
-                                              miss);
+    return ars_builtin_dirs_scan(out, sd, sd->dirs, ARS_SYSTEM_DIR_MAX,
+                                 &sd->count, miss, sd->raw_dirs);
 }
 
 #endif
@@ -1267,8 +1365,10 @@ static bool ars_driver_capture(const struct ars_ask *q, struct ars_driver *d,
     bool ok = snprintf(d->flags, sizeof(d->flags), "%s", q->flags) <
                   (int)sizeof(d->flags) &&
               ars_driver_ask(d, search, capture, sizeof(capture)) &&
-              ars_system_parse(capture, d, miss) &&
-              ars_programs_capture(d, miss) &&
+              ars_programs_capture(d, miss);
+    if (ok)
+        ars_toolchain_capture(d);
+    ok = ok && ars_system_parse(capture, d, miss) &&
               ars_sysroot_capture(d, miss) &&
               ars_linker_capture(d) && ars_implicit_capture(d);
     d->ask_env = NULL;
@@ -1752,6 +1852,8 @@ struct ars_hook {
     struct ars_argv argv;
     struct ars_driver driver;
     const char *system_dirs[ARS_SYSTEM_DIR_MAX];
+    const char *system_dirs_raw[ARS_SYSTEM_DIR_MAX];
+    const char *toolchain_roots[ARS_TOOLCHAIN_MAX];
     struct vcs_toolchain_capsule_v1 capsule;
     struct zcl_action_root_request req;
     FILE *harness_image; /* Retained until the action request is derived. */
@@ -2059,8 +2161,12 @@ static void ars_hook_request(struct ars_hook *h, const struct ars_compile *k)
     const struct ars_stage *st = k->unity ? &g_hotfork_stage
                                           : &g_hotswap_stage;
     struct zcl_action_root_request *r = &h->req;
-    for (size_t i = 0; i < h->driver.count; i++)
+    for (size_t i = 0; i < h->driver.count; i++) {
         h->system_dirs[i] = h->driver.dirs[i];
+        h->system_dirs_raw[i] = h->driver.raw_dirs[i];
+    }
+    for (size_t i = 0; i < h->driver.toolchain_n; i++)
+        h->toolchain_roots[i] = h->driver.toolchain[i];
     r->root = k->root;
     r->stage_kind = st->kind;
     r->stage_version = st->version;
@@ -2071,6 +2177,9 @@ static void ars_hook_request(struct ars_hook *h, const struct ars_compile *k)
     r->virtual_input_path = k->unity;
     r->system_dirs = h->system_dirs;
     r->system_dir_count = h->driver.count;
+    r->system_dirs_raw = h->system_dirs_raw;
+    r->toolchain_roots = h->toolchain_roots;
+    r->toolchain_root_count = h->driver.toolchain_n;
     r->sysroot = h->driver.sysroot;
     memcpy(r->sysroot_objects_sha3, h->capsule.sysroot_sha3, 32);
     r->linker = (struct zcl_action_root_linker){
@@ -2694,10 +2803,17 @@ static void aco_request(struct zcl_compile_observation *o)
     r->virtual_from = o->outputs;
     r->virtual_to = o->tokens;
     r->virtual_count = 2;
-    for (size_t i = 0; i < o->hook.driver.count; i++)
+    for (size_t i = 0; i < o->hook.driver.count; i++) {
         o->hook.system_dirs[i] = o->hook.driver.dirs[i];
+        o->hook.system_dirs_raw[i] = o->hook.driver.raw_dirs[i];
+    }
+    for (size_t i = 0; i < o->hook.driver.toolchain_n; i++)
+        o->hook.toolchain_roots[i] = o->hook.driver.toolchain[i];
     r->system_dirs = o->hook.system_dirs;
     r->system_dir_count = o->hook.driver.count;
+    r->system_dirs_raw = o->hook.system_dirs_raw;
+    r->toolchain_roots = o->hook.toolchain_roots;
+    r->toolchain_root_count = o->hook.driver.toolchain_n;
     r->sysroot = o->hook.driver.sysroot;
     memcpy(r->sysroot_objects_sha3, o->hook.capsule.sysroot_sha3, 32);
     memcpy(r->toolchain_root, o->identity, 32);

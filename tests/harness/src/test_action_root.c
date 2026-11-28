@@ -525,6 +525,40 @@ static void test_derive_builtin_dirs(struct fx *x,
              "(builtin_dir_noncanonical)", ok && fx_same(x, b));
 }
 
+#if !defined(_WIN32)
+static void test_toolchain_directory_binding(struct fx *x)
+{
+    char kit[PATH_MAX], include[PATH_MAX], bin[PATH_MAX], raw[PATH_MAX];
+    test_make_tmpdir(kit, sizeof(kit), "action_root", "toolchain_path");
+    bool ok = snprintf(include, sizeof(include), "%s/include", kit) < (int)sizeof(include) &&
+              snprintf(bin, sizeof(bin), "%s/bin", kit) < (int)sizeof(bin) &&
+              snprintf(raw, sizeof(raw), "%s/bin/../include", kit) < (int)sizeof(raw) &&
+              mkdir(include, 0700) == 0 && mkdir(bin, 0700) == 0;
+    const char *roots[] = { kit };
+    const char *raw_dirs[] = { raw };
+    const char *saved = x->system_dirs[0];
+    x->system_dirs[0] = include;
+    x->req.system_dirs_raw = raw_dirs;
+    x->req.toolchain_roots = roots;
+    x->req.toolchain_root_count = 1;
+    struct zcl_action_root_result result = {0};
+    ok = ok && fx_derive(x, &result);
+    zcl_action_root_result_free(&result);
+    ok = ok && rmdir(bin) == 0 && symlink("include", bin) == 0 &&
+         fx_miss(x, "builtin_dir_noncanonical");
+    x->req.system_dirs_raw = NULL;
+    x->req.toolchain_roots = NULL;
+    x->req.toolchain_root_count = 0;
+    ok = ok && fx_miss(x, "include_dir_outside_repo");
+    x->system_dirs[0] = saved;
+    (void)unlink(bin);
+    (void)rmdir(include);
+    (void)rmdir(kit);
+    AR_CHECK("toolchain paths: bounded search succeeds, symlink retarget and "
+             "unbound external root refuse", ok);
+}
+#endif
+
 static void test_derive_sysroot(struct fx *x,
                                 const struct zcl_action_root_result *b)
 {
@@ -567,6 +601,9 @@ static void test_derive_sysroot(struct fx *x,
     AR_CHECK("sysroot: a driver sysroot moves the root; a host one is "
              "refused", ok && fx_same(x, b));
     test_derive_builtin_dirs(x, b);
+#if !defined(_WIN32)
+    test_toolchain_directory_binding(x);
+#endif
 }
 
 static void test_derive_linker(struct fx *x,

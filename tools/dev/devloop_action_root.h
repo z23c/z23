@@ -164,6 +164,18 @@ struct zcl_action_root_request {
     /* The compiler's built-in #include <...> dirs, absolute, in order. */
     const char *const *system_dirs;
     size_t system_dir_count;
+    /* Original driver spellings, parallel to system_dirs, when a hook has
+     * resolved an admitted toolchain directory. */
+    const char *const *system_dirs_raw;
+    /* Install prefixes of the driver programs the plan names outside the
+     * checkout: canonical absolute paths, each the directory holding a
+     * driver program or, when that directory is "bin", its parent. An
+     * absolute path under one is bound by its exact spelling as
+     * "@sys<abs>", as a system path is. NULL or empty when the plan names
+     * none; every other absolute path outside the checkout and the system
+     * prefixes is still refused. */
+    const char *const *toolchain_roots;
+    size_t toolchain_root_count;
     /* `cc -print-sysroot`, absolute; NULL or "" when the driver has none. */
     const char *sysroot;
     uint8_t sysroot_objects_sha3[32];
@@ -342,6 +354,7 @@ void zcl_devloop_action_root_emit(
  * spelling: absolute, shorter than PATH_MAX, and already lexically normal
  * (no "." or ".." segment, no doubled or trailing slash). */
 bool zcl_action_root_builtin_dir_canonical(const char *dir);
+bool zcl_action_root_lex_normalize(const char *in, char *out, size_t cap);
 
 /* Parse `cc -xc -E -v /dev/null` output between its two search-list
  * markers into up to `dirs_cap` built-in #include <...> directories.
@@ -352,7 +365,10 @@ bool zcl_action_root_builtin_dir_canonical(const char *dir);
  * Either is refused (false, *count_out 0), never truncated or filtered
  * while still returning a usable list. `miss` is a 40-byte buffer (may be
  * NULL). Exposed so a captured driver transcript can be replayed by a test
- * without invoking a compiler. */
+ * without invoking a compiler. The hook's own capture adds one admission
+ * this replay never makes: a dot-dot entry that resolves, on the host, to
+ * an existing directory inside the install prefix of the plan's driver
+ * (toolchain_roots) is recorded by its resolved name. */
 bool zcl_action_root_parse_builtin_dirs(const char *cc_dash_e_v_output,
                                         char dirs[][PATH_MAX],
                                         size_t dirs_cap, size_t *count_out,

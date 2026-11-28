@@ -20,6 +20,7 @@
 #include "sha3/sha3.h"
 
 #include <pthread.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -150,6 +151,11 @@ static bool ar_lex_normalize(const char *in, char *out, size_t cap)
     return true;
 }
 
+bool zcl_action_root_lex_normalize(const char *in, char *out, size_t cap)
+{
+    return in && out && cap && ar_lex_normalize(in, out, cap);
+}
+
 bool zcl_action_root_builtin_dir_canonical(const char *dir)
 {
     char norm[PATH_MAX];
@@ -173,6 +179,11 @@ static bool ar_system_path(const char *abs)
     return false;
 }
 
+/* True when `abs` lies under one of the plan's toolchain roots
+ * (request.toolchain_roots): the install tree of a driver the plan names
+ * outside the checkout and the system prefixes. It is bound by its exact
+ * spelling, as a system path is. `abs` need only carry the root as a
+ * whole leading path segment. */
 static bool ar_delim(char c)
 {
     return c == '\0' || strchr("/=,:; \"'", c) != NULL;
@@ -186,6 +197,17 @@ struct ar_ctx {
     char *miss;
     size_t miss_len;
 };
+
+static bool ar_toolchain_path(const struct ar_ctx *c, const char *abs)
+{
+    const struct zcl_action_root_request *req = c->req;
+    for (size_t i = 0; i < req->toolchain_root_count; i++) {
+        size_t n = strlen(req->toolchain_roots[i]);
+        if (strncmp(abs, req->toolchain_roots[i], n) == 0 && abs[n] == '/')
+            return true;
+    }
+    return false;
+}
 
 /* Record the first miss: a stable code plus a human detail. */
 static void ar_fail(const struct ar_ctx *c, const char *code,
@@ -213,7 +235,8 @@ static bool ar_reserved_rel(const struct ar_ctx *c, const char *token,
 }
 
 /* Token and filesystem path for an absolute, normalized spelling: inside
- * the checkout it is repo-relative, under a system prefix "@sys/...". */
+ * the checkout it is repo-relative, under a system prefix or a toolchain
+ * root "@sys/...". */
 static int ar_tokenize_absolute(const struct ar_ctx *c, const char *norm,
                                 char token[PATH_MAX], char fs[PATH_MAX])
 {
@@ -226,7 +249,7 @@ static int ar_tokenize_absolute(const struct ar_ctx *c, const char *norm,
             return -1;
         return snprintf(fs, PATH_MAX, "%s", norm);
     }
-    if (!ar_system_path(norm))
+    if (!ar_system_path(norm) && !ar_toolchain_path(c, norm))
         return -1;
     int n = snprintf(token, PATH_MAX, "@sys%s", norm);
     return n > 0 && n < PATH_MAX ? snprintf(fs, PATH_MAX, "%s", norm) : -1;
@@ -255,7 +278,8 @@ static bool ar_tokenize(const struct ar_ctx *c, const char *raw,
 }
 
 /* Rewrite host spellings inside one argv/env text: the checkout root
- * becomes "@root", a system prefix gains "@sys". The canonical check that
+ * becomes "@root", a system prefix or a toolchain root gains "@sys". The
+ * canonical check that
  * follows refuses whatever absolute spelling is left. */
 static bool ar_rewrite(const struct ar_ctx *c, const char *in,
                        char *out, size_t cap)
@@ -270,7 +294,8 @@ static bool ar_rewrite(const struct ar_ctx *c, const char *in,
             ar_delim(in[i + c->root_len])) {
             emit = "@root";
             skip = c->root_len;
-        } else if (at_path && ar_system_path(in + i)) {
+        } else if (at_path && (ar_system_path(in + i) ||
+                               ar_toolchain_path(c, in + i))) {
             emit = "@sys";
         }
         size_t emit_n = emit ? strlen(emit) : 0;
@@ -615,6 +640,52 @@ static bool ar_stamp_late(int64_t sec, int64_t nsec,
            (sec == t0->sec && (nsec >= t0->nsec || nsec == 0));
 }
 
+/* A kit path can be lexically collapsed only when no component is a
+ * symlink. Check each component as spelled, including components before
+ * ".."; a late directory change also refuses a cold observation. */
+static bool ar_kit_path_settled(struct ar_state *s, const char *raw,
+                                bool allow_missing)
+{
+#if defined(_WIN32)
+    (void)allow_missing;
+    char norm[PATH_MAX];
+    return ar_lex_normalize(raw, norm, sizeof(norm)) &&
+           !ar_toolchain_path(&s->c, norm);
+#else
+    char norm[PATH_MAX], prefix[PATH_MAX];
+    if (!ar_lex_normalize(raw, norm, sizeof(norm)) ||
+        !ar_toolchain_path(&s->c, norm))
+        return true;
+    size_t n = strlen(raw);
+    if (raw[0] != '/' || n >= sizeof(prefix))
+        return false;
+    memcpy(prefix, raw, n + 1);
+    for (size_t i = 1; i <= n; i++) {
+        if (prefix[i] != '/' && prefix[i] != '\0')
+            continue;
+        char saved = prefix[i];
+        prefix[i] = '\0';
+        struct stat st;
+        if (lstat(prefix, &st) != 0) {
+            bool missing = allow_missing && errno == ENOENT;
+            prefix[i] = saved;
+            return missing;
+        }
+        prefix[i] = saved;
+        if (S_ISLNK(st.st_mode))
+            return false;
+        if (s->c.req->compile_t0.set) {
+            struct ar_memo stamp = {0};
+            ar_memo_key(&st, &stamp);
+            if (ar_stamp_late(stamp.ctime_s, stamp.ctime_ns,
+                              &s->c.req->compile_t0))
+                return false;
+        }
+    }
+    return true;
+#endif
+}
+
 /* Called after `fs` was hashed: when the request carries the compile start,
  * the file's ctime and mtime must both precede it. A stat after the hash
  * that shows no late stamp proves the bytes hashed are the bytes the
@@ -714,7 +785,8 @@ static bool ar_dep_add(struct ar_state *s, const char *raw)
         return false;
     }
     struct ar_dep *d = &s->deps[s->dep_n];
-    if (!ar_tokenize(&s->c, raw, d->token, d->fs) ||
+    if (!ar_kit_path_settled(s, raw, false) ||
+        !ar_tokenize(&s->c, raw, d->token, d->fs) ||
         strcmp(d->token, ".") == 0) {
         ar_fail(&s->c, "dependency_outside_repo",
                 "dependency has no canonical spelling", raw);
@@ -1155,6 +1227,18 @@ static bool ar_builtin_dirs_canonical(struct ar_state *s)
 static bool ar_search_build(struct ar_state *s)
 {
     const struct zcl_action_root_request *req = s->c.req;
+    for (size_t i = 0; req->system_dirs_raw && i < req->system_dir_count; i++) {
+        char norm[PATH_MAX];
+        if (!req->system_dirs[i] || !req->system_dirs_raw[i] ||
+            !ar_lex_normalize(req->system_dirs_raw[i], norm, sizeof(norm)) ||
+            strcmp(norm, req->system_dirs[i]) != 0 ||
+            !ar_kit_path_settled(s, req->system_dirs_raw[i], false)) {
+            ar_fail(&s->c, "builtin_dir_noncanonical",
+                    "toolchain search path changed or traverses a symlink",
+                    req->system_dirs_raw[i]);
+            return false;
+        }
+    }
     if (!ar_argv_admitted(s, req->argv, req->argc, false) ||
         !ar_builtin_dirs_canonical(s))
         return false;
@@ -1590,6 +1674,11 @@ static bool ar_probe(struct ar_state *s, uint32_t slot, const char *dir,
     s->probes++;
     if (n <= 0 || n >= (int)sizeof(path)) {
         ar_fail(&s->c, "probe_overflow", "probe path overflow", name);
+        return false;
+    }
+    if (!ar_kit_path_settled(s, path, true)) {
+        ar_fail(&s->c, "probe_unreadable",
+                "toolchain probe changed or traverses a symlink", path);
         return false;
     }
     enum platform_file_shape shape = platform_file_shape_read(path);
@@ -2253,6 +2342,20 @@ static void ar_state_free(struct ar_state *s)
         free(s->env_value[i]);
 }
 
+/* A toolchain root is spelled the way the paths under it are bound:
+ * absolute, lexically normal, shorter than a path buffer, and never "/". */
+static bool ar_toolchain_roots_valid(const struct zcl_action_root_request *req)
+{
+    if (req->toolchain_root_count && !req->toolchain_roots)
+        return false;
+    for (size_t i = 0; i < req->toolchain_root_count; i++)
+        if (!req->toolchain_roots[i] ||
+            !zcl_action_root_builtin_dir_canonical(req->toolchain_roots[i]) ||
+            strcmp(req->toolchain_roots[i], "/") == 0)
+            return false;
+    return true;
+}
+
 static bool ar_request_valid(const struct zcl_action_root_request *req,
                              struct zcl_action_root_result *out)
 {
@@ -2263,7 +2366,8 @@ static bool ar_request_valid(const struct zcl_action_root_request *req,
               req->argv && req->argc > 0 && req->stage_kind &&
               allow_n <= AR_ENV_MAX &&
               ar_lex_normalize(req->root, norm, sizeof(norm)) &&
-              strcmp(norm, req->root) == 0 && strcmp(req->root, "/") != 0;
+              strcmp(norm, req->root) == 0 && strcmp(req->root, "/") != 0 &&
+              ar_toolchain_roots_valid(req);
     if (!ok) {
         const struct ar_ctx c = { .why = out->why, .why_len = sizeof(out->why),
                                   .miss = out->miss,
