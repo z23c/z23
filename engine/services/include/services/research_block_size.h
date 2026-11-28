@@ -74,7 +74,9 @@ static inline bool research_block_write_for_size(const struct block *block, stru
         !stream_write_compact_size(s, block->num_vtx)) return false;
     for (size_t i = 0; i < block->num_vtx; ++i) {
         const struct transaction *tx = &block->vtx[i];
-        if (tx->version == IRONWOOD_TX_VERSION || tx->v6_wire.data || tx->v6_wire.size) {
+        if ((tx->overwintered && tx->version == IRONWOOD_TX_VERSION &&
+             tx->version_group_id == IRONWOOD_VERSION_GROUP_ID) ||
+            tx->v6_wire.data || tx->v6_wire.size) {
             struct v6_wire_view view;
             if (!ironwood_checked_wire(tx, MAX_BLOCK_SIZE, &view).ok ||
                 !stream_write_bytes(s, tx->v6_wire.data, tx->v6_wire.size)) return false;

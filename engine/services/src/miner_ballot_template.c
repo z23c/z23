@@ -12,6 +12,7 @@
 #include "primitives/block.h"
 #include "mining/miner.h"
 #include "services/research_block_size.h"
+#include "services/research_template_transaction.h"
 #include "services/research_rules_tip.h"
 #include "core/amount.h"
 #include "primitives/transaction.h"
@@ -76,7 +77,14 @@ static struct zcl_result ballot_append(struct transaction *cb,
     return ZCL_OK;
 }
 
-static struct zcl_result ballot_check_size(struct block *block, size_t solution_size,
+static bool template_write_block(const struct chain_params *params,
+                                 const struct block *block, struct byte_stream *out)
+{
+    return research_template_private_active(params)
+        ? research_block_write_for_size(block, out) : block_serialize(block, out);
+}
+
+static struct zcl_result ballot_check_size(struct block *block, const struct chain_params *params, size_t solution_size,
                                             size_t limit, size_t *out)
 {
     uint8_t *buf = zcl_malloc(limit, "miner ballot serialization bound");
@@ -89,7 +97,7 @@ static struct zcl_result ballot_check_size(struct block *block, size_t solution_
     /* Input header is unsolved; bytes beyond its zero length have no wire value. */
     memset(block->header.nSolution, 0, solution_size);
     block->header.nSolutionSize = solution_size;
-    bool ok = block_serialize(block, &s) && !s.error;
+    bool ok = template_write_block(params, block, &s) && !s.error;
     size_t size = s.size;
     block->header.nSolutionSize = 0;
     script->size = (uint16_t)old_len;
@@ -99,12 +107,12 @@ static struct zcl_result ballot_check_size(struct block *block, size_t solution_
     return ZCL_OK;
 }
 
-static struct zcl_result ballot_update_merkle(struct block *block)
+static struct zcl_result ballot_update_merkle(struct block *block, const struct chain_params *params)
 {
     struct uint256 *txids = zcl_malloc(block->num_vtx * sizeof(*txids), "miner ballot merkle");
     if (!txids) return ZCL_ERR(-5, "Cannot allocate merkle leaves");
     for (size_t i = 0; i < block->num_vtx; i++) {
-        if (!transaction_hash_serialized(&block->vtx[i], &txids[i])) {
+        if (!research_template_txid(params, &block->vtx[i], &txids[i])) {
             free(txids);
             return ZCL_ERR(-6, "Cannot serialize a template transaction for hashing");
         }
@@ -121,6 +129,7 @@ static struct zcl_result ballot_update_merkle(struct block *block)
 static bool ballot_unsolved_template(const struct block *block)
 {
     return block && block->vtx && block->num_vtx &&
+           !research_template_is_v6(&block->vtx[0]) &&
            block->num_vtx <= MAX_BLOCK_TRANSACTIONS && !block->header.nSolutionSize;
 }
 
@@ -131,7 +140,7 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
 {
     if (!ballot_unsolved_template(block) || !catalog || !bitmap || !params ||
         !reserved_size_out || height < 0 || !mining_limit || mining_limit > MAX_BLOCK_SIZE)
-        return ZCL_ERR(-8, "Invalid unsolved mining template or policy limit");
+        return ZCL_ERR(-8, "Invalid unsolved mining template, unsupported v6 coinbase, or policy limit");
     unsigned n = chain_params_equihash_n(params, height);
     unsigned k = chain_params_equihash_k(params, height);
     if (!equihash_params_supported(n, k)) return ZCL_ERR(-9, "Unsupported Equihash parameters");
@@ -142,9 +151,9 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
     struct zcl_result r = ballot_append(&block->vtx[0], catalog, bitmap);
     if (!r.ok) return r;
     size_t reserved = 0;
-    r = ballot_check_size(block, ep.solution_width, mining_limit, &reserved);
+    r = ballot_check_size(block, params, ep.solution_width, mining_limit, &reserved);
     if (!r.ok) return r;
-    r = ballot_update_merkle(block);
+    r = ballot_update_merkle(block, params);
     if (!r.ok) return r;
     *reserved_size_out = reserved;
     return ZCL_OK;
@@ -153,7 +162,7 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
 /* Reserve a maximum coinbase script and the selected Equihash solution;
  * optional ballot output growth includes the output-count CompactSize. */
 static struct zcl_result research_reserved_size(struct block *block,
-    size_t solution_size, bool reserve_ballot, size_t limit, size_t *out)
+    const struct chain_params *params, size_t solution_size, bool reserve_ballot, size_t limit, size_t *out)
 {
     struct transaction *cb = &block->vtx[0];
     size_t extra = reserve_ballot ? 8 + compact_size_sizeof(MINER_SIGNAL_SCRIPT_BYTES) +
@@ -168,7 +177,7 @@ static struct zcl_result research_reserved_size(struct block *block,
     script->size = 100;
     memset(block->header.nSolution, 0, solution_size);
     block->header.nSolutionSize = solution_size;
-    bool ok = block_serialize(block, &s);
+    bool ok = template_write_block(params, block, &s);
     bool overflow = s.error || s.size > limit || extra > limit - s.size;
     size_t size = s.size + (overflow ? 0 : extra);
     block->header.nSolutionSize = 0;
@@ -182,7 +191,7 @@ static struct zcl_result research_reserved_size(struct block *block,
 
 static bool research_coinbase_valid(const struct transaction *cb, bool reserve_ballot)
 {
-    return cb->vin && transaction_is_coinbase(cb) && cb->vout && cb->num_vout &&
+    return !research_template_is_v6(cb) && cb->vin && transaction_is_coinbase(cb) && cb->vout && cb->num_vout &&
         cb->vin[0].script_sig.size <= 100 &&
         (!reserve_ballot || cb->num_vout < MAX_TX_OUTPUTS);
 }
@@ -190,7 +199,7 @@ static bool research_coinbase_valid(const struct transaction *cb, bool reserve_b
 /* Determine the longest fitting prefix with one bounded buffer and a single
  * serialization per candidate transaction. A final full-block check follows. */
 static struct zcl_result research_fitting_prefix(struct block *block,
-    size_t solution_size, bool reserve_ballot, size_t limit, size_t *count_out)
+    const struct chain_params *params, size_t solution_size, bool reserve_ballot, size_t limit, size_t *count_out)
 {
     struct transaction *cb = &block->vtx[0];
     size_t extra = reserve_ballot ? 8 + compact_size_sizeof(MINER_SIGNAL_SCRIPT_BYTES) +
@@ -224,7 +233,7 @@ static struct zcl_result research_fitting_prefix(struct block *block,
     for (size_t i = 1; i < block->num_vtx; i++) {
         s.size = 0;
         s.error = false;
-        ok = transaction_serialize(&block->vtx[i], &s);
+        ok = research_template_write_tx(params, &block->vtx[i], &s);
         if (!ok && !s.error) { free(bytes); return ZCL_ERR(-22, "Cannot serialize research transaction"); }
         if (!ok || s.size > limit - extra - total ||
             compact_size_sizeof(count + 1) > limit - extra - total - s.size)
@@ -285,7 +294,7 @@ struct zcl_result miner_research_template_fit(struct block_template *tmpl,
         return ZCL_ERR(-26, "Invalid Equihash solution width");
     struct block *block = &tmpl->block;
     size_t keep = 0;
-    struct zcl_result r = research_fitting_prefix(block, ep.solution_width, reserve_ballot, limit, &keep);
+    struct zcl_result r = research_fitting_prefix(block, params, ep.solution_width, reserve_ballot, limit, &keep);
     if (!r.ok) return r;
     for (size_t i = 1; i < keep; ++i) {
         if (research_tip_deposit_frozen((struct research_tip_rules){ .freeze = freeze }, &block->vtx[i])) {
@@ -299,9 +308,9 @@ struct zcl_result miner_research_template_fit(struct block_template *tmpl,
         if (!r.ok) return r;
     }
     size_t reserved;
-    r = research_reserved_size(block, ep.solution_width, reserve_ballot, limit, &reserved);
+    r = research_reserved_size(block, params, ep.solution_width, reserve_ballot, limit, &reserved);
     if (!r.ok) return r;
     if (research_block_size_check_under(block, limit) != RESEARCH_BLOCK_SIZE_OK)
         return ZCL_ERR(-29, "Cannot verify research template size");
-    return ballot_update_merkle(block);
+    return ballot_update_merkle(block, params);
 }

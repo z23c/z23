@@ -16,6 +16,7 @@
 #include "crypto/equihash.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_decode.h"
 #include "validation/main_constants.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -286,6 +287,124 @@ done:
     return failures;
 }
 
+static int bt_legacy_version_six_block(void)
+{
+    int failures = 0;
+    struct block b = {0};
+    BT_CHECK(bt_make(&b, 1));
+    struct transaction *v = realloc(b.vtx, 2 * sizeof(*v));
+    BT_CHECK(v);
+    b.vtx = v;
+    transaction_init(&v[1]);
+    v[1].version = IRONWOOD_TX_VERSION;
+    b.num_vtx = 2;
+    struct byte_stream legacy, research;
+    stream_init(&legacy, 0);
+    stream_init(&research, 0);
+    bool same = block_serialize(&b, &legacy) && research_block_write_for_size(&b, &research) &&
+                legacy.size == research.size && !memcmp(legacy.data, research.data, legacy.size);
+    stream_free(&legacy);
+    stream_free(&research);
+    BT_CHECK(same);
+done:
+    block_free(&b);
+    return failures;
+}
+
+static bool bt_v6_fit_guards(struct block_template *bt, const struct chain_params *params)
+{
+    chain_params_select(CHAIN_MAIN);
+    if (miner_research_template_fit(bt, params, 1, false, 200000, false).ok ||
+        bt->block.num_vtx != 2 || !chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return false;
+    bt->block.vtx[1].ironwood_value_balance ^= 1;
+    bool refused = !miner_research_template_fit(bt, params, 1, false, 200000, false).ok;
+    bt->block.vtx[1].ironwood_value_balance ^= 1;
+    return refused && bt->block.num_vtx == 2 &&
+           miner_research_template_fit(bt, params, 1, false, 200000, false).ok &&
+           bt->block.num_vtx == 2 && bt->num_entries == 2;
+}
+
+static bool bt_v6_merkle_matches(struct block *b)
+{
+    struct uint256 ids[2];
+    if (!transaction_hash_serialized(&b->vtx[0], &ids[0])) return false;
+    ids[1] = b->vtx[1].hash;
+    bool mutated = false;
+    struct uint256 root = merkle_root_mutated_in_place(ids, 2, &mutated);
+    return !mutated && uint256_eq(&root, &b->header.hashMerkleRoot);
+}
+
+static bool bt_v6_exact_block(struct block *b, const uint8_t *wire, size_t len)
+{
+    struct byte_stream actual, expected;
+    stream_init(&actual, 0);
+    stream_init(&expected, 0);
+    bool exact = research_block_write_for_size(b, &actual) &&
+        block_header_serialize(&b->header, &expected) &&
+        stream_write_compact_size(&expected, 2) && transaction_serialize(&b->vtx[0], &expected) &&
+        stream_write_bytes(&expected, wire, len) && actual.size == expected.size &&
+        !memcmp(actual.data, expected.data, actual.size);
+    stream_free(&actual);
+    stream_free(&expected);
+    return exact;
+}
+
+static bool bt_v6_ballot_coinbase(struct block_template *bt, const struct chain_params *params, size_t wire_len)
+{
+    uint8_t catalog[32] = {3}, bitmap[32] = {1};
+    size_t reserved = 0;
+    if (!miner_ballot_template_apply(&bt->block, catalog, bitmap, params, 1,
+                                      200000, &reserved).ok || reserved <= wire_len ||
+        !bt_v6_merkle_matches(&bt->block)) return false;
+    struct transaction *cb = &bt->block.vtx[0];
+    int32_t version = cb->version;
+    bool overwintered = cb->overwintered;
+    uint32_t group = cb->version_group_id;
+    cb->version = IRONWOOD_TX_VERSION;
+    cb->overwintered = true;
+    cb->version_group_id = IRONWOOD_VERSION_GROUP_ID;
+    size_t outputs_before = cb->num_vout;
+    bool refused = !miner_research_template_fit(bt, params, 1, false, 200000, false).ok &&
+        !miner_ballot_template_apply(&bt->block, catalog, bitmap, params, 1, 200000, &reserved).ok &&
+        cb->num_vout == outputs_before;
+    cb->version = version;
+    cb->overwintered = overwintered;
+    cb->version_group_id = group;
+    return refused;
+}
+
+static int bt_funded_v6_template(void)
+{
+    int failures = 0;
+    struct block_template bt = {0};
+    static uint8_t wire[9313];
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "rb");
+    bool loaded = f && fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    if (f && fclose(f)) loaded = false;
+    BT_CHECK(d && loaded && bt_make(&bt.block, 1));
+    struct transaction *v = realloc(bt.block.vtx, 2 * sizeof(*v));
+    BT_CHECK(v);
+    bt.block.vtx = v;
+    transaction_init(&v[1]);
+    bt.block.num_vtx = 2;
+    bt.num_entries = 2;
+    bt.tx_fees = calloc(2, sizeof(*bt.tx_fees));
+    bt.tx_sig_ops = calloc(2, sizeof(*bt.tx_sig_ops));
+    BT_CHECK(bt.tx_fees && bt.tx_sig_ops);
+    struct byte_stream input;
+    stream_init_from_data(&input, wire, sizeof wire);
+    BT_CHECK(transaction_v6_decode_prefix(&v[1], &input, sizeof wire) && !stream_remaining(&input));
+    BT_CHECK(bt_v6_fit_guards(&bt, d->chain));
+    BT_CHECK(bt_v6_merkle_matches(&bt.block));
+    BT_CHECK(bt_v6_exact_block(&bt.block, wire, sizeof wire));
+    BT_CHECK(bt_v6_ballot_coinbase(&bt, d->chain, sizeof wire));
+done:
+    block_template_free(&bt);
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
 static int bt_size_boundaries(void)
 {
     int failures = 0;
@@ -338,6 +457,8 @@ done:
 int test_miner_ballot_template(void)
 {
     int failures = 0;
+    failures += bt_legacy_version_six_block();
+    failures += bt_funded_v6_template();
     failures += bt_tip_refusal();
     failures += bt_size_boundaries();
     failures += bt_freeze_case(false);

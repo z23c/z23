@@ -9,6 +9,7 @@
 #include "services/miner_ballot_template.h"
 #include "services/research_block_size.h"
 #include "services/private_applied_relay.h"
+#include "services/research_template_transaction.h"
 #include "services/research_rules_tip.h"
 #include "services/miner_signal_catalog_pin.h"
 #include "controllers/blockchain_controller.h"
@@ -69,6 +70,35 @@ struct mining_template_parent {
     size_t ballot_limit;
     struct research_tip_rules rules;
 };
+
+static bool mining_template_v6_allowed(const struct block *block)
+{
+    /* This release descriptor does not bind a v6 signing domain. Even an
+     * active rule cannot authorize work until that independent binding exists. */
+    if (!block || (block->num_vtx && !block->vtx)) return false;
+    for (size_t i = 0; i < block->num_vtx; i++)
+        if (research_template_is_v6(&block->vtx[i]))
+            return false;
+    return true;
+}
+
+static bool mining_template_v6_gate(bool ok, const struct block *block, const char **reason)
+{
+    if (!ok) return false;
+    if (mining_template_v6_allowed(block)) return true;
+    *reason = "V6 mining is not active for the selected parent";
+    return false;
+}
+
+#ifdef ZCL_TESTING
+bool rpc_mining_test_v6_parent_allowed(const struct block *block,
+    const struct chain_params *params, const struct block_index *parent)
+{
+    (void)params;
+    (void)parent;
+    return mining_template_v6_allowed(block);
+}
+#endif
 
 static bool mining_finish_template(struct block_template *tmpl,
     const struct chain_params *cp, int height, const struct uint256 *parent_root,
@@ -141,6 +171,7 @@ static struct block_template *mining_create_template(const struct script *script
         bound->size_limit = research_block_size_limit_for(cp, &state);
         bound->ballot_limit = research_ballot_template_limit(cp, &state);
     }
+    ok = mining_template_v6_gate(ok, &tmpl->block, reason);
     if (ok) ok = mining_finish_template(tmpl, cp, bound->height, &parent_root,
                                          genesis, reserve_ballot, bound, reason);
     if (ok) return tmpl;
@@ -669,7 +700,8 @@ static bool mining_template_data(const struct transaction *tx, struct json_value
 {
     struct byte_stream bytes;
     stream_init(&bytes, 256);
-    bool ok = transaction_serialize(tx, &bytes) && !bytes.error && bytes.size <= (SIZE_MAX - 1) / 2;
+    bool ok = research_template_write_tx(chain_params_get(), tx, &bytes) &&
+              !bytes.error && bytes.size <= (SIZE_MAX - 1) / 2;
     char *hex = ok ? zcl_malloc(2 * bytes.size + 1, "mining template transaction hex") : NULL;
     if (hex) {
         zcl_hex_encode(bytes.data, bytes.size, hex);
@@ -678,10 +710,21 @@ static bool mining_template_data(const struct transaction *tx, struct json_value
     } else {
         ok = false;
     }
-    if (ok && hash) hash256(bytes.data, bytes.size, hash->data);
+    if (ok && hash) {
+        if (research_template_is_v6(tx)) *hash = tx->hash;
+        else hash256(bytes.data, bytes.size, hash->data);
+    }
     stream_free(&bytes);
     return ok;
 }
+
+#ifdef ZCL_TESTING
+bool rpc_mining_test_template_data(const struct transaction *tx,
+                                   struct json_value *entry, struct uint256 *hash)
+{
+    return mining_template_data(tx, entry, hash);
+}
+#endif
 
 static bool mining_template_entry(const struct block_template *tmpl, size_t i,
                                   struct json_value *txs)

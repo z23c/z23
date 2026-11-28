@@ -9,11 +9,13 @@
 #include "services/miner_signal_catalog_pin.h"
 #include "base/hex.h"
 #include "core/serialize.h"
+#include "core/hash.h"
 #include "crypto/common.h"
 #include "mining/miner.h"
 #include "keys/key_io.h"
 #include "script/standard.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_decode.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "core/arith_uint256.h"
@@ -33,6 +35,93 @@
 
 void rpc_mining_test_set_hooks(void (*on_template)(void *),
     bool (*submit)(struct block *, struct validation_state *, void *), void *ctx);
+bool rpc_mining_test_template_data(const struct transaction *, struct json_value *, struct uint256 *);
+bool rpc_mining_test_v6_parent_allowed(const struct block *, const struct chain_params *,
+                                       const struct block_index *);
+
+static int mining_legacy_version_six_data(void)
+{
+    int failures = 0;
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.version = IRONWOOD_TX_VERSION;
+    struct byte_stream legacy;
+    stream_init(&legacy, 0);
+    struct json_value entry = {0};
+    json_set_object(&entry);
+    struct uint256 hash, expected;
+    chain_params_select(CHAIN_MAIN);
+    struct block block = { .vtx = &tx, .num_vtx = 1 };
+    struct block_index parent = {0};
+    MT_CHECK("legacy version six is not gated as Ironwood", rpc_mining_test_v6_parent_allowed(&block,
+        chain_params_get(), &parent));
+    bool ready = transaction_serialize(&tx, &legacy);
+    if (ready) hash256(legacy.data, legacy.size, expected.data);
+    bool rendered = rpc_mining_test_template_data(&tx, &entry, &hash);
+    const char *data = json_get_str(json_get(&entry, "data"));
+    char hex[256] = {0};
+    if (ready && legacy.size * 2 + 1 <= sizeof hex) zcl_hex_encode(legacy.data, legacy.size, hex);
+    MT_CHECK("legacy non-overwintered version six retains template serialization", ready && rendered &&
+        data && !strcmp(data, hex) && uint256_eq(&hash, &expected));
+    json_free(&entry);
+    stream_free(&legacy);
+    transaction_free(&tx);
+    return failures;
+}
+
+static int mining_v6_render_case(struct transaction *tx, const uint8_t *wire, size_t wire_len)
+{
+    int failures = 0;
+    static char expected[2 * 9313 + 1];
+    struct json_value entry = {0};
+    struct uint256 hash, original;
+    uint256_set_null(&hash);
+    original = hash;
+    json_set_object(&entry);
+    chain_params_select(CHAIN_MAIN);
+    struct block block = { .vtx = tx, .num_vtx = 1 };
+    struct block_index parent = {0};
+    MT_CHECK("ordinary network refuses v6 template data",
+        !rpc_mining_test_template_data(tx, &entry, &hash) &&
+        json_size(&entry) == 0 && uint256_eq(&hash, &original));
+    MT_CHECK("select private profile for funded v6 template", chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    MT_CHECK("unbound parent refuses v6 mining even on private profile",
+        !rpc_mining_test_v6_parent_allowed(&block, chain_params_get(), &parent));
+    zcl_hex_encode(wire, wire_len, expected);
+    bool rendered = rpc_mining_test_template_data(tx, &entry, &hash);
+    struct uint256 expected_id;
+    uint256_set_hex(&expected_id, "9b9eac775e6a0f7b5eef6d946dbb1ca9dcc338124b507c9ef53729b6ab41545a");
+    const char *data = json_get_str(json_get(&entry, "data"));
+    MT_CHECK("funded v6 template returns exact wire and canonical txid", rendered && data &&
+        !strcmp(data, expected) && uint256_eq(&hash, &expected_id));
+    json_free(&entry);
+    json_set_object(&entry);
+    tx->ironwood_value_balance ^= 1;
+    MT_CHECK("stale v6 model refuses template output",
+        !rpc_mining_test_template_data(tx, &entry, &hash) && json_size(&entry) == 0);
+    tx->ironwood_value_balance ^= 1;
+    json_free(&entry);
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
+static int mining_private_v6_data(void)
+{
+    int failures = 0;
+    static uint8_t wire[9313];
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "rb");
+    bool loaded = f && fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    if (f && fclose(f)) loaded = false;
+    struct transaction tx;
+    transaction_init(&tx);
+    struct byte_stream in;
+    stream_init_from_data(&in, wire, sizeof wire);
+    bool decoded = loaded && transaction_v6_decode_prefix(&tx, &in, sizeof wire) && !stream_remaining(&in);
+    MT_CHECK("funded v6 fixture decodes", decoded);
+    if (decoded) failures += mining_v6_render_case(&tx, wire, sizeof wire);
+    transaction_free(&tx);
+    return failures;
+}
 
 struct mining_failure_fixture {
     struct main_state *ms;
@@ -723,6 +812,8 @@ static int mining_h1_wire_cases(void)
 int test_mining(void)
 {
     int failures = 0;
+    failures += mining_legacy_version_six_data();
+    failures += mining_private_v6_data();
 
     printf("mining: register_mining_rpc_commands accepts table... ");
     {
