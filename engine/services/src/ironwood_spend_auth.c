@@ -15,7 +15,9 @@ static const uint8_t spend_base[32] = {
 static bool challenge(BIGNUM *c, const BIGNUM *order, BN_CTX *ctx,
                       const uint8_t rk[32], const uint8_t sig[64], const uint8_t msg[32])
 {
-    static const uint8_t personal[16] = "Zcash_RedPallasH";
+    static const uint8_t personal[16] = {
+        0x5a, 0x63, 0x61, 0x73, 0x68, 0x5f, 0x52, 0x65,
+        0x64, 0x50, 0x61, 0x6c, 0x6c, 0x61, 0x73, 0x48};
     uint8_t wide[64];
     struct blake2b_ctx hash;
     if (blake2b_init_salt_personal(&hash, 64, NULL, 0, NULL, personal) ||
