@@ -8111,6 +8111,7 @@ $(eval $(call BUILD_NODE_TOOL,spec_zcl,tests/harness/spec_main.c $(SPEC_SRCS) te
 $(eval $(call BUILD_NODE_TOOL,wallet_dump,tools/wallet_dump.c))
 $(eval $(call BUILD_NODE_TOOL,snapshot_from_coinskv,tools/snapshot_from_coinskv.c))
 $(eval $(call BUILD_NODE_TOOL,mint_v2_snapshot,tools/mint_v2_snapshot.c))
+$(eval $(call BUILD_NODE_TOOL,z23_ironwood_template_worker,tools/z23_ironwood_template_worker.c))
 GPU_MINER_SRCS = tools/z23_gpu_miner.c tools/miner/gpu_equihash.c \
 	core/modules/crypto/src/equihash.c \
 	core/modules/crypto/src/blake2b.c core/modules/crypto/src/blake2b_avx2.c \
