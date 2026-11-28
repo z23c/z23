@@ -1,6 +1,8 @@
 /* purpose: Check public RedPallas action signature verification vectors. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_spend_auth.h"
+#include "controllers/transaction_v6_digest.h"
+#include "base/serialize_le.h"
 #include "base/hex.h"
 #include <stdio.h>
 #include <string.h>
@@ -89,9 +91,35 @@ static bool check_binding(void)
     return check_binding_refusals(cv, sig, msg);
 }
 
+/* Public funded transaction SHA256 09733416ff3f21a0cca4fecc2bbd6ad2f59248a645db01152e4020015038ed54.
+ * Upstream ZIP 244 S.2 uses the txid transparent digest when vin is empty,
+ * so ZIP 229 txid bytes are this shielded signature hash. This equivalence
+ * does not hold for ordinary transparent inputs, which require prevouts. */
+static bool check_binding_transaction(void)
+{
+    uint8_t wire[11518], cv[2][32], expected[32];
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-two-action-payment.bin", "rb");
+    if (!f) return false;
+    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF;
+    if (fclose(f) != 0 || !ok) return false;
+    struct v6_wire_view v; struct v6_digests d; struct v6_action_view a;
+    if (v6_wire_parse(wire, sizeof wire, &v) != V6_WIRE_OK || v.inputs != 0 ||
+        v.ironwood.count != 2 || v.ironwood.value_balance.size != 8 ||
+        v.ironwood.binding_signature.size != 64 || !v6_wire_digests(&v, &d) ||
+        !zcl_hex_decode("19a61a86bd739ad0ffc008dcc239d68bfe79a6b5d2f2488de17d08059fdc905a", expected, 32) ||
+        memcmp(d.txid, expected, 32)) return false;
+    for (size_t i = 0; i < 2; ++i) {
+        if (!v6_bundle_action(&v.ironwood, i, &a) || a.cv.size != 32) return false;
+        memcpy(cv[i], a.cv.data, 32);
+    }
+    int64_t balance = zcl_read_i64_le(v.ironwood.value_balance.data);
+    return balance == -200000 &&
+        ironwood_binding_auth_verify(cv, 2, balance, v.ironwood.binding_signature.data, d.txid).ok;
+}
+
 int test_ironwood_spend_auth(void)
 {
-    bool ok = check_case(0) && check_case(1) && check_binding();
+    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction();
     printf("Ironwood spend authorization: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
