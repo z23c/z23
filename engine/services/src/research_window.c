@@ -66,7 +66,6 @@ static struct zcl_result window_from_bytes(const unsigned char *bytes, size_t n,
 {
     struct json_value manifest = {0};
     struct miner_signal_catalog_pin pin = {0};
-    struct research_window got;
     struct zcl_result r;
 
     if (!json_read(&manifest, (const char *)bytes, n) ||
@@ -82,11 +81,7 @@ static struct zcl_result window_from_bytes(const unsigned char *bytes, size_t n,
     json_free(&manifest);
     if (!r.ok)
         return r;
-    r = schedules(&pin, &got);
-    if (!r.ok)
-        return r;
-    *out = got;
-    return ZCL_OK;
+    return schedules(&pin, out);
 }
 
 struct zcl_result research_window_read(const char *path,
@@ -94,7 +89,6 @@ struct zcl_result research_window_read(const char *path,
 {
     const struct chain_research_descriptor *d;
     unsigned char buf[WINDOW_MANIFEST_MAX];
-    struct research_window got;
     struct zcl_result r;
     size_t n = 0;
 
@@ -108,10 +102,6 @@ struct zcl_result research_window_read(const char *path,
     r = read_bytes(path, buf, sizeof buf, &n);
     if (!r.ok)
         return r;
-    r = window_from_bytes(buf, n, d->chain->consensus.hashGenesisBlock.data,
-                          &got);
-    if (!r.ok)
-        return r;
-    *out = got;
-    return ZCL_OK;
+    return window_from_bytes(buf, n, d->chain->consensus.hashGenesisBlock.data,
+                             out);
 }
