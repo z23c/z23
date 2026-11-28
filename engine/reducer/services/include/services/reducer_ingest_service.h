@@ -122,6 +122,10 @@ void reducer_publish_on_demand_tip(struct chain_activation_controller *ctl,
                                   const struct uint256 *block_hash);
 
 #ifdef ZCL_TESTING
+/* Exercise the same private synchronous evidence gate used by ingestion. */
+#include "services/chain_activation_service.h"
+bool reducer_private_rpc_applied_for_testing(enum reducer_source source, int height,
+                                             const struct uint256 *hash);
 /* Run the pre-drain anchor step of reducer_ingest_block on its own (the
  * runtime re-seed and the regtest genesis seed). A synthetic block cannot pass
  * reducer_ingest_block's Equihash check, so tests reach this step here. */

@@ -884,13 +884,35 @@ static void reducer_format_on_demand_reject_line(int target_h, char *line,
     }
 }
 
+/* A finalize row may contain the next block hash before that block is applied. */
+static bool reducer_private_rpc_applied(enum reducer_source source, int height,
+                                        const struct uint256 *hash)
+{
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
+    if ((source != REDUCER_SRC_MINED && source != REDUCER_SRC_SUBMIT) ||
+        !profile || profile->id != CHAIN_RESEARCH_IRONWOOD ||
+        chain_params_get() != profile->chain) return true;
+    progress_store_tx_lock();
+    sqlite3 *db = progress_store_db();
+    bool ok = db && tip_finalize_full_evidence_at(db, height, hash) == 1;
+    progress_store_tx_unlock();
+    return ok;
+}
+
+#ifdef ZCL_TESTING
+bool reducer_private_rpc_applied_for_testing(enum reducer_source source, int height,
+                                             const struct uint256 *hash)
+{
+    return reducer_private_rpc_applied(source, height, hash);
+}
+#endif
+
 bool reducer_ingest_block(struct chain_activation_controller *ctl,
                           struct block *pblock,
                           enum reducer_source source,
                           bool force,
                           struct validation_state *out)
 {
-    (void)source; /* informational; `force` carries the live semantics */
 
     if (!reducer_intake_admitted(ctl, pblock, out)) return false;
 
@@ -964,17 +986,23 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
      * header/stateful rejects are recorded at the ingested height. */
     struct block_index *tip = active_chain_tip(&ctl->ms->chain_active);
     int target_h = ingested ? ingested->nHeight : (tip ? tip->nHeight : 0);
+    bool applied = reducer_private_rpc_applied(source, ingested ? target_h : -1, &block_hash);
     reducer_exit_batched_body_sync();
     reducer_drive_exit();
     zcl_mutex_unlock(&ctl->mutex);
 
     /* (4) Read back the verdict from the freshly-written log rows. */
-    if (reducer_read_back_verdict(ctl->ms, target_h, &block_hash, out))
-        return true;
+    if (reducer_read_back_verdict(ctl->ms, target_h, &block_hash, out)) {
+        if (applied) return true;
+        validation_state_invalid(out, false, REJECT_INVALID,
+                                 "block-not-finalized-by-reducer",
+                                 "private block lacks applied validation evidence");
+        return false;
+    }
 
     /* Pending fallback: accept ONLY the live active tip (ingested == tip,
      * snapshotted under the lock) — a fork can't borrow another block's row. */
-    if (ingested && ingested == tip &&
+    if (applied && ingested && ingested == tip &&
         reducer_pending_body_is_accepted(ctl->ms, ingested, out))
         return true;
 

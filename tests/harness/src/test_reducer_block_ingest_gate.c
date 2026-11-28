@@ -51,6 +51,7 @@
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "services/chain_activation_service.h"
+#include "services/reducer_ingest_service.h"
 #include "services/node_db_catchup_service.h"
 #include "services/block_index_loader.h"
 #include "services/header_admit_inbox.h"
@@ -1040,6 +1041,19 @@ int test_reducer_block_ingest_gate(void)
     RBI_CHECK("utxo_apply recorded no spend-unknown",
               utxo_apply_stage_spend_unknown_total() == 0);
     bool applied2 = utxo_apply_stage_succeeded_at(2);
+    struct uint256 wrong_hash = hash1;
+    wrong_hash.data[0] ^= 1;
+    RBI_CHECK("ordinary on-demand retains existing path",
+              reducer_private_rpc_applied_for_testing(REDUCER_SRC_MINED, 999, &wrong_hash));
+    RBI_CHECK("select private profile for synchronous evidence checks",
+              chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    RBI_CHECK("private submit requires exact applied evidence",
+              reducer_private_rpc_applied_for_testing(REDUCER_SRC_SUBMIT, 1, &hash1) &&
+              !reducer_private_rpc_applied_for_testing(REDUCER_SRC_SUBMIT, 1, &wrong_hash) &&
+              !reducer_private_rpc_applied_for_testing(REDUCER_SRC_MINED, 999, &hash1));
+    RBI_CHECK("private P2P retains existing path",
+              reducer_private_rpc_applied_for_testing(REDUCER_SRC_P2P, 999, &wrong_hash));
+    chain_params_select(CHAIN_REGTEST);
 
     /* ── (5) Assert the post-ingest state: finality + UTXO commitment ──── */
     failures += rbi_assert_block1_finalized_and_utxo_committed(
