@@ -2,6 +2,8 @@
 #include "controllers/transaction_v6_inspect.h"
 #include "controllers/transaction_v6_digest.h"
 #include "controllers/transaction_v6_rpc.h"
+#include "services/ironwood_instance.h"
+#include "base/hex.h"
 #include "encoding/utilstrencodings.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -234,6 +236,65 @@ static bool check_statement_invalid_calls(const struct v6_wire_view *v,
         !v6_ironwood_statement(v, 0, NULL, V6_IRONWOOD_STATEMENT_SIZE);
 }
 
+static bool check_funded_view(const uint8_t *s, const struct ironwood_instance_rows *expected)
+{
+    uint8_t action[820] = {0}, signature[64] = {0}, flags = 7;
+    memcpy(action, s + 32, 128);
+    struct v6_wire_view v = {0};
+    v.ironwood.count = 1;
+    v.ironwood.actions = (struct v6_span){action, sizeof action};
+    v.ironwood.signatures = (struct v6_span){signature, sizeof signature};
+    v.ironwood.anchor = (struct v6_span){s, 32};
+    v.ironwood.flags = (struct v6_span){&flags, 1};
+    struct ironwood_instance_rows actual;
+    return ironwood_instance_project(&v, 0, &actual) &&
+        !memcmp(&actual, expected, sizeof actual) &&
+        !ironwood_instance_project(&v, 1, &actual);
+}
+
+/* Funded reopened spend, Orchard 0.16.0 PostNu6_3 to_halo2_instance;
+ * R1 ironwood-vk-repro.RZfQAkV6/rows-run2.log, action zero. */
+static bool check_funded_instance(void)
+{
+    static const char statement[] =
+        "c54832e4998cf9088b77703c858865e752241c1c0115909caeeffaf1396e370e"
+        "59c10b7aa34e715e59c4d1642054c53ac61e1ac7aa8f5b650eb55b4b68d4553f"
+        "20aa0b094b3bef6b52674892a038108ac022b7eba02ced6f5cb8345e7251600e"
+        "99811e9ee44526e3f9713a61599610de79b5cc99459e2e47d523edf7c34a9634"
+        "5f6284a9465b1fd2c73495aee25b437da7781fc31de6e01a06e25d936345eb09"
+        "010100";
+    static const char *rows[] = {
+        "c54832e4998cf9088b77703c858865e752241c1c0115909caeeffaf1396e370e",
+        "59c10b7aa34e715e59c4d1642054c53ac61e1ac7aa8f5b650eb55b4b68d4553f",
+        "2a8274cdc97168a895f47a2a7db6895f57cef5585448d4f65cbf0e000507a72e",
+        "20aa0b094b3bef6b52674892a038108ac022b7eba02ced6f5cb8345e7251600e",
+        "99811e9ee44526e3f9713a61599610de79b5cc99459e2e47d523edf7c34a9634",
+        "90a87f1f6fb70e5bf4f1fa8ab6c58a218d9a7f644b8f9740408c42ae29843512",
+        "5f6284a9465b1fd2c73495aee25b437da7781fc31de6e01a06e25d936345eb09",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    };
+    uint8_t s[V6_IRONWOOD_STATEMENT_SIZE], expected[32];
+    struct ironwood_instance_rows got;
+    if (!zcl_hex_decode(statement, s, sizeof s) ||
+        !ironwood_instance_from_statement(s, sizeof s, &got)) return false;
+    for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
+        if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
+    return check_funded_view(s, &got);
+}
+
+static bool check_instance_refusals(void)
+{
+    uint8_t s[V6_IRONWOOD_STATEMENT_SIZE] = {0};
+    struct ironwood_instance_rows out, before;
+    memset(&out, 0xa5, sizeof out); memcpy(&before, &out, sizeof out);
+    if (ironwood_instance_from_statement(s, sizeof s, &out) ||
+        ironwood_instance_from_statement(s, sizeof s - 1, &out) ||
+        ironwood_instance_project(NULL, 0, &out)) return false; /* identity rk */
+    return !memcmp(&out, &before, sizeof out);
+}
+
 static bool check_statement_views(void)
 {
     uint8_t wire[sizeof ironwood_anchor_a], out[V6_IRONWOOD_STATEMENT_SIZE];
@@ -388,6 +449,8 @@ int test_transaction_v6_inspect(void)
     int failures = check_v6_rpc_cases();
     if (!check_action_views()) ++failures;
     if (!check_statement_views()) ++failures;
+    if (!check_funded_instance()) ++failures;
+    if (!check_instance_refusals()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
     if (!check_single_cursor()) ++failures;
