@@ -38,6 +38,7 @@ extern _Atomic uint64_t g_ua_shielded_double_spend_total;
 extern _Atomic uint64_t g_ua_shielded_anchor_reject_total;
 extern _Atomic uint64_t g_ua_turnstile_sprout_total;
 extern _Atomic uint64_t g_ua_turnstile_sapling_total;
+extern _Atomic uint64_t g_ua_turnstile_ironwood_total;
 extern _Atomic uint64_t g_ua_upstream_failed_total;
 extern _Atomic uint64_t g_ua_internal_error_total;
 extern _Atomic uint64_t g_ua_reorg_unwound_total;

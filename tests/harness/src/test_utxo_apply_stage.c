@@ -9,6 +9,7 @@
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "platform/time_compat.h"
 #include "controllers/agent_security_posture.h"
 #include "core/uint256.h"
@@ -33,6 +34,7 @@
 #include "storage/disk_block_io.h"
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/projection_store.h"
 #include "storage/seal_kv.h"
 #include "util/blocker.h"
@@ -2743,6 +2745,88 @@ static int uv_nf_ironwood_rewind_cases(void)
     return failures;
 }
 
+static bool uv_pool_total(sqlite3 *db, int64_t height, int64_t expected)
+{
+    int64_t total = 0;
+    bool known = false, found = false;
+    return shielded_pool_kv_get_ironwood(db, height, &total, &known, &found) &&
+        found && known && total == expected;
+}
+
+static bool uv_pool_absent(sqlite3 *db, int64_t height)
+{
+    int64_t total = 0;
+    bool known = false, found = false;
+    return shielded_pool_kv_get_ironwood(db, height, &total, &known, &found) &&
+        !found;
+}
+
+static int uv_ironwood_pool_rewind_cases(void)
+{
+    int failures = 0;
+    UV_CHECK("ironwood pool: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    UV_CHECK("ironwood pool: setup",
+             uv_setup("iw_pool_rewind", 3, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    sc.bodies[0].vtx[0].ironwood_value_balance = -100;
+    sc.bodies[1].vtx[0].ironwood_value_balance = -50;
+    sc.bodies[2].vtx[0].ironwood_value_balance = 25;
+    UV_CHECK("ironwood pool: apply three blocks",
+             utxo_apply_stage_drain(100) == 3);
+    sqlite3 *db = progress_store_db();
+    UV_CHECK("ironwood pool: durable totals at every height",
+             uv_pool_total(db, 0, 100) && uv_pool_total(db, 1, 150) &&
+             uv_pool_total(db, 2, 125));
+    utxo_apply_stage_shutdown();
+    UV_CHECK("ironwood pool: restart preserves exact total",
+             utxo_apply_stage_init(&ms) && uv_pool_total(db, 2, 125));
+    utxo_apply_stage_set_reader(fake_reader, &sc);
+    bool rewound =
+        exec_sql(db, "BEGIN IMMEDIATE") &&
+        utxo_apply_emit_inverse_delta(db, 2) &&
+        utxo_apply_emit_inverse_delta(db, 1) &&
+        utxo_apply_delete_rows_above(db, 1, 2) &&
+        utxo_apply_unwind_write_cursor(db, 1) &&
+        coins_kv_set_applied_height_in_tx(db, 1) &&
+        exec_sql(db, "COMMIT");
+    UV_CHECK("ironwood pool: rewind transaction commits", rewound);
+    UV_CHECK("ironwood pool: abandoned total removed and fork total retained",
+             uv_pool_absent(db, 2) && uv_pool_total(db, 0, 100));
+    UV_CHECK("ironwood pool: reconnect restores exact totals",
+             utxo_apply_stage_drain(100) == 2 &&
+             uv_pool_total(db, 1, 150) && uv_pool_total(db, 2, 125));
+    uv_teardown(dir, &ms, &sc);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
+static int uv_ironwood_reject_status_cases(void)
+{
+    int failures = 0;
+    UV_CHECK("ironwood reject status: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    UV_CHECK("ironwood reject status: setup",
+             uv_setup("iw_reject_status", 2, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc) == 0);
+    sc.bodies[0].vtx[0].ironwood_value_balance = 1;
+    atomic_store(&g_enforce_turnstile, true);
+    UV_CHECK("ironwood reject status: negative pool refused",
+             utxo_apply_stage_drain(100) == 0 &&
+             utxo_apply_stage_cursor() == 0);
+    UV_CHECK("ironwood reject status: classified counter, not internal_error",
+             uv_dump_has("\"turnstile_ironwood_reject_total\":1") &&
+             uv_dump_has("\"internal_error_total\":0"));
+    UV_CHECK("ironwood reject status: refused height has no committed row",
+             !utxo_apply_stage_succeeded_at(0));
+    atomic_store(&g_enforce_turnstile, false);
+    uv_teardown(dir, &ms, &sc);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
 static int uv_suffix_reconcile_cases(void)
 {
     int failures = 0;
@@ -4091,6 +4175,8 @@ int test_utxo_apply_stage(void)
     failures += uv_nf_ironwood_wrong_group_cases();
     failures += uv_nf_ironwood_non_overwintered_cases();
     failures += uv_nf_ironwood_rewind_cases();
+    failures += uv_ironwood_pool_rewind_cases();
+    failures += uv_ironwood_reject_status_cases();
 
     /* A past cursor-only repair could leave shielded kernel rows at future
      * heights. Restart must remove that suffix before the next block fold,

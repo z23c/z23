@@ -55,7 +55,7 @@ static int check_turnstile_deltas(void)
     tx[1].value_balance = 20;
     blk.vtx = tx; blk.num_vtx = 2;
     int64_t sprout = -1, sapling = -1;
-    connect_block_shielded_values(&blk, &sprout, &sapling);
+    connect_block_shielded_values(&blk, &sprout, &sapling, NULL);
     bool ok = sprout == 25 && sapling == -13;
     printf("consensus-parity: %s... %s\n",
            "turnstile deltas: sprout += old - new, sapling -= valueBalance", ok ? "OK" : "FAIL");
@@ -64,13 +64,13 @@ static int check_turnstile_deltas(void)
     memset(tx, 0, sizeof(tx));
     tx[0].value_balance = -100000000;
     blk.vtx = tx; blk.num_vtx = 1;
-    connect_block_shielded_values(&blk, &sprout, &sapling);
+    connect_block_shielded_values(&blk, &sprout, &sapling, NULL);
     ok = sprout == 0 && sapling == 100000000;
     printf("consensus-parity: %s... %s\n",
            "turnstile oracle 476977: valueBalance -1 ZCL grows Sapling by 1 ZCL", ok ? "OK" : "FAIL");
     failures += !ok;
 
-    connect_block_shielded_values(NULL, &sprout, &sapling);
+    connect_block_shielded_values(NULL, &sprout, &sapling, NULL);
     ok = sprout == 0 && sapling == 0;
     printf("consensus-parity: %s... %s\n", "turnstile deltas of no block are zero", ok ? "OK" : "FAIL");
     failures += !ok;

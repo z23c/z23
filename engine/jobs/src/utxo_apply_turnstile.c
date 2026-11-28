@@ -7,6 +7,7 @@
 #include "jobs/utxo_apply_turnstile.h"
 
 #include "jobs/utxo_apply_delta.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -51,6 +52,32 @@ const char *utxo_apply_turnstile_check(
     return reject;
 }
 
+static bool ts_i64_add(int64_t a, int64_t b, int64_t *out)
+{
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b))
+        return false;
+    *out = a + b;
+    return true;
+}
+
+const char *utxo_apply_turnstile_ironwood_check(
+    struct utxo_apply_turnstile_pool prev_ironwood,
+    int64_t block_ironwood,
+    struct utxo_apply_turnstile_pool *out_ironwood)
+{
+    struct utxo_apply_turnstile_pool next = { 0, false };
+    if (out_ironwood) *out_ironwood = next;
+    if (!prev_ironwood.known) return NULL;
+    int64_t total = 0;
+    if (!ts_i64_add(prev_ironwood.total, block_ironwood, &total))
+        return "bad-txns-ironwood-turnstile-violation";
+    if (out_ironwood) {
+        out_ironwood->total = total;
+        out_ironwood->known = true;
+    }
+    return total < 0 ? "bad-txns-ironwood-turnstile-violation" : NULL;
+}
+
 /* Totals the block would leave in each pool whether or not it is refused:
  * the chain's real running totals, which is what shadow mode records. */
 struct ts_totals {
@@ -80,10 +107,52 @@ static void ts_warn_once(int64_t next_h, const struct uint256 *hash,
 static void ts_refuse(struct delta_summary *summary, const char *reject)
 {
     bool sprout = strcmp(reject, "bad-txns-sprout-turnstile-violation") == 0;
+    bool ironwood = strcmp(reject, "bad-txns-ironwood-turnstile-violation") == 0;
     summary->ok = false;
-    summary->status = sprout ? "turnstile_sprout" : "turnstile_sapling";
+    summary->status = ironwood ? "turnstile_ironwood" :
+        sprout ? "turnstile_sprout" : "turnstile_sapling";
     summary->failure_kind = reject;
     memset(summary->failure_detail, 0, sizeof(summary->failure_detail));
+}
+
+static bool ts_ironwood_refuse(struct delta_summary *summary,
+                               struct utxo_apply_turnstile_pending *pending)
+{
+    pending->write = false;
+    pending->ironwood_known = false;
+    ts_refuse(summary, "bad-txns-ironwood-turnstile-violation");
+    return true;
+}
+
+static bool ts_ironwood_stage(sqlite3 *db, const struct block *blk,
+    int64_t next_h, struct delta_summary *summary,
+    struct utxo_apply_turnstile_pending *pending)
+{
+    struct utxo_apply_turnstile_pool prev = { 0, next_h == 0 };
+    bool found = next_h == 0;
+    if (next_h > 0 &&
+        !shielded_pool_kv_get_ironwood(db, next_h - 1, &prev.total,
+                                       &prev.known, &found)) return false;
+    if (!found || !prev.known)
+        return ts_ironwood_refuse(summary, pending);
+    int64_t block_value = 0;
+    if (!connect_block_shielded_values(blk, NULL, NULL, &block_value))
+        return ts_ironwood_refuse(summary, pending);
+    struct utxo_apply_turnstile_pool next;
+    const char *reject = utxo_apply_turnstile_ironwood_check(
+        prev, block_value, &next);
+    if (reject && !next.known)
+        return ts_ironwood_refuse(summary, pending);
+    if (reject && atomic_load(&g_enforce_turnstile))
+        return ts_ironwood_refuse(summary, pending);
+    if (reject) {
+        atomic_fetch_add(&g_ua_turnstile_would_reject_total, 1);
+        LOG_WARN("utxo_apply", "turnstile SHADOW Ironwood violation at height=%lld",
+                 (long long)next_h);
+    }
+    pending->ironwood = next.total;
+    pending->ironwood_known = next.known;
+    return true;
 }
 
 bool utxo_apply_turnstile_stage_check(
@@ -100,10 +169,12 @@ bool utxo_apply_turnstile_stage_check(
                               &parent.sapling, &parent_known))
         return false;
     if (!parent_known) {
+        if (chain_research_profile_current())
+            return ts_ironwood_refuse(summary, pending);
         atomic_fetch_add(&g_ua_turnstile_unknown_total, 1);
         return true;
     }
-    connect_block_shielded_values(blk, &blockv.sprout, &blockv.sapling);
+    connect_block_shielded_values(blk, &blockv.sprout, &blockv.sapling, NULL);
     struct utxo_apply_turnstile_pool ns, np;
     const char *reject = utxo_apply_turnstile_check(
         (struct utxo_apply_turnstile_pool){ parent.sprout, true },
@@ -122,5 +193,7 @@ bool utxo_apply_turnstile_stage_check(
     pending->write = true;
     pending->sprout = parent.sprout + blockv.sprout;
     pending->sapling = parent.sapling + blockv.sapling;
+    if (chain_research_profile_current() &&
+        !ts_ironwood_stage(db, blk, next_h, summary, pending)) return false;
     return true;
 }

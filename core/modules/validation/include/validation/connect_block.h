@@ -87,9 +87,13 @@ _Bool sapling_root_matches(const struct block *block,
  * vpub_old - vpub_new of each joinsplit, and Sapling moves by -valueBalance
  * (valueBalance is value LEAVING the Sapling pool). Oracle, height 476977:
  * a tx with valueBalance -1.00000000 takes the Sapling chainValue from 0 to
- * +1.00000000. `block` may be NULL (both deltas 0); either out may be NULL. */
-void connect_block_shielded_values(const struct block *block,
-                                   int64_t *sprout, int64_t *sapling);
+ * +1.00000000. Ironwood independently moves by -ironwood_value_balance.
+ * `block` may be NULL (all deltas 0); any out may be NULL. Ironwood is
+ * computed only when its out pointer is non-NULL. Returns false only when
+ * the requested Ironwood delta overflows int64_t; callers must check it. */
+bool connect_block_shielded_values(const struct block *block,
+                                   int64_t *sprout, int64_t *sapling,
+                                   int64_t *ironwood);
 
 /* Connect `block` at `pindex` against `view`, applying its inputs/outputs.
  * just_check — when true, run full validation (all script/proof/conservation

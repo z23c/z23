@@ -31,6 +31,17 @@ bool shielded_pool_kv_get(struct sqlite3 *db, int64_t height,
 bool shielded_pool_kv_put(struct sqlite3 *db, int64_t height,
                           int64_t sprout, int64_t sapling);
 
+/* Ironwood is a separate nullable total. A present row with a NULL total is
+ * explicitly unknown, never zero or a Sapling value. */
+bool shielded_pool_kv_get_ironwood(struct sqlite3 *db, int64_t height,
+                                   int64_t *total_out, bool *known_out,
+                                   bool *found_out);
+
+/* Set the Ironwood total on an existing row, preserving its other pools.
+ * Reusing the same value is accepted; a different known value conflicts. */
+bool shielded_pool_kv_put_ironwood(struct sqlite3 *db, int64_t height,
+                                   int64_t total);
+
 /* Highest stored height; *found_out false (and *height_out -1) when empty. */
 bool shielded_pool_kv_max_height(struct sqlite3 *db, int64_t *height_out,
                                  bool *found_out);

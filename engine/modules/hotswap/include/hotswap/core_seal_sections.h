@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "99b375702bd0a6118711e8b4abb01fd40f09b8d741fbb0d1359730f0aca37348"
+    "dc9b53b14d3e4cc1e9e5933f1bdbf77c949186dfa0380977deb1318b7ae24ec4"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "f59bd71a45e405593f4b1d3ef233017c2ba07fb9a4a1a6c029d413802b5ddbef") \
+        "890ca914120b7015e61787cab699be4e3e5168713410a57eafaba7747116e108") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "ab1d35a842f07c9eb8cf49193a10ada2094fa6ecabc92468c6673ed4d5498071") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \
@@ -73,7 +73,7 @@
     ZCL_HOTSWAP_SECTION_ROW("core/math/src", \
         "489136c5ceec46980deb06e9a9437c79b691a13606b3fcab9d6130508dad43a8") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules", \
-        "6b973b2353e034d94df813af0d9171a2a11621175e9748ca0d0c876441bb5991") \
+        "9c5e416f231591c3a473ec434a2fe4356bb01908b0f350f0e1521a2e19364f25") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom", \
         "20fc50fc216a21b99b3704761fd36818bad04788f7fc18fc2f774277ab273515") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom/include", \
@@ -189,13 +189,13 @@
     ZCL_HOTSWAP_SECTION_ROW("core/modules/sync/src", \
         "8ed9847d2112c410cdcb5d83dc9eb68b344490493904928bb50ac72b636056b2") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/validation", \
-        "ad59314df8c88561c7ee90c1a0120516934b4be3c209aa0239fa129d1cacf626") \
+        "a700c36eabe0bb6573aee5227ad756c0f631f90bb996649fd6df42a6014176fd") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/validation/include", \
-        "300978e78150c96b109fdebf634c0ae804805cf0ed75e0992e4510ba1760cfd3") \
+        "6277388447c055465b90bf6d7bb597a46b74c3bf806c381c737f74426276b3b0") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/validation/include/validation", \
-        "fe64bf655acf8da294511118d685fd89d36bee61a92c57e473ddf4054f8aad00") \
+        "86cde1d7274f7ce7be574cc5344a44d550941a9c931edd35540e3fa93acbbd2b") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/validation/src", \
-        "ecd6cfc5d23fc7d11a14d77f669ef919277aafb0eb718d222dc2efc36c3b382d") \
+        "77273488fa93ca0c7018f1d29b1a5ab9daefc99015a39c8aa6ce03e3ec4a9357") \
     ZCL_HOTSWAP_SECTION_ROW("core/params", \
         "9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0") \
     ZCL_HOTSWAP_SECTION_ROW("core/params/include", \

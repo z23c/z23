@@ -9,6 +9,7 @@
 #include "test/test_core.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_turnstile.h"
@@ -38,6 +39,7 @@ struct sd_fx {
     struct uint256 *hash;
     int64_t *sprout;    /* per-height block values (the body decides) */
     int64_t *sapling;
+    int64_t *ironwood;
     int n;
     int fail_h;         /* reader refuses this height, -1 none */
 };
@@ -57,6 +59,7 @@ static bool sd_reader(struct block *out, const struct block_index *bi,
     out->num_vtx = 1;
     out->vtx = zcl_calloc(1, sizeof(struct transaction), "sd_tx");
     out->vtx[0].value_balance = -fx->sapling[h]; /* pool delta = -valueBalance */
+    out->vtx[0].ironwood_value_balance = fx->ironwood[h];
     if (fx->sprout[h] != 0) {
         out->vtx[0].num_joinsplit = 1;
         out->vtx[0].v_joinsplit =
@@ -84,6 +87,7 @@ static bool sd_open(struct sd_fx *fx, int n, int64_t cursor)
     fx->hash = zcl_calloc((size_t)n, sizeof(struct uint256), "sd_hash");
     fx->sprout = zcl_calloc((size_t)n, sizeof(int64_t), "sd_sp");
     fx->sapling = zcl_calloc((size_t)n, sizeof(int64_t), "sd_sa");
+    fx->ironwood = zcl_calloc((size_t)n, sizeof(int64_t), "sd_iw");
     main_state_init(&fx->ms);
     /* Keep the zeroed IBD tip age and no-checkpoint flag. */
     fx->ms.nMaxTipAge = 0;
@@ -125,6 +129,7 @@ static void sd_close(struct sd_fx *fx)
     free(fx->hash);
     free(fx->sprout);
     free(fx->sapling);
+    free(fx->ironwood);
 }
 
 static bool sd_run(struct sd_fx *fx)
@@ -645,11 +650,31 @@ static int test_seed_mutant_gaps(void)
            test_seed_reset_clears_everything();
 }
 
+static int test_seed_ironwood(void)
+{
+    int failures = 0;
+    SD_CHECK("ironwood seed: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    struct sd_fx fx;
+    SD_CHECK("ironwood seed: fixture", sd_open(&fx, 10, 10));
+    for (int i = 0; i < 10; ++i) fx.ironwood[i] = -i;
+    while (sd_run(&fx)) {}
+    int64_t total = 0;
+    bool known = false, found = false;
+    SD_CHECK("ironwood seed: rows carry an independent known total",
+             shielded_pool_kv_get_ironwood(fx.db, 9, &total, &known, &found) &&
+             found && known && total == 45);
+    sd_close(&fx);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
 int test_utxo_apply_turnstile_seed(void)
 {
     return test_seed_genesis_without_body() +
            test_seed_empty_table() + test_seed_bounded_slice() +
            test_seed_missing_body() + test_seed_ignores_cached_values() +
            test_seed_discards_stale_slice() + test_seed_handoff() +
-           test_seed_negative_total() + test_seed_mutant_gaps();
+           test_seed_negative_total() + test_seed_ironwood() +
+           test_seed_mutant_gaps();
 }

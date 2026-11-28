@@ -124,6 +124,7 @@ _Atomic uint64_t g_ua_shielded_double_spend_total = 0;
 _Atomic uint64_t g_ua_shielded_anchor_reject_total = 0;
 _Atomic uint64_t g_ua_turnstile_sprout_total = 0;
 _Atomic uint64_t g_ua_turnstile_sapling_total = 0;
+_Atomic uint64_t g_ua_turnstile_ironwood_total = 0;
 _Atomic uint64_t g_ua_upstream_failed_total = 0;
 _Atomic uint64_t g_ua_internal_error_total = 0;
 _Atomic uint64_t g_ua_reorg_unwound_total = 0;
@@ -352,6 +353,12 @@ static bool ua_persist_delta_and_pool(
                                    "shielded_pool_kv put store failure");
         return false;
     }
+    if (pending->ironwood_known &&
+        !shielded_pool_kv_put_ironwood(db, next_h, pending->ironwood)) {
+        ua_fatal_permanent_blocker(next_h,
+                                   "shielded_pool_kv Ironwood put store failure");
+        return false;
+    }
     return true;
 }
 
@@ -383,6 +390,8 @@ static void ua_reject_note(int next_h, const char *status)
           "bad-txns-sprout-turnstile-violation" },
         { "turnstile_sapling", &g_ua_turnstile_sapling_total,
           "bad-txns-sapling-turnstile-violation" },
+        { "turnstile_ironwood", &g_ua_turnstile_ironwood_total,
+          "bad-txns-ironwood-turnstile-violation" },
     };
     _Atomic uint64_t *counter = &g_ua_internal_error_total;
     const char *label = "internal_error";
@@ -1201,6 +1210,7 @@ void utxo_apply_stage_shutdown(void)
     atomic_store(&g_ua_shielded_anchor_reject_total, (uint64_t)0);
     atomic_store(&g_ua_turnstile_sprout_total, (uint64_t)0);
     atomic_store(&g_ua_turnstile_sapling_total, (uint64_t)0);
+    atomic_store(&g_ua_turnstile_ironwood_total, (uint64_t)0);
     atomic_store(&g_ua_turnstile_would_reject_total, (uint64_t)0);
     atomic_store(&g_ua_turnstile_unknown_total, (uint64_t)0);
     atomic_store(&g_ua_upstream_failed_total, (uint64_t)0);

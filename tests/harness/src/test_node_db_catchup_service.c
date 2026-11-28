@@ -2300,7 +2300,7 @@ static int ndc_check_shielded_values(int64_t balance, const char *label)
     index.nStatus = BLOCK_HAVE_DATA;
     index.phashBlock = &hash;
     int64_t expected_sprout = 0, expected_sapling = 0;
-    connect_block_shielded_values(&blk, &expected_sprout, &expected_sapling);
+    connect_block_shielded_values(&blk, &expected_sprout, &expected_sapling, NULL);
     uint8_t direct_receipt[32] = {0}, saved_receipt[32] = {0};
     int64_t explorer_sprout = 0, explorer_sapling = 0;
     bool saved = node_db_catchup_test_sync_block_lean(&ndb, &blk, &index);

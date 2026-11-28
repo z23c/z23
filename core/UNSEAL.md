@@ -1358,3 +1358,7 @@ later lane flips it HARD.
 - 2026-11-28T09:01:30Z — REASON: testnet-only Ironwood value-balance decoding and conservation accounting
   old ROOT: 67bb1b6329ef3cc1ad5aec223be0556099e8ccb5a6cc0995a436467d31c7ae83
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T09:58:49Z — REASON: testnet-only Ironwood pool-total conservation and reorg-safe storage
+  old ROOT: ab9c424fe936630ceff36594c7b45843f56aa196a59d5d0a4933c435322396b8
+  by: owner unseal ritual (make core-unseal)

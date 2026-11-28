@@ -412,7 +412,7 @@ static const char *node_db_sync_index_block_rows(
 
     /* Per-block shielded value, the same sum core connect_block uses */
     connect_block_shielded_values(blk, &db_blk.sprout_value,
-                                  &db_blk.sapling_value);
+                                  &db_blk.sapling_value, NULL);
 
     if (!db_block_save_canonical(ndb, &db_blk)) {
         return "db_block_save_canonical";

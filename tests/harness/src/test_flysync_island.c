@@ -1584,7 +1584,7 @@ static bool fsi_recovery_genesis(sqlite3 *db)
         return false;
     const char *sql =
         "INSERT OR REPLACE INTO utxo_apply_log(height,status,ok,spent_count,added_count,total_value_delta,applied_at) VALUES(0,'anchor',1,0,0,0,0);"
-        "INSERT OR REPLACE INTO shielded_pool_totals VALUES(0,0,0);"
+        "INSERT OR REPLACE INTO shielded_pool_totals(height,sprout,sapling) VALUES(0,0,0);"
         "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('tip_finalize',0,0),('utxo_apply',1,0);";
     if (sqlite3_exec(db, sql, NULL, NULL, NULL) != SQLITE_OK) return false;
     return fsi_recovery_anchor(db);

@@ -44,12 +44,22 @@ const char *utxo_apply_turnstile_check(
     struct utxo_apply_turnstile_pool *out_sprout,
     struct utxo_apply_turnstile_pool *out_sapling);
 
+/* Ironwood is independent of Sprout/Sapling. A known parent is required for
+ * an accepted total. Signed overflow and negative totals return
+ * "bad-txns-ironwood-turnstile-violation"; overflow leaves out->known false. */
+const char *utxo_apply_turnstile_ironwood_check(
+    struct utxo_apply_turnstile_pool prev_ironwood,
+    int64_t block_ironwood,
+    struct utxo_apply_turnstile_pool *out_ironwood);
+
 /* What the stage must persist when the block applies: the totals AFTER this
  * block, written only on the success path inside the stage txn. */
 struct utxo_apply_turnstile_pending {
     bool write;
     int64_t sprout;
     int64_t sapling;
+    int64_t ironwood;
+    bool ironwood_known;
 };
 
 /* Shadow/enforce observability (read by the utxo_apply status dump). */

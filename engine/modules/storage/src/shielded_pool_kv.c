@@ -10,8 +10,28 @@
 
 #include <sqlite3.h>
 #include <stdint.h>
+#include <string.h>
 
 #define SP_SUBSYS "shielded_pool_kv"
+
+static bool pool_ironwood_column_exists(sqlite3 *db, bool *exists)
+{
+    *exists = false;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(shielded_pool_totals)",
+                           -1, &s, NULL) != SQLITE_OK)
+        LOG_FAIL(SP_SUBSYS, "table_info prepare failed: %s", sqlite3_errmsg(db));
+    int rc;
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+        const unsigned char *name = sqlite3_column_text(s, 1);
+        if (name && strcmp((const char *)name, "ironwood") == 0)
+            *exists = true;
+    }
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE)
+        LOG_FAIL(SP_SUBSYS, "table_info step rc=%d", rc);
+    return true;
+}
 
 bool shielded_pool_kv_ensure_schema(sqlite3 *db)
 {
@@ -22,10 +42,21 @@ bool shielded_pool_kv_ensure_schema(sqlite3 *db)
         "CREATE TABLE IF NOT EXISTS shielded_pool_totals ("
         "  height INTEGER PRIMARY KEY,"
         "  sprout INTEGER NOT NULL,"
-        "  sapling INTEGER NOT NULL"
+        "  sapling INTEGER NOT NULL,"
+        "  ironwood INTEGER"
         ")", NULL, NULL, &err);
     if (rc != SQLITE_OK) {
         LOG_WARN(SP_SUBSYS, "ensure_schema failed: %s",
+                 err ? err : sqlite3_errmsg(db));
+        sqlite3_free(err);
+        return false;
+    }
+    bool exists = false;
+    if (!pool_ironwood_column_exists(db, &exists)) return false;
+    if (!exists && sqlite3_exec(db,
+            "ALTER TABLE shielded_pool_totals ADD COLUMN ironwood INTEGER",
+            NULL, NULL, &err) != SQLITE_OK) {
+        LOG_WARN(SP_SUBSYS, "ensure_schema Ironwood migration failed: %s",
                  err ? err : sqlite3_errmsg(db));
         sqlite3_free(err);
         return false;
@@ -96,6 +127,72 @@ bool shielded_pool_kv_put(sqlite3 *db, int64_t height, int64_t sprout,
                  (long long)height, (long long)old_sprout,
                  (long long)old_sapling, (long long)sprout,
                  (long long)sapling);
+    return true;
+}
+
+bool shielded_pool_kv_get_ironwood(sqlite3 *db, int64_t height,
+                                   int64_t *total_out, bool *known_out,
+                                   bool *found_out)
+{
+    if (total_out) *total_out = 0;
+    if (known_out) *known_out = false;
+    if (found_out) *found_out = false;
+    if (!db || height < 0 || !total_out || !known_out || !found_out)
+        LOG_FAIL(SP_SUBSYS, "get_ironwood: invalid args height=%lld",
+                 (long long)height);
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT ironwood FROM shielded_pool_totals WHERE height=?",
+            -1, &s, NULL) != SQLITE_OK)
+        LOG_FAIL(SP_SUBSYS, "get_ironwood prepare failed: %s", sqlite3_errmsg(db));
+    sqlite3_bind_int64(s, 1, (sqlite3_int64)height);
+    int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
+    if (rc == SQLITE_ROW) {
+        int type = sqlite3_column_type(s, 0);
+        if (type == SQLITE_NULL) {
+            *found_out = true;
+        } else if (type == SQLITE_INTEGER) {
+            *total_out = sqlite3_column_int64(s, 0);
+            *known_out = true;
+            *found_out = true;
+        }
+    }
+    sqlite3_finalize(s);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        LOG_FAIL(SP_SUBSYS, "get_ironwood step rc=%d height=%lld", rc,
+                 (long long)height);
+    return true;
+}
+
+bool shielded_pool_kv_put_ironwood(sqlite3 *db, int64_t height, int64_t total)
+{
+    int64_t old_total = 0;
+    bool known = false, found = false;
+    if (!shielded_pool_kv_get_ironwood(db, height, &old_total, &known, &found))
+        return false;
+    if (!found)
+        LOG_FAIL(SP_SUBSYS, "put_ironwood: missing parent row height=%lld",
+                 (long long)height);
+    if (known && old_total != total)
+        LOG_FAIL(SP_SUBSYS,
+                 "put_ironwood conflict height=%lld stored=%lld new=%lld",
+                 (long long)height, (long long)old_total, (long long)total);
+    if (known) return true;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE shielded_pool_totals SET ironwood=? WHERE height=?",
+            -1, &s, NULL) != SQLITE_OK)
+        LOG_FAIL(SP_SUBSYS, "put_ironwood prepare failed: %s", sqlite3_errmsg(db));
+    sqlite3_bind_int64(s, 1, (sqlite3_int64)total);
+    sqlite3_bind_int64(s, 2, (sqlite3_int64)height);
+    int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(s);
+    if (rc != SQLITE_DONE)
+        LOG_FAIL(SP_SUBSYS, "put_ironwood step rc=%d height=%lld: %s", rc,
+                 (long long)height, sqlite3_errmsg(db));
+    if (sqlite3_changes(db) != 1)
+        LOG_FAIL(SP_SUBSYS, "put_ironwood affected row count is not one: height=%lld",
+                 (long long)height);
     return true;
 }
 

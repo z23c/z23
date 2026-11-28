@@ -590,7 +590,7 @@ static int ckrs_pool_pinned(sqlite3 *db)
     CKRS_CHECK("missing pool is distinct from zero",
         ckrs_pool_expect(snap, 10, false, 0, 0));
     CKRS_CHECK("writer inserts known zero after pin",
-        ckrs_exec(db, "INSERT INTO shielded_pool_totals VALUES(10,0,0)"));
+        ckrs_exec(db, "INSERT INTO shielded_pool_totals(height,sprout,sapling) VALUES(10,0,0)"));
     CKRS_CHECK("pinned snapshot still sees missing pool",
         ckrs_pool_expect(snap, 10, false, 0, 0));
     if (snap) coins_kv_read_snapshot_abort(snap);
@@ -661,7 +661,7 @@ static int ckrs_pool_transaction_rows(sqlite3 *db)
         coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
         !found && a == 0 && b == 0);
     CKRS_CHECK("transaction reader malformed fixture",
-        ckrs_exec(db, "INSERT INTO shielded_pool_totals VALUES(10,'bad',0)") &&
+        ckrs_exec(db, "INSERT INTO shielded_pool_totals(height,sprout,sapling) VALUES(10,'bad',0)") &&
         !coins_kv_read_transaction_shielded_pool(db, 10, &a, &b, &found) &&
         !found && a == 0 && b == 0);
     CKRS_CHECK("transaction reader closes", ckrs_exec(db, "ROLLBACK"));

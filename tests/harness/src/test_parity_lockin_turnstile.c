@@ -11,6 +11,7 @@
 #include "test/parity_lockin_turnstile_stage.h"
 #include "test/shielded_pool_reset_pairing.h"
 
+#include "chain/chainparams.h"
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_turnstile.h"
 #include "primitives/block.h"
@@ -72,11 +73,14 @@ static int test_block_values(void)
     blk.vtx[0].v_joinsplit[1].vpub_new = 50;
     blk.vtx[0].value_balance = -7;
     blk.vtx[1].value_balance = 20;
+    blk.vtx[0].ironwood_value_balance = -5;
+    blk.vtx[1].ironwood_value_balance = -2;
 
-    int64_t s = -1, p = -1;
-    connect_block_shielded_values(&blk, &s, &p);
+    int64_t s = -1, p = -1, i = -1;
+    TS_CHECK("block sums compute without overflow",
+             connect_block_shielded_values(&blk, &s, &p, &i));
     TS_CHECK("block sums: sprout += old - new, sapling -= value_balance",
-             s == 25 && p == -13);
+             s == 25 && p == -13 && i == 7);
 
     free(blk.vtx[0].v_joinsplit);
     free(blk.vtx);
@@ -89,7 +93,7 @@ static int test_block_values(void)
     blk.num_vtx = 1;
     blk.vtx = zcl_calloc(1, sizeof(struct transaction), "ts_vtx_476977");
     blk.vtx[0].value_balance = -100000000;
-    connect_block_shielded_values(&blk, &s, &p);
+    connect_block_shielded_values(&blk, &s, &p, NULL);
     TS_CHECK("oracle 476977: valueBalance -1 ZCL grows the Sapling pool by 1 ZCL",
              s == 0 && p == 100000000);
     free(blk.vtx);
@@ -102,9 +106,16 @@ static int test_block_values(void)
                  op.known && op.total == 100000000);
     }
     memset(&blk, 0, sizeof(blk));
-    connect_block_shielded_values(&blk, &s, &p);
+    connect_block_shielded_values(&blk, &s, &p, NULL);
     TS_CHECK("empty block sums to zero", s == 0 && p == 0);
     return failures;
+}
+
+static const char *run_ironwood(struct utxo_apply_turnstile_pool prev,
+                                int64_t block,
+                                struct utxo_apply_turnstile_pool *out)
+{
+    return utxo_apply_turnstile_ironwood_check(prev, block, out);
 }
 
 static int test_check(void)
@@ -140,6 +151,34 @@ static int test_check(void)
     return failures;
 }
 
+static int test_ironwood_check(void)
+{
+    int failures = 0;
+    struct utxo_apply_turnstile_pool os;
+    TS_CHECK("ironwood positive and negative movements are independent",
+             run_ironwood(known(100), -20, &os) == NULL && os.total == 80 &&
+             run_ironwood(known(80), 25, &os) == NULL && os.total == 105);
+    TS_CHECK("ironwood negative total is refused",
+             run_ironwood(known(0), -1, &os) != NULL);
+    TS_CHECK("ironwood cumulative overflow is refused without a total",
+             run_ironwood(known(INT64_MAX), 1, &os) != NULL && !os.known);
+    TS_CHECK("ironwood cumulative underflow is refused without a total",
+             run_ironwood(known(INT64_MIN), -1, &os) != NULL && !os.known);
+    TS_CHECK("ironwood pure unknown parent remains unknown",
+             run_ironwood(unknown(), 100, &os) == NULL && !os.known);
+    TS_CHECK("ironwood block delta underflow is refused",
+             !connect_block_shielded_values(&(struct block){
+                 .num_vtx = 1,
+                 .vtx = &(struct transaction){ .ironwood_value_balance = INT64_MIN }
+             }, NULL, NULL, &os.total));
+    TS_CHECK("ironwood NULL output skips overflow and preserves legacy callers",
+             connect_block_shielded_values(&(struct block){
+                 .num_vtx = 1,
+                 .vtx = &(struct transaction){ .ironwood_value_balance = INT64_MIN }
+             }, NULL, NULL, NULL));
+    return failures;
+}
+
 
 static bool kv_pair(sqlite3 *db, int64_t h, int64_t sp, int64_t sa)
 {
@@ -154,6 +193,17 @@ static bool kv_absent(sqlite3 *db, int64_t h)
     int64_t a = 0, b = 0;
     bool found = true;
     return shielded_pool_kv_get(db, h, &a, &b, &found) && !found;
+}
+
+static bool kv_ironwood_pair(sqlite3 *db, int64_t h, int64_t total,
+                             bool known, bool found)
+{
+    int64_t actual = 0;
+    bool actual_known = false, actual_found = false;
+    return shielded_pool_kv_get_ironwood(db, h, &actual, &actual_known,
+                                         &actual_found) &&
+        actual_found == found && actual_known == known &&
+        (!known || actual == total);
 }
 
 static int test_pool_kv_rows(sqlite3 *db);
@@ -205,6 +255,75 @@ static int test_pool_kv_rows(sqlite3 *db)
 }
 
 
+static int test_pool_ironwood_migration(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood migration: open legacy schema",
+             sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             sqlite3_exec(db,
+                 "CREATE TABLE shielded_pool_totals("
+                 "height INTEGER PRIMARY KEY,sprout INTEGER NOT NULL,"
+                 "sapling INTEGER NOT NULL)", NULL, NULL, NULL) == SQLITE_OK &&
+             sqlite3_exec(db,
+                 "INSERT INTO shielded_pool_totals VALUES(0,1,2)",
+                 NULL, NULL, NULL) == SQLITE_OK);
+    TS_CHECK("ironwood migration: additive schema is idempotent",
+             shielded_pool_kv_ensure_schema(db) &&
+             shielded_pool_kv_ensure_schema(db));
+    TS_CHECK("ironwood migration: legacy row is present but total unknown",
+             kv_ironwood_pair(db, 0, 0, false, true));
+    TS_CHECK("ironwood migration: first known put succeeds",
+             shielded_pool_kv_put_ironwood(db, 0, -42) &&
+             kv_ironwood_pair(db, 0, -42, true, true));
+    TS_CHECK("ironwood migration: same-value re-put accepted",
+             shielded_pool_kv_put_ironwood(db, 0, -42));
+    TS_CHECK("ironwood migration: conflicting known value refused",
+             !shielded_pool_kv_put_ironwood(db, 0, 7) &&
+             kv_ironwood_pair(db, 0, -42, true, true));
+    TS_CHECK("ironwood migration: missing row refused",
+             !shielded_pool_kv_put_ironwood(db, 99, 1) &&
+             kv_ironwood_pair(db, 99, 0, false, false));
+    sqlite3_close(db);
+    return failures;
+}
+
+static int test_pool_ironwood_types_and_rows(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
+    TS_CHECK("ironwood storage: seed rows",
+             shielded_pool_kv_put(db, 0, 0, 0) &&
+             shielded_pool_kv_put(db, 1, 0, 0) &&
+             shielded_pool_kv_put(db, 2, 0, 0));
+    TS_CHECK("ironwood storage: TEXT is not a known total",
+             sqlite3_exec(db, "UPDATE shielded_pool_totals SET ironwood='not-a-number' WHERE height=0",
+                          NULL, NULL, NULL) == SQLITE_OK &&
+             kv_ironwood_pair(db, 0, 0, false, false));
+    TS_CHECK("ironwood storage: REAL is not a known total",
+             sqlite3_exec(db, "UPDATE shielded_pool_totals SET ironwood=1.5 WHERE height=0",
+                          NULL, NULL, NULL) == SQLITE_OK &&
+             kv_ironwood_pair(db, 0, 0, false, false));
+    TS_CHECK("ironwood storage: BLOB is not a known total",
+             sqlite3_exec(db, "UPDATE shielded_pool_totals SET ironwood=zeroblob(4) WHERE height=0",
+                          NULL, NULL, NULL) == SQLITE_OK &&
+             kv_ironwood_pair(db, 0, 0, false, false));
+    TS_CHECK("ironwood storage: concurrent delete makes affected rows zero",
+             shielded_pool_kv_put(db, 4, 0, 0) &&
+             sqlite3_exec(db,
+                 "CREATE TRIGGER ironwood_delete_before_update "
+                 "BEFORE UPDATE ON shielded_pool_totals "
+                 "WHEN OLD.height=4 BEGIN "
+                 "DELETE FROM shielded_pool_totals WHERE height=4; END;",
+                 NULL, NULL, NULL) == SQLITE_OK &&
+             !shielded_pool_kv_put_ironwood(db, 4, 9) &&
+             kv_absent(db, 4));
+    sqlite3_close(db);
+    return failures;
+}
+
 /* ── Stage-facing step (shadow by default, refusal under enforcement) ──── */
 
 #define KIND_SPROUT "bad-txns-sprout-turnstile-violation"
@@ -232,24 +351,15 @@ static void ts_block_free(struct block *blk)
     free(blk->vtx);
 }
 
-static sqlite3 *ts_db(int *failure_count)
-{
-    sqlite3 *db = NULL;
-    int failures = 0;
-    TS_CHECK("open in-memory store",
-             sqlite3_open(":memory:", &db) == SQLITE_OK &&
-             shielded_pool_kv_ensure_schema(db));
-    *failure_count += failures;
-    return db;
-}
 
 /* One stage_check call on a fresh summary. */
-static bool ts_step(sqlite3 *db, int64_t h, int64_t vb, int64_t vo,
-                    int64_t vn, struct delta_summary *s,
-                    struct utxo_apply_turnstile_pending *p)
+static bool ts_step_ironwood(sqlite3 *db, int64_t h, int64_t vb, int64_t vo,
+                             int64_t vn, int64_t ivb, struct delta_summary *s,
+                             struct utxo_apply_turnstile_pending *p)
 {
     struct block blk;
     ts_block(&blk, vb, vo, vn);
+    blk.vtx[0].ironwood_value_balance = ivb;
     memset(s, 0, sizeof(*s));
     s->ok = true;
     s->status = "ok";
@@ -258,11 +368,24 @@ static bool ts_step(sqlite3 *db, int64_t h, int64_t vb, int64_t vo,
     return r;
 }
 
+static bool ts_step(sqlite3 *db, int64_t h, int64_t vb, int64_t vo,
+                    int64_t vn, struct delta_summary *s,
+                    struct utxo_apply_turnstile_pending *p)
+{
+    return ts_step_ironwood(db, h, vb, vo, vn, 0, s, p);
+}
+
 static bool ts_pending_is(const struct utxo_apply_turnstile_pending *p,
                           bool write, int64_t sprout, int64_t sapling)
 {
     return p->write == write && (!write || (p->sprout == sprout &&
                                             p->sapling == sapling));
+}
+
+static bool ts_pending_ironwood_is(const struct utxo_apply_turnstile_pending *p,
+                                   int64_t total)
+{
+    return p->ironwood_known && p->ironwood == total;
 }
 
 static bool ts_refused_as(const struct delta_summary *s, const char *status,
@@ -275,7 +398,9 @@ static bool ts_refused_as(const struct delta_summary *s, const char *status,
 static int test_stage_genesis_and_accept(void)
 {
     int failures = 0;
-    sqlite3 *db = ts_db(&failures);
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
     struct delta_summary s;
     struct utxo_apply_turnstile_pending p;
     TS_CHECK("genesis: parent is known {0,0}, row = its own block values",
@@ -293,7 +418,9 @@ static int test_stage_genesis_and_accept(void)
 static int test_stage_sapling(void)
 {
     int failures = 0;
-    sqlite3 *db = ts_db(&failures);
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
     struct delta_summary s;
     struct utxo_apply_turnstile_pending p;
     uint64_t before = atomic_load(&g_ua_turnstile_would_reject_total);
@@ -319,7 +446,9 @@ static int test_stage_sapling(void)
 static int test_stage_sprout(void)
 {
     int failures = 0;
-    sqlite3 *db = ts_db(&failures);
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
     struct delta_summary s;
     struct utxo_apply_turnstile_pending p;
     (void)shielded_pool_kv_put(db, 9, 5, 7);
@@ -359,7 +488,9 @@ static bool ts_unknown_in_mode(sqlite3 *db, bool enforce)
 static int test_stage_unknown_parent(void)
 {
     int failures = 0;
-    sqlite3 *db = ts_db(&failures);
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
     TS_CHECK("unknown parent: applied, no row, unknown+1 (shadow)",
              ts_unknown_in_mode(db, false));
     TS_CHECK("unknown parent: applied, no row, unknown+1 (enforce)",
@@ -416,10 +547,142 @@ static int test_pool_reset(void)
     return failures;
 }
 
+static int test_stage_ironwood_movement(void)
+{
+    int failures = 0;
+    TS_CHECK("ironwood stage: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    TS_CHECK("ironwood stage: genesis deposit starts from known zero",
+             ts_step_ironwood(db, 0, 0, 0, 0, -100, &s, &p) && s.ok &&
+             ts_pending_ironwood_is(&p, 100) &&
+             shielded_pool_kv_put(db, 0, p.sprout, p.sapling) &&
+             shielded_pool_kv_put_ironwood(db, 0, p.ironwood) &&
+             kv_ironwood_pair(db, 0, 100, true, true));
+    TS_CHECK("ironwood stage: withdrawal reduces the total",
+             ts_step_ironwood(db, 1, 0, 0, 0, 25, &s, &p) && s.ok &&
+             ts_pending_ironwood_is(&p, 75) &&
+             shielded_pool_kv_put(db, 1, p.sprout, p.sapling) &&
+             shielded_pool_kv_put_ironwood(db, 1, p.ironwood) &&
+             kv_ironwood_pair(db, 1, 75, true, true));
+    TS_CHECK("ironwood stage: second deposit accumulates independently",
+             ts_step_ironwood(db, 2, 0, 0, 0, -50, &s, &p) && s.ok &&
+             ts_pending_ironwood_is(&p, 125));
+    sqlite3_close(db);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
+static int test_stage_ironwood_overflow(void)
+{
+    int failures = 0;
+    TS_CHECK("ironwood overflow: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    (void)shielded_pool_kv_put(db, 9, 0, 0);
+    (void)shielded_pool_kv_put_ironwood(db, 9, INT64_MAX);
+    atomic_store(&g_enforce_turnstile, false);
+    TS_CHECK("ironwood overflow: cumulative overflow fails closed",
+             ts_step_ironwood(db, 10, 0, 0, 0, -1, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 10));
+    (void)shielded_pool_kv_put(db, 10, 0, 0);
+    (void)shielded_pool_kv_put_ironwood(db, 10, INT64_MIN);
+    TS_CHECK("ironwood overflow: cumulative underflow fails closed",
+             ts_step_ironwood(db, 11, 0, 0, 0, 1, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 11));
+    (void)shielded_pool_kv_put(db, 11, 0, 0);
+    (void)shielded_pool_kv_put_ironwood(db, 11, 0);
+    TS_CHECK("ironwood overflow: block delta underflow fails closed",
+             ts_step_ironwood(db, 12, 0, 0, 0, INT64_MIN, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 12));
+    sqlite3_close(db);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
+static int test_stage_ironwood_unknown_parent(void)
+{
+    int failures = 0;
+    TS_CHECK("ironwood unknown parent: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    TS_CHECK("ironwood unknown parent: missing parent is not known zero",
+             ts_step_ironwood(db, 50, 0, 0, 0, 0, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 50));
+    (void)shielded_pool_kv_put(db, 30, 1, 2);
+    TS_CHECK("ironwood unknown parent: legacy NULL parent remains unknown",
+             ts_step_ironwood(db, 31, 0, 0, 0, 0, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 31));
+    sqlite3_close(db);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
+static int test_stage_ironwood_negative(void)
+{
+    int failures = 0;
+    TS_CHECK("ironwood negative: select research chain",
+             chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    (void)shielded_pool_kv_put(db, 20, 0, 0);
+    (void)shielded_pool_kv_put_ironwood(db, 20, 0);
+    atomic_store(&g_enforce_turnstile, true);
+    TS_CHECK("ironwood negative: negative total refused under enforcement",
+             ts_step_ironwood(db, 21, 0, 0, 0, 1, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 21));
+    atomic_store(&g_enforce_turnstile, false);
+    TS_CHECK("ironwood negative: shadow negative total records real chain",
+             ts_step_ironwood(db, 21, 0, 0, 0, 1, &s, &p) && s.ok &&
+             ts_pending_ironwood_is(&p, -1) &&
+             shielded_pool_kv_put(db, 21, p.sprout, p.sapling) &&
+             shielded_pool_kv_put_ironwood(db, 21, p.ironwood) &&
+             kv_ironwood_pair(db, 21, -1, true, true));
+    atomic_store(&g_enforce_turnstile, true);
+    TS_CHECK("ironwood negative: known negative parent refused under enforcement",
+             ts_step_ironwood(db, 22, 0, 0, 0, 0, &s, &p) &&
+             ts_refused_as(&s, "turnstile_ironwood",
+                           "bad-txns-ironwood-turnstile-violation") &&
+             !p.write && kv_absent(db, 22));
+    atomic_store(&g_enforce_turnstile, false);
+    sqlite3_close(db);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
 static int test_stage_unwind(void)
 {
     int failures = 0;
-    sqlite3 *db = ts_db(&failures);
+    sqlite3 *db = NULL;
+    TS_CHECK("ironwood storage: open store", sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
     struct delta_summary s;
     struct utxo_apply_turnstile_pending p;
     TS_CHECK("old branch rows 0..5", ts_seed_old_branch(db));
@@ -437,9 +700,13 @@ static int test_stage_unwind(void)
 
 int test_parity_lockin_turnstile(void)
 {
-    return test_block_values() + test_check() + test_pool_kv() +
+    return test_block_values() + test_check() + test_ironwood_check() +
+           test_pool_kv() +
+           test_pool_ironwood_migration() + test_pool_ironwood_types_and_rows() +
            test_stage_genesis_and_accept() + test_stage_sapling() +
            test_stage_sprout() + test_stage_unknown_parent() +
+           test_stage_ironwood_movement() + test_stage_ironwood_overflow() +
+           test_stage_ironwood_unknown_parent() + test_stage_ironwood_negative() +
            test_stage_unwind() + test_pool_reset() +
            shielded_pool_reset_pairing_cases() +
            parity_lockin_turnstile_stage_cases();

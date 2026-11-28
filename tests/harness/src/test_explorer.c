@@ -185,9 +185,9 @@ static bool ex_shielded_seed(sqlite3 *db, int64_t *incoming, int64_t *outgoing)
     blk.vtx = &tx;
     blk.num_vtx = 1;
     tx.value_balance = -700000000;
-    connect_block_shielded_values(&blk, NULL, incoming);
+    connect_block_shielded_values(&blk, NULL, incoming, NULL);
     tx.value_balance = 300000000;
-    connect_block_shielded_values(&blk, NULL, outgoing);
+    connect_block_shielded_values(&blk, NULL, outgoing, NULL);
     sqlite3_stmt *stmt = NULL;
     ok = ok && sqlite3_prepare_v2(db,
         "INSERT INTO blocks VALUES(?1,zeroblob(32),1600000000,3,1,520617983,?2,0)",

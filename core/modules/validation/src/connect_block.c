@@ -172,11 +172,21 @@ static bool checkpoint_covers(const struct checkpoint_data *cpdata,
     return cpdata->entries[cpdata->nEntries - 1].height >= height;
 }
 
-void connect_block_shielded_values(const struct block *block,
-                                   int64_t *sprout, int64_t *sapling)
+static bool connect_ironwood_delta_add(int64_t *total, int64_t balance)
+{
+    if ((balance > 0 && *total < INT64_MIN + balance) ||
+        (balance < 0 && *total > INT64_MAX + balance)) return false;
+    *total -= balance;
+    return true;
+}
+
+bool connect_block_shielded_values(const struct block *block,
+                                   int64_t *sprout, int64_t *sapling,
+                                   int64_t *ironwood)
 {
     int64_t sprout_value = 0;
     int64_t sapling_value = 0;
+    int64_t ironwood_value = 0;
     for (size_t i = 0; block && i < block->num_vtx; i++) {
         const struct transaction *tx = &block->vtx[i];
         for (size_t j = 0; j < tx->num_joinsplit; j++) {
@@ -185,11 +195,17 @@ void connect_block_shielded_values(const struct block *block,
         }
         /* zclassicd: saplingValue += -tx.valueBalance */
         sapling_value -= tx->value_balance;
+        if (ironwood &&
+            !connect_ironwood_delta_add(&ironwood_value,
+                                        tx->ironwood_value_balance)) return false;
     }
     if (sprout)
         *sprout = sprout_value;
     if (sapling)
         *sapling = sapling_value;
+    if (ironwood)
+        *ironwood = ironwood_value;
+    return true;
 }
 
 /* Collected inputs for one block's parallel script verification. */
@@ -291,7 +307,7 @@ static bool connect_block_apply_shielded_turnstile(
     /* Compute per-block shielded value from transactions */
     int64_t sprout_value = 0;
     int64_t sapling_value = 0;
-    connect_block_shielded_values(block, &sprout_value, &sapling_value);
+    connect_block_shielded_values(block, &sprout_value, &sapling_value, NULL);
     pindex->nSproutValue = sprout_value;
     pindex->has_sprout_value = true;
     pindex->nSaplingValue = sapling_value;

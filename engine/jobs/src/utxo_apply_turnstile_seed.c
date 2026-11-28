@@ -11,6 +11,7 @@
 #include "jobs/utxo_apply_turnstile_seed.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "jobs/catchup_cadence.h"
 #include "jobs/stage_helpers.h"
@@ -41,6 +42,7 @@ struct seed_row {
     struct uint256 hash;
     int64_t sprout;
     int64_t sapling;
+    int64_t ironwood;
 };
 
 static struct seed_row g_rows[UA_TURNSTILE_SEED_MAX_ROWS];
@@ -117,6 +119,7 @@ static bool seed_genesis_row(const struct block_index *bi, int n)
     g_rows[n].hash = *bi->phashBlock;
     g_rows[n].sprout = 0;
     g_rows[n].sapling = 0;
+    g_rows[n].ironwood = 0;
     return true;
 }
 
@@ -151,8 +154,13 @@ static int seed_scan(struct main_state *ms, const char *datadir,
         }
         g_rows[n].height = h;
         g_rows[n].hash = *bi->phashBlock;
-        connect_block_shielded_values(&blk, &g_rows[n].sprout,
-                                      &g_rows[n].sapling);
+        if (!connect_block_shielded_values(&blk, &g_rows[n].sprout,
+                                           &g_rows[n].sapling,
+                                           &g_rows[n].ironwood)) {
+            seed_negative_blocker(h, "ironwood-overflow", 0, 0);
+            block_free(&blk);
+            break;
+        }
         block_free(&blk);
         seed_body_clear();
         n++;
@@ -174,6 +182,35 @@ static bool seed_chain_matches(struct main_state *ms, int n)
     return true;
 }
 
+static bool seed_ironwood_next(int64_t height, int64_t sprout,
+                               int64_t sapling, int64_t block_value,
+                               struct utxo_apply_turnstile_pool *total)
+{
+    struct utxo_apply_turnstile_pool next;
+    const char *reject = utxo_apply_turnstile_ironwood_check(
+        *total, block_value, &next);
+    if (reject) {
+        seed_negative_blocker(height, "ironwood", sprout, sapling);
+        return false;
+    }
+    *total = next;
+    return true;
+}
+
+static bool seed_ironwood_parent(sqlite3 *db, int64_t k, bool k_found,
+                                 bool research, int64_t sprout, int64_t sapling,
+                                 struct utxo_apply_turnstile_pool *total)
+{
+    if (!research || !k_found) return true;
+    bool found = false;
+    if (!shielded_pool_kv_get_ironwood(db, k, &total->total, &total->known,
+                                       &found) || !found || !total->known) {
+        seed_negative_blocker(k, "ironwood-unknown", sprout, sapling);
+        return false;
+    }
+    return true;
+}
+
 /* Write the remembered rows on top of row K's totals. Returns rows written,
  * or -1 on a store failure. A negative total stops before its row. */
 static int seed_write_rows(sqlite3 *db, int64_t k, bool k_found, int n)
@@ -185,6 +222,10 @@ static int seed_write_rows(sqlite3 *db, int64_t k, bool k_found, int n)
         LOG_ERR(STAGE_NAME,
                 "[utxo_apply] turnstile seed: row K=%lld totals read failed",
                 (long long)k);
+    bool research = chain_research_profile_current() != NULL;
+    struct utxo_apply_turnstile_pool ironwood = { 0, true };
+    if (!seed_ironwood_parent(db, k, k_found, research, sprout, sapling,
+                              &ironwood)) return -1;  // raw-return-ok:unknown Ironwood parent stops migration
     int wrote = 0;
     for (int i = 0; i < n; i++) {
         sprout += g_rows[i].sprout;
@@ -195,9 +236,17 @@ static int seed_write_rows(sqlite3 *db, int64_t k, bool k_found, int n)
                                   sprout, sapling);
             break;
         }
+        if (research &&
+            !seed_ironwood_next(g_rows[i].height, sprout, sapling,
+                                g_rows[i].ironwood, &ironwood)) break;
         if (!shielded_pool_kv_put(db, g_rows[i].height, sprout, sapling))
             LOG_ERR(STAGE_NAME,
                     "[utxo_apply] turnstile seed: put failed at height=%lld",
+                    (long long)g_rows[i].height);
+        if (research &&
+            !shielded_pool_kv_put_ironwood(db, g_rows[i].height, ironwood.total))
+            LOG_ERR(STAGE_NAME,
+                    "[utxo_apply] turnstile seed: Ironwood put failed at height=%lld",
                     (long long)g_rows[i].height);
         wrote++;
     }

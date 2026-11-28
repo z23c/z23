@@ -302,7 +302,7 @@ static bool sync_block_lean(struct node_db *ndb,
                  "height %d (continuing — degraded explorer row, not fatal)",
                  pindex->nHeight);
     connect_block_shielded_values(blk, &db_blk.sprout_value,
-                                  &db_blk.sapling_value);
+                                  &db_blk.sapling_value, NULL);
 
     if (!db_block_save_canonical(ndb, &db_blk))
         LOG_FAIL("sync", "sync_block_lean: db_block_save_canonical failed at height %d",

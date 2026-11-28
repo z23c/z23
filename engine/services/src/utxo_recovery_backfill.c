@@ -204,7 +204,7 @@ static int backfill_resolve_block_values(struct block_index *bi,
     struct block blk;
     if (!read_block_from_disk_index(&blk, bi, datadir))
         return -1; /* raw-return-ok:unreadable body; the walk stops and retries next boot */
-    connect_block_shielded_values(&blk, sprout_val, sapling_val);
+    connect_block_shielded_values(&blk, sprout_val, sapling_val, NULL);
     block_free(&blk);
     return 0;
 }

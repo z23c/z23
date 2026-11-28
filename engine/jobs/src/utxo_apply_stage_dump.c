@@ -94,6 +94,8 @@ static void dump_turnstile(struct json_value *out, sqlite3 *db)
                      (int64_t)atomic_load(&g_ua_turnstile_sprout_total));
     json_push_kv_int(out, "turnstile_sapling_reject_total",
                      (int64_t)atomic_load(&g_ua_turnstile_sapling_total));
+    json_push_kv_int(out, "turnstile_ironwood_reject_total",
+                     (int64_t)atomic_load(&g_ua_turnstile_ironwood_total));
     struct utxo_apply_turnstile_seed_stats ss;
     utxo_apply_turnstile_seed_stats_get(&ss);
     json_push_kv_int(out, "turnstile_seed_through", ss.seeded_through);
