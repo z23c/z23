@@ -3177,6 +3177,22 @@ static void observation_driver_refusals(struct observation_fixture *fixture)
     (void)unlink(driver);
 }
 
+static bool observation_chain_paths(const char *linkdir, char driver[PATH_MAX],
+                                    char intermediate[PATH_MAX])
+{
+    int dn = snprintf(driver, PATH_MAX, "%s/cc", linkdir);
+    int in = snprintf(intermediate, PATH_MAX, "%s/cc-link", linkdir);
+    return dn > 0 && dn < PATH_MAX && in > 0 && in < PATH_MAX;
+}
+
+static bool observation_chain_retarget(const char *intermediate,
+                                       const char *compiler)
+{
+    return unlink(intermediate) == 0 &&
+           symlink("/usr/bin/false", intermediate) == 0 &&
+           unlink(intermediate) == 0 && symlink(compiler, intermediate) == 0;
+}
+
 static void observation_driver_chain(struct observation_fixture *fixture)
 {
     struct zcl_compile_observation *observation = NULL;
@@ -3187,12 +3203,17 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     AR_CHECK("observation compiler link fixture is canonical", canonical);
     if (!canonical)
         return;
-    (void)snprintf(driver, sizeof(driver), "%s/cc", linkdir);
     const char *original = fixture->argv[0];
     char intermediate[PATH_MAX];
-    (void)snprintf(intermediate, sizeof(intermediate), "%s/cc-link", linkdir);
-    bool linked = symlink(fixture->compiler, intermediate) == 0 &&
-                  symlink("cc-link", driver) == 0;
+    bool paths_ok = observation_chain_paths(linkdir, driver, intermediate);
+    AR_CHECK("observation compiler link paths fit", paths_ok);
+    if (!paths_ok) {
+        (void)rmdir(linkdir);
+        return;
+    }
+    bool inner_created = symlink(fixture->compiler, intermediate) == 0;
+    bool driver_created = inner_created && symlink("cc-link", driver) == 0;
+    bool linked = inner_created && driver_created;
     fixture->argv[0] = driver;
     observation = NULL;
     bool ready = linked && observation_begin(fixture, &observation) &&
@@ -3204,18 +3225,16 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     observation = NULL;
     ready = linked && observation_begin(fixture, &observation) &&
             observation_compile(observation);
-    bool retargeted = ready && unlink(intermediate) == 0 &&
-                      symlink("/usr/bin/false", intermediate) == 0 &&
-                      unlink(intermediate) == 0 &&
-                      symlink(fixture->compiler, intermediate) == 0;
+    bool retargeted = ready && observation_chain_retarget(intermediate,
+                                                          fixture->compiler);
     AR_CHECK("observation refuses a restored intermediate link retarget",
              retargeted && !zcl_compile_observation_finish(observation, true, &result) &&
              strcmp(result.miss, "toolchain_changed") == 0);
     zcl_action_root_result_free(&result);
     zcl_compile_observation_close(observation);
     fixture->argv[0] = original;
-    (void)unlink(driver);
-    (void)unlink(intermediate);
+    if (driver_created) (void)unlink(driver);
+    if (inner_created) (void)unlink(intermediate);
     (void)rmdir(linkdir);
 }
 
