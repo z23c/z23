@@ -50,7 +50,7 @@ static const char *const k_sr_root_allowed[] = {
     ".git", "build", "vendor", "test-tmp", "compile_commands.json",
     ".cache", ".codeindex", ".zvcs", ".core-unseal-token", ".zcl_test_render",
     "chaos-output", ".antigravitycli", ".gemini", ".aider", ".vscode", ".idea",
-    "tags", "TAGS", ".DS_Store", ".eu-warm", ".eu-lock",
+    "tags", "TAGS", ".DS_Store", ".eu-warm", ".eu-lock", ".lane-lease.json",
 };
 
 static int sr_seed(struct sr_set *s)
@@ -163,19 +163,19 @@ int check_no_stray_root_files_run(int argc, char **argv)
                   scanned) < 0 ? die("z23-lint: write failed\n", "") : 0;
 }
 
-/* The funnel's pool markers are required in every pool worktree root: they
+/* The funnel markers and native lane lease are legitimate root entries: they
  * pass, and an unknown root entry still trips. */
 static int sr_selftest_pool_markers(void)
 {
     struct sr_set al = {0};
     char stray[8][SR_NAME];
     int ns = 0, sc = 0, bad = sr_seed(&al) != 0;
-    const char *pool[] = { ".git", ".eu-warm", ".eu-lock" };
-    bad |= sr_feed(&al, pool, 3, stray, 8, &ns, &sc) || ns != 0 || sc != 3;
-    const char *pooljunk[] = { ".eu-warm", "junk.db" };
+    const char *pool[] = { ".git", ".eu-warm", ".eu-lock", ".lane-lease.json" };
+    bad |= sr_feed(&al, pool, 4, stray, 8, &ns, &sc) || ns != 0 || sc != 4;
+    const char *pooljunk[] = { ".eu-warm", ".lane-lease.json.bak", "junk.db" };
     ns = sc = 0;
-    bad |= sr_feed(&al, pooljunk, 2, stray, 8, &ns, &sc) || ns != 1
-        || strcmp(stray[0], "junk.db");
+    bad |= sr_feed(&al, pooljunk, 3, stray, 8, &ns, &sc) || ns != 2
+        || strcmp(stray[0], ".lane-lease.json.bak") || strcmp(stray[1], "junk.db");
     return bad;
 }
 
