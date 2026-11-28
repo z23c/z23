@@ -123,6 +123,15 @@ static struct zcl_result sweep_tracker_init(struct sweep_state *st, uint32_t sta
     return ZCL_OK;
 }
 
+static struct zcl_result sweep_local_error(const struct sweep_state *st)
+{
+    if (st->tracker_error[0])
+        return ZCL_ERR(-9, "replay_verify_run_port: research rule unavailable at height %u: %s",
+                       st->local_height, st->tracker_error);
+    return ZCL_ERR(-9, "replay_verify_run_port: block checks ran out of memory at "
+                   "height %u; no verdict on that block", st->local_height);
+}
+
 /* Record the first observed failure (any class) into the report. Static
  * reason strings only — the report holds a borrowed pointer. */
 static void note_first_fail(struct replay_verify_report *r,
@@ -317,15 +326,7 @@ struct zcl_result replay_verify_run_port(struct block_log_port *port,
                    st.deser_height);
     }
 
-    if (st.local_failed) {
-        if (st.tracker_error[0])
-            return ZCL_ERR(-9, "replay_verify_run_port: research rule unavailable at height %u: %s",
-                           st.local_height, st.tracker_error);
-        return ZCL_ERR(-9,
-                   "replay_verify_run_port: block checks ran out of memory at "
-                   "height %u; no verdict on that block",
-                   st.local_height);
-    }
+    if (st.local_failed) return sweep_local_error(&st);
 
     /* An adapter may return OK after reaching its own end of iteration.
      * A shorter sweep cannot establish the requested range's integrity. */

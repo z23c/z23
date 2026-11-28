@@ -7,6 +7,11 @@
 #include "storage/disk_block_io.h"
 #include "platform/directory_compat.h"
 #include "test/test_core.h"
+#include "test/test_block_map.h"
+#include "services/chain_activation_service.h"
+#include "validation/main_state.h"
+#include "consensus/validation.h"
+#include "util/util.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -127,6 +132,31 @@ static int ceiling_test(void)
     return exact && over && unchanged ? 0 : 1;
 }
 
+static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, const char *dir)
+{
+    struct main_state ms;
+    main_state_init(&ms);
+    bool setup = SetDataDir(dir) &&
+                 test_block_map_insert(&ms.map_block_index, f->index[125].phashBlock,
+                                       &f->index[125]) &&
+                 research_rules_install(f->binding.params, f->binding.pin);
+    candidate->header.hashPrevBlock = *f->index[125].phashBlock;
+    struct chain_activation_controller ctl = { .ms = &ms, .params = f->binding.params };
+    struct validation_state state;
+    unsigned before = block_index_status_load(&f->index[125]);
+    size_t entries = ms.map_block_index.size;
+    bool admitted = setup && reducer_stage_p2p_block_for_catchup(&ctl, candidate, &state);
+    bool held = setup && !admitted && state.mode == MODE_ERROR &&
+                !strcmp(state.reject_reason, "research-rules-unavailable") &&
+                before == block_index_status_load(&f->index[125]) &&
+                entries == ms.map_block_index.size;
+    main_state_free(&ms);
+    SetDataDir("");
+    ClearDataDirCache();
+    if (!held) fprintf(stderr, "research gate: reducer did not hold missing window\n");
+    return held ? 0 : 1;
+}
+
 static int activation_test(void)
 {
     int failures = 0;
@@ -185,6 +215,8 @@ static int activation_test(void)
     invalid.params = chain_params_get();
     d = research_rules_gate_for(&invalid, invalid.params, &b, &f.index[125], dir);
     failures += expect_gate("invalid binding", d, RESEARCH_GATE_HOLD, "research-rules-unavailable", 0);
+    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) failures++;
+    else failures += reducer_hold_test(&f, &b, raw);
 done:
     block_free(&b);
     if (f.blocks) {
