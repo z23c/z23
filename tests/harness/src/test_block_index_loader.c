@@ -981,6 +981,91 @@ static int bil_foreign_projection_refusal(const struct chain_research_descriptor
     return failures;
 }
 
+static bool bil_snapshot_outside_projection(const struct bil_file_snapshot *a,
+                                             const struct bil_file_snapshot *b)
+{
+    size_t i = 0, j = 0;
+    while (i < a->count || j < b->count) {
+        if (i < a->count && !strncmp(a->records[i].path, "projection.db", 13)) { i++; continue; }
+        if (j < b->count && !strncmp(b->records[j].path, "projection.db", 13)) { j++; continue; }
+        if (i == a->count || j == b->count ||
+            strcmp(a->records[i].path, b->records[j].path) ||
+            a->records[i].size != b->records[j].size ||
+            memcmp(a->records[i].digest, b->records[j].digest, 32)) return false;
+        i++; j++;
+    }
+    return true;
+}
+
+static bool bil_projection_append(event_log_t *log, int height, uint8_t hash)
+{
+    struct ev_block_header h = {0};
+    h.hash[0] = hash; h.height = height; h.nBits = 0x200f0f0f;
+    uint8_t bytes[256]; size_t written = 0;
+    return ev_block_header_serialize(&h, NULL, bytes, sizeof bytes, &written) &&
+           event_log_append(log, EV_BLOCK_HEADER, bytes, written) != UINT64_MAX;
+}
+
+static bool bil_pending_projection_refused(const char *dir, const char *blocks,
+    const struct boot_blkidx_load_ctx *load, struct main_state *state,
+    const struct bil_file_snapshot *before)
+{
+    struct stat st;
+    struct bil_file_snapshot after;
+    return load->genesis_failed && active_chain_cached_tip(&state->chain_active) == NULL &&
+        stat(blocks, &st) != 0 && errno == ENOENT &&
+        bil_snapshot_take(dir, &after) && bil_snapshot_outside_projection(before, &after);
+}
+
+static bool bil_pending_projection_case(const struct chain_research_descriptor *profile,
+                                         bool behind, bool from_log)
+{
+    char dir[256], logpath[320], dbpath[320], blocks[320];
+    if (!test_mkdtemp(dir, sizeof dir, "bil_pending_foreign")) return false;
+    snprintf(logpath, sizeof logpath, "%s/event.dat", dir);
+    snprintf(dbpath, sizeof dbpath, "%s/projection.db", dir);
+    snprintf(blocks, sizeof blocks, "%s/blocks", dir);
+    event_log_t *log = event_log_open(logpath);
+    block_index_projection_t *projection = log ? block_index_projection_open(dbpath, log) : NULL;
+    bool ready = projection != NULL;
+    if (ready && behind)
+        ready = bil_projection_append(log, 1, 1) &&
+                block_index_projection_catch_up(projection) != UINT64_MAX;
+    if (ready) ready = bil_projection_append(log, 0, 42);
+    struct main_state state; main_state_init(&state);
+    struct app_context ctx = {0}; ctx.datadir = dir; ctx.boot_from_log = from_log;
+    struct node_db db = {0};
+    struct boot_blkidx_load_ctx load = {
+        .ctx = &ctx, .st = &state, .ndb = &db, .params = profile->chain
+    };
+    struct bil_file_snapshot before;
+    bool captured = ready && SetDataDir(dir) && bil_snapshot_take(dir, &before);
+    if (projection) block_index_projection_set_singleton(projection);
+    if (captured) boot_blkidx_run_ladder(&load);
+    bool refused = captured && bil_pending_projection_refused(dir, blocks, &load, &state, &before);
+    if (projection) block_index_projection_set_singleton(NULL);
+    ClearDataDirCache();
+    main_state_free(&state);
+    if (projection) block_index_projection_close(projection);
+    if (log) event_log_close(log);
+    test_cleanup_tmpdir(dir);
+    return refused;
+}
+
+static int bil_pending_projection_cases(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    BIL_CHECK("bil: pending foreign genesis refused on kill9 empty projection",
+              bil_pending_projection_case(profile, false, false));
+    BIL_CHECK("bil: pending foreign genesis refused on kill9 behind projection",
+              bil_pending_projection_case(profile, true, false));
+    BIL_CHECK("bil: pending foreign genesis refused on rung0 empty projection",
+              bil_pending_projection_case(profile, false, true));
+    BIL_CHECK("bil: pending foreign genesis refused on rung0 behind projection",
+              bil_pending_projection_case(profile, true, true));
+    return failures;
+}
+
 static int bil_research_foreign_index(const struct chain_research_descriptor *profile)
 {
     int failures = 0;
@@ -1038,6 +1123,7 @@ static int bil_research_genesis_body(void)
         failures += bil_hydrate_genesis_gate(profile);
         failures += bil_mixed_genesis_refusal(profile);
         failures += bil_foreign_projection_refusal(profile);
+        failures += bil_pending_projection_cases(profile);
         chain_params_select(CHAIN_REGTEST);
     } else BIL_CHECK("bil: select research for ladder refusals", false);
     block_index_hdrext_free(&g);

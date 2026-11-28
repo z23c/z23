@@ -401,8 +401,10 @@ static bool projection_restore_genesis(struct main_state *ms, const struct chain
     const struct chain_research_descriptor *research = chain_research_profile_current();
     if (!research) return true;
     if (!params || research->chain != params) return false;
-    if (block_index_has_foreign_genesis(ms, params))
-        LOG_FAIL("block_index", "projection research genesis: foreign height-zero index");
+    if (block_index_has_foreign_genesis(ms, params)) {
+        LOG_ERROR("block_index", "projection research genesis: foreign height-zero index");
+        return false;
+    }
     char datadir[2048] = {0};
     GetDataDir(true, datadir, sizeof datadir);
     struct block_index *genesis = block_map_find(&ms->map_block_index,
