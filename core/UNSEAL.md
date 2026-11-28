@@ -1382,3 +1382,11 @@ later lane flips it HARD.
 - 2026-11-28T13:19:56Z — REASON: testnet-only Ironwood remove one-input script-code prevout inference
   old ROOT: 3642401d2156b53f659c06a7762dde3046d6f45ccb2811bd57fe8b05d1c11f64
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T14:03:38Z — REASON: Add testnet-only checked Ironwood bundle authentication contract without changing admission
+  old ROOT: 0c12a949a0025fe0c6499328e6a846c15c82013c3354a565b094fd2021936d78
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T14:15:09Z — REASON: Reseal staged checked Ironwood bundle contract with funded context evidence
+  old ROOT: 8c04bf2a8da731ec5bbb1d539e12e004e6e644f5cde13d01f4343fa58c17f2c0
+  by: owner unseal ritual (make core-unseal)

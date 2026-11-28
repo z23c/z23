@@ -6,7 +6,7 @@
 #include "services/ironwood_postnu63_wire_commitment.h"
 #include "services/ironwood_postnu63_query.h"
 #include "services/ironwood_opening_equation.h"
-#include "services/ironwood_resident_params.h"
+#include "services/ironwood_verification_setup.h"
 #include "primitives/transaction_v6_wire.h"
 
 struct zcl_result ironwood_postnu63_verify_proof(const uint8_t *wire, size_t length,
@@ -28,12 +28,28 @@ struct zcl_result ironwood_postnu63_verify_proof(const uint8_t *wire, size_t len
     return holds ? ZCL_OK : ZCL_ERR(-1, "Invalid Ironwood PostNu6_3 opening proof");
 }
 
+struct zcl_result ironwood_postnu63_verify_proof_trusted(const uint8_t *wire, size_t length,
+    const struct ironwood_verification_setup *setup)
+{
+    if (!wire || setup != ironwood_postnu63_verification_setup())
+        return ZCL_ERR(-1, "Missing Ironwood proof or unauthenticated verification setup");
+    struct v6_wire_view view;
+    if (v6_core_parse(wire, length, &view) != V6_WIRE_OK || !view.ironwood.count)
+        return ZCL_ERR(-1, "Expected a complete v6 transaction with an Ironwood proof");
+    struct ironwood_postnu63_stage stage;
+    uint8_t quotient[32], commitment[32], evaluation[32];
+    bool holds = false;
+    struct zcl_result r = ironwood_postnu63_prepare_opening_trusted(&view, setup, &stage);
+    if (r.ok) r = ironwood_postnu63_pinned_h(&stage, &setup->programs, quotient);
+    if (r.ok) r = ironwood_postnu63_wire_commitment(&view, commitment);
+    if (r.ok) r = ironwood_postnu63_wire_value(&view, quotient, evaluation);
+    if (r.ok) r = ironwood_postnu63_check_claim_trusted(&view, setup, commitment, evaluation, &holds);
+    if (!r.ok) return r;
+    return holds ? ZCL_OK : ZCL_ERR(-1, "Invalid Ironwood PostNu6_3 opening proof");
+}
+
 struct zcl_result ironwood_postnu63_verify_proof_resident(const uint8_t *wire, size_t length)
 {
-    const struct ironwood_postnu63_constraint_programs programs = {
-        {ironwood_resident_custom, sizeof ironwood_resident_custom},
-        {ironwood_resident_permutation, sizeof ironwood_resident_permutation},
-        {ironwood_resident_lookup, sizeof ironwood_resident_lookup}
-    };
-    return ironwood_postnu63_verify_proof(wire, length, &programs, &ironwood_resident_basis);
+    return ironwood_postnu63_verify_proof_trusted(wire, length,
+        ironwood_postnu63_verification_setup());
 }

@@ -2,6 +2,8 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_postnu63.h"
 #include "services/ironwood_opening_equation.h"
+#include "services/ironwood_resident_params.h"
+#include "services/ironwood_verification_setup.h"
 #include "crypto/sha256.h"
 #include <string.h>
 
@@ -76,4 +78,54 @@ struct zcl_result ironwood_postnu63_check_claim(const struct v6_wire_view *view,
     struct ironwood_postnu63_stage stage;
     struct zcl_result r = ironwood_postnu63_prepare_opening(view, &stage);
     return r.ok ? ironwood_opening_equation(&stage, basis, commitment, evaluation, holds) : r;
+}
+
+static const struct ironwood_verification_setup postnu63_setup = {
+    .programs = {
+        {ironwood_resident_custom, sizeof ironwood_resident_custom},
+        {ironwood_resident_permutation, sizeof ironwood_resident_permutation},
+        {ironwood_resident_lookup, sizeof ironwood_resident_lookup}
+    },
+    .opening_basis = &ironwood_resident_basis,
+    .vk_scalar = vk_scalar,
+    .instance_basis = instance_basis,
+    .blinding_base = blinding_base
+};
+
+const struct ironwood_verification_setup *
+ironwood_postnu63_verification_setup(void)
+{
+    return &postnu63_setup;
+}
+
+struct zcl_result ironwood_postnu63_prepare_opening_trusted(
+    const struct v6_wire_view *view,
+    const struct ironwood_verification_setup *setup,
+    struct ironwood_postnu63_stage *out)
+{
+    if (!out || setup != ironwood_postnu63_verification_setup())
+        return ZCL_ERR(-1, "Missing PostNu6_3 output or unauthenticated verification setup");
+    struct ironwood_postnu63_stage stage;
+    struct zcl_result r = ironwood_postnu63_first_challenge(view, setup->vk_scalar,
+        setup->instance_basis, setup->blinding_base, &stage);
+    if (r.ok) r = ironwood_postnu63_lookup_challenges(&stage);
+    if (r.ok) r = ironwood_postnu63_yx_challenges(&stage);
+    if (r.ok) r = ironwood_postnu63_evaluations(&stage);
+    if (r.ok) *out = stage;
+    return r;
+}
+
+struct zcl_result ironwood_postnu63_check_claim_trusted(
+    const struct v6_wire_view *view,
+    const struct ironwood_verification_setup *setup,
+    const uint8_t commitment[32], const uint8_t evaluation[32], bool *holds)
+{
+    if (!commitment || !evaluation || !holds ||
+        setup != ironwood_postnu63_verification_setup() ||
+        !opening_basis_matches(setup->opening_basis))
+        return ZCL_ERR(-1, "Missing opening claim or incorrect Halo2 parameters");
+    struct ironwood_postnu63_stage stage;
+    struct zcl_result r = ironwood_postnu63_prepare_opening_trusted(view, setup, &stage);
+    return r.ok ? ironwood_opening_equation(&stage, setup->opening_basis,
+        commitment, evaluation, holds) : r;
 }

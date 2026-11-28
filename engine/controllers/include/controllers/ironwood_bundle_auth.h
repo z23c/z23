@@ -15,4 +15,5 @@
  * rules and all other consensus state. Errors do not mutate inputs. */
 struct zcl_result ironwood_bundle_authenticate(const uint8_t *wire, size_t size,
     const struct v6_prevout *prevouts, size_t prevout_count);
+#include "validation/ironwood_bundle_auth.h"
 #endif
