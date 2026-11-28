@@ -1051,6 +1051,17 @@ int test_reducer_block_ingest_gate(void)
               reducer_private_rpc_applied_for_testing(REDUCER_SRC_SUBMIT, 1, &hash1) &&
               !reducer_private_rpc_applied_for_testing(REDUCER_SRC_SUBMIT, 1, &wrong_hash) &&
               !reducer_private_rpc_applied_for_testing(REDUCER_SRC_MINED, 999, &hash1));
+    sqlite3 *evidence_db = progress_store_db();
+    uint8_t lookahead_hash[32];
+    RBI_CHECK("lookahead cannot substitute for missing apply",
+              evidence_db && sqlite3_exec(evidence_db, "SAVEPOINT witness_test", NULL, NULL, NULL) == SQLITE_OK &&
+              tip_finalize_stage_block_hash_at(evidence_db, 1, lookahead_hash) &&
+              !memcmp(lookahead_hash, hash1.data, 32) &&
+              sqlite3_exec(evidence_db, "DELETE FROM utxo_apply_log WHERE height=1", NULL, NULL, NULL) == SQLITE_OK &&
+              !reducer_private_rpc_applied_for_testing(REDUCER_SRC_MINED, 1, &hash1));
+    RBI_CHECK("restore applied fixture row", evidence_db &&
+              sqlite3_exec(evidence_db, "ROLLBACK TO witness_test", NULL, NULL, NULL) == SQLITE_OK &&
+              sqlite3_exec(evidence_db, "RELEASE witness_test", NULL, NULL, NULL) == SQLITE_OK);
     RBI_CHECK("private P2P retains existing path",
               reducer_private_rpc_applied_for_testing(REDUCER_SRC_P2P, 999, &wrong_hash));
     chain_params_select(CHAIN_REGTEST);
