@@ -9,6 +9,7 @@
 #include "services/miner_signal_catalog_pin.h"
 #include "base/hex.h"
 #include "core/serialize.h"
+#include "mining/miner.h"
 #include "primitives/transaction.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
@@ -438,6 +439,69 @@ static int mining_rate_cases(void)
 }
 
 
+/* A real template at H1 uses the selected epoch shape. The normal miner
+ * updates extranonce before solving; check the final wire and Merkle root. */
+static bool mining_h1_wire_case(int32_t overwinter, int32_t sapling,
+                                uint32_t header, uint32_t group)
+{
+    struct chain_params cp = *chain_params_get();
+    cp.consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = overwinter;
+    cp.consensus.vUpgrades[UPGRADE_SAPLING].nActivationHeight = sapling;
+    struct main_state ms; main_state_init(&ms);
+    struct tx_mempool pool; tx_mempool_init(&pool, 0);
+    struct coins_view_kv backing; coins_view_kv_init(&backing);
+    struct coins_view_cache cache; coins_view_cache_init(&cache, &backing.view);
+    struct block_index parent; block_index_init(&parent);
+    parent.nHeight = 0; parent.hashBlock.data[0] = 1;
+    parent.phashBlock = &parent.hashBlock;
+    struct arith_uint256 limit; uint256_to_arith(&limit, &cp.consensus.powLimit);
+    parent.nBits = arith_uint256_get_compact(&limit, false);
+    parent.nTime = (uint32_t)GetAdjustedTime();
+    active_chain_move_window_tip(&ms.chain_active, &parent);
+    struct script script; script_init(&script);
+    struct block_template *tmpl = create_new_block(&script, &ms, &cache, &pool, &cp);
+    bool ok = tmpl && tmpl->block.num_vtx == 1;
+    if (ok) {
+        unsigned nonce = 0;
+        increment_extra_nonce(&tmpl->block, &parent, &nonce);
+        struct transaction *cb = &tmpl->block.vtx[0];
+        struct byte_stream wire; stream_init(&wire, 256);
+        struct uint256 fresh;
+        struct transaction decoded; transaction_init(&decoded);
+        ok = transaction_serialize(cb, &wire) && !wire.error && wire.size >= 8;
+        if (ok) {
+            uint32_t got = (uint32_t)wire.data[0] | (uint32_t)wire.data[1] << 8 |
+                (uint32_t)wire.data[2] << 16 | (uint32_t)wire.data[3] << 24;
+            ok = got == header;
+            if (group) {
+                uint32_t gid = (uint32_t)wire.data[4] | (uint32_t)wire.data[5] << 8 |
+                    (uint32_t)wire.data[6] << 16 | (uint32_t)wire.data[7] << 24;
+                ok = ok && gid == group;
+            }
+        }
+        if (ok) {
+            struct byte_stream input; stream_init_from_data(&input, wire.data, wire.size);
+            ok = transaction_deserialize(&decoded, &input) && !stream_remaining(&input) &&
+                decoded.overwintered == (group != 0) && decoded.version_group_id == group &&
+                transaction_hash_serialized(cb, &fresh) && uint256_eq(&fresh, &cb->hash) &&
+                uint256_eq(&fresh, &tmpl->block.header.hashMerkleRoot);
+        }
+        transaction_free(&decoded); stream_free(&wire);
+    }
+    if (tmpl) { block_template_free(tmpl); free(tmpl); }
+    coins_view_cache_free(&cache); tx_mempool_free(&pool); main_state_free(&ms);
+    return ok;
+}
+
+static int mining_h1_wire_cases(void)
+{
+    int failures = 0;
+    MT_CHECK("H1 pre-Overwinter coinbase wire and merkle", mining_h1_wire_case(2, 2, 1, 0));
+    MT_CHECK("H1 Overwinter coinbase wire and merkle", mining_h1_wire_case(0, 2, 0x80000003u, 0x03c48270u));
+    MT_CHECK("H1 Sapling coinbase wire and merkle", mining_h1_wire_case(0, 0, 0x80000004u, 0x892f2085u));
+    return failures;
+}
+
 int test_mining(void)
 {
     int failures = 0;
@@ -486,5 +550,5 @@ int test_mining(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    return failures + mining_template_time_cases() + mining_ballot_cases() + mining_rate_cases();
+    return failures + mining_h1_wire_cases() + mining_template_time_cases() + mining_ballot_cases() + mining_rate_cases();
 }
