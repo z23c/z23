@@ -1188,6 +1188,18 @@ static bool pc_push_timings(struct pc_run *r, struct zcl_command_reply *reply)
 }
 
 /* One gate: skipped (unknown or unproven), refused, or ran clean. */
+static void pc_capability_advisory(struct pc_run *r, struct zcl_command_reply *reply)
+{
+    const char *line = strstr(r->out, "changed capability: WARNING");
+    if (!line) line = strstr(r->out, "changed capability: UNPROVEN");
+    if (!line) return;
+    char advisory[PC_TEXT_CAP];
+    size_t n = strcspn(line, "\r\n");
+    if (n >= sizeof advisory) n = sizeof advisory - 1;
+    memcpy(advisory, line, n); advisory[n] = '\0';
+    (void)json_push_kv_str(&reply->data, "precheck_advisory", advisory);
+}
+
 static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
                                       const char *list,
                                       struct zcl_command_reply *reply)
@@ -1226,12 +1238,7 @@ static enum pc_gate_state pc_gate_one(struct pc_run *r, const char *gate,
         return PC_GATE_REFUSED;
     }
     pc_capture_windows_success(r, gate);
-    if (!strcmp(gate, PC_STRICT_GATE) &&
-        (strstr(r->out, "changed capability: WARNING") || strstr(r->out, "changed capability: UNPROVEN"))) {
-        char advisory[PC_TEXT_CAP];
-        (void)snprintf(advisory, sizeof advisory, "%s", r->out);
-        (void)json_push_kv_str(&reply->data, "precheck_advisory", advisory);
-    }
+    if (!strcmp(gate, PC_STRICT_GATE)) pc_capability_advisory(r, reply);
     r->ran[r->nran++] = gate;
     return PC_GATE_RAN;
 }

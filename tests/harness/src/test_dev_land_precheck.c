@@ -1436,7 +1436,7 @@ static bool dlx_pc_strict_rig(struct dlx_rig *rig, int mode)
         ("proof-compile-changed:\n\t@echo \"tests/harness/src/t.c:7:5: error: ignoring "
          "return value of fread [-Werror=unused-result]\"; exit 1\n"),
         "other-target:\n\t@echo older lane Makefile\n",
-        "proof-compile-changed:\n\t@echo changed capability: WARNING candidate requires review\n"};
+        "proof-compile-changed:\n\t@printf \"%02000d\\n\" 0; echo \"changed capability: WARNING engine/example.c uses CAP_FS_READ via fopen\"\n"};
     char path[1400];
     if (!dlx_pc_rig(rig, tag[mode], true, "check-core-seal\n"))
         return false;
@@ -1467,7 +1467,7 @@ static bool dlx_pc_strict_case(int mode)
     else if (mode == 1 || mode == 4)
         ok = ok && dlx_ok(&c) &&
              dlx_pc_has(dlx_arr(&c, "precheck_ran"), "proof-compile-changed") &&
-             (mode != 4 || strstr(dlx_str(&c, "precheck_advisory"), "changed capability: WARNING") != NULL);
+             (mode != 4 || (strstr(dlx_str(&c, "precheck_advisory"), "engine/example.c uses CAP_FS_READ via fopen") != NULL && strlen(dlx_str(&c, "precheck_advisory")) < 512));
     else
         ok = ok && dlx_ok(&c) &&
              dlx_pc_has(dlx_arr(&c, "precheck_skipped"), "proof-compile-changed") &&

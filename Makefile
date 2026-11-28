@@ -18576,7 +18576,7 @@ proof-compile-changed:
 PROOF_COMPILE_SKIPPED = $(strip $(filter-out $(TEST_PARALLEL_FAST_SRCS),$(CHANGED_TU)))
 PROOF_COMPILE_OBJS = $(patsubst %.c,$(TEST_FAST_OBJ_DIR)/%.o,$(filter $(CHANGED_TU),$(TEST_PARALLEL_FAST_SRCS)))
 proof-compile-changed-locked: $(PROOF_COMPILE_OBJS) $(LINTC_TOOL)
-	@./$(LINTC_TOOL) check-capability-changed $(foreach f,$(filter engine/%.c,$(filter $(TEST_PARALLEL_FAST_SRCS),$(CHANGED_TU))),$(f) $(TEST_FAST_OBJ_DIR)/$(f:.c=.o))
+	$(if $(filter engine/%.c,$(CHANGED_TU)),@./$(LINTC_TOOL) check-capability-changed $(foreach f,$(filter engine/%.c,$(filter $(TEST_PARALLEL_FAST_SRCS),$(CHANGED_TU))),$(f) $(TEST_FAST_OBJ_DIR)/$(f:.c=.o)),@:)
 	$(if $(filter engine/%.c,$(PROOF_COMPILE_SKIPPED)),@echo "changed capability: UNPROVEN skipped $(filter engine/%.c,$(PROOF_COMPILE_SKIPPED))",@:)
 	@echo "proof-compile-changed: OK ($(words $(PROOF_COMPILE_OBJS)) changed TU(s) compiled under the proof profile$(if $(PROOF_COMPILE_SKIPPED),; NOT checked (outside the test-fast set): $(PROOF_COMPILE_SKIPPED)))"
 

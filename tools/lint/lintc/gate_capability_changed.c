@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+static char changed_first[CCD_PATH + 256];
+
 /* Use the declaration union: a conditional arm not selected by this proof
  * profile must never become a false hard rejection here. Full closure chooses
  * the exact host arm and remains the authority for symmetry and coverage. */
@@ -20,6 +22,9 @@ static int changed_check(const char *source, const struct ccd_nm *nm,
         if (strcmp(r->type, "U") && strcmp(r->type, "w") && strcmp(r->type, "v")) continue;
         const char *cls = ccd_map_get(symbols, r->name);
         if (!cls || !strcmp(cls, "CAP_HARMLESS") || (granted && ccd_grants(granted, cls))) continue;
+        if (!changed_first[0])
+            (void)snprintf(changed_first, sizeof changed_first, "%s uses %s via %s",
+                           source, cls, r->name);
         fprintf(stderr, "changed capability: %s reaches %s via %s without a declaration\n",
                 source, cls, r->name);
         bad = 1;
@@ -63,6 +68,7 @@ int check_capability_changed_run(int argc, char **argv)
         fputs("changed capability: UNPROVEN cannot load capability tables\n", stderr);
         ccd_map_free(&symbols); ccd_mods_free(&modules); return 0;
     }
+    changed_first[0] = 0;
     int bad = 0, unproven = 0;
     for (int i = 0; i < argc; i += 2) {
         if (strncmp(argv[i], "engine/", 7)) { ++unproven; continue; }
@@ -74,7 +80,8 @@ int check_capability_changed_run(int argc, char **argv)
     int sig = lsc_pending();
     if (sig) lsc_finish(sig);
     if (bad || unproven)
-        fprintf(stderr, "changed capability: WARNING %d need review, %d unproven; test profile may differ from release\n", bad, unproven);
+        fprintf(stderr, "changed capability: WARNING %d need review, %d unproven; %s; test profile may differ from release\n",
+                bad, unproven, changed_first[0] ? changed_first : "object unavailable");
     else printf("changed capability: checked %d compiled engine object(s)\n", argc / 2);
     return 0;
 }
