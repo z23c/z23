@@ -252,6 +252,26 @@ static bool check_funded_view(const uint8_t *s, const struct ironwood_instance_r
         !ironwood_instance_project(&v, 1, &actual);
 }
 
+static bool check_pallas_encodings(const uint8_t *original)
+{
+    static const char modulus[] = "01000000ed302d991bf94c09fc98462200000000000000000000000000000040";
+    static const char opposite_y[] = "d77d8b3223bfc4f08504d2de7ee2bcc2a8310aa7abb72b09a340f1fffaf85811";
+    uint8_t s[V6_IRONWOOD_STATEMENT_SIZE], expected[32];
+    struct ironwood_instance_rows out, saved, opposite;
+    if (!ironwood_instance_from_statement(original, V6_IRONWOOD_STATEMENT_SIZE, &out)) return false;
+    memcpy(s, original, sizeof s); s[63] ^= 0x80;
+    if (!ironwood_instance_from_statement(s, sizeof s, &opposite) ||
+        !zcl_hex_decode(opposite_y, expected, sizeof expected) ||
+        memcmp(out.row[1], opposite.row[1], 32) || memcmp(opposite.row[2], expected, 32)) return false;
+    memcpy(&saved, &out, sizeof out);
+    memcpy(s, original, sizeof s);
+    if (!zcl_hex_decode(modulus, s + 32, 32) ||
+        ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    memset(s + 32, 0, 32); s[32] = 2; /* x^3+5 is a non-square in Pallas Fp. */
+    return !ironwood_instance_from_statement(s, sizeof s, &out) &&
+        !memcmp(&out, &saved, sizeof out);
+}
+
 static bool check_funded_controls(const uint8_t *original)
 {
     uint8_t s[V6_IRONWOOD_STATEMENT_SIZE];
@@ -300,7 +320,7 @@ static bool check_funded_instance(void)
         !ironwood_instance_from_statement(s, sizeof s, &got)) return false;
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
-    return check_funded_view(s, &got) && check_funded_controls(s);
+    return check_funded_view(s, &got) && check_funded_controls(s) && check_pallas_encodings(s);
 }
 
 static bool check_instance_refusals(void)
@@ -341,6 +361,41 @@ static bool check_funded_second_instance(void)
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
     return check_funded_view(s, &got);
+}
+
+/* Structurally serialized v6 frame using the public funded action slices;
+ * ciphertexts, proof and signatures are synthetic and are not validated. */
+static bool check_two_action_instance(void)
+{
+    static const char *statements[] = {
+        "c54832e4998cf9088b77703c858865e752241c1c0115909caeeffaf1396e370e"
+        "59c10b7aa34e715e59c4d1642054c53ac61e1ac7aa8f5b650eb55b4b68d4553f"
+        "20aa0b094b3bef6b52674892a038108ac022b7eba02ced6f5cb8345e7251600e"
+        "99811e9ee44526e3f9713a61599610de79b5cc99459e2e47d523edf7c34a9634"
+        "5f6284a9465b1fd2c73495aee25b437da7781fc31de6e01a06e25d936345eb09010100",
+        "c54832e4998cf9088b77703c858865e752241c1c0115909caeeffaf1396e370e"
+        "6040aaadabcee434225ed88c72fe893488c9be4c0986ea934fc36d8a05a9c52c"
+        "16cbac01db396328cf81c873fe12cc4e77e6233a2a67c89bc6ee81faba151919"
+        "c34f9b620a939918a1c81907e072d15961200afdf9fe05b9c44fd6006abace38"
+        "75f7a99688cc5939df2646f9eb7e1be51c60b2d84e728dff790bf1807f72963a010100"
+    };
+    enum { ACTIONS_START = 26, FLAGS = ACTIONS_START + 2 * 820,
+           ANCHOR = FLAGS + 9, SIZE = ANCHOR + 32 + 1 + 2 * 64 + 64 };
+    uint8_t wire[SIZE] = {0}, s[2][V6_IRONWOOD_STATEMENT_SIZE];
+    for (size_t i = 0; i < 2; ++i)
+        if (!zcl_hex_decode(statements[i], s[i], sizeof s[i])) return false;
+    memcpy(wire, empty, 25); wire[25] = 2;
+    for (size_t i = 0; i < 2; ++i) memcpy(wire + ACTIONS_START + 820 * i, s[i] + 32, 128);
+    wire[FLAGS] = 7; memcpy(wire + ANCHOR, s[0], 32);
+    struct v6_wire_view v;
+    if (v6_wire_parse(wire, sizeof wire, &v) != V6_WIRE_OK || v.ironwood.count != 2) return false;
+    for (size_t i = 0; i < 2; ++i) {
+        struct ironwood_instance_rows expected, actual;
+        if (!ironwood_instance_from_statement(s[i], sizeof s[i], &expected) ||
+            !ironwood_instance_project(&v, i, &actual) || memcmp(&actual, &expected, sizeof actual))
+            return false;
+    }
+    return true;
 }
 
 static bool check_statement_views(void)
@@ -499,6 +554,7 @@ int test_transaction_v6_inspect(void)
     if (!check_statement_views()) ++failures;
     if (!check_funded_instance()) ++failures;
     if (!check_funded_second_instance()) ++failures;
+    if (!check_two_action_instance()) ++failures;
     if (!check_instance_refusals()) ++failures;
     if (!check_empty_view()) ++failures;
     if (!check_empty_digests()) ++failures;
