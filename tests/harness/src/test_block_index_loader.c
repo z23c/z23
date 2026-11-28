@@ -1144,7 +1144,11 @@ static int bil_flat_arena_reage_case(void)
                "pass2 %zu bytes / %zu pages\n", fake_height,
                (long long)fake_clock_ms, p1.aged, p1.present,
                present_refaulted, p2.aged, p2.present);
-        (void)pass1_sum; (void)refault_sum; (void)pass2_sum;
+        unsigned expected_sum = (unsigned)(chain_n * (chain_n - 1) / 2);
+        BIL_CHECK("bil: each re-age walk visits every chain height",
+                  refault_sum == expected_sum &&
+                  pass1_sum == expected_sum + (unsigned)(chain_n - 1) &&
+                  pass2_sum == pass1_sum);
 
         char path[512];
         snprintf(path, sizeof(path), "%s/block_index.bin", tmpdir);
