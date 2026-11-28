@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_merkle_crh.h"
 #include "ironwood_pasta_internal.h"
+#include "ironwood_sinsemilla_internal.h"
 #include "crypto/sha256.h"
 #include <openssl/bn.h>
 #include <openssl/ec.h>
@@ -23,7 +24,6 @@ struct zcl_result ironwood_merkle_parameters_validate(const uint8_t *p, size_t s
 }
 /* Upstream incomplete addition returns bottom for either identity or equal x.
  * An OpenSSL error is separate from this mathematical bottom. */
-enum addition_status { ADD_ERROR, ADD_BOTTOM, ADD_OK };
 static enum addition_status incomplete_add(const EC_GROUP *g, BN_CTX *ctx,
     EC_POINT *out, const EC_POINT *a, const EC_POINT *b, EC_POINT *neg)
 {
@@ -51,15 +51,16 @@ static unsigned piece(unsigned index, unsigned level, const uint8_t left[32], co
     for (unsigned i = 0; i < 10; ++i) value |= message_bit(index * 10 + i, level, left, right) << i;
     return value;
 }
-static enum addition_status hash_points(const EC_GROUP *g, BN_CTX *ctx, EC_POINT *acc,
-    const uint8_t *p, unsigned level, const uint8_t left[32], const uint8_t right[32])
+enum addition_status ironwood_sinsemilla_hash_points(const EC_GROUP *g, BN_CTX *ctx, EC_POINT *acc,
+    const uint8_t *p, const uint8_t q[32], const uint16_t *pieces, size_t count)
 {
     EC_POINT *s = EC_POINT_new(g), *tmp = EC_POINT_new(g), *neg = EC_POINT_new(g);
     enum addition_status result = s && tmp && neg ? ADD_OK : ADD_ERROR;
-    if (result == ADD_OK && !ironwood_pasta_decode(p, IRONWOOD_PALLAS, false, g, acc, ctx).ok)
+    if (result == ADD_OK && !ironwood_pasta_decode(q, IRONWOOD_PALLAS, false, g, acc, ctx).ok)
         result = ADD_ERROR;
-    for (unsigned i = 0; result == ADD_OK && i < 52; ++i) {
-        unsigned n = piece(i, level, left, right);
+    for (size_t i = 0; result == ADD_OK && i < count; ++i) {
+        unsigned n = pieces[i];
+        if (n >= 1024) { result = ADD_ERROR; break; }
         if (!ironwood_pasta_decode(p + (n + 1) * 32, IRONWOOD_PALLAS, false, g, s, ctx).ok) {
             result = ADD_ERROR; break;
         }
@@ -69,6 +70,13 @@ static enum addition_status hash_points(const EC_GROUP *g, BN_CTX *ctx, EC_POINT
     }
     EC_POINT_free(neg); EC_POINT_free(tmp); EC_POINT_free(s);
     return result;
+}
+static enum addition_status hash_points(const EC_GROUP *g, BN_CTX *ctx, EC_POINT *acc,
+    const uint8_t *p, unsigned level, const uint8_t left[32], const uint8_t right[32])
+{
+    uint16_t pieces[52];
+    for (unsigned i = 0; i < 52; ++i) pieces[i] = (uint16_t)piece(i, level, left, right);
+    return ironwood_sinsemilla_hash_points(g, ctx, acc, p, p, pieces, 52);
 }
 static bool merkle_inputs_valid(unsigned level, const uint8_t left[32], const uint8_t right[32],
                                 const uint8_t *parameters, size_t parameters_size, const uint8_t *out)

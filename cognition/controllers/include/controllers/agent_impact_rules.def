@@ -3773,3 +3773,4 @@ AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_point.c|engine/services/s
 AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_agreement.c|engine/services/src/ironwood_pallas_agreement.h|tests/harness/src/test_ironwood_pallas_agreement.c|tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "ironwood_pallas_agreement")
 
 AGENT_IMPACT_RULE("tools/z23_ironwood_template_worker.c|tests/harness/src/test_ironwood_template_worker.c|tests/fixtures/ironwood/gbt-coinbase-template.json", "ironwood_template_worker")
+AGENT_IMPACT_RULE("engine/services/src/ironwood_merkle_crh.c|engine/services/src/ironwood_note_commitment.c|engine/services/include/services/ironwood_note_commitment.h|engine/services/src/ironwood_sinsemilla_internal.h|tests/harness/src/test_ironwood_note_commitment.c", "ironwood_note_commitment ironwood_merkle_crh")

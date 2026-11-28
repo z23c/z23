@@ -1667,3 +1667,5 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_pending_restore.c", CA
 
 ZCL_MODULE_CAPABILITY("engine/services/src/ironwood_ipa.c", CAP_FS_WRITE, "Checked allocation can write a failure diagnostic; the coefficient computation performs no file operations.")
 ZCL_MODULE_CAPABILITY("engine/services/src/ironwood_spend_auth.c", CAP_RANDOM, "OpenSSL point multiplication reaches its random blinding machinery while checking public signatures.")
+
+ZCL_MODULE_CAPABILITY("engine/services/src/ironwood_note_commitment.c", CAP_RANDOM, "OpenSSL point multiplication may use random blinding for public research inputs.")
