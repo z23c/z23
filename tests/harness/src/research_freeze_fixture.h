@@ -11,7 +11,8 @@ static const char rf_digest[] =
 struct rf_fixture {
     struct rnf node;
     char parent[PATH_MAX + 32], network[PATH_MAX + 64];
-    char address[128];
+    char address[128], shielded[256], restart_shielded[256];
+    char deposit_hex[16384];
 };
 
 static bool rf_file(const char *path, const char *data, size_t len)
@@ -45,7 +46,7 @@ static bool rf_catalog(struct rf_fixture *f)
 static bool rf_start(struct rf_fixture *f)
 {
     char dd[PATH_MAX + 80], p2p[32], rpc[32], pin[96], log[PATH_MAX + 32];
-    char home[PATH_MAX + 16], cred[PATH_MAX + 48];
+    char home[PATH_MAX + 16], cred[PATH_MAX + 48], params[PATH_MAX + 32];
     snprintf(dd, sizeof(dd), "-datadir=%s", f->parent);
     snprintf(p2p, sizeof(p2p), "-port=%u", f->node.port[0]);
     snprintf(rpc, sizeof(rpc), "-rpcport=%u", f->node.port[1]);
@@ -53,6 +54,9 @@ static bool rf_start(struct rf_fixture *f)
     snprintf(log, sizeof(log), "%s/node.log", f->node.work);
     snprintf(home, sizeof(home), "HOME=%s", f->node.work);
     snprintf(cred, sizeof(cred), "CREDENTIALS_DIRECTORY=%s", f->node.cred);
+    const char *source_home = getenv("HOME");
+    if (!source_home || snprintf(params, sizeof(params), "-paramsdir=%s/.zcash-params",
+                                 source_home) >= (int)sizeof(params)) return false;
     pid_t parent = getpid(), pid = fork();
     if (pid < 0) return false;
     if (!pid) {
@@ -62,7 +66,7 @@ static bool rf_start(struct rf_fixture *f)
         if (fd < 0) _exit(127);
         dup2(fd, 1); dup2(fd, 2); close(fd);
         char *const env[] = {home, "PATH=/usr/bin:/bin", cred, NULL};
-        execle(RNF_BIN, RNF_BIN, "-testnet-profile=ironwood", pin, dd, p2p, rpc,
+        execle(RNF_BIN, RNF_BIN, "-testnet-profile=ironwood", pin, dd, p2p, rpc, params,
               "-operator-lane=dev", "-private-listeners", "-bind=127.0.0.1",
               "-no-tor", "-wallet-no-phrase-backup", "-walletbackup=0",
               "-nobgvalidation", "-showmetrics=0", "-packagehost=0",
