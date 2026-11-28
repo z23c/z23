@@ -36,6 +36,23 @@ static bool pin_write(const char *path, const char *bytes, size_t n)
     return ok;
 }
 
+static int selected_release_schedules(const struct miner_signal_catalog_pin *pin,
+                                      const uint8_t expected[32])
+{
+    struct miner_signal_schedule first = {0}, second = {0};
+    CAT_CHECK(miner_signal_catalog_pin_select(pin, 0, &first).ok);
+    CAT_CHECK(miner_signal_catalog_pin_select(pin, 1, &second).ok);
+    CAT_CHECK(first.start == 121 && first.window == 20 && first.activation == 143 &&
+              first.slot == 0 && first.slots == 2);
+    CAT_CHECK(second.start == 121 && second.window == 20 && second.activation == 144 &&
+              second.slot == 1 && second.slots == 2);
+    CAT_CHECK(miner_signal_required_votes(first.window) == 19 &&
+              miner_signal_required_votes(second.window) == 19);
+    CAT_CHECK(!memcmp(first.catalog, expected, 32) &&
+              !memcmp(second.catalog, expected, 32));
+    return 0;
+}
+
 /* Load the tracked release ballot through the real digest-bound loader. */
 static int selected_release_catalog_cases(void)
 {
@@ -63,20 +80,11 @@ static int selected_release_catalog_cases(void)
     CAT_CHECK(pin_write(path, manifest, n) && pin_write(wrong_path, manifest, n));
     struct miner_signal_catalog_pin pin = {0};
     CAT_CHECK(miner_signal_catalog_pin_load(dir, expected, genesis, &pin).ok);
-    struct miner_signal_schedule first = {0}, second = {0};
-    CAT_CHECK(miner_signal_catalog_pin_select(&pin, 0, &first).ok);
-    CAT_CHECK(miner_signal_catalog_pin_select(&pin, 1, &second).ok);
-    CAT_CHECK(first.start == 121 && first.window == 20 && first.activation == 143 &&
-              first.slot == 0 && first.slots == 2);
-    CAT_CHECK(second.start == 121 && second.window == 20 && second.activation == 144 &&
-              second.slot == 1 && second.slots == 2);
-    CAT_CHECK(miner_signal_required_votes(first.window) == 19 &&
-              miner_signal_required_votes(second.window) == 19);
-    CAT_CHECK(!memcmp(first.catalog, expected_bytes, 32) &&
-              !memcmp(second.catalog, expected_bytes, 32));
-    struct miner_signal_catalog_pin before = pin;
+    CAT_CHECK(selected_release_schedules(&pin, expected_bytes) == 0);
+    uint8_t before[sizeof(pin)];
+    memcpy(before, &pin, sizeof(pin));
     CAT_CHECK(!miner_signal_catalog_pin_load(dir, mismatch, genesis, &pin).ok);
-    CAT_CHECK(!memcmp(&pin, &before, sizeof(pin)));
+    CAT_CHECK(!memcmp(&pin, before, sizeof(pin)));
     CAT_CHECK(unlink(path) == 0 && unlink(wrong_path) == 0 && rmdir(ballots) == 0);
     test_cleanup_tmpdir(dir);
     return 0;
