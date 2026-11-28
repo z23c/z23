@@ -6,6 +6,7 @@
 #include <stdint.h>
 enum ironwood_pasta_curve { IRONWOOD_PALLAS, IRONWOOD_VESTA };
 struct zcl_result ironwood_pasta_fp_canonical(const uint8_t bytes[32]);
+struct zcl_result ironwood_pasta_vesta_modulus(uint8_t out[32]);
 struct zcl_result ironwood_pasta_point(const uint8_t bytes[32], enum ironwood_pasta_curve curve,
                                        bool allow_identity, uint8_t affine[64]);
 #endif

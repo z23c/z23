@@ -17,4 +17,11 @@ struct zcl_result ironwood_instance_from_statement(const uint8_t *statement, siz
  * input view or its backing bytes. This is not proof or transaction validation. */
 struct zcl_result ironwood_instance_project(const struct v6_wire_view *view, uint64_t action,
                                             struct ironwood_instance_rows *out);
+/* Compute sum(rows[i] * basis[i]) + w for public data. The ten ordered
+ * nonidentity Vesta bases and w are caller-supplied; this does not authenticate
+ * parameters or verify a proof. Output is a compressed Pasta point and is
+ * unchanged on failure. Output must not overlap any input object. */
+struct zcl_result ironwood_instance_commitment(const struct ironwood_instance_rows *rows,
+                                                const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
+                                                const uint8_t w[32], uint8_t out[32]);
 #endif

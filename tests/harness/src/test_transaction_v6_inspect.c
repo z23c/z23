@@ -291,6 +291,52 @@ static bool check_funded_controls(const uint8_t *original)
     return !memcmp(out.row[1], zero, 32) && !memcmp(out.row[2], zero, 32);
 }
 
+static bool check_commitment_refusals(const struct ironwood_instance_rows *rows,
+                                      uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], uint8_t w[32],
+                                      uint8_t out[32])
+{
+    uint8_t saved[32], original[32]; memcpy(saved, out, 32); memcpy(original, basis[3], 32);
+    memset(basis[3], 0, 32);
+    if (ironwood_instance_commitment(rows, basis, w, out).ok || memcmp(out, saved, 32)) return false;
+    memset(basis[3], 0xff, 32);
+    if (ironwood_instance_commitment(rows, basis, w, out).ok || memcmp(out, saved, 32)) return false;
+    memcpy(basis[3], original, 32); memset(w, 0, 32);
+    if (ironwood_instance_commitment(rows, basis, w, out).ok || memcmp(out, saved, 32)) return false;
+    memcpy(w, original, 32); /* Valid point; the scalar refusal precedes its use. */
+    struct ironwood_instance_rows bad = *rows;
+    memset(bad.row[0], 0xff, 32);
+    return !ironwood_instance_commitment(&bad, basis, w, out).ok && !memcmp(out, saved, 32);
+}
+
+/* Pinned upstream Halo2 0.4.0 k=11 basis and funded two-action transcript;
+ * R1 ironwood-instance-commit.kRFCL9qn/{basis-11-and-w.hex,commitments.txt}. */
+static bool check_instance_commitment(const struct ironwood_instance_rows *rows, const char *want)
+{
+    static const char *points[] = {
+        "d8e88412dad928ab63cf8d2532aea6f5b118e3af01091721172c81a568757882",
+        "5d1232a1a28cd09dffeec96ea2113ed77971720c6fe715b4f7ec35d98967eb9e",
+        "fdd970bc80e05e71fe3c91ddd7d5150dd5acffb8c5a22ba0f8abb661215e9f8a",
+        "cd935c612a14c155f78fd01cfe28a09f6ccb123ed459868597b5270aa4440b2a",
+        "cdd404a09bc2d634cfb64ef2990b9f377cd9f2c8a476bbf29e827dae2723931e",
+        "7427839a4ad1fa088800c46f94d08d83c44d212932488547da8b4f9bb9bce38c",
+        "3f41f0b32db4be5ce9343fce46bae7e5e7d19099d3c4ac9ae85af2727fda1e15",
+        "08feea323aaebd690f8f397c0d5a1390a410db18a5c47245241905a71b084d3e",
+        "b5a4e78ecd3d2025a7e94792dc9b0a5a90dac3b8d03855147a7a46f8289df6a8",
+        "8e9fda732d7be75897c1cff1631f05da6fbc405bdb1e5eb4aae62bad9737a490",
+        "7520d96f3e5cd41760367151608b54821883c10c4b9a4ff2beae227bef94bcab"
+    };
+    uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], out[32], expected[32];
+    for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
+        if (!zcl_hex_decode(points[i], basis[i], 32)) return false;
+    if (!zcl_hex_decode(points[10], w, 32) || !zcl_hex_decode(want, expected, 32) ||
+        !ironwood_instance_commitment(rows, basis, w, out).ok || memcmp(out, expected, 32)) return false;
+    struct ironwood_instance_rows zero = {0};
+    uint8_t zero_result[32];
+    if (!ironwood_instance_commitment(&zero, basis, w, zero_result).ok ||
+        memcmp(zero_result, w, 32)) return false;
+    return check_commitment_refusals(rows, basis, w, out);
+}
+
 /* Funded reopened spend, Orchard 0.16.0 PostNu6_3 to_halo2_instance;
  * R1 ironwood-vk-repro.RZfQAkV6/rows-run2.log, action zero. */
 static bool check_funded_instance(void)
@@ -320,7 +366,8 @@ static bool check_funded_instance(void)
         !ironwood_instance_from_statement(s, sizeof s, &got).ok) return false;
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
-    return check_funded_view(s, &got) && check_funded_controls(s) && check_pallas_encodings(s);
+    return check_funded_view(s, &got) && check_funded_controls(s) && check_pallas_encodings(s) &&
+        check_instance_commitment(&got, "e55fe4c155c0e04e28e3a39aaa06ec5a77c27eea1aab0c529391e7b2a12fb9a0");
 }
 
 static bool check_instance_refusals(void)
@@ -360,7 +407,8 @@ static bool check_funded_second_instance(void)
         !ironwood_instance_from_statement(s, sizeof s, &got).ok) return false;
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
-    return check_funded_view(s, &got);
+    return check_funded_view(s, &got) &&
+        check_instance_commitment(&got, "273cf53ff47191c5a7a25ba8e3a8df751b1b4933500b3653ff54ccd8b94f95a0");
 }
 
 /* Structurally serialized v6 frame using the public funded action slices;

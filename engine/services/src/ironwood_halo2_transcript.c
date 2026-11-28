@@ -17,6 +17,14 @@ static const struct arith_uint256 vesta_base_modulus = { .pn = {
     0, 0, 0, 0x40000000u
 }};
 
+struct zcl_result ironwood_pasta_vesta_modulus(uint8_t out[32])
+{
+    if (!out) return ZCL_ERR(-1, "Missing Vesta modulus output");
+    for (size_t i = 0; i < 32; ++i)
+        out[i] = (uint8_t)(vesta_base_modulus.pn[i / 4] >> ((i % 4) * 8));
+    return ZCL_OK;
+}
+
 static bool field_canonical(const uint8_t bytes[32], const struct arith_uint256 *modulus)
 {
     struct arith_uint256 value = {0};
