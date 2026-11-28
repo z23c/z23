@@ -37,10 +37,21 @@ static bool genesis_matches(const struct block_index *bi)
         uint256_eq(bi->phashBlock, &research->chain->consensus.hashGenesisBlock);
 }
 
+static bool genesis_transaction_shape(const struct transaction *tx)
+{
+    if (tx->overwintered || tx->version != 1 || tx->num_vin != 1 || !tx->vin ||
+        tx->num_vout != 1 || !tx->vout) return false;
+    return tx->vin[0].script_sig.size <= MAX_SCRIPT_SIZE &&
+        tx->vout[0].script_pub_key.size <= MAX_SCRIPT_SIZE &&
+        !tx->num_joinsplit && !tx->num_shielded_spend && !tx->num_shielded_output &&
+        !tx->value_balance && !tx->v6_wire.size && !tx->v6_wire.data;
+}
+
 static bool genesis_body_matches(const struct block_index *bi, const struct block *block)
 {
     if (!genesis_matches(bi) || block->header.nSolutionSize > MAX_SOLUTION_SIZE ||
-        block->num_vtx != 1 || !block->vtx) return false;
+        block->num_vtx != 1 || !block->vtx || !genesis_transaction_shape(block->vtx) ||
+        !uint256_eq(&block->vtx->hash, &block->header.hashMerkleRoot)) return false;
     const struct chain_research_descriptor *profile = chain_research_profile_current();
     struct byte_stream wire;
     stream_init(&wire, profile->genesis_wire_len);
