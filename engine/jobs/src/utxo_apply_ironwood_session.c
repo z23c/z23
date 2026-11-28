@@ -69,6 +69,20 @@ static bool empty_root(uint8_t root[32])
     return ironwood_note_frontier_extend(&empty, NULL, 0, params, size, root).ok;
 }
 
+static enum utxo_ironwood_result seed_store(struct sqlite3 *db, const struct block_index *bi)
+{
+    if (!genesis_matches(bi) && !(bi->nHeight == 1 && genesis_matches(bi->pprev)))
+        return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
+    uint8_t root[32], zero[32] = {0};
+    if (!empty_root(root) || !ironwood_checkpoint_begin_replay(db, zero, root))
+        return UTXO_IRONWOOD_LOCAL_ERROR;
+    if (!ironwood_checkpoint_refresh(db, &store)) return UTXO_IRONWOOD_LOCAL_ERROR;
+    if (bi->nHeight == 1 && !ironwood_checkpoint_append(&store, 0,
+            bi->pprev->phashBlock->data, zero, root, 0, NULL, 0))
+        return UTXO_IRONWOOD_LOCAL_ERROR;
+    return UTXO_IRONWOOD_OK;
+}
+
 static enum utxo_ironwood_result open_store(struct sqlite3 *db, const struct block_index *bi)
 {
     if (store.audited && store.db == db) {
@@ -86,18 +100,7 @@ static enum utxo_ironwood_result open_store(struct sqlite3 *db, const struct blo
     utxo_ironwood_session_reset();
     enum ironwood_checkpoint_probe_result probe = ironwood_checkpoint_probe(db);
     if (probe == IRONWOOD_CHECKPOINT_PROBE_ERROR) return UTXO_IRONWOOD_LOCAL_ERROR;
-    if (probe == IRONWOOD_CHECKPOINT_UNINITIALIZED) {
-        if (!genesis_matches(bi) && !(bi->nHeight == 1 && genesis_matches(bi->pprev)))
-            return UTXO_IRONWOOD_HISTORY_INCOMPLETE;
-        uint8_t root[32], zero[32] = {0};
-        if (!empty_root(root) || !ironwood_checkpoint_begin_replay(db, zero, root))
-            return UTXO_IRONWOOD_LOCAL_ERROR;
-        if (!ironwood_checkpoint_refresh(db, &store)) return UTXO_IRONWOOD_LOCAL_ERROR;
-        if (bi->nHeight == 1 && !ironwood_checkpoint_append(&store, 0,
-                bi->pprev->phashBlock->data, zero, root, 0, NULL, 0))
-            return UTXO_IRONWOOD_LOCAL_ERROR;
-        return UTXO_IRONWOOD_OK;
-    }
+    if (probe == IRONWOOD_CHECKPOINT_UNINITIALIZED) return seed_store(db, bi);
     return ironwood_checkpoint_refresh(db, &store) ? UTXO_IRONWOOD_OK : UTXO_IRONWOOD_LOCAL_ERROR;
 }
 
