@@ -35,6 +35,13 @@ static inline FILE *open_undo_file(const char *datadir,
     return open_disk_file(datadir, pos, "rev", read_only);
 }
 
+/* Explicit private-profile writer. The encoder must authenticate v6 model
+ * against wire; it receives a fixed-size MAX_BLOCK_SIZE stream before any
+ * file is opened. Ordinary profiles always refuse this entry point. */
+typedef bool (*block_encoder_fn)(const struct block *, struct byte_stream *);
+bool write_research_block_to_disk(struct block *b, struct disk_block_pos *pos,
+    const char *datadir, const unsigned char message_start[4], block_encoder_fn encoder);
+
 bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
                          const char *datadir,
                          const unsigned char message_start[4]);

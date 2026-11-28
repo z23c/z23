@@ -22,6 +22,8 @@
 #include "services/reducer_ingest_service.h"
 #include "services/reducer_drain.h"
 #include "services/research_rules_gate.h"
+#include "services/research_block_size.h"
+#include "chain/chainparams.h"
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "event/event.h"
@@ -269,6 +271,16 @@ static const char *reducer_body_persist_dir(
     return persist_dir[0] ? persist_dir : ctl->datadir;
 }
 
+static bool reducer_body_has_v6(const struct block *block)
+{
+    if (!block || (block->num_vtx && !block->vtx)) return false;
+    for (size_t i = 0; i < block->num_vtx; ++i) {
+        const struct transaction *tx = &block->vtx[i];
+        if (tx->version == IRONWOOD_TX_VERSION || tx->v6_wire.data || tx->v6_wire.size) return true;
+    }
+    return false;
+}
+
 static bool reducer_persist_ingested_body_locked(
         struct chain_activation_controller *ctl,
         const struct uint256 *block_hash,
@@ -337,8 +349,12 @@ static bool reducer_persist_ingested_body_locked(
 
     struct disk_block_pos pos;
     disk_block_pos_init(&pos);
-    if (!write_block_to_disk(pblock, &pos, bdir,
-                             ctl->params->pchMessageStart)) {
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    bool research = profile && chain_research_profile_current() == profile && ctl->params == profile->chain;
+    bool written = research && reducer_body_has_v6(pblock) ? write_research_block_to_disk(pblock, &pos, bdir,
+        ctl->params->pchMessageStart, research_block_write_for_size) :
+        write_block_to_disk(pblock, &pos, bdir, ctl->params->pchMessageStart);
+    if (!written) {
         LOG_WARN("reducer", "body persist write failed h=%d", bi->nHeight);
         return validation_state_error(out, "reducer-body-write-failed");
     }

@@ -4,6 +4,8 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 #include "storage/disk_block_io.h"
+#include "chain/chainparams.h"
+#include "validation/main_constants.h"
 #include "disk_block_io_internal.h"
 #include "core/serialize.h"
 #include "core/hash.h"
@@ -716,18 +718,10 @@ static void finish_block_write(struct disk_block_pos *pos, long data_pos,
     stream_free(s);
 }
 
-bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
-                         const char *datadir,
-                         const unsigned char message_start[4])
+static bool write_block_stream(struct byte_stream *s, struct disk_block_pos *pos,
+                               const char *datadir, const unsigned char message_start[4])
 {
-    /* Serialize first (outside lock) to minimize lock hold time */
-    struct byte_stream s;
-    stream_init(&s, 4096);
-    if (!block_serialize(b, &s)) {
-        stream_free(&s);
-        LOG_FAIL("disk_block_io", "write_block: block serialization failed");
-    }
-    uint32_t nSize = (uint32_t)s.size;
+    uint32_t nSize = (uint32_t)s->size;
 
     /* Hold mutex for entire file operation to prevent concurrent
      * read_block_from_disk from seeing partial writes or getting a
@@ -736,14 +730,14 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
     bool append_allocated = pos->nFile < 0;
     if (!ensure_append_block_pos(pos, nSize, datadir, append_allocated)) {
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         LOG_FAIL("disk_block_io", "write_block: append position allocation failed");
     }
 
     FILE *file = open_block_file(datadir, pos, false);
     if (!file) {
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         LOG_FAIL("disk_block_io", "write_block: open_block_file failed for file=%d", pos->nFile);
     }
 
@@ -752,7 +746,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
     if (!opened_blk_file_is_safe(file, datadir, pos, &opened, &opened_links)) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         LOG_FAIL("disk_block_io",
                  "write_block: refusing unsafe file=%d regular=%d nlink=%lu",
                  pos->nFile, S_ISREG(opened.st_mode),
@@ -761,33 +755,33 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
 
     long data_pos = 0;
     enum block_write_result write_result =
-        write_block_frame(file, message_start, nSize, &s, &data_pos);
+        write_block_frame(file, message_start, nSize, s, &data_pos);
     if (write_result == BLOCK_WRITE_FTELL_FAILED) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         LOG_FAIL("disk_block_io", "write_block: ftell failed");
     }
 
     if (write_result == BLOCK_WRITE_HEADER_FAILED) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         LOG_FAIL("disk_block_io", "write_block: fwrite header failed for file=%d", pos->nFile);
     }
 
     if (write_result == BLOCK_WRITE_DATA_POS_RANGE) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         LOG_FAIL("disk_block_io", "write_block: data position out of range (pos=%ld)", data_pos);
     }
 
     if (write_result == BLOCK_WRITE_DATA_FAILED) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
-        LOG_FAIL("disk_block_io", "write_block: fwrite block data failed (size=%zu)", s.size);
+        stream_free(s);
+        LOG_FAIL("disk_block_io", "write_block: fwrite block data failed (size=%zu)", s->size);
     }
 
     enum block_sync_result sync_result =
@@ -797,7 +791,7 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
                 strerror(errno));
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         return false;
     }
     if (sync_result == BLOCK_SYNC_DATASYNC_FAILED) {
@@ -805,12 +799,40 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
                 strerror(errno));
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
-        stream_free(&s);
+        stream_free(s);
         return false;
     }
 
-    finish_block_write(pos, data_pos, datadir, &s, file, append_allocated);
+    finish_block_write(pos, data_pos, datadir, s, file, append_allocated);
     return true;
+}
+
+bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
+                         const char *datadir, const unsigned char message_start[4])
+{
+    struct byte_stream s;
+    stream_init(&s, 4096);
+    if (!block_serialize(b, &s)) {
+        stream_free(&s);
+        LOG_FAIL("disk_block_io", "write_block: block serialization failed");
+    }
+    return write_block_stream(&s, pos, datadir, message_start);
+}
+
+bool write_research_block_to_disk(struct block *b, struct disk_block_pos *pos,
+    const char *datadir, const unsigned char message_start[4], block_encoder_fn encoder)
+{
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    if (!d || chain_research_profile_current() != d || chain_params_get() != d->chain ||
+        !b || !pos || !datadir || !message_start || !encoder ||
+        b->header.nSolutionSize > MAX_SOLUTION_SIZE || b->num_vtx > MAX_BLOCK_TRANSACTIONS ||
+        (b->num_vtx && !b->vtx)) return false;
+    unsigned char *bytes = zcl_malloc(MAX_BLOCK_SIZE, "research block encoding");
+    if (!bytes) return false;
+    struct byte_stream s = {.data = bytes, .capacity = MAX_BLOCK_SIZE};
+    if (!encoder(b, &s) || s.error || !s.size) { free(bytes); return false; }
+    s.owns_data = true;
+    return write_block_stream(&s, pos, datadir, message_start);
 }
 
 bool read_block_from_disk(struct block *b, const struct disk_block_pos *pos,

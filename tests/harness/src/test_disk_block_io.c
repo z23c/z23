@@ -3,6 +3,8 @@
 
 #include "test/test_core.h"
 #include "storage/disk_block_io.h"
+#include "services/research_block_size.h"
+#include "primitives/transaction_v6_decode.h"
 #include "chain/chainparams.h"
 #include "primitives/block.h"
 #include "core/serialize.h"
@@ -1487,9 +1489,64 @@ static int test_restore_padded_frames(void)
 
 #include "disk_block_io_scan_network_test.h"
 
+static bool research_disk_fixture(struct block *b)
+{
+    build_test_block(b, 777);
+    struct transaction *v = realloc(b->vtx, 2 * sizeof *v); // raw-alloc-ok:test-fixture
+    if (!v) return false;
+    b->vtx = v; transaction_init(&v[1]); b->num_vtx = 2;
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", "rb");
+    if (!f) return false;
+    uint8_t wire[9313];
+    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) || !ok) return false;
+    struct byte_stream input; stream_init_from_data(&input, wire, sizeof wire);
+    return transaction_v6_decode_prefix(&v[1], &input, sizeof wire) && !stream_remaining(&input);
+}
+
+static bool research_disk_readback(struct block *b, struct disk_block_pos *pos, const char *dir)
+{
+    struct byte_stream expected; stream_init(&expected, 1024);
+    bool ok = research_block_write_for_size(b, &expected);
+    struct block decoded; block_init(&decoded);
+    if (ok) ok = read_block_from_disk_pread(&decoded, pos, dir);
+    if (ok) ok = decoded.num_vtx == 2 && decoded.vtx[1].v6_wire.size == b->vtx[1].v6_wire.size &&
+        !memcmp(decoded.vtx[1].v6_wire.data, b->vtx[1].v6_wire.data, b->vtx[1].v6_wire.size);
+    char path[512]; get_block_pos_filename(path, sizeof path, dir, pos, "blk");
+    FILE *f = ok ? fopen(path, "rb") : NULL;
+    uint8_t *actual = f ? malloc(expected.size) : NULL; // raw-alloc-ok:test-fixture
+    if (!actual || fseek(f, pos->nPos, SEEK_SET) ||
+        fread(actual, 1, expected.size, f) != expected.size || memcmp(actual, expected.data, expected.size)) ok = false;
+    if (f && fclose(f)) ok = false;
+    free(actual); block_free(&decoded); stream_free(&expected);
+    return ok;
+}
+
+static int test_research_v6_disk(void)
+{
+    char dir[256], path[512]; make_test_dir(dir, sizeof dir);
+    struct block b; bool ok = research_disk_fixture(&b);
+    struct disk_block_pos pos; disk_block_pos_init(&pos);
+    if (snprintf(path, sizeof path, "%s/blocks/blk00000.dat", dir) < 0) ok = false;
+    chain_params_select(CHAIN_MAIN);
+    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, TEST_MSG_START, research_block_write_for_size) &&
+        !write_block_to_disk(&b, &pos, dir, TEST_MSG_START) && pos.nFile < 0 && access(path, F_OK) != 0;
+    if (ok) ok = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+    if (ok) b.vtx[1].ironwood_value_balance ^= 1;
+    if (ok) ok = !write_research_block_to_disk(&b, &pos, dir, TEST_MSG_START, research_block_write_for_size) && pos.nFile < 0 && access(path, F_OK) != 0;
+    if (ok) b.vtx[1].ironwood_value_balance ^= 1;
+    if (ok) ok = write_research_block_to_disk(&b, &pos, dir, TEST_MSG_START, research_block_write_for_size) &&
+        research_disk_readback(&b, &pos, dir);
+    block_free(&b); chain_params_select(CHAIN_MAIN); cleanup_test_dir(dir);
+    if (!ok) fprintf(stderr, "FAIL: private v6 block disk round-trip\n");
+    return ok ? 0 : 1;
+}
+
 int test_disk_block_io(void)
 {
     printf("\n=== disk_block_io (pread thread safety) ===\n");
+    int research_failures = test_research_v6_disk();
+    if (research_failures) return research_failures;
     int failures = 0;
     failures += test_open_missing_file();
 #if !defined(_WIN32)
