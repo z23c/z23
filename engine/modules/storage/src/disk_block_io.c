@@ -819,14 +819,19 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
     return write_block_stream(&s, pos, datadir, message_start);
 }
 
+static bool research_writer_valid(const struct chain_research_descriptor *d,
+    const struct block *b, const struct disk_block_pos *pos, const char *datadir, block_encoder_fn encoder)
+{
+    return d && chain_research_profile_current() == d && chain_params_get() == d->chain &&
+        b && pos && datadir && encoder && b->header.nSolutionSize <= MAX_SOLUTION_SIZE &&
+        b->num_vtx <= MAX_BLOCK_TRANSACTIONS && (!b->num_vtx || b->vtx);
+}
+
 bool write_research_block_to_disk(struct block *b, struct disk_block_pos *pos,
     const char *datadir, block_encoder_fn encoder)
 {
     const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
-    if (!d || chain_research_profile_current() != d || chain_params_get() != d->chain ||
-        !b || !pos || !datadir || !encoder ||
-        b->header.nSolutionSize > MAX_SOLUTION_SIZE || b->num_vtx > MAX_BLOCK_TRANSACTIONS ||
-        (b->num_vtx && !b->vtx)) return false;
+    if (!research_writer_valid(d, b, pos, datadir, encoder)) return false;
     unsigned char *bytes = zcl_malloc(MAX_BLOCK_SIZE, "research block encoding");
     if (!bytes) return false;
     struct byte_stream s = {.data = bytes, .capacity = MAX_BLOCK_SIZE};
