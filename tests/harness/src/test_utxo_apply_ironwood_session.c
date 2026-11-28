@@ -317,7 +317,8 @@ static bool bootstrap_marker_deleted(struct session_fixture *f)
     if (ok) ok = sql(db, "BEGIN; DELETE FROM repair_marker; COMMIT");
     if (ok) {
         c = next; r = test_bootstrap_step(db, 8, &f->index[2], NULL, f, &c, &next);
-        ok = r == IRONWOOD_BOOTSTRAP_ERROR && sql(db, "ROLLBACK");
+        ok = r == IRONWOOD_BOOTSTRAP_MORE && sql(db, "COMMIT");
+        if (ok) { c = next; ok = bootstrap_finish(db, f, 8, &f->index[2], NULL, &c); }
     }
     if (sqlite3_close(db) != SQLITE_OK) ok = false;
     return ok;
@@ -511,12 +512,41 @@ static bool foreign_row_refused(struct session_fixture *f)
     utxo_ironwood_session_reset();
     memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
     ok = ok && sql(db, "BEGIN") &&
-        utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3], session_reader, NULL, f, &p) == UTXO_IRONWOOD_LOCAL_ERROR &&
-        !memcmp(&p, &before, sizeof p);
+        utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3], session_reader, NULL, f, &p) == UTXO_IRONWOOD_HISTORY_INCOMPLETE &&
+        !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
+    struct ironwood_bootstrap_cursor c = {0};
+    if (ok) ok = !bootstrap_finish(db, f, 9, &f->index[2], NULL, &c);
     if (!sqlite3_get_autocommit(db)) (void)sql(db, "ROLLBACK");
     utxo_ironwood_session_reset();
     if (sqlite3_close(db) != SQLITE_OK) ok = false;
     block_free(&body);
+    return ok;
+}
+static bool aged_prefix_repair(struct session_fixture *f)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) return false;
+    struct ironwood_bootstrap_cursor c = {0};
+    bool ok = bootstrap_finish(db, f, 10, &f->index[1], NULL, &c);
+    utxo_ironwood_session_reset();
+    struct utxo_ironwood_pending p, before;
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    if (ok) ok = sql(db, "BEGIN") &&
+        utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3],
+            session_reader, NULL, f, &p) == UTXO_IRONWOOD_HISTORY_INCOMPLETE &&
+        !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
+    c = (struct ironwood_bootstrap_cursor){0};
+    if (ok) ok = bootstrap_prefix(db, f, progress_store_epoch(), 2, &c);
+    struct ironwood_checkpoint_session store = {0};
+    int64_t tip, generation;
+    if (ok) ok = sql(db, "BEGIN") && ironwood_checkpoint_refresh(db, &store) &&
+        ironwood_checkpoint_progress(&store, &tip, &generation) && tip == 1 && sql(db, "COMMIT");
+    c = (struct ironwood_bootstrap_cursor){0};
+    if (ok) ok = bootstrap_finish(db, f, progress_store_epoch(), &f->index[2], NULL, &c);
+    if (ok) ok = bootstrap_handoff(f, db, &c);
+    if (!sqlite3_get_autocommit(db)) (void)sql(db, "ROLLBACK");
+    utxo_ironwood_session_reset();
+    if (sqlite3_close(db) != SQLITE_OK) ok = false;
     return ok;
 }
 int test_utxo_apply_ironwood_session(void)
@@ -532,6 +562,7 @@ int test_utxo_apply_ironwood_session(void)
         {"partial empty", partial_empty_refused}, {"partial populated", partial_populated_refused},
         {"corruption", corruption_refused},
         {"foreign checkpoint row", foreign_row_refused},
+        {"aged checkpoint prefix", aged_prefix_repair},
     };
     bool ok = true;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
