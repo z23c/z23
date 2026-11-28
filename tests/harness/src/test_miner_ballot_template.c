@@ -119,6 +119,16 @@ static bool bt_retained_sapling_root(struct block *block, const struct chain_par
         uint256_eq(&block->header.hashFinalSaplingRoot, &expected);
 }
 
+static bool bt_fit_count_matches(size_t limit, size_t actual, size_t count)
+{
+    return limit == 200000 ? actual < count : actual == count;
+}
+
+static bool bt_fit_size_matches(size_t limit, size_t bound)
+{
+    return limit <= 200000 || bound > 200000;
+}
+
 static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, bool zero_fee, bool sapling,
                                 size_t limit)
 {
@@ -154,8 +164,7 @@ static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, b
     bt.tx_fees[0] = zero_fee ? 0 : -(int64_t)(count - 1);
     if (!zero_fee) bt.block.vtx[0].vout[0].value += (int64_t)(count - 1);
     BT_CHECK(miner_research_template_fit(&bt, d->chain, 1, ballot, limit, false).ok);
-    if (limit == 200000) BT_CHECK(bt.block.num_vtx < count);
-    else BT_CHECK(bt.block.num_vtx == count);
+    BT_CHECK(bt_fit_count_matches(limit, bt.block.num_vtx, count));
     BT_CHECK(bt.num_entries == bt.block.num_vtx);
     BT_CHECK(bt.block.vtx[0].vout[0].value == 42 + (zero_fee ? 0 : (int64_t)bt.num_entries - 1));
     BT_CHECK(bt.tx_fees[0] == (zero_fee ? 0 : -(int64_t)(bt.num_entries - 1)));
@@ -166,7 +175,7 @@ static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, b
     equihash_params_init(&ep, chain_params_equihash_n(d->chain, 1), chain_params_equihash_k(d->chain, 1));
     size_t bound = bt_serialized_block_bound(&bt.block, ep.solution_width);
     BT_CHECK(bound <= limit);
-    if (limit > 200000) BT_CHECK(bound > 200000);
+    BT_CHECK(bt_fit_size_matches(limit, bound));
     if (ballot) {
         uint8_t catalog[32] = {3}, bitmap[32] = {1};
         size_t reserved = 0;
