@@ -11,6 +11,7 @@
  * no address, amount, key or txid. */
 
 #include "controllers/wallet_shield_address.h"
+#include "services/research_rules_tip.h"
 
 #include "controllers/wallet_send_once.h"
 #include "controllers/wallet_shielded_internal.h"
@@ -368,6 +369,12 @@ bool wallet_shield_build(struct wallet_rpc_context *ctx,
     if (!shield_key_present(ctx, p, result) ||
         !wallet_shield_assemble(p, wtx, result))
         return false; // raw-return-ok:callee-logged
+    /* Wallet preflight samples the current tip; validation decides validity. */
+    if (research_tip_deposit_frozen(research_rules_tip(), &wtx->tx)) {
+        transaction_free(&wtx->tx);
+        json_set_str(result, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain");
+        LOG_FAIL(SHIELD_TAG, "research deposit freeze active");
+    }
     if (!shield_prove(ctx, p, wtx, result)) {
         transaction_free(&wtx->tx);
         return false;

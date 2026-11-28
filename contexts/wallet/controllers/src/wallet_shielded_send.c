@@ -8,6 +8,7 @@
  * transparent-spend handling stays inline with the RPC validation flow. */
 
 #include "controllers/wallet_shielded_internal.h"
+#include "services/research_rules_tip.h"
 #include "controllers/wallet_spend_gate.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "wallet/wallet_lock.h"
@@ -992,6 +993,14 @@ static bool z_sendmany_build_transparent(struct wallet_rpc_context *ctx,
     for (size_t i = 0; i < o->num_z_out; i++)
         shielded_total += o->z_amounts[i];
     wtx.tx.value_balance = -shielded_total;
+    /* Wallet preflight samples the current tip; validation decides validity. */
+    if (research_tip_deposit_frozen(research_rules_tip(), &wtx.tx)) {
+        for (size_t i = 0; i < sel->num_selected; i++)
+            db_wallet_utxo_free(&sel->db_selected[i]);
+        transaction_free(&wtx.tx);
+        json_set_str(result, "research-deposit-freeze: new net deposits into Sapling are frozen on this chain");
+        LOG_FAIL("wallet_shielded", "z_sendmany: research deposit freeze active");
+    }
 
     /* Build Sapling output descriptions */
     if (o->num_z_out > 0) {
