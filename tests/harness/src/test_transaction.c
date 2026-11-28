@@ -1508,6 +1508,27 @@ static bool tx_v6_sapling_frame(struct byte_stream *wire)
         stream_write_compact_size(wire, 0);
 }
 
+static bool tx_v6_ironwood_frame(struct byte_stream *wire, int64_t balance)
+{
+    uint8_t action[820] = {0}, anchor[32] = {0};
+    uint8_t signature[64] = {0}, binding[64] = {0}, flags = 7;
+    stream_init(wire, 1200);
+    return tx_v6_write_header(wire) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_compact_size(wire, 1) &&
+        stream_write_bytes(wire, action, sizeof action) &&
+        stream_write_u8(wire, flags) &&
+        stream_write_i64_le(wire, balance) &&
+        stream_write_bytes(wire, anchor, sizeof anchor) &&
+        stream_write_compact_size(wire, 0) &&
+        stream_write_bytes(wire, signature, sizeof signature) &&
+        stream_write_bytes(wire, binding, sizeof binding);
+}
+
 static bool tx_v6_decode_oom(const unsigned char *data, size_t size,
                              const char *label)
 {
@@ -1634,6 +1655,107 @@ static int test_tx_v6_model_allocation_failures(void)
     return ok ? 0 : 1;
 }
 
+static bool tx_v6_ironwood_balance_case(int64_t balance, int64_t expected_out,
+                                        int64_t expected_in)
+{
+    struct byte_stream wire;
+    if (!tx_v6_ironwood_frame(&wire, balance)) return false;
+    struct byte_stream input;
+    stream_init_from_data(&input, wire.data, wire.size);
+    struct transaction tx;
+    bool ok = transaction_v6_decode_prefix(&tx, &input, wire.size) &&
+        input.read_pos == wire.size && tx.ironwood_value_balance == balance &&
+        transaction_get_value_out(&tx) == expected_out &&
+        transaction_get_shielded_value_in(&tx) == expected_in;
+    struct transaction copy;
+    bool copied = transaction_copy(&copy, &tx);
+    ok = copied && copy.ironwood_value_balance == balance &&
+        copy.v6_wire.data != tx.v6_wire.data &&
+        !memcmp(copy.v6_wire.data, tx.v6_wire.data, wire.size) && ok;
+    transaction_free(&copy);
+    transaction_free(&tx);
+    ok = tx.ironwood_value_balance == 0 && ok;
+    stream_free(&wire);
+    return ok;
+}
+
+static int test_tx_v6_ironwood_accounting(void)
+{
+    bool ok = tx_v6_ironwood_balance_case(-200000, 200000, 0) &&
+        tx_v6_ironwood_balance_case(200000, 0, 200000) &&
+        tx_v6_ironwood_balance_case(0, 0, 0) &&
+        tx_v6_ironwood_balance_case(-MAX_MONEY, MAX_MONEY, 0) &&
+        tx_v6_ironwood_balance_case(MAX_MONEY, 0, MAX_MONEY);
+    printf("transaction v6 Ironwood balance accounting and deep copy... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static bool tx_v6_ironwood_nonzero_prior_total(void)
+{
+    struct transaction tx;
+    transaction_init(&tx);
+    tx.value_balance = 1;
+    tx.ironwood_value_balance = INT64_MAX;
+    bool rejected = transaction_get_shielded_value_in(&tx) == -1;
+    transaction_free(&tx);
+    return rejected;
+}
+
+static bool tx_v6_ironwood_invalid_spans(void)
+{
+    struct byte_stream wire;
+    if (!tx_v6_ironwood_frame(&wire, -1)) return false;
+    size_t truncated = wire.size - (32 + 1 + 64 + 64 + 1);
+    struct byte_stream input;
+    stream_init_from_data(&input, wire.data, truncated);
+    struct transaction tx;
+    bool ok = !transaction_v6_decode_prefix(&tx, &input, truncated) &&
+        input.read_pos == 0 && tx.ironwood_value_balance == 0;
+    transaction_free(&tx);
+    stream_free(&wire);
+
+    struct tx_in in;
+    struct tx_out out;
+    ok = tx_v6_transparent_frame(&wire, &in, &out) && ok;
+    stream_init_from_data(&input, wire.data, wire.size);
+    ok = transaction_v6_decode_prefix(&tx, &input, wire.size) &&
+        tx.ironwood_value_balance == 0 &&
+        transaction_get_value_out(&tx) == 123456789 &&
+        transaction_get_shielded_value_in(&tx) == 0 && ok;
+    transaction_free(&tx);
+    stream_free(&wire);
+    return ok;
+}
+
+static int test_tx_v6_ironwood_boundaries(void)
+{
+    static const struct {
+        int64_t balance, out, in;
+    } cases[] = {
+        {INT64_MIN, -1, 0},
+        {-(MAX_MONEY + 1), -1, 0},
+        {MAX_MONEY + 1, 0, -1},
+        {INT64_MAX, 0, -1}
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        struct transaction tx;
+        transaction_init(&tx);
+        tx.ironwood_value_balance = cases[i].balance;
+        ok = transaction_get_value_out(&tx) == cases[i].out &&
+            transaction_get_shielded_value_in(&tx) == cases[i].in && ok;
+        transaction_free(&tx);
+    }
+
+    ok = tx_v6_ironwood_nonzero_prior_total() && ok;
+
+    ok = tx_v6_ironwood_invalid_spans() && ok;
+    printf("transaction v6 Ironwood balance bounds and invalid spans... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int test_transaction(void)
 {
     int failures = 0;
@@ -1641,6 +1763,8 @@ int test_transaction(void)
     failures += test_tx_v6_wire_lifecycle();
     failures += test_tx_v6_transparent_model();
     failures += test_tx_v6_model_allocation_failures();
+    failures += test_tx_v6_ironwood_accounting();
+    failures += test_tx_v6_ironwood_boundaries();
     failures += test_tx_outpoint_alloc_and_value();
     failures += test_tx_coinbase_bloom_and_merkle_roots();
     failures += test_tx_partial_merkle_build_extract();

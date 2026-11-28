@@ -136,6 +136,7 @@ struct transaction {
     uint32_t lock_time;
     uint32_t expiry_height;
     int64_t value_balance;
+    int64_t ironwood_value_balance;
     struct spend_description *v_shielded_spend;
     size_t num_shielded_spend;
     struct output_description *v_shielded_output;
@@ -216,9 +217,10 @@ int transaction_alloc_poison_set(int fill_byte);
  * record. dst->hash is copied verbatim (NOT recomputed). */
 bool transaction_copy(struct transaction *dst, const struct transaction *src);
 
-/* Sum of transparent + Sprout outbound value: all vout values, plus
+/* Sum of transparent + shielded outbound value: all vout values, plus
  * (-value_balance) when value_balance <= 0 (value sent INTO the Sapling
- * pool), plus every joinsplit vpub_old. Returns -1 if any term or running
+ * pool), (-ironwood_value_balance) when negative, plus every joinsplit
+ * vpub_old. Returns -1 if any term or running
  * total leaves the MoneyRange [0, MAX_MONEY] (logged) — a consensus
  * overflow guard, so -1 means "reject", not a valid amount. */
 int64_t transaction_get_value_out(const struct transaction *tx);
@@ -322,8 +324,9 @@ size_t transaction_serialize_size(const struct transaction *tx);
 
 /* Shielded value flowing INTO the tx (the value side opposite
  * transaction_get_value_out): +value_balance when value_balance >= 0 (value
- * taken FROM the Sapling pool), plus every joinsplit vpub_new (value FROM the
- * Sprout pool). Returns -1 on a MoneyRange violation of any term or the
+ * taken FROM the Sapling pool), +ironwood_value_balance when positive, plus
+ * every joinsplit vpub_new (value FROM the Sprout pool). Returns -1 on a
+ * MoneyRange violation of any term or the
  * running total (logged) — a reject sentinel, not a valid amount. */
 int64_t transaction_get_shielded_value_in(const struct transaction *tx);
 

@@ -39,6 +39,7 @@ void transaction_init(struct transaction *tx)
     tx->lock_time = 0;
     tx->expiry_height = 0;
     tx->value_balance = 0;
+    tx->ironwood_value_balance = 0;
     tx->v_shielded_spend = NULL;
     tx->num_shielded_spend = 0;
     tx->v_shielded_output = NULL;
@@ -71,6 +72,7 @@ void transaction_free(struct transaction *tx)
     tx->num_shielded_spend = 0;
     tx->num_shielded_output = 0;
     tx->num_joinsplit = 0;
+    tx->ironwood_value_balance = 0;
 }
 
 /* Negative = production: element arrays are left indeterminate outside the
@@ -169,6 +171,7 @@ bool transaction_copy(struct transaction *dst, const struct transaction *src)
     dst->lock_time = src->lock_time;
     dst->expiry_height = src->expiry_height;
     dst->value_balance = src->value_balance;
+    dst->ironwood_value_balance = src->ironwood_value_balance;
 
     if (!transaction_alloc(dst, src->num_vin, src->num_vout)) {
         transaction_free(dst);
@@ -262,6 +265,17 @@ int64_t transaction_get_value_out(const struct transaction *tx)
                        (long long)neg, (long long)total);
     }
 
+    if (tx->ironwood_value_balance < 0) {
+        if (tx->ironwood_value_balance < -MAX_MONEY)
+            LOG_RETURN(-1, "tx", "ironwood_value_balance MoneyRange violation: vb=%lld",
+                       (long long)tx->ironwood_value_balance);
+        int64_t neg = -tx->ironwood_value_balance;
+        total += neg;
+        if (!MoneyRange(neg) || !MoneyRange(total))
+            LOG_RETURN(-1, "tx", "ironwood_value_balance total MoneyRange violation: total=%lld",
+                       (long long)total);
+    }
+
     for (size_t i = 0; i < tx->num_joinsplit; i++) {
         total += tx->v_joinsplit[i].vpub_old;
         if (!MoneyRange(tx->v_joinsplit[i].vpub_old) || !MoneyRange(total))
@@ -279,6 +293,15 @@ int64_t transaction_get_shielded_value_in(const struct transaction *tx)
         if (!MoneyRange(tx->value_balance) || !MoneyRange(total))
             LOG_RETURN(-1, "tx", "value_balance(in) MoneyRange violation: vb=%lld total=%lld",
                        (long long)tx->value_balance, (long long)total);
+    }
+    if (tx->ironwood_value_balance > 0) {
+        if (!MoneyRange(tx->ironwood_value_balance))
+            LOG_RETURN(-1, "tx", "ironwood_value_balance(in) MoneyRange violation: vb=%lld",
+                       (long long)tx->ironwood_value_balance);
+        total += tx->ironwood_value_balance;
+        if (!MoneyRange(total))
+            LOG_RETURN(-1, "tx", "ironwood_value_balance(in) total MoneyRange violation: total=%lld",
+                       (long long)total);
     }
     for (size_t i = 0; i < tx->num_joinsplit; i++) {
         total += tx->v_joinsplit[i].vpub_new;

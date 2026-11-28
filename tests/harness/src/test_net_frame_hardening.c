@@ -645,6 +645,30 @@ static int neth_v6_candidate_sapling_identity(const struct transaction *v6,
     return failures;
 }
 
+static int neth_v6_candidate_ironwood_accounting(const struct transaction *v6)
+{
+    int failures = 0;
+    NETH_CHECK("block v6: funded Ironwood balance and total accounting",
+               v6->ironwood_value_balance == -200000 &&
+               transaction_get_value_out(v6) == 200000 &&
+               transaction_get_shielded_value_in(v6) == 200000);
+    struct transaction copy;
+    bool copied = transaction_copy(&copy, v6);
+    NETH_CHECK("block v6: Ironwood balance and wire survive deep copy",
+               copied && copy.ironwood_value_balance == -200000 &&
+               copy.v6_wire.data && copy.v6_wire.data != v6->v6_wire.data &&
+               copy.v6_wire.size == v6->v6_wire.size &&
+               !memcmp(copy.v6_wire.data, v6->v6_wire.data, copy.v6_wire.size));
+    if (copied) {
+        copy.value_balance = 0;
+        NETH_CHECK("block v6: isolated Ironwood accounting",
+                   transaction_get_value_out(&copy) == 200000 &&
+                   transaction_get_shielded_value_in(&copy) == 0);
+    }
+    transaction_free(&copy);
+    return failures;
+}
+
 static int neth_v6_candidate_transaction_identity(const struct block *b,
                                                   const unsigned char *data)
 {
@@ -667,6 +691,7 @@ static int neth_v6_candidate_transaction_identity(const struct block *b,
                    "684900bd4595fa07474506a5b6d04b524ff2954877b259a6de6c7da5f4ee2111") &&
                uint256_eq(&b->vtx[1].hash, &v6_txid));
     failures += neth_v6_candidate_sapling_identity(&b->vtx[1], data);
+    failures += neth_v6_candidate_ironwood_accounting(&b->vtx[1]);
     stream_free(&coinbase);
     return failures;
 }

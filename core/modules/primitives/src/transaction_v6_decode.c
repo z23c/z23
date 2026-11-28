@@ -169,6 +169,18 @@ static bool v6_decode_sapling(struct transaction *tx,
     return true;
 }
 
+static bool v6_decode_ironwood_balance(struct transaction *tx,
+                                       const struct v6_wire_view *view)
+{
+    if (!view->ironwood.count) return true;
+    if (view->ironwood.flags.size != 1 ||
+        view->ironwood.value_balance.size != sizeof tx->ironwood_value_balance)
+        return false;
+    tx->ironwood_value_balance =
+        zcl_read_i64_le(view->ironwood.value_balance.data);
+    return true;
+}
+
 bool transaction_v6_decode_is_prefix(const struct byte_stream *s)
 {
     static const uint8_t header[8] = {
@@ -204,7 +216,8 @@ bool transaction_v6_decode_prefix(struct transaction *tx, struct byte_stream *s,
     if (!transaction_v6_store_wire(tx, data, consumed, max_size))
         LOG_FAIL("tx", "failed to store checked v6 wire frame of %zu bytes",
                  consumed);
-    if (!v6_decode_transparent(tx, &view) || !v6_decode_sapling(tx, &view))
+    if (!v6_decode_transparent(tx, &view) || !v6_decode_sapling(tx, &view) ||
+        !v6_decode_ironwood_balance(tx, &view))
         LOG_FAIL("tx", "failed to populate checked v6 wire frame of %zu bytes",
                  consumed);
     struct v6_digests digests;
