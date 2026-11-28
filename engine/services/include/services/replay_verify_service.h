@@ -55,6 +55,7 @@ struct replay_verify_report {
     uint32_t    start_height;       /* echo of the requested start           */
     uint32_t    end_height;         /* last height the sweep intended to read*/
     uint32_t    tip_height;         /* legacy log tip at open time           */
+    uint64_t    deposit_failures;   /* activated research deposit violations  */
 };
 
 /* Run the sweep against the legacy block log under `datadir`.

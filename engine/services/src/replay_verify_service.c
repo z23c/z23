@@ -21,6 +21,7 @@
 
 #include "services/replay_verify_service.h"
 #include "services/research_block_size.h"
+#include "services/research_rules.h"
 
 #include "adapters/outbound/persistence/block_log_legacy.h"
 #include "ports/block_log_port.h"
@@ -54,7 +55,73 @@ struct sweep_state {
     uint32_t                     deser_height;   /* height that failed parse  */
     bool                         local_failed;   /* could not run the checks  */
     uint32_t                     local_height;   /* height left unchecked     */
+    struct research_rules_tracker *tracker;
+    struct block_index           indexes[2];
+    struct uint256               hashes[2];
+    bool                         tracked;
+    char                         tracker_error[ZCL_RESULT_MSG_MAX];
 };
+
+static void note_first_fail(struct replay_verify_report *r,
+                            uint32_t height, const char *reason);
+
+static bool sweep_research(struct sweep_state *st, uint32_t height,
+                           const struct block_hash *hash, const struct block *blk)
+{
+    if (!st->tracker) return true;
+    struct research_rules_state rules = {0};
+    struct zcl_result result = ZCL_OK;
+    if (st->tracked) result = research_rules_tracker_state(st->tracker, &rules);
+    if (result.ok && height >= INT32_MAX)
+        result = ZCL_ERR(RESEARCH_RULES_INVALID, "research height out of range");
+    if (result.ok) {
+        size_t n = height % 2;
+        struct block_index *bi = &st->indexes[n];
+        *bi = (struct block_index){0};
+        memcpy(st->hashes[n].data, hash->bytes, sizeof st->hashes[n].data);
+        bi->nHeight = (int)height;
+        bi->phashBlock = &st->hashes[n];
+        bi->pprev = st->tracked ? &st->indexes[1 - n] : NULL;
+        result = research_rules_tracker_connect(st->tracker, bi, blk);
+        st->tracked = result.ok;
+    }
+    if (result.ok) {
+        enum research_block_size_verdict size = research_block_size_check_under(
+            blk, research_block_size_limit_for(st->params, &rules));
+        if (size == RESEARCH_BLOCK_SIZE_UNAVAILABLE)
+            result = ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "research block size unavailable");
+        else if (size == RESEARCH_BLOCK_SIZE_EXCEEDED) {
+            st->report->size_failures++;
+            note_first_fail(st->report, height, "block-size");
+        }
+        if (result.ok && rules.active[RESEARCH_RULE_DEPOSIT_FREEZE]) {
+            size_t offender = research_rules_deposit_violation(blk);
+            if (offender == SIZE_MAX)
+                result = ZCL_ERR(RESEARCH_RULES_UNAVAILABLE, "research block body unavailable");
+            else if (offender) {
+                st->report->deposit_failures++;
+                note_first_fail(st->report, height, "research-deposit-freeze");
+            }
+        }
+    }
+    if (result.ok) return true;
+    st->local_failed = true;
+    st->local_height = height;
+    snprintf(st->tracker_error, sizeof st->tracker_error, "%s", result.message);
+    return false;
+}
+
+static struct zcl_result sweep_tracker_init(struct sweep_state *st, uint32_t start)
+{
+    const struct research_rules_binding *binding = research_rules_binding();
+    if (!binding) return ZCL_OK;
+    if ((int64_t)start > (int64_t)binding->pin->start - 1)
+        return ZCL_ERR(-10, "research replay must start at or below height %d",
+                       binding->pin->start - 1);
+    st->tracker = research_rules_tracker_create(binding);
+    if (!st->tracker) return ZCL_ERR(-10, "cannot create research replay tracker");
+    return ZCL_OK;
+}
 
 /* Record the first observed failure (any class) into the report. Static
  * reason strings only — the report holds a borrowed pointer. */
@@ -98,16 +165,9 @@ static bool sweep_cb(uint32_t height,
         return false; /* stop iteration */
     }
 
-    enum research_block_size_verdict size = research_block_size_check(st->params, &blk);
-    if (size == RESEARCH_BLOCK_SIZE_UNAVAILABLE) {
+    if (!sweep_research(st, height, hash, &blk)) {
         block_free(&blk);
-        st->local_failed = true;
-        st->local_height = height;
         return false;
-    }
-    if (size == RESEARCH_BLOCK_SIZE_EXCEEDED) {
-        r->size_failures++;
-        note_first_fail(r, height, "block-size");
     }
 
     /* The height index is evidence to verify, not an authority for the
@@ -234,8 +294,11 @@ struct zcl_result replay_verify_run_port(struct block_log_port *port,
         .deser_height = 0,
     };
 
+    struct zcl_result init = sweep_tracker_init(&st, start_height);
+    if (!init.ok) return init;
     struct zcl_result ri = port->iter_from(port->self, start_height,
                                            sweep_cb, &st);
+    research_rules_tracker_destroy(st.tracker);
 
     if (!ri.ok) {
         LOG_RETURN(ZCL_ERR(-6,
@@ -255,6 +318,9 @@ struct zcl_result replay_verify_run_port(struct block_log_port *port,
     }
 
     if (st.local_failed) {
+        if (st.tracker_error[0])
+            return ZCL_ERR(-9, "replay_verify_run_port: research rule unavailable at height %u: %s",
+                           st.local_height, st.tracker_error);
         return ZCL_ERR(-9,
                    "replay_verify_run_port: block checks ran out of memory at "
                    "height %u; no verdict on that block",

@@ -412,9 +412,8 @@ static int rv_research_oversize_sweep(const struct block *b)
         bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
         struct zcl_result swept = replay_verify_run_port(&port, 0, 0, &rep);
         chain_params_select(CHAIN_MAIN);
-        RV_CHECK("research sweep records size violation", selected && swept.ok &&
-                 rep.size_failures == 1 && rep.first_fail_reason &&
-                 strcmp(rep.first_fail_reason, "block-size") == 0);
+        RV_CHECK("unbound research sweep does not apply cap", selected && swept.ok &&
+                 rep.size_failures == 0 && rep.pow_failures == 1);
     }
     block_log_file_close(log);
     test_cleanup_tmpdir(dir);
@@ -430,19 +429,20 @@ static int rv_research_oversize_intake(struct block *b, const struct chain_param
     struct chain_activation_controller ctl = { .ms = ms, .params = params };
     struct validation_state state;
     bool ok = reducer_stage_p2p_block_for_catchup(&ctl, b, &state);
-    RV_CHECK("catchup refuses oversized block", !ok &&
-             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-blk-length") == 0);
+    RV_CHECK("catchup reaches coinbase validation without binding", !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-cb-missing") == 0);
     ok = reducer_ingest_block(&ctl, b, REDUCER_SRC_P2P, false, &state);
-    RV_CHECK("normal intake refuses oversized block", !ok &&
-             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-blk-length") == 0);
+    RV_CHECK("normal intake reaches proof validation without binding", !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "invalid-solution") == 0);
     ok = reducer_ingest_block(&ctl, b, REDUCER_SRC_SUBMIT, true, &state);
-    RV_CHECK("forced submit intake refuses oversized block", !ok &&
-             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-blk-length") == 0);
+    RV_CHECK("forced submit reaches proof validation without binding", !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "invalid-solution") == 0);
     zcl_alloc_fault_fail_next("research block size");
     ok = reducer_stage_p2p_block_for_catchup(&ctl, b, &state);
-    bool fired = zcl_alloc_fault_armed_label() == NULL;
+    bool armed = zcl_alloc_fault_armed_label() != NULL;
     zcl_alloc_fault_clear();
-    RV_CHECK("catchup allocation failure is local", fired && !ok && state.mode == MODE_ERROR);
+    RV_CHECK("unbound intake does not allocate for cap", armed && !ok &&
+             state.mode == MODE_INVALID && strcmp(state.reject_reason, "bad-cb-missing") == 0);
     free(ms);
     return failures;
 }
