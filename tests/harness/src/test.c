@@ -1371,6 +1371,8 @@ static void run_full_suite_foundation(int *failures)
     { extern int test_format_helpers_codec(void);
       *failures += test_format_helpers_codec(); }
     *failures += test_mining();
+    { extern int test_ironwood_node_e2e(void);
+      *failures += test_ironwood_node_e2e(); }
     { extern int test_migration_activation(void);
       *failures += test_migration_activation(); }
     *failures += test_regtest_generate();
@@ -2424,6 +2426,14 @@ static void run_full_suite_late_and_specs(int *failures)
     *failures += spec_consensus_compat();
 }
 
+static bool run_only_ironwood_node_e2e(const char *only, int *failures)
+{
+    if (strcmp(only, "ironwood_node_e2e") != 0) return false;
+    extern int test_ironwood_node_e2e(void);
+    *failures += test_ironwood_node_e2e();
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     extern void onion_stop_child_exit_if_requested(int, char **);
@@ -2456,6 +2466,8 @@ int main(int argc, char **argv)
     const char *only = getenv("ZCL_TEST_ONLY");
     if ((!only || !*only) && argc > 1)
         only = test_only_from_argv(argc, argv);
+    if (only && run_only_ironwood_node_e2e(only, &failures))
+        return failures ? 1 : 0;
     if (only && run_only_recovery_and_proving(only, &failures))
         return failures ? 1 : 0;
 
