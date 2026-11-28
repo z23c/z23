@@ -1643,7 +1643,8 @@ static int cas_test_research_unmarked_refuses(void)
         ASSERT(fp != NULL);
         ASSERT(fputs("old-state", fp) >= 0 && fclose(fp) == 0);
         char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                        flag, (char *)"-help", NULL};
+                        flag, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
+                        (char *)"-help", NULL};
         int rc = cas_run(argv, home, out, sizeof(out));
         struct stat st;
         bool intact = stat(file, &st) == 0 && st.st_size == 9;
@@ -1796,7 +1797,8 @@ static int cas_test_research_marker_guards(void)
         int pending_rc = cas_run(unselected, home, out, sizeof(out));
         bool pending_refused = pending_rc != 0 && strstr(out, "requires its selector");
         char *selected[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                            parent, (char *)"-help", NULL};
+                            parent, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
+                            (char *)"-help", NULL};
         int invalid_rc = cas_run(selected, home, out, sizeof(out));
         struct stat st;
         bool invalid_intact = stat(pending, &st) == 0 && st.st_size == 0;
@@ -1854,7 +1856,8 @@ static int cas_test_research_concurrent_creation(void)
                 char token;
                 if (read(gate[0], &token, 1) != 1) _exit(2);
                 char *argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                                flag, (char *)"-help", NULL};
+                                flag, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
+                                (char *)"-help", NULL};
                 _exit(cas_run(argv, home, out, sizeof(out)) == 0 ? 0 : 1);
             }
         }
@@ -1870,7 +1873,8 @@ static int cas_test_research_concurrent_creation(void)
                 successes++;
         }
         char *restart[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                           flag, (char *)"-help", NULL};
+                           flag, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000",
+                           (char *)"-help", NULL};
         int restart_rc = cas_run(restart, home, out, sizeof(out));
         (void)test_rm_rf_recursive(home);
         ASSERT(launched && released && successes >= 1 && restart_rc == 0);
@@ -1900,7 +1904,7 @@ static int cas_test_research_import_refusals(void)
         ASSERT(snprintf(endpoint, sizeof(endpoint), "-filesync=127.0.0.2:%u",
                         (unsigned)ntohs(address.sin_port)) > 0);
         char *sync[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                        flag, endpoint, NULL};
+                        flag, endpoint, (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000", NULL};
         int sync_rc = cas_run(sync, home, out, sizeof(out));
         bool sync_refused = sync_rc != 0 &&
             strstr(out, "-filesync requires chain state unavailable on the Ironwood testnet") &&
@@ -1909,7 +1913,8 @@ static int cas_test_research_import_refusals(void)
         bool no_contact = poll(&event, 1, 100) == 0;
         close(listener);
         char *snapshot[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
-                            flag, (char *)"-load-snapshot-at-own-height=/no-snapshot", NULL};
+                            flag, (char *)"-load-snapshot-at-own-height=/no-snapshot",
+                            (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000", NULL};
         int snapshot_rc = cas_run(snapshot, home, out, sizeof(out));
         bool snapshot_refused = snapshot_rc != 0 &&
             strstr(out, "-load-snapshot-at-own-height requires chain state unavailable on the Ironwood testnet");
@@ -1983,14 +1988,16 @@ static int cas_test_research_datadir(void)
         ASSERT(n > 0 && (size_t)n < sizeof(expected));
         char *argv[] = {(char *)CAS_BIN, (char *)"--testnet-profile=ironwood",
                         (char *)"-nolegacyimport", (char *)"-nobgvalidation",
-                        (char *)"-backfill-zslp", NULL};
+                        (char *)"-backfill-zslp",
+                            (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000", NULL};
         bool found = cas_research_oneshot(argv, home, expected, out, sizeof(out));
         char parent_flag[PATH_MAX + 16];
         int p = snprintf(parent_flag, sizeof(parent_flag), "-datadir=%s", home);
         int e = snprintf(expected, sizeof(expected), "datadir=%s/ironwood-research", home);
         char *explicit_argv[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
                                  parent_flag, (char *)"-nolegacyimport",
-                                 (char *)"-backfill-zslp", NULL};
+                                 (char *)"-backfill-zslp",
+                                     (char *)"-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000", NULL};
         bool explicit_found = p > 0 && (size_t)p < sizeof(parent_flag) &&
             e > 0 && (size_t)e < sizeof(expected) &&
             cas_research_oneshot(explicit_argv, home, expected, out, sizeof(out));
