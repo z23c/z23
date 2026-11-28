@@ -157,6 +157,12 @@ static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, co
     return held ? 0 : 1;
 }
 
+static int reducer_hold_selected(struct gate_fixture *f, struct block *candidate, const char *dir)
+{
+    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return 1;
+    return reducer_hold_test(f, candidate, dir);
+}
+
 static int activation_test(void)
 {
     int failures = 0;
@@ -215,8 +221,7 @@ static int activation_test(void)
     invalid.params = chain_params_get();
     d = research_rules_gate_for(&invalid, invalid.params, &b, &f.index[125], dir);
     failures += expect_gate("invalid binding", d, RESEARCH_GATE_HOLD, "research-rules-unavailable", 0);
-    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) failures++;
-    else failures += reducer_hold_test(&f, &b, raw);
+    failures += reducer_hold_selected(&f, &b, raw);
 done:
     block_free(&b);
     if (f.blocks) {
