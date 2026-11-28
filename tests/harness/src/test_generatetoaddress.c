@@ -90,6 +90,12 @@ static bool gta_mining_authority(sqlite3 *db)
         coins_kv_mark_migration_complete(db) && coins_kv_mark_self_folded(db);
 }
 
+static void gta_report_testnet_reply(const struct json_value *result)
+{
+    printf("generatetoaddress: testnet reply: %s\n",
+           result->type == JSON_STR ? json_get_str(result) : "(non-string)");
+}
+
 static int gta_testnet_refusal(const struct tx_destination *dest)
 {
     int failures = 0;
@@ -116,8 +122,7 @@ static int gta_testnet_refusal(const struct tx_destination *dest)
         reducer_frontier_provable_tip_cached() == before;
     printf("generatetoaddress: testnet refuses on-demand mining without a block... %s\n",
            ok ? "OK" : "FAIL");
-    if (!ok) printf("generatetoaddress: testnet reply: %s\n",
-                    result.type == JSON_STR ? json_get_str(&result) : "(non-string)");
+    if (!ok) gta_report_testnet_reply(&result);
     if (!ok) failures++;
     json_free(&params);
     json_free(&result);
