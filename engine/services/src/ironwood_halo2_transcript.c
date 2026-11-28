@@ -25,9 +25,11 @@ static bool field_canonical(const uint8_t bytes[32], const struct arith_uint256 
     return arith_uint256_compare(&value, modulus) < 0;
 }
 
-bool ironwood_pasta_fp_canonical(const uint8_t bytes[32])
+struct zcl_result ironwood_pasta_fp_canonical(const uint8_t bytes[32])
 {
-    return field_canonical(bytes, &vesta_scalar_modulus);
+    if (!bytes || !field_canonical(bytes, &vesta_scalar_modulus))
+        return ZCL_ERR(-1, "Noncanonical Pasta Fp element");
+    return ZCL_OK;
 }
 
 struct zcl_result ironwood_halo2_transcript_init(struct ironwood_halo2_transcript *t)
@@ -78,8 +80,8 @@ struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t
     if (!bytes) return ZCL_ERR(-1, "Truncated scalar");
     uint8_t scalar[32];
     memcpy(scalar, bytes, sizeof scalar);
-    if (!ironwood_pasta_fp_canonical(scalar))
-        return ZCL_ERR(-1, "Noncanonical Vesta scalar");
+    struct zcl_result canonical = ironwood_pasta_fp_canonical(scalar);
+    if (!canonical.ok) return canonical;
     struct ironwood_halo2_transcript next_t = *t;
     struct zcl_result result = ironwood_halo2_transcript_scalar(&next_t, scalar, sizeof scalar);
     if (!result.ok) return result;
@@ -122,10 +124,11 @@ static bool pasta_decode(const uint8_t xbytes[32], unsigned sign,
 }
 
 /* Coordinates and proof bytes are public; BN/EC operations are variable-time. */
-bool ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_pasta_curve kind,
-                          bool allow_identity, uint8_t affine[64])
+struct zcl_result ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_pasta_curve kind,
+                                       bool allow_identity, uint8_t affine[64])
 {
-    if (kind != IRONWOOD_PALLAS && kind != IRONWOOD_VESTA) return false;
+    if (!encoded || !affine || (kind != IRONWOOD_PALLAS && kind != IRONWOOD_VESTA))
+        return ZCL_ERR(-1, "Invalid Pasta point input");
     const struct arith_uint256 *modulus = kind == IRONWOOD_PALLAS ?
         &vesta_scalar_modulus : &vesta_base_modulus;
     uint8_t xbytes[32];
@@ -134,13 +137,15 @@ bool ironwood_pasta_point(const uint8_t encoded[32], enum ironwood_pasta_curve k
     xbytes[31] &= 0x7f;
     uint8_t any = 0;
     for (size_t i = 0; i < sizeof xbytes; ++i) any |= xbytes[i];
-    if (!field_canonical(xbytes, modulus)) return false;
+    if (!field_canonical(xbytes, modulus)) return ZCL_ERR(-1, "Noncanonical Pasta point coordinate");
     if (!any && !sign) {
-        if (!allow_identity) return false;
+        if (!allow_identity) return ZCL_ERR(-1, "Pasta point identity is not permitted");
         memset(affine, 0, 64);
-        return true;
+        return ZCL_OK;
     }
-    return pasta_decode(xbytes, sign, modulus, affine);
+    if (!pasta_decode(xbytes, sign, modulus, affine))
+        return ZCL_ERR(-1, "Cannot decode Pasta point");
+    return ZCL_OK;
 }
 
 struct zcl_result ironwood_halo2_read_point(struct ironwood_halo2_transcript *t,
@@ -153,8 +158,8 @@ struct zcl_result ironwood_halo2_read_point(struct ironwood_halo2_transcript *t,
     const uint8_t *bytes = zcl_codec_take(&next_reader, 32);
     if (!bytes) return ZCL_ERR(-1, "Truncated point");
     uint8_t affine[64];
-    if (!ironwood_pasta_point(bytes, IRONWOOD_VESTA, false, affine))
-        return ZCL_ERR(-1, "Invalid Vesta point");
+    struct zcl_result point = ironwood_pasta_point(bytes, IRONWOOD_VESTA, false, affine);
+    if (!point.ok) return point;
     struct ironwood_halo2_transcript next_t = *t;
     struct zcl_result result = ironwood_halo2_transcript_point(&next_t, affine, sizeof affine);
     if (!result.ok) return result;

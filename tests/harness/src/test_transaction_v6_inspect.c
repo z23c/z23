@@ -247,9 +247,9 @@ static bool check_funded_view(const uint8_t *s, const struct ironwood_instance_r
     v.ironwood.anchor = (struct v6_span){s, 32};
     v.ironwood.flags = (struct v6_span){&flags, 1};
     struct ironwood_instance_rows actual;
-    return ironwood_instance_project(&v, 0, &actual) &&
+    return ironwood_instance_project(&v, 0, &actual).ok &&
         !memcmp(&actual, expected, sizeof actual) &&
-        !ironwood_instance_project(&v, 1, &actual);
+        !ironwood_instance_project(&v, 1, &actual).ok;
 }
 
 static bool check_pallas_encodings(const uint8_t *original)
@@ -258,17 +258,17 @@ static bool check_pallas_encodings(const uint8_t *original)
     static const char opposite_y[] = "d77d8b3223bfc4f08504d2de7ee2bcc2a8310aa7abb72b09a340f1fffaf85811";
     uint8_t s[V6_IRONWOOD_STATEMENT_SIZE], expected[32];
     struct ironwood_instance_rows out, saved, opposite;
-    if (!ironwood_instance_from_statement(original, V6_IRONWOOD_STATEMENT_SIZE, &out)) return false;
+    if (!ironwood_instance_from_statement(original, V6_IRONWOOD_STATEMENT_SIZE, &out).ok) return false;
     memcpy(s, original, sizeof s); s[63] ^= 0x80;
-    if (!ironwood_instance_from_statement(s, sizeof s, &opposite) ||
+    if (!ironwood_instance_from_statement(s, sizeof s, &opposite).ok ||
         !zcl_hex_decode(opposite_y, expected, sizeof expected) ||
         memcmp(out.row[1], opposite.row[1], 32) || memcmp(opposite.row[2], expected, 32)) return false;
     memcpy(&saved, &out, sizeof out);
     memcpy(s, original, sizeof s);
     if (!zcl_hex_decode(modulus, s + 32, 32) ||
-        ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+        ironwood_instance_from_statement(s, sizeof s, &out).ok) return false;
     memset(s + 32, 0, 32); s[32] = 2; /* x^3+5 is a non-square in Pallas Fp. */
-    return !ironwood_instance_from_statement(s, sizeof s, &out) &&
+    return !ironwood_instance_from_statement(s, sizeof s, &out).ok &&
         !memcmp(&out, &saved, sizeof out);
 }
 
@@ -279,14 +279,14 @@ static bool check_funded_controls(const uint8_t *original)
     memcpy(s, original, sizeof s);
     memset(&out, 0xa5, sizeof out); memcpy(&saved, &out, sizeof out);
     s[160] = 2;
-    if (ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    if (ironwood_instance_from_statement(s, sizeof s, &out).ok) return false;
     memcpy(s, original, sizeof s); memset(s, 0xff, 32);
-    if (ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    if (ironwood_instance_from_statement(s, sizeof s, &out).ok) return false;
     memcpy(s, original, sizeof s); memset(s + 96, 0, 32);
-    if (ironwood_instance_from_statement(s, sizeof s, &out) ||
+    if (ironwood_instance_from_statement(s, sizeof s, &out).ok ||
         memcmp(&out, &saved, sizeof out)) return false;
     memcpy(s, original, sizeof s); memset(s + 32, 0, 32);
-    if (!ironwood_instance_from_statement(s, sizeof s, &out)) return false;
+    if (!ironwood_instance_from_statement(s, sizeof s, &out).ok) return false;
     uint8_t zero[32] = {0};
     return !memcmp(out.row[1], zero, 32) && !memcmp(out.row[2], zero, 32);
 }
@@ -317,7 +317,7 @@ static bool check_funded_instance(void)
     uint8_t s[V6_IRONWOOD_STATEMENT_SIZE], expected[32];
     struct ironwood_instance_rows got;
     if (!zcl_hex_decode(statement, s, sizeof s) ||
-        !ironwood_instance_from_statement(s, sizeof s, &got)) return false;
+        !ironwood_instance_from_statement(s, sizeof s, &got).ok) return false;
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
     return check_funded_view(s, &got) && check_funded_controls(s) && check_pallas_encodings(s);
@@ -328,9 +328,9 @@ static bool check_instance_refusals(void)
     uint8_t s[V6_IRONWOOD_STATEMENT_SIZE] = {0};
     struct ironwood_instance_rows out, before;
     memset(&out, 0xa5, sizeof out); memcpy(&before, &out, sizeof out);
-    if (ironwood_instance_from_statement(s, sizeof s, &out) ||
-        ironwood_instance_from_statement(s, sizeof s - 1, &out) ||
-        ironwood_instance_project(NULL, 0, &out)) return false; /* identity rk */
+    if (ironwood_instance_from_statement(s, sizeof s, &out).ok ||
+        ironwood_instance_from_statement(s, sizeof s - 1, &out).ok ||
+        ironwood_instance_project(NULL, 0, &out).ok) return false; /* identity rk */
     return !memcmp(&out, &before, sizeof out);
 }
 
@@ -357,7 +357,7 @@ static bool check_funded_second_instance(void)
     uint8_t s[V6_IRONWOOD_STATEMENT_SIZE], expected[32];
     struct ironwood_instance_rows got;
     if (!zcl_hex_decode(statement, s, sizeof s) ||
-        !ironwood_instance_from_statement(s, sizeof s, &got)) return false;
+        !ironwood_instance_from_statement(s, sizeof s, &got).ok) return false;
     for (size_t i = 0; i < IRONWOOD_INSTANCE_ROWS; ++i)
         if (!zcl_hex_decode(rows[i], expected, 32) || memcmp(got.row[i], expected, 32)) return false;
     return check_funded_view(s, &got);
@@ -391,8 +391,8 @@ static bool check_two_action_instance(void)
     if (v6_wire_parse(wire, sizeof wire, &v) != V6_WIRE_OK || v.ironwood.count != 2) return false;
     for (size_t i = 0; i < 2; ++i) {
         struct ironwood_instance_rows expected, actual;
-        if (!ironwood_instance_from_statement(s[i], sizeof s[i], &expected) ||
-            !ironwood_instance_project(&v, i, &actual) || memcmp(&actual, &expected, sizeof actual))
+        if (!ironwood_instance_from_statement(s[i], sizeof s[i], &expected).ok ||
+            !ironwood_instance_project(&v, i, &actual).ok || memcmp(&actual, &expected, sizeof actual))
             return false;
     }
     return true;
