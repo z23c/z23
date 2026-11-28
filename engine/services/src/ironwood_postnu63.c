@@ -1,4 +1,4 @@
-/* purpose: Frame public PostNu6_3 Ironwood proof inputs through x. */
+/* purpose: Frame public PostNu6_3 Ironwood proof inputs through opening challenge x1. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_postnu63.h"
 #include "primitives/transaction_v6_wire.h"
@@ -122,5 +122,37 @@ struct zcl_result ironwood_postnu63_yx_challenges(struct ironwood_postnu63_stage
     if (result.ok) result = absorb_points(&next, 8, &next.quotient_offset);
     if (result.ok) result = squeeze_scalar(&next, next.x);
     if (result.ok) { next.phase = IRONWOOD_POSTNU63_Y_X; *stage = next; }
+    return result;
+}
+
+static struct zcl_result absorb_scalars(struct ironwood_postnu63_stage *stage, size_t count, size_t *offset)
+{
+    uint8_t scalar[32];
+    *offset = stage->proof.position;
+    for (size_t i = 0; i < count; ++i) {
+        struct zcl_result result = ironwood_halo2_read_scalar(&stage->transcript, &stage->proof,
+                                                             scalar, sizeof scalar);
+        if (!result.ok) return result;
+    }
+    return ZCL_OK;
+}
+
+struct zcl_result ironwood_postnu63_evaluations(struct ironwood_postnu63_stage *stage)
+{
+    if (!stage || stage->phase != IRONWOOD_POSTNU63_Y_X || !stage->actions ||
+        stage->actions > (SIZE_MAX - 288) / 704 ||
+        stage->proof.position != (size_t)stage->actions * 704 + 288)
+        return ZCL_ERR(-1, "Invalid PostNu6_3 evaluation stage");
+    struct ironwood_postnu63_stage next = *stage;
+    size_t count = (size_t)next.actions;
+    struct zcl_result result = absorb_scalars(&next, count, &next.instance_eval_offset);
+    if (result.ok) result = absorb_scalars(&next, count * 25, &next.advice_eval_offset);
+    if (result.ok) result = absorb_scalars(&next, 29, &next.fixed_eval_offset);
+    if (result.ok) result = absorb_scalars(&next, 1, &next.random_eval_offset);
+    if (result.ok) result = absorb_scalars(&next, 15, &next.sigma_eval_offset);
+    if (result.ok) result = absorb_scalars(&next, count * 8, &next.permutation_eval_offset);
+    if (result.ok) result = absorb_scalars(&next, count * 15, &next.lookup_eval_offset);
+    if (result.ok) result = squeeze_scalar(&next, next.x1);
+    if (result.ok) { next.phase = IRONWOOD_POSTNU63_EVAL_X1; *stage = next; }
     return result;
 }

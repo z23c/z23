@@ -734,6 +734,60 @@ static bool check_yx_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
     return !ironwood_postnu63_yx_challenges(stage).ok && !memcmp(stage, &before, sizeof before);
 }
 
+static bool eval_reject(const struct ironwood_postnu63_stage *stage, uint8_t *wire, size_t offset)
+{
+    struct ironwood_postnu63_stage trial, before;
+    uint8_t saved[32];
+    memcpy(&trial, stage, sizeof trial); memcpy(&before, &trial, sizeof before);
+    memcpy(saved, wire + offset, 32); memset(wire + offset, 0xff, 32);
+    bool ok = !ironwood_postnu63_evaluations(&trial).ok && !memcmp(&trial, &before, sizeof before);
+    memcpy(wire + offset, saved, 32);
+    return ok;
+}
+
+static bool eval_refusals(const struct ironwood_postnu63_stage *stage, uint8_t *wire,
+                          const size_t offsets[7], size_t end, const uint8_t expected[32])
+{
+    struct ironwood_postnu63_stage trial, before;
+    memcpy(&trial, stage, sizeof trial); trial.proof.length = end - 1;
+    memcpy(&before, &trial, sizeof before);
+    if (ironwood_postnu63_evaluations(&trial).ok || memcmp(&trial, &before, sizeof before)) return false;
+    size_t base = (size_t)(stage->proof.buffer - wire);
+    for (size_t i = 0; i < 7; ++i)
+        if (!eval_reject(stage, wire, base + offsets[i])) return false;
+    uint8_t saved[32]; size_t a = base + offsets[1], b = a + 32;
+    memcpy(&trial, stage, sizeof trial);
+    memcpy(saved, wire + a, 32); memcpy(wire + a, wire + b, 32); memcpy(wire + b, saved, 32);
+    bool ok = ironwood_postnu63_evaluations(&trial).ok && memcmp(trial.x1, expected, 32);
+    memcpy(wire + b, wire + a, 32); memcpy(wire + a, saved, 32);
+    return ok;
+}
+
+/* Upstream 0.4.0 PostNu6_3 one/two-action opening aggregation x1. */
+static bool check_eval_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
+{
+    static const char *const x1[] = {
+        "ef07195d8f747d47ec405d09dfa70d2d4a9dc3ada36823cf344b1c224e41fd2e",
+        "b708924eba8cb1cb9ae8ae04b2bd522acfd0e50589df5960475db3e327e78b0d"};
+    size_t n = (size_t)stage->actions;
+    if (!n || n > 2) return false;
+    size_t o[7];
+    o[0] = stage->proof.position; o[1] = o[0] + n * 32; o[2] = o[1] + n * 25 * 32;
+    o[3] = o[2] + 29 * 32; o[4] = o[3] + 32; o[5] = o[4] + 15 * 32;
+    o[6] = o[5] + n * 8 * 32; size_t end = o[6] + n * 15 * 32;
+    uint8_t expected[32];
+    if (!zcl_hex_decode(x1[n - 1], expected, 32) || !eval_refusals(stage, wire, o, end, expected) ||
+        !ironwood_postnu63_evaluations(stage).ok) return false;
+    if (stage->instance_eval_offset != o[0] || stage->advice_eval_offset != o[1] ||
+        stage->fixed_eval_offset != o[2] || stage->random_eval_offset != o[3] ||
+        stage->sigma_eval_offset != o[4] || stage->permutation_eval_offset != o[5] ||
+        stage->lookup_eval_offset != o[6] || stage->proof.position != end || memcmp(stage->x1, expected, 32))
+        return false;
+    struct ironwood_postnu63_stage before;
+    memcpy(&before, stage, sizeof before);
+    return !ironwood_postnu63_evaluations(stage).ok && !memcmp(stage, &before, sizeof before);
+}
+
 /* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
 static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
 {
@@ -747,7 +801,7 @@ static bool check_stage(const struct v6_wire_view *view, const char *path, const
         !stage_fixture(view, path, input, size) || !stage_wire(view, input, size, wire, sizeof wire, &full) ||
         !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
         stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
-    return check_lookup_stage(&stage, wire) && check_yx_stage(&stage, wire) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
+    return check_lookup_stage(&stage, wire) && check_yx_stage(&stage, wire) && check_eval_stage(&stage, wire) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
 }
 
 /* Public coinbase fixture: Orchard 0.16.0 PostNu6_3, R1 evidence

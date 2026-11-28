@@ -1,4 +1,4 @@
-/* purpose: Frame public PostNu6_3 Ironwood proof inputs through x. */
+/* purpose: Frame public PostNu6_3 Ironwood proof inputs through opening challenge x1. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_IRONWOOD_POSTNU63_H
 #define ZCL_IRONWOOD_POSTNU63_H
@@ -10,14 +10,16 @@
 #include <stdint.h>
 
 struct v6_wire_view;
-enum ironwood_postnu63_phase { IRONWOOD_POSTNU63_THETA = 1, IRONWOOD_POSTNU63_BETA_GAMMA, IRONWOOD_POSTNU63_Y_X };
+enum ironwood_postnu63_phase { IRONWOOD_POSTNU63_THETA = 1, IRONWOOD_POSTNU63_BETA_GAMMA, IRONWOOD_POSTNU63_Y_X, IRONWOOD_POSTNU63_EVAL_X1 };
 struct ironwood_postnu63_stage {
     struct ironwood_halo2_transcript transcript;
     struct zcl_codec_reader proof;
-    uint8_t theta[32], beta[32], gamma[32], y[32], x[32];
+    uint8_t theta[32], beta[32], gamma[32], y[32], x[32], x1[32];
     uint64_t actions;
     size_t lookup_offset, lookup_size;
     size_t permutation_offset, product_offset, random_offset, quotient_offset;
+    size_t instance_eval_offset, advice_eval_offset, fixed_eval_offset, random_eval_offset;
+    size_t sigma_eval_offset, permutation_eval_offset, lookup_eval_offset;
     enum ironwood_postnu63_phase phase;
 };
 /* Orchard 0.16.0 PostNu6_3 canonical proof size, with checked arithmetic. */
@@ -39,4 +41,8 @@ struct zcl_result ironwood_postnu63_lookup_challenges(struct ironwood_postnu63_s
  * start; the first two spans contain three points per action, random one
  * point and quotient eight points. All state is unchanged on failure. */
 struct zcl_result ironwood_postnu63_yx_challenges(struct ironwood_postnu63_stage *stage);
+/* Frame the canonical evaluation scalars and opening challenge x1. Offsets
+ * refer to the original proof. The stage is unchanged on failure. This does
+ * not evaluate constraints, opening equations or proof validity. */
+struct zcl_result ironwood_postnu63_evaluations(struct ironwood_postnu63_stage *stage);
 #endif
