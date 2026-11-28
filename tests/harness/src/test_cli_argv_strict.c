@@ -1797,7 +1797,8 @@ static int cas_test_research_client_aliases(void)
                 refused = refused && pair_refused;
             }
         }
-        ASSERT(snprintf(path, sizeof(path), "%s/.zclassic-c23", home) > 0);
+        ASSERT(snprintf(path, sizeof(path), "%s/%s", home,
+                      ZCL_CLI_RELEASE_DATADIR) > 0);
         struct stat st;
         bool untouched = lstat(path, &st) != 0 && errno == ENOENT;
         test_cleanup_tmpdir(home);
