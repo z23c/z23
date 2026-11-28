@@ -73,11 +73,17 @@ static bool boot_index_research_chain_size_valid(const struct block_index *tip,
         struct block block;
         block_init(&block);
         bool ok = read_block_from_disk_index(&block, bi, datadir);
-        if (ok)
-            ok = research_rules_gate(params, &block, bi->pprev, datadir).verdict == RESEARCH_GATE_PASS;
+        if (ok) {
+            struct research_gate_decision gate =
+                research_rules_gate(params, &block, bi->pprev, datadir);
+            ok = gate.verdict == RESEARCH_GATE_PASS;
+            if (!ok)
+                fprintf(stderr, "research rule %s at height %d: %s\n",
+                        gate.rule ? gate.rule : "unknown", bi->nHeight, gate.detail);
+        }
         block_free(&block);
         if (!ok) {
-            fprintf(stderr, "research block size or read failed at height %d\n", bi->nHeight);
+            fprintf(stderr, "research block validation or read failed at height %d\n", bi->nHeight);
             return false;
         }
         if (!bi->nHeight)
