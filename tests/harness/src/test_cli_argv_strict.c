@@ -1154,6 +1154,7 @@ static int cas_test_noisetransport_is_recognized(void)
 
 int test_cli_argv_strict(void);
 
+
 /* A -datadir= value that does not fit the CLI's path buffer must refuse
  * before any routing: an unchecked copy would chop the cookie directory,
  * and the 511-byte prefix of a chosen path can name another node's
@@ -1598,7 +1599,6 @@ static int cas_test_research_refusals(void)
             {(char *)CAS_BIN, (char *)"-testnet-profile=unknown", NULL},
             {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood", (char *)"-testnet", NULL},
             {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood", (char *)"-gui", NULL},
-            {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood", (char *)"status", NULL},
             {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
              (char *)"--testnet-profile=ironwood", NULL},
             {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
@@ -1609,8 +1609,11 @@ static int cas_test_research_refusals(void)
             int rc = cas_run(bad[i], home, out, sizeof(out));
             refused = refused && rc != 0 && strstr(out, "Invalid or unsafe testnet profile");
         }
+        char *cli[] = {(char *)CAS_BIN, (char *)"-testnet-profile=ironwood",
+                       (char *)"status", NULL};
+        int cli_rc = cas_run(cli, home, out, sizeof(out));
         (void)test_rm_rf_recursive(home);
-        ASSERT(refused);
+        ASSERT(refused && cli_rc != 0 && strstr(out, "error=UNSUPPORTED_PROFILE"));
         PASS();
     } _test_next:;
     return failures;

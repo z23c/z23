@@ -61,7 +61,6 @@ void print_usage_all(const char *prog)
     printf("Node options:\n");
     printf("  -datadir=<dir>      Data directory\n");
     printf("  -paramsdir=<dir>    Params directory\n");
-    printf("  -testnet-profile=ironwood  Start the isolated proposal network\n");
     printf("  -port=<port>        P2P port (default: 8033)\n");
     printf("  -bind=<address>     Listen only on one literal IPv4/IPv6 address\n");
     printf("                      No hostname, port, zone or mapped IPv6; bind failure aborts\n");
@@ -1416,7 +1415,6 @@ static int args_admit_options(struct app_context *ctx)
     return 0;
 }
 
-
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
@@ -1434,7 +1432,14 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     /* Automatic legacy sources under ~/.zclassic belong to mainnet. */
     if (ctx->regtest || ctx->testnet)
         ctx->no_legacy_auto_import = true;
-    /* Warn at parse time for the deprecated Noise transport alias. */
+    /* The -v2transport spelling is a deprecated alias for
+     * -noisetransport (kept so existing Noise operators keep booting;
+     * connman_init() honors it and repeats this notice where the flag
+     * takes effect). Say so HERE, at parse time, instead of ~30 s deep
+     * in P2P init: an operator typo or stale runbook deserves its
+     * answer in milliseconds, and waiting for connman couples the
+     * diagnostic to full boot latency. GetArg-based: every spelling
+     * (-v2transport, -v2transport=0/1) is one check, printed once. */
     if (GetArg("-v2transport", NULL) != NULL) {
         const bool noise_new_set = GetArg("-noisetransport", NULL) != NULL;
         fprintf(stderr,

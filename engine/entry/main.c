@@ -1158,6 +1158,7 @@ static bool main_research_prepare(int argc, char ***args,
                                   char *path, size_t capacity)
 {
     char **argv = *args;
+    if (is_cli_mode(argc, argv)) return main_research_unselected_ok(argc, argv);
     if (!main_research_scan(argc, argv, research) ||
         (research->profile && (!main_research_node_only(argc, argv) ||
          !main_research_path(argc, argv, research, path, capacity)))) {
