@@ -1,6 +1,7 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Forward research v6 inspection to the checked core wire parser.
+ */
 #include "controllers/transaction_v6_inspect.h"
-/* purpose: Forward research v6 inspection to the checked core wire parser. */
 bool v6_bundle_action(const struct v6_bundle *b, uint64_t i, struct v6_action_view *out)
 {
     return v6_core_bundle_action(b, i, out);
