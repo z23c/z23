@@ -2,6 +2,8 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_spend_auth.h"
 #include "controllers/transaction_v6_digest.h"
+#include "controllers/transaction_v6_inspect.h"
+#include "controllers/transaction_v6_sighash.h"
 #include "base/serialize_le.h"
 #include "base/hex.h"
 #include <stdio.h>
@@ -97,20 +99,21 @@ static bool check_binding(void)
  * does not hold for ordinary transparent inputs, which require prevouts. */
 static bool check_binding_wire(const uint8_t *wire, size_t size)
 {
-    uint8_t cv[2][32], expected[32];
+    uint8_t cv[2][32], expected[32], sighash[32];
     struct v6_wire_view v; struct v6_digests d; struct v6_action_view a;
     if (v6_wire_parse(wire, size, &v) != V6_WIRE_OK || v.inputs != 0 ||
         v.ironwood.count != 2 || v.ironwood.value_balance.size != 8 ||
         v.ironwood.binding_signature.size != 64 || !v6_wire_digests(&v, &d) ||
         !zcl_hex_decode("19a61a86bd739ad0ffc008dcc239d68bfe79a6b5d2f2488de17d08059fdc905a", expected, 32) ||
-        memcmp(d.txid, expected, 32)) return false;
+        memcmp(d.txid, expected, 32) || !v6_shielded_sighash(&v, NULL, 0, sighash) ||
+        memcmp(sighash, expected, 32)) return false;
     for (size_t i = 0; i < 2; ++i) {
         if (!v6_bundle_action(&v.ironwood, i, &a) || a.cv.size != 32) return false;
         memcpy(cv[i], a.cv.data, 32);
     }
     int64_t balance = zcl_read_i64_le(v.ironwood.value_balance.data);
     return balance == -200000 &&
-        ironwood_binding_auth_verify(cv, 2, balance, v.ironwood.binding_signature.data, d.txid).ok;
+        ironwood_binding_auth_verify(cv, 2, balance, v.ironwood.binding_signature.data, sighash).ok;
 }
 
 static bool check_binding_transaction(void)
@@ -123,9 +126,62 @@ static bool check_binding_transaction(void)
     return check_binding_wire(wire, sizeof wire);
 }
 
+/* Independent librustzcash v6 PrecomputedSighashData oracle: one non-coinbase
+ * input, prevout value 123456 and scriptPubKey OP_TRUE. This fixture is public
+ * synthetic data, not an authorization of a spend. */
+static bool check_sighash_boundary(const struct v6_wire_view *v);
+static bool check_coinbase_sighash(uint8_t *wire, size_t size);
+static bool check_transparent_sighash(void)
+{
+    static const char wire_hex[] = "0600008098b684d85b16a537000000000000000001"
+        "0101010101010101010101010101010101010101010101010101010101010101"
+        "0100000000feffffff0000000000";
+    uint8_t wire[(sizeof wire_hex - 1) / 2], want[32], out[32], before[32];
+    uint8_t script_bytes[] = {0x51};
+    struct v6_prevout prev = {123456, {script_bytes, sizeof script_bytes}};
+    struct v6_wire_view v;
+    if (!zcl_hex_decode(wire_hex, wire, sizeof wire) ||
+        !zcl_hex_decode("108db092f0363d0685a3e3ef538b5b295ad1d403549bcff1438e719f6cdb3661", want, 32) ||
+        v6_core_parse(wire, sizeof wire, &v) != V6_WIRE_OK || v.inputs != 1 ||
+        !v6_shielded_sighash(&v, &prev, 1, out) || memcmp(out, want, 32)) return false;
+    if (!check_sighash_boundary(&v)) return false;
+    prev.amount++;
+    if (!v6_shielded_sighash(&v, &prev, 1, out) || !memcmp(out, want, 32)) return false;
+    prev.amount--; script_bytes[0] ^= 1;
+    if (!v6_shielded_sighash(&v, &prev, 1, out) || !memcmp(out, want, 32)) return false;
+    memset(out, 0xa5, 32); memcpy(before, out, 32);
+    return !v6_shielded_sighash(&v, NULL, 0, out) && !memcmp(out, before, 32) &&
+        check_coinbase_sighash(wire, sizeof wire);
+}
+
+static bool check_coinbase_sighash(uint8_t *wire, size_t size)
+{
+    memset(wire + 21, 0, 32); memset(wire + 53, 0xff, 4);
+    struct v6_wire_view v; struct v6_digests d; uint8_t out[32];
+    return v6_core_parse(wire, size, &v) == V6_WIRE_OK && v.inputs == 1 &&
+        v6_wire_digests(&v, &d) && v6_shielded_sighash(&v, NULL, 0, out) &&
+        !memcmp(out, d.txid, 32);
+}
+
+static bool check_sighash_boundary(const struct v6_wire_view *v)
+{
+    uint8_t script[253], expected[32], out[32], before[32];
+    memset(script, 0x51, sizeof script);
+    struct v6_prevout p = {123456, {script, sizeof script}};
+    if (!zcl_hex_decode("2fc76bb0b0afb6c9c5d0984d7041ff7f6e968e1886f362da14a95fc853441be3", expected, 32) ||
+        !v6_shielded_sighash(v, &p, 1, out) || memcmp(out, expected, 32)) return false;
+    memset(out, 0xa5, 32); memcpy(before, out, 32);
+    p.script_pubkey.data = NULL;
+    if (v6_shielded_sighash(v, &p, 1, out) || memcmp(out, before, 32)) return false;
+    p.script_pubkey.data = script; p.script_pubkey.size = 10001;
+    if (v6_shielded_sighash(v, &p, 1, out) || memcmp(out, before, 32)) return false;
+    p.script_pubkey.size = 1; p.amount = UINT64_MAX;
+    return !v6_shielded_sighash(v, &p, 1, out) && !memcmp(out, before, 32);
+}
+
 int test_ironwood_spend_auth(void)
 {
-    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction();
+    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction() && check_transparent_sighash();
     printf("Ironwood spend authorization: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
