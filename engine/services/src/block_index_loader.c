@@ -327,6 +327,8 @@ static void bil_flat_fill_pindex(struct block_index *pindex,
     pindex->nVersion = row->n_version;
     unsigned status = row->n_status;
     const struct chain_research_descriptor *research = chain_research_profile_current();
+    /* A flat research genesis position is untrusted; restore verifies the
+     * compiled-in body or replaces stale bytes before advertising data. */
     if (research && row->height == 0 &&
         uint256_eq(&pindex->hashBlock, &research->chain->consensus.hashGenesisBlock))
         status &= ~BLOCK_HAVE_DATA;
@@ -1030,7 +1032,8 @@ static struct zcl_result bil_flat_check_count(uint32_t count, size_t max_entries
 static struct block_index *bil_load_arena(const char *datadir, uint32_t count,
     bool canonical, bool *mapped, char *path, size_t path_cap)
 {
-    if (canonical) return bil_arena_alloc(datadir, count, mapped, path, path_cap);
+    if (canonical && !chain_research_profile_current())
+        return bil_arena_alloc(datadir, count, mapped, path, path_cap);
     return zcl_calloc(count, sizeof(struct block_index), "private history arena");
 }
 
@@ -1220,6 +1223,18 @@ static struct block_index *insert_block_index_cb(void *ctx_ptr,
         (struct chainstate *)ms, hash);
 }
 
+static struct zcl_result bil_verify_loaded_genesis(struct main_state *ms,
+    const struct chain_params *params, const uint8_t *wire, size_t wire_len,
+    const char *datadir)
+{
+    if (!wire) return ZCL_OK;
+    struct block_index *genesis = block_map_find(&ms->map_block_index,
+                                                 &params->consensus.hashGenesisBlock);
+    if (!genesis)
+        return ZCL_ERR(-1, "load_block_index: research genesis index missing");
+    return block_index_ensure_genesis_body(genesis, params, wire, wire_len, datadir);
+}
+
 struct zcl_result load_block_index_with_genesis(struct main_state *ms,
                        const struct chain_params *params,
                        struct block_tree_db *btdb, bool btdb_open,
@@ -1294,6 +1309,9 @@ struct zcl_result load_block_index_with_genesis(struct main_state *ms,
         }
         return ZCL_ERR(-2, "load_block_index: out of memory inserting genesis block index");
     }
+
+    /* Header promotion can flush SQLite. Verify research genesis first. */
+    ZCL_CHECK(bil_verify_loaded_genesis(ms, params, wire, wire_len, datadir));
 
     /* Post-load: compute nChainWork, nChainTx, skip links */
     size_t count = ms->map_block_index.size;

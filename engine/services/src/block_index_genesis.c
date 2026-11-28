@@ -122,6 +122,8 @@ static enum genesis_restore genesis_restore_position(struct block_index *genesis
         block_free(&block);
         return GENESIS_REBUILD;
     }
+    /* Flat research rows clear HAVE_DATA before reaching here, so a stale
+     * body is rebuilt. Other callers retaining HAVE_DATA refuse a conflict. */
     bool had_data = (block_index_status_load(genesis) & BLOCK_HAVE_DATA) != 0;
     bool same = genesis_wire_matches(&block, wire, len) && genesis_block_valid(&block, params) &&
                 genesis_set_header(genesis, &block.header) &&

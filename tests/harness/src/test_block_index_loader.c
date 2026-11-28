@@ -529,6 +529,11 @@ static int bil_research_boot(const struct chain_params *cp, const uint8_t *wire)
             struct uint256 got; if (read) block_get_hash(&b, &got);
             BIL_CHECK("bil: genesis survives index reload", read && uint256_eq(&got, &cp->consensus.hashGenesisBlock));
             block_free(&b);
+            uint8_t bad[276]; memcpy(bad, wire, sizeof bad); bad[104] ^= 1;
+            struct zcl_result refused = load_block_index_with_genesis(
+                &restart, cp, NULL, false, bad, sizeof bad, boot_dir);
+            BIL_CHECK("bil: conflicting genesis refuses before header promotion",
+                      restored && !refused.ok && !restart.pindex_best_header);
         }
         main_state_free(&first); main_state_free(&restart);
     } else BIL_CHECK("bil: genesis boot directory", false);
@@ -603,6 +608,55 @@ static int bil_research_sql(const struct chain_research_descriptor *profile, str
     return failures;
 }
 
+static bool bil_other_body_unverified(struct main_state *restored,
+    const struct block_index *pg, const struct uint256 *other_hash, const char *dir)
+{
+    struct block_index *other = block_map_find(&restored->map_block_index, other_hash);
+    struct disk_block_pos pos = { .nFile = pg->nFile, .nPos = pg->nDataPos };
+    struct block body; block_init(&body);
+    struct uint256 hash;
+    bool foreign = read_block_from_disk(&body, &pos, dir);
+    if (foreign) {
+        block_get_hash(&body, &hash);
+        foreign = !uint256_eq(&hash, other_hash);
+    }
+    block_free(&body);
+    return foreign && other && !(other->nStatus & (BLOCK_HAVE_DATA | BLOCK_VALID_MASK));
+}
+
+static int bil_research_corrupt_restore(const struct chain_research_descriptor *profile,
+    struct main_state *restored, struct block_index *pg, struct block_index *r,
+    const struct uint256 *other_hash, const char *dir)
+{
+    int failures = 0;
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    bool positioned = pg && block_index_disk_pos_snapshot(pg, &pos, NULL);
+    char path[512];
+    if (positioned) get_block_pos_filename(path, sizeof path, dir, &pos, "blk");
+    int fd = positioned ? open(path, O_RDWR) : -1;
+    uint8_t altered = profile->genesis_wire[profile->genesis_wire_len - 1] ^ 1;
+    bool corrupted = fd >= 0 && pwrite(fd, &altered, 1,
+        pos.nPos + profile->genesis_wire_len - 1) == 1;
+    if (fd >= 0) close(fd);
+    BIL_CHECK("bil: research cache restores verified genesis data",
+              corrupted && r && block_index_ensure_genesis_body(r, profile->chain, profile->genesis_wire,
+                                                  profile->genesis_wire_len, dir).ok &&
+              (r->nStatus & BLOCK_HAVE_DATA) &&
+              (r->nStatus & BLOCK_VALID_MASK) == BLOCK_VALID_SCRIPTS);
+    struct block body; block_init(&body);
+    struct byte_stream serialized; stream_init(&serialized, profile->genesis_wire_len);
+    bool same = r && read_block_from_disk_index(&body, r, dir) &&
+        block_serialize(&body, &serialized) &&
+        serialized.size == profile->genesis_wire_len &&
+        !memcmp(serialized.data, profile->genesis_wire, serialized.size);
+    BIL_CHECK("bil: stale genesis is replaced by exact compiled bytes", same);
+    BIL_CHECK("bil: genesis repair does not validate another row's foreign body",
+              bil_other_body_unverified(restored, pg, other_hash, dir));
+    stream_free(&serialized); block_free(&body);
+    return failures;
+}
+
 static int bil_research_restore(const struct chain_research_descriptor *profile, struct main_state *first, struct main_state *restored, const char *dir, bool loaded)
 {
     int failures = 0;
@@ -615,6 +669,12 @@ static int bil_research_restore(const struct chain_research_descriptor *profile,
         child->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_FAILED_VALID;
         child->nTx = 1; child->nChainTx = 2;
     }
+    struct uint256 other_hash = {0}; other_hash.data[0] = 2;
+    struct block_index *other = chainstate_insert_block_index((struct chainstate *)first, &other_hash);
+    if (other && pg) {
+        other->nHeight = 2; other->pprev = child; other->nBits = pg->nBits;
+        other->nFile = pg->nFile; other->nDataPos = pg->nDataPos;
+    }
     if (loaded) save_block_index_flat(dir, first);
     bool reloaded = loaded && load_block_index_flat(dir, restored).ok;
     struct block_index *r = block_map_find(&restored->map_block_index,
@@ -624,10 +684,8 @@ static int bil_research_restore(const struct chain_research_descriptor *profile,
     struct block_index *rc = block_map_find(&restored->map_block_index, &child_hash);
     BIL_CHECK("bil: research cache does not trust mainnet ROM boundary",
               child && rc && (rc->nStatus & BLOCK_REVALIDATE_PENDING));
-    BIL_CHECK("bil: research cache restores verified genesis data",
-              r && block_index_ensure_genesis_body(r, profile->chain, profile->genesis_wire,
-                                                  profile->genesis_wire_len, dir).ok &&
-              (r->nStatus & BLOCK_HAVE_DATA));
+    if (pg && other) failures += bil_research_corrupt_restore(profile, restored, pg, r, &other_hash, dir);
+    else BIL_CHECK("bil: research corruption fixture", false);
     failures += bil_research_sql(profile, first, pg, &child_hash);
     return failures;
 }
@@ -649,6 +707,26 @@ static int bil_research_profile(void)
         } else BIL_CHECK("bil: profile restore directory", false);
         chain_params_select(CHAIN_REGTEST);
     } else BIL_CHECK("bil: research profile select", false);
+    return failures;
+}
+
+static int bil_research_foreign_index(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    char dir[256], blocks[320];
+    if (!test_mkdtemp(dir, sizeof dir, "bil_foreign_genesis")) return 1;
+    struct main_state ms; main_state_init(&ms);
+    struct uint256 hash = {0}; hash.data[0] = 42;
+    struct block_index *foreign = chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+    if (foreign) foreign->nHeight = 0;
+    struct zcl_result r = load_block_index_with_genesis(&ms, profile->chain, NULL, false,
+        profile->genesis_wire, profile->genesis_wire_len, dir);
+    snprintf(blocks, sizeof blocks, "%s/blocks", dir);
+    struct stat st;
+    BIL_CHECK("bil: foreign genesis index refused without block writes",
+              foreign && !r.ok && stat(blocks, &st) != 0 && errno == ENOENT &&
+              !ms.pindex_best_header);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -681,6 +759,7 @@ static int bil_research_genesis_body(void)
     failures += bil_research_persist(&cp, &g, wire, dir);
     failures += bil_research_boot(&cp, wire);
     failures += bil_research_profile();
+    failures += bil_research_foreign_index(chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD));
     block_index_hdrext_free(&g);
     return failures;
 }
