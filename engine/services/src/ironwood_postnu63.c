@@ -1,4 +1,4 @@
-/* purpose: Frame public PostNu6_3 Ironwood proof inputs through theta. */
+/* purpose: Frame public PostNu6_3 Ironwood proof inputs through x. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_postnu63.h"
 #include "primitives/transaction_v6_wire.h"
@@ -85,5 +85,42 @@ struct zcl_result ironwood_postnu63_lookup_challenges(struct ironwood_postnu63_s
     if (result.ok) result = ironwood_halo2_transcript_challenge(&next.transcript, wide, sizeof wide);
     if (result.ok) result = ironwood_halo2_vesta_scalar(wide, sizeof wide, next.gamma, sizeof next.gamma);
     if (result.ok) { next.phase = IRONWOOD_POSTNU63_BETA_GAMMA; *stage = next; }
+    return result;
+}
+
+/* The returned offsets refer to the original proof; no commitment is copied. */
+static struct zcl_result absorb_points(struct ironwood_postnu63_stage *stage, size_t count, size_t *offset)
+{
+    uint8_t affine[64];
+    *offset = stage->proof.position;
+    for (size_t i = 0; i < count; ++i) {
+        struct zcl_result result = ironwood_halo2_read_point(&stage->transcript, &stage->proof,
+                                                            affine, sizeof affine);
+        if (!result.ok) return result;
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result squeeze_scalar(struct ironwood_postnu63_stage *stage, uint8_t out[32])
+{
+    uint8_t wide[64];
+    struct zcl_result result = ironwood_halo2_transcript_challenge(&stage->transcript, wide, sizeof wide);
+    return result.ok ? ironwood_halo2_vesta_scalar(wide, sizeof wide, out, 32) : result;
+}
+
+struct zcl_result ironwood_postnu63_yx_challenges(struct ironwood_postnu63_stage *stage)
+{
+    if (!stage || stage->phase != IRONWOOD_POSTNU63_BETA_GAMMA || !stage->actions ||
+        stage->actions > SIZE_MAX / 512 || stage->proof.position != (size_t)stage->actions * 512)
+        return ZCL_ERR(-1, "Invalid PostNu6_3 product stage");
+    struct ironwood_postnu63_stage next = *stage;
+    size_t per_action = (size_t)next.actions * 3;
+    struct zcl_result result = absorb_points(&next, per_action, &next.permutation_offset);
+    if (result.ok) result = absorb_points(&next, per_action, &next.product_offset);
+    if (result.ok) result = absorb_points(&next, 1, &next.random_offset);
+    if (result.ok) result = squeeze_scalar(&next, next.y);
+    if (result.ok) result = absorb_points(&next, 8, &next.quotient_offset);
+    if (result.ok) result = squeeze_scalar(&next, next.x);
+    if (result.ok) { next.phase = IRONWOOD_POSTNU63_Y_X; *stage = next; }
     return result;
 }

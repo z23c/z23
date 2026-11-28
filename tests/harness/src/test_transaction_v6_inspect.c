@@ -666,6 +666,67 @@ static bool check_lookup_stage(struct ironwood_postnu63_stage *stage, uint8_t *w
     return ok;
 }
 
+static bool yx_reject_short(const struct ironwood_postnu63_stage *stage, size_t end)
+{
+    struct ironwood_postnu63_stage short_stage, before;
+    memcpy(&short_stage, stage, sizeof short_stage);
+    short_stage.proof.length = end - 1;
+    memcpy(&before, &short_stage, sizeof before);
+    return !ironwood_postnu63_yx_challenges(&short_stage).ok && !memcmp(&short_stage, &before, sizeof before);
+}
+
+static bool yx_reject_bad(const struct ironwood_postnu63_stage *stage, uint8_t *wire, size_t offset)
+{
+    struct ironwood_postnu63_stage trial, before;
+    uint8_t saved[32];
+    memcpy(&trial, stage, sizeof trial); memcpy(&before, &trial, sizeof before);
+    memcpy(saved, wire + offset, 32); memset(wire + offset, 0, 32);
+    bool ok = !ironwood_postnu63_yx_challenges(&trial).ok && !memcmp(&trial, &before, sizeof before);
+    memcpy(wire + offset, saved, 32);
+    return ok;
+}
+
+static bool yx_order_sensitive(const struct ironwood_postnu63_stage *stage, uint8_t *wire,
+                               size_t perm, size_t product, const uint8_t expected[32])
+{
+    struct ironwood_postnu63_stage trial;
+    uint8_t saved[32];
+    memcpy(&trial, stage, sizeof trial);
+    memcpy(saved, wire + perm, 32); memcpy(wire + perm, wire + product, 32);
+    memcpy(wire + product, saved, 32);
+    bool ok = ironwood_postnu63_yx_challenges(&trial).ok && memcmp(trial.y, expected, 32);
+    memcpy(wire + product, wire + perm, 32); memcpy(wire + perm, saved, 32);
+    return ok;
+}
+
+/* PostNu6_3 retained upstream traces, Vesta Fp challenge representations. */
+static bool check_yx_stage(struct ironwood_postnu63_stage *stage, uint8_t *wire)
+{
+    static const char *const ys[] = {
+        "60b1247bc1277add885feba2189bf565b04a6be1b1a9542884f3971779f38316",
+        "e5e43021d615a67ded66f757b0a083bf9ffff0d7143346a6ba330483a5a1331d"};
+    static const char *const xs[] = {
+        "3fafa948dc173285045f363b178d2d420f41f8cfc98c533e9cc080d6038f870a",
+        "a1c6c0c3c9fc964d3d54bbb9e586a2a3c1e6489881715ed10540fdf622c29d3a"};
+    uint64_t count = stage->actions;
+    if (!count || count > 2) return false;
+    size_t perm = (size_t)count * 512, prod = perm + (size_t)count * 96;
+    size_t random = prod + (size_t)count * 96, quotient = random + 32, end = quotient + 256;
+    size_t base = (size_t)(stage->proof.buffer - wire);
+    uint8_t y[32], x[32];
+    if (!zcl_hex_decode(ys[count - 1], y, 32) || !zcl_hex_decode(xs[count - 1], x, 32) ||
+        !yx_reject_short(stage, quotient) || !yx_reject_short(stage, end) ||
+        !yx_reject_bad(stage, wire, base + perm) || !yx_reject_bad(stage, wire, base + prod) ||
+        !yx_reject_bad(stage, wire, base + random) || !yx_reject_bad(stage, wire, base + quotient) ||
+        !yx_order_sensitive(stage, wire, base + perm, base + prod, y)) return false;
+    if (!ironwood_postnu63_yx_challenges(stage).ok || stage->permutation_offset != perm ||
+        stage->product_offset != prod || stage->random_offset != random || stage->quotient_offset != quotient ||
+        stage->proof.position != end || memcmp(stage->y, y, 32) || memcmp(stage->x, x, 32)) return false;
+    struct ironwood_postnu63_stage before;
+    memcpy(&before, stage, sizeof before);
+    return !ironwood_postnu63_yx_challenges(stage).ok && !memcmp(stage, &before, sizeof before);
+}
+
 /* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
 static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
 {
@@ -679,7 +740,7 @@ static bool check_stage(const struct v6_wire_view *view, const char *path, const
         !stage_fixture(view, path, input, size) || !stage_wire(view, input, size, wire, sizeof wire, &full) ||
         !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
         stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
-    return check_lookup_stage(&stage, wire) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
+    return check_lookup_stage(&stage, wire) && check_yx_stage(&stage, wire) && stage_refusals(&full, wire, size, vk, basis, w, &stage);
 }
 
 /* Public coinbase fixture: Orchard 0.16.0 PostNu6_3, R1 evidence
