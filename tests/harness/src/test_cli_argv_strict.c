@@ -1508,6 +1508,9 @@ static int cas_test_unsupported_profile(void)
         char *early[] = {CAS_BIN, dirarg, "--testnet-profile=fixture", "sentinel", NULL};
         ASSERT(cas_run(early, home, out, sizeof(out)) != 0);
         ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
+        char *early_first[] = {CAS_BIN, "--testnet-profile=fixture", "sentinel", NULL};
+        ASSERT(cas_run(early_first, home, out, sizeof(out)) != 0);
+        ASSERT(cas_contains(out, "error=UNSUPPORTED_PROFILE"));
         char *late[] = {CAS_BIN, dirarg, "sentinel", "-testnet-profile=fixture", NULL};
         ASSERT(cas_run(late, home, out, sizeof(out)) != 0);
         ASSERT(!cas_contains(out, "error=UNSUPPORTED_PROFILE"));

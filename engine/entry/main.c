@@ -1168,15 +1168,20 @@ static bool main_research_unselected_ok(int argc, char **argv)
 #endif
 }
 
+static bool main_research_first_direct(const char *arg)
+{
+    return !strncmp(arg, "--", 2) && strncmp(arg, "--testnet-profile", 17) &&
+        strncmp(arg, "--datadir=", 10) && strncmp(arg, "--rpcport=", 10) &&
+        strcmp(arg, "--agent") && strcmp(arg, "--status") && strcmp(arg, "--summary");
+}
+
 static bool main_research_direct_mode(int argc, char **argv)
 {
     bool before_word = true;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--importblockindex")) return true;
         if (before_word && !strcmp(argv[i], "--importchainstate")) return true;
-        if (i == 1 && !strncmp(argv[i], "--", 2) &&
-            strcmp(argv[i], "--agent") && strcmp(argv[i], "--status") &&
-            strcmp(argv[i], "--summary")) return true;
+        if (i == 1 && main_research_first_direct(argv[i])) return true;
         if (argv[i][0] != '-') before_word = false;
     }
     return false;
