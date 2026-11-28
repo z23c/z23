@@ -67,3 +67,19 @@ void pallas_point_add(struct pallas_point *out, const struct pallas_point *left,
     point_select(&result,&result,&b,fp_equal(&a.z,&identity.z));
     point_select(out,&result,&a,fp_equal(&b.z,&identity.z));
 }
+/* Fixed 255-bit double-and-add/select schedule. This is research arithmetic:
+ * neither compiler-level timing nor secret-memory handling is qualified. */
+void pallas_point_multiply(struct pallas_point *out, const struct pallas_point *point,
+                           const uint8_t scalar[32])
+{
+    struct pallas_point base = *point, acc = identity;
+    uint8_t bits[32];
+    for (size_t i = 0; i < 32; ++i) bits[i] = scalar[i];
+    for (size_t i = 255; i-- > 0;) {
+        struct pallas_point doubled, sum;
+        pallas_point_double(&doubled, &acc);
+        pallas_point_add(&sum, &doubled, &base);
+        point_select(&acc, &doubled, &sum, (bits[i / 8] >> (i % 8)) & 1);
+    }
+    *out = acc;
+}

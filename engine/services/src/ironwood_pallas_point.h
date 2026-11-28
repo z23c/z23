@@ -10,4 +10,7 @@ struct pallas_point { struct pallas_fp x, y, z; };
 void pallas_point_double(struct pallas_point *out, const struct pallas_point *a);
 void pallas_point_add(struct pallas_point *out, const struct pallas_point *a,
                       const struct pallas_point *b);
+/* Research only: scalar bytes must encode a canonical nonzero Orchard IVK. */
+void pallas_point_multiply(struct pallas_point *out, const struct pallas_point *p,
+                           const uint8_t scalar[32]);
 #endif

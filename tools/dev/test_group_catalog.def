@@ -2138,3 +2138,5 @@ ZCL_TEST_GROUP(fleet_goals_release)
 ZCL_TEST_GROUP(ironwood_pallas_field)
 
 ZCL_TEST_GROUP(ironwood_pallas_point)
+
+ZCL_TEST_GROUP(ironwood_pallas_agreement)
