@@ -1013,7 +1013,7 @@ static int bmx_t_tampered_mail(void)
             (void)snprintf(tag, sizeof(tag), "tampered-%s", names[i]);
             ASSERT(bmx_setup(tag));
             bmx_use(BMX_B);
-            ASSERT(bmx_grant("rhett", "node-a", NULL, 0));
+            ASSERT(bmx_grant("owner", "node-a", NULL, 0));
             ASSERT(bmx_grant("chatgpt", "node-a", NULL, 0));
             ASSERT_EQ(bmx_drive(BMX_A, &st), 1);
             ASSERT(bmx_presence_ref(g_bmx_node[BMX_A].p[0].text, original,
