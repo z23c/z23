@@ -111,10 +111,18 @@ static bool rm_boundary(struct rf_fixture *f, bool mature)
     return true;
 }
 
+static bool rm_setup(struct rf_fixture *f)
+{
+    return rnf_setup(&f->node, "research_maturity") && f->node.port[0] && f->node.port[1] &&
+        f->node.port[0] != 28023 && f->node.port[0] != 28033 &&
+        f->node.port[1] != 28023 && f->node.port[1] != 28033 &&
+        rf_catalog(f) && rf_start(f) && rf_ready(f);
+}
+
 static int rm_run(bool mature)
 {
     struct rf_fixture f = { .extra_flag = "-enforce-coinbase-maturity" };
-    bool ok = rf_setup(&f) && rm_boundary(&f, mature);
+    bool ok = rm_setup(&f) && rm_boundary(&f, mature);
     if (!ok && f.node.work[0]) rnf_log_tail(&f.node);
     rnf_cleanup(&f.node);
     return ok ? 0 : 1;
@@ -123,6 +131,6 @@ static int rm_run(bool mature)
 int test_research_maturity_node(void)
 {
     /* Other shared fixture helpers are exercised by research_freeze_node. */
-    (void)rf_mine; (void)rf_status;
+    (void)rf_setup; (void)rf_mine; (void)rf_status;
     return rm_run(false) || rm_run(true);
 }
