@@ -1784,6 +1784,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     { extern int test_ironwood_frontier_store(void); *failures += test_ironwood_frontier_store(); }
     { extern int test_utxo_apply_ironwood(void); *failures += test_utxo_apply_ironwood(); }
     { extern int test_utxo_apply_ironwood_session(void); *failures += test_utxo_apply_ironwood_session(); }
+    { extern int test_utxo_apply_ironwood_history(void); *failures += test_utxo_apply_ironwood_history(); }
     { extern int test_transaction_v6_inspect(void); *failures += test_transaction_v6_inspect(); }
     { extern int test_ironwood_checked_wire(void); *failures += test_ironwood_checked_wire(); }
     *failures += test_rescanwitnesses_diverge_guard();
