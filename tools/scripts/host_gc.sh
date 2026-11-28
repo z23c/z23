@@ -600,7 +600,7 @@ z23p_creator_status() {
 z23p_sweep_pool() {
     local pool="$1"
     [ -d "$pool" ] || { say "z23p: no pool at $pool — skipped"; return 0; }
-    local min_age=$(( Z23P_MIN_AGE_H * 3600 ))
+    local min_age=$(( (Z23P_MIN_AGE_H > 0 ? Z23P_MIN_AGE_H : 1) * 3600 ))
     local total=0 removed=0 kept=0 dirty=0 busy=0 young=0 bytes
     local wt creator
     while IFS= read -r wt; do
@@ -615,7 +615,7 @@ z23p_sweep_pool() {
             continue
         fi
         if [ "$creator" != "dead" ] \
-            && [ "$(age_secs "$wt")" -lt "$min_age" ] && [ "$LOW_DISK" = 0 ]; then
+            && [ "$(age_secs "$wt")" -lt "$min_age" ]; then
             young=$(( young + 1 )); continue
         fi
         if worktree_locked "$wt" || z23p_keep_donor "$pool" "$wt"; then kept=$(( kept + 1 )); continue; fi
@@ -692,7 +692,7 @@ z23p_sweep_ram() {
         z23p_sweep_pool "$Z23P_RAM"
         return 0
     fi
-    floor="$Z23P_MIN_AGE_H"; [ "$LOW_DISK" = 1 ] && floor=0
+    floor="$Z23P_MIN_AGE_H"; [ "$floor" -ge 1 ] || floor=1
     apply_arg=false; [ "$APPLY" = 1 ] && apply_arg=true
     out="$(env HOME="$GC_HOME" ZCL_RAM_SCRATCH_ROOT="$(dirname -- "$Z23P_RAM")" \
         "$bin" ops host gc "--apply=$apply_arg" "--floor_hours=$floor" 2>&1)" || true

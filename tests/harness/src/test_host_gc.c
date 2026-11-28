@@ -702,6 +702,46 @@ static bool hgt_script_isolated(const char *tmp)
     return ok && intact;
 }
 
+/* Exercise the actual shell fallback with only private fixture paths. */
+static bool hgt_shell_floor_run(const char *root, const char *repo, const char *pool,
+                                const char *bin, const char *proc)
+{
+    char home_env[HGT_PATH + 32], repo_env[HGT_PATH + 32], pool_env[HGT_PATH + 32];
+    char proc_env[HGT_PATH + 32], ram_env[HGT_PATH + 32], state_env[HGT_PATH + 32];
+    char path_env[HGT_PATH + 64], out[65536];
+    if (snprintf(home_env, sizeof home_env, "ZCL_HOST_GC_HOME=%s", root) >= (int)sizeof home_env ||
+        snprintf(repo_env, sizeof repo_env, "ZCL_HOST_GC_REPO=%s", repo) >= (int)sizeof repo_env ||
+        snprintf(pool_env, sizeof pool_env, "ZCL_HOST_GC_Z23P=%s", pool) >= (int)sizeof pool_env ||
+        snprintf(proc_env, sizeof proc_env, "ZCL_HOST_GC_PROC=%s", proc) >= (int)sizeof proc_env ||
+        snprintf(ram_env, sizeof ram_env, "ZCL_HOST_GC_RAM_ROOT=%s/no-ram", root) >= (int)sizeof ram_env ||
+        snprintf(state_env, sizeof state_env, "ZCL_HOST_GC_STATE=%s/state", root) >= (int)sizeof state_env ||
+        snprintf(path_env, sizeof path_env, "PATH=%s:/usr/bin:/bin", bin) >= (int)sizeof path_env) return false;
+    const char *argv[] = {"env", home_env, repo_env, pool_env, proc_env, ram_env, state_env, path_env,
+        "ZCL_HOST_GC_Z23_BIN=/nonexistent/z23", "ZCL_HOST_GC_Z23P_MIN_AGE_H=1",
+        "tools/scripts/host_gc.sh", "--only", "z23p", "--apply", NULL};
+    int rc = zcl_spawn_capture(argv, out, sizeof out, 180000);
+    if (rc != 0) fprintf(stderr, "host gc floor fixture rc=%d: %s\n", rc, out);
+    return rc == 0 && strstr(out, "LOW DISK") != NULL;
+}
+
+static bool hgt_shell_floor(const char *tmp)
+{
+    char root[HGT_PATH], repo[HGT_PATH], pool[HGT_PATH], bin[HGT_PATH], proc[HGT_PATH];
+    char fresh[HGT_PATH], stale[HGT_PATH], df[HGT_PATH];
+    if (snprintf(root, sizeof root, "%s/shell-floor", tmp) >= (int)sizeof root ||
+        snprintf(repo, sizeof repo, "%s/repo", root) >= (int)sizeof repo ||
+        snprintf(pool, sizeof pool, "%s/.z23p", root) >= (int)sizeof pool ||
+        snprintf(bin, sizeof bin, "%s/bin", root) >= (int)sizeof bin ||
+        snprintf(proc, sizeof proc, "%s/proc", root) >= (int)sizeof proc ||
+        snprintf(df, sizeof df, "%s/df", bin) >= (int)sizeof df) return false;
+    if (mkdir(root, 0700) || mkdir(pool, 0700) || mkdir(bin, 0700) || mkdir(proc, 0700) ||
+        !hgt_make_repo(repo) || !hgt_add_gen(repo, pool, "fresh", fresh, sizeof fresh) ||
+        !hgt_add_gen(repo, pool, "stale", stale, sizeof stale) || !hgt_backdate(stale, 48)) return false;
+    static const char fake_df[] = "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 2000000000 1999999000 1000 99%% /\\n'\n";
+    if (!hgt_write(df, fake_df) || chmod(df, 0700)) return false;
+    return hgt_shell_floor_run(root, repo, pool, bin, proc) && hgt_exists(fresh) && !hgt_exists(stale);
+}
+
 /* Exercise the real warning paths with private metrics and no mail delivery. */
 struct hgt_warning_fixture {
     char root[HGT_PATH], home[HGT_PATH], bin[HGT_PATH], bulk[HGT_PATH];
@@ -2016,6 +2056,10 @@ int test_host_gc(void)
     }
     if (!hgt_script_isolated(tmp)) {
         fprintf(stderr, "host gc: selftest escaped isolated Git environment\n");
+        ++failures;
+    }
+    if (!hgt_shell_floor(tmp)) {
+        fprintf(stderr, "host gc: pressured shell age-floor fixture failed\n");
         ++failures;
     }
 

@@ -255,12 +255,12 @@ assert_gone "$Z23P_FX/gen-dead" "z23p apply left a dead-creator generation behin
 log_lines_before="$(wc -l < "$STATE_FX/host_gc.log" 2>/dev/null || echo 0)"
 : > "$Z23_STUB_CALLS"
 out="$(run_hostgc z23p dry-run)"
-assert_contains "$(cat -- "$Z23_STUB_CALLS")" "ops host gc --apply=false --floor_hours=0" \
+assert_contains "$(cat -- "$Z23_STUB_CALLS")" "ops host gc --apply=false --floor_hours=1" \
     "z23p dry-run asks the native sweep for a dry run at this run's age floor"
 : > "$Z23_STUB_CALLS"
 out="$(run_hostgc z23p apply)"
 new_log="$(tail -n "+$(( log_lines_before + 1 ))" -- "$STATE_FX/host_gc.log" 2>/dev/null || true)"
-assert_contains "$(cat -- "$Z23_STUB_CALLS")" "ops host gc --apply=true --floor_hours=0" \
+assert_contains "$(cat -- "$Z23_STUB_CALLS")" "ops host gc --apply=true --floor_hours=1" \
     "z23p apply asks the native sweep to apply"
 assert_contains "$out" "$RAM_FX" "z23p apply names the tmpfs pool it swept"
 assert_contains "$new_log" "z23p-ram" "z23p apply logs one z23p-ram row"
