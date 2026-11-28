@@ -34,6 +34,29 @@ static bool checkpoint_roundtrip(const struct ironwood_note_frontier *tree,
            !memcmp(restored.slots, tree->slots, sizeof tree->slots);
 }
 
+static bool restore_refusals(uint8_t *frame, size_t size, const uint8_t root[32],
+    const uint8_t *params, const uint8_t leaves[4][32], struct ironwood_note_frontier *out)
+{
+    struct ironwood_note_frontier saved;
+    memcpy(&saved, out, sizeof saved);
+    uint8_t wrong_root[32];
+    memcpy(wrong_root, root, sizeof wrong_root);
+    wrong_root[0] ^= 1;
+    if (ironwood_frontier_restore(frame, size, 3, wrong_root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok ||
+        ironwood_frontier_restore(frame, size, 3, root, params, 0, out).ok ||
+        ironwood_frontier_restore(frame, size - 1, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok ||
+        ironwood_frontier_restore(frame, size + 1, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok ||
+        ironwood_frontier_restore(frame, size, 5, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok) return false;
+    frame[0]++;
+    if (ironwood_frontier_restore(frame, size, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok) return false;
+    frame[0]--;
+    memcpy(frame + 9, leaves[1], 32);
+    if (ironwood_frontier_restore(frame, size, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok) return false;
+    memset(frame + 9, 0xff, 32);
+    return !ironwood_frontier_restore(frame, size, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, out).ok &&
+        memcmp(out, &saved, sizeof saved) == 0;
+}
+
 static bool damaged_checkpoints(const uint8_t *params, const uint8_t leaves[4][32])
 {
     struct ironwood_note_frontier tree = {0}, out = {.count = 15};
@@ -46,24 +69,7 @@ static bool damaged_checkpoints(const uint8_t *params, const uint8_t leaves[4][3
     /* The low slot is the last leaf. The higher slot covers the first pair. */
     if (frame[1] != 3 || memcmp(frame + 9, leaves[2], 32) ||
         memcmp(frame + 41, tree.slots[1], 32)) return false;
-    struct ironwood_note_frontier saved;
-    memcpy(&saved, &out, sizeof saved);
-    uint8_t wrong_root[32];
-    memcpy(wrong_root, root, sizeof root);
-    wrong_root[0] ^= 1;
-    if (ironwood_frontier_restore(frame, size, 3, wrong_root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok ||
-        ironwood_frontier_restore(frame, size, 3, root, params, 0, &out).ok) return false;
-    if (ironwood_frontier_restore(frame, size - 1, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok ||
-        ironwood_frontier_restore(frame, size + 1, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok ||
-        ironwood_frontier_restore(frame, size, 5, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok) return false;
-    frame[0]++;
-    if (ironwood_frontier_restore(frame, size, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok) return false;
-    frame[0]--;
-    memcpy(frame + 9, leaves[1], 32);
-    if (ironwood_frontier_restore(frame, size, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok) return false;
-    memset(frame + 9, 0xff, 32);
-    if (ironwood_frontier_restore(frame, size, 3, root, params, IRONWOOD_MERKLE_PARAMETERS_SIZE, &out).ok ||
-        memcmp(&out, &saved, sizeof out)) return false;
+    if (!restore_refusals(frame, size, root, params, leaves, &out)) return false;
     memset(tree.slots[1], 0xff, 32);
     memset(frame, 0xaa, sizeof frame);
     uint8_t before[sizeof frame];
