@@ -3254,15 +3254,21 @@ static void observation_driver_chain(struct observation_fixture *fixture)
     bool linked = inner_created && driver_created;
     fixture->argv[0] = driver;
     observation = NULL;
-    bool ready = linked && observation_begin(fixture, &observation) &&
-                 observation_compile(observation);
+    bool began = linked && observation_begin(fixture, &observation);
+    bool compiled = began && observation_compile(observation);
+    bool finished = compiled &&
+                    zcl_compile_observation_finish(observation, true, &result);
+    if (!finished)
+        printf("    stable chain: linked=%d begin=%d compile=%d finish=%d "
+               "miss=%s detail=%s\n", linked, began, compiled, finished,
+               result.miss, result.why);
     AR_CHECK("observation accepts a stable compiler symlink chain",
-             ready && zcl_compile_observation_finish(observation, true, &result));
+             finished);
     zcl_action_root_result_free(&result);
     zcl_compile_observation_close(observation);
     observation = NULL;
-    ready = linked && observation_begin(fixture, &observation) &&
-            observation_compile(observation);
+    bool ready = linked && observation_begin(fixture, &observation) &&
+                 observation_compile(observation);
     bool retargeted = ready && observation_chain_retarget(intermediate,
                                                           fixture->compiler);
     AR_CHECK("observation refuses a restored intermediate link retarget",
