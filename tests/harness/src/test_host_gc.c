@@ -729,22 +729,31 @@ static bool hgt_shell_floor_run(const char *root, const char *repo, const char *
     return rc == 0 && strstr(out, "LOW DISK") != NULL;
 }
 
-static bool hgt_shell_floor(const char *tmp)
-{
+struct hgt_floor_fixture {
     char root[HGT_PATH], repo[HGT_PATH], pool[HGT_PATH], bin[HGT_PATH], proc[HGT_PATH];
     char fresh[HGT_PATH], stale[HGT_PATH], df[HGT_PATH];
-    if (snprintf(root, sizeof root, "%s/shell-floor", tmp) >= (int)sizeof root ||
-        snprintf(repo, sizeof repo, "%s/repo", root) >= (int)sizeof repo ||
-        snprintf(pool, sizeof pool, "%s/.z23p", root) >= (int)sizeof pool ||
-        snprintf(bin, sizeof bin, "%s/bin", root) >= (int)sizeof bin ||
-        snprintf(proc, sizeof proc, "%s/proc", root) >= (int)sizeof proc ||
-        snprintf(df, sizeof df, "%s/df", bin) >= (int)sizeof df) return false;
-    if (mkdir(root, 0700) || mkdir(pool, 0700) || mkdir(bin, 0700) || mkdir(proc, 0700) ||
-        !hgt_make_repo(repo) || !hgt_add_gen(repo, pool, "fresh", fresh, sizeof fresh) ||
-        !hgt_add_gen(repo, pool, "stale", stale, sizeof stale) || !hgt_backdate(stale, 48)) return false;
+};
+
+static bool hgt_shell_floor_paths(struct hgt_floor_fixture *f, const char *tmp)
+{
+    return snprintf(f->root, sizeof f->root, "%s/shell-floor", tmp) < (int)sizeof f->root &&
+        snprintf(f->repo, sizeof f->repo, "%s/repo", f->root) < (int)sizeof f->repo &&
+        snprintf(f->pool, sizeof f->pool, "%s/.z23p", f->root) < (int)sizeof f->pool &&
+        snprintf(f->bin, sizeof f->bin, "%s/bin", f->root) < (int)sizeof f->bin &&
+        snprintf(f->proc, sizeof f->proc, "%s/proc", f->root) < (int)sizeof f->proc &&
+        snprintf(f->df, sizeof f->df, "%s/df", f->bin) < (int)sizeof f->df;
+}
+
+static bool hgt_shell_floor(const char *tmp)
+{
+    struct hgt_floor_fixture f;
+    if (!hgt_shell_floor_paths(&f, tmp)) return false;
+    if (mkdir(f.root, 0700) || mkdir(f.pool, 0700) || mkdir(f.bin, 0700) || mkdir(f.proc, 0700) ||
+        !hgt_make_repo(f.repo) || !hgt_add_gen(f.repo, f.pool, "fresh", f.fresh, sizeof f.fresh) ||
+        !hgt_add_gen(f.repo, f.pool, "stale", f.stale, sizeof f.stale) || !hgt_backdate(f.stale, 48)) return false;
     static const char fake_df[] = "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nfixture 2000000000 1999999000 1000 99%% /\\n'\n";
-    if (!hgt_write(df, fake_df) || chmod(df, 0700)) return false;
-    return hgt_shell_floor_run(root, repo, pool, bin, proc) && hgt_exists(fresh) && !hgt_exists(stale);
+    if (!hgt_write(f.df, fake_df) || chmod(f.df, 0700)) return false;
+    return hgt_shell_floor_run(f.root, f.repo, f.pool, f.bin, f.proc) && hgt_exists(f.fresh) && !hgt_exists(f.stale);
 }
 
 /* Exercise the real warning paths with private metrics and no mail delivery. */
