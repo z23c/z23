@@ -1760,30 +1760,41 @@ static int cas_test_research_nonclient_dispatch(void)
     return failures;
 }
 
+/* One alias with the selector after it is refused as the unsupported profile
+ * it is, not as "Invalid or unsafe testnet profile invocation"; with the
+ * selector before it, it is refused too.  Every pair is judged on its own. */
+static bool cas_alias_pair_refused(const char *alias, const char *selector,
+                                   const char *home)
+{
+    char out[8192] = {0};
+    char *after[] = {CAS_BIN, (char *)alias, (char *)selector, NULL};
+    int after_rc = cas_run(after, home, out, sizeof(out));
+    bool after_refused = after_rc == ZCL_COMMAND_EXIT_INVALID &&
+        strstr(out, "error=UNSUPPORTED_PROFILE") && !strstr(out, "zcl.public_status") &&
+        !strstr(out, "Invalid or unsafe testnet profile invocation.");
+    char *before[] = {CAS_BIN, (char *)selector, (char *)alias, NULL};
+    int before_rc = cas_run(before, home, out, sizeof(out));
+    bool before_refused = before_rc == ZCL_COMMAND_EXIT_INVALID &&
+        strstr(out, "error=UNSUPPORTED_PROFILE") && !strstr(out, "zcl.public_status");
+    if (!after_refused || !before_refused)
+        fprintf(stderr, "alias %s selector %s: after rc=%d refused=%d before rc=%d refused=%d\n",
+                alias, selector, after_rc, after_refused, before_rc, before_refused);
+    return after_refused && before_refused;
+}
+
 static int cas_test_research_client_aliases(void)
 {
     int failures = 0;
     TEST("research selector refuses client aliases in either order") {
-        char home[PATH_MAX], out[8192], path[PATH_MAX + 32];
+        char home[PATH_MAX], path[PATH_MAX + 32];
         ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_alias") != NULL);
         const char *aliases[] = {"--status", "--summary", "--agent"};
         const char *selectors[] = {"-testnet-profile=ironwood", "--testnet-profile=ironwood"};
         bool refused = true;
         for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); i++) {
             for (size_t j = 0; j < sizeof(selectors) / sizeof(selectors[0]); j++) {
-                char *after[] = {CAS_BIN, (char *)aliases[i], (char *)selectors[j], NULL};
-                int after_rc = cas_run(after, home, out, sizeof(out));
-                bool after_refused = after_rc == ZCL_COMMAND_EXIT_INVALID &&
-                    strstr(out, "error=UNSUPPORTED_PROFILE") && !strstr(out, "zcl.public_status") &&
-                    !strstr(out, "Invalid or unsafe testnet profile invocation.");
-                char *before[] = {CAS_BIN, (char *)selectors[j], (char *)aliases[i], NULL};
-                int before_rc = cas_run(before, home, out, sizeof(out));
-                bool before_refused = before_rc == ZCL_COMMAND_EXIT_INVALID &&
-                    strstr(out, "error=UNSUPPORTED_PROFILE") && !strstr(out, "zcl.public_status");
-                if (!after_refused || !before_refused)
-                    fprintf(stderr, "alias %s selector %s: after rc=%d refused=%d before rc=%d refused=%d\n",
-                            aliases[i], selectors[j], after_rc, after_refused, before_rc, before_refused);
-                refused = refused && after_refused && before_refused;
+                bool pair_refused = cas_alias_pair_refused(aliases[i], selectors[j], home);
+                refused = refused && pair_refused;
             }
         }
         ASSERT(snprintf(path, sizeof(path), "%s/.zclassic-c23", home) > 0);
@@ -1792,34 +1803,61 @@ static int cas_test_research_client_aliases(void)
         test_cleanup_tmpdir(home);
         ASSERT(refused && untouched);
         PASS();
-    }
+    } _test_next:;
+    return failures;
+}
+
+/* The method route is refused with the selector on either side of it, and
+ * with explicit target flags still present. */
+static bool cas_method_orders_refused(char *const after[], char *const before[],
+                                      char *const targeted[], const char *home)
+{
+    char out[8192] = {0};
+    int after_rc = cas_run(after, home, out, sizeof(out));
+    bool after_refused = after_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
+    int before_rc = cas_run(before, home, out, sizeof(out));
+    bool before_refused = before_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
+    int targeted_rc = cas_run(targeted, home, out, sizeof(out));
+    bool targeted_refused = targeted_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
+    if (!after_refused || !before_refused || !targeted_refused)
+        fprintf(stderr, "method order: after rc=%d refused=%d before rc=%d refused=%d targeted rc=%d refused=%d\n",
+                after_rc, after_refused, before_rc, before_refused, targeted_rc, targeted_refused);
+    return after_refused && before_refused && targeted_refused;
+}
+
+/* The plain client route still names the explicit target in its output. */
+static bool cas_plain_names_target(char *const argv[], const char *home,
+                                   char *out, size_t cap, int *rc)
+{
+    *rc = cas_run(argv, home, out, cap);
+    return *rc != ZCL_COMMAND_EXIT_INVALID && *rc > 0 &&
+        strstr(out, "error=CONNECT_REFUSED") && strstr(out, "/target/.cookie");
+}
+
+static int cas_test_research_method_order(void)
+{
+    int failures = 0;
     TEST("research selector refuses a method in either order; explicit target flags stay the client route") {
-        char home[PATH_MAX], out[8192], flag[PATH_MAX + 32];
+        char home[PATH_MAX], out[8192] = {0}, flag[PATH_MAX + 32];
         ASSERT(test_mkdtemp(home, sizeof(home), "cas_research_order") != NULL);
         ASSERT(snprintf(flag, sizeof(flag), "-datadir=%s/target", home) > 0);
         char *after[] = {CAS_BIN, "getblockcount", "-testnet-profile=ironwood", NULL};
-        int after_rc = cas_run(after, home, out, sizeof(out));
-        bool after_refused = after_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
         char *before[] = {CAS_BIN, "-testnet-profile=ironwood", "getblockcount", NULL};
-        int before_rc = cas_run(before, home, out, sizeof(out));
-        bool before_refused = before_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
         char *targeted[] = {CAS_BIN, "getblockcount", flag, "-rpcport=28023",
                             "--testnet-profile=ironwood", NULL};
-        int targeted_rc = cas_run(targeted, home, out, sizeof(out));
-        bool targeted_refused = targeted_rc == ZCL_COMMAND_EXIT_INVALID && strstr(out, "error=UNSUPPORTED_PROFILE");
         char *plain[] = {CAS_BIN, "getblockcount", flag, "-rpcport=28023", NULL};
-        int plain_rc = cas_run(plain, home, out, sizeof(out));
-        bool plain_named = plain_rc != ZCL_COMMAND_EXIT_INVALID && plain_rc > 0 &&
-            strstr(out, "error=CONNECT_REFUSED") && strstr(out, "/target/.cookie");
-        if (!after_refused || !before_refused || !targeted_refused || !plain_named)
-            fprintf(stderr, "method order: after rc=%d refused=%d before rc=%d refused=%d targeted rc=%d refused=%d plain rc=%d named=%d out=%s\n",
-                    after_rc, after_refused, before_rc, before_refused, targeted_rc, targeted_refused, plain_rc, plain_named, out);
+        bool orders_refused = cas_method_orders_refused(after, before, targeted, home);
+        int plain_rc = 0;
+        bool plain_named = cas_plain_names_target(plain, home, out, sizeof(out), &plain_rc);
+        if (!orders_refused || !plain_named)
+            fprintf(stderr, "method order: plain rc=%d named=%d out=%s\n", plain_rc, plain_named, out);
         test_cleanup_tmpdir(home);
-        ASSERT(after_refused && before_refused && targeted_refused && plain_named);
+        ASSERT(orders_refused && plain_named);
         PASS();
     } _test_next:;
     return failures;
 }
+
 
 static int cas_test_research_marker_guards(void)
 {
@@ -2165,6 +2203,7 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_bench_dispatch();
     failures += cas_test_research_nonclient_dispatch();
     failures += cas_test_research_client_aliases();
+    failures += cas_test_research_method_order();
     failures += cas_test_research_marker_guards();
     failures += cas_test_research_empty_mode();
     failures += cas_test_research_private_directory();
