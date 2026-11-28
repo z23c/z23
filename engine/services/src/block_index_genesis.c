@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
  * purpose: Persist and verify the selected network's genesis body before advertising its data. */
 #include "services/block_index_loader.h"
+#include "block_index_genesis_internal.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
@@ -8,7 +9,25 @@
 #include "domain/consensus/check_block.h"
 #include "primitives/block.h"
 #include "storage/disk_block_io.h"
+#include "validation/main_state.h"
+#include "validation/chainstate.h"
 #include <string.h>
+
+bool block_index_foreign_genesis_row(int height, const uint8_t hash[32], const struct chain_params *params)
+{
+    return height == 0 && memcmp(hash, params->consensus.hashGenesisBlock.data, 32) != 0;
+}
+
+bool block_index_has_foreign_genesis(struct main_state *state, const struct chain_params *params)
+{
+    size_t iter = 0;
+    struct block_index *row;
+    while (block_map_next(&state->map_block_index, &iter, NULL, &row))
+        if (row && row->phashBlock &&
+            block_index_foreign_genesis_row(row->nHeight, row->phashBlock->data, params))
+            return true;
+    return false;
+}
 
 uint32_t block_index_genesis_bits(const struct chain_params *cp)
 {

@@ -26,6 +26,7 @@
 #include "storage/blocks_mmap_reader.h"
 #include "core/serialize.h"
 #include "block_index_flat_internal.h"
+#include "block_index_genesis_internal.h"
 #include "block_index_history_ancestry.h"
 #include "services/block_index_flat_anchor.h"
 #include "services/block_row_verify.h"
@@ -1224,14 +1225,8 @@ static struct zcl_result bil_verify_loaded_genesis(struct main_state *ms,
     const char *datadir)
 {
     if (!wire) return ZCL_OK;
-    if (chain_research_profile_current()) {
-        size_t iter = 0;
-        struct block_index *row;
-        while (block_map_next(&ms->map_block_index, &iter, NULL, &row))
-            if (row && row->nHeight == 0 && row->phashBlock &&
-                !uint256_eq(row->phashBlock, &params->consensus.hashGenesisBlock))
-                return ZCL_ERR(-1, "load_block_index: foreign research genesis index");
-    }
+    if (chain_research_profile_current() && block_index_has_foreign_genesis(ms, params))
+        return ZCL_ERR(-1, "load_block_index: foreign research genesis index");
     struct block_index *genesis = block_map_find(&ms->map_block_index,
                                                  &params->consensus.hashGenesisBlock);
     if (!genesis)

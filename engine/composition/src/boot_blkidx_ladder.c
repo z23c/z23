@@ -56,12 +56,15 @@ static bool rung_from_log_applicable(const struct boot_blkidx_load_ctx *c)
 }
 static bool rung_from_log_load(struct boot_blkidx_load_ctx *c)
 {
-    if (boot_try_rebuild_block_index_from_projection(
-            c->st, c->params, 1000, /*publish_tip=*/true).ok) {
+    struct zcl_result result = boot_try_rebuild_block_index_from_projection(
+            c->st, c->params, 1000, /*publish_tip=*/!chain_research_profile_current());
+    if (result.ok) {
         c->rebuilt_from_log = true;
         c->loaded = true;
         return true;
     }
+    if (chain_research_profile_current() && result.code == -6)
+        c->genesis_failed = true;
     return false;
 }
 
@@ -101,11 +104,14 @@ static bool rung_kill9_applicable(const struct boot_blkidx_load_ctx *c)
 }
 static bool rung_kill9_load(struct boot_blkidx_load_ctx *c)
 {
-    if (boot_try_rebuild_block_index_from_projection(
-            c->st, c->params, 1, /*publish_tip=*/false).ok) {
+    struct zcl_result result = boot_try_rebuild_block_index_from_projection(
+            c->st, c->params, 1, /*publish_tip=*/false);
+    if (result.ok) {
         c->loaded = true;
         return true;
     }
+    if (chain_research_profile_current() && result.code == -6)
+        c->genesis_failed = true;
     return false;
 }
 

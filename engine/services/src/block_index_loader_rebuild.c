@@ -11,6 +11,7 @@
  * declared in services/block_index_loader.h. */
 #include "platform/time_compat.h"
 #include "services/block_index_loader.h"
+#include "block_index_genesis_internal.h"
 #include "util/util.h"
 #include "services/chain_tip.h"
 #include "services/chain_restore_repair.h"
@@ -400,6 +401,8 @@ static bool projection_restore_genesis(struct main_state *ms, const struct chain
     const struct chain_research_descriptor *research = chain_research_profile_current();
     if (!research) return true;
     if (!params || research->chain != params) return false;
+    if (block_index_has_foreign_genesis(ms, params))
+        LOG_FAIL("block_index", "projection research genesis: foreign height-zero index");
     char datadir[2048] = {0};
     GetDataDir(true, datadir, sizeof datadir);
     struct block_index *genesis = block_map_find(&ms->map_block_index,
@@ -409,6 +412,28 @@ static bool projection_restore_genesis(struct main_state *ms, const struct chain
         genesis, params, research->genesis_wire, research->genesis_wire_len, datadir);
     if (!result.ok) LOG_FAIL("block_index", "research genesis: %s", result.message);
     return true;
+}
+
+struct projection_genesis_preflight {
+    const struct chain_params *params;
+    bool foreign;
+};
+
+static bool projection_genesis_preflight_cb(const uint8_t hash[32],
+    const struct disk_block_index *row, void *ctx)
+{
+    struct projection_genesis_preflight *check = ctx;
+    check->foreign = block_index_foreign_genesis_row(row->nHeight, hash, check->params);
+    return !check->foreign;
+}
+
+static bool projection_genesis_preflight(struct main_state *ms, const struct chain_params *params,
+                                         struct block_index_projection *bip)
+{
+    if (!params || block_index_has_foreign_genesis(ms, params)) return false;
+    struct projection_genesis_preflight check = { .params = params };
+    return block_index_projection_iterate(bip, projection_genesis_preflight_cb, &check) == 0 &&
+           !check.foreign;
 }
 
 struct zcl_result load_block_index_from_projection(struct main_state *ms,
@@ -423,6 +448,9 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
      * or fast_sync separately. */
     if (!bip)
         return ZCL_OK;
+
+    if (chain_research_profile_current() && !projection_genesis_preflight(ms, params, bip))
+        return ZCL_ERR(-6, "projection research genesis: foreign index or unreadable projection");
 
     /* (1) Drain the event log into the projection. */
     uint64_t off = block_index_projection_catch_up(bip);
@@ -487,7 +515,7 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
            ctx.folded, (long long)elapsed);
 
     /* (5) Seed the tip from the durable tip_finalize cursor. */
-    rebuild_seed_tip(ms, progress_db);
+    if (!chain_research_profile_current()) rebuild_seed_tip(ms, progress_db);
 
     return ZCL_OK;
 }

@@ -22,6 +22,8 @@
 #include "services/chain_tip.h"
 #include "storage/sha3_sidecar_io.h"
 #include "storage/disk_block_io.h"
+#include "storage/block_index_projection.h"
+#include "storage/event_log_payloads.h"
 #include "storage/progress_store.h"
 #include "storage/coins_kv.h"
 #include "jobs/tip_finalize_stage.h"
@@ -949,6 +951,36 @@ static int bil_mixed_genesis_refusal(const struct chain_research_descriptor *pro
     return failures;
 }
 
+static int bil_foreign_projection_refusal(const struct chain_research_descriptor *profile)
+{
+    int failures = 0;
+    char dir[256], logpath[320], dbpath[320], blocks[320];
+    if (!test_mkdtemp(dir, sizeof dir, "bil_foreign_projection")) return 1;
+    snprintf(logpath, sizeof logpath, "%s/event.dat", dir);
+    snprintf(dbpath, sizeof dbpath, "%s/projection.db", dir);
+    snprintf(blocks, sizeof blocks, "%s/blocks", dir);
+    event_log_t *log = event_log_open(logpath);
+    struct ev_block_header h = {0}; h.hash[0] = 42; h.height = 0;
+    h.nBits = block_index_genesis_bits(profile->chain);
+    uint8_t bytes[256]; size_t written = 0;
+    bool emitted = log && ev_block_header_serialize(&h, NULL, bytes, sizeof bytes, &written) &&
+        event_log_append(log, EV_BLOCK_HEADER, bytes, written) != UINT64_MAX;
+    block_index_projection_t *projection = emitted ? block_index_projection_open(dbpath, log) : NULL;
+    bool caught = projection && block_index_projection_catch_up(projection) != UINT64_MAX;
+    struct main_state state; main_state_init(&state);
+    if (projection) block_index_projection_set_singleton(projection);
+    bool refused = caught && bil_ladder_refuses_unchanged(dir, &state, profile->chain);
+    struct stat st;
+    BIL_CHECK("bil: foreign projection kill9 rung refuses without changing files",
+              refused && stat(blocks, &st) != 0 && errno == ENOENT);
+    if (projection) block_index_projection_set_singleton(NULL);
+    main_state_free(&state);
+    if (projection) block_index_projection_close(projection);
+    if (log) event_log_close(log);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int bil_research_foreign_index(const struct chain_research_descriptor *profile)
 {
     int failures = 0;
@@ -1005,6 +1037,7 @@ static int bil_research_genesis_body(void)
         failures += bil_conflicting_body_refusal(profile);
         failures += bil_hydrate_genesis_gate(profile);
         failures += bil_mixed_genesis_refusal(profile);
+        failures += bil_foreign_projection_refusal(profile);
         chain_params_select(CHAIN_REGTEST);
     } else BIL_CHECK("bil: select research for ladder refusals", false);
     block_index_hdrext_free(&g);
