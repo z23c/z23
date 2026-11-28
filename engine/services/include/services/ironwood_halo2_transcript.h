@@ -9,9 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Framing only: callers must validate and decode points and scalars, enforce
- * proof ordering, and reduce challenge bytes to the appropriate field. This
- * interface does not verify a proof or decide transaction validity. */
+/* Low-level framing does not validate points or scalars. Callers enforce
+ * proof ordering. This interface does not verify a proof or decide validity. */
 struct ironwood_halo2_transcript {
     struct blake2b_ctx hash;
     bool initialized;
@@ -31,6 +30,12 @@ struct zcl_result ironwood_halo2_transcript_scalar(struct ironwood_halo2_transcr
 struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t,
                                               struct zcl_codec_reader *reader,
                                               uint8_t *out, size_t size);
+/* Read and absorb a canonical nonidentity Vesta proof point. On failure the
+ * reader, transcript and 64-byte affine output remain unchanged. Output must
+ * not overlap the reader or transcript objects. Public inputs only. */
+struct zcl_result ironwood_halo2_read_point(struct ironwood_halo2_transcript *t,
+                                             struct zcl_codec_reader *reader,
+                                             uint8_t *out, size_t size);
 /* Appends the challenge delimiter and returns 64 raw bytes; state advances. */
 struct zcl_result ironwood_halo2_transcript_challenge(struct ironwood_halo2_transcript *t,
                                                        uint8_t *out, size_t size);

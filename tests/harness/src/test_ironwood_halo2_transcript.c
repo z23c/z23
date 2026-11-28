@@ -101,6 +101,68 @@ static int scalar_reader_boundaries(void)
     CHECK(scalar_reader_refusal(wire, 32, true, false, 32) == 0);
     return 0;
 }
+/* pasta_curves 0.5.1 oracle: src/main.rs SHA256
+ * cebea21bc654d35e3cd1575149ed01010b810874cd6dcf16fa888ab52b43ba1a;
+ * vectors.txt SHA256 d8a89140ab1ccc73cacde5c1ba8bdcd7ed184b7df58cb7a15b3e79bd3f40e408.
+ * The x coordinate is the first point of the retained Orchard trace. */
+static int point_reader_vector(const char *wire_hex, const char *affine_hex)
+{
+    uint8_t wire[32], affine[64], out[64], a[64], b[64];
+    struct ironwood_halo2_transcript t, expected;
+    struct zcl_codec_reader reader;
+    CHECK(zcl_hex_decode(wire_hex, wire, sizeof wire));
+    CHECK(zcl_hex_decode(affine_hex, affine, sizeof affine));
+    CHECK(ironwood_halo2_transcript_init(&t).ok);
+    CHECK(ironwood_halo2_transcript_init(&expected).ok);
+    zcl_codec_reader_init(&reader, wire, sizeof wire);
+    CHECK(ironwood_halo2_read_point(&t, &reader, out, sizeof out).ok);
+    CHECK(reader.position == 32 && !memcmp(out, affine, sizeof out));
+    CHECK(ironwood_halo2_transcript_point(&expected, affine, sizeof affine).ok);
+    CHECK(ironwood_halo2_transcript_challenge(&t, a, sizeof a).ok);
+    CHECK(ironwood_halo2_transcript_challenge(&expected, b, sizeof b).ok);
+    CHECK(!memcmp(a, b, sizeof a));
+    return 0;
+}
+
+static int point_reader_refusal(const uint8_t *wire, size_t length, bool initialized,
+                                bool prefailed, size_t size)
+{
+    struct ironwood_halo2_transcript t = {0}, before;
+    struct zcl_codec_reader reader, prior;
+    uint8_t out[64], saved[64];
+    if (initialized) CHECK(ironwood_halo2_transcript_init(&t).ok);
+    zcl_codec_reader_init(&reader, wire, length);
+    if (prefailed) reader.error = ZCL_CODEC_BOUNDS;
+    memcpy(&before, &t, sizeof t); memcpy(&prior, &reader, sizeof reader);
+    memset(out, 0xa5, sizeof out); memcpy(saved, out, sizeof out);
+    CHECK(!ironwood_halo2_read_point(&t, &reader, out, size).ok);
+    CHECK(!memcmp(&t, &before, sizeof t) && !memcmp(&reader, &prior, sizeof reader));
+    CHECK(!memcmp(out, saved, sizeof out));
+    return 0;
+}
+
+static int point_reader_cases(void)
+{
+    static const char x[] = "5d1ec738bb0307c047eeb2a9af2ffa180a4022574dbc6165133c04e78d8eb811";
+    static const char xodd[] = "5d1ec738bb0307c047eeb2a9af2ffa180a4022574dbc6165133c04e78d8eb891";
+    static const char even[] = "5d1ec738bb0307c047eeb2a9af2ffa180a4022574dbc6165133c04e78d8eb811e276a6b4792ec294ba6ece7a07e8aa756e53ec63faceb6c6a691e17b31b5c736";
+    static const char odd[] = "5d1ec738bb0307c047eeb2a9af2ffa180a4022574dbc6165133c04e78d8eb8111f89594ba7bc84f7223ac68ef4b09bac91ac139c05314939596e1e84ce4a3809";
+    static const char fq[] = "0100000021eb468cdda89409fc98462200000000000000000000000000000040";
+    uint8_t wire[32] = {0};
+    CHECK(point_reader_vector(x, even) == 0 && point_reader_vector(xodd, odd) == 0);
+    CHECK(point_reader_refusal(wire, 32, true, false, 64) == 0); /* identity */
+    wire[0] = 2; /* non-square x^3+5 */
+    CHECK(point_reader_refusal(wire, 32, true, false, 64) == 0);
+    CHECK(zcl_hex_decode(fq, wire, sizeof wire));
+    CHECK(point_reader_refusal(wire, 32, true, false, 64) == 0);
+    CHECK(zcl_hex_decode(x, wire, sizeof wire));
+    CHECK(point_reader_refusal(wire, 31, true, false, 64) == 0);
+    CHECK(point_reader_refusal(wire, 32, false, false, 64) == 0);
+    CHECK(point_reader_refusal(wire, 32, true, true, 64) == 0);
+    CHECK(point_reader_refusal(wire, 32, true, false, 63) == 0);
+    return 0;
+}
+
 static int reduction_checks(void)
 {
     /* Fp modulus from pasta_curves 0.5.1; the zero-extended modulus and
@@ -139,6 +201,7 @@ int test_ironwood_halo2_transcript(void)
     size_t challenge_count = 0;
     CHECK(reduction_checks() == 0);
     CHECK(scalar_reader_sequence() == 0);
+    CHECK(point_reader_cases() == 0);
     CHECK(scalar_reader_boundaries() == 0);
     CHECK(!ironwood_halo2_transcript_challenge(&t, bytes, 64).ok);
     CHECK(!ironwood_halo2_transcript_init(NULL).ok);
