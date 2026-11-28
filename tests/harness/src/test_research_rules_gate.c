@@ -159,7 +159,7 @@ static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, co
     size_t entries = ms.map_block_index.size;
     bool admitted = setup && reducer_stage_p2p_block_for_catchup(&ctl, candidate, &state);
     bool held = setup && !admitted && state.mode == MODE_ERROR &&
-                !strcmp(state.reject_reason, "research-rules-unavailable") &&
+                !strcmp(state.reject_reason, "p2p-block-intake-unavailable") &&
                 before == block_index_status_load(&f->index[125]) &&
                 entries == ms.map_block_index.size;
     main_state_free(&ms);

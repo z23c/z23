@@ -484,7 +484,9 @@ static bool reducer_research_preflight(struct chain_activation_controller *ctl,
     if (gate.verdict == RESEARCH_GATE_PASS) return true;
     if (gate.verdict == RESEARCH_GATE_HOLD) {
         LOG_WARN("reducer", "research rule held: %s", gate.detail);
-        return validation_state_error(out, gate.rule);
+        /* Existing network retry handling treats intake unavailability as
+         * operational backpressure and, where possible, requests the body again. */
+        return validation_state_error(out, "p2p-block-intake-unavailable");
     }
     LOG_WARN("reducer", "research rule rejected: %s transaction=%zu", gate.rule, gate.offender);
     const char *reason = gate.offender ? "research-deposit-freeze" : "bad-blk-length";
