@@ -129,6 +129,7 @@ static const char *const k_utxo_apply[] = {
     "turnstile_sprout_total", "turnstile_sapling_total",
     "turnstile_would_reject_total", "turnstile_unknown_total",
     "turnstile_sprout_reject_total", "turnstile_sapling_reject_total",
+    "turnstile_ironwood_reject_total",
     "turnstile_seed_through", "turnstile_seed_rows", "turnstile_seed_slices",
     "turnstile_seed_last_slice_us", "turnstile_seed_read_us",
     "turnstile_seed_hold",
