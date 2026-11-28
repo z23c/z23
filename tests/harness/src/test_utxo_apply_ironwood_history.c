@@ -6,6 +6,7 @@
 #include "bloom/merkle.h"
 #include "core/serialize.h"
 #include "primitives/block.h"
+#include "primitives/transaction_v6_decode.h"
 #include "base/hex.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,7 +52,7 @@ static bool history_fixture_make(struct history_fixture *f)
     bool ok = fread(wire, 1, sizeof wire, input) == sizeof wire && fgetc(input) == EOF && !ferror(input);
     if (fclose(input) || !ok) return false;
     stream_init_from_data(&stream, wire, sizeof wire);
-    if (!transaction_deserialize(&v[1], &stream) || stream_remaining(&stream)) return false;
+    if (!transaction_v6_decode_prefix(&v[1], &stream, sizeof wire) || stream_remaining(&stream)) return false;
     struct uint256 ids[2] = { v[0].hash, v[1].hash };
     bool mutated = false;
     b->header.hashMerkleRoot = merkle_root_mutated_in_place(ids, 2, &mutated);
