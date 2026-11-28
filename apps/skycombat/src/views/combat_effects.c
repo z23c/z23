@@ -14,6 +14,11 @@
 #define MAX_EFFECTS 500
 #define PARTICLES_PER_EFFECT 50
 
+static float effects_random_fraction(void)
+{
+    return (float)rand() / (float)RAND_MAX;
+}
+
 effects_manager_t* effects_create(int max_effects, int max_particles) {
     effects_manager_t* manager = calloc(1, sizeof(effects_manager_t));
     if (!manager) return NULL;
@@ -107,9 +112,9 @@ void effects_spawn_explosion(effects_manager_t* manager, Vector3 pos, float radi
         p->position = pos;
         
         // Random explosion direction
-        float angle = ((float)rand() / RAND_MAX) * 2 * PI;
-        float pitch = ((float)rand() / RAND_MAX) * PI - PI/2;
-        float speed = radius * (5.0f + (float)rand() / RAND_MAX * 10.0f);
+        float angle = effects_random_fraction() * 2 * PI;
+        float pitch = effects_random_fraction() * PI - PI/2;
+        float speed = radius * (5.0f + effects_random_fraction() * 10.0f);
         
         p->velocity = (Vector3){
             cosf(angle) * cosf(pitch) * speed,
@@ -118,9 +123,9 @@ void effects_spawn_explosion(effects_manager_t* manager, Vector3 pos, float radi
         };
         
         p->color = color;
-        p->size = 2.0f + (float)rand() / RAND_MAX * 3.0f;
+        p->size = 2.0f + effects_random_fraction() * 3.0f;
         p->life = 1.0f;
-        p->max_life = 0.5f + (float)rand() / RAND_MAX * 0.5f;
+        p->max_life = 0.5f + effects_random_fraction() * 0.5f;
         p->has_gravity = true;
         p->emits_light = true;
         p->glow_radius = radius / 2;
@@ -138,7 +143,7 @@ void effects_spawn_explosion(effects_manager_t* manager, Vector3 pos, float radi
             (float)(rand() % 40) - 20
         };
         debris->color = (Color){100, 100, 100, 255};
-        debris->size = 1.0f + (float)rand() / RAND_MAX * 2.0f;
+        debris->size = 1.0f + effects_random_fraction() * 2.0f;
         debris->life = 1.5f;
         debris->max_life = 1.5f;
         debris->has_gravity = true;
@@ -168,17 +173,17 @@ void effects_spawn_laser_hit(effects_manager_t* manager, Vector3 pos, Vector3 no
         
         // Reflect off normal with some randomness
         Vector3 reflect_dir = Vector3Add(normal, (Vector3){
-            ((float)rand() / RAND_MAX - 0.5f) * 0.5f,
-            ((float)rand() / RAND_MAX - 0.5f) * 0.5f,
-            ((float)rand() / RAND_MAX - 0.5f) * 0.5f
+            (effects_random_fraction() - 0.5f) * 0.5f,
+            (effects_random_fraction() - 0.5f) * 0.5f,
+            (effects_random_fraction() - 0.5f) * 0.5f
         });
         reflect_dir = Vector3Normalize(reflect_dir);
         
-        float speed = 30.0f + (float)rand() / RAND_MAX * 50.0f;
+        float speed = 30.0f + effects_random_fraction() * 50.0f;
         p->velocity = Vector3Scale(reflect_dir, speed);
         
         p->color = color;
-        p->size = 0.5f + (float)rand() / RAND_MAX * 1.0f;
+        p->size = 0.5f + effects_random_fraction() * 1.0f;
         p->life = 0.3f;
         p->max_life = 0.3f;
         p->has_gravity = false;
