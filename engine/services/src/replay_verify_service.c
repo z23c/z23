@@ -66,7 +66,7 @@ static void note_first_fail(struct replay_verify_report *r,
                             uint32_t height, const char *reason);
 
 static bool sweep_research(struct sweep_state *st, uint32_t height,
-                           const struct block_hash *hash, const struct block *blk)
+                           const struct block *blk)
 {
     if (!st->tracker) return true;
     struct research_rules_state rules = {0};
@@ -74,17 +74,6 @@ static bool sweep_research(struct sweep_state *st, uint32_t height,
     if (st->tracked) result = research_rules_tracker_state(st->tracker, &rules);
     if (result.ok && height >= INT32_MAX)
         result = ZCL_ERR(RESEARCH_RULES_INVALID, "research height out of range");
-    if (result.ok) {
-        size_t n = height % 2;
-        struct block_index *bi = &st->indexes[n];
-        *bi = (struct block_index){0};
-        memcpy(st->hashes[n].data, hash->bytes, sizeof st->hashes[n].data);
-        bi->nHeight = (int)height;
-        bi->phashBlock = &st->hashes[n];
-        bi->pprev = st->tracked ? &st->indexes[1 - n] : NULL;
-        result = research_rules_tracker_connect(st->tracker, bi, blk);
-        st->tracked = result.ok;
-    }
     if (result.ok) {
         enum research_block_size_verdict size = research_block_size_check_under(
             blk, research_block_size_limit_for(st->params, &rules));
@@ -105,6 +94,28 @@ static bool sweep_research(struct sweep_state *st, uint32_t height,
         }
     }
     if (result.ok) return true;
+    st->local_failed = true;
+    st->local_height = height;
+    snprintf(st->tracker_error, sizeof st->tracker_error, "%s", result.message);
+    return false;
+}
+
+static bool sweep_connect_research(struct sweep_state *st, uint32_t height,
+                                   const struct block_hash *hash, const struct block *blk)
+{
+    if (!st->tracker) return true;
+    size_t n = height % 2;
+    struct block_index *bi = &st->indexes[n];
+    *bi = (struct block_index){0};
+    memcpy(st->hashes[n].data, hash->bytes, sizeof st->hashes[n].data);
+    bi->nHeight = (int)height;
+    bi->phashBlock = &st->hashes[n];
+    bi->pprev = st->tracked ? &st->indexes[1 - n] : NULL;
+    struct zcl_result result = research_rules_tracker_connect(st->tracker, bi, blk);
+    if (result.ok) {
+        st->tracked = true;
+        return true;
+    }
     st->local_failed = true;
     st->local_height = height;
     snprintf(st->tracker_error, sizeof st->tracker_error, "%s", result.message);
@@ -174,7 +185,9 @@ static bool sweep_cb(uint32_t height,
         return false; /* stop iteration */
     }
 
-    if (!sweep_research(st, height, hash, &blk)) {
+    uint64_t failures_before = r->size_failures + r->deposit_failures +
+        r->hash_failures + r->pow_failures + r->merkle_failures + r->linkage_failures;
+    if (!sweep_research(st, height, &blk)) {
         block_free(&blk);
         return false;
     }
@@ -238,6 +251,18 @@ static bool sweep_cb(uint32_t height,
             r->linkage_failures++;
             note_first_fail(r, height, "linkage");
         }
+    }
+
+    uint64_t failures_after = r->size_failures + r->deposit_failures +
+        r->hash_failures + r->pow_failures + r->merkle_failures + r->linkage_failures;
+    if (st->tracker && failures_after != failures_before) {
+        r->blocks_checked++;
+        block_free(&blk);
+        return false; /* Later rules cannot be derived from an invalid parent. */
+    }
+    if (!sweep_connect_research(st, height, hash, &blk)) {
+        block_free(&blk);
+        return false;
     }
 
     /* Linkage must follow the bytes just checked, even if the side index
