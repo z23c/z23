@@ -6,6 +6,7 @@
 #include "core/serialize.h"
 #include "core/amount.h"
 #include "script/script.h"
+#include "util/log_macros.h"
 #include <limits.h>
 #include <string.h>
 enum { HEADER = 20, PREVOUT = 36, SEQUENCE = 4 };
@@ -40,7 +41,7 @@ static bool sighash_coinbase(const struct v6_wire_view *v, bool *coinbase)
     if (v->inputs != 1) return true;
     struct v6_wire_cursor c; struct v6_span input;
     if (!v6_core_cursor_init(v, true, &c) || !v6_core_cursor_next(&c, &input) || input.size < PREVOUT)
-        return false;
+        LOG_FAIL("tx", "Cannot inspect transparent input for shielded signature hash");
     static const uint8_t null_prevout[36] = {
         [32] = 0xff, [33] = 0xff, [34] = 0xff, [35] = 0xff
     };
