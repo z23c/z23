@@ -118,6 +118,13 @@ static int tracker_check(struct fixture *f)
         CHECK(a.active[0] == b.active[0] && a.active[1] == b.active[1]);
         if (h == 102) {
             CHECK(research_rules_tracker_connect(t, &f->index[104], &f->blocks[104]).code == RESEARCH_RULES_INVALID);
+            struct block_index wrong = f->index[103];
+            wrong.pprev = &f->index[101];
+            CHECK(research_rules_tracker_connect(t, &wrong, &f->blocks[103]).code == RESEARCH_RULES_INVALID);
+            struct block_index fake_parent = f->index[102];
+            fake_parent.phashBlock = &f->index[101].hashBlock;
+            wrong.pprev = &fake_parent;
+            CHECK(research_rules_tracker_connect(t, &wrong, &f->blocks[103]).code == RESEARCH_RULES_INVALID);
             struct block tampered;
             CHECK(block_clone(&tampered, &f->blocks[103]));
             tampered.vtx[0].vout[0].script_pub_key.data[39] ^= 1;
@@ -173,9 +180,9 @@ static int deposit_checks(void)
     CHECK(research_rules_deposit_violation(NULL) == SIZE_MAX);
     CHECK(research_rules_deposit_violation(&b) == 0);
     tx[1].value_balance = -1;
-    CHECK(research_rules_deposit_violation(&b) == 1);
-    tx[1].value_balance = 1; tx[2].value_balance = -1;
     CHECK(research_rules_deposit_violation(&b) == 2);
+    tx[1].value_balance = 1; tx[2].value_balance = -1;
+    CHECK(research_rules_deposit_violation(&b) == 3);
     tx[2].value_balance = 0;
     CHECK(research_rules_deposit_violation(&b) == 0);
     return 0;
@@ -190,6 +197,37 @@ static void rehash_from(struct fixture *f, int start)
         if (h) b->header.hashPrevBlock = f->index[h-1].hashBlock;
         block_get_hash(b, &f->index[h].hashBlock);
     }
+}
+
+static int replay_range(struct research_rules_tracker *tracker, struct fixture *f, int first, int last)
+{
+    for (int h = first; h <= last; ++h) {
+        struct research_rules_state tracked, resolved;
+        CHECK(research_rules_tracker_connect(tracker, &f->index[h], &f->blocks[h]).ok);
+        CHECK(research_rules_tracker_state(tracker, &tracked).ok);
+        CHECK(research_rules_for_parent(&f->binding, &f->index[h], read_block, f, &resolved).ok);
+        CHECK(tracked.active[0] == resolved.active[0] && tracked.active[1] == resolved.active[1]);
+    }
+    return 0;
+}
+
+static int reorg_check(struct fixture *original, struct fixture *sibling)
+{
+    struct research_rules_tracker *tracker = research_rules_tracker_create(&original->binding);
+    CHECK(tracker);
+    CHECK(replay_range(tracker, original, 0, 20) == 0);
+    struct research_rules_state state;
+    CHECK(research_rules_tracker_state(tracker, &state).ok && state.active[0]);
+    CHECK(research_rules_tracker_connect(tracker, &sibling->index[13],
+                                         &sibling->blocks[13]).code == RESEARCH_RULES_INVALID);
+    research_rules_tracker_destroy(tracker);
+    tracker = research_rules_tracker_create(&original->binding);
+    CHECK(tracker);
+    CHECK(replay_range(tracker, original, 0, 12) == 0);
+    CHECK(replay_range(tracker, sibling, 13, 30) == 0);
+    CHECK(research_rules_tracker_state(tracker, &state).ok && !state.active[0]);
+    research_rules_tracker_destroy(tracker);
+    return 0;
 }
 
 static int other_rounds(void)
@@ -223,6 +261,7 @@ static int other_rounds(void)
     CHECK(expect_state(&f, 15, true, false) == 0);
     CHECK(expect_state(&sibling, 15, false, false) == 0);
     CHECK(expect_state(&sibling, 399, false, false) == 0);
+    CHECK(reorg_check(&f, &sibling) == 0);
     fixture_free(&sibling);
     fixture_free(&f);
     f = (struct fixture){0};

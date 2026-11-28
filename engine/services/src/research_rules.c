@@ -47,7 +47,7 @@ size_t research_rules_deposit_violation(const struct block *block)
     if (!block) return SIZE_MAX;
     for (size_t i = 1; i < block->num_vtx; ++i) {
         const struct transaction *tx = &block->vtx[i];
-        if (tx->value_balance < 0 && !(tx->vin && transaction_is_coinbase(tx))) return i;
+        if (tx->value_balance < 0 && !(tx->vin && transaction_is_coinbase(tx))) return i + 1;
     }
     return 0;
 }
@@ -233,6 +233,8 @@ static bool tracker_ordered(const struct research_rules_tracker *t,
 {
     if (!t->connected) return !t->bound || bi->nHeight <= t->start - 1;
     return (int64_t)bi->nHeight == (int64_t)t->height + 1 &&
+        bi->pprev && bi->pprev->phashBlock && bi->pprev->nHeight == t->height &&
+        uint256_eq(bi->pprev->phashBlock, &t->hash) &&
         uint256_eq(&blk->header.hashPrevBlock, &t->hash);
 }
 
