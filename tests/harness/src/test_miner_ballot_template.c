@@ -3,6 +3,8 @@
 #include "services/miner_ballot_template.h"
 #include "mining/miner.h"
 #include "services/miner_signal_round.h"
+#include "services/research_rules_tip.h"
+#include "services/research_block_size.h"
 #include "base/safe_alloc.h"
 #include "bloom/merkle.h"
 #include "controllers/mining_controller.h"
@@ -151,7 +153,7 @@ static int bt_research_fit_case(size_t count, size_t script_size, bool ballot, b
     bt.num_entries = count;
     bt.tx_fees[0] = zero_fee ? 0 : -(int64_t)(count - 1);
     if (!zero_fee) bt.block.vtx[0].vout[0].value += (int64_t)(count - 1);
-    BT_CHECK(miner_research_template_fit(&bt, d->chain, 1, ballot, limit).ok);
+    BT_CHECK(miner_research_template_fit(&bt, d->chain, 1, ballot, limit, false).ok);
     if (limit == 200000) BT_CHECK(bt.block.num_vtx < count);
     else BT_CHECK(bt.block.num_vtx == count);
     BT_CHECK(bt.num_entries == bt.block.num_vtx);
@@ -176,9 +178,93 @@ done:
     return failures;
 }
 
+static int bt_freeze_case(bool freeze)
+{
+    int failures = 0;
+    struct block_template bt = {0};
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    BT_CHECK(d && bt_make(&bt.block, 1));
+    struct transaction cb = bt.block.vtx[0];
+    free(bt.block.vtx);
+    bt.block.vtx = calloc(3, sizeof(*bt.block.vtx));
+    BT_CHECK(bt.block.vtx);
+    bt.block.vtx[0] = cb;
+    bt.block.num_vtx = 1;
+    bt.tx_fees = calloc(3, sizeof(*bt.tx_fees));
+    bt.tx_sig_ops = calloc(3, sizeof(*bt.tx_sig_ops));
+    BT_CHECK(bt.tx_fees && bt.tx_sig_ops);
+    for (size_t i = 1; i < 3; ++i) {
+        transaction_init(&bt.block.vtx[i]);
+        BT_CHECK(transaction_alloc(&bt.block.vtx[i], 1, 1));
+        bt.block.num_vtx++;
+        bt.block.vtx[i].lock_time = (uint32_t)i;
+        bt.tx_fees[i] = 1;
+    }
+    bt.block.vtx[1].value_balance = -1;
+    bt.block.vtx[0].vout[0].value += 2;
+    bt.tx_fees[0] = -2;
+    bt.num_entries = 3;
+    BT_CHECK(research_tip_deposit_frozen((struct research_tip_rules){ .freeze = true }, &bt.block.vtx[1]));
+    BT_CHECK(!research_tip_deposit_frozen((struct research_tip_rules){0}, &bt.block.vtx[1]));
+    BT_CHECK(!research_tip_deposit_frozen((struct research_tip_rules){ .freeze = true }, &bt.block.vtx[2]));
+    BT_CHECK(miner_research_template_fit(&bt, d->chain, 1, false, 200000, freeze).ok);
+    BT_CHECK(bt.block.num_vtx == (freeze ? 1u : 3u));
+    BT_CHECK(bt.num_entries == bt.block.num_vtx);
+    BT_CHECK(bt.block.vtx[0].vout[0].value == (freeze ? 42 : 44));
+    BT_CHECK(bt.tx_fees[0] == (freeze ? 0 : -2));
+    BT_CHECK(bt_merkle_matches(&bt.block));
+done:
+    block_template_free(&bt);
+    return failures;
+}
+
+static int bt_size_boundaries(void)
+{
+    int failures = 0;
+    struct block b = {0};
+    const struct chain_research_descriptor *d = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    BT_CHECK(d);
+    b.num_vtx = 253;
+    b.vtx = calloc(b.num_vtx, sizeof(*b.vtx));
+    BT_CHECK(b.vtx);
+    for (size_t i = 0; i < b.num_vtx; ++i) transaction_init(&b.vtx[i]);
+    BT_CHECK(transaction_alloc(&b.vtx[0], 0, 25));
+    for (size_t i = 0; i < 24; ++i) {
+        memset(b.vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
+        b.vtx[0].vout[i].script_pub_key.size = 8000;
+    }
+    struct byte_stream s;
+    stream_init(&s, 0);
+    bool ok = block_serialize(&b, &s);
+    size_t base = s.size;
+    stream_free(&s);
+    BT_CHECK(ok && base < 199999 && 200001 - base < 10000);
+    struct research_rules_state capped = {0}, uncapped = {0};
+    capped.active[RESEARCH_RULE_BLOCK_CAP] = true;
+    for (size_t size = 200000; size <= 200001; ++size) {
+        struct script *script = &b.vtx[0].vout[24].script_pub_key;
+        script->size = size - base - 2;
+        memset(script->data, 0x51, script->size);
+        stream_init(&s, 0);
+        ok = block_serialize(&b, &s) && s.size == size;
+        stream_free(&s);
+        BT_CHECK(ok);
+        BT_CHECK(research_block_size_check_under(&b, research_block_size_limit_for(d->chain, &capped)) ==
+                 (size == 200000 ? RESEARCH_BLOCK_SIZE_OK : RESEARCH_BLOCK_SIZE_EXCEEDED));
+        BT_CHECK(research_block_size_check_under(&b, research_block_size_limit_for(d->chain, &uncapped)) ==
+                 RESEARCH_BLOCK_SIZE_OK);
+    }
+done:
+    block_free(&b);
+    return failures;
+}
+
 int test_miner_ballot_template(void)
 {
     int failures = 0;
+    failures += bt_size_boundaries();
+    failures += bt_freeze_case(false);
+    failures += bt_freeze_case(true);
     failures += bt_research_fit_case(30, 8000, false, false, false, 200000);
     failures += bt_research_fit_case(30, 8000, true, false, false, 200000);
     failures += bt_research_fit_case(255, 790, false, false, false, 200000);

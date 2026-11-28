@@ -9,9 +9,11 @@
 #include "primitives/block.h"
 #include "mining/miner.h"
 #include "services/research_block_size.h"
+#include "services/research_rules_tip.h"
 #include "core/amount.h"
 #include "primitives/transaction.h"
 #include "util/safe_alloc.h"
+#include "util/util.h"
 #include "validation/main_constants.h"
 #include <stdlib.h>
 #include <string.h>
@@ -93,7 +95,7 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
     size_t *reserved_size_out)
 {
     if (!ballot_unsolved_template(block) || !catalog || !bitmap || !params ||
-        !reserved_size_out || height < 0 || !mining_limit || mining_limit > DEFAULT_BLOCK_MAX_SIZE)
+        !reserved_size_out || height < 0 || !mining_limit || mining_limit > MAX_BLOCK_SIZE)
         return ZCL_ERR(-8, "Invalid unsolved mining template or policy limit");
     unsigned n = chain_params_equihash_n(params, height);
     unsigned k = chain_params_equihash_k(params, height);
@@ -233,7 +235,7 @@ static struct zcl_result research_template_drop_last(struct block_template *tmpl
 }
 
 struct zcl_result miner_research_template_fit(struct block_template *tmpl,
-    const struct chain_params *params, int height, bool reserve_ballot, size_t limit)
+    const struct chain_params *params, int height, bool reserve_ballot, size_t limit, bool freeze)
 {
     struct zcl_result valid = research_template_validate(tmpl, params, height, reserve_ballot);
     if (!valid.ok) return valid;
@@ -250,11 +252,21 @@ struct zcl_result miner_research_template_fit(struct block_template *tmpl,
     size_t keep = 0;
     struct zcl_result r = research_fitting_prefix(block, ep.solution_width, reserve_ballot, limit, &keep);
     if (!r.ok) return r;
+    for (size_t i = 1; i < keep; ++i) {
+        if (research_tip_deposit_frozen((struct research_tip_rules){ .freeze = freeze }, &block->vtx[i])) {
+            LogPrint("mining", "[mining] omitting frozen deposit and template suffix\n");
+            keep = i;
+            break;
+        }
+    }
     while (block->num_vtx > keep) {
         r = research_template_drop_last(tmpl);
         if (!r.ok) return r;
     }
     size_t reserved;
     r = research_reserved_size(block, ep.solution_width, reserve_ballot, limit, &reserved);
-    return r.ok ? ballot_update_merkle(block) : r;
+    if (!r.ok) return r;
+    if (research_block_size_check_under(block, limit) != RESEARCH_BLOCK_SIZE_OK)
+        return ZCL_ERR(-29, "Cannot verify research template size");
+    return ballot_update_merkle(block);
 }

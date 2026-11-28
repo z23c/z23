@@ -11,7 +11,7 @@ struct chain_params;
 struct block_template;
 
 /* Append a final zero-value ballot output to an UNSOLVED, caller-owned block.
- * Mining limit is 1..DEFAULT_BLOCK_MAX_SIZE inclusive. The entire block is
+ * Mining limit is 1..MAX_BLOCK_SIZE inclusive. The entire block is
  * canonically serialized into a fixed-capacity buffer with the selected
  * height's actual Equihash solution width and a 100-byte coinbase scriptSig.
  * Checked serialization, every txid and Merkle root must succeed; duplicate
@@ -28,8 +28,9 @@ struct zcl_result miner_ballot_template_apply(struct block *block,
     const struct chain_params *params, int height, size_t mining_limit,
     size_t *reserved_size_out);
 
-/* Fit a research template to the supplied limit by dropping a trailing suffix.
+/* Fit a research template to the supplied limit, and when frozen drop the
+ * suffix starting with the first deposit (including possible descendants).
  * The caller discards the template on any error. */
 struct zcl_result miner_research_template_fit(struct block_template *tmpl,
-    const struct chain_params *params, int height, bool reserve_ballot, size_t limit);
+    const struct chain_params *params, int height, bool reserve_ballot, size_t limit, bool freeze);
 #endif
