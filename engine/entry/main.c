@@ -226,6 +226,7 @@ static void report_app_init_failed(const struct app_context *ctx)
  * returns true when it has handled the invocation, writing the process
  * exit code to *rc; each `main_check_*` helper returns -1 to continue or
  * the exit code main must return. */
+static bool g_research_selector_client;
 
 static bool main_dispatch_source_record(int argc, char **argv, int *rc)
 {
@@ -525,6 +526,10 @@ static bool main_dispatch_mcp_mode(int argc, char **argv, int *rc)
  * matches is the one that runs. */
 static bool main_dispatch_standalone_mode(int argc, char **argv, int *rc)
 {
+    if (g_research_selector_client) {
+        *rc = cli_main(argc, argv);
+        return true;
+    }
     return main_dispatch_priority_modes(argc, argv, rc) ||
            main_dispatch_mcp_mode(argc, argv, rc) ||
            main_dispatch_snapshot_and_cli_modes(argc, argv, rc) ||
@@ -1187,13 +1192,59 @@ static bool main_research_direct_mode(int argc, char **argv)
     return false;
 }
 
+static bool main_research_selector_present(int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (arg[0] == '-' && arg[1] == '-') arg++;
+        if (!strncmp(arg, "-testnet-profile", 16)) return true;
+    }
+    return false;
+}
+
+static bool main_research_client_reserved(int argc, char **argv)
+{
+    if (main_multicall_argv0_tool(argv[0])) return true;
+    if (argc < 2) return false;
+    if (!strcmp(argv[1], "jsonq") || !strcmp(argv[1], "sqlq") ||
+        !strcmp(argv[1], "mcp") || !strncmp(argv[1], "ops.mesh.device.host.", 21))
+        return true;
+    return argc >= 6 && !strcmp(argv[1], "ops") && !strcmp(argv[2], "mesh") &&
+        !strcmp(argv[3], "device") && !strcmp(argv[4], "host");
+}
+
+static bool main_research_client_forbidden(int argc, char **argv)
+{
+    if (main_research_client_reserved(argc, argv)) return true;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (arg[0] != '-') break;
+        if (!strncmp(arg, "-bench", 6) || !strcmp(arg, "-gui")) return true;
+    }
+    return false;
+}
+
+static void main_device_host_runtime(int argc, char **argv)
+{
+    if (!g_research_selector_client)
+        zcl_native_device_host_runtime_exit_if_requested(argc, argv);
+}
+
 static bool main_research_prepare(int argc, char ***args,
                                   struct main_research_selection *research,
                                   char *path, size_t capacity)
 {
     char **argv = *args;
-    if (is_cli_mode(argc, argv) && !main_research_direct_mode(argc, argv))
+    if (is_cli_mode(argc, argv) && !main_research_direct_mode(argc, argv)) {
+        if (main_research_selector_present(argc, argv)) {
+            if (main_research_client_forbidden(argc, argv)) {
+                fprintf(stderr, "Invalid or unsafe testnet profile invocation.\n");
+                return false;
+            }
+            g_research_selector_client = true;
+        }
         return main_research_unselected_ok(argc, argv);
+    }
     if (!main_research_scan(argc, argv, research) ||
         (research->profile && (!main_research_node_only(argc, argv) ||
          !main_research_path(argc, argv, research, path, capacity)))) {
@@ -1254,7 +1305,7 @@ int main(int argc, char **argv)
     if (main_dispatch_reserved(argc, argv, &rc)) return rc;
     /* Before any thread exists: glibc arenas are created per contending thread. */
     const int malloc_arena_cap = platform_allocator_cap_arenas();
-    zcl_native_device_host_runtime_exit_if_requested(argc, argv);
+    main_device_host_runtime(argc, argv);
     if (main_dispatch_multicall(argc, argv, &rc))
         return rc;
     if (main_dispatch_dev_ui_modes(argc, argv, &rc))

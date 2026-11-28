@@ -1707,6 +1707,76 @@ static int cas_test_research_reordered_direct(void)
     return failures;
 }
 
+static int cas_test_research_bench_dispatch(void)
+{
+    int failures = 0;
+    TEST("research selector never enters benchmark dispatch") {
+        char home[PATH_MAX], flag[PATH_MAX + 16], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof home, "cas_research_bench") != NULL);
+        ASSERT(snprintf(flag, sizeof flag, "-datadir=%s", home) > 0);
+        char *before[] = {CAS_BIN, flag, "-testnet-profile=ironwood", "-bench-x", "sentinel", NULL};
+        int before_rc = cas_run(before, home, out, sizeof out);
+        bool before_refused = before_rc == 1 && strstr(out, "Invalid or unsafe testnet profile invocation.");
+        char *after[] = {CAS_BIN, flag, "-testnet-profile=ironwood", "sentinel", "-bench-x", NULL};
+        int after_rc = cas_run(after, home, out, sizeof out);
+        bool client_only = after_rc != 2 && strstr(out, "error=UNSUPPORTED_PROFILE");
+        char *node[] = {CAS_BIN, flag, "-testnet-profile=ironwood", "-bench-x", NULL};
+        int node_rc = cas_run(node, home, out, sizeof out);
+        bool node_refused = node_rc == 1 && strstr(out, "Invalid or unsafe testnet profile invocation.");
+        test_cleanup_tmpdir(home);
+        ASSERT(before_refused && client_only && node_refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_research_nonclient_dispatch(void)
+{
+    int failures = 0;
+    TEST("research selector refuses non-client entry points") {
+        char home[PATH_MAX], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof home, "cas_research_nonclient") != NULL);
+        char *cases[][5] = {
+            {CAS_BIN, "--app-host-worker", "-testnet-profile=ironwood", NULL},
+            {CAS_BIN, "--source-record", "-testnet-profile=ironwood", NULL},
+            {CAS_BIN, "--ui-present-host", "-testnet-profile=ironwood", NULL},
+            {CAS_BIN, "-gui", "-testnet-profile=ironwood", NULL},
+            {CAS_BIN, "jsonq", "-testnet-profile=ironwood", NULL},
+            {CAS_BIN, "mcp", "serve", "-testnet-profile=ironwood", NULL},
+            {CAS_BIN, "ops.mesh.device.host.client", "-testnet-profile=ironwood", NULL},
+        };
+        bool refused = true;
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            int rc = cas_run(cases[i], home, out, sizeof out);
+            refused = refused && rc == 1 && strstr(out, "Invalid or unsafe testnet profile invocation.");
+        }
+        test_cleanup_tmpdir(home);
+        ASSERT(refused);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int cas_test_research_client_aliases(void)
+{
+    int failures = 0;
+    TEST("research selector preserves client aliases") {
+        char home[PATH_MAX], out[8192];
+        ASSERT(test_mkdtemp(home, sizeof home, "cas_research_alias") != NULL);
+        const char *aliases[] = {"--status", "--summary", "--agent"};
+        bool client = true;
+        for (size_t i = 0; i < sizeof aliases / sizeof aliases[0]; i++) {
+            char *argv[] = {CAS_BIN, (char *)aliases[i], "-testnet-profile=ironwood", NULL};
+            (void)cas_run(argv, home, out, sizeof out);
+            client = client && !strstr(out, "Invalid or unsafe testnet profile invocation.");
+        }
+        test_cleanup_tmpdir(home);
+        ASSERT(client);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int cas_test_research_marker_guards(void)
 {
     int failures = 0;
@@ -1979,6 +2049,9 @@ int test_cli_argv_strict(void)
     failures += cas_test_research_unmarked_refuses();
     failures += cas_test_research_direct_refuses();
     failures += cas_test_research_reordered_direct();
+    failures += cas_test_research_bench_dispatch();
+    failures += cas_test_research_nonclient_dispatch();
+    failures += cas_test_research_client_aliases();
     failures += cas_test_research_marker_guards();
     failures += cas_test_research_empty_mode();
     failures += cas_test_research_private_directory();
