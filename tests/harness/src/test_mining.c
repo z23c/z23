@@ -11,6 +11,8 @@
 #include "core/serialize.h"
 #include "crypto/common.h"
 #include "mining/miner.h"
+#include "keys/key_io.h"
+#include "script/standard.h"
 #include "primitives/transaction.h"
 #include "chain/chainparams.h"
 #include "chain/pow.h"
@@ -300,6 +302,51 @@ static int mining_guarded_slots(struct rpc_table *table,
     return failures;
 }
 
+static bool mining_encode_address(const struct tx_destination *dest, char *out, size_t size)
+{
+    const struct chain_params *cp = chain_params_get();
+    size_t pk_len = 0, sc_len = 0;
+    const unsigned char *pk = chain_params_base58_prefix(cp, B58_PUBKEY_ADDRESS, &pk_len);
+    const unsigned char *sc = chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_len);
+    return encode_destination(dest, pk, pk_len, sc, sc_len, out, size);
+}
+
+static int mining_payout_cases(struct rpc_table *table, const struct miner_signal_catalog_pin *pin)
+{
+    int failures = 0;
+    struct tx_destination dest = { .type = DEST_KEY_ID };
+    for (size_t i = 0; i < sizeof dest.id.key.id.data; ++i) dest.id.key.id.data[i] = (uint8_t)(0xa0 + i);
+    char main_addr[128] = {0}, reg_addr[128] = {0}, request[320], digest[65];
+    zcl_hex_encode(pin->digest, sizeof pin->digest, digest);
+    chain_params_select(CHAIN_MAIN);
+    bool main_ok = mining_encode_address(&dest, main_addr, sizeof main_addr);
+    chain_params_select(CHAIN_REGTEST);
+    bool reg_ok = mining_encode_address(&dest, reg_addr, sizeof reg_addr);
+    struct mining_failure_fixture f = {0};
+    rpc_mining_test_set_hooks(mining_count_template, NULL, &f);
+    snprintf(request, sizeof request, "[{\"payoutaddress\":\"%s\"}]", main_addr);
+    MT_CHECK("wrong-network payout refuses before work", main_ok &&
+             mining_slots_refused(table, request, "invalid address") && f.built == 0);
+    MT_CHECK("non-string payout refuses before work",
+             mining_slots_refused(table, "[{\"payoutaddress\":42}]", "must be a string") && f.built == 0);
+    MT_CHECK("malformed payout refuses before work",
+             mining_slots_refused(table, "[{\"payoutaddress\":\"bad\"}]", "invalid address") && f.built == 0);
+    rpc_mining_test_set_hooks(NULL, NULL, NULL);
+    struct json_value plain = {0}, voted = {0}; struct transaction a, b;
+    snprintf(request, sizeof request, "[{\"payoutaddress\":\"%s\"}]", reg_addr);
+    bool a_ok = reg_ok && mining_slots_call(table, request, &plain) && mining_coinbase_decode(&plain, &a);
+    snprintf(request, sizeof request, "[{\"payoutaddress\":\"%s\",\"ballotslots\":{\"catalog\":\"%s\",\"slots\":[0,1]}}]", reg_addr, digest);
+    bool b_ok = reg_ok && mining_slots_call(table, request, &voted) && mining_coinbase_decode(&voted, &b);
+    struct script expected; script_init(&expected); script_for_destination(&expected, &dest);
+    MT_CHECK("payout script and ballot preserve all coinbase values", a_ok && b_ok && a.num_vout &&
+        a.vout[0].script_pub_key.size == expected.size &&
+        !memcmp(a.vout[0].script_pub_key.data, expected.data, expected.size) && mining_ballot_output(&a, &b, pin));
+    if (a_ok) transaction_free(&a);
+    if (b_ok) transaction_free(&b);
+    json_free(&plain); json_free(&voted);
+    return failures;
+}
+
 static int mining_slots_inside(struct rpc_table *table,
                                const struct miner_signal_catalog_pin *pin)
 {
@@ -427,6 +474,7 @@ static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
     MT_CHECK("ballot mint authority", mining_test_authority(progress_store_db(), 11));
     failures += mining_partial_failure(table, ms, ancestors);
     failures += mining_slots_inside(table, &pin);
+    failures += mining_payout_cases(table, &pin);
     failures += mining_guarded_slots(table, &pin);
     failures += mining_crossing_window(table, ms, ancestors);
     active_chain_move_window_tip(&ms->chain_active, &ancestors[17]);

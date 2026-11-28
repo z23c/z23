@@ -506,6 +506,29 @@ static bool rpc_generate(const struct json_value *params, bool help,
     return mining_generate_to_script(&coinbase_script, num_blocks, NULL, result);
 }
 
+static bool mining_payout_script(const char *addr, struct script *script,
+                                 struct json_value *result)
+{
+    const struct chain_params *cp = chain_params_get();
+    size_t pk_len = 0, sc_len = 0;
+    const unsigned char *pk = chain_params_base58_prefix(cp, B58_PUBKEY_ADDRESS, &pk_len);
+    const unsigned char *sc = chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_len);
+    struct tx_destination dest;
+    if (!decode_destination(addr, pk, pk_len, sc, sc_len, &dest) ||
+        !tx_destination_is_valid(&dest)) {
+        json_set_str(result, "Error: invalid address for this network "
+                             "(expected a transparent P2PKH or P2SH address)");
+        LOG_FAIL("mining", "payout address rejected on chain %s", cp->strNetworkID);
+    }
+    script_init(script);
+    script_for_destination(script, &dest);
+    if (!script->size) {
+        json_set_str(result, "Error: could not build a coinbase script for that address");
+        LOG_FAIL("mining", "payout script could not be built (dest type %d)", (int)dest.type);
+    }
+    return true;
+}
+
 static bool rpc_generatetoaddress(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
@@ -536,38 +559,8 @@ static bool rpc_generatetoaddress(const struct json_value *params, bool help,
         return false;
     }
 
-    /* Decode with the ACTIVE chain's base58 prefixes — the same pair every
-     * other address surface uses — so a mainnet address cannot be paid on
-     * regtest (or vice versa) by accident. */
-    const struct chain_params *cp = chain_params_get();
-    size_t pk_pfx_len = 0, sc_pfx_len = 0;
-    const unsigned char *pk_pfx =
-        chain_params_base58_prefix(cp, B58_PUBKEY_ADDRESS, &pk_pfx_len);
-    const unsigned char *sc_pfx =
-        chain_params_base58_prefix(cp, B58_SCRIPT_ADDRESS, &sc_pfx_len);
-
-    struct tx_destination dest;
-    if (!decode_destination(addr, pk_pfx, pk_pfx_len,
-                            sc_pfx, sc_pfx_len, &dest) ||
-        !tx_destination_is_valid(&dest)) {
-        json_set_str(result,
-                     "Error: invalid address for this network "
-                     "(expected a transparent P2PKH or P2SH address)");
-        LOG_FAIL("mining", "generatetoaddress: decode_destination rejected "
-                 "the supplied address on chain %s", cp->strNetworkID);
-    }
-
     struct script coinbase_script;
-    script_init(&coinbase_script);
-    script_for_destination(&coinbase_script, &dest);
-    if (coinbase_script.size == 0) {
-        json_set_str(result,
-                     "Error: could not build a coinbase script for that "
-                     "address");
-        LOG_FAIL("mining", "generatetoaddress: script_for_destination "
-                 "produced an empty script (dest type %d)", (int)dest.type);
-    }
-
+    if (!mining_payout_script(addr, &coinbase_script, result)) return false;
     return mining_generate_to_script(&coinbase_script, num_blocks, json_at(params, 2), result);
 }
 
@@ -726,6 +719,7 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
         "Returns data needed to construct a block. On testnet or regtest the optional "
         "request field ballotslots adds a final coinbase output signaling the listed "
         "slots in the operator's pinned catalog for this voting window. "
+        "The optional payoutaddress field specifies the transparent coinbase recipient. "
         "Pass ballotslots as {\"catalog\":\"<lowercase digest>\",\"slots\":[0]} "
         "to require the miner's expected catalog before producing a voting template.");
 
@@ -746,7 +740,13 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
 
     const struct chain_params *cp = chain_params_get();
     struct script coinbase_script;
-    coinbase_script.size = 0;
+    script_init(&coinbase_script);
+    const struct json_value *payout = json_get(json_at(params, 0), "payoutaddress");
+    if (payout && (payout->type != JSON_STR ||
+        !mining_payout_script(json_get_str(payout), &coinbase_script, result))) {
+        if (payout->type != JSON_STR) json_set_str(result, "Error: payoutaddress must be a string");
+        return false;
+    }
 
     struct mining_template_parent parent;
     const char *reason;
