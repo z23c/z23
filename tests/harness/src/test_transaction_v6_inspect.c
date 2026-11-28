@@ -7,7 +7,6 @@
 #include "codec/cursor.h"
 #include "base/hex.h"
 #include "encoding/utilstrencodings.h"
-#include "base/hex.h"
 #include "crypto/blake2b.h"
 #include "crypto/chacha20poly1305.h"
 #include <stdio.h>
