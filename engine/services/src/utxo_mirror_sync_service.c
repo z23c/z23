@@ -853,6 +853,21 @@ static bool mirror_rebuild_left_unchanged(int64_t code)
            code == UTXO_MIRROR_REBUILD_OVERLAY_ACTIVE;
 }
 
+static bool mirror_rebuild_restore_health(struct mirror_rebuild_ctx *r)
+{
+    if (!mirror_rebuild_left_unchanged(r->written))
+        return false;
+    atomic_store(&r->svc->mirror_health, r->prior_quarantine
+                 ? UTXO_MIRROR_QUARANTINED : UTXO_MIRROR_HEALTHY);
+    return true;
+}
+
+static void mirror_rebuild_mark_auditing(struct mirror_rebuild_ctx *r)
+{
+    if (!r->prior_quarantine)
+        atomic_store(&r->svc->mirror_health, UTXO_MIRROR_AUDITING);
+}
+
 static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
 {
     struct mirror_rebuild_ctx *r = ctx;
@@ -895,18 +910,13 @@ static bool mirror_rebuild_and_advance_lane(struct node_db *ndb, void *ctx)
         return false;
     }
 
-    if (!r->prior_quarantine)
-        atomic_store(&r->svc->mirror_health, UTXO_MIRROR_AUDITING);
+    mirror_rebuild_mark_auditing(r);
     int32_t snap_h = r->frontier;
     r->written = mirror_rebuild_from_coins_kv(ndb, &snap_h,
                                               &r->svc->stop_requested, r->operator_repair,
                                               r->reason, sizeof(r->reason));
-    if (mirror_rebuild_left_unchanged(r->written)) {
-        /* A stopped or overlay-refused rebuild leaves prior health unchanged. */
-        atomic_store(&r->svc->mirror_health, r->prior_quarantine
-                     ? UTXO_MIRROR_QUARANTINED : UTXO_MIRROR_HEALTHY);
+    if (mirror_rebuild_restore_health(r))
         return false;
-    }
     if (r->written < 0) {
         if (!r->prior_quarantine && (r->cause_snapshot & UINT64_C(3)) == UTXO_MIRROR_CAUSE_UNKNOWN)
             mirror_cause_if_unchanged(r, UTXO_MIRROR_CAUSE_REBUILD_ERROR);
@@ -1044,6 +1054,13 @@ static void mirror_sync_account_pass(
     atomic_store(&svc->last_pass_unix, platform_time_wall_unix());
 }
 
+static void mirror_sync_request_changed_branch(
+    struct utxo_mirror_sync_service *svc, bool changed)
+{
+    if (changed)
+        utxo_mirror_rewind_request_if_due(svc);
+}
+
 int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
 {
     if (mirror_sync_ndb_unavailable(svc))
@@ -1099,8 +1116,7 @@ int64_t utxo_mirror_sync_run_once(struct utxo_mirror_sync_service *svc)
         atomic_fetch_add(&svc->quarantines_total, 1);
         atomic_store(&svc->last_quarantine_unix,
                      platform_time_wall_unix());
-        if (changed)
-            utxo_mirror_rewind_request_if_due(svc);
+        mirror_sync_request_changed_branch(svc, changed);
         LOG_RETURN(-1, "utxo_mirror",
                    "mirror branch identity at cursor=%lld: %s; "
                    "quarantined without changing rows or cursor",
