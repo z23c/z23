@@ -9,6 +9,7 @@
 #include "jobs/utxo_apply_delta.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
+#include "core/serialize.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "storage/shielded_pool_kv.h"
@@ -155,6 +156,36 @@ static bool ts_ironwood_stage(sqlite3 *db, const struct block *blk,
     return true;
 }
 
+/* A fresh on-demand node can anchor genesis without applying its body.
+ * Reconstruct its pool row in H1's transaction from the pinned descriptor.
+ * The storage puts compare existing totals and refuse a disagreement. */
+static bool ts_research_genesis_pools(sqlite3 *db,
+    const struct chain_research_descriptor *profile, const struct uint256 *parent)
+{
+    if (sqlite3_get_autocommit(db) || chain_params_get() != profile->chain ||
+        !profile->genesis_wire || !profile->genesis_wire_len)
+        LOG_FAIL("utxo_apply", "cannot establish transactional research genesis totals");
+    struct byte_stream wire;
+    stream_init_from_data(&wire, profile->genesis_wire, profile->genesis_wire_len);
+    struct block genesis;
+    block_init(&genesis);
+    int64_t sprout = 0, sapling = 0, ironwood = 0;
+    bool ok = block_deserialize(&genesis, &wire) && !stream_remaining(&wire) &&
+              genesis.num_vtx == 1;
+    if (ok) {
+        struct uint256 hash;
+        block_get_hash(&genesis, &hash);
+        transaction_compute_hash(&genesis.vtx[0]);
+        ok = uint256_eq(&hash, parent) &&
+             uint256_eq(&genesis.vtx[0].hash, &genesis.header.hashMerkleRoot) &&
+             connect_block_shielded_values(&genesis, &sprout, &sapling, &ironwood);
+    }
+    block_free(&genesis);
+    if (!ok) LOG_FAIL("utxo_apply", "research genesis body does not authenticate pool totals");
+    return shielded_pool_kv_put(db, 0, sprout, sapling) &&
+           shielded_pool_kv_put_ironwood(db, 0, ironwood);
+}
+
 bool utxo_apply_turnstile_stage_check(
     sqlite3 *db, const struct block *blk, int64_t next_h,
     const struct uint256 *hash, struct delta_summary *summary,
@@ -163,7 +194,12 @@ bool utxo_apply_turnstile_stage_check(
     struct ts_totals parent = { 0, 0 };
     struct ts_totals blockv = { 0, 0 };
     bool parent_known = true;
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
     pending->write = false;
+    if (next_h == 1 && profile && profile->id == CHAIN_RESEARCH_IRONWOOD &&
+        blk && uint256_eq(&blk->header.hashPrevBlock, &profile->chain->consensus.hashGenesisBlock) &&
+        !ts_research_genesis_pools(db, profile, &blk->header.hashPrevBlock))
+        return false; // raw-return-ok:callee-logged-research-genesis-pool-failure
     if (next_h > 0 &&
         !shielded_pool_kv_get(db, next_h - 1, &parent.sprout,
                               &parent.sapling, &parent_known))

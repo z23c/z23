@@ -19,6 +19,7 @@
 #include "test/test_core.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_stage.h"
@@ -396,7 +397,48 @@ static int pt_shadow_case(void)
     return failures;
 }
 
+static bool pt_anchored_h1(sqlite3 *db, const struct uint256 *parent, bool *accepted)
+{
+    struct block b = {0};
+    b.header.hashPrevBlock = *parent;
+    struct delta_summary summary = {.ok = true};
+    struct utxo_apply_turnstile_pending pending = {0};
+    bool ok = utxo_apply_turnstile_stage_check(db, &b, 1, NULL, &summary, &pending);
+    *accepted = ok && summary.ok && pending.write && pending.ironwood_known;
+    return ok;
+}
+
+static int pt_research_genesis_anchor(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return 1;
+    const struct uint256 *genesis = &chain_params_get()->consensus.hashGenesisBlock;
+    bool accepted = false, known = false, found = false;
+    int64_t total = -1;
+    struct uint256 other = *genesis;
+    other.data[0] ^= 1;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK || !shielded_pool_kv_ensure_schema(db))
+        failures++;
+    else {
+        PT_CHECK("H1: start stage transaction", sqlite3_exec(db,"BEGIN",NULL,NULL,NULL)==SQLITE_OK);
+        PT_CHECK("H1: foreign parent cannot seed totals", pt_anchored_h1(db, &other, &accepted) && !accepted &&
+                 shielded_pool_kv_get_ironwood(db,0,&total,&known,&found) && !found);
+        PT_CHECK("H1: pinned parent recovers all genesis totals", pt_anchored_h1(db,genesis,&accepted) && accepted &&
+                 pt_pool_is(db,0,0,0) && shielded_pool_kv_get_ironwood(db,0,&total,&known,&found) &&
+                 found && known && total==0);
+        PT_CHECK("H1: rejected transaction rolls back genesis totals", sqlite3_exec(db,"ROLLBACK",NULL,NULL,NULL)==SQLITE_OK &&
+                 shielded_pool_kv_get_ironwood(db,0,&total,&known,&found) && !found);
+        PT_CHECK("H1: existing disagreement survives refusal", sqlite3_exec(db,"BEGIN",NULL,NULL,NULL)==SQLITE_OK &&
+                 shielded_pool_kv_put(db,0,0,1) && !pt_anchored_h1(db,genesis,&accepted) && pt_pool_is(db,0,0,1));
+        PT_CHECK("H1: close fixture transaction", sqlite3_exec(db,"ROLLBACK",NULL,NULL,NULL)==SQLITE_OK);
+    }
+    if (db) sqlite3_close(db);
+    chain_params_select(CHAIN_REGTEST);
+    return failures;
+}
+
 int parity_lockin_turnstile_stage_cases(void)
 {
-    return pt_enforce_case() + pt_shadow_case();
+    return pt_enforce_case() + pt_shadow_case() + pt_research_genesis_anchor();
 }
