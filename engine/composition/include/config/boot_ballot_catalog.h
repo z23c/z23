@@ -7,7 +7,7 @@ struct app_context;
 /* A research node boot creates, chmods or publishes nothing in its datadir
  * before catalog consent is present in argv or config (main_research_bind);
  * the prologue check remains authoritative for in-process boots. */
-/* Valid only after argv and config parsing. */
+/* Valid only after argv and config parsing; malformed pins are refused. */
 bool boot_ballot_catalog_consent_present(void);
 extern const char boot_ballot_catalog_consent_refusal[];
 bool boot_ballot_catalog_consent(const struct app_context *ctx);

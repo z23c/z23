@@ -145,7 +145,7 @@ static bool binary_fresh(void)
     return true;
 }
 
-static void binary_child(const char *home, const char *arg, FILE *capture)
+static void binary_child(const char *home, const char *arg, const char *pin, FILE *capture)
 {
     alarm(10);
     int nullfd = open("/dev/null", O_WRONLY);
@@ -153,18 +153,19 @@ static void binary_child(const char *home, const char *arg, FILE *capture)
         dup2(fileno(capture), STDERR_FILENO) < 0 || setenv("HOME", home, 1))
         _exit(127);
     close(nullfd);
-    execl("build/bin/z23", "z23", arg, "-testnet-profile=ironwood", (char *)NULL);
+    execl("build/bin/z23", "z23", arg, "-testnet-profile=ironwood", pin, (char *)NULL);
     _exit(127);
 }
 
-static bool binary_refuse(const char *home, const char *parent, int *rc, char *out, size_t cap)
+static bool binary_refuse(const char *home, const char *parent, const char *pin,
+                          int *rc, char *out, size_t cap)
 {
     char arg[1024];
     if (snprintf(arg, sizeof(arg), "-datadir=%s", parent) >= (int)sizeof(arg)) return false;
     FILE *capture = tmpfile();
     if (!capture) return false;
     pid_t child = fork();
-    if (child == 0) binary_child(home, arg, capture);
+    if (child == 0) binary_child(home, arg, pin, capture);
     int status = 0;
     bool ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status);
     *rc = ok ? WEXITSTATUS(status) : -1;
@@ -174,7 +175,8 @@ static bool binary_refuse(const char *home, const char *parent, int *rc, char *o
     if (ferror(capture)) ok = false;
     if (fclose(capture)) ok = false;
     return ok && *rc != 0 && *rc != 127 &&
-        strstr(out, "the research profile requires an explicitly pinned catalog");
+        strstr(out, "the research profile requires an explicitly pinned catalog") &&
+        (!pin || strstr(out, "must be exactly 64 lowercase hexadecimal characters"));
 }
 
 static bool write_fixture_file(const char *path, const char *text)
@@ -204,7 +206,7 @@ static bool binary_unchanged(const char *dir, bool existing, const struct snapsh
         lstat(dir, &st) != 0 && errno == ENOENT;
 }
 
-static int binary_consent_case(bool existing)
+static int binary_consent_case(bool existing, const char *pin)
 {
     char home[512], parent[600], dir[700], marker[800], sentinel[800], output[4096] = {0};
     struct snapshot before = {0};
@@ -217,13 +219,15 @@ static int binary_consent_case(bool existing)
     bool ready = mkdir(parent, 0700) == 0;
     if (ready && existing)
         ready = binary_marked_fixture(dir, marker, sentinel, &before);
-    bool refused = ready && binary_refuse(home, parent, &rc, output, sizeof(output));
+    bool refused = ready && binary_refuse(home, parent, pin, &rc, output, sizeof(output));
     bool unchanged = binary_unchanged(dir, existing, &before);
     if (refused && unchanged)
-        printf("binary consent %s: rc=%d stderr=%s", existing ? "marked" : "absent", rc, output);
+        printf("binary consent %s %s: rc=%d stderr=%s", existing ? "marked" : "absent",
+               pin ? pin : "(no pin)", rc, output);
     if (!refused || !unchanged)
-        fprintf(stderr, "binary consent %s: refused=%d rc=%d unchanged=%d output=%s\n",
-                existing ? "marked" : "absent", refused, rc, unchanged, ready ? output : "(setup failed)");
+        fprintf(stderr, "binary consent %s %s: refused=%d rc=%d unchanged=%d output=%s\n",
+                existing ? "marked" : "absent", pin ? pin : "(no pin)", refused, rc,
+                unchanged, ready ? output : "(setup failed)");
     (void)test_rm_rf_recursive(home);
     return refused && unchanged ? 0 : 1;
 }
@@ -231,8 +235,16 @@ static int binary_consent_case(bool existing)
 int test_boot_ballot_catalog(void)
 {
     CHECK(binary_fresh());
-    int binary_failures = binary_consent_case(false) + binary_consent_case(true);
+    const char *pins[] = {NULL, "-notestballotcatalog", "-testballotcatalog=",
+        "-testballotcatalog", "-testballotcatalog=123",
+        "-testballotcatalog=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"};
+    int binary_failures = 0;
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i)
+        binary_failures += binary_consent_case(false, pins[i]) + binary_consent_case(true, pins[i]);
     CHECK(binary_failures == 0);
+    const char *valid[] = {"z23", "-testballotcatalog=0000000000000000000000000000000000000000000000000000000000000000"};
+    ParseParameters(2, valid);
+    CHECK(boot_ballot_catalog_consent_present());
     const char *empty[] = {"z23"};
     ParseParameters(1, empty);
     chain_params_select(CHAIN_MAIN);

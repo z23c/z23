@@ -35,7 +35,13 @@ const char boot_ballot_catalog_consent_refusal[] =
 
 bool boot_ballot_catalog_consent_present(void)
 {
-    return GetArg("-testballotcatalog", NULL) != NULL;
+    const char *digest = GetArg("-testballotcatalog", NULL);
+    uint8_t parsed[32];
+    if (digest && !zcl_hex_decode_lower(digest, parsed, sizeof(parsed))) {
+        fprintf(stderr, "FATAL: -testballotcatalog must be exactly 64 lowercase hexadecimal characters\n");
+        return false;
+    }
+    return digest != NULL;
 }
 
 bool boot_ballot_catalog_consent(const struct app_context *ctx)
