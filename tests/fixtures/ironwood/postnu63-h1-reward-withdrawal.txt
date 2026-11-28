@@ -1,0 +1,26 @@
+Public, synthetic-key research fixture. This is not evidence of chain admission.
+
+withdrawal wire SHA256: 4f53da1ce9c4017d34959ae363acb3c4e8fe7c4508d8aa821da71ec8fe2c113e
+parent reward-spend wire SHA256: 8be913fdab58df0b0e507c53a2915c3e69dcff1df9b18883d57354413fe8fe40
+upstream shielded sighash (raw bytes): 42f6311ad7276f7a3edb013ea395fdb2fe8b9089f18fe60e77b8164d47bd87dc
+projected anchor (raw bytes): 382ccad224a7e382b6e18d38beb6f518ef9a30ea0a0cc259aa9021737d41cf22
+
+Recipe: parse the parent as NU6.3 v6; derive the external incoming viewing
+key from the public test-only Orchard SpendingKey [0; 32]; decrypt the note
+of value 1249985000 at action 1. Append both parent action commitments in wire
+order to an empty depth-32 Orchard tree and retain the witness for position 1.
+This anchor is usable on a chain only if those are its first two Ironwood
+commitments and the parent transaction actually enters that chain.
+
+Use the retained librustzcash builder with all upgrades active from height 1,
+target height 146, the witness root as Ironwood anchor, default padding,
+this note and its test-only SpendAuthorizingKey, and one transparent P2PKH
+output with hash160 [0x42; 20] for 1249970000 zatoshi. The ZIP317 fee is
+15000; there are no transparent inputs. Use ChaCha20Rng seeded with [0x43; 32].
+The upstream builder.rs SHA256 is 94a04abdf166f767d6bfec1b0c65b1d2d7bc3db712bababa839e3cb222ee6ead;
+Cargo.lock SHA256 is 87f36c41a12da5a7430547c754aa52640ecfd52c939cf16fb0534e7f91b851cf;
+the experimental builder harness SHA256 is 0ce2146a2d5d0918fbcb034b9229164205a10e12b09ae11ed9ce9ada1582b27a.
+The local snapshot is not a Git checkout; these are byte identities, not a
+claimed upstream commit. Rust 1.89 and the snapshot compiled dependencies
+were used. Independent upstream verification passed its proof, both action
+signatures and binding signature, and rejected a changed signature hash.

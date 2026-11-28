@@ -182,7 +182,8 @@ static bool check_sighash_boundary(const struct v6_wire_view *v)
 /* Research H1 transparent-coinbase output, spent offline at target H144.
  * Fixture SHA256 8be913fdab58df0b0e507c53a2915c3e69dcff1df9b18883d57354413fe8fe40.
  * This checks public signature inputs, not chain maturity or script execution. */
-static bool check_reward_signatures(const struct v6_wire_view *v, const uint8_t hash[32])
+static bool check_reward_signatures(const struct v6_wire_view *v, const uint8_t hash[32],
+                                    int64_t expected_balance)
 {
     uint8_t cv[2][32], changed[32]; memcpy(changed, hash, 32); changed[0] ^= 1;
     for (size_t i = 0; i < 2; ++i) {
@@ -194,7 +195,7 @@ static bool check_reward_signatures(const struct v6_wire_view *v, const uint8_t 
         memcpy(cv[i], action.cv.data, 32);
     }
     int64_t balance = zcl_read_i64_le(v->ironwood.value_balance.data);
-    return balance == -1249985000 &&
+    return balance == expected_balance &&
         ironwood_binding_auth_verify(cv, 2, balance, v->ironwood.binding_signature.data, hash).ok &&
         !ironwood_binding_auth_verify(cv, 2, balance, v->ironwood.binding_signature.data, changed).ok;
 }
@@ -219,7 +220,7 @@ static bool check_reward_wire(const uint8_t *wire, size_t size)
     if (!check_reward_outpoint(&v)) return false;
     const struct v6_prevout prev = {1250000000, {script, sizeof script}};
     return v6_shielded_sighash(&v, &prev, 1, hash) && !memcmp(hash, want, 32) &&
-        check_reward_signatures(&v, hash);
+        check_reward_signatures(&v, hash, -1249985000);
 }
 
 static bool check_reward_fixture(void)
@@ -232,9 +233,38 @@ static bool check_reward_fixture(void)
     return check_reward_wire(wire, sizeof wire);
 }
 
+/* Exact output of the prior H1-reward fixture, position 1 in an initially
+ * empty two-action tree. This is not an on-chain anchor or admission claim;
+ * generation inputs and independent proof evidence are recorded alongside it. */
+static bool check_withdraw_wire(const uint8_t *wire, size_t size)
+{
+    uint8_t expected[32], anchor[32], hash[32]; struct v6_wire_view v;
+    struct v6_wire_cursor cursor; struct v6_span output;
+    if (!zcl_hex_decode("42f6311ad7276f7a3edb013ea395fdb2fe8b9089f18fe60e77b8164d47bd87dc", expected, 32) ||
+        !zcl_hex_decode("382ccad224a7e382b6e18d38beb6f518ef9a30ea0a0cc259aa9021737d41cf22", anchor, 32) ||
+        v6_core_parse(wire, size, &v) != V6_WIRE_OK || v.inputs != 0 || v.outputs != 1 ||
+        v.ironwood.count != 2 || v.ironwood.anchor.size != 32 ||
+        v.ironwood.value_balance.size != 8 || v.ironwood.binding_signature.size != 64 ||
+        memcmp(v.ironwood.anchor.data, anchor, 32)) return false;
+    if (!v6_core_cursor_init(&v, false, &cursor) || !v6_core_cursor_next(&cursor, &output) ||
+        output.size < 8 || zcl_read_u64_le(output.data) != 1249970000) return false;
+    return v6_shielded_sighash(&v, NULL, 0, hash) && !memcmp(hash, expected, 32) &&
+        check_reward_signatures(&v, hash, 1249985000);
+}
+
+static bool check_withdraw_fixture(void)
+{
+    uint8_t wire[9200];
+    FILE *f = fopen("tests/fixtures/ironwood/postnu63-h1-reward-withdrawal.v6", "rb");
+    if (!f) return false;
+    bool ok = fread(wire, 1, sizeof wire, f) == sizeof wire && fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0 || !ok) return false;
+    return check_withdraw_wire(wire, sizeof wire);
+}
+
 int test_ironwood_spend_auth(void)
 {
-    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction() && check_transparent_sighash() && check_reward_fixture();
+    bool ok = check_case(0) && check_case(1) && check_binding() && check_binding_transaction() && check_transparent_sighash() && check_reward_fixture() && check_withdraw_fixture();
     printf("Ironwood spend authorization: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
