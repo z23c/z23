@@ -3750,3 +3750,5 @@ AGENT_IMPACT_RULE("engine/jobs/include/jobs/utxo_apply_ironwood_session.h|engine
 AGENT_IMPACT_RULE("engine/jobs/include/jobs/utxo_apply_ironwood_history.h|engine/jobs/src/utxo_apply_ironwood_history.c|tests/harness/src/test_utxo_apply_ironwood_history.c", "utxo_apply_ironwood_history")
 AGENT_IMPACT_RULE("engine/jobs/include/jobs/ironwood_context_auth.h|engine/jobs/src/ironwood_context_auth.c|tests/harness/src/test_ironwood_context_auth.c", "ironwood_context_auth")
 AGENT_IMPACT_RULE("engine/services/include/services/ironwood_auth_data_root.h|engine/services/src/ironwood_auth_data_root.c|tests/harness/src/test_ironwood_auth_data_root.c|tests/fixtures/ironwood/postnu63-h1-reward-spend.v6|tests/fixtures/ironwood/postnu63-h1-reward-withdrawal.v6", "ironwood_auth_data_root")
+
+AGENT_IMPACT_RULE("engine/services/src/ironwood_pallas_field.c|engine/services/src/ironwood_pallas_field.h|tests/harness/src/test_ironwood_pallas_field.c|tests/fixtures/ironwood/pallas-fp-differential.txt", "ironwood_pallas_field")
