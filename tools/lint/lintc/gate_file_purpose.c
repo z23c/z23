@@ -81,6 +81,7 @@ struct fp_acc {
     FILE *err;
     const char *root;
     const char *mode;
+    const char *violation_path; /* borrowed from the scan until fp_finish returns */
     int fail_mode;
     int scanned, viol, allow;
 };
@@ -368,6 +369,7 @@ static int fp_judge(const char *full, const char *key, struct fp_acc *a)
         return 0;
     }
     a->viol++;
+    a->violation_path = key;
     return fprintf(a->err, "%s: no derivable file purpose — add a top-of-file"
                    " comment line (or a '/* purpose: ... */' override)\n",
                    key) < 0
@@ -391,8 +393,13 @@ static int fp_finish(const struct fp_acc *a, FILE *out)
                    "(shrink-only) write to "
                    "tools/lint/file_purpose_baseline.txt\n") < 0)
         return die("z23-lint: write failed\n", "");
-    return (a->viol > 0
-            && (a->fail_mode || strcmp(a->mode, "RATCHET") == 0)) ? 1 : 0;
+    if (!a->viol || (!a->fail_mode && strcmp(a->mode, "RATCHET") != 0))
+        return 0;
+    /* A sole offender can be attributed without including the remediation path. */
+    if (a->viol == 1 && fprintf(out, "[check-file-purpose] FAIL: %s lacks a file purpose\n",
+                                a->violation_path) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
 }
 
 /* for authority in "${ZCL_SOURCE_AUTHORITIES[@]}" tools; keep only dirs
@@ -662,6 +669,8 @@ int check_file_purpose_selftest(void)
                           "1 violation(s) found (mode: RATCHET)\n"
                           "[check_file_purpose] 1 allowlisted violation(s) "
                           "ignored");
+        bad |= fp_st_case(root, "RATCHET", "engine/services/src/bad.c\n", 1,
+                          "[check-file-purpose] FAIL: engine/services/src/coponly.c lacks a file purpose");
         bad |= fp_st_unplant(root);
         /* set semantics: an entry nobody scanned is unused, never stale */
         bad |= fp_st_case(root, "RATCHET", "engine/services/src/gone.c\n", 0,
