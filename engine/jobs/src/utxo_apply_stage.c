@@ -615,10 +615,14 @@ static job_result_t ua_ironwood_wait(int height, const char *detail)
 static enum ua_apply_flow ua_prepare_ironwood(struct ua_apply_work *w, job_result_t *result)
 {
     const struct chain_research_descriptor *profile = chain_research_profile_current();
-    w->ironwood_active = profile && profile->id == CHAIN_RESEARCH_IRONWOOD &&
-        !w->skip_crypto && !replay_count_only_active();
+    w->ironwood_active = profile && profile->id == CHAIN_RESEARCH_IRONWOOD;
     if (!w->ironwood_active) return UA_APPLY_CONTINUE;
-    if (ua_ironwood_requires_auth(w->blk)) {
+    if (!w->blk->num_vtx || w->blk->num_vtx > MAX_BLOCK_TRANSACTIONS || !w->blk->vtx) {
+        ua_fatal_permanent_blocker(w->next_h, "malformed Ironwood block view");
+        *result = JOB_FATAL;
+    } else if (w->skip_crypto || replay_count_only_active()) {
+        *result = ua_ironwood_wait(w->next_h, "full reducer validation mode");
+    } else if (ua_ironwood_requires_auth(w->blk)) {
         *result = ua_ironwood_wait(w->next_h, "full v6 authorization evidence");
     } else {
         enum utxo_ironwood_result r = utxo_ironwood_session_prepare(w->db, w->bi,

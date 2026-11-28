@@ -5,6 +5,7 @@
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "primitives/block.h"
+#include "core/serialize.h"
 #include "services/ironwood_resident_params.h"
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +35,19 @@ static bool genesis_matches(const struct block_index *bi)
     return research && research->id == CHAIN_RESEARCH_IRONWOOD && bi && !bi->pprev &&
         bi->nHeight == 0 && bi->phashBlock &&
         uint256_eq(bi->phashBlock, &research->chain->consensus.hashGenesisBlock);
+}
+
+static bool genesis_body_matches(const struct block_index *bi, const struct block *block)
+{
+    if (!genesis_matches(bi) || block->header.nSolutionSize > MAX_SOLUTION_SIZE ||
+        block->num_vtx != 1 || !block->vtx) return false;
+    const struct chain_research_descriptor *profile = chain_research_profile_current();
+    struct byte_stream wire;
+    stream_init(&wire, profile->genesis_wire_len);
+    bool match = block_serialize(block, &wire) && wire.size == profile->genesis_wire_len &&
+        !memcmp(wire.data, profile->genesis_wire, wire.size);
+    stream_free(&wire);
+    return match;
 }
 
 static bool empty_root(uint8_t root[32])
@@ -131,13 +145,11 @@ enum utxo_ironwood_result utxo_ironwood_session_prepare(struct sqlite3 *db,
     enum utxo_ironwood_result r = open_store(db, bi);
     if (r != UTXO_IRONWOOD_OK) return r;
     if (bi->nHeight == 0) {
-        struct uint256 hash;
-        block_header_get_hash(&block->header, &hash);
-        if (!genesis_matches(bi) || !uint256_eq(bi->phashBlock, &hash))
+        if (!genesis_body_matches(bi, block))
             return UTXO_IRONWOOD_LOCAL_ERROR;
         struct utxo_ironwood_pending genesis = {0};
         if (!empty_root(genesis.checkpoint.root)) return UTXO_IRONWOOD_LOCAL_ERROR;
-        memcpy(genesis.checkpoint.block_hash, hash.data, 32);
+        memcpy(genesis.checkpoint.block_hash, bi->phashBlock->data, 32);
         *out = genesis;
         return UTXO_IRONWOOD_OK;
     }
