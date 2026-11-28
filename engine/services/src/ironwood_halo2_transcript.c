@@ -74,6 +74,16 @@ struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t
     return ZCL_OK;
 }
 
+static bool vesta_affine(const EC_GROUP *curve, EC_POINT *point, BIGNUM *x,
+                         BIGNUM *y, unsigned sign, BN_CTX *ctx, uint8_t out[64])
+{
+    return EC_POINT_set_compressed_coordinates(curve, point, x, (int)sign, ctx) == 1 &&
+        EC_POINT_is_at_infinity(curve, point) == 0 &&
+        EC_POINT_is_on_curve(curve, point, ctx) == 1 &&
+        EC_POINT_get_affine_coordinates(curve, point, x, y, ctx) == 1 &&
+        BN_bn2lebinpad(x, out, 32) == 32 && BN_bn2lebinpad(y, out + 32, 32) == 32;
+}
+
 /* Vesta coordinates and proof bytes are public. OpenSSL BN/EC operations
  * here are variable-time and must never be used for secret values. */
 static bool decode_vesta_point(const uint8_t encoded[32], uint8_t affine[64])
@@ -96,11 +106,7 @@ static bool decode_vesta_point(const uint8_t encoded[32], uint8_t affine[64])
         BN_set_word(five, 5) && BN_cmp(x, prime) < 0;
     if (ok) { curve = EC_GROUP_new_curve_GFp(prime, zero, five, ctx); ok = curve != NULL; }
     if (ok) { point = EC_POINT_new(curve); ok = point != NULL; }
-    if (ok) ok = EC_POINT_set_compressed_coordinates(curve, point, x, (int)sign, ctx) == 1 &&
-        EC_POINT_is_at_infinity(curve, point) == 0 &&
-        EC_POINT_is_on_curve(curve, point, ctx) == 1 &&
-        EC_POINT_get_affine_coordinates(curve, point, x, y, ctx) == 1 &&
-        BN_bn2lebinpad(x, affine, 32) == 32 && BN_bn2lebinpad(y, affine + 32, 32) == 32;
+    if (ok) ok = vesta_affine(curve, point, x, y, sign, ctx, affine);
     EC_POINT_free(point);
     EC_GROUP_free(curve);
     BN_free(y); BN_free(x); BN_free(five); BN_free(zero); BN_free(prime);
