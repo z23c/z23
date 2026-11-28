@@ -40,17 +40,23 @@ static bool boundaries(const uint8_t ivk[32], const uint8_t epk[32])
     memcpy(out,epk,32);
     return ironwood_research_pallas_agree(one,out,out).ok && !memcmp(out,epk,32);
 }
-static bool fixture(const uint8_t ivk[32], const uint8_t wrong[32], const uint8_t epk[32])
+static bool fixture_action(uint8_t wire[10000], const uint8_t **action)
 {
-    uint8_t wire[10000], shared[32], want[32], plain[564];
     FILE *f=fopen("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6","rb");
     if (!f) return false;
-    size_t n=fread(wire,1,sizeof wire,f); bool ok=!ferror(f) && feof(f);
+    size_t n=fread(wire,1,10000,f); bool ok=!ferror(f) && feof(f);
     if (fclose(f)!=0) ok=false;
     struct v6_wire_view view;
     if (!ok || v6_core_parse(wire,n,&view)!=V6_WIRE_OK || view.ironwood.count!=2 ||
         view.ironwood.actions.size!=1640) return false;
-    const uint8_t *action=view.ironwood.actions.data+820;
+    *action=view.ironwood.actions.data+820;
+    return true;
+}
+static bool fixture(const uint8_t ivk[32], const uint8_t wrong[32], const uint8_t epk[32])
+{
+    uint8_t wire[10000], shared[32], want[32], plain[564];
+    const uint8_t *action = NULL;
+    if (!fixture_action(wire, &action)) return false;
     if (memcmp(action+128,epk,32) ||
         !zcl_hex_decode("4d00929d6d5400b85d40ac60273c821345d3a19f73a94a897fecf356fcb44729",want,32) ||
         !ironwood_research_pallas_agree(ivk,epk,shared).ok || memcmp(shared,want,32) ||
