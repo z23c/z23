@@ -411,9 +411,16 @@ void GetDefaultDataDirUnder(const char *home, char *out, size_t out_size)
 static void AppendNetworkDataDir(char *path, size_t path_size)
 {
     const struct base_chain_params *bp = BaseParams();
-    /* Research startup passes the final profile directory to every subsystem. */
+    /* Research startup passes the final profile directory to every subsystem.
+     * No research profile can be selected on Windows (its storage path is
+     * resolved by POSIX-only code), and that lookup is not linked there. */
+#if !defined(_WIN32)
     if (chain_research_profile_current() || !bp || !bp->strDataDir[0])
         return;
+#else
+    if (!bp || !bp->strDataDir[0])
+        return;
+#endif
 
     size_t len = strlen(path);
     if (len + 1 >= path_size)
