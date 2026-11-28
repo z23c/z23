@@ -236,18 +236,23 @@ static bool check_reward_fixture(void)
 /* Exact output of the prior H1-reward fixture, position 1 in an initially
  * empty two-action tree. This is not an on-chain anchor or admission claim;
  * generation inputs and independent proof evidence are recorded alongside it. */
+static bool check_withdraw_output(const struct v6_wire_view *v)
+{
+    struct v6_wire_cursor cursor; struct v6_span output;
+    return v6_core_cursor_init(v, false, &cursor) && v6_core_cursor_next(&cursor, &output) &&
+        output.size >= 8 && zcl_read_u64_le(output.data) == 1249970000;
+}
+
 static bool check_withdraw_wire(const uint8_t *wire, size_t size)
 {
     uint8_t expected[32], anchor[32], hash[32]; struct v6_wire_view v;
-    struct v6_wire_cursor cursor; struct v6_span output;
     if (!zcl_hex_decode("42f6311ad7276f7a3edb013ea395fdb2fe8b9089f18fe60e77b8164d47bd87dc", expected, 32) ||
         !zcl_hex_decode("382ccad224a7e382b6e18d38beb6f518ef9a30ea0a0cc259aa9021737d41cf22", anchor, 32) ||
         v6_core_parse(wire, size, &v) != V6_WIRE_OK || v.inputs != 0 || v.outputs != 1 ||
         v.ironwood.count != 2 || v.ironwood.anchor.size != 32 ||
         v.ironwood.value_balance.size != 8 || v.ironwood.binding_signature.size != 64 ||
         memcmp(v.ironwood.anchor.data, anchor, 32)) return false;
-    if (!v6_core_cursor_init(&v, false, &cursor) || !v6_core_cursor_next(&cursor, &output) ||
-        output.size < 8 || zcl_read_u64_le(output.data) != 1249970000) return false;
+    if (!check_withdraw_output(&v)) return false;
     return v6_shielded_sighash(&v, NULL, 0, hash) && !memcmp(hash, expected, 32) &&
         check_reward_signatures(&v, hash, 1249985000);
 }
