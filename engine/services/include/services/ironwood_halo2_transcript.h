@@ -16,6 +16,7 @@ struct ironwood_halo2_transcript {
     struct blake2b_ctx hash;
     bool initialized;
 };
+struct zcl_codec_reader;
 
 struct zcl_result ironwood_halo2_transcript_init(struct ironwood_halo2_transcript *t);
 /* A point is its canonical 32-byte little-endian affine x followed by y;
@@ -24,6 +25,12 @@ struct zcl_result ironwood_halo2_transcript_point(struct ironwood_halo2_transcri
                                                    const uint8_t *point, size_t size);
 struct zcl_result ironwood_halo2_transcript_scalar(struct ironwood_halo2_transcript *t,
                                                     const uint8_t *scalar, size_t size);
+/* Read one canonical Vesta scalar from public proof bytes and absorb it.
+ * On failure the reader, transcript and output are unchanged. Output must
+ * not overlap the reader or transcript objects. This does not verify a proof. */
+struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t,
+                                              struct zcl_codec_reader *reader,
+                                              uint8_t *out, size_t size);
 /* Appends the challenge delimiter and returns 64 raw bytes; state advances. */
 struct zcl_result ironwood_halo2_transcript_challenge(struct ironwood_halo2_transcript *t,
                                                        uint8_t *out, size_t size);

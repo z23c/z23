@@ -2,6 +2,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_halo2_transcript.h"
 #include "base/hex.h"
+#include "codec/cursor.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -31,6 +32,68 @@ static const struct trace_row trace[] = {
     {'C', "a09c11c2e91c6dc9a9f795bcd1c22188574cdf0f0ce367360a76ec763599071028ce68446f4bb788539b33e3ff1cd467968472df6966c0a76de16746e69c8dfb"},
 };
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "transcript line %d: %s\n", __LINE__, #x); return 1; } } while (0)
+static int scalar_reader_refusal(const uint8_t *input, size_t length, bool initialized)
+{
+    struct ironwood_halo2_transcript t = {0};
+    struct zcl_codec_reader r;
+    uint8_t out[32], saved[32];
+    if (initialized) CHECK(ironwood_halo2_transcript_init(&t).ok);
+    zcl_codec_reader_init(&r, input, length);
+    struct ironwood_halo2_transcript before = t;
+    struct zcl_codec_reader prior = r;
+    memset(out, 0xa5, sizeof out);
+    memcpy(saved, out, sizeof out);
+    CHECK(!ironwood_halo2_read_scalar(&t, &r, out, sizeof out).ok);
+    CHECK(!memcmp(&t, &before, sizeof t));
+    CHECK(!memcmp(&r, &prior, sizeof r));
+    CHECK(!memcmp(out, saved, sizeof out));
+    return 0;
+}
+
+static int scalar_reader_sequence(void)
+{
+    /* First INPUT_S in the retained Orchard restricted proof trace. */
+    static const char corpus[] = "d76829e6e44d3e45b056b3dbcb2b36e5deeabc4940dc6d47d9dea7beb51c9009";
+    uint8_t wire[64] = {0}, out[32], a[64], b[64];
+    struct ironwood_halo2_transcript t, expected;
+    struct zcl_codec_reader r;
+    CHECK(zcl_hex_decode(corpus, wire, 32));
+    CHECK(ironwood_halo2_transcript_init(&t).ok);
+    CHECK(ironwood_halo2_transcript_init(&expected).ok);
+    zcl_codec_reader_init(&r, wire, sizeof wire);
+    CHECK(ironwood_halo2_read_scalar(&t, &r, out, sizeof out).ok);
+    CHECK(r.position == 32 && !memcmp(out, wire, 32));
+    CHECK(ironwood_halo2_read_scalar(&t, &r, out, sizeof out).ok);
+    CHECK(r.position == 64 && !memcmp(out, wire + 32, 32));
+    CHECK(ironwood_halo2_transcript_scalar(&expected, wire, 32).ok);
+    CHECK(ironwood_halo2_transcript_scalar(&expected, wire + 32, 32).ok);
+    CHECK(ironwood_halo2_transcript_challenge(&t, a, sizeof a).ok);
+    CHECK(ironwood_halo2_transcript_challenge(&expected, b, sizeof b).ok);
+    CHECK(!memcmp(a, b, sizeof a));
+    CHECK(scalar_reader_refusal(wire, 31, true) == 0);
+    CHECK(scalar_reader_refusal(wire, 32, false) == 0);
+    return 0;
+}
+
+static int scalar_reader_boundaries(void)
+{
+    static const char modulus[] = "01000000ed302d991bf94c09fc98462200000000000000000000000000000040";
+    uint8_t wire[32], out[32];
+    struct ironwood_halo2_transcript t;
+    struct zcl_codec_reader r;
+    CHECK(ironwood_halo2_transcript_init(&t).ok);
+    CHECK(zcl_hex_decode(modulus, wire, 32));
+    CHECK(scalar_reader_refusal(wire, 32, true) == 0);
+    ++wire[0];
+    CHECK(scalar_reader_refusal(wire, 32, true) == 0);
+    wire[0] -= 2;
+    zcl_codec_reader_init(&r, wire, 32);
+    CHECK(ironwood_halo2_read_scalar(&t, &r, out, sizeof out).ok);
+    CHECK(r.position == 32 && !memcmp(out, wire, 32));
+    memset(wire, 0xff, 32);
+    CHECK(scalar_reader_refusal(wire, 32, true) == 0);
+    return 0;
+}
 static int reduction_checks(void)
 {
     /* Fp modulus from pasta_curves 0.5.1; the zero-extended modulus and
@@ -68,6 +131,8 @@ int test_ironwood_halo2_transcript(void)
     uint8_t bytes[64], expected[64], untouched[64], scalar[32], scalar_expected[32];
     size_t challenge_count = 0;
     CHECK(reduction_checks() == 0);
+    CHECK(scalar_reader_sequence() == 0);
+    CHECK(scalar_reader_boundaries() == 0);
     CHECK(!ironwood_halo2_transcript_challenge(&t, bytes, 64).ok);
     CHECK(!ironwood_halo2_transcript_init(NULL).ok);
     CHECK(ironwood_halo2_transcript_init(&t).ok);

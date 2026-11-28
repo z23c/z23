@@ -1,8 +1,14 @@
 /* purpose: Frame Halo2 transcript input and derive challenge bytes. */
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/ironwood_halo2_transcript.h"
+#include "codec/cursor.h"
 #include "core/arith_uint256.h"
 #include <string.h>
+
+static const struct arith_uint256 vesta_scalar_modulus = { .pn = {
+    0x00000001u, 0x992d30edu, 0x094cf91bu, 0x224698fcu,
+    0, 0, 0, 0x40000000u
+}};
 
 struct zcl_result ironwood_halo2_transcript_init(struct ironwood_halo2_transcript *t)
 {
@@ -41,6 +47,31 @@ struct zcl_result ironwood_halo2_transcript_scalar(struct ironwood_halo2_transcr
     return absorb(t, scalar, size, 32, 2);
 }
 
+struct zcl_result ironwood_halo2_read_scalar(struct ironwood_halo2_transcript *t,
+                                              struct zcl_codec_reader *reader,
+                                              uint8_t *out, size_t size)
+{
+    if (!t || !reader || !out || size != 32)
+        return ZCL_ERR(-1, "Invalid scalar reader input");
+    struct zcl_codec_reader next_reader = *reader;
+    const uint8_t *bytes = zcl_codec_take(&next_reader, 32);
+    if (!bytes) return ZCL_ERR(-1, "Truncated scalar");
+    uint8_t scalar[32];
+    memcpy(scalar, bytes, sizeof scalar);
+    struct arith_uint256 value = {0};
+    for (size_t i = 0; i < sizeof scalar; ++i)
+        value.pn[i / 4] |= (uint32_t)scalar[i] << ((i % 4) * 8);
+    if (arith_uint256_compare(&value, &vesta_scalar_modulus) >= 0)
+        return ZCL_ERR(-1, "Noncanonical Vesta scalar");
+    struct ironwood_halo2_transcript next_t = *t;
+    struct zcl_result result = ironwood_halo2_transcript_scalar(&next_t, scalar, sizeof scalar);
+    if (!result.ok) return result;
+    *t = next_t;
+    *reader = next_reader;
+    memcpy(out, scalar, sizeof scalar);
+    return ZCL_OK;
+}
+
 struct zcl_result ironwood_halo2_transcript_challenge(struct ironwood_halo2_transcript *t,
                                                        uint8_t *out, size_t size)
 {
@@ -65,18 +96,14 @@ struct zcl_result ironwood_halo2_vesta_scalar(const uint8_t *wide, size_t wide_s
 {
     if (!wide || wide_size != 64 || !out || out_size != 32)
         return ZCL_ERR(-1, "Invalid Vesta challenge reduction input");
-    const struct arith_uint256 modulus = { .pn = {
-        0x00000001u, 0x992d30edu, 0x094cf91bu, 0x224698fcu,
-        0, 0, 0, 0x40000000u
-    }};
     struct arith_uint256 value = {0};
     for (int bit = 511; bit >= 0; --bit) {
         /* value < modulus before each step, so twice value plus one is
          * below 2^256 and the fixed-width addition cannot overflow. */
         arith_uint256_add(&value, &value, &value);
         value.pn[0] |= (uint32_t)((wide[bit / 8] >> (bit % 8)) & 1u);
-        if (arith_uint256_compare(&value, &modulus) >= 0)
-            arith_uint256_sub(&value, &value, &modulus);
+        if (arith_uint256_compare(&value, &vesta_scalar_modulus) >= 0)
+            arith_uint256_sub(&value, &value, &vesta_scalar_modulus);
     }
     uint8_t result[32];
     for (size_t i = 0; i < sizeof result; ++i)
