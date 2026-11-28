@@ -154,6 +154,20 @@ static void note_first_fail(struct replay_verify_report *r,
     }
 }
 
+static bool sweep_finish_research(struct sweep_state *st, uint32_t height,
+                                  const struct block_hash *hash, const struct block *blk,
+                                  uint64_t failures_before)
+{
+    struct replay_verify_report *r = st->report;
+    uint64_t failures_after = r->size_failures + r->deposit_failures +
+        r->hash_failures + r->pow_failures + r->merkle_failures + r->linkage_failures;
+    if (st->tracker && failures_after != failures_before) {
+        r->blocks_checked++;
+        return false; /* Later rules cannot be derived from an invalid parent. */
+    }
+    return sweep_connect_research(st, height, hash, blk);
+}
+
 /* iter_from callback: one block, in active-chain order. Returns true to
  * keep iterating, false to stop. A consensus-level failure does NOT stop
  * the sweep (we want full counts); only an operational parse failure or
@@ -253,14 +267,7 @@ static bool sweep_cb(uint32_t height,
         }
     }
 
-    uint64_t failures_after = r->size_failures + r->deposit_failures +
-        r->hash_failures + r->pow_failures + r->merkle_failures + r->linkage_failures;
-    if (st->tracker && failures_after != failures_before) {
-        r->blocks_checked++;
-        block_free(&blk);
-        return false; /* Later rules cannot be derived from an invalid parent. */
-    }
-    if (!sweep_connect_research(st, height, hash, &blk)) {
+    if (!sweep_finish_research(st, height, hash, &blk, failures_before)) {
         block_free(&blk);
         return false;
     }
