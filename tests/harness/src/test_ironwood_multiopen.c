@@ -112,8 +112,8 @@ static int actual_trace(const char *const *rows)
 {
     struct ironwood_multiopen_set sets[IRONWOOD_MULTIOPEN_SETS] = {0};
     size_t evals[IRONWOOD_MULTIOPEN_SETS] = {0}, u = 0;
-    uint8_t x2[32] = {0}, x3[32] = {0}, x4[32] = {0}, expected[32] = {0}, out[32];
-    bool have2 = false, have3 = false, have4 = false, havev = false;
+    uint8_t x[3][32] = {0}, expected[32] = {0}, out[32];
+    bool have[3] = {false}, havev = false;
     for (size_t i = 0; rows[i]; ++i) {
         const char *r = rows[i];
         if (r[0] == 'Q') {
@@ -132,18 +132,15 @@ static int actual_trace(const char *const *rows)
             CHECK(zcl_hex_decode(r + 2, expected, 32));
         }
         else if (r[1] == 'X') {
-            uint8_t *x; bool *seen;
-            if (r[2] == '2') { x = x2; seen = &have2; }
-            else if (r[2] == '3') { x = x3; seen = &have3; }
-            else if (r[2] == '4') { x = x4; seen = &have4; }
-            else { CHECK(false); return 1; }
-            CHECK(!*seen); *seen = true;
-            CHECK(zcl_hex_decode(r + 3, x, 32));
+            CHECK(r[2] >= '2' && r[2] <= '4');
+            size_t n = (size_t)(r[2] - '2');
+            CHECK(!have[n]); have[n] = true;
+            CHECK(zcl_hex_decode(r + 3, x[n], 32));
         } else CHECK(false);
     }
-    CHECK(u == IRONWOOD_MULTIOPEN_SETS && have2 && have3 && have4 && havev);
+    CHECK(u == IRONWOOD_MULTIOPEN_SETS && have[0] && have[1] && have[2] && havev);
     for (size_t i = 0; i < IRONWOOD_MULTIOPEN_SETS; ++i) CHECK(evals[i] == sets[i].count);
-    CHECK(ironwood_multiopen_value(sets, x2, x3, x4, out).ok);
+    CHECK(ironwood_multiopen_value(sets, x[0], x[1], x[2], out).ok);
     CHECK(!memcmp(out, expected, 32));
     return 0;
 }
