@@ -3742,3 +3742,4 @@ AGENT_IMPACT_RULE("engine/jobs/include/jobs/utxo_apply_ironwood.h|engine/jobs/sr
 AGENT_IMPACT_RULE("engine/jobs/include/jobs/utxo_apply_ironwood_session.h|engine/jobs/src/utxo_apply_ironwood_session.c|tests/harness/src/test_utxo_apply_ironwood_session.c", "utxo_apply_ironwood_session")
 
 AGENT_IMPACT_RULE("engine/jobs/include/jobs/utxo_apply_ironwood_history.h|engine/jobs/src/utxo_apply_ironwood_history.c|tests/harness/src/test_utxo_apply_ironwood_history.c", "utxo_apply_ironwood_history")
+AGENT_IMPACT_RULE("engine/jobs/include/jobs/ironwood_context_auth.h|engine/jobs/src/ironwood_context_auth.c|tests/harness/src/test_ironwood_context_auth.c", "ironwood_context_auth")
