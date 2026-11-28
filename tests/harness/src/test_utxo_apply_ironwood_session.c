@@ -483,6 +483,19 @@ static bool corruption_refused(struct session_fixture *f)
     bool refused = session_prepare(f, 3, &p) == UTXO_IRONWOOD_LOCAL_ERROR && !memcmp(&p, &before, sizeof p);
     return sql(f->db, "ROLLBACK") && refused;
 }
+static bool foreign_bootstrap_refused(sqlite3 *db, struct session_fixture *f)
+{
+    struct ironwood_bootstrap_cursor c = {0}, next = {0};
+    enum ironwood_bootstrap_result r = IRONWOOD_BOOTSTRAP_MORE;
+    bool ok = true;
+    for (int i = 0; ok && r == IRONWOOD_BOOTSTRAP_MORE && i < 8; ++i) {
+        r = test_bootstrap_step(db, 9, &f->index[2], NULL, f, &c, &next);
+        if (r == IRONWOOD_BOOTSTRAP_ERROR) { ok = sql(db, "ROLLBACK"); break; }
+        ok = sql(db, "COMMIT");
+        if (ok) c = next;
+    }
+    return ok && r == IRONWOOD_BOOTSTRAP_ERROR;
+}
 /* A checkpoint the store wrote itself from a body that is not the canonical
  * block at its height passes the audit. Only the comparison of each replayed
  * step with its row refuses the canonical block above it with a local error;
@@ -517,15 +530,7 @@ static bool foreign_row_refused(struct session_fixture *f)
     ok = ok && sql(db, "BEGIN") &&
         utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3], session_reader, NULL, f, &p) == UTXO_IRONWOOD_HISTORY_INCOMPLETE &&
         !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
-    struct ironwood_bootstrap_cursor c = {0}, next = {0};
-    enum ironwood_bootstrap_result r = IRONWOOD_BOOTSTRAP_MORE;
-    for (int i = 0; ok && r == IRONWOOD_BOOTSTRAP_MORE && i < 8; ++i) {
-        r = test_bootstrap_step(db, 9, &f->index[2], NULL, f, &c, &next);
-        if (r == IRONWOOD_BOOTSTRAP_ERROR) { ok = sql(db, "ROLLBACK"); break; }
-        ok = sql(db, "COMMIT");
-        if (ok) c = next;
-    }
-    ok = ok && r == IRONWOOD_BOOTSTRAP_ERROR;
+    if (ok) ok = foreign_bootstrap_refused(db, f);
     if (!sqlite3_get_autocommit(db)) (void)sql(db, "ROLLBACK");
     utxo_ironwood_session_reset();
     if (sqlite3_close(db) != SQLITE_OK) ok = false;

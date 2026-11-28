@@ -269,15 +269,11 @@ static enum ironwood_bootstrap_result bootstrap_open_prefix(sqlite3 *db,
         .hash = *parent->phashBlock, .generation = open->generation };
     return marker_write(db, &open->marker) ? IRONWOOD_BOOTSTRAP_MORE : IRONWOOD_BOOTSTRAP_ERROR;
 }
-static enum ironwood_bootstrap_result bootstrap_open_store(sqlite3 *db, uint64_t epoch,
+static enum ironwood_bootstrap_result bootstrap_choose_store(sqlite3 *db, uint64_t epoch,
     const struct block_index *parent, const struct block_index *old_parent,
-    const struct ironwood_bootstrap_cursor *in, struct bootstrap_open *open)
+    const struct ironwood_bootstrap_cursor *in, struct bootstrap_open *open,
+    bool have, enum ironwood_checkpoint_probe_result probe)
 {
-    bool have = false;
-    if (!marker_read(db, &have, &open->marker) || !ironwood_checkpoint_ensure_schema(db))
-        return IRONWOOD_BOOTSTRAP_ERROR;
-    enum ironwood_checkpoint_probe_result probe = ironwood_checkpoint_probe(db);
-    if (probe == IRONWOOD_CHECKPOINT_PROBE_ERROR) return IRONWOOD_BOOTSTRAP_ERROR;
     if (have && same_cursor(in, db, epoch, &open->marker)) open->store = in->storage;
     if (!have && in->active && in->db == db && in->epoch == epoch)
         return IRONWOOD_BOOTSTRAP_ERROR;
@@ -290,6 +286,19 @@ static enum ironwood_bootstrap_result bootstrap_open_store(sqlite3 *db, uint64_t
         if (!bootstrap_initialize(db, parent, open)) return IRONWOOD_BOOTSTRAP_ERROR;
     } else if (!bootstrap_existing_marker_valid(db, parent, old_parent, probe, open))
         return IRONWOOD_BOOTSTRAP_ERROR;
+    return IRONWOOD_BOOTSTRAP_MORE;
+}
+static enum ironwood_bootstrap_result bootstrap_open_store(sqlite3 *db, uint64_t epoch,
+    const struct block_index *parent, const struct block_index *old_parent,
+    const struct ironwood_bootstrap_cursor *in, struct bootstrap_open *open)
+{
+    bool have = false;
+    if (!marker_read(db, &have, &open->marker) || !ironwood_checkpoint_ensure_schema(db))
+        return IRONWOOD_BOOTSTRAP_ERROR;
+    enum ironwood_checkpoint_probe_result probe = ironwood_checkpoint_probe(db);
+    if (probe == IRONWOOD_CHECKPOINT_PROBE_ERROR) return IRONWOOD_BOOTSTRAP_ERROR;
+    enum ironwood_bootstrap_result r = bootstrap_choose_store(db, epoch, parent, old_parent, in, open, have, probe);
+    if (r != IRONWOOD_BOOTSTRAP_MORE) return r;
     if (!ironwood_checkpoint_progress(&open->store, &open->tip, &open->generation) ||
         open->generation != open->marker.generation || open->tip > open->marker.height)
         return IRONWOOD_BOOTSTRAP_ERROR;
