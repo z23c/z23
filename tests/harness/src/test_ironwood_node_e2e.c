@@ -397,20 +397,35 @@ static int iw_sync(void)
     return failures;
 }
 
+static bool iw_recovered(struct rnf *node)
+{
+    const char *const peers[] = { "getpeerinfo", NULL };
+    int height = -1;
+    char hash[80];
+    if (!iw_clean_reply(iw_call(node, peers)) || strcmp(iw.raw, "[]\n") != 0)
+        return false;
+    if (!iw_chain(node, &height, hash, sizeof(hash)))
+        return false;
+    printf("ISOLATED_RECOVERY height=%d hash=%s expected=%s\n", height, hash, iw.tip);
+    return height == 101 && strcmp(hash, iw.tip) == 0;
+}
+
 static int iw_restart(void)
 {
-    int failures = 0, height = -1;
-    char hash[80];
+    int failures = 0;
+    char peer[64];
+    snprintf(peer, sizeof(peer), "127.0.0.1:%u", iw.miner.port[0]);
+    const char *const connect[] = { "addnode", peer, "onetry", NULL };
     TEST(iw.research ? "research restart" : "regtest restart") {
         ASSERT(iw_stop(&iw.follower, &iw_follower_pid));
         ASSERT(iw_stop(&iw.miner, &iw_miner_pid));
         ASSERT(iw_start(&iw.miner, 0, &iw_miner_pid));
         ASSERT(iw_wait_up(&iw.miner));
-        ASSERT(iw_start(&iw.follower, iw.miner.port[0], &iw_follower_pid));
+        ASSERT(iw_recovered(&iw.miner));
+        ASSERT(iw_start(&iw.follower, 0, &iw_follower_pid));
         ASSERT(iw_wait_up(&iw.follower));
-        ASSERT(iw_chain(&iw.miner, &height, hash, sizeof(hash)));
-        ASSERT_EQ(height, 101);
-        ASSERT_STR_EQ(hash, iw.tip);
+        ASSERT(iw_recovered(&iw.follower));
+        ASSERT(iw_clean_reply(iw_call(&iw.follower, connect)));
         ASSERT(iw_agree(101, iw.tip));
         printf("RESTART height=101 hash=%s\n", iw.tip);
         PASS();
