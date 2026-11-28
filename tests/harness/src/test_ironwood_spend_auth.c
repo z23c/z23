@@ -44,9 +44,47 @@ static bool check_case(size_t i)
     return !ironwood_spend_auth_verify(key, bad, msg).ok &&
         !ironwood_spend_auth_verify(NULL, sig, msg).ok;
 }
+static bool check_binding_keys(const uint8_t cv[2][32])
+{
+    static const int64_t balances[] = {-200000, 0, 200000, INT64_MIN};
+    static const char *expected[] = {
+        "1ce71c92078cc5ba866fa27635a07b166f031181104412c0fc135889d2f00c20",
+        "d73233b085c958baaff91837a0ad051789d9af9f2e336240a1a4abf36b799d9a",
+        "f0bbc3593025f61f8a0052edf002ff3e14125bb7a0b308f9594f69ebb752f91b",
+        "2e4d6842cd90f5b0812f8887ac776077a2a721b3a7fed8dcc9c40dc4265786b3"};
+    uint8_t key[32], want[32];
+    for (size_t i = 0; i < 4; ++i)
+        if (!zcl_hex_decode(expected[i], want, 32) ||
+            !ironwood_binding_key(cv, 2, balances[i], key).ok || memcmp(key, want, 32)) return false;
+    return true;
+}
+
+static bool check_binding(void)
+{
+    uint8_t cv[2][32], sig[64], msg[32], key[32], before[32];
+    if (!zcl_hex_decode("1ab7122ad5e623a7d8cc2ae609bdc36a9416c833a5af2db40378211396f7bd80", cv[0], 32) ||
+        !zcl_hex_decode("ad322be6ba6669192897b02d2322a2914eff0645ef900da1485453345a79ae16", cv[1], 32) ||
+        !zcl_hex_decode("43c027b68d25c52b118a2a83a39a651b84029c824bbe3c01bcc1e8a0e9b98202"
+                        "1107ddbc49f6587fa189de3339a772725fde4789a9203d3ced55f5d71c93470b", sig, 64) ||
+        !zcl_hex_decode("19a61a86bd739ad0ffc008dcc239d68bfe79a6b5d2f2488de17d08059fdc905a", msg, 32) ||
+        !check_binding_keys(cv) || !ironwood_binding_auth_verify(cv, 2, -200000, sig, msg).ok) return false;
+    if (!ironwood_binding_key(cv, 2, -200000, key).ok ||
+        ironwood_spend_auth_verify(key, sig, msg).ok ||
+        ironwood_binding_auth_verify(cv, 2, 200000, sig, msg).ok) return false;
+    msg[0] ^= 1;
+    if (ironwood_binding_auth_verify(cv, 2, -200000, sig, msg).ok) return false;
+    msg[0] ^= 1; sig[0] ^= 1;
+    if (ironwood_binding_auth_verify(cv, 2, -200000, sig, msg).ok) return false;
+    memset(cv[0], 0, 32); memset(sig, 0, 64);
+    if (!ironwood_binding_auth_verify(cv, 1, 0, sig, msg).ok) return false;
+    memset(key, 0xa5, 32); memcpy(before, key, 32); memset(cv[0], 0xff, 32);
+    return !ironwood_binding_key(cv, 2, -200000, key).ok && !memcmp(key, before, 32) &&
+        !ironwood_binding_key(cv, 0, -200000, key).ok;
+}
+
 int test_ironwood_spend_auth(void)
 {
-    bool ok = check_case(0) && check_case(1);
+    bool ok = check_case(0) && check_case(1) && check_binding();
     printf("Ironwood spend authorization: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

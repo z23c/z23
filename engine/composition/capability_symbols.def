@@ -975,6 +975,7 @@ ZCL_CAPABILITY_SYMBOL("EC_POINT_add", CAP_HARMLESS, "Adds two caller-supplied cu
 ZCL_CAPABILITY_SYMBOL("EC_POINT_cmp", CAP_HARMLESS, "Compares caller-supplied in-memory curve points.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_free", CAP_HARMLESS, "Releases the in-memory point.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_get_affine_coordinates", CAP_HARMLESS, "Computes affine coordinates of a public point.")
+ZCL_CAPABILITY_SYMBOL("EC_POINT_invert", CAP_HARMLESS, "Negates a caller-supplied in-memory curve point.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_is_at_infinity", CAP_HARMLESS, "Tests the identity element of an in-memory group.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_is_on_curve", CAP_HARMLESS, "Checks the curve equation over a public field.")
 ZCL_CAPABILITY_SYMBOL("EC_POINT_new", CAP_HARMLESS, "Allocates an in-memory point for the caller's group.")
