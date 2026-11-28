@@ -149,7 +149,7 @@ static struct zcl_result round_state(const struct rule_round *r, int32_t height,
         int64_t check_height = r->rule[i] >= 0 ? r->schedule[i].activation :
             (int64_t)r->schedule[i].start + r->schedule[i].window;
         if (height < check_height) continue;
-        enum miner_signal_phase phase;
+        enum miner_signal_phase phase = MINER_SIGNAL_VOTING;
         if (!miner_signal_phase_at(&r->tally[i], height, &phase).ok)
             return ZCL_ERR(RESEARCH_RULES_INVALID, "Incomplete research tally");
         if (r->rule[i] < 0) {
