@@ -206,6 +206,11 @@ static int failure_checks(struct fixture *f)
     f->index[110].nHeight--;
     CHECK(research_rules_for_parent(&f->binding, &f->index[124], read_block, f, &state).code == RESEARCH_RULES_INVALID);
     f->index[110].nHeight++;
+    /* Leave the fixture as it was found: block 103 hashes to its index entry
+     * again, so a later check can file it through the node's own reader. */
+    f->blocks[103].vtx[0].vout[0].script_pub_key.data[39] ^= 1;
+    transaction_compute_hash(f->blocks[103].vtx);
+    f->blocks[103].header.hashMerkleRoot = f->blocks[103].vtx[0].hash;
     return 0;
 }
 
@@ -378,48 +383,79 @@ static int other_rounds(void)
 /* The node's own block files: research_rules_for_index resolves the window
  * from disk exactly as the in-memory reader does, and a window body that is
  * not on disk holds instead of deciding. */
-static int disk_check(struct fixture *f)
+enum { DISK_WINDOW_PARENT = 124, DISK_ABOVE_WINDOW = 399 };
+
+/* File the window's base and its window the way a selected research node
+ * does: under the profile's frame magic, where the index records them. */
+static bool disk_write_window(struct fixture *f, const char *dir,
+                              struct disk_block_pos *first)
 {
-    char raw[PATH_MAX], dir[PATH_MAX], missing[PATH_MAX];
-    struct disk_block_pos first;
-    disk_block_pos_init(&first);
-    test_make_tmpdir(raw, sizeof(raw), "research_rules", "blocks");
-    bool ok = platform_directory_canonical_real(raw, dir, sizeof(dir));
-    for (int h = f->pin.start - 1; ok && h < f->pin.start + f->pin.window; ++h) {
+    for (int h = f->pin.start - 1; h < f->pin.start + f->pin.window; ++h) {
         struct disk_block_pos pos;
         disk_block_pos_init(&pos);
-        ok = write_block_to_disk(&f->blocks[h], &pos, dir,
-                                 f->binding.params->pchMessageStart);
-        if (!ok) break;
+        if (!write_block_to_disk(&f->blocks[h], &pos, dir,
+                                 f->binding.params->pchMessageStart))
+            return false;
         block_index_disk_pos_store(&f->index[h], pos.nFile, pos.nPos);
         (void)block_index_status_fetch_or(&f->index[h], BLOCK_HAVE_DATA);
-        if (h == f->pin.start - 1) first = pos;
+        if (h == f->pin.start - 1) *first = pos;
     }
+    return true;
+}
+
+/* Every window body on disk: the window decides, later bodies are never
+ * opened, and no binding leaves every rule inactive. */
+static int disk_resolve_checks(struct fixture *f, const char *dir)
+{
     struct research_rules_state state = {0};
-    struct zcl_result r = {0};
-    if (ok) r = research_rules_for_index(&f->binding, &f->index[124], dir, &state);
-    if (!ok || !r.ok || !state.active[0] || state.active[1]) {
-        (void)test_rm_rf_recursive(raw);
-        CHECK(ok && r.ok && state.active[0] && !state.active[1]);
-    }
+    CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], dir,
+                                   &state).ok);
+    CHECK(state.active[0] && !state.active[1]);
     /* Bodies above the window are never opened: the index links them. */
-    CHECK(research_rules_for_index(&f->binding, &f->index[399], dir, &state).ok &&
-          state.active[0]);
-    CHECK(research_rules_for_index(NULL, &f->index[124], dir, &state).ok &&
-          !state.active[0] && !state.active[1]);
-    get_block_pos_filename(missing, sizeof(missing), dir, &first, "blk");
-    CHECK(unlink(missing) == 0);
-    state.active[0] = false;
-    CHECK(research_rules_for_index(&f->binding, &f->index[124], dir, &state).code ==
-          RESEARCH_RULES_UNAVAILABLE);
-    /* A failure leaves the output untouched. */
-    CHECK(!state.active[0]);
-    CHECK(research_rules_for_index(&f->binding, &f->index[124], NULL, &state).code ==
-          RESEARCH_RULES_INVALID);
-    CHECK(research_rules_for_index(&f->binding, &f->index[124], "", &state).code ==
-          RESEARCH_RULES_INVALID);
-    CHECK(test_rm_rf_recursive(raw) == 0);
+    CHECK(research_rules_for_index(&f->binding, &f->index[DISK_ABOVE_WINDOW], dir,
+                                   &state).ok && state.active[0]);
+    CHECK(research_rules_for_index(NULL, &f->index[DISK_WINDOW_PARENT], dir,
+                                   &state).ok);
+    CHECK(!state.active[0] && !state.active[1]);
     return 0;
+}
+
+/* The window's base removed from disk: the outcome is UNAVAILABLE and, as
+ * the header promises, a failure leaves the output untouched. */
+static int disk_hold_checks(struct fixture *f, const char *dir)
+{
+    struct research_rules_state state = {0};
+    state.active[0] = true;
+    CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], dir,
+                                   &state).code == RESEARCH_RULES_UNAVAILABLE);
+    CHECK(state.active[0]);
+    CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], NULL,
+                                   &state).code == RESEARCH_RULES_INVALID);
+    CHECK(research_rules_for_index(&f->binding, &f->index[DISK_WINDOW_PARENT], "",
+                                   &state).code == RESEARCH_RULES_INVALID);
+    CHECK(state.active[0]);
+    return 0;
+}
+
+static int disk_check(struct fixture *f)
+{
+    char raw[PATH_MAX], dir[PATH_MAX], base[PATH_MAX];
+    struct disk_block_pos first;
+    disk_block_pos_init(&first);
+    /* The node's reader accepts the frame magic of the SELECTED profile, so
+     * the fixture selects what a research node runs. */
+    CHECK(chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD));
+    test_make_tmpdir(raw, sizeof(raw), "research_rules", "blocks");
+    int failures = !platform_directory_canonical_real(raw, dir, sizeof(dir));
+    if (!failures) failures = !disk_write_window(f, dir, &first);
+    if (!failures) failures = disk_resolve_checks(f, dir);
+    if (!failures) {
+        get_block_pos_filename(base, sizeof(base), dir, &first, "blk");
+        failures = unlink(base) != 0 || disk_hold_checks(f, dir);
+    }
+    /* The harness starts every test process on the main network. */
+    chain_params_select(CHAIN_MAIN);
+    return failures + (test_rm_rf_recursive(raw) != 0);
 }
 
 int test_research_rules(void)
