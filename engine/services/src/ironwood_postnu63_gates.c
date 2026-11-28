@@ -40,6 +40,15 @@ static struct zcl_result gate_arithmetic(struct gate_machine *m, uint8_t op)
     return ZCL_OK;
 }
 
+static struct zcl_result gate_query(struct gate_machine *m, uint8_t op,
+                                    const uint8_t *program, size_t size, size_t *position)
+{
+    if (*position == size) return ZCL_ERR(-1, "Truncated custom gate query");
+    unsigned index = program[(*position)++];
+    if (index >= (op == 'F' ? 29u : 25u)) return ZCL_ERR(-1, "Invalid custom gate query index");
+    return gate_push(m, (op == 'F' ? m->fixed : m->advice) + index * 32);
+}
+
 static struct zcl_result gate_instruction(struct gate_machine *m, uint8_t op,
                                           const uint8_t *program, size_t size, size_t *position)
 {
@@ -48,12 +57,7 @@ static struct zcl_result gate_instruction(struct gate_machine *m, uint8_t op,
         const uint8_t *value = program + *position; *position += 32;
         return gate_push(m, value);
     }
-    if (op == 'F' || op == 'A') {
-        if (*position == size) return ZCL_ERR(-1, "Truncated custom gate query");
-        unsigned index = program[(*position)++];
-        if (index >= (op == 'F' ? 29u : 25u)) return ZCL_ERR(-1, "Invalid custom gate query index");
-        return gate_push(m, (op == 'F' ? m->fixed : m->advice) + index * 32);
-    }
+    if (op == 'F' || op == 'A') return gate_query(m, op, program, size, position);
     if (op == 'N' || op == 'S' || op == 'M') return gate_arithmetic(m, op);
     if (op == 'E') {
         if (m->depth != 1 || m->gates == IRONWOOD_POSTNU63_CUSTOM_GATES)
@@ -87,11 +91,9 @@ static struct zcl_result gate_evaluate(const uint8_t *program, size_t size,
     return r;
 }
 
-struct zcl_result ironwood_postnu63_custom_gates(const struct ironwood_postnu63_stage *stage,
-    uint64_t action, const uint8_t *program, size_t program_size, uint8_t *out, size_t out_size)
+static struct zcl_result gate_stage(const struct ironwood_postnu63_stage *stage, uint64_t action)
 {
-    if (!stage || !program || !program_size || program_size > GATE_PROGRAM_MAX || !out ||
-        out_size != IRONWOOD_POSTNU63_GATE_BYTES || stage->phase != IRONWOOD_POSTNU63_EVAL_X1 ||
+    if (!stage || stage->phase != IRONWOOD_POSTNU63_EVAL_X1 ||
         !stage->proof.buffer || stage->proof.error != ZCL_CODEC_OK || action >= stage->actions)
         return ZCL_ERR(-1, "Invalid custom gate input");
     size_t expected = 0;
@@ -101,6 +103,16 @@ struct zcl_result ironwood_postnu63_custom_gates(const struct ironwood_postnu63_
     if (stage->proof.length != expected || stage->proof.position != expected - 992 ||
         stage->advice_eval_offset != 736 * n + 288 || stage->fixed_eval_offset != 1536 * n + 288)
         return ZCL_ERR(-1, "Invalid custom gate evaluation offsets");
+    return ZCL_OK;
+}
+
+struct zcl_result ironwood_postnu63_custom_gates(const struct ironwood_postnu63_stage *stage,
+    uint64_t action, const uint8_t *program, size_t program_size, uint8_t *out, size_t out_size)
+{
+    if (!program || !program_size || program_size > GATE_PROGRAM_MAX || !out ||
+        out_size != IRONWOOD_POSTNU63_GATE_BYTES) return ZCL_ERR(-1, "Invalid custom gate program or output");
+    struct zcl_result r = gate_stage(stage, action);
+    if (!r.ok) return r;
     uint8_t values[IRONWOOD_POSTNU63_GATE_BYTES];
     const uint8_t *fixed = stage->proof.buffer + stage->fixed_eval_offset;
     const uint8_t *advice = stage->proof.buffer + stage->advice_eval_offset + (size_t)action * 25 * 32;
