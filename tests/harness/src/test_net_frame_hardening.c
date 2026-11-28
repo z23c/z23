@@ -398,7 +398,7 @@ static void neth_v6_block_start(struct byte_stream *w, uint64_t count)
     stream_write_compact_size(w, count);
 }
 
-static int neth_case_block_v6(void)
+static int neth_v6_valid_frames(void)
 {
     int failures = 0;
     struct byte_stream w;
@@ -435,6 +435,15 @@ static int neth_case_block_v6(void)
     block_free(&b);
     stream_free(&r);
     stream_free(&w);
+    return failures;
+}
+
+static int neth_v6_invalid_frames(void)
+{
+    int failures = 0;
+    struct byte_stream w;
+    struct byte_stream r;
+    struct block b;
 
     neth_v6_block_start(&w, 1);
     stream_write_bytes(&w, ironwood_anchor_a, sizeof(ironwood_anchor_a) - 1);
@@ -459,46 +468,60 @@ static int neth_case_block_v6(void)
     block_free(&b);
     stream_free(&r);
     stream_free(&w);
+    return failures;
+}
 
+static int neth_v6_legacy_frame(int32_t version)
+{
+    int failures = 0;
+    struct byte_stream w;
+    struct byte_stream r;
+    struct block b;
+    struct transaction legacy;
+    transaction_init(&legacy);
+    legacy.overwintered = true;
+    legacy.version = version;
+    legacy.version_group_id = version == OVERWINTER_TX_VERSION ?
+                              OVERWINTER_VERSION_GROUP_ID : SAPLING_VERSION_GROUP_ID;
+    struct byte_stream txwire;
+    stream_init(&txwire, 128);
+    NETH_CHECK("block legacy: control serializes",
+               transaction_serialize(&legacy, &txwire));
+    transaction_free(&legacy);
+
+    neth_v6_block_start(&w, 1);
+    stream_write_bytes(&w, txwire.data, txwire.size);
+    stream_write_u8(&w, 0);
+    neth_reader(&r, &w, w.size);
+    block_init(&b);
+    char label[96];
+    snprintf(label, sizeof(label),
+             "block v%d: legacy decode and trailing behavior unchanged", version);
+    NETH_CHECK(label,
+               block_deserialize(&b, &r) && b.num_vtx == 1 &&
+               b.vtx[0].version == version && stream_remaining(&r) == 1 &&
+               r.read_pos == w.size - 1);
+    struct byte_stream encoded;
+    stream_init(&encoded, 128);
+    NETH_CHECK("block legacy: reserialized bytes unchanged",
+               transaction_serialize(&b.vtx[0], &encoded) &&
+               encoded.size == txwire.size &&
+               memcmp(encoded.data, txwire.data, txwire.size) == 0);
+    stream_free(&encoded);
+    block_free(&b);
+    stream_free(&r);
+    stream_free(&txwire);
+    stream_free(&w);
+    return failures;
+}
+
+static int neth_case_block_v6(void)
+{
+    int failures = neth_v6_valid_frames();
+    failures += neth_v6_invalid_frames();
     for (int32_t version = OVERWINTER_TX_VERSION;
-         version <= SAPLING_TX_VERSION; ++version) {
-        struct transaction legacy;
-        transaction_init(&legacy);
-        legacy.overwintered = true;
-        legacy.version = version;
-        legacy.version_group_id = version == OVERWINTER_TX_VERSION ?
-                                  OVERWINTER_VERSION_GROUP_ID : SAPLING_VERSION_GROUP_ID;
-        struct byte_stream txwire;
-        stream_init(&txwire, 128);
-        NETH_CHECK("block legacy: control serializes",
-                   transaction_serialize(&legacy, &txwire));
-        transaction_free(&legacy);
-
-        neth_v6_block_start(&w, 1);
-        stream_write_bytes(&w, txwire.data, txwire.size);
-        stream_write_u8(&w, 0);
-        neth_reader(&r, &w, w.size);
-        block_init(&b);
-        char label[96];
-        snprintf(label, sizeof(label),
-                 "block v%d: legacy decode and trailing behavior unchanged", version);
-        NETH_CHECK(label,
-                   block_deserialize(&b, &r) && b.num_vtx == 1 &&
-                   b.vtx[0].version == version && stream_remaining(&r) == 1 &&
-                   r.read_pos == w.size - 1);
-        struct byte_stream encoded;
-        stream_init(&encoded, 128);
-        NETH_CHECK("block legacy: reserialized bytes unchanged",
-                   transaction_serialize(&b.vtx[0], &encoded) &&
-                   encoded.size == txwire.size &&
-                   memcmp(encoded.data, txwire.data, txwire.size) == 0);
-        stream_free(&encoded);
-        block_free(&b);
-        stream_free(&r);
-        stream_free(&txwire);
-        stream_free(&w);
-    }
-
+         version <= SAPLING_TX_VERSION; ++version)
+        failures += neth_v6_legacy_frame(version);
     return failures;
 }
 
@@ -520,21 +543,26 @@ static bool neth_sha256_is(const unsigned char *data, size_t size,
     return neth_digest_is(digest, expected);
 }
 
-static int neth_case_external_v6_block(void)
+static int neth_v6_candidate_block_identity(const unsigned char *data, size_t size)
 {
     int failures = 0;
-    const char *required_env = getenv("Z23_V6_BLOCK_REQUIRED");
-    bool required = required_env && strcmp(required_env, "1") == 0;
-    if (required_env && !required && strcmp(required_env, "0") != 0)
-        NETH_CHECK("block v6: required mode is 0 or 1", false);
-
-    const char *path = getenv("Z23_V6_BLOCK_CANDIDATE");
-    if (!path || !*path) {
-        if (required)
-            NETH_CHECK("block v6: required candidate path is present", false);
+    NETH_CHECK("block v6: strict H127 candidate is exactly 9882 bytes",
+               size == 9882);
+    bool block_identity = size == 9882 && neth_sha256_is(data, size,
+        "c55c4ccad3b636da48c32c7cc3ac13e96bd3e151e82af16a940ed99d0f2b0d55");
+    NETH_CHECK("block v6: strict H127 whole-block SHA-256 identity",
+               block_identity);
+    if (!block_identity) {
+        free((void *)data);
         return failures;
     }
+    return failures;
+}
 
+static int neth_v6_candidate_load(const char *path, unsigned char **out_data,
+                                  size_t *out_size)
+{
+    int failures = 0;
     FILE *file = fopen(path, "rb");
     NETH_CHECK("block v6: external candidate opens", file != NULL);
     if (!file) return failures;
@@ -563,17 +591,60 @@ static int neth_case_external_v6_block(void)
         return failures;
     }
 
-    NETH_CHECK("block v6: strict H127 candidate is exactly 9882 bytes",
-               size == 9882);
-    bool block_identity = size == 9882 && neth_sha256_is(data, size,
-        "c55c4ccad3b636da48c32c7cc3ac13e96bd3e151e82af16a940ed99d0f2b0d55");
-    NETH_CHECK("block v6: strict H127 whole-block SHA-256 identity",
-               block_identity);
-    if (!block_identity) {
-        free(data);
-        return failures;
-    }
+    failures += neth_v6_candidate_block_identity(data, size);
+    if (failures) return failures;
+    *out_data = data;
+    *out_size = size;
+    return failures;
+}
 
+static int neth_v6_candidate_header_identity(const struct block *b)
+{
+    int failures = 0;
+    struct uint256 parent, merkle, sapling, block_id;
+    uint256_set_hex(&parent,
+        "0538be8be2416c63df63c6319726d805db66e3189df6f8bdbbc4c04caf5cd473");
+    uint256_set_hex(&merkle,
+        "a685e1643c76ab4ee8d8f50a0cf250a72fc9db77da585a5e7ddff11d4a27ce80");
+    uint256_set_hex(&sapling,
+        "6eb10fd1464824132d26de60046cbed6bc1676527cf3965451d1d9f8e278e699");
+    block_get_hash(b, &block_id);
+    NETH_CHECK("block v6: independent H127 header identity",
+               b->header.nSolutionSize == 36 && b->header.nBits == 0x200f0f0f &&
+               uint256_eq(&b->header.hashPrevBlock, &parent) &&
+               uint256_eq(&b->header.hashMerkleRoot, &merkle) &&
+               uint256_eq(&b->header.hashFinalSaplingRoot, &sapling) &&
+               neth_digest_is(block_id.data,
+                   "5c60569e89416a317adf01fb9f1bc90954a2fd25cdfe61975eebe57304ea9d04"));
+    return failures;
+}
+
+static int neth_v6_candidate_transaction_identity(const struct block *b,
+                                                  const unsigned char *data)
+{
+    int failures = 0;
+    struct byte_stream coinbase;
+    stream_init(&coinbase, 128);
+    bool coinbase_encoded = transaction_serialize(&b->vtx[0], &coinbase);
+    NETH_CHECK("block v6: independent H127 transaction identities and bytes",
+               b->vtx[0].version == SAPLING_TX_VERSION &&
+               transaction_is_coinbase(&b->vtx[0]) && coinbase_encoded &&
+               coinbase.size == 82 && memcmp(coinbase.data, data + 178, 82) == 0 &&
+               neth_digest_is(b->vtx[0].hash.data,
+                   "e8fe2b19757b591262f16b445638b26047072db3395e60a02b0656f63c15c7f7") &&
+               b->vtx[1].v6_wire.size == 9622 &&
+               b->vtx[1].v6_wire.data != data + 260 &&
+               memcmp(b->vtx[1].v6_wire.data, data + 260, 9622) == 0 &&
+               neth_sha256_is(b->vtx[1].v6_wire.data, b->vtx[1].v6_wire.size,
+                   "684900bd4595fa07474506a5b6d04b524ff2954877b259a6de6c7da5f4ee2111") &&
+               uint256_is_null(&b->vtx[1].hash));
+    stream_free(&coinbase);
+    return failures;
+}
+
+static int neth_v6_candidate_decode(const unsigned char *data, size_t size)
+{
+    int failures = 0;
     struct byte_stream r;
     stream_init_from_data(&r, data, size);
     struct block b;
@@ -586,45 +657,36 @@ static int neth_case_external_v6_block(void)
     if (!shape) {
         block_free(&b);
         stream_free(&r);
-        free(data);
         return failures;
     }
 
-    struct uint256 parent, merkle, sapling, block_id;
-    uint256_set_hex(&parent,
-        "0538be8be2416c63df63c6319726d805db66e3189df6f8bdbbc4c04caf5cd473");
-    uint256_set_hex(&merkle,
-        "a685e1643c76ab4ee8d8f50a0cf250a72fc9db77da585a5e7ddff11d4a27ce80");
-    uint256_set_hex(&sapling,
-        "6eb10fd1464824132d26de60046cbed6bc1676527cf3965451d1d9f8e278e699");
-    block_get_hash(&b, &block_id);
-    NETH_CHECK("block v6: independent H127 header identity",
-               b.header.nSolutionSize == 36 && b.header.nBits == 0x200f0f0f &&
-               uint256_eq(&b.header.hashPrevBlock, &parent) &&
-               uint256_eq(&b.header.hashMerkleRoot, &merkle) &&
-               uint256_eq(&b.header.hashFinalSaplingRoot, &sapling) &&
-               neth_digest_is(block_id.data,
-                   "5c60569e89416a317adf01fb9f1bc90954a2fd25cdfe61975eebe57304ea9d04"));
-
-    struct byte_stream coinbase;
-    stream_init(&coinbase, 128);
-    bool coinbase_encoded = transaction_serialize(&b.vtx[0], &coinbase);
-    NETH_CHECK("block v6: independent H127 transaction identities and bytes",
-               b.vtx[0].version == SAPLING_TX_VERSION &&
-               transaction_is_coinbase(&b.vtx[0]) && coinbase_encoded &&
-               coinbase.size == 82 && memcmp(coinbase.data, data + 178, 82) == 0 &&
-               neth_digest_is(b.vtx[0].hash.data,
-                   "e8fe2b19757b591262f16b445638b26047072db3395e60a02b0656f63c15c7f7") &&
-               b.vtx[1].v6_wire.size == 9622 &&
-               b.vtx[1].v6_wire.data != data + 260 &&
-               memcmp(b.vtx[1].v6_wire.data, data + 260, 9622) == 0 &&
-               neth_sha256_is(b.vtx[1].v6_wire.data, b.vtx[1].v6_wire.size,
-                   "684900bd4595fa07474506a5b6d04b524ff2954877b259a6de6c7da5f4ee2111") &&
-               uint256_is_null(&b.vtx[1].hash));
-
-    stream_free(&coinbase);
+    failures += neth_v6_candidate_header_identity(&b);
+    failures += neth_v6_candidate_transaction_identity(&b, data);
     block_free(&b);
     stream_free(&r);
+    return failures;
+}
+
+static int neth_case_external_v6_block(void)
+{
+    int failures = 0;
+    const char *required_env = getenv("Z23_V6_BLOCK_REQUIRED");
+    bool required = required_env && strcmp(required_env, "1") == 0;
+    if (required_env && !required && strcmp(required_env, "0") != 0)
+        NETH_CHECK("block v6: required mode is 0 or 1", false);
+
+    const char *path = getenv("Z23_V6_BLOCK_CANDIDATE");
+    if (!path || !*path) {
+        if (required)
+            NETH_CHECK("block v6: required candidate path is present", false);
+        return failures;
+    }
+
+    unsigned char *data = NULL;
+    size_t size = 0;
+    int load_failures = neth_v6_candidate_load(path, &data, &size);
+    if (load_failures) return failures + load_failures;
+    failures += neth_v6_candidate_decode(data, size);
     free(data);
     return failures;
 }
