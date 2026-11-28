@@ -54,6 +54,9 @@
 #include "script/script.h"
 #include "script/standard.h"
 #include "rpc/server.h"
+#include "rpc/client.h"
+#include "services/miner_ballot_template.h"
+#include "services/miner_signal_catalog_pin.h"
 #include "storage/anchor_kv.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
@@ -113,6 +116,8 @@ static int gta_testnet_refusal(const struct tx_destination *dest)
         reducer_frontier_provable_tip_cached() == before;
     printf("generatetoaddress: testnet refuses on-demand mining without a block... %s\n",
            ok ? "OK" : "FAIL");
+    if (!ok) printf("generatetoaddress: testnet reply: %s\n",
+                    result.type == JSON_STR ? json_get_str(&result) : "(non-string)");
     if (!ok) failures++;
     json_free(&params);
     json_free(&result);
@@ -120,6 +125,56 @@ static int gta_testnet_refusal(const struct tx_destination *dest)
     reducer_frontier_provable_tip_reset();
     if (opened) progress_store_close();
     if (dir[0]) test_rm_rf(dir);
+    return failures;
+}
+
+static bool gta_bitmap_case(const struct miner_signal_catalog_pin *pin,
+                            const char *raw, bool accept, uint8_t expected)
+{
+    struct json_value request = {0};
+    uint8_t bits[32] = {0};
+    bool parsed = json_read(&request, raw, strlen(raw));
+    struct zcl_result r = parsed ? miner_ballot_request_bitmap(&request, pin, bits) :
+                                  ZCL_ERR(-1, "fixture JSON invalid");
+    json_free(&request);
+    return parsed && r.ok == accept && (!accept || bits[0] == expected);
+}
+
+static int gta_ballot_parser(void)
+{
+    int failures = 0;
+    struct miner_signal_catalog_pin pin = { .count = 2 };
+    const char *digest = "1111111111111111111111111111111111111111111111111111111111111111";
+    memset(pin.digest, 0x11, sizeof(pin.digest));
+    const char *slots[] = {"[0]", "[0,1]", "[1]"};
+    const uint8_t expected[] = {1, 3, 2};
+    for (size_t i = 0; i < 3; i++) {
+        char raw[160];
+        if (i < 2) snprintf(raw, sizeof(raw), "{\"catalog\":\"%s\",\"slots\":%s}", digest, slots[i]);
+        else snprintf(raw, sizeof(raw), "%s", slots[i]);
+        bool ok = gta_bitmap_case(&pin, raw, true, expected[i]);
+        printf("generatetoaddress: ballot bitmap %s... %s\n", slots[i], ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    const char *bad[] = {
+        "42", "{\"catalog\":\"1111111111111111111111111111111111111111111111111111111111111111\"}",
+        "{\"catalog\":\"ABC\",\"slots\":[0]}",
+        "{\"catalog\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"slots\":[0]}",
+        "[2]", "[0,0]", "[1.5]"
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        bool ok = gta_bitmap_case(&pin, bad[i], false, 0);
+        printf("generatetoaddress: invalid ballot %zu... %s\n", i, ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    const char *args[] = {"1", "address", "{\"slots\":[0]}"};
+    struct json_value converted = {0};
+    bool ok = rpc_convert_values("generatetoaddress", args, 3, &converted) &&
+        json_at(&converted, 0)->type == JSON_INT && json_at(&converted, 1)->type == JSON_STR &&
+        json_at(&converted, 2)->type == JSON_OBJ;
+    printf("generatetoaddress: client converts count and ballot... %s\n", ok ? "OK" : "FAIL");
+    if (!ok) failures++;
+    json_free(&converted);
     return failures;
 }
 
@@ -491,6 +546,7 @@ int test_generatetoaddress(void)
     char mainnet_addr[128] = {0};
     bool main_encoded = gta_encode(&want, mainnet_addr, sizeof(mainnet_addr));
     failures += gta_testnet_refusal(&want);
+    failures += gta_ballot_parser();
 
     /* ── (0) the gate itself: generatetoaddress, the regtest wallet-projection
      * feed in tip_finalize_post_step and wallet_advance_confirmations sit

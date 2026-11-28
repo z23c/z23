@@ -385,6 +385,9 @@ int test_sovereignty_guard(void)
             int before = reducer_frontier_provable_tip_cached();
             bool refused = parsed && !rpc_table_execute(&tbl, "generatetoaddress",
                                                          &mining_params, &mining_result);
+            if (!refused || !sg_rpc_body_has(&mining_result, "release_assisted"))
+                printf("  sovereignty_guard: generatetoaddress reply: %s\n",
+                       mining_result.type == JSON_STR ? json_get_str(&mining_result) : "(non-string)");
             SG_CHECK("borrowed: generatetoaddress refuses without a block",
                      refused && sg_rpc_body_has(&mining_result, "release_assisted") &&
                      reducer_frontier_provable_tip_cached() == before);

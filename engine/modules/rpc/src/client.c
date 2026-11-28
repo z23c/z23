@@ -25,6 +25,8 @@ static const struct convert_param convert_table[] = {
     { "setgenerate", 0 },
     { "setgenerate", 1 },
     { "generate", 0 },
+    { "generatetoaddress", 0 },
+    { "generatetoaddress", 2 },
     { "getnetworkhashps", 0 },
     { "getnetworkhashps", 1 },
     { "getnetworksolps", 0 },

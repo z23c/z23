@@ -9,7 +9,10 @@
 struct block;
 struct chain_params;
 struct block_template;
-
+struct json_value;
+struct miner_signal_catalog_pin;
+struct zcl_result miner_ballot_request_bitmap(const struct json_value *request,
+    const struct miner_signal_catalog_pin *pin, uint8_t bits[32]);
 /* Append a final zero-value ballot output to an UNSOLVED, caller-owned block.
  * Mining limit is 1..MAX_BLOCK_SIZE inclusive. The entire block is
  * canonically serialized into a fixed-capacity buffer with the selected

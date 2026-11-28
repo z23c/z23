@@ -2,6 +2,9 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "services/miner_ballot_template.h"
 #include "services/miner_signal_round.h"
+#include "services/miner_signal_catalog_pin.h"
+#include "base/hex.h"
+#include "json/json.h"
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
 #include "core/serialize.h"
@@ -18,6 +21,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+static struct zcl_result mining_slot_bitmap(const struct json_value *list, size_t slots,
+                                            uint8_t bits[32])
+{
+    if (list->type != JSON_ARR || json_size(list) > slots)
+        return ZCL_ERR(-1, "ballotslots must be a list of distinct pinned slots");
+    for (size_t i = 0; i < json_size(list); ++i) {
+        const struct json_value *v = json_at(list, i);
+        if (!v || v->type != JSON_INT) return ZCL_ERR(-1, "Expected an integer ballot slot");
+        int64_t n = json_get_int(v);
+        if (n < 0 || (uint64_t)n >= slots) return ZCL_ERR(-1, "Slot outside pinned catalog");
+        size_t byte = (size_t)n / 8;
+        uint8_t mask = (uint8_t)(1u << ((unsigned)n % 8));
+        if (bits[byte] & mask) return ZCL_ERR(-1, "Repeated ballot slot");
+        bits[byte] |= mask;
+    }
+    return ZCL_OK;
+}
+struct zcl_result miner_ballot_request_bitmap(const struct json_value *request,
+    const struct miner_signal_catalog_pin *pin, uint8_t bits[32])
+{
+    if (request->type != JSON_OBJ)
+        return mining_slot_bitmap(request, pin->count, bits);
+    const struct json_value *slots = json_get(request, "slots");
+    const char *catalog = json_get_str(json_get(request, "catalog"));
+    uint8_t expected[32];
+    if (json_size(request) != 2 || !slots ||
+        !zcl_hex_decode_lower(catalog, expected, sizeof(expected)))
+        return ZCL_ERR(-1, "Expected ballotslots object with lowercase catalog digest and slots list");
+    if (memcmp(expected, pin->digest, sizeof(expected)))
+        return ZCL_ERR(-1, "Requested ballot catalog differs from node pin");
+    return mining_slot_bitmap(slots, pin->count, bits);
+}
 static struct zcl_result ballot_append(struct transaction *cb,
                                         const uint8_t catalog[32],
                                         const uint8_t bitmap[32])

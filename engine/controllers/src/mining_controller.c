@@ -375,8 +375,11 @@ static bool mining_on_demand_allowed(const char *rpc_name,
  * ONLY difference between the two RPCs is which script the subsidy pays to.
  *
  * Caller must have passed mining_on_demand_allowed() first. */
+static struct zcl_result mining_template_ballot(const struct json_value *list,
+    struct block *block, const struct chain_params *cp, int height, size_t limit);
 static bool mining_generate_to_script(const struct script *coinbase_script,
                                       int64_t num_blocks,
+                                      const struct json_value *ballot_request,
                                       struct json_value *result)
 {
     const struct chain_params *cp = chain_params_get();
@@ -386,9 +389,17 @@ static bool mining_generate_to_script(const struct script *coinbase_script,
     for (int64_t i = 0; i < num_blocks; i++) {
         struct mining_template_parent parent;
         const char *reason;
-        struct block_template *tmpl = mining_create_template(coinbase_script, cp, &parent, &reason, false);
+        struct block_template *tmpl = mining_create_template(coinbase_script, cp, &parent, &reason, ballot_request != NULL);
         if (!tmpl) {
             json_set_str(result, reason);
+            return false;
+        }
+        struct zcl_result ballot = mining_template_ballot(ballot_request, &tmpl->block, cp,
+                                                           parent.height, parent.ballot_limit);
+        if (!ballot.ok) {
+            block_template_free(tmpl);
+            free(tmpl);
+            json_set_str(result, ballot.message);
             return false;
         }
         unsigned int extra_nonce = 0;
@@ -470,14 +481,14 @@ static bool rpc_generate(const struct json_value *params, bool help,
     script_init(&coinbase_script);
     coinbase_script.size = 0;
 
-    return mining_generate_to_script(&coinbase_script, num_blocks, result);
+    return mining_generate_to_script(&coinbase_script, num_blocks, NULL, result);
 }
 
 static bool rpc_generatetoaddress(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
     RPC_HELP(help, result,
-        "generatetoaddress numblocks \"address\"\n"
+        "generatetoaddress numblocks \"address\" ( ballotslots )\n"
         "Mine blocks immediately, paying each coinbase to address (regtest only).\n"
         "Unlike generate, the subsidy lands on a real scriptPubKey, so the\n"
         "coinbase output is spendable once it is COINBASE_MATURITY (100)\n"
@@ -485,6 +496,7 @@ static bool rpc_generatetoaddress(const struct json_value *params, bool help,
         "Arguments:\n"
         "1. numblocks (numeric, required) How many blocks to generate\n"
         "2. \"address\" (string, required) Transparent address to pay\n"
+        "3. ballotslots (optional) Signal slots in the pinned catalog.\n"
         "Result:\n"
         "[ \"blockhash\", ... ]  hashes of the blocks that were accepted");
 
@@ -535,7 +547,7 @@ static bool rpc_generatetoaddress(const struct json_value *params, bool help,
                  "produced an empty script (dest type %d)", (int)dest.type);
     }
 
-    return mining_generate_to_script(&coinbase_script, num_blocks, result);
+    return mining_generate_to_script(&coinbase_script, num_blocks, json_at(params, 2), result);
 }
 
 static bool rpc_submitblock(const struct json_value *params, bool help,
@@ -613,45 +625,9 @@ static bool rpc_submitblock(const struct json_value *params, bool help,
     return true;
 }
 
-static struct zcl_result mining_slot_bitmap(const struct json_value *list, size_t slots,
-                                            uint8_t bits[32])
-{
-    if (list->type != JSON_ARR || json_size(list) > slots)
-        return ZCL_ERR(-1, "ballotslots must be a list of distinct pinned slots");
-    for (size_t i = 0; i < json_size(list); ++i) {
-        const struct json_value *v = json_at(list, i);
-        if (!v || v->type != JSON_INT) return ZCL_ERR(-1, "Expected an integer ballot slot");
-        int64_t n = json_get_int(v);
-        if (n < 0 || (uint64_t)n >= slots) return ZCL_ERR(-1, "Slot outside pinned catalog");
-        size_t byte = (size_t)n / 8;
-        uint8_t mask = (uint8_t)(1u << ((unsigned)n % 8));
-        if (bits[byte] & mask) return ZCL_ERR(-1, "Repeated ballot slot");
-        bits[byte] |= mask;
-    }
-    return ZCL_OK;
-}
-
-static struct zcl_result mining_requested_bitmap(const struct json_value *request,
-    const struct miner_signal_catalog_pin *pin, uint8_t bits[32])
-{
-    if (request->type != JSON_OBJ)
-        return mining_slot_bitmap(request, pin->count, bits);
-
-    const struct json_value *slots = json_get(request, "slots");
-    const char *catalog = json_get_str(json_get(request, "catalog"));
-    uint8_t expected[32];
-    if (json_size(request) != 2 || !slots ||
-        !zcl_hex_decode_lower(catalog, expected, sizeof(expected)))
-        return ZCL_ERR(-1, "Expected ballotslots object with lowercase catalog digest and slots list");
-    if (memcmp(expected, pin->digest, sizeof(expected)))
-        return ZCL_ERR(-1, "Requested ballot catalog differs from node pin");
-    return mining_slot_bitmap(slots, pin->count, bits);
-}
-
-static struct zcl_result mining_template_ballot(const struct json_value *params,
+static struct zcl_result mining_template_ballot(const struct json_value *list,
     struct block *block, const struct chain_params *cp, int height, size_t limit)
 {
-    const struct json_value *list = json_get(json_at(params, 0), "ballotslots");
     if (!list) return ZCL_OK;
     if (!ballot_network_eligible(cp))
         return ZCL_ERR(-1, "Template ballots require testnet, regtest or the selected research profile");
@@ -661,7 +637,7 @@ static struct zcl_result mining_template_ballot(const struct json_value *params,
     if (height < pin->start || (int64_t)height >= (int64_t)pin->start + pin->window)
         return ZCL_ERR(-1, "Template height outside the pinned voting window");
     uint8_t bits[32] = {0};
-    struct zcl_result r = mining_requested_bitmap(list, pin, bits);
+    struct zcl_result r = miner_ballot_request_bitmap(list, pin, bits);
     if (!r.ok) return r;
     size_t reserved_size;
     return miner_ballot_template_apply(block, pin->digest, bits, cp, height,
@@ -760,7 +736,7 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
         return false;
     }
 
-    struct zcl_result ballot = mining_template_ballot(params, &tmpl->block, cp, parent.height,
+    struct zcl_result ballot = mining_template_ballot(json_get(json_at(params, 0), "ballotslots"), &tmpl->block, cp, parent.height,
                                                        parent.ballot_limit);
     if (!ballot.ok) {
         block_template_free(tmpl);
