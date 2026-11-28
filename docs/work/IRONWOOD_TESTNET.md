@@ -52,6 +52,12 @@ A node profile needs an explicit startup selector, a separate base datadir and w
 <!-- claim: symbol-present boot_step_select_chain_and_datadir engine/composition/src/boot.c # compiled startup network selection -->
 <!-- claim: symbol-present get_sha3_utxo_checkpoint core/chainparams/src/checkpoints.c # compiled checkpoint provider -->
 
+## First private ballot selection
+
+Miners on the private research network continue mining with Equihash (48,5). Slot 0 proposes an inclusive 200,000-byte limit on the serialized block. Slot 1 proposes freezing new net deposits into Sapling. Miners signal each proposal separately in the coinbase. In the 20-block qualification window, a slot needs at least 19 votes. Test both 19/18 and 18/19 outcomes.
+
+Before choosing a deployment schedule, verify the 200,000/200,001-byte boundary with mined blocks, spend a mature protected mining reward, confirm withdrawals during the freeze and replay a fork that changes the decisive vote.
+
 ## Example ballot round
 
 The [signaling catalog](MINER_SIGNALING.md) uses the raw genesis hash and a separate fork ID. For this example use SHA3-256 of ASCII `Z23/Ironwood/testnet/experimental-round/v1` without a terminator. The fork ID is `0470426015683b2d25ae8014a684975fa4841720b848c22457ee8f510a1ab718`. Hash the exact proposal file bytes at revision `223f48c5fb361f2a0024909fc75cb557bd1c7e37` with SHA3-256 for the two rule revisions below.
@@ -61,4 +67,4 @@ The [signaling catalog](MINER_SIGNALING.md) uses the raw genesis hash and a sepa
 | 0 | [Block size](BLOCK_SIZE_UPGRADE.md) | `6768eafc3e43a946ac945bdec839f5cdc751e6be73570b53b6101b65616fa286` | 23 |
 | 1 | [Sapling deposits](SAPLING_DEPOSIT_UPGRADE.md) | `dd9a28179af68e0e8b65831cca98d73c398da03ae66cc0e50f0f810904a664e8` | 24 |
 
-Voting at heights 1 through 20 yields the v1 catalog digest `a2eebcca533c2173cea136af4085fe50d7523b5e0d70b2d895ba0b106f70ff73`. Signal both slots at heights 1–18, only slot 0 at 19, and abstain at 20. On this branch the expected tally is 19 and 18. Slot 0 locks in for blocks 21 and 22 and first reports active for block 23. Slot 1 expires. These heights are test inputs. Adopting the block cap, preserving protected rewards and withdrawals during a deposit freeze, and selecting any new proof of work each require separate decisions.
+Voting at heights 1 through 20 yields the v1 catalog digest `a2eebcca533c2173cea136af4085fe50d7523b5e0d70b2d895ba0b106f70ff73`. Signal both slots at heights 1–18, only slot 0 at 19, and abstain at 20. On this branch the expected tally is 19 and 18. Slot 0 locks in for blocks 21 and 22 and first reports active for block 23. Slot 1 expires. These heights are test inputs. Selecting any new proof of work requires a separate decision.
