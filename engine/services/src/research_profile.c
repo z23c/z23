@@ -4,6 +4,7 @@
 #include "services/research_profile.h"
 
 #include "base/hex.h"
+#include "base/serialize_le.h"
 #include "crypto/sha256.h"
 #include "sha3/sha3.h"
 
@@ -24,10 +25,8 @@ static void profile_sha256d(const uint8_t *data, size_t len, uint8_t out[32])
 
 static void profile_u32(struct sha3_256_ctx *ctx, uint32_t value)
 {
-    uint8_t bytes[4] = {
-        (uint8_t)value, (uint8_t)(value >> 8),
-        (uint8_t)(value >> 16), (uint8_t)(value >> 24)
-    };
+    uint8_t bytes[4];
+    zcl_write_u32_le(bytes, value);
     sha3_256_write(ctx, bytes, sizeof(bytes));
 }
 
@@ -189,10 +188,7 @@ struct zcl_result research_profile_solve_child(const struct research_profile_ide
     child.compact_target = compact_target;
     for (uint32_t n = 0; n < 1000000u; ++n) {
         int pow_ok = 0;
-        child.nonce[0] = (uint8_t)n;
-        child.nonce[1] = (uint8_t)(n >> 8);
-        child.nonce[2] = (uint8_t)(n >> 16);
-        child.nonce[3] = (uint8_t)(n >> 24);
+        zcl_write_u32_le(child.nonce, n);
         struct zcl_result accepted = research_profile_accept_child(id, &child, &pow_ok);
         if (accepted.ok) {
             *out = child;

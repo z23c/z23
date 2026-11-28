@@ -1,5 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 /* purpose: Bind one research profile to its baseline, schedule, and genesis. */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #ifndef ZCL_SERVICES_RESEARCH_PROFILE_H
 #define ZCL_SERVICES_RESEARCH_PROFILE_H
 
