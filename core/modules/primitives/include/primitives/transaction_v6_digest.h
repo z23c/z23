@@ -10,6 +10,7 @@ struct v6_digests {
     uint8_t sapling_effect[32], sapling_auth[32];
     uint8_t orchard_effect[32], orchard_auth[32];
     uint8_t ironwood_effect[32], ironwood_auth[32];
+    uint8_t header_effect[32], transparent_effect[32];
 };
 /* View must come from a successful parse and its borrowed bytes stay immutable.
  * Structural inspection only: this does not verify signatures or proofs. */

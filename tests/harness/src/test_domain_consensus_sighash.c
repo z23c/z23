@@ -29,9 +29,14 @@
 #include "domain/consensus/sighash.h"
 #include "validation/sighash.h"
 
+#include "base/hex.h"
+#include "base/serialize_le.h"
 #include "core/hash.h"
+#include "core/serialize.h"
 #include "core/uint256.h"
 #include "primitives/transaction.h"
+#include "primitives/transaction_v6_decode.h"
+#include "primitives/transaction_v6_sighash.h"
 #include "script/script.h"
 #include "script/sighashtype.h"
 #include "util/safe_alloc.h"
@@ -638,6 +643,404 @@ static bool dcs_sprout_refused(unsigned int n_vout, unsigned int nin,
     return rejected && memcmp(result.data, before, sizeof(before)) == 0;
 }
 
+static bool dcs_v6_build_shaped(struct transaction *tx, size_t inputs,
+                                size_t outputs, bool coinbase)
+{
+    static const uint8_t header[20] = {
+        6, 0, 0, 0x80, 0x98, 0xb6, 0x84, 0xd8,
+        0x5b, 0x16, 0xa5, 0x37, 0x44, 0x33, 0x22, 0x11,
+        0x08, 0x07, 0x06, 0x05
+    };
+    struct byte_stream wire;
+    stream_init(&wire, 256 + inputs * 64 + outputs * 32);
+    bool ok = stream_write_bytes(&wire, header, sizeof header);
+    ok = stream_write_compact_size(&wire, inputs) && ok;
+    for (size_t i = 0; i < inputs; ++i) {
+        struct tx_in in;
+        tx_in_init(&in);
+        if (coinbase && i == 0) {
+            outpoint_set_null(&in.prevout);
+        } else {
+            memset(in.prevout.hash.data, (int)(i + 1), sizeof in.prevout.hash.data);
+            in.prevout.n = (uint32_t)i;
+        }
+        in.sequence = 100 + (uint32_t)i;
+        ok = tx_in_serialize(&in, &wire) && ok;
+    }
+    ok = stream_write_compact_size(&wire, outputs) && ok;
+    for (size_t i = 0; i < outputs; ++i) {
+        struct tx_out out;
+        tx_out_set_null(&out);
+        out.value = 1000 + (int64_t)i;
+        out.script_pub_key.data[0] = 0x51;
+        out.script_pub_key.size = 1;
+        ok = tx_out_serialize(&out, &wire) && ok;
+    }
+    for (size_t i = 0; i < 4; ++i)
+        ok = stream_write_compact_size(&wire, 0) && ok;
+    struct byte_stream input;
+    stream_init_from_data(&input, wire.data, wire.size);
+    ok = transaction_v6_decode_prefix(tx, &input, wire.size) &&
+        input.read_pos == wire.size && ok;
+    stream_free(&wire);
+    return ok;
+}
+
+static bool dcs_v6_build(struct transaction *tx, size_t inputs, size_t outputs)
+{
+    return dcs_v6_build_shaped(tx, inputs, outputs, false);
+}
+
+static bool dcs_v6_build_coinbase(struct transaction *tx)
+{
+    return dcs_v6_build_shaped(tx, 1, 0, true);
+}
+
+static bool dcs_v6_rejected(const struct transaction *tx, unsigned int n_in,
+    uint32_t raw_type, const struct script *script_code, int64_t amount,
+    uint32_t branch, const struct domain_consensus_precomputed_tx_data *cache)
+{
+    struct sighash_type hash_type = { .raw = raw_type };
+    struct uint256 result;
+    memset(result.data, 0xa5, sizeof result.data);
+    bool ok = domain_consensus_signature_hash(script_code, tx, n_in, hash_type,
+                                               amount, branch, cache, &result);
+    if (ok) return false;
+    for (size_t i = 0; i < sizeof result.data; ++i)
+        if (result.data[i] != 0xa5) return false;
+    return true;
+}
+
+static void dcs_v6_one_byte_script(struct script *script)
+{
+    uint8_t code[] = {0x52, 0x53};
+    script_set(script, code, sizeof code);
+}
+
+static bool dcs_v6_one_input_semantics(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_build(&tx, 1, 1)) return false;
+    struct script script;
+    dcs_v6_one_byte_script(&script);
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    static const uint32_t types[] = {
+        SIGHASH_ALL, SIGHASH_NONE, SIGHASH_SINGLE,
+        SIGHASH_ALL | SIGHASH_ANYONECANPAY,
+        SIGHASH_NONE | SIGHASH_ANYONECANPAY,
+        SIGHASH_SINGLE | SIGHASH_ANYONECANPAY
+    };
+    bool ok = true;
+    struct uint256 previous = {0};
+    for (size_t i = 0; i < sizeof types / sizeof types[0]; ++i) {
+        struct sighash_type hash_type = { .raw = types[i] };
+        struct uint256 current = {0};
+        ok = domain_consensus_signature_hash(&script, &tx, 0, hash_type, 5000,
+                                              branch, NULL, &current) && ok;
+        if (i) ok = !uint256_eq(&previous, &current) && ok;
+        previous = current;
+    }
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    struct uint256 base = {0}, changed = {0};
+    ok = domain_consensus_signature_hash(&script, &tx, 0, all, 5000,
+                                          branch, NULL, &base) && ok;
+    ok = domain_consensus_signature_hash(&script, &tx, 0, all, 5001,
+                                          branch, NULL, &changed) && ok;
+    ok = !uint256_eq(&base, &changed) && ok;
+    transaction_free(&tx);
+    return ok;
+}
+
+static bool dcs_v6_rejection_semantics(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_build(&tx, 1, 1)) return false;
+    struct script script;
+    dcs_v6_one_byte_script(&script);
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    struct domain_consensus_precomputed_tx_data cache = {0};
+    bool ok = dcs_v6_rejected(&tx, 0, SIGHASH_ALL, &script, 5000, branch, &cache);
+    ok = dcs_v6_rejected(&tx, 0, SIGHASH_ALL, &script, 5000, branch ^ 1, NULL) && ok;
+    ok = dcs_v6_rejected(&tx, 0, 4, &script, 5000, branch, NULL) && ok;
+    ok = dcs_v6_rejected(&tx, 1, SIGHASH_ALL, &script, 5000, branch, NULL) && ok;
+    ok = dcs_v6_rejected(&tx, 0, SIGHASH_ALL, NULL, 5000, branch, NULL) && ok;
+    ok = dcs_v6_rejected(&tx, NOT_AN_INPUT, SIGHASH_ALL, NULL, 0, branch, NULL) && ok;
+    transaction_free(&tx);
+    return ok;
+}
+
+static bool dcs_v6_multi_input_semantics(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_build(&tx, 2, 2)) return false;
+    struct script script;
+    dcs_v6_one_byte_script(&script);
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    bool ok = dcs_v6_rejected(&tx, 1, SIGHASH_ALL, &script, 5000, branch, NULL);
+    struct sighash_type all_acp = { .raw = SIGHASH_ALL | SIGHASH_ANYONECANPAY };
+    struct uint256 first = {0}, changed = {0};
+    ok = domain_consensus_signature_hash(&script, &tx, 1, all_acp, 5000,
+                                          branch, NULL, &first) && ok;
+    ok = domain_consensus_signature_hash(&script, &tx, 1, all_acp, 5001,
+                                          branch, NULL, &changed) && ok;
+    ok = !uint256_eq(&first, &changed) && ok;
+    struct sighash_type single_acp = { .raw = SIGHASH_SINGLE | SIGHASH_ANYONECANPAY };
+    ok = domain_consensus_signature_hash(&script, &tx, 1, single_acp, 5000,
+                                          branch, NULL, &changed) && ok;
+    transaction_free(&tx);
+    if (!dcs_v6_build(&tx, 2, 1)) return false;
+    branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    ok = dcs_v6_rejected(&tx, 1, SIGHASH_SINGLE | SIGHASH_ANYONECANPAY,
+                         &script, 5000, branch, NULL) && ok;
+    ok = domain_consensus_signature_hash(&script, &tx, 1, all_acp, 5000,
+                                          branch, NULL, &changed) && ok;
+    transaction_free(&tx);
+    return ok;
+}
+
+static bool dcs_v6_external_hash(const struct transaction *tx, uint32_t branch,
+                                 const struct uint256 *want)
+{
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    struct uint256 got;
+    if (!domain_consensus_signature_hash(NULL, tx, NOT_AN_INPUT, all, 0,
+                                          branch, NULL, &got) ||
+        !uint256_eq(&got, want)) return false;
+    return domain_consensus_signature_hash(NULL, tx, NOT_AN_INPUT, all, 1,
+                                            branch, NULL, &got) &&
+        uint256_eq(&got, want);
+}
+
+static bool dcs_v6_external_rejections(const struct transaction *tx, uint32_t branch)
+{
+    bool ok = dcs_v6_rejected(tx, NOT_AN_INPUT, SIGHASH_ALL, NULL, 0,
+                              branch ^ 1, NULL);
+    ok = dcs_v6_rejected(tx, NOT_AN_INPUT, SIGHASH_NONE, NULL, 0,
+                         branch, NULL) && ok;
+    return dcs_v6_rejected(tx, 0, SIGHASH_ALL, NULL, 0, branch, NULL) && ok;
+}
+
+static bool dcs_v6_external_vector(const char *path, size_t offset, size_t size,
+                                   const char expected[65])
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    bool sized = fseek(file, 0, SEEK_END) == 0 && ftell(file) == (long)(offset + size) &&
+        fseek(file, (long)offset, SEEK_SET) == 0;
+    uint8_t *bytes = sized ? zcl_malloc(size, "dcsh_v6_fixture") : NULL;
+    bool read = bytes && fread(bytes, 1, size, file) == size;
+    if (fclose(file) != 0) read = false;
+    if (!read) {
+        free(bytes);
+        return false;
+    }
+    struct byte_stream input;
+    stream_init_from_data(&input, bytes, size);
+    struct transaction tx;
+    bool decoded = transaction_v6_decode_prefix(&tx, &input, size) &&
+        input.read_pos == size;
+    uint32_t branch = decoded ? zcl_read_u32_le(tx.v6_wire.data + 8) : 0;
+    struct uint256 want;
+    bool hash_ok = decoded && zcl_hex_decode(expected, want.data, sizeof want.data) &&
+        dcs_v6_external_hash(&tx, branch, &want);
+    bool reject_ok = dcs_v6_external_rejections(&tx, branch);
+    bool ok = hash_ok && reject_ok;
+    transaction_free(&tx);
+    free(bytes);
+    return ok;
+}
+
+static bool dcs_v6_external_vectors(const char *strict, const char *reopened)
+{
+    bool ok = true;
+    if (strict)
+        ok = dcs_v6_external_vector(strict, 260, 9622,
+            "90476992185941451c416c1e14e8affb610bd606b1b5b8e1e67daec62e8f4535") && ok;
+    if (reopened)
+        ok = dcs_v6_external_vector(reopened, 0, 9166,
+            "70b8443c3aa18e897435a3ec382e3f5076693cf37ecb8a82d71aca2d7efac02b") && ok;
+    return ok;
+}
+
+static bool dcs_v6_primitive_rejected(const struct transaction *tx,
+    const struct transaction_v6_prevout *prevouts, size_t prevout_count,
+    unsigned int n_in, const struct script *script_code, int64_t amount,
+    uint32_t branch)
+{
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    struct uint256 result;
+    memset(result.data, 0xa5, sizeof result.data);
+    if (transaction_v6_sighash(tx, prevouts, prevout_count, n_in, all,
+                               script_code, amount, branch, &result)) return false;
+    for (size_t i = 0; i < sizeof result.data; ++i)
+        if (result.data[i] != 0xa5) return false;
+    return true;
+}
+
+static bool dcs_v6_coinbase_sighash(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_build_coinbase(&tx)) return false;
+    memset(tx.vin[0].prevout.hash.data, 0x5a, sizeof tx.vin[0].prevout.hash.data);
+    tx.vin[0].prevout.n = 0;
+    if (outpoint_is_null(&tx.vin[0].prevout)) return false;
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    struct uint256 domain, primitive;
+    bool ok = domain_consensus_signature_hash(NULL, &tx, NOT_AN_INPUT, all, 0,
+                                               branch, NULL, &domain) &&
+        transaction_v6_sighash(&tx, NULL, 0, NOT_AN_INPUT, all, NULL, 0,
+                               branch, &primitive) &&
+        uint256_eq(&domain, &tx.hash) && uint256_eq(&primitive, &tx.hash);
+    transaction_free(&tx);
+    return ok;
+}
+
+static bool dcs_v6_independent_tx(struct transaction *tx)
+{
+    static const char wire_hex[] =
+        "0600008098b684d85b16a537000000000000000001"
+        "0101010101010101010101010101010101010101010101010101010101010101"
+        "0100000000feffffff0000000000";
+    uint8_t wire[(sizeof wire_hex - 1) / 2];
+    if (!zcl_hex_decode(wire_hex, wire, sizeof wire)) return false;
+    struct byte_stream input;
+    stream_init_from_data(&input, wire, sizeof wire);
+    return transaction_v6_decode_prefix(tx, &input, sizeof wire) &&
+        input.read_pos == sizeof wire;
+}
+
+static bool dcs_v6_independent_scripts(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_independent_tx(&tx)) return false;
+    uint8_t code[] = {0x51};
+    struct script current;
+    script_set(&current, code, sizeof code);
+    struct transaction_v6_prevout prev = {
+        .amount = 123456, .script = current.data, .script_size = current.size
+    };
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    struct uint256 got, want;
+    bool ok = zcl_hex_decode(
+        "108db092f0363d0685a3e3ef538b5b295ad1d403549bcff1438e719f6cdb3661",
+        want.data, sizeof want.data) &&
+        transaction_v6_sighash(&tx, &prev, 1, NOT_AN_INPUT, all, NULL, 0,
+                               branch, &got) && uint256_eq(&got, &want);
+    uint8_t long_bytes[253];
+    memset(long_bytes, 0x51, sizeof long_bytes);
+    script_set(&current, long_bytes, sizeof long_bytes);
+    prev.script = current.data;
+    prev.script_size = current.size;
+    ok = zcl_hex_decode(
+        "2fc76bb0b0afb6c9c5d0984d7041ff7f6e968e1886f362da14a95fc853441be3",
+        want.data, sizeof want.data) &&
+        transaction_v6_sighash(&tx, &prev, 1, NOT_AN_INPUT, all, NULL, 0,
+                               branch, &got) && uint256_eq(&got, &want) && ok;
+    transaction_free(&tx);
+    return ok;
+}
+
+static bool dcs_v6_amount_and_script_bounds(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_independent_tx(&tx)) return false;
+    uint8_t code[] = {0x51};
+    struct script current;
+    script_set(&current, code, sizeof code);
+    struct transaction_v6_prevout prev = {
+        .amount = 123456, .script = current.data, .script_size = current.size
+    };
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    bool ok = dcs_v6_primitive_rejected(&tx, NULL, 0, 0, &current, 123456, branch);
+    prev.amount = MAX_MONEY + 1;
+    ok = dcs_v6_primitive_rejected(&tx, &prev, 1, 0, &current,
+                                   prev.amount, branch) && ok;
+    prev.amount = -1;
+    ok = dcs_v6_primitive_rejected(&tx, &prev, 1, 0, &current,
+                                   prev.amount, branch) && ok;
+    prev.amount = MAX_MONEY;
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    struct uint256 got;
+    ok = transaction_v6_sighash(&tx, &prev, 1, 0, all, &current,
+                                prev.amount, branch, &got) && ok;
+    prev.amount = 123456;
+    prev.script = NULL;
+    ok = dcs_v6_primitive_rejected(&tx, &prev, 1, 0, &current,
+                                   prev.amount, branch) && ok;
+    prev.script = current.data;
+    prev.script_size = MAX_SCRIPT_SIZE + 1;
+    current.size = MAX_SCRIPT_SIZE + 1;
+    ok = dcs_v6_primitive_rejected(&tx, &prev, 1, 0, &current,
+                                   prev.amount, branch) && ok;
+    transaction_free(&tx);
+    return ok;
+}
+
+static bool dcs_v6_full_prevout_multi(void)
+{
+    struct transaction tx;
+    if (!dcs_v6_build(&tx, 2, 2)) return false;
+    struct script current;
+    dcs_v6_one_byte_script(&current);
+    struct transaction_v6_prevout prev[2];
+    for (size_t i = 0; i < 2; ++i) {
+        prev[i].amount = 5000 + (int64_t)i;
+        prev[i].script = current.data;
+        prev[i].script_size = current.size;
+    }
+    uint32_t branch = zcl_read_u32_le(tx.v6_wire.data + 8);
+    struct sighash_type all = { .raw = SIGHASH_ALL };
+    struct uint256 first, second;
+    bool ok = transaction_v6_sighash(&tx, prev, 2, 0, all, &current, 5000,
+                                     branch, &first) &&
+        transaction_v6_sighash(&tx, prev, 2, 1, all, &current, 5001,
+                               branch, &second) && !uint256_eq(&first, &second);
+    prev[1].amount = 5002;
+    ok = dcs_v6_primitive_rejected(&tx, prev, 2, 1, &current, 5001, branch) && ok;
+    prev[1].amount = 5001;
+    prev[0].amount = -1;
+    ok = dcs_v6_primitive_rejected(&tx, prev, 2, 1, &current, 5001, branch) && ok;
+    transaction_free(&tx);
+    return ok;
+}
+
+static int dcs_v6_tests(void)
+{
+    int failures = 0;
+    {
+        struct transaction tx;
+        memset(&tx, 0, sizeof(tx));
+        tx.overwintered = true;
+        tx.version = IRONWOOD_TX_VERSION;
+        tx.version_group_id = IRONWOOD_VERSION_GROUP_ID;
+        DCS_CHECK("version: ironwood v6",
+                  domain_consensus_signature_hash_version(&tx) ==
+                      DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD);
+    }
+    DCS_CHECK("v6 ZIP 244 one-input hash types and amount",
+              dcs_v6_one_input_semantics());
+    DCS_CHECK("v6 ZIP 244 changed-call refusals",
+              dcs_v6_rejection_semantics());
+    DCS_CHECK("v6 ZIP 244 multi-input ACP and context refusals",
+              dcs_v6_multi_input_semantics());
+    DCS_CHECK("v6 ZIP 244 coinbase uses txid without prevouts",
+              dcs_v6_coinbase_sighash());
+    DCS_CHECK("v6 ZIP 244 independent one-input and 253-byte scripts",
+              dcs_v6_independent_scripts());
+    DCS_CHECK("v6 ZIP 244 amount and script bounds leave result untouched",
+              dcs_v6_amount_and_script_bounds());
+    DCS_CHECK("v6 ZIP 244 full-prevout multi-input primitive",
+              dcs_v6_full_prevout_multi());
+    const char *strict = getenv("Z23_V6_BLOCK_CANDIDATE");
+    const char *reopened = getenv("Z23_V6_REOPENED_CANDIDATE");
+    if (strict || reopened)
+        DCS_CHECK("v6 ZIP 244 independent strict and reopened vectors",
+                  dcs_v6_external_vectors(strict, reopened));
+    return failures;
+}
+
 int test_domain_consensus_sighash(void)
 {
     int failures = 0;
@@ -900,6 +1303,8 @@ int test_domain_consensus_sighash(void)
               dcs_sprout_refused(2, 2, SIGHASH_ALL));
     DCS_CHECK("sprout ALL|ACP nIn far out of range refused",
               dcs_sprout_refused(2, 7, SIGHASH_ALL | SIGHASH_ANYONECANPAY));
+
+    failures += dcs_v6_tests();
 
     return failures;
 }

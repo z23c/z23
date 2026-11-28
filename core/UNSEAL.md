@@ -1350,3 +1350,7 @@ later lane flips it HARD.
 - 2026-11-28T06:26:29Z — REASON: testnet-only Ironwood v6 transparent and Sapling model decoding
   old ROOT: ead40409ab31eb1a39c4a43ecd7e5ea1daf537ffca7698b88030610cb376666d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-28T07:21:54Z — REASON: testnet-only Ironwood v6 ZIP 244 signature hashing
+  old ROOT: 5233b209d614e1e16a36561a9ad80b13c692117a8489c9d9337b8107e5c3fffa
+  by: owner unseal ritual (make core-unseal)

@@ -15,6 +15,8 @@
  *   - Overwinter: ZIP-143 BLAKE2b-256 with a per-branch personalization.
  *   - Sapling:    ZIP-243 BLAKE2b-256 with a per-branch personalization,
  *     including shielded-spend / shielded-output digests.
+ *   - Ironwood:   ZIP-244 BLAKE2b-256 with transparent input context and
+ *     Sapling, Orchard, and Ironwood pool commitments.
  *
  * No clock, no RNG, no I/O, no UTXO lookups. The function reads only
  * the supplied transaction, script, and scalar arguments; it writes
@@ -47,6 +49,7 @@ enum domain_consensus_sig_version {
     DOMAIN_CONSENSUS_SIGVERSION_SPROUT,
     DOMAIN_CONSENSUS_SIGVERSION_OVERWINTER,
     DOMAIN_CONSENSUS_SIGVERSION_SAPLING,
+    DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD,
 };
 
 /* Precomputed mid-state used by the ZIP-143/ZIP-243 sighashes. Each
@@ -80,15 +83,16 @@ domain_consensus_signature_hash_version(const struct transaction *tx);
  *                        signed input's scriptSig in Sprout).
  *   tx                   transaction being signed.
  *   n_in                 input index, or NOT_AN_INPUT for the JoinSplit
- *                        signature hash (no per-input commitment).
+ *                        signature hash or v6 shielded signature hash (no
+ *                        per-input commitment).
  *   hash_type            SIGHASH_{ALL,NONE,SINGLE} | optional ANYONECANPAY.
  *   amount               value (satoshis) of the prevout being signed,
- *                        used by Overwinter/Sapling personalization.
+ *                        committed by Overwinter/Sapling and transparent v6.
  *   consensus_branch_id  network-upgrade branch id, mixed into the
- *                        BLAKE2b personalization for Overwinter/Sapling.
- *   cache                optional precomputed mid-state. Pass NULL to
- *                        force per-call recomputation (slower but bit-
- *                        for-bit identical).
+ *                        BLAKE2b personalization. It must equal the checked
+ *                        header branch for v6.
+ *   cache                optional v1-v4 precomputed mid-state. Pass NULL to
+ *                        force per-call recomputation and always for v6.
  *   result               32-byte output. Untouched on failure.
  *
  * Returns true on success. Returns false on contract violation

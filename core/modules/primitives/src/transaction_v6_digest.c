@@ -168,7 +168,10 @@ bool v6_wire_digests(const struct v6_wire_view *v, struct v6_digests *result)
     /* Header bytes 8..11 carry the branch identifier in wire byte order. */
     memcpy(tx_name+12,v->header.data+8,4); memcpy(auth_name+12,v->header.data+8,4);
     CHECK(start(&header,"ZTxIdHeadersHash")); CHECK(add(&header,v->header.data,HEADER));
-    CHECK(start(&tx,tx_name)); CHECK(start(&auth,auth_name)); CHECK(child(&tx,&header));
+    uint8_t header_effect[HASH];
+    CHECK(finish(&header,header_effect));
+    CHECK(start(&tx,tx_name)); CHECK(start(&auth,auth_name));
+    CHECK(add(&tx,header_effect,HASH));
     for (size_t i = 0; i < 4; ++i) {
         CHECK(add(&tx,pools[i].effect,HASH)); CHECK(add(&auth,pools[i].auth,HASH));
     }
@@ -177,5 +180,7 @@ bool v6_wire_digests(const struct v6_wire_view *v, struct v6_digests *result)
     memcpy(value.sapling_effect,pools[1].effect,HASH); memcpy(value.sapling_auth,pools[1].auth,HASH);
     memcpy(value.orchard_effect,pools[2].effect,HASH); memcpy(value.orchard_auth,pools[2].auth,HASH);
     memcpy(value.ironwood_effect,pools[3].effect,HASH); memcpy(value.ironwood_auth,pools[3].auth,HASH);
+    memcpy(value.header_effect,header_effect,HASH);
+    memcpy(value.transparent_effect,pools[0].effect,HASH);
     *result = value; return true;
 }

@@ -12,6 +12,7 @@
 #include "core/hash.h"
 #include "core/serialize.h"
 #include "crypto/blake2b.h"
+#include "primitives/transaction_v6_sighash.h"
 #include "util/log_macros.h"
 
 #include <string.h>
@@ -152,6 +153,9 @@ enum domain_consensus_sig_version
 domain_consensus_signature_hash_version(const struct transaction *tx)
 {
     if (tx->overwintered) {
+        if (tx->version == IRONWOOD_TX_VERSION &&
+            tx->version_group_id == IRONWOOD_VERSION_GROUP_ID)
+            return DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD;
         if (tx->version_group_id == SAPLING_VERSION_GROUP_ID)
             return DOMAIN_CONSENSUS_SIGVERSION_SAPLING;
         return DOMAIN_CONSENSUS_SIGVERSION_OVERWINTER;
@@ -452,6 +456,40 @@ static bool sighash_sprout(
     return true;
 }
 
+static bool sighash_ironwood(
+    const struct script *script_code, const struct transaction *tx,
+    unsigned int n_in, struct sighash_type hash_type, int64_t amount,
+    uint32_t consensus_branch_id,
+    const struct domain_consensus_precomputed_tx_data *cache,
+    struct uint256 *result)
+{
+    if (cache) LOG_FAIL("sighash", "v6 does not use the v1-v4 sighash cache");
+    if (n_in == NOT_AN_INPUT) {
+        if (!transaction_v6_sighash(tx, NULL, 0, n_in, hash_type, NULL, 0,
+                                    consensus_branch_id, result))
+            LOG_FAIL("sighash", "invalid v6 shielded sighash call");
+        return true;
+    }
+    if (!script_code) LOG_FAIL("sighash", "v6 transparent sighash needs script_code");
+    bool anyone_can_pay = sighash_has_anyone_can_pay(hash_type);
+    if (!anyone_can_pay && tx->num_vin != 1)
+        LOG_FAIL("sighash", "v6 non-ACP multi-input sighash lacks all prevouts");
+    struct transaction_v6_prevout current = {
+        .amount = amount, .script = script_code->data,
+        .script_size = script_code->size
+    };
+    const struct transaction_v6_prevout *prevouts = &current;
+    size_t prevout_count = 1;
+    if (anyone_can_pay && tx->num_vin != 1) {
+        prevouts = NULL;
+        prevout_count = 0;
+    }
+    if (!transaction_v6_sighash(tx, prevouts, prevout_count, n_in, hash_type,
+                                script_code, amount, consensus_branch_id, result))
+        LOG_FAIL("sighash", "invalid v6 transparent sighash call");
+    return true;
+}
+
 bool domain_consensus_signature_hash(
         const struct script *script_code,
         const struct transaction *tx,
@@ -467,6 +505,10 @@ bool domain_consensus_signature_hash(
 
     enum domain_consensus_sig_version sigver =
         domain_consensus_signature_hash_version(tx);
+
+    if (sigver == DOMAIN_CONSENSUS_SIGVERSION_IRONWOOD)
+        return sighash_ironwood(script_code, tx, n_in, hash_type, amount,
+                                consensus_branch_id, cache, result);
 
     if (sigver == DOMAIN_CONSENSUS_SIGVERSION_OVERWINTER ||
         sigver == DOMAIN_CONSENSUS_SIGVERSION_SAPLING) {
