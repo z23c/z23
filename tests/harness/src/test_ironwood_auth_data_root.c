@@ -125,16 +125,25 @@ static const char private_h1[] =
     "1976a91479b000887626b294a914501a4cd226b58b23598388ac00000000000000000000000000000000000000"
 ;
 
-/* This tag is test data for a proposed commitment, not an activated rule. */
+/* Signed proposal 40438ae28a60: OP_RETURN, one 36-byte push, Z23A + root.
+ * This tests the proposed framing only; no admission rule is installed. */
+static bool commitment_script_matches(const struct tx_out *output, const uint8_t root[32])
+{
+    uint8_t expected[38] = {0x6a,0x24,0x5a,0x32,0x33,0x41};
+    memcpy(expected+6,root,32);
+    return output->value == 0 && output->script_pub_key.size == sizeof expected &&
+        !memcmp(output->script_pub_key.data,expected,sizeof expected);
+}
 static bool proposed_commitment(struct transaction *coinbase, struct tx_out *output,
                                 const uint8_t root[32])
 {
-    static const uint8_t tag[] = {0x5a,0x32,0x33,0x41,0x55,0x54,0x48};
+    uint8_t payload[36] = {0x5a,0x32,0x33,0x41};
+    memcpy(payload+4,root,32);
     output->value = 0;
     script_init(&output->script_pub_key);
     return script_push_op(&output->script_pub_key, OP_RETURN) &&
-        script_push_data(&output->script_pub_key, tag, sizeof tag) &&
-        script_push_data(&output->script_pub_key, root, 32) &&
+        script_push_data(&output->script_pub_key, payload, sizeof payload) &&
+        commitment_script_matches(output,root) &&
         transaction_hash_serialized(coinbase, &coinbase->hash);
 }
 static bool fixture_merkle(struct block *block, struct uint256 *out)
@@ -198,9 +207,8 @@ static bool commitment_mutation(struct block *block, const struct tx_out *output
         !root_is(block,"5f0b954f48e80f67b2a7739d1c5ec001735985a6b0a8bd7b7b58c072c87a2b5c") ||
         !memcmp(state->first,state->after,32) || !fixture_merkle(block,&after_merkle) ||
         !uint256_eq(&state->first_merkle,&after_merkle)) return false;
-    const struct script *script = &output->script_pub_key;
-    return script->size >= 32 && !memcmp(script->data+script->size-32,state->first,32) &&
-        memcmp(script->data+script->size-32,state->after,32);
+    return commitment_script_matches(output,state->first) &&
+        !commitment_script_matches(output,state->after);
 }
 static bool commitment_cycle(struct block *block, struct tx_out output[2])
 {
@@ -209,11 +217,10 @@ static bool commitment_cycle(struct block *block, struct tx_out output[2])
         !commitment_mutation(block,&output[1],&state) ||
         !proposed_commitment(&block->vtx[0], &output[1], state.after)) return false;
     uint8_t unchanged[32]; struct uint256 changed_merkle;
-    const struct script *script = &output[1].script_pub_key;
     return !uint256_eq(&state.first_txid,&block->vtx[0].hash) &&
         fixture_merkle(block,&changed_merkle) &&
         !uint256_eq(&state.first_merkle,&changed_merkle) &&
-        script->size >= 32 && !memcmp(script->data+script->size-32,state.after,32) &&
+        commitment_script_matches(&output[1],state.after) &&
         ironwood_auth_data_root(block,unchanged).ok && !memcmp(state.after,unchanged,32);
 }
 static bool proposed_commitment_cycle(const struct transaction *payment)
