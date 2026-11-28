@@ -2070,6 +2070,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_coins_kv_reset_for_reseed(); }
     { extern int test_utxo_mirror_sync(void);
       *failures += test_utxo_mirror_sync(); }
+    { extern int test_utxo_mirror_rewind(void); *failures += test_utxo_mirror_rewind(); }
     *failures += test_seal_kv();
     *failures += test_sha3_sidecar_io();
     *failures += test_seal_ratify();
