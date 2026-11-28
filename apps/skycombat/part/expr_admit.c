@@ -9,8 +9,11 @@ static enum expr_admit_status admit_fail(struct expr_admit_error *error,
  enum expr_admit_status stage,struct expr_error detail)
 {
  if(error)*error=(struct expr_admit_error){stage,detail};
- if(stage<EX_ADMIT_VALIDATE)fprintf(stderr,"HUD admission: stage=%u code=%u record=%u: %s\n",
-  (unsigned)stage,(unsigned)detail.code,detail.index,detail.reason);return stage;
+ if (stage < EX_ADMIT_VALIDATE) {
+  fprintf(stderr, "HUD admission: stage=%u code=%u record=%u: %s\n",
+          (unsigned)stage, (unsigned)detail.code, detail.index, detail.reason);
+ }
+ return stage;
 }
 static enum expr_status admit_read_bytes(const struct platform_positioned_file *file,
  uint8_t bytes[EXPR_MAX_BYTES],size_t n)
