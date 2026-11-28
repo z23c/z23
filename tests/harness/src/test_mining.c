@@ -307,7 +307,7 @@ static int mining_slots_inside(struct rpc_table *table,
     bool parsed = json_read(&missing_params, missing, strlen(missing));
     bool missing_refused = parsed && !rpc_table_execute(table, "generatetoaddress",
                                                          &missing_params, &missing_result);
-    MT_CHECK("missing ballot catalog refuses without changing height",
+    MT_CHECK("missing request catalog field refuses without changing height",
         missing_refused && missing_result.type == JSON_STR &&
         strstr(json_get_str(&missing_result), "Expected ballotslots object") &&
         reducer_frontier_provable_tip_cached() == before);
@@ -368,6 +368,30 @@ static int mining_crossing_window(struct rpc_table *table, struct main_state *ms
     return failures;
 }
 
+static int mining_no_node_pin(struct rpc_table *table, struct main_state *ms)
+{
+    int failures = 0;
+    struct mining_failure_fixture f = {0};
+    struct json_value params = {0}, out = {0};
+    const char *raw = "[1,\"tmQMh5UwwJGfi53XvgjVZjTGo6SzZGVz6Q6\",[0]]";
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
+    struct uint256 hash = *tip->phashBlock;
+    int height = active_chain_height(&ms->chain_active);
+    bool ready = json_read(&params, raw, strlen(raw));
+    rpc_mining_test_set_hooks(mining_count_template, NULL, &f);
+    bool refused = ready && !rpc_table_execute(table, "generatetoaddress", &params, &out);
+    rpc_mining_test_set_hooks(NULL, NULL, NULL);
+    struct block_index *after = active_chain_tip(&ms->chain_active);
+    MT_CHECK("missing node ballot pin refuses before template with unchanged tip",
+        refused && out.type == JSON_STR &&
+        strstr(json_get_str(&out), "No ballot catalog pinned for the selected network") &&
+        f.built == 0 && active_chain_height(&ms->chain_active) == height &&
+        after && after->phashBlock && uint256_eq(after->phashBlock, &hash));
+    json_free(&params);
+    json_free(&out);
+    return failures;
+}
+
 static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
                               struct block_index *ancestors)
 {
@@ -376,6 +400,7 @@ static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
     struct miner_signal_catalog_pin pin = {0};
     struct json_value no_pin = {0}, pinned = {0};
     rpc_blockchain_set_ballot_catalog_pin(NULL);
+    failures += mining_no_node_pin(table, ms);
     bool legacy_ok = mining_test_gbt(table, &no_pin);
     MT_CHECK("ballot request requires a pin", mining_slots_refused(table, request,
              "No ballot catalog pinned for the selected network"));
