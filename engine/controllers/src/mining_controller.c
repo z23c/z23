@@ -62,6 +62,8 @@ struct mining_template_parent {
     int height;
     int64_t minimum_time;
     size_t size_limit;
+    /* What the ballot suffix is fitted under; not the reported size limit. */
+    size_t ballot_limit;
     struct research_tip_rules rules;
 };
 
@@ -133,6 +135,7 @@ static struct block_template *mining_create_template(const struct script *script
         struct research_rules_state state = {0};
         state.active[RESEARCH_RULE_BLOCK_CAP] = bound->rules.capped;
         bound->size_limit = research_block_size_limit_for(cp, &state);
+        bound->ballot_limit = research_ballot_template_limit(cp, &state);
     }
     if (ok) ok = mining_finish_template(tmpl, cp, bound->height, &parent_root,
                                          genesis, reserve_ballot, bound, reason);
@@ -758,7 +761,7 @@ static bool rpc_getblocktemplate(const struct json_value *params, bool help,
     }
 
     struct zcl_result ballot = mining_template_ballot(params, &tmpl->block, cp, parent.height,
-                                                       parent.size_limit);
+                                                       parent.ballot_limit);
     if (!ballot.ok) {
         block_template_free(tmpl);
         free(tmpl);

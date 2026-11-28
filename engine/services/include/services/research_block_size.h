@@ -9,6 +9,7 @@
 #include "primitives/block.h"
 #include "services/research_rules.h"
 #include "util/safe_alloc.h"
+#include "validation/main_constants.h"
 #include <stdlib.h>
 
 enum research_block_size_verdict {
@@ -50,6 +51,18 @@ static inline size_t research_block_size_limit_for(const struct chain_params *pa
     bool capped = params && rules && rules->active[RESEARCH_RULE_BLOCK_CAP] &&
                   research_block_size_limit(params) == RESEARCH_BLOCK_SIZE_LIMIT;
     return capped ? RESEARCH_BLOCK_SIZE_LIMIT : research_block_size_ceiling(params);
+}
+
+/* The limit a ballot template is fitted under on the selected chain: the
+ * limit for `rules` on the research chain, whose block-cap rule bounds it,
+ * and the historical mining default on every other network, exactly as
+ * before the research rules existed. */
+static inline size_t research_ballot_template_limit(const struct chain_params *params,
+                                                    const struct research_rules_state *rules)
+{
+    return research_block_size_limit(params) == RESEARCH_BLOCK_SIZE_LIMIT
+        ? research_block_size_limit_for(params, rules)
+        : DEFAULT_BLOCK_MAX_SIZE;
 }
 
 /* Classify `block` against one explicit limit. Only the research limit is

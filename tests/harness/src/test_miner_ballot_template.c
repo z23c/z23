@@ -250,6 +250,14 @@ static int bt_size_boundaries(void)
     BT_CHECK(ok && base < 199999 && 200001 - base < 10000);
     struct research_rules_state capped = {0}, uncapped = {0};
     capped.active[RESEARCH_RULE_BLOCK_CAP] = true;
+    /* Ballot templates follow the research chain's resolved limit and keep
+     * the historical mining default on every other network. */
+    struct chain_params ordinary = *d->chain;
+    ordinary.consensus.hashGenesisBlock.data[0] ^= 1;
+    BT_CHECK(research_ballot_template_limit(d->chain, &capped) == RESEARCH_BLOCK_SIZE_LIMIT);
+    BT_CHECK(research_ballot_template_limit(d->chain, &uncapped) == MAX_BLOCK_SIZE);
+    BT_CHECK(research_ballot_template_limit(&ordinary, &capped) == DEFAULT_BLOCK_MAX_SIZE);
+    BT_CHECK(research_ballot_template_limit(&ordinary, &uncapped) == DEFAULT_BLOCK_MAX_SIZE);
     for (size_t size = 200000; size <= 200001; ++size) {
         struct script *script = &b.vtx[0].vout[24].script_pub_key;
         script->size = size - base - 2;
