@@ -43,6 +43,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/util.h"  /* LogPrintf */
+#include "mining_controller_test_hooks.h"
 
 struct mining_context {
     struct main_state *main_state;
@@ -89,6 +90,7 @@ static struct block_template *mining_create_template(const struct script *script
     const struct chain_params *cp, struct mining_template_parent *bound,
     const char **reason, bool reserve_ballot)
 {
+    mining_test_template();
     struct mining_context *ctx = mining_ctx();
     *reason = "Mining state unavailable";
     if (!ctx->main_state || !ctx->mempool || !ctx->coins_tip || !cp) {
@@ -146,15 +148,7 @@ static struct block_template *mining_create_template(const struct script *script
     return NULL;
 }
 
-/* Announce a just-accepted local tip block to connected peers. Locally-minted
- * (`generate`) and externally-submitted (`submitblock`) blocks are accepted
- * through reducer_ingest_block directly, never through the P2P block-receive
- * relay in msg_blocks.c, so without this an already-connected peer never hears
- * about the new tip and can sit one-or-more blocks behind until it re-queries
- * on its own. This is the standard full-node behaviour: a node that accepts a
- * new best-chain tip advertises it. connman_relay_block is bounded (one inv
- * per peer, per-peer known-inventory filtered) and a no-op when there are no
- * handshaked peers, so it is safe on every network. */
+/* Locally accepted blocks bypass P2P receive; announce to connected peers. */
 static void mining_announce_accepted_block(const struct uint256 *hash)
 {
     struct connman *cm = rpc_net_get_connman();
@@ -162,24 +156,21 @@ static void mining_announce_accepted_block(const struct uint256 *hash)
         connman_relay_block(cm, hash);
 }
 
-static bool mining_submit_mined_block(struct block *block)
+static bool mining_submit_mined_block(struct block *block, struct validation_state *state)
 {
-    struct validation_state state;
-    validation_state_init(&state);
-    bool ok = reducer_ingest_block(boot_activation_controller(), block,
-                                   REDUCER_SRC_MINED, true, &state);
+    validation_state_init(state);
+    bool handled = false;
+    bool ok = mining_test_submit(block, state, &handled);
+    if (!handled) ok = reducer_ingest_block(boot_activation_controller(), block, REDUCER_SRC_MINED, true, state);
     if (ok) {
         struct uint256 h;
         block_get_hash(block, &h);
         mining_announce_accepted_block(&h);
     }
     if (!ok) {
-        /* Surface WHY the reducer rejected a locally-mined block. Without
-         * this, `generate` returns an empty result array with no clue why
-         * the tip didn't advance (the validation_state was dropped on the
-         * floor). Log the reject reason + the block hash for the operator. */
+        /* Keep the reducer's rejection and hash visible to the operator. */
         char msg[MAX_REJECT_REASON + 64];
-        format_state_message(&state, msg, sizeof(msg));
+        format_state_message(state, msg, sizeof(msg));
         struct uint256 h;
         block_get_hash(block, &h);
         char hex[65];
@@ -329,20 +320,9 @@ static bool rpc_getmininginfo(const struct json_value *params, bool help,
     return true;
 }
 
-/* Shared admission check for both on-demand mint entry points (`generate`
- * and `generatetoaddress`). Two conditions, in this order:
- *
- *   1. Sovereign guard (docs/node/shielded-history-importer.md §5.3):
- *      refuse to mint on a borrowed-and-not-self-folded (release_assisted)
- *      shielded history. This gates the MINT action only — tip-following
- *      (rpc_submitblock accepting a block relayed/mined by someone else, the
- *      reducer's own forward fold) is never touched here.
- *   2. On-demand mining is a regtest facility. On mainnet/testnet the
- *      Equihash parameters make an in-process solve impractical (and mining
- *      goes through real workers/peers), so we refuse — matching zcashd's
- *      "regtest mode only" contract via fMineBlocksOnDemand.
- *
- * Sets an explanatory error body in `result` and returns false on refusal. */
+/* Both on-demand RPCs first enforce the mint-only sovereignty guard, then
+ * fMineBlocksOnDemand. A refusal logs and sets the result; tip following is
+ * unaffected (docs/node/shielded-history-importer.md §5.3). */
 static bool mining_on_demand_allowed(const char *rpc_name,
                                      struct json_value *result)
 {
@@ -367,14 +347,27 @@ static bool mining_on_demand_allowed(const char *rpc_name,
     return true;
 }
 
-/* Mine `num_blocks` blocks on demand, paying every coinbase to
- * `coinbase_script`, and push each accepted block hash into `result` (which
- * this sets to an array). Shared by `generate` and `generatetoaddress` — the
- * ONLY difference between the two RPCs is which script the subsidy pays to.
- *
- * Caller must have passed mining_on_demand_allowed() first. */
+/* Shared on-demand loop; caller has passed mining_on_demand_allowed(). */
 static struct zcl_result mining_template_ballot(const struct json_value *list,
     struct block *block, const struct chain_params *cp, int height, size_t limit);
+static bool mining_report_submit_failure(struct json_value *result, int height,
+                                         const struct validation_state *state)
+{
+    struct json_value hashes = *result;
+    json_init(result);
+    json_set_object(result);
+    char reason[MAX_REJECT_REASON + 64], message[MAX_REJECT_REASON + 128];
+    format_state_message(state, reason, sizeof(reason));
+    snprintf(message, sizeof(message), "Mining failed at height %d: %s",
+             height, reason[0] ? reason : "reducer rejected block");
+    bool ok = json_push_kv_int(result, "code", -1) &&
+              json_push_kv_str(result, "message", message) &&
+              json_push_kv_int(result, "height", height) &&
+              json_push_kv(result, "hashes", &hashes);
+    json_free(&hashes);
+    if (!ok) { json_set_str(result, "Cannot report mining failure"); LOG_FAIL("mining", "cannot report rejected block"); }
+    return false;
+}
 static bool mining_ballot_range_allowed(int64_t count, struct json_value *result)
 {
     struct mining_context *ctx = mining_ctx();
@@ -443,7 +436,12 @@ static bool mining_generate_to_script(const struct script *coinbase_script,
             break;
         }
 
-        if (mining_submit_mined_block(&tmpl->block)) {
+        struct validation_state state;
+        if (!mining_submit_mined_block(&tmpl->block, &state)) {
+            block_template_free(tmpl);
+            free(tmpl);
+            return mining_report_submit_failure(result, new_height, &state);
+        } else {
             struct uint256 hash;
             block_get_hash(&tmpl->block, &hash);
             char hex[65];
@@ -523,7 +521,8 @@ static bool rpc_generatetoaddress(const struct json_value *params, bool help,
         "2. \"address\" (string, required) Transparent address to pay\n"
         "3. ballotslots (optional) Signal slots in the pinned catalog.\n"
         "Result:\n"
-        "[ \"blockhash\", ... ]  hashes of the blocks that were accepted");
+        "[ \"blockhash\", ... ]  hashes of the blocks that were accepted.\n"
+        "On submission failure, the error includes height, reason and accepted hashes.");
 
     if (!mining_on_demand_allowed("generatetoaddress", result))
         return false;  // raw-return-ok:callee set the error body and logged the refusal

@@ -20,12 +20,61 @@
 #include "storage/coins_view_kv.h"
 #include "storage/progress_store.h"
 #include "util/timedata.h"
+#include "consensus/validation.h"
 #include <sqlite3.h>
 #include <string.h>
 
 #define MT_CHECK(name, expr) do { \
     printf("mining: %s... %s\n", name, (expr) ? "OK" : (failures++, "FAIL")); \
 } while (0)
+
+void rpc_mining_test_set_hooks(void (*on_template)(void *),
+    bool (*submit)(struct block *, struct validation_state *, void *), void *ctx);
+
+struct mining_failure_fixture {
+    struct main_state *ms;
+    struct block_index *next;
+    int built, submitted;
+};
+
+static void mining_count_template(void *ctx)
+{
+    ((struct mining_failure_fixture *)ctx)->built++;
+}
+
+static bool mining_fail_second_submit(struct block *block,
+                                       struct validation_state *state, void *ctx)
+{
+    (void)block;
+    struct mining_failure_fixture *f = ctx;
+    if (++f->submitted == 1) {
+        return active_chain_move_window_tip(&f->ms->chain_active, f->next);
+    }
+    return validation_state_error(state, "fixture-second-submit");
+}
+
+static int mining_partial_failure(struct rpc_table *table, struct main_state *ms,
+                                  struct block_index *ancestors)
+{
+    int failures = 0;
+    struct mining_failure_fixture f = { .ms = ms, .next = &ancestors[12] };
+    struct json_value params = {0}, out = {0};
+    const char *raw = "[3,\"tmQMh5UwwJGfi53XvgjVZjTGo6SzZGVz6Q6\"]";
+    bool ready = json_read(&params, raw, strlen(raw));
+    rpc_mining_test_set_hooks(mining_count_template, mining_fail_second_submit, &f);
+    bool ok = ready && rpc_table_execute(table, "generatetoaddress", &params, &out);
+    rpc_mining_test_set_hooks(NULL, NULL, NULL);
+    const struct json_value *hashes = json_get(&out, "hashes");
+    const char *reason = json_get_str(json_get(&out, "message"));
+    MT_CHECK("second submit failure retains one accepted hash and never builds third",
+        !ok && hashes && json_size(hashes) == 1 && f.built == 2 &&
+        f.submitted == 2 && json_get_int(json_get(&out, "height")) == 13 &&
+        strstr(reason, "fixture-second-submit"));
+    json_free(&params);
+    json_free(&out);
+    active_chain_move_window_tip(&ms->chain_active, &ancestors[11]);
+    return failures;
+}
 
 static bool mining_test_gbt(struct rpc_table *table, struct json_value *out)
 {
@@ -313,6 +362,7 @@ static int mining_slots_cases(struct rpc_table *table, struct main_state *ms,
     active_chain_move_window_tip(&ms->chain_active, &ancestors[11]);
     reducer_frontier_provable_tip_set(11);
     MT_CHECK("ballot mint authority", mining_test_authority(progress_store_db(), 11));
+    failures += mining_partial_failure(table, ms, ancestors);
     failures += mining_slots_inside(table, &pin);
     failures += mining_guarded_slots(table, &pin);
     failures += mining_crossing_window(table, ms, ancestors);
