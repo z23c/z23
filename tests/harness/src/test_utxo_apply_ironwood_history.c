@@ -86,6 +86,26 @@ static bool history_check_failure(struct ironwood_history_cursor *c, struct hist
         !memcmp(&out, &before, sizeof out) && !memcmp(&event, &ebefore, sizeof event);
 }
 
+static bool history_refusals(struct ironwood_history_cursor *c, struct history_fixture *f)
+{
+    f->missing = true;
+    if (!history_check_failure(c, f)) return false;
+    f->missing = false;
+    f->corrupt_tx = true;
+    if (!history_check_failure(c, f)) return false;
+    f->corrupt_tx = false;
+    f->corrupt_prev = true;
+    if (!history_check_failure(c, f)) return false;
+    f->corrupt_prev = false;
+    f->corrupt_merkle = true;
+    if (!history_check_failure(c, f)) return false;
+    f->corrupt_merkle = false;
+    f->oversized = true;
+    if (!history_check_failure(c, f)) return false;
+    f->oversized = false;
+    return true;
+}
+
 static bool history_positive(struct history_fixture *f)
 {
     const struct block_index *slots[2] = {0};
@@ -96,21 +116,7 @@ static bool history_positive(struct history_fixture *f)
         !history_step_ok(&c, f, &e) || e.available ||
         !history_step_ok(&c, f, &e) || !e.available || e.height != 0 || e.count != 0)
         return false;
-    f->missing = true;
-    if (!history_check_failure(&c, f)) return false;
-    f->missing = false;
-    f->corrupt_tx = true;
-    if (!history_check_failure(&c, f)) return false;
-    f->corrupt_tx = false;
-    f->corrupt_prev = true;
-    if (!history_check_failure(&c, f)) return false;
-    f->corrupt_prev = false;
-    f->corrupt_merkle = true;
-    if (!history_check_failure(&c, f)) return false;
-    f->corrupt_merkle = false;
-    f->oversized = true;
-    if (!history_check_failure(&c, f)) return false;
-    f->oversized = false;
+    if (!history_refusals(&c, f)) return false;
     uint8_t expected[32];
     return history_step_ok(&c, f, &e) && e.available && e.height == 1 &&
         e.count == 2 && c.complete && zcl_hex_decode(

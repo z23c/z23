@@ -146,16 +146,21 @@ static struct zcl_result history_body(const struct ironwood_history_cursor *in,
     return ZCL_OK;
 }
 
+static bool history_cursor_valid(const struct ironwood_history_cursor *in)
+{
+    return in && history_profile() && in->parent && in->parent->phashBlock &&
+        in->parent->nHeight == in->parent_height &&
+        uint256_eq(in->parent->phashBlock, &in->parent_hash) && !in->complete &&
+        in->slots && in->parent_height >= 0 &&
+        (size_t)in->parent_height < in->slot_count && in->scan_height >= 0 &&
+        in->replay_height >= 0 && in->replay_height <= in->parent_height;
+}
+
 struct zcl_result utxo_ironwood_history_step(const struct ironwood_history_cursor *in,
     ironwood_history_reader_fn reader, const char *datadir, void *user,
     struct ironwood_history_cursor *out, struct ironwood_history_event *event)
 {
-    if (!in || !out || !event || !history_profile() || !in->parent ||
-        !in->parent->phashBlock || in->parent->nHeight != in->parent_height ||
-        !uint256_eq(in->parent->phashBlock, &in->parent_hash) || in->complete ||
-        !in->slots || in->parent_height < 0 ||
-        (size_t)in->parent_height >= in->slot_count || in->scan_height < 0 ||
-        in->replay_height < 0 || in->replay_height > in->parent_height)
+    if (!out || !event || !history_cursor_valid(in))
         return ZCL_ERR(-1, "Invalid or changed Ironwood history cursor");
     struct ironwood_history_cursor next = *in;
     struct ironwood_history_event result = {0};
