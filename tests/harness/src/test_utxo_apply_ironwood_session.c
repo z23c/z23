@@ -496,6 +496,19 @@ static bool foreign_bootstrap_refused(sqlite3 *db, struct session_fixture *f)
     }
     return ok && r == IRONWOOD_BOOTSTRAP_ERROR;
 }
+static bool foreign_session_refused(sqlite3 *db, struct session_fixture *f)
+{
+    struct utxo_ironwood_pending p, before;
+    utxo_ironwood_session_reset();
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    bool ok = sql(db, "BEGIN") &&
+        utxo_ironwood_session_prepare(db, &f->index[2], &f->bodies[2], session_reader, NULL, f, &p) == UTXO_IRONWOOD_LOCAL_ERROR &&
+        !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
+    utxo_ironwood_session_reset();
+    return ok && sql(db, "BEGIN") &&
+        utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3], session_reader, NULL, f, &p) == UTXO_IRONWOOD_HISTORY_INCOMPLETE &&
+        !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
+}
 /* A checkpoint the store wrote itself from a body that is not the canonical
  * block at its height passes the audit. Only the comparison of each replayed
  * step with its row refuses the canonical block above it with a local error;
@@ -506,7 +519,7 @@ static bool foreign_row_refused(struct session_fixture *f)
     struct block body = {0};
     struct block_index foreign = {0};
     struct uint256 hash = {0};
-    struct utxo_ironwood_pending p = {0}, before;
+    struct utxo_ironwood_pending p = {0};
     bool ok = block_clone(&body, &f->bodies[0]);
     if (ok && sqlite3_open(":memory:", &db) != SQLITE_OK) {
         /* A failed open can still leave a handle to close. */
@@ -521,15 +534,7 @@ static bool foreign_row_refused(struct session_fixture *f)
     ok = sql(db, "BEGIN") &&
         utxo_ironwood_session_prepare(db, &foreign, &body, session_reader, NULL, f, &p) == UTXO_IRONWOOD_OK &&
         p.checkpoint.count == 0 && utxo_ironwood_session_publish(&p) && sql(db, "COMMIT");
-    utxo_ironwood_session_reset();
-    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
-    ok = ok && sql(db, "BEGIN") &&
-        utxo_ironwood_session_prepare(db, &f->index[2], &f->bodies[2], session_reader, NULL, f, &p) == UTXO_IRONWOOD_LOCAL_ERROR &&
-        !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
-    utxo_ironwood_session_reset();
-    ok = ok && sql(db, "BEGIN") &&
-        utxo_ironwood_session_prepare(db, &f->index[3], &f->bodies[3], session_reader, NULL, f, &p) == UTXO_IRONWOOD_HISTORY_INCOMPLETE &&
-        !memcmp(&p, &before, sizeof p) && sql(db, "ROLLBACK");
+    if (ok) ok = foreign_session_refused(db, f);
     if (ok) ok = foreign_bootstrap_refused(db, f);
     if (!sqlite3_get_autocommit(db)) (void)sql(db, "ROLLBACK");
     utxo_ironwood_session_reset();
