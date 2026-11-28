@@ -25,6 +25,8 @@
 #include "json/json.h"
 #include "models/block.h"
 #include "primitives/block.h"
+#include "services/ironwood_auth_data_root.h"
+#include "services/research_block_egress.h"
 #include "storage/disk_block_io.h"
 #include "storage/node_db_runtime.h"
 #include "util/log_macros.h"
@@ -500,12 +502,59 @@ static bool rpc_getblock_height(const char *s, int *height)
     return true;
 }
 
+static bool rpc_getblock_private_profile(void)
+{
+    const struct chain_research_descriptor *profile = chain_research_profile_get(CHAIN_RESEARCH_IRONWOOD);
+    return profile && chain_research_profile_current() == profile && chain_params_get() == profile->chain;
+}
+
+static bool rpc_getblock_push_auth_root(const struct block *block,
+                                        struct json_value *result)
+{
+    if (!rpc_getblock_private_profile()) return true;
+    uint8_t root[32];
+    char raw_hex[65];
+    if (!ironwood_auth_data_root(block, root).ok) return false;
+    HexStr(root, sizeof(root), false, raw_hex, sizeof(raw_hex));
+    return json_push_kv_str(result, "computed_auth_data_root_raw", raw_hex);
+}
+
+static bool rpc_getblock_raw(const struct byte_stream *serialized,
+                             struct json_value *result, const char *hash_str)
+{
+    if (serialized->size > (SIZE_MAX - 1) / 2) {
+        json_set_str(result, "Block serialization too large");
+        LOG_FAIL("blockchain", "getblock: hex size overflow for block %s", hash_str);
+    }
+    size_t hex_cap = serialized->size * 2 + 1;
+    char *hex = zcl_malloc(hex_cap, "getblock raw hex");
+    if (!hex) {
+        json_set_str(result, "Out of memory");
+        LOG_FAIL("blockchain", "getblock: raw hex allocation failed for %zu bytes",
+                 serialized->size);
+    }
+    HexStr(serialized->data, serialized->size, false, hex, hex_cap);
+    json_set_str(result, hex);
+    free(hex);
+    return true;
+}
+
+/* Serialize the identity-checked disk body for both RPC verbosity modes. */
+static bool rpc_getblock_serialize(const struct block *block, struct byte_stream *out)
+{
+    if (!rpc_getblock_private_profile()) {
+        stream_init(out, 4096);
+        return block_serialize(block, out);
+    }
+    return research_block_egress(chain_params_get(), block, out);
+}
+
 bool rpc_getblock(const struct json_value *params, bool help,
                           struct json_value *result)
 {
     struct blockchain_context *ctx = blockchain_ctx();
     RPC_HELP(help, result,
-             "getblock \"hash_or_height\" ( verbose )\nReturns block data.");
+             "getblock \"hash_or_height\" ( verbose )\nReturns block data. Private verbose replies include computed_auth_data_root_raw in digest byte order.");
 
     struct rpc_params p;
     rpc_params_init(&p, params);
@@ -572,9 +621,8 @@ bool rpc_getblock(const struct json_value *params, bool help,
                  "at height %d", hash_str, bi->nHeight);
     }
 
-    struct byte_stream serialized;
-    stream_init(&serialized, 4096);
-    if (!block_serialize(&block, &serialized)) {
+    struct byte_stream serialized = {0};
+    if (!rpc_getblock_serialize(&block, &serialized)) {
         stream_free(&serialized);
         block_free(&block);
         json_set_str(result, "Block serialization failed");
@@ -583,31 +631,19 @@ bool rpc_getblock(const struct json_value *params, bool help,
     }
 
     if (verbose == 0) {
-        if (serialized.size > (SIZE_MAX - 1) / 2) {
-            stream_free(&serialized);
-            block_free(&block);
-            json_set_str(result, "Block serialization too large");
-            LOG_FAIL("blockchain", "getblock: hex size overflow for block %s",
-                     hash_str);
-        }
-        size_t hex_cap = serialized.size * 2 + 1;
-        char *hex = zcl_malloc(hex_cap, "getblock raw hex");
-        if (!hex) {
-            stream_free(&serialized);
-            block_free(&block);
-            json_set_str(result, "Out of memory");
-            LOG_FAIL("blockchain", "getblock: raw hex allocation failed "
-                     "for %zu bytes", serialized.size);
-        }
-        HexStr(serialized.data, serialized.size, false, hex, hex_cap);
-        json_set_str(result, hex);
-        free(hex);
+        bool ok = rpc_getblock_raw(&serialized, result, hash_str);
         stream_free(&serialized);
         block_free(&block);
-        return true;
+        return ok;
     }
 
     block_header_to_json(bi, result, true);
+    if (!rpc_getblock_push_auth_root(&block, result)) {
+        stream_free(&serialized);
+        block_free(&block);
+        json_set_str(result, "Block authorization data root unavailable");
+        LOG_FAIL("blockchain", "getblock: authorization data root unavailable for %s", hash_str);
+    }
 
     json_push_kv_int(result, "size", (int64_t)serialized.size);
     json_push_kv_int(result, "tx_count", (int64_t)block.num_vtx);

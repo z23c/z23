@@ -562,6 +562,8 @@ static bool bf_cleanup(struct ballot_fixture *f)
     return ok;
 }
 
+bool rpc_ironwood_body_case(struct main_state *, struct rpc_table *, struct block_index *, const char *, bool);
+
 static int ballot_integration_child(bool research)
 {
     static struct ballot_fixture f;
@@ -573,6 +575,8 @@ static int ballot_integration_child(bool research)
               bf_window_branch(&f) && bf_selected_revisions(&f) && bf_catalog_status(&f, true) &&
               bf_catalog_limit(&f) && bf_foreign_pin(&f) &&
               bf_negative_cases(&f);
+    static struct block_index stored;
+    ok = ok && rpc_ironwood_body_case(&f.ms, &f.table, &stored, f.blocks, research);
     if (!bf_cleanup(&f))
         ok = false;
     return ok ? 0 : 1;

@@ -2,6 +2,7 @@
 #include "services/research_rules_gate.h"
 #include "base/hex.h"
 #include "services/research_block_size.h"
+#include "services/research_block_egress.h"
 #include "primitives/block.h"
 #include "primitives/transaction_v6_decode.h"
 #include "util/safe_alloc.h"
@@ -132,6 +133,36 @@ static int ceiling_test(void)
     block_free(&b);
     return exact && over && unchanged ? 0 : 1;
 }
+static bool checked_reward_egress_refusals(const struct chain_params *params,
+                                            struct block *b, size_t exactly)
+{
+    struct byte_stream out = {0};
+    b->header.hashMerkleRoot.data[0] ^= 1;
+    bool ok = !research_block_egress(params, b, &out) && !out.data && !out.size;
+    b->header.hashMerkleRoot.data[0] ^= 1;
+    b->vtx->ironwood_value_balance ^= 1;
+    return ok && research_block_size_measure(b, exactly) == RESEARCH_BLOCK_SIZE_UNAVAILABLE &&
+        !research_block_egress(params, b, &out) && !out.data && !out.size;
+}
+static bool checked_reward_egress(struct block *b, const uint8_t *wire, size_t wire_size)
+{
+    struct transaction *reward = b->vtx;
+    size_t exactly = 142 + wire_size;
+    b->header.hashMerkleRoot = reward->hash;
+    const struct chain_params *ordinary = chain_params_get();
+    bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
+    const struct chain_params *research = chain_params_get();
+    struct byte_stream out = {0};
+    bool ok = selected && !research_block_egress(ordinary, b, &out) &&
+        !out.data && !out.size;
+    bool served = research_block_egress(research, b, &out);
+    ok = ok && served && out.size == exactly &&
+        !memcmp(out.data + 142, wire, wire_size);
+    stream_free(&out);
+    ok = ok && checked_reward_egress_refusals(research, b, exactly);
+    chain_params_select(CHAIN_MAIN);
+    return ok;
+}
 static bool checked_reward_size(void)
 {
     uint8_t wire[9313];
@@ -153,8 +184,7 @@ static bool checked_reward_size(void)
     bool ok = decoded && !stream_remaining(&input) &&
         research_block_size_measure(&b, exactly) == RESEARCH_BLOCK_SIZE_OK &&
         research_block_size_measure(&b, exactly - 1) == RESEARCH_BLOCK_SIZE_EXCEEDED;
-    reward.ironwood_value_balance ^= 1;
-    ok = ok && research_block_size_measure(&b, exactly) == RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    ok = ok && checked_reward_egress(&b, wire, sizeof wire);
     transaction_free(&reward);
     return ok;
 }
