@@ -22,7 +22,6 @@ struct zcl_result ironwood_postnu63_proof_size(uint64_t count, size_t *out);
  * view and full proof bytes must remain alive while the returned cursor is
  * used. Output is unchanged on failure and must not overlap any input. */
 struct zcl_result ironwood_postnu63_first_challenge(
-    const struct v6_wire_view *view, const uint8_t *proof, size_t proof_size,
-    const uint8_t vk[32], const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
+    const struct v6_wire_view *view, const uint8_t vk[32], const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
     const uint8_t w[32], struct ironwood_postnu63_stage *out);
 #endif

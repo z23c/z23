@@ -575,11 +575,31 @@ static bool check_first_theta(const struct v6_wire_view *view)
     return !first_theta(view, 2, 10, bad, sizeof bad, false, out, raw) && !memcmp(out, before, 32);
 }
 
+/* Build a structural wire from public statements and the complete proof. */
+static bool stage_wire(const struct v6_wire_view *source, const uint8_t *input,
+                       size_t proof_size, uint8_t *wire, size_t capacity, struct v6_wire_view *out)
+{
+    size_t count = (size_t)source->ironwood.count;
+    if (!count || count > 2 || !source->ironwood.flags.data || proof_size > 65535) return false;
+    size_t flags = 26 + count * 820, anchor = flags + 9, proof = anchor + 35;
+    size_t total = proof + proof_size + count * 64 + 64;
+    if (total > capacity) return false;
+    memset(wire, 0, total); memcpy(wire, empty, 25); wire[25] = (uint8_t)count;
+    for (size_t i = 0; i < count; ++i)
+        memcpy(wire + 26 + i * 820, input + i * V6_IRONWOOD_STATEMENT_SIZE + 32, 128);
+    wire[flags] = *source->ironwood.flags.data; memcpy(wire + anchor, input, 32);
+    wire[anchor + 32] = 0xfd; wire[anchor + 33] = (uint8_t)proof_size;
+    wire[anchor + 34] = (uint8_t)(proof_size >> 8);
+    memcpy(wire + proof, input + count * V6_IRONWOOD_STATEMENT_SIZE, proof_size);
+    return v6_wire_parse(wire, total, out) == V6_WIRE_OK;
+}
+
 /* Public upstream-verified PostNu6_3 statement(s) followed by full proof. */
 static bool check_stage(const struct v6_wire_view *view, const char *path, const char *theta)
 {
     uint8_t basis[IRONWOOD_INSTANCE_ROWS][32], w[32], vk[32], expected[32];
-    uint8_t input[7590], statement[V6_IRONWOOD_STATEMENT_SIZE];
+    uint8_t input[7590], wire[9400], statement[V6_IRONWOOD_STATEMENT_SIZE];
+    struct v6_wire_view full, short_view;
     struct ironwood_postnu63_stage stage, before;
     size_t size = 0;
     if (!load_instance_basis(basis, w) || !zcl_hex_decode(theta, expected, 32) ||
@@ -594,14 +614,16 @@ static bool check_stage(const struct v6_wire_view *view, const char *path, const
     for (uint64_t i = 0; i < view->ironwood.count; ++i)
         if (!v6_core_ironwood_statement(view, i, statement, sizeof statement) ||
             memcmp(statement, input + i * sizeof statement, sizeof statement)) return false;
-    uint8_t *proof = input + statements;
-    if (!ironwood_postnu63_first_challenge(view, proof, size, vk, basis, w, &stage).ok ||
+    if (!stage_wire(view, input, size, wire, sizeof wire, &full) ||
+        !ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
         stage.proof.position != view->ironwood.count * 320 || memcmp(stage.theta, expected, 32)) return false;
     memcpy(&before, &stage, sizeof before);
-    if (ironwood_postnu63_first_challenge(view, proof, size - 1, vk, basis, w, &stage).ok ||
+    short_view = full; --short_view.ironwood.proof.size;
+    if (ironwood_postnu63_first_challenge(&short_view, vk, basis, w, &stage).ok ||
         memcmp(&stage, &before, sizeof stage)) return false;
-    memset(proof, 0, 32);
-    if (ironwood_postnu63_first_challenge(view, proof, size, vk, basis, w, &stage).ok ||
+    size_t proof_offset = (size_t)(full.ironwood.proof.data - wire);
+    memset(wire + proof_offset, 0, 32);
+    if (ironwood_postnu63_first_challenge(&full, vk, basis, w, &stage).ok ||
         memcmp(&stage, &before, sizeof stage)) return false;
     size_t saved = size;
     return !ironwood_postnu63_proof_size(UINT64_MAX, &size).ok && size == saved;

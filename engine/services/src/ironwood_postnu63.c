@@ -31,16 +31,15 @@ static struct zcl_result absorb_instances(struct ironwood_postnu63_stage *stage,
 }
 
 struct zcl_result ironwood_postnu63_first_challenge(
-    const struct v6_wire_view *view, const uint8_t *proof, size_t proof_size,
-    const uint8_t vk[32], const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
+    const struct v6_wire_view *view, const uint8_t vk[32], const uint8_t basis[IRONWOOD_INSTANCE_ROWS][32],
     const uint8_t w[32], struct ironwood_postnu63_stage *out)
 {
-    if (!view || !proof || !vk || !basis || !w || !out)
+    if (!view || !view->ironwood.proof.data || !vk || !basis || !w || !out)
         return ZCL_ERR(-1, "Missing PostNu6_3 framing input");
     size_t expected;
     struct zcl_result result = ironwood_postnu63_proof_size(view->ironwood.count, &expected);
     if (!result.ok) return result;
-    if (proof_size != expected) return ZCL_ERR(-1, "Noncanonical PostNu6_3 proof length");
+    if (view->ironwood.proof.size != expected) return ZCL_ERR(-1, "Noncanonical PostNu6_3 proof length");
     struct ironwood_postnu63_stage next = {0};
     struct zcl_codec_reader vk_reader;
     uint8_t scalar[32], affine[64], wide[64];
@@ -48,7 +47,7 @@ struct zcl_result ironwood_postnu63_first_challenge(
     result = ironwood_halo2_transcript_init(&next.transcript);
     if (result.ok) result = ironwood_halo2_read_scalar(&next.transcript, &vk_reader, scalar, sizeof scalar);
     if (result.ok) result = absorb_instances(&next, view, basis, w);
-    zcl_codec_reader_init(&next.proof, proof, proof_size);
+    zcl_codec_reader_init(&next.proof, view->ironwood.proof.data, view->ironwood.proof.size);
     for (uint64_t i = 0; result.ok && i < view->ironwood.count; ++i)
         for (size_t j = 0; result.ok && j < 10; ++j)
             result = ironwood_halo2_read_point(&next.transcript, &next.proof, affine, sizeof affine);
