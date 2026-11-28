@@ -148,10 +148,13 @@ static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, co
 {
     struct main_state ms;
     main_state_init(&ms);
+    const struct research_rules_binding *installed = research_rules_binding();
     bool setup = SetDataDir(dir) &&
-                 test_block_map_insert(&ms.map_block_index, f->index[125].phashBlock,
-                                       &f->index[125]) &&
-                 research_rules_install(f->binding.params, f->binding.pin);
+                  test_block_map_insert(&ms.map_block_index, f->index[125].phashBlock,
+                                        &f->index[125]) &&
+                  (installed ? installed->params == f->binding.params &&
+                               installed->pin == f->binding.pin
+                             : research_rules_install(f->binding.params, f->binding.pin));
     candidate->header.hashPrevBlock = *f->index[125].phashBlock;
     struct chain_activation_controller ctl = { .ms = &ms, .params = f->binding.params };
     struct validation_state state;
@@ -181,7 +184,8 @@ static int activation_test(void)
     char raw[PATH_MAX], dir[PATH_MAX];
     test_make_tmpdir(raw, sizeof raw, "research_gate", "blocks");
     if (!platform_directory_canonical_real(raw, dir, sizeof dir)) return 1;
-    struct gate_fixture f = {0};
+    static struct gate_fixture f;
+    memset(&f, 0, sizeof f);
     bool selected = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD);
     bool ok = selected && gate_fixture_init(&f, dir);
     struct block b;
@@ -239,6 +243,7 @@ done:
     if (f.blocks) {
         for (int h = 0; h < 126; ++h) block_free(&f.blocks[h]);
         free(f.blocks);
+        f.blocks = NULL;
     }
     chain_params_select(CHAIN_MAIN);
     (void)test_rm_rf_recursive(raw);
@@ -257,5 +262,14 @@ int test_research_rules_gate(void)
         fprintf(stderr, "research rules gate: unbound pass failed\n");
         return 1;
     }
-    return unwalkable_size_test() + ceiling_test() + activation_test();
+    int failures = unwalkable_size_test() + ceiling_test();
+    failures += activation_test();
+    const struct research_rules_binding *installed = research_rules_binding();
+    const struct miner_signal_catalog_pin *pin = installed ? installed->pin : NULL;
+    failures += activation_test();
+    installed = research_rules_binding();
+    if (!installed || installed->pin != pin || !pin ||
+        pin->start != 103 || pin->window != 20)
+        failures++;
+    return failures;
 }
