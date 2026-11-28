@@ -317,19 +317,22 @@ static bool reducer_compare_paths(struct gate_fixture *f, struct main_state *ms,
     if (!reducer_hold_message(cf, control_ms, control, &rb, false)) return false;
     return compare_verdict("message", ra.admitted, &ra.verdict, rb.admitted, &rb.verdict);
 }
+static int reducer_results(bool held, bool message_held, bool restored, bool compared)
+{
+    if (!held || !message_held || !restored || !compared)
+        fprintf(stderr, "research gate: reducer hold/retry failed\n");
+    return held && message_held && restored && compared ? 0 : 1;
+}
 static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, const char *dir)
 {
-    struct main_state ms;
-    struct chain_activation_controller ctl;
+    struct main_state ms; struct chain_activation_controller ctl;
     bool setup = reducer_fixture_setup(f, &ms, &ctl, dir, false);
-    static struct gate_fixture cf;
-    cf = *f;
+    static struct gate_fixture cf; cf = *f;
     for (int h = 0; h < 126; ++h) {
         cf.index[h].pprev = h ? &cf.index[h - 1] : NULL;
         cf.index[h].phashBlock = &cf.index[h].hashBlock;
     }
-    struct main_state control_ms;
-    struct chain_activation_controller control;
+    struct main_state control_ms; struct chain_activation_controller control;
     bool control_ready = reducer_fixture_setup(&cf, &control_ms, &control, dir, true);
     candidate->header.hashPrevBlock = *f->index[125].phashBlock;
     bool held = setup && reducer_hold_paths(f, &ms, &ctl, candidate);
@@ -344,11 +347,8 @@ static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, co
                                                  &message_candidate);
     main_state_free(&control_ms);
     main_state_free(&ms);
-    SetDataDir("");
-    ClearDataDirCache();
-    if (!held || !message_held || !restored || !compared)
-        fprintf(stderr, "research gate: reducer hold/retry failed\n");
-    return held && message_held && restored && compared ? 0 : 1;
+    SetDataDir(""); ClearDataDirCache();
+    return reducer_results(held, message_held, restored, compared);
 }
 static int reducer_hold_selected(struct gate_fixture *f, struct block *candidate, const char *dir)
 {
