@@ -187,6 +187,15 @@ static int bo_st_cov_case(int want_rc, char roots[][RS_PATH], int nroots,
     if (!out)
         return die("z23-lint: tmpfile failed\n", "");
     int rc = bo_eval(&opts, out, out);
+    if (rc != want_rc) {
+        fprintf(stderr, "byte-order coverage selftest: expected %d, got %d\n",
+                want_rc, rc);
+        if (fseek(out, 0, SEEK_SET) == 0) {
+            char line[1024];
+            while (fgets(line, sizeof line, out))
+                fputs(line, stderr);
+        }
+    }
     fclose(out);
     return rc != want_rc;
 }
