@@ -3,6 +3,7 @@
 #include "services/ironwood_postnu63.h"
 #include "services/ironwood_postnu63_quotient.h"
 #include "services/ironwood_postnu63_gates.h"
+#include "services/ironwood_postnu63_domain.h"
 #include "base/hex.h"
 #include <stdio.h>
 #include <string.h>
@@ -115,6 +116,33 @@ static int gate_bad_inputs(struct ironwood_postnu63_stage *stage, const uint8_t 
     return 0;
 }
 
+static int domain_case(const struct ironwood_postnu63_stage *stage, size_t actions)
+{
+    static const char *const expected[2][3] = {
+        {"bcd1d6350c58259dcede7b8d5f051b1fdc61d73bedb546fed2273626fdbfbb0d",
+         "71ec2db10214459101885a8067300936d73070984c45322d6a5d3bd871aa890d",
+         "3f6d2be86b65aa881907602a90bc6ae25e1f78c8ee71300b878070f20a7fe319"},
+        {"ef7c2f41c1d8d0664e44a5eea91d99583a34024b88c1f8a0aee5a0a90c93f92c",
+         "8c87820476bbea638e9cf1b3196eadfa00bb9f640ab7c5a6ceda4238057ef917",
+         "1e0a739319825e7aeadad92e33101c11406fd5b12b0ef86180bf99ffd70c3712"}
+    };
+    uint8_t omega[32], want[3][32];
+    Q_CHECK(actions >= 1 && actions <= 2);
+    Q_CHECK(zcl_hex_decode("1378a1ad5a5428ef4ec2a1aabc889b7a0b606d4295d3cb319e11325fad501b18", omega, 32));
+    for (size_t i = 0; i < 3; ++i) Q_CHECK(zcl_hex_decode(expected[actions - 1][i], want[i], 32));
+    struct ironwood_postnu63_domain_rows rows, saved;
+    Q_CHECK(ironwood_postnu63_domain_rows(stage, omega, &rows).ok);
+    Q_CHECK(!memcmp(rows.l0, want[0], 32) && !memcmp(rows.last, want[1], 32) && !memcmp(rows.active, want[2], 32));
+    memcpy(&saved, &rows, sizeof saved);
+    struct ironwood_postnu63_stage bad = *stage;
+    memset(bad.x, 0, 32); bad.x[0] = 1;
+    Q_CHECK(!ironwood_postnu63_domain_rows(&bad, omega, &rows).ok);
+    memset(omega, 0, sizeof omega); omega[0] = 1;
+    Q_CHECK(!ironwood_postnu63_domain_rows(stage, omega, &rows).ok);
+    Q_CHECK(!memcmp(&rows, &saved, sizeof rows));
+    return 0;
+}
+
 static int gate_case(const char *proof_path, const char *terms_path, size_t actions,
                      const uint8_t *program, size_t program_size, const char *expected_h)
 {
@@ -128,6 +156,7 @@ static int gate_case(const char *proof_path, const char *terms_path, size_t acti
     stage.proof.buffer = proof + 163 * actions; stage.proof.length = proof_size; stage.proof.position = proof_size - 992;
     stage.advice_eval_offset = 736 * actions + 288; stage.fixed_eval_offset = 1536 * actions + 288;
     memcpy(stage.y, input, 32); memcpy(stage.x, input + 32, 32);
+    Q_CHECK(!domain_case(&stage, actions));
     for (size_t a = 0; a < actions; ++a) {
         Q_CHECK(ironwood_postnu63_custom_gates(&stage, a, program, program_size, values, sizeof values).ok);
         Q_CHECK(!memcmp(values, input + 64 + a * 215 * 32, sizeof values));
