@@ -6,6 +6,7 @@
 #include "services/ironwood_halo2_transcript.h"
 #include "services/ironwood_postnu63.h"
 #include "services/ironwood_ipa.h"
+#include "crypto/sha256.h"
 #include "codec/cursor.h"
 #include "base/hex.h"
 #include "encoding/utilstrencodings.h"
@@ -1121,6 +1122,35 @@ static const char *const ipa_wide[2][12] = {
     },
 };
 
+/* SHA256 over all 2048 canonical weights, derived independently from each
+ * upstream 0.4.0 proof trace by multiplying challenge subsets by -c. */
+static bool check_ipa_weights(size_t which, const uint8_t u[IRONWOOD_IPA_ROUNDS][32])
+{
+    static const char *const initial[] = {
+        "ee89c5db280fbfecf24b3ab6d46cb8e080dd34fac5da017c7f0f07ea6c627910",
+        "a355eeef3b753ff1e344792e6c78ee937364315f681550094bc4f589d0279531"};
+    static const char *const digest[] = {
+        "d60dbd5158128e348743b95980c791f5dd4b7ea9551e52e2c010a70f615a66a4",
+        "9e5150cc32ced47b7dd5dbf681b47500e6bfe7f64adcb7da9eb62e6e1a7c52e6"};
+    const size_t bytes = (size_t)IRONWOOD_IPA_GENERATORS * 32;
+    uint8_t seed[32], expected[32], got[32], changed[IRONWOOD_IPA_ROUNDS][32];
+    uint8_t *out = malloc(bytes);
+    if (!out) return false;
+    bool ok = zcl_hex_decode(initial[which], seed, 32) && zcl_hex_decode(digest[which], expected, 32) &&
+        ironwood_ipa_generator_weights(seed, u, out, bytes).ok && !memcmp(out, seed, 32);
+    struct sha256_ctx hash;
+    if (ok) { sha256_init(&hash); sha256_write(&hash, out, bytes); sha256_finalize(&hash, got); ok = !memcmp(got, expected, 32); }
+    memcpy(changed, u, sizeof changed); changed[0][0] ^= 1;
+    if (ok) ok = ironwood_ipa_generator_weights(seed, changed, out, bytes).ok;
+    if (ok) { sha256_init(&hash); sha256_write(&hash, out, bytes); sha256_finalize(&hash, got); ok = memcmp(got, expected, 32) != 0; }
+    memset(out, 0xa5, bytes); memset(changed[0], 0xff, 32);
+    if (ok) ok = !ironwood_ipa_generator_weights(seed, changed, out, bytes).ok &&
+        !ironwood_ipa_generator_weights(seed, u, out, bytes - 1).ok;
+    for (size_t i = 0; ok && i < bytes; ++i) ok = out[i] == 0xa5;
+    free(out);
+    return ok;
+}
+
 /* Halo2 0.4.0 x3 and round challenges in proof transcript order. Expected b
  * was independently calculated by expanding the 2048 generator coefficients
  * and evaluating the resulting polynomial over Vesta Fp. */
@@ -1133,7 +1163,8 @@ static bool check_ipa_coefficient_case(size_t which, const char *want)
     for (size_t i = 0; i < IRONWOOD_IPA_ROUNDS; ++i)
         if (!zcl_hex_decode(ipa_wide[which][i + 1], wide, 64) ||
             !ironwood_halo2_vesta_scalar(wide, sizeof wide, u[i], sizeof u[i]).ok) return false;
-    if (!ironwood_ipa_compute_b(x, u, out).ok || memcmp(out, expected, 32)) return false;
+    if (!ironwood_ipa_compute_b(x, u, out).ok || memcmp(out, expected, 32) ||
+        !check_ipa_weights(which, u)) return false;
     u[0][0] ^= 1;
     if (!ironwood_ipa_compute_b(x, u, out).ok || !memcmp(out, expected, 32)) return false;
     memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof before);
