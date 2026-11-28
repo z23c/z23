@@ -61,7 +61,8 @@ static inline enum research_block_size_verdict research_block_size_measure(
 {
     if (!limit || limit == SIZE_MAX || !block)
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
-    if (block->header.nSolutionSize > MAX_SOLUTION_SIZE)
+    if (block->header.nSolutionSize > MAX_SOLUTION_SIZE ||
+        (block->num_vtx && !block->vtx))
         return RESEARCH_BLOCK_SIZE_UNAVAILABLE;
     unsigned char *bytes = zcl_malloc(limit + 1, "research block size");
     if (!bytes)

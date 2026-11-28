@@ -132,6 +132,18 @@ static int ceiling_test(void)
     return exact && over && unchanged ? 0 : 1;
 }
 
+static int unwalkable_size_test(void)
+{
+    struct block b;
+    block_init(&b);
+    b.num_vtx = 1;
+    bool missing = research_block_size_measure(&b, RESEARCH_BLOCK_SIZE_LIMIT) ==
+                   RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    bool null = research_block_size_measure(NULL, RESEARCH_BLOCK_SIZE_LIMIT) ==
+                RESEARCH_BLOCK_SIZE_UNAVAILABLE;
+    return missing && null ? 0 : 1;
+}
+
 static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, const char *dir)
 {
     struct main_state ms;
@@ -245,5 +257,5 @@ int test_research_rules_gate(void)
         fprintf(stderr, "research rules gate: unbound pass failed\n");
         return 1;
     }
-    return ceiling_test() + activation_test();
+    return unwalkable_size_test() + ceiling_test() + activation_test();
 }
