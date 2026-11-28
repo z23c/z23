@@ -82,6 +82,26 @@ static enum utxo_ironwood_result session_prepare(struct session_fixture *f, int 
     return utxo_ironwood_session_prepare(f->db, &f->index[height], &f->bodies[height],
         session_reader, NULL, f, pending);
 }
+static bool genesis_cases(struct session_fixture *f)
+{
+    struct utxo_ironwood_pending p, before;
+    if (!sql(f->db, "BEGIN")) return false;
+    memset(&p, 0xa5, sizeof p); memcpy(&before, &p, sizeof p);
+    struct transaction *tx = &f->bodies[0].vtx[0];
+    tx->hash.data[0] ^= 1;
+    enum utxo_ironwood_result r = session_prepare(f, 0, &p);
+    tx->hash.data[0] ^= 1;
+    if (r != UTXO_IRONWOOD_LOCAL_ERROR || memcmp(&p, &before, sizeof p)) return false;
+    struct tx_in *vin = tx->vin;
+    tx->vin = NULL;
+    r = session_prepare(f, 0, &p);
+    tx->vin = vin;
+    if (r != UTXO_IRONWOOD_LOCAL_ERROR || memcmp(&p, &before, sizeof p)) return false;
+    if (session_prepare(f, 0, &p) != UTXO_IRONWOOD_OK || p.checkpoint.height != 0 ||
+        p.checkpoint.count != 0 || !sql(f->db, "ROLLBACK")) return false;
+    utxo_ironwood_session_reset();
+    return true;
+}
 static bool rollback_first(struct session_fixture *f)
 {
     struct utxo_ironwood_pending p;
@@ -128,7 +148,7 @@ static bool corruption_refused(struct session_fixture *f)
 int test_utxo_apply_ironwood_session(void)
 {
     struct session_fixture f = {0};
-    bool ok = fixture_init(&f) && first_transaction(&f) && cold_replay(&f) && corruption_refused(&f);
+    bool ok = fixture_init(&f) && genesis_cases(&f) && first_transaction(&f) && cold_replay(&f) && corruption_refused(&f);
     utxo_ironwood_session_reset();
     if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
     for (size_t i = 0; i < 4; ++i) block_free(&f.bodies[i]);
