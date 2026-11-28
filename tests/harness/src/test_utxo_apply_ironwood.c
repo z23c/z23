@@ -58,8 +58,8 @@ static bool fixture_init(struct ironwood_fixture *f)
         sqlite3_open(":memory:", &f->db) != SQLITE_OK) return false;
     struct ironwood_note_frontier empty = {0};
     if (!ironwood_note_frontier_extend(&empty, NULL, 0, f->params, sizeof f->params, f->parent.root).ok ||
-        !ironwood_checkpoint_ensure_schema(f->db) ||
-        sqlite3_exec(f->db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK) return false;
+        sqlite3_exec(f->db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK ||
+        !ironwood_checkpoint_ensure_schema(f->db)) return false;
     uint8_t genesis_parent[32] = {0};
     f->h0.hashBlock.data[0] = 1;
     f->h0.phashBlock = &f->h0.hashBlock;
