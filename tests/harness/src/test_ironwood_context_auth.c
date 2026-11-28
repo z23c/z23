@@ -37,7 +37,11 @@ static bool load_transaction(const char *path, uint8_t *wire, size_t size, struc
     struct byte_stream stream;
     stream_init_from_data(&stream, wire, size);
     transaction_init(tx);
-    return transaction_v6_decode_prefix(tx, &stream, size) && !stream_remaining(&stream);
+    if (!transaction_v6_decode_prefix(tx, &stream, size) || stream_remaining(&stream)) {
+        transaction_free(tx);
+        return false;
+    }
+    return true;
 }
 static bool fixture_init(struct auth_fixture *f)
 {
@@ -70,25 +74,40 @@ static bool payment_controls(struct auth_fixture *f, struct transaction *tx)
     tx->v6_wire.data[offset] ^= 1;
     return r == IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
 }
+static bool wrong_context_controls(struct auth_fixture *f, struct transaction *tx)
+{
+    if (ironwood_context_authenticate(tx, SELECTED_BRANCH, 0, coin_lookup, f) != IRONWOOD_CONTEXT_UNSUPPORTED) return false;
+    chain_params_select(CHAIN_MAIN);
+    enum ironwood_context_auth_result network = authenticate(f, tx, SELECTED_BRANCH);
+    if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD) || network != IRONWOOD_CONTEXT_UNSUPPORTED) return false;
+    f->script[3] ^= 1;
+    bool inserted = coins_kv_add(f->db, f->txid, 0, 1250000000, 0, true, f->script, 25);
+    f->script[3] ^= 1;
+    if (!inserted) return false;
+    enum ironwood_context_auth_result wrong_script = authenticate(f, tx, SELECTED_BRANCH);
+    return coins_kv_add(f->db, f->txid, 0, 1250000000, 0, true, f->script, 25) &&
+        wrong_script == IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
+}
 static bool proof_and_model_controls(struct auth_fixture *f, struct transaction *tx)
 {
     struct v6_wire_view view;
-    if (v6_core_parse(tx->v6_wire.data, tx->v6_wire.size, &view) != V6_WIRE_OK || !view.ironwood.proof.size || !tx->num_vout) return false;
+    if (v6_core_parse(tx->v6_wire.data, tx->v6_wire.size, &view) != V6_WIRE_OK || !view.ironwood.proof.size) return false;
     size_t offset = (size_t)(view.ironwood.proof.data - tx->v6_wire.data);
     tx->v6_wire.data[offset] ^= 1;
     enum ironwood_context_auth_result proof = authenticate(f, tx, SELECTED_BRANCH);
     tx->v6_wire.data[offset] ^= 1;
-    int64_t value = tx->vout[0].value;
-    tx->vout[0].value ^= 1;
-    enum ironwood_context_auth_result model = authenticate(f, tx, SELECTED_BRANCH);
-    tx->vout[0].value = value;
-    return proof == IRONWOOD_CONTEXT_CHECK_UNAVAILABLE && model == IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
+    return proof == IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
 }
 static bool withdrawal_control(struct auth_fixture *f)
 {
     uint8_t wire[9200]; struct transaction tx;
     if (!load_transaction("tests/fixtures/ironwood/postnu63-h1-reward-withdrawal.v6", wire, sizeof wire, &tx)) return false;
-    bool ok = tx.num_vin == 0 && authenticate(f, &tx, SELECTED_BRANCH) == IRONWOOD_CONTEXT_COMPONENTS_OK;
+    bool ok = tx.num_vin == 0 && tx.num_vout == 1 && authenticate(f, &tx, SELECTED_BRANCH) == IRONWOOD_CONTEXT_COMPONENTS_OK;
+    if (ok) {
+        tx.vout[0].value ^= 1;
+        ok = authenticate(f, &tx, SELECTED_BRANCH) == IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
+        tx.vout[0].value ^= 1;
+    }
     transaction_free(&tx);
     return ok;
 }
@@ -98,7 +117,7 @@ int test_ironwood_context_auth(void)
     bool loaded = false;
     bool ok = chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD) && fixture_init(&f);
     if (ok) { loaded = load_transaction("tests/fixtures/ironwood/postnu63-h1-reward-spend.v6", wire, sizeof wire, &tx); ok = loaded; }
-    if (ok) ok = payment_controls(&f, &tx) && proof_and_model_controls(&f, &tx) && withdrawal_control(&f);
+    if (ok) ok = payment_controls(&f, &tx) && wrong_context_controls(&f, &tx) && proof_and_model_controls(&f, &tx) && withdrawal_control(&f);
     if (loaded) transaction_free(&tx);
     if (f.db && sqlite3_close(f.db) != SQLITE_OK) ok = false;
     chain_params_select(CHAIN_MAIN);

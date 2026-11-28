@@ -20,7 +20,9 @@ enum ironwood_context_auth_result {
 /* expected_branch comes from trusted chain context, never from wire bytes.
  * Supports only non-coinbase private-profile v6 transactions with zero or one
  * transparent input, an Ironwood bundle and no Sapling or Orchard bundle.
- * A transparent input must spend an exact P2PKH output. Other shapes hold;
+ * The trusted caller must supply the applicable script flags, including P2SH
+ * and CHECKLOCKTIMEVERIFY; omitted required flags hold. A transparent input
+ * must spend an exact P2PKH output. Other shapes hold;
  * they are not rejected. Input transaction and coin view remain unchanged. */
 enum ironwood_context_auth_result ironwood_context_authenticate(
     const struct transaction *tx, uint32_t expected_branch, unsigned int script_flags,

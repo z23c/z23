@@ -7,6 +7,7 @@
 #include "controllers/transaction_v6_transparent.h"
 #include "primitives/block.h"
 #include "script/script.h"
+#include "script/script_flags.h"
 #include "services/ironwood_checked_wire.h"
 #include <string.h>
 
@@ -42,7 +43,9 @@ enum ironwood_context_auth_result ironwood_context_authenticate(
     const struct transaction *tx, uint32_t expected_branch, unsigned int script_flags,
     utxo_apply_lookup_fn resolve, void *user)
 {
-    if (!private_profile() || !tx || !expected_branch) return IRONWOOD_CONTEXT_UNSUPPORTED;
+    const unsigned int required = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
+    if (!private_profile() || !tx || !expected_branch || (script_flags & required) != required)
+        return IRONWOOD_CONTEXT_UNSUPPORTED;
     struct v6_wire_view view;
     if (!ironwood_checked_wire(tx, MAX_BLOCK_SIZE, &view).ok)
         return IRONWOOD_CONTEXT_CHECK_UNAVAILABLE;
