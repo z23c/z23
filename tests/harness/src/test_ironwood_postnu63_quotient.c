@@ -143,10 +143,37 @@ static int domain_case(const struct ironwood_postnu63_stage *stage, size_t actio
     return 0;
 }
 
-static int gate_case(const char *proof_path, const char *terms_path, size_t actions,
-                     const uint8_t *program, size_t program_size, const char *expected_h)
+static int lookup_refusals(struct ironwood_postnu63_stage *stage, const uint8_t omega[32],
+                           const uint8_t *program, size_t size)
 {
-    uint8_t proof[7590], input[(2 + 2 * 215) * 32], values[IRONWOOD_POSTNU63_GATE_BYTES], expected[32], h[32];
+    uint8_t out[IRONWOOD_POSTNU63_LOOKUP_BYTES], before[IRONWOOD_POSTNU63_LOOKUP_BYTES];
+    memset(out, 0xa5, sizeof out); memcpy(before, out, sizeof out);
+    const uint8_t bad_special[] = {'I', 0xf3, 0x01}, short_special[] = {'I', 0xf4};
+    Q_CHECK(!ironwood_postnu63_lookup_gates(stage, 0, omega, bad_special, sizeof bad_special, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_lookup_gates(stage, 0, omega, short_special, sizeof short_special, out, sizeof out).ok);
+    Q_CHECK(!ironwood_postnu63_lookup_gates(stage, 0, omega, program, size - 1, out, sizeof out).ok);
+    struct ironwood_postnu63_stage invalid = *stage;
+    ++invalid.lookup_eval_offset;
+    Q_CHECK(!ironwood_postnu63_lookup_gates(&invalid, 0, omega, program, size, out, sizeof out).ok);
+    memset(invalid.theta, 0xff, 32); --invalid.lookup_eval_offset;
+    Q_CHECK(!ironwood_postnu63_lookup_gates(&invalid, 0, omega, program, size, out, sizeof out).ok);
+    Q_CHECK(!memcmp(out, before, sizeof out));
+    return 0;
+}
+
+static int gate_case(const char *proof_path, const char *terms_path, size_t actions,
+                     const uint8_t *program, size_t program_size, const uint8_t *lookup, size_t lookup_size,
+                     const char *expected_h)
+{
+    static const char *const challenges[2][3] = {
+        {"c646b63addb91bb5431ddffc0f0f054c4edcea95143b7006d5fe3f3e6d41000c",
+         "1b6a36e4d9361552dc592493d87e3570d0fcb8ed44b81727c4780d9ad73a3b36",
+         "973504d5f2f8e6bf4896eb0a60aa7c894f4bf5fb73eb29b1a431e213dda4393f"},
+        {"9b4c4db54b5587629516968e6cba32a1c9239bee4c8e5d22dd534b79ed27bc34",
+         "8a03d35c2b5547a838e80fa0d0e2a74a3a274758025c1f382035bd8af31ee726",
+         "35d7dea4c45b405f44e0b08be51a01de556790d375a158ba97e29e23b960e42f"}
+    };
+    uint8_t proof[7590], input[(2 + 2 * 215) * 32], values[IRONWOOD_POSTNU63_GATE_BYTES], expected[32], h[32], omega[32];
     size_t proof_size = 2720 + actions * 2272, term_size = actions * 215 * 32;
     Q_CHECK(fixture_read(proof_path, proof, 163 * actions + proof_size));
     Q_CHECK(fixture_read(terms_path, input, 64 + term_size));
@@ -155,27 +182,39 @@ static int gate_case(const char *proof_path, const char *terms_path, size_t acti
     stage.actions = actions; stage.phase = IRONWOOD_POSTNU63_EVAL_X1;
     stage.proof.buffer = proof + 163 * actions; stage.proof.length = proof_size; stage.proof.position = proof_size - 992;
     stage.advice_eval_offset = 736 * actions + 288; stage.fixed_eval_offset = 1536 * actions + 288;
+    stage.lookup_eval_offset = 1792 * actions + 1728;
     memcpy(stage.y, input, 32); memcpy(stage.x, input + 32, 32);
+    Q_CHECK(zcl_hex_decode(challenges[actions - 1][0], stage.theta, 32));
+    Q_CHECK(zcl_hex_decode(challenges[actions - 1][1], stage.beta, 32));
+    Q_CHECK(zcl_hex_decode(challenges[actions - 1][2], stage.gamma, 32));
+    Q_CHECK(zcl_hex_decode("1378a1ad5a5428ef4ec2a1aabc889b7a0b606d4295d3cb319e11325fad501b18", omega, 32));
     Q_CHECK(!domain_case(&stage, actions));
     for (size_t a = 0; a < actions; ++a) {
         Q_CHECK(ironwood_postnu63_custom_gates(&stage, a, program, program_size, values, sizeof values).ok);
         Q_CHECK(!memcmp(values, input + 64 + a * 215 * 32, sizeof values));
         memcpy(input + 64 + a * 215 * 32, values, sizeof values);
+        Q_CHECK(ironwood_postnu63_lookup_gates(&stage, a, omega, lookup, lookup_size, values, IRONWOOD_POSTNU63_LOOKUP_BYTES).ok);
+        Q_CHECK(!memcmp(values, input + 64 + (a * 215 + 200) * 32, IRONWOOD_POSTNU63_LOOKUP_BYTES));
+        memcpy(input + 64 + (a * 215 + 200) * 32, values, IRONWOOD_POSTNU63_LOOKUP_BYTES);
     }
     Q_CHECK(ironwood_postnu63_expected_h(&stage, input + 64, term_size, h).ok && !memcmp(h, expected, 32));
     Q_CHECK(!gate_refusals(&stage, program, program_size));
     Q_CHECK(!gate_bad_inputs(&stage, program, program_size, proof + 163 * actions));
+    Q_CHECK(!lookup_refusals(&stage, omega, lookup, lookup_size));
     return 0;
 }
 
 static int gate_cases(void)
 {
-    uint8_t program[48484];
+    /* Lookup RPN SHA-256 479bada7b99fd3b27431bb2e81c39a457db0f0e1e73ea39cb725fb2a17f36b11;
+     * encoded bytes SHA-256 8fb1c0ce2729b3be8eaa6afe2f418f70248b62d358500f15c03599b3358f630c. */
+    uint8_t program[48484], lookup[1159];
     Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-custom-gates.bin", program, sizeof program));
+    Q_CHECK(fixture_read("tests/fixtures/ironwood/postnu63-lookup-gates.bin", lookup, sizeof lookup));
     Q_CHECK(!gate_case("tests/fixtures/ironwood/postnu63-coinbase.bin", "tests/fixtures/ironwood/postnu63-quotient-one.bin",
-        1, program, sizeof program, "4b60b489fba78511e7852cdfb8cd499053d50db264e2e389bee82f12d23f9415"));
+        1, program, sizeof program, lookup, sizeof lookup, "4b60b489fba78511e7852cdfb8cd499053d50db264e2e389bee82f12d23f9415"));
     Q_CHECK(!gate_case("tests/fixtures/ironwood/postnu63-funded.bin", "tests/fixtures/ironwood/postnu63-quotient-two.bin",
-        2, program, sizeof program, "b6a266e4e45ca24645108adbdaba49e232a16542d4c6a2fe0635e2bb7c5de02a"));
+        2, program, sizeof program, lookup, sizeof lookup, "b6a266e4e45ca24645108adbdaba49e232a16542d4c6a2fe0635e2bb7c5de02a"));
     return 0;
 }
 
