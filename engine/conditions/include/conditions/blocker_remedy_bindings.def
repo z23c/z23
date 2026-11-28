@@ -520,3 +520,5 @@ ZCL_BLOCKER_REMEDY(rpc.start_failed,                            rpc_start_failed
  * a -reindex-explorer, truncates and re-walks projections, which is a person's
  * call; a later successful unwind clears it by itself. */
 ZCL_BLOCKER_REMEDY(explorer.unwind_failed,                      OWNER)
+/* Private Ironwood waits for validated mode, authorization evidence or replay. */
+ZCL_BLOCKER_REMEDY(utxo_apply.ironwood,                           OWNER)

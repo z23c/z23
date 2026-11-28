@@ -404,3 +404,15 @@ ZCL_BLOCKER_DECISION(explorer.unwind_failed,
     "during which explorer, name and token answers are incomplete. "
     "Consensus, relay and wallet custody are unaffected either way - the "
     "projection is rebuildable and never consulted by consensus.")
+
+ZCL_BLOCKER_DECISION(utxo_apply.ironwood,
+    "The private Ironwood reducer is waiting for the prerequisite named in "
+    "the blocker: full validation mode, v6 authorization evidence, or an "
+    "authenticated checkpoint replay. Replay progresses in bounded steps; "
+    "a successful preparation clears the hold. If full validation mode is "
+    "disabled, select a fully validated mode. If authorization evidence is "
+    "not implemented, wait for a reviewed implementation before advancing "
+    "the private chain. Investigate unavailable or inconsistent history "
+    "using the separate fatal diagnostic; do not treat a local integrity "
+    "failure as proof that a network block is invalid. No automatic data "
+    "repair or consensus bypass is provided.")
