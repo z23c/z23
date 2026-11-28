@@ -2499,7 +2499,7 @@ static int tgs_run_weighted(const char *root, const char *weights, const char *p
 
 #if !defined(_WIN32)
 static bool tgs_priority_fixture_run(const char *root, const char *scratch,
-    const char *const *changed, char *out, size_t cap)
+    const char *const *changed, char *out, size_t cap, char *newest, size_t newest_cap)
 {
     char saved[256] = "";
     const char *prior = getenv("ZCL_DEVLOOP_TEST_PROCESS");
@@ -2507,8 +2507,8 @@ static bool tgs_priority_fixture_run(const char *root, const char *scratch,
     if (had && strlen(prior) >= sizeof(saved)) return false;
     if (had) snprintf(saved, sizeof(saved), "%s", prior);
     if (setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0) return false;
-    bool ok = zcl_dev_proof_test_failure_priority(root, scratch,
-        "test_hex_codec,test_codec_cursor", changed, 1, out, cap);
+    bool ok = zcl_dev_proof_test_failure_priority_choice(root, scratch,
+        "test_hex_codec,test_codec_cursor", changed, 1, out, cap, newest, newest_cap);
     int restored = had ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1)
                        : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
     return ok && restored == 0;
@@ -2525,15 +2525,15 @@ static bool tgs_priority_git(const char *root, const char *args, char *out, size
 }
 
 static bool tgs_priority_timed_attempt(const char *root, const char *local,
-                                       const char *base, int when)
+                                       const char *base, int when, const char *group)
 {
     char attempt[PATH_MAX], request[PATH_MAX + 32], body[320];
     if (!zcl_dev_proof_test_failure_attempt_prepare(root, local, base, attempt, sizeof(attempt)) ||
         snprintf(request, sizeof(request), "%s/request", attempt) >= (int)sizeof(request) ||
         snprintf(body, sizeof(body), "zcl.dev_proof_request.v1\n%s\n%s\n%d\n1\n", local, base, when) >= (int)sizeof(body) ||
         !tgs_write_file(request, body)) return false;
-    return zcl_dev_proof_test_failure_attempt_settle(root, local, base, attempt,
-        "child_proof_failed_exit_1\ntest test_hex_codec: FAIL at changed.c:1");
+    if (snprintf(body, sizeof body, "child_proof_failed_exit_1\ntest %s: FAIL at changed.c:1", group) >= (int)sizeof body) return false;
+    return zcl_dev_proof_test_failure_attempt_settle(root, local, base, attempt, body);
 }
 
 static int test_priority_recent_history(void)
@@ -2567,11 +2567,16 @@ static int test_priority_recent_history(void)
         const char *old = first_newer ? second : first;
         const char *recent = first_newer ? first : second;
         const char *changed[] = {first_newer ? "first.c" : "second.c"};
-        for (int i = 0; i < 17; i++) ASSERT(tgs_priority_timed_attempt(canonical, old, base, 10));
-        ASSERT(tgs_priority_timed_attempt(canonical, recent, base, 20));
+        for (int i = 0; i < 17; i++) ASSERT(tgs_priority_timed_attempt(canonical, old, base, 10, "test_hex_codec"));
+        ASSERT(tgs_priority_timed_attempt(canonical, recent, base, 20, "test_hex_codec"));
         snprintf(scratch, sizeof(scratch), "%s/priority-diff", canonical);
-        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority)));
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority), NULL, 0));
         ASSERT_STR_EQ(priority, "test_hex_codec");
+        ASSERT(tgs_priority_timed_attempt(canonical, recent, base, 30, "test_codec_cursor"));
+        char newest[256];
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority), newest, sizeof newest));
+        ASSERT_STR_EQ(priority, "test_hex_codec,test_codec_cursor");
+        ASSERT_STR_EQ(newest, "test_codec_cursor");
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();
     } _test_next:;
@@ -2604,13 +2609,13 @@ static int test_priority_bound_history_dispatch(void)
                "child_proof_failed_exit_1\ntest test_hex_codec: FAIL at changed.c:1"));
         snprintf(scratch, sizeof(scratch), "%s/priority-diff", canonical);
         const char *changed[] = {"changed.c"}, *other[] = {"other.c"};
-        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority)));
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority), NULL, 0));
         ASSERT_STR_EQ(priority, "test_hex_codec");
         snprintf(flag, sizeof(flag), "--failure-priority=%s", priority);
         ASSERT(tgs_run_weighted(canonical, "test_codec_cursor\t9\n",
                flag, out, sizeof(out)) == 0);
         ASSERT(tgs_dispatch_pos(out, "test_hex_codec") < tgs_dispatch_pos(out, "test_codec_cursor"));
-        ASSERT(tgs_priority_fixture_run(canonical, scratch, other, priority, sizeof(priority)));
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, other, priority, sizeof(priority), NULL, 0));
         ASSERT_STR_EQ(priority, "");
         const char *fake = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         ASSERT(zcl_dev_proof_test_failure_attempt_prepare(canonical, fake, base, legacy, sizeof(legacy)));
@@ -2618,7 +2623,7 @@ static int test_priority_bound_history_dispatch(void)
                "child_proof_failed_exit_1\ntest test_hex_codec: FAIL at changed.c:1"));
         snprintf(path, sizeof(path), "%s/logs/failure.txt", legacy);
         ASSERT(tgs_write_file(path, "child_proof_failed_exit_1\ntest test_hex_codec: FAIL at changed.c:1\n"));
-        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority)));
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority), NULL, 0));
         ASSERT_STR_EQ(priority, "test_hex_codec");
         struct zcl_dev_proof_status status = {0};
         ASSERT(zcl_dev_proof_status_read(canonical, local, base, &status));
@@ -2626,7 +2631,7 @@ static int test_priority_bound_history_dispatch(void)
         snprintf(path, sizeof(path), "%s/.cache/zcl-dev-proof/attempts/%s/logs/failure.txt",
                  canonical, status.failure_identity.attempt);
         ASSERT(unlink(path) == 0 && symlink("../request", path) == 0);
-        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority)));
+        ASSERT(tgs_priority_fixture_run(canonical, scratch, changed, priority, sizeof(priority), NULL, 0));
         ASSERT_STR_EQ(priority, "");
         ASSERT(test_rm_rf_recursive(root) == 0);
         PASS();

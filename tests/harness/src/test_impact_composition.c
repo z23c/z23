@@ -14022,6 +14022,62 @@ static int test_ic_proof_test_accounting_refuses_reuse(void)
     return failures;
 }
 
+static int test_ic_proof_failure_screen(void)
+{
+    static const char red[] =
+        "==================== test_hex_codec (FAIL, 0.01s) ====================\n"
+        "SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=0 "
+        "groups_gated=1 groups_failed=1 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t\n";
+    static const char cached[] =
+        "==================== test_hex_codec (FAIL, 0.01s) ====================\n"
+        "SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=1 "
+        "groups_gated=0 groups_failed=1 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t\n";
+    static const char red_script[] =
+        "#!/bin/sh\n"
+        "[ \"$1\" = \"--exact=test_hex_codec\" ] && [ \"$2\" = \"--no-cache\" ] && "
+        "[ \"$3\" = \"--activate-proof-contracts\" ] || exit 9\n"
+        "printf '==================== test_hex_codec (FAIL, 0.01s) ====================\\n'\n"
+        "printf 'SUITE VERDICT mode=cold groups_total=2 groups_ran=1 groups_cached=0 groups_gated=1 groups_failed=1 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=t\\n'\n"
+        "exit 1\n";
+    static const char green_script[] = "#!/bin/sh\nexit 0\n";
+    int failures = 0;
+    TEST("proof failure screen: two current cold failures stop, inconclusive never supplies a pass") {
+        char dir[4096], log[4096], runner[4096], testlog[4096];
+        test_make_tmpdir(dir, sizeof dir, "proof_failure_screen", "current");
+        ASSERT(snprintf(log,sizeof log,"%s/red.log",dir) < (int)sizeof log);
+        ASSERT(snprintf(runner,sizeof runner,"%s/runner",dir) < (int)sizeof runner);
+        ASSERT(snprintf(testlog,sizeof testlog,"%s/screen-fixture.test.log",dir) < (int)sizeof testlog);
+        ASSERT(ic_write(dir,"red.log",red));
+        ASSERT(zcl_dev_proof_test_screen_failed(log,"test_hex_codec",1,ZCL_DEV_PROOF_KILL_NONE));
+        ASSERT(!zcl_dev_proof_test_screen_failed(log,"test_codec_cursor",1,ZCL_DEV_PROOF_KILL_NONE));
+        ASSERT(!zcl_dev_proof_test_screen_failed(log,"test_hex_codec",0,ZCL_DEV_PROOF_KILL_NONE));
+        ASSERT(!zcl_dev_proof_test_screen_failed(log,"test_hex_codec",1,ZCL_DEV_PROOF_KILL_CANCELLED));
+        ASSERT(ic_write(dir,"red.log",cached));
+        ASSERT(!zcl_dev_proof_test_screen_failed(log,"test_hex_codec",1,ZCL_DEV_PROOF_KILL_NONE));
+        /* ede0989 sole-retry banner, followed by the actual full-suite
+         * accounting: a full proof log must not impersonate a solo screen. */
+        ASSERT(ic_write(dir,"red.log",
+            "==================== test_utxo_apply_stage (FAIL, 0.211s) ====================\n"
+            "SUITE VERDICT mode=cold groups_total=1680 groups_ran=1669 groups_cached=0 groups_gated=11 groups_failed=2 self_skips=0 env_unobserved=0 load_flaky=1 toolkey=f2915559d95a\n"));
+        ASSERT(!zcl_dev_proof_test_screen_failed(log,"test_utxo_apply_stage",1,ZCL_DEV_PROOF_KILL_NONE));
+        ASSERT(ic_write(dir,"red.log",
+            "==================== test_utxo_apply_stage (FAIL, 0.211s) ====================\n"
+            "SUITE VERDICT mode=cold groups_total=1680 groups_ran=1 groups_cached=0 groups_gated=1679 groups_failed=1 self_skips=0 env_unobserved=0 load_flaky=0 toolkey=f2915559d95a\n"));
+        ASSERT(zcl_dev_proof_test_screen_failed(log,"test_utxo_apply_stage",1,ZCL_DEV_PROOF_KILL_NONE));
+        ASSERT(ic_write(dir,"runner",red_script) && chmod(runner,0700) == 0);
+        unsigned children = 0;
+        ASSERT(zcl_dev_proof_test_failure_screen(dir,dir,runner,"test_hex_codec",&children));
+        ASSERT(children == 2 && access(testlog,F_OK) == 0);
+        ASSERT(unlink(testlog) == 0 && ic_write(dir,"runner",green_script) && chmod(runner,0700) == 0);
+        children = 0;
+        ASSERT(!zcl_dev_proof_test_failure_screen(dir,dir,runner,"test_hex_codec",&children));
+        ASSERT(children == 1 && access(testlog,F_OK) != 0);
+        ASSERT(test_rm_rf_recursive(dir) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Routed-group preflight parser: the exact reader the proof worker runs on
  * the runner's --cache-probe-only output before the test dimension decides
  * what still needs execution. The SUMMARY carries the counts and the PROBE
@@ -18808,6 +18864,7 @@ static int ic_run_remainder(bool include_bundle)
     failures += test_ic_generation_refuses_forged_verdict();
     failures += test_ic_proof_test_dimension_runs_cold();
     failures += test_ic_proof_test_accounting_refuses_reuse();
+    failures += test_ic_proof_failure_screen();
     failures += test_ic_preflight_parse();
     failures += test_ic_shadow_seed_note();
     failures += test_ic_preflight_skips_only_empty_store();

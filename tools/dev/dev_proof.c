@@ -11418,6 +11418,7 @@ struct dp_worker {
     char groups[PROOF_GROUPS_MAX];
     char only[PROOF_GROUPS_MAX + 8];
     char failure_priority[PROOF_GROUPS_MAX + 32];
+    char failure_screen_group[ZCL_TEST_GROUP_FULL_MAX];
     /* Warm-start sidecar inputs, held here so the bundle step can rewrite
      * the sidecar with both build phases timed. */
     const char *warm_compile_mode;
@@ -13389,6 +13390,8 @@ struct dp_priority_scan {
     const char **selected;
     size_t selected_count, diffs, seen, ignored, limited, hints;
     bool *matched;
+    char newest_group[ZCL_TEST_GROUP_FULL_MAX];
+    char newest_attempt[144];
     struct zcl_dev_proof_history_failure candidates[DP_PRIORITY_DIFF_LIMIT];
     size_t candidates_count;
 };
@@ -13414,11 +13417,16 @@ static bool dp_priority_read_diff(struct dp_priority_scan *s,
         ? zcl_dev_proof_failure_priority_match(failure, files, count,
               s->changed, s->changed_count, s->selected, s->selected_count,
               selected_group, sizeof(selected_group)) : ZCL_FAILURE_PRIORITY_INVALID;
-    if (match == ZCL_FAILURE_PRIORITY_MATCH)
+    if (match == ZCL_FAILURE_PRIORITY_MATCH) {
+        if (!s->newest_group[0]) {
+            (void)snprintf(s->newest_group, sizeof s->newest_group, "%s", group);
+            (void)snprintf(s->newest_attempt, sizeof s->newest_attempt, "%s", failure->attempt);
+        }
         for (size_t i = 0; i < s->selected_count; i++)
             if (strcmp(s->selected[i], group) == 0 && !s->matched[i]) {
                 s->matched[i] = true; s->hints++;
             }
+    }
     free(files); free(bytes);
     return match != ZCL_FAILURE_PRIORITY_INVALID;
 }
@@ -13495,14 +13503,20 @@ static void dp_priority_report(const struct dp_priority_scan *s, bool ok,
     if (!report || !cap) return;
     const char *status = !ok ? "unavailable" :
         (s->ignored || invalid || s->limited) ? "partial" : "complete";
-    (void)snprintf(report, cap, "%s seen=%zu diffs=%zu hints=%zu ignored=%zu limited=%zu",
-                   status, s->seen, s->diffs, s->hints, s->ignored + invalid, s->limited);
+    (void)snprintf(report, cap, "%s seen=%zu diffs=%zu hints=%zu ignored=%zu limited=%zu group=%s attempt=%s",
+                   status, s->seen, s->diffs, s->hints, s->ignored + invalid, s->limited,
+                   s->newest_group[0] ? s->newest_group : "-", s->newest_attempt[0] ? s->newest_attempt : "-");
+}
+
+static void dp_priority_export_newest(const struct dp_priority_scan *s, bool ok, char *out, size_t cap)
+{
+    if (out && cap) (void)snprintf(out, cap, "%s", ok ? s->newest_group : "");
 }
 
 static bool dp_failure_priority(const char *root, const char *scratch,
                                 const char *groups, const char *const *changed,
                                 size_t changed_count, char *out, size_t cap,
-                                char *report, size_t report_cap)
+                                char *report, size_t report_cap, char *newest, size_t newest_cap)
 {
     if (!root || !scratch || !groups || !out || !cap) return false;
     out[0] = '\0';
@@ -13525,6 +13539,7 @@ static bool dp_failure_priority(const char *root, const char *scratch,
         ok = dp_priority_render(&s, out, cap);
     }
     if (!ok) out[0] = '\0';
+    dp_priority_export_newest(&s, ok, newest, newest_cap);
     dp_priority_report(&s, ok, invalid_archives, report, report_cap);
     free(matched); free(selected); free(copy);
     return ok;
@@ -13535,7 +13550,14 @@ bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
     const char *groups, const char *const *changed, size_t changed_count,
     char *out, size_t cap)
 {
-    return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap, NULL, 0);
+    return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap, NULL, 0, NULL, 0);
+}
+
+bool zcl_dev_proof_test_failure_priority_choice(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t changed_count,
+    char *out, size_t cap, char *newest, size_t newest_cap)
+{
+    return dp_failure_priority(root, scratch, groups, changed, changed_count, out, cap, NULL, 0, newest, newest_cap);
 }
 
 bool zcl_dev_proof_test_failure_priority_report(const char *root, const char *scratch,
@@ -13543,13 +13565,14 @@ bool zcl_dev_proof_test_failure_priority_report(const char *root, const char *sc
     char *out, size_t cap, char *report, size_t report_cap)
 {
     return dp_failure_priority(root, scratch, groups, changed, changed_count,
-                               out, cap, report, report_cap);
+                               out, cap, report, report_cap, NULL, 0);
 }
 #endif
 
 static void dp_worker_failure_priority(struct dp_worker *w)
 {
-    char scratch[PATH_MAX], report[192] = "unavailable";
+    char scratch[PATH_MAX], report[384] = "unavailable";
+    w->failure_screen_group[0] = 0;
     w->failure_priority[0] = '\0';
     /* The check seam builds a worker with no attempt directory and no changed
      * set. Without a changed set there is nothing to rank, and an empty
@@ -13565,7 +13588,8 @@ static void dp_worker_failure_priority(struct dp_worker *w)
     if (!groups) return;
     bool ok = dp_failure_priority(w->paths->root, scratch, w->groups,
                                   w->changed->files, w->changed->count, groups, PROOF_GROUPS_MAX,
-                                  report, sizeof(report));
+                                  report, sizeof(report), w->failure_screen_group,
+                                  sizeof(w->failure_screen_group));
     if (ok && groups[0])
         (void)snprintf(w->failure_priority, sizeof(w->failure_priority),
                        "--failure-priority=%s", groups);
@@ -13587,6 +13611,130 @@ static bool dp_worker_test_argv(const struct dp_worker *w, const char **argv,
     }
     return true;
 }
+
+/* A history hint only chooses what to observe. It never supplies a verdict:
+ * an early refusal requires two complete cold failures of this exact group
+ * on this exact generation; a pass or inconclusive observation falls through
+ * to the unchanged complete proof. */
+static bool dp_screen_verdict_failed(const char *path)
+{
+    char verdict[4096] = {0};
+    struct dp_test_counts counts = {0};
+    uint32_t flaky = 0;
+    return dp_test_verdict_read(path, verdict, sizeof verdict) &&
+        strncmp(verdict, "SUITE VERDICT mode=cold ", 24) == 0 &&
+        dp_test_verdict_counts(verdict, &counts) && counts.ran == 1 &&
+        !counts.reused && counts.failed == 1 && !counts.skipped && !counts.unobserved &&
+        (uint64_t)counts.total == (uint64_t)counts.ran + counts.gated &&
+        parse_uint_field(verdict, "load_flaky=", &flaky) && !flaky;
+}
+
+static bool dp_screen_group_marker(const char *path, const char *group)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char line[4096], marker[ZCL_TEST_GROUP_FULL_MAX + 32];
+    int n = snprintf(marker, sizeof marker, "==================== %s (FAIL,", group);
+    bool found = false;
+    while (n > 0 && (size_t)n < sizeof marker && fgets(line, sizeof line, f))
+        if (strncmp(line, marker, (size_t)n) == 0) found = true;
+    bool ok = found && !ferror(f);
+    fclose(f);
+    return ok;
+}
+
+static bool dp_screen_group_failed(const char *path, const char *group, int rc,
+                                   enum zcl_dev_proof_kill_cause cause)
+{
+    return path && group && rc == 1 && cause == ZCL_DEV_PROOF_KILL_NONE &&
+        zcl_test_group_catalog_contains(group) && dp_screen_verdict_failed(path) &&
+        dp_screen_group_marker(path, group);
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_screen_failed(const char *path, const char *group, int rc,
+                                      int cause)
+{
+    return dp_screen_group_failed(path, group, rc, (enum zcl_dev_proof_kill_cause)cause);
+}
+#endif
+
+static bool dp_screen_group(const struct dp_worker *w, char *group, size_t cap)
+{
+    const char *start = w->failure_screen_group;
+    size_t n = strlen(start);
+    if (!n || n >= cap) return false;
+    memcpy(group, start, n);
+    group[n] = '\0';
+    return zcl_test_group_catalog_contains(group);
+}
+
+/* A confirmed screen is recorded as a failure of this exact candidate, never
+ * as a partial success. Screen files are attempt-local; no cache is read. */
+static bool dp_worker_failure_screen(struct dp_worker *w,
+                                     struct zcl_dev_proof_dimension *test,
+                                     const struct zcl_dev_proof_budget *budget,
+                                     char *why, size_t why_len)
+{
+    char group[ZCL_TEST_GROUP_FULL_MAX], exact[ZCL_TEST_GROUP_FULL_MAX + 9];
+    char screen[2][PATH_MAX], test_log[PATH_MAX];
+    if (!dp_screen_group(w, group, sizeof group) ||
+        snprintf(exact, sizeof exact, "--exact=%s", group) >= (int)sizeof exact ||
+        snprintf(test_log, sizeof test_log, "%s/%s.test.log", w->execution.logs, w->execution.key) >= (int)sizeof test_log)
+        return false;
+    const char *argv[5];
+    if (!dp_test_dimension_argv(w->generation_binary, exact, argv, 5)) return false;
+    struct zcl_dev_proof_budget screen_budget = w->paths ?
+        zcl_dev_proof_test_budget(w->paths->state, group, 1) : *budget;
+    struct zcl_dev_proof_step_report report = {0};
+    for (unsigned i = 0; i < 2; ++i) {
+        if (snprintf(screen[i], sizeof screen[i], "%s/%s.test-screen-%u.log",
+                     w->execution.logs, w->execution.key, i + 1) >= (int)sizeof screen[i]) return false;
+        int rc = zcl_dev_proof_run_watched(w->execution.root, screen[i], argv, &screen_budget, &report);
+        w->test_children_started++;
+        if (!dp_screen_group_failed(screen[i], group, rc, report.cause)) return false;
+    }
+    if (rename(screen[1], test_log) != 0) return false;
+    if (w->execution.phases[0])
+        (void)zcl_dev_proof_phase_record(w->execution.phases, "test", &report);
+    test->failed = 1;
+    test->ran = 1;
+    proof_why(why, why_len, "child_proof_failed_exit_1");
+    return true;
+}
+
+
+#if defined(ZCL_TESTING)
+static bool dp_screen_fixture_setup(struct dp_worker *w, const char *root,
+                                    const char *logs, const char *binary, const char *group)
+{
+    return snprintf(w->execution.root, sizeof w->execution.root, "%s", root) < (int)sizeof w->execution.root &&
+        snprintf(w->execution.logs, sizeof w->execution.logs, "%s", logs) < (int)sizeof w->execution.logs &&
+        snprintf(w->execution.key, sizeof w->execution.key, "screen-fixture") < (int)sizeof w->execution.key &&
+        snprintf(w->generation_binary, sizeof w->generation_binary, "%s", binary) < (int)sizeof w->generation_binary &&
+        snprintf(w->failure_screen_group, sizeof w->failure_screen_group, "%s", group) < (int)sizeof w->failure_screen_group;
+}
+
+
+bool zcl_dev_proof_test_failure_screen(const char *root, const char *logs,
+    const char *binary, const char *group, unsigned *children)
+{
+    if (!root || !logs || !binary || !group || !children) return false;
+    struct dp_worker *w = zcl_calloc(1, sizeof *w, "proof failure screen fixture");
+    if (!w) return false;
+    bool ok = dp_screen_fixture_setup(w, root, logs, binary, group);
+    struct zcl_dev_proof_dimension test = {.selected=2};
+    struct zcl_dev_proof_budget budget = zcl_dev_proof_budget_make(10000, 1000);
+    char why[160] = {0};
+    bool stopped = ok && dp_worker_failure_screen(w, &test, &budget, why, sizeof why);
+    *children = w->test_children_started;
+    ok = !stopped || (test.selected == 2 && test.ran == 1 && test.failed == 1 &&
+                      !strcmp(why, "child_proof_failed_exit_1"));
+    free(w);
+    return stopped && ok;
+}
+#endif
+
 
 static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
                                      struct zcl_dev_proof_dimension *lint,
@@ -13612,6 +13760,8 @@ static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
     }
     struct zcl_dev_proof_budget test_budget =
         zcl_dev_proof_test_budget(w->paths->state, w->groups, test->selected);
+    if (test->selected && !admitted.skip &&
+        dp_worker_failure_screen(w, test, &test_budget, why, why_len)) return false;
     struct dp_dimension_plan plan = {
         .paths = &w->execution, .root = w->execution.root,
         .lint_argv = w->lint_argv, .lint = lint,
@@ -13627,7 +13777,7 @@ static bool dp_worker_dimensions_run_clean(struct dp_worker *w,
         dp_lint_hold_note(w->paths->phases, &hold);
         dimension_runs_wait(runs, run_count);
         dp_worker_lint_wall_note(w, runs, run_count);
-        w->test_children_started = dp_test_children_started(runs, run_count);
+        w->test_children_started += dp_test_children_started(runs, run_count);
         /* Fail closed on the first dimension that failed, in the order they
          * would have run sequentially, and always finish every child so each
          * one's log, receipt root and phases row survive the failure. */

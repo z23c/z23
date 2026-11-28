@@ -214,9 +214,16 @@ enum zcl_failure_priority_match zcl_dev_proof_failure_priority_group(
     const char *const *selected_groups, size_t selected_count,
     char *group_out, size_t group_cap);
 #if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_screen_failed(const char *path, const char *group, int rc,
+                                      int cause);
+bool zcl_dev_proof_test_failure_screen(const char *root, const char *logs, const char *binary,
+                                       const char *group, unsigned *children);
 bool zcl_dev_proof_test_failure_priority(const char *root, const char *scratch,
     const char *groups, const char *const *changed, size_t changed_count,
     char *out, size_t cap);
+bool zcl_dev_proof_test_failure_priority_choice(const char *root, const char *scratch,
+    const char *groups, const char *const *changed, size_t changed_count,
+    char *out, size_t cap, char *newest, size_t newest_cap);
 bool zcl_dev_proof_test_failure_priority_report(const char *root, const char *scratch,
     const char *groups, const char *const *changed, size_t changed_count,
     char *out, size_t cap, char *report, size_t report_cap);
