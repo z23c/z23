@@ -1778,6 +1778,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_sprout_groth16_kat();
     *failures += test_transaction_wire_evidence();
     { extern int test_ironwood_spend_auth(void); *failures += test_ironwood_spend_auth(); }
+    { extern int test_v6_transparent(void); *failures += test_v6_transparent(); }
     { extern int test_ironwood_merkle_crh(void); *failures += test_ironwood_merkle_crh(); }
     { extern int test_ironwood_note_frontier(void); *failures += test_ironwood_note_frontier(); }
     { extern int test_transaction_v6_inspect(void); *failures += test_transaction_v6_inspect(); }
