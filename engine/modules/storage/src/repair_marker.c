@@ -257,17 +257,20 @@ bool repair_marker_have(sqlite3 *db, const char *kind, int64_t height,
         progress_store_tx_unlock();
         return false;  // raw-return-ok:prepare-failure-caller-logs
     }
-    sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(st, 2, height);
-    sqlite3_bind_blob(st, 3, hash32, 32, SQLITE_TRANSIENT);
-
-    int rc = sqlite3_step(st);  // raw-sql-ok:kernel-primitive
+    bool bound = sqlite3_bind_text(st, 1, kind, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+        sqlite3_bind_int64(st, 2, height) == SQLITE_OK &&
+        sqlite3_bind_blob(st, 3, hash32, 32, SQLITE_TRANSIENT) == SQLITE_OK;
+    int rc = bound ? sqlite3_step(st) : SQLITE_ERROR;  // raw-sql-ok:kernel-primitive
     bool ok = true;
     if (rc == SQLITE_ROW) {
-        *out_have = true;
         int n = sqlite3_column_bytes(st, 0);
         const void *blob = sqlite3_column_blob(st, 0);
-        copy_row_payload_out(blob, n, payload_out, payload_cap, payload_len);
+        if (sqlite3_errcode(db) == SQLITE_NOMEM || (n > 0 && !blob)) {
+            ok = false;
+        } else {
+            *out_have = true;
+            copy_row_payload_out(blob, n, payload_out, payload_cap, payload_len);
+        }
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }

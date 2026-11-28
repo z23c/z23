@@ -340,6 +340,21 @@ static int rm_check_migrate_convergence(sqlite3 *db,
     return failures;
 }
 
+static int rm_check_bind_failure(sqlite3 *db, const uint8_t hash[32])
+{
+    int failures = 0;
+    const char *kind = "repair_marker_bind_failure_control";
+    bool have = false;
+    RM_CHECK("bind failure fixture", repair_marker_note(db, kind, 1, hash, NULL, 0));
+    int old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 16);
+    bool ok = repair_marker_have(db, kind, 1, hash, &have, NULL, 0, NULL);
+    sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
+    RM_CHECK("bind error never looks absent", !ok);
+    RM_CHECK("marker survives bind error",
+        repair_marker_have(db, kind, 1, hash, &have, NULL, 0, NULL) && have);
+    return failures;
+}
+
 int test_repair_marker(void);
 int test_repair_marker(void)
 {
@@ -359,6 +374,7 @@ int test_repair_marker(void)
     rm_hash(1, h1);
     rm_hash(2, h2);
 
+    failures += rm_check_bind_failure(db, h1);
     failures += rm_check_presence(db, h1, h2);
     failures += rm_check_payload(db, h1);
     failures += rm_check_gc_below(db, h1);
