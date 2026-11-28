@@ -9,9 +9,16 @@
 #include "test/test_core.h"
 #include "test/test_block_map.h"
 #include "services/chain_activation_service.h"
+#include "services/replay_verify_service.h"
+#include "ports/block_log_port.h"
 #include "validation/main_state.h"
 #include "consensus/validation.h"
+#include "net/msgprocessor.h"
+#include "net/msg_internal.h"
+#include "net/download.h"
+#include "net/peer_scoring.h"
 #include "util/util.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,6 +151,38 @@ static int unwalkable_size_test(void)
     return missing && null ? 0 : 1;
 }
 
+static bool tracker_bad_inputs(struct gate_fixture *f, struct research_rules_tracker *a, int h)
+{
+    struct block bad = f->blocks[h];
+    bad.header.nTime++;
+    if (research_rules_tracker_connect(a, &f->index[h], &bad).code !=
+        RESEARCH_RULES_UNAVAILABLE) {
+        fprintf(stderr, "research gate: bad hash was not held\n");
+        return false;
+    }
+    bad = f->blocks[h];
+    memset(&bad.header.hashPrevBlock, 0, sizeof bad.header.hashPrevBlock);
+    if (research_rules_tracker_connect(a, &f->index[h], &bad).code != RESEARCH_RULES_INVALID) {
+        fprintf(stderr, "research gate: bad linkage was not rejected\n");
+        return false;
+    }
+    return true;
+}
+
+static bool tracker_compare_step(struct gate_fixture *f, struct research_rules_tracker *a,
+                                 struct research_rules_tracker *b, int h, bool *activated)
+{
+    if (!research_rules_tracker_connect(a, &f->index[h], &f->blocks[h]).ok) return false;
+    if (!research_rules_tracker_connect(b, &f->index[h], &f->blocks[h]).ok) return false;
+    struct research_rules_state sa = {0}, sb = {0};
+    if (!research_rules_tracker_state(a, &sa).ok) return false;
+    if (!research_rules_tracker_state(b, &sb).ok) return false;
+    for (size_t i = 0; i < RESEARCH_RULE_COUNT; ++i)
+        if (sa.active[i] != sb.active[i]) return false;
+    if (sa.active[RESEARCH_RULE_BLOCK_CAP]) *activated = true;
+    return true;
+}
+
 /* A rejected input that consumed a window slot or tally could shift activation.
  * Compare a tracker that sees bad inputs with one that never sees them. */
 static int tracker_retry_test(struct gate_fixture *f)
@@ -153,29 +192,98 @@ static int tracker_retry_test(struct gate_fixture *f)
     bool ok = a && b;
     bool activated = false;
     for (int h = 102; ok && h < 126; ++h) {
-        if (h == 103) {
-            struct block bad = f->blocks[h];
-            bad.header.nTime++;
-            ok = research_rules_tracker_connect(a, &f->index[h], &bad).code ==
-                 RESEARCH_RULES_UNAVAILABLE;
-            bad = f->blocks[h];
-            memset(&bad.header.hashPrevBlock, 0, sizeof bad.header.hashPrevBlock);
-            ok = ok && research_rules_tracker_connect(a, &f->index[h], &bad).code ==
-                 RESEARCH_RULES_INVALID;
-        }
-        ok = ok && research_rules_tracker_connect(a, &f->index[h], &f->blocks[h]).ok &&
-             research_rules_tracker_connect(b, &f->index[h], &f->blocks[h]).ok;
-        struct research_rules_state sa = {0}, sb = {0};
-        ok = ok && research_rules_tracker_state(a, &sa).ok &&
-             research_rules_tracker_state(b, &sb).ok;
-        for (size_t i = 0; ok && i < RESEARCH_RULE_COUNT; ++i)
-            ok = sa.active[i] == sb.active[i];
-        if (sa.active[RESEARCH_RULE_BLOCK_CAP]) activated = true;
+        if (h == 103) ok = tracker_bad_inputs(f, a, h);
+        if (ok) ok = tracker_compare_step(f, a, b, h, &activated);
     }
     research_rules_tracker_destroy(a);
     research_rules_tracker_destroy(b);
     if (!ok || !activated) fprintf(stderr, "research gate: tracker retry mismatch\n");
     return ok && activated ? 0 : 1;
+}
+
+static bool reducer_hold_result(bool admitted, const struct validation_state *state)
+{
+    if (admitted) return false;
+    if (state->mode != MODE_ERROR) return false;
+    return !strcmp(state->reject_reason, "p2p-block-intake-unavailable");
+}
+
+static bool reducer_hold_paths(struct gate_fixture *f, struct main_state *ms,
+                               struct chain_activation_controller *ctl, struct block *candidate)
+{
+    struct validation_state state;
+    unsigned before = block_index_status_load(&f->index[125]);
+    size_t entries = ms->map_block_index.size;
+    bool admitted = reducer_stage_p2p_block_for_catchup(ctl, candidate, &state);
+    if (!reducer_hold_result(admitted, &state)) return false;
+    if (before != block_index_status_load(&f->index[125])) return false;
+    if (entries != ms->map_block_index.size) return false;
+    admitted = reducer_ingest_block(ctl, candidate, REDUCER_SRC_P2P, false, &state);
+    if (!reducer_hold_result(admitted, &state)) return false;
+    if (before != block_index_status_load(&f->index[125])) return false;
+    if (entries != ms->map_block_index.size) return false;
+    admitted = reducer_ingest_block(ctl, candidate, REDUCER_SRC_COMPACT, false, &state);
+    return reducer_hold_result(admitted, &state);
+}
+
+static bool reducer_restore_window(struct gate_fixture *f, struct chain_activation_controller *ctl,
+                                   struct block *candidate, const char *dir)
+{
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    if (!write_block_to_disk(&f->blocks[103], &pos, dir, f->binding.params->pchMessageStart))
+        return false;
+    block_index_disk_pos_store(&f->index[103], pos.nFile, pos.nPos);
+    struct validation_state state;
+    bool admitted = reducer_stage_p2p_block_for_catchup(ctl, candidate, &state);
+    return admitted || strcmp(state.reject_reason, "p2p-block-intake-unavailable");
+}
+
+struct hold_message_context {
+    struct chain_activation_controller *ctl;
+    struct validation_state verdict;
+    int calls;
+};
+
+static bool hold_message_submit(struct block *block, struct validation_state *state, void *ctx)
+{
+    struct hold_message_context *hold = ctx;
+    bool accepted = reducer_stage_p2p_block_for_catchup(hold->ctl, block, state);
+    hold->verdict = *state;
+    hold->calls++;
+    return accepted;
+}
+
+static bool reducer_hold_message(struct gate_fixture *f, struct main_state *ms,
+                                 struct chain_activation_controller *ctl)
+{
+    struct block block = f->blocks[125];
+    block.header.hashPrevBlock = *f->index[125].phashBlock;
+    struct uint256 hash;
+    block_get_hash(&block, &hash);
+    block_clear_seen(&hash);
+    struct byte_stream stream;
+    stream_init(&stream, 256);
+    bool ok = block_serialize(&block, &stream);
+    struct download_manager *dm = get_download_mgr();
+    dl_init(dm);
+    peer_scoring_init();
+    struct p2p_node node = {0};
+    node.id = 42;
+    atomic_init(&node.misbehavior, 0);
+    struct hold_message_context hold = { .ctl = ctl };
+    struct msg_processor mp = { .main_state = ms, .block_submit = hold_message_submit,
+                                .block_submit_ctx = &hold };
+    if (ok) ok = dl_mark_requested(dm, &hash, 126, node.id);
+    if (ok) ok = process_block_msg(&mp, &node, &stream);
+    if (hold.calls != 1) ok = false;
+    if (!reducer_hold_result(false, &hold.verdict)) ok = false;
+    if (atomic_load(&node.misbehavior) != 0) ok = false;
+    if (block_already_seen(&hash)) ok = false;
+    dl_free(dm);
+    stream_free(&stream);
+    if (!ok) fprintf(stderr, "research gate: held message scored or not retryable\n");
+    return ok;
 }
 
 static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, const char *dir)
@@ -191,42 +299,96 @@ static int reducer_hold_test(struct gate_fixture *f, struct block *candidate, co
                              : research_rules_install(f->binding.params, f->binding.pin));
     candidate->header.hashPrevBlock = *f->index[125].phashBlock;
     struct chain_activation_controller ctl = { .ms = &ms, .params = f->binding.params };
-    struct validation_state state;
-    unsigned before = block_index_status_load(&f->index[125]);
-    size_t entries = ms.map_block_index.size;
-    bool admitted = setup && reducer_stage_p2p_block_for_catchup(&ctl, candidate, &state);
-    bool held = setup && !admitted && state.mode == MODE_ERROR &&
-                !strcmp(state.reject_reason, "p2p-block-intake-unavailable") &&
-                before == block_index_status_load(&f->index[125]) &&
-                entries == ms.map_block_index.size;
-    admitted = setup && reducer_ingest_block(&ctl, candidate, REDUCER_SRC_P2P, false, &state);
-    held = held && !admitted && state.mode == MODE_ERROR &&
-           !strcmp(state.reject_reason, "p2p-block-intake-unavailable") &&
-           before == block_index_status_load(&f->index[125]) &&
-           entries == ms.map_block_index.size;
-    admitted = setup && reducer_ingest_block(&ctl, candidate, REDUCER_SRC_COMPACT, false, &state);
-    held = held && !admitted && state.mode == MODE_ERROR &&
-           !strcmp(state.reject_reason, "p2p-block-intake-unavailable");
-    struct disk_block_pos pos;
-    disk_block_pos_init(&pos);
-    bool restored = write_block_to_disk(&f->blocks[103], &pos, dir,
-                                        f->binding.params->pchMessageStart);
-    if (restored) {
-        block_index_disk_pos_store(&f->index[103], pos.nFile, pos.nPos);
-        admitted = reducer_stage_p2p_block_for_catchup(&ctl, candidate, &state);
-        restored = admitted || strcmp(state.reject_reason, "p2p-block-intake-unavailable");
-    }
+    bool held = setup && reducer_hold_paths(f, &ms, &ctl, candidate);
+    bool message_held = setup && reducer_hold_message(f, &ms, &ctl);
+    bool restored = reducer_restore_window(f, &ctl, candidate, dir);
     main_state_free(&ms);
     SetDataDir("");
     ClearDataDirCache();
-    if (!held || !restored) fprintf(stderr, "research gate: reducer hold/retry failed\n");
-    return held && restored ? 0 : 1;
+    if (!held || !message_held || !restored)
+        fprintf(stderr, "research gate: reducer hold/retry failed\n");
+    return held && message_held && restored ? 0 : 1;
 }
 
 static int reducer_hold_selected(struct gate_fixture *f, struct block *candidate, const char *dir)
 {
     if (!chain_research_profile_select(CHAIN_RESEARCH_IRONWOOD)) return 1;
     return reducer_hold_test(f, candidate, dir);
+}
+
+struct replay_gate_fixture {
+    struct gate_fixture *gate;
+    int visited;
+};
+
+static uint32_t replay_gate_tip(void *ctx)
+{
+    (void)ctx;
+    return 1;
+}
+
+static struct zcl_result replay_gate_iter(void *ctx, uint32_t start, block_log_iter_fn cb,
+                                         void *user)
+{
+    struct replay_gate_fixture *f = ctx;
+    for (uint32_t h = start; h < 2; ++h) {
+        struct byte_stream stream;
+        stream_init(&stream, 256);
+        if (!block_serialize(&f->gate->blocks[h], &stream)) {
+            stream_free(&stream);
+            return ZCL_ERR(-1, "fixture block serialization failed");
+        }
+        struct block_hash hash;
+        memcpy(hash.bytes, f->gate->index[h].hashBlock.data, sizeof hash.bytes);
+        f->visited++;
+        bool more = cb(h, &hash, stream.data, stream.size, user);
+        stream_free(&stream);
+        if (!more) break;
+    }
+    return ZCL_OK;
+}
+
+/* A bound replay stops at the PoW failure before visiting its successor. */
+static int replay_pow_stop_test(struct gate_fixture *f)
+{
+    struct replay_gate_fixture fixture = { .gate = f };
+    struct block_log_port port = { .self = &fixture, .tip_height = replay_gate_tip,
+                                   .iter_from = replay_gate_iter };
+    struct replay_verify_report report;
+    struct zcl_result result = replay_verify_run_port(&port, 0, 0, &report);
+    bool ok = result.code == -8;
+    if (report.pow_failures != 1) ok = false;
+    if (report.blocks_checked != 1) ok = false;
+    if (fixture.visited != 1) ok = false;
+    if (!report.first_fail_reason || strcmp(report.first_fail_reason, "pow")) ok = false;
+    if (!ok) fprintf(stderr, "research gate: bound replay did not stop at PoW failure\n");
+    return ok ? 0 : 1;
+}
+
+static bool activation_candidate_init(struct block *b)
+{
+    block_init(b);
+    b->num_vtx = 2;
+    b->vtx = calloc(2, sizeof(*b->vtx));
+    if (!b->vtx) return false;
+    transaction_init(&b->vtx[0]);
+    transaction_init(&b->vtx[1]);
+    if (!transaction_alloc(&b->vtx[0], 1, 25)) return false;
+    outpoint_set_null(&b->vtx[0].vin[0].prevout);
+    for (size_t i = 0; i < 24; ++i) {
+        b->vtx[0].vout[i].script_pub_key.size = 8000;
+        memset(b->vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
+    }
+    struct byte_stream stream;
+    stream_init(&stream, 0);
+    bool ok = block_serialize(b, &stream);
+    size_t base = stream.size;
+    stream_free(&stream);
+    if (!ok || base >= 200000 || 200001 - base >= MAX_SCRIPT_SIZE) return false;
+    struct script *s = &b->vtx[0].vout[24].script_pub_key;
+    s->size = 200001 - base - 2;
+    memset(s->data, 0x51, s->size);
+    return true;
 }
 
 static int activation_test(void)
@@ -241,29 +403,9 @@ static int activation_test(void)
     bool ok = selected && gate_fixture_init(&f, dir);
     if (ok) failures += tracker_retry_test(&f);
     struct block b;
-    block_init(&b);
-    b.num_vtx = 2;
-    b.vtx = calloc(2, sizeof(*b.vtx));
-    if (!ok || !b.vtx) { failures++; goto done; }
-    transaction_init(&b.vtx[0]);
-    transaction_init(&b.vtx[1]);
-    if (!transaction_alloc(&b.vtx[0], 1, 25)) { failures++; goto done; }
-    outpoint_set_null(&b.vtx[0].vin[0].prevout);
-    for (size_t i = 0; i < 24; ++i) {
-        b.vtx[0].vout[i].script_pub_key.size = 8000;
-        memset(b.vtx[0].vout[i].script_pub_key.data, 0x51, 8000);
-    }
-    struct byte_stream stream;
-    stream_init(&stream, 0);
-    ok = block_serialize(&b, &stream);
-    size_t base = stream.size;
-    stream_free(&stream);
-    if (!ok || base >= 200000 || 200001 - base >= MAX_SCRIPT_SIZE) {
-        failures++; goto done;
-    }
+    bool candidate_ready = activation_candidate_init(&b);
+    if (!ok || !candidate_ready) { failures++; goto done; }
     struct script *s = &b.vtx[0].vout[24].script_pub_key;
-    s->size = 200001 - base - 2;
-    memset(s->data, 0x51, s->size);
     struct research_gate_decision unbound = research_rules_gate_for(NULL, NULL, &b, NULL, NULL);
     failures += expect_gate("unbound oversized", unbound, RESEARCH_GATE_PASS, NULL, 0);
     struct research_gate_decision d = research_rules_gate_for(&f.binding, f.binding.params, &b,
@@ -290,6 +432,7 @@ static int activation_test(void)
     d = research_rules_gate_for(&invalid, invalid.params, &b, &f.index[125], dir);
     failures += expect_gate("invalid binding", d, RESEARCH_GATE_HOLD, "research-rules-unavailable", 0);
     failures += reducer_hold_selected(&f, &b, raw);
+    failures += replay_pow_stop_test(&f);
 done:
     block_free(&b);
     if (f.blocks) {
