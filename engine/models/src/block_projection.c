@@ -5,6 +5,9 @@
 #include "models/block.h"
 
 #include "util/log_macros.h"
+#include "util/ar_step_readonly.h"
+#include <stdio.h>
+#include <string.h>
 
 bool db_block_first_missing_connected_height(struct node_db *ndb,
                                              int max_height,
@@ -59,4 +62,37 @@ bool db_block_first_missing_connected_height(struct node_db *ndb,
         LOG_FAIL("block", "first_missing_connected_height: scan failed: %s",
                  sqlite3_errmsg(ndb->db));
     return true;
+}
+
+bool db_block_read_connected_hash(const char *datadir, int32_t height,
+                                  uint8_t out_hash[32])
+{
+    char path[576];
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = false;
+    if (!datadir || height < 0 || !out_hash)
+        return false;
+    int n = snprintf(path, sizeof(path), "%s/node.db", datadir);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK ||
+        !db)
+        goto done;
+    if (sqlite3_prepare_v2(db,
+            "SELECT hash FROM blocks WHERE height=? AND status>=3 AND "
+            "length(hash)=32 LIMIT 1", -1, &stmt, NULL) != SQLITE_OK || !stmt)
+        goto done;
+    if (sqlite3_bind_int(stmt, 1, height) != SQLITE_OK ||
+        AR_STEP_ROW_READONLY(stmt) != SQLITE_ROW ||
+        sqlite3_column_bytes(stmt, 0) != 32)
+        goto done;
+    memcpy(out_hash, sqlite3_column_blob(stmt, 0), 32);
+    ok = true;
+done:
+    if (stmt)
+        sqlite3_finalize(stmt);
+    if (db)
+        sqlite3_close(db);
+    return ok;
 }

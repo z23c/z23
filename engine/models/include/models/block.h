@@ -43,6 +43,10 @@ bool db_block_validate(const struct db_block *b, struct ar_errors *errors);
 
 bool db_block_save(struct node_db *ndb, const struct db_block *b);
 bool db_block_save_canonical(struct node_db *ndb, const struct db_block *b);
+/* Read the connected projection's 32-byte hash at height from a separate,
+ * read-only node.db connection. The caller supplies the verified height. */
+bool db_block_read_connected_hash(const char *datadir, int32_t height,
+                                  uint8_t out_hash[32]);
 bool db_block_find_by_hash(struct node_db *ndb, const uint8_t hash[32],
                            struct db_block *out);
 bool db_block_find_by_height(struct node_db *ndb, int height,
