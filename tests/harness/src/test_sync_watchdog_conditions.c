@@ -234,13 +234,16 @@ static bool sync_watchdog_refill_rotation_detail_ok(
 }
 
 static bool sync_watchdog_fork_body_queued(const struct download_manager *dm,
-                                           const struct block_index *fork_tip)
+                                           const struct block_index *fork_tip,
+                                           const struct main_state *ms)
 {
     return local_header_refill_needed_test_remedy_calls() == 1 &&
         sync_get_state() == SYNC_BLOCKS_DOWNLOAD &&
-        dm->queue_len == 1 &&
+        dm->queue_len == 2 &&
         dm->queue_heights && dm->queue_heights[0] == 10 &&
-        dm->queue && uint256_eq(&dm->queue[0], fork_tip->phashBlock);
+        dm->queue_heights[1] == 11 && dm->queue &&
+        uint256_eq(&dm->queue[0], fork_tip->phashBlock) &&
+        uint256_eq(&dm->queue[1], ms->pindex_best_header->phashBlock);
 }
 
 static int sync_watchdog_case_hstar_backpressure(void)
@@ -1041,7 +1044,7 @@ static int sync_watchdog_case_refill_fork_body(void)
             &ms, &fork_h, 0xF0, 10, common, BLOCK_VALID_TREE);
         struct block_index *best = insert_watchdog_block(
             &ms, &best_h, 0xF1, 11, fork_tip,
-            BLOCK_VALID_TREE | BLOCK_HAVE_DATA);
+            BLOCK_VALID_TREE);
         ms.pindex_best_header = best;
         ok = ok && common && active10 && tip && fork_tip && best &&
              active_chain_move_window_tip(&ms.chain_active, tip);
@@ -1059,11 +1062,14 @@ static int sync_watchdog_case_refill_fork_body(void)
 
         condition_engine_tick();
 
-        bool queued = sync_watchdog_fork_body_queued(&dm, fork_tip);
+        bool queued = sync_watchdog_fork_body_queued(&dm, fork_tip, &ms);
+        fake_clock_set(&clock, 4306);
+        condition_engine_tick();
+        queued = queued && local_header_refill_needed_test_remedy_calls() == 1;
         struct watchdog_stats wd;
         sync_monitor_get_stats(&wd);
         bool recorded = wd.last_recovery == WATCHDOG_BODY_FRONTIER_MISSING &&
-            wd.last_recovery_peer_height == 10;
+            wd.last_recovery_peer_height == 11;
         ok = ok && queued && recorded;
         SYNC_WATCHDOG_CHECK("local header refill queues fork body hash",
                             queued);

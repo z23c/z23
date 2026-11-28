@@ -30,46 +30,59 @@ static bool g_tip_hash_known;
 static _Atomic int g_test_remedy_calls;
 #endif
 
-static int best_header_same_height_body_target(struct main_state *ms)
-{
-    int target = -1;
-    if (!ms) {
-        LOG_WARN("condition",
-                 "[condition:local_header_refill_needed] best-header body "
-                 "target unavailable: missing main_state");
-        return target;
-    }
+#define REFILL_FORK_WINDOW 16
+struct refill_body_target {
+    struct uint256 hash;
+    int height;
+};
 
+static void refill_ring_push(struct refill_body_target *ring, size_t *start,
+                             size_t *count, const struct block_index *side)
+{
+    *start = (*start + REFILL_FORK_WINDOW - 1) % REFILL_FORK_WINDOW;
+    ring[*start].hash = *side->phashBlock;
+    ring[*start].height = side->nHeight;
+    if (*count < REFILL_FORK_WINDOW)
+        (*count)++;
+}
+
+/* Snapshot the lowest missing bodies only after finding a shared parent. */
+static size_t best_header_fork_window(struct main_state *ms,
+                                      struct refill_body_target *out)
+{
+    size_t count = 0;
+    size_t start = 0;
+    struct refill_body_target ring[REFILL_FORK_WINDOW];
+    bool anchored = false;
+    if (!ms)
+        return 0;
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *tip = active_chain_tip(&ms->chain_active);
     struct block_index *best = ms->pindex_best_header;
-    if (tip && tip->phashBlock && best &&
-        best->nHeight >= tip->nHeight) {
-        struct block_index *side =
-            block_index_get_ancestor(best, tip->nHeight);
+    if (tip && best && best->nHeight >= tip->nHeight) {
+        struct block_index *side = block_index_get_ancestor(best, tip->nHeight);
         struct block_index *active = tip;
-
-        /* A best-header fork can stop header refill even when its tip is only
-         * level with the active tip. Walk just the divergent segment and name
-         * its earliest missing body, so parents are fetched before an already
-         * available descendant. This schedules bytes only; validation and
-         * chain selection retain their existing authority. */
         while (side && active && side->nHeight == active->nHeight) {
             if (!side->phashBlock || !active->phashBlock ||
-                block_has_any_failure(side)) {
-                target = -1;
+                block_has_any_failure(side))
+                break;
+            if (uint256_eq(side->phashBlock, active->phashBlock)) {
+                anchored = true;
                 break;
             }
-            if (uint256_eq(side->phashBlock, active->phashBlock))
-                break;
-            if ((side->nStatus & BLOCK_HAVE_DATA) == 0)
-                target = side->nHeight;
+            if (!(side->nStatus & BLOCK_HAVE_DATA)) {
+                refill_ring_push(ring, &start, &count, side);
+            }
             side = side->pprev;
             active = active->pprev;
         }
     }
     zcl_mutex_unlock(&ms->cs_main);
-    return target;
+    if (!anchored)
+        return 0;
+    for (size_t i = 0; i < count; i++)
+        out[i] = ring[(start + i) % REFILL_FORK_WINDOW];
+    return count;
 }
 
 static bool detect_local_header_refill_needed(void)
@@ -129,24 +142,23 @@ static enum condition_remedy_result remedy_local_header_refill_needed(void)
     if (proceed) {
         bool queued_body = false;
         struct main_state *ms = sync_monitor_main_state();
-        int body_h = best_header_same_height_body_target(ms);
-        atomic_store(&g_last_best_header_body_target, body_h);
-        if (body_h >= 0) {
-            struct zcl_result qr = sync_monitor_queue_best_header_body(
-                body_h, NULL,
-                "condition:local_header_refill_needed same-height fork body");
+        struct refill_body_target targets[REFILL_FORK_WINDOW];
+        size_t count = best_header_fork_window(ms, targets);
+        atomic_store(&g_last_best_header_body_target,
+                     count ? targets[0].height : -1);
+        for (size_t i = 0; i < count; i++) {
+            bool queued = false;
+            struct zcl_result qr = sync_monitor_queue_best_header_body_checked(
+                targets[i].height, &targets[i].hash,
+                "condition:local_header_refill_needed fork body", &queued);
             if (!qr.ok) {
                 LOG_WARN("condition",
                          "[condition:local_header_refill_needed] best-header "
                          "body queue failed h=%d code=%d msg=%s",
-                         body_h, qr.code, qr.message);
-            } else {
-                LOG_WARN("condition",
-                         "[condition:local_header_refill_needed] queued "
-                         "best-header same-height body h=%d",
-                         body_h);
-                queued_body = true;
+                         targets[i].height, qr.code, qr.message);
+                break;
             }
+            queued_body = queued_body || queued;
         }
         if (!queued_body) {
             if (!sync_set_state(SYNC_HEADERS_DOWNLOAD,
