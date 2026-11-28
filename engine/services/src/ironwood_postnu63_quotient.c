@@ -28,15 +28,13 @@ static struct zcl_result fold_terms(const uint8_t *terms, size_t count, const BI
 static struct zcl_result quotient_value(const struct ironwood_postnu63_stage *stage,
                                          const uint8_t *terms, size_t count, uint8_t out[32])
 {
-    BN_CTX *ctx = BN_CTX_new(); EC_GROUP *group = NULL;
-    if (!ctx) return ZCL_ERR(-1, "Cannot allocate quotient context");
+    BN_CTX *ctx = BN_CTX_new(); BIGNUM *prime = ironwood_pasta_fp_modulus();
+    if (!ctx || !prime) { BN_free(prime); BN_CTX_free(ctx); return ZCL_ERR(-1, "Cannot allocate quotient context"); }
     BN_CTX_start(ctx);
-    BIGNUM *prime = BN_CTX_get(ctx), *x = BN_CTX_get(ctx), *y = BN_CTX_get(ctx);
+    BIGNUM *x = BN_CTX_get(ctx), *y = BN_CTX_get(ctx);
     BIGNUM *sum = BN_CTX_get(ctx), *one = BN_CTX_get(ctx), *den = BN_CTX_get(ctx), *inv = BN_CTX_get(ctx);
-    struct zcl_result result = inv ? ironwood_pasta_group(IRONWOOD_PALLAS, ctx, &group)
-                                   : ZCL_ERR(-1, "Cannot allocate quotient scalars");
-    if (result.ok && (!EC_GROUP_get_curve(group, prime, NULL, NULL, ctx) ||
-        !BN_lebin2bn(stage->x, 32, x) || !BN_lebin2bn(stage->y, 32, y) || !BN_one(one)))
+    struct zcl_result result = inv ? ZCL_OK : ZCL_ERR(-1, "Cannot allocate quotient scalars");
+    if (result.ok && (!BN_lebin2bn(stage->x, 32, x) || !BN_lebin2bn(stage->y, 32, y) || !BN_one(one)))
         result = ZCL_ERR(-1, "Cannot initialize quotient scalars");
     if (result.ok) result = fold_terms(terms, count, y, prime, sum, ctx);
     for (size_t i = 0; result.ok && i < DOMAIN_LOG; ++i)
@@ -46,7 +44,7 @@ static struct zcl_result quotient_value(const struct ironwood_postnu63_stage *st
     if (result.ok && (!BN_mod_inverse(inv, den, prime, ctx) || !BN_mod_mul(sum, sum, inv, prime, ctx) ||
                       BN_bn2lebinpad(sum, out, 32) != 32))
         result = ZCL_ERR(-1, "Cannot compute expected quotient");
-    EC_GROUP_free(group); BN_CTX_end(ctx); BN_CTX_free(ctx);
+    BN_CTX_end(ctx); BN_CTX_free(ctx); BN_free(prime);
     return result;
 }
 

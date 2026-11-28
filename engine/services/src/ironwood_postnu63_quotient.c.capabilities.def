@@ -1,3 +1,0 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("engine/services/src/ironwood_postnu63_quotient.c", CAP_RANDOM,
-    "OpenSSL group operations may initialize randomness for public quotient field arithmetic.")
