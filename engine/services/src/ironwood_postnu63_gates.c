@@ -52,14 +52,15 @@ static struct zcl_result gate_query(struct gate_machine *m, uint8_t op,
     return gate_push(m, (op == 'F' ? m->fixed : m->advice) + index * 32);
 }
 
-static int gate_special_index(unsigned kind, unsigned index)
+static struct zcl_result gate_special_index(unsigned kind, unsigned index, size_t *slot)
 {
-    if (index >= 500 && index < 506) return (int)(index - 500);
-    if (kind == SPECIAL_LOOKUP && index >= 600 && index < 615) return (int)(index - 591);
-    if (kind == SPECIAL_PERMUTATION && index >= 506 && index < 509) return (int)(index - 500);
-    if (kind == SPECIAL_PERMUTATION && index >= 620 && index < 635) return (int)(index - 596);
-    if (kind == SPECIAL_PERMUTATION && index >= 640 && index < 648) return (int)(index - 601);
-    return -1;
+    if (index >= 500 && index < 506) *slot = index - 500;
+    else if (kind == SPECIAL_LOOKUP && index >= 600 && index < 615) *slot = index - 591;
+    else if (kind == SPECIAL_PERMUTATION && index >= 506 && index < 509) *slot = index - 500;
+    else if (kind == SPECIAL_PERMUTATION && index >= 620 && index < 635) *slot = index - 596;
+    else if (kind == SPECIAL_PERMUTATION && index >= 640 && index < 648) *slot = index - 601;
+    else return ZCL_ERR(-1, "Unknown special gate query");
+    return ZCL_OK;
 }
 
 static struct zcl_result gate_special(struct gate_machine *m, const uint8_t *program,
@@ -68,8 +69,9 @@ static struct zcl_result gate_special(struct gate_machine *m, const uint8_t *pro
     if (!m->special || size - *position < 2) return ZCL_ERR(-1, "Invalid special gate query");
     unsigned index = zcl_read_u16_le(program + *position);
     *position += 2;
-    int slot = gate_special_index(m->special_kind, index);
-    return slot < 0 ? ZCL_ERR(-1, "Unknown special gate query") : gate_push(m, m->special + (size_t)slot * 32);
+    size_t slot = 0;
+    struct zcl_result r = gate_special_index(m->special_kind, index, &slot);
+    return r.ok ? gate_push(m, m->special + slot * 32) : r;
 }
 
 static struct zcl_result gate_instruction(struct gate_machine *m, uint8_t op,
