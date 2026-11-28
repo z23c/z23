@@ -217,6 +217,19 @@ static int mining_slots_inside(struct rpc_table *table,
                                const struct miner_signal_catalog_pin *pin)
 {
     int failures = 0;
+    /* Pin existing behavior: absent catalog is rejected without a production change. */
+    struct json_value missing_params = {0}, missing_result = {0};
+    const char *missing = "[1,\"tmQMh5UwwJGfi53XvgjVZjTGo6SzZGVz6Q6\",{\"slots\":[0],\"extra\":0}]";
+    int before = reducer_frontier_provable_tip_cached();
+    bool parsed = json_read(&missing_params, missing, strlen(missing));
+    bool missing_refused = parsed && !rpc_table_execute(table, "generatetoaddress",
+                                                         &missing_params, &missing_result);
+    MT_CHECK("missing ballot catalog refuses without changing height",
+        missing_refused && missing_result.type == JSON_STR &&
+        strstr(json_get_str(&missing_result), "Expected ballotslots object") &&
+        reducer_frontier_provable_tip_cached() == before);
+    json_free(&missing_params);
+    json_free(&missing_result);
     struct json_value legacy = {0}, voted = {0};
     struct transaction a, b;
     bool a_ok = mining_test_gbt(table, &legacy) && mining_coinbase_decode(&legacy, &a);
