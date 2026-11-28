@@ -1833,6 +1833,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_wallet_tx_matrix_regtest();
     { extern int test_research_freeze_node(void); *failures += test_research_freeze_node(); }
     { extern int test_research_maturity_node(void); *failures += test_research_maturity_node(); }
+    { extern int test_ironwood_template_worker(void); *failures += test_ironwood_template_worker(); }
     *failures += test_simnet_wallet_import_backup();
     *failures += test_simnet_zmsg_onchain();
     *failures += test_coinbase_subsidy_adversarial();

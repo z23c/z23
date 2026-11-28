@@ -8,11 +8,13 @@
 #include "primitives/block.h"
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 enum { TEMPLATE_LIMIT = 4000000, TX_HEX_LIMIT = 400000 };
+volatile sig_atomic_t g_shutdown_requested = 0;
 
 static bool read_template(const char *path, struct json_value *json)
 {
